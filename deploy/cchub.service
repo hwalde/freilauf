@@ -12,6 +12,11 @@ Environment=NODE_OPTIONS=--disable-warning=ExperimentalWarning
 Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=%h/.config/cc-hub/env
 ExecStart=/usr/bin/node %h/projects/cc-hub/server/hub.mjs
+# Only kill the node main process on stop/restart. With the default
+# (control-group) a tmux server that happened to be spawned by a hub-started
+# run (first tmux session after a reboot) would live in this unit's cgroup —
+# a restart would then tear down ALL agent sessions with it.
+KillMode=process
 Restart=always
 RestartSec=5
 StandardOutput=journal
