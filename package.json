@@ -1,0 +1,14 @@
+{
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0",
+    "ws": "^8.21.3"
+  },
+  "scripts": {
+    "test": "node test/unit.mjs && node test/e2e.mjs",
+    "test:unit": "node test/unit.mjs",
+    "test:e2e": "node test/e2e.mjs",
+    "test:e2e:echt": "node test/e2e.mjs --echt"
+  }
+}

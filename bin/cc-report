@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# cc-report — Agenten melden sich an cc-hub (Planung 6).
+# Usage:
+#   cc-report done [--file report.md | "text"]     Lauf abgeschlossen
+#   cc-report failed "grund"                       Lauf gescheitert
+#   cc-report help "frage/problem"                 Hilferuf (Lauf bleibt offen, wartet)
+#   cc-report progress "status"                    Fortschritt / dauert länger
+#   cc-report branch <name>                        Branch gemeldet
+#   cc-report pr <url>                             Pull-Request gemeldet
+#   cc-report _api_error [fehler] ["text"]        Rate-Limit/Provider-Fehler (aus Hooks);
+#                                                  ohne Argumente: Claude-Hook-JSON von stdin
+#   cc-report _turn_end|_exit|_rate_limit|_idle|_pane_died [exit]   interne Hooks
+#
+# Quelle: CC_RUN_ID + CC_HUB_URL aus der Umgebung. Fallback, wenn der Hub nicht
+# erreichbar ist: JSON-Zeile an ~/agents/runs/<id>/inbox.jsonl — der Watcher sammelt ein.
+set -euo pipefail
+
+usage() {
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+[[ $# -ge 1 ]] || { usage >&2; exit 2; }
+KIND="$1"; shift
+
+case "$KIND" in
+    done|failed|help|progress|branch|pr) ;;
+    _turn_end|_exit|_rate_limit|_idle|_pane_died|_api_error) ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'unbekannte Art: %s\n' "$KIND" >&2; exit 2 ;;
+esac
+
+RUN_ID="${CC_RUN_ID:-}"
+HUB="${CC_HUB_URL:-http://127.0.0.1:8791}"
+if [[ -z "$RUN_ID" ]]; then
+    echo "cc-report: CC_RUN_ID ist nicht gesetzt — außerhalb eines cc-hub-Laufs sinnlos." >&2
+    exit 3
+fi
+
+TEXT="" ; FILE_ARG="" ; ERR=""
+# Claude ruft den StopFailure-Hook ohne Argumente auf und liefert das Ereignis als JSON
+# auf stdin: { "error": "rate_limit", "last_assistant_message": "…" }.
+if [[ "$KIND" == "_api_error" ]]; then
+    if [[ -n "${1:-}" ]]; then
+        ERR="$1"; shift; TEXT="${*:-}"
+    elif [[ ! -t 0 ]]; then
+        HOOK_JSON="$(cat 2>/dev/null || true)"
+        ERR="$(printf '%s' "$HOOK_JSON" | python3 -c 'import json,sys
+try: j=json.load(sys.stdin); print(j.get("error") or "unknown")
+except Exception: print("unknown")' 2>/dev/null || echo unknown)"
+        TEXT="$(printf '%s' "$HOOK_JSON" | python3 -c 'import json,sys
+try: j=json.load(sys.stdin); print((j.get("last_assistant_message") or j.get("error_details") or "")[:300])
+except Exception: pass' 2>/dev/null || true)"
+    else
+        ERR="unknown"
+    fi
+    set --
+fi
+if [[ -n "${1:-}" ]]; then
+    if [[ "$KIND" == "done" && "${1:-}" == "--file" ]]; then
+        FILE_ARG="${2:-}"
+        [[ -r "$FILE_ARG" ]] || { echo "Report-Datei nicht lesbar: $FILE_ARG" >&2; exit 2; }
+    else
+        TEXT="$*"
+    fi
+fi
+
+# Payload als JSON mit python3 bauen (Quoting-sicher, keine jq-Pflicht).
+PAYLOAD="$(python3 - "$KIND" "$TEXT" "$FILE_ARG" "$ERR" <<'PY'
+import json, sys, os
+kind, text, file_arg, err = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+body = {"kind": kind}
+if kind == "_api_error":
+    body["error"] = err or "unknown"
+    if text:
+        body["text"] = text
+elif kind == "_pane_died" and text.isdigit():
+    body["exit"] = int(text)
+elif kind == "branch":
+    body["branch"] = text
+elif kind == "pr":
+    body["pr"] = text
+else:
+    if file_arg and os.path.isfile(file_arg):
+        with open(file_arg, encoding="utf-8", errors="replace") as fh:
+            body["file"] = fh.read()
+    elif text:
+        body["text"] = text
+print(json.dumps(body))
+PY
+)"
+
+send() {
+    curl -fsS --max-time 10 -X POST \
+         -H 'content-type: application/json' \
+         --data-binary "$PAYLOAD" \
+         "$HUB/api/runs/$RUN_ID/report"
+}
+
+FALLBACK_DIR="$HOME/agents/runs/$RUN_ID"
+if OUT="$(send 2>/dev/null)"; then
+    exit 0
+fi
+
+# Fallback: Hub nicht erreichbar → inbox.jsonl (Watcher sammelt ein, Planung 6).
+mkdir -p "$FALLBACK_DIR" 2>/dev/null || true
+printf '%s\n' "$PAYLOAD" >> "$FALLBACK_DIR/inbox.jsonl"
+echo "cc-report: Hub nicht erreichbar — Meldung liegt in inbox.jsonl, der Watcher holt sie ab." >&2
+exit 0

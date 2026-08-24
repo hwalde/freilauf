@@ -1,0 +1,77 @@
+/* cc-hub — schlicht: Tabellen, Formulare, ein Terminal. Rot/Gelb/Grün als einzige Farben. */
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.45 system-ui, sans-serif; background: #f6f6f4; color: #1c1c1c; }
+header { display: flex; align-items: center; gap: 16px; padding: 8px 16px; background: #22252a; color: #eee; flex-wrap: wrap; }
+header .brand { font-weight: 700; letter-spacing: .5px; }
+header nav a { color: #cfd4da; text-decoration: none; margin-right: 12px; }
+header nav a.on { color: #fff; font-weight: 600; border-bottom: 2px solid #6ea8fe; }
+header .spacer { flex: 1; }
+header .ok { color: #7ddc8f; } header .warn { color: #f2c14e; }
+header label.dim { color: #9aa0a6; }
+.quota { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.quota .track { width: 90px; height: 8px; background: #3a3f45; border-radius: 4px; overflow: hidden; }
+.quota .fill { height: 100%; background: #7ddc8f; }
+.quota .fill.y { background: #f2c14e; } .quota .fill.r { background: #e5484d; }
+main { max-width: 1200px; margin: 20px auto; padding: 0 16px; }
+table.list { border-collapse: collapse; width: 100%; background: #fff; }
+table.list th, table.list td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e4e4e0; }
+table.list tbody tr:hover { background: #f0f4fa; cursor: pointer; }
+.dim { color: #8a8f96; font-size: .92em; }
+.dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; }
+.dot.rot { background: #e5484d; } .dot.gelb { background: #f2c14e; } .dot.gruen { background: #46a758; }
+.btn, button { background: #2f6fed; border: 0; color: #fff; padding: 7px 14px; border-radius: 6px; cursor: pointer; font: inherit; }
+button.danger { background: #e5484d; }
+form.inline { display: inline; }
+label { display: block; margin: 10px 0; }
+label.chk { display: flex; align-items: center; gap: 8px; }
+input, select, textarea { font: inherit; padding: 6px 8px; border: 1px solid #c9c9c4; border-radius: 6px; width: 100%; max-width: 640px; }
+label.chk input { width: auto; }
+form.settings { background: #fff; padding: 16px; border-radius: 10px; max-width: 720px; }
+.card { background: #fff; padding: 14px 16px; border-radius: 10px; margin: 12px 0; border-left: 4px solid #c9c9c4; }
+.card.ok { border-left-color: #46a758; }
+.help { background: #fdecec; border: 1px solid #e5484d; padding: 12px; border-radius: 8px; margin: 12px 0; }
+pre { background: #16181b; color: #d7dae0; padding: 12px; border-radius: 8px; overflow: auto; max-height: 480px; }
+code { background: #eceae6; padding: 1px 5px; border-radius: 4px; }
+ul.events { list-style: none; padding-left: 0; }
+ul.events li { padding: 3px 0; border-bottom: 1px dashed #e4e4e0; }
+#term { height: 480px; background: #000; border-radius: 8px; padding: 4px;
+        border: 2px solid transparent; }
+/* Sichtbar machen, wohin die Tastatur gerade geht — sonst tippt man ins Leere. */
+#term:focus-within { border-color: #2c7a3f; }
+.err { color: #e5484d; } .warn { color: #b98900; } .ok { color: #2c7a3f; }
+/* Zeitplan-Auswahl im Agenten-Formular */
+fieldset.zeitplan { border: 1px solid #dcdad6; border-radius: 8px; padding: 10px 14px; margin: 6px 0; }
+fieldset.zeitplan legend { padding: 0 6px; font-weight: 600; }
+fieldset.zeitplan .zp[hidden] { display: none; }
+fieldset.zeitplan label[hidden] { display: none; }
+.tage { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.tage .tag { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #dcdad6;
+  border-radius: 999px; padding: 4px 12px; cursor: pointer; user-select: none; background: #fff; }
+.tage .tag:has(input:checked) { background: #2c7a3f; border-color: #2c7a3f; color: #fff; }
+
+@media (prefers-color-scheme: dark) {
+  fieldset.zeitplan { border-color: #33363b; }
+  .tage .tag { background: #202226; border-color: #33363b; }
+  .tage .tag:has(input:checked) { background: #2c7a3f; border-color: #2c7a3f; }
+
+  body { background: #17181a; color: #e6e6e6; }
+  table.list, form.settings, .card { background: #202226; }
+  table.list th, table.list td { border-color: #33363b; }
+  table.list tbody tr:hover { background: #262a30; }
+  code { background: #2c2f34; }
+}
+
+/* Vorfälle (Rate-Limit, Provider) */
+.vorfall { display:inline-block; padding:1px 6px; border-radius:3px; border:1px solid; margin-right:4px; }
+.vorfall.rot { border-color:#c62828; color:#c62828; }
+.vorfall.gelb { border-color:#b8860b; color:#b8860b; }
+.banner { padding:8px 12px; margin-bottom:12px; border-left:4px solid #c62828; background:rgba(198,40,40,.08); }
+ul.vorfaelle { list-style:none; padding:0; }
+ul.vorfaelle li { padding:6px 8px; margin-bottom:4px; border-left:4px solid #999; }
+ul.vorfaelle li.rot { border-left-color:#c62828; }
+ul.vorfaelle li.gelb { border-left-color:#b8860b; }
+ul.vorfaelle li.geloest { opacity:.6; }
+code.beleg { display:block; white-space:pre-wrap; word-break:break-all; font-size:.85em; margin-top:4px; }
+fieldset { border:1px solid #ccc; padding:8px 12px; margin:8px 0; }
+label.skill-regler { margin-left: 24px; }

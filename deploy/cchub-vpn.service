@@ -1,0 +1,17 @@
+# cc-hub VPN-Zugang (TLS auf wg0). Fail-closed: nach Reboot NICHT automatisch aktiv.
+[Unit]
+Description=cc-hub VPN-Zugang (TLS auf wg0)
+After=cchub.service
+Requires=cchub.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/cc-hub/env
+ExecStart=/usr/bin/node %h/projects/cc-hub/vpn-proxy.mjs
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

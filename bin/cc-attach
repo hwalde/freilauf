@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# Listet laufende Coding-Agent-Sessions (claude/opencode/hermes) auf, verbindet sich
+# mit einer davon und kann optional einen Prompt in die laufende Session tippen.
+# Usage: cc-attach [optionen] [session-name]
+set -euo pipefail
+
+PREFIX="cc-"
+
+usage() {
+    cat <<'EOF'
+Usage: cc-attach [optionen] [session-name]
+
+  session-name   Session direkt wählen (mit oder ohne cc-/cc-oc-/cc-he--Prefix).
+                 Ohne Angabe: Auswahlliste (bzw. direkt, wenn nur eine läuft).
+
+Optionen:
+  -H, --harness HARNESS   Nur Sessions dieser Harness zeigen/ansprechen:
+                          claude | opencode | hermes
+  -p, --prompt TEXT     Diesen Prompt in die gewählte Session tippen und
+                        abschicken, dann attachen.
+  -f, --prompt-file DAT Prompt aus einer Datei lesen (statt -p).
+  -n, --no-attach       Prompt nur senden, nicht attachen (für Scripte/Cron).
+  -h, --help            Übersicht aller cc-Befehle.
+
+Beispiele:
+  cc-attach                                  # Session auswählen und verbinden
+  cc-attach -H opencode                      # nur opencode-Sessions auflisten
+  cc-attach leadmachine                      # direkt verbinden (jede Harness)
+  cc-attach -p "Status?" nachtlauf           # Frage reinschicken und zusehen
+  cc-attach -p "Weiter" -n nachtlauf         # nur senden, nicht attachen
+
+Hinweis: Der Permission-Modus einer LAUFENDEN Session lässt sich nicht mehr ändern.
+Autonom (ohne Rückfragen) startet man mit:  cc-start -p "..." [name] [verzeichnis]
+EOF
+}
+
+err() { printf '%s\n' "$*" >&2; }
+
+PROMPT=""
+PROMPT_FILE=""
+NO_ATTACH=""
+TARGET=""
+HARNESS=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)        exec cc-help ;;
+        --usage)          usage; exit 0 ;;
+        -H|--harness)     [[ $# -ge 2 ]] || { err "Fehler: $1 braucht einen Wert."; exit 2; }
+                          HARNESS="$2"; shift 2 ;;
+        -p|--prompt)      [[ $# -ge 2 ]] || { err "Fehler: $1 braucht einen Text."; exit 2; }
+                          PROMPT="$2"; shift 2 ;;
+        -f|--prompt-file) [[ $# -ge 2 ]] || { err "Fehler: $1 braucht einen Dateipfad."; exit 2; }
+                          PROMPT_FILE="$2"; shift 2 ;;
+        -n|--no-attach)   NO_ATTACH=1; shift ;;
+        --)               shift; TARGET="${1:-}"; break ;;
+        -*)               err "Unbekannte Option: $1  (cc-attach --usage)"; exit 2 ;;
+        *)                TARGET="$1"; shift ;;
+    esac
+done
+
+if [[ -n "$HARNESS" ]]; then
+    case "$HARNESS" in
+        claude|opencode|hermes) ;;
+        *) err "Fehler: unbekannte Harness '$HARNESS'. Erlaubt: claude opencode hermes"; exit 2 ;;
+    esac
+fi
+
+if [[ -n "$PROMPT_FILE" ]]; then
+    [[ -n "$PROMPT" ]] && { err "Fehler: -p und -f schließen sich aus."; exit 2; }
+    [[ -r "$PROMPT_FILE" ]] || { err "Fehler: Prompt-Datei nicht lesbar: $PROMPT_FILE"; exit 2; }
+    PROMPT="$(cat "$PROMPT_FILE")"
+fi
+if [[ -n "$NO_ATTACH" && -z "$PROMPT" ]]; then
+    err "Fehler: --no-attach ohne Prompt macht nichts."; exit 2
+fi
+
+# Harness einer Session aus dem Namen ableiten: cc-oc-* -> opencode, cc-he-* -> hermes, sonst claude.
+harness_of() {
+    case "$1" in
+        "$PREFIX"oc-*) echo "opencode" ;;
+        "$PREFIX"he-*) echo "hermes" ;;
+        *) echo "claude" ;;
+    esac
+}
+
+mapfile -t ROWS < <(tmux list-sessions \
+    -F '#{session_name}|#{t:session_created}|#{?session_attached,verbunden,frei}|#{session_path}' \
+    2>/dev/null | grep "^$PREFIX" || true)
+
+SESSIONS=()
+for row in "${ROWS[@]}"; do
+    s="${row%%|*}"
+    [[ -n "$HARNESS" ]] && [[ "$(harness_of "$s")" != "$HARNESS" ]] && continue
+    SESSIONS+=("$s")
+done
+
+if [[ ${#SESSIONS[@]} -eq 0 ]]; then
+    if [[ -n "$HARNESS" ]]; then
+        echo "Keine laufende $HARNESS-Session gefunden."
+    else
+        echo "Keine laufende Agent-Session gefunden."
+    fi
+    echo "Neue Session starten mit: cc-start [-H claude|opencode|hermes] [-p \"prompt\"] [name] [verzeichnis]"
+    exit 1
+fi
+
+# Prompt in die laufende Session tippen. Mehrzeilig per Bracketed Paste (Planung §9):
+# die TUI nimmt den Text als einen Einfügevorgang ohne Zeilen-Enter; das abschließende
+# Enter schickt erst NACH dem Einfügen ab (300 ms Pause, sonst wird Enter verschluckt).
+send_prompt() {
+    local s="$1" text
+    [[ -n "${PROMPT//[[:space:]]/}" ]] || { err "Fehler: Prompt ist leer."; exit 2; }
+    text="$PROMPT"
+    if tmux send-keys -t "$s:" -l -- $'\e[200~'"$text"$'\e[201~' 2>/dev/null; then
+        sleep 0.3
+        tmux send-keys -t "$s:" Enter
+    else
+        # Fallback (TUI ohne Bracketed-Paste-Unterstützung): plätten wie bisher.
+        text="$(printf '%s' "$text" | tr '\n\r' '  ')"
+        tmux send-keys -t "$s:" -l -- "$text"
+        sleep 0.4
+        tmux send-keys -t "$s:" Enter
+    fi
+    echo "Prompt an '$s' geschickt (${#text} Zeichen)."
+}
+
+finish() {
+    local s="$1"
+    [[ -n "$PROMPT" ]] && send_prompt "$s"
+    if [[ -n "$NO_ATTACH" ]]; then
+        exit 0
+    fi
+    echo "Verbinde mit '$s' ... (Detach: Strg+b, dann d)"
+    if [[ -n "${TMUX:-}" ]]; then
+        tmux switch-client -t "=$s"
+    else
+        tmux attach-session -t "=$s"
+    fi
+}
+
+# Direktauswahl per Argument (mit oder ohne Prefix/Harness-Tag)
+if [[ -n "$TARGET" ]]; then
+    for s in "${SESSIONS[@]}"; do
+        bare="${s#$PREFIX}"               # cc- entfernen
+        bare="${bare#oc-}"; bare="${bare#he-}"   # Harness-Tag entfernen
+        if [[ "$s" == "$TARGET" || "$s" == "$PREFIX$TARGET" || "$bare" == "$TARGET" ]]; then
+            finish "$s"
+            exit 0
+        fi
+    done
+    err "Fehler: Session '$TARGET' nicht gefunden."
+    exit 1
+fi
+
+# Genau eine Session -> direkt
+if [[ ${#SESSIONS[@]} -eq 1 ]]; then
+    finish "${SESSIONS[0]}"
+    exit 0
+fi
+
+echo "Laufende Agent-Sessions:"
+echo
+i=1
+for row in "${ROWS[@]}"; do
+    IFS='|' read -r name created attached path <<<"$row"
+    [[ -n "$HARNESS" ]] && [[ "$(harness_of "$name")" != "$HARNESS" ]] && continue
+    printf "  [%d] %-24s  (%s)  gestartet: %s  (%s)\n" "$i" "$name" "$(harness_of "$name")" "$created" "$attached"
+    printf "      %s\n" "$path"
+    i=$((i + 1))
+done
+echo
+
+read -r -p "Welche Session? [1-$((i - 1)), q=abbrechen]: " choice
+[[ "$choice" == "q" || -z "$choice" ]] && { echo "Abgebrochen."; exit 0; }
+
+if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > i - 1 )); then
+    err "Ungültige Auswahl."
+    exit 1
+fi
+
+finish "${SESSIONS[choice - 1]}"

@@ -1,0 +1,548 @@
+#!/usr/bin/env bash
+# Startet eine Coding-Agent-Session in einer tmux-Session (überlebt SSH-Logout).
+# Harnesses: claude (Default) | opencode | hermes.
+#   claude:   interaktiv im bypassPermissions-Modus; autonom (-p) im dontAsk-Modus.
+#   opencode: interaktiv mit --auto; autonom (-p) als 'opencode --auto --prompt' (TUI,
+#             laeuft den Auftrag selbst ab und bleibt dabei bedienbar).
+#   hermes:   interaktiv mit --yolo; autonom (-p) als 'hermes chat -q --yolo'.
+#   cursor:   cursor-agent mit --force --trust; autonom als Positions-Prompt (TUI,
+#             arbeitet den Auftrag ab und bleibt danach stehen -- wie opencode).
+# Usage: cc-start [optionen] [session-name] [arbeitsverzeichnis]
+set -euo pipefail
+
+PREFIX="cc-"
+USAGE_SH="$HOME/.claude/usage.sh"
+
+usage() {
+    cat <<'EOF'
+Usage: cc-start [optionen] [session-name] [arbeitsverzeichnis]
+
+  session-name   Name der Session (default: Name des Arbeitsverzeichnisses)
+  verzeichnis    Arbeitsverzeichnis für den Agenten (default: aktuelles Verzeichnis)
+
+Harness wählen (Default: claude):
+  -H, --harness HARNESS   claude | opencode | hermes | cursor
+      --effort STUFE      Denk-Aufwand. Bei claude '--effort', bei hermes '--reasoning'
+                          (gleiche Option, anderer Name). Für opencode NICHT möglich:
+                          dort kennt nur 'opencode run' ein --variant, die TUI nicht;
+                          cc-hub setzt es deshalb über OPENCODE_CONFIG_CONTENT.
+                          Für cursor NICHT möglich: dort steckt die Stufe bereits in
+                          der Modell-ID (z. B. claude-opus-5-xhigh, -low, -max).
+      --provider PROVIDER Inferenz-Provider, NUR für hermes (z.B. deepseek, openrouter,
+                          opencode-zen). Bei hermes ist das Modell dann bare bzw.
+                          author/slug; opencode wählt den Provider stattdessen über
+                          das Präfix im --model-Wert.
+      --model MODEL       Modell. Bei claude ein Alias ('opus', 'fable', 'sonnet',
+                          'haiku') oder eine volle Kennung ('claude-opus-5').
+                          Bei opencode/hermes z.B. openrouter/stealth/ox-alpha
+                          (Format provider/model). Ohne Angabe:
+                            opencode  -> nutzt das zuletzt verwendete Modell
+                                         (opencode merkt sich das letzte Modell; ohne
+                                         --model und ohne "model" in der Config wird das
+                                         "recent"-Modell aus ~/.local/share/opencode/state
+                                         verwendet, sonst das Config-Default)
+                            hermes    -> nutzt das in ~/.hermes/config.yaml konfigurierte
+                                         Modell (bzw. das letzte hermes chat --model)
+                            cursor    -> nutzt das in ~/.cursor/cli-config.json zuletzt
+                                         gewählte Modell
+                          Bei cursor eine flache ID aus 'cursor-agent models', in der
+                          der Denk-Aufwand schon steckt (claude-opus-5-xhigh). IDs mit
+                          Endung '-fast' sind der Fast-Modus.
+
+Optionen:
+  -p, --prompt TEXT     Startprompt. Die Session läuft damit AUTONOM und detacht im
+                        Hintergrund (claude: dontAsk, opencode: TUI --auto --prompt, hermes: chat -q --yolo).
+  -f, --prompt-file DAT Startprompt aus einer Datei lesen (statt -p).
+      --mode MODE       Permission-Modus, NUR für claude. Erlaubt:
+                        dontAsk | bypassPermissions | acceptEdits | auto | manual | plan
+                        Default: dontAsk mit Prompt, bypassPermissions ohne.
+  -a, --attach          Auch bei autonomem Start sofort attachen (zuschauen).
+      --no-trust        Den Trust-Dialog NICHT vorab bestätigen (nur claude).
+      --dry-run         Nur zeigen, was gestartet würde. Nichts starten.
+      --- cc-hub-Integration (Planung §9) ---
+      --env KEY=VAL     Umgebungsvariable für die Session (mehrfach erlaubt,
+                        wird als tmux new-session -e durchgereicht).
+      --log DATEI       Vollprotokoll der Session ab Start mitschneiden
+                        (tmux pipe-pane in DATEI).
+      --keep            Session nach Prozessende offen halten (remain-on-exit)
+                        + pane-died-Hook (cc-report _pane_died).
+      --name NAME       Session-Grundname ohne Prefix (überschreibt Positionsargument).
+      --id KURZ         Suffix für den Session-Namen (Kollisionssicherheit,
+                        z. B. Run-Kurz-ID).
+      --session-id UUID Nur claude: feste Claude-Session-ID durchreichen
+                        (--session-id, macht das Transkript vorab adressierbar).
+      --settings JSON   Nur claude: --settings-JSON durchreichen (z. B. Lauf-Hooks).
+  -h, --help            Diese Hilfe.
+
+Beispiele:
+  cc-start                                  # claude interaktiv, aktuelles Verzeichnis
+  cc-start -H opencode video ~/projects/beispiel  # opencode interaktiv (--auto)
+  cc-start -H opencode --model openrouter/stealth/ox-alpha video ~/projects/beispiel
+  cc-start -H opencode -p "Baue die Tests grün" build ~/projects/beispiel
+                                            # opencode autonom, ohne Modellwahl
+  cc-start -H hermes -p "Analysiere die Logs" logs ~/projects/beispiel
+  cc-start -f ~/auftrag.md nachtlauf ~/projects/beispiel   # claude autonom
+
+Session-Namen: cc-<name> (claude), cc-oc-<name> (opencode), cc-he-<name> (hermes),
+               cc-cu-<name> (cursor).
+Anzeige/Auswahl: cc-attach [-H harness], Beenden: cc-kill, Übersicht: cc-help
+
+Hinweise pro Harness:
+  claude:   dontAsk fragt NIE. Erlaubtes läuft, Riskantes wird VERWEIGERT (nie hängenbleiben).
+            Braucht die permissions.allow-Liste in ~/.claude/settings.json.
+  opencode: --auto genehmigt alles, was nicht explizit in "permission" verweigert ist
+            (Config: ~/.config/opencode/opencode.json). Kein Trust-Dialog; einmalig
+            'opencode auth login' (z.B. openrouter) nötig.
+  hermes:   --yolo = auto-approve. Einmalig 'hermes setup' (Provider) nötig. Globale
+            Anweisungen: ~/.hermes/AGENTS.md (via SOUL.md-Pointer eingelesen).
+  cursor:   --force = Run Everything, --trust bestätigt den Workspace-Dialog vorab
+            (ohne ihn bleibt die TUI daran hängen). Einmalig 'cursor-agent login'.
+            ACHTUNG: cursor liest CLAUDE.md, .claude/skills und .claude/agents mit
+            (nachgemessen) — ein Lauf sieht also mehr als nur den Prompt.
+EOF
+}
+
+err() { printf '%s\n' "$*" >&2; }
+
+# Shell-sicheres Quoten für den generierten Launcher.
+q() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+
+PROMPT=""
+PROMPT_FILE=""
+MODE=""
+ATTACH=""
+DRY_RUN=""
+NO_TRUST=""
+HARNESS="claude"
+MODEL=""
+PROVIDER=""
+EFFORT=""
+ENVS=()
+LOGFILE=""
+KEEP=""
+CLAUDE_SESSION_ID=""
+CLAUDE_SETTINGS=""
+NAME_ARG=""
+ID_SUFFIX=""
+POS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)        usage; exit 0 ;;
+        -H|--harness)     [[ $# -ge 2 ]] || { err "Fehler: $1 braucht einen Wert."; exit 2; }
+                          HARNESS="$2"; shift 2 ;;
+        --model)          [[ $# -ge 2 ]] || { err "Fehler: $1 braucht einen Wert."; exit 2; }
+                          MODEL="$2"; shift 2 ;;
+        --provider)       [[ $# -ge 2 ]] || { err "Fehler: $1 braucht einen Wert."; exit 2; }
+                          PROVIDER="$2"; shift 2 ;;
+        --effort)         [[ $# -ge 2 ]] || { err "Fehler: $1 braucht einen Wert."; exit 2; }
+                          EFFORT="$2"; shift 2 ;;
+        -p|--prompt)      [[ $# -ge 2 ]] || { err "Fehler: $1 braucht einen Text."; exit 2; }
+                          PROMPT="$2"; shift 2 ;;
+        -f|--prompt-file) [[ $# -ge 2 ]] || { err "Fehler: $1 braucht einen Dateipfad."; exit 2; }
+                          PROMPT_FILE="$2"; shift 2 ;;
+        --mode)           [[ $# -ge 2 ]] || { err "Fehler: $1 braucht einen Wert."; exit 2; }
+                          MODE="$2"; shift 2 ;;
+        -a|--attach)      ATTACH=1; shift ;;
+        --no-trust)       NO_TRUST=1; shift ;;
+        --dry-run)        DRY_RUN=1; shift ;;
+        --env)            [[ $# -ge 2 ]] || { err "Fehler: $1 braucht KEY=WERT."; exit 2; }
+                          ENVS+=("$2"); shift 2 ;;
+        --log)            [[ $# -ge 2 ]] || { err "Fehler: $1 braucht eine Datei."; exit 2; }
+                          LOGFILE="$2"; shift 2 ;;
+        --keep)           KEEP=1; shift ;;
+        --session-id)     [[ $# -ge 2 ]] || { err "Fehler: $1 braucht eine UUID."; exit 2; }
+                          CLAUDE_SESSION_ID="$2"; shift 2 ;;
+        --settings)       [[ $# -ge 2 ]] || { err "Fehler: $1 braucht JSON."; exit 2; }
+                          CLAUDE_SETTINGS="$2"; shift 2 ;;
+        --name)           [[ $# -ge 2 ]] || { err "Fehler: $1 braucht einen Namen."; exit 2; }
+                          NAME_ARG="$2"; shift 2 ;;
+        --id)             [[ $# -ge 2 ]] || { err "Fehler: $1 braucht ein Kürzel."; exit 2; }
+                          ID_SUFFIX="$2"; shift 2 ;;
+        --)               shift; POS+=("$@"); break ;;
+        -*)               err "Unbekannte Option: $1  (cc-start --help)"; exit 2 ;;
+        *)                POS+=("$1"); shift ;;
+    esac
+done
+
+case "$HARNESS" in
+    claude|opencode|hermes|cursor) ;;
+    *) err "Fehler: unbekannte Harness '$HARNESS'. Erlaubt: claude opencode hermes cursor"; exit 2 ;;
+esac
+
+if [[ -n "$EFFORT" && "$HARNESS" == "cursor" ]]; then
+    # Wirkungsloses Durchreichen waere schlimmer als ein Fehler: cursor-agent hat gar
+    # kein --effort. Die Stufe ist Teil der Modell-ID ('claude-opus-5-xhigh'), und ein
+    # unbekanntes Modell lehnt cursor lautstark ab -- eine erfundene ID darf hier also
+    # gar nicht erst entstehen.
+    err "Fehler: --effort gibt es nicht für cursor (die Stufe steckt in der Modell-ID)."
+    exit 2
+fi
+
+if [[ -n "$EFFORT" && "$HARNESS" == "opencode" ]]; then
+    # Wirkungsloses Durchreichen wäre schlimmer als ein Fehler: opencode kennt --variant
+    # nur bei 'opencode run', hier läuft die TUI. Der Weg dorthin ist
+    # agent.<default>.variant in OPENCODE_CONFIG_CONTENT — das setzt cc-hub selbst.
+    err "Fehler: --effort gibt es nicht für opencode (dort über OPENCODE_CONFIG_CONTENT)."
+    exit 2
+fi
+
+if [[ -n "$PROVIDER" && "$HARNESS" != "hermes" ]]; then
+    # Nur hermes kennt ein eigenes --provider. opencode entscheidet über das Präfix
+    # im Modellnamen, claude gar nicht — ein Durchreichen wäre stillschweigend wirkungslos.
+    err "Fehler: --provider gibt es nur für hermes (bei opencode steckt der Provider im --model-Präfix)."
+    exit 2
+fi
+
+
+if [[ -n "$CLAUDE_SESSION_ID" || -n "$CLAUDE_SETTINGS" ]] && [[ "$HARNESS" != "claude" ]]; then
+    err "Hinweis: --session-id/--settings sind nur bei claude wirksam (ignoriert)."
+fi
+
+if [[ -n "$PROMPT_FILE" ]]; then
+    [[ -n "$PROMPT" ]] && { err "Fehler: -p und -f schließen sich aus."; exit 2; }
+    [[ -r "$PROMPT_FILE" ]] || { err "Fehler: Prompt-Datei nicht lesbar: $PROMPT_FILE"; exit 2; }
+    PROMPT="$(cat "$PROMPT_FILE")"
+    [[ -n "${PROMPT//[[:space:]]/}" ]] || { err "Fehler: Prompt-Datei ist leer: $PROMPT_FILE"; exit 2; }
+fi
+
+AUTONOM=""
+[[ -n "$PROMPT" ]] && AUTONOM=1
+
+# Harness-Binary suchen.
+BIN=""
+case "$HARNESS" in
+    claude)  BIN="$(command -v claude || true)" ;;
+    opencode) BIN="$(command -v opencode || true)" ;;
+    hermes)  BIN="$(command -v hermes || true)" ;;
+    cursor)  BIN="$(command -v cursor-agent || true)" ;;
+esac
+if [[ -z "$BIN" ]]; then
+    err "Fehler: '$HARNESS' nicht im PATH gefunden."
+    case "$HARNESS" in
+        claude)  err "Installation: native Claude-Code-Installation (claude in ~/.local/bin)." ;;
+        opencode) err "Installation: npm install -g opencode-ai   (oder: curl -fsSL https://opencode.ai/install | bash)" ;;
+        hermes)  err "Installation: curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash" ;;
+        cursor)  err "Installation: curl https://cursor.com/install -fsS | bash   (dann: cursor-agent login)" ;;
+    esac
+    exit 1
+fi
+
+# Modus bestimmen (nur claude). Ohne Prompt: bypassPermissions; mit Prompt: dontAsk.
+if [[ -z "$MODE" ]]; then
+    MODE=$([[ -n "$AUTONOM" ]] && echo "dontAsk" || echo "bypassPermissions")
+fi
+if [[ "$HARNESS" == "claude" ]]; then
+    case "$MODE" in
+        dontAsk|bypassPermissions|acceptEdits|auto|manual|plan) ;;
+        *) err "Fehler: unbekannter Modus '$MODE'."
+           err "Erlaubt: dontAsk bypassPermissions acceptEdits auto manual plan"; exit 2 ;;
+    esac
+elif [[ "$MODE" != "dontAsk" && "$MODE" != "bypassPermissions" ]]; then
+    # Bei opencode/hermes ist --mode bedeutungslos; nur den Default-Zustand akzeptieren.
+    err "Hinweis: --mode wird bei $HARNESS ignoriert ($HARNESS fragt nie: --auto bzw. --yolo)."
+fi
+
+# Positionsargumente: [session-name] [arbeitsverzeichnis]. Ist der Name schon über
+# --name gesetzt (so ruft cc-hub auf), rutscht das Verzeichnis auf Platz 1 vor —
+# sonst startete der Agent im Arbeitsverzeichnis des AUFRUFERS statt im Worktree.
+if [[ -n "$NAME_ARG" ]]; then
+    WORKDIR="${POS[0]:-$PWD}"
+else
+    WORKDIR="${POS[1]:-$PWD}"
+fi
+[[ -d "$WORKDIR" ]] || { err "Fehler: Verzeichnis '$WORKDIR' existiert nicht."; exit 1; }
+WORKDIR="$(cd "$WORKDIR" && pwd)"
+
+# Session-Namen bilden: cc-<name> (claude), cc-oc-<name> (opencode), cc-he-<name> (hermes).
+HTAG=""
+case "$HARNESS" in
+    opencode) HTAG="oc-" ;;
+    hermes)   HTAG="he-" ;;
+    cursor)   HTAG="cu-" ;;
+esac
+RAW_NAME="${NAME_ARG:-${POS[0]:-$(basename "$WORKDIR")}}"
+BASE_NAME="$PREFIX$HTAG$(printf '%s' "$RAW_NAME" | tr -c 'A-Za-z0-9_-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')"
+[[ -n "$ID_SUFFIX" ]] && BASE_NAME="${BASE_NAME}-$(printf '%s' "$ID_SUFFIX" | tr -c 'A-Za-z0-9_-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')"
+[[ "$BASE_NAME" == "$PREFIX$HTAG" ]] && BASE_NAME="${PREFIX}${HTAG}${HARNESS}"
+
+# Bei Namenskollision durchnummerieren
+SESSION="$BASE_NAME"
+n=2
+while tmux has-session -t "=$SESSION" 2>/dev/null; do
+    SESSION="$BASE_NAME-$n"
+    n=$((n + 1))
+done
+
+# Kommandozeile bauen (ohne Prompt).
+MODEL_ARGS=()
+[[ -n "$MODEL" ]] && MODEL_ARGS+=("--model" "$MODEL")
+
+# opencode schreibt Schema-Warnungen der MCP-Server ("unknown format ... ignored")
+# nach stderr — mitten in die TUI hinein, was die Anzeige zerlegt. stderr geht darum
+# in eine Logdatei; echte Fehler stehen dort und die TUI bleibt sauber.
+OC_ERRLOG="$HOME/.local/share/opencode/log/cc-$SESSION-stderr.log"
+mkdir -p "$(dirname "$OC_ERRLOG")" 2>/dev/null || true
+
+cmd_interactive() {
+    case "$HARNESS" in
+        claude)  printf '%s --permission-mode %s' "$(q "$BIN")" "$(q "$MODE")"
+                 [[ -n "$MODEL" ]]  && printf ' --model %s' "$(q "$MODEL")"
+                 [[ -n "$EFFORT" ]] && printf ' --effort %s' "$(q "$EFFORT")"
+                 : ;;
+        opencode) printf '%s --auto 2>>%s' "$(q "$BIN")" "$(q "$OC_ERRLOG")" ;;
+        hermes)  printf '%s --yolo' "$(q "$BIN")" ;;
+        cursor)  printf '%s --force --trust' "$(q "$BIN")"
+                 [[ -n "$MODEL" ]] && printf ' --model %s' "$(q "$MODEL")"
+                 : ;;
+    esac
+}
+
+cmd_autonomous() {
+    local model_args=""
+    [[ -n "$MODEL" ]] && model_args=" --model $(q "$MODEL")"
+    [[ -n "$PROVIDER" ]] && model_args+=" --provider $(q "$PROVIDER")"
+    # hermes nennt dieselbe Sache '--reasoning'.
+    [[ -n "$EFFORT" && "$HARNESS" == "hermes" ]] && model_args+=" --reasoning $(q "$EFFORT")"
+    local claude_args=""
+    [[ "$HARNESS" == "claude" ]] && {
+        [[ -n "$MODEL" ]]             && claude_args+=" --model $(q "$MODEL")"
+        [[ -n "$EFFORT" ]]            && claude_args+=" --effort $(q "$EFFORT")"
+        [[ -n "$CLAUDE_SESSION_ID" ]] && claude_args+=" --session-id $(q "$CLAUDE_SESSION_ID")"
+        [[ -n "$CLAUDE_SETTINGS" ]]   && claude_args+=" --settings $(q "$CLAUDE_SETTINGS")"
+    }
+    case "$HARNESS" in
+        claude)  printf '%s --permission-mode %s%s "$CC_PROMPT"' "$(q "$BIN")" "$(q "$MODE")" "$claude_args" ;;
+        opencode) printf '%s --auto%s --prompt "$CC_PROMPT" 2>>%s' "$(q "$BIN")" "$model_args" "$(q "$OC_ERRLOG")" ;;
+        hermes)  printf '%s chat -q "$CC_PROMPT" --yolo%s' "$(q "$BIN")" "$model_args" ;;
+        # cursor: der Prompt ist ein POSITIONSargument, kein -p. '-p/--print' waere hier
+        # falsch -- das druckt und beendet sich, die Session waere sofort weg. So laeuft
+        # die TUI den Auftrag ab und bleibt danach stehen (wie opencode), also
+        # nachschaubar und mit lebendem Pane fuer den Watcher.
+        # --trust ist Pflicht: ohne den Schalter haengt die TUI am Dialog
+        # "Do you trust the contents of this directory?" (nachgemessen).
+        cursor)  printf '%s --force --trust' "$(q "$BIN")"
+                 [[ -n "$MODEL" ]] && printf ' --model %s' "$(q "$MODEL")"
+                 printf ' -- "$CC_PROMPT"'
+                 : ;;
+    esac
+}
+
+# Quota-Hinweis (nur claude: usage.sh ist Claude-spezifisch).
+quota_hinweis() {
+    [[ "$HARNESS" == "claude" ]] || return 0
+    [[ -x "$USAGE_SH" ]] || return 0
+    local json pct reset
+    json="$("$USAGE_SH" 2>/dev/null | tail -1)" || return 0
+    pct="$(printf '%s' "$json" | sed -n 's/.*"usage_pct"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')"
+    [[ -n "$pct" ]] || return 0
+    reset="$(printf '%s' "$json" | sed -n 's/.*"reset_at"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    if (( pct >= 90 )); then
+        err "Quota-Warnung: ${pct} % des 5-Stunden-Fensters verbraucht (Reset: ${reset:-unbekannt})."
+        err "Die Session pausiert vermutlich sofort. Abbruch mit Strg+C, sonst läuft sie an."
+    else
+        echo "Quota: ${pct} % des 5-Stunden-Fensters verbraucht (Reset: ${reset:-unbekannt})"
+    fi
+}
+
+# Trust-Dialog vorab bestätigen (nur claude).
+trust_workdir() {
+    [[ "$HARNESS" == "claude" ]] || return 0
+    local dir="$1" cfg="$HOME/.claude.json" cur tmp
+    [[ -f "$cfg" ]] || return 0
+    command -v jq >/dev/null 2>&1 || {
+        err "Hinweis: jq fehlt — Trust-Dialog kann nicht vorab bestätigt werden."
+        return 0
+    }
+    cur="$(jq -r --arg d "$dir" '.projects[$d].hasTrustDialogAccepted // false' "$cfg" 2>/dev/null || echo false)"
+    [[ "$cur" == "true" ]] && return 0
+
+    tmp="$(mktemp "${cfg}.cc.XXXXXX")" || return 0
+    if jq --arg d "$dir" \
+         '.projects = ((.projects // {}) | .[$d] = ((.[$d] // {}) + {hasTrustDialogAccepted: true}))' \
+         "$cfg" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+        chmod --reference="$cfg" "$tmp" 2>/dev/null || chmod 600 "$tmp"
+        cp -p "$cfg" "$cfg.bak-cc-start" 2>/dev/null || true
+        mv "$tmp" "$cfg"
+        echo "Trust-Dialog für $dir vorab bestätigt (~/.claude.json)."
+    else
+        rm -f "$tmp"
+        err "Warnung: Trust-Flag nicht setzbar. Die Session bleibt ggf. an der Frage"
+        err "'Do you trust this folder?' stehen — einmal 'cc-attach' und Enter drücken."
+    fi
+}
+
+# Auth/Setup-Vorab-Checks (nicht-blockierend, nur Warnung).
+preflight() {
+    case "$HARNESS" in
+        opencode)
+            if ! "$BIN" auth list 2>/dev/null | grep -qE "[1-9][0-9]* credentials"; then
+                err "Hinweis: opencode hat noch keine Credentials (opencode auth list)."
+                err "Einmalig: opencode auth login   (z.B. openrouter) — oder OPENROUTER_API_KEY setzen."
+            fi
+            ;;
+        hermes)
+            if [[ ! -f "$HOME/.hermes/config.yaml" ]]; then
+                err "Hinweis: ~/.hermes/config.yaml fehlt — hermes ist noch nicht eingerichtet."
+                err "Einmalig: hermes setup   (Provider wählen, z.B. openrouter)."
+            fi
+            ;;
+        cursor)
+            if ! "$BIN" status >/dev/null 2>&1; then
+                err "Hinweis: 'cursor-agent status' schlägt fehl — vermutlich nicht angemeldet."
+                err "Einmalig: cursor-agent login"
+            fi
+            ;;
+    esac
+}
+
+if [[ -n "$DRY_RUN" ]]; then
+    echo "--- Würde starten ---"
+    echo "Harness:        $HARNESS"
+    echo "Binary:         $BIN"
+    echo "Session:        $SESSION"
+    echo "Verzeichnis:    $WORKDIR"
+    echo "Autonom:        $([[ -n "$AUTONOM" ]] && echo "ja (detacht im Hintergrund)" || echo "nein (interaktiv, attacht)")"
+    if [[ -n "$MODEL" ]]; then
+        echo "Modell:         $MODEL"
+    else
+        echo "Modell:         (nicht gesetzt — $HARNESS nutzt sein Default/zuletzt verwendetes Modell)"
+    fi
+    if [[ -n "$EFFORT" ]]; then
+        echo "Denk-Aufwand:   $EFFORT"
+    fi
+    if [[ -n "$PROVIDER" ]]; then
+        echo "Provider:       $PROVIDER"
+    fi
+    if [[ "$HARNESS" == "claude" ]]; then
+        echo "Modus:          $MODE"
+        if [[ -n "$AUTONOM" && -z "$NO_TRUST" ]]; then
+            echo "Trust-Flag:     $(jq -r --arg d "$WORKDIR" \
+                'if (.projects[$d].hasTrustDialogAccepted // false) then "schon gesetzt" else "würde gesetzt" end' \
+                "$HOME/.claude.json" 2>/dev/null || echo "unbekannt")"
+        fi
+    elif [[ "$HARNESS" == "cursor" ]]; then
+        echo "Modus:          auto-approve (--force) + Workspace vorab vertraut (--trust)"
+    else
+        echo "Modus:          auto-approve (--auto bzw. --yolo)"
+    fi
+    echo "Kommando:       $(if [[ -n "$AUTONOM" ]]; then cmd_autonomous | sed 's/\$CC_PROMPT/<prompt>/'; else cmd_interactive; fi)"
+    [[ -n "$AUTONOM" ]] && { echo "--- Prompt ---"; printf '%s\n' "$PROMPT"; }
+    echo "--- Quota (nur claude) ---"
+    quota_hinweis
+    exit 0
+fi
+
+if [[ -n "$AUTONOM" ]]; then
+    quota_hinweis
+    [[ -z "$NO_TRUST" ]] && trust_workdir "$WORKDIR"
+fi
+preflight
+
+# Groesse der neuen Session. tmux legt detachte Sessions sonst in default-size (80x24)
+# an; beim spaeteren Attach aus einem groesseren Terminal wird der Pane umgebrochen und
+# schon gezeichnete Ausgabe zerfaellt. Darum gleich in Zielgroesse anlegen.
+TMUX_W="$(tput cols 2>/dev/null || true)"
+TMUX_H="$(tput lines 2>/dev/null || true)"
+[[ "$TMUX_W" =~ ^[0-9]+$ ]] && (( TMUX_W >= 40 )) || TMUX_W=200
+[[ "$TMUX_H" =~ ^[0-9]+$ ]] && (( TMUX_H >= 10 )) || TMUX_H=50
+
+# --env KEY=VAL → tmux new-session -e (mehrfach). Validierung: nur KEY=VAL.
+ENV_ARGS=()
+for kv in "${ENVS[@]:-}"; do
+    [[ -n "$kv" ]] || continue
+    [[ "$kv" == *=* ]] || { err "Fehler: --env braucht KEY=WERT, bekommen: '$kv'"; exit 2; }
+    ENV_ARGS+=("-e" "$kv")
+done
+
+if [[ -z "$AUTONOM" ]]; then
+    # Interaktiv: direkt starten, kein Launcher nötig.
+    if (( ${#ENV_ARGS[@]} )); then
+        tmux new-session -d -x "$TMUX_W" -y "$TMUX_H" "${ENV_ARGS[@]}" -s "$SESSION" -c "$WORKDIR" "$(cmd_interactive)"
+    else
+        tmux new-session -d -x "$TMUX_W" -y "$TMUX_H" -s "$SESSION" -c "$WORKDIR" "$(cmd_interactive)"
+    fi
+else
+    # Autonom: Prompt und Mini-Launcher als Dateien ablegen. Das umgeht jede Quoting-Falle
+    # beim Durchreichen mehrzeiliger Prompts durch tmux. Beide Dateien löschen sich beim
+    # Start selbst, direkt nach dem Einlesen.
+    TDIR="${TMPDIR:-/tmp}"
+    PF="$TDIR/cc-prompt-$SESSION-$$.txt"
+    LF="$TDIR/cc-launch-$SESSION-$$.sh"
+    # Reste abgebrochener Starts (älter als ein Tag) wegräumen, fail-safe.
+    find "$TDIR" -maxdepth 1 \( -name 'cc-prompt-*.txt' -o -name 'cc-launch-*.sh' \) \
+        -mtime +1 -delete 2>/dev/null || true
+
+    printf '%s' "$PROMPT" > "$PF"
+    chmod 600 "$PF"
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'cd %s\n' "$(q "$WORKDIR")"
+        printf 'CC_PROMPT="$(cat %s)"\n' "$(q "$PF")"
+        printf 'rm -f %s %s\n' "$(q "$PF")" "$(q "$LF")"
+        printf 'exec %s\n' "$(cmd_autonomous)"
+    } > "$LF"
+    chmod 700 "$LF"
+
+    if (( ${#ENV_ARGS[@]} )); then
+        tmux new-session -d -x "$TMUX_W" -y "$TMUX_H" "${ENV_ARGS[@]}" -s "$SESSION" -c "$WORKDIR" bash "$LF"
+    else
+        tmux new-session -d -x "$TMUX_W" -y "$TMUX_H" -s "$SESSION" -c "$WORKDIR" bash "$LF"
+    fi
+fi
+
+# cc-hub-Integration: Vollprotokoll SOFORT nach new-session beginnen (sonst fehlt
+# der Anfang), Session nach Prozessende offen halten + pane-died melden (Planung 7.2).
+# Ein Fehler HIER wäre besonders tückisch: die Session läuft bereits, 'set -e' würde
+# cc-start aber abbrechen — der Aufrufer sähe einen Fehlstart und die Session liefe
+# verwaist weiter. Darum aufräumen statt Waisen hinterlassen.
+tmux_or_die() {
+    if ! tmux "$@" 2>&1; then
+        err "Fehler: 'tmux $*' fehlgeschlagen — Session '$SESSION' wird wieder beendet."
+        tmux kill-session -t "=$SESSION" 2>/dev/null || true
+        exit 1
+    fi
+}
+
+if [[ -n "$LOGFILE" ]]; then
+    mkdir -p "$(dirname "$LOGFILE")" 2>/dev/null || true
+    # Zwei Fallen in einer Zeile:
+    #  - Ziel: "=name" ist für pipe-pane KEIN Pane-Ziel ("can't find pane"). Der
+    #    Doppelpunkt macht daraus das aktive Pane der Session.
+    #  - $LOGFILE landet in einem Shell-Kommando und muss gequotet werden.
+    tmux_or_die pipe-pane -o -t "=$SESSION:" "cat >> $(q "$LOGFILE")"
+fi
+if [[ -n "$KEEP" ]]; then
+    tmux_or_die set-option -t "=$SESSION:" -q remain-on-exit on
+    # set-hook braucht ebenfalls ein Ziel mit ':' — "=name" allein: "no such window".
+    tmux_or_die set-hook -t "=$SESSION:" pane-died 'run-shell "cc-report _pane_died #{pane_dead_status}"'
+fi
+
+tmux set-option -t "=$SESSION:" -q history-limit 50000
+tmux set-option -t "=$SESSION:" -q mouse on
+tmux set-window-option -t "=$SESSION:" -q aggressive-resize on
+
+# tmux meldet auch dann Erfolg, wenn das Kommando sofort wieder stirbt. Kurz anlaufen
+# lassen und nachsehen, ob die Session wirklich lebt.
+sleep 1
+if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
+    err "Fehler: Session ist sofort wieder beendet — das Startkommando stirbt."
+    err "Direkt testen: $(if [[ -n "$AUTONOM" ]]; then cmd_autonomous | sed 's/\$CC_PROMPT/<prompt>/'; else cmd_interactive; fi)"
+    [[ -n "$AUTONOM" ]] && rm -f "$PF" "$LF" 2>/dev/null
+    exit 1
+fi
+
+echo "Session '$SESSION' gestartet in $WORKDIR (Harness: $HARNESS)"
+
+if [[ -n "$AUTONOM" && -z "$ATTACH" ]]; then
+    echo "Läuft autonom im Hintergrund. Zuschauen:  cc-attach $SESSION"
+    echo "Beenden:                                  cc-kill $SESSION"
+    exit 0
+fi
+
+echo "Detach mit: Strg+b, dann d"
+if [[ -n "${TMUX:-}" ]]; then
+    tmux switch-client -t "=$SESSION"
+else
+    tmux attach-session -t "=$SESSION"
+fi

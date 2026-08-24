@@ -1,0 +1,13 @@
+node_modules/
+.playwright-mcp/
+
+# Privat — versioniert im Schwester-Repo cc-hub-private
+PLANUNG.md
+CLAUDE.local.md
+opencode.json
+
+# Nie committen
+*.db
+.env
+*.pem
+*.key

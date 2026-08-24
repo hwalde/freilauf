@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# cchub — Steuerung des cc-hub. Planung 4.8 + 9.
+#   cchub on|off|status|url|logs|restart|stop|start
+#   cchub pipeline on|off|status
+set -euo pipefail
+
+ENV_FILE="$HOME/.config/cc-hub/env"
+[[ -f "$ENV_FILE" ]] && . "$ENV_FILE"
+LOCAL_PORT="${CCHUB_LOCAL_PORT:-8791}"
+VPN_PORT="${CCHUB_VPN_PORT:-8790}"
+VPN_BIND="${CCHUB_VPN_BIND:-<VPN-IP nicht gesetzt>}"
+
+usage() {
+    cat <<'EOF'
+Usage: cchub <befehl>
+
+  on            VPN-Proxy starten  → Website von außen erreichbar (WireGuard)
+  off           VPN-Proxy stoppen  → Website nur noch lokal (fail-closed)
+  status        Zustand aller drei Schalter + Prozesse
+  url           VPN-URL ausgeben
+  logs          journalctl --user -u cchub -f
+  start|stop|restart   Hub-Prozess steuern (Scheduler/Watcher/UI)
+
+  pipeline on|off|status   globales Und-Gatter für geplante Agent-Starts
+
+Schalter-Modell: Zugang (VPN-Proxy) · Pipeline (Scheduler-Gatter) · Agent (aktiv-Flag
+in der UI). Hub, Scheduler, Watcher, Telegram und laufende Agenten laufen unabhängig
+vom Zugangs-Schalter weiter.
+EOF
+}
+
+db_pipeline() {
+    node --disable-warning=ExperimentalWarning -e '
+const {DatabaseSync}=require("node:sqlite");
+const {join}=require("node:path");
+const db=new DatabaseSync(join(process.env.HOME,".local/share/cc-hub/cc-hub.db"));
+const r=db.prepare("SELECT value FROM settings WHERE key=?").get("pipeline_on");
+process.stdout.write((r&&r.value==="1")?"an":"aus");' 2>/dev/null || echo '?'
+}
+
+set_pipeline() {
+    node --disable-warning=ExperimentalWarning -e '
+const {DatabaseSync}=require("node:sqlite");
+const {join}=require("node:path");
+const db=new DatabaseSync(join(process.env.HOME,".local/share/cc-hub/cc-hub.db"));
+db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run("pipeline_on", process.argv[1]);' "$1"
+}
+
+case "${1:-}" in
+    on)
+        systemctl --user start cchub-vpn.service
+        echo "Zugang an: https://${VPN_BIND}:${VPN_PORT}"
+        ;;
+    off)
+        systemctl --user stop cchub-vpn.service
+        echo "Zugang aus (Hub läuft lokal weiter)."
+        ;;
+    status)
+        hub="$(systemctl --user is-active cchub.service 2>/dev/null || true)" ; hub="${hub:-unbekannt}"
+        vpn="$(systemctl --user is-active cchub-vpn.service 2>/dev/null || true)"; vpn="${vpn:-unbekannt}"
+        echo "Hub-Prozess:  $hub   (127.0.0.1:${LOCAL_PORT})"
+        echo "Zugang (VPN): $vpn   (https://${VPN_BIND}:${VPN_PORT})"
+        echo "Pipeline:     $(db_pipeline)"
+        echo "Laufende cc-Sessions: $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^cc-' || true)"
+        ;;
+    url)
+        echo "https://${VPN_BIND}:${VPN_PORT}"
+        ;;
+    logs)
+        exec journalctl --user -u cchub -f -n 100
+        ;;
+    start)
+        systemctl --user start cchub.service ;;
+    stop)
+        systemctl --user stop cchub.service ;;
+    restart)
+        systemctl --user restart cchub.service ;;
+    pipeline)
+        case "${2:-status}" in
+            on)  set_pipeline 1; echo "Pipeline an." ;;
+            off) set_pipeline 0; echo "Pipeline aus — Agent-Flags bleiben unverändert." ;;
+            status) echo "Pipeline: $(db_pipeline)" ;;
+            *) usage; exit 2 ;;
+        esac ;;
+    -h|--help|"" ) usage ;;
+    *) usage; exit 2 ;;
+esac

@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Übersicht über die cc-* Scripte (Coding-Agents in tmux: claude | opencode | hermes).
+set -euo pipefail
+
+PREFIX="cc-"
+
+# Farben nur, wenn Ausgabe ins Terminal geht
+if [[ -t 1 ]]; then
+    B=$'\033[1m'; D=$'\033[2m'; C=$'\033[36m'; R=$'\033[0m'
+else
+    B=""; D=""; C=""; R=""
+fi
+
+cat <<EOF
+${B}Coding-Agents in tmux — Übersicht${R}
+${D}Der Agent läuft in einer tmux-Session weiter, auch wenn du dich vom Server ausloggst.${R}
+${D}Harnesses: ${C}claude${R} (Default) | ${C}opencode${R} | ${C}hermes${R} — wählbar mit ${C}cc-start -H${R}.${D}${R}
+
+${B}BEFEHLE${R}
+
+  ${C}cc-start${R} [-H harness] [--model modell] [name] [verzeichnis]
+      Startet eine neue Agent-Session und verbindet dich damit.
+        -H, --harness     claude (Default) | opencode | hermes
+        --model MODELL    Modell für opencode/hermes (Format provider/model,
+                          z.B. openrouter/stealth/ox-alpha). Ohne Angabe:
+                          opencode nutzt das zuletzt verwendete Modell,
+                          hermes das in ~/.hermes/config.yaml konfigurierte.
+        name              Session-Name (default: Name des Arbeitsverzeichnisses)
+        verzeichnis       Arbeitsverzeichnis (default: aktuelles Verzeichnis)
+
+  ${C}cc-start -p${R} "auftrag" [-H harness] [name] [verzeichnis]   ${D}# AUTONOM${R}
+      Startet die Session mit einem Auftrag im Nicht-fragen-Modus; sie fragt nie,
+      läuft detacht im Hintergrund durch und bleibt an keinem Dialog hängen.
+        claude   -> --permission-mode dontAsk   (Erlaubtes läuft, Riskantes wird verweigert)
+        opencode -> opencode --auto --prompt     (TUI: arbeitet autonom, bleibt bedienbar)
+        hermes   -> hermes chat -q --yolo        (auto-approve)
+      ${C}-f datei${R} liest den Auftrag aus einer Datei, ${C}-a${R} attacht trotzdem sofort,
+      ${C}--dry-run${R} zeigt nur. Details: cc-start --help
+
+  ${C}cc-attach${R} [-H harness] [name]
+      Listet die laufenden Sessions auf (mit Harness-Kennzeichnung) und verbindet
+      dich mit der gewählten. Bei nur einer Session: verbindet direkt. Mit [name]:
+      ohne Nachfrage. Das nimmst du auch nach einem Verbindungsabbruch.
+      ${C}-p${R} "text" tippt einen Prompt in die laufende Session und schickt ihn ab,
+      ${C}-n${R} sendet nur, ohne zu attachen (für Scripte/Cron).
+
+  ${C}cc-kill${R} [-H harness] [name]
+      Beendet eine Session. Zur Sicherheit musst du den Session-Namen
+      vollständig eintippen.
+
+  ${C}cc-help${R}
+      Diese Übersicht.
+
+  ${C}cchub${R} on|off|status|url|logs|restart|stop
+  ${C}cchub pipeline${R} on|off|status
+      cc-hub: Web-Oberfläche für Agenten (nur über VPN erreichbar).
+        on/off          VPN-Zugang zur Website (Hub läuft lokal immer weiter)
+        status          Zustand der drei Schalter (Zugang, Pipeline, Prozesse)
+        pipeline on/off globales Und-Gatter für geplante Agent-Starts
+                        (Agent-Flags werden dabei NICHT verändert)
+      UI-Start von Läufen läuft über cc-start; beendete Sessions bleiben
+      standardmäßig 3 Tage offen und werden dann automatisch geschlossen.
+
+  ${C}cc-report${R} done|failed|help|progress "text"   ·   branch <name>   ·   pr <url>
+      Meldung eines Agenten an cc-hub (braucht CC_RUN_ID/CC_HUB_URL aus der
+      Session-Umgebung). done --file report.md liest den Report aus einer Datei;
+      help ruft einen Menschen und lässt den Lauf offen (waiting_help).
+
+${B}SESSION-NAMEN${R}
+  cc-<name>      = claude      (Alt-Sessions ohne Tag gelten als claude)
+  cc-oc-<name>   = opencode
+  cc-he-<name>   = hermes
+
+${B}TASTEN INNERHALB DER SESSION${R}
+
+  ${C}Strg+b${R} dann ${C}d${R}     Detach — der Agent läuft im Hintergrund weiter
+  ${C}Strg+b${R} dann ${C}[${R}     Scroll-Modus (mit Pfeiltasten/PageUp), ${C}q${R} beendet ihn
+  ${C}Strg+b${R} dann ${C}?${R}     Alle tmux-Tastenkürzel
+
+${B}TYPISCHER ABLAUF${R}
+
+  cd ~/projects/meinprojekt
+  cc-start                 ${D}# claude-Session starten, arbeiten${R}
+  cc-start -H opencode -p "Baue die Tests grün" build   ${D}# opencode autonom${R}
+  ${D}# Strg+b, d           → abkoppeln${R}
+  exit                     ${D}# SSH beenden, der Agent läuft weiter${R}
+  ${D}# ... später wieder einloggen ...${R}
+  cc-attach                ${D}# Session auswählen und weiterarbeiten${R}
+  cc-kill                  ${D}# wenn du sie nicht mehr brauchst${R}
+
+${B}HARNESS-HINWEISE${R}
+
+  claude:
+    dontAsk fragt NIE: Erlaubtes läuft (permissions.allow in ~/.claude/settings.json),
+    Riskantes wird VERWEIGERT statt erfragt — die Session hängt nie an einem Dialog.
+    rm/rmdir auf kritische Pfade (rm -rf /, ~) werden auch bei Bash(*) verweigert.
+    Trust-Dialog wird bei autonomen Starts vorab bestätigt (~/.claude.json).
+
+  opencode:
+    --auto genehmigt alles, was nicht explizit per "permission"-Config verweigert ist
+    (~/.config/opencode/opencode.json). KEIN Trust-Dialog, keine Klassifikator-Stufe:
+    die Sicherheit steht und fällt mit deinen deny-Regeln — du hast bewusst darauf
+    verzichtet (Version-Control als Netz).
+    Einmalig: 'opencode auth login' (z.B. openrouter) für stealth/ox-alpha:
+    cc-start -H opencode --model openrouter/stealth/ox-alpha ...
+    Ohne --model: opencode nutzt das zuletzt verwendete Modell.
+    Liest CLAUDE.md (auch in Unterordnern), ~/.claude/skills und .claude/skills direkt.
+
+  hermes:
+    --yolo = auto-approve. Einmalig: 'hermes setup' (Provider).
+    Globale Anweisungen: ~/.hermes/AGENTS.md (eingelesen über ~/.hermes/SOUL.md).
+    Dort steht u.a.: AGENTS.md-Symlink auf CLAUDE.md im Projekt pflegen und
+    Custom-Subagenten über delegate_task + .claude/agents/<name>.md ausführen.
+    MCP (u.a. cua-computer-use): ~/.hermes/config.yaml → mcp_servers.
+
+${B}HINWEIS${R}
+  Sessions überleben Logout und Verbindungsabbruch, aber ${B}keinen Server-Reboot${R}.
+  Der autonome Modus stützt sich auf die jeweilige No-Ask-Konfiguration
+  (claude: dontAsk + permissions.allow, opencode: --auto, hermes: --yolo).
+EOF
+
+# Aktuellen Zustand anzeigen
+echo
+if ! tmux has-session 2>/dev/null; then
+    echo "${B}AKTUELL${R}  Keine laufende Agent-Session. Starten mit: cc-start"
+    exit 0
+fi
+
+harness_of() {
+    case "$1" in
+        "${PREFIX}oc-"*) echo "opencode" ;;
+        "${PREFIX}he-"*) echo "hermes" ;;
+        *) echo "claude" ;;
+    esac
+}
+
+mapfile -t ROWS < <(tmux list-sessions \
+    -F '#{session_name}|#{t:session_created}|#{?session_attached,verbunden,frei}|#{session_path}' \
+    2>/dev/null | grep "^$PREFIX" || true)
+
+if [[ ${#ROWS[@]} -eq 0 ]]; then
+    echo "${B}AKTUELL${R}  Keine laufende Agent-Session. Starten mit: cc-start"
+    exit 0
+fi
+
+echo "${B}AKTUELL LAUFENDE SESSIONS (${#ROWS[@]})${R}"
+for row in "${ROWS[@]}"; do
+    IFS='|' read -r name created attached path <<<"$row"
+    printf "  %-24s  (%s)  gestartet: %s  (%s)\n" "$name" "$(harness_of "$name")" "$created" "$attached"
+    printf "  ${D}%s${R}\n" "$path"
+done
