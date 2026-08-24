@@ -24,3 +24,17 @@ tr.err td { color: #c62828; }
 /* Larger toolbox/editor panes than the designer default. */
 #flow-designer .sqd-toolbox { width: 220px; }
 #flow-designer .sqd-smart-editor { width: 420px; }
+
+/* The designer ships a light theme only, so its canvas stays white in every
+   colour scheme. Everything the hub renders INTO it (trigger and step editor)
+   would otherwise inherit the dark scheme's light text and sit invisibly on
+   white — hence an explicit light island. `color-scheme` keeps the form
+   controls light as well. */
+#flow-designer { color-scheme: light; color: #1c1c1c; }
+#flow-designer .flow-editor h3, #flow-designer .flow-editor label,
+#flow-designer .flow-editor p, #flow-designer .flow-editor summary { color: #1c1c1c; }
+/* #8a8f96 is hard to read on white even in light mode. */
+#flow-designer .dim { color: #5a6069; }
+#flow-designer code { background: #eceae6; color: #1c1c1c; }
+#flow-designer .flow-vars { border-top-color: #e4e4e0; }
+#flow-designer .flow-editor .err { color: #c62828; }
