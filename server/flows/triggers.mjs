@@ -22,7 +22,10 @@ export function normalizeTrigger(t = {}) {
   const out = { kind }
   if (kind === 'run_finished') {
     out.agentIds = (Array.isArray(t.agentIds) ? t.agentIds : []).map(Number).filter(Number.isFinite)
-    out.repoId = Number(t.repoId) || null
+    // An agent belongs to exactly one repo — with agents chosen, a repo filter can
+    // only ever narrow the result to nothing. The editor offers either/or; an older
+    // definition (or a hand-written API call) is straightened out here.
+    out.repoId = out.agentIds.length ? null : (Number(t.repoId) || null)
     out.outcomes = (Array.isArray(t.outcomes) ? t.outcomes : OUTCOMES).filter(o => OUTCOMES.includes(o))
     if (!out.outcomes.length) out.outcomes = [...OUTCOMES]
     out.singleRuns = t.singleRuns !== false           // runs without an agent

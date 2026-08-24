@@ -125,8 +125,11 @@ Finished runs are found by **polling**, not by hooks in every end path: each run
 carries `flow_dispatched` (0/1). `flowsTick()` takes every terminal run with
 `flow_dispatched = 0`, marks it first (crash-safe, never double-fires), resumes
 flow runs waiting on it, then starts every active flow whose `run_finished`
-trigger matches (`triggerMatches()`: outcomes, repo, agents, single runs, runs
-started by a flow). Then it resumes elapsed delays and evaluates cron triggers
+trigger matches (`triggerMatches()`: outcomes, scope, single runs, runs started
+by a flow). The scope is either agents or a repo, never both — an agent belongs
+to exactly one repo, so a repo filter next to chosen agents could only narrow
+the result to nothing. The editor offers one selector; `normalizeTrigger()`
+drops `repoId` as soon as `agentIds` is non-empty. Then it resumes elapsed delays and evaluates cron triggers
 (minute-debounced like the scheduler). Re-entrancy is guarded.
 
 Loop guard: runs started by a flow (`runs.flow_run_id` set) do **not** fire

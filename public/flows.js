@@ -93,14 +93,39 @@
     const renderDetail = () => {
       detail.replaceChildren()
       if (trigger.kind === 'run_finished') {
-        const agents = $('select', { multiple: true, size: Math.min(8, Math.max(3, meta.agents.length)) },
-          meta.agents.map(a => $('option', { value: a.id, selected: (trigger.agentIds ?? []).includes(a.id) }, `${a.name} (${a.repo})`)))
-        agents.addEventListener('change', () => { trigger.agentIds = [...agents.selectedOptions].map(o => +o.value); touch() })
-        detail.append($('label', {}, T('flows.trigger.agents'), agents, $('span', { class: 'dim' }, ' ' + T('flows.trigger.agents_hint'))))
-        const repo = $('select', {}, $('option', { value: '' }, T('flows.trigger.any_repo')),
-          meta.repos.map(r => $('option', { value: r.id, selected: trigger.repoId === r.id }, r.name)))
-        repo.addEventListener('change', () => { trigger.repoId = +repo.value || null; touch() })
-        detail.append($('label', {}, T('flows.trigger.repo'), repo))
+        // An agent belongs to exactly one repo, so agent filter and repo filter are
+        // never both meaningful: one scope selector, one control below it.
+        const scopeOf = () => ((trigger.agentIds ?? []).length ? 'agents' : trigger.repoId ? 'repo' : 'all')
+        const scope = $('select', {}, ['all', 'agents', 'repo'].map(s => $('option', { value: s, selected: scopeOf() === s }, T(`flows.trigger.scope.${s}`))))
+        detail.append($('label', {}, T('flows.trigger.scope'), scope))
+        const scopeBox = $('div')
+        const renderScope = () => {
+          scopeBox.replaceChildren()
+          if (scope.value === 'agents') {
+            const agents = $('select', { multiple: true, size: Math.min(8, Math.max(3, meta.agents.length)) },
+              meta.agents.map(a => $('option', { value: a.id, selected: (trigger.agentIds ?? []).includes(a.id) }, `${a.name} (${a.repo})`)))
+            agents.addEventListener('change', () => { trigger.agentIds = [...agents.selectedOptions].map(o => +o.value); touch() })
+            scopeBox.append($('label', {}, T('flows.trigger.agents'), agents, $('span', { class: 'dim hint' }, T('flows.trigger.agents_hint'))))
+          } else if (scope.value === 'repo') {
+            const repo = $('select', {}, $('option', { value: '' }, T('flows.trigger.any_repo')),
+              meta.repos.map(r => $('option', { value: r.id, selected: trigger.repoId === r.id }, r.name)))
+            repo.addEventListener('change', () => { trigger.repoId = +repo.value || null; touch() })
+            scopeBox.append($('label', {}, T('flows.trigger.repo'), repo, $('span', { class: 'dim hint' }, T('flows.trigger.repo_hint'))))
+          }
+          // "Single runs" only means something where an agent filter does not apply.
+          if (scope.value !== 'agents') {
+            const single = $('input', { type: 'checkbox', checked: trigger.singleRuns !== false })
+            single.addEventListener('change', () => { trigger.singleRuns = single.checked; touch() })
+            scopeBox.append($('label', { class: 'chk' }, single, T('flows.trigger.single_runs')))
+          }
+        }
+        scope.addEventListener('change', () => {
+          if (scope.value !== 'agents') trigger.agentIds = []
+          if (scope.value !== 'repo') trigger.repoId = null
+          renderScope(); touch()
+        })
+        renderScope()
+        detail.append(scopeBox)
         const oc = $('div', { class: 'tage' }, meta.outcomes.map(o => {
           const cb = $('input', { type: 'checkbox', checked: (trigger.outcomes ?? meta.outcomes).includes(o) })
           cb.addEventListener('change', () => {
@@ -110,9 +135,6 @@
           return $('label', { class: 'tag' }, cb, T(`flows.outcome.${o}`))
         }))
         detail.append($('div', {}, T('flows.trigger.outcomes'), oc))
-        const single = $('input', { type: 'checkbox', checked: trigger.singleRuns !== false })
-        single.addEventListener('change', () => { trigger.singleRuns = single.checked; touch() })
-        detail.append($('label', { class: 'chk' }, single, T('flows.trigger.single_runs')))
         const fs = $('input', { type: 'checkbox', checked: trigger.flowStarted === true })
         fs.addEventListener('change', () => { trigger.flowStarted = fs.checked; touch() })
         detail.append($('label', { class: 'chk' }, fs, T('flows.trigger.flow_started')), $('p', { class: 'dim' }, T('flows.trigger.flow_started_hint')))

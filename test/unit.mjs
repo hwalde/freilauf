@@ -686,6 +686,8 @@ try {
     falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', outcomes: ['failed'] }), run), 'outcome filter')
     wahr(triggerMatches(normalizeTrigger({ kind: 'run_finished', outcomes: ['bogus'] }), run), 'invalid outcome list falls back to all')
     falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', repoId: 2 }), run), 'repo filter')
+    gleich(normalizeTrigger({ kind: 'run_finished', agentIds: [7], repoId: 2 }).repoId, null, 'agents pin the repo — a repo filter next to them is dropped')
+    wahr(triggerMatches(normalizeTrigger({ kind: 'run_finished', agentIds: [7], repoId: 2 }), run), 'and therefore cannot exclude the run')
     wahr(triggerMatches(normalizeTrigger({ kind: 'run_finished', agentIds: ['7'] }), run), 'agent ids are coerced to numbers')
     falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', agentIds: [8] }), run), 'other agent')
     falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', agentIds: [7] }), { ...run, agent_id: null }), 'agent filter excludes single runs')
