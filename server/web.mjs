@@ -21,6 +21,8 @@ import { redirect, body as readBody, parseForm } from './web-helpers.mjs'
 import { vorfallLoesen, vorfaelleLoesen, vorfall } from './incidents.mjs'
 import { skillsAusFormular } from './zusaetze.mjs'
 import { t } from './i18n.mjs'
+import { flowRoute, flowApi } from './flows/web.mjs'
+import { flowsTick } from './flows/triggers.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -93,6 +95,8 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'GET' && path === '/settings/coding-agents') return pageCodingAgents(req, res, url)
   if (req.method === 'POST' && path === '/settings/coding-agents/save') return codingAgentSave(req, res, url, formBody)
   if (req.method === 'POST' && path === '/settings/coding-agents/delete') return codingAgentDelete(req, res, url, formBody)
+  // No-code flows (server/flows/) — own router, own pages.
+  if (path === '/flows' || path.startsWith('/flows/')) return flowRoute(req, res, url, formBody)
   res.writeHead(404, { 'content-type': 'text/plain' }); res.end(t('web.not_found'))
 }
 
@@ -101,6 +105,7 @@ async function api(req, res, url) {
   const path = url.pathname
   let m
   if (req.method === 'GET' && path === '/api/telegram/chats') return telegramChats(req, res)
+  if (path.startsWith('/api/flows') || path.startsWith('/api/flow-runs')) return flowApi(req, res, url)
 
   // Which providers the chosen harness can use — plugin capability, restricted
   // to the operator's per-coding-agent selection and available credentials.
@@ -189,10 +194,8 @@ async function api(req, res, url) {
     const b = await form(req)
     const text = String(b.text || '')
     // Multi-line without accidental submit: bracketed paste + Enter (planning 7.3)
-    const { sh } = await import('./util.mjs')
-    await sh('tmux', ['send-keys', '-t', `=${run.tmux_session}:`, '-l', '--', '\x1b[200~' + text + '\x1b[201~'])
-    await new Promise(r => setTimeout(r, 300))
-    await sh('tmux', ['send-keys', '-t', `=${run.tmux_session}:`, 'Enter'])
+    const { sendToSession } = await import('./util.mjs')
+    await sendToSession(run.tmux_session, text)
     db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(run.id)
     if (run.status === 'waiting_help') {
       db.prepare(`UPDATE runs SET status='running', help_answer=? WHERE id=?`).run(text, run.id)
@@ -207,6 +210,7 @@ async function api(req, res, url) {
     // a terminal to the dead session until the next watcher tick (410 in the browser).
     db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
                 tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(m[1])
+    flowsTick().catch(e => console.error('[flows]', e.message))   // "run finished" triggers, without waiting for the watcher
     return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/retry$/))) {
@@ -248,6 +252,12 @@ const STATIC_MAP = [
   ['/static/addon-fit.js', '/@xterm/addon-fit/lib/addon-fit.js', 'application/javascript'],
   ['/static/hub.css', '/../public/hub.css', 'text/css'],
   ['/static/hub.js', '/../public/hub.js', 'application/javascript'],
+  // No-code flow designer (server/flows/, public/flows.js)
+  ['/static/flows.js', '/../public/flows.js', 'application/javascript'],
+  ['/static/flows.css', '/../public/flows.css', 'text/css'],
+  ['/static/swd.js', '/sequential-workflow-designer/dist/index.umd.js', 'application/javascript'],
+  ['/static/swd.css', '/sequential-workflow-designer/css/designer.css', 'text/css'],
+  ['/static/swd-light.css', '/sequential-workflow-designer/css/designer-light.css', 'text/css'],
 ]
 function serveStatic(res, path) {
   for (const [route, file, type] of STATIC_MAP) {

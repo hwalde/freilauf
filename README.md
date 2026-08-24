@@ -33,6 +33,10 @@ Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux sessions
   progress / branch / pr); fallback `inbox.jsonl` when the hub is unreachable.
 - **Telegram**: notification on completion, help call, anomaly — with a link to
   the detail page (setup assistant in the settings).
+- **No-code flows**: a graphical designer chains what happens after a run — send
+  a message to running agents, start follow-up runs and wait for them, extract
+  structured data from a report via LLM, branch, loop over a list, Telegram/HTTP
+  ([server/flows/AGENTS.md](server/flows/AGENTS.md)).
 - **Quota gate**: scheduled starts wait when the Claude subscription quota or
   the OpenRouter credits run low.
 - **Multilingual UI**: English (default), German, Chinese — Settings → UI

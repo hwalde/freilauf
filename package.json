@@ -3,6 +3,7 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "node-pty": "^1.1.0",
+    "sequential-workflow-designer": "^0.40.0",
     "ws": "^8.21.3"
   },
   "scripts": {

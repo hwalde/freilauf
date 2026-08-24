@@ -630,6 +630,241 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('Flows: templates, operators, triggers, validation')
+  const tpl = await import('../server/flows/template.mjs')
+  const { validateDefinition, defaultProps } = await import('../server/flows/steps.mjs')
+  const { triggerMatches, normalizeTrigger } = await import('../server/flows/triggers.mjs')
+  const { schemaFromFields } = await import('../server/flows/llm.mjs')
+
+  const ctx = { trigger: { run: { id: 'r1', outcome: 'done', report: 'all good', agent_name: 'nightly', n: 3 } }, vars: { x: { y: 'deep' }, list: ['a', 'b'] } }
+  await pruefe('render substitutes paths, objects as JSON, missing as empty', () => {
+    gleich(tpl.render('run {{trigger.run.id}} → {{ trigger.run.outcome }}', ctx), 'run r1 → done', 'two placeholders')
+    gleich(tpl.render('{{vars.x.y}}/{{vars.nope}}/{{vars.x.nope.deeper}}', ctx), 'deep//', 'missing values render empty')
+    gleich(tpl.render('{{vars.list}}', ctx), '[\n  "a",\n  "b"\n]', 'arrays as JSON')
+    gleich(tpl.render('{{vars.nope | default: fallback}}', ctx), 'fallback', 'default filter on empty')
+    gleich(tpl.render('{{trigger.run.n | default: 0}}', ctx), '3', 'default not used when set')
+    gleich(tpl.render(null, ctx), '', 'null template')
+  })
+  await pruefe('resolve keeps the type of a whole-value placeholder', () => {
+    gleich(tpl.resolve('{{trigger.run.n}}', ctx), 3, 'number stays number')
+    gleich(JSON.stringify(tpl.resolve(' {{vars.x}} ', ctx)), '{"y":"deep"}', 'object stays object')
+    gleich(tpl.resolve('n={{trigger.run.n}}', ctx), 'n=3', 'mixed text renders')
+  })
+  await pruefe('compare: operators', () => {
+    wahr(tpl.compare('Done', 'eq', 'done'), 'eq is case-insensitive')
+    wahr(tpl.compare('done', 'neq', 'failed'), 'neq')
+    wahr(tpl.compare('all good here', 'contains', 'GOOD'), 'contains')
+    falsch(tpl.compare('all good', 'not_contains', 'good'), 'not_contains')
+    wahr(tpl.compare('', 'empty', ''), 'empty'); wahr(tpl.compare(undefined, 'empty', ''), 'undefined is empty')
+    wahr(tpl.compare('x', 'not_empty', ''), 'not_empty')
+    wahr(tpl.compare('yes', 'truthy', ''), 'truthy yes'); falsch(tpl.compare('false', 'truthy', ''), 'string false is not truthy')
+    wahr(tpl.compare(true, 'truthy', ''), 'boolean true'); wahr(tpl.compare([], 'falsy', ''), 'empty list is falsy')
+    wahr(tpl.compare('12', 'gt', '9'), 'gt numeric, not lexical'); wahr(tpl.compare(5, 'lte', '5'), 'lte')
+    falsch(tpl.compare('abc', 'gt', '1'), 'NaN never greater')
+    wahr(tpl.compare('feature/x-12', 'matches', '^feature/'), 'regex'); falsch(tpl.compare('a', 'matches', '('), 'broken regex is false')
+    falsch(tpl.compare('a', 'bogus', 'a'), 'unknown operator is false')
+  })
+  await pruefe('setPath / varName', () => {
+    const o = {}; tpl.setPath(o, 'a.b.c', 1); gleich(o.a.b.c, 1, 'nested create')
+    tpl.setPath(o, 'a.b', 'flat'); gleich(o.a.b, 'flat', 'overwrite')
+    gleich(tpl.varName(' my var! ', 'x'), 'my_var_', 'sanitized'); gleich(tpl.varName('', 'fallback'), 'fallback', 'fallback')
+  })
+  await pruefe('toList: arrays, JSON, lines, junk', () => {
+    gleich(tpl.toList(['a', 'b']).join(','), 'a,b', 'array stays')
+    gleich(tpl.toList('["a","b"]').join(','), 'a,b', 'JSON list')
+    gleich(tpl.toList('a\n b \n\nc').join(','), 'a,b,c', 'one item per line, trimmed, blanks dropped')
+    gleich(tpl.toList('[broken').join(','), '[broken', 'broken JSON counts as text')
+    gleich(tpl.toList('').length, 0, 'empty text'); gleich(tpl.toList(null).length, 0, 'null')
+    gleich(tpl.toList({ a: 1 }).length, 1, 'a single object is one element')
+  })
+  await pruefe('triggerMatches: outcomes, repo, agents, single runs, flow-started guard', () => {
+    const t0 = normalizeTrigger({ kind: 'run_finished' })
+    const run = { outcome: 'done', repo_id: 1, agent_id: 7, flow_run_id: null }
+    wahr(triggerMatches(t0, run), 'default matches any agent')
+    wahr(triggerMatches(t0, { ...run, agent_id: null }), 'single runs included by default')
+    falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', singleRuns: false }), { ...run, agent_id: null }), 'single runs excluded')
+    falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', outcomes: ['failed'] }), run), 'outcome filter')
+    wahr(triggerMatches(normalizeTrigger({ kind: 'run_finished', outcomes: ['bogus'] }), run), 'invalid outcome list falls back to all')
+    falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', repoId: 2 }), run), 'repo filter')
+    wahr(triggerMatches(normalizeTrigger({ kind: 'run_finished', agentIds: ['7'] }), run), 'agent ids are coerced to numbers')
+    falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', agentIds: [8] }), run), 'other agent')
+    falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', agentIds: [7] }), { ...run, agent_id: null }), 'agent filter excludes single runs')
+    falsch(triggerMatches(t0, { ...run, flow_run_id: 'f' }), 'flow-started runs do not re-trigger by default')
+    wahr(triggerMatches(normalizeTrigger({ kind: 'run_finished', flowStarted: true }), { ...run, flow_run_id: 'f' }), 'unless opted in')
+    falsch(triggerMatches(normalizeTrigger({ kind: 'cron', expr: '* * * * *' }), run), 'cron never matches a run')
+    gleich(normalizeTrigger({ kind: 'nonsense' }).kind, 'manual', 'unknown kind → manual')
+  })
+  await pruefe('validateDefinition: unknown types, required fields (showIf-aware), branches', () => {
+    gleich(validateDefinition({ sequence: [] }).length, 0, 'empty is valid')
+    wahr(validateDefinition({ sequence: [{ type: 'teleport' }] })[0].includes('unknown step type'), 'unknown type')
+    const tg = { id: 'a', type: 'telegram', name: 'tg', properties: defaultProps('telegram') }
+    wahr(validateDefinition({ sequence: [tg] }).some(p => p.includes("'text' is required")), 'required text')
+    tg.properties.text = 'hi'; gleich(validateDefinition({ sequence: [tg] }).length, 0, 'filled → valid')
+    const sm = { id: 'b', type: 'send_message', properties: { ...defaultProps('send_message'), target: 'all_running', text: 'x' } }
+    gleich(validateDefinition({ sequence: [sm] }).length, 0, 'agentId not required when target is not agent')
+    const cond = { id: 'c', type: 'condition', properties: { left: '1', op: 'eq', right: '1' }, branches: { true: [{ type: 'stop', properties: {} }], false: [{ type: 'nope' }] } }
+    wahr(validateDefinition({ sequence: [cond] }).some(p => p.includes("unknown step type 'nope'")), 'walks into branches')
+    const loop = { id: 'd', type: 'for_each', properties: { list: '{{vars.x}}', itemVar: 'i', maxItems: 5 }, sequence: [{ type: 'nirvana' }] }
+    wahr(validateDefinition({ sequence: [loop] }).some(p => p.includes("unknown step type 'nirvana'")), 'walks into a container body')
+    gleich(validateDefinition({ sequence: [{ id: 'e', type: 'for_each', properties: { itemVar: 'i' }, sequence: [] }] }).length, 1, "'list' is required")
+  })
+  await pruefe('schemaFromFields builds a strict JSON schema', () => {
+    const s = schemaFromFields([{ name: 'branch name', type: 'string' }, { name: 'ok', type: 'boolean' }, { name: 'tags', type: 'string_list' }, { name: 'sev', type: 'string', enumValues: 'low, high' }, { name: '' }])
+    gleich(s.required.join(','), 'branch_name,ok,tags,sev', 'names sanitized, empty dropped')
+    gleich(s.properties.tags.type, 'array', 'list type'); gleich(s.properties.sev.enum.join('|'), 'low|high', 'enum')
+    falsch(s.additionalProperties, 'strict')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Flows: engine with a stub api (branching, wait/resume, delay, stop, failure)')
+  const engine = await import('../server/flows/engine.mjs')
+  const fdb = await import('../server/flows/db.mjs')
+  const calls = []
+  const stubApi = {
+    now: () => Date.parse('2026-08-24T10:00:00Z'),
+    runInfo: async (id) => ({ id, outcome: 'done', ended_normally: true, report: 'fine' }),
+    findRuns: async (f) => { calls.push(['findRuns', f]); return [{ id: 'live', status: 'running', tmux_session: 's' }] },
+    sendToRun: async (run, text) => { calls.push(['send', run.id, text]); return { ok: true } },
+    killRun: async (run) => { calls.push(['kill', run.id]); return true },
+    startAgent: async (agentId, extra) => { calls.push(['startAgent', agentId, extra]); return { ok: true, runId: 'new-run' } },
+    startSingle: async (opts) => { calls.push(['startSingle', opts.prompt]); return { ok: true, runId: 'single-run' } },
+    telegram: async (text) => { calls.push(['telegram', text]); return true },
+    runText: async () => 'report text',
+    extract: async ({ fields }) => Object.fromEntries(fields.map(f => [f.name, 'v'])),
+    http: async () => ({ status: 200, ok: true, body: '{}', json: {} }),
+  }
+  const step = (type, properties, extra = {}) => ({ id: `${type}-${Math.random().toString(36).slice(2, 7)}`, type, name: type, componentType: extra.branches ? 'switch' : 'task', properties, ...extra })
+  const trig = { kind: 'run_finished', run: { id: 'r1', outcome: 'failed', agent_name: 'nightly', report: 'broke' } }
+
+  await pruefe('branching on outcome, outputs into vars, note renders templates', async () => {
+    const def = { sequence: [
+      step('switch_outcome', { value: '' }, { branches: {
+        done: [step('note', { text: 'was done' })],
+        failed: [step('set_var', { outputVar: 'reason', value: 'failed: {{trigger.run.report}}' }), step('telegram', { text: '{{vars.reason}}', outputVar: 'tg' })],
+        aborted: [],
+      } }),
+      step('note', { text: 'after switch {{vars.reason}}' }),
+    ] }
+    const id = await engine.startFlowRun({ id: null, name: 'branchy', definition: def }, trig, stubApi)
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'done', 'finished')
+    gleich(fr.context.vars.reason, 'failed: broke', 'set_var rendered')
+    gleich(fr.context.vars.tg.delivered, true, 'telegram output stored')
+    gleich(calls.find(c => c[0] === 'telegram')[1], 'failed: broke', 'telegram received the rendered text')
+    wahr(fr.log.some(l => l.msg === 'after switch failed: broke'), 'continued after the switch')
+    falsch(fr.log.some(l => l.msg === 'was done'), 'other branch not executed')
+  })
+  await pruefe('send_message targets running runs of an agent', async () => {
+    calls.length = 0
+    const def = { sequence: [step('send_message', { target: 'agent', agentId: '5', text: 'pull {{trigger.run.agent_name}}', outputVar: 'sent' })] }
+    const id = await engine.startFlowRun({ id: null, name: 'msg', definition: def }, trig, stubApi)
+    gleich(fdb.getFlowRun(id).context.vars.sent.count, 1, 'one run reached')
+    gleich(JSON.stringify(calls[0][1]), '{"statuses":["running","waiting_help"],"agentId":5}', 'filter by agent, running only')
+    gleich(calls[1][2], 'pull nightly', 'text rendered')
+  })
+  await pruefe('start_agent with wait suspends, resume stores the RunInfo, condition sees it', async () => {
+    calls.length = 0
+    const def = { sequence: [
+      step('start_agent', { agentId: '3', promptExtra: 'fix: {{trigger.run.report}}', wait: true, outputVar: 'fixer' }),
+      step('condition', { left: '{{vars.fixer.ended_normally}}', op: 'truthy', right: '' }, { branches: { true: [step('note', { text: 'fixed' })], false: [step('note', { text: 'not fixed' })] } }),
+    ] }
+    const id = await engine.startFlowRun({ id: null, name: 'chain', definition: def }, trig, stubApi)
+    let fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'waiting', 'suspended'); gleich(fr.wait_run_id, 'new-run', 'on the started run')
+    gleich(calls[0][2], 'fix: broke', 'prompt extra rendered')
+    gleich(fr.context.vars.fixer.id, 'new-run', 'run id known before the wait')
+    await engine.resumeWaitingOnRun('other-run', stubApi)
+    gleich(fdb.getFlowRun(id).status, 'waiting', 'a different run ending does not resume')
+    await engine.resumeWaitingOnRun('new-run', stubApi)
+    fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'done', 'resumed and finished')
+    gleich(fr.context.vars.fixer.outcome, 'done', 'RunInfo replaced the placeholder output')
+    wahr(fr.log.some(l => l.msg === 'fixed'), 'condition read the resumed variable')
+  })
+  await pruefe('delay suspends until resume_at; resumeDelayed continues', async () => {
+    const def = { sequence: [step('delay', { minutes: 10 }), step('note', { text: 'later' })] }
+    const id = await engine.startFlowRun({ id: null, name: 'sleepy', definition: def }, trig, stubApi)
+    gleich(fdb.getFlowRun(id).status, 'waiting', 'waiting')
+    gleich(fdb.getFlowRun(id).resume_at, '2026-08-24T10:10:00.000Z', 'resume time from api.now')
+    await engine.resumeDelayed(stubApi)
+    gleich(fdb.getFlowRun(id).status, 'waiting', 'not yet due')
+    await engine.resumeDelayed({ ...stubApi, now: () => Date.parse('2026-08-24T10:11:00Z') })
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'done', 'done after the delay'); wahr(fr.log.some(l => l.msg === 'later'), 'continued')
+  })
+  await pruefe('stop ends the run; a throwing step fails it with the message; unknown type fails', async () => {
+    const id1 = await engine.startFlowRun({ id: null, name: 's', definition: { sequence: [step('stop', { reason: 'enough' }), step('note', { text: 'never' })] } }, trig, stubApi)
+    const fr1 = fdb.getFlowRun(id1)
+    gleich(fr1.status, 'done', 'stopped = done'); falsch(fr1.log.some(l => l.msg === 'never'), 'nothing after stop')
+    const id2 = await engine.startFlowRun({ id: null, name: 'f', definition: { sequence: [step('extract', { source: 'report', fields: [] })] } }, trig, stubApi)
+    const fr2 = fdb.getFlowRun(id2)
+    gleich(fr2.status, 'failed', 'failed'); wahr(fr2.error.includes('no fields'), 'error message kept')
+    const id3 = await engine.startFlowRun({ id: null, name: 'u', definition: { sequence: [{ id: 'z', type: 'warp', properties: {} }] } }, trig, stubApi)
+    gleich(fdb.getFlowRun(id3).status, 'failed', 'unknown step type fails')
+    wahr(engine.stopFlowRun(id3) === false, 'cannot stop a finished flow run')
+  })
+  await pruefe('extract stores the model output; kill_run and start_single_run go through the api', async () => {
+    calls.length = 0
+    const def = { sequence: [
+      step('extract', { source: 'report', sourceRun: '{{trigger.run.id}}', fields: [{ name: 'branch', type: 'string' }], outputVar: 'ex' }),
+      step('kill_run', { target: 'all_running', outputVar: 'k' }),
+      step('start_single_run', { repoId: '1', harness: 'claude', prompt: 'branch {{vars.ex.branch}}', wait: false, outputVar: 'single' }),
+    ] }
+    const id = await engine.startFlowRun({ id: null, name: 'x', definition: def }, trig, stubApi)
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'done', 'done')
+    gleich(fr.context.vars.ex.branch, 'v', 'extract output'); gleich(fr.context.vars.k.count, 1, 'kill count')
+    gleich(calls.find(c => c[0] === 'startSingle')[1], 'branch v', 'single run prompt used the extracted value')
+    gleich(fr.context.vars.single.id, 'single-run', 'no wait → continues with the id')
+  })
+
+  await pruefe('for each: body per element, item + index variables, maxItems cap', async () => {
+    const container = (id, properties, sequence) => ({ id, type: 'for_each', name: id, componentType: 'container', properties, sequence })
+    const def = { sequence: [
+      step('set_var', { outputVar: 'points', value: 'alpha\nbeta\ngamma' }),
+      container('loop', { list: '{{vars.points}}', itemVar: 'punkt', maxItems: 2 }, [step('note', { text: '{{vars.punkt_index}}: {{vars.punkt}}' })]),
+      step('note', { text: 'after the loop' }),
+    ] }
+    const id = await engine.startFlowRun({ id: null, name: 'loopy', definition: def }, trig, stubApi)
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'done', 'finished')
+    gleich(fr.log.filter(l => l.type === 'note').map(l => l.msg).join(' | '), '1: alpha | 2: beta | after the loop', 'body once per element, capped at maxItems, then on')
+    gleich(fr.context.vars.punkt, 'beta', 'the last element stays readable')
+  })
+  await pruefe('for each: JSON list, nested branch, empty list skips the body', async () => {
+    const container = (id, properties, sequence) => ({ id, type: 'for_each', name: id, componentType: 'container', properties, sequence })
+    const def = { sequence: [
+      container('l1', { list: '["x","y"]', itemVar: 'it' }, [
+        step('condition', { left: '{{vars.it}}', op: 'eq', right: 'y' }, { branches: { true: [step('note', { text: 'hit {{vars.it}}' })], false: [] } }),
+      ]),
+      container('l2', { list: '{{vars.does_not_exist}}', itemVar: 'n' }, [step('note', { text: 'never' })]),
+      step('note', { text: 'end' }),
+    ] }
+    const id = await engine.startFlowRun({ id: null, name: 'nested', definition: def }, trig, stubApi)
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'done', 'finished')
+    gleich(fr.log.filter(l => l.type === 'note').map(l => l.msg).join(' | '), 'hit y | end', 'branch inside the loop, empty loop skipped')
+  })
+  await pruefe('for each: a wait inside the body survives and continues with the next element', async () => {
+    calls.length = 0
+    const container = (id, properties, sequence) => ({ id, type: 'for_each', name: id, componentType: 'container', properties, sequence })
+    const def = { sequence: [container('l', { list: '["one","two"]', itemVar: 'it' }, [
+      step('start_agent', { agentId: '3', promptExtra: 'work on {{vars.it}}', wait: true, outputVar: 'r' }),
+      step('note', { text: 'done with {{vars.it}}' }),
+    ])] }
+    const id = await engine.startFlowRun({ id: null, name: 'waity', definition: def }, trig, stubApi)
+    gleich(fdb.getFlowRun(id).status, 'waiting', 'suspended in the first element')
+    gleich(calls[0][2], 'work on one', 'first element in the prompt')
+    await engine.resumeWaitingOnRun('new-run', stubApi)
+    gleich(fdb.getFlowRun(id).status, 'waiting', 'suspended again, now in the second element')
+    gleich(calls.filter(c => c[0] === 'startAgent').at(-1)[2], 'work on two', 'second element in the prompt')
+    await engine.resumeWaitingOnRun('new-run', stubApi)
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'done', 'finished after the last element')
+    gleich(fr.log.filter(l => l.type === 'note').map(l => l.msg).join(' | '), 'done with one | done with two', 'body completed for both elements')
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Docs: AGENTS.md / CLAUDE.md pairing')
 
   await pruefe('every AGENTS.md has a CLAUDE.md next to it that only includes it', async () => {

@@ -101,6 +101,11 @@ export async function handleReport(runId, body) {
     default:
       return { ok: false, error: `unknown kind '${kind}'` }
   }
+  if (['done', 'failed', '_pane_died'].includes(kind)) {
+    // The run may have just ended: evaluate the flows' "run finished" triggers
+    // now instead of waiting for the next watcher tick (server/flows/).
+    import('./flows/triggers.mjs').then(m => m.flowsTick()).catch(e => console.error('[flows]', e.message))
+  }
   return { ok: true }
 }
 

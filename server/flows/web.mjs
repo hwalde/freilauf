@@ -1,0 +1,218 @@
+// cc-hub flows — HTTP: pages (/flows, /flows/edit, /flows/runs, /flows/runs/<id>)
+// and JSON API (/api/flows/*, /api/flow-runs/*). Mounted by ../web.mjs; the
+// page chrome comes from ../pages.mjs (layout), everything else is local.
+import db, {
+  listFlows, getFlow, saveFlow, deleteFlow, toggleFlow, listFlowRuns, getFlowRun,
+} from './db.mjs'
+import { stepsMeta, GROUPS, validateDefinition, defaultProps } from './steps.mjs'
+import { OPS } from './template.mjs'
+import { FIELD_TYPES } from './llm.mjs'
+import { normalizeTrigger, runFlowNow, TRIGGER_KINDS, OUTCOMES } from './triggers.mjs'
+import { stopFlowRun } from './engine.mjs'
+import { layout } from '../pages.mjs'
+import { escapeHtml as e, validCron } from '../util.mjs'
+import { redirect, body as readBody, parseForm } from '../web-helpers.mjs'
+import { enabledCodingAgents } from '../coding-agents.mjs'
+import { harnessLabel } from '../harnesses/index.mjs'
+import { t, clientCatalog } from '../i18n.mjs'
+
+const html = (res, code, page) => res.writeHead(code, { 'content-type': 'text/html; charset=utf-8' }).end(page)
+const json = (res, code, obj) => res.writeHead(code, { 'content-type': 'application/json' }).end(JSON.stringify(obj))
+
+// ---------------- meta for the editor ----------------
+function agentsList() { return db.prepare('SELECT a.id, a.name, r.name AS repo FROM agents a JOIN repos r ON r.id=a.repo_id ORDER BY a.name').all() }
+function reposList() { return db.prepare('SELECT id, name FROM repos ORDER BY name').all() }
+
+export function editorMeta() {
+  return {
+    steps: stepsMeta(),
+    groups: GROUPS,
+    agents: agentsList(),
+    repos: reposList(),
+    harnesses: enabledCodingAgents().map(a => ({ id: a.harness, label: harnessLabel(a.harness) })),
+    triggerKinds: TRIGGER_KINDS,
+    outcomes: OUTCOMES,
+    ops: OPS,
+    fieldTypes: FIELD_TYPES,
+  }
+}
+
+// ---------------- text helpers ----------------
+function triggerText(trigger) {
+  const trig = normalizeTrigger(trigger)
+  if (trig.kind === 'cron') return `${t('flows.trigger.cron')}: ${trig.expr || '?'}`
+  if (trig.kind === 'manual') return t('flows.trigger.manual')
+  const agents = agentsList()
+  const who = trig.agentIds.length
+    ? trig.agentIds.map(id => agents.find(a => a.id === id)?.name ?? `#${id}`).join(', ')
+    : t('flows.trigger.any_agent')
+  const repo = trig.repoId ? ` @ ${reposList().find(r => r.id === trig.repoId)?.name ?? '#' + trig.repoId}` : ''
+  const outcomes = trig.outcomes.length === OUTCOMES.length ? '' : ` [${trig.outcomes.map(o => t(`flows.outcome.${o}`)).join('/')}]`
+  return `${t('flows.trigger.run_finished')}: ${who}${repo}${outcomes}`
+}
+
+const STATUS_DOT = { running: 'gelb', waiting: 'gelb', done: 'gruen', failed: 'rot', stopped: 'rot' }
+const statusBadge = (s) => `<span class="dot ${STATUS_DOT[s] ?? 'gelb'}"></span> ${e(t(`flows.status.${s}`))}`
+
+// ---------------- pages ----------------
+function pageList(res) {
+  const flows = listFlows()
+  const rows = flows.map(f => {
+    const last = db.prepare('SELECT id, status, started_at FROM flow_runs WHERE flow_id=? ORDER BY started_at DESC LIMIT 1').get(f.id)
+    return `<tr>
+      <td><a href="/flows/edit?id=${f.id}">${e(f.name)}</a></td>
+      <td>${e(triggerText(f.trigger))}</td>
+      <td class="${f.active ? 'ok' : 'warn'}">${e(f.active ? t('flows.on') : t('flows.off'))}</td>
+      <td>${last ? `<a href="/flows/runs/${last.id}">${statusBadge(last.status)} <span class="dim">${e(last.started_at)}</span></a>` : '<span class="dim">–</span>'}</td>
+      <td class="acts">
+        <a class="btn" href="/flows/edit?id=${f.id}">${e(t('flows.edit'))}</a>
+        <a class="btn" href="/flows/runs?flow=${f.id}">${e(t('flows.runs'))}</a>
+        <form method="post" action="/api/flows/${f.id}/run" class="inline"><button>${e(t('flows.run_now'))}</button></form>
+        <form method="post" action="/api/flows/${f.id}/toggle" class="inline"><button>${e(f.active ? t('flows.turn_off') : t('flows.turn_on'))}</button></form>
+        <form method="post" action="/api/flows/${f.id}/delete" class="inline" onsubmit="return confirm(${JSON.stringify(t('flows.delete_confirm'))})"><button class="danger">${e(t('flows.delete'))}</button></form>
+      </td></tr>`
+  }).join('')
+  const body = `
+  <link rel="stylesheet" href="/static/flows.css">
+  <p><a class="btn" href="/flows/edit">${e(t('flows.new'))}</a> <a class="btn" href="/flows/runs">${e(t('flows.runs.all'))}</a></p>
+  <p class="dim">${e(t('flows.intro'))}</p>
+  <table class="list flows"><thead><tr><th>${e(t('flows.name'))}</th><th>${e(t('flows.trigger'))}</th><th>${e(t('flows.active'))}</th><th>${e(t('flows.last_run'))}</th><th></th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="5" class="dim">${e(t('flows.none'))}</td></tr>`}</tbody></table>`
+  html(res, 200, layout(t('nav.flows'), '/flows', body))
+}
+
+function pageEditor(res, url) {
+  const id = Number(url.searchParams.get('id')) || null
+  const flow = id ? getFlow(id) : null
+  if (id && !flow) return html(res, 404, layout(t('nav.flows'), '/flows', `<p>${e(t('web.not_found'))}</p>`))
+  const data = flow
+    ? { id: flow.id, name: flow.name, active: !!flow.active, trigger: normalizeTrigger(flow.trigger), definition: flow.definition }
+    : { id: null, name: '', active: true, trigger: normalizeTrigger({ kind: 'run_finished' }), definition: { properties: {}, sequence: [] } }
+  // Recent finished runs — for "run now with this run as the trigger".
+  const recent = db.prepare(`SELECT r.id, r.status, r.ended_at, a.name AS agent FROM runs r LEFT JOIN agents a ON a.id=r.agent_id
+    WHERE r.status IN ('done','failed','aborted') ORDER BY r.ended_at DESC LIMIT 30`).all()
+  const body = `
+  <link rel="stylesheet" href="/static/swd.css"><link rel="stylesheet" href="/static/swd-light.css"><link rel="stylesheet" href="/static/flows.css">
+  <div class="flow-head">
+    <a class="btn" href="/flows">${e(t('flows.editor.back'))}</a>
+    <input id="flow-name" placeholder="${e(t('flows.name'))}" value="${e(data.name)}">
+    <label class="chk"><input type="checkbox" id="flow-active" ${data.active ? 'checked' : ''}> ${e(t('flows.active'))}</label>
+    <span class="spacer"></span>
+    <span id="flow-status" class="dim"></span>
+    <button id="flow-save">${e(t('flows.editor.save'))}</button>
+    ${data.id ? `<form method="post" action="/api/flows/${data.id}/run" class="inline" id="flow-run-now">
+      <select name="run_id"><option value="">${e(t('flows.editor.sim_none'))}</option>${recent.map(r => `<option value="${r.id}">${e(r.agent ?? t('overview.single_run'))} · ${e(r.status)} · ${e(r.ended_at ?? '')}</option>`).join('')}</select>
+      <button>${e(t('flows.run_now'))}</button></form>` : ''}
+  </div>
+  <div id="flow-designer"></div>
+  <script>window.CCHUB_FLOWS=${JSON.stringify({ i18n: clientCatalog('flows.'), meta: editorMeta(), flow: data }).replace(/</g, '\\u003c')}</script>
+  <script src="/static/swd.js"></script><script src="/static/flows.js" defer></script>`
+  html(res, 200, layout(data.name || t('flows.new'), '/flows', body))
+}
+
+function pageRuns(res, url) {
+  const flowId = Number(url.searchParams.get('flow')) || null
+  const runs = listFlowRuns(flowId)
+  const rows = runs.map(fr => `<tr onclick="location='/flows/runs/${fr.id}'">
+    <td><a href="/flows/runs/${fr.id}">${e(fr.flow_name)}</a></td>
+    <td>${statusBadge(fr.status)}</td>
+    <td>${e(t(`flows.trigger.${fr.context.trigger?.kind ?? 'manual'}`))}${fr.trigger_run_id ? ` · <a href="/runs/${fr.trigger_run_id}">${e(fr.context.trigger?.run?.agent_name || t('overview.single_run'))}</a>` : ''}</td>
+    <td>${e(fr.started_at)}</td><td>${e(fr.ended_at ?? '')}</td>
+    <td class="dim">${e(fr.error ?? (fr.log.at(-1)?.msg ?? ''))}</td></tr>`).join('')
+  const body = `
+  <p><a class="btn" href="/flows">${e(t('flows.editor.back'))}</a></p>
+  <table class="list"><thead><tr><th>${e(t('flows.runs.flow'))}</th><th>${e(t('flows.runs.status'))}</th><th>${e(t('flows.trigger'))}</th><th>${e(t('flows.runs.started'))}</th><th>${e(t('flows.runs.ended'))}</th><th>${e(t('flows.runs.last_message'))}</th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="6" class="dim">${e(t('flows.runs.none'))}</td></tr>`}</tbody></table>`
+  html(res, 200, layout(t('flows.runs.title'), '/flows', body))
+}
+
+function pageRunDetail(res, id) {
+  const fr = getFlowRun(id)
+  if (!fr) return html(res, 404, layout(t('nav.flows'), '/flows', `<p>${e(t('web.not_found'))}</p>`))
+  const log = fr.log.map(l => `<tr class="${l.ok ? '' : 'err'}"><td class="dim">${e(l.ts.slice(11, 19))}</td><td>${e(l.name || '')}<span class="dim"> ${e(l.type)}</span></td><td>${e(l.msg)}${l.ms != null ? ` <span class="dim">${l.ms} ms</span>` : ''}</td></tr>`).join('')
+  const trig = fr.context.trigger ?? {}
+  const body = `
+  <p><a class="btn" href="/flows/runs?flow=${fr.flow_id ?? ''}">${e(t('flows.editor.back'))}</a>
+  ${fr.flow_id ? `<a class="btn" href="/flows/edit?id=${fr.flow_id}">${e(t('flows.edit'))}</a>` : ''}
+  ${['running', 'waiting'].includes(fr.status) ? `<form method="post" action="/api/flow-runs/${fr.id}/stop" class="inline"><button class="danger">${e(t('flows.runs.stop'))}</button></form>` : ''}</p>
+  <div class="card"><b>${e(fr.flow_name)}</b> — ${statusBadge(fr.status)}
+    <div class="dim">${e(t('flows.runs.started'))}: ${e(fr.started_at)} · ${e(t('flows.runs.ended'))}: ${e(fr.ended_at ?? '–')}</div>
+    <div>${e(t('flows.trigger'))}: ${e(t(`flows.trigger.${trig.kind ?? 'manual'}`))}${trig.run ? ` · <a href="/runs/${trig.run.id}">${e(trig.run.agent_name || t('overview.single_run'))} (${e(trig.run.outcome)})</a>` : ''}</div>
+    ${fr.wait_run_id ? `<div>${e(t('flows.runs.waiting_on'))}: <a href="/runs/${fr.wait_run_id}">${e(fr.wait_run_id)}</a></div>` : ''}
+    ${fr.resume_at ? `<div>${e(t('flows.runs.resume_at'))}: ${e(fr.resume_at)}</div>` : ''}
+    ${fr.error ? `<div class="err">${e(t('flows.runs.error'))}: ${e(fr.error)}</div>` : ''}
+  </div>
+  <h3>${e(t('flows.runs.log'))}</h3>
+  <table class="list"><thead><tr><th></th><th>${e(t('flows.runs.step'))}</th><th>${e(t('flows.runs.message'))}</th></tr></thead><tbody>${log || `<tr><td colspan="3" class="dim">–</td></tr>`}</tbody></table>
+  <h3>${e(t('flows.runs.vars'))}</h3>
+  <pre>${e(JSON.stringify(fr.context.vars ?? {}, null, 2))}</pre>
+  <details><summary>${e(t('flows.runs.trigger_data'))}</summary><pre>${e(JSON.stringify(trig, null, 2))}</pre></details>`
+  html(res, 200, layout(fr.flow_name, '/flows', body))
+}
+
+// ---------------- routing ----------------
+export async function flowRoute(req, res, url) {
+  const path = url.pathname
+  let m
+  if (req.method === 'GET' && path === '/flows') return pageList(res)
+  if (req.method === 'GET' && path === '/flows/edit') return pageEditor(res, url)
+  if (req.method === 'GET' && path === '/flows/runs') return pageRuns(res, url)
+  if (req.method === 'GET' && (m = path.match(/^\/flows\/runs\/([0-9a-f-]{36})$/))) return pageRunDetail(res, m[1])
+  res.writeHead(404, { 'content-type': 'text/plain' }).end(t('web.not_found'))
+}
+
+const wantsHtml = (req) => (req.headers.accept ?? '').includes('text/html')
+const answer = (req, res, code, obj, backTo) => (wantsHtml(req) ? redirect(res, backTo) : json(res, code, obj))
+
+export async function flowApi(req, res, url) {
+  const path = url.pathname
+  let m
+  if (req.method === 'GET' && path === '/api/flows/meta') return json(res, 200, { ok: true, ...editorMeta() })
+  if (req.method === 'GET' && path === '/api/flows') return json(res, 200, { ok: true, flows: listFlows() })
+  if (req.method === 'POST' && path === '/api/flows/save') {
+    let b
+    try { b = JSON.parse(await readBody(req) || '{}') } catch { return json(res, 400, { ok: false, problems: ['invalid JSON'] }) }
+    const name = String(b.name ?? '').trim()
+    const problems = []
+    if (!name) problems.push(t('flows.editor.name_required'))
+    const trigger = normalizeTrigger(b.trigger)
+    if (trigger.kind === 'cron' && !validCron(trigger.expr)) problems.push(t('flows.editor.cron_invalid'))
+    const definition = b.definition && typeof b.definition === 'object' ? b.definition : { properties: {}, sequence: [] }
+    problems.push(...validateDefinition(definition))
+    if (problems.length) return json(res, 400, { ok: false, problems })
+    const dup = db.prepare('SELECT id FROM flows WHERE name = ? AND id <> ?').get(name, Number(b.id) || 0)
+    if (dup) return json(res, 400, { ok: false, problems: [t('flows.editor.name_taken')] })
+    const id = saveFlow({ id: Number(b.id) || null, name, active: b.active ? 1 : 0, trigger, definition })
+    return json(res, 200, { ok: true, id })
+  }
+  if (req.method === 'GET' && (m = path.match(/^\/api\/flows\/(\d+)$/))) {
+    const f = getFlow(+m[1])
+    return f ? json(res, 200, { ok: true, flow: f }) : json(res, 404, { ok: false })
+  }
+  if (req.method === 'GET' && path === '/api/flows/step-defaults') {
+    return json(res, 200, { ok: true, properties: defaultProps(url.searchParams.get('type') ?? '') })
+  }
+  if (req.method === 'POST' && (m = path.match(/^\/api\/flows\/(\d+)\/run$/))) {
+    const f = getFlow(+m[1])
+    if (!f) return answer(req, res, 404, { ok: false, error: 'unknown flow' }, '/flows')
+    const b = parseForm(await readBody(req))
+    try {
+      const flowRunId = await runFlowNow(f, b.run_id || null)
+      return answer(req, res, 200, { ok: true, flowRunId }, `/flows/runs/${flowRunId}`)
+    } catch (err) { return answer(req, res, 400, { ok: false, error: err.message }, `/flows/runs?flow=${f.id}`) }
+  }
+  if (req.method === 'POST' && (m = path.match(/^\/api\/flows\/(\d+)\/toggle$/))) {
+    toggleFlow(+m[1]); return answer(req, res, 200, { ok: true }, '/flows')
+  }
+  if (req.method === 'POST' && (m = path.match(/^\/api\/flows\/(\d+)\/delete$/))) {
+    deleteFlow(+m[1]); return answer(req, res, 200, { ok: true }, '/flows')
+  }
+  if (req.method === 'GET' && (m = path.match(/^\/api\/flow-runs\/([0-9a-f-]{36})$/))) {
+    const fr = getFlowRun(m[1])
+    return fr ? json(res, 200, { ok: true, flowRun: fr }) : json(res, 404, { ok: false })
+  }
+  if (req.method === 'POST' && (m = path.match(/^\/api\/flow-runs\/([0-9a-f-]{36})\/stop$/))) {
+    const ok = stopFlowRun(m[1]); return answer(req, res, ok ? 200 : 409, { ok }, `/flows/runs/${m[1]}`)
+  }
+  return json(res, 404, { ok: false, error: `unknown API path: ${req.method} ${path}` })
+}

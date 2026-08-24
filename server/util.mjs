@@ -23,6 +23,18 @@ export function sh(cmd, args, opts = {}) {
 
 export async function tmux(args) { return sh('tmux', args) }
 
+/**
+ * Type text into a tmux session as if a human had pasted it: bracketed paste
+ * (multi-line without an accidental submit) followed by Enter (planning 7.3).
+ * Shared by the run detail page and the flow step "send message".
+ */
+export async function sendToSession(session, text) {
+  const r = await sh('tmux', ['send-keys', '-t', `=${session}:`, '-l', '--', '\x1b[200~' + String(text ?? '') + '\x1b[201~'])
+  if (!r.ok) return r
+  await new Promise(resolve => setTimeout(resolve, 300))
+  return sh('tmux', ['send-keys', '-t', `=${session}:`, 'Enter'])
+}
+
 export function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))

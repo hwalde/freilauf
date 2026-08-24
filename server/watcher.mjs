@@ -13,6 +13,7 @@ import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, offeneVorfaelle, de
 import { pruefeTreffer, pruefLlmAktiv } from './pruefer.mjs'
 import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
+import { flowsTick } from './flows/triggers.mjs'
 
 let timer = null
 
@@ -62,6 +63,8 @@ export async function tick() {
   await retryDeferred()
   await closeOldSessions()
   await cleanupWorktrees()
+  // No-code flows: run_finished backstop, delays, cron (server/flows/triggers.mjs).
+  try { await flowsTick() } catch (e) { console.error('[flows]', e.message) }
 }
 
 // ---------- inbox fallback (cc-report could not reach the hub) ----------

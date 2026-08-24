@@ -1,0 +1,26 @@
+/* cc-hub flows — designer page. Only what the flow pages need; the rest comes from hub.css. */
+.flow-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.flow-head #flow-name { max-width: 320px; font-weight: 600; }
+.flow-head label.chk { margin: 0; }
+.flow-head .spacer { flex: 1; }
+.flow-head form.inline select { width: auto; max-width: 360px; }
+#flow-designer { height: calc(100vh - 170px); min-height: 480px; background: #fff; border-radius: 10px; overflow: hidden; }
+.flow-editor { padding: 10px 12px; font-size: 14px; }
+.flow-editor h3 { margin: 0 0 6px; }
+.flow-editor label { margin: 8px 0; }
+.flow-editor input, .flow-editor select, .flow-editor textarea { width: 100%; max-width: none; font-size: 13px; }
+.flow-editor textarea { font-family: ui-monospace, monospace; }
+.flow-editor .hint { display: block; margin-top: 2px; }
+.flow-editor .tage { margin: 4px 0; }
+.flow-vars { margin-top: 12px; border-top: 1px solid #e4e4e0; padding-top: 8px; }
+.flow-vars .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.flow-vars code { cursor: copy; font-size: 12px; }
+.fields-editor .field-row { display: grid; grid-template-columns: 1fr 100px 1fr 1fr 32px; gap: 4px; margin-bottom: 4px; }
+.fields-editor .field-row button { padding: 2px 6px; }
+.fields-editor > button { margin-top: 4px; }
+table.flows td.acts { white-space: nowrap; }
+table.flows td.acts .btn, table.flows td.acts button { padding: 4px 10px; font-size: 13px; margin-right: 2px; }
+tr.err td { color: #c62828; }
+/* Larger toolbox/editor panes than the designer default. */
+#flow-designer .sqd-toolbox { width: 220px; }
+#flow-designer .sqd-smart-editor { width: 420px; }

@@ -1,0 +1,220 @@
+// cc-hub flows — the production `api` object the steps run against. This is the
+// ONLY file in the flow module that touches the rest of the hub for side effects
+// (tmux, Telegram, run creation). Tests pass a stub with the same shape.
+import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
+import { join } from 'node:path'
+import db from '../db.mjs'
+import { RUNS_DIR, sh, sendToSession, kurzid } from '../util.mjs'
+import { terminalText } from '../detect.mjs'
+import { notify, notifyLong, detailUrl, publicBase } from '../telegram.mjs'
+import { startForAgent } from '../scheduler.mjs'
+import { createRun, launchRun } from '../runner.mjs'
+import { extractStructured } from './llm.mjs'
+import { markStartedByFlow } from './db.mjs'
+
+const LOG_TAIL_BYTES = 48 * 1024
+const TRANSCRIPT_TAIL_BYTES = 256 * 1024   // JSONL is verbose — more bytes than the log for the same amount of text
+
+const iso = (s) => (s ? s.replace(' ', 'T') + 'Z' : null)
+
+/**
+ * Everything a flow may know about a run — the shape behind `trigger.run` and
+ * the output of "start agent"/"start single run" with wait. Only the report is
+ * included verbatim; the terminal log is fetched on demand (runText).
+ */
+export function runInfo(runId) {
+  const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
+  if (!run) return null
+  const agent = run.agent_id ? db.prepare('SELECT name FROM agents WHERE id = ?').get(run.agent_id) : null
+  const repo = db.prepare('SELECT name, path FROM repos WHERE id = ?').get(run.repo_id)
+  const incidents = db.prepare('SELECT COUNT(*) AS n FROM incidents WHERE run_id = ?').get(runId)?.n ?? 0
+  const startMs = Date.parse(iso(run.started_at))
+  const endMs = run.ended_at ? Date.parse(iso(run.ended_at)) : Date.now()
+  const finished = ['done', 'failed', 'aborted'].includes(run.status)
+  return {
+    id: run.id,
+    short_id: kurzid(run.id),
+    status: run.status,
+    // 'done' | 'failed' | 'aborted' for finished runs, '' while still going
+    outcome: finished ? run.status : '',
+    ended_normally: run.status === 'done',
+    agent_id: run.agent_id ?? null,
+    agent_name: agent?.name ?? '',
+    repo_id: run.repo_id,
+    repo_name: repo?.name ?? '',
+    repo_path: repo?.path ?? '',
+    harness: run.harness,
+    model: run.model ?? '',
+    provider: run.provider ?? '',
+    branch: run.branch_reported || run.branch_observed || run.branch_expected || '',
+    pr_url: run.pr_url ?? '',
+    report: run.report_md ?? '',
+    help_text: run.help_text ?? '',
+    exit_code: run.exit_code ?? null,
+    duration_min: Number.isFinite(startMs) ? Math.round((endMs - startMs) / 60000) : 0,
+    started_at: run.started_at,
+    ended_at: run.ended_at ?? '',
+    incidents,
+    worktree: run.worktree ?? '',
+    url: detailUrl(run.id),
+    flow_run_id: run.flow_run_id ?? null,
+  }
+}
+
+/** Last `max` bytes of a file as UTF-8 (whole file when it is smaller). */
+function tailBytes(file, max) {
+  const size = statSync(file).size
+  const len = Math.min(size, max)
+  const fd = openSync(file, 'r')
+  try {
+    const buf = Buffer.alloc(len)
+    readSync(fd, buf, 0, len, size - len)
+    return { text: buf.toString('utf8'), truncated: size > len }
+  } finally { closeSync(fd) }
+}
+
+/**
+ * Claude transcript (JSONL) as readable text: what the agent actually said and
+ * did, not what the terminal drew. Only claude keeps one (path from --session-id,
+ * see watcher.mjs); every other harness falls back to the log tail in runText().
+ * Tool calls and results are flattened to one line each — the model needs the
+ * gist, not the payloads.
+ */
+async function transcriptText(runId) {
+  const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
+  if (!run || run.harness !== 'claude' || !run.workdir_effective) return ''
+  // Dynamic import: watcher.mjs imports the flow module — a static import would close the cycle.
+  const { claudeTranskriptPfad } = await import('../watcher.mjs')
+  const f = claudeTranskriptPfad(run)
+  if (!existsSync(f)) return ''
+  const { text, truncated } = tailBytes(f, TRANSCRIPT_TAIL_BYTES)
+  const out = []
+  // A truncated tail starts mid-line — that first fragment is not valid JSON anyway.
+  for (const line of text.split('\n').slice(truncated ? 1 : 0)) {
+    let j
+    try { j = JSON.parse(line) } catch { continue }
+    const role = j.message?.role ?? j.type
+    if (!['user', 'assistant'].includes(role)) continue
+    const content = j.message?.content
+    const parts = []
+    for (const c of Array.isArray(content) ? content : [content]) {
+      if (typeof c === 'string') { parts.push(c); continue }
+      if (c?.type === 'text' && c.text) parts.push(c.text)
+      else if (c?.type === 'thinking' && c.thinking) parts.push(`(thinking) ${c.thinking}`)
+      else if (c?.type === 'tool_use') parts.push(`[tool ${c.name}] ${JSON.stringify(c.input ?? {}).slice(0, 400)}`)
+      else if (c?.type === 'tool_result') {
+        const t = typeof c.content === 'string' ? c.content : JSON.stringify(c.content ?? '')
+        parts.push(`[result] ${t.slice(0, 400)}`)
+      }
+    }
+    const body = parts.join('\n').trim()
+    if (body) out.push(`### ${role}\n${body}`)
+  }
+  return out.join('\n\n')
+}
+
+/** Last bytes of the pipe-pane log, cleaned of escape sequences and redraw noise. */
+function logTail(runId) {
+  const f = join(RUNS_DIR, runId, 'log.txt')
+  if (!existsSync(f)) return ''
+  const lines = terminalText(tailBytes(f, LOG_TAIL_BYTES).text).split('\n').map(l => l.trimEnd())
+  const out = []
+  for (const l of lines) if (l && l !== out[out.length - 1]) out.push(l)
+  return out.join('\n')
+}
+
+export const actions = {
+  now: () => Date.now(),
+  runInfo: async (runId) => runInfo(runId),
+
+  /** Runs matching a selector: { runId } | { agentId } | { repoId } | {} (+ statuses). */
+  async findRuns({ runId = null, agentId = null, repoId = null, statuses = ['running', 'waiting_help'] }) {
+    const where = [], args = []
+    if (runId) { where.push('id = ?'); args.push(runId) }
+    if (agentId) { where.push('agent_id = ?'); args.push(agentId) }
+    if (repoId) { where.push('repo_id = ?'); args.push(repoId) }
+    if (statuses?.length) { where.push(`status IN (${statuses.map(() => '?').join(',')})`); args.push(...statuses) }
+    return db.prepare(`SELECT * FROM runs ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY started_at DESC LIMIT 50`).all(...args)
+  },
+
+  async sendToRun(run, text) {
+    if (!run.tmux_session) return { ok: false }
+    const r = await sendToSession(run.tmux_session, text)
+    if (r.ok) {
+      db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(run.id)
+      if (run.status === 'waiting_help') db.prepare(`UPDATE runs SET status='running', help_answer=? WHERE id=?`).run(text, run.id)
+      db.prepare('INSERT INTO events(run_id, kind, payload) VALUES(?, ?, ?)').run(run.id, 'flow_message', JSON.stringify({ text: text.slice(0, 500) }))
+    }
+    return r
+  },
+
+  async killRun(run) {
+    if (run.tmux_session) await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
+    db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
+                tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=? AND status IN ('running','waiting_help','deferred')`).run(run.id)
+    return true
+  },
+
+  async startAgent(agentId, promptExtra, flowRunId) {
+    const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId)
+    if (!agent) return { ok: false, error: `agent ${agentId} does not exist` }
+    const r = await startForAgent(agent, promptExtra)
+    if (r.runId) markStartedByFlow(r.runId, flowRunId)
+    return r
+  },
+
+  async startSingle(opts, flowRunId) {
+    let runId
+    try { runId = createRun({ ...opts, agentId: null, orProvider: null, promptExtra: null }) }
+    catch (e) { return { ok: false, error: e.message } }
+    markStartedByFlow(runId, flowRunId)
+    const r = await launchRun(runId)
+    return r.ok ? { ok: true, runId } : { ok: false, runId, error: r.error }
+  },
+
+  /**
+   * Telegram message from a flow. The link points where the reader wants to go:
+   * the run the flow is about, otherwise the flow run itself. Deliberately NOT
+   * through notifyRun() — its dedupe is meant for the watcher's own alarms and
+   * would swallow a second flow message about the same run.
+   */
+  async telegram(text, attachment = '', link = {}) {
+    const url = link.runId ? detailUrl(link.runId)
+      : link.flowRunId ? `${publicBase()}/flows/runs/${link.flowRunId}`
+        : `${publicBase()}/flows`
+    const full = `${text}\n\n${url}`
+    if (attachment?.trim()) return notifyLong(full, { fileName: 'flow-attachment.md', fileContent: attachment })
+    return notify(full)
+  },
+
+  /** Text of a run for extraction: report, terminal log tail, or both. */
+  async runText(runId, source) {
+    const info = runInfo(runId)
+    if (!info) throw new Error(`run ${runId} does not exist`)
+    const head = `Run ${info.id} — ${info.agent_name || 'single run'} @ ${info.repo_name} (${info.harness}${info.model ? '/' + info.model : ''}), status ${info.status}, branch ${info.branch || '-'}, PR ${info.pr_url || '-'}\n\n`
+    if (source === 'transcript') {
+      const tr = await transcriptText(runId)
+      return tr ? head + '## Transcript (tail)\n' + tr
+        : head + '## Transcript\n(none — only claude runs keep one, terminal log instead)\n\n## Terminal log (tail)\n' + logTail(runId)
+    }
+    if (source === 'log') return head + '## Terminal log (tail)\n' + logTail(runId)
+    if (source === 'report_and_log') return head + '## Report\n' + (info.report || '(none)') + '\n\n## Terminal log (tail)\n' + logTail(runId)
+    return head + '## Report\n' + (info.report || '(none)')
+  },
+
+  extract: (args) => extractStructured(args),
+
+  async http({ url, method, headers, body }) {
+    const init = { method, headers: { ...headers }, signal: AbortSignal.timeout(60_000) }
+    if (!['GET', 'HEAD'].includes(method) && body) {
+      init.body = body
+      if (!Object.keys(init.headers).some(h => h.toLowerCase() === 'content-type')) init.headers['content-type'] = 'application/json'
+    }
+    const res = await fetch(url, init)
+    const text = await res.text()
+    let json = null
+    try { json = JSON.parse(text) } catch { /* not JSON */ }
+    return { status: res.status, ok: res.ok, body: text.slice(0, 20_000), json }
+  },
+}
+

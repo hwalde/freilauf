@@ -85,10 +85,10 @@ function setupBanner() {
     <a class="btn" href="/settings/coding-agents">${e(t('banner.no_coding_agent_cta'))}</a></div>`
 }
 
-function layout(title, active, content, selectedRepo = null, withTerminal = false) {
+export function layout(title, active, content, selectedRepo = null, withTerminal = false) {
   const pipeline = pipelineAn()
   const q = claudeQuota()
-  const nav = [['/', t('nav.overview')], ['/agents', t('nav.agents')], ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
+  const nav = [['/', t('nav.overview')], ['/agents', t('nav.agents')], ['/flows', t('nav.flows')], ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
     .map(([href, label]) => `<a href="${href}" class="${active === href ? 'on' : ''}">${e(label)}</a>`).join('')
   const bar = (label, pct) => `<div class="quota"><span>${label}</span><div class="track"><div class="fill ${(pct ?? 0) >= 90 ? 'r' : (pct ?? 0) >= 80 ? 'y' : ''}" style="width:${Math.min(pct ?? 0, 100)}%"></div></div><span>${pct ?? '?'} %</span></div>`
   const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()

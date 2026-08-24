@@ -171,6 +171,9 @@ async function hubStarten({ echteAgenten = false } = {}) {
     CCHUB_ZUSAETZE_DIR: join(SB, 'zusaetze'),
     CCHUB_PULS_AUS: '1',          // no provider pulse against real endpoints from the suite
     CCHUB_CURSOR_AUTH: join(SB, 'missing-cursor-auth.json'),   // cursor usage stays silent in the sandbox
+    // "Fresh installation" tests must not pick up the operator's seed file
+    // (~/.config/cc-hub/coding-agents.json) — point at a file that does not exist.
+    CCHUB_AGENTS_SEED: join(SB, 'no-seed.json'),
     NODE_OPTIONS: '--disable-warning=ExperimentalWarning',
   }
   if (echteAgenten) {

@@ -169,6 +169,16 @@ worktree's `CLAUDE.md` **automatically**. The opt-in idea behind
 half applies to cursor — the run sees more than its prompt plus the checked
 extras.
 
+## No-code flows
+
+`server/flows/` — a self-contained module (own tables, pages, API, designer
+client) that reacts to finished runs, a cron schedule or a button with
+building blocks: message running agents, start agents/single runs (optionally
+waiting for their result), extract structured data from a report via LLM,
+branch on the outcome, loop over a list, Telegram, HTTP, delay. Architecture,
+step registry contract and the four integration seams:
+**[server/flows/AGENTS.md](server/flows/AGENTS.md)**.
+
 ## Extra skills (opt-in)
 
 `~/agents/zusaetze/<name>/SKILL.md` — **deliberately not** a `.claude/skills`
