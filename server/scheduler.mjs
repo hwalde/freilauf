@@ -1,5 +1,5 @@
-// cc-hub — Scheduler (Planung 4.2/4.8): Cron-Ausdrücke der Agenten, globales
-// Pipeline-Und-Gatter, Budget-Gate mit Verschieben statt Verwerfen.
+// cc-hub — scheduler (planning 4.2/4.8): the agents' cron expressions, global
+// pipeline AND gate, budget gate with deferral instead of discarding.
 import db, { addEvent } from './db.mjs'
 import { scheduleDue } from './util.mjs'
 import { createRun, launchRun } from './runner.mjs'
@@ -26,32 +26,32 @@ async function tick() {
     const key = `${agent.id}@${slot}`
     if (fired.get(key)) continue
     fired.set(key, true)
-    // Der vorige Lauf desselben Agenten läuft noch? Dann NICHT nachlegen — sonst
-    // überholt ein Agent, dessen Lauf länger dauert als sein Zeitplan, sich selbst
-    // und es stapeln sich Worktrees und LLM-Sessions. „Kein festes Limit"
-    // (Planung 4.2) meint verschiedene Agenten, nicht denselben mehrfach.
+    // The previous run of the same agent is still going? Then do NOT start another —
+    // otherwise an agent whose run takes longer than its schedule laps itself
+    // and worktrees and LLM sessions pile up. "No fixed limit"
+    // (planning 4.2) means different agents, not the same one several times.
     const busy = db.prepare(`SELECT id FROM runs WHERE agent_id=?
       AND status IN ('running','waiting_help','deferred') LIMIT 1`).get(agent.id)
     if (busy) {
       addEvent(busy.id, 'schedule_skipped', { agent: agent.name, slot })
       continue
     }
-    // Einmalige Termine feuern genau einmal und schalten sich danach selbst ab.
+    // One-off schedules fire exactly once and then switch themselves off.
     if (agent.schedule_kind === 'einmalig') {
       db.prepare(`UPDATE agents SET schedule_kind='manuell', run_at=NULL, updated_at=datetime('now') WHERE id=?`).run(agent.id)
     }
     await startForAgent(agent)
   }
-  // Map begrenzen
+  // Bound the map
   if (fired.size > 500) for (const k of fired.keys()) { if (!k.endsWith(slot)) fired.delete(k) }
 }
 
 /**
- * Startet einen Lauf für einen Agenten (auch „jetzt starten" aus der UI).
- * Liefert {ok, runId?, deferred?, error?}.
+ * Starts a run for an agent (also "start now" from the UI).
+ * Returns {ok, runId?, deferred?, error?}.
  */
 export async function startForAgent(agent, promptExtra = null) {
-  // Budget-Gates VOR dem Start; blocked → verschieben (Retry im Watcher), nicht verwerfen.
+  // Budget gates BEFORE the start; blocked → defer (retry in the watcher), do not discard.
   const gate = agent.harness === 'claude'
     ? (() => { const g = claudeGateBlocked(); return g.blocked ? g : null })()
     : await openrouterGateBlocked(Number(db.prepare(`SELECT value FROM settings WHERE key='openrouter_min_eur'`).get()?.value ?? 5) || 5)
@@ -75,7 +75,7 @@ export async function startForAgent(agent, promptExtra = null) {
     const q = claudeQuota()
     db.prepare(`UPDATE runs SET status='deferred' WHERE id=?`).run(runId)
     addEvent(runId, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null })
-    notifyRun(runId, 'deferred', `🟡 Start verschoben — ${gate.reason}${gate.resets_at ? ` (Reset: ${gate.resets_at})` : ''}`)
+    notifyRun(runId, 'deferred', `🟡 Start deferred — ${gate.reason}${gate.resets_at ? ` (reset: ${gate.resets_at})` : ''}`)
     return { ok: true, runId, deferred: true }
   }
   const r = await launchRun(runId)

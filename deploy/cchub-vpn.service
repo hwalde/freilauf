@@ -1,6 +1,6 @@
-# cc-hub VPN-Zugang (TLS auf wg0). Fail-closed: nach Reboot NICHT automatisch aktiv.
+# cc-hub VPN access (TLS on wg0). Fail-closed: NOT automatically active after reboot.
 [Unit]
-Description=cc-hub VPN-Zugang (TLS auf wg0)
+Description=cc-hub VPN access (TLS on wg0)
 After=cchub.service
 Requires=cchub.service
 

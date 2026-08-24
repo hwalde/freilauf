@@ -1,25 +1,25 @@
-// cc-hub — Terminal im Browser (Planung 7.4): node-pty spawnt `tmux attach-session`;
-// Resize-Frame "\0{cols,rows}"; pty.kill() beendet nur den tmux-Client, nie die Session.
-// Schreibrechte hängen an `?ro=0` und sind fail-closed: fehlt der Parameter oder steht
-// etwas anderes drin, wird mit `-r` angehängt UND jede Eingabe verworfen. Der Client
-// setzt ro=0 nur für Läufe mit offener Session (pages.mjs: data-live).
+// cc-hub — terminal in the browser (planning 7.4): node-pty spawns `tmux attach-session`;
+// resize frame "\0{cols,rows}"; pty.kill() only terminates the tmux client, never the session.
+// Write access hangs on `?ro=0` and is fail-closed: if the parameter is missing or holds
+// anything else, we attach with `-r` AND discard every input. The client sets
+// ro=0 only for runs with an open session (pages.mjs: data-live).
 import { WebSocketServer } from 'ws'
 import pty from 'node-pty'
 import { getRun } from './db.mjs'
 import { sh } from './util.mjs'
 
-const SESSION_RE = /^cc-[A-Za-z0-9_-]+$/   // Planung 11
+const SESSION_RE = /^cc-[A-Za-z0-9_-]+$/   // planning 11
 
 export function startTerminalServer(httpServer) {
   const wss = new WebSocketServer({ noServer: true })
 
   httpServer.on('upgrade', async (req, socket, head) => {
     const url = new URL(req.url, 'http://x')
-    if (url.pathname !== '/term') return   // andere Upgrades (falls später) unberührt lassen
+    if (url.pathname !== '/term') return   // leave other upgrades (if added later) untouched
     const runId = url.searchParams.get('run') ?? ''
     const readOnly = url.searchParams.get('ro') !== '0'
     const run = /^[0-9a-f-]{36}$/.test(runId) ? getRun(runId) : null
-    // Planung 11: Session-Namen gegen Muster prüfen + Run-Zugehörigkeit.
+    // Planning 11: check session names against the pattern + run ownership.
     if (!run || !run.tmux_session || !SESSION_RE.test(run.tmux_session)) {
       socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n')
       return socket.destroy()
@@ -36,13 +36,13 @@ export function startTerminalServer(httpServer) {
 }
 
 function attach(ws, session, readOnly) {
-  // '-r' ist ein Flag von attach-session, muss also DAHINTER stehen — vorangestellt
-  // hielte tmux es für ein globales Flag und bräche ab.
-  // Das Fenster des Agenten bricht beim Zuschauen auf die Browsergröße um. Das kommt
-  // vom Resize-Frame, NICHT von den Schreibrechten — der read-only-Client tat es
-  // genauso (gemessen). '-f ignore-size' hilft dagegen nicht: bei 'window-size latest'
-  // (Default) zählt der zuletzt aktive Client trotzdem. Wer die Größe festnageln will,
-  // braucht 'window-size manual' auf der Session.
+  // '-r' is a flag of attach-session, so it must come AFTER it — placed before,
+  // tmux would take it for a global flag and abort.
+  // The agent's window rewraps to the browser size while watching. That comes from
+  // the resize frame, NOT from the write access — the read-only client did it
+  // just the same (measured). '-f ignore-size' does not help against it: with
+  // 'window-size latest' (default) the most recently active client still counts.
+  // To pin the size you need 'window-size manual' on the session.
   const args = readOnly
     ? ['attach-session', '-r', '-t', `=${session}`]
     : ['attach-session', '-t', `=${session}`]
@@ -59,18 +59,18 @@ function attach(ws, session, readOnly) {
   })
   ws.on('message', (data) => {
     const s = String(data)
-    if (s.startsWith('\0')) {           // Resize-Frame: \0{cols},{rows}
+    if (s.startsWith('\0')) {           // resize frame: \0{cols},{rows}
       const [c, r] = s.slice(1).split(',').map(Number)
       if (Number.isFinite(c) && Number.isFinite(r)) {
         try { ptyProc.resize(Math.min(Math.max(c, 20), 500), Math.min(Math.max(r, 5), 300)) } catch {}
       }
       return
     }
-    // Kein Filtern einzelner Tasten: wer schreiben darf, darf auch Strg-C oder `exit`
-    // tippen — das ist der Preis der Bedienbarkeit und lässt sich nicht sinnvoll
-    // aussieben. Der frühere Vergleich auf die Zeichenkette '\x03\x03kill' traf nie zu.
+    // No filtering of individual keys: whoever may write may also type Ctrl-C or
+    // `exit` — that is the price of usability and cannot be filtered out sensibly.
+    // The earlier comparison against the string '\x03\x03kill' never matched.
     if (!readOnly) ptyProc.write(s)
   })
-  ws.on('close', () => { try { ptyProc.kill() } catch {} })   // nur der tmux-Client stirbt
+  ws.on('close', () => { try { ptyProc.kill() } catch {} })   // only the tmux client dies
   ws.on('error', () => { try { ptyProc.kill() } catch {} })
 }

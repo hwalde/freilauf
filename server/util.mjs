@@ -1,6 +1,7 @@
-// cc-hub — kleine Helfer ohne externe Abhängigkeiten.
+// cc-hub — small helpers without external dependencies.
 import { homedir } from 'node:os'
 import { execFile } from 'node:child_process'
+import { t } from './i18n.mjs'
 
 export const HOME = homedir()
 export const RUNS_DIR = process.env.CCHUB_RUNS_DIR ?? `${HOME}/agents/runs`
@@ -8,7 +9,7 @@ export const WORKTREES_DIR = process.env.CCHUB_WORKTREES_DIR ?? `${HOME}/agents/
 
 export function kurzid(uuid) { return uuid.split('-')[0] }
 
-/** ANSI + CR aus pipe-pane-Log für die HTML-Loganzeige (Planung 7.2). */
+/** Strip ANSI + CR from the pipe-pane log for the HTML log view (planning 7.2). */
 export function stripAnsi(s) {
   return s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r/g, '')
 }
@@ -33,9 +34,9 @@ export function fmtDuration(sec) {
   return h > 0 ? `${h} h ${m % 60} min` : `${m} min`
 }
 
-// Minimaler 5-Feld-Cron (Minute Stunde Tag Monat Wochentag): *, *&#47;n, a-b, Listen.
+// Minimal 5-field cron (minute hour day month weekday): *, *&#47;n, a-b, lists.
 const CRON_MAX = [59, 23, 31, 12, 6]
-/** Prüft, ob ein Ausdruck von cronMatches überhaupt verstanden wird (5 Felder). */
+/** Checks whether an expression is understood by cronMatches at all (5 fields). */
 export function validCron(expr) {
   const fields = String(expr ?? '').trim().split(/\s+/)
   if (fields.length !== 5) return false
@@ -77,27 +78,27 @@ function fieldMatches(field, value, max, dowWrap) {
   return false
 }
 
-// ---------------- Zeitpläne jenseits von Cron (Planung: grafische Auswahl) ----------------
+// ---------------- schedules beyond cron (planning: graphical selection) ----------------
+// Display names are i18n keys, resolved with t() where they are rendered.
 export const WOCHENTAGE = [
-  { n: 1, kurz: 'Mo', lang: 'Montag' }, { n: 2, kurz: 'Di', lang: 'Dienstag' },
-  { n: 3, kurz: 'Mi', lang: 'Mittwoch' }, { n: 4, kurz: 'Do', lang: 'Donnerstag' },
-  { n: 5, kurz: 'Fr', lang: 'Freitag' }, { n: 6, kurz: 'Sa', lang: 'Samstag' },
-  { n: 0, kurz: 'So', lang: 'Sonntag' },
+  { n: 1, key: 'day.mon' }, { n: 2, key: 'day.tue' }, { n: 3, key: 'day.wed' },
+  { n: 4, key: 'day.thu' }, { n: 5, key: 'day.fri' }, { n: 6, key: 'day.sat' },
+  { n: 0, key: 'day.sun' },
 ]
 
 const zwei = (n) => String(n).padStart(2, '0')
 
-/** Montag 00:00 der Woche, in der das Datum liegt (lokale Zeit). */
+/** Monday 00:00 of the week the date falls in (local time). */
 function wochenstart(d) {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate())
-  const versatz = (x.getDay() + 6) % 7          // Mo=0 … So=6
+  const versatz = (x.getDay() + 6) % 7          // Mon=0 … Sun=6
   x.setDate(x.getDate() - versatz)
   return x
 }
 
 /**
- * Ist der Agent in dieser Minute fällig? Wird vom Scheduler im 30-Sekunden-Takt
- * gefragt; die Minute selbst wird dort gegen Doppelstarts entprellt.
+ * Is the agent due in this minute? Asked by the scheduler every 30 seconds;
+ * the minute itself is debounced there against double starts.
  */
 export function scheduleDue(agent, now = new Date()) {
   switch (agent.schedule_kind) {
@@ -111,7 +112,7 @@ export function scheduleDue(agent, now = new Date()) {
       if (!tage.includes(now.getDay())) return false
       const n = Number(agent.schedule_weeks) || 1
       if (n <= 1) return true
-      // n-wöchentlich zählt ganze Wochen ab der Ankerwoche — nicht ab dem Tag.
+      // Every-n-weeks counts whole weeks from the anchor week — not from the day.
       if (!agent.schedule_anchor) return true
       const anker = new Date(`${agent.schedule_anchor}T00:00:00`)
       if (Number.isNaN(anker.getTime())) return true
@@ -122,7 +123,7 @@ export function scheduleDue(agent, now = new Date()) {
     case 'einmalig': {
       if (!agent.run_at) return false
       const ziel = new Date(agent.run_at)
-      // Fällig ab dem Zeitpunkt — ein verpasster Termin (Hub war aus) wird nachgeholt.
+      // Due from that point in time — a missed appointment (hub was off) is caught up.
       return !Number.isNaN(ziel.getTime()) && ziel.getTime() <= now.getTime()
     }
 
@@ -131,18 +132,20 @@ export function scheduleDue(agent, now = new Date()) {
   }
 }
 
-/** Einzeiler für die Agentenliste. */
+/** One-liner for the agent list. */
 export function scheduleText(agent) {
   switch (agent.schedule_kind) {
     case 'cron': return `Cron: ${agent.schedule}`
-    case 'einmalig': return agent.run_at ? `einmalig am ${String(agent.run_at).replace('T', ' um ')}` : 'einmalig (kein Termin)'
+    case 'einmalig': return agent.run_at
+      ? t('sched.once_on', { ts: String(agent.run_at).replace('T', ' ') })
+      : t('sched.once_none')
     case 'woechentlich': {
-      const tage = String(agent.schedule_days ?? '').split(',').filter(t => t !== '')
-        .map(t => WOCHENTAGE.find(w => w.n === Number(t))?.kurz ?? t).join(', ')
+      const days = String(agent.schedule_days ?? '').split(',').filter(x => x !== '')
+        .map(x => { const w = WOCHENTAGE.find(w => w.n === Number(x)); return w ? t(w.key) : x }).join(', ')
       const n = Number(agent.schedule_weeks) || 1
-      const takt = n === 1 ? 'wöchentlich' : `alle ${n} Wochen`
-      return `${takt}: ${tage || '(keine Tage)'} um ${agent.schedule_time ?? '??:??'}`
+      const takt = n === 1 ? t('sched.weekly_word') : t('sched.every_n_weeks', { n })
+      return t('sched.weekly_line', { takt, days: days || t('sched.no_days'), time: agent.schedule_time ?? '??:??' })
     }
-    default: return 'manuell'
+    default: return t('sched.manual')
   }
 }

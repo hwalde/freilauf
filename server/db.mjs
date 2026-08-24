@@ -1,9 +1,10 @@
-// cc-hub — SQLite via node:sqlite (Null Dependencies; Fallback better-sqlite3 wäre
-// API-kompatibel genug, um diesen Wrapper auszutauschen).
+// cc-hub — SQLite via node:sqlite (zero dependencies; the fallback better-sqlite3
+// would be API-compatible enough to swap out this wrapper).
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { harnessIds } from './harnesses/index.mjs'
 
 const DATA_DIR = process.env.CCHUB_DATA_DIR ?? join(homedir(), '.local', 'share', 'cc-hub')
 mkdirSync(DATA_DIR, { recursive: true })
@@ -29,7 +30,7 @@ CREATE TABLE IF NOT EXISTS agents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
   name TEXT NOT NULL UNIQUE,
-  harness TEXT NOT NULL CHECK(harness IN ('claude','opencode','hermes','cursor')),
+  harness TEXT NOT NULL CHECK(harness IN (${harnessIds().map(id => `'${id}'`).join(',')})),
   model TEXT,
   prompt TEXT NOT NULL,
   branch_mode TEXT NOT NULL CHECK(branch_mode IN ('keiner','neu','fest')),
@@ -106,60 +107,65 @@ CREATE INDEX IF NOT EXISTS idx_runs_repo ON runs(repo_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);
 `)
 
-// ---- Migrationen: Spalten nachrüsten, ohne bestehende DBs neu anzulegen ----
+// ---- migrations: retrofit columns without recreating existing DBs ----
 function addColumn(table, name, definition) {
   const have = db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === name)
   if (!have) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`)
 }
-// Zeitplan über Cron hinaus (wöchentlich mit Wochentagen/Uhrzeit, n-wöchentlich, einmalig)
+// Schedules beyond cron (weekly with weekdays/time, every n weeks, one-off)
 addColumn('agents', 'schedule_kind', `TEXT NOT NULL DEFAULT 'manuell'`)
-addColumn('agents', 'schedule_days', 'TEXT')      // "1,2,5" — 0=So … 6=Sa
+addColumn('agents', 'schedule_days', 'TEXT')      // "1,2,5" — 0=Sun … 6=Sat
 addColumn('agents', 'schedule_time', 'TEXT')      // "06:30"
-addColumn('agents', 'schedule_weeks', 'INTEGER')  // 1 = jede Woche, 2 = jede zweite …
-addColumn('agents', 'schedule_anchor', 'TEXT')    // "2026-08-23" Startwoche für n-wöchentlich
-addColumn('agents', 'run_at', 'TEXT')             // "2026-08-24T06:30" für den einmaligen Start
-// Provider-Wahl für opencode/hermes. NULL = wie bisher: 'model' ist dann der komplette,
-// selbst getippte String und geht unverändert an die Harness — Bestand bleibt unberührt.
+addColumn('agents', 'schedule_weeks', 'INTEGER')  // 1 = every week, 2 = every second …
+addColumn('agents', 'schedule_anchor', 'TEXT')    // "2026-08-23" start week for every-n-weeks
+addColumn('agents', 'run_at', 'TEXT')             // "2026-08-24T06:30" for the one-off start
+// Provider choice for opencode/hermes. NULL = as before: 'model' is then the complete,
+// hand-typed string and goes to the harness unchanged — existing data stays untouched.
 addColumn('agents', 'provider', 'TEXT')
-addColumn('agents', 'or_provider', 'TEXT')   // fester OpenRouter-Serving-Provider (tag)
+addColumn('agents', 'or_provider', 'TEXT')   // fixed OpenRouter serving provider (tag)
 addColumn('runs', 'provider', 'TEXT')
 addColumn('runs', 'or_provider', 'TEXT')
-// Denk-Aufwand pro Lauf. NULL = wie bisher: die Harness nimmt ihren eigenen Default.
+// Reasoning effort per run. NULL = as before: the harness uses its own default.
 addColumn('agents', 'effort', 'TEXT')
 addColumn('runs', 'effort', 'TEXT')
-// Zusatz-Skills (JSON-Liste von Ordnernamen unter ~/agents/zusaetze) — opt-in je
-// Agent/Lauf, NIE automatisch geladen. Der Lauf trägt wie üblich die Definitions-Kopie.
+// Extra skills (JSON list of folder names under ~/agents/zusaetze) — opt-in per
+// agent/run, NEVER loaded automatically. The run carries the definition copy as usual.
 addColumn('agents', 'skills', 'TEXT')
 addColumn('runs', 'skills', 'TEXT')
-// Lese-Positionen der Detektoren: nur NEUE Bytes werden gescannt. Ohne Offset zählt
-// derselbe Treffer bei jedem Durchgang erneut und ein alter Treffer „gilt" ewig.
+// Read positions of the detectors: only NEW bytes are scanned. Without the offset the
+// same hit is counted again on every pass and an old hit "counts" forever.
 addColumn('runs', 'log_offset', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('runs', 'transcript_offset', 'INTEGER NOT NULL DEFAULT 0')
-// Neue Harness in der CHECK-Regel von 'agents'. SQLite kann einen CHECK nicht ändern
-// (kein ALTER dafür), und 'CREATE TABLE IF NOT EXISTS' greift bei einer bestehenden
-// Datenbank nicht mehr — dort stünde weiter die alte Regel und das Speichern eines
-// cursor-Agenten liefe in einen Constraint-Fehler. Also einmalig umbauen.
+// New harness in the CHECK rule of 'agents'. SQLite cannot change a CHECK (no ALTER
+// for that), and 'CREATE TABLE IF NOT EXISTS' no longer takes effect on an existing
+// database — the old rule would still be in place there and saving a cursor agent
+// would run into a constraint error. So rebuild once.
 //
-// Der neue Tabellenkopf wird NICHT hier eingetippt, sondern aus sqlite_master geholt
-// und nur an der einen Stelle ersetzt: so bleiben alle nachgerüsteten Spalten, ihre
-// Defaults und das UNIQUE auf 'name' garantiert erhalten. Kopiert wird spaltenweise
-// nach Namen, damit die Reihenfolge egal ist.
+// The new table header is NOT typed in here but fetched from sqlite_master and
+// replaced only at that one spot: this guarantees that all retrofitted columns,
+// their defaults and the UNIQUE on 'name' survive. Copying is done column-wise
+// by name, so the order does not matter.
 function harnessCheckErweitern() {
   const sql = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'`).get()?.sql
-  if (!sql || sql.includes("'cursor'")) return          // frisch angelegt oder schon umgebaut
-  const alt = "harness IN ('claude','opencode','hermes')"
-  if (!sql.includes(alt)) {
-    // Unerwartete Form: lieber nichts anfassen als eine Tabelle blind neu bauen.
-    console.warn('[db] agents.harness: CHECK-Regel nicht wiedererkannt — kein Umbau')
+  if (!sql) return
+  // Wanted: exactly the ids from the coding agent plugin registry. A new
+  // harness therefore only needs its plugin file — the CHECK follows.
+  const wanted = harnessIds()
+  const m = sql.match(/harness IN \(([^)]*)\)/)
+  if (!m) {
+    // Unexpected shape: better touch nothing than rebuild a table blindly.
+    console.warn('[db] agents.harness: CHECK rule not recognized — no rebuild')
     return
   }
+  const have = [...m[1].matchAll(/'([^']*)'/g)].map(x => x[1])
+  if (have.length === wanted.length && wanted.every(id => have.includes(id))) return   // already current
   const spalten = db.prepare(`PRAGMA table_info(agents)`).all().map(c => `"${c.name}"`).join(',')
   const neuSql = sql
-    .replace(alt, "harness IN ('claude','opencode','hermes','cursor')")
+    .replace(m[0], `harness IN (${wanted.map(id => `'${id}'`).join(',')})`)
     .replace(/CREATE TABLE (IF NOT EXISTS )?["'`]?agents["'`]?/i, 'CREATE TABLE agents_neu')
 
-  // PRAGMA foreign_keys wirkt innerhalb einer Transaktion nicht — vorher setzen.
-  // runs.agent_id zeigt auf agents(id); ohne das Abschalten stolpert das DROP darüber.
+  // PRAGMA foreign_keys has no effect inside a transaction — set it beforehand.
+  // runs.agent_id points to agents(id); without turning it off, the DROP trips over that.
   db.exec('PRAGMA foreign_keys = OFF')
   try {
     db.exec('BEGIN')
@@ -168,9 +174,9 @@ function harnessCheckErweitern() {
     db.exec('DROP TABLE agents')
     db.exec('ALTER TABLE agents_neu RENAME TO agents')
     db.exec('COMMIT')
-    console.log('[db] agents.harness: CHECK um cursor erweitert')
+    console.log(`[db] agents.harness: CHECK rebuilt for (${harnessIds().join(', ')})`)
   } catch (err) {
-    try { db.exec('ROLLBACK') } catch { /* schon zurückgerollt */ }
+    try { db.exec('ROLLBACK') } catch { /* already rolled back */ }
     throw err
   } finally {
     db.exec('PRAGMA foreign_keys = ON')
@@ -178,7 +184,7 @@ function harnessCheckErweitern() {
 }
 harnessCheckErweitern()
 
-// Bestandsagenten mit Cron-Ausdruck behalten ihr Verhalten.
+// Existing agents with a cron expression keep their behavior.
 db.exec(`UPDATE agents SET schedule_kind='cron'
          WHERE schedule_kind='manuell' AND schedule IS NOT NULL AND trim(schedule) <> ''`)
 
@@ -208,7 +214,7 @@ export function addEvent(runId, kind, payload = null) {
     .run(runId, kind, payload === null ? null : JSON.stringify(payload))
 }
 
-/** Event nur anlegen, wenn dieser (run,kind) noch nicht existiert — Telegram/Ampel dedupen so von selbst. */
+/** Only create the event if this (run,kind) does not exist yet — Telegram/traffic light dedupe by themselves this way. */
 export function addEventOnce(runId, kind, payload = null) {
   const have = db.prepare('SELECT 1 FROM events WHERE run_id = ? AND kind = ? LIMIT 1').get(runId, kind)
   if (!have) addEvent(runId, kind, payload)

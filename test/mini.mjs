@@ -1,6 +1,6 @@
-// cc-hub — Mini-Testrunner für unit.mjs und e2e.mjs.
-// Kein Framework: Zählen, Klartext ausgeben, Exit-Code setzen. Mehr braucht es nicht,
-// und es hält die Suite abhängigkeitsfrei wie den Rest des Projekts.
+// cc-hub — mini test runner for unit.mjs and e2e.mjs.
+// No framework: count, print plain text, set the exit code. Nothing more is needed,
+// and it keeps the suite dependency-free like the rest of the project.
 
 const GRUEN = '\x1b[32m', ROT = '\x1b[31m', GRAU = '\x1b[90m', WEG = '\x1b[0m'
 
@@ -10,7 +10,7 @@ export function gruppe(titel) {
   console.log(`\n${titel}`)
 }
 
-/** Eine Prüfung. fn darf synchron oder asynchron sein; wirft = durchgefallen. */
+/** A single check. fn may be synchronous or asynchronous; throwing = failed. */
 export async function pruefe(name, fn) {
   try {
     await fn()
@@ -28,24 +28,24 @@ export function uebersprungen(name, grund) {
   console.log(`  ${GRAU}– ${name} (${grund})${WEG}`)
 }
 
-// ---- Zusicherungen. Bewusst wenige: gleich/wahr/enthaelt decken alles ab. ----
-export function gleich(ist, soll, was = 'Wert') {
-  if (ist !== soll) throw new Error(`${was}: ist ${JSON.stringify(ist)}, erwartet ${JSON.stringify(soll)}`)
+// ---- Assertions. Deliberately few: gleich/wahr/enthaelt cover everything. ----
+export function gleich(ist, soll, was = 'value') {
+  if (ist !== soll) throw new Error(`${was}: got ${JSON.stringify(ist)}, expected ${JSON.stringify(soll)}`)
 }
-export function wahr(bedingung, was = 'Bedingung') {
-  if (!bedingung) throw new Error(`${was} trifft nicht zu`)
+export function wahr(bedingung, was = 'condition') {
+  if (!bedingung) throw new Error(`${was} does not hold`)
 }
-export function falsch(bedingung, was = 'Bedingung') {
-  if (bedingung) throw new Error(`${was} trifft zu, sollte aber nicht`)
+export function falsch(bedingung, was = 'condition') {
+  if (bedingung) throw new Error(`${was} holds, but should not`)
 }
-export function enthaelt(text, teil, was = 'Text') {
+export function enthaelt(text, teil, was = 'text') {
   if (!String(text).includes(teil)) {
-    throw new Error(`${was} enthält ${JSON.stringify(teil)} nicht.\n  Anfang: ${String(text).slice(0, 300)}`)
+    throw new Error(`${was} does not contain ${JSON.stringify(teil)}.\n  start: ${String(text).slice(0, 300)}`)
   }
 }
 
-/** Wartet, bis bedingung() wahr liefert — sonst Fehler mit Klartext statt stiller Hänger. */
-export async function warteAuf(bedingung, { was = 'Bedingung', timeoutMs = 15_000, taktMs = 250 } = {}) {
+/** Waits until bedingung() returns truthy — otherwise fails with plain text instead of hanging silently. */
+export async function warteAuf(bedingung, { was = 'condition', timeoutMs = 15_000, taktMs = 250 } = {}) {
   const ende = Date.now() + timeoutMs
   let zuletzt
   while (Date.now() < ende) {
@@ -57,20 +57,20 @@ export async function warteAuf(bedingung, { was = 'Bedingung', timeoutMs = 15_00
     }
     await new Promise(r => setTimeout(r, taktMs))
   }
-  throw new Error(`Zeitüberschreitung (${timeoutMs} ms) beim Warten auf: ${was}` +
-    (zuletzt ? `\n  zuletzt gesehen: ${JSON.stringify(zuletzt).slice(0, 200)}` : ''))
+  throw new Error(`timeout (${timeoutMs} ms) while waiting for: ${was}` +
+    (zuletzt ? `\n  last seen: ${JSON.stringify(zuletzt).slice(0, 200)}` : ''))
 }
 
-/** Abschlussbericht; liefert den Exit-Code. */
+/** Final report; returns the exit code. */
 export function bericht(titel, startZeit) {
   const dauer = ((Date.now() - startZeit) / 1000).toFixed(1)
   console.log(`\n${'─'.repeat(64)}`)
   if (zaehler.fehler.length === 0) {
-    console.log(`${GRUEN}${titel}: ${zaehler.ok} Prüfungen bestanden${WEG}` +
-      (zaehler.uebersprungen ? `, ${zaehler.uebersprungen} übersprungen` : '') + ` (${dauer} s)`)
+    console.log(`${GRUEN}${titel}: ${zaehler.ok} checks passed${WEG}` +
+      (zaehler.uebersprungen ? `, ${zaehler.uebersprungen} skipped` : '') + ` (${dauer} s)`)
     return 0
   }
-  console.log(`${ROT}${titel}: ${zaehler.fehler.length} von ${zaehler.ok + zaehler.fehler.length} Prüfungen fehlgeschlagen${WEG} (${dauer} s)`)
+  console.log(`${ROT}${titel}: ${zaehler.fehler.length} of ${zaehler.ok + zaehler.fehler.length} checks failed${WEG} (${dauer} s)`)
   for (const f of zaehler.fehler) console.log(`  ${ROT}✗${WEG} ${f.name}: ${f.grund.split('\n')[0]}`)
   return 1
 }

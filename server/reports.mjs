@@ -1,22 +1,22 @@
-// cc-hub — Verarbeitung von Agent-Meldungen (cc-report → POST /api/runs/<id>/report
-// oder Fallback inbox.jsonl, die der Watcher einsammelt). Planung 6 + 11.
+// cc-hub — processing of agent reports (cc-report → POST /api/runs/<id>/report
+// or fallback inbox.jsonl collected by the watcher). Planning 6 + 11.
 import db, { addEvent } from './db.mjs'
 import { notify, notifyLong, detailUrl } from './telegram.mjs'
 import { sh } from './util.mjs'
 import { vorfallMelden } from './incidents.mjs'
 import { typVonClaudeFehler, typVonText, TYP_TEXT } from './detect.mjs'
 
-const MAX_REPORT = 200 * 1024   // Planung 11: Report ≤ 200 kB
+const MAX_REPORT = 200 * 1024   // planning 11: report ≤ 200 kB
 
-/** Ein Meldungs-Event verarbeiten. Liefert {ok, status?} */
+/** Process one report event. Returns {ok, status?} */
 export async function handleReport(runId, body) {
   const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
-  // Planung 11: nur existierende Läufe in running/waiting_help akzeptieren.
-  if (!run || !['running', 'waiting_help'].includes(run.status)) return { ok: false, error: 'unbekannter oder bereits beendeter Lauf' }
+  // Planning 11: only accept existing runs in running/waiting_help.
+  if (!run || !['running', 'waiting_help'].includes(run.status)) return { ok: false, error: 'unknown or already finished run' }
   const kind = String(body.kind || '')
   let text = typeof body.text === 'string' ? body.text : ''
   if (typeof body.file === 'string') {
-    if (body.file.length > MAX_REPORT) return { ok: false, error: 'payload zu groß' }
+    if (body.file.length > MAX_REPORT) return { ok: false, error: 'payload too large' }
     text = text ? `${text}\n\n${body.file}` : body.file
   }
 
@@ -29,16 +29,16 @@ export async function handleReport(runId, body) {
     }
     case 'failed': {
       db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), report_md=? WHERE id=?`)
-        .run(`**Gescheitert:** ${text}`, runId)
+        .run(`**Failed:** ${text}`, runId)
       addEvent(runId, 'failed')
-      await notifyRun(runId, 'failed', `❌ Lauf gescheitert${laufKopf(run)}\n${text}`, { fileName: `gescheitert-${runId.slice(0, 8)}.md`, fileContent: text })
+      await notifyRun(runId, 'failed', `❌ Run failed${laufKopf(run)}\n${text}`, { fileName: `failed-${runId.slice(0, 8)}.md`, fileContent: text })
       break
     }
     case 'help': {
       db.prepare(`UPDATE runs SET status='waiting_help', help_text=? WHERE id=?`).run(text, runId)
       addEvent(runId, 'help')
-      // Die Frage MUSS vollständig ankommen — abgeschnitten ist sie nicht zu beantworten.
-      await notifyRun(runId, 'help', `🆘 Hilferuf${laufKopf(run)}\n${text}`, { fileName: `hilferuf-${runId.slice(0, 8)}.md`, fileContent: text, dedupe: false })
+      // The question MUST arrive completely — truncated it cannot be answered.
+      await notifyRun(runId, 'help', `🆘 Help call${laufKopf(run)}\n${text}`, { fileName: `help-${runId.slice(0, 8)}.md`, fileContent: text, dedupe: false })
       break
     }
     case 'progress': {
@@ -64,19 +64,20 @@ export async function handleReport(runId, body) {
       addEvent(runId, 'exit')
       const fresh = db.prepare('SELECT status FROM runs WHERE id = ?').get(runId)
       if (fresh?.status === 'running') {
-        // Prozess weg ohne done/failed → rot (Planung 4.5); Watcher bestätigt über pane_dead.
+        // Process gone without done/failed → red (planning 4.5); the watcher confirms via pane_dead.
         addEventOnce(runId, 'anomaly:exit_without_report')
-        await notifyRun(runId, 'exit_without_report', '🔴 Prozess beendet ohne Report.')
+        await notifyRun(runId, 'exit_without_report', '🔴 Process ended without a report.')
       }
       break
     }
-    case '_rate_limit':   // alter Name, gleicher Weg
+    case '_rate_limit':   // old name, same path
     case '_api_error': {
-      // Hook-Meldung: claude 'StopFailure' (festes Enum) oder opencode 'session.error'
-      // (Freitext). Der Hook ist die verlässlichste Quelle — sofort rot.
+      // Hook report: claude 'StopFailure' (fixed enum) or opencode
+      // 'session.error' (free text). The hook is the most reliable source —
+      // immediately red.
       const roh = String(body.error ?? (kind === '_rate_limit' ? 'rate_limit' : 'unknown'))
       let typ = typVonClaudeFehler(roh)
-      if (typ === null) break                       // z. B. max_output_tokens: kein Provider-Problem
+      if (typ === null) break                       // e.g. max_output_tokens: not a provider problem
       if (typ === 'unbekannt') typ = typVonText(`${roh} ${text}`)
       if (typ === 'rate_limit') db.prepare('UPDATE runs SET rate_limit_hits = rate_limit_hits + 1 WHERE id=?').run(runId)
       const beleg = [roh !== 'unknown' ? roh : null, text].filter(Boolean).join(' — ').slice(0, 300) || null
@@ -93,12 +94,12 @@ export async function handleReport(runId, body) {
       if (fresh?.status === 'running') {
         db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), exit_code=? WHERE id=?`)
           .run(Number.isFinite(+body.exit) ? +body.exit : null, runId)
-        await notifyRun(runId, 'pane_died', '🔴 Prozess tot ohne Report (tmux pane_dead).')
+        await notifyRun(runId, 'pane_died', '🔴 Process dead without a report (tmux pane_dead).')
       }
       break
     }
     default:
-      return { ok: false, error: `unbekannte Art '${kind}'` }
+      return { ok: false, error: `unknown kind '${kind}'` }
   }
   return { ok: true }
 }
@@ -109,45 +110,45 @@ export function addEventOnce(runId, kind, payload = null) {
 }
 
 /**
- * Auffälligkeiten "erledigen sich" durch Fortschritt. Die Events bleiben als Historie
- * stehen, heißen danach aber 'cleared:*' — damit fällt die Ampel zurück (pages.mjs sucht
- * nach 'anomaly:%') und addEventOnce greift bei erneutem Auftreten wieder. Die
- * 'telegram_sent:*'-Flags bleiben absichtlich liegen: derselbe Typ soll auch dann keine
- * zweite Nachricht erzeugen (Planung 4.5).
+ * Anomalies "resolve themselves" through progress. The events remain as
+ * history but are renamed to 'cleared:*' — the traffic light falls back
+ * (pages.mjs searches for 'anomaly:%') and addEventOnce fires again on
+ * recurrence. The 'telegram_sent:*' flags stay on purpose: the same type must
+ * not produce a second message either (planning 4.5).
  */
 function clearAnomalies(runId, kinds) {
   const stmt = db.prepare(`UPDATE events SET kind = 'cleared:' || kind WHERE run_id = ? AND kind = ?`)
   for (const kind of kinds) stmt.run(runId, kind)
 }
 
-/** Kopfzeile mit Agent/Repo/Harness — so ist die Nachricht ohne Klick zuzuordnen. */
+/** Header line with agent/repo/harness — so the message is attributable without a click. */
 function laufKopf(run) {
   const a = run.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name : null
   const p = db.prepare('SELECT name FROM repos WHERE id=?').get(run.repo_id)?.name
-  return ` — ${a ?? 'Einzellauf'} @ ${p ?? '?'} (${run.harness}${run.model ? '/' + run.model : ''})`
+  return ` — ${a ?? 'single run'} @ ${p ?? '?'} (${run.harness}${run.model ? '/' + run.model : ''})`
 }
 
 function doneText(run, report) {
   const dur = run.started_at
-    ? `Dauer: ${Math.round((Date.now() - Date.parse(run.started_at.replace(' ', 'T') + 'Z')) / 60000)} min`
+    ? `Duration: ${Math.round((Date.now() - Date.parse(run.started_at.replace(' ', 'T') + 'Z')) / 60000)} min`
     : ''
   const vorfaelle = db.prepare(`SELECT typ, anzahl FROM incidents WHERE run_id = ? ORDER BY id`).all(run.id)
-  const vf = vorfaelle.length ? ' · Vorfälle: ' + vorfaelle.map(v => `${TYP_TEXT[v.typ] ?? v.typ} ${v.anzahl}×`).join(', ') : ''
+  const vf = vorfaelle.length ? ' · Incidents: ' + vorfaelle.map(v => `${TYP_TEXT[v.typ] ?? v.typ} ${v.anzahl}×`).join(', ') : ''
   const branch = run.branch_reported || run.branch_expected
   const zeile2 = [dur, branch ? `Branch: ${branch}` : null, run.pr_url ? `PR: ${run.pr_url}` : null].filter(Boolean).join(' · ')
-  // Vollständiger Report; über 4096 Zeichen kappt notify() und notifyLong() hängt die Datei an.
-  return `✅ Fertig${laufKopf(run)}\n${zeile2}${vf}\n\n${report || '(kein Report-Text)'}`
+  // Full report; over 4096 chars notify() truncates and notifyLong() attaches the file.
+  return `✅ Done${laufKopf(run)}\n${zeile2}${vf}\n\n${report || '(no report text)'}`
 }
 
 /**
- * Telegram mit Dedup pro (Lauf, Typ) — Planung 4.5: nur eine Nachricht je Auffälligkeits-Typ.
+ * Telegram with dedupe per (run, type) — planning 4.5: only one message per anomaly type.
  */
 export async function notifyRun(runId, type, text, lang = null) {
   const flag = `telegram_sent:${type}`
   const have = db.prepare('SELECT 1 FROM events WHERE run_id = ? AND kind = ? LIMIT 1').get(runId, flag)
-  // Hilferufe sind nie Duplikate: jede Frage braucht eine Antwort.
+  // Help calls are never duplicates: every question needs an answer.
   if (have && lang?.dedupe !== false) return false
-  const voll = `${text}\n\nLauf: ${runId}`
+  const voll = `${text}\n\nRun: ${runId}`
   const ok = lang
     ? await notifyLong(voll, { fileName: lang.fileName, fileContent: lang.fileContent, url: detailUrl(runId) })
     : await notify(voll, detailUrl(runId))
@@ -157,11 +158,11 @@ export async function notifyRun(runId, type, text, lang = null) {
 }
 
 /**
- * git-Hilfsprüfung für den Watcher: Upstream UND Tracking-Zustand.
- * Achtung, die Falle: '%(upstream:track)' ist auch dann leer, wenn der Branch GAR KEINEN
- * Upstream hat — leer allein heißt also nicht "gepusht". Darum kommt der Upstream mit
- * zurück und 'synced' ist nur wahr, wenn es einen Upstream gibt und nichts aussteht.
- * Liefert { upstream, track, synced }.
+ * git helper check for the watcher: upstream AND tracking state.
+ * The trap: '%(upstream:track)' is also empty when the branch has NO upstream
+ * at all — empty alone does not mean "pushed". Hence the upstream comes back
+ * too and 'synced' is only true when an upstream exists and nothing is pending.
+ * Returns { upstream, track, synced }.
  */
 export async function branchSyncState(repoPath, branch) {
   const r = await sh('git', ['-C', repoPath, 'for-each-ref',

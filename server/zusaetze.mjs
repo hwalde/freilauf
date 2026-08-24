@@ -1,22 +1,24 @@
-// cc-hub — Zusatz-Skills: wählbare Arbeitsanweisungen für Läufe und Agenten.
+// cc-hub — extra skills: selectable work instructions for runs and agents.
 //
-// BEWUSST kein .claude/skills-Ordner: dort würde jede claude-Instanz den Skill
-// automatisch laden. Diese Skills (z. B. „unlazy" gegen faule kleine Modelle) sollen
-// nur wirken, wenn sie beim Anlegen eines Agenten oder Laufs ANGEHAKT wurden — dann
-// bekommt der Prompt eine Zeile, die auf die SKILL.md (voller Pfad) verweist.
+// DELIBERATELY not a .claude/skills folder: there every claude instance would
+// load the skill automatically. These skills (e.g. "unlazy" against lazy small
+// models) shall only take effect when they were CHECKED while creating an
+// agent or run — the prompt then gets a line pointing at the SKILL.md (full
+// path).
 //
-// Ablage: ~/agents/zusaetze/<name>/SKILL.md — außerhalb des Repos; installiert wird
-// über setup/02-install-scripts.sh (git clone, Commit-gepinnt). Jeder Ordner mit
-// einer SKILL.md taucht automatisch als Häkchen in den Formularen auf.
+// Location: ~/agents/zusaetze/<name>/SKILL.md — outside the repo; installed by
+// setup/02-install-scripts.sh (git clone, commit-pinned). Every folder with a
+// SKILL.md automatically appears as a checkbox in the forms.
 import { readdirSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { t } from './i18n.mjs'
 
 export function zusaetzeDir() {
   return process.env.CCHUB_ZUSAETZE_DIR ?? join(homedir(), 'agents', 'zusaetze')
 }
 
-/** Frontmatter-Felder (name, description) aus einer SKILL.md — tolerant, ohne YAML-Parser. */
+/** Frontmatter fields (name, description) from a SKILL.md — tolerant, no YAML parser. */
 function frontmatter(text) {
   const m = String(text).match(/^---\n([\s\S]*?)\n---/)
   const out = {}
@@ -29,9 +31,10 @@ function frontmatter(text) {
 }
 
 /**
- * Verfügbare Zusatz-Skills: [{ name, titel, beschreibung, pfad }].
- * 'name' ist der Ordnername (das ist auch, was in der DB steht), 'pfad' der volle
- * Pfad zur SKILL.md. Fehlt der Ordner ganz, gibt es schlicht keine Häkchen.
+ * Available extra skills: [{ name, titel, beschreibung, pfad }].
+ * 'name' is the folder name (which is also what goes in the DB), 'pfad' the
+ * full path to the SKILL.md. If the folder is missing, there are simply no
+ * checkboxes.
  */
 export function zusatzSkills() {
   const dir = zusaetzeDir()
@@ -50,18 +53,19 @@ export function zusatzSkills() {
 }
 
 /**
- * Auswahl aus einem Formular (Checkboxen 'skills', mehrfach) prüfen und als JSON
- * für die DB liefern. Unbekannte Namen fliegen raus — in der DB steht nur, was es
- * wirklich gibt; null statt '[]', damit Bestandszeilen unauffällig bleiben.
+ * Validate the selection from a form (checkboxes 'skills', multiple) and
+ * return it as JSON for the DB. Unknown names are dropped — only what really
+ * exists ends up in the DB; null instead of '[]' so legacy rows stay
+ * inconspicuous.
  */
 export function skillsAusFormular(b) {
-  // parseForm legt Mehrfach-Checkboxen unter '<name>_list' ab; JSON-Aufrufer können
-  // auch direkt eine Liste schicken.
+  // parseForm puts multi-checkboxes under '<name>_list'; JSON callers may also
+  // send a list directly.
   const roh = Array.isArray(b.skills_list) ? b.skills_list
     : b.skills == null ? [] : Array.isArray(b.skills) ? b.skills : [b.skills]
   const bekannt = new Set(zusatzSkills().map(s => s.name))
   const gewaehlt = [...new Set(roh.filter(s => bekannt.has(s)))].map(name => {
-    // Regler-Wert (z. B. Tiefe) aus dem zugehörigen Select — nur gültige Werte.
+    // Dial value (e.g. depth) from the matching select — valid values only.
     const wert = String(b[`skill_regler_${name}`] ?? '').trim()
     const erlaubt = (REGLER[name]?.optionen ?? []).some(([v]) => v !== '' && v === wert)
     return erlaubt ? `${name}:${wert}` : name
@@ -73,22 +77,23 @@ export function skillListe(skillsJson) {
   try { return JSON.parse(skillsJson || '[]') } catch { return [] }
 }
 
-// ---- Regler je Skill --------------------------------------------------------
-// Manche Skills haben einen dokumentierten Drehknopf. Bei unlazy ist das die
-// Depth-Tree-Tiefe: SKILL.md nennt „tree N" als expliziten Trigger, und
-// references/method.md verspricht „Honor an explicit tree N request". Tiefe ≤3
-// arbeitet solo in einer Session, ≥4 orchestriert mit plan.md, eigenen Gates je
-// Teilaufgabe und paralleler Vergabe (OWNS:/rolling dispatch).
-// Gespeichert wird der Wert im Eintrag selbst: "unlazy" oder "unlazy:4".
+// ---- dials per skill --------------------------------------------------------
+// Some skills have a documented knob. For unlazy that is the depth-tree depth:
+// SKILL.md names "tree N" as an explicit trigger, and references/method.md
+// promises "Honor an explicit tree N request". Depth ≤3 works solo in one
+// session, ≥4 orchestrates with plan.md, own gates per subtask and parallel
+// dispatch (OWNS:/rolling dispatch).
+// The value is stored in the entry itself: "unlazy" or "unlazy:4".
+// Labels/options are i18n keys, resolved when rendering.
 const REGLER = {
   unlazy: {
-    label: 'Arbeitstiefe',
+    labelKey: 'skills.depth_label',
     optionen: [
-      ['', 'Skill entscheidet'],
-      ['2', 'Tiefe 2 — solo, schnell'],
-      ['3', 'Tiefe 3 — solo, gründlich'],
-      ['4', 'Tiefe 4 — orchestriert, parallele Teilaufgaben'],
-      ['5', 'Tiefe 5 — maximal (teuer und langsam!)'],
+      ['', 'skills.depth_auto'],
+      ['2', 'skills.depth_2'],
+      ['3', 'skills.depth_3'],
+      ['4', 'skills.depth_4'],
+      ['5', 'skills.depth_5'],
     ],
   },
 }
@@ -98,56 +103,56 @@ export function eintragWert(eintrag) {
   const w = String(eintrag).split(':')[1]
   return w && /^\d$/.test(w) ? w : null
 }
-/** Anzeige-Text für die Detailseite: "unlazy (Tiefe 4)" statt "unlazy:4". */
+/** Display text for the detail page: "unlazy (depth 4)" instead of "unlazy:4". */
 export function skillAnzeige(skillsJson) {
   return skillListe(skillsJson).map(e => {
     const w = eintragWert(e)
-    return w ? `${eintragName(e)} (Tiefe ${w})` : eintragName(e)
+    return w ? `${eintragName(e)} (${t('skills.depth_short', { n: w })})` : eintragName(e)
   })
 }
 
 /**
- * Prompt-Zusatz für die gewählten Skills. Der Lauf trägt eine KOPIE der Auswahl —
- * verschwindet ein Skill später von der Platte, sagt der Zusatz das ehrlich, statt
- * auf eine tote Datei zu verweisen.
+ * Prompt addition for the selected skills. The run carries a COPY of the
+ * selection — if a skill later disappears from disk, the addition says so
+ * honestly instead of pointing at a dead file.
  */
 export function skillPromptZusatz(skillsJson) {
   const namen = skillListe(skillsJson)
   if (!namen.length) return ''
   const vorhanden = new Map(zusatzSkills().map(s => [s.name, s]))
-  const zeilen = ['Arbeitsweise (gewählte Zusatz-Skills):']
+  const zeilen = ['Working method (selected extra skills):']
   for (const eintrag of namen) {
     const n = eintragName(eintrag), wert = eintragWert(eintrag)
     const s = vorhanden.get(n)
     if (s) {
-      zeilen.push(`- Lies ZUERST die Datei ${s.pfad} vollständig und wende die dort beschriebene`
-        + ` Arbeitsweise während des GESAMTEN Auftrags an. Dateiverweise darin sind relativ zu ${join(s.pfad, '..')}.`)
-      // unlazy: „tree N" ist der dokumentierte Trigger für die Depth-Tree-Tiefe.
+      zeilen.push(`- FIRST read the file ${s.pfad} completely and apply the working method described`
+        + ` there during the ENTIRE task. File references in it are relative to ${join(s.pfad, '..')}.`)
+      // unlazy: "tree N" is the documented trigger for the depth-tree depth.
       if (wert && n === 'unlazy') {
-        zeilen.push(`  Für diesen Auftrag ist ausdrücklich "tree ${wert}" angefordert — nutze den Depth Tree mit Tiefe ${wert}.`)
+        zeilen.push(`  For this task "tree ${wert}" is explicitly requested — use the depth tree with depth ${wert}.`)
       }
     } else {
-      zeilen.push(`- (Skill '${n}' war gewählt, liegt aber nicht mehr unter ${zusaetzeDir()} — überspringen.)`)
+      zeilen.push(`- (Skill '${n}' was selected but no longer exists under ${zusaetzeDir()} — skip it.)`)
     }
   }
   return zeilen.join('\n')
 }
 
-/** Anzeige-Häkchen für die Formulare (Einzellauf + Agent). */
+/** Checkbox markup for the forms (single run + agent). */
 export function skillFelder(skillsJson) {
   const eintraege = new Map(skillListe(skillsJson).map(e => [eintragName(e), eintragWert(e)]))
   const skills = zusatzSkills()
   if (!skills.length) return ''
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
-  return `<fieldset><legend>Zusatz-Skills (opt-in, landen als Anweisung im Prompt)</legend>
+  return `<fieldset><legend>${esc(t('skills.legend'))}</legend>
   ${skills.map(s => {
     const regler = REGLER[s.name]
     const wert = eintraege.get(s.name) ?? ''
     return `<label class="chk"><input type="checkbox" name="skills" value="${esc(s.name)}" ${eintraege.has(s.name) ? 'checked' : ''}>
     <b>${esc(s.titel)}</b>${s.beschreibung ? ` — <span class="dim">${esc(s.beschreibung.slice(0, 180))}</span>` : ''}</label>
-    ${regler ? `<label class="chk skill-regler">↳ ${esc(regler.label)}
-      <select name="skill_regler_${esc(s.name)}">${regler.optionen.map(([v, t]) =>
-        `<option value="${esc(v)}" ${v === wert ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>` : ''}`
+    ${regler ? `<label class="chk skill-regler">↳ ${esc(t(regler.labelKey))}
+      <select name="skill_regler_${esc(s.name)}">${regler.optionen.map(([v, key]) =>
+        `<option value="${esc(v)}" ${v === wert ? 'selected' : ''}>${esc(t(key))}</option>`).join('')}</select></label>` : ''}`
   }).join('')}
   </fieldset>`
 }

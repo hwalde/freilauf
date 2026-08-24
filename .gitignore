@@ -11,3 +11,6 @@ opencode.json
 .env
 *.pem
 *.key
+
+# Local Claude Code state (never commit)
+.claude/settings.local.json

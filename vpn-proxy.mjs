@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 /**
- * TLS-Reverse-Proxy vor cc-hub (Planung 5).
+ * TLS reverse proxy in front of cc-hub (Planung 5).
  *
- *  - KEIN Host-Rewrite: cc-hub kennt keine Loopback-Sperre, die Anfrage geht
- *    unverändert an 127.0.0.1 durch.
- *  - Rebinding-/Cross-Site-Fence: Host MUSS in der Allowlist stehen,
- *    Origin muss exakt zur angefragten Authority passen, Sec-Fetch-Site: cross-site
- *    wird abgelehnt.
- *  - WebSocket-Upgrade wird durchgereicht (Terminal im Browser, Planung 7.4).
+ *  - NO host rewrite: cc-hub has no loopback restriction, the request passes
+ *    through to 127.0.0.1 unchanged.
+ *  - Rebinding/cross-site fence: the Host MUST be in the allowlist,
+ *    the Origin must match the requested authority exactly, Sec-Fetch-Site: cross-site
+ *    is rejected.
+ *  - WebSocket upgrades are passed through (terminal in the browser, Planung 7.4).
  *
- * Zugangsberechtigung liefert WireGuard: der Proxy bindet ausdrücklich NUR an
- * die wg-Adresse — fällt die Firewall aus, bleibt der Dienst trotzdem dicht.
+ * Access authorization is provided by WireGuard: the proxy explicitly binds ONLY to
+ * the wg address — if the firewall fails, the service still stays closed.
  */
 import http from 'node:http'
 import https from 'node:https'
@@ -18,8 +18,8 @@ import { readFileSync } from 'node:fs'
 
 const BIND = process.env.CCHUB_VPN_BIND
 if (!BIND) {
-  console.error('[cc-hub-vpn] CCHUB_VPN_BIND ist nicht gesetzt (die VPN-Adresse, an die der Proxy bindet).')
-  console.error('[cc-hub-vpn] Absichtlich kein Default: an 0.0.0.0 darf dieser Dienst nie geraten.')
+  console.error('[cc-hub-vpn] CCHUB_VPN_BIND is not set (the VPN address the proxy binds to).')
+  console.error('[cc-hub-vpn] Deliberately no default: this service must never end up on 0.0.0.0.')
   process.exit(1)
 }
 const PORT = Number(process.env.CCHUB_VPN_PORT ?? 8790)
@@ -36,21 +36,21 @@ const ALLOWED_HOSTS = (process.env.CCHUB_ALLOWED_HOSTS ?? `${BIND}:${PORT}`)
 
 for (const entry of ALLOWED_HOSTS) {
   if (!/^[a-z0-9.\-]+(:\d+)?$|^\[[0-9a-f:]+\](:\d+)?$/.test(entry)) {
-    console.error(`[cc-hub-vpn] CCHUB_ALLOWED_HOSTS: ${JSON.stringify(entry)} ist keine host[:port]-Authority`)
+    console.error(`[cc-hub-vpn] CCHUB_ALLOWED_HOSTS: ${JSON.stringify(entry)} is not a host[:port] authority`)
     process.exit(1)
   }
 }
 if (ALLOWED_HOSTS.length === 0) {
-  console.error('[cc-hub-vpn] CCHUB_ALLOWED_HOSTS ist leer — so käme keine Anfrage durch')
+  console.error('[cc-hub-vpn] CCHUB_ALLOWED_HOSTS is empty — no request could get through')
   process.exit(1)
 }
 
 /**
- * Eine per Link aus einer anderen App geöffnete Seite meldet 'cross-site'. Dieser eine
- * Fall ist ungefährlich und soll durch: DNS-Rebinding fängt die Host-Allowlist ab, und
- * CSRF betrifft zustandsändernde Anfragen — eine Top-Level-GET-Navigation ist keine.
- * 'dest=document' schließt Frames aus, das Verfahren deckt also weiterhin ab:
- * fetch/XHR, Formular-POSTs, iframes und WebSockets von fremden Seiten.
+ * A page opened via a link from another app reports 'cross-site'. This one case is
+ * harmless and is meant to pass: DNS rebinding is caught by the host allowlist, and
+ * CSRF concerns state-changing requests — a top-level GET navigation is not one.
+ * 'dest=document' excludes frames, so the mechanism still covers:
+ * fetch/XHR, form POSTs, iframes and WebSockets from foreign pages.
  */
 function isTopLevelNavigation(method, headers) {
   return (method === 'GET' || method === 'HEAD')
@@ -58,16 +58,16 @@ function isTopLevelNavigation(method, headers) {
     && headers['sec-fetch-dest'] === 'document'
 }
 
-/** Grund der Ablehnung, oder null wenn die Anfrage durchdarf. Nur zum Loggen. */
+/** Reason for rejection, or null if the request may pass. Only used for logging. */
 function rejectReason(method, headers) {
   const host = (headers.host ?? '').toLowerCase()
-  if (!ALLOWED_HOSTS.includes(host)) return `Host '${host}' nicht in der Allowlist`
+  if (!ALLOWED_HOSTS.includes(host)) return `Host '${host}' not in the allowlist`
   if (headers['sec-fetch-site'] === 'cross-site' && !isTopLevelNavigation(method, headers)) {
-    return 'Sec-Fetch-Site: cross-site (keine Top-Level-Navigation)'
+    return 'Sec-Fetch-Site: cross-site (not a top-level navigation)'
   }
   const origin = headers.origin
   if (origin !== undefined && origin !== `https://${host}` && origin !== `http://${host}`) {
-    return `Origin '${origin}' passt nicht zu Host '${host}'`
+    return `Origin '${origin}' does not match host '${host}'`
   }
   return null
 }
@@ -76,7 +76,7 @@ function acceptedAuthority(method, headers) {
   return rejectReason(method, headers) === null ? (headers.host ?? '').toLowerCase() : undefined
 }
 
-/** 403 mit Begründung ins Journal — sonst rätselt man im Browser vor sich hin. */
+/** Log the 403 with its reason to the journal — otherwise you sit in the browser guessing. */
 function logReject(req) {
   const h = req.headers
   console.warn(`[cc-hub-vpn] 403 ${req.method} ${req.url} — ${rejectReason(req.method, h)}`
@@ -95,7 +95,7 @@ const server = https.createServer(options, (req, res) => {
   if (acceptedAuthority(req.method, req.headers) === undefined) {
     logReject(req)
     res.writeHead(403, { 'content-type': 'text/plain' })
-    res.end('forbidden: unerwarteter Host oder Origin\n')
+    res.end('forbidden: unexpected host or origin\n')
     return
   }
   const upstream = http.request({
@@ -114,7 +114,7 @@ const server = https.createServer(options, (req, res) => {
   req.pipe(upstream)
 })
 
-// WebSocket-Upgrade: Handshake weiterreichen, danach roher Socket-Pipe.
+// WebSocket upgrade: forward the handshake, then a raw socket pipe.
 server.on('upgrade', (req, socket, head) => {
   if (acceptedAuthority(req.method, req.headers) === undefined) {
     logReject(req)
@@ -149,7 +149,7 @@ server.on('upgrade', (req, socket, head) => {
 
 server.on('error', (err) => {
   if (err.code === 'EADDRNOTAVAIL') {
-    console.error(`[cc-hub-vpn] ${BIND} existiert nicht — läuft das VPN-Interface?`)
+    console.error(`[cc-hub-vpn] ${BIND} does not exist — is the VPN interface up?`)
   } else {
     console.error(`[cc-hub-vpn] ${err.message}`)
   }
@@ -158,7 +158,7 @@ server.on('error', (err) => {
 
 server.listen(PORT, BIND, () => {
   console.log(`[cc-hub-vpn] ${BIND}:${PORT} -> http://${LOOPBACK_AUTHORITY}`)
-  console.log(`[cc-hub-vpn] erlaubte Authorities: ${ALLOWED_HOSTS.join(', ')}`)
+  console.log(`[cc-hub-vpn] allowed authorities: ${ALLOWED_HOSTS.join(', ')}`)
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

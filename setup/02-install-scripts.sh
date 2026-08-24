@@ -1,42 +1,42 @@
 #!/usr/bin/env bash
-# 02-install-scripts.sh — installiert die cc-hub-Scripte nach ~/.local/bin
-# und das opencode-Plugin. KEINE Admin-Rechte nötig.
+# 02-install-scripts.sh — installs the cc-hub scripts into ~/.local/bin
+# and the opencode plugin. NO admin rights required.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "==> cc-Scripte nach ~/.local/bin"
+echo "==> cc scripts into ~/.local/bin"
 mkdir -p "$HOME/.local/bin"
-for s in cc-start cc-attach cc-kill cc-help cc-report cchub; do
+for s in cc-start cc-attach cc-kill cc-help cc-report cc-oc-sync-agents cchub; do
     install -m 755 "$ROOT/bin/$s" "$HOME/.local/bin/$s"
     echo "    $s"
 done
 
-echo "==> opencode-Plugin (session.idle / session.error → cc-report)"
+echo "==> opencode plugin (session.idle / session.error → cc-report)"
 mkdir -p "$HOME/.config/opencode/plugins"
 cat > "$HOME/.config/opencode/plugins/cc-hub.js" <<'EOF'
-// cc-hub-Plugin: meldet idle/error eines opencode-Laufs an den Hub (Planung 7.1).
+// cc-hub plugin: reports idle/error of an opencode run to the hub (Planung 7.1).
 //
-// WICHTIG zur Form: opencode erwartet eine FABRIK — eine Funktion, die die Hooks
-// zurueckgibt. Exportiert die Datei stattdessen direkt einen 'event'-Hook, scheitert
-// der config-Hook ("undefined is not an object (evaluating 'N.config')") und opencode
-// stirbt danach beim Auflisten der Provider mit "Unexpected server error".
-// Das legt opencode KOMPLETT lahm, auch ausserhalb von cc-hub.
+// IMPORTANT about the shape: opencode expects a FACTORY — a function that returns
+// the hooks. If the file instead exports an 'event' hook directly, the config hook
+// fails ("undefined is not an object (evaluating 'N.config')") and opencode then
+// dies while listing the providers with "Unexpected server error".
+// That cripples opencode COMPLETELY, even outside of cc-hub.
 export const CcHub = async ({ $ }) => {
   const runId = process.env.CC_RUN_ID
-  // Ohne CC_RUN_ID laeuft opencode nicht unter cc-hub — dann bleibt alles unberuehrt.
+  // Without CC_RUN_ID, opencode is not running under cc-hub — then leave everything untouched.
   if (!runId) return {}
 
   const melden = async (...args) => {
-    try { await $`cc-report ${args}`.quiet().nothrow() } catch { /* Meldung ist Beiwerk */ }
+    try { await $`cc-report ${args}`.quiet().nothrow() } catch { /* reporting is best-effort */ }
   }
 
   return {
     event: async ({ event }) => {
       if (event?.type === 'session.idle') await melden('_idle')
-      // session.error: Rate-Limit, Provider-Fehler, Auth … Frueher ging das als 'failed'
-      // an den Hub und beendete den Lauf — auch wenn opencode nach dem Retry weiterlief
-      // (z. B. Fehler in einer Subagent-Session). Jetzt: Vorfall oeffnen, Lauf laeuft
-      // weiter; stirbt der Prozess wirklich, faengt das der Watcher ueber pane_dead.
+      // session.error: rate limit, provider failure, auth … This used to go to the hub
+      // as 'failed' and ended the run — even when opencode kept running after the retry
+      // (e.g. an error in a subagent session). Now: open an incident, the run keeps
+      // going; if the process really dies, the watcher catches that via pane_dead.
       if (event?.type === 'session.error') {
         const e = event.properties?.error ?? event.error
         const text = typeof e === 'string' ? e
@@ -48,11 +48,11 @@ export const CcHub = async ({ $ }) => {
 }
 EOF
 
-echo "==> Zusatz-Skills nach ~/agents/zusaetze (opt-in je Agent/Lauf, KEIN Auto-Laden)"
-# Bewusst NICHT unter .claude/skills: dort wuerde jede claude-Instanz den Skill
-# automatisch laden. cc-hub bietet die Ordner hier als Haekchen im Formular an und
-# schreibt bei Auswahl einen Verweis auf die SKILL.md in den Prompt.
-# Commit-gepinnt: Updates sind eine bewusste Entscheidung (Pin anheben), kein Zufall.
+echo "==> Extra skills into ~/agents/zusaetze (opt-in per agent/run, NO auto-loading)"
+# Deliberately NOT under .claude/skills: there, every claude instance would load the
+# skill automatically. cc-hub offers these folders as checkboxes in the form and, on
+# selection, writes a reference to the SKILL.md into the prompt.
+# Commit-pinned: updates are a deliberate decision (bump the pin), not an accident.
 UNLAZY_PIN="754d9a68109e39b836cc72a39fb9a823f9d6b613"
 ZUSAETZE="$HOME/agents/zusaetze"
 mkdir -p "$ZUSAETZE"
@@ -63,4 +63,4 @@ git -C "$ZUSAETZE/unlazy" fetch -q origin
 git -C "$ZUSAETZE/unlazy" checkout -q "$UNLAZY_PIN"
 echo "    unlazy @ $(git -C "$ZUSAETZE/unlazy" rev-parse --short HEAD) OK"
 
-echo "==> Fertig. Weiter mit: ./setup/03-install-services.sh"
+echo "==> Done. Continue with: ./setup/03-install-services.sh"

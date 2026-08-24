@@ -1,26 +1,35 @@
-// cc-hub — kleines Vanilla-JS: Repo-Umschalter, Terminal-Client (xterm.js), Formular-Helfer.
+// cc-hub — small vanilla JS: repo switcher, terminal client (xterm.js), form helpers.
+// UI strings come from window.CCHUB_I18N (injected by the layout); English
+// fallbacks are inlined so the file also works standalone.
 (function () {
   'use strict'
 
-  // ---- Repo-Umschalter im Seitenkopf: ?repo=… an die aktuelle Seite hängen ----
+  var I18N = window.CCHUB_I18N || {}
+  function T(key, fallback, params) {
+    var raw = I18N[key] || fallback
+    return String(raw).replace(/\{(\w+)\}/g, function (_, k) {
+      return params && params[k] !== undefined ? String(params[k]) : '{' + k + '}'
+    })
+  }
+
+  // ---- repo switcher in the header: append ?repo=… to the current page ----
   const repoSwitch = document.getElementById('repo-switch')
   if (repoSwitch) {
     repoSwitch.addEventListener('change', () => {
       const u = new URL(location.href)
       u.searchParams.set('repo', repoSwitch.value)
-      // Bei festen Pfaden (/agents/edit?id=…) repo einfach ergänzen.
       location.href = u.pathname + u.search
     })
   }
 
-  // ---- Zeitplan-Auswahl: immer nur den Block der gewählten Art zeigen ----
+  // ---- schedule selection: only show the block of the chosen kind ----
   const kindSel = document.getElementById('schedule-kind')
   if (kindSel) {
     const bloecke = Array.from(document.querySelectorAll('.zp'))
     const sync = () => bloecke.forEach(b => { b.hidden = b.dataset.kind !== kindSel.value })
     kindSel.addEventListener('change', sync)
     sync()
-    // Startwoche nur zeigen, wenn der Takt sie überhaupt braucht.
+    // Only show the anchor week when the interval needs it at all.
     const takt = document.querySelector('select[name=schedule_weeks]')
     const anker = document.querySelector('input[name=schedule_anchor]')?.closest('label')
     if (takt && anker) {
@@ -30,10 +39,10 @@
     }
   }
 
-  // ---- Provider- und Modellauswahl ----
-  // Die Liste kommt NACH dem Rendern per fetch: hängt eine Provider-API, steht trotzdem
-  // sofort ein Textfeld da, in das man den Slug direkt tippen kann. Die Suchfunktion
-  // erledigt <datalist> von sich aus (Substring-Filter beim Tippen).
+  // ---- provider and model selection ----
+  // The list arrives AFTER rendering via fetch: if a provider API hangs, a
+  // text field is still there immediately to type the slug into. The search is
+  // <datalist>'s own substring filter while typing.
   const provSel = document.getElementById('prov')
   if (provSel) {
     const modelInput = document.getElementById('model')
@@ -47,21 +56,22 @@
 
     const provLabel = document.getElementById('prov-label')
     const provHint = document.getElementById('prov-hint')
-    const zeitText = (iso) => { try { return new Date(iso).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) } catch { return '' } }
+    const zeitText = (iso) => { try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) } catch { return '' } }
 
-    // Jede Harness kann andere Provider — claude gar keinen (dort gibt es nur das Abo).
-    // Deshalb wird die Auswahl bei jedem Harness-Wechsel neu geholt, statt eine feste
-    // Liste anzubieten, in der die Hälfte nicht funktioniert.
+    // Every harness can use different providers — subscription-based ones none
+    // at all (there is only the account). Hence the selection is re-fetched on
+    // every harness change instead of offering a fixed list of which half
+    // would not work.
     async function ladeProvider() {
-      const harness = harnessSel?.value ?? 'claude'
+      const harness = harnessSel?.value ?? ''
       const gewaehlt = provSel.dataset.gewaehlt || provSel.value || ''
       try {
         const j = await (await fetch('/api/providers?harness=' + encodeURIComponent(harness))).json()
-        if (harness === 'claude' || harness === 'cursor') {
-          // claude und cursor laufen über ihr Abo: kein Provider, dafür direkt die
-          // Modelle des Kontos. Bei cursor kommt die Liste aus 'cursor-agent models'
-          // und trägt den Denk-Aufwand schon in der ID — deshalb bleibt das
-          // Effort-Feld dort leer und ausgeblendet.
+        if (j.subscription) {
+          // Subscription harnesses (claude, cursor): no provider, the models
+          // of the account instead. For cursor the list comes from
+          // 'cursor-agent models' and already carries the effort level in the
+          // ID — hence the effort field stays empty and hidden there.
           provLabel.hidden = true
           provSel.value = ''
           provHint.textContent = ''
@@ -69,16 +79,16 @@
           return
         }
         provLabel.hidden = false
-        provSel.innerHTML = '<option value="">— keiner: Modell frei eintippen —</option>' +
+        provSel.innerHTML = '<option value="">' + T('js.provider_none', '— none: type the model slug —') + '</option>' +
           j.provider.map(p => '<option value="' + p.id + '">' + p.label +
             (p.hinweis ? ' (' + p.hinweis + ')' : '') + '</option>').join('')
         if (j.provider.some(p => p.id === gewaehlt)) provSel.value = gewaehlt
         provHint.textContent = j.provider.length
-          ? 'nur Provider, für die hier auch Zugangsdaten vorliegen'
-          : 'für diese Harness sind keine Zugangsdaten hinterlegt — Modell frei eintippen'
+          ? T('js.providers_with_creds', 'only providers with credentials, enabled for this coding agent')
+          : T('js.no_creds', 'no providers available for this coding agent — type the model freely')
         await ladeModelle()
       } catch {
-        provHint.textContent = 'Providerliste nicht abrufbar — Modell frei eintippen'
+        provHint.textContent = T('js.provider_list_unreachable', 'provider list unreachable — type the model freely')
       }
     }
 
@@ -86,42 +96,42 @@
       const quelle = erzwingen ?? provSel.value
       liste.innerHTML = ''
       if (!quelle) { hinweis.textContent = ''; return }
-      hinweis.textContent = 'lade Modelle …'
+      hinweis.textContent = T('js.loading_models', 'loading models …')
       try {
         const r = await fetch('/api/models?provider=' + encodeURIComponent(quelle) +
           '&harness=' + encodeURIComponent(harnessSel?.value ?? ''))
         const j = await r.json()
-        if (!j.ok) { hinweis.textContent = 'Liste nicht erreichbar (' + j.error + ') — Modell-Slug bitte direkt eintippen.'; return }
+        if (!j.ok) { hinweis.textContent = T('js.list_unreachable', 'List unreachable ({err}) — type the model slug directly.', { err: j.error }); return }
         liste.innerHTML = j.models.map(m =>
           '<option value="' + m.id + '">' + (m.name !== m.id ? m.name : '') +
-          (m.frei ? ' · frei' : '') + (m.ctx ? ' · ' + Math.round(m.ctx / 1000) + 'k' : '') +
-          // Cursors Fast-Modus ist teurer und nicht der Regelfall — sichtbar machen,
-          // statt ihn wie eine gleichwertige Variante aussehen zu lassen.
-          (m.fast ? ' · FAST (teurer)' : '') +
-          (m.tools ? '' : ' · ohne Tools') + '</option>').join('')
-        // 'katalog' heißt: die Liste kommt aus dem Anbieter-Katalog statt aus dem lokalen
-        // opencode — dann kann darin stehen, was hier mangels Schlüssel gar nicht läuft.
+          (m.frei ? ' · ' + T('js.free', 'free') : '') + (m.ctx ? ' · ' + Math.round(m.ctx / 1000) + 'k' : '') +
+          // Cursor's fast mode is more expensive and not the default — make it
+          // visible instead of letting it look like an equal variant.
+          (m.fast ? ' · ' + T('js.fast_tag', 'FAST (more expensive)') : '') +
+          (m.tools ? '' : ' · ' + T('js.no_tools', 'no tools')) + '</option>').join('')
+        // 'katalog' means: the list comes from the vendor catalog instead of the
+        // local opencode — it may then contain models that will not run here
+        // without a key.
         const ausKatalog = j.models.some(m => m.katalog)
-        // Bei cursor beantwortet die Modellwahl zugleich die Effort-Frage — das
-        // Denk-Aufwand-Feld bleibt deshalb aus. Ohne diesen Satz sucht man es.
+        // For cursor the model choice also answers the effort question — the
+        // effort field therefore stays off. Without this sentence you search for it.
         const cursorNote = (harnessSel?.value === 'cursor')
-          ? ' · Der Denk-Aufwand steckt in der ID (…-low/-medium/-high/-xhigh/-max);'
-            + ' IDs mit „-fast“ sind Cursors Schnellmodus — im Regelfall die Variante ohne.'
+          ? ' · ' + T('js.cursor_note', 'The reasoning effort is part of the ID (…-low/-medium/-high/-xhigh/-max); IDs ending in “-fast” are cursor’s fast mode — the default is the variant without.')
           : ''
-        hinweis.textContent = j.models.length + ' Modelle' +
-          (j.stand ? ' · Stand ' + zeitText(j.stand) : '') +
-          (j.veraltet ? ' (Liste gerade nicht erreichbar, zeige den letzten Stand)' : '') +
-          (ausKatalog ? ' · aus dem Anbieter-Katalog: nicht alles davon ist hier ohne Schlüssel nutzbar' : '') +
+        hinweis.textContent = T('js.models_count', '{n} models', { n: j.models.length }) +
+          (j.stand ? ' · ' + T('js.as_of', 'as of {time}', { time: zeitText(j.stand) }) : '') +
+          (j.veraltet ? ' ' + T('js.stale', '(list currently unreachable, showing the last state)') : '') +
+          (ausKatalog ? ' · ' + T('js.from_catalog', 'from the vendor catalog: not everything in it is usable here without a key') : '') +
           cursorNote +
-          ' · Tippen filtert, eigener Slug ist jederzeit erlaubt.'
+          ' · ' + T('js.type_filter', 'Typing filters; a custom slug is always allowed.')
       } catch (err) {
-        hinweis.textContent = 'Liste nicht erreichbar (' + err.message + ') — Modell-Slug bitte direkt eintippen.'
+        hinweis.textContent = T('js.list_unreachable', 'List unreachable ({err}) — type the model slug directly.', { err: err.message })
       }
     }
 
     function syncRouting() {
-      // Serving-Provider lässt sich nur bei opencode pro Lauf durchreichen; hermes
-      // kennt dafür ausschließlich einen globalen Eintrag in ~/.hermes/config.yaml.
+      // The serving provider can only be passed through per run for opencode;
+      // hermes only knows a global entry in ~/.hermes/config.yaml for this.
       const moeglich = harnessSel?.value === 'opencode' && provSel.value === 'openrouter'
       routing.hidden = !moeglich
       if (!moeglich && pin) pin.checked = false
@@ -133,10 +143,10 @@
     const effHint = document.getElementById('effort-hint')
 
     /**
-     * Denk-Aufwand: Feld nur zeigen, wenn diese Kombination wirklich Stufen kennt.
-     * Ausblenden statt ausgrauen — ein graues Feld erklärt nichts, und ein Feld, das
-     * nichts bewirkt, ist schlimmer als keines: bei opencode und hermes verpufft eine
-     * ungültige Stufe lautlos.
+     * Effort: only show the field when this combination really knows levels.
+     * Hide instead of graying out — a gray field explains nothing, and a field
+     * that does nothing is worse than none: with opencode and hermes an
+     * invalid level fizzles silently.
      */
     async function ladeEffort() {
       if (!effLabel) return
@@ -152,7 +162,7 @@
         }
         const merken = effSel.dataset.gewaehlt || effSel.value || ''
         effLabel.hidden = false
-        effSel.innerHTML = '<option value="">— Standard' + (j.standard ? ' (' + j.standard + ')' : '') + ' —</option>' +
+        effSel.innerHTML = '<option value="">' + T('js.effort_default', '— default{d} —', { d: j.standard ? ' (' + j.standard + ')' : '' }) + '</option>' +
           j.stufen.map(x => '<option value="' + x + '">' + x + '</option>').join('')
         effSel.value = j.stufen.includes(merken) ? merken : ''
         effHint.textContent = j.hinweis ?? ''
@@ -164,21 +174,22 @@
     let timer
     async function ladeEndpunkte() {
       if (!pin?.checked || !modelInput.value.trim()) return
-      orProv.innerHTML = '<option value="">lade …</option>'
+      orProv.innerHTML = '<option value="">' + T('js.loading', 'loading …') + '</option>'
       try {
         const r = await fetch('/api/or-endpoints?model=' + encodeURIComponent(modelInput.value.trim()))
         const j = await r.json()
         if (!j.ok || !j.endpoints.length) {
-          orProv.innerHTML = '<option value="">— keine Angaben, Slug unten eintippen —</option>'
+          orProv.innerHTML = '<option value="">' + T('js.no_endpoints', '— no data, type the slug below —') + '</option>'
           return
         }
-        // Wert ist IMMER der tag: der Anzeigename ist nicht eindeutig (mehrere Regionen
-        // heißen gleich), man würde sonst einen anderen Anbieter festnageln als gedacht.
+        // The value is ALWAYS the tag: the display name is not unique (several
+        // regions share a name), you would otherwise pin a different vendor
+        // than intended.
         orProv.innerHTML = j.endpoints.map(ep =>
           '<option value="' + ep.tag + '">' + ep.name + ' — ' + ep.tag +
-          (ep.uptime != null ? ' (' + Math.round(ep.uptime) + '% Uptime)' : '') + '</option>').join('')
+          (ep.uptime != null ? ' (' + Math.round(ep.uptime) + '% ' + T('js.uptime', 'uptime') + ')' : '') + '</option>').join('')
       } catch {
-        orProv.innerHTML = '<option value="">— nicht abrufbar —</option>'
+        orProv.innerHTML = '<option value="">' + T('js.not_fetchable', '— not fetchable —') + '</option>'
       }
     }
 
@@ -199,9 +210,9 @@
     if (pin?.checked) ladeEndpunkte()
   }
 
-  // ---- Text in Session senden / Lauf beenden (Detailseite) ----
-  // NICHT async: 'onsubmit="return cchubSend(...)"' bekäme sonst ein Promise zurück —
-  // immer truthy, und der Browser würde das Formular zusätzlich klassisch abschicken.
+  // ---- send text into a session / end run (detail page) ----
+  // NOT async: 'onsubmit="return cchubSend(...)"' would otherwise receive a
+  // promise — always truthy, and the browser would also submit classically.
   window.cchubSend = function (form, url) {
     const ta = form.querySelector('textarea')
     if (!ta.value.trim()) return false
@@ -210,41 +221,41 @@
     const btn = form.querySelector('button')
     if (btn) btn.disabled = true
     fetch(url, { method: 'POST', body })
-      .then(r => { if (!r.ok) alert('Senden fehlgeschlagen: HTTP ' + r.status) })
-      .catch(err => alert('Senden fehlgeschlagen: ' + err.message))
+      .then(r => { if (!r.ok) alert(T('js.send_failed', 'Send failed: ') + 'HTTP ' + r.status) })
+      .catch(err => alert(T('js.send_failed', 'Send failed: ') + err.message))
       .finally(() => { if (btn) btn.disabled = false })
     ta.value = ''
     return false
   }
   window.cchubKill = function (id) {
-    if (!confirm('Diesen Lauf wirklich beenden?')) return false
-    fetch(`/api/runs/${id}/kill`, { method: 'POST' }).then(() => location.reload())
+    if (!confirm(T('js.kill_confirm', 'Really end this run?'))) return false
+    fetch('/api/runs/' + id + '/kill', { method: 'POST' }).then(() => location.reload())
     return false
   }
 
-  // ---- Terminal: xterm.js + Resize-Frame \0{cols},{rows} (Planung 7.4) ----
-  // xterm.js stellt die Globals 'Terminal' und 'FitAddon' bereit — nicht 'Term'.
+  // ---- terminal: xterm.js + resize frame \0{cols},{rows} (planning 7.4) ----
+  // xterm.js provides the globals 'Terminal' and 'FitAddon' — not 'Term'.
   const termBox = document.getElementById('term')
   if (!termBox || typeof Terminal === 'undefined' || typeof FitAddon === 'undefined') return
 
   const runMatch = location.pathname.match(/^\/runs\/([0-9a-f-]{36})$/)
   if (!runMatch) return
-  // Ohne tmux-Session gäbe es nur einen 404 beim Handshake und einen leeren Kasten.
+  // Without a tmux session there would only be a 404 at the handshake and an empty box.
   if (termBox.dataset.session === '0') {
-    termBox.textContent = 'Keine tmux-Session mehr — der Verlauf steht unten im Log.'
+    termBox.textContent = T('js.no_session', 'No tmux session anymore — the history is in the log below.')
     termBox.classList.add('dim')
     return
   }
-  // data-live kommt aus pages.mjs und meint dasselbe wie dort: laufender Status UND
-  // offene tmux-Session. Früher stand hier ein innerHTML.includes('live') — das hätte
-  // bei einem Lauf namens „live-…" oder dem Wort im Report Schreibrechte auf eine tote
-  // Session gegeben. Ohne Session bleibt es beim Zusehen; 'ro' muss explizit '0' sein,
-  // der Server ist fail-closed.
+  // data-live comes from pages.mjs and means the same as there: running status
+  // AND open tmux session. Earlier an innerHTML.includes('live') sat here —
+  // that would have granted write access to a dead session for a run named
+  // "live-…" or the word in a report. Without a session it stays view-only;
+  // 'ro' must be explicitly '0', the server is fail-closed.
   const live = termBox.dataset.live === '1'
   const ro = live ? '&ro=0' : '&ro=1'
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   let ws
-  try { ws = new WebSocket(`${proto}://${location.host}/term?run=${runMatch[1]}${ro}`) } catch { return }
+  try { ws = new WebSocket(proto + '://' + location.host + '/term?run=' + runMatch[1] + ro) } catch { return }
 
   const fitAddon = new FitAddon.FitAddon()
   const term = new Terminal({ cursorBlink: true, scrollback: 5000 })
@@ -258,8 +269,8 @@
 
   ws.onmessage = (ev) => term.write(typeof ev.data === 'string' ? ev.data : '')
   ws.onopen = sendSize
-  ws.onclose = () => term.write('\r\n\x1b[90m— Verbindung geschlossen —\x1b[0m\r\n')
-  ws.onerror = () => term.write('\r\n\x1b[90m— Terminal nicht erreichbar (Session beendet?) —\x1b[0m\r\n')
+  ws.onclose = () => term.write('\r\n\x1b[90m' + T('js.conn_closed', '— connection closed —') + '\x1b[0m\r\n')
+  ws.onerror = () => term.write('\r\n\x1b[90m' + T('js.term_unreachable', '— terminal unreachable (session ended?) —') + '\x1b[0m\r\n')
   term.onData(d => { if (ws.readyState === WebSocket.OPEN && live) ws.send(d) })
 
   new ResizeObserver(() => {

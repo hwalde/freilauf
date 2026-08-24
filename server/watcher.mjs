@@ -1,6 +1,6 @@
-// cc-hub — Watcher (Planung 4.4, 4.5, 4.7): Beobachtung der Läufe über tmux,
-// Transkript/DB der Harnesses und inbox-Fallback; Auffälligkeiten (Ampel), Budget-Retry,
-// Kosten-Schätzung, Auto-Schließen nach 3 Tagen, Worktree-Aufräumen.
+// cc-hub — watcher (planning 4.4, 4.5, 4.7): observes runs via tmux, the harnesses'
+// transcript/DB and the inbox fallback; anomalies (traffic light), budget retry,
+// cost estimation, auto-close after 3 days, worktree cleanup.
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -11,6 +11,8 @@ import { claudeGateBlocked, openrouterGateBlocked, claudeQuota } from './quota.m
 import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText } from './detect.mjs'
 import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, offeneVorfaelle, detektorLog, msVon } from './incidents.mjs'
 import { pruefeTreffer, pruefLlmAktiv } from './pruefer.mjs'
+import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
+import { PROVIDER_PLUGINS } from './providers/index.mjs'
 
 let timer = null
 
@@ -21,14 +23,14 @@ export function startWatcher() {
 export function stopWatcher() { clearInterval(timer); timer = null }
 
 /**
- * Läufe, die nie eine Session bekommen haben. Passiert, wenn der Hub mitten im
- * Startvorgang beendet wird (Neustart des Dienstes, Reboot, Absturz): der Datensatz
- * steht dann auf 'running', hat aber weder Session noch Worktree — die Übersicht
- * zeigt einen Lauf, den es nicht gibt, und das Terminal kann sich nirgends anhängen.
+ * Runs that never got a session. Happens when the hub is terminated in the middle
+ * of the start-up sequence (service restart, reboot, crash): the record is then
+ * stuck on 'running' but has neither a session nor a worktree — the overview
+ * shows a run that does not exist, and the terminal has nothing to attach to.
  *
- * 'gnadenfristSek' schützt davor, einen Lauf abzuräumen, der gerade eben erst
- * angelegt wurde und dessen cc-start noch arbeitet. Beim Start des Hubs ist die
- * Frist 0: was dort steht, stammt zwangsläufig aus einem früheren Prozess.
+ * 'gnadenfristSek' (grace period in seconds) guards against tearing down a run
+ * that was created just now and whose cc-start is still working. At hub start-up
+ * the grace period is 0: whatever is there must come from an earlier process.
  */
 export function verwaisteLaeufeAbschliessen(gnadenfristSek = 300) {
   const rows = db.prepare(`
@@ -38,10 +40,10 @@ export function verwaisteLaeufeAbschliessen(gnadenfristSek = 300) {
   `).all(`-${Math.max(0, gnadenfristSek)} seconds`)
   for (const run of rows) {
     db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), report_md=? WHERE id=?`)
-      .run('Start wurde unterbrochen: der Hub war beendet, bevor eine tmux-Session stand '
-        + '(Dienst-Neustart, Reboot oder Absturz). Es wurde nichts gestartet — '
-        + '„Lauf wiederholen" setzt neu auf.', run.id)
-    addEvent(run.id, 'failed', { grund: 'Start unterbrochen, keine Session' })
+      .run('Start was interrupted: the hub shut down before a tmux session existed '
+        + '(service restart, reboot or crash). Nothing was started — '
+        + '"Retry run" sets up anew.', run.id)
+    addEvent(run.id, 'failed', { grund: 'start interrupted, no session' })
   }
   return rows.length
 }
@@ -62,7 +64,7 @@ export async function tick() {
   await cleanupWorktrees()
 }
 
-// ---------- inbox-Fallback (cc-report konnte den Hub nicht erreichen) ----------
+// ---------- inbox fallback (cc-report could not reach the hub) ----------
 async function collectInboxes() {
   let dirs = []
   try { dirs = readdirSync(RUNS_DIR) } catch { return }
@@ -77,28 +79,28 @@ async function collectInboxes() {
     for (const line of lines) {
       try { await handleReport(id, JSON.parse(line)) } catch (e) { console.error('[inbox]', e.message) }
     }
-    // verarbeitet löschen
+    // clear what has been processed
     writeFileSync(f, '')
   }
 }
 
 /**
- * Lebt die Session noch? Nur has-session beantwortet das ehrlich.
- * 'tmux display -p -t "=name"' liefert für eine NICHT existierende Session Exit 0 mit
- * leerer Ausgabe — darauf gebaute Prüfungen greifen deshalb nie.
+ * Is the session still alive? Only has-session answers that honestly.
+ * 'tmux display -p -t "=name"' returns exit 0 with empty output for a session that
+ * does NOT exist — checks built on that therefore never trigger.
  */
 async function sessionLebt(session) {
   const r = await sh('tmux', ['has-session', '-t', `=${session}`])
   return r.ok
 }
 
-// ---------- einzelner Lauf ----------
+// ---------- single run ----------
 async function watchRun(run) {
   let st = { pane_dead: '?', dead_status: '', dead_time: '', pid: '', cmd: '' }
   if (run.tmux_session) {
     if (!await sessionLebt(run.tmux_session)) {
-      // Session ganz weg (Reboot, manuelles cc-kill). Gleich als geschlossen vermerken,
-      // sonst wartet das Worktree-Aufräumen ewig auf tmux_closed_at.
+      // Session gone entirely (reboot, manual cc-kill). Mark it closed right away,
+      // otherwise the worktree cleanup waits forever for tmux_closed_at.
       addEventOnce(run.id, 'anomaly:session_gone')
       db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(run.id)
     } else {
@@ -115,58 +117,58 @@ async function watchRun(run) {
     handleReport(run.id, { kind: '_pane_died', exit: st.dead_status }).catch(() => {})
   }
 
-  // Aktivität + Tokens je Harness
+  // Activity + tokens per harness
   const act = await measureActivity(run)
   if (act.lastActivity) {
     db.prepare('UPDATE runs SET last_activity_at=?, tokens_in=?, tokens_out=?, cost_usd=COALESCE(?, cost_usd) WHERE id=?')
       .run(act.lastActivity, act.tokensIn, act.tokensOut, act.costUsd ?? null, run.id)
   }
 
-  // ---- Ampel-Logik (Planung 4.5) ----
+  // ---- traffic-light logic (planning 4.5) ----
   const now = Date.now()
   const startedMs = Date.parse(run.started_at.replace(' ', 'T') + 'Z')
   const expectedMs = run.expected_minutes * 60_000
   const lastAct = run.last_activity_at ? Date.parse(run.last_activity_at.replace(' ', 'T') + 'Z') : startedMs
 
   if (run.status === 'running' || run.status === 'waiting_help') {
-    // gelb: keine Aktivität seit 15 min
+    // yellow: no activity for 15 min
     if (now - lastAct > 15 * 60_000 && st.pane_dead !== '1') {
       addEventOnce(run.id, 'anomaly:no_activity')
     }
-    // gelb: 80 % der Erwartung erreicht, kein Report
+    // yellow: 80 % of the expected duration reached, no report
     if (now - startedMs > 0.8 * expectedMs && !run.report_md) {
       addEventOnce(run.id, 'anomaly:soft_overrun')
     }
-    // rot: Erwartung überschritten ohne Report/Fortschritt
+    // red: expected duration exceeded without report/progress
     if (now - startedMs > expectedMs && !run.report_md) {
       const hadProgress = db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind='progress'`).get(run.id)
       if (!hadProgress) {
         addEventOnce(run.id, 'anomaly:overrun')
         await notifyRun(run.id, 'overrun',
-          `🔴 Lauf überschreitet die erwartete Dauer (${run.expected_minutes} min) ohne Report.`)
+          `🔴 Run exceeds the expected duration (${run.expected_minutes} min) without a report.`)
       }
     }
-    // Rate-Limit / Provider-Fehler: Hooks melden sich selbst (reports.mjs); hier die
-    // beiden Quellen, die der Hub von außen liest — Transkript und pipe-pane-Log.
+    // Rate limit / provider errors: hooks report themselves (reports.mjs); here are
+    // the two sources the hub reads from the outside — transcript and pipe-pane log.
     await transkriptScannen(run)
     await logScannen(run)
-    // rot: quota.json ≥ 100 %
+    // red: quota.json ≥ 100 %
     const q = claudeQuota()
     if ((q.five ?? 0) >= 100 || (q.seven ?? 0) >= 100) addEventOnce(run.id, 'anomaly:quota_full')
   }
 
 }
 
-/** Pfad des Claude-Transkripts: steht dank --session-id vorab fest (Planung 7.1). */
+/** Path of the Claude transcript: known in advance thanks to --session-id (planning 7.1). */
 export function claudeTranskriptPfad(run) {
   const dirName = run.workdir_effective.replaceAll('/', '-')
   return `${process.env.CCHUB_CLAUDE_PROJECTS ?? `${homedir()}/.claude/projects`}/${dirName}/${run.id}.jsonl`
 }
 
-/** Datei ab Offset lesen; liefert { text, size }. Bei zu großem Rückstand nur den Schluss. */
+/** Read a file starting at offset; returns { text, size }. If too far behind, only the tail. */
 function neueBytes(pfad, offset, maxBytes = 2_000_000) {
   const size = statSync(pfad).size
-  // Datei kürzer als der Offset: neu angelegt oder gekappt (Lauf wiederholt) — von vorn.
+  // File shorter than the offset: recreated or truncated (run retried) — start over.
   if (size < offset) offset = 0
   if (size === offset) return { text: '', size, uebersprungen: 0 }
   let von = offset, uebersprungen = 0
@@ -180,10 +182,10 @@ function neueBytes(pfad, offset, maxBytes = 2_000_000) {
 }
 
 /**
- * Claude-Transkript: API-Fehler stehen dort als eigene Zeilen mit isApiErrorMessage
- * und Claudes eigenem Fehler-Enum — so eindeutig wie der Hook, nur ohne Hook. Fängt
- * den Fall, dass der StopFailure-Hook nicht lief, und liefert jedes Vorkommen mit
- * Zeitstempel (Retry-Schleifen werden als anzahl sichtbar).
+ * Claude transcript: API errors appear there as dedicated lines with isApiErrorMessage
+ * and Claude's own error enum — as unambiguous as the hook, just without the hook.
+ * Catches the case where the StopFailure hook did not run, and yields every occurrence
+ * with a timestamp (retry loops become visible as anzahl).
  */
 async function transkriptScannen(run) {
   if (run.harness !== 'claude' || !run.workdir_effective) return
@@ -192,7 +194,7 @@ async function transkriptScannen(run) {
   let chunk
   try { chunk = neueBytes(f, run.transcript_offset ?? 0) } catch { return }
   if (!chunk.text) return
-  // Nur vollständige Zeilen werten; der Rest kommt beim nächsten Durchgang.
+  // Only evaluate complete lines; the remainder comes in the next pass.
   const schnitt = chunk.text.lastIndexOf('\n')
   if (schnitt < 0) return
   const komplett = chunk.text.slice(0, schnitt + 1)
@@ -209,25 +211,25 @@ async function transkriptScannen(run) {
 }
 
 /**
- * pipe-pane-Log (alle Harnesses, für hermes die EINZIGE Quelle): nur die neuen Bytes,
- * Muster je Harness, Treffer zunächst GELB. Rot wird daraus durch Wiederholung oder
- * Stille (vorfaelleBewerten) — oder sofort, wenn das Prüf-LLM es bestätigt.
+ * pipe-pane log (all harnesses, for hermes the ONLY source): only the new bytes,
+ * patterns per harness, hits start out YELLOW. They turn red through repetition or
+ * silence (vorfaelleBewerten) — or immediately, if the check LLM confirms it.
  */
 async function logScannen(run) {
   const logf = join(RUNS_DIR, run.id, 'log.txt')
   if (!existsSync(logf)) return
   let chunk
   try { chunk = neueBytes(logf, run.log_offset ?? 0) } catch { return }
-  if (chunk.uebersprungen) detektorLog(run.id, { art: 'log', hinweis: 'Rückstand übersprungen', bytes: chunk.uebersprungen })
+  if (chunk.uebersprungen) detektorLog(run.id, { art: 'log', hinweis: 'backlog skipped', bytes: chunk.uebersprungen })
   if (!chunk.text) return
   const { treffer, neuerOffset } = scanneNeueBytes(run.harness, chunk.text, chunk.von ?? run.log_offset ?? 0)
   db.prepare('UPDATE runs SET log_offset = ? WHERE id = ?').run(neuerOffset, run.id)
   if (!treffer.length) return
   detektorLog(run.id, { art: 'log', treffer: treffer.map(t => ({ typ: t.typ, zeile: t.zeile })) })
 
-  // Je Typ ein Vorkommen; die Anzahl der Zeilen steckt im Beleg. Sonst macht eine
-  // Retry-Schleife mit 20 Zeilen in einem Durchgang sofort rot — das soll die
-  // Bewertung nach Zeit entscheiden, nicht die Zeilenzahl eines Neuzeichnens.
+  // One occurrence per type; the number of lines is carried in the evidence. Otherwise
+  // a retry loop with 20 lines in a single pass goes red immediately — that decision
+  // belongs to the time-based assessment, not to the line count of a screen redraw.
   const jeTyp = new Map()
   for (const t of treffer) if (!jeTyp.has(t.typ)) jeTyp.set(t.typ, t)
 
@@ -238,7 +240,7 @@ async function logScannen(run) {
     detektorLog(run.id, { art: 'llm', urteil })
   }
 
-  if (urteil && urteil.problem === false) return   // Prüf-LLM: harmlos (Menü, eigener Code …)
+  if (urteil && urteil.problem === false) return   // check LLM: harmless (menu, the agent's own code …)
   for (const [typ, t] of jeTyp) {
     const bestaetigt = urteil && urteil.problem === true && urteil.blockiert === true
     await vorfallMelden(run.id, {
@@ -251,9 +253,9 @@ async function logScannen(run) {
 }
 
 /**
- * Gelbe Log-Vorfälle nach Zeit und Anzahl bewerten: Retry-Schleife oder Stille nach
- * dem Treffer → rot (+ Telegram). Arbeitet der Agent dagegen eine halbe Stunde
- * weiter, ohne dass es wieder auftritt, war es nichts → automatisch geschlossen.
+ * Assess yellow log incidents by time and count: retry loop or silence after the
+ * hit → red (+ Telegram). If, on the other hand, the agent keeps working for half
+ * an hour without it recurring, it was nothing → closed automatically.
  */
 async function vorfaelleBewerten() {
   const rows = db.prepare(`SELECT i.*, r.last_activity_at, r.status FROM incidents i
@@ -266,35 +268,36 @@ async function vorfaelleBewerten() {
     const stufe = bewerteLogTreffer({ anzahl: v.anzahl, erstGesehenMs: msVon(v.erst_gesehen),
       zuletztGesehenMs: zuletzt, letzteAktivitaetMs: letzteAkt, jetztMs: jetzt })
     if (stufe === 'rot') {
-      const grund = v.anzahl >= 2 ? `${v.anzahl}× in kurzer Zeit` : 'seit dem Treffer keine Aktivität mehr'
+      const grund = v.anzahl >= 2 ? `${v.anzahl}× within a short time` : 'no activity since the hit'
       await vorfallEskalieren(v.id, grund)
     } else if (letzteAkt != null && letzteAkt > zuletzt && jetzt - zuletzt > 30 * 60_000) {
-      vorfallVerwerfen(v.id, 'verlaufen: Agent arbeitete weiter')
+      vorfallVerwerfen(v.id, 'expired: agent kept working')
     } else if (!['running', 'waiting_help'].includes(v.status) && jetzt - zuletzt > 30 * 60_000) {
-      vorfallVerwerfen(v.id, 'verlaufen: Lauf beendet')
+      vorfallVerwerfen(v.id, 'expired: run ended')
     }
   }
 }
 
 /**
- * Provider-Puls: unabhängig vom Agenten alle 5 min prüfen, ob die Provider der
- * laufenden Agenten überhaupt antworten. Ein Ausfall wird so auch sichtbar, wenn
- * gerade kein Agent dagegen läuft. Zwei Fehlschläge in Folge = Vorfall (global),
- * Erholung schließt ihn automatisch — der nächste Ausfall öffnet ihn wieder.
+ * Provider pulse: independently of the agents, check every 5 min whether the
+ * providers of the running agents respond at all. An outage thus becomes visible
+ * even when no agent is currently hitting it. Two consecutive failures = incident
+ * (global), recovery closes it automatically — the next outage reopens it.
  */
+// Pulse targets come from the plugins: provider plugins carry their own pulse
+// endpoint, and harness plugins can add extra targets (claude → anthropic).
+// A harness whose pulseId() returns null (cursor: no open endpoint for
+// api2.cursor.sh) is explicitly "not monitored", not "healthy".
 const PULS = {
-  anthropic:  { url: 'https://api.anthropic.com/v1/models', okStatus: [200, 401, 403] },
-  openrouter: { url: 'https://openrouter.ai/api/v1/models', okStatus: [200] },
-  deepseek:   { url: 'https://api.deepseek.com/models', okStatus: [200, 401] },
+  ...Object.fromEntries(Object.entries(PROVIDER_PLUGINS)
+    .filter(([, p]) => p.pulse).map(([id, p]) => [id, p.pulse])),
+  ...Object.assign({}, ...Object.values(HARNESS_PLUGINS).map(p => p.pulseTargets ?? {})),
 }
 const pulsZustand = { zuletztMs: 0, fehlschlaege: {} }
 export function providerVonLauf(run) {
-  if (run.harness === 'claude') return 'anthropic'
-  // cursor läuft über api2.cursor.sh — dafür gibt es keinen offenen Endpunkt, den man
-  // ohne Anmeldung anpingen könnte. Lieber kein Puls als ein erfundener: null heißt
-  // hier ausdrücklich „nicht überwacht", nicht „gesund".
-  if (run.harness === 'cursor') return null
-  return run.provider && PULS[run.provider] ? run.provider : null
+  const plugin = getHarness(run.harness)
+  const id = plugin?.pulseId ? plugin.pulseId(run) : (run.provider ?? null)
+  return id && PULS[id] ? id : null
 }
 async function providerPuls(jetzt = Date.now()) {
   if (process.env.CCHUB_PULS_AUS === '1') return
@@ -309,7 +312,7 @@ async function providerPuls(jetzt = Date.now()) {
     f[name] = ok ? 0 : (f[name] ?? 0) + 1
     const typ = `provider_down:${name}`
     if (!ok && f[name] >= 2) {
-      await vorfallMelden(null, { typ, quelle: 'puls', schwere: 'rot', beleg: `${name}: ${f[name]} Prüfungen in Folge ohne Antwort` })
+      await vorfallMelden(null, { typ, quelle: 'puls', schwere: 'rot', beleg: `${name}: ${f[name]} consecutive checks without a response` })
     } else if (ok) {
       for (const v of offeneVorfaelle(null)) if (v.typ === typ) vorfallVerwerfen(v.id, 'erholt')
     }
@@ -324,7 +327,7 @@ async function pulsPruefen(name) {
   } catch { return false }
 }
 
-/** Claude-Transkript auswerten (Pfad steht dank --session-id vorab fest, Planung 7.1). */
+/** Evaluate the Claude transcript (path known in advance thanks to --session-id, planning 7.1). */
 async function measureActivity(run) {
   const out = { lastActivity: null, tokensIn: 0, tokensOut: 0, costUsd: null }
   if (run.harness === 'claude' && run.workdir_effective) {
@@ -349,7 +352,7 @@ async function measureActivity(run) {
     }
     return out
   }
-  // opencode: session-Store SQLite (Zuordnung über directory + Zeit, Planung 7.1)
+  // opencode: session store SQLite (matched via directory + time, planning 7.1)
   if (run.harness === 'opencode' && run.workdir_effective) {
     try {
       const { DatabaseSync } = await import('node:sqlite')
@@ -367,14 +370,14 @@ async function measureActivity(run) {
     } catch {}
     return out
   }
-  // hermes: state.db sessions (Zuordnung über cwd + Zeit)
+  // hermes: state.db sessions (matched via cwd + time)
   if (run.harness === 'hermes' && run.workdir_effective) {
     try {
       const { DatabaseSync } = await import('node:sqlite')
       const d = new DatabaseSync(`${homedir()}/.hermes/state.db`, { readOnly: true })
       const rows = d.prepare(`SELECT estimated_cost_usd, input_tokens, output_tokens FROM sessions
                               WHERE cwd = ? ORDER BY started_at DESC LIMIT 1`).all()
-      // Spaltennamen können je Version abweichen — defensiv per PRAGMA auflösen.
+      // Column names can differ between versions — resolve defensively via PRAGMA.
       let row = rows[0]
       if (!row) {
         const cols = d.prepare(`SELECT name FROM pragma_table_info('sessions')`).all().map(c => c.name)
@@ -398,7 +401,7 @@ async function measureActivity(run) {
   return out
 }
 
-/** Kosten beim Lauf-Ende: Claude = Delta des 7-Tage-Kontingents in Prozentpunkten → €. */
+/** Costs at run end: Claude = delta of the 7-day quota in percentage points → €. */
 function finishCosts(run) {
   const q = claudeQuota()
   const aboPreis = Number(db.prepare(`SELECT value FROM settings WHERE key='abo_price'`).get()?.value ?? 200) || 200
@@ -411,7 +414,7 @@ function finishCosts(run) {
     .run(q.five, q.seven, costEur, run.id)
 }
 
-// ---------- verschobene Läufe erneut versuchen ----------
+// ---------- retry deferred runs ----------
 async function retryDeferred() {
   const deferred = db.prepare(`SELECT * FROM runs WHERE status='deferred'`).all()
   for (const run of deferred) {
@@ -423,27 +426,28 @@ async function retryDeferred() {
     addEvent(run.id, 'deferred_retry')
     const { launchRun } = await import('./runner.mjs')
     launchRun(run.id).then(r => {
-      if (!r.ok) notifyRun(run.id, 'start_failed', `Start nach Verschiebung fehlgeschlagen: ${r.error}`)
+      if (!r.ok) notifyRun(run.id, 'start_failed', `Start after deferral failed: ${r.error}`)
     }).catch(() => {})
   }
 }
 
 /**
- * Branch-Abgleich NACH dem Ende (gelb: ungepusht; Planung 4.5/7.7).
- * Bewusst ein eigener Durchgang: watchRun() bekommt nur laufende Läufe zu sehen,
- * dort wäre die Prüfung auf 'done'/'failed' nie wahr geworden.
+ * Branch reconciliation AFTER the end (yellow: unpushed; planning 4.5/7.7).
+ * Deliberately its own pass: watchRun() only ever sees running runs, so a check
+ * for 'done'/'failed' there would never have become true.
  */
 /**
- * Ende-Kosten einmalig festhalten (Delta des 7-Tage-Kontingents → €, Planung 4.4).
- * Auch das lief vorher in watchRun() und damit nie: dort kommen nur laufende Läufe an.
+ * Record the end costs once (delta of the 7-day quota → €, planning 4.4).
+ * This too used to live in watchRun() and therefore never ran: only running runs
+ * arrive there.
  */
 async function finishCostsPass() {
   const rows = db.prepare(`SELECT * FROM runs
     WHERE status IN ('done','failed','aborted') AND quota7_end IS NULL`).all()
   for (const run of rows) {
-    // Ein kurzer Lauf ist vorbei, bevor der Watcher ihn das erste Mal sieht — und
-    // danach kommt er nie wieder vorbei (watchRun bekommt nur laufende Läufe).
-    // Ohne diese letzte Messung stünden Tokens und Kosten für immer auf 0.
+    // A short run is over before the watcher sees it for the first time — and after
+    // that it never comes around again (watchRun only receives running runs).
+    // Without this final measurement, tokens and costs would stay at 0 forever.
     const act = await measureActivity(run)
     if (act.tokensIn || act.tokensOut || act.lastActivity) {
       db.prepare(`UPDATE runs SET last_activity_at=COALESCE(?, last_activity_at),
@@ -472,17 +476,17 @@ async function checkFinishedBranches() {
     }
     addEventOnce(run.id, 'anomaly:unpushed', { branch, upstream: upstream || null, track })
     await notifyRun(run.id, 'unpushed', upstream
-      ? `🟡 Branch '${branch}' hat ungepushte Commits.`
-      : `🟡 Branch '${branch}' ist nirgends gepusht (kein Upstream).`)
+      ? `🟡 Branch '${branch}' has unpushed commits.`
+      : `🟡 Branch '${branch}' is not pushed anywhere (no upstream).`)
   }
 }
 
-// ---------- Aufräumen (Planung 4.7) ----------
+// ---------- cleanup (planning 4.7) ----------
 async function closeOldSessions() {
   const retentionDays = Number(db.prepare(`SELECT value FROM settings WHERE key='retention_days'`).get()?.value ?? 3) || 3
   const rows = db.prepare(`SELECT * FROM runs WHERE tmux_session IS NOT NULL AND tmux_closed_at IS NULL`).all()
   for (const run of rows) {
-    if (!await sessionLebt(run.tmux_session)) {   // existiert nicht mehr
+    if (!await sessionLebt(run.tmux_session)) {   // no longer exists
       db.prepare(`UPDATE runs SET tmux_closed_at=datetime('now') WHERE id=?`).run(run.id)
       continue
     }
@@ -500,8 +504,8 @@ async function closeOldSessions() {
 }
 
 async function cleanupWorktrees() {
-  // Entfernen, wenn Branch gepusht (kein [ahead]) oder PR gemerged (nur gh pr view,
-  // Squash-Merge macht git-Ancestor-Checks wertlos — Planung 7.7); sonst behalten.
+  // Remove when the branch is pushed (no [ahead]) or the PR is merged (gh pr view only,
+  // squash merges make git ancestor checks worthless — planning 7.7); otherwise keep.
   const rows = db.prepare(`
     SELECT * FROM runs
     WHERE worktree IS NOT NULL AND status IN ('done','failed','aborted') AND tmux_closed_at IS NOT NULL
@@ -513,19 +517,20 @@ async function cleanupWorktrees() {
     let removable = false
     if (branch) {
       const { synced } = await branchSyncState(repo.path, branch)
-      if (synced) removable = true      // Upstream vorhanden UND nichts ausstehend
+      if (synced) removable = true      // upstream exists AND nothing outstanding
       if (!removable) {
         const pr = await ghPrState(repo.path, branch)
         if (pr === 'MERGED') removable = true
       }
     }
-    // Letzte Sicherung vor 'worktree remove --force': nicht committete Arbeit im Worktree
-    // schlägt jedes 'removable'. Sonst löscht das Aufräumen echte Arbeit.
+    // Last safeguard before 'worktree remove --force': uncommitted work in the worktree
+    // beats any 'removable'. Otherwise the cleanup deletes real work.
     if (removable) {
       const dirty = await sh('git', ['-C', run.worktree, 'status', '--porcelain'])
-      // Die Worktree-Ergänzungen stammen von uns, nicht vom Agenten. Ein Symlink
-      // 'referenz' fällt z. B. nicht unter die Ignore-Regel 'referenz/' (mit Schrägstrich)
-      // und stünde sonst für immer als '?? referenz' da — der Worktree würde nie aufgeräumt.
+      // The worktree extras come from us, not from the agent. A symlink 'referenz',
+      // for example, is not covered by the ignore rule 'referenz/' (with a slash)
+      // and would otherwise sit there as '?? referenz' forever — the worktree would
+      // never get cleaned up.
       const eigene = new Set((repo.extras ?? []).map(x => String(x.path).replace(/\/+$/, '')))
       const fremd = dirty.stdout.split('\n').filter(Boolean)
         .filter(z => !eigene.has(z.slice(3).trim().replace(/\/+$/, '')))

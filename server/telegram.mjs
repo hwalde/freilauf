@@ -1,16 +1,16 @@
-// cc-hub — Telegram-Sender (Planung 7.6): sendMessage mit parse_mode HTML,
-// Link-Preview aus, URL-Button „Zur Detailseite", 429 → retry_after abwarten.
-// Lange Inhalte (Reports) gehen zusätzlich als Datei: Telegram kappt Nachrichten
-// bei 4096 Zeichen, ein Report soll aber VOLLSTÄNDIG ankommen.
+// cc-hub — Telegram sender (planning 7.6): sendMessage with parse_mode HTML,
+// link preview off, URL button "Open detail page", 429 → wait out retry_after.
+// Long content (reports) is additionally sent as a file: Telegram truncates messages
+// at 4096 characters, but a report must arrive COMPLETE.
 import { getSetting } from './db.mjs'
 
 const TEXT_MAX = 4096
 
 function escapeHtml(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }
 
-/** Öffentliche Basis-URL für Buttons: Hostname statt IP, damit der Link im Browser zum Zertifikat passt. */
+/** Public base URL for buttons: hostname instead of IP, so the link matches the certificate in the browser. */
 export function publicBase() {
-  // Ohne CCHUB_PUBLIC_URL zeigen die Buttons ins Leere — der Hinweis steht in env.example.
+  // Without CCHUB_PUBLIC_URL the buttons point nowhere — the note is in env.example.
   return (process.env.CCHUB_PUBLIC_URL
     || `https://127.0.0.1:${process.env.CCHUB_VPN_PORT ?? 8790}`).replace(/\/+$/, '')
 }
@@ -20,7 +20,7 @@ export function detailUrl(runId) {
 
 async function api(method, body, { timeoutMs = 15_000 } = {}) {
   const token = getSetting('telegram_token')
-  if (!token) return { ok: false, grund: 'kein Token' }
+  if (!token) return { ok: false, grund: 'no token' }
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const isForm = body instanceof FormData
@@ -40,7 +40,7 @@ async function api(method, body, { timeoutMs = 15_000 } = {}) {
       await new Promise(r => setTimeout(r, 2000))
     }
   }
-  return { ok: false, grund: 'nicht erreichbar' }
+  return { ok: false, grund: 'unreachable' }
 }
 
 export async function notify(text, url = null) {
@@ -52,14 +52,14 @@ export async function notify(text, url = null) {
     parse_mode: 'HTML',
     link_preview_options: { is_disabled: true },
   }
-  if (url) body.reply_markup = { inline_keyboard: [[{ text: 'Zur Detailseite', url }]] }
+  if (url) body.reply_markup = { inline_keyboard: [[{ text: 'Open detail page', url }]] }
   return (await api('sendMessage', body)).ok
 }
 
 /**
- * Datei mitschicken (Report, Hilferuf-Volltext). 'caption' ≤ 1024 Zeichen laut Telegram.
- * Liefert false, wenn Token/Chat fehlen oder Telegram nicht erreichbar ist — der
- * Aufrufer hat die Kurzfassung dann schon per notify() verschickt.
+ * Send a file along (report, help-request full text). 'caption' ≤ 1024 characters per Telegram.
+ * Returns false when token/chat are missing or Telegram is unreachable — the
+ * caller has already sent the short version via notify() in that case.
  */
 export async function notifyDocument(fileName, content, caption = '', url = null) {
   const chat = getSetting('telegram_chat')
@@ -67,14 +67,14 @@ export async function notifyDocument(fileName, content, caption = '', url = null
   const form = new FormData()
   form.set('chat_id', chat)
   if (caption) { form.set('caption', kuerzen(escapeHtml(caption), 1024)); form.set('parse_mode', 'HTML') }
-  if (url) form.set('reply_markup', JSON.stringify({ inline_keyboard: [[{ text: 'Zur Detailseite', url }]] }))
+  if (url) form.set('reply_markup', JSON.stringify({ inline_keyboard: [[{ text: 'Open detail page', url }]] }))
   form.set('document', new Blob([String(content ?? '')], { type: 'text/markdown' }), fileName)
   return (await api('sendDocument', form, { timeoutMs: 30_000 })).ok
 }
 
 /**
- * Text + ggf. Datei: passt der ganze Text in eine Nachricht, nur die Nachricht.
- * Sonst die Nachricht mit dem Anfang und dazu die vollständige Datei.
+ * Text + file if needed: if the whole text fits into one message, just the message.
+ * Otherwise the message with the beginning plus the complete file.
  */
 export async function notifyLong(text, { fileName = 'report.md', fileContent = null, url = null } = {}) {
   const ok = await notify(text, url)
@@ -88,7 +88,7 @@ export async function notifyLong(text, { fileName = 'report.md', fileContent = n
 
 function kuerzen(s, n) { return s.length > n ? s.slice(0, n - 2) + ' …' : s }
 
-/** Testnachricht aus den Einstellungen. */
+/** Test message from the settings page. */
 export async function sendTest() {
-  return notify('cc-hub: Testnachricht. Der Kanal steht.', detailUrl(null))
+  return notify('cc-hub: test message. The channel works.', detailUrl(null))
 }

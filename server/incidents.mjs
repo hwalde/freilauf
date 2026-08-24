@@ -1,15 +1,14 @@
-// cc-hub — Vorfälle: das Alarm-Modell für Rate-Limits, Provider-Ausfälle und Co.
+// cc-hub — incidents: the alarm model for rate limits, provider outages and the like.
 //
-// Ein Vorfall ist EIN Datensatz je (Lauf, Typ). Er wird eröffnet, zählt weitere
-// Vorkommen mit (anzahl, zuletzt_gesehen), kann vom Menschen gelöst werden — und geht
-// WIEDER auf, wenn das Problem nach dem Lösen erneut auftritt. Wie ein Autoalarm:
-// abschalten geht, aber beim nächsten Einbruch heult er wieder. Telegram feuert beim
-// Eröffnen und bei jedem Wieder-Öffnen, nicht bei jedem einzelnen Vorkommen.
+// An incident is ONE record per (run, type). It gets opened, keeps counting further
+// occurrences (anzahl, zuletzt_gesehen), can be resolved by a human — and REOPENS
+// when the problem occurs again after being resolved. Like a car alarm: you can turn
+// it off, but on the next break-in it wails again. Telegram fires on opening and on
+// every reopening, not on every single occurrence.
 //
-// Jede Entscheidung landet zusätzlich in <run>/detektor.jsonl — damit man später
-// nachvollziehen kann, was gescannt wurde, was getroffen hat und warum etwas (nicht)
-// gemeldet wurde. Rate-Limits lassen sich schlecht nachstellen; das Protokoll ist der
-// Ersatz für den Debugger.
+// Every decision additionally lands in <run>/detektor.jsonl — so one can later trace
+// what was scanned, what matched and why something was (not) reported. Rate limits
+// are hard to reproduce; the log is the substitute for the debugger.
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { addEvent } from './db.mjs'
@@ -17,7 +16,7 @@ import { RUNS_DIR } from './util.mjs'
 import { notify, detailUrl } from './telegram.mjs'
 import { TYP_TEXT } from './detect.mjs'
 
-/** Zeitstempel im DB-Format (UTC, 'YYYY-MM-DD HH:MM:SS'). */
+/** Timestamp in DB format (UTC, 'YYYY-MM-DD HH:MM:SS'). */
 export function dbZeit(ms = Date.now()) {
   return new Date(ms).toISOString().replace('T', ' ').slice(0, 19)
 }
@@ -25,14 +24,14 @@ export function msVon(dbTs) {
   return dbTs ? Date.parse(String(dbTs).replace(' ', 'T') + 'Z') : NaN
 }
 
-/** Protokollzeile für den Detektor — append-only, nie lesen im Betrieb. */
+/** Log line for the detector — append-only, never read during operation. */
 export function detektorLog(runId, eintrag) {
   if (!runId) return
   try {
     const dir = join(RUNS_DIR, runId)
     mkdirSync(dir, { recursive: true })
     appendFileSync(join(dir, 'detektor.jsonl'), JSON.stringify({ ts: new Date().toISOString(), ...eintrag }) + '\n')
-  } catch { /* Protokoll ist Beiwerk, nie ein Grund zu scheitern */ }
+  } catch { /* the log is incidental, never a reason to fail */ }
 }
 
 export function offeneVorfaelle(runId) {
@@ -46,15 +45,15 @@ export function alleVorfaelle(runId) {
 export function vorfall(id) { return db.prepare('SELECT * FROM incidents WHERE id = ?').get(id) }
 
 /**
- * Vorkommen melden. Liefert { vorfall, ereignis } mit ereignis ∈
+ * Report an occurrence. Returns { vorfall, ereignis } with ereignis ∈
  *   'neu' | 'wieder' | 'zusatz' | 'dedupe' | 'eskaliert'
  *
- * - Offener Vorfall gleichen Typs: anzahl++, zuletzt_gesehen; eine Hochstufung
- *   gelb→rot (z. B. Hook bestätigt, was der Log-Scanner nur vermutete) meldet Telegram.
- * - Gelöster Vorfall und das Vorkommen liegt NACH dem Lösen: wieder öffnen + Telegram.
- * - Vorkommen VOR dem Lösen (Nachzügler aus dem Transkript): nur mitzählen.
- * - Zwei Quellen sehen dasselbe Ereignis (Hook + Transkript binnen 90 s): nicht
- *   doppelt zählen.
+ * - Open incident of the same type: anzahl++, zuletzt_gesehen; an upgrade
+ *   yellow→red (e.g. the hook confirms what the log scanner only suspected) notifies Telegram.
+ * - Resolved incident and the occurrence lies AFTER the resolution: reopen + Telegram.
+ * - Occurrence BEFORE the resolution (straggler from the transcript): only count it.
+ * - Two sources see the same event (hook + transcript within 90 s): do not
+ *   count it twice.
  */
 export async function vorfallMelden(runId, { typ, quelle, schwere = 'rot', beleg = null, tsMs = Date.now(), stillMelden = false }) {
   const ts = dbZeit(tsMs)
@@ -73,12 +72,12 @@ export async function vorfallMelden(runId, { typ, quelle, schwere = 'rot', beleg
     ereignis = hoch ? 'eskaliert' : dedupe ? 'dedupe' : 'zusatz'
     row = vorfall(letzter.id)
   } else if (letzter && tsMs <= msVon(letzter.geloest_am)) {
-    // Nachzügler: das Vorkommen ist älter als das Lösen — gehört noch zum alten Vorfall.
+    // Straggler: the occurrence is older than the resolution — still belongs to the old incident.
     db.prepare(`UPDATE incidents SET anzahl = anzahl + 1 WHERE id = ?`).run(letzter.id)
     ereignis = 'zusatz'
     row = vorfall(letzter.id)
   } else if (letzter) {
-    // Wieder-Öffnen: derselbe Datensatz, damit Historie (erst_gesehen, anzahl) erhalten bleibt.
+    // Reopening: the same record, so the history (erst_gesehen, anzahl) is preserved.
     db.prepare(`UPDATE incidents SET geloest_am = NULL, geloest_von = NULL, zuletzt_gesehen = ?,
                 anzahl = anzahl + 1, schwere = ?, quelle = ?, beleg = COALESCE(?, beleg),
                 wieder_geoeffnet = wieder_geoeffnet + 1 WHERE id = ?`)
@@ -100,7 +99,7 @@ export async function vorfallMelden(runId, { typ, quelle, schwere = 'rot', beleg
   return { vorfall: row, ereignis }
 }
 
-/** Hochstufung gelb → rot durch den Watcher (Bewertung nach Zeit/Anzahl). */
+/** Upgrade yellow → red by the watcher (assessment by time/count). */
 export async function vorfallEskalieren(id, grund) {
   const row = vorfall(id)
   if (!row || row.geloest_am !== null || row.schwere === 'rot') return row
@@ -112,7 +111,7 @@ export async function vorfallEskalieren(id, grund) {
   return neu
 }
 
-/** Vorfall vom Menschen gelöst. Ein erneutes Vorkommen danach öffnet ihn wieder. */
+/** Incident resolved by a human. Another occurrence afterwards reopens it. */
 export function vorfallLoesen(id, von = 'web') {
   const row = vorfall(id)
   if (!row || row.geloest_am !== null) return row
@@ -122,12 +121,12 @@ export function vorfallLoesen(id, von = 'web') {
   return vorfall(id)
 }
 
-/** Alle offenen Vorfälle eines Laufs lösen (Knopf „alle lösen"). */
+/** Resolve all open incidents of a run ("resolve all" button). */
 export function vorfaelleLoesen(runId, von = 'web') {
   for (const v of offeneVorfaelle(runId)) vorfallLoesen(v.id, von)
 }
 
-/** Gelber Log-Verdacht, der sich als harmlos herausgestellt hat (Prüf-LLM sagt nein). */
+/** Yellow log suspicion that turned out to be harmless (check LLM says no). */
 export function vorfallVerwerfen(id, grund) {
   const row = vorfall(id)
   if (!row || row.geloest_am !== null) return row
@@ -136,7 +135,7 @@ export function vorfallVerwerfen(id, grund) {
   return vorfall(id)
 }
 
-/** Ampelfarbe allein aus den Vorfällen: 'rot' | 'gelb' | null. */
+/** Traffic-light color from the incidents alone: 'rot' | 'gelb' | null. */
 export function ampelAusVorfaellen(runId) {
   const r = db.prepare(`SELECT schwere FROM incidents WHERE run_id = ? AND geloest_am IS NULL`).all(runId)
   if (r.some(x => x.schwere === 'rot')) return 'rot'
@@ -145,21 +144,21 @@ export function ampelAusVorfaellen(runId) {
 }
 
 async function telegramVorfall(row, ereignis, grund = null) {
-  const kopf = ereignis === 'wieder' ? '🔴 ERNEUT: ' : ereignis === 'eskaliert' ? '🔴 Bestätigt: ' : '🔴 '
+  const kopf = ereignis === 'wieder' ? '🔴 AGAIN: ' : ereignis === 'eskaliert' ? '🔴 Confirmed: ' : '🔴 '
   const name = TYP_TEXT[row.typ] ?? row.typ
   const zeilen = [`${kopf}${name}`]
   if (row.run_id) {
     const run = db.prepare(`SELECT r.harness, r.model, r.provider, a.name AS agent, p.name AS repo
                             FROM runs r LEFT JOIN agents a ON a.id = r.agent_id LEFT JOIN repos p ON p.id = r.repo_id
                             WHERE r.id = ?`).get(row.run_id)
-    if (run) zeilen.push(`Agent: ${run.agent ?? '(Einzellauf)'} · Repo: ${run.repo ?? '?'} · ${run.harness}${run.model ? '/' + run.model : ''}${run.provider ? ' via ' + run.provider : ''}`)
+    if (run) zeilen.push(`Agent: ${run.agent ?? '(single run)'} · Repo: ${run.repo ?? '?'} · ${run.harness}${run.model ? '/' + run.model : ''}${run.provider ? ' via ' + run.provider : ''}`)
   } else {
-    zeilen.push('Global (Provider-Puls), betrifft alle laufenden Agenten.')
+    zeilen.push('Global (provider pulse), affects all running agents.')
   }
-  zeilen.push(`Quelle: ${row.quelle} · seit ${row.erst_gesehen} UTC · zuletzt ${row.zuletzt_gesehen} UTC · ${row.anzahl}×${row.wieder_geoeffnet ? ` · ${row.wieder_geoeffnet}× wieder geöffnet` : ''}`)
-  if (grund) zeilen.push(`Grund: ${grund}`)
-  if (row.beleg) zeilen.push(`Beleg: ${row.beleg}`)
-  if (row.run_id) zeilen.push(`Lauf: ${row.run_id}`)
+  zeilen.push(`Source: ${row.quelle} · since ${row.erst_gesehen} UTC · last ${row.zuletzt_gesehen} UTC · ${row.anzahl}×${row.wieder_geoeffnet ? ` · reopened ${row.wieder_geoeffnet}×` : ''}`)
+  if (grund) zeilen.push(`Reason: ${grund}`)
+  if (row.beleg) zeilen.push(`Evidence: ${row.beleg}`)
+  if (row.run_id) zeilen.push(`Run: ${row.run_id}`)
   const ok = await notify(zeilen.join('\n'), row.run_id ? detailUrl(row.run_id) : detailUrl(null))
   if (row.run_id) addEvent(row.run_id, 'telegram_sent', { type: `incident:${row.typ}`, delivered: ok })
 }

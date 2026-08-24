@@ -1,4 +1,4 @@
-/* cc-hub — schlicht: Tabellen, Formulare, ein Terminal. Rot/Gelb/Grün als einzige Farben. */
+/* cc-hub — plain: tables, forms, one terminal. Red/yellow/green as the only colors. */
 :root { color-scheme: light dark; }
 * { box-sizing: border-box; }
 body { margin: 0; font: 15px/1.45 system-ui, sans-serif; background: #f6f6f4; color: #1c1c1c; }
@@ -37,10 +37,10 @@ ul.events { list-style: none; padding-left: 0; }
 ul.events li { padding: 3px 0; border-bottom: 1px dashed #e4e4e0; }
 #term { height: 480px; background: #000; border-radius: 8px; padding: 4px;
         border: 2px solid transparent; }
-/* Sichtbar machen, wohin die Tastatur gerade geht — sonst tippt man ins Leere. */
+/* Make it visible where keyboard input currently goes — otherwise you type into the void. */
 #term:focus-within { border-color: #2c7a3f; }
 .err { color: #e5484d; } .warn { color: #b98900; } .ok { color: #2c7a3f; }
-/* Zeitplan-Auswahl im Agenten-Formular */
+/* Schedule selection in the agent form */
 fieldset.zeitplan { border: 1px solid #dcdad6; border-radius: 8px; padding: 10px 14px; margin: 6px 0; }
 fieldset.zeitplan legend { padding: 0 6px; font-weight: 600; }
 fieldset.zeitplan .zp[hidden] { display: none; }
@@ -62,7 +62,7 @@ fieldset.zeitplan label[hidden] { display: none; }
   code { background: #2c2f34; }
 }
 
-/* Vorfälle (Rate-Limit, Provider) */
+/* Incidents (rate limit, provider) */
 .vorfall { display:inline-block; padding:1px 6px; border-radius:3px; border:1px solid; margin-right:4px; }
 .vorfall.rot { border-color:#c62828; color:#c62828; }
 .vorfall.gelb { border-color:#b8860b; color:#b8860b; }
@@ -75,3 +75,18 @@ ul.vorfaelle li.geloest { opacity:.6; }
 code.beleg { display:block; white-space:pre-wrap; word-break:break-all; font-size:.85em; margin-top:4px; }
 fieldset { border:1px solid #ccc; padding:8px 12px; margin:8px 0; }
 label.skill-regler { margin-left: 24px; }
+
+/* Setup banner (no coding agent configured yet) — very top, above the header */
+.banner.setup { background: #2f6fed; color: #fff; padding: 10px 16px; margin: 0;
+  border-left: 0; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.banner.setup .btn { background: #fff; color: #2f6fed; }
+
+/* Subscription usage panel (overview) */
+details.usage { background: #fff; padding: 10px 14px; border-radius: 10px; margin-bottom: 14px; }
+details.usage summary { font-weight: 600; cursor: pointer; }
+.usage-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; padding: 5px 0; }
+.usage-row .quota .track { background: #e4e4e0; }
+@media (prefers-color-scheme: dark) {
+  details.usage { background: #202226; }
+  .usage-row .quota .track { background: #3a3f45; }
+}

@@ -1,24 +1,28 @@
-// cc-hub — Erkennung von Rate-Limits und Provider-Fehlern aus Text. Reine Logik,
-// keine Datenbank, kein Dateisystem: alles hier ist mit festen Eingaben testbar.
+// cc-hub — detection of rate limits and provider failures from text. Pure
+// logic: no database, no filesystem — everything here is testable with fixed
+// inputs.
 //
-// Warum das überhaupt nötig ist: bei einem Rate-Limit oder Provider-Ausfall kann der
-// Agent selbst nichts mehr melden — ohne API kein Werkzeugaufruf, also kein cc-report.
-// Die Plattform muss es von außen sehen. Es gibt drei Quellen, in dieser Rangfolge:
+// Why this is needed at all: on a rate limit or provider outage the agent
+// itself can no longer report — without an API there is no tool call, so no
+// cc-report. The platform has to see it from the outside. There are three
+// sources, in this order of reliability:
 //
-//   hook        claude 'StopFailure' (liefert ein festes Fehler-Enum), opencode-Plugin
-//               'session.error'. hermes hat KEINEN Hook für API-Fehler — dessen
-//               'post_api_request' feuert nur nach einer ERFOLGREICHEN Antwort.
-//   transcript  claude-Transkript (JSONL) mit isApiErrorMessage:true + error:<enum>
-//   log         pipe-pane-Mitschnitt der tmux-Session (alle Harnesses). Roh, mit
-//               ANSI-Steuerzeichen, Menütexten und Neuzeichnungen — darum Muster je
-//               Harness und eine Bewertung, ob der Treffer wirklich ein Problem ist.
+//   hook        claude 'StopFailure' (delivers a fixed error enum), opencode
+//               plugin 'session.error'. hermes has NO hook for API errors —
+//               its 'post_api_request' only fires after a SUCCESSFUL response.
+//   transcript  claude transcript (JSONL) with isApiErrorMessage:true + error:<enum>
+//   log         pipe-pane capture of the tmux session (all harnesses). Raw,
+//               with ANSI control codes, menu text and redraws — hence
+//               per-harness patterns (defined in the harness plugins) and an
+//               assessment whether the hit is really a problem.
+import { HARNESS_PLUGINS } from './harnesses/index.mjs'
 
-/** Vorfalltypen. Alles andere wäre Rätselraten — lieber 'unbekannt' als falsch. */
+/** Incident types. Anything else would be guesswork — better 'unbekannt' than wrong. */
 export const TYPEN = ['rate_limit', 'provider_error', 'auth_error', 'billing_error', 'model_error', 'unbekannt']
 
 /**
- * Claudes StopFailure-Enum (Stand 2.1.241, aus dem Binary gelesen) → unser Vorfalltyp.
- * Genau dasselbe Enum steht im Transkript unter 'error'.
+ * Claude's StopFailure enum (as of 2.1.241, read from the binary) → our
+ * incident type. Exactly the same enum appears in the transcript under 'error'.
  */
 const CLAUDE_ENUM = {
   rate_limit: 'rate_limit',
@@ -30,7 +34,7 @@ const CLAUDE_ENUM = {
   billing_error: 'billing_error',
   model_not_found: 'model_error',
   invalid_request: 'model_error',
-  max_output_tokens: null,   // kein Provider-Problem, der Agent läuft weiter
+  max_output_tokens: null,   // not a provider problem, the agent keeps running
   unknown: 'unbekannt',
 }
 export function typVonClaudeFehler(enumWert) {
@@ -39,8 +43,8 @@ export function typVonClaudeFehler(enumWert) {
 }
 
 /**
- * Freitext (opencode-Plugin, Logzeile) → Typ. Reihenfolge ist Absicht: Auth und
- * Billing vor Rate-Limit, weil „402 … rate" o. ä. sonst falsch einsortiert würde.
+ * Free text (opencode plugin, log line) → type. The order is deliberate: auth
+ * and billing before rate limit, otherwise "402 … rate" would be misfiled.
  */
 export function typVonText(text) {
   const t = String(text ?? '')
@@ -52,78 +56,42 @@ export function typVonText(text) {
   return 'unbekannt'
 }
 
-/** ANSI-CSI, OSC (Fenstertitel) und CR entfernen; \r-Neuzeichnungen werden zu Zeilen. */
+/** Strip ANSI CSI, OSC (window titles) and CR; \r redraws become lines. */
 export function terminalText(s) {
   return String(s ?? '')
     .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '')     // OSC … BEL / ST
     .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')            // CSI
-    .replace(/\x1b[@-Z\\-_]/g, '')                         // einzelne ESC-Sequenzen
+    .replace(/\x1b[@-Z\\-_]/g, '')                         // single ESC sequences
     .replace(/\r\n?/g, '\n')
 }
 
 /**
- * Muster je Harness. Jedes Muster ist bewusst ENG: lieber ein Fall weniger als
- * ein Menütext, der Alarm schlägt („Upgrade to Max for higher rate limits" stand in
- * einem Produktivlauf als Rate-Limit in der DB).
+ * Per-harness patterns come from the coding agent plugins (logPatterns) —
+ * adding a harness means adding a plugin file, nothing here. Each pattern set
+ * is deliberately NARROW: better one case fewer than a menu line raising an
+ * alarm ("Upgrade to Max for higher rate limits" once landed in the DB as a
+ * rate limit on a production run).
  */
-const MUSTER = {
-  claude: [
-    // Ausgabe bei Abo-Limit: "You've hit your session limit · resets 8:36pm"
-    { typ: 'rate_limit', re: /you'?ve hit your (session|usage|weekly|daily|5.?hour|7.?day)? ?limit/i },
-    { typ: 'rate_limit', re: /API Error: 429/i },
-    { typ: 'rate_limit', re: /rate_limit_error/i },
-    { typ: 'provider_error', re: /API Error: 5\d\d/i },
-    { typ: 'provider_error', re: /overloaded_error|\bOverloaded\b/ },
-    { typ: 'auth_error', re: /API Error: (401|403)|Please run \/login|OAuth token (has )?expired/i },
-    { typ: 'billing_error', re: /API Error: 402|credit balance is too low/i },
-    { typ: 'provider_error', re: /API Error:.*(fetch failed|socket|ECONN|ETIMEDOUT)/i },
-  ],
-  opencode: [
-    // opencode: AI_APICallError: [Stealth] stealth/ox-alpha is temporarily rate-limited upstream.
-    { typ: 'rate_limit', re: /rate.?limited|rate limit|\b429\b|too many requests/i },
-    { typ: 'auth_error', re: /\b(401|403)\b|unauthori[sz]ed|invalid api key|authentication/i },
-    { typ: 'billing_error', re: /\b402\b|insufficient credits|credit balance/i },
-    { typ: 'provider_error', re: /AI_APICallError|AI_RetryError|ProviderError|stream error|\b5\d\d\b|overloaded|no endpoints|unavailable/i },
-  ],
-  hermes: [
-    // hermes (conversation_loop.py): "⏳ Retrying in 12.0s (rate limited by upstream provider (429))..."
-    //                                "⚠️  API call failed (attempt 2/5): RateLimitError (HTTP 429)"
-    { typ: 'rate_limit', re: /rate.?limited|rate limit|\b429\b|RateLimitError/i },
-    { typ: 'auth_error', re: /AuthenticationError|\b(401|403)\b|invalid api key/i },
-    { typ: 'billing_error', re: /\b402\b|insufficient|billing/i },
-    { typ: 'provider_error', re: /API call failed|Retrying in .*\(|overloaded|\b5\d\d\b|APIConnectionError|InternalServerError|ServiceUnavailable/i },
-  ],
-  // cursor hat wie hermes KEINEN Hook für API-Fehler (das Hook-Enum kennt
-  // beforeShellExecution/afterFileEdit/stop/beforeSubmitPrompt, aber nichts für einen
-  // fehlgeschlagenen Aufruf) — der Log-Scan ist hier die einzige Quelle.
-  // 'Cannot use this model' ist Cursors laute Ablehnung einer unbekannten Modell-ID;
-  // die kommt sofort beim Start und ist ein sicherer Treffer, kein Rauschen.
-  cursor: [
-    { typ: 'rate_limit', re: /rate.?limit|\b429\b|too many requests|usage limit reached|out of (requests|credits)/i },
-    { typ: 'auth_error', re: /\b(401|403)\b|not (logged in|authenticated)|unauthori[sz]ed|please run .?cursor-agent login|invalid api key/i },
-    { typ: 'billing_error', re: /\b402\b|insufficient (credits|funds)|billing|subscription (expired|required)|hard limit/i },
-    { typ: 'model_error', re: /Cannot use this model/i },
-    { typ: 'provider_error', re: /\b5\d\d\b|overloaded|unavailable|connection (error|refused|closed)|ECONNRE|ETIMEDOUT|fetch failed|stream (error|disconnected)/i },
-  ],
-}
+const MUSTER = Object.fromEntries(
+  Object.values(HARNESS_PLUGINS).map(p => [p.id, p.logPatterns ?? []]))
 
 /**
- * Zeilen, die Treffer enthalten, aber KEIN Fehler sind. Hier landet, was in der Praxis
- * schon falsch gezündet hat — plus die naheliegenden Verwandten.
+ * Lines that contain hits but are NOT errors. This collects what has already
+ * misfired in practice — plus the obvious relatives.
  */
 const AUSNAHMEN = [
-  /upgrade to max/i,                       // Claude-Befehlsmenü: "/upgrade … higher rate limits"
-  /\/(upgrade|usage|usage-credits|status|help)\b/,  // Menüzeilen mit Slash-Befehl
-  /^\s*[│|]?\s*(rate|usage) limit(s)?\s*[│|]?\s*$/i, // nackte Überschrift (z. B. /usage-Tabelle)
-  /\bgrep\b|\brg\b|\bsed\b|\bawk\b/,        // der Agent sucht selbst nach dem Wort
-  /cc-hub|detect\.mjs|incidents|test\/(unit|e2e)/, // Arbeit an genau diesem Code
-  /\b(describe|it|test|expect)\(/,          // Testcode
-  /retry_after|retryAfter|rateLimit[A-Z]|rate_limit_hits|RATE_LIMIT/, // Bezeichner in Quelltext
+  /upgrade to max/i,                       // Claude command menu: "/upgrade … higher rate limits"
+  /\/(upgrade|usage|usage-credits|status|help)\b/,  // menu lines with slash command
+  /^\s*[│|]?\s*(rate|usage) limit(s)?\s*[│|]?\s*$/i, // bare heading (e.g. /usage table)
+  /\bgrep\b|\brg\b|\bsed\b|\bawk\b/,        // the agent itself searches for the word
+  /cc-hub|detect\.mjs|incidents|test\/(unit|e2e)/, // work on exactly this code
+  /\b(describe|it|test|expect)\(/,          // test code
+  /retry_after|retryAfter|rateLimit[A-Z]|rate_limit_hits|RATE_LIMIT/, // identifiers in source
 ]
 
 /**
- * Durchsucht bereinigte Zeilen mit den Mustern einer Harness.
- * Liefert [{ typ, zeile, index }] — jede Zeile höchstens einmal (erstes Muster gewinnt).
+ * Scans cleaned lines with the patterns of one harness.
+ * Returns [{ typ, zeile, index }] — each line at most once (first pattern wins).
  */
 export function scanneZeilen(harness, zeilen) {
   const muster = MUSTER[harness] ?? []
@@ -140,26 +108,26 @@ export function scanneZeilen(harness, zeilen) {
 }
 
 /**
- * Neue Bytes eines Logs scannen. 'text' ist der Ausschnitt ab dem alten Offset.
- * Die letzte, evtl. unvollständige Zeile wird NICHT gewertet und auch nicht
- * „verbraucht": der neue Offset zeigt auf ihren Anfang, sie kommt beim nächsten
- * Durchgang vollständig. Sonst zerreißt ein Zeilenumbruch mitten im Wort den Treffer.
+ * Scan new bytes of a log. 'text' is the chunk starting at the old offset.
+ * The last, possibly incomplete line is NOT evaluated and also not "consumed":
+ * the new offset points at its start, so it arrives complete on the next pass.
+ * Otherwise a line break in the middle of a word would tear the hit apart.
  */
 export function scanneNeueBytes(harness, text, altOffset) {
   const sauber = terminalText(text)
   const letzterUmbruch = sauber.lastIndexOf('\n')
   if (letzterUmbruch < 0) return { treffer: [], neuerOffset: altOffset }
   const komplett = sauber.slice(0, letzterUmbruch)
-  // Der Offset zählt ROHE Bytes; die Bereinigung ändert Längen. Darum wird der Rest
-  // über die rohe Länge der unvollständigen Schlusszeile zurückgerechnet.
+  // The offset counts RAW bytes; the cleanup changes lengths. So the remainder
+  // is computed from the raw length of the incomplete trailing line.
   const rohRest = Buffer.byteLength(text.slice(text.lastIndexOf('\n') + 1), 'utf8')
   const neuerOffset = altOffset + Buffer.byteLength(text, 'utf8') - rohRest
   return { treffer: scanneZeilen(harness, komplett.split('\n')), neuerOffset }
 }
 
 /**
- * Claude-Transkript (JSONL): API-Fehler stehen als eigene Zeilen mit
- * isApiErrorMessage:true und error:<enum>. Liefert [{ typ, ts, text }].
+ * Claude transcript (JSONL): API errors appear as own lines with
+ * isApiErrorMessage:true and error:<enum>. Returns [{ typ, ts, text }].
  */
 export function transkriptFehler(jsonlText) {
   const out = []
@@ -174,20 +142,20 @@ export function transkriptFehler(jsonlText) {
       const text = typeof c === 'string' ? c
         : Array.isArray(c) ? c.map(x => x?.text ?? '').join(' ') : ''
       out.push({ typ, ts: j.timestamp ?? null, text: text.trim().slice(0, 300), enum: j.error ?? null })
-    } catch { /* halbe Zeile — nächster Durchgang */ }
+    } catch { /* half a line — next pass */ }
   }
   return out
 }
 
 /**
- * Bewertung eines LOG-Treffers (Hooks und Transkript brauchen das nicht, die sind
- * eindeutig). Dein Kriterium: ein echtes Limit steht AM ENDE — danach passiert nichts
- * mehr. Ein Treffer, hinter dem der Agent weiterarbeitet, war ein Retry oder ein
- * Menütext.
+ * Assessment of a LOG hit (hooks and transcript do not need this, they are
+ * unambiguous). The criterion: a real limit stands AT THE END — nothing
+ * happens after it. A hit after which the agent keeps working was a retry or a
+ * menu line.
  *
- *   rot   – mehrere Treffer in kurzer Zeit (Retry-Schleife) ODER seit dem letzten
- *           Treffer Stille (keine Aktivität) über 'stilleMs'
- *   gelb  – erster, einzelner Treffer: vormerken, Ampel gelb, KEIN Telegram
+ *   rot   – several hits in a short time (retry loop) OR silence (no activity)
+ *           since the last hit for longer than 'stilleMs'
+ *   gelb  – first, single hit: note it, traffic light yellow, NO Telegram
  */
 export function bewerteLogTreffer({ anzahl, erstGesehenMs, zuletztGesehenMs, letzteAktivitaetMs, jetztMs,
   fensterMs = 10 * 60_000, stilleMs = 5 * 60_000, schwelle = 2 }) {
@@ -197,14 +165,18 @@ export function bewerteLogTreffer({ anzahl, erstGesehenMs, zuletztGesehenMs, let
   return 'gelb'
 }
 
-/** Menschlicher Name je Typ (für Übersicht, Telegram). */
+/**
+ * Human-readable name per type (overview, Telegram). English fallback — the
+ * web UI translates via i18n key `incident.<typ>` and only uses this map when
+ * a key is missing.
+ */
 export const TYP_TEXT = {
-  rate_limit: 'Rate-Limit',
-  provider_error: 'Provider-Fehler',
-  auth_error: 'Anmeldung/Token',
-  billing_error: 'Guthaben/Abrechnung',
-  model_error: 'Modell nicht verfügbar',
-  provider_down: 'Provider nicht erreichbar',
-  llm_warnung: 'Prüf-LLM-Warnung',
-  unbekannt: 'API-Fehler',
+  rate_limit: 'Rate limit',
+  provider_error: 'Provider error',
+  auth_error: 'Login/token',
+  billing_error: 'Credits/billing',
+  model_error: 'Model unavailable',
+  provider_down: 'Provider unreachable',
+  llm_warnung: 'Check-LLM warning',
+  unbekannt: 'API error',
 }

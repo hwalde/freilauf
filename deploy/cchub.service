@@ -1,14 +1,14 @@
-# cc-hub Web-UI + Scheduler + Watcher (nur 127.0.0.1)
+# cc-hub web UI + scheduler + watcher (127.0.0.1 only)
 [Unit]
-Description=cc-hub (Agenten-Verwaltung, nur 127.0.0.1)
+Description=cc-hub (agent management, 127.0.0.1 only)
 After=network.target
 
 [Service]
 Type=simple
 Environment=NODE_OPTIONS=--disable-warning=ExperimentalWarning
-# systemd-User-Dienste starten mit einem minimalen PATH ohne ~/.local/bin. Ohne diese
-# Zeile findet cc-start weder 'claude' noch 'opencode'/'hermes', und der Agent in der
-# tmux-Session erbt denselben PATH — 'cc-report' wäre dort ebenfalls unauffindbar.
+# systemd user services start with a minimal PATH that lacks ~/.local/bin. Without this
+# line, cc-start finds neither 'claude' nor 'opencode'/'hermes', and the agent in the
+# tmux session inherits the same PATH — 'cc-report' would be unfindable there as well.
 Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=%h/.config/cc-hub/env
 ExecStart=/usr/bin/node %h/projects/cc-hub/server/hub.mjs

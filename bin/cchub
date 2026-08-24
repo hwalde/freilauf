@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cchub — Steuerung des cc-hub. Planung 4.8 + 9.
+# cchub — controls the cc-hub. Planung 4.8 + 9.
 #   cchub on|off|status|url|logs|restart|stop|start
 #   cchub pipeline on|off|status
 set -euo pipefail
@@ -8,24 +8,24 @@ ENV_FILE="$HOME/.config/cc-hub/env"
 [[ -f "$ENV_FILE" ]] && . "$ENV_FILE"
 LOCAL_PORT="${CCHUB_LOCAL_PORT:-8791}"
 VPN_PORT="${CCHUB_VPN_PORT:-8790}"
-VPN_BIND="${CCHUB_VPN_BIND:-<VPN-IP nicht gesetzt>}"
+VPN_BIND="${CCHUB_VPN_BIND:-<VPN IP not set>}"
 
 usage() {
     cat <<'EOF'
-Usage: cchub <befehl>
+Usage: cchub <command>
 
-  on            VPN-Proxy starten  → Website von außen erreichbar (WireGuard)
-  off           VPN-Proxy stoppen  → Website nur noch lokal (fail-closed)
-  status        Zustand aller drei Schalter + Prozesse
-  url           VPN-URL ausgeben
+  on            start the VPN proxy  → website reachable from outside (WireGuard)
+  off           stop the VPN proxy   → website local-only again (fail-closed)
+  status        state of all three switches + processes
+  url           print the VPN URL
   logs          journalctl --user -u cchub -f
-  start|stop|restart   Hub-Prozess steuern (Scheduler/Watcher/UI)
+  start|stop|restart   control the hub process (scheduler/watcher/UI)
 
-  pipeline on|off|status   globales Und-Gatter für geplante Agent-Starts
+  pipeline on|off|status   global AND gate for scheduled agent starts
 
-Schalter-Modell: Zugang (VPN-Proxy) · Pipeline (Scheduler-Gatter) · Agent (aktiv-Flag
-in der UI). Hub, Scheduler, Watcher, Telegram und laufende Agenten laufen unabhängig
-vom Zugangs-Schalter weiter.
+Switch model: access (VPN proxy) · pipeline (scheduler gate) · agent (active flag
+in the UI). Hub, scheduler, watcher, Telegram and running agents keep running
+independently of the access switch.
 EOF
 }
 
@@ -35,7 +35,7 @@ const {DatabaseSync}=require("node:sqlite");
 const {join}=require("node:path");
 const db=new DatabaseSync(join(process.env.HOME,".local/share/cc-hub/cc-hub.db"));
 const r=db.prepare("SELECT value FROM settings WHERE key=?").get("pipeline_on");
-process.stdout.write((r&&r.value==="1")?"an":"aus");' 2>/dev/null || echo '?'
+process.stdout.write((r&&r.value==="1")?"on":"off");' 2>/dev/null || echo '?'
 }
 
 set_pipeline() {
@@ -49,19 +49,19 @@ db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDA
 case "${1:-}" in
     on)
         systemctl --user start cchub-vpn.service
-        echo "Zugang an: https://${VPN_BIND}:${VPN_PORT}"
+        echo "Access on: https://${VPN_BIND}:${VPN_PORT}"
         ;;
     off)
         systemctl --user stop cchub-vpn.service
-        echo "Zugang aus (Hub läuft lokal weiter)."
+        echo "Access off (hub keeps running locally)."
         ;;
     status)
-        hub="$(systemctl --user is-active cchub.service 2>/dev/null || true)" ; hub="${hub:-unbekannt}"
-        vpn="$(systemctl --user is-active cchub-vpn.service 2>/dev/null || true)"; vpn="${vpn:-unbekannt}"
-        echo "Hub-Prozess:  $hub   (127.0.0.1:${LOCAL_PORT})"
-        echo "Zugang (VPN): $vpn   (https://${VPN_BIND}:${VPN_PORT})"
+        hub="$(systemctl --user is-active cchub.service 2>/dev/null || true)" ; hub="${hub:-unknown}"
+        vpn="$(systemctl --user is-active cchub-vpn.service 2>/dev/null || true)"; vpn="${vpn:-unknown}"
+        echo "Hub process:  $hub   (127.0.0.1:${LOCAL_PORT})"
+        echo "Access (VPN): $vpn   (https://${VPN_BIND}:${VPN_PORT})"
         echo "Pipeline:     $(db_pipeline)"
-        echo "Laufende cc-Sessions: $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^cc-' || true)"
+        echo "Running cc sessions: $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^cc-' || true)"
         ;;
     url)
         echo "https://${VPN_BIND}:${VPN_PORT}"
@@ -77,8 +77,8 @@ case "${1:-}" in
         systemctl --user restart cchub.service ;;
     pipeline)
         case "${2:-status}" in
-            on)  set_pipeline 1; echo "Pipeline an." ;;
-            off) set_pipeline 0; echo "Pipeline aus — Agent-Flags bleiben unverändert." ;;
+            on)  set_pipeline 1; echo "Pipeline on." ;;
+            off) set_pipeline 0; echo "Pipeline off — agent flags remain unchanged." ;;
             status) echo "Pipeline: $(db_pipeline)" ;;
             *) usage; exit 2 ;;
         esac ;;

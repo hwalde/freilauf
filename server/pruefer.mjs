@@ -1,26 +1,26 @@
-// cc-hub — Prüf-LLM (optional): zweite Meinung zu Log-Treffern des Detektors.
+// cc-hub — check LLM (optional): second opinion on the detector's log hits.
 //
-// Der Scanner findet Zeilen, die nach Rate-Limit oder Provider-Fehler aussehen. Er
-// kann aber nicht wissen, ob der Agent danach weitermacht oder ob das nur ein Menütext
-// war. Wenn eingeschaltet, bekommt ein Modell über OpenRouter die letzten Zeilen des
-// bereinigten Terminals und antwortet STRUKTURIERT (json_schema) — kein Freitext, den
-// man dann wieder parsen müsste.
+// The scanner finds lines that look like a rate limit or provider error. But it
+// cannot know whether the agent carries on afterwards or whether it was just a menu
+// text. When enabled, a model via OpenRouter receives the last lines of the cleaned
+// terminal and answers STRUCTURED (json_schema) — no free text that would then have
+// to be parsed again.
 //
-// Fail-loud: ist OpenRouter selbst nicht erreichbar oder kein Schlüssel da, bleibt der
-// Scanner-Treffer ungeprüft stehen (gelb, wird nach Zeit/Anzahl rot). Lieber ein
-// Alarm zu viel als ein verschluckter Ausfall.
+// Fail-loud: if OpenRouter itself is unreachable or no key is present, the scanner
+// hit remains unchecked (yellow, turns red by time/count). Better one alarm too
+// many than a swallowed outage.
 import { getSetting, setSetting } from './db.mjs'
 import { TYPEN } from './detect.mjs'
 
-const MIN_ABSTAND_MS = 10 * 60_000    // je Lauf höchstens alle 10 min eine Anfrage
-const MAX_ZEICHEN = 12_000            // Kontext-Deckel: Kosten und Latenz
-const zuletzt = new Map()             // runId → ms der letzten Anfrage
+const MIN_ABSTAND_MS = 10 * 60_000    // per run at most one request every 10 min
+const MAX_ZEICHEN = 12_000            // context cap: cost and latency
+const zuletzt = new Map()             // runId → ms of the last request
 
 export function pruefLlmAktiv() {
   return getSetting('llm_check_on') === '1' && !!getSetting('llm_check_model') && !!process.env.OPENROUTER_API_KEY
 }
 
-/** Zuletzt verwendete Modelle — „verwendet" heißt: in den Einstellungen gespeichert. */
+/** Most recently used models — "used" means: saved in the settings. */
 export function llmModelleMru() {
   try { return JSON.parse(getSetting('llm_check_models_mru') || '[]').filter(Boolean).slice(0, 10) } catch { return [] }
 }
@@ -39,29 +39,29 @@ const SCHEMA = {
     additionalProperties: false,
     required: ['problem', 'typ', 'blockiert', 'begruendung', 'zitat'],
     properties: {
-      problem: { type: 'boolean', description: 'true, wenn der Agent wirklich durch ein Rate-Limit, einen Provider-Ausfall, Auth- oder Guthabenproblem behindert ist' },
+      problem: { type: 'boolean', description: 'true if the agent is genuinely hindered by a rate limit, a provider outage, an auth or credit problem' },
       typ: { type: 'string', enum: [...TYPEN, 'kein'] },
-      blockiert: { type: 'boolean', description: 'true, wenn der Agent aktuell NICHT weiterarbeitet (steht, wartet, abgebrochen)' },
+      blockiert: { type: 'boolean', description: 'true if the agent is currently NOT continuing to work (stalled, waiting, aborted)' },
       begruendung: { type: 'string' },
-      zitat: { type: 'string', description: 'die eine Zeile aus dem Terminal, die das belegt (wörtlich), oder leer' },
+      zitat: { type: 'string', description: 'the one line from the terminal that proves it (verbatim), or empty' },
     },
   },
 }
 
-const SYSTEM = `Du bewertest den Terminal-Mitschnitt eines autonomen Coding-Agenten (claude code, opencode oder hermes).
-Frage: Ist der Agent gerade durch ein Rate-Limit, einen Provider-Ausfall (5xx, overloaded, nicht erreichbar),
-ein Anmelde-/Token-Problem oder fehlendes Guthaben behindert?
-Wichtig:
-- Menütexte, Hilfetexte, Statuszeilen ("Upgrade to Max for higher rate limits") sind KEIN Problem.
-- Wenn der Agent selbst Code oder Texte über Rate-Limits liest, schreibt oder sucht, ist das KEIN Problem.
-- Ein Retry, nach dem die Arbeit sichtbar weitergeht, ist ein Hinweis (problem=true, blockiert=false).
-- Steht am Ende des Mitschnitts eine Fehlermeldung und danach nichts Produktives mehr, ist das problem=true, blockiert=true.
-Antworte ausschließlich im vorgegebenen JSON-Schema.`
+const SYSTEM = `You are assessing the terminal capture of an autonomous coding agent (claude code, opencode or hermes).
+Question: Is the agent currently hindered by a rate limit, a provider outage (5xx, overloaded, unreachable),
+a login/token problem or missing credit?
+Important:
+- Menu texts, help texts, status lines ("Upgrade to Max for higher rate limits") are NOT a problem.
+- If the agent itself is reading, writing or searching code or text about rate limits, that is NOT a problem.
+- A retry after which the work visibly continues is an indication (problem=true, blockiert=false).
+- If an error message stands at the end of the capture and nothing productive follows, that is problem=true, blockiert=true.
+Answer exclusively in the given JSON schema.`
 
 /**
- * Eine Bewertung anfordern. Liefert das Urteil oder null (aus, gedrosselt, Fehler).
- * 'zeilen' sind bereits bereinigte Terminalzeilen, die letzten zuerst NICHT —
- * chronologisch, so wie sie im Log stehen.
+ * Request an assessment. Returns the verdict or null (off, throttled, error).
+ * 'zeilen' are already cleaned terminal lines, NOT newest-first —
+ * chronological, as they appear in the log.
  */
 export async function pruefeTreffer({ runId, harness, treffer, zeilen, jetztMs = Date.now(), erzwingen = false }) {
   if (!pruefLlmAktiv()) return null
@@ -71,7 +71,7 @@ export async function pruefeTreffer({ runId, harness, treffer, zeilen, jetztMs =
 
   let kontext = zeilen.join('\n')
   if (kontext.length > MAX_ZEICHEN) kontext = '…\n' + kontext.slice(-MAX_ZEICHEN)
-  const user = `Harness: ${harness}\nVerdächtige Zeile(n) des Scanners:\n${treffer.map(t => `- [${t.typ}] ${t.zeile}`).join('\n')}\n\nLetzte Terminalzeilen (chronologisch, bereinigt):\n\`\`\`\n${kontext}\n\`\`\``
+  const user = `Harness: ${harness}\nSuspicious line(s) from the scanner:\n${treffer.map(t => `- [${t.typ}] ${t.zeile}`).join('\n')}\n\nLast terminal lines (chronological, cleaned):\n\`\`\`\n${kontext}\n\`\`\``
 
   const model = getSetting('llm_check_model')
   const body = {
@@ -100,12 +100,12 @@ export async function pruefeTreffer({ runId, harness, treffer, zeilen, jetztMs =
     const j = await res.json()
     const roh = j?.choices?.[0]?.message?.content
     const urteil = JSON.parse(typeof roh === 'string' ? roh : JSON.stringify(roh))
-    if (typeof urteil?.problem !== 'boolean') return { fehler: 'Antwort ohne problem-Feld' }
+    if (typeof urteil?.problem !== 'boolean') return { fehler: 'response without problem field' }
     return { ...urteil, model, usage: j?.usage ?? null }
   } catch (e) {
     return { fehler: e.message }
   }
 }
 
-/** Nur für Tests: Drossel zurücksetzen. */
+/** For tests only: reset the throttle. */
 export function _drosselZuruecksetzen() { zuletzt.clear() }

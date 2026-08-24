@@ -1,4 +1,4 @@
-// cc-hub — kleine HTTP-Helfer, die pages.mjs und web.mjs teilen.
+// cc-hub — small HTTP helpers shared by pages.mjs and web.mjs.
 export function redirect(res, loc) {
   res.writeHead(303, { location: loc }).end()
 }
@@ -13,9 +13,9 @@ export function body(req) {
 }
 
 /**
- * Formulardaten als flaches Objekt. Mehrfach vorkommende Felder (Checkbox-Gruppen wie
- * die Wochentage) gingen mit Object.fromEntries() bis auf den letzten Wert verloren —
- * sie stehen deshalb zusätzlich als Liste unter "<name>_list".
+ * Form data as a flat object. Fields occurring multiple times (checkbox groups like
+ * the weekdays) would be lost down to the last value with Object.fromEntries() —
+ * they are therefore additionally available as a list under "<name>_list".
  */
 export function parseForm(text) {
   const params = new URLSearchParams(text)

@@ -1,19 +1,19 @@
 #!/usr/bin/env node
-// cc-hub — End-to-End-Tests gegen einen ECHTEN Hub-Prozess in einem Sandkasten.
+// cc-hub — end-to-end tests against a REAL hub process in a sandbox.
 //
-// Warum ein eigener Hub statt Tests gegen den laufenden: die Suite darf jederzeit im
-// Live-Betrieb laufen. Sie startet deshalb einen zweiten Hub auf einem freien Port mit
-// eigener Datenbank, eigenem runs-/worktrees-Verzeichnis und eigenem Test-Repo. Der
-// Produktivhub, seine Datenbank, ~/agents und dessen tmux-Sessions werden nie berührt.
-// Aufgeräumt werden nur Sessions, die diese Suite selbst erzeugt hat (Namen werden
-// mitgeschrieben) — niemals per Muster über alle cc-*.
+// Why a dedicated hub instead of testing against the running one: the suite must be
+// safe to run at any time alongside live operation. It therefore starts a second hub
+// on a free port with its own database, its own runs/worktrees directories and its own
+// test repo. The production hub, its database, ~/agents and its tmux sessions are
+// never touched. Only sessions this suite created itself are cleaned up (their names
+// are recorded) — never by pattern-matching across all cc-*.
 //
-// Aufruf:
-//   node test/e2e.mjs           Stub statt echter Agenten: schnell, keine Kosten
-//   node test/e2e.mjs --echt    zusätzlich je EIN echter Lauf pro Harness (claude,
-//                               opencode, hermes) über das echte
-//                               ~/.local/bin/cc-start (verbraucht Quota!)
-//   node test/e2e.mjs --keep    Sandkasten nach dem Lauf stehen lassen (Fehlersuche)
+// Usage:
+//   node test/e2e.mjs           stub instead of real agents: fast, no cost
+//   node test/e2e.mjs --echt    additionally ONE real run per harness (claude,
+//                               opencode, hermes) through the real
+//                               ~/.local/bin/cc-start (consumes quota!)
+//   node test/e2e.mjs --keep    keep the sandbox after the run (debugging)
 import { spawn, execFile, execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync, lstatSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
@@ -24,12 +24,12 @@ import { WebSocket } from 'ws'
 import { gruppe, pruefe, uebersprungen, gleich, wahr, falsch, enthaelt, warteAuf, bericht, zaehler } from './mini.mjs'
 
 const ECHT = process.argv.includes('--echt')
-// Vom Nutzer vorgegebenes Testmodell für opencode/hermes (günstig, werkzeugfähig).
-// Den Provider-Key JETZT festhalten: der Stub-Teil löscht ihn gleich aus der Umgebung,
-// der Echt-Teil braucht ihn aber noch.
+// User-specified test model for opencode/hermes (cheap, tool-capable).
+// Capture the provider key NOW: the stub part deletes it from the environment in a
+// moment, but the real-run part still needs it.
 const ECHT_KEYS = { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY }
 const ECHT_MODELL = process.env.CCHUB_TEST_MODELL ?? 'deepseek/deepseek-v4-flash-0731'
-// Zen: eines der freien Modelle — läuft ohne Schlüssel.
+// Zen: one of the free models — runs without a key.
 const ZEN_MODELL = process.env.CCHUB_TEST_ZEN_MODELL ?? 'nemotron-3.5-lightning-free'
 const vorhanden = (bin) => {
   try { execFileSync('sh', ['-c', `command -v ${bin}`], { stdio: 'ignore' }); return true } catch { return false }
@@ -38,7 +38,7 @@ const BEHALTEN = process.argv.includes('--keep')
 const PROJEKT = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
 const start = Date.now()
 
-// ---------------------------------------------------------------- Werkzeug
+// ---------------------------------------------------------------- Tooling
 function sh(cmd, args, opts = {}) {
   return new Promise((resolve) => {
     execFile(cmd, args, { encoding: 'utf8', timeout: 60_000, ...opts }, (err, stdout, stderr) =>
@@ -57,9 +57,9 @@ async function freierPort() {
   })
 }
 
-// ---------------------------------------------------------------- Sandkasten
+// ---------------------------------------------------------------- Sandbox
 const SB = mkdtempSync(join(tmpdir(), 'cc-hub-e2e-'))
-const sessions = new Set()          // nur DAS wird am Ende gekillt
+const sessions = new Set()          // ONLY these get killed at the end
 let hub = null
 let db = null
 let PORT = 0
@@ -73,13 +73,13 @@ const FEHLSTART = join(SB, 'fehlstart-an')
 async function sandkastenBauen() {
   for (const d of ['data', 'runs', 'worktrees', 'bin']) mkdirSync(join(SB, d), { recursive: true })
 
-  // Zusatz-Skill-Attrappe (Planung: opt-in-Skills außerhalb der Skill-Autoload-Ordner)
+  // Extra-skill dummy (planning: opt-in skills outside the skill autoload folders)
   mkdirSync(join(SB, 'zusaetze', 'e2e-fleiss'), { recursive: true })
   writeFileSync(join(SB, 'zusaetze', 'e2e-fleiss', 'SKILL.md'),
     '---\nname: e2e-fleiss\ndescription: Testskill gegen faule Modelle.\n---\n\n# Fleiss\n')
 
-  // Quota-Fixture: sonst entschiede die echte ~/.claude/quota.json über die Budget-Gates
-  // und die Suite wäre je nach Tagesform grün oder rot.
+  // Quota fixture: otherwise the real ~/.claude/quota.json would decide the budget
+  // gates and the suite would be green or red depending on the day.
   writeFileSync(join(SB, 'quota.json'), JSON.stringify({
     five_hour: { used_percentage: 1, resets_at: 1800000000 }, seven_day_fable: { used_percentage: 0 },
   }))
@@ -90,12 +90,12 @@ async function sandkastenBauen() {
   await g('config', 'user.email', 'e2e@test.local')
   await g('config', 'user.name', 'E2E')
   writeFileSync(join(REPO, 'README.md'), '# Testrepo\n')
-  // .env und referenz/ bleiben UNVERSIONIERT — genau dafür gibt es die
-  // Worktree-Ergänzungen. Lägen sie im git, wären sie im Worktree ohnehin da und
-  // der Kopier-/Verlinkungsweg würde stillschweigend übersprungen.
-  // Ohne Schrägstrich! 'referenz/' würde nur das Verzeichnis ignorieren — die
-  // Ergänzung legt im Worktree aber ein SYMLINK an, und das gilt git dann als
-  // unversionierte Datei: der Worktree wäre für immer „schmutzig“.
+  // .env and referenz/ stay UNVERSIONED — that is exactly what the worktree extras
+  // are for. If they were in git, they would already be in the worktree and the
+  // copy/link path would be skipped silently.
+  // No trailing slash! 'referenz/' would only ignore the directory — but the extra
+  // creates a SYMLINK in the worktree, which git then treats as an unversioned
+  // file: the worktree would be "dirty" forever.
   writeFileSync(join(REPO, '.gitignore'), '.env\nreferenz\n')
   mkdirSync(join(REPO, 'referenz'), { recursive: true })
   writeFileSync(join(REPO, '.env'), 'GEHEIM=1\n')
@@ -105,8 +105,8 @@ async function sandkastenBauen() {
   await g('remote', 'add', 'origin', ORIGIN)
   await g('push', '-q', '-u', 'origin', 'main')
 
-  // Stub-cc-start: erzeugt eine echte tmux-Session mit einem harmlosen "Agenten",
-  // spricht dieselbe Schnittstelle wie das Original und meldet dieselbe Erfolgszeile.
+  // Stub cc-start: creates a real tmux session with a harmless "agent", speaks the
+  // same interface as the original and reports the same success line.
   writeFileSync(STUB, `#!/usr/bin/env bash
 set -euo pipefail
 NAME=e2e; ID=""; ENVS=(); LOG=""; KEEP=""; PROMPTFILE=""; POS=()
@@ -126,12 +126,12 @@ while [[ $# -gt 0 ]]; do
 done
 WORKDIR="\${POS[0]:-$PWD}"
 
-# Rauchtest-Lauf: an das ECHTE cc-start durchreichen (deckt die cc-*-Skripte mit ab).
+# Smoke-test run: pass through to the REAL cc-start (also covers the cc-* scripts).
 if [[ -n "$PROMPTFILE" && -r "$PROMPTFILE" ]] && grep -q 'E2E-ECHT' "$PROMPTFILE"; then
   exec "${homedir()}/.local/bin/cc-start" "\${ALLE[@]}"
 fi
 
-# Absichtlicher Fehlstart für den Retry-Test.
+# Deliberate failed start for the retry test.
 if [[ -f "${FEHLSTART}" ]]; then
   echo "Fehlstart erzwungen (E2E)" >&2
   exit 1
@@ -151,12 +151,12 @@ INNER
 tmux new-session -d -x 200 -y 50 "\${ENVS[@]}" -e "CC_PROMPTFILE=$PROMPTFILE" -s "$SESSION" -c "$WORKDIR" bash "$RUNNER"
 if [[ -n "$LOG" ]]; then mkdir -p "$(dirname "$LOG")"; tmux pipe-pane -o -t "=$SESSION:" "cat >> '$LOG'"; fi
 [[ -n "$KEEP" ]] && tmux set-option -t "=$SESSION:" -q remain-on-exit on
-echo "Session '$SESSION' gestartet in $WORKDIR (Harness: e2e-stub)"
+echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
 `)
   chmodSync(STUB, 0o755)
 }
 
-// ---------------------------------------------------------------- Hub-Prozess
+// ---------------------------------------------------------------- Hub process
 async function hubStarten({ echteAgenten = false } = {}) {
   PORT = await freierPort()
   BASIS = `http://127.0.0.1:${PORT}`
@@ -169,33 +169,34 @@ async function hubStarten({ echteAgenten = false } = {}) {
     CCHUB_QUOTA_JSON: join(SB, 'quota.json'),
     CCHUB_CLAUDE_PROJECTS: join(SB, 'claude-projects'),
     CCHUB_ZUSAETZE_DIR: join(SB, 'zusaetze'),
-    CCHUB_PULS_AUS: '1',          // kein Provider-Puls gegen echte Endpunkte aus der Suite
+    CCHUB_PULS_AUS: '1',          // no provider pulse against real endpoints from the suite
+    CCHUB_CURSOR_AUTH: join(SB, 'missing-cursor-auth.json'),   // cursor usage stays silent in the sandbox
     NODE_OPTIONS: '--disable-warning=ExperimentalWarning',
   }
   if (echteAgenten) {
-    // Kein CCHUB_CC_START: der Hub nimmt ~/.local/bin/cc-start und damit die echten
-    // Harnesses. Der Provider-Key muss zurück in die Umgebung, sonst startet
-    // opencode/hermes und stirbt erst beim ersten API-Aufruf.
+    // No CCHUB_CC_START: the hub uses ~/.local/bin/cc-start and thereby the real
+    // harnesses. The provider key must go back into the environment, otherwise
+    // opencode/hermes starts and dies only at the first API call.
     delete umgebung.CCHUB_CC_START
     for (const [k, v] of Object.entries(ECHT_KEYS)) if (v) umgebung[k] = v
   } else {
     umgebung.CCHUB_CC_START = STUB
-    delete umgebung.OPENROUTER_API_KEY    // keine echten API-Aufrufe aus dem Stub-Teil
+    delete umgebung.OPENROUTER_API_KEY    // no real API calls from the stub part
   }
   hub = spawn(process.execPath, [join(PROJEKT, 'server', 'hub.mjs')], { env: umgebung, stdio: ['ignore', 'pipe', 'pipe'] })
   const logs = []
   hub.stdout.on('data', (d) => logs.push(String(d)))
   hub.stderr.on('data', (d) => logs.push(String(d)))
-  hub.on('exit', (code) => { if (code !== 0 && code !== null) console.log(`  (Hub beendet, Code ${code})\n${logs.join('')}`) })
+  hub.on('exit', (code) => { if (code !== 0 && code !== null) console.log(`  (hub exited, code ${code})\n${logs.join('')}`) })
 
   await warteAuf(async () => (await hol('/')).status === 200,
-    { was: `Hub auf ${BASIS} antwortet`, timeoutMs: 15_000 })
+    { was: `hub at ${BASIS} responds`, timeoutMs: 15_000 })
 
   db = new DatabaseSync(join(SB, 'data', 'cc-hub.db'))
 }
 
-// Der Watcher tickt im Hub alle 30 s. Statt zu warten, stößt die Suite denselben
-// Durchgang zusätzlich selbst an — gleiche Datenbank, gleicher Code, aber sofort.
+// The watcher ticks inside the hub every 30 s. Instead of waiting, the suite also
+// triggers the same pass itself — same database, same code, but immediately.
 let watcherTick = null
 async function watcherVorbereiten() {
   process.env.CCHUB_DATA_DIR = join(SB, 'data')
@@ -206,6 +207,7 @@ async function watcherVorbereiten() {
   process.env.CCHUB_CLAUDE_PROJECTS = join(SB, 'claude-projects')
   process.env.CCHUB_ZUSAETZE_DIR = join(SB, 'zusaetze')
   process.env.CCHUB_PULS_AUS = '1'
+  process.env.CCHUB_CURSOR_AUTH = join(SB, 'missing-cursor-auth.json')
   delete process.env.OPENROUTER_API_KEY
   ;({ tick: watcherTick } = await import('../server/watcher.mjs'))
 }
@@ -226,12 +228,12 @@ async function formular(pfad, daten, { alsBrowser = false } = {}) {
   })
 }
 
-// ---------------------------------------------------------------- Datenbank
+// ---------------------------------------------------------------- Database
 const lauf = (id) => db.prepare('SELECT * FROM runs WHERE id=?').get(id)
 const ereignisse = (id) => db.prepare('SELECT kind FROM events WHERE run_id=? ORDER BY id').all(id).map(e => e.kind)
 const agent = (name) => db.prepare('SELECT * FROM agents WHERE name=?').get(name)
 
-/** Lauf über die JSON-API starten und die erzeugte tmux-Session mitschreiben. */
+/** Start a run via the JSON API and record the created tmux session. */
 async function laufStarten(daten) {
   const r = await formular('/api/runs', { harness: 'claude', branch_mode: 'keiner', expected_minutes: '45', ...daten })
   const j = await r.json()
@@ -248,9 +250,9 @@ async function sessionMerken(runId) {
   return s
 }
 
-// ---------------------------------------------------------------- Aufräumen
+// ---------------------------------------------------------------- Cleanup
 let aufgeraeumt = false
-/** Hub-Prozess beenden (auch zwischendurch, wenn der Echt-Modus neu startet). */
+/** Stop the hub process (also mid-suite, when the real-run mode restarts it). */
 async function hubStoppen() {
   try { db?.close() } catch {}
   db = null
@@ -265,224 +267,290 @@ async function aufraeumen() {
   if (aufgeraeumt) return
   aufgeraeumt = true
   await hubStoppen()
-  // NUR die selbst erzeugten Sessions — niemals ein Muster über alle cc-*.
+  // ONLY the sessions we created ourselves — never a pattern across all cc-*.
   for (const s of sessions) await sh('tmux', ['kill-session', '-t', `=${s}`]).catch(() => {})
-  if (BEHALTEN) console.log(`\nSandkasten bleibt stehen: ${SB}`)
+  if (BEHALTEN) console.log(`\nSandbox kept: ${SB}`)
   else rmSync(SB, { recursive: true, force: true })
 }
 process.on('SIGINT', async () => { await aufraeumen(); process.exit(130) })
 process.on('SIGTERM', async () => { await aufraeumen(); process.exit(143) })
 
-// ================================================================== Testlauf
+// ================================================================== Test run
 try {
-  console.log(`Sandkasten: ${SB}`)
+  console.log(`Sandbox: ${SB}`)
   await sandkastenBauen()
   await hubStarten()
   await watcherVorbereiten()
-  console.log(`Hub: ${BASIS}${ECHT ? '   [--echt: echte Läufe je Harness — verbraucht Quota und Guthaben]' : ''}`)
+  console.log(`Hub: ${BASIS}${ECHT ? '   [--echt: real runs per harness — consumes quota and credits]' : ''}`)
 
   // ------------------------------------------------------------------
-  gruppe('Grundgerüst: Seiten, statische Dateien, API-Fallback')
+  gruppe('Coding agents: initial state, detection, configuration')
 
-  await pruefe('leerer Zustand führt zum Repo-Anlegen', async () => {
+  await pruefe('fresh installation: every page shows the setup banner', async () => {
+    const html = await (await hol('/')).text()
+    enthaelt(html, 'banner setup', 'banner container')
+    enthaelt(html, '/settings/coding-agents', 'link to the settings')
+  })
+  await pruefe('run creation without a configured coding agent is rejected', async () => {
+    const r = await formular('/api/runs', { repo_id: '1', harness: 'claude', prompt: 'x', branch_mode: 'keiner', expected_minutes: '5' })
+    gleich(r.status, 400, 'rejected')
+    enthaelt((await r.json()).error, 'not configured', 'reason names the configuration')
+  })
+  await pruefe('detect API lists the known coding agents with install state', async () => {
+    const j = await (await hol('/api/coding-agents/detect')).json()
+    wahr(j.ok, 'ok')
+    gleich(j.agents.map(a => a.id).sort().join(','), 'claude,cursor,hermes,opencode', 'all four plugins')
+    wahr(j.agents.every(a => typeof a.installed === 'boolean' && a.configured === false), 'installed flag, none configured yet')
+  })
+  await pruefe('coding agents can be added with their provider selection', async () => {
+    const faelle = [
+      ['claude', []],
+      ['opencode', ['opencode-zen', 'deepseek', 'openrouter']],
+      ['hermes', ['openrouter', 'opencode-zen', 'deepseek']],
+      ['cursor', []],
+    ]
+    for (const [harness, providers] of faelle) {
+      const r = await formular('/settings/coding-agents/save',
+        { harness, enabled: '1', ...(providers.length ? { providers } : {}) }, { alsBrowser: true })
+      gleich(r.status, 303, harness)
+    }
+    gleich(db.prepare('SELECT count(*) c FROM coding_agents WHERE enabled=1').get().c, 4, 'four enabled')
+    gleich(JSON.parse(db.prepare(`SELECT providers FROM coding_agents WHERE harness='opencode'`).get().providers).length, 3, 'providers stored')
+  })
+  await pruefe('unknown coding agent is rejected by the settings form', async () => {
+    const r = await formular('/settings/coding-agents/save', { harness: 'gpt', enabled: '1' }, { alsBrowser: true })
+    gleich(r.status, 400, 'rejected')
+  })
+  await pruefe('the banner disappears once a coding agent is configured', async () => {
+    falsch((await (await hol('/')).text()).includes('banner setup'), 'no banner')
+  })
+  await pruefe('settings page lists the configured coding agents', async () => {
+    const html = await (await hol('/settings/coding-agents')).text()
+    enthaelt(html, 'Claude Code', 'label')
+    enthaelt(html, 'cursor-agent', 'binary name')
+  })
+  await pruefe('usage API answers with the Claude quota from the fixture', async () => {
+    const j = await (await hol('/api/usage')).json()
+    wahr(j.ok, 'ok')
+    const claude = j.usage.find(u => u.harness === 'claude')
+    wahr(!!claude && claude.ok, `claude row (${JSON.stringify(j.usage).slice(0, 200)})`)
+    gleich(claude.data.five, 1, '5h percentage from quota.json')
+    const cursor = j.usage.find(u => u.harness === 'cursor')
+    wahr(!!cursor && cursor.ok === false, 'cursor row honestly unavailable (no auth file in the sandbox)')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Basic scaffolding: pages, static files, API fallback')
+
+  await pruefe('empty state leads to creating a repo', async () => {
     const r = await hol('/')
-    gleich(r.status, 200, 'Status')
-    enthaelt(await r.text(), 'Repo anlegen', 'Hinweistext')
+    gleich(r.status, 200, 'status')
+    enthaelt(await r.text(), 'Create repo', 'hint text')
   })
   for (const datei of ['/static/xterm.js', '/static/addon-fit.js', '/static/hub.js', '/static/hub.css', '/static/xterm.css']) {
-    await pruefe(`${datei} wird ausgeliefert`, async () => {
+    await pruefe(`${datei} is served`, async () => {
       const r = await hol(datei)
-      gleich(r.status, 200, 'Status')
-      wahr((await r.text()).length > 100, 'Inhalt vorhanden')
+      gleich(r.status, 200, 'status')
+      wahr((await r.text()).length > 100, 'content present')
     })
   }
-  await pruefe('unbekannter API-Pfad antwortet 404 statt zu hängen', async () => {
+  await pruefe('unknown API path answers 404 instead of hanging', async () => {
     const r = await hol('/api/gibtsnicht', { timeoutMs: 5000 })
-    gleich(r.status, 404, 'Status')
+    gleich(r.status, 404, 'status')
   })
-  await pruefe('Telegram-Chats ohne Token melden den Grund', async () => {
+  await pruefe('Telegram chats without a token report the reason', async () => {
     const j = await (await hol('/api/telegram/chats', { timeoutMs: 5000 })).json()
     falsch(j.ok, 'ok')
-    wahr(typeof j.error === 'string' && j.error.length > 0, 'Fehlermeldung')
+    wahr(typeof j.error === 'string' && j.error.length > 0, 'error message')
   })
 
   // ------------------------------------------------------------------
-  gruppe('Repos: anlegen und prüfen')
+  gruppe('Repos: create and validate')
 
-  await pruefe('gültiges Repo wird angelegt', async () => {
+  await pruefe('valid repo is created', async () => {
     const r = await formular('/repos/edit', {
       name: 'e2e', path: REPO, base_branch: 'main',
       worktree_extras: JSON.stringify([{ path: '.env', mode: 'copy' }, { path: 'referenz/', mode: 'link' }]),
     }, { alsBrowser: true })
-    gleich(r.status, 303, 'Weiterleitung')
+    gleich(r.status, 303, 'redirect')
     const repo = db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
-    wahr(!!repo, 'Repo in der Datenbank')
-    gleich(repo.path, REPO, 'Pfad')
+    wahr(!!repo, 'repo in the database')
+    gleich(repo.path, REPO, 'path')
   })
-  await pruefe('kaputtes JSON wird abgelehnt (400 statt 500)', async () => {
+  await pruefe('broken JSON is rejected (400 instead of 500)', async () => {
     const r = await formular('/repos/edit', { name: 'x', path: REPO, worktree_extras: '[{kaputt' }, { alsBrowser: true })
-    gleich(r.status, 400, 'Status')
+    gleich(r.status, 400, 'status')
   })
-  await pruefe('Pfad ohne .git wird abgelehnt', async () => {
+  await pruefe('path without .git is rejected', async () => {
     const r = await formular('/repos/edit', { name: 'x', path: '/tmp', worktree_extras: '[]' }, { alsBrowser: true })
-    gleich(r.status, 400, 'Status')
-    enthaelt(await r.text(), 'git', 'Begründung nennt git')
+    gleich(r.status, 400, 'status')
+    enthaelt(await r.text(), 'git', 'reason mentions git')
   })
-  await pruefe('unbekannter mode in den Ergänzungen wird abgelehnt', async () => {
+  await pruefe('unknown mode in the extras is rejected', async () => {
     const r = await formular('/repos/edit', {
       name: 'x', path: REPO, worktree_extras: JSON.stringify([{ path: '.env', mode: 'kopieren' }]),
     }, { alsBrowser: true })
-    gleich(r.status, 400, 'Status')
+    gleich(r.status, 400, 'status')
   })
 
   const repoId = db.prepare('SELECT id FROM repos WHERE name=?').get('e2e').id
 
   // ------------------------------------------------------------------
-  gruppe('Agenten: anlegen und prüfen')
+  gruppe('Agents: create and validate')
 
-  await pruefe('unbekannte Harness wird abgelehnt', async () => {
+  await pruefe('unknown harness is rejected', async () => {
     const r = await formular('/agents/edit', { repo_id: repoId, name: 'a1', harness: 'gpt', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'manuell' }, { alsBrowser: true })
-    gleich(r.status, 400, 'Status')
+    gleich(r.status, 400, 'status')
   })
-  await pruefe('leerer Prompt wird abgelehnt', async () => {
+  await pruefe('empty prompt is rejected', async () => {
     const r = await formular('/agents/edit', { repo_id: repoId, name: 'a2', harness: 'claude', prompt: '   ', branch_mode: 'keiner', schedule_kind: 'manuell' }, { alsBrowser: true })
-    gleich(r.status, 400, 'Status')
+    gleich(r.status, 400, 'status')
   })
-  await pruefe('ungültiger Cron-Ausdruck wird abgelehnt', async () => {
+  await pruefe('invalid cron expression is rejected', async () => {
     const r = await formular('/agents/edit', { repo_id: repoId, name: 'a3', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'cron', schedule: 'jeden tag' }, { alsBrowser: true })
-    gleich(r.status, 400, 'Status')
+    gleich(r.status, 400, 'status')
   })
-  await pruefe('wöchentlich ohne Wochentag wird abgelehnt', async () => {
+  await pruefe('weekly without a weekday is rejected', async () => {
     const r = await formular('/agents/edit', { repo_id: repoId, name: 'a4', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'woechentlich', schedule_time: '06:00', schedule_weeks: '1' }, { alsBrowser: true })
-    gleich(r.status, 400, 'Status')
+    gleich(r.status, 400, 'status')
   })
-  await pruefe('einmalig ohne Termin wird abgelehnt', async () => {
+  await pruefe('one-off without a date is rejected', async () => {
     const r = await formular('/agents/edit', { repo_id: repoId, name: 'a5', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'einmalig', run_at: '' }, { alsBrowser: true })
-    gleich(r.status, 400, 'Status')
+    gleich(r.status, 400, 'status')
   })
-  await pruefe('mehrwöchiger Takt ohne Startwoche wird abgelehnt', async () => {
+  await pruefe('multi-week cadence without an anchor week is rejected', async () => {
     const r = await formular('/agents/edit', { repo_id: repoId, name: 'a6', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'woechentlich', schedule_days: ['1'], schedule_time: '06:00', schedule_weeks: '2', schedule_anchor: '' }, { alsBrowser: true })
-    gleich(r.status, 400, 'Status')
+    gleich(r.status, 400, 'status')
   })
-  await pruefe('wöchentlicher Agent wird mit allen Feldern gespeichert', async () => {
+  await pruefe('weekly agent is saved with all fields', async () => {
     const r = await formular('/agents/edit', {
       repo_id: repoId, name: 'e2e-woechentlich', harness: 'claude', prompt: 'Testauftrag', branch_mode: 'keiner',
       expected_minutes: '30', schedule_kind: 'woechentlich', schedule_days: ['1', '3', '5'],
       schedule_time: '07:30', schedule_weeks: '2', schedule_anchor: '2026-08-24', active: '1',
     }, { alsBrowser: true })
-    gleich(r.status, 303, 'Weiterleitung')
+    gleich(r.status, 303, 'redirect')
     const a = agent('e2e-woechentlich')
-    gleich(a.schedule_kind, 'woechentlich', 'Art')
-    gleich(a.schedule_days, '1,3,5', 'Wochentage')
-    gleich(a.schedule_time, '07:30', 'Uhrzeit')
-    gleich(a.schedule_weeks, 2, 'Takt')
-    gleich(a.schedule_anchor, '2026-08-24', 'Startwoche')
+    gleich(a.schedule_kind, 'woechentlich', 'kind')
+    gleich(a.schedule_days, '1,3,5', 'weekdays')
+    gleich(a.schedule_time, '07:30', 'time')
+    gleich(a.schedule_weeks, 2, 'cadence')
+    gleich(a.schedule_anchor, '2026-08-24', 'anchor week')
   })
-  await pruefe('Umschalten auf manuell räumt die Zeitplanfelder ab', async () => {
+  await pruefe('switching to manual clears the schedule fields', async () => {
     const id = agent('e2e-woechentlich').id
     const r = await formular(`/agents/edit?id=${id}`, {
       repo_id: repoId, name: 'e2e-woechentlich', harness: 'claude', prompt: 'Testauftrag',
       branch_mode: 'keiner', expected_minutes: '30', schedule_kind: 'manuell', active: '1',
     }, { alsBrowser: true })
-    gleich(r.status, 303, 'Weiterleitung')
+    gleich(r.status, 303, 'redirect')
     const a = agent('e2e-woechentlich')
-    gleich(a.schedule_kind, 'manuell', 'Art')
-    gleich(a.schedule_days, null, 'Wochentage geleert')
-    gleich(a.run_at, null, 'Termin geleert')
+    gleich(a.schedule_kind, 'manuell', 'kind')
+    gleich(a.schedule_days, null, 'weekdays cleared')
+    gleich(a.run_at, null, 'date cleared')
   })
 
   // ------------------------------------------------------------------
-  gruppe('Provider- und Effort-Auswahl (harness-abhängig)')
+  gruppe('Provider and effort selection (harness-dependent)')
 
-  await pruefe('jede Harness bekommt nur Provider, die sie hier auch kann', async () => {
+  await pruefe('each harness only gets providers it can actually use here', async () => {
     const p = async (h) => (await (await hol(`/api/providers?harness=${h}`)).json()).provider.map(x => x.id)
-    gleich((await p('claude')).length, 0, 'claude läuft über das Abo, kein Provider')
-    wahr((await p('opencode')).includes('opencode-zen'), 'opencode kennt Zen')
-    falsch((await p('hermes')).includes('opencode-zen'), 'hermes kann Zen hier nicht (kein Schlüssel)')
+    gleich((await p('claude')).length, 0, 'claude runs on the subscription, no provider')
+    wahr((await p('opencode')).includes('opencode-zen'), 'opencode knows Zen')
+    falsch((await p('hermes')).includes('opencode-zen'), 'hermes cannot use Zen here (no key)')
   })
 
-  await pruefe('Denk-Aufwand nur, wo er wirklich ankommt', async () => {
+  await pruefe('reasoning effort only where it actually arrives', async () => {
     const eff = async (q) => (await (await hol('/api/effort?' + q)).json())
     const c = await eff('harness=claude')
-    wahr(c.ok && c.stufen.includes('high'), `claude nennt Stufen (${JSON.stringify(c).slice(0, 90)})`)
+    wahr(c.ok && c.stufen.includes('high'), `claude names levels (${JSON.stringify(c).slice(0, 90)})`)
     const quatsch = await eff('harness=opencode&provider=openrouter&model=gibtsnicht/quatsch')
-    falsch(quatsch.ok, 'unbekanntes Modell: kein Feld statt geratener Stufen')
-    gleich((await hol('/api/effort?harness=quatsch')).status, 200, 'antwortet immer mit 200')
+    falsch(quatsch.ok, 'unknown model: no field instead of guessed levels')
+    gleich((await hol('/api/effort?harness=quatsch')).status, 200, 'always answers with 200')
   })
 
-  await pruefe('eine unmögliche Stufe wird abgelehnt statt still verworfen', async () => {
-    // opencode wirft eine unbekannte Variante kommentarlos weg — der Hub muss das
-    // vorher merken, sonst stünde in der DB eine Zusage, die nichts bewirkt.
+  await pruefe('an impossible level is rejected instead of silently dropped', async () => {
+    // opencode discards an unknown variant without comment — the hub must catch that
+    // beforehand, otherwise the DB would hold a promise that does nothing.
     const r = await formular('/agents/edit', {
       repo_id: String(repoId), name: 'effort-quatsch', harness: 'opencode', provider: 'opencode-zen',
       model: 'hy3-free', effort: 'ultraturbo', prompt: 'x', branch_mode: 'keiner',
       expected_minutes: '5', schedule_kind: 'manuell',
     }, { alsBrowser: true })
-    gleich(r.status, 400, 'abgelehnt')
-    enthaelt(await r.text(), 'Denk-Aufwand', 'mit Begründung')
-    falsch(!!db.prepare(`SELECT 1 FROM agents WHERE name='effort-quatsch'`).get(), 'nichts gespeichert')
+    gleich(r.status, 400, 'rejected')
+    enthaelt(await r.text(), 'Reasoning effort', 'with a reason')
+    falsch(!!db.prepare(`SELECT 1 FROM agents WHERE name='effort-quatsch'`).get(), 'nothing saved')
   })
 
-  gruppe('Einzellauf: Worktree, Prompt, tmux, Log')
+  await pruefe('a disabled coding agent is rejected at run creation and can be re-enabled', async () => {
+    await formular('/settings/coding-agents/save', { harness: 'hermes', enabled: '0' }, { alsBrowser: true })
+    const r = await formular('/api/runs', { repo_id: String(repoId), harness: 'hermes', prompt: 'x', branch_mode: 'keiner', expected_minutes: '5' })
+    gleich(r.status, 400, 'rejected')
+    enthaelt((await r.json()).error, 'not configured', 'reason')
+    const wieder = await formular('/settings/coding-agents/save',
+      { harness: 'hermes', enabled: '1', providers: ['openrouter', 'opencode-zen', 'deepseek'] }, { alsBrowser: true })
+    gleich(wieder.status, 303, 're-enabled')
+  })
 
-  await pruefe('das Startformular zeigt den WIRKLICHEN Pipeline-Zustand', async () => {
-    // War fest verdrahtet: das Formular behauptete immer "Pipeline ist aus",
-    // auch wenn oben rechts "an" stand.
+  gruppe('Single run: worktree, prompt, tmux, log')
+
+  await pruefe('the start form shows the ACTUAL pipeline state', async () => {
+    // Used to be hard-wired: the form always claimed "pipeline is off",
+    // even when the top-right corner said "on".
     const text = async () => (await hol(`/runs/new?repo=${repoId}`)).text()
     await formular('/api/settings/pipeline', { value: '0' })
-    enthaelt(await text(), 'Pipeline ist aus', 'Hinweis bei ausgeschalteter Pipeline')
+    enthaelt(await text(), 'Pipeline is off', 'hint with the pipeline switched off')
     await formular('/api/settings/pipeline', { value: '1' })
     const an = await text()
-    enthaelt(an, 'Pipeline ist an', 'Hinweis bei eingeschalteter Pipeline')
-    falsch(an.includes('Pipeline ist aus'), 'kein widersprüchlicher Hinweis daneben')
+    enthaelt(an, 'Pipeline is on', 'hint with the pipeline switched on')
+    falsch(an.includes('Pipeline is off'), 'no contradictory hint next to it')
     await formular('/api/settings/pipeline', { value: '0' })
   })
 
   let R1 = null
-  await pruefe('Lauf startet über das Formular und leitet auf die Laufseite', async () => {
+  await pruefe('run starts via the form and redirects to the run page', async () => {
     const r = await formular('/runs/new', {
       repo_id: repoId, harness: 'claude', prompt: 'E2E-Auftrag: nichts tun.',
       branch_mode: 'neu', branch_pattern: 'agent/e2e/{kurz}', expected_minutes: '45',
     }, { alsBrowser: true })
-    gleich(r.status, 303, 'Weiterleitung')
+    gleich(r.status, 303, 'redirect')
     const ort = r.headers.get('location')
-    wahr(/^\/runs\/[0-9a-f-]{36}$/.test(ort), `Ziel ist eine Laufseite (${ort})`)
+    wahr(/^\/runs\/[0-9a-f-]{36}$/.test(ort), `target is a run page (${ort})`)
     R1 = ort.split('/')[2]
     await sessionMerken(R1)
-    gleich(lauf(R1).status, 'running', 'Status')
+    gleich(lauf(R1).status, 'running', 'status')
   })
-  await pruefe('Worktree existiert und steht auf dem erwarteten Branch', async () => {
+  await pruefe('worktree exists and is on the expected branch', async () => {
     const l = lauf(R1)
-    wahr(existsSync(l.workdir_effective), `Worktree ${l.workdir_effective}`)
+    wahr(existsSync(l.workdir_effective), `worktree ${l.workdir_effective}`)
     const b = await sh('git', ['-C', l.workdir_effective, 'rev-parse', '--abbrev-ref', 'HEAD'])
-    gleich(b.stdout.trim(), l.branch_expected, 'Branch')
-    enthaelt(l.branch_expected, 'agent/e2e/', 'Branch-Muster expandiert')
+    gleich(b.stdout.trim(), l.branch_expected, 'branch')
+    enthaelt(l.branch_expected, 'agent/e2e/', 'branch pattern expanded')
   })
-  await pruefe('Worktree-Ergänzungen: .env kopiert, referenz/ verlinkt', () => {
+  await pruefe('worktree extras: .env copied, referenz/ linked', () => {
     const wt = lauf(R1).workdir_effective
-    wahr(existsSync(join(wt, '.env')), '.env vorhanden')
-    falsch(lstatSync(join(wt, '.env')).isSymbolicLink(), '.env ist eine Kopie')
-    wahr(lstatSync(join(wt, 'referenz')).isSymbolicLink(), 'referenz/ ist ein Symlink')
+    wahr(existsSync(join(wt, '.env')), '.env present')
+    falsch(lstatSync(join(wt, '.env')).isSymbolicLink(), '.env is a copy')
+    wahr(lstatSync(join(wt, 'referenz')).isSymbolicLink(), 'referenz/ is a symlink')
   })
-  await pruefe('prompt.md enthält Auftrag und Plattform-Zusatz', () => {
+  await pruefe('prompt.md contains the task and the platform suffix', () => {
     const p = readFileSync(join(SB, 'runs', R1, 'prompt.md'), 'utf8')
-    enthaelt(p, 'E2E-Auftrag', 'eigener Auftrag')
-    enthaelt(p, 'cc-report done', 'Plattform-Regeln')
-    enthaelt(p, R1, 'Lauf-ID')
+    enthaelt(p, 'E2E-Auftrag', 'own task')
+    enthaelt(p, 'cc-report done', 'platform rules')
+    enthaelt(p, R1, 'run ID')
   })
-  await pruefe('tmux-Session läuft und ist dem Lauf zugeordnet', async () => {
+  await pruefe('tmux session is running and assigned to the run', async () => {
     const s = lauf(R1).tmux_session
-    wahr(!!s, 'Session in der Datenbank')
-    wahr((await sh('tmux', ['has-session', '-t', `=${s}`])).ok, `Session ${s} lebt`)
+    wahr(!!s, 'session in the database')
+    wahr((await sh('tmux', ['has-session', '-t', `=${s}`])).ok, `session ${s} is alive`)
   })
-  await pruefe('Log-Datei wird angelegt (cc-start --log → pipe-pane)', () => {
-    // Auf den INHALT wird erst nach dem ersten Senden geprüft: pipe-pane hängt sich
-    // erst nach dem Start an, die Startausgabe kann ihm entgehen.
-    wahr(existsSync(join(SB, 'runs', R1, 'log.txt')), 'log.txt angelegt')
+  await pruefe('log file is created (cc-start --log → pipe-pane)', () => {
+    // The CONTENT is checked only after the first send: pipe-pane attaches only
+    // after startup, so the initial output can escape it.
+    wahr(existsSync(join(SB, 'runs', R1, 'log.txt')), 'log.txt created')
   })
 
   // ------------------------------------------------------------------
-  gruppe('Terminal im Browser (WebSocket)')
+  gruppe('Terminal in the browser (WebSocket)')
 
   const wsVersuch = (pfad) => new Promise((resolve) => {
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}${pfad}`)
@@ -493,23 +561,23 @@ try {
     ws.on('error', (err) => { clearTimeout(t); fertig({ art: 'fehler', text: err.message }) })
   })
 
-  await pruefe('Terminal verbindet und liefert den Sitzungsinhalt', async () => {
+  await pruefe('terminal connects and delivers the session content', async () => {
     const e = await wsVersuch(`/term?run=${R1}&ro=1`)
-    gleich(e.art, 'daten', `Ereignis (${JSON.stringify(e)})`)
-    wahr(e.text.length > 0, 'Ausgabe empfangen')
+    gleich(e.art, 'daten', `event (${JSON.stringify(e)})`)
+    wahr(e.text.length > 0, 'output received')
   })
-  await pruefe('unbekannter Lauf ergibt 404 statt Hänger', async () => {
+  await pruefe('unknown run yields 404 instead of hanging', async () => {
     const e = await wsVersuch('/term?run=00000000-0000-4000-8000-000000000000&ro=1')
-    gleich(e.art, 'http', 'HTTP-Antwort')
-    gleich(e.status, 404, 'Status')
+    gleich(e.art, 'http', 'HTTP response')
+    gleich(e.status, 404, 'status')
   })
 
-  // Tippen im Terminal — der Weg, den die Suite lange nicht genommen hat: bis hierher
-  // prüfte sie nur ro=1 und hätte eine dauerhaft stumme Eingabe nie bemerkt.
+  // Typing into the terminal — the path the suite long left untested: up to this point
+  // it only checked ro=1 and would never have noticed a permanently mute input.
   const wsSchreiben = (pfad, text) => new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}${pfad}`)
-    const t = setTimeout(() => { try { ws.close() } catch {}; reject(new Error('Timeout beim Verbinden')) }, 8000)
-    // Erst wenn tmux den Bildschirm gemalt hat, ist der Client wirklich angehängt.
+    const t = setTimeout(() => { try { ws.close() } catch {}; reject(new Error('timeout while connecting')) }, 8000)
+    // Only once tmux has painted the screen is the client really attached.
     ws.once('message', () => {
       clearTimeout(t)
       ws.send(text)
@@ -518,167 +586,167 @@ try {
     ws.on('error', (err) => { clearTimeout(t); reject(err) })
   })
 
-  await pruefe('mit ro=0 landet Getipptes wirklich in der Session', async () => {
+  await pruefe('with ro=0, typed text really lands in the session', async () => {
     await wsSchreiben(`/term?run=${R1}&ro=0`, 'direkt getippt\r')
     await warteAuf(async () => (await sh('tmux', ['capture-pane', '-p', '-t', `=${lauf(R1).tmux_session}:`]))
-      .stdout.includes('[agent sah] direkt getippt'), { was: 'getippter Text im Pane', timeoutMs: 8000 })
+      .stdout.includes('[agent sah] direkt getippt'), { was: 'typed text in the pane', timeoutMs: 8000 })
   })
-  await pruefe('ohne ro-Parameter bleibt das Terminal stumm (fail-closed)', async () => {
+  await pruefe('without the ro parameter the terminal stays mute (fail-closed)', async () => {
     await wsSchreiben(`/term?run=${R1}`, 'darf nicht ankommen\r')
     await new Promise((r) => setTimeout(r, 1500))
     const p = await sh('tmux', ['capture-pane', '-p', '-t', `=${lauf(R1).tmux_session}:`])
-    falsch(p.stdout.includes('darf nicht ankommen'), 'nichts durchgelassen')
+    falsch(p.stdout.includes('darf nicht ankommen'), 'nothing let through')
   })
 
   // ------------------------------------------------------------------
-  gruppe('Text senden und Rückmeldungen (cc-report)')
+  gruppe('Sending text and reports (cc-report)')
 
   const ccReport = (runId, args) => sh(join(homedir(), '.local', 'bin', 'cc-report'), args, {
     env: { ...process.env, CC_RUN_ID: runId, CC_HUB_URL: BASIS },
   })
 
-  await pruefe('Senden über die API landet in der tmux-Session', async () => {
+  await pruefe('sending via the API lands in the tmux session', async () => {
     const r = await formular(`/api/runs/${R1}/send`, { text: 'hallo aus dem test' })
-    gleich(r.status, 200, 'Status')
+    gleich(r.status, 200, 'status')
     gleich((await r.json()).ok, true, 'ok')
     await warteAuf(async () => (await sh('tmux', ['capture-pane', '-p', '-t', `=${lauf(R1).tmux_session}:`]))
-      .stdout.includes('[agent sah] hallo aus dem test'), { was: 'Text im Pane', timeoutMs: 8000 })
+      .stdout.includes('[agent sah] hallo aus dem test'), { was: 'text in the pane', timeoutMs: 8000 })
   })
-  await pruefe('das Log schneidet den Verlauf mit', async () => {
+  await pruefe('the log records the transcript', async () => {
     const datei = join(SB, 'runs', R1, 'log.txt')
     await warteAuf(() => readFileSync(datei, 'utf8').includes('hallo aus dem test'),
-      { was: 'gesendeter Text im Log', timeoutMs: 8000 })
+      { was: 'sent text in the log', timeoutMs: 8000 })
   })
-  await pruefe('Formular-POST leitet auf die Laufseite zurück (kein nacktes JSON)', async () => {
+  await pruefe('form POST redirects back to the run page (no bare JSON)', async () => {
     const r = await formular(`/api/runs/${R1}/send`, { text: 'zweiter text' }, { alsBrowser: true })
-    gleich(r.status, 303, 'Status')
-    gleich(r.headers.get('location'), `/runs/${R1}`, 'Ziel')
+    gleich(r.status, 303, 'status')
+    gleich(r.headers.get('location'), `/runs/${R1}`, 'target')
   })
-  await pruefe('Fortschritt, Branch und PR werden übernommen', async () => {
+  await pruefe('progress, branch and PR are taken over', async () => {
     wahr((await ccReport(R1, ['progress', 'laeuft weiter'])).ok, 'progress')
     wahr((await ccReport(R1, ['branch', 'agent/e2e/gemeldet'])).ok, 'branch')
     wahr((await ccReport(R1, ['pr', 'https://example.invalid/pr/1'])).ok, 'pr')
     const l = lauf(R1)
-    gleich(l.branch_reported, 'agent/e2e/gemeldet', 'Branch')
+    gleich(l.branch_reported, 'agent/e2e/gemeldet', 'branch')
     gleich(l.pr_url, 'https://example.invalid/pr/1', 'PR')
-    wahr(ereignisse(R1).includes('progress'), 'Ereignis progress')
+    wahr(ereignisse(R1).includes('progress'), 'event progress')
   })
-  await pruefe('Hilferuf setzt den Lauf auf waiting_help', async () => {
+  await pruefe('a call for help sets the run to waiting_help', async () => {
     wahr((await ccReport(R1, ['help', 'Variante A oder B?'])).ok, 'help')
     const l = lauf(R1)
-    gleich(l.status, 'waiting_help', 'Status')
-    enthaelt(l.help_text, 'Variante A', 'Frage gespeichert')
+    gleich(l.status, 'waiting_help', 'status')
+    enthaelt(l.help_text, 'Variante A', 'question stored')
   })
-  await pruefe('Antwort setzt den Lauf zurück auf running', async () => {
+  await pruefe('an answer sets the run back to running', async () => {
     await formular(`/api/runs/${R1}/send`, { text: 'Nimm B.' })
     const l = lauf(R1)
-    gleich(l.status, 'running', 'Status')
-    enthaelt(l.help_answer, 'Nimm B.', 'Antwort gespeichert')
+    gleich(l.status, 'running', 'status')
+    enthaelt(l.help_answer, 'Nimm B.', 'answer stored')
   })
-  await pruefe('Abschlussbericht landet im Lauf und auf der Seite', async () => {
+  await pruefe('final report lands in the run and on the page', async () => {
     const datei = join(SB, 'report.md')
     writeFileSync(datei, '# Bericht\n- alles erledigt\n')
     wahr((await ccReport(R1, ['done', '--file', datei])).ok, 'done')
     const l = lauf(R1)
-    gleich(l.status, 'done', 'Status')
-    enthaelt(l.report_md, 'alles erledigt', 'Bericht gespeichert')
-    enthaelt(await (await hol(`/runs/${R1}`)).text(), 'alles erledigt', 'Bericht auf der Seite')
+    gleich(l.status, 'done', 'status')
+    enthaelt(l.report_md, 'alles erledigt', 'report stored')
+    enthaelt(await (await hol(`/runs/${R1}`)).text(), 'alles erledigt', 'report on the page')
   })
 
   // ------------------------------------------------------------------
-  gruppe('Watcher: Auffälligkeiten, Kosten, Branch-Abgleich')
+  gruppe('Watcher: anomalies, costs, branch reconciliation')
 
   let R3 = null
-  await pruefe('überzogene Erwartung erzeugt Auffälligkeiten', async () => {
+  await pruefe('exceeded expectation creates anomalies', async () => {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Ueberzug', expected_minutes: '1' })
     R3 = j.runId
-    wahr(!!R3, 'Lauf angelegt')
+    wahr(!!R3, 'run created')
     await sessionMerken(R3)
-    // Startzeit zurückdatieren, statt fünf Minuten zu warten.
+    // Backdate the start time instead of waiting five minutes.
     db.prepare(`UPDATE runs SET started_at=datetime('now','-5 minutes') WHERE id=?`).run(R3)
     await watcherTick()
     const k = ereignisse(R3)
-    wahr(k.includes('anomaly:overrun'), `anomaly:overrun (hat: ${k.join(', ')})`)
+    wahr(k.includes('anomaly:overrun'), `anomaly:overrun (has: ${k.join(', ')})`)
     wahr(k.includes('anomaly:soft_overrun'), 'anomaly:soft_overrun')
   })
-  await pruefe('Fortschrittsmeldung räumt die Auffälligkeiten wieder ab', async () => {
+  await pruefe('a progress report clears the anomalies again', async () => {
     wahr((await ccReport(R3, ['progress', 'melde mich, dauert laenger'])).ok, 'progress')
     const k = ereignisse(R3)
-    falsch(k.includes('anomaly:overrun'), 'anomaly:overrun ist weg')
-    wahr(k.includes('cleared:anomaly:overrun'), 'als erledigt vermerkt')
-    wahr(k.includes('cleared:anomaly:soft_overrun'), 'auch die gelbe Stufe')
+    falsch(k.includes('anomaly:overrun'), 'anomaly:overrun is gone')
+    wahr(k.includes('cleared:anomaly:overrun'), 'marked as resolved')
+    wahr(k.includes('cleared:anomaly:soft_overrun'), 'the yellow level too')
   })
-  await pruefe('Kostenabschluss läuft für beendete Läufe wirklich', async () => {
+  await pruefe('cost finalization really runs for finished runs', async () => {
     await watcherTick()
     const l = lauf(R1)
-    wahr(l.quota7_end !== null, 'quota7_end gesetzt')
-    wahr(l.cost_eur !== null, 'cost_eur berechnet')
+    wahr(l.quota7_end !== null, 'quota7_end set')
+    wahr(l.cost_eur !== null, 'cost_eur computed')
   })
-  await pruefe('ungepushter Branch wird gemeldet', async () => {
+  await pruefe('unpushed branch is reported', async () => {
     const l = lauf(R1)
-    // Der gemeldete Branch existiert nicht in git — für den Abgleich zählt der echte.
+    // The reported branch does not exist in git — the reconciliation counts the real one.
     db.prepare('UPDATE runs SET branch_reported=? WHERE id=?').run(l.branch_expected, R1)
     db.prepare(`DELETE FROM events WHERE run_id=? AND kind IN ('anomaly:unpushed','branch_synced')`).run(R1)
     await sh('git', ['-C', l.workdir_effective, 'commit', '-q', '--allow-empty', '-m', 'Arbeit des Agenten'])
     await watcherTick()
-    wahr(ereignisse(R1).includes('anomaly:unpushed'), `anomaly:unpushed (hat: ${ereignisse(R1).join(', ')})`)
+    wahr(ereignisse(R1).includes('anomaly:unpushed'), `anomaly:unpushed (has: ${ereignisse(R1).join(', ')})`)
   })
 
   // ------------------------------------------------------------------
-  gruppe('Zusatz-Skills: opt-in je Lauf und Agent')
+  gruppe('Extra skills: opt-in per run and agent')
 
-  await pruefe('Formulare bieten den Skill als Häkchen an, nichts ist vorausgewählt', async () => {
+  await pruefe('forms offer the skill as a checkbox, nothing preselected', async () => {
     const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
-    enthaelt(html, 'e2e-fleiss', 'Einzellauf-Formular')
-    enthaelt(html, 'Testskill gegen faule Modelle', 'Beschreibung')
-    falsch(/name="skills"[^>]*checked/.test(html), 'opt-in: nicht vorausgewählt')
-    enthaelt(await (await hol(`/agents/edit?repo=${repoId}`)).text(), 'e2e-fleiss', 'Agenten-Formular')
+    enthaelt(html, 'e2e-fleiss', 'single-run form')
+    enthaelt(html, 'Testskill gegen faule Modelle', 'description')
+    falsch(/name="skills"[^>]*checked/.test(html), 'opt-in: not preselected')
+    enthaelt(await (await hol(`/agents/edit?repo=${repoId}`)).text(), 'e2e-fleiss', 'agent form')
   })
-  await pruefe('gewählter Skill landet als SKILL.md-Verweis im Prompt des Laufs', async () => {
+  await pruefe('a selected skill lands as a SKILL.md reference in the run prompt', async () => {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Skilltest', skills: 'e2e-fleiss' })
-    wahr(!!j.runId, `Lauf (${JSON.stringify(j)})`)
+    wahr(!!j.runId, `run (${JSON.stringify(j)})`)
     await sessionMerken(j.runId)
-    gleich(lauf(j.runId).skills, '["e2e-fleiss"]', 'Definitions-Kopie am Lauf')
+    gleich(lauf(j.runId).skills, '["e2e-fleiss"]', 'definition copy on the run')
     const prompt = readFileSync(join(SB, 'runs', j.runId, 'prompt.md'), 'utf8')
-    enthaelt(prompt, join(SB, 'zusaetze', 'e2e-fleiss', 'SKILL.md'), 'voller Pfad im Prompt')
-    enthaelt(prompt, 'GESAMTEN Auftrags', 'Anwendungs-Anweisung')
-    enthaelt(await (await hol(`/runs/${j.runId}`)).text(), 'e2e-fleiss', 'Detailseite zeigt die Auswahl')
+    enthaelt(prompt, join(SB, 'zusaetze', 'e2e-fleiss', 'SKILL.md'), 'full path in the prompt')
+    enthaelt(prompt, 'ENTIRE task', 'instruction to apply')
+    enthaelt(await (await hol(`/runs/${j.runId}`)).text(), 'e2e-fleiss', 'detail page shows the selection')
   })
-  await pruefe('ohne Häkchen bleibt der Prompt frei von Skill-Verweisen', async () => {
+  await pruefe('without the checkbox the prompt stays free of skill references', async () => {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-ohne-Skill' })
     await sessionMerken(j.runId)
-    gleich(lauf(j.runId).skills, null, 'keine Auswahl')
-    falsch(readFileSync(join(SB, 'runs', j.runId, 'prompt.md'), 'utf8').includes('SKILL.md'), 'kein Verweis')
+    gleich(lauf(j.runId).skills, null, 'no selection')
+    falsch(readFileSync(join(SB, 'runs', j.runId, 'prompt.md'), 'utf8').includes('SKILL.md'), 'no reference')
   })
-  await pruefe('Agent mit Skill: der Lauf erbt die Auswahl (auch über den Scheduler-Weg)', async () => {
+  await pruefe('agent with skill: the run inherits the selection (also via the scheduler path)', async () => {
     const r = await formular('/agents/edit', {
       repo_id: repoId, name: 'skill-traeger', harness: 'claude', prompt: 'E2E-Agent-Skill',
       branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'manuell', active: '1',
       skills: 'e2e-fleiss',
     }, { alsBrowser: true })
-    gleich(r.status, 303, 'gespeichert')
-    gleich(agent('skill-traeger').skills, '["e2e-fleiss"]', 'am Agenten')
+    gleich(r.status, 303, 'saved')
+    gleich(agent('skill-traeger').skills, '["e2e-fleiss"]', 'on the agent')
     const r2 = await formular('/agents/start', { id: String(agent('skill-traeger').id), repo: String(repoId) }, { alsBrowser: true })
-    gleich(r2.status, 303, 'gestartet')
+    gleich(r2.status, 303, 'started')
     const runId = r2.headers.get('location').split('/')[2]
     await sessionMerken(runId)
-    gleich(lauf(runId).skills, '["e2e-fleiss"]', 'Kopie am Lauf')
-    enthaelt(readFileSync(join(SB, 'runs', runId, 'prompt.md'), 'utf8'), 'e2e-fleiss/SKILL.md', 'im Prompt')
+    gleich(lauf(runId).skills, '["e2e-fleiss"]', 'copy on the run')
+    enthaelt(readFileSync(join(SB, 'runs', runId, 'prompt.md'), 'utf8'), 'e2e-fleiss/SKILL.md', 'in the prompt')
   })
-  await pruefe('Regler: Tiefe aus dem Formular landet im Lauf und im Prompt', async () => {
+  await pruefe('slider: depth from the form lands in the run and in the prompt', async () => {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Skill-Tiefe', skills: 'e2e-fleiss', 'skill_regler_e2e-fleiss': '4' })
     await sessionMerken(j.runId)
-    // e2e-fleiss hat keinen Regler definiert → Wert wird verworfen, Häkchen bleibt.
-    gleich(lauf(j.runId).skills, '["e2e-fleiss"]', 'ohne Regler-Definition kein Anhang')
+    // e2e-fleiss defines no slider → the value is dropped, the checkbox remains.
+    gleich(lauf(j.runId).skills, '["e2e-fleiss"]', 'no suffix without a slider definition')
   })
-  await pruefe('erfundene Skill-Namen aus dem Formular werden verworfen', async () => {
+  await pruefe('made-up skill names from the form are discarded', async () => {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Skill-boese', skills: '../../etc/passwd' })
     await sessionMerken(j.runId)
-    gleich(lauf(j.runId).skills, null, 'nicht übernommen')
+    gleich(lauf(j.runId).skills, null, 'not taken over')
   })
 
   // ------------------------------------------------------------------
-  gruppe('Vorfälle: Rate-Limit und Provider-Fehler (Autoalarm)')
+  gruppe('Incidents: rate limit and provider errors (auto-alarm)')
 
   const vorfaelle = (id) => db.prepare('SELECT * FROM incidents WHERE run_id=? ORDER BY id').all(id)
   const logAnhaengen = (id, text) => {
@@ -687,106 +755,106 @@ try {
     writeFileSync(f, text, { flag: 'a' })
   }
 
-  await pruefe('cursor: Lauf läuft durch die Pipeline und "Cannot use this model" wird erkannt', async () => {
-    // Zwei Dinge auf einmal, weil sie zusammengehören: dass eine cursor-Harness den
-    // ganzen Weg (Formular → DB-CHECK → Worktree → Session → Watcher) übersteht, und
-    // dass Cursors LAUTE Modellablehnung als Vorfall ankommt. Genau die ist bei cursor
-    // der wahrscheinlichste Startfehler — die CLI nimmt nur IDs aus 'cursor-agent
-    // models' an und schreibt bei allem anderen die komplette Liste ins Log.
+  await pruefe('cursor: run passes through the pipeline and "Cannot use this model" is detected', async () => {
+    // Two things at once because they belong together: that a cursor harness survives
+    // the whole path (form → DB CHECK → worktree → session → watcher), and that
+    // cursor's LOUD model rejection arrives as an incident. That rejection is the most
+    // likely startup failure with cursor — the CLI only accepts IDs from 'cursor-agent
+    // models' and writes the complete list into the log for anything else.
     const j = await laufStarten({ repo_id: repoId, harness: 'cursor',
       model: 'claude-opus-5-xhigh', prompt: 'E2E-Vorfall-cursor', expected_minutes: '45' })
     const RC = j.runId
-    wahr(!!RC, `Lauf angelegt (Antwort: ${JSON.stringify(j).slice(0, 200)})`)
+    wahr(!!RC, `run created (response: ${JSON.stringify(j).slice(0, 200)})`)
     const lauf = db.prepare('SELECT harness, model, effort FROM runs WHERE id=?').get(RC)
-    gleich(lauf.harness, 'cursor', 'Harness in der DB')
-    gleich(lauf.model, 'claude-opus-5-xhigh', 'Modell-ID wortwörtlich gespeichert')
-    gleich(lauf.effort, null, 'kein getrennter Effort — die Stufe steckt in der ID')
+    gleich(lauf.harness, 'cursor', 'harness in the DB')
+    gleich(lauf.model, 'claude-opus-5-xhigh', 'model ID stored verbatim')
+    gleich(lauf.effort, null, 'no separate effort — the level is baked into the ID')
     await sessionMerken(RC)
     await watcherTick()
     logAnhaengen(RC, 'Cannot use this model: gibtsnicht-9000. Available models: auto, gpt-5.2\r\n')
     await watcherTick()
     const v = vorfaelle(RC)
-    gleich(v.length, 1, `genau ein Vorfall (hat: ${JSON.stringify(v.map(x => [x.typ, x.schwere]))})`)
-    gleich(v[0].typ, 'model_error', 'als Modellfehler eingeordnet')
-    enthaelt(v[0].beleg, 'Cannot use this model', 'Beleg ist die Zeile')
+    gleich(v.length, 1, `exactly one incident (has: ${JSON.stringify(v.map(x => [x.typ, x.schwere]))})`)
+    gleich(v[0].typ, 'model_error', 'classified as a model error')
+    enthaelt(v[0].beleg, 'Cannot use this model', 'evidence is the line')
   })
 
-  let RH = null   // „hermes"-Lauf (der Stub ignoriert die Harness; die Muster im Hub nicht)
-  await pruefe('hermes: erster Log-Treffer wird GELB vorgemerkt, ohne Telegram', async () => {
+  let RH = null   // "hermes" run (the stub ignores the harness; the hub's patterns do not)
+  await pruefe('hermes: first log match is noted YELLOW, without Telegram', async () => {
     const j = await laufStarten({ repo_id: repoId, harness: 'hermes', prompt: 'E2E-Vorfall-hermes', expected_minutes: '45' })
     RH = j.runId
-    wahr(!!RH, 'Lauf angelegt')
+    wahr(!!RH, 'run created')
     await sessionMerken(RH)
-    await watcherTick()   // Offset auf den Stand bringen — der Stub-Start hat schon geschrieben
+    await watcherTick()   // bring the offset up to date — the stub startup already wrote
     logAnhaengen(RH, '\x1b[33m⏳ Retrying in 12.0s (rate limited by upstream provider (429))...\x1b[0m\r\n')
     await watcherTick()
     const v = vorfaelle(RH)
-    gleich(v.length, 1, `genau ein Vorfall (hat: ${JSON.stringify(v.map(x => [x.typ, x.schwere]))})`)
-    gleich(v[0].typ, 'rate_limit', 'Typ')
-    gleich(v[0].schwere, 'gelb', 'gelb')
-    gleich(v[0].quelle, 'log', 'Quelle')
-    enthaelt(v[0].beleg, 'Retrying', 'Beleg ist die Zeile')
-    falsch(ereignisse(RH).some(k => k === 'telegram_sent'), 'kein Telegram für gelb')
-    enthaelt(await (await hol(`/?repo=${repoId}`)).text(), 'Rate-Limit 1×', 'Übersicht zeigt den Vorfall')
+    gleich(v.length, 1, `exactly one incident (has: ${JSON.stringify(v.map(x => [x.typ, x.schwere]))})`)
+    gleich(v[0].typ, 'rate_limit', 'type')
+    gleich(v[0].schwere, 'gelb', 'yellow')
+    gleich(v[0].quelle, 'log', 'source')
+    enthaelt(v[0].beleg, 'Retrying', 'evidence is the line')
+    falsch(ereignisse(RH).some(k => k === 'telegram_sent'), 'no Telegram for yellow')
+    enthaelt(await (await hol(`/?repo=${repoId}`)).text(), 'Rate limit 1×', 'overview shows the incident')
   })
-  await pruefe('derselbe Treffer zählt bei jedem Durchgang nur einmal (Offset)', async () => {
+  await pruefe('the same match counts only once per pass (offset)', async () => {
     await watcherTick(); await watcherTick()
-    gleich(vorfaelle(RH)[0].anzahl, 1, 'anzahl bleibt 1')
+    gleich(vorfaelle(RH)[0].anzahl, 1, 'anzahl stays 1')
   })
-  await pruefe('Wiederholung binnen 10 min → ROT (Retry-Schleife), Telegram-Versuch vermerkt', async () => {
+  await pruefe('repetition within 10 min → RED (retry loop), Telegram attempt recorded', async () => {
     logAnhaengen(RH, '⚠️  API call failed (attempt 2/5): RateLimitError (HTTP 429)\n')
     await watcherTick()
     const v = vorfaelle(RH)[0]
     gleich(v.anzahl, 2, 'anzahl 2')
-    gleich(v.schwere, 'rot', 'rot')
-    wahr(ereignisse(RH).includes('incident:eskaliert'), `eskaliert (hat: ${ereignisse(RH).join(', ')})`)
+    gleich(v.schwere, 'rot', 'red')
+    wahr(ereignisse(RH).includes('incident:eskaliert'), `escalated (has: ${ereignisse(RH).join(', ')})`)
     const tg = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='telegram_sent' ORDER BY id DESC LIMIT 1`).get(RH)
-    wahr(!!tg && JSON.parse(tg.payload).type === 'incident:rate_limit', 'Telegram-Versand für den Vorfall (ohne Token: delivered=false, aber versucht)')
-    enthaelt(await (await hol(`/runs/${RH}`)).text(), 'Vorfälle', 'Detailseite zeigt den Abschnitt')
+    wahr(!!tg && JSON.parse(tg.payload).type === 'incident:rate_limit', 'Telegram send for the incident (without a token: delivered=false, but attempted)')
+    enthaelt(await (await hol(`/runs/${RH}`)).text(), 'Incidents', 'detail page shows the section')
   })
-  await pruefe('Lösen über die Oberfläche nimmt den Alarm zurück', async () => {
+  await pruefe('resolving via the UI withdraws the alarm', async () => {
     const v = vorfaelle(RH)[0]
     const r = await formular(`/api/incidents/${v.id}/resolve`, { back: `/runs/${RH}` }, { alsBrowser: true })
-    gleich(r.status, 303, 'Redirect')
-    gleich(r.headers.get('location'), `/runs/${RH}`, 'zurück zur Laufseite')
+    gleich(r.status, 303, 'redirect')
+    gleich(r.headers.get('location'), `/runs/${RH}`, 'back to the run page')
     const nach = vorfaelle(RH)[0]
-    wahr(!!nach.geloest_am, 'geloest_am gesetzt')
-    gleich(nach.geloest_von, 'web', 'von web')
-    falsch((await (await hol(`/?repo=${repoId}`)).text()).includes('Rate-Limit 2×'), 'Übersicht ohne offenen Vorfall')
+    wahr(!!nach.geloest_am, 'geloest_am set')
+    gleich(nach.geloest_von, 'web', 'by web')
+    falsch((await (await hol(`/?repo=${repoId}`)).text()).includes('Rate limit 2×'), 'overview without an open incident')
   })
-  await pruefe('tritt es NACH dem Lösen erneut auf, geht der Alarm wieder an (Autoalarm)', async () => {
-    // Das Lösen liegt in derselben Sekunde — der neue Treffer muss danach liegen.
+  await pruefe('if it recurs AFTER resolving, the alarm goes on again (auto-alarm)', async () => {
+    // The resolution happened within the same second — the new match must come after it.
     db.prepare(`UPDATE incidents SET geloest_am=datetime('now','-2 minutes') WHERE run_id=?`).run(RH)
     logAnhaengen(RH, '⏳ Retrying in 30.0s (rate limited by upstream provider (429))...\n')
     await watcherTick()
     const v = vorfaelle(RH)
-    gleich(v.length, 1, 'immer noch EIN Datensatz (Historie bleibt)')
-    gleich(v[0].geloest_am, null, 'wieder offen')
-    gleich(v[0].wieder_geoeffnet, 1, '1× wieder geöffnet')
-    gleich(v[0].anzahl, 3, 'zählt weiter')
-    wahr(ereignisse(RH).includes('incident:wieder'), 'Ereignis incident:wieder')
+    gleich(v.length, 1, 'still ONE record (history remains)')
+    gleich(v[0].geloest_am, null, 'open again')
+    gleich(v[0].wieder_geoeffnet, 1, 'reopened once')
+    gleich(v[0].anzahl, 3, 'keeps counting')
+    wahr(ereignisse(RH).includes('incident:wieder'), 'event incident:wieder')
   })
-  await pruefe('Protokoll des Detektors liegt im Laufverzeichnis', async () => {
+  await pruefe('the detector\'s protocol is in the run directory', async () => {
     const f = join(SB, 'runs', RH, 'detektor.jsonl')
     wahr(existsSync(f), 'detektor.jsonl')
     const arten = readFileSync(f, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l).art)
-    wahr(arten.includes('log') && arten.includes('vorfall') && arten.includes('geloest'), `Einträge: ${[...new Set(arten)].join(', ')}`)
+    wahr(arten.includes('log') && arten.includes('vorfall') && arten.includes('geloest'), `entries: ${[...new Set(arten)].join(', ')}`)
   })
 
- // R1 ist inzwischen 'done' — Vorfälle werden nur für laufende Läufe gesammelt.
+ // R1 is 'done' by now — incidents are only collected for running runs.
   let RC = null
-  await pruefe('claude: der Menütext „Upgrade to Max for higher rate limits" ist KEIN Vorfall', async () => {
+  await pruefe('claude: the menu text "Upgrade to Max for higher rate limits" is NOT an incident', async () => {
     const j = await laufStarten({ repo_id: repoId, harness: 'claude', prompt: 'E2E-Vorfall-claude' })
     RC = j.runId
     await sessionMerken(RC)
-    // Genau das stand in einem Produktivlauf als Rate-Limit in der Datenbank.
+    // Exactly this stood in a production run as a rate limit in the database.
     await watcherTick()
     logAnhaengen(RC, '\x1b[38;5;246m/\x1b[39m\x1b[1mu\x1b[22mpgrade   Upgrade to Max for higher rate limits and more Opus\x1b[K\r\n')
     await watcherTick()
-    gleich(vorfaelle(RC).length, 0, 'kein Vorfall')
+    gleich(vorfaelle(RC).length, 0, 'no incident')
   })
 
-  await pruefe('claude: Transkript-Eintrag mit isApiErrorMessage → sofort ROT, mit Original-Zeitstempel', async () => {
+  await pruefe('claude: transcript entry with isApiErrorMessage → RED immediately, with original timestamp', async () => {
     const r = lauf(RC)
     const dir = join(SB, 'claude-projects', r.workdir_effective.replaceAll('/', '-'))
     mkdirSync(dir, { recursive: true })
@@ -798,13 +866,13 @@ try {
     ].join('\n') + '\n')
     await watcherTick()
     const v = vorfaelle(RC)
-    gleich(v.length, 1, 'ein Vorfall')
-    gleich(v[0].typ, 'auth_error', 'Typ aus dem Enum')
-    gleich(v[0].schwere, 'rot', 'rot ohne Umweg')
-    gleich(v[0].quelle, 'transcript', 'Quelle')
-    gleich(v[0].erst_gesehen, '2026-08-11 08:05:00', 'Zeitstempel aus dem Transkript, nicht „jetzt"')
+    gleich(v.length, 1, 'one incident')
+    gleich(v[0].typ, 'auth_error', 'type from the enum')
+    gleich(v[0].schwere, 'rot', 'red without detours')
+    gleich(v[0].quelle, 'transcript', 'source')
+    gleich(v[0].erst_gesehen, '2026-08-11 08:05:00', 'timestamp from the transcript, not "now"')
   })
-  await pruefe('Hook-Meldung (cc-report _api_error per stdin) → ROT; Rate-Limit-Zähler steigt', async () => {
+  await pruefe('hook report (cc-report _api_error via stdin) → RED; rate limit counter increments', async () => {
     const hookJson = JSON.stringify({ hook_event_name: 'StopFailure', error: 'rate_limit', last_assistant_message: "You've hit your session limit · resets 8:36pm" })
     const r = await new Promise((resolve) => {
       const p = execFile(join(homedir(), '.local', 'bin', 'cc-report'), ['_api_error'],
@@ -813,35 +881,35 @@ try {
     })
     wahr(r.ok, `cc-report ok (${r.stderr})`)
     const v = vorfaelle(RC).find(x => x.typ === 'rate_limit')
-    wahr(!!v, 'Vorfall rate_limit')
-    gleich(v.schwere, 'rot', 'rot')
-    gleich(v.quelle, 'hook:claude', 'Quelle')
-    enthaelt(v.beleg, 'session limit', 'Beleg aus last_assistant_message')
+    wahr(!!v, 'incident rate_limit')
+    gleich(v.schwere, 'rot', 'red')
+    gleich(v.quelle, 'hook:claude', 'source')
+    enthaelt(v.beleg, 'session limit', 'evidence from last_assistant_message')
     gleich(lauf(RC).rate_limit_hits, 1, 'rate_limit_hits')
   })
-  await pruefe('Hook und Transkript sehen dasselbe Ereignis → nicht doppelt gezählt', async () => {
+  await pruefe('hook and transcript see the same event → not counted twice', async () => {
     const r = lauf(RC)
     const dir = join(SB, 'claude-projects', r.workdir_effective.replaceAll('/', '-'))
     writeFileSync(join(dir, `${RC}.jsonl`), JSON.stringify({ type: 'assistant', error: 'rate_limit',
       timestamp: new Date().toISOString(), isApiErrorMessage: true, message: { content: 'limit' } }) + '\n', { flag: 'a' })
     await watcherTick()
-    gleich(vorfaelle(RC).find(x => x.typ === 'rate_limit').anzahl, 1, 'anzahl bleibt 1 (Dedupe binnen 90 s)')
+    gleich(vorfaelle(RC).find(x => x.typ === 'rate_limit').anzahl, 1, 'anzahl stays 1 (dedupe within 90 s)')
   })
-  await pruefe('Stille nach einem Log-Treffer wird ROT (das Limit steht am Ende)', async () => {
+  await pruefe('silence after a log match turns RED (the limit stands at the end)', async () => {
     const j = await laufStarten({ repo_id: repoId, harness: 'opencode', prompt: 'E2E-Vorfall-stille' })
     await sessionMerken(j.runId)
     await watcherTick()
     logAnhaengen(j.runId, 'AI_APICallError: [Stealth] stealth/ox-alpha is temporarily rate-limited upstream.\n')
     await watcherTick()
-    gleich(vorfaelle(j.runId)[0]?.schwere, 'gelb', 'erst gelb')
+    gleich(vorfaelle(j.runId)[0]?.schwere, 'gelb', 'yellow at first')
     db.prepare(`UPDATE incidents SET zuletzt_gesehen=datetime('now','-6 minutes'), erst_gesehen=datetime('now','-6 minutes') WHERE run_id=?`).run(j.runId)
     db.prepare(`UPDATE runs SET last_activity_at=datetime('now','-7 minutes') WHERE id=?`).run(j.runId)
     await watcherTick()
     const v = vorfaelle(j.runId)[0]
-    gleich(v.schwere, 'rot', 'nach 5 min Stille rot')
-    gleich(v.typ, 'rate_limit', 'Typ aus dem opencode-Text')
+    gleich(v.schwere, 'rot', 'red after 5 min of silence')
+    gleich(v.typ, 'rate_limit', 'type from the opencode text')
   })
-  await pruefe('arbeitet der Agent 30 min weiter, verläuft ein gelber Treffer von selbst', async () => {
+  await pruefe('if the agent keeps working for 30 min, a yellow match expires on its own', async () => {
     const j = await laufStarten({ repo_id: repoId, harness: 'hermes', prompt: 'E2E-Vorfall-verlaufen' })
     await sessionMerken(j.runId)
     await watcherTick()
@@ -851,10 +919,10 @@ try {
     db.prepare(`UPDATE runs SET last_activity_at=datetime('now','-1 minutes') WHERE id=?`).run(j.runId)
     await watcherTick()
     const v = vorfaelle(j.runId)[0]
-    wahr(!!v.geloest_am, 'geschlossen')
-    enthaelt(v.geloest_von, 'auto:', 'automatisch')
+    wahr(!!v.geloest_am, 'closed')
+    enthaelt(v.geloest_von, 'auto:', 'automatic')
   })
-  await pruefe('Provider-Puls: zwei Fehlschläge → globaler Vorfall mit Banner, Erholung schließt ihn', async () => {
+  await pruefe('provider pulse: two failures → global incident with banner, recovery closes it', async () => {
     let antwort = 500
     const http = await import('node:http')
     const hs = http.createServer((req, res) => { res.writeHead(antwort).end('{}') })
@@ -864,16 +932,16 @@ try {
     process.env.CCHUB_PULS_URL_TEST = `http://127.0.0.1:${hs.address().port}/`
     try {
       await watcherTick()
-      gleich(db.prepare(`SELECT count(*) c FROM incidents WHERE run_id IS NULL`).get().c, 0, 'ein Fehlschlag reicht nicht')
+      gleich(db.prepare(`SELECT count(*) c FROM incidents WHERE run_id IS NULL`).get().c, 0, 'one failure is not enough')
       await watcherTick()
       const g = db.prepare(`SELECT * FROM incidents WHERE run_id IS NULL AND geloest_am IS NULL`).all()
-      wahr(g.length >= 1, `globaler Vorfall (hat ${g.length})`)
-      wahr(g.every(x => x.typ.startsWith('provider_down:')), 'Typ provider_down:<name>')
-      enthaelt(await (await hol(`/?repo=${repoId}`)).text(), 'Provider nicht erreichbar', 'Banner in der Übersicht')
+      wahr(g.length >= 1, `global incident (has ${g.length})`)
+      wahr(g.every(x => x.typ.startsWith('provider_down:')), 'type provider_down:<name>')
+      enthaelt(await (await hol(`/?repo=${repoId}`)).text(), 'Provider unreachable', 'banner in the overview')
       antwort = 200
       await watcherTick()
-      gleich(db.prepare(`SELECT count(*) c FROM incidents WHERE run_id IS NULL AND geloest_am IS NULL`).get().c, 0, 'erholt → geschlossen')
-      enthaelt(db.prepare(`SELECT geloest_von FROM incidents WHERE run_id IS NULL LIMIT 1`).get().geloest_von, 'erholt', 'Grund')
+      gleich(db.prepare(`SELECT count(*) c FROM incidents WHERE run_id IS NULL AND geloest_am IS NULL`).get().c, 0, 'recovered → closed')
+      enthaelt(db.prepare(`SELECT geloest_von FROM incidents WHERE run_id IS NULL LIMIT 1`).get().geloest_von, 'erholt', 'reason')
     } finally {
       process.env.CCHUB_PULS_AUS = '1'
       delete process.env.CCHUB_PULS_URL_TEST
@@ -881,20 +949,20 @@ try {
       hs.close()
     }
   })
-  await pruefe('Übersicht: Laufzeit beendeter Läufe endet bei ended_at, nicht „jetzt"', async () => {
+  await pruefe('overview: runtime of finished runs ends at ended_at, not "now"', async () => {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Dauer' })
     await sessionMerken(j.runId)
     db.prepare(`UPDATE runs SET status='done', started_at=datetime('now','-3 days'), ended_at=datetime('now','-3 days','+2 minutes') WHERE id=?`).run(j.runId)
     const html = await (await hol(`/?repo=${repoId}`)).text()
     const zeile = html.split('<tr').find(z => z.includes(j.runId))
-    enthaelt(zeile, '>2 min<', '2 min statt 4320')
+    enthaelt(zeile, '>2 min<', '2 min instead of 4320')
   })
 
-  // Simulation mit ECHTEM Claude Code: ein Mini-Server antwortet 429 mit den
-  // Abo-Limit-Headern, Claude bricht ab, der StopFailure-Hook meldet über cc-report
-  // an diesen Sandkasten-Hub. Kein Quota-Verbrauch, kein Netz — aber der komplette Weg.
+  // Simulation with REAL Claude Code: a mini server answers 429 with the
+  // subscription-limit headers, Claude aborts, the StopFailure hook reports via
+  // cc-report to this sandbox hub. No quota consumed, no network — but the full path.
   if (vorhanden('claude')) {
-    await pruefe('ECHT: Claude Code + simuliertes 429 → StopFailure-Hook → Vorfall rate_limit', async () => {
+    await pruefe('REAL: Claude Code + simulated 429 → StopFailure hook → incident rate_limit', async () => {
       const http = await import('node:http')
       const reset = Math.floor(Date.now() / 1000) + 3600
       const mock = http.createServer((req, res) => {
@@ -921,211 +989,211 @@ try {
           { cwd: arbeitsdir, timeout: 120_000, env: { ...process.env, ANTHROPIC_BASE_URL: `http://127.0.0.1:${mock.address().port}`,
             CC_RUN_ID: j.runId, CC_HUB_URL: BASIS, PATH: `${join(homedir(), '.local', 'bin')}:${process.env.PATH}` } },
           (err, stdout, stderr) => resolve({ err, stdout: String(stdout), stderr: String(stderr) })))
-        enthaelt(r.stdout + r.stderr, 'limit', `Claude meldet das Limit (${(r.stdout + r.stderr).slice(-200)})`)
-        await warteAuf(() => vorfaelle(j.runId).some(v => v.typ === 'rate_limit'), { was: 'Vorfall über den Hook', timeoutMs: 15_000 })
+        enthaelt(r.stdout + r.stderr, 'limit', `Claude reports the limit (${(r.stdout + r.stderr).slice(-200)})`)
+        await warteAuf(() => vorfaelle(j.runId).some(v => v.typ === 'rate_limit'), { was: 'incident via the hook', timeoutMs: 15_000 })
         const v = vorfaelle(j.runId).find(v => v.typ === 'rate_limit')
-        gleich(v.quelle, 'hook:claude', 'Quelle ist der Hook')
-        gleich(v.schwere, 'rot', 'rot')
-        enthaelt(v.beleg, 'rate_limit', 'Beleg trägt das Enum')
+        gleich(v.quelle, 'hook:claude', 'source is the hook')
+        gleich(v.schwere, 'rot', 'red')
+        enthaelt(v.beleg, 'rate_limit', 'evidence carries the enum')
       } finally { mock.close() }
     })
   } else {
-    uebersprungen('ECHT: Claude Code + simuliertes 429', 'claude nicht im PATH')
+    uebersprungen('REAL: Claude Code + simulated 429', 'claude not in PATH')
   }
 
   // ------------------------------------------------------------------
-  gruppe('Worktree-Aufräumen: kein Datenverlust (Regressionstest)')
+  gruppe('Worktree cleanup: no data loss (regression test)')
 
   {
     const s = lauf(R1).tmux_session
     await sh('tmux', ['kill-session', '-t', `=${s}`])
     sessions.delete(s)
     await watcherTick()
-    // BEKANNTER FEHLER (in watcher.mjs, nicht hier): closeOldSessions() erkennt eine
-    // verschwundene Session nicht, weil `tmux display -p -t "=name"` auch für nicht
-    // existierende Sessions mit Code 0 antwortet. Damit bleibt tmux_closed_at leer und
-    // das gesamte Worktree-Aufräumen läuft nie an. Sobald das gefixt ist, wird aus dem
-    // folgenden Block wieder eine echte Prüfung.
+    // KNOWN BUG (in watcher.mjs, not here): closeOldSessions() does not notice a
+    // vanished session, because `tmux display -p -t "=name"` answers with code 0 even
+    // for non-existent sessions. Thus tmux_closed_at stays empty and the whole
+    // worktree cleanup never starts. Once that is fixed, the following block becomes
+    // a real check again.
     if (lauf(R1).tmux_closed_at !== null) {
-      await pruefe('Sitzung zu Ende: tmux_closed_at wird gesetzt', () => {
+      await pruefe('session over: tmux_closed_at gets set', () => {
         wahr(lauf(R1).tmux_closed_at !== null, 'tmux_closed_at')
       })
     } else {
-      uebersprungen('Sitzung zu Ende: tmux_closed_at wird gesetzt',
-        'bekannter Fehler: tmux display meldet Erfolg auch für fehlende Sessions')
+      uebersprungen('session over: tmux_closed_at gets set',
+        'known bug: tmux display reports success even for missing sessions')
       db.prepare(`UPDATE runs SET tmux_closed_at=datetime('now') WHERE id=?`).run(R1)
     }
   }
-  await pruefe('ungepushter Branch: Worktree bleibt stehen', async () => {
+  await pruefe('unpushed branch: worktree stays put', async () => {
     const wt = lauf(R1).workdir_effective
     await watcherTick()
-    wahr(existsSync(wt), `Worktree ${wt} existiert noch`)
-    falsch(ereignisse(R1).includes('worktree_removed'), 'nicht entfernt')
+    wahr(existsSync(wt), `worktree ${wt} still exists`)
+    falsch(ereignisse(R1).includes('worktree_removed'), 'not removed')
   })
-  await pruefe('gepusht, aber nicht committete Arbeit: Worktree bleibt stehen', async () => {
+  await pruefe('pushed, but uncommitted work: worktree stays put', async () => {
     const wt = lauf(R1).workdir_effective
     await sh('git', ['-C', wt, 'push', '-q', '-u', 'origin', 'HEAD'])
     writeFileSync(join(wt, 'offene-notiz.txt'), 'noch nicht committet\n')
     db.prepare(`DELETE FROM events WHERE run_id=? AND kind IN ('anomaly:unpushed','branch_synced')`).run(R1)
     await watcherTick()
-    wahr(existsSync(wt), 'Worktree existiert noch')
-    wahr(ereignisse(R1).includes('anomaly:worktree_dirty'), `als schmutzig vermerkt (hat: ${ereignisse(R1).join(', ')})`)
+    wahr(existsSync(wt), 'worktree still exists')
+    wahr(ereignisse(R1).includes('anomaly:worktree_dirty'), `marked as dirty (has: ${ereignisse(R1).join(', ')})`)
   })
-  await pruefe('gepusht und sauber: Worktree wird aufgeräumt', async () => {
+  await pruefe('pushed and clean: worktree gets cleaned up', async () => {
     const wt = lauf(R1).workdir_effective
     rmSync(join(wt, 'offene-notiz.txt'))
     db.prepare(`DELETE FROM events WHERE run_id=? AND kind='anomaly:worktree_dirty'`).run(R1)
     await watcherTick()
-    falsch(existsSync(wt), 'Worktree entfernt')
-    wahr(ereignisse(R1).includes('worktree_removed'), 'Ereignis vermerkt')
+    falsch(existsSync(wt), 'worktree removed')
+    wahr(ereignisse(R1).includes('worktree_removed'), 'event recorded')
   })
-  await pruefe('die Arbeit steckt im origin — nichts ging verloren', async () => {
+  await pruefe('the work is in the origin — nothing was lost', async () => {
     const l = await sh('git', ['-C', ORIGIN, 'log', '--oneline', '-1', lauf(R1).branch_expected])
-    enthaelt(l.stdout, 'Arbeit des Agenten', 'Commit im origin')
+    enthaelt(l.stdout, 'Arbeit des Agenten', 'commit in the origin')
   })
 
   // ------------------------------------------------------------------
-  await pruefe('ein beim Start unterbrochener Lauf bleibt nicht ewig „läuft“', async () => {
-    // Stirbt der Hub mitten im Startvorgang (Dienst-Neustart, Reboot), stand der Lauf
-    // vorher für immer auf 'running' — ohne Session, ohne Worktree, mit einem Terminal,
-    // das sich nirgends anhängen konnte.
+  await pruefe('a run interrupted during startup does not stay "running" forever', async () => {
+    // If the hub dies in the middle of the startup sequence (service restart, reboot),
+    // the run used to be stuck on 'running' forever — with no session, no worktree,
+    // and a terminal that had nothing to attach to.
     const id = 'aaaaaaaa-1111-4222-8333-444444444444'
     db.prepare(`INSERT INTO runs(id,repo_id,status,harness,prompt,branch_mode,expected_minutes,started_at)
                 VALUES(?,?,'running','claude','x','keiner',45, datetime('now','-30 minutes'))`).run(id, repoId)
     await watcherTick()
     const r = lauf(id)
-    gleich(r.status, 'failed', 'wird als gescheitert abgeschlossen')
-    enthaelt(r.report_md ?? '', 'unterbrochen', 'Begründung im Bericht')
+    gleich(r.status, 'failed', 'completed as failed')
+    enthaelt(r.report_md ?? '', 'interrupted', 'reason in the report')
     const seite = await (await hol(`/runs/${id}`)).text()
-    falsch(seite.includes('Terminal (live)'), 'die Seite verspricht kein Terminal mehr')
-    enthaelt(seite, 'Lauf wiederholen', 'Wiederholen wird angeboten')
+    falsch(seite.includes('data-live=\"1\"'), 'the page no longer promises a terminal')
+    enthaelt(seite, 'Retry run', 'retry is offered')
   })
 
-  await pruefe('ein gerade erst angelegter Lauf wird dabei NICHT abgeräumt', async () => {
-    // Gegenprobe: während cc-start noch arbeitet, hat ein Lauf zu Recht keine Session.
+  await pruefe('a run created just now is NOT swept up by this', async () => {
+    // Counter-check: while cc-start is still working, a run rightly has no session.
     const id = 'bbbbbbbb-1111-4222-8333-444444444444'
     db.prepare(`INSERT INTO runs(id,repo_id,status,harness,prompt,branch_mode,expected_minutes,started_at)
                 VALUES(?,?,'running','claude','x','keiner',45, datetime('now'))`).run(id, repoId)
     await watcherTick()
-    gleich(lauf(id).status, 'running', 'bleibt unangetastet')
+    gleich(lauf(id).status, 'running', 'left untouched')
     db.prepare('DELETE FROM runs WHERE id=?').run(id)
   })
 
-  gruppe('Fehlstart, Wiederholung und Abbruch')
+  gruppe('Failed start, retry and abort')
 
   let R2 = null
-  await pruefe('gescheiterter Start wird als failed vermerkt', async () => {
+  await pruefe('failed start is recorded as failed', async () => {
     writeFileSync(FEHLSTART, 'an')
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Fehlstart', branch_mode: 'neu', branch_pattern: 'agent/e2e-fehl/{kurz}' })
     R2 = j.runId
-    gleich(lauf(R2).status, 'failed', 'Status')
-    enthaelt(lauf(R2).report_md, 'cc-start', 'Grund genannt')
+    gleich(lauf(R2).status, 'failed', 'status')
+    enthaelt(lauf(R2).report_md, 'cc-start', 'reason named')
   })
-  await pruefe('Wiederholung benutzt denselben Worktree und läuft an', async () => {
+  await pruefe('retry uses the same worktree and starts up', async () => {
     const vorher = lauf(R2).workdir_effective
-    wahr(existsSync(vorher), 'Worktree aus dem Fehlversuch liegt noch da')
+    wahr(existsSync(vorher), 'worktree from the failed attempt is still there')
     rmSync(FEHLSTART)
     const r = await formular(`/api/runs/${R2}/retry`, {}, { alsBrowser: true })
-    gleich(r.status, 303, 'Weiterleitung statt JSON')
+    gleich(r.status, 303, 'redirect instead of JSON')
     await sessionMerken(R2)
-    gleich(lauf(R2).status, 'running', 'Status')
-    gleich(lauf(R2).workdir_effective, vorher, 'gleicher Worktree')
+    gleich(lauf(R2).status, 'running', 'status')
+    gleich(lauf(R2).workdir_effective, vorher, 'same worktree')
   })
-  await pruefe('Abbruch setzt aborted und schließt die Session sofort', async () => {
+  await pruefe('abort sets aborted and closes the session immediately', async () => {
     const r = await formular(`/api/runs/${R2}/kill`, {})
-    gleich(r.status, 200, 'Status')
+    gleich(r.status, 200, 'status')
     const l = lauf(R2)
-    gleich(l.status, 'aborted', 'Status')
-    wahr(l.tmux_closed_at !== null, 'tmux_closed_at sofort gesetzt')
-    falsch((await sh('tmux', ['has-session', '-t', `=${l.tmux_session}`])).ok, 'Session beendet')
+    gleich(l.status, 'aborted', 'status')
+    wahr(l.tmux_closed_at !== null, 'tmux_closed_at set immediately')
+    falsch((await sh('tmux', ['has-session', '-t', `=${l.tmux_session}`])).ok, 'session terminated')
     sessions.delete(l.tmux_session)
   })
-  await pruefe('Terminal einer beendeten Sitzung meldet 410 statt zu hängen', async () => {
+  await pruefe('terminal of a terminated session reports 410 instead of hanging', async () => {
     const e = await wsVersuch(`/term?run=${R2}&ro=1`)
-    gleich(e.art, 'http', 'HTTP-Antwort')
-    gleich(e.status, 410, 'Status')
+    gleich(e.art, 'http', 'HTTP response')
+    gleich(e.status, 410, 'status')
   })
 
   // ------------------------------------------------------------------
-  gruppe('Scheduler (wartet auf den 30-Sekunden-Takt des Hubs)')
+  gruppe('Scheduler (waits for the hub\'s 30-second tick)')
 
-  await pruefe('Zeitplan-Agenten anlegen und Pipeline einschalten', async () => {
-    // A: läuft jede Minute, hat aber schon einen laufenden Lauf -> muss übersprungen werden.
+  await pruefe('create schedule agents and switch on the pipeline', async () => {
+    // A: runs every minute, but already has a running run -> must be skipped.
     const a = await formular('/agents/edit', {
       repo_id: repoId, name: 'e2e-jede-minute', harness: 'claude', prompt: 'E2E-Dauerlaeufer',
       branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'cron', schedule: '* * * * *', active: '1',
     }, { alsBrowser: true })
-    gleich(a.status, 303, 'Agent A angelegt')
+    gleich(a.status, 303, 'agent A created')
     const idA = agent('e2e-jede-minute').id
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-belegt' })
     db.prepare('UPDATE runs SET agent_id=? WHERE id=?').run(idA, j.runId)
 
-    // B: einmaliger Termin in der Vergangenheit -> muss genau einmal zünden.
+    // B: one-off date in the past -> must fire exactly once.
     const gestern = new Date(Date.now() - 3600_000).toISOString().slice(0, 16)
     const b = await formular('/agents/edit', {
       repo_id: repoId, name: 'e2e-einmalig', harness: 'claude', prompt: 'E2E-Einmalig',
       branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'einmalig', run_at: gestern, active: '1',
     }, { alsBrowser: true })
-    gleich(b.status, 303, 'Agent B angelegt')
-    gleich((await (await formular('/api/settings/pipeline', { value: '1' })).json()).ok, true, 'Pipeline an')
+    gleich(b.status, 303, 'agent B created')
+    gleich((await (await formular('/api/settings/pipeline', { value: '1' })).json()).ok, true, 'pipeline on')
   })
-  await pruefe('einmaliger Termin zündet genau einmal und stellt sich auf manuell', async () => {
+  await pruefe('one-off date fires exactly once and switches itself to manual', async () => {
     const idB = agent('e2e-einmalig').id
     await warteAuf(() => db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(idB).c === 1,
-      { was: 'Lauf des einmaligen Agenten', timeoutMs: 75_000, taktMs: 1000 })
+      { was: 'run of the one-off agent', timeoutMs: 75_000, taktMs: 1000 })
     const a = agent('e2e-einmalig')
-    gleich(a.schedule_kind, 'manuell', 'Art zurückgestellt')
-    gleich(a.run_at, null, 'Termin geleert')
+    gleich(a.schedule_kind, 'manuell', 'kind reset')
+    gleich(a.run_at, null, 'date cleared')
     for (const r of db.prepare('SELECT id FROM runs WHERE agent_id=?').all(idB)) await sessionMerken(r.id)
   })
-  await pruefe('ein Agent überholt sich nicht selbst', async () => {
+  await pruefe('an agent does not overtake itself', async () => {
     const idA = agent('e2e-jede-minute').id
     const belegt = db.prepare(`SELECT id FROM runs WHERE agent_id=? AND status='running'`).get(idA)
     await warteAuf(() => ereignisse(belegt.id).includes('schedule_skipped'),
       { was: 'schedule_skipped', timeoutMs: 75_000, taktMs: 1000 })
-    gleich(db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(idA).c, 1, 'nur ein Lauf')
+    gleich(db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(idA).c, 1, 'only one run')
   })
-  await pruefe('Pipeline lässt sich wieder ausschalten', async () => {
+  await pruefe('pipeline can be switched off again', async () => {
     gleich((await (await formular('/api/settings/pipeline', { value: '0' })).json()).ok, true, 'ok')
-    gleich(db.prepare(`SELECT value FROM settings WHERE key='pipeline_on'`).get().value, '0', 'gespeichert')
+    gleich(db.prepare(`SELECT value FROM settings WHERE key='pipeline_on'`).get().value, '0', 'saved')
   })
 
   // ------------------------------------------------------------------
   if (ECHT) {
-    // Ab hier mit dem ECHTEN cc-start und echten Harnesses. Bewusst ein zweiter
-    // Hub-Start: der Stub-Teil oben soll deterministisch und kostenlos bleiben.
+    // From here on with the REAL cc-start and real harnesses. Deliberately a second
+    // hub start: the stub part above must stay deterministic and free of charge.
     await hubStoppen()
     await hubStarten({ echteAgenten: true })
 
     const harnesses = [
-      { name: 'claude', bedingung: () => vorhanden('claude'), fehlt: 'claude nicht im PATH' },
+      { name: 'claude', bedingung: () => vorhanden('claude'), fehlt: 'claude not in PATH' },
       {
         name: 'opencode', provider: 'openrouter', model: ECHT_MODELL,
         bedingung: () => vorhanden('opencode') && !!ECHT_KEYS.OPENROUTER_API_KEY,
-        fehlt: 'opencode fehlt oder OPENROUTER_API_KEY ist nicht gesetzt',
+        fehlt: 'opencode missing or OPENROUTER_API_KEY is not set',
       },
       {
         name: 'hermes', provider: 'openrouter', model: ECHT_MODELL,
         bedingung: () => vorhanden('hermes') && !!ECHT_KEYS.OPENROUTER_API_KEY,
-        fehlt: 'hermes fehlt oder OPENROUTER_API_KEY ist nicht gesetzt',
+        fehlt: 'hermes missing or OPENROUTER_API_KEY is not set',
       },
       {
-        // Zen braucht für die freien Modelle keinen Schlüssel — deckt zugleich ab,
-        // dass das Präfix stimmt (opencode/… und NICHT opencode-zen/…).
-        name: 'opencode', titel: 'opencode über OpenCode Zen (freies Modell)',
+        // Zen needs no key for the free models — and this also covers that the
+        // prefix is right (opencode/… and NOT opencode-zen/…).
+        name: 'opencode', titel: 'opencode via OpenCode Zen (free model)',
         provider: 'opencode-zen', model: ZEN_MODELL, marke: 'zen-echt.md',
         bedingung: () => vorhanden('opencode'),
-        fehlt: 'opencode nicht im PATH',
+        fehlt: 'opencode not in PATH',
       },
     ]
 
     for (const h of harnesses) {
-      gruppe(`Echter Lauf: ${h.titel ?? h.name}${h.provider ? ` — ${h.provider}/${h.model}` : ''}`)
+      gruppe(`Real run: ${h.titel ?? h.name}${h.provider ? ` — ${h.provider}/${h.model}` : ''}`)
       if (!h.bedingung()) {
         uebersprungen(h.titel ?? h.name, h.fehlt)
         continue
       }
-      await pruefe(`${h.name} schreibt die Datei und meldet done`, async () => {
+      await pruefe(`${h.name} writes the file and reports done`, async () => {
         const marke = h.marke ?? `${h.name}-echt.md`
         const j = await laufStarten({
           repo_id: repoId, harness: h.name,
@@ -1134,23 +1202,23 @@ try {
             + `Fuehre danach genau dieses Kommando aus: cc-report done "${h.name}-Rauchtest fertig"`,
           branch_mode: 'keiner', expected_minutes: '10',
         })
-        wahr(!!j.runId, `Lauf gestartet (${JSON.stringify(j)})`)
+        wahr(!!j.runId, `run started (${JSON.stringify(j)})`)
         await sessionMerken(j.runId)
         await warteAuf(() => ['done', 'failed', 'aborted'].includes(lauf(j.runId).status),
-          { was: `Ende des ${h.name}-Laufs`, timeoutMs: 420_000, taktMs: 2000 })
+          { was: `end of the ${h.name} run`, timeoutMs: 420_000, taktMs: 2000 })
         const r = lauf(j.runId)
-        gleich(r.status, 'done', `Status (Bericht: ${(r.report_md ?? '').slice(0, 80)})`)
+        gleich(r.status, 'done', `status (report: ${(r.report_md ?? '').slice(0, 80)})`)
         wahr(existsSync(join(r.workdir_effective, marke)),
-          `${marke} wurde im Worktree wirklich angelegt`)
-        wahr((r.report_md ?? '').length > 0, 'Bericht vorhanden')
+          `${marke} was really created in the worktree`)
+        wahr((r.report_md ?? '').length > 0, 'report present')
       })
     }
   }
 } catch (err) {
-  console.log(`\nAbbruch: ${err.stack}`)
-  zaehler.fehler.push({ name: 'Testlauf', grund: err.message })
+  console.log(`\nAborted: ${err.stack}`)
+  zaehler.fehler.push({ name: 'Test run', grund: err.message })
 } finally {
   await aufraeumen()
 }
 
-process.exit(bericht(`E2E-Tests${ECHT ? ' (mit echtem Lauf)' : ''}`, start))
+process.exit(bericht(`E2E tests${ECHT ? ' (with real runs)' : ''}`, start))

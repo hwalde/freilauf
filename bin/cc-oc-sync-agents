@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""cc-oc-sync-agents — Converts Claude Code agents (.claude/agents/*.md)
+into OpenCode agents (.opencode/agents/*.md) within the same project.
+
+Why conversion instead of a 1:1 copy (verified empirically, opencode 1.18.20):
+  * "tools: <list>"   -> HARD FAILURE in opencode ("Expected object | undefined")
+  * "model: haiku"    -> runtime error "Model not found: haiku/." (no fallback)
+  * missing "mode:"   -> agent becomes "all" instead of "subagent"
+  * "name:", "description:", "permission:" are accepted.
+
+The conversion:
+  * removes tools: lines (opencode governs this via permission/deny;
+    without a value the agent inherits the global permissions — deliberately permissive)
+  * removes model: lines (the agent uses the session model; model choice via
+    cc-start --model or opencode.json)
+  * adds "mode: subagent"
+  * leaves name/description/body unchanged
+
+The .claude/agents/*.md files stay untouched (Claude Code behaves as before).
+Idempotent: regenerates the files freshly from the source on every run.
+
+Usage: cc-oc-sync-agents [project-directory]   (default: current directory)
+"""
+import os
+import re
+import sys
+
+
+def convert(src: str) -> str:
+    with open(src, encoding="utf-8") as f:
+        text = f.read()
+    m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n?(.*)$", text, re.DOTALL)
+    if not m:
+        # No frontmatter: take over unchanged (opencode loads it as an agent without
+        # a description; we would add mode anyway).
+        return text
+    front, body = m.group(1), m.group(2)
+    lines = front.splitlines()
+    out: list[str] = []
+    has_mode = False
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^tools\s*:", stripped):
+            continue  # remove tools: (would make the opencode config invalid)
+        if re.match(r"^model\s*:", stripped):
+            continue  # remove model: (unresolvable alias -> runtime error)
+        if re.match(r"^mode\s*:", stripped):
+            has_mode = True
+        out.append(line)
+    if not has_mode:
+        out.append("mode: subagent")
+    new_front = "\n".join(out)
+    return f"---\n{new_front}\n---\n{body}"
+
+
+def main() -> int:
+    project = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.getcwd())
+    src_dir = os.path.join(project, ".claude", "agents")
+    dst_dir = os.path.join(project, ".opencode", "agents")
+    if not os.path.isdir(src_dir):
+        print(f"Error: no directory {src_dir}", file=sys.stderr)
+        return 1
+    os.makedirs(dst_dir, exist_ok=True)
+    files = sorted(f for f in os.listdir(src_dir) if f.endswith(".md"))
+    if not files:
+        print(f"No agents in {src_dir}")
+        return 0
+    for f in files:
+        src = os.path.join(src_dir, f)
+        dst = os.path.join(dst_dir, f)
+        content = convert(src)
+        with open(dst, "w", encoding="utf-8") as out:
+            out.write(content)
+        print(f"{f}: {os.path.basename(src_dir)}/{f} -> .opencode/agents/{f} (tools/model removed, mode: subagent)")
+    print(f"\n{len(files)} agent(s) written to {dst_dir}.")
+    print("The source remains .claude/agents/*.md — run again whenever something changes there.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

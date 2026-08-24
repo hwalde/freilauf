@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
-# Beendet eine laufende Coding-Agent-Session (claude/opencode/hermes, mit Sicherheitsabfrage).
-# Usage: cc-kill [optionen] [session-name]
+# Terminates a running coding-agent session (claude/opencode/hermes, with a safety prompt).
+# Usage: cc-kill [options] [session-name]
 set -euo pipefail
 
 PREFIX="cc-"
 
 usage() {
     cat <<'EOF'
-Usage: cc-kill [optionen] [session-name]
+Usage: cc-kill [options] [session-name]
 
-  session-name   Session direkt wählen (mit oder ohne cc-/cc-oc-/cc-he--Prefix).
-                 Ohne Angabe: Auswahlliste (bzw. direkt, wenn nur eine läuft).
+  session-name   Pick a session directly (with or without the cc-/cc-oc-/cc-he- prefix).
+                 If omitted: selection list (or directly, if only one is running).
 
-Optionen:
-  -H, --harness HARNESS   Nur Sessions dieser Harness anzeigen: claude | opencode | hermes
-      --yes               Ohne Rückfrage beenden (für cc-hub; die Bestätigung
-                          übernimmt dort die UI).
-  -h, --help            Übersicht aller cc-Befehle.
+Options:
+  -H, --harness HARNESS   Only show sessions of this harness: claude | opencode | hermes
+      --yes               Terminate without asking (for cc-hub; the confirmation
+                          is handled by the UI there).
+  -h, --help            Overview of all cc commands.
 EOF
 }
 
 [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && exec cc-help
 [[ "${1:-}" == "--usage" ]] && { usage; exit 0; }
 
-# --yes (nicht-interaktiv) vor dem Harness-Argument abtrennen.
+# Split off --yes (non-interactive) before the harness argument.
 YES=""
 ARGS=()
 for a in "$@"; do
@@ -39,7 +39,7 @@ if [[ "${1:-}" == "-H" || "${1:-}" == "--harness" ]]; then
     HARNESS="${2:-}"
     case "$HARNESS" in
         claude|opencode|hermes) shift 2 ;;
-        *) err() { printf '%s\n' "$*" >&2; }; err "Fehler: unbekannte Harness '$HARNESS'. Erlaubt: claude opencode hermes"; exit 2 ;;
+        *) err() { printf '%s\n' "$*" >&2; }; err "Error: unknown harness '$HARNESS'. Allowed: claude opencode hermes"; exit 2 ;;
     esac
 fi
 
@@ -54,7 +54,7 @@ harness_of() {
 }
 
 mapfile -t ROWS < <(tmux list-sessions \
-    -F '#{session_name}|#{t:session_created}|#{?session_attached,verbunden,frei}|#{session_path}' \
+    -F '#{session_name}|#{t:session_created}|#{?session_attached,attached,free}|#{session_path}' \
     2>/dev/null | grep "^$PREFIX" || true)
 
 SESSIONS=()
@@ -66,9 +66,9 @@ done
 
 if [[ ${#SESSIONS[@]} -eq 0 ]]; then
     if [[ -n "$HARNESS" ]]; then
-        echo "Keine laufende $HARNESS-Session gefunden."
+        echo "No running $HARNESS session found."
     else
-        echo "Keine laufende Agent-Session gefunden."
+        echo "No running agent session found."
     fi
     exit 0
 fi
@@ -85,28 +85,28 @@ kill_session() {
     done
 
     echo
-    echo "  Session:       $s  ($(harness_of "$s"))"
-    echo "  Verzeichnis:   $path"
-    echo "  Aktuell offen: $attached"
+    echo "  Session:        $s  ($(harness_of "$s"))"
+    echo "  Directory:      $path"
+    echo "  Currently open: $attached"
     echo
     if [[ -n "$YES" ]]; then
         tmux kill-session -t "=$s"
-        echo "Session '$s' beendet (--yes)."
+        echo "Session '$s' terminated (--yes)."
         return
     fi
-    echo "  ACHTUNG: Die laufende Agent-Instanz wird beendet, nicht gespeicherte"
-    echo "  Arbeit in dieser Session geht verloren."
+    echo "  WARNING: the running agent instance will be terminated; unsaved"
+    echo "  work in this session will be lost."
     echo
-    read -r -p "Session '$s' wirklich beenden? Tippe den Namen zur Bestätigung: " confirm
+    read -r -p "Really terminate session '$s'? Type the name to confirm: " confirm
     if [[ "$confirm" != "$s" ]]; then
-        echo "Abgebrochen - Name stimmt nicht überein."
+        echo "Cancelled - name does not match."
         exit 0
     fi
     tmux kill-session -t "=$s"
-    echo "Session '$s' beendet."
+    echo "Session '$s' terminated."
 }
 
-# Direktauswahl per Argument (mit oder ohne Prefix/Harness-Tag)
+# Direct selection via argument (with or without prefix/harness tag)
 if [[ -n "${1:-}" ]]; then
     TARGET="$1"
     for s in "${SESSIONS[@]}"; do
@@ -117,27 +117,27 @@ if [[ -n "${1:-}" ]]; then
             exit 0
         fi
     done
-    err "Fehler: Session '$TARGET' nicht gefunden."
+    err "Error: session '$TARGET' not found."
     exit 1
 fi
 
-echo "Laufende Agent-Sessions:"
+echo "Running agent sessions:"
 echo
 i=1
 for row in "${ROWS[@]}"; do
     IFS='|' read -r name created attached path <<<"$row"
     [[ -n "$HARNESS" ]] && [[ "$(harness_of "$name")" != "$HARNESS" ]] && continue
-    printf "  [%d] %-24s  (%s)  gestartet: %s  (%s)\n" "$i" "$name" "$(harness_of "$name")" "$created" "$attached"
+    printf "  [%d] %-24s  (%s)  started: %s  (%s)\n" "$i" "$name" "$(harness_of "$name")" "$created" "$attached"
     printf "      %s\n" "$path"
     i=$((i + 1))
 done
 echo
 
-read -r -p "Welche Session beenden? [1-$((i - 1)), q=abbrechen]: " choice
-[[ "$choice" == "q" || -z "$choice" ]] && { echo "Abgebrochen."; exit 0; }
+read -r -p "Which session to terminate? [1-$((i - 1)), q=cancel]: " choice
+[[ "$choice" == "q" || -z "$choice" ]] && { echo "Cancelled."; exit 0; }
 
 if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > i - 1 )); then
-    err "Ungültige Auswahl."
+    err "Invalid selection."
     exit 1
 fi
 

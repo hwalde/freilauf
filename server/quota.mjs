@@ -1,5 +1,5 @@
-// cc-hub — Budget-Gates (Planung 4.2): Claude-Quota (quota.json, seven_day_fable via
-// fable_weekly_refresh.py) und OpenRouter-Guthaben.
+// cc-hub — budget gates (planning 4.2): Claude quota (quota.json, seven_day_fable via
+// fable_weekly_refresh.py) and OpenRouter credits.
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -45,18 +45,18 @@ export async function openrouterCredits() {
   }
 }
 
-/** true = Start verschieben (Planung 4.2: 5 h >= 90 % bzw. 7 Tage >= 95 %). */
+/** true = defer the start (planning 4.2: 5 h >= 90 % or 7 days >= 95 %). */
 export function claudeGateBlocked(quota = claudeQuota()) {
   if ((quota.five ?? 0) >= 90 || (quota.seven ?? 0) >= 95) {
-    return { blocked: true, reason: `Claude-Quota: 5h ${quota.five ?? '?'} % / 7d ${quota.seven ?? '?'} %`, resets_at: quota.resets_at }
+    return { blocked: true, reason: `Claude quota: 5h ${quota.five ?? '?'} % / 7d ${quota.seven ?? '?'} %`, resets_at: quota.resets_at }
   }
   return { blocked: false }
 }
 export async function openrouterGateBlocked(minimumEur = 5) {
   const c = await openrouterCredits()
-  if (!c) return { blocked: false }   // kein Key / kein Signal → nicht blocken
+  if (!c) return { blocked: false }   // no key / no signal → do not block
   if (c.remaining != null && c.remaining < minimumEur) {
-    return { blocked: true, reason: `OpenRouter-Guthaben niedrig: ${c.remaining} €` }
+    return { blocked: true, reason: `OpenRouter credits low: ${c.remaining} €` }
   }
   return { blocked: false }
 }

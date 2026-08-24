@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cc-hub — Haupteinstieg: HTTP + WS + Scheduler + Watcher in einem Prozess (Planung 5).
+// cc-hub — main entry point: HTTP + WS + scheduler + watcher in one process (planning 5).
 import http from 'node:http'
 import process from 'node:process'
 import { route } from './web.mjs'
@@ -7,24 +7,31 @@ import { startTerminalServer } from './terminal.mjs'
 import { startScheduler, stopScheduler } from './scheduler.mjs'
 import { startWatcher, stopWatcher, verwaisteLaeufeAbschliessen } from './watcher.mjs'
 import { setSetting, getSetting } from './db.mjs'
+import { seedIfEmpty } from './coding-agents.mjs'
+import { setLanguage } from './i18n.mjs'
+
+// UI language (default English) and, on a fresh installation, the optional
+// coding agent seed file (installed e.g. by a private setup repo).
+setLanguage(getSetting('ui_language') ?? 'en')
+seedIfEmpty()
 
 const PORT = Number(process.env.CCHUB_LOCAL_PORT ?? 8791)
-const HOST = '127.0.0.1'   // Planung 11: App NIE anders erreichbar
+const HOST = '127.0.0.1'   // planning 11: the app is NEVER reachable any other way
 
 const server = http.createServer((req, res) => route(req, res))
 startTerminalServer(server)
 
 server.listen(PORT, HOST, () => {
-  console.log(`[cc-hub] läuft auf http://${HOST}:${PORT}`)
-  // Zuerst aufräumen, was ein früherer Prozess mitten im Start hinterlassen hat:
-  // ohne Gnadenfrist, denn diese Läufe können nicht mehr von uns stammen.
+  console.log(`[cc-hub] running on http://${HOST}:${PORT}`)
+  // First clean up what an earlier process left behind mid-start:
+  // no grace period, because these runs cannot be ours any more.
   const verwaist = verwaisteLaeufeAbschliessen(0)
-  if (verwaist) console.log(`[cc-hub] ${verwaist} unterbrochene(n) Lauf/Läufe abgeschlossen (keine Session)`)
+  if (verwaist) console.log(`[cc-hub] closed ${verwaist} interrupted run(s) (no session)`)
   startScheduler()
   startWatcher()
-  // Nach Reboot: Zugang bleibt aus (fail-closed), Pipeline-Zustand kommt aus der DB.
+  // After a reboot: access stays off (fail-closed), the pipeline state comes from the DB.
   setSetting('access_on', '0')
-  console.log(`[cc-hub] pipeline=${getSetting('pipeline_on') === '1' ? 'an' : 'aus'} (aus der DB), zugang=aus (fail-closed)`)
+  console.log(`[cc-hub] pipeline=${getSetting('pipeline_on') === '1' ? 'on' : 'off'} (from the DB), access=off (fail-closed)`)
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

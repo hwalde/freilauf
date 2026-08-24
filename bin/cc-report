@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# cc-report — Agenten melden sich an cc-hub (Planung 6).
+# cc-report — agents report back to cc-hub (Planung 6).
 # Usage:
-#   cc-report done [--file report.md | "text"]     Lauf abgeschlossen
-#   cc-report failed "grund"                       Lauf gescheitert
-#   cc-report help "frage/problem"                 Hilferuf (Lauf bleibt offen, wartet)
-#   cc-report progress "status"                    Fortschritt / dauert länger
-#   cc-report branch <name>                        Branch gemeldet
-#   cc-report pr <url>                             Pull-Request gemeldet
-#   cc-report _api_error [fehler] ["text"]        Rate-Limit/Provider-Fehler (aus Hooks);
-#                                                  ohne Argumente: Claude-Hook-JSON von stdin
-#   cc-report _turn_end|_exit|_rate_limit|_idle|_pane_died [exit]   interne Hooks
+#   cc-report done [--file report.md | "text"]     Run completed
+#   cc-report failed "reason"                      Run failed
+#   cc-report help "question/problem"              Call for help (run stays open, waits)
+#   cc-report progress "status"                    Progress / taking longer
+#   cc-report branch <name>                        Branch reported
+#   cc-report pr <url>                             Pull request reported
+#   cc-report _api_error [error] ["text"]         Rate-limit/provider error (from hooks);
+#                                                  without arguments: Claude hook JSON on stdin
+#   cc-report _turn_end|_exit|_rate_limit|_idle|_pane_died [exit]   internal hooks
 #
-# Quelle: CC_RUN_ID + CC_HUB_URL aus der Umgebung. Fallback, wenn der Hub nicht
-# erreichbar ist: JSON-Zeile an ~/agents/runs/<id>/inbox.jsonl — der Watcher sammelt ein.
+# Source: CC_RUN_ID + CC_HUB_URL from the environment. Fallback when the hub is not
+# reachable: JSON line to ~/agents/runs/<id>/inbox.jsonl — the watcher collects it.
 set -euo pipefail
 
 usage() {
@@ -26,19 +26,19 @@ case "$KIND" in
     done|failed|help|progress|branch|pr) ;;
     _turn_end|_exit|_rate_limit|_idle|_pane_died|_api_error) ;;
     -h|--help) usage; exit 0 ;;
-    *) printf 'unbekannte Art: %s\n' "$KIND" >&2; exit 2 ;;
+    *) printf 'unknown kind: %s\n' "$KIND" >&2; exit 2 ;;
 esac
 
 RUN_ID="${CC_RUN_ID:-}"
 HUB="${CC_HUB_URL:-http://127.0.0.1:8791}"
 if [[ -z "$RUN_ID" ]]; then
-    echo "cc-report: CC_RUN_ID ist nicht gesetzt — außerhalb eines cc-hub-Laufs sinnlos." >&2
+    echo "cc-report: CC_RUN_ID is not set — pointless outside a cc-hub run." >&2
     exit 3
 fi
 
 TEXT="" ; FILE_ARG="" ; ERR=""
-# Claude ruft den StopFailure-Hook ohne Argumente auf und liefert das Ereignis als JSON
-# auf stdin: { "error": "rate_limit", "last_assistant_message": "…" }.
+# Claude calls the StopFailure hook without arguments and delivers the event as JSON
+# on stdin: { "error": "rate_limit", "last_assistant_message": "…" }.
 if [[ "$KIND" == "_api_error" ]]; then
     if [[ -n "${1:-}" ]]; then
         ERR="$1"; shift; TEXT="${*:-}"
@@ -58,13 +58,13 @@ fi
 if [[ -n "${1:-}" ]]; then
     if [[ "$KIND" == "done" && "${1:-}" == "--file" ]]; then
         FILE_ARG="${2:-}"
-        [[ -r "$FILE_ARG" ]] || { echo "Report-Datei nicht lesbar: $FILE_ARG" >&2; exit 2; }
+        [[ -r "$FILE_ARG" ]] || { echo "Report file not readable: $FILE_ARG" >&2; exit 2; }
     else
         TEXT="$*"
     fi
 fi
 
-# Payload als JSON mit python3 bauen (Quoting-sicher, keine jq-Pflicht).
+# Build the payload as JSON with python3 (quoting-safe, no jq dependency).
 PAYLOAD="$(python3 - "$KIND" "$TEXT" "$FILE_ARG" "$ERR" <<'PY'
 import json, sys, os
 kind, text, file_arg, err = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
@@ -101,8 +101,8 @@ if OUT="$(send 2>/dev/null)"; then
     exit 0
 fi
 
-# Fallback: Hub nicht erreichbar → inbox.jsonl (Watcher sammelt ein, Planung 6).
+# Fallback: hub not reachable → inbox.jsonl (the watcher collects it, Planung 6).
 mkdir -p "$FALLBACK_DIR" 2>/dev/null || true
 printf '%s\n' "$PAYLOAD" >> "$FALLBACK_DIR/inbox.jsonl"
-echo "cc-report: Hub nicht erreichbar — Meldung liegt in inbox.jsonl, der Watcher holt sie ab." >&2
+echo "cc-report: hub not reachable — the report is in inbox.jsonl, the watcher will pick it up." >&2
 exit 0
