@@ -109,7 +109,8 @@ ${setupBanner()}
   ${repoSel}
   <span class="spacer"></span>
   <span title="${e(t('layout.pipeline_hint'))}">${e(t('layout.pipeline'))}: <b class="${pipeline ? 'ok' : 'warn'}">${e(pipeline ? t('layout.on') : t('layout.off'))}</b></span>
-  ${bar('5h', q.five)}${bar('7d', q.seven)}
+  ${bar('5h', q.five)}${q.seven_general != null ? bar('7d', q.seven_general) : ''}${
+    q.seven_fable != null ? bar('7d fable', q.seven_fable) : ''}
 </header>
 <main>${globalesBanner()}${content}</main>
 ${withTerminal ? '<script src="/static/xterm.js"></script><script src="/static/addon-fit.js"></script>' : ''}
@@ -123,16 +124,33 @@ async function usagePanel() {
   try { usage = await subscriptionUsage() } catch { usage = [] }
   const credits = await openrouterCredits()
   if (!usage.length && !credits) return ''
+  // A reset within the next day is a time, everything beyond it needs the date
+  // too — '16:30' alone says nothing about a window that runs for a week.
+  const resetText = (iso) => {
+    const ms = Date.parse(iso)
+    if (!Number.isFinite(ms)) return ''
+    const d = new Date(ms)
+    const uhr = `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
+    const tag = `${String(d.getUTCDate()).padStart(2, '0')}.${String(d.getUTCMonth() + 1).padStart(2, '0')}.`
+    return (ms - Date.now() > 24 * 3600_000 ? `${tag} ` : '') + `${uhr} UTC`
+  }
   const pctBar = (pct) => pct == null ? '' :
     `<div class="track"><div class="fill ${pct >= 90 ? 'r' : pct >= 80 ? 'y' : ''}" style="width:${Math.min(pct, 100)}%"></div></div><span>${pct} %</span>`
   const rows = usage.map(u => {
     if (!u.ok) return `<div class="usage-row"><b>${e(u.label)}</b> <span class="dim">${e(t('usage.unavailable'))}</span></div>`
     const d = u.data
     if (d.kind === 'claude') {
+      // Three windows, each with its own bar and its own reset time — the fable
+      // week runs separately from the general one, and one shared reset behind
+      // the row could only ever belong to one of them. A window claude does not
+      // report at all stays out of the row, and so does a missing reset time.
+      const fenster = (label, pct, iso) => pct == null ? ''
+        : `<span class="quota"><span>${label}</span>${pctBar(pct)}${
+          iso ? `<span class="dim">${e(t('usage.resets', { time: resetText(iso) }))}</span>` : ''}</span>`
       return `<div class="usage-row"><b>${e(u.label)}</b>${d.plan ? ` <span class="dim">${e(d.plan)}</span>` : ''}
-        <span class="quota"><span>5h</span>${pctBar(d.five)}</span>
-        <span class="quota"><span>7d</span>${pctBar(d.seven)}</span>
-        ${d.resets_at ? `<span class="dim">${e(t('usage.resets', { time: d.resets_at.slice(11, 16) + ' UTC' }))}</span>` : ''}</div>`
+        ${fenster('5h', d.five, d.resets_at)}
+        ${fenster('7d', d.seven_general, d.seven_resets_at)}
+        ${fenster('7d fable', d.seven_fable, d.seven_fable_resets_at)}</div>`
     }
     if (d.kind === 'cursor') {
       // What one reads at a glance is the bar — like the claude rows above. The

@@ -104,9 +104,10 @@ export default {
   },
 
   /**
-   * Subscription usage: percentages of the 5-hour and 7-day windows from
-   * quota.json, plus the plan from the local credentials file (only the two
-   * non-secret fields are read — never the tokens).
+   * Subscription usage: percentages of the 5-hour window and of both 7-day
+   * windows (general and fable) from quota.json, plus the plan from the local
+   * credentials file (only the two non-secret fields are read — never the
+   * tokens).
    */
   async usage() {
     const q = claudeQuota()
@@ -118,6 +119,11 @@ export default {
       if (o?.subscriptionType) plan = o.subscriptionType + (o.rateLimitTier ? ` (${o.rateLimitTier})` : '')
     } catch { /* no credentials file — plan stays unknown */ }
     if (q.five === null && q.seven === null && !plan) return null
-    return { kind: 'claude', plan, five: q.five, seven: q.seven, resets_at: q.resets_at }
+    return {
+      kind: 'claude', plan, five: q.five, seven: q.seven,
+      seven_general: q.seven_general, seven_fable: q.seven_fable,
+      resets_at: q.resets_at, seven_resets_at: q.seven_resets_at,
+      seven_fable_resets_at: q.seven_fable_resets_at,
+    }
   },
 }

@@ -1,5 +1,11 @@
 // cc-hub — budget gates (planning 4.2): Claude quota (quota.json, seven_day_fable via
 // fable_weekly_refresh.py) and OpenRouter credits.
+//
+// Claude has THREE windows, not two: the 5-hour one, the general 7-day one and
+// a separate 7-day one for fable. They are reported separately (seven_general /
+// seven_fable) so the panel can show which one is filling up; 'seven' is the
+// binding value for the gate and the cost estimate — the HIGHER of the two,
+// because a weekly window that is full blocks regardless of which one it is.
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -9,16 +15,29 @@ const QUOTA_PATH = process.env.CCHUB_QUOTA_JSON ?? `${homedir()}/.claude/quota.j
 export function claudeQuota() {
   try {
     const q = JSON.parse(readFileSync(QUOTA_PATH, 'utf8'))
-    const five = Number(q?.five_hour?.used_percentage)
-    const seven = Number(q?.seven_day_fable?.used_percentage ?? q?.seven_day?.used_percentage)
-    const resetAt = q?.five_hour?.resets_at
+    const zahl = (v) => (Number.isFinite(Number(v)) ? Number(v) : null)
+    const five = zahl(q?.five_hour?.used_percentage)
+    const sevenGeneral = zahl(q?.seven_day?.used_percentage)
+    const sevenFable = zahl(q?.seven_day_fable?.used_percentage)
+    const wochen = [sevenGeneral, sevenFable].filter(v => v !== null)
+    // Every window brings its own reset time — or none: claude writes resets_at
+    // only where it knows one, and the panel then shows nothing rather than the
+    // reset time of a different window.
+    const zeit = (v) => (Number.isFinite(Number(v)) ? new Date(Number(v) * 1000).toISOString() : null)
     return {
-      five: Number.isFinite(five) ? five : null,
-      seven: Number.isFinite(seven) ? seven : null,
-      resets_at: Number.isFinite(resetAt) ? new Date(resetAt * 1000).toISOString() : null,
+      five,
+      seven: wochen.length ? Math.max(...wochen) : null,
+      seven_general: sevenGeneral,
+      seven_fable: sevenFable,
+      resets_at: zeit(q?.five_hour?.resets_at),
+      seven_resets_at: zeit(q?.seven_day?.resets_at),
+      seven_fable_resets_at: zeit(q?.seven_day_fable?.resets_at),
     }
   } catch {
-    return { five: null, seven: null, resets_at: null }
+    return {
+      five: null, seven: null, seven_general: null, seven_fable: null,
+      resets_at: null, seven_resets_at: null, seven_fable_resets_at: null,
+    }
   }
 }
 

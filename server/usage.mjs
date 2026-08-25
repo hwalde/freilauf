@@ -1,7 +1,8 @@
 // cc-hub — subscription usage of the configured coding agents.
 //
 // Each harness plugin may implement usage() and report what its subscription
-// account has consumed (Claude: 5-hour/7-day windows from quota.json; Cursor:
+// account has consumed (Claude: the 5-hour window and both 7-day windows —
+// general and fable — from quota.json; Cursor:
 // spend, included amount and cycle end of the running period via the CLI
 // token). Everything is best-effort and cached: a hanging endpoint must never
 // block a page render.

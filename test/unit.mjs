@@ -247,11 +247,23 @@ try {
     gleich(q.seven, 10, '7-day value')
     wahr(typeof q.resets_at === 'string' && q.resets_at.includes('T'), 'reset as ISO time')
   })
-  await pruefe('seven_day_fable takes precedence over seven_day', async () => {
+  await pruefe('both 7-day windows are reported; the gate value is the higher one', async () => {
     const { claudeQuota } = await quotaMit(JSON.stringify({
       five_hour: { used_percentage: 5 }, seven_day: { used_percentage: 10 }, seven_day_fable: { used_percentage: 42 },
     }), 2)
-    gleich(claudeQuota().seven, 42, '7-day value')
+    const q = claudeQuota()
+    gleich(q.seven_general, 10, 'general week')
+    gleich(q.seven_fable, 42, 'fable week')
+    gleich(q.seven, 42, 'the fuller window is the binding one')
+  })
+  await pruefe('a week claude does not report at all stays null', async () => {
+    const { claudeQuota } = await quotaMit(JSON.stringify({
+      five_hour: { used_percentage: 5 }, seven_day_fable: { used_percentage: 35 },
+    }), 7)
+    const q = claudeQuota()
+    gleich(q.seven_general, null, 'no general week in the file')
+    gleich(q.seven_fable, 35, 'fable week')
+    gleich(q.seven, 35, 'gate value comes from the only window there is')
   })
   await pruefe('missing file blocks nothing (all null)', async () => {
     const { claudeQuota, claudeGateBlocked } = await quotaMit(null, 3)
