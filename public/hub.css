@@ -30,7 +30,11 @@ label.chk input { width: auto; }
 form.settings { background: #fff; padding: 16px; border-radius: 10px; max-width: 720px; }
 .card { background: #fff; padding: 14px 16px; border-radius: 10px; margin: 12px 0; border-left: 4px solid #c9c9c4; }
 .card.ok { border-left-color: #46a758; }
-.help { background: #fdecec; border: 1px solid #e5484d; padding: 12px; border-radius: 8px; margin: 12px 0; }
+/* Translucent instead of a fixed light red: the box then carries itself in both
+   colour schemes. As #fdecec it stayed light in dark mode while the text came
+   from body (#e6e6e6) — light on light, the help call was unreadable exactly
+   when it matters. Same trick as .banner below. */
+.help { background: rgba(229, 72, 77, .12); border: 1px solid #e5484d; padding: 12px; border-radius: 8px; margin: 12px 0; }
 pre { background: #16181b; color: #d7dae0; padding: 12px; border-radius: 8px; overflow: auto; max-height: 480px; }
 code { background: #eceae6; padding: 1px 5px; border-radius: 4px; }
 ul.events { list-style: none; padding-left: 0; }
