@@ -4,7 +4,7 @@
 import db, {
   listFlows, getFlow, saveFlow, deleteFlow, toggleFlow, listFlowRuns, getFlowRun,
 } from './db.mjs'
-import { stepsMeta, GROUPS, validateDefinition, defaultProps } from './steps.mjs'
+import { stepsMeta, GROUPS, validateDefinition, definitionHints, defaultProps } from './steps.mjs'
 import { OPS } from './template.mjs'
 import { FIELD_TYPES } from './llm.mjs'
 import { normalizeTrigger, runFlowNow, TRIGGER_KINDS, OUTCOMES } from './triggers.mjs'
@@ -106,7 +106,7 @@ function pageEditor(res, url) {
   </div>
   <div id="flow-designer"></div>
   <script>window.CCHUB_FLOWS=${JSON.stringify({ i18n: clientCatalog('flows.'), meta: editorMeta(), flow: data }).replace(/</g, '\\u003c')}</script>
-  <script src="/static/swd.js"></script><script src="/static/flows.js" defer></script>`
+  <script src="/static/swd.js"></script><script src="/static/flows.js" type="module"></script>`
   html(res, 200, layout(data.name || t('flows.new'), '/flows', body))
 }
 
@@ -178,12 +178,14 @@ export async function flowApi(req, res, url) {
     const trigger = normalizeTrigger(b.trigger)
     if (trigger.kind === 'cron' && !validCron(trigger.expr)) problems.push(t('flows.editor.cron_invalid'))
     const definition = b.definition && typeof b.definition === 'object' ? b.definition : { properties: {}, sequence: [] }
-    problems.push(...validateDefinition(definition))
+    problems.push(...validateDefinition(definition, trigger,
+      (p) => t(`flows.placement.${p.code}.why`, { step: p.stepName })))
     if (problems.length) return json(res, 400, { ok: false, problems })
     const dup = db.prepare('SELECT id FROM flows WHERE name = ? AND id <> ?').get(name, Number(b.id) || 0)
     if (dup) return json(res, 400, { ok: false, problems: [t('flows.editor.name_taken')] })
     const id = saveFlow({ id: Number(b.id) || null, name, active: b.active ? 1 : 0, trigger, definition })
-    return json(res, 200, { ok: true, id })
+    // Hints travel with the answer: saving succeeded, the designer still shows them.
+    return json(res, 200, { ok: true, id, hints: definitionHints(definition, trigger) })
   }
   if (req.method === 'GET' && (m = path.match(/^\/api\/flows\/(\d+)$/))) {
     const f = getFlow(+m[1])

@@ -9,7 +9,9 @@ import { providersForHarness, listCodingAgents } from './coding-agents.mjs'
 import { detectInstalled } from './harnesses/index.mjs'
 import { subscriptionUsage } from './usage.mjs'
 import { openrouterCredits } from './quota.mjs'
-import { launchRun, createRun } from './runner.mjs'
+import { launchRun } from './runner.mjs'
+import { startRun } from './scheduler.mjs'
+import { runDefFromForm, saveAgent, rememberRunChoice } from './run-def.mjs'
 import {
   pageOverview, pageAgents, pageRunForm, pageRun, pageRepos, pageSettings,
   runNewPost, agentEdit, agentSave, agentToggle, agentStart,
@@ -19,7 +21,6 @@ import {
 } from './pages.mjs'
 import { redirect, body as readBody, parseForm } from './web-helpers.mjs'
 import { vorfallLoesen, vorfaelleLoesen, vorfall } from './incidents.mjs'
-import { skillsAusFormular } from './zusaetze.mjs'
 import { t } from './i18n.mjs'
 import { flowRoute, flowApi } from './flows/web.mjs'
 import { flowsTick } from './flows/triggers.mjs'
@@ -168,25 +169,21 @@ async function api(req, res, url) {
     const r = await handleReport(m[1], b)
     return json(res, r.ok ? 200 : 400, r)
   }
+  // Same definition, same validation and same start path as the run form
+  // (pages.mjs) — this endpoint used to be its own third copy and saved an
+  // agent without provider, effort and skills.
   if (req.method === 'POST' && path === '/api/runs') {
     const b = await form(req)
-    try {
-      const runId = createRun({
-        repoId: +b.repo_id, agentId: null, harness: b.harness, model: b.model || null,
-        provider: b.provider || null, orProvider: b.or_provider || null, effort: b.effort || null,
-        prompt: b.prompt, promptExtra: null, branchMode: b.branch_mode,
-        branchPattern: b.branch_pattern || null, expectedMinutes: +b.expected_minutes || 45,
-        skills: skillsAusFormular(b),
-      })
-      if (b.save_agent === '1') {
-        db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,branch_mode,branch_pattern,expected_minutes,active)
-                    VALUES(?,?,?,?,?,?,?,?,'1')`)
-          .run(+b.repo_id, b.agent_name || `agent-${Date.now()}`, b.harness, b.model || null, b.prompt,
-            b.branch_mode, b.branch_pattern || null, +b.expected_minutes || 45)
-      }
-      const r = await launchRun(runId)
-      return json(res, r.ok ? 200 : 500, { ok: r.ok, runId, error: r.error })
-    } catch (e) { return json(res, 400, { ok: false, error: e.message }) }
+    const problems = []
+    const def = await runDefFromForm(b, problems)
+    if (problems.length) return json(res, 400, { ok: false, error: problems.join(' · ') })
+    rememberRunChoice(def)
+    if (b.save_agent === '1') {
+      try { saveAgent({ repoId: +b.repo_id, name: b.agent_name || `agent-${Date.now()}`, def }) }
+      catch { /* duplicate name: the run is what matters, not the copy */ }
+    }
+    const r = await startRun(def, { repoId: +b.repo_id })
+    return json(res, r.ok ? 200 : 500, { ok: r.ok, runId: r.runId, deferred: r.deferred, error: r.error })
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/send$/))) {
     const run = getRun(m[1])
@@ -255,6 +252,11 @@ const STATIC_MAP = [
   // No-code flow designer (server/flows/, public/flows.js)
   ['/static/flows.js', '/../public/flows.js', 'application/javascript'],
   ['/static/flows.css', '/../public/flows.css', 'text/css'],
+  // The two pure flow modules run in the browser as well, so the designer and
+  // the server judge a flow by the very same code. The /static/flows/ prefix
+  // keeps varschema's relative import of template.mjs resolvable.
+  ['/static/flows/template.mjs', '/../server/flows/template.mjs', 'application/javascript'],
+  ['/static/flows/varschema.mjs', '/../server/flows/varschema.mjs', 'application/javascript'],
   ['/static/swd.js', '/sequential-workflow-designer/dist/index.umd.js', 'application/javascript'],
   ['/static/swd.css', '/sequential-workflow-designer/css/designer.css', 'text/css'],
   ['/static/swd-light.css', '/sequential-workflow-designer/css/designer-light.css', 'text/css'],

@@ -70,6 +70,40 @@ Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux sessions
   worktrees in `~/agents/worktrees`. All paths can be redirected via `CCHUB_*`
   variables — exactly that is what the test suite lives on.
 
+## The run definition: agent and single run are the same thing
+
+An agent and a single run differ in exactly **two** things: an agent has a name
+and a schedule and can be started again. Everything else — coding agent,
+provider, model, effort, prompt, branch rule, expected duration, extra skills —
+is one and the same **run definition**, and it lives in **`server/run-def.mjs`**:
+
+| What | Function | Used by |
+|---|---|---|
+| Form block (HTML) | `runDefFields(values)` | agent form + single-run form |
+| Form → definition, incl. all validation | `runDefFromForm(body, problems)` | both forms + `POST /api/runs` |
+| Agent row → definition | `defFromAgent(row)` | scheduler, "start now", flows |
+| Write an agent (INSERT/UPDATE) | `saveAgent(...)` | agent form + "save as agent" |
+| Field list for the flow designer | `RUN_DEF_FLOW_FIELDS`, `defFromFlowProps` | `flows/steps.mjs` |
+| Last used setup | `rememberRunChoice`, `lastRunChoice` | both forms (preselection) |
+
+And there is exactly **one** way from a definition to a running run:
+**`startRun(def, { repoId, agentId, promptExtra })`** in `server/scheduler.mjs`
+— including the budget gate (`budgetGate(harness)`, also used by the watcher
+when picking a deferred run back up). `startForAgent(agent)` is only its wrapper
+for a stored definition.
+
+A new field of a run therefore needs **one** change in `run-def.mjs`, not four.
+Before that, the copies had already drifted: the single-run form dropped the
+branch mode it had been prefilled with, `POST /api/runs` saved an agent without
+provider/effort/skills, only the agent form checked the branch rule, and only
+the agent path knew the budget gate — a single run started into an exhausted
+quota and died at the first API call instead of being deferred.
+
+New forms/steps that start a run go through these functions. What is
+deliberately **not** part of the definition: the repo (it is the context, and
+the switcher in the header sets it), the name and the schedule (they make an
+agent an agent).
+
 ## Plugin architecture: coding agents and providers
 
 Coding agents (harnesses) and model providers are **plugins** — one file each
@@ -175,8 +209,18 @@ extras.
 client) that reacts to finished runs, a cron schedule or a button with
 building blocks: message running agents, start agents/single runs (optionally
 waiting for their result), extract structured data from a report via LLM,
-branch on the outcome, loop over a list, Telegram, HTTP, delay. Architecture,
-step registry contract and the four integration seams:
+branch on the outcome, loop over a list, Telegram, HTTP, delay.
+
+Variables are **typed**, not guessed: `varschema.mjs` knows for every spot in a
+flow which variables exist there, of which type and with which allowed values —
+so a condition picks its left side from a list, its operator is narrowed to what
+that type can answer, and a boolean or an enum is chosen instead of typed. The
+same module runs in the browser (served under `/static/flows/`), so the designer
+and the server judge a flow by identical code. It also carries the placement
+rules: `switch_outcome` needs a finished run, and the designer refuses the drop
+with the reason instead of silently not sticking.
+
+Architecture, step registry contract and the four integration seams:
 **[server/flows/AGENTS.md](server/flows/AGENTS.md)**.
 
 ## Extra skills (opt-in)

@@ -3,8 +3,9 @@
 import db, { addEvent } from './db.mjs'
 import { scheduleDue } from './util.mjs'
 import { createRun, launchRun } from './runner.mjs'
-import { claudeGateBlocked, openrouterGateBlocked, claudeQuota } from './quota.mjs'
+import { claudeGateBlocked, openrouterGateBlocked } from './quota.mjs'
 import { notifyRun } from './reports.mjs'
+import { defFromAgent } from './run-def.mjs'
 
 let timer = null
 const fired = new Map()   // "agentId@YYYY-MM-DDTHH:MM" -> true
@@ -47,32 +48,39 @@ async function tick() {
 }
 
 /**
- * Starts a run for an agent (also "start now" from the UI).
+ * The budget gate for a harness: claude runs on the subscription quota,
+ * everything else on OpenRouter credits. Also used by the watcher when it picks
+ * a deferred run back up — one rule, one place.
+ * Returns the blocking reason, or null when the start may happen.
+ */
+export async function budgetGate(harness) {
+  const g = harness === 'claude'
+    ? claudeGateBlocked()
+    : await openrouterGateBlocked(Number(db.prepare(`SELECT value FROM settings WHERE key='openrouter_min_eur'`).get()?.value ?? 5) || 5)
+  return g.blocked ? g : null
+}
+
+/**
+ * THE start path: definition in, run out — for the scheduler, the "start now"
+ * button, the single-run form, the JSON API and the flow steps alike. Before,
+ * each of them created and launched its run itself, and only the agent path
+ * knew the budget gate; a single run started into an exhausted quota and died
+ * at the first API call instead of being deferred.
+ *
  * Returns {ok, runId?, deferred?, error?}.
  */
-export async function startForAgent(agent, promptExtra = null) {
-  // Budget gates BEFORE the start; blocked → defer (retry in the watcher), do not discard.
-  const gate = agent.harness === 'claude'
-    ? (() => { const g = claudeGateBlocked(); return g.blocked ? g : null })()
-    : await openrouterGateBlocked(Number(db.prepare(`SELECT value FROM settings WHERE key='openrouter_min_eur'`).get()?.value ?? 5) || 5)
-        .then(g => (g.blocked ? g : null))
+export async function startRun(def, { repoId, agentId = null, promptExtra = null } = {}) {
+  // Budget gate BEFORE the start; blocked → defer (retry in the watcher), do not discard.
+  const gate = await budgetGate(def.harness)
 
   let runId
   try {
-    runId = createRun({
-      repoId: agent.repo_id, agentId: agent.id, harness: agent.harness, model: agent.model,
-      provider: agent.provider ?? null, orProvider: agent.or_provider ?? null,
-      effort: agent.effort ?? null,
-      prompt: agent.prompt, promptExtra, branchMode: agent.branch_mode,
-      branchPattern: agent.branch_pattern, expectedMinutes: agent.expected_minutes,
-      skills: agent.skills ?? null,
-    })
+    runId = createRun({ ...def, repoId, agentId, promptExtra })
   } catch (e) {
     return { ok: false, error: e.message }
   }
 
   if (gate) {
-    const q = claudeQuota()
     db.prepare(`UPDATE runs SET status='deferred' WHERE id=?`).run(runId)
     addEvent(runId, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null })
     notifyRun(runId, 'deferred', `🟡 Start deferred — ${gate.reason}${gate.resets_at ? ` (reset: ${gate.resets_at})` : ''}`)
@@ -80,4 +88,13 @@ export async function startForAgent(agent, promptExtra = null) {
   }
   const r = await launchRun(runId)
   return r.ok ? { ok: true, runId } : { ok: false, runId, error: r.error }
+}
+
+/**
+ * Starts a run for an agent (also "start now" from the UI) — the agent row is
+ * only the stored definition.
+ * Returns {ok, runId?, deferred?, error?}.
+ */
+export async function startForAgent(agent, promptExtra = null) {
+  return startRun(defFromAgent(agent), { repoId: agent.repo_id, agentId: agent.id, promptExtra })
 }

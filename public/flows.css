@@ -38,3 +38,45 @@ tr.err td { color: #c62828; }
 #flow-designer code { background: #eceae6; color: #1c1c1c; }
 #flow-designer .flow-vars { border-top-color: #e4e4e0; }
 #flow-designer .flow-editor .err { color: #c62828; }
+
+/* ---------------- typed variables, hints, placement ---------------- */
+
+/* Notes panel above the canvas: everything that is merely suspicious (a
+   variable no step writes, a comparison that can never be true). Never blocks
+   saving, so it lives outside the designer and follows the page theme. */
+#flow-hints { margin-bottom: 10px; }
+#flow-hints:empty { display: none; }
+#flow-hints > b { color: #b98900; font-size: 13px; }
+#flow-hints ul { list-style: none; padding: 0; margin: 4px 0 0; }
+#flow-hints li { padding: 4px 10px; border-left: 3px solid #b98900; margin-bottom: 3px;
+  font-size: 13px; cursor: pointer; background: rgba(185, 137, 0, .07); }
+#flow-hints li:hover { background: rgba(185, 137, 0, .16); }
+
+/* A yellow glow on the canvas — the designer only knows the red error badge.
+   A drop-shadow instead of a stroke: task, switch and container steps are built
+   from different shapes, and this one hits all of them. */
+#flow-designer [data-step-id].has-hint { filter: drop-shadow(0 0 2px #b98900) drop-shadow(0 0 4px #b98900); }
+
+/* Where a step may sit, stated in its property panel. */
+#flow-designer .flow-editor p.placement { margin: 4px 0; padding: 6px 8px; font-size: 12px;
+  background: #eef2f7; border-left: 3px solid #64748b; color: #334155; }
+#flow-designer .flow-editor p.placement-bad { margin: 4px 0; padding: 6px 8px; font-size: 12px;
+  border-left: 3px solid currentColor; background: rgba(198, 40, 40, .08); }
+#flow-designer .flow-editor p.warn.placement-bad { background: rgba(185, 137, 0, .12); }
+#flow-designer .flow-editor .warn { color: #8a6600; }
+
+/* Variable catalog, grouped by the step that produces it. */
+.flow-vars .var-group { margin-top: 6px; }
+.flow-vars .var-group > b { font-size: 12px; }
+/* "?" — set inside a branch or loop, so it may be missing when the flow gets here. */
+.flow-vars code.cond { opacity: .7; border-bottom: 1px dotted currentColor; }
+
+/* {{…}} autocomplete, anchored under its field. */
+.flow-editor .ac { position: relative; display: block; }
+.flow-editor .ac-list { position: absolute; z-index: 30; left: 0; right: 0; top: 100%;
+  max-height: 220px; overflow-y: auto; background: #fff; border: 1px solid #cfd4da;
+  border-radius: 6px; box-shadow: 0 6px 18px rgba(0, 0, 0, .12); }
+.flow-editor .ac-item { display: flex; justify-content: space-between; gap: 10px;
+  padding: 4px 8px; font-size: 12px; font-family: ui-monospace, monospace; cursor: pointer; }
+.flow-editor .ac-item.sel, .flow-editor .ac-item:hover { background: #e8f0fe; }
+.flow-editor .ac + .hint { margin-top: 2px; }

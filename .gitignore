@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 .playwright-mcp/
 
 # Privat — versioniert im Schwester-Repo cc-hub-private

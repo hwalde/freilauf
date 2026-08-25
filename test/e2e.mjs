@@ -749,6 +749,56 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('One definition for agent and single run')
+
+  await pruefe('both forms are built from the same block', async () => {
+    const runForm = await (await hol(`/runs/new?repo=${repoId}`)).text()
+    const agentForm = await (await hol(`/agents/edit?repo=${repoId}`)).text()
+    for (const feld of ['name="harness"', 'id="prov"', 'name="model"', 'id="effort"', 'name="prompt"',
+      'name="branch_mode"', 'name="branch_pattern"', 'name="expected_minutes"', 'name="or_pin"']) {
+      wahr(runForm.includes(feld) && agentForm.includes(feld), `${feld} in both forms`)
+    }
+    falsch(runForm.includes('name="schedule_kind"'), 'only the agent has a schedule')
+    wahr(agentForm.includes('name="schedule_kind"'), 'the agent has one')
+  })
+
+  await pruefe('the last used coding agent, model and effort are preselected', async () => {
+    const j = await laufStarten({ repo_id: repoId, harness: 'cursor', model: 'gpt-5.2-high',
+      prompt: 'E2E-Merken', expected_minutes: '45' })
+    wahr(!!j.runId, `run started (${JSON.stringify(j)})`)
+    await sessionMerken(j.runId)
+    for (const [pfad, was] of [[`/runs/new?repo=${repoId}`, 'run form'], [`/agents/edit?repo=${repoId}`, 'agent form']]) {
+      const html = await (await hol(pfad)).text()
+      enthaelt(html, 'value="gpt-5.2-high"', `model preselected in the ${was}`)
+      wahr(/<option value="cursor" selected>/.test(html), `coding agent preselected in the ${was}`)
+    }
+  })
+
+  await pruefe('an existing agent keeps its own setup in the form', async () => {
+    const r = await formular('/agents/edit', {
+      repo_id: repoId, name: 'merk-test', harness: 'claude', model: 'claude-opus-5',
+      prompt: 'x', branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'manuell', active: '1',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'saved')
+    const html = await (await hol(`/agents/edit?id=${agent('merk-test').id}&repo=${repoId}`)).text()
+    enthaelt(html, 'value="claude-opus-5"', 'its own model, not the remembered one')
+  })
+
+  await pruefe('"save as agent" carries provider, effort and skills along', async () => {
+    const j = await laufStarten({ repo_id: repoId, harness: 'claude', prompt: 'E2E-Speichern',
+      skills: 'e2e-fleiss', expected_minutes: '20', branch_mode: 'neu', branch_pattern: 'x/{kurz}',
+      save_agent: '1', agent_name: 'aus-einzellauf' })
+    wahr(!!j.runId, `run started (${JSON.stringify(j)})`)
+    await sessionMerken(j.runId)
+    const a = agent('aus-einzellauf')
+    wahr(!!a, 'agent saved')
+    gleich(a.skills, '["e2e-fleiss"]', 'skills — used to fall off on this path')
+    gleich(a.expected_minutes, 20, 'expected duration')
+    gleich(a.branch_pattern, 'x/{kurz}', 'branch pattern')
+    gleich(a.schedule_kind, 'manuell', 'no schedule: runs manually')
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Incidents: rate limit and provider errors (auto-alarm)')
 
   const vorfaelle = (id) => db.prepare('SELECT * FROM incidents WHERE run_id=? ORDER BY id').all(id)

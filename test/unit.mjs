@@ -710,6 +710,125 @@ try {
     wahr(validateDefinition({ sequence: [loop] }).some(p => p.includes("unknown step type 'nirvana'")), 'walks into a container body')
     gleich(validateDefinition({ sequence: [{ id: 'e', type: 'for_each', properties: { itemVar: 'i' }, sequence: [] }] }).length, 1, "'list' is required")
   })
+  // ------------------------------------------------------------------
+  gruppe('Flows: typed variable catalog and placement rules (varschema.mjs)')
+  const vs = await import('../server/flows/varschema.mjs')
+  const { STEP_MAP } = await import('../server/flows/steps.mjs')
+  const runTrig = { kind: 'run_finished' }, cronTrig = { kind: 'cron' }
+  // One extraction, one comparison against it, one loop over its list — the
+  // shape every "the variable was typed wrong" report has.
+  const vdef = { sequence: [
+    { id: 's1', type: 'extract', properties: { outputVar: 'ex', fields: [
+      { name: 'needs review', type: 'boolean' }, { name: 'sev', type: 'string', enumValues: 'low, high' }, { name: 'points', type: 'string_list' }] } },
+    { id: 's2', type: 'condition', properties: { left: '{{vars.ex.needs_review}}', op: 'eq', right: 'yes' },
+      branches: { true: [{ id: 's3', type: 'set_var', properties: { outputVar: 'inner', value: 'x' } }], false: [] } },
+    { id: 's4', type: 'for_each', properties: { list: '{{vars.ex.points}}', itemVar: 'pt' },
+      sequence: [{ id: 's5', type: 'note', properties: { text: '{{vars.pt}} und {{vars.nope}}' } }] },
+  ] }
+  const at = (id, trig = runTrig) => vs.varsInScope(vdef, STEP_MAP, id, trig)
+  const find = (scope, path) => scope.find(v => v.path === path)
+
+  await pruefe('varsInScope: types, enums and the sanitized field name', () => {
+    const sc = at('s2')
+    gleich(find(sc, 'vars.ex.needs_review')?.type, 'boolean', 'a boolean extraction field stays a boolean')
+    gleich(find(sc, 'vars.ex.sev')?.enum.join('|'), 'low|high', 'enum values come from the field')
+    gleich(find(sc, 'vars.ex.points')?.type, 'string_list', 'list field')
+    falsch(find(sc, 'vars.ex.needs review'), 'the space became an underscore — as in the JSON schema')
+    gleich(find(sc, 'trigger.run.outcome')?.enum.join('|'), 'done|failed|aborted', 'run outcome is an enum')
+  })
+  await pruefe('varsInScope: order — a variable exists only after the step that writes it', () => {
+    falsch(find(at('s1'), 'vars.ex'), 'the extraction cannot read its own output')
+    wahr(find(at('s2'), 'vars.ex'), 'the next step can')
+  })
+  await pruefe('varsInScope: branch and loop variables are marked conditional', () => {
+    wahr(find(at('s4'), 'vars.inner')?.conditional, 'set inside a branch — may be missing')
+    falsch(find(at('s2'), 'vars.inner'), 'and does not exist before its own branch at all')
+    const inner = at('s5')
+    gleich(find(inner, 'vars.pt')?.type, 'string', 'the loop element takes the item type of the list')
+    gleich(find(inner, 'vars.pt_index')?.type, 'number', 'position')
+    falsch(find(inner, 'vars.pt')?.conditional, 'inside the body the element is guaranteed')
+  })
+  await pruefe('varsInScope: a cron flow has no trigger run', () => {
+    falsch(find(at('s2', cronTrig), 'trigger.run.outcome'), 'nothing to offer')
+    wahr(find(at('s2', { kind: 'manual' }), 'trigger.run.outcome')?.conditional, 'manual: only when "run now" gives one')
+  })
+  await pruefe('varsInScope: a drop position works like a step id', () => {
+    const sc = vs.varsInScope(vdef, STEP_MAP, { sequence: vdef.sequence, index: 1 }, runTrig)
+    wahr(find(sc, 'vars.ex'), 'dropping after the extraction sees it')
+    falsch(vs.varsInScope(vdef, STEP_MAP, { sequence: vdef.sequence, index: 0 }, runTrig).find(v => v.path === 'vars.ex'), 'dropping before it does not')
+  })
+  await pruefe('pathProblem: typo, missing field, and what cannot be judged', () => {
+    const sc = at('s2')
+    gleich(vs.pathProblem('vars.ex.needs_review', sc), 'ok', 'exact hit')
+    gleich(vs.pathProblem('vars.extracted.x', sc), 'unknown_var', 'no step writes that variable')
+    gleich(vs.pathProblem('vars.ex.needs_reviev', sc), 'unknown_field', 'typo in the field')
+    gleich(vs.pathProblem('trigger.run.bogus', sc), 'unknown_field', 'RunInfo has no such field')
+    gleich(vs.pathProblem('vars.inner.whatever', at('s4')), 'ok', 'below a set_var nothing is knowable')
+    gleich(vs.pathProblem('something.else', sc), 'foreign', 'not one of our roots — left alone')
+  })
+  await pruefe('opsForType / valueProblem: the value has to be one the left side can take', () => {
+    gleich(vs.opsForType('boolean').join(','), 'truthy,falsy,eq,neq', 'a boolean answers four questions')
+    wahr(vs.opsForType('number').includes('gt'), 'numbers compare')
+    falsch(vs.opsForType('boolean').includes('contains'), 'a boolean contains nothing')
+    const b = { type: 'boolean' }, e = { type: 'string', enum: ['low', 'high'] }, n = { type: 'number' }
+    gleich(vs.valueProblem(b, 'eq', 'yes'), 'bool_value', 'compare() stringifies — only true/false can match')
+    falsch(vs.valueProblem(b, 'eq', 'TRUE'), 'case does not matter')
+    falsch(vs.valueProblem(b, 'truthy', ''), 'a unary operator needs no value')
+    gleich(vs.valueProblem(e, 'eq', 'medium'), 'enum_value', 'not in the enum')
+    falsch(vs.valueProblem(e, 'eq', 'High'), 'in the enum')
+    gleich(vs.valueProblem(n, 'gt', 'zwei'), 'number_value', 'not a number')
+    falsch(vs.valueProblem(e, 'eq', '{{vars.x}}'), 'a template is only known at run time')
+    gleich(vs.valuesFor(b).join('|'), 'true|false', 'the designer offers exactly these')
+  })
+  await pruefe('definitionWarnings: the typo and the impossible comparison, both found', () => {
+    const w = vs.definitionWarnings(vdef, STEP_MAP, runTrig)
+    wahr(w.some(x => x.stepId === 's2' && x.code === 'bool_value'), 'boolean against "yes"')
+    wahr(w.some(x => x.stepId === 's5' && x.code === 'unknown_var' && x.path === 'vars.nope'), 'variable nothing writes')
+    gleich(w.filter(x => x.path === 'vars.pt').length, 0, 'the loop element itself is fine')
+  })
+  await pruefe('placement: a run outcome needs a run', () => {
+    const sw = (id) => ({ id, type: 'switch_outcome', properties: { value: '{{trigger.run.outcome}}' }, branches: { done: [], failed: [], aborted: [] } })
+    const pdef = { sequence: [sw('p1')] }
+    gleich(vs.placementErrors(pdef, STEP_MAP, runTrig).length, 0, 'a run_finished trigger delivers one')
+    gleich(vs.placementErrors(pdef, STEP_MAP, cronTrig)[0]?.code, 'needs_run', 'a cron flow does not')
+    gleich(vs.placementOf(sw('p1'), pdef, STEP_MAP, { kind: 'manual' })?.severity, 'warning', 'manual is only a warning')
+    const waited = { sequence: [
+      { id: 'q1', type: 'start_agent', properties: { agentId: 1, wait: true, outputVar: 'run' } },
+      { ...sw('q2'), properties: { value: '{{vars.run.outcome}}' } }] }
+    gleich(vs.placementErrors(waited, STEP_MAP, cronTrig).length, 0, 'a start step with wait delivers one too')
+    const noWait = { sequence: [{ ...waited.sequence[0], properties: { agentId: 1, wait: false, outputVar: 'run' } }, waited.sequence[1]] }
+    gleich(vs.placementErrors(noWait, STEP_MAP, cronTrig)[0]?.code, 'needs_run', 'without wait there is no outcome')
+  })
+  await pruefe('placement: nothing follows a stop, also at the drop position', () => {
+    const sdef = { sequence: [{ id: 'x1', type: 'stop', properties: {} }, { id: 'x2', type: 'note', properties: { text: 'hi' } }] }
+    gleich(vs.placementErrors(sdef, STEP_MAP)[0]?.code, 'after_stop', 'the step behind it is unreachable')
+    const probe = { type: 'note', properties: { text: 'x' } }
+    gleich(vs.placementProblem(probe, STEP_MAP, { definition: sdef, sequence: sdef.sequence, index: 1 })?.code, 'after_stop', 'the drop is refused')
+    falsch(vs.placementProblem(probe, STEP_MAP, { definition: sdef, sequence: sdef.sequence, index: 0 }), 'in front of the stop it is fine')
+  })
+  await pruefe('placement: only the target "the trigger run" needs one — other targets reach anything', () => {
+    const mdef = { sequence: [{ id: 'm1', type: 'send_message', properties: { target: 'trigger_run', text: 'hi' } }] }
+    gleich(vs.placementErrors(mdef, STEP_MAP, cronTrig)[0]?.code, 'needs_run_target', 'no trigger run under cron')
+    for (const target of ['agent', 'repo', 'all_running', 'run_id']) {
+      mdef.sequence[0].properties.target = target
+      gleich(vs.placementErrors(mdef, STEP_MAP, cronTrig).length, 0, `target ${target} messages runs outside this flow`)
+    }
+  })
+  await pruefe('placement: a rule bound to a field value is only advertised while it applies', () => {
+    const send = (target) => ({ id: 'r1', type: 'send_message', properties: { target, text: 'hi' } })
+    gleich(vs.activeRuleKey(send('trigger_run'), STEP_MAP.send_message), 'needs_run_target', 'stated for that target')
+    falsch(vs.activeRuleKey(send('agent'), STEP_MAP.send_message), 'and for no other — messaging a foreign agent needs nothing')
+    falsch(vs.activeRuleKey(send('all_running'), STEP_MAP.send_message), 'nor for all running runs')
+    gleich(vs.activeRuleKey({ type: 'switch_outcome', properties: {} }, STEP_MAP.switch_outcome), 'needs_run', 'an unconditional rule always applies')
+    falsch(vs.activeRuleKey({ type: 'note', properties: {} }, STEP_MAP.note), 'a step without a rule has none')
+  })
+  await pruefe('validateDefinition rejects a placement error, hints stay non-blocking', () => {
+    const pdef = { sequence: [{ id: 'p1', type: 'switch_outcome', properties: { value: '{{trigger.run.outcome}}' }, branches: { done: [], failed: [], aborted: [] } }] }
+    gleich(validateDefinition(pdef, runTrig).length, 0, 'fine under its own trigger')
+    wahr(validateDefinition(pdef, cronTrig).some(p => p.includes('needs_run')), 'refused under cron')
+    gleich(validateDefinition(vdef, runTrig).length, 0, 'a wrong comparison is a hint, never a save error')
+  })
+
   await pruefe('schemaFromFields builds a strict JSON schema', () => {
     const s = schemaFromFields([{ name: 'branch name', type: 'string' }, { name: 'ok', type: 'boolean' }, { name: 'tags', type: 'string_list' }, { name: 'sev', type: 'string', enumValues: 'low, high' }, { name: '' }])
     gleich(s.required.join(','), 'branch_name,ok,tags,sev', 'names sanitized, empty dropped')
@@ -911,6 +1030,73 @@ try {
     gleich(ca.seedIfEmpty(), 1, 'empty table: valid entries seeded')
     wahr(ca.isHarnessEnabled('claude'), 'claude seeded')
     delete process.env.CCHUB_AGENTS_SEED
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Run definition: one form → one definition (run-def.mjs)')
+  // 'claude' is the configured coding agent here (seeded by the group above).
+  const rd = await import('../server/run-def.mjs')
+
+  await pruefe('a complete form becomes the definition the run is created from', async () => {
+    const problems = []
+    const def = await rd.runDefFromForm({
+      harness: 'claude', model: ' claude-opus-5 ', prompt: 'do something',
+      branch_mode: 'neu', branch_pattern: 'agent/{date}-{kurz}', expected_minutes: '30',
+    }, problems)
+    gleich(problems.length, 0, `no problems (${problems.join(', ')})`)
+    gleich(def.model, 'claude-opus-5', 'model trimmed')
+    gleich(def.branchMode, 'neu', 'branch mode')
+    gleich(def.expectedMinutes, 30, 'expected duration')
+    gleich(def.provider, null, 'subscription harness has no provider')
+  })
+  await pruefe('missing expectation falls back to the default instead of NaN', async () => {
+    const def = await rd.runDefFromForm({ harness: 'claude', prompt: 'x', branch_mode: 'keiner' }, [])
+    gleich(def.expectedMinutes, rd.DEFAULT_EXPECTED_MINUTES, 'default')
+  })
+  await pruefe('the same checks apply to every form: harness, prompt, branch rule', async () => {
+    const p1 = []
+    await rd.runDefFromForm({ harness: 'gpt', prompt: 'x', branch_mode: 'keiner' }, p1)
+    gleich(p1.length, 1, `unknown harness (${p1.join(', ')})`)
+    const p2 = []
+    await rd.runDefFromForm({ harness: 'opencode', prompt: 'x', branch_mode: 'keiner' }, p2)
+    enthaelt(p2.join(' '), 'not configured', 'known but not configured coding agent')
+    const p3 = []
+    await rd.runDefFromForm({ harness: 'claude', prompt: '   ', branch_mode: 'quatsch' }, p3)
+    // Empty prompt, unknown branch mode — and that mode is not 'keiner', so the
+    // missing pattern counts too. Everything the operator has to fix at once.
+    gleich(p3.length, 3, `empty prompt and unknown branch mode (${p3.join(', ')})`)
+    const p4 = []
+    await rd.runDefFromForm({ harness: 'claude', prompt: 'x', branch_mode: 'neu' }, p4)
+    gleich(p4.length, 1, `branch mode without a pattern (${p4.join(', ')})`)
+  })
+  await pruefe('a provider the harness cannot use is refused, not silently stored', async () => {
+    const problems = []
+    const def = await rd.runDefFromForm({ harness: 'claude', prompt: 'x', branch_mode: 'keiner', provider: 'openrouter' }, problems)
+    gleich(problems.length, 1, `refused (${problems.join(', ')})`)
+    gleich(def.provider, null, 'nothing taken over')
+  })
+  await pruefe('agent row and definition describe the same thing', () => {
+    const def = rd.defFromAgent({
+      harness: 'claude', model: 'm', provider: null, or_provider: null, effort: 'high',
+      prompt: 'p', branch_mode: 'fest', branch_pattern: 'b', expected_minutes: 20, skills: '["x"]',
+    })
+    gleich(def.branchMode, 'fest', 'branch mode')
+    gleich(def.expectedMinutes, 20, 'expected duration')
+    gleich(def.skills, '["x"]', 'skills copied verbatim')
+  })
+  await pruefe('the last choice is remembered and offered again', () => {
+    gleich(JSON.stringify(rd.lastRunChoice()), '{}', 'nothing remembered yet')
+    rd.rememberRunChoice({ harness: 'claude', model: 'claude-opus-5', provider: null, orProvider: null, effort: 'high' })
+    const l = rd.lastRunChoice()
+    gleich(l.harness, 'claude', 'coding agent')
+    gleich(l.model, 'claude-opus-5', 'model')
+    gleich(l.effort, 'high', 'effort')
+  })
+  await pruefe('a coding agent that was switched off is not preselected', () => {
+    ca.saveCodingAgent({ harness: 'claude', enabled: 0, providers: [] })
+    gleich(JSON.stringify(rd.lastRunChoice()), '{}', 'nothing offered')
+    ca.saveCodingAgent({ harness: 'claude', enabled: 1, providers: [] })
+    gleich(rd.lastRunChoice().harness, 'claude', 'offered again after switching on')
   })
 
 } finally {

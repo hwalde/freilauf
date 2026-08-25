@@ -7,7 +7,7 @@ import { homedir } from 'node:os'
 import db, { getRepo, addEvent } from './db.mjs'
 import { RUNS_DIR, sh } from './util.mjs'
 import { handleReport, addEventOnce, notifyRun, branchSyncState } from './reports.mjs'
-import { claudeGateBlocked, openrouterGateBlocked, claudeQuota } from './quota.mjs'
+import { claudeQuota } from './quota.mjs'
 import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText } from './detect.mjs'
 import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, offeneVorfaelle, detektorLog, msVon } from './incidents.mjs'
 import { pruefeTreffer, pruefLlmAktiv } from './pruefer.mjs'
@@ -420,11 +420,12 @@ function finishCosts(run) {
 // ---------- retry deferred runs ----------
 async function retryDeferred() {
   const deferred = db.prepare(`SELECT * FROM runs WHERE status='deferred'`).all()
+  if (!deferred.length) return
+  // Same gate as at the start (scheduler.mjs) — dynamic import, because the
+  // scheduler pulls in the runner and the watcher is loaded by hub.mjs first.
+  const { budgetGate } = await import('./scheduler.mjs')
   for (const run of deferred) {
-    const gate = run.harness === 'claude'
-      ? claudeGateBlocked()
-      : await openrouterGateBlocked(Number(db.prepare(`SELECT value FROM settings WHERE key='openrouter_min_eur'`).get()?.value ?? 5) || 5)
-    if (gate.blocked) continue
+    if (await budgetGate(run.harness)) continue
     db.prepare(`UPDATE runs SET status='running' WHERE id=?`).run(run.id)
     addEvent(run.id, 'deferred_retry')
     const { launchRun } = await import('./runner.mjs')

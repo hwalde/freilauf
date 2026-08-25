@@ -6,18 +6,20 @@ import { join } from 'node:path'
 import db, { getRepo, getRun } from './db.mjs'
 import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText } from './util.mjs'
 import { claudeQuota, openrouterCredits } from './quota.mjs'
-import { effortOptionen } from './models.mjs'
 import {
-  providersForHarness, enabledCodingAgents, listCodingAgents, saveCodingAgent,
+  enabledCodingAgents, listCodingAgents, saveCodingAgent,
   deleteCodingAgent, unconfiguredHarnessIds,
 } from './coding-agents.mjs'
+import {
+  runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
+} from './run-def.mjs'
 import { getHarness, harnessLabel, detectInstalled } from './harnesses/index.mjs'
 import { providerLabel } from './providers/index.mjs'
 import { subscriptionUsage } from './usage.mjs'
 import { ampelAusVorfaellen, offeneVorfaelle, alleVorfaelle } from './incidents.mjs'
 import { TYP_TEXT } from './detect.mjs'
 import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
-import { skillFelder, skillsAusFormular, skillListe, skillAnzeige } from './zusaetze.mjs'
+import { skillListe, skillAnzeige } from './zusaetze.mjs'
 import { t, LANGUAGES, currentLanguage, setLanguage, clientCatalog } from './i18n.mjs'
 
 /**
@@ -198,13 +200,6 @@ export function noRepoPage(res, active, title) {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(title, active, body))
 }
 
-/** Harness <select> options from the CONFIGURED coding agents. */
-function harnessOptionen(selected) {
-  const agents = enabledCodingAgents()
-  return agents.map(a =>
-    `<option value="${e(a.harness)}" ${selected === a.harness ? 'selected' : ''}>${e(a.plugin.label)}</option>`).join('')
-}
-
 // ---------------- agents ----------------
 export async function pageAgents(req, res, url) {
   const sel = selectRepo(url)
@@ -226,24 +221,16 @@ export async function pageAgents(req, res, url) {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.agents'), '/agents', body, sel.id))
 }
 
-// ---------------- single-run form (= agent form without schedule) ----------------
+// ---------------- single-run form (= agent form without name and schedule) ----------------
 export async function pageRunForm(req, res, url) {
   const sel = selectRepo(url)
   if (!sel) return noRepoPage(res, '', t('runform.title_short'))
   const agentId = url.searchParams.get('agent')
   const a = agentId ? db.prepare('SELECT * FROM agents WHERE id=?').get(+agentId) : null
+  // Without an agent as a template: the setup of the last start — in practice
+  // the next run wants the same coding agent, provider, model and effort.
   const fields = `
-  <label>${e(t('agents.harness'))} <select name="harness">${harnessOptionen(a?.harness)}</select></label>
-  ${modellFelder(a ?? {})}
-  <label>${e(t('runform.prompt'))} <textarea name="prompt" rows="10" required>${e(a?.prompt ?? '')}</textarea></label>
-  <label>${e(t('runform.branch_mode'))} <select name="branch_mode">
-    <option value="keiner">${e(t('branch.none'))}</option>
-    <option value="neu">${e(t('branch.new'))}</option>
-    <option value="fest">${e(t('branch.fixed'))}</option>
-  </select></label>
-  <label>${e(t('runform.branch_pattern'))} <input name="branch_pattern" placeholder="${e(t('runform.branch_pattern_ph'))}"></label>
-  <label>${e(t('runform.expected'))} <input type="number" name="expected_minutes" value="${a?.expected_minutes ?? 45}" min="1"></label>
-  ${skillFelder(a?.skills)}
+  ${runDefFields(a ?? lastRunChoice())}
   <input type="hidden" name="repo_id" value="${sel.id}">
   <label class="chk"><input type="checkbox" name="save_agent" value="1"> ${e(t('runform.save_agent'))} (<input name="agent_name" placeholder="agent-name">)</label>`
   const body = `
@@ -484,84 +471,27 @@ export async function codingAgentDelete(req, res, url, formBody) {
 
 // ---------------- form actions ----------------
 import { redirect } from './web-helpers.mjs'
-import { createRun, launchRun } from './runner.mjs'
-import { startForAgent } from './scheduler.mjs'
+import { startForAgent, startRun } from './scheduler.mjs'
 import { setSetting } from './db.mjs'
 import { sendTest } from './telegram.mjs'
 
 export async function runNewPost(req, res, url, formBody) {
   const b = await formBody()
+  const back = `/runs/new?repo=${b.repo_id ?? ''}`
   const problems = []
-  const pv = providerAusFormular(b, problems)
-  const effort = await effortAusFormular(b, problems)
-  if (problems.length) return problemPage(res, t('runform.title_short'), problems, `/runs/new?repo=${b.repo_id ?? ''}`)
-  const skills = skillsAusFormular(b)
-  let runId
-  try {
-    runId = createRun({
-      repoId: +b.repo_id, agentId: null, harness: b.harness, model: b.model || null,
-      provider: pv.provider, orProvider: pv.or_provider, effort,
-      prompt: b.prompt, promptExtra: null, branchMode: b.branch_mode,
-      branchPattern: b.branch_pattern || null, expectedMinutes: +b.expected_minutes || 45,
-      skills,
-    })
-  } catch (err) { return problemPage(res, t('runform.title_short'), [err.message], `/runs/new?repo=${b.repo_id ?? ''}`) }
+  const def = await runDefFromForm(b, problems)
+  if (problems.length) return problemPage(res, t('runform.title_short'), problems, back)
+  rememberRunChoice(def)
+  // "Save as agent": the very same definition, only with a name — the run form
+  // is the agent form without one.
   if (b.save_agent === 'on' || b.save_agent === '1') {
     try {
-      db.prepare(`INSERT INTO agents(repo_id,name,harness,model,provider,or_provider,effort,prompt,
-                  branch_mode,branch_pattern,expected_minutes,skills,active)
-                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'1')`)
-        .run(+b.repo_id, b.agent_name?.trim() || `agent-${Date.now()}`, b.harness, b.model || null,
-          pv.provider, pv.or_provider, effort, b.prompt, b.branch_mode, b.branch_pattern || null,
-          +b.expected_minutes || 45, skills)
-    } catch {}
+      saveAgent({ repoId: +b.repo_id, name: b.agent_name?.trim() || `agent-${Date.now()}`, def })
+    } catch { /* duplicate name: the run is what matters, not the copy */ }
   }
-  const r = await launchRun(runId)
-  redirect(res, r.ok ? `/runs/${runId}` : `/runs/${runId}`)
-}
-
-/**
- * Provider fields from the form. A serving provider is ONLY taken over when it
- * can technically be passed through (opencode + OpenRouter + checkbox) —
- * otherwise the DB would hold a promise that silently falls off at start.
- */
-function providerAusFormular(b, problems) {
-  const provider = b.provider ?? ''
-  // Not just "do we know the provider", but "can this harness use it HERE with
-  // the operator's configuration" — otherwise the DB would store a combination
-  // that fails at start.
-  const erlaubt = providersForHarness(b.harness).map(p => p.id)
-  if (provider !== '' && !erlaubt.includes(provider)) {
-    const plugin = getHarness(b.harness)
-    problems.push(plugin?.subscription
-      ? t('form.subscription_no_provider', { harness: b.harness })
-      : t('form.provider_unavailable', { provider, harness: b.harness, list: erlaubt.join(', ') || '—' }))
-    return { provider: null, or_provider: null }
-  }
-  const pinnen = b.or_pin === '1' && b.harness === 'opencode' && provider === 'openrouter'
-  return { provider: provider || null, or_provider: pinnen ? (b.or_provider?.trim() || null) : null }
-}
-
-/**
- * Validate the effort level. Same strictness as the serving provider: only
- * what actually arrives for exactly this combination is taken over. opencode
- * silently discards an unknown level, hermes checks nothing — a passed-through
- * nonsense value would fizzle silently and nobody would know the setting does
- * nothing.
- */
-async function effortAusFormular(b, problems) {
-  const wunsch = (b.effort ?? '').trim()
-  if (!wunsch) return null
-  const r = await effortOptionen(b.harness, b.provider ?? '', b.model ?? '')
-  if (!r.stufen?.includes(wunsch)) {
-    problems.push(t('form.effort_invalid', {
-      effort: wunsch,
-      target: b.harness + (b.model ? ` (${b.model})` : ''),
-      list: r.stufen ? r.stufen.join(', ') : t(r.hinweisKey ?? 'effort.unknown'),
-    }))
-    return null
-  }
-  return wunsch
+  const r = await startRun(def, { repoId: +b.repo_id })
+  if (!r.runId) return problemPage(res, t('runform.title_short'), [r.error ?? 'start failed'], back)
+  redirect(res, `/runs/${r.runId}`)
 }
 
 /**
@@ -611,69 +541,23 @@ function zeitplanFelder(a = {}) {
 }
 
 /**
- * Provider and model selection. Deliberately ONE building block for the agent
- * form and the single-run form — before, the model field was duplicated in
- * both forms and drifted.
- *
- * The list is not embedded server-side but fetched afterwards: if a provider
- * API hangs, a text field is still there immediately to type the slug into.
- * <datalist> provides the search for free.
+ * The agent form = the run definition (run-def.mjs) plus what only an agent
+ * has: a name, a schedule, an on/off switch.
  */
-function modellFelder(a = {}) {
-  const prov = a.provider ?? ''
-  return `
-  <label id="prov-label">Provider
-    <select name="provider" id="prov" data-gewaehlt="${e(prov)}">
-      <option value="">${e(t('model.provider_none'))}</option>
-    </select>
-    <span class="dim" id="prov-hint"></span>
-  </label>
-
-  <label>${e(t('agents.model'))}
-    <input name="model" id="model" list="modelle" autocomplete="off" value="${e(a.model ?? '')}"
-           placeholder="${e(t('model.model_ph'))}">
-    <datalist id="modelle"></datalist>
-  </label>
-  <p class="dim" id="model-hint"></p>
-
-  <label id="effort-label" hidden>${e(t('model.effort'))}
-    <select name="effort" id="effort" data-gewaehlt="${e(a.effort ?? '')}">
-      <option value="">${e(t('model.effort_default'))}</option>
-    </select>
-    <span class="dim" id="effort-hint"></span>
-  </label>
-
-  <fieldset class="zeitplan" id="or-routing" hidden>
-    <legend>${e(t('or.legend'))}</legend>
-    <label class="chk"><input type="checkbox" name="or_pin" value="1" id="or-pin" ${a.or_provider ? 'checked' : ''}>
-      ${e(t('or.pin'))}</label>
-    <label id="or-prov-label" ${a.or_provider ? '' : 'hidden'}>${e(t('or.provider_label'))}
-      <select name="or_provider" id="or-prov"><option value="${e(a.or_provider ?? '')}">${e(a.or_provider ?? '')}</option></select>
-    </label>
-    <p class="dim">${e(t('or.hint'))}</p>
-  </fieldset>`
-}
-
 function agentFields(a = {}, repoId) {
   return `
   <label>${e(t('agents.name'))} <input name="name" value="${e(a.name ?? '')}" required></label>
-  <label>${e(t('agents.harness'))} <select name="harness">${harnessOptionen(a.harness)}</select></label>
-  ${modellFelder(a)}
+  ${runDefFields(a)}
   <input type="hidden" name="repo_id" value="${repoId}">
-  <label>${e(t('runform.prompt'))} <textarea name="prompt" rows="10" required>${e(a.prompt ?? '')}</textarea></label>
-  <label>${e(t('runform.branch_mode'))} <select name="branch_mode">
-    ${['keiner', 'neu', 'fest'].map(m => `<option value="${m}" ${a.branch_mode === m ? 'selected' : ''}>${e(m === 'neu' ? t('branch.new') : m === 'fest' ? t('branch.fixed') : t('branch.none'))}</option>`).join('')}
-  </select></label>
-  <label>${e(t('runform.branch_pattern'))} <input name="branch_pattern" value="${e(a.branch_pattern ?? '')}" placeholder="${e(t('runform.branch_pattern_ph'))}"></label>
-  <label>${e(t('runform.expected'))} <input type="number" name="expected_minutes" min="1" value="${a.expected_minutes ?? 45}"></label>
-  ${skillFelder(a.skills)}
   ${zeitplanFelder(a)}
   <label class="chk"><input type="checkbox" name="active" value="1" ${a.active ?? 1 ? 'checked' : ''}> ${e(t('agents.active'))}</label>`
 }
 
 export async function agentEdit(req, res, url) {
   const id = url.searchParams.get('id')
-  const a = id ? db.prepare('SELECT * FROM agents WHERE id=?').get(+id) : {}
+  // A new agent starts from the setup of the last start, an existing one from
+  // what is saved.
+  const a = id ? db.prepare('SELECT * FROM agents WHERE id=?').get(+id) : lastRunChoice()
   const repoId = +(url.searchParams.get('repo') ?? db.prepare('SELECT id FROM repos ORDER BY name LIMIT 1').get()?.id ?? 0)
   const body = `<h2>${e(id ? t('agentform.title_edit') : t('agentform.title_new'))}</h2>
   <form method="post" action="/agents/edit${id ? `?id=${id}` : ''}" class="settings">${agentFields(a, repoId)}<button>${e(t('settings.save'))}</button></form>`
@@ -687,37 +571,12 @@ export async function agentSave(req, res, url, formBody) {
   const back = `/agents/edit${id ? `?id=${id}&repo=${b.repo_id ?? ''}` : `?repo=${b.repo_id ?? ''}`}`
   const problems = []
   if (!b.name?.trim()) problems.push(t('form.name_missing'))
-  if (!b.prompt?.trim()) problems.push(t('form.prompt_missing'))
-  if (!getHarness(b.harness)) problems.push(t('run.unknown_harness', { harness: b.harness }))
-  else if (!enabledCodingAgents().some(a2 => a2.harness === b.harness)) problems.push(t('run.harness_not_configured', { harness: b.harness }))
-  if (!['keiner', 'neu', 'fest'].includes(b.branch_mode)) problems.push(t('form.branch_mode_unknown', { mode: b.branch_mode }))
-  if (b.branch_mode !== 'keiner' && !b.branch_pattern?.trim()) problems.push(t('form.branch_missing'))
+  const def = await runDefFromForm(b, problems)
   const zp = zeitplanAusFormular(b, problems)
-  const pv = providerAusFormular(b, problems)
-  const effort = await effortAusFormular(b, problems)
-  const skills = skillsAusFormular(b)
   if (problems.length) return problemPage(res, t('agentform.title_edit'), problems, back)
 
-  if (id) {
-    // A single UPDATE — before, 'active' was first set to 1 and then derived
-    // again from exactly that freshly written value.
-    db.prepare(`UPDATE agents SET name=?, harness=?, model=?, prompt=?, branch_mode=?, branch_pattern=?,
-                expected_minutes=?, schedule=?, schedule_kind=?, schedule_days=?, schedule_time=?,
-                schedule_weeks=?, schedule_anchor=?, run_at=?, provider=?, or_provider=?, effort=?,
-                skills=?, active=?, updated_at=datetime('now') WHERE id=?`).run(
-      b.name.trim(), b.harness, b.model || null, b.prompt, b.branch_mode, b.branch_pattern || null,
-      +b.expected_minutes || 45, zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
-      pv.provider, pv.or_provider, effort, skills, active, +id)
-  } else {
-    db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,branch_mode,branch_pattern,expected_minutes,
-                schedule,schedule_kind,schedule_days,schedule_time,schedule_weeks,schedule_anchor,run_at,
-                provider,or_provider,effort,skills,active)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-      +b.repo_id, b.name.trim(), b.harness, b.model || null, b.prompt, b.branch_mode,
-      b.branch_pattern || null, +b.expected_minutes || 45,
-      zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
-      pv.provider, pv.or_provider, effort, skills, active)
-  }
+  saveAgent({ id: id ? +id : null, repoId: +b.repo_id, name: b.name.trim(), def, schedule: zp, active })
+  rememberRunChoice(def)
   redirect(res, `/agents?repo=${b.repo_id}`)
 }
 
@@ -769,13 +628,9 @@ export async function agentStart(req, res, url, formBody) {
   const b = await formBody()
   const agent = db.prepare('SELECT * FROM agents WHERE id=?').get(+b.id)
   if (!agent) { res.writeHead(404).end(); return }
-  const pipelineOn = db.prepare(`SELECT value FROM settings WHERE key='pipeline_on'`).get()?.value === '1'
-  if (!pipelineOn) {
-    // Manual start despite a disabled pipeline is allowed (planning 4.8).
-    const r2 = await startForAgent(agent, null)
-    redirect(res, r2.runId ? `/runs/${r2.runId}` : '/agents')
-    return
-  }
+  // A manual start is allowed even with the pipeline switched off (planning
+  // 4.8) — the switch only gates the SCHEDULED starts. Both branches used to
+  // stand here, doing exactly the same thing.
   const r = await startForAgent(agent)
   redirect(res, r.runId ? `/runs/${r.runId}` : '/agents')
 }

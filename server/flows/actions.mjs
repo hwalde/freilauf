@@ -7,8 +7,7 @@ import db from '../db.mjs'
 import { RUNS_DIR, sh, sendToSession, kurzid } from '../util.mjs'
 import { terminalText } from '../detect.mjs'
 import { notify, notifyLong, detailUrl, publicBase } from '../telegram.mjs'
-import { startForAgent } from '../scheduler.mjs'
-import { createRun, launchRun } from '../runner.mjs'
+import { startForAgent, startRun } from '../scheduler.mjs'
 import { extractStructured } from './llm.mjs'
 import { markStartedByFlow } from './db.mjs'
 
@@ -163,13 +162,11 @@ export const actions = {
     return r
   },
 
-  async startSingle(opts, flowRunId) {
-    let runId
-    try { runId = createRun({ ...opts, agentId: null, orProvider: null, promptExtra: null }) }
-    catch (e) { return { ok: false, error: e.message } }
-    markStartedByFlow(runId, flowRunId)
-    const r = await launchRun(runId)
-    return r.ok ? { ok: true, runId } : { ok: false, runId, error: r.error }
+  /** A run definition without an agent — same start path as the run form. */
+  async startSingle(def, repoId, flowRunId) {
+    const r = await startRun(def, { repoId })
+    if (r.runId) markStartedByFlow(r.runId, flowRunId)
+    return r
   },
 
   /**

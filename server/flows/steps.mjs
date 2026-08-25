@@ -2,15 +2,22 @@
 // (what the designer shows, which properties it has, how it executes).
 //
 // Each step: { type, component ('task'|'switch'|'container'), group, branches?, fields,
-// output?, run }.
+// output?, outputShape?, run }.
 // `fields` drives the property editor in public/flows.js (shipped via
-// GET /api/flows/meta) and the defaults/validation here; `run(props, ctx, api, info)`
+// GET /api/flows/meta) and the defaults/validation here; `outputShape` says what
+// the output variable looks like, which is what varschema.mjs turns into typed
+// pickers and "that variable does not exist" warnings; `run(props, ctx, api, info)`
 // performs the step through the `api` object (actions.mjs in production, a stub in
 // tests) and returns { msg?, output?, branch?, wait?, stop? }.
 //
 // Side effects never happen here directly — everything goes through `api`, so the
 // engine stays testable and the coupling to the rest of the hub is one file.
 import { render, resolve, compare, OPS, varName, toList } from './template.mjs'
+import { placementErrors, definitionWarnings } from './varschema.mjs'
+import { RUN_DEF_FLOW_FIELDS, defFromFlowProps } from '../run-def.mjs'
+
+// A target selector aimed at the trigger run needs one to exist.
+const TARGET_PLACEMENT = { needsRun: { whenField: 'target', is: 'trigger_run' } }
 
 const TARGET_FIELDS = [
   { key: 'target', kind: 'select', options: ['trigger_run', 'agent', 'repo', 'all_running', 'run_id'], default: 'agent' },
@@ -35,6 +42,9 @@ async function targetRuns(props, ctx, api) {
   return api.findRuns(filter)
 }
 
+// send_message / kill_run both report which runs they reached.
+const RUNS_TOUCHED = { type: 'object', props: { count: { type: 'number' }, run_ids: { type: 'string_list' } } }
+
 const WAIT_FIELDS = [
   { key: 'wait', kind: 'checkbox', default: true },
   { key: 'outputVar', kind: 'text', default: 'run' },
@@ -44,6 +54,7 @@ export const STEPS = [
   // ---------------- agents ----------------
   {
     type: 'send_message', component: 'task', group: 'agents', output: true,
+    outputShape: RUNS_TOUCHED, placement: TARGET_PLACEMENT,
     fields: [
       ...TARGET_FIELDS,
       { key: 'text', kind: 'textarea', required: true, placeholder: 'main has moved ({{trigger.run.branch}} merged) — please pull the latest commits.' },
@@ -60,6 +71,8 @@ export const STEPS = [
   },
   {
     type: 'start_agent', component: 'task', group: 'agents', output: true,
+    // Without "wait" only the id exists; with it the finished run replaces the output.
+    outputShape: { from: 'run_if_wait', otherwise: { type: 'object', props: { id: { type: 'string' }, deferred: { type: 'boolean' } } } },
     fields: [
       { key: 'agentId', kind: 'agent', required: true },
       { key: 'promptExtra', kind: 'textarea', placeholder: 'Additional instructions — {{vars.…}} placeholders allowed.' },
@@ -77,33 +90,33 @@ export const STEPS = [
   },
   {
     type: 'start_single_run', component: 'task', group: 'agents', output: true,
+    outputShape: { from: 'run_if_wait', otherwise: { type: 'object', props: { id: { type: 'string' }, deferred: { type: 'boolean' } } } },
+    // The definition fields come from run-def.mjs — the same list the run form
+    // and the agent form are built from, so a field cannot exist there and be
+    // missing here.
     fields: [
       { key: 'repoId', kind: 'repo', required: true },
-      { key: 'harness', kind: 'harness', required: true },
-      { key: 'provider', kind: 'text', placeholder: 'openrouter / opencode-zen / … (as in the run form)' },
-      { key: 'model', kind: 'text' },
-      { key: 'effort', kind: 'text' },
-      { key: 'prompt', kind: 'textarea', required: true, placeholder: 'Review the report:\n{{trigger.run.report}}' },
-      { key: 'branchMode', kind: 'select', options: ['keiner', 'neu', 'fest'], default: 'keiner' },
-      { key: 'branchPattern', kind: 'text', placeholder: 'flow/{date}-{kurz}' },
-      { key: 'expectedMinutes', kind: 'number', default: 45 },
+      ...RUN_DEF_FLOW_FIELDS,
       ...WAIT_FIELDS,
     ],
     async run(props, ctx, api, info) {
-      const r = await api.startSingle({
-        repoId: Number(props.repoId), harness: props.harness, provider: props.provider || null,
-        model: render(props.model, ctx) || null, effort: props.effort || null,
-        prompt: render(props.prompt, ctx), branchMode: props.branchMode || 'keiner',
-        branchPattern: props.branchPattern || null, expectedMinutes: Number(props.expectedMinutes) || 45,
-      }, info.flowRunId)
+      // Templates first, then the definition: {{…}} may appear in every text field.
+      const def = defFromFlowProps({
+        ...props,
+        model: render(props.model, ctx),
+        prompt: render(props.prompt, ctx),
+        branchPattern: render(props.branchPattern, ctx),
+      })
+      const r = await api.startSingle(def, Number(props.repoId), info.flowRunId)
       if (!r.ok) throw new Error(r.error || 'run start failed')
-      const out = { id: r.runId }
+      const out = { id: r.runId, deferred: !!r.deferred }
       if (props.wait) return { msg: `started run ${r.runId} — waiting`, output: out, wait: { runId: r.runId } }
       return { msg: `started run ${r.runId}`, output: out }
     },
   },
   {
     type: 'kill_run', component: 'task', group: 'agents', output: true,
+    outputShape: RUNS_TOUCHED, placement: TARGET_PLACEMENT,
     fields: [...TARGET_FIELDS, { key: 'outputVar', kind: 'text', default: 'killed' }],
     async run(props, ctx, api) {
       const runs = await targetRuns(props, ctx, api)
@@ -116,6 +129,9 @@ export const STEPS = [
   // ---------------- data ----------------
   {
     type: 'extract', component: 'task', group: 'data', output: true,
+    // The fields the operator defined ARE the shape — strict json_schema makes
+    // the model keep to them, enum values included.
+    outputShape: { from: 'extract_fields' },
     fields: [
       { key: 'source', kind: 'select', options: ['report', 'log', 'transcript', 'report_and_log', 'custom'], default: 'report' },
       { key: 'sourceRun', kind: 'text', default: '{{trigger.run.id}}', placeholder: '{{vars.review.id}}' },
@@ -141,6 +157,7 @@ export const STEPS = [
   },
   {
     type: 'set_var', component: 'task', group: 'data', output: true,
+    outputShape: { type: 'any' },          // whatever the template produced
     fields: [
       { key: 'outputVar', kind: 'text', required: true, default: 'value' },
       { key: 'value', kind: 'textarea', required: true },
@@ -151,6 +168,8 @@ export const STEPS = [
   },
   {
     type: 'http_request', component: 'task', group: 'data', output: true,
+    // `json` stays 'any': the response body has no schema we could know.
+    outputShape: { type: 'object', props: { status: { type: 'number' }, ok: { type: 'boolean' }, body: { type: 'string' }, json: { type: 'any' } } },
     fields: [
       { key: 'url', kind: 'text', required: true, placeholder: 'https://…' },
       { key: 'method', kind: 'select', options: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], default: 'POST' },
@@ -172,9 +191,9 @@ export const STEPS = [
   {
     type: 'condition', component: 'switch', group: 'control', branches: ['true', 'false'],
     fields: [
-      { key: 'left', kind: 'text', required: true, placeholder: '{{trigger.run.outcome}}' },
-      { key: 'op', kind: 'select', options: OPS, default: 'eq' },
-      { key: 'right', kind: 'text', placeholder: 'done' },
+      { key: 'left', kind: 'var', required: true, placeholder: '{{trigger.run.outcome}}' },
+      { key: 'op', kind: 'op', typeOf: 'left', options: OPS, default: 'eq' },
+      { key: 'right', kind: 'value', typeOf: 'left', opOf: 'op', placeholder: 'done' },
     ],
     async run(props, ctx) {
       const ok = compare(resolve(props.left, ctx), props.op || 'eq', resolve(props.right, ctx))
@@ -183,7 +202,11 @@ export const STEPS = [
   },
   {
     type: 'switch_outcome', component: 'switch', group: 'control', branches: ['done', 'failed', 'aborted'],
-    fields: [{ key: 'value', kind: 'text', default: '{{trigger.run.outcome}}' }],
+    // Only meaningful where a finished run exists: the trigger delivers one, or
+    // an earlier start step waited for its run. In a cron flow it would always
+    // fall through to 'failed'.
+    placement: { needsRun: true },
+    fields: [{ key: 'value', kind: 'var', default: '{{trigger.run.outcome}}' }],
     async run(props, ctx) {
       const v = String(resolve(props.value || '{{trigger.run.outcome}}', ctx) ?? '').trim().toLowerCase()
       const branch = ['done', 'failed', 'aborted'].includes(v) ? v : 'failed'
@@ -193,7 +216,7 @@ export const STEPS = [
   {
     type: 'for_each', component: 'container', group: 'control',
     fields: [
-      { key: 'list', kind: 'text', required: true, placeholder: '{{vars.extracted.open_points}}' },
+      { key: 'list', kind: 'var', required: true, placeholder: '{{vars.extracted.open_points}}' },
       { key: 'itemVar', kind: 'text', default: 'item' },
       { key: 'maxItems', kind: 'number', default: 50 },
     ],
@@ -223,6 +246,7 @@ export const STEPS = [
   // ---------------- notify ----------------
   {
     type: 'telegram', component: 'task', group: 'notify', output: true,
+    outputShape: { type: 'object', props: { delivered: { type: 'boolean' } } },
     fields: [
       { key: 'text', kind: 'textarea', required: true, placeholder: '🔁 {{trigger.run.agent_name}} finished: {{trigger.run.outcome}}' },
       { key: 'attachment', kind: 'textarea', placeholder: '{{trigger.run.report}} — sent as a file when non-empty' },
@@ -260,10 +284,14 @@ export function stepsMeta() {
 
 /**
  * Validate a designer definition: known step types, required fields, branch
- * shape. Returns a list of problems (empty = valid). Walks recursively so
- * a broken step inside a branch is found too.
+ * shape and placement rules. Returns a list of problems (empty = valid). Walks
+ * recursively so a broken step inside a branch is found too. `trigger` is what
+ * decides a placement rule — a step reading a run outcome is fine under a
+ * run_finished trigger and broken under a cron one. `translate` turns a
+ * placement code into the sentence the operator reads; without it the bare
+ * code comes back (that is what the tests assert against).
  */
-export function validateDefinition(def) {
+export function validateDefinition(def, trigger = null, translate = null) {
   const problems = []
   const walk = (seq, where) => {
     if (!Array.isArray(seq)) { problems.push(`${where}: sequence is not a list`); return }
@@ -286,5 +314,20 @@ export function validateDefinition(def) {
     })
   }
   walk(def?.sequence, 'sequence')
+  // Placement: same rules the designer enforces while dragging, repeated here
+  // so a definition that never went through the designer cannot slip past.
+  for (const p of placementErrors(def, STEP_MAP, trigger)) {
+    problems.push(translate ? translate(p) : `${p.stepName}: ${p.code}`)
+  }
   return problems
+}
+
+/**
+ * Everything that is merely suspicious: a variable no step writes, a field an
+ * extraction does not have, a comparison that can never be true, a step that
+ * only *maybe* has its run. Never blocks saving — half-built flows are normal,
+ * and an expression may point into an HTTP response we cannot describe.
+ */
+export function definitionHints(def, trigger = null) {
+  return definitionWarnings(def, STEP_MAP, trigger)
 }
