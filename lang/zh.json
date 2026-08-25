@@ -3,23 +3,21 @@
   "nav.agents": "代理",
   "nav.repos": "仓库",
   "nav.settings": "设置",
-
   "layout.repo": "仓库",
   "layout.no_repo": "尚未创建仓库",
   "layout.pipeline": "流水线",
   "layout.pipeline_hint": "计划启动的全局与门",
   "layout.on": "开",
   "layout.off": "关",
-
   "banner.no_coding_agent": "尚未配置任何 Coding Agent —— 没有它就无法启动任务。",
   "banner.no_coding_agent_cta": "立即添加第一个 Coding Agent",
-
   "problem.back": "返回表单",
   "web.not_found": "未找到",
-
   "overview.single_run": "（单次运行）",
   "overview.start_single": "启动单次运行",
-  "overview.agent": "代理",
+  "overview.title_col": "标题",
+  "overview.from_agent": "代理“{agent}”",
+  "overview.rename": "重命名此运行（代理名称不变）",
   "overview.harness_model": "Coding Agent/模型",
   "overview.status": "状态",
   "overview.started": "开始时间",
@@ -27,7 +25,6 @@
   "overview.branch": "分支",
   "overview.no_runs": "还没有运行记录",
   "overview.last_anomaly": "最近异常",
-
   "usage.title": "订阅用量",
   "usage.unavailable": "无法获取用量",
   "usage.resets": "重置于 {time}",
@@ -36,12 +33,10 @@
   "usage.spent_est": "已用 {usd} $，共含约 {included} $ 额度（配置的备用值）",
   "usage.openrouter_credits": "OpenRouter 余额",
   "usage.remaining": "剩余 {eur} €",
-
   "norepo.title": "请先创建一个仓库",
   "norepo.text": "代理和运行始终属于且仅属于一个仓库。例如：",
   "norepo.base_hint": "基础分支为",
   "norepo.cta": "立即创建仓库",
-
   "agents.on": "启用",
   "agents.off": "停用",
   "agents.start_now": "立即启动",
@@ -56,12 +51,13 @@
   "agents.none": "没有代理",
   "agents.active": "启用",
   "agents.flows_hint": "流程附加在代理或单次运行上——在下面的表单中附加。",
-
   "agentform.title_new": "创建代理",
   "agentform.title_edit": "编辑代理",
-
   "runform.title": "单次运行 — 仓库“{repo}”",
   "runform.title_short": "单次运行",
+  "runform.title_field": "标题",
+  "runform.title_ph": "留空：将根据提示词自动生成",
+  "runform.title_hint": "留空时：由 OpenRouter 上的一个低价模型根据提示词生成简短标题（设置 → 运行标题）。任何标题之后都可在概览中重命名。",
   "runform.like_agent": "参照代理“{agent}”",
   "runform.prompt": "提示词",
   "runform.branch_mode": "分支预期",
@@ -71,12 +67,27 @@
   "runform.save_agent": "保存为代理（名称：",
   "runform.start": "启动",
   "runform.pipeline_on_hint": "流水线已开启 —— 计划启动也会执行。",
-  "runform.pipeline_off_hint": "流水线已关闭 —— 只影响计划启动；本次运行会立即开始。",
-
+  "runform.pipeline_off_hint": "流水线已关闭 — 这只影响计划中的代理启动；此运行不会因此被阻拦。",
+  "start.legend": "启动",
+  "start.mode": "时间点",
+  "start.mode_now": "立即",
+  "start.mode_at": "在指定日期时间",
+  "start.mode_in": "n 分钟后",
+  "start.mode_idle": "当该仓库没有其他运行时",
+  "start.at_label": "日期和时间",
+  "start.in_label": "分钟",
+  "start.idle_hint": "该运行将在概览中等待，一旦仓库空闲便自行启动。多个等待中的运行会依次启动，而非同时启动。",
+  "start.err_mode": "未知的启动方式：{mode}",
+  "start.err_at": "启动时间缺失或无法解析。",
+  "start.err_in": "分钟数必须大于 0。",
+  "start.waits": "等待启动",
+  "start.waits_until": "将于 {time} 启动",
+  "start.until_free": "仓库空闲后即启动",
+  "start.waits_budget": "已推迟 — 等待配额/余额",
+  "start.cancel": "取消此运行",
   "branch.none": "无",
   "branch.new": "新建分支",
   "branch.fixed": "使用固定分支",
-
   "run.not_found": "未找到该运行",
   "run.title": "运行 {id}",
   "run.pinned": "固定",
@@ -114,7 +125,6 @@
   "run.unknown_harness": "未知的 Coding Agent：{harness}",
   "run.harness_not_configured": "Coding Agent“{harness}”未配置或已停用 —— 请在设置 → Coding Agents 中添加。",
   "run.empty_prompt": "提示词为空",
-
   "skills.title": "附加技能",
   "skills.legend": "附加技能（可选，作为指令写入提示词）",
   "skills.depth_label": "工作深度",
@@ -124,7 +134,6 @@
   "skills.depth_4": "深度 4 —— 编排，并行子任务",
   "skills.depth_5": "深度 5 —— 最大（昂贵且缓慢！）",
   "skills.depth_short": "深度 {n}",
-
   "incidents.title": "事件",
   "incidents.resolve": "解决",
   "incidents.resolve_hint": "已解决的事件再次发生时会重新打开，并再次通过 Telegram 通知。",
@@ -137,7 +146,6 @@
   "incidents.resolved_at": "已解决",
   "incidents.resolved_n": "{n} 个已解决",
   "incidents.detector_log": "检测器日志",
-
   "incident.rate_limit": "限流",
   "incident.provider_error": "服务商错误",
   "incident.auth_error": "登录/令牌",
@@ -146,7 +154,6 @@
   "incident.provider_down": "服务商不可达",
   "incident.llm_warnung": "校验 LLM 警告",
   "incident.unbekannt": "API 错误",
-
   "repos.create": "创建仓库",
   "repos.name": "名称",
   "repos.path": "路径",
@@ -161,7 +168,6 @@
   "repos.no_git": "{path} 下没有 git 仓库（缺少 .git）。",
   "repos.extras_invalid": "Worktree 附加项：需要一个由 {\"path\": \"…\", \"mode\": \"copy\"|\"link\"} 组成的列表。",
   "repos.extras_json": "Worktree 附加项不是有效的 JSON：{err}",
-
   "settings.global_hint": "这些设置对整个 hub 全局生效 —— 与上方选择的仓库无关。仓库相关的只有“仓库”下的条目（路径、基础分支、Worktree 附加项）和代理本身。",
   "settings.coding_agents_hint": "添加、编辑或移除 Coding Agent 及其服务商",
   "settings.language": "界面语言",
@@ -182,12 +188,18 @@
   "settings.llm_mru_hint": "列表：最近保存的 10 个模型",
   "settings.llm_or_provider": "固定服务节点（可选，OpenRouter 标签）",
   "settings.llm_or_ph": "留空 = 由 OpenRouter 选择",
+  "settings.title_legend": "运行标题（通过 OpenRouter）",
+  "settings.title_hint": "标题字段留空的单次运行会根据提示词生成标题。这只需一个非常便宜的模型 — 一个标题的成本不到一分钱。关闭时、没有密钥时或出错时，运行会保留提示词的第一行作为标题；绝不会因为标题而失败。",
+  "settings.title_on": "生成标题",
+  "settings.title_model": "模型（OpenRouter ID）",
+  "settings.title_model_hint": "留空即为 {model}；列表包含默认值和最近保存的模型",
+  "js.title_ph": "此运行的标题",
+  "js.rename_failed": "重命名失败：",
   "settings.save": "保存",
   "settings.telegram_ok": "Telegram 测试消息已发送。",
   "settings.telegram_fail": "Telegram 测试消息失败 —— 令牌和聊天 ID 都设置了吗？请查看向导。",
   "settings.telegram_setup": "打开 Telegram 设置向导",
   "settings.telegram_test": "Telegram 测试消息",
-
   "ca.title": "Coding Agents",
   "ca.intro": "这个 hub 可以驱动哪些 Coding Agent CLI，每个又可以使用哪些模型服务商？表单只提供在此配置并启用的选项。",
   "ca.none": "尚未配置任何 Coding Agent。",
@@ -206,9 +218,7 @@
   "ca.delete_confirm": "确定移除 Coding Agent“{label}”？现有代理和运行的数据会保留。",
   "ca.add": "添加",
   "ca.plugin_missing": "插件已不存在",
-
   "provider.keyfree": "无需自己的密钥",
-
   "form.name_missing": "缺少名称。",
   "form.prompt_missing": "提示词为空。",
   "form.branch_mode_unknown": "未知的分支预期：{mode}",
@@ -217,7 +227,6 @@
   "form.subscription_no_provider": "{harness} 基于订阅运行 —— 无需选择服务商，只需选择模型。",
   "form.provider_unavailable": "服务商“{provider}”在此对 {harness} 不可用（缺少密钥或未启用？）。可用：{list}",
   "form.effort_invalid": "推理力度“{effort}”对 {target} 不可用 —— 可用：{list}",
-
   "effort.unknown": "未知",
   "effort.no_harness": "未指定 Coding Agent",
   "effort.unknown_harness": "未知的 Coding Agent",
@@ -230,7 +239,6 @@
   "effort.intersection": "hermes 和模型都支持的级别",
   "effort.no_common": "hermes 与该模型没有共同级别",
   "effort.model_unknown": "该模型没有已知的力度级别",
-
   "sched.legend": "计划",
   "sched.kind": "类型",
   "sched.kind_manual": "仅手动启动",
@@ -260,7 +268,6 @@
   "sched.weekly_line": "{takt}：{days} {time}",
   "sched.no_days": "（无日期）",
   "sched.manual": "手动",
-
   "day.mon": "一",
   "day.tue": "二",
   "day.wed": "三",
@@ -268,17 +275,14 @@
   "day.fri": "五",
   "day.sat": "六",
   "day.sun": "日",
-
   "model.provider_none": "— 无：直接输入模型标识 —",
   "model.model_ph": "输入标识或从列表中选择",
   "model.effort": "推理力度",
   "model.effort_default": "— harness 默认 —",
-
   "or.legend": "服务节点（OpenRouter）",
   "or.pin": "固定服务节点",
   "or.provider_label": "供应商",
   "or.hint": "不勾选时由 OpenRouter 自行决定。仅 opencode 支持 —— hermes 没有按次运行的参数。",
-
   "tg.title": "Telegram 设置",
   "tg.step1": "第 1 步 —— 机器人令牌",
   "tg.step1_hint": "在 Telegram 打开 @BotFather → /newbot（或 /mybots → 现有机器人）→ 复制令牌（形如 123456789:AA…）。",
@@ -298,7 +302,6 @@
   "tg.chat_invalid": "无效的聊天 ID。",
   "tg.no_token": "尚未保存令牌（第 1 步）。",
   "tg.unreachable": "无法访问：{err}",
-
   "js.provider_none": "— 无：直接输入模型标识 —",
   "js.providers_with_creds": "只显示为此 Coding Agent 启用且此处有凭据的服务商",
   "js.no_creds": "此 Coding Agent 没有可用的服务商 —— 请直接输入模型",
@@ -325,7 +328,6 @@
   "js.conn_closed": "— 连接已关闭 —",
   "js.term_unreachable": "— 终端不可达（会话已结束？）—",
   "js.no_session": "tmux 会话已不存在 —— 过程记录在下方日志中。",
-
   "nav.flows": "流程",
   "flows.intro": "流程用无代码积木响应已结束的运行（或定时计划）：给运行中的代理发消息、从报告中提取结构化数据、启动后续代理、通过 Telegram 通知。",
   "flows.new": "新建流程",

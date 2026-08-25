@@ -61,6 +61,7 @@ export async function tick() {
   await finishCostsPass()
   await checkFinishedBranches()
   await retryDeferred()
+  await startScheduled()
   await closeOldSessions()
   await cleanupWorktrees()
   // No-code flows: run_finished backstop, delays, cron (server/flows/triggers.mjs).
@@ -433,6 +434,16 @@ async function retryDeferred() {
       if (!r.ok) notifyRun(run.id, 'start_failed', `Start after deferral failed: ${r.error}`)
     }).catch(() => {})
   }
+}
+
+// ---------- planned single runs (point in time / "when the repo is free") ----------
+async function startScheduled() {
+  const wartend = db.prepare(`SELECT 1 FROM runs WHERE status='scheduled' LIMIT 1`).get()
+  if (!wartend) return
+  // Dynamic import for the same reason as retryDeferred above: the scheduler
+  // pulls in the runner, and hub.mjs loads the watcher first.
+  const { pickUpScheduled } = await import('./scheduler.mjs')
+  await pickUpScheduled()
 }
 
 /**

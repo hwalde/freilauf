@@ -1,11 +1,12 @@
 // cc-hub — scheduler (planning 4.2/4.8): the agents' cron expressions, global
 // pipeline AND gate, budget gate with deferral instead of discarding.
 import db, { addEvent } from './db.mjs'
-import { scheduleDue } from './util.mjs'
+import { scheduleDue, parseDbUtc } from './util.mjs'
 import { createRun, launchRun } from './runner.mjs'
 import { claudeGateBlocked, openrouterGateBlocked } from './quota.mjs'
 import { notifyRun } from './reports.mjs'
 import { defFromAgent } from './run-def.mjs'
+import { fallbackTitle, applyGeneratedTitle } from './title.mjs'
 
 let timer = null
 const fired = new Map()   // "agentId@YYYY-MM-DDTHH:MM" -> true
@@ -67,19 +68,47 @@ export async function budgetGate(harness) {
  * knew the budget gate; a single run started into an exhausted quota and died
  * at the first API call instead of being deferred.
  *
- * Returns {ok, runId?, deferred?, error?}.
+ * 'title', 'startMode' and 'startAt' come from the single-run form
+ * (runStartFromForm); everything else starts immediately and unnamed, exactly
+ * as before.
+ *
+ * Returns {ok, runId?, deferred?, scheduled?, error?}.
  */
-export async function startRun(def, { repoId, agentId = null, promptExtra = null } = {}) {
-  // Budget gate BEFORE the start; blocked → defer (retry in the watcher), do not discard.
-  const gate = await budgetGate(def.harness)
+export async function startRun(def, {
+  repoId, agentId = null, promptExtra = null,
+  title = null, startMode = 'now', startAt = null,
+} = {}) {
+  // What the run is called: the operator's input first, then the agent's name —
+  // an agent run needs no title of its own, one knows the agent. Only a single
+  // run with no input at all gets one derived from the prompt.
+  const agentName = agentId
+    ? db.prepare('SELECT name FROM agents WHERE id=?').get(agentId)?.name ?? null
+    : null
+  const chosen = String(title ?? '').trim() || agentName || null
+  const startTitle = chosen ?? fallbackTitle(def.prompt)
 
   let runId
   try {
-    runId = createRun({ ...def, repoId, agentId, promptExtra })
+    runId = createRun({ ...def, repoId, agentId, promptExtra, title: startTitle || null })
   } catch (e) {
     return { ok: false, error: e.message }
   }
 
+  // The generated title never holds a start up: the run carries the fallback
+  // from the first moment, and the model's answer replaces it when it arrives.
+  if (!chosen) applyGeneratedTitle(runId, def.prompt).catch(() => {})
+
+  // A planned start: the run exists and is visible in the overview, it just
+  // does not run yet. pickUpScheduled() below takes it from here.
+  if (startMode === 'at' || startMode === 'idle') {
+    db.prepare(`UPDATE runs SET status='scheduled', start_mode=?, start_at=? WHERE id=?`)
+      .run(startMode, startMode === 'at' ? startAt : null, runId)
+    addEvent(runId, 'scheduled', { start_mode: startMode, start_at: startAt ?? null })
+    return { ok: true, runId, scheduled: true }
+  }
+
+  // Budget gate BEFORE the start; blocked → defer (retry in the watcher), do not discard.
+  const gate = await budgetGate(def.harness)
   if (gate) {
     db.prepare(`UPDATE runs SET status='deferred' WHERE id=?`).run(runId)
     addEvent(runId, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null })
@@ -97,4 +126,60 @@ export async function startRun(def, { repoId, agentId = null, promptExtra = null
  */
 export async function startForAgent(agent, promptExtra = null) {
   return startRun(defFromAgent(agent), { repoId: agent.repo_id, agentId: agent.id, promptExtra })
+}
+
+/**
+ * Planned single runs whose moment has come — called by the watcher, NOT by the
+ * scheduler tick above: the pipeline switch gates the SCHEDULED agent starts,
+ * and a single run the operator sent off by hand is not one of those (same rule
+ * as the "start now" button).
+ *
+ * Two kinds of waiting:
+ *   'at'   — a point in time. A missed one (hub was off) is caught up, exactly
+ *            like an agent's one-off schedule.
+ *   'idle' — until no other run of this repo is going. Then exactly ONE run
+ *            starts per repo and pass, because after the first one the repo is
+ *            not free any more — including the 'at' runs that start in the same
+ *            pass, which is why they mark the repo as busy too.
+ *
+ * Returns the ids that were started.
+ */
+export async function pickUpScheduled(nowMs = Date.now()) {
+  const rows = db.prepare(`SELECT * FROM runs WHERE status='scheduled' ORDER BY started_at`).all()
+  if (!rows.length) return []
+  const started = []
+  const busy = new Set()
+  for (const run of rows) {
+    if (run.start_mode === 'idle') {
+      if (busy.has(run.repo_id)) continue
+      const laufend = db.prepare(`SELECT id FROM runs WHERE repo_id=? AND status IN ('running','waiting_help') LIMIT 1`)
+        .get(run.repo_id)
+      if (laufend) continue
+    } else if (run.start_mode === 'at') {
+      const ms = parseDbUtc(run.start_at)
+      if (!Number.isFinite(ms) || ms > nowMs) continue
+    } else {
+      continue   // no waiting kind: nothing to wait for, nothing to decide
+    }
+    busy.add(run.repo_id)
+
+    // Same gate as at an immediate start — a waiting run must not start into an
+    // exhausted quota either; it moves on to 'deferred' and the watcher retries.
+    const gate = await budgetGate(run.harness)
+    if (gate) {
+      db.prepare(`UPDATE runs SET status='deferred' WHERE id=?`).run(run.id)
+      addEvent(run.id, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null })
+      notifyRun(run.id, 'deferred', `🟡 Start deferred — ${gate.reason}${gate.resets_at ? ` (reset: ${gate.resets_at})` : ''}`)
+      continue
+    }
+    // started_at becomes the REAL start: otherwise the overview would count the
+    // waiting time as runtime and every planned run would look overdue.
+    db.prepare(`UPDATE runs SET status='running', started_at=datetime('now'),
+                last_activity_at=datetime('now') WHERE id=?`).run(run.id)
+    addEvent(run.id, 'scheduled_start', { start_mode: run.start_mode, start_at: run.start_at ?? null })
+    started.push(run.id)
+    const r = await launchRun(run.id)
+    if (!r.ok) notifyRun(run.id, 'start_failed', `Planned start failed: ${r.error}`)
+  }
+  return started
 }

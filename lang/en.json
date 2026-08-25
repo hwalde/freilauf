@@ -3,23 +3,21 @@
   "nav.agents": "Agents",
   "nav.repos": "Repos",
   "nav.settings": "Settings",
-
   "layout.repo": "Repo",
   "layout.no_repo": "no repo yet",
   "layout.pipeline": "Pipeline",
   "layout.pipeline_hint": "global AND gate for scheduled starts",
   "layout.on": "on",
   "layout.off": "off",
-
   "banner.no_coding_agent": "No coding agent is configured yet — without one, no runs can be started.",
   "banner.no_coding_agent_cta": "Add your first coding agent",
-
   "problem.back": "Back to the form",
   "web.not_found": "not found",
-
   "overview.single_run": "(single run)",
   "overview.start_single": "Start single run",
-  "overview.agent": "Agent",
+  "overview.title_col": "Title",
+  "overview.from_agent": "Agent „{agent}“",
+  "overview.rename": "Rename this run (the agent keeps its name)",
   "overview.harness_model": "Coding agent/model",
   "overview.status": "Status",
   "overview.started": "Started",
@@ -27,7 +25,6 @@
   "overview.branch": "Branch",
   "overview.no_runs": "no runs yet",
   "overview.last_anomaly": "last anomaly",
-
   "usage.title": "Subscription usage",
   "usage.unavailable": "usage not available",
   "usage.resets": "resets {time}",
@@ -36,12 +33,10 @@
   "usage.spent_est": "{usd} $ of ~{included} $ included (configured fallback)",
   "usage.openrouter_credits": "OpenRouter credits",
   "usage.remaining": "{eur} € remaining",
-
   "norepo.title": "Create a repo first",
   "norepo.text": "Agents and runs always belong to exactly one repo. Example:",
   "norepo.base_hint": "with base branch",
   "norepo.cta": "Create repo now",
-
   "agents.on": "active",
   "agents.off": "off",
   "agents.start_now": "start now",
@@ -56,12 +51,13 @@
   "agents.none": "no agents",
   "agents.active": "active",
   "agents.flows_hint": "Flows hang on an agent or a single run — attach them in the form below.",
-
   "agentform.title_new": "Create agent",
   "agentform.title_edit": "Edit agent",
-
   "runform.title": "Single run — repo „{repo}“",
   "runform.title_short": "Single run",
+  "runform.title_field": "Title",
+  "runform.title_ph": "leave empty: generated from the prompt",
+  "runform.title_hint": "Empty field: a cheap model at OpenRouter derives a short title from the prompt (Settings → Run titles). Every title can be renamed later in the overview.",
   "runform.like_agent": "like agent „{agent}“",
   "runform.prompt": "Prompt",
   "runform.branch_mode": "Branch expectation",
@@ -71,12 +67,27 @@
   "runform.save_agent": "save as agent (name:",
   "runform.start": "Start",
   "runform.pipeline_on_hint": "Pipeline is on — scheduled starts run as well.",
-  "runform.pipeline_off_hint": "Pipeline is off — that only affects scheduled starts; this run starts immediately.",
-
+  "runform.pipeline_off_hint": "Pipeline is off — that only gates the scheduled agent starts; this run is not held up by it.",
+  "start.legend": "Start",
+  "start.mode": "Point in time",
+  "start.mode_now": "immediately",
+  "start.mode_at": "at a date and time",
+  "start.mode_in": "in n minutes",
+  "start.mode_idle": "as soon as no other run of this repo is going",
+  "start.at_label": "Date and time",
+  "start.in_label": "Minutes",
+  "start.idle_hint": "The run waits in the overview and starts by itself as soon as the repo is free. Several waiting runs start one after another, not at once.",
+  "start.err_mode": "Unknown start kind: {mode}",
+  "start.err_at": "Start time is missing or unreadable.",
+  "start.err_in": "The number of minutes must be greater than 0.",
+  "start.waits": "waiting for its start",
+  "start.waits_until": "starts at {time}",
+  "start.until_free": "starts as soon as the repo is free",
+  "start.waits_budget": "deferred — waiting for quota/credit",
+  "start.cancel": "Cancel this run",
   "branch.none": "none",
   "branch.new": "creates a new one",
   "branch.fixed": "uses a fixed one",
-
   "run.not_found": "run not found",
   "run.title": "Run {id}",
   "run.pinned": "pinned",
@@ -114,7 +125,6 @@
   "run.unknown_harness": "Unknown coding agent: {harness}",
   "run.harness_not_configured": "Coding agent „{harness}“ is not configured or disabled — add it under Settings → Coding agents.",
   "run.empty_prompt": "Prompt is empty",
-
   "skills.title": "Extra skills",
   "skills.legend": "Extra skills (opt-in, become an instruction in the prompt)",
   "skills.depth_label": "Working depth",
@@ -124,7 +134,6 @@
   "skills.depth_4": "depth 4 — orchestrated, parallel subtasks",
   "skills.depth_5": "depth 5 — maximum (expensive and slow!)",
   "skills.depth_short": "depth {n}",
-
   "incidents.title": "Incidents",
   "incidents.resolve": "resolve",
   "incidents.resolve_hint": "If a resolved incident occurs again, it reopens and Telegram notifies again.",
@@ -137,7 +146,6 @@
   "incidents.resolved_at": "resolved",
   "incidents.resolved_n": "{n} resolved",
   "incidents.detector_log": "Detector protocol",
-
   "incident.rate_limit": "Rate limit",
   "incident.provider_error": "Provider error",
   "incident.auth_error": "Login/token",
@@ -146,7 +154,6 @@
   "incident.provider_down": "Provider unreachable",
   "incident.llm_warnung": "Check-LLM warning",
   "incident.unbekannt": "API error",
-
   "repos.create": "Create repo",
   "repos.name": "Name",
   "repos.path": "Path",
@@ -161,7 +168,6 @@
   "repos.no_git": "No git repository at {path} (.git missing).",
   "repos.extras_invalid": "Worktree extras: expected a list of {\"path\": \"…\", \"mode\": \"copy\"|\"link\"}.",
   "repos.extras_json": "Worktree extras are not valid JSON: {err}",
-
   "settings.global_hint": "These settings apply globally to the whole hub — not to the repo selected above. Repo-specific are only the entries under Repos (path, base branch, worktree extras) and the agents themselves.",
   "settings.coding_agents_hint": "add, edit or remove coding agents and their providers",
   "settings.language": "UI language",
@@ -182,12 +188,18 @@
   "settings.llm_mru_hint": "list: the 10 most recently saved models",
   "settings.llm_or_provider": "Fixed serving provider (optional, OpenRouter tag)",
   "settings.llm_or_ph": "empty = OpenRouter chooses",
+  "settings.title_legend": "Run titles (via OpenRouter)",
+  "settings.title_hint": "A single run whose title field stayed empty gets one from the prompt. A very cheap model is enough for this — a title costs a fraction of a cent. Off, without a key or on any error the run keeps the first line of its prompt as its title; nothing ever fails over a title.",
+  "settings.title_on": "Generate titles",
+  "settings.title_model": "Model (OpenRouter ID)",
+  "settings.title_model_hint": "empty = {model}; the list holds the default and the models saved most recently",
+  "js.title_ph": "Title of this run",
+  "js.rename_failed": "Renaming failed: ",
   "settings.save": "Save",
   "settings.telegram_ok": "Telegram test message was sent.",
   "settings.telegram_fail": "Telegram test message failed — are token and chat ID set? See the assistant.",
   "settings.telegram_setup": "Open Telegram setup assistant",
   "settings.telegram_test": "Telegram test message",
-
   "ca.title": "Coding agents",
   "ca.intro": "Which coding agent CLIs may this hub drive, and which model providers may each of them use? Forms only offer what is configured and enabled here.",
   "ca.none": "No coding agent configured yet.",
@@ -206,9 +218,7 @@
   "ca.delete_confirm": "Really remove the coding agent „{label}“? Existing agents and runs keep their data.",
   "ca.add": "Add",
   "ca.plugin_missing": "plugin no longer exists",
-
   "provider.keyfree": "works without an own key",
-
   "form.name_missing": "Name is missing.",
   "form.prompt_missing": "Prompt is empty.",
   "form.branch_mode_unknown": "Unknown branch expectation: {mode}",
@@ -217,7 +227,6 @@
   "form.subscription_no_provider": "{harness} runs on its subscription — there is no provider selection, only the model.",
   "form.provider_unavailable": "Provider „{provider}“ is not available for {harness} here (missing key or not enabled?). Possible: {list}",
   "form.effort_invalid": "Reasoning effort „{effort}“ is not possible for {target} — possible: {list}",
-
   "effort.unknown": "unknown",
   "effort.no_harness": "no coding agent given",
   "effort.unknown_harness": "unknown coding agent",
@@ -230,7 +239,6 @@
   "effort.intersection": "levels known to BOTH hermes and the model",
   "effort.no_common": "hermes and the model have no common level",
   "effort.model_unknown": "no effort levels known for this model",
-
   "sched.legend": "Schedule",
   "sched.kind": "Kind",
   "sched.kind_manual": "start manually only",
@@ -260,7 +268,6 @@
   "sched.weekly_line": "{takt}: {days} at {time}",
   "sched.no_days": "(no days)",
   "sched.manual": "manual",
-
   "day.mon": "Mon",
   "day.tue": "Tue",
   "day.wed": "Wed",
@@ -268,17 +275,14 @@
   "day.fri": "Fri",
   "day.sat": "Sat",
   "day.sun": "Sun",
-
   "model.provider_none": "— none: type the model slug —",
   "model.model_ph": "Type a slug or pick from the list",
   "model.effort": "Reasoning effort",
   "model.effort_default": "— harness default —",
-
   "or.legend": "Serving provider (OpenRouter)",
   "or.pin": "pin a fixed serving provider",
   "or.provider_label": "Vendor",
   "or.hint": "Without the checkbox OpenRouter decides itself. Only possible for opencode — hermes has no per-run argument for this.",
-
   "tg.title": "Telegram setup",
   "tg.step1": "Step 1 — bot token",
   "tg.step1_hint": "In Telegram open @BotFather → /newbot (or /mybots → existing bot) → copy the token (form 123456789:AA…).",
@@ -298,7 +302,6 @@
   "tg.chat_invalid": "Invalid chat ID.",
   "tg.no_token": "No token saved (step 1).",
   "tg.unreachable": "Reachability failed: {err}",
-
   "js.provider_none": "— none: type the model slug —",
   "js.providers_with_creds": "only providers that are enabled for this coding agent and have credentials here",
   "js.no_creds": "no providers available for this coding agent — type the model freely",
@@ -325,7 +328,6 @@
   "js.conn_closed": "— connection closed —",
   "js.term_unreachable": "— terminal unreachable (session ended?) —",
   "js.no_session": "No tmux session anymore — the history is in the log below.",
-
   "nav.flows": "Flows",
   "flows.intro": "Flows react to finished runs (or a schedule) with no-code building blocks: message running agents, extract structured data from a report, start follow-up agents, notify via Telegram.",
   "flows.new": "New flow",

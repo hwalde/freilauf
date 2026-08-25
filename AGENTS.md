@@ -86,12 +86,13 @@ is one and the same **run definition**, and it lives in **`server/run-def.mjs`**
 | Write an agent (INSERT/UPDATE) | `saveAgent(...)` | agent form + "save as agent" |
 | Field list for the flow designer | `RUN_DEF_FLOW_FIELDS`, `defFromFlowProps` | `flows/steps.mjs` |
 | Last used setup | `rememberRunChoice`, `lastRunChoice` | both forms (preselection) |
+| Title + start time (single run only) | `runTitleField`, `runStartTimeFields`, `runStartFromForm` | single-run form + `POST /api/runs` |
 
 And there is exactly **one** way from a definition to a running run:
-**`startRun(def, { repoId, agentId, promptExtra })`** in `server/scheduler.mjs`
-— including the budget gate (`budgetGate(harness)`, also used by the watcher
-when picking a deferred run back up). `startForAgent(agent)` is only its wrapper
-for a stored definition.
+**`startRun(def, { repoId, agentId, promptExtra, title, startMode, startAt })`**
+in `server/scheduler.mjs` — including the budget gate (`budgetGate(harness)`,
+also used by the watcher when picking a deferred run back up).
+`startForAgent(agent)` is only its wrapper for a stored definition.
 
 A new field of a run therefore needs **one** change in `run-def.mjs`, not four.
 Before that, the copies had already drifted: the single-run form dropped the
@@ -104,6 +105,51 @@ New forms/steps that start a run go through these functions. What is
 deliberately **not** part of the definition: the repo (it is the context, and
 the switcher in the header sets it), the name and the schedule (they make an
 agent an agent).
+
+### Every run has a title
+
+An agent run is recognizable by its agent — a single run is not: it is not
+stored anywhere, it only exists as a prompt. So `runs.title` carries a name for
+**every** run:
+
+1. what was typed into the single-run form's title field, otherwise
+2. the agent's name, otherwise
+3. the first meaningful line of the prompt (`fallbackTitle`) — and in the
+   background a cheap model at OpenRouter replaces it with a real one.
+
+The generated title **never** holds a start up: the run carries the fallback
+from the first moment and `applyGeneratedTitle()` writes over it afterwards —
+and only if it is still the fallback, so a rename by hand always wins over the
+model. Everything about this is fail-soft (`server/title.mjs`), the exact
+opposite of the check LLM: without a key, switched off or on any error the run
+simply keeps the fallback. Model and on/off live under **Settings → Run
+titles** (`llm_title_model`, default `deepseek/deepseek-v4-flash`, ~$0.05 per
+million input tokens — a title costs a fraction of a cent).
+
+Every run can be **renamed inline** in the overview and on its detail page
+(`POST /api/runs/<id>/title`, pencil next to the title). That touches only the
+run: the agent keeps its name, and its next run is called by it again. An
+emptied title falls back to the agent's name.
+
+### A single run may also start later
+
+The single-run form carries what an agent's schedule carries — minus the
+repetition, because a single run happens once. Three ways to wait, all ending
+in status `scheduled` (which the CHECK rule always knew and nothing ever used):
+
+| Kind | Stored | Started by |
+|---|---|---|
+| at a date and time | `start_mode='at'`, `start_at` (UTC) | `pickUpScheduled()` once the moment has passed — a missed one is caught up, like an agent's one-off schedule |
+| in n minutes | the same, resolved in the form | as above |
+| when no other run of this repo is going | `start_mode='idle'` | `pickUpScheduled()` as soon as the repo is free |
+
+`pickUpScheduled()` (scheduler.mjs) runs in the **watcher** pass, not in the
+scheduler tick: the pipeline switch gates the scheduled AGENT starts, and a
+single run sent off by hand is not one of those — same rule as the "start now"
+button. Per repo and pass exactly **one** run starts, because after the first
+one the repo is not free any more. The budget gate applies as at any other
+start; blocked means `deferred`, not lost. Waiting runs stand at the top of the
+overview next to the deferred ones and can be cancelled on their detail page.
 
 ## Plugin architecture: coding agents and providers
 

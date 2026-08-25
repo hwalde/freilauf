@@ -9,7 +9,7 @@
 // Fail-loud: if OpenRouter itself is unreachable or no key is present, the scanner
 // hit remains unchecked (yellow, turns red by time/count). Better one alarm too
 // many than a swallowed outage.
-import { getSetting, setSetting } from './db.mjs'
+import { getSetting, mruList, mruRemember } from './db.mjs'
 import { TYPEN } from './detect.mjs'
 
 const MIN_ABSTAND_MS = 10 * 60_000    // per run at most one request every 10 min
@@ -21,15 +21,8 @@ export function pruefLlmAktiv() {
 }
 
 /** Most recently used models — "used" means: saved in the settings. */
-export function llmModelleMru() {
-  try { return JSON.parse(getSetting('llm_check_models_mru') || '[]').filter(Boolean).slice(0, 10) } catch { return [] }
-}
-export function llmModellMerken(model) {
-  const m = String(model ?? '').trim()
-  if (!m) return
-  const liste = [m, ...llmModelleMru().filter(x => x !== m)].slice(0, 10)
-  setSetting('llm_check_models_mru', JSON.stringify(liste))
-}
+export function llmModelleMru() { return mruList('llm_check_models_mru') }
+export function llmModellMerken(model) { mruRemember('llm_check_models_mru', model) }
 
 const SCHEMA = {
   name: 'vorfall_urteil',

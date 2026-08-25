@@ -239,6 +239,13 @@ try {
     gleich(fmtRelativeTime(now - 86400_000, now, 'en'), 'yesterday', 'one day, auto numeric')
     gleich(fmtRelativeTime(NaN, now, 'en'), '–', 'invalid then')
   })
+  await pruefe('fmtRelativeTime also looks forward — a planned run starts, it did not start', () => {
+    const now = Date.parse('2026-08-25T12:00:00Z')
+    gleich(fmtRelativeTime(now + 20 * 60_000, now, 'en'), 'in 20 minutes', 'minutes ahead')
+    gleich(fmtRelativeTime(now + 20 * 60_000, now, 'de'), 'in 20 Minuten', 'minutes ahead, German')
+    gleich(fmtRelativeTime(now + 3 * 3600_000, now, 'en'), 'in 3 hours', 'hours ahead')
+    gleich(fmtRelativeTime(now + 86400_000, now, 'en'), 'tomorrow', 'one day ahead, auto numeric')
+  })
   await pruefe('fmtDateTime is a locale date-time, not a relative phrase', () => {
     const ms = Date.parse('2026-08-25T12:00:00Z')
     const de = fmtDateTime(ms, 'de')
@@ -1215,6 +1222,81 @@ try {
     gleich(JSON.stringify(rd.lastRunChoice()), '{}', 'nothing offered')
     ca.saveCodingAgent({ harness: 'claude', enabled: 1, providers: [] })
     gleich(rd.lastRunChoice().harness, 'claude', 'offered again after switching on')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Run title (title.mjs)')
+  const ti = await import('../server/title.mjs')
+
+  await pruefe('the fallback is the first line of the prompt that says something', () => {
+    gleich(ti.fallbackTitle('Rewrite the login form'), 'Rewrite the login form', 'plain line')
+    gleich(ti.fallbackTitle('\n\n   \n# Rewrite the login form\n\nand more'), 'Rewrite the login form',
+      'empty lines and the heading marker skipped')
+    gleich(ti.fallbackTitle('- **fix** the `parser`'), 'fix the parser', 'list bullet and inline markdown removed')
+    gleich(ti.fallbackTitle('1. First step'), 'First step', 'numbered list')
+    gleich(ti.fallbackTitle('   '), '', 'nothing to take')
+    gleich(ti.fallbackTitle('ok'), '', 'too short to be a title')
+  })
+  await pruefe('a long line is cut at a whole word', () => {
+    const lang = ti.fallbackTitle('Rewrite the complete authentication of the web interface including all of its tests', 40)
+    wahr(lang.length <= 40, `at most 40 characters: ${lang.length}`)
+    wahr(lang.endsWith('…'), `marked as cut: ${lang}`)
+    falsch(/\s…$/.test(lang), `no space before the ellipsis: ${lang}`)
+  })
+  await pruefe('the title on screen: own title, then agent name, then the generic word', () => {
+    gleich(ti.runTitle({ title: 'Own title' }, 'nightly', '(single run)'), 'Own title', 'own title wins')
+    gleich(ti.runTitle({ title: '  ' }, 'nightly', '(single run)'), 'nightly', 'blank counts as none')
+    gleich(ti.runTitle({ title: null }, null, '(single run)'), '(single run)', 'no title, no agent')
+  })
+  await pruefe('without a key or switched off nothing is requested — the run keeps the fallback', () => {
+    const key = process.env.OPENROUTER_API_KEY
+    delete process.env.OPENROUTER_API_KEY
+    falsch(ti.titleLlmActive(), 'no key = off')
+    if (key !== undefined) process.env.OPENROUTER_API_KEY = key
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Planned start of a single run (run-def.mjs)')
+
+  await pruefe('without a choice a run starts immediately, as it always did', () => {
+    const s = rd.runStartFromForm({})
+    gleich(s.startMode, 'now', 'mode')
+    gleich(s.startAt, null, 'no point in time')
+    gleich(s.title, null, 'no title = generated later')
+  })
+  await pruefe('a point in time is stored as UTC and keeps its meaning', () => {
+    const problems = []
+    const s = rd.runStartFromForm({ start_mode: 'at', start_at: '2026-08-25T09:00' }, problems)
+    gleich(problems.length, 0, `no problems (${problems.join(', ')})`)
+    gleich(s.startMode, 'at', 'mode')
+    gleich(parseDbUtc(s.startAt), Date.parse('2026-08-25T09:00'), 'the local input, read back as UTC')
+  })
+  await pruefe('"in n minutes" becomes exactly that point in time', () => {
+    const now = Date.parse('2026-08-25T12:00:00Z')
+    const s = rd.runStartFromForm({ start_mode: 'in', start_in_minutes: '20' }, [], now)
+    gleich(s.startMode, 'at', 'stored as a point in time — the DB knows two waiting kinds, not three')
+    gleich(parseDbUtc(s.startAt), now + 20 * 60_000, '20 minutes later')
+  })
+  await pruefe('"when the repo is free" carries no point in time', () => {
+    const s = rd.runStartFromForm({ start_mode: 'idle' })
+    gleich(s.startMode, 'idle', 'mode')
+    gleich(s.startAt, null, 'nothing to wait for by the clock')
+  })
+  await pruefe('a broken entry is a problem, not a run that starts at the wrong time', () => {
+    const p1 = []
+    gleich(rd.runStartFromForm({ start_mode: 'at', start_at: 'nonsense' }, p1).startMode, 'now', 'falls back to now')
+    gleich(p1.length, 1, `unreadable point in time (${p1.join(', ')})`)
+    const p2 = []
+    rd.runStartFromForm({ start_mode: 'in', start_in_minutes: '0' }, p2)
+    gleich(p2.length, 1, `zero minutes (${p2.join(', ')})`)
+    const p3 = []
+    rd.runStartFromForm({ start_mode: 'someday' }, p3)
+    gleich(p3.length, 1, `unknown kind (${p3.join(', ')})`)
+  })
+  await pruefe('the title is trimmed and capped, an empty one stays empty', () => {
+    gleich(rd.runStartFromForm({ title: '  Rewrite login  ' }).title, 'Rewrite login', 'trimmed')
+    gleich(rd.runStartFromForm({ title: '   ' }).title, null, 'blank = none')
+    gleich(rd.runStartFromForm({ title: 'x'.repeat(200) }).title.length, ti.TITLE_MAX, 'capped')
   })
 
 } finally {

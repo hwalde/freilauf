@@ -3,23 +3,21 @@
   "nav.agents": "Agenten",
   "nav.repos": "Repos",
   "nav.settings": "Einstellungen",
-
   "layout.repo": "Repo",
   "layout.no_repo": "kein Repo angelegt",
   "layout.pipeline": "Pipeline",
   "layout.pipeline_hint": "globales Und-Gatter für geplante Starts",
   "layout.on": "an",
   "layout.off": "aus",
-
   "banner.no_coding_agent": "Es ist noch kein Coding Agent konfiguriert — ohne ihn können keine Läufe starten.",
   "banner.no_coding_agent_cta": "Jetzt ersten Coding Agent hinzufügen",
-
   "problem.back": "Zurück zum Formular",
   "web.not_found": "nicht gefunden",
-
   "overview.single_run": "(Einzellauf)",
   "overview.start_single": "Einzellauf starten",
-  "overview.agent": "Agent",
+  "overview.title_col": "Titel",
+  "overview.from_agent": "Agent „{agent}“",
+  "overview.rename": "Diesen Lauf umbenennen (der Agent behält seinen Namen)",
   "overview.harness_model": "Coding Agent/Modell",
   "overview.status": "Status",
   "overview.started": "Gestartet",
@@ -27,7 +25,6 @@
   "overview.branch": "Branch",
   "overview.no_runs": "noch keine Läufe",
   "overview.last_anomaly": "letzte Auffälligkeit",
-
   "usage.title": "Abo-Verbrauch",
   "usage.unavailable": "Verbrauch nicht abrufbar",
   "usage.resets": "Reset {time}",
@@ -36,12 +33,10 @@
   "usage.spent_est": "{usd} $ von ~{included} $ inklusive (konfigurierter Ersatzwert)",
   "usage.openrouter_credits": "OpenRouter-Guthaben",
   "usage.remaining": "{eur} € übrig",
-
   "norepo.title": "Erst ein Repo anlegen",
   "norepo.text": "Agenten und Läufe gehören immer zu genau einem Repo. Beispiel:",
   "norepo.base_hint": "mit Basis-Branch",
   "norepo.cta": "Jetzt Repo anlegen",
-
   "agents.on": "aktiv",
   "agents.off": "aus",
   "agents.start_now": "jetzt starten",
@@ -56,12 +51,13 @@
   "agents.none": "keine Agenten",
   "agents.active": "aktiv",
   "agents.flows_hint": "Flows hängen an einem Agenten oder Einzellauf — im Formular darunter anhängen.",
-
   "agentform.title_new": "Agent anlegen",
   "agentform.title_edit": "Agent bearbeiten",
-
   "runform.title": "Einzellauf — Repo „{repo}“",
   "runform.title_short": "Einzellauf",
+  "runform.title_field": "Titel",
+  "runform.title_ph": "leer lassen: wird aus dem Prompt erzeugt",
+  "runform.title_hint": "Leeres Feld: Ein günstiges Modell bei OpenRouter leitet einen kurzen Titel aus dem Prompt ab (Einstellungen → Lauftitel). Jeder Titel lässt sich später in der Übersicht umbenennen.",
   "runform.like_agent": "wie Agent „{agent}“",
   "runform.prompt": "Prompt",
   "runform.branch_mode": "Branch-Erwartung",
@@ -71,12 +67,27 @@
   "runform.save_agent": "als Agent speichern (Name:",
   "runform.start": "Starten",
   "runform.pipeline_on_hint": "Pipeline ist an — geplante Starts laufen ebenfalls.",
-  "runform.pipeline_off_hint": "Pipeline ist aus — das betrifft nur geplante Starts; dieser Lauf startet sofort.",
-
+  "runform.pipeline_off_hint": "Pipeline ist aus — das betrifft nur die geplanten Agentenstarts; dieser Lauf wird davon nicht aufgehalten.",
+  "start.legend": "Start",
+  "start.mode": "Zeitpunkt",
+  "start.mode_now": "sofort",
+  "start.mode_at": "zu einem Zeitpunkt",
+  "start.mode_in": "in n Minuten",
+  "start.mode_idle": "sobald kein anderer Lauf dieses Repos läuft",
+  "start.at_label": "Datum und Uhrzeit",
+  "start.in_label": "Minuten",
+  "start.idle_hint": "Der Lauf wartet in der Übersicht und startet von selbst, sobald das Repo frei ist. Mehrere wartende Läufe starten nacheinander, nicht gleichzeitig.",
+  "start.err_mode": "Unbekannte Startart: {mode}",
+  "start.err_at": "Startzeitpunkt fehlt oder ist unlesbar.",
+  "start.err_in": "Die Minutenzahl muss größer als 0 sein.",
+  "start.waits": "wartet auf seinen Start",
+  "start.waits_until": "startet um {time}",
+  "start.until_free": "startet, sobald das Repo frei ist",
+  "start.waits_budget": "zurückgestellt — wartet auf Kontingent/Guthaben",
+  "start.cancel": "Diesen Lauf abbrechen",
   "branch.none": "keiner",
   "branch.new": "legt neuen an",
   "branch.fixed": "benutzt festen",
-
   "run.not_found": "Lauf nicht gefunden",
   "run.title": "Lauf {id}",
   "run.pinned": "fest",
@@ -114,7 +125,6 @@
   "run.unknown_harness": "Unbekannter Coding Agent: {harness}",
   "run.harness_not_configured": "Coding Agent „{harness}“ ist nicht konfiguriert oder deaktiviert — unter Einstellungen → Coding Agents hinzufügen.",
   "run.empty_prompt": "Prompt ist leer",
-
   "skills.title": "Zusatz-Skills",
   "skills.legend": "Zusatz-Skills (opt-in, landen als Anweisung im Prompt)",
   "skills.depth_label": "Arbeitstiefe",
@@ -124,7 +134,6 @@
   "skills.depth_4": "Tiefe 4 — orchestriert, parallele Teilaufgaben",
   "skills.depth_5": "Tiefe 5 — maximal (teuer und langsam!)",
   "skills.depth_short": "Tiefe {n}",
-
   "incidents.title": "Vorfälle",
   "incidents.resolve": "lösen",
   "incidents.resolve_hint": "Tritt ein gelöster Vorfall erneut auf, geht er wieder auf und Telegram meldet erneut.",
@@ -137,7 +146,6 @@
   "incidents.resolved_at": "gelöst",
   "incidents.resolved_n": "{n} gelöste",
   "incidents.detector_log": "Protokoll des Detektors",
-
   "incident.rate_limit": "Rate-Limit",
   "incident.provider_error": "Provider-Fehler",
   "incident.auth_error": "Anmeldung/Token",
@@ -146,7 +154,6 @@
   "incident.provider_down": "Provider nicht erreichbar",
   "incident.llm_warnung": "Prüf-LLM-Warnung",
   "incident.unbekannt": "API-Fehler",
-
   "repos.create": "Repo anlegen",
   "repos.name": "Name",
   "repos.path": "Pfad",
@@ -161,7 +168,6 @@
   "repos.no_git": "Kein git-Repository unter {path} (.git fehlt).",
   "repos.extras_invalid": "Worktree-Ergänzungen: erwartet wird eine Liste aus {\"path\": \"…\", \"mode\": \"copy\"|\"link\"}.",
   "repos.extras_json": "Worktree-Ergänzungen sind kein gültiges JSON: {err}",
-
   "settings.global_hint": "Diese Einstellungen gelten global für den gesamten Hub — nicht für das oben gewählte Repo. Repo-bezogen sind nur die Angaben unter Repos (Pfad, Basis-Branch, Worktree-Ergänzungen) und die Agenten selbst.",
   "settings.coding_agents_hint": "Coding Agents und ihre Provider hinzufügen, bearbeiten, entfernen",
   "settings.language": "Sprache der Oberfläche",
@@ -182,12 +188,18 @@
   "settings.llm_mru_hint": "Liste: die 10 zuletzt gespeicherten Modelle",
   "settings.llm_or_provider": "Fester Serving-Provider (optional, OpenRouter-Tag)",
   "settings.llm_or_ph": "leer = OpenRouter wählt",
+  "settings.title_legend": "Lauftitel (über OpenRouter)",
+  "settings.title_hint": "Ein Einzellauf, dessen Titelfeld leer geblieben ist, bekommt einen aus dem Prompt. Dafür reicht ein sehr günstiges Modell — ein Titel kostet den Bruchteil eines Cents. Aus, ohne Schlüssel oder bei einem Fehler behält der Lauf die erste Zeile seines Prompts als Titel; an einem Titel scheitert nie etwas.",
+  "settings.title_on": "Titel erzeugen",
+  "settings.title_model": "Modell (OpenRouter-ID)",
+  "settings.title_model_hint": "leer = {model}; die Liste enthält die Voreinstellung und die zuletzt gespeicherten Modelle",
+  "js.title_ph": "Titel dieses Laufs",
+  "js.rename_failed": "Umbenennen fehlgeschlagen: ",
   "settings.save": "Speichern",
   "settings.telegram_ok": "Telegram-Testnachricht wurde versendet.",
   "settings.telegram_fail": "Telegram-Testnachricht fehlgeschlagen — sind Token und Chat-ID gesetzt? Siehe Assistent.",
   "settings.telegram_setup": "Telegram-Setup-Assistent öffnen",
   "settings.telegram_test": "Telegram-Testnachricht",
-
   "ca.title": "Coding Agents",
   "ca.intro": "Welche Coding-Agent-CLIs darf dieser Hub steuern, und welche Modell-Provider darf jeder davon benutzen? Die Formulare bieten nur an, was hier konfiguriert und aktiviert ist.",
   "ca.none": "Noch kein Coding Agent konfiguriert.",
@@ -206,9 +218,7 @@
   "ca.delete_confirm": "Coding Agent „{label}“ wirklich entfernen? Bestehende Agenten und Läufe behalten ihre Daten.",
   "ca.add": "Hinzufügen",
   "ca.plugin_missing": "Plugin existiert nicht mehr",
-
   "provider.keyfree": "läuft ohne eigenen Schlüssel",
-
   "form.name_missing": "Name fehlt.",
   "form.prompt_missing": "Prompt ist leer.",
   "form.branch_mode_unknown": "Unbekannte Branch-Erwartung: {mode}",
@@ -217,7 +227,6 @@
   "form.subscription_no_provider": "{harness} läuft über das Abo — dort wird kein Provider gewählt, nur das Modell.",
   "form.provider_unavailable": "Provider „{provider}“ ist für {harness} hier nicht verfügbar (fehlt ein Schlüssel oder nicht aktiviert?). Möglich: {list}",
   "form.effort_invalid": "Denk-Aufwand „{effort}“ ist für {target} nicht möglich — möglich: {list}",
-
   "effort.unknown": "unbekannt",
   "effort.no_harness": "kein Coding Agent angegeben",
   "effort.unknown_harness": "unbekannter Coding Agent",
@@ -230,7 +239,6 @@
   "effort.intersection": "Stufen, die hermes UND das Modell kennen",
   "effort.no_common": "hermes und das Modell haben keine gemeinsame Stufe",
   "effort.model_unknown": "für dieses Modell sind keine Effort-Stufen bekannt",
-
   "sched.legend": "Zeitplan",
   "sched.kind": "Art",
   "sched.kind_manual": "nur manuell starten",
@@ -260,7 +268,6 @@
   "sched.weekly_line": "{takt}: {days} um {time}",
   "sched.no_days": "(keine Tage)",
   "sched.manual": "manuell",
-
   "day.mon": "Mo",
   "day.tue": "Di",
   "day.wed": "Mi",
@@ -268,17 +275,14 @@
   "day.fri": "Fr",
   "day.sat": "Sa",
   "day.sun": "So",
-
   "model.provider_none": "— keiner: Modell frei eintippen —",
   "model.model_ph": "Slug eintippen oder aus der Liste wählen",
   "model.effort": "Denk-Aufwand",
   "model.effort_default": "— Standard der Harness —",
-
   "or.legend": "Serving-Provider (OpenRouter)",
   "or.pin": "festen Serving-Provider erzwingen",
   "or.provider_label": "Anbieter",
   "or.hint": "Ohne Häkchen entscheidet OpenRouter selbst. Nur für opencode möglich — hermes kennt dafür kein Argument pro Lauf.",
-
   "tg.title": "Telegram-Setup",
   "tg.step1": "Schritt 1 — Bot-Token",
   "tg.step1_hint": "In Telegram @BotFather öffnen → /newbot (oder /mybots → vorhandener Bot) → den Token kopieren (Form 123456789:AA…).",
@@ -298,7 +302,6 @@
   "tg.chat_invalid": "Ungültige Chat-ID.",
   "tg.no_token": "Kein Token gespeichert (Schritt 1).",
   "tg.unreachable": "Erreichbarkeit fehlgeschlagen: {err}",
-
   "js.provider_none": "— keiner: Modell frei eintippen —",
   "js.providers_with_creds": "nur Provider, die für diesen Coding Agent aktiviert sind und hier Zugangsdaten haben",
   "js.no_creds": "für diesen Coding Agent sind keine Provider verfügbar — Modell frei eintippen",
@@ -325,7 +328,6 @@
   "js.conn_closed": "— Verbindung geschlossen —",
   "js.term_unreachable": "— Terminal nicht erreichbar (Session beendet?) —",
   "js.no_session": "Keine tmux-Session mehr — der Verlauf steht unten im Log.",
-
   "nav.flows": "Flows",
   "flows.intro": "Flows reagieren auf beendete Läufe (oder einen Zeitplan) mit No-Code-Bausteinen: laufende Agenten anschreiben, strukturierte Daten aus einem Report ziehen, Folge-Agenten starten, per Telegram benachrichtigen.",
   "flows.new": "Neuer Flow",

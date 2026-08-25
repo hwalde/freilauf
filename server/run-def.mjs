@@ -15,11 +15,15 @@
 //   - agent row → definition and back          (defFromAgent, saveAgent)
 //   - the field list the flow designer shows   (RUN_DEF_FLOW_FIELDS)
 //   - what was chosen last time                (rememberRunChoice, lastRunChoice)
+//   - and, for the single run alone, its title and planned start
+//     (runStartFields, runStartFromForm) — the two things an agent already has
+//     in its name and its schedule
 //
 // The one place that turns a definition into a running run is
 // startRun() in scheduler.mjs.
 import db, { getRepo, getSetting, setSetting } from './db.mjs'
-import { escapeHtml as e } from './util.mjs'
+import { escapeHtml as e, toDbUtc } from './util.mjs'
+import { TITLE_MAX } from './title.mjs'
 import { providersForHarness, enabledCodingAgents } from './coding-agents.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { effortOptionen } from './models.mjs'
@@ -247,6 +251,92 @@ export function saveAgent({ id = null, repoId, name, def, schedule = null, activ
     zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
     def.provider, def.orProvider, def.effort, def.skills, def.flows ?? null, active)
   return Number(r.lastInsertRowid)
+}
+
+// ----------------------------------- single run only: title and planned start
+
+/**
+ * How a single run enters the world. 'in' is only the convenient form of 'at'
+ * ("in 20 minutes") and is resolved right here — the DB knows two waiting
+ * kinds, not three.
+ */
+export const START_MODES = ['now', 'at', 'in', 'idle']
+
+/**
+ * Title and start time — the two things a single run has and an AGENT does not:
+ * an agent already carries a name and a schedule. Hence these blocks sit next
+ * to runDefFields() instead of inside it, and only the single-run form embeds
+ * them: the title at the top, where one names a thing, the start time at the
+ * bottom, next to the button that sets it off.
+ */
+export function runTitleField(v = {}) {
+  return `
+  <label>${e(t('runform.title_field'))}
+    <input name="title" maxlength="${TITLE_MAX}" value="${e(v.title ?? '')}" placeholder="${e(t('runform.title_ph'))}">
+    <span class="dim">${e(t('runform.title_hint'))}</span>
+  </label>`
+}
+
+export function runStartTimeFields(v = {}) {
+  const mode = START_MODES.includes(v.start_mode) ? v.start_mode : 'now'
+  const modes = [
+    ['now', t('start.mode_now')],
+    ['at', t('start.mode_at')],
+    ['in', t('start.mode_in')],
+    ['idle', t('start.mode_idle')],
+  ]
+  return `
+  <fieldset class="zeitplan">
+    <legend>${e(t('start.legend'))}</legend>
+    <label>${e(t('start.mode'))} <select name="start_mode" id="start-mode">
+      ${modes.map(([id, label]) => `<option value="${id}" ${mode === id ? 'selected' : ''}>${e(label)}</option>`).join('')}
+    </select></label>
+    <div class="st" data-mode="at">
+      <label>${e(t('start.at_label'))} <input type="datetime-local" name="start_at" value="${e(v.start_at ?? '')}"></label>
+    </div>
+    <div class="st" data-mode="in">
+      <label>${e(t('start.in_label'))} <input type="number" name="start_in_minutes" min="1" step="1" value="${e(v.start_in_minutes ?? '30')}"></label>
+    </div>
+    <div class="st" data-mode="idle">
+      <p class="dim">${e(t('start.idle_hint'))}</p>
+    </div>
+  </fieldset>`
+}
+
+/**
+ * Title and start time out of the form — the counterpart to runDefFromForm(),
+ * used by the single-run form and by POST /api/runs alike. Returns what
+ * startRun() takes as options; the mode 'in' has already become a point in
+ * time here.
+ */
+export function runStartFromForm(b, problems = [], nowMs = Date.now()) {
+  const title = String(b.title ?? '').trim().slice(0, TITLE_MAX) || null
+  const mode = String(b.start_mode ?? 'now')
+  if (!START_MODES.includes(mode)) {
+    problems.push(t('start.err_mode', { mode }))
+    return { title, startMode: 'now', startAt: null }
+  }
+  if (mode === 'at') {
+    // <input type="datetime-local"> sends LOCAL time without a zone; the hub
+    // runs on the same machine as the browser's operator, so Date() reads it
+    // the way it was meant, and the DB gets UTC as everywhere else.
+    const ms = Date.parse(String(b.start_at ?? '').trim())
+    if (!Number.isFinite(ms)) {
+      problems.push(t('start.err_at'))
+      return { title, startMode: 'now', startAt: null }
+    }
+    return { title, startMode: 'at', startAt: toDbUtc(ms) }
+  }
+  if (mode === 'in') {
+    const min = Number(b.start_in_minutes)
+    if (!Number.isFinite(min) || min <= 0) {
+      problems.push(t('start.err_in'))
+      return { title, startMode: 'now', startAt: null }
+    }
+    return { title, startMode: 'at', startAt: toDbUtc(nowMs + min * 60_000) }
+  }
+  if (mode === 'idle') return { title, startMode: 'idle', startAt: null }
+  return { title, startMode: 'now', startAt: null }
 }
 
 // ------------------------------------------------------------ last used choice

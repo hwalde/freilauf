@@ -54,6 +54,23 @@ fieldset.zeitplan label[hidden] { display: none; }
 .tage .tag { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #dcdad6;
   border-radius: 999px; padding: 4px 12px; cursor: pointer; user-select: none; background: #fff; }
 .tage .tag:has(input:checked) { background: #2c7a3f; border-color: #2c7a3f; color: #fff; }
+/* Planned start in the single-run form — same block switching as the schedule. */
+fieldset.zeitplan .st[hidden] { display: none; }
+
+/* Run title with inline renaming (overview + detail page) */
+.titel-inline { display: inline-flex; align-items: baseline; gap: 6px; }
+.titel-inline button.mini { background: none; border: 0; color: #8a8f96; cursor: pointer;
+  padding: 0 2px; font-size: .95em; line-height: 1; opacity: 0; transition: opacity .1s; }
+/* The pencil only appears where one is about to click — a table full of icons
+   is noise, an icon that is nowhere is undiscoverable. */
+tr:hover .titel-inline button.mini, .titel-inline:hover button.mini,
+.titel-inline button.mini:focus, h2 .titel-inline button.mini { opacity: 1; }
+.titel-inline button.mini:hover { color: #2f6fed; }
+.titel-input { max-width: 22em; font-size: 1em; padding: 2px 6px; }
+h2 .titel-input { font-size: .8em; }
+.titelzelle { min-width: 12em; }
+/* A waiting run is not an incident — the banner must not look like one. */
+.banner.warten { border-left-color: #b8860b; background: rgba(184, 134, 11, .1); }
 
 @media (prefers-color-scheme: dark) {
   fieldset.zeitplan { border-color: #33363b; }

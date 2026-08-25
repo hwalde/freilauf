@@ -13,21 +13,24 @@
   }
 
   // ---- relative timestamps (overview): live "n seconds ago", exact time on hover ----
-  // Unit ladder must stay in sync with fmtRelativeTime in server/util.mjs.
+  // Signed, like fmtRelativeTime in server/util.mjs: a started run looks back,
+  // a planned one forward ("in 20 minutes"). Keep the unit ladder in sync.
   function relTimeText(ms, now) {
     var lang = document.documentElement.lang || 'en'
-    var sec = Math.max(0, Math.floor((now - ms) / 1000))
+    var sec = Math.round((now - ms) / 1000)
+    var abs = Math.abs(sec)
     var rtf = new Intl.RelativeTimeFormat(lang, { numeric: 'auto' })
-    if (sec < 60) return rtf.format(-sec, 'second')
-    var min = Math.floor(sec / 60)
-    if (min < 60) return rtf.format(-min, 'minute')
+    var say = function (n, unit) { return rtf.format(sec < 0 ? n : -n, unit) }
+    if (abs < 60) return say(abs, 'second')
+    var min = Math.floor(abs / 60)
+    if (min < 60) return say(min, 'minute')
     var hr = Math.floor(min / 60)
-    if (hr < 24) return rtf.format(-hr, 'hour')
+    if (hr < 24) return say(hr, 'hour')
     var day = Math.floor(hr / 24)
-    if (day < 30) return rtf.format(-day, 'day')
+    if (day < 30) return say(day, 'day')
     var month = Math.floor(day / 30)
-    if (month < 12) return rtf.format(-month, 'month')
-    return rtf.format(-Math.floor(day / 365), 'year')
+    if (month < 12) return say(month, 'month')
+    return say(Math.floor(day / 365), 'year')
   }
   function refreshRelTimes() {
     var now = Date.now()
@@ -73,6 +76,79 @@
       syncAnker()
     }
   }
+
+  // ---- planned start (single-run form): show only the chosen kind's block ----
+  const startSel = document.getElementById('start-mode')
+  if (startSel) {
+    const bloecke = Array.from(document.querySelectorAll('.st'))
+    const syncStart = () => bloecke.forEach(b => { b.hidden = b.dataset.mode !== startSel.value })
+    startSel.addEventListener('change', syncStart)
+    syncStart()
+  }
+
+  // ---- inline renaming of a run (overview + detail page) ----
+  // Renaming touches only the RUN. An agent keeps its name — that is the whole
+  // point: the same agent may run twice and each run gets called what it is.
+  document.addEventListener('click', function (ev) {
+    const btn = ev.target.closest('[data-title-edit]')
+    if (!btn) return
+    ev.preventDefault()
+    ev.stopPropagation()
+    const box = btn.closest('.titel-inline')
+    const link = box && box.querySelector('[data-title-text]')
+    if (!box || !link || box.querySelector('input')) return
+    const runId = box.dataset.run
+    const alt = link.textContent.trim()
+
+    const input = document.createElement('input')
+    input.type = 'text'
+    input.className = 'titel-input'
+    input.maxLength = 80
+    input.value = alt
+    input.placeholder = T('js.title_ph', 'Title of this run')
+    link.hidden = true
+    btn.hidden = true
+    box.insertBefore(input, link)
+    input.focus()
+    input.select()
+
+    let fertig = false
+    const schliessen = (text) => {
+      if (fertig) return
+      fertig = true
+      link.textContent = text
+      link.hidden = false
+      btn.hidden = false
+      input.remove()
+    }
+    const speichern = () => {
+      const neu = input.value.trim()
+      if (fertig || neu === alt) return schliessen(alt)
+      input.disabled = true
+      const body = new URLSearchParams()
+      body.set('title', neu)
+      fetch('/api/runs/' + runId + '/title', {
+        method: 'POST', body, headers: { accept: 'application/json' },
+      })
+        .then(r => r.json())
+        .then(j => {
+          if (!j.ok) throw new Error(j.error || 'HTTP')
+          schliessen(j.title || neu)
+          // The browser tab carries the title on the detail page.
+          if (location.pathname === '/runs/' + runId) document.title = 'cc-hub — ' + (j.title || neu)
+        })
+        .catch(err => {
+          alert(T('js.rename_failed', 'Renaming failed: ') + err.message)
+          schliessen(alt)
+        })
+    }
+    input.addEventListener('keydown', (e2) => {
+      if (e2.key === 'Enter') { e2.preventDefault(); speichern() }
+      if (e2.key === 'Escape') { e2.preventDefault(); schliessen(alt) }
+    })
+    input.addEventListener('blur', speichern)
+    input.addEventListener('click', (e2) => e2.stopPropagation())
+  })
 
   // ---- provider and model selection ----
   // The list arrives AFTER rendering via fetch: if a provider API hangs, a

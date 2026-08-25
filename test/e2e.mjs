@@ -1293,6 +1293,101 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('Run title and planned start')
+
+  await pruefe('the single-run form asks for a title and a start time', async () => {
+    const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
+    enthaelt(html, 'name="title"', 'title field')
+    enthaelt(html, 'generated from the prompt', 'says what an empty field means')
+    enthaelt(html, 'name="start_mode"', 'start kind')
+    enthaelt(html, 'name="start_at"', 'point in time')
+    enthaelt(html, 'name="start_in_minutes"', 'in n minutes')
+  })
+  await pruefe('an empty title becomes the first line of the prompt', async () => {
+    // No OPENROUTER_API_KEY in the sandbox, so no model is asked — exactly the
+    // case the fallback exists for.
+    const j = await laufStarten({ repo_id: repoId, prompt: '# Rewrite the login form\n\nand much more text' })
+    await sessionMerken(j.runId)
+    gleich(lauf(j.runId).title, 'Rewrite the login form', 'title from the prompt')
+    const html = await (await hol(`/?repo=${repoId}`)).text()
+    enthaelt(html, 'Rewrite the login form', 'shown in the overview')
+  })
+  await pruefe('a typed title is taken over verbatim', async () => {
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Titel', title: '  Nightly cleanup  ' })
+    await sessionMerken(j.runId)
+    gleich(lauf(j.runId).title, 'Nightly cleanup', 'trimmed and stored')
+  })
+  let TITELLAUF = null
+  await pruefe('a run of an agent is called by its agent', async () => {
+    const r = await formular('/agents/edit', {
+      repo_id: repoId, name: 'e2e-titel-agent', harness: 'claude', prompt: 'E2E-Agentenlauf',
+      branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'manuell', active: '1',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'agent created')
+    const s = await formular('/agents/start', { id: agent('e2e-titel-agent').id, repo: repoId }, { alsBrowser: true })
+    TITELLAUF = s.headers.get('location').split('/')[2]
+    await sessionMerken(TITELLAUF)
+    gleich(lauf(TITELLAUF).title, 'e2e-titel-agent', 'the agent name, not a generated title')
+  })
+  await pruefe('renaming changes the run — the agent keeps its name', async () => {
+    const r = await formular(`/api/runs/${TITELLAUF}/title`, { title: 'Renamed by hand' })
+    gleich((await r.json()).title, 'Renamed by hand', 'the new title comes back')
+    gleich(lauf(TITELLAUF).title, 'Renamed by hand', 'stored on the run')
+    gleich(agent('e2e-titel-agent').name, 'e2e-titel-agent', 'the agent is untouched')
+    enthaelt(await (await hol(`/runs/${TITELLAUF}`)).text(), 'Renamed by hand', 'detail page shows it')
+  })
+  await pruefe('an emptied title falls back to the agent instead of leaving a nameless row', async () => {
+    const r = await formular(`/api/runs/${TITELLAUF}/title`, { title: '   ' })
+    gleich((await r.json()).title, 'e2e-titel-agent', 'the agent name comes back')
+    gleich(lauf(TITELLAUF).title, null, 'nothing stored')
+  })
+
+  let GEPLANT = null
+  await pruefe('a run planned for later waits instead of starting', async () => {
+    const j = await laufStarten({
+      repo_id: repoId, prompt: 'E2E-spaeter', title: 'Planned run',
+      start_mode: 'in', start_in_minutes: '60',
+    })
+    GEPLANT = j.runId
+    wahr(j.scheduled, `reported as planned (${JSON.stringify(j)})`)
+    const r = lauf(GEPLANT)
+    gleich(r.status, 'scheduled', 'status')
+    gleich(r.tmux_session, null, 'no session — nothing was started')
+    wahr(!!r.start_at, 'point in time noted')
+    await watcherTick()
+    gleich(lauf(GEPLANT).status, 'scheduled', 'a pass before the moment changes nothing')
+    const zeile = (await (await hol(`/?repo=${repoId}`)).text()).split('<tr').find(z => z.includes(GEPLANT))
+    enthaelt(zeile, 'scheduled', 'the waiting run is visible in the overview')
+    enthaelt(zeile, 'Planned run', 'with its title')
+  })
+  await pruefe('when the moment has come the watcher starts it', async () => {
+    db.prepare(`UPDATE runs SET start_at=datetime('now','-1 minutes') WHERE id=?`).run(GEPLANT)
+    await watcherTick()
+    const r = lauf(GEPLANT)
+    gleich(r.status, 'running', 'started')
+    wahr(!!r.tmux_session, 'has a session')
+    await sessionMerken(GEPLANT)
+    enthaelt(ereignisse(GEPLANT).join(','), 'scheduled_start', 'recorded as a planned start')
+  })
+  await pruefe('"when the repo is free" waits for exactly that', async () => {
+    // The groups before left runs behind; the question here is only about the
+    // blocker this test starts itself.
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now')
+                WHERE repo_id=? AND status IN ('running','waiting_help')`).run(repoId)
+    const blocker = await laufStarten({ repo_id: repoId, prompt: 'E2E-Blocker' })
+    await sessionMerken(blocker.runId)
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-frei', start_mode: 'idle' })
+    await watcherTick()
+    gleich(lauf(j.runId).status, 'scheduled', 'the repo is busy: it keeps waiting')
+    gleich(lauf(j.runId).start_at, null, 'no point in time — it waits for a state')
+
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(blocker.runId)
+    await watcherTick()
+    gleich(lauf(j.runId).status, 'running', 'repo free: started')
+    await sessionMerken(j.runId)
+  })
+
+  // ------------------------------------------------------------------
   if (ECHT) {
     // From here on with the REAL cc-start and real harnesses. Deliberately a second
     // hub start: the stub part above must stay deterministic and free of charge.

@@ -143,16 +143,17 @@ export function claudeSettingsJson() {
 /** Creates the run record (definition copy) and returns the run ID. */
 export function createRun({ repoId, agentId = null, harness, model = null, provider = null,
   orProvider = null, effort = null, prompt, promptExtra = null, branchMode, branchPattern = null,
-  expectedMinutes, skills = null, flows = null }) {
+  expectedMinutes, skills = null, flows = null, title = null }) {
   if (!getHarness(harness)) throw new Error(t('run.unknown_harness', { harness }))
   if (!isHarnessEnabled(harness)) throw new Error(t('run.harness_not_configured', { harness }))
   if (!prompt?.trim()) throw new Error(t('run.empty_prompt'))
   const id = randomUUID()
   db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, model, provider, or_provider,
-              effort, prompt, prompt_extra, branch_mode, branch_pattern, expected_minutes, skills, flows, last_activity_at)
-              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,? , datetime('now'))`)
+              effort, prompt, prompt_extra, branch_mode, branch_pattern, expected_minutes, skills, flows,
+              title, last_activity_at)
+              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,? , datetime('now'))`)
     .run(id, repoId, agentId, harness, model, provider, orProvider, effort, prompt, promptExtra,
-      branchMode, branchPattern, expectedMinutes, skills, flows)
+      branchMode, branchPattern, expectedMinutes, skills, flows, title)
   return id
 }
 

@@ -11,7 +11,8 @@ import { subscriptionUsage } from './usage.mjs'
 import { openrouterCredits } from './quota.mjs'
 import { launchRun } from './runner.mjs'
 import { startRun } from './scheduler.mjs'
-import { runDefFromForm, saveAgent, rememberRunChoice } from './run-def.mjs'
+import { runDefFromForm, runStartFromForm, saveAgent, rememberRunChoice } from './run-def.mjs'
+import { runTitle, TITLE_MAX } from './title.mjs'
 import {
   pageOverview, pageAgents, pageRunForm, pageRun, pageRepos, pageSettings,
   runNewPost, agentEdit, agentSave, agentToggle, agentStart,
@@ -176,14 +177,32 @@ async function api(req, res, url) {
     const b = await form(req)
     const problems = []
     const def = await runDefFromForm(b, problems)
+    const start = runStartFromForm(b, problems)
     if (problems.length) return json(res, 400, { ok: false, error: problems.join(' · ') })
     rememberRunChoice(def)
     if (b.save_agent === '1') {
       try { saveAgent({ repoId: +b.repo_id, name: b.agent_name || `agent-${Date.now()}`, def }) }
       catch { /* duplicate name: the run is what matters, not the copy */ }
     }
-    const r = await startRun(def, { repoId: +b.repo_id })
-    return json(res, r.ok ? 200 : 500, { ok: r.ok, runId: r.runId, deferred: r.deferred, error: r.error })
+    const r = await startRun(def, { repoId: +b.repo_id, ...start })
+    return json(res, r.ok ? 200 : 500, {
+      ok: r.ok, runId: r.runId, deferred: r.deferred, scheduled: r.scheduled, error: r.error,
+    })
+  }
+  // Rename a run — inline editing in the overview and on the detail page. This
+  // touches ONLY the run: an agent keeps its name, and its next run is called
+  // by it again. An empty title falls back to the agent's name.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/title$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: 'unknown run' }, `/runs/${m[1]}`)
+    const b = await form(req)
+    const gewuenscht = String(b.title ?? '').trim().slice(0, TITLE_MAX)
+    db.prepare('UPDATE runs SET title=? WHERE id=?').run(gewuenscht || null, run.id)
+    const agentName = run.agent_id
+      ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null
+    return answer(req, res, 200,
+      { ok: true, title: runTitle({ title: gewuenscht }, agentName, t('overview.single_run')) },
+      `/runs/${run.id}`)
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/send$/))) {
     const run = getRun(m[1])

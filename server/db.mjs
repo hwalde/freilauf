@@ -137,6 +137,16 @@ addColumn('runs', 'skills', 'TEXT')
 // editing an agent never changes what an already running run will trigger.
 addColumn('agents', 'flows', 'TEXT')
 addColumn('runs', 'flows', 'TEXT')
+// The run's title — what the overview and the detail page name it. An agent run
+// takes the agent's name, a single run the operator's input or a title derived
+// from the prompt (server/title.mjs). Editable per run at any time, WITHOUT
+// touching the agent behind it.
+addColumn('runs', 'title', 'TEXT')
+// Planned start of a single run: 'at' waits for a point in time (UTC, SQLite
+// format), 'idle' for the repo to have no other run going. NULL = start
+// immediately, exactly as before.
+addColumn('runs', 'start_mode', 'TEXT')
+addColumn('runs', 'start_at', 'TEXT')
 // Read positions of the detectors: only NEW bytes are scanned. Without the offset the
 // same hit is counted again on every pass and an old hit "counts" forever.
 addColumn('runs', 'log_offset', 'INTEGER NOT NULL DEFAULT 0')
@@ -208,6 +218,21 @@ export function setSetting(key, value) {
      ON CONFLICT(key) DO UPDATE SET value = excluded.value`
   ).run(key, String(value))
 }
+/**
+ * "Most recently used" list behind a settings key (JSON, newest first). Both
+ * OpenRouter models the hub picks — the check LLM and the title LLM — offer
+ * what was used before instead of making you retype a slug; one implementation,
+ * two keys.
+ */
+export function mruList(key, max = 10) {
+  try { return JSON.parse(getSetting(key) || '[]').filter(Boolean).slice(0, max) } catch { return [] }
+}
+export function mruRemember(key, value, max = 10) {
+  const v = String(value ?? '').trim()
+  if (!v) return
+  setSetting(key, JSON.stringify([v, ...mruList(key, max).filter(x => x !== v)].slice(0, max)))
+}
+
 export function allSettings() {
   const out = {}
   for (const r of db.prepare('SELECT key, value FROM settings').all()) out[r.key] = r.value

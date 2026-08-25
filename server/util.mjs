@@ -55,23 +55,33 @@ export function parseDbUtc(ts) {
 }
 
 /**
- * Relative time in the UI language ("4 seconds ago"). Keep the unit
- * ladder in sync with the copy in public/hub.js (no bundler to share it).
+ * Relative time in the UI language ("4 seconds ago", "in 20 minutes"). Signed
+ * on purpose: the overview shows when a run STARTED, but a planned run says
+ * when it WILL start — the same cell, once looking back and once forward. The
+ * unit ladder judges by distance, the sign only decides the direction. Keep it
+ * in sync with the copy in public/hub.js (no bundler to share it).
  */
 export function fmtRelativeTime(thenMs, nowMs = Date.now(), locale = currentLanguage()) {
   if (!Number.isFinite(thenMs) || !Number.isFinite(nowMs)) return '–'
-  const sec = Math.max(0, Math.floor((nowMs - thenMs) / 1000))
+  const sec = Math.round((nowMs - thenMs) / 1000)
+  const abs = Math.abs(sec)
   const rtf = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' })
-  if (sec < 60) return rtf.format(-sec, 'second')
-  const min = Math.floor(sec / 60)
-  if (min < 60) return rtf.format(-min, 'minute')
+  const sag = (n, unit) => rtf.format(sec < 0 ? n : -n, unit)
+  if (abs < 60) return sag(abs, 'second')
+  const min = Math.floor(abs / 60)
+  if (min < 60) return sag(min, 'minute')
   const hr = Math.floor(min / 60)
-  if (hr < 24) return rtf.format(-hr, 'hour')
+  if (hr < 24) return sag(hr, 'hour')
   const day = Math.floor(hr / 24)
-  if (day < 30) return rtf.format(-day, 'day')
+  if (day < 30) return sag(day, 'day')
   const month = Math.floor(day / 30)
-  if (month < 12) return rtf.format(-month, 'month')
-  return rtf.format(-Math.floor(day / 365), 'year')
+  if (month < 12) return sag(month, 'month')
+  return sag(Math.floor(day / 365), 'year')
+}
+
+/** SQLite-comparable UTC stamp ("YYYY-MM-DD HH:MM:SS"), the format datetime('now') writes. */
+export function toDbUtc(ms) {
+  return Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 19).replace('T', ' ') : null
 }
 
 /** Exact local date+time for a title/tooltip. */

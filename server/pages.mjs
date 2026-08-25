@@ -12,7 +12,9 @@ import {
 } from './coding-agents.mjs'
 import {
   runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
+  runTitleField, runStartTimeFields, runStartFromForm,
 } from './run-def.mjs'
+import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } from './title.mjs'
 import { getHarness, harnessLabel, detectInstalled } from './harnesses/index.mjs'
 import { providerLabel } from './providers/index.mjs'
 import { subscriptionUsage } from './usage.mjs'
@@ -182,25 +184,37 @@ async function usagePanel() {
 export async function pageOverview(req, res, url) {
   const sel = selectRepo(url)
   if (!sel) return noRepoPage(res, '/', t('nav.overview'))
+  // 'scheduled' sits with 'deferred': both are runs that exist and are WAITING —
+  // that is exactly what one wants to see at a glance, not somewhere below the
+  // finished ones.
   const runs = db.prepare(`SELECT * FROM runs WHERE repo_id=? ORDER BY
-    CASE status WHEN 'waiting_help' THEN 0 WHEN 'failed' THEN 1 WHEN 'running' THEN 2 WHEN 'deferred' THEN 3 ELSE 4 END,
+    CASE status WHEN 'waiting_help' THEN 0 WHEN 'failed' THEN 1 WHEN 'running' THEN 2
+                WHEN 'deferred' THEN 3 WHEN 'scheduled' THEN 4 ELSE 5 END,
     started_at DESC LIMIT 200`).all(sel.id)
   const rows = runs.map(r => {
-    const agent = r.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(r.agent_id)?.name : t('overview.single_run')
+    const agentName = r.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(r.agent_id)?.name ?? null : null
+    const titel = runTitle(r, agentName, t('overview.single_run'))
+    // Under the title stands where the run comes from — the agent by name, or
+    // the word for "no agent". A renamed run must not lose that information.
+    const herkunft = agentName ? t('overview.from_agent', { agent: agentName }) : t('overview.single_run')
     // Finished runs: duration until the end, not until now — otherwise a run
     // from three days ago "grows" to 4000 minutes in the overview.
     const startedMs = parseDbUtc(r.started_at)
     const endeMs = r.ended_at ? parseDbUtc(r.ended_at) : Date.now()
     const durMin = Math.round((endeMs - startedMs) / 60000)
-    // The row stays clickable as a whole, the name is additionally a real link —
-    // otherwise the detail page would be unreachable by keyboard.
+    const wartend = r.status === 'scheduled'
+    // The row stays clickable as a whole, the title is additionally a real link —
+    // otherwise the detail page would be unreachable by keyboard. The title cell
+    // swallows the row click: renaming must not navigate away.
     return `<tr onclick="location='/runs/${r.id}'">
       <td>${AMPEL_DOT[ampel(r)]}</td>
-      <td><a href="/runs/${r.id}">${e(agent)}</a></td>
+      <td class="titelzelle" onclick="event.stopPropagation()">
+        ${titleInline(r.id, titel)}
+        <div class="dim">${e(herkunft)}</div></td>
       <td>${e(r.harness)}${r.model ? `<span class="dim">/${r.provider ? e(r.provider) + ':' : ''}${e(r.model)}</span>` : ''}</td>
-      <td>${r.status}</td>
-      <td>${startedCell(r.started_at)}</td>
-      <td>${durMin > 0 ? durMin + ' min' : ''}<span class="dim"> / ${r.expected_minutes} min</span></td>
+      <td>${r.status}${wartend ? `<div class="dim">${wartetAuf(r)}</div>` : ''}</td>
+      <td>${wartend ? plannedCell(r) : startedCell(r.started_at)}</td>
+      <td>${wartend ? '' : (durMin > 0 ? durMin + ' min' : '')}<span class="dim"> / ${r.expected_minutes} min</span></td>
       <td>${e(r.branch_reported || r.branch_expected || '–')}</td>
       <td>${r.pr_url ? `<a href="${e(r.pr_url)}">PR</a>` : '–'}</td>
       <td>${vorfallZelle(r.id, sel.id)}</td>
@@ -210,9 +224,21 @@ export async function pageOverview(req, res, url) {
   const body = `
   ${await usagePanel()}
   <p><a class="btn" href="/runs/new?repo=${sel.id}">${e(t('overview.start_single'))}</a></p>
-  <table class="list"><thead><tr><th></th><th>${e(t('overview.agent'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('overview.started'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th>${e(t('incidents.title'))}</th><th>${e(t('overview.last_anomaly'))}</th></tr></thead>
+  <table class="list"><thead><tr><th></th><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('overview.started'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th>${e(t('incidents.title'))}</th><th>${e(t('overview.last_anomaly'))}</th></tr></thead>
   <tbody>${rows || `<tr><td colspan="10" class="dim">${e(t('overview.no_runs'))}</td></tr>`}</tbody></table>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.overview'), '/', body, sel.id))
+}
+
+/**
+ * The title as a link plus a pencil that turns it into an input in place
+ * (hub.js). Renaming works on EVERY run, including one an agent started — it
+ * changes the run, never the agent behind it.
+ */
+function titleInline(runId, titel) {
+  return `<span class="titel-inline" data-run="${e(runId)}">
+    <a href="/runs/${e(runId)}" data-title-text>${e(titel)}</a>
+    <button type="button" class="mini" data-title-edit title="${e(t('overview.rename'))}" aria-label="${e(t('overview.rename'))}">✎</button>
+  </span>`
 }
 
 /** Relative start ("4 seconds ago"); exact date-time sits in the title tooltip. */
@@ -220,6 +246,19 @@ function startedCell(ts) {
   const ms = parseDbUtc(ts)
   if (!Number.isFinite(ms)) return '–'
   return `<time class="reltime" datetime="${new Date(ms).toISOString()}" title="${e(fmtDateTime(ms))}">${e(fmtRelativeTime(ms))}</time>`
+}
+
+/** A planned run shows when it WILL start — the same cell, looking forward. */
+function plannedCell(run) {
+  return run.start_mode === 'idle' ? `<span class="dim">–</span>` : startedCell(run.start_at)
+}
+
+/** What a waiting run is waiting for, in one line. */
+function wartetAuf(run) {
+  if (run.status === 'deferred') return e(t('start.waits_budget'))
+  if (run.start_mode === 'idle') return e(t('start.until_free'))
+  const ms = parseDbUtc(run.start_at)
+  return Number.isFinite(ms) ? e(t('start.waits_until', { time: fmtDateTime(ms) })) : e(t('start.waits'))
 }
 
 function selectRepo(url) {
@@ -270,7 +309,9 @@ export async function pageRunForm(req, res, url) {
   // Without an agent as a template: the setup of the last start — in practice
   // the next run wants the same coding agent, provider, model and effort.
   const fields = `
+  ${runTitleField({})}
   ${runDefFields(a ?? lastRunChoice())}
+  ${runStartTimeFields({})}
   <input type="hidden" name="repo_id" value="${sel.id}">
   <label class="chk"><input type="checkbox" name="save_agent" value="1"> ${e(t('runform.save_agent'))} (<input name="agent_name" placeholder="agent-name">)</label>`
   const body = `
@@ -287,7 +328,9 @@ export async function pageRun(req, res, url, id) {
   const run = getRun(id)
   if (!run) { res.writeHead(404).end(t('run.not_found')); return }
   const repo = getRepo(run.repo_id)
-  const agent = run.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name : t('overview.single_run')
+  const agentName = run.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null
+  const titel = runTitle(run, agentName, t('overview.single_run'))
+  const herkunft = agentName ? t('overview.from_agent', { agent: agentName }) : t('overview.single_run')
   const events = db.prepare(`SELECT * FROM events WHERE run_id=? AND kind NOT LIKE 'telegram_sent%' ORDER BY id`).all(id)
   // Log (ANSI-cleaned), last excerpt
   const { readFileSync, existsSync, statSync } = await import('node:fs')
@@ -305,8 +348,15 @@ export async function pageRun(req, res, url, id) {
   // status, the page promised a terminal that did not exist.
   const live = ['running', 'waiting_help'].includes(run.status) && !!run.tmux_session && !run.tmux_closed_at
   const body = `
-  <h2>${AMPEL_DOT[ampel(run)]} ${e(t('run.title', { id: id.slice(0, 8) }))} — ${e(agent)} (${run.status})</h2>
-  <p class="dim">${e(t('layout.repo'))} „${e(repo?.name ?? '?')}“, ${e(t('agents.harness'))} ${e(run.harness)}${run.model ? `, ${t('agents.model')} ` + e(run.model) : ''}
+  <h2>${AMPEL_DOT[ampel(run)]} ${titleInline(id, titel)} <span class="dim">(${run.status})</span></h2>
+  ${run.status === 'scheduled'
+    // A planned run must be revocable — otherwise a start you thought better of
+    // sits in the future with no way to stop it. 'kill' is exactly right here:
+    // there is no session to end, only a record to set to 'aborted'.
+    ? `<div class="banner warten">⏳ ${wartetAuf(run)}
+       <form method="post" action="/api/runs/${id}/kill" class="inline"><button class="danger">${e(t('start.cancel'))}</button></form></div>`
+    : ''}
+  <p class="dim">${e(t('run.title', { id: id.slice(0, 8) }))} · ${e(herkunft)} · ${e(t('layout.repo'))} „${e(repo?.name ?? '?')}“, ${e(t('agents.harness'))} ${e(run.harness)}${run.model ? `, ${t('agents.model')} ` + e(run.model) : ''}
    ${run.provider ? `· Provider ${e(run.provider)}${run.or_provider ? ` (${e(t('run.pinned'))}: ${e(run.or_provider)})` : ''} ` : ''}· ${e(t('run.start'))} ${e(run.started_at)}${run.ended_at ? ' · ' + e(t('run.end')) + ' ' + e(run.ended_at) : ''}
    · ${e(t('run.expectation'))} ${run.expected_minutes} min · ${e(t('run.workdir'))} <code>${e(run.workdir_effective ?? '')}</code>
    ${skillListe(run.skills).length ? `· ${e(t('skills.title'))}: <b>${skillAnzeige(run.skills).map(e).join(', ')}</b>` : ''}</p>
@@ -341,7 +391,7 @@ export async function pageRun(req, res, url, id) {
   </ul>
   <h3>${e(t('run.events'))}</h3><ul class="events">${events.map(ev => `<li><span class="dim">${e(ev.ts)}</span> ${e(ev.kind)}</li>`).join('') || `<li class="dim">${e(t('run.none'))}</li>`}</ul>
   <h3>${e(t('run.log'))}</h3>${logHtml}`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('run.title', { id: id.slice(0, 8) }), '/', body, run.repo_id, true))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(titel, '/', body, run.repo_id, true))
 }
 
 function fmtLaufzeit(run) {
@@ -415,6 +465,14 @@ export async function pageSettings(req, res, url) {
         <datalist id="llm-mru">${llmModelleMru().map(m => `<option value="${e(m)}">`).join('')}</datalist>
         <span class="dim">${e(t('settings.llm_mru_hint'))}</span></label>
       <label>${e(t('settings.llm_or_provider'))} <input name="llm_check_or_provider" value="${e(s.llm_check_or_provider ?? '')}" placeholder="${e(t('settings.llm_or_ph'))}"></label>
+    </fieldset>
+    <fieldset><legend>${e(t('settings.title_legend'))}</legend>
+      <p class="dim">${e(t('settings.title_hint'))} ${process.env.OPENROUTER_API_KEY ? '' : `<b class="warn">${e(t('settings.llm_missing_key'))}</b>`}</p>
+      <label>${e(t('settings.title_on'))} <select name="llm_title_on"><option value="1" ${(s.llm_title_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.llm_title_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+      <label>${e(t('settings.title_model'))} <input name="llm_title_model" list="title-mru" value="${e(s.llm_title_model || DEFAULT_TITLE_MODEL)}" placeholder="${e(DEFAULT_TITLE_MODEL)}">
+        <datalist id="title-mru">${[...new Set([DEFAULT_TITLE_MODEL, ...titleModelsMru()])].map(m => `<option value="${e(m)}">`).join('')}</datalist>
+        <span class="dim">${e(t('settings.title_model_hint', { model: DEFAULT_TITLE_MODEL }))}</span></label>
+      <label>${e(t('settings.llm_or_provider'))} <input name="llm_title_or_provider" value="${e(s.llm_title_or_provider ?? '')}" placeholder="${e(t('settings.llm_or_ph'))}"></label>
     </fieldset>
     <button>${e(t('settings.save'))}</button>
   </form>
@@ -521,6 +579,7 @@ export async function runNewPost(req, res, url, formBody) {
   const back = `/runs/new?repo=${b.repo_id ?? ''}`
   const problems = []
   const def = await runDefFromForm(b, problems)
+  const start = runStartFromForm(b, problems)
   if (problems.length) return problemPage(res, t('runform.title_short'), problems, back)
   rememberRunChoice(def)
   // "Save as agent": the very same definition, only with a name — the run form
@@ -530,7 +589,7 @@ export async function runNewPost(req, res, url, formBody) {
       saveAgent({ repoId: +b.repo_id, name: b.agent_name?.trim() || `agent-${Date.now()}`, def })
     } catch { /* duplicate name: the run is what matters, not the copy */ }
   }
-  const r = await startRun(def, { repoId: +b.repo_id })
+  const r = await startRun(def, { repoId: +b.repo_id, ...start })
   if (!r.runId) return problemPage(res, t('runform.title_short'), [r.error ?? 'start failed'], back)
   redirect(res, `/runs/${r.runId}`)
 }
@@ -723,13 +782,15 @@ export async function settingsSave(req, res, url, formBody) {
   const b = await formBody()
   for (const k of ['pipeline_on', 'telegram_token', 'telegram_chat', 'quota_threshold',
     'openrouter_min_eur', 'abo_price', 'cursor_included_usd', 'retention_days', 'prompt_suffix',
-    'llm_check_on', 'llm_check_model', 'llm_check_or_provider', 'ui_language']) {
+    'llm_check_on', 'llm_check_model', 'llm_check_or_provider',
+    'llm_title_on', 'llm_title_model', 'llm_title_or_provider', 'ui_language']) {
     setSetting(k, b[k] ?? '')
   }
   // The language takes effect immediately — the redirect below already renders in it.
   setLanguage(b.ui_language ?? 'en')
   // "Used" means saved: only now does the model enter the MRU list.
   llmModellMerken(b.llm_check_model)
+  rememberTitleModel(b.llm_title_model)
   redirect(res, '/settings')
 }
 
