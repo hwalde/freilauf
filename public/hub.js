@@ -108,6 +108,9 @@
           // Cursor's fast mode is more expensive and not the default — make it
           // visible instead of letting it look like an equal variant.
           (m.fast ? ' · ' + T('js.fast_tag', 'FAST (more expensive)') : '') +
+          // 'auto' is the one entry that names no model: cursor routes it to its
+          // own models and bills it against their pool of the included usage.
+          (m.auto ? ' · ' + T('js.auto_tag', 'Auto — Cursor picks the model (draws on its own pool of the included usage)') : '') +
           (m.tools ? '' : ' · ' + T('js.no_tools', 'no tools')) + '</option>').join('')
         // 'katalog' means: the list comes from the vendor catalog instead of the
         // local opencode — it may then contain models that will not run here

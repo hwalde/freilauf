@@ -2,8 +2,9 @@
 //
 // Each harness plugin may implement usage() and report what its subscription
 // account has consumed (Claude: 5-hour/7-day windows from quota.json; Cursor:
-// spent USD of the current cycle via the CLI token). Everything is best-effort
-// and cached: a hanging endpoint must never block a page render.
+// spend, included amount and cycle end of the running period via the CLI
+// token). Everything is best-effort and cached: a hanging endpoint must never
+// block a page render.
 import { getSetting } from './db.mjs'
 import { enabledCodingAgents } from './coding-agents.mjs'
 
@@ -31,11 +32,15 @@ export async function subscriptionUsage({ force = false } = {}) {
         continue
       }
       if (data.kind === 'cursor') {
-        // No public endpoint exposes the included quota — the percentage is
-        // computed against a configurable amount (default: Pro's 20 USD).
-        const included = Number(getSetting?.('cursor_included_usd') ?? 20) || 20
-        data.included_usd = included
-        data.pct = data.spent_usd != null ? Math.round((data.spent_usd / included) * 1000) / 10 : null
+        // The included amount comes from Cursor itself (GetCurrentPeriodUsage).
+        // Only when that endpoint stays silent does the configured fallback step
+        // in — and then the UI says so instead of presenting a guess as a fact.
+        if (data.included_usd == null) {
+          data.included_usd = Number(getSetting?.('cursor_included_usd') ?? 20) || 20
+          data.included_estimated = true
+        }
+        data.pct = data.spent_usd != null && data.included_usd
+          ? Math.round((data.spent_usd / data.included_usd) * 1000) / 10 : null
       }
       out.push({ harness: agent.harness, label: plugin.label, ok: true, data })
     }

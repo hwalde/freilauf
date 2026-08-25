@@ -7,7 +7,7 @@
 // computes or decides — schedules, cron, form parsing, quota gate, text processing.
 //
 // Usage:  node test/unit.mjs
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gruppe, pruefe, gleich, wahr, falsch, enthaelt, bericht, zaehler } from './mini.mjs'
@@ -595,6 +595,54 @@ try {
     delete process.env.OPENROUTER_API_KEY
     falsch(providerHasKey('openrouter'), 'without key')
     if (alt !== undefined) process.env.OPENROUTER_API_KEY = alt
+  })
+
+  // The included amount is the point here: it comes from Cursor's own period
+  // endpoint (cents), so no plan has to be guessed. Fetch is stubbed — the test
+  // must never talk to api2.cursor.sh.
+  await pruefe('cursor usage() takes spend, included amount and cycle from GetCurrentPeriodUsage', async () => {
+    const auth = join(sandkasten, 'cursor-auth.json')
+    writeFileSync(auth, JSON.stringify({ accessToken: 'tok' }))
+    const altAuth = process.env.CCHUB_CURSOR_AUTH
+    process.env.CCHUB_CURSOR_AUTH = auth
+    const echt = globalThis.fetch
+    globalThis.fetch = async (url) => {
+      const antwort = String(url).endsWith('GetCurrentPeriodUsage')
+        ? { planUsage: { totalSpend: 13, remaining: 1987, limit: 2000 }, billingCycleEnd: '1789404355000' }
+        : String(url).endsWith('GetAggregatedUsageEvents')
+          ? { totalCostCents: 14, aggregations: [{ modelIntent: 'auto', totalCents: 13 }] }
+          : { membershipType: 'pro' }
+      return { ok: true, json: async () => antwort }
+    }
+    try {
+      const d = await HARNESS_PLUGINS.cursor.usage()
+      gleich(d.plan, 'pro', 'plan')
+      gleich(d.included_usd, 20, 'included amount in dollars, from the server')
+      gleich(d.spent_usd, 0.13, 'spend belongs to the same source as the limit')
+      gleich(d.remaining_usd, 19.87, 'remaining')
+      gleich(d.cycle_end, '2026-09-14T16:45:55.000Z', 'cycle end')
+      gleich(d.by_model[0].model, 'auto', 'per-model breakdown from the aggregation')
+    } finally {
+      globalThis.fetch = echt
+      if (altAuth === undefined) delete process.env.CCHUB_CURSOR_AUTH
+      else process.env.CCHUB_CURSOR_AUTH = altAuth
+    }
+  })
+  await pruefe('cursor model list puts "auto" first and marks it', async () => {
+    const bin = join(sandkasten, 'bin-cursor')
+    mkdirSync(bin, { recursive: true })
+    writeFileSync(join(bin, 'cursor-agent'),
+      '#!/bin/sh\necho "Available models"\necho ""\necho "zeta-1 - Zeta"\necho "auto - Auto (default)"\necho "alpha-1-fast - Alpha Fast"\n')
+    chmodSync(join(bin, 'cursor-agent'), 0o755)
+    const altPath = process.env.PATH
+    process.env.PATH = `${bin}:${altPath}`
+    try {
+      const liste = await HARNESS_PLUGINS.cursor.fetchModels()
+      gleich(liste[0].id, 'auto', 'auto first, before every sorted ID')
+      wahr(liste[0].auto === true, 'marked as auto')
+      gleich(liste.at(-1).id, 'alpha-1-fast', 'fast still sorts last')
+      falsch(liste[1].auto, 'nothing else is auto')
+    } finally { process.env.PATH = altPath }
   })
 
   // ------------------------------------------------------------------

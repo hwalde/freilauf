@@ -136,9 +136,19 @@ async function usagePanel() {
     }
     if (d.kind === 'cursor') {
       const models = (d.by_model ?? []).map(m => `${e(m.model)} ${m.usd.toFixed(2)} $`).join(' · ')
+      // What one reads at a glance is the bar — like the claude rows above. The
+      // dollars are the detail and move into the tooltip; only when the included
+      // amount is the configured fallback does the text say so (tilde).
+      const money = d.spent_usd != null
+        ? t(d.included_estimated ? 'usage.spent_est' : 'usage.spent',
+          { usd: d.spent_usd.toFixed(2), included: d.included_usd })
+        : ''
+      const days = d.cycle_end != null
+        ? Math.max(0, Math.ceil((Date.parse(d.cycle_end) - Date.now()) / 86_400_000)) : null
       return `<div class="usage-row"><b>${e(u.label)}</b>${d.plan ? ` <span class="dim">${e(d.plan)}</span>` : ''}
-        ${d.spent_usd != null ? `<span>${e(t('usage.spent', { usd: d.spent_usd.toFixed(2), included: d.included_usd }))}</span>
-        <span class="quota">${pctBar(d.pct)}</span>` : `<span class="dim">${e(t('usage.unavailable'))}</span>`}
+        ${d.pct != null ? `<span class="quota" title="${e(money)}">${pctBar(d.pct)}</span>`
+          : `<span class="dim">${e(t('usage.unavailable'))}</span>`}
+        ${days != null ? `<span class="dim">${e(t('usage.resets_in', { days }))}</span>` : ''}
         ${models ? `<span class="dim">${models}</span>` : ''}</div>`
     }
     return ''

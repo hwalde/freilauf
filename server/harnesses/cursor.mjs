@@ -1,7 +1,7 @@
 // cc-hub — coding agent plugin: cursor (cursor-agent CLI).
 //
 // cursor runs like claude only on its subscription: no provider, no --effort.
-// The 204 flat model IDs are base × effort level × fast, already multiplied
+// The ~200 flat model IDs are base × effort level × fast, already multiplied
 // out — the effort level is PART of the model ID ('claude-opus-5-xhigh'), and
 // the ID goes out verbatim, exactly as `cursor-agent models` printed it. An
 // assembled ID could simply not exist.
@@ -51,7 +51,10 @@ export default {
    *
    * Line format: '<id> - <display name>'. IDs ending in '-fast' are cursor's
    * fast mode (more expensive) — they sort last and are marked, the normal case
-   * is the variant without.
+   * is the variant without. 'auto - Auto (default)' is part of the list and is
+   * therefore a valid --model value like any other; cursor then routes to its
+   * own models (composer/vega/grok), which draw on the Cursor-models pool of
+   * the included usage instead of the third-party one.
    */
   async fetchModels() {
     const { stdout } = await execFileAsync('cursor-agent', ['models'], { timeout: 30_000 })
@@ -67,10 +70,13 @@ export default {
         ctx: /\b1M\b/.test(name) ? 1_000_000 : null,
         tools: true,
         fast: id.endsWith('-fast'),
+        auto: id === 'auto',
       })
     }
     if (!models.length) throw new Error('cursor-agent models returned no models')
-    return models.sort((a, b) => (a.fast - b.fast) || a.id.localeCompare(b.id))
+    // 'auto' first: it is cursor's own default and the only entry that does not
+    // name a model — between 200 sorted IDs it would otherwise disappear.
+    return models.sort((a, b) => (b.auto - a.auto) || (a.fast - b.fast) || a.id.localeCompare(b.id))
   },
 
   /**
@@ -92,11 +98,18 @@ export default {
 
   /**
    * Subscription usage via the CLI's own token (~/.config/cursor/auth.json):
-   *   - auth/full_stripe_profile          → plan ("pro", …)
-   *   - DashboardService/GetAggregatedUsageEvents → spent cents this cycle,
-   *     per-model breakdown.
-   * There is no public endpoint for the included quota — the percentage is
-   * computed against a configurable amount (settings), which usage.mjs adds.
+   *   - auth/full_stripe_profile                  → plan ("pro", …)
+   *   - DashboardService/GetCurrentPeriodUsage    → included amount, spend and
+   *     billing cycle of the running period, all in CENTS ('limit': 2000 on
+   *     Pro) — this is what makes the bar honest, nothing has to be assumed
+   *   - DashboardService/GetAggregatedUsageEvents → per-model breakdown
+   *
+   * Cursor documents no included amount anywhere (the pricing page says only
+   * "a set amount of model usage", Pro+/Ultra are "3x/20x Pro limits"), and the
+   * public APIs are admin-only — GetCurrentPeriodUsage is the endpoint the
+   * account itself answers, and the one the community's usage extensions read.
+   * It is internal and has no contract: when it fails, included_usd stays null
+   * and usage.mjs falls back to the configured amount.
    */
   async usage() {
     let token
@@ -105,19 +118,29 @@ export default {
     const headers = { Authorization: `Bearer ${token}`, 'content-type': 'application/json' }
     const get = (path, init) => fetch(`${API()}${path}`, { headers, signal: AbortSignal.timeout(12_000), ...init })
       .then(r => (r.ok ? r.json() : null)).catch(() => null)
-    const [profile, agg] = await Promise.all([
+    const post = (path) => get(path, { method: 'POST', body: '{}' })
+    const [profile, agg, period] = await Promise.all([
       get('/auth/full_stripe_profile'),
-      get('/aiserver.v1.DashboardService/GetAggregatedUsageEvents', { method: 'POST', body: '{}' }),
+      post('/aiserver.v1.DashboardService/GetAggregatedUsageEvents'),
+      post('/aiserver.v1.DashboardService/GetCurrentPeriodUsage'),
     ])
-    if (!profile && !agg) return null
+    if (!profile && !agg && !period) return null
     const byModel = (agg?.aggregations ?? []).map(a => ({
       model: a.modelIntent ?? '?',
       usd: Math.round((a.totalCents ?? 0)) / 100,
     })).sort((a, b) => b.usd - a.usd)
+    const usd = (cents) => (cents == null || !Number.isFinite(Number(cents)) ? null : Math.round(Number(cents)) / 100)
+    const plan = period?.planUsage ?? null
+    const endMs = Number(period?.billingCycleEnd)
     return {
       kind: 'cursor',
       plan: profile?.membershipType ?? profile?.individualMembershipType ?? null,
-      spent_usd: agg?.totalCostCents != null ? Math.round(agg.totalCostCents) / 100 : null,
+      // The period endpoint's own total belongs to its own limit — mixing it
+      // with the aggregation would make bar and tooltip disagree by a cent.
+      spent_usd: usd(plan?.totalSpend) ?? usd(agg?.totalCostCents),
+      included_usd: usd(plan?.limit),
+      remaining_usd: usd(plan?.remaining),
+      cycle_end: Number.isFinite(endMs) && endMs > 0 ? new Date(endMs).toISOString() : null,
       by_model: byModel.slice(0, 5),
     }
   },

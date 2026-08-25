@@ -131,9 +131,13 @@ private setup repo installs that file.
 Harness plugins may implement `usage()`; `server/usage.mjs` aggregates and
 caches the results for the overview panel and `GET /api/usage`. Claude reads
 `~/.claude/quota.json`, cursor asks the Cursor API with the CLI's own token
-(`~/.config/cursor/auth.json`). The included Cursor quota is not exposed by any
-endpoint — the percentage is computed against the configurable
-`cursor_included_usd` setting (default 20).
+(`~/.config/cursor/auth.json`): `GetCurrentPeriodUsage` reports spend, the
+included amount and the cycle end of the running period in cents — the bar
+therefore measures against the amount the account really has, on every plan.
+Cursor documents that amount nowhere and its public APIs are admin-only, so this
+internal dashboard endpoint is the only source; it has no contract. When it
+stays silent the configurable `cursor_included_usd` setting (default 20) steps
+in as a fallback and the UI marks the value as estimated.
 
 ## Tests
 
@@ -177,11 +181,14 @@ verbatim — nothing is assembled there.
 
 ### cursor in particular
 
-The 204 flat IDs are base × effort level × fast, already multiplied out. That is
+The ~200 flat IDs are base × effort level × fast, already multiplied out. That is
 why the hub does **not** split into base + effort: an ID built that way might
-not exist at all, and `<datalist>` filters 204 entries just as well as the ~360
-from OpenRouter. IDs ending in `-fast` are cursor's fast mode (more expensive) —
-they sort last and are marked; the default is the variant without.
+not exist at all, and `<datalist>` filters them just as well as the ~360 from
+OpenRouter. IDs ending in `-fast` are cursor's fast mode (more expensive) — they
+sort last and are marked; the default is the variant without. `auto` is part of
+the same list and hence a valid `--model` value: cursor then routes to its own
+models (composer/vega/grok), which draw on the Cursor-models pool of the
+included usage rather than the third-party one. It sorts first and is marked.
 
 **cursor reads the Claude configuration along** — measured with canary code
 words in an empty repo, all three confirmed:
