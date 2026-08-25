@@ -131,7 +131,10 @@ p.crumbs { font-size: 13px; color: #6b7076; margin: 0 0 8px; }
 table.sessions { font-size: 14px; }
 table.sessions td code { font-size: .9em; background: none; padding: 0; }
 table.sessions td:last-child { white-space: nowrap; }
-table.sessions tbody tr:hover { background: #f0f4fa; cursor: default; }
+/* Hover background comes from table.list (light + dark). Setting it again
+   here to the light colour overrode the dark-mode rule and left light text
+   on #f0f4fa — same class of bug as .help above. Only cursor differs. */
+table.sessions tbody tr:hover { cursor: default; }
 table.sessions tr[data-running="1"] { background: rgba(229, 72, 77, .05); }
 table.sessions tr.ending { opacity: .55; }
 table.sessions tr.gone { opacity: .4; text-decoration: line-through; }
