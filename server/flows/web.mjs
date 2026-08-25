@@ -2,7 +2,7 @@
 // and JSON API (/api/flows/*, /api/flow-runs/*). Mounted by ../web.mjs; the
 // page chrome comes from ../pages.mjs (layout), everything else is local.
 import db, {
-  listFlows, getFlow, saveFlow, deleteFlow, toggleFlow, listFlowRuns, getFlowRun,
+  listFlows, getFlow, saveFlow, deleteFlow, toggleFlow, listFlowRuns, getFlowRun, autoFlowName,
 } from './db.mjs'
 import { stepsMeta, GROUPS, validateDefinition, definitionHints, defaultProps } from './steps.mjs'
 import { OPS } from './template.mjs'
@@ -83,6 +83,19 @@ function pageList(res) {
   html(res, 200, layout(t('nav.flows'), '/flows', body))
 }
 
+/**
+ * Where "Back" leads. A flow is reached from the agent or single-run form whose
+ * end shall start it — that form is where one wants to return to, and it passes
+ * itself in `back`. Only a local path is accepted (never `//host`, never a
+ * scheme), so the parameter cannot turn the button into an open redirect. The
+ * flow list is deliberately NOT the fallback: flows hang on a run definition,
+ * not in a menu.
+ */
+function backTarget(url) {
+  const raw = url.searchParams.get('back') ?? ''
+  return /^\/(?!\/)[^\\]*$/.test(raw) ? raw : '/agents'
+}
+
 function pageEditor(res, url) {
   const id = Number(url.searchParams.get('id')) || null
   const flow = id ? getFlow(id) : null
@@ -97,11 +110,12 @@ function pageEditor(res, url) {
   // Recent finished runs — for "run now with this run as the trigger".
   const recent = db.prepare(`SELECT r.id, r.status, r.ended_at, a.name AS agent FROM runs r LEFT JOIN agents a ON a.id=r.agent_id
     WHERE r.status IN ('done','failed','aborted') ORDER BY r.ended_at DESC LIMIT 30`).all()
+  const back = backTarget(url)
   const body = `
   <link rel="stylesheet" href="/static/swd.css"><link rel="stylesheet" href="/static/swd-light.css"><link rel="stylesheet" href="/static/flows.css">
   <div class="flow-head">
-    <a class="btn" href="/flows">${e(t('flows.editor.back'))}</a>
-    <input id="flow-name" placeholder="${e(t('flows.name'))}" value="${e(data.name)}">
+    <a class="btn" id="flow-back" href="${e(back)}">${e(t('flows.editor.back'))}</a>
+    <input id="flow-name" placeholder="${e(t('flows.name_optional'))}" value="${e(data.name)}">
     <label class="chk"><input type="checkbox" id="flow-active" ${data.active ? 'checked' : ''}> ${e(t('flows.active'))}</label>
     <span class="spacer"></span>
     <span id="flow-status" class="dim"></span>
@@ -126,7 +140,7 @@ function pageRuns(res, url) {
     <td>${e(fr.started_at)}</td><td>${e(fr.ended_at ?? '')}</td>
     <td class="dim">${e(fr.error ?? (fr.log.at(-1)?.msg ?? ''))}</td></tr>`).join('')
   const body = `
-  <p><a class="btn" href="/flows">${e(t('flows.editor.back'))}</a></p>
+  <p><a class="btn" href="${e(flowId ? `/flows/edit?id=${flowId}` : backTarget(url))}">${e(t('flows.editor.back'))}</a></p>
   <table class="list"><thead><tr><th>${e(t('flows.runs.flow'))}</th><th>${e(t('flows.runs.status'))}</th><th>${e(t('flows.trigger'))}</th><th>${e(t('flows.runs.started'))}</th><th>${e(t('flows.runs.ended'))}</th><th>${e(t('flows.runs.last_message'))}</th></tr></thead>
   <tbody>${rows || `<tr><td colspan="6" class="dim">${e(t('flows.runs.none'))}</td></tr>`}</tbody></table>`
   html(res, 200, layout(t('flows.runs.title'), '/flows', body))
@@ -178,9 +192,12 @@ export async function flowApi(req, res, url) {
   if (req.method === 'POST' && path === '/api/flows/save') {
     let b
     try { b = JSON.parse(await readBody(req) || '{}') } catch { return json(res, 400, { ok: false, problems: ['invalid JSON'] }) }
-    const name = String(b.name ?? '').trim()
+    // The name is OPTIONAL. A flow hangs on the agent or the single run whose
+    // end starts it; whether that is one flow or four, naming each of them is a
+    // hurdle, not information. Left empty, the hub picks a free "Flow n" — the
+    // row still needs something unique for the lists and for `flow_runs.flow_name`.
+    const name = String(b.name ?? '').trim() || autoFlowName()
     const problems = []
-    if (!name) problems.push(t('flows.editor.name_required'))
     const trigger = normalizeTrigger(b.trigger)
     if (trigger.kind === 'cron' && !validCron(trigger.expr)) problems.push(t('flows.editor.cron_invalid'))
     const definition = b.definition && typeof b.definition === 'object' ? b.definition : { properties: {}, sequence: [] }

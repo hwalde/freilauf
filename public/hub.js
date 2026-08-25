@@ -159,6 +159,73 @@
     input.addEventListener('blur', speichern)
     input.addEventListener('click', (e2) => e2.stopPropagation())
   }, true)
+  // ---- run/agent form: keep it while a flow is being built ----
+  // The flow editor is a page of its own, and this form is plain server-rendered
+  // HTML: clicking "create a flow" used to throw away everything typed and left
+  // no way back to the form at all. Two halves fix that — the link carries where
+  // to return to (the editor's Back button uses it), and what stands in the form
+  // is parked in sessionStorage until it comes back.
+  const STASH_PREFIX = 'cchub:form:'
+  function ohneFlowParam() {
+    const u = new URL(location.href)
+    u.searchParams.delete('flow')
+    return u.pathname + u.search
+  }
+  function stashForm(form, key) {
+    if (!form) return
+    try {
+      const data = []
+      new FormData(form).forEach(function (v, k) { if (typeof v === 'string') data.push([k, v]) })
+      sessionStorage.setItem(key, JSON.stringify(data))
+    } catch (err) { /* private mode / quota: the form is then simply lost, as before */ }
+  }
+  function restoreForm(form, key) {
+    if (!form) return
+    let data
+    try {
+      data = JSON.parse(sessionStorage.getItem(key) || 'null')
+      sessionStorage.removeItem(key)
+    } catch (err) { return }
+    if (!Array.isArray(data)) return
+    const byName = new Map()
+    data.forEach(function (kv) { byName.set(kv[0], (byName.get(kv[0]) || []).concat(kv[1])) })
+    form.querySelectorAll('input[name], textarea[name], select[name]').forEach(function (el) {
+      const vals = byName.get(el.name)
+      if (el.type === 'checkbox' || el.type === 'radio') {
+        // Unchecked boxes are not in a FormData — absent means "was not ticked".
+        el.checked = !!vals && vals.indexOf(el.value) >= 0
+        return
+      }
+      if (!vals || !vals.length) return
+      const v = vals.shift()
+      el.value = v
+      // The provider and effort <select>s are filled by fetch only afterwards;
+      // 'data-gewaehlt' is what those loaders read, so the choice survives.
+      if (el.dataset.gewaehlt !== undefined) el.dataset.gewaehlt = v
+    })
+  }
+
+  const flowBox = document.querySelector('fieldset.flows-attach')
+  if (flowBox) {
+    const defForm = flowBox.closest('form')
+    const stashKey = STASH_PREFIX + ohneFlowParam()
+    flowBox.querySelectorAll('a[href^="/flows"]').forEach(function (a) {
+      const u = new URL(a.getAttribute('href'), location.origin)
+      u.searchParams.set('back', ohneFlowParam())
+      a.setAttribute('href', u.pathname + u.search)
+      a.addEventListener('click', function () { stashForm(defForm, stashKey) })
+    })
+    restoreForm(defForm, stashKey)
+    // Coming back from the editor of a FRESHLY created flow: tick it right away
+    // — that is why the trip was made.
+    const neu = new URL(location.href).searchParams.get('flow')
+    if (neu) {
+      Array.from(flowBox.querySelectorAll('input[name=flows]')).forEach(function (cb) {
+        if (cb.value === neu) cb.checked = true
+      })
+      history.replaceState(null, '', ohneFlowParam())
+    }
+  }
 
   // ---- provider and model selection ----
   // The list arrives AFTER rendering via fetch: if a provider API hangs, a
@@ -317,10 +384,46 @@
       }
     }
 
+    /**
+     * Switching the coding agent replaces provider, model, serving provider and
+     * effort with what THAT coding agent was last run with — it does not carry
+     * the previous one's setup over. Those settings are not merely unhelpful
+     * across coding agents, they are incompatible: an opencode model slug is
+     * nothing claude runs, cursor carries the effort level inside its model ID,
+     * and a subscription harness has no provider at all. Nothing remembered for
+     * it means: empty, not "whatever was standing there".
+     */
+    async function harnessGewechselt() {
+      let c = { provider: '', model: '', or_provider: '', effort: '' }
+      try {
+        const j = await (await fetch('/api/run-choice?harness=' +
+          encodeURIComponent(harnessSel?.value ?? ''))).json()
+        if (j.ok && j.choice) c = j.choice
+      } catch { /* no answer: start empty rather than keep the old coding agent's setup */ }
+      provSel.dataset.gewaehlt = c.provider || ''
+      provSel.value = c.provider || ''
+      modelInput.value = c.model || ''
+      if (effSel) { effSel.dataset.gewaehlt = c.effort || ''; effSel.value = '' }
+      if (pin) pin.checked = !!c.or_provider
+      if (orProv) {
+        orProv.innerHTML = ''
+        if (c.or_provider) {
+          const opt = document.createElement('option')
+          opt.value = c.or_provider
+          opt.textContent = c.or_provider
+          orProv.append(opt)
+        }
+      }
+      await ladeProvider()      // fills the provider list and, through it, the models
+      syncRouting()
+      await ladeEffort()
+      if (pin?.checked) ladeEndpunkte()
+    }
+
     provSel.addEventListener('change', () => {
       provSel.dataset.gewaehlt = provSel.value; ladeModelle(); syncRouting(); ladeEffort()
     })
-    harnessSel?.addEventListener('change', () => { ladeProvider(); syncRouting(); ladeEffort() })
+    harnessSel?.addEventListener('change', harnessGewechselt)
     pin?.addEventListener('change', () => { syncRouting(); ladeEndpunkte() })
     effSel?.addEventListener('change', () => { effSel.dataset.gewaehlt = effSel.value })
     modelInput.addEventListener('change', () => { ladeEndpunkte(); ladeEffort() })

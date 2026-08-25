@@ -11,7 +11,7 @@ import { subscriptionUsage } from './usage.mjs'
 import { openrouterCredits } from './quota.mjs'
 import { launchRun } from './runner.mjs'
 import { startRun } from './scheduler.mjs'
-import { runDefFromForm, runStartFromForm, saveAgent, rememberRunChoice } from './run-def.mjs'
+import { runDefFromForm, runStartFromForm, saveAgent, rememberRunChoice, lastRunChoiceFor } from './run-def.mjs'
 import { runTitle, TITLE_MAX } from './title.mjs'
 import {
   pageOverview, pageAgents, pageRunForm, pageRun, pageRepos, pageSettings,
@@ -118,6 +118,25 @@ async function api(req, res, url) {
     const agents = listCodingAgents()
     const subscription = !!agents.find(a => a.harness === harness)?.plugin?.subscription
     return json(res, 200, { ok: true, harness, subscription, provider })
+  }
+
+  // What this coding agent was last run with. The form asks for it when the
+  // coding agent is SWITCHED: provider, model and effort of the previous one are
+  // not merely unhelpful there, they are incompatible (an opencode slug is
+  // nothing claude runs), so they are replaced instead of left standing.
+  if (req.method === 'GET' && path === '/api/run-choice') {
+    const harness = url.searchParams.get('harness') ?? ''
+    const c = lastRunChoiceFor(harness)
+    return json(res, 200, {
+      ok: true,
+      harness,
+      choice: {
+        provider: c.provider ?? '',
+        model: c.model ?? '',
+        or_provider: c.or_provider ?? '',
+        effort: c.effort ?? '',
+      },
+    })
   }
 
   // Configured coding agents + which plugins are installed on this machine

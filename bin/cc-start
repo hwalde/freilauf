@@ -328,6 +328,36 @@ cmd_autonomous() {
     esac
 }
 
+# opencode only: press Enter once, after the TUI has drawn.
+#
+# 'opencode --prompt' puts the text into the TUI's editor and normally sends it
+# off by itself -- but only up to a certain length. A real hub prompt (task plus
+# platform rules plus extra skills) is past it: the text then sits UNSENT in the
+# editor, opencode never starts working, and from the outside the run looks
+# perfectly healthy -- tmux session alive, no error in the log. Measured with
+# opencode 1.18.23: ~2 KB is sent off, ~20 KB is not.
+#
+# So the launcher nudges once. Enter on an EMPTY editor is a no-op in opencode
+# (measured), so the case that sent itself by itself is not harmed: whichever of
+# the two happens first sends the prompt, the other one hits an empty editor.
+# The wait is for the status bar ('ctrl+p'), not a fixed number of seconds --
+# MCP servers can take a while, and pressing Enter before the TUI is there would
+# go nowhere.
+oc_submit_nudge() {
+    cat <<'NUDGE'
+(
+  i=0
+  while [[ $i -lt 90 ]]; do
+      sleep 1
+      tmux capture-pane -p -t "$TMUX_PANE" 2>/dev/null | grep -q 'ctrl+p' && break
+      i=$((i + 1))
+  done
+  sleep 1
+  tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null
+) >/dev/null 2>&1 &
+NUDGE
+}
+
 # Quota notice (claude only: usage.sh is Claude-specific).
 quota_hinweis() {
     [[ "$HARNESS" == "claude" ]] || return 0
@@ -480,6 +510,7 @@ else
         printf 'cd %s\n' "$(q "$WORKDIR")"
         printf 'CC_PROMPT="$(cat %s)"\n' "$(q "$PF")"
         printf 'rm -f %s %s\n' "$(q "$PF")" "$(q "$LF")"
+        [[ "$HARNESS" == "opencode" ]] && oc_submit_nudge
         printf 'exec %s\n' "$(cmd_autonomous)"
     } > "$LF"
     chmod 700 "$LF"

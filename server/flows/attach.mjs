@@ -75,9 +75,11 @@ export function attachableFlows() {
 export function flowAttachFields(json) {
   const chosen = new Map(parseAttachments(json).map(a => [a.flowId, a.when]))
   const flows = attachableFlows()
-  const links = `<p class="dim">
-    <a href="/flows/edit">${e(t('flows.attach.new'))}</a> ·
-    <a href="/flows">${e(t('flows.attach.manage'))}</a></p>`
+  // Only the way INTO a new flow, deliberately not into the flow list: a flow
+  // hangs on this agent or this single run, and the list is not part of that
+  // thought. hub.js appends `back=<this page>` to the link and parks the form in
+  // sessionStorage, so the trip to the editor does not cost what was typed.
+  const links = `<p class="dim"><a href="/flows/edit">${e(t('flows.attach.new'))}</a></p>`
   if (!flows.length) {
     return `<fieldset class="flows-attach"><legend>${e(t('flows.attach.legend'))}</legend>
       <p class="dim">${e(t('flows.attach.none'))}</p>${links}</fieldset>`

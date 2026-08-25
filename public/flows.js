@@ -560,9 +560,28 @@ designer.onDefinitionChanged.subscribe(touch)
 refreshHints()
 
 // ---------------- save ----------------
+/**
+ * Where the freshly saved flow sends the browser. The editor was opened FROM a
+ * run definition (`?back=/runs/new?repo=1`), and that form wants to come back
+ * with the new flow ticked — so the id travels in the back target as well.
+ */
+function nextUrl(newId) {
+  const u = new URL(location.href)
+  u.searchParams.set('id', newId)
+  const back = u.searchParams.get('back')
+  if (back) {
+    const b = new URL(back, location.origin)
+    b.searchParams.set('flow', newId)
+    u.searchParams.set('back', b.pathname + b.search)
+  }
+  return u.pathname + u.search
+}
+
 async function save() {
+  // The name is optional: a flow hangs on an agent or a single run, and naming
+  // each of them is a hurdle rather than information. The server fills an empty
+  // one with a free "Flow n".
   const name = document.getElementById('flow-name').value.trim()
-  if (!name) { setStatus(T('flows.editor.name_required'), 'err'); return }
   if (!designer.isValid()) { setStatus(T('flows.editor.invalid'), 'err'); return }
   setStatus('…')
   const body = {
@@ -573,7 +592,7 @@ async function save() {
   if (!r.ok) { setStatus((r.problems ?? [r.error]).join(' · '), 'err'); return }
   dirty = false
   setStatus(r.hints?.length ? T('flows.editor.saved_with_hints', { n: r.hints.length }) : T('flows.editor.saved'), r.hints?.length ? 'warn' : 'ok')
-  if (!flow.id) location.replace(`/flows/edit?id=${r.id}`)
+  if (!flow.id) location.replace(nextUrl(r.id))
 }
 document.getElementById('flow-save').addEventListener('click', save)
 document.getElementById('flow-name').addEventListener('input', touch)

@@ -106,6 +106,20 @@ export function saveFlow({ id = null, name, active = 1, trigger, definition }) {
     .run(name, active ? 1 : 0, trig, def)
   return Number(r.lastInsertRowid)
 }
+/**
+ * A free name for a flow that was saved without one. The name is optional in
+ * the UI — a flow hangs on an agent or a single run, and naming each of four
+ * attached flows is a hurdle — but the column is UNIQUE and `flow_runs` keeps a
+ * copy of the name, so the row needs something. Counts up instead of using the
+ * id: the id is only known after the INSERT.
+ */
+export function autoFlowName() {
+  const taken = new Set(db.prepare('SELECT name FROM flows').all().map(r => r.name))
+  for (let n = 1; ; n++) {
+    const candidate = `Flow ${n}`
+    if (!taken.has(candidate)) return candidate
+  }
+}
 export function deleteFlow(id) { db.prepare('DELETE FROM flows WHERE id = ?').run(id) }
 export function toggleFlow(id) { db.prepare('UPDATE flows SET active = 1 - active WHERE id = ?').run(id) }
 

@@ -1200,6 +1200,15 @@ try {
     gleich(rd.defFromAgent({ flows: '[{"flowId":1,"when":"failed"}]' }).flows, '[{"flowId":1,"when":"failed"}]',
       'attached flows copied verbatim')
   })
+  // A flow hangs on an agent or a single run — naming each of four attached
+  // flows is a hurdle, not information. So the name is optional in the UI and
+  // the hub fills in a free one; the column is UNIQUE and flow_runs keeps a copy.
+  await pruefe('a flow saved without a name gets a free one', async () => {
+    const fdb3 = await import('../server/flows/db.mjs')
+    gleich(fdb3.autoFlowName(), 'Flow 1', 'the first one')
+    fdb3.saveFlow({ name: fdb3.autoFlowName(), trigger: { kind: 'manual' }, definition: { sequence: [] } })
+    gleich(fdb3.autoFlowName(), 'Flow 2', 'the taken one is skipped')
+  })
   await pruefe('attached flows go through the form like every other definition field', async () => {
     const fdb2 = await import('../server/flows/db.mjs')
     const id = fdb2.saveFlow({ name: 'attach-test', trigger: { kind: 'run_finished' }, definition: { sequence: [] } })
@@ -1222,6 +1231,24 @@ try {
     gleich(JSON.stringify(rd.lastRunChoice()), '{}', 'nothing offered')
     ca.saveCodingAgent({ harness: 'claude', enabled: 1, providers: [] })
     gleich(rd.lastRunChoice().harness, 'claude', 'offered again after switching on')
+  })
+  // Switching the coding agent in the form must not leave the previous one's
+  // setup standing — an opencode slug is nothing claude runs. So every coding
+  // agent keeps its OWN last setup, and one it has none for answers empty.
+  await pruefe('every coding agent remembers its own setup', () => {
+    ca.saveCodingAgent({ harness: 'opencode', enabled: 1, providers: ['openrouter'] })
+    rd.rememberRunChoice({ harness: 'opencode', model: 'z-ai/glm-4.6', provider: 'openrouter', orProvider: 'novita', effort: null })
+    gleich(rd.lastRunChoice().harness, 'opencode', 'the last one opens the form')
+    const c = rd.lastRunChoiceFor('claude')
+    gleich(c.model, 'claude-opus-5', 'claude still has its own model')
+    gleich(c.effort, 'high', 'and its own effort')
+    gleich(c.provider, null, 'and no provider of the other one')
+    const o = rd.lastRunChoiceFor('opencode')
+    gleich(o.provider, 'openrouter', 'opencode has its own provider')
+    gleich(o.or_provider, 'novita', 'including the serving provider')
+    gleich(JSON.stringify(rd.lastRunChoiceFor('hermes')), '{}', 'an unconfigured coding agent offers nothing')
+    ca.saveCodingAgent({ harness: 'cursor', enabled: 1, providers: [] })
+    gleich(rd.lastRunChoiceFor('cursor').model, null, 'a configured one without history stays empty')
   })
 
   // ------------------------------------------------------------------

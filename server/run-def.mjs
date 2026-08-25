@@ -343,36 +343,74 @@ export function runStartFromForm(b, problems = [], nowMs = Date.now()) {
 
 const LAST_CHOICE_KEY = 'last_run_choice'
 
+/** The stored blob, in the current shape. Old single-entry blobs are lifted. */
+function choiceStore() {
+  let v
+  try { v = JSON.parse(getSetting(LAST_CHOICE_KEY) ?? 'null') } catch { return { harness: null, byHarness: {} } }
+  if (!v || typeof v !== 'object') return { harness: null, byHarness: {} }
+  // Before, exactly ONE setup was remembered — that one belongs to its harness.
+  if (!v.byHarness) {
+    return v.harness ? { harness: v.harness, byHarness: { [v.harness]: setupOf(v) } } : { harness: null, byHarness: {} }
+  }
+  return { harness: v.harness ?? null, byHarness: v.byHarness ?? {} }
+}
+
+/** Only the four setup fields, in the shape the form block reads (agent row keys). */
+function setupOf(v = {}) {
+  return {
+    provider: v.provider ?? null,
+    model: v.model ?? null,
+    or_provider: v.or_provider ?? null,
+    effort: v.effort ?? null,
+  }
+}
+
 /**
- * Remember coding agent, provider, model and effort of the last definition the
- * operator sent off. In practice the next run wants the same combination — and
- * picking a model from a 200-entry list again every time is exactly the kind of
- * work a form should do for you.
+ * Remember provider, model, serving provider and effort of the last definition
+ * the operator sent off — PER coding agent. In practice the next run wants the
+ * same combination, and picking a model from a 200-entry list again every time
+ * is exactly the kind of work a form should do for you.
+ *
+ * Per coding agent, because the setups are not interchangeable: an opencode
+ * model slug is nothing claude could run, and an effort level cursor knows sits
+ * inside its model ID. Whoever switches the coding agent in the form must not
+ * keep the previous one's model — hence one entry per harness plus the harness
+ * that was used last (that one opens the form).
  *
  * Deliberately only these four fields: prompt, branch rule and duration belong
  * to the task, not to the setup.
  */
 export function rememberRunChoice(def) {
   if (!def?.harness) return
-  setSetting(LAST_CHOICE_KEY, JSON.stringify({
-    harness: def.harness,
+  const store = choiceStore()
+  store.harness = def.harness
+  store.byHarness[def.harness] = setupOf({
     provider: def.provider ?? null,
     model: def.model ?? null,
     or_provider: def.orProvider ?? null,
     effort: def.effort ?? null,
-  }))
+  })
+  setSetting(LAST_CHOICE_KEY, JSON.stringify(store))
+}
+
+/**
+ * What this coding agent was last run with — `{ harness, provider, model,
+ * or_provider, effort }`, the fields empty when nothing is remembered for it.
+ * The form asks for exactly this when the coding agent is switched, so no
+ * setting of the previous one is left standing.
+ */
+export function lastRunChoiceFor(harness) {
+  if (!harness || !enabledCodingAgents().some(a => a.harness === harness)) return {}
+  return { harness, ...setupOf(choiceStore().byHarness[harness]) }
 }
 
 /** The remembered choice in the shape the form block reads (agent row keys), or {}. */
 export function lastRunChoice() {
-  try {
-    const v = JSON.parse(getSetting(LAST_CHOICE_KEY) ?? 'null')
-    if (!v || typeof v !== 'object' || !v.harness) return {}
-    // A coding agent that has since been switched off must not silently
-    // preselect itself — the form would offer something the hub refuses.
-    if (!enabledCodingAgents().some(a => a.harness === v.harness)) return {}
-    return v
-  } catch { return {} }
+  const store = choiceStore()
+  // A coding agent that has since been switched off must not silently
+  // preselect itself — the form would offer something the hub refuses.
+  if (!store.harness || !enabledCodingAgents().some(a => a.harness === store.harness)) return {}
+  return { harness: store.harness, ...setupOf(store.byHarness[store.harness]) }
 }
 
 // ------------------------------------------------------------------- flows

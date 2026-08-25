@@ -85,7 +85,7 @@ is one and the same **run definition**, and it lives in **`server/run-def.mjs`**
 | Agent row → definition | `defFromAgent(row)` | scheduler, "start now", flows |
 | Write an agent (INSERT/UPDATE) | `saveAgent(...)` | agent form + "save as agent" |
 | Field list for the flow designer | `RUN_DEF_FLOW_FIELDS`, `defFromFlowProps` | `flows/steps.mjs` |
-| Last used setup | `rememberRunChoice`, `lastRunChoice` | both forms (preselection) |
+| Last used setup, **per coding agent** | `rememberRunChoice`, `lastRunChoice`, `lastRunChoiceFor` | both forms (preselection, and the reset on switching the coding agent) |
 | Title + start time (single run only) | `runTitleField`, `runStartTimeFields`, `runStartFromForm` | single-run form + `POST /api/runs` |
 
 And there is exactly **one** way from a definition to a running run:
@@ -387,6 +387,15 @@ errors (`post_api_request` only fires after success).
   from the `/` menu once sat in the DB as a rate limit on a production run.
   Patterns in the harness plugins are therefore narrow, there is an exception
   list, and a single log hit is only yellow.
+- **`opencode --prompt` stops sending the prompt off when it gets long.** The
+  text lands in the TUI's editor either way, but only a short one is submitted
+  by itself — measured with opencode 1.18.23: ~2 KB goes, ~20 KB stays put. A
+  real hub prompt (task + platform rules + extra skills) is past that, and the
+  failure is silent in every direction: tmux session alive, no line in the log,
+  the run simply never starts working. `cc-start` therefore presses Enter once
+  from the launcher after the TUI has drawn (it waits for the status bar, not
+  for a fixed number of seconds). Enter on an empty editor is a no-op in
+  opencode — measured — so the case that submitted by itself is not harmed.
 - **`cursor-agent -p` is wrong for a run.** `-p/--print` prints and exits — the
   tmux session would be gone immediately. The prompt belongs as a **positional
   argument** after `--` (`cursor-agent --force --trust -- "$CC_PROMPT"`); the
