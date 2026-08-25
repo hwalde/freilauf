@@ -135,7 +135,6 @@ async function usagePanel() {
         ${d.resets_at ? `<span class="dim">${e(t('usage.resets', { time: d.resets_at.slice(11, 16) + ' UTC' }))}</span>` : ''}</div>`
     }
     if (d.kind === 'cursor') {
-      const models = (d.by_model ?? []).map(m => `${e(m.model)} ${m.usd.toFixed(2)} $`).join(' · ')
       // What one reads at a glance is the bar — like the claude rows above. The
       // dollars are the detail and move into the tooltip; only when the included
       // amount is the configured fallback does the text say so (tilde).
@@ -148,8 +147,7 @@ async function usagePanel() {
       return `<div class="usage-row"><b>${e(u.label)}</b>${d.plan ? ` <span class="dim">${e(d.plan)}</span>` : ''}
         ${d.pct != null ? `<span class="quota" title="${e(money)}">${pctBar(d.pct)}</span>`
           : `<span class="dim">${e(t('usage.unavailable'))}</span>`}
-        ${days != null ? `<span class="dim">${e(t('usage.resets_in', { days }))}</span>` : ''}
-        ${models ? `<span class="dim">${models}</span>` : ''}</div>`
+        ${days != null ? `<span class="dim">${e(t('usage.resets_in', { days }))}</span>` : ''}</div>`
     }
     return ''
   }).join('')

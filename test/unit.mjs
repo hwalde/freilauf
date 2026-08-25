@@ -621,7 +621,6 @@ try {
       gleich(d.spent_usd, 0.13, 'spend belongs to the same source as the limit')
       gleich(d.remaining_usd, 19.87, 'remaining')
       gleich(d.cycle_end, '2026-09-14T16:45:55.000Z', 'cycle end')
-      gleich(d.by_model[0].model, 'auto', 'per-model breakdown from the aggregation')
     } finally {
       globalThis.fetch = echt
       if (altAuth === undefined) delete process.env.CCHUB_CURSOR_AUTH

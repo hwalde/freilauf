@@ -47,7 +47,7 @@ server/usage.mjs           aggregates plugin usage() for the UI
 | `effortLevels()` | async fn (optional) | levels the CLI itself accepts (probed; cached 24 h) |
 | `effortOptions({provider, model, helpers})` | async fn | levels for a concrete combination; returns `{stufen, standard?, pflicht?, quelle?, hinweisKey}` — `stufen: null` hides the form field. `helpers` = `{ownLevels, registryEffort, openrouterEffort}` |
 | `modelArgs(run)` | fn | CLI arguments for `cc-start`; returns `{args, fehlt}` (`fehlt` = provider ids whose key is missing) |
-| `usage()` | async fn | subscription usage for the overview panel, or `null` (see `usage.mjs` for the shapes: `{kind:'claude', five, seven, resets_at, plan}` / `{kind:'cursor', plan, spent_usd, by_model}`) |
+| `usage()` | async fn | subscription usage for the overview panel, or `null` (see `usage.mjs` for the shapes: `{kind:'claude', five, seven, resets_at, plan}` / `{kind:'cursor', plan, spent_usd, included_usd, remaining_usd, cycle_end}`) |
 
 ### Adding a new coding agent
 

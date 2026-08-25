@@ -102,7 +102,8 @@ export default {
    *   - DashboardService/GetCurrentPeriodUsage    → included amount, spend and
    *     billing cycle of the running period, all in CENTS ('limit': 2000 on
    *     Pro) — this is what makes the bar honest, nothing has to be assumed
-   *   - DashboardService/GetAggregatedUsageEvents → per-model breakdown
+   *   - DashboardService/GetAggregatedUsageEvents → total of the period, used
+   *     only as the fallback when the period endpoint answers nothing
    *
    * Cursor documents no included amount anywhere (the pricing page says only
    * "a set amount of model usage", Pro+/Ultra are "3x/20x Pro limits"), and the
@@ -125,10 +126,6 @@ export default {
       post('/aiserver.v1.DashboardService/GetCurrentPeriodUsage'),
     ])
     if (!profile && !agg && !period) return null
-    const byModel = (agg?.aggregations ?? []).map(a => ({
-      model: a.modelIntent ?? '?',
-      usd: Math.round((a.totalCents ?? 0)) / 100,
-    })).sort((a, b) => b.usd - a.usd)
     const usd = (cents) => (cents == null || !Number.isFinite(Number(cents)) ? null : Math.round(Number(cents)) / 100)
     const plan = period?.planUsage ?? null
     const endMs = Number(period?.billingCycleEnd)
@@ -141,7 +138,6 @@ export default {
       included_usd: usd(plan?.limit),
       remaining_usd: usd(plan?.remaining),
       cycle_end: Number.isFinite(endMs) && endMs > 0 ? new Date(endMs).toISOString() : null,
-      by_model: byModel.slice(0, 5),
     }
   },
 }
