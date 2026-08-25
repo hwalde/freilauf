@@ -1,6 +1,13 @@
 // cc-hub — budget gates (planning 4.2): Claude quota (quota.json, seven_day_fable via
 // fable_weekly_refresh.py) and OpenRouter credits.
 //
+// Where quota.json comes from: claude NEVER writes it itself. It hands the
+// windows to the status line only (stdin JSON, 'rate_limits.five_hour' and
+// 'rate_limits.seven_day', each used_percentage + resets_at, and only for
+// Pro/Max after the first API response) — the status line script mirrors them
+// into the file. A window missing there means nobody wrote it, not that it does
+// not exist.
+//
 // Claude has THREE windows, not two: the 5-hour one, the general 7-day one and
 // a separate 7-day one for fable. They are reported separately (seven_general /
 // seven_fable) so the panel can show which one is filling up; 'seven' is the
