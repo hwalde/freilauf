@@ -106,6 +106,14 @@ deliberately **not** part of the definition: the repo (it is the context, and
 the switcher in the header sets it), the name and the schedule (they make an
 agent an agent).
 
+The repo is not just the path — under **Repos** each repo can carry its own
+**repo prompt** (`repos.prompt`): instructions that are added to **every** run
+of that repo, agents and single runs alike. Like `base_branch` and
+`worktree_extras` it is read live at launch (`repoPromptZusatz()` in
+runner.mjs composes it as a labeled section into `prompt.md`) — repo config is
+not snapshotted into the run, so editing it affects the next run, never a
+running or finished one.
+
 ### Every run has a title
 
 An agent run is recognizable by its agent — a single run is not: it is not

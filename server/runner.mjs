@@ -38,6 +38,19 @@ export function platformSuffix(run, branchRule, settings) {
     .replaceAll('{expected_minutes}', String(run.expected_minutes))
 }
 
+/**
+ * Prompt addition for the repo's per-repo prompt (repos.prompt): instructions
+ * that apply to EVERY run of this repo — agents and single runs alike. Kept as
+ * its own labeled section so the agent can tell repo-wide context from the task
+ * and the platform rules. Read live at launch, like base_branch and
+ * worktree_extras: repo config is not snapshotted into the run.
+ */
+export function repoPromptZusatz(prompt) {
+  const text = String(prompt ?? '').trim()
+  if (!text) return ''
+  return `Repository context (applies to every run of this repo):\n${text}`
+}
+
 function expandPattern(pattern, run) {
   return String(pattern || '')
     .replaceAll('{date}', new Date().toISOString().slice(0, 10).replaceAll('-', ''))
@@ -201,7 +214,7 @@ export async function launchRun(runId) {
     : run.branch_mode === 'fest'
       ? `Work on the existing branch ${branchExpected}.`
       : 'No branch — the worktree is detached; changes are throwaway changes.'
-  const fullPrompt = [run.prompt, run.prompt_extra?.trim(),
+  const fullPrompt = [run.prompt, repoPromptZusatz(repo.prompt), run.prompt_extra?.trim(),
     skillPromptZusatz(run.skills),
     platformSuffix({ ...run, id: runId, workdir_effective: workdir }, branchRule, settings).trim()]
     .filter(Boolean).join('\n\n')

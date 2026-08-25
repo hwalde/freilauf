@@ -196,6 +196,10 @@ async function hubStarten({ echteAgenten = false } = {}) {
     { was: `hub at ${BASIS} responds`, timeoutMs: 15_000 })
 
   db = new DatabaseSync(join(SB, 'data', 'cc-hub.db'))
+  // The hub holds its own connection and writes in the background (scheduler,
+  // watcher); a direct write here must WAIT for it instead of failing instantly
+  // with "database is locked" (the hub's own connection uses busy_timeout 5000).
+  db.exec('PRAGMA busy_timeout = 10000;')
 }
 
 // The watcher ticks inside the hub every 30 s. Instead of waiting, the suite also
@@ -395,6 +399,23 @@ try {
     }, { alsBrowser: true })
     gleich(r.status, 400, 'status')
   })
+  await pruefe('a repo prompt is saved and survives an update', async () => {
+    const row = db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
+    const r = await formular(`/repos/edit?id=${row.id}`, {
+      name: 'e2e', path: REPO, base_branch: 'main',
+      worktree_extras: row.worktree_extras,
+      prompt: 'This repo is only for e2e tests.',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'redirect')
+    gleich(db.prepare('SELECT prompt FROM repos WHERE name=?').get('e2e').prompt, 'This repo is only for e2e tests.', 'prompt in the database')
+    // Emptying it sets the row back to NULL — no empty string stays behind.
+    const r2 = await formular(`/repos/edit?id=${row.id}`, {
+      name: 'e2e', path: REPO, base_branch: 'main',
+      worktree_extras: row.worktree_extras, prompt: '   ',
+    }, { alsBrowser: true })
+    gleich(r2.status, 303, 'redirect of the clearing update')
+    gleich(db.prepare('SELECT prompt FROM repos WHERE name=?').get('e2e').prompt, null, 'whitespace-only prompt is NULL')
+  })
 
   const repoId = db.prepare('SELECT id FROM repos WHERE name=?').get('e2e').id
 
@@ -540,6 +561,19 @@ try {
     enthaelt(p, 'E2E-Auftrag', 'own task')
     enthaelt(p, 'cc-report done', 'platform rules')
     enthaelt(p, R1, 'run ID')
+  })
+  await pruefe('a per-repo prompt is added to every run', async () => {
+    db.prepare('UPDATE repos SET prompt=? WHERE id=?').run('This repo has its own rules.', repoId)
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Repo-Prompt' })
+    wahr(!!j.runId, `run (${JSON.stringify(j)})`)
+    await sessionMerken(j.runId)
+    const p = readFileSync(join(SB, 'runs', j.runId, 'prompt.md'), 'utf8')
+    enthaelt(p, 'E2E-Repo-Prompt', 'own task')
+    enthaelt(p, 'Repository context', 'section label')
+    enthaelt(p, 'This repo has its own rules.', 'repo prompt content')
+    // Repo config is read at launch, not snapshotted: clearing it removes it from
+    // the next run, and runs before it keep their prompt.md.
+    db.prepare('UPDATE repos SET prompt=? WHERE id=?').run(null, repoId)
   })
   await pruefe('tmux session is running and assigned to the run', async () => {
     const s = lauf(R1).tmux_session

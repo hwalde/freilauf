@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS repos (
   path TEXT NOT NULL,
   base_branch TEXT NOT NULL DEFAULT 'main',
   worktree_extras TEXT NOT NULL DEFAULT '[]',
+  prompt TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS agents (
@@ -119,6 +120,9 @@ addColumn('agents', 'schedule_time', 'TEXT')      // "06:30"
 addColumn('agents', 'schedule_weeks', 'INTEGER')  // 1 = every week, 2 = every second …
 addColumn('agents', 'schedule_anchor', 'TEXT')    // "2026-08-23" start week for every-n-weeks
 addColumn('agents', 'run_at', 'TEXT')             // "2026-08-24T06:30" for the one-off start
+// Per-repo prompt: additional instructions given to EVERY run of this repo
+// (agents and single runs alike), read at launch like base_branch/worktree_extras.
+addColumn('repos', 'prompt', 'TEXT')
 // Provider choice for opencode/hermes. NULL = as before: 'model' is then the complete,
 // hand-typed string and goes to the harness unchanged — existing data stays untouched.
 addColumn('agents', 'provider', 'TEXT')

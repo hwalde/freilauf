@@ -358,6 +358,22 @@ try {
     enthaelt(platformSuffix(lauf, 'REGEL', { prompt_suffix: '' }), 'Platform rules', 'default template')
   })
   // ------------------------------------------------------------------
+  gruppe('Repo prompt in the run prompt (repoPromptZusatz)')
+
+  const { repoPromptZusatz } = await import('../server/runner.mjs')
+
+  await pruefe('no prompt adds nothing', () => {
+    gleich(repoPromptZusatz(null), '', 'null')
+    gleich(repoPromptZusatz(''), '', 'empty')
+    gleich(repoPromptZusatz('   \n  '), '', 'whitespace only')
+  })
+  await pruefe('a prompt becomes a labeled section', () => {
+    const t = repoPromptZusatz('Always write tests for this repo.')
+    enthaelt(t, 'Always write tests for this repo.', 'content is passed through verbatim')
+    enthaelt(t, 'Repository context', 'the section is labeled')
+    gleich(t.split('\n')[0], 'Repository context (applies to every run of this repo):', 'label line')
+  })
+  // ------------------------------------------------------------------
   gruppe('Model, provider and effort arguments for the harnesses')
 
   const { harnessModelArgs } = await import('../server/runner.mjs')

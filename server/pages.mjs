@@ -444,14 +444,18 @@ function vorfallAbschnitt(runId, runStatus = null) {
 // ---------------- repos ----------------
 export async function pageRepos(req, res, url) {
   const repos = db.prepare('SELECT * FROM repos ORDER BY name').all()
-  const rows = repos.map(r => `
-  <tr><td>${e(r.name)}</td><td><code>${e(r.path)}</code></td><td>${e(r.base_branch)}</td>
-  <td class="dim">${e(r.worktree_extras)}</td>
-  <td><a href="/repos/edit?id=${r.id}">${e(t('agents.edit'))}</a></td></tr>`).join('')
+  const rows = repos.map(r => {
+    const p = (r.prompt ?? '').trim()
+    const kurz = p ? (p.length > 60 ? p.slice(0, 60) + '…' : p) : ''
+    return `<tr><td>${e(r.name)}</td><td><code>${e(r.path)}</code></td><td>${e(r.base_branch)}</td>
+    <td class="dim">${e(r.worktree_extras)}</td>
+    <td>${kurz ? `<span class="dim" title="${e(p)}">${e(kurz)}</span>` : `<span class="dim">—</span>`}</td>
+    <td><a href="/repos/edit?id=${r.id}">${e(t('agents.edit'))}</a></td></tr>`
+  }).join('')
   const body = `
   <p><a class="btn" href="/repos/edit">${e(t('repos.create'))}</a></p>
-  <table class="list"><thead><tr><th>${e(t('repos.name'))}</th><th>${e(t('repos.path'))}</th><th>${e(t('repos.base'))}</th><th>${e(t('repos.extras'))}</th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="5" class="dim">${e(t('repos.none'))}</td></tr>`}</tbody></table>`
+  <table class="list"><thead><tr><th>${e(t('repos.name'))}</th><th>${e(t('repos.path'))}</th><th>${e(t('repos.base'))}</th><th>${e(t('repos.extras'))}</th><th>${e(t('repos.prompt'))}</th><th></th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="6" class="dim">${e(t('repos.none'))}</td></tr>`}</tbody></table>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.repos'), '/repos', body))
 }
 
@@ -847,6 +851,7 @@ export async function repoEdit(req, res, url) {
     <label>${e(t('repos.name'))} <input name="name" value="${e(r.name ?? '')}" required></label>
     <label>${e(t('repos.path_label'))} <input name="path" value="${e(r.path ?? '')}" placeholder="~/projects/my-project" required></label>
     <label>${e(t('repos.base'))} <input name="base_branch" value="${e(r.base_branch ?? 'main')}"></label>
+    <label>${e(t('repos.prompt_label'))} <textarea name="prompt" rows="6">${e(r.prompt ?? '')}</textarea></label>
     <label>${e(t('repos.extras_label'))} <textarea name="worktree_extras" rows="5">${e(r.worktree_extras ?? '[]')}</textarea></label>
     <button>${e(t('settings.save'))}</button>
   </form>`
@@ -872,12 +877,13 @@ export async function repoSave(req, res, url, formBody) {
     problems.push(t('repos.extras_json', { err: err.message }))
   }
   if (problems.length) return problemPage(res, t('repos.edit_title'), problems, back)
+  const prompt = (b.prompt ?? '').trim() || null
   if (id) {
-    db.prepare(`UPDATE repos SET name=?, path=?, base_branch=?, worktree_extras=? WHERE id=?`)
-      .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', +id)
+    db.prepare(`UPDATE repos SET name=?, path=?, base_branch=?, worktree_extras=?, prompt=? WHERE id=?`)
+      .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt, +id)
   } else {
-    db.prepare(`INSERT INTO repos(name,path,base_branch,worktree_extras) VALUES(?,?,?,?)`)
-      .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]')
+    db.prepare(`INSERT INTO repos(name,path,base_branch,worktree_extras,prompt) VALUES(?,?,?,?,?)`)
+      .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt)
   }
   redirect(res, '/repos')
 }
