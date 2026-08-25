@@ -48,6 +48,37 @@ db.exec(`UPDATE runs SET flow_dispatched=1 WHERE status IN ('done','failed','abo
 
 const parse = (s, fallback) => { try { return JSON.parse(s) } catch { return fallback } }
 
+// One-time migration: the `run_finished` trigger used to carry its own filter
+// (agentIds / repoId / outcomes / singleRuns). That filter now lives as an
+// attachment on the agent (`agents.flows`, see attach.mjs) so the agent form
+// and the flow editor edit the same rows instead of two copies. Old triggers
+// are converted once and then reduced to their bare kind.
+// Single runs cannot be reached retroactively — there is no row to hang the
+// attachment on until one is created; such flows keep working via "run now".
+;(function migrateTriggersToAttachments() {
+  const done = db.prepare(`SELECT value FROM settings WHERE key='flows_attach_migrated'`).get()?.value
+  if (done === '1') return
+  const OUT = { 'done,failed,aborted': 'always', done: 'done', failed: 'failed', aborted: 'aborted', 'aborted,failed': 'not_done' }
+  const whenOf = (o) => OUT[[...new Set(o ?? [])].sort().join(',')] ?? 'always'
+  const attach = new Map()   // agentId → [{ flowId, when }]
+  for (const row of db.prepare('SELECT id, trigger FROM flows').all()) {
+    const trig = parse(row.trigger, { kind: 'manual' })
+    if (trig.kind !== 'run_finished') continue
+    const when = whenOf(trig.outcomes)
+    const ids = Array.isArray(trig.agentIds) && trig.agentIds.length
+      ? trig.agentIds.map(Number)
+      : db.prepare(trig.repoId ? 'SELECT id FROM agents WHERE repo_id=?' : 'SELECT id FROM agents')
+        .all(...(trig.repoId ? [trig.repoId] : [])).map(a => a.id)
+    for (const id of ids) attach.set(id, [...(attach.get(id) ?? []), { flowId: row.id, when }])
+    db.prepare('UPDATE flows SET trigger=? WHERE id=?').run(JSON.stringify({ kind: 'run_finished' }), row.id)
+  }
+  for (const [agentId, list] of attach) {
+    db.prepare('UPDATE agents SET flows=? WHERE id=?').run(JSON.stringify(list), agentId)
+  }
+  db.prepare(`INSERT INTO settings(key,value) VALUES('flows_attach_migrated','1')
+              ON CONFLICT(key) DO UPDATE SET value='1'`).run()
+})()
+
 function hydrate(row) {
   if (!row) return null
   return {

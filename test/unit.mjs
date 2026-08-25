@@ -716,7 +716,8 @@ try {
   gruppe('Flows: templates, operators, triggers, validation')
   const tpl = await import('../server/flows/template.mjs')
   const { validateDefinition, defaultProps } = await import('../server/flows/steps.mjs')
-  const { triggerMatches, normalizeTrigger } = await import('../server/flows/triggers.mjs')
+  const { flowsForRun, normalizeTrigger } = await import('../server/flows/triggers.mjs')
+  const att = await import('../server/flows/attach.mjs')
   const { schemaFromFields } = await import('../server/flows/llm.mjs')
 
   const ctx = { trigger: { run: { id: 'r1', outcome: 'done', report: 'all good', agent_name: 'nightly', n: 3 } }, vars: { x: { y: 'deep' }, list: ['a', 'b'] } }
@@ -760,23 +761,36 @@ try {
     gleich(tpl.toList('').length, 0, 'empty text'); gleich(tpl.toList(null).length, 0, 'null')
     gleich(tpl.toList({ a: 1 }).length, 1, 'a single object is one element')
   })
-  await pruefe('triggerMatches: outcomes, repo, agents, single runs, flow-started guard', () => {
-    const t0 = normalizeTrigger({ kind: 'run_finished' })
-    const run = { outcome: 'done', repo_id: 1, agent_id: 7, flow_run_id: null }
-    wahr(triggerMatches(t0, run), 'default matches any agent')
-    wahr(triggerMatches(t0, { ...run, agent_id: null }), 'single runs included by default')
-    falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', singleRuns: false }), { ...run, agent_id: null }), 'single runs excluded')
-    falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', outcomes: ['failed'] }), run), 'outcome filter')
-    wahr(triggerMatches(normalizeTrigger({ kind: 'run_finished', outcomes: ['bogus'] }), run), 'invalid outcome list falls back to all')
-    falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', repoId: 2 }), run), 'repo filter')
-    gleich(normalizeTrigger({ kind: 'run_finished', agentIds: [7], repoId: 2 }).repoId, null, 'agents pin the repo — a repo filter next to them is dropped')
-    wahr(triggerMatches(normalizeTrigger({ kind: 'run_finished', agentIds: [7], repoId: 2 }), run), 'and therefore cannot exclude the run')
-    wahr(triggerMatches(normalizeTrigger({ kind: 'run_finished', agentIds: ['7'] }), run), 'agent ids are coerced to numbers')
-    falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', agentIds: [8] }), run), 'other agent')
-    falsch(triggerMatches(normalizeTrigger({ kind: 'run_finished', agentIds: [7] }), { ...run, agent_id: null }), 'agent filter excludes single runs')
-    falsch(triggerMatches(t0, { ...run, flow_run_id: 'f' }), 'flow-started runs do not re-trigger by default')
-    wahr(triggerMatches(normalizeTrigger({ kind: 'run_finished', flowStarted: true }), { ...run, flow_run_id: 'f' }), 'unless opted in')
-    falsch(triggerMatches(normalizeTrigger({ kind: 'cron', expr: '* * * * *' }), run), 'cron never matches a run')
+  await pruefe('attachments: parsing, conditions, and what the old trigger filters became', () => {
+    gleich(att.parseAttachments(null).length, 0, 'nothing attached')
+    gleich(att.parseAttachments('[broken').length, 0, 'broken JSON never throws')
+    gleich(att.parseAttachments('[{"flowId":"3"}]')[0].when, 'always', 'missing condition = always')
+    gleich(att.parseAttachments([{ flowId: 3 }, { flowId: 3, when: 'failed' }]).length, 1, 'a flow hangs on a run only once')
+    gleich(att.parseAttachments([{ flowId: 3, when: 'nonsense' }])[0].when, 'always', 'unknown condition = always')
+    gleich(att.serializeAttachments([]), null, 'empty stays NULL in the column')
+    wahr(att.attachmentFires({ when: 'always' }, 'aborted'), 'always covers every outcome')
+    wahr(att.attachmentFires({ when: 'not_done' }, 'aborted') && att.attachmentFires({ when: 'not_done' }, 'failed'), 'not_done covers both')
+    falsch(att.attachmentFires({ when: 'not_done' }, 'done'), 'but not a success')
+    falsch(att.attachmentFires({ when: 'done' }, 'failed'), 'a single outcome is exact')
+    gleich(att.whenFromOutcomes(['aborted', 'failed', 'done']), 'always', 'the old full outcome list is "always"')
+    gleich(att.whenFromOutcomes(['failed']), 'failed', 'and a one-element list its condition')
+  })
+  await pruefe('flowsForRun: the attachment is the trigger, the flow only has to be ready', () => {
+    const flows = [
+      { id: 1, name: 'notify', active: 1, trigger: { kind: 'run_finished' } },
+      { id: 2, name: 'nightly', active: 1, trigger: { kind: 'cron', expr: '* * * * *' } },
+      { id: 3, name: 'off', active: 0, trigger: { kind: 'run_finished' } },
+    ]
+    const run = { flows: JSON.stringify([{ flowId: 1, when: 'failed' }, { flowId: 2, when: 'always' }, { flowId: 3, when: 'always' }]) }
+    gleich(flowsForRun(run, 'failed', flows).map(f => f.id).join(','), '1', 'condition, trigger kind and active flag all have to hold')
+    gleich(flowsForRun(run, 'done', flows).length, 0, 'the condition excludes the outcome')
+    gleich(flowsForRun({ flows: null }, 'done', flows).length, 0, 'a run without attachments starts nothing')
+    gleich(flowsForRun({ flows: '[{"flowId":99}]' }, 'done', flows).length, 0, 'a deleted flow is skipped, not crashed on')
+  })
+  await pruefe('normalizeTrigger: kind only — the filter moved to the attachment', () => {
+    gleich(normalizeTrigger({ kind: 'run_finished', agentIds: [7], outcomes: ['done'] }).agentIds, undefined, 'old filters are dropped')
+    gleich(Object.keys(normalizeTrigger({ kind: 'run_finished' })).join(','), 'kind', 'run_finished carries nothing else')
+    gleich(normalizeTrigger({ kind: 'cron', expr: ' * * * * * ' }).expr, '* * * * *', 'the cron expression is trimmed')
     gleich(normalizeTrigger({ kind: 'nonsense' }).kind, 'manual', 'unknown kind → manual')
   })
   await pruefe('validateDefinition: unknown types, required fields (showIf-aware), branches', () => {
@@ -1166,6 +1180,17 @@ try {
     gleich(def.branchMode, 'fest', 'branch mode')
     gleich(def.expectedMinutes, 20, 'expected duration')
     gleich(def.skills, '["x"]', 'skills copied verbatim')
+    gleich(rd.defFromAgent({ flows: '[{"flowId":1,"when":"failed"}]' }).flows, '[{"flowId":1,"when":"failed"}]',
+      'attached flows copied verbatim')
+  })
+  await pruefe('attached flows go through the form like every other definition field', async () => {
+    const fdb2 = await import('../server/flows/db.mjs')
+    const id = fdb2.saveFlow({ name: 'attach-test', trigger: { kind: 'run_finished' }, definition: { sequence: [] } })
+    const base = { harness: 'claude', prompt: 'x', branch_mode: 'keiner' }
+    gleich((await rd.runDefFromForm(base, [])).flows, null, 'nothing ticked = NULL')
+    const def = await rd.runDefFromForm({ ...base, flows_list: [String(id), '4242'], [`flow_when_${id}`]: 'failed' }, [])
+    gleich(def.flows, JSON.stringify([{ flowId: id, when: 'failed' }]),
+      'the ticked flow with its condition — a flow that does not exist is dropped')
   })
   await pruefe('the last choice is remembered and offered again', () => {
     gleich(JSON.stringify(rd.lastRunChoice()), '{}', 'nothing remembered yet')

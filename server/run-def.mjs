@@ -25,6 +25,7 @@ import { getHarness } from './harnesses/index.mjs'
 import { effortOptionen } from './models.mjs'
 import { branchWorktree } from './runner.mjs'
 import { skillFelder, skillsAusFormular } from './zusaetze.mjs'
+import { flowAttachFields, attachmentsFromForm } from './flows/attach.mjs'
 import { t } from './i18n.mjs'
 
 /** 'keiner' = detached worktree, 'neu' = create a branch, 'fest' = use an existing one. */
@@ -97,7 +98,8 @@ export function runDefFields(a = {}) {
   </select></label>
   <label>${e(t('runform.branch_pattern'))} <input name="branch_pattern" value="${e(a.branch_pattern ?? '')}" placeholder="${e(t('runform.branch_pattern_ph'))}"></label>
   <label>${e(t('runform.expected'))} <input type="number" name="expected_minutes" min="1" value="${a.expected_minutes ?? DEFAULT_EXPECTED_MINUTES}"></label>
-  ${skillFelder(a.skills)}`
+  ${skillFelder(a.skills)}
+  ${flowAttachFields(a.flows)}`
 }
 
 // ---------------------------------------------------------- form → definition
@@ -194,6 +196,7 @@ export async function runDefFromForm(b, problems = []) {
     branchPattern: b.branch_pattern?.trim() || null,
     expectedMinutes: +b.expected_minutes || DEFAULT_EXPECTED_MINUTES,
     skills: skillsAusFormular(b),
+    flows: attachmentsFromForm(b),
   }
 }
 
@@ -212,6 +215,7 @@ export function defFromAgent(agent) {
     branchPattern: agent.branch_pattern ?? null,
     expectedMinutes: agent.expected_minutes,
     skills: agent.skills ?? null,
+    flows: agent.flows ?? null,
   }
 }
 
@@ -228,20 +232,20 @@ export function saveAgent({ id = null, repoId, name, def, schedule = null, activ
     db.prepare(`UPDATE agents SET name=?, harness=?, model=?, prompt=?, branch_mode=?, branch_pattern=?,
                 expected_minutes=?, schedule=?, schedule_kind=?, schedule_days=?, schedule_time=?,
                 schedule_weeks=?, schedule_anchor=?, run_at=?, provider=?, or_provider=?, effort=?,
-                skills=?, active=?, updated_at=datetime('now') WHERE id=?`).run(
+                skills=?, flows=?, active=?, updated_at=datetime('now') WHERE id=?`).run(
       name, def.harness, def.model, def.prompt, def.branchMode, def.branchPattern,
       def.expectedMinutes, zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
-      def.provider, def.orProvider, def.effort, def.skills, active, id)
+      def.provider, def.orProvider, def.effort, def.skills, def.flows ?? null, active, id)
     return id
   }
   const r = db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,branch_mode,branch_pattern,expected_minutes,
               schedule,schedule_kind,schedule_days,schedule_time,schedule_weeks,schedule_anchor,run_at,
-              provider,or_provider,effort,skills,active)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+              provider,or_provider,effort,skills,flows,active)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     repoId, name, def.harness, def.model, def.prompt, def.branchMode,
     def.branchPattern, def.expectedMinutes,
     zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
-    def.provider, def.orProvider, def.effort, def.skills, active)
+    def.provider, def.orProvider, def.effort, def.skills, def.flows ?? null, active)
   return Number(r.lastInsertRowid)
 }
 
@@ -312,5 +316,9 @@ export function defFromFlowProps(props) {
     branchPattern: props.branchPattern || null,
     expectedMinutes: Number(props.expectedMinutes) || DEFAULT_EXPECTED_MINUTES,
     skills: null,
+    // Deliberately no attached flows: a run a flow starts must not start flows
+    // itself — that is the loop guard, and a flow that wants to react to its own
+    // run uses "wait" on the start step instead.
+    flows: null,
   }
 }

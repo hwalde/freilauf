@@ -95,3 +95,8 @@ details.usage summary { font-weight: 600; cursor: pointer; }
   details.usage { background: #202226; }
   .usage-row .quota .track { background: #3a3f45; }
 }
+
+/* Flows attached to an agent / single run, and the way back to the flow pages. */
+fieldset.flows-attach label.chk a { margin-left: auto; font-size: 12px; }
+fieldset.flows-attach p:last-child { margin-bottom: 0; }
+p.crumbs { font-size: 13px; color: #6b7076; margin: 0 0 8px; }

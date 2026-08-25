@@ -20,6 +20,7 @@ import { ampelAusVorfaellen, offeneVorfaelle, alleVorfaelle } from './incidents.
 import { TYP_TEXT } from './detect.mjs'
 import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
 import { skillListe, skillAnzeige } from './zusaetze.mjs'
+import { attachmentSummary, flowSection } from './flows/attach.mjs'
 import { t, LANGUAGES, currentLanguage, setLanguage, clientCatalog } from './i18n.mjs'
 
 /**
@@ -90,7 +91,9 @@ function setupBanner() {
 export function layout(title, active, content, selectedRepo = null, withTerminal = false) {
   const pipeline = pipelineAn()
   const q = claudeQuota()
-  const nav = [['/', t('nav.overview')], ['/agents', t('nav.agents')], ['/flows', t('nav.flows')], ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
+  // No "Flows" entry: a flow is not a place you go, it hangs on the agent or the
+  // single run that starts it. The flow pages are reached from those two forms.
+  const nav = [['/', t('nav.overview')], ['/agents', t('nav.agents')], ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
     .map(([href, label]) => `<a href="${href}" class="${active === href ? 'on' : ''}">${e(label)}</a>`).join('')
   const bar = (label, pct) => `<div class="quota"><span>${label}</span><div class="track"><div class="fill ${(pct ?? 0) >= 90 ? 'r' : (pct ?? 0) >= 80 ? 'y' : ''}" style="width:${Math.min(pct ?? 0, 100)}%"></div></div><span>${pct ?? '?'} %</span></div>`
   const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
@@ -245,13 +248,16 @@ export async function pageAgents(req, res, url) {
     <td><form method="post" action="/agents/toggle" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${sel.id}"><button>${e(a.active ? t('agents.on') : t('agents.off'))}</button></form></td>
     <td>${e(a.name)}</td><td>${e(a.harness)}</td><td>${e(a.model || '–')}</td>
     <td>${e(scheduleText(a))}</td><td>${a.expected_minutes} min</td>
+    <td class="dim">${e(attachmentSummary(a.flows)) || '–'}</td>
     <td><form method="post" action="/agents/start" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${sel.id}"><button>${e(t('agents.start_now'))}</button></form></td>
     <td><a href="/agents/edit?id=${a.id}&repo=${sel.id}">${e(t('agents.edit'))}</a></td>
   </tr>`).join('')
   const body = `
-  <p><a class="btn" href="/agents/edit?repo=${sel.id}">${e(t('agents.create'))}</a></p>
-  <table class="list"><thead><tr><th>${e(t('agents.status'))}</th><th>${e(t('agents.name'))}</th><th>${e(t('agents.harness'))}</th><th>${e(t('agents.model'))}</th><th>${e(t('agents.schedule'))}</th><th>${e(t('agents.expected'))}</th><th></th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="8" class="dim">${e(t('agents.none'))}</td></tr>`}</tbody></table>`
+  <p><a class="btn" href="/agents/edit?repo=${sel.id}">${e(t('agents.create'))}</a>
+     <a class="btn" href="/flows">${e(t('nav.flows'))}</a>
+     <span class="dim">${e(t('agents.flows_hint'))}</span></p>
+  <table class="list"><thead><tr><th>${e(t('agents.status'))}</th><th>${e(t('agents.name'))}</th><th>${e(t('agents.harness'))}</th><th>${e(t('agents.model'))}</th><th>${e(t('agents.schedule'))}</th><th>${e(t('agents.expected'))}</th><th>${e(t('nav.flows'))}</th><th></th><th></th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="9" class="dim">${e(t('agents.none'))}</td></tr>`}</tbody></table>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.agents'), '/agents', body, sel.id))
 }
 
@@ -322,6 +328,7 @@ export async function pageRun(req, res, url, id) {
        <span class="dim">${e(t('run.retry_hint'))}</span></form>`
     : ''}
   ${run.report_md ? `<h3>${e(t('run.report'))}</h3><pre>${e(run.report_md)}</pre>` : ''}
+  ${flowSection(run)}
   ${vorfallAbschnitt(id)}
   <h3>${e(t('run.metrics'))}</h3>
   <ul>

@@ -132,6 +132,11 @@ addColumn('runs', 'effort', 'TEXT')
 // agent/run, NEVER loaded automatically. The run carries the definition copy as usual.
 addColumn('agents', 'skills', 'TEXT')
 addColumn('runs', 'skills', 'TEXT')
+// Attached flows (JSON list of { flowId, when }) — part of the run definition,
+// see server/flows/attach.mjs. The run carries the definition copy as usual, so
+// editing an agent never changes what an already running run will trigger.
+addColumn('agents', 'flows', 'TEXT')
+addColumn('runs', 'flows', 'TEXT')
 // Read positions of the detectors: only NEW bytes are scanned. Without the offset the
 // same hit is counted again on every pass and an old hit "counts" forever.
 addColumn('runs', 'log_offset', 'INTEGER NOT NULL DEFAULT 0')

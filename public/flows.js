@@ -38,6 +38,10 @@ const $ = (tag, attrs = {}, ...children) => {
 }
 
 let trigger = flow.trigger
+// Which agents this flow hangs on. NOT part of the flow row: it is stored on
+// the agents (agents.flows) and edited by the agent form as well — same rows,
+// so the two views cannot drift. Saved together with the flow.
+let attachments = (flow.attachments ?? []).map(a => ({ agentId: a.agentId, when: a.when }))
 let dirty = false
 let designer = null
 const status = document.getElementById('flow-status')
@@ -191,6 +195,42 @@ function autocomplete(input, at) {
   return input
 }
 
+/**
+ * The "run finished" trigger IS the list of agents this flow hangs on — the
+ * very same rows the agent form edits. A single run cannot appear here: it only
+ * exists once it has been started, so it attaches its flows in its own form.
+ */
+function attachEditor() {
+  const box = $('div', { class: 'attach' })
+  const list = $('div')
+  const render = () => {
+    list.replaceChildren()
+    if (!attachments.length) list.append($('p', { class: 'dim' }, T('flows.attach.editor_none')))
+    for (const a of attachments) {
+      const agent = meta.agents.find(x => x.id === a.agentId)
+      const when = $('select', {}, meta.whenKinds.map(k => $('option', { value: k, selected: a.when === k }, T(`flows.when.${k}`))))
+      when.addEventListener('change', () => { a.when = when.value; touch() })
+      const del = $('button', { type: 'button', class: 'danger' }, '×')
+      del.addEventListener('click', () => { attachments = attachments.filter(x => x !== a); render(); touch() })
+      list.append($('div', { class: 'attach-row' },
+        $('b', {}, agent ? agent.name : `#${a.agentId}`),
+        agent ? $('span', { class: 'dim' }, ` (${agent.repo})`) : null, when, del))
+    }
+  }
+  const add = $('select', {}, $('option', { value: '' }, T('flows.attach.add')),
+    meta.agents.map(a => $('option', { value: a.id }, `${a.name} (${a.repo})`)))
+  add.addEventListener('change', () => {
+    const id = +add.value
+    add.value = ''
+    if (!id || attachments.some(x => x.agentId === id)) return
+    attachments.push({ agentId: id, when: 'always' })
+    render(); touch()
+  })
+  render()
+  box.append($('p', { class: 'dim' }, T('flows.attach.editor_hint')), list, add)
+  return box
+}
+
 // ---------------- root editor: name, trigger ----------------
 function rootEditor() {
   const box = $('div', { class: 'flow-editor' })
@@ -201,51 +241,7 @@ function rootEditor() {
   const renderDetail = () => {
     detail.replaceChildren()
     if (trigger.kind === 'run_finished') {
-      // An agent belongs to exactly one repo, so agent filter and repo filter are
-      // never both meaningful: one scope selector, one control below it.
-      const scopeOf = () => ((trigger.agentIds ?? []).length ? 'agents' : trigger.repoId ? 'repo' : 'all')
-      const scope = $('select', {}, ['all', 'agents', 'repo'].map(s => $('option', { value: s, selected: scopeOf() === s }, T(`flows.trigger.scope.${s}`))))
-      detail.append($('label', {}, T('flows.trigger.scope'), scope))
-      const scopeBox = $('div')
-      const renderScope = () => {
-        scopeBox.replaceChildren()
-        if (scope.value === 'agents') {
-          const agents = $('select', { multiple: true, size: Math.min(8, Math.max(3, meta.agents.length)) },
-            meta.agents.map(a => $('option', { value: a.id, selected: (trigger.agentIds ?? []).includes(a.id) }, `${a.name} (${a.repo})`)))
-          agents.addEventListener('change', () => { trigger.agentIds = [...agents.selectedOptions].map(o => +o.value); touch() })
-          scopeBox.append($('label', {}, T('flows.trigger.agents'), agents, $('span', { class: 'dim hint' }, T('flows.trigger.agents_hint'))))
-        } else if (scope.value === 'repo') {
-          const repo = $('select', {}, $('option', { value: '' }, T('flows.trigger.any_repo')),
-            meta.repos.map(r => $('option', { value: r.id, selected: trigger.repoId === r.id }, r.name)))
-          repo.addEventListener('change', () => { trigger.repoId = +repo.value || null; touch() })
-          scopeBox.append($('label', {}, T('flows.trigger.repo'), repo, $('span', { class: 'dim hint' }, T('flows.trigger.repo_hint'))))
-        }
-        // "Single runs" only means something where an agent filter does not apply.
-        if (scope.value !== 'agents') {
-          const single = $('input', { type: 'checkbox', checked: trigger.singleRuns !== false })
-          single.addEventListener('change', () => { trigger.singleRuns = single.checked; touch() })
-          scopeBox.append($('label', { class: 'chk' }, single, T('flows.trigger.single_runs')))
-        }
-      }
-      scope.addEventListener('change', () => {
-        if (scope.value !== 'agents') trigger.agentIds = []
-        if (scope.value !== 'repo') trigger.repoId = null
-        renderScope(); touch()
-      })
-      renderScope()
-      detail.append(scopeBox)
-      const oc = $('div', { class: 'tage' }, meta.outcomes.map(o => {
-        const cb = $('input', { type: 'checkbox', checked: (trigger.outcomes ?? meta.outcomes).includes(o) })
-        cb.addEventListener('change', () => {
-          const set = new Set(trigger.outcomes ?? meta.outcomes); cb.checked ? set.add(o) : set.delete(o)
-          trigger.outcomes = meta.outcomes.filter(x => set.has(x)); touch()
-        })
-        return $('label', { class: 'tag' }, cb, T(`flows.outcome.${o}`))
-      }))
-      detail.append($('div', {}, T('flows.trigger.outcomes'), oc))
-      const fs = $('input', { type: 'checkbox', checked: trigger.flowStarted === true })
-      fs.addEventListener('change', () => { trigger.flowStarted = fs.checked; touch() })
-      detail.append($('label', { class: 'chk' }, fs, T('flows.trigger.flow_started')), $('p', { class: 'dim' }, T('flows.trigger.flow_started_hint')))
+      detail.append(attachEditor())
     } else if (trigger.kind === 'cron') {
       const inp = $('input', { value: trigger.expr ?? '', placeholder: '30 6 * * 1-5' })
       inp.addEventListener('input', () => { trigger.expr = inp.value; touch() })
@@ -256,7 +252,7 @@ function rootEditor() {
     }
   }
   kindSel.addEventListener('change', () => {
-    trigger = { kind: kindSel.value, agentIds: [], outcomes: [...meta.outcomes], singleRuns: true, flowStarted: false, expr: '' }
+    trigger = { kind: kindSel.value, expr: '' }
     renderDetail(); touch()
     // The trigger decides which variables exist and which steps may stay where
     // they are — everything on the canvas has to be judged again.
@@ -569,7 +565,10 @@ async function save() {
   if (!name) { setStatus(T('flows.editor.name_required'), 'err'); return }
   if (!designer.isValid()) { setStatus(T('flows.editor.invalid'), 'err'); return }
   setStatus('…')
-  const body = { id: flow.id, name, active: document.getElementById('flow-active').checked, trigger, definition: designer.getDefinition() }
+  const body = {
+    id: flow.id, name, active: document.getElementById('flow-active').checked,
+    trigger, attachments, definition: designer.getDefinition(),
+  }
   const r = await fetch('/api/flows/save', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(x => x.json()).catch(() => ({ ok: false, problems: ['network'] }))
   if (!r.ok) { setStatus((r.problems ?? [r.error]).join(' · '), 'err'); return }
   dirty = false

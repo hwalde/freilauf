@@ -1,7 +1,14 @@
 // cc-hub flows — triggers. Three kinds:
-//   run_finished  a run reached done/failed/aborted (filters: agents, repo, outcomes)
+//   run_finished  a run this flow is ATTACHED to reached done/failed/aborted
 //   cron          5-field cron expression, evaluated every tick (minute-debounced)
 //   manual        only via the "run now" button / API
+//
+// `run_finished` carries no filter of its own any more. Which runs start the
+// flow, and under which condition, is the attachment on the agent / the single
+// run (`agents.flows` → `runs.flows`, see attach.mjs) — edited in the agent
+// form, in the single-run form and in the flow editor, all three writing the
+// same rows. A trigger filter next to it would be a second copy of the same
+// statement, and the two would drift.
 //
 // Detection of finished runs is polling-based on `runs.flow_dispatched`: every
 // path that ends a run (report, kill, pane_dead, watcher timeouts) is covered
@@ -9,6 +16,7 @@
 // endpoint call `flowsTick()` right away for low latency; the watcher calls it
 // every 30 s as the backstop.
 import { listFlows, undispatchedRuns, markDispatched } from './db.mjs'
+import { parseAttachments, attachmentFires } from './attach.mjs'
 import { startFlowRun, resumeWaitingOnRun, resumeDelayed } from './engine.mjs'
 import { actions, runInfo } from './actions.mjs'
 import { cronMatches } from '../util.mjs'
@@ -20,31 +28,20 @@ export const OUTCOMES = ['done', 'failed', 'aborted']
 export function normalizeTrigger(t = {}) {
   const kind = TRIGGER_KINDS.includes(t.kind) ? t.kind : 'manual'
   const out = { kind }
-  if (kind === 'run_finished') {
-    out.agentIds = (Array.isArray(t.agentIds) ? t.agentIds : []).map(Number).filter(Number.isFinite)
-    // An agent belongs to exactly one repo — with agents chosen, a repo filter can
-    // only ever narrow the result to nothing. The editor offers either/or; an older
-    // definition (or a hand-written API call) is straightened out here.
-    out.repoId = out.agentIds.length ? null : (Number(t.repoId) || null)
-    out.outcomes = (Array.isArray(t.outcomes) ? t.outcomes : OUTCOMES).filter(o => OUTCOMES.includes(o))
-    if (!out.outcomes.length) out.outcomes = [...OUTCOMES]
-    out.singleRuns = t.singleRuns !== false           // runs without an agent
-    out.flowStarted = t.flowStarted === true          // runs started by a flow (loop guard: off by default)
-  }
   if (kind === 'cron') out.expr = String(t.expr ?? '').trim()
   return out
 }
 
-/** Does a run_finished trigger match this run? Pure — unit-tested. */
-export function triggerMatches(trigger, run) {
-  if (trigger.kind !== 'run_finished') return false
-  if (!trigger.outcomes.includes(run.outcome)) return false
-  if (trigger.repoId && run.repo_id !== trigger.repoId) return false
-  if (run.flow_run_id && !trigger.flowStarted) return false
-  if (run.agent_id) {
-    if (trigger.agentIds.length && !trigger.agentIds.includes(run.agent_id)) return false
-  } else if (!trigger.singleRuns || trigger.agentIds.length) return false
-  return true
+/**
+ * Which flows this finished run starts: its own attachments, filtered by their
+ * condition and by the flow being active with a `run_finished` trigger. Pure
+ * apart from the flow list — unit-tested against a handed-in one.
+ */
+export function flowsForRun(run, outcome, flows) {
+  return parseAttachments(run.flows)
+    .filter(a => attachmentFires(a, outcome))
+    .map(a => flows.find(f => f.id === a.flowId))
+    .filter(f => f && f.active && normalizeTrigger(f.trigger).kind === 'run_finished')
 }
 
 const cronFired = new Map()   // "flowId@YYYY-MM-DDTHH:MM" → true
@@ -64,12 +61,17 @@ export async function flowsTick(api = actions) {
       markDispatched(run.id)                     // first, so a crash never double-fires
       const info = runInfo(run.id)
       try { await resumeWaitingOnRun(run.id, api) } catch (e) { console.error('[flows] resume', e.message) }
-      for (const flow of flows) {
-        if (!triggerMatches(normalizeTrigger(flow.trigger), info)) continue
-        try {
-          await startFlowRun(flow, { kind: 'run_finished', run: info, at: new Date(api.now()).toISOString() }, api, { triggerRunId: run.id })
-        } catch (e) { console.error(`[flows] ${flow.name}:`, e.message) }
-      }
+      // Loop guard: a run that a flow started carries no attachments of its own
+      // (defFromFlowProps), and an agent started by a flow must not re-trigger
+      // the flow that started it. Chaining is done with "wait" on the start step.
+      if (run.flow_run_id) continue
+      const at = new Date(api.now()).toISOString()
+      // Every attached flow starts — in parallel, the way a no-code platform
+      // fans a trigger out. One flow throwing at its first step must not keep
+      // the others from running, hence allSettled around individual catches.
+      await Promise.allSettled(flowsForRun(run, info.outcome, flows).map(flow =>
+        startFlowRun(flow, { kind: 'run_finished', run: info, at }, api, { triggerRunId: run.id })
+          .catch(e => console.error(`[flows] ${flow.name}:`, e.message))))
     }
     await resumeDelayed(api)
     const now = new Date(api.now())

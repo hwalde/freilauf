@@ -35,7 +35,9 @@ Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux sessions
   the detail page (setup assistant in the settings).
 - **No-code flows**: a graphical designer chains what happens after a run — send
   a message to running agents, start follow-up runs and wait for them, extract
-  structured data from a report via LLM, branch, loop over a list, Telegram/HTTP
+  structured data from a report via LLM, branch, loop over a list, Telegram/HTTP.
+  Flows are attached to an agent or a single run in its own form (optionally
+  only for a certain outcome) and all start in parallel when that run ends
   ([server/flows/AGENTS.md](server/flows/AGENTS.md)).
 - **Quota gate**: scheduled starts wait when the Claude subscription quota or
   the OpenRouter credits run low.

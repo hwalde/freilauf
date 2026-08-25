@@ -2,9 +2,8 @@
 
 `server/flows/` is a self-contained module: it owns its tables, its pages, its
 API and its client (`public/flows.js`, `public/flows.css`). The rest of the hub
-knows it through exactly four seams (listed under *Integration*). Nothing in
-here is required for the hub to schedule, watch or report runs — remove the
-module and the four seams and the hub works as before.
+knows it through the seams listed under *Integration*. Nothing in here is
+required for the hub to schedule, watch or report runs.
 
 ## What a flow is
 
@@ -36,14 +35,15 @@ objects as JSON, missing values as an empty string. Templates never throw.
 
 | File | Role |
 |---|---|
-| `db.mjs` | tables `flows`, `flow_runs`; retrofits `runs.flow_dispatched` and `runs.flow_run_id`; all queries |
+| `db.mjs` | tables `flows`, `flow_runs`; retrofits `runs.flow_dispatched` and `runs.flow_run_id`; all queries; the one-time migration of old trigger filters into attachments |
+| `attach.mjs` | **the attachment** — which flows hang on an agent / a single run and under which condition: parsing, the form block both run forms embed, the flow editor's side of the same rows, the run detail page's section |
 | `template.mjs` | pure: `render`, `resolve`, `getPath`/`setPath`, `compare` (the condition operators), `varName` |
 | `varschema.mjs` | pure: the **typed variable catalog** — which variables exist where, of which type, with which allowed values; plus the placement rules |
 | `steps.mjs` | **the step registry** — one entry per building block: designer metadata (`fields`), defaults, validation and `run()` |
 | `engine.mjs` | executes a definition: frame stack, persistence after every step, suspend/resume (`wait`, `delay`), stop |
 | `actions.mjs` | the production `api` object steps run against (tmux, Telegram, agent/run start, LLM, HTTP) — the only file with side effects |
 | `llm.mjs` | structured extraction via OpenRouter `json_schema` (`schemaFromFields`, `extractStructured`) |
-| `triggers.mjs` | `run_finished`/`cron`/`manual`, `triggerMatches`, `flowsTick()` (dispatcher), `runFlowNow()` |
+| `triggers.mjs` | `run_finished`/`cron`/`manual`, `flowsForRun`, `flowsTick()` (dispatcher), `runFlowNow()` |
 | `web.mjs` | pages `/flows`, `/flows/edit`, `/flows/runs`, `/flows/runs/<id>`; API `/api/flows/*`, `/api/flow-runs/*` |
 | `../../public/flows.js` | designer page: toolbox from the registry, property editors from `fields`, trigger editor, save |
 
@@ -190,22 +190,31 @@ a flow never breaks a suspended run. Suspension is a row state
 Finished runs are found by **polling**, not by hooks in every end path: each run
 carries `flow_dispatched` (0/1). `flowsTick()` takes every terminal run with
 `flow_dispatched = 0`, marks it first (crash-safe, never double-fires), resumes
-flow runs waiting on it, then starts every active flow whose `run_finished`
-trigger matches (`triggerMatches()`: outcomes, scope, single runs, runs started
-by a flow). The scope is either agents or a repo, never both — an agent belongs
-to exactly one repo, so a repo filter next to chosen agents could only narrow
-the result to nothing. The editor offers one selector; `normalizeTrigger()`
-drops `repoId` as soon as `agentIds` is non-empty. Then it resumes elapsed delays and evaluates cron triggers
+flow runs waiting on it, then starts the flows the run itself carries
+(`flowsForRun()`). Then it resumes elapsed delays and evaluates cron triggers
 (minute-debounced like the scheduler). Re-entrancy is guarded.
 
-Loop guard: runs started by a flow (`runs.flow_run_id` set) do **not** fire
-`run_finished` triggers unless the trigger opts in (`flowStarted`). Chaining is
-done with `wait` on the start step instead.
+All flows of one run start **in parallel** (`Promise.allSettled` around
+individual catches) — that is what a no-code platform does with a trigger, and
+one flow throwing at its first step must not swallow the others.
+
+The `run_finished` trigger carries **no filter of its own**. Which runs start
+the flow, and under which condition, is the **attachment** (`attach.mjs`):
+`agents.flows` → `runs.flows`, a list of `{ flowId, when }` with `when` one of
+`always | done | failed | not_done | aborted`. One storage, three editors (agent
+form, single-run form, the flow editor's trigger panel) — nothing has to be kept
+in sync because there is nothing to sync. The old filters
+(`agentIds`/`repoId`/`outcomes`/`singleRuns`/`flowStarted`) are migrated into
+attachments once, in `db.mjs`, and then dropped by `normalizeTrigger()`.
+
+Loop guard: runs started by a flow (`runs.flow_run_id` set) never dispatch
+attachments, and `defFromFlowProps()` gives a flow-started single run no
+attachments in the first place. Chaining is done with `wait` on the start step.
 
 Runs that were already finished more than an hour before the module first ran
 are marked dispatched at startup, so history is never replayed.
 
-## Integration — the four seams
+## Integration — the seams
 
 1. `server/web.mjs`: mounts `flowRoute` (`/flows*`) and `flowApi`
    (`/api/flows*`, `/api/flow-runs*`); serves `flows.js/css`, the two pure
@@ -217,7 +226,13 @@ are marked dispatched at startup, so history is never replayed.
    `flowsTick()` (dynamic import — no static cycle) for low latency.
 3. `server/watcher.mjs`: `flowsTick()` at the end of every tick — the backstop
    for every other way a run can end, plus delays and cron.
-4. `server/pages.mjs`: exports `layout()` and has the "Flows" nav entry.
+4. `server/pages.mjs`: exports `layout()`; shows `attachmentSummary()` in the
+   agents table and `flowSection()` on the run detail page, and links to
+   `/flows` from the agents page. There is deliberately **no** nav entry.
+5. `server/run-def.mjs`: the attachment is a field of the run definition —
+   `flowAttachFields()` in the form block, `attachmentsFromForm()` on the way
+   back, carried through `defFromAgent`/`saveAgent`/`createRun` like `skills`.
+   The two columns (`agents.flows`, `runs.flows`) sit in `server/db.mjs`.
 
 Plus `util.sendToSession()` (shared with the run detail page's message form).
 
@@ -230,7 +245,15 @@ step editor renders `fields`. It is an **ES module** and imports
 `varschema.mjs` from `/static/flows/` — client validation is therefore not a
 mirror of the server's but the same code, so a red step in the designer is
 exactly what the server would reject. Save is `POST /api/flows/save` with
-`{ id, name, active, trigger, definition }`; the answer carries `hints`.
+`{ id, name, active, trigger, attachments, definition }`; the answer carries
+`hints`.
+
+The `run_finished` trigger's panel is the attachment list — agents plus their
+condition. It travels in `attachments` and is written back onto the **agents**
+(`setFlowAttachments`), not into the flow row: the agent form reads the same
+rows, so neither side can hold a stale copy. Switching the trigger kind away
+from `run_finished` detaches the flow everywhere (`forgetFlow`), and so does
+deleting it — otherwise dead ids would pile up in `agents.flows`.
 
 Field kinds beyond the plain inputs:
 
@@ -249,7 +272,8 @@ knows the red error badge, so the glow is a `drop-shadow` of our own.
 
 ## Tests
 
-`test/unit.mjs`, groups "Flows": templates and operators, `triggerMatches`,
+`test/unit.mjs`, groups "Flows": templates and operators, attachments
+(`parseAttachments`, `attachmentFires`, `flowsForRun`, `normalizeTrigger`),
 `validateDefinition`, the typed catalog (types and enums out of an extraction,
 order, conditional branch variables, the drop position, `pathProblem`,
 `valueProblem`, `opsForType`) and the placement rules, plus the engine

@@ -74,7 +74,8 @@ Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux sessions
 
 An agent and a single run differ in exactly **two** things: an agent has a name
 and a schedule and can be started again. Everything else — coding agent,
-provider, model, effort, prompt, branch rule, expected duration, extra skills —
+provider, model, effort, prompt, branch rule, expected duration, extra skills,
+attached flows —
 is one and the same **run definition**, and it lives in **`server/run-def.mjs`**:
 
 | What | Function | Used by |
@@ -218,6 +219,28 @@ building blocks: message running agents, start agents/single runs (optionally
 waiting for their result), extract structured data from a report via LLM,
 branch on the outcome, loop over a list, Telegram, HTTP, delay.
 
+**A flow is not a place you navigate to** — there is no "Flows" nav entry. A
+flow hangs on the agent or the single run whose end starts it: both forms carry
+the attachment block (`flowAttachFields` in `flows/attach.mjs`, embedded by
+`runDefFields` like the extra skills), and the flow pages are reached from
+there and from the button on the agents page. When a run ends, **every**
+attached flow starts — all of them in parallel, the way a no-code platform fans
+a trigger out.
+
+The attachment carries the condition (`always`, only on `done`/`failed`/
+`aborted`, or `not_done`), so the case distinction is made where one thinks of
+it. It does **not** replace `switch_outcome`: that block branches on the result
+of a run the flow started **itself**, which no attachment can know about.
+
+Agent side and flow side cannot drift because there is only **one** storage:
+`agents.flows` (snapshotted into `runs.flows` when the run is created, like
+every other definition field). The agent form writes it, the flow editor's
+trigger panel writes the same rows from the other side (`agentsWithFlow`,
+`setFlowAttachments`), and the `run_finished` trigger itself carries no filter
+at all any more — a filter next to the attachment would be a second copy of the
+same statement. Older triggers (`agentIds`/`repoId`/`outcomes`/`singleRuns`)
+are converted into attachments once, at startup, in `flows/db.mjs`.
+
 Variables are **typed**, not guessed: `varschema.mjs` knows for every spot in a
 flow which variables exist there, of which type and with which allowed values —
 so a condition picks its left side from a list, its operator is narrowed to what
@@ -227,7 +250,7 @@ and the server judge a flow by identical code. It also carries the placement
 rules: `switch_outcome` needs a finished run, and the designer refuses the drop
 with the reason instead of silently not sticking.
 
-Architecture, step registry contract and the four integration seams:
+Architecture, step registry contract and the integration seams:
 **[server/flows/AGENTS.md](server/flows/AGENTS.md)**.
 
 ## Extra skills (opt-in)

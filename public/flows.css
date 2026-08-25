@@ -80,3 +80,8 @@ tr.err td { color: #c62828; }
   padding: 4px 8px; font-size: 12px; font-family: ui-monospace, monospace; cursor: pointer; }
 .flow-editor .ac-item.sel, .flow-editor .ac-item:hover { background: #e8f0fe; }
 .flow-editor .ac + .hint { margin-top: 2px; }
+
+/* Trigger "run finished" = the agents this flow hangs on (attach.mjs). */
+.flow-editor .attach-row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+.flow-editor .attach-row select { flex: 1; }
+.flow-editor .attach-row button { padding: 2px 8px; }
