@@ -109,8 +109,7 @@ ${setupBanner()}
   ${repoSel}
   <span class="spacer"></span>
   <span title="${e(t('layout.pipeline_hint'))}">${e(t('layout.pipeline'))}: <b class="${pipeline ? 'ok' : 'warn'}">${e(pipeline ? t('layout.on') : t('layout.off'))}</b></span>
-  ${bar('5h', q.five)}${q.seven_general != null ? bar('7d', q.seven_general) : ''}${
-    q.seven_fable != null ? bar('7d fable', q.seven_fable) : ''}
+  ${bar('5h', q.five)}${q.seven_general != null ? bar('7d', q.seven_general) : ''}
 </header>
 <main>${globalesBanner()}${content}</main>
 ${withTerminal ? '<script src="/static/xterm.js"></script><script src="/static/addon-fit.js"></script>' : ''}
