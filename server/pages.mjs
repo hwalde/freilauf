@@ -22,6 +22,7 @@ import { ampelAusVorfaellen, offeneVorfaelle, alleVorfaelle, brauchtMensch } fro
 import { TYP_TEXT } from './detect.mjs'
 import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
 import { skillListe, skillAnzeige } from './zusaetze.mjs'
+import { listSessions, sessionKeepHours, currentKeepMs } from './sessions.mjs'
 import { attachmentSummary, flowSection } from './flows/attach.mjs'
 import { t, LANGUAGES, currentLanguage, setLanguage, clientCatalog } from './i18n.mjs'
 
@@ -100,7 +101,8 @@ export function layout(title, active, content, selectedRepo = null, withTerminal
   const q = claudeQuota()
   // No "Flows" entry: a flow is not a place you go, it hangs on the agent or the
   // single run that starts it. The flow pages are reached from those two forms.
-  const nav = [['/', t('nav.overview')], ['/agents', t('nav.agents')], ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
+  const nav = [['/', t('nav.overview')], ['/agents', t('nav.agents')], ['/sessions', t('nav.sessions')],
+    ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
     .map(([href, label]) => `<a href="${href}" class="${active === href ? 'on' : ''}">${e(label)}</a>`).join('')
   const bar = (label, pct) => `<div class="quota"><span>${label}</span><div class="track"><div class="fill ${(pct ?? 0) >= 90 ? 'r' : (pct ?? 0) >= 80 ? 'y' : ''}" style="width:${Math.min(pct ?? 0, 100)}%"></div></div><span>${pct ?? '?'} %</span></div>`
   const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
@@ -453,6 +455,92 @@ export async function pageRepos(req, res, url) {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.repos'), '/repos', body))
 }
 
+// ---------------- tmux sessions ----------------
+//
+// The one page that shows the machine instead of the hub's bookkeeping: what
+// tmux really holds, how old it is and what it costs. Sessions with a RUNNING
+// agent are hidden by default — this page exists for cleaning up, and the row
+// one must not hit by accident should not be within reach of the mouse.
+//
+// The filter, the selection and the ending all happen in the browser
+// (public/hub.js): every row is rendered once, hiding is a CSS class, and a
+// kill is a fetch per session. Nothing here waits for tmux.
+
+const STATE_CLASS = {
+  agent_running: 'rot', run_ended: 'gelb', dead: 'gruen', unknown: 'grau',
+}
+
+function byteText(kb) {
+  if (!kb) return '–'
+  return kb >= 1024 * 1024 ? `${(kb / 1024 / 1024).toFixed(1)} GB` : `${Math.round(kb / 1024)} MB`
+}
+
+function sessionRow(s) {
+  const run = s.run
+  const running = s.state === 'agent_running'
+  const title = run ? runTitle(run, run.agent_name, t('overview.single_run')) : s.name
+  const age = s.createdMs != null
+    ? `<time class="reltime" datetime="${new Date(s.createdMs).toISOString()}" title="${e(fmtDateTime(s.createdMs))}">${e(fmtRelativeTime(s.createdMs))}</time>`
+    : '<span class="dim">–</span>'
+  const activity = s.activityMs != null
+    ? `<time class="reltime" datetime="${new Date(s.activityMs).toISOString()}" title="${e(fmtDateTime(s.activityMs))}">${e(fmtRelativeTime(s.activityMs))}</time>`
+    : '<span class="dim">–</span>'
+  const stateText = {
+    agent_running: t('sessions.state_running'),
+    run_ended: t('sessions.state_ended'),
+    dead: t('sessions.state_dead'),
+    unknown: t('sessions.state_unknown'),
+  }[s.state]
+  return `<tr data-session="${e(s.name)}" data-running="${running ? '1' : '0'}">
+    <td><input type="checkbox" class="sess-pick" value="${e(s.name)}" aria-label="${e(s.name)}"></td>
+    <td><span class="dot ${STATE_CLASS[s.state]}"></span> <span class="sess-state">${e(stateText)}</span>
+      ${s.deadStatus ? `<span class="dim">exit ${e(s.deadStatus)}</span>` : ''}</td>
+    <td>${run
+      ? `<a href="/runs/${e(run.id)}">${e(title)}</a><div class="dim">${e(run.status)}${run.repo_name ? ` · ${e(run.repo_name)}` : ''}</div>`
+      : `<span class="dim">${e(t('sessions.unknown_hint'))}</span>`}</td>
+    <td><code>${e(s.name)}</code>${run ? `<div class="dim">${e(run.harness)}${run.model ? `/${e(run.model)}` : ''}</div>` : ''}</td>
+    <td>${age}</td>
+    <td>${activity}</td>
+    <td>${e(s.command || '–')}<div class="dim">${e(t('sessions.processes'))}: ${s.resources.count}</div></td>
+    <td>${e(byteText(s.resources.rssKb))}<div class="dim">${s.resources.cpu.toFixed(1)} % CPU</div></td>
+    <td>${s.windows}/${s.paneCount}${s.attached ? ` <b>${e(t('sessions.attached'))}</b>` : ''}</td>
+    <td class="dim"><code>${e(s.path)}</code></td>
+    <td><button type="button" class="danger sess-kill">${e(t('sessions.end'))}</button></td>
+  </tr>`
+}
+
+export async function pageSessions(req, res, url) {
+  const sessions = await listSessions()
+  const runningCount = sessions.filter(s => s.state === 'agent_running').length
+  const rssTotal = sessions.reduce((n, s) => n + s.resources.rssKb, 0)
+  const hours = Math.round(currentKeepMs() / 3_600_000 * 10) / 10
+  const rows = sessions.map(sessionRow).join('')
+  const body = `
+  <h2>${e(t('sessions.title'))}</h2>
+  <p class="dim">${e(t('sessions.intro'))}</p>
+  <div class="sess-bar">
+    <label class="chk"><input type="checkbox" id="sess-show-running"> ${e(t('sessions.show_running'))}</label>
+    <label class="chk"><input type="checkbox" id="sess-all"> ${e(t('sessions.select_all'))}</label>
+    <button type="button" id="sess-kill-selected" class="danger" disabled>${e(t('sessions.end_selected', { n: 0 }))}</button>
+    <span class="spacer"></span>
+    <span class="dim" id="sess-summary">${e(t('sessions.summary', { n: sessions.length, ram: byteText(rssTotal) }))}</span>
+    <a class="btn" href="/sessions">${e(t('sessions.refresh'))}</a>
+  </div>
+  <p class="dim" id="sess-hidden" hidden></p>
+  <p class="dim">${e(t('sessions.auto_hint', { hours: hours }))}
+     <a href="/settings">${e(t('nav.settings'))}</a></p>
+  <table class="list sessions"><thead><tr>
+    <th></th><th>${e(t('sessions.col_state'))}</th><th>${e(t('sessions.col_run'))}</th>
+    <th>${e(t('sessions.col_session'))}</th><th>${e(t('sessions.col_age'))}</th>
+    <th>${e(t('sessions.col_activity'))}</th><th>${e(t('sessions.col_process'))}</th>
+    <th>${e(t('sessions.col_resources'))}</th><th>${e(t('sessions.col_windows'))}</th>
+    <th>${e(t('sessions.col_path'))}</th><th></th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="11" class="dim">${e(t('sessions.none'))}</td></tr>`}</tbody></table>
+  <p class="dim">${e(t('sessions.hidden_note', { n: runningCount }))}</p>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(layout(t('sessions.title'), '/sessions', body))
+}
+
 // ---------------- settings ----------------
 export async function pageSettings(req, res, url) {
   const s = Object.fromEntries(db.prepare('SELECT key,value FROM settings').all().map(r => [r.key, r.value]))
@@ -471,7 +559,8 @@ export async function pageSettings(req, res, url) {
     <label>${e(t('settings.openrouter_min'))} <input name="openrouter_min_eur" type="number" step="0.5" value="${e(s.openrouter_min_eur ?? '5')}"></label>
     <label>${e(t('settings.abo_price'))} <input name="abo_price" type="number" value="${e(s.abo_price ?? '200')}"></label>
     <label>${e(t('settings.cursor_included'))} <input name="cursor_included_usd" type="number" step="1" value="${e(s.cursor_included_usd ?? '20')}"></label>
-    <label>${e(t('settings.retention'))} <input name="retention_days" type="number" value="${e(s.retention_days ?? '3')}"></label>
+    <label>${e(t('settings.session_keep'))} <input name="session_keep_hours" type="number" min="0" step="0.5" value="${e(String(sessionKeepHours(s)))}">
+      <span class="dim">${e(t('settings.session_keep_hint'))}</span></label>
     <label>${e(t('settings.prompt_suffix'))} <textarea name="prompt_suffix" rows="12">${e(s.prompt_suffix ?? '')}</textarea></label>
     <fieldset><legend>${e(t('settings.llm_legend'))}</legend>
       <p class="dim">${e(t('settings.llm_hint'))} ${process.env.OPENROUTER_API_KEY ? '' : `<b class="warn">${e(t('settings.llm_missing_key'))}</b>`}</p>
@@ -796,7 +885,10 @@ export async function repoSave(req, res, url, formBody) {
 export async function settingsSave(req, res, url, formBody) {
   const b = await formBody()
   for (const k of ['pipeline_on', 'telegram_token', 'telegram_chat', 'quota_threshold',
-    'openrouter_min_eur', 'abo_price', 'cursor_included_usd', 'retention_days', 'prompt_suffix',
+    // 'retention_days' is deliberately NOT written any more: it stays in the
+    // database as the fallback for an installation that has not saved the new
+    // field yet (sessionKeepMs), and an empty write would silently reset it.
+    'openrouter_min_eur', 'abo_price', 'cursor_included_usd', 'session_keep_hours', 'prompt_suffix',
     'llm_check_on', 'llm_check_model', 'llm_check_or_provider',
     'llm_title_on', 'llm_title_model', 'llm_title_or_provider', 'ui_language']) {
     setSetting(k, b[k] ?? '')

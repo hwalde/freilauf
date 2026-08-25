@@ -1399,6 +1399,119 @@ try {
     gleich(rd.runStartFromForm({ title: 'x'.repeat(200) }).title.length, ti.TITLE_MAX, 'capped')
   })
 
+  // ------------------------------------------------------------------
+  gruppe('tmux sessions: reading, judging, keeping (sessions.mjs)')
+
+  const se = await import('../server/sessions.mjs')
+  // Exactly the two format strings sessions.mjs asks tmux for, tab-separated.
+  const SESSION_LINES = [
+    'cc-einzel-aaaa\t1787600000\t0\t1\t1787600500\t/srv/worktrees/a',
+    'cc-einzel-bbbb\t1787500000\t1\t2\t1787500900\t/srv/worktrees/b',
+  ].join('\n')
+
+  await pruefe('a session line becomes a session, the path may contain tabs', () => {
+    const s = se.parseSessions(SESSION_LINES + '\ncc-tab\t1787400000\t0\t1\t1787400000\t/srv/a\tb')
+    gleich(s.length, 3, 'three sessions')
+    gleich(s[0].name, 'cc-einzel-aaaa', 'name')
+    gleich(s[0].createdMs, 1787600000000, 'created in ms')
+    falsch(s[0].attached, 'not attached')
+    wahr(s[1].attached, 'attached')
+    gleich(s[1].windows, 2, 'windows')
+    gleich(s[2].path, '/srv/a\tb', 'the tab stays in the path instead of shifting a field')
+  })
+
+  await pruefe('an empty or unreachable listing yields nothing, not a crash', () => {
+    gleich(se.parseSessions('').length, 0, 'empty')
+    gleich(se.parseSessions('no server running on /tmp/tmux-1000/default').length, 0, 'tmux error text')
+  })
+
+  await pruefe('panes decide whether a session still works', () => {
+    const s = se.mergePanes(se.parseSessions(SESSION_LINES), [
+      'cc-einzel-aaaa\t0\t111\t\t\tclaude',
+      'cc-einzel-bbbb\t1\t222\t0\t1787501000\tbash',
+      'cc-einzel-bbbb\t1\t223\t0\t1787502000\tbash',
+    ].join('\n'))
+    falsch(s[0].dead, 'a live pane keeps the session alive')
+    gleich(s[0].command, 'claude', 'command of the live pane')
+    wahr(s[1].dead, 'all panes dead = session dead')
+    gleich(s[1].paneCount, 2, 'both panes counted')
+    gleich(s[1].deadMs, 1787501000000, 'the EARLIEST death is when it stopped working')
+  })
+
+  await pruefe('resources are counted over the whole process tree, not just the pane', () => {
+    // 100 = the pane's shell, 101 = the agent below it, 102 = its child.
+    const baum = se.parsePs(['  100 1 2000 1.0', '  101 100 500000 30.0', '  102 101 1000 2.0',
+      '  200 1 9999 5.0'].join('\n'))
+    const r = se.processTree(baum, 100)
+    gleich(r.count, 3, 'shell + agent + child')
+    gleich(r.rssKb, 503000, 'summed RSS')
+    gleich(Math.round(r.cpu * 10) / 10, 33, 'summed CPU')
+    gleich(se.processTree(baum, 999).count, 0, 'an unknown pid costs nothing')
+  })
+
+  await pruefe('a process tree with a cycle terminates', () => {
+    // Not reachable through real ps output, but a parser must not hang on it.
+    const baum = se.parsePs(['  10 11 100 0.0', '  11 10 100 0.0'].join('\n'))
+    gleich(se.processTree(baum, 10).count, 2, 'each process counted once')
+  })
+
+  await pruefe('"finished" is the earlier of run end and process end', () => {
+    const lebt = { dead: false, deadMs: null, createdMs: 1000 }
+    const tot = { dead: true, deadMs: 5000, createdMs: 1000 }
+    gleich(se.finishedAtMs(lebt, { status: 'running' }), null, 'a working session is never finished')
+    gleich(se.finishedAtMs(tot, null), 5000, 'dead pane without a run')
+    // The claude case: the run reported 'done', the TUI keeps its pane alive.
+    // Exactly this is what the old rule (dead pane only) never caught.
+    gleich(se.finishedAtMs(lebt, { status: 'done', ended_at: '2026-08-25 10:00:00' }),
+      Date.parse('2026-08-25T10:00:00Z'), 'the run end alone is enough')
+    gleich(se.finishedAtMs(tot, { status: 'done', ended_at: '1970-01-01 00:00:03' }), 3000, 'the earlier one wins')
+    gleich(se.finishedAtMs({ dead: true, deadMs: null, createdMs: 7000 }, null), 7000,
+      'a dead pane without a timestamp still counts as finished')
+  })
+
+  await pruefe('the keep time comes from the hours, the old days are the fallback', () => {
+    gleich(se.sessionKeepMs({ session_keep_hours: '2' }), 2 * 3600_000, 'hours')
+    gleich(se.sessionKeepMs({ session_keep_hours: '0' }), 0, 'zero means right away, not "unset"')
+    gleich(se.sessionKeepMs({ session_keep_hours: '0.5' }), 1800_000, 'half hours are allowed')
+    gleich(se.sessionKeepMs({ retention_days: '2' }), 2 * 86_400_000, 'old setting still counts')
+    gleich(se.sessionKeepMs({ session_keep_hours: '', retention_days: '1' }), 86_400_000, 'empty falls through')
+    gleich(se.sessionKeepMs({}), 3 * 86_400_000, 'default: three days, as before')
+    gleich(se.sessionKeepHours({ session_keep_hours: '1.5' }), 1.5, 'the form gets hours back')
+  })
+
+  await pruefe('only a finished session is closed automatically', () => {
+    const jetzt = 1_000_000_000
+    const lebt = { dead: false, deadMs: null }
+    const fertig = { dead: true, deadMs: jetzt - 7200_000 }      // finished two hours ago
+    falsch(se.shouldAutoClose(lebt, { status: 'running' }, 3600_000, jetzt), 'a working agent is never closed')
+    wahr(se.shouldAutoClose(fertig, null, 3600_000, jetzt), 'two hours old, keep one hour')
+    falsch(se.shouldAutoClose(fertig, null, 4 * 3600_000, jetzt), 'keep four hours: stays')
+    wahr(se.shouldAutoClose(lebt, { status: 'done', ended_at: '1970-01-01 00:00:00' }, 0, jetzt),
+      'keep 0 closes a finished run right away, even with a live pane')
+  })
+
+  await pruefe('the state is what the page shows, and it decides what is hidden', () => {
+    const lebt = { dead: false }, tot = { dead: true }
+    gleich(se.sessionState(lebt, { status: 'running' }), 'agent_running', 'running')
+    gleich(se.sessionState(lebt, { status: 'waiting_help' }), 'agent_running', 'waiting for an answer is still running')
+    gleich(se.sessionState(lebt, { status: 'done' }), 'run_ended', 'run over, session open')
+    // A dead pane beats the record: whatever the row says, nothing works there.
+    gleich(se.sessionState(tot, { status: 'running' }), 'dead', 'dead pane beats the status')
+    gleich(se.sessionState(lebt, null), 'unknown', 'foreign session')
+    gleich(se.sessionState(tot, null), 'dead', 'foreign dead session')
+  })
+
+  await pruefe('automatic closing only ever touches sessions with a run of this hub', () => {
+    const jetzt = 1_000_000_000
+    const alt = { dead: true, deadMs: jetzt - 86_400_000 }
+    const liste = [
+      { ...alt, name: 'mit-lauf', run: { status: 'done', ended_at: null } },
+      { ...alt, name: 'fremd', run: null },
+    ]
+    const k = se.autoCloseCandidates(liste, 3600_000, jetzt).map(s => s.name)
+    gleich(k.join(','), 'mit-lauf', 'a foreign session is only ended by hand')
+  })
+
 } finally {
   rmSync(sandkasten, { recursive: true, force: true })
 }

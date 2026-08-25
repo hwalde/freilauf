@@ -14,7 +14,7 @@ import { startRun } from './scheduler.mjs'
 import { runDefFromForm, runStartFromForm, saveAgent, rememberRunChoice, lastRunChoiceFor } from './run-def.mjs'
 import { runTitle, TITLE_MAX } from './title.mjs'
 import {
-  pageOverview, pageAgents, pageRunForm, pageRun, pageRepos, pageSettings,
+  pageOverview, pageAgents, pageRunForm, pageRun, pageRepos, pageSettings, pageSessions,
   runNewPost, agentEdit, agentSave, agentToggle, agentStart,
   repoEdit, repoSave, settingsSave, settingsTestTelegram,
   telegramSetup, telegramTokenSave, telegramChatSave, telegramChats,
@@ -87,6 +87,7 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'GET' && path === '/runs/new') return pageRunForm(req, res, url)
   if (req.method === 'POST' && path === '/runs/new') return runNewPost(req, res, url, formBody)
   if (/^\/runs\/[0-9a-f-]{36}$/.test(path)) return pageRun(req, res, url, path.split('/')[2])
+  if (req.method === 'GET' && path === '/sessions') return pageSessions(req, res, url)
   if (req.method === 'GET' && path === '/repos') return pageRepos(req, res, url)
   if (req.method === 'GET' && path === '/repos/edit') return repoEdit(req, res, url)
   if (req.method === 'POST' && path === '/repos/edit') return repoSave(req, res, url, formBody)
@@ -254,6 +255,20 @@ async function api(req, res, url) {
     db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL WHERE id=?`).run(m[1])
     const r = await launchRun(m[1])
     return answer(req, res, r.ok ? 200 : 500, r, `/runs/${m[1]}`)
+  }
+  // End tmux sessions — one or many in a single call. The page fires this for
+  // every row the operator clicks away; the kills run concurrently inside
+  // killSessions(), so a batch costs no more wall clock than a single one.
+  // Whatever hung on a session is brought in line there too (a run still on
+  // 'running' becomes 'aborted', attached flows fire) — that is the whole point
+  // of routing this through one function instead of calling tmux from the page.
+  if (req.method === 'POST' && path === '/api/sessions/kill') {
+    const b = await form(req)
+    const names = b.session_list ?? (b.session ? [b.session] : [])
+    if (!names.length) return answer(req, res, 400, { ok: false, error: 'no session given' }, '/sessions')
+    const { killSessions } = await import('./sessions.mjs')
+    const results = await killSessions(names, 'web')
+    return answer(req, res, 200, { ok: results.every(r => r.ok), results }, '/sessions')
   }
   // Resolve an incident (auto-alarm off) — single or all of one run.
   if (req.method === 'POST' && (m = path.match(/^\/api\/incidents\/(\d+)\/resolve$/))) {

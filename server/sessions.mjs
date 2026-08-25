@@ -1,0 +1,319 @@
+// cc-hub — tmux sessions: what is running on this machine, what it costs and
+// how it is ended.
+//
+// A run works in its own tmux session, and `cc-start --keep` sets
+// remain-on-exit: the session therefore OUTLIVES the agent on purpose — the
+// screen stays readable afterwards. The price is a process that keeps its
+// memory for as long as the session stands, and with a retention measured in
+// days that adds up to dozens of them.
+//
+// This module is the one place that knows about sessions:
+//   - listSessions()           what tmux has, enriched with the run behind it
+//   - killSessions()           end them, and keep the run records honest
+//   - reconcileClosedSession() what an ended session means for its run
+//   - sessionKeepMs()          how long a finished session may stay
+//
+// The parsing and deciding parts are pure functions (parseSessions, mergePanes,
+// parsePs, processTree, finishedAtMs, shouldAutoClose, sessionState) so they can
+// be tested without a tmux server.
+import db, { getRun, addEvent, allSettings } from './db.mjs'
+import { sh, parseDbUtc } from './util.mjs'
+import { t } from './i18n.mjs'
+
+// session_path is free text and comes LAST, so a tab inside it cannot shift
+// any other field (the parser rejoins the remainder).
+const SESSION_FIELDS = [
+  '#{session_name}', '#{session_created}', '#{session_attached}',
+  '#{session_windows}', '#{session_activity}', '#{session_path}',
+].join('\t')
+// Same rule: pane_current_command last.
+const PANE_FIELDS = [
+  '#{session_name}', '#{pane_dead}', '#{pane_pid}',
+  '#{pane_dead_status}', '#{pane_dead_time}', '#{pane_current_command}',
+].join('\t')
+
+const num = (s) => { const n = Number(s); return Number.isFinite(n) ? n : null }
+
+/** `tmux list-sessions -F SESSION_FIELDS` → one object per session. */
+export function parseSessions(text) {
+  const out = []
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line.trim()) continue
+    const f = line.split('\t')
+    if (f.length < 6) continue
+    const createdSec = num(f[1])
+    const activitySec = num(f[4])
+    out.push({
+      name: f[0],
+      createdMs: createdSec != null ? createdSec * 1000 : null,
+      attached: f[2] === '1',
+      windows: num(f[3]) ?? 1,
+      activityMs: activitySec != null ? activitySec * 1000 : null,
+      // A path may contain tabs — everything from field 6 on belongs to it.
+      path: f.slice(5).join('\t'),
+      panes: [],
+    })
+  }
+  return out
+}
+
+/** `tmux list-panes -a -F PANE_FIELDS` → panes attached to their sessions. */
+export function mergePanes(sessions, text) {
+  const bySession = new Map(sessions.map(s => [s.name, s]))
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line.trim()) continue
+    const f = line.split('\t')
+    if (f.length < 6) continue
+    const session = bySession.get(f[0])
+    if (!session) continue
+    const deadSec = num(f[4])
+    session.panes.push({
+      dead: f[1] === '1',
+      pid: num(f[2]),
+      deadStatus: f[3] || null,
+      deadMs: deadSec != null ? deadSec * 1000 : null,
+      command: f.slice(5).join('\t'),
+    })
+  }
+  // A session with no live pane left is finished, whatever it once ran.
+  for (const session of sessions) {
+    session.paneCount = session.panes.length
+    session.dead = session.panes.length > 0 && session.panes.every(p => p.dead)
+    // The earliest death among the panes is when the session stopped working.
+    const deadTimes = session.panes.filter(p => p.dead && p.deadMs != null).map(p => p.deadMs)
+    session.deadMs = session.dead && deadTimes.length ? Math.min(...deadTimes) : null
+    session.command = session.panes.find(p => !p.dead)?.command ?? session.panes[0]?.command ?? ''
+    session.deadStatus = session.panes.find(p => p.dead && p.deadStatus)?.deadStatus ?? null
+  }
+  return sessions
+}
+
+/**
+ * `ps -eo pid=,ppid=,rss=,pcpu=` → resources of a whole process tree. The pane
+ * PID is the shell; what actually eats the memory are its children (the agent
+ * and everything it spawned), so a single ps line would understate it by an
+ * order of magnitude.
+ */
+export function parsePs(text) {
+  const procs = new Map()      // pid → { ppid, rssKb, cpu }
+  const children = new Map()   // ppid → [pid]
+  for (const line of String(text ?? '').split('\n')) {
+    const f = line.trim().split(/\s+/)
+    if (f.length < 4) continue
+    const pid = num(f[0]), ppid = num(f[1])
+    if (pid == null || ppid == null) continue
+    procs.set(pid, { ppid, rssKb: num(f[2]) ?? 0, cpu: num(f[3]) ?? 0 })
+    if (!children.has(ppid)) children.set(ppid, [])
+    children.get(ppid).push(pid)
+  }
+  return { procs, children }
+}
+
+/** Sum of RSS (KiB), CPU percentage and process count below and including `pid`. */
+export function processTree({ procs, children }, pid) {
+  const out = { rssKb: 0, cpu: 0, count: 0 }
+  if (pid == null || !procs.has(pid)) return out
+  const queue = [pid]
+  const seen = new Set()
+  while (queue.length) {
+    const current = queue.pop()
+    if (seen.has(current)) continue     // a ppid cycle would otherwise loop forever
+    seen.add(current)
+    const info = procs.get(current)
+    if (!info) continue
+    out.rssKb += info.rssKb
+    out.cpu += info.cpu
+    out.count += 1
+    for (const child of children.get(current) ?? []) queue.push(child)
+  }
+  return out
+}
+
+/**
+ * When did this session finish its work? The EARLIEST of the two signals wins,
+ * because that is the moment the operator means by "the agent is done":
+ *   - the run reported a result (ended_at), or
+ *   - the pane's process exited (remain-on-exit keeps the session standing).
+ * Returns null while it is still working — such a session is never closed
+ * automatically.
+ */
+export function finishedAtMs(session, run) {
+  const candidates = []
+  if (session?.deadMs != null) candidates.push(session.deadMs)
+  if (run?.ended_at) {
+    const ms = parseDbUtc(run.ended_at)
+    if (Number.isFinite(ms)) candidates.push(ms)
+  }
+  // A dead pane without a usable timestamp still counts as finished; without a
+  // reference point it would otherwise stand forever.
+  if (!candidates.length && session?.dead) return session.createdMs ?? null
+  return candidates.length ? Math.min(...candidates) : null
+}
+
+/**
+ * How long a finished session may stay open. The setting is in hours (0 =
+ * close right away); the older `retention_days` is read as a fallback so an
+ * existing installation keeps its behavior until it is saved once.
+ */
+export function sessionKeepMs(settings = {}) {
+  const hours = settings.session_keep_hours
+  if (hours != null && String(hours).trim() !== '') {
+    const n = Number(hours)
+    if (Number.isFinite(n) && n >= 0) return n * 3_600_000
+  }
+  const days = Number(settings.retention_days)
+  return (Number.isFinite(days) && days >= 0 ? days : 3) * 86_400_000
+}
+
+/** Default for the settings form, in hours. */
+export function sessionKeepHours(settings = {}) {
+  return Math.round(sessionKeepMs(settings) / 3_600_000 * 10) / 10
+}
+
+/** Is this session over its keep time? */
+export function shouldAutoClose(session, run, keepMs, nowMs = Date.now()) {
+  const finished = finishedAtMs(session, run)
+  if (finished == null) return false
+  return nowMs - finished >= keepMs
+}
+
+/**
+ * State of a session, as the page shows it:
+ *   'agent_running' — a run of this hub is going in it (hidden by default)
+ *   'run_ended'     — the run is over, the session is still standing
+ *   'dead'          — the process exited, only the screen is left
+ *   'unknown'       — no run of this hub belongs to it (foreign or leftover)
+ */
+export function sessionState(session, run) {
+  if (!run) return session?.dead ? 'dead' : 'unknown'
+  if (['running', 'waiting_help'].includes(run.status) && !session?.dead) return 'agent_running'
+  return session?.dead ? 'dead' : 'run_ended'
+}
+
+// ---------------------------------------------------------------- tmux access
+
+/** Raw session list including panes. Empty when tmux is not reachable. */
+export async function tmuxSessions() {
+  const list = await sh('tmux', ['list-sessions', '-F', SESSION_FIELDS])
+  if (!list.ok) return []                   // "no server running on …" is not an error here
+  const sessions = parseSessions(list.stdout)
+  if (!sessions.length) return sessions
+  const panes = await sh('tmux', ['list-panes', '-a', '-F', PANE_FIELDS])
+  return mergePanes(sessions, panes.ok ? panes.stdout : '')
+}
+
+/** name → session, for the watcher (one listing instead of one call per run). */
+export async function tmuxSessionMap() {
+  return new Map((await tmuxSessions()).map(s => [s.name, s]))
+}
+
+export async function sessionAlive(name) {
+  return (await sh('tmux', ['has-session', '-t', `=${name}`])).ok
+}
+
+/**
+ * Every session with everything known about it: the run behind it, the agent,
+ * the repo and what the process tree costs. Oldest first — that is the order
+ * one wants when cleaning up.
+ */
+export async function listSessions() {
+  const sessions = await tmuxSessions()
+  if (!sessions.length) return []
+  const ps = await sh('ps', ['-eo', 'pid=,ppid=,rss=,pcpu='])
+  const tree = parsePs(ps.ok ? ps.stdout : '')
+  // One query instead of one per session: there are few runs with a session.
+  const runs = new Map()
+  for (const run of db.prepare(`SELECT r.*, a.name AS agent_name, p.name AS repo_name
+                                FROM runs r
+                                LEFT JOIN agents a ON a.id = r.agent_id
+                                LEFT JOIN repos p ON p.id = r.repo_id
+                                WHERE r.tmux_session IS NOT NULL
+                                ORDER BY r.started_at`).all()) {
+    runs.set(run.tmux_session, run)   // a name is reused at most after a kill: the newest wins
+  }
+  const out = sessions.map(session => {
+    const run = runs.get(session.name) ?? null
+    const pid = session.panes.find(p => !p.dead)?.pid ?? session.panes[0]?.pid ?? null
+    return {
+      ...session,
+      run,
+      state: sessionState(session, run),
+      resources: processTree(tree, pid),
+      finishedAtMs: finishedAtMs(session, run),
+    }
+  })
+  out.sort((a, b) => (a.createdMs ?? 0) - (b.createdMs ?? 0))
+  return out
+}
+
+// ---------------------------------------------------------------- ending
+
+/**
+ * Bring the run record in line with a session that is gone. Without this the
+ * overview keeps a run on 'running' forever — there is nothing left that could
+ * ever report a result for it.
+ *
+ * Returns 'aborted' when the run was still open, 'closed' when it had already
+ * finished, null when there is no run.
+ */
+export function reconcileClosedSession(runId, source = 'session') {
+  const run = getRun(runId)
+  if (!run) return null
+  db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(runId)
+  if (!['running', 'waiting_help'].includes(run.status)) {
+    if (!run.tmux_closed_at) addEvent(runId, 'tmux_closed', { source })
+    return 'closed'
+  }
+  db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
+              report_md=COALESCE(report_md, ?) WHERE id=?`)
+    .run(t('sessions.aborted_note'), runId)
+  addEvent(runId, 'aborted', { reason: 'tmux session ended', source })
+  return 'aborted'
+}
+
+/**
+ * End sessions. Every name is treated on its own: one that is already gone
+ * counts as done (the point is the end state, not who caused it), and one that
+ * refuses reports its error instead of taking the whole batch down.
+ *
+ * The kills run concurrently — the page fires a dozen at once and must not wait
+ * for them one after another.
+ */
+export async function killSessions(names, source = 'web') {
+  const unique = [...new Set((names ?? []).map(n => String(n ?? '').trim()).filter(Boolean))]
+  const results = await Promise.all(unique.map(async (name) => {
+    const r = await sh('tmux', ['kill-session', '-t', `=${name}`])
+    // kill-session on a session that no longer exists is an error to tmux, but
+    // not to us: the wish "this must be gone" is fulfilled.
+    const gone = r.ok || !(await sessionAlive(name))
+    return { session: name, ok: gone, error: gone ? null : (r.stderr || r.stdout).trim() || 'kill-session failed' }
+  }))
+  let aborted = 0
+  for (const result of results) {
+    if (!result.ok) continue
+    const run = db.prepare(`SELECT id FROM runs WHERE tmux_session=? ORDER BY started_at DESC LIMIT 1`).get(result.session)
+    if (!run) continue
+    result.runId = run.id
+    result.run = reconcileClosedSession(run.id, source)
+    if (result.run === 'aborted') aborted++
+  }
+  if (aborted) {
+    // "Run finished" is a flow trigger — an ended session is exactly that, and
+    // waiting for the next watcher pass would delay it by up to 30 seconds.
+    const { flowsTick } = await import('./flows/triggers.mjs')
+    flowsTick().catch(err => console.error('[flows]', err.message))
+  }
+  return results
+}
+
+/**
+ * Sessions the watcher may close by itself. Deliberately only those carrying a
+ * run of THIS hub: the e2e suite and other instances share the same tmux
+ * server, and a pattern across all cc-* sessions would kill theirs.
+ */
+export function autoCloseCandidates(sessions, keepMs, nowMs = Date.now()) {
+  return sessions.filter(s => s.run && shouldAutoClose(s, s.run, keepMs, nowMs))
+}
+
+/** The keep time in force right now (watcher and settings page read the same value). */
+export function currentKeepMs() { return sessionKeepMs(allSettings()) }

@@ -299,6 +299,53 @@ with the reason instead of silently not sticking.
 Architecture, step registry contract and the integration seams:
 **[server/flows/AGENTS.md](server/flows/AGENTS.md)**.
 
+## tmux sessions: the machine, not the bookkeeping
+
+`server/sessions.mjs` + the **Sessions** page. Every other page shows what the
+hub *recorded*; this one shows what the machine is actually *holding* — and it
+is the only place where a session can be ended by hand.
+
+A session deliberately outlives its agent: `cc-start --keep` sets
+`remain-on-exit`, so the screen stays readable afterwards. The price is a
+process keeping its memory until the session goes, and with the old rule that
+bill ran for days (thirty sessions, 15 GB, measured).
+
+- **Running agents are hidden by default.** The row you must not hit by accident
+  is not within reach of the mouse; one checkbox shows them, and the choice
+  lives in `localStorage`. Ending one of them asks first — that confirmation is
+  the only friction on the page.
+- **Oldest first**, because that is the order one cleans up in.
+- **Nothing blocks.** A click marks its row "ending …" in the same tick and the
+  request goes off in the background; several rows can be clicked away in a row,
+  and `POST /api/sessions/kill` takes any number of names and kills them
+  concurrently. Only what the server confirms is struck through.
+- Shown per session: age, last activity, state, the run behind it, the pane's
+  command, and **RSS/CPU of the whole process tree** (one `ps`, summed from the
+  pane PID down) — the pane itself is only a shell and would understate it by an
+  order of magnitude.
+
+**Ending a session is a run event, not just a tmux call.**
+`reconcileClosedSession()` is the single place that knows this: a run still on
+`running`/`waiting_help` becomes `aborted` with an `ended_at` and a report line
+saying why, and attached flows fire. Nothing could ever report for that run
+again — leaving it on `running` is how the overview came to show runs that did
+not exist. The watcher uses the same function when it finds a session gone (it
+used to only set `tmux_closed_at` and leave the status alone), and so does the
+retention pass.
+
+**Retention is in hours and counts from the agent's end** (Settings → keep the
+tmux session open, `session_keep_hours`, `0` = right away; the old
+`retention_days` is still read as a fallback for an installation that has not
+saved the field yet). The first version fired on a **dead pane** only — but a
+claude that reported `done` and stays in its TUI keeps its pane alive forever,
+which is exactly the set of sessions that was piling up. `finishedAtMs()`
+therefore takes the **earlier** of the run's end and the process's end.
+
+Automatic closing only ever touches sessions **that carry a run of this hub**.
+The e2e suite and other hub instances share the same tmux server, and a pattern
+across all `cc-*` would kill theirs; a foreign session is listed and ended by
+hand, never by the watcher.
+
 ## Extra skills (opt-in)
 
 `~/agents/zusaetze/<name>/SKILL.md` — **deliberately not** a `.claude/skills`

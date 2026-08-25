@@ -460,6 +460,124 @@
     return false
   }
 
+  // ---- sessions page: filter, multi-select, non-blocking ending ----
+  // Nothing here reloads the page. A click marks its row as "ending …" in the
+  // same tick and the request goes off in the background — so a dozen sessions
+  // can be clicked away in a row without waiting for any of them. Only what the
+  // server confirms is struck through; a failure hands the row back.
+  const sessTable = document.querySelector('table.sessions')
+  if (sessTable) {
+    const showRunning = document.getElementById('sess-show-running')
+    const selectAll = document.getElementById('sess-all')
+    const killBtn = document.getElementById('sess-kill-selected')
+    const hiddenNote = document.getElementById('sess-hidden')
+    const STORE_KEY = 'cchub.sessions.showRunning'
+
+    const rows = function () {
+      return Array.from(sessTable.querySelectorAll('tbody tr[data-session]'))
+    }
+    // A row that is filtered away or already ended is out of reach — neither
+    // "select all" nor a bulk end may touch it.
+    const reachable = function (tr) { return !tr.hidden && !tr.classList.contains('gone') }
+    const selected = function () {
+      return rows().filter(function (tr) {
+        var box = tr.querySelector('.sess-pick')
+        return reachable(tr) && box && box.checked
+      })
+    }
+
+    function syncSelection() {
+      var n = selected().length
+      killBtn.disabled = n === 0
+      killBtn.textContent = T('js.sessions_end_selected', 'End selected ({n})', { n: n })
+      var reachableRows = rows().filter(reachable)
+      selectAll.checked = reachableRows.length > 0 && n === reachableRows.length
+    }
+
+    function syncFilter() {
+      var hiddenCount = 0
+      rows().forEach(function (tr) {
+        var hide = tr.dataset.running === '1' && !showRunning.checked
+        tr.hidden = hide
+        if (hide) {
+          hiddenCount++
+          var box = tr.querySelector('.sess-pick')
+          if (box) box.checked = false      // never end what is not on screen
+        }
+      })
+      hiddenNote.hidden = hiddenCount === 0
+      hiddenNote.textContent = T('js.sessions_hidden',
+        'Sessions with a running agent, hidden: {n}', { n: hiddenCount })
+      syncSelection()
+    }
+
+    function endSessions(trs) {
+      trs = trs.filter(function (tr) { return tr && !tr.classList.contains('gone') })
+      if (!trs.length) return
+      var runningCount = trs.filter(function (tr) { return tr.dataset.running === '1' }).length
+      if (runningCount && !confirm(T('js.sessions_kill_confirm',
+        '{n} of these sessions still have a running agent — it is killed along with the session. Continue?',
+        { n: runningCount }))) return
+      trs.forEach(function (tr) {
+        tr.classList.add('ending')
+        var b = tr.querySelector('.sess-kill'); if (b) b.disabled = true
+        var box = tr.querySelector('.sess-pick'); if (box) { box.checked = false; box.disabled = true }
+        var z = tr.querySelector('.sess-state'); if (z) z.textContent = T('js.sessions_ending', 'ending …')
+      })
+      syncSelection()
+
+      function finish(byName) {
+        trs.forEach(function (tr) {
+          var result = byName[tr.dataset.session]
+          var z = tr.querySelector('.sess-state')
+          tr.classList.remove('ending')
+          if (result && result.ok) {
+            tr.classList.add('gone')
+            if (z) z.textContent = T('js.sessions_ended', 'ended')
+          } else {
+            tr.classList.add('failed')
+            var b = tr.querySelector('.sess-kill'); if (b) b.disabled = false
+            var box = tr.querySelector('.sess-pick'); if (box) box.disabled = false
+            if (z) z.textContent = T('js.sessions_kill_failed', 'could not be ended')
+          }
+        })
+        syncSelection()
+      }
+
+      var body = new URLSearchParams()
+      trs.forEach(function (tr) { body.append('session', tr.dataset.session) })
+      fetch('/api/sessions/kill', { method: 'POST', body: body, headers: { accept: 'application/json' } })
+        .then(function (r) { return r.json() })
+        .then(function (j) {
+          var byName = {}
+          ;(j.results || []).forEach(function (x) { byName[x.session] = x })
+          finish(byName)
+        })
+        .catch(function () { finish({}) })
+    }
+
+    sessTable.addEventListener('click', function (ev) {
+      if (ev.target.classList.contains('sess-kill')) endSessions([ev.target.closest('tr')])
+    })
+    sessTable.addEventListener('change', function (ev) {
+      if (ev.target.classList.contains('sess-pick')) syncSelection()
+    })
+    killBtn.addEventListener('click', function () { endSessions(selected()) })
+    selectAll.addEventListener('change', function () {
+      rows().filter(reachable).forEach(function (tr) {
+        var box = tr.querySelector('.sess-pick')
+        if (box && !box.disabled) box.checked = selectAll.checked
+      })
+      syncSelection()
+    })
+    showRunning.addEventListener('change', function () {
+      try { localStorage.setItem(STORE_KEY, showRunning.checked ? '1' : '0') } catch (err) { /* private mode */ }
+      syncFilter()
+    })
+    try { showRunning.checked = localStorage.getItem(STORE_KEY) === '1' } catch (err) { /* private mode */ }
+    syncFilter()
+  }
+
   // ---- terminal: xterm.js + resize frame \0{cols},{rows} (planning 7.4) ----
   // xterm.js provides the globals 'Terminal' and 'FitAddon' — not 'Term'.
   const termBox = document.getElementById('term')

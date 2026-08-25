@@ -1068,6 +1068,71 @@ try {
   }
 
   // ------------------------------------------------------------------
+  gruppe('Sessions page: list, end, and the run that hung on it')
+
+  {
+    let SESS = null, SESSNAME = null
+    await pruefe('a running session is listed with its run', async () => {
+      const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Sessionseite' })
+      SESS = j.runId
+      wahr(!!SESS, `run created (${j.error ?? ''})`)
+      await warteAuf(() => !!lauf(SESS)?.tmux_session, { was: 'tmux session' })
+      SESSNAME = lauf(SESS).tmux_session
+      sessions.add(SESSNAME)
+      const html = await (await hol('/sessions')).text()
+      enthaelt(html, SESSNAME, 'the session name is on the page')
+      // Its row must carry the marker the default filter hides it by — that is
+      // the whole safety of "running agents are not shown".
+      enthaelt(html, `data-session="${SESSNAME}" data-running="1"`, 'marked as running')
+    })
+
+    await pruefe('ending a session ends the run that hung on it', async () => {
+      const r = await formular('/api/sessions/kill', { session: SESSNAME })
+      const j = await r.json()
+      wahr(j.ok, `kill answered ok (${JSON.stringify(j.results ?? j)})`)
+      sessions.delete(SESSNAME)
+      falsch((await sh('tmux', ['has-session', '-t', `=${SESSNAME}`])).ok, 'session gone')
+      const l = lauf(SESS)
+      gleich(l.status, 'aborted', 'the run does not stay on "running"')
+      wahr(l.ended_at !== null, 'ended_at set')
+      wahr(l.tmux_closed_at !== null, 'tmux_closed_at set immediately')
+      wahr(ereignisse(SESS).includes('aborted'), `event recorded (has: ${ereignisse(SESS).join(', ')})`)
+    })
+
+    await pruefe('ending a session that is already gone is not an error', async () => {
+      const j = await (await formular('/api/sessions/kill', { session: SESSNAME })).json()
+      wahr(j.ok, 'idempotent')
+    })
+
+    await pruefe('several sessions go in ONE call', async () => {
+      const a = await laufStarten({ repo_id: repoId, prompt: 'E2E-Bulk-a' })
+      const b = await laufStarten({ repo_id: repoId, prompt: 'E2E-Bulk-b' })
+      await warteAuf(() => !!lauf(a.runId)?.tmux_session && !!lauf(b.runId)?.tmux_session,
+        { was: 'both tmux sessions' })
+      const namen = [lauf(a.runId).tmux_session, lauf(b.runId).tmux_session]
+      namen.forEach(n => sessions.add(n))
+      const j = await (await formular('/api/sessions/kill', { session: namen })).json()
+      wahr(j.ok, `both ended (${JSON.stringify(j.results ?? j)})`)
+      gleich(j.results.length, 2, 'one result per session')
+      for (const n of namen) sessions.delete(n)
+      gleich(lauf(a.runId).status, 'aborted', 'first run aborted')
+      gleich(lauf(b.runId).status, 'aborted', 'second run aborted')
+    })
+
+    await pruefe('the keep time is set in hours on the settings page', async () => {
+      // Written directly instead of through the form: /settings/save writes ALL
+      // of its keys, and a partial post would blank the rest for every test
+      // after this one.
+      db.prepare(`INSERT INTO settings(key,value) VALUES('session_keep_hours','0.5')
+                  ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run()
+      const html = await (await hol('/settings')).text()
+      enthaelt(html, 'name="session_keep_hours"', 'the field is on the settings page')
+      enthaelt(html, 'value="0.5"', 'and shows what is stored')
+      const { sessionKeepMs } = await import('../server/sessions.mjs')
+      gleich(sessionKeepMs({ session_keep_hours: '0.5' }), 1800_000, 'half an hour')
+    })
+  }
+
   gruppe('Worktree cleanup: no data loss (regression test)')
 
   {

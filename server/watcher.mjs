@@ -1,6 +1,6 @@
 // cc-hub — watcher (planning 4.4, 4.5, 4.7): observes runs via tmux, the harnesses'
 // transcript/DB and the inbox fallback; anomalies (traffic light), budget retry,
-// cost estimation, auto-close after 3 days, worktree cleanup.
+// cost estimation, auto-close of finished sessions (server/sessions.mjs), worktree cleanup.
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -14,6 +14,7 @@ import { pruefeTreffer, pruefLlmAktiv } from './pruefer.mjs'
 import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
 import { flowsTick } from './flows/triggers.mjs'
+import { reconcileClosedSession, tmuxSessionMap, shouldAutoClose, currentKeepMs } from './sessions.mjs'
 
 let timer = null
 
@@ -103,10 +104,14 @@ async function watchRun(run) {
   let st = { pane_dead: '?', dead_status: '', dead_time: '', pid: '', cmd: '' }
   if (run.tmux_session) {
     if (!await sessionLebt(run.tmux_session)) {
-      // Session gone entirely (reboot, manual cc-kill). Mark it closed right away,
-      // otherwise the worktree cleanup waits forever for tmux_closed_at.
+      // Session gone entirely (reboot, manual cc-kill, the sessions page). Mark
+      // it closed right away, otherwise the worktree cleanup waits forever for
+      // tmux_closed_at — AND end the run: nothing can report for it any more, so
+      // leaving it on 'running' means the overview shows a run that does not
+      // exist, forever. reconcileClosedSession() does both, and is the same
+      // function the sessions page uses.
       addEventOnce(run.id, 'anomaly:session_gone')
-      db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(run.id)
+      reconcileClosedSession(run.id, 'watcher')
     } else {
       const r = await sh('tmux', ['display', '-p', '-t', `=${run.tmux_session}`,
         '#{pane_dead} #{pane_dead_status} #{pane_dead_time} #{pane_pid} #{pane_current_command}'])
@@ -521,24 +526,33 @@ async function checkFinishedBranches() {
 }
 
 // ---------- cleanup (planning 4.7) ----------
+/**
+ * Close sessions whose work is over. Two things changed here against the first
+ * version, both of which cost real memory on this machine:
+ *
+ * 1. The trigger used to be a DEAD pane only. With `--keep` (remain-on-exit) a
+ *    claude that reported 'done' and then sits in its TUI keeps its pane alive
+ *    indefinitely — the rule never fired for exactly the sessions that were
+ *    piling up. finishedAtMs() therefore also counts the run's own end.
+ * 2. The keep time is configurable in hours instead of whole days
+ *    (sessionKeepMs, Settings → keep the tmux session open).
+ *
+ * One tmux listing serves all runs; the old version made two tmux calls per
+ * open session.
+ */
 async function closeOldSessions() {
-  const retentionDays = Number(db.prepare(`SELECT value FROM settings WHERE key='retention_days'`).get()?.value ?? 3) || 3
   const rows = db.prepare(`SELECT * FROM runs WHERE tmux_session IS NOT NULL AND tmux_closed_at IS NULL`).all()
+  if (!rows.length) return
+  const keepMs = currentKeepMs()
+  const live = await tmuxSessionMap()
+  const now = Date.now()
   for (const run of rows) {
-    if (!await sessionLebt(run.tmux_session)) {   // no longer exists
-      db.prepare(`UPDATE runs SET tmux_closed_at=datetime('now') WHERE id=?`).run(run.id)
-      continue
-    }
-    const r = await sh('tmux', ['display', '-p', '-t', `=${run.tmux_session}`, '#{pane_dead} #{pane_dead_time}'])
-    const [dead, deadTime] = r.stdout.trim().split(/\s+/)
-    if (dead === '1' && deadTime && /^\d+$/.test(deadTime)) {
-      const ageDays = (Date.now() / 1000 - Number(deadTime)) / 86400
-      if (ageDays >= retentionDays) {
-        await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
-        db.prepare(`UPDATE runs SET tmux_closed_at=datetime('now') WHERE id=?`).run(run.id)
-        addEvent(run.id, 'tmux_closed')
-      }
-    }
+    const session = live.get(run.tmux_session)
+    if (!session) { reconcileClosedSession(run.id, 'watcher'); continue }   // no longer exists
+    if (!shouldAutoClose(session, run, keepMs, now)) continue
+    await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
+    reconcileClosedSession(run.id, 'retention')
+    addEvent(run.id, 'tmux_closed', { reason: 'retention' })
   }
 }
 
