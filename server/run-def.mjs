@@ -18,11 +18,12 @@
 //
 // The one place that turns a definition into a running run is
 // startRun() in scheduler.mjs.
-import db, { getSetting, setSetting } from './db.mjs'
+import db, { getRepo, getSetting, setSetting } from './db.mjs'
 import { escapeHtml as e } from './util.mjs'
 import { providersForHarness, enabledCodingAgents } from './coding-agents.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { effortOptionen } from './models.mjs'
+import { branchWorktree } from './runner.mjs'
 import { skillFelder, skillsAusFormular } from './zusaetze.mjs'
 import { t } from './i18n.mjs'
 
@@ -146,6 +147,23 @@ async function effortFromForm(b, problems) {
 }
 
 /**
+ * Branch expectation "fixed" with a branch that another worktree already holds
+ * cannot work — git grants a branch to exactly one worktree, and the classic
+ * case is the repo's base branch, which the main checkout itself has. Without
+ * this check the mistake only surfaced as a failed run at 'git worktree add'.
+ * A pattern with placeholders is only resolved at start; that case stays with
+ * the check in the runner (makeWorktree).
+ */
+async function fixedBranchProblem(b, problems) {
+  const branch = b.branch_pattern?.trim()
+  if (!branch || branch.includes('{')) return
+  const repo = getRepo(+b.repo_id)
+  if (!repo) return
+  const worktree = await branchWorktree(repo.path, branch)
+  if (worktree) problems.push(t('run.branch_in_use', { branch, worktree }))
+}
+
+/**
  * Read the definition out of a form body and validate it — the SAME checks for
  * the agent form, the single-run form and the JSON API. Problems are collected
  * in `problems`; a definition is returned in any case, so the caller decides
@@ -162,6 +180,7 @@ export async function runDefFromForm(b, problems = []) {
   const branchMode = String(b.branch_mode ?? '')
   if (!BRANCH_MODES.includes(branchMode)) problems.push(t('form.branch_mode_unknown', { mode: branchMode }))
   if (branchMode !== 'keiner' && !b.branch_pattern?.trim()) problems.push(t('form.branch_missing'))
+  if (branchMode === 'fest') await fixedBranchProblem(b, problems)
   const pv = providerFromForm(b, problems)
   const effort = await effortFromForm(b, problems)
   return {

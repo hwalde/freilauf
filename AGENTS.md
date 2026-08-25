@@ -263,6 +263,15 @@ errors (`post_api_request` only fires after success).
 
 ## Pitfalls that already cost time here
 
+- **A branch belongs to exactly one worktree.** Branch expectation "fixed" with
+  the base branch (`main`) — which the main checkout itself holds — can never
+  work: `git worktree add` refuses it. The hub therefore checks beforehand
+  (`branchWorktree()` in `runner.mjs`): `runDefFromForm()` blocks it for every
+  form path, so no run is even created, and a start that gets there anyway
+  (an agent whose branch was taken afterwards) fails with a readable sentence
+  instead of git's "'main' is already used by worktree at …". `--force` would push it
+  through, but the main checkout would then carry the agent's commits as
+  reverse-modifications in its working tree — never do that.
 - **tmux targets need the colon.** `-t "=name"` is no valid target for
   `pipe-pane` and `set-hook` ("can't find pane" / "no such window"); correct is
   `-t "=name:"`. And `tmux display -p -t "=name"` returns exit code 0 for a

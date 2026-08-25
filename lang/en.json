@@ -209,6 +209,7 @@
   "form.prompt_missing": "Prompt is empty.",
   "form.branch_mode_unknown": "Unknown branch expectation: {mode}",
   "form.branch_missing": "Branch pattern is missing (expectation is not „none“).",
+  "run.branch_in_use": "Branch „{branch}“ is already checked out in {worktree} — git grants a branch to only one worktree. Pick a branch that is free, or the expectation „new branch“ / „none“.",
   "form.subscription_no_provider": "{harness} runs on its subscription — there is no provider selection, only the model.",
   "form.provider_unavailable": "Provider „{provider}“ is not available for {harness} here (missing key or not enabled?). Possible: {list}",
   "form.effort_invalid": "Reasoning effort „{effort}“ is not possible for {target} — possible: {list}",

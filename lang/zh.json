@@ -209,6 +209,7 @@
   "form.prompt_missing": "提示词为空。",
   "form.branch_mode_unknown": "未知的分支预期：{mode}",
   "form.branch_missing": "缺少分支模式（预期不是“无”）。",
+  "run.branch_in_use": "分支“{branch}”已在 {worktree} 中检出 —— git 只允许一个工作树占用同一分支。请选择一个空闲分支，或将预期改为“新建分支”/“无”。",
   "form.subscription_no_provider": "{harness} 基于订阅运行 —— 无需选择服务商，只需选择模型。",
   "form.provider_unavailable": "服务商“{provider}”在此对 {harness} 不可用（缺少密钥或未启用？）。可用：{list}",
   "form.effort_invalid": "推理力度“{effort}”对 {target} 不可用 —— 可用：{list}",

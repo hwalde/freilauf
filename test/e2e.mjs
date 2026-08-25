@@ -1168,6 +1168,74 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('Branch expectation "fixed": occupied, free, only on origin')
+
+  await pruefe('a fixed branch another worktree holds is rejected before a run exists', async () => {
+    // 'main' is checked out in the repo itself — git grants a branch to exactly
+    // one worktree. Before, this only came out as a failed run with git's raw
+    // message ("'main' is already used by worktree at …").
+    const vorher = db.prepare('SELECT COUNT(*) n FROM runs').get().n
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Festbranch', branch_mode: 'fest', branch_pattern: 'main' })
+    falsch(j.ok, 'rejected')
+    enthaelt(j.error, 'main', 'branch named')
+    enthaelt(j.error, REPO, 'the occupying worktree named')
+    gleich(db.prepare('SELECT COUNT(*) n FROM runs').get().n, vorher, 'no run created')
+    const r = await formular('/runs/new', {
+      repo_id: repoId, harness: 'claude', prompt: 'E2E-Festbranch-Formular',
+      branch_mode: 'fest', branch_pattern: 'main', expected_minutes: '45',
+    }, { alsBrowser: true })
+    gleich(r.status, 400, 'the HTML form as well')
+    enthaelt(await r.text(), 'main', 'branch named')
+  })
+  await pruefe('an agent whose branch got occupied later fails at start, also readably', async () => {
+    // The form check cannot help here: the branch was still free when the agent
+    // was saved. That is what the check in the runner is for — second line.
+    const r = await formular('/agents/edit', {
+      repo_id: repoId, name: 'e2e-festbranch', harness: 'claude', prompt: 'E2E-Agent-Festbranch',
+      branch_mode: 'fest', branch_pattern: 'feature/e2e-belegt', expected_minutes: '45',
+      schedule_kind: 'manuell', active: '1',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'agent saved (branch still free)')
+    const fremd = join(SB, 'fremdes-worktree')
+    await sh('git', ['-C', REPO, 'branch', 'feature/e2e-belegt'])
+    await sh('git', ['-C', REPO, 'worktree', 'add', fremd, 'feature/e2e-belegt'])
+    const s = await formular('/agents/start', { id: String(agent('e2e-festbranch').id), repo: String(repoId) }, { alsBrowser: true })
+    gleich(s.status, 303, 'redirect')
+    const l = db.prepare('SELECT * FROM runs WHERE agent_id=?').get(agent('e2e-festbranch').id)
+    gleich(l.status, 'failed', 'status')
+    enthaelt(l.report_md, 'feature/e2e-belegt', 'branch named')
+    enthaelt(l.report_md, fremd, 'the occupying worktree named')
+    falsch(/already used by worktree/.test(l.report_md), 'no raw git message')
+  })
+  await pruefe('a free fixed branch is checked out', async () => {
+    await sh('git', ['-C', REPO, 'branch', 'feature/e2e-fest'])
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Festbranch-frei', branch_mode: 'fest', branch_pattern: 'feature/e2e-fest' })
+    const l = lauf(j.runId)
+    gleich(l.status, 'running', 'status')
+    const b = await sh('git', ['-C', l.workdir_effective, 'rev-parse', '--abbrev-ref', 'HEAD'])
+    gleich(b.stdout.trim(), 'feature/e2e-fest', 'branch')
+  })
+  await pruefe('a fixed branch that only exists on origin starts from THERE', async () => {
+    // Otherwise the run would build on the base branch and the first push would
+    // bounce off as non-fast-forward.
+    // A commit of its own on the remote branch (plumbing: no checkout needed),
+    // so that "starts from origin/<branch>" is distinguishable from "starts
+    // from the base branch".
+    const tree = await sh('git', ['-C', REPO, 'rev-parse', 'main^{tree}'])
+    const commit = await sh('git', ['-C', REPO, 'commit-tree', tree.stdout.trim(), '-p', 'main', '-m', 'e2e nur auf origin'])
+    const soll = { stdout: commit.stdout }
+    await sh('git', ['-C', REPO, 'push', '-q', 'origin', `${commit.stdout.trim()}:refs/heads/feature/e2e-nur-origin`])
+    await sh('git', ['-C', REPO, 'fetch', '-q', 'origin'])
+    const mainSha = await sh('git', ['-C', REPO, 'rev-parse', 'main'])
+    falsch(soll.stdout.trim() === mainSha.stdout.trim(), 'remote branch differs from the base branch')
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Festbranch-origin', branch_mode: 'fest', branch_pattern: 'feature/e2e-nur-origin' })
+    const l = lauf(j.runId)
+    gleich(l.status, 'running', 'status')
+    const ist = await sh('git', ['-C', l.workdir_effective, 'rev-parse', 'HEAD'])
+    gleich(ist.stdout.trim(), soll.stdout.trim(), 'starting point is the remote branch')
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Scheduler (waits for the hub\'s 30-second tick)')
 
   await pruefe('create schedule agents and switch on the pipeline', async () => {

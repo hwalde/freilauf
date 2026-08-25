@@ -209,6 +209,7 @@
   "form.prompt_missing": "Prompt ist leer.",
   "form.branch_mode_unknown": "Unbekannte Branch-Erwartung: {mode}",
   "form.branch_missing": "Branch-Muster fehlt (Erwartung ist nicht „keiner“).",
+  "run.branch_in_use": "Branch „{branch}“ ist bereits in {worktree} ausgecheckt — git gibt einen Branch nur an ein Worktree. Wähle einen freien Branch oder die Erwartung „neuer Branch“ / „keiner“.",
   "form.subscription_no_provider": "{harness} läuft über das Abo — dort wird kein Provider gewählt, nur das Modell.",
   "form.provider_unavailable": "Provider „{provider}“ ist für {harness} hier nicht verfügbar (fehlt ein Schlüssel oder nicht aktiviert?). Möglich: {list}",
   "form.effort_invalid": "Denk-Aufwand „{effort}“ ist für {target} nicht möglich — möglich: {list}",

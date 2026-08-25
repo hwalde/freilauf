@@ -45,6 +45,29 @@ function expandPattern(pattern, run) {
     .replaceAll('{kurz}', kurzid(run.id))
 }
 
+/**
+ * Which worktree holds a branch? git grants a branch to exactly ONE worktree; a
+ * second 'worktree add' on it dies with "'main' is already used by worktree at
+ * …". The classic case: expectation "fixed branch" with the base branch, which
+ * the main repo itself has checked out — the run then failed with git's raw
+ * message. One git call beforehand turns that into a sentence the operator can
+ * act on (and the forms use the same check, see pages.mjs).
+ * Returns the path of the occupying worktree, otherwise null.
+ */
+export async function branchWorktree(repoPath, branch) {
+  if (!branch) return null
+  const r = await sh('git', ['-C', repoPath, 'worktree', 'list', '--porcelain'])
+  if (!r.ok) return null
+  let current = null
+  for (const line of r.stdout.split('\n')) {
+    // Porcelain: a block per worktree, 'worktree <path>' first, then optionally
+    // 'branch refs/heads/<name>' (missing when the worktree is detached).
+    if (line.startsWith('worktree ')) current = line.slice('worktree '.length).trim()
+    else if (line.trim() === `branch refs/heads/${branch}`) return current
+  }
+  return null
+}
+
 async function makeWorktree(repo, run, branchName) {
   const wtRoot = join(WORKTREES_DIR, repo.name)
   mkdirSync(wtRoot, { recursive: true })
@@ -55,17 +78,27 @@ async function makeWorktree(repo, run, branchName) {
   // Retry of a failed run: the worktree from before is still there.
   // 'git worktree add' would fail on it — so reuse what already stands.
   if (existsSync(target)) return target
+  // Checked AFTER 'worktree prune': a leftover registration of a long-deleted
+  // worktree must not block the branch.
+  const occupied = await branchWorktree(repo.path, branchName)
+  if (occupied) throw new Error(t('run.branch_in_use', { branch: branchName, worktree: occupied }))
   let r
-  if (run.branch_mode === 'neu') {
-    r = await sh('git', ['-C', repo.path, 'worktree', 'add', '-b', branchName, target, `origin/${base}`])
-  } else if (run.branch_mode === 'fest') {
-    // Use an existing local branch, otherwise create it from origin.
-    const have = await sh('git', ['-C', repo.path, 'show-ref', '--verify', '--quiet', `refs/heads/${branchName}`])
-    r = have.ok
-      ? await sh('git', ['-C', repo.path, 'worktree', 'add', target, branchName])
-      : await sh('git', ['-C', repo.path, 'worktree', 'add', '-b', branchName, target, `origin/${base}`])
-  } else {
+  if (run.branch_mode === 'keiner') {
     r = await sh('git', ['-C', repo.path, 'worktree', 'add', '--detach', target, `origin/${base}`])
+  } else {
+    // Use an existing local branch — for "fixed" that is the point, for "new"
+    // it makes the retry of a run whose worktree was already cleaned up work.
+    const have = await sh('git', ['-C', repo.path, 'show-ref', '--verify', '--quiet', `refs/heads/${branchName}`])
+    if (have.ok) {
+      r = await sh('git', ['-C', repo.path, 'worktree', 'add', target, branchName])
+    } else {
+      // A branch that so far only exists on origin starts from THERE, not from
+      // the base branch — otherwise the run would build on a foreign history
+      // and the first push would bounce off as non-fast-forward.
+      const remote = await sh('git', ['-C', repo.path, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branchName}`])
+      const start = remote.ok ? `origin/${branchName}` : `origin/${base}`
+      r = await sh('git', ['-C', repo.path, 'worktree', 'add', '-b', branchName, target, start])
+    }
   }
   if (!r.ok) throw new Error(`git worktree failed: ${r.stderr.trim()}`)
   // Worktree extras (planning 4.0): copy or link.
