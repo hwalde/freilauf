@@ -18,7 +18,7 @@ import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } fro
 import { getHarness, harnessLabel, detectInstalled } from './harnesses/index.mjs'
 import { providerLabel } from './providers/index.mjs'
 import { subscriptionUsage } from './usage.mjs'
-import { ampelAusVorfaellen, offeneVorfaelle, alleVorfaelle } from './incidents.mjs'
+import { ampelAusVorfaellen, offeneVorfaelle, alleVorfaelle, brauchtMensch } from './incidents.mjs'
 import { TYP_TEXT } from './detect.mjs'
 import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
 import { skillListe, skillAnzeige } from './zusaetze.mjs'
@@ -66,13 +66,18 @@ export function typName(typ) {
 }
 
 /** Open incidents of a run as a table cell: type, count, resolve button. */
-function vorfallZelle(runId, repoId) {
+function vorfallZelle(runId, repoId, runStatus = null) {
   const offen = offeneVorfaelle(runId)
   if (!offen.length) return '<span class="dim">–</span>'
-  return offen.map(v => `<span class="vorfall ${v.schwere}" title="${e(v.beleg ?? '')}">${e(typName(v.typ))} ${v.anzahl}×
+  return offen.map(v => {
+    // '!' marks the ones that are waiting for hands — in a table of many runs
+    // that mark is the whole difference between a to-do and a note.
+    const handeln = brauchtMensch(v, runStatus)
+    return `<span class="vorfall ${v.schwere}" title="${e(v.beleg ?? '')}">${handeln ? '❗ ' : ''}${e(typName(v.typ))} ${v.anzahl}×
     <span class="dim">${e(v.zuletzt_gesehen.slice(5, 16))}</span></span>
     <form method="post" action="/api/incidents/${v.id}/resolve" class="inline" onclick="event.stopPropagation()">
-      <input type="hidden" name="back" value="/?repo=${repoId}"><button title="${e(t('incidents.resolve_hint'))}">${e(t('incidents.resolve'))}</button></form>`).join('<br>')
+      <input type="hidden" name="back" value="/?repo=${repoId}"><button title="${e(t('incidents.resolve_hint'))}">${e(t(handeln ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`
+  }).join('<br>')
 }
 
 /** Global incidents (provider pulse) above all pages. */
@@ -80,7 +85,7 @@ function globalesBanner() {
   const offen = offeneVorfaelle(null)
   if (!offen.length) return ''
   return `<div class="banner rot">${offen.map(v => `🔴 <b>${e(typName(v.typ))}</b> ${e(t('incidents.global_since', { ts: v.erst_gesehen }))} (${e(t('incidents.checked', { n: v.anzahl }))}) — ${e(v.beleg ?? '')}
-    <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/"><button>${e(t('incidents.resolve'))}</button></form>`).join('<br>')}</div>`
+    <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/"><button>${e(t(brauchtMensch(v) ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`).join('<br>')}</div>`
 }
 
 /** Top bar shown on every page while no coding agent is configured. */
@@ -217,7 +222,7 @@ export async function pageOverview(req, res, url) {
       <td>${wartend ? '' : (durMin > 0 ? durMin + ' min' : '')}<span class="dim"> / ${r.expected_minutes} min</span></td>
       <td>${e(r.branch_reported || r.branch_expected || '–')}</td>
       <td>${r.pr_url ? `<a href="${e(r.pr_url)}">PR</a>` : '–'}</td>
-      <td>${vorfallZelle(r.id, sel.id)}</td>
+      <td>${vorfallZelle(r.id, sel.id, r.status)}</td>
       <td class="dim">${e(lastAnomaly(r.id))}</td>
     </tr>`
   }).join('')
@@ -379,7 +384,7 @@ export async function pageRun(req, res, url, id) {
     : ''}
   ${run.report_md ? `<h3>${e(t('run.report'))}</h3><pre>${e(run.report_md)}</pre>` : ''}
   ${flowSection(run)}
-  ${vorfallAbschnitt(id)}
+  ${vorfallAbschnitt(id, run.status)}
   <h3>${e(t('run.metrics'))}</h3>
   <ul>
     <li>${e(t('run.runtime'))}: ${fmtLaufzeit(run)} · ${e(t('run.expectation'))} ${run.expected_minutes} min</li>
@@ -405,7 +410,7 @@ function fmtLaufzeit(run) {
  * as history. The evidence (the line that fired) is shown — otherwise a false
  * alarm cannot be told apart from a real one.
  */
-function vorfallAbschnitt(runId) {
+function vorfallAbschnitt(runId, runStatus = null) {
   const alle = alleVorfaelle(runId)
   if (!alle.length) return ''
   const zeile = (v) => `<li class="vorfall-zeile ${v.geloest_am ? 'geloest' : v.schwere}">
@@ -413,12 +418,22 @@ function vorfallAbschnitt(runId) {
     · ${v.anzahl}× · ${e(t('incidents.first'))} ${e(v.erst_gesehen)} · ${e(t('incidents.last'))} ${e(v.zuletzt_gesehen)} UTC
     ${v.wieder_geoeffnet ? `· ${e(t('incidents.reopened', { n: v.wieder_geoeffnet }))}` : ''}
     ${v.geloest_am ? `· ${e(t('incidents.resolved_at'))} ${e(v.geloest_am)} (${e(v.geloest_von ?? '')})` : `
-      <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/runs/${runId}"><button>${e(t('incidents.resolve'))}</button></form>`}
+      <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/runs/${runId}"><button>${e(t(brauchtMensch(v, runStatus) ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`}
     ${v.beleg ? `<br><code class="beleg">${e(v.beleg)}</code>` : ''}</li>`
   const offen = alle.filter(v => !v.geloest_am), zu = alle.filter(v => v.geloest_am)
+  // The split the single "resolve" button was missing: what is waiting for
+  // hands, and what the hub merely wrote down. Both stay visible — but only the
+  // first group is a to-do.
+  const handeln = offen.filter(v => brauchtMensch(v, runStatus))
+  const notiz = offen.filter(v => !brauchtMensch(v, runStatus))
   return `<h3>${e(t('incidents.title'))}</h3>
-  ${offen.length ? `<ul class="vorfaelle">${offen.map(zeile).join('')}</ul>
-    <form method="post" action="/api/runs/${runId}/incidents/resolve-all"><button>${e(t('incidents.resolve_all'))}</button>
+  ${handeln.length ? `<h4 class="vorfall-gruppe rot">${e(t('incidents.needs_you', { n: handeln.length }))}</h4>
+    <p class="dim">${e(t('incidents.needs_you_hint'))}</p>
+    <ul class="vorfaelle">${handeln.map(zeile).join('')}</ul>` : ''}
+  ${notiz.length ? `<h4 class="vorfall-gruppe gelb">${e(t('incidents.noticed', { n: notiz.length }))}</h4>
+    <p class="dim">${e(t('incidents.noticed_hint'))}</p>
+    <ul class="vorfaelle">${notiz.map(zeile).join('')}</ul>` : ''}
+  ${offen.length ? `<form method="post" action="/api/runs/${runId}/incidents/resolve-all"><button>${e(t('incidents.resolve_all'))}</button>
     <span class="dim">${e(t('incidents.resolve_hint'))}</span></form>` : ''}
   ${zu.length ? `<details><summary class="dim">${e(t('incidents.resolved_n', { n: zu.length }))}</summary><ul class="vorfaelle">${zu.map(zeile).join('')}</ul></details>` : ''}
   <p class="dim">${e(t('incidents.detector_log'))}: <code>${e(join(process.env.CCHUB_RUNS_DIR ?? `${process.env.HOME}/agents/runs`, runId, 'detektor.jsonl'))}</code></p>`

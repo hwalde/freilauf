@@ -5,6 +5,7 @@
 // effort levels and silently runs with the default on nonsense — the hub must
 // therefore only offer levels that the model actually knows.
 import { getProvider } from '../providers/index.mjs'
+import { HTTP_5XX } from './patterns.mjs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
@@ -33,7 +34,7 @@ export default {
     { typ: 'rate_limit', re: /rate.?limited|rate limit|\b429\b|RateLimitError/i },
     { typ: 'auth_error', re: /AuthenticationError|\b(401|403)\b|invalid api key/i },
     { typ: 'billing_error', re: /\b402\b|insufficient|billing/i },
-    { typ: 'provider_error', re: /API call failed|Retrying in .*\(|overloaded|\b5\d\d\b|APIConnectionError|InternalServerError|ServiceUnavailable/i },
+    { typ: 'provider_error', re: new RegExp(`API call failed|Retrying in .*\\(|overloaded|${HTTP_5XX.source}|APIConnectionError|InternalServerError|ServiceUnavailable`, 'i') },
   ],
 
   /** hermes names its levels only in the help text for --reasoning; there is no other source. */

@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { HTTP_5XX } from './patterns.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -41,7 +42,7 @@ export default {
     { typ: 'auth_error', re: /\b(401|403)\b|not (logged in|authenticated)|unauthori[sz]ed|please run .?cursor-agent login|invalid api key/i },
     { typ: 'billing_error', re: /\b402\b|insufficient (credits|funds)|billing|subscription (expired|required)|hard limit/i },
     { typ: 'model_error', re: /Cannot use this model/i },
-    { typ: 'provider_error', re: /\b5\d\d\b|overloaded|unavailable|connection (error|refused|closed)|ECONNRE|ETIMEDOUT|fetch failed|stream (error|disconnected)/i },
+    { typ: 'provider_error', re: new RegExp(`${HTTP_5XX.source}|overloaded|unavailable|connection (error|refused|closed)|ECONNRE|ETIMEDOUT|fetch failed|stream (error|disconnected)`, 'i') },
   ],
 
   /**

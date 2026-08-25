@@ -16,6 +16,7 @@
 //               per-harness patterns (defined in the harness plugins) and an
 //               assessment whether the hit is really a problem.
 import { HARNESS_PLUGINS } from './harnesses/index.mjs'
+import { HTTP_5XX } from './harnesses/patterns.mjs'
 
 /** Incident types. Anything else would be guesswork — better 'unbekannt' than wrong. */
 export const TYPEN = ['rate_limit', 'provider_error', 'auth_error', 'billing_error', 'model_error', 'unbekannt']
@@ -52,7 +53,7 @@ export function typVonText(text) {
   if (/\b402\b|billing|insufficient (credits|funds|balance)|credit balance|account (is )?on hold|payment/i.test(t)) return 'billing_error'
   if (/\b429\b|rate.?limit|too many requests|usage limit|hit your (session|usage|weekly|daily)? ?limit|quota exceeded|resource.?exhausted/i.test(t)) return 'rate_limit'
   if (/model (not found|does not exist)|unknown model|no such model|not a valid model/i.test(t)) return 'model_error'
-  if (/\b(5\d\d)\b|overload|unavailable|no endpoints|stream error|AI_APICallError|ECONNRE|ENOTFOUND|ETIMEDOUT|socket (hang up|connection was closed)|fetch failed|upstream|provider error|temporarily/i.test(t)) return 'provider_error'
+  if (HTTP_5XX.test(t) || /overload|unavailable|no endpoints|stream error|AI_APICallError|ECONNRE|ENOTFOUND|ETIMEDOUT|socket (hang up|connection was closed)|fetch failed|upstream|provider error|temporarily/i.test(t)) return 'provider_error'
   return 'unbekannt'
 }
 
@@ -84,9 +85,27 @@ const AUSNAHMEN = [
   /\/(upgrade|usage|usage-credits|status|help)\b/,  // menu lines with slash command
   /^\s*[│|]?\s*(rate|usage) limit(s)?\s*[│|]?\s*$/i, // bare heading (e.g. /usage table)
   /\bgrep\b|\brg\b|\bsed\b|\bawk\b/,        // the agent itself searches for the word
-  /cc-hub|detect\.mjs|incidents|test\/(unit|e2e)/, // work on exactly this code
+  // Work on exactly this code. Case-insensitive since a capital "Incidents:"
+  // (the hub's own section heading, scrolling through the agent's terminal)
+  // slipped past the lowercase version and landed in the DB as a rate limit.
+  /cc-hub|detect\.mjs|incidents?\b|test\/(unit|e2e)/i,
   /\b(describe|it|test|expect)\(/,          // test code
   /retry_after|retryAfter|rateLimit[A-Z]|rate_limit_hits|RATE_LIMIT/, // identifiers in source
+  // A call with a quoted/bracketed argument list is source code, not output —
+  // the error text sits INSIDE a string literal. This repo's own test lines
+  // (`scanneZeilen('cursor', ['API Error: 503', …])`) scrolled through a
+  // claude run's terminal and opened two red incidents on it. No real harness
+  // error message has this shape: they print `API Error: 529 {…}`,
+  // `upstream connection error (503)`, `Retrying in 12.0s (…)`.
+  /\w+\(\s*['"`\[]/,
+  // A line that REPORTS a detection is not one. The e2e suite's own output
+  // ('✓ cursor: … and "Cannot use this model" is detected') opened a
+  // "Model unavailable" incident on the run that was executing that suite.
+  /^[✓✔✗✘×]\s/,
+  /\b(is|are) (detected|recognized|reported)\b/i,
+  // cursor's TUI status line: braille spinner, activity, token count. The
+  // number is a count, not a status code — '555 tokens' is not a 5xx.
+  /^[⠀-⣿\s]*[\w ]{0,24}\s\d[\d.,]*\s*k? ?tokens?\b/i,
 ]
 
 /**
@@ -156,12 +175,30 @@ export function transkriptFehler(jsonlText) {
  *   rot   – several hits in a short time (retry loop) OR silence (no activity)
  *           since the last hit for longer than 'stilleMs'
  *   gelb  – first, single hit: note it, traffic light yellow, NO Telegram
+ *
+ * Measurable work AFTER the last hit vetoes BOTH paths. An agent that is still
+ * producing output is demonstrably not blocked by an API error, so the hit was
+ * text on its screen — source code, a test line, a report it is writing. Without
+ * that veto the repetition path fired on an agent that merely scrolled through a
+ * file: five hits in two minutes, red, while the run was working normally.
+ *
+ * This costs nothing where it matters: the two harnesses for which the log is
+ * the ONLY source (cursor, hermes) have no activity measurement at all, so the
+ * veto never applies to them. The two it does apply to (claude, opencode) each
+ * have a hook and a transcript/plugin channel that reports a real API error
+ * red immediately and independently of the log.
+ *
+ * 'letzteAktivitaetMs === null' means UNKNOWN, not silent — and unknown never
+ * escalates by silence. measureActivity() returns nothing for cursor and hermes,
+ * so treating null as silence turned EVERY yellow log hit on those two into a
+ * red alarm exactly stilleMs after it — while the agent was working. Repetition
+ * and the check LLM stay as escalation paths there.
  */
 export function bewerteLogTreffer({ anzahl, erstGesehenMs, zuletztGesehenMs, letzteAktivitaetMs, jetztMs,
   fensterMs = 10 * 60_000, stilleMs = 5 * 60_000, schwelle = 2 }) {
+  if (letzteAktivitaetMs != null && letzteAktivitaetMs > zuletztGesehenMs) return 'gelb'
   if (anzahl >= schwelle && (zuletztGesehenMs - erstGesehenMs) <= fensterMs) return 'rot'
-  const still = letzteAktivitaetMs == null || letzteAktivitaetMs <= zuletztGesehenMs
-  if (still && (jetztMs - zuletztGesehenMs) >= stilleMs) return 'rot'
+  if (letzteAktivitaetMs != null && (jetztMs - zuletztGesehenMs) >= stilleMs) return 'rot'
   return 'gelb'
 }
 

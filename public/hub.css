@@ -94,6 +94,11 @@ ul.vorfaelle li { padding:6px 8px; margin-bottom:4px; border-left:4px solid #999
 ul.vorfaelle li.rot { border-left-color:#c62828; }
 ul.vorfaelle li.gelb { border-left-color:#b8860b; }
 ul.vorfaelle li.geloest { opacity:.6; }
+/* The two groups: a to-do and a note must not look the same. */
+h4.vorfall-gruppe { margin:14px 0 2px; }
+h4.vorfall-gruppe.rot { color:#c62828; }
+h4.vorfall-gruppe.gelb { color:#b8860b; }
+h4.vorfall-gruppe + p.dim { margin:0 0 6px; }
 code.beleg { display:block; white-space:pre-wrap; word-break:break-all; font-size:.85em; margin-top:4px; }
 fieldset { border:1px solid #ccc; padding:8px 12px; margin:8px 0; }
 label.skill-regler { margin-left: 24px; }

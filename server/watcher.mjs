@@ -9,7 +9,7 @@ import { RUNS_DIR, sh } from './util.mjs'
 import { handleReport, addEventOnce, notifyRun, branchSyncState } from './reports.mjs'
 import { claudeQuota } from './quota.mjs'
 import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText } from './detect.mjs'
-import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, offeneVorfaelle, detektorLog, msVon } from './incidents.mjs'
+import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, offeneVorfaelle, detektorLog, msVon, brauchtMensch } from './incidents.mjs'
 import { pruefeTreffer, pruefLlmAktiv } from './pruefer.mjs'
 import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
@@ -278,7 +278,31 @@ async function vorfaelleBewerten() {
       vorfallVerwerfen(v.id, 'expired: agent kept working')
     } else if (!['running', 'waiting_help'].includes(v.status) && jetzt - zuletzt > 30 * 60_000) {
       vorfallVerwerfen(v.id, 'expired: run ended')
+    } else if (letzteAkt == null && jetzt - zuletzt > 30 * 60_000) {
+      // cursor/hermes: no activity source, so neither "kept working" nor
+      // "silent" can be proven. What did not recur within half an hour was
+      // noise — that is the only statement available here, and it is enough.
+      vorfallVerwerfen(v.id, 'expired: no recurrence')
     }
+  }
+  vorfaelleNachErfolgSchliessen()
+}
+
+/**
+ * A run that came through ('done') has already answered what a rate limit or a
+ * provider hiccup during it meant: nothing. Those incidents close with the run.
+ * Asking a human to click away a question that answered itself is what made
+ * "resolve" feel like busywork.
+ *
+ * What needs a human stays open (brauchtMensch): a login, a credit balance or a
+ * wrong model ID does not get better on its own — the next run walks into it
+ * again.
+ */
+function vorfaelleNachErfolgSchliessen() {
+  const rows = db.prepare(`SELECT i.*, r.status FROM incidents i JOIN runs r ON r.id = i.run_id
+    WHERE i.geloest_am IS NULL AND r.status = 'done'`).all()
+  for (const v of rows) {
+    if (!brauchtMensch(v, v.status)) vorfallVerwerfen(v.id, 'run finished successfully')
   }
 }
 

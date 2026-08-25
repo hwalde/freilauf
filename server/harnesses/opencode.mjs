@@ -6,6 +6,7 @@
 // via OPENCODE_CONFIG_CONTENT with agent.build.{model,variant} — the variant
 // only takes effect when the model is set in the SAME block.
 import { getProvider } from '../providers/index.mjs'
+import { HTTP_5XX } from './patterns.mjs'
 
 // The default agent of opencode; the model/variant choice lives under this key.
 // 'opencode debug config' has no own entry here, the status line shows "Build".
@@ -33,7 +34,7 @@ export default {
     { typ: 'rate_limit', re: /rate.?limited|rate limit|\b429\b|too many requests/i },
     { typ: 'auth_error', re: /\b(401|403)\b|unauthori[sz]ed|invalid api key|authentication/i },
     { typ: 'billing_error', re: /\b402\b|insufficient credits|credit balance/i },
-    { typ: 'provider_error', re: /AI_APICallError|AI_RetryError|ProviderError|stream error|\b5\d\d\b|overloaded|no endpoints|unavailable/i },
+    { typ: 'provider_error', re: new RegExp(`AI_APICallError|AI_RetryError|ProviderError|stream error|${HTTP_5XX.source}|overloaded|no endpoints|unavailable`, 'i') },
   ],
 
   /**

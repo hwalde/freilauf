@@ -325,6 +325,45 @@ principle):
 | pipe-pane log, patterns per harness (plugin `logPatterns`, orchestrated in `detect.mjs`) | all; for hermes and cursor the **only** source | no: yellow; red on repetition within 10 min or 5 min of silence — or when the optional check LLM (settings, OpenRouter) confirms it |
 | Provider pulse (plugin pulse targets, every 5 min) | global | after 2 failures, closes on recovery |
 
+**A working agent is never escalated.** `bewerteLogTreffer()` starts with a veto:
+measurable work *after* the last hit means the agent is demonstrably not blocked
+by an API error, so the hit was text on its screen — and neither repetition nor
+silence may promote it to red. Applying the module's own principle ("a real limit
+stands at the end") to only one of the two paths was the hole: an agent scrolling
+through source code about API errors produced five hits in two minutes and turned
+its own run red. The veto costs nothing where it matters — cursor and hermes,
+the two harnesses for which the log is the *only* source, have no activity
+measurement, so it never applies to them; claude and opencode, where it does,
+each have a hook and a transcript/plugin channel that reports a real error red
+immediately anyway.
+
+**Silence is only an argument where activity is measured.** `measureActivity()`
+has a source for claude (transcript mtime) and opencode (session store); for
+cursor and hermes it has none and returns nothing. `bewerteLogTreffer()`
+therefore reads `letzteAktivitaetMs === null` as *unknown*, never as *silent* —
+otherwise every yellow log hit on exactly those two harnesses turned red five
+minutes later while the agent was happily working. There, repetition and the
+check LLM are the escalation paths; a hit that has not recurred within 30 min
+expires by itself.
+
+### Does it need a human? (`brauchtMensch`)
+
+Severity says how sure the detector is. It does **not** say whether anything is
+left to do — and that was the question the single "resolve" button could not
+answer. `incidents.mjs` splits it:
+
+| Group | What | Button |
+|---|---|---|
+| **Needs you** | `auth_error`, `billing_error`, `model_error` — always. A token, a credit balance or a wrong model ID does not get better by waiting; every following run walks into the same wall. Plus a **red** incident on a run with status `failed`/`aborted`: that is the reason it did not come through. | "Mark as handled" |
+| **Noticed** | everything else — rate limit, provider hiccup, global pulse. The hub deferred, retried, or the run simply carried on. | "Dismiss" |
+
+Neither button changes anything about the run; both only silence the entry here
+and on Telegram, and a recurrence reopens it. What the watcher adds: incidents in
+the "noticed" group **close by themselves** when the run reaches `done` — a run
+that came through has already answered what the hiccup during it meant. The
+Telegram message states the group in its second line, so the reader can tell a
+"get up" from a "noted" without opening the hub.
+
 cursor, like hermes, has **no** hook for API errors (its hook enum knows
 `beforeShellExecution`, `afterFileEdit`, `stop`, `beforeSubmitPrompt` — nothing
 for a failed call), and there is no open pulse endpoint for `api2.cursor.sh`:
@@ -396,6 +435,27 @@ errors (`post_api_request` only fires after success).
   from the launcher after the TUI has drawn (it waits for the status bar, not
   for a fixed number of seconds). Enter on an empty editor is a no-op in
   opencode — measured — so the case that submitted by itself is not harmed.
+- **`\b5\d\d\b` is not an HTTP status.** cursor's own status line
+  `⠠⠛ Globbing  555 tokens` opened a "Provider error" incident, because the
+  pattern matches a token count just as happily as a 503. A status code counts
+  only next to an error word (`HTTP_5XX` in `harnesses/patterns.mjs`, shared by
+  cursor/hermes/opencode and `typVonText`).
+- **An agent working on cc-hub reads its own alarm texts into the log.** One
+  cursor run produced three incidents in seven minutes, all from its own screen:
+  the token count above, the hub's section heading `Incidents: rate limit and
+  provider errors (auto-alarm)`, and the e2e suite's success line
+  `✓ cursor: … and "Cannot use this model" is detected`. The exception for "work
+  on exactly this code" existed but was **case-sensitive** (`incidents` vs.
+  `Incidents:`). The exception list is `i`-flagged now and additionally skips
+  test-runner tick lines and "… is detected"/"is reported" phrasings.
+- **And the exception list alone will never be enough.** The very next run — the
+  claude run *fixing* the above — went red from two lines of the test file it had
+  just written (`scanneZeilen('cursor', ['API Error: 503', …])`), five hits in
+  two minutes via the repetition path. Two answers, and the second one is the
+  load-bearing one: a call with a quoted argument list is source code, not
+  output (no harness prints that shape); and above all, **work after the hit
+  vetoes escalation** (see above) — patterns can always be tricked, a run that
+  keeps producing output cannot.
 - **`cursor-agent -p` is wrong for a run.** `-p/--print` prints and exits — the
   tmux session would be gone immediately. The prompt belongs as a **positional
   argument** after `--` (`cursor-agent --force --trust -- "$CC_PROMPT"`); the

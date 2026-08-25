@@ -482,6 +482,32 @@ try {
     gleich(scanneZeilen('opencode', zeilen).length, 0, 'opencode patterns on source code')
   })
 
+  // All three lines below opened an incident on ONE real cursor run (2026-08-25):
+  // a token count read as a 5xx, the hub's own section heading read as a rate
+  // limit, and the e2e suite's success line read as a rejected model.
+  await pruefe('production false positives: cursor status line, hub UI text and test output do NOT fire', () => {
+    const zeilen = [
+      '⠠⠛ Globbing  555 tokens',
+      '⠀⠞ Running  597 tokens',
+      'Incidents: rate limit and provider errors (auto-alarm)',
+      '✓ cursor: run passes through the pipeline and "Cannot use this model" is detected',
+      '✓ hook report (cc-report _api_error via stdin) → RED; rate limit counter increments',
+      // These two — this file's own lines — turned a running claude agent red.
+      "    gleich(scanneZeilen('cursor', ['API Error: 503', 'upstream connection error (502)']).length, 2, 'real status codes')",
+      "    const c = scanneZeilen('claude', [\"You've hit your session limit · resets 8:36pm (Europe/Berlin)\"])",
+    ]
+    for (const h of ['cursor', 'hermes', 'opencode', 'claude']) {
+      gleich(scanneZeilen(h, zeilen).length, 0, `${h}: no match`)
+    }
+  })
+
+  await pruefe('a bare 5xx number is not a status code — an error word has to stand next to it', () => {
+    gleich(scanneZeilen('cursor', ['reading 512 lines', 'chunk 500 of 900', 'saved 503 bytes']).length, 0, 'plain numbers')
+    gleich(scanneZeilen('cursor', ['API Error: 503', 'upstream connection error (502)']).length, 2, 'real status codes')
+    gleich(typVonText('500 Internal Server Error'), 'provider_error', 'status + text')
+    gleich(typVonText('processed 555 tokens'), 'unbekannt', 'token count is not a 5xx')
+  })
+
   await pruefe('real error texts per harness are recognized', () => {
     const c = scanneZeilen('claude', ["You've hit your session limit · resets 8:36pm (Europe/Berlin)", 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}'])
     gleich(c.map(t => t.typ).join(','), 'rate_limit,provider_error', 'claude')
@@ -545,13 +571,60 @@ try {
   await pruefe('rating: silence after the match turns red (the limit stands at the end)', () => {
     const t0 = Date.parse('2026-08-23T10:00:00Z')
     gleich(bewerteLogTreffer({ anzahl: 1, erstGesehenMs: t0, zuletztGesehenMs: t0, letzteAktivitaetMs: t0 - 1000, jetztMs: t0 + 5 * 60_000 }), 'rot', '5 min silent')
-    gleich(bewerteLogTreffer({ anzahl: 1, erstGesehenMs: t0, zuletztGesehenMs: t0, letzteAktivitaetMs: null, jetztMs: t0 + 5 * 60_000 }), 'rot', 'activity never measured')
     gleich(bewerteLogTreffer({ anzahl: 1, erstGesehenMs: t0, zuletztGesehenMs: t0, letzteAktivitaetMs: t0 - 1000, jetztMs: t0 + 2 * 60_000 }), 'gelb', 'only 2 min silent')
+  })
+  // Regression: cursor and hermes have NO activity source (measureActivity
+  // returns nothing for them), so null was permanently true here — every yellow
+  // log hit on those two turned red 5 min later while the agent was working.
+  await pruefe('rating: unmeasured activity is unknown, not silence — it never escalates', () => {
+    const t0 = Date.parse('2026-08-23T10:00:00Z')
+    gleich(bewerteLogTreffer({ anzahl: 1, erstGesehenMs: t0, zuletztGesehenMs: t0, letzteAktivitaetMs: null, jetztMs: t0 + 5 * 60_000 }), 'gelb', 'no activity source: stays yellow')
+    gleich(bewerteLogTreffer({ anzahl: 1, erstGesehenMs: t0, zuletztGesehenMs: t0, letzteAktivitaetMs: null, jetztMs: t0 + 3 * 3600_000 }), 'gelb', 'even after hours')
+    gleich(bewerteLogTreffer({ anzahl: 2, erstGesehenMs: t0, zuletztGesehenMs: t0 + 60_000, letzteAktivitaetMs: null, jetztMs: t0 + 2 * 60_000 }), 'rot', 'repetition still escalates')
   })
   await pruefe('rating: repetition within 10 min turns red (retry loop)', () => {
     const t0 = Date.parse('2026-08-23T10:00:00Z')
-    gleich(bewerteLogTreffer({ anzahl: 2, erstGesehenMs: t0, zuletztGesehenMs: t0 + 3 * 60_000, letzteAktivitaetMs: t0 + 4 * 60_000, jetztMs: t0 + 4 * 60_000 }), 'rot', '2× in 3 min')
-    gleich(bewerteLogTreffer({ anzahl: 2, erstGesehenMs: t0, zuletztGesehenMs: t0 + 40 * 60_000, letzteAktivitaetMs: t0 + 41 * 60_000, jetztMs: t0 + 41 * 60_000 }), 'gelb', '2× 40 min apart is not a loop')
+    gleich(bewerteLogTreffer({ anzahl: 2, erstGesehenMs: t0, zuletztGesehenMs: t0 + 3 * 60_000, letzteAktivitaetMs: t0 - 1000, jetztMs: t0 + 4 * 60_000 }), 'rot', '2× in 3 min')
+    gleich(bewerteLogTreffer({ anzahl: 2, erstGesehenMs: t0, zuletztGesehenMs: t0 + 3 * 60_000, letzteAktivitaetMs: null, jetztMs: t0 + 4 * 60_000 }), 'rot', '… also without an activity source (cursor/hermes)')
+    gleich(bewerteLogTreffer({ anzahl: 2, erstGesehenMs: t0, zuletztGesehenMs: t0 + 40 * 60_000, letzteAktivitaetMs: t0 - 1000, jetztMs: t0 + 41 * 60_000 }), 'gelb', '2× 40 min apart is not a loop')
+  })
+  // Regression: an agent that scrolls through source code about API errors
+  // produced five hits in two minutes — the repetition path made its run red
+  // while it was working normally.
+  await pruefe('rating: work AFTER the last match vetoes every escalation', () => {
+    const t0 = Date.parse('2026-08-23T10:00:00Z')
+    gleich(bewerteLogTreffer({ anzahl: 5, erstGesehenMs: t0, zuletztGesehenMs: t0 + 2 * 60_000, letzteAktivitaetMs: t0 + 3 * 60_000, jetztMs: t0 + 4 * 60_000 }), 'gelb', '5× but the agent kept working')
+    gleich(bewerteLogTreffer({ anzahl: 5, erstGesehenMs: t0, zuletztGesehenMs: t0 + 2 * 60_000, letzteAktivitaetMs: t0 + 3 * 60_000, jetztMs: t0 + 60 * 60_000 }), 'gelb', 'and an hour later still not')
+    gleich(bewerteLogTreffer({ anzahl: 5, erstGesehenMs: t0, zuletztGesehenMs: t0 + 2 * 60_000, letzteAktivitaetMs: t0 + 60_000, jetztMs: t0 + 4 * 60_000 }), 'rot', 'no work after the last match: the loop stands')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Incidents: needs a human vs. merely noticed (brauchtMensch)')
+  const { brauchtMensch } = await import('../server/incidents.mjs')
+
+  await pruefe('login, credits and model always need a human — they never clear themselves', () => {
+    for (const typ of ['auth_error', 'billing_error', 'model_error']) {
+      wahr(brauchtMensch({ typ, schwere: 'gelb' }, 'running'), `${typ} while running`)
+      wahr(brauchtMensch({ typ, schwere: 'gelb' }, 'done'), `${typ} on a finished run`)
+    }
+  })
+
+  await pruefe('rate limit and provider errors are observations while the run lives or came through', () => {
+    for (const typ of ['rate_limit', 'provider_error', 'unbekannt']) {
+      falsch(brauchtMensch({ typ, schwere: 'rot' }, 'running'), `${typ} while running`)
+      falsch(brauchtMensch({ typ, schwere: 'rot' }, 'done'), `${typ} on a finished run`)
+    }
+  })
+
+  await pruefe('a confirmed incident on a run that did NOT come through is a to-do', () => {
+    wahr(brauchtMensch({ typ: 'rate_limit', schwere: 'rot' }, 'failed'), 'red + failed')
+    wahr(brauchtMensch({ typ: 'provider_error', schwere: 'rot' }, 'aborted'), 'red + aborted')
+    falsch(brauchtMensch({ typ: 'rate_limit', schwere: 'gelb' }, 'failed'), 'a mere suspicion is not')
+  })
+
+  await pruefe('a global incident (provider pulse, no run) is not a to-do either', () => {
+    falsch(brauchtMensch({ typ: 'provider_down:openrouter', schwere: 'rot' }), 'nobody can fix a provider outage')
+    wahr(brauchtMensch({ typ: 'billing_error', schwere: 'rot' }), 'global billing still needs a human')
   })
 
   // ------------------------------------------------------------------

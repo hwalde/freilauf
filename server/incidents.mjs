@@ -34,6 +34,35 @@ export function detektorLog(runId, eintrag) {
   } catch { /* the log is incidental, never a reason to fail */ }
 }
 
+/**
+ * Types that only a human can clear. A token, a credit balance and a wrong
+ * model ID do not get better by waiting — every following run walks into the
+ * same wall. A rate limit and a provider hiccup, on the other hand, pass by
+ * themselves; the hub defers and retries.
+ */
+export const MENSCH_TYPEN = new Set(['auth_error', 'billing_error', 'model_error'])
+
+/**
+ * Does this incident need a human — or is it just an observation?
+ *
+ * This is deliberately NOT the same question as 'schwere' (yellow/red). Severity
+ * says how sure the detector is; this says whether anything is left to do.
+ * Without the distinction, "resolve" asked the same click for "your account is
+ * out of credits" and for "the provider hiccupped once and the run finished
+ * fine" — and the second case is the overwhelming majority.
+ *
+ *   needs you    auth / billing / model, always. Plus: a confirmed (red)
+ *                incident on a run that did NOT come through — that is the
+ *                reason it did not, and the decision (retry? change model?
+ *                wait?) is a human one.
+ *   noticed      everything else. The record stays as history, the hub closes
+ *                it by itself when the run finishes.
+ */
+export function brauchtMensch(v, runStatus = null) {
+  if (MENSCH_TYPEN.has(String(v.typ).split(':')[0])) return true
+  return v.schwere === 'rot' && ['failed', 'aborted'].includes(String(runStatus))
+}
+
 export function offeneVorfaelle(runId) {
   return runId === null
     ? db.prepare(`SELECT * FROM incidents WHERE run_id IS NULL AND geloest_am IS NULL ORDER BY id`).all()
@@ -148,9 +177,14 @@ async function telegramVorfall(row, ereignis, grund = null) {
   const name = TYP_TEXT[row.typ] ?? row.typ
   const zeilen = [`${kopf}${name}`]
   if (row.run_id) {
-    const run = db.prepare(`SELECT r.harness, r.model, r.provider, a.name AS agent, p.name AS repo
+    const run = db.prepare(`SELECT r.harness, r.model, r.provider, r.status, a.name AS agent, p.name AS repo
                             FROM runs r LEFT JOIN agents a ON a.id = r.agent_id LEFT JOIN repos p ON p.id = r.repo_id
                             WHERE r.id = ?`).get(row.run_id)
+    // Say straight away whether this needs hands: the whole point of the alarm
+    // is that the reader can tell a "get up" from a "noted" without opening it.
+    zeilen.push(brauchtMensch(row, run?.status)
+      ? '→ Needs you: this does not clear itself.'
+      : '→ For information: the hub keeps going, nothing to do.')
     if (run) zeilen.push(`Agent: ${run.agent ?? '(single run)'} · Repo: ${run.repo ?? '?'} · ${run.harness}${run.model ? '/' + run.model : ''}${run.provider ? ' via ' + run.provider : ''}`)
   } else {
     zeilen.push('Global (provider pulse), affects all running agents.')
