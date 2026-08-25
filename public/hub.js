@@ -89,6 +89,10 @@
   // ---- inline renaming of a run (overview + detail page) ----
   // Renaming touches only the RUN. An agent keeps its name — that is the whole
   // point: the same agent may run twice and each run gets called what it is.
+  //
+  // CAPTURE phase, deliberately: in the overview the title cell stops the click
+  // from bubbling (otherwise the row's onclick would navigate away while you
+  // rename). A listener on document would then never see it at all.
   document.addEventListener('click', function (ev) {
     const btn = ev.target.closest('[data-title-edit]')
     if (!btn) return
@@ -113,6 +117,7 @@
     input.select()
 
     let fertig = false
+    let laeuft = false
     const schliessen = (text) => {
       if (fertig) return
       fertig = true
@@ -122,8 +127,13 @@
       input.remove()
     }
     const speichern = () => {
+      // 'input.disabled = true' below takes the focus away and thereby fires
+      // blur — which lands here again. Without this guard every rename would be
+      // sent twice.
+      if (fertig || laeuft) return
       const neu = input.value.trim()
-      if (fertig || neu === alt) return schliessen(alt)
+      if (neu === alt) return schliessen(alt)
+      laeuft = true
       input.disabled = true
       const body = new URLSearchParams()
       body.set('title', neu)
@@ -148,7 +158,7 @@
     })
     input.addEventListener('blur', speichern)
     input.addEventListener('click', (e2) => e2.stopPropagation())
-  })
+  }, true)
 
   // ---- provider and model selection ----
   // The list arrives AFTER rendering via fetch: if a provider API hangs, a
