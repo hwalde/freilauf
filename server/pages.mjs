@@ -4,7 +4,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRepo, getRun } from './db.mjs'
-import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText } from './util.mjs'
+import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime } from './util.mjs'
 import { claudeQuota, openrouterCredits } from './quota.mjs'
 import {
   enabledCodingAgents, listCodingAgents, saveCodingAgent,
@@ -186,8 +186,9 @@ export async function pageOverview(req, res, url) {
     const agent = r.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(r.agent_id)?.name : t('overview.single_run')
     // Finished runs: duration until the end, not until now — otherwise a run
     // from three days ago "grows" to 4000 minutes in the overview.
-    const endeMs = r.ended_at ? Date.parse(r.ended_at.replace(' ', 'T') + 'Z') : Date.now()
-    const durMin = Math.round((endeMs - Date.parse(r.started_at.replace(' ', 'T') + 'Z')) / 60000)
+    const startedMs = parseDbUtc(r.started_at)
+    const endeMs = r.ended_at ? parseDbUtc(r.ended_at) : Date.now()
+    const durMin = Math.round((endeMs - startedMs) / 60000)
     // The row stays clickable as a whole, the name is additionally a real link —
     // otherwise the detail page would be unreachable by keyboard.
     return `<tr onclick="location='/runs/${r.id}'">
@@ -195,6 +196,7 @@ export async function pageOverview(req, res, url) {
       <td><a href="/runs/${r.id}">${e(agent)}</a></td>
       <td>${e(r.harness)}${r.model ? `<span class="dim">/${r.provider ? e(r.provider) + ':' : ''}${e(r.model)}</span>` : ''}</td>
       <td>${r.status}</td>
+      <td>${startedCell(r.started_at)}</td>
       <td>${durMin > 0 ? durMin + ' min' : ''}<span class="dim"> / ${r.expected_minutes} min</span></td>
       <td>${e(r.branch_reported || r.branch_expected || '–')}</td>
       <td>${r.pr_url ? `<a href="${e(r.pr_url)}">PR</a>` : '–'}</td>
@@ -205,9 +207,16 @@ export async function pageOverview(req, res, url) {
   const body = `
   ${await usagePanel()}
   <p><a class="btn" href="/runs/new?repo=${sel.id}">${e(t('overview.start_single'))}</a></p>
-  <table class="list"><thead><tr><th></th><th>${e(t('overview.agent'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th>${e(t('incidents.title'))}</th><th>${e(t('overview.last_anomaly'))}</th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="9" class="dim">${e(t('overview.no_runs'))}</td></tr>`}</tbody></table>`
+  <table class="list"><thead><tr><th></th><th>${e(t('overview.agent'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('overview.started'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th>${e(t('incidents.title'))}</th><th>${e(t('overview.last_anomaly'))}</th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="10" class="dim">${e(t('overview.no_runs'))}</td></tr>`}</tbody></table>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.overview'), '/', body, sel.id))
+}
+
+/** Relative start ("4 seconds ago"); exact date-time sits in the title tooltip. */
+function startedCell(ts) {
+  const ms = parseDbUtc(ts)
+  if (!Number.isFinite(ms)) return '–'
+  return `<time class="reltime" datetime="${new Date(ms).toISOString()}" title="${e(fmtDateTime(ms))}">${e(fmtRelativeTime(ms))}</time>`
 }
 
 function selectRepo(url) {

@@ -12,6 +12,41 @@
     })
   }
 
+  // ---- relative timestamps (overview): live "n seconds ago", exact time on hover ----
+  // Unit ladder must stay in sync with fmtRelativeTime in server/util.mjs.
+  function relTimeText(ms, now) {
+    var lang = document.documentElement.lang || 'en'
+    var sec = Math.max(0, Math.floor((now - ms) / 1000))
+    var rtf = new Intl.RelativeTimeFormat(lang, { numeric: 'auto' })
+    if (sec < 60) return rtf.format(-sec, 'second')
+    var min = Math.floor(sec / 60)
+    if (min < 60) return rtf.format(-min, 'minute')
+    var hr = Math.floor(min / 60)
+    if (hr < 24) return rtf.format(-hr, 'hour')
+    var day = Math.floor(hr / 24)
+    if (day < 30) return rtf.format(-day, 'day')
+    var month = Math.floor(day / 30)
+    if (month < 12) return rtf.format(-month, 'month')
+    return rtf.format(-Math.floor(day / 365), 'year')
+  }
+  function refreshRelTimes() {
+    var now = Date.now()
+    var lang = document.documentElement.lang || 'en'
+    document.querySelectorAll('time.reltime[datetime]').forEach(function (el) {
+      var ms = Date.parse(el.getAttribute('datetime'))
+      if (!Number.isFinite(ms)) return
+      el.textContent = relTimeText(ms, now)
+      el.title = new Date(ms).toLocaleString(lang, {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit'
+      })
+    })
+  }
+  if (document.querySelector('time.reltime')) {
+    refreshRelTimes()
+    setInterval(refreshRelTimes, 1000)
+  }
+
   // ---- repo switcher in the header: append ?repo=… to the current page ----
   const repoSwitch = document.getElementById('repo-switch')
   if (repoSwitch) {

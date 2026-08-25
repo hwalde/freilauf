@@ -23,7 +23,7 @@ const d = (s) => new Date(s)
 
 try {
   const { cronMatches, validCron, scheduleDue, scheduleText, stripAnsi, escapeHtml,
-    fmtDuration, kurzid } = await import('../server/util.mjs')
+    fmtDuration, parseDbUtc, fmtRelativeTime, fmtDateTime, kurzid } = await import('../server/util.mjs')
   const { parseForm } = await import('../server/web-helpers.mjs')
 
   // ------------------------------------------------------------------
@@ -221,6 +221,30 @@ try {
     gleich(fmtDuration(-5), '–', 'negative')
     gleich(fmtDuration(NaN), '–', 'NaN')
     gleich(fmtDuration(undefined), '–', 'undefined')
+  })
+  await pruefe('parseDbUtc treats naive SQLite timestamps as UTC', () => {
+    gleich(parseDbUtc('2026-08-25 12:00:00'), Date.parse('2026-08-25T12:00:00Z'), 'space form')
+    gleich(parseDbUtc('2026-08-25T12:00:00Z'), Date.parse('2026-08-25T12:00:00Z'), 'already ISO')
+    wahr(Number.isNaN(parseDbUtc(null)), 'null')
+    wahr(Number.isNaN(parseDbUtc('')), 'empty')
+  })
+  await pruefe('fmtRelativeTime picks the unit and follows the UI locale', () => {
+    const now = Date.parse('2026-08-25T12:00:00Z')
+    gleich(fmtRelativeTime(now, now, 'en'), 'now', 'zero seconds')
+    gleich(fmtRelativeTime(now - 4000, now, 'en'), '4 seconds ago', 'seconds, English')
+    gleich(fmtRelativeTime(now - 4000, now, 'de'), 'vor 4 Sekunden', 'seconds, German')
+    gleich(fmtRelativeTime(now - 60_000, now, 'en'), '1 minute ago', 'one minute')
+    gleich(fmtRelativeTime(now - 4 * 60_000, now, 'de'), 'vor 4 Minuten', 'minutes, German')
+    gleich(fmtRelativeTime(now - 2 * 3600_000, now, 'en'), '2 hours ago', 'hours')
+    gleich(fmtRelativeTime(now - 86400_000, now, 'en'), 'yesterday', 'one day, auto numeric')
+    gleich(fmtRelativeTime(NaN, now, 'en'), '–', 'invalid then')
+  })
+  await pruefe('fmtDateTime is a locale date-time, not a relative phrase', () => {
+    const ms = Date.parse('2026-08-25T12:00:00Z')
+    const de = fmtDateTime(ms, 'de')
+    wahr(de.includes('25.08.2026'), 'German date: ' + de)
+    wahr(/\d{2}:\d{2}:\d{2}/.test(de), 'has a clock time: ' + de)
+    gleich(fmtDateTime(NaN, 'en'), '', 'invalid')
   })
   await pruefe('kurzid returns the first UUID block', () => {
     gleich(kurzid('1d005159-78bd-4cc1-a889-07617871af2e'), '1d005159', 'UUID')

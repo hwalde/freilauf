@@ -22,6 +22,7 @@
   "overview.agent": "代理",
   "overview.harness_model": "Coding Agent/模型",
   "overview.status": "状态",
+  "overview.started": "开始时间",
   "overview.duration_expected": "时长/预期",
   "overview.branch": "分支",
   "overview.no_runs": "还没有运行记录",

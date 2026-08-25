@@ -22,6 +22,7 @@
   "overview.agent": "Agent",
   "overview.harness_model": "Coding agent/model",
   "overview.status": "Status",
+  "overview.started": "Started",
   "overview.duration_expected": "Duration/expected",
   "overview.branch": "Branch",
   "overview.no_runs": "no runs yet",

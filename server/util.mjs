@@ -1,7 +1,7 @@
 // cc-hub — small helpers without external dependencies.
 import { homedir } from 'node:os'
 import { execFile } from 'node:child_process'
-import { t } from './i18n.mjs'
+import { t, currentLanguage } from './i18n.mjs'
 
 export const HOME = homedir()
 export const RUNS_DIR = process.env.CCHUB_RUNS_DIR ?? `${HOME}/agents/runs`
@@ -44,6 +44,43 @@ export function fmtDuration(sec) {
   if (!Number.isFinite(sec) || sec < 0) return '–'
   const m = Math.floor(sec / 60), h = Math.floor(m / 60)
   return h > 0 ? `${h} h ${m % 60} min` : `${m} min`
+}
+
+/** SQLite `datetime('now')` is UTC without a timezone suffix. */
+export function parseDbUtc(ts) {
+  if (ts == null || ts === '') return NaN
+  const s = String(ts).trim()
+  if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) return Date.parse(s)
+  return Date.parse(s.replace(' ', 'T') + 'Z')
+}
+
+/**
+ * Relative time in the UI language ("4 seconds ago"). Keep the unit
+ * ladder in sync with the copy in public/hub.js (no bundler to share it).
+ */
+export function fmtRelativeTime(thenMs, nowMs = Date.now(), locale = currentLanguage()) {
+  if (!Number.isFinite(thenMs) || !Number.isFinite(nowMs)) return '–'
+  const sec = Math.max(0, Math.floor((nowMs - thenMs) / 1000))
+  const rtf = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' })
+  if (sec < 60) return rtf.format(-sec, 'second')
+  const min = Math.floor(sec / 60)
+  if (min < 60) return rtf.format(-min, 'minute')
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return rtf.format(-hr, 'hour')
+  const day = Math.floor(hr / 24)
+  if (day < 30) return rtf.format(-day, 'day')
+  const month = Math.floor(day / 30)
+  if (month < 12) return rtf.format(-month, 'month')
+  return rtf.format(-Math.floor(day / 365), 'year')
+}
+
+/** Exact local date+time for a title/tooltip. */
+export function fmtDateTime(ms, locale = currentLanguage()) {
+  if (!Number.isFinite(ms)) return ''
+  return new Date(ms).toLocaleString(locale, {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
 }
 
 // Minimal 5-field cron (minute hour day month weekday): *, *&#47;n, a-b, lists.

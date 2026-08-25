@@ -17,6 +17,7 @@ main { max-width: 1200px; margin: 20px auto; padding: 0 16px; }
 table.list { border-collapse: collapse; width: 100%; background: #fff; }
 table.list th, table.list td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e4e4e0; }
 table.list tbody tr:hover { background: #f0f4fa; cursor: pointer; }
+time.reltime { white-space: nowrap; }
 .dim { color: #8a8f96; font-size: .92em; }
 .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; }
 .dot.rot { background: #e5484d; } .dot.gelb { background: #f2c14e; } .dot.gruen { background: #46a758; }

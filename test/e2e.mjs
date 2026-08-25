@@ -1010,6 +1010,19 @@ try {
     const zeile = html.split('<tr').find(z => z.includes(j.runId))
     enthaelt(zeile, '>2 min<', '2 min instead of 4320')
   })
+  await pruefe('overview: started column is relative with exact datetime on hover', async () => {
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-started' })
+    await sessionMerken(j.runId)
+    db.prepare(`UPDATE runs SET started_at=datetime('now','-4 minutes') WHERE id=?`).run(j.runId)
+    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const zeile = html.split('<tr').find(z => z.includes(j.runId))
+    wahr(!!zeile, 'row for the run')
+    enthaelt(zeile, 'class="reltime"', 'relative-time element')
+    wahr(/\d+ minutes ago/.test(zeile), 'relative English minutes')
+    wahr(/title="[^"]*\d{2}:\d{2}:\d{2}/.test(zeile), 'title carries a clock time')
+    wahr(/datetime="\d{4}-\d{2}-\d{2}T/.test(zeile), 'datetime is ISO')
+    enthaelt(html, '>Started<', 'column header')
+  })
 
   // Simulation with REAL Claude Code: a mini server answers 429 with the
   // subscription-limit headers, Claude aborts, the StopFailure hook reports via
