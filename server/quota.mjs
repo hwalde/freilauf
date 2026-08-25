@@ -23,9 +23,14 @@ export function claudeQuota() {
   try {
     const q = JSON.parse(readFileSync(QUOTA_PATH, 'utf8'))
     const zahl = (v) => (Number.isFinite(Number(v)) ? Number(v) : null)
-    const five = zahl(q?.five_hour?.used_percentage)
-    const sevenGeneral = zahl(q?.seven_day?.used_percentage)
-    const sevenFable = zahl(q?.seven_day_fable?.used_percentage)
+    // The status line writes what claude hands it — which is sometimes a float
+    // artifact (28.000000000000004). Rounding once here, to one decimal like the
+    // cursor percentage in usage.mjs, keeps every consumer (header bar, usage
+    // panel, gate reason, watcher cost delta, /api/usage) clean.
+    const runden = (v) => (v === null ? null : Math.round(v * 10) / 10)
+    const five = runden(zahl(q?.five_hour?.used_percentage))
+    const sevenGeneral = runden(zahl(q?.seven_day?.used_percentage))
+    const sevenFable = runden(zahl(q?.seven_day_fable?.used_percentage))
     const wochen = [sevenGeneral, sevenFable].filter(v => v !== null)
     // Every window brings its own reset time — or none: claude writes resets_at
     // only where it knows one, and the panel then shows nothing rather than the

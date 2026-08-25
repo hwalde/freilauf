@@ -14,3 +14,6 @@ opencode.json
 
 # Local Claude Code state (never commit)
 .claude/settings.local.json
+
+# Unlazy work-tree tracking artifacts (machine-specific)
+.unlazy/

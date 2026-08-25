@@ -271,6 +271,16 @@ try {
     gleich(q.seven, 10, '7-day value')
     wahr(typeof q.resets_at === 'string' && q.resets_at.includes('T'), 'reset as ISO time')
   })
+  await pruefe('float artifacts in used_percentage are rounded to one decimal', async () => {
+    const { claudeQuota } = await quotaMit(JSON.stringify({
+      five_hour: { used_percentage: 28.000000000000004 }, seven_day: { used_percentage: 32 }, seven_day_fable: { used_percentage: 35.0 },
+    }), 8)
+    const q = claudeQuota()
+    gleich(q.five, 28, '5h float artifact rounded')
+    gleich(q.seven_general, 32, '7d stays clean')
+    gleich(q.seven_fable, 35, 'fable week stays clean')
+    gleich(q.seven, 35, 'gate value is the rounded maximum')
+  })
   await pruefe('both 7-day windows are reported; the gate value is the higher one', async () => {
     const { claudeQuota } = await quotaMit(JSON.stringify({
       five_hour: { used_percentage: 5 }, seven_day: { used_percentage: 10 }, seven_day_fable: { used_percentage: 42 },
