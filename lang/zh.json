@@ -232,7 +232,7 @@
   "settings.cursor_included": "Cursor 订阅 —— 每月包含额度，仅作备用值（USD）：通常由 Cursor 自行报告",
   "settings.session_keep": "代理结束后 tmux 会话继续保留的时间（小时）",
   "settings.session_keep_hint": "0 = 立即关闭。从运行结束或其进程退出中较早发生的那一刻开始计算。会话列表与手动结束请见「会话」页面。",
-  "settings.prompt_suffix": "平台提示词后缀 — 一旦填写即“替换”内置平台规则（占位符 {run_id} {workdir} {report_file} {branch_rule} {expected_minutes}）。留空则使用默认规则；自定义工作规则请写入仓库提示词。",
+  "settings.prompt_suffix": "平台提示词后缀 — 每次运行都会追加到内置平台规则之后（占位符 {run_id} {workdir} {report_file} {branch_rule} {expected_minutes}）。规则本身与收尾命令始终保留；仅针对单个仓库的规则请写入仓库提示词。",
   "settings.llm_legend": "日志命中的校验 LLM（可选，经 OpenRouter）",
   "settings.llm_hint": "扫描器会找出疑似限流或服务商错误的行。开启校验 LLM 后，它会收到最近的终端输出并结构化判断代理是否真的被阻塞（立即变红），还是只是菜单文本/重试（不算事件）。关闭时：命中先变黄，重复出现或静默 5 分钟后变红。对所有代理生效。每次运行每 10 分钟最多一次请求。",
   "settings.llm_missing_key": "~/.config/cc-hub/env 中缺少 OPENROUTER_API_KEY —— 没有密钥时保持关闭。",

@@ -13,7 +13,7 @@ import { getHarness } from './harnesses/index.mjs'
 import { isHarnessEnabled } from './coding-agents.mjs'
 import { t } from './i18n.mjs'
 
-const DEFAULT_SUFFIX = [
+const PLATFORM_RULES = [
   '---',
   'Platform rules (cc-hub, run {run_id}):',
   '- Working directory: {workdir}. Branch rule: {branch_rule}.',
@@ -24,7 +24,9 @@ const DEFAULT_SUFFIX = [
   '- If you need a human decision or discovered a big problem:',
   '  `cc-report help "<question/problem>"` — then WAIT for the answer in this session.',
   '- On failure: `cc-report failed "<reason>"`.',
-  '',
+].join('\n')
+
+const FINISH_RULES = [
   'HOW THIS RUN ENDS — two commands, and they are not optional:',
   '  1. Write your report to {report_file} — what was done, what is open,',
   '     what should be reviewed. That path is outside the repository on purpose:',
@@ -37,20 +39,32 @@ const DEFAULT_SUFFIX = [
 
 /**
  * The prompt block that turns a task into a RUN: where to work, how long it may
- * take, and above all how to report back. The reporting contract stands at the
- * end and on its own, because that is the part runs actually fail on — a
- * forgotten `cc-report done` leaves the run on 'running' forever and blocks
- * everything queued behind it.
+ * take, and above all how to report back.
  *
- * `settings.prompt_suffix` REPLACES this template (that is what the field under
- * Settings is for). The harness's own lines are appended afterwards either way:
- * they describe the machine the agent is running on, not the operator's house
- * rules, and cursor in particular needs them (harnesses/cursor.mjs).
+ * Four sections in this order, and the order is the point:
+ *
+ *   1. the platform rules
+ *   2. the operator's own addition (Settings → Platform prompt suffix)
+ *   3. the harness's own lines (`promptRules`) — cursor has to be told that its
+ *      turn ending closes the run
+ *   4. how the run ends — LAST, because that is what runs actually fail on
+ *
+ * The finishing instruction is **not removable**, and that is a lesson, not a
+ * design preference: the settings field used to REPLACE this whole block. It is
+ * called a suffix, it starts out empty and it looks like a free notepad — so the
+ * moment somebody wrote their own working rules into it, every prompt on this
+ * hub silently lost the sentence "at the end always `cc-report done`". The runs
+ * kept working and kept not reporting; one of them held up the queue for a day.
+ * Whatever the operator writes is now an ADDITION, placed where it reads like
+ * one.
  */
 export function platformSuffix(run, branchRule, settings) {
-  const tpl = settings.prompt_suffix || DEFAULT_SUFFIX
-  const rules = getHarness(run.harness)?.promptRules
-  return [tpl, rules].filter(Boolean).join('\n\n')
+  const own = String(settings.prompt_suffix ?? '').trim()
+  const harnessRules = getHarness(run.harness)?.promptRules
+  return [PLATFORM_RULES,
+    own && `Operator rules (apply to every run of this hub):\n${own}`,
+    harnessRules, FINISH_RULES]
+    .filter(Boolean).join('\n\n')
     .replaceAll('{run_id}', run.id)
     .replaceAll('{workdir}', run.workdir_effective)
     .replaceAll('{report_file}', join(RUNS_DIR, run.id, 'report.md'))

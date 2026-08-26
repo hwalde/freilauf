@@ -85,10 +85,10 @@ export default {
    */
   promptRules: [
     'You are running as `cursor-agent` under cc-hub, and your turn ending is what ends this run.',
-    'The platform closes the run the moment you stop — so the `cc-report done --file <report.md>`',
-    'call has to be your LAST tool call, in this same turn. A summary printed into the chat is not',
-    'a report: nobody reads the TUI. `cc-report` is an ordinary program on PATH; run it with your',
-    'shell tool like any other command.',
+    'The platform closes the run the moment you stop, so the `cc-report done --file {report_file}`',
+    'call below has to be your LAST tool call, inside this same turn — afterwards there is nothing',
+    'left to call it from. A summary printed into the chat is not a report: nobody reads the TUI.',
+    '`cc-report` is an ordinary program on PATH; run it with your shell tool like any other command.',
   ].join('\n'),
 
   // cursor has NO hook for API errors (its hook enum knows beforeShellExecution,

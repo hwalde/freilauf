@@ -317,17 +317,26 @@ The hook file is the hub's, not the agent's work: `harnessOwnedPaths()` keeps
 the worktree cleanup from counting it as uncommitted changes (the same trap the
 worktree extras once fell into), and this repo gitignores `.cursor/hooks.json`.
 
-**And the prompt says it too.** The end-detection is the net, not the plan: the
-platform rules name the finishing command with a concrete, absolute path
-(`{report_file}` → `~/agents/runs/<id>/report.md`, deliberately outside the
-worktree so a report file cannot leave it dirty), and cursor gets extra lines of
-its own (`promptRules` in the plugin) saying that its turn ending closes the run
-and that a summary printed into the TUI is not a report.
+**And the prompt says it too**, because the detection is the net and not the
+plan. `platformSuffix()` builds four sections, and the order is the point:
 
-Careful with **Settings → Platform prompt suffix**: that field *replaces* the
-built-in rules, it does not add to them. Emptying it restores them; for one's own
-working rules the repo prompt is the right place. The harness's `promptRules` are
-appended either way — they describe the machine, not the operator's house rules.
+1. the platform rules (working directory, branch, duration, help/branch/pr/failed)
+2. the operator's own addition — **Settings → Platform prompt suffix**
+3. the harness's own lines (`promptRules`): cursor is told that its turn ending
+   closes the run and that a summary printed into the TUI is not a report
+4. **how the run ends** — last, because that is what runs actually fail on:
+   write the report to `{report_file}` (→ `~/agents/runs/<id>/report.md`,
+   deliberately outside the worktree so a report file cannot leave it dirty),
+   then `cc-report done --file <that path>`, then stop.
+
+**Section 4 cannot be removed, and that is a lesson rather than a preference.**
+The settings field used to *replace* this whole block. It is called a suffix, it
+starts out empty and it looks like a free notepad — so the day somebody wrote
+their own working rules into it, every prompt on this hub silently lost the
+sentence "at the end always `cc-report done`". The runs kept working and kept not
+reporting. Whatever is written there is an addition now, placed where it reads
+like one; for rules that concern a single repository the repo prompt is still the
+better place.
 
 ## No-code flows
 

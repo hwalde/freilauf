@@ -232,7 +232,7 @@
   "settings.cursor_included": "Cursor-Abo — inkludierter Monatsverbrauch, nur als Ersatzwert (USD): normalerweise meldet Cursor ihn selbst",
   "settings.session_keep": "tmux-Session nach Abschluss des Agenten offen halten (Stunden)",
   "settings.session_keep_hint": "0 = sofort schließen. Gezählt wird ab dem, was zuerst eintritt: das Ende des Laufs oder das Ende seines Prozesses. Aufgelistet und von Hand beendet werden Sessions unter „Sessions“.",
-  "settings.prompt_suffix": "Plattform-Prompt-Zusatz — ERSETZT die eingebauten Plattformregeln, sobald etwas darin steht (Platzhalter {run_id} {workdir} {report_file} {branch_rule} {expected_minutes}). Leer lassen für die Standardregeln; eigene Arbeitsregeln gehören in den Repo-Prompt.",
+  "settings.prompt_suffix": "Plattform-Prompt-Zusatz — wird bei jedem Lauf zu den eingebauten Plattformregeln hinzugefügt (Platzhalter {run_id} {workdir} {report_file} {branch_rule} {expected_minutes}). Die Regeln selbst und der Abschlussbefehl bleiben immer erhalten; Regeln für nur ein Repository gehören in den Repo-Prompt.",
   "settings.llm_legend": "Prüf-LLM für Log-Treffer (optional, über OpenRouter)",
   "settings.llm_hint": "Der Scanner findet Zeilen, die nach Rate-Limit oder Provider-Fehler aussehen. Ist das Prüf-LLM an, bekommt es die letzten Terminalzeilen und entscheidet strukturiert, ob der Agent wirklich blockiert ist (sofort rot) oder ob es ein Menütext/Retry war (kein Vorfall). Aus: Treffer werden gelb und nach Wiederholung oder 5 min Stille rot. Gilt für alle Agenten. Höchstens eine Anfrage je Lauf und 10 Minuten.",
   "settings.llm_missing_key": "OPENROUTER_API_KEY fehlt in ~/.config/cc-hub/env — ohne Schlüssel bleibt es aus.",

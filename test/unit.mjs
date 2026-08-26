@@ -350,12 +350,24 @@ try {
     enthaelt(t, 'cc-report done', 'completion report')
     enthaelt(t, 'cc-report help', 'call for help')
   })
-  await pruefe('custom template from the settings beats the default template', () => {
-    const t = platformSuffix(lauf, 'REGEL', { prompt_suffix: 'Lauf {run_id} in {workdir}, max {expected_minutes} min. {branch_rule}' })
-    gleich(t, 'Lauf abc-123 in /pfad/zum/worktree, max 42 min. REGEL', 'custom template')
+  await pruefe('the operator\'s own rules are an ADDITION and cannot delete the finishing command', () => {
+    // This field used to REPLACE the whole block. It is called a suffix, it
+    // starts out empty and it looks like a free notepad — so the day somebody
+    // wrote their working rules into it, every prompt on this hub silently lost
+    // "at the end always cc-report done". The runs kept working and kept not
+    // reporting; one of them held up the queue for a day.
+    const t = platformSuffix(lauf, 'REGEL', { prompt_suffix: 'Immer Tests schreiben. Lauf {run_id}.' })
+    enthaelt(t, 'Immer Tests schreiben.', 'the addition is there')
+    enthaelt(t, 'Lauf abc-123.', 'and its placeholders are filled too')
+    enthaelt(t, 'Platform rules', 'the platform rules stay')
+    enthaelt(t, 'cc-report done --file', 'and so does the finishing command')
+    wahr(t.indexOf('Immer Tests schreiben.') < t.indexOf('HOW THIS RUN ENDS'),
+      'how the run ends stands last — that is what runs fail on')
   })
-  await pruefe('empty template falls back to the default template', () => {
-    enthaelt(platformSuffix(lauf, 'REGEL', { prompt_suffix: '' }), 'Platform rules', 'default template')
+  await pruefe('an empty field adds nothing at all', () => {
+    const leer = platformSuffix(lauf, 'REGEL', { prompt_suffix: '   ' })
+    gleich(leer, platformSuffix(lauf, 'REGEL', {}), 'whitespace is not a rule')
+    falsch(leer.includes('Operator rules'), 'no empty section header')
   })
   await pruefe('the finishing command names a concrete file outside the working directory', () => {
     // A run died of a vague instruction: "cc-report done --file <report.md>" left
