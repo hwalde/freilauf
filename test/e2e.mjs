@@ -765,6 +765,30 @@ try {
     gleich(lauf(id).status, 'done', 'closed by the watcher')
     enthaelt(lauf(id).report_md, AGENT_TEXT, 'same report text')
   })
+  await pruefe('all three end channels together ring Telegram exactly once', async () => {
+    // cursor's run end is detected THREE times on purpose — stop hook (fast),
+    // transcript (the net that survives a repo's own hooks.json), sessionEnd's
+    // `_exit`. Every one of them ends in handleReport(), and handleReport() is
+    // what sends the Telegram message: if they were not fenced off, one finished
+    // run would ring the phone three times about the same thing.
+    //
+    // Three fences hold, and this test is here so none of them can be removed
+    // quietly: handleReport() only accepts a run in running/waiting_help,
+    // finishByTurnEnd() only fires from 'running', and notifyRun() carries the
+    // per-(run, type) flag.
+    const id = await cursorRun('E2E-cursor-doppelmeldung')
+    writeTranscript(id, TURN_END)
+    await watcherTick()                  // transcript channel closes it
+    await ccReport(id, ['_turn_end'])    // stop hook, on the same finished turn
+    await ccReport(id, ['_exit'])        // sessionEnd's net on top
+    await watcherTick()
+    gleich(lauf(id).status, 'done', 'done')
+    const kinds = ereignisse(id)
+    const ende = kinds.filter(k => /^telegram_sent:(done|failed|pane_died|exit_without_report)$/.test(k))
+    gleich(ende.join(','), 'telegram_sent:done', 'exactly one end message, and it is the done one')
+    gleich(kinds.filter(k => k === 'done').length, 1, 'the run was closed exactly once')
+    gleich(kinds.filter(k => k === 'turn_end_finished').length, 1, 'only the channel that got there first closes it')
+  })
   await pruefe('a claude run is not closed by a turn end', async () => {
     // Every other harness has a dying process as its safety net; there the turn
     // end stays what it always was — a note.

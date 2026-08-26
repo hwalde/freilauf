@@ -313,6 +313,17 @@ because `cc-report` is a tool call *inside* the turn and the hook comes after it
 report is the agent's own closing message from the transcript, plus one line
 saying that the platform, not the agent, closed the run.
 
+**Detecting the end three times must still notify once.** Two channels here plus
+`sessionEnd`'s `_exit` all run into `handleReport()`, and `handleReport()` is
+what writes to Telegram — so the fences against a run ringing the phone three
+times about the same thing are load-bearing, not incidental: `handleReport()`
+accepts a run only in `running`/`waiting_help`, `finishByTurnEnd()` fires only
+from `running`, and `notifyRun()` carries a `telegram_sent:<type>` flag per run.
+Whichever channel gets there first closes the run; the others find it finished
+and fall out. The e2e suite fires all three at one run and asserts a single
+`telegram_sent:done` ("all three end channels together ring Telegram exactly
+once") — remove any of the three fences and that test goes red.
+
 The hook file is the hub's, not the agent's work: `harnessOwnedPaths()` keeps
 the worktree cleanup from counting it as uncommitted changes (the same trap the
 worktree extras once fell into), and this repo gitignores `.cursor/hooks.json`.
