@@ -189,8 +189,11 @@ start time. Room for `FAVORITES_MAX` of them (3, `CCHUB_FAVORITES_MAX`), because
 a shortcut one has to read is not one.
 
 The **Quick Run** button sits in the header of *every* page and opens a dialog
-asking for what a favorite does not carry: the task, and — folded away —
-the branch rule and the start time. It does **not** navigate: `POST
+asking for what a favorite does not carry: the task and the start time, both
+open, and — folded away — the branch rule. When a run happens is decided in the
+same breath as what it does, so that block stands next to the task rather than
+behind a click; the branch rule is the one of the three usually left as it
+is. It does **not** navigate: `POST
 /api/runs/quick` answers JSON, the page stays where it was and a toast says
 whether the run started, was planned or was deferred, with a link to it. Being
 torn to a detail page is what would make a quick start not quick.

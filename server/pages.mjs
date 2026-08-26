@@ -107,7 +107,10 @@ function setupBanner() {
  * It sits in the layout, so it is reachable wherever one happens to be: the
  * moment one wants to send a task off is rarely the moment one is standing on
  * the run form. The dialog asks for the three things a favorite deliberately
- * does NOT carry — the task, the branch rule, the start time — and nothing else.
+ * does NOT carry — the task, the start time, the branch rule — and nothing else.
+ * The first two stand open, because a run one wants at eight tonight is decided
+ * in the same breath as the task; only the branch rule is folded away, being the
+ * one of the three that is usually left as it is.
  *
  * It does not navigate. `POST /api/runs/quick` answers with JSON, the page stays
  * where it was and a toast says what happened, with a link to the run for
@@ -127,9 +130,9 @@ function quickRunDialog(repos, selectedRepo) {
       `<option value="${f.id}" data-summary="${e(favoriteSummary(f))}">${e(f.name)}</option>`).join('')}</select></label>
     <p class="dim" id="qr-fav-info"></p>
     <label>${e(t('qr.prompt'))} <textarea name="prompt" rows="8" required placeholder="${e(t('qr.prompt_ph'))}"></textarea></label>
+    ${runStartTimeFields({})}
     <details class="qr-more"><summary>${e(t('qr.more'))}</summary>
       ${branchFields({ branch_mode: 'keiner' })}
-      ${runStartTimeFields({})}
     </details>
     <p class="err" id="qr-error" hidden></p>
     <menu class="qr-actions">

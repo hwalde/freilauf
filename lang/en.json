@@ -290,7 +290,7 @@
   "qr.favorite": "Favorite",
   "qr.prompt": "Task",
   "qr.prompt_ph": "What shall the agent do?",
-  "qr.more": "Branch rule and start time (optional)",
+  "qr.more": "Branch rule (optional)",
   "qr.cancel": "Cancel",
   "qr.start": "Start",
   "qr.no_repo": "There is no repo yet — a run needs one.",

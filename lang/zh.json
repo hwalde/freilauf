@@ -290,7 +290,7 @@
   "qr.favorite": "收藏配置",
   "qr.prompt": "任务",
   "qr.prompt_ph": "让代理做什么？",
-  "qr.more": "分支规则与启动时间（可选）",
+  "qr.more": "分支规则（可选）",
   "qr.cancel": "取消",
   "qr.start": "启动",
   "qr.no_repo": "尚未配置仓库——运行需要一个仓库。",

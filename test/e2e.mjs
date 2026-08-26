@@ -1714,6 +1714,15 @@ try {
       enthaelt(html, 'E2E-Favorit', `${pfad}: the favorite is selectable`)
     }
   })
+  await pruefe('the start time stands open under the task, only the branch rule is folded away', async () => {
+    const html = await (await hol('/')).text()
+    const dialog = html.slice(html.indexOf('id="qr-dialog"'))
+    const aufgabe = dialog.indexOf('name="prompt"')
+    const start = dialog.indexOf('name="start_mode"')
+    const details = dialog.indexOf('details class="qr-more"')
+    wahr(aufgabe >= 0 && start >= 0 && details >= 0, 'task, start time and the folded block are all there')
+    wahr(aufgabe < start && start < details, 'the start time sits under the task and before the folded block')
+  })
   await pruefe('a quick run starts with the favorite\'s setup and only the task from the dialog', async () => {
     const r = await formular('/api/runs/quick', {
       repo_id: String(repoId), favorite_id: String(FAVID),

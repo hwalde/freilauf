@@ -290,7 +290,7 @@
   "qr.favorite": "Favorit",
   "qr.prompt": "Aufgabe",
   "qr.prompt_ph": "Was soll der Agent tun?",
-  "qr.more": "Branch-Regel und Startzeitpunkt (optional)",
+  "qr.more": "Branch-Regel (optional)",
   "qr.cancel": "Abbrechen",
   "qr.start": "Starten",
   "qr.no_repo": "Es gibt noch kein Repo — ein Lauf braucht eines.",
