@@ -15,6 +15,7 @@ import { runDefFromForm, runStartFromForm, saveAgent, rememberRunChoice, lastRun
 import { runTitle, TITLE_MAX } from './title.mjs'
 import {
   pageOverview, pageAgents, pageRunForm, pageRun, pageRepos, pageSettings, pageSessions,
+  pageArchive,
   runNewPost, agentEdit, agentSave, agentToggle, agentStart,
   repoEdit, repoSave, settingsSave, settingsTestTelegram,
   telegramSetup, telegramTokenSave, telegramChatSave, telegramChats,
@@ -79,6 +80,7 @@ async function dispatch(req, res, url, path, formBody) {
 
   // --- pages ---
   if (req.method === 'GET' && path === '/') return pageOverview(req, res, url)
+  if (req.method === 'GET' && path === '/archive') return pageArchive(req, res, url)
   if (req.method === 'GET' && path === '/agents') return pageAgents(req, res, url)
   if (req.method === 'GET' && path === '/agents/edit') return agentEdit(req, res, url)
   if (req.method === 'POST' && path === '/agents/edit') return agentSave(req, res, url, formBody)
@@ -224,6 +226,29 @@ async function api(req, res, url) {
       { ok: true, title: runTitle({ title: gewuenscht }, agentName, t('overview.single_run')) },
       `/runs/${run.id}`)
   }
+  // Archive a run — one click in the overview, the record (report, log, incidents)
+  // stays intact and only leaves the overview. ONLY finished runs: a running one is
+  // still being watched, and a deferred/scheduled one would simply start later anyway —
+  // the archive must not hide a run that still has work to do. Unarchiving is the
+  // reverse. Both go through 'answer' so a classic <form method="post"> lands back on
+  // the page it came from ('back'), while a fetch gets JSON.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/archive$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: 'unknown run' }, `/runs/${m[1]}`)
+    if (['running', 'waiting_help', 'scheduled', 'deferred'].includes(run.status)) {
+      return answer(req, res, 400, { ok: false, error: 'only finished runs can be archived' }, `/runs/${run.id}`)
+    }
+    db.prepare(`UPDATE runs SET archived_at=COALESCE(archived_at, datetime('now')) WHERE id=?`).run(run.id)
+    const b = await form(req)
+    return answer(req, res, 200, { ok: true, archived: true }, b.back || `/runs/${run.id}`)
+  }
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/unarchive$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: 'unknown run' }, `/runs/${m[1]}`)
+    db.prepare(`UPDATE runs SET archived_at=NULL WHERE id=?`).run(run.id)
+    const b = await form(req)
+    return answer(req, res, 200, { ok: true, archived: false }, b.back || `/runs/${run.id}`)
+  }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/send$/))) {
     const run = getRun(m[1])
     if (!run?.tmux_session) return answer(req, res, 404, { ok: false, error: 'no session' }, `/runs/${m[1]}`)
@@ -252,7 +277,9 @@ async function api(req, res, url) {
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/retry$/))) {
     const run = getRun(m[1])
     if (!run) return json(res, 404, { ok: false })
-    db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL WHERE id=?`).run(m[1])
+    // Retried = not over any more: it leaves the archive, otherwise an active run
+    // would sit hidden in the overview while it works.
+    db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL, archived_at=NULL WHERE id=?`).run(m[1])
     const r = await launchRun(m[1])
     return answer(req, res, r.ok ? 200 : 500, r, `/runs/${m[1]}`)
   }

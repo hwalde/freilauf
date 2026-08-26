@@ -155,6 +155,10 @@ addColumn('runs', 'start_at', 'TEXT')
 // same hit is counted again on every pass and an old hit "counts" forever.
 addColumn('runs', 'log_offset', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('runs', 'transcript_offset', 'INTEGER NOT NULL DEFAULT 0')
+// Archived: NULL = visible in the overview, set = hidden from it and only reachable
+// under the Archive page. A run is moved there when it is over ('done'/'failed'/'aborted')
+// and not needed at a glance any more — the record, its report and its log stay intact.
+addColumn('runs', 'archived_at', 'TEXT')
 // New harness in the CHECK rule of 'agents'. SQLite cannot change a CHECK (no ALTER
 // for that), and 'CREATE TABLE IF NOT EXISTS' no longer takes effect on an existing
 // database — the old rule would still be in place there and saving a cursor agent

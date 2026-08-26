@@ -101,7 +101,7 @@ export function layout(title, active, content, selectedRepo = null, withTerminal
   const q = claudeQuota()
   // No "Flows" entry: a flow is not a place you go, it hangs on the agent or the
   // single run that starts it. The flow pages are reached from those two forms.
-  const nav = [['/', t('nav.overview')], ['/agents', t('nav.agents')], ['/sessions', t('nav.sessions')],
+  const nav = [['/', t('nav.overview')], ['/archive', t('nav.archive')], ['/agents', t('nav.agents')], ['/sessions', t('nav.sessions')],
     ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
     .map(([href, label]) => `<a href="${href}" class="${active === href ? 'on' : ''}">${e(label)}</a>`).join('')
   const bar = (label, pct) => `<div class="quota"><span>${label}</span><div class="track"><div class="fill ${(pct ?? 0) >= 90 ? 'r' : (pct ?? 0) >= 80 ? 'y' : ''}" style="width:${Math.min(pct ?? 0, 100)}%"></div></div><span>${pct ?? '?'} %</span></div>`
@@ -193,8 +193,8 @@ export async function pageOverview(req, res, url) {
   if (!sel) return noRepoPage(res, '/', t('nav.overview'))
   // 'scheduled' sits with 'deferred': both are runs that exist and are WAITING —
   // that is exactly what one wants to see at a glance, not somewhere below the
-  // finished ones.
-  const runs = db.prepare(`SELECT * FROM runs WHERE repo_id=? ORDER BY
+  // finished ones. Archived runs have left the overview entirely (Archive page).
+  const runs = db.prepare(`SELECT * FROM runs WHERE repo_id=? AND archived_at IS NULL ORDER BY
     CASE status WHEN 'waiting_help' THEN 0 WHEN 'failed' THEN 1 WHEN 'running' THEN 2
                 WHEN 'deferred' THEN 3 WHEN 'scheduled' THEN 4 ELSE 5 END,
     started_at DESC LIMIT 200`).all(sel.id)
@@ -210,6 +210,14 @@ export async function pageOverview(req, res, url) {
     const endeMs = r.ended_at ? parseDbUtc(r.ended_at) : Date.now()
     const durMin = Math.round((endeMs - startedMs) / 60000)
     const wartend = r.status === 'scheduled'
+    // One click moves a finished run into the archive — the record stays, it just
+    // leaves the overview. Only finished runs may go: a running or waiting one
+    // still has work to do and must not hide (the server enforces this too).
+    const archivBtn = ['done', 'failed', 'aborted'].includes(r.status)
+      ? `<form method="post" action="/api/runs/${r.id}/archive" class="inline" onclick="event.stopPropagation()">
+          <input type="hidden" name="back" value="/?repo=${sel.id}">
+          <button type="submit" class="act" title="${e(t('overview.archive'))}" aria-label="${e(t('overview.archive'))}">${e(t('overview.archive_short'))}</button></form>`
+      : ''
     // The row stays clickable as a whole, the title is additionally a real link —
     // otherwise the detail page would be unreachable by keyboard. The title cell
     // swallows the row click: renaming must not navigate away.
@@ -226,13 +234,15 @@ export async function pageOverview(req, res, url) {
       <td>${r.pr_url ? `<a href="${e(r.pr_url)}">PR</a>` : '–'}</td>
       <td>${vorfallZelle(r.id, sel.id, r.status)}</td>
       <td class="dim">${e(lastAnomaly(r.id))}</td>
+      <td>${archivBtn}</td>
     </tr>`
   }).join('')
   const body = `
   ${await usagePanel()}
-  <p><a class="btn" href="/runs/new?repo=${sel.id}">${e(t('overview.start_single'))}</a></p>
-  <table class="list"><thead><tr><th></th><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('overview.started'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th>${e(t('incidents.title'))}</th><th>${e(t('overview.last_anomaly'))}</th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="10" class="dim">${e(t('overview.no_runs'))}</td></tr>`}</tbody></table>`
+  <p><a class="btn" href="/runs/new?repo=${sel.id}">${e(t('overview.start_single'))}</a>
+     <a class="btn" href="/archive?repo=${sel.id}">${e(t('nav.archive'))}</a></p>
+  <table class="list"><thead><tr><th></th><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('overview.started'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th>${e(t('incidents.title'))}</th><th>${e(t('overview.last_anomaly'))}</th><th></th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="11" class="dim">${e(t('overview.no_runs'))}</td></tr>`}</tbody></table>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.overview'), '/', body, sel.id))
 }
 
@@ -266,6 +276,54 @@ function wartetAuf(run) {
   if (run.start_mode === 'idle') return e(t('start.until_free'))
   const ms = parseDbUtc(run.start_at)
   return Number.isFinite(ms) ? e(t('start.waits_until', { time: fmtDateTime(ms) })) : e(t('start.waits'))
+}
+
+// ---------------- archive ----------------
+// Finished runs the overview should not show any more. The record stays complete
+// (report, log, incidents) and reachable under its detail page — it only leaves
+// the at-a-glance list. Paginated, newest-archived first.
+const ARCHIV_SEITE = Number(process.env.CCHUB_ARCHIVE_PAGE_SIZE ?? 50) || 50
+
+export async function pageArchive(req, res, url) {
+  const sel = selectRepo(url)
+  if (!sel) return noRepoPage(res, '/archive', t('nav.archive'))
+  const gewuenscht = Math.max(1, Number(url.searchParams.get('page')) || 1)
+  const total = db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NOT NULL`).get(sel.id).c
+  const seiten = Math.max(1, Math.ceil(total / ARCHIV_SEITE))
+  const seite = Math.min(gewuenscht, seiten)
+  const runs = db.prepare(`SELECT * FROM runs WHERE repo_id=? AND archived_at IS NOT NULL
+    ORDER BY archived_at DESC, started_at DESC LIMIT ? OFFSET ?`)
+    .all(sel.id, ARCHIV_SEITE, (seite - 1) * ARCHIV_SEITE)
+  const rows = runs.map(r => {
+    const agentName = r.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(r.agent_id)?.name ?? null : null
+    const titel = runTitle(r, agentName, t('overview.single_run'))
+    const herkunft = agentName ? t('overview.from_agent', { agent: agentName }) : t('overview.single_run')
+    return `<tr onclick="location='/runs/${r.id}'">
+      <td><a href="/runs/${r.id}">${e(titel)}</a>
+        <div class="dim">${e(herkunft)}</div></td>
+      <td>${e(r.harness)}${r.model ? `<span class="dim">/${r.provider ? e(r.provider) + ':' : ''}${e(r.model)}</span>` : ''}</td>
+      <td>${e(r.status)}</td>
+      <td>${e(r.archived_at)}</td>
+      <td>${e(r.branch_reported || r.branch_expected || '–')}</td>
+      <td>${r.pr_url ? `<a href="${e(r.pr_url)}">PR</a>` : '–'}</td>
+      <td><form method="post" action="/api/runs/${r.id}/unarchive" class="inline" onclick="event.stopPropagation()">
+        <input type="hidden" name="back" value="/archive?repo=${sel.id}&page=${seite}">
+        <button type="submit" title="${e(t('archive.restore_title'))}" aria-label="${e(t('archive.restore_title'))}">${e(t('archive.restore'))}</button></form></td>
+    </tr>`
+  }).join('')
+  const pager = seiten <= 1 ? ''
+    : `<div class="pager">
+        ${seite > 1 ? `<a class="btn" href="/archive?repo=${sel.id}&page=${seite - 1}">${e(t('archive.prev'))}</a>` : `<span class="dim">${e(t('archive.prev'))}</span>`}
+        <span>${e(t('archive.page', { page: seite, pages: seiten }))}</span>
+        ${seite < seiten ? `<a class="btn" href="/archive?repo=${sel.id}&page=${seite + 1}">${e(t('archive.next'))}</a>` : `<span class="dim">${e(t('archive.next'))}</span>`}
+      </div>`
+  const body = `
+  <h2>${e(t('archive.title', { repo: sel.name }))}</h2>
+  <p class="dim">${e(t('archive.total', { n: total }))}</p>
+  <table class="list"><thead><tr><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('archive.archived_at'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th></th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="7" class="dim">${e(t('archive.empty'))}</td></tr>`}</tbody></table>
+  ${pager}`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.archive'), '/archive', body, sel.id))
 }
 
 function selectRepo(url) {
@@ -362,6 +420,15 @@ export async function pageRun(req, res, url, id) {
     // there is no session to end, only a record to set to 'aborted'.
     ? `<div class="banner warten">⏳ ${wartetAuf(run)}
        <form method="post" action="/api/runs/${id}/kill" class="inline"><button class="danger">${e(t('start.cancel'))}</button></form></div>`
+    : ''}
+  ${['done', 'failed', 'aborted'].includes(run.status)
+    // One click into the archive / back out of it. An archived run is hidden
+    // from the overview but stays fully reachable here, report and log intact.
+    ? `<p><form method="post" action="/api/runs/${id}/${run.archived_at ? 'unarchive' : 'archive'}" class="inline">
+         <input type="hidden" name="back" value="/runs/${id}">
+         <button>${e(t(run.archived_at ? 'run.restore' : 'run.archive'))}</button></form>
+       ${run.archived_at ? `<span class="dim">${e(t('run.archived_since', { ts: run.archived_at }))}</span>`
+         : `<span class="dim">${e(t('run.archive_hint'))}</span>`}</p>`
     : ''}
   <p class="dim">${e(t('run.title', { id: id.slice(0, 8) }))} · ${e(herkunft)} · ${e(t('layout.repo'))} „${e(repo?.name ?? '?')}“, ${e(t('agents.harness'))} ${e(run.harness)}${run.model ? `, ${t('agents.model')} ` + e(run.model) : ''}
    ${run.provider ? `· Provider ${e(run.provider)}${run.or_provider ? ` (${e(t('run.pinned'))}: ${e(run.or_provider)})` : ''} ` : ''}· ${e(t('run.start'))} ${e(run.started_at)}${run.ended_at ? ' · ' + e(t('run.end')) + ' ' + e(run.ended_at) : ''}

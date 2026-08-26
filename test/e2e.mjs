@@ -15,6 +15,7 @@
 //                               ~/.local/bin/cc-start (consumes quota!)
 //   node test/e2e.mjs --keep    keep the sandbox after the run (debugging)
 import { spawn, execFile, execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync, lstatSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
@@ -1484,6 +1485,93 @@ try {
     await watcherTick()
     gleich(lauf(j.runId).status, 'running', 'repo free: started')
     await sessionMerken(j.runId)
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Archive')
+
+  let ARV = null
+  await pruefe('one click archives a finished run — it leaves the overview, the record stays', async () => {
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Archiv', title: 'Archived by hand' })
+    await sessionMerken(j.runId)
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+    ARV = j.runId
+    enthaelt(await (await hol(`/runs/${ARV}`)).text(), 'Move to archive', 'detail page offers archiving once the run is over')
+    // A classic form post (Accept: text/html) lands back on the overview.
+    const r = await formular(`/api/runs/${ARV}/archive`, { back: `/?repo=${repoId}` }, { alsBrowser: true })
+    gleich(r.status, 303, 'redirects back')
+    gleich(r.headers.get('location'), `/?repo=${repoId}`, 'back to the overview')
+    const auf = lauf(ARV)
+    wahr(!!auf.archived_at, 'archived_at is set')
+    // The overview row is gone; the archive page shows it.
+    falsch((await (await hol(`/?repo=${repoId}`)).text()).includes(ARV), 'not in the overview any more')
+    const archiv = await (await hol(`/archive?repo=${repoId}`)).text()
+    enthaelt(archiv, ARV, 'listed in the archive')
+    enthaelt(archiv, 'Archived by hand', 'with its title')
+    enthaelt(archiv, 'Restore', 'restore button')
+  })
+  await pruefe('the detail page offers to restore an archived run', async () => {
+    const html = await (await hol(`/runs/${ARV}`)).text()
+    enthaelt(html, 'Restore to overview', 'button on the detail page')
+    enthaelt(html, 'archived', 'mentions the archive')
+  })
+  await pruefe('restore puts the run back into the overview', async () => {
+    const r = await formular(`/api/runs/${ARV}/unarchive`, { back: `/archive?repo=${repoId}` }, { alsBrowser: true })
+    gleich(r.status, 303, 'redirects back')
+    gleich(lauf(ARV).archived_at, null, 'archived_at cleared')
+    enthaelt(await (await hol(`/?repo=${repoId}`)).text(), ARV, 'visible in the overview again')
+    falsch((await (await hol(`/archive?repo=${repoId}`)).text()).includes(ARV), 'gone from the archive')
+  })
+  await pruefe('retrying an archived run brings it back to the overview', async () => {
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Archiv-retry' })
+    await sessionMerken(j.runId)
+    db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+    await formular(`/api/runs/${j.runId}/archive`, {})
+    wahr(!!lauf(j.runId).archived_at, 'archived')
+    const r = await formular(`/api/runs/${j.runId}/retry`, {})
+    gleich(r.status, 200, 'retried')
+    const auf = lauf(j.runId)
+    gleich(auf.status, 'running', 'running again')
+    gleich(auf.archived_at, null, 'left the archive — an active run must not be hidden')
+    falsch((await (await hol(`/archive?repo=${repoId}`)).text()).includes(j.runId), 'not in the archive any more')
+  })
+  await pruefe('a run that is still working cannot be archived', async () => {
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Archiv-laeuft' })
+    await sessionMerken(j.runId)
+    gleich(lauf(j.runId).status, 'running', 'sanity: it is running')
+    const r = await formular(`/api/runs/${j.runId}/archive`, {})
+    gleich(r.status, 400, 'rejected')
+    gleich(lauf(j.runId).archived_at, null, 'nothing archived')
+    // Clean up: the run must not linger for the watcher's sake.
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+  })
+  await pruefe('the archive is paginated', async () => {
+    // 55 archived runs → 2 pages of 50. Inserted directly: only the archive page
+    // cares about them, the overview must not show them anyway.
+    const ids = []
+    for (let i = 0; i < 55; i++) {
+      const id = randomUUID()
+      ids.push(id)
+      db.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode,
+                   expected_minutes, started_at, ended_at, archived_at)
+                  VALUES(?, ?, 'done', 'claude', 'E2E-Archiv-Masse', 'keiner', 45,
+                   datetime('now', ?), datetime('now'), datetime('now', ?))`)
+        .run(id, repoId, `-${i} days`, `-${i} days`)
+    }
+    const seite1 = await (await hol(`/archive?repo=${repoId}`)).text()
+    enthaelt(seite1, 'Page 1 of 2', 'pagination line')
+    enthaelt(seite1, 'next ›', 'a next link')
+    enthaelt(seite1, ids[0], 'newest archived first')
+    falsch(seite1.includes(ids[ids.length - 1]), 'the oldest is on page 2')
+    const seite2 = await (await hol(`/archive?repo=${repoId}&page=2`)).text()
+    enthaelt(seite2, 'Page 2 of 2', 'second page')
+    enthaelt(seite2, ids[ids.length - 1], 'the oldest sits here')
+    falsch(/<a [^>]*>next ›<\/a>/.test(seite2), 'no next link on the last page')
+    const alle = db.prepare(`SELECT id FROM runs WHERE repo_id=? AND archived_at IS NOT NULL`).all(repoId)
+    gleich(alle.length, 55, 'all inserted runs are archived')
+    // Page 3 beyond the range clamps to the last page instead of an empty one.
+    const seite3 = await (await hol(`/archive?repo=${repoId}&page=99`)).text()
+    enthaelt(seite3, 'Page 2 of 2', 'clamped to the last page')
   })
 
   // ------------------------------------------------------------------

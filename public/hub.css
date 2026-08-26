@@ -69,6 +69,15 @@ tr:hover .titel-inline button.mini, .titel-inline:hover button.mini,
 .titel-input { max-width: 22em; font-size: 1em; padding: 2px 6px; }
 h2 .titel-input { font-size: .8em; }
 .titelzelle { min-width: 12em; }
+/* One-click archive button in the overview — same hover rule as the pencil: only
+   where one is about to click. A table full of "Archive" buttons is noise. */
+button.act { background: none; border: 0; color: #8a8f96; cursor: pointer; padding: 2px 8px;
+  font-size: .92em; line-height: 1.4; border-radius: 4px; opacity: 0; transition: opacity .1s; }
+tr:hover button.act, button.act:focus-visible { opacity: 1; }
+button.act:hover { color: #2f6fed; background: #eef1f6; }
+/* Pagination on the archive page */
+.pager { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.pager .btn { padding: 5px 12px; }
 /* A waiting run is not an incident — the banner must not look like one. */
 .banner.warten { border-left-color: #b8860b; background: rgba(184, 134, 11, .1); }
 
@@ -82,6 +91,7 @@ h2 .titel-input { font-size: .8em; }
   table.list th, table.list td { border-color: #33363b; }
   table.list tbody tr:hover { background: #262a30; }
   code { background: #2c2f34; }
+  button.act:hover { background: #2c3036; color: #6ea8fe; }
 }
 
 /* Incidents (rate limit, provider) */

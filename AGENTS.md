@@ -159,6 +159,21 @@ one the repo is not free any more. The budget gate applies as at any other
 start; blocked means `deferred`, not lost. Waiting runs stand at the top of the
 overview next to the deferred ones and can be cancelled on their detail page.
 
+### Runs can be archived
+
+`runs.archived_at` (NULL = visible) moves a finished run out of the overview —
+the record, report, log and incidents stay intact and the detail page keeps
+working. Only terminal statuses may go (`done`/`failed`/`aborted`): a running
+one is still being watched and a deferred/scheduled one would start later
+anyway, so archiving it would hide work that is not over. One click per row in
+the overview (`POST /api/runs/<id>/archive`) or on the detail page; the
+**Archive** page (`/archive`, per repo like the overview) lists them
+newest-archived first with pagination (50 per page,
+`CCHUB_ARCHIVE_PAGE_SIZE`) and a restore button
+(`POST /api/runs/<id>/unarchive`). Nothing else in the code filters on
+`archived_at` — the watcher, the flows and the incidents keep their view of a
+run whether it is archived or not.
+
 ## Plugin architecture: coding agents and providers
 
 Coding agents (harnesses) and model providers are **plugins** — one file each
