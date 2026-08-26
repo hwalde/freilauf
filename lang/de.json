@@ -306,6 +306,7 @@
   "qr.title": "Quick Run",
   "qr.hint": "Einen Lauf aus einem Favoriten starten — von jeder Seite aus, ohne sie zu verlassen.",
   "qr.favorite": "Favorit",
+  "qr.favorite_info": "das Setup, mit dem dieser Favorit startet",
   "qr.prompt": "Aufgabe",
   "qr.prompt_ph": "Was soll der Agent tun?",
   "qr.more": "Branch-Regel (optional)",

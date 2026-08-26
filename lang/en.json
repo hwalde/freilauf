@@ -306,6 +306,7 @@
   "qr.title": "Quick Run",
   "qr.hint": "Start a run from a favorite — from any page, without leaving it.",
   "qr.favorite": "Favorite",
+  "qr.favorite_info": "the setup this favorite starts with",
   "qr.prompt": "Task",
   "qr.prompt_ph": "What shall the agent do?",
   "qr.more": "Branch rule (optional)",

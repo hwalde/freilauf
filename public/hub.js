@@ -143,7 +143,12 @@
     const zeigeFav = function () {
       if (!favSel || !favInfo) return
       const opt = favSel.selectedOptions[0]
-      favInfo.textContent = opt ? (opt.dataset.summary || '') : ''
+      // The setup used to stand as a line of text under the select, where it
+      // clung to the field and pushed the task box down. It is a detail one
+      // looks up, not one one reads every time — so it lives on the marker.
+      const summary = opt ? (opt.dataset.summary || '') : ''
+      favInfo.title = summary
+      favInfo.hidden = !summary
       try { localStorage.setItem(FAV_KEY, favSel.value) } catch (err) { /* private mode */ }
     }
     if (favSel) {

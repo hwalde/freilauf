@@ -226,9 +226,19 @@ aside.sidebar .side-head h2 { font-size: var(--fs-small); text-transform: upperc
 button.side-toggle { background: none; border: 0; color: var(--text-dim); cursor: pointer; margin-left: auto;
   padding: 0 var(--sp-4); font-size: var(--fs-body); line-height: 1; border-radius: var(--radius-4); }
 button.side-toggle:hover { color: var(--accent-act-hover); background: var(--accent-soft-bg); }
-aside.sidebar .side-body { margin-top: var(--sp-8); }
-aside.sidebar .side-block { padding: var(--sp-6) 0; border-top: 1px solid var(--border); }
-aside.sidebar .side-block:first-child { border-top: 0; padding-top: 0; }
+/* ONE rhythm for the whole sidebar: every rule gets the same air above and
+   below it, and the head is a section like the others rather than a special
+   case. Before this the head sat 8px from the first block while sections sat
+   6+6 apart, and the usage panel had a rule with no padding under it at all —
+   three different gaps in a column 268px wide, which is exactly where uneven
+   spacing shows. */
+aside.sidebar .side-head { padding-bottom: var(--sp-8); border-bottom: 1px solid var(--border); }
+aside.sidebar .side-body { margin-top: 0; }
+aside.sidebar .side-block,
+aside.sidebar details.usage { padding: var(--sp-8) 0; border-top: 1px solid var(--border); }
+/* The first section already has the head's rule above it — a second line there
+   would be two rules with nothing between them. */
+aside.sidebar .side-block:first-child { border-top: 0; }
 aside.sidebar .side-label { display: block; color: var(--text-dim); margin-bottom: var(--sp-4); }
 /* Pipeline as a state with weight, not as a sentence. */
 #header-status { display: flex; align-items: baseline; gap: var(--sp-8); }
@@ -240,14 +250,39 @@ ul.side-counts li { padding: var(--sp-2) 0; }
 ul.side-counts a { display: flex; align-items: baseline; gap: var(--sp-8); text-decoration: none; color: inherit; border-radius: var(--radius-4); }
 ul.side-counts a:hover { color: var(--accent-act-hover); }
 ul.side-counts .n { font-size: var(--fs-title); font-weight: 600; min-width: 1.6em; text-align: right; font-variant-numeric: tabular-nums; }
-aside.sidebar .usage-row { padding: var(--sp-2) 0; gap: var(--sp-6); }
+/* In the sidebar a usage row is a GROUP, not a line. Claude carries three
+   windows and Cursor a reset note, and as a wrapping flex row (the wide
+   layout's shape) label, plan and windows simply flowed into each other — one
+   could not see which bar belonged to which agent. So: the name and its plan
+   stay on the first line, every window goes on its own line beneath, indented
+   under the name it belongs to, and the groups are separated from each other
+   more than their own lines are. */
+aside.sidebar .usage-row { display: block; padding: 0; margin-top: var(--sp-10); }
+aside.sidebar .usage-row:first-of-type { margin-top: var(--sp-4); }
+aside.sidebar .usage-row .quota { padding-left: var(--sp-10); margin-top: var(--sp-2); flex-wrap: wrap; }
+/* Bars line up under each other or they read as three unrelated things. The
+   label column is as wide as the WIDEST label ("7d fable"), not as wide as it
+   happens to need — otherwise the third bar steps to the right. */
+aside.sidebar .usage-row .quota .quota-label { min-width: 4.6em; }
+/* Cursor reports one number and brings no label at all, so its bar started at
+   the indent while Claude's started after the label column. It borrows the
+   same offset. */
+aside.sidebar .usage-row .quota:not(:has(.quota-label)) { padding-left: calc(var(--sp-10) + 4.6em); }
+/* The reset time does not fit beside a bar in a 268px column — squeezed in, it
+   wrapped mid-phrase and shoved the bar around. It gets its own line, aligned
+   under the bar it belongs to. */
+aside.sidebar .usage-row .quota > .dim { flex: 1 0 100%; padding-left: 4.6em; }
+/* Cursor's reset note is a sibling of its bar, not a child — it needs the same
+   alignment by hand. Matched via `.quota ~` so it hits only the note AFTER a
+   bar: the plan ("max (…)", "pro") is a .dim too and belongs on the name's
+   line, not on one of its own. */
+aside.sidebar .usage-row > .quota ~ .dim { display: block; padding-left: calc(var(--sp-10) + 4.6em); }
 /* The panel is already inside a panel that folds; a second disclosure
    triangle inside it asks the same question twice. It reads as a section. */
 aside.sidebar details.usage > summary { list-style: none; cursor: default; color: var(--text-dim);
   display: block; margin-bottom: var(--sp-4); }
 aside.sidebar details.usage > summary::-webkit-details-marker { display: none; }
-aside.sidebar details.usage { border-top: 1px solid var(--border); padding-top: var(--sp-6); margin-top: var(--sp-6); }
-aside.sidebar details.usage { background: none; padding: 0; margin: 0; border-radius: 0; }
+aside.sidebar details.usage { background: none; margin: 0; border-radius: 0; }
 aside.sidebar details.usage summary { font-weight: 600; color: var(--text-dim); }
 table.list { border-collapse: collapse; width: 100%; background: var(--surface-card); }
 table.list th, table.list td { text-align: left; padding: var(--sp-6) var(--sp-10); border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -308,7 +343,7 @@ form.settings { background: var(--surface-card); padding: var(--sp-16); border-r
 form.form-grid { max-width: 900px; }
 form.form-grid label:not(.chk):not(.weekday):not([hidden]) {
   display: grid; grid-template-columns: 13em minmax(0, 1fr);
-  gap: var(--sp-2) var(--sp-12); align-items: center; margin: var(--sp-8) 0;
+  gap: var(--sp-2) var(--sp-12); align-items: center; margin: var(--sp-10) 0;
 }
 /* A hint belongs under ITS FIELD, in the field's column. Across the full width
    it ran into the next caption and read as that field's description. */
@@ -522,13 +557,30 @@ dialog.qr h3 { margin: 0 0 var(--sp-10); display: flex; align-items: center; gap
 dialog.qr h3 button.mini { margin-left: auto; background: none; border: 0; color: var(--text-dim);
   cursor: pointer; font-size: 1em; padding: 0 var(--sp-4); opacity: 1; }
 dialog.qr textarea { min-height: 8em; }
+/* A fieldset around a single row carried more chrome than content: legend,
+   10px of padding and the row's own 10px margin stacked to ~36px of air around
+   one select. */
+dialog.qr fieldset.schedule { padding: var(--sp-4) var(--sp-12) var(--sp-6); }
+dialog.qr fieldset.schedule > label:first-of-type { margin-top: var(--sp-4); }
 dialog.qr input, dialog.qr select, dialog.qr textarea { max-width: 100%; }
 dialog.qr details.qr-more { margin: var(--sp-10) 0; }
 dialog.qr details.qr-more summary { cursor: pointer; color: var(--accent-act-hover); }
 dialog.qr menu.qr-actions { display: flex; gap: var(--sp-10); justify-content: flex-end;
   margin: var(--sp-14) 0 0; padding: 0; }
 dialog.qr button.ghost { background: none; color: var(--text-ghost); border: 1px solid var(--border-ghost); }
-#qr-fav-info { margin: -4px 0 var(--sp-10); }
+/* The favorite's setup as a marker beside its select, not as a line beneath
+   it: one line of text there clung to the field, and the gap it opened made
+   the space above the task box twice the space above everything else. */
+.fav-info { width: 1.35em; height: 1.35em; padding: 0; border-radius: var(--radius-pill);
+  background: none; border: 1px solid var(--border-strong); color: var(--text-dim);
+  font-size: var(--fs-small); font-style: italic; line-height: 1; cursor: help; justify-self: start; }
+.fav-info:hover, .fav-info:focus-visible { color: var(--accent-act-hover); border-color: var(--accent-act-hover); }
+/* The marker belongs BESIDE its select, not under it: in a two-column grid a
+   second element in column 2 is auto-placed onto a new row, which is exactly
+   the extra line this change was meant to remove. A row that carries one gets
+   a third column of its own width. */
+form.form-grid label:has(.fav-info) { grid-template-columns: 13em minmax(0, 1fr) auto; }
+form.form-grid label:not(.chk):not(.weekday) > .fav-info { grid-column: 3; }
 
 /* ---- toasts: the answer to an action that did not change the page ---- */
 .toasts { position: fixed; right: var(--sp-16); bottom: var(--sp-16); display: flex; flex-direction: column;

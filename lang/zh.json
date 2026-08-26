@@ -306,6 +306,7 @@
   "qr.title": "快速运行",
   "qr.hint": "从收藏配置启动一次运行——在任意页面，无需离开当前页面。",
   "qr.favorite": "收藏配置",
+  "qr.favorite_info": "此收藏启动时使用的配置",
   "qr.prompt": "任务",
   "qr.prompt_ph": "让代理做什么？",
   "qr.more": "分支规则（可选）",
