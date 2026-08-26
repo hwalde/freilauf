@@ -5,6 +5,8 @@ import { notify, notifyLong, detailUrl } from './telegram.mjs'
 import { sh } from './util.mjs'
 import { vorfallMelden } from './incidents.mjs'
 import { typVonClaudeFehler, typVonText, TYP_TEXT } from './detect.mjs'
+import { getHarness } from './harnesses/index.mjs'
+import { transcriptState } from './cursor-transcript.mjs'
 
 const MAX_REPORT = 200 * 1024   // planning 11: report ≤ 200 kB
 
@@ -59,6 +61,10 @@ export async function handleReport(runId, body) {
     }
     case '_turn_end':
       addEvent(runId, 'turn_end')
+      // For most harnesses the end of a turn is just a note. For cursor it is
+      // the end of the RUN (harnesses/cursor.mjs: turnEndsRun) — its TUI stays
+      // standing afterwards, so nothing else will ever say the work is over.
+      await finishByTurnEnd(runId, 'stop hook')
       break
     case '_exit': {
       addEvent(runId, 'exit')
@@ -107,6 +113,43 @@ export async function handleReport(runId, body) {
     import('./flows/triggers.mjs').then(m => m.flowsTick()).catch(e => console.error('[flows]', e.message))
   }
   return { ok: true }
+}
+
+/**
+ * The agent ended its turn without reporting — close the run anyway.
+ *
+ * This exists for one harness shape: cursor works through the task and then
+ * stays in its TUI at "→ Add a follow-up". The pane never dies, the process
+ * never exits, so `_pane_died` and `_exit` never come. Whoever waits for
+ * `cc-report done` there waits forever, and everything the repo has queued
+ * behind that run waits with it.
+ *
+ * Only from status 'running': `waiting_help` means the agent asked a question
+ * and is deliberately idle until a human answers — ending its turn is the
+ * correct behaviour there, not the end of the work. And a run that reported
+ * properly is already 'done' by the time the hook fires (cc-report is a tool
+ * call INSIDE the turn, the hook comes after it), so this only ever catches the
+ * case it is meant for.
+ *
+ * The report text comes from the harness's transcript: the agent's own closing
+ * words are what a human would have gotten had it called cc-report. Everything
+ * else — Telegram, events, flows, cost accounting — happens because this goes
+ * back through the normal 'done' path instead of writing the row itself.
+ *
+ * Returns true when the run was closed here.
+ */
+export async function finishByTurnEnd(runId, source) {
+  const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
+  if (!run || run.status !== 'running') return false
+  if (!getHarness(run.harness)?.turnEndsRun) return false
+  const state = run.harness === 'cursor' ? transcriptState(run) : null
+  const note = `_(cc-hub closed this run: the agent ended its turn without calling \`cc-report done\` `
+    + `— noticed via ${source}. The text above is the agent's own closing message`
+    + `${state?.lastAnswer ? '' : ', which the transcript did not yield'}.)_`
+  const text = [state?.lastAnswer, note].filter(Boolean).join('\n\n')
+  addEvent(runId, 'turn_end_finished', { source, transcript: !!state?.lastAnswer })
+  await handleReport(runId, { kind: 'done', text })
+  return true
 }
 
 export function addEventOnce(runId, kind, payload = null) {

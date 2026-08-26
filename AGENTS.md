@@ -280,6 +280,55 @@ worktree's `CLAUDE.md` **automatically**. The opt-in idea behind
 half applies to cursor — the run sees more than its prompt plus the checked
 extras.
 
+### cursor: when a run is over
+
+**cursor's TUI stays standing after the work is done** ("→ Add a follow-up").
+The pane never dies, the process never exits — so `_pane_died` and `_exit`, the
+last safety nets under every other harness, never fire. Until this was built, a
+cursor run whose agent forgot `cc-report done` stood on `running` **forever**,
+and a single run waiting for "when no other run of this repo is going" waited
+behind it just as long. Measured on 2026-08-25: one forgotten report held up four
+runs, among them the one meant to fix exactly this.
+
+Two channels report the end, and both end in `finishByTurnEnd()`
+(`reports.mjs`) — the single place that knows a turn end can be a run's end:
+
+| Channel | What | Speed |
+|---|---|---|
+| `stop` hook | `runner.mjs` writes `.cursor/hooks.json` into the worktree before the start (`hookFiles()` in the plugin); `stop` fires when the agent ends its turn while the session stays alive, `sessionEnd` when the process really exits | within a second |
+| transcript | `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl` ends a finished turn with `{"type":"turn_ended"}` (`server/cursor-transcript.mjs`) | next watcher pass |
+
+The transcript is not decoration: an existing `.cursor/hooks.json` is **never**
+overwritten (a repository may bring its own tooling), and a cursor release could
+rename the event. It also finally gives cursor an **activity source** — the file
+grows while the agent works (measured: 325 → 693 → 994 → 1302 bytes across three
+tool calls, mtime advancing each time), which is what `measureActivity()` reads.
+
+Only from status `running`. `waiting_help` means the agent asked a question and
+is deliberately idle until a human answers — ending its turn is correct there,
+not the end of the work (the answer via `/api/runs/<id>/send` puts it back on
+`running`). A run that reported properly is already `done` when the hook fires,
+because `cc-report` is a tool call *inside* the turn and the hook comes after it
+— so this only ever catches the case it is meant for. What it writes as the
+report is the agent's own closing message from the transcript, plus one line
+saying that the platform, not the agent, closed the run.
+
+The hook file is the hub's, not the agent's work: `harnessOwnedPaths()` keeps
+the worktree cleanup from counting it as uncommitted changes (the same trap the
+worktree extras once fell into), and this repo gitignores `.cursor/hooks.json`.
+
+**And the prompt says it too.** The end-detection is the net, not the plan: the
+platform rules name the finishing command with a concrete, absolute path
+(`{report_file}` → `~/agents/runs/<id>/report.md`, deliberately outside the
+worktree so a report file cannot leave it dirty), and cursor gets extra lines of
+its own (`promptRules` in the plugin) saying that its turn ending closes the run
+and that a summary printed into the TUI is not a report.
+
+Careful with **Settings → Platform prompt suffix**: that field *replaces* the
+built-in rules, it does not add to them. Emptying it restores them; for one's own
+working rules the repo prompt is the right place. The harness's `promptRules` are
+appended either way — they describe the machine, not the operator's house rules.
+
 ## No-code flows
 
 `server/flows/` — a self-contained module (own tables, pages, API, designer
@@ -401,20 +450,20 @@ by an API error, so the hit was text on its screen — and neither repetition no
 silence may promote it to red. Applying the module's own principle ("a real limit
 stands at the end") to only one of the two paths was the hole: an agent scrolling
 through source code about API errors produced five hits in two minutes and turned
-its own run red. The veto costs nothing where it matters — cursor and hermes,
-the two harnesses for which the log is the *only* source, have no activity
-measurement, so it never applies to them; claude and opencode, where it does,
-each have a hook and a transcript/plugin channel that reports a real error red
-immediately anyway.
+its own run red. The veto costs nothing where it matters — hermes, the harness
+for which the log is the *only* source, has no activity measurement, so it never
+applies to it; claude, opencode and cursor each have a second channel that
+reports a real error (claude, opencode) or at least the agent's activity
+(cursor) independently of the log.
 
 **Silence is only an argument where activity is measured.** `measureActivity()`
-has a source for claude (transcript mtime) and opencode (session store); for
-cursor and hermes it has none and returns nothing. `bewerteLogTreffer()`
-therefore reads `letzteAktivitaetMs === null` as *unknown*, never as *silent* —
-otherwise every yellow log hit on exactly those two harnesses turned red five
-minutes later while the agent was happily working. There, repetition and the
-check LLM are the escalation paths; a hit that has not recurred within 30 min
-expires by itself.
+has a source for claude (transcript mtime), opencode (session store) and cursor
+(transcript mtime, see "cursor: when a run is over"); for hermes it has none and
+returns nothing. `bewerteLogTreffer()` therefore reads
+`letzteAktivitaetMs === null` as *unknown*, never as *silent* — otherwise every
+yellow log hit on that harness turned red five minutes later while the agent was
+happily working. There, repetition and the check LLM are the escalation paths; a
+hit that has not recurred within 30 min expires by itself.
 
 ### Does it need a human? (`brauchtMensch`)
 
@@ -435,8 +484,10 @@ Telegram message states the group in its second line, so the reader can tell a
 "get up" from a "noted" without opening the hub.
 
 cursor, like hermes, has **no** hook for API errors (its hook enum knows
-`beforeShellExecution`, `afterFileEdit`, `stop`, `beforeSubmitPrompt` — nothing
-for a failed call), and there is no open pulse endpoint for `api2.cursor.sh`:
+`beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `afterFileEdit`,
+`beforeSubmitPrompt`, `afterAgentResponse`, `stop`, `sessionStart`, `sessionEnd`,
+`preToolUse`/`postToolUse`, … — nothing for a failed call), and there is no open
+pulse endpoint for `api2.cursor.sh`:
 `providerVonLauf()` deliberately returns `null` there ("not monitored", not
 "healthy"). In return cursor rejects an unknown model **loudly** (`Cannot use
 this model: …`) — unlike opencode and hermes, which swallow nonsense silently.
@@ -480,6 +531,12 @@ errors (`post_api_request` only fires after success).
 - **Claude hook format.** Every event is a list of
   `{ matcher?, hooks: [{ type, command }] }`. A bare command list makes Claude
   discard the settings file **completely** and the run hangs at a dialog.
+- **cursor's hook format is the other one.** `<workspace>/.cursor/hooks.json` is
+  `{ version, hooks: { <event>: [{ command }] } }` — a **flat** list per event,
+  exactly the shape Claude rejects. Handing cursor Claude's nesting gets the file
+  silently ignored, and a silently ignored end-of-turn hook is the whole bug
+  again. cursor also reads `<workspace>/.claude/settings.json`, so the two
+  formats really do meet in one directory tree.
 - **`StopFailure` exists — but Claude does not wait for it.** (Claude Code
   2.1.241; the enum is in the binary: `rate_limit`, `overloaded`, `server_error`,
   `authentication_failed`, `billing_error`, `model_not_found`, …) The process is

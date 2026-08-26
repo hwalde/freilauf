@@ -99,6 +99,10 @@ Notes per harness:
             (without it the TUI hangs there). One-time 'cursor-agent login'.
             CAUTION: cursor also reads CLAUDE.md, .claude/skills and .claude/agents
             (verified by measurement) — a run therefore sees more than just the prompt.
+            The TUI STAYS OPEN after the work is done, so the pane never dies.
+            cc-hub therefore puts a '.cursor/hooks.json' into the workspace whose
+            'stop' hook calls cc-report; started by hand there is no run to report
+            to and the session simply stays standing until cc-kill.
 EOF
 }
 

@@ -6,7 +6,9 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import db, { getRepo, addEvent } from './db.mjs'
 import { RUNS_DIR, sh } from './util.mjs'
-import { handleReport, addEventOnce, notifyRun, branchSyncState } from './reports.mjs'
+import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd } from './reports.mjs'
+import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
+import { harnessOwnedPaths } from './runner.mjs'
 import { claudeQuota } from './quota.mjs'
 import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText } from './detect.mjs'
 import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, offeneVorfaelle, detektorLog, msVon, brauchtMensch } from './incidents.mjs'
@@ -161,6 +163,8 @@ async function watchRun(run) {
     // the two sources the hub reads from the outside — transcript and pipe-pane log.
     await transkriptScannen(run)
     await logScannen(run)
+    // cursor's second end channel, independent of any hook (see below).
+    if (await cursorTurnEndDetected(run)) return
     // red: quota.json ≥ 100 %
     const q = claudeQuota()
     if ((q.five ?? 0) >= 100 || (q.seven ?? 0) >= 100) addEventOnce(run.id, 'anomaly:quota_full')
@@ -259,6 +263,26 @@ async function logScannen(run) {
       beleg: (urteil?.zitat || t.zeile).slice(0, 300),
     })
   }
+}
+
+/**
+ * cursor: the turn end WITHOUT a hook.
+ *
+ * The `stop` hook in the worktree's `.cursor/hooks.json` is the fast path — it
+ * reports within a second. This is the one that also works when the hook is not
+ * there: a repository that brings its own hooks.json keeps the hub from writing
+ * one (runner.mjs never overwrites), and a cursor version could rename the
+ * event. The transcript cannot go away, because it is where cursor keeps the
+ * conversation: a finished turn ends the file with {"type":"turn_ended"}.
+ *
+ * Costs one file read per pass and per running cursor run — the same thing
+ * measureActivity() does for claude.
+ */
+async function cursorTurnEndDetected(run) {
+  if (run.harness !== 'cursor' || run.status !== 'running') return false
+  const state = cursorTranscriptState(run)
+  if (!state?.turnEnded) return false
+  return await finishByTurnEnd(run.id, 'cursor transcript')
 }
 
 /**
@@ -401,6 +425,18 @@ async function measureActivity(run) {
       }
       d.close()
     } catch {}
+    return out
+  }
+  // cursor: the transcript's mtime. cursor appends to it while it works
+  // (measured: 325 → 693 → 994 → 1302 bytes across three tool calls, mtime
+  // advancing each time), so it is an activity source exactly like claude's
+  // transcript. Before this, measureActivity() returned nothing for cursor —
+  // which left the traffic light's "no activity for 15 min" and the incident
+  // detector's work-after-the-hit veto blind on this harness. Tokens are not in
+  // there; for cursor the subscription usage panel is the honest source.
+  if (run.harness === 'cursor') {
+    const state = cursorTranscriptState(run)
+    if (state) out.lastActivity = new Date(state.mtimeMs).toISOString().replace('T', ' ').slice(0, 19)
     return out
   }
   // hermes: state.db sessions (matched via cwd + time)
@@ -584,9 +620,17 @@ async function cleanupWorktrees() {
       // for example, is not covered by the ignore rule 'referenz/' (with a slash)
       // and would otherwise sit there as '?? referenz' forever — the worktree would
       // never get cleaned up.
-      const eigene = new Set((repo.extras ?? []).map(x => String(x.path).replace(/\/+$/, '')))
+      // …and so are the harness hook files the hub itself wrote in before the
+      // start (cursor: '.cursor/hooks.json'). Left in the list they would make
+      // every cursor worktree "dirty" forever and none would ever be removed.
+      const eigene = [...(repo.extras ?? []).map(x => String(x.path)), ...harnessOwnedPaths(run.harness)]
+        .map(p => p.replace(/\/+$/, ''))
+      // git names the directory ('?? .cursor/') when everything below it is
+      // untracked, and the single file ('?? .cursor/hooks.json') when it is not
+      // — so the comparison has to cover both.
       const fremd = dirty.stdout.split('\n').filter(Boolean)
-        .filter(z => !eigene.has(z.slice(3).trim().replace(/\/+$/, '')))
+        .map(z => z.slice(3).trim().replace(/\/+$/, ''))
+        .filter(p => !eigene.some(e => p === e || p.startsWith(`${e}/`)))
       if (!dirty.ok || fremd.length) {
         addEventOnce(run.id, 'anomaly:worktree_dirty', { worktree: run.worktree, offen: fremd.slice(0, 20) })
         removable = false

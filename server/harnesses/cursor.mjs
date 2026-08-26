@@ -33,10 +33,69 @@ export default {
   pulseId: () => null,
   pulseTargets: {},
 
+  /**
+   * The turn end IS the end of the run. cursor's TUI stays standing after the
+   * work is done ('→ Add a follow-up'), so the pane never dies and the last
+   * safety net every other harness has does not exist here. Without this flag a
+   * cursor run whose agent forgot `cc-report done` stood on 'running' FOREVER —
+   * and since a single run with the start mode "when no other run of this repo
+   * is going" waits for exactly that, one forgotten report blocked the whole
+   * queue behind it (observed 2026-08-25: four runs, among them the one meant to
+   * fix this).
+   *
+   * reports.mjs closes the run on `_turn_end` when this is set — but only from
+   * status 'running': a `cc-report help` puts the run on 'waiting_help' and the
+   * agent ends its turn exactly as it should while waiting for the answer.
+   */
+  turnEndsRun: true,
+
+  /**
+   * Hook files the hub writes into the worktree before the start (runner.mjs).
+   * cursor reads <workspace>/.cursor/hooks.json; the format is one flat list of
+   * { command } objects per event — NOT claude's { matcher, hooks: [...] } shape.
+   *
+   * 'stop' fires when the agent finishes its turn while the session stays alive
+   * (measured with 2026.08.11-e8db854: payload status "completed", and the
+   * session's environment — CC_RUN_ID included — is inherited, which is what
+   * makes cc-report work from here at all). 'sessionEnd' is the second net for
+   * the case where the process really exits; it detaches with setsid because a
+   * hook a dying process takes down with it reports nothing (the lesson from
+   * claude's StopFailure).
+   */
+  hookFiles({ ccReport }) {
+    const cmd = (...args) => `${ccReport} ${args.join(' ')}`
+    return [{
+      path: '.cursor/hooks.json',
+      content: JSON.stringify({
+        version: 1,
+        hooks: {
+          stop: [{ command: cmd('_turn_end') }],
+          sessionEnd: [{ command: `setsid -f ${cmd('_exit')} >/dev/null 2>&1` }],
+        },
+      }, null, 2) + '\n',
+    }]
+  },
+
+  /**
+   * Extra prompt lines for this harness (runner.mjs appends them to the platform
+   * rules). cursor is the harness that lost the most runs to a missing report,
+   * so it gets told twice and concretely: the summary it prints into the TUI is
+   * not a report, and the call has to happen inside the turn — after the turn
+   * there is nothing left to call from.
+   */
+  promptRules: [
+    'You are running as `cursor-agent` under cc-hub, and your turn ending is what ends this run.',
+    'The platform closes the run the moment you stop — so the `cc-report done --file <report.md>`',
+    'call has to be your LAST tool call, in this same turn. A summary printed into the chat is not',
+    'a report: nobody reads the TUI. `cc-report` is an ordinary program on PATH; run it with your',
+    'shell tool like any other command.',
+  ].join('\n'),
+
   // cursor has NO hook for API errors (its hook enum knows beforeShellExecution,
-  // afterFileEdit, stop, beforeSubmitPrompt — nothing for a failed call), so the
-  // log scan is the only source. 'Cannot use this model' is cursor's loud
-  // rejection of an unknown model ID; it comes right at start and is a safe hit.
+  // afterFileEdit, stop, sessionEnd, beforeSubmitPrompt — nothing for a failed
+  // call), so the log scan is the only source. 'Cannot use this model' is
+  // cursor's loud rejection of an unknown model ID; it comes right at start and
+  // is a safe hit.
   logPatterns: [
     { typ: 'rate_limit', re: /rate.?limit|\b429\b|too many requests|usage limit reached|out of (requests|credits)/i },
     { typ: 'auth_error', re: /\b(401|403)\b|not (logged in|authenticated)|unauthori[sz]ed|please run .?cursor-agent login|invalid api key/i },

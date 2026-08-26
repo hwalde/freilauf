@@ -7,7 +7,7 @@
 // computes or decides — schedules, cron, form parsing, quota gate, text processing.
 //
 // Usage:  node test/unit.mjs
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gruppe, pruefe, gleich, wahr, falsch, enthaelt, bericht, zaehler } from './mini.mjs'
@@ -357,6 +357,27 @@ try {
   await pruefe('empty template falls back to the default template', () => {
     enthaelt(platformSuffix(lauf, 'REGEL', { prompt_suffix: '' }), 'Platform rules', 'default template')
   })
+  await pruefe('the finishing command names a concrete file outside the working directory', () => {
+    // A run died of a vague instruction: "cc-report done --file <report.md>" left
+    // both the path and the fact that it is mandatory to the model's judgement.
+    // Now the command is copy-and-paste ready — and the file lies next to the
+    // run's log, not in the worktree, which a report file would leave dirty.
+    const t = platformSuffix(lauf, 'egal', {})
+    enthaelt(t, 'cc-report done --file /', 'absolute path in the command')
+    enthaelt(t, 'abc-123/report.md', 'the run\'s own report file')
+    falsch(t.includes('{report_file}'), 'placeholder is resolved')
+    falsch(t.includes(`${lauf.workdir_effective}/report.md`), 'not inside the worktree')
+  })
+  await pruefe('the harness adds its own rules — even to a custom template', () => {
+    // The settings field REPLACES the platform rules (that is what it is for),
+    // but the harness lines describe the machine, not the operator's house
+    // rules: cursor has to be told that its turn ending closes the run.
+    const cu = { ...lauf, harness: 'cursor' }
+    enthaelt(platformSuffix(cu, 'egal', {}), 'cursor-agent', 'harness rules in the default template')
+    enthaelt(platformSuffix(cu, 'egal', { prompt_suffix: 'nur das hier' }), 'cursor-agent', '… and in a custom one')
+    falsch(platformSuffix({ ...lauf, harness: 'claude' }, 'egal', {}).includes('cursor-agent'),
+      'other harnesses do not get cursor\'s rules')
+  })
   // ------------------------------------------------------------------
   gruppe('Repo prompt in the run prompt (repoPromptZusatz)')
 
@@ -443,6 +464,95 @@ try {
     const { args } = harnessModelArgs({ harness: 'opencode', model: 'openrouter/a/b' })
     gleich(args.join(' '), '--model openrouter/a/b', 'passed through unchanged')
     gleich(harnessModelArgs({ harness: 'claude' }).args.length, 0, 'no model, no argument at all')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('cursor: when is a run over? (hooks + transcript)')
+
+  const { stateFromJsonl, projectDirs } = await import('../server/cursor-transcript.mjs')
+  const { harnessOwnedPaths, writeHarnessHooks } = await import('../server/runner.mjs')
+  const { HARNESS_PLUGINS: HP } = await import('../server/harnesses/index.mjs')
+  const line = (o) => JSON.stringify(o)
+  const answer = (text) => line({ role: 'assistant', message: { content: [{ type: 'text', text }] } })
+  const TURN_END = line({ type: 'turn_ended', status: 'success' })
+
+  await pruefe('only cursor ends its run with the turn — its TUI stays standing', () => {
+    // claude and opencode have a dying process, a hook and a plugin channel;
+    // cursor has none of that, which is exactly why this flag exists.
+    gleich(HP.cursor.turnEndsRun, true, 'cursor')
+    for (const id of ['claude', 'opencode', 'hermes']) {
+      falsch(!!HP[id].turnEndsRun, `${id} keeps its turn end a note`)
+    }
+  })
+
+  await pruefe('the hook file is cursor\'s format, not claude\'s', () => {
+    // cursor wants a flat list of { command } per event. claude's
+    // { matcher, hooks: [...] } shape would be rejected — and a rejected hook
+    // file is exactly the silent failure this whole detection is about.
+    const [datei, ...weitere] = HP.cursor.hookFiles({ ccReport: '/bin/cc-report' })
+    gleich(weitere.length, 0, 'one file')
+    gleich(datei.path, '.cursor/hooks.json', 'in the workspace, where cursor looks')
+    const j = JSON.parse(datei.content)
+    gleich(j.hooks.stop[0].command, '/bin/cc-report _turn_end', 'stop reports the turn end')
+    enthaelt(j.hooks.sessionEnd[0].command, '_exit', 'sessionEnd is the second net')
+    enthaelt(j.hooks.sessionEnd[0].command, 'setsid', 'a dying process must not take the hook with it')
+    falsch(JSON.stringify(j).includes('"matcher"'), 'no claude shape')
+  })
+
+  await pruefe('the hub knows the hook file is its own, not the agent\'s work', () => {
+    // Otherwise every cursor worktree counts as dirty forever and is never
+    // removed — the same trap the worktree extras once fell into.
+    gleich(harnessOwnedPaths('cursor').join(','), '.cursor', 'cursor')
+    gleich(harnessOwnedPaths('claude').length, 0, 'claude brings nothing into the worktree')
+  })
+
+  await pruefe('an existing hooks.json is never overwritten', () => {
+    const wt = join(sandkasten, 'wt-hooks')
+    mkdirSync(wt, { recursive: true })
+    gleich(writeHarnessHooks('cursor', wt).join(','), '.cursor/hooks.json', 'the folder is created along with it')
+    writeFileSync(join(wt, '.cursor', 'hooks.json'), '{"mine":true}')
+    gleich(writeHarnessHooks('cursor', wt).join(','), '', 'a repo\'s own hooks stay untouched')
+    gleich(readFileSync(join(wt, '.cursor', 'hooks.json'), 'utf8'), '{"mine":true}', 'and unchanged')
+  })
+
+  await pruefe('a turn is over when turn_ended is the LAST record', () => {
+    const s = stateFromJsonl([answer('Done, pushed as abc1234.'), TURN_END].join('\n'))
+    gleich(s.turnEnded, 'success', 'ended')
+    gleich(s.lastAnswer, 'Done, pushed as abc1234.', 'the agent\'s closing words become the report')
+  })
+  await pruefe('a follow-up makes the earlier turn end history again', () => {
+    // The operator types into the terminal, or a flow messages the agent: the
+    // run goes on and must not be closed under it.
+    const s = stateFromJsonl([answer('first part'), TURN_END,
+      line({ role: 'user', message: { content: [{ type: 'text', text: 'and now this too' }] } }),
+      answer('second part')].join('\n'))
+    gleich(s.turnEnded, null, 'not ended')
+    gleich(s.lastAnswer, 'second part', 'the newer answer')
+  })
+  await pruefe('a running turn and a broken line are not an end', () => {
+    gleich(stateFromJsonl(answer('still working')).turnEnded, null, 'still working')
+    gleich(stateFromJsonl('').turnEnded, null, 'empty')
+    gleich(stateFromJsonl('{"type":"turn_en').turnEnded, null, 'half a line — the next pass gets it whole')
+    gleich(stateFromJsonl(`${answer('a')}\n{"type":"turn_e`).lastAnswer, 'a', 'the complete lines still count')
+  })
+  await pruefe('tool calls without text do not overwrite the closing words', () => {
+    const toolCall = line({ role: 'assistant', message: { content: [{ type: 'tool_use', name: 'Shell', input: {} }] } })
+    gleich(stateFromJsonl([answer('my report'), toolCall, TURN_END].join('\n')).lastAnswer, 'my report', 'text wins')
+  })
+
+  await pruefe('the transcript directory follows cursor\'s own slug rule', () => {
+    process.env.CCHUB_CURSOR_DIR = '/c'
+    try {
+      gleich(projectDirs('/srv/agents/worktrees/repo/ab12-detached')[0],
+        '/c/projects/srv-agents-worktrees-repo-ab12-detached', 'non-alphanumeric becomes -, ends trimmed')
+      gleich(projectDirs('')[0], undefined, 'no directory, no guess')
+      // Over 92 characters cursor shortens to 84 plus 7 hex of its own sha256.
+      // Both variants are returned so a rename does not blind the hub silently.
+      const long = projectDirs('/srv/' + 'x'.repeat(120))
+      gleich(long.length, 2, 'plain form and shortened form')
+      gleich(long[1].length, 92, 'the shortened one is exactly 92 characters')
+      wahr(/-[0-9a-f]{7}$/.test(long[1]), 'with the hash cursor appends')
+    } finally { delete process.env.CCHUB_CURSOR_DIR }
   })
 
   // ------------------------------------------------------------------
@@ -647,7 +757,6 @@ try {
   gruppe('Extra skills (zusaetze.mjs)')
   const zdir = join(sandkasten, 'zusaetze')
   process.env.CCHUB_ZUSAETZE_DIR = zdir
-  const { mkdirSync } = await import('node:fs')
   mkdirSync(join(zdir, 'unlazy'), { recursive: true })
   writeFileSync(join(zdir, 'unlazy', 'SKILL.md'),
     '---\nname: unlazy\ndescription: Enforces completion discipline for lazy models.\n---\n\n# Unlazy\n')

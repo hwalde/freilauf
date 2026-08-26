@@ -172,6 +172,7 @@ async function hubStarten({ echteAgenten = false } = {}) {
     CCHUB_ZUSAETZE_DIR: join(SB, 'zusaetze'),
     CCHUB_PULS_AUS: '1',          // no provider pulse against real endpoints from the suite
     CCHUB_CURSOR_AUTH: join(SB, 'missing-cursor-auth.json'),   // cursor usage stays silent in the sandbox
+    CCHUB_CURSOR_DIR: join(SB, 'cursor'),      // fake cursor transcripts; the real ~/.cursor is never touched
     // "Fresh installation" tests must not pick up the operator's seed file
     // (~/.config/cc-hub/coding-agents.json) — point at a file that does not exist.
     CCHUB_AGENTS_SEED: join(SB, 'no-seed.json'),
@@ -216,6 +217,7 @@ async function watcherVorbereiten() {
   process.env.CCHUB_ZUSAETZE_DIR = join(SB, 'zusaetze')
   process.env.CCHUB_PULS_AUS = '1'
   process.env.CCHUB_CURSOR_AUTH = join(SB, 'missing-cursor-auth.json')
+  process.env.CCHUB_CURSOR_DIR = join(SB, 'cursor')
   delete process.env.OPENROUTER_API_KEY
   ;({ tick: watcherTick } = await import('../server/watcher.mjs'))
 }
@@ -689,6 +691,87 @@ try {
     gleich(l.status, 'done', 'status')
     enthaelt(l.report_md, 'alles erledigt', 'report stored')
     enthaelt(await (await hol(`/runs/${R1}`)).text(), 'alles erledigt', 'report on the page')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('cursor: a run ends even without cc-report')
+
+  // The hole this closes: cursor's TUI stays standing after the work is done
+  // ('→ Add a follow-up'), so the pane never dies and no process ever exits. A
+  // run whose agent forgot `cc-report done` therefore stood on 'running'
+  // forever — and a single run waiting for "when the repo is free" waited behind
+  // it just as long (observed 2026-08-25 with four runs, one of them the one
+  // meant to fix exactly this).
+  const { projectDirs } = await import('../server/cursor-transcript.mjs')
+  const writeTranscript = (runId, lines) => {
+    const wd = lauf(runId).workdir_effective
+    const dir = join(projectDirs(wd)[0], 'agent-transcripts', `session-${runId.slice(0, 8)}`)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, `session-${runId.slice(0, 8)}.jsonl`), lines.join('\n') + '\n')
+  }
+  const cursorRun = async (prompt) => {
+    const j = await laufStarten({ repo_id: repoId, harness: 'cursor', prompt, expected_minutes: '45' })
+    wahr(!!j.runId, `run created (${JSON.stringify(j).slice(0, 200)})`)
+    await sessionMerken(j.runId)
+    return j.runId
+  }
+  const AGENT_TEXT = 'Done: dark-mode hover fixed, pushed as abc1234.'
+  const TURN_END = ['{"role":"assistant","message":{"content":[{"type":"text","text":"' + AGENT_TEXT + '"}]}}',
+    '{"type":"turn_ended","status":"success"}']
+
+  let RCU = null
+  await pruefe('the hub writes the stop hook into the worktree before the start', async () => {
+    RCU = await cursorRun('E2E-cursor-turn-end')
+    const f = join(lauf(RCU).workdir_effective, '.cursor', 'hooks.json')
+    const j = JSON.parse(readFileSync(f, 'utf8'))
+    enthaelt(j.hooks.stop[0].command, 'cc-report _turn_end', 'stop reports the turn end')
+    enthaelt(j.hooks.sessionEnd[0].command, 'cc-report _exit', 'sessionEnd is the second net')
+  })
+  await pruefe('the prompt tells cursor how the run ends, with a copy-ready command', async () => {
+    const p = readFileSync(join(SB, 'runs', RCU, 'prompt.md'), 'utf8')
+    enthaelt(p, `cc-report done --file ${join(SB, 'runs', RCU, 'report.md')}`, 'exact command, exact path')
+    enthaelt(p, 'cursor-agent', 'the harness gets its own rules')
+    falsch(p.includes('{report_file}'), 'no placeholder left over')
+  })
+  await pruefe('the stop hook closes the run and keeps the agent\'s own words', async () => {
+    writeTranscript(RCU, TURN_END)
+    wahr((await ccReport(RCU, ['_turn_end'])).ok, '_turn_end accepted')
+    const l = lauf(RCU)
+    gleich(l.status, 'done', 'status')
+    enthaelt(l.report_md, AGENT_TEXT, 'the closing message becomes the report')
+    enthaelt(l.report_md, 'without calling', 'and it says why the platform wrote it')
+    wahr(ereignisse(RCU).includes('turn_end_finished'), 'recorded as its own event')
+  })
+  await pruefe('a turn end while waiting for help does NOT close the run', async () => {
+    const id = await cursorRun('E2E-cursor-help')
+    wahr((await ccReport(id, ['help', 'A or B?'])).ok, 'help')
+    gleich(lauf(id).status, 'waiting_help', 'waiting')
+    // Ending the turn is exactly right here: the agent asked and is idle until a
+    // human answers. Closing the run on it would throw the question away.
+    writeTranscript(id, TURN_END)
+    await ccReport(id, ['_turn_end'])
+    await watcherTick()
+    gleich(lauf(id).status, 'waiting_help', 'still waiting')
+  })
+  await pruefe('without a hook the transcript closes the run', async () => {
+    // Second channel: a repository bringing its own .cursor/hooks.json keeps the
+    // hub from writing one, and a cursor release could rename the event. The
+    // transcript cannot go away — it is where cursor keeps the conversation.
+    const id = await cursorRun('E2E-cursor-transcript')
+    await watcherTick()
+    gleich(lauf(id).status, 'running', 'still running while the turn is open')
+    writeTranscript(id, TURN_END)
+    await watcherTick()
+    gleich(lauf(id).status, 'done', 'closed by the watcher')
+    enthaelt(lauf(id).report_md, AGENT_TEXT, 'same report text')
+  })
+  await pruefe('a claude run is not closed by a turn end', async () => {
+    // Every other harness has a dying process as its safety net; there the turn
+    // end stays what it always was — a note.
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-claude-turn-end', expected_minutes: '45' })
+    await sessionMerken(j.runId)
+    wahr((await ccReport(j.runId, ['_turn_end'])).ok, '_turn_end accepted')
+    gleich(lauf(j.runId).status, 'running', 'keeps running')
   })
 
   // ------------------------------------------------------------------

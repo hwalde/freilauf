@@ -23,19 +23,78 @@ const DEFAULT_SUFFIX = [
   '  `cc-report branch <name>` or `cc-report pr <url>`.',
   '- If you need a human decision or discovered a big problem:',
   '  `cc-report help "<question/problem>"` — then WAIT for the answer in this session.',
-  '- At the end ALWAYS: `cc-report done --file <report.md>` (what was done, what is open, what',
-  '  should be reviewed). Without this call the run counts as not finished.',
   '- On failure: `cc-report failed "<reason>"`.',
-  'Do not end the session yourself after the report; the platform cleans up.',
+  '',
+  'HOW THIS RUN ENDS — two commands, and they are not optional:',
+  '  1. Write your report to {report_file} — what was done, what is open,',
+  '     what should be reviewed. That path is outside the repository on purpose:',
+  '     a report file inside the working directory would leave it dirty.',
+  '  2. Run: cc-report done --file {report_file}',
+  '  3. Only then stop. Do not end the session yourself; the platform cleans up.',
+  'Printing a summary is NOT a report — nobody reads your terminal. Only step 2 tells',
+  'the platform the run is finished; without it a human has to close it by hand.',
 ].join('\n')
 
+/**
+ * The prompt block that turns a task into a RUN: where to work, how long it may
+ * take, and above all how to report back. The reporting contract stands at the
+ * end and on its own, because that is the part runs actually fail on — a
+ * forgotten `cc-report done` leaves the run on 'running' forever and blocks
+ * everything queued behind it.
+ *
+ * `settings.prompt_suffix` REPLACES this template (that is what the field under
+ * Settings is for). The harness's own lines are appended afterwards either way:
+ * they describe the machine the agent is running on, not the operator's house
+ * rules, and cursor in particular needs them (harnesses/cursor.mjs).
+ */
 export function platformSuffix(run, branchRule, settings) {
   const tpl = settings.prompt_suffix || DEFAULT_SUFFIX
-  return tpl
+  const rules = getHarness(run.harness)?.promptRules
+  return [tpl, rules].filter(Boolean).join('\n\n')
     .replaceAll('{run_id}', run.id)
     .replaceAll('{workdir}', run.workdir_effective)
+    .replaceAll('{report_file}', join(RUNS_DIR, run.id, 'report.md'))
     .replaceAll('{branch_rule}', branchRule)
     .replaceAll('{expected_minutes}', String(run.expected_minutes))
+}
+
+/** Path of cc-report as the hub knows it — hook commands must not depend on PATH. */
+export function ccReportPath() {
+  return process.env.CCHUB_CC_REPORT ?? `${homedir()}/.local/bin/cc-report`
+}
+
+/**
+ * Hook files a harness needs inside its workspace (cursor: `.cursor/hooks.json`,
+ * the only way it reports the end of a turn). Written before the start and never
+ * over an existing file: a repository may bring its own hooks, and overwriting
+ * them would be the hub silently disabling somebody else's tooling. The run then
+ * loses the hook channel but not the end detection — the cursor transcript
+ * (server/cursor-transcript.mjs) reports it too.
+ *
+ * Returns the paths actually written, relative to the workdir.
+ */
+export function writeHarnessHooks(harness, workdir) {
+  const files = getHarness(harness)?.hookFiles?.({ ccReport: ccReportPath() }) ?? []
+  const written = []
+  for (const f of files) {
+    const target = join(workdir, f.path)
+    if (existsSync(target)) continue
+    mkdirSync(join(target, '..'), { recursive: true })
+    writeFileSync(target, f.content, { mode: 0o600 })
+    written.push(f.path)
+  }
+  return written
+}
+
+/**
+ * Top-level entries the hub itself put into a worktree. The cleanup has to know
+ * them: `.cursor/hooks.json` is ours, not the agent's work, and counting it as
+ * "uncommitted changes" would keep the worktree from ever being removed (the
+ * same trap the worktree extras once fell into).
+ */
+export function harnessOwnedPaths(harness) {
+  return (getHarness(harness)?.hookFiles?.({ ccReport: 'x' }) ?? [])
+    .map(d => String(d.path).split('/')[0])
 }
 
 /**
@@ -219,6 +278,16 @@ export async function launchRun(runId) {
     platformSuffix({ ...run, id: runId, workdir_effective: workdir }, branchRule, settings).trim()]
     .filter(Boolean).join('\n\n')
   writeFileSync(join(runDir, 'prompt.md'), fullPrompt, { mode: 0o600 })
+
+  // Hook files into the workspace (cursor: the 'stop' hook that reports the end
+  // of a turn). Fail-soft: a run without hooks still works, it just falls back
+  // to the transcript for its end detection.
+  try {
+    const hooks = writeHarnessHooks(run.harness, workdir)
+    if (hooks.length) addEvent(runId, 'hooks_installed', { files: hooks })
+  } catch (err) {
+    addEvent(runId, 'warn', { hooks: err.message })
+  }
 
   const q = claudeQuota()
   const credits = await openrouterCredits()

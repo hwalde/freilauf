@@ -15,5 +15,10 @@ opencode.json
 # Local Claude Code state (never commit)
 .claude/settings.local.json
 
+# Written by the hub into every cursor worktree (the 'stop' hook that reports
+# the end of a turn) — ours, not the agent's work. Only this one file: a repo's
+# own .cursor/rules are perfectly checkinable.
+.cursor/hooks.json
+
 # Unlazy work-tree tracking artifacts (machine-specific)
 .unlazy/

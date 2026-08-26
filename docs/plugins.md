@@ -43,6 +43,9 @@ server/usage.mjs           aggregates plugin usage() for the UI
 | `pulseId(run)` | fn → string\|null | which pulse target to check while this run is active; `null` = explicitly not monitored |
 | `pulseTargets` | object | extra pulse targets `{id: {url, okStatus[]}}` beyond the provider plugins (claude contributes `anthropic`) |
 | `logPatterns` | `[{typ, re}]` | narrow regexes for the pipe-pane log scan; `typ` ∈ `TYPEN` from `detect.mjs` |
+| `turnEndsRun` | boolean (optional) | `true` = the end of a turn ends the RUN, not just a note (`_turn_end` → `finishByTurnEnd()` in `reports.mjs`). Set it when the CLI keeps running after the work is done, so neither `_pane_died` nor `_exit` will ever come — cursor's TUI does exactly that |
+| `hookFiles({ccReport})` | fn (optional) | files the hub writes into the workspace before the start: `[{path, content}]`, `path` relative to the worktree. `ccReport` is the absolute path of `cc-report` — hook commands must not depend on `PATH`. An existing file is never overwritten, and `harnessOwnedPaths()` keeps these paths out of the worktree cleanup's dirty check |
+| `promptRules` | string (optional) | extra prompt lines for this harness, appended to the platform rules by `platformSuffix()` — also to a custom template from the settings, because they describe the machine, not the operator's house rules |
 | `fetchModels()` | async fn | model list for subscription harnesses (cached by `models.mjs`) |
 | `effortLevels()` | async fn (optional) | levels the CLI itself accepts (probed; cached 24 h) |
 | `effortOptions({provider, model, helpers})` | async fn | levels for a concrete combination; returns `{stufen, standard?, pflicht?, quelle?, hinweisKey}` — `stufen: null` hides the form field. `helpers` = `{ownLevels, registryEffort, openrouterEffort}` |
@@ -61,7 +64,12 @@ server/usage.mjs           aggregates plugin usage() for the UI
 4. If the harness reports API errors through a hook of its own, wire it to
    `cc-report _api_error` (see the opencode plugin installed by
    `setup/02-install-scripts.sh`).
-5. Done: the database CHECK, the settings page, install detection, forms,
+5. Ask how a run of this harness **ends**. If the process exits when the work is
+   done, `_pane_died`/`_exit` already cover it. If the CLI stays up instead
+   (cursor), the harness needs `turnEndsRun` plus a channel that reports the turn
+   end — a `hookFiles` entry, and ideally a second, hook-free source; see
+   "cursor: when a run is over" in [AGENTS.md](../AGENTS.md).
+6. Done: the database CHECK, the settings page, install detection, forms,
    detection patterns and the pulse follow the registry automatically. Configure
    the new coding agent under Settings → Coding agents.
 
