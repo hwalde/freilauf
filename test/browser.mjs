@@ -235,6 +235,89 @@ try {
     await p.close()
   })
 
+  // ------------------------------------------------------------------
+  // The sidebar is the one panel that is on every page, so the one panel that
+  // has to be foldable — and the fold has to survive the page, otherwise one
+  // closes it again on every navigation. The class sits on the SHELL and not on
+  // the sidebar itself, because the live channel replaces #status-sidebar whole
+  // and would carry a class on it away with the swap.
+  gruppe('The status sidebar folds away, and stays folded')
+
+  await pruefe('the toggle folds the readings away and remembers it across pages', async () => {
+    const p = await neueSeite(`/?repo=${repoId}`)
+    wahr(await p.isVisible('#side-body'), 'open to begin with')
+    gleich(await p.$eval('#side-toggle', b => b.getAttribute('aria-expanded')), 'true', 'and says so to a screen reader')
+    await p.click('#side-toggle')
+    falsch(await p.isVisible('#side-body'), 'folded away')
+    gleich(await p.$eval('#side-toggle', b => b.getAttribute('aria-expanded')), 'false', 'and says that too')
+    gleich(await p.evaluate(() => localStorage.getItem('cchub.sidebar.open')), '0', 'the choice is written down')
+    // Another page, same choice — that is the whole point of writing it down.
+    await p.goto(sk.basis + '/agents', { waitUntil: 'load' })
+    falsch(await p.isVisible('#side-body'), 'still folded on the next page')
+    wahr(await p.isVisible('#side-toggle'), 'but the way back is still reachable')
+    await p.click('#side-toggle')
+    wahr(await p.isVisible('#side-body'), 'and opens again')
+    gleich(await p.evaluate(() => localStorage.getItem('cchub.sidebar.open')), '1', 'which is written down as well')
+    sauber(p)
+    await p.close()
+  })
+  await pruefe('a live update does not pop the folded sidebar back open', async () => {
+    const p = await neueSeite(`/?repo=${repoId}`)
+    await p.click('#side-toggle')
+    falsch(await p.isVisible('#side-body'), 'folded')
+    // Mark the element that is standing there now — the live channel replaces
+    // the whole aside, so the mark disappearing IS the proof of the swap.
+    await p.evaluate(() => { document.getElementById('status-sidebar').dataset.vorher = '1' })
+    // A real run event, from outside the browser, exactly like the watcher's.
+    await laufStarten({ repo_id: repoId, prompt: 'a run while the sidebar is folded' })
+    await wartePage(p, () => !document.getElementById('status-sidebar')?.dataset.vorher,
+      null, 'the live channel to swap the sidebar')
+    // The server knows nothing about the fold, so without hub.js re-applying it
+    // after the swap the sidebar would stand open again.
+    falsch(await p.isVisible('#side-body'), 'still folded after the swap')
+    gleich(await p.$eval('#side-toggle', b => b.getAttribute('aria-expanded')), 'false', 'and still says so')
+    sauber(p)
+    await p.close()
+  })
+
+  // ------------------------------------------------------------------
+  // `label { display: block }` plus a field inline after the caption means every
+  // row of a form starts at a different x, depending on how long the caption is.
+  gruppe('Forms: captions in one column, tall fields with the caption above')
+
+  await pruefe('every caption starts at the same x and its field at the same x', async () => {
+    const p = await neueSeite(`/runs/new?repo=${repoId}`)
+    const kanten = await p.$$eval('form[action="/runs/new"] > label:not(.chk)', (labels) => labels
+      .filter(l => !l.hidden && !l.querySelector('textarea'))
+      .map(l => {
+        const feld = l.querySelector('input, select')
+        return feld ? { links: Math.round(l.getBoundingClientRect().left), feld: Math.round(feld.getBoundingClientRect().left) } : null
+      })
+      .filter(Boolean))
+    wahr(kanten.length >= 3, `at least three captioned fields (${kanten.length})`)
+    gleich(new Set(kanten.map(k => k.links)).size, 1, 'all captions start at one x')
+    gleich(new Set(kanten.map(k => k.feld)).size, 1, 'and all fields start at one x')
+    wahr(kanten[0].feld > kanten[0].links, 'the field really stands beside its caption, not under it')
+    sauber(p)
+    await p.close()
+  })
+  await pruefe('the prompt caption stands ABOVE its box, not beside its bottom edge', async () => {
+    const p = await neueSeite(`/runs/new?repo=${repoId}`)
+    const masse = await p.$eval('form[action="/runs/new"] label:has(textarea)', (l) => {
+      const ta = l.querySelector('textarea')
+      const lr = l.getBoundingClientRect(), tr = ta.getBoundingClientRect()
+      // The caption is the label's own text, so its box starts where the label
+      // does and the textarea has to begin BELOW that line.
+      return { labelOben: Math.round(lr.top), feldOben: Math.round(tr.top), feldLinks: Math.round(tr.left),
+        labelLinks: Math.round(lr.left), hoehe: Math.round(tr.height) }
+    })
+    wahr(masse.hoehe > 100, `the box really is tall (${masse.hoehe}px) — that is what makes this matter`)
+    wahr(masse.feldOben > masse.labelOben, 'the box starts below the caption')
+    gleich(masse.feldLinks, masse.labelLinks, 'and uses the full width instead of standing in the second column')
+    sauber(p)
+    await p.close()
+  })
+
   // ------------------------------------------------------------------ A3
   gruppe('A3 — the schedule shows only the kind that was chosen')
 
@@ -392,7 +475,7 @@ try {
     const p = await neueSeite(`/?repo=${repoId}`)
     const stift = `tr[onclick*="${R_ALT}"] [data-title-edit]`
     gleich(await p.$eval(stift, b => getComputedStyle(b).opacity), '0', 'invisible at rest')
-    await p.hover(`tr[onclick*="${R_ALT}"] .titelzelle`)
+    await p.hover(`tr[onclick*="${R_ALT}"] .title-cell`)
     await wartePage(p, (sel) => getComputedStyle(document.querySelector(sel)).opacity === '1',
       stift, 'the pencil to appear on hover')
     await p.mouse.move(0, 0)
@@ -411,15 +494,15 @@ try {
     p.on('request', (r) => { if (r.method() === 'POST' && r.url().includes('/title')) anfragen.push(r.url()) })
     const zeile = `tr[onclick*="${R_ALT}"]`
     await p.click(`${zeile} [data-title-edit]`)
-    await p.waitForSelector(`${zeile} input.titel-input`)
-    gleich(await p.$eval(`${zeile} input.titel-input`, i => i.maxLength), 80, 'the input is capped at 80')
-    await p.fill(`${zeile} input.titel-input`, 'Von Hand benannt')
+    await p.waitForSelector(`${zeile} input.title-input`)
+    gleich(await p.$eval(`${zeile} input.title-input`, i => i.maxLength), 80, 'the input is capped at 80')
+    await p.fill(`${zeile} input.title-input`, 'Von Hand benannt')
     await p.keyboard.press('Enter')
     await wartePage(p, (sel) => document.querySelector(sel)?.textContent.trim() === 'Von Hand benannt',
       `${zeile} [data-title-text]`, 'the new title to stand in the row')
     gleich(anfragen.length, 1, 'one POST /api/runs/<id>/title, no double send')
     gleich(laufRow(R_ALT).title, 'Von Hand benannt', 'and it is what the database holds')
-    gleich(await p.$$eval(`${zeile} input.titel-input`, els => els.length), 0, 'the input made way for the link again')
+    gleich(await p.$$eval(`${zeile} input.title-input`, els => els.length), 0, 'the input made way for the link again')
     sauber(p)
     await p.close()
   })
@@ -430,10 +513,10 @@ try {
     p.on('request', (r) => { if (r.method() === 'POST' && r.url().includes('/title')) anfragen.push(r.url()) })
     const zeile = `tr[onclick*="${R_ALT}"]`
     await p.click(`${zeile} [data-title-edit]`)
-    await p.fill(`${zeile} input.titel-input`, 'Weggeworfen')
+    await p.fill(`${zeile} input.title-input`, 'Weggeworfen')
     await p.keyboard.press('Escape')
     await wartePage(p, (sel) => document.querySelectorAll(sel).length === 0,
-      `${zeile} input.titel-input`, 'the input to close')
+      `${zeile} input.title-input`, 'the input to close')
     gleich((await p.textContent(`${zeile} [data-title-text]`)).trim(), 'Von Hand benannt', 'the old title stayed')
     gleich(anfragen.length, 0, 'and nothing was sent')
     gleich(laufRow(R_ALT).title, 'Von Hand benannt', 'the database is untouched')
@@ -444,7 +527,7 @@ try {
   await pruefe('on the detail page the browser tab is renamed along with the run', async () => {
     const p = await neueSeite(`/runs/${R_ALT}`)
     await p.click('h2 [data-title-edit]')
-    await p.fill('h2 input.titel-input', 'Auf der Detailseite benannt')
+    await p.fill('h2 input.title-input', 'Auf der Detailseite benannt')
     await p.keyboard.press('Enter')
     await wartePage(p, () => document.title === 'cc-hub — Auf der Detailseite benannt',
       null, 'document.title to follow')
@@ -732,13 +815,13 @@ try {
     const p = await neueSeite(`/?repo=${repoId}`)
     await p.hover(`#run-${R_TICK}`)
     await p.click(`#run-${R_TICK} [data-title-edit]`)
-    await p.fill(`#run-${R_TICK} .titel-inline input`, 'half typed')
+    await p.fill(`#run-${R_TICK} .title-inline input`, 'half typed')
     await formular(`/api/runs/${R_TICK}/title`, { title: 'pushed from outside' })
     await new Promise(r => setTimeout(r, 900))   // long enough for the swap to have happened
     // Check the input still EXISTS before asking for its value: if the row was
     // swapped, the element is gone and inputValue() would sit in a 30 s timeout
     // instead of saying what went wrong.
-    const feld = await p.$(`#run-${R_TICK} .titel-inline input`)
+    const feld = await p.$(`#run-${R_TICK} .title-inline input`)
     wahr(feld !== null, 'the open input was not swapped away underneath the cursor')
     gleich(feld ? await feld.inputValue() : '(row was replaced)', 'half typed', 'the typing survived')
     await p.keyboard.press('Escape')
@@ -773,6 +856,11 @@ try {
       r()
     }))
     await p.reload({ waitUntil: 'load' })
+    // Wait for the channel to be UP before changing anything. A fresh load
+    // carries no Last-Event-ID, so an event fired before the connection exists
+    // is missed — which made this test a race the moment the page grew a
+    // sidebar and took longer to settle.
+    await wartePage(p, () => document.body.dataset.live === '1', null, 'the live channel to be connected')
     await formular(`/api/runs/${R_ALT}/title`, { title: 'After a reconnect' })
     await wartePage(p, (id) => document.querySelector(`#run-${id} [data-title-text]`)?.textContent === 'After a reconnect',
       R_ALT, 'the row to update after the page came back')

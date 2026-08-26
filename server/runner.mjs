@@ -186,7 +186,7 @@ async function makeWorktree(repo, run, branchName) {
       r = await sh('git', ['-C', repo.path, 'worktree', 'add', '-b', branchName, target, start])
     }
   }
-  if (!r.ok) throw new Error(`git worktree failed: ${r.stderr.trim()}`)
+  if (!r.ok) throw new Error(t('run.worktree_failed', { err: r.stderr.trim() }))
   // Worktree extras (planning 4.0): copy or link.
   for (const extra of repo.extras ?? []) {
     const src = resolve(repo.path, extra.path)

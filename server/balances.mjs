@@ -15,7 +15,10 @@ import { enabledCodingAgents } from './coding-agents.mjs'
 import { providerCtx } from './models.mjs'
 
 const CACHE_MS = 2 * 60_000
-let cache = { at: 0, value: null }
+let cache = { at: 0, key: '', value: null }
+// { key, promise } — see usage.mjs for both traps this shape avoids: a body
+// without an `await` clearing the flag before it is set, and an in-flight
+// request being shared with a caller that is asking about a different world.
 let inflight = null
 
 /**
@@ -40,9 +43,13 @@ export function relevantProviderIds() {
  * hiding it. (The same distinction usage.mjs draws for subscription plugins.)
  */
 export async function providerBalances({ force = false } = {}) {
-  if (!force && cache.value && Date.now() - cache.at < CACHE_MS) return cache.value
-  if (inflight) return inflight
-  inflight = (async () => {
+  // Keyed on the relevant providers for the same reason usage.mjs is keyed on
+  // the enabled coding agents: the selection decides who is asked, so changing
+  // it does not make the answer old, it makes it about something else.
+  const key = relevantProviderIds().join(',')
+  if (!force && cache.value && cache.key === key && Date.now() - cache.at < CACHE_MS) return cache.value
+  if (inflight && inflight.key === key) return inflight.promise
+  const task = (async () => {
     const ctx = providerCtx()
     const out = []
     for (const id of relevantProviderIds()) {
@@ -55,11 +62,13 @@ export async function providerBalances({ force = false } = {}) {
         ? { provider: id, label: plugin.label, ok: true, data }
         : { provider: id, label: plugin.label, ok: false })
     }
-    cache = { at: Date.now(), value: out }
-    inflight = null
+    cache = { at: Date.now(), key, value: out }
     return out
   })()
-  return inflight
+  inflight = { key, promise: task }
+  const release = () => { if (inflight?.promise === task) inflight = null }
+  task.then(release, release)
+  return task
 }
 
 /**
@@ -73,4 +82,4 @@ export function remainingIn(balance, currency = 'USD') {
 }
 
 /** Test hook: drop the cache. */
-export function _balanceCacheReset() { cache = { at: 0, value: null }; inflight = null }
+export function _balanceCacheReset() { cache = { at: 0, key: '', value: null }; inflight = null }

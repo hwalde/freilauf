@@ -128,12 +128,12 @@ export function flowSection(run) {
                            WHERE trigger_run_id = ? ORDER BY started_at`).all(run.id)
   if (!attached.length && !runs.length) return ''
   const names = new Map(listFlows().map(f => [f.id, f.name]))
-  const DOT = { running: 'gelb', waiting: 'gelb', done: 'gruen', failed: 'rot', stopped: 'rot' }
+  const DOT = { running: 'yellow', waiting: 'yellow', done: 'green', failed: 'red', stopped: 'red' }
   return `<h3>${e(t('flows.attach.legend'))}</h3>
   ${attached.length ? `<ul>${attached.map(a => `<li><a href="/flows/edit?id=${a.flowId}">${e(names.get(a.flowId) ?? `#${a.flowId}`)}</a>
     <span class="dim">— ${e(t(`flows.when.${a.when}`))}</span></li>`).join('')}</ul>`
     : `<p class="dim">${e(t('flows.attach.run_none'))}</p>`}
-  ${runs.length ? `<ul>${runs.map(fr => `<li><a href="/flows/runs/${fr.id}"><span class="dot ${DOT[fr.status] ?? 'gelb'}"></span>
+  ${runs.length ? `<ul>${runs.map(fr => `<li><a href="/flows/runs/${fr.id}"><span class="dot ${DOT[fr.status] ?? 'yellow'}"></span>
     ${e(fr.flow_name)}</a> <span class="dim">${e(fr.started_at)}</span></li>`).join('')}</ul>` : ''}`
 }
 

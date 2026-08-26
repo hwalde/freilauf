@@ -262,6 +262,157 @@ internal dashboard endpoint is the only source; it has no contract. When it
 stays silent the configurable `cursor_included_usd` setting (default 20) steps
 in as a fallback and the UI marks the value as estimated.
 
+### Provider balances
+
+The sibling of the above, and the reason it exists: `openrouterCredits()` used
+to sit in `quota.mjs` with one vendor's URL, auth header and response shape
+hard-coded into it — exactly the provider-specific knowledge `docs/plugins.md`
+says belongs in a plugin. It is a **`balance()` contract** on the provider
+plugin now, aggregated by `server/balances.mjs`.
+
+The shape is **normalized rather than passed through**, because the two
+providers that implement it disagree on almost everything: OpenRouter keeps one
+pot, reports it as numbers and says nothing about whether calls still go
+through; DeepSeek reports **strings**, **one entry per currency** (an account
+can hold CNY and USD at once) and adds `is_available`, which nobody else has.
+Folding those into a single number would silently drop one of the two pots. The
+full contract and its four rules are in `docs/plugins.md`.
+
+Two consequences worth knowing. The panel printed `{eur} €` for a dollar figure
+until the currency became part of the answer; the setting behind the gate is
+still called `openrouter_min_eur`, because renaming a stored key would need a
+migration for nothing. And **the budget gate does NOT go through the
+aggregator** — `balances.mjs` reaches the database via `coding-agents.mjs`, and
+`db.mjs` imports the harness registry, which imports `quota.mjs`. The gate needs
+one number from one plugin, so it asks that plugin directly.
+
+**Both caches are keyed on the configuration, not only on time**
+(`usage.mjs`, `balances.mjs`): the set of enabled coding agents decides who is
+asked at all, so changing it does not make the answer old, it makes it about
+something else. And the in-flight flag is released by the promise, never at the
+end of the body — with nothing configured the loop has no `await`, so the body
+ran to completion (flag reset included) *before* the assignment that set the
+flag, and every later call got that one stale promise for the life of the
+process. Both only became visible when the status sidebar started asking on
+every page, the first of which happens before anything is configured.
+
+## The live channel: a run announces itself
+
+The hub rendered a whole page and then never spoke again. A title generated
+after the fact only appeared on the next reload, a run that ended left the
+overview showing work that was over, and killing a run needed
+`location.reload()` to make the page agree with reality.
+
+**`server/events.mjs`** is the channel that fixes that: an event bus and one SSE
+endpoint, `GET /api/events[?repo=<id>]`. It can be this small because HTTP,
+scheduler and watcher share **one process** (`hub.mjs`) — whoever changes a run
+is in the same memory as whoever holds the browser connection, so a publish is a
+function call. No broker, no second port. It imports nothing at all, which is
+what lets `db.mjs` import *it* without a cycle.
+
+### It hangs on `addEvent()`, and that was measured
+
+There are **39 `UPDATE runs SET` sites in 10 files**. Publishing from each of
+them is the drift `run-def.mjs` exists to prevent, so the channel hangs on the
+one place a run's transitions already pass through — `addEvent()` in `db.mjs`.
+
+That this holds was **measured, not assumed**: of the 18 places that write
+`status=`, 13 already added an event. The five that did not — ending a run by
+hand, answering a help call, retrying, and the two flow equivalents — were a gap
+in the run's own event list, not just in the channel. "Why did this run stop?"
+had no answer on its own detail page. They write one now (`message_sent`,
+`help_answered`, `aborted {by}`, `retry`).
+
+Three changes are visible without writing an event — the generated title,
+archiving and unarchiving — and those call `announceRun()` explicitly.
+
+### The event carries a signal, never markup
+
+The browser answers an event by **fetching a fragment** (`/api/fragments/…`),
+which the server renders through the same function the full page uses. So a row
+keeps exactly ONE renderer, and translations, traffic-light rules and
+conditional cells cannot drift between the page and its updates. The event's
+`status` field is a **hint**, not the truth: some call sites run `addEvent`
+before the `UPDATE` and some after, which is harmless precisely because nobody
+renders from it.
+
+**Deliberately no htmx**, and it was tried on paper first. Every swap here is a
+special case — an element that may not exist yet, a row that must not be
+replaced while it is being renamed, a terminal that must never be touched — and
+the inline `onclick` attributes plus the capture-phase rename listener would
+have to be reconciled with a library's own handlers. It came to 40 lines of
+vanilla instead of a 51 KB dependency.
+
+Three rules the client keeps, each with a test:
+
+- **A row being renamed is skipped.** The half-typed title lives only in the
+  DOM; swapping the row throws it away mid-word.
+- **A run the page does not show yet re-renders the tbody**, not the row. The
+  empty state and the sort order both live there, so a new row cannot be
+  appended. The same is true for anything whose *presence* depends on state (the
+  scheduled banner, the usage panel): from absent to present is a parent swap.
+- **`#term` is never part of a fragment.** Replacing it tears the xterm instance
+  off the DOM, leaves the WebSocket open and leaks a tmux client — and every
+  attached client rewraps the running agent's window, because tmux runs with
+  `window-size=latest`.
+
+**And `location.reload()` after killing a run STAYS.** It looks like a leftover
+and is the opposite: it is what closes the terminal's WebSocket, and with it
+that tmux client. The send and kill forms also sit outside the fragment and have
+to disappear. The reason is in the code, so it does not get modernized away.
+
+## The status sidebar: one place that says how the machine is doing
+
+`statusSidebar()` in `pages.mjs`, right of the content, on **every** page,
+`id="status-sidebar"`. In it, in this order: pipeline state (`headerStatus()`,
+`id="header-status"`), work in flight per status for the current repo (each
+count links to `/?repo=…&status=…`, the overview's one filter), open incidents
+split the way `incidents.mjs` splits them, subscription usage and provider
+balances (`usagePanel()`, `id="usage-panel"`).
+
+Before this, status stood in three places and fully on exactly one page: two
+quota bars in the header, the pipeline switch as running text beside them, and
+the usage panel on the overview. The two bars were `bar()` in `layout()` and
+`pctBar()` in `usagePanel()` — the same reading, two markups, the thresholds
+spelled out twice. There is one `quotaBar()` now, and every bar in the
+application comes out of it.
+
+- **`layout()` is `async`** because the panel is: every call site awaits it.
+- The header kept **context** (repo switcher) and one **action** (Quick Run) and
+  gave up status. It is a line high and has to stay that way.
+- **The fold lives on the shell**, not on the sidebar: `#shell.side-closed`,
+  written from `localStorage['cchub.sidebar.open']` in try/catch. The live
+  channel replaces `#status-sidebar` **whole** — blocks appear and disappear
+  (no open incidents, no incident block), and an element that is not in the DOM
+  cannot be swapped in by its own id — so a class on the sidebar itself would
+  go with every update. `sidebarSync()` re-applies it after each swap.
+- The sidebar carries **its own repo** (`data-repo` on the aside). `<body
+  data-repo>` is the SSE filter and is only set where a page really has a repo
+  context; the sidebar reads one on every page, so it has to say which.
+- Fragment route: `GET /api/fragments/sidebar?repo=`, rendered by the same
+  function the page uses. `/api/fragments/header-status` and `…/usage` still
+  exist; the client simply asks for the whole aside instead.
+- Under ~1000 px it drops **below** the content. A table narrowed by the
+  sidebar is the one thing it must never cause.
+
+### The overview: seven columns, and forms on a grid
+
+Eleven columns became seven without losing a fact: traffic light + status word
++ last anomaly are **one** statement (`td.status-cell`), and harness/model and
+branch/PR are one technical pair each (`td.two-line`). `OVERVIEW_COLS` is what
+the empty state spans. The incident cell is a badge with its action on hover —
+the rule the pencil and the archive button already followed, keyboard included
+(`:focus-within`, because focus lands *inside* the form). A run's `status` goes
+through `t()` (`status.*`), an anomaly kind through `anomaly.*`, a harness
+through its plugin label. A table that does not fit scrolls inside
+`.table-wrap`; it does not get to decide how wide the page is.
+
+Forms are a two-column grid (`form.form-grid`): captions in one column, fields
+in the other, hints in the field's column, and a tall field gets its caption
+above it. **Every selector there carries `:not([hidden])`** — `label[hidden] {
+display: none }` is the weaker selector of the two, and without the guard the
+grid would bring switched-off schedule fields back, visible *and* submitted.
+
 ## Tests
 
 ```bash

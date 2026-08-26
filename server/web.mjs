@@ -22,7 +22,7 @@ import {
   telegramSetup, telegramTokenSave, telegramChatSave, telegramChats,
   pageCodingAgents, codingAgentSave, codingAgentDelete,
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
-  headerStatus, usagePanel, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
+  headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
 } from './pages.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
 import { redirect, body as readBody, parseForm } from './web-helpers.mjs'
@@ -82,7 +82,7 @@ export async function route(req, res) {
   catch (e) {
     console.error('[http]', e)
     if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain' })
-    res.end('internal error: ' + e.message)
+    res.end(t('web.internal_error', { msg: e.message }))
   }
 }
 
@@ -200,7 +200,7 @@ async function api(req, res, url) {
     const r = await modelList(provider, url.searchParams.get('harness'))
     return json(res, 200, r.liste
       ? { ok: true, provider, models: r.liste, veraltet: r.veraltet, stand: standVon(provider) }
-      : { ok: false, error: r.fehler ?? 'list unreachable' })
+      : { ok: false, error: r.fehler ?? t('api.model_list_unreachable') })
   }
   // Which effort levels this combination REALLY accepts. Always answers 200:
   // without an answer the form simply hides the field.
@@ -216,7 +216,7 @@ async function api(req, res, url) {
     const r = await orEndpoints(url.searchParams.get('model') ?? '')
     return json(res, 200, r.liste
       ? { ok: true, endpoints: r.liste, veraltet: r.veraltet }
-      : { ok: false, error: r.fehler ?? 'serving providers unreachable' })
+      : { ok: false, error: r.fehler ?? t('api.endpoints_unreachable') })
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/report$/))) {
     let b = {}
@@ -262,7 +262,7 @@ async function api(req, res, url) {
     if (problems.length) return json(res, 400, { ok: false, error: problems.join(' · ') })
     rememberRunChoice(def)
     const r = await startRun(def, { repoId: +b.repo_id, ...start })
-    if (!r.ok) return json(res, 500, { ok: false, error: r.error ?? 'start failed' })
+    if (!r.ok) return json(res, 500, { ok: false, error: r.error ?? t('run.start_failed') })
     const run = getRun(r.runId)
     return json(res, 200, {
       ok: true, runId: r.runId, deferred: !!r.deferred, scheduled: !!r.scheduled,
@@ -274,7 +274,7 @@ async function api(req, res, url) {
   // by it again. An empty title falls back to the agent's name.
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/title$/))) {
     const run = getRun(m[1])
-    if (!run) return answer(req, res, 404, { ok: false, error: 'unknown run' }, `/runs/${m[1]}`)
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
     const b = await form(req)
     const gewuenscht = String(b.title ?? '').trim().slice(0, TITLE_MAX)
     db.prepare('UPDATE runs SET title=? WHERE id=?').run(gewuenscht || null, run.id)
@@ -293,9 +293,9 @@ async function api(req, res, url) {
   // the page it came from ('back'), while a fetch gets JSON.
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/archive$/))) {
     const run = getRun(m[1])
-    if (!run) return answer(req, res, 404, { ok: false, error: 'unknown run' }, `/runs/${m[1]}`)
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
     if (['running', 'waiting_help', 'scheduled', 'deferred'].includes(run.status)) {
-      return answer(req, res, 400, { ok: false, error: 'only finished runs can be archived' }, `/runs/${run.id}`)
+      return answer(req, res, 400, { ok: false, error: t('api.archive_only_finished') }, `/runs/${run.id}`)
     }
     db.prepare(`UPDATE runs SET archived_at=COALESCE(archived_at, datetime('now')) WHERE id=?`).run(run.id)
     announceRun(run.id, 'archived')
@@ -304,7 +304,7 @@ async function api(req, res, url) {
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/unarchive$/))) {
     const run = getRun(m[1])
-    if (!run) return answer(req, res, 404, { ok: false, error: 'unknown run' }, `/runs/${m[1]}`)
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
     db.prepare(`UPDATE runs SET archived_at=NULL WHERE id=?`).run(run.id)
     announceRun(run.id, 'unarchived')
     const b = await form(req)
@@ -312,7 +312,7 @@ async function api(req, res, url) {
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/send$/))) {
     const run = getRun(m[1])
-    if (!run?.tmux_session) return answer(req, res, 404, { ok: false, error: 'no session' }, `/runs/${m[1]}`)
+    if (!run?.tmux_session) return answer(req, res, 404, { ok: false, error: t('api.no_session') }, `/runs/${m[1]}`)
     const b = await form(req)
     const text = String(b.text || '')
     // Multi-line without accidental submit: bracketed paste + Enter (planning 7.3)
@@ -363,7 +363,7 @@ async function api(req, res, url) {
   if (req.method === 'POST' && path === '/api/sessions/kill') {
     const b = await form(req)
     const names = b.session_list ?? (b.session ? [b.session] : [])
-    if (!names.length) return answer(req, res, 400, { ok: false, error: 'no session given' }, '/sessions')
+    if (!names.length) return answer(req, res, 400, { ok: false, error: t('api.no_session_given') }, '/sessions')
     const { killSessions } = await import('./sessions.mjs')
     const results = await killSessions(names, 'web')
     return answer(req, res, 200, { ok: results.every(r => r.ok), results }, '/sessions')
@@ -372,7 +372,7 @@ async function api(req, res, url) {
   if (req.method === 'POST' && (m = path.match(/^\/api\/incidents\/(\d+)\/resolve$/))) {
     const b = await form(req)
     const v = vorfall(+m[1])
-    if (!v) return answer(req, res, 404, { ok: false, error: 'unknown incident' }, b.back || '/')
+    if (!v) return answer(req, res, 404, { ok: false, error: t('api.unknown_incident') }, b.back || '/')
     vorfallLoesen(v.id, 'web')
     return answer(req, res, 200, { ok: true }, b.back || (v.run_id ? `/runs/${v.run_id}` : '/'))
   }
@@ -421,6 +421,17 @@ async function fragmentApi(req, res, url) {
   // absent from the page in that case too, and 204 says exactly that.
   if (path === '/api/fragments/usage') return fragment(res, await usagePanel())
 
+  // The whole status sidebar. It is the one fragment that is asked for as a
+  // WHOLE rather than piece by piece, and deliberately so: its blocks appear
+  // and disappear (no open incidents means no incident block at all), and an
+  // element that is absent cannot be swapped into place by its own id. The
+  // repo is part of the reading — "work in flight" and "open incidents" are
+  // counted for the repo one is looking at.
+  if (path === '/api/fragments/sidebar') {
+    const repo = url.searchParams.get('repo')
+    return fragment(res, await statusSidebar(repo ? +repo : null))
+  }
+
   // The whole tbody. Needed for the one case a row-level swap cannot serve: a
   // run this page does not show YET. The empty state and the sort order both
   // live in the body, so a new row cannot simply be appended — the parent has
@@ -428,7 +439,11 @@ async function fragmentApi(req, res, url) {
   if (path === '/api/fragments/runs-body') {
     const repo = url.searchParams.get('repo')
     if (!repo) return fragment(res, '')
-    return fragment(res, runsBody(overviewRuns(+repo), { repoId: +repo }))
+    // The status filter travels with the request. Without it the first live
+    // update would replace a filtered list by the unfiltered one — the page
+    // would silently stop showing what the user asked it to show.
+    const status = url.searchParams.get('status')
+    return fragment(res, runsBody(overviewRuns(+repo, status), { repoId: +repo, status }))
   }
 
   // A row of the overview. Archived counts as gone: the overview does not show

@@ -176,7 +176,7 @@
       fetch('/api/runs/quick', { method: 'POST', body: body, headers: { accept: 'application/json' } })
         .then(function (r) { return r.json() })
         .then(function (j) {
-          if (!j.ok) throw new Error(j.error || 'HTTP')
+          if (!j.ok) throw new Error(j.error || T('js.error_generic', 'request failed'))
           qrDialog.close()
           // Only the task is cleared: favorite, repo, branch rule and start time
           // are the setup of the next quick run just as much as of this one.
@@ -210,7 +210,7 @@
     if (!btn) return
     ev.preventDefault()
     ev.stopPropagation()
-    const box = btn.closest('.titel-inline')
+    const box = btn.closest('.title-inline')
     const link = box && box.querySelector('[data-title-text]')
     if (!box || !link || box.querySelector('input')) return
     const runId = box.dataset.run
@@ -218,7 +218,7 @@
 
     const input = document.createElement('input')
     input.type = 'text'
-    input.className = 'titel-input'
+    input.className = 'title-input'
     input.maxLength = 80
     input.value = alt
     input.placeholder = T('js.title_ph', 'Title of this run')
@@ -254,7 +254,7 @@
       })
         .then(r => r.json())
         .then(j => {
-          if (!j.ok) throw new Error(j.error || 'HTTP')
+          if (!j.ok) throw new Error(j.error || T('js.error_generic', 'request failed'))
           schliessen(j.title || neu)
           // The browser tab carries the title on the detail page.
           if (location.pathname === '/runs/' + runId) document.title = 'cc-hub — ' + (j.title || neu)
@@ -426,7 +426,7 @@
         // For cursor the model choice also answers the effort question — the
         // effort field therefore stays off. Without this sentence you search for it.
         const cursorNote = (harnessSel?.value === 'cursor')
-          ? ' · ' + T('js.cursor_note', 'The reasoning effort is part of the ID (…-low/-medium/-high/-xhigh/-max); IDs ending in “-fast” are cursor’s fast mode — the default is the variant without.')
+          ? ' · ' + T('js.cursor_note', "The reasoning effort is part of the ID (…-low/-medium/-high/-xhigh/-max); IDs ending in \"-fast\" are cursor's fast mode — the default is the variant without.")
           : ''
         hinweis.textContent = T('js.models_count', '{n} models', { n: j.models.length }) +
           (j.stand ? ' · ' + T('js.as_of', 'as of {time}', { time: zeitText(j.stand) }) : '') +
@@ -704,6 +704,40 @@
     syncFilter()
   }
 
+  // ---- status sidebar: collapsible, and the state survives the page ----
+  //
+  // The open/closed class sits on the SHELL, not on the sidebar: the live
+  // channel replaces #status-sidebar whole, and a class on the element itself
+  // would be thrown away with it on every update. sidebarSync() is therefore
+  // called again after each swap — it reads the one truth (localStorage) and
+  // writes it to the two places that show it, the shell and the button.
+  //
+  // Every localStorage access in try/catch, like cchub.sessions.showRunning:
+  // in a private window the accessor itself throws, and a status panel is not
+  // worth a page that stops working.
+  var SIDEBAR_KEY = 'cchub.sidebar.open'
+  function sidebarOpen() {
+    try { return localStorage.getItem(SIDEBAR_KEY) !== '0' } catch (err) { return true }
+  }
+  function sidebarSync() {
+    var shell = document.getElementById('shell')
+    if (!shell) return
+    var open = sidebarOpen()
+    shell.classList.toggle('side-closed', !open)
+    var btn = document.getElementById('side-toggle')
+    if (btn) {
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false')
+      btn.textContent = open ? '▸' : '◂'
+    }
+  }
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target.closest && ev.target.closest('#side-toggle')
+    if (!btn) return
+    try { localStorage.setItem(SIDEBAR_KEY, sidebarOpen() ? '0' : '1') } catch (err) { /* private mode */ }
+    sidebarSync()
+  })
+  sidebarSync()
+
   // ---- live channel: a signal from /api/events, the HTML from the server ----
   //
   // The event carries only what changed, never markup. The page answers by
@@ -763,7 +797,7 @@
       // Never swap a row whose title is being edited — the half-typed text is
       // not in the DOM the server knows about, and replacing it throws the
       // typing away mid-word.
-      if (zeile.querySelector('.titel-inline input')) return
+      if (zeile.querySelector('.title-inline input')) return
       const html = await holeFragment('/api/fragments/run-row?id=' + encodeURIComponent(runId)
         + (repo ? '&repo=' + encodeURIComponent(repo) : ''))
       if (html === null) { zeile.remove(); return }
@@ -776,10 +810,17 @@
     // whole body is re-rendered — the one case where a parent has to be swapped
     // (the same reason a banner that was absent cannot appear by itself).
     async function tabelleAktualisieren() {
-      if (!runsBody) return
-      const html = await holeFragment('/api/fragments/runs-body' + (repo ? '?repo=' + encodeURIComponent(repo) : ''))
+      // Re-query: the element is replaced by every swap, so the reference
+      // captured at load time is stale — and with it the status filter it
+      // carries, which has to travel with the request or the filtered list
+      // would silently be replaced by the unfiltered one.
+      const tbody = document.getElementById('runs-body')
+      if (!tbody) return
+      const status = tbody.dataset.status || ''
+      const html = await holeFragment('/api/fragments/runs-body' + (repo ? '?repo=' + encodeURIComponent(repo) : '?')
+        + (status ? '&status=' + encodeURIComponent(status) : ''))
       if (html === null) return
-      if (document.querySelector('#runs-body .titel-inline input')) return
+      if (document.querySelector('#runs-body .title-inline input')) return
       tauscheNachId(html)
     }
 
@@ -791,17 +832,24 @@
       // the running agent's window.
       const html = await holeFragment('/api/fragments/run-detail?id=' + encodeURIComponent(runId))
       if (html === null) return
-      if (document.querySelector('.titel-inline input')) return
+      if (document.querySelector('.title-inline input')) return
       tauscheNachId(html)
     }
 
+    // The status sidebar as ONE request. Its blocks appear and disappear —
+    // no open incidents means no incident block at all, no usage means no
+    // usage panel — and an element that is not in the DOM cannot be swapped
+    // in by its own id. So the whole aside is replaced, which also covers
+    // #header-status and #usage-panel inside it; the two fragment routes for
+    // those stay, they are simply not what the page asks for any more.
     async function statusAktualisieren() {
-      for (const pfad of ['/api/fragments/header-status', '/api/fragments/usage']) {
-        try {
-          const html = await holeFragment(pfad)
-          if (html !== null) tauscheNachId(html)
-        } catch (err) { /* a quiet panel beats a broken page */ }
-      }
+      try {
+        // The sidebar's repo, not the body's: it is set on pages that have no
+        // repo context too (see statusSidebar in pages.mjs).
+        const sRepo = document.getElementById('status-sidebar')?.dataset.repo || repo
+        const html = await holeFragment('/api/fragments/sidebar' + (sRepo ? '?repo=' + encodeURIComponent(sRepo) : ''))
+        if (html !== null) { tauscheNachId(html); sidebarSync() }
+      } catch (err) { /* a quiet panel beats a broken page */ }
     }
 
     const quelle = new EventSource('/api/events' + (repo ? '?repo=' + encodeURIComponent(repo) : ''))
@@ -819,9 +867,15 @@
       // requests, each of which may talk to a provider API.
       bald('status', () => { statusAktualisieren().catch(() => {}) }, 2000)
     })
+    // Whether the channel is actually up is a fact about the page, so the page
+    // says so. It matters for real: a fresh load has no Last-Event-ID, so an
+    // event fired in the gap between rendering and connecting is simply missed
+    // — harmless (the page just rendered current state) but worth being able
+    // to see, and the browser suite waits for it instead of racing it.
+    quelle.onopen = () => { document.body.dataset.live = '1' }
     // EventSource reconnects by itself and sends Last-Event-ID, which the hub
     // answers from its ring buffer. Nothing to do here but not get in the way.
-    quelle.onerror = () => { /* reconnect is the browser's job */ }
+    quelle.onerror = () => { document.body.dataset.live = '0' }
   }())
 
   // ---- terminal: xterm.js + resize frame \0{cols},{rows} (planning 7.4) ----

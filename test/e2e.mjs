@@ -802,7 +802,16 @@ try {
     gleich(v[0].quelle, 'log', 'source')
     enthaelt(v[0].beleg, 'Retrying', 'evidence is the line')
     falsch(ereignisse(RH).some(k => k === 'telegram_sent'), 'no Telegram for yellow')
-    enthaelt(await (await hol(`/?repo=${repoId}`)).text(), 'Rate limit 1×', 'overview shows the incident')
+    // In the overview the incident is a compact badge inside the run's OWN row,
+    // and the action that clears it is still in that cell — it is only hidden
+    // until the row is hovered (the same rule the pencil and the archive button
+    // follow). Checked against the route it posts to, which outlives markup.
+    const zeile = (await (await hol(`/?repo=${repoId}`)).text()).split('<tr ').find(z => z.includes(RH))
+    wahr(!!zeile, 'the run has a row')
+    enthaelt(zeile, 'Rate limit 1×', 'overview shows the incident')
+    enthaelt(zeile, 'incident yellow', 'in the severity it was given')
+    enthaelt(zeile, `/api/incidents/${v[0].id}/resolve`, 'and the action to clear it sits in the same cell')
+    enthaelt(zeile, 'Dismiss', 'named for the group it belongs to — noticed, not to-do')
   })
   await pruefe('the same match counts only once per pass (offset)', async () => {
     await watcherTick(); await watcherTick()
@@ -1074,9 +1083,9 @@ try {
     })
 
     await pruefe('the keep time is set in hours on the settings page', async () => {
-      // Written directly instead of through the form: /settings/save writes ALL
-      // of its keys, and a partial post would blank the rest for every test
-      // after this one.
+      // Written directly instead of through the form: this test is about the
+      // field and the hours conversion, not about the save route (that one has
+      // its own group).
       db.prepare(`INSERT INTO settings(key,value) VALUES('session_keep_hours','0.5')
                   ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run()
       const html = await (await hol('/settings')).text()
@@ -1375,8 +1384,13 @@ try {
     wahr(!!r.start_at, 'point in time noted')
     await watcherTick()
     gleich(lauf(GEPLANT).status, 'scheduled', 'a pass before the moment changes nothing')
+    // The status cell of the overview: the word (translated, from lang/en.json —
+    // the raw 'scheduled' is a database value and no longer reaches the screen)
+    // and, underneath it, WHAT the run is waiting for. That second line is the
+    // whole point of showing a waiting run at the top of the list.
     const zeile = (await (await hol(`/?repo=${repoId}`)).text()).split('<tr').find(z => z.includes(GEPLANT))
-    enthaelt(zeile, 'scheduled', 'the waiting run is visible in the overview')
+    enthaelt(zeile, 'Scheduled', 'the waiting run is visible in the overview')
+    enthaelt(zeile, 'starts at', 'and says what it is waiting for')
     enthaelt(zeile, 'Planned run', 'with its title')
   })
   await pruefe('when the moment has come the watcher starts it', async () => {
@@ -1831,6 +1845,154 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // Status used to stand in three places and fully on exactly ONE page: two
+  // quota bars in the header, the pipeline switch as running text beside them,
+  // and the usage panel on the overview. The question those three answer
+  // together — can I send something off right now, and is anything stuck? —
+  // could therefore only be asked from the overview.
+  gruppe('The status sidebar: one reading, on every page')
+
+  await pruefe('the sidebar stands on every page, and the header kept only context and action', async () => {
+    for (const pfad of ['/', '/agents', '/sessions', '/settings', '/repos', `/archive?repo=${repoId}`, '/flows', '/runs/new']) {
+      const html = await (await hol(pfad)).text()
+      enthaelt(html, 'id="status-sidebar"', `${pfad}: the sidebar`)
+      enthaelt(html, 'id="header-status"', `${pfad}: the pipeline reading, inside it`)
+      enthaelt(html, 'Pipeline', `${pfad}: by its name from lang/en.json`)
+      const kopf = html.slice(html.indexOf('<header'), html.indexOf('</header>'))
+      // The two things that stay: the repo is context, Quick Run is an action.
+      enthaelt(kopf, 'id="repo-switch"', `${pfad}: the repo switcher stayed in the header`)
+      enthaelt(kopf, 'id="qr-open"', `${pfad}: and so did the Quick-Run button`)
+      // The one thing that left: a reading. It is a status, and status is the
+      // sidebar's job now — a bar that has to stay one line high cannot carry it.
+      falsch(kopf.includes('class="quota"'), `${pfad}: no quota bar left in the header`)
+      falsch(kopf.includes('id="header-status"'), `${pfad}: and no pipeline reading either`)
+    }
+  })
+  await pruefe('the sidebar counts the work in flight of THIS repo and links each count into the overview', async () => {
+    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const leiste = html.slice(html.indexOf('id="status-sidebar"'), html.indexOf('</aside>'))
+    wahr(leiste.length > 50, 'the sidebar has content')
+    enthaelt(leiste, 'Work in flight', 'the block by its name from lang/en.json')
+    const zaehl = (s) => db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND status=?`).get(repoId, s).c
+    let gesehen = 0
+    for (const s of ['running', 'waiting_help', 'scheduled', 'deferred']) {
+      const n = zaehl(s)
+      if (!n) {
+        // Zero is not information, it is furniture: the line is absent, not "0".
+        falsch(leiste.includes(`status=${s}"`), `${s}: none of them, so no line`)
+        continue
+      }
+      gesehen++
+      enthaelt(leiste, `/?repo=${repoId}&amp;status=${s}`, `${s}: linked into the overview`)
+      enthaelt(leiste, `<span class="n">${n}</span>`, `${s}: with the count the database holds`)
+    }
+    wahr(gesehen > 0, 'at least one status was in flight at this point of the suite')
+  })
+  await pruefe('a count leads to the overview filtered to exactly that status', async () => {
+    // A planned run: it exists, it has no session, and nothing picks it up for
+    // the next ten hours — so this is deterministic wherever the suite stands.
+    const j = await laufStarten({
+      repo_id: repoId, prompt: 'E2E-Filter', title: 'Filter run',
+      start_mode: 'in', start_in_minutes: '600',
+    })
+    wahr(j.scheduled, `planned (${JSON.stringify(j)})`)
+    const gefiltert = await (await hol(`/?repo=${repoId}&status=scheduled`)).text()
+    const koerper = gefiltert.slice(gefiltert.indexOf('id="runs-body"'), gefiltert.indexOf('</table>'))
+    enthaelt(koerper, j.runId, 'the filtered list holds the planned run')
+    const ids = [...koerper.matchAll(/id="run-([0-9a-f-]{36})"/g)].map(m => m[1])
+    for (const id of ids) gleich(lauf(id).status, 'scheduled', `${id.slice(0, 8)}: really has that status`)
+    const erwartet = db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND status='scheduled'`).get(repoId).c
+    gleich(ids.length, erwartet, 'exactly the runs of that status, no more and no fewer')
+    enthaelt(gefiltert, 'Show all', 'and a way back to the whole list')
+    // The live channel has to ask for the SAME selection, or the first update
+    // would silently replace the filtered list with the unfiltered one.
+    enthaelt(koerper, 'data-status="scheduled"', 'the tbody carries the filter for the live channel')
+    const frag = await hol(`/api/fragments/runs-body?repo=${repoId}&status=scheduled`)
+    gleich(frag.status, 200, 'the fragment answers')
+    gleich([...(await frag.text()).matchAll(/id="run-([0-9a-f-]{36})"/g)].length, erwartet, 'with the same selection')
+    // A status the CHECK constraint does not know is no filter, not an error.
+    const alles = await hol(`/?repo=${repoId}&status=erfunden`)
+    gleich(alles.status, 200, 'an invented status is simply no filter')
+    wahr([...(await alles.text()).matchAll(/id="run-([0-9a-f-]{36})"/g)].length > erwartet, 'and the whole list comes back')
+  })
+  await pruefe('the overview is seven columns wide and its empty state spans all of them', async () => {
+    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const kopf = html.slice(html.indexOf('<thead'), html.indexOf('</thead>'))
+    gleich((kopf.match(/<th>/g) || []).length, 7, 'seven column headers, not eleven')
+    // Eleven columns became seven without losing a single fact: traffic light,
+    // status word and last anomaly are one statement, and so are harness/model
+    // and branch/PR.
+    for (const titel of ['Status', 'Title', 'Coding agent/model', 'Started', 'Duration/expected', 'Branch/PR', 'Incidents']) {
+      enthaelt(kopf, `>${titel}<`, `header ${titel}`)
+    }
+    const zeile = html.split('<tr ').find(z => z.includes(RH))
+    gleich((zeile.match(/<td/g) || []).length, 7, 'and a row has exactly as many cells as the head has columns')
+    // A repo without runs: the sentence has to span the whole table, otherwise
+    // it sits in the first column with six empty cells beside it.
+    const leer = await (await hol('/api/fragments/runs-body?repo=999999')).text()
+    enthaelt(leer, 'colspan="7"', 'the empty state spans all seven')
+    enthaelt(leer, 'no runs yet', 'and says so')
+  })
+  await pruefe('the sidebar fragment renders the same aside the page does', async () => {
+    const r = await hol(`/api/fragments/sidebar?repo=${repoId}`)
+    gleich(r.status, 200, 'status')
+    const frag = await r.text()
+    enthaelt(frag, 'id="status-sidebar"', 'the swap target')
+    enthaelt(frag, 'id="header-status"', 'with the pipeline reading inside it')
+    enthaelt(frag, 'Work in flight', 'and the work counts of the repo it was asked for')
+    // Same renderer as the page — a fragment that builds its own markup is the
+    // mistake server/run-def.mjs was written from.
+    const seite = await (await hol(`/?repo=${repoId}`)).text()
+    gleich(frag.trim(), seite.slice(seite.indexOf('<aside id="status-sidebar"'), seite.indexOf('</aside>') + '</aside>'.length).trim(),
+      'byte for byte what the page carries')
+  })
+
+  // ------------------------------------------------------------------
+  // POST /settings/save writes only the keys the request actually carried. The
+  // old version looped `b[k] ?? ''` over the whole key list, so a body with one
+  // field blanked the other fifteen — switching the language would have wiped
+  // the Telegram token. Three things have to hold at once, and only all three
+  // together describe the rule: an absent key is untouched, a present but empty
+  // one is still cleared (that is how a text field is emptied on purpose), and a
+  // key nobody declared never reaches the settings table.
+  gruppe('POST /settings/save writes only what the request brought')
+
+  {
+    const einstellung = (k) => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value
+    const setzen = (k, v) => db.prepare(`INSERT INTO settings(key,value) VALUES(?,?)
+                                         ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(k, v)
+
+    await pruefe('a post with only ui_language leaves the other keys alone', async () => {
+      setzen('telegram_token', 'geheim:123')
+      setzen('abo_price', '200')
+      try {
+        const r = await formular('/settings/save', { ui_language: 'en' }, { alsBrowser: true })
+        gleich(r.status, 303, 'saved')
+        gleich(einstellung('telegram_token'), 'geheim:123', 'the token survived a post that never mentioned it')
+        gleich(einstellung('abo_price'), '200', 'and so did the subscription price')
+        gleich(einstellung('ui_language'), 'en', 'while the key that was posted did arrive')
+      } finally {
+        setzen('telegram_token', '')
+        setzen('abo_price', '200')
+      }
+    })
+
+    await pruefe('an empty text field still clears its setting', async () => {
+      setzen('prompt_suffix', 'never send this to the agent')
+      const r = await formular('/settings/save', { prompt_suffix: '' }, { alsBrowser: true })
+      gleich(r.status, 303, 'saved')
+      gleich(einstellung('prompt_suffix'), '', 'present-but-empty means delete, not "not mentioned"')
+    })
+
+    await pruefe('a key that is not in SETTINGS_KEYS never reaches the table', async () => {
+      const r = await formular('/settings/save',
+        { ui_language: 'en', erfundener_schluessel: 'ha' }, { alsBrowser: true })
+      gleich(r.status, 303, 'saved')
+      gleich(einstellung('erfundener_schluessel'), undefined, 'the invented key was dropped')
+    })
+  }
+
+  // ------------------------------------------------------------------
   // Nothing in this suite ever rendered a page in another language, so a string
   // hard-wired instead of run through t() stayed invisible as long as the English
   // text happened to match. This group closes that hole — and puts the language
@@ -1839,14 +2001,10 @@ try {
   gruppe('The UI really renders in the chosen language')
 
   await pruefe('switching the UI language changes what the pages say', async () => {
-    // /settings/save writes ALL of its keys from the body, so a post carrying only
-    // the language would blank the rest. The stored settings therefore travel back
-    // with it — that is also exactly what the real form does.
-    const spracheSetzen = (lang) => {
-      const s = Object.fromEntries(db.prepare('SELECT key, value FROM settings').all()
-        .map(r => [r.key, r.value ?? '']))
-      return formular('/settings/save', { ...s, ui_language: lang }, { alsBrowser: true })
-    }
+    // Only the language goes over the wire — the route writes what the request
+    // brought and leaves the rest standing (see the group above).
+    const spracheSetzen = (lang) =>
+      formular('/settings/save', { ui_language: lang }, { alsBrowser: true })
     try {
       gleich((await spracheSetzen('de')).status, 303, 'language saved')
       const html = await (await hol('/repos')).text()
@@ -1854,10 +2012,23 @@ try {
       enthaelt(html, 'Übersicht', 'and the navigation with it (nav.overview)')
       enthaelt(html, 'Worktree-Ergänzungen', 'a column header too (repos.extras)')
       falsch(html.includes('Create repo'), 'the English string is really gone')
+      // The strings that used to sit hard-wired between the tags. English alone
+      // is no proof for them: "min" and "in {x}, out {y}" read exactly like the
+      // literals they replaced, so only a second language shows that they go
+      // through t() at all.
+      const uebersicht = await (await hol(`/?repo=${repoId}`)).text()
+      enthaelt(uebersicht, ' Min.', 'the duration unit is translated (unit.minutes)')
+      const detail = await (await hol(`/runs/${RH}`)).text()
+      enthaelt(detail, 'rein ', 'the token metric is translated (run.tokens_value)')
     } finally {
       gleich((await spracheSetzen('en')).status, 303, 'back to English')
     }
     enthaelt(await (await hol('/repos')).text(), 'Create repo', 'English again for everything that follows')
+    // The other way round for the incident severity: 'rot' is the value the
+    // CHECK on the table stores, so only the English page can show that the
+    // line renders a word instead of the raw column.
+    enthaelt(await (await hol(`/runs/${RH}`)).text(), ', red)',
+      'the incident severity is a translated word, not the stored value')
   })
 
   // ------------------------------------------------------------------

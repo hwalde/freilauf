@@ -56,7 +56,7 @@ function harnessOptions(selected) {
  */
 function modelFields(a = {}) {
   return `
-  <label id="prov-label">Provider
+  <label id="prov-label">${e(t('model.provider'))}
     <select name="provider" id="prov" data-gewaehlt="${e(a.provider ?? '')}">
       <option value="">${e(t('model.provider_none'))}</option>
     </select>
@@ -67,8 +67,8 @@ function modelFields(a = {}) {
     <input name="model" id="model" list="modelle" autocomplete="off" value="${e(a.model ?? '')}"
            placeholder="${e(t('model.model_ph'))}">
     <datalist id="modelle"></datalist>
+    <span class="dim" id="model-hint"></span>
   </label>
-  <p class="dim" id="model-hint"></p>
 
   <label id="effort-label" hidden>${e(t('model.effort'))}
     <select name="effort" id="effort" data-gewaehlt="${e(a.effort ?? '')}">
@@ -77,7 +77,7 @@ function modelFields(a = {}) {
     <span class="dim" id="effort-hint"></span>
   </label>
 
-  <fieldset class="zeitplan" id="or-routing" hidden>
+  <fieldset class="schedule" id="or-routing" hidden>
     <legend>${e(t('or.legend'))}</legend>
     <label class="chk"><input type="checkbox" name="or_pin" value="1" id="or-pin" ${a.or_provider ? 'checked' : ''}>
       ${e(t('or.pin'))}</label>
@@ -324,7 +324,7 @@ export function runStartTimeFields(v = {}) {
   // of EVERY page, so this block exists twice on the single-run form — and two
   // elements with the same id are one element too many for a `getElementById`.
   return `
-  <fieldset class="zeitplan">
+  <fieldset class="schedule">
     <legend>${e(t('start.legend'))}</legend>
     <label>${e(t('start.mode'))} <select name="start_mode" data-start-switch>
       ${modes.map(([id, label]) => `<option value="${id}" ${mode === id ? 'selected' : ''}>${e(label)}</option>`).join('')}

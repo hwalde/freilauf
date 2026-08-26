@@ -977,6 +977,22 @@ try {
       gleich(zuviel.length, 0, `${code}: extra keys: ${zuviel.slice(0, 5).join(', ')}`)
     }
   })
+  // Identical keys is not the same as identical meaning: a translation that
+  // drops a {placeholder} renders a sentence with a hole in it, and one that
+  // invents a name renders the name in braces. Both pass the key check above.
+  await pruefe('every translation carries exactly the placeholders English does', () => {
+    // A doubled brace is a flow template ({{path}}), not an interpolation slot —
+    // t() leaves those alone, and their inner word is translated on purpose.
+    const slots = (s) => [...String(s).matchAll(/(?<!\{)\{(\w+)\}(?!\})/g)].map(m => m[1]).sort().join(',')
+    const cats = _catalogs()
+    for (const [key, text] of Object.entries(cats.en)) {
+      const soll = slots(text)
+      for (const code of Object.keys(LANGUAGES)) {
+        if (code === 'en') continue
+        gleich(slots(cats[code][key]), soll, `${code}:${key} placeholders`)
+      }
+    }
+  })
   await pruefe('no catalog entry is empty', () => {
     for (const [code, cat] of Object.entries(_catalogs())) {
       for (const [k, v] of Object.entries(cat)) wahr(String(v).trim().length > 0, `${code}:${k}`)
@@ -1444,6 +1460,58 @@ try {
         if (v === undefined) delete process.env[k]; else process.env[k] = v
       }
       bal._balanceCacheReset()
+    }
+  })
+
+  // The status sidebar asks for usage and balances on EVERY page, so the very
+  // first request of a fresh hub happens while nothing is configured yet. Two
+  // ways that answer used to get stuck for the life of the process, both found
+  // by exactly that: [] cached for two minutes although the configuration had
+  // changed in the meantime, and — worse — a body without a single `await`
+  // (the empty loop) clearing the in-flight flag BEFORE the assignment that
+  // set it, so every later call returned that one stale promise forever.
+  await pruefe('a configuration change is visible in usage and balances without a cache reset', async () => {
+    const usage = await import('../server/usage.mjs')
+    const bal = await import('../server/balances.mjs')
+    const echt = globalThis.fetch
+    const key = process.env.OPENROUTER_API_KEY
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: { total_credits: 5, total_usage: 1 }, is_available: true }) })
+    const vorher = ca.listCodingAgents().map(a => ({ harness: a.harness, providers: a.providerIds, enabled: a.enabled }))
+    try {
+      for (const a of ca.listCodingAgents()) ca.deleteCodingAgent(a.id)
+      usage._usageCacheReset(); bal._balanceCacheReset()
+      delete process.env.OPENROUTER_API_KEY
+      // Nothing configured: nothing to report — and NO await happens in here.
+      gleich((await usage.subscriptionUsage()).length, 0, 'empty configuration reports nothing')
+      gleich((await bal.providerBalances()).length, 0, 'and holds no balance')
+
+      // Now configure — without touching the caches, exactly as the web UI does.
+      ca.saveCodingAgent({ harness: 'claude', enabled: 1, providers: [] })
+      const rows = await usage.subscriptionUsage()
+      gleich(rows.length, 1, 'the newly configured coding agent is reported at once')
+      gleich(rows[0].harness, 'claude', 'and it is the one that was added')
+
+      ca.saveCodingAgent({ harness: 'opencode', enabled: 1, providers: ['openrouter'] })
+      process.env.OPENROUTER_API_KEY = 'k'
+      const b = await bal.providerBalances()
+      gleich(b.length, 1, 'its provider is asked for a balance at once')
+      gleich(b[0].provider, 'openrouter', 'the provider that was just allowed')
+
+      // And a finished request really is finished: `force` is the one call that
+      // is supposed to ignore the cache, so it must not be handed the promise
+      // the cache was made of. That is what a flag left standing does.
+      const uEinmal = await usage.subscriptionUsage()
+      falsch(await usage.subscriptionUsage({ force: true }) === uEinmal,
+        'a forced usage refresh asks again instead of returning the finished request')
+      const bEinmal = await bal.providerBalances()
+      falsch(await bal.providerBalances({ force: true }) === bEinmal,
+        'a forced balance refresh asks again instead of returning the finished request')
+    } finally {
+      globalThis.fetch = echt
+      if (key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = key
+      for (const a of ca.listCodingAgents()) ca.deleteCodingAgent(a.id)
+      for (const a of vorher) ca.saveCodingAgent({ harness: a.harness, enabled: a.enabled, providers: a.providers })
+      usage._usageCacheReset(); bal._balanceCacheReset()
     }
   })
 
