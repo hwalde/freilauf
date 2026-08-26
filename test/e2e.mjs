@@ -1682,6 +1682,109 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // A favorite is the setup half of a run definition under a name; the Quick-Run
+  // dialog adds the task, the branch rule and the start time and starts without
+  // taking the page away. What is checked here is the seam between the two: what
+  // the favorite decides, what the request may decide — and that the request
+  // cannot decide what the favorite already did.
+  gruppe('Favorites and Quick Run')
+
+  let FAVID = null
+
+  await pruefe('a favorite is saved with its setup, and the settings page lists it', async () => {
+    const r = await formular('/settings/favorites/edit', {
+      name: 'E2E-Favorit', harness: 'claude', model: 'claude-opus-5', skills: 'e2e-fleiss',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'saved and redirected')
+    const row = db.prepare('SELECT * FROM favorites WHERE name=?').get('E2E-Favorit')
+    wahr(!!row, 'stored')
+    gleich(row.harness, 'claude', 'coding agent')
+    gleich(row.model, 'claude-opus-5', 'model')
+    gleich(row.skills, '["e2e-fleiss"]', 'extra skill')
+    FAVID = row.id
+    const html = await (await hol('/settings/favorites')).text()
+    enthaelt(html, 'E2E-Favorit', 'listed by name')
+    enthaelt(html, 'claude-opus-5', 'with its setup')
+  })
+  await pruefe('the Quick-Run dialog stands on every page, not only on the run form', async () => {
+    for (const pfad of ['/', '/agents', '/sessions', '/settings', `/archive?repo=${repoId}`]) {
+      const html = await (await hol(pfad)).text()
+      enthaelt(html, 'id="qr-dialog"', `${pfad}: dialog`)
+      enthaelt(html, 'id="qr-open"', `${pfad}: button in the header`)
+      enthaelt(html, 'E2E-Favorit', `${pfad}: the favorite is selectable`)
+    }
+  })
+  await pruefe('a quick run starts with the favorite\'s setup and only the task from the dialog', async () => {
+    const r = await formular('/api/runs/quick', {
+      repo_id: String(repoId), favorite_id: String(FAVID),
+      prompt: 'E2E-Quickrun: tu etwas', branch_mode: 'keiner', start_mode: 'now',
+    })
+    const j = await r.json()
+    wahr(j.ok && !!j.runId, `started (${JSON.stringify(j)})`)
+    await sessionMerken(j.runId)
+    const l = lauf(j.runId)
+    gleich(l.harness, 'claude', 'coding agent from the favorite')
+    gleich(l.model, 'claude-opus-5', 'model from the favorite')
+    gleich(l.skills, '["e2e-fleiss"]', 'extra skill from the favorite')
+    gleich(l.prompt, 'E2E-Quickrun: tu etwas', 'task from the dialog')
+    gleich(l.expected_minutes, 45, 'the duration is not asked for and takes the default')
+    gleich(l.status, 'running', 'really started')
+  })
+  await pruefe('the request cannot override what the favorite decided', async () => {
+    const r = await formular('/api/runs/quick', {
+      repo_id: String(repoId), favorite_id: String(FAVID),
+      prompt: 'E2E-Quickrun: untergeschoben', branch_mode: 'keiner',
+      // Everything a favorite owns — smuggled in alongside it.
+      harness: 'hermes', model: 'boeses/modell', provider: 'openrouter', skills: '',
+    })
+    const j = await r.json()
+    wahr(j.ok, `started (${JSON.stringify(j)})`)
+    await sessionMerken(j.runId)
+    const l = lauf(j.runId)
+    gleich(l.harness, 'claude', 'coding agent stayed the favorite\'s')
+    gleich(l.model, 'claude-opus-5', 'model stayed the favorite\'s')
+    gleich(l.skills, '["e2e-fleiss"]', 'skills stayed the favorite\'s')
+  })
+  await pruefe('a quick run can be planned instead of started', async () => {
+    const r = await formular('/api/runs/quick', {
+      repo_id: String(repoId), favorite_id: String(FAVID),
+      prompt: 'E2E-Quickrun: spaeter', branch_mode: 'keiner',
+      start_mode: 'in', start_in_minutes: '30',
+    })
+    const j = await r.json()
+    wahr(j.ok && j.scheduled, `planned (${JSON.stringify(j)})`)
+    const l = lauf(j.runId)
+    gleich(l.status, 'scheduled', 'waiting')
+    gleich(l.tmux_session, null, 'nothing started yet')
+    wahr(!!l.start_at, 'point in time noted')
+  })
+  await pruefe('a broken quick run is a readable answer, not a run', async () => {
+    const ohneFavorit = await formular('/api/runs/quick', {
+      repo_id: String(repoId), favorite_id: '99999', prompt: 'x', branch_mode: 'keiner',
+    })
+    gleich(ohneFavorit.status, 400, 'unknown favorite rejected')
+    const ohnePrompt = await formular('/api/runs/quick', {
+      repo_id: String(repoId), favorite_id: String(FAVID), prompt: '   ', branch_mode: 'keiner',
+    })
+    gleich(ohnePrompt.status, 400, 'empty task rejected')
+    enthaelt((await ohnePrompt.json()).error, 'Prompt', 'names what is missing')
+    const branchOhneMuster = await formular('/api/runs/quick', {
+      repo_id: String(repoId), favorite_id: String(FAVID), prompt: 'x', branch_mode: 'neu',
+    })
+    gleich(branchOhneMuster.status, 400, 'branch rule without a pattern rejected — same check as the run form')
+  })
+  await pruefe('more favorites than there is room for are refused', async () => {
+    const max = db.prepare('SELECT count(*) c FROM favorites').get().c
+    for (let i = max; i < 3; i++) {
+      await formular('/settings/favorites/edit', { name: `E2E-Fill-${i}`, harness: 'claude' }, { alsBrowser: true })
+    }
+    gleich(db.prepare('SELECT count(*) c FROM favorites').get().c, 3, 'three slots in use')
+    const r = await formular('/settings/favorites/edit', { name: 'E2E-zuviel', harness: 'claude' }, { alsBrowser: true })
+    gleich(r.status, 400, 'the fourth is refused')
+    falsch(!!db.prepare('SELECT id FROM favorites WHERE name=?').get('E2E-zuviel'), 'and not stored')
+  })
+
+  // ------------------------------------------------------------------
   if (ECHT) {
     // From here on with the REAL cc-start and real harnesses. Deliberately a second
     // hub start: the stub part above must stay deterministic and free of charge.

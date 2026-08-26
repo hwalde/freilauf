@@ -42,6 +42,24 @@ CREATE TABLE IF NOT EXISTS agents (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- Favoriten: die SETUP-Hälfte einer Laufdefinition unter einem Namen (Coding Agent,
+-- Provider, Modell, Effort, Extra-Skills, angehängte Flows). Bewusst OHNE Prompt,
+-- Branch-Regel und Dauer — die gehören zur Aufgabe, nicht zur Einstellung.
+-- Bewusst auch ohne CHECK auf harness: siehe harnessCheckErweitern() weiter unten,
+-- eine CHECK-Regel wäre bei jedem neuen Plugin ein Tabellen-Neubau.
+CREATE TABLE IF NOT EXISTS favorites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  harness TEXT NOT NULL,
+  model TEXT,
+  provider TEXT,
+  or_provider TEXT,
+  effort TEXT,
+  skills TEXT,
+  flows TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   repo_id INTEGER NOT NULL REFERENCES repos(id),

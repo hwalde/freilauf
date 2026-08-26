@@ -89,18 +89,39 @@ function modelFields(a = {}) {
 }
 
 /**
+ * The SETUP part of the definition: which coding agent runs the task, on which
+ * provider, with which model and effort. Split out of `runDefFields` because a
+ * favorite (server/favorites.mjs) is exactly this part and nothing else — the
+ * prompt, the branch rule and the duration belong to the task, not to the setup.
+ */
+export function runSetupFields(a = {}) {
+  return `
+  <label>${e(t('agents.harness'))} <select name="harness">${harnessOptions(a.harness)}</select></label>
+  ${modelFields(a)}`
+}
+
+/**
+ * The branch rule as form fields — used by both run forms and by the Quick-Run
+ * dialog, which is the one place where a favorite's setup meets a task.
+ * `data-branch-mode` lets hub.js hide the pattern where "no branch" is chosen.
+ */
+export function branchFields(a = {}) {
+  return `
+  <label>${e(t('runform.branch_mode'))} <select name="branch_mode" data-branch-mode>
+    ${BRANCH_MODES.map(m => `<option value="${m}" ${a.branch_mode === m ? 'selected' : ''}>${e(branchLabel(m))}</option>`).join('')}
+  </select></label>
+  <label data-branch-pattern>${e(t('runform.branch_pattern'))} <input name="branch_pattern" value="${e(a.branch_pattern ?? '')}" placeholder="${e(t('runform.branch_pattern_ph'))}"></label>`
+}
+
+/**
  * The definition as form fields — embedded IDENTICALLY by the agent form and
  * the single-run form. `a` is an agent row, a remembered choice or {}.
  */
 export function runDefFields(a = {}) {
   return `
-  <label>${e(t('agents.harness'))} <select name="harness">${harnessOptions(a.harness)}</select></label>
-  ${modelFields(a)}
+  ${runSetupFields(a)}
   <label>${e(t('runform.prompt'))} <textarea name="prompt" rows="10" required>${e(a.prompt ?? '')}</textarea></label>
-  <label>${e(t('runform.branch_mode'))} <select name="branch_mode">
-    ${BRANCH_MODES.map(m => `<option value="${m}" ${a.branch_mode === m ? 'selected' : ''}>${e(branchLabel(m))}</option>`).join('')}
-  </select></label>
-  <label>${e(t('runform.branch_pattern'))} <input name="branch_pattern" value="${e(a.branch_pattern ?? '')}" placeholder="${e(t('runform.branch_pattern_ph'))}"></label>
+  ${branchFields(a)}
   <label>${e(t('runform.expected'))} <input type="number" name="expected_minutes" min="1" value="${a.expected_minutes ?? DEFAULT_EXPECTED_MINUTES}"></label>
   ${skillFelder(a.skills)}
   ${flowAttachFields(a.flows)}`
@@ -170,23 +191,18 @@ async function fixedBranchProblem(b, problems) {
 }
 
 /**
- * Read the definition out of a form body and validate it — the SAME checks for
- * the agent form, the single-run form and the JSON API. Problems are collected
- * in `problems`; a definition is returned in any case, so the caller decides
- * whether to show the problem page or answer with JSON.
+ * Coding agent, provider, model and effort out of a form body — with exactly the
+ * validation `runDefFromForm` applies, because it IS that part of it. A favorite
+ * saves this and nothing more, and a Quick Run turns it back into a form body,
+ * so what is stored under a name can never mean something else than what the
+ * run form would have made of the same inputs.
  */
-export async function runDefFromForm(b, problems = []) {
+export async function runSetupFromForm(b, problems = []) {
   const harness = String(b.harness ?? '')
   if (!getHarness(harness)) problems.push(t('run.unknown_harness', { harness }))
   else if (!enabledCodingAgents().some(a => a.harness === harness)) {
     problems.push(t('run.harness_not_configured', { harness }))
   }
-  const prompt = String(b.prompt ?? '')
-  if (!prompt.trim()) problems.push(t('form.prompt_missing'))
-  const branchMode = String(b.branch_mode ?? '')
-  if (!BRANCH_MODES.includes(branchMode)) problems.push(t('form.branch_mode_unknown', { mode: branchMode }))
-  if (branchMode !== 'keiner' && !b.branch_pattern?.trim()) problems.push(t('form.branch_missing'))
-  if (branchMode === 'fest') await fixedBranchProblem(b, problems)
   const pv = providerFromForm(b, problems)
   const effort = await effortFromForm(b, problems)
   return {
@@ -195,6 +211,25 @@ export async function runDefFromForm(b, problems = []) {
     provider: pv.provider,
     orProvider: pv.or_provider,
     effort,
+  }
+}
+
+/**
+ * Read the definition out of a form body and validate it — the SAME checks for
+ * the agent form, the single-run form and the JSON API. Problems are collected
+ * in `problems`; a definition is returned in any case, so the caller decides
+ * whether to show the problem page or answer with JSON.
+ */
+export async function runDefFromForm(b, problems = []) {
+  const setup = await runSetupFromForm(b, problems)
+  const prompt = String(b.prompt ?? '')
+  if (!prompt.trim()) problems.push(t('form.prompt_missing'))
+  const branchMode = String(b.branch_mode ?? '')
+  if (!BRANCH_MODES.includes(branchMode)) problems.push(t('form.branch_mode_unknown', { mode: branchMode }))
+  if (branchMode !== 'keiner' && !b.branch_pattern?.trim()) problems.push(t('form.branch_missing'))
+  if (branchMode === 'fest') await fixedBranchProblem(b, problems)
+  return {
+    ...setup,
     prompt,
     branchMode,
     branchPattern: b.branch_pattern?.trim() || null,
@@ -285,10 +320,13 @@ export function runStartTimeFields(v = {}) {
     ['in', t('start.mode_in')],
     ['idle', t('start.mode_idle')],
   ]
+  // `data-start-switch` instead of an id: the Quick-Run dialog sits in the layout
+  // of EVERY page, so this block exists twice on the single-run form — and two
+  // elements with the same id are one element too many for a `getElementById`.
   return `
   <fieldset class="zeitplan">
     <legend>${e(t('start.legend'))}</legend>
-    <label>${e(t('start.mode'))} <select name="start_mode" id="start-mode">
+    <label>${e(t('start.mode'))} <select name="start_mode" data-start-switch>
       ${modes.map(([id, label]) => `<option value="${id}" ${mode === id ? 'selected' : ''}>${e(label)}</option>`).join('')}
     </select></label>
     <div class="st" data-mode="at">

@@ -20,7 +20,9 @@ import {
   repoEdit, repoSave, settingsSave, settingsTestTelegram,
   telegramSetup, telegramTokenSave, telegramChatSave, telegramChats,
   pageCodingAgents, codingAgentSave, codingAgentDelete,
+  pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
 } from './pages.mjs'
+import { getFavorite, favoriteToFormBody } from './favorites.mjs'
 import { redirect, body as readBody, parseForm } from './web-helpers.mjs'
 import { vorfallLoesen, vorfaelleLoesen, vorfall } from './incidents.mjs'
 import { t } from './i18n.mjs'
@@ -48,6 +50,22 @@ async function form(req) {
 function wantsHtml(req) {
   return (req.headers.accept ?? '').includes('text/html')
 }
+/**
+ * What a Quick Run may say for itself: the task, the branch rule, the repo — the
+ * three things a favorite deliberately does not carry. An allowlist and not a
+ * spread, so a request cannot quietly replace the favorite's coding agent, model
+ * or skills and start something else than the name on the button promised.
+ * The duration is not asked for and takes the default.
+ */
+function pickQuickFields(b) {
+  return {
+    repo_id: b.repo_id,
+    prompt: b.prompt,
+    branch_mode: b.branch_mode,
+    branch_pattern: b.branch_pattern,
+  }
+}
+
 function answer(req, res, code, obj, backTo) {
   if (backTo && wantsHtml(req)) return redirect(res, backTo)
   return json(res, code, obj)
@@ -100,6 +118,11 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'GET' && path === '/settings/coding-agents') return pageCodingAgents(req, res, url)
   if (req.method === 'POST' && path === '/settings/coding-agents/save') return codingAgentSave(req, res, url, formBody)
   if (req.method === 'POST' && path === '/settings/coding-agents/delete') return codingAgentDelete(req, res, url, formBody)
+  // Favorites (Settings → Favorites) — the saved setup a Quick Run starts from.
+  if (req.method === 'GET' && path === '/settings/favorites') return pageFavorites(req, res, url)
+  if (req.method === 'GET' && path === '/settings/favorites/edit') return favoriteEdit(req, res, url)
+  if (req.method === 'POST' && path === '/settings/favorites/edit') return favoriteSave(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/settings/favorites/delete') return favoriteDelete(req, res, url, formBody)
   // No-code flows (server/flows/) — own router, own pages.
   if (path === '/flows' || path.startsWith('/flows/')) return flowRoute(req, res, url, formBody)
   res.writeHead(404, { 'content-type': 'text/plain' }); res.end(t('web.not_found'))
@@ -209,6 +232,32 @@ async function api(req, res, url) {
     const r = await startRun(def, { repoId: +b.repo_id, ...start })
     return json(res, r.ok ? 200 : 500, {
       ok: r.ok, runId: r.runId, deferred: r.deferred, scheduled: r.scheduled, error: r.error,
+    })
+  }
+  // Quick Run: a favorite plus a task. The dialog sits in the layout of every
+  // page, so this is the one start path that must answer JSON and nothing else —
+  // the caller stays where it is and shows a toast.
+  //
+  // Deliberately NOT its own definition builder: the favorite becomes a form
+  // body again (favoriteToFormBody) and goes through runDefFromForm() /
+  // runStartFromForm() like the run form. That is the whole point of a favorite
+  // storing only the setup half — everything the definition needs beyond it is
+  // in this request, and the validation is the one that already exists.
+  if (req.method === 'POST' && path === '/api/runs/quick') {
+    const b = await form(req)
+    const fav = getFavorite(b.favorite_id)
+    if (!fav) return json(res, 400, { ok: false, error: t('qr.err_favorite') })
+    const problems = []
+    const def = await runDefFromForm({ ...favoriteToFormBody(fav), ...pickQuickFields(b) }, problems)
+    const start = runStartFromForm(b, problems)
+    if (problems.length) return json(res, 400, { ok: false, error: problems.join(' · ') })
+    rememberRunChoice(def)
+    const r = await startRun(def, { repoId: +b.repo_id, ...start })
+    if (!r.ok) return json(res, 500, { ok: false, error: r.error ?? 'start failed' })
+    const run = getRun(r.runId)
+    return json(res, 200, {
+      ok: true, runId: r.runId, deferred: !!r.deferred, scheduled: !!r.scheduled,
+      title: run?.title ?? null, favorite: fav.name,
     })
   }
   // Rename a run — inline editing in the overview and on the detail page. This

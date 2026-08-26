@@ -13,7 +13,12 @@ import {
 import {
   runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
   runTitleField, runStartTimeFields, runStartFromForm,
+  runSetupFields, branchFields,
 } from './run-def.mjs'
+import {
+  listFavorites, getFavorite, saveFavorite, deleteFavorite,
+  favoriteFromForm, favoriteSummary, FAVORITES_MAX,
+} from './favorites.mjs'
 import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } from './title.mjs'
 import { getHarness, harnessLabel, detectInstalled } from './harnesses/index.mjs'
 import { providerLabel } from './providers/index.mjs'
@@ -21,9 +26,9 @@ import { subscriptionUsage } from './usage.mjs'
 import { ampelAusVorfaellen, offeneVorfaelle, alleVorfaelle, brauchtMensch } from './incidents.mjs'
 import { TYP_TEXT } from './detect.mjs'
 import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
-import { skillListe, skillAnzeige } from './zusaetze.mjs'
+import { skillListe, skillAnzeige, skillFelder } from './zusaetze.mjs'
 import { listSessions, sessionKeepHours, currentKeepMs } from './sessions.mjs'
-import { attachmentSummary, flowSection } from './flows/attach.mjs'
+import { attachmentSummary, flowSection, flowAttachFields } from './flows/attach.mjs'
 import { t, LANGUAGES, currentLanguage, setLanguage, clientCatalog } from './i18n.mjs'
 
 /**
@@ -96,6 +101,48 @@ function setupBanner() {
     <a class="btn" href="/settings/coding-agents">${e(t('banner.no_coding_agent_cta'))}</a></div>`
 }
 
+/**
+ * Quick Run — a run from a favorite, startable from every page.
+ *
+ * It sits in the layout, so it is reachable wherever one happens to be: the
+ * moment one wants to send a task off is rarely the moment one is standing on
+ * the run form. The dialog asks for the three things a favorite deliberately
+ * does NOT carry — the task, the branch rule, the start time — and nothing else.
+ *
+ * It does not navigate. `POST /api/runs/quick` answers with JSON, the page stays
+ * where it was and a toast says what happened, with a link to the run for
+ * whoever wants to look. Being torn to a detail page is exactly what makes a
+ * quick start not quick.
+ */
+function quickRunDialog(repos, selectedRepo) {
+  const favs = listFavorites()
+  const body = !repos.length
+    ? `<p class="dim">${e(t('qr.no_repo'))}</p><p><a class="btn" href="/repos/edit">${e(t('norepo.cta'))}</a></p>`
+    : !favs.length
+      ? `<p class="dim">${e(t('qr.no_favorite'))}</p><p><a class="btn" href="/settings/favorites">${e(t('fav.create'))}</a></p>`
+      : `<form id="qr-form">
+    <label>${e(t('layout.repo'))} <select name="repo_id">${repos.map(r =>
+      `<option value="${r.id}" ${r.id == selectedRepo ? 'selected' : ''}>${e(r.name)}</option>`).join('')}</select></label>
+    <label>${e(t('qr.favorite'))} <select name="favorite_id" id="qr-fav">${favs.map(f =>
+      `<option value="${f.id}" data-summary="${e(favoriteSummary(f))}">${e(f.name)}</option>`).join('')}</select></label>
+    <p class="dim" id="qr-fav-info"></p>
+    <label>${e(t('qr.prompt'))} <textarea name="prompt" rows="8" required placeholder="${e(t('qr.prompt_ph'))}"></textarea></label>
+    <details class="qr-more"><summary>${e(t('qr.more'))}</summary>
+      ${branchFields({ branch_mode: 'keiner' })}
+      ${runStartTimeFields({})}
+    </details>
+    <p class="err" id="qr-error" hidden></p>
+    <menu class="qr-actions">
+      <button type="button" class="ghost" data-qr-close>${e(t('qr.cancel'))}</button>
+      <button type="submit">${e(t('qr.start'))}</button>
+    </menu>
+  </form>`
+  return `<dialog id="qr-dialog" class="qr">
+    <h3>⚡ ${e(t('qr.title'))} <button type="button" class="mini" data-qr-close aria-label="${e(t('qr.cancel'))}">✕</button></h3>
+    ${body}
+  </dialog>`
+}
+
 export function layout(title, active, content, selectedRepo = null, withTerminal = false) {
   const pipeline = pipelineAn()
   const q = claudeQuota()
@@ -119,11 +166,14 @@ ${setupBanner()}
   <span class="brand">cc-hub</span>
   <nav>${nav}</nav>
   ${repoSel}
+  <button type="button" id="qr-open" class="qr-open" title="${e(t('qr.hint'))}">⚡ ${e(t('qr.title'))}</button>
   <span class="spacer"></span>
   <span title="${e(t('layout.pipeline_hint'))}">${e(t('layout.pipeline'))}: <b class="${pipeline ? 'ok' : 'warn'}">${e(pipeline ? t('layout.on') : t('layout.off'))}</b></span>
   ${bar('5h', q.five)}${q.seven_general != null ? bar('7d', q.seven_general) : ''}
 </header>
 <main>${globalesBanner()}${content}</main>
+${quickRunDialog(repos, selectedRepo)}
+<div class="toasts" id="cchub-toasts" aria-live="polite"></div>
 ${withTerminal ? '<script src="/static/xterm.js"></script><script src="/static/addon-fit.js"></script>' : ''}
 <script>window.CCHUB_I18N=${JSON.stringify(clientCatalog())}</script>
 <script src="/static/hub.js"></script></body></html>`
@@ -620,6 +670,8 @@ export async function pageSettings(req, res, url) {
   <p class="dim">${e(t('settings.global_hint'))}</p>
   <p><a class="btn" href="/settings/coding-agents">${e(t('ca.title'))}</a>
      <span class="dim">${e(t('settings.coding_agents_hint'))}</span></p>
+  <p><a class="btn" href="/settings/favorites">${e(t('fav.title'))}</a>
+     <span class="dim">${e(t('settings.favorites_hint'))}</span></p>
   <form method="post" action="/settings/save" class="settings">
     <label>${e(t('settings.language'))} <select name="ui_language">${Object.entries(LANGUAGES).map(([code, label]) =>
       `<option value="${code}" ${(s.ui_language ?? 'en') === code ? 'selected' : ''}>${e(label)}</option>`).join('')}</select></label>
@@ -656,6 +708,78 @@ export async function pageSettings(req, res, url) {
   <p><a class="btn" href="/telegram-setup">${e(t('settings.telegram_setup'))}</a></p>
   <form method="post" action="/settings/test-telegram"><button>${e(t('settings.telegram_test'))}</button></form>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.settings'), '/settings', body))
+}
+
+// ---------------- favorites (Settings → Favorites) ----------------
+//
+// A favorite is the setup half of a run definition under a name (see
+// server/favorites.mjs). List and edit page are separate for the same reason the
+// agents are: the model/provider/effort block in the run form is ONE block per
+// page — hub.js drives it through #prov, #model and #effort — and three of them
+// side by side would be three elements sharing one id. So: overview here, and
+// one form per favorite on its own page.
+
+export async function pageFavorites(req, res, url) {
+  const favs = listFavorites()
+  const rows = favs.map(f => `
+  <div class="card">
+    <h3>${e(f.name)}</h3>
+    <p class="dim">${e(favoriteSummary(f))}</p>
+    <div class="btn-row"><a class="btn" href="/settings/favorites/edit?id=${f.id}">${e(t('agents.edit'))}</a>
+      <form method="post" action="/settings/favorites/delete" class="inline"
+            onsubmit="return confirm(${JSON.stringify(t('fav.delete_confirm', { name: f.name }))})">
+        <input type="hidden" name="id" value="${f.id}"><button class="danger">${e(t('ca.delete'))}</button></form></div>
+  </div>`).join('')
+  const voll = favs.length >= FAVORITES_MAX
+  const body = `
+  <h2>${e(t('fav.title'))}</h2>
+  <p class="dim">${e(t('fav.intro'))}</p>
+  <p class="dim">${e(t('fav.slots', { n: favs.length, max: FAVORITES_MAX }))}</p>
+  ${rows || `<p class="dim">${e(t('fav.none'))}</p>`}
+  <div class="btn-row">${voll
+    ? `<span class="dim">${e(t('fav.full', { max: FAVORITES_MAX }))}</span>`
+    : `<a class="btn" href="/settings/favorites/edit">${e(t('fav.create'))}</a>`}
+     <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(layout(t('fav.title'), '/settings', body))
+}
+
+export async function favoriteEdit(req, res, url) {
+  const id = url.searchParams.get('id')
+  const f = id ? getFavorite(+id) : null
+  if (id && !f) return void res.writeHead(404).end(t('web.not_found'))
+  // A new favorite opens with the setup of the last start — that is almost
+  // always the one worth keeping, which is why one is saving it at all.
+  const werte = f ?? lastRunChoice()
+  const body = `<h2>${e(id ? t('fav.edit_title') : t('fav.create_title'))}</h2>
+  <form method="post" action="/settings/favorites/edit${id ? `?id=${id}` : ''}" class="settings">
+    <label>${e(t('fav.name'))} <input name="name" value="${e(f?.name ?? '')}" placeholder="${e(t('fav.name_ph'))}" required></label>
+    ${runSetupFields(werte)}
+    ${skillFelder(werte.skills)}
+    ${flowAttachFields(werte.flows)}
+    <div class="btn-row"><button>${e(t('settings.save'))}</button>
+      <a class="btn" href="/settings/favorites">${e(t('fav.title'))}</a></div>
+  </form>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(layout(id ? t('fav.edit_title') : t('fav.create_title'), '/settings', body))
+}
+
+export async function favoriteSave(req, res, url, formBody) {
+  const id = url.searchParams.get('id')
+  const b = await formBody()
+  const back = `/settings/favorites/edit${id ? `?id=${id}` : ''}`
+  const problems = []
+  const fav = await favoriteFromForm(b, problems)
+  if (problems.length) return problemPage(res, t('fav.title'), problems, back)
+  const r = saveFavorite({ id: id ? +id : null, fav })
+  if (!r.ok) return problemPage(res, t('fav.title'), r.problems, back)
+  redirect(res, '/settings/favorites')
+}
+
+export async function favoriteDelete(req, res, url, formBody) {
+  const b = await formBody()
+  deleteFavorite(+b.id)
+  redirect(res, '/settings/favorites')
 }
 
 // ---------------- coding agents (Settings → Coding agents) ----------------

@@ -1462,6 +1462,80 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('Favorites: the setup of a run under a name (favorites.mjs)')
+  const fv = await import('../server/favorites.mjs')
+
+  await pruefe('a favorite is the setup half — nothing about the task', async () => {
+    const problems = []
+    const fav = await fv.favoriteFromForm({
+      name: '  Opus, thorough  ', harness: 'claude', model: ' claude-opus-5 ',
+      skills: 'unlazy', skill_regler_unlazy: '4',
+      // Fields of the run form that a favorite deliberately does not carry —
+      // they must not leak into it through the same body.
+      prompt: 'do something', branch_mode: 'neu', branch_pattern: 'x', expected_minutes: '90',
+    }, problems)
+    gleich(problems.length, 0, `no problems (${problems.join(', ')})`)
+    gleich(fav.name, 'Opus, thorough', 'name trimmed')
+    gleich(fav.model, 'claude-opus-5', 'model trimmed')
+    gleich(fav.skills, '["unlazy:4"]', 'extra skill with its dial')
+    falsch('prompt' in fav, 'no prompt')
+    falsch('branchMode' in fav, 'no branch rule')
+    falsch('expectedMinutes' in fav, 'no expected duration')
+  })
+  await pruefe('it refuses exactly what the run form refuses, plus a missing name', async () => {
+    const p = []
+    await fv.favoriteFromForm({ name: '   ', harness: 'claude', provider: 'openrouter' }, p)
+    gleich(p.length, 2, `name missing and a provider claude cannot use (${p.join(', ')})`)
+    const p2 = []
+    await fv.favoriteFromForm({ name: 'x', harness: 'gpt' }, p2)
+    gleich(p2.length, 1, `unknown coding agent (${p2.join(', ')})`)
+  })
+  // The whole point of storing only the setup: a Quick Run turns the favorite
+  // back into a form body and goes through runDefFromForm() like every other
+  // start. If this round trip broke, a favorite would quietly mean something
+  // else than what was saved — which is exactly the drift run-def.mjs exists
+  // to prevent.
+  await pruefe('a favorite becomes a form body again and yields the very same definition', async () => {
+    const fdb5 = await import('../server/flows/db.mjs')
+    const fid = fdb5.saveFlow({ name: 'fav-flow', trigger: { kind: 'run_finished' }, definition: { sequence: [] } })
+    const gespeichert = {
+      harness: 'claude', model: 'claude-opus-5', provider: null, or_provider: null, effort: null,
+      skills: '["unlazy:4"]', flows: JSON.stringify([{ flowId: fid, when: 'failed' }]),
+    }
+    const body = fv.favoriteToFormBody(gespeichert)
+    const def = await rd.runDefFromForm({ ...body, prompt: 'do it', branch_mode: 'keiner' }, [])
+    gleich(def.harness, 'claude', 'coding agent')
+    gleich(def.model, 'claude-opus-5', 'model')
+    gleich(def.skills, '["unlazy:4"]', 'skill including its dial survives the round trip')
+    gleich(def.flows, JSON.stringify([{ flowId: fid, when: 'failed' }]), 'attachment survives the round trip')
+    gleich(def.prompt, 'do it', 'the task comes from the dialog, not from the favorite')
+    gleich(def.expectedMinutes, rd.DEFAULT_EXPECTED_MINUTES, 'duration is not part of a favorite')
+  })
+  await pruefe('a serving provider only survives where it can be passed through at all', async () => {
+    const body = fv.favoriteToFormBody({
+      harness: 'opencode', model: 'z-ai/glm-4.6', provider: 'openrouter', or_provider: 'novita',
+      effort: null, skills: null, flows: null,
+    })
+    gleich(body.or_pin, '1', 'the pin is set again from the stored value')
+    const def = await rd.runDefFromForm({ ...body, prompt: 'x', branch_mode: 'keiner' }, [])
+    gleich(def.orProvider, 'novita', 'opencode + OpenRouter: passed through')
+  })
+  await pruefe('there is room for exactly the cap, and a name is taken only once', () => {
+    const mk = (name) => ({
+      name, harness: 'claude', model: null, provider: null, or_provider: null,
+      effort: null, skills: null, flows: null,
+    })
+    gleich(fv.listFavorites().length, 0, 'nothing saved yet')
+    for (let i = 1; i <= fv.FAVORITES_MAX; i++) wahr(fv.saveFavorite({ fav: mk(`fav ${i}`) }).ok, `favorite ${i}`)
+    falsch(fv.saveFavorite({ fav: mk('one too many') }).ok, 'the cap holds')
+    const erster = fv.listFavorites()[0].id
+    falsch(fv.saveFavorite({ id: erster, fav: mk('fav 2') }).ok, 'a taken name is refused while editing too')
+    wahr(fv.saveFavorite({ id: erster, fav: mk('fav 1') }).ok, 'its own name stays free for itself')
+    fv.deleteFavorite(erster)
+    wahr(fv.saveFavorite({ fav: mk('now there is room again') }).ok, 'a removed one frees its slot')
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Run title (title.mjs)')
   const ti = await import('../server/title.mjs')
 

@@ -150,3 +150,53 @@ table.sessions tr.ending { opacity: .55; }
 table.sessions tr.gone { opacity: .4; text-decoration: line-through; }
 table.sessions tr.failed { background: rgba(229, 72, 77, .12); }
 .dot.grau { background: #9aa0a6; }
+
+/* Buttons next to each other. Deliberately not a <p>: an HTML parser closes an
+   open paragraph at a <form>, so a link and a form-button inside one paragraph
+   land on two lines no matter what the CSS says. */
+.btn-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+/* The repo switcher is a header control, not a form field — the 100% width from
+   the rule above stretched it across half the bar. */
+header select { width: auto; max-width: 22em; }
+
+/* A hidden label must really disappear: 'label { display: block }' above beats
+   the browser's own [hidden] rule, which is why the schedule block already
+   needed its own version of this line. One rule for all of them. */
+label[hidden] { display: none; }
+
+/* ---- Quick Run: the button in the header and its dialog ----
+   Reachable from every page, because the moment one wants to send a task off is
+   rarely the moment one is standing on the run form. */
+.qr-open { background: #2c7a3f; padding: 5px 12px; font-size: 14px; white-space: nowrap; }
+.qr-open:hover { background: #35924b; }
+dialog.qr { width: min(680px, 94vw); border: 0; border-radius: 12px; padding: 18px 20px;
+  background: #fff; color: #1c1c1c; box-shadow: 0 18px 60px rgba(0, 0, 0, .35); }
+dialog.qr::backdrop { background: rgba(0, 0, 0, .45); }
+dialog.qr h3 { margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+dialog.qr h3 button.mini { margin-left: auto; background: none; border: 0; color: #8a8f96;
+  cursor: pointer; font-size: 1em; padding: 0 4px; opacity: 1; }
+dialog.qr textarea { min-height: 8em; }
+dialog.qr input, dialog.qr select, dialog.qr textarea { max-width: 100%; }
+dialog.qr details.qr-more { margin: 10px 0; }
+dialog.qr details.qr-more summary { cursor: pointer; color: #2f6fed; }
+dialog.qr menu.qr-actions { display: flex; gap: 10px; justify-content: flex-end;
+  margin: 14px 0 0; padding: 0; }
+dialog.qr button.ghost { background: none; color: #6b7076; border: 1px solid #c9c9c4; }
+#qr-fav-info { margin: -4px 0 10px; }
+
+/* ---- toasts: the answer to an action that did not change the page ---- */
+.toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column;
+  gap: 8px; z-index: 60; max-width: min(420px, 92vw); }
+.toast { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px;
+  background: #22252a; color: #eee; box-shadow: 0 6px 24px rgba(0, 0, 0, .3);
+  border-left: 4px solid #46a758; }
+.toast.warn { border-left-color: #f2c14e; }
+.toast.err { border-left-color: #e5484d; }
+.toast a { color: #8ec5ff; margin-left: auto; white-space: nowrap; }
+.toast button.mini { background: none; border: 0; color: #9aa0a6; cursor: pointer;
+  padding: 0 2px; opacity: 1; font-size: 1em; }
+
+@media (prefers-color-scheme: dark) {
+  dialog.qr { background: #202226; color: #e6e6e6; }
+  dialog.qr button.ghost { border-color: #3a3f45; color: #9aa0a6; }
+}

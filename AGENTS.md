@@ -81,7 +81,9 @@ is one and the same **run definition**, and it lives in **`server/run-def.mjs`**
 | What | Function | Used by |
 |---|---|---|
 | Form block (HTML) | `runDefFields(values)` | agent form + single-run form |
+| Its setup half, on its own | `runSetupFields`, `branchFields` | favorite form, Quick-Run dialog |
 | Form → definition, incl. all validation | `runDefFromForm(body, problems)` | both forms + `POST /api/runs` |
+| Its setup half, on its own | `runSetupFromForm(body, problems)` | favorites (see below) |
 | Agent row → definition | `defFromAgent(row)` | scheduler, "start now", flows |
 | Write an agent (INSERT/UPDATE) | `saveAgent(...)` | agent form + "save as agent" |
 | Field list for the flow designer | `RUN_DEF_FLOW_FIELDS`, `defFromFlowProps` | `flows/steps.mjs` |
@@ -173,6 +175,54 @@ newest-archived first with pagination (50 per page,
 (`POST /api/runs/<id>/unarchive`). Nothing else in the code filters on
 `archived_at` — the watcher, the flows and the incidents keep their view of a
 run whether it is archived or not.
+
+### Favorites and Quick Run: the setup without the task
+
+Picking a coding agent, a provider, a model out of ~200 slugs and an effort level
+is the half of starting a run that is the same every time and says nothing about
+the task. A **favorite** (`server/favorites.mjs`, table `favorites`, Settings →
+Favorites) is exactly that half under a name: harness, provider, model, serving
+provider, effort — plus the two opt-ins that behave like a setting rather than
+like a task, the **extra skills including their dial** and the **attached
+flows**. Deliberately not part of it: prompt, branch rule, expected duration,
+start time. Room for `FAVORITES_MAX` of them (3, `CCHUB_FAVORITES_MAX`), because
+a shortcut one has to read is not one.
+
+The **Quick Run** button sits in the header of *every* page and opens a dialog
+asking for what a favorite does not carry: the task, and — folded away —
+the branch rule and the start time. It does **not** navigate: `POST
+/api/runs/quick` answers JSON, the page stays where it was and a toast says
+whether the run started, was planned or was deferred, with a link to it. Being
+torn to a detail page is what would make a quick start not quick.
+
+There is **no second definition builder** behind any of this, which is the whole
+reason a favorite stores only the setup half:
+
+| Direction | Function | Ends in |
+|---|---|---|
+| form → favorite | `favoriteFromForm()` → `runSetupFromForm()` | the same validation the run form applies |
+| favorite → form | `favoriteToFormBody()` | `runDefFromForm()` — the ordinary start path |
+
+`runSetupFromForm()` is `runDefFromForm()`'s own first half (harness enabled,
+provider possible for this harness, effort really accepted), and
+`runSetupFields()` / `branchFields()` are the form blocks both run forms already
+use. So what is saved under a name cannot come to mean something else than what
+the run form would have made of the same inputs — the drift `run-def.mjs` exists
+to prevent, one field further out.
+
+The Quick-Run endpoint takes exactly four fields from the request
+(`pickQuickFields`: repo, prompt, branch mode, branch pattern) and lets the
+favorite fill in the rest. An allowlist and not a spread: otherwise a request
+could quietly replace the favorite's coding agent, model or skills and start
+something other than the name on the button promised. The e2e suite asserts
+precisely that.
+
+Two page-level consequences worth knowing: the dialog lives in `layout()`, so
+the single-run form now carries the planned-start block **twice** — hence
+`data-start-switch` instead of an id, scoped per fieldset. And favorites are
+edited on a page of their own rather than three side by side, because the
+provider/model/effort block is driven through `#prov`, `#model` and `#effort`,
+and three of those would be three elements sharing one id.
 
 ## Plugin architecture: coding agents and providers
 
@@ -623,6 +673,11 @@ errors (`post_api_request` only fires after success).
   `sqlite_master`, keeps the CHECK in sync with the plugin registry and only
   replaces that one spot, so retrofitted columns, defaults and the UNIQUE
   reliably survive.
+- **A `<form>` closes an open `<p>`.** The HTML parser does it, so
+  `<p><a class="btn">…</a><form class="inline"><button>…</button></form></p>`
+  puts the two buttons on two lines and no CSS can talk it out of that — the
+  form has become a sibling of the paragraph before the stylesheet ever sees it.
+  Buttons that belong next to each other go in a `<div class="btn-row">`.
 - **A green test only proves the path the test took.** `curl` against the VPN IP
   from the server itself runs over `lo` and says nothing about the firewall;
   check real reachability only from a VPN client.

@@ -77,13 +77,125 @@
     }
   }
 
-  // ---- planned start (single-run form): show only the chosen kind's block ----
-  const startSel = document.getElementById('start-mode')
-  if (startSel) {
-    const bloecke = Array.from(document.querySelectorAll('.st'))
+  // ---- planned start: show only the chosen kind's block ----
+  // Per fieldset, not per page: the Quick-Run dialog sits in every page's layout,
+  // so the single-run form carries this block twice. Scoping to the surrounding
+  // fieldset is what keeps the two from switching each other.
+  document.querySelectorAll('select[data-start-switch]').forEach(function (startSel) {
+    const box = startSel.closest('fieldset') || document
+    const bloecke = Array.from(box.querySelectorAll('.st'))
     const syncStart = () => bloecke.forEach(b => { b.hidden = b.dataset.mode !== startSel.value })
     startSel.addEventListener('change', syncStart)
     syncStart()
+  })
+
+  // ---- branch rule: the pattern only matters when a branch is wanted at all ----
+  document.querySelectorAll('select[data-branch-mode]').forEach(function (modeSel) {
+    const form = modeSel.closest('form') || document
+    const pattern = form.querySelector('[data-branch-pattern]')
+    if (!pattern) return
+    const sync = () => { pattern.hidden = modeSel.value === 'keiner' }
+    modeSel.addEventListener('change', sync)
+    sync()
+  })
+
+  // ---- toasts: say what happened without taking the page away ----
+  // A Quick Run starts from wherever one is standing; being torn to a detail page
+  // is exactly what would make it not quick. So the answer arrives here — with a
+  // link for whoever does want to look.
+  window.cchubToast = function (text, opts) {
+    opts = opts || {}
+    const box = document.getElementById('cchub-toasts')
+    if (!box) return
+    const el = document.createElement('div')
+    el.className = 'toast ' + (opts.kind || 'ok')
+    const span = document.createElement('span')
+    span.textContent = text
+    el.append(span)
+    if (opts.href) {
+      const a = document.createElement('a')
+      a.href = opts.href
+      a.textContent = opts.linkText || T('js.toast_open', 'open')
+      el.append(a)
+    }
+    const close = document.createElement('button')
+    close.type = 'button'
+    close.className = 'mini'
+    close.textContent = '✕'
+    close.setAttribute('aria-label', T('js.toast_close', 'close'))
+    close.addEventListener('click', function () { el.remove() })
+    el.append(close)
+    box.append(el)
+    // An error stays until it is read; a success says its piece and goes.
+    if (opts.kind !== 'err') setTimeout(function () { el.remove() }, opts.ms || 9000)
+  }
+
+  // ---- Quick Run dialog (in the layout of every page) ----
+  const qrDialog = document.getElementById('qr-dialog')
+  const qrOpen = document.getElementById('qr-open')
+  if (qrDialog && qrOpen) {
+    const qrForm = document.getElementById('qr-form')
+    const favSel = document.getElementById('qr-fav')
+    const favInfo = document.getElementById('qr-fav-info')
+    const fehler = document.getElementById('qr-error')
+    const FAV_KEY = 'cchub.quickrun.favorite'
+
+    const zeigeFav = function () {
+      if (!favSel || !favInfo) return
+      const opt = favSel.selectedOptions[0]
+      favInfo.textContent = opt ? (opt.dataset.summary || '') : ''
+      try { localStorage.setItem(FAV_KEY, favSel.value) } catch (err) { /* private mode */ }
+    }
+    if (favSel) {
+      // The favorite one used last is almost always the one wanted again.
+      try {
+        const merk = localStorage.getItem(FAV_KEY)
+        if (merk && Array.from(favSel.options).some(function (o) { return o.value === merk })) favSel.value = merk
+      } catch (err) { /* private mode */ }
+      favSel.addEventListener('change', zeigeFav)
+      zeigeFav()
+    }
+
+    qrOpen.addEventListener('click', function () {
+      if (fehler) { fehler.hidden = true; fehler.textContent = '' }
+      qrDialog.showModal()
+      const ta = qrForm && qrForm.querySelector('textarea[name=prompt]')
+      if (ta) ta.focus()
+    })
+    qrDialog.querySelectorAll('[data-qr-close]').forEach(function (b) {
+      b.addEventListener('click', function () { qrDialog.close() })
+    })
+
+    if (qrForm) qrForm.addEventListener('submit', function (ev) {
+      ev.preventDefault()
+      const btn = qrForm.querySelector('button[type=submit]')
+      const body = new URLSearchParams()
+      new FormData(qrForm).forEach(function (v, k) { if (typeof v === 'string') body.append(k, v) })
+      if (fehler) { fehler.hidden = true; fehler.textContent = '' }
+      if (btn) btn.disabled = true
+      fetch('/api/runs/quick', { method: 'POST', body: body, headers: { accept: 'application/json' } })
+        .then(function (r) { return r.json() })
+        .then(function (j) {
+          if (!j.ok) throw new Error(j.error || 'HTTP')
+          qrDialog.close()
+          // Only the task is cleared: favorite, repo, branch rule and start time
+          // are the setup of the next quick run just as much as of this one.
+          const ta = qrForm.querySelector('textarea[name=prompt]')
+          if (ta) ta.value = ''
+          const name = j.title || j.favorite || ''
+          const text = j.scheduled
+            ? T('js.qr_scheduled', 'Run planned: {name}', { name: name })
+            : j.deferred
+              ? T('js.qr_deferred', 'Run deferred (quota/credit): {name}', { name: name })
+              : T('js.qr_started', 'Run started: {name}', { name: name })
+          window.cchubToast(text, { kind: j.deferred ? 'warn' : 'ok', href: '/runs/' + j.runId })
+        })
+        .catch(function (err) {
+          if (fehler) { fehler.hidden = false; fehler.textContent = err.message }
+          else window.cchubToast(err.message, { kind: 'err' })
+        })
+        .finally(function () { if (btn) btn.disabled = false })
+    })
   }
 
   // ---- inline renaming of a run (overview + detail page) ----
