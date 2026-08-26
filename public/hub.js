@@ -264,6 +264,7 @@
           provSel.value = ''
           provHint.textContent = ''
           await ladeModelle(harness)
+          ladeEffort()
           return
         }
         provLabel.hidden = false
@@ -275,6 +276,12 @@
           ? T('js.providers_with_creds', 'only providers with credentials, enabled for this coding agent')
           : T('js.no_creds', 'no providers available for this coding agent — type the model freely')
         await ladeModelle()
+        // Effort depends on provider AND model, but at page load the provider
+        // <select> is still empty until this fetch fills it — the init-time
+        // ladeEffort() therefore ran with provider='' and hid the field. The
+        // programmatic value assignment above fires no 'change' event, so the
+        // field would stay hidden: refresh it now that the combination stands.
+        ladeEffort()
       } catch {
         provHint.textContent = T('js.provider_list_unreachable', 'provider list unreachable — type the model freely')
       }
