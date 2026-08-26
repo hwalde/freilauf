@@ -1,7 +1,10 @@
 // cc-hub — provider plugin: DeepSeek (direct API).
 export default {
   id: 'deepseek',
-  label: 'DeepSeek (direct)',
+  // Short on purpose: the label is a column heading in a 268px sidebar, and
+  // "(direct)" pushed the balance onto a second line. That this is the direct
+  // API rather than opencode's bundled access is what envKeys already says.
+  label: 'DeepSeek',
   envKeys: ['DEEPSEEK_API_KEY'],
   ocPrefix: 'deepseek',
   mdKey: 'deepseek',
