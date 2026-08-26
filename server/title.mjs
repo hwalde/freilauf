@@ -12,7 +12,7 @@
 // meaningful line of the prompt. A title never holds a start up and never lets
 // one fail: generation happens AFTER the run exists and only replaces the
 // fallback if it is still there.
-import db, { getSetting, mruList, mruRemember } from './db.mjs'
+import db, { getSetting, mruList, mruRemember, announceRun } from './db.mjs'
 
 /**
  * The default: DeepSeek V4 Flash at OpenRouter, ~$0.05/$0.10 per million tokens
@@ -155,6 +155,10 @@ export async function applyGeneratedTitle(runId, prompt) {
   const before = fallbackTitle(prompt)
   const r = db.prepare(`UPDATE runs SET title=? WHERE id=? AND (title IS NULL OR title='' OR title=?)`)
     .run(title, runId, before)
+  // A title change writes no event, so the live channel has to be told here.
+  // This is the case the whole live channel started from: the title arrives
+  // seconds after the run does, and the page is already open by then.
+  if (r.changes) announceRun(runId, 'title')
   return r.changes ? title : null
 }
 

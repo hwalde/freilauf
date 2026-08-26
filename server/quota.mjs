@@ -16,6 +16,8 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { getProvider, providerHasKey } from './providers/index.mjs'
+import { providerCtx } from './models.mjs'
 
 const QUOTA_PATH = process.env.CCHUB_QUOTA_JSON ?? `${homedir()}/.claude/quota.json`
 
@@ -54,23 +56,27 @@ export function claudeQuota() {
 }
 
 let creditsCache = { at: 0, value: null }
-export async function openrouterCredits() {
-  if (!process.env.OPENROUTER_API_KEY) return null
+
+/**
+ * Remaining OpenRouter credit in US dollars — null when there is no key, no
+ * answer, and no earlier answer to fall back on.
+ *
+ * Deliberately asks the provider plugin directly instead of going through
+ * balances.mjs: that module reaches the database via coding-agents.mjs, and
+ * db.mjs imports the harness registry, which imports THIS file. Routing the
+ * gate through the aggregator would close exactly the cycle docs/plugins.md
+ * warns about. The gate needs one number from one plugin, so it asks it.
+ */
+async function openrouterRemaining() {
+  const plugin = getProvider('openrouter')
+  const ctx = providerCtx()
+  if (!plugin?.balance || !providerHasKey('openrouter', ctx.env)) return null
   if (creditsCache.value !== null && Date.now() - creditsCache.at < 120_000) return creditsCache.value
   try {
-    const res = await fetch('https://openrouter.ai/api/v1/credits', {
-      headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` },
-      signal: AbortSignal.timeout(10_000),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const j = await res.json()
-    const d = j?.data ?? {}
-    const value = { total_credits: d.total_credits ?? null, total_usage: d.total_usage ?? null }
-    value.remaining = value.total_credits != null && value.total_usage != null
-      ? Math.round((value.total_credits - value.total_usage) * 100) / 100
-      : null
-    creditsCache = { at: Date.now(), value }
-    return value
+    const b = await plugin.balance(ctx)
+    const usd = (b?.amounts ?? []).find(a => a.currency === 'USD')?.remaining ?? null
+    creditsCache = { at: Date.now(), value: usd }
+    return usd
   } catch {
     return creditsCache.value
   }
@@ -83,11 +89,15 @@ export function claudeGateBlocked(quota = claudeQuota()) {
   }
   return { blocked: false }
 }
-export async function openrouterGateBlocked(minimumEur = 5) {
-  const c = await openrouterCredits()
-  if (!c) return { blocked: false }   // no key / no signal → do not block
-  if (c.remaining != null && c.remaining < minimumEur) {
-    return { blocked: true, reason: `OpenRouter credits low: ${c.remaining} €` }
+// The setting behind `minimum` is still called `openrouter_min_eur` (renaming a
+// stored key would need a migration for nothing), but OpenRouter denominates
+// its credits in DOLLARS — the old reason line printed a euro sign next to a
+// dollar figure.
+export async function openrouterGateBlocked(minimum = 5) {
+  const remaining = await openrouterRemaining()
+  if (remaining === null) return { blocked: false }   // no key / no signal → do not block
+  if (remaining < minimum) {
+    return { blocked: true, reason: `OpenRouter credits low: ${remaining} $` }
   }
   return { blocked: false }
 }

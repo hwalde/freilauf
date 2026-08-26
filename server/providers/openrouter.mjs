@@ -23,6 +23,31 @@ export default {
    * the `reasoning` field (NOT supported_parameters) carries the allowed effort
    * levels and whether reasoning is mandatory for the model.
    */
+  /**
+   * Account balance in the normalized shape (see docs/plugins.md). OpenRouter
+   * keeps ONE pot and denominates it in US dollars — despite the `_eur` in the
+   * old setting name, which is why the panel used to print a dollar figure with
+   * a euro sign next to it.
+   *
+   * It says nothing about whether calls still go through, so `available` stays
+   * null: the gate decides from the number, and null means "not reported"
+   * rather than "fine" — the same rule the provider pulse follows.
+   */
+  async balance(ctx) {
+    const key = ctx.env.OPENROUTER_API_KEY
+    if (!key) return null
+    const j = await ctx.json('https://openrouter.ai/api/v1/credits',
+      { Authorization: `Bearer ${key}` })
+    const d = j?.data ?? {}
+    const total = Number(d.total_credits)
+    const used = Number(d.total_usage)
+    if (!Number.isFinite(total) || !Number.isFinite(used)) return null
+    return {
+      available: null,
+      amounts: [{ currency: 'USD', remaining: Math.round((total - used) * 100) / 100 }],
+    }
+  },
+
   async fetchModels(ctx) {
     const j = await ctx.json('https://openrouter.ai/api/v1/models')
     return (j.data ?? []).map(m => ({

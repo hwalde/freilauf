@@ -851,6 +851,59 @@ try {
       wahr(!!p.pulse?.url, `${p.id}: pulse target`)
     }
   })
+
+  // ---- balance(): the normalized shape (docs/plugins.md) ----
+  // ctx is injected, so these run without a network and without a key file.
+  const ctxMit = (antwort, env = {}) => ({ json: async () => antwort, registry: async () => ({}), env })
+
+  await pruefe('a provider balance keeps every currency apart', async () => {
+    // DeepSeek reports strings and one entry PER currency — folding them into a
+    // single figure would silently drop one of the two pots.
+    const d = await PROVIDER_PLUGINS.deepseek.balance(ctxMit({
+      is_available: true,
+      balance_infos: [
+        { currency: 'CNY', total_balance: '110.00', granted_balance: '10.00', topped_up_balance: '100.00' },
+        { currency: 'USD', total_balance: '15.50', granted_balance: '0.50', topped_up_balance: '15.00' },
+      ],
+    }, { DEEPSEEK_API_KEY: 'k' }))
+    gleich(d.amounts.length, 2, 'both currencies survive')
+    gleich(d.amounts[0].currency, 'CNY', 'currency carried')
+    gleich(d.amounts[0].remaining, 110, 'string parsed to a number')
+    gleich(d.amounts[1].granted, 0.5, 'granted parsed too')
+    wahr(d.available === true, 'the provider\'s own verdict is carried')
+  })
+  await pruefe('a provider that reports nothing usable answers null, not zero', async () => {
+    const leer = await PROVIDER_PLUGINS.deepseek.balance(ctxMit({ balance_infos: [] }, { DEEPSEEK_API_KEY: 'k' }))
+    wahr(leer === null, 'no amounts and no verdict = no answer')
+    const ohne = await PROVIDER_PLUGINS.deepseek.balance(ctxMit({}, {}))
+    wahr(ohne === null, 'no key = nothing to report')
+    const kaputt = await PROVIDER_PLUGINS.openrouter.balance(
+      ctxMit({ data: { total_credits: 'x', total_usage: null } }, { OPENROUTER_API_KEY: 'k' }))
+    wahr(kaputt === null, 'unusable numbers are no balance')
+  })
+  await pruefe('an exhausted account is stated even when a figure remains', async () => {
+    const d = await PROVIDER_PLUGINS.deepseek.balance(ctxMit({
+      is_available: false,
+      balance_infos: [{ currency: 'USD', total_balance: '2.00', granted_balance: '2.00', topped_up_balance: '0' }],
+    }, { DEEPSEEK_API_KEY: 'k' }))
+    wahr(d.available === false, 'expired promotional credit still shows a number')
+    gleich(d.amounts[0].remaining, 2, 'and the number is reported as it stands')
+  })
+  await pruefe('OpenRouter reports one pot, in dollars, with no verdict', async () => {
+    const d = await PROVIDER_PLUGINS.openrouter.balance(
+      ctxMit({ data: { total_credits: 20, total_usage: 7.125 } }, { OPENROUTER_API_KEY: 'k' }))
+    gleich(d.amounts.length, 1, 'one pot')
+    gleich(d.amounts[0].currency, 'USD', 'dollars, despite the _eur in the old setting name')
+    gleich(d.amounts[0].remaining, 12.88, 'credits minus usage, rounded to cents')
+    wahr(d.available === null, 'not reported is not the same as fine')
+  })
+  await pruefe('remainingIn picks one currency and never guesses', async () => {
+    const { remainingIn } = await import('../server/balances.mjs')
+    const b = { amounts: [{ currency: 'CNY', remaining: 110 }, { currency: 'USD', remaining: 15.5 }] }
+    gleich(remainingIn(b, 'USD'), 15.5, 'the asked-for currency')
+    wahr(remainingIn(b, 'EUR') === null, 'an unknown currency is null, not 0')
+    wahr(remainingIn(null) === null, 'no balance is null, not 0')
+  })
   await pruefe('providerHasKey looks at the environment', () => {
     const alt = process.env.OPENROUTER_API_KEY
     process.env.OPENROUTER_API_KEY = 'test-key'
@@ -1354,6 +1407,44 @@ try {
     gleich(ca.seedIfEmpty(), 1, 'empty table: valid entries seeded')
     wahr(ca.isHarnessEnabled('claude'), 'claude seeded')
     delete process.env.CCHUB_AGENTS_SEED
+  })
+
+  // A balance nobody can act on is noise: the panel asks only providers that an
+  // ENABLED coding agent may use and that actually carry a credential.
+  await pruefe('balances are only fetched for providers a configured agent may use', async () => {
+    const bal = await import('../server/balances.mjs')
+    const echt = globalThis.fetch
+    const gefragt = []
+    const keys = { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY, DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY }
+    globalThis.fetch = async (url) => {
+      gefragt.push(String(url))
+      return { ok: true, json: async () => ({ data: { total_credits: 5, total_usage: 1 }, is_available: true }) }
+    }
+    try {
+      // Only claude is configured here, and a subscription harness has no providers.
+      bal._balanceCacheReset()
+      gleich(bal.relevantProviderIds().length, 0, 'subscription-only setup asks nobody')
+      gleich((await bal.providerBalances()).length, 0, 'and fetches nothing')
+      gleich(gefragt.length, 0, 'no request left the process')
+
+      ca.saveCodingAgent({ harness: 'opencode', providers: ['opencode-zen', 'deepseek', 'openrouter'] })
+      process.env.OPENROUTER_API_KEY = 'k'
+      delete process.env.DEEPSEEK_API_KEY
+      bal._balanceCacheReset()
+      const rows = await bal.providerBalances()
+      gleich(rows.length, 1, 'a provider without a credential is left out, not reported as broken')
+      gleich(rows[0].provider, 'openrouter', 'the one with a key')
+      wahr(rows[0].ok, 'and it answered')
+      falsch(gefragt.some(u => u.includes('deepseek')), 'the keyless provider was never called')
+    } finally {
+      globalThis.fetch = echt
+      const oc = ca.codingAgentFor('opencode')
+      if (oc) ca.deleteCodingAgent(oc.id)   // restore the world the next group expects
+      for (const [k, v] of Object.entries(keys)) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v
+      }
+      bal._balanceCacheReset()
+    }
   })
 
   // ------------------------------------------------------------------

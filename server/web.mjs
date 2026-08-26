@@ -2,13 +2,14 @@
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import db, { getRepo, getRun, setSetting } from './db.mjs'
+import db, { getRepo, getRun, setSetting, addEvent, announceRun } from './db.mjs'
 import { handleReport } from './reports.mjs'
 import { modelList, orEndpoints, standVon, effortOptionen } from './models.mjs'
 import { providersForHarness, listCodingAgents } from './coding-agents.mjs'
 import { detectInstalled } from './harnesses/index.mjs'
 import { subscriptionUsage } from './usage.mjs'
-import { openrouterCredits } from './quota.mjs'
+import { providerBalances } from './balances.mjs'
+import { sseHandler } from './events.mjs'
 import { launchRun } from './runner.mjs'
 import { startRun } from './scheduler.mjs'
 import { runDefFromForm, runStartFromForm, saveAgent, rememberRunChoice, lastRunChoiceFor } from './run-def.mjs'
@@ -21,6 +22,7 @@ import {
   telegramSetup, telegramTokenSave, telegramChatSave, telegramChats,
   pageCodingAgents, codingAgentSave, codingAgentDelete,
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
+  headerStatus, usagePanel, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
 } from './pages.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
 import { redirect, body as readBody, parseForm } from './web-helpers.mjs'
@@ -132,6 +134,11 @@ async function dispatch(req, res, url, path, formBody) {
 async function api(req, res, url) {
   const path = url.pathname
   let m
+  // Live channel. Stands FIRST because it is the one response that never ends:
+  // everything below assumes a request that finishes.
+  if (req.method === 'GET' && path === '/api/events') return sseHandler(req, res, url)
+  // Pieces of a page, rendered by the very functions the page uses (pages.mjs).
+  if (req.method === 'GET' && path.startsWith('/api/fragments/')) return fragmentApi(req, res, url)
   if (req.method === 'GET' && path === '/api/telegram/chats') return telegramChats(req, res)
   if (path.startsWith('/api/flows') || path.startsWith('/api/flow-runs')) return flowApi(req, res, url)
 
@@ -176,11 +183,13 @@ async function api(req, res, url) {
     })
   }
 
-  // Subscription usage (Claude Code, Cursor) + OpenRouter credits.
+  // Subscription usage (Claude Code, Cursor) + provider account balances.
+  // Both lists carry their own ok-flag per row, so a provider that went silent
+  // is reported as silent rather than dropped.
   if (req.method === 'GET' && path === '/api/usage') {
     const usage = await subscriptionUsage()
-    const openrouter = await openrouterCredits()
-    return json(res, 200, { ok: true, usage, openrouter })
+    const balances = await providerBalances()
+    return json(res, 200, { ok: true, usage, balances })
   }
 
   // Model lists of the providers. ALWAYS answers 200 with ok:false on error —
@@ -269,6 +278,7 @@ async function api(req, res, url) {
     const b = await form(req)
     const gewuenscht = String(b.title ?? '').trim().slice(0, TITLE_MAX)
     db.prepare('UPDATE runs SET title=? WHERE id=?').run(gewuenscht || null, run.id)
+    announceRun(run.id, 'title')
     const agentName = run.agent_id
       ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null
     return answer(req, res, 200,
@@ -288,6 +298,7 @@ async function api(req, res, url) {
       return answer(req, res, 400, { ok: false, error: 'only finished runs can be archived' }, `/runs/${run.id}`)
     }
     db.prepare(`UPDATE runs SET archived_at=COALESCE(archived_at, datetime('now')) WHERE id=?`).run(run.id)
+    announceRun(run.id, 'archived')
     const b = await form(req)
     return answer(req, res, 200, { ok: true, archived: true }, b.back || `/runs/${run.id}`)
   }
@@ -295,6 +306,7 @@ async function api(req, res, url) {
     const run = getRun(m[1])
     if (!run) return answer(req, res, 404, { ok: false, error: 'unknown run' }, `/runs/${m[1]}`)
     db.prepare(`UPDATE runs SET archived_at=NULL WHERE id=?`).run(run.id)
+    announceRun(run.id, 'unarchived')
     const b = await form(req)
     return answer(req, res, 200, { ok: true, archived: false }, b.back || `/runs/${run.id}`)
   }
@@ -307,8 +319,14 @@ async function api(req, res, url) {
     const { sendToSession } = await import('./util.mjs')
     await sendToSession(run.tmux_session, text)
     db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(run.id)
+    // The run's event list is meant to be its history, and a message from a
+    // human was missing from it — the flow path has recorded its equivalent
+    // ('flow_message') all along.
     if (run.status === 'waiting_help') {
       db.prepare(`UPDATE runs SET status='running', help_answer=? WHERE id=?`).run(text, run.id)
+      addEvent(run.id, 'help_answered', { text: text.slice(0, 500) })
+    } else {
+      addEvent(run.id, 'message_sent', { text: text.slice(0, 500) })
     }
     return answer(req, res, 200, { ok: true }, `/runs/${run.id}`)
   }
@@ -320,6 +338,9 @@ async function api(req, res, url) {
     // a terminal to the dead session until the next watcher tick (410 in the browser).
     db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
                 tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(m[1])
+    // Same event kind reconcileClosedSession() writes, so "why did this run
+    // stop?" has one answer to look for rather than two.
+    addEvent(m[1], 'aborted', { by: 'user' })
     flowsTick().catch(e => console.error('[flows]', e.message))   // "run finished" triggers, without waiting for the watcher
     return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
   }
@@ -329,6 +350,7 @@ async function api(req, res, url) {
     // Retried = not over any more: it leaves the archive, otherwise an active run
     // would sit hidden in the overview while it works.
     db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL, archived_at=NULL WHERE id=?`).run(m[1])
+    addEvent(m[1], 'retry', { previous_status: run.status })
     const r = await launchRun(m[1])
     return answer(req, res, r.ok ? 200 : 500, r, `/runs/${m[1]}`)
   }
@@ -368,6 +390,77 @@ async function api(req, res, url) {
   }
   // Without this closing answer any unknown /api/ path would stay UNANSWERED —
   // the browser then waits until timeout instead of showing an error.
+  return json(res, 404, { ok: false, error: `unknown API path: ${req.method} ${path}` })
+}
+
+// ---------------- HTML fragments ----------------
+//
+// One piece of a page, on request, as HTML — for a client that wants to refresh
+// a single row instead of the document around it.
+//
+// The point of these endpoints is what they do NOT contain: no markup of their
+// own. Every one of them calls the same function the full page calls, so a row
+// has exactly ONE renderer. The moment a fragment builds its own <tr>, the two
+// drift — that is the lesson server/run-def.mjs was written from.
+//
+// The terminal block of the detail page is deliberately absent from run-detail:
+// swapping #term would tear the xterm instance off the DOM, leave the WebSocket
+// open and leak a tmux client that resizes the running agent's window.
+
+/** A fragment that is not there any more is 204, not 404. */
+function fragment(res, html) {
+  if (!html) return void res.writeHead(204).end()
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(html)
+}
+
+async function fragmentApi(req, res, url) {
+  const path = url.pathname
+
+  if (path === '/api/fragments/header-status') return fragment(res, headerStatus())
+  // Empty when there is neither subscription usage nor a balance — the panel is
+  // absent from the page in that case too, and 204 says exactly that.
+  if (path === '/api/fragments/usage') return fragment(res, await usagePanel())
+
+  // The whole tbody. Needed for the one case a row-level swap cannot serve: a
+  // run this page does not show YET. The empty state and the sort order both
+  // live in the body, so a new row cannot simply be appended — the parent has
+  // to be re-rendered, through the very same query the page uses.
+  if (path === '/api/fragments/runs-body') {
+    const repo = url.searchParams.get('repo')
+    if (!repo) return fragment(res, '')
+    return fragment(res, runsBody(overviewRuns(+repo), { repoId: +repo }))
+  }
+
+  // A row of the overview. Archived counts as gone: the overview does not show
+  // archived runs, so the answer is the same as for a run that never existed —
+  // 204, and the caller drops the row.
+  if (path === '/api/fragments/run-row') {
+    const run = getRun(url.searchParams.get('id') ?? '')
+    if (!run || run.archived_at) return fragment(res, '')
+    const repo = url.searchParams.get('repo')
+    return fragment(res, runRow(run, { repoId: repo ? +repo : run.repo_id }))
+  }
+
+  // Head, metrics and events of the detail page — the three blocks that change
+  // while a run works. Each carries its own id, so they can be placed one by one.
+  if (path === '/api/fragments/run-detail') {
+    const run = getRun(url.searchParams.get('id') ?? '')
+    if (!run) return fragment(res, '')
+    const agentName = run.agent_id
+      ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null
+    const title = runTitle(run, agentName, t('overview.single_run'))
+    return fragment(res, runDetailHead(run, { title }) + runMetrics(run) + runEvents(run.id))
+  }
+
+  // A session row. listSessions() asks tmux, so this is the one fragment that
+  // costs a process — and the reason the sessions page does not poll it in bulk.
+  if (path === '/api/fragments/session-row') {
+    const name = url.searchParams.get('name') ?? ''
+    const { listSessions } = await import('./sessions.mjs')
+    const s = name ? (await listSessions()).find(x => x.name === name) : null
+    return fragment(res, s ? sessionRow(s, {}) : '')
+  }
+
   return json(res, 404, { ok: false, error: `unknown API path: ${req.method} ${path}` })
 }
 

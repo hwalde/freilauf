@@ -3,7 +3,7 @@
 // happen HERE, in the server: the browser only reaches the hub on 127.0.0.1
 // and must not contact foreign hosts.
 //
-// Ground rule (same as openrouterCredits() in quota.mjs): a hanging or broken
+// Ground rule (the same one balances.mjs and usage.mjs follow): a hanging or broken
 // provider API must NEVER block the form. In doubt the caller gets an outdated
 // list or none at all — the free slug input always works.
 import { execFile } from 'node:child_process'
@@ -83,7 +83,7 @@ async function registry() {
 }
 
 /** Helper context injected into provider plugins. */
-function providerCtx() {
+export function providerCtx() {
   return { json, registry, env: process.env }
 }
 

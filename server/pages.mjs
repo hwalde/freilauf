@@ -5,7 +5,8 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRepo, getRun } from './db.mjs'
 import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime } from './util.mjs'
-import { claudeQuota, openrouterCredits } from './quota.mjs'
+import { claudeQuota } from './quota.mjs'
+import { providerBalances } from './balances.mjs'
 import {
   enabledCodingAgents, listCodingAgents, saveCodingAgent,
   deleteCodingAgent, unconfiguredHarnessIds,
@@ -29,6 +30,10 @@ import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder } from './zusaetze.mjs'
 import { listSessions, sessionKeepHours, currentKeepMs } from './sessions.mjs'
 import { attachmentSummary, flowSection, flowAttachFields } from './flows/attach.mjs'
+// The flow block of the detail page is rendered in server/flows/ and belongs to
+// that module; it is re-exported here so a fragment has ONE place to ask for a
+// piece of a page, whichever module happens to build it.
+export { flowSection }
 import { t, LANGUAGES, currentLanguage, setLanguage, clientCatalog } from './i18n.mjs'
 
 /**
@@ -146,15 +151,28 @@ function quickRunDialog(repos, selectedRepo) {
   </dialog>`
 }
 
-export function layout(title, active, content, selectedRepo = null, withTerminal = false) {
+/**
+ * The two live readings in the header: the pipeline switch and the quota bars.
+ *
+ * Each piece carries its own id and there is deliberately NO wrapper around
+ * them — <header> is a flex row, and a wrapper would turn three flex items into
+ * one and stack the bars. So this is a group of siblings that happen to be
+ * rendered together, and a swap addresses them one by one (or out of band).
+ */
+export function headerStatus() {
   const pipeline = pipelineAn()
   const q = claudeQuota()
+  const bar = (label, pct) => `<div class="quota" id="quota-${e(label)}"><span>${label}</span><div class="track"><div class="fill ${(pct ?? 0) >= 90 ? 'r' : (pct ?? 0) >= 80 ? 'y' : ''}" style="width:${Math.min(pct ?? 0, 100)}%"></div></div><span>${pct ?? '?'} %</span></div>`
+  return `<span id="header-status" title="${e(t('layout.pipeline_hint'))}">${e(t('layout.pipeline'))}: <b class="${pipeline ? 'ok' : 'warn'}">${e(pipeline ? t('layout.on') : t('layout.off'))}</b></span>
+  ${bar('5h', q.five)}${q.seven_general != null ? bar('7d', q.seven_general) : ''}`
+}
+
+export function layout(title, active, content, selectedRepo = null, withTerminal = false) {
   // No "Flows" entry: a flow is not a place you go, it hangs on the agent or the
   // single run that starts it. The flow pages are reached from those two forms.
   const nav = [['/', t('nav.overview')], ['/archive', t('nav.archive')], ['/agents', t('nav.agents')], ['/sessions', t('nav.sessions')],
     ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
     .map(([href, label]) => `<a href="${href}" class="${active === href ? 'on' : ''}">${e(label)}</a>`).join('')
-  const bar = (label, pct) => `<div class="quota"><span>${label}</span><div class="track"><div class="fill ${(pct ?? 0) >= 90 ? 'r' : (pct ?? 0) >= 80 ? 'y' : ''}" style="width:${Math.min(pct ?? 0, 100)}%"></div></div><span>${pct ?? '?'} %</span></div>`
   const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
   const repoSel = repos.length
     ? `<label class="dim">${e(t('layout.repo'))}</label> <select id="repo-switch" data-active="${e(active)}">${repos.map(r => `<option value="${r.id}" ${r.id == selectedRepo ? 'selected' : ''}>${e(r.name)}</option>`).join('')}</select>`
@@ -163,7 +181,7 @@ export function layout(title, active, content, selectedRepo = null, withTerminal
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>cc-hub — ${e(title)}</title>
 <link rel="stylesheet" href="/static/xterm.css"><link rel="stylesheet" href="/static/hub.css"></head>
-<body>
+<body${selectedRepo == null ? '' : ` data-repo="${e(String(selectedRepo))}"`}>
 ${setupBanner()}
 <header>
   <span class="brand">cc-hub</span>
@@ -171,8 +189,7 @@ ${setupBanner()}
   ${repoSel}
   <button type="button" id="qr-open" class="qr-open" title="${e(t('qr.hint'))}">⚡ ${e(t('qr.title'))}</button>
   <span class="spacer"></span>
-  <span title="${e(t('layout.pipeline_hint'))}">${e(t('layout.pipeline'))}: <b class="${pipeline ? 'ok' : 'warn'}">${e(pipeline ? t('layout.on') : t('layout.off'))}</b></span>
-  ${bar('5h', q.five)}${q.seven_general != null ? bar('7d', q.seven_general) : ''}
+  ${headerStatus()}
 </header>
 <main>${globalesBanner()}${content}</main>
 ${quickRunDialog(repos, selectedRepo)}
@@ -183,11 +200,16 @@ ${withTerminal ? '<script src="/static/xterm.js"></script><script src="/static/a
 }
 
 // ---------------- subscription usage panel ----------------
-async function usagePanel() {
+/**
+ * Subscription usage + provider balances. Exported because it is one of the
+ * blocks that goes stale on its own clock rather than with the page around it.
+ */
+export async function usagePanel() {
   let usage = []
   try { usage = await subscriptionUsage() } catch { usage = [] }
-  const credits = await openrouterCredits()
-  if (!usage.length && !credits) return ''
+  let balances = []
+  try { balances = await providerBalances() } catch { balances = [] }
+  if (!usage.length && !balances.length) return ''
   // A reset within the next day is a time, everything beyond it needs the date
   // too — '16:30' alone says nothing about a window that runs for a week.
   const resetText = (iso) => {
@@ -233,11 +255,28 @@ async function usagePanel() {
     }
     return ''
   }).join('')
-  const or = credits?.remaining != null
-    ? `<div class="usage-row"><b>${e(t('usage.openrouter_credits'))}</b> <span>${e(t('usage.remaining', { eur: credits.remaining }))}</span></div>`
-    : ''
-  if (!rows && !or) return ''
-  return `<details class="usage" open><summary>${e(t('usage.title'))}</summary>${rows}${or}</details>`
+  // Provider balances. One line per provider, one figure per CURRENCY — an
+  // account can hold CNY and USD at once (DeepSeek does), and folding those into
+  // a single number would quietly drop one of them. The name comes from the
+  // plugin label, so a new provider appears here without a line of UI code.
+  const guthaben = balances.map(b => {
+    if (!b.ok) return `<div class="usage-row"><b>${e(b.label)}</b> <span class="dim">${e(t('usage.unavailable'))}</span></div>`
+    const betraege = b.data.amounts.map(a => {
+      // granted/topped_up are DeepSeek's split and stay in the tooltip: the
+      // figure that matters on screen is what is left.
+      const detail = a.granted != null && a.topped_up != null
+        ? t('usage.balance_detail', { granted: a.granted, topped_up: a.topped_up }) : ''
+      return `<span${detail ? ` title="${e(detail)}"` : ''}>${
+        e(t('usage.remaining', { amount: a.remaining, currency: a.currency }))}</span>`
+    }).join(' <span class="dim">·</span> ')
+    // `available:false` is the provider's own verdict and outranks the number
+    // next to it — promotional credit can expire while the figure looks healthy.
+    const leer = b.data.available === false
+      ? ` <b class="err">${e(t('usage.balance_exhausted'))}</b>` : ''
+    return `<div class="usage-row"><b>${e(b.label)}</b> ${betraege}${leer}</div>`
+  }).join('')
+  if (!rows && !guthaben) return ''
+  return `<details class="usage" id="usage-panel" open><summary>${e(t('usage.title'))}</summary>${rows}${guthaben}</details>`
 }
 
 // ---------------- overview ----------------
@@ -247,34 +286,48 @@ export async function pageOverview(req, res, url) {
   // 'scheduled' sits with 'deferred': both are runs that exist and are WAITING —
   // that is exactly what one wants to see at a glance, not somewhere below the
   // finished ones. Archived runs have left the overview entirely (Archive page).
-  const runs = db.prepare(`SELECT * FROM runs WHERE repo_id=? AND archived_at IS NULL ORDER BY
-    CASE status WHEN 'waiting_help' THEN 0 WHEN 'failed' THEN 1 WHEN 'running' THEN 2
-                WHEN 'deferred' THEN 3 WHEN 'scheduled' THEN 4 ELSE 5 END,
-    started_at DESC LIMIT 200`).all(sel.id)
-  const rows = runs.map(r => {
-    const agentName = r.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(r.agent_id)?.name ?? null : null
-    const titel = runTitle(r, agentName, t('overview.single_run'))
-    // Under the title stands where the run comes from — the agent by name, or
-    // the word for "no agent". A renamed run must not lose that information.
-    const herkunft = agentName ? t('overview.from_agent', { agent: agentName }) : t('overview.single_run')
-    // Finished runs: duration until the end, not until now — otherwise a run
-    // from three days ago "grows" to 4000 minutes in the overview.
-    const startedMs = parseDbUtc(r.started_at)
-    const endeMs = r.ended_at ? parseDbUtc(r.ended_at) : Date.now()
-    const durMin = Math.round((endeMs - startedMs) / 60000)
-    const wartend = r.status === 'scheduled'
-    // One click moves a finished run into the archive — the record stays, it just
-    // leaves the overview. Only finished runs may go: a running or waiting one
-    // still has work to do and must not hide (the server enforces this too).
-    const archivBtn = ['done', 'failed', 'aborted'].includes(r.status)
-      ? `<form method="post" action="/api/runs/${r.id}/archive" class="inline" onclick="event.stopPropagation()">
-          <input type="hidden" name="back" value="/?repo=${sel.id}">
+  const runs = overviewRuns(sel.id)
+  const body = `
+  ${await usagePanel()}
+  <p><a class="btn" href="/runs/new?repo=${sel.id}">${e(t('overview.start_single'))}</a>
+     <a class="btn" href="/archive?repo=${sel.id}">${e(t('nav.archive'))}</a></p>
+  ${overviewTable(runs, { repoId: sel.id })}`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.overview'), '/', body, sel.id))
+}
+
+/**
+ * One run as a table row — the smallest unit of the overview that is worth
+ * replacing on its own, and therefore the one place a row is ever built.
+ *
+ * `ctx` carries what the row cannot know by itself: the repo the overview is
+ * currently showing, which is where the inline forms have to return to. It is
+ * not state, it is the call site's context handed down.
+ */
+export function runRow(r, ctx) {
+  const repoId = ctx.repoId
+  const agentName = r.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(r.agent_id)?.name ?? null : null
+  const titel = runTitle(r, agentName, t('overview.single_run'))
+  // Under the title stands where the run comes from — the agent by name, or
+  // the word for "no agent". A renamed run must not lose that information.
+  const herkunft = agentName ? t('overview.from_agent', { agent: agentName }) : t('overview.single_run')
+  // Finished runs: duration until the end, not until now — otherwise a run
+  // from three days ago "grows" to 4000 minutes in the overview.
+  const startedMs = parseDbUtc(r.started_at)
+  const endeMs = r.ended_at ? parseDbUtc(r.ended_at) : Date.now()
+  const durMin = Math.round((endeMs - startedMs) / 60000)
+  const wartend = r.status === 'scheduled'
+  // One click moves a finished run into the archive — the record stays, it just
+  // leaves the overview. Only finished runs may go: a running or waiting one
+  // still has work to do and must not hide (the server enforces this too).
+  const archivBtn = ['done', 'failed', 'aborted'].includes(r.status)
+    ? `<form method="post" action="/api/runs/${r.id}/archive" class="inline" onclick="event.stopPropagation()">
+          <input type="hidden" name="back" value="/?repo=${repoId}">
           <button type="submit" class="act" title="${e(t('overview.archive'))}" aria-label="${e(t('overview.archive'))}">${e(t('overview.archive_short'))}</button></form>`
-      : ''
-    // The row stays clickable as a whole, the title is additionally a real link —
-    // otherwise the detail page would be unreachable by keyboard. The title cell
-    // swallows the row click: renaming must not navigate away.
-    return `<tr onclick="location='/runs/${r.id}'">
+    : ''
+  // The row stays clickable as a whole, the title is additionally a real link —
+  // otherwise the detail page would be unreachable by keyboard. The title cell
+  // swallows the row click: renaming must not navigate away.
+  return `<tr id="run-${e(r.id)}" onclick="location='/runs/${r.id}'">
       <td>${AMPEL_DOT[ampel(r)]}</td>
       <td class="titelzelle" onclick="event.stopPropagation()">
         ${titleInline(r.id, titel)}
@@ -285,18 +338,44 @@ export async function pageOverview(req, res, url) {
       <td>${wartend ? '' : (durMin > 0 ? durMin + ' min' : '')}<span class="dim"> / ${r.expected_minutes} min</span></td>
       <td>${e(r.branch_reported || r.branch_expected || '–')}</td>
       <td>${r.pr_url ? `<a href="${e(r.pr_url)}">PR</a>` : '–'}</td>
-      <td>${vorfallZelle(r.id, sel.id, r.status)}</td>
+      <td>${vorfallZelle(r.id, repoId, r.status)}</td>
       <td class="dim">${e(lastAnomaly(r.id))}</td>
       <td>${archivBtn}</td>
     </tr>`
-  }).join('')
-  const body = `
-  ${await usagePanel()}
-  <p><a class="btn" href="/runs/new?repo=${sel.id}">${e(t('overview.start_single'))}</a>
-     <a class="btn" href="/archive?repo=${sel.id}">${e(t('nav.archive'))}</a></p>
-  <table class="list"><thead><tr><th></th><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('overview.started'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th>${e(t('incidents.title'))}</th><th>${e(t('overview.last_anomaly'))}</th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="11" class="dim">${e(t('overview.no_runs'))}</td></tr>`}</tbody></table>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.overview'), '/', body, sel.id))
+}
+
+/** The rows of the overview — including the one row that says there are none. */
+export function runRows(runs, ctx) {
+  return runs.map(r => runRow(r, ctx)).join('')
+    || `<tr><td colspan="11" class="dim">${e(t('overview.no_runs'))}</td></tr>`
+}
+
+/**
+ * The runs the overview shows, in the order it shows them.
+ *
+ * Its own function because the live channel re-renders the tbody when a run
+ * appears that the page does not know yet — and a second copy of this ORDER BY
+ * would be a second opinion about which runs matter. 'scheduled' sits with
+ * 'deferred': both are runs that exist and are WAITING, which is what one wants
+ * to see at a glance rather than below the finished ones. Archived runs have
+ * left the overview entirely (Archive page).
+ */
+export function overviewRuns(repoId) {
+  return db.prepare(`SELECT * FROM runs WHERE repo_id=? AND archived_at IS NULL ORDER BY
+    CASE status WHEN 'waiting_help' THEN 0 WHEN 'failed' THEN 1 WHEN 'running' THEN 2
+                WHEN 'deferred' THEN 3 WHEN 'scheduled' THEN 4 ELSE 5 END,
+    started_at DESC LIMIT 200`).all(repoId)
+}
+
+/** The tbody on its own — the swap target when a row has to appear or vanish. */
+export function runsBody(runs, ctx) {
+  return `<tbody id="runs-body">${runRows(runs, ctx)}</tbody>`
+}
+
+/** The overview table around the rows; the tbody is the anchor for new rows. */
+export function overviewTable(runs, ctx) {
+  return `<table class="list"><thead><tr><th></th><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('overview.started'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th>${e(t('incidents.title'))}</th><th>${e(t('overview.last_anomaly'))}</th><th></th></tr></thead>
+  ${runsBody(runs, ctx)}</table>`
 }
 
 /**
@@ -400,22 +479,36 @@ export async function pageAgents(req, res, url) {
   if (!sel) return noRepoPage(res, '/agents', t('nav.agents'))
   if (req.method === 'POST') return void res.writeHead(405).end()
   const agents = db.prepare('SELECT * FROM agents WHERE repo_id=? ORDER BY name').all(sel.id)
-  const rows = agents.map(a => `
-  <tr>
-    <td><form method="post" action="/agents/toggle" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${sel.id}"><button>${e(a.active ? t('agents.on') : t('agents.off'))}</button></form></td>
-    <td>${e(a.name)}</td><td>${e(a.harness)}</td><td>${e(a.model || '–')}</td>
-    <td>${e(scheduleText(a))}</td><td>${a.expected_minutes} min</td>
-    <td class="dim">${e(attachmentSummary(a.flows)) || '–'}</td>
-    <td><form method="post" action="/agents/start" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${sel.id}"><button>${e(t('agents.start_now'))}</button></form></td>
-    <td><a href="/agents/edit?id=${a.id}&repo=${sel.id}">${e(t('agents.edit'))}</a></td>
-  </tr>`).join('')
   const body = `
   <p><a class="btn" href="/agents/edit?repo=${sel.id}">${e(t('agents.create'))}</a>
      <a class="btn" href="/flows">${e(t('nav.flows'))}</a>
      <span class="dim">${e(t('agents.flows_hint'))}</span></p>
-  <table class="list"><thead><tr><th>${e(t('agents.status'))}</th><th>${e(t('agents.name'))}</th><th>${e(t('agents.harness'))}</th><th>${e(t('agents.model'))}</th><th>${e(t('agents.schedule'))}</th><th>${e(t('agents.expected'))}</th><th>${e(t('nav.flows'))}</th><th></th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="9" class="dim">${e(t('agents.none'))}</td></tr>`}</tbody></table>`
+  ${agentsTable(agents, { repoId: sel.id })}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.agents'), '/agents', body, sel.id))
+}
+
+/** One agent as a table row. `ctx.repoId` is where its two forms return to. */
+export function agentRow(a, ctx) {
+  const repoId = ctx.repoId
+  return `
+  <tr id="agent-${a.id}">
+    <td><form method="post" action="/agents/toggle" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button>${e(a.active ? t('agents.on') : t('agents.off'))}</button></form></td>
+    <td>${e(a.name)}</td><td>${e(a.harness)}</td><td>${e(a.model || '–')}</td>
+    <td>${e(scheduleText(a))}</td><td>${a.expected_minutes} min</td>
+    <td class="dim">${e(attachmentSummary(a.flows)) || '–'}</td>
+    <td><form method="post" action="/agents/start" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button>${e(t('agents.start_now'))}</button></form></td>
+    <td><a href="/agents/edit?id=${a.id}&repo=${repoId}">${e(t('agents.edit'))}</a></td>
+  </tr>`
+}
+
+export function agentRows(agents, ctx) {
+  return agents.map(a => agentRow(a, ctx)).join('')
+    || `<tr><td colspan="9" class="dim">${e(t('agents.none'))}</td></tr>`
+}
+
+export function agentsTable(agents, ctx) {
+  return `<table class="list"><thead><tr><th>${e(t('agents.status'))}</th><th>${e(t('agents.name'))}</th><th>${e(t('agents.harness'))}</th><th>${e(t('agents.model'))}</th><th>${e(t('agents.schedule'))}</th><th>${e(t('agents.expected'))}</th><th>${e(t('nav.flows'))}</th><th></th><th></th></tr></thead>
+  <tbody id="agents-body">${agentRows(agents, ctx)}</tbody></table>`
 }
 
 // ---------------- single-run form (= agent form without name and schedule) ----------------
@@ -449,7 +542,6 @@ export async function pageRun(req, res, url, id) {
   const agentName = run.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null
   const titel = runTitle(run, agentName, t('overview.single_run'))
   const herkunft = agentName ? t('overview.from_agent', { agent: agentName }) : t('overview.single_run')
-  const events = db.prepare(`SELECT * FROM events WHERE run_id=? AND kind NOT LIKE 'telegram_sent%' ORDER BY id`).all(id)
   // Log (ANSI-cleaned), last excerpt
   const { readFileSync, existsSync, statSync } = await import('node:fs')
   const { join } = await import('node:path')
@@ -466,23 +558,7 @@ export async function pageRun(req, res, url, id) {
   // status, the page promised a terminal that did not exist.
   const live = ['running', 'waiting_help'].includes(run.status) && !!run.tmux_session && !run.tmux_closed_at
   const body = `
-  <h2>${AMPEL_DOT[ampel(run)]} ${titleInline(id, titel)} <span class="dim">(${run.status})</span></h2>
-  ${run.status === 'scheduled'
-    // A planned run must be revocable — otherwise a start you thought better of
-    // sits in the future with no way to stop it. 'kill' is exactly right here:
-    // there is no session to end, only a record to set to 'aborted'.
-    ? `<div class="banner warten">⏳ ${wartetAuf(run)}
-       <form method="post" action="/api/runs/${id}/kill" class="inline"><button class="danger">${e(t('start.cancel'))}</button></form></div>`
-    : ''}
-  ${['done', 'failed', 'aborted'].includes(run.status)
-    // One click into the archive / back out of it. An archived run is hidden
-    // from the overview but stays fully reachable here, report and log intact.
-    ? `<p><form method="post" action="/api/runs/${id}/${run.archived_at ? 'unarchive' : 'archive'}" class="inline">
-         <input type="hidden" name="back" value="/runs/${id}">
-         <button>${e(t(run.archived_at ? 'run.restore' : 'run.archive'))}</button></form>
-       ${run.archived_at ? `<span class="dim">${e(t('run.archived_since', { ts: run.archived_at }))}</span>`
-         : `<span class="dim">${e(t('run.archive_hint'))}</span>`}</p>`
-    : ''}
+  ${runDetailHead(run, { title: titel })}
   <p class="dim">${e(t('run.title', { id: id.slice(0, 8) }))} · ${e(herkunft)} · ${e(t('layout.repo'))} „${e(repo?.name ?? '?')}“, ${e(t('agents.harness'))} ${e(run.harness)}${run.model ? `, ${t('agents.model')} ` + e(run.model) : ''}
    ${run.provider ? `· Provider ${e(run.provider)}${run.or_provider ? ` (${e(t('run.pinned'))}: ${e(run.or_provider)})` : ''} ` : ''}· ${e(t('run.start'))} ${e(run.started_at)}${run.ended_at ? ' · ' + e(t('run.end')) + ' ' + e(run.ended_at) : ''}
    · ${e(t('run.expectation'))} ${run.expected_minutes} min · ${e(t('run.workdir'))} <code>${e(run.workdir_effective ?? '')}</code>
@@ -508,17 +584,56 @@ export async function pageRun(req, res, url, id) {
   ${flowSection(run)}
   ${vorfallAbschnitt(id, run.status)}
   <h3>${e(t('run.metrics'))}</h3>
-  <ul>
+  ${runMetrics(run)}
+  <h3>${e(t('run.events'))}</h3>${runEvents(id)}
+  <h3>${e(t('run.log'))}</h3>${logHtml}`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(titel, '/', body, run.repo_id, true))
+}
+
+/**
+ * Head of the detail page: name, traffic light, status — plus the two lines that
+ * are only there in certain states (a planned run's cancel banner, the archive
+ * row of a finished one). They stand together because they answer one question:
+ * what IS this run right now.
+ */
+export function runDetailHead(run, ctx) {
+  const id = run.id
+  const titel = ctx.title
+  return `<h2 id="run-head">${AMPEL_DOT[ampel(run)]} ${titleInline(id, titel)} <span class="dim">(${run.status})</span></h2>
+  ${run.status === 'scheduled'
+    // A planned run must be revocable — otherwise a start you thought better of
+    // sits in the future with no way to stop it. 'kill' is exactly right here:
+    // there is no session to end, only a record to set to 'aborted'.
+    ? `<div class="banner warten" id="run-banner">⏳ ${wartetAuf(run)}
+       <form method="post" action="/api/runs/${id}/kill" class="inline"><button class="danger">${e(t('start.cancel'))}</button></form></div>`
+    : ''}
+  ${['done', 'failed', 'aborted'].includes(run.status)
+    // One click into the archive / back out of it. An archived run is hidden
+    // from the overview but stays fully reachable here, report and log intact.
+    ? `<p id="run-archive"><form method="post" action="/api/runs/${id}/${run.archived_at ? 'unarchive' : 'archive'}" class="inline">
+         <input type="hidden" name="back" value="/runs/${id}">
+         <button>${e(t(run.archived_at ? 'run.restore' : 'run.archive'))}</button></form>
+       ${run.archived_at ? `<span class="dim">${e(t('run.archived_since', { ts: run.archived_at }))}</span>`
+         : `<span class="dim">${e(t('run.archive_hint'))}</span>`}</p>`
+    : ''}`
+}
+
+/** The six figures of a run. Its own list because it is the part that moves. */
+export function runMetrics(run) {
+  return `<ul id="run-metrics">
     <li>${e(t('run.runtime'))}: ${fmtLaufzeit(run)} · ${e(t('run.expectation'))} ${run.expected_minutes} min</li>
     <li>${e(t('run.tokens'))}: in ${run.tokens_in ?? 0}, out ${run.tokens_out ?? 0}</li>
     <li>${e(t('run.costs'))}: ${run.cost_eur != null ? run.cost_eur.toFixed(2) + ' € (' + e(t('run.abo_delta')) + ')' : run.cost_usd != null ? run.cost_usd.toFixed(4) + ' $' : '–'}</li>
     <li>${e(t('run.activity'))}: ${e(run.last_activity_at ?? '–')}</li>
     <li>${e(t('run.branch_reported'))}: ${e(run.branch_reported ?? '–')} · ${e(t('run.branch_expected'))}: ${e(run.branch_expected ?? '–')} · PR: ${run.pr_url ? `<a href="${e(run.pr_url)}">${e(run.pr_url)}</a>` : '–'}</li>
     <li>Exit: ${run.exit_code ?? '–'}${run.tmux_closed_at ? ' · ' + e(t('run.tmux_closed')) + ' ' + e(run.tmux_closed_at) : ''}</li>
-  </ul>
-  <h3>${e(t('run.events'))}</h3><ul class="events">${events.map(ev => `<li><span class="dim">${e(ev.ts)}</span> ${e(ev.kind)}</li>`).join('') || `<li class="dim">${e(t('run.none'))}</li>`}</ul>
-  <h3>${e(t('run.log'))}</h3>${logHtml}`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(titel, '/', body, run.repo_id, true))
+  </ul>`
+}
+
+/** The run's history, oldest first — without the Telegram bookkeeping. */
+export function runEvents(runId) {
+  const events = db.prepare(`SELECT * FROM events WHERE run_id=? AND kind NOT LIKE 'telegram_sent%' ORDER BY id`).all(runId)
+  return `<ul class="events" id="run-events">${events.map(ev => `<li><span class="dim">${e(ev.ts)}</span> ${e(ev.kind)}</li>`).join('') || `<li class="dim">${e(t('run.none'))}</li>`}</ul>`
 }
 
 function fmtLaufzeit(run) {
@@ -532,7 +647,7 @@ function fmtLaufzeit(run) {
  * as history. The evidence (the line that fired) is shown — otherwise a false
  * alarm cannot be told apart from a real one.
  */
-function vorfallAbschnitt(runId, runStatus = null) {
+export function vorfallAbschnitt(runId, runStatus = null) {
   const alle = alleVorfaelle(runId)
   if (!alle.length) return ''
   const zeile = (v) => `<li class="vorfall-zeile ${v.geloest_am ? 'geloest' : v.schwere}">
@@ -599,7 +714,12 @@ function byteText(kb) {
   return kb >= 1024 * 1024 ? `${(kb / 1024 / 1024).toFixed(1)} GB` : `${Math.round(kb / 1024)} MB`
 }
 
-function sessionRow(s) {
+/**
+ * One tmux session as a table row. `ctx` is unused today and stands there for
+ * the same reason the other row renderers take one: the call site, not the row,
+ * decides what a row needs to know.
+ */
+export function sessionRow(s, ctx = {}) {
   const run = s.run
   const running = s.state === 'agent_running'
   const title = run ? runTitle(run, run.agent_name, t('overview.single_run')) : s.name
@@ -615,7 +735,7 @@ function sessionRow(s) {
     dead: t('sessions.state_dead'),
     unknown: t('sessions.state_unknown'),
   }[s.state]
-  return `<tr data-session="${e(s.name)}" data-running="${running ? '1' : '0'}">
+  return `<tr id="session-${e(s.name)}" data-session="${e(s.name)}" data-running="${running ? '1' : '0'}">
     <td><input type="checkbox" class="sess-pick" value="${e(s.name)}" aria-label="${e(s.name)}"></td>
     <td><span class="dot ${STATE_CLASS[s.state]}"></span> <span class="sess-state">${e(stateText)}</span>
       ${s.deadStatus ? `<span class="dim">exit ${e(s.deadStatus)}</span>` : ''}</td>
@@ -638,7 +758,6 @@ export async function pageSessions(req, res, url) {
   const runningCount = sessions.filter(s => s.state === 'agent_running').length
   const rssTotal = sessions.reduce((n, s) => n + s.resources.rssKb, 0)
   const hours = Math.round(currentKeepMs() / 3_600_000 * 10) / 10
-  const rows = sessions.map(sessionRow).join('')
   const body = `
   <h2>${e(t('sessions.title'))}</h2>
   <p class="dim">${e(t('sessions.intro'))}</p>
@@ -653,16 +772,25 @@ export async function pageSessions(req, res, url) {
   <p class="dim" id="sess-hidden" hidden></p>
   <p class="dim">${e(t('sessions.auto_hint', { hours: hours }))}
      <a href="/settings">${e(t('nav.settings'))}</a></p>
-  <table class="list sessions"><thead><tr>
+  ${sessionsTable(sessions, {})}
+  <p class="dim">${e(t('sessions.hidden_note', { n: runningCount }))}</p>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(layout(t('sessions.title'), '/sessions', body))
+}
+
+export function sessionRows(sessions, ctx = {}) {
+  return sessions.map(s => sessionRow(s, ctx)).join('')
+    || `<tr><td colspan="11" class="dim">${e(t('sessions.none'))}</td></tr>`
+}
+
+export function sessionsTable(sessions, ctx = {}) {
+  return `<table class="list sessions"><thead><tr>
     <th></th><th>${e(t('sessions.col_state'))}</th><th>${e(t('sessions.col_run'))}</th>
     <th>${e(t('sessions.col_session'))}</th><th>${e(t('sessions.col_age'))}</th>
     <th>${e(t('sessions.col_activity'))}</th><th>${e(t('sessions.col_process'))}</th>
     <th>${e(t('sessions.col_resources'))}</th><th>${e(t('sessions.col_windows'))}</th>
     <th>${e(t('sessions.col_path'))}</th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="11" class="dim">${e(t('sessions.none'))}</td></tr>`}</tbody></table>
-  <p class="dim">${e(t('sessions.hidden_note', { n: runningCount }))}</p>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    .end(layout(t('sessions.title'), '/sessions', body))
+  <tbody id="sessions-body">${sessionRows(sessions, ctx)}</tbody></table>`
 }
 
 // ---------------- settings ----------------
@@ -1082,22 +1210,41 @@ export async function repoSave(req, res, url, formBody) {
   redirect(res, '/repos')
 }
 
+/**
+ * Every setting this route may write. An allowlist, not the body's own keys —
+ * a request must not be able to invent a setting.
+ *
+ * 'retention_days' is deliberately absent: it stays in the database as the
+ * fallback for an installation that has not saved the new field yet
+ * (sessionKeepMs), and an empty write would silently reset it.
+ */
+const SETTINGS_KEYS = ['pipeline_on', 'telegram_token', 'telegram_chat', 'quota_threshold',
+  'openrouter_min_eur', 'abo_price', 'cursor_included_usd', 'session_keep_hours', 'prompt_suffix',
+  'llm_check_on', 'llm_check_model', 'llm_check_or_provider',
+  'llm_title_on', 'llm_title_model', 'llm_title_or_provider', 'ui_language']
+
 export async function settingsSave(req, res, url, formBody) {
   const b = await formBody()
-  for (const k of ['pipeline_on', 'telegram_token', 'telegram_chat', 'quota_threshold',
-    // 'retention_days' is deliberately NOT written any more: it stays in the
-    // database as the fallback for an installation that has not saved the new
-    // field yet (sessionKeepMs), and an empty write would silently reset it.
-    'openrouter_min_eur', 'abo_price', 'cursor_included_usd', 'session_keep_hours', 'prompt_suffix',
-    'llm_check_on', 'llm_check_model', 'llm_check_or_provider',
-    'llm_title_on', 'llm_title_model', 'llm_title_or_provider', 'ui_language']) {
-    setSetting(k, b[k] ?? '')
+  // Write only what the request actually CARRIED. This used to be `b[k] ?? ''`
+  // over the whole list, which meant a body with one field blanked the other
+  // fifteen — a settings page that saves a fragment at a time would have wiped
+  // the Telegram token the first time somebody switched the language. The e2e
+  // suite still has to post everything back to change one value; that was the
+  // symptom, and this is the cause.
+  //
+  // Safe for this form because every field here is a text input or a <select>,
+  // and both always post a value — an empty text field arrives as ''. It would
+  // NOT be safe for a checkbox: an unchecked one is simply absent, so its "off"
+  // would read as "not mentioned". A checkbox added here needs a hidden
+  // companion field carrying the 0.
+  for (const k of SETTINGS_KEYS) {
+    if (Object.hasOwn(b, k)) setSetting(k, b[k] ?? '')
   }
   // The language takes effect immediately — the redirect below already renders in it.
-  setLanguage(b.ui_language ?? 'en')
+  if (Object.hasOwn(b, 'ui_language')) setLanguage(b.ui_language ?? 'en')
   // "Used" means saved: only now does the model enter the MRU list.
-  llmModellMerken(b.llm_check_model)
-  rememberTitleModel(b.llm_title_model)
+  if (Object.hasOwn(b, 'llm_check_model')) llmModellMerken(b.llm_check_model)
+  if (Object.hasOwn(b, 'llm_title_model')) rememberTitleModel(b.llm_title_model)
   redirect(res, '/settings')
 }
 

@@ -269,6 +269,7 @@ node test/unit.mjs          # pure logic (cron, schedules, quota gate, parsers, 
 node test/e2e.mjs           # complete hub in a sandbox, stub instead of real agents — ~30 s
 node test/e2e.mjs --echt    # additionally ONE real run per harness (consumes quota)
 node test/e2e.mjs --keep    # keep the sandbox (debugging)
+node test/browser.mjs       # public/hub.js in a real Chromium — ~10 s
 ```
 
 The e2e suite starts a **second hub** on a free port with its own database, its
@@ -276,7 +277,27 @@ own test repo and its own `cc-start` stub. It may therefore run at any time
 alongside production: the production database, `~/agents` and foreign tmux
 sessions are never touched, and only sessions the suite created itself are
 killed (also on Ctrl-C). Watcher passes are triggered directly instead of
-waiting for the 30-second interval.
+waiting for the 30-second interval. That sandbox lives in
+**`test/sandkasten.mjs`** — one construction, two suites, because a second copy
+of it would drift the way the run definition once did.
+
+**Why there is a browser suite.** `public/hub.js` was 746 lines with not one
+test, because no browser ran in the suite: everything else stops at the HTML the
+server sends. And the ways that file breaks are all **silent** — a dead listener
+throws nothing, the selects simply never fill, the terminal is a black box, the
+pencil does nothing. `test/browser.mjs` therefore drives Chromium against a
+sandbox hub and writes down what hub.js does today: the relative times that tick
+by themselves, the schedule and start-time blocks (the latter **per fieldset** —
+the Quick-Run dialog puts that block on the page twice), the Quick Run that
+clears only the task, inline renaming including its guard against sending twice,
+the form parked in `sessionStorage` while one builds a flow, the
+provider/model/effort cascade, the sessions page's optimistic ending, and both
+branches of the terminal. Every test also fails on an exception in the browser
+console, because that is where a silent break first shows.
+
+It is **not** part of `npm test`: it needs `playwright` (a devDependency) and a
+Chromium. Without either, the suite reports itself skipped and ends green —
+whoever has no browser must not sit in front of a red test.
 
 ## Models, providers and reasoning effort
 

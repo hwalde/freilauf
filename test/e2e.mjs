@@ -14,15 +14,14 @@
 //                               opencode, hermes) through the real
 //                               ~/.local/bin/cc-start (consumes quota!)
 //   node test/e2e.mjs --keep    keep the sandbox after the run (debugging)
-import { spawn, execFile, execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync, lstatSync } from 'node:fs'
-import { tmpdir, homedir } from 'node:os'
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, lstatSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { createServer } from 'node:net'
-import { DatabaseSync } from 'node:sqlite'
 import { WebSocket } from 'ws'
 import { gruppe, pruefe, uebersprungen, gleich, wahr, falsch, enthaelt, warteAuf, bericht, zaehler } from './mini.mjs'
+import { neuerSandkasten, sh, vorhanden } from './sandkasten.mjs'
 
 const ECHT = process.argv.includes('--echt')
 // User-specified test model for opencode/hermes (cheap, tool-capable).
@@ -32,211 +31,35 @@ const ECHT_KEYS = { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY }
 const ECHT_MODELL = process.env.CCHUB_TEST_MODELL ?? 'deepseek/deepseek-v4-flash-0731'
 // Zen: one of the free models — runs without a key.
 const ZEN_MODELL = process.env.CCHUB_TEST_ZEN_MODELL ?? 'nemotron-3.5-lightning-free'
-const vorhanden = (bin) => {
-  try { execFileSync('sh', ['-c', `command -v ${bin}`], { stdio: 'ignore' }); return true } catch { return false }
-}
 const BEHALTEN = process.argv.includes('--keep')
-const PROJEKT = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
 const start = Date.now()
 
-// ---------------------------------------------------------------- Tooling
-function sh(cmd, args, opts = {}) {
-  return new Promise((resolve) => {
-    execFile(cmd, args, { encoding: 'utf8', timeout: 60_000, ...opts }, (err, stdout, stderr) =>
-      resolve({ ok: !err, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') }))
-  })
-}
-
-async function freierPort() {
-  return new Promise((resolve, reject) => {
-    const s = createServer()
-    s.once('error', reject)
-    s.listen(0, '127.0.0.1', () => {
-      const p = s.address().port
-      s.close(() => resolve(p))
-    })
-  })
-}
-
-// ---------------------------------------------------------------- Sandbox
-const SB = mkdtempSync(join(tmpdir(), 'cc-hub-e2e-'))
-const sessions = new Set()          // ONLY these get killed at the end
-let hub = null
+// ------------------------------------------------- sandbox and hub process
+// Both come from test/sandkasten.mjs: the browser suite runs against exactly the
+// same sandbox, and one copy of that construction is enough. The names below stay
+// what the tests in this file have always used.
+const sk = neuerSandkasten({ praefix: 'cc-hub-e2e-', behalten: BEHALTEN })
+const { SB, REPO, ORIGIN, STUB, FEHLSTART, sessions, hol, formular } = sk
 let db = null
 let PORT = 0
 let BASIS = ''
 
-const REPO = join(SB, 'repo')
-const ORIGIN = join(SB, 'origin.git')
-const STUB = join(SB, 'bin', 'cc-start')
-const FEHLSTART = join(SB, 'fehlstart-an')
-
-async function sandkastenBauen() {
-  for (const d of ['data', 'runs', 'worktrees', 'bin']) mkdirSync(join(SB, d), { recursive: true })
-
-  // Extra-skill dummy (planning: opt-in skills outside the skill autoload folders)
-  mkdirSync(join(SB, 'zusaetze', 'e2e-fleiss'), { recursive: true })
-  writeFileSync(join(SB, 'zusaetze', 'e2e-fleiss', 'SKILL.md'),
-    '---\nname: e2e-fleiss\ndescription: Testskill gegen faule Modelle.\n---\n\n# Fleiss\n')
-
-  // Quota fixture: otherwise the real ~/.claude/quota.json would decide the budget
-  // gates and the suite would be green or red depending on the day.
-  writeFileSync(join(SB, 'quota.json'), JSON.stringify({
-    five_hour: { used_percentage: 1, resets_at: 1800000000 }, seven_day_fable: { used_percentage: 0 },
-  }))
-
-  await sh('git', ['init', '-q', '--bare', ORIGIN])
-  await sh('git', ['init', '-q', '-b', 'main', REPO])
-  const g = (...a) => sh('git', ['-C', REPO, ...a])
-  await g('config', 'user.email', 'e2e@test.local')
-  await g('config', 'user.name', 'E2E')
-  writeFileSync(join(REPO, 'README.md'), '# Testrepo\n')
-  // .env and referenz/ stay UNVERSIONED — that is exactly what the worktree extras
-  // are for. If they were in git, they would already be in the worktree and the
-  // copy/link path would be skipped silently.
-  // No trailing slash! 'referenz/' would only ignore the directory — but the extra
-  // creates a SYMLINK in the worktree, which git then treats as an unversioned
-  // file: the worktree would be "dirty" forever.
-  writeFileSync(join(REPO, '.gitignore'), '.env\nreferenz\n')
-  mkdirSync(join(REPO, 'referenz'), { recursive: true })
-  writeFileSync(join(REPO, '.env'), 'GEHEIM=1\n')
-  writeFileSync(join(REPO, 'referenz', 'a.txt'), 'ref\n')
-  await g('add', '-A')
-  await g('commit', '-qm', 'init')
-  await g('remote', 'add', 'origin', ORIGIN)
-  await g('push', '-q', '-u', 'origin', 'main')
-
-  // Stub cc-start: creates a real tmux session with a harmless "agent", speaks the
-  // same interface as the original and reports the same success line.
-  writeFileSync(STUB, `#!/usr/bin/env bash
-set -euo pipefail
-NAME=e2e; ID=""; ENVS=(); LOG=""; KEEP=""; PROMPTFILE=""; POS=()
-ALLE=("$@")
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --harness|--model|--session-id|--settings) shift 2 ;;
-    --name) NAME="$2"; shift 2 ;;
-    --id)   ID="$2";   shift 2 ;;
-    --env)  ENVS+=("-e" "$2"); shift 2 ;;
-    --log)  LOG="$2";  shift 2 ;;
-    --keep) KEEP=1; shift ;;
-    -f|--prompt-file) PROMPTFILE="$2"; shift 2 ;;
-    --no-trust|--keep) shift ;;
-    *) POS+=("$1"); shift ;;
-  esac
-done
-WORKDIR="\${POS[0]:-$PWD}"
-
-# Smoke-test run: pass through to the REAL cc-start (also covers the cc-* scripts).
-if [[ -n "$PROMPTFILE" && -r "$PROMPTFILE" ]] && grep -q 'E2E-ECHT' "$PROMPTFILE"; then
-  exec "${homedir()}/.local/bin/cc-start" "\${ALLE[@]}"
-fi
-
-# Deliberate failed start for the retry test.
-if [[ -f "${FEHLSTART}" ]]; then
-  echo "Fehlstart erzwungen (E2E)" >&2
-  exit 1
-fi
-
-SESSION="cc-$NAME"; [[ -n "$ID" ]] && SESSION="$SESSION-$ID"
-n=2; while tmux has-session -t "=$SESSION" 2>/dev/null; do SESSION="cc-$NAME-$ID-$n"; n=$((n+1)); done
-RUNNER="${SB}/runner-$$.sh"
-cat > "$RUNNER" <<'INNER'
-echo "=== E2E-Agent gestartet ==="
-echo "workdir: $PWD"
-echo "CC_RUN_ID=\${CC_RUN_ID:-<leer>}"
-[[ -n "\${CC_PROMPTFILE:-}" && -r "\$CC_PROMPTFILE" ]] && { echo "--- Prompt ---"; cat "\$CC_PROMPTFILE"; }
-echo "bereit fuer Eingaben:"
-while IFS= read -r zeile; do echo "[agent sah] $zeile"; done
-INNER
-tmux new-session -d -x 200 -y 50 "\${ENVS[@]}" -e "CC_PROMPTFILE=$PROMPTFILE" -s "$SESSION" -c "$WORKDIR" bash "$RUNNER"
-if [[ -n "$LOG" ]]; then mkdir -p "$(dirname "$LOG")"; tmux pipe-pane -o -t "=$SESSION:" "cat >> '$LOG'"; fi
-[[ -n "$KEEP" ]] && tmux set-option -t "=$SESSION:" -q remain-on-exit on
-echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
-`)
-  chmodSync(STUB, 0o755)
+/** Start the hub and carry port, base URL and database into this file. */
+async function hubStarten(opts = {}) {
+  await sk.hubStarten({ keys: ECHT_KEYS, ...opts })
+  db = sk.db
+  PORT = sk.port
+  BASIS = sk.basis
+}
+async function hubStoppen() {
+  await sk.hubStoppen()
+  db = null
 }
 
-// ---------------------------------------------------------------- Hub process
-async function hubStarten({ echteAgenten = false } = {}) {
-  PORT = await freierPort()
-  BASIS = `http://127.0.0.1:${PORT}`
-  const umgebung = {
-    ...process.env,
-    CCHUB_LOCAL_PORT: String(PORT),
-    CCHUB_DATA_DIR: join(SB, 'data'),
-    CCHUB_RUNS_DIR: join(SB, 'runs'),
-    CCHUB_WORKTREES_DIR: join(SB, 'worktrees'),
-    CCHUB_QUOTA_JSON: join(SB, 'quota.json'),
-    CCHUB_CLAUDE_PROJECTS: join(SB, 'claude-projects'),
-    CCHUB_ZUSAETZE_DIR: join(SB, 'zusaetze'),
-    CCHUB_PULS_AUS: '1',          // no provider pulse against real endpoints from the suite
-    CCHUB_CURSOR_AUTH: join(SB, 'missing-cursor-auth.json'),   // cursor usage stays silent in the sandbox
-    CCHUB_CURSOR_DIR: join(SB, 'cursor'),      // fake cursor transcripts; the real ~/.cursor is never touched
-    // "Fresh installation" tests must not pick up the operator's seed file
-    // (~/.config/cc-hub/coding-agents.json) — point at a file that does not exist.
-    CCHUB_AGENTS_SEED: join(SB, 'no-seed.json'),
-    NODE_OPTIONS: '--disable-warning=ExperimentalWarning',
-  }
-  if (echteAgenten) {
-    // No CCHUB_CC_START: the hub uses ~/.local/bin/cc-start and thereby the real
-    // harnesses. The provider key must go back into the environment, otherwise
-    // opencode/hermes starts and dies only at the first API call.
-    delete umgebung.CCHUB_CC_START
-    for (const [k, v] of Object.entries(ECHT_KEYS)) if (v) umgebung[k] = v
-  } else {
-    umgebung.CCHUB_CC_START = STUB
-    delete umgebung.OPENROUTER_API_KEY    // no real API calls from the stub part
-  }
-  hub = spawn(process.execPath, [join(PROJEKT, 'server', 'hub.mjs')], { env: umgebung, stdio: ['ignore', 'pipe', 'pipe'] })
-  const logs = []
-  hub.stdout.on('data', (d) => logs.push(String(d)))
-  hub.stderr.on('data', (d) => logs.push(String(d)))
-  hub.on('exit', (code) => { if (code !== 0 && code !== null) console.log(`  (hub exited, code ${code})\n${logs.join('')}`) })
-
-  await warteAuf(async () => (await hol('/')).status === 200,
-    { was: `hub at ${BASIS} responds`, timeoutMs: 15_000 })
-
-  db = new DatabaseSync(join(SB, 'data', 'cc-hub.db'))
-  // The hub holds its own connection and writes in the background (scheduler,
-  // watcher); a direct write here must WAIT for it instead of failing instantly
-  // with "database is locked" (the hub's own connection uses busy_timeout 5000).
-  db.exec('PRAGMA busy_timeout = 10000;')
-}
-
-// The watcher ticks inside the hub every 30 s. Instead of waiting, the suite also
-// triggers the same pass itself — same database, same code, but immediately.
+// The watcher ticks inside the hub every 30 s; watcherTick() triggers the same
+// pass right away.
 let watcherTick = null
-async function watcherVorbereiten() {
-  process.env.CCHUB_DATA_DIR = join(SB, 'data')
-  process.env.CCHUB_RUNS_DIR = join(SB, 'runs')
-  process.env.CCHUB_WORKTREES_DIR = join(SB, 'worktrees')
-  process.env.CCHUB_QUOTA_JSON = join(SB, 'quota.json')
-  process.env.CCHUB_CC_START = STUB
-  process.env.CCHUB_CLAUDE_PROJECTS = join(SB, 'claude-projects')
-  process.env.CCHUB_ZUSAETZE_DIR = join(SB, 'zusaetze')
-  process.env.CCHUB_PULS_AUS = '1'
-  process.env.CCHUB_CURSOR_AUTH = join(SB, 'missing-cursor-auth.json')
-  process.env.CCHUB_CURSOR_DIR = join(SB, 'cursor')
-  delete process.env.OPENROUTER_API_KEY
-  ;({ tick: watcherTick } = await import('../server/watcher.mjs'))
-}
-
-// ---------------------------------------------------------------- HTTP
-async function hol(pfad, opts = {}) {
-  return fetch(BASIS + pfad, { redirect: 'manual', signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000), ...opts })
-}
-async function formular(pfad, daten, { alsBrowser = false } = {}) {
-  const body = new URLSearchParams()
-  for (const [k, v] of Object.entries(daten)) Array.isArray(v) ? v.forEach(x => body.append(k, x)) : body.append(k, v)
-  return hol(pfad, {
-    method: 'POST', body,
-    headers: {
-      'content-type': 'application/x-www-form-urlencoded',
-      accept: alsBrowser ? 'text/html,application/xhtml+xml' : 'application/json',
-    },
-  })
-}
+async function watcherVorbereiten() { watcherTick = await sk.watcherVorbereiten() }
 
 // ---------------------------------------------------------------- Database
 const lauf = (id) => db.prepare('SELECT * FROM runs WHERE id=?').get(id)
@@ -261,26 +84,9 @@ async function sessionMerken(runId) {
 }
 
 // ---------------------------------------------------------------- Cleanup
-let aufgeraeumt = false
-/** Stop the hub process (also mid-suite, when the real-run mode restarts it). */
-async function hubStoppen() {
-  try { db?.close() } catch {}
-  db = null
-  if (hub && hub.exitCode === null) {
-    hub.kill('SIGTERM')
-    await new Promise(r => { const t = setTimeout(() => { try { hub.kill('SIGKILL') } catch {} ; r() }, 4000); hub.once('exit', () => { clearTimeout(t); r() }) })
-  }
-  hub = null
-}
-
 async function aufraeumen() {
-  if (aufgeraeumt) return
-  aufgeraeumt = true
-  await hubStoppen()
-  // ONLY the sessions we created ourselves — never a pattern across all cc-*.
-  for (const s of sessions) await sh('tmux', ['kill-session', '-t', `=${s}`]).catch(() => {})
-  if (BEHALTEN) console.log(`\nSandbox kept: ${SB}`)
-  else rmSync(SB, { recursive: true, force: true })
+  await sk.aufraeumen()
+  db = null
 }
 process.on('SIGINT', async () => { await aufraeumen(); process.exit(130) })
 process.on('SIGTERM', async () => { await aufraeumen(); process.exit(143) })
@@ -288,7 +94,7 @@ process.on('SIGTERM', async () => { await aufraeumen(); process.exit(143) })
 // ================================================================== Test run
 try {
   console.log(`Sandbox: ${SB}`)
-  await sandkastenBauen()
+  await sk.bauen()
   await hubStarten()
   await watcherVorbereiten()
   console.log(`Hub: ${BASIS}${ECHT ? '   [--echt: real runs per harness — consumes quota and credits]' : ''}`)
@@ -357,7 +163,13 @@ try {
     gleich(r.status, 200, 'status')
     enthaelt(await r.text(), 'Create repo', 'hint text')
   })
-  for (const datei of ['/static/xterm.js', '/static/addon-fit.js', '/static/hub.js', '/static/hub.css', '/static/xterm.css']) {
+  // The flow designer's own scripts belong in this loop as much as xterm does: a
+  // moved or renamed entry in STATIC_MAP shows up nowhere else, and the designer
+  // page would be silently dead. /static/flows/ carries the two pure modules the
+  // browser runs as well, so designer and server judge a flow by the same code.
+  for (const datei of ['/static/xterm.js', '/static/addon-fit.js', '/static/hub.js', '/static/hub.css', '/static/xterm.css',
+    '/static/flows.js', '/static/flows.css', '/static/flows/template.mjs', '/static/flows/varschema.mjs',
+    '/static/swd.js', '/static/swd.css', '/static/swd-light.css']) {
     await pruefe(`${datei} is served`, async () => {
       const r = await hol(datei)
       gleich(r.status, 200, 'status')
@@ -1791,6 +1603,358 @@ try {
     const r = await formular('/settings/favorites/edit', { name: 'E2E-zuviel', harness: 'claude' }, { alsBrowser: true })
     gleich(r.status, 400, 'the fourth is refused')
     falsch(!!db.prepare('SELECT id FROM favorites WHERE name=?').get('E2E-zuviel'), 'and not stored')
+  })
+
+  // ------------------------------------------------------------------
+  // The whole flows module had no e2e coverage: not one of its four pages, not
+  // one of its ten endpoints, not one of its static files. It sits at the end of
+  // the suite on purpose — a flow with a `run_finished` trigger is what makes the
+  // attachment block render checkboxes at all, and the group deletes it again so
+  // nothing that follows inherits a flow hanging on an agent.
+  gruppe('Flows: pages, meta and the round trip through the API')
+
+  /** POST a JSON body — /api/flows/save reads JSON, not a form. */
+  const jsonPost = (pfad, obj) => hol(pfad, {
+    method: 'POST', body: JSON.stringify(obj),
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+  })
+
+  let FLOWID = null
+
+  await pruefe('the three flow pages answer with real HTML', async () => {
+    // One characteristic string per page, each from lang/en.json. Deliberately not
+    // "Flows" for all three: a flow is not a place one navigates to, so there is no
+    // nav entry carrying that word onto every page.
+    const kennzeichen = {
+      '/flows': 'New flow',           // flows.new
+      '/flows/edit': 'Back',          // flows.editor.back — the designer's own head
+      '/flows/runs': 'Flow runs',     // flows.runs.title
+    }
+    for (const [pfad, text] of Object.entries(kennzeichen)) {
+      const r = await hol(pfad)
+      gleich(r.status, 200, `${pfad}: status`)
+      const html = await r.text()
+      wahr(html.length > 500, `${pfad}: not an empty page (${html.length} bytes)`)
+      enthaelt(html, text, `${pfad}: its own heading`)
+    }
+    enthaelt(await (await hol('/flows')).text(), 'no flows yet', 'the empty list says so instead of showing a broken table')
+  })
+  await pruefe('the flow designer\'s own scripts and its data reach the page', async () => {
+    const html = await (await hol('/flows/edit')).text()
+    // Markup, unavoidably: the designer is a client application and these two are
+    // the seam it hangs on — the catalog it boots from and the module that boots
+    // it. Everything else about the page is checked through the API below.
+    enthaelt(html, 'window.CCHUB_FLOWS', 'the editor state is injected')
+    enthaelt(html, '/static/flows.js', 'the designer module is pulled in')
+    enthaelt(html, 'Save', 'and the button that saves what was drawn')
+  })
+  await pruefe('the step registry reaches the editor through /api/flows/meta', async () => {
+    const j = await (await hol('/api/flows/meta')).json()
+    wahr(j.ok, 'ok')
+    for (const feld of ['steps', 'groups', 'triggerKinds', 'ops', 'fieldTypes']) {
+      wahr(Array.isArray(j[feld]) && j[feld].length > 0, `${feld} is present and not empty`)
+    }
+    wahr(j.steps.every(s => s.type && s.component && s.group && Array.isArray(s.fields)),
+      'every step names its type, component, group and fields — that is what the property editor renders from')
+    wahr(j.steps.some(s => s.type === 'telegram') && j.steps.some(s => s.type === 'switch_outcome'),
+      'known building blocks are in the registry')
+    wahr(j.triggerKinds.includes('run_finished'), 'the trigger that an attachment is')
+    wahr(j.groups.every(g => j.steps.some(s => s.group === g)), 'no toolbox group without a step in it')
+  })
+  await pruefe('a flow is saved through the API and comes back unchanged', async () => {
+    const definition = {
+      properties: {},
+      sequence: [{ id: 'e2e-note', componentType: 'task', type: 'note', name: 'E2E note', properties: { text: 'E2E flow ran' } }],
+    }
+    const r = await jsonPost('/api/flows/save', {
+      name: 'E2E-Flow', active: true, trigger: { kind: 'run_finished' }, definition,
+    })
+    const j = await r.json()
+    wahr(j.ok && !!j.id, `saved (${JSON.stringify(j).slice(0, 200)})`)
+    FLOWID = j.id
+    const gelesen = await (await hol(`/api/flows/${FLOWID}`)).json()
+    wahr(gelesen.ok, 'read back')
+    gleich(gelesen.flow.name, 'E2E-Flow', 'name')
+    gleich(gelesen.flow.active, 1, 'active')
+    gleich(gelesen.flow.trigger.kind, 'run_finished', 'trigger')
+    gleich(gelesen.flow.definition.sequence[0].properties.text, 'E2E flow ran', 'the definition survived the round trip')
+    enthaelt(await (await hol('/flows')).text(), 'E2E-Flow', 'and the list shows it')
+  })
+  await pruefe('a definition the registry does not know is refused instead of stored', async () => {
+    const r = await jsonPost('/api/flows/save', {
+      name: 'E2E-Flow-kaputt', trigger: { kind: 'manual' },
+      definition: { properties: {}, sequence: [{ id: 'x', type: 'gibtsnicht', properties: {} }] },
+    })
+    gleich(r.status, 400, 'rejected')
+    wahr((await r.json()).problems.length > 0, 'with a reason')
+    falsch(!!db.prepare('SELECT id FROM flows WHERE name=?').get('E2E-Flow-kaputt'), 'nothing stored')
+    // A required field left empty is the same class of answer.
+    const ohneText = await jsonPost('/api/flows/save', {
+      name: 'E2E-Flow-leer', trigger: { kind: 'manual' },
+      definition: { properties: {}, sequence: [{ id: 'y', type: 'note', properties: {} }] },
+    })
+    gleich(ohneText.status, 400, 'a required field left empty is refused too')
+  })
+  await pruefe('all three run forms carry the flow attachment block', async () => {
+    // The only safeguard of the attach block. Checked by what the definition is
+    // built from — the field NAMES — plus the class the block is styled and found
+    // by; there is no text of its own that would prove the checkbox is a checkbox.
+    for (const pfad of [`/runs/new?repo=${repoId}`, `/agents/edit?repo=${repoId}`, '/settings/favorites/edit']) {
+      const html = await (await hol(pfad)).text()
+      enthaelt(html, 'Flows after this run', `${pfad}: the block's legend`)
+      enthaelt(html, 'flows-attach', `${pfad}: the block's own container`)
+      enthaelt(html, 'name="flows"', `${pfad}: the checkbox the definition is built from`)
+      enthaelt(html, `value="${FLOWID}"`, `${pfad}: the flow is offered`)
+      enthaelt(html, `name="flow_when_${FLOWID}"`, `${pfad}: with its condition`)
+      enthaelt(html, 'E2E-Flow', `${pfad}: by name`)
+    }
+  })
+  await pruefe('ticking the box really attaches the flow, and the editor sees the same row', async () => {
+    const r = await formular('/agents/edit', {
+      repo_id: String(repoId), name: 'e2e-flow-agent', harness: 'claude', prompt: 'x',
+      branch_mode: 'keiner', expected_minutes: '5', schedule_kind: 'manuell',
+      flows: String(FLOWID), [`flow_when_${FLOWID}`]: 'failed',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'agent saved')
+    gleich(agent('e2e-flow-agent').flows, `[{"flowId":${FLOWID},"when":"failed"}]`, 'the attachment landed on the agent')
+    // One storage, two editors: the flow editor reads the very same row back.
+    const html = await (await hol(`/flows/edit?id=${FLOWID}`)).text()
+    enthaelt(html, '"when":"failed"', 'the flow editor knows the condition the agent form wrote')
+    enthaelt(html, 'e2e-flow-agent', 'and which agent it hangs on')
+  })
+  await pruefe('a flow can be switched off and on again through the API', async () => {
+    const aus = await formular(`/api/flows/${FLOWID}/toggle`, {})
+    gleich(aus.status, 200, 'toggled')
+    gleich(db.prepare('SELECT active FROM flows WHERE id=?').get(FLOWID).active, 0, 'off')
+    await formular(`/api/flows/${FLOWID}/toggle`, {})
+    gleich(db.prepare('SELECT active FROM flows WHERE id=?').get(FLOWID).active, 1, 'on again')
+  })
+  await pruefe('deleting the flow also removes it from the agent it hung on', async () => {
+    const r = await formular(`/api/flows/${FLOWID}/delete`, {})
+    gleich(r.status, 200, 'deleted')
+    gleich((await hol(`/api/flows/${FLOWID}`)).status, 404, 'gone')
+    gleich(agent('e2e-flow-agent').flows, null, 'no dead id left behind on the agent')
+    // Without an attachable flow the block falls back to its "nothing here" form —
+    // legend and hint, but no checkbox.
+    const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
+    enthaelt(html, 'Flows after this run', 'the block still stands')
+    falsch(html.includes('name="flows"'), 'but offers nothing to attach any more')
+  })
+
+  // ------------------------------------------------------------------
+  // Five pages whose HTML was never fetched once. Checked against the strings
+  // from lang/en.json and against form field names, not against markup — these
+  // tests are meant to survive the rebuild that is coming.
+  gruppe('Pages that had no test at all')
+
+  await pruefe('the repo list shows the repo with path, base branch and prompt column', async () => {
+    const r = await hol('/repos')
+    gleich(r.status, 200, 'status')
+    const html = await r.text()
+    enthaelt(html, 'Create repo', 'the way into the form')
+    enthaelt(html, 'Worktree extras', 'column header')
+    enthaelt(html, 'Repo prompt', 'column header')
+    enthaelt(html, 'e2e', 'the sandbox repo by name')
+    enthaelt(html, REPO, 'with its path')
+  })
+  await pruefe('the repo form carries every field the save route reads back', async () => {
+    const row = db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
+    const html = await (await hol(`/repos/edit?id=${row.id}`)).text()
+    enthaelt(html, 'Path (main checkout)', 'the label from lang/en.json')
+    for (const feld of ['name="name"', 'name="path"', 'name="base_branch"', 'name="prompt"', 'name="worktree_extras"']) {
+      enthaelt(html, feld, `field ${feld}`)
+    }
+    enthaelt(html, REPO, 'prefilled with what is stored')
+    enthaelt(html, 'main', 'and the base branch')
+  })
+  await pruefe('the agents page shows the schedule and all three actions of a row', async () => {
+    // An agent with a real schedule, deliberately left switched OFF: the scheduler
+    // only ever picks up active ones, so this row cannot start anything by itself.
+    const gespeichert = await formular('/agents/edit', {
+      repo_id: String(repoId), name: 'e2e-anzeige', harness: 'claude', prompt: 'x',
+      branch_mode: 'keiner', expected_minutes: '20',
+      schedule_kind: 'woechentlich', schedule_days: ['1', '3'], schedule_time: '07:30', schedule_weeks: '1',
+    }, { alsBrowser: true })
+    gleich(gespeichert.status, 303, 'agent saved')
+    const r = await hol(`/agents?repo=${repoId}`)
+    gleich(r.status, 200, 'status')
+    const html = await r.text()
+    enthaelt(html, 'Create agent', 'the way to a new agent')
+    enthaelt(html, 'Flows hang on an agent', 'the hint that says where flows are attached')
+    enthaelt(html, 'Schedule', 'the schedule column exists')
+    const zeile = html.split('<tr').find(z => z.includes('e2e-anzeige'))
+    wahr(!!zeile, 'the agent has a row')
+    enthaelt(zeile, 'weekly: Mon, Wed at 07:30', 'the schedule column says what is really planned')
+    enthaelt(zeile, '20 min', 'the expected duration')
+    // The actions are checked by the routes they post to: those outlive any markup.
+    enthaelt(zeile, '/agents/toggle', 'the on/off toggle')
+    enthaelt(zeile, 'off', 'which says what the agent currently is')
+    enthaelt(zeile, '/agents/start', 'the "start now" button')
+    enthaelt(zeile, 'start now', 'by its name')
+    enthaelt(zeile, `/agents/edit?id=${agent('e2e-anzeige').id}`, 'and the edit link')
+  })
+  await pruefe('the toggle in the row switches the agent on and off again', async () => {
+    const a = agent('e2e-anzeige')
+    gleich(a.active, 0, 'starts switched off')
+    const r = await formular('/agents/toggle', { id: String(a.id), repo: String(repoId) }, { alsBrowser: true })
+    gleich(r.status, 303, 'redirects back to the list')
+    gleich(agent('e2e-anzeige').active, 1, 'now on')
+    await formular('/agents/toggle', { id: String(a.id), repo: String(repoId) }, { alsBrowser: true })
+    // Off again on purpose: an ACTIVE weekly agent left behind would be picked up
+    // by the scheduler tick and start a run nobody asked for.
+    gleich(agent('e2e-anzeige').active, 0, 'and off again')
+  })
+  await pruefe('the favorite form is the run setup under a name', async () => {
+    const r = await hol(`/settings/favorites/edit?id=${FAVID}`)
+    gleich(r.status, 200, 'status')
+    const html = await r.text()
+    enthaelt(html, 'Edit favorite', 'the title from lang/en.json')
+    enthaelt(html, 'E2E-Favorit', 'prefilled with what is stored')
+    enthaelt(html, 'name="harness"', 'the coding agent')
+    enthaelt(html, 'name="model"', 'the model')
+    enthaelt(html, 'e2e-fleiss', 'the extra-skills block is part of it')
+    const neu = await hol('/settings/favorites/edit')
+    gleich(neu.status, 200, 'a fresh favorite form answers as well')
+    enthaelt(await neu.text(), 'New favorite', 'with its own title')
+  })
+  await pruefe('the Telegram assistant walks through its three steps', async () => {
+    const r = await hol('/telegram-setup')
+    gleich(r.status, 200, 'status')
+    const html = await r.text()
+    enthaelt(html, 'Telegram setup', 'title')
+    for (const schritt of ['Step 1 — bot token', 'Step 2 — find the chat ID', 'Step 3 — test']) {
+      enthaelt(html, schritt, schritt)
+    }
+    enthaelt(html, '/telegram-setup/token', 'step 1 posts the token to its route')
+    enthaelt(html, 'name="telegram_token"', 'and has the field for it')
+    enthaelt(html, '/settings/test-telegram', 'step 3 sends the test message')
+  })
+
+  // ------------------------------------------------------------------
+  // Nothing in this suite ever rendered a page in another language, so a string
+  // hard-wired instead of run through t() stayed invisible as long as the English
+  // text happened to match. This group closes that hole — and puts the language
+  // back to English no matter what, because every other assertion here reads
+  // English strings.
+  gruppe('The UI really renders in the chosen language')
+
+  await pruefe('switching the UI language changes what the pages say', async () => {
+    // /settings/save writes ALL of its keys from the body, so a post carrying only
+    // the language would blank the rest. The stored settings therefore travel back
+    // with it — that is also exactly what the real form does.
+    const spracheSetzen = (lang) => {
+      const s = Object.fromEntries(db.prepare('SELECT key, value FROM settings').all()
+        .map(r => [r.key, r.value ?? '']))
+      return formular('/settings/save', { ...s, ui_language: lang }, { alsBrowser: true })
+    }
+    try {
+      gleich((await spracheSetzen('de')).status, 303, 'language saved')
+      const html = await (await hol('/repos')).text()
+      enthaelt(html, 'Repo anlegen', 'repos.create in German')
+      enthaelt(html, 'Übersicht', 'and the navigation with it (nav.overview)')
+      enthaelt(html, 'Worktree-Ergänzungen', 'a column header too (repos.extras)')
+      falsch(html.includes('Create repo'), 'the English string is really gone')
+    } finally {
+      gleich((await spracheSetzen('en')).status, 303, 'back to English')
+    }
+    enthaelt(await (await hol('/repos')).text(), 'Create repo', 'English again for everything that follows')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('The live channel (server/events.mjs)')
+
+  /**
+   * Reads an SSE stream for a while and returns the raw frames. Deliberately no
+   * EventSource: there is no browser here, and the wire format is exactly what
+   * this test is about.
+   */
+  async function lauscher(pfad, { msKopf = 1500 } = {}) {
+    const ctrl = new AbortController()
+    const res = await fetch(BASIS + pfad, { signal: ctrl.signal, headers: { accept: 'text/event-stream' } })
+    const leser = res.body.getReader()
+    const dec = new TextDecoder()
+    let text = ''
+    const lesen = (async () => {
+      try {
+        for (;;) {
+          const { done, value } = await leser.read()
+          if (done) break
+          text += dec.decode(value, { stream: true })
+        }
+      } catch { /* aborted below */ }
+    })()
+    return {
+      res,
+      text: () => text,
+      async warteAufText(teil, ms = msKopf) {
+        const ende = Date.now() + ms
+        while (Date.now() < ende) {
+          if (text.includes(teil)) return true
+          await new Promise(r => setTimeout(r, 25))
+        }
+        return false
+      },
+      async schliessen() { ctrl.abort(); await lesen },
+    }
+  }
+
+  await pruefe('the channel opens as a stream and says so before anything happens', async () => {
+    const l = await lauscher('/api/events')
+    try {
+      gleich(l.res.status, 200, 'status')
+      enthaelt(l.res.headers.get('content-type') ?? '', 'text/event-stream', 'content type')
+      // The headers must be flushed at once, otherwise the browser fires onopen
+      // only at the first real event — which may be minutes away.
+      wahr(await l.warteAufText(': connected'), `the greeting arrives immediately (got: ${JSON.stringify(l.text())})`)
+    } finally { await l.schliessen() }
+  })
+
+  await pruefe('a title generated after the fact reaches an open page', async () => {
+    // This is the case the live channel was built for: the run is created, the
+    // page is open, and the real title only arrives once the model has answered.
+    const l = await lauscher(`/api/events?repo=${repoId}`)
+    try {
+      await l.warteAufText(': connected')
+      const r = await formular(`/api/runs/${R1}/title`, { title: 'Live channel proof' })
+      gleich(r.status, 200, 'rename accepted')
+      wahr(await l.warteAufText('event: run'), `an event arrives (got: ${JSON.stringify(l.text())})`)
+      enthaelt(l.text(), R1, 'and it names the run')
+      enthaelt(l.text(), '"kind":"title"', 'and says what changed')
+      enthaelt(l.text(), 'id: ', 'with an id, so a reconnect can catch up')
+    } finally { await l.schliessen() }
+  })
+
+  await pruefe('a listener on another repo is not told about this one', async () => {
+    // The filter is the whole reason the event carries a repoId: an operator
+    // watching one repo must not see another repo's runs appear.
+    const fremd = await formular('/repos/edit', {
+      name: 'e2e-fremd', path: join(SB, 'repo'), base_branch: 'main', worktree_extras: '[]',
+    }, { alsBrowser: true })
+    gleich(fremd.status, 303, 'second repo created')
+    const fremdId = db.prepare(`SELECT id FROM repos WHERE name='e2e-fremd'`).get().id
+    const l = await lauscher(`/api/events?repo=${fremdId}`)
+    try {
+      await l.warteAufText(': connected')
+      await formular(`/api/runs/${R1}/title`, { title: 'Still not yours' })
+      wahr(!(await l.warteAufText('event: run', 600)), `nothing arrived (got: ${JSON.stringify(l.text())})`)
+    } finally { await l.schliessen() }
+  })
+
+  await pruefe('the five status changes that wrote no event now write one', async () => {
+    // Measured before the live channel was wired: of the 18 places that set
+    // runs.status, five left no trace at all — so the run's own event list did
+    // not know why it had stopped. addEvent() is the channel's single choke
+    // point, which only works if every transition really passes through it.
+    const j = await laufStarten({ repo_id: repoId, prompt: 'event coverage', branch_mode: 'keiner' })
+    await sessionMerken(j.runId)
+    await formular(`/api/runs/${j.runId}/send`, { text: 'hello' })
+    enthaelt(ereignisse(j.runId).join(','), 'message_sent', 'a message from a human is recorded')
+    await formular(`/api/runs/${j.runId}/kill`, {})
+    enthaelt(ereignisse(j.runId).join(','), 'aborted', 'ending it by hand is recorded')
+    await formular(`/api/runs/${j.runId}/retry`, {})
+    enthaelt(ereignisse(j.runId).join(','), 'retry', 'and so is retrying it')
+    await sessionMerken(j.runId)
+    await formular(`/api/runs/${j.runId}/kill`, {})   // leave nothing running
   })
 
   // ------------------------------------------------------------------

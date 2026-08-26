@@ -5,6 +5,9 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { harnessIds } from './harnesses/index.mjs'
+// events.mjs imports nothing at all — deliberately, so that the module which
+// everything writes through can be imported from anywhere without a cycle.
+import { publish } from './events.mjs'
 
 const DATA_DIR = process.env.CCHUB_DATA_DIR ?? join(homedir(), '.local', 'share', 'cc-hub')
 mkdirSync(DATA_DIR, { recursive: true })
@@ -268,6 +271,30 @@ export function allSettings() {
 export function addEvent(runId, kind, payload = null) {
   db.prepare('INSERT INTO events(run_id, kind, payload) VALUES(?, ?, ?)')
     .run(runId, kind, payload === null ? null : JSON.stringify(payload))
+  announceRun(runId, kind)
+}
+
+/**
+ * Tell the live channel that a run changed.
+ *
+ * It hangs on addEvent() rather than on the 39 `UPDATE runs SET` sites because
+ * a run's meaningful transitions are recorded as events — measured, not assumed:
+ * of the 18 places that write `status=`, 13 already added an event and the five
+ * that did not (kill by hand, answering a help call, retry, and the two flow
+ * equivalents) were a gap in the event list itself. They add one now.
+ *
+ * The payload's `status` is a HINT, not the truth: whether the UPDATE runs
+ * before or after the addEvent() differs per call site. That is harmless here
+ * because the browser answers a signal by re-fetching the fragment, which the
+ * server renders fresh — so there stays exactly one source for what a row says.
+ *
+ * Never throws: the live channel must not be able to break a database write.
+ */
+export function announceRun(runId, kind = 'changed') {
+  try {
+    const row = db.prepare('SELECT repo_id, status FROM runs WHERE id = ?').get(runId)
+    if (row) publish('run', { runId, repoId: row.repo_id, status: row.status, kind })
+  } catch { /* a silent live channel beats a failed write */ }
 }
 
 /** Only create the event if this (run,kind) does not exist yet — Telegram/traffic light dedupe by themselves this way. */

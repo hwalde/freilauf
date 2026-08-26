@@ -573,6 +573,13 @@
     ta.value = ''
     return false
   }
+  // The reload STAYS, even though the live channel would update the page by
+  // itself. It is not a leftover: it is what closes the terminal's WebSocket,
+  // and with it the tmux client behind it. Without the reload the browser keeps
+  // an attached client on a dying session — and every attached client rewraps
+  // the agent's window, because tmux runs with window-size=latest. Ending a run
+  // is also a deliberate act where a fresh page is the honest answer: the send
+  // and kill forms have to disappear, and they sit outside the fragment.
   window.cchubKill = function (id) {
     if (!confirm(T('js.kill_confirm', 'Really end this run?'))) return false
     fetch('/api/runs/' + id + '/kill', { method: 'POST' }).then(() => location.reload())
@@ -696,6 +703,126 @@
     try { showRunning.checked = localStorage.getItem(STORE_KEY) === '1' } catch (err) { /* private mode */ }
     syncFilter()
   }
+
+  // ---- live channel: a signal from /api/events, the HTML from the server ----
+  //
+  // The event carries only what changed, never markup. The page answers by
+  // fetching the fragment, which the server renders through the same function
+  // the full page uses — so a row has exactly one renderer, and translations,
+  // traffic-light rules and conditional cells cannot drift apart from the page.
+  //
+  // Deliberately no framework: every swap here is a special case (an element
+  // that may not exist yet, a row that must not be replaced while it is being
+  // renamed, a terminal that must never be touched at all), and the inline
+  // onclick attributes plus the capture-phase rename listener would have to be
+  // reconciled with a library's own handlers.
+  ;(function live() {
+    if (typeof EventSource === 'undefined') return
+    const runsBody = document.getElementById('runs-body')
+    const detail = location.pathname.match(/^\/runs\/([0-9a-f-]{36})$/)
+    const header = document.getElementById('header-status')
+    if (!runsBody && !detail && !header) return
+
+    // The repo comes from the BODY, not from #repo-switch: pages without a repo
+    // context (sessions, repos, settings) still render that select, and it then
+    // shows the first repo — filtering by it would silently drop every event.
+    const repo = document.body.dataset.repo || ''
+
+    // One trailing timer per target: a watcher pass can announce a dozen runs in
+    // the same tick, and each of them would otherwise be its own request.
+    const geplant = new Map()
+    function bald(key, fn, ms) {
+      clearTimeout(geplant.get(key))
+      geplant.set(key, setTimeout(() => { geplant.delete(key); fn() }, ms || 120))
+    }
+
+    // 204 = the thing is gone (archived, ended, never existed). That is an
+    // answer, not an error: the row is removed instead of left behind stale.
+    async function holeFragment(pfad) {
+      const res = await fetch(pfad, { headers: { accept: 'text/html' } })
+      if (res.status === 204) return null
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      return await res.text()
+    }
+    function zuElementen(html) {
+      const t = document.createElement('template')
+      t.innerHTML = html.trim()
+      return Array.from(t.content.children)
+    }
+    /** Replace every element of the fragment by its own id. Missing ids are skipped. */
+    function tauscheNachId(html) {
+      for (const neu of zuElementen(html)) {
+        const alt = neu.id && document.getElementById(neu.id)
+        if (alt) alt.replaceWith(neu)
+      }
+    }
+
+    async function zeileAktualisieren(runId) {
+      const zeile = document.getElementById('run-' + runId)
+      if (!zeile) return
+      // Never swap a row whose title is being edited — the half-typed text is
+      // not in the DOM the server knows about, and replacing it throws the
+      // typing away mid-word.
+      if (zeile.querySelector('.titel-inline input')) return
+      const html = await holeFragment('/api/fragments/run-row?id=' + encodeURIComponent(runId)
+        + (repo ? '&repo=' + encodeURIComponent(repo) : ''))
+      if (html === null) { zeile.remove(); return }
+      const neu = zuElementen(html)[0]
+      if (neu) zeile.replaceWith(neu)
+    }
+
+    // A run this page does not show yet: the row cannot be created in place,
+    // because the empty state and the sort order both live in the tbody. So the
+    // whole body is re-rendered — the one case where a parent has to be swapped
+    // (the same reason a banner that was absent cannot appear by itself).
+    async function tabelleAktualisieren() {
+      if (!runsBody) return
+      const html = await holeFragment('/api/fragments/runs-body' + (repo ? '?repo=' + encodeURIComponent(repo) : ''))
+      if (html === null) return
+      if (document.querySelector('#runs-body .titel-inline input')) return
+      tauscheNachId(html)
+    }
+
+    async function detailAktualisieren(runId) {
+      if (!detail || detail[1] !== runId) return
+      // Head, metrics and events only. The terminal is NOT part of this
+      // fragment: replacing #term would tear the xterm instance off the DOM,
+      // leave the WebSocket open and leak a tmux client that keeps rewrapping
+      // the running agent's window.
+      const html = await holeFragment('/api/fragments/run-detail?id=' + encodeURIComponent(runId))
+      if (html === null) return
+      if (document.querySelector('.titel-inline input')) return
+      tauscheNachId(html)
+    }
+
+    async function statusAktualisieren() {
+      for (const pfad of ['/api/fragments/header-status', '/api/fragments/usage']) {
+        try {
+          const html = await holeFragment(pfad)
+          if (html !== null) tauscheNachId(html)
+        } catch (err) { /* a quiet panel beats a broken page */ }
+      }
+    }
+
+    const quelle = new EventSource('/api/events' + (repo ? '?repo=' + encodeURIComponent(repo) : ''))
+    quelle.addEventListener('run', (ev) => {
+      let d = {}
+      try { d = JSON.parse(ev.data) } catch (err) { return }
+      if (!d.runId) return
+      bald('run:' + d.runId, () => {
+        zeileAktualisieren(d.runId).catch(() => {})
+        detailAktualisieren(d.runId).catch(() => {})
+        if (runsBody && !document.getElementById('run-' + d.runId)) tabelleAktualisieren().catch(() => {})
+      })
+      // Quota and balances move with the work, but far more slowly — a longer
+      // timer keeps a burst of run events from turning into a burst of usage
+      // requests, each of which may talk to a provider API.
+      bald('status', () => { statusAktualisieren().catch(() => {}) }, 2000)
+    })
+    // EventSource reconnects by itself and sends Last-Event-ID, which the hub
+    // answers from its ring buffer. Nothing to do here but not get in the way.
+    quelle.onerror = () => { /* reconnect is the browser's job */ }
+  }())
 
   // ---- terminal: xterm.js + resize frame \0{cols},{rows} (planning 7.4) ----
   // xterm.js provides the globals 'Terminal' and 'FitAddon' — not 'Term'.

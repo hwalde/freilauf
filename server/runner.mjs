@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import db, { getRepo, addEvent } from './db.mjs'
 import { RUNS_DIR, WORKTREES_DIR, kurzid, sh } from './util.mjs'
-import { claudeQuota, openrouterCredits } from './quota.mjs'
+import { claudeQuota } from './quota.mjs'
 import { skillPromptZusatz } from './zusaetze.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { isHarnessEnabled } from './coding-agents.mjs'
@@ -303,8 +303,10 @@ export async function launchRun(runId) {
     addEvent(runId, 'warn', { hooks: err.message })
   }
 
+  // Only the claude windows are recorded on the run (quota5_start/quota7_start).
+  // An `await openrouterCredits()` used to sit here whose result was never read:
+  // a 10-second-timeout HTTP call on the hot path of every single launch.
   const q = claudeQuota()
-  const credits = await openrouterCredits()
   db.prepare(`UPDATE runs SET status='running', workdir_effective=?, worktree=?, branch_expected=?,
               main_sha_start=?, quota5_start=?, quota7_start=? WHERE id=?`)
     .run(workdir, workdir !== repo.path ? workdir : null, branchExpected,

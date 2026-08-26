@@ -3,7 +3,7 @@
 // (tmux, Telegram, run creation). Tests pass a stub with the same shape.
 import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
-import db from '../db.mjs'
+import db, { addEvent } from '../db.mjs'
 import { RUNS_DIR, sh, sendToSession, kurzid } from '../util.mjs'
 import { terminalText } from '../detect.mjs'
 import { notify, notifyLong, detailUrl, publicBase } from '../telegram.mjs'
@@ -141,16 +141,24 @@ export const actions = {
     const r = await sendToSession(run.tmux_session, text)
     if (r.ok) {
       db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(run.id)
-      if (run.status === 'waiting_help') db.prepare(`UPDATE runs SET status='running', help_answer=? WHERE id=?`).run(text, run.id)
-      db.prepare('INSERT INTO events(run_id, kind, payload) VALUES(?, ?, ?)').run(run.id, 'flow_message', JSON.stringify({ text: text.slice(0, 500) }))
+      if (run.status === 'waiting_help') {
+        db.prepare(`UPDATE runs SET status='running', help_answer=? WHERE id=?`).run(text, run.id)
+        addEvent(run.id, 'help_answered', { by: 'flow' })
+      }
+      // Through addEvent() like everywhere else — a hand-rolled INSERT here
+      // bypasses the one place that knows a run has changed.
+      addEvent(run.id, 'flow_message', { text: text.slice(0, 500) })
     }
     return r
   },
 
   async killRun(run) {
     if (run.tmux_session) await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
-    db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
+    const r = db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
                 tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=? AND status IN ('running','waiting_help','deferred')`).run(run.id)
+    // Only when a row really changed: the status guard above means a run that
+    // was already over is left alone, and an 'aborted' event for it would lie.
+    if (r.changes) addEvent(run.id, 'aborted', { by: 'flow' })
     return true
   },
 

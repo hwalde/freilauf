@@ -84,6 +84,44 @@ server/usage.mjs           aggregates plugin usage() for the UI
 | `mdKey` | string | key of this provider in the models.dev registry (effort levels) |
 | `pulse` | `{url, okStatus[]}` | health-pulse endpoint (watcher) |
 | `fetchModels(ctx)` | async fn | model catalog; `ctx` = `{json, registry, env}` (`json` = fetch helper with timeout, `registry()` = cached models.dev snapshot) |
+| `balance(ctx)` | async fn, optional | account balance in the normalized shape below; `null` = no key, no answer, nothing to report |
+
+### `balance()` — the normalized shape
+
+```js
+{
+  available: true | false | null,     // the provider's own verdict; null = not reported
+  amounts: [{ currency: 'USD', remaining: 12.34, granted: 1.0, topped_up: 11.34 }],
+}
+```
+
+The shape is normalized rather than passed through because the two providers
+that implement it disagree on almost everything: OpenRouter keeps **one** pot,
+reports it as **numbers** (`total_credits` minus `total_usage`) and says nothing
+about whether calls still go through; DeepSeek reports **strings**, **one entry
+per currency** (an account can hold CNY and USD at once) and adds
+`is_available`, which no one else has.
+
+Rules a plugin must keep:
+
+- **`granted` / `topped_up` are optional**, `currency` and `remaining` are not.
+- **`available: null` means "not reported", never "fine".** Same rule the
+  provider pulse follows — a provider that stays silent is not a healthy one.
+- **Return `null` rather than an empty result.** A row of zeroes claims a fact
+  the endpoint never stated.
+- **Do not fold currencies together.** One number for an account holding two
+  currencies silently drops one of them.
+
+`server/balances.mjs` aggregates all of it (cached, fail-soft, one row per
+provider with its own `ok` flag) for the usage panel and `GET /api/usage`. It
+asks only providers that at least one **enabled** coding agent may use and that
+actually have a credential — a balance nobody can act on is noise.
+
+**The budget gate does NOT go through that aggregator.** `openrouterGateBlocked()`
+in `quota.mjs` calls the plugin directly, because `balances.mjs` reaches the
+database via `coding-agents.mjs`, and `db.mjs` imports the harness registry,
+which imports `quota.mjs` — routing the gate through the aggregator closes
+exactly the cycle this document warns about above.
 
 ### Adding a new provider
 
@@ -93,6 +131,8 @@ server/usage.mjs           aggregates plugin usage() for the UI
    use it (plus `keyFreeProviders` when no own key is needed).
 3. Document the credential env var in `env.example`.
 4. Enable the provider per coding agent under Settings → Coding agents.
+5. Optional: implement `balance()` — the usage panel then shows it without a
+   line of UI code.
 
 ## Operator configuration and seeding
 

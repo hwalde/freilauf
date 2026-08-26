@@ -1,141 +1,231 @@
 /* cc-hub — plain: tables, forms, one terminal. Red/yellow/green as the only colors. */
 :root { color-scheme: light dark; }
+
+/* ---- Design tokens ----------------------------------------------------
+   Every colour below used to sit unnamed in the rule that happened to need
+   it, and the dark mode had to answer each one with a *selector* of its own
+   — three @media blocks scattered over the file, each a copy of a selector
+   that already existed. That is why a rule could quietly miss its dark
+   counterpart (ul.events li did, for months): nothing connected the two
+   places. A token is redefined once, at the bottom, and no rule has to know
+   that dark mode exists.
+
+   The values here are exactly the ones the file carried before. This layer
+   is deliberately invisible — it buys the *next* change, not this one.
+
+   Two greys that look like one are two: #8a8f96 sits on the light page,
+   #9aa0a6 on the dark header/toast bar. They are not interchangeable and
+   merging them would move pixels, so each keeps its own name. The same for
+   #6b7076 (crumbs, fixed) vs. the ghost button's grey (which does flip). */
+:root {
+  /* Surfaces. --surface-bar, --surface-pre and --surface-term are dark in
+     BOTH schemes on purpose — the header, a report and the terminal are
+     dark regardless of what the system says, so they are not redefined. */
+  --surface-page: #f6f6f4;
+  --surface-card: #fff;        /* tables, settings form, cards, tags, dialog */
+  --surface-hover: #f0f4fa;    /* clickable table row under the mouse */
+  --surface-code: #eceae6;     /* inline <code> */
+  --surface-track: #e4e4e0;    /* quota track on a light card */
+  --surface-bar: #22252a;      /* header + toast, scheme-independent */
+  --track-on-bar: #3a3f45;     /* the same track inside the dark header */
+  --surface-pre: #16181b;
+  --surface-term: #000;
+
+  /* Text */
+  --text: #1c1c1c;
+  --text-inverse: #fff;        /* on accent/green; also the setup banner's inverted button face */
+  --text-dim: #8a8f96;         /* .dim and the icon buttons, on light surfaces */
+  --text-soft: #6b7076;        /* breadcrumbs — a shade darker than --text-dim, on purpose */
+  --text-ghost: #6b7076;       /* the dialog's secondary button, the one grey that flips */
+  --text-on-bar: #eee;
+  --text-on-bar-dim: #9aa0a6;
+  --text-on-bar-nav: #cfd4da;
+  --text-pre: #d7dae0;
+
+  /* Borders */
+  --border: #e4e4e0;           /* table rows, event list */
+  --border-field: #dcdad6;     /* fieldset.zeitplan, weekday tags */
+  --border-strong: #c9c9c4;    /* input frames and the card's left edge — same in dark */
+  --border-ghost: #c9c9c4;     /* the dialog's secondary button */
+  --border-plain: #ccc;        /* plain fieldset */
+  --border-neutral: #999;      /* incident list item without a severity */
+
+  /* Status. Three tones per colour, because the same red means three
+     different things: a text/line tone, a fill behind text, and (for the
+     banners) a deeper variant that carries a border AND its own wash. */
+  --ok: #46a758;
+  --ok-text: #2c7a3f;          /* readable green on a light surface; also the quick-run button */
+  --ok-hover: #35924b;
+  --ok-bright: #7ddc8f;        /* green on the dark bar */
+  --warn: #f2c14e;
+  --warn-text: #b98900;
+  --warn-deep: #b8860b;
+  --warn-deep-soft: rgba(184, 134, 11, .1);
+  --err: #e5484d;
+  --err-soft: rgba(229, 72, 77, .12);
+  --err-faint: rgba(229, 72, 77, .05);
+  --err-deep: #c62828;
+  --err-deep-soft: rgba(198, 40, 40, .08);
+  --dot-idle: #9aa0a6;         /* fourth traffic-light state, sessions page only */
+  --accent: #2f6fed;
+  --accent-bright: #6ea8fe;    /* accent on the dark bar */
+  --accent-on-bar: #8ec5ff;    /* link inside a toast */
+  --accent-soft-bg: #eef1f6;   /* wash behind a hovered action button */
+  --accent-act-hover: #2f6fed; /* its text — the one accent that brightens in dark */
+
+  /* The translucent blacks: a shadow and a backdrop must sit on whatever is
+     behind them, in either scheme. Same reasoning as --err-soft. */
+  --shadow-dialog: 0 18px 60px rgba(0, 0, 0, .35);
+  --shadow-toast: 0 6px 24px rgba(0, 0, 0, .3);
+  --backdrop: rgba(0, 0, 0, .45);
+
+  /* Radii and spacing as a scale. Only padding/margin/gap and border-radius
+     go through it — a width, a height or a border width is a measurement of
+     something concrete, not a rhythm. Values off the scale (1px, 3px, 7px,
+     -4px, 50%) stay literal rather than being rounded onto it: rounding is
+     a visible change, and this layer is not allowed to make one. */
+  --radius-4: 4px;
+  --radius-6: 6px;
+  --radius-8: 8px;
+  --radius-10: 10px;
+  --radius-12: 12px;
+  --radius-pill: 999px;
+  --sp-2: 2px;
+  --sp-4: 4px;
+  --sp-5: 5px;
+  --sp-6: 6px;
+  --sp-8: 8px;
+  --sp-10: 10px;
+  --sp-12: 12px;
+  --sp-14: 14px;
+  --sp-16: 16px;
+  --sp-18: 18px;
+  --sp-20: 20px;
+  --sp-24: 24px;
+}
+
 * { box-sizing: border-box; }
-body { margin: 0; font: 15px/1.45 system-ui, sans-serif; background: #f6f6f4; color: #1c1c1c; }
-header { display: flex; align-items: center; gap: 16px; padding: 8px 16px; background: #22252a; color: #eee; flex-wrap: wrap; }
+body { margin: 0; font: 15px/1.45 system-ui, sans-serif; background: var(--surface-page); color: var(--text); }
+header { display: flex; align-items: center; gap: var(--sp-16); padding: var(--sp-8) var(--sp-16); background: var(--surface-bar); color: var(--text-on-bar); flex-wrap: wrap; }
 header .brand { font-weight: 700; letter-spacing: .5px; }
-header nav a { color: #cfd4da; text-decoration: none; margin-right: 12px; }
-header nav a.on { color: #fff; font-weight: 600; border-bottom: 2px solid #6ea8fe; }
+header nav a { color: var(--text-on-bar-nav); text-decoration: none; margin-right: var(--sp-12); }
+header nav a.on { color: var(--text-inverse); font-weight: 600; border-bottom: 2px solid var(--accent-bright); }
 header .spacer { flex: 1; }
-header .ok { color: #7ddc8f; } header .warn { color: #f2c14e; }
-header label.dim { color: #9aa0a6; }
-.quota { display: flex; align-items: center; gap: 6px; font-size: 12px; }
-.quota .track { width: 90px; height: 8px; background: #3a3f45; border-radius: 4px; overflow: hidden; }
-.quota .fill { height: 100%; background: #7ddc8f; }
-.quota .fill.y { background: #f2c14e; } .quota .fill.r { background: #e5484d; }
-main { max-width: 1200px; margin: 20px auto; padding: 0 16px; }
-table.list { border-collapse: collapse; width: 100%; background: #fff; }
-table.list th, table.list td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e4e4e0; }
-table.list tbody tr:hover { background: #f0f4fa; cursor: pointer; }
+header .ok { color: var(--ok-bright); } header .warn { color: var(--warn); }
+header label.dim { color: var(--text-on-bar-dim); }
+.quota { display: flex; align-items: center; gap: var(--sp-6); font-size: 12px; }
+.quota .track { width: 90px; height: 8px; background: var(--track-on-bar); border-radius: var(--radius-4); overflow: hidden; }
+.quota .fill { height: 100%; background: var(--ok-bright); }
+.quota .fill.y { background: var(--warn); } .quota .fill.r { background: var(--err); }
+main { max-width: 1200px; margin: var(--sp-20) auto; padding: 0 var(--sp-16); }
+table.list { border-collapse: collapse; width: 100%; background: var(--surface-card); }
+table.list th, table.list td { text-align: left; padding: var(--sp-8) var(--sp-10); border-bottom: 1px solid var(--border); }
+table.list tbody tr:hover { background: var(--surface-hover); cursor: pointer; }
 time.reltime { white-space: nowrap; }
-.dim { color: #8a8f96; font-size: .92em; }
+.dim { color: var(--text-dim); font-size: .92em; }
 .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; }
-.dot.rot { background: #e5484d; } .dot.gelb { background: #f2c14e; } .dot.gruen { background: #46a758; }
-.btn, button { background: #2f6fed; border: 0; color: #fff; padding: 7px 14px; border-radius: 6px; cursor: pointer; font: inherit; }
-button.danger { background: #e5484d; }
+.dot.rot { background: var(--err); } .dot.gelb { background: var(--warn); } .dot.gruen { background: var(--ok); }
+.btn, button { background: var(--accent); border: 0; color: var(--text-inverse); padding: 7px var(--sp-14); border-radius: var(--radius-6); cursor: pointer; font: inherit; }
+button.danger { background: var(--err); }
 form.inline { display: inline; }
-label { display: block; margin: 10px 0; }
-label.chk { display: flex; align-items: center; gap: 8px; }
-input, select, textarea { font: inherit; padding: 6px 8px; border: 1px solid #c9c9c4; border-radius: 6px; width: 100%; max-width: 640px; }
+label { display: block; margin: var(--sp-10) 0; }
+label.chk { display: flex; align-items: center; gap: var(--sp-8); }
+input, select, textarea { font: inherit; padding: var(--sp-6) var(--sp-8); border: 1px solid var(--border-strong); border-radius: var(--radius-6); width: 100%; max-width: 640px; }
 label.chk input { width: auto; }
-form.settings { background: #fff; padding: 16px; border-radius: 10px; max-width: 720px; }
-.card { background: #fff; padding: 14px 16px; border-radius: 10px; margin: 12px 0; border-left: 4px solid #c9c9c4; }
-.card.ok { border-left-color: #46a758; }
+form.settings { background: var(--surface-card); padding: var(--sp-16); border-radius: var(--radius-10); max-width: 720px; }
+.card { background: var(--surface-card); padding: var(--sp-14) var(--sp-16); border-radius: var(--radius-10); margin: var(--sp-12) 0; border-left: 4px solid var(--border-strong); }
+.card.ok { border-left-color: var(--ok); }
 /* Translucent instead of a fixed light red: the box then carries itself in both
    colour schemes. As #fdecec it stayed light in dark mode while the text came
    from body (#e6e6e6) — light on light, the help call was unreadable exactly
    when it matters. Same trick as .banner below. */
-.help { background: rgba(229, 72, 77, .12); border: 1px solid #e5484d; padding: 12px; border-radius: 8px; margin: 12px 0; }
-pre { background: #16181b; color: #d7dae0; padding: 12px; border-radius: 8px; overflow: auto; max-height: 480px; }
-code { background: #eceae6; padding: 1px 5px; border-radius: 4px; }
+.help { background: var(--err-soft); border: 1px solid var(--err); padding: var(--sp-12); border-radius: var(--radius-8); margin: var(--sp-12) 0; }
+pre { background: var(--surface-pre); color: var(--text-pre); padding: var(--sp-12); border-radius: var(--radius-8); overflow: auto; max-height: 480px; }
+code { background: var(--surface-code); padding: 1px var(--sp-5); border-radius: var(--radius-4); }
 ul.events { list-style: none; padding-left: 0; }
-ul.events li { padding: 3px 0; border-bottom: 1px dashed #e4e4e0; }
-#term { height: 480px; background: #000; border-radius: 8px; padding: 4px;
+ul.events li { padding: 3px 0; border-bottom: 1px dashed var(--border); }
+#term { height: 480px; background: var(--surface-term); border-radius: var(--radius-8); padding: var(--sp-4);
         border: 2px solid transparent; }
 /* Make it visible where keyboard input currently goes — otherwise you type into the void. */
-#term:focus-within { border-color: #2c7a3f; }
-.err { color: #e5484d; } .warn { color: #b98900; } .ok { color: #2c7a3f; }
+#term:focus-within { border-color: var(--ok-text); }
+.err { color: var(--err); } .warn { color: var(--warn-text); } .ok { color: var(--ok-text); }
 /* Schedule selection in the agent form */
-fieldset.zeitplan { border: 1px solid #dcdad6; border-radius: 8px; padding: 10px 14px; margin: 6px 0; }
-fieldset.zeitplan legend { padding: 0 6px; font-weight: 600; }
+fieldset.zeitplan { border: 1px solid var(--border-field); border-radius: var(--radius-8); padding: var(--sp-10) var(--sp-14); margin: var(--sp-6) 0; }
+fieldset.zeitplan legend { padding: 0 var(--sp-6); font-weight: 600; }
 fieldset.zeitplan .zp[hidden] { display: none; }
 fieldset.zeitplan label[hidden] { display: none; }
-.tage { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
-.tage .tag { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #dcdad6;
-  border-radius: 999px; padding: 4px 12px; cursor: pointer; user-select: none; background: #fff; }
-.tage .tag:has(input:checked) { background: #2c7a3f; border-color: #2c7a3f; color: #fff; }
+.tage { display: flex; flex-wrap: wrap; gap: var(--sp-6); margin: var(--sp-8) 0; }
+.tage .tag { display: inline-flex; align-items: center; gap: var(--sp-5); border: 1px solid var(--border-field);
+  border-radius: var(--radius-pill); padding: var(--sp-4) var(--sp-12); cursor: pointer; user-select: none; background: var(--surface-card); }
+.tage .tag:has(input:checked) { background: var(--ok-text); border-color: var(--ok-text); color: var(--text-inverse); }
 /* Planned start in the single-run form — same block switching as the schedule. */
 fieldset.zeitplan .st[hidden] { display: none; }
 
 /* Run title with inline renaming (overview + detail page) */
-.titel-inline { display: inline-flex; align-items: baseline; gap: 6px; }
-.titel-inline button.mini { background: none; border: 0; color: #8a8f96; cursor: pointer;
-  padding: 0 2px; font-size: .95em; line-height: 1; opacity: 0; transition: opacity .1s; }
+.titel-inline { display: inline-flex; align-items: baseline; gap: var(--sp-6); }
+.titel-inline button.mini { background: none; border: 0; color: var(--text-dim); cursor: pointer;
+  padding: 0 var(--sp-2); font-size: .95em; line-height: 1; opacity: 0; transition: opacity .1s; }
 /* The pencil only appears where one is about to click — a table full of icons
    is noise, an icon that is nowhere is undiscoverable. */
 tr:hover .titel-inline button.mini, .titel-inline:hover button.mini,
 .titel-inline button.mini:focus, h2 .titel-inline button.mini { opacity: 1; }
-.titel-inline button.mini:hover { color: #2f6fed; }
-.titel-input { max-width: 22em; font-size: 1em; padding: 2px 6px; }
+.titel-inline button.mini:hover { color: var(--accent); }
+.titel-input { max-width: 22em; font-size: 1em; padding: var(--sp-2) var(--sp-6); }
 h2 .titel-input { font-size: .8em; }
 .titelzelle { min-width: 12em; }
 /* One-click archive button in the overview — same hover rule as the pencil: only
    where one is about to click. A table full of "Archive" buttons is noise. */
-button.act { background: none; border: 0; color: #8a8f96; cursor: pointer; padding: 2px 8px;
-  font-size: .92em; line-height: 1.4; border-radius: 4px; opacity: 0; transition: opacity .1s; }
+button.act { background: none; border: 0; color: var(--text-dim); cursor: pointer; padding: var(--sp-2) var(--sp-8);
+  font-size: .92em; line-height: 1.4; border-radius: var(--radius-4); opacity: 0; transition: opacity .1s; }
 tr:hover button.act, button.act:focus-visible { opacity: 1; }
-button.act:hover { color: #2f6fed; background: #eef1f6; }
+button.act:hover { color: var(--accent-act-hover); background: var(--accent-soft-bg); }
 /* Pagination on the archive page */
-.pager { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
-.pager .btn { padding: 5px 12px; }
+.pager { display: flex; align-items: center; gap: var(--sp-12); margin-top: var(--sp-12); }
+.pager .btn { padding: var(--sp-5) var(--sp-12); }
 /* A waiting run is not an incident — the banner must not look like one. */
-.banner.warten { border-left-color: #b8860b; background: rgba(184, 134, 11, .1); }
-
-@media (prefers-color-scheme: dark) {
-  fieldset.zeitplan { border-color: #33363b; }
-  .tage .tag { background: #202226; border-color: #33363b; }
-  .tage .tag:has(input:checked) { background: #2c7a3f; border-color: #2c7a3f; }
-
-  body { background: #17181a; color: #e6e6e6; }
-  table.list, form.settings, .card { background: #202226; }
-  table.list th, table.list td { border-color: #33363b; }
-  table.list tbody tr:hover { background: #262a30; }
-  code { background: #2c2f34; }
-  button.act:hover { background: #2c3036; color: #6ea8fe; }
-}
+.banner.warten { border-left-color: var(--warn-deep); background: var(--warn-deep-soft); }
 
 /* Incidents (rate limit, provider) */
-.vorfall { display:inline-block; padding:1px 6px; border-radius:3px; border:1px solid; margin-right:4px; }
-.vorfall.rot { border-color:#c62828; color:#c62828; }
-.vorfall.gelb { border-color:#b8860b; color:#b8860b; }
-.banner { padding:8px 12px; margin-bottom:12px; border-left:4px solid #c62828; background:rgba(198,40,40,.08); }
+.vorfall { display:inline-block; padding:1px var(--sp-6); border-radius:3px; border:1px solid; margin-right:var(--sp-4); }
+.vorfall.rot { border-color:var(--err-deep); color:var(--err-deep); }
+.vorfall.gelb { border-color:var(--warn-deep); color:var(--warn-deep); }
+.banner { padding:var(--sp-8) var(--sp-12); margin-bottom:var(--sp-12); border-left:4px solid var(--err-deep); background:var(--err-deep-soft); }
 ul.vorfaelle { list-style:none; padding:0; }
-ul.vorfaelle li { padding:6px 8px; margin-bottom:4px; border-left:4px solid #999; }
-ul.vorfaelle li.rot { border-left-color:#c62828; }
-ul.vorfaelle li.gelb { border-left-color:#b8860b; }
+ul.vorfaelle li { padding:var(--sp-6) var(--sp-8); margin-bottom:var(--sp-4); border-left:4px solid var(--border-neutral); }
+ul.vorfaelle li.rot { border-left-color:var(--err-deep); }
+ul.vorfaelle li.gelb { border-left-color:var(--warn-deep); }
 ul.vorfaelle li.geloest { opacity:.6; }
 /* The two groups: a to-do and a note must not look the same. */
-h4.vorfall-gruppe { margin:14px 0 2px; }
-h4.vorfall-gruppe.rot { color:#c62828; }
-h4.vorfall-gruppe.gelb { color:#b8860b; }
-h4.vorfall-gruppe + p.dim { margin:0 0 6px; }
-code.beleg { display:block; white-space:pre-wrap; word-break:break-all; font-size:.85em; margin-top:4px; }
-fieldset { border:1px solid #ccc; padding:8px 12px; margin:8px 0; }
-label.skill-regler { margin-left: 24px; }
+h4.vorfall-gruppe { margin:var(--sp-14) 0 var(--sp-2); }
+h4.vorfall-gruppe.rot { color:var(--err-deep); }
+h4.vorfall-gruppe.gelb { color:var(--warn-deep); }
+h4.vorfall-gruppe + p.dim { margin:0 0 var(--sp-6); }
+code.beleg { display:block; white-space:pre-wrap; word-break:break-all; font-size:.85em; margin-top:var(--sp-4); }
+fieldset { border:1px solid var(--border-plain); padding:var(--sp-8) var(--sp-12); margin:var(--sp-8) 0; }
+label.skill-regler { margin-left: var(--sp-24); }
 
 /* Setup banner (no coding agent configured yet) — very top, above the header */
-.banner.setup { background: #2f6fed; color: #fff; padding: 10px 16px; margin: 0;
-  border-left: 0; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
-.banner.setup .btn { background: #fff; color: #2f6fed; }
+.banner.setup { background: var(--accent); color: var(--text-inverse); padding: var(--sp-10) var(--sp-16); margin: 0;
+  border-left: 0; display: flex; gap: var(--sp-14); align-items: center; flex-wrap: wrap; }
+.banner.setup .btn { background: var(--text-inverse); color: var(--accent); }
 
 /* Subscription usage panel (overview) */
-details.usage { background: #fff; padding: 10px 14px; border-radius: 10px; margin-bottom: 14px; }
+details.usage { background: var(--surface-card); padding: var(--sp-10) var(--sp-14); border-radius: var(--radius-10); margin-bottom: var(--sp-14); }
 details.usage summary { font-weight: 600; cursor: pointer; }
-.usage-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; padding: 5px 0; }
-.usage-row .quota .track { background: #e4e4e0; }
-@media (prefers-color-scheme: dark) {
-  details.usage { background: #202226; }
-  .usage-row .quota .track { background: #3a3f45; }
-}
+.usage-row { display: flex; gap: var(--sp-14); align-items: center; flex-wrap: wrap; padding: var(--sp-5) 0; }
+/* The track needs a lighter base here than in the dark header — the same
+   element, two contexts. That is what --surface-track is for; the header
+   keeps --track-on-bar, which never flips. */
+.usage-row .quota .track { background: var(--surface-track); }
 
 /* Flows attached to an agent / single run, and the way back to the flow pages. */
 fieldset.flows-attach label.chk a { margin-left: auto; font-size: 12px; }
 fieldset.flows-attach p:last-child { margin-bottom: 0; }
-p.crumbs { font-size: 13px; color: #6b7076; margin: 0 0 8px; }
+p.crumbs { font-size: 13px; color: var(--text-soft); margin: 0 0 var(--sp-8); }
 
 /* Sessions page: a wide table one cleans up in — the row states must be
    readable at a glance, so ending is a visible transition, not a reload. */
-.sess-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 10px 0; }
+.sess-bar { display: flex; align-items: center; gap: var(--sp-14); flex-wrap: wrap; margin: var(--sp-10) 0; }
 .sess-bar .spacer { flex: 1; }
 .sess-bar label.chk { margin: 0; }
 table.sessions { font-size: 14px; }
@@ -145,16 +235,16 @@ table.sessions td:last-child { white-space: nowrap; }
    here to the light colour overrode the dark-mode rule and left light text
    on #f0f4fa — same class of bug as .help above. Only cursor differs. */
 table.sessions tbody tr:hover { cursor: default; }
-table.sessions tr[data-running="1"] { background: rgba(229, 72, 77, .05); }
+table.sessions tr[data-running="1"] { background: var(--err-faint); }
 table.sessions tr.ending { opacity: .55; }
 table.sessions tr.gone { opacity: .4; text-decoration: line-through; }
-table.sessions tr.failed { background: rgba(229, 72, 77, .12); }
-.dot.grau { background: #9aa0a6; }
+table.sessions tr.failed { background: var(--err-soft); }
+.dot.grau { background: var(--dot-idle); }
 
 /* Buttons next to each other. Deliberately not a <p>: an HTML parser closes an
    open paragraph at a <form>, so a link and a form-button inside one paragraph
    land on two lines no matter what the CSS says. */
-.btn-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+.btn-row { display: flex; align-items: center; gap: var(--sp-10); flex-wrap: wrap; margin: var(--sp-12) 0; }
 /* The repo switcher is a header control, not a form field — the 100% width from
    the rule above stretched it across half the bar. */
 header select { width: auto; max-width: 22em; }
@@ -167,36 +257,60 @@ label[hidden] { display: none; }
 /* ---- Quick Run: the button in the header and its dialog ----
    Reachable from every page, because the moment one wants to send a task off is
    rarely the moment one is standing on the run form. */
-.qr-open { background: #2c7a3f; padding: 5px 12px; font-size: 14px; white-space: nowrap; }
-.qr-open:hover { background: #35924b; }
-dialog.qr { width: min(680px, 94vw); border: 0; border-radius: 12px; padding: 18px 20px;
-  background: #fff; color: #1c1c1c; box-shadow: 0 18px 60px rgba(0, 0, 0, .35); }
-dialog.qr::backdrop { background: rgba(0, 0, 0, .45); }
-dialog.qr h3 { margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
-dialog.qr h3 button.mini { margin-left: auto; background: none; border: 0; color: #8a8f96;
-  cursor: pointer; font-size: 1em; padding: 0 4px; opacity: 1; }
+.qr-open { background: var(--ok-text); padding: var(--sp-5) var(--sp-12); font-size: 14px; white-space: nowrap; }
+.qr-open:hover { background: var(--ok-hover); }
+/* A <dialog> does not inherit from body, so it has to name its own surface and
+   text — with tokens that is the same pair every card uses, and dark mode needs
+   no rule of its own for it any more. */
+dialog.qr { width: min(680px, 94vw); border: 0; border-radius: var(--radius-12); padding: var(--sp-18) var(--sp-20);
+  background: var(--surface-card); color: var(--text); box-shadow: var(--shadow-dialog); }
+dialog.qr::backdrop { background: var(--backdrop); }
+dialog.qr h3 { margin: 0 0 var(--sp-10); display: flex; align-items: center; gap: var(--sp-8); }
+dialog.qr h3 button.mini { margin-left: auto; background: none; border: 0; color: var(--text-dim);
+  cursor: pointer; font-size: 1em; padding: 0 var(--sp-4); opacity: 1; }
 dialog.qr textarea { min-height: 8em; }
 dialog.qr input, dialog.qr select, dialog.qr textarea { max-width: 100%; }
-dialog.qr details.qr-more { margin: 10px 0; }
-dialog.qr details.qr-more summary { cursor: pointer; color: #2f6fed; }
-dialog.qr menu.qr-actions { display: flex; gap: 10px; justify-content: flex-end;
-  margin: 14px 0 0; padding: 0; }
-dialog.qr button.ghost { background: none; color: #6b7076; border: 1px solid #c9c9c4; }
-#qr-fav-info { margin: -4px 0 10px; }
+dialog.qr details.qr-more { margin: var(--sp-10) 0; }
+dialog.qr details.qr-more summary { cursor: pointer; color: var(--accent); }
+dialog.qr menu.qr-actions { display: flex; gap: var(--sp-10); justify-content: flex-end;
+  margin: var(--sp-14) 0 0; padding: 0; }
+dialog.qr button.ghost { background: none; color: var(--text-ghost); border: 1px solid var(--border-ghost); }
+#qr-fav-info { margin: -4px 0 var(--sp-10); }
 
 /* ---- toasts: the answer to an action that did not change the page ---- */
-.toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column;
-  gap: 8px; z-index: 60; max-width: min(420px, 92vw); }
-.toast { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px;
-  background: #22252a; color: #eee; box-shadow: 0 6px 24px rgba(0, 0, 0, .3);
-  border-left: 4px solid #46a758; }
-.toast.warn { border-left-color: #f2c14e; }
-.toast.err { border-left-color: #e5484d; }
-.toast a { color: #8ec5ff; margin-left: auto; white-space: nowrap; }
-.toast button.mini { background: none; border: 0; color: #9aa0a6; cursor: pointer;
-  padding: 0 2px; opacity: 1; font-size: 1em; }
+.toasts { position: fixed; right: var(--sp-16); bottom: var(--sp-16); display: flex; flex-direction: column;
+  gap: var(--sp-8); z-index: 60; max-width: min(420px, 92vw); }
+.toast { display: flex; align-items: center; gap: var(--sp-10); padding: var(--sp-10) var(--sp-12); border-radius: var(--radius-8);
+  background: var(--surface-bar); color: var(--text-on-bar); box-shadow: var(--shadow-toast);
+  border-left: 4px solid var(--ok); }
+.toast.warn { border-left-color: var(--warn); }
+.toast.err { border-left-color: var(--err); }
+.toast a { color: var(--accent-on-bar); margin-left: auto; white-space: nowrap; }
+.toast button.mini { background: none; border: 0; color: var(--text-on-bar-dim); cursor: pointer;
+  padding: 0 var(--sp-2); opacity: 1; font-size: 1em; }
 
+/* ---- Dark mode: values only, no selectors -----------------------------
+   Everything the three former @media blocks did by repeating a selector is
+   a redefinition here. What is NOT listed keeps its light value on purpose:
+   the header, the toasts, the setup banner, <pre> and the terminal are dark
+   in both schemes, and --border-strong stays because input frames and the
+   card's left edge never had a dark counterpart.
+   The one rule that changes behaviour: ul.events li now follows --border
+   like every other row separator — it used to keep the light #e4e4e0 in
+   dark mode because nothing tied it to the table rule it was copied from. */
 @media (prefers-color-scheme: dark) {
-  dialog.qr { background: #202226; color: #e6e6e6; }
-  dialog.qr button.ghost { border-color: #3a3f45; color: #9aa0a6; }
+  :root {
+    --surface-page: #17181a;
+    --surface-card: #202226;
+    --surface-hover: #262a30;
+    --surface-code: #2c2f34;
+    --surface-track: #3a3f45;
+    --text: #e6e6e6;
+    --text-ghost: #9aa0a6;
+    --border: #33363b;
+    --border-field: #33363b;
+    --border-ghost: #3a3f45;
+    --accent-soft-bg: #2c3036;
+    --accent-act-hover: #6ea8fe;
+  }
 }
