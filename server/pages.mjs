@@ -177,8 +177,9 @@ function quickRunDialog(repos, selectedRepo) {
       `<option value="${r.id}" ${r.id == selectedRepo ? 'selected' : ''}>${e(r.name)}</option>`).join('')}</select></label>
     <label>${e(t('qr.favorite'))} <select name="favorite_id" id="qr-fav">${favs.map(f =>
       `<option value="${f.id}" data-summary="${e(favoriteSummary(f))}">${e(f.name)}</option>`).join('')}</select>
-      <button type="button" class="fav-info" id="qr-fav-info"
-        aria-label="${e(t('qr.favorite_info'))}">i</button></label>
+      <span class="fav-tip"><button type="button" class="fav-info" id="qr-fav-info"
+        aria-describedby="qr-fav-tip" aria-label="${e(t('qr.favorite_info'))}">i</button>
+        <span class="tip" id="qr-fav-tip" role="tooltip"></span></span></label>
     <label>${e(t('qr.prompt'))} <textarea name="prompt" rows="8" required placeholder="${e(t('qr.prompt_ph'))}"></textarea></label>
     ${runStartTimeFields({})}
     <details class="qr-more"><summary>${e(t('qr.more'))}</summary>

@@ -575,12 +575,29 @@ dialog.qr button.ghost { background: none; color: var(--text-ghost); border: 1px
   background: none; border: 1px solid var(--border-strong); color: var(--text-dim);
   font-size: var(--fs-small); font-style: italic; line-height: 1; cursor: help; justify-self: start; }
 .fav-info:hover, .fav-info:focus-visible { color: var(--accent-act-hover); border-color: var(--accent-act-hover); }
+/* The bubble. Shown by CSS, so it appears the INSTANT the marker is hovered —
+   the native title waits about a second, cannot be styled, and would put this
+   on one long dot-separated line.
+   Anchored right: the marker sits at the dialog's right edge, so the bubble
+   grows leftwards instead of out of the frame. */
+.fav-tip { position: relative; display: inline-flex; }
+.fav-tip .tip { position: absolute; top: calc(100% + var(--sp-6)); right: 0; z-index: 70;
+  min-width: 15em; max-width: 22em; display: none; flex-direction: column; gap: var(--sp-2);
+  background: var(--surface-bar); color: var(--text-on-bar); padding: var(--sp-8) var(--sp-10);
+  border-radius: var(--radius-8); box-shadow: var(--shadow-toast); font-size: var(--fs-small);
+  text-align: left; font-style: normal; white-space: normal; }
+.fav-tip .tip i { color: var(--text-on-bar-dim); font-style: normal; margin-right: var(--sp-4); }
+.fav-tip:hover .tip, .fav-info:focus-visible + .tip { display: flex; }
+/* A caret, so the bubble reads as belonging to the marker and not as a panel
+   that happens to be under it. */
+.fav-tip .tip::before { content: ''; position: absolute; bottom: 100%; right: .45em;
+  border: 5px solid transparent; border-bottom-color: var(--surface-bar); }
 /* The marker belongs BESIDE its select, not under it: in a two-column grid a
    second element in column 2 is auto-placed onto a new row, which is exactly
    the extra line this change was meant to remove. A row that carries one gets
    a third column of its own width. */
-form.form-grid label:has(.fav-info) { grid-template-columns: 13em minmax(0, 1fr) auto; }
-form.form-grid label:not(.chk):not(.weekday) > .fav-info { grid-column: 3; }
+form.form-grid label:has(.fav-tip) { grid-template-columns: 13em minmax(0, 1fr) auto; }
+form.form-grid label:not(.chk):not(.weekday) > .fav-tip { grid-column: 3; }
 
 /* ---- toasts: the answer to an action that did not change the page ---- */
 .toasts { position: fixed; right: var(--sp-16); bottom: var(--sp-16); display: flex; flex-direction: column;

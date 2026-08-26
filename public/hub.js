@@ -146,9 +146,33 @@
       // The setup used to stand as a line of text under the select, where it
       // clung to the field and pushed the task box down. It is a detail one
       // looks up, not one one reads every time — so it lives on the marker.
+      //
+      // Built as elements rather than left to the native `title`: that one
+      // waits about a second before it appears, cannot be styled, and would
+      // render this as one long dot-separated line. CSS shows the bubble the
+      // instant the marker is hovered or focused; this only fills it.
       const summary = opt ? (opt.dataset.summary || '') : ''
-      favInfo.title = summary
+      const tip = document.getElementById('qr-fav-tip')
       favInfo.hidden = !summary
+      // Guarded, not returned early: the remembered favorite is saved at the
+      // end of this function, and a missing bubble must not cost that.
+      if (tip) {
+        tip.textContent = ''
+        for (const teil of summary.split(' · ')) {
+          const zeile = document.createElement('span')
+          // "Extra skills: unlazy" is a pair, "opus" is a bare fact. Where
+          // there is a colon the caption goes dim so the value carries the line.
+          const i = teil.indexOf(': ')
+          if (i > 0) {
+            const k = document.createElement('i')
+            k.textContent = teil.slice(0, i)
+            zeile.append(k, document.createTextNode(teil.slice(i + 1)))
+          } else {
+            zeile.textContent = teil
+          }
+          tip.append(zeile)
+        }
+      }
       try { localStorage.setItem(FAV_KEY, favSel.value) } catch (err) { /* private mode */ }
     }
     if (favSel) {
