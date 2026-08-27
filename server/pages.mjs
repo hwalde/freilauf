@@ -27,7 +27,7 @@ import { ampelAusVorfaellen, offeneVorfaelle, alleVorfaelle, brauchtMensch } fro
 import { TYP_TEXT } from './detect.mjs'
 import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder } from './zusaetze.mjs'
-import { listSessions, sessionKeepHours, currentKeepMs } from './sessions.mjs'
+import { listSessions, sessionKeepHours, currentKeepMs, paneAlive } from './sessions.mjs'
 import { attachmentSummary, flowSection, flowAttachFields } from './flows/attach.mjs'
 // The flow block of the detail page is rendered in server/flows/ and belongs to
 // that module; it is re-exported here so a fragment has ONE place to ask for a
@@ -776,9 +776,25 @@ export async function pageRun(req, res, url, id) {
       logHtml = `<pre id="log">${e(raw.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r/g, ''))}</pre>`
     } catch {}
   }
-  // "live" means: there really is a session one can attach to. Judged only by
-  // status, the page promised a terminal that did not exist.
-  const live = ['running', 'waiting_help'].includes(run.status) && !!run.tmux_session && !run.tmux_closed_at
+  // "live" means: there really is an agent one can type to — a standing session
+  // AND a process in it. Judged by the run's STATUS it meant neither, and both
+  // readings were wrong in their own direction:
+  //   - status alone promised a terminal for a session that was long gone;
+  //   - status as a CONDITION locked the operator out of the case the coding
+  //     agents make the normal one. claude, opencode and cursor stay in their
+  //     TUI after the work is done; the run says 'done', the agent is still
+  //     sitting there waiting for a follow-up, and the page offered a read-only
+  //     screen of it. Whether one may type is a fact about the session, never
+  //     about the record. (hermes is the counter-example, and the reason the
+  //     pane is asked about at all: `chat -q` is one query and then the process
+  //     exits — remain-on-exit leaves the screen, not the agent.)
+  const sessionOpen = !!run.tmux_session && !run.tmux_closed_at
+  // Unknown (null) counts as alive: a tmux that did not answer must not silently
+  // take away write access — the handshake is fail-closed on its own.
+  const live = sessionOpen && (await paneAlive(run.tmux_session)) !== false
+  // Is this run itself still going? That decides the BUTTON, not the typing:
+  // ending a run that is over would rewrite its 'done' to 'aborted'.
+  const inFlight = ['running', 'waiting_help'].includes(run.status)
   const body = `
   ${runDetailHead(run, { title: titel })}
   ${runChips(run, repo, herkunft)}
@@ -791,10 +807,21 @@ export async function pageRun(req, res, url, id) {
       // done: show as history, not as an open question
       : `<p class="dim"><b>${e(t('run.help_answered'))}:</b> ${e(run.help_text)}${run.help_answer ? ` → <i>${e(run.help_answer)}</i>` : ''}</p>`
     : ''}
-  <details ${live ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(live ? t('run.terminal_live') : t('run.terminal_closed'))}</summary>
-    <div id="term" data-session="${run.tmux_session && !run.tmux_closed_at ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
-    ${live ? `<form onsubmit="return cchubSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>
-    <form onsubmit="return cchubKill('${id}')"><button class="danger">${e(t('run.kill'))}</button></form>` : ''}
+  <details ${live ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(terminalState(live, sessionOpen, inFlight))}</summary>
+    <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
+    ${live && !inFlight ? `<p class="dim">${e(t('run.session_after_hint'))}</p>` : ''}
+    ${live ? `<form onsubmit="return cchubSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>` : ''}
+    ${inFlight
+      ? (live ? `<form onsubmit="return cchubKill('${id}')"><button class="danger">${e(t('run.kill'))}</button></form>` : '')
+      // The run is over — only the session is left. Ending it here must NOT go
+      // through /runs/<id>/kill: that sets 'aborted', and it would turn a run
+      // that came through cleanly into a failed one. /api/sessions/kill is the
+      // one path that ends a session and leaves a finished record alone.
+      : sessionOpen ? `<div class="btn-row"><form method="post" action="/api/sessions/kill" class="inline">
+          <input type="hidden" name="session" value="${e(run.tmux_session)}">
+          <input type="hidden" name="back" value="/runs/${id}">
+          <button class="danger">${e(t('run.end_session'))}</button></form>
+        <span class="dim">${e(t('run.end_session_hint'))}</span></div>` : ''}
   </details>
   ${['failed', 'aborted'].includes(run.status)
     ? `<form method="post" action="/api/runs/${id}/retry"><button>${e(t('run.retry'))}</button>
@@ -808,6 +835,19 @@ export async function pageRun(req, res, url, id) {
   <h3>${e(t('run.events'))}</h3>${runEvents(id)}
   <h3>${e(t('run.log'))}</h3>${logHtml}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(titel, '/', body, run.repo_id, true))
+}
+
+/**
+ * The half sentence behind "Terminal" in the summary.
+ *
+ * Four states, because the two facts behind them are independent: is there a
+ * session, and is anybody still sitting in it. "(ended)" for a session whose
+ * process has exited would be a lie — the scrollback is there and can be
+ * attached to, only nobody answers any more.
+ */
+export function terminalState(live, sessionOpen, inFlight) {
+  if (live) return t(inFlight ? 'run.terminal_live' : 'run.terminal_after')
+  return t(sessionOpen ? 'run.terminal_dead' : 'run.terminal_closed')
 }
 
 /**

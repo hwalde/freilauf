@@ -940,11 +940,14 @@
     termBox.classList.add('dim')
     return
   }
-  // data-live comes from pages.mjs and means the same as there: running status
-  // AND open tmux session. Earlier an innerHTML.includes('live') sat here —
-  // that would have granted write access to a dead session for a run named
-  // "live-…" or the word in a report. Without a session it stays view-only;
-  // 'ro' must be explicitly '0', the server is fail-closed.
+  // data-live comes from pages.mjs and means the same as there: a standing tmux
+  // session with a live process in it — NOT "the run is still going". A claude,
+  // opencode or cursor that has reported 'done' is still sitting in its TUI,
+  // and typing a follow-up into it is the whole point of keeping the session.
+  // Earlier an innerHTML.includes('live') sat here — that would have granted
+  // write access to a dead session for a run named "live-…" or the word in a
+  // report. Without a session it stays view-only; 'ro' must be explicitly '0',
+  // the server is fail-closed.
   const live = termBox.dataset.live === '1'
   const ro = live ? '&ro=0' : '&ro=1'
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'

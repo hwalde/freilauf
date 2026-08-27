@@ -334,6 +334,18 @@ async function api(req, res, url) {
     const run = getRun(m[1])
     const { sh } = await import('./util.mjs')
     if (run?.tmux_session) await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
+    // A run that is ALREADY over only loses the session it left standing. Writing
+    // 'aborted' over it would turn a run that came through cleanly into a failed
+    // one — and since the coding agents keep their session after the work is
+    // done, that is not a corner case but the ordinary state of a finished run.
+    // Same rule, and same event, as reconcileClosedSession(). Only the three
+    // terminal statuses count: a 'scheduled' or 'deferred' run is cancelled
+    // through this very endpoint, and cancelling it IS setting it to 'aborted'.
+    if (['done', 'failed', 'aborted'].includes(run?.status ?? '')) {
+      db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(m[1])
+      if (run && !run.tmux_closed_at) addEvent(m[1], 'tmux_closed', { source: 'user' })
+      return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
+    }
     // Set tmux_closed_at right away: otherwise the detail page tries to attach
     // a terminal to the dead session until the next watcher tick (410 in the browser).
     db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
@@ -366,10 +378,15 @@ async function api(req, res, url) {
   if (req.method === 'POST' && path === '/api/sessions/kill') {
     const b = await form(req)
     const names = b.session_list ?? (b.session ? [b.session] : [])
-    if (!names.length) return answer(req, res, 400, { ok: false, error: t('api.no_session_given') }, '/sessions')
+    // Where a classic form post returns to. The sessions page fetches and stays
+    // put, but the run's detail page ends its session with a plain form — and
+    // it wants to land back on the run, not on the session list. The full
+    // navigation is deliberate there: it is what closes the terminal's
+    // WebSocket, and with it the tmux client behind it.
+    if (!names.length) return answer(req, res, 400, { ok: false, error: t('api.no_session_given') }, b.back || '/sessions')
     const { killSessions } = await import('./sessions.mjs')
     const results = await killSessions(names, 'web')
-    return answer(req, res, 200, { ok: results.every(r => r.ok), results }, '/sessions')
+    return answer(req, res, 200, { ok: results.every(r => r.ok), results }, b.back || '/sessions')
   }
   // Resolve an incident (auto-alarm off) — single or all of one run.
   if (req.method === 'POST' && (m = path.match(/^\/api\/incidents\/(\d+)\/resolve$/))) {

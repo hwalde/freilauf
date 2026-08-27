@@ -1154,6 +1154,67 @@ try {
     })
   }
 
+  // ------------------------------------------------------------------
+  gruppe('The agent stays operable after the work is done')
+
+  {
+    // The coding agents that run in a TUI (claude, opencode, cursor) do not go
+    // away when the task is finished — the session stands, the process sits at
+    // its prompt. Whether one may type into it is therefore a fact about the
+    // SESSION, not about the run's record.
+    let RN = null, RNSESS = null
+    await pruefe('a finished run whose session still stands stays writable', async () => {
+      const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Nachbedienung' })
+      RN = j.runId
+      await warteAuf(() => !!lauf(RN)?.tmux_session, { was: 'tmux session' })
+      RNSESS = lauf(RN).tmux_session
+      sessions.add(RNSESS)
+      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(RN)
+      const html = await (await hol(`/runs/${RN}`)).text()
+      enthaelt(html, 'data-live="1"', 'the terminal is offered with write access')
+      enthaelt(html, `cchubSend(this,'/api/runs/${RN}/send')`, 'and the send form is there')
+      falsch(html.includes(`cchubKill('${RN}')`), 'but no "end run" — that run is over')
+      enthaelt(html, 'name="session"', 'instead: end the session it left standing')
+    })
+
+    await pruefe('a message reaches the session of a finished run', async () => {
+      const r = await formular(`/api/runs/${RN}/send`, { text: 'weiter geht es' })
+      gleich(r.status, 200, 'accepted')
+      wahr(ereignisse(RN).includes('message_sent'), `recorded (has: ${ereignisse(RN).join(', ')})`)
+      gleich(lauf(RN).status, 'done', 'and the run stays done')
+    })
+
+    await pruefe('"end run" on a finished run does NOT rewrite it to aborted', async () => {
+      // The button is gone from the page, but the endpoint is reachable — and a
+      // run that came through cleanly must not become a failed one because
+      // somebody closed its leftover session.
+      const r = await formular(`/api/runs/${RN}/kill`, {})
+      gleich(r.status, 200, 'accepted')
+      gleich(lauf(RN).status, 'done', 'still done')
+      wahr(lauf(RN).tmux_closed_at !== null, 'only the session is marked closed')
+    })
+
+    await pruefe('without a session there is no write access left', async () => {
+      const html = await (await hol(`/runs/${RN}`)).text()
+      falsch(html.includes('data-live="1"'), 'read-only')
+      enthaelt(html, 'data-session="0"', 'and the box says there is no session')
+      sessions.delete(RNSESS)
+    })
+
+    await pruefe('ending the session from the detail page lands back on the run', async () => {
+      const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Session-zurueck' })
+      await warteAuf(() => !!lauf(j.runId)?.tmux_session, { was: 'tmux session' })
+      const name = lauf(j.runId).tmux_session
+      sessions.add(name)
+      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+      const r = await formular('/api/sessions/kill', { session: name, back: `/runs/${j.runId}` }, { alsBrowser: true })
+      gleich(r.status, 303, 'redirect instead of JSON')
+      gleich(r.headers.get('location'), `/runs/${j.runId}`, 'back to the run, not to the session list')
+      sessions.delete(name)
+      gleich(lauf(j.runId).status, 'done', 'the finished run is left alone')
+    })
+  }
+
   gruppe('Worktree cleanup: no data loss (regression test)')
 
   {

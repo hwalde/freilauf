@@ -678,6 +678,38 @@ bill ran for days (thirty sessions, 15 GB, measured).
   pane PID down) — the pane itself is only a shell and would understate it by an
   order of magnitude.
 
+### The work is done — who is still there, and who only left a screen
+
+Three of the four coding agents keep running after the task is finished, and
+that is not a detail of the terminal but the reason it exists (measured
+2026-08-27, one trivial prompt each):
+
+| Coding agent | Command (`cc-start`) | When the work is done |
+|---|---|---|
+| claude | `claude --permission-mode dontAsk "$CC_PROMPT"` | stays in its TUI, pane alive — production sessions on `done` runs still had a live `claude` pane 19 h later |
+| opencode | `opencode --auto --prompt "$CC_PROMPT"` | stays in its TUI, pane alive |
+| cursor | `cursor-agent --force --trust -- "$CC_PROMPT"` | stays at "→ Add a follow-up", pane alive — this is what `finishByTurnEnd()` exists for |
+| hermes | `hermes chat -q "$CC_PROMPT" --yolo` | **exits.** `-q` is "single query (non-interactive mode)": it prints its answer plus a `hermes --resume …` line and the process ends (measured: dead pane, status 0, 9 s after the start) |
+
+So a standing session and a reachable agent are two different facts, and only
+`pane_dead` tells them apart — `remain-on-exit` keeps hermes's screen exactly
+the way it keeps a crashed run's. `paneAlive()` (sessions.mjs) is that one
+question, one `tmux list-panes` per detail page.
+
+**Which is why the run's terminal is writable as long as its SESSION is**, not
+as long as its status says `running`. It used to hang on the status, and that
+locked the operator out of the ordinary case: the run reports `done`, the agent
+is still sitting in its TUI ready for a follow-up, and the page showed a
+read-only screen of it. `pageRun()` therefore asks for the session and the pane,
+never for the status; the status only decides the BUTTON underneath — a run
+still in flight is ended (`/api/runs/<id>/kill`, sets `aborted`), a finished one
+only loses the session it left standing (`/api/sessions/kill` with a `back`,
+which leaves the record alone). `/api/runs/<id>/kill` enforces the same rule
+from its own side: on `done`/`failed`/`aborted` it closes the session and writes
+`tmux_closed` instead of rewriting a clean run into a failed one. What is sent
+into a finished session is real work that this run no longer records, and the
+retention clock keeps counting from the run's end — the page says so.
+
 **Ending a session is a run event, not just a tmux call.**
 `reconcileClosedSession()` is the single place that knows this: a run still on
 `running`/`waiting_help` becomes `aborted` with an `ended_at` and a report line
@@ -798,9 +830,10 @@ errors (`post_api_request` only fires after success).
 - **The terminal is fail-closed, twice.** `/term` only enables write access on an
   explicit `?ro=0` (`terminal.mjs`); without the parameter tmux attaches with
   `-r` AND every input is discarded. The client sets `ro=0` from `data-live` in
-  `pages.mjs`. Touching only one of the two sides yields a terminal that
-  silently does nothing — exactly how it sat for a long time, because `ro=0`
-  appeared nowhere.
+  `pages.mjs`, and `data-live` means "session standing AND a process in it" —
+  never "the run's status is `running`" (see above). Touching only one of the
+  two sides yields a terminal that silently does nothing — exactly how it sat
+  for a long time, because `ro=0` appeared nowhere.
 - **`tmux attach -r` is only the shorthand for `-f read-only,ignore-size`.** And
   `ignore-size` is useless while `window-size` is `latest` (default): the
   browser rewraps the agent's window to its size while watching — with and
