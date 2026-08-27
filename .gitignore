@@ -22,3 +22,8 @@ opencode.json
 
 # Unlazy work-tree tracking artifacts (machine-specific)
 .unlazy/
+
+# Unlazy session ledgers (GATES.md / PLAN.md): per-run working artifacts,
+# never part of a feature commit
+GATES.md
+PLAN.md

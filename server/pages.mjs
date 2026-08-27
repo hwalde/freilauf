@@ -13,7 +13,7 @@ import {
 import {
   runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
   runTitleField, runStartTimeFields, runStartFromForm,
-  runSetupFields, branchFields,
+  runSetupFields, branchFields, agentNameTaken, moveAgent, deleteAgent,
 } from './run-def.mjs'
 import {
   listFavorites, getFavorite, saveFavorite, deleteFavorite,
@@ -407,14 +407,16 @@ export async function pageAgents(req, res, url) {
     <td>${e(scheduleText(a))}</td><td>${a.expected_minutes} min</td>
     <td class="dim">${e(attachmentSummary(a.flows)) || '–'}</td>
     <td><form method="post" action="/agents/start" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${sel.id}"><button>${e(t('agents.start_now'))}</button></form></td>
-    <td><a href="/agents/edit?id=${a.id}&repo=${sel.id}">${e(t('agents.edit'))}</a></td>
+    <td><a href="/agents/edit?id=${a.id}&repo=${sel.id}">${e(t('agents.edit'))}</a>
+        <a href="/agents/move?id=${a.id}&repo=${sel.id}">${e(t('agents.move'))}</a></td>
+    <td><form method="post" action="/agents/delete" class="inline" onsubmit="return confirm(${JSON.stringify(t('agents.delete_confirm', { name: a.name }))})"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${sel.id}"><button class="danger">${e(t('agents.delete'))}</button></form></td>
   </tr>`).join('')
   const body = `
   <p><a class="btn" href="/agents/edit?repo=${sel.id}">${e(t('agents.create'))}</a>
      <a class="btn" href="/flows">${e(t('nav.flows'))}</a>
      <span class="dim">${e(t('agents.flows_hint'))}</span></p>
-  <table class="list"><thead><tr><th>${e(t('agents.status'))}</th><th>${e(t('agents.name'))}</th><th>${e(t('agents.harness'))}</th><th>${e(t('agents.model'))}</th><th>${e(t('agents.schedule'))}</th><th>${e(t('agents.expected'))}</th><th>${e(t('nav.flows'))}</th><th></th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="9" class="dim">${e(t('agents.none'))}</td></tr>`}</tbody></table>`
+  <table class="list"><thead><tr><th>${e(t('agents.status'))}</th><th>${e(t('agents.name'))}</th><th>${e(t('agents.harness'))}</th><th>${e(t('agents.model'))}</th><th>${e(t('agents.schedule'))}</th><th>${e(t('agents.expected'))}</th><th>${e(t('nav.flows'))}</th><th></th><th></th><th></th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="10" class="dim">${e(t('agents.none'))}</td></tr>`}</tbody></table>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.agents'), '/agents', body, sel.id))
 }
 
@@ -958,9 +960,13 @@ function agentFields(a = {}, repoId) {
 export async function agentEdit(req, res, url) {
   const id = url.searchParams.get('id')
   // A new agent starts from the setup of the last start, an existing one from
-  // what is saved.
+  // what is saved. An EXISTING agent is edited in the repo it lives in: its own
+  // repo_id is the truth, not a query parameter — moving happens on the move
+  // page (with the name-collision handling), not by editing the hidden field.
   const a = id ? db.prepare('SELECT * FROM agents WHERE id=?').get(+id) : lastRunChoice()
-  const repoId = +(url.searchParams.get('repo') ?? db.prepare('SELECT id FROM repos ORDER BY name LIMIT 1').get()?.id ?? 0)
+  const repoId = id
+    ? a.repo_id
+    : +(url.searchParams.get('repo') ?? db.prepare('SELECT id FROM repos ORDER BY name LIMIT 1').get()?.id ?? 0)
   const body = `<h2>${e(id ? t('agentform.title_edit') : t('agentform.title_new'))}</h2>
   <form method="post" action="/agents/edit${id ? `?id=${id}` : ''}" class="settings">${agentFields(a, repoId)}<button>${e(t('settings.save'))}</button></form>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(id ? t('agentform.title_edit') : t('agentform.title_new'), '/agents', body, repoId))
@@ -972,14 +978,66 @@ export async function agentSave(req, res, url, formBody) {
   const active = b.active ? 1 : 0
   const back = `/agents/edit${id ? `?id=${id}&repo=${b.repo_id ?? ''}` : `?repo=${b.repo_id ?? ''}`}`
   const problems = []
-  if (!b.name?.trim()) problems.push(t('form.name_missing'))
+  const name = (b.name ?? '').trim()
+  if (!name) problems.push(t('form.name_missing'))
+  // Names are unique per REPO — a duplicate is a readable form problem, not a
+  // SQLite constraint that surfaces as a 500. The other repo is free to carry
+  // the same name, which is what the move feature relies on.
+  else if (agentNameTaken(+b.repo_id, name, id ? +id : null)) problems.push(t('agents.name_taken', { name }))
   const def = await runDefFromForm(b, problems)
   const zp = zeitplanAusFormular(b, problems)
   if (problems.length) return problemPage(res, t('agentform.title_edit'), problems, back)
 
-  saveAgent({ id: id ? +id : null, repoId: +b.repo_id, name: b.name.trim(), def, schedule: zp, active })
+  saveAgent({ id: id ? +id : null, repoId: +b.repo_id, name, def, schedule: zp, active })
   rememberRunChoice(def)
   redirect(res, `/agents?repo=${b.repo_id}`)
+}
+
+/**
+ * Delete an agent — the row on the agents page with a confirmation. The runs
+ * survive (deleteAgent only cuts the reference; the run keeps its own copy of
+ * the definition and title), so an agent can be retired without its history
+ * disappearing from the overview.
+ */
+export async function agentDelete(req, res, url, formBody) {
+  const b = await formBody()
+  const agent = db.prepare('SELECT repo_id FROM agents WHERE id=?').get(+b.id)
+  if (!agent) { res.writeHead(404).end(t('agents.not_found')); return }
+  deleteAgent(+b.id)
+  redirect(res, `/agents?repo=${agent.repo_id}`)
+}
+
+/** Move page: choose the target repo. The name collision handling lives in moveAgent. */
+export async function agentMovePage(req, res, url) {
+  const agent = db.prepare('SELECT * FROM agents WHERE id=?').get(+url.searchParams.get('id'))
+  if (!agent) { res.writeHead(404).end(t('agents.not_found')); return }
+  const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
+  const body = `
+  <h2>${e(t('agents.move_title', { name: agent.name }))}</h2>
+  <form method="post" action="/agents/move" class="settings">
+    <input type="hidden" name="id" value="${agent.id}">
+    <label>${e(t('agents.move_repo'))} <select name="repo">
+      ${repos.map(r => `<option value="${r.id}" ${r.id === agent.repo_id ? 'selected' : ''}>${e(r.name)}</option>`).join('')}
+    </select></label>
+    <p class="dim">${e(t('agents.move_hint'))}</p>
+    <button>${e(t('agents.move'))}</button>
+  </form>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(layout(t('agents.move_title', { name: agent.name }), '/agents', body, agent.repo_id))
+}
+
+export async function agentMovePost(req, res, url, formBody) {
+  const b = await formBody()
+  const agent = db.prepare('SELECT * FROM agents WHERE id=?').get(+b.id)
+  const sourceRepo = agent?.repo_id ?? ''
+  const r = moveAgent(+b.id, +b.repo)
+  if (!r.ok) {
+    return problemPage(res, t('agents.move_title', { name: agent?.name ?? '' }), [r.error], `/agents?repo=${sourceRepo}`)
+  }
+  // Back to the repo the operator was looking at — the source, where the agent
+  // just disappeared from; the target repo shows it under its (possibly
+  // suffixed) new name.
+  redirect(res, `/agents?repo=${sourceRepo}`)
 }
 
 /**

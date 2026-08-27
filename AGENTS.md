@@ -90,6 +90,22 @@ is one and the same **run definition**, and it lives in **`server/run-def.mjs`**
 | Last used setup, **per coding agent** | `rememberRunChoice`, `lastRunChoice`, `lastRunChoiceFor` | both forms (preselection, and the reset on switching the coding agent) |
 | Title + start time (single run only) | `runTitleField`, `runStartTimeFields`, `runStartFromForm` | single-run form + `POST /api/runs` |
 
+### Agent lifecycle: delete, move, per-repo names
+
+An agent lives in exactly one repo, and its **name is unique per repo** —
+two repos may each carry an agent called "nightly". The agents table enforces
+`UNIQUE(repo_id, name)`; databases from before the change are rebuilt once at
+startup (`agentNameUniquePerRepo()` in db.mjs). The form reports a duplicate
+inside one repo as a readable problem (`agents.name_taken`), never a 500.
+
+Three lifecycle operations, all in `server/run-def.mjs` next to `saveAgent`:
+
+| Operation | Function | Notes |
+|---|---|---|
+| Delete | `deleteAgent(id)` | NULLs `runs.agent_id` first, then drops the row — the runs survive with their definition copy and title snapshot (`POST /agents/delete`) |
+| Move | `moveAgent(id, repoId)` | `UPDATE agents SET repo_id, name`; a name collision in the target repo appends a `YYYYMMDD-HHMMSS` suffix (`POST /agents/move`, page `GET /agents/move`) |
+| Name free? | `agentNameTaken(repoId, name, excludeId)` | mirrors the UNIQUE constraint for validation |
+
 And there is exactly **one** way from a definition to a running run:
 **`startRun(def, { repoId, agentId, promptExtra, title, startMode, startAt })`**
 in `server/scheduler.mjs` — including the budget gate (`budgetGate(harness)`,

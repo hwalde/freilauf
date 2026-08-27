@@ -477,6 +477,95 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('Agents: delete and move (per-repo names)')
+
+  await pruefe('a second repo exists for the move tests', async () => {
+    const r = await formular('/repos/edit', {
+      name: 'e2e2', path: REPO, base_branch: 'main', worktree_extras: '[]',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'repo created')
+  })
+  const repo2Id = db.prepare('SELECT id FROM repos WHERE name=?').get('e2e2').id
+
+  await pruefe('same name is allowed in two repos, rejected inside one', async () => {
+    const anlegen = (rid) => formular('/agents/edit', {
+      repo_id: rid, name: 'e2e-dup', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'manuell',
+    }, { alsBrowser: true })
+    gleich((await anlegen(repoId)).status, 303, 'first agent in repo1')
+    gleich((await anlegen(repo2Id)).status, 303, 'same name allowed in repo2')
+    const dup = await anlegen(repoId)
+    gleich(dup.status, 400, 'duplicate in the same repo is rejected')
+    enthaelt(await dup.text(), 'already exists', 'readable reason instead of a 500')
+    gleich(db.prepare('SELECT count(*) c FROM agents WHERE repo_id=? AND name=?').get(repoId, 'e2e-dup').c, 1, 'no second row in repo1')
+  })
+
+  await pruefe('a deleted agent leaves its runs untouched', async () => {
+    const r = await formular('/agents/edit', {
+      repo_id: repoId, name: 'e2e-weg', harness: 'claude', prompt: 'Mach was',
+      branch_mode: 'keiner', schedule_kind: 'manuell', expected_minutes: '30',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'agent created')
+    const a = db.prepare('SELECT * FROM agents WHERE repo_id=? AND name=?').get(repoId, 'e2e-weg')
+    wahr(!!a, 'agent in the database')
+    const st = await formular('/agents/start', { id: String(a.id), repo: String(repoId) })
+    gleich(st.status, 303, 'start redirects')
+    const run = db.prepare('SELECT * FROM runs WHERE agent_id=? ORDER BY started_at DESC LIMIT 1').get(a.id)
+    wahr(!!run, 'a run was started for the agent')
+    gleich(run.agent_id, a.id, 'run references the agent')
+    gleich(run.title, 'e2e-weg', 'run carries the agent name as its title snapshot')
+    sessionMerken(run.id)
+
+    const del = await formular('/agents/delete', { id: String(a.id), repo: String(repoId) }, { alsBrowser: true })
+    gleich(del.status, 303, 'delete redirects')
+    gleich(db.prepare('SELECT count(*) c FROM agents WHERE id=?').get(a.id).c, 0, 'agent row gone')
+    const surviving = db.prepare('SELECT * FROM runs WHERE id=?').get(run.id)
+    wahr(!!surviving, 'the run survives the delete')
+    gleich(surviving.agent_id, null, 'reference cut')
+    gleich(surviving.title, 'e2e-weg', 'title snapshot keeps the name')
+    gleich(surviving.prompt, run.prompt, 'definition copy untouched')
+  })
+
+  await pruefe('move to another repo keeps the name when it is free', async () => {
+    const r = await formular('/agents/edit', {
+      repo_id: repoId, name: 'e2e-frei', harness: 'claude', prompt: 'x',
+      branch_mode: 'keiner', schedule_kind: 'manuell',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'created')
+    const a = db.prepare('SELECT * FROM agents WHERE repo_id=? AND name=?').get(repoId, 'e2e-frei')
+    const mv = await formular('/agents/move', { id: String(a.id), repo: String(repo2Id) }, { alsBrowser: true })
+    gleich(mv.status, 303, 'moved')
+    const row = db.prepare('SELECT * FROM agents WHERE id=?').get(a.id)
+    gleich(row.repo_id, repo2Id, 'now lives in repo2')
+    gleich(row.name, 'e2e-frei', 'name unchanged when it is free there')
+  })
+
+  await pruefe('move into a name collision appends a datetime suffix', async () => {
+    // 'e2e-frei' is already in repo2 — a second one from repo1 must not overwrite it.
+    const r = await formular('/agents/edit', {
+      repo_id: repoId, name: 'e2e-frei', harness: 'claude', prompt: 'x',
+      branch_mode: 'keiner', schedule_kind: 'manuell',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'same name in repo1 allowed')
+    const a = db.prepare('SELECT * FROM agents WHERE repo_id=? AND name=?').get(repoId, 'e2e-frei')
+    const mv = await formular('/agents/move', { id: String(a.id), repo: String(repo2Id) }, { alsBrowser: true })
+    gleich(mv.status, 303, 'moved')
+    const row = db.prepare('SELECT * FROM agents WHERE id=?').get(a.id)
+    gleich(row.repo_id, repo2Id, 'now lives in repo2')
+    gleich(/^e2e-frei-\d{4}-\d{2}-\d{2}-\d{6}$/.test(row.name), true, `name got a datetime suffix (${row.name})`)
+  })
+
+  await pruefe('move page and agents page expose the actions', async () => {
+    const a = db.prepare('SELECT * FROM agents WHERE repo_id=? AND name=?').get(repo2Id, 'e2e-frei')
+    const html = await (await hol(`/agents/move?id=${a.id}`)).text()
+    enthaelt(html, 'Move agent', 'move page title')
+    enthaelt(html, 'e2e-frei', 'names the agent')
+    enthaelt(html, 'e2e', 'lists a target repo')
+    const page = await (await hol(`/agents?repo=${repoId}`)).text()
+    enthaelt(page, '/agents/move', 'move link in the agents table')
+    enthaelt(page, '/agents/delete', 'delete form in the agents table')
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Provider and effort selection (harness-dependent)')
 
   await pruefe('each harness only gets providers it can actually use here', async () => {

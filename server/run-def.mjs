@@ -288,6 +288,57 @@ export function saveAgent({ id = null, repoId, name, def, schedule = null, activ
   return Number(r.lastInsertRowid)
 }
 
+// ------------------------------------------------------- agent lifecycle
+
+/**
+ * Whether a name is already used in a repo — the check the agents table now
+ * enforces itself (`UNIQUE(repo_id, name)`). The form reports this as a
+ * readable problem instead of letting SQLite's constraint surface as a 500.
+ */
+export function agentNameTaken(repoId, name, excludeId = null) {
+  return excludeId
+    ? !!db.prepare('SELECT id FROM agents WHERE repo_id=? AND name=? AND id<>?').get(repoId, name, excludeId)
+    : !!db.prepare('SELECT id FROM agents WHERE repo_id=? AND name=?').get(repoId, name)
+}
+
+/**
+ * The datetime suffix for a name collision on move: `2026-08-27-143055`
+ * (UTC, second precision — the while-loop in moveAgent makes even two moves
+ * in the same second distinct).
+ */
+export function moveSuffix(now = new Date()) {
+  return now.toISOString().slice(0, 19).replace('T', '-').replace(/:/g, '')
+}
+
+/**
+ * Move an agent to another repo. The name must stay unique THERE, so a
+ * collision appends the datetime suffix — the one place that decides this,
+ * so the form handler and the tests judge the same code.
+ * Returns { ok, name?, repoId? } or { ok:false, error }.
+ */
+export function moveAgent(id, targetRepoId) {
+  const agent = db.prepare('SELECT * FROM agents WHERE id=?').get(id)
+  if (!agent) return { ok: false, error: t('agents.not_found') }
+  const target = db.prepare('SELECT id FROM repos WHERE id=?').get(targetRepoId)
+  if (!target) return { ok: false, error: t('agents.move_bad_repo') }
+  if (targetRepoId === agent.repo_id) return { ok: false, error: t('agents.move_same_repo') }
+  let name = agent.name
+  while (agentNameTaken(targetRepoId, name, id)) name = `${agent.name}-${moveSuffix()}`
+  db.prepare(`UPDATE agents SET repo_id=?, name=?, updated_at=datetime('now') WHERE id=?`)
+    .run(targetRepoId, name, id)
+  return { ok: true, name, repoId: targetRepoId }
+}
+
+/**
+ * Delete an agent. Its past runs survive: the run carries the definition copy
+ * (title, prompt, harness, …) and only the reference is cut first, so the
+ * delete stays clean even with foreign keys enabled.
+ */
+export function deleteAgent(id) {
+  db.prepare('UPDATE runs SET agent_id=NULL WHERE agent_id=?').run(id)
+  db.prepare('DELETE FROM agents WHERE id=?').run(id)
+}
+
 // ----------------------------------- single run only: title and planned start
 
 /**
