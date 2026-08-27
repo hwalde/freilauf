@@ -100,13 +100,3 @@ export function sseHandler(req, res, url) {
   req.on('close', () => drop(client))
   req.on('error', () => drop(client))
 }
-
-/** How many browsers are currently listening (overview panel, tests). */
-export function clientCount() { return clients.size }
-
-/** Test hook: drop every connection and reset the ring. */
-export function _eventsReset() {
-  for (const client of [...clients]) drop(client)
-  ring.length = 0
-  lastId = 0
-}

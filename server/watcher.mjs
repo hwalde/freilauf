@@ -545,7 +545,7 @@ async function checkFinishedBranches() {
       AND id NOT IN (SELECT run_id FROM events WHERE kind IN ('anomaly:unpushed','branch_synced'))
   `).all()
   for (const run of rows) {
-    const branch = run.branch_reported || run.branch_observed || run.branch_expected
+    const branch = run.branch_reported || run.branch_expected
     if (!branch || !existsSync(run.worktree)) continue
     const repo = getRepo(run.repo_id)
     if (!repo) continue

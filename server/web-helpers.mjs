@@ -27,7 +27,3 @@ export function parseForm(text) {
   }
   return out
 }
-
-export function formBodyFactory(req) {
-  return async () => parseForm(await body(req))
-}

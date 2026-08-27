@@ -278,9 +278,9 @@ while tmux has-session -t "=$SESSION" 2>/dev/null; do
     n=$((n + 1))
 done
 
-# Build the command line (without the prompt).
-MODEL_ARGS=()
-[[ -n "$MODEL" ]] && MODEL_ARGS+=("--model" "$MODEL")
+# Build the command line (without the prompt). Every harness spells --model out
+# for itself in cmd_interactive()/cmd_autonomous() below — a shared argument
+# array would not fit, because the flag sits in a different place per harness.
 
 # opencode writes schema warnings from the MCP servers ("unknown format ... ignored")
 # to stderr — right into the TUI, which wrecks the display. stderr therefore goes to

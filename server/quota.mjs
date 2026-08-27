@@ -15,7 +15,6 @@
 // because a weekly window that is full blocks regardless of which one it is.
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
 import { getProvider, providerHasKey } from './providers/index.mjs'
 import { providerCtx } from './models.mjs'
 

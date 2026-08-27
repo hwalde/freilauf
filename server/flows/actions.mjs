@@ -45,7 +45,7 @@ export function runInfo(runId) {
     harness: run.harness,
     model: run.model ?? '',
     provider: run.provider ?? '',
-    branch: run.branch_reported || run.branch_observed || run.branch_expected || '',
+    branch: run.branch_reported || run.branch_expected || '',
     pr_url: run.pr_url ?? '',
     report: run.report_md ?? '',
     help_text: run.help_text ?? '',

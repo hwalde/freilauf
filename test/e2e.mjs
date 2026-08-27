@@ -39,7 +39,7 @@ const start = Date.now()
 // same sandbox, and one copy of that construction is enough. The names below stay
 // what the tests in this file have always used.
 const sk = neuerSandkasten({ praefix: 'cc-hub-e2e-', behalten: BEHALTEN })
-const { SB, REPO, ORIGIN, STUB, FEHLSTART, sessions, hol, formular } = sk
+const { SB, REPO, ORIGIN, FEHLSTART, sessions, hol, formular } = sk
 let db = null
 let PORT = 0
 let BASIS = ''

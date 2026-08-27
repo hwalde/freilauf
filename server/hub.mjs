@@ -6,7 +6,7 @@ import { route } from './web.mjs'
 import { startTerminalServer } from './terminal.mjs'
 import { startScheduler, stopScheduler } from './scheduler.mjs'
 import { startWatcher, stopWatcher, verwaisteLaeufeAbschliessen } from './watcher.mjs'
-import { setSetting, getSetting } from './db.mjs'
+import { getSetting } from './db.mjs'
 import { seedIfEmpty } from './coding-agents.mjs'
 import { setLanguage } from './i18n.mjs'
 
@@ -29,9 +29,10 @@ server.listen(PORT, HOST, () => {
   if (verwaist) console.log(`[cc-hub] closed ${verwaist} interrupted run(s) (no session)`)
   startScheduler()
   startWatcher()
-  // After a reboot: access stays off (fail-closed), the pipeline state comes from the DB.
-  setSetting('access_on', '0')
-  console.log(`[cc-hub] pipeline=${getSetting('pipeline_on') === '1' ? 'on' : 'off'} (from the DB), access=off (fail-closed)`)
+  // The pipeline state comes from the DB. Access from the outside is NOT a
+  // setting of this process — it is cchub-vpn.service, which deliberately does
+  // not start on its own (fail-closed) and is switched with `cchub on|off`.
+  console.log(`[cc-hub] pipeline=${getSetting('pipeline_on') === '1' ? 'on' : 'off'} (from the DB)`)
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

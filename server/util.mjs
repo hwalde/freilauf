@@ -21,8 +21,6 @@ export function sh(cmd, args, opts = {}) {
   })
 }
 
-export async function tmux(args) { return sh('tmux', args) }
-
 /**
  * Type text into a tmux session as if a human had pasted it: bracketed paste
  * (multi-line without an accidental submit) followed by Enter (planning 7.3).

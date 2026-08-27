@@ -265,7 +265,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
   }
 
   return {
-    SB, REPO, ORIGIN, STUB, FEHLSTART, sessions,
+    SB, REPO, ORIGIN, FEHLSTART, sessions,
     bauen, hubStarten, hubStoppen, watcherVorbereiten, aufraeumen,
     hol, formular,
     get db() { return zustand.db },

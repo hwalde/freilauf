@@ -191,7 +191,6 @@
   "incident.billing_error": "Credits/billing",
   "incident.model_error": "Model unavailable",
   "incident.provider_down": "Provider unreachable",
-  "incident.llm_warnung": "Check-LLM warning",
   "incident.unbekannt": "API error",
   "repos.create": "Create repo",
   "repos.name": "Name",

@@ -191,7 +191,6 @@
   "incident.billing_error": "余额/账单",
   "incident.model_error": "模型不可用",
   "incident.provider_down": "服务商不可达",
-  "incident.llm_warnung": "校验 LLM 警告",
   "incident.unbekannt": "API 错误",
   "repos.create": "创建仓库",
   "repos.name": "名称",

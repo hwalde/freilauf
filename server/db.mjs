@@ -84,7 +84,6 @@ CREATE TABLE IF NOT EXISTS runs (
   worktree TEXT,
   branch_expected TEXT,
   branch_reported TEXT,
-  branch_observed TEXT,
   pr_url TEXT,
   main_sha_start TEXT,
   exit_code INTEGER,
@@ -236,11 +235,6 @@ export function getSetting(key, fallback = null) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key)
   return row ? row.value : fallback
 }
-export function getSettingInt(key, fallback) {
-  const v = getSetting(key)
-  const n = Number.parseInt(v ?? '', 10)
-  return Number.isFinite(n) ? n : fallback
-}
 export function setSetting(key, value) {
   db.prepare(
     `INSERT INTO settings(key, value) VALUES(?, ?)
@@ -297,11 +291,8 @@ export function announceRun(runId, kind = 'changed') {
   } catch { /* a silent live channel beats a failed write */ }
 }
 
-/** Only create the event if this (run,kind) does not exist yet — Telegram/traffic light dedupe by themselves this way. */
-export function addEventOnce(runId, kind, payload = null) {
-  const have = db.prepare('SELECT 1 FROM events WHERE run_id = ? AND kind = ? LIMIT 1').get(runId, kind)
-  if (!have) addEvent(runId, kind, payload)
-}
+// The deduplicating variant, addEventOnce(), lives in reports.mjs — next to the
+// anomaly handling every one of its callers belongs to.
 
 export function getRepo(id) {
   const r = db.prepare('SELECT * FROM repos WHERE id = ?').get(id)

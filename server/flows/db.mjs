@@ -164,9 +164,6 @@ export function dueDelayed(nowIso) {
   return db.prepare(`SELECT * FROM flow_runs WHERE status='waiting' AND resume_at IS NOT NULL AND resume_at <= ?`)
     .all(nowIso).map(hydrateRun)
 }
-export function runningFlowRuns() {
-  return db.prepare(`SELECT * FROM flow_runs WHERE status IN ('running','waiting')`).all().map(hydrateRun)
-}
 
 /** Finished runs whose "run finished" trigger has not been evaluated yet. */
 export function undispatchedRuns() {

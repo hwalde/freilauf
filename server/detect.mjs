@@ -214,6 +214,5 @@ export const TYP_TEXT = {
   billing_error: 'Credits/billing',
   model_error: 'Model unavailable',
   provider_down: 'Provider unreachable',
-  llm_warnung: 'Check-LLM warning',
   unbekannt: 'API error',
 }

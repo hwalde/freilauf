@@ -191,7 +191,6 @@
   "incident.billing_error": "Guthaben/Abrechnung",
   "incident.model_error": "Modell nicht verfügbar",
   "incident.provider_down": "Provider nicht erreichbar",
-  "incident.llm_warnung": "Prüf-LLM-Warnung",
   "incident.unbekannt": "API-Fehler",
   "repos.create": "Repo anlegen",
   "repos.name": "Name",

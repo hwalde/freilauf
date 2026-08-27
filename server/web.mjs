@@ -126,7 +126,7 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'POST' && path === '/settings/favorites/edit') return favoriteSave(req, res, url, formBody)
   if (req.method === 'POST' && path === '/settings/favorites/delete') return favoriteDelete(req, res, url, formBody)
   // No-code flows (server/flows/) — own router, own pages.
-  if (path === '/flows' || path.startsWith('/flows/')) return flowRoute(req, res, url, formBody)
+  if (path === '/flows' || path.startsWith('/flows/')) return flowRoute(req, res, url)
   res.writeHead(404, { 'content-type': 'text/plain' }); res.end(t('web.not_found'))
 }
 

@@ -99,6 +99,3 @@ export async function pruefeTreffer({ runId, harness, treffer, zeilen, jetztMs =
     return { fehler: e.message }
   }
 }
-
-/** For tests only: reset the throttle. */
-export function _drosselZuruecksetzen() { zuletzt.clear() }
