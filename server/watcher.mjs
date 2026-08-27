@@ -9,6 +9,7 @@ import { RUNS_DIR, sh } from './util.mjs'
 import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd } from './reports.mjs'
 import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
 import { harnessOwnedPaths } from './runner.mjs'
+import { deliverPendingGoals } from './goal.mjs'
 import { claudeQuota } from './quota.mjs'
 import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText } from './detect.mjs'
 import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, offeneVorfaelle, detektorLog, msVon, brauchtMensch } from './incidents.mjs'
@@ -59,6 +60,10 @@ export async function tick() {
   for (const run of active) {
     try { await watchRun(run) } catch (e) { console.error(`[watcher] ${run.id}:`, e.message) }
   }
+  // The second prompt, for every run that still owes its session one: a hub
+  // restarted between the start and the delivery, a session that had not drawn
+  // yet, a run that was answering a help call (server/goal.mjs).
+  try { await deliverPendingGoals() } catch (e) { console.error('[goal]', e.message) }
   await vorfaelleBewerten()
   await providerPuls()
   await finishCostsPass()

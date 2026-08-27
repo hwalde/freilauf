@@ -782,6 +782,7 @@ export async function pageRun(req, res, url, id) {
   const body = `
   ${runDetailHead(run, { title: titel })}
   ${runChips(run, repo, herkunft)}
+  ${goalCard(run)}
   ${run.help_text
     ? run.status === 'waiting_help'
       // open: the agent is waiting for an answer right now
@@ -807,6 +808,24 @@ export async function pageRun(req, res, url, id) {
   <h3>${e(t('run.events'))}</h3>${runEvents(id)}
   <h3>${e(t('run.log'))}</h3>${logHtml}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(titel, '/', body, run.repo_id, true))
+}
+
+/**
+ * The goal of a run, and whether it ever reached the session.
+ *
+ * Its own block rather than a chip: a condition is a sentence, and "was it sent
+ * in?" is a fact one only asks about here. A goal that is still waiting is not
+ * an error — the delivery waits for the TUI and the watcher picks up the rest —
+ * but it is the difference between "claude keeps going until this holds" and
+ * "claude does not know about it yet".
+ */
+export function goalCard(run) {
+  if (!run.goal) return ''
+  const state = run.goal_sent_at
+    ? `<span class="dim">${e(t('goal.sent_at', { ts: run.goal_sent_at }))}</span>`
+    : `<span class="warn">${e(t(['done', 'failed', 'aborted'].includes(run.status) ? 'goal.never_sent' : 'goal.pending'))}</span>`
+  return `<div class="card" id="run-goal"><b>🎯 ${e(t('goal.title'))}</b> ${state}
+    <pre>${e(run.goal)}</pre></div>`
 }
 
 /**

@@ -348,8 +348,11 @@ async function api(req, res, url) {
     const run = getRun(m[1])
     if (!run) return json(res, 404, { ok: false })
     // Retried = not over any more: it leaves the archive, otherwise an active run
-    // would sit hidden in the overview while it works.
-    db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL, archived_at=NULL WHERE id=?`).run(m[1])
+    // would sit hidden in the overview while it works. And the goal starts over
+    // with it: a retry is a NEW session, and a `/goal` typed into the old one is
+    // gone with it (server/goal.mjs).
+    db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL, archived_at=NULL,
+                goal_sent_at=NULL WHERE id=?`).run(m[1])
     addEvent(m[1], 'retry', { previous_status: run.status })
     const r = await launchRun(m[1])
     return answer(req, res, r.ok ? 200 : 500, r, `/runs/${m[1]}`)

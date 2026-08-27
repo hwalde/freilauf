@@ -81,6 +81,7 @@ is one and the same **run definition**, and it lives in **`server/run-def.mjs`**
 | What | Function | Used by |
 |---|---|---|
 | Form block (HTML) | `runDefFields(values)` | agent form + single-run form |
+| Its second prompt, for the harnesses that know one | `goalFields` | both forms (see below) |
 | Its setup half, on its own | `runSetupFields`, `branchFields` | favorite form, Quick-Run dialog |
 | Form → definition, incl. all validation | `runDefFromForm(body, problems)` | both forms + `POST /api/runs` |
 | Its setup half, on its own | `runSetupFromForm(body, problems)` | favorites (see below) |
@@ -115,6 +116,42 @@ of that repo, agents and single runs alike. Like `base_branch` and
 runner.mjs composes it as a labeled section into `prompt.md`) — repo config is
 not snapshotted into the run, so editing it affects the next run, never a
 running or finished one.
+
+### The goal: the second prompt, and the only one that is typed in
+
+The prompt says what to do. A **goal** says when it is **done**: claude's
+`/goal <condition>` sets a completion condition, has a small model check it
+after every turn, and while it does not hold claude takes another turn by
+itself — until it holds, until claude judges it impossible, or until someone
+clears it. So it belongs in the run definition (`agents.goal`, snapshotted into
+`runs.goal`), under the prompt, folded away, and only in the two forms that
+describe a run: the agent form and the single-run form. Deliberately **not** in
+Quick Run — that dialog asks for the task and the time, and a favorite carries
+no task.
+
+It is the one definition field that never reaches the agent through
+`prompt.md`, because **there is no CLI flag for it**. The command exists only
+inside the session, so the hub types it in **after** the start —
+`server/goal.mjs`, one delivery function and two ways into it:
+
+| Way in | When | Why both |
+|---|---|---|
+| `launchRun()` | right after the session stands, not awaited | it waits for the TUI to draw, and a start must not hang on that |
+| watcher pass | every run that still owes its session a goal | a hub restarted between the start and the delivery, a session that had not drawn yet, a run that was answering a help call |
+
+`runs.goal_sent_at` is what keeps the two from typing it in twice, and what
+lets the detail page answer "did the goal ever arrive?". Only from status
+`running`: `waiting_help` means the agent asked a question and is waiting, so a
+goal typed in there would **be** the answer. A retry clears the mark — a retry
+is a new session, and a `/goal` typed into the old one went with it.
+
+**Who knows a goal is the plugin's answer, not the form's** (`goal` in the
+harness plugin, see [docs/plugins.md](docs/plugins.md)). The form block writes
+that list into `data-goal-harnesses`, hub.js shows or hides the block on it —
+and hiding **disables** the field, because a hidden field that still submits is
+a text one can neither see nor correct: switching the coding agent would
+otherwise send along a condition meant for claude. What was typed stays in the
+DOM, so switching back and forth does not cost it.
 
 ### Every run has a title
 

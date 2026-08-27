@@ -1621,6 +1621,46 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // The goal is the one definition field that never reaches the agent through
+  // the prompt file: it exists only as a slash command inside the session, and
+  // only a coding agent whose plugin carries a `goal` spec knows one at all.
+  gruppe('Goal: the second prompt (goal.mjs)')
+  const gl = await import('../server/goal.mjs')
+
+  await pruefe('who knows a goal is the plugin\'s answer, not the form\'s', () => {
+    wahr(gl.harnessSupportsGoal('claude'), 'claude does')
+    falsch(gl.harnessSupportsGoal('opencode'), 'opencode does not')
+    falsch(gl.harnessSupportsGoal('cursor'), 'cursor does not')
+    gleich(gl.goalMax('claude'), 4000, 'and claude names its own limit')
+    gleich(gl.goalMax('hermes'), null, 'a coding agent without a spec has none')
+  })
+  await pruefe('the condition becomes ONE command line', () => {
+    gleich(gl.goalCommand('claude', 'all tests pass'), '/goal all tests pass', 'the command in front of it')
+    gleich(gl.goalCommand('claude', ' all tests\n  pass\n'), '/goal all tests pass',
+      'whitespace folded — a pasted newline would submit the fragment before it')
+    gleich(gl.goalCommand('claude', '   '), null, 'nothing to send')
+    gleich(gl.goalCommand('opencode', 'all tests pass'), null, 'a coding agent without a spec gets no command')
+    gleich(gl.goalCommand('claude', 'x'.repeat(5000)).length, '/goal '.length + 4000, 'capped at the limit')
+  })
+  await pruefe('the goal goes through the form like every other definition field', async () => {
+    const base = { harness: 'claude', prompt: 'x', branch_mode: 'keiner' }
+    gleich((await rd.runDefFromForm(base, [])).goal, null, 'empty field = no goal')
+    gleich((await rd.runDefFromForm({ ...base, goal: '  tests are green  ' }, [])).goal, 'tests are green', 'trimmed')
+    gleich((await rd.runDefFromForm({ ...base, goal: '/goal tests are green' }, [])).goal, 'tests are green',
+      'whoever types the command keeps it: the hub is the one that puts it in front')
+    const zuLang = []
+    gleich((await rd.runDefFromForm({ ...base, goal: 'y'.repeat(4001) }, zuLang)).goal, null, 'nothing taken over')
+    gleich(zuLang.length, 1, `too long is a problem, not a condition cut in half (${zuLang.join(', ')})`)
+    // A coding agent that knows no goal simply has none — the form disables the
+    // field there, so this only catches a body the form did not write.
+    gleich(rd.defFromFlowProps({ harness: 'cursor', prompt: 'x', goal: 'tests are green' }).goal, null,
+      'and a coding agent without a spec gets none, whatever the request says')
+    gleich(rd.defFromFlowProps({ harness: 'claude', prompt: 'x', goal: 'tests are green' }).goal, 'tests are green',
+      'the flow step takes the same route')
+    gleich(rd.defFromAgent({ goal: 'tests are green' }).goal, 'tests are green', 'and the agent row carries it')
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Favorites: the setup of a run under a name (favorites.mjs)')
   const fv = await import('../server/favorites.mjs')
 

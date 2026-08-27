@@ -358,6 +358,11 @@ form.form-grid label:not(.chk):not(.weekday):not([hidden]):has(textarea) { displ
 form.form-grid label:has(textarea) > textarea { margin-top: var(--sp-4); }
 form.form-grid input, form.form-grid select, form.form-grid textarea { max-width: 100%; }
 form.form-grid fieldset { border-radius: var(--radius-8); }
+/* The goal (the second prompt) is folded away under the task: it is optional,
+   and a form should not open with a field most runs leave empty. Same shape as
+   the Quick-Run dialog's folded branch rule. */
+form.form-grid details.goal { margin: var(--sp-12) 0; }
+form.form-grid details.goal > summary { cursor: pointer; color: var(--accent-act-hover); }
 form.form-grid .btn-row { margin-top: var(--sp-16); }
 /* Narrow: a 13em caption column and a field next to it do not both fit, so the
    caption goes back above its field. */

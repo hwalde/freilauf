@@ -368,6 +368,26 @@
     }
   }
 
+  // ---- goal: the second prompt, and only where there is one ----
+  // Which coding agents know a goal is the plugins' answer, not this file's:
+  // the server writes it into `data-goal-harnesses`. Hidden means DISABLED too —
+  // a field one cannot see must not be submitted either, otherwise switching the
+  // coding agent would send along a condition the operator can no longer read.
+  // The text itself stays put, so switching back and forth does not cost it.
+  const goalBlock = document.getElementById('goal-block')
+  if (goalBlock) {
+    const harnessSel = document.querySelector('select[name=harness]')
+    const koennen = (goalBlock.dataset.goalHarnesses || '').split(/\s+/).filter(Boolean)
+    const goalFeld = goalBlock.querySelector('textarea')
+    const goalSync = () => {
+      const on = koennen.includes(harnessSel?.value ?? '')
+      goalBlock.hidden = !on
+      if (goalFeld) goalFeld.disabled = !on
+    }
+    harnessSel?.addEventListener('change', goalSync)
+    goalSync()
+  }
+
   // ---- provider and model selection ----
   // The list arrives AFTER rendering via fetch: if a provider API hangs, a
   // text field is still there immediately to type the slug into. The search is

@@ -9,6 +9,7 @@ import db, { getRepo, addEvent } from './db.mjs'
 import { RUNS_DIR, WORKTREES_DIR, kurzid, sh } from './util.mjs'
 import { claudeQuota } from './quota.mjs'
 import { skillPromptZusatz } from './zusaetze.mjs'
+import { deliverGoal } from './goal.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { isHarnessEnabled } from './coding-agents.mjs'
 import { t } from './i18n.mjs'
@@ -228,18 +229,18 @@ export function claudeSettingsJson() {
 
 /** Creates the run record (definition copy) and returns the run ID. */
 export function createRun({ repoId, agentId = null, harness, model = null, provider = null,
-  orProvider = null, effort = null, prompt, promptExtra = null, branchMode, branchPattern = null,
+  orProvider = null, effort = null, prompt, promptExtra = null, goal = null, branchMode, branchPattern = null,
   expectedMinutes, skills = null, flows = null, title = null }) {
   if (!getHarness(harness)) throw new Error(t('run.unknown_harness', { harness }))
   if (!isHarnessEnabled(harness)) throw new Error(t('run.harness_not_configured', { harness }))
   if (!prompt?.trim()) throw new Error(t('run.empty_prompt'))
   const id = randomUUID()
   db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, model, provider, or_provider,
-              effort, prompt, prompt_extra, branch_mode, branch_pattern, expected_minutes, skills, flows,
+              effort, prompt, prompt_extra, goal, branch_mode, branch_pattern, expected_minutes, skills, flows,
               title, last_activity_at)
-              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,? , datetime('now'))`)
+              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,?,? , datetime('now'))`)
     .run(id, repoId, agentId, harness, model, provider, orProvider, effort, prompt, promptExtra,
-      branchMode, branchPattern, expectedMinutes, skills, flows, title)
+      goal, branchMode, branchPattern, expectedMinutes, skills, flows, title)
   return id
 }
 
@@ -341,6 +342,11 @@ export async function launchRun(runId) {
   }
   db.prepare('UPDATE runs SET tmux_session=? WHERE id=?').run(session, runId)
   addEvent(runId, 'tmux_started', { session })
+  // The goal is the SECOND prompt and exists only inside the session (claude:
+  // `/goal <condition>`), so it goes in now that there IS one. Deliberately not
+  // awaited: it waits for the TUI to draw, and a start must not hang on that.
+  // Whatever does not get through is picked up by the watcher (server/goal.mjs).
+  if (run.goal) deliverGoal(runId).catch(err => addEvent(runId, 'warn', { goal: err.message }))
   return { ok: true, session }
 }
 

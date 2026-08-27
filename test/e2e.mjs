@@ -753,6 +753,64 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // The goal is the one definition field that does NOT travel in the prompt
+  // file: `/goal <condition>` exists only inside the session, so the hub types
+  // it in after the start. Which means it can also fail to arrive — hence a
+  // test for each of the two ways in.
+  gruppe('The goal: a second prompt into the session')
+
+  const paneText = async (runId) =>
+    (await sh('tmux', ['capture-pane', '-p', '-t', `=${lauf(runId).tmux_session}:`])).stdout
+
+  await pruefe('both forms carry the goal, and it names who knows one', async () => {
+    for (const [pfad, was] of [[`/runs/new?repo=${repoId}`, 'run form'], [`/agents/edit?repo=${repoId}`, 'agent form']]) {
+      const html = await (await hol(pfad)).text()
+      enthaelt(html, 'name="goal"', `the field is in the ${was}`)
+      enthaelt(html, 'data-goal-harnesses="claude"', `and says who has one (${was})`)
+    }
+  })
+
+  await pruefe('a claude run gets its goal typed into the session after the start', async () => {
+    const j = await laufStarten({ repo_id: repoId, harness: 'claude', prompt: 'E2E-Ziel',
+      goal: 'all tests are green' })
+    wahr(!!j.runId, `run started (${JSON.stringify(j)})`)
+    await sessionMerken(j.runId)
+    gleich(lauf(j.runId).goal, 'all tests are green', 'the run carries the definition copy')
+    await warteAuf(async () => (await paneText(j.runId)).includes('[agent sah] /goal all tests are green'),
+      { was: 'the goal command in the pane', timeoutMs: 15_000 })
+    await warteAuf(() => !!lauf(j.runId).goal_sent_at, { was: 'delivery recorded', timeoutMs: 5000 })
+    enthaelt(ereignisse(j.runId).join(','), 'goal_sent', 'and the run says so in its own event list')
+    const html = await (await hol(`/runs/${j.runId}`)).text()
+    enthaelt(html, 'all tests are green', 'the detail page shows the goal')
+    await formular(`/api/runs/${j.runId}/kill`, {})
+  })
+
+  await pruefe('a coding agent that knows no goal simply has none', async () => {
+    const j = await laufStarten({ repo_id: repoId, harness: 'cursor', model: 'auto',
+      prompt: 'E2E-Ziel-cursor', goal: 'all tests are green' })
+    wahr(!!j.runId, `run started (${JSON.stringify(j)})`)
+    await sessionMerken(j.runId)
+    gleich(lauf(j.runId).goal, null, 'nothing stored — cursor has no /goal')
+    await formular(`/api/runs/${j.runId}/kill`, {})
+  })
+
+  await pruefe('what did not get through is delivered by the watcher, and only once', async () => {
+    // Exactly the case of a hub restarted between the start and the delivery:
+    // the run is going, the session stands, nobody has typed the goal in.
+    const j = await laufStarten({ repo_id: repoId, harness: 'claude', prompt: 'E2E-Ziel-Watcher',
+      goal: 'the branch is pushed' })
+    await sessionMerken(j.runId)
+    await warteAuf(() => !!lauf(j.runId).goal_sent_at, { was: 'first delivery', timeoutMs: 15_000 })
+    await watcherTick()
+    const einmal = (await paneText(j.runId)).split('/goal the branch is pushed').length - 1
+    wahr(einmal >= 1, `it is in the pane (${einmal}×)`)
+    db.prepare('UPDATE runs SET goal_sent_at=NULL WHERE id=?').run(j.runId)
+    await watcherTick()
+    await warteAuf(() => !!lauf(j.runId).goal_sent_at, { was: 'the watcher delivers what is missing', timeoutMs: 8000 })
+    await formular(`/api/runs/${j.runId}/kill`, {})
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Incidents: rate limit and provider errors (auto-alarm)')
 
   const vorfaelle = (id) => db.prepare('SELECT * FROM incidents WHERE run_id=? ORDER BY id').all(id)

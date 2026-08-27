@@ -173,6 +173,11 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // "Fresh installation" tests must not pick up the operator's seed file
       // (~/.config/cc-hub/coding-agents.json) — point at a file that does not exist.
       CCHUB_AGENTS_SEED: join(SB, 'no-seed.json'),
+      // The goal waits for the TUI to draw before it is typed in (server/goal.mjs).
+      // The stub prints immediately, so the suite must not sit through the
+      // production grace period for it.
+      CCHUB_GOAL_DELAY_MS: '100',
+      CCHUB_GOAL_WAIT_MS: '10000',
       NODE_OPTIONS: '--disable-warning=ExperimentalWarning',
     }
     if (echteAgenten) {
@@ -220,6 +225,8 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     process.env.CCHUB_PULS_AUS = '1'
     process.env.CCHUB_CURSOR_AUTH = join(SB, 'missing-cursor-auth.json')
     process.env.CCHUB_CURSOR_DIR = join(SB, 'cursor')
+    process.env.CCHUB_GOAL_DELAY_MS = '100'
+    process.env.CCHUB_GOAL_WAIT_MS = '10000'
     delete process.env.OPENROUTER_API_KEY
     const { tick } = await import('../server/watcher.mjs')
     return tick

@@ -676,6 +676,31 @@ try {
     await p.close()
   })
 
+  await pruefe('the goal belongs to the coding agent that knows one — hidden means not submitted', async () => {
+    // A hidden field that still submits is a text the operator cannot see and
+    // cannot correct: switching the coding agent would silently send along a
+    // condition meant for claude. So hiding and disabling are one move.
+    const p = await neueSeite(`/runs/new?repo=${repoId}`)
+    await p.selectOption('select[name=harness]', 'claude')
+    await wartePage(p, () => document.getElementById('goal-block').hidden === false, null,
+      'the goal block to be there for claude')
+    // Folded away: it is optional, and a form should not open with a field most
+    // runs leave empty. One click is what a goal costs.
+    falsch(await p.$eval('#goal-block', el => el.open), 'and folded, because most runs have none')
+    await p.click('#goal-block summary')
+    await p.fill('#goal-block textarea', 'all tests are green')
+    await p.selectOption('select[name=harness]', 'opencode')
+    await wartePage(p, () => document.getElementById('goal-block').hidden === true, null,
+      'and to disappear for a coding agent without a /goal')
+    wahr(await p.$eval('#goal-block textarea', el => el.disabled), 'the field is disabled, so nothing is submitted')
+    await p.selectOption('select[name=harness]', 'claude')
+    await wartePage(p, () => document.getElementById('goal-block').hidden === false, null, 'and comes back')
+    gleich(await p.$eval('#goal-block textarea', el => el.value), 'all tests are green',
+      'with what was typed — switching back and forth does not cost it')
+    sauber(p)
+    await p.close()
+  })
+
   // ------------------------------------------------------------------ A13
   gruppe('A13 — the sessions page: filter, selection, non-blocking ending')
 

@@ -21,6 +21,15 @@ export function getHarness(id) { return HARNESS_PLUGINS[id] ?? null }
 export function harnessLabel(id) { return HARNESS_PLUGINS[id]?.label ?? id }
 
 /**
+ * The goal spec of a coding agent, or null when it knows no second prompt.
+ * `{ max, command(condition) }` — see docs/plugins.md and server/goal.mjs.
+ */
+export function goalSpec(id) { return HARNESS_PLUGINS[id]?.goal ?? null }
+
+/** The coding agents that accept a goal — what the form shows the field for. */
+export function harnessesWithGoal() { return harnessIds().filter(id => HARNESS_PLUGINS[id].goal) }
+
+/**
  * Which of the registered plugins are actually installed on this machine?
  * Used by the "add coding agent" dialog to suggest what can be added.
  * `command -v` is the portable way to ask the shell; a missing binary is a

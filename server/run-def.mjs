@@ -25,7 +25,7 @@ import db, { getRepo, getSetting, setSetting } from './db.mjs'
 import { escapeHtml as e, toDbUtc } from './util.mjs'
 import { TITLE_MAX } from './title.mjs'
 import { providersForHarness, enabledCodingAgents } from './coding-agents.mjs'
-import { getHarness } from './harnesses/index.mjs'
+import { getHarness, goalSpec, harnessesWithGoal } from './harnesses/index.mjs'
 import { effortOptionen } from './models.mjs'
 import { branchWorktree } from './runner.mjs'
 import { skillFelder, skillsAusFormular } from './zusaetze.mjs'
@@ -114,6 +114,40 @@ export function branchFields(a = {}) {
 }
 
 /**
+ * The goal: the SECOND prompt, folded away under the first one.
+ *
+ * It is not the task but the condition under which the task is over — and only
+ * a coding agent whose plugin carries a `goal` spec knows one (claude does, as
+ * `/goal <condition>`). So the block belongs to the harness, not to the form:
+ * `data-goal-harnesses` names who has it, and hub.js shows or hides it when the
+ * coding agent is switched. Hidden means DISABLED too, because a hidden field
+ * that still submits is a text one cannot see and cannot correct.
+ *
+ * Open when there is a goal to see: whoever edits an agent that has one must not
+ * have to find it behind a fold first.
+ */
+export function goalFields(a = {}) {
+  const kann = harnessesWithGoal()
+  if (!kann.length) return ''
+  // The form shows the first configured coding agent when nothing is preselected
+  // — that is what the browser picks out of a <select> without a `selected`.
+  const harness = a.harness || enabledCodingAgents()[0]?.harness || ''
+  const on = kann.includes(harness)
+  const goal = a.goal ?? ''
+  const max = goalSpec(harness)?.max ?? goalSpec(kann[0]).max
+  return `
+  <details class="goal" id="goal-block" data-goal-harnesses="${e(kann.join(' '))}"
+           ${goal ? 'open' : ''} ${on ? '' : 'hidden'}>
+    <summary>${e(t('goal.legend'))}</summary>
+    <label>${e(t('goal.field'))}
+      <textarea name="goal" rows="3" maxlength="${max}" placeholder="${e(t('goal.ph'))}"
+                ${on ? '' : 'disabled'}>${e(goal)}</textarea>
+      <span class="dim">${e(t('goal.hint'))}</span>
+    </label>
+  </details>`
+}
+
+/**
  * The definition as form fields — embedded IDENTICALLY by the agent form and
  * the single-run form. `a` is an agent row, a remembered choice or {}.
  */
@@ -121,6 +155,7 @@ export function runDefFields(a = {}) {
   return `
   ${runSetupFields(a)}
   <label>${e(t('runform.prompt'))} <textarea name="prompt" rows="10" required>${e(a.prompt ?? '')}</textarea></label>
+  ${goalFields(a)}
   ${branchFields(a)}
   <label>${e(t('runform.expected'))} <input type="number" name="expected_minutes" min="1" value="${a.expected_minutes ?? DEFAULT_EXPECTED_MINUTES}"></label>
   ${skillFelder(a.skills)}
@@ -171,6 +206,27 @@ async function effortFromForm(b, problems) {
     return null
   }
   return wanted
+}
+
+/**
+ * The goal out of the form. A coding agent that knows none simply has no goal —
+ * the field is disabled there and sends nothing, so this only catches a request
+ * that was not written by the form (the JSON API, a copied body).
+ *
+ * A leading `/goal` is stripped: whoever knows the command types it, and the
+ * hub is the one that puts it in front. Too long is a problem and not a silent
+ * cut — a condition trimmed in the middle would still be sent and mean
+ * something else than what was written.
+ */
+function goalFromForm(b, problems) {
+  const spec = goalSpec(String(b.harness ?? ''))
+  const text = String(b.goal ?? '').replace(/^\s*\/goal\b\s*/i, '').trim()
+  if (!text || !spec) return null
+  if (text.length > spec.max) {
+    problems.push(t('form.goal_too_long', { max: spec.max, len: text.length }))
+    return null
+  }
+  return text
 }
 
 /**
@@ -231,6 +287,7 @@ export async function runDefFromForm(b, problems = []) {
   return {
     ...setup,
     prompt,
+    goal: goalFromForm(b, problems),
     branchMode,
     branchPattern: b.branch_pattern?.trim() || null,
     expectedMinutes: +b.expected_minutes || DEFAULT_EXPECTED_MINUTES,
@@ -250,6 +307,7 @@ export function defFromAgent(agent) {
     orProvider: agent.or_provider ?? null,
     effort: agent.effort ?? null,
     prompt: agent.prompt,
+    goal: agent.goal ?? null,
     branchMode: agent.branch_mode,
     branchPattern: agent.branch_pattern ?? null,
     expectedMinutes: agent.expected_minutes,
@@ -268,20 +326,20 @@ export function saveAgent({ id = null, repoId, name, def, schedule = null, activ
   if (id) {
     // A single UPDATE — before, 'active' was first set to 1 and then derived
     // again from exactly that freshly written value.
-    db.prepare(`UPDATE agents SET name=?, harness=?, model=?, prompt=?, branch_mode=?, branch_pattern=?,
+    db.prepare(`UPDATE agents SET name=?, harness=?, model=?, prompt=?, goal=?, branch_mode=?, branch_pattern=?,
                 expected_minutes=?, schedule=?, schedule_kind=?, schedule_days=?, schedule_time=?,
                 schedule_weeks=?, schedule_anchor=?, run_at=?, provider=?, or_provider=?, effort=?,
                 skills=?, flows=?, active=?, updated_at=datetime('now') WHERE id=?`).run(
-      name, def.harness, def.model, def.prompt, def.branchMode, def.branchPattern,
+      name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode, def.branchPattern,
       def.expectedMinutes, zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
       def.provider, def.orProvider, def.effort, def.skills, def.flows ?? null, active, id)
     return id
   }
-  const r = db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,branch_mode,branch_pattern,expected_minutes,
+  const r = db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,goal,branch_mode,branch_pattern,expected_minutes,
               schedule,schedule_kind,schedule_days,schedule_time,schedule_weeks,schedule_anchor,run_at,
               provider,or_provider,effort,skills,flows,active)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-    repoId, name, def.harness, def.model, def.prompt, def.branchMode,
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    repoId, name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode,
     def.branchPattern, def.expectedMinutes,
     zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
     def.provider, def.orProvider, def.effort, def.skills, def.flows ?? null, active)
@@ -464,6 +522,10 @@ export const RUN_DEF_FLOW_FIELDS = [
   { key: 'model', kind: 'text' },
   { key: 'effort', kind: 'text' },
   { key: 'prompt', kind: 'textarea', required: true, placeholder: 'Review the report:\n{{trigger.run.report}}' },
+  // The second prompt (claude: '/goal <condition>'), typed into the session
+  // after the start — see server/goal.mjs. A coding agent that knows none
+  // simply ignores it.
+  { key: 'goal', kind: 'textarea', placeholder: 'all tests pass and the branch is pushed' },
   { key: 'branchMode', kind: 'select', options: BRANCH_MODES, default: 'keiner' },
   { key: 'branchPattern', kind: 'text', placeholder: 'flow/{date}-{kurz}' },
   { key: 'expectedMinutes', kind: 'number', default: DEFAULT_EXPECTED_MINUTES },
@@ -478,6 +540,10 @@ export function defFromFlowProps(props) {
     orProvider: null,
     effort: props.effort || null,
     prompt: props.prompt,
+    // Through the same gate as the form's: a coding agent without a goal spec
+    // gets none, and a condition past the limit is dropped rather than cut in
+    // the middle — half a condition means something else than the whole one.
+    goal: goalFromForm({ harness: props.harness, goal: props.goal }, []),
     branchMode: props.branchMode || 'keiner',
     branchPattern: props.branchPattern || null,
     expectedMinutes: Number(props.expectedMinutes) || DEFAULT_EXPECTED_MINUTES,
