@@ -5,7 +5,7 @@
 // any). Everything else in the core schema stays untouched — the merge columns
 // themselves (`merge_status`, `merged_sha`, `resolves_run_id`, …) belong to the
 // merge integrator and are only ever read here.
-import db from '../db.mjs'
+import db, { getSetting } from '../db.mjs'
 import { randomUUID } from 'node:crypto'
 
 db.exec(`
@@ -223,6 +223,41 @@ export function updateFlowRun(id, { status, context, state, log, waitRunId = nul
     .run(status, JSON.stringify(context), JSON.stringify(state), JSON.stringify(log),
       waitRunId, resumeAt, error, ended ? 1 : 0, id)
 }
+/** How long a finished flow run is kept, in days. 0 = forever; the default is 7. */
+export function flowRunKeepDays(settings = null) {
+  const raw = settings ? settings.flow_runs_keep_days : getSetting('flow_runs_keep_days')
+  if (raw == null || String(raw).trim() === '') return 7
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : 7
+}
+
+/**
+ * Delete flow runs that are over their keep time. Returns how many went.
+ *
+ * Nothing ever deleted a flow run, which was fine while a flow was something a
+ * finished agent run started — a handful a day. A CRON flow is the other case:
+ * the one that deploys pushed commits fires every ten minutes, 144 runs a day,
+ * for as long as the machine is up. /flows/runs would silt up with rows saying
+ * "nothing to do".
+ *
+ * `failed` is kept FOUR TIMES as long, and that is the whole point of splitting
+ * the rule: the successful ones are the noise, the failed one is the reason
+ * somebody opens the page at all — and they are rare, so keeping them costs
+ * nothing. `waiting` and `running` are never touched, whatever their age: a
+ * waiting flow run is not old, it is suspended, and deleting it would drop work
+ * that is still going to happen.
+ */
+export function pruneFlowRuns(nowMs = Date.now(), settings = null) {
+  const days = flowRunKeepDays(settings)
+  if (!days) return 0
+  const cutoff = (factor) => new Date(nowMs - days * factor * 86_400_000).toISOString().replace('T', ' ').slice(0, 19)
+  const del = db.prepare(`DELETE FROM flow_runs WHERE status IN ('done','stopped')
+                          AND ended_at IS NOT NULL AND ended_at < ?`).run(cutoff(1))
+  const delFailed = db.prepare(`DELETE FROM flow_runs WHERE status='failed'
+                                AND ended_at IS NOT NULL AND ended_at < ?`).run(cutoff(4))
+  return Number(del.changes) + Number(delFailed.changes)
+}
+
 /** Flow runs suspended on a run that has now ended, or whose delay has elapsed. */
 export function waitingOnRun(runId) {
   return db.prepare(`SELECT * FROM flow_runs WHERE status='waiting' AND wait_run_id = ?`).all(runId).map(hydrateRun)

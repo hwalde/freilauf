@@ -1580,6 +1580,42 @@ try {
     gleich(fdb.getFlowRun(waiting).status, 'waiting', 'a suspended one is a row, not a stack frame — untouched')
   })
 
+  // A cron flow produces flow runs around the clock — the one that deploys pushed
+  // commits fires every ten minutes. Nothing ever deleted a flow run before, so
+  // /flows/runs would silt up with rows saying "nothing to do".
+  await pruefe('retention deletes the finished ones, keeps failed four times as long, never the waiting', async () => {
+    const { default: raw, setSetting } = await import('../server/db.mjs')
+    const age = (id, days) => raw.prepare(`UPDATE flow_runs SET ended_at = datetime('now', ?) WHERE id=?`)
+      .run(`-${days} days`, id)
+    const make = (name, status, days) => {
+      const id = fdb.createFlowRun({ flow: { id: null, name }, context: { trigger: {}, vars: {} }, state: { frames: [] } })
+      raw.prepare('UPDATE flow_runs SET status=? WHERE id=?').run(status, id)
+      age(id, days)
+      return id
+    }
+    const finished = make('cron, nothing to do', 'done', 10)      // over 7 days
+    const broken = make('cron, it broke', 'failed', 10)         // over 7, under 28
+    const suspended = make('still suspended', 'waiting', 30)       // older than everything
+
+    setSetting('flow_runs_keep_days', '7')
+    gleich(fdb.flowRunKeepDays(), 7, 'the setting is read')
+    gleich(fdb.pruneFlowRuns(Date.now()), 1, 'exactly one row went')
+    gleich(fdb.getFlowRun(finished), null, 'the finished one is gone')
+    gleich(fdb.getFlowRun(broken).status, 'failed', 'the failed one stays — it is the reason anyone opens the page')
+    gleich(fdb.getFlowRun(suspended).status, 'waiting', 'a waiting run is not old, it is suspended')
+
+    age(broken, 30)                                            // now over 4 × 7
+    gleich(fdb.pruneFlowRuns(Date.now()), 1, 'four times as long, then it goes too')
+
+    const later = make('cron, nothing to do either', 'done', 10)
+    setSetting('flow_runs_keep_days', '0')
+    gleich(fdb.flowRunKeepDays(), 0, '0 is a value, not "unset"')
+    gleich(fdb.pruneFlowRuns(Date.now()), 0, 'and it means: never delete anything')
+    wahr(!!fdb.getFlowRun(later), 'the row is still there')
+    setSetting('flow_runs_keep_days', '')
+    gleich(fdb.flowRunKeepDays(), 7, 'empty falls back to the default')
+  })
+
   // ------------------------------------------------------------------
   gruppe('Docs: AGENTS.md / CLAUDE.md pairing')
 

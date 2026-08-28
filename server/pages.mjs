@@ -32,6 +32,7 @@ import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusa
 import { resumeCommand } from './integrate.mjs'
 import { listSessions, sessionKeepHours, currentKeepMs, paneAlive } from './sessions.mjs'
 import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
+import { flowRunKeepDays } from './flows/db.mjs'
 // The flow block of the detail page is rendered in server/flows/ and belongs to
 // that module; it is re-exported here so a fragment has ONE place to ask for a
 // piece of a page, whichever module happens to build it.
@@ -1287,6 +1288,8 @@ export async function pageSettings(req, res, url) {
       <span class="dim">${e(t('settings.cursor_included_hint'))}</span></label>
     <label>${e(t('settings.session_keep'))} <input name="session_keep_hours" type="number" min="0" step="0.5" value="${e(String(sessionKeepHours(s)))}">
       <span class="dim">${e(t('settings.session_keep_hint'))}</span></label>
+    <label>${e(t('settings.flow_runs_keep'))} <input name="flow_runs_keep_days" type="number" min="0" step="1" value="${e(String(flowRunKeepDays(s)))}">
+      <span class="dim">${e(t('settings.flow_runs_keep_hint'))}</span></label>
     <label>${e(t('settings.prompt_suffix'))} <textarea name="prompt_suffix" rows="12">${e(s.prompt_suffix ?? '')}</textarea></label>
     <fieldset><legend>${e(t('settings.llm_legend'))}</legend>
       <p class="dim">${e(t('settings.llm_hint'))} ${process.env.OPENROUTER_API_KEY ? '' : `<b class="warn">${e(t('settings.llm_missing_key'))}</b>`}</p>
@@ -1890,7 +1893,7 @@ export async function repoSave(req, res, url, formBody) {
  * (sessionKeepMs), and an empty write would silently reset it.
  */
 const SETTINGS_KEYS = ['pipeline_on', 'telegram_token', 'telegram_chat', 'quota_threshold',
-  'openrouter_min_eur', 'abo_price', 'cursor_included_usd', 'session_keep_hours', 'prompt_suffix',
+  'openrouter_min_eur', 'abo_price', 'cursor_included_usd', 'session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
   'llm_check_on', 'llm_check_model', 'llm_check_or_provider',
   'llm_title_on', 'llm_title_model', 'llm_title_or_provider', 'ui_language']
 

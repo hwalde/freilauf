@@ -25,7 +25,7 @@
 // (`runs.merge_dispatched`), fed by the merge integrator, which calls
 // `flowsTick()` right after it has written the merge.
 import {
-  listFlows, undispatchedRuns, markDispatched,
+  listFlows, undispatchedRuns, markDispatched, pruneFlowRuns,
   undispatchedMerges, markMergeDispatched, mergeFacts, mergeFactsIfMerged, mergeTriggerRepoId,
 } from './db.mjs'
 import { parseAttachments, attachmentFires } from './attach.mjs'
@@ -150,7 +150,25 @@ export async function flowsTick(api = actions) {
       catch (e) { console.error(`[flows] ${flow.name}:`, e.message) }
     }
     if (cronFired.size > 500) for (const k of cronFired.keys()) if (!k.endsWith(slot)) cronFired.delete(k)
+    prune(api.now())
   } finally { busy = false }
+}
+
+/**
+ * Retention, at most every ten minutes. This pass runs on every report, every
+ * merge and every watcher tick — several times a minute on a busy hub — and a
+ * DELETE that finds nothing is still a table scan each time. The timestamp is in
+ * memory on purpose: losing it on a restart costs one extra sweep, and a
+ * settings row for it would be state about nothing.
+ */
+let prunedAt = 0
+function prune(nowMs) {
+  if (nowMs - prunedAt < 600_000) return
+  prunedAt = nowMs
+  try {
+    const n = pruneFlowRuns(nowMs)
+    if (n > 0) console.log(`[flows] ${n} finished flow run(s) deleted (retention)`)
+  } catch (e) { console.error('[flows] prune', e.message) }
 }
 
 /**

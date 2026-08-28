@@ -288,6 +288,37 @@ Runs that were already finished more than an hour before the module first ran
 are marked dispatched at startup, and so is every merge that was already there
 — history is never replayed.
 
+### Flow runs are deleted after a while
+
+Nothing ever deleted a `flow_runs` row, and while a flow was something a
+*finished agent run* started that was fine: a handful a day, and every one of
+them about something that happened. A **cron** flow is the other case. The one
+that brings pushed commits live fires every ten minutes — 144 flow runs a day,
+for as long as the machine is up, almost all of them saying "there was nothing
+to deploy". `/flows/runs` would silt up until the interesting row could not be
+found in it any more.
+
+`pruneFlowRuns(nowMs)` (`db.mjs`) therefore deletes by `ended_at`, and the rule
+is deliberately not one number:
+
+| status | kept |
+|---|---|
+| `done`, `stopped` | `flow_runs_keep_days` (Settings, default 7; `0` = forever) |
+| `failed` | **four times** as long |
+| `waiting`, `running` | never deleted, at any age |
+
+The successful ones are the noise; the failed one is the reason somebody opens
+the page at all, and they are rare enough that keeping them four times as long
+costs nothing. `waiting` is not old, it is **suspended** — deleting it would
+throw away work that is still going to happen, the same reason
+`failRunningFlowRuns()` leaves it alone.
+
+`flowsTick()` calls it at the end of a pass, **at most every ten minutes**
+(in-memory timestamp): the pass runs on every report, every merge and every
+watcher tick, and a DELETE that finds nothing is still a table scan each time.
+Losing the timestamp on a restart costs one extra sweep, which is why it is not
+a settings row.
+
 ## Integration — the seams
 
 1. `server/web.mjs`: mounts `flowRoute` (`/flows*`) and `flowApi`
