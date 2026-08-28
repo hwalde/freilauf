@@ -1006,6 +1006,22 @@
       } catch (err) { /* a quiet panel beats a broken page */ }
     }
 
+    // The panel's statistics (subscription usage, provider balances) move on
+    // their OWN clock, not with run events: a long-running agent burns quota
+    // without a single event, and without a timer the sidebar sat frozen at
+    // page-load values until the next run event or reload. A periodic re-fetch
+    // closes that. It goes through the SAME fragment the run events use, so the
+    // server's panel cache (usage.mjs) decides how often the vendors are really
+    // asked — this timer only makes sure something asks, and the
+    // stale-while-revalidate refresh lands on the next tick. Skipped while the
+    // tab is hidden; browsers throttle timers there anyway.
+    // Overridable for the browser suite, which must not wait thirty seconds.
+    const POLL_MS = Math.max(1000, Number(window.CCHUB_SIDEBAR_POLL_MS) || 30_000)
+    setInterval(() => {
+      if (document.hidden) return
+      statusAktualisieren().catch(() => {})
+    }, POLL_MS)
+
     // While the header stands on ANOTHER repo than the page — a run detail
     // after the switcher was used, which the page says out loud — one filter
     // cannot serve both: the detail wants its own run's repo, the sidebar counts

@@ -173,7 +173,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
    * `echteAgenten` hands the runs to the real ~/.local/bin/cc-start (and needs the
    * provider keys back in the environment); everything else keeps the stub.
    */
-  async function hubStarten({ echteAgenten = false, keys = {} } = {}) {
+  async function hubStarten({ echteAgenten = false, keys = {}, env = {} } = {}) {
     zustand.port = await freierPort()
     zustand.basis = `http://127.0.0.1:${zustand.port}`
     const umgebung = {
@@ -203,6 +203,9 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       CCHUB_GOAL_WAIT_MS: '10000',
       NODE_OPTIONS: '--disable-warning=ExperimentalWarning',
     }
+    // A suite may override or add to the hub's environment — e.g. shorten the
+    // usage/balance caches so a browser test does not wait a full minute.
+    for (const [k, v] of Object.entries(env)) umgebung[k] = v
     if (echteAgenten) {
       // No CCHUB_CC_START: the hub uses ~/.local/bin/cc-start and thereby the real
       // harnesses. The provider key must go back into the environment, otherwise

@@ -682,6 +682,13 @@ application comes out of it.
 - Fragment route: `GET /api/fragments/sidebar?repo=`, rendered by the same
   function the page uses. `/api/fragments/header-status` and `…/usage` still
   exist; the client simply asks for the whole aside instead.
+- **It refreshes itself every 30 s** (hub.js, `window.CCHUB_SIDEBAR_POLL_MS` in
+  the browser suite). The run events alone were not enough: a long-running
+  agent fires none, and the usage/balance numbers sat frozen at page-load
+  values. The timer asks the same fragment, the server's panel caches
+  (usage.mjs/balances.mjs, now one minute, `CCHUB_USAGE_CACHE_MS`/
+  `CCHUB_BALANCE_CACHE_MS` in the suite) decide how often the vendors are
+  really called, and the stale-while-revalidate refresh lands on the next tick.
 - Under ~1000 px it drops **below** the content. A table narrowed by the
   sidebar is the one thing it must never cause.
 

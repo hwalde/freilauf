@@ -24,6 +24,8 @@
 //   node test/browser.mjs --keep     keep the sandbox
 import { gruppe, pruefe, uebersprungen, gleich, wahr, falsch, enthaelt, bericht, zaehler } from './mini.mjs'
 import { neuerSandkasten } from './sandkasten.mjs'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 const BEHALTEN = process.argv.includes('--keep')
 const SICHTBAR = process.argv.includes('--sichtbar')
@@ -70,9 +72,12 @@ process.on('SIGTERM', async () => { await aufraeumen(); process.exit(143) })
  * A page that watches itself: every uncaught exception and every console error
  * is collected, and `sauber(p)` turns them into a failing check. The silent
  * breakages this suite is about announce themselves in exactly those two places.
+ * `init` runs in the page before ANY script, so a test can e.g. shorten the
+ * sidebar poll interval the page would otherwise use.
  */
-async function neueSeite(pfad) {
+async function neueSeite(pfad, init) {
   const p = await kontext.newPage()
+  if (init) await p.addInitScript(init)
   p.fehler = []
   p.dialoge = []
   p.on('pageerror', (err) => p.fehler.push(`pageerror: ${err.message}`))
@@ -188,7 +193,7 @@ async function datenAnlegen() {
 try {
   console.log(`Sandbox: ${sk.SB}`)
   await sk.bauen()
-  await sk.hubStarten()
+  await sk.hubStarten({ env: { CCHUB_USAGE_CACHE_MS: '300', CCHUB_BALANCE_CACHE_MS: '300' } })
   db = sk.db
   kontext = await browser.newContext({ viewport: { width: 1400, height: 900 } })
   await datenAnlegen()
@@ -333,6 +338,55 @@ try {
     // after the swap the sidebar would stand open again.
     falsch(await p.isVisible('#side-body'), 'still folded after the swap')
     gleich(await p.$eval('#side-toggle', b => b.getAttribute('aria-expanded')), 'false', 'and still says so')
+    sauber(p)
+    await p.close()
+  })
+
+  // ------------------------------------------------------------------
+  // The sidebar's statistics (subscription usage, provider balances) move on
+  // their OWN clock: a long-running agent burns quota without firing a single
+  // run event, and before the poll the panel sat frozen at page-load values.
+  // The poll (window.CCHUB_SIDEBAR_POLL_MS) plus the shortened server caches
+  // (the sandbox hub starts with CCHUB_USAGE_CACHE_MS=300) turn that minute into
+  // seconds — the page itself behaves exactly as in production, only faster.
+  gruppe('The status sidebar statistics refresh on their own')
+
+  await pruefe('the Claude usage percentage is updated without a run event', async () => {
+    const p = await neueSeite(`/?repo=${repoId}`, () => { window.CCHUB_SIDEBAR_POLL_MS = 1500 })
+    // The sandbox quota.json fixture starts at 1 % — read what the panel shows.
+    const liest5h = () => p.$$eval('#usage-panel .quota', (qs) => {
+      for (const q of qs) {
+        const label = q.querySelector('.quota-label')
+        if (label && label.textContent.trim() === '5h') return q.querySelector('.quota-pct')?.textContent.trim() ?? null
+      }
+      return null
+    })
+    const anfang = await liest5h()
+    wahr(anfang !== null, `the panel shows a Claude 5h percentage (${anfang})`)
+    wahr(anfang === '1 %', `and it is the fixture value (${anfang})`)
+    // Change the source data. NO run event, NO page interaction — only the poll
+    // may make this show up: the first poll after the change still serves the
+    // cached panel while the refresh runs behind it, the next one shows the
+    // new value.
+    const quotaPfad = join(sk.SB, 'quota.json')
+    writeFileSync(quotaPfad, JSON.stringify({
+      five_hour: { used_percentage: 42, resets_at: 1800000000 }, seven_day_fable: { used_percentage: 0 },
+    }))
+    try {
+      await wartePage(p, () => {
+        for (const q of document.querySelectorAll('#usage-panel .quota')) {
+          const label = q.querySelector('.quota-label')
+          if (label && label.textContent.trim() === '5h')
+            return /^42 %/.test(q.querySelector('.quota-pct')?.textContent ?? '')
+        }
+        return false
+      }, null, 'the sidebar to show the new Claude usage')
+      gleich(await liest5h(), '42 %', 'the updated percentage is on screen')
+    } finally {
+      writeFileSync(quotaPfad, JSON.stringify({
+        five_hour: { used_percentage: 1, resets_at: 1800000000 }, seven_day_fable: { used_percentage: 0 },
+      }))
+    }
     sauber(p)
     await p.close()
   })
