@@ -825,7 +825,10 @@ export async function pageAgents(req, res, url) {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.agents'), '/agents', body, sel.id))
 }
 
-/** One agent as a table row. `ctx.repoId` is where its two forms return to. */
+/** One agent as a table row. `ctx.repoId` is where its two forms return to.
+ * The destructive actions — move and delete — live on the agent's edit page
+ * (the detail page), not here: a cleanup action must not sit a click away from
+ * the on/off switch you reach for when editing. */
 export function agentRow(a, ctx) {
   const repoId = ctx.repoId
   return `
@@ -834,20 +837,18 @@ export function agentRow(a, ctx) {
     <td>${e(a.name)}</td><td>${e(harnessLabel(a.harness))}</td><td>${e(a.model || '–')}</td>
     <td>${e(scheduleText(a))}</td><td>${e(t('unit.minutes', { n: a.expected_minutes }))}</td>
     <td class="dim">${e(attachmentSummary(a.flows)) || '–'}</td>
-    <td><form method="post" action="/agents/start" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button>${e(t('agents.start_now'))}</button></form></td>
-    <td><a href="/agents/edit?id=${a.id}&repo=${repoId}">${e(t('agents.edit'))}</a>
-        <a href="/agents/move?id=${a.id}&repo=${repoId}">${e(t('agents.move'))}</a></td>
-    <td><form method="post" action="/agents/delete" class="inline" onsubmit="return confirm(${JSON.stringify(t('agents.delete_confirm', { name: a.name }))})"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button class="danger">${e(t('agents.delete'))}</button></form></td>
+    <td><form method="post" action="/agents/start" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button>${e(t('agents.start_now'))}</button></form>
+        <a href="/agents/edit?id=${a.id}&repo=${repoId}">${e(t('agents.edit'))}</a></td>
   </tr>`
 }
 
 export function agentRows(agents, ctx) {
   return agents.map(a => agentRow(a, ctx)).join('')
-    || `<tr><td colspan="10" class="dim">${e(t('agents.none'))}</td></tr>`
+    || `<tr><td colspan="8" class="dim">${e(t('agents.none'))}</td></tr>`
 }
 
 export function agentsTable(agents, ctx) {
-  return `<table class="list"><thead><tr><th>${e(t('agents.status'))}</th><th>${e(t('agents.name'))}</th><th>${e(t('agents.harness'))}</th><th>${e(t('agents.model'))}</th><th>${e(t('agents.schedule'))}</th><th>${e(t('agents.expected'))}</th><th>${e(t('nav.flows'))}</th><th></th><th></th><th></th></tr></thead>
+  return `<table class="list"><thead><tr><th>${e(t('agents.status'))}</th><th>${e(t('agents.name'))}</th><th>${e(t('agents.harness'))}</th><th>${e(t('agents.model'))}</th><th>${e(t('agents.schedule'))}</th><th>${e(t('agents.expected'))}</th><th>${e(t('nav.flows'))}</th><th></th></tr></thead>
   <tbody id="agents-body">${agentRows(agents, ctx)}</tbody></table>`
 }
 
@@ -1682,9 +1683,18 @@ export async function agentEdit(req, res, url) {
   const repoId = id
     ? a.repo_id
     : +(url.searchParams.get('repo') ?? cookieRepo(req) ?? db.prepare('SELECT id FROM repos ORDER BY name LIMIT 1').get()?.id ?? 0)
+  // The destructive actions belong ON this page — the agent's detail page —
+  // never in the overview. Delete is a separate form that requires the confirm
+  // dialog; move goes to its own page because a collision needs a date-time
+  // suffix. A new agent has nothing to delete or move.
+  const danger = id ? `
+  <div class="btn-row">
+    <a class="btn ghost" href="/agents/move?id=${id}&repo=${repoId}">${e(t('agents.move'))}</a>
+    <form method="post" action="/agents/delete" class="inline" onsubmit="return confirm(${JSON.stringify(t('agents.delete_confirm', { name: a.name }))})"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button class="danger">${e(t('agents.delete'))}</button></form>
+  </div>` : ''
   const body = `<h2>${e(id ? t('agentform.title_edit') : t('agentform.title_new'))}</h2>
   <form method="post" action="/agents/edit${id ? `?id=${id}` : ''}" class="settings form-grid">${agentFields(a, repoId)}
-    <div class="btn-row"><button>${e(t('settings.save'))}</button></div></form>`
+    <div class="btn-row"><button>${e(t('settings.save'))}</button></div></form>${danger}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, id ? t('agentform.title_edit') : t('agentform.title_new'), '/agents', body, repoId))
 }
 

@@ -384,15 +384,21 @@ try {
     gleich(/^e2e-frei-\d{4}-\d{2}-\d{2}-\d{6}$/.test(row.name), true, `name got a datetime suffix (${row.name})`)
   })
 
-  await pruefe('move page and agents page expose the actions', async () => {
+  await pruefe('move page and the agent detail page expose the actions', async () => {
     const a = db.prepare('SELECT * FROM agents WHERE repo_id=? AND name=?').get(repo2Id, 'e2e-frei')
     const html = await (await hol(`/agents/move?id=${a.id}`)).text()
     enthaelt(html, 'Move agent', 'move page title')
     enthaelt(html, 'e2e-frei', 'names the agent')
     enthaelt(html, 'e2e', 'lists a target repo')
+    // The destructive actions live on the agent's detail (edit) page, not in
+    // the overview table — a cleanup action must not sit next to the on/off
+    // switch, and delete asks for the confirm dialog where it appears.
+    const detail = await (await hol(`/agents/edit?id=${a.id}&repo=${repo2Id}`)).text()
+    enthaelt(detail, '/agents/move', 'move link on the agent detail page')
+    enthaelt(detail, '/agents/delete', 'delete form on the agent detail page')
     const page = await (await hol(`/agents?repo=${repoId}`)).text()
-    enthaelt(page, '/agents/move', 'move link in the agents table')
-    enthaelt(page, '/agents/delete', 'delete form in the agents table')
+    falsch(page.includes('/agents/move'), 'no move link in the agents table')
+    falsch(page.includes('/agents/delete'), 'no delete form in the agents table')
   })
 
   // ------------------------------------------------------------------
