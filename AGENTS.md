@@ -629,11 +629,30 @@ application comes out of it.
   navigation. The cookie is written twice on purpose: by the client when the
   switcher changes (so the very next page already shows the choice) and by the
   router whenever a page request names a valid `?repo=` (so followed links and
-  "back" redirects persist too). `selectRepo()` and `layout()` read it in that
-  order: explicit `?repo=` wins, then the cookie, then the first repo. An id
-  that no longer exists (a deleted repo) is ignored, not trusted. `<body
-  data-repo>` is **not** affected: pages without a repo context still set no SSE
-  filter.
+  "back" redirects persist too) — both through `requestRepo(req)`, so the
+  persisted choice and the visible one read the same signal. `selectRepo()`
+  answers explicit `?repo=`, then the cookie, then the first repo. An id that no
+  longer exists (a deleted repo) is ignored, not trusted. `<body data-repo>` is
+  **not** affected: pages without a repo context still set no SSE filter.
+- **A page that belongs to ONE repo still shows the chosen one.** Some pages
+  cannot follow the switcher: a run belongs to its repo, and rendering another
+  repo's overview under `/runs/<id>` would be a 404 with extra steps. So they
+  reload as themselves and only the CHOICE moves — which is why `layout()` asks
+  in this order and not in the page's:
+
+  1. an explicit `?repo=` in the request — the switcher itself speaking,
+  2. the repo context the page handed over (`selectedRepo`),
+  3. the cookie, then the first repo.
+
+  Before that, the click wrote the cookie, the next page obeyed it, and the
+  dropdown one had just used snapped back to the run's repo. Nothing was broken;
+  it read as if the click had been swallowed. **The rule lives in `layout()`, so
+  a new page inherits it by being rendered** — there is nothing to remember to
+  do, and that is the whole point: the pages that need it (run detail, agent
+  form, agent move) never mention it. What stays with the page is `<body
+  data-repo>`, the live channel's filter — the run's own events must keep
+  arriving while the header talks about somewhere else; the sidebar carries its
+  own `data-repo` and follows the choice.
 - **The fold lives on the shell**, not on the sidebar: `#shell.side-closed`,
   written from `localStorage['cchub.sidebar.open']` in try/catch. The live
   channel replaces `#status-sidebar` **whole** — blocks appear and disappear

@@ -47,3 +47,21 @@ export function cookieRepo(req) {
 export function rememberRepo(res, id) {
   res.setHeader('set-cookie', `${REPO_COOKIE}=${id}; Path=/; Max-Age=31536000; SameSite=Lax`)
 }
+
+/**
+ * The repo id a request names in its query string, or null.
+ *
+ * That is the switcher speaking: it appends `?repo=<id>` to the page one stands
+ * on, whatever page that is. The router reads it to write the cookie, and
+ * `layout()` reads it to decide which repo the header shows — one signal, two
+ * readers, so the persisted choice and the visible one cannot disagree.
+ */
+export function requestRepo(req) {
+  const q = String(req?.url ?? '')
+  const i = q.indexOf('?')
+  if (i < 0) return null
+  const raw = new URLSearchParams(q.slice(i + 1)).get('repo')
+  if (raw == null) return null
+  const id = Number(raw)
+  return Number.isInteger(id) && id > 0 ? id : null
+}
