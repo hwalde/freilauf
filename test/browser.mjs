@@ -468,6 +468,63 @@ try {
     await p.close()
   })
 
+  await pruefe('"More settings" opens the FULL run form in a new window with the dialog\'s state', async () => {
+    const p = await neueSeite(`/?repo=${repoId}`)
+    await p.click('#qr-open')
+    await p.selectOption('#qr-fav', String(FAV1))
+    await p.fill('#qr-form textarea[name=prompt]', 'Browser-Quickrun: doch mehr Einstellungen')
+    await p.evaluate(() => { document.querySelector('#qr-dialog details.qr-more').open = true })
+    await p.selectOption('#qr-form select[data-branch-mode]', 'neu')
+    await p.fill('#qr-form input[name=branch_pattern]', 'aufschub/{datum}')
+    await p.selectOption('#qr-form select[data-start-switch]', 'in')
+    await p.fill('#qr-form input[name=start_in_minutes]', '45')
+
+    const popupFehler = []
+    const [neu] = await Promise.all([
+      p.waitForEvent('popup'),
+      p.click('#qr-form [data-qr-full]'),
+    ])
+    neu.on('pageerror', (err) => popupFehler.push(`pageerror: ${err.message}`))
+    neu.on('console', (m) => {
+      if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) popupFehler.push(`console: ${m.text()}`)
+    })
+    await neu.waitForLoadState('load')
+    gleich(await p.$eval('#qr-dialog', d => d.open), false, 'the dialog closes on the way out')
+
+    const u = new URL(neu.url())
+    gleich(u.pathname, '/runs/new', 'a full run form opens')
+    gleich(u.searchParams.get('repo'), String(repoId), 'for the repo chosen in the dialog')
+    gleich(u.searchParams.get('favorite'), String(FAV1), 'carrying the favorite as its template')
+
+    // The dialog's own fields, parked in sessionStorage and restored onto the
+    // MAIN form — the dialog on that page has them empty, the two must not mix.
+    gleich(await neu.$eval('form.settings textarea[name=prompt]', el => el.value),
+      'Browser-Quickrun: doch mehr Einstellungen', 'the task survives')
+    gleich(await neu.$eval('form.settings select[data-branch-mode]', el => el.value), 'neu', 'the branch rule survives')
+    gleich(await neu.$eval('form.settings input[name=branch_pattern]', el => el.value),
+      'aufschub/{datum}', 'with its pattern')
+    gleich(await neu.$eval('form.settings [data-branch-pattern]', el => el.hidden), false,
+      'the pattern is visible again — the branch sync saw the restored value')
+    gleich(await neu.$eval('form.settings select[data-start-switch]', el => el.value), 'in', 'the start time survives')
+    gleich(await neu.$eval('form.settings .st[data-mode="in"]', el => el.hidden), false,
+      'and its block is shown, not the default "now"')
+
+    // The favorite's setup is the form's TEMPLATE, not something the dialog typed.
+    gleich(await neu.$eval('form.settings select[name=harness]', el => el.value), 'claude',
+      'the favorite\'s coding agent')
+    gleich(await neu.$eval('form.settings #model', el => el.value), 'claude-opus-5', 'and its model')
+
+    gleich(await neu.evaluate(() => sessionStorage.getItem('cchub:qrfull')), null,
+      'the parked state is consumed on the way in')
+    gleich(await p.evaluate(() => sessionStorage.getItem('cchub:qrfull')), null,
+      'and not left over in the opener either')
+
+    wahr(popupFehler.length === 0, `the new window's console stays quiet (${popupFehler.join(' | ')})`)
+    sauber(p)
+    await p.close()
+    await neu.close()
+  })
+
   // ------------------------------------------------------------------ A8
   gruppe('A8 — renaming a run in place')
 

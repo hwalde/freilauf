@@ -17,7 +17,7 @@ import {
 } from './run-def.mjs'
 import {
   listFavorites, getFavorite, saveFavorite, deleteFavorite,
-  favoriteFromForm, favoriteSummary, FAVORITES_MAX,
+  favoriteFromForm, favoriteTemplate, favoriteSummary, FAVORITES_MAX,
 } from './favorites.mjs'
 import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } from './title.mjs'
 import { getHarness, harnessLabel, detectInstalled } from './harnesses/index.mjs'
@@ -165,6 +165,13 @@ function setupBanner() {
  * where it was and a toast says what happened, with a link to the run for
  * whoever wants to look. Being torn to a detail page is exactly what makes a
  * quick start not quick.
+ *
+ * The one exit that does lead away is "More settings": it opens the FULL
+ * single-run form in a new window (`/runs/new?repo=…&favorite=…`) with the
+ * dialog's state carried over — the favorite becomes the form's template, and
+ * hub.js parks the task, the branch rule and the start time in sessionStorage
+ * so the new window restores them. The moment one wants more than the dialog
+ * asks, the run stops being quick, and the full form is the place it belongs.
  */
 function quickRunDialog(repos, selectedRepo) {
   const favs = listFavorites()
@@ -187,6 +194,7 @@ function quickRunDialog(repos, selectedRepo) {
     </details>
     <p class="err" id="qr-error" hidden></p>
     <menu class="qr-actions">
+      <button type="button" class="ghost" data-qr-full>${e(t('qr.full'))}</button>
       <button type="button" class="ghost" data-qr-close>${e(t('qr.cancel'))}</button>
       <button type="submit">${e(t('qr.start'))}</button>
     </menu>
@@ -738,16 +746,24 @@ export async function pageRunForm(req, res, url) {
   if (!sel) return noRepoPage(res, '', t('runform.title_short'))
   const agentId = url.searchParams.get('agent')
   const a = agentId ? db.prepare('SELECT * FROM agents WHERE id=?').get(+agentId) : null
-  // Without an agent as a template: the setup of the last start — in practice
-  // the next run wants the same coding agent, provider, model and effort.
+  // A favorite as template: the Quick-Run dialog's "more settings" hands its
+  // favorite over via ?favorite=<id>, so the form opens with that setup and
+  // hub.js restores the dialog's prompt, branch rule and start time on top of
+  // it. Explicit beats remembered: an agent, then a favorite, then the last
+  // choice — never two templates competing.
+  const favId = url.searchParams.get('favorite')
+  const fav = favId && !a ? getFavorite(+favId) : null
+  const template = a ?? (fav ? favoriteTemplate(fav) : null) ?? lastRunChoice()
   const fields = `
   ${runTitleField({})}
-  ${runDefFields(a ?? lastRunChoice())}
+  ${runDefFields(template)}
   ${runStartTimeFields({})}
   <input type="hidden" name="repo_id" value="${sel.id}">
   <label class="chk"><input type="checkbox" name="save_agent" value="1"> ${e(t('runform.save_agent'))} (<input name="agent_name" placeholder="${e(t('runform.agent_name_ph'))}">)</label>`
   const body = `
-  <h2>${e(t('runform.title', { repo: sel.name }))}${a ? ` (${e(t('runform.like_agent', { agent: a.name }))})` : ''}</h2>
+  <h2>${e(t('runform.title', { repo: sel.name }))}${a
+    ? ` (${e(t('runform.like_agent', { agent: a.name }))})`
+    : fav ? ` (${e(t('runform.like_favorite', { favorite: fav.name }))})` : ''}</h2>
   <form method="post" action="/runs/new" class="settings form-grid">${fields}
   <div class="btn-row"><button>${e(t('runform.start'))}</button>
   ${pipelineAn()

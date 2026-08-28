@@ -60,6 +60,42 @@
     })
   }
 
+  // ---- Quick Run → full run form: what was typed survives the handoff ----
+  // The Quick-Run dialog's "more settings" opens /runs/new in a NEW window and
+  // parks its fields under this key first (a window opened by the opener
+  // inherits a copy of its sessionStorage). This block restores them onto the
+  // MAIN form — never onto the Quick-Run dialog that sits on this page too —
+  // and runs BEFORE the start-time and branch syncs below, so those re-evaluate
+  // against the restored values. What the dialog does not ask for (coding
+  // agent, provider, model, effort, skills, flows) is not parked and stays as
+  // the server rendered it — the favorite that travels in the URL.
+  const QRFULL_KEY = 'cchub:qrfull'
+  if (location.pathname === '/runs/new') {
+    const laufForm = document.querySelector('form.settings')
+    if (laufForm) {
+      let geparkt = null
+      try { geparkt = JSON.parse(sessionStorage.getItem(QRFULL_KEY) || 'null') } catch (err) { geparkt = null }
+      if (Array.isArray(geparkt)) {
+        const byName = new Map()
+        geparkt.forEach(function (kv) { byName.set(kv[0], (byName.get(kv[0]) || []).concat(kv[1])) })
+        laufForm.querySelectorAll('input[name], textarea[name], select[name]').forEach(function (el) {
+          const vals = byName.get(el.name)
+          if (el.type === 'checkbox' || el.type === 'radio') {
+            el.checked = !!vals && vals.indexOf(el.value) >= 0
+            return
+          }
+          if (!vals || !vals.length) return
+          const v = vals.shift()
+          el.value = v
+          // The provider/effort <select>s are filled by fetch only afterwards;
+          // 'data-gewaehlt' is what those loaders read, so the choice survives.
+          if (el.dataset.gewaehlt !== undefined) el.dataset.gewaehlt = v
+        })
+        try { sessionStorage.removeItem(QRFULL_KEY) } catch (err) { /* private mode */ }
+      }
+    }
+  }
+
   // ---- schedule selection: only show the block of the chosen kind ----
   const kindSel = document.getElementById('schedule-kind')
   if (kindSel) {
@@ -225,6 +261,32 @@
         })
         .finally(function () { if (btn) btn.disabled = false })
     })
+
+    // "More settings": the moment one wants more than the dialog asks, the run
+    // stops being quick — open the FULL single-run form in a new window with
+    // what is already here. The favorite travels in the URL (it IS the form's
+    // template, resolved server-side), everything the dialog itself holds is
+    // parked in sessionStorage first — a window this opener opens inherits a
+    // copy of it, and the form page restores the fields at load.
+    const qrFull = qrForm && qrForm.querySelector('[data-qr-full]')
+    if (qrFull) {
+      qrFull.addEventListener('click', function () {
+        const repo = qrForm.querySelector('select[name=repo_id]').value
+        const fav = qrForm.querySelector('select[name=favorite_id]').value
+        if (!repo || !fav) return
+        try {
+          const data = []
+          new FormData(qrForm).forEach(function (v, k) { if (typeof v === 'string') data.push([k, v]) })
+          sessionStorage.setItem(QRFULL_KEY, JSON.stringify(data))
+        } catch (err) { /* private mode: the form then opens with the favorite alone */ }
+        window.open('/runs/new?repo=' + encodeURIComponent(repo) +
+          '&favorite=' + encodeURIComponent(fav), '_blank')
+        // The new window got its own copy at open time; the opener does not need
+        // the blob any more, and a stale one would come back on the next click.
+        try { sessionStorage.removeItem(QRFULL_KEY) } catch (err) { /* private mode */ }
+        qrDialog.close()
+      })
+    }
   }
 
   // ---- inline renaming of a run (overview + detail page) ----

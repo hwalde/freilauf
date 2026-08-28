@@ -572,6 +572,9 @@ dialog.qr details.qr-more { margin: var(--sp-10) 0; }
 dialog.qr details.qr-more summary { cursor: pointer; color: var(--accent-act-hover); }
 dialog.qr menu.qr-actions { display: flex; gap: var(--sp-10); justify-content: flex-end;
   margin: var(--sp-14) 0 0; padding: 0; }
+/* The escape to the full run form stands on its own, left of Cancel/Start —
+   it is not one of the two ways of sending this dialog, it is the exit from it. */
+dialog.qr menu.qr-actions [data-qr-full] { margin-right: auto; }
 dialog.qr button.ghost { background: none; color: var(--text-ghost); border: 1px solid var(--border-ghost); }
 /* The favorite's setup as a marker beside its select, not as a line beneath
    it: one line of text there clung to the field, and the gap it opened made

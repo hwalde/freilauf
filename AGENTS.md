@@ -235,6 +235,17 @@ is. It does **not** navigate: `POST
 whether the run started, was planned or was deferred, with a link to it. Being
 torn to a detail page is what would make a quick start not quick.
 
+The one exit that does lead away is **More settings**: the moment one wants more
+than the dialog asks, the run stops being quick. It opens the FULL single-run
+form in a new window (`/runs/new?repo=…&favorite=…`): the favorite becomes the
+form's template (`favoriteTemplate()` in favorites.mjs, the counterpart of
+`favoriteToFormBody()`), and hub.js parks the task, the branch rule and the
+start time in `sessionStorage` (key `cchub:qrfull`) — a window opened by the
+opener inherits a copy, and the form page restores the fields onto the MAIN
+form before its start-time and branch syncs run. What the dialog does not ask
+for stays as the favorite's template rendered it; there is still no second
+definition builder involved.
+
 There is **no second definition builder** behind any of this, which is the whole
 reason a favorite stores only the setup half:
 
