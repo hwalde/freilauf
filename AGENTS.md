@@ -83,6 +83,7 @@ is one and the same **run definition**, and it lives in **`server/run-def.mjs`**
 | Form block (HTML) | `runDefFields(values)` | agent form + single-run form |
 | Its second prompt, for the harnesses that know one | `goalFields` | both forms (see below) |
 | Its setup half, on its own | `runSetupFields`, `branchFields` | favorite form, Quick-Run dialog |
+| What each branch rule MEANS — label, explanation, agent sentence | `BRANCH_MODE_INFO`, `branchRuleText`, `branchContext` | `branchFields` + `launchRun` (see below) |
 | Form → definition, incl. all validation | `runDefFromForm(body, problems)` | both forms + `POST /api/runs` |
 | Its setup half, on its own | `runSetupFromForm(body, problems)` | favorites (see below) |
 | Agent row → definition | `defFromAgent(row)` | scheduler, "start now", flows |
@@ -91,11 +92,35 @@ is one and the same **run definition**, and it lives in **`server/run-def.mjs`**
 | Last used setup, **per coding agent** | `rememberRunChoice`, `lastRunChoice`, `lastRunChoiceFor` | both forms (preselection, and the reset on switching the coding agent) |
 | Title + start time (single run only) | `runTitleField`, `runStartTimeFields`, `runStartFromForm` | single-run form + `POST /api/runs` |
 
+### Agent lifecycle: delete, move, per-repo names
+
+An agent lives in exactly one repo, and its **name is unique per repo** —
+two repos may each carry an agent called "nightly". The agents table enforces
+`UNIQUE(repo_id, name)`; databases from before the change are rebuilt once at
+startup (`agentNameUniquePerRepo()` in db.mjs). The form reports a duplicate
+inside one repo as a readable problem (`agents.name_taken`), never a 500.
+
+Three lifecycle operations, all in `server/run-def.mjs` next to `saveAgent`:
+
+| Operation | Function | Notes |
+|---|---|---|
+| Delete | `deleteAgent(id)` | NULLs `runs.agent_id` first, then drops the row — the runs survive with their definition copy and title snapshot (`POST /agents/delete`) |
+| Move | `moveAgent(id, repoId)` | `UPDATE agents SET repo_id, name`; a name collision in the target repo appends a `YYYYMMDD-HHMMSS` suffix (`POST /agents/move`, page `GET /agents/move`) |
+| Name free? | `agentNameTaken(repoId, name, excludeId)` | mirrors the UNIQUE constraint for validation |
+
 And there is exactly **one** way from a definition to a running run:
 **`startRun(def, { repoId, agentId, promptExtra, title, startMode, startAt })`**
 in `server/scheduler.mjs` — including the budget gate (`budgetGate(harness)`,
 also used by the watcher when picking a deferred run back up).
 `startForAgent(agent)` is only its wrapper for a stored definition.
+
+`keep_on_branch` (0/1) is the newest field and went exactly that way: the form
+block, `runDefFromForm`, `defFromAgent`, `saveAgent`, `createRun`,
+`RUN_DEF_FLOW_FIELDS`/`defFromFlowProps`, two columns — and
+`pickQuickFields`'s allowlist in web.mjs, which is the one place a field can
+fall off silently because it is an allowlist and not a spread. It is
+deliberately NOT part of `rememberRunChoice`: it belongs to the task, not to the
+setup.
 
 A new field of a run therefore needs **one** change in `run-def.mjs`, not four.
 Before that, the copies had already drifted: the single-run form dropped the
@@ -409,6 +434,90 @@ and is the opposite: it is what closes the terminal's WebSocket, and with it
 that tmux client. The send and kill forms also sit outside the fragment and have
 to disappear. The reason is in the code, so it does not get modernized away.
 
+## The transport: why the hub felt slow, and what carries it now
+
+Every page rendered in single-digit milliseconds and the hub still hung. That is
+the shape of this whole section: **none of it was visible from inside the hub**,
+because the requests never got there. Three causes, all in the layer between the
+browser and `hub.mjs`, all measured on the running installation.
+
+### One connection per tab, and a browser has six
+
+`vpn-proxy.mjs` was `https.createServer` — HTTP/1.1 only. A browser opens at most
+**6 connections per origin** over HTTP/1.1, and since the live channel exists
+**every open cc-hub tab holds one of them open forever**: an EventSource is a
+response that never ends. Four tabs left the page two connections to load itself
+through; six left it none, and every further request simply queued in the browser
+until a tab was closed.
+
+It is `http2.createSecureServer` now, `ALPNProtocols: ['h2', 'http/1.1']`. An h2
+browser multiplexes pages, fragments, static files and the SSE stream over ONE
+connection, and the ceiling stops existing.
+
+`allowHTTP1: true` is what keeps the terminal working: browsers do not run
+WebSockets over h2 (RFC 8441 is not advertised here), so they open a separate
+HTTP/1.1 connection for the upgrade — and the proxy's `upgrade` event still fires
+for it. That was measured against Node 22 before the switch, because the h2
+server's compat layer documents `request` but not `upgrade`.
+
+**Hop-by-hop headers become fatal under h2.** `connection`, `keep-alive`,
+`transfer-encoding` and `upgrade` describe one connection; node rejects them on
+an h2 stream outright. The hub's SSE handler sends `connection: keep-alive`, so
+passing the upstream headers straight through would have killed the live channel
+for every h2 client — silently, since the throw happens inside the proxy. Both
+directions are filtered (`normalizeHeaders`, `responseHeaders`), and the same
+function turns an h2 client's `:authority` into the `host` the allowlist reads.
+
+### `pipe()` does not close what it stopped reading
+
+`up.pipe(res)` alone does not survive the client going away. When a browser
+closes an SSE stream — a navigation, a closed tab — the downstream `res` ends,
+but the **upstream request to the hub was never destroyed**: node's `pipe()`
+unpipes a dead destination, it does not tear down the source.
+
+So every page view left behind a socket to the hub, and inside the hub the SSE
+client record that hangs on it: an entry in `clients` that receives every
+published event, plus a 25 s heartbeat interval, for the life of the process.
+Measured before the fix: **7 browser connections, 19 upstream ones**, and the
+number only ever went up.
+
+`res.on('close') → upstream.destroy()`. Everything the hub does to notice a gone
+client (`req.on('close')` in events.mjs) depends on this socket actually closing
+— which is why the fix belongs in the proxy and not there.
+
+### Static files had no validator, and were read from disk every time
+
+`serveStatic` did a `readFileSync` on **every** request and answered with nothing
+but a content-type. Two consequences, and the second is the expensive one:
+
+- a synchronous read in the request path blocks the ONE event loop that also
+  holds every SSE stream, the terminal WebSocket, the scheduler and the watcher.
+  xterm.js alone is 488 KB off disk;
+- with no validator a browser cannot revalidate, so it re-downloaded the whole
+  set on every page view — ~600 KB per page, ~900 KB on a run detail page.
+
+Now: in memory, with an ETag from the file's mtime+size and `cache-control:
+no-cache`. A repeat page view went from 104 KB to 10.5 KB. `no-cache` rather than
+a long `max-age` because these URLs carry no content hash — a cached hub.js would
+otherwise outlive a deploy. The entry is validated against one `statSync` per
+request (metadata, no bytes), so editing `public/hub.js` still takes effect on
+the next reload; the dev loop this repo lives on must not be traded for a cache.
+
+### And a page render never waits on somebody else's server
+
+`layout()` awaits `subscriptionUsage()` and `providerBalances()` — the rail and
+the panel — on **every** page, and both talk to vendor APIs (cursor's dashboard
+endpoint carries a 12 s timeout). With a two-minute cache the hub was fast for
+two minutes and then ONE page view paid for everybody.
+
+Both are **stale-while-revalidate** now: an expired entry is returned as it
+stands while the refresh runs behind it, and the live channel re-fetches the
+sidebar anyway, so the new numbers arrive on their own. `force` (the `/api/usage`
+route) still waits — that caller asked for the current answer, not a fast one.
+The only request that could still wait on a vendor is the one finding no cached
+answer at all, which is why `hub.mjs` **warms both at startup**, fire and forget.
+First page view after a restart: 1.15 s before, 11 ms after.
+
 ## The status sidebar: one place that says how the machine is doing
 
 `statusSidebar()` in `pages.mjs`, right of the content, on **every** page,
@@ -612,6 +721,60 @@ same files: parallel resolvers then invalidate each other and only the first
 one's work survives. Raise it for a large repository where conflicts rarely land
 on the same files.
 
+### The branch rule under `hub`, and keeping work on a branch
+
+Under `merge_mode='off'` the branch rule answers "does this work survive": no
+branch means a detached worktree and throwaway changes. Under `hub` it answers
+nothing of the kind — the hub merges **every** run — and only decides under
+which NAME the work travels:
+
+| Rule | `off` | `hub` |
+|---|---|---|
+| **no branch** | detached, throwaway unless the agent pushes it somewhere itself | detached; the commits are merged into `{base}` at the end. Where a name is needed anyway (backup, conflict run) it is `run/<short id>` |
+| **new branch** | a branch from the pattern; whether it reaches `{base}` is up to the agent | the same branch, merged into `{base}` at the end — pick it for a readable name on origin |
+| **existing branch** | continue across several runs | the same, and merged after **every** run — unless "keep on branch" says otherwise |
+
+The form said none of this, and the prompt sentence for "no branch" still
+promised *"changes are throwaway changes"* — in the same prompt where
+`MERGE_RULE` promised the opposite. Both now come out of **one** table,
+`BRANCH_MODE_INFO` in `run-def.mjs`: the i18n key of each explanation and the
+English sentence the agent reads, per merge mode. `branchRuleText()` is what
+`launchRun` calls instead of the inline ternary it used to carry, and a unit
+test checks that every `explain` key really exists in `lang/en.json` — a table
+may not name a string that is not there.
+
+The form renders **both** explanations and lets CSS show the one that fits
+`data-merge-mode` on the fieldset. So the static case needs no JavaScript, and
+the only form that can change repo without rebuilding the page — the Quick-Run
+dialog, which has a repo `<select>` while the header's switcher reloads — just
+flips that attribute from a `repoId → mode` map, and rewrites the `<span
+data-base>` inside the sentences so a repo with a base branch of its own is not
+described with somebody else's.
+
+**"Keep the work on its branch"** (`runs.keep_on_branch`) is for the long-lived
+branch: a documentation branch, a spike, an agent that works on the same
+`fest` branch for a week. Only offered under `hub` (the checkbox carries
+`hidden` from the server as well as the CSS rule, so it is gone without the
+stylesheet too), and refused with "no branch" — keeping work on a branch needs a
+branch. What the integrator then does is a **short** version of the finish gate:
+
+- the **dirt check stays** — a run is only over when its work is committed, and
+  M1 is the same message as ever;
+- **no dry run, no merge**; instead the branch is pushed to origin (the same
+  `backupBranch()` the backup rule uses), `merge_status='kept_on_branch'`,
+  event `branch_kept`, and the Telegram done line reads
+  `Kept on branch <name> — not merged, as configured`;
+- a **failed push is an escalation**, like a merge that cannot be pushed:
+  the operator wants nothing living only on this machine;
+- it sends no "main has moved" (nothing moved) but still receives one, and it
+  fires no `run_merged` flow, because there was no merge;
+- the prompt gets the `keep` sentence **instead of** `MERGE_RULE`. Two rules
+  about the same thing is one too many — that is the lesson this whole table was
+  written from;
+- **"Merge now" is offered anyway.** Keeping the work on its branch is what
+  happened automatically at the end of the run, not a verdict for all time; the
+  click clears the flag and runs the ordinary path, dry run and all.
+
 ### The conflict run is not a normal run
 
 `isResolverRun(run)` — `!!run.resolves_run_id`, one predicate in
@@ -703,6 +866,7 @@ node test/e2e.mjs           # complete hub in a sandbox, stub instead of real ag
 node test/e2e.mjs --echt    # additionally ONE real run per harness (consumes quota)
 node test/e2e.mjs --keep    # keep the sandbox (debugging)
 node test/browser.mjs       # public/hub.js in a real Chromium — ~10 s
+node test/proxy.mjs         # vpn-proxy.mjs against a stub upstream — <1 s
 ```
 
 The e2e suite starts a **second hub** on a free port with its own database, its
@@ -713,6 +877,19 @@ killed (also on Ctrl-C). Watcher passes are triggered directly instead of
 waiting for the 30-second interval. That sandbox lives in
 **`test/sandkasten.mjs`** — one construction, two suites, because a second copy
 of it would drift the way the run definition once did.
+
+**The sandbox kills what its own stub created, and the stub writes the list.**
+That used to be a `sessions` Set filled by two helpers, so every run started
+along another path — the scheduler, a flow, a conflict run, a retry — created a
+tmux session nothing would ever kill. One per suite run is enough: agents working
+on this repository run the suite dozens of times a day, and the machine ended up
+with 157 live sessions, 11 of them belonging to the running hub, together holding
+gigabytes of RSS while it sat in swap. The leftovers are recognizable by their
+`-2` suffix — the stub's own collision loop, firing because a retry reuses the
+run id while the first session is still standing. The stub knows the name it
+created and cannot forget to write it down, so `$SB/sessions.txt` is the list and
+`aufraeumen()` reads it. Still no pattern across all `cc-*`: that file holds
+exactly the sessions THIS sandbox produced.
 
 The sandbox repo has a **bare `origin`** next to it, which is what lets the
 integration be tested for real: the group "Integration: a run is done when its
@@ -740,6 +917,17 @@ the form parked in `sessionStorage` while one builds a flow, the
 provider/model/effort cascade, the sessions page's optimistic ending, and both
 branches of the terminal. Every test also fails on an exception in the browser
 console, because that is where a silent break first shows.
+
+**Why there is a proxy suite.** AGENTS.md has carried the sentence "a green test
+against 127.0.0.1 says NOTHING about the path through the TLS proxy" for a long
+time, and nothing tested that path at all — which is exactly where the three
+slowdowns above were hiding. `test/proxy.mjs` starts `vpn-proxy.mjs` against a
+**stub** upstream, because what is being tested is what the proxy does with a
+connection and a stub can COUNT its connections: ALPN really offers h2 and still
+falls back to http/1.1 for the terminal, an SSE stream survives the hop-by-hop
+headers h2 forbids, and eight abandoned streams leave **not one** socket behind.
+It is part of `npm test` (it needs only openssl, and reports itself skipped and
+green without it).
 
 It is **not** part of `npm test`: it needs `playwright` (a devDependency) and a
 Chromium. Without either, the suite reports itself skipped and ends green —

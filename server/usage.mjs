@@ -50,8 +50,13 @@ let inflight = null   // { key, promise }
  */
 export async function subscriptionUsage({ force = false } = {}) {
   const key = agentKey()
-  if (!force && cache.value && cache.key === key && Date.now() - cache.at < CACHE_MS) return cache.value
-  if (inflight && inflight.key === key) return inflight.promise
+  const cached = cache.value && cache.key === key ? cache.value : null
+  if (!force && cached && Date.now() - cache.at < CACHE_MS) return cached
+  if (inflight && inflight.key === key) {
+    // Stale-but-usable beats waiting: hand the old answer back and let the
+    // refresh already in flight finish in the background.
+    return !force && cached ? cached : inflight.promise
+  }
   const task = (async () => {
     const out = []
     for (const agent of enabledCodingAgents()) {
@@ -82,8 +87,24 @@ export async function subscriptionUsage({ force = false } = {}) {
   inflight = { key, promise: task }
   const release = () => { if (inflight?.promise === task) inflight = null }
   task.then(release, release)
+  // Stale-while-revalidate, and the reason is a hang rather than a preference.
+  //
+  // layout() awaits this, twice (the rail and the panel), on EVERY page. The
+  // plugins behind it talk to the network — cursor's dashboard endpoint alone
+  // carries a 12 s timeout — so for two minutes the hub was fast and then one
+  // unlucky page view paid for everybody, up to a quarter of a minute of a
+  // white screen. Nothing on a page render may wait on somebody else's server.
+  //
+  // An expired entry is therefore returned as it stands while the refresh runs
+  // behind it; the live channel re-fetches the sidebar anyway, so the new
+  // numbers arrive on their own. `force` (the /api/usage route) still waits —
+  // that caller asked for the current answer, not for a fast one.
+  if (!force && cached) return cached
   return task
 }
+
+/** Test hook: let the cache age by `ms`, so staleness can be tested without waiting. */
+export function _usageCacheAge(ms) { cache.at -= ms }
 
 /** Test hook: drop the cache. */
 export function _usageCacheReset() { cache = { at: 0, key: '', value: null }; inflight = null }

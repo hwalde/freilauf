@@ -1,5 +1,5 @@
 // cc-hub — HTTP: server-rendered HTML + JSON API (planning 5).
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import db, { getRepo, getRun, setSetting, addEvent, announceRun } from './db.mjs'
@@ -18,6 +18,7 @@ import {
   pageOverview, pageAgents, pageRunForm, pageRun, pageRepos, pageSettings, pageSessions,
   pageArchive,
   runNewPost, agentEdit, agentSave, agentToggle, agentStart,
+  agentDelete, agentMovePage, agentMovePost,
   repoEdit, repoSave, settingsSave, settingsTestTelegram,
   telegramSetup, telegramTokenSave, telegramChatSave, telegramChats,
   pageCodingAgents, codingAgentSave, codingAgentDelete,
@@ -68,6 +69,10 @@ function pickQuickFields(b) {
     prompt: b.prompt,
     branch_mode: b.branch_mode,
     branch_pattern: b.branch_pattern,
+    // Part of the branch rule, and rendered by the same branchFields() the run
+    // forms use — so it has to be on the allowlist, or a ticked box would be
+    // dropped here and nowhere else.
+    keep_on_branch: b.keep_on_branch,
   }
 }
 
@@ -91,7 +96,7 @@ export async function route(req, res) {
 
 async function dispatch(req, res, url, path, formBody) {
   // --- static (xterm.js from node_modules) ---
-  if (req.method === 'GET' && path.startsWith('/static/')) return serveStatic(res, path)
+  if (req.method === 'GET' && path.startsWith('/static/')) return serveStatic(req, res, path)
 
   // --- JSON API ---
   if (path.startsWith('/api/')) return api(req, res, url)
@@ -109,6 +114,9 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'POST' && path === '/agents/edit') return agentSave(req, res, url, formBody)
   if (req.method === 'POST' && path === '/agents/toggle') return agentToggle(req, res, url, formBody)
   if (req.method === 'POST' && path === '/agents/start') return agentStart(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/agents/delete') return agentDelete(req, res, url, formBody)
+  if (req.method === 'GET' && path === '/agents/move') return agentMovePage(req, res, url)
+  if (req.method === 'POST' && path === '/agents/move') return agentMovePost(req, res, url, formBody)
   if (req.method === 'GET' && path === '/runs/new') return pageRunForm(req, res, url)
   if (req.method === 'POST' && path === '/runs/new') return runNewPost(req, res, url, formBody)
   if (/^\/runs\/[0-9a-f-]{36}$/.test(path)) return pageRun(req, res, url, path.split('/')[2])
@@ -577,16 +585,63 @@ const STATIC_MAP = [
   ['/static/swd.css', '/sequential-workflow-designer/css/designer.css', 'text/css'],
   ['/static/swd-light.css', '/sequential-workflow-designer/css/designer-light.css', 'text/css'],
 ]
-function serveStatic(res, path) {
+
+/**
+ * Every static file that was ever asked for, kept in memory and validated by an
+ * ETag — and both halves of that sentence were measured, not assumed.
+ *
+ * Before this the handler did `readFileSync` on EVERY request and answered with
+ * nothing but a content-type. Two consequences, and the second one is the
+ * expensive one:
+ *
+ *  - a synchronous read in the request path blocks the ONE event loop that also
+ *    holds every SSE stream, the terminal WebSocket, the scheduler and the
+ *    watcher. xterm.js alone is 488 KB off disk;
+ *  - with no validator the browser could not revalidate, so it re-downloaded
+ *    the whole set on every page view — ~600 KB per page, and ~900 KB on a run
+ *    detail page (xterm + addon-fit). Over a connection pool the SSE stream is
+ *    already eating into (see vpn-proxy.mjs) that is exactly what "the hub
+ *    hangs" felt like.
+ *
+ * `no-cache` rather than a long `max-age`: these URLs carry no content hash, so
+ * a cached hub.js could otherwise outlive a deploy by a day. `no-cache` still
+ * means "ask first", and the answer is a 304 of a couple of hundred bytes
+ * instead of half a megabyte.
+ *
+ * The cache is validated against the file's mtime+size on each request — one
+ * `statSync` (a metadata lookup, no bytes) instead of a full read. So editing
+ * public/hub.js during development still takes effect on the next reload; the
+ * dev loop this repo lives on must not be traded away for the cache.
+ */
+const statCache = new Map()   // route -> { stamp, data, etag }
+
+function serveStatic(req, res, path) {
   for (const [route, file, type] of STATIC_MAP) {
     if (route !== path) continue
     const abs = file.startsWith('/..') ? join(HERE, file) : join(HERE, '..', 'node_modules', file)
+    let entry = statCache.get(route)
     try {
-      const data = readFileSync(abs)
-      res.writeHead(200, { 'content-type': type }).end(data)
+      const st = statSync(abs)
+      const stamp = `${st.size}-${st.mtimeMs}`
+      if (!entry || entry.stamp !== stamp) {
+        entry = { stamp, data: readFileSync(abs), etag: `W/"${stamp}"` }
+        statCache.set(route, entry)
+      }
     } catch {
+      statCache.delete(route)
       res.writeHead(404).end('missing — run npm install? (' + file + ')')
+      return
     }
+    const head = {
+      'content-type': type,
+      etag: entry.etag,
+      'cache-control': 'no-cache',
+    }
+    if (req.headers['if-none-match'] === entry.etag) {
+      res.writeHead(304, head).end()
+      return
+    }
+    res.writeHead(200, { ...head, 'content-length': entry.data.length }).end(entry.data)
     return
   }
   res.writeHead(404).end()

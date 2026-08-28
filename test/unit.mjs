@@ -1686,6 +1686,54 @@ try {
     }
   })
 
+  // layout() awaits usage AND balances on every single page, and both of them
+  // talk to a vendor's API — cursor's own dashboard endpoint carries a 12 s
+  // timeout. So for two minutes the hub was fast and then ONE page view paid
+  // for everybody, with a white screen for as long as the slowest provider took.
+  // A stale number in the sidebar is worth incomparably more than a page that
+  // does not come.
+  await pruefe('an expired panel is served stale while it refreshes behind the page', async () => {
+    const usage = await import('../server/usage.mjs')
+    const bal = await import('../server/balances.mjs')
+    const echt = globalThis.fetch
+    const key = process.env.OPENROUTER_API_KEY
+    const vorher = ca.listCodingAgents().map(a => ({ harness: a.harness, providers: a.providerIds, enabled: a.enabled }))
+    let haenge = null                       // resolves the pending fetch by hand
+    let rufe = 0
+    globalThis.fetch = async () => {
+      rufe++
+      if (haenge) await new Promise(r => { haenge = r })
+      return { ok: true, json: async () => ({ data: { total_credits: 5, total_usage: 1 }, is_available: true }) }
+    }
+    try {
+      for (const a of ca.listCodingAgents()) ca.deleteCodingAgent(a.id)
+      ca.saveCodingAgent({ harness: 'opencode', enabled: 1, providers: ['openrouter'] })
+      process.env.OPENROUTER_API_KEY = 'k'
+      usage._usageCacheReset(); bal._balanceCacheReset()
+
+      const erste = await bal.providerBalances()
+      gleich(erste.length, 1, 'the cold call really does fetch')
+      const rufeNachErster = rufe
+
+      // Age the entry past its two minutes, then make the next fetch hang.
+      bal._balanceCacheAge(3 * 60_000)
+      haenge = () => {}
+      const zweite = await Promise.race([
+        bal.providerBalances(),
+        new Promise(r => setTimeout(() => r('zu langsam'), 200)),
+      ])
+      wahr(zweite === erste, 'the stale answer comes back at once, byte for byte the old one')
+      wahr(rufe > rufeNachErster, 'and the refresh really was started behind it')
+      haenge?.()
+    } finally {
+      globalThis.fetch = echt
+      if (key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = key
+      for (const a of ca.listCodingAgents()) ca.deleteCodingAgent(a.id)
+      for (const a of vorher) ca.saveCodingAgent({ harness: a.harness, enabled: a.enabled, providers: a.providers })
+      usage._usageCacheReset(); bal._balanceCacheReset()
+    }
+  })
+
   // ------------------------------------------------------------------
   gruppe('Run definition: one form → one definition (run-def.mjs)')
   // 'claude' is the configured coding agent here (seeded by the group above).
@@ -1729,6 +1777,95 @@ try {
     gleich(problems.length, 1, `refused (${problems.join(', ')})`)
     gleich(def.provider, null, 'nothing taken over')
   })
+  // ---- the branch rule: one table, three consumers ----
+  await pruefe('the sentence the agent reads comes from BRANCH_MODE_INFO, per merge mode', () => {
+    const rule = (mode, opts) => rd.branchRuleText(mode, opts)
+    // With the integration switched off these three are BYTE FOR BYTE the
+    // sentences that used to be an inline ternary in runner.mjs. If one of them
+    // changes, every prompt of every non-integrating repo changes with it.
+    gleich(rule('keiner', { hubMerges: false }),
+      'No branch — the worktree is detached; changes are throwaway changes.', 'no branch, off')
+    gleich(rule('neu', { branch: 'agent/x', hubMerges: false }),
+      'Create a new branch, name following the pattern agent/x.', 'new branch, off')
+    gleich(rule('fest', { branch: 'long-lived', hubMerges: false }),
+      'Work on the existing branch long-lived.', 'existing branch, off')
+
+    // Under 'hub' the same three say what really happens.
+    enthaelt(rule('keiner', { base: 'main', hubMerges: true }), 'cc-hub merges your commits into main',
+      'no branch under hub does NOT promise throwaway work')
+    falsch(rule('keiner', { base: 'main', hubMerges: true }).includes('throwaway'), 'no leftover promise')
+    enthaelt(rule('neu', { branch: 'b', base: 'trunk', hubMerges: true }), 'merges it into trunk', 'the repo\'s own base branch')
+    enthaelt(rule('fest', { branch: 'b', base: 'main', hubMerges: true }), 'merges it into main', 'existing branch under hub')
+  })
+
+  await pruefe('"keep on branch" only exists where there IS a branch to keep it on', () => {
+    const keep = { base: 'main', hubMerges: true, keepOnBranch: true }
+    enthaelt(rd.branchRuleText('neu', { ...keep, branch: 'b' }), 'STAYS on that branch', 'new branch')
+    enthaelt(rd.branchRuleText('fest', { ...keep, branch: 'b' }), 'will not merge it into main', 'existing branch')
+    // 'keiner' has no keep sentence — it falls back to the ordinary hub one
+    // rather than promising something it cannot do.
+    gleich(rd.branchRuleText('keiner', keep), rd.branchRuleText('keiner', { base: 'main', hubMerges: true }),
+      'no branch: the hub sentence, never a keep sentence')
+    // And keep is ignored where the hub does not integrate at all.
+    gleich(rd.branchRuleText('neu', { branch: 'b', hubMerges: false, keepOnBranch: true }),
+      'Create a new branch, name following the pattern b.', 'off outranks keep')
+  })
+
+  await pruefe('every explanation the table names really exists in lang/en.json', async () => {
+    const { _catalogs } = await import('../server/i18n.mjs')
+    const en = _catalogs().en
+    for (const [mode, info] of Object.entries(rd.BRANCH_MODE_INFO)) {
+      wahr(typeof en[info.label] === 'string' && en[info.label], `${mode}: label key ${info.label}`)
+      for (const modus of ['off', 'hub']) {
+        const key = info.explain[modus]
+        wahr(typeof en[key] === 'string' && en[key], `${mode}/${modus}: explain key ${key}`)
+      }
+      wahr(!!info.rule.off && !!info.rule.hub, `${mode}: both agent sentences`)
+    }
+    // The two that carry {base} in the UI have to keep saying it.
+    enthaelt(en['branch.keep'], '{base}', 'the checkbox names the branch it will NOT merge into')
+  })
+
+  await pruefe('keeping the work on a branch needs a branch', async () => {
+    const p1 = []
+    const def1 = await rd.runDefFromForm({ harness: 'claude', prompt: 'x', branch_mode: 'keiner', keep_on_branch: '1' }, p1)
+    gleich(p1.length, 1, `refused (${p1.join(', ')})`)
+    gleich(def1.keepOnBranch, 1, 'the value is still reported back, so the form can show it ticked')
+    const p2 = []
+    const def2 = await rd.runDefFromForm({ harness: 'claude', prompt: 'x', branch_mode: 'neu', branch_pattern: 'b', keep_on_branch: '1' }, p2)
+    gleich(p2.length, 0, `accepted with a branch (${p2.join(', ')})`)
+    gleich(def2.keepOnBranch, 1, 'and taken over')
+    const p3 = []
+    const def3 = await rd.runDefFromForm({ harness: 'claude', prompt: 'x', branch_mode: 'neu', branch_pattern: 'b' }, p3)
+    gleich(def3.keepOnBranch, 0, 'an unticked checkbox is simply absent — and that is the default')
+  })
+
+  await pruefe('keep_on_branch goes the whole way a run definition field goes', async () => {
+    const agentRow = {
+      harness: 'claude', prompt: 'p', branch_mode: 'fest', branch_pattern: 'long-lived',
+      keep_on_branch: 1, expected_minutes: 20,
+    }
+    gleich(rd.defFromAgent(agentRow).keepOnBranch, 1, 'agent row → definition')
+    gleich(rd.defFromAgent({ ...agentRow, keep_on_branch: 0 }).keepOnBranch, 0, 'and back off again')
+    // saveAgent writes it, defFromAgent reads it back: the round trip a stored
+    // agent takes every time it starts.
+    const id = rd.saveAgent({ repoId: 1, name: `keep-${Date.now()}`, def: await rd.runDefFromForm({
+      harness: 'claude', prompt: 'p', branch_mode: 'fest', branch_pattern: 'long-lived', keep_on_branch: '1',
+    }, []) })
+    const { default: db2 } = await import('../server/db.mjs')
+    const zurueck = db2.prepare('SELECT * FROM agents WHERE id=?').get(id)
+    gleich(zurueck.keep_on_branch, 1, 'stored')
+    gleich(rd.defFromAgent(zurueck).keepOnBranch, 1, 'and read back as the same definition')
+    // The flow designer offers it too, or a flow-started run could never keep.
+    const feld = rd.RUN_DEF_FLOW_FIELDS.find(f => f.key === 'keepOnBranch')
+    wahr(!!feld, 'the flow step has the field')
+    gleich(feld.kind, 'checkbox', 'as a checkbox')
+    gleich(rd.defFromFlowProps({ harness: 'claude', prompt: 'p', branchMode: 'neu', branchPattern: 'b', keepOnBranch: true }).keepOnBranch, 1,
+      'a flow can keep the work on its branch')
+    gleich(rd.defFromFlowProps({ harness: 'claude', prompt: 'p', branchMode: 'keiner', keepOnBranch: true }).keepOnBranch, 0,
+      'but not without a branch — the same rule the form enforces')
+  })
+
   await pruefe('agent row and definition describe the same thing', () => {
     const def = rd.defFromAgent({
       harness: 'claude', model: 'm', provider: null, or_provider: null, effort: 'high',

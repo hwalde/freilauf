@@ -9,6 +9,8 @@ import { startWatcher, stopWatcher, verwaisteLaeufeAbschliessen } from './watche
 import { startIntegrator, stopIntegrator } from './integrate.mjs'
 import { getSetting } from './db.mjs'
 import { seedIfEmpty } from './coding-agents.mjs'
+import { subscriptionUsage } from './usage.mjs'
+import { providerBalances } from './balances.mjs'
 import { setLanguage } from './i18n.mjs'
 
 // UI language (default English) and, on a fresh installation, the optional
@@ -37,6 +39,14 @@ server.listen(PORT, HOST, () => {
   // setting of this process — it is cchub-vpn.service, which deliberately does
   // not start on its own (fail-closed) and is switched with `cchub on|off`.
   console.log(`[cc-hub] pipeline=${getSetting('pipeline_on') === '1' ? 'on' : 'off'} (from the DB)`)
+  // Warm the two panels the status sidebar is built from, before a browser can
+  // ask for them. Both are stale-while-revalidate now (usage.mjs), so the ONLY
+  // request that can still wait on a vendor's API is the one that finds no
+  // cached answer at all — which, without this, is the first page view after
+  // every restart. Fire and forget: a start must never hang on somebody else's
+  // server, and a failure here simply leaves the panel to the next caller.
+  subscriptionUsage().catch(() => {})
+  providerBalances().catch(() => {})
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

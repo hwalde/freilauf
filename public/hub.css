@@ -375,6 +375,41 @@ form.form-grid fieldset { border-radius: var(--radius-8); }
 form.form-grid details.goal { margin: var(--sp-12) 0; }
 form.form-grid details.goal > summary { cursor: pointer; color: var(--accent-act-hover); }
 form.form-grid .btn-row { margin-top: var(--sp-16); }
+
+/* ---- the branch rule: a choice that explains itself ----------------------
+   Cards under one another rather than a <select>, because under merge_mode
+   'hub' the three words no longer say what they mean: the hub merges every run
+   either way and the rule only decides under which NAME the work travels. Both
+   explanations are in the markup; `data-merge-mode` on the fieldset decides
+   which one is visible, so the static case needs no JavaScript at all and the
+   one form that can switch repo in place only flips an attribute.
+
+   The :not([hidden]) chain is the same guard the grid rules above carry: these
+   labels sit inside a .form-grid form, and without it a hidden pattern field
+   would be brought back by the grid rule — visible AND submitted. */
+fieldset.branch-choice { display: block; }
+fieldset.branch-choice > legend { padding: 0 var(--sp-6); }
+fieldset.branch-choice label.choice:not([hidden]) {
+  display: grid; grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-8); align-items: baseline;
+  margin: var(--sp-4) 0; padding: var(--sp-8) var(--sp-10);
+  border-radius: var(--radius-8); cursor: pointer;
+}
+fieldset.branch-choice label.choice:hover { background: var(--surface-card); }
+fieldset.branch-choice label.choice > input { grid-row: 1 / span 2; }
+fieldset.branch-choice label.choice > small { grid-column: 2; }
+/* Which explanation belongs to this repo. Both directions are spelled out: a
+   fieldset without the attribute would otherwise show both at once. */
+fieldset.branch-choice[data-merge-mode="off"] [data-explain="hub"],
+fieldset.branch-choice[data-merge-mode="hub"] [data-explain="off"] { display: none; }
+/* "Keep on branch" only means something where the hub integrates. The server
+   also sets `hidden`, so the field is gone without this stylesheet too. */
+fieldset.branch-choice[data-merge-mode="off"] [data-hub-only] { display: none; }
+fieldset.branch-choice [data-hub-only] > small { display: block; margin-left: var(--sp-24); }
+form.form-grid fieldset.branch-choice label:not(.chk):not(.choice):not([hidden]) {
+  display: grid; grid-template-columns: 13em minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-12); align-items: center; margin: var(--sp-10) 0;
+}
 /* Narrow: a 13em caption column and a field next to it do not both fit, so the
    caption goes back above its field. */
 @media (max-width: 700px) {

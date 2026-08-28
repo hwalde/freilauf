@@ -33,7 +33,10 @@ CREATE TABLE IF NOT EXISTS repos (
 CREATE TABLE IF NOT EXISTS agents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
-  name TEXT NOT NULL UNIQUE,
+  -- Unique per REPO, not per hub: two repos may each carry an agent called
+  -- "nightly". The one-time migration in agentNameUniquePerRepo() rebuilds
+  -- existing databases, which still carry the old global UNIQUE on name.
+  name TEXT NOT NULL,
   harness TEXT NOT NULL CHECK(harness IN (${harnessIds().map(id => `'${id}'`).join(',')})),
   model TEXT,
   prompt TEXT NOT NULL,
@@ -43,7 +46,8 @@ CREATE TABLE IF NOT EXISTS agents (
   schedule TEXT,
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(repo_id, name)
 );
 -- Favoriten: die SETUP-Hälfte einer Laufdefinition unter einem Namen (Coding Agent,
 -- Provider, Modell, Effort, Extra-Skills, angehängte Flows). Bewusst OHNE Prompt,
@@ -168,6 +172,11 @@ addColumn('runs', 'goal_sent_at', 'TEXT')
 // see server/flows/attach.mjs. The run carries the definition copy as usual, so
 // editing an agent never changes what an already running run will trigger.
 addColumn('agents', 'flows', 'TEXT')
+// Keep the work on its branch instead of merging it into the base branch — only
+// meaningful while the repo integrates (repos.merge_mode='hub'), stored either
+// way, like every other field of the run definition.
+addColumn('agents', 'keep_on_branch', 'INTEGER NOT NULL DEFAULT 0')
+addColumn('runs', 'keep_on_branch', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('runs', 'flows', 'TEXT')
 // The run's title — what the overview and the detail page name it. An agent run
 // takes the agent's name, a single run the operator's input or a title derived
@@ -237,22 +246,30 @@ function harnessCheckErweitern() {
   }
   const have = [...m[1].matchAll(/'([^']*)'/g)].map(x => x[1])
   if (have.length === wanted.length && wanted.every(id => have.includes(id))) return   // already current
-  const spalten = db.prepare(`PRAGMA table_info(agents)`).all().map(c => `"${c.name}"`).join(',')
   const neuSql = sql
     .replace(m[0], `harness IN (${wanted.map(id => `'${id}'`).join(',')})`)
     .replace(/CREATE TABLE (IF NOT EXISTS )?["'`]?agents["'`]?/i, 'CREATE TABLE agents_neu')
 
-  // PRAGMA foreign_keys has no effect inside a transaction — set it beforehand.
-  // runs.agent_id points to agents(id); without turning it off, the DROP trips over that.
+  tabelleUmziehen(neuSql)
+  console.log(`[db] agents.harness: CHECK rebuilt for (${harnessIds().join(', ')})`)
+}
+
+/**
+ * The table-rebuild dance both migrations below share. PRAGMA foreign_keys has
+ * no effect inside a transaction — set it beforehand. runs.agent_id points to
+ * agents(id); without turning it off, the DROP trips over that. Copying goes
+ * column-wise by NAME from the live table, so the column order does not matter.
+ */
+function tabelleUmziehen(neuSql) {
   db.exec('PRAGMA foreign_keys = OFF')
   try {
     db.exec('BEGIN')
     db.exec(neuSql)
+    const spalten = db.prepare(`PRAGMA table_info(agents)`).all().map(c => `"${c.name}"`).join(',')
     db.exec(`INSERT INTO agents_neu(${spalten}) SELECT ${spalten} FROM agents`)
     db.exec('DROP TABLE agents')
     db.exec('ALTER TABLE agents_neu RENAME TO agents')
     db.exec('COMMIT')
-    console.log(`[db] agents.harness: CHECK rebuilt for (${harnessIds().join(', ')})`)
   } catch (err) {
     try { db.exec('ROLLBACK') } catch { /* already rolled back */ }
     throw err
@@ -260,7 +277,40 @@ function harnessCheckErweitern() {
     db.exec('PRAGMA foreign_keys = ON')
   }
 }
+
+/**
+ * Agent names are unique per REPO, not per hub (the CREATE TABLE above carries
+ * UNIQUE(repo_id, name)); databases created before that change still hold a
+ * column-level UNIQUE on name. SQLite cannot drop such a UNIQUE — so rebuild
+ * once, with the same care as harnessCheckErweitern(). Idempotent: a fresh
+ * database already has the new rule and nothing happens.
+ */
+function agentNameUniquePerRepo() {
+  const sql = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'`).get()?.sql
+  if (!sql) return
+  if (/UNIQUE\s*\(\s*repo_id\s*,\s*name\s*\)/i.test(sql)) return   // already per-repo
+  const columnLevel = /name\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i.test(sql)
+  const tableLevel = /UNIQUE\s*\(\s*name\s*\)/i.test(sql)
+  if (!columnLevel && !tableLevel) {
+    // Unexpected shape: better touch nothing than rebuild a table blindly.
+    console.warn('[db] agents.name: UNIQUE rule not recognized — no rebuild')
+    return
+  }
+  let neu = sql
+    .replace(/name\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i, 'name TEXT NOT NULL')
+    .replace(/UNIQUE\s*\(\s*name\s*\)/i, 'UNIQUE(repo_id, name)')
+  // The column-level case leaves no table-level constraint behind — add one
+  // in front of the closing parenthesis (keeping any trailing semicolon).
+  if (!/UNIQUE\s*\(\s*repo_id\s*,\s*name\s*\)/i.test(neu)) {
+    neu = neu.replace(/\)(\s*;?\s*)$/, ', UNIQUE(repo_id, name))$1')
+  }
+  neu = neu.replace(/CREATE TABLE (IF NOT EXISTS )?["'`]?agents["'`]?/i, 'CREATE TABLE agents_neu')
+
+  tabelleUmziehen(neu)
+  console.log('[db] agents.name: UNIQUE rebuilt per repo (repo_id, name)')
+}
 harnessCheckErweitern()
+agentNameUniquePerRepo()
 
 // Existing agents with a cron expression keep their behavior.
 db.exec(`UPDATE agents SET schedule_kind='cron'

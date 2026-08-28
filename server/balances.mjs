@@ -47,8 +47,9 @@ export async function providerBalances({ force = false } = {}) {
   // the enabled coding agents: the selection decides who is asked, so changing
   // it does not make the answer old, it makes it about something else.
   const key = relevantProviderIds().join(',')
-  if (!force && cache.value && cache.key === key && Date.now() - cache.at < CACHE_MS) return cache.value
-  if (inflight && inflight.key === key) return inflight.promise
+  const cached = cache.value && cache.key === key ? cache.value : null
+  if (!force && cached && Date.now() - cache.at < CACHE_MS) return cached
+  if (inflight && inflight.key === key) return !force && cached ? cached : inflight.promise
   const task = (async () => {
     const ctx = providerCtx()
     const out = []
@@ -68,6 +69,9 @@ export async function providerBalances({ force = false } = {}) {
   inflight = { key, promise: task }
   const release = () => { if (inflight?.promise === task) inflight = null }
   task.then(release, release)
+  // Stale-while-revalidate — same rule and same reason as usage.mjs: this is
+  // awaited by layout() on every page, and it reaches two vendors' APIs.
+  if (!force && cached) return cached
   return task
 }
 
@@ -80,6 +84,9 @@ export function remainingIn(balance, currency = 'USD') {
   const amount = (balance?.amounts ?? []).find(a => a.currency === currency)
   return amount?.remaining ?? null
 }
+
+/** Test hook: let the cache age by `ms`, so staleness can be tested without waiting. */
+export function _balanceCacheAge(ms) { cache.at -= ms }
 
 /** Test hook: drop the cache. */
 export function _balanceCacheReset() { cache = { at: 0, key: '', value: null }; inflight = null }

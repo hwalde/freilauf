@@ -35,7 +35,89 @@ import { t } from './i18n.mjs'
 /** 'keiner' = detached worktree, 'neu' = create a branch, 'fest' = use an existing one. */
 export const BRANCH_MODES = ['keiner', 'neu', 'fest']
 
-const branchLabel = (m) => m === 'neu' ? t('branch.new') : m === 'fest' ? t('branch.fixed') : t('branch.none')
+/**
+ * What each branch rule MEANS — one table, three consumers.
+ *
+ * The branch rule stopped being a yes/no about whether work reaches the base
+ * branch the day the hub started integrating: under `merge_mode='hub'` the hub
+ * merges every run, and the rule only decides under which NAME the work travels.
+ * The form said none of that, and the prompt sentence for "no branch" still
+ * promised "throwaway changes" — in the same prompt where MERGE_RULE promised
+ * the opposite.
+ *
+ * So: the label, the explanation the form shows (per merge mode) and the
+ * sentence the AGENT reads all come from here. Three copies of the same
+ * statement is exactly the drift this module exists to prevent — and a
+ * unit test checks that every `explain` key really exists in lang/en.json,
+ * because a table may not name a string that is not there.
+ *
+ * `explain` values are i18n keys (UI, translated). `rule` values are English
+ * constants (they go to an agent, like PLATFORM_RULES in runner.mjs) with
+ * `{branch}` and `{base}` placeholders. The three `off` sentences are BYTE FOR
+ * BYTE the ones that were inline in runner.mjs: with the integration switched
+ * off, not one prompt may change.
+ */
+export const BRANCH_MODE_INFO = {
+  keiner: {
+    label: 'branch.none',
+    explain: { off: 'branch.none.explain_off', hub: 'branch.none.explain_hub' },
+    rule: {
+      off: 'No branch — the worktree is detached; changes are throwaway changes.',
+      hub: 'No branch — the worktree is detached; cc-hub merges your commits into {base} when you report done.',
+      // Deliberately no 'keep': there is no branch to keep the work on.
+    },
+  },
+  neu: {
+    label: 'branch.new',
+    explain: { off: 'branch.new.explain_off', hub: 'branch.new.explain_hub' },
+    rule: {
+      off: 'Create a new branch, name following the pattern {branch}.',
+      hub: 'Create a new branch, name following the pattern {branch}; cc-hub merges it into {base} when you report done.',
+      keep: 'Create a new branch, name following the pattern {branch}. The work STAYS on that branch: cc-hub will not merge it into {base}. Commit everything and push the branch before you report done.',
+    },
+  },
+  fest: {
+    label: 'branch.fixed',
+    explain: { off: 'branch.fixed.explain_off', hub: 'branch.fixed.explain_hub' },
+    rule: {
+      off: 'Work on the existing branch {branch}.',
+      hub: 'Work on the existing branch {branch}; cc-hub merges it into {base} when you report done.',
+      keep: 'Work on the existing branch {branch}. The work STAYS on that branch: cc-hub will not merge it into {base}. Commit everything and push the branch before you report done.',
+    },
+  },
+}
+
+const branchLabel = (m) => t(BRANCH_MODE_INFO[m]?.label ?? 'branch.none')
+
+/**
+ * The sentence the agent reads about its branch — the one place that decides it.
+ * `keep` only exists where there is a branch to keep the work on, so 'keiner'
+ * falls back to the ordinary hub sentence rather than promising something it
+ * cannot do.
+ */
+export function branchRuleText(mode, { branch = '', base = 'main', hubMerges = false, keepOnBranch = false } = {}) {
+  const info = BRANCH_MODE_INFO[mode] ?? BRANCH_MODE_INFO.keiner
+  const wanted = !hubMerges ? 'off' : (keepOnBranch && info.rule.keep) ? 'keep' : 'hub'
+  return info.rule[wanted].replaceAll('{branch}', branch).replaceAll('{base}', base)
+}
+
+/**
+ * The repo context a branch choice needs: which mode THIS repo integrates in,
+ * its base branch — and the same for every repo, because one form can switch
+ * repo without a page rebuild (the Quick-Run dialog has a repo <select>; the
+ * header switcher reloads and needs none of this).
+ */
+export function branchContext(repoId = null) {
+  const repos = db.prepare('SELECT id, merge_mode, base_branch FROM repos ORDER BY name').all()
+  const modeOf = (r) => r?.merge_mode === 'hub' ? 'hub' : 'off'
+  const here = repos.find(r => r.id === Number(repoId)) ?? repos[0] ?? null
+  return {
+    mergeMode: modeOf(here),
+    base: here?.base_branch || 'main',
+    modes: Object.fromEntries(repos.map(r => [r.id, modeOf(r)])),
+    bases: Object.fromEntries(repos.map(r => [r.id, r.base_branch || 'main'])),
+  }
+}
 
 export const DEFAULT_EXPECTED_MINUTES = 45
 
@@ -101,16 +183,63 @@ export function runSetupFields(a = {}) {
 }
 
 /**
- * The branch rule as form fields — used by both run forms and by the Quick-Run
- * dialog, which is the one place where a favorite's setup meets a task.
- * `data-branch-mode` lets hub.js hide the pattern where "no branch" is chosen.
+ * The base branch inside an explanation, as an element rather than as text.
+ *
+ * The Quick-Run dialog can switch repo without rebuilding the page, and a repo
+ * brings its own base branch — so a sentence reading "merges into main" has to
+ * be able to become "merges into trunk" in place. The interpolation therefore
+ * puts a marker in and this turns the marker into a span hub.js can rewrite.
+ * Everything around it is escaped first; the span is the only markup that gets
+ * through.
  */
-export function branchFields(a = {}) {
+const BASE_MARK = '\u0001base\u0001'
+function explainHtml(key, base) {
+  return e(t(key, { base: BASE_MARK })).replaceAll(BASE_MARK, `<span data-base>${e(base)}</span>`)
+}
+
+/**
+ * The branch rule as form fields — the ONE place it is rendered: the agent form,
+ * the single-run form and the Quick-Run dialog all embed this and nothing else.
+ *
+ * A radio group with a line of explanation per option, because under
+ * `merge_mode='hub'` the choice no longer means what its three words say: the
+ * hub merges every run either way, and the rule only decides under which name
+ * the work travels. BOTH explanations are rendered and CSS shows the one that
+ * fits `data-merge-mode` — so the static case needs no JavaScript at all, and
+ * the one form that can switch repo in place (Quick Run) only has to flip an
+ * attribute.
+ *
+ * `name="branch_mode"` and its three values are unchanged, so runDefFromForm()
+ * does not know the difference between a <select> and these radios.
+ */
+export function branchFields(a = {}, ctx = {}) {
+  const mode = BRANCH_MODES.includes(a.branch_mode) ? a.branch_mode : 'keiner'
+  const mergeMode = ctx.mergeMode === 'hub' ? 'hub' : 'off'
+  const base = ctx.base || 'main'
+  const keep = !!(a.keep_on_branch ?? a.keepOnBranch)
+  const wahl = (m) => {
+    const info = BRANCH_MODE_INFO[m]
+    return `
+    <label class="choice"><input type="radio" name="branch_mode" value="${m}" ${mode === m ? 'checked' : ''}>
+      <b>${e(branchLabel(m))}</b>
+      <small class="dim" data-explain="off">${explainHtml(info.explain.off, base)}</small>
+      <small class="dim" data-explain="hub">${explainHtml(info.explain.hub, base)}</small></label>`
+  }
+  // The checkbox carries `hidden` from the server as well as the CSS rule: a
+  // field that only CSS hides is a field that shows up when the stylesheet does
+  // not load, and one that is hidden but still submits is worse than either.
   return `
-  <label>${e(t('runform.branch_mode'))} <select name="branch_mode" data-branch-mode>
-    ${BRANCH_MODES.map(m => `<option value="${m}" ${a.branch_mode === m ? 'selected' : ''}>${e(branchLabel(m))}</option>`).join('')}
-  </select></label>
-  <label data-branch-pattern>${e(t('runform.branch_pattern'))} <input name="branch_pattern" value="${e(a.branch_pattern ?? '')}" placeholder="${e(t('runform.branch_pattern_ph'))}"></label>`
+  <fieldset class="branch-choice" data-branch-choice data-merge-mode="${mergeMode}"
+            data-merge-modes="${e(JSON.stringify(ctx.modes ?? {}))}"
+            data-merge-bases="${e(JSON.stringify(ctx.bases ?? {}))}">
+    <legend>${e(t('runform.branch_rule'))}</legend>
+    ${BRANCH_MODES.map(wahl).join('')}
+    <label data-branch-pattern>${e(t('runform.branch_pattern'))} <input name="branch_pattern" value="${e(a.branch_pattern ?? '')}" placeholder="${e(t('runform.branch_pattern_ph'))}"></label>
+    <label class="chk" data-hub-only ${mergeMode === 'hub' ? '' : 'hidden'}>
+      <input type="checkbox" name="keep_on_branch" value="1" ${keep ? 'checked' : ''}>
+      ${explainHtml('branch.keep', base)}
+      <small class="dim">${e(t('branch.keep.hint'))}</small></label>
+  </fieldset>`
 }
 
 /**
@@ -151,12 +280,12 @@ export function goalFields(a = {}) {
  * The definition as form fields — embedded IDENTICALLY by the agent form and
  * the single-run form. `a` is an agent row, a remembered choice or {}.
  */
-export function runDefFields(a = {}) {
+export function runDefFields(a = {}, ctx = {}) {
   return `
   ${runSetupFields(a)}
   <label>${e(t('runform.prompt'))} <textarea name="prompt" rows="10" required>${e(a.prompt ?? '')}</textarea></label>
   ${goalFields(a)}
-  ${branchFields(a)}
+  ${branchFields(a, ctx)}
   <label>${e(t('runform.expected'))} <input type="number" name="expected_minutes" min="1" value="${a.expected_minutes ?? DEFAULT_EXPECTED_MINUTES}"></label>
   ${skillFelder(a.skills)}
   ${flowAttachFields(a.flows)}`
@@ -284,12 +413,18 @@ export async function runDefFromForm(b, problems = []) {
   if (!BRANCH_MODES.includes(branchMode)) problems.push(t('form.branch_mode_unknown', { mode: branchMode }))
   if (branchMode !== 'keiner' && !b.branch_pattern?.trim()) problems.push(t('form.branch_missing'))
   if (branchMode === 'fest') await fixedBranchProblem(b, problems)
+  // Keeping the work on a branch needs a branch. Checked here rather than
+  // silently ignored, because "the checkbox did nothing" is the kind of thing
+  // one only notices three runs later.
+  const keepOnBranch = b.keep_on_branch === '1' || b.keep_on_branch === 'on' ? 1 : 0
+  if (keepOnBranch && branchMode === 'keiner') problems.push(t('form.keep_needs_branch'))
   return {
     ...setup,
     prompt,
     goal: goalFromForm(b, problems),
     branchMode,
     branchPattern: b.branch_pattern?.trim() || null,
+    keepOnBranch,
     expectedMinutes: +b.expected_minutes || DEFAULT_EXPECTED_MINUTES,
     skills: skillsAusFormular(b),
     flows: attachmentsFromForm(b),
@@ -350,6 +485,7 @@ export function defFromAgent(agent) {
     goal: agent.goal ?? null,
     branchMode: agent.branch_mode,
     branchPattern: agent.branch_pattern ?? null,
+    keepOnBranch: agent.keep_on_branch ? 1 : 0,
     expectedMinutes: agent.expected_minutes,
     skills: agent.skills ?? null,
     flows: agent.flows ?? null,
@@ -367,23 +503,75 @@ export function saveAgent({ id = null, repoId, name, def, schedule = null, activ
     // A single UPDATE — before, 'active' was first set to 1 and then derived
     // again from exactly that freshly written value.
     db.prepare(`UPDATE agents SET name=?, harness=?, model=?, prompt=?, goal=?, branch_mode=?, branch_pattern=?,
-                expected_minutes=?, schedule=?, schedule_kind=?, schedule_days=?, schedule_time=?,
+                keep_on_branch=?, expected_minutes=?, schedule=?, schedule_kind=?, schedule_days=?, schedule_time=?,
                 schedule_weeks=?, schedule_anchor=?, run_at=?, provider=?, or_provider=?, effort=?,
                 skills=?, flows=?, active=?, updated_at=datetime('now') WHERE id=?`).run(
       name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode, def.branchPattern,
+      def.keepOnBranch ? 1 : 0,
       def.expectedMinutes, zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
       def.provider, def.orProvider, def.effort, def.skills, def.flows ?? null, active, id)
     return id
   }
-  const r = db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,goal,branch_mode,branch_pattern,expected_minutes,
+  const r = db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,goal,branch_mode,branch_pattern,keep_on_branch,expected_minutes,
               schedule,schedule_kind,schedule_days,schedule_time,schedule_weeks,schedule_anchor,run_at,
               provider,or_provider,effort,skills,flows,active)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     repoId, name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode,
-    def.branchPattern, def.expectedMinutes,
+    def.branchPattern, def.keepOnBranch ? 1 : 0, def.expectedMinutes,
     zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
     def.provider, def.orProvider, def.effort, def.skills, def.flows ?? null, active)
   return Number(r.lastInsertRowid)
+}
+
+// ------------------------------------------------------- agent lifecycle
+
+/**
+ * Whether a name is already used in a repo — the check the agents table now
+ * enforces itself (`UNIQUE(repo_id, name)`). The form reports this as a
+ * readable problem instead of letting SQLite's constraint surface as a 500.
+ */
+export function agentNameTaken(repoId, name, excludeId = null) {
+  return excludeId
+    ? !!db.prepare('SELECT id FROM agents WHERE repo_id=? AND name=? AND id<>?').get(repoId, name, excludeId)
+    : !!db.prepare('SELECT id FROM agents WHERE repo_id=? AND name=?').get(repoId, name)
+}
+
+/**
+ * The datetime suffix for a name collision on move: `2026-08-27-143055`
+ * (UTC, second precision — the while-loop in moveAgent makes even two moves
+ * in the same second distinct).
+ */
+export function moveSuffix(now = new Date()) {
+  return now.toISOString().slice(0, 19).replace('T', '-').replace(/:/g, '')
+}
+
+/**
+ * Move an agent to another repo. The name must stay unique THERE, so a
+ * collision appends the datetime suffix — the one place that decides this,
+ * so the form handler and the tests judge the same code.
+ * Returns { ok, name?, repoId? } or { ok:false, error }.
+ */
+export function moveAgent(id, targetRepoId) {
+  const agent = db.prepare('SELECT * FROM agents WHERE id=?').get(id)
+  if (!agent) return { ok: false, error: t('agents.not_found') }
+  const target = db.prepare('SELECT id FROM repos WHERE id=?').get(targetRepoId)
+  if (!target) return { ok: false, error: t('agents.move_bad_repo') }
+  if (targetRepoId === agent.repo_id) return { ok: false, error: t('agents.move_same_repo') }
+  let name = agent.name
+  while (agentNameTaken(targetRepoId, name, id)) name = `${agent.name}-${moveSuffix()}`
+  db.prepare(`UPDATE agents SET repo_id=?, name=?, updated_at=datetime('now') WHERE id=?`)
+    .run(targetRepoId, name, id)
+  return { ok: true, name, repoId: targetRepoId }
+}
+
+/**
+ * Delete an agent. Its past runs survive: the run carries the definition copy
+ * (title, prompt, harness, …) and only the reference is cut first, so the
+ * delete stays clean even with foreign keys enabled.
+ */
+export function deleteAgent(id) {
+  db.prepare('UPDATE runs SET agent_id=NULL WHERE agent_id=?').run(id)
+  db.prepare('DELETE FROM agents WHERE id=?').run(id)
 }
 
 // ----------------------------------- single run only: title and planned start
@@ -568,6 +756,7 @@ export const RUN_DEF_FLOW_FIELDS = [
   { key: 'goal', kind: 'textarea', placeholder: 'all tests pass and the branch is pushed' },
   { key: 'branchMode', kind: 'select', options: BRANCH_MODES, default: 'keiner' },
   { key: 'branchPattern', kind: 'text', placeholder: 'flow/{date}-{kurz}' },
+  { key: 'keepOnBranch', kind: 'checkbox', default: false },
   { key: 'expectedMinutes', kind: 'number', default: DEFAULT_EXPECTED_MINUTES },
 ]
 
@@ -586,6 +775,9 @@ export function defFromFlowProps(props) {
     goal: goalFromForm({ harness: props.harness, goal: props.goal }, []),
     branchMode: props.branchMode || 'keiner',
     branchPattern: props.branchPattern || null,
+    // Only where there is a branch to keep the work on — the same rule the form
+    // enforces, so a flow cannot store a combination the form would refuse.
+    keepOnBranch: props.keepOnBranch && props.branchMode !== 'keiner' ? 1 : 0,
     expectedMinutes: Number(props.expectedMinutes) || DEFAULT_EXPECTED_MINUTES,
     skills: null,
     // Deliberately no attached flows: a run a flow starts must not start flows
