@@ -600,6 +600,26 @@ try {
     await p.close()
   })
 
+  await pruefe('the trigger editor: "run merged" asks for a repo, the other kinds do not', async () => {
+    // The root editor is the one panel of the designer that is ours from top to
+    // bottom, and its newest branch is a select that appears only for one
+    // trigger kind. That is the silent breakage this suite exists for: no
+    // exception, just a filter nobody can set.
+    const p = await neueSeite(`/flows/edit?id=${FLOWID}`)
+    await p.waitForSelector('#trigger-kind', { timeout: 10_000 })
+    falsch(await p.$('#trigger-repo'), 'a "run finished" flow shows the agent list, not a repo')
+    await p.selectOption('#trigger-kind', 'run_merged')
+    await p.waitForSelector('#trigger-repo', { timeout: 10_000 })
+    const optionen = await p.$$eval('#trigger-repo option', o => o.map(x => x.textContent.trim()))
+    enthaelt(optionen.join('|'), 'all repos', 'the default is every repo')
+    enthaelt(optionen.join('|'), 'browser', 'and the repos of this hub are offered')
+    await p.selectOption('#trigger-repo', String(repoId))
+    await p.selectOption('#trigger-kind', 'cron')
+    falsch(await p.$('#trigger-repo'), 'a schedule has no repo filter — the block really goes away again')
+    sauber(p)
+    await p.close()
+  })
+
   // ------------------------------------------------------------------ A10
   gruppe('A10 — the cascade: coding agent → provider → model → effort')
 

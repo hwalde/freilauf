@@ -1379,6 +1379,177 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // The trigger that fires after a merge and the block that may run a command
+  // afterwards. Both were built for one sentence — "after every merge into this
+  // repo, restart the hub" — and both have exactly one place where they could
+  // silently do the wrong thing: firing twice for one integration, and treating
+  // a non-zero exit code as a broken step.
+  gruppe('Flows: the run_merged trigger and the shell_command block')
+  const { flowsForMerge, flowsTick } = await import('../server/flows/triggers.mjs')
+  const { STEPS } = await import('../server/flows/steps.mjs')
+  const rawdb = fdb.default
+
+  await pruefe('normalizeTrigger: run_merged carries a repo, or all of them', () => {
+    gleich(normalizeTrigger({ kind: 'run_merged', repoId: 4 }).repoId, 4, 'a repo id survives')
+    gleich(normalizeTrigger({ kind: 'run_merged', repoId: '4' }).repoId, 4, 'as a number, whatever the form sent')
+    gleich(normalizeTrigger({ kind: 'run_merged' }).repoId, null, 'nothing chosen = every repo')
+    gleich(normalizeTrigger({ kind: 'run_merged', repoId: 'nonsense' }).repoId, null, 'and so is nonsense')
+    gleich(normalizeTrigger({ kind: 'run_finished', repoId: 4 }).repoId, undefined, 'no other trigger carries one')
+  })
+  await pruefe('flowsForMerge: the filter is the repo, not an attachment', () => {
+    const flows = [
+      { id: 1, name: 'this repo', active: 1, trigger: { kind: 'run_merged', repoId: 7 } },
+      { id: 2, name: 'every repo', active: 1, trigger: { kind: 'run_merged' } },
+      { id: 3, name: 'other repo', active: 1, trigger: { kind: 'run_merged', repoId: 8 } },
+      { id: 4, name: 'switched off', active: 0, trigger: { kind: 'run_merged' } },
+      { id: 5, name: 'run finished', active: 1, trigger: { kind: 'run_finished' } },
+    ]
+    gleich(flowsForMerge({ repo_id: 7, flows: null }, flows).map(f => f.id).join(','), '1,2',
+      'its own repo and "all repos" — and no attachment anywhere in sight')
+    gleich(flowsForMerge({ repo_id: 8 }, flows).map(f => f.id).join(','), '2,3', 'another repo sees its own')
+    gleich(flowsForMerge({ repo_id: 9 }, []).length, 0, 'no flows, no starts')
+  })
+  await pruefe('the merge is a variable only under its own trigger', () => {
+    const mdef = { sequence: [{ id: 'n1', type: 'note', properties: { text: 'x' } }] }
+    const scope = (kind) => vs.varsInScope(mdef, STEP_MAP, 'n1', { kind })
+    gleich(find(scope('run_merged'), 'trigger.merge.sha')?.type, 'string', 'the commit that landed')
+    gleich(find(scope('run_merged'), 'trigger.merge.files')?.type, 'string_list', 'the files it changed')
+    wahr(find(scope('run_merged'), 'trigger.run.merge_status')?.enum.includes('merged'), 'the run says how its merge went')
+    falsch(find(scope('cron'), 'trigger.merge'), 'a schedule has no merge')
+    falsch(find(scope('run_finished'), 'trigger.merge'), 'and neither has a finished run')
+    falsch(find(scope('run_merged'), 'trigger.run')?.conditional, 'a merge always has the run whose work landed')
+  })
+  await pruefe('shell_command: registry entry, defaults and the shape that depends on "detach"', () => {
+    const meta = STEP_MAP.shell_command
+    wahr(!!meta && meta.output && meta.group === 'data', 'in the registry, in the data group, with an output')
+    wahr(STEPS.some(s => s.type === 'shell_command'), 'and in the list the editor is built from')
+    const props = defaultProps('shell_command')
+    gleich(props.outputVar, 'shell', 'default output variable')
+    gleich(props.timeoutMinutes, 10, 'default timeout')
+    gleich(props.detach, false, 'not detached by default')
+    const step = (detach) => ({ id: 'sh', type: 'shell_command', properties: { ...props, command: 'true', detach } })
+    const shapeOf = (detach) => vs.shapePaths('vars.shell', vs.outputShapeOf(step(detach), meta)).map(p => p.path).join(',')
+    enthaelt(shapeOf(false), 'vars.shell.exit_code', 'not detached: the exit code is readable')
+    enthaelt(shapeOf(false), 'vars.shell.stdout', 'and the output')
+    falsch(shapeOf(true).includes('exit_code'), 'detached: there is no exit code to promise')
+    enthaelt(shapeOf(true), 'vars.shell.detached', 'only the fact that it was detached')
+    wahr(validateDefinition({ sequence: [{ id: 'sh', type: 'shell_command', properties: { ...props } }] })
+      .some(p => p.includes("'command' is required")), 'without a command it is not a step')
+  })
+  await pruefe('shell_command: templates, exit code as a result, detach as an immediate answer', async () => {
+    const seen = []
+    const shellApi = {
+      ...stubApi,
+      shell: async (args) => {
+        seen.push(args)
+        if (args.detach) return { ok: true, detached: true }
+        return { ok: false, exit_code: 3, stdout: 'out', stderr: 'err' }
+      },
+    }
+    const def = { sequence: [
+      step('shell_command', { command: 'echo {{trigger.run.id}}', cwd: '{{trigger.run.repo_path}}', timeoutMinutes: 2, detach: false, outputVar: 'shell' }),
+      step('condition', { left: '{{vars.shell.ok}}', op: 'falsy', right: '' }, { branches: {
+        true: [step('shell_command', { command: 'sleep 1; touch x', cwd: '', timeoutMinutes: 10, detach: true, outputVar: 'bg' })],
+        false: [step('note', { text: 'never' })],
+      } }),
+    ] }
+    const id = await engine.startFlowRun({ id: null, name: 'shelly', definition: def },
+      { kind: 'run_merged', run: { id: 'r1', repo_path: '/tmp/repo' }, merge: { sha: 'abc', files: ['a.txt'] } }, shellApi)
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'done', 'a command that exits 3 does NOT fail the flow run')
+    gleich(seen[0].command, 'echo r1', 'the command is a template')
+    gleich(seen[0].cwd, '/tmp/repo', 'and so is the working directory')
+    gleich(seen[0].timeoutMs, 120_000, 'minutes become milliseconds')
+    gleich(fr.context.vars.shell.exit_code, 3, 'the exit code is readable')
+    falsch(fr.context.vars.shell.ok, 'and says the command did not succeed')
+    wahr(fr.log.some(l => l.msg === 'exit 3'), 'the step log names it')
+    gleich(fr.context.vars.bg.detached, true, 'the detached command answers at once')
+    wahr(fr.log.some(l => l.msg === 'detached'), 'and says so')
+    falsch(fr.log.some(l => l.msg === 'never'), 'the branch really hung on the exit code')
+  })
+
+  // The dispatch, against the sandbox database: the five columns belong to the
+  // merge integrator and are not in this branch yet, so the test adds them the
+  // way it will find them later.
+  await pruefe('a merge fires its flows exactly once — the conflict run is marked, not fired', async () => {
+    for (const [name, typ] of [['merge_status', 'TEXT'], ['merged_sha', 'TEXT'], ['merged_at', 'TEXT'],
+      ['resolves_run_id', 'TEXT'], ['resolver_run_id', 'TEXT']]) {
+      if (!fdb.hasColumn('runs', name)) rawdb.exec(`ALTER TABLE runs ADD COLUMN ${name} ${typ}`)
+    }
+    rawdb.exec(`INSERT INTO repos(name, path, base_branch) VALUES('merge-repo', '/tmp/merge-repo', 'main')`)
+    const repoId = rawdb.prepare('SELECT id FROM repos WHERE name=?').get('merge-repo').id
+    const anlegen = (id, extra = {}) => {
+      rawdb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes,
+                     ended_at, flow_dispatched, merge_status, merged_sha, merged_at, resolves_run_id, resolver_run_id)
+                     VALUES(?,?,'done','claude','p','keiner',5,datetime('now'),1,?,?,datetime('now'),?,?)`)
+        .run(id, repoId, extra.merge_status ?? 'merged', extra.merged_sha ?? 'sha-1',
+          extra.resolves_run_id ?? null, extra.resolver_run_id ?? null)
+    }
+    const flowId = fdb.saveFlow({ name: 'after the merge', active: 1, trigger: { kind: 'run_merged', repoId },
+      definition: { sequence: [{ id: 'n', type: 'note', name: 'n', properties: { text: 'merged {{trigger.merge.sha}}' } }] } })
+    const fremd = fdb.saveFlow({ name: 'another repo', active: 1, trigger: { kind: 'run_merged', repoId: repoId + 999 },
+      definition: { sequence: [{ id: 'n', type: 'note', name: 'n', properties: { text: 'no' } }] } })
+
+    anlegen('merge-run-1', { resolver_run_id: 'conflict-run-1' })
+    rawdb.prepare(`INSERT INTO events(run_id, kind, payload) VALUES('merge-run-1','merged',?)`)
+      .run(JSON.stringify({ sha: 'sha-1', files: ['server/a.mjs', 'lang/en.json'] }))
+    await flowsTick(stubApi)
+    const runs1 = fdb.listFlowRuns(flowId)
+    gleich(runs1.length, 1, 'exactly one flow run')
+    gleich(fdb.listFlowRuns(fremd).length, 0, 'the flow of another repo stayed out of it')
+    const trig1 = runs1[0].context.trigger
+    gleich(trig1.kind, 'run_merged', 'trigger kind')
+    gleich(trig1.run.id, 'merge-run-1', 'with the run whose work landed')
+    gleich(trig1.merge.sha, 'sha-1', 'the commit')
+    gleich(trig1.merge.base, 'main', 'the branch it landed on')
+    gleich(trig1.merge.resolver_run_id, 'conflict-run-1', 'and the conflict run that made it mergeable')
+    gleich(trig1.merge.files.join(','), 'server/a.mjs,lang/en.json', 'the files out of the event')
+    wahr(runs1[0].log.some(l => l.msg === 'merged sha-1'), 'the step read the merge')
+    gleich(rawdb.prepare('SELECT merge_dispatched FROM runs WHERE id=?').get('merge-run-1').merge_dispatched, 1, 'marked')
+
+    await flowsTick(stubApi)
+    gleich(fdb.listFlowRuns(flowId).length, 1, 'a second pass starts nothing — the mark holds')
+
+    anlegen('conflict-run-1', { merged_sha: 'sha-1', resolves_run_id: 'merge-run-1' })
+    await flowsTick(stubApi)
+    gleich(fdb.listFlowRuns(flowId).length, 1, 'the conflict run merged the same work and starts no second flow run')
+    gleich(rawdb.prepare('SELECT merge_dispatched FROM runs WHERE id=?').get('conflict-run-1').merge_dispatched, 1,
+      'but it is marked, or the next pass would look at it again')
+
+    anlegen('merge-run-old', { merged_sha: 'sha-old' })
+    gleich(fdb.markExistingMergesDispatched(), 1, 'a merge that was there before this code counts as dispatched')
+    await flowsTick(stubApi)
+    gleich(fdb.listFlowRuns(flowId).length, 1, 'history is never replayed')
+  })
+  // The repo page's way in: a run_merged flow hangs on the repo, so the repo
+  // form has to be able to name it. Unlike the dispatch, this list deliberately
+  // includes the switched-off ones — it answers "what happens after a merge
+  // here", and "nothing, it is off" is part of that answer.
+  await pruefe('flowsForMergeOfRepo: this repo, all repos, and the switched-off ones too', () => {
+    const repoId = rawdb.prepare('SELECT id FROM repos WHERE name=?').get('merge-repo').id
+    const alle = fdb.saveFlow({ name: 'every repo', active: 0, trigger: { kind: 'run_merged' },
+      definition: { sequence: [] } })
+    const fremd = rawdb.prepare('SELECT id FROM flows WHERE name=?').get('another repo').id
+    const namen = fdb.flowsForMergeOfRepo(repoId).map(f => f.name).sort().join(',')
+    gleich(namen, 'after the merge,every repo', 'its own flow and the one watching every repo — the inactive one included')
+    wahr(fdb.flowsForMergeOfRepo(repoId).some(f => f.id === alle && !f.active), 'and it says that it is off')
+    falsch(fdb.flowsForMergeOfRepo(repoId).some(f => f.id === fremd), 'another repo\'s flow stays out')
+    gleich(fdb.flowsForMergeOfRepo(0).map(f => f.name).join(','), 'every repo', 'without a repo only the "all repos" flows')
+    gleich(fdb.mergeTriggerRepoId({ repoId: '4' }), 4, 'one rule for reading the filter')
+    gleich(fdb.mergeTriggerRepoId({}), null, 'and null means all of them')
+  })
+  await pruefe('a flow run the hub restart caught mid-step is closed, not left running', () => {
+    const id = fdb.createFlowRun({ flow: { id: null, name: 'interrupted' }, context: { trigger: {}, vars: {} }, state: { frames: [] } })
+    const waiting = fdb.createFlowRun({ flow: { id: null, name: 'suspended' }, context: { trigger: {}, vars: {} }, state: { frames: [] } })
+    fdb.updateFlowRun(waiting, { status: 'waiting', context: {}, state: {}, log: [], resumeAt: '2099-01-01T00:00:00Z' })
+    gleich(fdb.failRunningFlowRuns(), 1, 'only the one that was really in a step')
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'failed', 'ever "running" would be a lie — nothing ever picks it up again')
+    enthaelt(fr.log.at(-1).msg, 'hub restarted', 'and its own log says why')
+    gleich(fdb.getFlowRun(waiting).status, 'waiting', 'a suspended one is a row, not a stack frame — untouched')
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Docs: AGENTS.md / CLAUDE.md pairing')
 
   await pruefe('every AGENTS.md has a CLAUDE.md next to it that only includes it', async () => {

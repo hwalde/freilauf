@@ -1875,6 +1875,103 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // The trigger that fires after a merge, and the block that may run a real
+  // command afterwards — end to end, with a real shell instead of a stub. What
+  // this group cannot do is produce the merge itself: the integrator lives in
+  // another module, so the merge is written the way it will be written, by SQL.
+  // The two cases that need the real integrator are described in
+  // test/TODO-e2e-run-merged.md.
+  gruppe('Flows: run_merged fires, and shell_command really runs')
+
+  await pruefe('a merge starts the flow, and its command writes the SHA into a file', async () => {
+    // The columns belong to the merge integrator; on this branch the test adds
+    // them itself, exactly as it will find them once both branches are one.
+    const spalten = db.prepare('PRAGMA table_info(runs)').all().map(c => c.name)
+    for (const [name, typ] of [['merge_status', 'TEXT'], ['merged_sha', 'TEXT'], ['merged_at', 'TEXT'],
+      ['resolves_run_id', 'TEXT'], ['resolver_run_id', 'TEXT']]) {
+      if (!spalten.includes(name)) db.exec(`ALTER TABLE runs ADD COLUMN ${name} ${typ}`)
+    }
+    const ziel = join(SB, 'merged.txt')
+    const r = await jsonPost('/api/flows/save', {
+      name: 'E2E-Merge-Flow', active: true, trigger: { kind: 'run_merged', repoId },
+      definition: { properties: {}, sequence: [{
+        id: 'e2e-shell', componentType: 'task', type: 'shell_command', name: 'write the sha',
+        properties: { command: `echo {{trigger.merge.sha}} > ${ziel}`, cwd: SB, timeoutMinutes: 1, detach: false, outputVar: 'shell' },
+      }] },
+    })
+    const j = await r.json()
+    wahr(j.ok && !!j.id, `flow saved (${JSON.stringify(j).slice(0, 200)})`)
+    const flowId = j.id
+
+    db.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes,
+                ended_at, flow_dispatched, merge_status, merged_sha, merged_at)
+                VALUES('e2e-merged-1',?,'done','claude','p','keiner',5,datetime('now'),1,'merged','deadbee',datetime('now'))`).run(repoId)
+    db.prepare(`INSERT INTO events(run_id, kind, payload) VALUES('e2e-merged-1','merged',?)`)
+      .run(JSON.stringify({ sha: 'deadbee', files: ['server/flows/steps.mjs'] }))
+
+    const { flowsTick } = await import('../server/flows/triggers.mjs')
+    await flowsTick()
+    await warteAuf(() => existsSync(ziel), { was: 'the command of the flow has run', timeoutMs: 10_000 })
+    gleich(readFileSync(ziel, 'utf8').trim(), 'deadbee', 'the template put the merge commit into the file')
+    const fr = db.prepare('SELECT * FROM flow_runs WHERE flow_id=? ORDER BY started_at DESC LIMIT 1').get(flowId)
+    gleich(fr.status, 'done', 'the flow run finished')
+    gleich(JSON.parse(fr.context).vars.shell.exit_code, 0, 'and the command with exit code 0')
+    gleich(db.prepare('SELECT merge_dispatched FROM runs WHERE id=?').get('e2e-merged-1').merge_dispatched, 1, 'the merge is marked')
+  })
+
+  await pruefe('the repo form names the flows that run after a merge, and offers a new one', async () => {
+    // A run_merged flow hangs on the repo, not on an agent — so the repo form is
+    // its way in. The attachment block of the run forms cannot show it.
+    const html = await (await hol(`/repos/edit?id=${repoId}`)).text()
+    enthaelt(html, 'Flows after merge', 'the block from lang/en.json')
+    enthaelt(html, 'E2E-Merge-Flow', 'the flow of this repo by name')
+    enthaelt(html, '/flows/edit?trigger=run_merged&amp;repo=' + repoId, 'and the way to a new one, pre-aimed')
+    const neu = await (await hol('/repos/edit')).text()
+    falsch(neu.includes('Flows after merge'), 'a repo that does not exist yet has nothing to hang a flow on')
+  })
+  await pruefe('the editor really arrives with that trigger and repo already set', async () => {
+    const html = await (await hol(`/flows/edit?trigger=run_merged&repo=${repoId}`)).text()
+    const m = html.match(/window\.CCHUB_FLOWS=(\{.*?\})<\/script>/s)
+    wahr(!!m, 'the editor state is injected')
+    const flow = JSON.parse(m[1]).flow
+    gleich(flow.trigger.kind, 'run_merged', 'the trigger the button asked for')
+    gleich(flow.trigger.repoId, repoId, 'aimed at this repo')
+    enthaelt(flow.name, 'After merge', 'and named after what it does')
+    const ohne = await (await hol('/flows/edit?trigger=run_merged&repo=999999')).text()
+    enthaelt(ohne, '"repoId":null', 'a repo that does not exist becomes "all repos", not a broken filter')
+  })
+
+  await pruefe('a detached command ends its step at once and keeps running afterwards', async () => {
+    // The reason the block has that switch at all: a command that restarts the
+    // hub must outlive the flow run, and the flow run must be finished and
+    // saved before the command hits it.
+    const ziel = join(SB, 'detached.txt')
+    const r = await jsonPost('/api/flows/save', {
+      name: 'E2E-Merge-Flow-detach', active: true, trigger: { kind: 'run_merged', repoId },
+      definition: { properties: {}, sequence: [{
+        id: 'e2e-shell-bg', componentType: 'task', type: 'shell_command', name: 'in the background',
+        properties: { command: `sleep 1; touch ${ziel}`, cwd: SB, timeoutMinutes: 1, detach: true, outputVar: 'shell' },
+      }] },
+    })
+    const j = await r.json()
+    wahr(j.ok && !!j.id, 'flow saved')
+
+    db.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes,
+                ended_at, flow_dispatched, merge_status, merged_sha, merged_at)
+                VALUES('e2e-merged-2',?,'done','claude','p','keiner',5,datetime('now'),1,'merged','cafe123',datetime('now'))`).run(repoId)
+
+    const { flowsTick } = await import('../server/flows/triggers.mjs')
+    const t0 = Date.now()
+    await flowsTick()
+    const fr = db.prepare('SELECT * FROM flow_runs WHERE flow_id=? ORDER BY started_at DESC LIMIT 1').get(j.id)
+    gleich(fr.status, 'done', 'the flow run is over')
+    gleich(JSON.parse(fr.context).vars.shell.detached, true, 'the step answered "detached" instead of waiting')
+    falsch(existsSync(ziel), 'and it really did not wait — the file is not there yet')
+    wahr(Date.now() - t0 < 3000, `the pass did not wait for the command (${Date.now() - t0} ms)`)
+    await warteAuf(() => existsSync(ziel), { was: 'the detached command runs on by itself', timeoutMs: 5000 })
+  })
+
+  // ------------------------------------------------------------------
   // Five pages whose HTML was never fetched once. Checked against the strings
   // from lang/en.json and against form field names, not against markup — these
   // tests are meant to survive the rebuild that is coming.
