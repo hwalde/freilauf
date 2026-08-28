@@ -408,8 +408,8 @@ private setup repo installs that file.
 ### Subscription usage
 
 Harness plugins may implement `usage()`; `server/usage.mjs` aggregates and
-caches the results for the overview panel and `GET /api/usage`. Claude reads
-`~/.claude/quota.json`, cursor asks the Cursor API with the CLI's own token
+caches the results for the overview panel and `GET /api/usage`. Claude asks the
+account (see below), cursor asks the Cursor API with the CLI's own token
 (`~/.config/cursor/auth.json`): `GetCurrentPeriodUsage` reports spend, the
 included amount and the cycle end of the running period in cents — the bar
 therefore measures against the amount the account really has, on every plan.
@@ -417,6 +417,74 @@ Cursor documents that amount nowhere and its public APIs are admin-only, so this
 internal dashboard endpoint is the only source; it has no contract. When it
 stays silent the configurable `cursor_included_usd` setting (default 20) steps
 in as a fallback and the UI marks the value as estimated.
+
+#### Claude's windows come from the account, not off the floor
+
+`~/.claude/quota.json` is not cc-hub's file, and it is not claude's either:
+claude **never writes it**. It hands the windows to the **status line**, and a
+status line only renders while an interactive session is open; the per-model
+week (`seven_day_fable`) is put there by a script belonging to an entirely
+different project. So the panel's freshness hung on two things cc-hub does not
+control, and it failed **silently** — the numbers looked current. Measured
+2026-08-28, with the sidebar's own 30 s refresh working perfectly, re-fetching a
+fragment rendered from a seven-hour-old file:
+
+| window | shown | real |
+|---|---|---|
+| 5 h | 3 % | 5 % |
+| 7 d | 77 % | 78 % |
+| 7 d Fable | 80 % | **88 %** |
+
+Eight points on the window that **binds**: `seven` is the maximum of the weekly
+values and the budget gate defers a start at 95 %, so a stale 80 lets runs into a
+quota that is nearly gone.
+
+**`server/claude-usage.mjs`** asks the account itself —
+`GET https://api.anthropic.com/api/oauth/usage`, bearer token out of
+`~/.claude/.credentials.json`. Its `limits[]` array is preferred over the flat
+`five_hour`/`seven_day` keys next to it because it is self-describing: each entry
+carries its own `group` (`session` | `weekly`), `percent`, `resets_at` and, for a
+per-model window, the model's display name. **Nothing about "Fable" is
+hardcoded** — a second scoped window appears in the panel by itself, and that
+window finally has the reset time the file never carried for it.
+
+Four rules, each load-bearing:
+
+1. **Never write `quota.json`.** It belongs to the status line and to that other
+   project's script. cc-hub reads it — as the **fallback** — and nothing else.
+2. **Never refresh the OAuth token.** An expired token is a reason to stay
+   silent, not to mint a new one: racing claude for its own credentials file
+   could invalidate the operator's live session, and no panel is worth that.
+   `expiresAt` is checked, and that is all.
+3. **Fail soft in every direction.** No credentials, no network, a renamed
+   field, an HTTP error — all of them mean "no live answer", and `claudeQuota()`
+   is then byte for byte the function it was before.
+4. **The gate stays synchronous.** `claudeQuota()` sits on the launch path, in
+   the watcher pass and in the cost calculation. So the *refresh* is async and
+   fills a cache (`refreshClaudeLimits()`, called from the watcher pass and from
+   the usage aggregator) while the *read* is not. `claudeQuota()` merges the two
+   **per field**, live winning: an expired token leaves the live side empty and
+   the status line's minutes-old 5-hour window is still worth having. A live
+   answer older than the TTL is dropped — an hour-old live number is worse than
+   the file, which a running claude session at least keeps moving.
+
+Two traps the tests now pin down. `Number(null)` is `0` **and finite**, and the
+endpoint really does send nulls for windows the account does not have
+(`seven_day_opus: null` sits in the same response) — without the guard a missing
+window arrives as a confident 0 %, which is not merely wrong but counts as an
+answer and shuts out the file fallback for a whole TTL. And an answer carrying no
+window at all is **not an answer**: returning it would let an empty success
+shadow the file for the same TTL.
+
+The **rail** (the folded sidebar's whole glance) shows `seven`, the binding
+maximum — not the general week. They are not the same number, and a rail reading
+78 next to a per-model week at 88 reads as comfortable right up to the point
+where runs get deferred. The panel below still breaks the windows out one by one.
+
+The e2e sandbox points `CCHUB_CLAUDE_CREDENTIALS` at a file that does not exist,
+so the suite never touches the real endpoint (same fence as `CCHUB_CURSOR_AUTH`)
+and the quota fixture stays the only source — which also keeps the operator's
+real plan string out of the suite.
 
 ### Provider balances
 

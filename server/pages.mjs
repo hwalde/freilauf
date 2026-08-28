@@ -373,8 +373,14 @@ async function sideRail(repoId) {
     // the coding agent it belongs to. Cutting the LABEL gave "Cu" for
     // "Cursor CLI" — two letters that name nothing. The harness id at least
     // reads as itself.
+    // The rail is the folded sidebar's whole glance, so its weekly figure is the
+    // BINDING one — `seven`, the highest of the weekly windows — not the general
+    // one. They are not the same number: a per-model week at 88 % next to a
+    // general week at 78 % is what the budget gate acts on, and a rail showing
+    // 78 would read as comfortable right up to the point where runs get deferred.
+    // The panel below it still breaks the windows out one by one.
     const werte = d.kind === 'claude'
-      ? [['5h', d.five], ['7d', d.seven_general]]
+      ? [['5h', d.five], ['7d', d.seven]]
       : [[u.harness.slice(0, 3), d.pct]]
     for (const [kurz, pct] of werte) {
       if (pct == null) continue
@@ -503,16 +509,22 @@ export async function usagePanel() {
     if (!u.ok) return `<div class="usage-row"><b>${e(u.label)}</b> <span class="dim">${e(t('usage.unavailable'))}</span></div>`
     const d = u.data
     if (d.kind === 'claude') {
-      // Three windows, each with its own bar and its own reset time — the fable
-      // week runs separately from the general one, and one shared reset behind
-      // the row could only ever belong to one of them. A window claude does not
-      // report at all stays out of the row, and so does a missing reset time.
+      // One bar per window, each with its own reset time — a per-model week runs
+      // separately from the general one, and one shared reset behind the row
+      // could only ever belong to one of them. A window claude does not report
+      // at all stays out of the row, and so does a missing reset time.
+      //
+      // The per-model windows come as a LIST carrying the vendor's own display
+      // names ('Fable'), not as one hardcoded field: the account decides how
+      // many there are and what they are called, and the day a second one
+      // appears it belongs in the panel without a code change.
       const fenster = (label, pct, iso) => pct == null ? ''
         : quotaBar(pct, { label, note: iso ? t('usage.resets', { time: resetText(iso) }) : '' })
+      const scoped = (d.weekly_scoped ?? []).map(w => fenster(`7d ${w.label}`, w.pct, w.resets_at)).join('')
       return `<div class="usage-row"><b>${e(u.label)}</b>${d.plan ? ` <span class="dim">${e(d.plan)}</span>` : ''}
         ${fenster('5h', d.five, d.resets_at)}
         ${fenster('7d', d.seven_general, d.seven_resets_at)}
-        ${fenster('7d fable', d.seven_fable, d.seven_fable_resets_at)}</div>`
+        ${scoped}</div>`
     }
     if (d.kind === 'cursor') {
       // What one reads at a glance is the bar — like the claude rows above. The

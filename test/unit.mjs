@@ -362,6 +362,125 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('Claude usage: the account answers, the file is the fallback')
+
+  // The bug this group was written for: quota.json is maintained by a status
+  // line and by a script from another project, so it went stale whenever nobody
+  // was running a claude session — silently, because the numbers looked current.
+  // Measured 2026-08-28: the panel showed a per-model week of 80 % while the
+  // account said 88 %, off a file written seven hours earlier.
+  const cu = await import('../server/claude-usage.mjs')
+
+  // A real response of GET /api/oauth/usage, recorded on 2026-08-28.
+  const realResponse = {
+    limits: [
+      { kind: 'session', group: 'session', percent: 5, resets_at: '2026-08-28T13:49:59.830958+00:00', scope: null },
+      { kind: 'weekly_all', group: 'weekly', percent: 78, resets_at: '2026-08-30T05:59:59.830975+00:00', scope: null },
+      {
+        kind: 'weekly_scoped', group: 'weekly', percent: 88,
+        resets_at: '2026-08-30T05:59:59.831186+00:00',
+        scope: { model: { id: null, display_name: 'Fable' }, surface: null },
+      },
+    ],
+  }
+
+  await pruefe('limits[] is mapped by group/kind, not by position', () => {
+    const p = cu._parseLimits(realResponse)
+    gleich(p.five, 5, 'the session window is the 5-hour one')
+    gleich(p.seven_general, 78, 'weekly_all is the general week')
+    gleich(p.weekly_scoped.length, 1, 'one per-model week')
+    gleich(p.weekly_scoped[0].label, 'Fable', "the vendor's own display name, not a hardcoded one")
+    gleich(p.weekly_scoped[0].pct, 88, 'its percentage')
+    wahr(p.weekly_scoped[0].resets_at?.startsWith('2026-08-30'),
+      'and its OWN reset time — the file never carried one for this window')
+  })
+
+  await pruefe('a second scoped model needs no code change', () => {
+    const p = cu._parseLimits({ limits: [
+      { kind: 'weekly_all', group: 'weekly', percent: 10, resets_at: null, scope: null },
+      { kind: 'weekly_scoped', group: 'weekly', percent: 20, scope: { model: { display_name: 'Fable' } } },
+      { kind: 'weekly_scoped', group: 'weekly', percent: 30, scope: { model: { display_name: 'Opus' } } },
+    ] })
+    gleich(p.weekly_scoped.map(w => `${w.label}:${w.pct}`).join(','), 'Fable:20,Opus:30', 'both are carried')
+  })
+
+  await pruefe('an answer without a single window is not an answer', () => {
+    gleich(cu._parseLimits({ limits: [] }), null, 'empty list')
+    gleich(cu._parseLimits({}), null, 'no limits key at all')
+    gleich(cu._parseLimits({ limits: [{ kind: 'session', percent: null }] }), null,
+      'an entry without a percentage does not count as one')
+  })
+
+  await pruefe('the live answer wins over the file, per field', async () => {
+    const { claudeQuota } = await quotaMit(JSON.stringify({
+      five_hour: { used_percentage: 3, resets_at: 1800000000 },
+      seven_day: { used_percentage: 77 },
+      seven_day_fable: { used_percentage: 80 },
+    }), 9)
+    cu._claudeLimitsSet(cu._parseLimits(realResponse))
+    const q = claudeQuota()
+    gleich(q.five, 5, 'the stale 3 % from the file is replaced')
+    gleich(q.seven_general, 78, 'and the stale 77 %')
+    gleich(q.seven_fable, 88, 'and the 80 % that was seven hours old')
+    gleich(q.seven, 88, 'the gate value is the highest weekly window')
+    wahr(q.live === true, 'the answer says it came from the account')
+    cu._claudeLimitsReset()
+  })
+
+  await pruefe('what the account does not report, the file still supplies', async () => {
+    const { claudeQuota } = await quotaMit(JSON.stringify({
+      five_hour: { used_percentage: 42, resets_at: 1800000000 },
+      seven_day: { used_percentage: 11 },
+    }), 10)
+    // A live answer that knows only the weekly windows — the merge is per field,
+    // so the 5-hour window a status line wrote minutes ago is not thrown away.
+    cu._claudeLimitsSet({ five: null, resets_at: null, seven_general: 60, seven_resets_at: null, weekly_scoped: [] })
+    const q = claudeQuota()
+    gleich(q.five, 42, '5-hour window comes out of the file')
+    gleich(q.seven_general, 60, 'the week comes from the account')
+    cu._claudeLimitsReset()
+  })
+
+  await pruefe('a live answer that has aged out falls back to the file', async () => {
+    const { claudeQuota } = await quotaMit(JSON.stringify({
+      five_hour: { used_percentage: 7 }, seven_day: { used_percentage: 12 },
+    }), 11)
+    // Older than the TTL: a live number an hour old is worse than the file,
+    // which a running claude session at least keeps moving.
+    cu._claudeLimitsSet(cu._parseLimits(realResponse), Date.now() - 3600_000)
+    const q = claudeQuota()
+    gleich(q.five, 7, 'the file decides again')
+    gleich(q.seven_general, 12, 'in both windows')
+    falsch(q.live, 'and the answer no longer claims to be live')
+    cu._claudeLimitsReset()
+  })
+
+  await pruefe('without a credentials file nothing is fetched and nothing throws', async () => {
+    const before = process.env.CCHUB_CLAUDE_CREDENTIALS
+    process.env.CCHUB_CLAUDE_CREDENTIALS = join(sandkasten, 'no-such-credentials.json')
+    // No URL is set either: were a request made anyway, this would hang or throw
+    // rather than quietly pass.
+    gleich(await cu.refreshClaudeLimits({ force: true }), null, 'no token, no answer')
+    gleich(cu.claudeLimits(), null, 'and nothing cached')
+    if (before === undefined) delete process.env.CCHUB_CLAUDE_CREDENTIALS
+    else process.env.CCHUB_CLAUDE_CREDENTIALS = before
+  })
+
+  await pruefe('an expired token is not used and is not refreshed', async () => {
+    const credPath = join(sandkasten, 'expired-credentials.json')
+    writeFileSync(credPath, JSON.stringify({
+      claudeAiOauth: { accessToken: 'x', refreshToken: 'y', expiresAt: Date.now() - 1000 },
+    }))
+    const before = process.env.CCHUB_CLAUDE_CREDENTIALS
+    process.env.CCHUB_CLAUDE_CREDENTIALS = credPath
+    gleich(await cu.refreshClaudeLimits({ force: true }), null, 'expired means silent')
+    const after = JSON.parse(readFileSync(credPath, 'utf8'))
+    gleich(after.claudeAiOauth.accessToken, 'x', 'the credentials file is never written back')
+    if (before === undefined) delete process.env.CCHUB_CLAUDE_CREDENTIALS
+    else process.env.CCHUB_CLAUDE_CREDENTIALS = before
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Platform suffix in the prompt (platformSuffix)')
 
   const { platformSuffix } = await import('../server/runner.mjs')
