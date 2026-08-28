@@ -1653,6 +1653,106 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('Edit a run before and during its life (run-edit.mjs)')
+
+  /** The "Edit this run" card of a detail page, scoped — the layout carries a
+   *  Quick-Run dialog with the same field names, so assertions must not match it. */
+  const editKarte = async (runId) => {
+    const html = await (await hol(`/runs/${runId}`)).text()
+    const i = html.indexOf('id="run-edit"')
+    return i < 0 ? '' : html.slice(i, i + 1500)
+  }
+
+  await pruefe('a running run accepts only the expected duration', async () => {
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Edit-laeuft' })
+    await sessionMerken(j.runId)
+    gleich(lauf(j.runId).status, 'running', 'sanity: running')
+
+    const p1 = await formular(`/api/runs/${j.runId}/edit`, { prompt: 'anders' })
+    gleich(p1.status, 400, 'a prompt edit is refused for a started run')
+    enthaelt((await p1.json()).error, 'not started yet', 'the reason names the rule')
+    gleich(lauf(j.runId).prompt, 'E2E-Edit-laeuft', 'prompt untouched')
+
+    const p2 = await formular(`/api/runs/${j.runId}/edit`, { repo_id: String(repo2Id) })
+    gleich(p2.status, 400, 'a move is refused for a started run')
+    gleich(lauf(j.runId).repo_id, repoId, 'repo untouched')
+
+    const p3 = await formular(`/api/runs/${j.runId}/edit`, { expected_minutes: '90' })
+    gleich(p3.status, 200, 'the duration edit is accepted')
+    gleich(lauf(j.runId).expected_minutes, 90, 'new duration')
+    enthaelt(ereignisse(j.runId).join(','), 'edited', 'the edit is an event')
+
+    const karte = await editKarte(j.runId)
+    enthaelt(karte, 'name="expected_minutes"', 'card offers the duration')
+    falsch(karte.includes('name="prompt"'), 'no prompt textarea for a started run')
+    falsch(karte.includes('name="repo_id"'), 'no repo select for a started run')
+
+    // Clean up: the run must not linger as 'running' for the status sidebar.
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+  })
+
+  await pruefe('a finished run refuses every edit', async () => {
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Edit-fertig' })
+    await sessionMerken(j.runId)
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+    const r = await formular(`/api/runs/${j.runId}/edit`, { expected_minutes: '1' })
+    gleich(r.status, 400, 'refused')
+    enthaelt((await r.json()).error, 'already over', 'the reason says the run is over')
+    gleich(await editKarte(j.runId), '', 'no card at all on the detail page')
+  })
+
+  let EDITLAUF = null
+  await pruefe('a scheduled run is edited: prompt, duration and repo before it starts', async () => {
+    const j = await laufStarten({
+      repo_id: repoId, prompt: 'E2E-Edit-alt', title: 'Planned edit',
+      start_mode: 'in', start_in_minutes: '60',
+    })
+    EDITLAUF = j.runId
+    wahr(j.scheduled, `planned (${JSON.stringify(j)})`)
+    gleich(lauf(EDITLAUF).title, 'Planned edit', 'an operator title')
+
+    // A classic form post lands back on the run page.
+    const r = await formular(`/api/runs/${EDITLAUF}/edit`, {
+      expected_minutes: '120', prompt: 'E2E-Edit-neu', repo_id: String(repo2Id),
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'form post redirects back')
+    gleich(r.headers.get('location'), `/runs/${EDITLAUF}`, 'to the run page')
+    const l = lauf(EDITLAUF)
+    gleich(l.prompt, 'E2E-Edit-neu', 'new prompt')
+    gleich(l.expected_minutes, 120, 'new duration')
+    gleich(l.repo_id, repo2Id, 'moved to the other repo')
+    gleich(l.title, 'Planned edit', 'an operator title stays')
+
+    const karte = await editKarte(EDITLAUF)
+    enthaelt(karte, 'E2E-Edit-neu', 'card shows the new prompt')
+    enthaelt(karte, 'name="prompt"', 'prompt textarea for a planned run')
+    enthaelt(karte, 'name="repo_id"', 'repo select for a planned run')
+    enthaelt(karte, '>e2e2<', 'the other repo is selected')
+
+    // The live channel renders the same card.
+    const frag = await (await hol(`/api/fragments/run-detail?id=${EDITLAUF}`)).text()
+    enthaelt(frag, 'id="run-edit"', 'card is part of the fragment')
+    enthaelt(frag, 'E2E-Edit-neu', 'and carries the new prompt')
+  })
+
+  await pruefe('the edited run starts with its new prompt in its new repo', async () => {
+    db.prepare(`UPDATE runs SET start_at=datetime('now','-1 minutes') WHERE id=?`).run(EDITLAUF)
+    await watcherTick()
+    const l = lauf(EDITLAUF)
+    gleich(l.status, 'running', 'started once the moment has come')
+    wahr(!!l.tmux_session, 'has a session')
+    await sessionMerken(EDITLAUF)
+    gleich(l.repo_id, repo2Id, 'started in the repo it was moved to')
+    gleich(l.expected_minutes, 120, 'with the edited duration')
+    const p = readFileSync(join(SB, 'runs', EDITLAUF, 'prompt.md'), 'utf8')
+    enthaelt(p, 'E2E-Edit-neu', 'the launched prompt is the edited one')
+    falsch(p.includes('E2E-Edit-alt'), 'the old prompt is gone')
+
+    // Clean up for the status sidebar that counts later.
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(EDITLAUF)
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Archive')
 
   let ARV = null

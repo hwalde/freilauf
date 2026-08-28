@@ -2382,6 +2382,126 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('Run editing: what may change before and during a run (run-edit.mjs)')
+
+  const { db: edb } = await import('../server/db.mjs')
+  const { runEditAllowed, editRun } = await import('../server/run-edit.mjs')
+  const { fallbackTitle: fb } = await import('../server/title.mjs')
+
+  await pruefe('the permission matrix: a scheduled/deferred run is fully editable, a running one only its duration', () => {
+    const erlaubt = (s) => JSON.stringify(runEditAllowed({ status: s }))
+    gleich(erlaubt('scheduled'), '{"duration":true,"prompt":true,"repo":true}', 'scheduled')
+    gleich(erlaubt('deferred'), '{"duration":true,"prompt":true,"repo":true}', 'deferred')
+    gleich(erlaubt('running'), '{"duration":true,"prompt":false,"repo":false}', 'running')
+    gleich(erlaubt('waiting_help'), '{"duration":true,"prompt":false,"repo":false}', 'waiting for a human is still running')
+    for (const s of ['done', 'failed', 'aborted']) {
+      gleich(erlaubt(s), '{"duration":false,"prompt":false,"repo":false}', `${s}: nothing left to edit`)
+    }
+    gleich(JSON.stringify(runEditAllowed(null)), '{"duration":false,"prompt":false,"repo":false}', 'no run')
+  })
+
+  await pruefe('editing a scheduled run: prompt, duration and repo are applied and recorded', () => {
+    edb.exec(`DELETE FROM repos WHERE name IN ('edit-repo-a','edit-repo-b')`)
+    edb.prepare(`INSERT INTO repos(name, path, base_branch) VALUES('edit-repo-a','/tmp/edit-a','main')`).run()
+    edb.prepare(`INSERT INTO repos(name, path, base_branch) VALUES('edit-repo-b','/tmp/edit-b','main')`).run()
+    const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
+    const b = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-b'`).get().id
+    const id = 'edit-run-0001'
+    edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title, start_mode, start_at)
+                 VALUES(?,?,'scheduled','claude','E2E alt', 'keiner', 45, ?, 'at', '2030-01-01 00:00:00')`)
+      .run(id, a, fb('E2E alt'))
+    const problems = []
+    const r = editRun(id, { prompt: 'E2E neu', expectedMinutes: '120', repoId: b }, problems)
+    gleich(problems.length, 0, `no problems (${problems.join(', ')})`)
+    gleich(r.ok, true, 'applied')
+    const lauf = edb.prepare('SELECT * FROM runs WHERE id=?').get(id)
+    gleich(lauf.prompt, 'E2E neu', 'new prompt')
+    gleich(lauf.expected_minutes, 120, 'new duration')
+    gleich(lauf.repo_id, b, 'moved to the other repo')
+    gleich(lauf.title, fb('E2E neu'), 'a prompt-derived title follows the prompt')
+    gleich(edb.prepare(`SELECT kind FROM events WHERE run_id=? AND kind='edited'`).get(id).kind, 'edited', 'the edit is an event')
+  })
+
+  await pruefe('a renamed run keeps its name when the prompt changes', () => {
+    const id = 'edit-run-0002'
+    edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title)
+                 VALUES(?,?,'scheduled','claude','E2E alt 2','keiner',45,'Renamed by hand')`)
+      .run(id, edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id)
+    const problems = []
+    editRun(id, { prompt: 'E2E neu 2' }, problems)
+    gleich(problems.length, 0, `no problems (${problems.join(', ')})`)
+    gleich(edb.prepare('SELECT title FROM runs WHERE id=?').get(id).title, 'Renamed by hand', 'an operator name wins')
+  })
+
+  await pruefe('moving to the repo the run already lives in is a no-op, not an error', () => {
+    const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
+    const id = 'edit-run-0003'
+    edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title)
+                 VALUES(?,?,'scheduled','claude','p','keiner',45,NULL)`).run(id, a)
+    const problems = []
+    editRun(id, { repoId: a }, problems)
+    // The combined form pre-fills the select; a duration-only edit must not
+    // fail on its own untouched field. With ONLY the repo submitted nothing
+    // changed at all, which is the honest 'nothing to save'.
+    gleich(problems.length, 1, `nothing changed: ${problems.join(', ')}`)
+    gleich(problems[0], 'Nothing to save.', 'the message names it')
+  })
+
+  await pruefe('a running run accepts only its duration', () => {
+    const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
+    const id = 'edit-run-0004'
+    edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title)
+                 VALUES(?,?,'running','claude','lauf','keiner',45,NULL)`).run(id, a)
+    const p1 = []
+    editRun(id, { prompt: 'anders' }, p1)
+    gleich(p1.length, 1, `prompt refused for a started run (${p1.join(', ')})`)
+    const p2 = []
+    editRun(id, { repoId: edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-b'`).get().id }, p2)
+    gleich(p2.length, 1, `move refused for a started run (${p2.join(', ')})`)
+    const p3 = []
+    const ok = editRun(id, { expectedMinutes: '7' }, p3)
+    gleich(p3.length, 0, `duration accepted (${p3.join(', ')})`)
+    gleich(ok.ok, true, 'applied')
+    gleich(edb.prepare('SELECT expected_minutes FROM runs WHERE id=?').get(id).expected_minutes, 7, 'new duration')
+    gleich(edb.prepare('SELECT prompt FROM runs WHERE id=?').get(id).prompt, 'lauf', 'prompt untouched')
+  })
+
+  await pruefe('a finished run is not editable at all', () => {
+    const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
+    const id = 'edit-run-0005'
+    edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title)
+                 VALUES(?,?,'done','claude','fertig','keiner',45,NULL)`).run(id, a)
+    const problems = []
+    editRun(id, { expectedMinutes: '1' }, problems)
+    gleich(problems.length, 1, `refused (${problems.join(', ')})`)
+  })
+
+  await pruefe('invalid input is a problem, never a partial write', () => {
+    const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
+    const id = 'edit-run-0006'
+    edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title)
+                 VALUES(?,?,'scheduled','claude','p','keiner',45,NULL)`).run(id, a)
+    const p1 = []
+    editRun(id, { prompt: '   ' }, p1)
+    gleich(p1.length, 1, `empty prompt (${p1.join(', ')})`)
+    const p2 = []
+    editRun(id, { expectedMinutes: '0' }, p2)
+    gleich(p2.length, 1, `zero minutes (${p2.join(', ')})`)
+    const p3 = []
+    editRun(id, { expectedMinutes: 'abc' }, p3)
+    gleich(p3.length, 1, `nonsense (${p3.join(', ')})`)
+    const p4 = []
+    editRun(id, { repoId: '99999' }, p4)
+    gleich(p4.length, 1, `unknown repo (${p4.join(', ')})`)
+    const p5 = []
+    editRun('does-not-exist', { prompt: 'x' }, p5)
+    gleich(p5.length, 1, `unknown run (${p5.join(', ')})`)
+    const lauf = edb.prepare('SELECT * FROM runs WHERE id=?').get(id)
+    gleich(lauf.prompt, 'p', 'nothing of the failed edits landed')
+    gleich(lauf.expected_minutes, 45, 'duration untouched')
+  })
+
+  // ------------------------------------------------------------------
   gruppe('tmux sessions: reading, judging, keeping (sessions.mjs)')
 
   const se = await import('../server/sessions.mjs')
