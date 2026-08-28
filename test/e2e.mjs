@@ -2345,6 +2345,13 @@ try {
     const offen = db.prepare(`SELECT * FROM incidents WHERE run_id=? AND typ='merge_blocked' AND geloest_am IS NULL`).get(l.id)
     wahr(!!offen, 'an open incident, so it shows up in the sidebar')
     enthaelt(ereignisse(l.id).join(','), 'telegram_sent:merge_blocked', 'and Telegram was told')
+    // And the operator can act on it without leaving the run's page.
+    const html = await (await hol(`/runs/${l.id}`)).text()
+    enthaelt(html, 'id="run-integration"', 'the detail page has an Integration line')
+    enthaelt(html, 'blocked: conflict unresolved', 'saying where the work stands')
+    enthaelt(html, `/api/runs/${l.id}/merge"`, 'with "Merge now"')
+    enthaelt(html, `/api/runs/${l.id}/merge-skip`, 'and "Skip merge"')
+    enthaelt(html, 'claude --resume', 'and the command that reopens the session')
   })
 
   // ---- 6. + 14. failed with commits: assessed, backed up, merged by hand ----
