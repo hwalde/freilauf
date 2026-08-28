@@ -24,7 +24,7 @@ const d = (s) => new Date(s)
 try {
   const { cronMatches, validCron, scheduleDue, scheduleText, stripAnsi, escapeHtml,
     fmtDuration, parseDbUtc, fmtRelativeTime, fmtDateTime, kurzid } = await import('../server/util.mjs')
-  const { parseForm, cookieRepo, rememberRepo } = await import('../server/web-helpers.mjs')
+  const { parseForm, cookieRepo, rememberRepo, requestRepo } = await import('../server/web-helpers.mjs')
 
   // ------------------------------------------------------------------
   gruppe('Cron: matching (cronMatches)')
@@ -204,6 +204,17 @@ try {
     enthaelt(gesetzt[1], 'cchub_repo=3', 'value')
     enthaelt(gesetzt[1], 'Max-Age=31536000', 'long-lived — the choice stays until it is changed')
     enthaelt(gesetzt[1], 'Path=/', 'valid on every page')
+  })
+  await pruefe('requestRepo reads an explicit ?repo= off the request', () => {
+    gleich(requestRepo({ url: '/?repo=7' }), 7, 'on the overview')
+    gleich(requestRepo({ url: '/runs/abc-123?repo=7' }), 7, 'on a page that belongs to one repo')
+    gleich(requestRepo({ url: '/agents/edit?id=4&repo=7' }), 7, 'among other parameters')
+    gleich(requestRepo({ url: '/settings' }), null, 'no query at all')
+    gleich(requestRepo({ url: '/?status=running' }), null, 'a query without repo')
+    gleich(requestRepo({ url: '/?repo=' }), null, 'empty value')
+    gleich(requestRepo({ url: '/?repo=abc' }), null, 'non-numeric value')
+    gleich(requestRepo({ url: '/?repo=-1' }), null, 'no id is negative')
+    gleich(requestRepo({}), null, 'no url at all')
   })
 
   // ------------------------------------------------------------------

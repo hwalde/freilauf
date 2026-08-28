@@ -262,6 +262,23 @@ try {
     await p.close()
   })
 
+  await pruefe('on a page that belongs to one repo the dropdown keeps the new choice', async () => {
+    // A run detail page cannot become another repo's page — it reloads as
+    // itself. Before this the dropdown snapped back to the run's repo and the
+    // click read as if it had been swallowed.
+    const p = await neueSeite(`/runs/${R_ALT}`)
+    gleich(await p.$eval('#repo-switch', s => s.value), String(repoId), 'starts on the run\'s repo')
+    await p.selectOption('#repo-switch', String(repoId2))
+    await p.waitForURL(new RegExp(`/runs/${R_ALT}\\?repo=${repoId2}$`), { timeout: 10_000 })
+    gleich(await p.$eval('#repo-switch', s => s.value), String(repoId2), 'after the reload it still shows what was picked')
+    gleich(await p.$eval('#status-sidebar', a => a.dataset.repo), String(repoId2), 'the sidebar follows it')
+    // …while the page is still about this run: <body data-repo> is the live
+    // channel's filter and must stay with the run whose events it wants.
+    gleich(await p.$eval('body', b => b.dataset.repo), String(repoId), 'the run is still the run')
+    sauber(p)
+    await p.close()
+  })
+
   // ------------------------------------------------------------------
   // The sidebar is the one panel that is on every page, so the one panel that
   // has to be foldable — and the fold has to survive the page, otherwise one
