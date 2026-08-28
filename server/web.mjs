@@ -68,6 +68,10 @@ function pickQuickFields(b) {
     prompt: b.prompt,
     branch_mode: b.branch_mode,
     branch_pattern: b.branch_pattern,
+    // Part of the branch rule, and rendered by the same branchFields() the run
+    // forms use — so it has to be on the allowlist, or a ticked box would be
+    // dropped here and nowhere else.
+    keep_on_branch: b.keep_on_branch,
   }
 }
 

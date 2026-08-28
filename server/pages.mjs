@@ -13,7 +13,7 @@ import {
 import {
   runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
   runTitleField, runStartTimeFields, runStartFromForm,
-  runSetupFields, runSetupFromForm, branchFields,
+  runSetupFields, runSetupFromForm, branchFields, branchContext,
 } from './run-def.mjs'
 import {
   listFavorites, getFavorite, saveFavorite, deleteFavorite,
@@ -194,7 +194,7 @@ function quickRunDialog(repos, selectedRepo) {
     <label>${e(t('qr.prompt'))} <textarea name="prompt" rows="8" required placeholder="${e(t('qr.prompt_ph'))}"></textarea></label>
     ${runStartTimeFields({})}
     <details class="qr-more"><summary>${e(t('qr.more'))}</summary>
-      ${branchFields({ branch_mode: 'keiner' })}
+      ${branchFields({ branch_mode: 'keiner' }, branchContext(selectedRepo))}
     </details>
     <p class="err" id="qr-error" hidden></p>
     <menu class="qr-actions">
@@ -784,7 +784,7 @@ export async function pageRunForm(req, res, url) {
   const template = a ?? (fav ? favoriteTemplate(fav) : null) ?? lastRunChoice()
   const fields = `
   ${runTitleField({})}
-  ${runDefFields(template)}
+  ${runDefFields(template, branchContext(sel.id))}
   ${runStartTimeFields({})}
   <input type="hidden" name="repo_id" value="${sel.id}">
   <label class="chk"><input type="checkbox" name="save_agent" value="1"> ${e(t('runform.save_agent'))} (<input name="agent_name" placeholder="${e(t('runform.agent_name_ph'))}">)</label>`
@@ -988,7 +988,11 @@ export function integrationSection(run, repo) {
     buttons.push(btn('mark-done', 'merge.mark_done'))
   }
   const unmerged = String(run.merge_status ?? '')
-  if (terminal && ['unmerged_commits', 'blocked_error', 'blocked_conflict', 'blocked_no_remote'].includes(unmerged)) {
+  // 'kept_on_branch' is in this list on purpose: keeping the work on its branch
+  // is what happened automatically at the end of the run, not a verdict for all
+  // time. One click still integrates it, the ordinary way.
+  if (terminal && ['unmerged_commits', 'blocked_error', 'blocked_conflict', 'blocked_no_remote',
+    'kept_on_branch'].includes(unmerged)) {
     buttons.push(btn('merge', 'merge.merge_now'))
   }
   if (['blocked_dirty', 'unmerged_both', 'unmerged_dirty'].includes(unmerged)) {
@@ -1577,7 +1581,7 @@ function zeitplanFelder(a = {}) {
 function agentFields(a = {}, repoId) {
   return `
   <label>${e(t('agents.name'))} <input name="name" value="${e(a.name ?? '')}" required></label>
-  ${runDefFields(a)}
+  ${runDefFields(a, branchContext(repoId))}
   <input type="hidden" name="repo_id" value="${repoId}">
   ${zeitplanFelder(a)}
   <label class="chk"><input type="checkbox" name="active" value="1" ${a.active ?? 1 ? 'checked' : ''}> ${e(t('agents.active'))}</label>`

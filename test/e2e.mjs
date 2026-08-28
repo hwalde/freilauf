@@ -2774,6 +2774,91 @@ try {
       'and the repo records when it was last backed up')
   })
 
+  // ---- the branch rule under hub, and keeping work on a branch ----
+  await pruefe('a run can keep its work on its branch — pushed, not merged', async () => {
+    await repoMerge({ merge_mode: 'hub' })
+    const beforeMain = (await g(ORIGIN, 'rev-parse', 'main')).stdout.trim()
+    const branch = `keep/e2e-${Date.now().toString(36)}`
+    const l = await mergeRun({ branch_mode: 'neu', branch_pattern: branch, keep_on_branch: '1' })
+    gleich(lauf(l.id).keep_on_branch, 1, 'the run carries the field')
+    // The prompt says it, and says it ONCE: the keep sentence replaces the merge
+    // rule instead of standing next to it and contradicting it.
+    const prompt = readFileSync(join(SB, 'runs', l.id, 'prompt.md'), 'utf8')
+    enthaelt(prompt, 'STAYS on that branch', 'the agent is told the work stays put')
+    enthaelt(prompt, 'cc-hub will not merge it into main', 'and who will not merge it')
+    falsch(prompt.includes('cc-hub merges your work into main itself'),
+      'and NOT the merge rule as well — two rules about one thing is one too many')
+
+    await writeAndCommit(l.wt, 'kept.txt', 'stays here\n', 'E2E: work that stays on its branch')
+    const answer = await sendReport(l.id, { kind: 'done', text: 'kept it here' })
+    wahr(answer.ok, 'accepted')
+    await warteAuf(() => lauf(l.id).merge_status === 'kept_on_branch',
+      { was: 'the run is closed as kept', timeoutMs: 20_000 })
+    const r = lauf(l.id)
+    gleich(r.status, 'done', 'done')
+    gleich(r.merged_sha, null, 'nothing was merged')
+    gleich((await g(ORIGIN, 'rev-parse', 'main')).stdout.trim(), beforeMain, 'and main did not move')
+    // …but the work is on origin: nothing may live only on this machine.
+    wahr((await g(ORIGIN, 'rev-parse', `refs/heads/${branch}`)).ok, `the branch is on origin (${branch})`)
+    enthaelt(ereignisse(l.id).join(','), 'branch_kept', 'and that is recorded')
+    gleich(flowRunsFor(l.id).length, 0, 'no run_merged flow fires — there was no merge')
+
+    // The operator may still change his mind: one click runs the ordinary path.
+    const merged = await (await formular(`/api/runs/${l.id}/merge`, {})).json()
+    wahr(merged.ok, `merge by hand accepted (${JSON.stringify(merged)})`)
+    await warteAuf(() => lauf(l.id).merge_status === 'merged', { was: 'merged after all', timeoutMs: 30_000 })
+    gleich(lauf(l.id).keep_on_branch, 0, 'and the run no longer keeps anything back')
+  })
+
+  await pruefe('a dirty worktree still holds a kept run — committing is not optional', async () => {
+    const branch = `keep/dirty-${Date.now().toString(36)}`
+    const l = await mergeRun({ branch_mode: 'fest', branch_pattern: branch, keep_on_branch: '1' })
+    // A name no earlier test committed: every worktree here starts from
+    // origin/main, and the files this suite merged along the way are IN it. A
+    // file that is already tracked with the same content leaves git clean.
+    const datei = `keep-leftover-${Date.now().toString(36)}.txt`
+    writeFileSync(join(l.wt, datei), 'left behind\n')
+    const answer = await sendReport(l.id, { kind: 'done', text: 'am I done?' })
+    enthaelt(answer.message ?? '', datei, 'the same M1 as for any other run')
+    gleich(lauf(l.id).finish_state, 'awaiting_commit', 'and the same waiting state')
+    gleich(lauf(l.id).status, 'running', 'the run stays running')
+    await g(l.wt, 'add', '-A')
+    await g(l.wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: the leftover')
+    await integrate.integrateTick()
+    await warteAuf(() => lauf(l.id).merge_status === 'kept_on_branch',
+      { was: 'kept once it was clean', timeoutMs: 20_000 })
+    gleich(lauf(l.id).status, 'done', 'and closed')
+  })
+
+  await pruefe('under hub, "no branch" no longer promises throwaway work', async () => {
+    const l = await mergeRun({ branch_mode: 'keiner' })
+    const prompt = readFileSync(join(SB, 'runs', l.id, 'prompt.md'), 'utf8')
+    enthaelt(prompt, 'cc-hub merges your commits into main', 'it says what really happens')
+    falsch(prompt.includes('throwaway'), 'and not the opposite, in the same prompt as the merge rule')
+    await formular(`/api/runs/${l.id}/kill`, {})
+  })
+
+  await pruefe('the form says which rule means what, and Quick Run carries the keep box', async () => {
+    const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
+    enthaelt(html, 'data-merge-mode="hub"', 'the form knows this repo integrates')
+    enthaelt(html, 'data-explain="off"', 'both explanations are rendered')
+    enthaelt(html, 'data-explain="hub"', 'so CSS can pick without a round trip')
+    enthaelt(html, 'name="keep_on_branch"', 'and the keep box is there')
+    enthaelt(html, 'data-merge-modes=', 'with the map the Quick-Run dialog switches by')
+    // Quick Run goes through the same branchFields(), so the box has to survive
+    // pickQuickFields' allowlist — that is where a field falls off silently.
+    const fav = db.prepare('SELECT id FROM favorites ORDER BY id LIMIT 1').get()
+    const j = await (await formular('/api/runs/quick', {
+      repo_id: String(repoId), favorite_id: String(fav.id), prompt: 'E2E-Quick-Keep',
+      branch_mode: 'neu', branch_pattern: `keep/quick-${Date.now().toString(36)}`, keep_on_branch: '1',
+      start_mode: 'now',
+    })).json()
+    wahr(j.ok, `quick run started (${JSON.stringify(j)})`)
+    await sessionMerken(j.runId)
+    gleich(lauf(j.runId).keep_on_branch, 1, 'the ticked box arrived at the run')
+    await formular(`/api/runs/${j.runId}/kill`, {})
+  })
+
   // ---- 9. with merge_mode off nothing of this happens ----
   await pruefe('with the integration switched off a done report closes the run as it always did', async () => {
     await repoMerge({ merge_mode: 'off' })
@@ -2785,6 +2870,15 @@ try {
     gleich(r.status, 'done', 'done right away, dirty worktree and all')
     gleich(r.finish_state, null, 'no gate')
     gleich(r.merge_status, null, 'and no verdict about its work')
+    // And the prompt is the one it always was, down to the sentence about a
+    // detached worktree — with the integration off, not a word may change.
+    const prompt = readFileSync(join(SB, 'runs', l.id, 'prompt.md'), 'utf8')
+    enthaelt(prompt, 'No branch — the worktree is detached; changes are throwaway changes.',
+      'the old sentence, byte for byte')
+    falsch(prompt.includes('cc-hub merges'), 'and nothing about merging at all')
+    const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
+    enthaelt(html, 'data-merge-mode="off"', 'the form says so too')
+    enthaelt(html, 'data-hub-only hidden', 'and the keep box is not even offered')
   })
 
   // ------------------------------------------------------------------

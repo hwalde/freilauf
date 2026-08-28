@@ -168,6 +168,11 @@ addColumn('runs', 'goal_sent_at', 'TEXT')
 // see server/flows/attach.mjs. The run carries the definition copy as usual, so
 // editing an agent never changes what an already running run will trigger.
 addColumn('agents', 'flows', 'TEXT')
+// Keep the work on its branch instead of merging it into the base branch — only
+// meaningful while the repo integrates (repos.merge_mode='hub'), stored either
+// way, like every other field of the run definition.
+addColumn('agents', 'keep_on_branch', 'INTEGER NOT NULL DEFAULT 0')
+addColumn('runs', 'keep_on_branch', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('runs', 'flows', 'TEXT')
 // The run's title — what the overview and the detail page name it. An agent run
 // takes the agent's name, a single run the operator's input or a title derived
