@@ -380,6 +380,18 @@ application comes out of it.
 - **`layout()` is `async`** because the panel is: every call site awaits it.
 - The header kept **context** (repo switcher) and one **action** (Quick Run) and
   gave up status. It is a line high and has to stay that way.
+- **The chosen repo is remembered.** The switcher's choice travels as the
+  `cchub_repo` cookie, so a page that carries no `?repo=` of its own (a menu
+  click, a context-less page like settings) keeps the selection instead of
+  falling back to the first repo — the reset the overview used to do on every
+  navigation. The cookie is written twice on purpose: by the client when the
+  switcher changes (so the very next page already shows the choice) and by the
+  router whenever a page request names a valid `?repo=` (so followed links and
+  "back" redirects persist too). `selectRepo()` and `layout()` read it in that
+  order: explicit `?repo=` wins, then the cookie, then the first repo. An id
+  that no longer exists (a deleted repo) is ignored, not trusted. `<body
+  data-repo>` is **not** affected: pages without a repo context still set no SSE
+  filter.
 - **The fold lives on the shell**, not on the sidebar: `#shell.side-closed`,
   written from `localStorage['cchub.sidebar.open']` in try/catch. The live
   channel replaces `#status-sidebar` **whole** — blocks appear and disappear

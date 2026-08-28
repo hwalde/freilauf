@@ -25,7 +25,7 @@ import {
   headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
 } from './pages.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
-import { redirect, body as readBody, parseForm } from './web-helpers.mjs'
+import { redirect, body as readBody, parseForm, rememberRepo } from './web-helpers.mjs'
 import { vorfallLoesen, vorfaelleLoesen, vorfall } from './incidents.mjs'
 import { t } from './i18n.mjs'
 import { flowRoute, flowApi } from './flows/web.mjs'
@@ -78,6 +78,15 @@ export async function route(req, res) {
   const url = new URL(req.url, 'http://x')
   const path = url.pathname
   const formBody = async () => parseForm(await readBody(req))
+  // A full page load that names a repo makes that repo the persisted choice: the
+  // switcher's navigation itself and every link carrying ?repo= (the sidebar's
+  // counts, the "back" redirects, the overview links). Fragments, the SSE stream
+  // and static files never touch it. An invalid id (a deleted repo) leaves the
+  // cookie alone — the last valid choice is the better answer.
+  if (req.method === 'GET' && !path.startsWith('/api/') && !path.startsWith('/static/') && url.searchParams.has('repo')) {
+    const id = Number(url.searchParams.get('repo'))
+    if (Number.isInteger(id) && getRepo(id)) rememberRepo(res, id)
+  }
   try { await dispatch(req, res, url, path, formBody) }
   catch (e) {
     console.error('[http]', e)

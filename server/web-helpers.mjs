@@ -27,3 +27,23 @@ export function parseForm(text) {
   }
   return out
 }
+
+// ---------------- the repo choice cookie ----------------
+// The repo selected in the header is remembered in a cookie, so navigation to a
+// page that carries no ?repo= itself keeps the choice instead of falling back to
+// the first repo. The client writes it when the switcher changes; the server
+// (re-)writes it whenever a page request arrives with a valid ?repo=, so a URL
+// someone followed also becomes the persisted choice.
+
+const REPO_COOKIE = 'cchub_repo'
+
+/** The repo id stored in the cchub_repo cookie, or null. */
+export function cookieRepo(req) {
+  const m = /(?:^|;\s*)cchub_repo=(\d+)(?:;|$)/.exec(req.headers.cookie ?? '')
+  return m ? Number(m[1]) : null
+}
+
+/** Remember the chosen repo in the browser for a year (until the user changes it). */
+export function rememberRepo(res, id) {
+  res.setHeader('set-cookie', `${REPO_COOKIE}=${id}; Path=/; Max-Age=31536000; SameSite=Lax`)
+}
