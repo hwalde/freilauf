@@ -358,6 +358,11 @@ form.form-grid label:not(.chk):not(.weekday):not([hidden]):has(textarea) { displ
 form.form-grid label:has(textarea) > textarea { margin-top: var(--sp-4); }
 form.form-grid input, form.form-grid select, form.form-grid textarea { max-width: 100%; }
 form.form-grid fieldset { border-radius: var(--radius-8); }
+/* The goal (the second prompt) is folded away under the task: it is optional,
+   and a form should not open with a field most runs leave empty. Same shape as
+   the Quick-Run dialog's folded branch rule. */
+form.form-grid details.goal { margin: var(--sp-12) 0; }
+form.form-grid details.goal > summary { cursor: pointer; color: var(--accent-act-hover); }
 form.form-grid .btn-row { margin-top: var(--sp-16); }
 /* Narrow: a 13em caption column and a field next to it do not both fit, so the
    caption goes back above its field. */
@@ -567,6 +572,9 @@ dialog.qr details.qr-more { margin: var(--sp-10) 0; }
 dialog.qr details.qr-more summary { cursor: pointer; color: var(--accent-act-hover); }
 dialog.qr menu.qr-actions { display: flex; gap: var(--sp-10); justify-content: flex-end;
   margin: var(--sp-14) 0 0; padding: 0; }
+/* The escape to the full run form stands on its own, left of Cancel/Start —
+   it is not one of the two ways of sending this dialog, it is the exit from it. */
+dialog.qr menu.qr-actions [data-qr-full] { margin-right: auto; }
 dialog.qr button.ghost { background: none; color: var(--text-ghost); border: 1px solid var(--border-ghost); }
 /* The favorite's setup as a marker beside its select, not as a line beneath
    it: one line of text there clung to the field, and the gap it opened made

@@ -17,7 +17,7 @@ import {
 } from './run-def.mjs'
 import {
   listFavorites, getFavorite, saveFavorite, deleteFavorite,
-  favoriteFromForm, favoriteSummary, FAVORITES_MAX,
+  favoriteFromForm, favoriteTemplate, favoriteSummary, FAVORITES_MAX,
 } from './favorites.mjs'
 import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } from './title.mjs'
 import { getHarness, harnessLabel, detectInstalled } from './harnesses/index.mjs'
@@ -28,7 +28,7 @@ import { TYP_TEXT } from './detect.mjs'
 import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
 import { resumeCommand } from './integrate.mjs'
-import { listSessions, sessionKeepHours, currentKeepMs } from './sessions.mjs'
+import { listSessions, sessionKeepHours, currentKeepMs, paneAlive } from './sessions.mjs'
 import { attachmentSummary, flowSection, flowAttachFields } from './flows/attach.mjs'
 // The flow block of the detail page is rendered in server/flows/ and belongs to
 // that module; it is re-exported here so a fragment has ONE place to ask for a
@@ -169,6 +169,13 @@ function setupBanner() {
  * where it was and a toast says what happened, with a link to the run for
  * whoever wants to look. Being torn to a detail page is exactly what makes a
  * quick start not quick.
+ *
+ * The one exit that does lead away is "More settings": it opens the FULL
+ * single-run form in a new window (`/runs/new?repo=…&favorite=…`) with the
+ * dialog's state carried over — the favorite becomes the form's template, and
+ * hub.js parks the task, the branch rule and the start time in sessionStorage
+ * so the new window restores them. The moment one wants more than the dialog
+ * asks, the run stops being quick, and the full form is the place it belongs.
  */
 function quickRunDialog(repos, selectedRepo) {
   const favs = listFavorites()
@@ -191,6 +198,7 @@ function quickRunDialog(repos, selectedRepo) {
     </details>
     <p class="err" id="qr-error" hidden></p>
     <menu class="qr-actions">
+      <button type="button" class="ghost" data-qr-full>${e(t('qr.full'))}</button>
       <button type="button" class="ghost" data-qr-close>${e(t('qr.cancel'))}</button>
       <button type="submit">${e(t('qr.start'))}</button>
     </menu>
@@ -766,16 +774,24 @@ export async function pageRunForm(req, res, url) {
   if (!sel) return noRepoPage(res, '', t('runform.title_short'))
   const agentId = url.searchParams.get('agent')
   const a = agentId ? db.prepare('SELECT * FROM agents WHERE id=?').get(+agentId) : null
-  // Without an agent as a template: the setup of the last start — in practice
-  // the next run wants the same coding agent, provider, model and effort.
+  // A favorite as template: the Quick-Run dialog's "more settings" hands its
+  // favorite over via ?favorite=<id>, so the form opens with that setup and
+  // hub.js restores the dialog's prompt, branch rule and start time on top of
+  // it. Explicit beats remembered: an agent, then a favorite, then the last
+  // choice — never two templates competing.
+  const favId = url.searchParams.get('favorite')
+  const fav = favId && !a ? getFavorite(+favId) : null
+  const template = a ?? (fav ? favoriteTemplate(fav) : null) ?? lastRunChoice()
   const fields = `
   ${runTitleField({})}
-  ${runDefFields(a ?? lastRunChoice())}
+  ${runDefFields(template)}
   ${runStartTimeFields({})}
   <input type="hidden" name="repo_id" value="${sel.id}">
   <label class="chk"><input type="checkbox" name="save_agent" value="1"> ${e(t('runform.save_agent'))} (<input name="agent_name" placeholder="${e(t('runform.agent_name_ph'))}">)</label>`
   const body = `
-  <h2>${e(t('runform.title', { repo: sel.name }))}${a ? ` (${e(t('runform.like_agent', { agent: a.name }))})` : ''}</h2>
+  <h2>${e(t('runform.title', { repo: sel.name }))}${a
+    ? ` (${e(t('runform.like_agent', { agent: a.name }))})`
+    : fav ? ` (${e(t('runform.like_favorite', { favorite: fav.name }))})` : ''}</h2>
   <form method="post" action="/runs/new" class="settings form-grid">${fields}
   <div class="btn-row"><button>${e(t('runform.start'))}</button>
   ${pipelineAn()
@@ -804,13 +820,30 @@ export async function pageRun(req, res, url, id) {
       logHtml = `<pre id="log">${e(raw.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r/g, ''))}</pre>`
     } catch {}
   }
-  // "live" means: there really is a session one can attach to. Judged only by
-  // status, the page promised a terminal that did not exist.
-  const live = ['running', 'waiting_help'].includes(run.status) && !!run.tmux_session && !run.tmux_closed_at
+  // "live" means: there really is an agent one can type to — a standing session
+  // AND a process in it. Judged by the run's STATUS it meant neither, and both
+  // readings were wrong in their own direction:
+  //   - status alone promised a terminal for a session that was long gone;
+  //   - status as a CONDITION locked the operator out of the case the coding
+  //     agents make the normal one. claude, opencode and cursor stay in their
+  //     TUI after the work is done; the run says 'done', the agent is still
+  //     sitting there waiting for a follow-up, and the page offered a read-only
+  //     screen of it. Whether one may type is a fact about the session, never
+  //     about the record. (hermes is the counter-example, and the reason the
+  //     pane is asked about at all: `chat -q` is one query and then the process
+  //     exits — remain-on-exit leaves the screen, not the agent.)
+  const sessionOpen = !!run.tmux_session && !run.tmux_closed_at
+  // Unknown (null) counts as alive: a tmux that did not answer must not silently
+  // take away write access — the handshake is fail-closed on its own.
+  const live = sessionOpen && (await paneAlive(run.tmux_session)) !== false
+  // Is this run itself still going? That decides the BUTTON, not the typing:
+  // ending a run that is over would rewrite its 'done' to 'aborted'.
+  const inFlight = ['running', 'waiting_help'].includes(run.status)
   const body = `
   ${runDetailHead(run, { title: titel })}
   ${runChips(run, repo, herkunft)}
   ${integrationSection(run, repo)}
+  ${goalCard(run)}
   ${run.help_text
     ? run.status === 'waiting_help'
       // open: the agent is waiting for an answer right now
@@ -819,10 +852,21 @@ export async function pageRun(req, res, url, id) {
       // done: show as history, not as an open question
       : `<p class="dim"><b>${e(t('run.help_answered'))}:</b> ${e(run.help_text)}${run.help_answer ? ` → <i>${e(run.help_answer)}</i>` : ''}</p>`
     : ''}
-  <details ${live ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(live ? t('run.terminal_live') : t('run.terminal_closed'))}</summary>
-    <div id="term" data-session="${run.tmux_session && !run.tmux_closed_at ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
-    ${live ? `<form onsubmit="return cchubSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>
-    <form onsubmit="return cchubKill('${id}')"><button class="danger">${e(t('run.kill'))}</button></form>` : ''}
+  <details ${live ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(terminalState(live, sessionOpen, inFlight))}</summary>
+    <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
+    ${live && !inFlight ? `<p class="dim">${e(t('run.session_after_hint'))}</p>` : ''}
+    ${live ? `<form onsubmit="return cchubSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>` : ''}
+    ${inFlight
+      ? (live ? `<form onsubmit="return cchubKill('${id}')"><button class="danger">${e(t('run.kill'))}</button></form>` : '')
+      // The run is over — only the session is left. Ending it here must NOT go
+      // through /runs/<id>/kill: that sets 'aborted', and it would turn a run
+      // that came through cleanly into a failed one. /api/sessions/kill is the
+      // one path that ends a session and leaves a finished record alone.
+      : sessionOpen ? `<div class="btn-row"><form method="post" action="/api/sessions/kill" class="inline">
+          <input type="hidden" name="session" value="${e(run.tmux_session)}">
+          <input type="hidden" name="back" value="/runs/${id}">
+          <button class="danger">${e(t('run.end_session'))}</button></form>
+        <span class="dim">${e(t('run.end_session_hint'))}</span></div>` : ''}
   </details>
   ${['failed', 'aborted'].includes(run.status) && !run.resolves_run_id
     // A conflict run is never retried: the way back in is "Merge now" on the
@@ -838,6 +882,37 @@ export async function pageRun(req, res, url, id) {
   <h3>${e(t('run.events'))}</h3>${runEvents(id)}
   <h3>${e(t('run.log'))}</h3>${logHtml}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(titel, '/', body, run.repo_id, true))
+}
+
+/**
+ * The half sentence behind "Terminal" in the summary.
+ *
+ * Four states, because the two facts behind them are independent: is there a
+ * session, and is anybody still sitting in it. "(ended)" for a session whose
+ * process has exited would be a lie — the scrollback is there and can be
+ * attached to, only nobody answers any more.
+ */
+export function terminalState(live, sessionOpen, inFlight) {
+  if (live) return t(inFlight ? 'run.terminal_live' : 'run.terminal_after')
+  return t(sessionOpen ? 'run.terminal_dead' : 'run.terminal_closed')
+}
+
+/**
+ * The goal of a run, and whether it ever reached the session.
+ *
+ * Its own block rather than a chip: a condition is a sentence, and "was it sent
+ * in?" is a fact one only asks about here. A goal that is still waiting is not
+ * an error — the delivery waits for the TUI and the watcher picks up the rest —
+ * but it is the difference between "claude keeps going until this holds" and
+ * "claude does not know about it yet".
+ */
+export function goalCard(run) {
+  if (!run.goal) return ''
+  const state = run.goal_sent_at
+    ? `<span class="dim">${e(t('goal.sent_at', { ts: run.goal_sent_at }))}</span>`
+    : `<span class="warn">${e(t(['done', 'failed', 'aborted'].includes(run.status) ? 'goal.never_sent' : 'goal.pending'))}</span>`
+  return `<div class="card" id="run-goal"><b>🎯 ${e(t('goal.title'))}</b> ${state}
+    <pre>${e(run.goal)}</pre></div>`
 }
 
 /**

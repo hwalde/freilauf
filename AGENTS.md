@@ -81,6 +81,7 @@ is one and the same **run definition**, and it lives in **`server/run-def.mjs`**
 | What | Function | Used by |
 |---|---|---|
 | Form block (HTML) | `runDefFields(values)` | agent form + single-run form |
+| Its second prompt, for the harnesses that know one | `goalFields` | both forms (see below) |
 | Its setup half, on its own | `runSetupFields`, `branchFields` | favorite form, Quick-Run dialog |
 | Form → definition, incl. all validation | `runDefFromForm(body, problems)` | both forms + `POST /api/runs` |
 | Its setup half, on its own | `runSetupFromForm(body, problems)` | favorites (see below) |
@@ -115,6 +116,42 @@ of that repo, agents and single runs alike. Like `base_branch` and
 runner.mjs composes it as a labeled section into `prompt.md`) — repo config is
 not snapshotted into the run, so editing it affects the next run, never a
 running or finished one.
+
+### The goal: the second prompt, and the only one that is typed in
+
+The prompt says what to do. A **goal** says when it is **done**: claude's
+`/goal <condition>` sets a completion condition, has a small model check it
+after every turn, and while it does not hold claude takes another turn by
+itself — until it holds, until claude judges it impossible, or until someone
+clears it. So it belongs in the run definition (`agents.goal`, snapshotted into
+`runs.goal`), under the prompt, folded away, and only in the two forms that
+describe a run: the agent form and the single-run form. Deliberately **not** in
+Quick Run — that dialog asks for the task and the time, and a favorite carries
+no task.
+
+It is the one definition field that never reaches the agent through
+`prompt.md`, because **there is no CLI flag for it**. The command exists only
+inside the session, so the hub types it in **after** the start —
+`server/goal.mjs`, one delivery function and two ways into it:
+
+| Way in | When | Why both |
+|---|---|---|
+| `launchRun()` | right after the session stands, not awaited | it waits for the TUI to draw, and a start must not hang on that |
+| watcher pass | every run that still owes its session a goal | a hub restarted between the start and the delivery, a session that had not drawn yet, a run that was answering a help call |
+
+`runs.goal_sent_at` is what keeps the two from typing it in twice, and what
+lets the detail page answer "did the goal ever arrive?". Only from status
+`running`: `waiting_help` means the agent asked a question and is waiting, so a
+goal typed in there would **be** the answer. A retry clears the mark — a retry
+is a new session, and a `/goal` typed into the old one went with it.
+
+**Who knows a goal is the plugin's answer, not the form's** (`goal` in the
+harness plugin, see [docs/plugins.md](docs/plugins.md)). The form block writes
+that list into `data-goal-harnesses`, hub.js shows or hides the block on it —
+and hiding **disables** the field, because a hidden field that still submits is
+a text one can neither see nor correct: switching the coding agent would
+otherwise send along a condition meant for claude. What was typed stays in the
+DOM, so switching back and forth does not cost it.
 
 ### Every run has a title
 
@@ -197,6 +234,17 @@ is. It does **not** navigate: `POST
 /api/runs/quick` answers JSON, the page stays where it was and a toast says
 whether the run started, was planned or was deferred, with a link to it. Being
 torn to a detail page is what would make a quick start not quick.
+
+The one exit that does lead away is **More settings**: the moment one wants more
+than the dialog asks, the run stops being quick. It opens the FULL single-run
+form in a new window (`/runs/new?repo=…&favorite=…`): the favorite becomes the
+form's template (`favoriteTemplate()` in favorites.mjs, the counterpart of
+`favoriteToFormBody()`), and hub.js parks the task, the branch rule and the
+start time in `sessionStorage` (key `cchub:qrfull`) — a window opened by the
+opener inherits a copy, and the form page restores the fields onto the MAIN
+form before its start-time and branch syncs run. What the dialog does not ask
+for stays as the favorite's template rendered it; there is still no second
+definition builder involved.
 
 There is **no second definition builder** behind any of this, which is the whole
 reason a favorite stores only the setup half:
@@ -882,6 +930,38 @@ bill ran for days (thirty sessions, 15 GB, measured).
   pane PID down) — the pane itself is only a shell and would understate it by an
   order of magnitude.
 
+### The work is done — who is still there, and who only left a screen
+
+Three of the four coding agents keep running after the task is finished, and
+that is not a detail of the terminal but the reason it exists (measured
+2026-08-27, one trivial prompt each):
+
+| Coding agent | Command (`cc-start`) | When the work is done |
+|---|---|---|
+| claude | `claude --permission-mode dontAsk "$CC_PROMPT"` | stays in its TUI, pane alive — production sessions on `done` runs still had a live `claude` pane 19 h later |
+| opencode | `opencode --auto --prompt "$CC_PROMPT"` | stays in its TUI, pane alive |
+| cursor | `cursor-agent --force --trust -- "$CC_PROMPT"` | stays at "→ Add a follow-up", pane alive — this is what `finishByTurnEnd()` exists for |
+| hermes | `hermes chat -q "$CC_PROMPT" --yolo` | **exits.** `-q` is "single query (non-interactive mode)": it prints its answer plus a `hermes --resume …` line and the process ends (measured: dead pane, status 0, 9 s after the start) |
+
+So a standing session and a reachable agent are two different facts, and only
+`pane_dead` tells them apart — `remain-on-exit` keeps hermes's screen exactly
+the way it keeps a crashed run's. `paneAlive()` (sessions.mjs) is that one
+question, one `tmux list-panes` per detail page.
+
+**Which is why the run's terminal is writable as long as its SESSION is**, not
+as long as its status says `running`. It used to hang on the status, and that
+locked the operator out of the ordinary case: the run reports `done`, the agent
+is still sitting in its TUI ready for a follow-up, and the page showed a
+read-only screen of it. `pageRun()` therefore asks for the session and the pane,
+never for the status; the status only decides the BUTTON underneath — a run
+still in flight is ended (`/api/runs/<id>/kill`, sets `aborted`), a finished one
+only loses the session it left standing (`/api/sessions/kill` with a `back`,
+which leaves the record alone). `/api/runs/<id>/kill` enforces the same rule
+from its own side: on `done`/`failed`/`aborted` it closes the session and writes
+`tmux_closed` instead of rewriting a clean run into a failed one. What is sent
+into a finished session is real work that this run no longer records, and the
+retention clock keeps counting from the run's end — the page says so.
+
 **Ending a session is a run event, not just a tmux call.**
 `reconcileClosedSession()` is the single place that knows this: a run still on
 `running`/`waiting_help` becomes `aborted` with an `ended_at` and a report line
@@ -1002,9 +1082,10 @@ errors (`post_api_request` only fires after success).
 - **The terminal is fail-closed, twice.** `/term` only enables write access on an
   explicit `?ro=0` (`terminal.mjs`); without the parameter tmux attaches with
   `-r` AND every input is discarded. The client sets `ro=0` from `data-live` in
-  `pages.mjs`. Touching only one of the two sides yields a terminal that
-  silently does nothing — exactly how it sat for a long time, because `ro=0`
-  appeared nowhere.
+  `pages.mjs`, and `data-live` means "session standing AND a process in it" —
+  never "the run's status is `running`" (see above). Touching only one of the
+  two sides yields a terminal that silently does nothing — exactly how it sat
+  for a long time, because `ro=0` appeared nowhere.
 - **`tmux attach -r` is only the shorthand for `-f read-only,ignore-size`.** And
   `ignore-size` is useless while `window-size` is `latest` (default): the
   browser rewraps the agent's window to its size while watching — with and

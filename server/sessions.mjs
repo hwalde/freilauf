@@ -212,6 +212,29 @@ export async function sessionAlive(name) {
 }
 
 /**
+ * Is there still a PROCESS in this session one could type to?
+ *
+ * A standing session is not the same thing as a reachable agent: `cc-start
+ * --keep` sets remain-on-exit, so the session outlives its process on purpose
+ * — the screen stays readable, but there is nobody left to answer. That is
+ * exactly where the coding agents differ: claude, opencode and cursor stay in
+ * their TUI when the work is done (the pane lives on, a follow-up can be typed
+ * into it), hermes runs `chat -q`, a single non-interactive query, and exits —
+ * what remains there is a screenshot, not an agent.
+ *
+ * One `tmux list-panes` for one session; the detail page asks this once per
+ * render. `null` means tmux gave no answer at all (session gone, no server) —
+ * the caller decides what to make of not knowing.
+ */
+export async function paneAlive(name) {
+  if (!name) return null
+  const r = await sh('tmux', ['list-panes', '-t', `=${name}`, '-F', '#{pane_dead}'])
+  if (!r.ok) return null
+  const flags = r.stdout.split('\n').map(s => s.trim()).filter(Boolean)
+  return flags.length ? flags.some(v => v === '0') : null
+}
+
+/**
  * Every session with everything known about it: the run behind it, the agent,
  * the repo and what the process tree costs. Oldest first — that is the order
  * one wants when cleaning up.

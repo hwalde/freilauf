@@ -468,6 +468,63 @@ try {
     await p.close()
   })
 
+  await pruefe('"More settings" opens the FULL run form in a new window with the dialog\'s state', async () => {
+    const p = await neueSeite(`/?repo=${repoId}`)
+    await p.click('#qr-open')
+    await p.selectOption('#qr-fav', String(FAV1))
+    await p.fill('#qr-form textarea[name=prompt]', 'Browser-Quickrun: doch mehr Einstellungen')
+    await p.evaluate(() => { document.querySelector('#qr-dialog details.qr-more').open = true })
+    await p.selectOption('#qr-form select[data-branch-mode]', 'neu')
+    await p.fill('#qr-form input[name=branch_pattern]', 'aufschub/{datum}')
+    await p.selectOption('#qr-form select[data-start-switch]', 'in')
+    await p.fill('#qr-form input[name=start_in_minutes]', '45')
+
+    const popupFehler = []
+    const [neu] = await Promise.all([
+      p.waitForEvent('popup'),
+      p.click('#qr-form [data-qr-full]'),
+    ])
+    neu.on('pageerror', (err) => popupFehler.push(`pageerror: ${err.message}`))
+    neu.on('console', (m) => {
+      if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) popupFehler.push(`console: ${m.text()}`)
+    })
+    await neu.waitForLoadState('load')
+    gleich(await p.$eval('#qr-dialog', d => d.open), false, 'the dialog closes on the way out')
+
+    const u = new URL(neu.url())
+    gleich(u.pathname, '/runs/new', 'a full run form opens')
+    gleich(u.searchParams.get('repo'), String(repoId), 'for the repo chosen in the dialog')
+    gleich(u.searchParams.get('favorite'), String(FAV1), 'carrying the favorite as its template')
+
+    // The dialog's own fields, parked in sessionStorage and restored onto the
+    // MAIN form — the dialog on that page has them empty, the two must not mix.
+    gleich(await neu.$eval('form.settings textarea[name=prompt]', el => el.value),
+      'Browser-Quickrun: doch mehr Einstellungen', 'the task survives')
+    gleich(await neu.$eval('form.settings select[data-branch-mode]', el => el.value), 'neu', 'the branch rule survives')
+    gleich(await neu.$eval('form.settings input[name=branch_pattern]', el => el.value),
+      'aufschub/{datum}', 'with its pattern')
+    gleich(await neu.$eval('form.settings [data-branch-pattern]', el => el.hidden), false,
+      'the pattern is visible again — the branch sync saw the restored value')
+    gleich(await neu.$eval('form.settings select[data-start-switch]', el => el.value), 'in', 'the start time survives')
+    gleich(await neu.$eval('form.settings .st[data-mode="in"]', el => el.hidden), false,
+      'and its block is shown, not the default "now"')
+
+    // The favorite's setup is the form's TEMPLATE, not something the dialog typed.
+    gleich(await neu.$eval('form.settings select[name=harness]', el => el.value), 'claude',
+      'the favorite\'s coding agent')
+    gleich(await neu.$eval('form.settings #model', el => el.value), 'claude-opus-5', 'and its model')
+
+    gleich(await neu.evaluate(() => sessionStorage.getItem('cchub:qrfull')), null,
+      'the parked state is consumed on the way in')
+    gleich(await p.evaluate(() => sessionStorage.getItem('cchub:qrfull')), null,
+      'and not left over in the opener either')
+
+    wahr(popupFehler.length === 0, `the new window's console stays quiet (${popupFehler.join(' | ')})`)
+    sauber(p)
+    await p.close()
+    await neu.close()
+  })
+
   // ------------------------------------------------------------------ A8
   gruppe('A8 — renaming a run in place')
 
@@ -688,6 +745,31 @@ try {
     await p.selectOption('select[name=harness]', 'claude')
     await wartePage(p, () => document.getElementById('or-routing').hidden === true, null,
       'and to disappear again for a coding agent that cannot pass it through')
+    sauber(p)
+    await p.close()
+  })
+
+  await pruefe('the goal belongs to the coding agent that knows one — hidden means not submitted', async () => {
+    // A hidden field that still submits is a text the operator cannot see and
+    // cannot correct: switching the coding agent would silently send along a
+    // condition meant for claude. So hiding and disabling are one move.
+    const p = await neueSeite(`/runs/new?repo=${repoId}`)
+    await p.selectOption('select[name=harness]', 'claude')
+    await wartePage(p, () => document.getElementById('goal-block').hidden === false, null,
+      'the goal block to be there for claude')
+    // Folded away: it is optional, and a form should not open with a field most
+    // runs leave empty. One click is what a goal costs.
+    falsch(await p.$eval('#goal-block', el => el.open), 'and folded, because most runs have none')
+    await p.click('#goal-block summary')
+    await p.fill('#goal-block textarea', 'all tests are green')
+    await p.selectOption('select[name=harness]', 'opencode')
+    await wartePage(p, () => document.getElementById('goal-block').hidden === true, null,
+      'and to disappear for a coding agent without a /goal')
+    wahr(await p.$eval('#goal-block textarea', el => el.disabled), 'the field is disabled, so nothing is submitted')
+    await p.selectOption('select[name=harness]', 'claude')
+    await wartePage(p, () => document.getElementById('goal-block').hidden === false, null, 'and comes back')
+    gleich(await p.$eval('#goal-block textarea', el => el.value), 'all tests are green',
+      'with what was typed — switching back and forth does not cost it')
     sauber(p)
     await p.close()
   })

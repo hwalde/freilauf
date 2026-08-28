@@ -156,6 +156,14 @@ addColumn('runs', 'effort', 'TEXT')
 // agent/run, NEVER loaded automatically. The run carries the definition copy as usual.
 addColumn('agents', 'skills', 'TEXT')
 addColumn('runs', 'skills', 'TEXT')
+// The goal: a SECOND prompt, part of the run definition (server/goal.mjs). Only
+// coding agents whose plugin carries a `goal` spec know one — claude does, as
+// `/goal <condition>`. 'goal_sent_at' is the run's own bookkeeping: the command
+// exists only inside the session, so it is typed in AFTER the start, and exactly
+// once.
+addColumn('agents', 'goal', 'TEXT')
+addColumn('runs', 'goal', 'TEXT')
+addColumn('runs', 'goal_sent_at', 'TEXT')
 // Attached flows (JSON list of { flowId, when }) — part of the run definition,
 // see server/flows/attach.mjs. The run carries the definition copy as usual, so
 // editing an agent never changes what an already running run will trigger.

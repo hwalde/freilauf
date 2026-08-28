@@ -51,6 +51,22 @@ export default {
   ],
 
   /**
+   * The second prompt. `/goal <condition>` (Claude Code 2.1.232 and newer) sets
+   * a completion condition: after every turn a small model checks whether the
+   * condition holds, and while it does not, claude takes another turn by itself
+   * — until it holds, until claude judges it impossible, or until `/goal clear`.
+   *
+   * There is NO command-line flag for it. The command exists only inside the
+   * session, which is why the hub types it in after the start instead of
+   * handing it to cc-start (server/goal.mjs). 4000 characters is the limit the
+   * command itself documents.
+   */
+  goal: {
+    max: 4000,
+    command: (condition) => `/goal ${condition}`,
+  },
+
+  /**
    * Model list. There is no catalog endpoint without an API key (the
    * subscription has none), hence a maintained list: the aliases that always
    * point to the newest release, plus the fixed identifiers. Free-text input

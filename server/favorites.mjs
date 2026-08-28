@@ -105,6 +105,27 @@ export function favoriteToFormBody(fav) {
   return setupToFormBody(fav)
 }
 
+/**
+ * A stored favorite in the shape the run form's definition block reads — the
+ * agent-row keys `runDefFields()` expects. `favoriteToFormBody()` is the other
+ * half: it turns a favorite back into a form body for the START path, while
+ * THIS one serves the run form as a template. The Quick-Run dialog's "more
+ * settings" hands its favorite over through `?favorite=<id>`, and the form
+ * opens prefilled with exactly that setup — the prompt, branch rule and start
+ * time are what hub.js parks on top of it.
+ */
+export function favoriteTemplate(fav) {
+  return {
+    harness: fav.harness,
+    model: fav.model ?? '',
+    provider: fav.provider ?? '',
+    or_provider: fav.or_provider ?? '',
+    effort: fav.effort ?? '',
+    skills: fav.skills ?? null,
+    flows: fav.flows ?? null,
+  }
+}
+
 /** "claude · claude-opus-5 · effort high · unlazy (depth 4)" — one line for a list or a dialog. */
 export function favoriteSummary(fav) {
   const teile = [harnessLabel(fav.harness) || fav.harness]
