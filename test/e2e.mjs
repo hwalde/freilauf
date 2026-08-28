@@ -2208,8 +2208,37 @@ try {
       gesehen++
       enthaelt(leiste, `/?repo=${repoId}&amp;status=${s}`, `${s}: linked into the overview`)
       enthaelt(leiste, `<span class="n">${n}</span>`, `${s}: with the count the database holds`)
+      // With only one repo the sum of all repos equals this repo's own count, so
+      // the overall suffix would add nothing and must stay away.
+      falsch(leiste.includes(`overall`), `${s}: one repo, so no "(y overall)" suffix`)
     }
     wahr(gesehen > 0, 'at least one status was in flight at this point of the suite')
+
+    // A second repo makes "overall" mean something: the line reads this repo's
+    // own count in the link and the sum of BOTH repos in the dimmed suffix. The
+    // fixture runs are directly inserted (nothing starts them: scheduled, start_at
+    // far in the future), one in this repo so the line exists, three in the other
+    // repo so the overall exceeds it — and cleaned up right after.
+    const zweites = db.prepare(`INSERT INTO repos(name, path) VALUES('e2e-zweites', ?)`).run(REPO).lastInsertRowid
+    const einsetzen = db.prepare(`INSERT INTO runs(id, repo_id, harness, prompt, branch_mode, expected_minutes, status, start_mode, start_at)
+      VALUES(?, ?, 'claude', 'E2E-Gesamt', 'keiner', 45, 'scheduled', 'at', '2030-01-01 00:00:00')`)
+    einsetzen.run('e2e-gesamt-own', repoId)
+    for (let i = 0; i < 3; i++) einsetzen.run(`e2e-gesamt-${i}`, zweites)
+    try {
+      const s2 = 'scheduled'
+      const jetzt = db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND status=?`).get(repoId, s2).c
+      const gesamt = db.prepare(`SELECT count(*) c FROM runs WHERE archived_at IS NULL AND status=?`).get(s2).c
+      wahr(gesamt > jetzt, `the fixture makes the overall exceed this repo (${gesamt} > ${jetzt})`)
+      const html2 = await (await hol(`/?repo=${repoId}`)).text()
+      const leiste2 = html2.slice(html2.indexOf('id="status-sidebar"'), html2.indexOf('</aside>'))
+      enthaelt(leiste2, `<span class="n">${jetzt}</span> <span>Scheduled <span class="dim">in this repo</span></span>`,
+        'the repo count links with the status and the "in this repo" scope')
+      enthaelt(leiste2, `<span class="overall dim">(${gesamt} overall)</span>`, 'and the sum of all repos stands dimmed outside the link')
+      falsch(leiste2.includes(`/status=scheduled"><span class="n">${gesamt}</span>`), 'the overall is NOT the number that links')
+    } finally {
+      db.prepare(`DELETE FROM runs WHERE id LIKE 'e2e-gesamt-%'`).run()
+      db.prepare(`DELETE FROM repos WHERE id=?`).run(zweites)
+    }
   })
   await pruefe('a count leads to the overview filtered to exactly that status', async () => {
     // A planned run: it exists, it has no session, and nothing picks it up for

@@ -694,6 +694,8 @@
   "side.toggle": "Show / hide the status panel",
   "side.work": "Work in flight",
   "side.work_none": "nothing running",
+  "side.work_here": "in this repo",
+  "side.work_overall": "({n} overall)",
   "incidents.needs_you_short": "need you",
   "incidents.noticed_short": "noticed",
   "status.scheduled": "Scheduled",

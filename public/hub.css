@@ -244,12 +244,23 @@ aside.sidebar .side-label { display: block; color: var(--text-dim); margin-botto
 #header-status { display: flex; align-items: baseline; gap: var(--sp-8); }
 #header-status b { font-size: var(--fs-title); }
 /* Work in flight: one line per status, the number first because that is what
-   is being read. Each line links into the overview filtered to that status. */
+   is being read. The repo's own count links into the overview filtered to that
+   status; the sum of ALL repos for the same status stands behind it as a dimmed
+   suffix — "1 running" that does not add up reads as "1 running in this repo
+   (17 overall)". The count line is one sentence and is set so it stays one line
+   once the counts reach three digits: the text sits at 12px (a deliberate
+   sub-small — at 13px the sentence overflows the 244px column), the number keeps
+   the title size as the emphasized figure, and only an extreme line (a long
+   status word AND a large overall) folds the suffix under rather than clipping
+   it. The link itself never wraps, so the number and the status stay whole. */
 ul.side-counts { list-style: none; padding: 0; margin: 0; }
-ul.side-counts li { padding: var(--sp-2) 0; }
-ul.side-counts a { display: flex; align-items: baseline; gap: var(--sp-8); text-decoration: none; color: inherit; border-radius: var(--radius-4); }
+ul.side-counts li { display: flex; align-items: baseline; gap: var(--sp-4); padding: var(--sp-2) 0; flex-wrap: wrap; font-size: 12px; }
+ul.side-counts a { display: flex; align-items: baseline; gap: var(--sp-6); text-decoration: none; color: inherit; border-radius: var(--radius-4); flex: 0 0 auto; white-space: nowrap; }
 ul.side-counts a:hover { color: var(--accent-act-hover); }
-ul.side-counts .n { font-size: var(--fs-title); font-weight: 600; min-width: 1.6em; text-align: right; font-variant-numeric: tabular-nums; }
+ul.side-counts a:hover .dim { color: inherit; }
+ul.side-counts .n { font-size: var(--fs-title); font-weight: 600; min-width: 1.2em; text-align: right; font-variant-numeric: tabular-nums; }
+ul.side-counts .dim { font-size: inherit; }
+ul.side-counts .overall { flex: 0 0 auto; }
 /* In the sidebar a usage row is a GROUP, not a line. Claude carries three
    windows and Cursor a reset note, and as a wrapping flex row (the wide
    layout's shape) label, plan and windows simply flowed into each other — one

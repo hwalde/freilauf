@@ -256,15 +256,23 @@ export function statusText(status) {
 /** How much work is in flight in this repo, per status, linked into the overview. */
 function workBlock(repoId) {
   if (repoId == null) return ''
-  const zeilen = WORK_STATUSES.map(s => ({
-    status: s,
-    n: db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND status=?`).get(repoId, s).c,
-  })).filter(z => z.n > 0)
+  const zeilen = WORK_STATUSES.map(s => {
+    const n = db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND status=?`).get(repoId, s).c
+    if (!n) return null
+    return {
+      status: s,
+      n,
+      // The sum of ALL repos for that status — the reading "1 running" that does
+      // not add up only makes sense against the other repos' loads.
+      gesamt: db.prepare(`SELECT count(*) c FROM runs WHERE archived_at IS NULL AND status=?`).get(s).c,
+    }
+  }).filter(Boolean)
   if (!zeilen.length) return `<div class="side-block"><span class="side-label">${e(t('side.work'))}</span>
     <span class="dim">${e(t('side.work_none'))}</span></div>`
   return `<div class="side-block"><span class="side-label">${e(t('side.work'))}</span>
     <ul class="side-counts">${zeilen.map(z =>
-      `<li><a href="/?repo=${repoId}&amp;status=${e(z.status)}"><span class="n">${z.n}</span> <span>${e(statusText(z.status))}</span></a></li>`).join('')}</ul></div>`
+      `<li><a href="/?repo=${repoId}&amp;status=${e(z.status)}"><span class="n">${z.n}</span> <span>${e(statusText(z.status))} <span class="dim">${e(t('side.work_here'))}</span></span></a>
+      ${z.gesamt > z.n ? `<span class="overall dim">${e(t('side.work_overall', { n: z.gesamt }))}</span>` : ''}</li>`).join('')}</ul></div>`
 }
 
 /**
