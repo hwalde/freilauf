@@ -13,7 +13,7 @@
 // production database, ~/agents and foreign tmux sessions are never touched,
 // and only the sessions an instance created itself are killed on the way out.
 import { spawn, execFile, execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
@@ -60,7 +60,19 @@ export function neuerSandkasten({ praefix = 'cc-hub-test-', behalten = false } =
   const ORIGIN = join(SB, 'origin.git')
   const STUB = join(SB, 'bin', 'cc-start')
   const FEHLSTART = join(SB, 'fehlstart-an')
-  const sessions = new Set()          // ONLY these get killed at the end
+  // Every session the stub below created, written by the stub itself. The `sessions`
+  // set next to it is what individual tests register by hand — and THAT is what used
+  // to leak: only two helpers ever called `sessions.add`, so every run started along
+  // another path (the scheduler, a flow, a conflict run, a retry) created a tmux
+  // session nothing would ever kill. Measured on the development machine: 157 live
+  // sessions, 11 of them belonging to the running hub, together holding gigabytes of
+  // RSS while the machine sat in swap.
+  //
+  // The stub knows the name it just created and cannot forget to write it down, so
+  // the list belongs to it. Still no pattern across all `cc-*`: this file holds
+  // exactly the sessions THIS sandbox produced, and nothing else is touched.
+  const SESSIONSLISTE = join(SB, 'sessions.txt')
+  const sessions = new Set()          // what a test registered by hand; killed as well
 
   const zustand = { hub: null, db: null, port: 0, basis: '', aufgeraeumt: false }
 
@@ -121,8 +133,13 @@ done
 WORKDIR="\${POS[0]:-$PWD}"
 
 # Smoke-test run: pass through to the REAL cc-start (also covers the cc-* scripts).
+# Not exec: the session it creates has to be written down too, or --echt would
+# leak exactly what the stub path no longer does.
 if [[ -n "$PROMPTFILE" && -r "$PROMPTFILE" ]] && grep -q 'E2E-ECHT' "$PROMPTFILE"; then
-  exec "${homedir()}/.local/bin/cc-start" "\${ALLE[@]}"
+  AUSGABE=$("${homedir()}/.local/bin/cc-start" "\${ALLE[@]}") || { echo "$AUSGABE"; exit 1; }
+  echo "$AUSGABE"
+  echo "$AUSGABE" | sed -n "s/^Session '\\([^']*\\)' .*/\\1/p" >> "${SESSIONSLISTE}"
+  exit 0
 fi
 
 # Deliberate failed start for the retry test.
@@ -142,6 +159,7 @@ echo "CC_RUN_ID=\${CC_RUN_ID:-<leer>}"
 echo "bereit fuer Eingaben:"
 while IFS= read -r zeile; do echo "[agent sah] $zeile"; done
 INNER
+echo "$SESSION" >> "${SESSIONSLISTE}"
 tmux new-session -d -x 200 -y 50 "\${ENVS[@]}" -e "CC_PROMPTFILE=$PROMPTFILE" -s "$SESSION" -c "$WORKDIR" bash "$RUNNER"
 if [[ -n "$LOG" ]]; then mkdir -p "$(dirname "$LOG")"; tmux pipe-pane -o -t "=$SESSION:" "cat >> '$LOG'"; fi
 [[ -n "$KEEP" ]] && tmux set-option -t "=$SESSION:" -q remain-on-exit on
@@ -273,13 +291,22 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     zustand.aufgeraeumt = true
     await hubStoppen()
     // ONLY the sessions we created ourselves — never a pattern across all cc-*.
-    for (const s of sessions) await sh('tmux', ['kill-session', '-t', `=${s}`]).catch(() => {})
+    // The stub's own list first (it cannot forget one), then whatever a test
+    // registered by hand; a Set, so a name in both is killed once.
+    const alle = new Set(sessions)
+    try {
+      for (const zeile of readFileSync(SESSIONSLISTE, 'utf8').split('\n')) {
+        const name = zeile.trim()
+        if (name) alle.add(name)
+      }
+    } catch { /* no run ever started: nothing to clean up */ }
+    for (const s of alle) await sh('tmux', ['kill-session', '-t', `=${s}`]).catch(() => {})
     if (behalten) console.log(`\nSandbox kept: ${SB}`)
     else rmSync(SB, { recursive: true, force: true })
   }
 
   return {
-    SB, REPO, ORIGIN, FEHLSTART, sessions,
+    SB, REPO, ORIGIN, FEHLSTART, sessions, SESSIONSLISTE,
     bauen, hubStarten, hubStoppen, watcherVorbereiten, aufraeumen,
     hol, formular,
     get db() { return zustand.db },

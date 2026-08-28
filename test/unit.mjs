@@ -1686,6 +1686,54 @@ try {
     }
   })
 
+  // layout() awaits usage AND balances on every single page, and both of them
+  // talk to a vendor's API — cursor's own dashboard endpoint carries a 12 s
+  // timeout. So for two minutes the hub was fast and then ONE page view paid
+  // for everybody, with a white screen for as long as the slowest provider took.
+  // A stale number in the sidebar is worth incomparably more than a page that
+  // does not come.
+  await pruefe('an expired panel is served stale while it refreshes behind the page', async () => {
+    const usage = await import('../server/usage.mjs')
+    const bal = await import('../server/balances.mjs')
+    const echt = globalThis.fetch
+    const key = process.env.OPENROUTER_API_KEY
+    const vorher = ca.listCodingAgents().map(a => ({ harness: a.harness, providers: a.providerIds, enabled: a.enabled }))
+    let haenge = null                       // resolves the pending fetch by hand
+    let rufe = 0
+    globalThis.fetch = async () => {
+      rufe++
+      if (haenge) await new Promise(r => { haenge = r })
+      return { ok: true, json: async () => ({ data: { total_credits: 5, total_usage: 1 }, is_available: true }) }
+    }
+    try {
+      for (const a of ca.listCodingAgents()) ca.deleteCodingAgent(a.id)
+      ca.saveCodingAgent({ harness: 'opencode', enabled: 1, providers: ['openrouter'] })
+      process.env.OPENROUTER_API_KEY = 'k'
+      usage._usageCacheReset(); bal._balanceCacheReset()
+
+      const erste = await bal.providerBalances()
+      gleich(erste.length, 1, 'the cold call really does fetch')
+      const rufeNachErster = rufe
+
+      // Age the entry past its two minutes, then make the next fetch hang.
+      bal._balanceCacheAge(3 * 60_000)
+      haenge = () => {}
+      const zweite = await Promise.race([
+        bal.providerBalances(),
+        new Promise(r => setTimeout(() => r('zu langsam'), 200)),
+      ])
+      wahr(zweite === erste, 'the stale answer comes back at once, byte for byte the old one')
+      wahr(rufe > rufeNachErster, 'and the refresh really was started behind it')
+      haenge?.()
+    } finally {
+      globalThis.fetch = echt
+      if (key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = key
+      for (const a of ca.listCodingAgents()) ca.deleteCodingAgent(a.id)
+      for (const a of vorher) ca.saveCodingAgent({ harness: a.harness, enabled: a.enabled, providers: a.providers })
+      usage._usageCacheReset(); bal._balanceCacheReset()
+    }
+  })
+
   // ------------------------------------------------------------------
   gruppe('Run definition: one form → one definition (run-def.mjs)')
   // 'claude' is the configured coding agent here (seeded by the group above).

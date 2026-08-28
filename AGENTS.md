@@ -409,6 +409,90 @@ and is the opposite: it is what closes the terminal's WebSocket, and with it
 that tmux client. The send and kill forms also sit outside the fragment and have
 to disappear. The reason is in the code, so it does not get modernized away.
 
+## The transport: why the hub felt slow, and what carries it now
+
+Every page rendered in single-digit milliseconds and the hub still hung. That is
+the shape of this whole section: **none of it was visible from inside the hub**,
+because the requests never got there. Three causes, all in the layer between the
+browser and `hub.mjs`, all measured on the running installation.
+
+### One connection per tab, and a browser has six
+
+`vpn-proxy.mjs` was `https.createServer` — HTTP/1.1 only. A browser opens at most
+**6 connections per origin** over HTTP/1.1, and since the live channel exists
+**every open cc-hub tab holds one of them open forever**: an EventSource is a
+response that never ends. Four tabs left the page two connections to load itself
+through; six left it none, and every further request simply queued in the browser
+until a tab was closed.
+
+It is `http2.createSecureServer` now, `ALPNProtocols: ['h2', 'http/1.1']`. An h2
+browser multiplexes pages, fragments, static files and the SSE stream over ONE
+connection, and the ceiling stops existing.
+
+`allowHTTP1: true` is what keeps the terminal working: browsers do not run
+WebSockets over h2 (RFC 8441 is not advertised here), so they open a separate
+HTTP/1.1 connection for the upgrade — and the proxy's `upgrade` event still fires
+for it. That was measured against Node 22 before the switch, because the h2
+server's compat layer documents `request` but not `upgrade`.
+
+**Hop-by-hop headers become fatal under h2.** `connection`, `keep-alive`,
+`transfer-encoding` and `upgrade` describe one connection; node rejects them on
+an h2 stream outright. The hub's SSE handler sends `connection: keep-alive`, so
+passing the upstream headers straight through would have killed the live channel
+for every h2 client — silently, since the throw happens inside the proxy. Both
+directions are filtered (`normalizeHeaders`, `responseHeaders`), and the same
+function turns an h2 client's `:authority` into the `host` the allowlist reads.
+
+### `pipe()` does not close what it stopped reading
+
+`up.pipe(res)` alone does not survive the client going away. When a browser
+closes an SSE stream — a navigation, a closed tab — the downstream `res` ends,
+but the **upstream request to the hub was never destroyed**: node's `pipe()`
+unpipes a dead destination, it does not tear down the source.
+
+So every page view left behind a socket to the hub, and inside the hub the SSE
+client record that hangs on it: an entry in `clients` that receives every
+published event, plus a 25 s heartbeat interval, for the life of the process.
+Measured before the fix: **7 browser connections, 19 upstream ones**, and the
+number only ever went up.
+
+`res.on('close') → upstream.destroy()`. Everything the hub does to notice a gone
+client (`req.on('close')` in events.mjs) depends on this socket actually closing
+— which is why the fix belongs in the proxy and not there.
+
+### Static files had no validator, and were read from disk every time
+
+`serveStatic` did a `readFileSync` on **every** request and answered with nothing
+but a content-type. Two consequences, and the second is the expensive one:
+
+- a synchronous read in the request path blocks the ONE event loop that also
+  holds every SSE stream, the terminal WebSocket, the scheduler and the watcher.
+  xterm.js alone is 488 KB off disk;
+- with no validator a browser cannot revalidate, so it re-downloaded the whole
+  set on every page view — ~600 KB per page, ~900 KB on a run detail page.
+
+Now: in memory, with an ETag from the file's mtime+size and `cache-control:
+no-cache`. A repeat page view went from 104 KB to 10.5 KB. `no-cache` rather than
+a long `max-age` because these URLs carry no content hash — a cached hub.js would
+otherwise outlive a deploy. The entry is validated against one `statSync` per
+request (metadata, no bytes), so editing `public/hub.js` still takes effect on
+the next reload; the dev loop this repo lives on must not be traded for a cache.
+
+### And a page render never waits on somebody else's server
+
+`layout()` awaits `subscriptionUsage()` and `providerBalances()` — the rail and
+the panel — on **every** page, and both talk to vendor APIs (cursor's dashboard
+endpoint carries a 12 s timeout). With a two-minute cache the hub was fast for
+two minutes and then ONE page view paid for everybody.
+
+Both are **stale-while-revalidate** now: an expired entry is returned as it
+stands while the refresh runs behind it, and the live channel re-fetches the
+sidebar anyway, so the new numbers arrive on their own. `force` (the `/api/usage`
+route) still waits — that caller asked for the current answer, not a fast one.
+The only request that could still wait on a vendor is the one finding no cached
+answer at all, which is why `hub.mjs` **warms both at startup**, fire and forget.
+First page view after a restart: 1.15 s before, 11 ms after.
+
 ## The status sidebar: one place that says how the machine is doing
 
 `statusSidebar()` in `pages.mjs`, right of the content, on **every** page,
@@ -701,6 +785,7 @@ node test/e2e.mjs           # complete hub in a sandbox, stub instead of real ag
 node test/e2e.mjs --echt    # additionally ONE real run per harness (consumes quota)
 node test/e2e.mjs --keep    # keep the sandbox (debugging)
 node test/browser.mjs       # public/hub.js in a real Chromium — ~10 s
+node test/proxy.mjs         # vpn-proxy.mjs against a stub upstream — <1 s
 ```
 
 The e2e suite starts a **second hub** on a free port with its own database, its
@@ -711,6 +796,19 @@ killed (also on Ctrl-C). Watcher passes are triggered directly instead of
 waiting for the 30-second interval. That sandbox lives in
 **`test/sandkasten.mjs`** — one construction, two suites, because a second copy
 of it would drift the way the run definition once did.
+
+**The sandbox kills what its own stub created, and the stub writes the list.**
+That used to be a `sessions` Set filled by two helpers, so every run started
+along another path — the scheduler, a flow, a conflict run, a retry — created a
+tmux session nothing would ever kill. One per suite run is enough: agents working
+on this repository run the suite dozens of times a day, and the machine ended up
+with 157 live sessions, 11 of them belonging to the running hub, together holding
+gigabytes of RSS while it sat in swap. The leftovers are recognizable by their
+`-2` suffix — the stub's own collision loop, firing because a retry reuses the
+run id while the first session is still standing. The stub knows the name it
+created and cannot forget to write it down, so `$SB/sessions.txt` is the list and
+`aufraeumen()` reads it. Still no pattern across all `cc-*`: that file holds
+exactly the sessions THIS sandbox produced.
 
 The sandbox repo has a **bare `origin`** next to it, which is what lets the
 integration be tested for real: the group "Integration: a run is done when its
@@ -738,6 +836,17 @@ the form parked in `sessionStorage` while one builds a flow, the
 provider/model/effort cascade, the sessions page's optimistic ending, and both
 branches of the terminal. Every test also fails on an exception in the browser
 console, because that is where a silent break first shows.
+
+**Why there is a proxy suite.** AGENTS.md has carried the sentence "a green test
+against 127.0.0.1 says NOTHING about the path through the TLS proxy" for a long
+time, and nothing tested that path at all — which is exactly where the three
+slowdowns above were hiding. `test/proxy.mjs` starts `vpn-proxy.mjs` against a
+**stub** upstream, because what is being tested is what the proxy does with a
+connection and a stub can COUNT its connections: ALPN really offers h2 and still
+falls back to http/1.1 for the terminal, an SSE stream survives the hop-by-hop
+headers h2 forbids, and eight abandoned streams leave **not one** socket behind.
+It is part of `npm test` (it needs only openssl, and reports itself skipped and
+green without it).
 
 It is **not** part of `npm test`: it needs `playwright` (a devDependency) and a
 Chromium. Without either, the suite reports itself skipped and ends green —

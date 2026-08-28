@@ -176,6 +176,24 @@ try {
       wahr((await r.text()).length > 100, 'content present')
     })
   }
+  // Without a validator a browser cannot revalidate, so it re-downloaded the
+  // whole set on every page view: ~600 KB per page and ~900 KB on a run detail
+  // page, xterm.js alone being 488 KB — read off disk SYNCHRONOUSLY, in the one
+  // event loop that also holds every SSE stream, the terminal WebSocket, the
+  // scheduler and the watcher. That is what "the hub hangs" was made of.
+  await pruefe('a static file carries an ETag and answers a revalidation with 304', async () => {
+    const r = await hol('/static/hub.js')
+    const etag = r.headers.get('etag')
+    wahr(!!etag, 'the answer carries a validator')
+    gleich(r.headers.get('cache-control'), 'no-cache',
+      'and asks to be revalidated rather than blindly reused — these URLs carry no content hash')
+    wahr((await r.text()).length > 100, 'the cold answer is the file')
+
+    const zweite = await hol('/static/hub.js', { headers: { 'if-none-match': etag } })
+    gleich(zweite.status, 304, 'the unchanged file is not sent a second time')
+    gleich((await zweite.text()).length, 0, 'and carries no body at all')
+  })
+
   await pruefe('unknown API path answers 404 instead of hanging', async () => {
     const r = await hol('/api/gibtsnicht', { timeoutMs: 5000 })
     gleich(r.status, 404, 'status')
