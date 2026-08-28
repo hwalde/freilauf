@@ -414,9 +414,11 @@ to disappear. The reason is in the code, so it does not get modernized away.
 `statusSidebar()` in `pages.mjs`, right of the content, on **every** page,
 `id="status-sidebar"`. In it, in this order: pipeline state (`headerStatus()`,
 `id="header-status"`), work in flight per status for the current repo (each
-count links to `/?repo=…&status=…`, the overview's one filter), open incidents
-split the way `incidents.mjs` splits them, subscription usage and provider
-balances (`usagePanel()`, `id="usage-panel"`).
+count links to `/?repo=…&status=…`, the overview's one filter; when the other
+repos together hold more of the same status, the sum across ALL repos follows as
+a dimmed `(y overall)` suffix outside the link, shown only when it differs), open
+incidents split the way `incidents.mjs` splits them, subscription usage and
+provider balances (`usagePanel()`, `id="usage-panel"`).
 
 Before this, status stood in three places and fully on exactly one page: two
 quota bars in the header, the pipeline switch as running text beside them, and

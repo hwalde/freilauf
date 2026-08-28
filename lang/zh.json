@@ -684,6 +684,8 @@
   "side.toggle": "显示／隐藏状态栏",
   "side.work": "进行中的工作",
   "side.work_none": "暂无运行",
+  "side.work_here": "在此仓库",
+  "side.work_overall": "({n} 总计)",
   "incidents.needs_you_short": "需要处理",
   "incidents.noticed_short": "仅记录",
   "status.scheduled": "已计划",
