@@ -418,7 +418,7 @@ export async function statusSidebar(repoId = null) {
 export async function layout(req, title, active, content, selectedRepo = null, withTerminal = false) {
   // No "Flows" entry: a flow is not a place you go, it hangs on the agent or the
   // single run that starts it. The flow pages are reached from those two forms.
-  const nav = [['/', t('nav.overview')], ['/archive', t('nav.archive')], ['/agents', t('nav.agents')], ['/sessions', t('nav.sessions')],
+  const nav = [['/', t('nav.overview')], ['/agents', t('nav.agents')], ['/sessions', t('nav.sessions')],
     ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
     .map(([href, label]) => `<a href="${href}" class="${active === href ? 'on' : ''}">${e(label)}</a>`).join('')
   const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
