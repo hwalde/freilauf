@@ -28,8 +28,8 @@ import { providersForHarness, enabledCodingAgents } from './coding-agents.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { effortOptionen } from './models.mjs'
 import { branchWorktree } from './runner.mjs'
-import { skillFelder, skillsAusFormular } from './zusaetze.mjs'
-import { flowAttachFields, attachmentsFromForm } from './flows/attach.mjs'
+import { skillFelder, skillsAusFormular, skillListe, eintragName, eintragWert } from './zusaetze.mjs'
+import { flowAttachFields, attachmentsFromForm, parseAttachments } from './flows/attach.mjs'
 import { t } from './i18n.mjs'
 
 /** 'keiner' = detached worktree, 'neu' = create a branch, 'fest' = use an existing one. */
@@ -237,6 +237,46 @@ export async function runDefFromForm(b, problems = []) {
     skills: skillsAusFormular(b),
     flows: attachmentsFromForm(b),
   }
+}
+
+/**
+ * A stored SETUP back in the shape of a form body — the counterpart to
+ * `runSetupFromForm()`, and the reason there is no second definition builder
+ * anywhere in this codebase. A favorite uses it, and so does the conflict
+ * resolver of server/integrate.mjs: both hold the setup half under a name and
+ * both turn it back into a run through `runDefFromForm()`, the ordinary path.
+ *
+ * It used to live in favorites.mjs, where it only happened to sit — the function
+ * knows nothing about favorites, it knows the form.
+ *
+ * The two list fields keep the shape the form parser produces (`<name>_list`
+ * plus a companion field per entry), because that is what `skillsAusFormular()`
+ * and `attachmentsFromForm()` read.
+ */
+export function setupToFormBody(setup = {}) {
+  const body = {
+    harness: setup.harness,
+    model: setup.model ?? '',
+    provider: setup.provider ?? '',
+    effort: setup.effort ?? '',
+    // The serving provider only survives where it can be passed through at all
+    // (opencode + OpenRouter); providerFromForm() decides that, as always.
+    or_pin: (setup.or_provider ?? setup.orProvider) ? '1' : '',
+    or_provider: setup.or_provider ?? setup.orProvider ?? '',
+    skills_list: [],
+    flows_list: [],
+  }
+  for (const eintrag of skillListe(setup.skills)) {
+    const name = eintragName(eintrag)
+    body.skills_list.push(name)
+    const wert = eintragWert(eintrag)
+    if (wert) body[`skill_regler_${name}`] = wert
+  }
+  for (const a of parseAttachments(setup.flows)) {
+    body.flows_list.push(String(a.flowId))
+    body[`flow_when_${a.flowId}`] = a.when
+  }
+  return body
 }
 
 // -------------------------------------------------------- agent row ↔ definition

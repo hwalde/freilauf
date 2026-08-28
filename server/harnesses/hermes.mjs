@@ -70,6 +70,15 @@ export default {
    * author/slug), provider as an own argument. cc-start translates --effort
    * into hermes' --reasoning.
    */
+  /**
+   * No resume command. `hermes --resume SESSION` wants a session name the hub
+   * never learns (nothing hands one out at start), and `--continue` without a
+   * name is not documented as "the session of this directory" — offering a
+   * command that opens somebody else's conversation is worse than offering none.
+   * The escalation messages then name the worktree instead.
+   */
+  resumeCommand() { return null },
+
   modelArgs(run) {
     const args = []
     const fehlt = []

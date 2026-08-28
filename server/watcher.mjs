@@ -8,7 +8,6 @@ import db, { getRepo, addEvent } from './db.mjs'
 import { RUNS_DIR, sh } from './util.mjs'
 import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd } from './reports.mjs'
 import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
-import { harnessOwnedPaths } from './runner.mjs'
 import { claudeQuota } from './quota.mjs'
 import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText } from './detect.mjs'
 import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, offeneVorfaelle, detektorLog, msVon, brauchtMensch } from './incidents.mjs'
@@ -17,6 +16,7 @@ import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
 import { flowsTick } from './flows/triggers.mjs'
 import { reconcileClosedSession, tmuxSessionMap, shouldAutoClose, currentKeepMs } from './sessions.mjs'
+import { integrateTick, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 
 let timer = null
 
@@ -65,6 +65,9 @@ export async function tick() {
   await checkFinishedBranches()
   await retryDeferred()
   await startScheduled()
+  // The finish gate has its own 5-second timer (server/integrate.mjs); this is
+  // the net under it, for the case that timer ever stops.
+  try { await integrateTick() } catch (e) { console.error('[integrate]', e.message) }
   await closeOldSessions()
   await cleanupWorktrees()
   // No-code flows: run_finished backstop, delays, cron (server/flows/triggers.mjs).
@@ -84,7 +87,9 @@ async function collectInboxes() {
     try { lines = readFileSync(f, 'utf8').split('\n').filter(Boolean) } catch { continue }
     if (!lines.length) continue
     for (const line of lines) {
-      try { await handleReport(id, JSON.parse(line)) } catch (e) { console.error('[inbox]', e.message) }
+      // 'inbox': there is no cc-report call left to answer, so the finish gate
+      // types its answer into the session instead.
+      try { await handleReport(id, JSON.parse(line), 'inbox') } catch (e) { console.error('[inbox]', e.message) }
     }
     // clear what has been processed
     writeFileSync(f, '')
@@ -141,17 +146,22 @@ async function watchRun(run) {
   const expectedMs = run.expected_minutes * 60_000
   const lastAct = run.last_activity_at ? Date.parse(run.last_activity_at.replace(' ', 'T') + 'Z') : startedMs
 
+  // A run in the finish gate has reported and is deliberately waiting for the
+  // hub (or for its own last commit) — none of the three "it is late" anomalies
+  // says anything true about it.
+  const imAbschluss = !!run.finish_state
+
   if (run.status === 'running' || run.status === 'waiting_help') {
     // yellow: no activity for 15 min
-    if (now - lastAct > 15 * 60_000 && st.pane_dead !== '1') {
+    if (!imAbschluss && now - lastAct > 15 * 60_000 && st.pane_dead !== '1') {
       addEventOnce(run.id, 'anomaly:no_activity')
     }
     // yellow: 80 % of the expected duration reached, no report
-    if (now - startedMs > 0.8 * expectedMs && !run.report_md) {
+    if (!imAbschluss && now - startedMs > 0.8 * expectedMs && !run.report_md) {
       addEventOnce(run.id, 'anomaly:soft_overrun')
     }
     // red: expected duration exceeded without report/progress
-    if (now - startedMs > expectedMs && !run.report_md) {
+    if (!imAbschluss && now - startedMs > expectedMs && !run.report_md) {
       const hadProgress = db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind='progress'`).get(run.id)
       if (!hadProgress) {
         addEventOnce(run.id, 'anomaly:overrun')
@@ -603,8 +613,10 @@ async function cleanupWorktrees() {
     if (!existsSync(run.worktree)) continue
     const repo = getRepo(run.repo_id)
     const branch = run.branch_reported || run.branch_expected
-    let removable = false
-    if (branch) {
+    // The hub merged this run itself — there is nothing left the branch could
+    // still be needed for. The dirt guard below still applies.
+    let removable = run.merge_status === 'merged'
+    if (branch && !removable) {
       const { synced } = await branchSyncState(repo.path, branch)
       if (synced) removable = true      // upstream exists AND nothing outstanding
       if (!removable) {
@@ -616,21 +628,10 @@ async function cleanupWorktrees() {
     // beats any 'removable'. Otherwise the cleanup deletes real work.
     if (removable) {
       const dirty = await sh('git', ['-C', run.worktree, 'status', '--porcelain'])
-      // The worktree extras come from us, not from the agent. A symlink 'referenz',
-      // for example, is not covered by the ignore rule 'referenz/' (with a slash)
-      // and would otherwise sit there as '?? referenz' forever — the worktree would
-      // never get cleaned up.
-      // …and so are the harness hook files the hub itself wrote in before the
-      // start (cursor: '.cursor/hooks.json'). Left in the list they would make
-      // every cursor worktree "dirty" forever and none would ever be removed.
-      const eigene = [...(repo.extras ?? []).map(x => String(x.path)), ...harnessOwnedPaths(run.harness)]
-        .map(p => p.replace(/\/+$/, ''))
-      // git names the directory ('?? .cursor/') when everything below it is
-      // untracked, and the single file ('?? .cursor/hooks.json') when it is not
-      // — so the comparison has to cover both.
-      const fremd = dirty.stdout.split('\n').filter(Boolean)
-        .map(z => z.slice(3).trim().replace(/\/+$/, ''))
-        .filter(p => !eigene.some(e => p === e || p.startsWith(`${e}/`)))
+      // Uncommitted work beats any 'removable' — the worktree extras and the
+      // harness hook files do not, because the hub put those there itself
+      // (foreignChanges() in integrate.mjs, shared with the finish gate).
+      const fremd = foreignChanges(dirty.stdout, ownWorktreePaths(repo, run.harness))
       if (!dirty.ok || fremd.length) {
         addEventOnce(run.id, 'anomaly:worktree_dirty', { worktree: run.worktree, offen: fremd.slice(0, 20) })
         removable = false
@@ -639,6 +640,12 @@ async function cleanupWorktrees() {
     if (removable) {
       await sh('git', ['-C', repo.path, 'worktree', 'remove', '--force', run.worktree])
       addEvent(run.id, 'worktree_removed')
+      // A local branch whose work is on the base branch has nothing left to
+      // hold. Remote branches stay in v1: visible history is cheaper than an
+      // accidental deletion.
+      if (branch && run.merge_status === 'merged') {
+        await sh('git', ['-C', repo.path, 'branch', '-D', branch])
+      }
     }
   }
 }

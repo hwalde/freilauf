@@ -54,6 +54,16 @@ export default {
    * the model; effort and serving-provider pinning both travel in ONE merged
    * OPENCODE_CONFIG_CONTENT (global plugins and MCP servers survive that).
    */
+  /**
+   * `opencode --continue` continues the LAST session of the directory it is
+   * started in (`-c, --continue  continue the last session`, opencode 1.18.23).
+   * Every run works in a worktree of its own, so that last session is this run's
+   * — no id to look up.
+   */
+  resumeCommand(run) {
+    return run?.workdir_effective ? `cd ${run.workdir_effective} && opencode --continue` : null
+  },
+
   modelArgs(run) {
     const args = []
     const fehlt = []

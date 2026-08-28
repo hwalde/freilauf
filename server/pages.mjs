@@ -13,7 +13,7 @@ import {
 import {
   runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
   runTitleField, runStartTimeFields, runStartFromForm,
-  runSetupFields, branchFields,
+  runSetupFields, runSetupFromForm, branchFields,
 } from './run-def.mjs'
 import {
   listFavorites, getFavorite, saveFavorite, deleteFavorite,
@@ -26,7 +26,8 @@ import { subscriptionUsage } from './usage.mjs'
 import { ampelAusVorfaellen, offeneVorfaelle, alleVorfaelle, brauchtMensch } from './incidents.mjs'
 import { TYP_TEXT } from './detect.mjs'
 import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
-import { skillListe, skillAnzeige, skillFelder } from './zusaetze.mjs'
+import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
+import { resumeCommand } from './integrate.mjs'
 import { listSessions, sessionKeepHours, currentKeepMs } from './sessions.mjs'
 import { attachmentSummary, flowSection, flowAttachFields } from './flows/attach.mjs'
 // The flow block of the detail page is rendered in server/flows/ and belongs to
@@ -65,8 +66,11 @@ function ampel(run) {
   const vf = ampelAusVorfaellen(run.id)
   const red = vf === 'rot' || ['waiting_help', 'failed'].includes(run.status)
     || db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind LIKE 'anomaly:%' AND kind NOT IN ('anomaly:no_activity','anomaly:soft_overrun','anomaly:unpushed') LIMIT 1`).get(run.id)
+  // A run in the finish gate is at least yellow: it has reported, and something
+  // is still keeping its work off the base branch. A blocked_* one is red
+  // through its incident anyway.
   const yellow = !red && (
-    vf === 'gelb' || run.status === 'deferred'
+    vf === 'gelb' || run.status === 'deferred' || !!run.finish_state
     || db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind IN ('anomaly:no_activity','anomaly:soft_overrun','anomaly:unpushed') LIMIT 1`).get(run.id))
   return red ? 'red' : yellow ? 'yellow' : 'green'
 }
@@ -541,6 +545,7 @@ export function runRow(r, ctx) {
       <td class="status-cell">
         <span class="status-line">${AMPEL_DOT[ampel(r)]()} ${e(statusText(r.status))}</span>
         ${wartend ? `<div class="dim">${wartetAuf(r)}</div>` : ''}
+        ${integrationLine(r)}
         ${anomaly ? `<div class="dim">${e(anomaly)}</div>` : ''}</td>
       <td class="title-cell" onclick="event.stopPropagation()">
         ${titleInline(r.id, titel)}
@@ -552,6 +557,20 @@ export function runRow(r, ctx) {
         r.pr_url ? `<span class="dim"><a href="${e(r.pr_url)}" onclick="event.stopPropagation()">PR</a></span>` : ''}</td>
       <td>${vorfallZelle(r.id, repoId, r.status)}${archivBtn}</td>
     </tr>`
+}
+
+/**
+ * Where a run's work stands, under the status word — the same place the last
+ * anomaly uses, because it answers the same kind of question. A run in the
+ * finish gate says what it is waiting for; a finished one says why its work is
+ * not on the base branch. 'merged' and 'nothing' say nothing: those are the
+ * cases where everything is as it should be.
+ */
+function integrationLine(r) {
+  if (r.finish_state) return `<div class="dim">${e(finishText(r.finish_state))}</div>`
+  if (!r.merge_status || ['merged', 'nothing'].includes(r.merge_status)) return ''
+  if (!['done', 'failed', 'aborted'].includes(r.status)) return ''
+  return `<div class="dim">${e(mergeText(r.merge_status))}</div>`
 }
 
 /** How many columns the overview has — the empty state has to span all of them. */
@@ -782,6 +801,7 @@ export async function pageRun(req, res, url, id) {
   const body = `
   ${runDetailHead(run, { title: titel })}
   ${runChips(run, repo, herkunft)}
+  ${integrationSection(run, repo)}
   ${run.help_text
     ? run.status === 'waiting_help'
       // open: the agent is waiting for an answer right now
@@ -838,6 +858,65 @@ export function runDetailHead(run, ctx) {
        ${run.archived_at ? `<span class="dim">${e(t('run.archived_since', { ts: run.archived_at }))}</span>`
          : `<span class="dim">${e(t('run.archive_hint'))}</span>`}</div>`
     : ''}`
+}
+
+/** A finish_state / merge_status as a word, falling back to the raw value. */
+export function finishText(state) {
+  const key = `finish.${state}`
+  return t(key) === key ? String(state) : t(key)
+}
+export function mergeText(status) {
+  const key = `merge.${status}`
+  return t(key) === key ? String(status) : t(key)
+}
+
+/**
+ * Where this run's work stands — and the buttons that move it.
+ *
+ * Only rendered where the repo asked the hub to integrate; with merge_mode 'off'
+ * this block does not exist and the page is what it always was. The buttons are
+ * ordinary POST forms in the page's own style; the destructive one asks first.
+ */
+export function integrationSection(run, repo) {
+  if (repo?.merge_mode !== 'hub' && !run.merge_status && !run.finish_state) return ''
+  const terminal = ['done', 'failed', 'aborted'].includes(run.status)
+  const zeilen = []
+  if (run.finish_state) zeilen.push(`<b>${e(finishText(run.finish_state))}</b>`)
+  if (run.merge_status) zeilen.push(e(mergeText(run.merge_status)))
+  if (run.merged_sha) zeilen.push(`<code>${e(run.merged_sha.slice(0, 7))}</code>`)
+  if (run.resolver_run_id) {
+    zeilen.push(`<a href="/runs/${e(run.resolver_run_id)}">${e(t('merge.resolver_run'))}</a>`)
+  }
+  if (run.resolves_run_id) {
+    zeilen.push(`<a href="/runs/${e(run.resolves_run_id)}">${e(t('merge.original_run'))}</a>`)
+  }
+  const resume = resumeCommand(run)
+
+  const knopf = (action, label, extra = '', confirmKey = null) => `
+    <form method="post" action="/api/runs/${e(run.id)}/${action}" class="inline"${
+      confirmKey ? ` onsubmit="return confirm(${JSON.stringify(t(confirmKey))})"` : ''}>${extra}
+      <button>${e(t(label))}</button></form>`
+
+  const buttons = []
+  if (run.status === 'running' && !run.finish_state) {
+    buttons.push(knopf('mark-done', 'merge.mark_done'))
+  }
+  const unmerged = String(run.merge_status ?? '')
+  if (terminal && ['unmerged_commits', 'blocked_error', 'blocked_conflict', 'blocked_no_remote'].includes(unmerged)) {
+    buttons.push(knopf('merge', 'merge.merge_now'))
+  }
+  if (['blocked_dirty', 'unmerged_both', 'unmerged_dirty'].includes(unmerged)) {
+    buttons.push(knopf('merge', 'merge.commit_leftovers', '<input type="hidden" name="leftovers" value="commit">'))
+    buttons.push(knopf('merge', 'merge.discard_leftovers', '<input type="hidden" name="leftovers" value="discard">',
+      'merge.discard_confirm'))
+  }
+  if (/^(blocked_|unmerged_)/.test(unmerged)) buttons.push(knopf('merge-skip', 'merge.skip'))
+
+  return `<div class="banner waiting" id="run-integration">
+    <b>${e(t('merge.section'))}:</b> ${zeilen.join(' · ') || `<span class="dim">–</span>`}
+    ${resume ? `<div class="dim">${e(t('merge.resume'))}: <code>${e(resume)}</code></div>` : ''}
+    ${buttons.length ? `<div class="btn-row">${buttons.join('')}</div>` : ''}
+  </div>`
 }
 
 /**
@@ -1060,6 +1139,8 @@ export async function pageSettings(req, res, url) {
      <span class="dim">${e(t('settings.coding_agents_hint'))}</span></p>
   <p><a class="btn" href="/settings/favorites">${e(t('fav.title'))}</a>
      <span class="dim">${e(t('settings.favorites_hint'))}</span></p>
+  <p><a class="btn" href="/settings/merge">${e(t('merge.settings_title'))}</a>
+     <span class="dim">${e(t('settings.merge_hint', { setup: mergeSettingsSummary() }))}</span></p>
   <form method="post" action="/settings/save" class="settings form-grid">
     <label>${e(t('settings.language'))} <select name="ui_language">${Object.entries(LANGUAGES).map(([code, label]) =>
       `<option value="${code}" ${(s.ui_language ?? 'en') === code ? 'selected' : ''}>${e(label)}</option>`).join('')}</select></label>
@@ -1170,6 +1251,78 @@ export async function favoriteDelete(req, res, url, formBody) {
   const b = await formBody()
   deleteFavorite(+b.id)
   redirect(res, '/settings/favorites')
+}
+
+// ---------------- merge (Settings → Merge) ----------------
+//
+// The conflict resolver's setup: which coding agent, provider, model and effort
+// the hub starts when a finished run's branch does not merge any more and its
+// agent is gone (server/integrate.mjs).
+//
+// Its own page, like the favorites, and for the same reason: the
+// provider/model/effort block is driven by hub.js through #prov, #model and
+// #effort, and those ids may exist once per page.
+//
+// There is no second definition builder behind it. The form block is
+// `runSetupFields()` — the one the run form uses — and the way back is
+// `runSetupFromForm()`, so what is stored here cannot come to mean something
+// else than what the run form would have made of the same inputs.
+
+export async function pageMergeSettings(req, res, url) {
+  const s = Object.fromEntries(db.prepare('SELECT key,value FROM settings').all().map(r => [r.key, r.value]))
+  const werte = {
+    harness: s.merge_resolver_harness ?? '',
+    provider: s.merge_resolver_provider ?? '',
+    or_provider: s.merge_resolver_or_provider ?? '',
+    model: s.merge_resolver_model ?? '',
+    effort: s.merge_resolver_effort ?? '',
+    skills: s.merge_resolver_skills ?? null,
+  }
+  const body = `<h2>${e(t('merge.settings_title'))}</h2>
+  <p class="dim">${e(t('merge.settings_intro'))}</p>
+  ${werte.harness ? '' : `<p class="warn">${e(t('merge.no_resolver_hint'))}</p>`}
+  <form method="post" action="/settings/merge" class="settings form-grid">
+    ${runSetupFields(werte)}
+    ${skillFelder(werte.skills)}
+    <label>${e(t('merge.resolver_prompt'))}
+      <textarea name="merge_resolver_prompt" rows="8">${e(s.merge_resolver_prompt ?? '')}</textarea>
+      <span class="dim">${e(t('merge.resolver_prompt_hint'))}</span></label>
+    <div class="btn-row"><button>${e(t('settings.save'))}</button>
+      <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>
+  </form>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(await layout(t('merge.settings_title'), '/settings', body))
+}
+
+export async function mergeSettingsSave(req, res, url, formBody) {
+  const b = await formBody()
+  const problems = []
+  // An empty coding agent means "no resolver configured" and is a legal state —
+  // a conflicting branch is then escalated to the operator directly.
+  if (String(b.harness ?? '').trim()) {
+    const setup = await runSetupFromForm(b, problems)
+    if (problems.length) return problemPage(res, t('merge.settings_title'), problems, '/settings/merge')
+    setSetting('merge_resolver_harness', setup.harness)
+    setSetting('merge_resolver_provider', setup.provider ?? '')
+    setSetting('merge_resolver_or_provider', setup.orProvider ?? '')
+    setSetting('merge_resolver_model', setup.model ?? '')
+    setSetting('merge_resolver_effort', setup.effort ?? '')
+    setSetting('merge_resolver_skills', skillsAusFormular(b) ?? '')
+  } else {
+    for (const k of ['harness', 'provider', 'or_provider', 'model', 'effort', 'skills']) {
+      setSetting(`merge_resolver_${k}`, '')
+    }
+  }
+  setSetting('merge_resolver_prompt', String(b.merge_resolver_prompt ?? ''))
+  redirect(res, '/settings/merge')
+}
+
+/** One line for the settings page: what the resolver is, or that there is none. */
+export function mergeSettingsSummary() {
+  const harness = db.prepare(`SELECT value FROM settings WHERE key='merge_resolver_harness'`).get()?.value
+  if (!harness) return t('merge.not_configured')
+  const model = db.prepare(`SELECT value FROM settings WHERE key='merge_resolver_model'`).get()?.value
+  return [harnessLabel(harness) || harness, model].filter(Boolean).join(' / ')
 }
 
 // ---------------- coding agents (Settings → Coding agents) ----------------
@@ -1425,6 +1578,67 @@ export async function agentStart(req, res, url, formBody) {
   redirect(res, r.runId ? `/runs/${r.runId}` : '/agents')
 }
 
+/**
+ * The Integration block of the repo form (server/integrate.mjs).
+ *
+ * `merge_mode='off'` is the default and means exactly the behaviour that existed
+ * before this block did: the run ends when the agent reports done, and nothing
+ * is merged. Everything below it only matters in 'hub' mode.
+ *
+ * `notify_running` is a CHECKBOX and therefore carries a hidden companion field
+ * with its "0": an unchecked box is simply absent from the body, and "off" would
+ * otherwise read as "not mentioned".
+ */
+function integrationFields(r = {}) {
+  const num = (name, value, min, hint) => `
+    <label>${e(t(`repos.${name}`))} <input type="number" name="${name}" min="${min}" value="${e(String(value))}">
+      <span class="dim">${e(t(hint))}</span></label>`
+  const mode = r.merge_mode === 'hub' ? 'hub' : 'off'
+  return `
+  <fieldset class="schedule">
+    <legend>${e(t('repos.integration_legend'))}</legend>
+    <label>${e(t('repos.merge_mode'))} <select name="merge_mode">
+      <option value="off" ${mode === 'off' ? 'selected' : ''}>${e(t('merge.mode_off'))}</option>
+      <option value="hub" ${mode === 'hub' ? 'selected' : ''}>${e(t('merge.mode_hub'))}</option>
+    </select>
+      <span class="dim">${e(t('repos.merge_mode_hint'))}</span></label>
+    <label>${e(t('repos.merge_check'))} <input name="merge_check" value="${e(r.merge_check ?? '')}" placeholder="node test/unit.mjs">
+      <span class="dim">${e(t('repos.merge_check_hint'))}</span></label>
+    ${num('finish_timeout_min', r.finish_timeout_min ?? 15, 1, 'repos.finish_timeout_hint')}
+    ${num('merge_max_attempts', r.merge_max_attempts ?? 2, 0, 'repos.merge_max_attempts_hint')}
+    ${num('conflict_parallel', r.conflict_parallel ?? 1, 1, 'repos.conflict_parallel_hint')}
+    <input type="hidden" name="notify_running" value="0">
+    <label class="chk"><input type="checkbox" name="notify_running" value="1" ${(r.notify_running ?? 1) ? 'checked' : ''}>
+      ${e(t('repos.notify_running'))}</label>
+    <p class="dim">${e(t('repos.notify_running_hint'))}</p>
+    ${num('max_parallel', r.max_parallel ?? 0, 0, 'repos.max_parallel_hint')}
+  </fieldset>`
+}
+
+/** The Integration numbers out of the form — same strictness as the other repo fields. */
+function integrationFromForm(b, problems) {
+  const zahl = (name, min, fallback) => {
+    const raw = String(b[name] ?? '').trim()
+    if (raw === '') return fallback
+    const n = Number(raw)
+    if (!Number.isInteger(n) || n < min) {
+      problems.push(t('repos.err_number', { field: t(`repos.${name}`), min }))
+      return fallback
+    }
+    return n
+  }
+  return {
+    merge_mode: b.merge_mode === 'hub' ? 'hub' : 'off',
+    merge_check: String(b.merge_check ?? '').trim() || null,
+    finish_timeout_min: zahl('finish_timeout_min', 1, 15),
+    merge_max_attempts: zahl('merge_max_attempts', 0, 2),
+    conflict_parallel: zahl('conflict_parallel', 1, 1),
+    // The last value wins in parseForm, so the checkbox beats its hidden companion.
+    notify_running: b.notify_running === '1' || b.notify_running === 'on' ? 1 : 0,
+    max_parallel: zahl('max_parallel', 0, 0),
+  }
+}
+
 export async function repoEdit(req, res, url) {
   const id = url.searchParams.get('id')
   const r = id ? getRepo(+id) : {}
@@ -1435,6 +1649,7 @@ export async function repoEdit(req, res, url) {
     <label>${e(t('repos.base'))} <input name="base_branch" value="${e(r.base_branch ?? 'main')}"></label>
     <label>${e(t('repos.prompt_label'))} <textarea name="prompt" rows="6">${e(r.prompt ?? '')}</textarea></label>
     <label>${e(t('repos.extras_label'))} <textarea name="worktree_extras" rows="5">${e(r.worktree_extras ?? '[]')}</textarea></label>
+    ${integrationFields(r)}
     <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
   </form>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.repos'), '/repos', body))
@@ -1458,14 +1673,21 @@ export async function repoSave(req, res, url, formBody) {
   } catch (err) {
     problems.push(t('repos.extras_json', { err: err.message }))
   }
+  const integ = integrationFromForm(b, problems)
   if (problems.length) return problemPage(res, t('repos.edit_title'), problems, back)
   const prompt = (b.prompt ?? '').trim() || null
+  const i = [integ.merge_mode, integ.merge_check, integ.finish_timeout_min, integ.merge_max_attempts,
+    integ.conflict_parallel, integ.notify_running, integ.max_parallel]
   if (id) {
-    db.prepare(`UPDATE repos SET name=?, path=?, base_branch=?, worktree_extras=?, prompt=? WHERE id=?`)
-      .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt, +id)
+    db.prepare(`UPDATE repos SET name=?, path=?, base_branch=?, worktree_extras=?, prompt=?,
+                merge_mode=?, merge_check=?, finish_timeout_min=?, merge_max_attempts=?,
+                conflict_parallel=?, notify_running=?, max_parallel=? WHERE id=?`)
+      .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt, ...i, +id)
   } else {
-    db.prepare(`INSERT INTO repos(name,path,base_branch,worktree_extras,prompt) VALUES(?,?,?,?,?)`)
-      .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt)
+    db.prepare(`INSERT INTO repos(name,path,base_branch,worktree_extras,prompt,
+                merge_mode,merge_check,finish_timeout_min,merge_max_attempts,
+                conflict_parallel,notify_running,max_parallel) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt, ...i)
   }
   redirect(res, '/repos')
 }

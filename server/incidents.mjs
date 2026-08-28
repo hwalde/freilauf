@@ -40,7 +40,11 @@ export function detektorLog(runId, eintrag) {
  * same wall. A rate limit and a provider hiccup, on the other hand, pass by
  * themselves; the hub defers and retries.
  */
-export const MENSCH_TYPEN = new Set(['auth_error', 'billing_error', 'model_error'])
+export const MENSCH_TYPEN = new Set(['auth_error', 'billing_error', 'model_error',
+  // A branch that did not make it onto the base branch stays where it is until
+  // somebody decides: merge it, commit the leftovers, or skip it. Waiting does
+  // not help, so this belongs in the group that asks for hands.
+  'merge_blocked'])
 
 /**
  * Does this incident need a human — or is it just an observation?

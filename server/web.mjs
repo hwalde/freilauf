@@ -22,9 +22,12 @@ import {
   telegramSetup, telegramTokenSave, telegramChatSave, telegramChats,
   pageCodingAgents, codingAgentSave, codingAgentDelete,
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
+  pageMergeSettings, mergeSettingsSave,
   headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
+  integrationSection,
 } from './pages.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
+import { mergeByHand, skipMerge, resetIntegration } from './integrate.mjs'
 import { redirect, body as readBody, parseForm } from './web-helpers.mjs'
 import { vorfallLoesen, vorfaelleLoesen, vorfall } from './incidents.mjs'
 import { t } from './i18n.mjs'
@@ -125,6 +128,11 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'GET' && path === '/settings/favorites/edit') return favoriteEdit(req, res, url)
   if (req.method === 'POST' && path === '/settings/favorites/edit') return favoriteSave(req, res, url, formBody)
   if (req.method === 'POST' && path === '/settings/favorites/delete') return favoriteDelete(req, res, url, formBody)
+  // Merge (Settings → Merge) — the conflict resolver's setup. Its own page for
+  // the same reason the favorites have one: the provider/model/effort block is
+  // driven through #prov, #model and #effort, and those ids exist once per page.
+  if (req.method === 'GET' && path === '/settings/merge') return pageMergeSettings(req, res, url)
+  if (req.method === 'POST' && path === '/settings/merge') return mergeSettingsSave(req, res, url, formBody)
   // No-code flows (server/flows/) — own router, own pages.
   if (path === '/flows' || path.startsWith('/flows/')) return flowRoute(req, res, url)
   res.writeHead(404, { 'content-type': 'text/plain' }); res.end(t('web.not_found'))
@@ -218,10 +226,16 @@ async function api(req, res, url) {
       ? { ok: true, endpoints: r.liste, veraltet: r.veraltet }
       : { ok: false, error: r.fehler ?? t('api.endpoints_unreachable') })
   }
+  // The report endpoint answers 200 with `{ ok, message }`, and the message is
+  // the point: with the repo's integration switched on the finish gate has
+  // something to SAY back ("your worktree is dirty", "this conflicts"), and
+  // cc-report prints it into the agent's running turn. It must be a 2xx —
+  // cc-report treats anything else as "hub unreachable" and files the report in
+  // inbox.jsonl, where the watcher would replay it.
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/report$/))) {
     let b = {}
     try { b = JSON.parse(await readBody(req) || '{}') } catch {}
-    const r = await handleReport(m[1], b)
+    const r = await handleReport(m[1], b, 'http')
     return json(res, r.ok ? 200 : 400, r)
   }
   // Same definition, same validation and same start path as the run form
@@ -337,10 +351,15 @@ async function api(req, res, url) {
     // Set tmux_closed_at right away: otherwise the detail page tries to attach
     // a terminal to the dead session until the next watcher tick (410 in the browser).
     db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
-                tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(m[1])
+                tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')), finish_state=NULL WHERE id=?`).run(m[1])
     // Same event kind reconcileClosedSession() writes, so "why did this run
     // stop?" has one answer to look for rather than two.
     addEvent(m[1], 'aborted', { by: 'user' })
+    // An end somebody ASKED for is an abort, even in the finish gate — and what
+    // it leaves behind is assessed like any other unfinished run (no Telegram:
+    // whoever clicked the button knows).
+    const { assessLater } = await import('./sessions.mjs')
+    assessLater(m[1], false)
     flowsTick().catch(e => console.error('[flows]', e.message))   // "run finished" triggers, without waiting for the watcher
     return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
   }
@@ -350,9 +369,39 @@ async function api(req, res, url) {
     // Retried = not over any more: it leaves the archive, otherwise an active run
     // would sit hidden in the overview while it works.
     db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL, archived_at=NULL WHERE id=?`).run(m[1])
+    // A retried run starts over — including its integration: everything the
+    // finish gate and the integrator wrote about the previous attempt is gone.
+    resetIntegration(m[1])
     addEvent(m[1], 'retry', { previous_status: run.status })
     const r = await launchRun(m[1])
     return answer(req, res, r.ok ? 200 : 500, r, `/runs/${m[1]}`)
+  }
+  // ---- integration by hand (server/integrate.mjs, buttons on the detail page) ----
+  //
+  // "Mark as done" is exactly what `cc-report done` is, only typed by a human:
+  // same path, same finish gate, same everything.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/mark-done$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const r = await handleReport(run.id, { kind: 'done', text: '_(marked done by the operator)_' }, 'internal')
+    return answer(req, res, r.ok ? 200 : 400, r, `/runs/${run.id}`)
+  }
+  // "Merge now" and its two variants. An explicit click bypasses the attempt
+  // limit — the operator has decided — but the dry run happens anyway, because
+  // the base branch may have moved since the run was blocked.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/merge$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const b = await form(req)
+    const leftovers = ['commit', 'discard'].includes(b.leftovers) ? b.leftovers : null
+    const r = await mergeByHand(run.id, leftovers)
+    return answer(req, res, r.ok ? 200 : 400, r, `/runs/${run.id}`)
+  }
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/merge-skip$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    skipMerge(run.id)
+    return answer(req, res, 200, { ok: true }, `/runs/${run.id}`)
   }
   // End tmux sessions — one or many in a single call. The page fires this for
   // every row the operator clicks away; the kills run concurrently inside
@@ -464,7 +513,8 @@ async function fragmentApi(req, res, url) {
     const agentName = run.agent_id
       ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null
     const title = runTitle(run, agentName, t('overview.single_run'))
-    return fragment(res, runDetailHead(run, { title }) + runMetrics(run) + runEvents(run.id))
+    return fragment(res, runDetailHead(run, { title })
+      + integrationSection(run, getRepo(run.repo_id)) + runMetrics(run) + runEvents(run.id))
   }
 
   // A session row. listSessions() asks tmux, so this is the one fragment that

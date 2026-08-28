@@ -94,6 +94,16 @@ export default {
       : { stufen: null, hinweisKey: 'effort.no_levels_cli' }
   },
 
+  /**
+   * How a human picks this run's session back up. The hub starts claude with
+   * `--session-id <run id>` (runner.mjs), so the id is known in advance — no
+   * lookup needed.
+   */
+  resumeCommand(run) {
+    if (!run?.id || !run?.workdir_effective) return null
+    return `cd ${run.workdir_effective} && claude --resume ${run.id}`
+  },
+
   /** CLI arguments for cc-start. claude takes model and effort as separate flags. */
   modelArgs(run) {
     const args = []

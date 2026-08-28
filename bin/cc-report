@@ -98,6 +98,18 @@ send() {
 
 FALLBACK_DIR="$HOME/agents/runs/$RUN_ID"
 if OUT="$(send 2>/dev/null)"; then
+    # cc-hub may ANSWER a report instead of just accepting it: with the repo's
+    # integration switched on, `done` is checked (worktree clean? branch still
+    # mergeable?) and the answer says what is still missing. Printing it puts the
+    # text into the agent's running turn as this tool's own output — the cheapest
+    # possible moment to tell it. Silent otherwise, as before.
+    printf '%s' "$OUT" | python3 -c 'import json,sys
+try:
+    j = json.load(sys.stdin)
+    m = j.get("message")
+    if m: print(m)
+except Exception:
+    pass' 2>/dev/null || true
     exit 0
 fi
 

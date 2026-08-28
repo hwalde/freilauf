@@ -26,6 +26,23 @@ const PLATFORM_RULES = [
   '- On failure: `cc-report failed "<reason>"`.',
 ].join('\n')
 
+/**
+ * The one extra rule of a repo the hub integrates for (repos.merge_mode='hub').
+ * It says the two things an agent cannot know by itself: that somebody else
+ * merges, and that resolving a conflict is ITS job while it still knows what it
+ * changed. Inserted after the branch line, because that is where the agent is
+ * being told what its work lives on.
+ */
+const MERGE_RULE = '- Integration: when this run ends, cc-hub merges your work into {base} itself. '
+  + 'Never merge into or push to {base} yourself. Before you report done: commit everything, '
+  + 'then `git fetch origin && git merge origin/{base}` and resolve conflicts — you know your '
+  + 'changes best; later nobody will. cc-hub checks your worktree when you report and tells you '
+  + 'if something is left.'
+
+/** …and its counterpart in the finishing instruction: the answer is worth reading. */
+const MERGE_FINISH_LINE = '     cc-report prints cc-hub\'s answer. If it says the run is not '
+  + 'finished yet, do what it says and report again.'
+
 const FINISH_RULES = [
   'HOW THIS RUN ENDS — two commands, and they are not optional:',
   '  1. Write your report to {report_file} — what was done, what is open,',
@@ -58,13 +75,24 @@ const FINISH_RULES = [
  * Whatever the operator writes is now an ADDITION, placed where it reads like
  * one.
  */
-export function platformSuffix(run, branchRule, settings) {
+export function platformSuffix(run, branchRule, settings, repo = null) {
   const own = String(settings.prompt_suffix ?? '').trim()
   const harnessRules = getHarness(run.harness)?.promptRules
-  return [PLATFORM_RULES,
+  // Only where the hub really integrates. With merge_mode 'off' the prompt is
+  // byte for byte what it was before this feature existed.
+  const hubMerges = repo?.merge_mode === 'hub'
+  const base = repo?.base_branch || 'main'
+  const rules = hubMerges
+    ? PLATFORM_RULES.replace('- Expected maximum working time', `${MERGE_RULE}\n- Expected maximum working time`)
+    : PLATFORM_RULES
+  const finish = hubMerges
+    ? FINISH_RULES.replace('  3. Only then stop.', `${MERGE_FINISH_LINE}\n  3. Only then stop.`)
+    : FINISH_RULES
+  return [rules,
     own && `Operator rules (apply to every run of this hub):\n${own}`,
-    harnessRules, FINISH_RULES]
+    harnessRules, finish]
     .filter(Boolean).join('\n\n')
+    .replaceAll('{base}', base)
     .replaceAll('{run_id}', run.id)
     .replaceAll('{workdir}', run.workdir_effective)
     .replaceAll('{report_file}', join(RUNS_DIR, run.id, 'report.md'))
@@ -187,7 +215,20 @@ async function makeWorktree(repo, run, branchName) {
     }
   }
   if (!r.ok) throw new Error(t('run.worktree_failed', { err: r.stderr.trim() }))
-  // Worktree extras (planning 4.0): copy or link.
+  applyExtras(repo, target)
+  return target
+}
+
+/**
+ * Worktree extras (planning 4.0): copy or link what the repo needs but git does
+ * not carry — a `.env`, a linked `node_modules`. Idempotent, so it can be
+ * applied to a worktree that already stands.
+ *
+ * Its own function because the INTEGRATION worktree needs the same treatment: a
+ * merge check like `node test/unit.mjs` runs on the merged result and wants the
+ * linked node_modules just as much as an agent does.
+ */
+export function applyExtras(repo, target) {
   for (const extra of repo.extras ?? []) {
     const src = resolve(repo.path, extra.path)
     const dst = resolve(target, extra.path)
@@ -196,7 +237,6 @@ async function makeWorktree(repo, run, branchName) {
     if (extra.mode === 'link') symlinkSync(src, dst)
     else cpSync(src, dst, { recursive: true })
   }
-  return target
 }
 
 /**
@@ -289,7 +329,7 @@ export async function launchRun(runId) {
       : 'No branch — the worktree is detached; changes are throwaway changes.'
   const fullPrompt = [run.prompt, repoPromptZusatz(repo.prompt), run.prompt_extra?.trim(),
     skillPromptZusatz(run.skills),
-    platformSuffix({ ...run, id: runId, workdir_effective: workdir }, branchRule, settings).trim()]
+    platformSuffix({ ...run, id: runId, workdir_effective: workdir }, branchRule, settings, repo).trim()]
     .filter(Boolean).join('\n\n')
   writeFileSync(join(runDir, 'prompt.md'), fullPrompt, { mode: 0o600 })
 
@@ -306,11 +346,17 @@ export async function launchRun(runId) {
   // Only the claude windows are recorded on the run (quota5_start/quota7_start).
   // An `await openrouterCredits()` used to sit here whose result was never read:
   // a 10-second-timeout HTTP call on the hot path of every single launch.
+  // Where this run STARTS from: the worktree's HEAD right after it was created.
+  // Everything the run adds sits between this and its tip — which is what makes
+  // "did it commit anything?" and "what does it want merged?" answerable without
+  // guessing at a branch. Read again on a retry, because the worktree is reused.
+  const baseSha = await sh('git', ['-C', workdir, 'rev-parse', 'HEAD'])
   const q = claudeQuota()
   db.prepare(`UPDATE runs SET status='running', workdir_effective=?, worktree=?, branch_expected=?,
-              main_sha_start=?, quota5_start=?, quota7_start=? WHERE id=?`)
+              main_sha_start=?, base_sha=?, quota5_start=?, quota7_start=? WHERE id=?`)
     .run(workdir, workdir !== repo.path ? workdir : null, branchExpected,
-      mainSha.ok ? mainSha.stdout.trim() : null, q.five, q.seven, runId)
+      mainSha.ok ? mainSha.stdout.trim() : null, baseSha.ok ? baseSha.stdout.trim() : null,
+      q.five, q.seven, runId)
   addEvent(runId, 'started', { workdir, harness: run.harness, model: run.model,
     provider: run.provider ?? null, effort: run.effort ?? null })
 

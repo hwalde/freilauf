@@ -179,6 +179,30 @@ addColumn('runs', 'transcript_offset', 'INTEGER NOT NULL DEFAULT 0')
 // under the Archive page. A run is moved there when it is over ('done'/'failed'/'aborted')
 // and not needed at a glance any more — the record, its report and its log stay intact.
 addColumn('runs', 'archived_at', 'TEXT')
+// ---- integration: a run is done when its work is on the base branch ----
+// Per repo, because a repo decides whether the hub integrates at all
+// ('off' = exactly the behaviour before this existed).
+addColumn('repos', 'merge_mode', `TEXT NOT NULL DEFAULT 'off'`)   // 'off' | 'hub'
+addColumn('repos', 'merge_check', 'TEXT')                          // shell command, empty = none
+addColumn('repos', 'finish_timeout_min', 'INTEGER NOT NULL DEFAULT 15')
+addColumn('repos', 'merge_max_attempts', 'INTEGER NOT NULL DEFAULT 2')
+addColumn('repos', 'conflict_parallel', 'INTEGER NOT NULL DEFAULT 1')
+addColumn('repos', 'notify_running', 'INTEGER NOT NULL DEFAULT 1')
+addColumn('repos', 'max_parallel', 'INTEGER NOT NULL DEFAULT 0')   // 0 = unlimited
+// Per run: where it started from, where it stands in the finish gate, and what
+// became of its commits. finish_state is a SUB-state of 'running' on purpose —
+// runs.status carries a CHECK, and a new value there would be a table rebuild
+// (harnessCheckErweitern); besides, the run really is still running: its
+// terminal is writable, messages reach it, a human can step in.
+addColumn('runs', 'base_sha', 'TEXT')            // HEAD of the worktree right after creation
+addColumn('runs', 'finish_state', 'TEXT')        // NULL|checking|awaiting_commit|awaiting_merge|merging|check_failed
+addColumn('runs', 'finish_started_at', 'TEXT')
+addColumn('runs', 'merge_status', 'TEXT')
+addColumn('runs', 'merged_sha', 'TEXT')
+addColumn('runs', 'merged_at', 'TEXT')
+addColumn('runs', 'merge_attempts', 'INTEGER NOT NULL DEFAULT 0')
+addColumn('runs', 'resolver_run_id', 'TEXT')     // the conflict run working for this run
+addColumn('runs', 'resolves_run_id', 'TEXT')     // set on a conflict run: the run it works for
 // New harness in the CHECK rule of 'agents'. SQLite cannot change a CHECK (no ALTER
 // for that), and 'CREATE TABLE IF NOT EXISTS' no longer takes effect on an existing
 // database — the old rule would still be in place there and saving a cursor agent

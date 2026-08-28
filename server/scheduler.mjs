@@ -38,6 +38,15 @@ async function tick() {
       addEvent(busy.id, 'schedule_skipped', { agent: agent.name, slot })
       continue
     }
+    // The repo's own ceiling (repos.max_parallel). The slot is marked as fired
+    // above, so this is a skipped appointment, not a queue — the next one comes
+    // when the schedule says so.
+    if (repoAtCapacity(agent.repo_id)) {
+      const any = db.prepare(`SELECT id FROM runs WHERE repo_id=? AND status IN ('running','waiting_help')
+        ORDER BY started_at DESC LIMIT 1`).get(agent.repo_id)
+      if (any) addEvent(any.id, 'schedule_skipped', { agent: agent.name, slot, reason: 'max_parallel' })
+      continue
+    }
     // One-off schedules fire exactly once and then switch themselves off.
     if (agent.schedule_kind === 'einmalig') {
       db.prepare(`UPDATE agents SET schedule_kind='manuell', run_at=NULL, updated_at=datetime('now') WHERE id=?`).run(agent.id)
@@ -46,6 +55,23 @@ async function tick() {
   }
   // Bound the map
   if (fired.size > 500) for (const k of fired.keys()) { if (!k.endsWith(slot)) fired.delete(k) }
+}
+
+/**
+ * Is this repo already running as many runs as it may?
+ *
+ * repos.max_parallel (0 = unlimited) bounds the SCHEDULED starts only — the
+ * agents' timetable and the planned single runs. A start the operator triggers
+ * by hand (form, Quick Run, API, "start now") is never blocked: that is a
+ * deliberate decision, and a limit that overrules a deliberate decision is a
+ * limit one works around.
+ */
+export function repoAtCapacity(repoId) {
+  const limit = Number(db.prepare('SELECT max_parallel FROM repos WHERE id=?').get(repoId)?.max_parallel ?? 0) || 0
+  if (limit <= 0) return false
+  const n = db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND status IN ('running','waiting_help')`)
+    .get(repoId).c
+  return n >= limit
 }
 
 /**
@@ -161,6 +187,8 @@ export async function pickUpScheduled(nowMs = Date.now()) {
     } else {
       continue   // no waiting kind: nothing to wait for, nothing to decide
     }
+    // A planned run is a scheduled start too — it simply waits one more pass.
+    if (repoAtCapacity(run.repo_id)) continue
     busy.add(run.repo_id)
 
     // Same gate as at an immediate start — a waiting run must not start into an
