@@ -1648,16 +1648,16 @@ export async function agentMovePage(req, res, url) {
   const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
   const body = `
   <h2>${e(t('agents.move_title', { name: agent.name }))}</h2>
-  <form method="post" action="/agents/move" class="settings">
+  <form method="post" action="/agents/move" class="settings form-grid">
     <input type="hidden" name="id" value="${agent.id}">
     <label>${e(t('agents.move_repo'))} <select name="repo">
       ${repos.map(r => `<option value="${r.id}" ${r.id === agent.repo_id ? 'selected' : ''}>${e(r.name)}</option>`).join('')}
     </select></label>
-    <p class="dim">${e(t('agents.move_hint'))}</p>
-    <button>${e(t('agents.move'))}</button>
-  </form>`
+    <div class="btn-row"><button>${e(t('agents.move'))}</button></div>
+  </form>
+  <p class="dim">${e(t('agents.move_hint'))}</p>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    .end(layout(t('agents.move_title', { name: agent.name }), '/agents', body, agent.repo_id))
+    .end(await layout(t('agents.move_title', { name: agent.name }), '/agents', body, agent.repo_id))
 }
 
 export async function agentMovePost(req, res, url, formBody) {
