@@ -1,11 +1,41 @@
 // cc-hub — small helpers without external dependencies.
 import { homedir } from 'node:os'
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
+import { dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { t, currentLanguage } from './i18n.mjs'
 
 export const HOME = homedir()
 export const RUNS_DIR = process.env.CCHUB_RUNS_DIR ?? `${HOME}/agents/runs`
 export const WORKTREES_DIR = process.env.CCHUB_WORKTREES_DIR ?? `${HOME}/agents/worktrees`
+
+/**
+ * The commit this hub process is running from, as a short sha — and the empty
+ * string when that cannot be answered (a tarball instead of a checkout, no git).
+ *
+ * Since the service runs from its own deploy checkout (bin/cchub-deploy), "which
+ * version is live" stopped being a thing one can see by looking at a directory.
+ * The sidebar prints this on every page.
+ *
+ * Asked at the module's OWN directory, never at the process's working directory:
+ * a hub started by hand from somewhere else must not report that somewhere else's
+ * commit. Computed once and cached — this is a page render, not a git client, and
+ * the answer cannot change while the process lives.
+ */
+let versionCache
+export function hubVersion() {
+  if (versionCache === undefined) {
+    try {
+      versionCache = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+        cwd: dirname(fileURLToPath(import.meta.url)),
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5000,
+      }).trim()
+    } catch { versionCache = '' }
+  }
+  return versionCache
+}
 
 export function kurzid(uuid) { return uuid.split('-')[0] }
 

@@ -1,0 +1,365 @@
+#!/usr/bin/env bash
+# cchub-deploy — brings a commit of cc-hub live.
+#
+# The hub used to be started by systemd from the checkout its operator works in.
+# A restart therefore loaded whatever happened to lie in that directory: half
+# finished edits, or — after a merge to origin/main — the state from before the
+# merge, for as long as nobody ran `git pull` there. Both have happened.
+#
+# This script owns a checkout of its own (~/agents/deploy/cc-hub by default,
+# CCHUB_DEPLOY_DIR overrides it). Nobody works in it, it is always DETACHED on a
+# commit, so `git status` stays empty and `git checkout` can never be refused by
+# local work. The operator's own checkout is never touched by this script.
+#
+#   cchub-deploy                deploy origin/<base> (fetch, checkout, deps, scripts,
+#                               units, restart, health check, rollback on failure)
+#   cchub-deploy <ref|sha>      deploy that commit instead
+#   cchub-deploy --init [--from <dir> | --url <url>]
+#                               create the deploy checkout (clone), then deploy
+#   cchub-deploy --status       deployed sha, origin/<base> sha, ahead-by, last deploy
+#   cchub-deploy --rollback     redeploy the previously deployed sha
+#
+#   --force      deploy even when the target is already checked out
+#   --no-wait    do not wait for a running deploy, fail instead
+#   --notify     Telegram on success too (a FAILURE always notifies)
+#
+# Exit codes: 0 deployed (or already deployed) · 1 deploy failed, rolled back
+#             · 2 the rollback itself is not healthy — a human is needed
+#
+# Test hooks (deliberately undocumented in --help, used by test/deploy.mjs):
+#   CCHUB_DEPLOY_HEALTH_SECONDS  how long the health check retries (default 20)
+set -euo pipefail
+
+ENV_FILE="${CCHUB_ENV_FILE:-$HOME/.config/cc-hub/env}"
+# shellcheck disable=SC1090
+[[ -f "$ENV_FILE" ]] && . "$ENV_FILE"
+
+DEPLOY_DIR="${CCHUB_DEPLOY_DIR:-$HOME/agents/deploy/cc-hub}"
+STATE_DIR="$(dirname "$DEPLOY_DIR")"
+LOG_FILE="$STATE_DIR/cc-hub-deploy.log"
+LOCK_FILE="$STATE_DIR/.lock"
+PREV_FILE="$STATE_DIR/previous-sha"
+LOCAL_PORT="${CCHUB_LOCAL_PORT:-8791}"
+HEALTH_SECONDS="${CCHUB_DEPLOY_HEALTH_SECONDS:-20}"
+DB_FILE="${CCHUB_DATA_DIR:-$HOME/.local/share/cc-hub}/cc-hub.db"
+SYSTEMD_DIR="$HOME/.config/systemd/user"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HEALTH_REASON=""
+
+log() {
+    local line="[$(date '+%F %T')] $*"
+    printf '%s\n' "$line"
+    printf '%s\n' "$line" >>"$LOG_FILE" 2>/dev/null || true
+}
+
+die() { log "ERROR: $*"; exit 2; }
+
+usage() { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# ------------------------------------------------------------------ arguments
+MODE=deploy REF="" FROM="" URL="" FORCE=0 NO_WAIT=0 NOTIFY=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --init)     MODE=init ;;
+        --status)   MODE=status ;;
+        --rollback) MODE=rollback ;;
+        --from)     FROM="${2:-}"; [[ -n $FROM ]] || die "--from needs a directory"; shift ;;
+        --url)      URL="${2:-}";  [[ -n $URL  ]] || die "--url needs a URL"; shift ;;
+        --force)    FORCE=1 ;;
+        --no-wait)  NO_WAIT=1 ;;
+        --notify)   NOTIFY=1 ;;
+        -h|--help)  usage; exit 0 ;;
+        -*)         die "unknown option: $1 (try --help)" ;;
+        *)          REF="$1" ;;
+    esac
+    shift
+done
+
+mkdir -p "$STATE_DIR"
+
+# ------------------------------------------------------------------ the base branch
+# The branch a plain `cchub-deploy` deploys. The hub knows it per repo, so ask the
+# hub's own database — but only if it is really there; opening a missing file would
+# CREATE an empty database. Everything about this falls back to `main`.
+base_branch() {
+    if [[ -n "${CCHUB_DEPLOY_BASE:-}" ]]; then printf '%s' "$CCHUB_DEPLOY_BASE"; return; fi
+    if [[ -f "$DB_FILE" ]]; then
+        local b
+        b="$(node --disable-warning=ExperimentalWarning -e '
+const {DatabaseSync}=require("node:sqlite");
+const db=new DatabaseSync(process.argv[1]);
+const r=db.prepare("SELECT base_branch FROM repos WHERE name=?").get("cc-hub");
+process.stdout.write(r&&r.base_branch?String(r.base_branch):"");' "$DB_FILE" 2>/dev/null || true)"
+        [[ -n $b ]] && { printf '%s' "$b"; return; }
+    fi
+    printf 'main'
+}
+
+# ------------------------------------------------------------------ Telegram
+# Best effort in every direction: no database, no token, no network — the deploy
+# is not affected by any of it. Token and chat come from the hub's settings, read
+# the way bin/cchub reads the pipeline switch.
+telegram() {
+    local text="$1" pair token chat
+    [[ -f "$DB_FILE" ]] || return 0
+    pair="$(node --disable-warning=ExperimentalWarning -e '
+const {DatabaseSync}=require("node:sqlite");
+const db=new DatabaseSync(process.argv[1]);
+const g=(k)=>{const r=db.prepare("SELECT value FROM settings WHERE key=?").get(k); return r&&r.value?String(r.value):""};
+process.stdout.write(g("telegram_token")+"\n"+g("telegram_chat"));' "$DB_FILE" 2>/dev/null || true)"
+    token="$(printf '%s\n' "$pair" | sed -n 1p)"
+    chat="$(printf '%s\n' "$pair" | sed -n 2p)"
+    [[ -n $token && -n $chat ]] || return 0
+    curl -sS -m 10 -o /dev/null -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+        --data-urlencode "chat_id=${chat}" --data-urlencode "text=${text}" >/dev/null 2>&1 || true
+}
+
+# ------------------------------------------------------------------ git helpers
+g() { git -C "$DEPLOY_DIR" "$@"; }
+sha_short() { printf '%s' "${1:0:7}"; }
+subject_of() { g log -1 --format=%s "$1" 2>/dev/null || printf '?'; }
+
+have_checkout() { [[ -d "$DEPLOY_DIR/.git" ]]; }
+
+# ------------------------------------------------------------------ the lock
+# Two deploys at once do not exist. The second one waits (or, with --no-wait,
+# says so and stops) instead of checking out under the other one's feet.
+take_lock() {
+    command -v flock >/dev/null 2>&1 || return 0
+    exec 9>"$LOCK_FILE"
+    if [[ $NO_WAIT == 1 ]]; then
+        flock -n 9 || die "another deploy is running (--no-wait)"
+    else
+        flock -w 600 9 || die "another deploy is still running after 600 s"
+    fi
+}
+
+# ------------------------------------------------------------------ the checkout
+# Everything that makes the working tree BE a commit: detach, throw away what does
+# not belong there, dependencies, scripts, units. Never a restart — the caller
+# decides that, because the rollback path needs the same steps without one.
+activate() {
+    local sha="$1"
+    log "checkout $(sha_short "$sha") ($(subject_of "$sha"))"
+    g checkout --quiet --detach "$sha"
+    # The checkout belongs to the script. node_modules is expensive (node-pty
+    # compiles natively) and .deploy-lock-hash is our own bookkeeping — the rest
+    # of an untracked file has no business surviving a deploy.
+    g clean -qfdx -e node_modules -e .deploy-lock-hash
+    install_deps
+    install_scripts
+    sync_units
+}
+
+# npm ci only when package-lock.json really changed. node-pty is compiled from
+# source; doing that on every deploy would turn a five-second restart into minutes.
+install_deps() {
+    local want have
+    want="$(sha256sum "$DEPLOY_DIR/package-lock.json" | cut -d' ' -f1)"
+    have="$(cat "$DEPLOY_DIR/.deploy-lock-hash" 2>/dev/null || true)"
+    if [[ "$want" == "$have" && -d "$DEPLOY_DIR/node_modules" ]]; then
+        log "dependencies unchanged"
+        return 0
+    fi
+    log "npm ci --omit=dev (lockfile changed)"
+    ( cd "$DEPLOY_DIR" && npm ci --omit=dev --no-fund --no-audit >/dev/null )
+    printf '%s\n' "$want" >"$DEPLOY_DIR/.deploy-lock-hash"
+}
+
+# The cc-* scripts in ~/.local/bin must always match the hub that is running —
+# cc-report talks to it, cc-start starts runs for it. Remembering that by hand is
+# what a deploy script exists to stop.
+install_scripts() {
+    log "installing scripts into ~/.local/bin"
+    bash "$DEPLOY_DIR/setup/02-install-scripts.sh" >/dev/null
+}
+
+# The unit files live in the repo, so a commit may change them. Installed only when
+# they really differ: a daemon-reload on every deploy would be noise, and an
+# unchanged file must not look like a change in the log.
+sync_units() {
+    local changed=0 f name
+    mkdir -p "$SYSTEMD_DIR"
+    for f in "$DEPLOY_DIR"/deploy/*.service; do
+        [[ -f "$f" ]] || continue
+        name="$(basename "$f")"
+        if ! cmp -s "$f" "$SYSTEMD_DIR/$name"; then
+            install -m 644 "$f" "$SYSTEMD_DIR/$name"
+            log "unit updated: $name"
+            changed=1
+        fi
+    done
+    if [[ $changed == 1 ]]; then systemctl --user daemon-reload; fi
+    return 0
+}
+
+# ------------------------------------------------------------------ restart + health
+vpn_active() { [[ "$(systemctl --user is-active cchub-vpn.service 2>/dev/null || true)" == active ]]; }
+
+restart_hub() {
+    local vpn_was="$1"
+    log "systemctl --user restart cchub.service"
+    systemctl --user restart cchub.service
+    # cchub-vpn.service has Requires=cchub.service, so a restart of the hub takes
+    # it down with it. Access that was on before the deploy has to be on after it.
+    if [[ "$vpn_was" == 1 ]] && ! vpn_active; then
+        log "access was on — starting cchub-vpn.service again"
+        systemctl --user start cchub-vpn.service || log "WARNING: cchub-vpn.service did not start"
+    fi
+}
+
+# What the journal said since the restart. Not a verdict of its own: the hub logs
+# the word "Error" in the course of perfectly normal operation (a provider that
+# answered badly, an agent that died), and a rollback over a log line would be a
+# service that takes itself down for someone else's mistake. It is printed, and it
+# is what the failure message carries when the health check really failed.
+journal_errors() {
+    local since="$1"
+    journalctl --user -u cchub -n 30 --since "$since" --no-pager 2>/dev/null \
+        | grep -E 'Error|Exception' || true
+}
+
+# 200 from the hub itself, and systemd agreeing that the unit is up. Everything
+# else — a syntax error, a failed import, a port already taken — shows up here as
+# a connection that is refused for as long as we are willing to wait.
+health_check() {
+    local i code=000
+    for ((i = 0; i < HEALTH_SECONDS; i++)); do
+        code="$(curl -sS -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${LOCAL_PORT}/" 2>/dev/null || printf '000')"
+        if [[ "$code" == 200 ]]; then
+            if [[ "$(systemctl --user is-active cchub.service 2>/dev/null || true)" == active ]]; then
+                HEALTH_REASON=""
+                return 0
+            fi
+            HEALTH_REASON="HTTP 200 but cchub.service is not active"
+            return 1
+        fi
+        sleep 1
+    done
+    HEALTH_REASON="no HTTP 200 from 127.0.0.1:${LOCAL_PORT} within ${HEALTH_SECONDS} s (last: ${code})"
+    return 1
+}
+
+# ------------------------------------------------------------------ the deploy
+do_deploy() {
+    have_checkout || die "no deploy checkout at $DEPLOY_DIR — run: cchub-deploy --init [--from <dir> | --url <url>]"
+
+    log "fetch origin"
+    g fetch --prune --quiet origin || log "WARNING: fetch failed — working with what is already here"
+
+    local base target_ref target current
+    base="$(base_branch)"
+    target_ref="${REF:-origin/$base}"
+    target="$(g rev-parse --verify --quiet "${target_ref}^{commit}" || true)"
+    [[ -n $target ]] || die "unknown ref: $target_ref"
+    current="$(g rev-parse HEAD)"
+
+    if [[ "$target" == "$current" && $FORCE == 0 ]]; then
+        log "already deployed $(sha_short "$target") ($(subject_of "$target"))"
+        return 0
+    fi
+
+    local vpn_was=0
+    if vpn_active; then vpn_was=1; fi
+    printf '%s\n' "$current" >"$PREV_FILE"
+    activate "$target"
+
+    local since; since="$(date '+%F %T')"
+    restart_hub "$vpn_was"
+
+    if health_check; then
+        local ok_errs; ok_errs="$(journal_errors "$since")"
+        if [[ -n $ok_errs ]]; then log "note: the journal mentions errors since the restart:
+$ok_errs"; fi
+        log "deployed $(sha_short "$target") ($(subject_of "$target"))"
+        if [[ $NOTIFY == 1 ]]; then telegram "cc-hub deployed $(sha_short "$target"): $(subject_of "$target")"; fi
+        return 0
+    fi
+
+    # ---- not healthy: back to what was running before
+    local reason="$HEALTH_REASON" errs
+    errs="$(journal_errors "$since")"
+    log "health check failed: $reason"
+    if [[ -n $errs ]]; then log "journal:
+$errs"; fi
+
+    log "rolling back to $(sha_short "$current")"
+    activate "$current"
+    restart_hub "$vpn_was"
+    if health_check; then
+        log "deploy of $(sha_short "$target") FAILED ($reason), rolled back to $(sha_short "$current")"
+        telegram "cc-hub deploy of $(sha_short "$target") FAILED ($reason). Rolled back to $(sha_short "$current") — the hub is up again."
+        exit 1
+    fi
+    log "ROLLBACK to $(sha_short "$current") is NOT healthy either ($HEALTH_REASON) — a human is needed"
+    log "journal:
+$(journal_errors "$since")"
+    telegram "cc-hub deploy of $(sha_short "$target") FAILED and the rollback to $(sha_short "$current") is not healthy either. The hub is DOWN — please look at it."
+    exit 2
+}
+
+# ------------------------------------------------------------------ the modes
+do_init() {
+    if have_checkout; then
+        log "deploy checkout already exists: $DEPLOY_DIR"
+    else
+        local url="$URL"
+        if [[ -z $url && -n $FROM ]]; then
+            url="$(git -C "$FROM" remote get-url origin 2>/dev/null || true)"
+            [[ -n $url ]] || die "$FROM has no remote 'origin'"
+        fi
+        # Run out of a checkout without --from/--url: take that checkout's origin.
+        # That is the case of the very first deploy, done from a working copy.
+        if [[ -z $url ]]; then
+            url="$(git -C "$SELF_DIR/.." remote get-url origin 2>/dev/null || true)"
+        fi
+        [[ -n $url ]] || die "no origin URL found — use --url <url> or --from <dir>"
+        log "cloning $url into $DEPLOY_DIR"
+        mkdir -p "$STATE_DIR"
+        git clone --quiet "$url" "$DEPLOY_DIR"
+        # A fresh clone already stands on the tip of the base branch — but on the
+        # BRANCH, and with no node_modules and no scripts installed. Without this,
+        # the deploy below would say "already deployed" and leave exactly that.
+        FORCE=1
+    fi
+    do_deploy
+}
+
+do_rollback() {
+    local prev
+    prev="$(cat "$PREV_FILE" 2>/dev/null || true)"
+    [[ -n $prev ]] || die "no previous deploy recorded in $PREV_FILE"
+    REF="$prev"; FORCE=1
+    log "rollback requested → redeploying $(sha_short "$prev")"
+    do_deploy
+}
+
+do_status() {
+    have_checkout || { echo "Deploy dir:   $DEPLOY_DIR (does not exist yet — cchub-deploy --init)"; return 0; }
+    local base current target ahead
+    base="$(base_branch)"
+    g fetch --prune --quiet origin 2>/dev/null || true
+    current="$(g rev-parse HEAD)"
+    target="$(g rev-parse --verify --quiet "origin/${base}^{commit}" || true)"
+    echo "Deploy dir:   $DEPLOY_DIR"
+    echo "Deployed:     $(sha_short "$current") ($(subject_of "$current"))"
+    if [[ -n $target ]]; then
+        echo "origin/$base:  $(sha_short "$target") ($(subject_of "$target"))"
+        ahead="$(g rev-list --count "${current}..${target}" 2>/dev/null || printf '?')"
+        if [[ "$ahead" == 0 ]]; then
+            echo "Ahead:        up to date"
+        else
+            echo "Ahead:        origin/$base is $ahead ahead — cchub deploy"
+        fi
+    else
+        echo "origin/$base:  unknown (no fetch)"
+    fi
+    echo "Last deploy:  $(grep -E 'deployed |rolled back|FAILED' "$LOG_FILE" 2>/dev/null | tail -1 || true)"
+}
+
+case "$MODE" in
+    status)   do_status ;;
+    init)     take_lock; do_init ;;
+    rollback) take_lock; do_rollback ;;
+    deploy)   take_lock; do_deploy ;;
+esac

@@ -4,7 +4,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRepo, getRun } from './db.mjs'
-import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime } from './util.mjs'
+import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime, hubVersion } from './util.mjs'
 import { cookieRepo } from './web-helpers.mjs'
 import { providerBalances } from './balances.mjs'
 import {
@@ -238,9 +238,15 @@ export function quotaBar(pct, { label = '', note = '', title = '' } = {}) {
  */
 export function headerStatus() {
   const pipeline = pipelineAn()
+  // The running version next to the pipeline switch: since the service runs from
+  // its own deploy checkout, no directory tells you any more what is live. Only
+  // the sha — deliberately no "N behind origin", which would mean a git fetch on
+  // every page render.
+  const version = hubVersion()
   return `<div id="header-status" title="${e(t('layout.pipeline_hint'))}">
     <span class="dim">${e(t('layout.pipeline'))}</span>
-    <b class="${pipeline ? 'ok' : 'warn'}">${e(pipeline ? t('layout.on') : t('layout.off'))}</b></div>`
+    <b class="${pipeline ? 'ok' : 'warn'}">${e(pipeline ? t('layout.on') : t('layout.off'))}</b>
+    ${version ? `<span class="dim">${e(t('status.version'))} <code>${e(version)}</code></span>` : ''}</div>`
 }
 
 /** The four statuses that mean "there is work in flight", in reading order. */

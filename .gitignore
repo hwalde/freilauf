@@ -1,6 +1,12 @@
 node_modules
 .playwright-mcp/
 
+# bin/cchub-deploy's bookkeeping in the deploy checkout: the hash of the
+# package-lock.json the current node_modules was installed from. It lives next to
+# node_modules and must survive the `git clean` of a deploy — but it belongs to no
+# commit.
+.deploy-lock-hash
+
 # Privat — versioniert im Schwester-Repo cc-hub-private
 PLANUNG.md
 CLAUDE.local.md

@@ -705,6 +705,7 @@
   "status.done": "Fertig",
   "status.failed": "Fehlgeschlagen",
   "status.aborted": "Abgebrochen",
+  "status.version": "Version",
   "overview.branch_pr": "Branch/PR",
   "overview.origin": "Herkunft",
   "overview.filtered": "nur „{status}“",

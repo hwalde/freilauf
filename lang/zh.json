@@ -705,6 +705,7 @@
   "status.done": "已完成",
   "status.failed": "失败",
   "status.aborted": "已中止",
+  "status.version": "版本",
   "overview.branch_pr": "分支／PR",
   "overview.origin": "来源",
   "overview.filtered": "仅「{status}」",

@@ -7,7 +7,9 @@ Requires=cchub.service
 [Service]
 Type=simple
 EnvironmentFile=%h/.config/cc-hub/env
-ExecStart=/usr/bin/node %h/projects/cc-hub/vpn-proxy.mjs
+# Same checkout as the hub itself — see the comment in cchub.service.
+WorkingDirectory=%h/agents/deploy/cc-hub
+ExecStart=/usr/bin/node %h/agents/deploy/cc-hub/vpn-proxy.mjs
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

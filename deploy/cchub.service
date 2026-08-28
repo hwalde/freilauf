@@ -11,7 +11,15 @@ Environment=NODE_OPTIONS=--disable-warning=ExperimentalWarning
 # tmux session inherits the same PATH — 'cc-report' would be unfindable there as well.
 Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=%h/.config/cc-hub/env
-ExecStart=/usr/bin/node %h/projects/cc-hub/server/hub.mjs
+# The service runs from a checkout of its own (bin/cchub-deploy owns it), NOT from
+# the operator's working copy: a restart there loads whatever lies in the directory
+# — half-finished edits, or the state from before the last merge. WorkingDirectory
+# only decides where a relative path would be resolved; the hub resolves everything
+# it needs from import.meta.url or $HOME, so it also runs when started by hand.
+# A different deploy path (CCHUB_DEPLOY_DIR) means editing this unit: systemd does
+# not expand EnvironmentFile variables inside ExecStart.
+WorkingDirectory=%h/agents/deploy/cc-hub
+ExecStart=/usr/bin/node %h/agents/deploy/cc-hub/server/hub.mjs
 # Only kill the node main process on stop/restart. With the default
 # (control-group) a tmux server that happened to be spawned by a hub-started
 # run (first tmux session after a reboot) would live in this unit's cgroup —

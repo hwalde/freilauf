@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "==> cc scripts into ~/.local/bin"
 mkdir -p "$HOME/.local/bin"
-for s in cc-start cc-attach cc-kill cc-help cc-report cc-oc-sync-agents cchub; do
+for s in cc-start cc-attach cc-kill cc-help cc-report cc-oc-sync-agents cchub cchub-deploy; do
     install -m 755 "$ROOT/bin/$s" "$HOME/.local/bin/$s"
     echo "    $s"
 done
@@ -53,14 +53,30 @@ echo "==> Extra skills into ~/agents/zusaetze (opt-in per agent/run, NO auto-loa
 # skill automatically. cc-hub offers these folders as checkboxes in the form and, on
 # selection, writes a reference to the SKILL.md into the prompt.
 # Commit-pinned: updates are a deliberate decision (bump the pin), not an accident.
+#
+# This block needs the NETWORK, and since cchub-deploy runs this script on every
+# deploy it must not be able to fail one: a GitHub that is briefly unreachable
+# would otherwise take a healthy hub down and roll it back. Hence fail-soft, plus
+# CCHUB_SKIP_EXTRAS=1 for a run that must not touch the network at all (tests).
 UNLAZY_PIN="754d9a68109e39b836cc72a39fb9a823f9d6b613"
 ZUSAETZE="$HOME/agents/zusaetze"
-mkdir -p "$ZUSAETZE"
-if [[ ! -d "$ZUSAETZE/unlazy/.git" ]]; then
-  git clone -q https://github.com/Leonxlnx/unlazy "$ZUSAETZE/unlazy"
+if [[ "${CCHUB_SKIP_EXTRAS:-0}" == 1 ]]; then
+  echo "    skipped (CCHUB_SKIP_EXTRAS=1)"
+else
+  mkdir -p "$ZUSAETZE"
+  if extras_ok=$(
+    set -e
+    if [[ ! -d "$ZUSAETZE/unlazy/.git" ]]; then
+      git clone -q https://github.com/Leonxlnx/unlazy "$ZUSAETZE/unlazy"
+    fi
+    git -C "$ZUSAETZE/unlazy" fetch -q origin
+    git -C "$ZUSAETZE/unlazy" checkout -q "$UNLAZY_PIN"
+    git -C "$ZUSAETZE/unlazy" rev-parse --short HEAD
+  ); then
+    echo "    unlazy @ $extras_ok OK"
+  else
+    echo "    WARNING: unlazy could not be updated (network?) — leaving it as it is"
+  fi
 fi
-git -C "$ZUSAETZE/unlazy" fetch -q origin
-git -C "$ZUSAETZE/unlazy" checkout -q "$UNLAZY_PIN"
-echo "    unlazy @ $(git -C "$ZUSAETZE/unlazy" rev-parse --short HEAD) OK"
 
 echo "==> Done. Continue with: ./setup/03-install-services.sh"

@@ -216,9 +216,18 @@ held our stdout pipe would make `execFile` wait for it after all, whatever the
 command looks like.
 
 So the operator's flow is: trigger `run_merged`, one `shell_command`,
-`detach` ticked, and a `sleep` in front of the restart —
-`sleep 3; systemctl --user restart cchub.service`. The sleep is what gives the
-answer time to reach the browser.
+`detach` ticked, and a `sleep` in front of the command —
+`sleep 3; cchub-deploy`. The sleep is what gives the answer time to reach the
+browser.
+
+**One step, and deliberately no condition after it.** The flow used to be three:
+pull the working checkout, branch on whether the pull worked, restart or send a
+Telegram message. Only the first two of those could ever report anything —
+whatever the restart does happens after the process running the flow is gone. So
+everything that has to be judged *after* the restart belongs in the script:
+`cchub-deploy` checks that the hub answers, rolls back to the previous commit if
+it does not, and writes to Telegram itself. See "Deploying: the service runs from
+its own checkout" in the root `AGENTS.md`.
 
 The command runs **as the hub's user on the hub machine**. That is nothing new
 (the hub starts coding agents with full shell access anyway), but it is said in

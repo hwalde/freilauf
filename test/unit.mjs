@@ -1594,6 +1594,58 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // Every shell file in this repo is installed and run on a machine — cchub-deploy
+  // even runs setup/02 on every single deploy. A typo in one of them is not a
+  // failing test somewhere, it is a hub that does not come back up, and `bash -n`
+  // is the cheapest possible fence against exactly that.
+  gruppe('Scripts: every shell file parses')
+
+  await pruefe('bash -n on bin/* and setup/*.sh', async () => {
+    const { readdirSync, readFileSync: rf } = await import('node:fs')
+    const { join: j } = await import('node:path')
+    const { execFileSync } = await import('node:child_process')
+    const root = new URL('..', import.meta.url).pathname
+    const files = []
+    for (const dir of ['bin', 'setup']) {
+      for (const f of readdirSync(j(root, dir), { withFileTypes: true })) {
+        if (!f.isFile()) continue
+        const p = j(root, dir, f.name)
+        if (rf(p, 'utf8').slice(0, 40).includes('bash')) files.push(p)
+      }
+    }
+    wahr(files.length >= 8, `found the scripts (${files.length})`)
+    for (const p of files) {
+      try { execFileSync('bash', ['-n', p], { stdio: ['ignore', 'ignore', 'pipe'] }) }
+      catch (err) { throw new Error(`${p}: ${String(err.stderr ?? err.message)}`) }
+    }
+  })
+
+  // ------------------------------------------------------------------
+  // Since the service runs from its own deploy checkout, no directory tells you
+  // any more which commit is live. The sidebar does — or says nothing at all, and
+  // that second case is the one worth a test: a hub unpacked from a tarball has
+  // no git, and a sidebar printing "undefined" would be worse than one printing
+  // nothing.
+  gruppe('The running version in the sidebar (hubVersion / headerStatus)')
+
+  await pruefe('the version is a short sha or the empty string, never anything else', async () => {
+    const { hubVersion } = await import('../server/util.mjs')
+    const v = hubVersion()
+    wahr(v === '' || /^[0-9a-f]{7,40}$/.test(v), `got ${JSON.stringify(v)}`)
+    gleich(hubVersion(), v, 'and it is cached — a page render is not a git client')
+  })
+
+  await pruefe('headerStatus carries it, and nothing broken when there is none', async () => {
+    const { hubVersion } = await import('../server/util.mjs')
+    const { headerStatus } = await import('../server/pages.mjs')
+    const html = headerStatus()
+    enthaelt(html, 'id="header-status"', 'still the block the live channel swaps')
+    if (hubVersion()) enthaelt(html, hubVersion(), 'the running sha is in it')
+    falsch(html.includes('undefined'), 'no stray undefined')
+    falsch(/>\s*null\s*</.test(html), 'no stray null')
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Configured coding agents (coding-agents.mjs)')
   const ca = await import('../server/coding-agents.mjs')
 

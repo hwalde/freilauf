@@ -9,6 +9,8 @@ sessions, every run in its own git worktree. The hub schedules runs
 Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux sessions
 (via WireGuard)    vpn-proxy.mjs           server/hub.mjs      cc-<name>-<id>
                    cchub-vpn.service       cchub.service       cc-oc-/he-/cu-…
+                   └─ both run from the deploy checkout ─┘
+                      (~/agents/deploy/cc-hub, see below)
 ```
 
 ## What it does
@@ -70,19 +72,41 @@ tmux, git, jq, curl; at least one agent CLI (`claude`, `opencode`, `hermes` or
 [mkcert](https://github.com/FiloSottile/mkcert).
 
 ```bash
-./setup/01-npm-install.sh       # node-pty, ws, xterm.js
-./setup/02-install-scripts.sh   # cc-start/-attach/-kill/-help/-report/-oc-sync-agents + cchub to ~/.local/bin
+./setup/01-npm-install.sh       # node-pty, ws, xterm.js — for THIS checkout (tests, editing)
+./setup/02-install-scripts.sh   # cc-start/-attach/-kill/-help/-report/-oc-sync-agents + cchub + cchub-deploy to ~/.local/bin
 ./setup/03-install-services.sh  # ~/.config/cc-hub/env (from env.example) + systemd units
 sudo ./setup/04-firewall.sh     # ufw: VPN port only on wg0 (one-time)
 ```
 
 Then set at least `CCHUB_VPN_BIND` and `CCHUB_ALLOWED_HOSTS` in
-`~/.config/cc-hub/env` (see `env.example`), place the certificates, then:
+`~/.config/cc-hub/env` (see `env.example`), place the certificates, then create
+the checkout the **service** runs from and bring the first version live:
 
 ```bash
-cchub status    # hub process, VPN access, pipeline, running sessions
-cchub on        # start the VPN proxy → website reachable over WireGuard
+cchub-deploy --init --from "$PWD"   # clones origin into ~/agents/deploy/cc-hub, deploys it
+cchub status                        # hub process, VPN access, pipeline, sessions, deployed sha
+cchub on                            # start the VPN proxy → website reachable over WireGuard
 ```
+
+### Bringing a version live
+
+The systemd units start `~/agents/deploy/cc-hub` — a clone that belongs to the
+hub alone, always detached on one commit. The checkout you work in never runs a
+service, so uncommitted work can never end up being served, and a restart can
+never quietly load the state from before the last merge.
+
+```bash
+cchub deploy            # fetch, check out origin/main, deps (only if the lockfile moved),
+                        # install the cc-* scripts, restart, health check — rollback if it fails
+cchub deploy <ref>      # that commit instead
+cchub-deploy --status   # deployed sha, origin sha, how far behind
+cchub-deploy --rollback # back to the previously deployed commit
+```
+
+A failed deploy rolls back to the commit that was running and reports it via
+Telegram. The running sha is printed in the sidebar of every page, so "is my
+change live?" is a glance. `cchub restart` stays what it says: a restart, without
+a deploy.
 
 First step in the UI: add your coding agents under **Settings → Coding
 agents** (a banner points there on a fresh installation). An optional seed file
@@ -95,6 +119,8 @@ for scripted setups.
 node test/unit.mjs          # pure logic (cron, schedules, quota gate, parsers, plugin registries, i18n, docs) — ~1 s
 node test/e2e.mjs           # complete hub in a sandbox, stub instead of real agents — ~30 s
 node test/e2e.mjs --echt    # additionally ONE real run per harness (consumes quota)
+node test/proxy.mjs         # the TLS proxy against a stub upstream — <1 s
+node test/deploy.mjs        # bin/cchub-deploy against a bare origin, in a sandbox — ~3 s
 ```
 
 The e2e suite starts a second hub on a free port with its own database, test

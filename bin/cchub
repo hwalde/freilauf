@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # cchub — controls the cc-hub. Planung 4.8 + 9.
 #   cchub on|off|status|url|logs|restart|stop|start
+#   cchub deploy [ref]
 #   cchub pipeline on|off|status
 set -euo pipefail
 
@@ -20,6 +21,10 @@ Usage: cchub <command>
   url           print the VPN URL
   logs          journalctl --user -u cchub -f
   start|stop|restart   control the hub process (scheduler/watcher/UI)
+
+  deploy [ref]  bring a commit live: fetch, check out in the hub's own deploy
+                checkout, dependencies, scripts, restart, health check —
+                and roll back if the hub does not come up (cchub-deploy)
 
   pipeline on|off|status   global AND gate for scheduled agent starts
 
@@ -62,6 +67,17 @@ case "${1:-}" in
         echo "Access (VPN): $vpn   (https://${VPN_BIND}:${VPN_PORT})"
         echo "Pipeline:     $(db_pipeline)"
         echo "Running cc sessions: $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^cc-' || true)"
+        # Which commit is actually running, and whether origin has moved on. The
+        # deploy script is the only thing that knows its checkout, so it answers.
+        if command -v cchub-deploy >/dev/null 2>&1; then
+            cchub-deploy --status 2>/dev/null | grep -E '^(Deployed|Ahead):' || true
+        fi
+        ;;
+    deploy)
+        shift
+        command -v cchub-deploy >/dev/null 2>&1 || {
+            echo "cchub-deploy is not installed — run ./setup/02-install-scripts.sh" >&2; exit 2; }
+        exec cchub-deploy "$@"
         ;;
     url)
         echo "https://${VPN_BIND}:${VPN_PORT}"

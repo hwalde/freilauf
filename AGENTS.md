@@ -51,6 +51,10 @@ the injected `window.CCHUB_I18N` catalog.
 Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux sessions
 (via WireGuard)    vpn-proxy.mjs           server/hub.mjs      cc-<name>-<id>
                    cchub-vpn.service       cchub.service       cc-oc-/he-/cu-…
+                   └──── both units run from ~/agents/deploy/cc-hub ────┘
+                         (the deploy checkout; bin/cchub-deploy owns it)
+
+~/projects/cc-hub  = where a HUMAN works. No service starts from it any more.
 
 (8790/8791 are the code defaults; the real values come from ~/.config/cc-hub/env.)
 ```
@@ -62,6 +66,8 @@ Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux sessions
   rebinding/CSRF fence (`CCHUB_ALLOWED_HOSTS` in `~/.config/cc-hub/env`).
 - **systemd user units**: `cchub.service` starts automatically, `cchub-vpn.service`
   deliberately does **not** (fail-closed). Control: `cchub on|off|status|logs`.
+  Both start `%h/agents/deploy/cc-hub/…` — a checkout that belongs to the hub
+  alone, never the one a human edits in (see "Deploying" below).
 - **Runs** are created exclusively via `bin/cc-start` (installed to
   `~/.local/bin`); agents report back via `bin/cc-report` (HTTP to the hub,
   fallback `inbox.jsonl`). All `cc-*` scripts are part of this repo (`bin/`),
@@ -69,6 +75,83 @@ Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux sessions
 - State: SQLite at `~/.local/share/cc-hub/cc-hub.db`, run data in `~/agents/runs`,
   worktrees in `~/agents/worktrees`. All paths can be redirected via `CCHUB_*`
   variables — exactly that is what the test suite lives on.
+
+### Deploying: the service runs from its own checkout
+
+The units used to start `%h/projects/cc-hub/server/hub.mjs` — the directory the
+operator and interactive coding sessions work in. So a restart loaded *whatever
+lay in that directory*: half-finished edits, or the state from before the last
+merge, for as long as nobody ran `git pull` there. Both happened, and the second
+one is in "Pitfalls" with the hour it cost. It also contradicted the rule the
+integrator is built on: `integrate.mjs` deliberately never merges in the working
+checkout — but the service started out of it.
+
+The hub therefore runs from **`~/agents/deploy/cc-hub`**, and
+**`bin/cchub-deploy`** owns that directory:
+
+- a **clone of its own** (`--init [--from <dir> | --url <url>]`), not a
+  `git worktree` of the working copy: a worktree hangs on that copy's `.git`, and
+  a service must not die because a human moved or re-cloned his repository.
+- always **detached on a commit**, never on a branch. Nobody commits there,
+  `git status` stays empty, and no local work can ever refuse a checkout.
+- its own `node_modules`, installed with `npm ci --omit=dev` **only when
+  `package-lock.json` changed** (its hash lives in `.deploy-lock-hash` next to
+  `node_modules`, gitignored, excluded from the deploy's `git clean`). `node-pty`
+  compiles natively; doing that on every deploy would turn a five-second restart
+  into minutes.
+- `~/.config/cc-hub/env`, the database, `~/agents/runs`, `~/agents/worktrees`,
+  `~/agents/integrate` and the certificates stay where they are — the hub
+  resolves them from `$HOME`, and everything inside the repo (`public/`,
+  `lang/*.json`, `node_modules` for the static xterm files, the flow modules
+  served to the browser) from `import.meta.url`, never from the process's working
+  directory. `WorkingDirectory` in the unit is therefore a courtesy, not a
+  requirement: a hub started by hand from anywhere still finds its files.
+
+`cchub-deploy [ref]` is one path with a fence at the end:
+
+1. `flock` — two deploys at once do not exist (`--no-wait` fails instead of
+   waiting).
+2. `fetch`, target = `<ref>` or `origin/<base>` (base from the hub's own DB for
+   the repo named `cc-hub`, else `main`, override `CCHUB_DEPLOY_BASE`).
+3. target == what is checked out and no `--force` → `already deployed`, exit 0,
+   **no restart**. A restart is not free: it kills flow runs in flight.
+4. write `previous-sha`, `checkout --detach`, `git clean -fdx` (minus
+   `node_modules` and the hash file), dependencies if the lockfile moved,
+   `setup/02-install-scripts.sh` — so `cc-report` and `cc-start` in `~/.local/bin`
+   always match the hub that is running; that used to be a step one had to
+   remember. Unit files are installed only when they really differ, then one
+   `daemon-reload`.
+5. restart `cchub.service`, and start `cchub-vpn.service` again if it *was* on —
+   `Requires=cchub.service` takes it down with the hub.
+6. **health check**: `curl` against `127.0.0.1:$CCHUB_LOCAL_PORT` until it answers
+   `200` (20 s), plus `systemctl is-active`. The journal since the restart is
+   read and printed but is **not** a verdict of its own: the hub writes the word
+   "Error" in the course of normal operation (a provider that answered badly, an
+   agent that died), and a service that rolls itself back over someone else's
+   log line would be worse than the problem.
+7. not healthy → **rollback** to `previous-sha`, the same steps again, health
+   check again. Exit 1 with `deploy of <sha> FAILED (<reason>), rolled back to
+   <previous>`. Rollback also unhealthy → exit 2, and the journal with it.
+8. **Telegram on failure, always** (token and chat read from `settings`, the way
+   `bin/cchub` reads the pipeline switch); on success only with `--notify`. Best
+   effort in every direction — no database, no token, no network, no consequence.
+
+`cchub deploy [ref]` is the front door, `cchub restart` stays a plain restart
+without a deploy, and `cchub status` names the deployed sha and how far
+`origin/<base>` has moved on (`cchub-deploy --status`, `--rollback`).
+
+**The sidebar prints the running sha** (`hubVersion()` in `util.mjs`,
+`headerStatus()`): asked once, at the module's own directory, cached, empty when
+there is no git. Deliberately no "N behind origin" — that would be a `git fetch`
+on every page render.
+
+And the flow **"Restart cc-hub after merge"** is now a single detached
+`shell_command`: `sleep 3; cchub-deploy`. It used to pull the working checkout,
+branch on whether that worked and restart — three steps, of which only the first
+two could ever report anything, because a step that restarts the hub kills the
+process running the flow (see `server/flows/AGENTS.md`, "Restarting the hub from
+a flow"). Everything that has to be checked *after* the restart therefore has to
+be checked by the script, and it is: health check, rollback, Telegram.
 
 ## The run definition: agent and single run are the same thing
 
@@ -879,7 +962,17 @@ node test/e2e.mjs --echt    # additionally ONE real run per harness (consumes qu
 node test/e2e.mjs --keep    # keep the sandbox (debugging)
 node test/browser.mjs       # public/hub.js in a real Chromium — ~10 s
 node test/proxy.mjs         # vpn-proxy.mjs against a stub upstream — <1 s
+node test/deploy.mjs        # bin/cchub-deploy against a bare origin — ~3 s
 ```
+
+`test/deploy.mjs` is the odd one out because the thing it tests restarts
+services and installs scripts into `~/.local/bin`. It therefore runs with `HOME`,
+`CCHUB_DEPLOY_DIR` and `PATH` all pointed into a sandbox, the last of them at a
+shim directory holding `systemctl`, `curl`, `npm` and `journalctl`: they log
+every call and answer what the test dictates — `curl` reads its HTTP status from
+a file, one per line, each consumed once, which is what makes "the deploy is
+unhealthy but the rollback is fine" expressible at all. Git, `flock` and the
+checkout are real; that is the half a stub could not test.
 
 The e2e suite starts a **second hub** on a free port with its own database, its
 own test repo and its own `cc-start` stub. It may therefore run at any time
@@ -1406,3 +1499,11 @@ errors (`post_api_request` only fires after success).
 - **A green test only proves the path the test took.** `curl` against the VPN IP
   from the server itself runs over `lo` and says nothing about the firewall;
   check real reachability only from a VPN client.
+- **A restart loads the directory, not the branch.** The hub ran for an hour on
+  the code from *before* a merge, because the flow after that merge did
+  `git pull --ff-only` in the working checkout and the checkout had 279 lines of
+  uncommitted work in it — `--ff-only` refused, the restart happened anyway, and
+  nothing in the hub said which commit it was serving. Two answers, and both were
+  needed: the service runs from a checkout nobody edits (see "Deploying"), and
+  the sidebar prints the sha it is running, so "is my change live?" is a glance
+  instead of a guess.
