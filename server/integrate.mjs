@@ -966,12 +966,19 @@ export async function escalate(runId, reason) {
   if (!run) return
   const repo = getRepo(run.repo_id)
   if (!repo) return
+  // 'merging' belongs to the integrator, and only to it: the agent's session
+  // going away while the hub is pushing says nothing about the merge, and
+  // pulling the run out from under the job would leave it half done.
+  if (run.finish_state === 'merging' && reason === 'agent_gone') return
   const wasWaiting = !!run.finish_state
   const dirty = await dirtyFiles(run, repo)
 
   if (wasWaiting) {
     db.prepare(`UPDATE runs SET finish_state=NULL, status='done',
                 ended_at=COALESCE(ended_at, datetime('now')) WHERE id=?`).run(runId)
+    // The run really ended here, so what hangs on its end has to fire — the
+    // ordinary 'done' path does this too.
+    import('./flows/triggers.mjs').then(m => m.flowsTick()).catch(e => console.error('[flows]', e.message))
   }
   nextCheckAt.delete(runId)
   addEvent(runId, 'finish_escalated', { reason })

@@ -2030,6 +2030,20 @@ try {
     gleich(zurueck.orProvider, 'fireworks', 'serving provider survives where it can be passed through')
   })
 
+  await pruefe('the merge rule is only in the prompt where the hub really merges', async () => {
+    const { platformSuffix } = await import('../server/runner.mjs')
+    const run = { id: 'r1', harness: 'claude', workdir_effective: '/wt/a', expected_minutes: 30 }
+    const aus = platformSuffix(run, 'No branch.', {}, { merge_mode: 'off', base_branch: 'main' })
+    falsch(aus.includes('cc-hub merges your work'), 'with merge_mode off the prompt is what it always was')
+    falsch(aus.includes('cc-report prints'), 'and the finishing block is unchanged too')
+    const an = platformSuffix(run, 'No branch.', {}, { merge_mode: 'hub', base_branch: 'trunk' })
+    enthaelt(an, 'cc-hub merges your work into trunk itself', 'the base branch is named')
+    enthaelt(an, 'Never merge into or push to trunk yourself', 'and so is the ground rule')
+    enthaelt(an, 'cc-report prints cc-hub\'s answer', 'the finishing block says the answer is worth reading')
+    enthaelt(an, 'cc-report done --file', 'and step 2 is still there — it is not removable')
+    falsch(/\{base\}/.test(an), 'no placeholder left over')
+  })
+
   await pruefe('the resume command comes from the plugin, not from the hub', async () => {
     const { getHarness } = await import('../server/harnesses/index.mjs')
     const run = { id: 'aaaa-bbbb', workdir_effective: '/wt/a' }
