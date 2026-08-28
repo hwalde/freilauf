@@ -547,6 +547,11 @@ label.skill-regler { margin-left: var(--sp-24); }
   border-left: 0; display: flex; gap: var(--sp-14); align-items: center; flex-wrap: wrap; }
 .banner.setup .btn { background: var(--text-inverse); color: var(--accent); }
 
+/* "This page belongs to another repo than the header shows" — a note, not an
+   alarm: the accent instead of the error red the plain .banner carries. */
+.banner.other-repo { border-left-color: var(--accent); background: var(--accent-soft-bg);
+  display: flex; gap: var(--sp-12); align-items: center; flex-wrap: wrap; }
+
 /* Subscription usage panel (overview) */
 details.usage { background: var(--surface-card); padding: var(--sp-10) var(--sp-14); border-radius: var(--radius-10); margin-bottom: var(--sp-14); }
 details.usage summary { font-weight: 600; cursor: pointer; }

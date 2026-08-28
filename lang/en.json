@@ -7,6 +7,8 @@
   "nav.settings": "Settings",
   "layout.repo": "Repo",
   "layout.no_repo": "no repo yet",
+  "layout.other_repo": "This page belongs to the repo “{page}” — the header now shows “{header}”.",
+  "layout.other_repo_cta": "Go to {repo}",
   "layout.pipeline": "Pipeline",
   "layout.pipeline_hint": "global AND gate for scheduled starts",
   "layout.on": "on",

@@ -1006,7 +1006,16 @@
       } catch (err) { /* a quiet panel beats a broken page */ }
     }
 
-    const quelle = new EventSource('/api/events' + (repo ? '?repo=' + encodeURIComponent(repo) : ''))
+    // While the header stands on ANOTHER repo than the page — a run detail
+    // after the switcher was used, which the page says out loud — one filter
+    // cannot serve both: the detail wants its own run's repo, the sidebar counts
+    // the chosen one. So the stream is left unfiltered for that stretch. Nothing
+    // misfires on the extra events: every handler is keyed on a run id, and the
+    // one that is not (the tbody) only exists on pages that follow the switcher,
+    // where the two repos are the same value by construction.
+    const sidebarRepo = document.getElementById('status-sidebar')?.dataset.repo || ''
+    const filter = sidebarRepo && repo && sidebarRepo !== repo ? '' : repo
+    const quelle = new EventSource('/api/events' + (filter ? '?repo=' + encodeURIComponent(filter) : ''))
     quelle.addEventListener('run', (ev) => {
       let d = {}
       try { d = JSON.parse(ev.data) } catch (err) { return }

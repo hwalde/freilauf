@@ -7,6 +7,8 @@
   "nav.settings": "设置",
   "layout.repo": "仓库",
   "layout.no_repo": "尚未创建仓库",
+  "layout.other_repo": "本页属于仓库“{page}”，而顶部当前选中的是“{header}”。",
+  "layout.other_repo_cta": "前往 {repo}",
   "layout.pipeline": "流水线",
   "layout.pipeline_hint": "计划启动的全局与门",
   "layout.on": "开",
