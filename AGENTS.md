@@ -627,6 +627,14 @@ there and from the button on the agents page. When a run ends, **every**
 attached flow starts — all of them in parallel, the way a no-code platform fans
 a trigger out.
 
+The one trigger that is **not** an attachment is `run_merged`: it fires once per
+merge into a repo's base branch and carries its own filter, the repo, because a
+merge belongs to the repository and may be carried by a conflict run that never
+hung on an agent — its way in is therefore the repo form, not the agents page.
+Together with the `shell_command` block (a command on the hub machine, exit code
+as a result rather than a failure, optionally detached) that is what lets a flow
+restart the hub after a merge.
+
 The attachment carries the condition (`always`, only on `done`/`failed`/
 `aborted`, or `not_done`), so the case distinction is made where one thinks of
 it. It does **not** replace `switch_outcome`: that block branches on the result
