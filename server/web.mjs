@@ -18,6 +18,7 @@ import {
   pageOverview, pageAgents, pageRunForm, pageRun, pageRepos, pageSettings, pageSessions,
   pageArchive,
   runNewPost, agentEdit, agentSave, agentToggle, agentStart,
+  agentDelete, agentMovePage, agentMovePost,
   repoEdit, repoSave, settingsSave, settingsTestTelegram,
   telegramSetup, telegramTokenSave, telegramChatSave, telegramChats,
   pageCodingAgents, codingAgentSave, codingAgentDelete,
@@ -68,6 +69,10 @@ function pickQuickFields(b) {
     prompt: b.prompt,
     branch_mode: b.branch_mode,
     branch_pattern: b.branch_pattern,
+    // Part of the branch rule, and rendered by the same branchFields() the run
+    // forms use — so it has to be on the allowlist, or a ticked box would be
+    // dropped here and nowhere else.
+    keep_on_branch: b.keep_on_branch,
   }
 }
 
@@ -109,6 +114,9 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'POST' && path === '/agents/edit') return agentSave(req, res, url, formBody)
   if (req.method === 'POST' && path === '/agents/toggle') return agentToggle(req, res, url, formBody)
   if (req.method === 'POST' && path === '/agents/start') return agentStart(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/agents/delete') return agentDelete(req, res, url, formBody)
+  if (req.method === 'GET' && path === '/agents/move') return agentMovePage(req, res, url)
+  if (req.method === 'POST' && path === '/agents/move') return agentMovePost(req, res, url, formBody)
   if (req.method === 'GET' && path === '/runs/new') return pageRunForm(req, res, url)
   if (req.method === 'POST' && path === '/runs/new') return runNewPost(req, res, url, formBody)
   if (/^\/runs\/[0-9a-f-]{36}$/.test(path)) return pageRun(req, res, url, path.split('/')[2])

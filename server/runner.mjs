@@ -12,6 +12,7 @@ import { skillPromptZusatz } from './zusaetze.mjs'
 import { deliverGoal } from './goal.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { isHarnessEnabled } from './coding-agents.mjs'
+import { branchRuleText } from './run-def.mjs'
 import { t } from './i18n.mjs'
 
 const PLATFORM_RULES = [
@@ -83,7 +84,12 @@ export function platformSuffix(run, branchRule, settings, repo = null) {
   // byte for byte what it was before this feature existed.
   const hubMerges = repo?.merge_mode === 'hub'
   const base = repo?.base_branch || 'main'
-  const rules = hubMerges
+  // A run that keeps its work on its branch gets the branch sentence and nothing
+  // else: it already says the work stays put and that cc-hub will not merge it,
+  // and MERGE_RULE would promise the opposite two lines above. Two rules about
+  // the same thing is one too many — that is the lesson the whole branch table
+  // was written from.
+  const rules = hubMerges && !run.keep_on_branch
     ? PLATFORM_RULES.replace('- Expected maximum working time', `${MERGE_RULE}\n- Expected maximum working time`)
     : PLATFORM_RULES
   const finish = hubMerges
@@ -270,17 +276,17 @@ export function claudeSettingsJson() {
 /** Creates the run record (definition copy) and returns the run ID. */
 export function createRun({ repoId, agentId = null, harness, model = null, provider = null,
   orProvider = null, effort = null, prompt, promptExtra = null, goal = null, branchMode, branchPattern = null,
-  expectedMinutes, skills = null, flows = null, title = null }) {
+  keepOnBranch = 0, expectedMinutes, skills = null, flows = null, title = null }) {
   if (!getHarness(harness)) throw new Error(t('run.unknown_harness', { harness }))
   if (!isHarnessEnabled(harness)) throw new Error(t('run.harness_not_configured', { harness }))
   if (!prompt?.trim()) throw new Error(t('run.empty_prompt'))
   const id = randomUUID()
   db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, model, provider, or_provider,
-              effort, prompt, prompt_extra, goal, branch_mode, branch_pattern, expected_minutes, skills, flows,
-              title, last_activity_at)
-              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,?,? , datetime('now'))`)
+              effort, prompt, prompt_extra, goal, branch_mode, branch_pattern, keep_on_branch,
+              expected_minutes, skills, flows, title, last_activity_at)
+              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? , datetime('now'))`)
     .run(id, repoId, agentId, harness, model, provider, orProvider, effort, prompt, promptExtra,
-      goal, branchMode, branchPattern, expectedMinutes, skills, flows, title)
+      goal, branchMode, branchPattern, keepOnBranch ? 1 : 0, expectedMinutes, skills, flows, title)
   return id
 }
 
@@ -323,11 +329,13 @@ export async function launchRun(runId) {
 
   const mainSha = await sh('git', ['-C', repo.path, 'rev-parse', 'HEAD'])
   const settings = Object.fromEntries(db.prepare('SELECT key, value FROM settings').all().map(r => [r.key, r.value]))
-  const branchRule = run.branch_mode === 'neu'
-    ? `Create a new branch, name following the pattern ${branchExpected}.`
-    : run.branch_mode === 'fest'
-      ? `Work on the existing branch ${branchExpected}.`
-      : 'No branch — the worktree is detached; changes are throwaway changes.'
+  // What the agent is told about its branch comes out of BRANCH_MODE_INFO
+  // (run-def.mjs) — the same table the form's explanations come from, so the
+  // two can never say different things about the same choice.
+  const branchRule = branchRuleText(run.branch_mode, {
+    branch: branchExpected, base: repo.base_branch || 'main',
+    hubMerges: repo.merge_mode === 'hub', keepOnBranch: !!run.keep_on_branch,
+  })
   const fullPrompt = [run.prompt, repoPromptZusatz(repo.prompt), run.prompt_extra?.trim(),
     skillPromptZusatz(run.skills),
     platformSuffix({ ...run, id: runId, workdir_effective: workdir }, branchRule, settings, repo).trim()]

@@ -129,6 +129,14 @@ async function datenAnlegen() {
   }
   repoId = db.prepare('SELECT id FROM repos WHERE name=?').get('browser').id
   repoId2 = db.prepare('SELECT id FROM repos WHERE name=?').get('browser-zwei').id
+  // The second repo INTEGRATES. The branch rule means something different there
+  // — that is the whole point of the explanations, and it cannot be seen with
+  // one repo alone.
+  await formular('/repos/edit?id=' + repoId2, {
+    name: 'browser-zwei', path: sk.REPO, base_branch: 'main', worktree_extras: '[]',
+    merge_mode: 'hub', finish_timeout_min: '15', merge_max_attempts: '2',
+    conflict_parallel: '1', notify_running: '1', max_parallel: '0',
+  }, { alsBrowser: true })
 
   // Two favorites: one is enough for the dialog to stand, two are needed to see
   // that the chosen one is remembered.
@@ -383,17 +391,73 @@ try {
   })
 
   // ------------------------------------------------------------------ A5
-  gruppe('A5 — the branch pattern only matters where a branch is wanted')
+  gruppe('A5 — the branch rule explains itself, per repo')
+
+  await pruefe('the explanation that fits the repo is the visible one', async () => {
+    // Repo 1 does not integrate, repo 2 does. Both explanations are in the
+    // markup either way — CSS picks, so the static case needs no JavaScript.
+    const aus = await neueSeite(`/runs/new?repo=${repoId}`)
+    const feld = 'form[action="/runs/new"] fieldset.branch-choice'
+    gleich(await aus.$eval(feld, f => f.dataset.mergeMode), 'off', 'the repo that does not integrate says so')
+    wahr(await aus.isVisible(`${feld} [data-explain="off"]`), 'the off explanation is shown')
+    falsch(await aus.isVisible(`${feld} [data-explain="hub"]`), 'and the hub one is not')
+    enthaelt(await aus.textContent(`${feld} [data-explain="off"]`), 'throwaway',
+      'off: "no branch" really does mean throwaway work')
+    falsch(await aus.isVisible(`${feld} [data-hub-only]`), 'and "keep on branch" means nothing here')
+    sauber(aus)
+    await aus.close()
+
+    const an = await neueSeite(`/runs/new?repo=${repoId2}`)
+    gleich(await an.$eval(feld, f => f.dataset.mergeMode), 'hub', 'the integrating repo says so')
+    wahr(await an.isVisible(`${feld} [data-explain="hub"]`), 'the hub explanation is shown')
+    falsch(await an.isVisible(`${feld} [data-explain="off"]`), 'and the off one is not')
+    enthaelt(await an.textContent(`${feld} [data-explain="hub"]`), 'cc-hub merges',
+      'hub: the hub merges it, whatever the rule is called')
+    wahr(await an.isVisible(`${feld} [data-hub-only]`), 'and "keep on branch" is offered')
+    sauber(an)
+    await an.close()
+  })
+
+  await pruefe('switching repo inside the dialog switches the explanation with it', async () => {
+    // The Quick-Run dialog is the ONE form that can change repo without
+    // rebuilding the page — the header's switcher reloads. So this is the only
+    // place the map on the fieldset is needed at all.
+    const p = await neueSeite(`/?repo=${repoId}`)
+    await p.click('#qr-open')
+    // The dialog folds the branch rule away — it is the one of the three things
+    // it asks for that is usually left as it is. Unfold it, or every visibility
+    // check below would pass for the wrong reason.
+    await p.evaluate(() => { document.querySelector('#qr-dialog details.qr-more').open = true })
+    const feld = '#qr-form fieldset.branch-choice'
+    gleich(await p.$eval(feld, f => f.dataset.mergeMode), 'off', 'it opens on the repo one is looking at')
+    falsch(await p.isVisible(`${feld} [data-hub-only]`), 'no keep box yet')
+    await p.selectOption('#qr-form select[name=repo_id]', String(repoId2))
+    await wartePage(p, () => document.querySelector('#qr-form fieldset.branch-choice').dataset.mergeMode === 'hub',
+      null, 'the fieldset to follow the repo')
+    wahr(await p.isVisible(`${feld} [data-explain="hub"]`), 'the hub explanation appears')
+    wahr(await p.isVisible(`${feld} [data-hub-only]`), 'and so does the keep box')
+    await p.check(`${feld} input[name=keep_on_branch]`)
+    await p.selectOption('#qr-form select[name=repo_id]', String(repoId))
+    await wartePage(p, () => document.querySelector('#qr-form fieldset.branch-choice').dataset.mergeMode === 'off',
+      null, 'and back again')
+    // Hidden AND unticked: a box one cannot see must not still submit.
+    gleich(await p.$eval(`${feld} input[name=keep_on_branch]`, c => c.checked), false,
+      'going back to a repo that does not integrate unticks it')
+    sauber(p)
+    await p.close()
+  })
+
+  gruppe('A5b — the branch pattern only matters where a branch is wanted')
 
   await pruefe('the pattern field follows the mode, scoped to its own form', async () => {
     const p = await neueSeite(`/runs/new?repo=${repoId}`)
     const formular_ = 'form[action="/runs/new"]'
     falsch(await p.isVisible(`${formular_} [data-branch-pattern]`), 'mode "none": no pattern')
-    await p.selectOption(`${formular_} select[data-branch-mode]`, 'neu')
+    await p.check(`${formular_} input[name=branch_mode][value=neu]`)
     wahr(await p.isVisible(`${formular_} [data-branch-pattern]`), 'mode "new branch": pattern')
     gleich(await p.$eval('#qr-form [data-branch-pattern]', el => el.hidden), true,
       'the dialog\'s own branch rule is untouched')
-    await p.selectOption(`${formular_} select[data-branch-mode]`, 'keiner')
+    await p.check(`${formular_} input[name=branch_mode][value=keiner]`)
     falsch(await p.isVisible(`${formular_} [data-branch-pattern]`), 'back to none: gone again')
     sauber(p)
     await p.close()
@@ -438,7 +502,7 @@ try {
     gleich(await p.$eval('#qr-form textarea[name=prompt]', el => el.value), '', 'the task is cleared')
     gleich(await p.$eval('#qr-fav', s => s.value), String(FAV1), 'the favorite stands as the next run\'s setup')
     gleich(await p.$eval('#qr-form select[name=repo_id]', s => s.value), String(repoId), 'the repo stands')
-    gleich(await p.$eval('#qr-form select[data-branch-mode]', s => s.value), 'keiner', 'the branch rule stands')
+    gleich(await p.$eval('#qr-form input[name=branch_mode]:checked', r => r.value), 'keiner', 'the branch rule stands')
     gleich(await p.$eval('#qr-form select[data-start-switch]', s => s.value), 'now', 'the start time stands')
     gleich(new URL(p.url()).pathname, '/', 'and the page one started from is still the page one is on')
 
@@ -457,7 +521,7 @@ try {
     const p = await neueSeite(`/?repo=${repoId}`)
     await p.click('#qr-open')
     await p.evaluate(() => { document.querySelector('details.qr-more').open = true })
-    await p.selectOption('#qr-form select[data-branch-mode]', 'neu')      // a new branch without a pattern
+    await p.check('#qr-form input[name=branch_mode][value=neu]')      // a new branch without a pattern
     await p.fill('#qr-form textarea[name=prompt]', 'Browser-Quickrun: kaputt')
     await p.click('#qr-form button[type=submit]')
     await p.waitForSelector('#qr-error:not([hidden])', { timeout: 15_000 })
@@ -474,7 +538,7 @@ try {
     await p.selectOption('#qr-fav', String(FAV1))
     await p.fill('#qr-form textarea[name=prompt]', 'Browser-Quickrun: doch mehr Einstellungen')
     await p.evaluate(() => { document.querySelector('#qr-dialog details.qr-more').open = true })
-    await p.selectOption('#qr-form select[data-branch-mode]', 'neu')
+    await p.check('#qr-form input[name=branch_mode][value=neu]')
     await p.fill('#qr-form input[name=branch_pattern]', 'aufschub/{datum}')
     await p.selectOption('#qr-form select[data-start-switch]', 'in')
     await p.fill('#qr-form input[name=start_in_minutes]', '45')
@@ -500,7 +564,7 @@ try {
     // MAIN form — the dialog on that page has them empty, the two must not mix.
     gleich(await neu.$eval('form.settings textarea[name=prompt]', el => el.value),
       'Browser-Quickrun: doch mehr Einstellungen', 'the task survives')
-    gleich(await neu.$eval('form.settings select[data-branch-mode]', el => el.value), 'neu', 'the branch rule survives')
+    gleich(await neu.$eval('form.settings input[name=branch_mode]:checked', el => el.value), 'neu', 'the branch rule survives')
     gleich(await neu.$eval('form.settings input[name=branch_pattern]', el => el.value),
       'aufschub/{datum}', 'with its pattern')
     gleich(await neu.$eval('form.settings [data-branch-pattern]', el => el.hidden), false,
@@ -612,7 +676,7 @@ try {
     await p.fill('input[name=expected_minutes]', '77')
     await p.fill('#model', 'claude-opus-5')
     await p.selectOption('#effort', 'high')
-    await p.selectOption('select[data-branch-mode]', 'neu')
+    await p.check('input[name=branch_mode][value=neu]')
     await p.fill('input[name=branch_pattern]', 'agent/browser/{datum}')
     await p.check(`fieldset.flows-attach input[name=flows][value="${FLOWID}"]`)
     await p.uncheck('input[name=active]')      // deliberately OFF — and it must stay off
@@ -630,7 +694,7 @@ try {
     gleich(await p.$eval('textarea[name=prompt]', el => el.value), 'Dieser Text darf den Ausflug nicht kosten.', 'task')
     gleich(await p.$eval('input[name=expected_minutes]', el => el.value), '77', 'expected duration')
     gleich(await p.$eval('#model', el => el.value), 'claude-opus-5', 'model')
-    gleich(await p.$eval('select[data-branch-mode]', el => el.value), 'neu', 'branch mode')
+    gleich(await p.$eval('input[name=branch_mode]:checked', el => el.value), 'neu', 'branch mode')
     gleich(await p.$eval('input[name=branch_pattern]', el => el.value), 'agent/browser/{datum}', 'branch pattern')
     gleich(await p.$eval(`fieldset.flows-attach input[name=flows][value="${FLOWID}"]`, el => el.checked), true,
       'the ticked flow is ticked again')

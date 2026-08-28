@@ -83,6 +83,7 @@ is one and the same **run definition**, and it lives in **`server/run-def.mjs`**
 | Form block (HTML) | `runDefFields(values)` | agent form + single-run form |
 | Its second prompt, for the harnesses that know one | `goalFields` | both forms (see below) |
 | Its setup half, on its own | `runSetupFields`, `branchFields` | favorite form, Quick-Run dialog |
+| What each branch rule MEANS — label, explanation, agent sentence | `BRANCH_MODE_INFO`, `branchRuleText`, `branchContext` | `branchFields` + `launchRun` (see below) |
 | Form → definition, incl. all validation | `runDefFromForm(body, problems)` | both forms + `POST /api/runs` |
 | Its setup half, on its own | `runSetupFromForm(body, problems)` | favorites (see below) |
 | Agent row → definition | `defFromAgent(row)` | scheduler, "start now", flows |
@@ -91,11 +92,35 @@ is one and the same **run definition**, and it lives in **`server/run-def.mjs`**
 | Last used setup, **per coding agent** | `rememberRunChoice`, `lastRunChoice`, `lastRunChoiceFor` | both forms (preselection, and the reset on switching the coding agent) |
 | Title + start time (single run only) | `runTitleField`, `runStartTimeFields`, `runStartFromForm` | single-run form + `POST /api/runs` |
 
+### Agent lifecycle: delete, move, per-repo names
+
+An agent lives in exactly one repo, and its **name is unique per repo** —
+two repos may each carry an agent called "nightly". The agents table enforces
+`UNIQUE(repo_id, name)`; databases from before the change are rebuilt once at
+startup (`agentNameUniquePerRepo()` in db.mjs). The form reports a duplicate
+inside one repo as a readable problem (`agents.name_taken`), never a 500.
+
+Three lifecycle operations, all in `server/run-def.mjs` next to `saveAgent`:
+
+| Operation | Function | Notes |
+|---|---|---|
+| Delete | `deleteAgent(id)` | NULLs `runs.agent_id` first, then drops the row — the runs survive with their definition copy and title snapshot (`POST /agents/delete`) |
+| Move | `moveAgent(id, repoId)` | `UPDATE agents SET repo_id, name`; a name collision in the target repo appends a `YYYYMMDD-HHMMSS` suffix (`POST /agents/move`, page `GET /agents/move`) |
+| Name free? | `agentNameTaken(repoId, name, excludeId)` | mirrors the UNIQUE constraint for validation |
+
 And there is exactly **one** way from a definition to a running run:
 **`startRun(def, { repoId, agentId, promptExtra, title, startMode, startAt })`**
 in `server/scheduler.mjs` — including the budget gate (`budgetGate(harness)`,
 also used by the watcher when picking a deferred run back up).
 `startForAgent(agent)` is only its wrapper for a stored definition.
+
+`keep_on_branch` (0/1) is the newest field and went exactly that way: the form
+block, `runDefFromForm`, `defFromAgent`, `saveAgent`, `createRun`,
+`RUN_DEF_FLOW_FIELDS`/`defFromFlowProps`, two columns — and
+`pickQuickFields`'s allowlist in web.mjs, which is the one place a field can
+fall off silently because it is an allowlist and not a spread. It is
+deliberately NOT part of `rememberRunChoice`: it belongs to the task, not to the
+setup.
 
 A new field of a run therefore needs **one** change in `run-def.mjs`, not four.
 Before that, the copies had already drifted: the single-run form dropped the
@@ -693,6 +718,60 @@ once per repo. Keep it at 1 for a small repository where every task touches the
 same files: parallel resolvers then invalidate each other and only the first
 one's work survives. Raise it for a large repository where conflicts rarely land
 on the same files.
+
+### The branch rule under `hub`, and keeping work on a branch
+
+Under `merge_mode='off'` the branch rule answers "does this work survive": no
+branch means a detached worktree and throwaway changes. Under `hub` it answers
+nothing of the kind — the hub merges **every** run — and only decides under
+which NAME the work travels:
+
+| Rule | `off` | `hub` |
+|---|---|---|
+| **no branch** | detached, throwaway unless the agent pushes it somewhere itself | detached; the commits are merged into `{base}` at the end. Where a name is needed anyway (backup, conflict run) it is `run/<short id>` |
+| **new branch** | a branch from the pattern; whether it reaches `{base}` is up to the agent | the same branch, merged into `{base}` at the end — pick it for a readable name on origin |
+| **existing branch** | continue across several runs | the same, and merged after **every** run — unless "keep on branch" says otherwise |
+
+The form said none of this, and the prompt sentence for "no branch" still
+promised *"changes are throwaway changes"* — in the same prompt where
+`MERGE_RULE` promised the opposite. Both now come out of **one** table,
+`BRANCH_MODE_INFO` in `run-def.mjs`: the i18n key of each explanation and the
+English sentence the agent reads, per merge mode. `branchRuleText()` is what
+`launchRun` calls instead of the inline ternary it used to carry, and a unit
+test checks that every `explain` key really exists in `lang/en.json` — a table
+may not name a string that is not there.
+
+The form renders **both** explanations and lets CSS show the one that fits
+`data-merge-mode` on the fieldset. So the static case needs no JavaScript, and
+the only form that can change repo without rebuilding the page — the Quick-Run
+dialog, which has a repo `<select>` while the header's switcher reloads — just
+flips that attribute from a `repoId → mode` map, and rewrites the `<span
+data-base>` inside the sentences so a repo with a base branch of its own is not
+described with somebody else's.
+
+**"Keep the work on its branch"** (`runs.keep_on_branch`) is for the long-lived
+branch: a documentation branch, a spike, an agent that works on the same
+`fest` branch for a week. Only offered under `hub` (the checkbox carries
+`hidden` from the server as well as the CSS rule, so it is gone without the
+stylesheet too), and refused with "no branch" — keeping work on a branch needs a
+branch. What the integrator then does is a **short** version of the finish gate:
+
+- the **dirt check stays** — a run is only over when its work is committed, and
+  M1 is the same message as ever;
+- **no dry run, no merge**; instead the branch is pushed to origin (the same
+  `backupBranch()` the backup rule uses), `merge_status='kept_on_branch'`,
+  event `branch_kept`, and the Telegram done line reads
+  `Kept on branch <name> — not merged, as configured`;
+- a **failed push is an escalation**, like a merge that cannot be pushed:
+  the operator wants nothing living only on this machine;
+- it sends no "main has moved" (nothing moved) but still receives one, and it
+  fires no `run_merged` flow, because there was no merge;
+- the prompt gets the `keep` sentence **instead of** `MERGE_RULE`. Two rules
+  about the same thing is one too many — that is the lesson this whole table was
+  written from;
+- **"Merge now" is offered anyway.** Keeping the work on its branch is what
+  happened automatically at the end of the run, not a verdict for all time; the
+  click clears the flag and runs the ordinary path, dry run and all.
 
 ### The conflict run is not a normal run
 

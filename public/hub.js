@@ -125,14 +125,46 @@
     syncStart()
   })
 
-  // ---- branch rule: the pattern only matters when a branch is wanted at all ----
-  document.querySelectorAll('select[data-branch-mode]').forEach(function (modeSel) {
-    const form = modeSel.closest('form') || document
-    const pattern = form.querySelector('[data-branch-pattern]')
-    if (!pattern) return
-    const sync = () => { pattern.hidden = modeSel.value === 'keiner' }
-    modeSel.addEventListener('change', sync)
-    sync()
+  // ---- the branch rule: a choice that explains itself ----
+  //
+  // The pattern field only matters when a branch is wanted at all, and the
+  // explanation under each option depends on whether THIS repo is one the hub
+  // integrates for. Which explanation is visible is CSS's job (both are in the
+  // markup, `data-merge-mode` on the fieldset decides) — so the static case
+  // needs nothing from here.
+  //
+  // What does need JS is the one form that can change repo without rebuilding
+  // the page: the Quick-Run dialog has a repo <select>, and picking another repo
+  // there can turn a run that gets merged into one that does not. The header's
+  // repo switcher reloads, so it is none of this code's business.
+  document.querySelectorAll('[data-branch-choice]').forEach(function (box) {
+    const form = box.closest('form') || document
+    const pattern = box.querySelector('[data-branch-pattern]')
+    const keep = box.querySelector('[data-hub-only]')
+    const radios = Array.from(box.querySelectorAll('input[name=branch_mode]'))
+    const gewaehlt = () => (radios.find(r => r.checked) || {}).value || 'keiner'
+    const syncPattern = () => { if (pattern) pattern.hidden = gewaehlt() === 'keiner' }
+    radios.forEach(r => r.addEventListener('change', syncPattern))
+    syncPattern()
+
+    let modes = {}, bases = {}
+    try { modes = JSON.parse(box.dataset.mergeModes || '{}') } catch (e) { modes = {} }
+    try { bases = JSON.parse(box.dataset.mergeBases || '{}') } catch (e) { bases = {} }
+    const repoSel = form.querySelector && form.querySelector('select[name=repo_id]')
+    if (!repoSel) return
+    repoSel.addEventListener('change', function () {
+      const modus = modes[repoSel.value] === 'hub' ? 'hub' : 'off'
+      box.dataset.mergeMode = modus
+      // A base branch is part of the sentence, and it belongs to the repo — so
+      // the explanations say the name of the branch one actually picked.
+      const base = bases[repoSel.value]
+      if (base) box.querySelectorAll('[data-base]').forEach(el => { el.textContent = base })
+      if (!keep) return
+      keep.hidden = modus !== 'hub'
+      // Hidden AND unticked: a box one cannot see must not still submit, and
+      // "keep the work here" means nothing in a repo the hub does not integrate.
+      if (keep.hidden) keep.querySelectorAll('input[type=checkbox]').forEach(c => { c.checked = false })
+    })
   })
 
   // ---- toasts: say what happened without taking the page away ----
@@ -406,6 +438,11 @@
       // 'data-gewaehlt' is what those loaders read, so the choice survives.
       if (el.dataset.gewaehlt !== undefined) el.dataset.gewaehlt = v
     })
+    // Setting .checked in code fires no event, so whoever listens for one has
+    // not heard. The branch rule is the case that shows: without this the
+    // pattern field stays hidden next to a restored "new branch".
+    form.querySelectorAll('input[name=branch_mode]:checked')
+      .forEach(function (r) { r.dispatchEvent(new Event('change', { bubbles: true })) })
   }
 
   const flowBox = document.querySelector('fieldset.flows-attach')

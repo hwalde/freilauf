@@ -563,8 +563,44 @@ export async function finishGate(runId, text, via = 'http') {
   if (first) addEvent(runId, 'finish_started', {})
 
   const fresh = getRun(runId)
+  if (fresh.keep_on_branch) return finishKept(fresh, repo, via)
   const result = await runFinishCheck(fresh, { force: true })
   return applyCheckResult(fresh, repo, result, via)
+}
+
+/**
+ * "Keep the work on its branch": everything the gate does about DIRT still
+ * applies — a run is only over when its work is committed — but nothing after
+ * it. No dry run, no merge, and the branch is pushed to origin instead, because
+ * work that nobody merges is exactly the work that must not live on one disk.
+ */
+async function finishKept(run, repo, via) {
+  const dirty = await dirtyFiles(run, repo)
+  if (dirty.length) {
+    setFinishState(run.id, 'awaiting_commit')
+    if (run.finish_state !== 'awaiting_commit' || via === 'http') {
+      addEvent(run.id, 'finish_dirty', { files: dirty.slice(0, 30) })
+    }
+    const message = fill(M1, {
+      files: formatFiles(dirty), report_file: reportFile(run.id),
+      timeout: repo.finish_timeout_min ?? 15,
+    })
+    await deliver(run, message, via, `awaiting_commit:${dirty.join(',')}`)
+    scheduleNext(run)
+    return { hold: true, message }
+  }
+  const branch = run.branch_reported || run.branch_expected
+  const ref = await backupBranch(run.id)
+  if (!ref) {
+    // The operator wants nothing living only here, so a branch that cannot be
+    // pushed is an escalation, exactly like a merge that cannot be pushed.
+    addEvent(run.id, 'merge_error', { reason: `could not push branch ${branch ?? '?'} to origin` })
+    await escalate(run.id, 'merge_error')
+    return { hold: true, message: null }
+  }
+  db.prepare(`UPDATE runs SET merge_status='kept_on_branch', finish_state=NULL WHERE id=?`).run(run.id)
+  addEvent(run.id, 'branch_kept', { branch: ref })
+  return { hold: false, mergeLine: `Kept on branch ${ref} — not merged, as configured` }
 }
 
 /**
@@ -619,6 +655,21 @@ async function applyCheckResult(run, repo, result, via) {
   }
 }
 
+/**
+ * A kept run that became clean while the loop was watching. The report path
+ * closes such a run in reports.mjs (that is where a `done` becomes a `done`);
+ * reached from the loop, the same three things have to happen here.
+ */
+async function closeKept(runId, repo, mergeLine) {
+  db.prepare(`UPDATE runs SET status='done', ended_at=COALESCE(ended_at, datetime('now')) WHERE id=?`).run(runId)
+  addEvent(runId, 'done')
+  nextCheckAt.delete(runId)
+  const run = getRun(runId)
+  await notifyRun(runId, 'done', doneText(run, run.report_md, mergeLine),
+    { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: run.report_md ?? '' })
+  import('./flows/triggers.mjs').then(m => m.flowsTick()).catch(e => console.error('[flows]', e.message))
+}
+
 function setFinishState(runId, state) {
   db.prepare('UPDATE runs SET finish_state=? WHERE id=?').run(state, runId)
 }
@@ -664,6 +715,12 @@ export async function integrateTick(nowMs = Date.now()) {
       try {
         const repo = getRepo(run.repo_id)
         if (!repo) return
+        if (run.keep_on_branch) {
+          const r = await finishKept(run, repo, 'internal')
+          // Nothing left to merge — close it the way the report path would have.
+          if (!r.hold) await closeKept(run.id, repo, r.mergeLine)
+          return
+        }
         const result = await runFinishCheck(run)
         await applyCheckResult(run, repo, result, 'internal')
       } catch (err) {
@@ -1044,6 +1101,20 @@ export async function escalate(runId, reason) {
       branch: branchOf(run), base: repo.base_branch, reason: String(why).slice(0, 300),
     }))
   }
+  // A run that was told to keep its work on its branch is not merged because
+  // its agent vanished: the setting says what happens to this branch, and an
+  // escalation is not a licence to overrule it. Push it and be done.
+  if (run.keep_on_branch && !dirty.length && reason !== 'resolver_failed') {
+    const ref = await backupBranch(runId)
+    if (ref) {
+      db.prepare(`UPDATE runs SET merge_status='kept_on_branch' WHERE id=?`).run(runId)
+      addEvent(runId, 'branch_kept', { branch: ref })
+      return
+    }
+    return blockRun(runId, repo, 'blocked_error', fill(T_BLOCKED_ERROR, {
+      branch: branchOf(run), base: repo.base_branch, reason: 'the branch could not be pushed to origin',
+    }))
+  }
   if (dirty.length && reason !== 'resolver_failed') {
     // NOTHING is merged, not even the committed part: half a run's work on the
     // base branch is the more expensive mistake, and the operator has three
@@ -1381,6 +1452,10 @@ export async function mergeByHand(runId, leftovers = null) {
     db.prepare(`UPDATE runs SET merge_status='blocked_dirty' WHERE id=?`).run(runId)
     return { ok: false, error: t('merge.err_still_dirty') }
   }
+  // A branch that was deliberately kept can still be integrated later — the
+  // ordinary way, dry run and all. `keep_on_branch` describes what happened
+  // automatically at the end of the run, not a verdict for all time.
+  db.prepare('UPDATE runs SET keep_on_branch=0 WHERE id=?').run(runId)
   const tip = await tipOf(run)
   if (!tip || tip === run.base_sha) {
     db.prepare(`UPDATE runs SET merge_status='nothing' WHERE id=?`).run(runId)
