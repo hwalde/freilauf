@@ -268,6 +268,9 @@ try {
     // click read as if it had been swallowed.
     const p = await neueSeite(`/runs/${R_ALT}`)
     gleich(await p.$eval('#repo-switch', s => s.value), String(repoId), 'starts on the run\'s repo')
+    falsch(await p.isVisible('.banner.other-repo'), 'and says nothing while the two agree')
+    const ereignisse = []
+    p.on('request', (r) => { if (r.url().includes('/api/events')) ereignisse.push(r.url()) })
     await p.selectOption('#repo-switch', String(repoId2))
     await p.waitForURL(new RegExp(`/runs/${R_ALT}\\?repo=${repoId2}$`), { timeout: 10_000 })
     gleich(await p.$eval('#repo-switch', s => s.value), String(repoId2), 'after the reload it still shows what was picked')
@@ -275,6 +278,16 @@ try {
     // …while the page is still about this run: <body data-repo> is the live
     // channel's filter and must stay with the run whose events it wants.
     gleich(await p.$eval('body', b => b.dataset.repo), String(repoId), 'the run is still the run')
+    // Which is right and silent — so the page says it, with both names in it.
+    wahr(await p.isVisible('.banner.other-repo'), 'the note about the other repo is visible')
+    const hinweis = await p.$eval('.banner.other-repo', el => el.textContent)
+    enthaelt(hinweis, 'browser-zwei', 'it names the repo that was picked')
+    // And for that one stretch the stream is unfiltered: the detail wants this
+    // run's repo, the sidebar counts the other one, and one filter cannot serve
+    // both. Without it the sidebar would sit there stale.
+    for (let i = 0; i < 100 && !ereignisse.length; i++) await p.waitForTimeout(50)
+    wahr(ereignisse.length > 0, 'the live channel opened')
+    falsch(ereignisse.some(u => u.includes('repo=')), 'the live channel listens to both repos while they differ')
     sauber(p)
     await p.close()
   })

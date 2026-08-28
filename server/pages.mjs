@@ -150,6 +150,26 @@ function globalesBanner() {
     <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/"><button>${e(t(brauchtMensch(v) ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`).join('<br>')}</div>`
 }
 
+/**
+ * The page belongs to one repo, and the header points somewhere else.
+ *
+ * A page that shows a single object cannot follow the switcher — a run belongs
+ * to its repo, and rendering repo B's overview under `/runs/<id>` would be a 404
+ * with extra steps. So it reloads as itself and only the CHOICE moves (the rule
+ * lives in `layout()`, see there). That is right, and it is silent: the header
+ * then names a repo the content in front of one has nothing to do with, and the
+ * sidebar counts somebody else's runs. This one line says so.
+ *
+ * It offers the way the click was probably meant to go — the chosen repo's
+ * overview — because a hint that only states the problem makes the reader hunt
+ * for the switcher again.
+ */
+function otherRepoBanner(pageRepo, headerRepo, repos) {
+  const name = (id) => repos.find(r => r.id === id)?.name ?? getRepo(id)?.name ?? String(id)
+  return `<div class="banner other-repo">↔ ${e(t('layout.other_repo', { page: name(pageRepo), header: name(headerRepo) }))}
+    <a class="btn ghost" href="/?repo=${headerRepo}">${e(t('layout.other_repo_cta', { repo: name(headerRepo) }))}</a></div>`
+}
+
 /** Top bar shown on every page while no coding agent is configured. */
 function setupBanner() {
   if (enabledCodingAgents().length) return ''
@@ -420,6 +440,16 @@ export async function layout(req, title, active, content, selectedRepo = null, w
   const known = (id) => id != null && repos.some(r => r.id === id)
   const effRepo = [requestRepo(req), selectedRepo, persist]
     .map(id => id == null ? null : Number(id)).find(known) ?? repos[0]?.id ?? null
+  // …and when those two differ, the page says so (otherRepoBanner above). It is
+  // DERIVED, not passed: a page that follows the switcher reads the same
+  // `?repo=` into its own `selectedRepo` (selectRepo()), so there the two values
+  // are the same by construction and the banner can never appear. Only a page
+  // whose repo is fixed — a run, an agent, a repo form — can produce the
+  // mismatch, and it does so by handing its repo over like every such page
+  // already does. Nothing to remember, same reason the rule above lives here.
+  const ownRepo = selectedRepo == null ? null : Number(selectedRepo)
+  const otherRepo = ownRepo != null && effRepo != null && ownRepo !== effRepo && known(ownRepo)
+    ? otherRepoBanner(ownRepo, effRepo, repos) : ''
   const repoSel = repos.length
     ? `<label class="dim">${e(t('layout.repo'))}</label> <select id="repo-switch" data-active="${e(active)}">${repos.map(r => `<option value="${r.id}" ${r.id == effRepo ? 'selected' : ''}>${e(r.name)}</option>`).join('')}</select>`
     : `<a href="/repos" class="warn">${e(t('layout.no_repo'))}</a>`
@@ -438,7 +468,7 @@ ${setupBanner()}
   <button type="button" id="qr-open" class="qr-open" title="${e(t('qr.hint'))}">⚡ ${e(t('qr.title'))}</button>
 </header>
 <div class="shell" id="shell">
-<main>${globalesBanner()}${content}</main>
+<main>${globalesBanner()}${otherRepo}${content}</main>
 ${await statusSidebar(effRepo)}
 </div>
 ${quickRunDialog(repos, effRepo)}
@@ -1844,7 +1874,12 @@ export async function repoEdit(req, res, url) {
     ${integrationFields(r)}
     <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
   </form>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.repos'), '/repos', body))
+  // This form belongs to ONE repo, like a run's detail page: switching the
+  // header repo cannot make it show another one, so it hands its own repo over
+  // and layout() adds the note saying so. A NEW repo has none yet — the page
+  // then follows the switcher like any other, which is to say it follows nothing.
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(await layout(req, t('nav.repos'), '/repos', body, id ? r?.id ?? null : null))
 }
 
 export async function repoSave(req, res, url, formBody) {

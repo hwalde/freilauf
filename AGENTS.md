@@ -653,6 +653,23 @@ application comes out of it.
   data-repo>`, the live channel's filter — the run's own events must keep
   arriving while the header talks about somewhere else; the sidebar carries its
   own `data-repo` and follows the choice.
+- **…and the page says so** (`otherRepoBanner()`, the note above the content).
+  The rule above is right and it is silent: the header names a repo the content
+  in front of one has nothing to do with, and the sidebar counts somebody else's
+  runs. The note names both repos and links to the chosen one's overview — a
+  hint that only states the problem makes the reader hunt for the switcher
+  again. It is **derived, not passed**: a page that follows the switcher reads
+  the same `?repo=` into its own `selectedRepo` (`selectRepo()`), so there the
+  two values are equal by construction and the note cannot appear; only a page
+  whose repo is fixed can produce the mismatch, and it does so by handing its
+  repo over the way it already does. Which is why `repoEdit` now hands one over
+  too — a repo form belongs to one repo exactly as much as a run's page does.
+- **While the two differ the live channel listens to both repos.** One filter
+  cannot serve a detail page that wants its own run's events and a sidebar that
+  counts the chosen repo's, so `hub.js` drops the `?repo=` from `/api/events`
+  for that stretch. Nothing misfires on the extra events: every handler is keyed
+  on a run id, and the one that is not (the tbody) exists only on pages that
+  follow the switcher, where the two repos are the same value anyway.
 - **The fold lives on the shell**, not on the sidebar: `#shell.side-closed`,
   written from `localStorage['cchub.sidebar.open']` in try/catch. The live
   channel replaces `#status-sidebar` **whole** — blocks appear and disappear

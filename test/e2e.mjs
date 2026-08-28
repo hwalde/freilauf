@@ -2366,6 +2366,36 @@ try {
     const kopfOhne = ohne.slice(ohne.indexOf('<header'), ohne.indexOf('</header>'))
     enthaelt(kopfOhne, `option value="${repoId}" selected`, 'no ?repo= — the page\'s own repo stands in the header')
   })
+  // …and it SAYS so. The rule above is right and silent: the header names a repo
+  // the content has nothing to do with, and the sidebar counts somebody else's
+  // runs. The note is derived in layout() from the two repo ids, so it appears
+  // on every page that hands its repo over and on no page that follows the
+  // switcher — that is what the three cases below pin down.
+  await pruefe('a page on another repo than the header says so, by name', async () => {
+    const zweiId = db.prepare(`SELECT id FROM repos WHERE name='e2e-zwei'`).get().id
+    const repoName = db.prepare('SELECT name FROM repos WHERE id=?').get(repoId).name
+    const run = db.prepare(`SELECT id FROM runs WHERE repo_id=? ORDER BY started_at LIMIT 1`).get(repoId)
+    const html = await (await hol(`/runs/${run.id}?repo=${zweiId}`)).text()
+    enthaelt(html, 'class="banner other-repo"', 'the note is there')
+    enthaelt(html, repoName, 'and names the repo the run belongs to')
+    enthaelt(html, 'e2e-zwei', 'and the one that was picked')
+    enthaelt(html, `href="/?repo=${zweiId}"`, 'with the way to the picked repo')
+    // Same run, no switch: nothing to say.
+    const gleich_ = await (await hol(`/runs/${run.id}?repo=${repoId}`)).text()
+    falsch(gleich_.includes('banner other-repo'), 'no note when the header agrees')
+    // A repo form belongs to ONE repo just as much as a run does.
+    const form = await (await hol(`/repos/edit?id=${repoId}&repo=${zweiId}`)).text()
+    enthaelt(form, 'class="banner other-repo"', 'the repo form says it too')
+    // The overview FOLLOWS the switcher — it renders the chosen repo, so there
+    // is no mismatch it could report, whatever the parameter says.
+    const uebersicht = await (await hol(`/?repo=${zweiId}`)).text()
+    falsch(uebersicht.includes('banner other-repo'), 'a page that follows the switcher never shows it')
+    const archiv = await (await hol(`/archive?repo=${zweiId}`)).text()
+    falsch(archiv.includes('banner other-repo'), 'the archive neither')
+    // And a page without any repo context (settings) cannot be on the wrong one.
+    const einst = await (await hol('/settings', { headers: { cookie: `cchub_repo=${zweiId}` } })).text()
+    falsch(einst.includes('banner other-repo'), 'nor a page without a repo context')
+  })
 
   // ------------------------------------------------------------------
   // POST /settings/save writes only the keys the request actually carried. The

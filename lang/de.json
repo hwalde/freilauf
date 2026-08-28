@@ -7,6 +7,8 @@
   "nav.settings": "Einstellungen",
   "layout.repo": "Repo",
   "layout.no_repo": "kein Repo angelegt",
+  "layout.other_repo": "Diese Seite gehört zum Repo „{page}“ — oben ist jetzt „{header}“ ausgewählt.",
+  "layout.other_repo_cta": "Zu {repo}",
   "layout.pipeline": "Pipeline",
   "layout.pipeline_hint": "globales Und-Gatter für geplante Starts",
   "layout.on": "an",
