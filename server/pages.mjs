@@ -40,7 +40,7 @@ import { t, LANGUAGES, currentLanguage, setLanguage, clientCatalog } from './i18
  * Input errors belong on a page with a way back — not in a 500 ("internal
  * error") or a bare text response that swallows the inputs.
  */
-async function problemPage(res, title, problems, backHref) {
+export async function problemPage(res, title, problems, backHref) {
   const body = `<h2>${e(title)}</h2>
   <ul class="err">${problems.map(p => `<li>${e(p)}</li>`).join('')}</ul>
   <div class="btn-row"><a class="btn" href="${e(backHref)}">${e(t('problem.back'))}</a></div>`
@@ -517,7 +517,10 @@ export function runRow(r, ctx) {
   const titel = runTitle(r, agentName, t('overview.single_run'))
   // Under the title stands where the run comes from — the agent by name, or
   // the word for "no agent". A renamed run must not lose that information.
-  const herkunft = agentName ? t('overview.from_agent', { agent: agentName }) : t('overview.single_run')
+  const herkunft = r.resolves_run_id
+    // A row nobody started by hand needs to say why it exists at all.
+    ? t('merge.resolver_for', { title: resolvedTitle(r.resolves_run_id) })
+    : agentName ? t('overview.from_agent', { agent: agentName }) : t('overview.single_run')
   // Finished runs: duration until the end, not until now — otherwise a run
   // from three days ago "grows" to 4000 minutes in the overview.
   const startedMs = parseDbUtc(r.started_at)
@@ -571,6 +574,12 @@ function integrationLine(r) {
   if (!r.merge_status || ['merged', 'nothing'].includes(r.merge_status)) return ''
   if (!['done', 'failed', 'aborted'].includes(r.status)) return ''
   return `<div class="dim">${e(mergeText(r.merge_status))}</div>`
+}
+
+/** The title of the run a conflict run works for — for the one line that explains it. */
+function resolvedTitle(runId) {
+  const row = db.prepare('SELECT title FROM runs WHERE id=?').get(runId)
+  return row?.title || String(runId).split('-')[0]
 }
 
 /** How many columns the overview has — the empty state has to span all of them. */
@@ -815,7 +824,9 @@ export async function pageRun(req, res, url, id) {
     ${live ? `<form onsubmit="return cchubSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>
     <form onsubmit="return cchubKill('${id}')"><button class="danger">${e(t('run.kill'))}</button></form>` : ''}
   </details>
-  ${['failed', 'aborted'].includes(run.status)
+  ${['failed', 'aborted'].includes(run.status) && !run.resolves_run_id
+    // A conflict run is never retried: the way back in is "Merge now" on the
+    // run it works for, which starts a fresh one with a fresh branch.
     ? `<form method="post" action="/api/runs/${id}/retry"><button>${e(t('run.retry'))}</button>
        <span class="dim">${e(t('run.retry_hint'))}</span></form>`
     : ''}
@@ -892,25 +903,25 @@ export function integrationSection(run, repo) {
   }
   const resume = resumeCommand(run)
 
-  const knopf = (action, label, extra = '', confirmKey = null) => `
+  const btn = (action, label, extra = '', confirmKey = null) => `
     <form method="post" action="/api/runs/${e(run.id)}/${action}" class="inline"${
       confirmKey ? ` onsubmit="return confirm(${JSON.stringify(t(confirmKey))})"` : ''}>${extra}
       <button>${e(t(label))}</button></form>`
 
   const buttons = []
   if (run.status === 'running' && !run.finish_state) {
-    buttons.push(knopf('mark-done', 'merge.mark_done'))
+    buttons.push(btn('mark-done', 'merge.mark_done'))
   }
   const unmerged = String(run.merge_status ?? '')
   if (terminal && ['unmerged_commits', 'blocked_error', 'blocked_conflict', 'blocked_no_remote'].includes(unmerged)) {
-    buttons.push(knopf('merge', 'merge.merge_now'))
+    buttons.push(btn('merge', 'merge.merge_now'))
   }
   if (['blocked_dirty', 'unmerged_both', 'unmerged_dirty'].includes(unmerged)) {
-    buttons.push(knopf('merge', 'merge.commit_leftovers', '<input type="hidden" name="leftovers" value="commit">'))
-    buttons.push(knopf('merge', 'merge.discard_leftovers', '<input type="hidden" name="leftovers" value="discard">',
+    buttons.push(btn('merge', 'merge.commit_leftovers', '<input type="hidden" name="leftovers" value="commit">'))
+    buttons.push(btn('merge', 'merge.discard_leftovers', '<input type="hidden" name="leftovers" value="discard">',
       'merge.discard_confirm'))
   }
-  if (/^(blocked_|unmerged_)/.test(unmerged)) buttons.push(knopf('merge-skip', 'merge.skip'))
+  if (/^(blocked_|unmerged_)/.test(unmerged)) buttons.push(btn('merge-skip', 'merge.skip'))
 
   return `<div class="banner waiting" id="run-integration">
     <b>${e(t('merge.section'))}:</b> ${zeilen.join(' · ') || `<span class="dim">–</span>`}
@@ -1619,7 +1630,7 @@ function integrationFields(r = {}) {
 
 /** The Integration numbers out of the form — same strictness as the other repo fields. */
 function integrationFromForm(b, problems) {
-  const zahl = (name, min, fallback) => {
+  const num = (name, min, fallback) => {
     const raw = String(b[name] ?? '').trim()
     if (raw === '') return fallback
     const n = Number(raw)
@@ -1632,12 +1643,12 @@ function integrationFromForm(b, problems) {
   return {
     merge_mode: b.merge_mode === 'hub' ? 'hub' : 'off',
     merge_check: String(b.merge_check ?? '').trim() || null,
-    finish_timeout_min: zahl('finish_timeout_min', 1, 15),
-    merge_max_attempts: zahl('merge_max_attempts', 0, 2),
-    conflict_parallel: zahl('conflict_parallel', 1, 1),
+    finish_timeout_min: num('finish_timeout_min', 1, 15),
+    merge_max_attempts: num('merge_max_attempts', 0, 2),
+    conflict_parallel: num('conflict_parallel', 1, 1),
     // The last value wins in parseForm, so the checkbox beats its hidden companion.
     notify_running: b.notify_running === '1' || b.notify_running === 'on' ? 1 : 0,
-    max_parallel: zahl('max_parallel', 0, 0),
+    max_parallel: num('max_parallel', 0, 0),
   }
 }
 

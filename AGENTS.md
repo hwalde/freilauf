@@ -562,6 +562,27 @@ same files: parallel resolvers then invalidate each other and only the first
 one's work survives. Raise it for a large repository where conflicts rarely land
 on the same files.
 
+### The conflict run is not a normal run
+
+`isResolverRun(run)` — `!!run.resolves_run_id`, one predicate in
+`integrate.mjs`, and every one of the rules below asks it. A conflict run is a
+**tool of the integrator**, not work anybody asked for. It shares the start path,
+a worktree, a session, the watcher (activity, incidents, cost) and its row in the
+overview, which says what it is for ("conflict run for …"). Everything else is
+off:
+
+| What | Why |
+|---|---|
+| **No Telegram of its own**, in any state — `notifyRun()` returns at the top | The operator hears about the run it works FOR: T-RESOLVING at the start, the done line naming the resolver after the merge, T-BLOCKED-CONFLICT when it did not get there. Three messages about one problem is two too many. |
+| **No flows** — `flows=NULL`, `flow_dispatched=1` at creation | A flow attached to "a run finished" must not fire for a run the operator never started. Set at creation, not at the end, because that flag is what the triggers poll on. |
+| **No generated title** | It is called `Resolve conflicts: <original title>`; a model would only make that less clear. |
+| **Never `unmerged_*` / `blocked_*`, never a `merge_blocked` incident** | Everything that goes wrong here is mapped onto the original: `escalate(original, 'resolver_failed')` → attempts → the next conflict run or `blocked_conflict`. It only ever carries `merged` or nothing. |
+| **The finish gate is help, not a gate** | M1/M2/M4 reach it while it lives. Deadline gone or agent dead → `escalate(original, 'resolver_failed')` — **never** a conflict run for a conflict run. That is the recursion guard, and it is the reason the predicate exists. |
+| **No `assessUnmerged()`** on `failed`/`aborted` | Same: not a decision for the operator, an answer the original still needs. |
+| **No "main has moved"** | It has exactly one job; a notice about a moving base branch is noise inside it. |
+| **`max_parallel` counts it but never blocks it** | It starts on the manual path. Its own ceiling is `conflict_parallel`. |
+| **No retry button** | A conflict run is never repeated — "Merge now" on the original starts a fresh one, with a fresh branch. Renaming and archiving stay. |
+
 ### "main has moved" is built in, not a flow
 
 After every merge the other running agents of the repo are told — urgently
@@ -646,7 +667,7 @@ work is on the base branch" walks a clean run through to a merge commit on
 conflict, watches a conflict run take over and both runs end up merged, hits the
 attempt limit, kills an agent mid-gate, fails a merge check, and pushes an
 operator commit to origin. The suite **owns the integrator's clock**
-(`CCHUB_INTEGRATOR_AUS=1`): two processes driving one integration worktree is a
+(`CCHUB_INTEGRATOR_OFF=1`): two processes driving one integration worktree is a
 race nobody wants to debug, so the hub still integrates on the report path and
 the suite calls `integrateTick(nowMs)` itself. The last test in the group turns
 `merge_mode` back to `off` — everything before it is the proof that without the

@@ -732,5 +732,10 @@
   "merge.unmerged_both": "未合并：既有提交也有未提交的改动",
   "merge.skipped_by_operator": "已跳过合并",
   "incident.merge_blocked": "未合并",
-  "repos.last_push": "上次备份推送：{ts}"
+  "repos.last_push": "上次备份推送：{ts}",
+  "run.marked_done_note": "_（由操作者标记为完成）_",
+  "api.unknown_repo": "未知的仓库",
+  "merge.err_still_dirty": "工作树中仍有未提交的改动——没有合并任何内容。",
+  "merge.err_no_resolver": "该分支与基础分支存在冲突，且尚未配置冲突解决者（设置 → 合并）。",
+  "merge.resolver_for": "为“{title}”而起的冲突运行"
 }

@@ -168,7 +168,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // The suite owns the integrator's clock: two processes on one integration
       // worktree is a race nobody wants to debug. The hub still integrates on
       // the report path, which is where it matters.
-      CCHUB_INTEGRATOR_AUS: '1',
+      CCHUB_INTEGRATOR_OFF: '1',
       CCHUB_QUOTA_JSON: join(SB, 'quota.json'),
       CCHUB_CLAUDE_PROJECTS: join(SB, 'claude-projects'),
       CCHUB_ZUSAETZE_DIR: join(SB, 'zusaetze'),
@@ -219,7 +219,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     process.env.CCHUB_RUNS_DIR = join(SB, 'runs')
     process.env.CCHUB_WORKTREES_DIR = join(SB, 'worktrees')
     process.env.CCHUB_INTEGRATE_DIR = join(SB, 'integrate')
-    process.env.CCHUB_INTEGRATOR_AUS = '1'
+    process.env.CCHUB_INTEGRATOR_OFF = '1'
     process.env.CCHUB_QUOTA_JSON = join(SB, 'quota.json')
     process.env.CCHUB_CC_START = STUB
     process.env.CCHUB_CLAUDE_PROJECTS = join(SB, 'claude-projects')

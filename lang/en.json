@@ -732,5 +732,10 @@
   "merge.unmerged_both": "not merged: commits and uncommitted changes",
   "merge.skipped_by_operator": "merge skipped",
   "incident.merge_blocked": "Not merged",
-  "repos.last_push": "last backup push: {ts}"
+  "repos.last_push": "last backup push: {ts}",
+  "run.marked_done_note": "_(marked done by the operator)_",
+  "api.unknown_repo": "unknown repo",
+  "merge.err_still_dirty": "The worktree still has uncommitted changes — nothing was merged.",
+  "merge.err_no_resolver": "The branch conflicts with the base branch, and no conflict resolver is configured (Settings → Merge).",
+  "merge.resolver_for": "conflict run for “{title}”"
 }

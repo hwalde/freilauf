@@ -24,7 +24,7 @@ import {
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
   pageMergeSettings, mergeSettingsSave,
   headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
-  integrationSection,
+  integrationSection, problemPage,
 } from './pages.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
 import { mergeByHand, skipMerge, resetIntegration } from './integrate.mjs'
@@ -388,7 +388,7 @@ async function api(req, res, url) {
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/mark-done$/))) {
     const run = getRun(m[1])
     if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
-    const r = await handleReport(run.id, { kind: 'done', text: '_(marked done by the operator)_' }, 'internal')
+    const r = await handleReport(run.id, { kind: 'done', text: t('run.marked_done_note') }, 'internal')
     return answer(req, res, r.ok ? 200 : 400, r, `/runs/${run.id}`)
   }
   // "Merge now" and its two variants. An explicit click bypasses the attempt
@@ -400,6 +400,10 @@ async function api(req, res, url) {
     const b = await form(req)
     const leftovers = ['commit', 'discard'].includes(b.leftovers) ? b.leftovers : null
     const r = await mergeByHand(run.id, leftovers)
+    // A refusal has a REASON ("still dirty", "no resolver configured"), and a
+    // redirect back to the run would swallow it — the page would look as if the
+    // click had done nothing at all.
+    if (!r.ok && wantsHtml(req)) return problemPage(res, t('merge.section'), [r.error], `/runs/${run.id}`)
     return answer(req, res, r.ok ? 200 : 400, r, `/runs/${run.id}`)
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/merge-skip$/))) {

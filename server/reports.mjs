@@ -264,6 +264,11 @@ export function doneText(run, report, mergeLine = null) {
  * Telegram with dedupe per (run, type) — planning 4.5: only one message per anomaly type.
  */
 export async function notifyRun(runId, type, text, lang = null) {
+  // A conflict run is the integrator's tool, not work the operator asked for.
+  // He hears about it through the run it works FOR — T-RESOLVING at the start,
+  // the done line naming it after the merge, T-BLOCKED-CONFLICT when it did not
+  // get there. No flag event either: there is nothing to deduplicate.
+  if (db.prepare('SELECT resolves_run_id FROM runs WHERE id=?').get(runId)?.resolves_run_id) return false
   const flag = `telegram_sent:${type}`
   const have = db.prepare('SELECT 1 FROM events WHERE run_id = ? AND kind = ? LIMIT 1').get(runId, flag)
   // Help calls are never duplicates: every question needs an answer.

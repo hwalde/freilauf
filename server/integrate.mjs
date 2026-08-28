@@ -38,6 +38,7 @@ import { notifyRun, doneText } from './reports.mjs'
 import { vorfallMelden, offeneVorfaelle, vorfallVerwerfen } from './incidents.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { fallbackTitle, TITLE_MAX } from './title.mjs'
+import { t } from './i18n.mjs'
 
 export const INTEGRATE_DIR = process.env.CCHUB_INTEGRATE_DIR ?? join(homedir(), 'agents', 'integrate')
 
@@ -231,6 +232,29 @@ export function conflictFilesFromMergeTree(stdout) {
 /** Does this repo want the hub to integrate? Everything here hangs on it. */
 export function hubMerges(repo) {
   return repo?.merge_mode === 'hub'
+}
+
+/**
+ * Is this run a tool of the integrator rather than a piece of work in its own
+ * right?
+ *
+ * A conflict run shares a lot with a normal run — the start path, a worktree, a
+ * session, the watcher's activity and incident handling, and its row in the
+ * overview. Everything else is switched OFF, and this predicate is the single
+ * place that says so, because the alternative is nine scattered conditions that
+ * drift.
+ *
+ * Two reasons, and the second is the load-bearing one. The operator did not ask
+ * for this run and must not be told about it: he hears about the ORIGINAL run —
+ * T-RESOLVING when a resolver starts, the done line naming the resolver when it
+ * lands, T-BLOCKED-CONFLICT when it does not. And a conflict run must never
+ * produce a conflict run: everything that goes wrong here is mapped onto the
+ * original (`escalate(original, 'resolver_failed')`), which is where the attempt
+ * counter lives. Without that, a failing resolver would spawn a resolver for
+ * itself, forever.
+ */
+export function isResolverRun(run) {
+  return !!run?.resolves_run_id
 }
 
 /**
@@ -526,7 +550,10 @@ export async function finishGate(runId, text, via = 'http') {
   const run = getRun(runId)
   if (!run) return null
   const repo = getRepo(run.repo_id)
-  if (!hubMerges(repo) || !run.workdir_effective || !existsSync(run.workdir_effective)) return null
+  // `runs.worktree` is NULL when the run worked in the repo itself (legacy rows).
+  // The hub never runs the gate against the operator's checkout: a dirty file
+  // there is HIS, and a merge there is the thing this whole module avoids.
+  if (!hubMerges(repo) || !run.worktree || !existsSync(run.worktree)) return null
 
   // The report is safe from this moment on, whatever the agent does next.
   const first = !run.finish_state
@@ -672,10 +699,10 @@ let timer = null
  * nobody wants to debug. The hub still integrates on the report path — the
  * suite simply owns the clock.
  */
-export function integratorTimerAus() { return process.env.CCHUB_INTEGRATOR_AUS === '1' }
+export function integratorTimerOff() { return process.env.CCHUB_INTEGRATOR_OFF === '1' }
 
 export function startIntegrator() {
-  if (timer || integratorTimerAus()) return
+  if (timer || integratorTimerOff()) return
   timer = setInterval(() => integrateTick().catch(e => console.error('[integrate]', e.message)), 5_000)
   // Nothing is lost across a restart: every waiting run is checked right away.
   for (const run of db.prepare(`SELECT id FROM runs WHERE finish_state IS NOT NULL`).all()) {
@@ -847,10 +874,17 @@ async function backToConflict(runId, repo, reason) {
  */
 async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = null, dir = null, already = false } = {}) {
   const sha = mergedSha ?? tip
+  // What this merge actually changed on the base branch. Computed once and
+  // carried in the event: "main has moved" needs it to judge urgency, and the
+  // flow trigger that reacts to a merge reads it from there.
+  const files = (!already && dir && beforeSha && mergedSha)
+    ? (await sh('git', ['-C', dir, 'diff', '--name-only', `${beforeSha}..${mergedSha}`]))
+      .stdout.split('\n').map(x => x.trim()).filter(Boolean)
+    : []
   db.prepare(`UPDATE runs SET merge_status='merged', merged_sha=?, merged_at=datetime('now'),
               finish_state=NULL, status='done', ended_at=COALESCE(ended_at, datetime('now')) WHERE id=?`)
     .run(tip, runId)
-  addEvent(runId, 'merged', already ? { already: true, sha: tip } : { sha })
+  addEvent(runId, 'merged', already ? { already: true, sha: tip, files } : { sha, files })
   nextCheckAt.delete(runId)
   lastTip.delete(runId)
 
@@ -867,7 +901,10 @@ async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = nu
     if (orig) {
       db.prepare(`UPDATE runs SET merge_status='merged', merged_sha=?, merged_at=datetime('now') WHERE id=?`)
         .run(tip, orig.id)
-      addEvent(orig.id, 'merged', { sha: tip, by_resolver: runId })
+      // The same payload the original would have carried had it merged itself:
+      // whatever reads a merge — "main has moved", the flow trigger — must not
+      // have to care which run happened to carry it over the line.
+      addEvent(orig.id, 'merged', { sha: tip, files, by_resolver: runId })
       closeMergeIncidents(orig.id)
       const fresh = getRun(orig.id)
       await notifyRun(orig.id, 'done', doneText(fresh, fresh.report_md,
@@ -877,7 +914,7 @@ async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = nu
   }
   closeMergeIncidents(runId)
 
-  if (!already && mergedSha && dir) await notifyBaseMoved(repo, run, { beforeSha, mergedSha, dir })
+  if (!already && mergedSha && dir) await notifyBaseMoved(repo, run, { files, mergedSha })
 
   // Flows see a run whose work really is on the base branch.
   import('./flows/triggers.mjs').then(m => m.flowsTick()).catch(e => console.error('[flows]', e.message))
@@ -903,19 +940,17 @@ function closeMergeIncidents(runId) {
  * the send route and the flow step switch such a run back to 'running' first.
  * Runs in the finish gate DO get it; an 'awaiting_merge' one needs it most.
  */
-async function notifyBaseMoved(repo, mergedRun, { beforeSha, mergedSha, dir }) {
+async function notifyBaseMoved(repo, mergedRun, { files, mergedSha }) {
   if (!repo.notify_running) return
-  const changed = new Set()
-  if (beforeSha && mergedSha) {
-    const r = await sh('git', ['-C', dir, 'diff', '--name-only', `${beforeSha}..${mergedSha}`])
-    if (r.ok) for (const f of r.stdout.split('\n').map(s => s.trim()).filter(Boolean)) changed.add(f)
-  }
+  const changed = new Set(files ?? [])
   const targets = db.prepare(`SELECT * FROM runs WHERE repo_id=? AND status='running'
     AND tmux_session IS NOT NULL AND tmux_closed_at IS NULL AND id<>?`).all(repo.id, mergedRun.id)
   const ids = [], urgentIds = []
   for (const other of targets) {
     if (other.id === mergedRun.resolves_run_id) continue
-    if (other.resolves_run_id === mergedRun.id) continue
+    // A conflict run is a tool, not a colleague — it has exactly one job and a
+    // notice about a moving base branch is noise inside it.
+    if (isResolverRun(other)) continue
     const mine = await filesOfRun(other, repo)
     const overlap = [...changed].filter(f => mine.has(f))
     const text = overlap.length
@@ -970,6 +1005,18 @@ export async function escalate(runId, reason) {
   // going away while the hub is pushing says nothing about the merge, and
   // pulling the run out from under the job would leave it half done.
   if (run.finish_state === 'merging' && reason === 'agent_gone') return
+  // A conflict run never gets a merge_status of its own beyond 'merged', never
+  // an incident and above all never a conflict run: whatever went wrong here
+  // counts against the ORIGINAL run's attempts.
+  if (isResolverRun(run) && reason !== 'resolver_failed') {
+    if (run.finish_state) {
+      db.prepare(`UPDATE runs SET finish_state=NULL, status='done',
+                  ended_at=COALESCE(ended_at, datetime('now')) WHERE id=?`).run(runId)
+      addEvent(runId, 'finish_escalated', { reason })
+    }
+    nextCheckAt.delete(runId)
+    return escalate(run.resolves_run_id, 'resolver_failed')
+  }
   const wasWaiting = !!run.finish_state
   const dirty = await dirtyFiles(run, repo)
 
@@ -1205,7 +1252,7 @@ async function startResolver(orig, repo) {
       branch, base: repo.base_branch, reason: String(r.error ?? 'resolver start failed').slice(0, 300),
     }))
   }
-  db.prepare('UPDATE runs SET resolves_run_id=? WHERE id=?').run(orig.id, r.runId)
+  markAsResolver(r.runId, orig.id)
   db.prepare(`UPDATE runs SET resolver_run_id=?, merge_attempts=merge_attempts+1,
               merge_status='resolving' WHERE id=?`).run(r.runId, orig.id)
   addEvent(orig.id, 'resolver_started', { run_id: r.runId, branch, attempt })
@@ -1214,6 +1261,17 @@ async function startResolver(orig, repo) {
     resolver_short: kurzid(r.runId), branch, attempt,
     max: Math.max(0, repo.merge_max_attempts ?? 2),
   }))
+}
+
+/**
+ * Stamp a fresh run as the integrator's tool. The two dispatch flags are set
+ * HERE and not when it ends: a flow must not fire for a run nobody asked for,
+ * and the flags are what the triggers poll on. `merge_dispatched` may not exist
+ * yet (a sibling change adds it) — an absent column is not a reason to fail.
+ */
+function markAsResolver(runId, origId) {
+  db.prepare('UPDATE runs SET resolves_run_id=?, flows=NULL, flow_dispatched=1 WHERE id=?').run(origId, runId)
+  try { db.prepare('UPDATE runs SET merge_dispatched=1 WHERE id=?').run(runId) } catch { /* column not there yet */ }
 }
 
 function checkTail(runId) {
@@ -1253,7 +1311,10 @@ export async function assessUnmerged(runId) {
   const run = getRun(runId)
   if (!run) return null
   const repo = getRepo(run.repo_id)
-  if (!hubMerges(repo) || !run.workdir_effective || !existsSync(run.workdir_effective)) return null
+  if (!hubMerges(repo) || !run.worktree || !existsSync(run.worktree)) return null
+  // A conflict run leaves nothing behind that is anybody's decision: it either
+  // delivered or the original needs another answer.
+  if (isResolverRun(run)) { await resolverEnded(run); return null }
   if (!run.base_sha) return null
   const dirty = await dirtyFiles(run, repo)
   const r = await sh('git', ['-C', run.workdir_effective, 'rev-list', '--count', `${run.base_sha}..HEAD`])
@@ -1297,9 +1358,9 @@ export function resumeCommand(run) {
  */
 export async function mergeByHand(runId, leftovers = null) {
   const run = getRun(runId)
-  if (!run) return { ok: false, error: 'unknown run' }
+  if (!run) return { ok: false, error: t('api.unknown_run') }
   const repo = getRepo(run.repo_id)
-  if (!repo) return { ok: false, error: 'unknown repo' }
+  if (!repo) return { ok: false, error: t('api.unknown_repo') }
   addEvent(runId, 'merge_manual', { action: leftovers ? `${leftovers}+merge` : 'merge' })
 
   if (leftovers === 'commit') {
@@ -1317,7 +1378,7 @@ export async function mergeByHand(runId, leftovers = null) {
   const dirty = await dirtyFiles(run, repo)
   if (dirty.length) {
     db.prepare(`UPDATE runs SET merge_status='blocked_dirty' WHERE id=?`).run(runId)
-    return { ok: false, error: 'worktree still has uncommitted changes' }
+    return { ok: false, error: t('merge.err_still_dirty') }
   }
   const tip = await tipOf(run)
   if (!tip || tip === run.base_sha) {
@@ -1331,7 +1392,7 @@ export async function mergeByHand(runId, leftovers = null) {
     const setup = resolverSetup()
     if (!setup.harness) {
       db.prepare(`UPDATE runs SET merge_status='blocked_conflict' WHERE id=?`).run(runId)
-      return { ok: false, error: 'conflict, and no conflict resolver configured (Settings → Merge)' }
+      return { ok: false, error: t('merge.err_no_resolver') }
     }
     await startResolver(getRun(runId), repo)
     return { ok: true, resolving: true }

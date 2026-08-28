@@ -2137,21 +2137,21 @@ try {
   const integrate = await import('../server/integrate.mjs')
   const g = (dir, ...args) => sh('git', ['-C', dir, ...args])
 
-  async function repoMerge(felder = {}) {
+  async function repoMerge(fields = {}) {
     const row = db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
     const r = await formular(`/repos/edit?id=${row.id}`, {
       name: 'e2e', path: REPO, base_branch: 'main',
       worktree_extras: row.worktree_extras ?? '[]', prompt: row.prompt ?? '',
       merge_mode: 'hub', merge_check: '', finish_timeout_min: '15',
       merge_max_attempts: '2', conflict_parallel: '1', notify_running: '1', max_parallel: '0',
-      ...felder,
+      ...fields,
     }, { alsBrowser: true })
-    gleich(r.status, 303, `repo saved (${JSON.stringify(felder)})`)
+    gleich(r.status, 303, `repo saved (${JSON.stringify(fields)})`)
     return db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
   }
 
   /** A report exactly as cc-report sends it — and the hub's answer to it. */
-  async function melde(runId, body) {
+  async function sendReport(runId, body) {
     const r = await hol(`/api/runs/${runId}/report`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -2162,18 +2162,18 @@ try {
   }
 
   /** Start a run and hand back id, worktree and session. */
-  async function mergeLauf(felder = {}) {
-    const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Merge', branch_mode: 'keiner', ...felder })
+  async function mergeRun(fields = {}) {
+    const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Merge', branch_mode: 'keiner', ...fields })
     wahr(!!j.runId, `run started (${JSON.stringify(j)})`)
     await sessionMerken(j.runId)
     const row = lauf(j.runId)
     return { id: j.runId, wt: row.workdir_effective, session: row.tmux_session }
   }
 
-  async function schreibeUndCommit(wt, datei, inhalt, nachricht) {
-    writeFileSync(join(wt, datei), inhalt)
+  async function writeAndCommit(wt, datei, content, message) {
+    writeFileSync(join(wt, datei), content)
     await g(wt, 'add', '-A')
-    await g(wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', nachricht)
+    await g(wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', message)
   }
 
   const originSubject = async (ref = 'main') =>
@@ -2205,22 +2205,22 @@ try {
   })
 
   // ---- 1. the clean case: the report is checked, then merged and pushed ----
-  let sauber = null
+  let cleanRun = null
   await pruefe('a clean, mergeable run is merged into main and only THEN done', async () => {
-    sauber = await mergeLauf()
-    await schreibeUndCommit(sauber.wt, 'sauber.txt', 'clean\n', 'E2E: clean run')
-    const antwort = await melde(sauber.id, { kind: 'done', text: 'Everything went fine.' })
+    cleanRun = await mergeRun()
+    await writeAndCommit(cleanRun.wt, 'clean.txt', 'clean\n', 'E2E: clean run')
+    const antwort = await sendReport(cleanRun.id, { kind: 'done', text: 'Everything went fine.' })
     wahr(antwort.ok, 'accepted')
     enthaelt(antwort.message ?? '', 'cc-hub is merging it into main', 'the answer says what happens now')
-    await warteAuf(() => lauf(sauber.id).merge_status === 'merged',
+    await warteAuf(() => lauf(cleanRun.id).merge_status === 'merged',
       { was: 'the run is merged', timeoutMs: 30_000 })
-    const r = lauf(sauber.id)
+    const r = lauf(cleanRun.id)
     gleich(r.status, 'done', 'done — and not a second earlier')
     wahr(!!r.merged_sha, 'the merged commit is recorded')
     const anc = await g(REPO, 'merge-base', '--is-ancestor', r.merged_sha, 'origin/main')
     wahr(anc.ok, 'the run\'s tip really is an ancestor of origin/main')
     enthaelt(await originSubject(), 'Merge run', 'a merge commit, always --no-ff')
-    const ev = ereignisse(sauber.id)
+    const ev = ereignisse(cleanRun.id)
     enthaelt(ev.join(','), 'finish_started', 'the gate is recorded')
     enthaelt(ev.join(','), 'finish_clean', 'and its verdict')
     enthaelt(ev.join(','), 'merged', 'and the merge')
@@ -2229,12 +2229,12 @@ try {
 
   // ---- 2. dirty: the agent is told, and reports again ----
   await pruefe('an uncommitted change holds the run and names the file', async () => {
-    const l = await mergeLauf()
-    await schreibeUndCommit(l.wt, 'a.txt', 'a\n', 'E2E: committed part')
-    writeFileSync(join(l.wt, 'vergessen.txt'), 'left behind\n')
-    const antwort = await melde(l.id, { kind: 'done', text: 'done, I think' })
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'a.txt', 'a\n', 'E2E: committed part')
+    writeFileSync(join(l.wt, 'forgotten.txt'), 'left behind\n')
+    const antwort = await sendReport(l.id, { kind: 'done', text: 'done, I think' })
     enthaelt(antwort.message ?? '', 'NOT finished yet', 'the answer says the run is not over')
-    enthaelt(antwort.message ?? '', 'vergessen.txt', 'and names the file')
+    enthaelt(antwort.message ?? '', 'forgotten.txt', 'and names the file')
     const r = lauf(l.id)
     gleich(r.status, 'running', 'the run stays running — its agent can still fix this')
     gleich(r.finish_state, 'awaiting_commit', 'and is waiting for the commit')
@@ -2253,7 +2253,7 @@ try {
     merge_resolver_prompt: 'Keep the tests green.',
   }, { alsBrowser: true })
 
-  let konflikt = null, resolver = null
+  let conflicted = null, resolver = null
   await pruefe('the Merge settings page stores the conflict resolver through the run form\'s own validation', async () => {
     const r = await resolverSetup()
     gleich(r.status, 303, 'saved')
@@ -2265,8 +2265,8 @@ try {
   })
 
   await pruefe('a branch that no longer merges holds the run and names the conflict', async () => {
-    konflikt = await mergeLauf()
-    await schreibeUndCommit(konflikt.wt, 'README.md', '# Testrepo\nfrom the run\n', 'E2E: run changes the readme')
+    conflicted = await mergeRun()
+    await writeAndCommit(conflicted.wt, 'README.md', '# Testrepo\nfrom the run\n', 'E2E: run changes the readme')
     // Meanwhile somebody else lands a change on the same line. The main
     // checkout has to be level with origin first — the hub has been merging
     // into it all along, so a commit on a stale main could not be pushed.
@@ -2276,23 +2276,23 @@ try {
     await g(REPO, 'add', '-A')
     await g(REPO, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: outside change')
     await g(REPO, 'push', '-q', 'origin', 'main')
-    const antwort = await melde(konflikt.id, { kind: 'done', text: 'I changed the readme.' })
+    const antwort = await sendReport(conflicted.id, { kind: 'done', text: 'I changed the readme.' })
     enthaelt(antwort.message ?? '', 'cannot be merged into main', 'the answer says why')
     enthaelt(antwort.message ?? '', 'README.md', 'and names the file')
     enthaelt(antwort.message ?? '', 'Do NOT merge into or push to main yourself', 'the ground rule')
-    gleich(lauf(konflikt.id).finish_state, 'awaiting_merge', 'waiting for the agent to resolve it')
-    gleich(lauf(konflikt.id).status, 'running', 'still running')
+    gleich(lauf(conflicted.id).finish_state, 'awaiting_merge', 'waiting for the agent to resolve it')
+    gleich(lauf(conflicted.id).status, 'running', 'still running')
   })
 
   await pruefe('when the deadline passes, a conflict run takes over', async () => {
     await repoMerge({ finish_timeout_min: '1' })
     // The clock is a parameter, so the suite advances it instead of waiting.
     await integrate.integrateTick(Date.now() + 5 * 60_000)
-    const orig = lauf(konflikt.id)
+    const orig = lauf(conflicted.id)
     gleich(orig.status, 'done', 'the original run leaves the gate')
     gleich(orig.merge_status, 'resolving', 'and its work is with a resolver')
     gleich(orig.merge_attempts, 1, 'first attempt')
-    resolver = db.prepare('SELECT * FROM runs WHERE resolves_run_id=?').get(konflikt.id)
+    resolver = db.prepare('SELECT * FROM runs WHERE resolves_run_id=?').get(conflicted.id)
     wahr(!!resolver, 'a conflict run exists')
     await sessionMerken(resolver.id)
     gleich(orig.resolver_run_id, resolver.id, 'and the original points at it')
@@ -2302,7 +2302,7 @@ try {
     enthaelt(prompt, 'I changed the readme.', 'and carries the original report')
     enthaelt(prompt, 'Keep the tests green.', 'and the operator\'s own instructions')
     enthaelt(prompt, 'BOTH intentions survive', 'and the rule that keeps work from being dropped')
-    enthaelt(ereignisse(konflikt.id).join(','), 'resolver_started', 'recorded on the original run')
+    enthaelt(ereignisse(conflicted.id).join(','), 'resolver_started', 'recorded on the original run')
   })
 
   await pruefe('when the conflict run delivers, BOTH runs are merged', async () => {
@@ -2312,26 +2312,34 @@ try {
     writeFileSync(join(wt, 'README.md'), '# Testrepo\nfrom the run\nfrom outside\n')
     await g(wt, 'add', '-A')
     await g(wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: both intentions')
-    await melde(resolver.id, { kind: 'done', text: 'Resolved.' })
+    await sendReport(resolver.id, { kind: 'done', text: 'Resolved.' })
     await warteAuf(() => lauf(resolver.id).merge_status === 'merged', { was: 'the resolver is merged', timeoutMs: 30_000 })
-    gleich(lauf(konflikt.id).merge_status, 'merged', 'and so is the run it worked for')
-    gleich(lauf(konflikt.id).merged_sha, lauf(resolver.id).merged_sha, 'the same commit for both')
-    gleich(ereignisse(konflikt.id).filter(k => k === 'telegram_sent:done').length, 1,
+    gleich(lauf(conflicted.id).merge_status, 'merged', 'and so is the run it worked for')
+    gleich(lauf(conflicted.id).merged_sha, lauf(resolver.id).merged_sha, 'the same commit for both')
+    gleich(ereignisse(conflicted.id).filter(k => k === 'telegram_sent:done').length, 1,
       'the original run hears about its merge exactly once, and only now')
+    // A conflict run is the integrator's tool: it never speaks for itself, and
+    // nothing hangs on its end.
+    gleich(ereignisse(resolver.id).filter(k => k.startsWith('telegram_sent')).length, 0,
+      'and the conflict run itself says nothing on Telegram')
+    gleich(lauf(resolver.id).flow_dispatched, 1, 'no flow ever fires for it')
+    gleich(lauf(resolver.id).flows, null, 'and it carries no attachments to fire')
+    const mergedEvent = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='merged'`).get(conflicted.id)
+    wahr(Array.isArray(JSON.parse(mergedEvent.payload).files), 'the merged event carries the files the merge changed')
   })
 
   // ---- 5. the attempt limit ----
   await pruefe('after the last attempt the hub asks a human instead of trying again', async () => {
     await repoMerge({ finish_timeout_min: '1', merge_max_attempts: '1' })
-    const l = await mergeLauf()
-    await schreibeUndCommit(l.wt, 'README.md', '# Testrepo\nsecond run\n', 'E2E: second conflict')
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'README.md', '# Testrepo\nsecond run\n', 'E2E: second conflict')
     await g(REPO, 'fetch', 'origin')
     await g(REPO, 'reset', '--hard', 'origin/main')
     writeFileSync(join(REPO, 'README.md'), '# Testrepo\nsecond outside\n')
     await g(REPO, 'add', '-A')
     await g(REPO, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: second outside')
     await g(REPO, 'push', '-q', 'origin', 'main')
-    await melde(l.id, { kind: 'done', text: 'second run report' })
+    await sendReport(l.id, { kind: 'done', text: 'second run report' })
     gleich(lauf(l.id).finish_state, 'awaiting_merge', 'conflict')
     await integrate.integrateTick(Date.now() + 5 * 60_000)
     const r1 = db.prepare('SELECT * FROM runs WHERE resolves_run_id=?').get(l.id)
@@ -2342,8 +2350,8 @@ try {
     await integrate.integrateTick(Date.now() + 10 * 60_000)
     const orig = lauf(l.id)
     gleich(orig.merge_status, 'blocked_conflict', 'no second attempt — a human decides')
-    const offen = db.prepare(`SELECT * FROM incidents WHERE run_id=? AND typ='merge_blocked' AND geloest_am IS NULL`).get(l.id)
-    wahr(!!offen, 'an open incident, so it shows up in the sidebar')
+    const openIncident = db.prepare(`SELECT * FROM incidents WHERE run_id=? AND typ='merge_blocked' AND geloest_am IS NULL`).get(l.id)
+    wahr(!!openIncident, 'an open incident, so it shows up in the sidebar')
     enthaelt(ereignisse(l.id).join(','), 'telegram_sent:merge_blocked', 'and Telegram was told')
     // And the operator can act on it without leaving the run's page.
     const html = await (await hol(`/runs/${l.id}`)).text()
@@ -2352,15 +2360,28 @@ try {
     enthaelt(html, `/api/runs/${l.id}/merge"`, 'with "Merge now"')
     enthaelt(html, `/api/runs/${l.id}/merge-skip`, 'and "Skip merge"')
     enthaelt(html, 'claude --resume', 'and the command that reopens the session')
+    // One conflict run per attempt, and never one for a conflict run: that is
+    // the recursion guard, and the whole reason isResolverRun() exists.
+    gleich(db.prepare('SELECT count(*) c FROM runs WHERE resolves_run_id=?').get(l.id).c, 1,
+      'exactly one conflict run — the limit was one attempt')
+    gleich(db.prepare('SELECT count(*) c FROM runs WHERE resolves_run_id=?').get(r1.id).c, 0,
+      'and no conflict run for the conflict run')
+    gleich(lauf(r1.id).merge_status, null, 'the failed conflict run carries no verdict of its own')
+    falsch(!!db.prepare(`SELECT 1 FROM incidents WHERE run_id=? AND typ='merge_blocked'`).get(r1.id),
+      'and no incident: what went wrong there is the original run\'s problem')
+    gleich(ereignisse(r1.id).filter(k => k.startsWith('telegram_sent')).length, 0,
+      'and it never rang the phone')
+    falsch((await (await hol(`/runs/${r1.id}`)).text()).includes(`/api/runs/${r1.id}/retry`),
+      'a conflict run has no retry button — "Merge now" on the original starts a fresh one')
   })
 
   // ---- 6. + 14. failed with commits: assessed, backed up, merged by hand ----
   await pruefe('a failed run is never merged by itself — but its work is named and backed up', async () => {
     await repoMerge({ finish_timeout_min: '15', merge_max_attempts: '2' })
     const vorher = (await g(ORIGIN, 'rev-parse', 'main')).stdout.trim()
-    const l = await mergeLauf()
-    await schreibeUndCommit(l.wt, 'gescheitert.txt', 'work\n', 'E2E: work of a failed run')
-    await melde(l.id, { kind: 'failed', text: 'it broke' })
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'failed.txt', 'work\n', 'E2E: work of a failed run')
+    await sendReport(l.id, { kind: 'failed', text: 'it broke' })
     const r = lauf(l.id)
     gleich(r.status, 'failed', 'failed')
     gleich(r.merge_status, 'unmerged_commits', 'its work is named')
@@ -2383,30 +2404,30 @@ try {
 
   // ---- 7. the other agents learn that main moved ----
   await pruefe('after a merge the other running agents are told that main moved', async () => {
-    const zuschauer = await mergeLauf({ prompt: 'E2E-Zuschauer' })
-    const l = await mergeLauf()
-    await schreibeUndCommit(l.wt, 'bewegt.txt', 'moved\n', 'E2E: moves main')
-    await melde(l.id, { kind: 'done', text: 'moved main' })
+    const onlooker = await mergeRun({ prompt: 'E2E-Onlooker' })
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'moved.txt', 'moved\n', 'E2E: moves main')
+    await sendReport(l.id, { kind: 'done', text: 'moved main' })
     await warteAuf(() => lauf(l.id).merge_status === 'merged', { was: 'merged', timeoutMs: 30_000 })
     // The colon is not decoration: 'capture-pane -t "=name"' is no valid target
     // ("can't find pane"), exactly like pipe-pane and set-hook (see AGENTS.md).
     await warteAuf(async () =>
-      (await sh('tmux', ['capture-pane', '-p', '-t', `=${zuschauer.session}:`])).stdout.includes('has moved'),
+      (await sh('tmux', ['capture-pane', '-p', '-t', `=${onlooker.session}:`])).stdout.includes('has moved'),
     { was: 'the watching agent sees the notice in its session', timeoutMs: 15_000 })
     // The text is on the screen ~300 ms before the event is written (the paste
     // and the Enter are two send-keys with a pause between them), so wait for it.
-    await warteAuf(() => ereignisse(zuschauer.id).includes('main_moved'),
+    await warteAuf(() => ereignisse(onlooker.id).includes('main_moved'),
       { was: 'the notice is recorded on the watching run', timeoutMs: 10_000 })
     await warteAuf(() => ereignisse(l.id).includes('main_moved_notified'),
       { was: 'and on the run that moved main', timeoutMs: 10_000 })
-    await formular(`/api/runs/${zuschauer.id}/kill`, {})
+    await formular(`/api/runs/${onlooker.id}/kill`, {})
   })
 
   // ---- 8. the agent vanishes while the gate waits ----
   await pruefe('an agent that disappears mid-gate escalates instead of counting as aborted', async () => {
-    const l = await mergeLauf()
-    writeFileSync(join(l.wt, 'nur-dreck.txt'), 'dirt\n')
-    await melde(l.id, { kind: 'done', text: 'am I done?' })
+    const l = await mergeRun()
+    writeFileSync(join(l.wt, 'only-dirt.txt'), 'dirt\n')
+    await sendReport(l.id, { kind: 'done', text: 'am I done?' })
     gleich(lauf(l.id).finish_state, 'awaiting_commit', 'waiting')
     await sh('tmux', ['kill-session', '-t', `=${l.session}`])
     await watcherTick()
@@ -2422,9 +2443,9 @@ try {
   await pruefe('a red merge check is treated like a conflict: nothing is pushed, the agent is told', async () => {
     await repoMerge({ merge_check: 'false' })
     const vorher = (await g(ORIGIN, 'rev-parse', 'main')).stdout.trim()
-    const l = await mergeLauf()
-    await schreibeUndCommit(l.wt, 'pruefung.txt', 'check\n', 'E2E: merge check')
-    await melde(l.id, { kind: 'done', text: 'please check' })
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'check.txt', 'check\n', 'E2E: merge check')
+    await sendReport(l.id, { kind: 'done', text: 'please check' })
     await warteAuf(() => lauf(l.id).finish_state === 'check_failed',
       { was: 'the merge check failed', timeoutMs: 30_000 })
     gleich(lauf(l.id).status, 'running', 'the run stays running — its agent can fix it')
@@ -2434,7 +2455,7 @@ try {
     { was: 'the agent is told', timeoutMs: 15_000 })
     // Green check, one more commit — the tip has to move for a new check.
     await repoMerge({ merge_check: 'true' })
-    await schreibeUndCommit(l.wt, 'pruefung.txt', 'check again\n', 'E2E: fixed')
+    await writeAndCommit(l.wt, 'check.txt', 'check again\n', 'E2E: fixed')
     await integrate.integrateTick()
     await warteAuf(() => lauf(l.id).merge_status === 'merged', { was: 'merged after the fix', timeoutMs: 30_000 })
     await repoMerge({ merge_check: '' })
@@ -2442,9 +2463,9 @@ try {
 
   // ---- 12. an end somebody asked for stays an abort ----
   await pruefe('killing a run in the gate aborts it — that end WAS asked for', async () => {
-    const l = await mergeLauf()
-    writeFileSync(join(l.wt, 'offen.txt', ), 'open\n')
-    await melde(l.id, { kind: 'done', text: 'x' })
+    const l = await mergeRun()
+    writeFileSync(join(l.wt, 'open.txt', ), 'open\n')
+    await sendReport(l.id, { kind: 'done', text: 'x' })
     gleich(lauf(l.id).finish_state, 'awaiting_commit', 'waiting')
     await formular(`/api/runs/${l.id}/kill`, {})
     await warteAuf(() => !!lauf(l.id).merge_status, { was: 'the assessment', timeoutMs: 15_000 })
@@ -2457,14 +2478,14 @@ try {
 
   // ---- 10. cc-report prints the hub's answer ----
   await pruefe('the real bin/cc-report prints the hub\'s answer and files nothing', async () => {
-    const l = await mergeLauf()
-    writeFileSync(join(l.wt, 'ungesagt.txt'), 'x\n')
+    const l = await mergeRun()
+    writeFileSync(join(l.wt, 'unsaid.txt'), 'x\n')
     const r = await sh(join(PROJEKT, 'bin', 'cc-report'), ['done', 'from the real script'], {
       env: { ...process.env, CC_RUN_ID: l.id, CC_HUB_URL: BASIS, HOME: SB },
     })
     wahr(r.ok, `exit 0 (${r.stderr})`)
     enthaelt(r.stdout, 'NOT finished yet', 'the answer reaches the agent as this tool\'s output')
-    enthaelt(r.stdout, 'ungesagt.txt', 'and names the file')
+    enthaelt(r.stdout, 'unsaid.txt', 'and names the file')
     falsch(existsSync(join(SB, 'agents', 'runs', l.id, 'inbox.jsonl')), 'nothing was filed as unreachable')
     await formular(`/api/runs/${l.id}/kill`, {})
   })
@@ -2473,14 +2494,14 @@ try {
   await pruefe('commits the operator made on main himself are pushed to origin', async () => {
     await g(REPO, 'fetch', 'origin')
     await g(REPO, 'reset', '--hard', 'origin/main')
-    writeFileSync(join(REPO, 'vom-betreiber.txt'), 'by hand\n')
+    writeFileSync(join(REPO, 'by-operator.txt'), 'by hand\n')
     await g(REPO, 'add', '-A')
     await g(REPO, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: operator commit')
-    const lokal = (await g(REPO, 'rev-parse', 'main')).stdout.trim()
-    falsch((await g(ORIGIN, 'rev-parse', 'main')).stdout.trim() === lokal, 'origin does not have it yet')
+    const localTip = (await g(REPO, 'rev-parse', 'main')).stdout.trim()
+    falsch((await g(ORIGIN, 'rev-parse', 'main')).stdout.trim() === localTip, 'origin does not have it yet')
     // The throttle is a parameter too, so the suite does not have to wait a minute.
     await integrate.pushOperatorBase(Date.now() + 10 * 60_000)
-    gleich((await g(ORIGIN, 'rev-parse', 'main')).stdout.trim(), lokal, 'now it is on origin')
+    gleich((await g(ORIGIN, 'rev-parse', 'main')).stdout.trim(), localTip, 'now it is on origin')
     wahr(!!db.prepare('SELECT last_push_at FROM repos WHERE name=?').get('e2e').last_push_at,
       'and the repo records when it was last backed up')
   })
@@ -2488,9 +2509,9 @@ try {
   // ---- 9. with merge_mode off nothing of this happens ----
   await pruefe('with the integration switched off a done report closes the run as it always did', async () => {
     await repoMerge({ merge_mode: 'off' })
-    const l = await mergeLauf()
-    writeFileSync(join(l.wt, 'egal.txt'), 'does not matter\n')
-    const antwort = await melde(l.id, { kind: 'done', text: 'plain old done' })
+    const l = await mergeRun()
+    writeFileSync(join(l.wt, 'irrelevant.txt'), 'does not matter\n')
+    const antwort = await sendReport(l.id, { kind: 'done', text: 'plain old done' })
     gleich(antwort.message ?? null, null, 'no answer to read — there is nothing to say')
     const r = lauf(l.id)
     gleich(r.status, 'done', 'done right away, dirty worktree and all')

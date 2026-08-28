@@ -732,5 +732,10 @@
   "merge.unmerged_both": "nicht gemerged: Commits und uncommittete Änderungen",
   "merge.skipped_by_operator": "Merge übersprungen",
   "incident.merge_blocked": "Nicht gemerged",
-  "repos.last_push": "letzter Backup-Push: {ts}"
+  "repos.last_push": "letzter Backup-Push: {ts}",
+  "run.marked_done_note": "_(vom Betreiber als fertig markiert)_",
+  "api.unknown_repo": "unbekanntes Repo",
+  "merge.err_still_dirty": "Der Worktree hat weiterhin uncommittete Änderungen — es wurde nichts gemerged.",
+  "merge.err_no_resolver": "Der Branch steht im Konflikt mit dem Basis-Branch, und es ist kein Konfliktlöser konfiguriert (Einstellungen → Merge).",
+  "merge.resolver_for": "Konflikt-Lauf für „{title}“"
 }

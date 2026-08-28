@@ -16,7 +16,7 @@ import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
 import { flowsTick } from './flows/triggers.mjs'
 import { reconcileClosedSession, tmuxSessionMap, shouldAutoClose, currentKeepMs } from './sessions.mjs'
-import { integrateTick, pushOperatorBase, integratorTimerAus, foreignChanges, ownWorktreePaths } from './integrate.mjs'
+import { integrateTick, pushOperatorBase, integratorTimerOff, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 
 let timer = null
 
@@ -67,7 +67,7 @@ export async function tick() {
   await startScheduled()
   // The finish gate has its own 5-second timer (server/integrate.mjs); this is
   // the net under it, for the case that timer ever stops.
-  if (!integratorTimerAus()) {
+  if (!integratorTimerOff()) {
     try { await integrateTick() } catch (e) { console.error('[integrate]', e.message) }
     // origin is the operator's backup: commits he made on the base branch of the
     // main checkout himself are pushed from here. A push touches no working tree.
@@ -154,19 +154,19 @@ async function watchRun(run) {
   // A run in the finish gate has reported and is deliberately waiting for the
   // hub (or for its own last commit) — none of the three "it is late" anomalies
   // says anything true about it.
-  const imAbschluss = !!run.finish_state
+  const inFinishGate = !!run.finish_state
 
   if (run.status === 'running' || run.status === 'waiting_help') {
     // yellow: no activity for 15 min
-    if (!imAbschluss && now - lastAct > 15 * 60_000 && st.pane_dead !== '1') {
+    if (!inFinishGate && now - lastAct > 15 * 60_000 && st.pane_dead !== '1') {
       addEventOnce(run.id, 'anomaly:no_activity')
     }
     // yellow: 80 % of the expected duration reached, no report
-    if (!imAbschluss && now - startedMs > 0.8 * expectedMs && !run.report_md) {
+    if (!inFinishGate && now - startedMs > 0.8 * expectedMs && !run.report_md) {
       addEventOnce(run.id, 'anomaly:soft_overrun')
     }
     // red: expected duration exceeded without report/progress
-    if (!imAbschluss && now - startedMs > expectedMs && !run.report_md) {
+    if (!inFinishGate && now - startedMs > expectedMs && !run.report_md) {
       const hadProgress = db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind='progress'`).get(run.id)
       if (!hadProgress) {
         addEventOnce(run.id, 'anomaly:overrun')

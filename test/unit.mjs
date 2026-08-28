@@ -1958,9 +1958,9 @@ try {
   await pruefe('a file list is indented and capped', () => {
     gleich(ig.formatFiles([]), '  (none)', 'nothing to list')
     gleich(ig.formatFiles(['a.txt', 'b/c.txt']), '  a.txt\n  b/c.txt', 'indented')
-    const viele = ig.formatFiles(Array.from({ length: 35 }, (_, i) => `f${i}.txt`))
-    gleich(viele.split('\n').length, 31, '30 lines plus the note')
-    enthaelt(viele, '… and 5 more', 'says how many were left out')
+    const many = ig.formatFiles(Array.from({ length: 35 }, (_, i) => `f${i}.txt`))
+    gleich(many.split('\n').length, 31, '30 lines plus the note')
+    enthaelt(many, '… and 5 more', 'says how many were left out')
   })
 
   await pruefe('the messages to the agent carry every placeholder filled in', () => {
@@ -2022,20 +2022,20 @@ try {
     saveCodingAgent({ harness: 'opencode', enabled: 1, providers: ['openrouter'] })
     const setup = { harness: 'opencode', provider: 'openrouter', model: 'x/y', or_provider: 'fireworks', effort: null }
     const problems = []
-    const zurueck = await runSetupFromForm(setupToFormBody(setup), problems)
+    const back = await runSetupFromForm(setupToFormBody(setup), problems)
     gleich(problems.length, 0, `no problems (${problems.join(' · ')})`)
-    gleich(zurueck.harness, 'opencode', 'harness')
-    gleich(zurueck.provider, 'openrouter', 'provider')
-    gleich(zurueck.model, 'x/y', 'model')
-    gleich(zurueck.orProvider, 'fireworks', 'serving provider survives where it can be passed through')
+    gleich(back.harness, 'opencode', 'harness')
+    gleich(back.provider, 'openrouter', 'provider')
+    gleich(back.model, 'x/y', 'model')
+    gleich(back.orProvider, 'fireworks', 'serving provider survives where it can be passed through')
   })
 
   await pruefe('the merge rule is only in the prompt where the hub really merges', async () => {
     const { platformSuffix } = await import('../server/runner.mjs')
     const run = { id: 'r1', harness: 'claude', workdir_effective: '/wt/a', expected_minutes: 30 }
-    const aus = platformSuffix(run, 'No branch.', {}, { merge_mode: 'off', base_branch: 'main' })
-    falsch(aus.includes('cc-hub merges your work'), 'with merge_mode off the prompt is what it always was')
-    falsch(aus.includes('cc-report prints'), 'and the finishing block is unchanged too')
+    const out = platformSuffix(run, 'No branch.', {}, { merge_mode: 'off', base_branch: 'main' })
+    falsch(out.includes('cc-hub merges your work'), 'with merge_mode off the prompt is what it always was')
+    falsch(out.includes('cc-report prints'), 'and the finishing block is unchanged too')
     const an = platformSuffix(run, 'No branch.', {}, { merge_mode: 'hub', base_branch: 'trunk' })
     enthaelt(an, 'cc-hub merges your work into trunk itself', 'the base branch is named')
     enthaelt(an, 'Never merge into or push to trunk yourself', 'and so is the ground rule')
