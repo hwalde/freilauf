@@ -112,9 +112,11 @@ export const T_ASSESS = {
 
 export const T_BLOCKED_DIRTY = `🔴 Finished with uncommitted changes and did not clean up within {timeout} min:
 {files}
-Nothing was merged. Decide on the detail page: commit & merge, discard & merge, or skip.
+Nothing was merged. Decide on the detail page: commit & merge, discard & merge, or skip.{backup}
 Attach: tmux attach -t ={session}
 Resume: {resume_cmd}`
+
+export const T_DIVERGED = `🔴 {repo}: local {base} has diverged from origin/{base} ({n} local, {m} remote commits). cc-hub never force-pushes — please reconcile by hand in {path}. Until then those local commits are not backed up; cc-hub's own merges land on origin only.`
 
 export const T_BLOCKED_CONFLICT = `🔴 Branch {branch} could not be merged into {base}: {attempts} conflict run(s) did not get it clean. Files:
 {files}
@@ -231,6 +233,21 @@ export function hubMerges(repo) {
   return repo?.merge_mode === 'hub'
 }
 
+/**
+ * What to do with the operator's own commits on the base branch of the main
+ * checkout. The remote is the backup: a commit that exists only on this machine
+ * is one power supply away from gone.
+ *
+ *   'skip'      nothing local that origin does not have
+ *   'push'      local is ahead and origin has nothing new — a fast-forward
+ *   'diverged'  both sides moved. NEVER --force: that would drop somebody's
+ *               commits. A human reconciles this, and hears about it.
+ */
+export function decidePush({ ahead, behind }) {
+  if (!ahead) return 'skip'
+  return behind ? 'diverged' : 'push'
+}
+
 // ---------------------------------------------------------------- git access
 
 const fetchedAt = new Map()      // repoId → ms of the last `git fetch origin`
@@ -277,7 +294,10 @@ async function dirtyFiles(run, repo) {
   if (!run.workdir_effective || !existsSync(run.workdir_effective)) return []
   // --no-optional-locks so the hub does not fight the agent's own git commands
   // over the index lock: a status that refreshes the index can block one.
-  const r = await sh('git', ['-C', run.workdir_effective, 'status', '--porcelain', '--no-optional-locks'])
+  // --no-optional-locks is a GIT-level option and has to stand before the
+  // subcommand; after it, git rejects it as unknown and the status comes back
+  // empty — which reads as "clean" and would let every dirty worktree through.
+  const r = await sh('git', ['-C', run.workdir_effective, '--no-optional-locks', 'status', '--porcelain'])
   if (!r.ok) return []
   return foreignChanges(r.stdout, ownWorktreePaths(repo, run.harness))
 }
@@ -294,6 +314,96 @@ async function mergeDryRun(repo, tip) {
   if (r.ok) return { conflict: false, files: [] }
   if (r.code === 1) return { conflict: true, files: conflictFilesFromMergeTree(r.stdout) }
   return { error: (r.stderr || r.stdout).trim() || 'merge-tree failed' }
+}
+
+// ------------------------------------------------- origin is the backup
+//
+// The operator runs the remote as his backup, and that is a rule beyond the
+// integrator: nothing may exist only on this machine. Three consequences, and
+// the first one is already how integrateOne() works — the integrator knows no
+// local merge. Its only way out is `push origin HEAD:{base}`; a merge that
+// cannot be pushed is not a merge, it is thrown away and escalated. There is no
+// state "merged, but only locally".
+
+const pushedAt = new Map()   // repoId → ms of the last operator-commit push
+
+/**
+ * Push what the OPERATOR committed on the base branch of the main checkout.
+ *
+ * A push does not touch a working tree, which is why it is the one git command
+ * the hub is allowed to run in the operator's checkout — merge, checkout and
+ * reset stay forbidden there, and for good reason (a branch belongs to exactly
+ * one worktree, and that one has files in it somebody is editing).
+ *
+ * Never --force. A diverged base branch is a human's problem, and the hub says
+ * so once (global incident + Telegram) instead of picking a winner.
+ */
+export async function pushOperatorBase(nowMs = Date.now()) {
+  const repos = db.prepare(`SELECT * FROM repos WHERE merge_mode='hub'`).all()
+  for (const row of repos) {
+    const repo = getRepo(row.id)
+    if (!repo) continue
+    if (nowMs - (pushedAt.get(repo.id) ?? 0) < 60_000) continue
+    pushedAt.set(repo.id, nowMs)
+    try { await pushOneRepo(repo) } catch (err) { console.error('[integrate]', err.message) }
+  }
+}
+
+async function pushOneRepo(repo) {
+  if (!await hasOrigin(repo)) return
+  await fetchThrottled(repo)
+  const base = repo.base_branch
+  const counts = await sh('git', ['-C', repo.path, 'rev-list', '--left-right', '--count',
+    `${base}...origin/${base}`])
+  if (!counts.ok) return
+  const [ahead = 0, behind = 0] = counts.stdout.trim().split(/\s+/).map(Number)
+  const typ = `merge_blocked:${repo.name}`
+  const decision = decidePush({ ahead, behind })
+  if (decision === 'skip') {
+    for (const v of offeneVorfaelle(null)) if (v.typ === typ) vorfallVerwerfen(v.id, 'base branch back in sync')
+    return
+  }
+  if (decision === 'diverged') {
+    const { ereignis } = await vorfallMelden(null, {
+      typ, quelle: 'integrate', schwere: 'rot', stillMelden: true,
+      beleg: `${base} has diverged from origin/${base}: ${ahead} local, ${behind} remote commits`,
+    })
+    if (['neu', 'wieder'].includes(ereignis)) {
+      const { notify } = await import('./telegram.mjs')
+      await notify(fill(T_DIVERGED, { repo: repo.name, base, n: ahead, m: behind, path: repo.path }))
+    }
+    return
+  }
+  const r = await sh('git', ['-C', repo.path, 'push', 'origin', `${base}:${base}`], { timeout: 180_000 })
+  if (!r.ok) return
+  db.prepare(`UPDATE repos SET last_push_at=datetime('now') WHERE id=?`).run(repo.id)
+  fetchedAt.delete(repo.id)
+  console.log(`[integrate] pushed ${ahead} operator commit(s) on ${repo.name}/${base}`)
+}
+
+/**
+ * Put a blocked or unmerged run's commits on origin. Same intention as the
+ * existing `anomaly:unpushed` — only carried out instead of reported: work that
+ * nobody merged is exactly the work that must not sit on one disk.
+ *
+ * The run's own branch where it has one, `run/<short id>` for a detached
+ * worktree. Returns the ref, or null when there was nothing to save.
+ */
+export async function backupBranch(runId) {
+  const run = getRun(runId)
+  if (!run) return null
+  const repo = getRepo(run.repo_id)
+  if (!hubMerges(repo) || !await hasOrigin(repo)) return null
+  const tip = await tipOf(run)
+  if (!tip || !run.base_sha || tip === run.base_sha) return null
+  const branch = run.branch_reported || run.branch_expected
+  const ref = branch || `run/${kurzid(runId)}`
+  const r = branch
+    ? await sh('git', ['-C', run.workdir_effective, 'push', '-u', 'origin', branch], { timeout: 180_000 })
+    : await sh('git', ['-C', repo.path, 'push', 'origin', `${tip}:refs/heads/${ref}`], { timeout: 180_000 })
+  if (!r.ok) return null
+  addEvent(runId, 'branch_backed_up', { ref })
+  return ref
 }
 
 // ---------------------------------------------------------------- the check
@@ -556,8 +666,16 @@ export async function integrateTick(nowMs = Date.now()) {
 }
 
 let timer = null
+/**
+ * Off switch for the test suites: with two processes (the hub and the suite)
+ * driving the same integration worktree, a timer in the background is a race
+ * nobody wants to debug. The hub still integrates on the report path — the
+ * suite simply owns the clock.
+ */
+export function integratorTimerAus() { return process.env.CCHUB_INTEGRATOR_AUS === '1' }
+
 export function startIntegrator() {
-  if (timer) return
+  if (timer || integratorTimerAus()) return
   timer = setInterval(() => integrateTick().catch(e => console.error('[integrate]', e.message)), 5_000)
   // Nothing is lost across a restart: every waiting run is checked right away.
   for (const run of db.prepare(`SELECT id FROM runs WHERE finish_state IS NOT NULL`).all()) {
@@ -694,6 +812,9 @@ async function integrateOne(runId, opts = {}) {
     const n = (pushFails.get(runId) ?? 0) + 1
     pushFails.set(runId, n)
     addEvent(runId, 'merge_error', { reason: err.slice(0, 300), attempt: n })
+    // A merge that cannot be pushed is not a merge. Throw it away rather than
+    // leave a "merged, but only locally" state behind — origin is the truth.
+    await sh('git', ['-C', dir, 'reset', '--hard', `origin/${repo.base_branch}`])
     if (n >= 5) { pushFails.delete(runId); return escalate(runId, 'merge_error') }
     setTimeout(() => enqueueIntegration(runId, opts), 60_000).unref?.()
     return
@@ -945,15 +1066,25 @@ async function conflictFilesOf(repo, run) {
   return dry.files ?? []
 }
 
-/** The whole "needs a human" step: status, incident, Telegram. */
+/**
+ * The whole "needs a human" step: status, backup, incident, Telegram.
+ *
+ * The backup comes first and on purpose: a run whose work did not reach the base
+ * branch is exactly the run whose commits would otherwise live on this disk
+ * alone. Uncommitted files cannot be saved this way, and the message says so
+ * rather than letting the word "backed up" cover more than it does.
+ */
 async function blockRun(runId, repo, status, text) {
   db.prepare(`UPDATE runs SET merge_status=? WHERE id=?`).run(status, runId)
   addEvent(runId, 'merge_blocked', { status })
+  const ref = await backupBranch(runId)
   await vorfallMelden(runId, {
     typ: 'merge_blocked', quelle: 'integrate', schwere: 'rot',
     beleg: `${status}: ${branchOf(getRun(runId))} → ${repo.base_branch}`,
   })
-  await notifyRun(runId, 'merge_blocked', text)
+  await notifyRun(runId, 'merge_blocked', fill(text, {
+    backup: ref ? `\nCommitted part backed up as origin/${ref}; the uncommitted files exist only in the worktree.` : '',
+  }))
 }
 
 // ------------------------------------------------------------- conflict runs
@@ -1123,6 +1254,8 @@ export async function assessUnmerged(runId) {
   const status = classifyUnmerged({ commits, dirty: dirty.length })
   db.prepare('UPDATE runs SET merge_status=? WHERE id=?').run(status, runId)
   addEvent(runId, 'merge_assessed', { status, commits, dirty: dirty.length })
+  // Commits nobody merged are commits that must not live on one disk alone.
+  if (['unmerged_commits', 'unmerged_both'].includes(status)) await backupBranch(runId)
   return { status, commits, dirty: dirty.length }
 }
 

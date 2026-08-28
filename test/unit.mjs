@@ -1882,6 +1882,163 @@ try {
     gleich(k.join(','), 'mit-lauf', 'a foreign session is only ended by hand')
   })
 
+  // ------------------------------------------------------------------
+  gruppe('Integration: finish gate, integrator, escalation (integrate.mjs)')
+
+  const ig = await import('../server/integrate.mjs')
+
+  await pruefe('the check interval is dense at first and slows down', () => {
+    gleich(ig.nextCheckDelayMs(0), 5000, 'right after the report')
+    gleich(ig.nextCheckDelayMs(59_000), 5000, 'still under a minute')
+    gleich(ig.nextCheckDelayMs(60_000), 15_000, 'from a minute on')
+    gleich(ig.nextCheckDelayMs(4 * 60_000), 15_000, 'under five minutes')
+    gleich(ig.nextCheckDelayMs(5 * 60_000), 30_000, 'from five minutes on')
+    gleich(ig.nextCheckDelayMs(NaN), 5000, 'no timestamp: as at the start')
+  })
+
+  await pruefe('what the hub put into the worktree is not the agent’s dirt', () => {
+    const porcelain = [
+      '?? referenz',
+      '?? .cursor/hooks.json',
+      ' M server/hub.mjs',
+      '?? neu.txt',
+    ].join('\n')
+    const fremd = ig.foreignChanges(porcelain, ['referenz', '.cursor'])
+    gleich(fremd.join(','), 'server/hub.mjs,neu.txt', 'only the agent’s own changes')
+  })
+
+  await pruefe('the extras are filtered as a directory AND as a single file', () => {
+    // git names the directory when everything below it is untracked, and the
+    // single file when it is not — both forms have to be covered.
+    gleich(ig.foreignChanges('?? .cursor/\n', ['.cursor']).length, 0, 'directory form with a slash')
+    gleich(ig.foreignChanges('?? .cursor/hooks.json\n', ['.cursor']).length, 0, 'file below it')
+    gleich(ig.foreignChanges('?? .cursorrules\n', ['.cursor']).length, 1, 'a neighbour with the same prefix is NOT ours')
+  })
+
+  await pruefe('an empty status is an empty list, not a crash', () => {
+    gleich(ig.foreignChanges('', []).length, 0, 'empty')
+    gleich(ig.foreignChanges(null, null).length, 0, 'nothing at all')
+  })
+
+  await pruefe('the finish gate decides in this order: dirty, commits, conflict', () => {
+    gleich(ig.decideFinish({ dirty: true, commits: true, conflict: true }), 'awaiting_commit', 'dirt outranks everything')
+    gleich(ig.decideFinish({ dirty: true, commits: false, conflict: false }), 'awaiting_commit', 'dirty without commits')
+    gleich(ig.decideFinish({ dirty: false, commits: false, conflict: false }), 'nothing', 'nothing committed')
+    gleich(ig.decideFinish({ dirty: false, commits: true, conflict: true }), 'awaiting_merge', 'conflict')
+    gleich(ig.decideFinish({ dirty: false, commits: true, conflict: false }), 'merging', 'clean and mergeable')
+  })
+
+  await pruefe('an unfinished run is classified by commits and dirt', () => {
+    gleich(ig.classifyUnmerged({ commits: 2, dirty: 0 }), 'unmerged_commits', 'only commits')
+    gleich(ig.classifyUnmerged({ commits: 2, dirty: 3 }), 'unmerged_both', 'both')
+    gleich(ig.classifyUnmerged({ commits: 0, dirty: 3 }), 'unmerged_dirty', 'only dirt')
+    gleich(ig.classifyUnmerged({ commits: 0, dirty: 0 }), 'nothing', 'neither')
+  })
+
+  await pruefe('the operator’s own commits are pushed, never forced', () => {
+    gleich(ig.decidePush({ ahead: 0, behind: 0 }), 'skip', 'in sync')
+    gleich(ig.decidePush({ ahead: 0, behind: 4 }), 'skip', 'only origin moved')
+    gleich(ig.decidePush({ ahead: 3, behind: 0 }), 'push', 'fast-forward')
+    gleich(ig.decidePush({ ahead: 3, behind: 4 }), 'diverged', 'both moved: a human decides')
+  })
+
+  await pruefe('git merge-tree’s output becomes the list of conflicting files', () => {
+    const stdout = [
+      'e99c659e743683c311fe49f74f1693a866fb1886',
+      'f.txt',
+      'server/hub.mjs',
+      '',
+      'Auto-merging f.txt',
+      'CONFLICT (content): Merge conflict in f.txt',
+    ].join('\n')
+    gleich(ig.conflictFilesFromMergeTree(stdout).join(','), 'f.txt,server/hub.mjs', 'the paths, not the prose')
+    gleich(ig.conflictFilesFromMergeTree('abc123\n').length, 0, 'a clean merge names no file')
+  })
+
+  await pruefe('a file list is indented and capped', () => {
+    gleich(ig.formatFiles([]), '  (none)', 'nothing to list')
+    gleich(ig.formatFiles(['a.txt', 'b/c.txt']), '  a.txt\n  b/c.txt', 'indented')
+    const viele = ig.formatFiles(Array.from({ length: 35 }, (_, i) => `f${i}.txt`))
+    gleich(viele.split('\n').length, 31, '30 lines plus the note')
+    enthaelt(viele, '… and 5 more', 'says how many were left out')
+  })
+
+  await pruefe('the messages to the agent carry every placeholder filled in', () => {
+    const m1 = ig.fill(ig.M1, { files: '  a.txt', report_file: '/runs/x/report.md', timeout: 15 })
+    enthaelt(m1, 'NOT finished yet', 'says the run is not over')
+    enthaelt(m1, '  a.txt', 'the file')
+    enthaelt(m1, 'cc-report done --file /runs/x/report.md', 'the exact command')
+    enthaelt(m1, 'after 15 minutes', 'the deadline')
+    falsch(/\{[a-z_]+\}/.test(m1), 'no placeholder left over')
+
+    const m2 = ig.fill(ig.M2, { base: 'main', files: '  a.txt', report_file: '/r.md', landed_runs: '- "x" (abc1234): y' })
+    enthaelt(m2, 'git fetch origin && git merge origin/main', 'the command that resolves it')
+    enthaelt(m2, 'Do NOT merge into or push to main yourself', 'the ground rule')
+    falsch(/\{[a-z_]+\}/.test(m2), 'no placeholder left over')
+  })
+
+  await pruefe('the conflict run’s task names branch, reason, report and what landed', () => {
+    const p = ig.fill(ig.P_CONFLICT, {
+      branch: 'resolve/abc1234', base: 'main',
+      orig_title: 'Add a goal field', orig_id: 'aaaa-bbbb',
+      reason: 'merge conflict', files: '  server/db.mjs',
+      check_line: 'Run the merge check and make it pass: `node test/unit.mjs`',
+      orig_report: 'It did the thing.', landed_runs: '- "other" (def5678): moved things',
+      resolver_extra: '',
+    })
+    enthaelt(p, 'make the branch `resolve/abc1234` mergeable', 'its own branch')
+    enthaelt(p, '"Add a goal field" (cc-hub run aaaa-bbbb)', 'the run it works for')
+    enthaelt(p, 'BOTH intentions survive', 'the rule that keeps work from being dropped')
+    enthaelt(p, 'It did the thing.', 'the original report')
+    enthaelt(p, 'never push to main yourself', 'the ground rule')
+    falsch(/\{[a-z_]+\}/.test(p), 'no placeholder left over')
+  })
+
+  await pruefe('a long report is cut and says where the whole one is', () => {
+    const kurz = ig.truncateReport({ id: 'r1', report_md: 'short' }, 20)
+    gleich(kurz, 'short', 'a short report is passed through')
+    const lang = ig.truncateReport({ id: 'r1', report_md: 'x'.repeat(100) }, 20)
+    wahr(lang.startsWith('x'.repeat(20)), 'cut at the cap')
+    enthaelt(lang, 'truncated by cc-hub', 'says it was cut')
+    enthaelt(lang, 'report.md', 'names the full report')
+    gleich(ig.truncateReport({ id: 'r1', report_md: null }), '(no report)', 'no report at all')
+  })
+
+  await pruefe('the Telegram assessment names the numbers and the way back in', () => {
+    const run = { harness: 'claude', id: 'aaaa-bbbb-cccc-dddd', workdir_effective: '/wt/a' }
+    const both = ig.assessText(run, { status: 'unmerged_both', commits: 2, dirty: 3 })
+    enthaelt(both, '2 commit(s)', 'commits')
+    enthaelt(both, '3 uncommitted file(s)', 'dirty files')
+    enthaelt(both, 'Resume the session: cd /wt/a && claude --resume aaaa-bbbb-cccc-dddd', 'the resume command')
+    const hermes = ig.assessText({ harness: 'hermes', workdir_effective: '/wt/b' },
+      { status: 'nothing', commits: 0, dirty: 0 })
+    enthaelt(hermes, 'cannot be resumed', 'a harness without a resume says so')
+    enthaelt(hermes, '/wt/b', 'and names the worktree instead')
+  })
+
+  await pruefe('the setup round trip: setup → form body → the same setup', async () => {
+    const { setupToFormBody, runSetupFromForm } = await import('../server/run-def.mjs')
+    const { saveCodingAgent } = await import('../server/coding-agents.mjs')
+    saveCodingAgent({ harness: 'opencode', enabled: 1, providers: ['openrouter'] })
+    const setup = { harness: 'opencode', provider: 'openrouter', model: 'x/y', or_provider: 'fireworks', effort: null }
+    const problems = []
+    const zurueck = await runSetupFromForm(setupToFormBody(setup), problems)
+    gleich(problems.length, 0, `no problems (${problems.join(' · ')})`)
+    gleich(zurueck.harness, 'opencode', 'harness')
+    gleich(zurueck.provider, 'openrouter', 'provider')
+    gleich(zurueck.model, 'x/y', 'model')
+    gleich(zurueck.orProvider, 'fireworks', 'serving provider survives where it can be passed through')
+  })
+
+  await pruefe('the resume command comes from the plugin, not from the hub', async () => {
+    const { getHarness } = await import('../server/harnesses/index.mjs')
+    const run = { id: 'aaaa-bbbb', workdir_effective: '/wt/a' }
+    enthaelt(getHarness('claude').resumeCommand(run), 'claude --resume aaaa-bbbb', 'claude knows its session id')
+    enthaelt(getHarness('opencode').resumeCommand(run), 'opencode --continue', 'opencode continues the directory’s session')
+    gleich(getHarness('hermes').resumeCommand(run), null, 'hermes has no reliable answer')
+    gleich(getHarness('claude').resumeCommand({ id: null }), null, 'without a workdir there is no command')
+  })
+
 } finally {
   rmSync(sandkasten, { recursive: true, force: true })
 }

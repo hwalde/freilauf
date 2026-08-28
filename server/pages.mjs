@@ -1021,12 +1021,14 @@ export async function pageRepos(req, res, url) {
     return `<tr><td>${e(r.name)}</td><td><code>${e(r.path)}</code></td><td>${e(r.base_branch)}</td>
     <td class="dim">${e(r.worktree_extras)}</td>
     <td>${kurz ? `<span class="dim" title="${e(p)}">${e(kurz)}</span>` : `<span class="dim">—</span>`}</td>
+    <td>${e(r.merge_mode === 'hub' ? t('merge.mode_hub') : t('merge.mode_off'))}
+      ${r.last_push_at ? `<div class="dim">${e(t('repos.last_push', { ts: r.last_push_at }))}</div>` : ''}</td>
     <td><a href="/repos/edit?id=${r.id}">${e(t('agents.edit'))}</a></td></tr>`
   }).join('')
   const body = `
   <p><a class="btn" href="/repos/edit">${e(t('repos.create'))}</a></p>
-  <table class="list"><thead><tr><th>${e(t('repos.name'))}</th><th>${e(t('repos.path'))}</th><th>${e(t('repos.base'))}</th><th>${e(t('repos.extras'))}</th><th>${e(t('repos.prompt'))}</th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="6" class="dim">${e(t('repos.none'))}</td></tr>`}</tbody></table>`
+  <table class="list"><thead><tr><th>${e(t('repos.name'))}</th><th>${e(t('repos.path'))}</th><th>${e(t('repos.base'))}</th><th>${e(t('repos.extras'))}</th><th>${e(t('repos.prompt'))}</th><th>${e(t('repos.integration_legend'))}</th><th></th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="7" class="dim">${e(t('repos.none'))}</td></tr>`}</tbody></table>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.repos'), '/repos', body))
 }
 

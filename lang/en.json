@@ -731,5 +731,6 @@
   "merge.unmerged_dirty": "not merged: uncommitted changes",
   "merge.unmerged_both": "not merged: commits and uncommitted changes",
   "merge.skipped_by_operator": "merge skipped",
-  "incident.merge_blocked": "Not merged"
+  "incident.merge_blocked": "Not merged",
+  "repos.last_push": "last backup push: {ts}"
 }

@@ -16,7 +16,7 @@ import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
 import { flowsTick } from './flows/triggers.mjs'
 import { reconcileClosedSession, tmuxSessionMap, shouldAutoClose, currentKeepMs } from './sessions.mjs'
-import { integrateTick, foreignChanges, ownWorktreePaths } from './integrate.mjs'
+import { integrateTick, pushOperatorBase, integratorTimerAus, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 
 let timer = null
 
@@ -67,7 +67,12 @@ export async function tick() {
   await startScheduled()
   // The finish gate has its own 5-second timer (server/integrate.mjs); this is
   // the net under it, for the case that timer ever stops.
-  try { await integrateTick() } catch (e) { console.error('[integrate]', e.message) }
+  if (!integratorTimerAus()) {
+    try { await integrateTick() } catch (e) { console.error('[integrate]', e.message) }
+    // origin is the operator's backup: commits he made on the base branch of the
+    // main checkout himself are pushed from here. A push touches no working tree.
+    try { await pushOperatorBase() } catch (e) { console.error('[integrate]', e.message) }
+  }
   await closeOldSessions()
   await cleanupWorktrees()
   // No-code flows: run_finished backstop, delays, cron (server/flows/triggers.mjs).
@@ -130,7 +135,7 @@ async function watchRun(run) {
   }
 
   if (st.pane_dead === '1') {
-    handleReport(run.id, { kind: '_pane_died', exit: st.dead_status }).catch(() => {})
+    handleReport(run.id, { kind: '_pane_died', exit: st.dead_status }, 'internal').catch(() => {})
   }
 
   // Activity + tokens per harness

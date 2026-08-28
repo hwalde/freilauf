@@ -189,6 +189,9 @@ addColumn('repos', 'merge_max_attempts', 'INTEGER NOT NULL DEFAULT 2')
 addColumn('repos', 'conflict_parallel', 'INTEGER NOT NULL DEFAULT 1')
 addColumn('repos', 'notify_running', 'INTEGER NOT NULL DEFAULT 1')
 addColumn('repos', 'max_parallel', 'INTEGER NOT NULL DEFAULT 0')   // 0 = unlimited
+// When the hub last pushed the operator's own base-branch commits to origin.
+// The remote is the backup: nothing may exist only on this machine.
+addColumn('repos', 'last_push_at', 'TEXT')
 // Per run: where it started from, where it stands in the finish gate, and what
 // became of its commits. finish_state is a SUB-state of 'running' on purpose —
 // runs.status carries a CHECK, and a new value there would be a table rebuild

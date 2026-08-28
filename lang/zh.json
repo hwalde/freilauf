@@ -731,5 +731,6 @@
   "merge.unmerged_dirty": "未合并：有未提交的改动",
   "merge.unmerged_both": "未合并：既有提交也有未提交的改动",
   "merge.skipped_by_operator": "已跳过合并",
-  "incident.merge_blocked": "未合并"
+  "incident.merge_blocked": "未合并",
+  "repos.last_push": "上次备份推送：{ts}"
 }

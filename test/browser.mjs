@@ -637,6 +637,22 @@ try {
     await p.close()
   })
 
+  await pruefe('the cascade runs on the Merge settings page too — same block, same ids', async () => {
+    // The conflict resolver's setup is runSetupFields(), the very block the run
+    // form embeds. It has a page of its own for exactly one reason: #prov,
+    // #model and #effort may exist once per page, and hub.js drives them by id.
+    const p = await neueSeite('/settings/merge')
+    await p.selectOption('select[name=harness]', 'claude')
+    await wartePage(p, () => document.getElementById('prov-label').hidden === true, null,
+      'the provider label to disappear for claude')
+    await wartePage(p, () => document.querySelectorAll('#modelle option').length > 0, null,
+      'the model list to arrive on this page as well')
+    await wartePage(p, () => document.getElementById('effort-label').hidden === false, null,
+      'and the effort field to appear')
+    sauber(p)
+    await p.close()
+  })
+
   await pruefe('the effort field hides itself where the combination knows no levels', async () => {
     // Hiding instead of graying out: with opencode an invalid level fizzles
     // silently, so a field without effect is worse than none.

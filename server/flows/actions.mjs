@@ -55,6 +55,9 @@ export function runInfo(runId) {
     ended_at: run.ended_at ?? '',
     incidents,
     worktree: run.worktree ?? '',
+    // Where the work ended up — '' while the integration has not said yet.
+    merge_status: run.merge_status ?? '',
+    merged_sha: run.merged_sha ?? '',
     url: detailUrl(run.id),
     flow_run_id: run.flow_run_id ?? null,
   }

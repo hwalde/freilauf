@@ -16,6 +16,11 @@ import { OPS, varName } from './template.mjs'
 export const TYPES = ['string', 'number', 'boolean', 'string_list', 'object', 'any']
 export const RUN_STATUSES = ['scheduled', 'deferred', 'running', 'waiting_help', 'done', 'failed', 'aborted']
 export const RUN_OUTCOMES = ['done', 'failed', 'aborted']
+// Where a run's work ended up (server/integrate.mjs). '' while nothing has been
+// decided yet — a flow can therefore ask "did this really land on main?".
+export const MERGE_STATUSES = ['', 'nothing', 'merged', 'resolving', 'blocked_dirty',
+  'blocked_conflict', 'blocked_error', 'blocked_no_remote', 'unmerged_commits',
+  'unmerged_dirty', 'unmerged_both', 'skipped_by_operator']
 export const TRIGGER_ROOTS = ['trigger', 'vars', 'flow']
 
 /** What actions.runInfo() delivers — the only picture a flow ever has of a run. */
@@ -46,6 +51,8 @@ export const RUN_SHAPE = {
     ended_at: { type: 'string' },
     incidents: { type: 'number' },
     worktree: { type: 'string' },
+    merge_status: { type: 'string', enum: MERGE_STATUSES },
+    merged_sha: { type: 'string' },
     url: { type: 'string' },
     flow_run_id: { type: 'string' },
   },
