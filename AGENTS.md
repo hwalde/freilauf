@@ -622,7 +622,7 @@ off:
 | What | Why |
 |---|---|
 | **No Telegram of its own**, in any state — `notifyRun()` returns at the top | The operator hears about the run it works FOR: T-RESOLVING at the start, the done line naming the resolver after the merge, T-BLOCKED-CONFLICT when it did not get there. Three messages about one problem is two too many. |
-| **No flows** — `flows=NULL`, `flow_dispatched=1` at creation | A flow attached to "a run finished" must not fire for a run the operator never started. Set at creation, not at the end, because that flag is what the triggers poll on. |
+| **No flows** — `flows=NULL`, `flow_dispatched=1`, `merge_dispatched=1` at creation | A flow must not fire for a run the operator never started, and the *merge* it carries belongs to the run it worked FOR: `run_merged` fires once per integration, on the original. Both flags are set at creation rather than at the end, because that is what the triggers poll on — and `dispatchMerges()` skips a `resolves_run_id` row for the same reason, so the two sides agree instead of depending on each other. |
 | **No generated title** | It is called `Resolve conflicts: <original title>`; a model would only make that less clear. |
 | **Never `unmerged_*` / `blocked_*`, never a `merge_blocked` incident** | Everything that goes wrong here is mapped onto the original: `escalate(original, 'resolver_failed')` → attempts → the next conflict run or `blocked_conflict`. It only ever carries `merged` or nothing. |
 | **The finish gate is help, not a gate** | M1/M2/M4 reach it while it lives. Deadline gone or agent dead → `escalate(original, 'resolver_failed')` — **never** a conflict run for a conflict run. That is the recursion guard, and it is the reason the predicate exists. |
@@ -677,7 +677,11 @@ The remote is the backup, and that is a rule beyond the integrator:
 The overview's status cell carries the finish state under the status word (and
 the merge status on a finished run), the detail page has an "Integration" line
 with the buttons, and a blocked merge is a `merge_blocked` incident — which puts
-it in the sidebar's "Needs you" group on every page. None of it needs a second
+it in the sidebar's "Needs you" group on every page. The repo form's
+"Integration" block ends with the flows that run **after** a merge
+(`mergeFlowsBlock`), and the repo list's Integration column says how many there
+are: a `run_merged` flow hangs on the repository, not on an agent, so this is
+where one goes looking for it. None of it needs a second
 renderer, because **every** change of `finish_state`/`merge_status` goes through
 `addEvent()` and the live channel re-fetches the fragment. There is no silent
 `UPDATE runs` on this path, and that is not a style preference: it is what makes
@@ -878,6 +882,14 @@ the attachment block (`flowAttachFields` in `flows/attach.mjs`, embedded by
 there and from the button on the agents page. When a run ends, **every**
 attached flow starts — all of them in parallel, the way a no-code platform fans
 a trigger out.
+
+The one trigger that is **not** an attachment is `run_merged`: it fires once per
+merge into a repo's base branch and carries its own filter, the repo, because a
+merge belongs to the repository and may be carried by a conflict run that never
+hung on an agent — its way in is therefore the repo form, not the agents page.
+Together with the `shell_command` block (a command on the hub machine, exit code
+as a result rather than a failure, optionally detached) that is what lets a flow
+restart the hub after a merge.
 
 The attachment carries the condition (`always`, only on `done`/`failed`/
 `aborted`, or `not_done`), so the case distinction is made where one thinks of

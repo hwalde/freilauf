@@ -29,7 +29,7 @@ import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
 import { resumeCommand } from './integrate.mjs'
 import { listSessions, sessionKeepHours, currentKeepMs, paneAlive } from './sessions.mjs'
-import { attachmentSummary, flowSection, flowAttachFields } from './flows/attach.mjs'
+import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
 // The flow block of the detail page is rendered in server/flows/ and belongs to
 // that module; it is re-exported here so a fragment has ONE place to ask for a
 // piece of a page, whichever module happens to build it.
@@ -1107,7 +1107,7 @@ export async function pageRepos(req, res, url) {
     return `<tr><td>${e(r.name)}</td><td><code>${e(r.path)}</code></td><td>${e(r.base_branch)}</td>
     <td class="dim">${e(r.worktree_extras)}</td>
     <td>${kurz ? `<span class="dim" title="${e(p)}">${e(kurz)}</span>` : `<span class="dim">—</span>`}</td>
-    <td>${e(r.merge_mode === 'hub' ? t('merge.mode_hub') : t('merge.mode_off'))}
+    <td>${e(r.merge_mode === 'hub' ? t('merge.mode_hub') : t('merge.mode_off'))}${mergeFlowsHint(r.id)}
       ${r.last_push_at ? `<div class="dim">${e(t('repos.last_push', { ts: r.last_push_at }))}</div>` : ''}</td>
     <td><a href="/repos/edit?id=${r.id}">${e(t('agents.edit'))}</a></td></tr>`
   }).join('')
@@ -1700,6 +1700,7 @@ function integrationFields(r = {}) {
       ${e(t('repos.notify_running'))}</label>
     <p class="dim">${e(t('repos.notify_running_hint'))}</p>
     ${num('max_parallel', r.max_parallel ?? 0, 0, 'repos.max_parallel_hint')}
+    ${mergeFlowsBlock(r)}
   </fieldset>`
 }
 

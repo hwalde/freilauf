@@ -1264,14 +1264,15 @@ async function startResolver(orig, repo) {
 }
 
 /**
- * Stamp a fresh run as the integrator's tool. The two dispatch flags are set
- * HERE and not when it ends: a flow must not fire for a run nobody asked for,
- * and the flags are what the triggers poll on. `merge_dispatched` may not exist
- * yet (a sibling change adds it) — an absent column is not a reason to fail.
+ * Stamp a fresh run as the integrator's tool. Both dispatch flags are set HERE
+ * and not when it ends: a flow must not fire for a run nobody asked for, and
+ * those flags are exactly what the triggers poll on. The merge of a conflict run
+ * belongs to the run it worked FOR — `dispatchMerges()` skips it for the same
+ * reason, so the two sides agree rather than depend on each other.
  */
 function markAsResolver(runId, origId) {
-  db.prepare('UPDATE runs SET resolves_run_id=?, flows=NULL, flow_dispatched=1 WHERE id=?').run(origId, runId)
-  try { db.prepare('UPDATE runs SET merge_dispatched=1 WHERE id=?').run(runId) } catch { /* column not there yet */ }
+  db.prepare(`UPDATE runs SET resolves_run_id=?, flows=NULL,
+              flow_dispatched=1, merge_dispatched=1 WHERE id=?`).run(origId, runId)
 }
 
 function checkTail(runId) {

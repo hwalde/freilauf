@@ -13,7 +13,8 @@ Every execution is a **flow run** with its own context:
 
 ```
 context = {
-  trigger: { kind: 'run_finished' | 'cron' | 'manual', at, run: RunInfo | null },
+  trigger: { kind: 'run_finished' | 'run_merged' | 'cron' | 'manual', at,
+             run: RunInfo | null, merge?: { sha, base, resolver_run_id, files } },
   vars:    { ... }          // outputs of steps, addressed by their "output variable"
   flow:    { id, name }
 }
@@ -23,8 +24,10 @@ context = {
 run: `id, short_id, status, outcome ('done'|'failed'|'aborted'), ended_normally,
 agent_id, agent_name, repo_id, repo_name, repo_path, harness, model, provider,
 branch, pr_url, report, help_text, exit_code, duration_min, started_at, ended_at,
-incidents, worktree, url, flow_run_id`. "Did the run end normally or was it
-aborted?" is `outcome` / `ended_normally`.
+incidents, worktree, url, flow_run_id, merge_status, merged_sha`. "Did the run
+end normally or was it aborted?" is `outcome` / `ended_normally`; whether its
+work has landed on the base branch is `merge_status` (the merge integrator's
+column — read here, never written).
 
 Text fields in steps are **templates**: `{{trigger.run.report}}`,
 `{{vars.review.branch}}`, `{{x | default: text}}`. A single `{{path}}` used as
@@ -35,15 +38,15 @@ objects as JSON, missing values as an empty string. Templates never throw.
 
 | File | Role |
 |---|---|
-| `db.mjs` | tables `flows`, `flow_runs`; retrofits `runs.flow_dispatched` and `runs.flow_run_id`; all queries; the one-time migration of old trigger filters into attachments |
-| `attach.mjs` | **the attachment** — which flows hang on an agent / a single run and under which condition: parsing, the form block both run forms embed, the flow editor's side of the same rows, the run detail page's section |
+| `db.mjs` | tables `flows`, `flow_runs`; retrofits `runs.flow_dispatched`, `runs.merge_dispatched` and `runs.flow_run_id`; all queries; the one-time migration of old trigger filters into attachments; the two startup rules (merges are never replayed, a flow run caught mid-step is closed) |
+| `attach.mjs` | **the attachment** — which flows hang on an agent / a single run and under which condition: parsing, the form block both run forms embed, the flow editor's side of the same rows, the run detail page's section — plus `mergeFlowsBlock()`, the repo form's list of what runs after a merge |
 | `template.mjs` | pure: `render`, `resolve`, `getPath`/`setPath`, `compare` (the condition operators), `varName` |
 | `varschema.mjs` | pure: the **typed variable catalog** — which variables exist where, of which type, with which allowed values; plus the placement rules |
 | `steps.mjs` | **the step registry** — one entry per building block: designer metadata (`fields`), defaults, validation and `run()` |
 | `engine.mjs` | executes a definition: frame stack, persistence after every step, suspend/resume (`wait`, `delay`), stop |
 | `actions.mjs` | the production `api` object steps run against (tmux, Telegram, agent/run start, LLM, HTTP) — the only file with side effects |
 | `llm.mjs` | structured extraction via OpenRouter `json_schema` (`schemaFromFields`, `extractStructured`) |
-| `triggers.mjs` | `run_finished`/`cron`/`manual`, `flowsForRun`, `flowsTick()` (dispatcher), `runFlowNow()` |
+| `triggers.mjs` | `run_finished`/`run_merged`/`cron`/`manual`, `flowsForRun`, `flowsForMerge`, `flowsTick()` (dispatcher), `runFlowNow()` |
 | `web.mjs` | pages `/flows`, `/flows/edit`, `/flows/runs`, `/flows/runs/<id>`; API `/api/flows/*`, `/api/flow-runs/*` |
 | `../../public/flows.js` | designer page: toolbox from the registry, property editors from `fields`, trigger editor, save |
 
@@ -94,6 +97,7 @@ Steps never touch the database or tmux themselves — everything goes through
 | `start_agent` | `startForAgent(agent, promptExtra)` — quota gate applies; `wait` suspends until the run ends |
 | `start_single_run` | the same `startRun(def, …)` the run form uses — quota gate applies. Its property fields ARE the run definition (`RUN_DEF_FLOW_FIELDS` from `server/run-def.mjs`), so a field cannot exist in the form and be missing here |
 | `kill_run` | kills the tmux session of target runs, marks them aborted |
+| `shell_command` | runs a command on the hub machine as the hub's user. A non-zero exit code is a **result** (`vars.<out>.ok/exit_code/stdout/stderr`), not a failure of the step — only a command that could not run at all (no such working directory, spawn error, timeout) throws. With `detach` it is started in its own session (`setsid -f`) and the step ends at once with `{ ok, detached }` — see "Restarting the hub from a flow" |
 | `extract` | LLM fills user-defined fields from report / terminal log tail / claude transcript / custom text |
 | `for_each` | container: repeats its body per element of a list (`maxItems` caps it); the element is `vars.<itemVar>` |
 | `set_var`, `http_request`, `condition`, `switch_outcome`, `delay`, `stop`, `telegram`, `note` | as named |
@@ -126,8 +130,9 @@ Where the types come from:
 | Source | What is known |
 |---|---|
 | `extract` | exactly: `fields[].type` and `enumValues`, and `strict` json_schema makes the model keep to them. The field name is sanitized like `schemaFromFields()` — "needs review" really is `vars.<out>.needs_review`, and the picker says so |
-| `trigger.run.*` | `RUN_SHAPE` — `outcome` and `status` as enums, `ended_normally` boolean, `duration_min`/`exit_code`/`incidents` numbers |
-| other steps | `outputShape` in the registry: a literal shape, `{ from: 'extract_fields' }`, or `{ from: 'run_if_wait', otherwise }` (with `wait` the finished `RunInfo` replaces the output) |
+| `trigger.run.*` | `RUN_SHAPE` — `outcome`, `status` and `merge_status` as enums, `ended_normally` boolean, `duration_min`/`exit_code`/`incidents` numbers |
+| `trigger.merge.*` | `MERGE_SHAPE` — `sha`, `base`, `resolver_run_id` strings, `files` a string list. Offered **only under `run_merged`**: under `cron`, `manual` or `run_finished` there is no merge, and a picker that offered one would promise a value that is never there |
+| other steps | `outputShape` in the registry: a literal shape, `{ from: 'extract_fields' }`, `{ from: 'run_if_wait', otherwise }` (with `wait` the finished `RunInfo` replaces the output), or `{ from: 'if_field', field, then, otherwise }` for a step whose output depends on one of its own switches (`shell_command` with `detach`) |
 | `for_each` | the element type of the list it walks; `<itemVar>_index` is a number |
 | `set_var`, an HTTP response body | `any` — and `any` silences every check below it |
 
@@ -185,6 +190,40 @@ program. Because the definition is snapshotted, editing
 a flow never breaks a suspended run. Suspension is a row state
 (`status='waiting'`, `wait_run_id` or `resume_at`), so it survives a hub restart.
 
+**A flow run left on `running` by a restart is closed as failed**
+(`failRunningFlowRuns()` in `db.mjs`, once at load, with
+`hub restarted while this step was running` in its own log). Persisting after
+every step is not the same as being resumable: there is no startup resume, and
+repeating the step that was in flight would not be idempotent — it may have sent
+a message, started a run, restarted the hub. Ever `running` would be a lie about
+work that nobody is doing. `waiting` is deliberately untouched: that state is a
+row, not a stack frame.
+
+### Restarting the hub from a flow
+
+The case that made `shell_command` carry a `detach` switch at all: "after every
+merge, restart cc-hub". A step that restarts the hub kills the process that is
+executing it — the flow run would stay on `running` and, per the rule above, be
+marked failed on the way back up, every single time.
+
+`detach` starts the command in its own session
+(`setsid -f bash -lc 'exec </dev/null >/dev/null 2>&1; <command>'` — the same
+pattern the `StopFailure` hook uses in `runner.mjs`, and for the same reason)
+and the step answers at once with `{ ok: true, detached: true }`. The flow run
+is finished and saved **before** the command reaches the hub. The redirections
+are the shell's own, done before the command runs: a detached child that still
+held our stdout pipe would make `execFile` wait for it after all, whatever the
+command looks like.
+
+So the operator's flow is: trigger `run_merged`, one `shell_command`,
+`detach` ticked, and a `sleep` in front of the restart —
+`sleep 3; systemctl --user restart cchub.service`. The sleep is what gives the
+answer time to reach the browser.
+
+The command runs **as the hub's user on the hub machine**. That is nothing new
+(the hub starts coding agents with full shell access anyway), but it is said in
+the field's own hint rather than left to be discovered.
+
 ## Triggers and dispatch (`triggers.mjs`)
 
 Finished runs are found by **polling**, not by hooks in every end path: each run
@@ -207,12 +246,38 @@ in sync because there is nothing to sync. The old filters
 (`agentIds`/`repoId`/`outcomes`/`singleRuns`/`flowStarted`) are migrated into
 attachments once, in `db.mjs`, and then dropped by `normalizeTrigger()`.
 
+The `run_merged` trigger **does** carry a filter of its own, and exactly one:
+the repo (`repoId`, `null` = all repos). That is not an inconsistency with the
+paragraph above, it is the same rule applied to a different fact. An attachment
+says "this agent's runs start this flow" — but a merge belongs to the
+**repository**, and the run that carries it may be a conflict run that never
+had an attachment to inherit. "After every merge into this repo" cannot be
+written as an attachment at all.
+
+Consequently the way in is the **repo form**, not the agents page:
+`mergeFlowsBlock()` (attach.mjs, one call in `pages.mjs`) lists the flows whose
+`run_merged` trigger points at this repo or at all repos — the switched-off ones
+included, because "nothing happens, it is off" is part of the answer — and links
+to `/flows/edit?trigger=run_merged&repo=<id>`, which opens the editor with the
+trigger, the repo and a name already filled in (`newFlowPreset()` in web.mjs).
+
+Dispatch works like the finished runs, on `runs.merge_dispatched`: `flowsTick()`
+takes every run with `merge_status='merged'` and `merge_dispatched=0`, marks it
+first, and starts `flowsForMerge()` — all of them in parallel. A run carrying
+`resolves_run_id` (a conflict run) is marked and **skipped**: it merged the
+origin run's work, and the trigger fires once per integration, not once per run
+involved in it. `trigger.run` is therefore always the origin run, never the
+conflict run. The merge columns belong to the integrator (`server/integrate.mjs`)
+and are only ever read here; a database without them costs one line in the log,
+not a broken tick.
+
 Loop guard: runs started by a flow (`runs.flow_run_id` set) never dispatch
 attachments, and `defFromFlowProps()` gives a flow-started single run no
 attachments in the first place. Chaining is done with `wait` on the start step.
 
 Runs that were already finished more than an hour before the module first ran
-are marked dispatched at startup, so history is never replayed.
+are marked dispatched at startup, and so is every merge that was already there
+— history is never replayed.
 
 ## Integration — the seams
 
@@ -248,7 +313,9 @@ exactly what the server would reject. Save is `POST /api/flows/save` with
 `{ id, name, active, trigger, attachments, definition }`; the answer carries
 `hints`.
 
-The `run_finished` trigger's panel is the attachment list — agents plus their
+The `run_merged` trigger's panel is a single repo `<select>` (`#trigger-repo`,
+"all repos" as its default) — the whole filter of that trigger. The
+`run_finished` trigger's panel is the attachment list — agents plus their
 condition. It travels in `attachments` and is written back onto the **agents**
 (`setFlowAttachments`), not into the flow row: the agent form reads the same
 rows, so neither side can hold a stale copy. Switching the trigger kind away
@@ -271,6 +338,19 @@ selects the step) and as a yellow glow on the step itself — the library only
 knows the red error badge, so the glow is a `drop-shadow` of our own.
 
 ## Tests
+
+`test/unit.mjs`, group "Flows: the run_merged trigger and the shell_command
+block": the repo filter (`normalizeTrigger`, `flowsForMerge`,
+`flowsForMergeOfRepo`), the dispatch against the sandbox database (fires once,
+the conflict run is marked and skipped, history is not replayed), the registry
+entry and the `detach`-dependent output shape, the engine against a stub
+`api.shell` (templates, exit code as a result, detach) and the restart rule for
+flow runs. `test/e2e.mjs`, group "Flows: run_merged fires, and shell_command
+really runs": a real command writing the merge SHA into a file, a detached one
+that outlives its step, the repo form's block and the pre-aimed editor.
+`test/browser.mjs` drives the trigger editor's repo select.
+`test/TODO-e2e-run-merged.md` lists the two cases that need the real merge
+integrator.
 
 `test/unit.mjs`, groups "Flows": templates and operators, attachments
 (`parseAttachments`, `attachmentFires`, `flowsForRun`, `normalizeTrigger`),

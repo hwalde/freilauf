@@ -3,6 +3,7 @@
 // (tmux, Telegram, run creation). Tests pass a stub with the same shape.
 import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import db, { addEvent } from '../db.mjs'
 import { RUNS_DIR, sh, sendToSession, kurzid } from '../util.mjs'
 import { terminalText } from '../detect.mjs'
@@ -13,8 +14,16 @@ import { markStartedByFlow } from './db.mjs'
 
 const LOG_TAIL_BYTES = 48 * 1024
 const TRANSCRIPT_TAIL_BYTES = 256 * 1024   // JSONL is verbose — more bytes than the log for the same amount of text
+const SHELL_OUTPUT_BYTES = 20 * 1024       // what a flow variable carries of a command's output
+const SHELL_MAX_BUFFER = 8 * 1024 * 1024   // what the command may print at all before it counts as broken
 
 const iso = (s) => (s ? s.replace(' ', 'T') + 'Z' : null)
+
+/** The end of a command's output — that is where the interesting part of a build or a test run is. */
+const lastBytes = (text) => {
+  const s = String(text ?? '')
+  return s.length <= SHELL_OUTPUT_BYTES ? s : s.slice(-SHELL_OUTPUT_BYTES)
+}
 
 /**
  * Everything a flow may know about a run — the shape behind `trigger.run` and
@@ -55,7 +64,10 @@ export function runInfo(runId) {
     ended_at: run.ended_at ?? '',
     incidents,
     worktree: run.worktree ?? '',
-    // Where the work ended up — '' while the integration has not said yet.
+    // Where the work ended up. Owned by the merge integrator and only read here;
+    // a run whose integration has not said anything yet — and every run of an
+    // installation that does not integrate at all — reports '' rather than
+    // making a flow blind. Same answer `outcome` gives while a run is going.
     merge_status: run.merge_status ?? '',
     merged_sha: run.merged_sha ?? '',
     url: detailUrl(run.id),
@@ -215,6 +227,43 @@ export const actions = {
   },
 
   extract: (args) => extractStructured(args),
+
+  /**
+   * A shell command on the hub machine, as the hub's user.
+   *
+   * Two things it does deliberately differently from every other action here.
+   *
+   * A non-zero exit is a RESULT, not a failure of the step: the flow is meant
+   * to branch on `{{vars.shell.ok}}`. Only a command that never ran to its own
+   * end throws — a missing working directory, a spawn error, the timeout.
+   * util.sh() flattens execFile's error, so those are told apart by the code it
+   * reports: a string is a spawn failure (ENOENT …), and a killed process
+   * carries no code at all, which `?? 0` turns into a 0 that `ok:false` proves
+   * cannot be an exit code.
+   *
+   * `detach` runs the command in its own session and returns at once — the same
+   * `setsid -f` the StopFailure hook uses in runner.mjs, and for the same
+   * reason: the command must survive the process that started it. Here that is
+   * the point rather than a detail, because the command may be the one that
+   * restarts this very hub. The redirections are done by the shell itself
+   * (`exec` before the command), so the detached child holds no pipe of ours
+   * open — otherwise execFile would sit and wait for it after all, whatever the
+   * command looks like.
+   */
+  async shell({ command, cwd, timeoutMs, detach }) {
+    const dir = String(cwd ?? '').trim() || homedir()
+    if (!existsSync(dir)) throw new Error(`working directory does not exist: ${dir}`)
+    if (detach) {
+      const r = await sh('setsid', ['-f', 'bash', '-lc', `exec </dev/null >/dev/null 2>&1\n${command}`],
+        { cwd: dir, timeout: 15_000 })
+      if (!r.ok) throw new Error(`command could not be detached: ${r.stderr.trim() || r.code}`)
+      return { ok: true, detached: true }
+    }
+    const r = await sh('bash', ['-lc', command], { cwd: dir, timeout: timeoutMs, maxBuffer: SHELL_MAX_BUFFER })
+    if (!r.ok && typeof r.code !== 'number') throw new Error(`command could not be started: ${r.stderr.trim() || r.code}`)
+    if (!r.ok && r.code === 0) throw new Error(`command did not finish within ${Math.round(timeoutMs / 60_000)} min`)
+    return { ok: r.code === 0, exit_code: r.code, stdout: lastBytes(r.stdout), stderr: lastBytes(r.stderr) }
+  },
 
   async http({ url, method, headers, body }) {
     const init = { method, headers: { ...headers }, signal: AbortSignal.timeout(60_000) }
