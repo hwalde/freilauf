@@ -243,6 +243,25 @@ try {
     await p.close()
   })
 
+  await pruefe('the chosen repo sticks: navigation keeps it until it is changed again', async () => {
+    const p = await neueSeite(`/?repo=${repoId}`)
+    // The very complaint this fixes: switch the repo, then walk the menu — the
+    // choice used to fall back to the first repo on the next page.
+    await p.selectOption('#repo-switch', String(repoId2))
+    await p.waitForURL(new RegExp(`[?&]repo=${repoId2}$`), { timeout: 10_000 })
+    // A context-less page: settings renders the switcher too and must keep the choice.
+    await p.goto(sk.basis + '/settings', { waitUntil: 'load' })
+    gleich(await p.$eval('#repo-switch', s => s.value), String(repoId2), 'settings keeps the chosen repo in the header')
+    // A context page reached through the menu: agents must BE that repo now.
+    await p.click('header nav a[href="/agents"]')
+    await p.waitForURL(/\/agents$/, { timeout: 10_000 })
+    gleich(await p.$eval('#repo-switch', s => s.value), String(repoId2), 'agents keeps the chosen repo in the header')
+    gleich(await p.$eval('body', b => b.dataset.repo), String(repoId2), 'and the agents page really is that repo')
+    gleich(await p.$eval('#status-sidebar', a => a.dataset.repo), String(repoId2), 'the sidebar follows the same choice')
+    sauber(p)
+    await p.close()
+  })
+
   // ------------------------------------------------------------------
   // The sidebar is the one panel that is on every page, so the one panel that
   // has to be foldable — and the fold has to survive the page, otherwise one

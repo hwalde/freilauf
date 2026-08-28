@@ -56,6 +56,12 @@
     repoSwitch.addEventListener('change', () => {
       const u = new URL(location.href)
       u.searchParams.set('repo', repoSwitch.value)
+      // Remember the choice before navigating: pages that carry no ?repo= of
+      // their own (settings, sessions, repos) keep it instead of resetting to
+      // the first repo. The server re-writes the same cookie whenever a page
+      // request names a repo, so both sides agree on one value.
+      document.cookie = 'cchub_repo=' + encodeURIComponent(repoSwitch.value)
+        + '; Path=/; Max-Age=31536000; SameSite=Lax'
       location.href = u.pathname + u.search
     })
   }

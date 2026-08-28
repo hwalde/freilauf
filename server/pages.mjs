@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRepo, getRun } from './db.mjs'
 import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime } from './util.mjs'
+import { cookieRepo } from './web-helpers.mjs'
 import { providerBalances } from './balances.mjs'
 import {
   enabledCodingAgents, listCodingAgents, saveCodingAgent,
@@ -41,11 +42,11 @@ import { t, LANGUAGES, currentLanguage, setLanguage, clientCatalog } from './i18
  * Input errors belong on a page with a way back — not in a 500 ("internal
  * error") or a bare text response that swallows the inputs.
  */
-export async function problemPage(res, title, problems, backHref) {
+export async function problemPage(req, res, title, problems, backHref) {
   const body = `<h2>${e(title)}</h2>
   <ul class="err">${problems.map(p => `<li>${e(p)}</li>`).join('')}</ul>
   <div class="btn-row"><a class="btn" href="${e(backHref)}">${e(t('problem.back'))}</a></div>`
-  res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(title, '', body))
+  res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, title, '', body))
 }
 
 /** State of the global AND gate for scheduled starts. */
@@ -373,20 +374,25 @@ export async function statusSidebar(repoId = null) {
 </aside>`
 }
 
-export async function layout(title, active, content, selectedRepo = null, withTerminal = false) {
+export async function layout(req, title, active, content, selectedRepo = null, withTerminal = false) {
   // No "Flows" entry: a flow is not a place you go, it hangs on the agent or the
   // single run that starts it. The flow pages are reached from those two forms.
   const nav = [['/', t('nav.overview')], ['/archive', t('nav.archive')], ['/agents', t('nav.agents')], ['/sessions', t('nav.sessions')],
     ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
     .map(([href, label]) => `<a href="${href}" class="${active === href ? 'on' : ''}">${e(label)}</a>`).join('')
   const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
-  // Which repo the STATUS is about: the one the page is showing, or — on the
-  // pages that have no repo context (settings, sessions, repos) — the one the
-  // switcher below shows anyway, which is the first. Anything else would put an
-  // empty panel on half of the pages.
-  const statusRepo = selectedRepo != null ? Number(selectedRepo) : (repos[0]?.id ?? null)
+  // The repo the page stands on, or — on the pages that have no repo context of
+  // their own (settings, sessions, repos, flows) — the one the operator chose in
+  // the header. That choice lives in the cchub_repo cookie; without one the first
+  // repo answers, exactly as before. The switcher, the sidebar and the Quick Run
+  // dialog all read the SAME value, so the header never shows one repo while the
+  // sidebar talks about another.
+  const persist = cookieRepo(req)
+  const effRepo = selectedRepo != null
+    ? Number(selectedRepo)
+    : (persist != null && repos.some(r => r.id === persist) ? persist : (repos[0]?.id ?? null))
   const repoSel = repos.length
-    ? `<label class="dim">${e(t('layout.repo'))}</label> <select id="repo-switch" data-active="${e(active)}">${repos.map(r => `<option value="${r.id}" ${r.id == selectedRepo ? 'selected' : ''}>${e(r.name)}</option>`).join('')}</select>`
+    ? `<label class="dim">${e(t('layout.repo'))}</label> <select id="repo-switch" data-active="${e(active)}">${repos.map(r => `<option value="${r.id}" ${r.id == effRepo ? 'selected' : ''}>${e(r.name)}</option>`).join('')}</select>`
     : `<a href="/repos" class="warn">${e(t('layout.no_repo'))}</a>`
   return `<!doctype html><html lang="${e(currentLanguage())}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -404,9 +410,9 @@ ${setupBanner()}
 </header>
 <div class="shell" id="shell">
 <main>${globalesBanner()}${content}</main>
-${await statusSidebar(statusRepo)}
+${await statusSidebar(effRepo)}
 </div>
-${quickRunDialog(repos, selectedRepo)}
+${quickRunDialog(repos, effRepo)}
 <div class="toasts" id="cchub-toasts" aria-live="polite"></div>
 ${withTerminal ? '<script src="/static/xterm.js"></script><script src="/static/addon-fit.js"></script>' : ''}
 <script>window.CCHUB_I18N=${JSON.stringify(clientCatalog())}</script>
@@ -492,8 +498,8 @@ export async function usagePanel() {
 
 // ---------------- overview ----------------
 export async function pageOverview(req, res, url) {
-  const sel = selectRepo(url)
-  if (!sel) return noRepoPage(res, '/', t('nav.overview'))
+  const sel = selectRepo(req, url)
+  if (!sel) return noRepoPage(req, res, '/', t('nav.overview'))
   // 'scheduled' sits with 'deferred': both are runs that exist and are WAITING —
   // that is exactly what one wants to see at a glance, not somewhere below the
   // finished ones. Archived runs have left the overview entirely (Archive page).
@@ -509,7 +515,7 @@ export async function pageOverview(req, res, url) {
      ${filter ? `<span class="dim">${e(t('overview.filtered', { status: statusText(filter) }))}</span>
        <a class="btn" href="/?repo=${sel.id}">${e(t('overview.filter_clear'))}</a>` : ''}</div>
   ${overviewTable(runs, { repoId: sel.id, status: filter })}`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.overview'), '/', body, sel.id))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.overview'), '/', body, sel.id))
 }
 
 /**
@@ -675,8 +681,8 @@ function wartetAuf(run) {
 const ARCHIV_SEITE = Number(process.env.CCHUB_ARCHIVE_PAGE_SIZE ?? 50) || 50
 
 export async function pageArchive(req, res, url) {
-  const sel = selectRepo(url)
-  if (!sel) return noRepoPage(res, '/archive', t('nav.archive'))
+  const sel = selectRepo(req, url)
+  if (!sel) return noRepoPage(req, res, '/archive', t('nav.archive'))
   const gewuenscht = Math.max(1, Number(url.searchParams.get('page')) || 1)
   const total = db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NOT NULL`).get(sel.id).c
   const seiten = Math.max(1, Math.ceil(total / ARCHIV_SEITE))
@@ -713,28 +719,31 @@ export async function pageArchive(req, res, url) {
   <div class="table-wrap"><table class="list"><thead><tr><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('archive.archived_at'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th></th></tr></thead>
   <tbody>${rows || `<tr><td colspan="7" class="dim">${e(t('archive.empty'))}</td></tr>`}</tbody></table></div>
   ${pager}`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.archive'), '/archive', body, sel.id))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.archive'), '/archive', body, sel.id))
 }
 
-function selectRepo(url) {
+function selectRepo(req, url) {
   const want = url.searchParams.get('repo')
   let sel = want ? getRepo(+want) : null
+  // No ?repo= — or one naming a repo that no longer exists: fall back to the
+  // repo chosen in the header, which travels as the cchub_repo cookie.
+  if (!sel) sel = cookieRepo(req) ? getRepo(cookieRepo(req)) : null
   if (!sel) sel = db.prepare('SELECT * FROM repos ORDER BY name LIMIT 1').get() ?? null
   return sel   // null = no repo yet → pages show a setup hint
 }
 
-export async function noRepoPage(res, active, title) {
+export async function noRepoPage(req, res, active, title) {
   const body = `
   <h2>${e(t('norepo.title'))}</h2>
   <p>${e(t('norepo.text'))} <code>~/projects/my-project</code> (${e(t('norepo.base_hint'))} <code>main</code>).</p>
   <p><a class="btn" href="/repos/edit">${e(t('norepo.cta'))}</a></p>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(title, active, body))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, title, active, body))
 }
 
 // ---------------- agents ----------------
 export async function pageAgents(req, res, url) {
-  const sel = selectRepo(url)
-  if (!sel) return noRepoPage(res, '/agents', t('nav.agents'))
+  const sel = selectRepo(req, url)
+  if (!sel) return noRepoPage(req, res, '/agents', t('nav.agents'))
   if (req.method === 'POST') return void res.writeHead(405).end()
   const agents = db.prepare('SELECT * FROM agents WHERE repo_id=? ORDER BY name').all(sel.id)
   const body = `
@@ -742,7 +751,7 @@ export async function pageAgents(req, res, url) {
      <a class="btn" href="/flows">${e(t('nav.flows'))}</a>
      <span class="dim">${e(t('agents.flows_hint'))}</span></p>
   ${agentsTable(agents, { repoId: sel.id })}`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.agents'), '/agents', body, sel.id))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.agents'), '/agents', body, sel.id))
 }
 
 /** One agent as a table row. `ctx.repoId` is where its two forms return to. */
@@ -773,8 +782,8 @@ export function agentsTable(agents, ctx) {
 
 // ---------------- single-run form (= agent form without name and schedule) ----------------
 export async function pageRunForm(req, res, url) {
-  const sel = selectRepo(url)
-  if (!sel) return noRepoPage(res, '', t('runform.title_short'))
+  const sel = selectRepo(req, url)
+  if (!sel) return noRepoPage(req, res, '', t('runform.title_short'))
   const agentId = url.searchParams.get('agent')
   const a = agentId ? db.prepare('SELECT * FROM agents WHERE id=?').get(+agentId) : null
   // A favorite as template: the Quick-Run dialog's "more settings" hands its
@@ -800,7 +809,7 @@ export async function pageRunForm(req, res, url) {
   ${pipelineAn()
     ? `<span class="dim">${e(t('runform.pipeline_on_hint'))}</span>`
     : `<span class="warn">${e(t('runform.pipeline_off_hint'))}</span>`}</div></form>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('runform.title_short'), '', body, sel.id))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('runform.title_short'), '', body, sel.id))
 }
 
 // ---------------- run detail page ----------------
@@ -884,7 +893,7 @@ export async function pageRun(req, res, url, id) {
   ${runMetrics(run)}
   <h3>${e(t('run.events'))}</h3>${runEvents(id)}
   <h3>${e(t('run.log'))}</h3>${logHtml}`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(titel, '/', body, run.repo_id, true))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, titel, '/', body, run.repo_id, true))
 }
 
 /**
@@ -1122,7 +1131,7 @@ export async function pageRepos(req, res, url) {
   <p><a class="btn" href="/repos/edit">${e(t('repos.create'))}</a></p>
   <table class="list"><thead><tr><th>${e(t('repos.name'))}</th><th>${e(t('repos.path'))}</th><th>${e(t('repos.base'))}</th><th>${e(t('repos.extras'))}</th><th>${e(t('repos.prompt'))}</th><th>${e(t('repos.integration_legend'))}</th><th></th></tr></thead>
   <tbody>${rows || `<tr><td colspan="7" class="dim">${e(t('repos.none'))}</td></tr>`}</tbody></table>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.repos'), '/repos', body))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.repos'), '/repos', body))
 }
 
 // ---------------- tmux sessions ----------------
@@ -1206,7 +1215,7 @@ export async function pageSessions(req, res, url) {
   ${sessionsTable(sessions, {})}
   <p class="dim">${e(t('sessions.hidden_note', { n: runningCount }))}</p>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    .end(await layout(t('sessions.title'), '/sessions', body))
+    .end(await layout(req, t('sessions.title'), '/sessions', body))
 }
 
 export function sessionRows(sessions, ctx = {}) {
@@ -1273,7 +1282,7 @@ export async function pageSettings(req, res, url) {
   ${url.searchParams.get('telegram') === 'fehler' ? `<p class="err">${e(t('settings.telegram_fail'))}</p>` : ''}
   <p><a class="btn" href="/telegram-setup">${e(t('settings.telegram_setup'))}</a></p>
   <form method="post" action="/settings/test-telegram"><button>${e(t('settings.telegram_test'))}</button></form>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.settings'), '/settings', body))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.settings'), '/settings', body))
 }
 
 // ---------------- favorites (Settings → Favorites) ----------------
@@ -1307,7 +1316,7 @@ export async function pageFavorites(req, res, url) {
     : `<a class="btn" href="/settings/favorites/edit">${e(t('fav.create'))}</a>`}
      <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    .end(await layout(t('fav.title'), '/settings', body))
+    .end(await layout(req, t('fav.title'), '/settings', body))
 }
 
 export async function favoriteEdit(req, res, url) {
@@ -1327,7 +1336,7 @@ export async function favoriteEdit(req, res, url) {
       <a class="btn" href="/settings/favorites">${e(t('fav.title'))}</a></div>
   </form>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    .end(await layout(id ? t('fav.edit_title') : t('fav.create_title'), '/settings', body))
+    .end(await layout(req, id ? t('fav.edit_title') : t('fav.create_title'), '/settings', body))
 }
 
 export async function favoriteSave(req, res, url, formBody) {
@@ -1336,9 +1345,9 @@ export async function favoriteSave(req, res, url, formBody) {
   const back = `/settings/favorites/edit${id ? `?id=${id}` : ''}`
   const problems = []
   const fav = await favoriteFromForm(b, problems)
-  if (problems.length) return problemPage(res, t('fav.title'), problems, back)
+  if (problems.length) return problemPage(req, res, t('fav.title'), problems, back)
   const r = saveFavorite({ id: id ? +id : null, fav })
-  if (!r.ok) return problemPage(res, t('fav.title'), r.problems, back)
+  if (!r.ok) return problemPage(req, res, t('fav.title'), r.problems, back)
   redirect(res, '/settings/favorites')
 }
 
@@ -1386,7 +1395,7 @@ export async function pageMergeSettings(req, res, url) {
       <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>
   </form>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    .end(await layout(t('merge.settings_title'), '/settings', body))
+    .end(await layout(req, t('merge.settings_title'), '/settings', body))
 }
 
 export async function mergeSettingsSave(req, res, url, formBody) {
@@ -1396,7 +1405,7 @@ export async function mergeSettingsSave(req, res, url, formBody) {
   // a conflicting branch is then escalated to the operator directly.
   if (String(b.harness ?? '').trim()) {
     const setup = await runSetupFromForm(b, problems)
-    if (problems.length) return problemPage(res, t('merge.settings_title'), problems, '/settings/merge')
+    if (problems.length) return problemPage(req, res, t('merge.settings_title'), problems, '/settings/merge')
     setSetting('merge_resolver_harness', setup.harness)
     setSetting('merge_resolver_provider', setup.provider ?? '')
     setSetting('merge_resolver_or_provider', setup.orProvider ?? '')
@@ -1485,7 +1494,7 @@ export async function pageCodingAgents(req, res, url) {
   <h2>${e(t('ca.add_title'))}</h2>
   ${addBlocks || `<p class="dim">${e(t('ca.all_configured'))}</p>`}
   <p class="dim">${e(t('ca.detect_note'))}</p>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('ca.title'), '/settings', body))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('ca.title'), '/settings', body))
 }
 
 export async function codingAgentSave(req, res, url, formBody) {
@@ -1495,7 +1504,7 @@ export async function codingAgentSave(req, res, url, formBody) {
     enabled: b.enabled === '1' || b.enabled === 'on' ? 1 : 0,
     providers: b.providers_list ?? (b.providers ? [b.providers] : []),
   })
-  if (!r.ok) return problemPage(res, t('ca.title'), r.problems, '/settings/coding-agents')
+  if (!r.ok) return problemPage(req, res, t('ca.title'), r.problems, '/settings/coding-agents')
   redirect(res, '/settings/coding-agents')
 }
 
@@ -1517,7 +1526,7 @@ export async function runNewPost(req, res, url, formBody) {
   const problems = []
   const def = await runDefFromForm(b, problems)
   const start = runStartFromForm(b, problems)
-  if (problems.length) return problemPage(res, t('runform.title_short'), problems, back)
+  if (problems.length) return problemPage(req, res, t('runform.title_short'), problems, back)
   rememberRunChoice(def)
   // "Save as agent": the very same definition, only with a name — the run form
   // is the agent form without one.
@@ -1527,7 +1536,7 @@ export async function runNewPost(req, res, url, formBody) {
     } catch { /* duplicate name: the run is what matters, not the copy */ }
   }
   const r = await startRun(def, { repoId: +b.repo_id, ...start })
-  if (!r.runId) return problemPage(res, t('runform.title_short'), [r.error ?? t('run.start_failed')], back)
+  if (!r.runId) return problemPage(req, res, t('runform.title_short'), [r.error ?? t('run.start_failed')], back)
   redirect(res, `/runs/${r.runId}`)
 }
 
@@ -1599,11 +1608,11 @@ export async function agentEdit(req, res, url) {
   const a = id ? db.prepare('SELECT * FROM agents WHERE id=?').get(+id) : lastRunChoice()
   const repoId = id
     ? a.repo_id
-    : +(url.searchParams.get('repo') ?? db.prepare('SELECT id FROM repos ORDER BY name LIMIT 1').get()?.id ?? 0)
+    : +(url.searchParams.get('repo') ?? cookieRepo(req) ?? db.prepare('SELECT id FROM repos ORDER BY name LIMIT 1').get()?.id ?? 0)
   const body = `<h2>${e(id ? t('agentform.title_edit') : t('agentform.title_new'))}</h2>
   <form method="post" action="/agents/edit${id ? `?id=${id}` : ''}" class="settings form-grid">${agentFields(a, repoId)}
     <div class="btn-row"><button>${e(t('settings.save'))}</button></div></form>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(id ? t('agentform.title_edit') : t('agentform.title_new'), '/agents', body, repoId))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, id ? t('agentform.title_edit') : t('agentform.title_new'), '/agents', body, repoId))
 }
 
 export async function agentSave(req, res, url, formBody) {
@@ -1620,7 +1629,7 @@ export async function agentSave(req, res, url, formBody) {
   else if (agentNameTaken(+b.repo_id, name, id ? +id : null)) problems.push(t('agents.name_taken', { name }))
   const def = await runDefFromForm(b, problems)
   const zp = zeitplanAusFormular(b, problems)
-  if (problems.length) return problemPage(res, t('agentform.title_edit'), problems, back)
+  if (problems.length) return problemPage(req, res, t('agentform.title_edit'), problems, back)
 
   saveAgent({ id: id ? +id : null, repoId: +b.repo_id, name, def, schedule: zp, active })
   rememberRunChoice(def)
@@ -1657,7 +1666,7 @@ export async function agentMovePage(req, res, url) {
   </form>
   <p class="dim">${e(t('agents.move_hint'))}</p>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    .end(await layout(t('agents.move_title', { name: agent.name }), '/agents', body, agent.repo_id))
+    .end(await layout(req, t('agents.move_title', { name: agent.name }), '/agents', body, agent.repo_id))
 }
 
 export async function agentMovePost(req, res, url, formBody) {
@@ -1666,7 +1675,7 @@ export async function agentMovePost(req, res, url, formBody) {
   const sourceRepo = agent?.repo_id ?? ''
   const r = moveAgent(+b.id, +b.repo)
   if (!r.ok) {
-    return problemPage(res, t('agents.move_title', { name: agent?.name ?? '' }), [r.error], `/agents?repo=${sourceRepo}`)
+    return problemPage(req, res, t('agents.move_title', { name: agent?.name ?? '' }), [r.error], `/agents?repo=${sourceRepo}`)
   }
   // Back to the repo the operator was looking at — the source, where the agent
   // just disappeared from; the target repo shows it under its (possibly
@@ -1804,7 +1813,7 @@ export async function repoEdit(req, res, url) {
     ${integrationFields(r)}
     <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
   </form>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.repos'), '/repos', body))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.repos'), '/repos', body))
 }
 
 export async function repoSave(req, res, url, formBody) {
@@ -1826,7 +1835,7 @@ export async function repoSave(req, res, url, formBody) {
     problems.push(t('repos.extras_json', { err: err.message }))
   }
   const integ = integrationFromForm(b, problems)
-  if (problems.length) return problemPage(res, t('repos.edit_title'), problems, back)
+  if (problems.length) return problemPage(req, res, t('repos.edit_title'), problems, back)
   const prompt = (b.prompt ?? '').trim() || null
   const i = [integ.merge_mode, integ.merge_check, integ.finish_timeout_min, integ.merge_max_attempts,
     integ.conflict_parallel, integ.notify_running, integ.max_parallel]
@@ -1942,7 +1951,7 @@ export async function telegramSetup(req, res, url) {
     } catch (e2) { box.textContent = String(e2) }
   })
   </script>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('tg.title'), '/settings', body))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('tg.title'), '/settings', body))
 }
 
 export async function telegramTokenSave(req, res, url, formBody) {

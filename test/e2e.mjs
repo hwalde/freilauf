@@ -2271,6 +2271,51 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // The repo chosen in the header travels as the cchub_repo cookie, so a page
+  // that carries no ?repo= of its own (a menu click, a context-less page) keeps
+  // the choice instead of falling back to the first repo. The cookie is written
+  // twice: by the client when the switcher changes, and by the server whenever a
+  // page request names a repo — both must agree, so the "back" links and the
+  // sidebar counts persist the choice exactly like the select does.
+  gruppe('The repo choice sticks (cchub_repo cookie)')
+
+  await pruefe('a page request that names a repo answers with the cchub_repo cookie', async () => {
+    const r = await hol(`/?repo=${repoId}`)
+    gleich(r.status, 200, 'status')
+    enthaelt(r.headers.get('set-cookie') ?? '', `cchub_repo=${repoId}`, 'the cookie is set')
+    // A page that names no repo stays silent — the switcher itself is the only
+    // place that may remember a choice, not every stray link.
+    const ohne = await hol('/settings')
+    falsch((ohne.headers.get('set-cookie') ?? '').includes('cchub_repo='), 'no repo named, no cookie written')
+  })
+  await pruefe('without ?repo= the persisted choice wins over the first repo', async () => {
+    const zwei = await formular('/repos/edit', {
+      name: 'e2e-zwei', path: REPO, base_branch: 'main', worktree_extras: '[]',
+    }, { alsBrowser: true })
+    gleich(zwei.status, 303, 'second repo created')
+    const zweiId = db.prepare(`SELECT id FROM repos WHERE name='e2e-zwei'`).get().id
+    // The first repo by name is 'e2e' — without the cookie the overview would
+    // show it. With the cookie it must show the persisted one instead.
+    const overview = await (await hol('/', { headers: { cookie: `cchub_repo=${zweiId}` } })).text()
+    enthaelt(overview, `id="repo-switch"`, 'header has the switcher')
+    const kopf = overview.slice(overview.indexOf('<header'), overview.indexOf('</header>'))
+    enthaelt(kopf, `option value="${zweiId}" selected`, 'the persisted repo is selected in the header')
+    enthaelt(overview, `<body data-repo="${zweiId}"`, 'and the page context is that repo')
+    // A context page (agents) honors it too — its "create" button belongs to it.
+    const agents = await (await hol('/agents', { headers: { cookie: `cchub_repo=${zweiId}` } })).text()
+    enthaelt(agents, `/agents/edit?repo=${zweiId}`, 'the agents page belongs to the persisted repo')
+    // And a context-less page (settings) keeps it in the header.
+    const settings = await (await hol('/settings', { headers: { cookie: `cchub_repo=${zweiId}` } })).text()
+    const kopf2 = settings.slice(settings.indexOf('<header'), settings.indexOf('</header>'))
+    enthaelt(kopf2, `option value="${zweiId}" selected`, 'settings keeps the persisted repo in the header')
+  })
+  await pruefe('an invalid cookie (deleted repo) falls back instead of an empty page', async () => {
+    const html = await (await hol('/', { headers: { cookie: 'cchub_repo=999999' } })).text()
+    enthaelt(html, 'id="repo-switch"', 'page renders')
+    falsch(html.includes('data-repo="999999"'), 'not the deleted id')
+  })
+
+  // ------------------------------------------------------------------
   // POST /settings/save writes only the keys the request actually carried. The
   // old version looped `b[k] ?? ''` over the whole key list, so a body with one
   // field blanked the other fifteen — switching the language would have wiped

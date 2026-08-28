@@ -29,7 +29,7 @@ import {
 } from './pages.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
 import { mergeByHand, skipMerge, resetIntegration } from './integrate.mjs'
-import { redirect, body as readBody, parseForm } from './web-helpers.mjs'
+import { redirect, body as readBody, parseForm, rememberRepo } from './web-helpers.mjs'
 import { vorfallLoesen, vorfaelleLoesen, vorfall } from './incidents.mjs'
 import { t } from './i18n.mjs'
 import { flowRoute, flowApi } from './flows/web.mjs'
@@ -86,6 +86,15 @@ export async function route(req, res) {
   const url = new URL(req.url, 'http://x')
   const path = url.pathname
   const formBody = async () => parseForm(await readBody(req))
+  // A full page load that names a repo makes that repo the persisted choice: the
+  // switcher's navigation itself and every link carrying ?repo= (the sidebar's
+  // counts, the "back" redirects, the overview links). Fragments, the SSE stream
+  // and static files never touch it. An invalid id (a deleted repo) leaves the
+  // cookie alone — the last valid choice is the better answer.
+  if (req.method === 'GET' && !path.startsWith('/api/') && !path.startsWith('/static/') && url.searchParams.has('repo')) {
+    const id = Number(url.searchParams.get('repo'))
+    if (Number.isInteger(id) && getRepo(id)) rememberRepo(res, id)
+  }
   try { await dispatch(req, res, url, path, formBody) }
   catch (e) {
     console.error('[http]', e)
@@ -426,7 +435,7 @@ async function api(req, res, url) {
     // A refusal has a REASON ("still dirty", "no resolver configured"), and a
     // redirect back to the run would swallow it — the page would look as if the
     // click had done nothing at all.
-    if (!r.ok && wantsHtml(req)) return problemPage(res, t('merge.section'), [r.error], `/runs/${run.id}`)
+    if (!r.ok && wantsHtml(req)) return problemPage(req, res, t('merge.section'), [r.error], `/runs/${run.id}`)
     return answer(req, res, r.ok ? 200 : 400, r, `/runs/${run.id}`)
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/merge-skip$/))) {

@@ -24,7 +24,7 @@ const d = (s) => new Date(s)
 try {
   const { cronMatches, validCron, scheduleDue, scheduleText, stripAnsi, escapeHtml,
     fmtDuration, parseDbUtc, fmtRelativeTime, fmtDateTime, kurzid } = await import('../server/util.mjs')
-  const { parseForm } = await import('../server/web-helpers.mjs')
+  const { parseForm, cookieRepo, rememberRepo } = await import('../server/web-helpers.mjs')
 
   // ------------------------------------------------------------------
   gruppe('Cron: matching (cronMatches)')
@@ -184,6 +184,26 @@ try {
   await pruefe('empty field is preserved (not undefined)', () => {
     const b = parseForm('leer=&x=1')
     gleich(b.leer, '', 'empty field')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Repo choice cookie (web-helpers)')
+
+  await pruefe('cookieRepo reads the cchub_repo value out of the Cookie header', () => {
+    gleich(cookieRepo({ headers: { cookie: 'cchub_repo=7' } }), 7, 'bare')
+    gleich(cookieRepo({ headers: { cookie: 'other=1; cchub_repo=7' } }), 7, 'among other cookies')
+    gleich(cookieRepo({ headers: { cookie: 'other=1; cchub_repo=7; x=y' } }), 7, 'with a trailing cookie')
+    gleich(cookieRepo({ headers: { cookie: 'cchub_repo=abc' } }), null, 'non-numeric value')
+    gleich(cookieRepo({ headers: { cookie: 'cchub_repo=' } }), null, 'empty value')
+    gleich(cookieRepo({ headers: {} }), null, 'no Cookie header at all')
+  })
+  await pruefe('rememberRepo writes a long-lived cchub_repo cookie', () => {
+    let gesetzt = null
+    rememberRepo({ setHeader: (k, v) => { gesetzt = [k, v] } }, 3)
+    gleich(gesetzt[0], 'set-cookie', 'header name')
+    enthaelt(gesetzt[1], 'cchub_repo=3', 'value')
+    enthaelt(gesetzt[1], 'Max-Age=31536000', 'long-lived — the choice stays until it is changed')
+    enthaelt(gesetzt[1], 'Path=/', 'valid on every page')
   })
 
   // ------------------------------------------------------------------

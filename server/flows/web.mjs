@@ -61,7 +61,7 @@ const STATUS_DOT = { running: 'yellow', waiting: 'yellow', done: 'green', failed
 const statusBadge = (s) => `<span class="dot ${STATUS_DOT[s] ?? 'yellow'}"></span> ${e(t(`flows.status.${s}`))}`
 
 // ---------------- pages ----------------
-async function pageList(res) {
+async function pageList(req, res) {
   const flows = listFlows()
   const rows = flows.map(f => {
     const last = db.prepare('SELECT id, status, started_at FROM flow_runs WHERE flow_id=? ORDER BY started_at DESC LIMIT 1').get(f.id)
@@ -85,7 +85,7 @@ async function pageList(res) {
   <p class="dim">${e(t('flows.intro'))}</p>
   <table class="list flows"><thead><tr><th>${e(t('flows.name'))}</th><th>${e(t('flows.trigger'))}</th><th>${e(t('flows.active'))}</th><th>${e(t('flows.last_run'))}</th><th></th></tr></thead>
   <tbody>${rows || `<tr><td colspan="5" class="dim">${e(t('flows.none'))}</td></tr>`}</tbody></table>`
-  html(res, 200, await layout(t('nav.flows'), '/flows', body))
+  html(res, 200, await layout(req, t('nav.flows'), '/flows', body))
 }
 
 /**
@@ -118,10 +118,10 @@ function newFlowPreset(url) {
   return { name: repo ? t('flows.name_after_merge', { repo: repo.name }) : '', trigger }
 }
 
-async function pageEditor(res, url) {
+async function pageEditor(req, res, url) {
   const id = Number(url.searchParams.get('id')) || null
   const flow = id ? getFlow(id) : null
-  if (id && !flow) return html(res, 404, await layout(t('nav.flows'), '/flows', `<p>${e(t('web.not_found'))}</p>`))
+  if (id && !flow) return html(res, 404, await layout(req, t('nav.flows'), '/flows', `<p>${e(t('web.not_found'))}</p>`))
   // The attachments come from the agents, not from the flow — one storage, two
   // editors, so the agent form and this page can never disagree.
   // A new flow may arrive pre-aimed: the repo page's "new flow after merge"
@@ -154,10 +154,10 @@ async function pageEditor(res, url) {
   <div id="flow-designer"></div>
   <script>window.CCHUB_FLOWS=${JSON.stringify({ i18n: clientCatalog('flows.'), meta: editorMeta(), flow: data }).replace(/</g, '\\u003c')}</script>
   <script src="/static/swd.js"></script><script src="/static/flows.js" type="module"></script>`
-  html(res, 200, await layout(data.name || t('flows.new'), '/flows', body))
+  html(res, 200, await layout(req, data.name || t('flows.new'), '/flows', body))
 }
 
-async function pageRuns(res, url) {
+async function pageRuns(req, res, url) {
   const flowId = Number(url.searchParams.get('flow')) || null
   const runs = listFlowRuns(flowId)
   const rows = runs.map(fr => `<tr onclick="location='/flows/runs/${fr.id}'">
@@ -170,12 +170,12 @@ async function pageRuns(res, url) {
   <p><a class="btn" href="${e(flowId ? `/flows/edit?id=${flowId}` : backTarget(url))}">${e(t('flows.editor.back'))}</a></p>
   <table class="list"><thead><tr><th>${e(t('flows.runs.flow'))}</th><th>${e(t('flows.runs.status'))}</th><th>${e(t('flows.trigger'))}</th><th>${e(t('flows.runs.started'))}</th><th>${e(t('flows.runs.ended'))}</th><th>${e(t('flows.runs.last_message'))}</th></tr></thead>
   <tbody>${rows || `<tr><td colspan="6" class="dim">${e(t('flows.runs.none'))}</td></tr>`}</tbody></table>`
-  html(res, 200, await layout(t('flows.runs.title'), '/flows', body))
+  html(res, 200, await layout(req, t('flows.runs.title'), '/flows', body))
 }
 
-async function pageRunDetail(res, id) {
+async function pageRunDetail(req, res, id) {
   const fr = getFlowRun(id)
-  if (!fr) return html(res, 404, await layout(t('nav.flows'), '/flows', `<p>${e(t('web.not_found'))}</p>`))
+  if (!fr) return html(res, 404, await layout(req, t('nav.flows'), '/flows', `<p>${e(t('web.not_found'))}</p>`))
   const log = fr.log.map(l => `<tr class="${l.ok ? '' : 'err'}"><td class="dim">${e(l.ts.slice(11, 19))}</td><td>${e(l.name || '')}<span class="dim"> ${e(l.type)}</span></td><td>${e(l.msg)}${l.ms != null ? ` <span class="dim">${l.ms} ms</span>` : ''}</td></tr>`).join('')
   const trig = fr.context.trigger ?? {}
   const body = `
@@ -194,17 +194,17 @@ async function pageRunDetail(res, id) {
   <h3>${e(t('flows.runs.vars'))}</h3>
   <pre>${e(JSON.stringify(fr.context.vars ?? {}, null, 2))}</pre>
   <details><summary>${e(t('flows.runs.trigger_data'))}</summary><pre>${e(JSON.stringify(trig, null, 2))}</pre></details>`
-  html(res, 200, await layout(fr.flow_name, '/flows', body))
+  html(res, 200, await layout(req, fr.flow_name, '/flows', body))
 }
 
 // ---------------- routing ----------------
 export async function flowRoute(req, res, url) {
   const path = url.pathname
   let m
-  if (req.method === 'GET' && path === '/flows') return pageList(res)
-  if (req.method === 'GET' && path === '/flows/edit') return pageEditor(res, url)
-  if (req.method === 'GET' && path === '/flows/runs') return pageRuns(res, url)
-  if (req.method === 'GET' && (m = path.match(/^\/flows\/runs\/([0-9a-f-]{36})$/))) return pageRunDetail(res, m[1])
+  if (req.method === 'GET' && path === '/flows') return pageList(req, res)
+  if (req.method === 'GET' && path === '/flows/edit') return pageEditor(req, res, url)
+  if (req.method === 'GET' && path === '/flows/runs') return pageRuns(req, res, url)
+  if (req.method === 'GET' && (m = path.match(/^\/flows\/runs\/([0-9a-f-]{36})$/))) return pageRunDetail(req, res, m[1])
   res.writeHead(404, { 'content-type': 'text/plain' }).end(t('web.not_found'))
 }
 
