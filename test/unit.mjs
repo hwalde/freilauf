@@ -1759,6 +1759,31 @@ try {
     }
   })
 
+  // The README exists in three languages and they are maintained TOGETHER — a
+  // translation that quietly disappears is worse than none, because the language
+  // switcher at the top keeps promising it. Same for SETUP_WITH_AGENT.md: it is
+  // the document a stranger's coding agent acts on, and it is only found because
+  // every README links it near the top.
+  await pruefe('all three READMEs exist, link each other and link SETUP_WITH_AGENT.md', async () => {
+    const { readFileSync, existsSync } = await import('node:fs')
+    const { join: j } = await import('node:path')
+    const root = new URL('..', import.meta.url).pathname
+    const readmes = ['README.md', 'README.zh-CN.md', 'README.de.md']
+    for (const f of ['SETUP_WITH_AGENT.md', 'CONTRIBUTING.md', 'LICENSE', ...readmes]) {
+      wahr(existsSync(j(root, f)), `${f} exists`)
+    }
+    for (const f of readmes) {
+      const text = readFileSync(j(root, f), 'utf8')
+      wahr(text.includes('SETUP_WITH_AGENT.md'), `${f} links SETUP_WITH_AGENT.md`)
+      wahr(text.includes('CONTRIBUTING.md'), `${f} links CONTRIBUTING.md`)
+      for (const other of readmes.filter((o) => o !== f)) {
+        wahr(text.includes(`(${other})`), `${f} links ${other} (language switcher)`)
+      }
+    }
+    wahr(readFileSync(j(root, 'LICENSE'), 'utf8').includes('Attribution 4.0 International'),
+      'LICENSE is the CC BY 4.0 legal code')
+  })
+
   // ------------------------------------------------------------------
   // Every shell file in this repo is installed and run on a machine — cchub-deploy
   // even runs setup/02 on every single deploy. A typo in one of them is not a

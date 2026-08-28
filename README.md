@@ -1,9 +1,18 @@
 # cc-hub
 
-Web UI for managing autonomous coding agents — **claude** (Claude Code),
-**opencode**, **hermes** and **cursor** (cursor-agent). Agents run in tmux
-sessions, every run in its own git worktree. The hub schedules runs
-(cron/schedules), observes them, collects reports and notifies via Telegram.
+**English** · [中文](README.zh-CN.md) · [Deutsch](README.de.md)
+
+**A web UI that runs your coding agents for you — scheduled, unattended, and
+watched from the outside.** Claude Code, opencode, hermes and cursor-agent each
+work in their own git worktree inside their own tmux session; cc-hub starts
+them, watches them, collects their reports, merges their work and pings you on
+Telegram when something needs you.
+
+> ### 🤖 Setting it up? Let your agent do it.
+> You already use a coding agent. Point it at
+> **[SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md)** — a guide written *for* agents
+> that explains the system, asks you the handful of questions it cannot guess,
+> and installs it. *"Read SETUP_WITH_AGENT.md and set this up for me."*
 
 ```
 Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux sessions
@@ -13,138 +22,160 @@ Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux sessions
                       (~/agents/deploy/cc-hub, see below)
 ```
 
-## What it does
+## Why you might want this
 
-- **Coding agents as plugins**: which CLIs the hub may drive — and which model
-  providers each of them may use — is configured in the UI (Settings → Coding
-  agents). The add dialog detects installed CLIs. New coding agents and
-  providers are single plugin files ([docs/plugins.md](docs/plugins.md)).
-- **Agents** as saved definitions (coding agent, model, reasoning effort,
-  prompt, repo, schedule) — scheduled runs start automatically, single runs via
-  a form.
-- **Subscription usage** of Claude Code (5-hour/7-day windows) and Cursor
-  (spent USD of the current cycle) directly in the overview, plus OpenRouter
-  credits.
-- **Outside-in observation**: tmux state, pipe-pane logs, harness transcripts
-  and hooks. Rate limits and provider outages are detected even when the agent
-  itself can no longer report (per-plugin log patterns, provider pulse,
-  optional check LLM via OpenRouter).
+You have a coding agent that works well when you are sitting in front of it.
+cc-hub is what you use when you are not:
+
+- **Give it a task and walk away.** A run gets its own worktree and its own tmux
+  session, so runs never step on each other and you can attach to any of them
+  later and read the whole screen.
+- **Schedule work.** "Every night at 2, look at the open issues." An *agent* is a
+  saved run definition plus a name and a schedule; a *single run* is the same
+  form without them.
+- **Know when it went wrong — even when the agent can't tell you.** An agent
+  that hit a rate limit cannot report anything, so the hub watches from outside:
+  tmux state, logs, transcripts, hooks, provider pulse.
+- **A finished run means the work is on `main`.** Optionally the hub does the
+  merging itself, checks the run's claim before believing it, and sends the
+  still-living agent back to fix what is missing.
+- **One place for four CLIs.** Which coding agents the hub may drive, and which
+  model providers each may use, is a setting — not a code change.
+
+## What's in the box
+
+- **Coding agents as plugins** — claude, opencode, hermes, cursor. Configured in
+  the UI (Settings → Coding agents); the add dialog detects installed CLIs. New
+  coding agents and providers are single files
+  ([docs/plugins.md](docs/plugins.md)).
+- **Agents and single runs** from one form: coding agent, model, reasoning
+  effort, prompt, repo, branch rule, schedule. A **Quick Run** button on every
+  page starts one from a saved favorite in two fields.
 - **Terminal in the browser** (xterm.js over WebSocket, read-only by default) —
-  watch, push text in, answer help calls.
-- **Reports**: agents report back via `cc-report` (done / failed / help /
-  progress / branch / pr); fallback `inbox.jsonl` when the hub is unreachable.
-- **Telegram**: notification on completion, help call, anomaly — with a link to
-  the detail page (setup assistant in the settings).
-- **No-code flows**: a graphical designer chains what happens after a run — send
-  a message to running agents, start follow-up runs and wait for them, extract
-  structured data from a report via LLM, branch, loop over a list, Telegram/HTTP.
-  Flows are attached to an agent or a single run in its own form (optionally
-  only for a certain outcome) and all start in parallel when that run ends
+  watch a run, type into it, answer a help call.
+- **Reports** via `cc-report` (done / failed / help / progress / branch / pr),
+  with an `inbox.jsonl` fallback when the hub is unreachable.
+- **Integration**: the hub merges finished runs into the base branch itself,
+  serially per repo, in a worktree of its own — dirty worktree, conflict or a
+  failing merge check escalate to the agent first and to you only if it cannot
+  fix it.
+- **Incidents**: rate limits and provider outages are detected through several
+  independent channels and raised once, not five times.
+- **Subscription usage** — Claude's 5-hour and 7-day windows, Cursor's spend for
+  the current cycle, OpenRouter credits — in the sidebar of every page, and a
+  **quota gate** that defers scheduled starts before they burn into an empty
+  quota.
+- **No-code flows**: a graphical designer for what happens after a run — message
+  running agents, start follow-up runs and wait for them, extract structured
+  data from a report via LLM, branch, loop, Telegram, HTTP, shell command
   ([server/flows/AGENTS.md](server/flows/AGENTS.md)).
-- **Quota gate**: scheduled starts wait when the Claude subscription quota or
-  the OpenRouter credits run low.
-- **Multilingual UI**: English (default), German, Chinese — Settings → UI
-  language; translations live in `lang/*.json`.
+- **Telegram** notifications with a link straight to the run.
+- **Multilingual UI**: English (default), 中文, Deutsch — Settings → UI language.
 
-## Security model
+## Security model — please read this one
 
-The hub can control tmux — that is shell access. Therefore:
+The hub can control tmux. **That is shell access.** So:
 
-- `server/hub.mjs` binds **firmly to 127.0.0.1**; there is no direct path from
+- `server/hub.mjs` binds **firmly to `127.0.0.1`**; there is no direct path from
   the network.
-- In front sits `vpn-proxy.mjs` (TLS), which binds **exclusively to the own
-  WireGuard address** — `CCHUB_VPN_BIND` is mandatory, there is deliberately no
-  default. WireGuard is the auth layer; there is no own login.
-- Host allowlist + origin check (`CCHUB_ALLOWED_HOSTS`) as a fence against DNS
-  rebinding and CSRF; `Sec-Fetch-Site: cross-site` is rejected.
-- **Fail-closed**: `cchub-vpn.service` deliberately does not start automatically
-  after a reboot (`cchub on` enables access); the ufw rules from
-  `setup/04-firewall.sh` allow the VPN port only on `wg0` and deny it everywhere
-  else.
+- In front sits `vpn-proxy.mjs` (TLS), which binds **exclusively to your own
+  WireGuard address**. `CCHUB_VPN_BIND` is mandatory — there is deliberately no
+  default. **WireGuard is the auth layer; cc-hub has no login of its own.**
+- Host allowlist + origin check (`CCHUB_ALLOWED_HOSTS`) fence off DNS rebinding
+  and CSRF; `Sec-Fetch-Site: cross-site` is rejected.
+- **Fail-closed**: `cchub-vpn.service` deliberately does *not* start after a
+  reboot (`cchub on` enables access), and `setup/04-firewall.sh` allows the VPN
+  port only on `wg0`, denying it everywhere else.
 
-**Never operate the hub without these layers in a reachable network.**
+**Never run the hub in a reachable network without these layers.**
 
 ## Installation
 
 Prerequisites: Linux with systemd (user units), Node.js ≥ 22 (`node:sqlite`),
-tmux, git, jq, curl; at least one agent CLI (`claude`, `opencode`, `hermes` or
-`cursor-agent`) on the PATH. Certificates e.g. with
-[mkcert](https://github.com/FiloSottile/mkcert).
+tmux, git, jq, curl, a WireGuard interface, and at least one agent CLI
+(`claude`, `opencode`, `hermes`, `cursor-agent`) on the `PATH`. Certificates
+e.g. with [mkcert](https://github.com/FiloSottile/mkcert).
 
 ```bash
 ./setup/01-npm-install.sh       # node-pty, ws, xterm.js — for THIS checkout (tests, editing)
-./setup/02-install-scripts.sh   # cc-start/-attach/-kill/-help/-report/-oc-sync-agents + cchub + cchub-deploy to ~/.local/bin
+./setup/02-install-scripts.sh   # cc-start/-attach/-kill/-help/-report + cchub + cchub-deploy → ~/.local/bin
 ./setup/03-install-services.sh  # ~/.config/cc-hub/env (from env.example) + systemd units
 sudo ./setup/04-firewall.sh     # ufw: VPN port only on wg0 (one-time)
 ```
 
 Then set at least `CCHUB_VPN_BIND` and `CCHUB_ALLOWED_HOSTS` in
-`~/.config/cc-hub/env` (see `env.example`), place the certificates, then create
-the checkout the **service** runs from and bring the first version live:
+`~/.config/cc-hub/env` (see [`env.example`](env.example)), place the
+certificates, and bring the first version live:
 
 ```bash
-cchub-deploy --init --from "$PWD"   # clones origin into ~/agents/deploy/cc-hub, deploys it
+cchub-deploy --init --from "$PWD"   # clones into ~/agents/deploy/cc-hub, deploys it
 cchub status                        # hub process, VPN access, pipeline, sessions, deployed sha
-cchub on                            # start the VPN proxy → website reachable over WireGuard
+cchub on                            # start the VPN proxy → reachable over WireGuard
 ```
+
+**First thing in the UI:** add your coding agents under **Settings → Coding
+agents** — a banner points there on a fresh install. An optional seed file
+`~/.config/cc-hub/coding-agents.json` pre-populates this on first start, which
+is what makes a scripted setup reproducible.
+
+> Verify reachability **from a VPN client**, never with `curl` on the server
+> itself: that request travels over `lo` and says nothing about your firewall.
 
 ### Bringing a version live
 
 The systemd units start `~/agents/deploy/cc-hub` — a clone that belongs to the
 hub alone, always detached on one commit. The checkout you work in never runs a
-service, so uncommitted work can never end up being served, and a restart can
-never quietly load the state from before the last merge.
+service, so uncommitted work can never end up being served.
 
 ```bash
 cchub deploy            # fetch, check out origin/main, deps (only if the lockfile moved),
-                        # install the cc-* scripts, restart, health check — rollback if it fails
+                        # reinstall the cc-* scripts, restart, health check — rollback if it fails
 cchub deploy <ref>      # that commit instead
 cchub-deploy --status   # deployed sha, origin sha, how far behind
 cchub-deploy --rollback # back to the previously deployed commit
 ```
 
-A failed deploy rolls back to the commit that was running and reports it via
-Telegram. The running sha is printed in the sidebar of every page, so "is my
-change live?" is a glance. `cchub restart` stays what it says: a restart, without
-a deploy.
-
-First step in the UI: add your coding agents under **Settings → Coding
-agents** (a banner points there on a fresh installation). An optional seed file
-`~/.config/cc-hub/coding-agents.json` pre-populates this on first start — handy
-for scripted setups.
+A failed deploy rolls back to the commit that was running and tells you on
+Telegram. The running sha is printed in the sidebar of every page, so *"is my
+change live?"* is a glance. `cchub restart` stays what it says — a restart,
+without a deploy.
 
 ## Tests
 
 ```bash
-node test/unit.mjs          # pure logic (cron, schedules, quota gate, parsers, plugin registries, i18n, docs) — ~1 s
-node test/e2e.mjs           # complete hub in a sandbox, stub instead of real agents — ~30 s
+node test/unit.mjs          # pure logic (cron, schedules, quota gate, parsers, registries, i18n, docs) — ~1 s
+node test/e2e.mjs           # complete hub in a sandbox, stub instead of real agents — ~40 s
 node test/e2e.mjs --echt    # additionally ONE real run per harness (consumes quota)
-node test/proxy.mjs         # the TLS proxy against a stub upstream — <1 s
-node test/deploy.mjs        # bin/cchub-deploy against a bare origin, in a sandbox — ~3 s
+node test/browser.mjs       # public/hub.js in a real Chromium — ~10 s (needs playwright)
+node test/proxy.mjs         # vpn-proxy.mjs against a stub upstream — <1 s
+node test/deploy.mjs        # bin/cchub-deploy against a bare origin — ~3 s
 ```
 
 The e2e suite starts a second hub on a free port with its own database, test
 repo and `cc-start` stub — it touches neither production data nor foreign tmux
-sessions.
+sessions, so it is safe to run next to a live hub.
+
+## Make it yours
+
+cc-hub is one operator's workflow turned into code, published because it might
+save you a month. **Fork it, change it, rip parts out.** The seams meant to be
+pulled on: harness and provider plugins, the platform prompt suffix, per-repo
+prompts, opt-in extra skills in `~/agents/zusaetze/`, and the no-code flows.
+[SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md) has the table.
 
 ## Contributing
 
-**Contributions are very welcome!** Bug reports, plugin files for further
-coding agents or providers, translations and documentation fixes alike — please
-open an issue or pull request.
+**Pull requests are very welcome** — bug reports, plugin files for further
+coding agents or providers, translations, documentation fixes alike. The ground
+rules and the pre-submit checklist are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-A few ground rules:
+Developer knowledge — architecture decisions, harness quirks, and a long list of
+pitfalls that already cost somebody an afternoon — lives in
+[AGENTS.md](AGENTS.md), written for humans **and** coding agents.
 
-- Project language is **English** (source, comments, docs, commit messages).
-- UI strings go through i18n (`lang/en.json` + `de.json` + `zh.json` — keys must
-  stay in sync; a unit test enforces it).
-- New coding agents/providers are plugins — see
-  [docs/plugins.md](docs/plugins.md). Please don't hardcode harness specifics
-  elsewhere.
-- Run `node test/unit.mjs && node test/e2e.mjs` before submitting.
-- No machine-specific values (real ports, hostnames, keys) in the repo —
-  `./pruefe-vor-push.sh` checks the commit state before every push.
+## License
 
-Developer knowledge (architecture decisions, harness quirks, known pitfalls)
-lives in [AGENTS.md](AGENTS.md) — written for humans **and** coding agents
-(`CLAUDE.md` simply includes it).
+[CC BY 4.0](LICENSE) — use it, change it, ship it commercially. Just give
+credit: name **Herbert Walde**, link back to
+<https://github.com/hwalde/cc-hub>, link the license, and say if you changed
+something.
