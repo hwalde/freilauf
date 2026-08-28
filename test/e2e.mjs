@@ -2343,6 +2343,29 @@ try {
     enthaelt(html, 'id="repo-switch"', 'page renders')
     falsch(html.includes('data-repo="999999"'), 'not the deleted id')
   })
+  // A page that shows ONE object cannot follow the switcher — a run belongs to
+  // its repo. So it reloads as itself and only the choice moves; the dropdown
+  // one just used has to stay on the repo one just picked. The rule lives in
+  // layout(), which is why this holds for every such page at once.
+  await pruefe('a page belonging to one repo still shows the CHOSEN repo in the header', async () => {
+    const zweiId = db.prepare(`SELECT id FROM repos WHERE name='e2e-zwei'`).get().id
+    const run = db.prepare(`SELECT id, repo_id FROM runs WHERE repo_id=? ORDER BY started_at LIMIT 1`).get(repoId)
+    wahr(!!run && run.repo_id !== zweiId, 'a run of the FIRST repo exists')
+    const r = await hol(`/runs/${run.id}?repo=${zweiId}`)
+    const html = await r.text()
+    const kopf = html.slice(html.indexOf('<header'), html.indexOf('</header>'))
+    enthaelt(kopf, `option value="${zweiId}" selected`, 'the header shows what was picked, not the run\'s repo')
+    falsch(kopf.includes(`option value="${repoId}" selected`), 'and not both')
+    // The page context is untouched: <body data-repo> is the live channel's
+    // filter, and the events of THIS run must keep arriving.
+    enthaelt(html, `<body data-repo="${repoId}"`, 'the run is still the run')
+    enthaelt(html, `data-repo="${zweiId}"`, 'the sidebar counts the chosen repo')
+    enthaelt(r.headers.get('set-cookie') ?? '', `cchub_repo=${zweiId}`, 'and the choice is persisted')
+    // Without the parameter nothing changes: the page's own repo answers.
+    const ohne = await (await hol(`/runs/${run.id}`)).text()
+    const kopfOhne = ohne.slice(ohne.indexOf('<header'), ohne.indexOf('</header>'))
+    enthaelt(kopfOhne, `option value="${repoId}" selected`, 'no ?repo= — the page\'s own repo stands in the header')
+  })
 
   // ------------------------------------------------------------------
   // POST /settings/save writes only the keys the request actually carried. The

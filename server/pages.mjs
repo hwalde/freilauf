@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRepo, getRun } from './db.mjs'
 import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime } from './util.mjs'
-import { cookieRepo } from './web-helpers.mjs'
+import { cookieRepo, requestRepo } from './web-helpers.mjs'
 import { providerBalances } from './balances.mjs'
 import {
   enabledCodingAgents, listCodingAgents, saveCodingAgent,
@@ -389,16 +389,30 @@ export async function layout(req, title, active, content, selectedRepo = null, w
     ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
     .map(([href, label]) => `<a href="${href}" class="${active === href ? 'on' : ''}">${e(label)}</a>`).join('')
   const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
-  // The repo the page stands on, or — on the pages that have no repo context of
-  // their own (settings, sessions, repos, flows) — the one the operator chose in
-  // the header. That choice lives in the cchub_repo cookie; without one the first
-  // repo answers, exactly as before. The switcher, the sidebar and the Quick Run
-  // dialog all read the SAME value, so the header never shows one repo while the
-  // sidebar talks about another.
+  // Which repo the HEADER stands on — three answers in this order, and the
+  // order is the whole point (see the switcher on a page that belongs to ONE
+  // repo, below):
+  //
+  //   1. an explicit ?repo= in the request      — the switcher itself speaking
+  //   2. the repo context the page handed over  — the run, the agent, the list
+  //   3. the cchub_repo cookie, then the first repo
+  //
+  // The switcher, the sidebar and the Quick Run dialog all read this ONE value,
+  // so the header can never show one repo while the sidebar talks about another.
+  //
+  // Why (1) beats (2): a page that shows a single object cannot follow the
+  // switcher — a run belongs to its repo, and rendering repo B's overview under
+  // /runs/<id> would be a 404 with extra steps. So those pages reload as
+  // themselves, and only the CHOICE moves. Before this the choice moved
+  // everywhere except in the header of exactly those pages: the click wrote the
+  // cookie, the next page obeyed it, and the dropdown one had just used snapped
+  // back to the run's repo. Nothing was broken, it just read as if the click had
+  // been swallowed. Because the rule lives here and not in the pages, a new page
+  // inherits it by being rendered — there is nothing to remember to do.
   const persist = cookieRepo(req)
-  const effRepo = selectedRepo != null
-    ? Number(selectedRepo)
-    : (persist != null && repos.some(r => r.id === persist) ? persist : (repos[0]?.id ?? null))
+  const known = (id) => id != null && repos.some(r => r.id === id)
+  const effRepo = [requestRepo(req), selectedRepo, persist]
+    .map(id => id == null ? null : Number(id)).find(known) ?? repos[0]?.id ?? null
   const repoSel = repos.length
     ? `<label class="dim">${e(t('layout.repo'))}</label> <select id="repo-switch" data-active="${e(active)}">${repos.map(r => `<option value="${r.id}" ${r.id == effRepo ? 'selected' : ''}>${e(r.name)}</option>`).join('')}</select>`
     : `<a href="/repos" class="warn">${e(t('layout.no_repo'))}</a>`

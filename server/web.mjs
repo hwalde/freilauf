@@ -29,7 +29,7 @@ import {
 } from './pages.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
 import { mergeByHand, skipMerge, resetIntegration } from './integrate.mjs'
-import { redirect, body as readBody, parseForm, rememberRepo } from './web-helpers.mjs'
+import { redirect, body as readBody, parseForm, rememberRepo, requestRepo } from './web-helpers.mjs'
 import { vorfallLoesen, vorfaelleLoesen, vorfall } from './incidents.mjs'
 import { t } from './i18n.mjs'
 import { flowRoute, flowApi } from './flows/web.mjs'
@@ -91,9 +91,9 @@ export async function route(req, res) {
   // counts, the "back" redirects, the overview links). Fragments, the SSE stream
   // and static files never touch it. An invalid id (a deleted repo) leaves the
   // cookie alone — the last valid choice is the better answer.
-  if (req.method === 'GET' && !path.startsWith('/api/') && !path.startsWith('/static/') && url.searchParams.has('repo')) {
-    const id = Number(url.searchParams.get('repo'))
-    if (Number.isInteger(id) && getRepo(id)) rememberRepo(res, id)
+  if (req.method === 'GET' && !path.startsWith('/api/') && !path.startsWith('/static/')) {
+    const id = requestRepo(req)
+    if (id != null && getRepo(id)) rememberRepo(res, id)
   }
   try { await dispatch(req, res, url, path, formBody) }
   catch (e) {
