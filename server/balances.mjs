@@ -14,7 +14,10 @@ import { getProvider, providerHasKey } from './providers/index.mjs'
 import { enabledCodingAgents } from './coding-agents.mjs'
 import { providerCtx } from './models.mjs'
 
-const CACHE_MS = 2 * 60_000
+// A minute, not two — same reason as usage.mjs: the sidebar re-fetches on its
+// own timer, and a balance shown is only as fresh as this window. The suite
+// shortens it further (CCHUB_BALANCE_CACHE_MS).
+const CACHE_MS = Number(process.env.CCHUB_BALANCE_CACHE_MS ?? 60_000)
 let cache = { at: 0, key: '', value: null }
 // { key, promise } — see usage.mjs for both traps this shape avoids: a body
 // without an `await` clearing the flag before it is set, and an in-flight

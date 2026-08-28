@@ -1,28 +1,25 @@
-# Gates: Quick Run → full run form handoff
+# Gates: the status sidebar's statistics refresh on their own
 
-OWNS: server/favorites.mjs, server/pages.mjs, server/web.mjs, public/hub.js, public/hub.css, lang/en.json, lang/de.json, lang/zh.json, test/browser.mjs
+OWNS: server/usage.mjs, server/balances.mjs, public/hub.js, test/sandkasten.mjs, test/browser.mjs, test/unit.mjs
 
-Scope: The Quick Run dialog gains a "More settings" action that opens the
-single-run form (`/runs/new`) in a new window prefilled with the dialog's
-favorite setup, task, branch rule and start time.
+Scope: The status sidebar re-fetches itself on a timer (no run event required),
+and the server panel caches age after 60 s (env-overridable) so the numbers
+actually move. The browser suite proves the Claude usage percentage updates
+when quota.json changes, with the page untouched.
 
-- [x] G1: the favorite can act as the run form's template; the form renders its setup
-  CHECK: node -e "import('./server/favorites.mjs').then(m=>{const f=m.favoriteTemplate({harness:'claude',model:'x',provider:'p',or_provider:'q',effort:'high',skills:'[\"unlazy\"]',flows:null});if(f.harness!=='claude'||f.model!=='x'||f.provider!=='p'||f.or_provider!=='q'||f.effort!=='high'||f.skills!=='[\"unlazy\"]')process.exit(1);console.log('favoriteTemplate ok')})"
-  EXPECT: favoriteTemplate ok
-  EVIDENCE: met — the one-liner exited 0 and printed the marker; full evidence
-    lives in the machine-local .unlazy/ (gitignored).
-
-- [x] G2: the Quick Run dialog offers the handoff, and i18n key sets stay identical
+- [x] G1: the panel caches honor the 60 s window — fresh within it, refreshed after it
   CHECK: node test/unit.mjs
   EXPECT: checks passed
-  EVIDENCE: met — node test/unit.mjs: 188 checks passed.
+  EVIDENCE: met — node test/unit.mjs: 225 checks passed.
 
-- [x] G3: a browser click on "More settings" opens the run form in a new window with the dialog's state carried over
+- [x] G2: the sidebar re-fetches itself and shows a changed Claude usage without a run event
   CHECK: node test/browser.mjs
   EXPECT: Browser tests:
-  EVIDENCE: met — node test/browser.mjs: 40 checks passed, incl. the new handoff test.
+  EVIDENCE: met — node test/browser.mjs: 47 checks passed, incl. "the Claude
+    usage percentage is updated without a run event" (proves the poll + cache
+    change end to end).
 
-- [x] G4: the hub's own suites still pass end to end
+- [x] G3: the hub still works end to end
   CHECK: node test/e2e.mjs
   EXPECT: E2E tests:
-  EVIDENCE: met — node test/e2e.mjs: 181 checks passed.
+  EVIDENCE: met — node test/e2e.mjs: 220 checks passed.

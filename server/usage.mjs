@@ -9,7 +9,10 @@
 import { getSetting } from './db.mjs'
 import { enabledCodingAgents } from './coding-agents.mjs'
 
-const CACHE_MS = 2 * 60_000
+// A minute, not two: the sidebar now re-fetches on its own timer (hub.js), so
+// the numbers it shows are only as fresh as this window. The suite shortens it
+// further (CCHUB_USAGE_CACHE_MS) because a browser test must not wait a minute.
+const CACHE_MS = Number(process.env.CCHUB_USAGE_CACHE_MS ?? 60_000)
 let cache = { at: 0, key: '', value: null }
 
 /**

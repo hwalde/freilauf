@@ -1834,7 +1834,8 @@ try {
       gleich(erste.length, 1, 'the cold call really does fetch')
       const rufeNachErster = rufe
 
-      // Age the entry past its two minutes, then make the next fetch hang.
+      // Age the entry past its cache window (now a minute), then make the next
+      // fetch hang: the stale answer must come back at once, not after it.
       bal._balanceCacheAge(3 * 60_000)
       haenge = () => {}
       const zweite = await Promise.race([
