@@ -26,8 +26,48 @@ identifiers.
 `AGENTS.md` is the canonical instruction file (readable by every agent CLI).
 Next to **every** `AGENTS.md` sits a `CLAUDE.md` containing exactly one line —
 `@AGENTS.md` — so Claude Code picks up the same content via its include
-mechanism. A unit test (`test/unit.mjs`, group "Docs") enforces both the pairing
-and that the CLAUDE.md contains nothing but the include.
+mechanism. **We never write content into a `CLAUDE.md` in this project**: it is
+the include and nothing else, so there is only ever one file to keep current and
+the two cannot drift. Add an `AGENTS.md` anywhere, and its `CLAUDE.md` is part
+of the same commit. A unit test (`test/unit.mjs`, group "Docs") enforces both
+the pairing and that the CLAUDE.md contains nothing but the include.
+
+## The public-facing documents, and who keeps them current
+
+Four files exist for people who are not us — they are the whole first
+impression, and a stale one costs more than a missing feature. They are part of
+a change, not a follow-up to it:
+
+| File | For whom | Rule |
+|---|---|---|
+| `README.md` | humans, English — the reference version | what the project is, why, the security model, install, tests |
+| `README.zh-CN.md` / `README.de.md` | Chinese and German readers | **maintained together with the English one.** The primary audience is Chinese and American, then German — so English is the reference and the two translations follow in the same commit, not "later" |
+| `SETUP_WITH_AGENT.md` | **coding agents**, English only | how the system works and how to set it up, written to be handed to an agent. Linked from the top of all three READMEs |
+| `CONTRIBUTING.md` | contributors | PRs are welcome; the ground rules and the pre-submit checklist |
+
+**Keep `SETUP_WITH_AGENT.md` current.** It is the one document a stranger's
+agent acts on, so it goes stale in the most expensive way — the reader is a
+machine that will follow it literally. If a change touches installation, the
+setup scripts, the prompt an agent receives, the plugin contracts, the flow
+building blocks or the seams listed under "Make it yours", update it in the same
+commit. It deliberately stays **short on internals**: it says what exists, where
+to look and what to do, and points at `AGENTS.md`, `docs/plugins.md` and
+`server/flows/AGENTS.md` for the depth. Details that belong in the code stay in
+the code.
+
+The three language rules together: the **UI** is trilingual (`lang/*.json`, see
+below), the **README** is trilingual, and everything else — source, comments,
+`AGENTS.md`, `SETUP_WITH_AGENT.md`, `CONTRIBUTING.md`, `docs/` — is English
+only.
+
+## License
+
+CC BY 4.0 (`LICENSE`) — anyone may use, change and ship this commercially, as
+long as they name the author and link back. Consequences for us: the license
+section at the bottom of all three READMEs and the licensing line in
+`CONTRIBUTING.md` state the same thing, and a contribution is accepted under
+the same license. Do not add a differently-licensed file into the tree without
+saying so next to it.
 
 ## Multilingual UI
 
