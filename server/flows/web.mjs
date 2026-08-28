@@ -44,6 +44,11 @@ function triggerText(flow) {
   const trig = normalizeTrigger(flow.trigger)
   if (trig.kind === 'cron') return `${t('flows.trigger.cron')}: ${trig.expr || '?'}`
   if (trig.kind === 'manual') return t('flows.trigger.manual')
+  if (trig.kind === 'run_merged') {
+    // This trigger's filter is its own — the repo, or all of them.
+    const repo = trig.repoId ? db.prepare('SELECT name FROM repos WHERE id=?').get(trig.repoId) : null
+    return `${t('flows.trigger.run_merged')}: ${repo?.name ?? t('flows.trigger.repo_all')}`
+  }
   // The attachments ARE the trigger — so that is what the list shows.
   const on = agentsWithFlow(flow.id)
   const who = on.length
@@ -96,16 +101,38 @@ function backTarget(url) {
   return /^\/(?!\/)[^\\]*$/.test(raw) ? raw : '/agents'
 }
 
+/**
+ * Trigger and name a NEW flow starts with, from the query
+ * (`?trigger=run_merged&repo=<id>`). Only what a page could legitimately have
+ * sent: the kind goes through `normalizeTrigger()` like every other trigger,
+ * and an unknown repo id simply yields "all repos" instead of a broken filter.
+ * An existing flow is never touched by this — its trigger is what was saved.
+ */
+function newFlowPreset(url) {
+  const kind = url.searchParams.get('trigger') ?? 'run_finished'
+  const repoId = Number(url.searchParams.get('repo')) || null
+  const trigger = normalizeTrigger({ kind, repoId })
+  if (trigger.kind !== 'run_merged') return { name: '', trigger: normalizeTrigger({ kind: 'run_finished' }) }
+  const repo = repoId ? db.prepare('SELECT name FROM repos WHERE id=?').get(repoId) : null
+  if (!repo) trigger.repoId = null
+  return { name: repo ? t('flows.name_after_merge', { repo: repo.name }) : '', trigger }
+}
+
 async function pageEditor(res, url) {
   const id = Number(url.searchParams.get('id')) || null
   const flow = id ? getFlow(id) : null
   if (id && !flow) return html(res, 404, await layout(t('nav.flows'), '/flows', `<p>${e(t('web.not_found'))}</p>`))
   // The attachments come from the agents, not from the flow — one storage, two
   // editors, so the agent form and this page can never disagree.
+  // A new flow may arrive pre-aimed: the repo page's "new flow after merge"
+  // button knows the trigger and the repo, and asking the operator to pick both
+  // again on a page they were sent to from exactly there would be a form asking
+  // what it was already told.
+  const wanted = newFlowPreset(url)
   const data = flow
     ? { id: flow.id, name: flow.name, active: !!flow.active, trigger: normalizeTrigger(flow.trigger),
       definition: flow.definition, attachments: agentsWithFlow(flow.id) }
-    : { id: null, name: '', active: true, trigger: normalizeTrigger({ kind: 'run_finished' }),
+    : { id: null, name: wanted.name, active: true, trigger: wanted.trigger,
       definition: { properties: {}, sequence: [] }, attachments: [] }
   // Recent finished runs — for "run now with this run as the trigger".
   const recent = db.prepare(`SELECT r.id, r.status, r.ended_at, a.name AS agent FROM runs r LEFT JOIN agents a ON a.id=r.agent_id

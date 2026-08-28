@@ -28,7 +28,7 @@ import { TYP_TEXT } from './detect.mjs'
 import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder } from './zusaetze.mjs'
 import { listSessions, sessionKeepHours, currentKeepMs, paneAlive } from './sessions.mjs'
-import { attachmentSummary, flowSection, flowAttachFields } from './flows/attach.mjs'
+import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock } from './flows/attach.mjs'
 // The flow block of the detail page is rendered in server/flows/ and belongs to
 // that module; it is re-exported here so a fragment has ONE place to ask for a
 // piece of a page, whichever module happens to build it.
@@ -1494,6 +1494,7 @@ export async function repoEdit(req, res, url) {
     <label>${e(t('repos.base'))} <input name="base_branch" value="${e(r.base_branch ?? 'main')}"></label>
     <label>${e(t('repos.prompt_label'))} <textarea name="prompt" rows="6">${e(r.prompt ?? '')}</textarea></label>
     <label>${e(t('repos.extras_label'))} <textarea name="worktree_extras" rows="5">${e(r.worktree_extras ?? '[]')}</textarea></label>
+    ${mergeFlowsBlock(r)}
     <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
   </form>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.repos'), '/repos', body))

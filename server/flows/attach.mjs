@@ -12,7 +12,7 @@
 // for every outcome. It does NOT replace the `switch_outcome` block — a flow
 // that starts runs of its own still needs to branch on THEIR result.
 import db from '../db.mjs'
-import { listFlows } from './db.mjs'
+import { listFlows, flowsForMergeOfRepo, mergeTriggerRepoId } from './db.mjs'
 import { escapeHtml as e } from '../util.mjs'
 import { t } from '../i18n.mjs'
 
@@ -135,6 +135,49 @@ export function flowSection(run) {
     : `<p class="dim">${e(t('flows.attach.run_none'))}</p>`}
   ${runs.length ? `<ul>${runs.map(fr => `<li><a href="/flows/runs/${fr.id}"><span class="dot ${DOT[fr.status] ?? 'yellow'}"></span>
     ${e(fr.flow_name)}</a> <span class="dim">${e(fr.started_at)}</span></li>`).join('')}</ul>` : ''}`
+}
+
+// ------------------------------------------------- the repo side: flows after a merge
+
+/**
+ * What runs after a merge of this repo — the repo form's block, rendered here
+ * so pages.mjs keeps its one import into this module instead of learning the
+ * flow tables.
+ *
+ * A `run_merged` flow hangs on the REPO, not on an agent, so the attachment
+ * block above cannot show it and the agent page is the wrong way in: a merge
+ * may be carried by a conflict run that never belonged to an agent. This is
+ * that way in — the list plus the button that creates one with the trigger and
+ * the repo already filled in.
+ *
+ * Empty for a repo that is being created: there is no id yet to hang a flow on.
+ */
+export function mergeFlowsBlock(repo) {
+  const id = Number(repo?.id) || 0
+  if (!id) return ''
+  const flows = flowsForMergeOfRepo(id)
+  const back = encodeURIComponent(`/repos/edit?id=${id}`)
+  const rows = flows.map(f => `<li><a href="/flows/edit?id=${f.id}">${e(f.name)}</a>
+    <span class="${f.active ? 'ok' : 'warn'}">${e(f.active ? t('flows.on') : t('flows.off'))}</span>
+    ${mergeTriggerRepoId(f.trigger) === null ? `<span class="dim">${e(t('repos.merge_flows_all'))}</span>` : ''}</li>`).join('')
+  return `<fieldset class="merge-flows"><legend>${e(t('repos.merge_flows'))}</legend>
+  ${rows ? `<ul>${rows}</ul>` : `<p class="dim">${e(t('repos.merge_flows_none'))}</p>`}
+  <p><a class="btn" href="/flows/edit?trigger=run_merged&amp;repo=${id}&amp;back=${back}">${e(t('repos.merge_flows_new'))}</a></p>
+  </fieldset>`
+}
+
+/**
+ * The same fact as one short addition for a table cell (`· 2 flow(s)`), empty
+ * when there is none.
+ *
+ * TODO(spec): its place is the repo list's "Integration" column, behind the
+ * merge mode — and that column is built in the merge integrator's branch, not
+ * in this one. Whoever merges the two drops this call into that cell; until
+ * then the repo form's block above is the only way in, and nothing is lost.
+ */
+export function mergeFlowsHint(repoId) {
+  const n = flowsForMergeOfRepo(repoId).length
+  return n ? ` <span class="dim">· ${e(t('repos.merge_flows_count', { n }))}</span>` : ''
 }
 
 // ------------------------------------------------- the other side: the flow editor

@@ -235,13 +235,24 @@ function attachEditor() {
 function rootEditor() {
   const box = $('div', { class: 'flow-editor' })
   box.append($('h3', {}, T('flows.trigger')))
-  const kindSel = $('select', {}, meta.triggerKinds.map(k => $('option', { value: k, selected: trigger.kind === k }, T(`flows.trigger.${k}`))))
+  // Ids, not positions: the root editor is what the browser suite drives, and
+  // "the second select in the panel" is a test that breaks on a layout change.
+  const kindSel = $('select', { id: 'trigger-kind' }, meta.triggerKinds.map(k => $('option', { value: k, selected: trigger.kind === k }, T(`flows.trigger.${k}`))))
   box.append($('label', {}, T('flows.trigger.kind'), kindSel))
   const detail = $('div')
   const renderDetail = () => {
     detail.replaceChildren()
     if (trigger.kind === 'run_finished') {
       detail.append(attachEditor())
+    } else if (trigger.kind === 'run_merged') {
+      // The filter of this trigger is the repo, not an attachment: a merge
+      // belongs to the repository, and the run that carries it may be a
+      // conflict run that never hung on an agent. Empty = every repo.
+      const sel = $('select', { id: 'trigger-repo' }, $('option', { value: '', selected: !trigger.repoId }, T('flows.trigger.repo_all')),
+        meta.repos.map(r => $('option', { value: r.id, selected: String(trigger.repoId) === String(r.id) }, r.name)))
+      sel.addEventListener('change', () => { trigger.repoId = Number(sel.value) || null; touch() })
+      detail.append($('label', {}, T('flows.trigger.repo'), sel),
+        $('p', { class: 'dim' }, T('flows.trigger.run_merged.desc')))
     } else if (trigger.kind === 'cron') {
       const inp = $('input', { value: trigger.expr ?? '', placeholder: '30 6 * * 1-5' })
       inp.addEventListener('input', () => { trigger.expr = inp.value; touch() })
@@ -252,7 +263,11 @@ function rootEditor() {
     }
   }
   kindSel.addEventListener('change', () => {
-    trigger = { kind: kindSel.value, expr: '' }
+    // A fresh trigger, not a patched one: leftovers of the previous kind
+    // (a cron expression, a repo filter) would travel to the server and be
+    // dropped by normalizeTrigger() anyway. Switching away from run_finished
+    // detaches the flow from every agent — the save route does that.
+    trigger = { kind: kindSel.value, expr: '', repoId: null }
     renderDetail(); touch()
     // The trigger decides which variables exist and which steps may stay where
     // they are — everything on the canvas has to be judged again.
