@@ -1,13 +1,15 @@
 // cc-hub — coding agent plugin: claude (Claude Code CLI).
 //
 // claude runs exclusively on the Claude subscription: there is no provider
-// selection, only the model choice. Usage data comes from ~/.claude/quota.json
+// selection, only the model choice. Usage data comes from the account's own
+// usage endpoint (../claude-usage.mjs), with ~/.claude/quota.json as fallback
 // (written by the statusline after every response).
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { claudeQuota } from '../quota.mjs'
+import { refreshClaudeLimits } from '../claude-usage.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -130,12 +132,19 @@ export default {
   },
 
   /**
-   * Subscription usage: percentages of the 5-hour window and of both 7-day
-   * windows (general and fable) from quota.json, plus the plan from the local
+   * Subscription usage: percentages of the 5-hour window and of every 7-day
+   * window (general plus the per-model ones), plus the plan from the local
    * credentials file (only the two non-secret fields are read — never the
    * tokens).
+   *
+   * The refresh is awaited HERE and nowhere on a page render: this is the one
+   * caller that exists to produce these numbers, and usage.mjs already wraps it
+   * in a cache with stale-while-revalidate, so a slow endpoint delays the
+   * numbers rather than the page. It returns null on every failure, at which
+   * point claudeQuota() reads the file exactly as it always did.
    */
   async usage() {
+    await refreshClaudeLimits()
     const q = claudeQuota()
     let plan = null
     try {
@@ -150,6 +159,10 @@ export default {
       seven_general: q.seven_general, seven_fable: q.seven_fable,
       resets_at: q.resets_at, seven_resets_at: q.seven_resets_at,
       seven_fable_resets_at: q.seven_fable_resets_at,
+      // Every per-model week under its own name, and whether the account itself
+      // answered. The panel renders the list; the two `fable` fields above stay
+      // because the gate, the cost estimate and /api/usage's consumers name them.
+      weekly_scoped: q.weekly_scoped, live: q.live,
     }
   },
 }

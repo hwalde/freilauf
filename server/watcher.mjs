@@ -10,6 +10,7 @@ import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd
 import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
 import { deliverPendingGoals } from './goal.mjs'
 import { claudeQuota } from './quota.mjs'
+import { refreshClaudeLimits } from './claude-usage.mjs'
 import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText } from './detect.mjs'
 import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, offeneVorfaelle, detektorLog, msVon, brauchtMensch } from './incidents.mjs'
 import { pruefeTreffer, pruefLlmAktiv } from './pruefer.mjs'
@@ -64,6 +65,12 @@ export async function tick() {
   // restarted between the start and the delivery, a session that had not drawn
   // yet, a run that was answering a help call (server/goal.mjs).
   try { await deliverPendingGoals() } catch (e) { console.error('[goal]', e.message) }
+  // Claude's windows, from the account (server/claude-usage.mjs). Refreshed here
+  // and not only when somebody opens a page, because the two things that USE the
+  // numbers run without a browser: the budget gate that defers a start, and the
+  // cost delta written at a run's end. Both read claudeQuota() synchronously —
+  // this is what keeps its live half from going stale under them. Never throws.
+  await refreshClaudeLimits()
   await vorfaelleBewerten()
   await providerPuls()
   await finishCostsPass()
@@ -185,7 +192,7 @@ async function watchRun(run) {
     await logScannen(run)
     // cursor's second end channel, independent of any hook (see below).
     if (await cursorTurnEndDetected(run)) return
-    // red: quota.json ≥ 100 %
+    // red: a Claude window is at 100 %
     const q = claudeQuota()
     if ((q.five ?? 0) >= 100 || (q.seven ?? 0) >= 100) addEventOnce(run.id, 'anomaly:quota_full')
   }

@@ -188,6 +188,12 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // the report path, which is where it matters.
       CCHUB_INTEGRATOR_OFF: '1',
       CCHUB_QUOTA_JSON: join(SB, 'quota.json'),
+      // No credentials file means no token, and no token means the live usage
+      // endpoint (server/claude-usage.mjs) is never asked — the quota fixture
+      // above stays the only source, the way the fixture's comment promises.
+      // It also keeps the operator's real plan string out of the suite, which
+      // the plan lookup in harnesses/claude.mjs used to read straight from $HOME.
+      CCHUB_CLAUDE_CREDENTIALS: join(SB, 'missing-claude-credentials.json'),
       CCHUB_CLAUDE_PROJECTS: join(SB, 'claude-projects'),
       CCHUB_ZUSAETZE_DIR: join(SB, 'zusaetze'),
       CCHUB_PULS_AUS: '1',          // no provider pulse against real endpoints from the suite
@@ -247,6 +253,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     process.env.CCHUB_INTEGRATE_DIR = join(SB, 'integrate')
     process.env.CCHUB_INTEGRATOR_OFF = '1'
     process.env.CCHUB_QUOTA_JSON = join(SB, 'quota.json')
+    process.env.CCHUB_CLAUDE_CREDENTIALS = join(SB, 'missing-claude-credentials.json')
     process.env.CCHUB_CC_START = STUB
     process.env.CCHUB_CLAUDE_PROJECTS = join(SB, 'claude-projects')
     process.env.CCHUB_ZUSAETZE_DIR = join(SB, 'zusaetze')

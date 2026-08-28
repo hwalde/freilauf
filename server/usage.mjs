@@ -1,11 +1,11 @@
 // cc-hub — subscription usage of the configured coding agents.
 //
 // Each harness plugin may implement usage() and report what its subscription
-// account has consumed (Claude: the 5-hour window and both 7-day windows —
-// general and fable — from quota.json; Cursor:
-// spend, included amount and cycle end of the running period via the CLI
-// token). Everything is best-effort and cached: a hanging endpoint must never
-// block a page render.
+// account has consumed (Claude: the 5-hour window and every 7-day window —
+// general plus the per-model ones — from the account's own usage endpoint, with
+// quota.json as the fallback; Cursor: spend, included amount and cycle end of
+// the running period via the CLI token). Everything is best-effort and cached:
+// a hanging endpoint must never block a page render.
 import { getSetting } from './db.mjs'
 import { enabledCodingAgents } from './coding-agents.mjs'
 
