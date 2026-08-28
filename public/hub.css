@@ -557,6 +557,12 @@ details.usage { background: var(--surface-card); padding: var(--sp-10) var(--sp-
 details.usage summary { font-weight: 600; cursor: pointer; }
 .usage-row { display: flex; gap: var(--sp-14); align-items: center; flex-wrap: wrap; padding: var(--sp-5) 0; }
 
+/* "Edit this run" card on the detail page (server/pages.mjs, runEditCard) */
+details.run-edit { background: var(--surface-card); padding: var(--sp-10) var(--sp-14); border-radius: var(--radius-10); margin-bottom: var(--sp-14); }
+details.run-edit summary { font-weight: 600; cursor: pointer; }
+details.run-edit[open] summary { margin-bottom: var(--sp-10); }
+details.run-edit form.settings { background: none; padding: 0; }
+
 /* Flows attached to an agent / single run, and the way back to the flow pages. */
 fieldset.flows-attach label.chk a { margin-left: auto; font-size: 12px; }
 fieldset.flows-attach p:last-child { margin-bottom: 0; }

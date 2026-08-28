@@ -361,6 +361,49 @@ newest-archived first with pagination (50 per page,
 `archived_at` — the watcher, the flows and the incidents keep their view of a
 run whether it is archived or not.
 
+### A run is not set in stone: duration while it runs, prompt and repo before it starts
+
+Three things about an existing run can be changed, and the rule behind all
+three is: **whatever is read at the moment it is used can be edited until then.**
+`server/run-edit.mjs` is the one place that decides what a status allows
+(`runEditAllowed()`), and the "Edit this run" card on the detail page
+(`runEditCard()`) renders from exactly that table — the form can never offer an
+edit the endpoint (`POST /api/runs/<id>/edit`) would refuse:
+
+| Field | `scheduled` / `deferred` | `running` / `waiting_help` | `done` / `failed` / `aborted` |
+|---|---|---|---|
+| **expected duration** | ✓ | ✓ | — |
+| **prompt** | ✓ | — | — |
+| **repo** | ✓ | — | — |
+
+- **The duration is read live.** The watcher's traffic-light thresholds
+  (soft_overrun at 80 %, overrun at 100 %), the metrics and the overview all
+  read `runs.expected_minutes` per pass, so a new value takes effect at once —
+  which is what changing it on a *running* run is for (a single run that turns
+  out to need longer stops firing false alarms; one that is being watched less
+  urgently stops being silent). The running agent is deliberately NOT told: the
+  minutes in its prompt are informational, and editing a session that stands
+  would fight it.
+- **The prompt and the repo are read at launch.** `launchRun()` reads
+  `runs.prompt`, the repo's `base_branch`/`prompt`/extras and `runs.repo_id`
+  when it starts, so changing them moves the run's *future*, not its past. A
+  started run has no way back to this — its session is already running the old
+  text in a worktree of the old repo, hence the refusal.
+- **"Not started" = `scheduled` + `deferred`.** Both have no session and no
+  worktree, and both reach `launchRun()` eventually; a `deferred` run waits on
+  quota exactly as a `scheduled` one waits on its time — same rule, same edit.
+- **A prompt change re-derives a prompt-derived title.** If the run's title is
+  still the fallback of the old prompt (nobody renamed it, no LLM answer
+  landed), it becomes the fallback of the new one and the title LLM gets
+  another chance — an operator's name or an LLM title is never overwritten.
+- **Moving to the repo the run already lives in is a no-op**, not an error: the
+  combined form pre-fills the select, and a duration-only edit must not fail on
+  its own untouched field.
+- **The card is part of the run-detail fragment**, so a status change (a
+  scheduled run starts) swaps the fields by themselves; hub.js skips that swap
+  while the card has focus (`#run-edit :focus`) so an edit is never thrown away
+  mid-typing, and removes the card once the fragment no longer renders one.
+
 ### Favorites and Quick Run: the setup without the task
 
 Picking a coding agent, a provider, a model out of ~200 slugs and an effort level

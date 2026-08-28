@@ -25,9 +25,10 @@ import {
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
   pageMergeSettings, mergeSettingsSave,
   headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
-  integrationSection, problemPage,
+  integrationSection, problemPage, runEditCard,
 } from './pages.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
+import { editRun } from './run-edit.mjs'
 import { mergeByHand, skipMerge, resetIntegration } from './integrate.mjs'
 import { redirect, body as readBody, parseForm, rememberRepo, requestRepo } from './web-helpers.mjs'
 import { vorfallLoesen, vorfaelleLoesen, vorfall } from './incidents.mjs'
@@ -413,6 +414,28 @@ async function api(req, res, url) {
     const r = await launchRun(m[1])
     return answer(req, res, r.ok ? 200 : 500, r, `/runs/${m[1]}`)
   }
+  // Edit a run that still has a future: the expected duration of a running one
+  // (the watcher's thresholds and the metrics read it live), and — while the
+  // run has not started — its prompt and its repo as well. What each status
+  // allows is decided in server/run-edit.mjs, the same table the detail page
+  // renders the card from, so the form can never offer an edit the endpoint
+  // would refuse. A classic form post lands back on the run; a fetch gets JSON.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/edit$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const b = await form(req)
+    const problems = []
+    const r = editRun(m[1], {
+      expectedMinutes: b.expected_minutes !== undefined ? b.expected_minutes : null,
+      prompt: b.prompt !== undefined ? b.prompt : null,
+      repoId: b.repo_id !== undefined ? b.repo_id : null,
+    }, problems)
+    if (problems.length) {
+      if (wantsHtml(req)) return problemPage(req, res, t('run.edit'), problems, `/runs/${run.id}`)
+      return json(res, 400, { ok: false, error: problems.join(' · ') })
+    }
+    return answer(req, res, r.ok ? 200 : 400, r, `/runs/${run.id}`)
+  }
   // ---- integration by hand (server/integrate.mjs, buttons on the detail page) ----
   //
   // "Mark as done" is exactly what `cc-report done` is, only typed by a human:
@@ -560,7 +583,7 @@ async function fragmentApi(req, res, url) {
       ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null
     const title = runTitle(run, agentName, t('overview.single_run'))
     return fragment(res, runDetailHead(run, { title })
-      + integrationSection(run, getRepo(run.repo_id)) + runMetrics(run) + runEvents(run.id))
+      + runEditCard(run) + integrationSection(run, getRepo(run.repo_id)) + runMetrics(run) + runEvents(run.id))
   }
 
   // A session row. listSessions() asks tmux, so this is the one fragment that

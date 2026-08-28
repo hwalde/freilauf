@@ -1,52 +1,80 @@
-# PLAN — the status sidebar's statistics refresh on their own (tree 3)
+# PLAN — edit a run before and during its life (tree 3)
 
 ## Goal
 
-The status sidebar shows subscription usage (Claude 5h/7d windows, cursor spend)
-and provider balances. Those numbers are outdated in practice: the live channel
-re-fetches the sidebar only on `run` events, and a long-running agent produces
-no events — so the percentages sit frozen at page-load values while quota keeps
-burning. Make the sidebar refresh by itself, on a timer, with a server panel
-cache that is short enough for the numbers to actually move.
+Three operator wishes, all about a run that exists but has not finished:
+
+1. **Running runs** (especially single runs) get a changeable **expected
+   duration** — the traffic-light thresholds (soft_overrun at 80 %, overrun at
+   100 %) and the metrics/overview read `runs.expected_minutes` live, so a new
+   value takes effect without touching the agent.
+2. **Not-yet-started runs** (`scheduled`, `deferred`) get a changeable
+   **prompt** — `launchRun()` reads `runs.prompt` when it starts, so the new
+   text is what the session actually launches with.
+3. **Not-yet-started runs** can be **moved to another repo** — the worktree is
+   created from the repo at launch, so changing `runs.repo_id` moves the run's
+   future, not its past.
 
 ## Depth tree
 
 ```
-Root: sidebar statistics stale — make the panel refresh on its own clock
-├── 1  Server: the panel caches age faster (2 min → 60 s)
-│    └── 1.1  usage.mjs + balances.mjs: CACHE_MS = env-overridable 60_000
-├── 2  Client: the sidebar re-fetches on its own timer, no run event needed
-│    └── 2.1  hub.js live(): setInterval → statusAktualisieren(), interval
-│              overridable via window.CCHUB_SIDEBAR_POLL_MS
-├── 3  Sandbox: a suite can shorten the server caches
-│    └── 3.1  sandkasten.mjs: hubStarten({ env }) merges extra environment
-└── 4  Verify
-     ├── 4.1  unit suite green (cache window still honored)
-     ├── 4.2  browser test: the sidebar shows a changed Claude 5h % by itself,
-     │          without a run event
-     └── 4.3  e2e suite green
+Root: let the operator edit parts of a run that still has a future
+├── 1  Server: what may be edited per status, applied in one place
+│    └── 1.1  server/run-edit.mjs (new): runEditAllowed() permission matrix,
+│              editRun() validates + applies + writes the 'edited' event and
+│              re-derives a prompt-derived title
+│    └── 1.2  server/web.mjs: POST /api/runs/<id>/edit — form or fetch, with
+│              problemPage for an HTML error
+├── 2  Detail page: the "Edit this run" card
+│    └── 2.1  server/pages.mjs: runEditCard() — rendered on pageRun AND in the
+│              run-detail fragment, fields per runEditAllowed()
+│    └── 2.2  public/hub.js: the fragment swap must not throw away what is
+│              being typed in the card (#run-edit :focus), and the card must
+│              disappear once the run is no longer editable
+│    └── 2.3  lang/en.json, lang/de.json, lang/zh.json: new keys, identical
+│              key set across all three (unit test enforces it)
+├── 3  Verify
+│    ├── 3.1  test/unit.mjs: the permission matrix and editRun() decisions
+│    ├── 3.2  test/e2e.mjs: schedule a run → edit prompt + duration + move it →
+│            it starts with the new prompt in the new repo; a running run's
+│            duration edit; rejected edits for a started run
+│    └── 3.3  test/browser.mjs: the card renders on the detail page with the
+│            fields the status allows
+└── 4  Docs
+     └── 4.1  AGENTS.md + SETUP_WITH_AGENT.md: the run is editable before and
+              during its life — where, and what each status allows
 ```
 
 ## Decisions
 
-- **Client timer is the primary fix.** The gap is that nothing asks the server
-  in quiet stretches; a 30 s poll of `/api/fragments/sidebar` closes it. The
-  server's panel cache (usage.mjs / balances.mjs) decides how often the vendors
-  are really called — the poll just makes sure SOMETHING asks, so the
-  stale-while-revalidate refresh runs and the next tick serves fresh data.
-- **Cache 2 min → 60 s.** With a 30 s poll, a 2-minute cache would serve the
-  same value for two ticks; one minute keeps the displayed numbers within a
-  minute of the vendors while bounding the call rate (one refresh per ~90 s).
-- **Overrides for the test suite, following the existing `CCHUB_*` pattern:**
-  `CCHUB_USAGE_CACHE_MS` / `CCHUB_BALANCE_CACHE_MS` shorten the server caches,
-  `window.CCHUB_SIDEBAR_POLL_MS` (set via `addInitScript`) shortens the poll —
-  otherwise the browser test would sit out a real minute.
-- Poll skipped while the tab is hidden (`document.hidden`); browsers throttle
-  timers there anyway.
+- **`runs.expected_minutes` is the only thing duration editing touches.** The
+  already-running agent is deliberately NOT told — the value in its prompt is
+  informational; the watcher's thresholds, the metrics and the overview read
+  the column live. New prompt/duration edits for a *running* run would fight
+  the session, so only the duration is offered there.
+- **"Not started" = `scheduled` + `deferred`.** Both have no session and no
+  worktree; both start through `launchRun()` which reads the stored prompt.
+  A `deferred` run waits on quota exactly as a `scheduled` one waits on its
+  time — same editability, same rule.
+- **A prompt change re-derives a prompt-derived title.** If the run's title is
+  still the fallback of the OLD prompt (i.e. nobody renamed it), it becomes the
+  fallback of the NEW prompt and `applyGeneratedTitle()` gets another chance —
+  an operator name or an LLM title is never overwritten.
+- **Moving to the repo the run already lives in is a no-op, not an error.**
+  The combined form pre-fills the repo select; a duration-only edit would
+  otherwise fail on its own untouched field.
+- **One combined card on the detail page**, a `<details>` that is closed by
+  default, fields rendered per `runEditAllowed()`. Classic `<form method=post>`
+  + redirect, like the archive button — the fragment live-updates the card
+  afterwards, and the run-detail fragment swap is skipped while the card has
+  focus so nothing is lost mid-typing.
+- **The 'edited' event goes through `addEvent()`** like every other run
+  transition, so the detail page's event list and the live channel stay honest
+  without a second announce path.
 
 ## Status log
 
 - [x] 2026-08-28: plan written
-- [x] 2026-08-28: leaves 1–3 implemented; unit (225), browser (47, incl. the new
-      "no run event" value test), e2e (220), proxy (4), deploy (9) green; all
-      three gates met
+- [x] 2026-08-28: leaves 1–4 implemented; unit (241), e2e (224, incl. the new
+      "Edit a run before and during its life" group), browser (50, incl. the
+      A15 card group), proxy (4), deploy (9) green; all four gates met

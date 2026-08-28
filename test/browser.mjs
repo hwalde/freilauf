@@ -1022,6 +1022,53 @@ try {
     await p.close()
   })
 
+  // ------------------------------------------------------------------ A15
+  gruppe('A15 — the "Edit this run" card')
+
+  await pruefe('a running run offers only its expected duration', async () => {
+    const p = await neueSeite(`/runs/${R_LIVE}`)
+    await p.click('#run-edit summary')
+    gleich(await p.$eval('#run-edit input[name=expected_minutes]', el => el.value), '45', 'the duration input is prefilled')
+    gleich(await p.$$eval('#run-edit textarea[name=prompt]', els => els.length), 0, 'no prompt textarea for a started run')
+    gleich(await p.$$eval('#run-edit select[name=repo_id]', els => els.length), 0, 'no repo select for a started run')
+    sauber(p)
+    await p.close()
+  })
+
+  await pruefe('a scheduled run offers prompt and repo too, prefilled', async () => {
+    const p = await neueSeite(`/runs/${R_GEPLANT}`)
+    await p.click('#run-edit summary')
+    gleich(await p.$eval('#run-edit textarea[name=prompt]', el => el.value), 'Browser-Lauf geplant', 'the prompt is prefilled')
+    wahr((await p.$$eval('#run-edit select[name=repo_id] option', els => els.length)) >= 2, 'both repos are offered')
+    gleich(await p.$eval('#run-edit select[name=repo_id]', el => el.value), String(repoId), 'the current repo is selected')
+    sauber(p)
+    await p.close()
+  })
+
+  await pruefe('an edit in the card survives the live channel, then lands', async () => {
+    const p = await neueSeite(`/runs/${R_GEPLANT}`)
+    await p.click('#run-edit summary')
+    await p.focus('#run-edit textarea[name=prompt]')
+    // Change the run from OUTSIDE while the operator is typing: the fragment
+    // arrives, but must not swap the card under the focused textarea — the
+    // half-written prompt lives only in the DOM.
+    await formular(`/api/runs/${R_GEPLANT}/edit`, { expected_minutes: '33' })
+    await p.waitForTimeout(700)
+    const noch = await p.evaluate(() => {
+      const a = document.activeElement
+      return a && a.name === 'prompt' && !!a.closest('#run-edit')
+    })
+    wahr(noch, 'the half-typed prompt is still there, still focused')
+    gleich(await p.$eval('#run-edit input[name=expected_minutes]', el => el.value), '45', 'the card was NOT swapped')
+    // Blur and change again: now the swap is allowed and lands.
+    await p.evaluate(() => document.activeElement.blur())
+    await formular(`/api/runs/${R_GEPLANT}/edit`, { expected_minutes: '44' })
+    await wartePage(p, () => (document.querySelector('#run-edit input[name=expected_minutes]')?.value) === '44',
+      null, 'the card to carry the new duration after the swap')
+    sauber(p)
+    await p.close()
+  })
+
   // ------------------------------------------------------------------ A14
   gruppe('A14 — the terminal')
 

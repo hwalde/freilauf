@@ -987,7 +987,19 @@
       const html = await holeFragment('/api/fragments/run-detail?id=' + encodeURIComponent(runId))
       if (html === null) return
       if (document.querySelector('.title-inline input')) return
+      // The "Edit this run" card is part of the fragment, and an edit in
+      // progress is typing that lives only in the DOM — swapping it would throw
+      // the half-written prompt away. Wait for the next event instead.
+      if (document.querySelector('#run-edit :focus')) return
       tauscheNachId(html)
+      // Unlike the other blocks the card is CONDITIONAL: a finished run is not
+      // editable, and tauscheNachId only replaces by id — an element absent
+      // from the new fragment would otherwise linger as a stale form that the
+      // server would refuse. Remove it when the fragment no longer has one.
+      if (!/id="run-edit"/.test(html)) {
+        const alte = document.getElementById('run-edit')
+        if (alte) alte.remove()
+      }
     }
 
     // The status sidebar as ONE request. Its blocks appear and disappear —

@@ -22,6 +22,7 @@ import {
   favoriteFromForm, favoriteTemplate, favoriteSummary, FAVORITES_MAX,
 } from './favorites.mjs'
 import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } from './title.mjs'
+import { runEditAllowed } from './run-edit.mjs'
 import { getHarness, harnessLabel, detectInstalled } from './harnesses/index.mjs'
 import { providerLabel } from './providers/index.mjs'
 import { subscriptionUsage } from './usage.mjs'
@@ -925,6 +926,7 @@ export async function pageRun(req, res, url, id) {
   const body = `
   ${runDetailHead(run, { title: titel })}
   ${runChips(run, repo, herkunft)}
+  ${runEditCard(run)}
   ${integrationSection(run, repo)}
   ${goalCard(run)}
   ${run.help_text
@@ -1119,6 +1121,48 @@ export function runChips(run, repo, herkunft) {
     ${run.workdir_effective ? chip('run.workdir', `<code>${e(run.workdir_effective)}</code>`, { raw: true }) : ''}
     ${skillListe(run.skills).length ? chip('skills.title', skillAnzeige(run.skills).join(', ')) : ''}
   </ul>`
+}
+
+/**
+ * "Edit this run" — the one card through which a run that still has a future
+ * can be changed, folded away like the goal. The fields are rendered from
+ * runEditAllowed(), the SAME table the API applies: a running run gets only
+ * the expected duration (the watcher's thresholds and the metrics read the
+ * column live), a scheduled or deferred run additionally the prompt and the
+ * repo (both read at launch). A finished run gets no card at all.
+ *
+ * The card is part of the run-detail fragment, so a status change (a scheduled
+ * run starts) swaps the fields by themselves — and hub.js skips that swap while
+ * the card has focus, so an edit is never thrown away mid-typing.
+ */
+export function runEditCard(run) {
+  const erlaubt = runEditAllowed(run)
+  if (!erlaubt.duration && !erlaubt.prompt && !erlaubt.repo) return ''
+  const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
+  const zeilen = []
+  if (erlaubt.duration) {
+    zeilen.push(`<label>${e(t('runform.expected'))}
+      <input type="number" name="expected_minutes" min="1" value="${e(run.expected_minutes)}">
+      <span class="dim">${e(t('run.edit.duration_hint'))}</span></label>`)
+  }
+  if (erlaubt.prompt) {
+    zeilen.push(`<label>${e(t('runform.prompt'))}
+      <textarea name="prompt" rows="8" required>${e(run.prompt)}</textarea>
+      <span class="dim">${e(t('run.edit.prompt_hint'))}</span></label>`)
+  }
+  if (erlaubt.repo) {
+    zeilen.push(`<label>${e(t('layout.repo'))} <select name="repo_id">
+      ${repos.map(r => `<option value="${r.id}" ${r.id === run.repo_id ? 'selected' : ''}>${e(r.name)}</option>`).join('')}
+    </select>
+    <span class="dim">${e(t('run.edit.repo_hint'))}</span></label>`)
+  }
+  return `<details class="run-edit" id="run-edit">
+    <summary>${e(t('run.edit'))}</summary>
+    <form method="post" action="/api/runs/${e(run.id)}/edit" class="settings form-grid">
+      ${zeilen.join('')}
+      <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
+    </form>
+  </details>`
 }
 
 /**
