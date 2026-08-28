@@ -21,8 +21,6 @@ export function sh(cmd, args, opts = {}) {
   })
 }
 
-export async function tmux(args) { return sh('tmux', args) }
-
 /**
  * Type text into a tmux session as if a human had pasted it: bracketed paste
  * (multi-line without an accidental submit) followed by Enter (planning 7.3).
@@ -43,7 +41,7 @@ export function escapeHtml(s) {
 export function fmtDuration(sec) {
   if (!Number.isFinite(sec) || sec < 0) return '–'
   const m = Math.floor(sec / 60), h = Math.floor(m / 60)
-  return h > 0 ? `${h} h ${m % 60} min` : `${m} min`
+  return h > 0 ? t('unit.hours_minutes', { h, m: m % 60 }) : t('unit.minutes', { n: m })
 }
 
 /** SQLite `datetime('now')` is UTC without a timezone suffix. */
@@ -194,7 +192,7 @@ export function scheduleDue(agent, now = new Date()) {
 /** One-liner for the agent list. */
 export function scheduleText(agent) {
   switch (agent.schedule_kind) {
-    case 'cron': return `Cron: ${agent.schedule}`
+    case 'cron': return t('sched.cron_line', { expr: agent.schedule })
     case 'einmalig': return agent.run_at
       ? t('sched.once_on', { ts: String(agent.run_at).replace('T', ' ') })
       : t('sched.once_none')

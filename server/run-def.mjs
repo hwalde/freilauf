@@ -25,17 +25,99 @@ import db, { getRepo, getSetting, setSetting } from './db.mjs'
 import { escapeHtml as e, toDbUtc } from './util.mjs'
 import { TITLE_MAX } from './title.mjs'
 import { providersForHarness, enabledCodingAgents } from './coding-agents.mjs'
-import { getHarness } from './harnesses/index.mjs'
+import { getHarness, goalSpec, harnessesWithGoal } from './harnesses/index.mjs'
 import { effortOptionen } from './models.mjs'
 import { branchWorktree } from './runner.mjs'
-import { skillFelder, skillsAusFormular } from './zusaetze.mjs'
-import { flowAttachFields, attachmentsFromForm } from './flows/attach.mjs'
+import { skillFelder, skillsAusFormular, skillListe, eintragName, eintragWert } from './zusaetze.mjs'
+import { flowAttachFields, attachmentsFromForm, parseAttachments } from './flows/attach.mjs'
 import { t } from './i18n.mjs'
 
 /** 'keiner' = detached worktree, 'neu' = create a branch, 'fest' = use an existing one. */
 export const BRANCH_MODES = ['keiner', 'neu', 'fest']
 
-const branchLabel = (m) => m === 'neu' ? t('branch.new') : m === 'fest' ? t('branch.fixed') : t('branch.none')
+/**
+ * What each branch rule MEANS — one table, three consumers.
+ *
+ * The branch rule stopped being a yes/no about whether work reaches the base
+ * branch the day the hub started integrating: under `merge_mode='hub'` the hub
+ * merges every run, and the rule only decides under which NAME the work travels.
+ * The form said none of that, and the prompt sentence for "no branch" still
+ * promised "throwaway changes" — in the same prompt where MERGE_RULE promised
+ * the opposite.
+ *
+ * So: the label, the explanation the form shows (per merge mode) and the
+ * sentence the AGENT reads all come from here. Three copies of the same
+ * statement is exactly the drift this module exists to prevent — and a
+ * unit test checks that every `explain` key really exists in lang/en.json,
+ * because a table may not name a string that is not there.
+ *
+ * `explain` values are i18n keys (UI, translated). `rule` values are English
+ * constants (they go to an agent, like PLATFORM_RULES in runner.mjs) with
+ * `{branch}` and `{base}` placeholders. The three `off` sentences are BYTE FOR
+ * BYTE the ones that were inline in runner.mjs: with the integration switched
+ * off, not one prompt may change.
+ */
+export const BRANCH_MODE_INFO = {
+  keiner: {
+    label: 'branch.none',
+    explain: { off: 'branch.none.explain_off', hub: 'branch.none.explain_hub' },
+    rule: {
+      off: 'No branch — the worktree is detached; changes are throwaway changes.',
+      hub: 'No branch — the worktree is detached; cc-hub merges your commits into {base} when you report done.',
+      // Deliberately no 'keep': there is no branch to keep the work on.
+    },
+  },
+  neu: {
+    label: 'branch.new',
+    explain: { off: 'branch.new.explain_off', hub: 'branch.new.explain_hub' },
+    rule: {
+      off: 'Create a new branch, name following the pattern {branch}.',
+      hub: 'Create a new branch, name following the pattern {branch}; cc-hub merges it into {base} when you report done.',
+      keep: 'Create a new branch, name following the pattern {branch}. The work STAYS on that branch: cc-hub will not merge it into {base}. Commit everything and push the branch before you report done.',
+    },
+  },
+  fest: {
+    label: 'branch.fixed',
+    explain: { off: 'branch.fixed.explain_off', hub: 'branch.fixed.explain_hub' },
+    rule: {
+      off: 'Work on the existing branch {branch}.',
+      hub: 'Work on the existing branch {branch}; cc-hub merges it into {base} when you report done.',
+      keep: 'Work on the existing branch {branch}. The work STAYS on that branch: cc-hub will not merge it into {base}. Commit everything and push the branch before you report done.',
+    },
+  },
+}
+
+const branchLabel = (m) => t(BRANCH_MODE_INFO[m]?.label ?? 'branch.none')
+
+/**
+ * The sentence the agent reads about its branch — the one place that decides it.
+ * `keep` only exists where there is a branch to keep the work on, so 'keiner'
+ * falls back to the ordinary hub sentence rather than promising something it
+ * cannot do.
+ */
+export function branchRuleText(mode, { branch = '', base = 'main', hubMerges = false, keepOnBranch = false } = {}) {
+  const info = BRANCH_MODE_INFO[mode] ?? BRANCH_MODE_INFO.keiner
+  const wanted = !hubMerges ? 'off' : (keepOnBranch && info.rule.keep) ? 'keep' : 'hub'
+  return info.rule[wanted].replaceAll('{branch}', branch).replaceAll('{base}', base)
+}
+
+/**
+ * The repo context a branch choice needs: which mode THIS repo integrates in,
+ * its base branch — and the same for every repo, because one form can switch
+ * repo without a page rebuild (the Quick-Run dialog has a repo <select>; the
+ * header switcher reloads and needs none of this).
+ */
+export function branchContext(repoId = null) {
+  const repos = db.prepare('SELECT id, merge_mode, base_branch FROM repos ORDER BY name').all()
+  const modeOf = (r) => r?.merge_mode === 'hub' ? 'hub' : 'off'
+  const here = repos.find(r => r.id === Number(repoId)) ?? repos[0] ?? null
+  return {
+    mergeMode: modeOf(here),
+    base: here?.base_branch || 'main',
+    modes: Object.fromEntries(repos.map(r => [r.id, modeOf(r)])),
+    bases: Object.fromEntries(repos.map(r => [r.id, r.base_branch || 'main'])),
+  }
+}
 
 export const DEFAULT_EXPECTED_MINUTES = 45
 
@@ -56,7 +138,7 @@ function harnessOptions(selected) {
  */
 function modelFields(a = {}) {
   return `
-  <label id="prov-label">Provider
+  <label id="prov-label">${e(t('model.provider'))}
     <select name="provider" id="prov" data-gewaehlt="${e(a.provider ?? '')}">
       <option value="">${e(t('model.provider_none'))}</option>
     </select>
@@ -67,8 +149,8 @@ function modelFields(a = {}) {
     <input name="model" id="model" list="modelle" autocomplete="off" value="${e(a.model ?? '')}"
            placeholder="${e(t('model.model_ph'))}">
     <datalist id="modelle"></datalist>
+    <span class="dim" id="model-hint"></span>
   </label>
-  <p class="dim" id="model-hint"></p>
 
   <label id="effort-label" hidden>${e(t('model.effort'))}
     <select name="effort" id="effort" data-gewaehlt="${e(a.effort ?? '')}">
@@ -77,7 +159,7 @@ function modelFields(a = {}) {
     <span class="dim" id="effort-hint"></span>
   </label>
 
-  <fieldset class="zeitplan" id="or-routing" hidden>
+  <fieldset class="schedule" id="or-routing" hidden>
     <legend>${e(t('or.legend'))}</legend>
     <label class="chk"><input type="checkbox" name="or_pin" value="1" id="or-pin" ${a.or_provider ? 'checked' : ''}>
       ${e(t('or.pin'))}</label>
@@ -101,27 +183,109 @@ export function runSetupFields(a = {}) {
 }
 
 /**
- * The branch rule as form fields — used by both run forms and by the Quick-Run
- * dialog, which is the one place where a favorite's setup meets a task.
- * `data-branch-mode` lets hub.js hide the pattern where "no branch" is chosen.
+ * The base branch inside an explanation, as an element rather than as text.
+ *
+ * The Quick-Run dialog can switch repo without rebuilding the page, and a repo
+ * brings its own base branch — so a sentence reading "merges into main" has to
+ * be able to become "merges into trunk" in place. The interpolation therefore
+ * puts a marker in and this turns the marker into a span hub.js can rewrite.
+ * Everything around it is escaped first; the span is the only markup that gets
+ * through.
  */
-export function branchFields(a = {}) {
+const BASE_MARK = '\u0001base\u0001'
+function explainHtml(key, base) {
+  return e(t(key, { base: BASE_MARK })).replaceAll(BASE_MARK, `<span data-base>${e(base)}</span>`)
+}
+
+/**
+ * The branch rule as form fields — the ONE place it is rendered: the agent form,
+ * the single-run form and the Quick-Run dialog all embed this and nothing else.
+ *
+ * A radio group with a line of explanation per option, because under
+ * `merge_mode='hub'` the choice no longer means what its three words say: the
+ * hub merges every run either way, and the rule only decides under which name
+ * the work travels. BOTH explanations are rendered and CSS shows the one that
+ * fits `data-merge-mode` — so the static case needs no JavaScript at all, and
+ * the one form that can switch repo in place (Quick Run) only has to flip an
+ * attribute.
+ *
+ * `name="branch_mode"` and its three values are unchanged, so runDefFromForm()
+ * does not know the difference between a <select> and these radios.
+ */
+export function branchFields(a = {}, ctx = {}) {
+  const mode = BRANCH_MODES.includes(a.branch_mode) ? a.branch_mode : 'keiner'
+  const mergeMode = ctx.mergeMode === 'hub' ? 'hub' : 'off'
+  const base = ctx.base || 'main'
+  const keep = !!(a.keep_on_branch ?? a.keepOnBranch)
+  const wahl = (m) => {
+    const info = BRANCH_MODE_INFO[m]
+    return `
+    <label class="choice"><input type="radio" name="branch_mode" value="${m}" ${mode === m ? 'checked' : ''}>
+      <b>${e(branchLabel(m))}</b>
+      <small class="dim" data-explain="off">${explainHtml(info.explain.off, base)}</small>
+      <small class="dim" data-explain="hub">${explainHtml(info.explain.hub, base)}</small></label>`
+  }
+  // The checkbox carries `hidden` from the server as well as the CSS rule: a
+  // field that only CSS hides is a field that shows up when the stylesheet does
+  // not load, and one that is hidden but still submits is worse than either.
   return `
-  <label>${e(t('runform.branch_mode'))} <select name="branch_mode" data-branch-mode>
-    ${BRANCH_MODES.map(m => `<option value="${m}" ${a.branch_mode === m ? 'selected' : ''}>${e(branchLabel(m))}</option>`).join('')}
-  </select></label>
-  <label data-branch-pattern>${e(t('runform.branch_pattern'))} <input name="branch_pattern" value="${e(a.branch_pattern ?? '')}" placeholder="${e(t('runform.branch_pattern_ph'))}"></label>`
+  <fieldset class="branch-choice" data-branch-choice data-merge-mode="${mergeMode}"
+            data-merge-modes="${e(JSON.stringify(ctx.modes ?? {}))}"
+            data-merge-bases="${e(JSON.stringify(ctx.bases ?? {}))}">
+    <legend>${e(t('runform.branch_rule'))}</legend>
+    ${BRANCH_MODES.map(wahl).join('')}
+    <label data-branch-pattern>${e(t('runform.branch_pattern'))} <input name="branch_pattern" value="${e(a.branch_pattern ?? '')}" placeholder="${e(t('runform.branch_pattern_ph'))}"></label>
+    <label class="chk" data-hub-only ${mergeMode === 'hub' ? '' : 'hidden'}>
+      <input type="checkbox" name="keep_on_branch" value="1" ${keep ? 'checked' : ''}>
+      ${explainHtml('branch.keep', base)}
+      <small class="dim">${e(t('branch.keep.hint'))}</small></label>
+  </fieldset>`
+}
+
+/**
+ * The goal: the SECOND prompt, folded away under the first one.
+ *
+ * It is not the task but the condition under which the task is over — and only
+ * a coding agent whose plugin carries a `goal` spec knows one (claude does, as
+ * `/goal <condition>`). So the block belongs to the harness, not to the form:
+ * `data-goal-harnesses` names who has it, and hub.js shows or hides it when the
+ * coding agent is switched. Hidden means DISABLED too, because a hidden field
+ * that still submits is a text one cannot see and cannot correct.
+ *
+ * Open when there is a goal to see: whoever edits an agent that has one must not
+ * have to find it behind a fold first.
+ */
+export function goalFields(a = {}) {
+  const kann = harnessesWithGoal()
+  if (!kann.length) return ''
+  // The form shows the first configured coding agent when nothing is preselected
+  // — that is what the browser picks out of a <select> without a `selected`.
+  const harness = a.harness || enabledCodingAgents()[0]?.harness || ''
+  const on = kann.includes(harness)
+  const goal = a.goal ?? ''
+  const max = goalSpec(harness)?.max ?? goalSpec(kann[0]).max
+  return `
+  <details class="goal" id="goal-block" data-goal-harnesses="${e(kann.join(' '))}"
+           ${goal ? 'open' : ''} ${on ? '' : 'hidden'}>
+    <summary>${e(t('goal.legend'))}</summary>
+    <label>${e(t('goal.field'))}
+      <textarea name="goal" rows="3" maxlength="${max}" placeholder="${e(t('goal.ph'))}"
+                ${on ? '' : 'disabled'}>${e(goal)}</textarea>
+      <span class="dim">${e(t('goal.hint'))}</span>
+    </label>
+  </details>`
 }
 
 /**
  * The definition as form fields — embedded IDENTICALLY by the agent form and
  * the single-run form. `a` is an agent row, a remembered choice or {}.
  */
-export function runDefFields(a = {}) {
+export function runDefFields(a = {}, ctx = {}) {
   return `
   ${runSetupFields(a)}
   <label>${e(t('runform.prompt'))} <textarea name="prompt" rows="10" required>${e(a.prompt ?? '')}</textarea></label>
-  ${branchFields(a)}
+  ${goalFields(a)}
+  ${branchFields(a, ctx)}
   <label>${e(t('runform.expected'))} <input type="number" name="expected_minutes" min="1" value="${a.expected_minutes ?? DEFAULT_EXPECTED_MINUTES}"></label>
   ${skillFelder(a.skills)}
   ${flowAttachFields(a.flows)}`
@@ -171,6 +335,27 @@ async function effortFromForm(b, problems) {
     return null
   }
   return wanted
+}
+
+/**
+ * The goal out of the form. A coding agent that knows none simply has no goal —
+ * the field is disabled there and sends nothing, so this only catches a request
+ * that was not written by the form (the JSON API, a copied body).
+ *
+ * A leading `/goal` is stripped: whoever knows the command types it, and the
+ * hub is the one that puts it in front. Too long is a problem and not a silent
+ * cut — a condition trimmed in the middle would still be sent and mean
+ * something else than what was written.
+ */
+function goalFromForm(b, problems) {
+  const spec = goalSpec(String(b.harness ?? ''))
+  const text = String(b.goal ?? '').replace(/^\s*\/goal\b\s*/i, '').trim()
+  if (!text || !spec) return null
+  if (text.length > spec.max) {
+    problems.push(t('form.goal_too_long', { max: spec.max, len: text.length }))
+    return null
+  }
+  return text
 }
 
 /**
@@ -228,15 +413,62 @@ export async function runDefFromForm(b, problems = []) {
   if (!BRANCH_MODES.includes(branchMode)) problems.push(t('form.branch_mode_unknown', { mode: branchMode }))
   if (branchMode !== 'keiner' && !b.branch_pattern?.trim()) problems.push(t('form.branch_missing'))
   if (branchMode === 'fest') await fixedBranchProblem(b, problems)
+  // Keeping the work on a branch needs a branch. Checked here rather than
+  // silently ignored, because "the checkbox did nothing" is the kind of thing
+  // one only notices three runs later.
+  const keepOnBranch = b.keep_on_branch === '1' || b.keep_on_branch === 'on' ? 1 : 0
+  if (keepOnBranch && branchMode === 'keiner') problems.push(t('form.keep_needs_branch'))
   return {
     ...setup,
     prompt,
+    goal: goalFromForm(b, problems),
     branchMode,
     branchPattern: b.branch_pattern?.trim() || null,
+    keepOnBranch,
     expectedMinutes: +b.expected_minutes || DEFAULT_EXPECTED_MINUTES,
     skills: skillsAusFormular(b),
     flows: attachmentsFromForm(b),
   }
+}
+
+/**
+ * A stored SETUP back in the shape of a form body — the counterpart to
+ * `runSetupFromForm()`, and the reason there is no second definition builder
+ * anywhere in this codebase. A favorite uses it, and so does the conflict
+ * resolver of server/integrate.mjs: both hold the setup half under a name and
+ * both turn it back into a run through `runDefFromForm()`, the ordinary path.
+ *
+ * It used to live in favorites.mjs, where it only happened to sit — the function
+ * knows nothing about favorites, it knows the form.
+ *
+ * The two list fields keep the shape the form parser produces (`<name>_list`
+ * plus a companion field per entry), because that is what `skillsAusFormular()`
+ * and `attachmentsFromForm()` read.
+ */
+export function setupToFormBody(setup = {}) {
+  const body = {
+    harness: setup.harness,
+    model: setup.model ?? '',
+    provider: setup.provider ?? '',
+    effort: setup.effort ?? '',
+    // The serving provider only survives where it can be passed through at all
+    // (opencode + OpenRouter); providerFromForm() decides that, as always.
+    or_pin: (setup.or_provider ?? setup.orProvider) ? '1' : '',
+    or_provider: setup.or_provider ?? setup.orProvider ?? '',
+    skills_list: [],
+    flows_list: [],
+  }
+  for (const eintrag of skillListe(setup.skills)) {
+    const name = eintragName(eintrag)
+    body.skills_list.push(name)
+    const wert = eintragWert(eintrag)
+    if (wert) body[`skill_regler_${name}`] = wert
+  }
+  for (const a of parseAttachments(setup.flows)) {
+    body.flows_list.push(String(a.flowId))
+    body[`flow_when_${a.flowId}`] = a.when
+  }
+  return body
 }
 
 // -------------------------------------------------------- agent row ↔ definition
@@ -250,8 +482,10 @@ export function defFromAgent(agent) {
     orProvider: agent.or_provider ?? null,
     effort: agent.effort ?? null,
     prompt: agent.prompt,
+    goal: agent.goal ?? null,
     branchMode: agent.branch_mode,
     branchPattern: agent.branch_pattern ?? null,
+    keepOnBranch: agent.keep_on_branch ? 1 : 0,
     expectedMinutes: agent.expected_minutes,
     skills: agent.skills ?? null,
     flows: agent.flows ?? null,
@@ -268,21 +502,22 @@ export function saveAgent({ id = null, repoId, name, def, schedule = null, activ
   if (id) {
     // A single UPDATE — before, 'active' was first set to 1 and then derived
     // again from exactly that freshly written value.
-    db.prepare(`UPDATE agents SET name=?, harness=?, model=?, prompt=?, branch_mode=?, branch_pattern=?,
-                expected_minutes=?, schedule=?, schedule_kind=?, schedule_days=?, schedule_time=?,
+    db.prepare(`UPDATE agents SET name=?, harness=?, model=?, prompt=?, goal=?, branch_mode=?, branch_pattern=?,
+                keep_on_branch=?, expected_minutes=?, schedule=?, schedule_kind=?, schedule_days=?, schedule_time=?,
                 schedule_weeks=?, schedule_anchor=?, run_at=?, provider=?, or_provider=?, effort=?,
                 skills=?, flows=?, active=?, updated_at=datetime('now') WHERE id=?`).run(
-      name, def.harness, def.model, def.prompt, def.branchMode, def.branchPattern,
+      name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode, def.branchPattern,
+      def.keepOnBranch ? 1 : 0,
       def.expectedMinutes, zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
       def.provider, def.orProvider, def.effort, def.skills, def.flows ?? null, active, id)
     return id
   }
-  const r = db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,branch_mode,branch_pattern,expected_minutes,
+  const r = db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,goal,branch_mode,branch_pattern,keep_on_branch,expected_minutes,
               schedule,schedule_kind,schedule_days,schedule_time,schedule_weeks,schedule_anchor,run_at,
               provider,or_provider,effort,skills,flows,active)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-    repoId, name, def.harness, def.model, def.prompt, def.branchMode,
-    def.branchPattern, def.expectedMinutes,
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    repoId, name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode,
+    def.branchPattern, def.keepOnBranch ? 1 : 0, def.expectedMinutes,
     zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
     def.provider, def.orProvider, def.effort, def.skills, def.flows ?? null, active)
   return Number(r.lastInsertRowid)
@@ -375,7 +610,7 @@ export function runStartTimeFields(v = {}) {
   // of EVERY page, so this block exists twice on the single-run form — and two
   // elements with the same id are one element too many for a `getElementById`.
   return `
-  <fieldset class="zeitplan">
+  <fieldset class="schedule">
     <legend>${e(t('start.legend'))}</legend>
     <label>${e(t('start.mode'))} <select name="start_mode" data-start-switch>
       ${modes.map(([id, label]) => `<option value="${id}" ${mode === id ? 'selected' : ''}>${e(label)}</option>`).join('')}
@@ -515,8 +750,13 @@ export const RUN_DEF_FLOW_FIELDS = [
   { key: 'model', kind: 'text' },
   { key: 'effort', kind: 'text' },
   { key: 'prompt', kind: 'textarea', required: true, placeholder: 'Review the report:\n{{trigger.run.report}}' },
+  // The second prompt (claude: '/goal <condition>'), typed into the session
+  // after the start — see server/goal.mjs. A coding agent that knows none
+  // simply ignores it.
+  { key: 'goal', kind: 'textarea', placeholder: 'all tests pass and the branch is pushed' },
   { key: 'branchMode', kind: 'select', options: BRANCH_MODES, default: 'keiner' },
   { key: 'branchPattern', kind: 'text', placeholder: 'flow/{date}-{kurz}' },
+  { key: 'keepOnBranch', kind: 'checkbox', default: false },
   { key: 'expectedMinutes', kind: 'number', default: DEFAULT_EXPECTED_MINUTES },
 ]
 
@@ -529,8 +769,15 @@ export function defFromFlowProps(props) {
     orProvider: null,
     effort: props.effort || null,
     prompt: props.prompt,
+    // Through the same gate as the form's: a coding agent without a goal spec
+    // gets none, and a condition past the limit is dropped rather than cut in
+    // the middle — half a condition means something else than the whole one.
+    goal: goalFromForm({ harness: props.harness, goal: props.goal }, []),
     branchMode: props.branchMode || 'keiner',
     branchPattern: props.branchPattern || null,
+    // Only where there is a branch to keep the work on — the same rule the form
+    // enforces, so a flow cannot store a combination the form would refuse.
+    keepOnBranch: props.keepOnBranch && props.branchMode !== 'keiner' ? 1 : 0,
     expectedMinutes: Number(props.expectedMinutes) || DEFAULT_EXPECTED_MINUTES,
     skills: null,
     // Deliberately no attached flows: a run a flow starts must not start flows

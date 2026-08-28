@@ -2,13 +2,14 @@
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import db, { getRepo, getRun, setSetting } from './db.mjs'
+import db, { getRepo, getRun, setSetting, addEvent, announceRun } from './db.mjs'
 import { handleReport } from './reports.mjs'
 import { modelList, orEndpoints, standVon, effortOptionen } from './models.mjs'
 import { providersForHarness, listCodingAgents } from './coding-agents.mjs'
 import { detectInstalled } from './harnesses/index.mjs'
 import { subscriptionUsage } from './usage.mjs'
-import { openrouterCredits } from './quota.mjs'
+import { providerBalances } from './balances.mjs'
+import { sseHandler } from './events.mjs'
 import { launchRun } from './runner.mjs'
 import { startRun } from './scheduler.mjs'
 import { runDefFromForm, runStartFromForm, saveAgent, rememberRunChoice, lastRunChoiceFor } from './run-def.mjs'
@@ -22,8 +23,12 @@ import {
   telegramSetup, telegramTokenSave, telegramChatSave, telegramChats,
   pageCodingAgents, codingAgentSave, codingAgentDelete,
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
+  pageMergeSettings, mergeSettingsSave,
+  headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
+  integrationSection, problemPage,
 } from './pages.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
+import { mergeByHand, skipMerge, resetIntegration } from './integrate.mjs'
 import { redirect, body as readBody, parseForm } from './web-helpers.mjs'
 import { vorfallLoesen, vorfaelleLoesen, vorfall } from './incidents.mjs'
 import { t } from './i18n.mjs'
@@ -64,6 +69,10 @@ function pickQuickFields(b) {
     prompt: b.prompt,
     branch_mode: b.branch_mode,
     branch_pattern: b.branch_pattern,
+    // Part of the branch rule, and rendered by the same branchFields() the run
+    // forms use — so it has to be on the allowlist, or a ticked box would be
+    // dropped here and nowhere else.
+    keep_on_branch: b.keep_on_branch,
   }
 }
 
@@ -81,7 +90,7 @@ export async function route(req, res) {
   catch (e) {
     console.error('[http]', e)
     if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain' })
-    res.end('internal error: ' + e.message)
+    res.end(t('web.internal_error', { msg: e.message }))
   }
 }
 
@@ -127,8 +136,13 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'GET' && path === '/settings/favorites/edit') return favoriteEdit(req, res, url)
   if (req.method === 'POST' && path === '/settings/favorites/edit') return favoriteSave(req, res, url, formBody)
   if (req.method === 'POST' && path === '/settings/favorites/delete') return favoriteDelete(req, res, url, formBody)
+  // Merge (Settings → Merge) — the conflict resolver's setup. Its own page for
+  // the same reason the favorites have one: the provider/model/effort block is
+  // driven through #prov, #model and #effort, and those ids exist once per page.
+  if (req.method === 'GET' && path === '/settings/merge') return pageMergeSettings(req, res, url)
+  if (req.method === 'POST' && path === '/settings/merge') return mergeSettingsSave(req, res, url, formBody)
   // No-code flows (server/flows/) — own router, own pages.
-  if (path === '/flows' || path.startsWith('/flows/')) return flowRoute(req, res, url, formBody)
+  if (path === '/flows' || path.startsWith('/flows/')) return flowRoute(req, res, url)
   res.writeHead(404, { 'content-type': 'text/plain' }); res.end(t('web.not_found'))
 }
 
@@ -136,6 +150,11 @@ async function dispatch(req, res, url, path, formBody) {
 async function api(req, res, url) {
   const path = url.pathname
   let m
+  // Live channel. Stands FIRST because it is the one response that never ends:
+  // everything below assumes a request that finishes.
+  if (req.method === 'GET' && path === '/api/events') return sseHandler(req, res, url)
+  // Pieces of a page, rendered by the very functions the page uses (pages.mjs).
+  if (req.method === 'GET' && path.startsWith('/api/fragments/')) return fragmentApi(req, res, url)
   if (req.method === 'GET' && path === '/api/telegram/chats') return telegramChats(req, res)
   if (path.startsWith('/api/flows') || path.startsWith('/api/flow-runs')) return flowApi(req, res, url)
 
@@ -180,11 +199,13 @@ async function api(req, res, url) {
     })
   }
 
-  // Subscription usage (Claude Code, Cursor) + OpenRouter credits.
+  // Subscription usage (Claude Code, Cursor) + provider account balances.
+  // Both lists carry their own ok-flag per row, so a provider that went silent
+  // is reported as silent rather than dropped.
   if (req.method === 'GET' && path === '/api/usage') {
     const usage = await subscriptionUsage()
-    const openrouter = await openrouterCredits()
-    return json(res, 200, { ok: true, usage, openrouter })
+    const balances = await providerBalances()
+    return json(res, 200, { ok: true, usage, balances })
   }
 
   // Model lists of the providers. ALWAYS answers 200 with ok:false on error —
@@ -195,7 +216,7 @@ async function api(req, res, url) {
     const r = await modelList(provider, url.searchParams.get('harness'))
     return json(res, 200, r.liste
       ? { ok: true, provider, models: r.liste, veraltet: r.veraltet, stand: standVon(provider) }
-      : { ok: false, error: r.fehler ?? 'list unreachable' })
+      : { ok: false, error: r.fehler ?? t('api.model_list_unreachable') })
   }
   // Which effort levels this combination REALLY accepts. Always answers 200:
   // without an answer the form simply hides the field.
@@ -211,12 +232,18 @@ async function api(req, res, url) {
     const r = await orEndpoints(url.searchParams.get('model') ?? '')
     return json(res, 200, r.liste
       ? { ok: true, endpoints: r.liste, veraltet: r.veraltet }
-      : { ok: false, error: r.fehler ?? 'serving providers unreachable' })
+      : { ok: false, error: r.fehler ?? t('api.endpoints_unreachable') })
   }
+  // The report endpoint answers 200 with `{ ok, message }`, and the message is
+  // the point: with the repo's integration switched on the finish gate has
+  // something to SAY back ("your worktree is dirty", "this conflicts"), and
+  // cc-report prints it into the agent's running turn. It must be a 2xx —
+  // cc-report treats anything else as "hub unreachable" and files the report in
+  // inbox.jsonl, where the watcher would replay it.
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/report$/))) {
     let b = {}
     try { b = JSON.parse(await readBody(req) || '{}') } catch {}
-    const r = await handleReport(m[1], b)
+    const r = await handleReport(m[1], b, 'http')
     return json(res, r.ok ? 200 : 400, r)
   }
   // Same definition, same validation and same start path as the run form
@@ -257,7 +284,7 @@ async function api(req, res, url) {
     if (problems.length) return json(res, 400, { ok: false, error: problems.join(' · ') })
     rememberRunChoice(def)
     const r = await startRun(def, { repoId: +b.repo_id, ...start })
-    if (!r.ok) return json(res, 500, { ok: false, error: r.error ?? 'start failed' })
+    if (!r.ok) return json(res, 500, { ok: false, error: r.error ?? t('run.start_failed') })
     const run = getRun(r.runId)
     return json(res, 200, {
       ok: true, runId: r.runId, deferred: !!r.deferred, scheduled: !!r.scheduled,
@@ -269,10 +296,11 @@ async function api(req, res, url) {
   // by it again. An empty title falls back to the agent's name.
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/title$/))) {
     const run = getRun(m[1])
-    if (!run) return answer(req, res, 404, { ok: false, error: 'unknown run' }, `/runs/${m[1]}`)
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
     const b = await form(req)
     const gewuenscht = String(b.title ?? '').trim().slice(0, TITLE_MAX)
     db.prepare('UPDATE runs SET title=? WHERE id=?').run(gewuenscht || null, run.id)
+    announceRun(run.id, 'title')
     const agentName = run.agent_id
       ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null
     return answer(req, res, 200,
@@ -287,32 +315,45 @@ async function api(req, res, url) {
   // the page it came from ('back'), while a fetch gets JSON.
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/archive$/))) {
     const run = getRun(m[1])
-    if (!run) return answer(req, res, 404, { ok: false, error: 'unknown run' }, `/runs/${m[1]}`)
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
     if (['running', 'waiting_help', 'scheduled', 'deferred'].includes(run.status)) {
-      return answer(req, res, 400, { ok: false, error: 'only finished runs can be archived' }, `/runs/${run.id}`)
+      return answer(req, res, 400, { ok: false, error: t('api.archive_only_finished') }, `/runs/${run.id}`)
     }
     db.prepare(`UPDATE runs SET archived_at=COALESCE(archived_at, datetime('now')) WHERE id=?`).run(run.id)
+    announceRun(run.id, 'archived')
     const b = await form(req)
     return answer(req, res, 200, { ok: true, archived: true }, b.back || `/runs/${run.id}`)
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/unarchive$/))) {
     const run = getRun(m[1])
-    if (!run) return answer(req, res, 404, { ok: false, error: 'unknown run' }, `/runs/${m[1]}`)
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
     db.prepare(`UPDATE runs SET archived_at=NULL WHERE id=?`).run(run.id)
+    announceRun(run.id, 'unarchived')
     const b = await form(req)
     return answer(req, res, 200, { ok: true, archived: false }, b.back || `/runs/${run.id}`)
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/send$/))) {
     const run = getRun(m[1])
-    if (!run?.tmux_session) return answer(req, res, 404, { ok: false, error: 'no session' }, `/runs/${m[1]}`)
+    if (!run?.tmux_session) return answer(req, res, 404, { ok: false, error: t('api.no_session') }, `/runs/${m[1]}`)
     const b = await form(req)
     const text = String(b.text || '')
     // Multi-line without accidental submit: bracketed paste + Enter (planning 7.3)
     const { sendToSession } = await import('./util.mjs')
     await sendToSession(run.tmux_session, text)
     db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(run.id)
+    // The run's event list is meant to be its history, and a message from a
+    // human was missing from it — the flow path has recorded its equivalent
+    // ('flow_message') all along.
     if (run.status === 'waiting_help') {
-      db.prepare(`UPDATE runs SET status='running', help_answer=? WHERE id=?`).run(text, run.id)
+      // The finish gate's deadline does not run while a run waits for a HUMAN —
+      // so the clock starts again from the moment the answer arrives, not from
+      // the report that came before the question.
+      db.prepare(`UPDATE runs SET status='running', help_answer=?,
+                  finish_started_at=CASE WHEN finish_state IS NULL THEN finish_started_at
+                                         ELSE datetime('now') END WHERE id=?`).run(text, run.id)
+      addEvent(run.id, 'help_answered', { text: text.slice(0, 500) })
+    } else {
+      addEvent(run.id, 'message_sent', { text: text.slice(0, 500) })
     }
     return answer(req, res, 200, { ok: true }, `/runs/${run.id}`)
   }
@@ -320,10 +361,30 @@ async function api(req, res, url) {
     const run = getRun(m[1])
     const { sh } = await import('./util.mjs')
     if (run?.tmux_session) await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
+    // A run that is ALREADY over only loses the session it left standing. Writing
+    // 'aborted' over it would turn a run that came through cleanly into a failed
+    // one — and since the coding agents keep their session after the work is
+    // done, that is not a corner case but the ordinary state of a finished run.
+    // Same rule, and same event, as reconcileClosedSession(). Only the three
+    // terminal statuses count: a 'scheduled' or 'deferred' run is cancelled
+    // through this very endpoint, and cancelling it IS setting it to 'aborted'.
+    if (['done', 'failed', 'aborted'].includes(run?.status ?? '')) {
+      db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(m[1])
+      if (run && !run.tmux_closed_at) addEvent(m[1], 'tmux_closed', { source: 'user' })
+      return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
+    }
     // Set tmux_closed_at right away: otherwise the detail page tries to attach
     // a terminal to the dead session until the next watcher tick (410 in the browser).
     db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
-                tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(m[1])
+                tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')), finish_state=NULL WHERE id=?`).run(m[1])
+    // Same event kind reconcileClosedSession() writes, so "why did this run
+    // stop?" has one answer to look for rather than two.
+    addEvent(m[1], 'aborted', { by: 'user' })
+    // An end somebody ASKED for is an abort, even in the finish gate — and what
+    // it leaves behind is assessed like any other unfinished run (no Telegram:
+    // whoever clicked the button knows).
+    const { assessLater } = await import('./sessions.mjs')
+    assessLater(m[1], false)
     flowsTick().catch(e => console.error('[flows]', e.message))   // "run finished" triggers, without waiting for the watcher
     return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
   }
@@ -331,10 +392,48 @@ async function api(req, res, url) {
     const run = getRun(m[1])
     if (!run) return json(res, 404, { ok: false })
     // Retried = not over any more: it leaves the archive, otherwise an active run
-    // would sit hidden in the overview while it works.
-    db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL, archived_at=NULL WHERE id=?`).run(m[1])
+    // would sit hidden in the overview while it works. And the goal starts over
+    // with it: a retry is a NEW session, and a `/goal` typed into the old one is
+    // gone with it (server/goal.mjs).
+    db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL, archived_at=NULL,
+                goal_sent_at=NULL WHERE id=?`).run(m[1])
+    // …and so does the integration: everything the finish gate and the
+    // integrator wrote about the previous attempt is gone.
+    resetIntegration(m[1])
+    addEvent(m[1], 'retry', { previous_status: run.status })
     const r = await launchRun(m[1])
     return answer(req, res, r.ok ? 200 : 500, r, `/runs/${m[1]}`)
+  }
+  // ---- integration by hand (server/integrate.mjs, buttons on the detail page) ----
+  //
+  // "Mark as done" is exactly what `cc-report done` is, only typed by a human:
+  // same path, same finish gate, same everything.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/mark-done$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const r = await handleReport(run.id, { kind: 'done', text: t('run.marked_done_note') }, 'internal')
+    return answer(req, res, r.ok ? 200 : 400, r, `/runs/${run.id}`)
+  }
+  // "Merge now" and its two variants. An explicit click bypasses the attempt
+  // limit — the operator has decided — but the dry run happens anyway, because
+  // the base branch may have moved since the run was blocked.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/merge$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const b = await form(req)
+    const leftovers = ['commit', 'discard'].includes(b.leftovers) ? b.leftovers : null
+    const r = await mergeByHand(run.id, leftovers)
+    // A refusal has a REASON ("still dirty", "no resolver configured"), and a
+    // redirect back to the run would swallow it — the page would look as if the
+    // click had done nothing at all.
+    if (!r.ok && wantsHtml(req)) return problemPage(res, t('merge.section'), [r.error], `/runs/${run.id}`)
+    return answer(req, res, r.ok ? 200 : 400, r, `/runs/${run.id}`)
+  }
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/merge-skip$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    skipMerge(run.id)
+    return answer(req, res, 200, { ok: true }, `/runs/${run.id}`)
   }
   // End tmux sessions — one or many in a single call. The page fires this for
   // every row the operator clicks away; the kills run concurrently inside
@@ -345,16 +444,21 @@ async function api(req, res, url) {
   if (req.method === 'POST' && path === '/api/sessions/kill') {
     const b = await form(req)
     const names = b.session_list ?? (b.session ? [b.session] : [])
-    if (!names.length) return answer(req, res, 400, { ok: false, error: 'no session given' }, '/sessions')
+    // Where a classic form post returns to. The sessions page fetches and stays
+    // put, but the run's detail page ends its session with a plain form — and
+    // it wants to land back on the run, not on the session list. The full
+    // navigation is deliberate there: it is what closes the terminal's
+    // WebSocket, and with it the tmux client behind it.
+    if (!names.length) return answer(req, res, 400, { ok: false, error: t('api.no_session_given') }, b.back || '/sessions')
     const { killSessions } = await import('./sessions.mjs')
     const results = await killSessions(names, 'web')
-    return answer(req, res, 200, { ok: results.every(r => r.ok), results }, '/sessions')
+    return answer(req, res, 200, { ok: results.every(r => r.ok), results }, b.back || '/sessions')
   }
   // Resolve an incident (auto-alarm off) — single or all of one run.
   if (req.method === 'POST' && (m = path.match(/^\/api\/incidents\/(\d+)\/resolve$/))) {
     const b = await form(req)
     const v = vorfall(+m[1])
-    if (!v) return answer(req, res, 404, { ok: false, error: 'unknown incident' }, b.back || '/')
+    if (!v) return answer(req, res, 404, { ok: false, error: t('api.unknown_incident') }, b.back || '/')
     vorfallLoesen(v.id, 'web')
     return answer(req, res, 200, { ok: true }, b.back || (v.run_id ? `/runs/${v.run_id}` : '/'))
   }
@@ -372,6 +476,93 @@ async function api(req, res, url) {
   }
   // Without this closing answer any unknown /api/ path would stay UNANSWERED —
   // the browser then waits until timeout instead of showing an error.
+  return json(res, 404, { ok: false, error: `unknown API path: ${req.method} ${path}` })
+}
+
+// ---------------- HTML fragments ----------------
+//
+// One piece of a page, on request, as HTML — for a client that wants to refresh
+// a single row instead of the document around it.
+//
+// The point of these endpoints is what they do NOT contain: no markup of their
+// own. Every one of them calls the same function the full page calls, so a row
+// has exactly ONE renderer. The moment a fragment builds its own <tr>, the two
+// drift — that is the lesson server/run-def.mjs was written from.
+//
+// The terminal block of the detail page is deliberately absent from run-detail:
+// swapping #term would tear the xterm instance off the DOM, leave the WebSocket
+// open and leak a tmux client that resizes the running agent's window.
+
+/** A fragment that is not there any more is 204, not 404. */
+function fragment(res, html) {
+  if (!html) return void res.writeHead(204).end()
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(html)
+}
+
+async function fragmentApi(req, res, url) {
+  const path = url.pathname
+
+  if (path === '/api/fragments/header-status') return fragment(res, headerStatus())
+  // Empty when there is neither subscription usage nor a balance — the panel is
+  // absent from the page in that case too, and 204 says exactly that.
+  if (path === '/api/fragments/usage') return fragment(res, await usagePanel())
+
+  // The whole status sidebar. It is the one fragment that is asked for as a
+  // WHOLE rather than piece by piece, and deliberately so: its blocks appear
+  // and disappear (no open incidents means no incident block at all), and an
+  // element that is absent cannot be swapped into place by its own id. The
+  // repo is part of the reading — "work in flight" and "open incidents" are
+  // counted for the repo one is looking at.
+  if (path === '/api/fragments/sidebar') {
+    const repo = url.searchParams.get('repo')
+    return fragment(res, await statusSidebar(repo ? +repo : null))
+  }
+
+  // The whole tbody. Needed for the one case a row-level swap cannot serve: a
+  // run this page does not show YET. The empty state and the sort order both
+  // live in the body, so a new row cannot simply be appended — the parent has
+  // to be re-rendered, through the very same query the page uses.
+  if (path === '/api/fragments/runs-body') {
+    const repo = url.searchParams.get('repo')
+    if (!repo) return fragment(res, '')
+    // The status filter travels with the request. Without it the first live
+    // update would replace a filtered list by the unfiltered one — the page
+    // would silently stop showing what the user asked it to show.
+    const status = url.searchParams.get('status')
+    return fragment(res, runsBody(overviewRuns(+repo, status), { repoId: +repo, status }))
+  }
+
+  // A row of the overview. Archived counts as gone: the overview does not show
+  // archived runs, so the answer is the same as for a run that never existed —
+  // 204, and the caller drops the row.
+  if (path === '/api/fragments/run-row') {
+    const run = getRun(url.searchParams.get('id') ?? '')
+    if (!run || run.archived_at) return fragment(res, '')
+    const repo = url.searchParams.get('repo')
+    return fragment(res, runRow(run, { repoId: repo ? +repo : run.repo_id }))
+  }
+
+  // Head, metrics and events of the detail page — the three blocks that change
+  // while a run works. Each carries its own id, so they can be placed one by one.
+  if (path === '/api/fragments/run-detail') {
+    const run = getRun(url.searchParams.get('id') ?? '')
+    if (!run) return fragment(res, '')
+    const agentName = run.agent_id
+      ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null
+    const title = runTitle(run, agentName, t('overview.single_run'))
+    return fragment(res, runDetailHead(run, { title })
+      + integrationSection(run, getRepo(run.repo_id)) + runMetrics(run) + runEvents(run.id))
+  }
+
+  // A session row. listSessions() asks tmux, so this is the one fragment that
+  // costs a process — and the reason the sessions page does not poll it in bulk.
+  if (path === '/api/fragments/session-row') {
+    const name = url.searchParams.get('name') ?? ''
+    const { listSessions } = await import('./sessions.mjs')
+    const s = name ? (await listSessions()).find(x => x.name === name) : null
+    return fragment(res, s ? sessionRow(s, {}) : '')
+  }
+
   return json(res, 404, { ok: false, error: `unknown API path: ${req.method} ${path}` })
 }
 

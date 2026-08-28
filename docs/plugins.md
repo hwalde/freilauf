@@ -45,11 +45,13 @@ server/usage.mjs           aggregates plugin usage() for the UI
 | `logPatterns` | `[{typ, re}]` | narrow regexes for the pipe-pane log scan; `typ` ∈ `TYPEN` from `detect.mjs` |
 | `turnEndsRun` | boolean (optional) | `true` = the end of a turn ends the RUN, not just a note (`_turn_end` → `finishByTurnEnd()` in `reports.mjs`). Set it when the CLI keeps running after the work is done, so neither `_pane_died` nor `_exit` will ever come — cursor's TUI does exactly that |
 | `hookFiles({ccReport})` | fn (optional) | files the hub writes into the workspace before the start: `[{path, content}]`, `path` relative to the worktree. `ccReport` is the absolute path of `cc-report` — hook commands must not depend on `PATH`. An existing file is never overwritten, and `harnessOwnedPaths()` keeps these paths out of the worktree cleanup's dirty check |
+| `goal` | `{max, command(condition)}` (optional) | this CLI takes a SECOND prompt, one that says when the run is done — claude's `/goal <condition>`. `max` is the longest condition it accepts, `command()` builds the line. Presence is the whole capability check: the form shows the goal field only for these harnesses (`harnessesWithGoal()`), and `server/goal.mjs` types the line into the session after the start, because a slash command has no CLI flag |
 | `promptRules` | string (optional) | extra prompt lines for this harness, appended to the platform rules by `platformSuffix()` — also to a custom template from the settings, because they describe the machine, not the operator's house rules |
 | `fetchModels()` | async fn | model list for subscription harnesses (cached by `models.mjs`) |
 | `effortLevels()` | async fn (optional) | levels the CLI itself accepts (probed; cached 24 h) |
 | `effortOptions({provider, model, helpers})` | async fn | levels for a concrete combination; returns `{stufen, standard?, pflicht?, quelle?, hinweisKey}` — `stufen: null` hides the form field. `helpers` = `{ownLevels, registryEffort, openrouterEffort}` |
 | `modelArgs(run)` | fn | CLI arguments for `cc-start`; returns `{args, fehlt}` (`fehlt` = provider ids whose key is missing) |
+| `resumeCommand(run)` | fn (optional) | the shell command a HUMAN continues this run's session with, `cd <workdir> && …` included; `null` when the CLI has no reliable way (hermes). Called by `server/integrate.mjs` for every escalation message, the run's detail page and the failed/aborted Telegram texts. Only the plugin knows how its CLI names a session — claude gets `--session-id <run id>` from the hub and can name it back, cursor's id is its transcript's directory, opencode continues the last session of the worktree |
 | `usage()` | async fn | subscription usage for the overview panel, or `null` (see `usage.mjs` for the shapes: `{kind:'claude', five, seven, seven_general, seven_fable, resets_at, plan}` / `{kind:'cursor', plan, spent_usd, included_usd, remaining_usd, cycle_end}`) |
 
 ### Adding a new coding agent
@@ -69,7 +71,12 @@ server/usage.mjs           aggregates plugin usage() for the UI
    (cursor), the harness needs `turnEndsRun` plus a channel that reports the turn
    end — a `hookFiles` entry, and ideally a second, hook-free source; see
    "cursor: when a run is over" in [AGENTS.md](../AGENTS.md).
-6. Done: the database CHECK, the settings page, install detection, forms,
+6. Optional but worth it: `resumeCommand(run)`. Every escalation the
+   integration produces ends with "here is how you pick this session up"; a
+   harness without it names the worktree instead. Find out from the CLI's own
+   `--help` rather than guessing — a command that opens somebody ELSE's
+   conversation is worse than no command.
+7. Done: the database CHECK, the settings page, install detection, forms,
    detection patterns and the pulse follow the registry automatically. Configure
    the new coding agent under Settings → Coding agents.
 
@@ -84,6 +91,44 @@ server/usage.mjs           aggregates plugin usage() for the UI
 | `mdKey` | string | key of this provider in the models.dev registry (effort levels) |
 | `pulse` | `{url, okStatus[]}` | health-pulse endpoint (watcher) |
 | `fetchModels(ctx)` | async fn | model catalog; `ctx` = `{json, registry, env}` (`json` = fetch helper with timeout, `registry()` = cached models.dev snapshot) |
+| `balance(ctx)` | async fn, optional | account balance in the normalized shape below; `null` = no key, no answer, nothing to report |
+
+### `balance()` — the normalized shape
+
+```js
+{
+  available: true | false | null,     // the provider's own verdict; null = not reported
+  amounts: [{ currency: 'USD', remaining: 12.34, granted: 1.0, topped_up: 11.34 }],
+}
+```
+
+The shape is normalized rather than passed through because the two providers
+that implement it disagree on almost everything: OpenRouter keeps **one** pot,
+reports it as **numbers** (`total_credits` minus `total_usage`) and says nothing
+about whether calls still go through; DeepSeek reports **strings**, **one entry
+per currency** (an account can hold CNY and USD at once) and adds
+`is_available`, which no one else has.
+
+Rules a plugin must keep:
+
+- **`granted` / `topped_up` are optional**, `currency` and `remaining` are not.
+- **`available: null` means "not reported", never "fine".** Same rule the
+  provider pulse follows — a provider that stays silent is not a healthy one.
+- **Return `null` rather than an empty result.** A row of zeroes claims a fact
+  the endpoint never stated.
+- **Do not fold currencies together.** One number for an account holding two
+  currencies silently drops one of them.
+
+`server/balances.mjs` aggregates all of it (cached, fail-soft, one row per
+provider with its own `ok` flag) for the usage panel and `GET /api/usage`. It
+asks only providers that at least one **enabled** coding agent may use and that
+actually have a credential — a balance nobody can act on is noise.
+
+**The budget gate does NOT go through that aggregator.** `openrouterGateBlocked()`
+in `quota.mjs` calls the plugin directly, because `balances.mjs` reaches the
+database via `coding-agents.mjs`, and `db.mjs` imports the harness registry,
+which imports `quota.mjs` — routing the gate through the aggregator closes
+exactly the cycle this document warns about above.
 
 ### Adding a new provider
 
@@ -93,6 +138,8 @@ server/usage.mjs           aggregates plugin usage() for the UI
    use it (plus `keyFreeProviders` when no own key is needed).
 3. Document the credential env var in `env.example`.
 4. Enable the provider per coding agent under Settings → Coding agents.
+5. Optional: implement `balance()` — the usage panel then shows it without a
+   line of UI code.
 
 ## Operator configuration and seeding
 

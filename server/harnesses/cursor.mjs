@@ -10,6 +10,7 @@ import { homedir } from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { HTTP_5XX } from './patterns.mjs'
+import { transcriptPath } from '../cursor-transcript.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -149,6 +150,19 @@ export default {
   },
 
   /** CLI arguments for cc-start: ONLY --model with a verbatim ID from `cursor-agent models`. */
+  /**
+   * `cursor-agent --resume [chatId]` (measured against the CLI's own --help).
+   * The chat id is the transcript's directory name — the same file the hub reads
+   * for activity and for the end of a turn, so no second source is needed.
+   * Without a transcript there is no id, and then there is no command either.
+   */
+  resumeCommand(run) {
+    const path = transcriptPath(run)
+    if (!path || !run?.workdir_effective) return null
+    const id = path.split('/').pop().replace(/\.jsonl$/, '')
+    return `cd ${run.workdir_effective} && cursor-agent --resume ${id}`
+  },
+
   modelArgs(run) {
     const args = []
     if (!run.model) return { args, fehlt: [] }

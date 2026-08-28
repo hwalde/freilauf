@@ -44,6 +44,11 @@ function triggerText(flow) {
   const trig = normalizeTrigger(flow.trigger)
   if (trig.kind === 'cron') return `${t('flows.trigger.cron')}: ${trig.expr || '?'}`
   if (trig.kind === 'manual') return t('flows.trigger.manual')
+  if (trig.kind === 'run_merged') {
+    // This trigger's filter is its own — the repo, or all of them.
+    const repo = trig.repoId ? db.prepare('SELECT name FROM repos WHERE id=?').get(trig.repoId) : null
+    return `${t('flows.trigger.run_merged')}: ${repo?.name ?? t('flows.trigger.repo_all')}`
+  }
   // The attachments ARE the trigger — so that is what the list shows.
   const on = agentsWithFlow(flow.id)
   const who = on.length
@@ -52,11 +57,11 @@ function triggerText(flow) {
   return `${t('flows.trigger.run_finished')}: ${who}`
 }
 
-const STATUS_DOT = { running: 'gelb', waiting: 'gelb', done: 'gruen', failed: 'rot', stopped: 'rot' }
-const statusBadge = (s) => `<span class="dot ${STATUS_DOT[s] ?? 'gelb'}"></span> ${e(t(`flows.status.${s}`))}`
+const STATUS_DOT = { running: 'yellow', waiting: 'yellow', done: 'green', failed: 'red', stopped: 'red' }
+const statusBadge = (s) => `<span class="dot ${STATUS_DOT[s] ?? 'yellow'}"></span> ${e(t(`flows.status.${s}`))}`
 
 // ---------------- pages ----------------
-function pageList(res) {
+async function pageList(res) {
   const flows = listFlows()
   const rows = flows.map(f => {
     const last = db.prepare('SELECT id, status, started_at FROM flow_runs WHERE flow_id=? ORDER BY started_at DESC LIMIT 1').get(f.id)
@@ -80,7 +85,7 @@ function pageList(res) {
   <p class="dim">${e(t('flows.intro'))}</p>
   <table class="list flows"><thead><tr><th>${e(t('flows.name'))}</th><th>${e(t('flows.trigger'))}</th><th>${e(t('flows.active'))}</th><th>${e(t('flows.last_run'))}</th><th></th></tr></thead>
   <tbody>${rows || `<tr><td colspan="5" class="dim">${e(t('flows.none'))}</td></tr>`}</tbody></table>`
-  html(res, 200, layout(t('nav.flows'), '/flows', body))
+  html(res, 200, await layout(t('nav.flows'), '/flows', body))
 }
 
 /**
@@ -96,16 +101,38 @@ function backTarget(url) {
   return /^\/(?!\/)[^\\]*$/.test(raw) ? raw : '/agents'
 }
 
-function pageEditor(res, url) {
+/**
+ * Trigger and name a NEW flow starts with, from the query
+ * (`?trigger=run_merged&repo=<id>`). Only what a page could legitimately have
+ * sent: the kind goes through `normalizeTrigger()` like every other trigger,
+ * and an unknown repo id simply yields "all repos" instead of a broken filter.
+ * An existing flow is never touched by this — its trigger is what was saved.
+ */
+function newFlowPreset(url) {
+  const kind = url.searchParams.get('trigger') ?? 'run_finished'
+  const repoId = Number(url.searchParams.get('repo')) || null
+  const trigger = normalizeTrigger({ kind, repoId })
+  if (trigger.kind !== 'run_merged') return { name: '', trigger: normalizeTrigger({ kind: 'run_finished' }) }
+  const repo = repoId ? db.prepare('SELECT name FROM repos WHERE id=?').get(repoId) : null
+  if (!repo) trigger.repoId = null
+  return { name: repo ? t('flows.name_after_merge', { repo: repo.name }) : '', trigger }
+}
+
+async function pageEditor(res, url) {
   const id = Number(url.searchParams.get('id')) || null
   const flow = id ? getFlow(id) : null
-  if (id && !flow) return html(res, 404, layout(t('nav.flows'), '/flows', `<p>${e(t('web.not_found'))}</p>`))
+  if (id && !flow) return html(res, 404, await layout(t('nav.flows'), '/flows', `<p>${e(t('web.not_found'))}</p>`))
   // The attachments come from the agents, not from the flow — one storage, two
   // editors, so the agent form and this page can never disagree.
+  // A new flow may arrive pre-aimed: the repo page's "new flow after merge"
+  // button knows the trigger and the repo, and asking the operator to pick both
+  // again on a page they were sent to from exactly there would be a form asking
+  // what it was already told.
+  const wanted = newFlowPreset(url)
   const data = flow
     ? { id: flow.id, name: flow.name, active: !!flow.active, trigger: normalizeTrigger(flow.trigger),
       definition: flow.definition, attachments: agentsWithFlow(flow.id) }
-    : { id: null, name: '', active: true, trigger: normalizeTrigger({ kind: 'run_finished' }),
+    : { id: null, name: wanted.name, active: true, trigger: wanted.trigger,
       definition: { properties: {}, sequence: [] }, attachments: [] }
   // Recent finished runs — for "run now with this run as the trigger".
   const recent = db.prepare(`SELECT r.id, r.status, r.ended_at, a.name AS agent FROM runs r LEFT JOIN agents a ON a.id=r.agent_id
@@ -127,10 +154,10 @@ function pageEditor(res, url) {
   <div id="flow-designer"></div>
   <script>window.CCHUB_FLOWS=${JSON.stringify({ i18n: clientCatalog('flows.'), meta: editorMeta(), flow: data }).replace(/</g, '\\u003c')}</script>
   <script src="/static/swd.js"></script><script src="/static/flows.js" type="module"></script>`
-  html(res, 200, layout(data.name || t('flows.new'), '/flows', body))
+  html(res, 200, await layout(data.name || t('flows.new'), '/flows', body))
 }
 
-function pageRuns(res, url) {
+async function pageRuns(res, url) {
   const flowId = Number(url.searchParams.get('flow')) || null
   const runs = listFlowRuns(flowId)
   const rows = runs.map(fr => `<tr onclick="location='/flows/runs/${fr.id}'">
@@ -143,12 +170,12 @@ function pageRuns(res, url) {
   <p><a class="btn" href="${e(flowId ? `/flows/edit?id=${flowId}` : backTarget(url))}">${e(t('flows.editor.back'))}</a></p>
   <table class="list"><thead><tr><th>${e(t('flows.runs.flow'))}</th><th>${e(t('flows.runs.status'))}</th><th>${e(t('flows.trigger'))}</th><th>${e(t('flows.runs.started'))}</th><th>${e(t('flows.runs.ended'))}</th><th>${e(t('flows.runs.last_message'))}</th></tr></thead>
   <tbody>${rows || `<tr><td colspan="6" class="dim">${e(t('flows.runs.none'))}</td></tr>`}</tbody></table>`
-  html(res, 200, layout(t('flows.runs.title'), '/flows', body))
+  html(res, 200, await layout(t('flows.runs.title'), '/flows', body))
 }
 
-function pageRunDetail(res, id) {
+async function pageRunDetail(res, id) {
   const fr = getFlowRun(id)
-  if (!fr) return html(res, 404, layout(t('nav.flows'), '/flows', `<p>${e(t('web.not_found'))}</p>`))
+  if (!fr) return html(res, 404, await layout(t('nav.flows'), '/flows', `<p>${e(t('web.not_found'))}</p>`))
   const log = fr.log.map(l => `<tr class="${l.ok ? '' : 'err'}"><td class="dim">${e(l.ts.slice(11, 19))}</td><td>${e(l.name || '')}<span class="dim"> ${e(l.type)}</span></td><td>${e(l.msg)}${l.ms != null ? ` <span class="dim">${l.ms} ms</span>` : ''}</td></tr>`).join('')
   const trig = fr.context.trigger ?? {}
   const body = `
@@ -167,7 +194,7 @@ function pageRunDetail(res, id) {
   <h3>${e(t('flows.runs.vars'))}</h3>
   <pre>${e(JSON.stringify(fr.context.vars ?? {}, null, 2))}</pre>
   <details><summary>${e(t('flows.runs.trigger_data'))}</summary><pre>${e(JSON.stringify(trig, null, 2))}</pre></details>`
-  html(res, 200, layout(fr.flow_name, '/flows', body))
+  html(res, 200, await layout(fr.flow_name, '/flows', body))
 }
 
 // ---------------- routing ----------------
@@ -209,8 +236,14 @@ export async function flowApi(req, res, url) {
     const id = saveFlow({ id: Number(b.id) || null, name, active: b.active ? 1 : 0, trigger, definition })
     // The attachment list is not part of the flow row — it is written back onto
     // the agents, which is where the agent form reads it from.
-    if (trigger.kind === 'run_finished') setFlowAttachments(id, b.attachments)
-    else forgetFlow(id)   // a flow that no longer reacts to runs must not stay hanging on agents
+    //
+    // Only when the request actually CARRIED the list. It used to write on every
+    // save, so a caller that left `attachments` out — a partial save, a script,
+    // anything but the designer, which always sends it — silently detached the
+    // flow from every agent it hung on. Absent is "did not say", not "none";
+    // an explicit empty array still detaches, because that is somebody saying it.
+    if (trigger.kind !== 'run_finished') forgetFlow(id)   // a flow that no longer reacts to runs must not stay hanging on agents
+    else if (Object.hasOwn(b, 'attachments')) setFlowAttachments(id, b.attachments)
     // Hints travel with the answer: saving succeeded, the designer still shows them.
     return json(res, 200, { ok: true, id, hints: definitionHints(definition, trigger) })
   }

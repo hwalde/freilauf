@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRepo, getRun } from './db.mjs'
 import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime } from './util.mjs'
-import { claudeQuota, openrouterCredits } from './quota.mjs'
+import { providerBalances } from './balances.mjs'
 import {
   enabledCodingAgents, listCodingAgents, saveCodingAgent,
   deleteCodingAgent, unconfiguredHarnessIds,
@@ -13,11 +13,12 @@ import {
 import {
   runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
   runTitleField, runStartTimeFields, runStartFromForm,
-  runSetupFields, branchFields, agentNameTaken, moveAgent, deleteAgent,
+  runSetupFields, runSetupFromForm, branchFields, branchContext,
+  agentNameTaken, moveAgent, deleteAgent,
 } from './run-def.mjs'
 import {
   listFavorites, getFavorite, saveFavorite, deleteFavorite,
-  favoriteFromForm, favoriteSummary, FAVORITES_MAX,
+  favoriteFromForm, favoriteTemplate, favoriteSummary, FAVORITES_MAX,
 } from './favorites.mjs'
 import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } from './title.mjs'
 import { getHarness, harnessLabel, detectInstalled } from './harnesses/index.mjs'
@@ -26,20 +27,25 @@ import { subscriptionUsage } from './usage.mjs'
 import { ampelAusVorfaellen, offeneVorfaelle, alleVorfaelle, brauchtMensch } from './incidents.mjs'
 import { TYP_TEXT } from './detect.mjs'
 import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
-import { skillListe, skillAnzeige, skillFelder } from './zusaetze.mjs'
-import { listSessions, sessionKeepHours, currentKeepMs } from './sessions.mjs'
-import { attachmentSummary, flowSection, flowAttachFields } from './flows/attach.mjs'
+import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
+import { resumeCommand } from './integrate.mjs'
+import { listSessions, sessionKeepHours, currentKeepMs, paneAlive } from './sessions.mjs'
+import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
+// The flow block of the detail page is rendered in server/flows/ and belongs to
+// that module; it is re-exported here so a fragment has ONE place to ask for a
+// piece of a page, whichever module happens to build it.
+export { flowSection }
 import { t, LANGUAGES, currentLanguage, setLanguage, clientCatalog } from './i18n.mjs'
 
 /**
  * Input errors belong on a page with a way back — not in a 500 ("internal
  * error") or a bare text response that swallows the inputs.
  */
-function problemPage(res, title, problems, backHref) {
+export async function problemPage(res, title, problems, backHref) {
   const body = `<h2>${e(title)}</h2>
   <ul class="err">${problems.map(p => `<li>${e(p)}</li>`).join('')}</ul>
-  <p><a class="btn" href="${e(backHref)}">${e(t('problem.back'))}</a></p>`
-  res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' }).end(layout(title, '', body))
+  <div class="btn-row"><a class="btn" href="${e(backHref)}">${e(t('problem.back'))}</a></div>`
+  res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(title, '', body))
 }
 
 /** State of the global AND gate for scheduled starts. */
@@ -47,21 +53,60 @@ function pipelineAn() {
   return db.prepare(`SELECT value FROM settings WHERE key='pipeline_on'`).get()?.value === '1'
 }
 
+/**
+ * `incidents.schwere` is a STORED value ('gelb'/'rot'), the CHECK on the table
+ * spells it that way and a rename would be a migration. The markup is not the
+ * database, though — the stylesheet speaks English — so the two meet here
+ * instead of the German word leaking into a class attribute.
+ */
+const SEVERITY_CLASS = { rot: 'red', gelb: 'yellow' }
+/** …and the same value as a word on the incident line — it used to print raw. */
+const SEVERITY_TEXT = { rot: 'incidents.severity_red', gelb: 'incidents.severity_yellow' }
+
 function ampel(run) {
   const vf = ampelAusVorfaellen(run.id)
   const red = vf === 'rot' || ['waiting_help', 'failed'].includes(run.status)
     || db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind LIKE 'anomaly:%' AND kind NOT IN ('anomaly:no_activity','anomaly:soft_overrun','anomaly:unpushed') LIMIT 1`).get(run.id)
+  // A run in the finish gate is at least yellow: it has reported, and something
+  // is still keeping its work off the base branch. A blocked_* one is red
+  // through its incident anyway.
   const yellow = !red && (
-    vf === 'gelb' || run.status === 'deferred'
+    vf === 'gelb' || run.status === 'deferred' || !!run.finish_state
     || db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind IN ('anomaly:no_activity','anomaly:soft_overrun','anomaly:unpushed') LIMIT 1`).get(run.id))
-  return red ? 'rot' : yellow ? 'gelb' : 'gruen'
+  return red ? 'red' : yellow ? 'yellow' : 'green'
 }
 
-const AMPEL_DOT = { rot: '<span class="dot rot" title="rot"></span>', gelb: '<span class="dot gelb"></span>', gruen: '<span class="dot gruen"></span>' }
+/**
+ * The traffic light as a dot. All three carry the same kind of label, and it is
+ * a translated one: the red dot used to say `title="rot"` — a raw German word,
+ * on every row of the overview — while yellow and green said nothing at all.
+ * Colour alone is not a channel everyone has, and the dot answers more than the
+ * status word beside it does (incidents and anomalies feed `ampel()` too).
+ */
+const AMPEL_DOT = {
+  red: () => `<span class="dot red" title="${e(t('ampel.red'))}"></span>`,
+  yellow: () => `<span class="dot yellow" title="${e(t('ampel.yellow'))}"></span>`,
+  green: () => `<span class="dot green" title="${e(t('ampel.green'))}"></span>`,
+}
 
+/**
+ * The last anomaly of a run, in words, or null when there is none.
+ *
+ * null rather than '–': it is the second line of the status cell now, and a
+ * dash on its own line is a line that says nothing while costing a row's
+ * height on every run that is simply fine.
+ *
+ * The event kind is a database value (`anomaly:no_activity`) and was printed
+ * raw for as long as it had a column of its own to hide in. Same treatment as
+ * an incident type in `typName()`: a key if there is one, the raw kind if the
+ * watcher ever invents a new one — a page must not go blank over a word.
+ */
 function lastAnomaly(runId) {
   const r = db.prepare(`SELECT kind, ts FROM events WHERE run_id=? AND (kind LIKE 'anomaly:%' OR kind='help') ORDER BY id DESC LIMIT 1`).get(runId)
-  return r ? `${r.kind} (${r.ts})` : '–'
+  if (!r) return null
+  const key = `anomaly.${String(r.kind).replace(/^anomaly:/, '')}`
+  const name = t(key) === key ? r.kind : t(key)
+  return `${name} (${r.ts})`
 }
 
 /** Name of an incident type, also for 'provider_down:openrouter'. */
@@ -71,26 +116,35 @@ export function typName(typ) {
   return name + (rest ? ` (${rest})` : '')
 }
 
-/** Open incidents of a run as a table cell: type, count, resolve button. */
+/**
+ * Open incidents of a run as a compact badge, with the resolving action on
+ * hover.
+ *
+ * It used to be a framed box with a permanently visible "Dismiss" button, and
+ * on its own it drove the row height to ~130px — for a column that is empty on
+ * almost every run. Same rule as the pencil and the archive button now: the
+ * badge is what one reads, the action appears where one is about to click, and
+ * the keyboard reaches it because focus inside the form reveals it too.
+ */
 function vorfallZelle(runId, repoId, runStatus = null) {
   const offen = offeneVorfaelle(runId)
-  if (!offen.length) return '<span class="dim">–</span>'
-  return offen.map(v => {
+  if (!offen.length) return '<span class="leer">–</span>'
+  return `<div class="incident-cell">${offen.map(v => {
     // '!' marks the ones that are waiting for hands — in a table of many runs
     // that mark is the whole difference between a to-do and a note.
     const handeln = brauchtMensch(v, runStatus)
-    return `<span class="vorfall ${v.schwere}" title="${e(v.beleg ?? '')}">${handeln ? '❗ ' : ''}${e(typName(v.typ))} ${v.anzahl}×
-    <span class="dim">${e(v.zuletzt_gesehen.slice(5, 16))}</span></span>
+    const titel = `${typName(v.typ)} · ${t('incidents.last')} ${v.zuletzt_gesehen} UTC${v.beleg ? `\n${v.beleg}` : ''}`
+    return `<span class="incident ${SEVERITY_CLASS[v.schwere]}" title="${e(titel)}">${handeln ? '❗ ' : ''}${e(typName(v.typ))} ${v.anzahl}×</span>
     <form method="post" action="/api/incidents/${v.id}/resolve" class="inline" onclick="event.stopPropagation()">
       <input type="hidden" name="back" value="/?repo=${repoId}"><button title="${e(t('incidents.resolve_hint'))}">${e(t(handeln ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`
-  }).join('<br>')
+  }).join('')}</div>`
 }
 
 /** Global incidents (provider pulse) above all pages. */
 function globalesBanner() {
   const offen = offeneVorfaelle(null)
   if (!offen.length) return ''
-  return `<div class="banner rot">${offen.map(v => `🔴 <b>${e(typName(v.typ))}</b> ${e(t('incidents.global_since', { ts: v.erst_gesehen }))} (${e(t('incidents.checked', { n: v.anzahl }))}) — ${e(v.beleg ?? '')}
+  return `<div class="banner red">${offen.map(v => `🔴 <b>${e(typName(v.typ))}</b> ${e(t('incidents.global_since', { ts: v.erst_gesehen }))} (${e(t('incidents.checked', { n: v.anzahl }))}) — ${e(v.beleg ?? '')}
     <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/"><button>${e(t(brauchtMensch(v) ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`).join('<br>')}</div>`
 }
 
@@ -116,6 +170,13 @@ function setupBanner() {
  * where it was and a toast says what happened, with a link to the run for
  * whoever wants to look. Being torn to a detail page is exactly what makes a
  * quick start not quick.
+ *
+ * The one exit that does lead away is "More settings": it opens the FULL
+ * single-run form in a new window (`/runs/new?repo=…&favorite=…`) with the
+ * dialog's state carried over — the favorite becomes the form's template, and
+ * hub.js parks the task, the branch rule and the start time in sessionStorage
+ * so the new window restores them. The moment one wants more than the dialog
+ * asks, the run stops being quick, and the full form is the place it belongs.
  */
 function quickRunDialog(repos, selectedRepo) {
   const favs = listFavorites()
@@ -123,19 +184,22 @@ function quickRunDialog(repos, selectedRepo) {
     ? `<p class="dim">${e(t('qr.no_repo'))}</p><p><a class="btn" href="/repos/edit">${e(t('norepo.cta'))}</a></p>`
     : !favs.length
       ? `<p class="dim">${e(t('qr.no_favorite'))}</p><p><a class="btn" href="/settings/favorites">${e(t('fav.create'))}</a></p>`
-      : `<form id="qr-form">
+      : `<form id="qr-form" class="form-grid">
     <label>${e(t('layout.repo'))} <select name="repo_id">${repos.map(r =>
       `<option value="${r.id}" ${r.id == selectedRepo ? 'selected' : ''}>${e(r.name)}</option>`).join('')}</select></label>
     <label>${e(t('qr.favorite'))} <select name="favorite_id" id="qr-fav">${favs.map(f =>
-      `<option value="${f.id}" data-summary="${e(favoriteSummary(f))}">${e(f.name)}</option>`).join('')}</select></label>
-    <p class="dim" id="qr-fav-info"></p>
+      `<option value="${f.id}" data-summary="${e(favoriteSummary(f))}">${e(f.name)}</option>`).join('')}</select>
+      <span class="fav-tip"><button type="button" class="fav-info" id="qr-fav-info"
+        aria-describedby="qr-fav-tip" aria-label="${e(t('qr.favorite_info'))}">i</button>
+        <span class="tip" id="qr-fav-tip" role="tooltip"></span></span></label>
     <label>${e(t('qr.prompt'))} <textarea name="prompt" rows="8" required placeholder="${e(t('qr.prompt_ph'))}"></textarea></label>
     ${runStartTimeFields({})}
     <details class="qr-more"><summary>${e(t('qr.more'))}</summary>
-      ${branchFields({ branch_mode: 'keiner' })}
+      ${branchFields({ branch_mode: 'keiner' }, branchContext(selectedRepo))}
     </details>
     <p class="err" id="qr-error" hidden></p>
     <menu class="qr-actions">
+      <button type="button" class="ghost" data-qr-full>${e(t('qr.full'))}</button>
       <button type="button" class="ghost" data-qr-close>${e(t('qr.cancel'))}</button>
       <button type="submit">${e(t('qr.start'))}</button>
     </menu>
@@ -146,35 +210,202 @@ function quickRunDialog(repos, selectedRepo) {
   </dialog>`
 }
 
-export function layout(title, active, content, selectedRepo = null, withTerminal = false) {
+/**
+ * ONE quota bar for the whole application.
+ *
+ * There used to be two: `bar()` in the header and `pctBar()` in the usage
+ * panel. Same reading, two markups, two track colours, and the thresholds
+ * spelled out twice — so "80 % is yellow" was a statement the code made in two
+ * places and could have made differently in each. That duplication is the
+ * reason the status sidebar exists at all: everything that says how much is
+ * left now comes out of here.
+ */
+export function quotaBar(pct, { label = '', note = '', title = '' } = {}) {
+  const klasse = pct == null ? '' : pct >= 90 ? 'r' : pct >= 80 ? 'y' : ''
+  return `<span class="quota"${title ? ` title="${e(title)}"` : ''}>${
+    label ? `<span class="quota-label">${e(label)}</span>` : ''}<span class="track"><span class="fill ${klasse}" style="width:${Math.min(pct ?? 0, 100)}%"></span></span><span class="quota-pct">${pct ?? '?'} %</span>${
+    note ? `<span class="dim">${e(note)}</span>` : ''}</span>`
+}
+
+/**
+ * The pipeline switch as a state with weight, not as a sentence.
+ *
+ * Name, id and fragment route still say "header" because that is where this
+ * block used to sit and because the live channel from phase 2 addresses it by
+ * exactly that id. It lives in the status sidebar now — a reading that belongs
+ * on every page does not belong in a bar that has to stay one line high.
+ */
+export function headerStatus() {
   const pipeline = pipelineAn()
-  const q = claudeQuota()
+  return `<div id="header-status" title="${e(t('layout.pipeline_hint'))}">
+    <span class="dim">${e(t('layout.pipeline'))}</span>
+    <b class="${pipeline ? 'ok' : 'warn'}">${e(pipeline ? t('layout.on') : t('layout.off'))}</b></div>`
+}
+
+/** The four statuses that mean "there is work in flight", in reading order. */
+const WORK_STATUSES = ['running', 'waiting_help', 'scheduled', 'deferred']
+
+/** A run status as a word one can read, in the operator's language. */
+export function statusText(status) {
+  const key = `status.${status}`
+  const txt = t(key)
+  return txt === key ? String(status) : txt
+}
+
+/** How much work is in flight in this repo, per status, linked into the overview. */
+function workBlock(repoId) {
+  if (repoId == null) return ''
+  const zeilen = WORK_STATUSES.map(s => ({
+    status: s,
+    n: db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND status=?`).get(repoId, s).c,
+  })).filter(z => z.n > 0)
+  if (!zeilen.length) return `<div class="side-block"><span class="side-label">${e(t('side.work'))}</span>
+    <span class="dim">${e(t('side.work_none'))}</span></div>`
+  return `<div class="side-block"><span class="side-label">${e(t('side.work'))}</span>
+    <ul class="side-counts">${zeilen.map(z =>
+      `<li><a href="/?repo=${repoId}&amp;status=${e(z.status)}"><span class="n">${z.n}</span> <span>${e(statusText(z.status))}</span></a></li>`).join('')}</ul></div>`
+}
+
+/**
+ * Open incidents of this repo, split the way incidents.mjs splits them: what is
+ * waiting for hands, and what the hub merely wrote down. Zero of a group means
+ * the group is absent — a "0" is not information, it is furniture.
+ */
+function openIncidents(repoId) {
+  const offen = db.prepare(`SELECT i.*, r.status AS run_status FROM incidents i
+    LEFT JOIN runs r ON r.id = i.run_id
+    WHERE i.geloest_am IS NULL AND (i.run_id IS NULL OR r.repo_id = ?)`).all(repoId ?? -1)
+  const handeln = offen.filter(v => brauchtMensch(v, v.run_status)).length
+  return { offen: offen.length, handeln, noticed: offen.length - handeln }
+}
+
+function incidentBlock(repoId) {
+  const { offen, handeln, noticed } = openIncidents(repoId)
+  if (!offen) return ''
+  return `<div class="side-block"><span class="side-label">${e(t('incidents.title'))}</span>
+    ${handeln ? `<div><b class="err">${handeln}</b> ${e(t('incidents.needs_you_short'))}</div>` : ''}
+    ${noticed ? `<div><b class="warn">${noticed}</b> ${e(t('incidents.noticed_short'))}</div>` : ''}</div>`
+}
+
+/**
+ * The status sidebar — on every page, right of the content.
+ *
+ * Before this, status stood in three places and only ever fully on the
+ * overview: two quota bars in the header, the pipeline switch as running text
+ * next to them, and the usage panel on exactly one page. The question those
+ * three answer together — "can I send something off right now, and is anything
+ * stuck?" — could therefore only be asked from the overview.
+ *
+ * It is the natural receiver of the live channel: `id="status-sidebar"` is the
+ * swap target, and /api/fragments/sidebar renders it through this very
+ * function. The open/closed class deliberately sits on the SHELL around it,
+ * not on the sidebar — a swap replaces this element whole and would drop it.
+ */
+/**
+ * The rail — what the sidebar still says once it is folded shut.
+ *
+ * Measured before it existed: folded, the sidebar was a 107x39 box reading
+ * "STATUS" and nothing else. A panel that goes silent when closed is one nobody
+ * opens again, so it would simply have stayed open and the fold been pointless.
+ *
+ * It carries exactly the three things one folds it open FOR — can I start
+ * something (pipeline), is anything stuck (incidents), and how full is the
+ * quota — as marks rather than words, because 46px is not a column of text.
+ * Every mark keeps its sentence in the title attribute.
+ */
+async function sideRail(repoId) {
+  const teile = []
+  const pipeline = pipelineAn()
+  teile.push(`<span class="rail-dot" title="${e(t('layout.pipeline'))}: ${e(pipeline ? t('layout.on') : t('layout.off'))}">
+    <span class="dot ${pipeline ? 'green' : 'yellow'}"></span></span>`)
+
+  const { handeln, noticed } = openIncidents(repoId)
+  if (handeln) teile.push(`<span class="rail-dot" title="${e(t('incidents.needs_you_short'))}">
+    <span class="dot red"></span>${handeln}</span>`)
+  if (noticed) teile.push(`<span class="rail-dot" title="${e(t('incidents.noticed_short'))}">
+    <span class="dot yellow"></span>${noticed}</span>`)
+
+  // The same numbers the panel shows, as bars that fill from the bottom. Read
+  // through subscriptionUsage() rather than re-derived, so the rail cannot come
+  // to disagree with the panel it replaces.
+  let usage = []
+  try { usage = await subscriptionUsage() } catch { usage = [] }
+  for (const u of usage) {
+    if (!u.ok) continue
+    const d = u.data
+    // Claude has named windows; everything else has one number, and its mark is
+    // the coding agent it belongs to. Cutting the LABEL gave "Cu" for
+    // "Cursor CLI" — two letters that name nothing. The harness id at least
+    // reads as itself.
+    const werte = d.kind === 'claude'
+      ? [['5h', d.five], ['7d', d.seven_general]]
+      : [[u.harness.slice(0, 3), d.pct]]
+    for (const [kurz, pct] of werte) {
+      if (pct == null) continue
+      const klasse = pct >= 90 ? 'r' : pct >= 80 ? 'y' : ''
+      teile.push(`<span class="rail-dot" title="${e(u.label)} ${e(kurz)}: ${pct} %">
+        <span class="rail-bar ${klasse}"><i style="height:${Math.min(pct, 100)}%"></i></span>
+        <span class="rail-label">${e(kurz)}</span></span>`)
+    }
+  }
+  return `<div class="side-rail" aria-hidden="true">${teile.join('')}</div>`
+}
+
+export async function statusSidebar(repoId = null) {
+  // The sidebar carries its own repo. <body data-repo> is the live channel's
+  // filter and is only set where a page really HAS a repo context; the sidebar
+  // reads a repo on every page (the header's switcher shows one there too), so
+  // it has to say which one it counted — otherwise the first live update would
+  // ask without a repo and the counts would silently fall away.
+  return `<aside id="status-sidebar" class="sidebar"${repoId == null ? '' : ` data-repo="${e(String(repoId))}"`}>
+  <div class="side-head">
+    <h2>${e(t('side.title'))}</h2>
+    <button type="button" class="side-toggle" id="side-toggle" aria-controls="side-body"
+      aria-expanded="true" title="${e(t('side.toggle'))}" aria-label="${e(t('side.toggle'))}">▸</button>
+  </div>
+  ${await sideRail(repoId)}
+  <div class="side-body" id="side-body">
+    <div class="side-block">${headerStatus()}</div>
+    ${workBlock(repoId)}
+    ${incidentBlock(repoId)}
+    ${await usagePanel()}
+  </div>
+</aside>`
+}
+
+export async function layout(title, active, content, selectedRepo = null, withTerminal = false) {
   // No "Flows" entry: a flow is not a place you go, it hangs on the agent or the
   // single run that starts it. The flow pages are reached from those two forms.
   const nav = [['/', t('nav.overview')], ['/archive', t('nav.archive')], ['/agents', t('nav.agents')], ['/sessions', t('nav.sessions')],
     ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
     .map(([href, label]) => `<a href="${href}" class="${active === href ? 'on' : ''}">${e(label)}</a>`).join('')
-  const bar = (label, pct) => `<div class="quota"><span>${label}</span><div class="track"><div class="fill ${(pct ?? 0) >= 90 ? 'r' : (pct ?? 0) >= 80 ? 'y' : ''}" style="width:${Math.min(pct ?? 0, 100)}%"></div></div><span>${pct ?? '?'} %</span></div>`
   const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
+  // Which repo the STATUS is about: the one the page is showing, or — on the
+  // pages that have no repo context (settings, sessions, repos) — the one the
+  // switcher below shows anyway, which is the first. Anything else would put an
+  // empty panel on half of the pages.
+  const statusRepo = selectedRepo != null ? Number(selectedRepo) : (repos[0]?.id ?? null)
   const repoSel = repos.length
     ? `<label class="dim">${e(t('layout.repo'))}</label> <select id="repo-switch" data-active="${e(active)}">${repos.map(r => `<option value="${r.id}" ${r.id == selectedRepo ? 'selected' : ''}>${e(r.name)}</option>`).join('')}</select>`
     : `<a href="/repos" class="warn">${e(t('layout.no_repo'))}</a>`
   return `<!doctype html><html lang="${e(currentLanguage())}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>cc-hub — ${e(title)}</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6fed'/%3E%3Cpath d='M9 11l5 5-5 5' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M17 21h7' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/xterm.css"><link rel="stylesheet" href="/static/hub.css"></head>
-<body>
+<body${selectedRepo == null ? '' : ` data-repo="${e(String(selectedRepo))}"`}>
 ${setupBanner()}
 <header>
   <span class="brand">cc-hub</span>
   <nav>${nav}</nav>
+  <span class="spacer"></span>
   ${repoSel}
   <button type="button" id="qr-open" class="qr-open" title="${e(t('qr.hint'))}">⚡ ${e(t('qr.title'))}</button>
-  <span class="spacer"></span>
-  <span title="${e(t('layout.pipeline_hint'))}">${e(t('layout.pipeline'))}: <b class="${pipeline ? 'ok' : 'warn'}">${e(pipeline ? t('layout.on') : t('layout.off'))}</b></span>
-  ${bar('5h', q.five)}${q.seven_general != null ? bar('7d', q.seven_general) : ''}
 </header>
+<div class="shell" id="shell">
 <main>${globalesBanner()}${content}</main>
+${await statusSidebar(statusRepo)}
+</div>
 ${quickRunDialog(repos, selectedRepo)}
 <div class="toasts" id="cchub-toasts" aria-live="polite"></div>
 ${withTerminal ? '<script src="/static/xterm.js"></script><script src="/static/addon-fit.js"></script>' : ''}
@@ -183,11 +414,16 @@ ${withTerminal ? '<script src="/static/xterm.js"></script><script src="/static/a
 }
 
 // ---------------- subscription usage panel ----------------
-async function usagePanel() {
+/**
+ * Subscription usage + provider balances. Exported because it is one of the
+ * blocks that goes stale on its own clock rather than with the page around it.
+ */
+export async function usagePanel() {
   let usage = []
   try { usage = await subscriptionUsage() } catch { usage = [] }
-  const credits = await openrouterCredits()
-  if (!usage.length && !credits) return ''
+  let balances = []
+  try { balances = await providerBalances() } catch { balances = [] }
+  if (!usage.length && !balances.length) return ''
   // A reset within the next day is a time, everything beyond it needs the date
   // too — '16:30' alone says nothing about a window that runs for a week.
   const resetText = (iso) => {
@@ -198,8 +434,6 @@ async function usagePanel() {
     const tag = `${String(d.getUTCDate()).padStart(2, '0')}.${String(d.getUTCMonth() + 1).padStart(2, '0')}.`
     return (ms - Date.now() > 24 * 3600_000 ? `${tag} ` : '') + `${uhr} UTC`
   }
-  const pctBar = (pct) => pct == null ? '' :
-    `<div class="track"><div class="fill ${pct >= 90 ? 'r' : pct >= 80 ? 'y' : ''}" style="width:${Math.min(pct, 100)}%"></div></div><span>${pct} %</span>`
   const rows = usage.map(u => {
     if (!u.ok) return `<div class="usage-row"><b>${e(u.label)}</b> <span class="dim">${e(t('usage.unavailable'))}</span></div>`
     const d = u.data
@@ -209,8 +443,7 @@ async function usagePanel() {
       // the row could only ever belong to one of them. A window claude does not
       // report at all stays out of the row, and so does a missing reset time.
       const fenster = (label, pct, iso) => pct == null ? ''
-        : `<span class="quota"><span>${label}</span>${pctBar(pct)}${
-          iso ? `<span class="dim">${e(t('usage.resets', { time: resetText(iso) }))}</span>` : ''}</span>`
+        : quotaBar(pct, { label, note: iso ? t('usage.resets', { time: resetText(iso) }) : '' })
       return `<div class="usage-row"><b>${e(u.label)}</b>${d.plan ? ` <span class="dim">${e(d.plan)}</span>` : ''}
         ${fenster('5h', d.five, d.resets_at)}
         ${fenster('7d', d.seven_general, d.seven_resets_at)}
@@ -227,17 +460,34 @@ async function usagePanel() {
       const days = d.cycle_end != null
         ? Math.max(0, Math.ceil((Date.parse(d.cycle_end) - Date.now()) / 86_400_000)) : null
       return `<div class="usage-row"><b>${e(u.label)}</b>${d.plan ? ` <span class="dim">${e(d.plan)}</span>` : ''}
-        ${d.pct != null ? `<span class="quota" title="${e(money)}">${pctBar(d.pct)}</span>`
+        ${d.pct != null ? quotaBar(d.pct, { title: money })
           : `<span class="dim">${e(t('usage.unavailable'))}</span>`}
         ${days != null ? `<span class="dim">${e(t('usage.resets_in', { days }))}</span>` : ''}</div>`
     }
     return ''
   }).join('')
-  const or = credits?.remaining != null
-    ? `<div class="usage-row"><b>${e(t('usage.openrouter_credits'))}</b> <span>${e(t('usage.remaining', { eur: credits.remaining }))}</span></div>`
-    : ''
-  if (!rows && !or) return ''
-  return `<details class="usage" open><summary>${e(t('usage.title'))}</summary>${rows}${or}</details>`
+  // Provider balances. One line per provider, one figure per CURRENCY — an
+  // account can hold CNY and USD at once (DeepSeek does), and folding those into
+  // a single number would quietly drop one of them. The name comes from the
+  // plugin label, so a new provider appears here without a line of UI code.
+  const guthaben = balances.map(b => {
+    if (!b.ok) return `<div class="usage-row"><b>${e(b.label)}</b> <span class="dim">${e(t('usage.unavailable'))}</span></div>`
+    const betraege = b.data.amounts.map(a => {
+      // granted/topped_up are DeepSeek's split and stay in the tooltip: the
+      // figure that matters on screen is what is left.
+      const detail = a.granted != null && a.topped_up != null
+        ? t('usage.balance_detail', { granted: a.granted, topped_up: a.topped_up }) : ''
+      return `<span${detail ? ` title="${e(detail)}"` : ''}>${
+        e(t('usage.remaining', { amount: a.remaining, currency: a.currency }))}</span>`
+    }).join(' <span class="dim">·</span> ')
+    // `available:false` is the provider's own verdict and outranks the number
+    // next to it — promotional credit can expire while the figure looks healthy.
+    const leer = b.data.available === false
+      ? ` <b class="err">${e(t('usage.balance_exhausted'))}</b>` : ''
+    return `<div class="usage-row"><b>${e(b.label)}</b> ${betraege}${leer}</div>`
+  }).join('')
+  if (!rows && !guthaben) return ''
+  return `<details class="usage" id="usage-panel" open><summary>${e(t('usage.title'))}</summary>${rows}${guthaben}</details>`
 }
 
 // ---------------- overview ----------------
@@ -247,56 +497,143 @@ export async function pageOverview(req, res, url) {
   // 'scheduled' sits with 'deferred': both are runs that exist and are WAITING —
   // that is exactly what one wants to see at a glance, not somewhere below the
   // finished ones. Archived runs have left the overview entirely (Archive page).
-  const runs = db.prepare(`SELECT * FROM runs WHERE repo_id=? AND archived_at IS NULL ORDER BY
-    CASE status WHEN 'waiting_help' THEN 0 WHEN 'failed' THEN 1 WHEN 'running' THEN 2
-                WHEN 'deferred' THEN 3 WHEN 'scheduled' THEN 4 ELSE 5 END,
-    started_at DESC LIMIT 200`).all(sel.id)
-  const rows = runs.map(r => {
-    const agentName = r.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(r.agent_id)?.name ?? null : null
-    const titel = runTitle(r, agentName, t('overview.single_run'))
-    // Under the title stands where the run comes from — the agent by name, or
-    // the word for "no agent". A renamed run must not lose that information.
-    const herkunft = agentName ? t('overview.from_agent', { agent: agentName }) : t('overview.single_run')
-    // Finished runs: duration until the end, not until now — otherwise a run
-    // from three days ago "grows" to 4000 minutes in the overview.
-    const startedMs = parseDbUtc(r.started_at)
-    const endeMs = r.ended_at ? parseDbUtc(r.ended_at) : Date.now()
-    const durMin = Math.round((endeMs - startedMs) / 60000)
-    const wartend = r.status === 'scheduled'
-    // One click moves a finished run into the archive — the record stays, it just
-    // leaves the overview. Only finished runs may go: a running or waiting one
-    // still has work to do and must not hide (the server enforces this too).
-    const archivBtn = ['done', 'failed', 'aborted'].includes(r.status)
-      ? `<form method="post" action="/api/runs/${r.id}/archive" class="inline" onclick="event.stopPropagation()">
-          <input type="hidden" name="back" value="/?repo=${sel.id}">
+  // The status filter the sidebar's "work in flight" counts link to. Anything
+  // else in the parameter is simply no filter — a URL must not be able to
+  // invent a status the CHECK constraint does not know.
+  const wanted = url.searchParams.get('status')
+  const filter = WORK_STATUSES.includes(wanted) ? wanted : null
+  const runs = overviewRuns(sel.id, filter)
+  const body = `
+  <div class="btn-row"><a class="btn" href="/runs/new?repo=${sel.id}">${e(t('overview.start_single'))}</a>
+     <a class="btn ghost" href="/archive?repo=${sel.id}">${e(t('nav.archive'))}</a>
+     ${filter ? `<span class="dim">${e(t('overview.filtered', { status: statusText(filter) }))}</span>
+       <a class="btn" href="/?repo=${sel.id}">${e(t('overview.filter_clear'))}</a>` : ''}</div>
+  ${overviewTable(runs, { repoId: sel.id, status: filter })}`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.overview'), '/', body, sel.id))
+}
+
+/**
+ * One run as a table row — the smallest unit of the overview that is worth
+ * replacing on its own, and therefore the one place a row is ever built.
+ *
+ * `ctx` carries what the row cannot know by itself: the repo the overview is
+ * currently showing, which is where the inline forms have to return to. It is
+ * not state, it is the call site's context handed down.
+ */
+export function runRow(r, ctx) {
+  const repoId = ctx.repoId
+  const agentName = r.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(r.agent_id)?.name ?? null : null
+  const titel = runTitle(r, agentName, t('overview.single_run'))
+  // Under the title stands where the run comes from — the agent by name, or
+  // the word for "no agent". A renamed run must not lose that information.
+  const herkunft = r.resolves_run_id
+    // A row nobody started by hand needs to say why it exists at all.
+    ? t('merge.resolver_for', { title: resolvedTitle(r.resolves_run_id) })
+    : agentName ? t('overview.from_agent', { agent: agentName }) : t('overview.single_run')
+  // Finished runs: duration until the end, not until now — otherwise a run
+  // from three days ago "grows" to 4000 minutes in the overview.
+  const startedMs = parseDbUtc(r.started_at)
+  const endeMs = r.ended_at ? parseDbUtc(r.ended_at) : Date.now()
+  const durMin = Math.round((endeMs - startedMs) / 60000)
+  const wartend = r.status === 'scheduled'
+  // One click moves a finished run into the archive — the record stays, it just
+  // leaves the overview. Only finished runs may go: a running or waiting one
+  // still has work to do and must not hide (the server enforces this too).
+  const archivBtn = ['done', 'failed', 'aborted'].includes(r.status)
+    ? `<form method="post" action="/api/runs/${r.id}/archive" class="inline" onclick="event.stopPropagation()">
+          <input type="hidden" name="back" value="/?repo=${repoId}">
           <button type="submit" class="act" title="${e(t('overview.archive'))}" aria-label="${e(t('overview.archive'))}">${e(t('overview.archive_short'))}</button></form>`
-      : ''
-    // The row stays clickable as a whole, the title is additionally a real link —
-    // otherwise the detail page would be unreachable by keyboard. The title cell
-    // swallows the row click: renaming must not navigate away.
-    return `<tr onclick="location='/runs/${r.id}'">
-      <td>${AMPEL_DOT[ampel(r)]}</td>
-      <td class="titelzelle" onclick="event.stopPropagation()">
+    : ''
+  // The row stays clickable as a whole, the title is additionally a real link —
+  // otherwise the detail page would be unreachable by keyboard. The title cell
+  // swallows the row click: renaming must not navigate away.
+  const anomaly = lastAnomaly(r.id)
+  const branch = r.branch_reported || r.branch_expected
+  // Seven cells, not eleven — and not one fact less. Three of the old columns
+  // said the same thing in three places (dot, status word, last anomaly) with
+  // ~500px between them, and two more were a technical pair each
+  // (harness/model, branch/PR) that reads as one line.
+  return `<tr id="run-${e(r.id)}" onclick="location='/runs/${r.id}'">
+      <td class="status-cell">
+        <span class="status-line">${AMPEL_DOT[ampel(r)]()} ${e(statusText(r.status))}</span>
+        ${wartend ? `<div class="dim">${wartetAuf(r)}</div>` : ''}
+        ${integrationLine(r)}
+        ${anomaly ? `<div class="dim">${e(anomaly)}</div>` : ''}</td>
+      <td class="title-cell" onclick="event.stopPropagation()">
         ${titleInline(r.id, titel)}
         <div class="dim">${e(herkunft)}</div></td>
-      <td>${e(r.harness)}${r.model ? `<span class="dim">/${r.provider ? e(r.provider) + ':' : ''}${e(r.model)}</span>` : ''}</td>
-      <td>${r.status}${wartend ? `<div class="dim">${wartetAuf(r)}</div>` : ''}</td>
+      <td class="two-line">${e(harnessLabel(r.harness))}${r.model ? `<span class="dim">${r.provider ? e(r.provider) + ':' : ''}${e(r.model)}</span>` : ''}</td>
       <td>${wartend ? plannedCell(r) : startedCell(r.started_at)}</td>
-      <td>${wartend ? '' : (durMin > 0 ? durMin + ' min' : '')}<span class="dim"> / ${r.expected_minutes} min</span></td>
-      <td>${e(r.branch_reported || r.branch_expected || '–')}</td>
-      <td>${r.pr_url ? `<a href="${e(r.pr_url)}">PR</a>` : '–'}</td>
-      <td>${vorfallZelle(r.id, sel.id, r.status)}</td>
-      <td class="dim">${e(lastAnomaly(r.id))}</td>
-      <td>${archivBtn}</td>
+      <td>${wartend ? '' : (durMin > 0 ? e(t('unit.minutes', { n: durMin })) : '')}<span class="dim"> / ${e(t('unit.minutes', { n: r.expected_minutes }))}</span></td>
+      <td class="two-line">${branch ? e(branch) : '<span class="leer">–</span>'}${
+        r.pr_url ? `<span class="dim"><a href="${e(r.pr_url)}" onclick="event.stopPropagation()">PR</a></span>` : ''}</td>
+      <td>${vorfallZelle(r.id, repoId, r.status)}${archivBtn}</td>
     </tr>`
-  }).join('')
-  const body = `
-  ${await usagePanel()}
-  <p><a class="btn" href="/runs/new?repo=${sel.id}">${e(t('overview.start_single'))}</a>
-     <a class="btn" href="/archive?repo=${sel.id}">${e(t('nav.archive'))}</a></p>
-  <table class="list"><thead><tr><th></th><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('overview.started'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th>${e(t('incidents.title'))}</th><th>${e(t('overview.last_anomaly'))}</th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="11" class="dim">${e(t('overview.no_runs'))}</td></tr>`}</tbody></table>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.overview'), '/', body, sel.id))
+}
+
+/**
+ * Where a run's work stands, under the status word — the same place the last
+ * anomaly uses, because it answers the same kind of question. A run in the
+ * finish gate says what it is waiting for; a finished one says why its work is
+ * not on the base branch. 'merged' and 'nothing' say nothing: those are the
+ * cases where everything is as it should be.
+ */
+function integrationLine(r) {
+  if (r.finish_state) return `<div class="dim">${e(finishText(r.finish_state))}</div>`
+  if (!r.merge_status || ['merged', 'nothing'].includes(r.merge_status)) return ''
+  if (!['done', 'failed', 'aborted'].includes(r.status)) return ''
+  return `<div class="dim">${e(mergeText(r.merge_status))}</div>`
+}
+
+/** The title of the run a conflict run works for — for the one line that explains it. */
+function resolvedTitle(runId) {
+  const row = db.prepare('SELECT title FROM runs WHERE id=?').get(runId)
+  return row?.title || String(runId).split('-')[0]
+}
+
+/** How many columns the overview has — the empty state has to span all of them. */
+const OVERVIEW_COLS = 7
+
+/** The rows of the overview — including the one row that says there are none. */
+export function runRows(runs, ctx) {
+  return runs.map(r => runRow(r, ctx)).join('')
+    || `<tr><td colspan="${OVERVIEW_COLS}" class="dim">${e(t('overview.no_runs'))}</td></tr>`
+}
+
+/**
+ * The runs the overview shows, in the order it shows them.
+ *
+ * Its own function because the live channel re-renders the tbody when a run
+ * appears that the page does not know yet — and a second copy of this ORDER BY
+ * would be a second opinion about which runs matter. 'scheduled' sits with
+ * 'deferred': both are runs that exist and are WAITING, which is what one wants
+ * to see at a glance rather than below the finished ones. Archived runs have
+ * left the overview entirely (Archive page).
+ */
+export function overviewRuns(repoId, status = null) {
+  const s = WORK_STATUSES.includes(status) ? status : null
+  return db.prepare(`SELECT * FROM runs WHERE repo_id=? AND archived_at IS NULL
+    AND (? IS NULL OR status = ?) ORDER BY
+    CASE status WHEN 'waiting_help' THEN 0 WHEN 'failed' THEN 1 WHEN 'running' THEN 2
+                WHEN 'deferred' THEN 3 WHEN 'scheduled' THEN 4 ELSE 5 END,
+    started_at DESC LIMIT 200`).all(repoId, s, s)
+}
+
+/**
+ * The tbody on its own — the swap target when a row has to appear or vanish.
+ *
+ * It carries the active status filter as a data attribute so the live channel
+ * can ask for the SAME selection again. Without it the first update would
+ * quietly replace a filtered list with the unfiltered one.
+ */
+export function runsBody(runs, ctx) {
+  return `<tbody id="runs-body"${ctx.status ? ` data-status="${e(ctx.status)}"` : ''}>${runRows(runs, ctx)}</tbody>`
+}
+
+/** The overview table around the rows; the tbody is the anchor for new rows. */
+export function overviewTable(runs, ctx) {
+  return `<div class="table-wrap"><table class="list"><thead><tr><th>${e(t('overview.status'))}</th><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.started'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch_pr'))}</th><th>${e(t('incidents.title'))}</th></tr></thead>
+  ${runsBody(runs, ctx)}</table></div>`
 }
 
 /**
@@ -305,7 +642,7 @@ export async function pageOverview(req, res, url) {
  * changes the run, never the agent behind it.
  */
 function titleInline(runId, titel) {
-  return `<span class="titel-inline" data-run="${e(runId)}">
+  return `<span class="title-inline" data-run="${e(runId)}">
     <a href="/runs/${e(runId)}" data-title-text>${e(titel)}</a>
     <button type="button" class="mini" data-title-edit title="${e(t('overview.rename'))}" aria-label="${e(t('overview.rename'))}">✎</button>
   </span>`
@@ -354,8 +691,8 @@ export async function pageArchive(req, res, url) {
     return `<tr onclick="location='/runs/${r.id}'">
       <td><a href="/runs/${r.id}">${e(titel)}</a>
         <div class="dim">${e(herkunft)}</div></td>
-      <td>${e(r.harness)}${r.model ? `<span class="dim">/${r.provider ? e(r.provider) + ':' : ''}${e(r.model)}</span>` : ''}</td>
-      <td>${e(r.status)}</td>
+      <td class="two-line">${e(harnessLabel(r.harness))}${r.model ? `<span class="dim">${r.provider ? e(r.provider) + ':' : ''}${e(r.model)}</span>` : ''}</td>
+      <td>${e(statusText(r.status))}</td>
       <td>${e(r.archived_at)}</td>
       <td>${e(r.branch_reported || r.branch_expected || '–')}</td>
       <td>${r.pr_url ? `<a href="${e(r.pr_url)}">PR</a>` : '–'}</td>
@@ -373,10 +710,10 @@ export async function pageArchive(req, res, url) {
   const body = `
   <h2>${e(t('archive.title', { repo: sel.name }))}</h2>
   <p class="dim">${e(t('archive.total', { n: total }))}</p>
-  <table class="list"><thead><tr><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('archive.archived_at'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="7" class="dim">${e(t('archive.empty'))}</td></tr>`}</tbody></table>
+  <div class="table-wrap"><table class="list"><thead><tr><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('archive.archived_at'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th></th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="7" class="dim">${e(t('archive.empty'))}</td></tr>`}</tbody></table></div>
   ${pager}`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.archive'), '/archive', body, sel.id))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.archive'), '/archive', body, sel.id))
 }
 
 function selectRepo(url) {
@@ -386,12 +723,12 @@ function selectRepo(url) {
   return sel   // null = no repo yet → pages show a setup hint
 }
 
-export function noRepoPage(res, active, title) {
+export async function noRepoPage(res, active, title) {
   const body = `
   <h2>${e(t('norepo.title'))}</h2>
   <p>${e(t('norepo.text'))} <code>~/projects/my-project</code> (${e(t('norepo.base_hint'))} <code>main</code>).</p>
   <p><a class="btn" href="/repos/edit">${e(t('norepo.cta'))}</a></p>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(title, active, body))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(title, active, body))
 }
 
 // ---------------- agents ----------------
@@ -400,24 +737,38 @@ export async function pageAgents(req, res, url) {
   if (!sel) return noRepoPage(res, '/agents', t('nav.agents'))
   if (req.method === 'POST') return void res.writeHead(405).end()
   const agents = db.prepare('SELECT * FROM agents WHERE repo_id=? ORDER BY name').all(sel.id)
-  const rows = agents.map(a => `
-  <tr>
-    <td><form method="post" action="/agents/toggle" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${sel.id}"><button>${e(a.active ? t('agents.on') : t('agents.off'))}</button></form></td>
-    <td>${e(a.name)}</td><td>${e(a.harness)}</td><td>${e(a.model || '–')}</td>
-    <td>${e(scheduleText(a))}</td><td>${a.expected_minutes} min</td>
-    <td class="dim">${e(attachmentSummary(a.flows)) || '–'}</td>
-    <td><form method="post" action="/agents/start" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${sel.id}"><button>${e(t('agents.start_now'))}</button></form></td>
-    <td><a href="/agents/edit?id=${a.id}&repo=${sel.id}">${e(t('agents.edit'))}</a>
-        <a href="/agents/move?id=${a.id}&repo=${sel.id}">${e(t('agents.move'))}</a></td>
-    <td><form method="post" action="/agents/delete" class="inline" onsubmit="return confirm(${JSON.stringify(t('agents.delete_confirm', { name: a.name }))})"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${sel.id}"><button class="danger">${e(t('agents.delete'))}</button></form></td>
-  </tr>`).join('')
   const body = `
   <p><a class="btn" href="/agents/edit?repo=${sel.id}">${e(t('agents.create'))}</a>
      <a class="btn" href="/flows">${e(t('nav.flows'))}</a>
      <span class="dim">${e(t('agents.flows_hint'))}</span></p>
-  <table class="list"><thead><tr><th>${e(t('agents.status'))}</th><th>${e(t('agents.name'))}</th><th>${e(t('agents.harness'))}</th><th>${e(t('agents.model'))}</th><th>${e(t('agents.schedule'))}</th><th>${e(t('agents.expected'))}</th><th>${e(t('nav.flows'))}</th><th></th><th></th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="10" class="dim">${e(t('agents.none'))}</td></tr>`}</tbody></table>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.agents'), '/agents', body, sel.id))
+  ${agentsTable(agents, { repoId: sel.id })}`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.agents'), '/agents', body, sel.id))
+}
+
+/** One agent as a table row. `ctx.repoId` is where its two forms return to. */
+export function agentRow(a, ctx) {
+  const repoId = ctx.repoId
+  return `
+  <tr id="agent-${a.id}">
+    <td><form method="post" action="/agents/toggle" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button>${e(a.active ? t('agents.on') : t('agents.off'))}</button></form></td>
+    <td>${e(a.name)}</td><td>${e(harnessLabel(a.harness))}</td><td>${e(a.model || '–')}</td>
+    <td>${e(scheduleText(a))}</td><td>${e(t('unit.minutes', { n: a.expected_minutes }))}</td>
+    <td class="dim">${e(attachmentSummary(a.flows)) || '–'}</td>
+    <td><form method="post" action="/agents/start" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button>${e(t('agents.start_now'))}</button></form></td>
+    <td><a href="/agents/edit?id=${a.id}&repo=${repoId}">${e(t('agents.edit'))}</a>
+        <a href="/agents/move?id=${a.id}&repo=${repoId}">${e(t('agents.move'))}</a></td>
+    <td><form method="post" action="/agents/delete" class="inline" onsubmit="return confirm(${JSON.stringify(t('agents.delete_confirm', { name: a.name }))})"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button class="danger">${e(t('agents.delete'))}</button></form></td>
+  </tr>`
+}
+
+export function agentRows(agents, ctx) {
+  return agents.map(a => agentRow(a, ctx)).join('')
+    || `<tr><td colspan="10" class="dim">${e(t('agents.none'))}</td></tr>`
+}
+
+export function agentsTable(agents, ctx) {
+  return `<table class="list"><thead><tr><th>${e(t('agents.status'))}</th><th>${e(t('agents.name'))}</th><th>${e(t('agents.harness'))}</th><th>${e(t('agents.model'))}</th><th>${e(t('agents.schedule'))}</th><th>${e(t('agents.expected'))}</th><th>${e(t('nav.flows'))}</th><th></th><th></th><th></th></tr></thead>
+  <tbody id="agents-body">${agentRows(agents, ctx)}</tbody></table>`
 }
 
 // ---------------- single-run form (= agent form without name and schedule) ----------------
@@ -426,21 +777,30 @@ export async function pageRunForm(req, res, url) {
   if (!sel) return noRepoPage(res, '', t('runform.title_short'))
   const agentId = url.searchParams.get('agent')
   const a = agentId ? db.prepare('SELECT * FROM agents WHERE id=?').get(+agentId) : null
-  // Without an agent as a template: the setup of the last start — in practice
-  // the next run wants the same coding agent, provider, model and effort.
+  // A favorite as template: the Quick-Run dialog's "more settings" hands its
+  // favorite over via ?favorite=<id>, so the form opens with that setup and
+  // hub.js restores the dialog's prompt, branch rule and start time on top of
+  // it. Explicit beats remembered: an agent, then a favorite, then the last
+  // choice — never two templates competing.
+  const favId = url.searchParams.get('favorite')
+  const fav = favId && !a ? getFavorite(+favId) : null
+  const template = a ?? (fav ? favoriteTemplate(fav) : null) ?? lastRunChoice()
   const fields = `
   ${runTitleField({})}
-  ${runDefFields(a ?? lastRunChoice())}
+  ${runDefFields(template, branchContext(sel.id))}
   ${runStartTimeFields({})}
   <input type="hidden" name="repo_id" value="${sel.id}">
-  <label class="chk"><input type="checkbox" name="save_agent" value="1"> ${e(t('runform.save_agent'))} (<input name="agent_name" placeholder="agent-name">)</label>`
+  <label class="chk"><input type="checkbox" name="save_agent" value="1"> ${e(t('runform.save_agent'))} (<input name="agent_name" placeholder="${e(t('runform.agent_name_ph'))}">)</label>`
   const body = `
-  <h2>${e(t('runform.title', { repo: sel.name }))}${a ? ` (${e(t('runform.like_agent', { agent: a.name }))})` : ''}</h2>
-  <form method="post" action="/runs/new">${fields}<button>${e(t('runform.start'))}</button>
+  <h2>${e(t('runform.title', { repo: sel.name }))}${a
+    ? ` (${e(t('runform.like_agent', { agent: a.name }))})`
+    : fav ? ` (${e(t('runform.like_favorite', { favorite: fav.name }))})` : ''}</h2>
+  <form method="post" action="/runs/new" class="settings form-grid">${fields}
+  <div class="btn-row"><button>${e(t('runform.start'))}</button>
   ${pipelineAn()
-    ? `<span class="dim"> ${e(t('runform.pipeline_on_hint'))}</span>`
-    : `<span class="warn"> ${e(t('runform.pipeline_off_hint'))}</span>`}</form>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('runform.title_short'), '', body, sel.id))
+    ? `<span class="dim">${e(t('runform.pipeline_on_hint'))}</span>`
+    : `<span class="warn">${e(t('runform.pipeline_off_hint'))}</span>`}</div></form>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('runform.title_short'), '', body, sel.id))
 }
 
 // ---------------- run detail page ----------------
@@ -451,7 +811,6 @@ export async function pageRun(req, res, url, id) {
   const agentName = run.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null
   const titel = runTitle(run, agentName, t('overview.single_run'))
   const herkunft = agentName ? t('overview.from_agent', { agent: agentName }) : t('overview.single_run')
-  const events = db.prepare(`SELECT * FROM events WHERE run_id=? AND kind NOT LIKE 'telegram_sent%' ORDER BY id`).all(id)
   // Log (ANSI-cleaned), last excerpt
   const { readFileSync, existsSync, statSync } = await import('node:fs')
   const { join } = await import('node:path')
@@ -464,31 +823,30 @@ export async function pageRun(req, res, url, id) {
       logHtml = `<pre id="log">${e(raw.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r/g, ''))}</pre>`
     } catch {}
   }
-  // "live" means: there really is a session one can attach to. Judged only by
-  // status, the page promised a terminal that did not exist.
-  const live = ['running', 'waiting_help'].includes(run.status) && !!run.tmux_session && !run.tmux_closed_at
+  // "live" means: there really is an agent one can type to — a standing session
+  // AND a process in it. Judged by the run's STATUS it meant neither, and both
+  // readings were wrong in their own direction:
+  //   - status alone promised a terminal for a session that was long gone;
+  //   - status as a CONDITION locked the operator out of the case the coding
+  //     agents make the normal one. claude, opencode and cursor stay in their
+  //     TUI after the work is done; the run says 'done', the agent is still
+  //     sitting there waiting for a follow-up, and the page offered a read-only
+  //     screen of it. Whether one may type is a fact about the session, never
+  //     about the record. (hermes is the counter-example, and the reason the
+  //     pane is asked about at all: `chat -q` is one query and then the process
+  //     exits — remain-on-exit leaves the screen, not the agent.)
+  const sessionOpen = !!run.tmux_session && !run.tmux_closed_at
+  // Unknown (null) counts as alive: a tmux that did not answer must not silently
+  // take away write access — the handshake is fail-closed on its own.
+  const live = sessionOpen && (await paneAlive(run.tmux_session)) !== false
+  // Is this run itself still going? That decides the BUTTON, not the typing:
+  // ending a run that is over would rewrite its 'done' to 'aborted'.
+  const inFlight = ['running', 'waiting_help'].includes(run.status)
   const body = `
-  <h2>${AMPEL_DOT[ampel(run)]} ${titleInline(id, titel)} <span class="dim">(${run.status})</span></h2>
-  ${run.status === 'scheduled'
-    // A planned run must be revocable — otherwise a start you thought better of
-    // sits in the future with no way to stop it. 'kill' is exactly right here:
-    // there is no session to end, only a record to set to 'aborted'.
-    ? `<div class="banner warten">⏳ ${wartetAuf(run)}
-       <form method="post" action="/api/runs/${id}/kill" class="inline"><button class="danger">${e(t('start.cancel'))}</button></form></div>`
-    : ''}
-  ${['done', 'failed', 'aborted'].includes(run.status)
-    // One click into the archive / back out of it. An archived run is hidden
-    // from the overview but stays fully reachable here, report and log intact.
-    ? `<p><form method="post" action="/api/runs/${id}/${run.archived_at ? 'unarchive' : 'archive'}" class="inline">
-         <input type="hidden" name="back" value="/runs/${id}">
-         <button>${e(t(run.archived_at ? 'run.restore' : 'run.archive'))}</button></form>
-       ${run.archived_at ? `<span class="dim">${e(t('run.archived_since', { ts: run.archived_at }))}</span>`
-         : `<span class="dim">${e(t('run.archive_hint'))}</span>`}</p>`
-    : ''}
-  <p class="dim">${e(t('run.title', { id: id.slice(0, 8) }))} · ${e(herkunft)} · ${e(t('layout.repo'))} „${e(repo?.name ?? '?')}“, ${e(t('agents.harness'))} ${e(run.harness)}${run.model ? `, ${t('agents.model')} ` + e(run.model) : ''}
-   ${run.provider ? `· Provider ${e(run.provider)}${run.or_provider ? ` (${e(t('run.pinned'))}: ${e(run.or_provider)})` : ''} ` : ''}· ${e(t('run.start'))} ${e(run.started_at)}${run.ended_at ? ' · ' + e(t('run.end')) + ' ' + e(run.ended_at) : ''}
-   · ${e(t('run.expectation'))} ${run.expected_minutes} min · ${e(t('run.workdir'))} <code>${e(run.workdir_effective ?? '')}</code>
-   ${skillListe(run.skills).length ? `· ${e(t('skills.title'))}: <b>${skillAnzeige(run.skills).map(e).join(', ')}</b>` : ''}</p>
+  ${runDetailHead(run, { title: titel })}
+  ${runChips(run, repo, herkunft)}
+  ${integrationSection(run, repo)}
+  ${goalCard(run)}
   ${run.help_text
     ? run.status === 'waiting_help'
       // open: the agent is waiting for an answer right now
@@ -497,12 +855,25 @@ export async function pageRun(req, res, url, id) {
       // done: show as history, not as an open question
       : `<p class="dim"><b>${e(t('run.help_answered'))}:</b> ${e(run.help_text)}${run.help_answer ? ` → <i>${e(run.help_answer)}</i>` : ''}</p>`
     : ''}
-  <details ${live ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(live ? t('run.terminal_live') : t('run.terminal_closed'))}</summary>
-    <div id="term" data-session="${run.tmux_session && !run.tmux_closed_at ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
-    ${live ? `<form onsubmit="return cchubSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>
-    <form onsubmit="return cchubKill('${id}')"><button class="danger">${e(t('run.kill'))}</button></form>` : ''}
+  <details ${live ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(terminalState(live, sessionOpen, inFlight))}</summary>
+    <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
+    ${live && !inFlight ? `<p class="dim">${e(t('run.session_after_hint'))}</p>` : ''}
+    ${live ? `<form onsubmit="return cchubSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>` : ''}
+    ${inFlight
+      ? (live ? `<form onsubmit="return cchubKill('${id}')"><button class="danger">${e(t('run.kill'))}</button></form>` : '')
+      // The run is over — only the session is left. Ending it here must NOT go
+      // through /runs/<id>/kill: that sets 'aborted', and it would turn a run
+      // that came through cleanly into a failed one. /api/sessions/kill is the
+      // one path that ends a session and leaves a finished record alone.
+      : sessionOpen ? `<div class="btn-row"><form method="post" action="/api/sessions/kill" class="inline">
+          <input type="hidden" name="session" value="${e(run.tmux_session)}">
+          <input type="hidden" name="back" value="/runs/${id}">
+          <button class="danger">${e(t('run.end_session'))}</button></form>
+        <span class="dim">${e(t('run.end_session_hint'))}</span></div>` : ''}
   </details>
-  ${['failed', 'aborted'].includes(run.status)
+  ${['failed', 'aborted'].includes(run.status) && !run.resolves_run_id
+    // A conflict run is never retried: the way back in is "Merge now" on the
+    // run it works for, which starts a fresh one with a fresh branch.
     ? `<form method="post" action="/api/runs/${id}/retry"><button>${e(t('run.retry'))}</button>
        <span class="dim">${e(t('run.retry_hint'))}</span></form>`
     : ''}
@@ -510,23 +881,194 @@ export async function pageRun(req, res, url, id) {
   ${flowSection(run)}
   ${vorfallAbschnitt(id, run.status)}
   <h3>${e(t('run.metrics'))}</h3>
-  <ul>
-    <li>${e(t('run.runtime'))}: ${fmtLaufzeit(run)} · ${e(t('run.expectation'))} ${run.expected_minutes} min</li>
-    <li>${e(t('run.tokens'))}: in ${run.tokens_in ?? 0}, out ${run.tokens_out ?? 0}</li>
-    <li>${e(t('run.costs'))}: ${run.cost_eur != null ? run.cost_eur.toFixed(2) + ' € (' + e(t('run.abo_delta')) + ')' : run.cost_usd != null ? run.cost_usd.toFixed(4) + ' $' : '–'}</li>
-    <li>${e(t('run.activity'))}: ${e(run.last_activity_at ?? '–')}</li>
-    <li>${e(t('run.branch_reported'))}: ${e(run.branch_reported ?? '–')} · ${e(t('run.branch_expected'))}: ${e(run.branch_expected ?? '–')} · PR: ${run.pr_url ? `<a href="${e(run.pr_url)}">${e(run.pr_url)}</a>` : '–'}</li>
-    <li>Exit: ${run.exit_code ?? '–'}${run.tmux_closed_at ? ' · ' + e(t('run.tmux_closed')) + ' ' + e(run.tmux_closed_at) : ''}</li>
-  </ul>
-  <h3>${e(t('run.events'))}</h3><ul class="events">${events.map(ev => `<li><span class="dim">${e(ev.ts)}</span> ${e(ev.kind)}</li>`).join('') || `<li class="dim">${e(t('run.none'))}</li>`}</ul>
+  ${runMetrics(run)}
+  <h3>${e(t('run.events'))}</h3>${runEvents(id)}
   <h3>${e(t('run.log'))}</h3>${logHtml}`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(titel, '/', body, run.repo_id, true))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(titel, '/', body, run.repo_id, true))
+}
+
+/**
+ * The half sentence behind "Terminal" in the summary.
+ *
+ * Four states, because the two facts behind them are independent: is there a
+ * session, and is anybody still sitting in it. "(ended)" for a session whose
+ * process has exited would be a lie — the scrollback is there and can be
+ * attached to, only nobody answers any more.
+ */
+export function terminalState(live, sessionOpen, inFlight) {
+  if (live) return t(inFlight ? 'run.terminal_live' : 'run.terminal_after')
+  return t(sessionOpen ? 'run.terminal_dead' : 'run.terminal_closed')
+}
+
+/**
+ * The goal of a run, and whether it ever reached the session.
+ *
+ * Its own block rather than a chip: a condition is a sentence, and "was it sent
+ * in?" is a fact one only asks about here. A goal that is still waiting is not
+ * an error — the delivery waits for the TUI and the watcher picks up the rest —
+ * but it is the difference between "claude keeps going until this holds" and
+ * "claude does not know about it yet".
+ */
+export function goalCard(run) {
+  if (!run.goal) return ''
+  const state = run.goal_sent_at
+    ? `<span class="dim">${e(t('goal.sent_at', { ts: run.goal_sent_at }))}</span>`
+    : `<span class="warn">${e(t(['done', 'failed', 'aborted'].includes(run.status) ? 'goal.never_sent' : 'goal.pending'))}</span>`
+  return `<div class="card" id="run-goal"><b>🎯 ${e(t('goal.title'))}</b> ${state}
+    <pre>${e(run.goal)}</pre></div>`
+}
+
+/**
+ * Head of the detail page: name, traffic light, status — plus the two lines that
+ * are only there in certain states (a planned run's cancel banner, the archive
+ * row of a finished one). They stand together because they answer one question:
+ * what IS this run right now.
+ */
+export function runDetailHead(run, ctx) {
+  const id = run.id
+  const titel = ctx.title
+  return `<h2 id="run-head">${AMPEL_DOT[ampel(run)]()} ${titleInline(id, titel)} <span class="status-chip">${e(statusText(run.status))}</span></h2>
+  ${run.status === 'scheduled'
+    // A planned run must be revocable — otherwise a start you thought better of
+    // sits in the future with no way to stop it. 'kill' is exactly right here:
+    // there is no session to end, only a record to set to 'aborted'.
+    ? `<div class="banner waiting" id="run-banner">⏳ ${wartetAuf(run)}
+       <form method="post" action="/api/runs/${id}/kill" class="inline"><button class="danger">${e(t('start.cancel'))}</button></form></div>`
+    : ''}
+  ${['done', 'failed', 'aborted'].includes(run.status)
+    // One click into the archive / back out of it. An archived run is hidden
+    // from the overview but stays fully reachable here, report and log intact.
+    // .btn-row, not <p>: an HTML parser closes an open paragraph at a <form>,
+    // so the button and the note beside it would land on two lines whatever
+    // the CSS says. One button hides the bug today; a second one shows it.
+    ? `<div class="btn-row" id="run-archive"><form method="post" action="/api/runs/${id}/${run.archived_at ? 'unarchive' : 'archive'}" class="inline">
+         <input type="hidden" name="back" value="/runs/${id}">
+         <button>${e(t(run.archived_at ? 'run.restore' : 'run.archive'))}</button></form>
+       ${run.archived_at ? `<span class="dim">${e(t('run.archived_since', { ts: run.archived_at }))}</span>`
+         : `<span class="dim">${e(t('run.archive_hint'))}</span>`}</div>`
+    : ''}`
+}
+
+/** A finish_state / merge_status as a word, falling back to the raw value. */
+export function finishText(state) {
+  const key = `finish.${state}`
+  return t(key) === key ? String(state) : t(key)
+}
+export function mergeText(status) {
+  const key = `merge.${status}`
+  return t(key) === key ? String(status) : t(key)
+}
+
+/**
+ * Where this run's work stands — and the buttons that move it.
+ *
+ * Only rendered where the repo asked the hub to integrate; with merge_mode 'off'
+ * this block does not exist and the page is what it always was. The buttons are
+ * ordinary POST forms in the page's own style; the destructive one asks first.
+ */
+export function integrationSection(run, repo) {
+  if (repo?.merge_mode !== 'hub' && !run.merge_status && !run.finish_state) return ''
+  const terminal = ['done', 'failed', 'aborted'].includes(run.status)
+  const zeilen = []
+  if (run.finish_state) zeilen.push(`<b>${e(finishText(run.finish_state))}</b>`)
+  if (run.merge_status) zeilen.push(e(mergeText(run.merge_status)))
+  if (run.merged_sha) zeilen.push(`<code>${e(run.merged_sha.slice(0, 7))}</code>`)
+  if (run.resolver_run_id) {
+    zeilen.push(`<a href="/runs/${e(run.resolver_run_id)}">${e(t('merge.resolver_run'))}</a>`)
+  }
+  if (run.resolves_run_id) {
+    zeilen.push(`<a href="/runs/${e(run.resolves_run_id)}">${e(t('merge.original_run'))}</a>`)
+  }
+  const resume = resumeCommand(run)
+
+  const btn = (action, label, extra = '', confirmKey = null) => `
+    <form method="post" action="/api/runs/${e(run.id)}/${action}" class="inline"${
+      confirmKey ? ` onsubmit="return confirm(${JSON.stringify(t(confirmKey))})"` : ''}>${extra}
+      <button>${e(t(label))}</button></form>`
+
+  const buttons = []
+  if (run.status === 'running' && !run.finish_state) {
+    buttons.push(btn('mark-done', 'merge.mark_done'))
+  }
+  const unmerged = String(run.merge_status ?? '')
+  // 'kept_on_branch' is in this list on purpose: keeping the work on its branch
+  // is what happened automatically at the end of the run, not a verdict for all
+  // time. One click still integrates it, the ordinary way.
+  if (terminal && ['unmerged_commits', 'blocked_error', 'blocked_conflict', 'blocked_no_remote',
+    'kept_on_branch'].includes(unmerged)) {
+    buttons.push(btn('merge', 'merge.merge_now'))
+  }
+  if (['blocked_dirty', 'unmerged_both', 'unmerged_dirty'].includes(unmerged)) {
+    buttons.push(btn('merge', 'merge.commit_leftovers', '<input type="hidden" name="leftovers" value="commit">'))
+    buttons.push(btn('merge', 'merge.discard_leftovers', '<input type="hidden" name="leftovers" value="discard">',
+      'merge.discard_confirm'))
+  }
+  if (/^(blocked_|unmerged_)/.test(unmerged)) buttons.push(btn('merge-skip', 'merge.skip'))
+
+  return `<div class="banner waiting" id="run-integration">
+    <b>${e(t('merge.section'))}:</b> ${zeilen.join(' · ') || `<span class="dim">–</span>`}
+    ${resume ? `<div class="dim">${e(t('merge.resume'))}: <code>${e(resume)}</code></div>` : ''}
+    ${buttons.length ? `<div class="btn-row">${buttons.join('')}</div>` : ''}
+  </div>`
+}
+
+/**
+ * What this run IS, as chips.
+ *
+ * Eight facts joined by "·" into one wrapping paragraph is a sentence one has
+ * to parse before one can look anything up; every fact wrapped in its own chip
+ * with its own caption can be found by looking. Nothing was dropped — repo,
+ * coding agent, model, serving provider, start, end, expectation, working
+ * directory and the extra skills are all still here.
+ */
+export function runChips(run, repo, herkunft) {
+  const chip = (key, value, opts = {}) => value == null || value === ''
+    ? ''
+    : `<li><span class="k">${e(t(key))}</span> ${opts.raw ? value : e(String(value))}</li>`
+  return `<ul class="chips">
+    <li><span class="k">${e(t('run.id_label'))}</span> <code>${e(run.id.slice(0, 8))}</code></li>
+    ${chip('layout.repo', repo?.name ?? '?')}
+    ${chip('overview.origin', herkunft)}
+    ${chip('agents.harness', harnessLabel(run.harness))}
+    ${chip('agents.model', run.model)}
+    ${chip('model.provider', run.provider
+      ? run.provider + (run.or_provider ? ` (${t('run.pinned')}: ${run.or_provider})` : '') : null)}
+    ${chip('run.start', run.started_at)}
+    ${chip('run.end', run.ended_at)}
+    ${chip('run.expectation', t('unit.minutes', { n: run.expected_minutes }))}
+    ${run.workdir_effective ? chip('run.workdir', `<code>${e(run.workdir_effective)}</code>`, { raw: true }) : ''}
+    ${skillListe(run.skills).length ? chip('skills.title', skillAnzeige(run.skills).join(', ')) : ''}
+  </ul>`
+}
+
+/**
+ * The figures of a run. Its own block because it is the part that moves —
+ * and a definition grid rather than a bullet list, because everyone read those
+ * <li>s as a two-column table anyway.
+ */
+export function runMetrics(run) {
+  const zeile = (key, value) => `<dt>${e(t(key))}</dt><dd>${value}</dd>`
+  return `<dl class="metrics" id="run-metrics">
+    ${zeile('run.runtime', `${fmtLaufzeit(run)} <span class="dim">/ ${e(t('run.expectation'))} ${e(t('unit.minutes', { n: run.expected_minutes }))}</span>`)}
+    ${zeile('run.tokens', e(t('run.tokens_value', { in: run.tokens_in ?? 0, out: run.tokens_out ?? 0 })))}
+    ${zeile('run.costs', run.cost_eur != null ? e(run.cost_eur.toFixed(2)) + ' € (' + e(t('run.abo_delta')) + ')' : run.cost_usd != null ? e(run.cost_usd.toFixed(4)) + ' $' : '–')}
+    ${zeile('run.activity', e(run.last_activity_at ?? '–'))}
+    ${zeile('run.branch_reported', `${e(run.branch_reported ?? '–')} <span class="dim">/ ${e(t('run.branch_expected'))} ${e(run.branch_expected ?? '–')}</span>`)}
+    ${zeile('run.pr', run.pr_url ? `<a href="${e(run.pr_url)}">${e(run.pr_url)}</a>` : '–')}
+    ${zeile('run.exit', `${run.exit_code ?? '–'}${run.tmux_closed_at ? ` <span class="dim">/ ${e(t('run.tmux_closed'))} ${e(run.tmux_closed_at)}</span>` : ''}`)}
+  </dl>`
+}
+
+/** The run's history, oldest first — without the Telegram bookkeeping. */
+export function runEvents(runId) {
+  const events = db.prepare(`SELECT * FROM events WHERE run_id=? AND kind NOT LIKE 'telegram_sent%' ORDER BY id`).all(runId)
+  return `<ul class="events" id="run-events">${events.map(ev => `<li><span class="dim">${e(ev.ts)}</span> ${e(ev.kind)}</li>`).join('') || `<li class="dim">${e(t('run.none'))}</li>`}</ul>`
 }
 
 function fmtLaufzeit(run) {
   const endeMs = run.ended_at ? Date.parse(run.ended_at.replace(' ', 'T') + 'Z') : Date.now()
   const min = Math.round((endeMs - Date.parse(run.started_at.replace(' ', 'T') + 'Z')) / 60000)
-  return `${min} min${run.ended_at ? '' : ' (' + t('run.running') + ')'}`
+  return `${t('unit.minutes', { n: min })}${run.ended_at ? '' : ' (' + t('run.running') + ')'}`
 }
 
 /**
@@ -534,16 +1076,16 @@ function fmtLaufzeit(run) {
  * as history. The evidence (the line that fired) is shown — otherwise a false
  * alarm cannot be told apart from a real one.
  */
-function vorfallAbschnitt(runId, runStatus = null) {
+export function vorfallAbschnitt(runId, runStatus = null) {
   const alle = alleVorfaelle(runId)
   if (!alle.length) return ''
-  const zeile = (v) => `<li class="vorfall-zeile ${v.geloest_am ? 'geloest' : v.schwere}">
-    <b>${e(typName(v.typ))}</b> <span class="dim">(${e(v.quelle)}, ${v.schwere})</span>
+  const zeile = (v) => `<li class="incident-row ${v.geloest_am ? 'resolved' : SEVERITY_CLASS[v.schwere]}">
+    <b>${e(typName(v.typ))}</b> <span class="dim">(${e(v.quelle)}, ${e(t(SEVERITY_TEXT[v.schwere] ?? 'incidents.severity_red'))})</span>
     · ${v.anzahl}× · ${e(t('incidents.first'))} ${e(v.erst_gesehen)} · ${e(t('incidents.last'))} ${e(v.zuletzt_gesehen)} UTC
     ${v.wieder_geoeffnet ? `· ${e(t('incidents.reopened', { n: v.wieder_geoeffnet }))}` : ''}
     ${v.geloest_am ? `· ${e(t('incidents.resolved_at'))} ${e(v.geloest_am)} (${e(v.geloest_von ?? '')})` : `
       <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/runs/${runId}"><button>${e(t(brauchtMensch(v, runStatus) ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`}
-    ${v.beleg ? `<br><code class="beleg">${e(v.beleg)}</code>` : ''}</li>`
+    ${v.beleg ? `<br><code class="evidence">${e(v.beleg)}</code>` : ''}</li>`
   const offen = alle.filter(v => !v.geloest_am), zu = alle.filter(v => v.geloest_am)
   // The split the single "resolve" button was missing: what is waiting for
   // hands, and what the hub merely wrote down. Both stay visible — but only the
@@ -551,15 +1093,15 @@ function vorfallAbschnitt(runId, runStatus = null) {
   const handeln = offen.filter(v => brauchtMensch(v, runStatus))
   const notiz = offen.filter(v => !brauchtMensch(v, runStatus))
   return `<h3>${e(t('incidents.title'))}</h3>
-  ${handeln.length ? `<h4 class="vorfall-gruppe rot">${e(t('incidents.needs_you', { n: handeln.length }))}</h4>
+  ${handeln.length ? `<h4 class="incident-group red">${e(t('incidents.needs_you', { n: handeln.length }))}</h4>
     <p class="dim">${e(t('incidents.needs_you_hint'))}</p>
-    <ul class="vorfaelle">${handeln.map(zeile).join('')}</ul>` : ''}
-  ${notiz.length ? `<h4 class="vorfall-gruppe gelb">${e(t('incidents.noticed', { n: notiz.length }))}</h4>
+    <ul class="incidents">${handeln.map(zeile).join('')}</ul>` : ''}
+  ${notiz.length ? `<h4 class="incident-group yellow">${e(t('incidents.noticed', { n: notiz.length }))}</h4>
     <p class="dim">${e(t('incidents.noticed_hint'))}</p>
-    <ul class="vorfaelle">${notiz.map(zeile).join('')}</ul>` : ''}
+    <ul class="incidents">${notiz.map(zeile).join('')}</ul>` : ''}
   ${offen.length ? `<form method="post" action="/api/runs/${runId}/incidents/resolve-all"><button>${e(t('incidents.resolve_all'))}</button>
     <span class="dim">${e(t('incidents.resolve_hint'))}</span></form>` : ''}
-  ${zu.length ? `<details><summary class="dim">${e(t('incidents.resolved_n', { n: zu.length }))}</summary><ul class="vorfaelle">${zu.map(zeile).join('')}</ul></details>` : ''}
+  ${zu.length ? `<details><summary class="dim">${e(t('incidents.resolved_n', { n: zu.length }))}</summary><ul class="incidents">${zu.map(zeile).join('')}</ul></details>` : ''}
   <p class="dim">${e(t('incidents.detector_log'))}: <code>${e(join(process.env.CCHUB_RUNS_DIR ?? `${process.env.HOME}/agents/runs`, runId, 'detektor.jsonl'))}</code></p>`
 }
 
@@ -572,13 +1114,15 @@ export async function pageRepos(req, res, url) {
     return `<tr><td>${e(r.name)}</td><td><code>${e(r.path)}</code></td><td>${e(r.base_branch)}</td>
     <td class="dim">${e(r.worktree_extras)}</td>
     <td>${kurz ? `<span class="dim" title="${e(p)}">${e(kurz)}</span>` : `<span class="dim">—</span>`}</td>
+    <td>${e(r.merge_mode === 'hub' ? t('merge.mode_hub') : t('merge.mode_off'))}${mergeFlowsHint(r.id)}
+      ${r.last_push_at ? `<div class="dim">${e(t('repos.last_push', { ts: r.last_push_at }))}</div>` : ''}</td>
     <td><a href="/repos/edit?id=${r.id}">${e(t('agents.edit'))}</a></td></tr>`
   }).join('')
   const body = `
   <p><a class="btn" href="/repos/edit">${e(t('repos.create'))}</a></p>
-  <table class="list"><thead><tr><th>${e(t('repos.name'))}</th><th>${e(t('repos.path'))}</th><th>${e(t('repos.base'))}</th><th>${e(t('repos.extras'))}</th><th>${e(t('repos.prompt'))}</th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="6" class="dim">${e(t('repos.none'))}</td></tr>`}</tbody></table>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.repos'), '/repos', body))
+  <table class="list"><thead><tr><th>${e(t('repos.name'))}</th><th>${e(t('repos.path'))}</th><th>${e(t('repos.base'))}</th><th>${e(t('repos.extras'))}</th><th>${e(t('repos.prompt'))}</th><th>${e(t('repos.integration_legend'))}</th><th></th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="7" class="dim">${e(t('repos.none'))}</td></tr>`}</tbody></table>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.repos'), '/repos', body))
 }
 
 // ---------------- tmux sessions ----------------
@@ -593,7 +1137,7 @@ export async function pageRepos(req, res, url) {
 // kill is a fetch per session. Nothing here waits for tmux.
 
 const STATE_CLASS = {
-  agent_running: 'rot', run_ended: 'gelb', dead: 'gruen', unknown: 'grau',
+  agent_running: 'red', run_ended: 'yellow', dead: 'green', unknown: 'gray',
 }
 
 function byteText(kb) {
@@ -601,7 +1145,12 @@ function byteText(kb) {
   return kb >= 1024 * 1024 ? `${(kb / 1024 / 1024).toFixed(1)} GB` : `${Math.round(kb / 1024)} MB`
 }
 
-function sessionRow(s) {
+/**
+ * One tmux session as a table row. `ctx` is unused today and stands there for
+ * the same reason the other row renderers take one: the call site, not the row,
+ * decides what a row needs to know.
+ */
+export function sessionRow(s, ctx = {}) {
   const run = s.run
   const running = s.state === 'agent_running'
   const title = run ? runTitle(run, run.agent_name, t('overview.single_run')) : s.name
@@ -617,14 +1166,14 @@ function sessionRow(s) {
     dead: t('sessions.state_dead'),
     unknown: t('sessions.state_unknown'),
   }[s.state]
-  return `<tr data-session="${e(s.name)}" data-running="${running ? '1' : '0'}">
+  return `<tr id="session-${e(s.name)}" data-session="${e(s.name)}" data-running="${running ? '1' : '0'}">
     <td><input type="checkbox" class="sess-pick" value="${e(s.name)}" aria-label="${e(s.name)}"></td>
     <td><span class="dot ${STATE_CLASS[s.state]}"></span> <span class="sess-state">${e(stateText)}</span>
-      ${s.deadStatus ? `<span class="dim">exit ${e(s.deadStatus)}</span>` : ''}</td>
+      ${s.deadStatus ? `<span class="dim">${e(t('sessions.exit', { code: s.deadStatus }))}</span>` : ''}</td>
     <td>${run
-      ? `<a href="/runs/${e(run.id)}">${e(title)}</a><div class="dim">${e(run.status)}${run.repo_name ? ` · ${e(run.repo_name)}` : ''}</div>`
+      ? `<a href="/runs/${e(run.id)}">${e(title)}</a><div class="dim">${e(statusText(run.status))}${run.repo_name ? ` · ${e(run.repo_name)}` : ''}</div>`
       : `<span class="dim">${e(t('sessions.unknown_hint'))}</span>`}</td>
-    <td><code>${e(s.name)}</code>${run ? `<div class="dim">${e(run.harness)}${run.model ? `/${e(run.model)}` : ''}</div>` : ''}</td>
+    <td><code>${e(s.name)}</code>${run ? `<div class="dim">${e(harnessLabel(run.harness))}${run.model ? `/${e(run.model)}` : ''}</div>` : ''}</td>
     <td>${age}</td>
     <td>${activity}</td>
     <td>${e(s.command || '–')}<div class="dim">${e(t('sessions.processes'))}: ${s.resources.count}</div></td>
@@ -640,7 +1189,6 @@ export async function pageSessions(req, res, url) {
   const runningCount = sessions.filter(s => s.state === 'agent_running').length
   const rssTotal = sessions.reduce((n, s) => n + s.resources.rssKb, 0)
   const hours = Math.round(currentKeepMs() / 3_600_000 * 10) / 10
-  const rows = sessions.map(sessionRow).join('')
   const body = `
   <h2>${e(t('sessions.title'))}</h2>
   <p class="dim">${e(t('sessions.intro'))}</p>
@@ -655,16 +1203,25 @@ export async function pageSessions(req, res, url) {
   <p class="dim" id="sess-hidden" hidden></p>
   <p class="dim">${e(t('sessions.auto_hint', { hours: hours }))}
      <a href="/settings">${e(t('nav.settings'))}</a></p>
-  <table class="list sessions"><thead><tr>
+  ${sessionsTable(sessions, {})}
+  <p class="dim">${e(t('sessions.hidden_note', { n: runningCount }))}</p>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(await layout(t('sessions.title'), '/sessions', body))
+}
+
+export function sessionRows(sessions, ctx = {}) {
+  return sessions.map(s => sessionRow(s, ctx)).join('')
+    || `<tr><td colspan="11" class="dim">${e(t('sessions.none'))}</td></tr>`
+}
+
+export function sessionsTable(sessions, ctx = {}) {
+  return `<div class="table-wrap"><table class="list sessions"><thead><tr>
     <th></th><th>${e(t('sessions.col_state'))}</th><th>${e(t('sessions.col_run'))}</th>
     <th>${e(t('sessions.col_session'))}</th><th>${e(t('sessions.col_age'))}</th>
     <th>${e(t('sessions.col_activity'))}</th><th>${e(t('sessions.col_process'))}</th>
     <th>${e(t('sessions.col_resources'))}</th><th>${e(t('sessions.col_windows'))}</th>
     <th>${e(t('sessions.col_path'))}</th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="11" class="dim">${e(t('sessions.none'))}</td></tr>`}</tbody></table>
-  <p class="dim">${e(t('sessions.hidden_note', { n: runningCount }))}</p>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    .end(layout(t('sessions.title'), '/sessions', body))
+  <tbody id="sessions-body">${sessionRows(sessions, ctx)}</tbody></table></div>`
 }
 
 // ---------------- settings ----------------
@@ -677,7 +1234,9 @@ export async function pageSettings(req, res, url) {
      <span class="dim">${e(t('settings.coding_agents_hint'))}</span></p>
   <p><a class="btn" href="/settings/favorites">${e(t('fav.title'))}</a>
      <span class="dim">${e(t('settings.favorites_hint'))}</span></p>
-  <form method="post" action="/settings/save" class="settings">
+  <p><a class="btn" href="/settings/merge">${e(t('merge.settings_title'))}</a>
+     <span class="dim">${e(t('settings.merge_hint', { setup: mergeSettingsSummary() }))}</span></p>
+  <form method="post" action="/settings/save" class="settings form-grid">
     <label>${e(t('settings.language'))} <select name="ui_language">${Object.entries(LANGUAGES).map(([code, label]) =>
       `<option value="${code}" ${(s.ui_language ?? 'en') === code ? 'selected' : ''}>${e(label)}</option>`).join('')}</select></label>
     <label>${e(t('settings.pipeline'))} <select name="pipeline_on"><option value="1" ${s.pipeline_on === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${s.pipeline_on !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
@@ -685,8 +1244,10 @@ export async function pageSettings(req, res, url) {
     <label>${e(t('settings.telegram_chat'))} <input name="telegram_chat" value="${e(s.telegram_chat ?? '')}"></label>
     <label>${e(t('settings.quota_threshold'))} <input name="quota_threshold" type="number" value="${e(s.quota_threshold ?? '90')}"></label>
     <label>${e(t('settings.openrouter_min'))} <input name="openrouter_min_eur" type="number" step="0.5" value="${e(s.openrouter_min_eur ?? '5')}"></label>
-    <label>${e(t('settings.abo_price'))} <input name="abo_price" type="number" value="${e(s.abo_price ?? '200')}"></label>
-    <label>${e(t('settings.cursor_included'))} <input name="cursor_included_usd" type="number" step="1" value="${e(s.cursor_included_usd ?? '20')}"></label>
+    <label>${e(t('settings.abo_price'))} <input name="abo_price" type="number" value="${e(s.abo_price ?? '200')}">
+      <span class="dim">${e(t('settings.abo_price_hint'))}</span></label>
+    <label>${e(t('settings.cursor_included'))} <input name="cursor_included_usd" type="number" step="1" value="${e(s.cursor_included_usd ?? '20')}">
+      <span class="dim">${e(t('settings.cursor_included_hint'))}</span></label>
     <label>${e(t('settings.session_keep'))} <input name="session_keep_hours" type="number" min="0" step="0.5" value="${e(String(sessionKeepHours(s)))}">
       <span class="dim">${e(t('settings.session_keep_hint'))}</span></label>
     <label>${e(t('settings.prompt_suffix'))} <textarea name="prompt_suffix" rows="12">${e(s.prompt_suffix ?? '')}</textarea></label>
@@ -706,13 +1267,13 @@ export async function pageSettings(req, res, url) {
         <span class="dim">${e(t('settings.title_model_hint', { model: DEFAULT_TITLE_MODEL }))}</span></label>
       <label>${e(t('settings.llm_or_provider'))} <input name="llm_title_or_provider" value="${e(s.llm_title_or_provider ?? '')}" placeholder="${e(t('settings.llm_or_ph'))}"></label>
     </fieldset>
-    <button>${e(t('settings.save'))}</button>
+    <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
   </form>
   ${url.searchParams.get('telegram') === 'ok' ? `<p class="ok">✓ ${e(t('settings.telegram_ok'))}</p>` : ''}
   ${url.searchParams.get('telegram') === 'fehler' ? `<p class="err">${e(t('settings.telegram_fail'))}</p>` : ''}
   <p><a class="btn" href="/telegram-setup">${e(t('settings.telegram_setup'))}</a></p>
   <form method="post" action="/settings/test-telegram"><button>${e(t('settings.telegram_test'))}</button></form>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.settings'), '/settings', body))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.settings'), '/settings', body))
 }
 
 // ---------------- favorites (Settings → Favorites) ----------------
@@ -746,7 +1307,7 @@ export async function pageFavorites(req, res, url) {
     : `<a class="btn" href="/settings/favorites/edit">${e(t('fav.create'))}</a>`}
      <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    .end(layout(t('fav.title'), '/settings', body))
+    .end(await layout(t('fav.title'), '/settings', body))
 }
 
 export async function favoriteEdit(req, res, url) {
@@ -757,7 +1318,7 @@ export async function favoriteEdit(req, res, url) {
   // always the one worth keeping, which is why one is saving it at all.
   const werte = f ?? lastRunChoice()
   const body = `<h2>${e(id ? t('fav.edit_title') : t('fav.create_title'))}</h2>
-  <form method="post" action="/settings/favorites/edit${id ? `?id=${id}` : ''}" class="settings">
+  <form method="post" action="/settings/favorites/edit${id ? `?id=${id}` : ''}" class="settings form-grid">
     <label>${e(t('fav.name'))} <input name="name" value="${e(f?.name ?? '')}" placeholder="${e(t('fav.name_ph'))}" required></label>
     ${runSetupFields(werte)}
     ${skillFelder(werte.skills)}
@@ -766,7 +1327,7 @@ export async function favoriteEdit(req, res, url) {
       <a class="btn" href="/settings/favorites">${e(t('fav.title'))}</a></div>
   </form>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    .end(layout(id ? t('fav.edit_title') : t('fav.create_title'), '/settings', body))
+    .end(await layout(id ? t('fav.edit_title') : t('fav.create_title'), '/settings', body))
 }
 
 export async function favoriteSave(req, res, url, formBody) {
@@ -785,6 +1346,78 @@ export async function favoriteDelete(req, res, url, formBody) {
   const b = await formBody()
   deleteFavorite(+b.id)
   redirect(res, '/settings/favorites')
+}
+
+// ---------------- merge (Settings → Merge) ----------------
+//
+// The conflict resolver's setup: which coding agent, provider, model and effort
+// the hub starts when a finished run's branch does not merge any more and its
+// agent is gone (server/integrate.mjs).
+//
+// Its own page, like the favorites, and for the same reason: the
+// provider/model/effort block is driven by hub.js through #prov, #model and
+// #effort, and those ids may exist once per page.
+//
+// There is no second definition builder behind it. The form block is
+// `runSetupFields()` — the one the run form uses — and the way back is
+// `runSetupFromForm()`, so what is stored here cannot come to mean something
+// else than what the run form would have made of the same inputs.
+
+export async function pageMergeSettings(req, res, url) {
+  const s = Object.fromEntries(db.prepare('SELECT key,value FROM settings').all().map(r => [r.key, r.value]))
+  const werte = {
+    harness: s.merge_resolver_harness ?? '',
+    provider: s.merge_resolver_provider ?? '',
+    or_provider: s.merge_resolver_or_provider ?? '',
+    model: s.merge_resolver_model ?? '',
+    effort: s.merge_resolver_effort ?? '',
+    skills: s.merge_resolver_skills ?? null,
+  }
+  const body = `<h2>${e(t('merge.settings_title'))}</h2>
+  <p class="dim">${e(t('merge.settings_intro'))}</p>
+  ${werte.harness ? '' : `<p class="warn">${e(t('merge.no_resolver_hint'))}</p>`}
+  <form method="post" action="/settings/merge" class="settings form-grid">
+    ${runSetupFields(werte)}
+    ${skillFelder(werte.skills)}
+    <label>${e(t('merge.resolver_prompt'))}
+      <textarea name="merge_resolver_prompt" rows="8">${e(s.merge_resolver_prompt ?? '')}</textarea>
+      <span class="dim">${e(t('merge.resolver_prompt_hint'))}</span></label>
+    <div class="btn-row"><button>${e(t('settings.save'))}</button>
+      <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>
+  </form>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(await layout(t('merge.settings_title'), '/settings', body))
+}
+
+export async function mergeSettingsSave(req, res, url, formBody) {
+  const b = await formBody()
+  const problems = []
+  // An empty coding agent means "no resolver configured" and is a legal state —
+  // a conflicting branch is then escalated to the operator directly.
+  if (String(b.harness ?? '').trim()) {
+    const setup = await runSetupFromForm(b, problems)
+    if (problems.length) return problemPage(res, t('merge.settings_title'), problems, '/settings/merge')
+    setSetting('merge_resolver_harness', setup.harness)
+    setSetting('merge_resolver_provider', setup.provider ?? '')
+    setSetting('merge_resolver_or_provider', setup.orProvider ?? '')
+    setSetting('merge_resolver_model', setup.model ?? '')
+    setSetting('merge_resolver_effort', setup.effort ?? '')
+    setSetting('merge_resolver_skills', skillsAusFormular(b) ?? '')
+  } else {
+    for (const k of ['harness', 'provider', 'or_provider', 'model', 'effort', 'skills']) {
+      setSetting(`merge_resolver_${k}`, '')
+    }
+  }
+  setSetting('merge_resolver_prompt', String(b.merge_resolver_prompt ?? ''))
+  redirect(res, '/settings/merge')
+}
+
+/** One line for the settings page: what the resolver is, or that there is none. */
+export function mergeSettingsSummary() {
+  const harness = db.prepare(`SELECT value FROM settings WHERE key='merge_resolver_harness'`).get()?.value
+  if (!harness) return t('merge.not_configured')
+  const model = db.prepare(`SELECT value FROM settings WHERE key='merge_resolver_model'`).get()?.value
+  return [harnessLabel(harness) || harness, model].filter(Boolean).join(' / ')
 }
 
 // ---------------- coding agents (Settings → Coding agents) ----------------
@@ -852,7 +1485,7 @@ export async function pageCodingAgents(req, res, url) {
   <h2>${e(t('ca.add_title'))}</h2>
   ${addBlocks || `<p class="dim">${e(t('ca.all_configured'))}</p>`}
   <p class="dim">${e(t('ca.detect_note'))}</p>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('ca.title'), '/settings', body))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('ca.title'), '/settings', body))
 }
 
 export async function codingAgentSave(req, res, url, formBody) {
@@ -894,7 +1527,7 @@ export async function runNewPost(req, res, url, formBody) {
     } catch { /* duplicate name: the run is what matters, not the copy */ }
   }
   const r = await startRun(def, { repoId: +b.repo_id, ...start })
-  if (!r.runId) return problemPage(res, t('runform.title_short'), [r.error ?? 'start failed'], back)
+  if (!r.runId) return problemPage(res, t('runform.title_short'), [r.error ?? t('run.start_failed')], back)
   redirect(res, `/runs/${r.runId}`)
 }
 
@@ -914,15 +1547,15 @@ function zeitplanFelder(a = {}) {
     ['cron', t('sched.kind_cron')],
   ]
   return `
-  <fieldset class="zeitplan">
+  <fieldset class="schedule">
     <legend>${e(t('sched.legend'))}</legend>
     <label>${e(t('sched.kind'))} <select name="schedule_kind" id="schedule-kind">
       ${arten.map(([v, txt]) => `<option value="${v}" ${kind === v ? 'selected' : ''}>${e(txt)}</option>`).join('')}
     </select></label>
 
     <div class="zp" data-kind="woechentlich">
-      <div class="tage">${WOCHENTAGE.map(w => `
-        <label class="tag"><input type="checkbox" name="schedule_days" value="${w.n}"
+      <div class="weekdays">${WOCHENTAGE.map(w => `
+        <label class="weekday"><input type="checkbox" name="schedule_days" value="${w.n}"
           ${tage.includes(w.n) ? 'checked' : ''}> ${e(t(w.key))}</label>`).join('')}
       </div>
       <label>${e(t('sched.time'))} <input type="time" name="schedule_time" value="${e(a.schedule_time ?? '06:00')}"></label>
@@ -951,7 +1584,7 @@ function zeitplanFelder(a = {}) {
 function agentFields(a = {}, repoId) {
   return `
   <label>${e(t('agents.name'))} <input name="name" value="${e(a.name ?? '')}" required></label>
-  ${runDefFields(a)}
+  ${runDefFields(a, branchContext(repoId))}
   <input type="hidden" name="repo_id" value="${repoId}">
   ${zeitplanFelder(a)}
   <label class="chk"><input type="checkbox" name="active" value="1" ${a.active ?? 1 ? 'checked' : ''}> ${e(t('agents.active'))}</label>`
@@ -968,8 +1601,9 @@ export async function agentEdit(req, res, url) {
     ? a.repo_id
     : +(url.searchParams.get('repo') ?? db.prepare('SELECT id FROM repos ORDER BY name LIMIT 1').get()?.id ?? 0)
   const body = `<h2>${e(id ? t('agentform.title_edit') : t('agentform.title_new'))}</h2>
-  <form method="post" action="/agents/edit${id ? `?id=${id}` : ''}" class="settings">${agentFields(a, repoId)}<button>${e(t('settings.save'))}</button></form>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(id ? t('agentform.title_edit') : t('agentform.title_new'), '/agents', body, repoId))
+  <form method="post" action="/agents/edit${id ? `?id=${id}` : ''}" class="settings form-grid">${agentFields(a, repoId)}
+    <div class="btn-row"><button>${e(t('settings.save'))}</button></div></form>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(id ? t('agentform.title_edit') : t('agentform.title_new'), '/agents', body, repoId))
 }
 
 export async function agentSave(req, res, url, formBody) {
@@ -1095,19 +1729,82 @@ export async function agentStart(req, res, url, formBody) {
   redirect(res, r.runId ? `/runs/${r.runId}` : '/agents')
 }
 
+/**
+ * The Integration block of the repo form (server/integrate.mjs).
+ *
+ * `merge_mode='off'` is the default and means exactly the behaviour that existed
+ * before this block did: the run ends when the agent reports done, and nothing
+ * is merged. Everything below it only matters in 'hub' mode.
+ *
+ * `notify_running` is a CHECKBOX and therefore carries a hidden companion field
+ * with its "0": an unchecked box is simply absent from the body, and "off" would
+ * otherwise read as "not mentioned".
+ */
+function integrationFields(r = {}) {
+  const num = (name, value, min, hint) => `
+    <label>${e(t(`repos.${name}`))} <input type="number" name="${name}" min="${min}" value="${e(String(value))}">
+      <span class="dim">${e(t(hint))}</span></label>`
+  const mode = r.merge_mode === 'hub' ? 'hub' : 'off'
+  return `
+  <fieldset class="schedule">
+    <legend>${e(t('repos.integration_legend'))}</legend>
+    <label>${e(t('repos.merge_mode'))} <select name="merge_mode">
+      <option value="off" ${mode === 'off' ? 'selected' : ''}>${e(t('merge.mode_off'))}</option>
+      <option value="hub" ${mode === 'hub' ? 'selected' : ''}>${e(t('merge.mode_hub'))}</option>
+    </select>
+      <span class="dim">${e(t('repos.merge_mode_hint'))}</span></label>
+    <label>${e(t('repos.merge_check'))} <input name="merge_check" value="${e(r.merge_check ?? '')}" placeholder="node test/unit.mjs">
+      <span class="dim">${e(t('repos.merge_check_hint'))}</span></label>
+    ${num('finish_timeout_min', r.finish_timeout_min ?? 15, 1, 'repos.finish_timeout_hint')}
+    ${num('merge_max_attempts', r.merge_max_attempts ?? 2, 0, 'repos.merge_max_attempts_hint')}
+    ${num('conflict_parallel', r.conflict_parallel ?? 1, 1, 'repos.conflict_parallel_hint')}
+    <input type="hidden" name="notify_running" value="0">
+    <label class="chk"><input type="checkbox" name="notify_running" value="1" ${(r.notify_running ?? 1) ? 'checked' : ''}>
+      ${e(t('repos.notify_running'))}</label>
+    <p class="dim">${e(t('repos.notify_running_hint'))}</p>
+    ${num('max_parallel', r.max_parallel ?? 0, 0, 'repos.max_parallel_hint')}
+    ${mergeFlowsBlock(r)}
+  </fieldset>`
+}
+
+/** The Integration numbers out of the form — same strictness as the other repo fields. */
+function integrationFromForm(b, problems) {
+  const num = (name, min, fallback) => {
+    const raw = String(b[name] ?? '').trim()
+    if (raw === '') return fallback
+    const n = Number(raw)
+    if (!Number.isInteger(n) || n < min) {
+      problems.push(t('repos.err_number', { field: t(`repos.${name}`), min }))
+      return fallback
+    }
+    return n
+  }
+  return {
+    merge_mode: b.merge_mode === 'hub' ? 'hub' : 'off',
+    merge_check: String(b.merge_check ?? '').trim() || null,
+    finish_timeout_min: num('finish_timeout_min', 1, 15),
+    merge_max_attempts: num('merge_max_attempts', 0, 2),
+    conflict_parallel: num('conflict_parallel', 1, 1),
+    // The last value wins in parseForm, so the checkbox beats its hidden companion.
+    notify_running: b.notify_running === '1' || b.notify_running === 'on' ? 1 : 0,
+    max_parallel: num('max_parallel', 0, 0),
+  }
+}
+
 export async function repoEdit(req, res, url) {
   const id = url.searchParams.get('id')
   const r = id ? getRepo(+id) : {}
   const body = `<h2>${e(id ? t('repos.edit_title') : t('repos.create_title'))}</h2>
-  <form method="post" action="/repos/edit${id ? `?id=${id}` : ''}" class="settings">
+  <form method="post" action="/repos/edit${id ? `?id=${id}` : ''}" class="settings form-grid">
     <label>${e(t('repos.name'))} <input name="name" value="${e(r.name ?? '')}" required></label>
     <label>${e(t('repos.path_label'))} <input name="path" value="${e(r.path ?? '')}" placeholder="~/projects/my-project" required></label>
     <label>${e(t('repos.base'))} <input name="base_branch" value="${e(r.base_branch ?? 'main')}"></label>
     <label>${e(t('repos.prompt_label'))} <textarea name="prompt" rows="6">${e(r.prompt ?? '')}</textarea></label>
     <label>${e(t('repos.extras_label'))} <textarea name="worktree_extras" rows="5">${e(r.worktree_extras ?? '[]')}</textarea></label>
-    <button>${e(t('settings.save'))}</button>
+    ${integrationFields(r)}
+    <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
   </form>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('nav.repos'), '/repos', body))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('nav.repos'), '/repos', body))
 }
 
 export async function repoSave(req, res, url, formBody) {
@@ -1128,34 +1825,60 @@ export async function repoSave(req, res, url, formBody) {
   } catch (err) {
     problems.push(t('repos.extras_json', { err: err.message }))
   }
+  const integ = integrationFromForm(b, problems)
   if (problems.length) return problemPage(res, t('repos.edit_title'), problems, back)
   const prompt = (b.prompt ?? '').trim() || null
+  const i = [integ.merge_mode, integ.merge_check, integ.finish_timeout_min, integ.merge_max_attempts,
+    integ.conflict_parallel, integ.notify_running, integ.max_parallel]
   if (id) {
-    db.prepare(`UPDATE repos SET name=?, path=?, base_branch=?, worktree_extras=?, prompt=? WHERE id=?`)
-      .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt, +id)
+    db.prepare(`UPDATE repos SET name=?, path=?, base_branch=?, worktree_extras=?, prompt=?,
+                merge_mode=?, merge_check=?, finish_timeout_min=?, merge_max_attempts=?,
+                conflict_parallel=?, notify_running=?, max_parallel=? WHERE id=?`)
+      .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt, ...i, +id)
   } else {
-    db.prepare(`INSERT INTO repos(name,path,base_branch,worktree_extras,prompt) VALUES(?,?,?,?,?)`)
-      .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt)
+    db.prepare(`INSERT INTO repos(name,path,base_branch,worktree_extras,prompt,
+                merge_mode,merge_check,finish_timeout_min,merge_max_attempts,
+                conflict_parallel,notify_running,max_parallel) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt, ...i)
   }
   redirect(res, '/repos')
 }
 
+/**
+ * Every setting this route may write. An allowlist, not the body's own keys —
+ * a request must not be able to invent a setting.
+ *
+ * 'retention_days' is deliberately absent: it stays in the database as the
+ * fallback for an installation that has not saved the new field yet
+ * (sessionKeepMs), and an empty write would silently reset it.
+ */
+const SETTINGS_KEYS = ['pipeline_on', 'telegram_token', 'telegram_chat', 'quota_threshold',
+  'openrouter_min_eur', 'abo_price', 'cursor_included_usd', 'session_keep_hours', 'prompt_suffix',
+  'llm_check_on', 'llm_check_model', 'llm_check_or_provider',
+  'llm_title_on', 'llm_title_model', 'llm_title_or_provider', 'ui_language']
+
 export async function settingsSave(req, res, url, formBody) {
   const b = await formBody()
-  for (const k of ['pipeline_on', 'telegram_token', 'telegram_chat', 'quota_threshold',
-    // 'retention_days' is deliberately NOT written any more: it stays in the
-    // database as the fallback for an installation that has not saved the new
-    // field yet (sessionKeepMs), and an empty write would silently reset it.
-    'openrouter_min_eur', 'abo_price', 'cursor_included_usd', 'session_keep_hours', 'prompt_suffix',
-    'llm_check_on', 'llm_check_model', 'llm_check_or_provider',
-    'llm_title_on', 'llm_title_model', 'llm_title_or_provider', 'ui_language']) {
-    setSetting(k, b[k] ?? '')
+  // Write only what the request actually CARRIED. This used to be `b[k] ?? ''`
+  // over the whole list, which meant a body with one field blanked the other
+  // fifteen — a settings page that saves a fragment at a time would have wiped
+  // the Telegram token the first time somebody switched the language. The e2e
+  // suite still has to post everything back to change one value; that was the
+  // symptom, and this is the cause.
+  //
+  // Safe for this form because every field here is a text input or a <select>,
+  // and both always post a value — an empty text field arrives as ''. It would
+  // NOT be safe for a checkbox: an unchecked one is simply absent, so its "off"
+  // would read as "not mentioned". A checkbox added here needs a hidden
+  // companion field carrying the 0.
+  for (const k of SETTINGS_KEYS) {
+    if (Object.hasOwn(b, k)) setSetting(k, b[k] ?? '')
   }
   // The language takes effect immediately — the redirect below already renders in it.
-  setLanguage(b.ui_language ?? 'en')
+  if (Object.hasOwn(b, 'ui_language')) setLanguage(b.ui_language ?? 'en')
   // "Used" means saved: only now does the model enter the MRU list.
-  llmModellMerken(b.llm_check_model)
-  rememberTitleModel(b.llm_title_model)
+  if (Object.hasOwn(b, 'llm_check_model')) llmModellMerken(b.llm_check_model)
+  if (Object.hasOwn(b, 'llm_title_model')) rememberTitleModel(b.llm_title_model)
   redirect(res, '/settings')
 }
 
@@ -1219,7 +1942,7 @@ export async function telegramSetup(req, res, url) {
     } catch (e2) { box.textContent = String(e2) }
   })
   </script>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(layout(t('tg.title'), '/settings', body))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(t('tg.title'), '/settings', body))
 }
 
 export async function telegramTokenSave(req, res, url, formBody) {
@@ -1244,7 +1967,7 @@ export async function telegramChats(_req, res) {
   try {
     const r = await fetch(`https://api.telegram.org/bot${token}/getUpdates?limit=100`, { signal: AbortSignal.timeout(15_000) })
     const j = await r.json()
-    if (!j.ok) return jsonOut(res, 200, { ok: false, error: `Telegram: ${j.description ?? 'unknown error'}` })
+    if (!j.ok) return jsonOut(res, 200, { ok: false, error: t('tg.api_error', { msg: j.description ?? t('tg.unknown_error') }) })
     const byId = new Map()
     for (const u of j.result ?? []) {
       for (const key of ['message', 'edited_message', 'channel_post', 'my_chat_member']) {
@@ -1253,7 +1976,7 @@ export async function telegramChats(_req, res) {
         const text = u[key]?.text || u[key]?.caption || ''
         const label = [chat.first_name, chat.last_name, chat.title, chat.username && '@' + chat.username].filter(Boolean).join(' ')
         const prev = byId.get(chat.id)
-        if (!prev) byId.set(chat.id, { id: chat.id, label: label || ('Chat ' + chat.id), last_text: text })
+        if (!prev) byId.set(chat.id, { id: chat.id, label: label || t('tg.chat_fallback', { id: chat.id }), last_text: text })
         else if (text) prev.last_text = text
       }
     }

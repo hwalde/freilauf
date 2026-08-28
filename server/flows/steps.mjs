@@ -167,6 +167,32 @@ export const STEPS = [
     },
   },
   {
+    type: 'shell_command', component: 'task', group: 'data', output: true,
+    // Detached there is nothing to report but the fact — the command outlives
+    // this step, so an exit code or an output would be a promise we cannot keep.
+    outputShape: { from: 'if_field', field: 'detach',
+      then: { type: 'object', props: { ok: { type: 'boolean' }, detached: { type: 'boolean' } } },
+      otherwise: { type: 'object', props: { ok: { type: 'boolean' }, exit_code: { type: 'number' }, stdout: { type: 'string' }, stderr: { type: 'string' } } } },
+    fields: [
+      { key: 'command', kind: 'textarea', required: true, placeholder: 'sleep 3; systemctl --user restart cchub.service' },
+      { key: 'cwd', kind: 'text', default: '{{trigger.run.repo_path}}' },
+      { key: 'timeoutMinutes', kind: 'number', default: 10 },
+      { key: 'detach', kind: 'checkbox', default: false },
+      { key: 'outputVar', kind: 'text', default: 'shell' },
+    ],
+    async run(props, ctx, api) {
+      const command = render(props.command, ctx).trim()
+      if (!command) throw new Error('shell_command: no command')
+      const minutes = Math.max(1, Number(resolve(props.timeoutMinutes, ctx)) || 10)
+      const out = await api.shell({
+        command, cwd: render(props.cwd, ctx).trim(), timeoutMs: minutes * 60_000, detach: !!props.detach,
+      })
+      // An exit code is a result the flow branches on, never a failure of the
+      // step — only a command that could not run at all throws (in api.shell).
+      return { msg: out.detached ? 'detached' : `exit ${out.exit_code}`, output: out }
+    },
+  },
+  {
     type: 'http_request', component: 'task', group: 'data', output: true,
     // `json` stays 'any': the response body has no schema we could know.
     outputShape: { type: 'object', props: { status: { type: 'number' }, ok: { type: 'boolean' }, body: { type: 'string' }, json: { type: 'any' } } },

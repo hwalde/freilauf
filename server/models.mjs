@@ -3,7 +3,7 @@
 // happen HERE, in the server: the browser only reaches the hub on 127.0.0.1
 // and must not contact foreign hosts.
 //
-// Ground rule (same as openrouterCredits() in quota.mjs): a hanging or broken
+// Ground rule (the same one balances.mjs and usage.mjs follow): a hanging or broken
 // provider API must NEVER block the form. In doubt the caller gets an outdated
 // list or none at all — the free slug input always works.
 import { execFile } from 'node:child_process'
@@ -12,6 +12,7 @@ import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { getHarness } from './harnesses/index.mjs'
+import { t } from './i18n.mjs'
 import { getProvider, providerLabel, providerHasKey } from './providers/index.mjs'
 const execFileAsync = promisify(execFile)
 
@@ -83,7 +84,7 @@ async function registry() {
 }
 
 /** Helper context injected into provider plugins. */
-function providerCtx() {
+export function providerCtx() {
   return { json, registry, env: process.env }
 }
 
@@ -127,7 +128,7 @@ async function opencodeIds(provider) {
  */
 function katalog(provider) {
   const plugin = getProvider(provider)
-  if (!plugin) return Promise.resolve({ liste: null, veraltet: false, fehler: `unknown provider: ${provider}` })
+  if (!plugin) return Promise.resolve({ liste: null, veraltet: false, fehler: t('api.unknown_provider', { provider }) })
   return holen(provider, LISTE_MS, () => plugin.fetchModels(providerCtx()))
 }
 
@@ -162,7 +163,7 @@ export function orEndpoints(modelId) {
   const id = String(modelId ?? '').trim()
   // OpenRouter IDs may start with '~' (e.g. ~anthropic/claude-fable-latest).
   if (!/^[\w.~\-]+\/[\w.~\-:]+$/.test(id)) {
-    return Promise.resolve({ liste: null, veraltet: false, fehler: 'model ID does not look like author/slug' })
+    return Promise.resolve({ liste: null, veraltet: false, fehler: t('api.model_id_shape') })
   }
   return holen(`endpoints:${id}`, ENDPUNKTE_MS, async () => {
     const j = await json(`https://openrouter.ai/api/v1/models/${id}/endpoints`)

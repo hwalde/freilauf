@@ -10,8 +10,16 @@ import { transcriptState } from './cursor-transcript.mjs'
 
 const MAX_REPORT = 200 * 1024   // planning 11: report ≤ 200 kB
 
-/** Process one report event. Returns {ok, status?} */
-export async function handleReport(runId, body) {
+/**
+ * Process one report event. Returns `{ ok, message? }`.
+ *
+ * `via` says how the report reached the hub, and the finish gate needs it: with
+ * 'http' the agent is standing in its own `cc-report` call and the answer travels
+ * back as that tool's output — the cheapest moment there is. Every other channel
+ * has no call to answer, so the same text is typed into the tmux session
+ * instead (see server/integrate.mjs).
+ */
+export async function handleReport(runId, body, via = 'http') {
   const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
   // Planning 11: only accept existing runs in running/waiting_help.
   if (!run || !['running', 'waiting_help'].includes(run.status)) return { ok: false, error: 'unknown or already finished run' }
@@ -24,16 +32,25 @@ export async function handleReport(runId, body) {
 
   switch (kind) {
     case 'done': {
+      // The finish gate: with repos.merge_mode='hub' a `done` report is CHECKED
+      // rather than believed — is the worktree clean, does the branch still
+      // merge? null means this repo does not want the hub to integrate, and
+      // then everything below is byte for byte what it always was.
+      const gate = await finishGate(runId, text, via)
+      if (gate?.hold) return { ok: true, message: gate.message ?? null }
       db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now'), report_md=? WHERE id=?`).run(text || null, runId)
       addEvent(runId, 'done')
-      await notifyRun(runId, 'done', doneText(run, text), { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: text })
+      await notifyRun(runId, 'done', doneText(run, text, gate?.mergeLine ?? null), { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: text })
       break
     }
     case 'failed': {
       db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), report_md=? WHERE id=?`)
         .run(`**Failed:** ${text}`, runId)
       addEvent(runId, 'failed')
-      await notifyRun(runId, 'failed', `❌ Run failed${laufKopf(run)}\n${text}`, { fileName: `failed-${runId.slice(0, 8)}.md`, fileContent: text })
+      // Never merged automatically — but named: what a failed run left behind is
+      // a fact the operator should not have to go looking for.
+      const assessment = await assessAfterEnd(runId)
+      await notifyRun(runId, 'failed', `❌ Run failed${laufKopf(run)}\n${text}${assessment}`, { fileName: `failed-${runId.slice(0, 8)}.md`, fileContent: text })
       break
     }
     case 'help': {
@@ -68,7 +85,10 @@ export async function handleReport(runId, body) {
       break
     case '_exit': {
       addEvent(runId, 'exit')
-      const fresh = db.prepare('SELECT status FROM runs WHERE id = ?').get(runId)
+      const fresh = db.prepare('SELECT status, finish_state FROM runs WHERE id = ?').get(runId)
+      // A run in the finish gate HAS reported. Its agent vanishing is not
+      // "ended without a report", it is the escalation trigger (3.3).
+      if (fresh?.finish_state) { await escalateGone(runId); break }
       if (fresh?.status === 'running') {
         // Process gone without done/failed → red (planning 4.5); the watcher confirms via pane_dead.
         addEventOnce(runId, 'anomaly:exit_without_report')
@@ -96,11 +116,13 @@ export async function handleReport(runId, body) {
       break
     case '_pane_died': {
       addEvent(runId, 'pane_died', { exit: body.exit ?? null })
-      const fresh = db.prepare('SELECT status FROM runs WHERE id = ?').get(runId)
+      const fresh = db.prepare('SELECT status, finish_state FROM runs WHERE id = ?').get(runId)
+      if (fresh?.finish_state) { await escalateGone(runId); break }
       if (fresh?.status === 'running') {
         db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), exit_code=? WHERE id=?`)
           .run(Number.isFinite(+body.exit) ? +body.exit : null, runId)
-        await notifyRun(runId, 'pane_died', '🔴 Process dead without a report (tmux pane_dead).')
+        const assessment = await assessAfterEnd(runId)
+        await notifyRun(runId, 'pane_died', `🔴 Process dead without a report (tmux pane_dead).${assessment}`)
       }
       break
     }
@@ -148,8 +170,51 @@ export async function finishByTurnEnd(runId, source) {
     + `${state?.lastAnswer ? '' : ', which the transcript did not yield'}.)_`
   const text = [state?.lastAnswer, note].filter(Boolean).join('\n\n')
   addEvent(runId, 'turn_end_finished', { source, transcript: !!state?.lastAnswer })
-  await handleReport(runId, { kind: 'done', text })
+  // 'internal': there is no cc-report call to answer here, so the finish gate
+  // types its answer into the session instead (server/integrate.mjs).
+  await handleReport(runId, { kind: 'done', text }, 'internal')
   return true
+}
+
+/**
+ * The finish gate, reached by a dynamic import so the cycle stays open in one
+ * direction only: server/integrate.mjs imports this module for notifyRun() and
+ * doneText(). Same pattern the watcher uses for the scheduler.
+ */
+async function finishGate(runId, text, via) {
+  try {
+    const m = await import('./integrate.mjs')
+    return await m.finishGate(runId, text, via)
+  } catch (err) {
+    console.error('[integrate]', err.message)
+    return null   // fail-soft: a broken gate must never swallow a report
+  }
+}
+
+/** The agent of a run in the finish gate is gone — that is an escalation, not a failure. */
+async function escalateGone(runId) {
+  try {
+    const m = await import('./integrate.mjs')
+    await m.escalate(runId, 'agent_gone')
+  } catch (err) { console.error('[integrate]', err.message) }
+}
+
+/**
+ * What a run that did not end with 'done' left behind, as a paragraph for the
+ * Telegram message. Empty where the repo does not want the hub to integrate.
+ */
+export async function assessAfterEnd(runId) {
+  try {
+    const m = await import('./integrate.mjs')
+    const assessment = await m.assessUnmerged(runId)
+    if (!assessment) return ''
+    const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
+    const text = m.assessText(run, assessment)
+    return text ? `\n\n${text}` : ''
+  } catch (err) {
+    console.error('[integrate]', err.message)
+    return ''
+  }
 }
 
 export function addEventOnce(runId, kind, payload = null) {
@@ -176,14 +241,21 @@ function laufKopf(run) {
   return ` — ${a ?? 'single run'} @ ${p ?? '?'} (${run.harness}${run.model ? '/' + run.model : ''})`
 }
 
-function doneText(run, report) {
+/**
+ * The "done" message. `mergeLine` is what the integration has to say about this
+ * run — `Merged into main: abc1234`, or `Nothing to merge (no commits)`. It sits
+ * on the second line next to duration and branch, because "where is the work
+ * now" is the first thing one wants from a finished run.
+ */
+export function doneText(run, report, mergeLine = null) {
   const dur = run.started_at
     ? `Duration: ${Math.round((Date.now() - Date.parse(run.started_at.replace(' ', 'T') + 'Z')) / 60000)} min`
     : ''
   const vorfaelle = db.prepare(`SELECT typ, anzahl FROM incidents WHERE run_id = ? ORDER BY id`).all(run.id)
   const vf = vorfaelle.length ? ' · Incidents: ' + vorfaelle.map(v => `${TYP_TEXT[v.typ] ?? v.typ} ${v.anzahl}×`).join(', ') : ''
   const branch = run.branch_reported || run.branch_expected
-  const zeile2 = [dur, branch ? `Branch: ${branch}` : null, run.pr_url ? `PR: ${run.pr_url}` : null].filter(Boolean).join(' · ')
+  const zeile2 = [dur, branch ? `Branch: ${branch}` : null, run.pr_url ? `PR: ${run.pr_url}` : null,
+    mergeLine].filter(Boolean).join(' · ')
   // Full report; over 4096 chars notify() truncates and notifyLong() attaches the file.
   return `✅ Done${laufKopf(run)}\n${zeile2}${vf}\n\n${report || '(no report text)'}`
 }
@@ -192,6 +264,11 @@ function doneText(run, report) {
  * Telegram with dedupe per (run, type) — planning 4.5: only one message per anomaly type.
  */
 export async function notifyRun(runId, type, text, lang = null) {
+  // A conflict run is the integrator's tool, not work the operator asked for.
+  // He hears about it through the run it works FOR — T-RESOLVING at the start,
+  // the done line naming it after the merge, T-BLOCKED-CONFLICT when it did not
+  // get there. No flag event either: there is nothing to deduplicate.
+  if (db.prepare('SELECT resolves_run_id FROM runs WHERE id=?').get(runId)?.resolves_run_id) return false
   const flag = `telegram_sent:${type}`
   const have = db.prepare('SELECT 1 FROM events WHERE run_id = ? AND kind = ? LIMIT 1').get(runId, flag)
   // Help calls are never duplicates: every question needs an answer.

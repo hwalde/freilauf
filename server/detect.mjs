@@ -19,7 +19,11 @@ import { HARNESS_PLUGINS } from './harnesses/index.mjs'
 import { HTTP_5XX } from './harnesses/patterns.mjs'
 
 /** Incident types. Anything else would be guesswork — better 'unbekannt' than wrong. */
-export const TYPEN = ['rate_limit', 'provider_error', 'auth_error', 'billing_error', 'model_error', 'unbekannt']
+export const TYPEN = ['rate_limit', 'provider_error', 'auth_error', 'billing_error', 'model_error',
+  // Not a provider problem at all: the hub could not get a finished run's work
+  // onto the base branch (server/integrate.mjs). It sits in the same table
+  // because it answers the same question — is anything waiting for me?
+  'merge_blocked', 'unbekannt']
 
 /**
  * Claude's StopFailure enum (as of 2.1.241, read from the binary) → our
@@ -214,6 +218,6 @@ export const TYP_TEXT = {
   billing_error: 'Credits/billing',
   model_error: 'Model unavailable',
   provider_down: 'Provider unreachable',
-  llm_warnung: 'Check-LLM warning',
+  merge_blocked: 'Not merged',
   unbekannt: 'API error',
 }

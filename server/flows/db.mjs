@@ -1,7 +1,10 @@
-// cc-hub flows — persistence. Own tables (flows, flow_runs) plus two retrofitted
+// cc-hub flows — persistence. Own tables (flows, flow_runs) plus three retrofitted
 // columns on runs: `flow_dispatched` (has the "run finished" trigger already been
-// evaluated for this run?) and `flow_run_id` (which flow run started this run, if
-// any). Everything else in the core schema stays untouched.
+// evaluated for this run?), `merge_dispatched` (the same question for the
+// "run merged" trigger) and `flow_run_id` (which flow run started this run, if
+// any). Everything else in the core schema stays untouched — the merge columns
+// themselves (`merge_status`, `merged_sha`, `resolves_run_id`, …) belong to the
+// merge integrator and are only ever read here.
 import db from '../db.mjs'
 import { randomUUID } from 'node:crypto'
 
@@ -35,11 +38,14 @@ CREATE INDEX IF NOT EXISTS idx_flow_runs_flow ON flow_runs(flow_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_flow_runs_wait ON flow_runs(status, wait_run_id);
 `)
 
+export function hasColumn(table, name) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === name)
+}
 function addColumn(table, name, definition) {
-  const have = db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === name)
-  if (!have) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`)
+  if (!hasColumn(table, name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`)
 }
 addColumn('runs', 'flow_dispatched', 'INTEGER NOT NULL DEFAULT 0')
+addColumn('runs', 'merge_dispatched', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('runs', 'flow_run_id', 'TEXT')
 // Runs that were already finished when the flow module arrived must not fire
 // triggers retroactively — a hub restart would otherwise replay history.
@@ -78,6 +84,44 @@ const parse = (s, fallback) => { try { return JSON.parse(s) } catch { return fal
   db.prepare(`INSERT INTO settings(key,value) VALUES('flows_attach_migrated','1')
               ON CONFLICT(key) DO UPDATE SET value='1'`).run()
 })()
+
+/**
+ * Runs that were already merged when this code first ran count as dispatched —
+ * the same "never replay history" rule `flow_dispatched` follows above. Without
+ * it the first start after an update would fire the `run_merged` trigger for
+ * every merge the integrator ever made.
+ *
+ * The merge columns belong to the integrator, so this is a no-op on an
+ * installation that does not have them yet.
+ */
+export function markExistingMergesDispatched() {
+  if (!hasColumn('runs', 'merge_status')) return 0
+  return db.prepare(`UPDATE runs SET merge_dispatched=1 WHERE merge_status='merged' AND merge_dispatched=0`).run().changes
+}
+markExistingMergesDispatched()
+
+/**
+ * A flow run left on `running` by a hub restart is a lie: the engine persists
+ * after every step, but nothing ever picks such a row up again — there is no
+ * startup resume, and repeating the step that was in flight would not be
+ * idempotent (it may have sent a message, started a run, restarted the hub).
+ * So it is closed as failed, with the reason in its own log.
+ *
+ * `waiting` is deliberately untouched: that state is a row, not a stack frame,
+ * and the watcher resumes it exactly as before.
+ */
+export function failRunningFlowRuns() {
+  const rows = db.prepare(`SELECT id, log FROM flow_runs WHERE status='running'`).all()
+  const msg = 'hub restarted while this step was running'
+  for (const row of rows) {
+    const log = parse(row.log, [])
+    log.push({ ts: new Date().toISOString(), step: null, name: null, type: 'end', ok: false, msg })
+    db.prepare(`UPDATE flow_runs SET status='failed', error=?, log=?,
+                ended_at=COALESCE(ended_at, datetime('now')) WHERE id=?`).run(msg, JSON.stringify(log), row.id)
+  }
+  return rows.length
+}
+failRunningFlowRuns()
 
 function hydrate(row) {
   if (!row) return null
@@ -120,6 +164,29 @@ export function autoFlowName() {
     if (!taken.has(candidate)) return candidate
   }
 }
+/**
+ * The repo a `run_merged` trigger is filtered to — null = every repo. ONE rule,
+ * used by `normalizeTrigger()` when a flow is saved and by the repo page when it
+ * lists what runs after a merge; two readings of "which repo is this about"
+ * would be the drift this module keeps avoiding.
+ */
+export const mergeTriggerRepoId = (trigger) => Number(trigger?.repoId) || null
+
+/**
+ * Every flow that reacts to a merge of this repo — its own and the ones that
+ * watch all repos. Deliberately including the switched-off ones: this list is
+ * the repo page's answer to "what happens after a merge here", and a flow that
+ * is off is part of that answer, not absent from it.
+ */
+export function flowsForMergeOfRepo(repoId) {
+  const id = Number(repoId) || 0
+  return listFlows().filter(f => {
+    if ((f.trigger?.kind ?? 'manual') !== 'run_merged') return false
+    const on = mergeTriggerRepoId(f.trigger)
+    return on === null || on === id
+  })
+}
+
 export function deleteFlow(id) { db.prepare('DELETE FROM flows WHERE id = ?').run(id) }
 export function toggleFlow(id) { db.prepare('UPDATE flows SET active = 1 - active WHERE id = ?').run(id) }
 
@@ -164,9 +231,6 @@ export function dueDelayed(nowIso) {
   return db.prepare(`SELECT * FROM flow_runs WHERE status='waiting' AND resume_at IS NOT NULL AND resume_at <= ?`)
     .all(nowIso).map(hydrateRun)
 }
-export function runningFlowRuns() {
-  return db.prepare(`SELECT * FROM flow_runs WHERE status IN ('running','waiting')`).all().map(hydrateRun)
-}
 
 /** Finished runs whose "run finished" trigger has not been evaluated yet. */
 export function undispatchedRuns() {
@@ -174,6 +238,48 @@ export function undispatchedRuns() {
 }
 export function markDispatched(runId) {
   db.prepare('UPDATE runs SET flow_dispatched = 1 WHERE id = ?').run(runId)
+}
+/**
+ * Merged runs whose "run merged" trigger has not been evaluated yet — including
+ * the conflict runs (`resolves_run_id` set), which the dispatcher marks and then
+ * skips: their merge is the origin run's merge, and a flow must fire once per
+ * integration, not once per run involved in it.
+ *
+ * Reads columns the merge integrator owns; the caller catches a database that
+ * does not have them yet.
+ */
+export function undispatchedMerges() {
+  return db.prepare(`SELECT * FROM runs WHERE merge_status = 'merged' AND merge_dispatched = 0
+                     ORDER BY merged_at`).all()
+}
+export function markMergeDispatched(runId) {
+  db.prepare('UPDATE runs SET merge_dispatched = 1 WHERE id = ?').run(runId)
+}
+/**
+ * What a flow may know about the merge itself: the commit it landed as, the
+ * branch it landed on, the conflict run that made it mergeable (if any) and the
+ * files it changed. The file list comes from the `merged` event the integrator
+ * writes — an event, not a column, because it is a list; a merge without one
+ * (an older record, a hand-made row) simply reports no files instead of failing.
+ */
+export function mergeFacts(run) {
+  const repo = db.prepare('SELECT base_branch FROM repos WHERE id = ?').get(run.repo_id)
+  const ev = db.prepare(`SELECT payload FROM events WHERE run_id = ? AND kind = 'merged'
+                         ORDER BY id DESC LIMIT 1`).get(run.id)
+  const payload = parse(ev?.payload ?? '', {}) ?? {}
+  return {
+    sha: run.merged_sha ?? '',
+    base: repo?.base_branch ?? '',
+    resolver_run_id: run.resolver_run_id ?? null,
+    files: Array.isArray(payload.files) ? payload.files.map(String) : [],
+  }
+}
+/** `mergeFacts` for a run id — null when it was never merged, or the columns are not there. */
+export function mergeFactsIfMerged(runId) {
+  try {
+    const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
+    return run?.merge_status === 'merged' ? mergeFacts(run) : null
+  } catch { return null }
 }
 export function markStartedByFlow(runId, flowRunId) {
   db.prepare('UPDATE runs SET flow_run_id = ? WHERE id = ?').run(flowRunId, runId)

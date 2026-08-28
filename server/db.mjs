@@ -5,6 +5,9 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { harnessIds } from './harnesses/index.mjs'
+// events.mjs imports nothing at all — deliberately, so that the module which
+// everything writes through can be imported from anywhere without a cycle.
+import { publish } from './events.mjs'
 
 const DATA_DIR = process.env.CCHUB_DATA_DIR ?? join(homedir(), '.local', 'share', 'cc-hub')
 mkdirSync(DATA_DIR, { recursive: true })
@@ -85,7 +88,6 @@ CREATE TABLE IF NOT EXISTS runs (
   worktree TEXT,
   branch_expected TEXT,
   branch_reported TEXT,
-  branch_observed TEXT,
   pr_url TEXT,
   main_sha_start TEXT,
   exit_code INTEGER,
@@ -158,10 +160,23 @@ addColumn('runs', 'effort', 'TEXT')
 // agent/run, NEVER loaded automatically. The run carries the definition copy as usual.
 addColumn('agents', 'skills', 'TEXT')
 addColumn('runs', 'skills', 'TEXT')
+// The goal: a SECOND prompt, part of the run definition (server/goal.mjs). Only
+// coding agents whose plugin carries a `goal` spec know one — claude does, as
+// `/goal <condition>`. 'goal_sent_at' is the run's own bookkeeping: the command
+// exists only inside the session, so it is typed in AFTER the start, and exactly
+// once.
+addColumn('agents', 'goal', 'TEXT')
+addColumn('runs', 'goal', 'TEXT')
+addColumn('runs', 'goal_sent_at', 'TEXT')
 // Attached flows (JSON list of { flowId, when }) — part of the run definition,
 // see server/flows/attach.mjs. The run carries the definition copy as usual, so
 // editing an agent never changes what an already running run will trigger.
 addColumn('agents', 'flows', 'TEXT')
+// Keep the work on its branch instead of merging it into the base branch — only
+// meaningful while the repo integrates (repos.merge_mode='hub'), stored either
+// way, like every other field of the run definition.
+addColumn('agents', 'keep_on_branch', 'INTEGER NOT NULL DEFAULT 0')
+addColumn('runs', 'keep_on_branch', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('runs', 'flows', 'TEXT')
 // The run's title — what the overview and the detail page name it. An agent run
 // takes the agent's name, a single run the operator's input or a title derived
@@ -181,6 +196,33 @@ addColumn('runs', 'transcript_offset', 'INTEGER NOT NULL DEFAULT 0')
 // under the Archive page. A run is moved there when it is over ('done'/'failed'/'aborted')
 // and not needed at a glance any more — the record, its report and its log stay intact.
 addColumn('runs', 'archived_at', 'TEXT')
+// ---- integration: a run is done when its work is on the base branch ----
+// Per repo, because a repo decides whether the hub integrates at all
+// ('off' = exactly the behaviour before this existed).
+addColumn('repos', 'merge_mode', `TEXT NOT NULL DEFAULT 'off'`)   // 'off' | 'hub'
+addColumn('repos', 'merge_check', 'TEXT')                          // shell command, empty = none
+addColumn('repos', 'finish_timeout_min', 'INTEGER NOT NULL DEFAULT 15')
+addColumn('repos', 'merge_max_attempts', 'INTEGER NOT NULL DEFAULT 2')
+addColumn('repos', 'conflict_parallel', 'INTEGER NOT NULL DEFAULT 1')
+addColumn('repos', 'notify_running', 'INTEGER NOT NULL DEFAULT 1')
+addColumn('repos', 'max_parallel', 'INTEGER NOT NULL DEFAULT 0')   // 0 = unlimited
+// When the hub last pushed the operator's own base-branch commits to origin.
+// The remote is the backup: nothing may exist only on this machine.
+addColumn('repos', 'last_push_at', 'TEXT')
+// Per run: where it started from, where it stands in the finish gate, and what
+// became of its commits. finish_state is a SUB-state of 'running' on purpose —
+// runs.status carries a CHECK, and a new value there would be a table rebuild
+// (harnessCheckErweitern); besides, the run really is still running: its
+// terminal is writable, messages reach it, a human can step in.
+addColumn('runs', 'base_sha', 'TEXT')            // HEAD of the worktree right after creation
+addColumn('runs', 'finish_state', 'TEXT')        // NULL|checking|awaiting_commit|awaiting_merge|merging|check_failed
+addColumn('runs', 'finish_started_at', 'TEXT')
+addColumn('runs', 'merge_status', 'TEXT')
+addColumn('runs', 'merged_sha', 'TEXT')
+addColumn('runs', 'merged_at', 'TEXT')
+addColumn('runs', 'merge_attempts', 'INTEGER NOT NULL DEFAULT 0')
+addColumn('runs', 'resolver_run_id', 'TEXT')     // the conflict run working for this run
+addColumn('runs', 'resolves_run_id', 'TEXT')     // set on a conflict run: the run it works for
 // New harness in the CHECK rule of 'agents'. SQLite cannot change a CHECK (no ALTER
 // for that), and 'CREATE TABLE IF NOT EXISTS' no longer takes effect on an existing
 // database — the old rule would still be in place there and saving a cursor agent
@@ -278,11 +320,6 @@ export function getSetting(key, fallback = null) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key)
   return row ? row.value : fallback
 }
-export function getSettingInt(key, fallback) {
-  const v = getSetting(key)
-  const n = Number.parseInt(v ?? '', 10)
-  return Number.isFinite(n) ? n : fallback
-}
 export function setSetting(key, value) {
   db.prepare(
     `INSERT INTO settings(key, value) VALUES(?, ?)
@@ -313,13 +350,34 @@ export function allSettings() {
 export function addEvent(runId, kind, payload = null) {
   db.prepare('INSERT INTO events(run_id, kind, payload) VALUES(?, ?, ?)')
     .run(runId, kind, payload === null ? null : JSON.stringify(payload))
+  announceRun(runId, kind)
 }
 
-/** Only create the event if this (run,kind) does not exist yet — Telegram/traffic light dedupe by themselves this way. */
-export function addEventOnce(runId, kind, payload = null) {
-  const have = db.prepare('SELECT 1 FROM events WHERE run_id = ? AND kind = ? LIMIT 1').get(runId, kind)
-  if (!have) addEvent(runId, kind, payload)
+/**
+ * Tell the live channel that a run changed.
+ *
+ * It hangs on addEvent() rather than on the 39 `UPDATE runs SET` sites because
+ * a run's meaningful transitions are recorded as events — measured, not assumed:
+ * of the 18 places that write `status=`, 13 already added an event and the five
+ * that did not (kill by hand, answering a help call, retry, and the two flow
+ * equivalents) were a gap in the event list itself. They add one now.
+ *
+ * The payload's `status` is a HINT, not the truth: whether the UPDATE runs
+ * before or after the addEvent() differs per call site. That is harmless here
+ * because the browser answers a signal by re-fetching the fragment, which the
+ * server renders fresh — so there stays exactly one source for what a row says.
+ *
+ * Never throws: the live channel must not be able to break a database write.
+ */
+export function announceRun(runId, kind = 'changed') {
+  try {
+    const row = db.prepare('SELECT repo_id, status FROM runs WHERE id = ?').get(runId)
+    if (row) publish('run', { runId, repoId: row.repo_id, status: row.status, kind })
+  } catch { /* a silent live channel beats a failed write */ }
 }
+
+// The deduplicating variant, addEventOnce(), lives in reports.mjs — next to the
+// anomaly handling every one of its callers belongs to.
 
 export function getRepo(id) {
   const r = db.prepare('SELECT * FROM repos WHERE id = ?').get(id)

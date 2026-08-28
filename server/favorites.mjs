@@ -18,9 +18,9 @@
 // saved under a name therefore cannot mean anything else than what the run form
 // would have made of the same inputs.
 import db from './db.mjs'
-import { runSetupFromForm } from './run-def.mjs'
-import { skillsAusFormular, skillListe, skillAnzeige, eintragName, eintragWert } from './zusaetze.mjs'
-import { attachmentsFromForm, parseAttachments, attachmentSummary } from './flows/attach.mjs'
+import { runSetupFromForm, setupToFormBody } from './run-def.mjs'
+import { skillsAusFormular, skillAnzeige } from './zusaetze.mjs'
+import { attachmentsFromForm, attachmentSummary } from './flows/attach.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import { providerLabel } from './providers/index.mjs'
 import { t } from './i18n.mjs'
@@ -97,34 +97,33 @@ export function saveFavorite({ id = null, fav }) {
  * `runDefFromForm()` instead of building a definition of its own: the favorite
  * only fills in the fields the dialog does not ask for.
  *
- * The two list fields keep the shape the form parser produces (`<name>_list`
- * plus a companion field per entry), because that is what `skillsAusFormular()`
- * and `attachmentsFromForm()` read.
+ * The work itself is `setupToFormBody()` in run-def.mjs: a favorite is the setup
+ * half of a run definition, and so is the conflict resolver's saved setup
+ * (server/integrate.mjs). The function only ever happened to live here.
  */
 export function favoriteToFormBody(fav) {
-  const body = {
+  return setupToFormBody(fav)
+}
+
+/**
+ * A stored favorite in the shape the run form's definition block reads — the
+ * agent-row keys `runDefFields()` expects. `favoriteToFormBody()` is the other
+ * half: it turns a favorite back into a form body for the START path, while
+ * THIS one serves the run form as a template. The Quick-Run dialog's "more
+ * settings" hands its favorite over through `?favorite=<id>`, and the form
+ * opens prefilled with exactly that setup — the prompt, branch rule and start
+ * time are what hub.js parks on top of it.
+ */
+export function favoriteTemplate(fav) {
+  return {
     harness: fav.harness,
     model: fav.model ?? '',
     provider: fav.provider ?? '',
-    effort: fav.effort ?? '',
-    // The serving provider only survives where it can be passed through at all
-    // (opencode + OpenRouter); providerFromForm() decides that, as always.
-    or_pin: fav.or_provider ? '1' : '',
     or_provider: fav.or_provider ?? '',
-    skills_list: [],
-    flows_list: [],
+    effort: fav.effort ?? '',
+    skills: fav.skills ?? null,
+    flows: fav.flows ?? null,
   }
-  for (const eintrag of skillListe(fav.skills)) {
-    const name = eintragName(eintrag)
-    body.skills_list.push(name)
-    const wert = eintragWert(eintrag)
-    if (wert) body[`skill_regler_${name}`] = wert
-  }
-  for (const a of parseAttachments(fav.flows)) {
-    body.flows_list.push(String(a.flowId))
-    body[`flow_when_${a.flowId}`] = a.when
-  }
-  return body
 }
 
 /** "claude · claude-opus-5 · effort high · unlazy (depth 4)" — one line for a list or a dialog. */

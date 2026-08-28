@@ -7,10 +7,12 @@ import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import db, { getRepo, addEvent } from './db.mjs'
 import { RUNS_DIR, WORKTREES_DIR, kurzid, sh } from './util.mjs'
-import { claudeQuota, openrouterCredits } from './quota.mjs'
+import { claudeQuota } from './quota.mjs'
 import { skillPromptZusatz } from './zusaetze.mjs'
+import { deliverGoal } from './goal.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { isHarnessEnabled } from './coding-agents.mjs'
+import { branchRuleText } from './run-def.mjs'
 import { t } from './i18n.mjs'
 
 const PLATFORM_RULES = [
@@ -25,6 +27,23 @@ const PLATFORM_RULES = [
   '  `cc-report help "<question/problem>"` — then WAIT for the answer in this session.',
   '- On failure: `cc-report failed "<reason>"`.',
 ].join('\n')
+
+/**
+ * The one extra rule of a repo the hub integrates for (repos.merge_mode='hub').
+ * It says the two things an agent cannot know by itself: that somebody else
+ * merges, and that resolving a conflict is ITS job while it still knows what it
+ * changed. Inserted after the branch line, because that is where the agent is
+ * being told what its work lives on.
+ */
+const MERGE_RULE = '- Integration: when this run ends, cc-hub merges your work into {base} itself. '
+  + 'Never merge into or push to {base} yourself. Before you report done: commit everything, '
+  + 'then `git fetch origin && git merge origin/{base}` and resolve conflicts — you know your '
+  + 'changes best; later nobody will. cc-hub checks your worktree when you report and tells you '
+  + 'if something is left.'
+
+/** …and its counterpart in the finishing instruction: the answer is worth reading. */
+const MERGE_FINISH_LINE = '     cc-report prints cc-hub\'s answer. If it says the run is not '
+  + 'finished yet, do what it says and report again.'
 
 const FINISH_RULES = [
   'HOW THIS RUN ENDS — two commands, and they are not optional:',
@@ -58,13 +77,29 @@ const FINISH_RULES = [
  * Whatever the operator writes is now an ADDITION, placed where it reads like
  * one.
  */
-export function platformSuffix(run, branchRule, settings) {
+export function platformSuffix(run, branchRule, settings, repo = null) {
   const own = String(settings.prompt_suffix ?? '').trim()
   const harnessRules = getHarness(run.harness)?.promptRules
-  return [PLATFORM_RULES,
+  // Only where the hub really integrates. With merge_mode 'off' the prompt is
+  // byte for byte what it was before this feature existed.
+  const hubMerges = repo?.merge_mode === 'hub'
+  const base = repo?.base_branch || 'main'
+  // A run that keeps its work on its branch gets the branch sentence and nothing
+  // else: it already says the work stays put and that cc-hub will not merge it,
+  // and MERGE_RULE would promise the opposite two lines above. Two rules about
+  // the same thing is one too many — that is the lesson the whole branch table
+  // was written from.
+  const rules = hubMerges && !run.keep_on_branch
+    ? PLATFORM_RULES.replace('- Expected maximum working time', `${MERGE_RULE}\n- Expected maximum working time`)
+    : PLATFORM_RULES
+  const finish = hubMerges
+    ? FINISH_RULES.replace('  3. Only then stop.', `${MERGE_FINISH_LINE}\n  3. Only then stop.`)
+    : FINISH_RULES
+  return [rules,
     own && `Operator rules (apply to every run of this hub):\n${own}`,
-    harnessRules, FINISH_RULES]
+    harnessRules, finish]
     .filter(Boolean).join('\n\n')
+    .replaceAll('{base}', base)
     .replaceAll('{run_id}', run.id)
     .replaceAll('{workdir}', run.workdir_effective)
     .replaceAll('{report_file}', join(RUNS_DIR, run.id, 'report.md'))
@@ -186,8 +221,21 @@ async function makeWorktree(repo, run, branchName) {
       r = await sh('git', ['-C', repo.path, 'worktree', 'add', '-b', branchName, target, start])
     }
   }
-  if (!r.ok) throw new Error(`git worktree failed: ${r.stderr.trim()}`)
-  // Worktree extras (planning 4.0): copy or link.
+  if (!r.ok) throw new Error(t('run.worktree_failed', { err: r.stderr.trim() }))
+  applyExtras(repo, target)
+  return target
+}
+
+/**
+ * Worktree extras (planning 4.0): copy or link what the repo needs but git does
+ * not carry — a `.env`, a linked `node_modules`. Idempotent, so it can be
+ * applied to a worktree that already stands.
+ *
+ * Its own function because the INTEGRATION worktree needs the same treatment: a
+ * merge check like `node test/unit.mjs` runs on the merged result and wants the
+ * linked node_modules just as much as an agent does.
+ */
+export function applyExtras(repo, target) {
   for (const extra of repo.extras ?? []) {
     const src = resolve(repo.path, extra.path)
     const dst = resolve(target, extra.path)
@@ -196,7 +244,6 @@ async function makeWorktree(repo, run, branchName) {
     if (extra.mode === 'link') symlinkSync(src, dst)
     else cpSync(src, dst, { recursive: true })
   }
-  return target
 }
 
 /**
@@ -228,18 +275,18 @@ export function claudeSettingsJson() {
 
 /** Creates the run record (definition copy) and returns the run ID. */
 export function createRun({ repoId, agentId = null, harness, model = null, provider = null,
-  orProvider = null, effort = null, prompt, promptExtra = null, branchMode, branchPattern = null,
-  expectedMinutes, skills = null, flows = null, title = null }) {
+  orProvider = null, effort = null, prompt, promptExtra = null, goal = null, branchMode, branchPattern = null,
+  keepOnBranch = 0, expectedMinutes, skills = null, flows = null, title = null }) {
   if (!getHarness(harness)) throw new Error(t('run.unknown_harness', { harness }))
   if (!isHarnessEnabled(harness)) throw new Error(t('run.harness_not_configured', { harness }))
   if (!prompt?.trim()) throw new Error(t('run.empty_prompt'))
   const id = randomUUID()
   db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, model, provider, or_provider,
-              effort, prompt, prompt_extra, branch_mode, branch_pattern, expected_minutes, skills, flows,
-              title, last_activity_at)
-              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,? , datetime('now'))`)
+              effort, prompt, prompt_extra, goal, branch_mode, branch_pattern, keep_on_branch,
+              expected_minutes, skills, flows, title, last_activity_at)
+              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? , datetime('now'))`)
     .run(id, repoId, agentId, harness, model, provider, orProvider, effort, prompt, promptExtra,
-      branchMode, branchPattern, expectedMinutes, skills, flows, title)
+      goal, branchMode, branchPattern, keepOnBranch ? 1 : 0, expectedMinutes, skills, flows, title)
   return id
 }
 
@@ -282,14 +329,16 @@ export async function launchRun(runId) {
 
   const mainSha = await sh('git', ['-C', repo.path, 'rev-parse', 'HEAD'])
   const settings = Object.fromEntries(db.prepare('SELECT key, value FROM settings').all().map(r => [r.key, r.value]))
-  const branchRule = run.branch_mode === 'neu'
-    ? `Create a new branch, name following the pattern ${branchExpected}.`
-    : run.branch_mode === 'fest'
-      ? `Work on the existing branch ${branchExpected}.`
-      : 'No branch — the worktree is detached; changes are throwaway changes.'
+  // What the agent is told about its branch comes out of BRANCH_MODE_INFO
+  // (run-def.mjs) — the same table the form's explanations come from, so the
+  // two can never say different things about the same choice.
+  const branchRule = branchRuleText(run.branch_mode, {
+    branch: branchExpected, base: repo.base_branch || 'main',
+    hubMerges: repo.merge_mode === 'hub', keepOnBranch: !!run.keep_on_branch,
+  })
   const fullPrompt = [run.prompt, repoPromptZusatz(repo.prompt), run.prompt_extra?.trim(),
     skillPromptZusatz(run.skills),
-    platformSuffix({ ...run, id: runId, workdir_effective: workdir }, branchRule, settings).trim()]
+    platformSuffix({ ...run, id: runId, workdir_effective: workdir }, branchRule, settings, repo).trim()]
     .filter(Boolean).join('\n\n')
   writeFileSync(join(runDir, 'prompt.md'), fullPrompt, { mode: 0o600 })
 
@@ -303,12 +352,20 @@ export async function launchRun(runId) {
     addEvent(runId, 'warn', { hooks: err.message })
   }
 
+  // Only the claude windows are recorded on the run (quota5_start/quota7_start).
+  // An `await openrouterCredits()` used to sit here whose result was never read:
+  // a 10-second-timeout HTTP call on the hot path of every single launch.
+  // Where this run STARTS from: the worktree's HEAD right after it was created.
+  // Everything the run adds sits between this and its tip — which is what makes
+  // "did it commit anything?" and "what does it want merged?" answerable without
+  // guessing at a branch. Read again on a retry, because the worktree is reused.
+  const baseSha = await sh('git', ['-C', workdir, 'rev-parse', 'HEAD'])
   const q = claudeQuota()
-  const credits = await openrouterCredits()
   db.prepare(`UPDATE runs SET status='running', workdir_effective=?, worktree=?, branch_expected=?,
-              main_sha_start=?, quota5_start=?, quota7_start=? WHERE id=?`)
+              main_sha_start=?, base_sha=?, quota5_start=?, quota7_start=? WHERE id=?`)
     .run(workdir, workdir !== repo.path ? workdir : null, branchExpected,
-      mainSha.ok ? mainSha.stdout.trim() : null, q.five, q.seven, runId)
+      mainSha.ok ? mainSha.stdout.trim() : null, baseSha.ok ? baseSha.stdout.trim() : null,
+      q.five, q.seven, runId)
   addEvent(runId, 'started', { workdir, harness: run.harness, model: run.model,
     provider: run.provider ?? null, effort: run.effort ?? null })
 
@@ -339,6 +396,11 @@ export async function launchRun(runId) {
   }
   db.prepare('UPDATE runs SET tmux_session=? WHERE id=?').run(session, runId)
   addEvent(runId, 'tmux_started', { session })
+  // The goal is the SECOND prompt and exists only inside the session (claude:
+  // `/goal <condition>`), so it goes in now that there IS one. Deliberately not
+  // awaited: it waits for the TUI to draw, and a start must not hang on that.
+  // Whatever does not get through is picked up by the watcher (server/goal.mjs).
+  if (run.goal) deliverGoal(runId).catch(err => addEvent(runId, 'warn', { goal: err.message }))
   return { ok: true, session }
 }
 

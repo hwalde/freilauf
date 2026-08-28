@@ -851,6 +851,59 @@ try {
       wahr(!!p.pulse?.url, `${p.id}: pulse target`)
     }
   })
+
+  // ---- balance(): the normalized shape (docs/plugins.md) ----
+  // ctx is injected, so these run without a network and without a key file.
+  const ctxMit = (antwort, env = {}) => ({ json: async () => antwort, registry: async () => ({}), env })
+
+  await pruefe('a provider balance keeps every currency apart', async () => {
+    // DeepSeek reports strings and one entry PER currency — folding them into a
+    // single figure would silently drop one of the two pots.
+    const d = await PROVIDER_PLUGINS.deepseek.balance(ctxMit({
+      is_available: true,
+      balance_infos: [
+        { currency: 'CNY', total_balance: '110.00', granted_balance: '10.00', topped_up_balance: '100.00' },
+        { currency: 'USD', total_balance: '15.50', granted_balance: '0.50', topped_up_balance: '15.00' },
+      ],
+    }, { DEEPSEEK_API_KEY: 'k' }))
+    gleich(d.amounts.length, 2, 'both currencies survive')
+    gleich(d.amounts[0].currency, 'CNY', 'currency carried')
+    gleich(d.amounts[0].remaining, 110, 'string parsed to a number')
+    gleich(d.amounts[1].granted, 0.5, 'granted parsed too')
+    wahr(d.available === true, 'the provider\'s own verdict is carried')
+  })
+  await pruefe('a provider that reports nothing usable answers null, not zero', async () => {
+    const leer = await PROVIDER_PLUGINS.deepseek.balance(ctxMit({ balance_infos: [] }, { DEEPSEEK_API_KEY: 'k' }))
+    wahr(leer === null, 'no amounts and no verdict = no answer')
+    const ohne = await PROVIDER_PLUGINS.deepseek.balance(ctxMit({}, {}))
+    wahr(ohne === null, 'no key = nothing to report')
+    const kaputt = await PROVIDER_PLUGINS.openrouter.balance(
+      ctxMit({ data: { total_credits: 'x', total_usage: null } }, { OPENROUTER_API_KEY: 'k' }))
+    wahr(kaputt === null, 'unusable numbers are no balance')
+  })
+  await pruefe('an exhausted account is stated even when a figure remains', async () => {
+    const d = await PROVIDER_PLUGINS.deepseek.balance(ctxMit({
+      is_available: false,
+      balance_infos: [{ currency: 'USD', total_balance: '2.00', granted_balance: '2.00', topped_up_balance: '0' }],
+    }, { DEEPSEEK_API_KEY: 'k' }))
+    wahr(d.available === false, 'expired promotional credit still shows a number')
+    gleich(d.amounts[0].remaining, 2, 'and the number is reported as it stands')
+  })
+  await pruefe('OpenRouter reports one pot, in dollars, with no verdict', async () => {
+    const d = await PROVIDER_PLUGINS.openrouter.balance(
+      ctxMit({ data: { total_credits: 20, total_usage: 7.125 } }, { OPENROUTER_API_KEY: 'k' }))
+    gleich(d.amounts.length, 1, 'one pot')
+    gleich(d.amounts[0].currency, 'USD', 'dollars, despite the _eur in the old setting name')
+    gleich(d.amounts[0].remaining, 12.88, 'credits minus usage, rounded to cents')
+    wahr(d.available === null, 'not reported is not the same as fine')
+  })
+  await pruefe('remainingIn picks one currency and never guesses', async () => {
+    const { remainingIn } = await import('../server/balances.mjs')
+    const b = { amounts: [{ currency: 'CNY', remaining: 110 }, { currency: 'USD', remaining: 15.5 }] }
+    gleich(remainingIn(b, 'USD'), 15.5, 'the asked-for currency')
+    wahr(remainingIn(b, 'EUR') === null, 'an unknown currency is null, not 0')
+    wahr(remainingIn(null) === null, 'no balance is null, not 0')
+  })
   await pruefe('providerHasKey looks at the environment', () => {
     const alt = process.env.OPENROUTER_API_KEY
     process.env.OPENROUTER_API_KEY = 'test-key'
@@ -922,6 +975,22 @@ try {
       const zuviel = keys.filter(k => !en.includes(k))
       gleich(fehlen.length, 0, `${code}: missing keys: ${fehlen.slice(0, 5).join(', ')}`)
       gleich(zuviel.length, 0, `${code}: extra keys: ${zuviel.slice(0, 5).join(', ')}`)
+    }
+  })
+  // Identical keys is not the same as identical meaning: a translation that
+  // drops a {placeholder} renders a sentence with a hole in it, and one that
+  // invents a name renders the name in braces. Both pass the key check above.
+  await pruefe('every translation carries exactly the placeholders English does', () => {
+    // A doubled brace is a flow template ({{path}}), not an interpolation slot —
+    // t() leaves those alone, and their inner word is translated on purpose.
+    const slots = (s) => [...String(s).matchAll(/(?<!\{)\{(\w+)\}(?!\})/g)].map(m => m[1]).sort().join(',')
+    const cats = _catalogs()
+    for (const [key, text] of Object.entries(cats.en)) {
+      const soll = slots(text)
+      for (const code of Object.keys(LANGUAGES)) {
+        if (code === 'en') continue
+        gleich(slots(cats[code][key]), soll, `${code}:${key} placeholders`)
+      }
     }
   })
   await pruefe('no catalog entry is empty', () => {
@@ -1310,6 +1379,177 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // The trigger that fires after a merge and the block that may run a command
+  // afterwards. Both were built for one sentence — "after every merge into this
+  // repo, restart the hub" — and both have exactly one place where they could
+  // silently do the wrong thing: firing twice for one integration, and treating
+  // a non-zero exit code as a broken step.
+  gruppe('Flows: the run_merged trigger and the shell_command block')
+  const { flowsForMerge, flowsTick } = await import('../server/flows/triggers.mjs')
+  const { STEPS } = await import('../server/flows/steps.mjs')
+  const rawdb = fdb.default
+
+  await pruefe('normalizeTrigger: run_merged carries a repo, or all of them', () => {
+    gleich(normalizeTrigger({ kind: 'run_merged', repoId: 4 }).repoId, 4, 'a repo id survives')
+    gleich(normalizeTrigger({ kind: 'run_merged', repoId: '4' }).repoId, 4, 'as a number, whatever the form sent')
+    gleich(normalizeTrigger({ kind: 'run_merged' }).repoId, null, 'nothing chosen = every repo')
+    gleich(normalizeTrigger({ kind: 'run_merged', repoId: 'nonsense' }).repoId, null, 'and so is nonsense')
+    gleich(normalizeTrigger({ kind: 'run_finished', repoId: 4 }).repoId, undefined, 'no other trigger carries one')
+  })
+  await pruefe('flowsForMerge: the filter is the repo, not an attachment', () => {
+    const flows = [
+      { id: 1, name: 'this repo', active: 1, trigger: { kind: 'run_merged', repoId: 7 } },
+      { id: 2, name: 'every repo', active: 1, trigger: { kind: 'run_merged' } },
+      { id: 3, name: 'other repo', active: 1, trigger: { kind: 'run_merged', repoId: 8 } },
+      { id: 4, name: 'switched off', active: 0, trigger: { kind: 'run_merged' } },
+      { id: 5, name: 'run finished', active: 1, trigger: { kind: 'run_finished' } },
+    ]
+    gleich(flowsForMerge({ repo_id: 7, flows: null }, flows).map(f => f.id).join(','), '1,2',
+      'its own repo and "all repos" — and no attachment anywhere in sight')
+    gleich(flowsForMerge({ repo_id: 8 }, flows).map(f => f.id).join(','), '2,3', 'another repo sees its own')
+    gleich(flowsForMerge({ repo_id: 9 }, []).length, 0, 'no flows, no starts')
+  })
+  await pruefe('the merge is a variable only under its own trigger', () => {
+    const mdef = { sequence: [{ id: 'n1', type: 'note', properties: { text: 'x' } }] }
+    const scope = (kind) => vs.varsInScope(mdef, STEP_MAP, 'n1', { kind })
+    gleich(find(scope('run_merged'), 'trigger.merge.sha')?.type, 'string', 'the commit that landed')
+    gleich(find(scope('run_merged'), 'trigger.merge.files')?.type, 'string_list', 'the files it changed')
+    wahr(find(scope('run_merged'), 'trigger.run.merge_status')?.enum.includes('merged'), 'the run says how its merge went')
+    falsch(find(scope('cron'), 'trigger.merge'), 'a schedule has no merge')
+    falsch(find(scope('run_finished'), 'trigger.merge'), 'and neither has a finished run')
+    falsch(find(scope('run_merged'), 'trigger.run')?.conditional, 'a merge always has the run whose work landed')
+  })
+  await pruefe('shell_command: registry entry, defaults and the shape that depends on "detach"', () => {
+    const meta = STEP_MAP.shell_command
+    wahr(!!meta && meta.output && meta.group === 'data', 'in the registry, in the data group, with an output')
+    wahr(STEPS.some(s => s.type === 'shell_command'), 'and in the list the editor is built from')
+    const props = defaultProps('shell_command')
+    gleich(props.outputVar, 'shell', 'default output variable')
+    gleich(props.timeoutMinutes, 10, 'default timeout')
+    gleich(props.detach, false, 'not detached by default')
+    const step = (detach) => ({ id: 'sh', type: 'shell_command', properties: { ...props, command: 'true', detach } })
+    const shapeOf = (detach) => vs.shapePaths('vars.shell', vs.outputShapeOf(step(detach), meta)).map(p => p.path).join(',')
+    enthaelt(shapeOf(false), 'vars.shell.exit_code', 'not detached: the exit code is readable')
+    enthaelt(shapeOf(false), 'vars.shell.stdout', 'and the output')
+    falsch(shapeOf(true).includes('exit_code'), 'detached: there is no exit code to promise')
+    enthaelt(shapeOf(true), 'vars.shell.detached', 'only the fact that it was detached')
+    wahr(validateDefinition({ sequence: [{ id: 'sh', type: 'shell_command', properties: { ...props } }] })
+      .some(p => p.includes("'command' is required")), 'without a command it is not a step')
+  })
+  await pruefe('shell_command: templates, exit code as a result, detach as an immediate answer', async () => {
+    const seen = []
+    const shellApi = {
+      ...stubApi,
+      shell: async (args) => {
+        seen.push(args)
+        if (args.detach) return { ok: true, detached: true }
+        return { ok: false, exit_code: 3, stdout: 'out', stderr: 'err' }
+      },
+    }
+    const def = { sequence: [
+      step('shell_command', { command: 'echo {{trigger.run.id}}', cwd: '{{trigger.run.repo_path}}', timeoutMinutes: 2, detach: false, outputVar: 'shell' }),
+      step('condition', { left: '{{vars.shell.ok}}', op: 'falsy', right: '' }, { branches: {
+        true: [step('shell_command', { command: 'sleep 1; touch x', cwd: '', timeoutMinutes: 10, detach: true, outputVar: 'bg' })],
+        false: [step('note', { text: 'never' })],
+      } }),
+    ] }
+    const id = await engine.startFlowRun({ id: null, name: 'shelly', definition: def },
+      { kind: 'run_merged', run: { id: 'r1', repo_path: '/tmp/repo' }, merge: { sha: 'abc', files: ['a.txt'] } }, shellApi)
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'done', 'a command that exits 3 does NOT fail the flow run')
+    gleich(seen[0].command, 'echo r1', 'the command is a template')
+    gleich(seen[0].cwd, '/tmp/repo', 'and so is the working directory')
+    gleich(seen[0].timeoutMs, 120_000, 'minutes become milliseconds')
+    gleich(fr.context.vars.shell.exit_code, 3, 'the exit code is readable')
+    falsch(fr.context.vars.shell.ok, 'and says the command did not succeed')
+    wahr(fr.log.some(l => l.msg === 'exit 3'), 'the step log names it')
+    gleich(fr.context.vars.bg.detached, true, 'the detached command answers at once')
+    wahr(fr.log.some(l => l.msg === 'detached'), 'and says so')
+    falsch(fr.log.some(l => l.msg === 'never'), 'the branch really hung on the exit code')
+  })
+
+  // The dispatch, against the sandbox database: the five columns belong to the
+  // merge integrator and are not in this branch yet, so the test adds them the
+  // way it will find them later.
+  await pruefe('a merge fires its flows exactly once — the conflict run is marked, not fired', async () => {
+    for (const [name, typ] of [['merge_status', 'TEXT'], ['merged_sha', 'TEXT'], ['merged_at', 'TEXT'],
+      ['resolves_run_id', 'TEXT'], ['resolver_run_id', 'TEXT']]) {
+      if (!fdb.hasColumn('runs', name)) rawdb.exec(`ALTER TABLE runs ADD COLUMN ${name} ${typ}`)
+    }
+    rawdb.exec(`INSERT INTO repos(name, path, base_branch) VALUES('merge-repo', '/tmp/merge-repo', 'main')`)
+    const repoId = rawdb.prepare('SELECT id FROM repos WHERE name=?').get('merge-repo').id
+    const anlegen = (id, extra = {}) => {
+      rawdb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes,
+                     ended_at, flow_dispatched, merge_status, merged_sha, merged_at, resolves_run_id, resolver_run_id)
+                     VALUES(?,?,'done','claude','p','keiner',5,datetime('now'),1,?,?,datetime('now'),?,?)`)
+        .run(id, repoId, extra.merge_status ?? 'merged', extra.merged_sha ?? 'sha-1',
+          extra.resolves_run_id ?? null, extra.resolver_run_id ?? null)
+    }
+    const flowId = fdb.saveFlow({ name: 'after the merge', active: 1, trigger: { kind: 'run_merged', repoId },
+      definition: { sequence: [{ id: 'n', type: 'note', name: 'n', properties: { text: 'merged {{trigger.merge.sha}}' } }] } })
+    const fremd = fdb.saveFlow({ name: 'another repo', active: 1, trigger: { kind: 'run_merged', repoId: repoId + 999 },
+      definition: { sequence: [{ id: 'n', type: 'note', name: 'n', properties: { text: 'no' } }] } })
+
+    anlegen('merge-run-1', { resolver_run_id: 'conflict-run-1' })
+    rawdb.prepare(`INSERT INTO events(run_id, kind, payload) VALUES('merge-run-1','merged',?)`)
+      .run(JSON.stringify({ sha: 'sha-1', files: ['server/a.mjs', 'lang/en.json'] }))
+    await flowsTick(stubApi)
+    const runs1 = fdb.listFlowRuns(flowId)
+    gleich(runs1.length, 1, 'exactly one flow run')
+    gleich(fdb.listFlowRuns(fremd).length, 0, 'the flow of another repo stayed out of it')
+    const trig1 = runs1[0].context.trigger
+    gleich(trig1.kind, 'run_merged', 'trigger kind')
+    gleich(trig1.run.id, 'merge-run-1', 'with the run whose work landed')
+    gleich(trig1.merge.sha, 'sha-1', 'the commit')
+    gleich(trig1.merge.base, 'main', 'the branch it landed on')
+    gleich(trig1.merge.resolver_run_id, 'conflict-run-1', 'and the conflict run that made it mergeable')
+    gleich(trig1.merge.files.join(','), 'server/a.mjs,lang/en.json', 'the files out of the event')
+    wahr(runs1[0].log.some(l => l.msg === 'merged sha-1'), 'the step read the merge')
+    gleich(rawdb.prepare('SELECT merge_dispatched FROM runs WHERE id=?').get('merge-run-1').merge_dispatched, 1, 'marked')
+
+    await flowsTick(stubApi)
+    gleich(fdb.listFlowRuns(flowId).length, 1, 'a second pass starts nothing — the mark holds')
+
+    anlegen('conflict-run-1', { merged_sha: 'sha-1', resolves_run_id: 'merge-run-1' })
+    await flowsTick(stubApi)
+    gleich(fdb.listFlowRuns(flowId).length, 1, 'the conflict run merged the same work and starts no second flow run')
+    gleich(rawdb.prepare('SELECT merge_dispatched FROM runs WHERE id=?').get('conflict-run-1').merge_dispatched, 1,
+      'but it is marked, or the next pass would look at it again')
+
+    anlegen('merge-run-old', { merged_sha: 'sha-old' })
+    gleich(fdb.markExistingMergesDispatched(), 1, 'a merge that was there before this code counts as dispatched')
+    await flowsTick(stubApi)
+    gleich(fdb.listFlowRuns(flowId).length, 1, 'history is never replayed')
+  })
+  // The repo page's way in: a run_merged flow hangs on the repo, so the repo
+  // form has to be able to name it. Unlike the dispatch, this list deliberately
+  // includes the switched-off ones — it answers "what happens after a merge
+  // here", and "nothing, it is off" is part of that answer.
+  await pruefe('flowsForMergeOfRepo: this repo, all repos, and the switched-off ones too', () => {
+    const repoId = rawdb.prepare('SELECT id FROM repos WHERE name=?').get('merge-repo').id
+    const alle = fdb.saveFlow({ name: 'every repo', active: 0, trigger: { kind: 'run_merged' },
+      definition: { sequence: [] } })
+    const fremd = rawdb.prepare('SELECT id FROM flows WHERE name=?').get('another repo').id
+    const namen = fdb.flowsForMergeOfRepo(repoId).map(f => f.name).sort().join(',')
+    gleich(namen, 'after the merge,every repo', 'its own flow and the one watching every repo — the inactive one included')
+    wahr(fdb.flowsForMergeOfRepo(repoId).some(f => f.id === alle && !f.active), 'and it says that it is off')
+    falsch(fdb.flowsForMergeOfRepo(repoId).some(f => f.id === fremd), 'another repo\'s flow stays out')
+    gleich(fdb.flowsForMergeOfRepo(0).map(f => f.name).join(','), 'every repo', 'without a repo only the "all repos" flows')
+    gleich(fdb.mergeTriggerRepoId({ repoId: '4' }), 4, 'one rule for reading the filter')
+    gleich(fdb.mergeTriggerRepoId({}), null, 'and null means all of them')
+  })
+  await pruefe('a flow run the hub restart caught mid-step is closed, not left running', () => {
+    const id = fdb.createFlowRun({ flow: { id: null, name: 'interrupted' }, context: { trigger: {}, vars: {} }, state: { frames: [] } })
+    const waiting = fdb.createFlowRun({ flow: { id: null, name: 'suspended' }, context: { trigger: {}, vars: {} }, state: { frames: [] } })
+    fdb.updateFlowRun(waiting, { status: 'waiting', context: {}, state: {}, log: [], resumeAt: '2099-01-01T00:00:00Z' })
+    gleich(fdb.failRunningFlowRuns(), 1, 'only the one that was really in a step')
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'failed', 'ever "running" would be a lie — nothing ever picks it up again')
+    enthaelt(fr.log.at(-1).msg, 'hub restarted', 'and its own log says why')
+    gleich(fdb.getFlowRun(waiting).status, 'waiting', 'a suspended one is a row, not a stack frame — untouched')
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Docs: AGENTS.md / CLAUDE.md pairing')
 
   await pruefe('every AGENTS.md has a CLAUDE.md next to it that only includes it', async () => {
@@ -1356,6 +1596,96 @@ try {
     delete process.env.CCHUB_AGENTS_SEED
   })
 
+  // A balance nobody can act on is noise: the panel asks only providers that an
+  // ENABLED coding agent may use and that actually carry a credential.
+  await pruefe('balances are only fetched for providers a configured agent may use', async () => {
+    const bal = await import('../server/balances.mjs')
+    const echt = globalThis.fetch
+    const gefragt = []
+    const keys = { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY, DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY }
+    globalThis.fetch = async (url) => {
+      gefragt.push(String(url))
+      return { ok: true, json: async () => ({ data: { total_credits: 5, total_usage: 1 }, is_available: true }) }
+    }
+    try {
+      // Only claude is configured here, and a subscription harness has no providers.
+      bal._balanceCacheReset()
+      gleich(bal.relevantProviderIds().length, 0, 'subscription-only setup asks nobody')
+      gleich((await bal.providerBalances()).length, 0, 'and fetches nothing')
+      gleich(gefragt.length, 0, 'no request left the process')
+
+      ca.saveCodingAgent({ harness: 'opencode', providers: ['opencode-zen', 'deepseek', 'openrouter'] })
+      process.env.OPENROUTER_API_KEY = 'k'
+      delete process.env.DEEPSEEK_API_KEY
+      bal._balanceCacheReset()
+      const rows = await bal.providerBalances()
+      gleich(rows.length, 1, 'a provider without a credential is left out, not reported as broken')
+      gleich(rows[0].provider, 'openrouter', 'the one with a key')
+      wahr(rows[0].ok, 'and it answered')
+      falsch(gefragt.some(u => u.includes('deepseek')), 'the keyless provider was never called')
+    } finally {
+      globalThis.fetch = echt
+      const oc = ca.codingAgentFor('opencode')
+      if (oc) ca.deleteCodingAgent(oc.id)   // restore the world the next group expects
+      for (const [k, v] of Object.entries(keys)) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v
+      }
+      bal._balanceCacheReset()
+    }
+  })
+
+  // The status sidebar asks for usage and balances on EVERY page, so the very
+  // first request of a fresh hub happens while nothing is configured yet. Two
+  // ways that answer used to get stuck for the life of the process, both found
+  // by exactly that: [] cached for two minutes although the configuration had
+  // changed in the meantime, and — worse — a body without a single `await`
+  // (the empty loop) clearing the in-flight flag BEFORE the assignment that
+  // set it, so every later call returned that one stale promise forever.
+  await pruefe('a configuration change is visible in usage and balances without a cache reset', async () => {
+    const usage = await import('../server/usage.mjs')
+    const bal = await import('../server/balances.mjs')
+    const echt = globalThis.fetch
+    const key = process.env.OPENROUTER_API_KEY
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: { total_credits: 5, total_usage: 1 }, is_available: true }) })
+    const vorher = ca.listCodingAgents().map(a => ({ harness: a.harness, providers: a.providerIds, enabled: a.enabled }))
+    try {
+      for (const a of ca.listCodingAgents()) ca.deleteCodingAgent(a.id)
+      usage._usageCacheReset(); bal._balanceCacheReset()
+      delete process.env.OPENROUTER_API_KEY
+      // Nothing configured: nothing to report — and NO await happens in here.
+      gleich((await usage.subscriptionUsage()).length, 0, 'empty configuration reports nothing')
+      gleich((await bal.providerBalances()).length, 0, 'and holds no balance')
+
+      // Now configure — without touching the caches, exactly as the web UI does.
+      ca.saveCodingAgent({ harness: 'claude', enabled: 1, providers: [] })
+      const rows = await usage.subscriptionUsage()
+      gleich(rows.length, 1, 'the newly configured coding agent is reported at once')
+      gleich(rows[0].harness, 'claude', 'and it is the one that was added')
+
+      ca.saveCodingAgent({ harness: 'opencode', enabled: 1, providers: ['openrouter'] })
+      process.env.OPENROUTER_API_KEY = 'k'
+      const b = await bal.providerBalances()
+      gleich(b.length, 1, 'its provider is asked for a balance at once')
+      gleich(b[0].provider, 'openrouter', 'the provider that was just allowed')
+
+      // And a finished request really is finished: `force` is the one call that
+      // is supposed to ignore the cache, so it must not be handed the promise
+      // the cache was made of. That is what a flag left standing does.
+      const uEinmal = await usage.subscriptionUsage()
+      falsch(await usage.subscriptionUsage({ force: true }) === uEinmal,
+        'a forced usage refresh asks again instead of returning the finished request')
+      const bEinmal = await bal.providerBalances()
+      falsch(await bal.providerBalances({ force: true }) === bEinmal,
+        'a forced balance refresh asks again instead of returning the finished request')
+    } finally {
+      globalThis.fetch = echt
+      if (key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = key
+      for (const a of ca.listCodingAgents()) ca.deleteCodingAgent(a.id)
+      for (const a of vorher) ca.saveCodingAgent({ harness: a.harness, enabled: a.enabled, providers: a.providers })
+      usage._usageCacheReset(); bal._balanceCacheReset()
+    }
+  })
+
   // ------------------------------------------------------------------
   gruppe('Run definition: one form → one definition (run-def.mjs)')
   // 'claude' is the configured coding agent here (seeded by the group above).
@@ -1399,6 +1729,95 @@ try {
     gleich(problems.length, 1, `refused (${problems.join(', ')})`)
     gleich(def.provider, null, 'nothing taken over')
   })
+  // ---- the branch rule: one table, three consumers ----
+  await pruefe('the sentence the agent reads comes from BRANCH_MODE_INFO, per merge mode', () => {
+    const rule = (mode, opts) => rd.branchRuleText(mode, opts)
+    // With the integration switched off these three are BYTE FOR BYTE the
+    // sentences that used to be an inline ternary in runner.mjs. If one of them
+    // changes, every prompt of every non-integrating repo changes with it.
+    gleich(rule('keiner', { hubMerges: false }),
+      'No branch — the worktree is detached; changes are throwaway changes.', 'no branch, off')
+    gleich(rule('neu', { branch: 'agent/x', hubMerges: false }),
+      'Create a new branch, name following the pattern agent/x.', 'new branch, off')
+    gleich(rule('fest', { branch: 'long-lived', hubMerges: false }),
+      'Work on the existing branch long-lived.', 'existing branch, off')
+
+    // Under 'hub' the same three say what really happens.
+    enthaelt(rule('keiner', { base: 'main', hubMerges: true }), 'cc-hub merges your commits into main',
+      'no branch under hub does NOT promise throwaway work')
+    falsch(rule('keiner', { base: 'main', hubMerges: true }).includes('throwaway'), 'no leftover promise')
+    enthaelt(rule('neu', { branch: 'b', base: 'trunk', hubMerges: true }), 'merges it into trunk', 'the repo\'s own base branch')
+    enthaelt(rule('fest', { branch: 'b', base: 'main', hubMerges: true }), 'merges it into main', 'existing branch under hub')
+  })
+
+  await pruefe('"keep on branch" only exists where there IS a branch to keep it on', () => {
+    const keep = { base: 'main', hubMerges: true, keepOnBranch: true }
+    enthaelt(rd.branchRuleText('neu', { ...keep, branch: 'b' }), 'STAYS on that branch', 'new branch')
+    enthaelt(rd.branchRuleText('fest', { ...keep, branch: 'b' }), 'will not merge it into main', 'existing branch')
+    // 'keiner' has no keep sentence — it falls back to the ordinary hub one
+    // rather than promising something it cannot do.
+    gleich(rd.branchRuleText('keiner', keep), rd.branchRuleText('keiner', { base: 'main', hubMerges: true }),
+      'no branch: the hub sentence, never a keep sentence')
+    // And keep is ignored where the hub does not integrate at all.
+    gleich(rd.branchRuleText('neu', { branch: 'b', hubMerges: false, keepOnBranch: true }),
+      'Create a new branch, name following the pattern b.', 'off outranks keep')
+  })
+
+  await pruefe('every explanation the table names really exists in lang/en.json', async () => {
+    const { _catalogs } = await import('../server/i18n.mjs')
+    const en = _catalogs().en
+    for (const [mode, info] of Object.entries(rd.BRANCH_MODE_INFO)) {
+      wahr(typeof en[info.label] === 'string' && en[info.label], `${mode}: label key ${info.label}`)
+      for (const modus of ['off', 'hub']) {
+        const key = info.explain[modus]
+        wahr(typeof en[key] === 'string' && en[key], `${mode}/${modus}: explain key ${key}`)
+      }
+      wahr(!!info.rule.off && !!info.rule.hub, `${mode}: both agent sentences`)
+    }
+    // The two that carry {base} in the UI have to keep saying it.
+    enthaelt(en['branch.keep'], '{base}', 'the checkbox names the branch it will NOT merge into')
+  })
+
+  await pruefe('keeping the work on a branch needs a branch', async () => {
+    const p1 = []
+    const def1 = await rd.runDefFromForm({ harness: 'claude', prompt: 'x', branch_mode: 'keiner', keep_on_branch: '1' }, p1)
+    gleich(p1.length, 1, `refused (${p1.join(', ')})`)
+    gleich(def1.keepOnBranch, 1, 'the value is still reported back, so the form can show it ticked')
+    const p2 = []
+    const def2 = await rd.runDefFromForm({ harness: 'claude', prompt: 'x', branch_mode: 'neu', branch_pattern: 'b', keep_on_branch: '1' }, p2)
+    gleich(p2.length, 0, `accepted with a branch (${p2.join(', ')})`)
+    gleich(def2.keepOnBranch, 1, 'and taken over')
+    const p3 = []
+    const def3 = await rd.runDefFromForm({ harness: 'claude', prompt: 'x', branch_mode: 'neu', branch_pattern: 'b' }, p3)
+    gleich(def3.keepOnBranch, 0, 'an unticked checkbox is simply absent — and that is the default')
+  })
+
+  await pruefe('keep_on_branch goes the whole way a run definition field goes', async () => {
+    const agentRow = {
+      harness: 'claude', prompt: 'p', branch_mode: 'fest', branch_pattern: 'long-lived',
+      keep_on_branch: 1, expected_minutes: 20,
+    }
+    gleich(rd.defFromAgent(agentRow).keepOnBranch, 1, 'agent row → definition')
+    gleich(rd.defFromAgent({ ...agentRow, keep_on_branch: 0 }).keepOnBranch, 0, 'and back off again')
+    // saveAgent writes it, defFromAgent reads it back: the round trip a stored
+    // agent takes every time it starts.
+    const id = rd.saveAgent({ repoId: 1, name: `keep-${Date.now()}`, def: await rd.runDefFromForm({
+      harness: 'claude', prompt: 'p', branch_mode: 'fest', branch_pattern: 'long-lived', keep_on_branch: '1',
+    }, []) })
+    const { default: db2 } = await import('../server/db.mjs')
+    const zurueck = db2.prepare('SELECT * FROM agents WHERE id=?').get(id)
+    gleich(zurueck.keep_on_branch, 1, 'stored')
+    gleich(rd.defFromAgent(zurueck).keepOnBranch, 1, 'and read back as the same definition')
+    // The flow designer offers it too, or a flow-started run could never keep.
+    const feld = rd.RUN_DEF_FLOW_FIELDS.find(f => f.key === 'keepOnBranch')
+    wahr(!!feld, 'the flow step has the field')
+    gleich(feld.kind, 'checkbox', 'as a checkbox')
+    gleich(rd.defFromFlowProps({ harness: 'claude', prompt: 'p', branchMode: 'neu', branchPattern: 'b', keepOnBranch: true }).keepOnBranch, 1,
+      'a flow can keep the work on its branch')
+    gleich(rd.defFromFlowProps({ harness: 'claude', prompt: 'p', branchMode: 'keiner', keepOnBranch: true }).keepOnBranch, 0,
+      'but not without a branch — the same rule the form enforces')
+  })
+
   await pruefe('agent row and definition describe the same thing', () => {
     const def = rd.defFromAgent({
       harness: 'claude', model: 'm', provider: null, or_provider: null, effort: 'high',
@@ -1459,6 +1878,46 @@ try {
     gleich(JSON.stringify(rd.lastRunChoiceFor('hermes')), '{}', 'an unconfigured coding agent offers nothing')
     ca.saveCodingAgent({ harness: 'cursor', enabled: 1, providers: [] })
     gleich(rd.lastRunChoiceFor('cursor').model, null, 'a configured one without history stays empty')
+  })
+
+  // ------------------------------------------------------------------
+  // The goal is the one definition field that never reaches the agent through
+  // the prompt file: it exists only as a slash command inside the session, and
+  // only a coding agent whose plugin carries a `goal` spec knows one at all.
+  gruppe('Goal: the second prompt (goal.mjs)')
+  const gl = await import('../server/goal.mjs')
+
+  await pruefe('who knows a goal is the plugin\'s answer, not the form\'s', () => {
+    wahr(gl.harnessSupportsGoal('claude'), 'claude does')
+    falsch(gl.harnessSupportsGoal('opencode'), 'opencode does not')
+    falsch(gl.harnessSupportsGoal('cursor'), 'cursor does not')
+    gleich(gl.goalMax('claude'), 4000, 'and claude names its own limit')
+    gleich(gl.goalMax('hermes'), null, 'a coding agent without a spec has none')
+  })
+  await pruefe('the condition becomes ONE command line', () => {
+    gleich(gl.goalCommand('claude', 'all tests pass'), '/goal all tests pass', 'the command in front of it')
+    gleich(gl.goalCommand('claude', ' all tests\n  pass\n'), '/goal all tests pass',
+      'whitespace folded — a pasted newline would submit the fragment before it')
+    gleich(gl.goalCommand('claude', '   '), null, 'nothing to send')
+    gleich(gl.goalCommand('opencode', 'all tests pass'), null, 'a coding agent without a spec gets no command')
+    gleich(gl.goalCommand('claude', 'x'.repeat(5000)).length, '/goal '.length + 4000, 'capped at the limit')
+  })
+  await pruefe('the goal goes through the form like every other definition field', async () => {
+    const base = { harness: 'claude', prompt: 'x', branch_mode: 'keiner' }
+    gleich((await rd.runDefFromForm(base, [])).goal, null, 'empty field = no goal')
+    gleich((await rd.runDefFromForm({ ...base, goal: '  tests are green  ' }, [])).goal, 'tests are green', 'trimmed')
+    gleich((await rd.runDefFromForm({ ...base, goal: '/goal tests are green' }, [])).goal, 'tests are green',
+      'whoever types the command keeps it: the hub is the one that puts it in front')
+    const zuLang = []
+    gleich((await rd.runDefFromForm({ ...base, goal: 'y'.repeat(4001) }, zuLang)).goal, null, 'nothing taken over')
+    gleich(zuLang.length, 1, `too long is a problem, not a condition cut in half (${zuLang.join(', ')})`)
+    // A coding agent that knows no goal simply has none — the form disables the
+    // field there, so this only catches a body the form did not write.
+    gleich(rd.defFromFlowProps({ harness: 'cursor', prompt: 'x', goal: 'tests are green' }).goal, null,
+      'and a coding agent without a spec gets none, whatever the request says')
+    gleich(rd.defFromFlowProps({ harness: 'claude', prompt: 'x', goal: 'tests are green' }).goal, 'tests are green',
+      'the flow step takes the same route')
+    gleich(rd.defFromAgent({ goal: 'tests are green' }).goal, 'tests are green', 'and the agent row carries it')
   })
 
   // ------------------------------------------------------------------
@@ -1721,6 +2180,177 @@ try {
     ]
     const k = se.autoCloseCandidates(liste, 3600_000, jetzt).map(s => s.name)
     gleich(k.join(','), 'mit-lauf', 'a foreign session is only ended by hand')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Integration: finish gate, integrator, escalation (integrate.mjs)')
+
+  const ig = await import('../server/integrate.mjs')
+
+  await pruefe('the check interval is dense at first and slows down', () => {
+    gleich(ig.nextCheckDelayMs(0), 5000, 'right after the report')
+    gleich(ig.nextCheckDelayMs(59_000), 5000, 'still under a minute')
+    gleich(ig.nextCheckDelayMs(60_000), 15_000, 'from a minute on')
+    gleich(ig.nextCheckDelayMs(4 * 60_000), 15_000, 'under five minutes')
+    gleich(ig.nextCheckDelayMs(5 * 60_000), 30_000, 'from five minutes on')
+    gleich(ig.nextCheckDelayMs(NaN), 5000, 'no timestamp: as at the start')
+  })
+
+  await pruefe('what the hub put into the worktree is not the agent’s dirt', () => {
+    const porcelain = [
+      '?? referenz',
+      '?? .cursor/hooks.json',
+      ' M server/hub.mjs',
+      '?? neu.txt',
+    ].join('\n')
+    const fremd = ig.foreignChanges(porcelain, ['referenz', '.cursor'])
+    gleich(fremd.join(','), 'server/hub.mjs,neu.txt', 'only the agent’s own changes')
+  })
+
+  await pruefe('the extras are filtered as a directory AND as a single file', () => {
+    // git names the directory when everything below it is untracked, and the
+    // single file when it is not — both forms have to be covered.
+    gleich(ig.foreignChanges('?? .cursor/\n', ['.cursor']).length, 0, 'directory form with a slash')
+    gleich(ig.foreignChanges('?? .cursor/hooks.json\n', ['.cursor']).length, 0, 'file below it')
+    gleich(ig.foreignChanges('?? .cursorrules\n', ['.cursor']).length, 1, 'a neighbour with the same prefix is NOT ours')
+  })
+
+  await pruefe('an empty status is an empty list, not a crash', () => {
+    gleich(ig.foreignChanges('', []).length, 0, 'empty')
+    gleich(ig.foreignChanges(null, null).length, 0, 'nothing at all')
+  })
+
+  await pruefe('the finish gate decides in this order: dirty, commits, conflict', () => {
+    gleich(ig.decideFinish({ dirty: true, commits: true, conflict: true }), 'awaiting_commit', 'dirt outranks everything')
+    gleich(ig.decideFinish({ dirty: true, commits: false, conflict: false }), 'awaiting_commit', 'dirty without commits')
+    gleich(ig.decideFinish({ dirty: false, commits: false, conflict: false }), 'nothing', 'nothing committed')
+    gleich(ig.decideFinish({ dirty: false, commits: true, conflict: true }), 'awaiting_merge', 'conflict')
+    gleich(ig.decideFinish({ dirty: false, commits: true, conflict: false }), 'merging', 'clean and mergeable')
+  })
+
+  await pruefe('an unfinished run is classified by commits and dirt', () => {
+    gleich(ig.classifyUnmerged({ commits: 2, dirty: 0 }), 'unmerged_commits', 'only commits')
+    gleich(ig.classifyUnmerged({ commits: 2, dirty: 3 }), 'unmerged_both', 'both')
+    gleich(ig.classifyUnmerged({ commits: 0, dirty: 3 }), 'unmerged_dirty', 'only dirt')
+    gleich(ig.classifyUnmerged({ commits: 0, dirty: 0 }), 'nothing', 'neither')
+  })
+
+  await pruefe('the operator’s own commits are pushed, never forced', () => {
+    gleich(ig.decidePush({ ahead: 0, behind: 0 }), 'skip', 'in sync')
+    gleich(ig.decidePush({ ahead: 0, behind: 4 }), 'skip', 'only origin moved')
+    gleich(ig.decidePush({ ahead: 3, behind: 0 }), 'push', 'fast-forward')
+    gleich(ig.decidePush({ ahead: 3, behind: 4 }), 'diverged', 'both moved: a human decides')
+  })
+
+  await pruefe('git merge-tree’s output becomes the list of conflicting files', () => {
+    const stdout = [
+      'e99c659e743683c311fe49f74f1693a866fb1886',
+      'f.txt',
+      'server/hub.mjs',
+      '',
+      'Auto-merging f.txt',
+      'CONFLICT (content): Merge conflict in f.txt',
+    ].join('\n')
+    gleich(ig.conflictFilesFromMergeTree(stdout).join(','), 'f.txt,server/hub.mjs', 'the paths, not the prose')
+    gleich(ig.conflictFilesFromMergeTree('abc123\n').length, 0, 'a clean merge names no file')
+  })
+
+  await pruefe('a file list is indented and capped', () => {
+    gleich(ig.formatFiles([]), '  (none)', 'nothing to list')
+    gleich(ig.formatFiles(['a.txt', 'b/c.txt']), '  a.txt\n  b/c.txt', 'indented')
+    const many = ig.formatFiles(Array.from({ length: 35 }, (_, i) => `f${i}.txt`))
+    gleich(many.split('\n').length, 31, '30 lines plus the note')
+    enthaelt(many, '… and 5 more', 'says how many were left out')
+  })
+
+  await pruefe('the messages to the agent carry every placeholder filled in', () => {
+    const m1 = ig.fill(ig.M1, { files: '  a.txt', report_file: '/runs/x/report.md', timeout: 15 })
+    enthaelt(m1, 'NOT finished yet', 'says the run is not over')
+    enthaelt(m1, '  a.txt', 'the file')
+    enthaelt(m1, 'cc-report done --file /runs/x/report.md', 'the exact command')
+    enthaelt(m1, 'after 15 minutes', 'the deadline')
+    falsch(/\{[a-z_]+\}/.test(m1), 'no placeholder left over')
+
+    const m2 = ig.fill(ig.M2, { base: 'main', files: '  a.txt', report_file: '/r.md', landed_runs: '- "x" (abc1234): y' })
+    enthaelt(m2, 'git fetch origin && git merge origin/main', 'the command that resolves it')
+    enthaelt(m2, 'Do NOT merge into or push to main yourself', 'the ground rule')
+    falsch(/\{[a-z_]+\}/.test(m2), 'no placeholder left over')
+  })
+
+  await pruefe('the conflict run’s task names branch, reason, report and what landed', () => {
+    const p = ig.fill(ig.P_CONFLICT, {
+      branch: 'resolve/abc1234', base: 'main',
+      orig_title: 'Add a goal field', orig_id: 'aaaa-bbbb',
+      reason: 'merge conflict', files: '  server/db.mjs',
+      check_line: 'Run the merge check and make it pass: `node test/unit.mjs`',
+      orig_report: 'It did the thing.', landed_runs: '- "other" (def5678): moved things',
+      resolver_extra: '',
+    })
+    enthaelt(p, 'make the branch `resolve/abc1234` mergeable', 'its own branch')
+    enthaelt(p, '"Add a goal field" (cc-hub run aaaa-bbbb)', 'the run it works for')
+    enthaelt(p, 'BOTH intentions survive', 'the rule that keeps work from being dropped')
+    enthaelt(p, 'It did the thing.', 'the original report')
+    enthaelt(p, 'never push to main yourself', 'the ground rule')
+    falsch(/\{[a-z_]+\}/.test(p), 'no placeholder left over')
+  })
+
+  await pruefe('a long report is cut and says where the whole one is', () => {
+    const kurz = ig.truncateReport({ id: 'r1', report_md: 'short' }, 20)
+    gleich(kurz, 'short', 'a short report is passed through')
+    const lang = ig.truncateReport({ id: 'r1', report_md: 'x'.repeat(100) }, 20)
+    wahr(lang.startsWith('x'.repeat(20)), 'cut at the cap')
+    enthaelt(lang, 'truncated by cc-hub', 'says it was cut')
+    enthaelt(lang, 'report.md', 'names the full report')
+    gleich(ig.truncateReport({ id: 'r1', report_md: null }), '(no report)', 'no report at all')
+  })
+
+  await pruefe('the Telegram assessment names the numbers and the way back in', () => {
+    const run = { harness: 'claude', id: 'aaaa-bbbb-cccc-dddd', workdir_effective: '/wt/a' }
+    const both = ig.assessText(run, { status: 'unmerged_both', commits: 2, dirty: 3 })
+    enthaelt(both, '2 commit(s)', 'commits')
+    enthaelt(both, '3 uncommitted file(s)', 'dirty files')
+    enthaelt(both, 'Resume the session: cd /wt/a && claude --resume aaaa-bbbb-cccc-dddd', 'the resume command')
+    const hermes = ig.assessText({ harness: 'hermes', workdir_effective: '/wt/b' },
+      { status: 'nothing', commits: 0, dirty: 0 })
+    enthaelt(hermes, 'cannot be resumed', 'a harness without a resume says so')
+    enthaelt(hermes, '/wt/b', 'and names the worktree instead')
+  })
+
+  await pruefe('the setup round trip: setup → form body → the same setup', async () => {
+    const { setupToFormBody, runSetupFromForm } = await import('../server/run-def.mjs')
+    const { saveCodingAgent } = await import('../server/coding-agents.mjs')
+    saveCodingAgent({ harness: 'opencode', enabled: 1, providers: ['openrouter'] })
+    const setup = { harness: 'opencode', provider: 'openrouter', model: 'x/y', or_provider: 'fireworks', effort: null }
+    const problems = []
+    const back = await runSetupFromForm(setupToFormBody(setup), problems)
+    gleich(problems.length, 0, `no problems (${problems.join(' · ')})`)
+    gleich(back.harness, 'opencode', 'harness')
+    gleich(back.provider, 'openrouter', 'provider')
+    gleich(back.model, 'x/y', 'model')
+    gleich(back.orProvider, 'fireworks', 'serving provider survives where it can be passed through')
+  })
+
+  await pruefe('the merge rule is only in the prompt where the hub really merges', async () => {
+    const { platformSuffix } = await import('../server/runner.mjs')
+    const run = { id: 'r1', harness: 'claude', workdir_effective: '/wt/a', expected_minutes: 30 }
+    const out = platformSuffix(run, 'No branch.', {}, { merge_mode: 'off', base_branch: 'main' })
+    falsch(out.includes('cc-hub merges your work'), 'with merge_mode off the prompt is what it always was')
+    falsch(out.includes('cc-report prints'), 'and the finishing block is unchanged too')
+    const an = platformSuffix(run, 'No branch.', {}, { merge_mode: 'hub', base_branch: 'trunk' })
+    enthaelt(an, 'cc-hub merges your work into trunk itself', 'the base branch is named')
+    enthaelt(an, 'Never merge into or push to trunk yourself', 'and so is the ground rule')
+    enthaelt(an, 'cc-report prints cc-hub\'s answer', 'the finishing block says the answer is worth reading')
+    enthaelt(an, 'cc-report done --file', 'and step 2 is still there — it is not removable')
+    falsch(/\{base\}/.test(an), 'no placeholder left over')
+  })
+
+  await pruefe('the resume command comes from the plugin, not from the hub', async () => {
+    const { getHarness } = await import('../server/harnesses/index.mjs')
+    const run = { id: 'aaaa-bbbb', workdir_effective: '/wt/a' }
+    enthaelt(getHarness('claude').resumeCommand(run), 'claude --resume aaaa-bbbb', 'claude knows its session id')
+    enthaelt(getHarness('opencode').resumeCommand(run), 'opencode --continue', 'opencode continues the directory’s session')
+    gleich(getHarness('hermes').resumeCommand(run), null, 'hermes has no reliable answer')
+    gleich(getHarness('claude').resumeCommand({ id: null }), null, 'without a workdir there is no command')
   })
 
 } finally {

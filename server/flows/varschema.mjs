@@ -17,6 +17,18 @@ export const TYPES = ['string', 'number', 'boolean', 'string_list', 'object', 'a
 export const RUN_STATUSES = ['scheduled', 'deferred', 'running', 'waiting_help', 'done', 'failed', 'aborted']
 export const RUN_OUTCOMES = ['done', 'failed', 'aborted']
 export const TRIGGER_ROOTS = ['trigger', 'vars', 'flow']
+export const TRIGGER_KINDS = ['run_finished', 'run_merged', 'cron', 'manual']
+// Where a run's work ended up — what the merge integrator writes into
+// `runs.merge_status` (server/integrate.mjs). Copied here rather than imported,
+// because this module has to stay free of anything the browser cannot run. The
+// empty string leads the list on purpose: it is what a run reports while nothing
+// has been decided yet, and what every run of an installation without the
+// integrator reports forever — so a flow can ask "did this really land on main?"
+// and get an answer either way.
+export const MERGE_STATUSES = [
+  '', 'nothing', 'merged', 'resolving', 'blocked_dirty', 'blocked_conflict', 'blocked_error',
+  'blocked_no_remote', 'unmerged_commits', 'unmerged_dirty', 'unmerged_both', 'skipped_by_operator',
+]
 
 /** What actions.runInfo() delivers — the only picture a flow ever has of a run. */
 export const RUN_SHAPE = {
@@ -46,8 +58,26 @@ export const RUN_SHAPE = {
     ended_at: { type: 'string' },
     incidents: { type: 'number' },
     worktree: { type: 'string' },
+    merge_status: { type: 'string', enum: MERGE_STATUSES },
+    merged_sha: { type: 'string' },
     url: { type: 'string' },
     flow_run_id: { type: 'string' },
+  },
+}
+
+/**
+ * `trigger.merge` — the integration itself, and only under the `run_merged`
+ * trigger. `sha` is what landed, `base` the branch it landed on,
+ * `resolver_run_id` the conflict run that made it mergeable (empty when there
+ * was none) and `files` the paths the merge changed.
+ */
+export const MERGE_SHAPE = {
+  type: 'object',
+  props: {
+    sha: { type: 'string' },
+    base: { type: 'string' },
+    resolver_run_id: { type: 'string' },
+    files: { type: 'string_list' },
   },
 }
 
@@ -109,6 +139,9 @@ export function outputShapeOf(step, meta) {
     return { type: 'object', props }
   }
   if (decl.from === 'run_if_wait') return step?.properties?.wait ? RUN_SHAPE : (decl.otherwise ?? { type: 'any' })
+  // A step whose output depends on one of its own switches: `shell_command`
+  // detached reports that it was detached, and nothing else.
+  if (decl.from === 'if_field') return (step?.properties?.[decl.field] ? decl.then : decl.otherwise) ?? { type: 'any' }
   return decl
 }
 
@@ -161,7 +194,7 @@ export function varsInScope(definition, stepMeta, at = null, trigger = null) {
     }
   }
 
-  add('trigger.kind', { type: 'string', enum: ['run_finished', 'cron', 'manual'] }, 'trigger', false)
+  add('trigger.kind', { type: 'string', enum: TRIGGER_KINDS }, 'trigger', false)
   add('trigger.at', { type: 'string' }, 'trigger', false)
   add('flow.id', { type: 'number' }, 'flow', false)
   add('flow.name', { type: 'string' }, 'flow', false)
@@ -169,6 +202,9 @@ export function varsInScope(definition, stepMeta, at = null, trigger = null) {
   // was given one — offered, but flagged as not guaranteed.
   const kind = trigger?.kind ?? 'run_finished'
   if (kind !== 'cron') add('trigger.run', RUN_SHAPE, 'trigger', kind === 'manual')
+  // The merge exists under its own trigger and nowhere else — offering
+  // {{trigger.merge.sha}} in a cron flow would promise a value that is never there.
+  if (kind === 'run_merged') add('trigger.merge', MERGE_SHAPE, 'trigger', false)
 
   // The element type of a loop is the item type of the list it walks — known
   // whenever the list is a plain {{path}} into a described string_list.

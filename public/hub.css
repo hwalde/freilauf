@@ -1,141 +1,554 @@
 /* cc-hub — plain: tables, forms, one terminal. Red/yellow/green as the only colors. */
 :root { color-scheme: light dark; }
+
+/* ---- Design tokens ----------------------------------------------------
+   Every colour below used to sit unnamed in the rule that happened to need
+   it, and the dark mode had to answer each one with a *selector* of its own
+   — three @media blocks scattered over the file, each a copy of a selector
+   that already existed. That is why a rule could quietly miss its dark
+   counterpart (ul.events li did, for months): nothing connected the two
+   places. A token is redefined once, at the bottom, and no rule has to know
+   that dark mode exists.
+
+   The values here are exactly the ones the file carried before. This layer
+   is deliberately invisible — it buys the *next* change, not this one.
+
+   Two greys that look like one are two: #8a8f96 sits on the light page,
+   #9aa0a6 on the dark header/toast bar. They are not interchangeable and
+   merging them would move pixels, so each keeps its own name. The same for
+   #6b7076 (crumbs, fixed) vs. the ghost button's grey (which does flip). */
+:root {
+  /* Surfaces. --surface-bar, --surface-pre and --surface-term are dark in
+     BOTH schemes on purpose — the header, a report and the terminal are
+     dark regardless of what the system says, so they are not redefined. */
+  --surface-page: #f6f6f4;
+  --surface-card: #fff;        /* tables, settings form, cards, tags, dialog */
+  --surface-hover: #f0f4fa;    /* clickable table row under the mouse */
+  --surface-code: #eceae6;     /* inline <code> */
+  --surface-track: #e4e4e0;    /* quota track on a light card */
+  --surface-bar: #22252a;      /* header + toast, scheme-independent */
+  --surface-pre: #16181b;
+  --surface-term: #000;
+
+  /* Text */
+  --text: #1c1c1c;
+  --text-inverse: #fff;        /* on accent/green; also the setup banner's inverted button face */
+  --text-dim: #8a8f96;         /* .dim and the icon buttons, on light surfaces */
+  --text-soft: #6b7076;        /* breadcrumbs — a shade darker than --text-dim, on purpose */
+  --text-ghost: #6b7076;       /* the dialog's secondary button, the one grey that flips */
+  --text-on-bar: #eee;
+  --text-on-bar-dim: #9aa0a6;
+  --text-on-bar-nav: #cfd4da;
+  --text-pre: #d7dae0;
+
+  /* Borders */
+  --border: #e4e4e0;           /* table rows, event list */
+  --border-field: #dcdad6;     /* fieldset.schedule, weekday tags */
+  --border-strong: #c9c9c4;    /* input frames and the card's left edge — same in dark */
+  --border-ghost: #c9c9c4;     /* the dialog's secondary button */
+  --border-plain: #ccc;        /* plain fieldset */
+  --border-neutral: #999;      /* incident list item without a severity */
+
+  /* Status. Three tones per colour, because the same red means three
+     different things: a text/line tone, a fill behind text, and (for the
+     banners) a deeper variant that carries a border AND its own wash.
+
+     THE RULE, so a fourth shade never gets invented (phase 4 decision — the
+     tones were named but nothing said which one applies where):
+
+       AREA   a filled shape that carries no text of its own: the traffic
+              light dot, a progress fill, a toast's left edge.
+              → --ok / --warn / --err
+       TEXT   a word on the page background. It has to beat the contrast
+              minimum, which the area tone does not: --warn (#f2c14e) on
+              white is unreadable, which is exactly why --warn-text exists.
+              → --ok-text / --warn-text / --err (already dark enough)
+       BORDER a line around text, plus the wash behind that text. A border
+              sits next to page background AND next to its own fill, so it
+              needs the deepest tone of the three.
+              → --warn-deep / --err-deep (+ their -soft washes)
+
+     Green has no -deep because nothing green ever gets a border: green is
+     "fine", and "fine" is never framed. --ok-bright is the one exception to
+     all of this — it is AREA on the permanently dark bar, where the light
+     tone would disappear. */
+  --ok: #46a758;
+  --ok-text: #2c7a3f;          /* readable green on a light surface; also the quick-run button */
+  --ok-hover: #35924b;
+  --ok-bright: #7ddc8f;        /* green on the dark bar */
+  --warn: #f2c14e;
+  --warn-text: #b98900;
+  --warn-deep: #b8860b;
+  --warn-deep-soft: rgba(184, 134, 11, .1);
+  --err: #e5484d;
+  --err-soft: rgba(229, 72, 77, .12);
+  --err-faint: rgba(229, 72, 77, .05);
+  --err-deep: #c62828;
+  --err-deep-soft: rgba(198, 40, 40, .08);
+  --dot-idle: #9aa0a6;         /* fourth traffic-light state, sessions page only */
+  --accent: #2f6fed;
+  --accent-bright: #6ea8fe;    /* accent on the dark bar */
+  --accent-on-bar: #8ec5ff;    /* link inside a toast */
+  --accent-soft-bg: #eef1f6;   /* wash behind a hovered action button */
+  --accent-act-hover: #2f6fed; /* its text — the one accent that brightens in dark */
+
+  /* The translucent blacks: a shadow and a backdrop must sit on whatever is
+     behind them, in either scheme. Same reasoning as --err-soft. */
+  --shadow-dialog: 0 18px 60px rgba(0, 0, 0, .35);
+  --shadow-toast: 0 6px 24px rgba(0, 0, 0, .3);
+  --backdrop: rgba(0, 0, 0, .45);
+
+  /* Type scale — three steps, not one value plus ".92em".
+     TITLE is what one scans a table by, BODY is what one reads, SMALL is
+     what one only looks at once one has found the row. Before this, every
+     size in the file was 15px and .dim was a relative .92em, so a secondary
+     line inside a heading came out at 20px and a secondary line inside a
+     table cell at 13.8px — the same class, two different meanings. Absolute
+     values make "secondary" mean one thing everywhere. */
+  --fs-title: 16px;
+  --fs-body: 15px;
+  --fs-small: 13px;
+  --lh-body: 1.45;
+
+  /* The status sidebar's column. A measurement, not a rhythm — hence not on
+     the spacing scale below. */
+  --sidebar-w: 268px;
+  /* Folded: wide enough for a dot with a number under it and a 6px bar. */
+  --sidebar-rail-w: 46px;
+
+  /* Radii and spacing as a scale. Only padding/margin/gap and border-radius
+     go through it — a width, a height or a border width is a measurement of
+     something concrete, not a rhythm. Values off the scale (1px, 3px, 7px,
+     -4px, 50%) stay literal rather than being rounded onto it: rounding is
+     a visible change, and this layer is not allowed to make one. */
+  --radius-4: 4px;
+  --radius-6: 6px;
+  --radius-8: 8px;
+  --radius-10: 10px;
+  --radius-12: 12px;
+  --radius-pill: 999px;
+  --sp-2: 2px;
+  --sp-4: 4px;
+  --sp-5: 5px;
+  --sp-6: 6px;
+  --sp-8: 8px;
+  --sp-10: 10px;
+  --sp-12: 12px;
+  --sp-14: 14px;
+  --sp-16: 16px;
+  --sp-18: 18px;
+  --sp-20: 20px;
+  --sp-24: 24px;
+}
+
 * { box-sizing: border-box; }
-body { margin: 0; font: 15px/1.45 system-ui, sans-serif; background: #f6f6f4; color: #1c1c1c; }
-header { display: flex; align-items: center; gap: 16px; padding: 8px 16px; background: #22252a; color: #eee; flex-wrap: wrap; }
+body { margin: 0; font: var(--fs-body)/var(--lh-body) system-ui, sans-serif; background: var(--surface-page); color: var(--text); }
+/* The header carries CONTEXT (where am I, which repo) and one ACTION (Quick
+   Run). It used to carry status too — two quota bars and the pipeline state —
+   which is what the sidebar took over: a reading that belongs on every page
+   does not belong in a bar that has to stay one line high. */
+header { display: flex; align-items: center; gap: var(--sp-16); padding: var(--sp-6) var(--sp-16); background: var(--surface-bar); color: var(--text-on-bar); flex-wrap: wrap; }
 header .brand { font-weight: 700; letter-spacing: .5px; }
-header nav a { color: #cfd4da; text-decoration: none; margin-right: 12px; }
-header nav a.on { color: #fff; font-weight: 600; border-bottom: 2px solid #6ea8fe; }
+header nav a { color: var(--text-on-bar-nav); text-decoration: none; margin-right: var(--sp-12); }
+header nav a.on { color: var(--text-inverse); font-weight: 600; border-bottom: 2px solid var(--accent-bright); }
 header .spacer { flex: 1; }
-header .ok { color: #7ddc8f; } header .warn { color: #f2c14e; }
-header label.dim { color: #9aa0a6; }
-.quota { display: flex; align-items: center; gap: 6px; font-size: 12px; }
-.quota .track { width: 90px; height: 8px; background: #3a3f45; border-radius: 4px; overflow: hidden; }
-.quota .fill { height: 100%; background: #7ddc8f; }
-.quota .fill.y { background: #f2c14e; } .quota .fill.r { background: #e5484d; }
-main { max-width: 1200px; margin: 20px auto; padding: 0 16px; }
-table.list { border-collapse: collapse; width: 100%; background: #fff; }
-table.list th, table.list td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e4e4e0; }
-table.list tbody tr:hover { background: #f0f4fa; cursor: pointer; }
+header label.dim { color: var(--text-on-bar-dim); }
+/* ONE quota bar for the whole application (pages.mjs: quotaBar). It only ever
+   sits on a light card now, so the track has one colour again — the dark
+   header variant went with the bars that used to stand there. */
+.quota { display: flex; align-items: center; gap: var(--sp-6); font-size: var(--fs-small); }
+.quota .track { flex: 1; min-width: 60px; max-width: 110px; height: 8px; background: var(--surface-track); border-radius: var(--radius-4); overflow: hidden; }
+.quota .fill { display: block; height: 100%; background: var(--ok); }
+.quota .fill.y { background: var(--warn); } .quota .fill.r { background: var(--err); }
+.quota .quota-label { min-width: 3.4em; }
+.quota .quota-pct { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* ---- page shell: content left, status sidebar right ----
+   `main` keeps its 1200px measure — a line of prose or a form is unreadable
+   wider than that, and the limit was never the problem. What broke it was the
+   overview table growing past it (11 columns of nowrap content have a
+   min-content width no `width:100%` can talk down) and dragging the page with
+   it. The answer is .table-wrap below, not a wider page. */
+.shell { display: grid; grid-template-columns: minmax(0, 1fr) var(--sidebar-w); gap: var(--sp-20);
+  align-items: start; max-width: 1540px; margin: var(--sp-20) auto; padding: 0 var(--sp-16); }
+.shell > main { max-width: 1200px; min-width: 0; margin: 0; padding: 0; }
+main { max-width: 1200px; margin: var(--sp-20) auto; padding: 0 var(--sp-16); }
+/* Collapsed: the toggle stays reachable, the readings fold away. The class
+   sits on the SHELL and not on the sidebar, because the sidebar is swapped
+   whole by the live channel and would lose it on every update. */
+/* Folded away, the sidebar becomes a RAIL — not an empty caption. Measured
+   before this existed: collapsed it was a 107x39 box reading "STATUS", and a
+   panel that says nothing when closed is one nobody opens again. The rail keeps
+   exactly the signals one would fold it open FOR: the pipeline, open incidents,
+   and how full the quota is. */
+.shell.side-closed { grid-template-columns: minmax(0, 1fr) var(--sidebar-rail-w); }
+.shell.side-closed .side-body { display: none; }
+.shell.side-closed .side-head { flex-direction: column; gap: var(--sp-6); }
+.shell.side-closed .side-head h2 { display: none; }
+.shell.side-closed .side-rail { display: flex; }
+.shell.side-closed aside.sidebar { padding: var(--sp-8) var(--sp-4); align-self: stretch; border-radius: var(--radius-6); }
+/* The width animates, not "all": a transition on everything also animates the
+   colours when the scheme flips, which reads as a glitch rather than a move. */
+.shell { transition: grid-template-columns 150ms ease; }
+@media (prefers-reduced-motion: reduce) { .shell { transition: none; } }
+
+/* The rail itself: a vertical stack of signals, readable at 46px. */
+.side-rail { display: none; flex-direction: column; align-items: center; gap: var(--sp-8); margin-top: var(--sp-8); }
+.side-rail .rail-dot { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 11px; color: var(--text-dim); }
+.side-rail .rail-bar { width: 6px; height: 34px; background: var(--surface-track); border-radius: var(--radius-4);
+  overflow: hidden; display: flex; align-items: flex-end; }
+.side-rail .rail-bar i { display: block; width: 100%; background: var(--ok); }
+.side-rail .rail-bar.y i { background: var(--warn); }
+.side-rail .rail-bar.r i { background: var(--err); }
+.side-rail .rail-label { font-size: 10px; color: var(--text-dim); }
+/* A table that does not fit does not get to decide how wide the page is. It
+   scrolls inside its own box instead — nothing is cut off, and `main` keeps
+   its measure on every other block of the page. */
+.table-wrap { overflow-x: auto; }
+/* Under ~1000px the sidebar drops BELOW the content instead of squeezing it.
+   A table narrowed by 268px is the one thing the sidebar must never cause —
+   status is context, and context does not get to crowd out the work. */
+@media (max-width: 1000px) {
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .shell > aside { order: 2; width: 100%; }
+  aside.sidebar .side-body { display: flex; flex-wrap: wrap; gap: var(--sp-12); }
+  aside.sidebar .side-block { flex: 1 1 220px; }
+}
+
+/* ---- status sidebar: the one place that says how the machine is doing ----
+   Pipeline, work in flight, open incidents, subscription usage, provider
+   balances — on EVERY page, because the answer to "can I start something now"
+   must not depend on which page one happens to be standing on. */
+aside.sidebar { background: var(--surface-card); border-radius: var(--radius-10); padding: var(--sp-10) var(--sp-12); font-size: var(--fs-small); }
+aside.sidebar .side-head { display: flex; align-items: center; gap: var(--sp-8); }
+aside.sidebar .side-head h2 { font-size: var(--fs-small); text-transform: uppercase; letter-spacing: .06em;
+  color: var(--text-dim); margin: 0; font-weight: 600; }
+button.side-toggle { background: none; border: 0; color: var(--text-dim); cursor: pointer; margin-left: auto;
+  padding: 0 var(--sp-4); font-size: var(--fs-body); line-height: 1; border-radius: var(--radius-4); }
+button.side-toggle:hover { color: var(--accent-act-hover); background: var(--accent-soft-bg); }
+/* ONE rhythm for the whole sidebar: every rule gets the same air above and
+   below it, and the head is a section like the others rather than a special
+   case. Before this the head sat 8px from the first block while sections sat
+   6+6 apart, and the usage panel had a rule with no padding under it at all —
+   three different gaps in a column 268px wide, which is exactly where uneven
+   spacing shows. */
+aside.sidebar .side-head { padding-bottom: var(--sp-8); border-bottom: 1px solid var(--border); }
+aside.sidebar .side-body { margin-top: 0; }
+aside.sidebar .side-block,
+aside.sidebar details.usage { padding: var(--sp-8) 0; border-top: 1px solid var(--border); }
+/* The first section already has the head's rule above it — a second line there
+   would be two rules with nothing between them. */
+aside.sidebar .side-block:first-child { border-top: 0; }
+aside.sidebar .side-label { display: block; color: var(--text-dim); margin-bottom: var(--sp-4); }
+/* Pipeline as a state with weight, not as a sentence. */
+#header-status { display: flex; align-items: baseline; gap: var(--sp-8); }
+#header-status b { font-size: var(--fs-title); }
+/* Work in flight: one line per status, the number first because that is what
+   is being read. Each line links into the overview filtered to that status. */
+ul.side-counts { list-style: none; padding: 0; margin: 0; }
+ul.side-counts li { padding: var(--sp-2) 0; }
+ul.side-counts a { display: flex; align-items: baseline; gap: var(--sp-8); text-decoration: none; color: inherit; border-radius: var(--radius-4); }
+ul.side-counts a:hover { color: var(--accent-act-hover); }
+ul.side-counts .n { font-size: var(--fs-title); font-weight: 600; min-width: 1.6em; text-align: right; font-variant-numeric: tabular-nums; }
+/* In the sidebar a usage row is a GROUP, not a line. Claude carries three
+   windows and Cursor a reset note, and as a wrapping flex row (the wide
+   layout's shape) label, plan and windows simply flowed into each other — one
+   could not see which bar belonged to which agent. So: the name and its plan
+   stay on the first line, every window goes on its own line beneath, indented
+   under the name it belongs to, and the groups are separated from each other
+   more than their own lines are. */
+aside.sidebar .usage-row { display: block; padding: 0; margin-top: var(--sp-10); }
+aside.sidebar .usage-row:first-of-type { margin-top: var(--sp-4); }
+aside.sidebar .usage-row .quota { padding-left: var(--sp-10); margin-top: var(--sp-2); flex-wrap: wrap; }
+/* Bars line up under each other or they read as three unrelated things. The
+   label column is as wide as the WIDEST label ("7d fable"), not as wide as it
+   happens to need — otherwise the third bar steps to the right. */
+aside.sidebar .usage-row .quota .quota-label { min-width: 4.6em; }
+/* Cursor reports one number and brings no label at all, so its bar started at
+   the indent while Claude's started after the label column. It borrows the
+   same offset. */
+aside.sidebar .usage-row .quota:not(:has(.quota-label)) { padding-left: calc(var(--sp-10) + 4.6em); }
+/* The reset time does not fit beside a bar in a 268px column — squeezed in, it
+   wrapped mid-phrase and shoved the bar around. It gets its own line, aligned
+   under the bar it belongs to. */
+aside.sidebar .usage-row .quota > .dim { flex: 1 0 100%; padding-left: 4.6em; }
+/* Cursor's reset note is a sibling of its bar, not a child — it needs the same
+   alignment by hand. Matched via `.quota ~` so it hits only the note AFTER a
+   bar: the plan ("max (…)", "pro") is a .dim too and belongs on the name's
+   line, not on one of its own. */
+aside.sidebar .usage-row > .quota ~ .dim { display: block; padding-left: calc(var(--sp-10) + 4.6em); }
+/* The panel is already inside a panel that folds; a second disclosure
+   triangle inside it asks the same question twice. It reads as a section. */
+aside.sidebar details.usage > summary { list-style: none; cursor: default; color: var(--text-dim);
+  display: block; margin-bottom: var(--sp-4); }
+aside.sidebar details.usage > summary::-webkit-details-marker { display: none; }
+aside.sidebar details.usage { background: none; margin: 0; border-radius: 0; }
+aside.sidebar details.usage summary { font-weight: 600; color: var(--text-dim); }
+table.list { border-collapse: collapse; width: 100%; background: var(--surface-card); }
+table.list th, table.list td { text-align: left; padding: var(--sp-6) var(--sp-10); border-bottom: 1px solid var(--border); vertical-align: top; }
+table.list th { font-size: var(--fs-small); color: var(--text-dim); font-weight: 600; white-space: nowrap; }
+/* The hand only where a click really goes somewhere. Agent and repo rows have
+   no onclick and promised one for as long as this rule was unconditional. */
+table.list tbody tr:hover { background: var(--surface-hover); }
+table.list tbody tr[onclick]:hover { cursor: pointer; }
 time.reltime { white-space: nowrap; }
-.dim { color: #8a8f96; font-size: .92em; }
+/* Links had NO rule at all, so every one of them rendered in the browser's
+   default #0000EE with a permanent underline — measured, not guessed. On the
+   dark page that is close to unreadable, and in a table it stripes every row.
+   A link carries the accent and earns its underline on hover or focus, where
+   it says "this is where the click goes". */
+a { color: var(--accent-act-hover); text-decoration: none; }
+a:hover, a:focus-visible { text-decoration: underline; }
+/* Inside a table the title IS the content, not a call to action: it reads as
+   text and only turns accent-coloured under the mouse. */
+table.list a { color: var(--text); }
+table.list a:hover, table.list a:focus-visible { color: var(--accent-act-hover); }
+
+.dim { color: var(--text-dim); font-size: var(--fs-small); }
+/* An empty cell is empty. The dash is a placeholder holding a column open, so
+   it must not compete with the values around it. */
+.leer { color: var(--text-dim); opacity: .5; }
+/* The incident badge is a mark, not a sentence: it must not wrap, and the
+   column it sits in must not be squeezed until it is clipped away. */
+table.list td:last-child, table.list th:last-child { white-space: nowrap; }
 .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; }
-.dot.rot { background: #e5484d; } .dot.gelb { background: #f2c14e; } .dot.gruen { background: #46a758; }
-.btn, button { background: #2f6fed; border: 0; color: #fff; padding: 7px 14px; border-radius: 6px; cursor: pointer; font: inherit; }
-button.danger { background: #e5484d; }
+.dot.red { background: var(--err); } .dot.yellow { background: var(--warn); } .dot.green { background: var(--ok); }
+/* A .btn is a button, so it must not also be underlined like a link — it read
+   as both at once. */
+.btn, button { background: var(--accent); border: 0; color: var(--text-inverse); padding: var(--sp-6) var(--sp-14); border-radius: var(--radius-6); cursor: pointer; font: inherit; text-decoration: none; display: inline-block; }
+/* Only ONE action on a page is the primary one. Two buttons in the same accent
+   next to each other ("Start single run" and "Archive") say they are equally
+   important, which is never true — the second is a place to go, not a thing to
+   do. It keeps the button's shape and gives up its colour. */
+.btn.ghost, button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border-strong); }
+.btn.ghost:hover, button.ghost:hover { background: var(--surface-hover); color: var(--accent-act-hover); text-decoration: none; }
+button.danger { background: var(--err); }
 form.inline { display: inline; }
-label { display: block; margin: 10px 0; }
-label.chk { display: flex; align-items: center; gap: 8px; }
-input, select, textarea { font: inherit; padding: 6px 8px; border: 1px solid #c9c9c4; border-radius: 6px; width: 100%; max-width: 640px; }
+label { display: block; margin: var(--sp-10) 0; }
+label.chk { display: flex; align-items: center; gap: var(--sp-8); }
+input, select, textarea { font: inherit; padding: var(--sp-6) var(--sp-8); border: 1px solid var(--border-strong); border-radius: var(--radius-6); width: 100%; max-width: 640px; }
 label.chk input { width: auto; }
-form.settings { background: #fff; padding: 16px; border-radius: 10px; max-width: 720px; }
-.card { background: #fff; padding: 14px 16px; border-radius: 10px; margin: 12px 0; border-left: 4px solid #c9c9c4; }
-.card.ok { border-left-color: #46a758; }
+form.settings { background: var(--surface-card); padding: var(--sp-16); border-radius: var(--radius-10); }
+
+/* ---- forms: one label column, one field column ----
+   `label { display: block }` plus a field inline after the caption means every
+   row starts at a different x — "Title", "Coding agent" and "Reasoning effort"
+   are three different lengths, so the fields stood in three different places
+   and the whole form frayed. A two-column grid lines them up in one move.
+
+   Every selector here carries :not([hidden]) on purpose. `label[hidden] {
+   display: none }` further down is what keeps a switched-off schedule field
+   from being visible AND submitted; it is the weaker selector of the two, so
+   without the guard this grid would quietly bring those fields back. */
+form.form-grid { max-width: 900px; }
+form.form-grid label:not(.chk):not(.weekday):not([hidden]) {
+  display: grid; grid-template-columns: 13em minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-12); align-items: center; margin: var(--sp-10) 0;
+}
+/* A hint belongs under ITS FIELD, in the field's column. Across the full width
+   it ran into the next caption and read as that field's description. */
+form.form-grid label:not(.chk):not(.weekday) > .dim { grid-column: 2; }
+/* A tall field gets its caption above it: next to a 230px textarea the label
+   sits at the bottom edge, so one learns what the big box is only after
+   scrolling past it. */
+/* The :not() chain is repeated verbatim so this rule OUTWEIGHS the grid rule
+   above — same trick, one class more. Without it the caption stayed vertically
+   centred beside a 230px box. */
+form.form-grid label:not(.chk):not(.weekday):not([hidden]):has(textarea) { display: block; }
+form.form-grid label:has(textarea) > textarea { margin-top: var(--sp-4); }
+form.form-grid input, form.form-grid select, form.form-grid textarea { max-width: 100%; }
+form.form-grid fieldset { border-radius: var(--radius-8); }
+/* The goal (the second prompt) is folded away under the task: it is optional,
+   and a form should not open with a field most runs leave empty. Same shape as
+   the Quick-Run dialog's folded branch rule. */
+form.form-grid details.goal { margin: var(--sp-12) 0; }
+form.form-grid details.goal > summary { cursor: pointer; color: var(--accent-act-hover); }
+form.form-grid .btn-row { margin-top: var(--sp-16); }
+
+/* ---- the branch rule: a choice that explains itself ----------------------
+   Cards under one another rather than a <select>, because under merge_mode
+   'hub' the three words no longer say what they mean: the hub merges every run
+   either way and the rule only decides under which NAME the work travels. Both
+   explanations are in the markup; `data-merge-mode` on the fieldset decides
+   which one is visible, so the static case needs no JavaScript at all and the
+   one form that can switch repo in place only flips an attribute.
+
+   The :not([hidden]) chain is the same guard the grid rules above carry: these
+   labels sit inside a .form-grid form, and without it a hidden pattern field
+   would be brought back by the grid rule — visible AND submitted. */
+fieldset.branch-choice { display: block; }
+fieldset.branch-choice > legend { padding: 0 var(--sp-6); }
+fieldset.branch-choice label.choice:not([hidden]) {
+  display: grid; grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-8); align-items: baseline;
+  margin: var(--sp-4) 0; padding: var(--sp-8) var(--sp-10);
+  border-radius: var(--radius-8); cursor: pointer;
+}
+fieldset.branch-choice label.choice:hover { background: var(--surface-card); }
+fieldset.branch-choice label.choice > input { grid-row: 1 / span 2; }
+fieldset.branch-choice label.choice > small { grid-column: 2; }
+/* Which explanation belongs to this repo. Both directions are spelled out: a
+   fieldset without the attribute would otherwise show both at once. */
+fieldset.branch-choice[data-merge-mode="off"] [data-explain="hub"],
+fieldset.branch-choice[data-merge-mode="hub"] [data-explain="off"] { display: none; }
+/* "Keep on branch" only means something where the hub integrates. The server
+   also sets `hidden`, so the field is gone without this stylesheet too. */
+fieldset.branch-choice[data-merge-mode="off"] [data-hub-only] { display: none; }
+fieldset.branch-choice [data-hub-only] > small { display: block; margin-left: var(--sp-24); }
+form.form-grid fieldset.branch-choice label:not(.chk):not(.choice):not([hidden]) {
+  display: grid; grid-template-columns: 13em minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-12); align-items: center; margin: var(--sp-10) 0;
+}
+/* Narrow: a 13em caption column and a field next to it do not both fit, so the
+   caption goes back above its field. */
+@media (max-width: 700px) {
+  form.form-grid label:not(.chk):not(.weekday):not([hidden]) { display: block; }
+}
+.card { background: var(--surface-card); padding: var(--sp-14) var(--sp-16); border-radius: var(--radius-10); margin: var(--sp-12) 0; border-left: 4px solid var(--border-strong); }
+.card.ok { border-left-color: var(--ok); }
 /* Translucent instead of a fixed light red: the box then carries itself in both
    colour schemes. As #fdecec it stayed light in dark mode while the text came
    from body (#e6e6e6) — light on light, the help call was unreadable exactly
    when it matters. Same trick as .banner below. */
-.help { background: rgba(229, 72, 77, .12); border: 1px solid #e5484d; padding: 12px; border-radius: 8px; margin: 12px 0; }
-pre { background: #16181b; color: #d7dae0; padding: 12px; border-radius: 8px; overflow: auto; max-height: 480px; }
-code { background: #eceae6; padding: 1px 5px; border-radius: 4px; }
+.help { background: var(--err-soft); border: 1px solid var(--err); padding: var(--sp-12); border-radius: var(--radius-8); margin: var(--sp-12) 0; }
+pre { background: var(--surface-pre); color: var(--text-pre); padding: var(--sp-12); border-radius: var(--radius-8); overflow: auto; max-height: 480px; }
+code { background: var(--surface-code); padding: 1px var(--sp-5); border-radius: var(--radius-4); }
+/* ---- run detail: figures as a table, facts as objects ----
+   The six metrics were <li>s that everyone read as a two-column table anyway;
+   a definition grid IS that table and needs no bullet to pretend otherwise. */
+dl.metrics { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--sp-2) var(--sp-14); margin: var(--sp-8) 0; }
+dl.metrics dt { color: var(--text-dim); font-size: var(--fs-small); white-space: nowrap; }
+dl.metrics dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+/* Eight facts joined by "·" in one wrapping paragraph is a sentence one has to
+   parse; as chips each fact is an object one can find. */
+ul.chips { display: flex; flex-wrap: wrap; gap: var(--sp-6); margin: var(--sp-8) 0 var(--sp-12); padding: 0; list-style: none; }
+ul.chips li { display: inline-flex; align-items: baseline; gap: var(--sp-6); background: var(--surface-card);
+  border: 1px solid var(--border); border-radius: var(--radius-pill); padding: var(--sp-2) var(--sp-10); font-size: var(--fs-small); }
+ul.chips li .k { color: var(--text-dim); }
+ul.chips li code { background: none; padding: 0; }
 ul.events { list-style: none; padding-left: 0; }
-ul.events li { padding: 3px 0; border-bottom: 1px dashed #e4e4e0; }
-#term { height: 480px; background: #000; border-radius: 8px; padding: 4px;
+ul.events li { padding: 3px 0; border-bottom: 1px dashed var(--border); }
+#term { height: 480px; background: var(--surface-term); border-radius: var(--radius-8); padding: var(--sp-4);
         border: 2px solid transparent; }
 /* Make it visible where keyboard input currently goes — otherwise you type into the void. */
-#term:focus-within { border-color: #2c7a3f; }
-.err { color: #e5484d; } .warn { color: #b98900; } .ok { color: #2c7a3f; }
+#term:focus-within { border-color: var(--ok-text); }
+.err { color: var(--err); } .warn { color: var(--warn-text); } .ok { color: var(--ok-text); }
 /* Schedule selection in the agent form */
-fieldset.zeitplan { border: 1px solid #dcdad6; border-radius: 8px; padding: 10px 14px; margin: 6px 0; }
-fieldset.zeitplan legend { padding: 0 6px; font-weight: 600; }
-fieldset.zeitplan .zp[hidden] { display: none; }
-fieldset.zeitplan label[hidden] { display: none; }
-.tage { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
-.tage .tag { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #dcdad6;
-  border-radius: 999px; padding: 4px 12px; cursor: pointer; user-select: none; background: #fff; }
-.tage .tag:has(input:checked) { background: #2c7a3f; border-color: #2c7a3f; color: #fff; }
+fieldset.schedule { border: 1px solid var(--border-field); border-radius: var(--radius-8); padding: var(--sp-10) var(--sp-14); margin: var(--sp-6) 0; }
+fieldset.schedule legend { padding: 0 var(--sp-6); font-weight: 600; }
+fieldset.schedule .zp[hidden] { display: none; }
+fieldset.schedule label[hidden] { display: none; }
+.weekdays { display: flex; flex-wrap: wrap; gap: var(--sp-6); margin: var(--sp-8) 0; }
+.weekdays .weekday { display: inline-flex; align-items: center; gap: var(--sp-5); border: 1px solid var(--border-field);
+  border-radius: var(--radius-pill); padding: var(--sp-4) var(--sp-12); cursor: pointer; user-select: none; background: var(--surface-card); }
+.weekdays .weekday:has(input:checked) { background: var(--ok-text); border-color: var(--ok-text); color: var(--text-inverse); }
 /* Planned start in the single-run form — same block switching as the schedule. */
-fieldset.zeitplan .st[hidden] { display: none; }
+fieldset.schedule .st[hidden] { display: none; }
 
 /* Run title with inline renaming (overview + detail page) */
-.titel-inline { display: inline-flex; align-items: baseline; gap: 6px; }
-.titel-inline button.mini { background: none; border: 0; color: #8a8f96; cursor: pointer;
-  padding: 0 2px; font-size: .95em; line-height: 1; opacity: 0; transition: opacity .1s; }
+.title-inline { display: inline-flex; align-items: baseline; gap: var(--sp-6); }
+.title-inline button.mini { background: none; border: 0; color: var(--text-dim); cursor: pointer;
+  padding: 0 var(--sp-2); font-size: .95em; line-height: 1; opacity: 0; transition: opacity .1s; }
 /* The pencil only appears where one is about to click — a table full of icons
    is noise, an icon that is nowhere is undiscoverable. */
-tr:hover .titel-inline button.mini, .titel-inline:hover button.mini,
-.titel-inline button.mini:focus, h2 .titel-inline button.mini { opacity: 1; }
-.titel-inline button.mini:hover { color: #2f6fed; }
-.titel-input { max-width: 22em; font-size: 1em; padding: 2px 6px; }
-h2 .titel-input { font-size: .8em; }
-.titelzelle { min-width: 12em; }
+tr:hover .title-inline button.mini, .title-inline:hover button.mini,
+.title-inline button.mini:focus, h2 .title-inline button.mini { opacity: 1; }
+/* --accent-act-hover, not --accent: this is an accent ON A CARD, and a card is
+   dark in dark mode. Two of the three hover accents used to stay at #2f6fed
+   over #202226 while the third brightened — an oversight, not a decision. */
+.title-inline button.mini:hover { color: var(--accent-act-hover); }
+.title-input { max-width: 22em; font-size: 1em; padding: var(--sp-2) var(--sp-6); }
+h2 .title-input { font-size: .8em; }
+/* The title is what one scans the table by, and it had the NARROWEST column of
+   the seven: 12em, so every title wrapped over three lines while the model id
+   next to it had room to spare. The row height came from that alone. The
+   min-width also keeps the column from collapsing when the title turns into an
+   input for renaming. */
+.title-cell { min-width: 16em; width: 34%; }
+/* And the technical pair does not get to grow past its worth. Only the second
+   line may break inside a word — a model slug is one long token, a branch name
+   is a name and must stay readable. */
+td.two-line { max-width: 13em; }
+td.two-line .dim { overflow-wrap: anywhere; }
 /* One-click archive button in the overview — same hover rule as the pencil: only
    where one is about to click. A table full of "Archive" buttons is noise. */
-button.act { background: none; border: 0; color: #8a8f96; cursor: pointer; padding: 2px 8px;
-  font-size: .92em; line-height: 1.4; border-radius: 4px; opacity: 0; transition: opacity .1s; }
+button.act { background: none; border: 0; color: var(--text-dim); cursor: pointer; padding: var(--sp-2) var(--sp-8);
+  font-size: .92em; line-height: 1.4; border-radius: var(--radius-4); opacity: 0; transition: opacity .1s; }
 tr:hover button.act, button.act:focus-visible { opacity: 1; }
-button.act:hover { color: #2f6fed; background: #eef1f6; }
+button.act:hover { color: var(--accent-act-hover); background: var(--accent-soft-bg); }
 /* Pagination on the archive page */
-.pager { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
-.pager .btn { padding: 5px 12px; }
+.pager { display: flex; align-items: center; gap: var(--sp-12); margin-top: var(--sp-12); }
+.pager .btn { padding: var(--sp-5) var(--sp-12); }
 /* A waiting run is not an incident — the banner must not look like one. */
-.banner.warten { border-left-color: #b8860b; background: rgba(184, 134, 11, .1); }
+.banner.waiting { border-left-color: var(--warn-deep); background: var(--warn-deep-soft); }
 
-@media (prefers-color-scheme: dark) {
-  fieldset.zeitplan { border-color: #33363b; }
-  .tage .tag { background: #202226; border-color: #33363b; }
-  .tage .tag:has(input:checked) { background: #2c7a3f; border-color: #2c7a3f; }
-
-  body { background: #17181a; color: #e6e6e6; }
-  table.list, form.settings, .card { background: #202226; }
-  table.list th, table.list td { border-color: #33363b; }
-  table.list tbody tr:hover { background: #262a30; }
-  code { background: #2c2f34; }
-  button.act:hover { background: #2c3036; color: #6ea8fe; }
-}
+/* ---- overview: one statement, one cell ----
+   Traffic light, status word and "last anomaly" used to sit in three cells
+   about 500px apart although they answer a single question. */
+td.status-cell { white-space: nowrap; }
+.status-line { display: flex; align-items: center; gap: var(--sp-6); }
+.status-line .dot { flex: none; }
+td.status-cell .dim, td.two-line .dim { white-space: normal; }
+/* Two facts that belong together, the technical one underneath — the same
+   shape the title cell already had. */
+td.two-line .dim { display: block; }
+.title-cell a { font-size: var(--fs-title); }
+/* A status is a state, not prose: a chip carries it in the detail page's
+   heading where a parenthesis used to. */
+.status-chip { display: inline-block; padding: 1px var(--sp-8); border-radius: var(--radius-pill);
+  border: 1px solid var(--border); background: var(--surface-card); font-size: var(--fs-small);
+  color: var(--text-dim); vertical-align: middle; }
 
 /* Incidents (rate limit, provider) */
-.vorfall { display:inline-block; padding:1px 6px; border-radius:3px; border:1px solid; margin-right:4px; }
-.vorfall.rot { border-color:#c62828; color:#c62828; }
-.vorfall.gelb { border-color:#b8860b; color:#b8860b; }
-.banner { padding:8px 12px; margin-bottom:12px; border-left:4px solid #c62828; background:rgba(198,40,40,.08); }
-ul.vorfaelle { list-style:none; padding:0; }
-ul.vorfaelle li { padding:6px 8px; margin-bottom:4px; border-left:4px solid #999; }
-ul.vorfaelle li.rot { border-left-color:#c62828; }
-ul.vorfaelle li.gelb { border-left-color:#b8860b; }
-ul.vorfaelle li.geloest { opacity:.6; }
+.incident { display:inline-block; padding:1px var(--sp-6); border-radius:3px; border:1px solid; margin-right:var(--sp-4); }
+/* In the overview the incident cell was a framed box with a permanently
+   visible "Dismiss" button and drove the row height to ~130px on its own.
+   Now it is a badge one reads, and the action appears where one is about to
+   click — the rule the pencil and the archive button already follow, with the
+   same keyboard escape hatch (:focus-within instead of :focus-visible,
+   because the reveal has to survive focus landing INSIDE the form). */
+.incident-cell { display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap; }
+.incident-cell .incident { margin: 0; white-space: nowrap; }
+.incident-cell form { opacity: 0; transition: opacity .1s; }
+tr:hover .incident-cell form, .incident-cell form:focus-within { opacity: 1; }
+.incident-cell button { background: none; border: 0; color: var(--text-dim); cursor: pointer;
+  padding: var(--sp-2) var(--sp-6); font-size: var(--fs-small); border-radius: var(--radius-4); }
+.incident-cell button:hover { color: var(--accent-act-hover); background: var(--accent-soft-bg); }
+.incident.red { border-color:var(--err-deep); color:var(--err-deep); }
+.incident.yellow { border-color:var(--warn-deep); color:var(--warn-deep); }
+.banner { padding:var(--sp-8) var(--sp-12); margin-bottom:var(--sp-12); border-left:4px solid var(--err-deep); background:var(--err-deep-soft); }
+ul.incidents { list-style:none; padding:0; }
+ul.incidents li { padding:var(--sp-6) var(--sp-8); margin-bottom:var(--sp-4); border-left:4px solid var(--border-neutral); }
+ul.incidents li.red { border-left-color:var(--err-deep); }
+ul.incidents li.yellow { border-left-color:var(--warn-deep); }
+ul.incidents li.resolved { opacity:.6; }
 /* The two groups: a to-do and a note must not look the same. */
-h4.vorfall-gruppe { margin:14px 0 2px; }
-h4.vorfall-gruppe.rot { color:#c62828; }
-h4.vorfall-gruppe.gelb { color:#b8860b; }
-h4.vorfall-gruppe + p.dim { margin:0 0 6px; }
-code.beleg { display:block; white-space:pre-wrap; word-break:break-all; font-size:.85em; margin-top:4px; }
-fieldset { border:1px solid #ccc; padding:8px 12px; margin:8px 0; }
-label.skill-regler { margin-left: 24px; }
+h4.incident-group { margin:var(--sp-14) 0 var(--sp-2); }
+h4.incident-group.red { color:var(--err-deep); }
+h4.incident-group.yellow { color:var(--warn-deep); }
+h4.incident-group + p.dim { margin:0 0 var(--sp-6); }
+code.evidence { display:block; white-space:pre-wrap; word-break:break-all; font-size:.85em; margin-top:var(--sp-4); }
+fieldset { border:1px solid var(--border-plain); padding:var(--sp-8) var(--sp-12); margin:var(--sp-8) 0; }
+label.skill-regler { margin-left: var(--sp-24); }
 
 /* Setup banner (no coding agent configured yet) — very top, above the header */
-.banner.setup { background: #2f6fed; color: #fff; padding: 10px 16px; margin: 0;
-  border-left: 0; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
-.banner.setup .btn { background: #fff; color: #2f6fed; }
+.banner.setup { background: var(--accent); color: var(--text-inverse); padding: var(--sp-10) var(--sp-16); margin: 0;
+  border-left: 0; display: flex; gap: var(--sp-14); align-items: center; flex-wrap: wrap; }
+.banner.setup .btn { background: var(--text-inverse); color: var(--accent); }
 
 /* Subscription usage panel (overview) */
-details.usage { background: #fff; padding: 10px 14px; border-radius: 10px; margin-bottom: 14px; }
+details.usage { background: var(--surface-card); padding: var(--sp-10) var(--sp-14); border-radius: var(--radius-10); margin-bottom: var(--sp-14); }
 details.usage summary { font-weight: 600; cursor: pointer; }
-.usage-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; padding: 5px 0; }
-.usage-row .quota .track { background: #e4e4e0; }
-@media (prefers-color-scheme: dark) {
-  details.usage { background: #202226; }
-  .usage-row .quota .track { background: #3a3f45; }
-}
+.usage-row { display: flex; gap: var(--sp-14); align-items: center; flex-wrap: wrap; padding: var(--sp-5) 0; }
 
 /* Flows attached to an agent / single run, and the way back to the flow pages. */
 fieldset.flows-attach label.chk a { margin-left: auto; font-size: 12px; }
 fieldset.flows-attach p:last-child { margin-bottom: 0; }
-p.crumbs { font-size: 13px; color: #6b7076; margin: 0 0 8px; }
+p.crumbs { font-size: 13px; color: var(--text-soft); margin: 0 0 var(--sp-8); }
 
 /* Sessions page: a wide table one cleans up in — the row states must be
    readable at a glance, so ending is a visible transition, not a reload. */
-.sess-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 10px 0; }
+.sess-bar { display: flex; align-items: center; gap: var(--sp-14); flex-wrap: wrap; margin: var(--sp-10) 0; }
 .sess-bar .spacer { flex: 1; }
 .sess-bar label.chk { margin: 0; }
 table.sessions { font-size: 14px; }
@@ -145,19 +558,24 @@ table.sessions td:last-child { white-space: nowrap; }
    here to the light colour overrode the dark-mode rule and left light text
    on #f0f4fa — same class of bug as .help above. Only cursor differs. */
 table.sessions tbody tr:hover { cursor: default; }
-table.sessions tr[data-running="1"] { background: rgba(229, 72, 77, .05); }
+table.sessions tr[data-running="1"] { background: var(--err-faint); }
 table.sessions tr.ending { opacity: .55; }
 table.sessions tr.gone { opacity: .4; text-decoration: line-through; }
-table.sessions tr.failed { background: rgba(229, 72, 77, .12); }
-.dot.grau { background: #9aa0a6; }
+table.sessions tr.failed { background: var(--err-soft); }
+.dot.gray { background: var(--dot-idle); }
 
 /* Buttons next to each other. Deliberately not a <p>: an HTML parser closes an
    open paragraph at a <form>, so a link and a form-button inside one paragraph
    land on two lines no matter what the CSS says. */
-.btn-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+.btn-row { display: flex; align-items: center; gap: var(--sp-10); flex-wrap: wrap; margin: var(--sp-12) 0; }
 /* The repo switcher is a header control, not a form field — the 100% width from
    the rule above stretched it across half the bar. */
-header select { width: auto; max-width: 22em; }
+/* On the dark bar a default-painted <select> is the one element that still
+   looks like a form control someone forgot. It joins the bar instead. */
+header select { width: auto; max-width: 22em; background: rgba(255, 255, 255, .08);
+  color: var(--text-on-bar); border: 1px solid rgba(255, 255, 255, .16); border-radius: var(--radius-6);
+  padding: var(--sp-4) var(--sp-8); }
+header select:hover { background: rgba(255, 255, 255, .14); }
 
 /* A hidden label must really disappear: 'label { display: block }' above beats
    the browser's own [hidden] rule, which is why the schedule block already
@@ -167,36 +585,107 @@ label[hidden] { display: none; }
 /* ---- Quick Run: the button in the header and its dialog ----
    Reachable from every page, because the moment one wants to send a task off is
    rarely the moment one is standing on the run form. */
-.qr-open { background: #2c7a3f; padding: 5px 12px; font-size: 14px; white-space: nowrap; }
-.qr-open:hover { background: #35924b; }
-dialog.qr { width: min(680px, 94vw); border: 0; border-radius: 12px; padding: 18px 20px;
-  background: #fff; color: #1c1c1c; box-shadow: 0 18px 60px rgba(0, 0, 0, .35); }
-dialog.qr::backdrop { background: rgba(0, 0, 0, .45); }
-dialog.qr h3 { margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
-dialog.qr h3 button.mini { margin-left: auto; background: none; border: 0; color: #8a8f96;
-  cursor: pointer; font-size: 1em; padding: 0 4px; opacity: 1; }
+.qr-open { background: var(--ok-text); padding: var(--sp-5) var(--sp-12); font-size: 14px; white-space: nowrap; }
+.qr-open:hover { background: var(--ok-hover); }
+/* A <dialog> does not inherit from body, so it has to name its own surface and
+   text — with tokens that is the same pair every card uses, and dark mode needs
+   no rule of its own for it any more. */
+dialog.qr { width: min(680px, 94vw); border: 0; border-radius: var(--radius-12); padding: var(--sp-18) var(--sp-20);
+  background: var(--surface-card); color: var(--text); box-shadow: var(--shadow-dialog); }
+dialog.qr::backdrop { background: var(--backdrop); }
+dialog.qr h3 { margin: 0 0 var(--sp-10); display: flex; align-items: center; gap: var(--sp-8); }
+dialog.qr h3 button.mini { margin-left: auto; background: none; border: 0; color: var(--text-dim);
+  cursor: pointer; font-size: 1em; padding: 0 var(--sp-4); opacity: 1; }
 dialog.qr textarea { min-height: 8em; }
+/* A fieldset around a single row carried more chrome than content: legend,
+   10px of padding and the row's own 10px margin stacked to ~36px of air around
+   one select. */
+dialog.qr fieldset.schedule { padding: var(--sp-4) var(--sp-12) var(--sp-6); }
+dialog.qr fieldset.schedule > label:first-of-type { margin-top: var(--sp-4); }
 dialog.qr input, dialog.qr select, dialog.qr textarea { max-width: 100%; }
-dialog.qr details.qr-more { margin: 10px 0; }
-dialog.qr details.qr-more summary { cursor: pointer; color: #2f6fed; }
-dialog.qr menu.qr-actions { display: flex; gap: 10px; justify-content: flex-end;
-  margin: 14px 0 0; padding: 0; }
-dialog.qr button.ghost { background: none; color: #6b7076; border: 1px solid #c9c9c4; }
-#qr-fav-info { margin: -4px 0 10px; }
+dialog.qr details.qr-more { margin: var(--sp-10) 0; }
+dialog.qr details.qr-more summary { cursor: pointer; color: var(--accent-act-hover); }
+dialog.qr menu.qr-actions { display: flex; gap: var(--sp-10); justify-content: flex-end;
+  margin: var(--sp-14) 0 0; padding: 0; }
+/* The escape to the full run form stands on its own, left of Cancel/Start —
+   it is not one of the two ways of sending this dialog, it is the exit from it. */
+dialog.qr menu.qr-actions [data-qr-full] { margin-right: auto; }
+dialog.qr button.ghost { background: none; color: var(--text-ghost); border: 1px solid var(--border-ghost); }
+/* The favorite's setup as a marker beside its select, not as a line beneath
+   it: one line of text there clung to the field, and the gap it opened made
+   the space above the task box twice the space above everything else. */
+.fav-info { width: 1.35em; height: 1.35em; padding: 0; border-radius: var(--radius-pill);
+  background: none; border: 1px solid var(--border-strong); color: var(--text-dim);
+  font-size: var(--fs-small); font-style: italic; line-height: 1; cursor: help; justify-self: start; }
+.fav-info:hover, .fav-info:focus-visible { color: var(--accent-act-hover); border-color: var(--accent-act-hover); }
+/* The bubble. Shown by CSS, so it appears the INSTANT the marker is hovered —
+   the native title waits about a second, cannot be styled, and would put this
+   on one long dot-separated line.
+   Anchored right: the marker sits at the dialog's right edge, so the bubble
+   grows leftwards instead of out of the frame. */
+.fav-tip { position: relative; display: inline-flex; }
+.fav-tip .tip { position: absolute; top: calc(100% + var(--sp-6)); right: 0; z-index: 70;
+  min-width: 15em; max-width: 22em; display: none; flex-direction: column; gap: var(--sp-2);
+  background: var(--surface-bar); color: var(--text-on-bar); padding: var(--sp-8) var(--sp-10);
+  border-radius: var(--radius-8); box-shadow: var(--shadow-toast); font-size: var(--fs-small);
+  text-align: left; font-style: normal; white-space: normal; }
+.fav-tip .tip i { color: var(--text-on-bar-dim); font-style: normal; margin-right: var(--sp-4); }
+.fav-tip:hover .tip, .fav-info:focus-visible + .tip { display: flex; }
+/* A caret, so the bubble reads as belonging to the marker and not as a panel
+   that happens to be under it. */
+.fav-tip .tip::before { content: ''; position: absolute; bottom: 100%; right: .45em;
+  border: 5px solid transparent; border-bottom-color: var(--surface-bar); }
+/* The marker belongs BESIDE its select, not under it: in a two-column grid a
+   second element in column 2 is auto-placed onto a new row, which is exactly
+   the extra line this change was meant to remove. A row that carries one gets
+   a third column of its own width. */
+form.form-grid label:has(.fav-tip) { grid-template-columns: 13em minmax(0, 1fr) auto; }
+form.form-grid label:not(.chk):not(.weekday) > .fav-tip { grid-column: 3; }
 
 /* ---- toasts: the answer to an action that did not change the page ---- */
-.toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column;
-  gap: 8px; z-index: 60; max-width: min(420px, 92vw); }
-.toast { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px;
-  background: #22252a; color: #eee; box-shadow: 0 6px 24px rgba(0, 0, 0, .3);
-  border-left: 4px solid #46a758; }
-.toast.warn { border-left-color: #f2c14e; }
-.toast.err { border-left-color: #e5484d; }
-.toast a { color: #8ec5ff; margin-left: auto; white-space: nowrap; }
-.toast button.mini { background: none; border: 0; color: #9aa0a6; cursor: pointer;
-  padding: 0 2px; opacity: 1; font-size: 1em; }
+.toasts { position: fixed; right: var(--sp-16); bottom: var(--sp-16); display: flex; flex-direction: column;
+  gap: var(--sp-8); z-index: 60; max-width: min(420px, 92vw); }
+.toast { display: flex; align-items: center; gap: var(--sp-10); padding: var(--sp-10) var(--sp-12); border-radius: var(--radius-8);
+  background: var(--surface-bar); color: var(--text-on-bar); box-shadow: var(--shadow-toast);
+  border-left: 4px solid var(--ok); }
+.toast.warn { border-left-color: var(--warn); }
+.toast.err { border-left-color: var(--err); }
+.toast a { color: var(--accent-on-bar); margin-left: auto; white-space: nowrap; }
+.toast button.mini { background: none; border: 0; color: var(--text-on-bar-dim); cursor: pointer;
+  padding: 0 var(--sp-2); opacity: 1; font-size: 1em; }
 
+/* ---- Dark mode: values only, no selectors -----------------------------
+   Everything the three former @media blocks did by repeating a selector is
+   a redefinition here. What is NOT listed keeps its light value on purpose:
+   the header, the toasts, the setup banner, <pre> and the terminal are dark
+   in both schemes.
+   The one rule that changes behaviour: ul.events li now follows --border
+   like every other row separator — it used to keep the light #e4e4e0 in
+   dark mode because nothing tied it to the table rule it was copied from.
+
+   --border-strong and --border-plain are new here (phase 4). They draw input
+   frames, fieldset frames and the card's left edge, and at #c9c9c4 / #ccc all
+   three glowed light grey on a dark page. The values are chosen AGAINST the
+   field fill, which no stylesheet paints: `color-scheme: light dark` makes
+   the browser fill an <input> at roughly #2b2b2b, so a frame has to be
+   lighter than that to be a frame at all — but not so light that it reads as
+   the brightest thing on the page. #4a4e55 sits between the field fill and
+   the text; #3f4348 for a fieldset, which encloses rather than contains. */
 @media (prefers-color-scheme: dark) {
-  dialog.qr { background: #202226; color: #e6e6e6; }
-  dialog.qr button.ghost { border-color: #3a3f45; color: #9aa0a6; }
+  :root {
+    --surface-page: #17181a;
+    --surface-card: #202226;
+    --surface-hover: #262a30;
+    --surface-code: #2c2f34;
+    --surface-track: #3a3f45;
+    --text: #e6e6e6;
+    --text-ghost: #9aa0a6;
+    --border: #33363b;
+    --border-field: #33363b;
+    --border-ghost: #3a3f45;
+    --border-strong: #4a4e55;
+    --border-plain: #3f4348;
+    --accent-soft-bg: #2c3036;
+    --accent-act-hover: #6ea8fe;
+  }
 }

@@ -14,15 +14,14 @@
 //                               opencode, hermes) through the real
 //                               ~/.local/bin/cc-start (consumes quota!)
 //   node test/e2e.mjs --keep    keep the sandbox after the run (debugging)
-import { spawn, execFile, execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync, lstatSync } from 'node:fs'
-import { tmpdir, homedir } from 'node:os'
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, lstatSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { createServer } from 'node:net'
-import { DatabaseSync } from 'node:sqlite'
 import { WebSocket } from 'ws'
 import { gruppe, pruefe, uebersprungen, gleich, wahr, falsch, enthaelt, warteAuf, bericht, zaehler } from './mini.mjs'
+import { neuerSandkasten, sh, vorhanden, PROJEKT } from './sandkasten.mjs'
 
 const ECHT = process.argv.includes('--echt')
 // User-specified test model for opencode/hermes (cheap, tool-capable).
@@ -32,211 +31,35 @@ const ECHT_KEYS = { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY }
 const ECHT_MODELL = process.env.CCHUB_TEST_MODELL ?? 'deepseek/deepseek-v4-flash-0731'
 // Zen: one of the free models — runs without a key.
 const ZEN_MODELL = process.env.CCHUB_TEST_ZEN_MODELL ?? 'nemotron-3.5-lightning-free'
-const vorhanden = (bin) => {
-  try { execFileSync('sh', ['-c', `command -v ${bin}`], { stdio: 'ignore' }); return true } catch { return false }
-}
 const BEHALTEN = process.argv.includes('--keep')
-const PROJEKT = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
 const start = Date.now()
 
-// ---------------------------------------------------------------- Tooling
-function sh(cmd, args, opts = {}) {
-  return new Promise((resolve) => {
-    execFile(cmd, args, { encoding: 'utf8', timeout: 60_000, ...opts }, (err, stdout, stderr) =>
-      resolve({ ok: !err, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') }))
-  })
-}
-
-async function freierPort() {
-  return new Promise((resolve, reject) => {
-    const s = createServer()
-    s.once('error', reject)
-    s.listen(0, '127.0.0.1', () => {
-      const p = s.address().port
-      s.close(() => resolve(p))
-    })
-  })
-}
-
-// ---------------------------------------------------------------- Sandbox
-const SB = mkdtempSync(join(tmpdir(), 'cc-hub-e2e-'))
-const sessions = new Set()          // ONLY these get killed at the end
-let hub = null
+// ------------------------------------------------- sandbox and hub process
+// Both come from test/sandkasten.mjs: the browser suite runs against exactly the
+// same sandbox, and one copy of that construction is enough. The names below stay
+// what the tests in this file have always used.
+const sk = neuerSandkasten({ praefix: 'cc-hub-e2e-', behalten: BEHALTEN })
+const { SB, REPO, ORIGIN, FEHLSTART, sessions, hol, formular } = sk
 let db = null
 let PORT = 0
 let BASIS = ''
 
-const REPO = join(SB, 'repo')
-const ORIGIN = join(SB, 'origin.git')
-const STUB = join(SB, 'bin', 'cc-start')
-const FEHLSTART = join(SB, 'fehlstart-an')
-
-async function sandkastenBauen() {
-  for (const d of ['data', 'runs', 'worktrees', 'bin']) mkdirSync(join(SB, d), { recursive: true })
-
-  // Extra-skill dummy (planning: opt-in skills outside the skill autoload folders)
-  mkdirSync(join(SB, 'zusaetze', 'e2e-fleiss'), { recursive: true })
-  writeFileSync(join(SB, 'zusaetze', 'e2e-fleiss', 'SKILL.md'),
-    '---\nname: e2e-fleiss\ndescription: Testskill gegen faule Modelle.\n---\n\n# Fleiss\n')
-
-  // Quota fixture: otherwise the real ~/.claude/quota.json would decide the budget
-  // gates and the suite would be green or red depending on the day.
-  writeFileSync(join(SB, 'quota.json'), JSON.stringify({
-    five_hour: { used_percentage: 1, resets_at: 1800000000 }, seven_day_fable: { used_percentage: 0 },
-  }))
-
-  await sh('git', ['init', '-q', '--bare', ORIGIN])
-  await sh('git', ['init', '-q', '-b', 'main', REPO])
-  const g = (...a) => sh('git', ['-C', REPO, ...a])
-  await g('config', 'user.email', 'e2e@test.local')
-  await g('config', 'user.name', 'E2E')
-  writeFileSync(join(REPO, 'README.md'), '# Testrepo\n')
-  // .env and referenz/ stay UNVERSIONED — that is exactly what the worktree extras
-  // are for. If they were in git, they would already be in the worktree and the
-  // copy/link path would be skipped silently.
-  // No trailing slash! 'referenz/' would only ignore the directory — but the extra
-  // creates a SYMLINK in the worktree, which git then treats as an unversioned
-  // file: the worktree would be "dirty" forever.
-  writeFileSync(join(REPO, '.gitignore'), '.env\nreferenz\n')
-  mkdirSync(join(REPO, 'referenz'), { recursive: true })
-  writeFileSync(join(REPO, '.env'), 'GEHEIM=1\n')
-  writeFileSync(join(REPO, 'referenz', 'a.txt'), 'ref\n')
-  await g('add', '-A')
-  await g('commit', '-qm', 'init')
-  await g('remote', 'add', 'origin', ORIGIN)
-  await g('push', '-q', '-u', 'origin', 'main')
-
-  // Stub cc-start: creates a real tmux session with a harmless "agent", speaks the
-  // same interface as the original and reports the same success line.
-  writeFileSync(STUB, `#!/usr/bin/env bash
-set -euo pipefail
-NAME=e2e; ID=""; ENVS=(); LOG=""; KEEP=""; PROMPTFILE=""; POS=()
-ALLE=("$@")
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --harness|--model|--session-id|--settings) shift 2 ;;
-    --name) NAME="$2"; shift 2 ;;
-    --id)   ID="$2";   shift 2 ;;
-    --env)  ENVS+=("-e" "$2"); shift 2 ;;
-    --log)  LOG="$2";  shift 2 ;;
-    --keep) KEEP=1; shift ;;
-    -f|--prompt-file) PROMPTFILE="$2"; shift 2 ;;
-    --no-trust|--keep) shift ;;
-    *) POS+=("$1"); shift ;;
-  esac
-done
-WORKDIR="\${POS[0]:-$PWD}"
-
-# Smoke-test run: pass through to the REAL cc-start (also covers the cc-* scripts).
-if [[ -n "$PROMPTFILE" && -r "$PROMPTFILE" ]] && grep -q 'E2E-ECHT' "$PROMPTFILE"; then
-  exec "${homedir()}/.local/bin/cc-start" "\${ALLE[@]}"
-fi
-
-# Deliberate failed start for the retry test.
-if [[ -f "${FEHLSTART}" ]]; then
-  echo "Fehlstart erzwungen (E2E)" >&2
-  exit 1
-fi
-
-SESSION="cc-$NAME"; [[ -n "$ID" ]] && SESSION="$SESSION-$ID"
-n=2; while tmux has-session -t "=$SESSION" 2>/dev/null; do SESSION="cc-$NAME-$ID-$n"; n=$((n+1)); done
-RUNNER="${SB}/runner-$$.sh"
-cat > "$RUNNER" <<'INNER'
-echo "=== E2E-Agent gestartet ==="
-echo "workdir: $PWD"
-echo "CC_RUN_ID=\${CC_RUN_ID:-<leer>}"
-[[ -n "\${CC_PROMPTFILE:-}" && -r "\$CC_PROMPTFILE" ]] && { echo "--- Prompt ---"; cat "\$CC_PROMPTFILE"; }
-echo "bereit fuer Eingaben:"
-while IFS= read -r zeile; do echo "[agent sah] $zeile"; done
-INNER
-tmux new-session -d -x 200 -y 50 "\${ENVS[@]}" -e "CC_PROMPTFILE=$PROMPTFILE" -s "$SESSION" -c "$WORKDIR" bash "$RUNNER"
-if [[ -n "$LOG" ]]; then mkdir -p "$(dirname "$LOG")"; tmux pipe-pane -o -t "=$SESSION:" "cat >> '$LOG'"; fi
-[[ -n "$KEEP" ]] && tmux set-option -t "=$SESSION:" -q remain-on-exit on
-echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
-`)
-  chmodSync(STUB, 0o755)
+/** Start the hub and carry port, base URL and database into this file. */
+async function hubStarten(opts = {}) {
+  await sk.hubStarten({ keys: ECHT_KEYS, ...opts })
+  db = sk.db
+  PORT = sk.port
+  BASIS = sk.basis
+}
+async function hubStoppen() {
+  await sk.hubStoppen()
+  db = null
 }
 
-// ---------------------------------------------------------------- Hub process
-async function hubStarten({ echteAgenten = false } = {}) {
-  PORT = await freierPort()
-  BASIS = `http://127.0.0.1:${PORT}`
-  const umgebung = {
-    ...process.env,
-    CCHUB_LOCAL_PORT: String(PORT),
-    CCHUB_DATA_DIR: join(SB, 'data'),
-    CCHUB_RUNS_DIR: join(SB, 'runs'),
-    CCHUB_WORKTREES_DIR: join(SB, 'worktrees'),
-    CCHUB_QUOTA_JSON: join(SB, 'quota.json'),
-    CCHUB_CLAUDE_PROJECTS: join(SB, 'claude-projects'),
-    CCHUB_ZUSAETZE_DIR: join(SB, 'zusaetze'),
-    CCHUB_PULS_AUS: '1',          // no provider pulse against real endpoints from the suite
-    CCHUB_CURSOR_AUTH: join(SB, 'missing-cursor-auth.json'),   // cursor usage stays silent in the sandbox
-    CCHUB_CURSOR_DIR: join(SB, 'cursor'),      // fake cursor transcripts; the real ~/.cursor is never touched
-    // "Fresh installation" tests must not pick up the operator's seed file
-    // (~/.config/cc-hub/coding-agents.json) — point at a file that does not exist.
-    CCHUB_AGENTS_SEED: join(SB, 'no-seed.json'),
-    NODE_OPTIONS: '--disable-warning=ExperimentalWarning',
-  }
-  if (echteAgenten) {
-    // No CCHUB_CC_START: the hub uses ~/.local/bin/cc-start and thereby the real
-    // harnesses. The provider key must go back into the environment, otherwise
-    // opencode/hermes starts and dies only at the first API call.
-    delete umgebung.CCHUB_CC_START
-    for (const [k, v] of Object.entries(ECHT_KEYS)) if (v) umgebung[k] = v
-  } else {
-    umgebung.CCHUB_CC_START = STUB
-    delete umgebung.OPENROUTER_API_KEY    // no real API calls from the stub part
-  }
-  hub = spawn(process.execPath, [join(PROJEKT, 'server', 'hub.mjs')], { env: umgebung, stdio: ['ignore', 'pipe', 'pipe'] })
-  const logs = []
-  hub.stdout.on('data', (d) => logs.push(String(d)))
-  hub.stderr.on('data', (d) => logs.push(String(d)))
-  hub.on('exit', (code) => { if (code !== 0 && code !== null) console.log(`  (hub exited, code ${code})\n${logs.join('')}`) })
-
-  await warteAuf(async () => (await hol('/')).status === 200,
-    { was: `hub at ${BASIS} responds`, timeoutMs: 15_000 })
-
-  db = new DatabaseSync(join(SB, 'data', 'cc-hub.db'))
-  // The hub holds its own connection and writes in the background (scheduler,
-  // watcher); a direct write here must WAIT for it instead of failing instantly
-  // with "database is locked" (the hub's own connection uses busy_timeout 5000).
-  db.exec('PRAGMA busy_timeout = 10000;')
-}
-
-// The watcher ticks inside the hub every 30 s. Instead of waiting, the suite also
-// triggers the same pass itself — same database, same code, but immediately.
+// The watcher ticks inside the hub every 30 s; watcherTick() triggers the same
+// pass right away.
 let watcherTick = null
-async function watcherVorbereiten() {
-  process.env.CCHUB_DATA_DIR = join(SB, 'data')
-  process.env.CCHUB_RUNS_DIR = join(SB, 'runs')
-  process.env.CCHUB_WORKTREES_DIR = join(SB, 'worktrees')
-  process.env.CCHUB_QUOTA_JSON = join(SB, 'quota.json')
-  process.env.CCHUB_CC_START = STUB
-  process.env.CCHUB_CLAUDE_PROJECTS = join(SB, 'claude-projects')
-  process.env.CCHUB_ZUSAETZE_DIR = join(SB, 'zusaetze')
-  process.env.CCHUB_PULS_AUS = '1'
-  process.env.CCHUB_CURSOR_AUTH = join(SB, 'missing-cursor-auth.json')
-  process.env.CCHUB_CURSOR_DIR = join(SB, 'cursor')
-  delete process.env.OPENROUTER_API_KEY
-  ;({ tick: watcherTick } = await import('../server/watcher.mjs'))
-}
-
-// ---------------------------------------------------------------- HTTP
-async function hol(pfad, opts = {}) {
-  return fetch(BASIS + pfad, { redirect: 'manual', signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000), ...opts })
-}
-async function formular(pfad, daten, { alsBrowser = false } = {}) {
-  const body = new URLSearchParams()
-  for (const [k, v] of Object.entries(daten)) Array.isArray(v) ? v.forEach(x => body.append(k, x)) : body.append(k, v)
-  return hol(pfad, {
-    method: 'POST', body,
-    headers: {
-      'content-type': 'application/x-www-form-urlencoded',
-      accept: alsBrowser ? 'text/html,application/xhtml+xml' : 'application/json',
-    },
-  })
-}
+async function watcherVorbereiten() { watcherTick = await sk.watcherVorbereiten() }
 
 // ---------------------------------------------------------------- Database
 const lauf = (id) => db.prepare('SELECT * FROM runs WHERE id=?').get(id)
@@ -261,26 +84,9 @@ async function sessionMerken(runId) {
 }
 
 // ---------------------------------------------------------------- Cleanup
-let aufgeraeumt = false
-/** Stop the hub process (also mid-suite, when the real-run mode restarts it). */
-async function hubStoppen() {
-  try { db?.close() } catch {}
-  db = null
-  if (hub && hub.exitCode === null) {
-    hub.kill('SIGTERM')
-    await new Promise(r => { const t = setTimeout(() => { try { hub.kill('SIGKILL') } catch {} ; r() }, 4000); hub.once('exit', () => { clearTimeout(t); r() }) })
-  }
-  hub = null
-}
-
 async function aufraeumen() {
-  if (aufgeraeumt) return
-  aufgeraeumt = true
-  await hubStoppen()
-  // ONLY the sessions we created ourselves — never a pattern across all cc-*.
-  for (const s of sessions) await sh('tmux', ['kill-session', '-t', `=${s}`]).catch(() => {})
-  if (BEHALTEN) console.log(`\nSandbox kept: ${SB}`)
-  else rmSync(SB, { recursive: true, force: true })
+  await sk.aufraeumen()
+  db = null
 }
 process.on('SIGINT', async () => { await aufraeumen(); process.exit(130) })
 process.on('SIGTERM', async () => { await aufraeumen(); process.exit(143) })
@@ -288,7 +94,7 @@ process.on('SIGTERM', async () => { await aufraeumen(); process.exit(143) })
 // ================================================================== Test run
 try {
   console.log(`Sandbox: ${SB}`)
-  await sandkastenBauen()
+  await sk.bauen()
   await hubStarten()
   await watcherVorbereiten()
   console.log(`Hub: ${BASIS}${ECHT ? '   [--echt: real runs per harness — consumes quota and credits]' : ''}`)
@@ -357,7 +163,13 @@ try {
     gleich(r.status, 200, 'status')
     enthaelt(await r.text(), 'Create repo', 'hint text')
   })
-  for (const datei of ['/static/xterm.js', '/static/addon-fit.js', '/static/hub.js', '/static/hub.css', '/static/xterm.css']) {
+  // The flow designer's own scripts belong in this loop as much as xterm does: a
+  // moved or renamed entry in STATIC_MAP shows up nowhere else, and the designer
+  // page would be silently dead. /static/flows/ carries the two pure modules the
+  // browser runs as well, so designer and server judge a flow by the same code.
+  for (const datei of ['/static/xterm.js', '/static/addon-fit.js', '/static/hub.js', '/static/hub.css', '/static/xterm.css',
+    '/static/flows.js', '/static/flows.css', '/static/flows/template.mjs', '/static/flows/varschema.mjs',
+    '/static/swd.js', '/static/swd.css', '/static/swd-light.css']) {
     await pruefe(`${datei} is served`, async () => {
       const r = await hol(datei)
       gleich(r.status, 200, 'status')
@@ -1030,6 +842,64 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // The goal is the one definition field that does NOT travel in the prompt
+  // file: `/goal <condition>` exists only inside the session, so the hub types
+  // it in after the start. Which means it can also fail to arrive — hence a
+  // test for each of the two ways in.
+  gruppe('The goal: a second prompt into the session')
+
+  const paneText = async (runId) =>
+    (await sh('tmux', ['capture-pane', '-p', '-t', `=${lauf(runId).tmux_session}:`])).stdout
+
+  await pruefe('both forms carry the goal, and it names who knows one', async () => {
+    for (const [pfad, was] of [[`/runs/new?repo=${repoId}`, 'run form'], [`/agents/edit?repo=${repoId}`, 'agent form']]) {
+      const html = await (await hol(pfad)).text()
+      enthaelt(html, 'name="goal"', `the field is in the ${was}`)
+      enthaelt(html, 'data-goal-harnesses="claude"', `and says who has one (${was})`)
+    }
+  })
+
+  await pruefe('a claude run gets its goal typed into the session after the start', async () => {
+    const j = await laufStarten({ repo_id: repoId, harness: 'claude', prompt: 'E2E-Ziel',
+      goal: 'all tests are green' })
+    wahr(!!j.runId, `run started (${JSON.stringify(j)})`)
+    await sessionMerken(j.runId)
+    gleich(lauf(j.runId).goal, 'all tests are green', 'the run carries the definition copy')
+    await warteAuf(async () => (await paneText(j.runId)).includes('[agent sah] /goal all tests are green'),
+      { was: 'the goal command in the pane', timeoutMs: 15_000 })
+    await warteAuf(() => !!lauf(j.runId).goal_sent_at, { was: 'delivery recorded', timeoutMs: 5000 })
+    enthaelt(ereignisse(j.runId).join(','), 'goal_sent', 'and the run says so in its own event list')
+    const html = await (await hol(`/runs/${j.runId}`)).text()
+    enthaelt(html, 'all tests are green', 'the detail page shows the goal')
+    await formular(`/api/runs/${j.runId}/kill`, {})
+  })
+
+  await pruefe('a coding agent that knows no goal simply has none', async () => {
+    const j = await laufStarten({ repo_id: repoId, harness: 'cursor', model: 'auto',
+      prompt: 'E2E-Ziel-cursor', goal: 'all tests are green' })
+    wahr(!!j.runId, `run started (${JSON.stringify(j)})`)
+    await sessionMerken(j.runId)
+    gleich(lauf(j.runId).goal, null, 'nothing stored — cursor has no /goal')
+    await formular(`/api/runs/${j.runId}/kill`, {})
+  })
+
+  await pruefe('what did not get through is delivered by the watcher, and only once', async () => {
+    // Exactly the case of a hub restarted between the start and the delivery:
+    // the run is going, the session stands, nobody has typed the goal in.
+    const j = await laufStarten({ repo_id: repoId, harness: 'claude', prompt: 'E2E-Ziel-Watcher',
+      goal: 'the branch is pushed' })
+    await sessionMerken(j.runId)
+    await warteAuf(() => !!lauf(j.runId).goal_sent_at, { was: 'first delivery', timeoutMs: 15_000 })
+    await watcherTick()
+    const einmal = (await paneText(j.runId)).split('/goal the branch is pushed').length - 1
+    wahr(einmal >= 1, `it is in the pane (${einmal}×)`)
+    db.prepare('UPDATE runs SET goal_sent_at=NULL WHERE id=?').run(j.runId)
+    await watcherTick()
+    await warteAuf(() => !!lauf(j.runId).goal_sent_at, { was: 'the watcher delivers what is missing', timeoutMs: 8000 })
+    await formular(`/api/runs/${j.runId}/kill`, {})
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Incidents: rate limit and provider errors (auto-alarm)')
 
   const vorfaelle = (id) => db.prepare('SELECT * FROM incidents WHERE run_id=? ORDER BY id').all(id)
@@ -1079,7 +949,16 @@ try {
     gleich(v[0].quelle, 'log', 'source')
     enthaelt(v[0].beleg, 'Retrying', 'evidence is the line')
     falsch(ereignisse(RH).some(k => k === 'telegram_sent'), 'no Telegram for yellow')
-    enthaelt(await (await hol(`/?repo=${repoId}`)).text(), 'Rate limit 1×', 'overview shows the incident')
+    // In the overview the incident is a compact badge inside the run's OWN row,
+    // and the action that clears it is still in that cell — it is only hidden
+    // until the row is hovered (the same rule the pencil and the archive button
+    // follow). Checked against the route it posts to, which outlives markup.
+    const zeile = (await (await hol(`/?repo=${repoId}`)).text()).split('<tr ').find(z => z.includes(RH))
+    wahr(!!zeile, 'the run has a row')
+    enthaelt(zeile, 'Rate limit 1×', 'overview shows the incident')
+    enthaelt(zeile, 'incident yellow', 'in the severity it was given')
+    enthaelt(zeile, `/api/incidents/${v[0].id}/resolve`, 'and the action to clear it sits in the same cell')
+    enthaelt(zeile, 'Dismiss', 'named for the group it belongs to — noticed, not to-do')
   })
   await pruefe('the same match counts only once per pass (offset)', async () => {
     await watcherTick(); await watcherTick()
@@ -1351,9 +1230,9 @@ try {
     })
 
     await pruefe('the keep time is set in hours on the settings page', async () => {
-      // Written directly instead of through the form: /settings/save writes ALL
-      // of its keys, and a partial post would blank the rest for every test
-      // after this one.
+      // Written directly instead of through the form: this test is about the
+      // field and the hours conversion, not about the save route (that one has
+      // its own group).
       db.prepare(`INSERT INTO settings(key,value) VALUES('session_keep_hours','0.5')
                   ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run()
       const html = await (await hol('/settings')).text()
@@ -1361,6 +1240,67 @@ try {
       enthaelt(html, 'value="0.5"', 'and shows what is stored')
       const { sessionKeepMs } = await import('../server/sessions.mjs')
       gleich(sessionKeepMs({ session_keep_hours: '0.5' }), 1800_000, 'half an hour')
+    })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('The agent stays operable after the work is done')
+
+  {
+    // The coding agents that run in a TUI (claude, opencode, cursor) do not go
+    // away when the task is finished — the session stands, the process sits at
+    // its prompt. Whether one may type into it is therefore a fact about the
+    // SESSION, not about the run's record.
+    let RN = null, RNSESS = null
+    await pruefe('a finished run whose session still stands stays writable', async () => {
+      const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Nachbedienung' })
+      RN = j.runId
+      await warteAuf(() => !!lauf(RN)?.tmux_session, { was: 'tmux session' })
+      RNSESS = lauf(RN).tmux_session
+      sessions.add(RNSESS)
+      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(RN)
+      const html = await (await hol(`/runs/${RN}`)).text()
+      enthaelt(html, 'data-live="1"', 'the terminal is offered with write access')
+      enthaelt(html, `cchubSend(this,'/api/runs/${RN}/send')`, 'and the send form is there')
+      falsch(html.includes(`cchubKill('${RN}')`), 'but no "end run" — that run is over')
+      enthaelt(html, 'name="session"', 'instead: end the session it left standing')
+    })
+
+    await pruefe('a message reaches the session of a finished run', async () => {
+      const r = await formular(`/api/runs/${RN}/send`, { text: 'weiter geht es' })
+      gleich(r.status, 200, 'accepted')
+      wahr(ereignisse(RN).includes('message_sent'), `recorded (has: ${ereignisse(RN).join(', ')})`)
+      gleich(lauf(RN).status, 'done', 'and the run stays done')
+    })
+
+    await pruefe('"end run" on a finished run does NOT rewrite it to aborted', async () => {
+      // The button is gone from the page, but the endpoint is reachable — and a
+      // run that came through cleanly must not become a failed one because
+      // somebody closed its leftover session.
+      const r = await formular(`/api/runs/${RN}/kill`, {})
+      gleich(r.status, 200, 'accepted')
+      gleich(lauf(RN).status, 'done', 'still done')
+      wahr(lauf(RN).tmux_closed_at !== null, 'only the session is marked closed')
+    })
+
+    await pruefe('without a session there is no write access left', async () => {
+      const html = await (await hol(`/runs/${RN}`)).text()
+      falsch(html.includes('data-live="1"'), 'read-only')
+      enthaelt(html, 'data-session="0"', 'and the box says there is no session')
+      sessions.delete(RNSESS)
+    })
+
+    await pruefe('ending the session from the detail page lands back on the run', async () => {
+      const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Session-zurueck' })
+      await warteAuf(() => !!lauf(j.runId)?.tmux_session, { was: 'tmux session' })
+      const name = lauf(j.runId).tmux_session
+      sessions.add(name)
+      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+      const r = await formular('/api/sessions/kill', { session: name, back: `/runs/${j.runId}` }, { alsBrowser: true })
+      gleich(r.status, 303, 'redirect instead of JSON')
+      gleich(r.headers.get('location'), `/runs/${j.runId}`, 'back to the run, not to the session list')
+      sessions.delete(name)
+      gleich(lauf(j.runId).status, 'done', 'the finished run is left alone')
     })
   }
 
@@ -1652,8 +1592,13 @@ try {
     wahr(!!r.start_at, 'point in time noted')
     await watcherTick()
     gleich(lauf(GEPLANT).status, 'scheduled', 'a pass before the moment changes nothing')
+    // The status cell of the overview: the word (translated, from lang/en.json —
+    // the raw 'scheduled' is a database value and no longer reaches the screen)
+    // and, underneath it, WHAT the run is waiting for. That second line is the
+    // whole point of showing a waiting run at the top of the list.
     const zeile = (await (await hol(`/?repo=${repoId}`)).text()).split('<tr').find(z => z.includes(GEPLANT))
-    enthaelt(zeile, 'scheduled', 'the waiting run is visible in the overview')
+    enthaelt(zeile, 'Scheduled', 'the waiting run is visible in the overview')
+    enthaelt(zeile, 'starts at', 'and says what it is waiting for')
     enthaelt(zeile, 'Planned run', 'with its title')
   })
   await pruefe('when the moment has come the watcher starts it', async () => {
@@ -1880,6 +1825,1149 @@ try {
     const r = await formular('/settings/favorites/edit', { name: 'E2E-zuviel', harness: 'claude' }, { alsBrowser: true })
     gleich(r.status, 400, 'the fourth is refused')
     falsch(!!db.prepare('SELECT id FROM favorites WHERE name=?').get('E2E-zuviel'), 'and not stored')
+  })
+
+  // ------------------------------------------------------------------
+  // The whole flows module had no e2e coverage: not one of its four pages, not
+  // one of its ten endpoints, not one of its static files. It sits at the end of
+  // the suite on purpose — a flow with a `run_finished` trigger is what makes the
+  // attachment block render checkboxes at all, and the group deletes it again so
+  // nothing that follows inherits a flow hanging on an agent.
+  gruppe('Flows: pages, meta and the round trip through the API')
+
+  /** POST a JSON body — /api/flows/save reads JSON, not a form. */
+  const jsonPost = (pfad, obj) => hol(pfad, {
+    method: 'POST', body: JSON.stringify(obj),
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+  })
+
+  let FLOWID = null
+
+  await pruefe('the three flow pages answer with real HTML', async () => {
+    // One characteristic string per page, each from lang/en.json. Deliberately not
+    // "Flows" for all three: a flow is not a place one navigates to, so there is no
+    // nav entry carrying that word onto every page.
+    const kennzeichen = {
+      '/flows': 'New flow',           // flows.new
+      '/flows/edit': 'Back',          // flows.editor.back — the designer's own head
+      '/flows/runs': 'Flow runs',     // flows.runs.title
+    }
+    for (const [pfad, text] of Object.entries(kennzeichen)) {
+      const r = await hol(pfad)
+      gleich(r.status, 200, `${pfad}: status`)
+      const html = await r.text()
+      wahr(html.length > 500, `${pfad}: not an empty page (${html.length} bytes)`)
+      enthaelt(html, text, `${pfad}: its own heading`)
+    }
+    enthaelt(await (await hol('/flows')).text(), 'no flows yet', 'the empty list says so instead of showing a broken table')
+  })
+  await pruefe('the flow designer\'s own scripts and its data reach the page', async () => {
+    const html = await (await hol('/flows/edit')).text()
+    // Markup, unavoidably: the designer is a client application and these two are
+    // the seam it hangs on — the catalog it boots from and the module that boots
+    // it. Everything else about the page is checked through the API below.
+    enthaelt(html, 'window.CCHUB_FLOWS', 'the editor state is injected')
+    enthaelt(html, '/static/flows.js', 'the designer module is pulled in')
+    enthaelt(html, 'Save', 'and the button that saves what was drawn')
+  })
+  await pruefe('the step registry reaches the editor through /api/flows/meta', async () => {
+    const j = await (await hol('/api/flows/meta')).json()
+    wahr(j.ok, 'ok')
+    for (const feld of ['steps', 'groups', 'triggerKinds', 'ops', 'fieldTypes']) {
+      wahr(Array.isArray(j[feld]) && j[feld].length > 0, `${feld} is present and not empty`)
+    }
+    wahr(j.steps.every(s => s.type && s.component && s.group && Array.isArray(s.fields)),
+      'every step names its type, component, group and fields — that is what the property editor renders from')
+    wahr(j.steps.some(s => s.type === 'telegram') && j.steps.some(s => s.type === 'switch_outcome'),
+      'known building blocks are in the registry')
+    wahr(j.triggerKinds.includes('run_finished'), 'the trigger that an attachment is')
+    wahr(j.groups.every(g => j.steps.some(s => s.group === g)), 'no toolbox group without a step in it')
+  })
+  await pruefe('a flow is saved through the API and comes back unchanged', async () => {
+    const definition = {
+      properties: {},
+      sequence: [{ id: 'e2e-note', componentType: 'task', type: 'note', name: 'E2E note', properties: { text: 'E2E flow ran' } }],
+    }
+    const r = await jsonPost('/api/flows/save', {
+      name: 'E2E-Flow', active: true, trigger: { kind: 'run_finished' }, definition,
+    })
+    const j = await r.json()
+    wahr(j.ok && !!j.id, `saved (${JSON.stringify(j).slice(0, 200)})`)
+    FLOWID = j.id
+    const gelesen = await (await hol(`/api/flows/${FLOWID}`)).json()
+    wahr(gelesen.ok, 'read back')
+    gleich(gelesen.flow.name, 'E2E-Flow', 'name')
+    gleich(gelesen.flow.active, 1, 'active')
+    gleich(gelesen.flow.trigger.kind, 'run_finished', 'trigger')
+    gleich(gelesen.flow.definition.sequence[0].properties.text, 'E2E flow ran', 'the definition survived the round trip')
+    enthaelt(await (await hol('/flows')).text(), 'E2E-Flow', 'and the list shows it')
+  })
+  await pruefe('a definition the registry does not know is refused instead of stored', async () => {
+    const r = await jsonPost('/api/flows/save', {
+      name: 'E2E-Flow-kaputt', trigger: { kind: 'manual' },
+      definition: { properties: {}, sequence: [{ id: 'x', type: 'gibtsnicht', properties: {} }] },
+    })
+    gleich(r.status, 400, 'rejected')
+    wahr((await r.json()).problems.length > 0, 'with a reason')
+    falsch(!!db.prepare('SELECT id FROM flows WHERE name=?').get('E2E-Flow-kaputt'), 'nothing stored')
+    // A required field left empty is the same class of answer.
+    const ohneText = await jsonPost('/api/flows/save', {
+      name: 'E2E-Flow-leer', trigger: { kind: 'manual' },
+      definition: { properties: {}, sequence: [{ id: 'y', type: 'note', properties: {} }] },
+    })
+    gleich(ohneText.status, 400, 'a required field left empty is refused too')
+  })
+  await pruefe('all three run forms carry the flow attachment block', async () => {
+    // The only safeguard of the attach block. Checked by what the definition is
+    // built from — the field NAMES — plus the class the block is styled and found
+    // by; there is no text of its own that would prove the checkbox is a checkbox.
+    for (const pfad of [`/runs/new?repo=${repoId}`, `/agents/edit?repo=${repoId}`, '/settings/favorites/edit']) {
+      const html = await (await hol(pfad)).text()
+      enthaelt(html, 'Flows after this run', `${pfad}: the block's legend`)
+      enthaelt(html, 'flows-attach', `${pfad}: the block's own container`)
+      enthaelt(html, 'name="flows"', `${pfad}: the checkbox the definition is built from`)
+      enthaelt(html, `value="${FLOWID}"`, `${pfad}: the flow is offered`)
+      enthaelt(html, `name="flow_when_${FLOWID}"`, `${pfad}: with its condition`)
+      enthaelt(html, 'E2E-Flow', `${pfad}: by name`)
+    }
+  })
+  await pruefe('ticking the box really attaches the flow, and the editor sees the same row', async () => {
+    const r = await formular('/agents/edit', {
+      repo_id: String(repoId), name: 'e2e-flow-agent', harness: 'claude', prompt: 'x',
+      branch_mode: 'keiner', expected_minutes: '5', schedule_kind: 'manuell',
+      flows: String(FLOWID), [`flow_when_${FLOWID}`]: 'failed',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'agent saved')
+    gleich(agent('e2e-flow-agent').flows, `[{"flowId":${FLOWID},"when":"failed"}]`, 'the attachment landed on the agent')
+    // One storage, two editors: the flow editor reads the very same row back.
+    const html = await (await hol(`/flows/edit?id=${FLOWID}`)).text()
+    enthaelt(html, '"when":"failed"', 'the flow editor knows the condition the agent form wrote')
+    enthaelt(html, 'e2e-flow-agent', 'and which agent it hangs on')
+  })
+  await pruefe('a flow can be switched off and on again through the API', async () => {
+    const aus = await formular(`/api/flows/${FLOWID}/toggle`, {})
+    gleich(aus.status, 200, 'toggled')
+    gleich(db.prepare('SELECT active FROM flows WHERE id=?').get(FLOWID).active, 0, 'off')
+    await formular(`/api/flows/${FLOWID}/toggle`, {})
+    gleich(db.prepare('SELECT active FROM flows WHERE id=?').get(FLOWID).active, 1, 'on again')
+  })
+  await pruefe('deleting the flow also removes it from the agent it hung on', async () => {
+    const r = await formular(`/api/flows/${FLOWID}/delete`, {})
+    gleich(r.status, 200, 'deleted')
+    gleich((await hol(`/api/flows/${FLOWID}`)).status, 404, 'gone')
+    gleich(agent('e2e-flow-agent').flows, null, 'no dead id left behind on the agent')
+    // Without an attachable flow the block falls back to its "nothing here" form —
+    // legend and hint, but no checkbox.
+    const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
+    enthaelt(html, 'Flows after this run', 'the block still stands')
+    falsch(html.includes('name="flows"'), 'but offers nothing to attach any more')
+  })
+
+  // ------------------------------------------------------------------
+  // The trigger that fires after a merge, and the block that may run a real
+  // command afterwards — end to end, with a real shell instead of a stub. What
+  // this group cannot do is produce the merge itself: the integrator lives in
+  // another module, so the merge is written the way it will be written, by SQL.
+  // The two cases that need the real integrator are described in
+  // test/TODO-e2e-run-merged.md.
+  gruppe('Flows: run_merged fires, and shell_command really runs')
+
+  await pruefe('a merge starts the flow, and its command writes the SHA into a file', async () => {
+    // The columns belong to the merge integrator; on this branch the test adds
+    // them itself, exactly as it will find them once both branches are one.
+    const spalten = db.prepare('PRAGMA table_info(runs)').all().map(c => c.name)
+    for (const [name, typ] of [['merge_status', 'TEXT'], ['merged_sha', 'TEXT'], ['merged_at', 'TEXT'],
+      ['resolves_run_id', 'TEXT'], ['resolver_run_id', 'TEXT']]) {
+      if (!spalten.includes(name)) db.exec(`ALTER TABLE runs ADD COLUMN ${name} ${typ}`)
+    }
+    const ziel = join(SB, 'merged.txt')
+    const r = await jsonPost('/api/flows/save', {
+      name: 'E2E-Merge-Flow', active: true, trigger: { kind: 'run_merged', repoId },
+      definition: { properties: {}, sequence: [{
+        id: 'e2e-shell', componentType: 'task', type: 'shell_command', name: 'write the sha',
+        properties: { command: `echo {{trigger.merge.sha}} > ${ziel}`, cwd: SB, timeoutMinutes: 1, detach: false, outputVar: 'shell' },
+      }] },
+    })
+    const j = await r.json()
+    wahr(j.ok && !!j.id, `flow saved (${JSON.stringify(j).slice(0, 200)})`)
+    const flowId = j.id
+
+    db.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes,
+                ended_at, flow_dispatched, merge_status, merged_sha, merged_at)
+                VALUES('e2e-merged-1',?,'done','claude','p','keiner',5,datetime('now'),1,'merged','deadbee',datetime('now'))`).run(repoId)
+    db.prepare(`INSERT INTO events(run_id, kind, payload) VALUES('e2e-merged-1','merged',?)`)
+      .run(JSON.stringify({ sha: 'deadbee', files: ['server/flows/steps.mjs'] }))
+
+    const { flowsTick } = await import('../server/flows/triggers.mjs')
+    await flowsTick()
+    await warteAuf(() => existsSync(ziel), { was: 'the command of the flow has run', timeoutMs: 10_000 })
+    gleich(readFileSync(ziel, 'utf8').trim(), 'deadbee', 'the template put the merge commit into the file')
+    const fr = db.prepare('SELECT * FROM flow_runs WHERE flow_id=? ORDER BY started_at DESC LIMIT 1').get(flowId)
+    gleich(fr.status, 'done', 'the flow run finished')
+    gleich(JSON.parse(fr.context).vars.shell.exit_code, 0, 'and the command with exit code 0')
+    gleich(db.prepare('SELECT merge_dispatched FROM runs WHERE id=?').get('e2e-merged-1').merge_dispatched, 1, 'the merge is marked')
+  })
+
+  await pruefe('the repo form names the flows that run after a merge, and offers a new one', async () => {
+    // A run_merged flow hangs on the repo, not on an agent — so the repo form is
+    // its way in. The attachment block of the run forms cannot show it.
+    const html = await (await hol(`/repos/edit?id=${repoId}`)).text()
+    enthaelt(html, 'Flows after merge', 'the block from lang/en.json')
+    enthaelt(html, 'E2E-Merge-Flow', 'the flow of this repo by name')
+    enthaelt(html, '/flows/edit?trigger=run_merged&amp;repo=' + repoId, 'and the way to a new one, pre-aimed')
+    const neu = await (await hol('/repos/edit')).text()
+    falsch(neu.includes('Flows after merge'), 'a repo that does not exist yet has nothing to hang a flow on')
+  })
+  await pruefe('the editor really arrives with that trigger and repo already set', async () => {
+    const html = await (await hol(`/flows/edit?trigger=run_merged&repo=${repoId}`)).text()
+    const m = html.match(/window\.CCHUB_FLOWS=(\{.*?\})<\/script>/s)
+    wahr(!!m, 'the editor state is injected')
+    const flow = JSON.parse(m[1]).flow
+    gleich(flow.trigger.kind, 'run_merged', 'the trigger the button asked for')
+    gleich(flow.trigger.repoId, repoId, 'aimed at this repo')
+    enthaelt(flow.name, 'After merge', 'and named after what it does')
+    const ohne = await (await hol('/flows/edit?trigger=run_merged&repo=999999')).text()
+    enthaelt(ohne, '"repoId":null', 'a repo that does not exist becomes "all repos", not a broken filter')
+  })
+
+  await pruefe('a detached command ends its step at once and keeps running afterwards', async () => {
+    // The reason the block has that switch at all: a command that restarts the
+    // hub must outlive the flow run, and the flow run must be finished and
+    // saved before the command hits it.
+    const ziel = join(SB, 'detached.txt')
+    const r = await jsonPost('/api/flows/save', {
+      name: 'E2E-Merge-Flow-detach', active: true, trigger: { kind: 'run_merged', repoId },
+      definition: { properties: {}, sequence: [{
+        id: 'e2e-shell-bg', componentType: 'task', type: 'shell_command', name: 'in the background',
+        properties: { command: `sleep 1; touch ${ziel}`, cwd: SB, timeoutMinutes: 1, detach: true, outputVar: 'shell' },
+      }] },
+    })
+    const j = await r.json()
+    wahr(j.ok && !!j.id, 'flow saved')
+
+    db.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes,
+                ended_at, flow_dispatched, merge_status, merged_sha, merged_at)
+                VALUES('e2e-merged-2',?,'done','claude','p','keiner',5,datetime('now'),1,'merged','cafe123',datetime('now'))`).run(repoId)
+
+    const { flowsTick } = await import('../server/flows/triggers.mjs')
+    const t0 = Date.now()
+    await flowsTick()
+    const fr = db.prepare('SELECT * FROM flow_runs WHERE flow_id=? ORDER BY started_at DESC LIMIT 1').get(j.id)
+    gleich(fr.status, 'done', 'the flow run is over')
+    gleich(JSON.parse(fr.context).vars.shell.detached, true, 'the step answered "detached" instead of waiting')
+    falsch(existsSync(ziel), 'and it really did not wait — the file is not there yet')
+    wahr(Date.now() - t0 < 3000, `the pass did not wait for the command (${Date.now() - t0} ms)`)
+    await warteAuf(() => existsSync(ziel), { was: 'the detached command runs on by itself', timeoutMs: 5000 })
+  })
+
+  // ------------------------------------------------------------------
+  // Five pages whose HTML was never fetched once. Checked against the strings
+  // from lang/en.json and against form field names, not against markup — these
+  // tests are meant to survive the rebuild that is coming.
+  gruppe('Pages that had no test at all')
+
+  await pruefe('the repo list shows the repo with path, base branch and prompt column', async () => {
+    const r = await hol('/repos')
+    gleich(r.status, 200, 'status')
+    const html = await r.text()
+    enthaelt(html, 'Create repo', 'the way into the form')
+    enthaelt(html, 'Worktree extras', 'column header')
+    enthaelt(html, 'Repo prompt', 'column header')
+    enthaelt(html, 'e2e', 'the sandbox repo by name')
+    enthaelt(html, REPO, 'with its path')
+  })
+  await pruefe('the repo form carries every field the save route reads back', async () => {
+    const row = db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
+    const html = await (await hol(`/repos/edit?id=${row.id}`)).text()
+    enthaelt(html, 'Path (main checkout)', 'the label from lang/en.json')
+    for (const feld of ['name="name"', 'name="path"', 'name="base_branch"', 'name="prompt"', 'name="worktree_extras"']) {
+      enthaelt(html, feld, `field ${feld}`)
+    }
+    enthaelt(html, REPO, 'prefilled with what is stored')
+    enthaelt(html, 'main', 'and the base branch')
+  })
+  await pruefe('the agents page shows the schedule and all three actions of a row', async () => {
+    // An agent with a real schedule, deliberately left switched OFF: the scheduler
+    // only ever picks up active ones, so this row cannot start anything by itself.
+    const gespeichert = await formular('/agents/edit', {
+      repo_id: String(repoId), name: 'e2e-anzeige', harness: 'claude', prompt: 'x',
+      branch_mode: 'keiner', expected_minutes: '20',
+      schedule_kind: 'woechentlich', schedule_days: ['1', '3'], schedule_time: '07:30', schedule_weeks: '1',
+    }, { alsBrowser: true })
+    gleich(gespeichert.status, 303, 'agent saved')
+    const r = await hol(`/agents?repo=${repoId}`)
+    gleich(r.status, 200, 'status')
+    const html = await r.text()
+    enthaelt(html, 'Create agent', 'the way to a new agent')
+    enthaelt(html, 'Flows hang on an agent', 'the hint that says where flows are attached')
+    enthaelt(html, 'Schedule', 'the schedule column exists')
+    const zeile = html.split('<tr').find(z => z.includes('e2e-anzeige'))
+    wahr(!!zeile, 'the agent has a row')
+    enthaelt(zeile, 'weekly: Mon, Wed at 07:30', 'the schedule column says what is really planned')
+    enthaelt(zeile, '20 min', 'the expected duration')
+    // The actions are checked by the routes they post to: those outlive any markup.
+    enthaelt(zeile, '/agents/toggle', 'the on/off toggle')
+    enthaelt(zeile, 'off', 'which says what the agent currently is')
+    enthaelt(zeile, '/agents/start', 'the "start now" button')
+    enthaelt(zeile, 'start now', 'by its name')
+    enthaelt(zeile, `/agents/edit?id=${agent('e2e-anzeige').id}`, 'and the edit link')
+  })
+  await pruefe('the toggle in the row switches the agent on and off again', async () => {
+    const a = agent('e2e-anzeige')
+    gleich(a.active, 0, 'starts switched off')
+    const r = await formular('/agents/toggle', { id: String(a.id), repo: String(repoId) }, { alsBrowser: true })
+    gleich(r.status, 303, 'redirects back to the list')
+    gleich(agent('e2e-anzeige').active, 1, 'now on')
+    await formular('/agents/toggle', { id: String(a.id), repo: String(repoId) }, { alsBrowser: true })
+    // Off again on purpose: an ACTIVE weekly agent left behind would be picked up
+    // by the scheduler tick and start a run nobody asked for.
+    gleich(agent('e2e-anzeige').active, 0, 'and off again')
+  })
+  await pruefe('the favorite form is the run setup under a name', async () => {
+    const r = await hol(`/settings/favorites/edit?id=${FAVID}`)
+    gleich(r.status, 200, 'status')
+    const html = await r.text()
+    enthaelt(html, 'Edit favorite', 'the title from lang/en.json')
+    enthaelt(html, 'E2E-Favorit', 'prefilled with what is stored')
+    enthaelt(html, 'name="harness"', 'the coding agent')
+    enthaelt(html, 'name="model"', 'the model')
+    enthaelt(html, 'e2e-fleiss', 'the extra-skills block is part of it')
+    const neu = await hol('/settings/favorites/edit')
+    gleich(neu.status, 200, 'a fresh favorite form answers as well')
+    enthaelt(await neu.text(), 'New favorite', 'with its own title')
+  })
+  await pruefe('the Telegram assistant walks through its three steps', async () => {
+    const r = await hol('/telegram-setup')
+    gleich(r.status, 200, 'status')
+    const html = await r.text()
+    enthaelt(html, 'Telegram setup', 'title')
+    for (const schritt of ['Step 1 — bot token', 'Step 2 — find the chat ID', 'Step 3 — test']) {
+      enthaelt(html, schritt, schritt)
+    }
+    enthaelt(html, '/telegram-setup/token', 'step 1 posts the token to its route')
+    enthaelt(html, 'name="telegram_token"', 'and has the field for it')
+    enthaelt(html, '/settings/test-telegram', 'step 3 sends the test message')
+  })
+
+  // ------------------------------------------------------------------
+  // Status used to stand in three places and fully on exactly ONE page: two
+  // quota bars in the header, the pipeline switch as running text beside them,
+  // and the usage panel on the overview. The question those three answer
+  // together — can I send something off right now, and is anything stuck? —
+  // could therefore only be asked from the overview.
+  gruppe('The status sidebar: one reading, on every page')
+
+  await pruefe('the sidebar stands on every page, and the header kept only context and action', async () => {
+    for (const pfad of ['/', '/agents', '/sessions', '/settings', '/repos', `/archive?repo=${repoId}`, '/flows', '/runs/new']) {
+      const html = await (await hol(pfad)).text()
+      enthaelt(html, 'id="status-sidebar"', `${pfad}: the sidebar`)
+      enthaelt(html, 'id="header-status"', `${pfad}: the pipeline reading, inside it`)
+      enthaelt(html, 'Pipeline', `${pfad}: by its name from lang/en.json`)
+      const kopf = html.slice(html.indexOf('<header'), html.indexOf('</header>'))
+      // The two things that stay: the repo is context, Quick Run is an action.
+      enthaelt(kopf, 'id="repo-switch"', `${pfad}: the repo switcher stayed in the header`)
+      enthaelt(kopf, 'id="qr-open"', `${pfad}: and so did the Quick-Run button`)
+      // The one thing that left: a reading. It is a status, and status is the
+      // sidebar's job now — a bar that has to stay one line high cannot carry it.
+      falsch(kopf.includes('class="quota"'), `${pfad}: no quota bar left in the header`)
+      falsch(kopf.includes('id="header-status"'), `${pfad}: and no pipeline reading either`)
+    }
+  })
+  await pruefe('the sidebar counts the work in flight of THIS repo and links each count into the overview', async () => {
+    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const leiste = html.slice(html.indexOf('id="status-sidebar"'), html.indexOf('</aside>'))
+    wahr(leiste.length > 50, 'the sidebar has content')
+    enthaelt(leiste, 'Work in flight', 'the block by its name from lang/en.json')
+    const zaehl = (s) => db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND status=?`).get(repoId, s).c
+    let gesehen = 0
+    for (const s of ['running', 'waiting_help', 'scheduled', 'deferred']) {
+      const n = zaehl(s)
+      if (!n) {
+        // Zero is not information, it is furniture: the line is absent, not "0".
+        falsch(leiste.includes(`status=${s}"`), `${s}: none of them, so no line`)
+        continue
+      }
+      gesehen++
+      enthaelt(leiste, `/?repo=${repoId}&amp;status=${s}`, `${s}: linked into the overview`)
+      enthaelt(leiste, `<span class="n">${n}</span>`, `${s}: with the count the database holds`)
+    }
+    wahr(gesehen > 0, 'at least one status was in flight at this point of the suite')
+  })
+  await pruefe('a count leads to the overview filtered to exactly that status', async () => {
+    // A planned run: it exists, it has no session, and nothing picks it up for
+    // the next ten hours — so this is deterministic wherever the suite stands.
+    const j = await laufStarten({
+      repo_id: repoId, prompt: 'E2E-Filter', title: 'Filter run',
+      start_mode: 'in', start_in_minutes: '600',
+    })
+    wahr(j.scheduled, `planned (${JSON.stringify(j)})`)
+    const gefiltert = await (await hol(`/?repo=${repoId}&status=scheduled`)).text()
+    const koerper = gefiltert.slice(gefiltert.indexOf('id="runs-body"'), gefiltert.indexOf('</table>'))
+    enthaelt(koerper, j.runId, 'the filtered list holds the planned run')
+    const ids = [...koerper.matchAll(/id="run-([0-9a-f-]{36})"/g)].map(m => m[1])
+    for (const id of ids) gleich(lauf(id).status, 'scheduled', `${id.slice(0, 8)}: really has that status`)
+    const erwartet = db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND status='scheduled'`).get(repoId).c
+    gleich(ids.length, erwartet, 'exactly the runs of that status, no more and no fewer')
+    enthaelt(gefiltert, 'Show all', 'and a way back to the whole list')
+    // The live channel has to ask for the SAME selection, or the first update
+    // would silently replace the filtered list with the unfiltered one.
+    enthaelt(koerper, 'data-status="scheduled"', 'the tbody carries the filter for the live channel')
+    const frag = await hol(`/api/fragments/runs-body?repo=${repoId}&status=scheduled`)
+    gleich(frag.status, 200, 'the fragment answers')
+    gleich([...(await frag.text()).matchAll(/id="run-([0-9a-f-]{36})"/g)].length, erwartet, 'with the same selection')
+    // A status the CHECK constraint does not know is no filter, not an error.
+    const alles = await hol(`/?repo=${repoId}&status=erfunden`)
+    gleich(alles.status, 200, 'an invented status is simply no filter')
+    wahr([...(await alles.text()).matchAll(/id="run-([0-9a-f-]{36})"/g)].length > erwartet, 'and the whole list comes back')
+  })
+  await pruefe('the overview is seven columns wide and its empty state spans all of them', async () => {
+    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const kopf = html.slice(html.indexOf('<thead'), html.indexOf('</thead>'))
+    gleich((kopf.match(/<th>/g) || []).length, 7, 'seven column headers, not eleven')
+    // Eleven columns became seven without losing a single fact: traffic light,
+    // status word and last anomaly are one statement, and so are harness/model
+    // and branch/PR.
+    for (const titel of ['Status', 'Title', 'Coding agent/model', 'Started', 'Duration/expected', 'Branch/PR', 'Incidents']) {
+      enthaelt(kopf, `>${titel}<`, `header ${titel}`)
+    }
+    const zeile = html.split('<tr ').find(z => z.includes(RH))
+    gleich((zeile.match(/<td/g) || []).length, 7, 'and a row has exactly as many cells as the head has columns')
+    // A repo without runs: the sentence has to span the whole table, otherwise
+    // it sits in the first column with six empty cells beside it.
+    const leer = await (await hol('/api/fragments/runs-body?repo=999999')).text()
+    enthaelt(leer, 'colspan="7"', 'the empty state spans all seven')
+    enthaelt(leer, 'no runs yet', 'and says so')
+  })
+  await pruefe('the sidebar fragment renders the same aside the page does', async () => {
+    const r = await hol(`/api/fragments/sidebar?repo=${repoId}`)
+    gleich(r.status, 200, 'status')
+    const frag = await r.text()
+    enthaelt(frag, 'id="status-sidebar"', 'the swap target')
+    enthaelt(frag, 'id="header-status"', 'with the pipeline reading inside it')
+    enthaelt(frag, 'Work in flight', 'and the work counts of the repo it was asked for')
+    // Same renderer as the page — a fragment that builds its own markup is the
+    // mistake server/run-def.mjs was written from.
+    const seite = await (await hol(`/?repo=${repoId}`)).text()
+    gleich(frag.trim(), seite.slice(seite.indexOf('<aside id="status-sidebar"'), seite.indexOf('</aside>') + '</aside>'.length).trim(),
+      'byte for byte what the page carries')
+  })
+
+  // ------------------------------------------------------------------
+  // POST /settings/save writes only the keys the request actually carried. The
+  // old version looped `b[k] ?? ''` over the whole key list, so a body with one
+  // field blanked the other fifteen — switching the language would have wiped
+  // the Telegram token. Three things have to hold at once, and only all three
+  // together describe the rule: an absent key is untouched, a present but empty
+  // one is still cleared (that is how a text field is emptied on purpose), and a
+  // key nobody declared never reaches the settings table.
+  gruppe('POST /settings/save writes only what the request brought')
+
+  {
+    const einstellung = (k) => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value
+    const setzen = (k, v) => db.prepare(`INSERT INTO settings(key,value) VALUES(?,?)
+                                         ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(k, v)
+
+    await pruefe('a post with only ui_language leaves the other keys alone', async () => {
+      setzen('telegram_token', 'geheim:123')
+      setzen('abo_price', '200')
+      try {
+        const r = await formular('/settings/save', { ui_language: 'en' }, { alsBrowser: true })
+        gleich(r.status, 303, 'saved')
+        gleich(einstellung('telegram_token'), 'geheim:123', 'the token survived a post that never mentioned it')
+        gleich(einstellung('abo_price'), '200', 'and so did the subscription price')
+        gleich(einstellung('ui_language'), 'en', 'while the key that was posted did arrive')
+      } finally {
+        setzen('telegram_token', '')
+        setzen('abo_price', '200')
+      }
+    })
+
+    await pruefe('an empty text field still clears its setting', async () => {
+      setzen('prompt_suffix', 'never send this to the agent')
+      const r = await formular('/settings/save', { prompt_suffix: '' }, { alsBrowser: true })
+      gleich(r.status, 303, 'saved')
+      gleich(einstellung('prompt_suffix'), '', 'present-but-empty means delete, not "not mentioned"')
+    })
+
+    await pruefe('a key that is not in SETTINGS_KEYS never reaches the table', async () => {
+      const r = await formular('/settings/save',
+        { ui_language: 'en', erfundener_schluessel: 'ha' }, { alsBrowser: true })
+      gleich(r.status, 303, 'saved')
+      gleich(einstellung('erfundener_schluessel'), undefined, 'the invented key was dropped')
+    })
+  }
+
+  // ------------------------------------------------------------------
+  // Nothing in this suite ever rendered a page in another language, so a string
+  // hard-wired instead of run through t() stayed invisible as long as the English
+  // text happened to match. This group closes that hole — and puts the language
+  // back to English no matter what, because every other assertion here reads
+  // English strings.
+  gruppe('The UI really renders in the chosen language')
+
+  await pruefe('switching the UI language changes what the pages say', async () => {
+    // Only the language goes over the wire — the route writes what the request
+    // brought and leaves the rest standing (see the group above).
+    const spracheSetzen = (lang) =>
+      formular('/settings/save', { ui_language: lang }, { alsBrowser: true })
+    try {
+      gleich((await spracheSetzen('de')).status, 303, 'language saved')
+      const html = await (await hol('/repos')).text()
+      enthaelt(html, 'Repo anlegen', 'repos.create in German')
+      enthaelt(html, 'Übersicht', 'and the navigation with it (nav.overview)')
+      enthaelt(html, 'Worktree-Ergänzungen', 'a column header too (repos.extras)')
+      falsch(html.includes('Create repo'), 'the English string is really gone')
+      // The strings that used to sit hard-wired between the tags. English alone
+      // is no proof for them: "min" and "in {x}, out {y}" read exactly like the
+      // literals they replaced, so only a second language shows that they go
+      // through t() at all.
+      const uebersicht = await (await hol(`/?repo=${repoId}`)).text()
+      enthaelt(uebersicht, ' Min.', 'the duration unit is translated (unit.minutes)')
+      const detail = await (await hol(`/runs/${RH}`)).text()
+      enthaelt(detail, 'rein ', 'the token metric is translated (run.tokens_value)')
+    } finally {
+      gleich((await spracheSetzen('en')).status, 303, 'back to English')
+    }
+    enthaelt(await (await hol('/repos')).text(), 'Create repo', 'English again for everything that follows')
+    // The other way round for the incident severity: 'rot' is the value the
+    // CHECK on the table stores, so only the English page can show that the
+    // line renders a word instead of the raw column.
+    enthaelt(await (await hol(`/runs/${RH}`)).text(), ', red)',
+      'the incident severity is a translated word, not the stored value')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('The live channel (server/events.mjs)')
+
+  /**
+   * Reads an SSE stream for a while and returns the raw frames. Deliberately no
+   * EventSource: there is no browser here, and the wire format is exactly what
+   * this test is about.
+   */
+  async function lauscher(pfad, { msKopf = 1500 } = {}) {
+    const ctrl = new AbortController()
+    const res = await fetch(BASIS + pfad, { signal: ctrl.signal, headers: { accept: 'text/event-stream' } })
+    const leser = res.body.getReader()
+    const dec = new TextDecoder()
+    let text = ''
+    const lesen = (async () => {
+      try {
+        for (;;) {
+          const { done, value } = await leser.read()
+          if (done) break
+          text += dec.decode(value, { stream: true })
+        }
+      } catch { /* aborted below */ }
+    })()
+    return {
+      res,
+      text: () => text,
+      async warteAufText(teil, ms = msKopf) {
+        const ende = Date.now() + ms
+        while (Date.now() < ende) {
+          if (text.includes(teil)) return true
+          await new Promise(r => setTimeout(r, 25))
+        }
+        return false
+      },
+      async schliessen() { ctrl.abort(); await lesen },
+    }
+  }
+
+  await pruefe('the channel opens as a stream and says so before anything happens', async () => {
+    const l = await lauscher('/api/events')
+    try {
+      gleich(l.res.status, 200, 'status')
+      enthaelt(l.res.headers.get('content-type') ?? '', 'text/event-stream', 'content type')
+      // The headers must be flushed at once, otherwise the browser fires onopen
+      // only at the first real event — which may be minutes away.
+      wahr(await l.warteAufText(': connected'), `the greeting arrives immediately (got: ${JSON.stringify(l.text())})`)
+    } finally { await l.schliessen() }
+  })
+
+  await pruefe('a title generated after the fact reaches an open page', async () => {
+    // This is the case the live channel was built for: the run is created, the
+    // page is open, and the real title only arrives once the model has answered.
+    const l = await lauscher(`/api/events?repo=${repoId}`)
+    try {
+      await l.warteAufText(': connected')
+      const r = await formular(`/api/runs/${R1}/title`, { title: 'Live channel proof' })
+      gleich(r.status, 200, 'rename accepted')
+      wahr(await l.warteAufText('event: run'), `an event arrives (got: ${JSON.stringify(l.text())})`)
+      enthaelt(l.text(), R1, 'and it names the run')
+      enthaelt(l.text(), '"kind":"title"', 'and says what changed')
+      enthaelt(l.text(), 'id: ', 'with an id, so a reconnect can catch up')
+    } finally { await l.schliessen() }
+  })
+
+  await pruefe('a listener on another repo is not told about this one', async () => {
+    // The filter is the whole reason the event carries a repoId: an operator
+    // watching one repo must not see another repo's runs appear.
+    const fremd = await formular('/repos/edit', {
+      name: 'e2e-fremd', path: join(SB, 'repo'), base_branch: 'main', worktree_extras: '[]',
+    }, { alsBrowser: true })
+    gleich(fremd.status, 303, 'second repo created')
+    const fremdId = db.prepare(`SELECT id FROM repos WHERE name='e2e-fremd'`).get().id
+    const l = await lauscher(`/api/events?repo=${fremdId}`)
+    try {
+      await l.warteAufText(': connected')
+      await formular(`/api/runs/${R1}/title`, { title: 'Still not yours' })
+      wahr(!(await l.warteAufText('event: run', 600)), `nothing arrived (got: ${JSON.stringify(l.text())})`)
+    } finally { await l.schliessen() }
+  })
+
+  await pruefe('the five status changes that wrote no event now write one', async () => {
+    // Measured before the live channel was wired: of the 18 places that set
+    // runs.status, five left no trace at all — so the run's own event list did
+    // not know why it had stopped. addEvent() is the channel's single choke
+    // point, which only works if every transition really passes through it.
+    const j = await laufStarten({ repo_id: repoId, prompt: 'event coverage', branch_mode: 'keiner' })
+    await sessionMerken(j.runId)
+    await formular(`/api/runs/${j.runId}/send`, { text: 'hello' })
+    enthaelt(ereignisse(j.runId).join(','), 'message_sent', 'a message from a human is recorded')
+    await formular(`/api/runs/${j.runId}/kill`, {})
+    enthaelt(ereignisse(j.runId).join(','), 'aborted', 'ending it by hand is recorded')
+    await formular(`/api/runs/${j.runId}/retry`, {})
+    enthaelt(ereignisse(j.runId).join(','), 'retry', 'and so is retrying it')
+    await sessionMerken(j.runId)
+    await formular(`/api/runs/${j.runId}/kill`, {})   // leave nothing running
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Integration: a run is done when its work is on the base branch')
+
+  // Everything below only happens because the repo asks for it. Turning it on
+  // goes through the repo FORM, so the block one clicks and the columns the hub
+  // reads cannot drift apart.
+  const integrate = await import('../server/integrate.mjs')
+  const g = (dir, ...args) => sh('git', ['-C', dir, ...args])
+
+  async function repoMerge(fields = {}) {
+    const row = db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
+    const r = await formular(`/repos/edit?id=${row.id}`, {
+      name: 'e2e', path: REPO, base_branch: 'main',
+      worktree_extras: row.worktree_extras ?? '[]', prompt: row.prompt ?? '',
+      merge_mode: 'hub', merge_check: '', finish_timeout_min: '15',
+      merge_max_attempts: '2', conflict_parallel: '1', notify_running: '1', max_parallel: '0',
+      ...fields,
+    }, { alsBrowser: true })
+    gleich(r.status, 303, `repo saved (${JSON.stringify(fields)})`)
+    return db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
+  }
+
+  /** A report exactly as cc-report sends it — and the hub's answer to it. */
+  async function sendReport(runId, body) {
+    const r = await hol(`/api/runs/${runId}/report`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    gleich(r.status, 200, 'the report endpoint answers 2xx — anything else lands in inbox.jsonl')
+    return r.json()
+  }
+
+  /** Start a run and hand back id, worktree and session. */
+  async function mergeRun(fields = {}) {
+    const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Merge', branch_mode: 'keiner', ...fields })
+    wahr(!!j.runId, `run started (${JSON.stringify(j)})`)
+    await sessionMerken(j.runId)
+    const row = lauf(j.runId)
+    return { id: j.runId, wt: row.workdir_effective, session: row.tmux_session }
+  }
+
+  async function writeAndCommit(wt, datei, content, message) {
+    writeFileSync(join(wt, datei), content)
+    await g(wt, 'add', '-A')
+    await g(wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', message)
+  }
+
+  const originSubject = async (ref = 'main') =>
+    (await g(ORIGIN, 'log', '-1', '--format=%s', ref)).stdout.trim()
+
+  // The `run_merged` flow of the group above is still active: it hangs on this
+  // repo and fires on every real merge from here on. That is the seam between
+  // the two halves of this work — the integrator writes the merge, the flow
+  // trigger reads it — and it is the one thing neither branch could test alone.
+  const mergeFlowId = db.prepare(`SELECT id FROM flows WHERE name='E2E-Merge-Flow'`).get()?.id ?? null
+  const flowRunsFor = (runId) => db.prepare('SELECT * FROM flow_runs WHERE flow_id=? AND trigger_run_id=?')
+    .all(mergeFlowId, runId)
+  const triggerOf = (fr) => JSON.parse(fr.context).trigger
+
+  await repoMerge()
+
+  await pruefe('the repo form carries the Integration block and stores it', async () => {
+    const row = db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
+    gleich(row.merge_mode, 'hub', 'merge mode stored')
+    gleich(row.finish_timeout_min, 15, 'timeout stored')
+    gleich(row.notify_running, 1, 'the checkbox is on')
+    const html = await (await hol(`/repos/edit?id=${row.id}`)).text()
+    for (const feld of ['name="merge_mode"', 'name="merge_check"', 'name="finish_timeout_min"',
+      'name="merge_max_attempts"', 'name="conflict_parallel"', 'name="notify_running"', 'name="max_parallel"']) {
+      enthaelt(html, feld, `field ${feld}`)
+    }
+  })
+
+  await pruefe('a wrong number is a readable problem, not a stored zero', async () => {
+    const row = db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
+    const r = await formular(`/repos/edit?id=${row.id}`, {
+      name: 'e2e', path: REPO, base_branch: 'main', worktree_extras: row.worktree_extras ?? '[]',
+      merge_mode: 'hub', finish_timeout_min: '0', merge_max_attempts: '2',
+      conflict_parallel: '1', notify_running: '1', max_parallel: '0',
+    }, { alsBrowser: true })
+    gleich(r.status, 400, 'refused')
+    gleich(db.prepare('SELECT finish_timeout_min FROM repos WHERE name=?').get('e2e').finish_timeout_min, 15, 'unchanged')
+  })
+
+  // ---- 1. the clean case: the report is checked, then merged and pushed ----
+  let cleanRun = null
+  await pruefe('a clean, mergeable run is merged into main and only THEN done', async () => {
+    cleanRun = await mergeRun()
+    await writeAndCommit(cleanRun.wt, 'clean.txt', 'clean\n', 'E2E: clean run')
+    const antwort = await sendReport(cleanRun.id, { kind: 'done', text: 'Everything went fine.' })
+    wahr(antwort.ok, 'accepted')
+    enthaelt(antwort.message ?? '', 'cc-hub is merging it into main', 'the answer says what happens now')
+    await warteAuf(() => lauf(cleanRun.id).merge_status === 'merged',
+      { was: 'the run is merged', timeoutMs: 30_000 })
+    const r = lauf(cleanRun.id)
+    gleich(r.status, 'done', 'done — and not a second earlier')
+    wahr(!!r.merged_sha, 'the merged commit is recorded')
+    const anc = await g(REPO, 'merge-base', '--is-ancestor', r.merged_sha, 'origin/main')
+    wahr(anc.ok, 'the run\'s tip really is an ancestor of origin/main')
+    enthaelt(await originSubject(), 'Merge run', 'a merge commit, always --no-ff')
+    const ev = ereignisse(cleanRun.id)
+    enthaelt(ev.join(','), 'finish_started', 'the gate is recorded')
+    enthaelt(ev.join(','), 'finish_clean', 'and its verdict')
+    enthaelt(ev.join(','), 'merged', 'and the merge')
+    gleich(ev.filter(k => k === 'telegram_sent:done').length, 1, 'Telegram hears about it exactly once')
+  })
+
+
+  await pruefe('the merge starts the run_merged flow — once, with the facts of the merge', async () => {
+    const { flowsTick } = await import('../server/flows/triggers.mjs')
+    wahr(!!mergeFlowId, 'the flow of the group above is still there')
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'flow-merge.txt', 'for the flow\n', 'E2E: a merge a flow reacts to')
+    await sendReport(l.id, { kind: 'done', text: 'merged for the flow' })
+    await warteAuf(() => lauf(l.id).merge_status === 'merged', { was: 'merged', timeoutMs: 30_000 })
+    await warteAuf(() => flowRunsFor(l.id).length === 1,
+      { was: 'exactly one flow run for this merge', timeoutMs: 15_000 })
+    const trigger = triggerOf(flowRunsFor(l.id)[0])
+    gleich(trigger.kind, 'run_merged', 'started by the merge, not by the end of the run')
+    gleich(trigger.run.id, l.id, 'and it names the run')
+    gleich(trigger.merge.sha, lauf(l.id).merged_sha, 'the commit it landed as')
+    gleich(trigger.merge.base, 'main', 'the branch it landed on')
+    // The files of the MERGE, not the ones the run happened to touch: that is
+    // what an agent downstream has to react to.
+    gleich(trigger.merge.files.join(','), 'flow-merge.txt', 'and what the merge really changed')
+    gleich(lauf(l.id).merge_dispatched, 1, 'the merge is marked as dispatched')
+    await flowsTick()
+    gleich(flowRunsFor(l.id).length, 1, 'a second pass starts nothing more')
+  })
+
+  // ---- 2. dirty: the agent is told, and reports again ----
+  await pruefe('an uncommitted change holds the run and names the file', async () => {
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'a.txt', 'a\n', 'E2E: committed part')
+    writeFileSync(join(l.wt, 'forgotten.txt'), 'left behind\n')
+    const antwort = await sendReport(l.id, { kind: 'done', text: 'done, I think' })
+    enthaelt(antwort.message ?? '', 'NOT finished yet', 'the answer says the run is not over')
+    enthaelt(antwort.message ?? '', 'forgotten.txt', 'and names the file')
+    const r = lauf(l.id)
+    gleich(r.status, 'running', 'the run stays running — its agent can still fix this')
+    gleich(r.finish_state, 'awaiting_commit', 'and is waiting for the commit')
+    wahr((r.report_md ?? '').includes('done, I think'), 'the report is already safe')
+    // The agent does what it was told.
+    await g(l.wt, 'add', '-A')
+    await g(l.wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: the leftover')
+    await integrate.integrateTick()
+    await warteAuf(() => lauf(l.id).merge_status === 'merged', { was: 'merged after the commit', timeoutMs: 30_000 })
+    gleich(lauf(l.id).status, 'done', 'and now it is done')
+  })
+
+  // ---- 3. conflict → conflict run ----
+  const resolverSetup = async () => formular('/settings/merge', {
+    harness: 'claude', model: '', provider: '', effort: '',
+    merge_resolver_prompt: 'Keep the tests green.',
+  }, { alsBrowser: true })
+
+  let conflicted = null, resolver = null
+  await pruefe('the Merge settings page stores the conflict resolver through the run form\'s own validation', async () => {
+    const r = await resolverSetup()
+    gleich(r.status, 303, 'saved')
+    gleich(db.prepare(`SELECT value FROM settings WHERE key='merge_resolver_harness'`).get().value, 'claude', 'harness')
+    const html = await (await hol('/settings/merge')).text()
+    enthaelt(html, 'name="harness"', 'the run form\'s own setup block')
+    enthaelt(html, 'Keep the tests green.', 'and the operator\'s own instructions')
+    enthaelt(await (await hol('/settings')).text(), '/settings/merge', 'the settings page links to it')
+  })
+
+  await pruefe('a branch that no longer merges holds the run and names the conflict', async () => {
+    conflicted = await mergeRun()
+    await writeAndCommit(conflicted.wt, 'README.md', '# Testrepo\nfrom the run\n', 'E2E: run changes the readme')
+    // Meanwhile somebody else lands a change on the same line. The main
+    // checkout has to be level with origin first — the hub has been merging
+    // into it all along, so a commit on a stale main could not be pushed.
+    await g(REPO, 'fetch', 'origin')
+    await g(REPO, 'reset', '--hard', 'origin/main')
+    writeFileSync(join(REPO, 'README.md'), '# Testrepo\nfrom outside\n')
+    await g(REPO, 'add', '-A')
+    await g(REPO, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: outside change')
+    await g(REPO, 'push', '-q', 'origin', 'main')
+    const antwort = await sendReport(conflicted.id, { kind: 'done', text: 'I changed the readme.' })
+    enthaelt(antwort.message ?? '', 'cannot be merged into main', 'the answer says why')
+    enthaelt(antwort.message ?? '', 'README.md', 'and names the file')
+    enthaelt(antwort.message ?? '', 'Do NOT merge into or push to main yourself', 'the ground rule')
+    gleich(lauf(conflicted.id).finish_state, 'awaiting_merge', 'waiting for the agent to resolve it')
+    gleich(lauf(conflicted.id).status, 'running', 'still running')
+  })
+
+  await pruefe('when the deadline passes, a conflict run takes over', async () => {
+    await repoMerge({ finish_timeout_min: '1' })
+    // The clock is a parameter, so the suite advances it instead of waiting.
+    await integrate.integrateTick(Date.now() + 5 * 60_000)
+    const orig = lauf(conflicted.id)
+    gleich(orig.status, 'done', 'the original run leaves the gate')
+    gleich(orig.merge_status, 'resolving', 'and its work is with a resolver')
+    gleich(orig.merge_attempts, 1, 'first attempt')
+    resolver = db.prepare('SELECT * FROM runs WHERE resolves_run_id=?').get(conflicted.id)
+    wahr(!!resolver, 'a conflict run exists')
+    await sessionMerken(resolver.id)
+    gleich(orig.resolver_run_id, resolver.id, 'and the original points at it')
+    wahr(resolver.branch_expected.startsWith('resolve/'), `its own branch (${resolver.branch_expected})`)
+    const prompt = readFileSync(join(SB, 'runs', resolver.id, 'prompt.md'), 'utf8')
+    enthaelt(prompt, 'README.md', 'the task names the conflicting file')
+    enthaelt(prompt, 'I changed the readme.', 'and carries the original report')
+    enthaelt(prompt, 'Keep the tests green.', 'and the operator\'s own instructions')
+    enthaelt(prompt, 'BOTH intentions survive', 'and the rule that keeps work from being dropped')
+    enthaelt(ereignisse(conflicted.id).join(','), 'resolver_started', 'recorded on the original run')
+  })
+
+  await pruefe('when the conflict run delivers, BOTH runs are merged', async () => {
+    const wt = lauf(resolver.id).workdir_effective
+    await g(wt, 'fetch', 'origin')
+    await g(wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'merge', 'origin/main')
+    writeFileSync(join(wt, 'README.md'), '# Testrepo\nfrom the run\nfrom outside\n')
+    await g(wt, 'add', '-A')
+    await g(wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: both intentions')
+    await sendReport(resolver.id, { kind: 'done', text: 'Resolved.' })
+    await warteAuf(() => lauf(resolver.id).merge_status === 'merged', { was: 'the resolver is merged', timeoutMs: 30_000 })
+    gleich(lauf(conflicted.id).merge_status, 'merged', 'and so is the run it worked for')
+    gleich(lauf(conflicted.id).merged_sha, lauf(resolver.id).merged_sha, 'the same commit for both')
+    gleich(ereignisse(conflicted.id).filter(k => k === 'telegram_sent:done').length, 1,
+      'the original run hears about its merge exactly once, and only now')
+    // A conflict run is the integrator's tool: it never speaks for itself, and
+    // nothing hangs on its end.
+    gleich(ereignisse(resolver.id).filter(k => k.startsWith('telegram_sent')).length, 0,
+      'and the conflict run itself says nothing on Telegram')
+    gleich(lauf(resolver.id).flow_dispatched, 1, 'no flow ever fires for it')
+    gleich(lauf(resolver.id).flows, null, 'and it carries no attachments to fire')
+    const mergedEvent = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='merged'`).get(conflicted.id)
+    wahr(Array.isArray(JSON.parse(mergedEvent.payload).files), 'the merged event carries the files the merge changed')
+  })
+
+
+  await pruefe('a merge over a conflict run fires once, for the ORIGINAL run', async () => {
+    const { flowsTick } = await import('../server/flows/triggers.mjs')
+    await flowsTick()
+    await warteAuf(() => flowRunsFor(conflicted.id).length === 1,
+      { was: 'one flow run for the integration', timeoutMs: 15_000 })
+    const trigger = triggerOf(flowRunsFor(conflicted.id)[0])
+    gleich(trigger.run.id, conflicted.id, 'the flow is about the run whose work landed')
+    gleich(trigger.merge.sha, lauf(conflicted.id).merged_sha, 'with the commit it landed as')
+    gleich(trigger.merge.resolver_run_id, resolver.id, 'and it names the conflict run that got it there')
+    // The dispatch fires per RUN, the flow has to fire per INTEGRATION — and the
+    // two only differ when a conflict run was involved (see 3.15).
+    gleich(flowRunsFor(resolver.id).length, 0, 'the conflict run itself never starts a flow')
+    gleich(lauf(resolver.id).merge_dispatched, 1, 'it is marked at birth, so no pass looks at it again')
+    gleich(lauf(conflicted.id).merge_dispatched, 1, 'and the original is marked once it fired')
+    const vorher = db.prepare('SELECT count(*) c FROM flow_runs').get().c
+    await flowsTick()
+    gleich(db.prepare('SELECT count(*) c FROM flow_runs').get().c, vorher, 'a second pass starts nothing more')
+  })
+
+  // ---- 5. the attempt limit ----
+  await pruefe('after the last attempt the hub asks a human instead of trying again', async () => {
+    await repoMerge({ finish_timeout_min: '1', merge_max_attempts: '1' })
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'README.md', '# Testrepo\nsecond run\n', 'E2E: second conflict')
+    await g(REPO, 'fetch', 'origin')
+    await g(REPO, 'reset', '--hard', 'origin/main')
+    writeFileSync(join(REPO, 'README.md'), '# Testrepo\nsecond outside\n')
+    await g(REPO, 'add', '-A')
+    await g(REPO, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: second outside')
+    await g(REPO, 'push', '-q', 'origin', 'main')
+    await sendReport(l.id, { kind: 'done', text: 'second run report' })
+    gleich(lauf(l.id).finish_state, 'awaiting_merge', 'conflict')
+    await integrate.integrateTick(Date.now() + 5 * 60_000)
+    const r1 = db.prepare('SELECT * FROM runs WHERE resolves_run_id=?').get(l.id)
+    wahr(!!r1, 'one conflict run — the limit')
+    await sessionMerken(r1.id)
+    // It ends without delivering.
+    await formular(`/api/runs/${r1.id}/kill`, {})
+    await integrate.integrateTick(Date.now() + 10 * 60_000)
+    const orig = lauf(l.id)
+    gleich(orig.merge_status, 'blocked_conflict', 'no second attempt — a human decides')
+    const openIncident = db.prepare(`SELECT * FROM incidents WHERE run_id=? AND typ='merge_blocked' AND geloest_am IS NULL`).get(l.id)
+    wahr(!!openIncident, 'an open incident, so it shows up in the sidebar')
+    enthaelt(ereignisse(l.id).join(','), 'telegram_sent:merge_blocked', 'and Telegram was told')
+    // And the operator can act on it without leaving the run's page.
+    const html = await (await hol(`/runs/${l.id}`)).text()
+    enthaelt(html, 'id="run-integration"', 'the detail page has an Integration line')
+    enthaelt(html, 'blocked: conflict unresolved', 'saying where the work stands')
+    enthaelt(html, `/api/runs/${l.id}/merge"`, 'with "Merge now"')
+    enthaelt(html, `/api/runs/${l.id}/merge-skip`, 'and "Skip merge"')
+    enthaelt(html, 'claude --resume', 'and the command that reopens the session')
+    // One conflict run per attempt, and never one for a conflict run: that is
+    // the recursion guard, and the whole reason isResolverRun() exists.
+    gleich(db.prepare('SELECT count(*) c FROM runs WHERE resolves_run_id=?').get(l.id).c, 1,
+      'exactly one conflict run — the limit was one attempt')
+    gleich(db.prepare('SELECT count(*) c FROM runs WHERE resolves_run_id=?').get(r1.id).c, 0,
+      'and no conflict run for the conflict run')
+    gleich(lauf(r1.id).merge_status, null, 'the failed conflict run carries no verdict of its own')
+    falsch(!!db.prepare(`SELECT 1 FROM incidents WHERE run_id=? AND typ='merge_blocked'`).get(r1.id),
+      'and no incident: what went wrong there is the original run\'s problem')
+    gleich(ereignisse(r1.id).filter(k => k.startsWith('telegram_sent')).length, 0,
+      'and it never rang the phone')
+    falsch((await (await hol(`/runs/${r1.id}`)).text()).includes(`/api/runs/${r1.id}/retry`),
+      'a conflict run has no retry button — "Merge now" on the original starts a fresh one')
+  })
+
+  // ---- 6. + 14. failed with commits: assessed, backed up, merged by hand ----
+  await pruefe('a failed run is never merged by itself — but its work is named and backed up', async () => {
+    await repoMerge({ finish_timeout_min: '15', merge_max_attempts: '2' })
+    const vorher = (await g(ORIGIN, 'rev-parse', 'main')).stdout.trim()
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'failed.txt', 'work\n', 'E2E: work of a failed run')
+    await sendReport(l.id, { kind: 'failed', text: 'it broke' })
+    const r = lauf(l.id)
+    gleich(r.status, 'failed', 'failed')
+    gleich(r.merge_status, 'unmerged_commits', 'its work is named')
+    gleich((await g(ORIGIN, 'rev-parse', 'main')).stdout.trim(), vorher, 'and nothing was merged')
+    const ev = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='merge_assessed'`).get(l.id)
+    const payload = JSON.parse(ev.payload)
+    gleich(payload.status, 'unmerged_commits', 'the assessment is recorded')
+    gleich(payload.commits, 1, 'with the number of commits')
+    gleich(payload.dirty, 0, 'and of dirty files')
+    // origin is the backup: work nobody merged must not live on one disk alone.
+    const ref = `run/${l.id.split('-')[0]}`
+    wahr((await g(ORIGIN, 'rev-parse', `refs/heads/${ref}`)).ok, `the tip is backed up as origin/${ref}`)
+    enthaelt(ereignisse(l.id).join(','), 'branch_backed_up', 'and that is recorded')
+    // …and the operator can still merge it, with one click.
+    const antwort = await (await formular(`/api/runs/${l.id}/merge`, {})).json()
+    wahr(antwort.ok, `merge by hand accepted (${JSON.stringify(antwort)})`)
+    await warteAuf(() => lauf(l.id).merge_status === 'merged', { was: 'merged by hand', timeoutMs: 30_000 })
+    enthaelt(ereignisse(l.id).join(','), 'merge_manual', 'the manual action is in the run\'s history')
+  })
+
+  // ---- 7. the other agents learn that main moved ----
+  await pruefe('after a merge the other running agents are told that main moved', async () => {
+    const onlooker = await mergeRun({ prompt: 'E2E-Onlooker' })
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'moved.txt', 'moved\n', 'E2E: moves main')
+    await sendReport(l.id, { kind: 'done', text: 'moved main' })
+    await warteAuf(() => lauf(l.id).merge_status === 'merged', { was: 'merged', timeoutMs: 30_000 })
+    // The colon is not decoration: 'capture-pane -t "=name"' is no valid target
+    // ("can't find pane"), exactly like pipe-pane and set-hook (see AGENTS.md).
+    await warteAuf(async () =>
+      (await sh('tmux', ['capture-pane', '-p', '-t', `=${onlooker.session}:`])).stdout.includes('has moved'),
+    { was: 'the watching agent sees the notice in its session', timeoutMs: 15_000 })
+    // The text is on the screen ~300 ms before the event is written (the paste
+    // and the Enter are two send-keys with a pause between them), so wait for it.
+    await warteAuf(() => ereignisse(onlooker.id).includes('main_moved'),
+      { was: 'the notice is recorded on the watching run', timeoutMs: 10_000 })
+    await warteAuf(() => ereignisse(l.id).includes('main_moved_notified'),
+      { was: 'and on the run that moved main', timeoutMs: 10_000 })
+    await formular(`/api/runs/${onlooker.id}/kill`, {})
+  })
+
+  // ---- 8. the agent vanishes while the gate waits ----
+  await pruefe('an agent that disappears mid-gate escalates instead of counting as aborted', async () => {
+    const l = await mergeRun()
+    writeFileSync(join(l.wt, 'only-dirt.txt'), 'dirt\n')
+    await sendReport(l.id, { kind: 'done', text: 'am I done?' })
+    gleich(lauf(l.id).finish_state, 'awaiting_commit', 'waiting')
+    await sh('tmux', ['kill-session', '-t', `=${l.session}`])
+    await watcherTick()
+    await warteAuf(() => lauf(l.id).merge_status === 'blocked_dirty',
+      { was: 'the escalation happened', timeoutMs: 15_000 })
+    const r = lauf(l.id)
+    gleich(r.status, 'done', 'done, not aborted: this run HAD reported')
+    wahr(!!db.prepare(`SELECT 1 FROM incidents WHERE run_id=? AND typ='merge_blocked' AND geloest_am IS NULL`).get(l.id),
+      'and it is waiting for a human')
+  })
+
+  // ---- 11. the merge check ----
+  await pruefe('a red merge check is treated like a conflict: nothing is pushed, the agent is told', async () => {
+    await repoMerge({ merge_check: 'false' })
+    const vorher = (await g(ORIGIN, 'rev-parse', 'main')).stdout.trim()
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'check.txt', 'check\n', 'E2E: merge check')
+    await sendReport(l.id, { kind: 'done', text: 'please check' })
+    await warteAuf(() => lauf(l.id).finish_state === 'check_failed',
+      { was: 'the merge check failed', timeoutMs: 30_000 })
+    gleich(lauf(l.id).status, 'running', 'the run stays running — its agent can fix it')
+    gleich((await g(ORIGIN, 'rev-parse', 'main')).stdout.trim(), vorher, 'and nothing reached main')
+    await warteAuf(async () =>
+      (await sh('tmux', ['capture-pane', '-p', '-t', `=${l.session}:`])).stdout.includes('merge check failed'),
+    { was: 'the agent is told', timeoutMs: 15_000 })
+    // Green check, one more commit — the tip has to move for a new check.
+    await repoMerge({ merge_check: 'true' })
+    await writeAndCommit(l.wt, 'check.txt', 'check again\n', 'E2E: fixed')
+    await integrate.integrateTick()
+    await warteAuf(() => lauf(l.id).merge_status === 'merged', { was: 'merged after the fix', timeoutMs: 30_000 })
+    await repoMerge({ merge_check: '' })
+  })
+
+  // ---- 12. an end somebody asked for stays an abort ----
+  await pruefe('killing a run in the gate aborts it — that end WAS asked for', async () => {
+    const l = await mergeRun()
+    writeFileSync(join(l.wt, 'open.txt', ), 'open\n')
+    await sendReport(l.id, { kind: 'done', text: 'x' })
+    gleich(lauf(l.id).finish_state, 'awaiting_commit', 'waiting')
+    await formular(`/api/runs/${l.id}/kill`, {})
+    await warteAuf(() => !!lauf(l.id).merge_status, { was: 'the assessment', timeoutMs: 15_000 })
+    const r = lauf(l.id)
+    gleich(r.status, 'aborted', 'aborted, not done')
+    wahr(['unmerged_dirty', 'unmerged_both'].includes(r.merge_status), `assessed (${r.merge_status})`)
+    falsch(!!db.prepare(`SELECT 1 FROM incidents WHERE run_id=? AND typ='merge_blocked'`).get(l.id),
+      'and nobody is asked to do anything: the operator did this on purpose')
+  })
+
+  // ---- 10. cc-report prints the hub's answer ----
+  await pruefe('the real bin/cc-report prints the hub\'s answer and files nothing', async () => {
+    const l = await mergeRun()
+    writeFileSync(join(l.wt, 'unsaid.txt'), 'x\n')
+    const r = await sh(join(PROJEKT, 'bin', 'cc-report'), ['done', 'from the real script'], {
+      env: { ...process.env, CC_RUN_ID: l.id, CC_HUB_URL: BASIS, HOME: SB },
+    })
+    wahr(r.ok, `exit 0 (${r.stderr})`)
+    enthaelt(r.stdout, 'NOT finished yet', 'the answer reaches the agent as this tool\'s output')
+    enthaelt(r.stdout, 'unsaid.txt', 'and names the file')
+    falsch(existsSync(join(SB, 'agents', 'runs', l.id, 'inbox.jsonl')), 'nothing was filed as unreachable')
+    await formular(`/api/runs/${l.id}/kill`, {})
+  })
+
+  // ---- 13. origin is the backup: the operator's own commits are pushed ----
+  await pruefe('commits the operator made on main himself are pushed to origin', async () => {
+    await g(REPO, 'fetch', 'origin')
+    await g(REPO, 'reset', '--hard', 'origin/main')
+    writeFileSync(join(REPO, 'by-operator.txt'), 'by hand\n')
+    await g(REPO, 'add', '-A')
+    await g(REPO, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: operator commit')
+    const localTip = (await g(REPO, 'rev-parse', 'main')).stdout.trim()
+    falsch((await g(ORIGIN, 'rev-parse', 'main')).stdout.trim() === localTip, 'origin does not have it yet')
+    // The throttle is a parameter too, so the suite does not have to wait a minute.
+    await integrate.pushOperatorBase(Date.now() + 10 * 60_000)
+    gleich((await g(ORIGIN, 'rev-parse', 'main')).stdout.trim(), localTip, 'now it is on origin')
+    wahr(!!db.prepare('SELECT last_push_at FROM repos WHERE name=?').get('e2e').last_push_at,
+      'and the repo records when it was last backed up')
+  })
+
+  // ---- the branch rule under hub, and keeping work on a branch ----
+  await pruefe('a run can keep its work on its branch — pushed, not merged', async () => {
+    await repoMerge({ merge_mode: 'hub' })
+    const beforeMain = (await g(ORIGIN, 'rev-parse', 'main')).stdout.trim()
+    const branch = `keep/e2e-${Date.now().toString(36)}`
+    const l = await mergeRun({ branch_mode: 'neu', branch_pattern: branch, keep_on_branch: '1' })
+    gleich(lauf(l.id).keep_on_branch, 1, 'the run carries the field')
+    // The prompt says it, and says it ONCE: the keep sentence replaces the merge
+    // rule instead of standing next to it and contradicting it.
+    const prompt = readFileSync(join(SB, 'runs', l.id, 'prompt.md'), 'utf8')
+    enthaelt(prompt, 'STAYS on that branch', 'the agent is told the work stays put')
+    enthaelt(prompt, 'cc-hub will not merge it into main', 'and who will not merge it')
+    falsch(prompt.includes('cc-hub merges your work into main itself'),
+      'and NOT the merge rule as well — two rules about one thing is one too many')
+
+    await writeAndCommit(l.wt, 'kept.txt', 'stays here\n', 'E2E: work that stays on its branch')
+    const answer = await sendReport(l.id, { kind: 'done', text: 'kept it here' })
+    wahr(answer.ok, 'accepted')
+    await warteAuf(() => lauf(l.id).merge_status === 'kept_on_branch',
+      { was: 'the run is closed as kept', timeoutMs: 20_000 })
+    const r = lauf(l.id)
+    gleich(r.status, 'done', 'done')
+    gleich(r.merged_sha, null, 'nothing was merged')
+    gleich((await g(ORIGIN, 'rev-parse', 'main')).stdout.trim(), beforeMain, 'and main did not move')
+    // …but the work is on origin: nothing may live only on this machine.
+    wahr((await g(ORIGIN, 'rev-parse', `refs/heads/${branch}`)).ok, `the branch is on origin (${branch})`)
+    enthaelt(ereignisse(l.id).join(','), 'branch_kept', 'and that is recorded')
+    gleich(flowRunsFor(l.id).length, 0, 'no run_merged flow fires — there was no merge')
+
+    // The operator may still change his mind: one click runs the ordinary path.
+    const merged = await (await formular(`/api/runs/${l.id}/merge`, {})).json()
+    wahr(merged.ok, `merge by hand accepted (${JSON.stringify(merged)})`)
+    await warteAuf(() => lauf(l.id).merge_status === 'merged', { was: 'merged after all', timeoutMs: 30_000 })
+    gleich(lauf(l.id).keep_on_branch, 0, 'and the run no longer keeps anything back')
+  })
+
+  await pruefe('a dirty worktree still holds a kept run — committing is not optional', async () => {
+    const branch = `keep/dirty-${Date.now().toString(36)}`
+    const l = await mergeRun({ branch_mode: 'fest', branch_pattern: branch, keep_on_branch: '1' })
+    // A name no earlier test committed: every worktree here starts from
+    // origin/main, and the files this suite merged along the way are IN it. A
+    // file that is already tracked with the same content leaves git clean.
+    const datei = `keep-leftover-${Date.now().toString(36)}.txt`
+    writeFileSync(join(l.wt, datei), 'left behind\n')
+    const answer = await sendReport(l.id, { kind: 'done', text: 'am I done?' })
+    enthaelt(answer.message ?? '', datei, 'the same M1 as for any other run')
+    gleich(lauf(l.id).finish_state, 'awaiting_commit', 'and the same waiting state')
+    gleich(lauf(l.id).status, 'running', 'the run stays running')
+    await g(l.wt, 'add', '-A')
+    await g(l.wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: the leftover')
+    await integrate.integrateTick()
+    await warteAuf(() => lauf(l.id).merge_status === 'kept_on_branch',
+      { was: 'kept once it was clean', timeoutMs: 20_000 })
+    gleich(lauf(l.id).status, 'done', 'and closed')
+  })
+
+  await pruefe('under hub, "no branch" no longer promises throwaway work', async () => {
+    const l = await mergeRun({ branch_mode: 'keiner' })
+    const prompt = readFileSync(join(SB, 'runs', l.id, 'prompt.md'), 'utf8')
+    enthaelt(prompt, 'cc-hub merges your commits into main', 'it says what really happens')
+    falsch(prompt.includes('throwaway'), 'and not the opposite, in the same prompt as the merge rule')
+    await formular(`/api/runs/${l.id}/kill`, {})
+  })
+
+  await pruefe('the form says which rule means what, and Quick Run carries the keep box', async () => {
+    const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
+    enthaelt(html, 'data-merge-mode="hub"', 'the form knows this repo integrates')
+    enthaelt(html, 'data-explain="off"', 'both explanations are rendered')
+    enthaelt(html, 'data-explain="hub"', 'so CSS can pick without a round trip')
+    enthaelt(html, 'name="keep_on_branch"', 'and the keep box is there')
+    enthaelt(html, 'data-merge-modes=', 'with the map the Quick-Run dialog switches by')
+    // Quick Run goes through the same branchFields(), so the box has to survive
+    // pickQuickFields' allowlist — that is where a field falls off silently.
+    const fav = db.prepare('SELECT id FROM favorites ORDER BY id LIMIT 1').get()
+    const j = await (await formular('/api/runs/quick', {
+      repo_id: String(repoId), favorite_id: String(fav.id), prompt: 'E2E-Quick-Keep',
+      branch_mode: 'neu', branch_pattern: `keep/quick-${Date.now().toString(36)}`, keep_on_branch: '1',
+      start_mode: 'now',
+    })).json()
+    wahr(j.ok, `quick run started (${JSON.stringify(j)})`)
+    await sessionMerken(j.runId)
+    gleich(lauf(j.runId).keep_on_branch, 1, 'the ticked box arrived at the run')
+    await formular(`/api/runs/${j.runId}/kill`, {})
+  })
+
+  // ---- 9. with merge_mode off nothing of this happens ----
+  await pruefe('with the integration switched off a done report closes the run as it always did', async () => {
+    await repoMerge({ merge_mode: 'off' })
+    const l = await mergeRun()
+    writeFileSync(join(l.wt, 'irrelevant.txt'), 'does not matter\n')
+    const antwort = await sendReport(l.id, { kind: 'done', text: 'plain old done' })
+    gleich(antwort.message ?? null, null, 'no answer to read — there is nothing to say')
+    const r = lauf(l.id)
+    gleich(r.status, 'done', 'done right away, dirty worktree and all')
+    gleich(r.finish_state, null, 'no gate')
+    gleich(r.merge_status, null, 'and no verdict about its work')
+    // And the prompt is the one it always was, down to the sentence about a
+    // detached worktree — with the integration off, not a word may change.
+    const prompt = readFileSync(join(SB, 'runs', l.id, 'prompt.md'), 'utf8')
+    enthaelt(prompt, 'No branch — the worktree is detached; changes are throwaway changes.',
+      'the old sentence, byte for byte')
+    falsch(prompt.includes('cc-hub merges'), 'and nothing about merging at all')
+    const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
+    enthaelt(html, 'data-merge-mode="off"', 'the form says so too')
+    enthaelt(html, 'data-hub-only hidden', 'and the keep box is not even offered')
   })
 
   // ------------------------------------------------------------------

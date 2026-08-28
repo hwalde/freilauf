@@ -212,6 +212,29 @@ export async function sessionAlive(name) {
 }
 
 /**
+ * Is there still a PROCESS in this session one could type to?
+ *
+ * A standing session is not the same thing as a reachable agent: `cc-start
+ * --keep` sets remain-on-exit, so the session outlives its process on purpose
+ * — the screen stays readable, but there is nobody left to answer. That is
+ * exactly where the coding agents differ: claude, opencode and cursor stay in
+ * their TUI when the work is done (the pane lives on, a follow-up can be typed
+ * into it), hermes runs `chat -q`, a single non-interactive query, and exits —
+ * what remains there is a screenshot, not an agent.
+ *
+ * One `tmux list-panes` for one session; the detail page asks this once per
+ * render. `null` means tmux gave no answer at all (session gone, no server) —
+ * the caller decides what to make of not knowing.
+ */
+export async function paneAlive(name) {
+  if (!name) return null
+  const r = await sh('tmux', ['list-panes', '-t', `=${name}`, '-F', '#{pane_dead}'])
+  if (!r.ok) return null
+  const flags = r.stdout.split('\n').map(s => s.trim()).filter(Boolean)
+  return flags.length ? flags.some(v => v === '0') : null
+}
+
+/**
  * Every session with everything known about it: the run behind it, the agent,
  * the repo and what the process tree costs. Oldest first — that is the order
  * one wants when cleaning up.
@@ -253,8 +276,17 @@ export async function listSessions() {
  * overview keeps a run on 'running' forever — there is nothing left that could
  * ever report a result for it.
  *
- * Returns 'aborted' when the run was still open, 'closed' when it had already
- * finished, null when there is no run.
+ * A run in the FINISH GATE is the one exception, and only for an UNASKED-FOR end
+ * (`source` 'watcher'/'retention'): it has already reported, so its agent
+ * disappearing is not "ended without a report" — it is the moment the hub has to
+ * take over (server/integrate.mjs, escalate 'agent_gone'). When a human or a
+ * flow ends it on purpose (the kill route, the sessions page: source 'web') it
+ * becomes 'aborted' exactly as before and is assessed like any other unfinished
+ * run.
+ *
+ * Returns 'aborted' when the run was still open, 'escalated' when the finish
+ * gate took it over, 'closed' when it had already finished, null when there is
+ * no run.
  */
 export function reconcileClosedSession(runId, source = 'session') {
   const run = getRun(runId)
@@ -264,11 +296,37 @@ export function reconcileClosedSession(runId, source = 'session') {
     if (!run.tmux_closed_at) addEvent(runId, 'tmux_closed', { source })
     return 'closed'
   }
+  if (run.finish_state && source !== 'web') {
+    import('./integrate.mjs')
+      .then(m => m.escalate(runId, 'agent_gone'))
+      .catch(err => console.error('[integrate]', err.message))
+    return 'escalated'
+  }
   db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
               report_md=COALESCE(report_md, ?) WHERE id=?`)
     .run(t('sessions.aborted_note'), runId)
   addEvent(runId, 'aborted', { reason: 'tmux session ended', source })
+  assessLater(runId, source !== 'web')
   return 'aborted'
+}
+
+/**
+ * An aborted run leaves work behind too. The assessment always happens (the
+ * detail page shows it); only the run the WATCHER aborted — a session that
+ * vanished on its own, which nobody was watching for — also says so on Telegram.
+ * An operator who just clicked "end session" does not need a message about it.
+ */
+export function assessLater(runId, telegram = false) {
+  import('./integrate.mjs')
+    .then(async (m) => {
+      const assessment = await m.assessUnmerged(runId)
+      if (!telegram || !assessment || (!assessment.commits && !assessment.dirty)) return
+      const { notifyRun } = await import('./reports.mjs')
+      const run = getRun(runId)
+      await notifyRun(runId, 'aborted_unmerged',
+        `🟡 Run aborted — its work is not merged.\n${m.assessText(run, assessment)}`)
+    })
+    .catch(err => console.error('[integrate]', err.message))
 }
 
 /**

@@ -60,6 +60,42 @@
     })
   }
 
+  // ---- Quick Run → full run form: what was typed survives the handoff ----
+  // The Quick-Run dialog's "more settings" opens /runs/new in a NEW window and
+  // parks its fields under this key first (a window opened by the opener
+  // inherits a copy of its sessionStorage). This block restores them onto the
+  // MAIN form — never onto the Quick-Run dialog that sits on this page too —
+  // and runs BEFORE the start-time and branch syncs below, so those re-evaluate
+  // against the restored values. What the dialog does not ask for (coding
+  // agent, provider, model, effort, skills, flows) is not parked and stays as
+  // the server rendered it — the favorite that travels in the URL.
+  const QRFULL_KEY = 'cchub:qrfull'
+  if (location.pathname === '/runs/new') {
+    const laufForm = document.querySelector('form.settings')
+    if (laufForm) {
+      let geparkt = null
+      try { geparkt = JSON.parse(sessionStorage.getItem(QRFULL_KEY) || 'null') } catch (err) { geparkt = null }
+      if (Array.isArray(geparkt)) {
+        const byName = new Map()
+        geparkt.forEach(function (kv) { byName.set(kv[0], (byName.get(kv[0]) || []).concat(kv[1])) })
+        laufForm.querySelectorAll('input[name], textarea[name], select[name]').forEach(function (el) {
+          const vals = byName.get(el.name)
+          if (el.type === 'checkbox' || el.type === 'radio') {
+            el.checked = !!vals && vals.indexOf(el.value) >= 0
+            return
+          }
+          if (!vals || !vals.length) return
+          const v = vals.shift()
+          el.value = v
+          // The provider/effort <select>s are filled by fetch only afterwards;
+          // 'data-gewaehlt' is what those loaders read, so the choice survives.
+          if (el.dataset.gewaehlt !== undefined) el.dataset.gewaehlt = v
+        })
+        try { sessionStorage.removeItem(QRFULL_KEY) } catch (err) { /* private mode */ }
+      }
+    }
+  }
+
   // ---- schedule selection: only show the block of the chosen kind ----
   const kindSel = document.getElementById('schedule-kind')
   if (kindSel) {
@@ -89,14 +125,46 @@
     syncStart()
   })
 
-  // ---- branch rule: the pattern only matters when a branch is wanted at all ----
-  document.querySelectorAll('select[data-branch-mode]').forEach(function (modeSel) {
-    const form = modeSel.closest('form') || document
-    const pattern = form.querySelector('[data-branch-pattern]')
-    if (!pattern) return
-    const sync = () => { pattern.hidden = modeSel.value === 'keiner' }
-    modeSel.addEventListener('change', sync)
-    sync()
+  // ---- the branch rule: a choice that explains itself ----
+  //
+  // The pattern field only matters when a branch is wanted at all, and the
+  // explanation under each option depends on whether THIS repo is one the hub
+  // integrates for. Which explanation is visible is CSS's job (both are in the
+  // markup, `data-merge-mode` on the fieldset decides) — so the static case
+  // needs nothing from here.
+  //
+  // What does need JS is the one form that can change repo without rebuilding
+  // the page: the Quick-Run dialog has a repo <select>, and picking another repo
+  // there can turn a run that gets merged into one that does not. The header's
+  // repo switcher reloads, so it is none of this code's business.
+  document.querySelectorAll('[data-branch-choice]').forEach(function (box) {
+    const form = box.closest('form') || document
+    const pattern = box.querySelector('[data-branch-pattern]')
+    const keep = box.querySelector('[data-hub-only]')
+    const radios = Array.from(box.querySelectorAll('input[name=branch_mode]'))
+    const gewaehlt = () => (radios.find(r => r.checked) || {}).value || 'keiner'
+    const syncPattern = () => { if (pattern) pattern.hidden = gewaehlt() === 'keiner' }
+    radios.forEach(r => r.addEventListener('change', syncPattern))
+    syncPattern()
+
+    let modes = {}, bases = {}
+    try { modes = JSON.parse(box.dataset.mergeModes || '{}') } catch (e) { modes = {} }
+    try { bases = JSON.parse(box.dataset.mergeBases || '{}') } catch (e) { bases = {} }
+    const repoSel = form.querySelector && form.querySelector('select[name=repo_id]')
+    if (!repoSel) return
+    repoSel.addEventListener('change', function () {
+      const modus = modes[repoSel.value] === 'hub' ? 'hub' : 'off'
+      box.dataset.mergeMode = modus
+      // A base branch is part of the sentence, and it belongs to the repo — so
+      // the explanations say the name of the branch one actually picked.
+      const base = bases[repoSel.value]
+      if (base) box.querySelectorAll('[data-base]').forEach(el => { el.textContent = base })
+      if (!keep) return
+      keep.hidden = modus !== 'hub'
+      // Hidden AND unticked: a box one cannot see must not still submit, and
+      // "keep the work here" means nothing in a repo the hub does not integrate.
+      if (keep.hidden) keep.querySelectorAll('input[type=checkbox]').forEach(c => { c.checked = false })
+    })
   })
 
   // ---- toasts: say what happened without taking the page away ----
@@ -143,7 +211,36 @@
     const zeigeFav = function () {
       if (!favSel || !favInfo) return
       const opt = favSel.selectedOptions[0]
-      favInfo.textContent = opt ? (opt.dataset.summary || '') : ''
+      // The setup used to stand as a line of text under the select, where it
+      // clung to the field and pushed the task box down. It is a detail one
+      // looks up, not one one reads every time — so it lives on the marker.
+      //
+      // Built as elements rather than left to the native `title`: that one
+      // waits about a second before it appears, cannot be styled, and would
+      // render this as one long dot-separated line. CSS shows the bubble the
+      // instant the marker is hovered or focused; this only fills it.
+      const summary = opt ? (opt.dataset.summary || '') : ''
+      const tip = document.getElementById('qr-fav-tip')
+      favInfo.hidden = !summary
+      // Guarded, not returned early: the remembered favorite is saved at the
+      // end of this function, and a missing bubble must not cost that.
+      if (tip) {
+        tip.textContent = ''
+        for (const teil of summary.split(' · ')) {
+          const zeile = document.createElement('span')
+          // "Extra skills: unlazy" is a pair, "opus" is a bare fact. Where
+          // there is a colon the caption goes dim so the value carries the line.
+          const i = teil.indexOf(': ')
+          if (i > 0) {
+            const k = document.createElement('i')
+            k.textContent = teil.slice(0, i)
+            zeile.append(k, document.createTextNode(teil.slice(i + 1)))
+          } else {
+            zeile.textContent = teil
+          }
+          tip.append(zeile)
+        }
+      }
       try { localStorage.setItem(FAV_KEY, favSel.value) } catch (err) { /* private mode */ }
     }
     if (favSel) {
@@ -176,7 +273,7 @@
       fetch('/api/runs/quick', { method: 'POST', body: body, headers: { accept: 'application/json' } })
         .then(function (r) { return r.json() })
         .then(function (j) {
-          if (!j.ok) throw new Error(j.error || 'HTTP')
+          if (!j.ok) throw new Error(j.error || T('js.error_generic', 'request failed'))
           qrDialog.close()
           // Only the task is cleared: favorite, repo, branch rule and start time
           // are the setup of the next quick run just as much as of this one.
@@ -196,6 +293,32 @@
         })
         .finally(function () { if (btn) btn.disabled = false })
     })
+
+    // "More settings": the moment one wants more than the dialog asks, the run
+    // stops being quick — open the FULL single-run form in a new window with
+    // what is already here. The favorite travels in the URL (it IS the form's
+    // template, resolved server-side), everything the dialog itself holds is
+    // parked in sessionStorage first — a window this opener opens inherits a
+    // copy of it, and the form page restores the fields at load.
+    const qrFull = qrForm && qrForm.querySelector('[data-qr-full]')
+    if (qrFull) {
+      qrFull.addEventListener('click', function () {
+        const repo = qrForm.querySelector('select[name=repo_id]').value
+        const fav = qrForm.querySelector('select[name=favorite_id]').value
+        if (!repo || !fav) return
+        try {
+          const data = []
+          new FormData(qrForm).forEach(function (v, k) { if (typeof v === 'string') data.push([k, v]) })
+          sessionStorage.setItem(QRFULL_KEY, JSON.stringify(data))
+        } catch (err) { /* private mode: the form then opens with the favorite alone */ }
+        window.open('/runs/new?repo=' + encodeURIComponent(repo) +
+          '&favorite=' + encodeURIComponent(fav), '_blank')
+        // The new window got its own copy at open time; the opener does not need
+        // the blob any more, and a stale one would come back on the next click.
+        try { sessionStorage.removeItem(QRFULL_KEY) } catch (err) { /* private mode */ }
+        qrDialog.close()
+      })
+    }
   }
 
   // ---- inline renaming of a run (overview + detail page) ----
@@ -210,7 +333,7 @@
     if (!btn) return
     ev.preventDefault()
     ev.stopPropagation()
-    const box = btn.closest('.titel-inline')
+    const box = btn.closest('.title-inline')
     const link = box && box.querySelector('[data-title-text]')
     if (!box || !link || box.querySelector('input')) return
     const runId = box.dataset.run
@@ -218,7 +341,7 @@
 
     const input = document.createElement('input')
     input.type = 'text'
-    input.className = 'titel-input'
+    input.className = 'title-input'
     input.maxLength = 80
     input.value = alt
     input.placeholder = T('js.title_ph', 'Title of this run')
@@ -254,7 +377,7 @@
       })
         .then(r => r.json())
         .then(j => {
-          if (!j.ok) throw new Error(j.error || 'HTTP')
+          if (!j.ok) throw new Error(j.error || T('js.error_generic', 'request failed'))
           schliessen(j.title || neu)
           // The browser tab carries the title on the detail page.
           if (location.pathname === '/runs/' + runId) document.title = 'cc-hub — ' + (j.title || neu)
@@ -315,6 +438,11 @@
       // 'data-gewaehlt' is what those loaders read, so the choice survives.
       if (el.dataset.gewaehlt !== undefined) el.dataset.gewaehlt = v
     })
+    // Setting .checked in code fires no event, so whoever listens for one has
+    // not heard. The branch rule is the case that shows: without this the
+    // pattern field stays hidden next to a restored "new branch".
+    form.querySelectorAll('input[name=branch_mode]:checked')
+      .forEach(function (r) { r.dispatchEvent(new Event('change', { bubbles: true })) })
   }
 
   const flowBox = document.querySelector('fieldset.flows-attach')
@@ -337,6 +465,26 @@
       })
       history.replaceState(null, '', ohneFlowParam())
     }
+  }
+
+  // ---- goal: the second prompt, and only where there is one ----
+  // Which coding agents know a goal is the plugins' answer, not this file's:
+  // the server writes it into `data-goal-harnesses`. Hidden means DISABLED too —
+  // a field one cannot see must not be submitted either, otherwise switching the
+  // coding agent would send along a condition the operator can no longer read.
+  // The text itself stays put, so switching back and forth does not cost it.
+  const goalBlock = document.getElementById('goal-block')
+  if (goalBlock) {
+    const harnessSel = document.querySelector('select[name=harness]')
+    const koennen = (goalBlock.dataset.goalHarnesses || '').split(/\s+/).filter(Boolean)
+    const goalFeld = goalBlock.querySelector('textarea')
+    const goalSync = () => {
+      const on = koennen.includes(harnessSel?.value ?? '')
+      goalBlock.hidden = !on
+      if (goalFeld) goalFeld.disabled = !on
+    }
+    harnessSel?.addEventListener('change', goalSync)
+    goalSync()
   }
 
   // ---- provider and model selection ----
@@ -426,7 +574,7 @@
         // For cursor the model choice also answers the effort question — the
         // effort field therefore stays off. Without this sentence you search for it.
         const cursorNote = (harnessSel?.value === 'cursor')
-          ? ' · ' + T('js.cursor_note', 'The reasoning effort is part of the ID (…-low/-medium/-high/-xhigh/-max); IDs ending in “-fast” are cursor’s fast mode — the default is the variant without.')
+          ? ' · ' + T('js.cursor_note', "The reasoning effort is part of the ID (…-low/-medium/-high/-xhigh/-max); IDs ending in \"-fast\" are cursor's fast mode — the default is the variant without.")
           : ''
         hinweis.textContent = T('js.models_count', '{n} models', { n: j.models.length }) +
           (j.stand ? ' · ' + T('js.as_of', 'as of {time}', { time: zeitText(j.stand) }) : '') +
@@ -573,6 +721,13 @@
     ta.value = ''
     return false
   }
+  // The reload STAYS, even though the live channel would update the page by
+  // itself. It is not a leftover: it is what closes the terminal's WebSocket,
+  // and with it the tmux client behind it. Without the reload the browser keeps
+  // an attached client on a dying session — and every attached client rewraps
+  // the agent's window, because tmux runs with window-size=latest. Ending a run
+  // is also a deliberate act where a fresh page is the honest answer: the send
+  // and kill forms have to disappear, and they sit outside the fragment.
   window.cchubKill = function (id) {
     if (!confirm(T('js.kill_confirm', 'Really end this run?'))) return false
     fetch('/api/runs/' + id + '/kill', { method: 'POST' }).then(() => location.reload())
@@ -697,6 +852,180 @@
     syncFilter()
   }
 
+  // ---- status sidebar: collapsible, and the state survives the page ----
+  //
+  // The open/closed class sits on the SHELL, not on the sidebar: the live
+  // channel replaces #status-sidebar whole, and a class on the element itself
+  // would be thrown away with it on every update. sidebarSync() is therefore
+  // called again after each swap — it reads the one truth (localStorage) and
+  // writes it to the two places that show it, the shell and the button.
+  //
+  // Every localStorage access in try/catch, like cchub.sessions.showRunning:
+  // in a private window the accessor itself throws, and a status panel is not
+  // worth a page that stops working.
+  var SIDEBAR_KEY = 'cchub.sidebar.open'
+  function sidebarOpen() {
+    try { return localStorage.getItem(SIDEBAR_KEY) !== '0' } catch (err) { return true }
+  }
+  function sidebarSync() {
+    var shell = document.getElementById('shell')
+    if (!shell) return
+    var open = sidebarOpen()
+    shell.classList.toggle('side-closed', !open)
+    var btn = document.getElementById('side-toggle')
+    if (btn) {
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false')
+      btn.textContent = open ? '▸' : '◂'
+    }
+  }
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target.closest && ev.target.closest('#side-toggle')
+    if (!btn) return
+    try { localStorage.setItem(SIDEBAR_KEY, sidebarOpen() ? '0' : '1') } catch (err) { /* private mode */ }
+    sidebarSync()
+  })
+  sidebarSync()
+
+  // ---- live channel: a signal from /api/events, the HTML from the server ----
+  //
+  // The event carries only what changed, never markup. The page answers by
+  // fetching the fragment, which the server renders through the same function
+  // the full page uses — so a row has exactly one renderer, and translations,
+  // traffic-light rules and conditional cells cannot drift apart from the page.
+  //
+  // Deliberately no framework: every swap here is a special case (an element
+  // that may not exist yet, a row that must not be replaced while it is being
+  // renamed, a terminal that must never be touched at all), and the inline
+  // onclick attributes plus the capture-phase rename listener would have to be
+  // reconciled with a library's own handlers.
+  ;(function live() {
+    if (typeof EventSource === 'undefined') return
+    const runsBody = document.getElementById('runs-body')
+    const detail = location.pathname.match(/^\/runs\/([0-9a-f-]{36})$/)
+    const header = document.getElementById('header-status')
+    if (!runsBody && !detail && !header) return
+
+    // The repo comes from the BODY, not from #repo-switch: pages without a repo
+    // context (sessions, repos, settings) still render that select, and it then
+    // shows the first repo — filtering by it would silently drop every event.
+    const repo = document.body.dataset.repo || ''
+
+    // One trailing timer per target: a watcher pass can announce a dozen runs in
+    // the same tick, and each of them would otherwise be its own request.
+    const geplant = new Map()
+    function bald(key, fn, ms) {
+      clearTimeout(geplant.get(key))
+      geplant.set(key, setTimeout(() => { geplant.delete(key); fn() }, ms || 120))
+    }
+
+    // 204 = the thing is gone (archived, ended, never existed). That is an
+    // answer, not an error: the row is removed instead of left behind stale.
+    async function holeFragment(pfad) {
+      const res = await fetch(pfad, { headers: { accept: 'text/html' } })
+      if (res.status === 204) return null
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      return await res.text()
+    }
+    function zuElementen(html) {
+      const t = document.createElement('template')
+      t.innerHTML = html.trim()
+      return Array.from(t.content.children)
+    }
+    /** Replace every element of the fragment by its own id. Missing ids are skipped. */
+    function tauscheNachId(html) {
+      for (const neu of zuElementen(html)) {
+        const alt = neu.id && document.getElementById(neu.id)
+        if (alt) alt.replaceWith(neu)
+      }
+    }
+
+    async function zeileAktualisieren(runId) {
+      const zeile = document.getElementById('run-' + runId)
+      if (!zeile) return
+      // Never swap a row whose title is being edited — the half-typed text is
+      // not in the DOM the server knows about, and replacing it throws the
+      // typing away mid-word.
+      if (zeile.querySelector('.title-inline input')) return
+      const html = await holeFragment('/api/fragments/run-row?id=' + encodeURIComponent(runId)
+        + (repo ? '&repo=' + encodeURIComponent(repo) : ''))
+      if (html === null) { zeile.remove(); return }
+      const neu = zuElementen(html)[0]
+      if (neu) zeile.replaceWith(neu)
+    }
+
+    // A run this page does not show yet: the row cannot be created in place,
+    // because the empty state and the sort order both live in the tbody. So the
+    // whole body is re-rendered — the one case where a parent has to be swapped
+    // (the same reason a banner that was absent cannot appear by itself).
+    async function tabelleAktualisieren() {
+      // Re-query: the element is replaced by every swap, so the reference
+      // captured at load time is stale — and with it the status filter it
+      // carries, which has to travel with the request or the filtered list
+      // would silently be replaced by the unfiltered one.
+      const tbody = document.getElementById('runs-body')
+      if (!tbody) return
+      const status = tbody.dataset.status || ''
+      const html = await holeFragment('/api/fragments/runs-body' + (repo ? '?repo=' + encodeURIComponent(repo) : '?')
+        + (status ? '&status=' + encodeURIComponent(status) : ''))
+      if (html === null) return
+      if (document.querySelector('#runs-body .title-inline input')) return
+      tauscheNachId(html)
+    }
+
+    async function detailAktualisieren(runId) {
+      if (!detail || detail[1] !== runId) return
+      // Head, metrics and events only. The terminal is NOT part of this
+      // fragment: replacing #term would tear the xterm instance off the DOM,
+      // leave the WebSocket open and leak a tmux client that keeps rewrapping
+      // the running agent's window.
+      const html = await holeFragment('/api/fragments/run-detail?id=' + encodeURIComponent(runId))
+      if (html === null) return
+      if (document.querySelector('.title-inline input')) return
+      tauscheNachId(html)
+    }
+
+    // The status sidebar as ONE request. Its blocks appear and disappear —
+    // no open incidents means no incident block at all, no usage means no
+    // usage panel — and an element that is not in the DOM cannot be swapped
+    // in by its own id. So the whole aside is replaced, which also covers
+    // #header-status and #usage-panel inside it; the two fragment routes for
+    // those stay, they are simply not what the page asks for any more.
+    async function statusAktualisieren() {
+      try {
+        // The sidebar's repo, not the body's: it is set on pages that have no
+        // repo context too (see statusSidebar in pages.mjs).
+        const sRepo = document.getElementById('status-sidebar')?.dataset.repo || repo
+        const html = await holeFragment('/api/fragments/sidebar' + (sRepo ? '?repo=' + encodeURIComponent(sRepo) : ''))
+        if (html !== null) { tauscheNachId(html); sidebarSync() }
+      } catch (err) { /* a quiet panel beats a broken page */ }
+    }
+
+    const quelle = new EventSource('/api/events' + (repo ? '?repo=' + encodeURIComponent(repo) : ''))
+    quelle.addEventListener('run', (ev) => {
+      let d = {}
+      try { d = JSON.parse(ev.data) } catch (err) { return }
+      if (!d.runId) return
+      bald('run:' + d.runId, () => {
+        zeileAktualisieren(d.runId).catch(() => {})
+        detailAktualisieren(d.runId).catch(() => {})
+        if (runsBody && !document.getElementById('run-' + d.runId)) tabelleAktualisieren().catch(() => {})
+      })
+      // Quota and balances move with the work, but far more slowly — a longer
+      // timer keeps a burst of run events from turning into a burst of usage
+      // requests, each of which may talk to a provider API.
+      bald('status', () => { statusAktualisieren().catch(() => {}) }, 2000)
+    })
+    // Whether the channel is actually up is a fact about the page, so the page
+    // says so. It matters for real: a fresh load has no Last-Event-ID, so an
+    // event fired in the gap between rendering and connecting is simply missed
+    // — harmless (the page just rendered current state) but worth being able
+    // to see, and the browser suite waits for it instead of racing it.
+    quelle.onopen = () => { document.body.dataset.live = '1' }
+    // EventSource reconnects by itself and sends Last-Event-ID, which the hub
+    // answers from its ring buffer. Nothing to do here but not get in the way.
+    quelle.onerror = () => { document.body.dataset.live = '0' }
+  }())
+
   // ---- terminal: xterm.js + resize frame \0{cols},{rows} (planning 7.4) ----
   // xterm.js provides the globals 'Terminal' and 'FitAddon' — not 'Term'.
   const termBox = document.getElementById('term')
@@ -710,11 +1039,14 @@
     termBox.classList.add('dim')
     return
   }
-  // data-live comes from pages.mjs and means the same as there: running status
-  // AND open tmux session. Earlier an innerHTML.includes('live') sat here —
-  // that would have granted write access to a dead session for a run named
-  // "live-…" or the word in a report. Without a session it stays view-only;
-  // 'ro' must be explicitly '0', the server is fail-closed.
+  // data-live comes from pages.mjs and means the same as there: a standing tmux
+  // session with a live process in it — NOT "the run is still going". A claude,
+  // opencode or cursor that has reported 'done' is still sitting in its TUI,
+  // and typing a follow-up into it is the whole point of keeping the session.
+  // Earlier an innerHTML.includes('live') sat here — that would have granted
+  // write access to a dead session for a run named "live-…" or the word in a
+  // report. Without a session it stays view-only; 'ro' must be explicitly '0',
+  // the server is fail-closed.
   const live = termBox.dataset.live === '1'
   const ro = live ? '&ro=0' : '&ro=1'
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'

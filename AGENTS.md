@@ -81,7 +81,9 @@ is one and the same **run definition**, and it lives in **`server/run-def.mjs`**
 | What | Function | Used by |
 |---|---|---|
 | Form block (HTML) | `runDefFields(values)` | agent form + single-run form |
+| Its second prompt, for the harnesses that know one | `goalFields` | both forms (see below) |
 | Its setup half, on its own | `runSetupFields`, `branchFields` | favorite form, Quick-Run dialog |
+| What each branch rule MEANS — label, explanation, agent sentence | `BRANCH_MODE_INFO`, `branchRuleText`, `branchContext` | `branchFields` + `launchRun` (see below) |
 | Form → definition, incl. all validation | `runDefFromForm(body, problems)` | both forms + `POST /api/runs` |
 | Its setup half, on its own | `runSetupFromForm(body, problems)` | favorites (see below) |
 | Agent row → definition | `defFromAgent(row)` | scheduler, "start now", flows |
@@ -112,6 +114,14 @@ in `server/scheduler.mjs` — including the budget gate (`budgetGate(harness)`,
 also used by the watcher when picking a deferred run back up).
 `startForAgent(agent)` is only its wrapper for a stored definition.
 
+`keep_on_branch` (0/1) is the newest field and went exactly that way: the form
+block, `runDefFromForm`, `defFromAgent`, `saveAgent`, `createRun`,
+`RUN_DEF_FLOW_FIELDS`/`defFromFlowProps`, two columns — and
+`pickQuickFields`'s allowlist in web.mjs, which is the one place a field can
+fall off silently because it is an allowlist and not a spread. It is
+deliberately NOT part of `rememberRunChoice`: it belongs to the task, not to the
+setup.
+
 A new field of a run therefore needs **one** change in `run-def.mjs`, not four.
 Before that, the copies had already drifted: the single-run form dropped the
 branch mode it had been prefilled with, `POST /api/runs` saved an agent without
@@ -131,6 +141,42 @@ of that repo, agents and single runs alike. Like `base_branch` and
 runner.mjs composes it as a labeled section into `prompt.md`) — repo config is
 not snapshotted into the run, so editing it affects the next run, never a
 running or finished one.
+
+### The goal: the second prompt, and the only one that is typed in
+
+The prompt says what to do. A **goal** says when it is **done**: claude's
+`/goal <condition>` sets a completion condition, has a small model check it
+after every turn, and while it does not hold claude takes another turn by
+itself — until it holds, until claude judges it impossible, or until someone
+clears it. So it belongs in the run definition (`agents.goal`, snapshotted into
+`runs.goal`), under the prompt, folded away, and only in the two forms that
+describe a run: the agent form and the single-run form. Deliberately **not** in
+Quick Run — that dialog asks for the task and the time, and a favorite carries
+no task.
+
+It is the one definition field that never reaches the agent through
+`prompt.md`, because **there is no CLI flag for it**. The command exists only
+inside the session, so the hub types it in **after** the start —
+`server/goal.mjs`, one delivery function and two ways into it:
+
+| Way in | When | Why both |
+|---|---|---|
+| `launchRun()` | right after the session stands, not awaited | it waits for the TUI to draw, and a start must not hang on that |
+| watcher pass | every run that still owes its session a goal | a hub restarted between the start and the delivery, a session that had not drawn yet, a run that was answering a help call |
+
+`runs.goal_sent_at` is what keeps the two from typing it in twice, and what
+lets the detail page answer "did the goal ever arrive?". Only from status
+`running`: `waiting_help` means the agent asked a question and is waiting, so a
+goal typed in there would **be** the answer. A retry clears the mark — a retry
+is a new session, and a `/goal` typed into the old one went with it.
+
+**Who knows a goal is the plugin's answer, not the form's** (`goal` in the
+harness plugin, see [docs/plugins.md](docs/plugins.md)). The form block writes
+that list into `data-goal-harnesses`, hub.js shows or hides the block on it —
+and hiding **disables** the field, because a hidden field that still submits is
+a text one can neither see nor correct: switching the coding agent would
+otherwise send along a condition meant for claude. What was typed stays in the
+DOM, so switching back and forth does not cost it.
 
 ### Every run has a title
 
@@ -214,6 +260,17 @@ is. It does **not** navigate: `POST
 whether the run started, was planned or was deferred, with a link to it. Being
 torn to a detail page is what would make a quick start not quick.
 
+The one exit that does lead away is **More settings**: the moment one wants more
+than the dialog asks, the run stops being quick. It opens the FULL single-run
+form in a new window (`/runs/new?repo=…&favorite=…`): the favorite becomes the
+form's template (`favoriteTemplate()` in favorites.mjs, the counterpart of
+`favoriteToFormBody()`), and hub.js parks the task, the branch rule and the
+start time in `sessionStorage` (key `cchub:qrfull`) — a window opened by the
+opener inherits a copy, and the form page restores the fields onto the MAIN
+form before its start-time and branch syncs run. What the dialog does not ask
+for stays as the favorite's template rendered it; there is still no second
+definition builder involved.
+
 There is **no second definition builder** behind any of this, which is the whole
 reason a favorite stores only the setup half:
 
@@ -278,13 +335,451 @@ internal dashboard endpoint is the only source; it has no contract. When it
 stays silent the configurable `cursor_included_usd` setting (default 20) steps
 in as a fallback and the UI marks the value as estimated.
 
+### Provider balances
+
+The sibling of the above, and the reason it exists: `openrouterCredits()` used
+to sit in `quota.mjs` with one vendor's URL, auth header and response shape
+hard-coded into it — exactly the provider-specific knowledge `docs/plugins.md`
+says belongs in a plugin. It is a **`balance()` contract** on the provider
+plugin now, aggregated by `server/balances.mjs`.
+
+The shape is **normalized rather than passed through**, because the two
+providers that implement it disagree on almost everything: OpenRouter keeps one
+pot, reports it as numbers and says nothing about whether calls still go
+through; DeepSeek reports **strings**, **one entry per currency** (an account
+can hold CNY and USD at once) and adds `is_available`, which nobody else has.
+Folding those into a single number would silently drop one of the two pots. The
+full contract and its four rules are in `docs/plugins.md`.
+
+Two consequences worth knowing. The panel printed `{eur} €` for a dollar figure
+until the currency became part of the answer; the setting behind the gate is
+still called `openrouter_min_eur`, because renaming a stored key would need a
+migration for nothing. And **the budget gate does NOT go through the
+aggregator** — `balances.mjs` reaches the database via `coding-agents.mjs`, and
+`db.mjs` imports the harness registry, which imports `quota.mjs`. The gate needs
+one number from one plugin, so it asks that plugin directly.
+
+**Both caches are keyed on the configuration, not only on time**
+(`usage.mjs`, `balances.mjs`): the set of enabled coding agents decides who is
+asked at all, so changing it does not make the answer old, it makes it about
+something else. And the in-flight flag is released by the promise, never at the
+end of the body — with nothing configured the loop has no `await`, so the body
+ran to completion (flag reset included) *before* the assignment that set the
+flag, and every later call got that one stale promise for the life of the
+process. Both only became visible when the status sidebar started asking on
+every page, the first of which happens before anything is configured.
+
+## The live channel: a run announces itself
+
+The hub rendered a whole page and then never spoke again. A title generated
+after the fact only appeared on the next reload, a run that ended left the
+overview showing work that was over, and killing a run needed
+`location.reload()` to make the page agree with reality.
+
+**`server/events.mjs`** is the channel that fixes that: an event bus and one SSE
+endpoint, `GET /api/events[?repo=<id>]`. It can be this small because HTTP,
+scheduler and watcher share **one process** (`hub.mjs`) — whoever changes a run
+is in the same memory as whoever holds the browser connection, so a publish is a
+function call. No broker, no second port. It imports nothing at all, which is
+what lets `db.mjs` import *it* without a cycle.
+
+### It hangs on `addEvent()`, and that was measured
+
+There are **39 `UPDATE runs SET` sites in 10 files**. Publishing from each of
+them is the drift `run-def.mjs` exists to prevent, so the channel hangs on the
+one place a run's transitions already pass through — `addEvent()` in `db.mjs`.
+
+That this holds was **measured, not assumed**: of the 18 places that write
+`status=`, 13 already added an event. The five that did not — ending a run by
+hand, answering a help call, retrying, and the two flow equivalents — were a gap
+in the run's own event list, not just in the channel. "Why did this run stop?"
+had no answer on its own detail page. They write one now (`message_sent`,
+`help_answered`, `aborted {by}`, `retry`).
+
+Three changes are visible without writing an event — the generated title,
+archiving and unarchiving — and those call `announceRun()` explicitly.
+
+### The event carries a signal, never markup
+
+The browser answers an event by **fetching a fragment** (`/api/fragments/…`),
+which the server renders through the same function the full page uses. So a row
+keeps exactly ONE renderer, and translations, traffic-light rules and
+conditional cells cannot drift between the page and its updates. The event's
+`status` field is a **hint**, not the truth: some call sites run `addEvent`
+before the `UPDATE` and some after, which is harmless precisely because nobody
+renders from it.
+
+**Deliberately no htmx**, and it was tried on paper first. Every swap here is a
+special case — an element that may not exist yet, a row that must not be
+replaced while it is being renamed, a terminal that must never be touched — and
+the inline `onclick` attributes plus the capture-phase rename listener would
+have to be reconciled with a library's own handlers. It came to 40 lines of
+vanilla instead of a 51 KB dependency.
+
+Three rules the client keeps, each with a test:
+
+- **A row being renamed is skipped.** The half-typed title lives only in the
+  DOM; swapping the row throws it away mid-word.
+- **A run the page does not show yet re-renders the tbody**, not the row. The
+  empty state and the sort order both live there, so a new row cannot be
+  appended. The same is true for anything whose *presence* depends on state (the
+  scheduled banner, the usage panel): from absent to present is a parent swap.
+- **`#term` is never part of a fragment.** Replacing it tears the xterm instance
+  off the DOM, leaves the WebSocket open and leaks a tmux client — and every
+  attached client rewraps the running agent's window, because tmux runs with
+  `window-size=latest`.
+
+**And `location.reload()` after killing a run STAYS.** It looks like a leftover
+and is the opposite: it is what closes the terminal's WebSocket, and with it
+that tmux client. The send and kill forms also sit outside the fragment and have
+to disappear. The reason is in the code, so it does not get modernized away.
+
+## The status sidebar: one place that says how the machine is doing
+
+`statusSidebar()` in `pages.mjs`, right of the content, on **every** page,
+`id="status-sidebar"`. In it, in this order: pipeline state (`headerStatus()`,
+`id="header-status"`), work in flight per status for the current repo (each
+count links to `/?repo=…&status=…`, the overview's one filter), open incidents
+split the way `incidents.mjs` splits them, subscription usage and provider
+balances (`usagePanel()`, `id="usage-panel"`).
+
+Before this, status stood in three places and fully on exactly one page: two
+quota bars in the header, the pipeline switch as running text beside them, and
+the usage panel on the overview. The two bars were `bar()` in `layout()` and
+`pctBar()` in `usagePanel()` — the same reading, two markups, the thresholds
+spelled out twice. There is one `quotaBar()` now, and every bar in the
+application comes out of it.
+
+- **`layout()` is `async`** because the panel is: every call site awaits it.
+- The header kept **context** (repo switcher) and one **action** (Quick Run) and
+  gave up status. It is a line high and has to stay that way.
+- **The fold lives on the shell**, not on the sidebar: `#shell.side-closed`,
+  written from `localStorage['cchub.sidebar.open']` in try/catch. The live
+  channel replaces `#status-sidebar` **whole** — blocks appear and disappear
+  (no open incidents, no incident block), and an element that is not in the DOM
+  cannot be swapped in by its own id — so a class on the sidebar itself would
+  go with every update. `sidebarSync()` re-applies it after each swap.
+- The sidebar carries **its own repo** (`data-repo` on the aside). `<body
+  data-repo>` is the SSE filter and is only set where a page really has a repo
+  context; the sidebar reads one on every page, so it has to say which.
+- Fragment route: `GET /api/fragments/sidebar?repo=`, rendered by the same
+  function the page uses. `/api/fragments/header-status` and `…/usage` still
+  exist; the client simply asks for the whole aside instead.
+- Under ~1000 px it drops **below** the content. A table narrowed by the
+  sidebar is the one thing it must never cause.
+
+### The overview: seven columns, and forms on a grid
+
+Eleven columns became seven without losing a fact: traffic light + status word
++ last anomaly are **one** statement (`td.status-cell`), and harness/model and
+branch/PR are one technical pair each (`td.two-line`). `OVERVIEW_COLS` is what
+the empty state spans. The incident cell is a badge with its action on hover —
+the rule the pencil and the archive button already followed, keyboard included
+(`:focus-within`, because focus lands *inside* the form). A run's `status` goes
+through `t()` (`status.*`), an anomaly kind through `anomaly.*`, a harness
+through its plugin label. A table that does not fit scrolls inside
+`.table-wrap`; it does not get to decide how wide the page is.
+
+Forms are a two-column grid (`form.form-grid`): captions in one column, fields
+in the other, hints in the field's column, and a tall field gets its caption
+above it. **Every selector there carries `:not([hidden])`** — `label[hidden] {
+display: none }` is the weaker selector of the two, and without the guard the
+grid would bring switched-off schedule fields back, visible *and* submitted.
+
+## Integration: a run is done when its work is on main
+
+**No agent merges or pushes to the base branch.** Agents make branches
+mergeable; the hub integrates. That one rule is what this whole section is
+about, and everything below follows from it.
+
+Before it, a run ended when the agent called `cc-report done`. What it had
+committed then sat in its worktree and its branch, and whether it ever reached
+`main` depended on whether the agent did it itself — which is how this
+repository's reflog came to hold two `reset`s on main, a cherry-pick duplicate
+and a finished branch lying unmerged for days.
+
+Now a run is `done` when its work is **on `main`**. The hub checks the `done`
+report instead of believing it, lets the still-living agent fix what is missing,
+merges itself — serially per repo, in an integration worktree of its own, by
+`push origin` — and escalates only when the agent does not deliver: to a fresh
+conflict run, and last of all to a human. It all lives in
+**`server/integrate.mjs`** and is off unless the repo says so
+(`repos.merge_mode='hub'`; `'off'` is byte for byte the old behaviour, including
+the prompt).
+
+### The finish gate: `runs.finish_state`, not a new status
+
+`handleReport(runId, {kind:'done'})` is where every end channel already met —
+`cc-report done`, cursor's `finishByTurnEnd()`, the inbox fallback. So the check
+hangs there. It stores the report first (it is safe from that moment on,
+whatever the agent does next), then asks three questions in this order:
+
+1. **uncommitted changes?** → `awaiting_commit`. Dirt outranks everything: half
+   a run's work on `main` is the more expensive mistake, so nothing is merged
+   while the worktree is dirty — not even the committed part.
+2. **no commits at all?** (`tip == base_sha`) → nothing to merge, the run closes
+   as it always did and the Telegram line says so.
+3. **still mergeable?** — a **dry run with `git merge-tree --write-tree
+   --name-only origin/{base} <tip>`**. Measured with git 2.43: exit 1 on
+   conflict, the conflicting paths on stdout, and `git status` afterwards empty.
+   It touches no worktree, which is the point — anything that checked out a
+   branch here would fight the agent for its own.
+
+`runs.finish_state` carries this as a **sub-state of `running`**, and not as a
+new value in `runs.status`: that column has a CHECK, and a new value would be a
+table rebuild like `harnessCheckErweitern()`. It is also simply true — the run
+is still running. Its terminal stays writable, messages reach it, a human can
+step in.
+
+`runs.base_sha` is the worktree's HEAD right after it was created. It is what
+makes "did this run commit anything" and "what does it want merged" answerable
+without guessing at a branch. A run from before that column falls back to
+`git merge-base <tip> origin/{base}`.
+
+### The answer has to reach the agent, so `cc-report` prints it
+
+`cc-report` used to call `curl -fsS` and throw the answer away. It now reads the
+response and prints the `message` field on stdout — which puts the text into the
+agent's **running turn** as that tool's own output, the cheapest moment there
+is. Two consequences worth keeping:
+
+- **`POST /api/runs/<id>/report` must answer 2xx.** Anything else is "hub
+  unreachable" to `cc-report`, which files the report in `inbox.jsonl` for the
+  watcher to replay. A finish gate that answered 4xx would loop.
+- Channels with no call to answer (`finishByTurnEnd`, the inbox) get the same
+  text typed into the tmux session instead — `handleReport` takes a
+  `via: 'http' | 'inbox' | 'internal'` for exactly that. And `'internal'`
+  carries a **loop guard for cursor**: `finishByTurnEnd()` fires at every turn
+  end of a running cursor run, so an injected message would be answered by
+  cursor working, ending its turn, and the hub injecting it again. The same
+  message therefore only goes out anew when the state changed or two minutes
+  passed.
+
+### The check loop, and what the watcher may not do
+
+Its own timer in `integrate.mjs`, every **5 s** — far denser than the 30-second
+watcher, because an agent told "commit first" usually does it in seconds. Per
+run a `nextCheckAt`, and the interval is a pure function:
+`nextCheckDelayMs(elapsed)` → 5 s under a minute, 15 s under five, 30 s after.
+At most **two git checks at a time**; what does not get a turn stays due and is
+at the front of the next pass, so nothing starves. A check is kept cheap:
+`git --no-optional-locks status --porcelain` (the flag is git-level and has to
+stand **before** the subcommand — after it git rejects it as unknown and returns
+an empty status, which reads as "clean"), and the conflict dry run only when
+`rev-parse HEAD` says the tip has moved.
+
+A run with a `finish_state` **has reported**. So:
+
+- `_pane_died`, `_exit` and `reconcileClosedSession()` do not mark it
+  `failed`/`aborted` and write no "ended without report" anomaly — they call
+  `escalate(runId, 'agent_gone')`. That is for the **unasked-for** end only: a
+  human or a flow ending the run on purpose (`/kill`, the sessions page,
+  `kill_run`) still aborts it, and it is assessed like any other unfinished run.
+- `watchRun()` writes no `overrun`, `soft_overrun` or `no_activity` for it: it is
+  waiting on purpose.
+- The deadline is `finish_started_at + repos.finish_timeout_min`, and it **does
+  not run while the run is `waiting_help`** — there the agent waits for a human,
+  not the other way round; answering the question restarts the clock.
+- `integrateTick(nowMs)` takes the time as a parameter, like `pickUpScheduled()`,
+  so the tests advance the clock instead of waiting fifteen minutes.
+
+### The integrator: one queue per repo, and a worktree of the hub's own
+
+`Map<repoId, Promise>` — each job hangs on the repo's chain, errors caught so
+the chain can never tear. That this needs neither a broker nor a database lock
+is the same argument `events.mjs` rests on: HTTP, scheduler and watcher are one
+process.
+
+The merge happens in `~/agents/integrate/<repo>` (`CCHUB_INTEGRATE_DIR`), a
+detached worktree that belongs to the hub and is cleaned before every job. **Not
+in the operator's checkout**, and that is not politeness: git refuses to push
+into a branch that is checked out there, a branch belongs to exactly one
+worktree, and `merge`/`reset` in a directory somebody is editing is how work
+gets lost. The repo's **worktree extras are applied** to it as well
+(`applyExtras()`, shared with `makeWorktree()`) — a `merge_check` like
+`node test/unit.mjs` wants the linked `node_modules` as much as an agent does.
+
+Then: `git merge --no-ff` (always, so every run is findable as a merge commit),
+the optional `repos.merge_check` **on the merged result**, and
+`git push origin HEAD:{base}`. A rejected push is retried once from the top
+(somebody was faster); a second rejection is treated as a conflict. Only after
+the push does the run become `done`, does Telegram hear about it, do the other
+agents learn that `main` moved, and do the flows fire — a flow then sees a run
+whose work really is on `main`.
+
+### The escalation ladder
+
+| Situation | `merge_status` | What happens |
+|---|---|---|
+| worktree still dirty | `blocked_dirty` | **nothing is merged**, incident + Telegram, three one-click answers on the detail page |
+| conflict, or a red merge check | `resolving` → `blocked_conflict` | a conflict run, up to `repos.merge_max_attempts` of them; then a human |
+| git/network/auth error | `blocked_error` | incident + Telegram, "Merge now" retries |
+| no `origin` remote | `blocked_no_remote` | incident + Telegram; the hub never merges in the operator's checkout |
+| ended `failed`/`aborted` | `unmerged_*` | never merged automatically — named, backed up, and the operator decides |
+
+A **conflict run** is an ordinary single run through `startRun()`: budget gate,
+title, overview, watcher, incidents, and the same finish gate at its end. Its
+setup lives under Settings → Merge and goes back into a run the one way there
+is — `setupToFormBody()` → `runDefFromForm()`, the same pair a favorite uses
+(the function was lifted out of `favorites.mjs`, where it only happened to sit).
+It works on a **fresh branch of its own**, `resolve/<short id>`: a branch belongs
+to exactly one worktree and the original's worktree holds its own, so taking it
+away under a possibly still-standing session is the trap this file warns about
+elsewhere. A branch from the same tip has the same content and costs nothing.
+**No conflict run starts a conflict run** — a failed one counts against the
+ORIGINAL run's attempts, and that loop guard sits in `escalate()`.
+
+**`repos.conflict_parallel` (default 1)** bounds how many conflict runs work at
+once per repo. Keep it at 1 for a small repository where every task touches the
+same files: parallel resolvers then invalidate each other and only the first
+one's work survives. Raise it for a large repository where conflicts rarely land
+on the same files.
+
+### The branch rule under `hub`, and keeping work on a branch
+
+Under `merge_mode='off'` the branch rule answers "does this work survive": no
+branch means a detached worktree and throwaway changes. Under `hub` it answers
+nothing of the kind — the hub merges **every** run — and only decides under
+which NAME the work travels:
+
+| Rule | `off` | `hub` |
+|---|---|---|
+| **no branch** | detached, throwaway unless the agent pushes it somewhere itself | detached; the commits are merged into `{base}` at the end. Where a name is needed anyway (backup, conflict run) it is `run/<short id>` |
+| **new branch** | a branch from the pattern; whether it reaches `{base}` is up to the agent | the same branch, merged into `{base}` at the end — pick it for a readable name on origin |
+| **existing branch** | continue across several runs | the same, and merged after **every** run — unless "keep on branch" says otherwise |
+
+The form said none of this, and the prompt sentence for "no branch" still
+promised *"changes are throwaway changes"* — in the same prompt where
+`MERGE_RULE` promised the opposite. Both now come out of **one** table,
+`BRANCH_MODE_INFO` in `run-def.mjs`: the i18n key of each explanation and the
+English sentence the agent reads, per merge mode. `branchRuleText()` is what
+`launchRun` calls instead of the inline ternary it used to carry, and a unit
+test checks that every `explain` key really exists in `lang/en.json` — a table
+may not name a string that is not there.
+
+The form renders **both** explanations and lets CSS show the one that fits
+`data-merge-mode` on the fieldset. So the static case needs no JavaScript, and
+the only form that can change repo without rebuilding the page — the Quick-Run
+dialog, which has a repo `<select>` while the header's switcher reloads — just
+flips that attribute from a `repoId → mode` map, and rewrites the `<span
+data-base>` inside the sentences so a repo with a base branch of its own is not
+described with somebody else's.
+
+**"Keep the work on its branch"** (`runs.keep_on_branch`) is for the long-lived
+branch: a documentation branch, a spike, an agent that works on the same
+`fest` branch for a week. Only offered under `hub` (the checkbox carries
+`hidden` from the server as well as the CSS rule, so it is gone without the
+stylesheet too), and refused with "no branch" — keeping work on a branch needs a
+branch. What the integrator then does is a **short** version of the finish gate:
+
+- the **dirt check stays** — a run is only over when its work is committed, and
+  M1 is the same message as ever;
+- **no dry run, no merge**; instead the branch is pushed to origin (the same
+  `backupBranch()` the backup rule uses), `merge_status='kept_on_branch'`,
+  event `branch_kept`, and the Telegram done line reads
+  `Kept on branch <name> — not merged, as configured`;
+- a **failed push is an escalation**, like a merge that cannot be pushed:
+  the operator wants nothing living only on this machine;
+- it sends no "main has moved" (nothing moved) but still receives one, and it
+  fires no `run_merged` flow, because there was no merge;
+- the prompt gets the `keep` sentence **instead of** `MERGE_RULE`. Two rules
+  about the same thing is one too many — that is the lesson this whole table was
+  written from;
+- **"Merge now" is offered anyway.** Keeping the work on its branch is what
+  happened automatically at the end of the run, not a verdict for all time; the
+  click clears the flag and runs the ordinary path, dry run and all.
+
+### The conflict run is not a normal run
+
+`isResolverRun(run)` — `!!run.resolves_run_id`, one predicate in
+`integrate.mjs`, and every one of the rules below asks it. A conflict run is a
+**tool of the integrator**, not work anybody asked for. It shares the start path,
+a worktree, a session, the watcher (activity, incidents, cost) and its row in the
+overview, which says what it is for ("conflict run for …"). Everything else is
+off:
+
+| What | Why |
+|---|---|
+| **No Telegram of its own**, in any state — `notifyRun()` returns at the top | The operator hears about the run it works FOR: T-RESOLVING at the start, the done line naming the resolver after the merge, T-BLOCKED-CONFLICT when it did not get there. Three messages about one problem is two too many. |
+| **No flows** — `flows=NULL`, `flow_dispatched=1`, `merge_dispatched=1` at creation | A flow must not fire for a run the operator never started, and the *merge* it carries belongs to the run it worked FOR: `run_merged` fires once per integration, on the original. Both flags are set at creation rather than at the end, because that is what the triggers poll on — and `dispatchMerges()` skips a `resolves_run_id` row for the same reason, so the two sides agree instead of depending on each other. |
+| **No generated title** | It is called `Resolve conflicts: <original title>`; a model would only make that less clear. |
+| **Never `unmerged_*` / `blocked_*`, never a `merge_blocked` incident** | Everything that goes wrong here is mapped onto the original: `escalate(original, 'resolver_failed')` → attempts → the next conflict run or `blocked_conflict`. It only ever carries `merged` or nothing. |
+| **The finish gate is help, not a gate** | M1/M2/M4 reach it while it lives. Deadline gone or agent dead → `escalate(original, 'resolver_failed')` — **never** a conflict run for a conflict run. That is the recursion guard, and it is the reason the predicate exists. |
+| **No `assessUnmerged()`** on `failed`/`aborted` | Same: not a decision for the operator, an answer the original still needs. |
+| **No "main has moved"** | It has exactly one job; a notice about a moving base branch is noise inside it. |
+| **`max_parallel` counts it but never blocks it** | It starts on the manual path. Its own ceiling is `conflict_parallel`. |
+| **No retry button** | A conflict run is never repeated — "Merge now" on the original starts a fresh one, with a fresh branch. Renaming and archiving stay. |
+
+### "main has moved" is built in, not a flow
+
+After every merge the other running agents of the repo are told — urgently
+(`M5a`) when the merge touched files they are working on too, as a note (`M5b`)
+otherwise. Built into the hub on purpose: a flow would have to be attached to
+every agent, and a forgotten attachment is invisible. Not to a run in
+`waiting_help`, because a text typed into a session that is waiting for a human's
+answer is read by the agent AS that answer — which is exactly why the send route
+and the flow step switch such a run back to `running` first.
+
+### `failed` and `aborted` are never merged automatically
+
+`assessUnmerged()` runs on every path a run can end badly and writes
+`unmerged_commits` / `unmerged_both` / `unmerged_dirty` / `nothing`. A failed
+run's work is not automatically wanted — but it is **named**, so nobody has to go
+looking, and the Telegram message carries the paragraph plus the resume command
+(`resumeCommand(run)`, a plugin capability, see `docs/plugins.md`). The detail
+page has the buttons: merge now, commit or discard the leftovers and merge, or
+skip. That is why there is no `merge_when` setting.
+
+### Nothing lives only on this machine
+
+The remote is the backup, and that is a rule beyond the integrator:
+
+1. **The integrator knows no local merge.** Its only way out is
+   `push origin HEAD:{base}`. A merge that cannot be pushed is thrown away
+   (`reset --hard origin/{base}`) and escalated. There is no state "merged, but
+   only locally".
+2. **The operator's own commits on `{base}` are pushed by the hub**
+   (`pushOperatorBase()`, in the watcher pass, throttled to once a minute per
+   repo). A **push touches no working tree**, which is why it is the one git
+   command the hub runs in the operator's checkout — `merge`, `checkout` and
+   `reset` stay forbidden there. Diverged? **Never `--force`**: a global incident
+   plus Telegram, and a human reconciles it. Success sets `repos.last_push_at`,
+   shown on the Repos page.
+3. **Work that nobody merged is pushed as a branch** — the run's own branch, or
+   `run/<short id>` for a detached worktree (`branch_backed_up`). Same intention
+   as the existing `anomaly:unpushed`, only carried out instead of reported.
+   Remote branches are **not** deleted after a merge in v1: visible history is
+   cheaper than an accidental deletion.
+
+### Visibility, and the one rule the whole thing hangs on
+
+The overview's status cell carries the finish state under the status word (and
+the merge status on a finished run), the detail page has an "Integration" line
+with the buttons, and a blocked merge is a `merge_blocked` incident — which puts
+it in the sidebar's "Needs you" group on every page. The repo form's
+"Integration" block ends with the flows that run **after** a merge
+(`mergeFlowsBlock`), and the repo list's Integration column says how many there
+are: a `run_merged` flow hangs on the repository, not on an agent, so this is
+where one goes looking for it. None of it needs a second
+renderer, because **every** change of `finish_state`/`merge_status` goes through
+`addEvent()` and the live channel re-fetches the fragment. There is no silent
+`UPDATE runs` on this path, and that is not a style preference: it is what makes
+the pages agree with the database.
+
+`repos.max_parallel` (0 = unlimited) belongs here too: it bounds the SCHEDULED
+starts of a repo — the timetable and the planned single runs. A start the
+operator triggers by hand is never blocked, because a limit that overrules a
+deliberate decision is a limit one works around.
+
 ## Tests
 
 ```bash
-node test/unit.mjs          # pure logic (cron, schedules, quota gate, parsers, registries, i18n, docs) — ~1 s
-node test/e2e.mjs           # complete hub in a sandbox, stub instead of real agents — ~30 s
+node test/unit.mjs          # pure logic (cron, schedules, quota gate, parsers, registries, i18n, docs,
+                            # the finish gate's decisions and its texts) — ~1 s
+node test/e2e.mjs           # complete hub in a sandbox, stub instead of real agents — ~40 s
 node test/e2e.mjs --echt    # additionally ONE real run per harness (consumes quota)
 node test/e2e.mjs --keep    # keep the sandbox (debugging)
+node test/browser.mjs       # public/hub.js in a real Chromium — ~10 s
 ```
 
 The e2e suite starts a **second hub** on a free port with its own database, its
@@ -292,7 +787,40 @@ own test repo and its own `cc-start` stub. It may therefore run at any time
 alongside production: the production database, `~/agents` and foreign tmux
 sessions are never touched, and only sessions the suite created itself are
 killed (also on Ctrl-C). Watcher passes are triggered directly instead of
-waiting for the 30-second interval.
+waiting for the 30-second interval. That sandbox lives in
+**`test/sandkasten.mjs`** — one construction, two suites, because a second copy
+of it would drift the way the run definition once did.
+
+The sandbox repo has a **bare `origin`** next to it, which is what lets the
+integration be tested for real: the group "Integration: a run is done when its
+work is on the base branch" walks a clean run through to a merge commit on
+`origin/main`, holds a dirty one and reads the hub's answer, produces a real
+conflict, watches a conflict run take over and both runs end up merged, hits the
+attempt limit, kills an agent mid-gate, fails a merge check, and pushes an
+operator commit to origin. The suite **owns the integrator's clock**
+(`CCHUB_INTEGRATOR_OFF=1`): two processes driving one integration worktree is a
+race nobody wants to debug, so the hub still integrates on the report path and
+the suite calls `integrateTick(nowMs)` itself. The last test in the group turns
+`merge_mode` back to `off` — everything before it is the proof that without the
+setting nothing runs differently.
+
+**Why there is a browser suite.** `public/hub.js` was 746 lines with not one
+test, because no browser ran in the suite: everything else stops at the HTML the
+server sends. And the ways that file breaks are all **silent** — a dead listener
+throws nothing, the selects simply never fill, the terminal is a black box, the
+pencil does nothing. `test/browser.mjs` therefore drives Chromium against a
+sandbox hub and writes down what hub.js does today: the relative times that tick
+by themselves, the schedule and start-time blocks (the latter **per fieldset** —
+the Quick-Run dialog puts that block on the page twice), the Quick Run that
+clears only the task, inline renaming including its guard against sending twice,
+the form parked in `sessionStorage` while one builds a flow, the
+provider/model/effort cascade, the sessions page's optimistic ending, and both
+branches of the terminal. Every test also fails on an exception in the browser
+console, because that is where a silent break first shows.
+
+It is **not** part of `npm test`: it needs `playwright` (a devDependency) and a
+Chromium. Without either, the suite reports itself skipped and ends green —
+whoever has no browser must not sit in front of a red test.
 
 ## Models, providers and reasoning effort
 
@@ -434,6 +962,14 @@ there and from the button on the agents page. When a run ends, **every**
 attached flow starts — all of them in parallel, the way a no-code platform fans
 a trigger out.
 
+The one trigger that is **not** an attachment is `run_merged`: it fires once per
+merge into a repo's base branch and carries its own filter, the repo, because a
+merge belongs to the repository and may be carried by a conflict run that never
+hung on an agent — its way in is therefore the repo form, not the agents page.
+Together with the `shell_command` block (a command on the hub machine, exit code
+as a result rather than a failure, optionally detached) that is what lets a flow
+restart the hub after a merge.
+
 The attachment carries the condition (`always`, only on `done`/`failed`/
 `aborted`, or `not_done`), so the case distinction is made where one thinks of
 it. It does **not** replace `switch_outcome`: that block branches on the result
@@ -484,6 +1020,38 @@ bill ran for days (thirty sessions, 15 GB, measured).
   command, and **RSS/CPU of the whole process tree** (one `ps`, summed from the
   pane PID down) — the pane itself is only a shell and would understate it by an
   order of magnitude.
+
+### The work is done — who is still there, and who only left a screen
+
+Three of the four coding agents keep running after the task is finished, and
+that is not a detail of the terminal but the reason it exists (measured
+2026-08-27, one trivial prompt each):
+
+| Coding agent | Command (`cc-start`) | When the work is done |
+|---|---|---|
+| claude | `claude --permission-mode dontAsk "$CC_PROMPT"` | stays in its TUI, pane alive — production sessions on `done` runs still had a live `claude` pane 19 h later |
+| opencode | `opencode --auto --prompt "$CC_PROMPT"` | stays in its TUI, pane alive |
+| cursor | `cursor-agent --force --trust -- "$CC_PROMPT"` | stays at "→ Add a follow-up", pane alive — this is what `finishByTurnEnd()` exists for |
+| hermes | `hermes chat -q "$CC_PROMPT" --yolo` | **exits.** `-q` is "single query (non-interactive mode)": it prints its answer plus a `hermes --resume …` line and the process ends (measured: dead pane, status 0, 9 s after the start) |
+
+So a standing session and a reachable agent are two different facts, and only
+`pane_dead` tells them apart — `remain-on-exit` keeps hermes's screen exactly
+the way it keeps a crashed run's. `paneAlive()` (sessions.mjs) is that one
+question, one `tmux list-panes` per detail page.
+
+**Which is why the run's terminal is writable as long as its SESSION is**, not
+as long as its status says `running`. It used to hang on the status, and that
+locked the operator out of the ordinary case: the run reports `done`, the agent
+is still sitting in its TUI ready for a follow-up, and the page showed a
+read-only screen of it. `pageRun()` therefore asks for the session and the pane,
+never for the status; the status only decides the BUTTON underneath — a run
+still in flight is ended (`/api/runs/<id>/kill`, sets `aborted`), a finished one
+only loses the session it left standing (`/api/sessions/kill` with a `back`,
+which leaves the record alone). `/api/runs/<id>/kill` enforces the same rule
+from its own side: on `done`/`failed`/`aborted` it closes the session and writes
+`tmux_closed` instead of rewriting a clean run into a failed one. What is sent
+into a finished session is real work that this run no longer records, and the
+retention clock keeps counting from the run's end — the page says so.
 
 **Ending a session is a run event, not just a tmux call.**
 `reconcileClosedSession()` is the single place that knows this: a run still on
@@ -605,9 +1173,10 @@ errors (`post_api_request` only fires after success).
 - **The terminal is fail-closed, twice.** `/term` only enables write access on an
   explicit `?ro=0` (`terminal.mjs`); without the parameter tmux attaches with
   `-r` AND every input is discarded. The client sets `ro=0` from `data-live` in
-  `pages.mjs`. Touching only one of the two sides yields a terminal that
-  silently does nothing — exactly how it sat for a long time, because `ro=0`
-  appeared nowhere.
+  `pages.mjs`, and `data-live` means "session standing AND a process in it" —
+  never "the run's status is `running`" (see above). Touching only one of the
+  two sides yields a terminal that silently does nothing — exactly how it sat
+  for a long time, because `ro=0` appeared nowhere.
 - **`tmux attach -r` is only the shorthand for `-f read-only,ignore-size`.** And
   `ignore-size` is useless while `window-size` is `latest` (default): the
   browser rewraps the agent's window to its size while watching — with and
@@ -697,6 +1266,20 @@ errors (`post_api_request` only fires after success).
   puts the two buttons on two lines and no CSS can talk it out of that — the
   form has become a sibling of the paragraph before the stylesheet ever sees it.
   Buttons that belong next to each other go in a `<div class="btn-row">`.
+- **`--no-optional-locks` is a GIT-level option, not a `status` one.**
+  `git -C <dir> status --porcelain --no-optional-locks` is rejected as an unknown
+  option — and the finish gate read the resulting empty output as "worktree
+  clean", so every dirty run sailed straight through to a merge. Correct is
+  `git -C <dir> --no-optional-locks status --porcelain`. Found by the e2e test
+  that was written for exactly that case, not by reading the code.
+- **`capture-pane` needs the colon too.** `tmux capture-pane -p -t "=name"`
+  answers "can't find pane" — the same trap `pipe-pane` and `set-hook` already
+  have an entry for above. `-t "=name:"` is what works, and a test that asserts
+  on an empty capture asserts on nothing.
+- **The text is on the agent's screen before the event is in the database.**
+  `sendToSession()` is a bracketed paste, a 300 ms pause and then Enter; the
+  event is written after all three. A test that greps `capture-pane` and then
+  reads the events in the same breath is racing itself.
 - **A green test only proves the path the test took.** `curl` against the VPN IP
   from the server itself runs over `lo` and says nothing about the firewall;
   check real reachability only from a VPN client.
