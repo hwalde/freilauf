@@ -337,7 +337,12 @@ async function api(req, res, url) {
     // human was missing from it — the flow path has recorded its equivalent
     // ('flow_message') all along.
     if (run.status === 'waiting_help') {
-      db.prepare(`UPDATE runs SET status='running', help_answer=? WHERE id=?`).run(text, run.id)
+      // The finish gate's deadline does not run while a run waits for a HUMAN —
+      // so the clock starts again from the moment the answer arrives, not from
+      // the report that came before the question.
+      db.prepare(`UPDATE runs SET status='running', help_answer=?,
+                  finish_started_at=CASE WHEN finish_state IS NULL THEN finish_started_at
+                                         ELSE datetime('now') END WHERE id=?`).run(text, run.id)
       addEvent(run.id, 'help_answered', { text: text.slice(0, 500) })
     } else {
       addEvent(run.id, 'message_sent', { text: text.slice(0, 500) })

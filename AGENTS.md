@@ -413,11 +413,218 @@ above it. **Every selector there carries `:not([hidden])`** — `label[hidden] {
 display: none }` is the weaker selector of the two, and without the guard the
 grid would bring switched-off schedule fields back, visible *and* submitted.
 
+## Integration: a run is done when its work is on main
+
+**No agent merges or pushes to the base branch.** Agents make branches
+mergeable; the hub integrates. That one rule is what this whole section is
+about, and everything below follows from it.
+
+Before it, a run ended when the agent called `cc-report done`. What it had
+committed then sat in its worktree and its branch, and whether it ever reached
+`main` depended on whether the agent did it itself — which is how this
+repository's reflog came to hold two `reset`s on main, a cherry-pick duplicate
+and a finished branch lying unmerged for days.
+
+Now a run is `done` when its work is **on `main`**. The hub checks the `done`
+report instead of believing it, lets the still-living agent fix what is missing,
+merges itself — serially per repo, in an integration worktree of its own, by
+`push origin` — and escalates only when the agent does not deliver: to a fresh
+conflict run, and last of all to a human. It all lives in
+**`server/integrate.mjs`** and is off unless the repo says so
+(`repos.merge_mode='hub'`; `'off'` is byte for byte the old behaviour, including
+the prompt).
+
+### The finish gate: `runs.finish_state`, not a new status
+
+`handleReport(runId, {kind:'done'})` is where every end channel already met —
+`cc-report done`, cursor's `finishByTurnEnd()`, the inbox fallback. So the check
+hangs there. It stores the report first (it is safe from that moment on,
+whatever the agent does next), then asks three questions in this order:
+
+1. **uncommitted changes?** → `awaiting_commit`. Dirt outranks everything: half
+   a run's work on `main` is the more expensive mistake, so nothing is merged
+   while the worktree is dirty — not even the committed part.
+2. **no commits at all?** (`tip == base_sha`) → nothing to merge, the run closes
+   as it always did and the Telegram line says so.
+3. **still mergeable?** — a **dry run with `git merge-tree --write-tree
+   --name-only origin/{base} <tip>`**. Measured with git 2.43: exit 1 on
+   conflict, the conflicting paths on stdout, and `git status` afterwards empty.
+   It touches no worktree, which is the point — anything that checked out a
+   branch here would fight the agent for its own.
+
+`runs.finish_state` carries this as a **sub-state of `running`**, and not as a
+new value in `runs.status`: that column has a CHECK, and a new value would be a
+table rebuild like `harnessCheckErweitern()`. It is also simply true — the run
+is still running. Its terminal stays writable, messages reach it, a human can
+step in.
+
+`runs.base_sha` is the worktree's HEAD right after it was created. It is what
+makes "did this run commit anything" and "what does it want merged" answerable
+without guessing at a branch. A run from before that column falls back to
+`git merge-base <tip> origin/{base}`.
+
+### The answer has to reach the agent, so `cc-report` prints it
+
+`cc-report` used to call `curl -fsS` and throw the answer away. It now reads the
+response and prints the `message` field on stdout — which puts the text into the
+agent's **running turn** as that tool's own output, the cheapest moment there
+is. Two consequences worth keeping:
+
+- **`POST /api/runs/<id>/report` must answer 2xx.** Anything else is "hub
+  unreachable" to `cc-report`, which files the report in `inbox.jsonl` for the
+  watcher to replay. A finish gate that answered 4xx would loop.
+- Channels with no call to answer (`finishByTurnEnd`, the inbox) get the same
+  text typed into the tmux session instead — `handleReport` takes a
+  `via: 'http' | 'inbox' | 'internal'` for exactly that. And `'internal'`
+  carries a **loop guard for cursor**: `finishByTurnEnd()` fires at every turn
+  end of a running cursor run, so an injected message would be answered by
+  cursor working, ending its turn, and the hub injecting it again. The same
+  message therefore only goes out anew when the state changed or two minutes
+  passed.
+
+### The check loop, and what the watcher may not do
+
+Its own timer in `integrate.mjs`, every **5 s** — far denser than the 30-second
+watcher, because an agent told "commit first" usually does it in seconds. Per
+run a `nextCheckAt`, and the interval is a pure function:
+`nextCheckDelayMs(elapsed)` → 5 s under a minute, 15 s under five, 30 s after.
+At most **two git checks at a time**; what does not get a turn stays due and is
+at the front of the next pass, so nothing starves. A check is kept cheap:
+`git --no-optional-locks status --porcelain` (the flag is git-level and has to
+stand **before** the subcommand — after it git rejects it as unknown and returns
+an empty status, which reads as "clean"), and the conflict dry run only when
+`rev-parse HEAD` says the tip has moved.
+
+A run with a `finish_state` **has reported**. So:
+
+- `_pane_died`, `_exit` and `reconcileClosedSession()` do not mark it
+  `failed`/`aborted` and write no "ended without report" anomaly — they call
+  `escalate(runId, 'agent_gone')`. That is for the **unasked-for** end only: a
+  human or a flow ending the run on purpose (`/kill`, the sessions page,
+  `kill_run`) still aborts it, and it is assessed like any other unfinished run.
+- `watchRun()` writes no `overrun`, `soft_overrun` or `no_activity` for it: it is
+  waiting on purpose.
+- The deadline is `finish_started_at + repos.finish_timeout_min`, and it **does
+  not run while the run is `waiting_help`** — there the agent waits for a human,
+  not the other way round; answering the question restarts the clock.
+- `integrateTick(nowMs)` takes the time as a parameter, like `pickUpScheduled()`,
+  so the tests advance the clock instead of waiting fifteen minutes.
+
+### The integrator: one queue per repo, and a worktree of the hub's own
+
+`Map<repoId, Promise>` — each job hangs on the repo's chain, errors caught so
+the chain can never tear. That this needs neither a broker nor a database lock
+is the same argument `events.mjs` rests on: HTTP, scheduler and watcher are one
+process.
+
+The merge happens in `~/agents/integrate/<repo>` (`CCHUB_INTEGRATE_DIR`), a
+detached worktree that belongs to the hub and is cleaned before every job. **Not
+in the operator's checkout**, and that is not politeness: git refuses to push
+into a branch that is checked out there, a branch belongs to exactly one
+worktree, and `merge`/`reset` in a directory somebody is editing is how work
+gets lost. The repo's **worktree extras are applied** to it as well
+(`applyExtras()`, shared with `makeWorktree()`) — a `merge_check` like
+`node test/unit.mjs` wants the linked `node_modules` as much as an agent does.
+
+Then: `git merge --no-ff` (always, so every run is findable as a merge commit),
+the optional `repos.merge_check` **on the merged result**, and
+`git push origin HEAD:{base}`. A rejected push is retried once from the top
+(somebody was faster); a second rejection is treated as a conflict. Only after
+the push does the run become `done`, does Telegram hear about it, do the other
+agents learn that `main` moved, and do the flows fire — a flow then sees a run
+whose work really is on `main`.
+
+### The escalation ladder
+
+| Situation | `merge_status` | What happens |
+|---|---|---|
+| worktree still dirty | `blocked_dirty` | **nothing is merged**, incident + Telegram, three one-click answers on the detail page |
+| conflict, or a red merge check | `resolving` → `blocked_conflict` | a conflict run, up to `repos.merge_max_attempts` of them; then a human |
+| git/network/auth error | `blocked_error` | incident + Telegram, "Merge now" retries |
+| no `origin` remote | `blocked_no_remote` | incident + Telegram; the hub never merges in the operator's checkout |
+| ended `failed`/`aborted` | `unmerged_*` | never merged automatically — named, backed up, and the operator decides |
+
+A **conflict run** is an ordinary single run through `startRun()`: budget gate,
+title, overview, watcher, incidents, and the same finish gate at its end. Its
+setup lives under Settings → Merge and goes back into a run the one way there
+is — `setupToFormBody()` → `runDefFromForm()`, the same pair a favorite uses
+(the function was lifted out of `favorites.mjs`, where it only happened to sit).
+It works on a **fresh branch of its own**, `resolve/<short id>`: a branch belongs
+to exactly one worktree and the original's worktree holds its own, so taking it
+away under a possibly still-standing session is the trap this file warns about
+elsewhere. A branch from the same tip has the same content and costs nothing.
+**No conflict run starts a conflict run** — a failed one counts against the
+ORIGINAL run's attempts, and that loop guard sits in `escalate()`.
+
+**`repos.conflict_parallel` (default 1)** bounds how many conflict runs work at
+once per repo. Keep it at 1 for a small repository where every task touches the
+same files: parallel resolvers then invalidate each other and only the first
+one's work survives. Raise it for a large repository where conflicts rarely land
+on the same files.
+
+### "main has moved" is built in, not a flow
+
+After every merge the other running agents of the repo are told — urgently
+(`M5a`) when the merge touched files they are working on too, as a note (`M5b`)
+otherwise. Built into the hub on purpose: a flow would have to be attached to
+every agent, and a forgotten attachment is invisible. Not to a run in
+`waiting_help`, because a text typed into a session that is waiting for a human's
+answer is read by the agent AS that answer — which is exactly why the send route
+and the flow step switch such a run back to `running` first.
+
+### `failed` and `aborted` are never merged automatically
+
+`assessUnmerged()` runs on every path a run can end badly and writes
+`unmerged_commits` / `unmerged_both` / `unmerged_dirty` / `nothing`. A failed
+run's work is not automatically wanted — but it is **named**, so nobody has to go
+looking, and the Telegram message carries the paragraph plus the resume command
+(`resumeCommand(run)`, a plugin capability, see `docs/plugins.md`). The detail
+page has the buttons: merge now, commit or discard the leftovers and merge, or
+skip. That is why there is no `merge_when` setting.
+
+### Nothing lives only on this machine
+
+The remote is the backup, and that is a rule beyond the integrator:
+
+1. **The integrator knows no local merge.** Its only way out is
+   `push origin HEAD:{base}`. A merge that cannot be pushed is thrown away
+   (`reset --hard origin/{base}`) and escalated. There is no state "merged, but
+   only locally".
+2. **The operator's own commits on `{base}` are pushed by the hub**
+   (`pushOperatorBase()`, in the watcher pass, throttled to once a minute per
+   repo). A **push touches no working tree**, which is why it is the one git
+   command the hub runs in the operator's checkout — `merge`, `checkout` and
+   `reset` stay forbidden there. Diverged? **Never `--force`**: a global incident
+   plus Telegram, and a human reconciles it. Success sets `repos.last_push_at`,
+   shown on the Repos page.
+3. **Work that nobody merged is pushed as a branch** — the run's own branch, or
+   `run/<short id>` for a detached worktree (`branch_backed_up`). Same intention
+   as the existing `anomaly:unpushed`, only carried out instead of reported.
+   Remote branches are **not** deleted after a merge in v1: visible history is
+   cheaper than an accidental deletion.
+
+### Visibility, and the one rule the whole thing hangs on
+
+The overview's status cell carries the finish state under the status word (and
+the merge status on a finished run), the detail page has an "Integration" line
+with the buttons, and a blocked merge is a `merge_blocked` incident — which puts
+it in the sidebar's "Needs you" group on every page. None of it needs a second
+renderer, because **every** change of `finish_state`/`merge_status` goes through
+`addEvent()` and the live channel re-fetches the fragment. There is no silent
+`UPDATE runs` on this path, and that is not a style preference: it is what makes
+the pages agree with the database.
+
+`repos.max_parallel` (0 = unlimited) belongs here too: it bounds the SCHEDULED
+starts of a repo — the timetable and the planned single runs. A start the
+operator triggers by hand is never blocked, because a limit that overrules a
+deliberate decision is a limit one works around.
+
 ## Tests
 
 ```bash
-node test/unit.mjs          # pure logic (cron, schedules, quota gate, parsers, registries, i18n, docs) — ~1 s
-node test/e2e.mjs           # complete hub in a sandbox, stub instead of real agents — ~30 s
+node test/unit.mjs          # pure logic (cron, schedules, quota gate, parsers, registries, i18n, docs,
+                            # the finish gate's decisions and its texts) — ~1 s
+node test/e2e.mjs           # complete hub in a sandbox, stub instead of real agents — ~40 s
 node test/e2e.mjs --echt    # additionally ONE real run per harness (consumes quota)
 node test/e2e.mjs --keep    # keep the sandbox (debugging)
 node test/browser.mjs       # public/hub.js in a real Chromium — ~10 s
@@ -431,6 +638,19 @@ killed (also on Ctrl-C). Watcher passes are triggered directly instead of
 waiting for the 30-second interval. That sandbox lives in
 **`test/sandkasten.mjs`** — one construction, two suites, because a second copy
 of it would drift the way the run definition once did.
+
+The sandbox repo has a **bare `origin`** next to it, which is what lets the
+integration be tested for real: the group "Integration: a run is done when its
+work is on the base branch" walks a clean run through to a merge commit on
+`origin/main`, holds a dirty one and reads the hub's answer, produces a real
+conflict, watches a conflict run take over and both runs end up merged, hits the
+attempt limit, kills an agent mid-gate, fails a merge check, and pushes an
+operator commit to origin. The suite **owns the integrator's clock**
+(`CCHUB_INTEGRATOR_AUS=1`): two processes driving one integration worktree is a
+race nobody wants to debug, so the hub still integrates on the report path and
+the suite calls `integrateTick(nowMs)` itself. The last test in the group turns
+`merge_mode` back to `off` — everything before it is the proof that without the
+setting nothing runs differently.
 
 **Why there is a browser suite.** `public/hub.js` was 746 lines with not one
 test, because no browser ran in the suite: everything else stops at the HTML the
@@ -853,6 +1073,20 @@ errors (`post_api_request` only fires after success).
   puts the two buttons on two lines and no CSS can talk it out of that — the
   form has become a sibling of the paragraph before the stylesheet ever sees it.
   Buttons that belong next to each other go in a `<div class="btn-row">`.
+- **`--no-optional-locks` is a GIT-level option, not a `status` one.**
+  `git -C <dir> status --porcelain --no-optional-locks` is rejected as an unknown
+  option — and the finish gate read the resulting empty output as "worktree
+  clean", so every dirty run sailed straight through to a merge. Correct is
+  `git -C <dir> --no-optional-locks status --porcelain`. Found by the e2e test
+  that was written for exactly that case, not by reading the code.
+- **`capture-pane` needs the colon too.** `tmux capture-pane -p -t "=name"`
+  answers "can't find pane" — the same trap `pipe-pane` and `set-hook` already
+  have an entry for above. `-t "=name:"` is what works, and a test that asserts
+  on an empty capture asserts on nothing.
+- **The text is on the agent's screen before the event is in the database.**
+  `sendToSession()` is a bracketed paste, a 300 ms pause and then Enter; the
+  event is written after all three. A test that greps `capture-pane` and then
+  reads the events in the same breath is racing itself.
 - **A green test only proves the path the test took.** `curl` against the VPN IP
   from the server itself runs over `lo` and says nothing about the firewall;
   check real reachability only from a VPN client.

@@ -145,7 +145,11 @@ export const actions = {
     if (r.ok) {
       db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(run.id)
       if (run.status === 'waiting_help') {
-        db.prepare(`UPDATE runs SET status='running', help_answer=? WHERE id=?`).run(text, run.id)
+        // Same rule as the send route: the finish gate's deadline is paused
+        // while a run waits for an answer and starts again when it gets one.
+        db.prepare(`UPDATE runs SET status='running', help_answer=?,
+                    finish_started_at=CASE WHEN finish_state IS NULL THEN finish_started_at
+                                           ELSE datetime('now') END WHERE id=?`).run(text, run.id)
         addEvent(run.id, 'help_answered', { by: 'flow' })
       }
       // Through addEvent() like everywhere else — a hand-rolled INSERT here

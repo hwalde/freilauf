@@ -50,6 +50,7 @@ server/usage.mjs           aggregates plugin usage() for the UI
 | `effortLevels()` | async fn (optional) | levels the CLI itself accepts (probed; cached 24 h) |
 | `effortOptions({provider, model, helpers})` | async fn | levels for a concrete combination; returns `{stufen, standard?, pflicht?, quelle?, hinweisKey}` — `stufen: null` hides the form field. `helpers` = `{ownLevels, registryEffort, openrouterEffort}` |
 | `modelArgs(run)` | fn | CLI arguments for `cc-start`; returns `{args, fehlt}` (`fehlt` = provider ids whose key is missing) |
+| `resumeCommand(run)` | fn (optional) | the shell command a HUMAN continues this run's session with, `cd <workdir> && …` included; `null` when the CLI has no reliable way (hermes). Called by `server/integrate.mjs` for every escalation message, the run's detail page and the failed/aborted Telegram texts. Only the plugin knows how its CLI names a session — claude gets `--session-id <run id>` from the hub and can name it back, cursor's id is its transcript's directory, opencode continues the last session of the worktree |
 | `usage()` | async fn | subscription usage for the overview panel, or `null` (see `usage.mjs` for the shapes: `{kind:'claude', five, seven, seven_general, seven_fable, resets_at, plan}` / `{kind:'cursor', plan, spent_usd, included_usd, remaining_usd, cycle_end}`) |
 
 ### Adding a new coding agent
@@ -69,7 +70,12 @@ server/usage.mjs           aggregates plugin usage() for the UI
    (cursor), the harness needs `turnEndsRun` plus a channel that reports the turn
    end — a `hookFiles` entry, and ideally a second, hook-free source; see
    "cursor: when a run is over" in [AGENTS.md](../AGENTS.md).
-6. Done: the database CHECK, the settings page, install detection, forms,
+6. Optional but worth it: `resumeCommand(run)`. Every escalation the
+   integration produces ends with "here is how you pick this session up"; a
+   harness without it names the worktree instead. Find out from the CLI's own
+   `--help` rather than guessing — a command that opens somebody ELSE's
+   conversation is worse than no command.
+7. Done: the database CHECK, the settings page, install detection, forms,
    detection patterns and the pulse follow the registry automatically. Configure
    the new coding agent under Settings → Coding agents.
 
