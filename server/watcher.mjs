@@ -19,6 +19,7 @@ import { PROVIDER_PLUGINS } from './providers/index.mjs'
 import { flowsTick } from './flows/triggers.mjs'
 import { reconcileClosedSession, tmuxSessionMap, shouldAutoClose, currentKeepMs } from './sessions.mjs'
 import { integrateTick, pushOperatorBase, integratorTimerOff, foreignChanges, ownWorktreePaths } from './integrate.mjs'
+import { maybeAutoCleanup } from './cleanup.mjs'
 
 let timer = null
 
@@ -77,6 +78,10 @@ export async function tick() {
   await checkFinishedBranches()
   await retryDeferred()
   await startScheduled()
+  // The tmux-cleanup agent: when memory is at or above the configured threshold
+  // (server/cleanup.mjs), one runs by itself. The memory read is the sidebar's
+  // cached measurement — the same number the panel shows, not a second one.
+  try { await maybeAutoCleanup() } catch (e) { console.error('[cleanup]', e.message) }
   // The finish gate has its own 5-second timer (server/integrate.mjs); this is
   // the net under it, for the case that timer ever stops.
   if (!integratorTimerOff()) {

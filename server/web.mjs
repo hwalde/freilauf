@@ -24,10 +24,12 @@ import {
   pageCodingAgents, codingAgentSave, codingAgentDelete,
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
   pageMergeSettings, mergeSettingsSave,
+  pageCleanupSettings, cleanupSettingsSave, cleanupSettingsSummary,
   headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
   integrationSection, problemPage, runEditCard,
 } from './pages.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
+import { startCleanupRun } from './cleanup.mjs'
 import { suggestExtras } from './extras-suggest.mjs'
 import { editRun } from './run-edit.mjs'
 import { mergeByHand, skipMerge, resetIntegration } from './integrate.mjs'
@@ -152,6 +154,9 @@ async function dispatch(req, res, url, path, formBody) {
   // driven through #prov, #model and #effort, and those ids exist once per page.
   if (req.method === 'GET' && path === '/settings/merge') return pageMergeSettings(req, res, url)
   if (req.method === 'POST' && path === '/settings/merge') return mergeSettingsSave(req, res, url, formBody)
+  // tmux cleanup (Settings → tmux cleanup) — the memory-freeing agent's setup.
+  if (req.method === 'GET' && path === '/settings/cleanup') return pageCleanupSettings(req, res, url)
+  if (req.method === 'POST' && path === '/settings/cleanup') return cleanupSettingsSave(req, res, url, formBody)
   // No-code flows (server/flows/) — own router, own pages.
   if (path === '/flows' || path.startsWith('/flows/')) return flowRoute(req, res, url)
   res.writeHead(404, { 'content-type': 'text/plain' }); res.end(t('web.not_found'))
@@ -300,6 +305,24 @@ async function api(req, res, url) {
     return json(res, 200, {
       ok: true, runId: r.runId, deferred: !!r.deferred, scheduled: !!r.scheduled,
       title: run?.title ?? null, favorite: fav.name,
+    })
+  }
+  // tmux cleanup: start the memory-freeing agent by hand. The sidebar's small
+  // button and the Sessions page's box both land here. `target_gb` may be empty
+  // (then the configured target applies); `keep` lists run ids whose tmux
+  // sessions must survive. Answers JSON — the callers stay where they are.
+  if (req.method === 'POST' && path === '/api/cleanup/start') {
+    const b = await form(req)
+    const raw = String(b.target_gb ?? '').trim()
+    const targetGb = raw === '' ? null : Number(raw)
+    const r = await startCleanupRun({
+      targetGb,
+      keep: String(b.keep ?? ''),
+      source: b.source === 'auto' ? 'auto' : (b.source === 'sessions' ? 'sessions' : 'sidebar'),
+    })
+    return json(res, r.ok ? 200 : 400, {
+      ok: r.ok, runId: r.runId ?? null, deferred: !!r.deferred,
+      targetGb: r.targetGb ?? null, error: r.error ?? null,
     })
   }
   // Rename a run — inline editing in the overview and on the detail page. This
