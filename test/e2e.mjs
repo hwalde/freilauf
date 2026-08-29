@@ -2420,6 +2420,24 @@ try {
     enthaelt(leer, 'colspan="7"', 'the empty state spans all seven')
     enthaelt(leer, 'no runs yet', 'and says so')
   })
+  await pruefe('the sidebar says what every tmux session on this machine costs', async () => {
+    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const leiste = html.slice(html.indexOf('id="status-sidebar"'), html.indexOf('</aside>'))
+    enthaelt(leiste, 'id="side-mem"', 'the block is there')
+    enthaelt(leiste, 'tmux memory', 'by its name from lang/en.json')
+    // A figure, and a way to the page that breaks it down per session.
+    wahr(/id="side-mem"[\s\S]*?<a href="\/sessions"><b>(\d+(\.\d+)?\s(MB|GB)|0 MB)<\/b><\/a>/.test(leiste),
+      `a memory figure linked to /sessions (${leiste.slice(leiste.indexOf('id="side-mem"'), leiste.indexOf('id="side-mem"') + 240)})`)
+    enthaelt(leiste, 'sessions', 'and how many sessions it is spread over')
+    // The reading is up to eight minutes old, and the block says so instead of
+    // presenting itself as live — the panel's whole honesty rests on that line.
+    enthaelt(leiste, 'measured every 8 min', 'the update interval, read out of the answer')
+    // It is on EVERY page, like the rest of the sidebar: a bill that runs
+    // quietly must not need a navigation to be seen.
+    for (const pfad of ['/agents', '/settings', '/sessions']) {
+      enthaelt(await (await hol(pfad)).text(), 'id="side-mem"', `${pfad}: there too`)
+    }
+  })
   await pruefe('the sidebar fragment renders the same aside the page does', async () => {
     const r = await hol(`/api/fragments/sidebar?repo=${repoId}`)
     gleich(r.status, 200, 'status')

@@ -68,7 +68,10 @@ Zeit, in der du das nicht tust:
 - **Subscription-Verbrauch** — Claudes 5-Stunden- und 7-Tage-Fenster, Cursors
   Ausgaben im laufenden Zyklus, OpenRouter-Guthaben — in der Seitenleiste jeder
   Seite, plus ein **Budget-Gate**, das geplante Starts zurückstellt, bevor sie
-  in ein leeres Kontingent laufen.
+  in ein leeres Kontingent laufen. Dieselbe Seitenleiste zeigt, was alle
+  tmux-Sessions der Maschine an Speicher kosten, alle acht Minuten neu gemessen:
+  Eine Session überlebt ihren Agenten absichtlich — diese Rechnung läuft leise
+  mit.
 - **No-Code-Flows**: ein grafischer Designer für das, was nach einem Lauf
   passiert — laufenden Agenten eine Nachricht schicken, Folgeläufe starten und
   auf sie warten, per LLM strukturierte Daten aus einem Report ziehen,
