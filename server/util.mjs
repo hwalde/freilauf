@@ -112,13 +112,120 @@ export function toDbUtc(ms) {
   return Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 19).replace('T', ' ') : null
 }
 
-/** Exact local date+time for a title/tooltip. */
+// ---------------- central display format: timezone + numbers ----------------
+//
+// The timezone every time display follows is a setting (`ui_timezone`, injected
+// like the language — this module stays free of db.mjs, see i18n.mjs for why).
+// An empty value resolves by UI language, then to the server's own zone. The
+// default deliberately preserves the pre-settings behaviour (server local time);
+// only an operator who wants otherwise touches the setting.
+let tzOverride = null
+
+/** Validate an IANA timezone identifier without installing it. */
+export function validTz(iana) {
+  if (!iana) return false
+  try { new Intl.DateTimeFormat('en-US', { timeZone: String(iana) }); return true } catch { return false }
+}
+
+/** The zone a UI language implies, or null when it names none (→ server zone). */
+export function timezoneForLanguage(lang = currentLanguage()) {
+  if (lang === 'de') return 'Europe/Berlin'
+  if (lang === 'zh') return 'Asia/Shanghai'
+  return null
+}
+
+/** Set the configured timezone; an empty/invalid value falls back to auto. */
+export function setTimezone(iana) {
+  tzOverride = validTz(iana) ? String(iana) : null
+}
+
+/** The timezone in effect: explicit setting → per-language → server default. */
+export function uiTimezone() {
+  if (tzOverride) return tzOverride
+  const sprache = timezoneForLanguage()
+  if (sprache) return sprache
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' } catch { return 'UTC' }
+}
+
+/** The zone's abbreviation for the configured timezone at the given instant. */
+export function tzAbbrev(ms = Date.now(), locale = currentLanguage()) {
+  try {
+    const tz = uiTimezone()
+    return new Intl.DateTimeFormat(locale, { timeZone: tz, timeZoneName: 'short' })
+      .formatToParts(new Date(ms)).find(p => p.type === 'timeZoneName')?.value || ''
+  } catch { return '' }
+}
+
+/** The timezone labels offered in Settings (common working zones, sorted). */
+export const TIMEZONE_OPTIONS = [
+  'Europe/Berlin', 'Europe/Vienna', 'Europe/Zurich', 'Europe/Paris', 'Europe/London',
+  'Europe/Madrid', 'Europe/Amsterdam', 'Europe/Stockholm', 'Europe/Warsaw', 'Europe/Rome',
+  'Europe/Prague', 'Europe/Athens', 'Europe/Kyiv', 'Europe/Moscow',
+  'Asia/Shanghai', 'Asia/Taipei', 'Asia/Hong_Kong', 'Asia/Tokyo', 'Asia/Seoul',
+  'Asia/Singapore', 'Asia/Kolkata', 'Asia/Dubai',
+  'America/Los_Angeles', 'America/New_York', 'America/Chicago', 'America/Denver',
+  'America/Phoenix', 'America/Toronto', 'America/Mexico_City', 'America/Sao_Paulo',
+  'Australia/Sydney', 'Australia/Melbourne', 'Pacific/Auckland', 'Pacific/Honolulu',
+].sort()
+
+/** Exact date+time for a title/tooltip, in the configured timezone. */
 export function fmtDateTime(ms, locale = currentLanguage()) {
   if (!Number.isFinite(ms)) return ''
   return new Date(ms).toLocaleString(locale, {
+    timeZone: uiTimezone(),
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   })
+}
+
+/** DB UTC string ('YYYY-MM-DD HH:MM:SS') → date+time in the configured zone. */
+export function fmtDbUtc(ts, locale = currentLanguage()) {
+  return fmtDateTime(parseDbUtc(ts), locale)
+}
+
+/** Clock in the configured timezone ('16:30' / '16:30:05'); an invalid ms → ''. */
+export function fmtClock(ms, { seconds = false, locale = currentLanguage() } = {}) {
+  if (!Number.isFinite(ms)) return ''
+  try {
+    const f = new Intl.DateTimeFormat(locale, {
+      timeZone: uiTimezone(), hour: '2-digit', minute: '2-digit',
+      ...(seconds ? { second: '2-digit' } : {}), hourCycle: 'h23',
+    })
+    return f.format(new Date(ms))
+  } catch { return '' }
+}
+
+/** 'DD.MM.' date part in the configured timezone, for the compact reset texts. */
+export function fmtDatePart(ms, locale = currentLanguage()) {
+  if (!Number.isFinite(ms)) return ''
+  try {
+    const parts = new Intl.DateTimeFormat(locale, {
+      timeZone: uiTimezone(), month: '2-digit', day: '2-digit',
+    }).formatToParts(new Date(ms))
+    const tag = parts.find(p => p.type === 'day')?.value ?? '??'
+    const mon = parts.find(p => p.type === 'month')?.value ?? '??'
+    return `${tag}.${mon}.`
+  } catch { return '' }
+}
+
+/**
+ * Locale number formatting — the one place a figure's decimal/thousands
+ * separators come from. Everything display-facing goes through here (or
+ * fmtPercent/fmtMoney) instead of toFixed + string concatenation.
+ */
+export function fmtNum(n, opts = {}) {
+  if (n === null || n === undefined || n === '') return ''
+  const num = Number(n)
+  if (!Number.isFinite(num)) return String(n)
+  try { return new Intl.NumberFormat(currentLanguage(), opts).format(num) } catch { return String(num) }
+}
+
+/** A percentage with the UI language's decimal separator ('78,5 %' in German). */
+export function fmtPercent(p) {
+  if (p === null || p === undefined) return '?'
+  const num = Number(p)
+  if (!Number.isFinite(num)) return String(p)
+  return `${fmtNum(num, { maximumFractionDigits: 1 })} %`
 }
 
 // Minimal 5-field cron (minute hour day month weekday): *, *&#47;n, a-b, lists.

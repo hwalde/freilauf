@@ -24,7 +24,9 @@ const d = (s) => new Date(s)
 
 try {
   const { cronMatches, validCron, scheduleDue, scheduleText, stripAnsi, escapeHtml,
-    fmtDuration, parseDbUtc, fmtRelativeTime, fmtDateTime, kurzid } = await import('../server/util.mjs')
+    fmtDuration, parseDbUtc, fmtRelativeTime, fmtDateTime, kurzid,
+    fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent,
+    uiTimezone, timezoneForLanguage, setTimezone, validTz, tzAbbrev, TIMEZONE_OPTIONS } = await import('../server/util.mjs')
   const { parseForm, cookieRepo, rememberRepo, requestRepo } = await import('../server/web-helpers.mjs')
 
   // ------------------------------------------------------------------
@@ -296,6 +298,53 @@ try {
     wahr(de.includes('25.08.2026'), 'German date: ' + de)
     wahr(/\d{2}:\d{2}:\d{2}/.test(de), 'has a clock time: ' + de)
     gleich(fmtDateTime(NaN, 'en'), '', 'invalid')
+  })
+  await pruefe('central format: the timezone resolves by language and by explicit choice', () => {
+    gleich(timezoneForLanguage('de'), 'Europe/Berlin', 'German → Berlin')
+    gleich(timezoneForLanguage('zh'), 'Asia/Shanghai', 'Chinese → Shanghai')
+    gleich(timezoneForLanguage('en'), null, 'English names no zone → server default')
+    gleich(timezoneForLanguage('xx'), null, 'unknown language names no zone')
+    wahr(validTz('Europe/Berlin'), 'a real IANA name is valid')
+    falsch(validTz('Mars/Olympus'), 'nonsense is not')
+    falsch(validTz(''), 'empty is not')
+    wahr(TIMEZONE_OPTIONS.includes('Europe/Berlin'), 'the settings list carries the common zones')
+  })
+  await pruefe('central format: fmtClock and fmtDatePart convert to the configured zone', () => {
+    const ms = Date.parse('2026-08-25T12:00:00Z')
+    setTimezone('Europe/Berlin')
+    gleich(fmtClock(ms), '14:00', 'Berlin is UTC+2 in August')
+    gleich(fmtDatePart(ms), '25.08.', 'the date part travels with the zone')
+    setTimezone('America/New_York')
+    gleich(fmtClock(ms), '08:00', 'New York is UTC-4 in August')
+    setTimezone('')                            // back to auto
+    gleich(fmtClock(NaN), '', 'invalid ms is empty')
+    gleich(fmtDatePart(NaN), '', 'invalid ms is empty')
+  })
+  await pruefe('central format: fmtDateTime and fmtDbUtc follow the configured zone', () => {
+    const ms = Date.parse('2026-08-25T12:00:00Z')
+    setTimezone('Europe/Berlin')
+    const de = fmtDateTime(ms, 'de')
+    wahr(de.includes('25.08.2026') && de.includes('14:00'), 'Berlin afternoon, German: ' + de)
+    gleich(fmtDbUtc('2026-08-25 12:00:00'), fmtDateTime(ms), 'DB UTC string == the instant')
+    gleich(fmtDbUtc(''), '', 'empty DB stamp')
+    setTimezone('')
+  })
+  await pruefe('central format: numbers and percentages follow the UI locale', async () => {
+    const { setLanguage } = await import('../server/i18n.mjs')
+    setLanguage('de')
+    gleich(fmtNum(1234.5, { maximumFractionDigits: 1 }), '1.234,5', 'German thousands+decimal')
+    gleich(fmtPercent(78.5), '78,5 %', 'German percentage')
+    gleich(fmtPercent(null), '?', 'missing stays a question mark')
+    setLanguage('en')
+    gleich(fmtNum(1234.5, { maximumFractionDigits: 1 }), '1,234.5', 'English thousands+decimal')
+    gleich(fmtPercent(78.5), '78.5 %', 'English percentage')
+    setLanguage('en')
+  })
+  await pruefe('central format: tzAbbrev names the configured zone', () => {
+    const ms = Date.parse('2026-08-25T12:00:00Z')
+    setTimezone('Europe/Berlin')
+    wahr(String(tzAbbrev(ms)).length > 0, 'a Berlin summer stamp has an abbreviation')
+    setTimezone('')
   })
   await pruefe('kurzid returns the first UUID block', () => {
     gleich(kurzid('1d005159-78bd-4cc1-a889-07617871af2e'), '1d005159', 'UUID')

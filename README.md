@@ -82,6 +82,10 @@ cc-hub is what you use when you are not:
   ([server/flows/AGENTS.md](server/flows/AGENTS.md)).
 - **Telegram** notifications with a link straight to the run.
 - **Multilingual UI**: English (default), 中文, Deutsch — Settings → UI language.
+- **One clock and one number format**: every time — sidebar included — is shown
+  in the timezone chosen under Settings → Time and numbers (auto: German →
+  Europe/Berlin, Chinese → Asia/Shanghai, English → the server's timezone);
+  numbers and percentages use the UI language's separators.
 
 ## Security model — please read this one
 

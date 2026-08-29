@@ -2819,6 +2819,42 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // The timezone is a display setting: it goes through the ordinary save route,
+  // is stored like any other setting, and makes the very next page render its
+  // times in the chosen zone — chips and the injected window.CCHUB_TZ, which is
+  // what keeps the browser's tooltips on the same clock as the server's.
+  gruppe('The display timezone is a central setting')
+
+  await pruefe('the settings page offers the timezone and saves it', async () => {
+    const html = await (await hol('/settings')).text()
+    enthaelt(html, 'name="ui_timezone"', 'the select is on the settings page')
+    const r = await formular('/settings/save', { ui_timezone: 'America/New_York' }, { alsBrowser: true })
+    gleich(r.status, 303, 'saved')
+    gleich(db.prepare(`SELECT value FROM settings WHERE key='ui_timezone'`).get()?.value,
+      'America/New_York', 'stored like any other setting')
+    try {
+      enthaelt(await (await hol('/settings')).text(),
+        'option value="America/New_York" selected', 'the saved zone is the selected option')
+    } finally {
+      await formular('/settings/save', { ui_timezone: '' }, { alsBrowser: true })
+    }
+  })
+
+  await pruefe('times on a page render in the configured timezone', async () => {
+    db.prepare(`UPDATE runs SET started_at='2026-08-25 12:00:00' WHERE id=?`).run(RH)
+    await formular('/settings/save', { ui_timezone: 'America/New_York', ui_language: 'en' }, { alsBrowser: true })
+    try {
+      const detail = await (await hol(`/runs/${RH}`)).text()
+      // 12:00 UTC on 2026-08-25 is 08:00 in New York (EDT, UTC-4) — the chip
+      // must read the configured clock, not UTC and not the server's.
+      enthaelt(detail, '08:00', 'the run start chip reads the New York clock')
+      enthaelt(detail, 'window.CCHUB_TZ="America/New_York"', 'the browser is told the same zone')
+    } finally {
+      await formular('/settings/save', { ui_timezone: '' }, { alsBrowser: true })
+    }
+  })
+
+  // ------------------------------------------------------------------
   gruppe('The live channel (server/events.mjs)')
 
   /**

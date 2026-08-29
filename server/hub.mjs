@@ -13,10 +13,12 @@ import { subscriptionUsage } from './usage.mjs'
 import { providerBalances } from './balances.mjs'
 import { sessionMemory } from './sessions.mjs'
 import { setLanguage } from './i18n.mjs'
+import { setTimezone } from './util.mjs'
 
 // UI language (default English) and, on a fresh installation, the optional
 // coding agent seed file (installed e.g. by a private setup repo).
 setLanguage(getSetting('ui_language') ?? 'en')
+setTimezone(getSetting('ui_timezone') ?? '')
 seedIfEmpty()
 
 const PORT = Number(process.env.CCHUB_LOCAL_PORT ?? 8791)

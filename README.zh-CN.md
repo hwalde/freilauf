@@ -71,6 +71,7 @@ tmux 会话中工作；cc-hub 负责启动它们、观察它们、收集它们�
   （[server/flows/AGENTS.md](server/flows/AGENTS.md)）。
 - **Telegram** 通知，附带直达该次运行的链接。
 - **多语言界面**：English（默认）、中文、Deutsch —— 设置 → UI language。
+- **统一时钟与数字格式**：所有时间（包括侧边栏）都使用设置 → 时间和数字中选定的时区（自动：德语 → Europe/Berlin，中文 → Asia/Shanghai，英语 → 服务器时区）；数字和百分比使用界面语言的分隔符。
 
 ## 安全模型 —— 这一节请务必读完
 

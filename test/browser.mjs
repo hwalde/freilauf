@@ -236,6 +236,25 @@ try {
     await p.close()
   })
 
+  await pruefe('the relative-time tooltip follows the configured timezone', async () => {
+    // 12:00 UTC on 2026-08-25 is 08:00 in New York (EDT, UTC-4). The tooltip is
+    // re-rendered by hub.js from window.CCHUB_TZ — it must read the configured
+    // clock, not the browser machine's.
+    const ur = db.prepare('SELECT started_at FROM runs WHERE id=?').get(R_ALT).started_at
+    db.prepare("UPDATE runs SET started_at='2026-08-25 12:00:00' WHERE id=?").run(R_ALT)
+    await formular('/settings/save', { ui_timezone: 'America/New_York' })
+    try {
+      const p = await neueSeite(`/?repo=${repoId}`)
+      const titel = await p.getAttribute(`tr[onclick*="${R_ALT}"] time.reltime`, 'title')
+      enthaelt(titel, '08:00', `title in New York time (${titel})`)
+      sauber(p)
+      await p.close()
+    } finally {
+      db.prepare('UPDATE runs SET started_at=? WHERE id=?').run(ur, R_ALT)
+      await formular('/settings/save', { ui_timezone: '' })
+    }
+  })
+
   // ------------------------------------------------------------------ A2
   gruppe('A2 — the repo switcher in the header')
 
