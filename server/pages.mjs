@@ -720,6 +720,15 @@ export function runRow(r, ctx) {
           <input type="hidden" name="back" value="/?repo=${repoId}">
           <button type="submit" class="act" title="${e(t('overview.archive'))}" aria-label="${e(t('overview.archive'))}">${e(t('overview.archive_short'))}</button></form>`
     : ''
+  // The budget gate held a run back and the operator disagrees — one click in
+  // the row starts it anyway (POST /start, no gate). Same pattern as the
+  // archive button: a small action button, hover for the full word, and the
+  // click must not navigate to the detail page.
+  const startBtn = r.status === 'deferred'
+    ? `<form method="post" action="/api/runs/${r.id}/start" class="inline" onclick="event.stopPropagation()">
+          <input type="hidden" name="back" value="/?repo=${repoId}">
+          <button type="submit" class="act" title="${e(t('start.force_start'))}" aria-label="${e(t('start.force_start'))}">${e(t('start.force_start_short'))}</button></form>`
+    : ''
   // The row stays clickable as a whole, the title is additionally a real link —
   // otherwise the detail page would be unreachable by keyboard. The title cell
   // swallows the row click: renaming must not navigate away.
@@ -743,7 +752,7 @@ export function runRow(r, ctx) {
       <td>${wartend ? '' : (durMin > 0 ? e(t('unit.minutes', { n: durMin })) : '')}<span class="dim"> / ${e(t('unit.minutes', { n: r.expected_minutes }))}</span></td>
       <td class="two-line">${branch ? e(branch) : '<span class="leer">–</span>'}${
         r.pr_url ? `<span class="dim"><a href="${e(r.pr_url)}" onclick="event.stopPropagation()">PR</a></span>` : ''}</td>
-      <td>${vorfallZelle(r.id, repoId, r.status)}${archivBtn}</td>
+      <td>${vorfallZelle(r.id, repoId, r.status)}${startBtn}${archivBtn}</td>
     </tr>`
 }
 
@@ -1135,6 +1144,17 @@ export function runDetailHead(run, ctx) {
     ? `<div class="banner waiting" id="run-banner">⏳ ${wartetAuf(run)}
        <form method="post" action="/api/runs/${id}/kill" class="inline"><button class="danger">${e(t('start.cancel'))}</button></form></div>`
     : ''}
+  ${run.status === 'deferred'
+    // The budget gate held the run back, and the operator disagrees — that is
+    // what the button is for: the gate is a rule that must not overrule a
+    // deliberate decision (same principle as repos.max_parallel). POST /start
+    // starts it without asking the gate again; cancel stays available.
+    ? `<div class="banner waiting" id="run-banner">🟡 ${wartetAuf(run)}
+       <div class="btn-row">
+         <form method="post" action="/api/runs/${id}/start" class="inline"><button>${e(t('start.force_start'))}</button></form>
+         <form method="post" action="/api/runs/${id}/kill" class="inline"><button class="danger">${e(t('start.cancel'))}</button></form>
+       </div></div>`
+    : ''}
   ${['done', 'failed', 'aborted'].includes(run.status)
     // One click into the archive / back out of it. An archived run is hidden
     // from the overview but stays fully reachable here, report and log intact.
@@ -1504,8 +1524,23 @@ export async function pageSettings(req, res, url) {
     <label>${e(t('settings.pipeline'))} <select name="pipeline_on"><option value="1" ${s.pipeline_on === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${s.pipeline_on !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
     <label>${e(t('settings.telegram_token'))} <input name="telegram_token" type="password" value="${e(s.telegram_token ?? '')}"></label>
     <label>${e(t('settings.telegram_chat'))} <input name="telegram_chat" value="${e(s.telegram_chat ?? '')}"></label>
-    <label>${e(t('settings.quota_threshold'))} <input name="quota_threshold" type="number" value="${e(s.quota_threshold ?? '90')}"></label>
-    <label>${e(t('settings.openrouter_min'))} <input name="openrouter_min_eur" type="number" step="0.5" value="${e(s.openrouter_min_eur ?? '5')}"></label>
+    <fieldset><legend>${e(t('settings.gates_legend'))}</legend>
+      <p class="dim">${e(t('settings.gates_hint'))}</p>
+      <label>${e(t('settings.gate_claude_on'))} <select name="claude_gate_on"><option value="1" ${(s.claude_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.claude_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+      <label>${e(t('settings.gate_claude_5h'))} <input name="claude_gate_5h" type="number" step="0.5" min="0" max="100" value="${e(s.claude_gate_5h ?? '90')}"></label>
+      <label>${e(t('settings.gate_claude_7d'))} <input name="claude_gate_7d" type="number" step="0.5" min="0" max="100" value="${e(s.claude_gate_7d ?? '95')}">
+        <span class="dim">${e(t('settings.gate_claude_7d_hint'))}</span></label>
+      <label>${e(t('settings.gate_claude_fable'))} <input name="claude_gate_fable" type="number" step="0.5" min="0" max="100" value="${e(s.claude_gate_fable ?? '95')}">
+        <span class="dim">${e(t('settings.gate_claude_fable_hint'))}</span></label>
+      <label>${e(t('settings.gate_openrouter_on'))} <select name="openrouter_gate_on"><option value="1" ${(s.openrouter_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.openrouter_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+      <label>${e(t('settings.openrouter_min'))} <input name="openrouter_min_eur" type="number" step="0.5" min="0" value="${e(s.openrouter_min_eur ?? '5')}"></label>
+      <label>${e(t('settings.gate_deepseek_on'))} <select name="deepseek_gate_on"><option value="1" ${(s.deepseek_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.deepseek_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+      <label>${e(t('settings.gate_deepseek_min'))} <input name="deepseek_min_usd" type="number" step="0.5" min="0" value="${e(s.deepseek_min_usd ?? '2')}">
+        <span class="dim">${e(t('settings.gate_deepseek_min_hint'))}</span></label>
+      <label>${e(t('settings.gate_cursor_on'))} <select name="cursor_gate_on"><option value="1" ${(s.cursor_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.cursor_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+      <label>${e(t('settings.gate_cursor_pct'))} <input name="cursor_gate_pct" type="number" step="0.5" min="0" max="100" value="${e(s.cursor_gate_pct ?? '95')}">
+        <span class="dim">${e(t('settings.gate_cursor_pct_hint'))}</span></label>
+    </fieldset>
     <label>${e(t('settings.abo_price'))} <input name="abo_price" type="number" value="${e(s.abo_price ?? '200')}">
       <span class="dim">${e(t('settings.abo_price_hint'))}</span></label>
     <label>${e(t('settings.cursor_included'))} <input name="cursor_included_usd" type="number" step="1" value="${e(s.cursor_included_usd ?? '20')}">
@@ -2235,8 +2270,11 @@ export async function repoSave(req, res, url, formBody) {
  * fallback for an installation that has not saved the new field yet
  * (sessionKeepMs), and an empty write would silently reset it.
  */
-const SETTINGS_KEYS = ['pipeline_on', 'telegram_token', 'telegram_chat', 'quota_threshold',
-  'openrouter_min_eur', 'abo_price', 'cursor_included_usd', 'session_keep_hours', 'archive_session_on', 'archive_session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
+const SETTINGS_KEYS = ['pipeline_on', 'telegram_token', 'telegram_chat',
+  'claude_gate_on', 'claude_gate_5h', 'claude_gate_7d', 'claude_gate_fable',
+  'openrouter_gate_on', 'openrouter_min_eur', 'deepseek_gate_on', 'deepseek_min_usd',
+  'cursor_gate_on', 'cursor_gate_pct', 'cursor_included_usd',
+  'abo_price', 'session_keep_hours', 'archive_session_on', 'archive_session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
   'llm_check_on', 'llm_check_model', 'llm_check_or_provider',
   'llm_title_on', 'llm_title_model', 'llm_title_or_provider',
   'llm_extras_on', 'llm_extras_model', 'llm_extras_or_provider', 'ui_language']

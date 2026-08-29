@@ -66,11 +66,15 @@ Zeit, in der du das nicht tust:
 - **Incidents**: Rate Limits und Provider-Ausfälle werden über mehrere
   unabhängige Kanäle erkannt und einmal gemeldet, nicht fünfmal.
 - **Subscription-Verbrauch** — Claudes 5-Stunden- und 7-Tage-Fenster, Cursors
-  Ausgaben im laufenden Zyklus, OpenRouter-Guthaben — in der Seitenleiste jeder
-  Seite, plus ein **Budget-Gate**, das geplante Starts zurückstellt, bevor sie
-  in ein leeres Kontingent laufen — und nur das, was das Fenster wirklich
-  betrifft: Claudes allgemeine Woche bremst jeden Lauf, eine modellbezogene
-  Woche nur die Läufe auf diesem Modell. Dieselbe Seitenleiste zeigt, was alle
+  Ausgaben im laufenden Zyklus, OpenRouter- und DeepSeek-Guthaben — in der
+  Seitenleiste jeder Seite, plus ein **Budget-Gate**, das Starts zurückstellt,
+  bevor sie in ein leeres Kontingent laufen — und nur das, was das Fenster
+  wirklich betrifft: Claudes allgemeine Woche bremst jeden Claude-Lauf, eine
+  modellbezogene Woche nur die Läufe auf diesem Modell, ein Cursor-Lauf nur den
+  Cursor-Zeitraum, ein DeepSeek-Lauf nur sein eigenes Guthaben. Jedes Gate ist
+  **optional** mit eigener Schwelle (Einstellungen → Budget-Gates), und ein
+  zurückgestellter Lauf lässt sich von seiner Detailseite **trotzdem starten**.
+  Dieselbe Seitenleiste zeigt, was alle
   tmux-Sessions der Maschine an Speicher kosten, alle acht Minuten neu gemessen:
   Eine Session überlebt ihren Agenten absichtlich — diese Rechnung läuft leise
   mit. Ein konfigurierbarer **tmux-Cleanup-Agent** (Einstellungen → tmux-Aufräumen,
