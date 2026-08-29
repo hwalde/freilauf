@@ -1050,16 +1050,33 @@ try {
     gleich(await p.$eval('#run-edit input[name=expected_minutes]', el => el.value), '45', 'the duration input is prefilled')
     gleich(await p.$$eval('#run-edit textarea[name=prompt]', els => els.length), 0, 'no prompt textarea for a started run')
     gleich(await p.$$eval('#run-edit select[name=repo_id]', els => els.length), 0, 'no repo select for a started run')
+    gleich(await p.$$eval('#run-edit select[name=start_mode]', els => els.length), 0, 'no start-time block for a started run')
+    gleich(await p.$$eval('#run-edit input[name=branch_mode]', els => els.length), 0, 'no branch rule for a started run')
     sauber(p)
     await p.close()
   })
 
-  await pruefe('a scheduled run offers prompt and repo too, prefilled', async () => {
+  await pruefe('a scheduled run offers prompt, repo, branch and its start time too, prefilled', async () => {
     const p = await neueSeite(`/runs/${R_GEPLANT}`)
     await p.click('#run-edit summary')
     gleich(await p.$eval('#run-edit textarea[name=prompt]', el => el.value), 'Browser-Lauf geplant', 'the prompt is prefilled')
     wahr((await p.$$eval('#run-edit select[name=repo_id] option', els => els.length)) >= 2, 'both repos are offered')
     gleich(await p.$eval('#run-edit select[name=repo_id]', el => el.value), String(repoId), 'the current repo is selected')
+    gleich(await p.$eval('#run-edit select[name=start_mode]', el => el.value), 'at', 'the start kind is prefilled')
+    wahr(await p.$eval('#run-edit input[name=start_at]', el => el.value !== ''), 'the date-time is prefilled')
+    gleich(await p.$eval('#run-edit input[name=branch_mode][value=keiner]', el => el.checked), true, 'the branch rule is prefilled')
+    // The branch rule reacts INSIDE the card too (it is a swap-in-able block).
+    gleich(await p.$eval('#run-edit [data-branch-pattern]', el => el.hidden), true, 'no pattern for "no branch"')
+    await p.click('#run-edit input[name=branch_mode][value=neu]')
+    gleich(await p.$eval('#run-edit [data-branch-pattern]', el => el.hidden), false, 'picking a branch reveals the pattern')
+    // The start-switch works INSIDE the card — and must not touch the Quick-Run
+    // dialog that sits in every page's layout (the same fieldset scoping A4
+    // guards on the run form).
+    await p.selectOption('#run-edit select[name=start_mode]', 'idle')
+    gleich(await p.$eval('#run-edit .st[data-mode="at"]', el => el.hidden), true, 'the card hides its date block')
+    gleich(await p.$eval('#run-edit .st[data-mode="idle"]', el => el.hidden), false, 'and shows the idle hint')
+    gleich(await p.$eval('#qr-form select[data-start-switch]', el => el.value), 'now', 'the dialog keeps its own choice')
+    gleich(await p.$eval('#qr-form .st[data-mode="at"]', el => el.hidden), true, 'and the dialog stays untouched')
     sauber(p)
     await p.close()
   })

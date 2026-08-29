@@ -302,3 +302,29 @@ export async function startDeferredRun(runId, { forced = false } = {}) {
   if (!r.ok) notifyRun(runId, 'start_failed', `Start after deferral failed: ${r.error}`)
   return r
 }
+
+/**
+ * A PLANNED run is told "start now" — the editing card's way of saying that a
+ * run waiting for its time is waiting no more. Exactly the "now" choice of the
+ * single-run form, applied to a run that already exists: the same budget gate
+ * as at any other start (a blocked one becomes `deferred`, the watcher retries
+ * it like any deferred run), and the same treatment of `started_at` as in
+ * pickUpScheduled() — the waiting time must not count as runtime.
+ */
+export async function startScheduledNow(runId) {
+  const run = db.prepare(`SELECT * FROM runs WHERE id=? AND status='scheduled'`).get(runId)
+  if (!run) return { ok: false, error: 'not scheduled' }
+  const gate = await budgetGate(run.harness, run.model ?? null, run.provider ?? null)
+  if (gate) {
+    db.prepare(`UPDATE runs SET status='deferred' WHERE id=?`).run(runId)
+    addEvent(runId, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null })
+    notifyRun(runId, 'deferred', `🟡 Start deferred — ${gate.reason}${gate.resets_at ? ` (reset: ${gate.resets_at})` : ''}`)
+    return { ok: true, runId, deferred: true }
+  }
+  db.prepare(`UPDATE runs SET status='running', started_at=datetime('now'),
+              last_activity_at=datetime('now') WHERE id=?`).run(runId)
+  addEvent(runId, 'scheduled_start', { start_mode: 'now', start_at: null })
+  const r = await launchRun(runId)
+  if (!r.ok) notifyRun(runId, 'start_failed', `Planned start failed: ${r.error}`)
+  return r.ok ? { ok: true, runId } : { ok: false, runId, error: r.error }
+}

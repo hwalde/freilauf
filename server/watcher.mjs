@@ -9,7 +9,7 @@ import { RUNS_DIR, sh } from './util.mjs'
 import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd } from './reports.mjs'
 import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
 import { deliverPendingGoals } from './goal.mjs'
-import { claudeQuota, sevenForRun } from './quota.mjs'
+import { claudeQuota, sevenForRun, quotaFullWindow } from './quota.mjs'
 import { refreshClaudeLimits } from './claude-usage.mjs'
 import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText } from './detect.mjs'
 import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, offeneVorfaelle, detektorLog, msVon, brauchtMensch } from './incidents.mjs'
@@ -198,10 +198,18 @@ async function watchRun(run) {
     await logScannen(run)
     // cursor's second end channel, independent of any hook (see below).
     if (await cursorTurnEndDetected(run)) return
-    // red: a Claude window that concerns THIS run is at 100 % — its own model's
-    // week and the general one, not a per-model week it does not draw from.
-    const q = claudeQuota()
-    if ((q.five ?? 0) >= 100 || (sevenForRun(run, q) ?? 0) >= 100) addEventOnce(run.id, 'anomaly:quota_full')
+    // red: a Claude window that concerns THIS run is at 100 %. Only a claude
+    // run draws from these windows — a run on another harness (opencode,
+    // hermes, cursor) must not be flagged because somebody else's claude
+    // session consumed the quota. The event names the window, so the overview
+    // can say WHICH one is exhausted instead of a bare "quota exhausted".
+    if (run.harness === 'claude') {
+      const q = claudeQuota()
+      const voll = quotaFullWindow(q, run.model ?? null)
+      if (voll) {
+        addEventOnce(run.id, 'anomaly:quota_full', { window: voll.label, pct: voll.pct, resets_at: voll.resets_at })
+      }
+    }
   }
 
 }

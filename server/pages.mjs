@@ -105,13 +105,23 @@ const AMPEL_DOT = {
  * raw for as long as it had a column of its own to hide in. Same treatment as
  * an incident type in `typName()`: a key if there is one, the raw kind if the
  * watcher ever invents a new one — a page must not go blank over a word.
+ *
+ * Some anomalies carry a named subject in their payload — `quota_full` names
+ * the window it saw full ('5h', '7d Fable', …) — and that word goes into the
+ * line, because "quota exhausted" without the window is exactly the case where
+ * one cannot tell whose quota ran out.
  */
 function lastAnomaly(runId) {
-  const r = db.prepare(`SELECT kind, ts FROM events WHERE run_id=? AND (kind LIKE 'anomaly:%' OR kind='help') ORDER BY id DESC LIMIT 1`).get(runId)
+  const r = db.prepare(`SELECT kind, ts, payload FROM events WHERE run_id=? AND (kind LIKE 'anomaly:%' OR kind='help') ORDER BY id DESC LIMIT 1`).get(runId)
   if (!r) return null
   const key = `anomaly.${String(r.kind).replace(/^anomaly:/, '')}`
   const name = t(key) === key ? r.kind : t(key)
-  return `${name} (${fmtDbUtc(r.ts)})`
+  let fenster = ''
+  try {
+    const p = JSON.parse(r.payload ?? 'null')
+    if (p && p.window) fenster = `${p.window} · `
+  } catch {}
+  return `${name} (${fenster}${fmtDbUtc(r.ts)})`
 }
 
 /** Name of an incident type, also for 'provider_down:openrouter'. */
@@ -1264,8 +1274,11 @@ export function runChips(run, repo, herkunft) {
  * can be changed, folded away like the goal. The fields are rendered from
  * runEditAllowed(), the SAME table the API applies: a running run gets only
  * the expected duration (the watcher's thresholds and the metrics read the
- * column live), a scheduled or deferred run additionally the prompt and the
- * repo (both read at launch). A finished run gets no card at all.
+ * column live), a scheduled or deferred run additionally the prompt, the repo
+ * and the branch rule (all read at launch), and a scheduled run its start time
+ * — through the same block the single-run form plans one with, so the operator
+ * re-decides the "when" exactly the way it was decided the first time. A
+ * finished run gets no card at all.
  *
  * The card is part of the run-detail fragment, so a status change (a scheduled
  * run starts) swaps the fields by themselves — and hub.js skips that swap while
@@ -1273,7 +1286,7 @@ export function runChips(run, repo, herkunft) {
  */
 export function runEditCard(run) {
   const erlaubt = runEditAllowed(run)
-  if (!erlaubt.duration && !erlaubt.prompt && !erlaubt.repo) return ''
+  if (!erlaubt.duration && !erlaubt.prompt && !erlaubt.repo && !erlaubt.startTime && !erlaubt.branch) return ''
   const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
   const zeilen = []
   if (erlaubt.duration) {
@@ -1292,6 +1305,23 @@ export function runEditCard(run) {
     </select>
     <span class="dim">${e(t('run.edit.repo_hint'))}</span></label>`)
   }
+  if (erlaubt.branch) {
+    // The same block the run forms use — repo-switching inside the card flips
+    // the explanations through its data-merge-modes/bases, exactly as in the
+    // Quick-Run dialog.
+    zeilen.push(branchFields(run, branchContext(run.repo_id)))
+  }
+  if (erlaubt.startTime) {
+    // Prefilled with what the run currently waits for: the DB holds UTC, the
+    // <input type="datetime-local"> wants local time on this machine (the same
+    // assumption runStartFromForm makes the other way round).
+    const at = parseDbUtc(run.start_at)
+    zeilen.push(runStartTimeFields({
+      start_mode: run.start_mode,
+      start_at: Number.isFinite(at) ? toDateTimeLocal(at) : '',
+    }))
+    zeilen.push(`<p class="dim">${e(t('run.edit.start_hint'))}</p>`)
+  }
   return `<details class="run-edit" id="run-edit">
     <summary>${e(t('run.edit'))}</summary>
     <form method="post" action="/api/runs/${e(run.id)}/edit" class="settings form-grid">
@@ -1299,6 +1329,13 @@ export function runEditCard(run) {
       <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
     </form>
   </details>`
+}
+
+/** DB UTC ('YYYY-MM-DD HH:MM:SS') → local time in the datetime-local shape. */
+function toDateTimeLocal(ms) {
+  const d = new Date(ms)
+  const z = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}T${z(d.getHours())}:${z(d.getMinutes())}`
 }
 
 /**

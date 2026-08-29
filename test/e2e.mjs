@@ -987,6 +987,40 @@ try {
     await sessionMerken(j.runId)
   })
 
+  await pruefe('quota_full is a claude run\u2019s signal, not the machine\u2019s', async () => {
+    // Both runs must be RUNNING before the quota flips to 100 % — a claude
+    // start into a full window would be deferred by the gate, not flagged.
+    const c = await laufStarten({ repo_id: repoId, model: 'claude-sonnet-5', prompt: 'E2E-Quota-Rot' })
+    wahr(!!c.runId && !c.deferred, 'the claude run is running')
+    await sessionMerken(c.runId)
+    const fremd = await laufStarten({ repo_id: repoId, harness: 'opencode', model: 'deepseek/deepseek-v4', prompt: 'E2E-Quota-Fremd' })
+    wahr(!!fremd.runId && !fremd.deferred, 'the other-harness run is running too')
+    await sessionMerken(fremd.runId)
+
+    writeFileSync(quotaDatei, JSON.stringify({
+      five_hour: { used_percentage: 100, resets_at: 1800000000 },
+      seven_day: { used_percentage: 0 },
+      seven_day_fable: { used_percentage: 0 },
+    }))
+    await watcherTick()
+
+    const ev = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='anomaly:quota_full'`).get(c.runId)
+    wahr(!!ev, 'a claude run on a full window is flagged')
+    enthaelt(ev.payload, '"window":"5h"', 'the event names the window that is full')
+    gleich(db.prepare(`SELECT count(*) n FROM events WHERE run_id=? AND kind='anomaly:quota_full'`)
+      .get(fremd.runId).n, 0, 'a run on another harness is not blamed for claude\u2019s quota')
+
+    // The overview says WHICH window is exhausted — not a bare word with no way
+    // to tell whose quota ran out.
+    const zeile = (await (await hol(`/?repo=${repoId}`)).text()).split('<tr').find(z => z.includes(c.runId))
+    enthaelt(zeile, 'quota exhausted', 'the row says the word')
+    enthaelt(zeile, '(5h', 'and names the window')
+
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(c.runId)
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(fremd.runId)
+    quotaSchreiben(0, 0)
+  })
+
   // ------------------------------------------------------------------
   // The goal is the one definition field that does NOT travel in the prompt
   // file: `/goal <condition>` exists only inside the session, so the hub types
@@ -1794,7 +1828,14 @@ try {
   const editKarte = async (runId) => {
     const html = await (await hol(`/runs/${runId}`)).text()
     const i = html.indexOf('id="run-edit"')
-    return i < 0 ? '' : html.slice(i, i + 1500)
+    return i < 0 ? '' : html.slice(i, i + 4000)
+  }
+
+  /** ms → local time in the datetime-local shape the form sends. */
+  const datenLocal = (ms) => {
+    const d = new Date(ms)
+    const z = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}T${z(d.getHours())}:${z(d.getMinutes())}`
   }
 
   await pruefe('a running run accepts only the expected duration', async () => {
@@ -1820,6 +1861,8 @@ try {
     enthaelt(karte, 'name="expected_minutes"', 'card offers the duration')
     falsch(karte.includes('name="prompt"'), 'no prompt textarea for a started run')
     falsch(karte.includes('name="repo_id"'), 'no repo select for a started run')
+    falsch(karte.includes('name="start_mode"'), 'no start-time block for a started run')
+    falsch(karte.includes('name="branch_mode"'), 'no branch rule for a started run')
 
     // Clean up: the run must not linger as 'running' for the status sidebar.
     db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
@@ -1836,7 +1879,7 @@ try {
   })
 
   let EDITLAUF = null
-  await pruefe('a scheduled run is edited: prompt, duration and repo before it starts', async () => {
+  await pruefe('a scheduled run is edited: prompt, duration, repo and start time before it starts', async () => {
     const j = await laufStarten({
       repo_id: repoId, prompt: 'E2E-Edit-alt', title: 'Planned edit',
       start_mode: 'in', start_in_minutes: '60',
@@ -1845,9 +1888,11 @@ try {
     wahr(j.scheduled, `planned (${JSON.stringify(j)})`)
     gleich(lauf(EDITLAUF).title, 'Planned edit', 'an operator title')
 
+    const neu = datenLocal(Date.now() + 30 * 60_000)
     // A classic form post lands back on the run page.
     const r = await formular(`/api/runs/${EDITLAUF}/edit`, {
       expected_minutes: '120', prompt: 'E2E-Edit-neu', repo_id: String(repo2Id),
+      start_mode: 'at', start_at: neu,
     }, { alsBrowser: true })
     gleich(r.status, 303, 'form post redirects back')
     gleich(r.headers.get('location'), `/runs/${EDITLAUF}`, 'to the run page')
@@ -1855,18 +1900,61 @@ try {
     gleich(l.prompt, 'E2E-Edit-neu', 'new prompt')
     gleich(l.expected_minutes, 120, 'new duration')
     gleich(l.repo_id, repo2Id, 'moved to the other repo')
+    gleich(l.start_mode, 'at', 'start mode')
     gleich(l.title, 'Planned edit', 'an operator title stays')
+    // Same local-time reading the form parser makes of the input; the DB stores
+    // UTC, so the expected value is derived from the same Date.parse.
+    const so = new Date(Date.parse(neu))
+    gleich(l.start_at, so.toISOString().slice(0, 19).replace('T', ' '), 'the start time moved')
+    // Still scheduled: 30 minutes in the future, a watcher pass must not start it.
+    gleich(l.status, 'scheduled', 'still waiting')
+    await watcherTick()
+    gleich(lauf(EDITLAUF).status, 'scheduled', 'a pass before the edited moment changes nothing')
 
     const karte = await editKarte(EDITLAUF)
     enthaelt(karte, 'E2E-Edit-neu', 'card shows the new prompt')
     enthaelt(karte, 'name="prompt"', 'prompt textarea for a planned run')
     enthaelt(karte, 'name="repo_id"', 'repo select for a planned run')
     enthaelt(karte, '>e2e2<', 'the other repo is selected')
+    enthaelt(karte, 'name="start_mode"', 'the planned run offers its start time')
+    enthaelt(karte, 'name="start_at"', 'with the date-time field')
+    enthaelt(karte, `value="${neu}"`, 'prefilled with what it is waiting for')
+    enthaelt(karte, 'name="branch_mode"', 'and the branch rule, prefilled for a planned run')
 
     // The live channel renders the same card.
     const frag = await (await hol(`/api/fragments/run-detail?id=${EDITLAUF}`)).text()
     enthaelt(frag, 'id="run-edit"', 'card is part of the fragment')
     enthaelt(frag, 'E2E-Edit-neu', 'and carries the new prompt')
+    enthaelt(frag, 'name="start_mode"', 'and the start-time block')
+  })
+
+  await pruefe('the branch rule of a planned run can be edited', async () => {
+    const j = await laufStarten({
+      repo_id: repoId, prompt: 'E2E-Edit-branch', title: 'Branch planned',
+      start_mode: 'in', start_in_minutes: '60',
+    })
+    const r = await formular(`/api/runs/${j.runId}/edit`, {
+      branch_mode: 'neu', branch_pattern: 'agent/e2e-edit', keep_on_branch: '1',
+    })
+    gleich(r.status, 200, 'the branch edit is accepted')
+    const l = lauf(j.runId)
+    gleich(l.branch_mode, 'neu', 'new branch mode')
+    gleich(l.branch_pattern, 'agent/e2e-edit', 'new branch pattern')
+    gleich(l.keep_on_branch, 1, 'keep-on-branch set')
+
+    // An invalid combination is a problem, not a partial write.
+    const schlecht = await formular(`/api/runs/${j.runId}/edit`, {
+      branch_mode: 'keiner', keep_on_branch: '1',
+    })
+    gleich(schlecht.status, 400, 'keep without a branch is refused')
+    gleich(lauf(j.runId).branch_mode, 'neu', 'the earlier edit stands')
+
+    const karte = await editKarte(j.runId)
+    enthaelt(karte, 'value="neu" checked', 'the edited mode is selected')
+    enthaelt(karte, 'value="agent/e2e-edit"', 'the edited pattern is prefilled')
+
+    // Clean up: a planned run must not linger.
+    await formular(`/api/runs/${j.runId}/kill`, {})
   })
 
   await pruefe('the edited run starts with its new prompt in its new repo', async () => {
@@ -1884,6 +1972,26 @@ try {
 
     // Clean up for the status sidebar that counts later.
     db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(EDITLAUF)
+  })
+
+  await pruefe('editing a planned run to "now" starts it right away', async () => {
+    const j = await laufStarten({
+      repo_id: repoId, prompt: 'E2E-Edit-jetzt', title: 'Start now by edit',
+      start_mode: 'in', start_in_minutes: '60',
+    })
+    gleich(lauf(j.runId).status, 'scheduled', 'sanity: planned')
+    const r = await formular(`/api/runs/${j.runId}/edit`, { start_mode: 'now' })
+    gleich(r.status, 200, 'the edit is accepted')
+    const gestartet = await r.json()
+    gleich(gestartet.ok, true, 'and reports the start')
+    const l = lauf(j.runId)
+    gleich(l.status, 'running', 'the run is running, not waiting')
+    wahr(!!l.tmux_session, 'has a session')
+    await sessionMerken(j.runId)
+    enthaelt(ereignisse(j.runId).join(','), 'scheduled_start', 'recorded as a started planned run')
+
+    // Clean up.
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
   })
 
   // ------------------------------------------------------------------
