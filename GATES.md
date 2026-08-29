@@ -1,76 +1,42 @@
-# Gates: the tmux-cleanup agent, selectable setup, sidebar and Sessions triggers
+# Gates: report messages begin with the repo/run or repo/AGENT header
 
-OWNS: server/cleanup.mjs, server/pages.mjs, server/web.mjs, server/watcher.mjs,
-server/run-def.mjs, bin/cc-session-cleanup, setup/02-install-scripts.sh,
-public/hub.js, public/hub.css, lang/en.json, lang/de.json, lang/zh.json,
-test/unit.mjs, test/e2e.mjs, test/browser.mjs, GATES.md, PLAN.md
+OWNS: server/reports.mjs, scripts/gates-msg-header.mjs, test/sandkasten.mjs,
+GATES.md, PLAN.md
 
-Scope: A reusable agent+provider+model selection (a styling option on the
-existing `runSetupFields()` element), a configurable tmux-cleanup agent that
-frees memory down to a target GB by ending the oldest inactive tmux sessions,
-an on/off switch plus a threshold in Settings, an unobtrusive "free memory"
-button in the sidebar's tmux block and a prominent box on the Sessions page
-with an optional keep-runs field, a helper script for the agent, and a
-Telegram report line. Machine-specific values (URLs, paths) stay out of the
-committed state.
+Scope: The Telegram messages that carry a run's report — `done`, `failed`,
+`help` — begin with a header that names the repo and the reporting entity:
+`<repo> / <run-title> REPORT:` for a single run, `<repo> / AGENT <agent-name>
+REPORT:` for an agent run, followed by a blank line and the report body. The
+status line (✅ Done / ❌ Run failed / 🆘 Help call + harness + duration +
+branch + merge + incidents) follows the report instead of preceding it.
 
-- [x] G1: the reusable setup element gains a pure styling option; existing
-      callers stay byte-for-byte identical
+- [x] G1: `doneText` begins with the header and the report for a single run,
+      and the status line follows the report
   CHECK: node test/unit.mjs
   EXPECT: checks passed
-  EVIDENCE: met — 270 unit checks green, incl. "runSetupFields: the styling
-    option wraps, the default stays untouched" (no wrapper without the option,
-    a wrapping fieldset with it, same harness select inside).
+  EVIDENCE: met — the unit suite passed 270 checks (all groups green). Full
+    evidence lives in the machine-local .unlazy/ (gitignored).
 
-- [x] G2: the cleanup planning logic decides correctly: oldest-inactive first,
-      protected sessions never chosen, target reached
+- [x] G2: `doneText` names an agent run as `AGENT <agent-name>` and a single
+      run by its title
+  CHECK: node scripts/gates-msg-header.mjs
+  EXPECT: message-header gates OK
+  EVIDENCE: met — the check script printed its success marker; the unit suite
+    exercises the same functions. Full evidence lives in the machine-local
+    .unlazy/ (gitignored).
+
+- [x] G3: the `failed` and `help` messages begin with the same header + body
+      shape, the status marker moved after the body
   CHECK: node test/unit.mjs
   EXPECT: checks passed
-  EVIDENCE: met — "cleanupPrompt fills the live values into the template",
-    "keepSessionsForRuns resolves run ids to session names", "cleanupRunInFlight
-    sees a marked run and clears when it ends", "maybeAutoCleanup gates on
-    threshold, in-flight and cooldown".
+  EVIDENCE: met — same unit suite as G1 (270 checks), the failed/help strings
+    are built from the same `reportHeader` helper as `doneText`. Full evidence
+    lives in the machine-local .unlazy/ (gitignored).
 
-- [x] G3: the cleanup agent starts through the ordinary run path with the
-      configured harness/provider/model, a memory-aware prompt, and no flows;
-      a second start is refused while one is in flight
+- [x] G4: no message-text regression in the e2e suite
   CHECK: node test/e2e.mjs
   EXPECT: checks passed
-  EVIDENCE: met — 244 e2e checks green, incl. "the cleanup settings save stores
-    agent + switch + numbers", "the cleanup agent starts through the ordinary
-    run path" (claude, no flows, target in the prompt, cleanup_run event) and
-    "a second start is refused while one is in flight".
-
-- [x] G4: the sessions page and the sidebar render the free-memory controls,
-      and the sidebar one works after a live re-render
-  CHECK: node test/browser.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — 55 browser checks green, incl. the A12 group: the sidebar
-    button and the Sessions box render, the sidebar one reveals the target
-    field, starts the agent (toast → run → cleanup_run event), refuses a
-    second start with a reason, and the Sessions box starts one with a keep
-    list.
-
-- [x] G5: the agent's helper script is syntactically sound, protects running
-      runs and a --keep list, and kills nothing in plan mode
-  CHECK: bash -n bin/cc-session-cleanup && node test/e2e.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — `bash -n` clean; e2e "the agent helper script protects and
-    kills nothing in plan mode" green (real tmux: candidates marked kill,
-    killed=0 without --kill, a --keep session marked protect). On this
-    machine the script also marks the currently running run's session as
-    protect.
-
-- [x] G6: the i18n key sets stay identical across all three language files
-  CHECK: node test/unit.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — the i18n group enforces identical key sets and placeholder
-    sets; 35 new cleanup/sidebar/sessions keys in all of en/de/zh, the suite
-    is green.
-
-- [x] G7: no machine-specific value in the committed state
-  CHECK: bash pruefe-vor-push.sh
-  EXPECT: OK: no forbidden patterns in the committed state.
-  EVIDENCE: met — the hook printed the OK line on the committed state (the
-    Telegram URL travels as `{sessions_url}`, filled from CCHUB_PUBLIC_URL at
-    start time).
+  EVIDENCE: met — the e2e suite passed 244 checks, including the message-text
+    paths and the sandbox teardown (hardenened against a detached flow
+    command racing the cleanup). Full evidence lives in the machine-local
+    .unlazy/ (gitignored).
