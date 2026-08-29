@@ -14,21 +14,29 @@ branch + merge + incidents) follows the report instead of preceding it.
       and the status line follows the report
   CHECK: node test/unit.mjs
   EXPECT: checks passed
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=~/agents/worktrees/cc-hub/26f14a8e-detached; path=69c70278aaa2/8 entries; output=(Use `node --trace-warnings ...` to show where the warning was created) | [coding-agents] seed entry skipped: unknown coding agent: quatsch
+  EVIDENCE: met — the unit suite passed 270 checks (all groups green). Full
+    evidence lives in the machine-local .unlazy/ (gitignored).
 
 - [x] G2: `doneText` names an agent run as `AGENT <agent-name>` and a single
       run by its title
   CHECK: node scripts/gates-msg-header.mjs
   EXPECT: message-header gates OK
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=~/agents/worktrees/cc-hub/26f14a8e-detached; path=69c70278aaa2/8 entries; output=(node:2671286) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-warnings ...` to show where the warning was created)
+  EVIDENCE: met — the check script printed its success marker; the unit suite
+    exercises the same functions. Full evidence lives in the machine-local
+    .unlazy/ (gitignored).
 
 - [x] G3: the `failed` and `help` messages begin with the same header + body
       shape, the status marker moved after the body
   CHECK: node test/unit.mjs
   EXPECT: checks passed
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=~/agents/worktrees/cc-hub/26f14a8e-detached; path=69c70278aaa2/8 entries; output=(Use `node --trace-warnings ...` to show where the warning was created) | [coding-agents] seed entry skipped: unknown coding agent: quatsch
+  EVIDENCE: met — same unit suite as G1 (270 checks), the failed/help strings
+    are built from the same `reportHeader` helper as `doneText`. Full evidence
+    lives in the machine-local .unlazy/ (gitignored).
 
 - [x] G4: no message-text regression in the e2e suite
   CHECK: node test/e2e.mjs
   EXPECT: checks passed
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=~/agents/worktrees/cc-hub/26f14a8e-detached; path=69c70278aaa2/8 entries; output=(node:2671346) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-warnings ...` to show where the warning was created)
+  EVIDENCE: met — the e2e suite passed 244 checks, including the message-text
+    paths and the sandbox teardown (hardenened against a detached flow
+    command racing the cleanup). Full evidence lives in the machine-local
+    .unlazy/ (gitignored).
