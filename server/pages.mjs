@@ -32,7 +32,7 @@ import { TYP_TEXT } from './detect.mjs'
 import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
 import { resumeCommand } from './integrate.mjs'
-import { listSessions, sessionMemory, sessionKeepHours, currentKeepMs, paneAlive } from './sessions.mjs'
+import { listSessions, sessionMemory, sessionKeepHours, currentKeepMs, paneAlive, archiveSessionKeepHours } from './sessions.mjs'
 import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
 import { flowRunKeepDays } from './flows/db.mjs'
 // The flow block of the detail page is rendered in server/flows/ and belongs to
@@ -1491,6 +1491,10 @@ export async function pageSettings(req, res, url) {
       <span class="dim">${e(t('settings.cursor_included_hint'))}</span></label>
     <label>${e(t('settings.session_keep'))} <input name="session_keep_hours" type="number" min="0" step="0.5" value="${e(String(sessionKeepHours(s)))}">
       <span class="dim">${e(t('settings.session_keep_hint'))}</span></label>
+    <label>${e(t('settings.archive_session'))} <select name="archive_session_on"><option value="1" ${(s.archive_session_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.archive_session_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select>
+      <span class="dim">${e(t('settings.archive_session_hint'))}</span></label>
+    <label>${e(t('settings.archive_session_keep'))} <input name="archive_session_keep_hours" type="number" min="0" step="0.5" value="${e(String(archiveSessionKeepHours(s)))}">
+      <span class="dim">${e(t('settings.archive_session_keep_hint'))}</span></label>
     <label>${e(t('settings.flow_runs_keep'))} <input name="flow_runs_keep_days" type="number" min="0" step="1" value="${e(String(flowRunKeepDays(s)))}">
       <span class="dim">${e(t('settings.flow_runs_keep_hint'))}</span></label>
     <label>${e(t('settings.prompt_suffix'))} <textarea name="prompt_suffix" rows="12">${e(s.prompt_suffix ?? '')}</textarea></label>
@@ -2123,7 +2127,7 @@ export async function repoSave(req, res, url, formBody) {
 const SETTINGS_KEYS = ['pipeline_on', 'telegram_token', 'telegram_chat',
   'claude_gate_on', 'claude_gate_5h', 'claude_gate_7d', 'claude_gate_fable',
   'openrouter_gate_on', 'openrouter_min_eur', 'deepseek_gate_on', 'deepseek_min_usd',
-  'abo_price', 'cursor_included_usd', 'session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
+  'abo_price', 'cursor_included_usd', 'session_keep_hours', 'archive_session_on', 'archive_session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
   'llm_check_on', 'llm_check_model', 'llm_check_or_provider',
   'llm_title_on', 'llm_title_model', 'llm_title_or_provider',
   'llm_extras_on', 'llm_extras_model', 'llm_extras_or_provider', 'ui_language']

@@ -2921,6 +2921,30 @@ try {
     gleich(se.sessionKeepHours({ session_keep_hours: '1.5' }), 1.5, 'the form gets hours back')
   })
 
+  await pruefe('the archive-session rule: on by default with keep 0, switchable off', () => {
+    gleich(se.archiveSessionKeepMs({}), 0, 'default: close right away')
+    gleich(se.archiveSessionKeepMs({ archive_session_keep_hours: '2' }), 2 * 3600_000, 'hours')
+    gleich(se.archiveSessionKeepMs({ archive_session_keep_hours: '0.5' }), 1800_000, 'half hours are allowed')
+    gleich(se.archiveSessionKeepMs({ archive_session_on: '0' }), null, 'switched off: no archive rule')
+    gleich(se.archiveSessionKeepMs({ archive_session_on: '0', archive_session_keep_hours: '2' }), null, 'off wins over hours')
+    gleich(se.archiveSessionKeepMs({ archive_session_on: '', archive_session_keep_hours: '2' }), null, 'empty is not "1" either')
+    gleich(se.archiveSessionKeepHours({ archive_session_keep_hours: '1.5' }), 1.5, 'the form gets hours back')
+    gleich(se.archiveSessionKeepHours({ archive_session_on: '0', archive_session_keep_hours: '1.5' }), 1.5,
+      'the hours survive a switch-off — an off switch must not clear the field')
+  })
+
+  await pruefe('an archived run is closed once its keep time after the archive has passed', () => {
+    const jetzt = 1_000_000_000_000   // = 2001-09-09 01:46:40 UTC
+    const run = { archived_at: '2001-09-09 01:46:40' }   // exactly `jetzt` in DB form
+    wahr(se.shouldCloseArchived(run, 0, jetzt), 'keep 0 closes right away')
+    falsch(se.shouldCloseArchived(run, 3600_000, jetzt), 'keep 1 h: just archived, stays')
+    const alt = { archived_at: '2001-09-09 00:46:40' }   // one hour earlier
+    wahr(se.shouldCloseArchived(alt, 3600_000, jetzt), 'an hour later the same keep closes it')
+    gleich(se.shouldCloseArchived(run, null, jetzt), false, 'off never closes by archive')
+    gleich(se.shouldCloseArchived({ ...run, archived_at: null }, 0, jetzt), false, 'not archived: nothing to close')
+    gleich(se.shouldCloseArchived({ archived_at: 'kaputt' }, 0, jetzt), false, 'an unparsable timestamp closes nothing')
+  })
+
   await pruefe('only a finished session is closed automatically', () => {
     const jetzt = 1_000_000_000
     const lebt = { dead: false, deadMs: null }
