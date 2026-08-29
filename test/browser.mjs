@@ -22,7 +22,7 @@
 //   node test/browser.mjs            headless
 //   node test/browser.mjs --sichtbar with a visible window (debugging)
 //   node test/browser.mjs --keep     keep the sandbox
-import { gruppe, pruefe, uebersprungen, gleich, wahr, falsch, enthaelt, bericht, zaehler } from './mini.mjs'
+import { gruppe, pruefe, uebersprungen, gleich, wahr, falsch, enthaelt, warteAuf, bericht, zaehler } from './mini.mjs'
 import { neuerSandkasten } from './sandkasten.mjs'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -1228,6 +1228,80 @@ try {
     await p.click('#extras-start')
     await wartePage(p, () => !document.getElementById('extras-error').hidden, null, 'the hub answer')
     enthaelt(await p.textContent('#extras-error'), '/gibt/es/nicht', 'the path is named')
+    sauber(p)
+    await p.close()
+  })
+
+  gruppe('A12 — the tmux-cleanup triggers')
+  let CL_ERSTER = ''
+  await pruefe('the sidebar and the Sessions page offer the configured cleanup agent', async () => {
+    // The sidebar's tmux block measures the real tmux server — give it one
+    // session so there is something to show, and register it for the cleanup.
+    const { execFile } = await import('node:child_process')
+    await new Promise((r) => execFile('tmux', ['new-session', '-d', '-s', 'cc-browser-mem', 'sleep 300'], () => r()))
+    sk.sessions.add('cc-browser-mem')
+    await formular('/settings/cleanup', {
+      harness: 'claude', cleanup_on: '1', cleanup_threshold_gb: '1', cleanup_target_gb: '0.5',
+      cleanup_cooldown_min: '5',
+    }, { alsBrowser: true })
+    const p = await neueSeite('/')
+    await wartePage(p, () => !!document.querySelector('.mem-free-open'), null, 'the small sidebar free-memory button')
+    const p2 = await neueSeite('/sessions')
+    await wartePage(p2, () => !!document.getElementById('cleanup-free'), null, 'the prominent Sessions box')
+    enthaelt(await p2.textContent('#cleanup-free'), 'Free memory', 'its button')
+    sauber(p); sauber(p2)
+    await p.close(); await p2.close()
+  })
+  await pruefe('the sidebar button reveals the target field and starts the agent', async () => {
+    const p = await neueSeite('/')
+    // An earlier test may have folded the sidebar away (the choice is persisted in
+    // localStorage) — the button lives inside the folded-away body.
+    await p.evaluate(() => { try { localStorage.setItem('cchub.sidebar.open', '1') } catch (err) { /* private mode */ } })
+    await p.reload()
+    await wartePage(p, () => !!document.querySelector('.mem-free-open') &&
+      getComputedStyle(document.querySelector('.mem-free-open')).display !== 'none', null, 'the small sidebar free-memory button')
+    await p.click('.mem-free-open')
+    gleich(await p.$eval('.mem-free-form', f => f.hidden), false, 'the target field appears')
+    await p.fill('.mem-free-form input[name=target]', '0.5')
+    await p.click('.mem-free-form button[type=submit]')
+    await wartePage(p, () => !!document.querySelector('.toast a'), null, 'the toast with a link to the run')
+    const href = await p.$eval('.toast a', a => a.getAttribute('href'))
+    CL_ERSTER = href.split('/').pop()
+    await warteAuf(async () => !!(db.prepare('SELECT tmux_session FROM runs WHERE id=?').get(CL_ERSTER)?.tmux_session),
+      { was: 'the cleanup run to get its session', timeoutMs: 10_000 })
+    const s = db.prepare('SELECT tmux_session FROM runs WHERE id=?').get(CL_ERSTER).tmux_session
+    sk.sessions.add(s)
+    gleich(db.prepare('SELECT kind FROM events WHERE run_id=? AND kind=?').get(CL_ERSTER, 'cleanup_run')?.kind,
+      'cleanup_run', 'marked as a cleanup run')
+    // The second attempt while one is running shows the reason, not a second run —
+    // the form is still open from the first click.
+    const vorher = db.prepare(`SELECT count(*) c FROM runs WHERE status IN ('running','waiting_help')`).get().c
+    await p.fill('.mem-free-form input[name=target]', '0.5')
+    await p.click('.mem-free-form button[type=submit]')
+    await wartePage(p, () => !!document.querySelector('.toast.err'), null, 'the error toast')
+    gleich(db.prepare(`SELECT count(*) c FROM runs WHERE status IN ('running','waiting_help')`).get().c, vorher,
+      'no second run')
+    sauber(p)
+    await p.close()
+  })
+  await pruefe('the Sessions box starts the agent with a keep list', async () => {
+    // End the first run so a new one may start.
+    await melden(CL_ERSTER, 'done', 'freed some GB.')
+    const p = await neueSeite('/sessions')
+    await wartePage(p, () => !!document.getElementById('cleanup-free'), null, 'the prominent Sessions box')
+    await p.fill('#cleanup-free input[name=target]', '0.5')
+    await p.fill('#cleanup-free input[name=keep]', CL_ERSTER)
+    await p.click('#cleanup-free button[type=submit]')
+    await wartePage(p, () => !!document.querySelector('.toast a'), null, 'the toast with a link to the new run')
+    const href = await p.$eval('.toast a', a => a.getAttribute('href'))
+    const id = href.split('/').pop()
+    await warteAuf(async () => !!(db.prepare('SELECT tmux_session FROM runs WHERE id=?').get(id)?.tmux_session),
+      { was: 'the kept cleanup run to get its session', timeoutMs: 10_000 })
+    sk.sessions.add(db.prepare('SELECT tmux_session FROM runs WHERE id=?').get(id).tmux_session)
+    const prompt = db.prepare('SELECT prompt FROM runs WHERE id=?').get(id).prompt
+    enthaelt(prompt, 'Diese Sessions bleiben auf jeden Fall erhalten', 'the keep line is present')
+    enthaelt(prompt, db.prepare('SELECT tmux_session FROM runs WHERE id=?').get(CL_ERSTER).tmux_session,
+      'naming the kept run\'s session')
     sauber(p)
     await p.close()
   })

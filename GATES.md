@@ -1,56 +1,76 @@
-# Gates: archived runs' tmux sessions are closed (configurable)
+# Gates: the tmux-cleanup agent, selectable setup, sidebar and Sessions triggers
 
-OWNS: server/sessions.mjs, server/web.mjs, server/watcher.mjs, server/pages.mjs,
-lang/en.json, lang/de.json, lang/zh.json, test/unit.mjs, test/e2e.mjs, AGENTS.md,
-GATES.md, PLAN.md
+OWNS: server/cleanup.mjs, server/pages.mjs, server/web.mjs, server/watcher.mjs,
+server/run-def.mjs, bin/cc-session-cleanup, setup/02-install-scripts.sh,
+public/hub.js, public/hub.css, lang/en.json, lang/de.json, lang/zh.json,
+test/unit.mjs, test/e2e.mjs, test/browser.mjs, GATES.md, PLAN.md
 
-Scope: Archiving a finished run closes its tmux session. The whole rule can be
-switched off in settings, or given a keep time in hours (default 0 = close right
-away). Pure logic in server/sessions.mjs, immediate close in the archive route,
-a watcher pass for keep > 0, i18n keys in all three languages, tests, AGENTS.md.
+Scope: A reusable agent+provider+model selection (a styling option on the
+existing `runSetupFields()` element), a configurable tmux-cleanup agent that
+frees memory down to a target GB by ending the oldest inactive tmux sessions,
+an on/off switch plus a threshold in Settings, an unobtrusive "free memory"
+button in the sidebar's tmux block and a prominent box on the Sessions page
+with an optional keep-runs field, a helper script for the agent, and a
+Telegram report line. Machine-specific values (URLs, paths) stay out of the
+committed state.
 
-- [x] G1: the pure session functions decide correctly
+- [x] G1: the reusable setup element gains a pure styling option; existing
+      callers stay byte-for-byte identical
   CHECK: node test/unit.mjs
   EXPECT: checks passed
-  EVIDENCE: met — the unit suite passed 262 checks, incl. the
-    "archive-session rule: on by default with keep 0, switchable off" and
-    "an archived run is closed once its keep time after the archive has passed"
-    groups. Full evidence lives in the machine-local .unlazy/ (gitignored).
+  EVIDENCE: met — 270 unit checks green, incl. "runSetupFields: the styling
+    option wraps, the default stays untouched" (no wrapper without the option,
+    a wrapping fieldset with it, same harness select inside).
 
-- [x] G2: archiving closes the session right away by default (e2e)
-  CHECK: node test/e2e.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — the e2e suite passed 235 checks, incl.
-    "archiving closes the tmux session right away by default": after the archive
-    click the session answers `has-session` with failure, the run record carries
-    `tmux_closed_at` and a `tmux_closed` event.
-
-- [x] G3: a switched-off rule keeps the session, a keep time defers the close (e2e)
-  CHECK: node test/e2e.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — the same suite passed "a switched-off archive rule keeps the
-    session" (archive_session_on=0: session survives, tmux_closed_at stays null)
-    and "a keep time defers the close to the watcher pass"
-    (archive_session_keep_hours=2: session survives the archive, is closed by
-    the watcher after archived_at moves three hours into the past).
-
-- [x] G4: the i18n key sets stay identical across all three language files
+- [x] G2: the cleanup planning logic decides correctly: oldest-inactive first,
+      protected sessions never chosen, target reached
   CHECK: node test/unit.mjs
   EXPECT: checks passed
-  EVIDENCE: met — the unit suite enforces identical key sets and non-empty
-    values; the four new `settings.archive_session*` keys exist in en, de and
-    zh, and the unit suite passed (see G1).
+  EVIDENCE: met — "cleanupPrompt fills the live values into the template",
+    "keepSessionsForRuns resolves run ids to session names", "cleanupRunInFlight
+    sees a marked run and clears when it ends", "maybeAutoCleanup gates on
+    threshold, in-flight and cooldown".
 
-- [x] G5: the settings page offers both new fields
+- [x] G3: the cleanup agent starts through the ordinary run path with the
+      configured harness/provider/model, a memory-aware prompt, and no flows;
+      a second start is refused while one is in flight
   CHECK: node test/e2e.mjs
   EXPECT: checks passed
-  EVIDENCE: met — the e2e suite passed "the archive-session rule is
-    configurable on the settings page" (`name="archive_session_on"` and
-    `name="archive_session_keep_hours"` are rendered), and POST /settings/save
-    accepts both keys (SETTINGS_KEYS allowlist).
+  EVIDENCE: met — 244 e2e checks green, incl. "the cleanup settings save stores
+    agent + switch + numbers", "the cleanup agent starts through the ordinary
+    run path" (claude, no flows, target in the prompt, cleanup_run event) and
+    "a second start is refused while one is in flight".
 
-- [x] G6: no machine-specific value in the committed state — the pre-push
-  check's own scan of HEAD finds nothing
+- [x] G4: the sessions page and the sidebar render the free-memory controls,
+      and the sidebar one works after a live re-render
+  CHECK: node test/browser.mjs
+  EXPECT: checks passed
+  EVIDENCE: met — 55 browser checks green, incl. the A12 group: the sidebar
+    button and the Sessions box render, the sidebar one reveals the target
+    field, starts the agent (toast → run → cleanup_run event), refuses a
+    second start with a reason, and the Sessions box starts one with a keep
+    list.
+
+- [x] G5: the agent's helper script is syntactically sound, protects running
+      runs and a --keep list, and kills nothing in plan mode
+  CHECK: bash -n bin/cc-session-cleanup && node test/e2e.mjs
+  EXPECT: checks passed
+  EVIDENCE: met — `bash -n` clean; e2e "the agent helper script protects and
+    kills nothing in plan mode" green (real tmux: candidates marked kill,
+    killed=0 without --kill, a --keep session marked protect). On this
+    machine the script also marks the currently running run's session as
+    protect.
+
+- [x] G6: the i18n key sets stay identical across all three language files
+  CHECK: node test/unit.mjs
+  EXPECT: checks passed
+  EVIDENCE: met — the i18n group enforces identical key sets and placeholder
+    sets; 35 new cleanup/sidebar/sessions keys in all of en/de/zh, the suite
+    is green.
+
+- [x] G7: no machine-specific value in the committed state
   CHECK: bash pruefe-vor-push.sh
   EXPECT: OK: no forbidden patterns in the committed state.
-  EVIDENCE: met — the hook printed the OK line on the committed state.
+  EVIDENCE: met — the hook printed the OK line on the committed state (the
+    Telegram URL travels as `{sessions_url}`, filled from CCHUB_PUBLIC_URL at
+    start time).
