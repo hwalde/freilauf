@@ -1010,6 +1010,7 @@ export async function pageRun(req, res, url, id) {
   const inFlight = ['running', 'waiting_help'].includes(run.status)
   const body = `
   ${runDetailHead(run, { title: titel })}
+  ${runPromptCard(run)}
   ${runChips(run, repo, herkunft)}
   ${runEditCard(run)}
   ${integrationSection(run, repo)}
@@ -1065,6 +1066,24 @@ export async function pageRun(req, res, url, id) {
 export function terminalState(live, sessionOpen, inFlight) {
   if (live) return t(inFlight ? 'run.terminal_live' : 'run.terminal_after')
   return t(sessionOpen ? 'run.terminal_dead' : 'run.terminal_closed')
+}
+
+/**
+ * The run's prompt, folded away near the top of the detail page.
+ *
+ * Its own block rather than a chip: the prompt IS the run — everything else on
+ * the page answers "what became of it". A <details> keeps a long prompt from
+ * dominating the page until it is asked for, and the block deliberately does
+ * NOT live in the run-detail fragment: the prompt does not change while a run
+ * works, and the fragment swap would close the block under whoever is reading
+ * it on every event. Same rule as the goal card, which is page-only for the
+ * same reason.
+ */
+export function runPromptCard(run) {
+  const text = String(run.prompt ?? '').trim()
+  if (!text) return ''
+  return `<details class="run-prompt" id="run-prompt"><summary>${e(t('run.prompt'))}</summary>
+    <pre>${e(text)}</pre></details>`
 }
 
 /**

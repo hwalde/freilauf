@@ -164,6 +164,7 @@
   "run.archive_hint": "An archived run is hidden from the overview but stays fully readable here.",
   "run.archived_since": "archived {ts}",
   "run.report": "Report",
+  "run.prompt": "Prompt",
   "run.metrics": "Metrics",
   "run.runtime": "Runtime",
   "run.tokens": "Tokens",

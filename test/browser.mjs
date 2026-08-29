@@ -1069,6 +1069,27 @@ try {
     await p.close()
   })
 
+  // ------------------------------------------------------------------ A16
+  gruppe('A16 — the collapsible prompt on the detail page')
+
+  await pruefe('the prompt block sits between title and chips, folded away, and unfolds', async () => {
+    const p = await neueSeite(`/runs/${R_LIVE}`)
+    const karte = await p.$('#run-prompt')
+    wahr(!!karte, 'the prompt block exists')
+    gleich(await p.$eval('#run-prompt', el => el.open), false, 'collapsed by default')
+    // Position: after the title, before the fact chips — "weit oben".
+    const oben = await p.evaluate(() => {
+      const reihe = [...document.querySelectorAll('#run-head, #run-prompt, ul.chips')]
+      return reihe.map(el => el.id || 'chips').join(',')
+    })
+    gleich(oben, 'run-head,run-prompt,chips', 'title → prompt → chips')
+    enthaelt(await p.textContent('#run-prompt pre'), 'Browser-Lauf laeuft', 'the prompt text is inside')
+    await p.click('#run-prompt summary')
+    gleich(await p.$eval('#run-prompt', el => el.open), true, 'and unfolds on the summary click')
+    sauber(p)
+    await p.close()
+  })
+
   // ------------------------------------------------------------------ A14
   gruppe('A14 — the terminal')
 

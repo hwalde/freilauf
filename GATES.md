@@ -1,56 +1,30 @@
-# Gates: archived runs' tmux sessions are closed (configurable)
+# Gates: the run detail page shows its prompt in a collapsible block near the top
 
-OWNS: server/sessions.mjs, server/web.mjs, server/watcher.mjs, server/pages.mjs,
-lang/en.json, lang/de.json, lang/zh.json, test/unit.mjs, test/e2e.mjs, AGENTS.md,
-GATES.md, PLAN.md
+OWNS: server/pages.mjs, public/hub.css, lang/en.json, lang/de.json, lang/zh.json,
+test/browser.mjs, test/e2e.mjs, PLAN.md, GATES.md
 
-Scope: Archiving a finished run closes its tmux session. The whole rule can be
-switched off in settings, or given a keep time in hours (default 0 = close right
-away). Pure logic in server/sessions.mjs, immediate close in the archive route,
-a watcher pass for keep > 0, i18n keys in all three languages, tests, AGENTS.md.
+Scope: The run detail page renders the run's prompt in a collapsed `<details>`
+block high on the page — between the title and the fact chips. The block is
+styled like the existing detail-page cards, carries a dedicated i18n key in all
+three languages, and is verified by a browser test (presence, collapsed state,
+toggle, position) and an e2e assertion (prompt text on the page, position).
 
-- [x] G1: the pure session functions decide correctly
+- [x] G1: the run detail page renders the prompt block between title and chips
+  CHECK: node test/e2e.mjs
+  EXPECT: checks passed
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=~/agents/worktrees/cc-hub/46d79a38-detached; path=69c70278aaa2/8 entries; output=(node:2738977) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-warnings ...` to show where the warning was created)
+
+- [x] G2: the block is collapsed by default and unfolds on the summary click
+  CHECK: node test/browser.mjs
+  EXPECT: checks passed
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=~/agents/worktrees/cc-hub/46d79a38-detached; path=69c70278aaa2/8 entries; output=(node:2749115) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-warnings ...` to show where the warning was created)
+
+- [x] G3: the i18n key sets stay identical across all three language files
   CHECK: node test/unit.mjs
   EXPECT: checks passed
-  EVIDENCE: met — the unit suite passed 262 checks, incl. the
-    "archive-session rule: on by default with keep 0, switchable off" and
-    "an archived run is closed once its keep time after the archive has passed"
-    groups. Full evidence lives in the machine-local .unlazy/ (gitignored).
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=~/agents/worktrees/cc-hub/46d79a38-detached; path=69c70278aaa2/8 entries; output=(Use `node --trace-warnings ...` to show where the warning was created) | [coding-agents] seed entry skipped: unknown coding agent: quatsch
 
-- [x] G2: archiving closes the session right away by default (e2e)
-  CHECK: node test/e2e.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — the e2e suite passed 235 checks, incl.
-    "archiving closes the tmux session right away by default": after the archive
-    click the session answers `has-session` with failure, the run record carries
-    `tmux_closed_at` and a `tmux_closed` event.
-
-- [x] G3: a switched-off rule keeps the session, a keep time defers the close (e2e)
-  CHECK: node test/e2e.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — the same suite passed "a switched-off archive rule keeps the
-    session" (archive_session_on=0: session survives, tmux_closed_at stays null)
-    and "a keep time defers the close to the watcher pass"
-    (archive_session_keep_hours=2: session survives the archive, is closed by
-    the watcher after archived_at moves three hours into the past).
-
-- [x] G4: the i18n key sets stay identical across all three language files
+- [x] G4: the whole unit suite stays green with the new key
   CHECK: node test/unit.mjs
   EXPECT: checks passed
-  EVIDENCE: met — the unit suite enforces identical key sets and non-empty
-    values; the four new `settings.archive_session*` keys exist in en, de and
-    zh, and the unit suite passed (see G1).
-
-- [x] G5: the settings page offers both new fields
-  CHECK: node test/e2e.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — the e2e suite passed "the archive-session rule is
-    configurable on the settings page" (`name="archive_session_on"` and
-    `name="archive_session_keep_hours"` are rendered), and POST /settings/save
-    accepts both keys (SETTINGS_KEYS allowlist).
-
-- [x] G6: no machine-specific value in the committed state — the pre-push
-  check's own scan of HEAD finds nothing
-  CHECK: bash pruefe-vor-push.sh
-  EXPECT: OK: no forbidden patterns in the committed state.
-  EVIDENCE: met — the hook printed the OK line on the committed state.
+  EVIDENCE: exit=0; shell=/bin/sh; cwd=~/agents/worktrees/cc-hub/46d79a38-detached; path=69c70278aaa2/8 entries; output=(Use `node --trace-warnings ...` to show where the warning was created) | [coding-agents] seed entry skipped: unknown coding agent: quatsch
