@@ -53,7 +53,8 @@
 //      async without dragging four call sites with it. So the refresh is
 //      async and the READ is not: `refreshClaudeLimits()` fills a module-level
 //      cache, `claudeLimits()` hands out what is in it while it is fresh.
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 
 // Both read at CALL time, not at module load: the suites point them at a stub
@@ -92,6 +93,89 @@ const round1 = (v) => {
 const isoTime = (v) => {
   const ms = Date.parse(v)
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null
+}
+
+// ---------------- the per-model windows are REMEMBERED ----------------
+//
+// WHY. The account does not report a per-model week the way it reports the other
+// two. `limits[]` carries the scoped entry while the account has one to report;
+// when it does not — and equally when the endpoint answers 429, or the token has
+// expired, or the TTL simply ran out — the live side hands over no scoped window
+// at all. quota.mjs then fell back to `~/.claude/quota.json`, whose
+// `seven_day_fable` is written by that other project's script and by nobody
+// else: measured 2026-08-29, 80 % with a `fetched_at` 45 hours old while the
+// account had said 88 % minutes before. So the bar JUMPED — 88, 80, 88, 80 —
+// with every gap in the live answer, and the number it jumped to was the older
+// of the two.
+//
+// A weekly window is not a live measurement one can re-take at will: it belongs
+// to a period, and between two live answers the best knowledge about it is the
+// last live answer. So the scoped windows are kept — per label, with the time
+// they were read — and quota.mjs merges by that time (see `mergeScoped` there),
+// newest reading winning. The bar then stands still instead of falling back to
+// something older than what it already showed.
+//
+// On disk, because this hub deploys often and a restart would otherwise drop
+// straight back to the two-day-old file value. Own file, never quota.json —
+// rule 1 above stands. The path is derived rather than imported from db.mjs:
+// db.mjs imports the harness registry, which imports this module.
+const MEMORY_PATH = () => process.env.CCHUB_CLAUDE_WINDOWS_JSON
+  ?? join(process.env.CCHUB_DATA_DIR ?? join(homedir(), '.local', 'share', 'cc-hub'),
+    'claude-windows.json')
+
+// How long a remembered window counts for when it carries no reset time of its
+// own. With one, that time decides: knowledge from before a window rolled over
+// is worthless, and a memory that could never expire would keep the budget gate
+// deferring runs against a quota that has long since been refilled.
+const MEMORY_TTL_MS = Number(process.env.CCHUB_CLAUDE_WINDOW_MEMORY_MS ?? 24 * 3600_000)
+
+let memory = null   // label → { label, pct, resets_at, at }
+
+function loadMemory() {
+  if (memory) return memory
+  memory = new Map()
+  try {
+    const raw = JSON.parse(readFileSync(MEMORY_PATH(), 'utf8'))
+    for (const w of Array.isArray(raw?.weekly_scoped) ? raw.weekly_scoped : []) {
+      const pct = round1(w?.pct)
+      const at = Number(w?.at)
+      if (!w?.label || pct === null || !Number.isFinite(at)) continue
+      memory.set(String(w.label), { label: String(w.label), pct, resets_at: isoTime(w?.resets_at), at })
+    }
+  } catch { /* no memory yet, a broken file, no read access — all the same */ }
+  return memory
+}
+
+/** Keep what a live answer said about the per-model weeks. Never throws. */
+function rememberScoped(list, at) {
+  const mem = loadMemory()
+  let changed = false
+  for (const w of list ?? []) {
+    const prev = mem.get(w.label)
+    if (prev && prev.at >= at) continue
+    mem.set(w.label, { label: w.label, pct: w.pct, resets_at: w.resets_at ?? null, at })
+    changed = true
+  }
+  if (!changed) return
+  try {
+    mkdirSync(dirname(MEMORY_PATH()), { recursive: true })
+    writeFileSync(MEMORY_PATH(), JSON.stringify({ weekly_scoped: [...mem.values()] }))
+  } catch { /* a panel is not worth an exception on the refresh path */ }
+}
+
+/**
+ * The last live reading of every per-model week that has not rolled over yet,
+ * each with the time it was read. quota.mjs treats these as one more source with
+ * a date on it — older than a live answer, newer than a file written days ago.
+ */
+export function rememberedScoped(now = Date.now()) {
+  const out = []
+  for (const w of loadMemory().values()) {
+    const reset = Date.parse(w.resets_at)
+    if (Number.isFinite(reset) ? reset <= now : now - w.at >= MEMORY_TTL_MS) continue
+    out.push({ ...w })
+  }
+  return out
 }
 
 /**
@@ -168,7 +252,11 @@ export async function refreshClaudeLimits({ force = false } = {}) {
       })
       if (!res.ok) return null
       const parsed = parseLimits(await res.json())
-      if (parsed) cache = { at: Date.now(), value: parsed }
+      if (parsed) {
+        const at = Date.now()
+        cache = { at, value: parsed }
+        rememberScoped(parsed.weekly_scoped, at)
+      }
       return parsed
     } catch { return null }   // network, timeout, parse — all the same answer
   })()
@@ -191,11 +279,19 @@ export function claudeLimits() {
   return cache.value
 }
 
-/** Test hook: drop the cache (and any in-flight request's claim on it). */
-export function _claudeLimitsReset() { cache = { at: 0, value: null }; inflight = null }
+/** Test hook: drop the cache, the remembered windows and any in-flight claim. */
+export function _claudeLimitsReset() {
+  cache = { at: 0, value: null }
+  inflight = null
+  memory = new Map()
+  try { writeFileSync(MEMORY_PATH(), JSON.stringify({ weekly_scoped: [] })) } catch { /* nothing to clear */ }
+}
 
-/** Test hook: plant a snapshot without a network round trip. */
-export function _claudeLimitsSet(value, at = Date.now()) { cache = { at, value } }
+/** Test hook: plant a snapshot without a network round trip — remembered like a real one. */
+export function _claudeLimitsSet(value, at = Date.now()) {
+  cache = { at, value }
+  if (value) rememberScoped(value.weekly_scoped, at)
+}
 
 /** Test hook: exposed so the parser can be tested against a recorded response. */
 export { parseLimits as _parseLimits }

@@ -54,6 +54,7 @@
   "usage.title": "订阅用量",
   "usage.unavailable": "无法获取用量",
   "usage.resets": "重置于 {time}",
+  "usage.as_of": "数据截至 {time}",
   "usage.resets_in": "{days} 天后重置",
   "usage.spent": "已用 {usd} $，共含 {included} $ 额度",
   "usage.spent_est": "已用 {usd} $，共含约 {included} $ 额度（配置的备用值）",

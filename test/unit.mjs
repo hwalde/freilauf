@@ -521,6 +521,66 @@ try {
     cu._claudeLimitsReset()
   })
 
+  // The bar jumped: 88 from the account, 80 out of the file, 88, 80 — because
+  // the file's per-model window is written by another project's script on its
+  // own occasions (measured 2026-08-29: `fetched_at` 45 hours behind the
+  // five_hour block right next to it) and it won every gap in the live answer.
+  const inTwoDays = () => new Date(Date.now() + 2 * 86_400_000).toISOString()
+  const liveWithFable = (pct) => ({
+    five: 18, resets_at: null, seven_general: 60, seven_resets_at: null,
+    weekly_scoped: [{ label: 'Fable', pct, resets_at: inTwoDays() }],
+  })
+  const liveWithoutFable = { five: 18, resets_at: null, seven_general: 60, seven_resets_at: null, weekly_scoped: [] }
+  const fileWithFable = (pct, ageHours) => JSON.stringify({
+    five_hour: { used_percentage: 18 }, seven_day: { used_percentage: 10 },
+    seven_day_fable: { used_percentage: pct, fetched_at: Math.floor(Date.now() / 1000) - ageHours * 3600 },
+  })
+
+  await pruefe('a per-model week the account stops reporting keeps its last live value', async () => {
+    const { claudeQuota } = await quotaMit(fileWithFable(80, 45), 12)
+    cu._claudeLimitsReset()
+    cu._claudeLimitsSet(liveWithFable(88))
+    gleich(claudeQuota().seven_fable, 88, 'the account answered')
+    // No scoped window in the answer at all: a 429, an expired token, or simply
+    // a moment at which the account reports none.
+    cu._claudeLimitsSet(liveWithoutFable)
+    const q = claudeQuota()
+    gleich(q.seven_fable, 88, 'the bar stands still instead of dropping to the 45-hour-old 80 %')
+    gleich(q.seven, 88, 'and the gate keeps reading the higher window')
+    gleich(q.weekly_scoped[0].stale, true, 'it is marked as not-current, so the panel can say when it was read')
+    cu._claudeLimitsReset()
+  })
+
+  await pruefe('the newer reading wins — the file too, when it is the newer one', async () => {
+    const { claudeQuota } = await quotaMit(fileWithFable(92, 0), 13)
+    cu._claudeLimitsReset()
+    cu._claudeLimitsSet(liveWithFable(88), Date.now() - 3 * 3600_000)   // remembered, three hours old
+    gleich(claudeQuota().seven_fable, 92, 'a file written just now beats a live reading from this morning')
+    cu._claudeLimitsReset()
+  })
+
+  await pruefe('a remembered window is forgotten once it has rolled over', async () => {
+    const { claudeQuota } = await quotaMit(fileWithFable(80, 45), 14)
+    cu._claudeLimitsReset()
+    cu._claudeLimitsSet({
+      ...liveWithoutFable,
+      weekly_scoped: [{ label: 'Fable', pct: 88, resets_at: new Date(Date.now() - 3600_000).toISOString() }],
+    }, Date.now() - 2 * 3600_000)
+    gleich(claudeQuota().seven_fable, 80, 'knowledge from before the reset is worthless, not conservative')
+    cu._claudeLimitsReset()
+  })
+
+  await pruefe('the remembered windows survive a restart', async () => {
+    cu._claudeLimitsReset()
+    cu._claudeLimitsSet(liveWithFable(88))
+    // A second instance of the module is a restarted hub: nothing in memory, and
+    // the file it wrote is all there is.
+    const restarted = await import('../server/claude-usage.mjs?restart=1')
+    gleich(restarted.rememberedScoped().find(w => w.label === 'Fable')?.pct, 88,
+      'the account’s last answer outlives the process')
+    cu._claudeLimitsReset()
+  })
+
   await pruefe('without a credentials file nothing is fetched and nothing throws', async () => {
     const before = process.env.CCHUB_CLAUDE_CREDENTIALS
     process.env.CCHUB_CLAUDE_CREDENTIALS = join(sandkasten, 'no-such-credentials.json')

@@ -558,13 +558,24 @@ export async function usagePanel() {
   if (!usage.length && !balances.length) return ''
   // A reset within the next day is a time, everything beyond it needs the date
   // too — '16:30' alone says nothing about a window that runs for a week.
+  const hhmm = (d) => `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
+  const ddmm = (d) => `${String(d.getUTCDate()).padStart(2, '0')}.${String(d.getUTCMonth() + 1).padStart(2, '0')}.`
   const resetText = (iso) => {
     const ms = Date.parse(iso)
     if (!Number.isFinite(ms)) return ''
     const d = new Date(ms)
-    const uhr = `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
-    const tag = `${String(d.getUTCDate()).padStart(2, '0')}.${String(d.getUTCMonth() + 1).padStart(2, '0')}.`
-    return (ms - Date.now() > 24 * 3600_000 ? `${tag} ` : '') + `${uhr} UTC`
+    return (ms - Date.now() > 24 * 3600_000 ? `${ddmm(d)} ` : '') + `${hhmm(d)} UTC`
+  }
+  // When a window was READ, for a reading that is not the current one. Same idea
+  // in the other direction: a time alone is a lie about a value taken two days
+  // ago, so anything but today carries its date.
+  const stampText = (ms) => {
+    if (!Number.isFinite(ms) || ms <= 0) return ''
+    const d = new Date(ms)
+    const today = new Date()
+    const sameDay = d.getUTCFullYear() === today.getUTCFullYear()
+      && d.getUTCMonth() === today.getUTCMonth() && d.getUTCDate() === today.getUTCDate()
+    return (sameDay ? '' : `${ddmm(d)} `) + `${hhmm(d)} UTC`
   }
   const rows = usage.map(u => {
     if (!u.ok) return `<div class="usage-row"><b>${e(u.label)}</b> <span class="dim">${e(t('usage.unavailable'))}</span></div>`
@@ -579,9 +590,22 @@ export async function usagePanel() {
       // names ('Fable'), not as one hardcoded field: the account decides how
       // many there are and what they are called, and the day a second one
       // appears it belongs in the panel without a code change.
-      const fenster = (label, pct, iso) => pct == null ? ''
-        : quotaBar(pct, { label, note: iso ? t('usage.resets', { time: resetText(iso) }) : '' })
-      const scoped = (d.weekly_scoped ?? []).map(w => fenster(`7d ${w.label}`, w.pct, w.resets_at)).join('')
+      //
+      // A per-model window may be the LAST live reading rather than the current
+      // one (quota.mjs merges the sources by age; the account reports the scoped
+      // window only sometimes). The bar then keeps standing where it stood — but
+      // it says when it was read, because a number that looks current and is two
+      // days old is exactly the failure this module was rebuilt over.
+      const fenster = (label, pct, iso, stampMs = null) => {
+        if (pct == null) return ''
+        const note = [
+          iso ? t('usage.resets', { time: resetText(iso) }) : '',
+          stampMs ? t('usage.as_of', { time: stampText(stampMs) }) : '',
+        ].filter(Boolean).join(' · ')
+        return quotaBar(pct, { label, note })
+      }
+      const scoped = (d.weekly_scoped ?? [])
+        .map(w => fenster(`7d ${w.label}`, w.pct, w.resets_at, w.stale ? w.at : null)).join('')
       return `<div class="usage-row"><b>${e(u.label)}</b>${d.plan ? ` <span class="dim">${e(d.plan)}</span>` : ''}
         ${fenster('5h', d.five, d.resets_at)}
         ${fenster('7d', d.seven_general, d.seven_resets_at)}
