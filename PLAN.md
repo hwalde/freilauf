@@ -46,4 +46,8 @@ Root: run detail page shows the prompt in a collapsible block near the top
 - [x] 2026-08-29: implemented (runPromptCard in pages.mjs, placement in pageRun,
       i18n run.prompt en/de/zh, details.run-prompt in hub.css); unit 262, e2e 236,
       browser 53, proxy 4, deploy 9 all green; GATES.md all four met via the
-      checker with machine-local evidence
+      checker with machine-free evidence; committed
+- [x] 2026-08-29: merged origin/main (report-header run a27e6f9) — only
+      PLAN.md/GATES.md conflicted (both are per-run ledgers, kept mine); after
+      the merge unit 270, browser 56, e2e 245 all green; GATES.md evidence
+      rewritten machine-free, pre-push check OK
