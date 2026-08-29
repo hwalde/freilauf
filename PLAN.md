@@ -1,52 +1,64 @@
-# PLAN — carry the weekly "daily" collapse to main with a clean GATES.md (tree 3)
+# PLAN — tmux sessions of archived runs are closed (configurable, default immediately) (tree 3)
 
 ## Goal
 
-Run fbb33d06 implemented the "weekly schedule covering all seven weekdays
-reads 'daily'" feature and committed it (e9c3bd5), but the push to main was
-blocked: the committed GATES.md carried machine-specific evidence
-(`/home/...` paths, the machine's login name), which `pruefe-vor-push.sh`
-correctly refuses. The feature never reached main; it lives on the backup
-branch `run/fbb33d06`.
+Today, archiving a run (`runs.archived_at`) leaves its tmux session standing;
+the session is only closed by the ordinary retention (`session_keep_hours`,
+counting from the run's end). The operator's gesture "put this finished work
+away" should also close the session it left behind — by default right away.
 
-This run carries that feature onto current main, with a GATES.md whose
-evidence is machine-free (the full evidence stays in the gitignored
-`.unlazy/`), and lets the hub's integrator merge it.
+New rule: **archiving a finished run closes its tmux session.** Two settings
+control it, both under Settings → Sessions:
+
+- `archive_session_on` (0/1, default on) — the whole rule can be switched off;
+  an archived session then follows the ordinary retention like any other.
+- `archive_session_keep_hours` (default 0) — how long after archiving the
+  session may stay. 0 = close right away, the default.
+
+Enforcement on two paths: the archive route closes immediately when the keep
+time is 0; a watcher pass closes archived runs' sessions once `archived_at +
+keep` has passed — which also catches runs archived before this feature existed.
 
 ## Depth tree
 
 ```
-Root: the weekly one-liner collapse lands on main, GATES.md clean of private values
-├── 1  Server: scheduleText() in server/util.mjs decides the collapse
-│    └── 1.1  all 7 weekdays selected AND schedule_weeks <= 1 →
-│              t('sched.daily_line', { time }) instead of the weekly_line
-├── 2  i18n: one new key in all three language files
-│    └── 2.1  lang/en.json + lang/de.json + lang/zh.json: sched.daily_line
-│              ("daily at {time}" / "täglich um {time}" / "每天 {time}")
-├── 3  Tests: the collapse, the multi-week exception, the unchanged partial
-│         selection (test/unit.mjs)
-└── 4  Clean merge surface
-     └── 4.1  GATES.md evidence without machine paths — a pre-push hook that
-               refuses /home/... must stay quiet (pruefe-vor-push.sh)
-     └── 4.2  the hub's integrator merges; origin/main carries the feature
+Root: archiving a run closes its tmux session (default immediately, configurable off/delay)
+├── 1  Settings surface
+│    └── 1.1  archive_session_on switch + archive_session_keep_hours input
+│         └── 1.1.1  SETTINGS_KEYS allowlist + settings form + i18n (en/de/zh)
+├── 2  Decision logic, pure (server/sessions.mjs)
+│    └── 2.1  archiveSessionKeepMs / archiveSessionKeepHours / shouldCloseArchived
+│         └── 2.1.1  counts from archived_at; null when the rule is off
+├── 3  Enforcement
+│    ├── 3.1  archive route (web.mjs): keep == 0 → killSessions() right away
+│    └── 3.2  watcher pass closeArchivedSessions(): close once archived_at + keep passed
+│         └── 3.2.1  also covers runs archived before the feature, and keep > 0
+└── 4  Tests + docs
+     ├── 4.1  unit: archiveSessionKeepMs/Hours, shouldCloseArchived (test/unit.mjs)
+     ├── 4.2  e2e: default closes, off keeps, delay defers then closes (test/e2e.mjs)
+     └── 4.3  AGENTS.md documents the rule
 ```
 
 ## Decisions
 
-- **Reuse the feature commit's content, not its GATES.md.** The code, i18n and
-  test changes from e9c3bd5 apply cleanly to current main (verified with
-  `git apply --check`); the GATES.md of that commit is exactly the problem, so
-  it is replaced by one whose evidence is machine-free.
-- **The evidence must never contain the working directory.** The gate checker
-  records `cwd=/home/...` by default; for the pushed ledger the evidence states
-  only the outcome. This is the repo's own precedent (commit 4680116 "GATES:
-  strip machine-specific evidence before pushing").
-- **Do not push to main by hand.** The hub integrates on `cc-report done`; the
-  pushed tree is the same, so the pre-push hook is checked against the local
-  committed state before reporting.
+- **Separate on/off switch and keep time.** The task asks for both "disabled in
+  settings" and "how long archived sessions stay". One key each, following the
+  existing pattern (`pipeline_on`, `session_keep_hours`).
+- **Count from `archived_at`, not from the run's end.** The gesture is "I put it
+  into the archive" — the clock starts there. The ordinary retention already
+  counts from the run's end; this is a second, stricter rule on top.
+- **Immediate close in the archive route.** "0 = sofort löschen" means the
+  click closes the session, not the next watcher tick. The watcher pass is the
+  net under it (keep > 0, a run archived while the hub was down, tmux hiccups).
+- **`killSessions([name], 'archive')`** so an already-gone session is a no-op
+  and the run record is reconciled exactly like the sessions page does it.
+- **The default is ON with keep 0** — that is the "always deleted" the task
+  demands; the settings are the exceptions, not the rule.
 
 ## Status log
 
 - [x] 2026-08-29: plan written
-- [x] 2026-08-29: feature applied, gates verified (unit 260, browser 52, e2e 231),
-      pre-push hook OK on the committed state, committed; report done sent
+- [x] 2026-08-29: implemented (sessions.mjs pure logic, archive route, watcher
+      pass, settings form + SETTINGS_KEYS, i18n en/de/zh, AGENTS.md);
+      unit 262, e2e 235, browser 52, proxy 4, deploy 9 all green;
+      GATES.md all six met with machine-free evidence; committed

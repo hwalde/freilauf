@@ -361,6 +361,20 @@ newest-archived first with pagination (50 per page,
 `archived_at` — the watcher, the flows and the incidents keep their view of a
 run whether it is archived or not.
 
+**Archiving also closes the run's tmux session** — the gesture is "put this
+finished work away", and the screen it left standing goes with it. Default:
+right away (Settings → Sessions → `archive_session_keep_hours`, `0` = at the
+click). Two settings, two exceptions: `archive_session_on` switches the whole
+rule off (an archived session then follows the ordinary retention like any
+other), and `archive_session_keep_hours` gives the session a grace period
+counting from `archived_at`. The close happens on two paths so a session is
+never missed: the archive route kills a keep-0 session at the click
+(`killSessions`, the same reconciliation the sessions page uses), and the
+watcher pass `closeArchivedSessions()` closes whatever still owes one — a run
+with a keep > 0, one archived while the hub was down, one from before the rule
+existed. A restored run does not get its session back; a session is not
+recreated.
+
 ### A run is not set in stone: duration while it runs, prompt and repo before it starts
 
 Three things about an existing run can be changed, and the rule behind all
