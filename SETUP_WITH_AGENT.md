@@ -206,7 +206,7 @@ tooling. The seams that were designed to be pulled on:
 | give agents an opt-in capability | drop a folder with a `SKILL.md` into `~/agents/zusaetze/` — it appears as a checkbox in the run forms. Deliberately *not* `.claude/skills`, so nothing loads automatically |
 | do something after a run finishes or a merge lands | **no-code flows** — a graphical designer, no code needed: message running agents, start follow-up runs and wait, extract data from a report via LLM, branch, loop, Telegram, HTTP, shell command → [`server/flows/AGENTS.md`](server/flows/AGENTS.md) |
 | change when a run is allowed to start | Settings → **Budget gates** (optional per provider), else `repos.max_parallel` — `server/scheduler.mjs`; a deferred run can be started anyway from its detail page |
-| change a run that is not over | the "Edit this run" card on its detail page: the expected duration of a running run, plus the prompt and the repo of one that has not started yet — `server/run-edit.mjs` decides what a status allows |
+| change a run that is not over | the "Edit this run" card on its detail page: the expected duration of a running run, plus the prompt, the repo, the branch rule and — for a planned run — its start time of one that has not started yet — `server/run-edit.mjs` decides what a status allows |
 | add a UI language | a new `lang/<code>.json` with the same keys, plus the language list — see `server/i18n.mjs` |
 
 If your change is generally useful, **please open a pull request** — new harness

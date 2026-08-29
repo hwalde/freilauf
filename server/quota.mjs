@@ -238,6 +238,25 @@ export function sevenForRun(run, quota = claudeQuota()) {
   return sevenFor(quota, run?.harness === 'claude' ? run?.model ?? null : null)
 }
 
+/**
+ * The window that is at 100 % and would bind a run on `model` — the 5-hour
+ * window first (every claude run draws from the same one), else the fullest
+ * 7-day window that concerns the model. Returns `{ label, pct, resets_at }` or
+ * null when nothing that binds the run is full. `label` uses the usage panel's
+ * own words ('5h', '7d', '7d Fable'), so the anomaly names the same window the
+ * panel shows.
+ */
+export function quotaFullWindow(quota = claudeQuota(), model = null) {
+  if ((quota?.five ?? 0) >= 100) {
+    return { label: '5h', pct: quota.five, resets_at: quota.resets_at ?? null }
+  }
+  const w = weeklyBinding(quota, model)
+  if (w && w.pct >= 100) {
+    return { label: w.label ? `7d ${w.label}` : '7d', pct: w.pct, resets_at: w.resets_at ?? null }
+  }
+  return null
+}
+
 let creditsCache = { at: 0, value: null }
 
 /**
