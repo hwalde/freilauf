@@ -604,6 +604,12 @@ header select:hover { background: rgba(255, 255, 255, .14); }
    needed its own version of this line. One rule for all of them. */
 label[hidden] { display: none; }
 
+/* ---- loading spinner (the worktree-extras dialog) ---------------------- */
+.spinner { display: inline-block; width: 1em; height: 1em; vertical-align: -0.15em;
+  border: 2px solid var(--border-ghost); border-top-color: var(--accent-act-hover);
+  border-radius: 50%; animation: cc-spin .8s linear infinite; }
+@keyframes cc-spin { to { transform: rotate(360deg); } }
+
 /* ---- Quick Run: the button in the header and its dialog ----
    Reachable from every page, because the moment one wants to send a task off is
    rarely the moment one is standing on the run form. */

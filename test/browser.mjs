@@ -1199,6 +1199,38 @@ try {
     sauber(p)
     await p.close()
   })
+
+  gruppe('A11 — the worktree-extras dialog')
+  await pruefe('it opens and the client refuses an empty path', async () => {
+    const p = await neueSeite('/repos/edit')
+    gleich(await p.$eval('#extras-dialog', d => d.open), false, 'closed to begin with')
+    await p.click('#extras-find')
+    gleich(await p.$eval('#extras-dialog', d => d.open), true, 'open')
+    gleich(await p.textContent('#extras-path'), '—', 'no path entered yet')
+    gleich(await p.$eval('#extras-error', e => e.hidden), true, 'no error to begin with')
+    await p.click('#extras-start')
+    await wartePage(p, () => !document.getElementById('extras-error').hidden, null, 'the empty-path error')
+    enthaelt(await p.textContent('#extras-error'), 'path', 'it says what is missing')
+    // Cancel closes it again.
+    await p.click('#extras-dialog [data-extras-close]')
+    gleich(await p.$eval('#extras-dialog', d => d.open), false, 'closed by cancel')
+    sauber(p)
+    await p.close()
+  })
+  await pruefe('the algorithmic errors from the hub land in the dialog, and the path is shown', async () => {
+    const p = await neueSeite(`/repos/edit?id=${repoId}`)
+    enthaelt(await p.textContent('#extras-dialog'), 'completely replaces', 'the warning that existing extras are not kept')
+    // Overwrite the stored path while the dialog is still closed — a modal
+    // blocks the page behind it, so filling must happen before it opens.
+    await p.fill('input[name=path]', '/gibt/es/nicht')
+    await p.click('#extras-find')
+    gleich(await p.textContent('#extras-path'), '/gibt/es/nicht', 'the dialog shows the path')
+    await p.click('#extras-start')
+    await wartePage(p, () => !document.getElementById('extras-error').hidden, null, 'the hub answer')
+    enthaelt(await p.textContent('#extras-error'), '/gibt/es/nicht', 'the path is named')
+    sauber(p)
+    await p.close()
+  })
 } catch (err) {
   console.log(`\nAborted: ${err.stack}`)
   zaehler.fehler.push({ name: 'Test run', grund: err.message })
