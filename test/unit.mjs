@@ -2562,6 +2562,40 @@ try {
       rmSync(repo, { recursive: true, force: true })
     }
   })
+  await pruefe('a model that finds nothing is a success with [], not an error', async () => {
+    // The repo above is gone; a fresh one. The model answers with an empty list —
+    // which is a valid result: the form gets `[]` like any other answer, and the
+    // dialog closes. "The model suggested nothing usable" is not an error state.
+    const repo = join(sandkasten, 'extras-leer-repo')
+    mkdirSync(repo, { recursive: true })
+    writeFileSync(join(repo, 'README.md'), '# x\n')
+    const git = (a) => execFileSync('git', ['-C', repo, ...a], { stdio: ['ignore', 'pipe', 'ignore'] })
+    git(['init', '-q', '-b', 'main'])
+    git(['config', 'user.email', 'u@t'])
+    git(['config', 'user.name', 'U'])
+    git(['add', '-A'])
+    git(['commit', '-qm', 'init'])
+
+    const echt = globalThis.fetch
+    const key = process.env.OPENROUTER_API_KEY
+    const basis = process.env.CCHUB_OPENROUTER_BASE
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify({ extras: [] }) } }] }),
+    })
+    try {
+      process.env.OPENROUTER_API_KEY = 'k'
+      process.env.CCHUB_OPENROUTER_BASE = 'http://stub'
+      const r = await ex.suggestExtras(repo)
+      wahr(r.ok, `ok — an empty answer is an answer (${r.error ?? ''})`)
+      gleich(JSON.stringify(r.extras), '[]', 'and the field gets exactly that')
+    } finally {
+      globalThis.fetch = echt
+      if (key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = key
+      if (basis === undefined) delete process.env.CCHUB_OPENROUTER_BASE; else process.env.CCHUB_OPENROUTER_BASE = basis
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
 
   // ------------------------------------------------------------------
   gruppe('Planned start of a single run (run-def.mjs)')

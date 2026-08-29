@@ -254,7 +254,6 @@
   "repos.extras_http": "OpenRouter answered HTTP {code}.",
   "repos.extras_net": "OpenRouter unreachable: {err}",
   "repos.extras_parse": "The model answered something that is not JSON.",
-  "repos.extras_none": "The model suggested nothing usable.",
   "js.extras_done": "Worktree extras: {n}",
   "js.extras_no_path": "Enter the path first.",
   "repos.prompt": "Repo prompt",

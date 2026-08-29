@@ -254,7 +254,6 @@
   "repos.extras_http": "OpenRouter antwortete HTTP {code}.",
   "repos.extras_net": "OpenRouter nicht erreichbar: {err}",
   "repos.extras_parse": "Die Antwort des Modells ist kein JSON.",
-  "repos.extras_none": "Das Modell hat nichts Brauchbares vorgeschlagen.",
   "js.extras_done": "Worktree-Ergänzungen: {n}",
   "js.extras_no_path": "Bitte zuerst den Pfad eingeben.",
   "repos.prompt": "Repo-Prompt",

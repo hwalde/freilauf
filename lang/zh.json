@@ -254,7 +254,6 @@
   "repos.extras_http": "OpenRouter 返回 HTTP {code}。",
   "repos.extras_net": "OpenRouter 不可达：{err}",
   "repos.extras_parse": "模型回答的不是 JSON。",
-  "repos.extras_none": "模型没有提出可用的建议。",
   "js.extras_done": "Worktree 附加项：{n}",
   "js.extras_no_path": "请先输入路径。",
   "repos.prompt": "仓库提示词",
