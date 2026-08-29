@@ -866,6 +866,41 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // The budget gate reads the quota file live (server/quota.mjs), so the whole
+  // path — form, startRun, gate, deferral — can be driven by rewriting the
+  // fixture. Which is the point of testing it here rather than only in the unit
+  // suite: the gate has to receive the run's MODEL, and that hand-over crosses
+  // four modules.
+  gruppe('Budget gate: a full per-model week defers that model, not every model')
+
+  const quotaDatei = join(SB, 'quota.json')
+  const quotaSchreiben = (fable, general = 10) => writeFileSync(quotaDatei, JSON.stringify({
+    five_hour: { used_percentage: 1, resets_at: 1800000000 },
+    seven_day: { used_percentage: general },
+    seven_day_fable: { used_percentage: fable },
+  }))
+
+  await pruefe('the fable week at 99 % defers a fable run', async () => {
+    quotaSchreiben(99)
+    const j = await laufStarten({ repo_id: repoId, model: 'claude-fable-5', prompt: 'E2E-Quota-Fable' })
+    wahr(!!j.runId, `run created (${JSON.stringify(j)})`)
+    wahr(j.deferred, 'deferred instead of started')
+    gleich(lauf(j.runId).status, 'deferred', 'status')
+    const ev = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='deferred'`).get(j.runId)
+    enthaelt(ev?.payload ?? '', 'Fable', 'the reason names the window that blocks')
+    // Away before the watcher's next pass picks it back up with a fresh fixture.
+    await formular(`/api/runs/${j.runId}/kill`, {})
+  })
+
+  await pruefe('…and the same week lets every other model through', async () => {
+    const j = await laufStarten({ repo_id: repoId, model: 'claude-sonnet-5', prompt: 'E2E-Quota-Sonnet' })
+    wahr(!!j.runId && !j.deferred, `run started (${JSON.stringify(j)})`)
+    gleich(lauf(j.runId).status, 'running', 'a window it does not draw from blocks nothing')
+    await sessionMerken(j.runId)
+    quotaSchreiben(0, 0)   // back to the sandbox fixture
+  })
+
+  // ------------------------------------------------------------------
   // The goal is the one definition field that does NOT travel in the prompt
   // file: `/goal <condition>` exists only inside the session, so the hub types
   // it in after the start. Which means it can also fail to arrive — hence a
