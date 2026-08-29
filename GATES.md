@@ -12,19 +12,27 @@ toggle, position) and an e2e assertion (prompt text on the page, position).
 - [x] G1: the run detail page renders the prompt block between title and chips
   CHECK: node test/e2e.mjs
   EXPECT: checks passed
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=~/agents/worktrees/cc-hub/46d79a38-detached; path=69c70278aaa2/8 entries; output=(node:2738977) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-warnings ...` to show where the warning was created)
+  EVIDENCE: met — the e2e suite passed 245 checks, incl. "the detail page shows
+    the prompt in a collapsible block near the top": the page carries
+    `id="run-prompt"`, the run's prompt text, and the three markers in order
+    title → prompt → chips. Full evidence lives in the machine-local .unlazy/
+    (gitignored).
 
 - [x] G2: the block is collapsed by default and unfolds on the summary click
   CHECK: node test/browser.mjs
   EXPECT: checks passed
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=~/agents/worktrees/cc-hub/46d79a38-detached; path=69c70278aaa2/8 entries; output=(node:2749115) ExperimentalWarning: SQLite is an experimental feature and might change at any time | (Use `node --trace-warnings ...` to show where the warning was created)
+  EVIDENCE: met — the browser suite passed 56 checks, incl. "the prompt block
+    sits between title and chips, folded away, and unfolds": `#run-prompt` is
+    closed at page load, stands between `#run-head` and `ul.chips`, carries the
+    prompt text, and opens on the summary click.
 
 - [x] G3: the i18n key sets stay identical across all three language files
   CHECK: node test/unit.mjs
   EXPECT: checks passed
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=~/agents/worktrees/cc-hub/46d79a38-detached; path=69c70278aaa2/8 entries; output=(Use `node --trace-warnings ...` to show where the warning was created) | [coding-agents] seed entry skipped: unknown coding agent: quatsch
+  EVIDENCE: met — the unit suite passed 270 checks, incl. the key-set test; the
+    new `run.prompt` key exists in en, de and zh with non-empty values.
 
 - [x] G4: the whole unit suite stays green with the new key
   CHECK: node test/unit.mjs
   EXPECT: checks passed
-  EVIDENCE: exit=0; shell=/bin/sh; cwd=~/agents/worktrees/cc-hub/46d79a38-detached; path=69c70278aaa2/8 entries; output=(Use `node --trace-warnings ...` to show where the warning was created) | [coding-agents] seed entry skipped: unknown coding agent: quatsch
+  EVIDENCE: met — the same 270-check run covers this gate (see G3).
