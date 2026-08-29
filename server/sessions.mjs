@@ -171,6 +171,46 @@ export function sessionKeepHours(settings = {}) {
   return Math.round(sessionKeepMs(settings) / 3_600_000 * 10) / 10
 }
 
+/**
+ * How long a session of an ARCHIVED run may stay open after the archive. The
+ * setting is in hours (0 = close right away, the default); the whole rule is
+ * off when `archive_session_on` is not '1'. Returns null when off — such a
+ * session then follows the ordinary retention like any other finished one.
+ */
+export function archiveSessionKeepMs(settings = {}) {
+  if (String(settings.archive_session_on ?? '1') !== '1') return null
+  const hours = settings.archive_session_keep_hours
+  if (hours != null && String(hours).trim() !== '') {
+    const n = Number(hours)
+    if (Number.isFinite(n) && n >= 0) return n * 3_600_000
+  }
+  return 0
+}
+
+/** Hours, for the settings form — the value survives a switch-off, so it is not lost. */
+export function archiveSessionKeepHours(settings = {}) {
+  const hours = settings.archive_session_keep_hours
+  if (hours != null && String(hours).trim() !== '') {
+    const n = Number(hours)
+    if (Number.isFinite(n) && n >= 0) return n
+  }
+  return 0
+}
+
+/**
+ * Is this ARCHIVED run's session over its keep time? `keepMs` comes from
+ * archiveSessionKeepMs() and is null when the rule is off.
+ */
+export function shouldCloseArchived(run, keepMs, nowMs = Date.now()) {
+  if (keepMs == null || !run?.archived_at) return false
+  const archivedMs = parseDbUtc(run.archived_at)
+  if (!Number.isFinite(archivedMs)) return false
+  return nowMs - archivedMs >= keepMs
+}
+
+/** The archive keep time in force right now (watcher and archive route read the same value). */
+export function currentArchiveKeepMs() { return archiveSessionKeepMs(allSettings()) }
+
 /** Is this session over its keep time? */
 export function shouldAutoClose(session, run, keepMs, nowMs = Date.now()) {
   const finished = finishedAtMs(session, run)

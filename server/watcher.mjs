@@ -4,7 +4,7 @@
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import db, { getRepo, addEvent } from './db.mjs'
+import db, { getRepo, addEvent, allSettings } from './db.mjs'
 import { RUNS_DIR, sh } from './util.mjs'
 import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd } from './reports.mjs'
 import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
@@ -17,7 +17,7 @@ import { pruefeTreffer, pruefLlmAktiv } from './pruefer.mjs'
 import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
 import { flowsTick } from './flows/triggers.mjs'
-import { reconcileClosedSession, tmuxSessionMap, shouldAutoClose, currentKeepMs } from './sessions.mjs'
+import { reconcileClosedSession, tmuxSessionMap, shouldAutoClose, currentKeepMs, shouldCloseArchived, archiveSessionKeepMs } from './sessions.mjs'
 import { integrateTick, pushOperatorBase, integratorTimerOff, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 import { maybeAutoCleanup } from './cleanup.mjs'
 
@@ -91,6 +91,7 @@ export async function tick() {
     try { await pushOperatorBase() } catch (e) { console.error('[integrate]', e.message) }
   }
   await closeOldSessions()
+  await closeArchivedSessions()
   await cleanupWorktrees()
   // No-code flows: run_finished backstop, delays, cron (server/flows/triggers.mjs).
   try { await flowsTick() } catch (e) { console.error('[flows]', e.message) }
@@ -630,6 +631,33 @@ async function closeOldSessions() {
     await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
     reconcileClosedSession(run.id, 'retention')
     addEvent(run.id, 'tmux_closed', { reason: 'retention' })
+  }
+}
+
+/**
+ * Close sessions of ARCHIVED runs. Archiving is the operator's "put this
+ * finished work away", so the session it left standing goes with it — by
+ * default right away (keep 0). The archive route closes a keep-0 session at
+ * the click; this pass is the net under it and the only path for a configured
+ * delay (keep > 0) — and it catches runs archived before the rule existed,
+ * whose archived_at is already in the past. Switched off (archive_session_on
+ * != 1) the pass does nothing: such a session follows the ordinary retention.
+ */
+async function closeArchivedSessions() {
+  const rows = db.prepare(`SELECT * FROM runs WHERE archived_at IS NOT NULL
+                           AND tmux_session IS NOT NULL AND tmux_closed_at IS NULL`).all()
+  if (!rows.length) return
+  const keepMs = archiveSessionKeepMs(allSettings())
+  if (keepMs == null) return
+  const live = await tmuxSessionMap()
+  const now = Date.now()
+  for (const run of rows) {
+    const session = live.get(run.tmux_session)
+    if (!session) { reconcileClosedSession(run.id, 'watcher'); continue }   // no longer exists
+    if (!shouldCloseArchived(run, keepMs, now)) continue
+    await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
+    reconcileClosedSession(run.id, 'archive')
+    addEvent(run.id, 'tmux_closed', { reason: 'archive' })
   }
 }
 

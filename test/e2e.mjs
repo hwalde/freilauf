@@ -1300,6 +1300,12 @@ try {
       const { sessionKeepMs } = await import('../server/sessions.mjs')
       gleich(sessionKeepMs({ session_keep_hours: '0.5' }), 1800_000, 'half an hour')
     })
+    await pruefe('the archive-session rule is configurable on the settings page', async () => {
+      const html = await (await hol('/settings')).text()
+      for (const feld of ['name="archive_session_on"', 'name="archive_session_keep_hours"']) {
+        enthaelt(html, feld, `field ${feld}`)
+      }
+    })
     await pruefe('the worktree-extras LLM is configured on the settings page', async () => {
       const html = await (await hol('/settings')).text()
       for (const feld of ['name="llm_extras_on"', 'name="llm_extras_model"', 'name="llm_extras_or_provider"']) {
@@ -1850,6 +1856,62 @@ try {
     gleich(lauf(j.runId).archived_at, null, 'nothing archived')
     // Clean up: the run must not linger for the watcher's sake.
     db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+  })
+  await pruefe('archiving closes the tmux session right away by default', async () => {
+    // The rule exists to make archiving mean what the operator's gesture says:
+    // "this finished work is put away". Its session goes with it — keep 0.
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Archiv-session' })
+    const sess = await sessionMerken(j.runId)
+    wahr(sess, 'a session stands')
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+    const r = await formular(`/api/runs/${j.runId}/archive`, {})
+    gleich(r.status, 200, 'archived')
+    gleich(lauf(j.runId).archived_at !== null, true, 'archived')
+    gleich((await sh('tmux', ['has-session', '-t', `=${sess}`])).ok, false, 'the session is gone')
+    gleich(lauf(j.runId).tmux_closed_at !== null, true, 'the run record knows the session closed')
+    wahr(ereignisse(j.runId).includes('tmux_closed'), `event recorded (has: ${ereignisse(j.runId).join(', ')})`)
+    sessions.delete(sess)   // already gone — do not let the cleanup expect it alive
+    db.prepare('DELETE FROM runs WHERE id=?').run(j.runId)   // keep the pagination count stable
+  })
+  await pruefe('a switched-off archive rule keeps the session', async () => {
+    db.prepare(`INSERT INTO settings(key,value) VALUES('archive_session_on','0')
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run()
+    try {
+      const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Archiv-aus' })
+      const sess = await sessionMerken(j.runId)
+      wahr(sess, 'a session stands')
+      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+      await formular(`/api/runs/${j.runId}/archive`, {})
+      gleich(lauf(j.runId).archived_at !== null, true, 'archived')
+      gleich((await sh('tmux', ['has-session', '-t', `=${sess}`])).ok, true, 'the session survives — the rule is off')
+      gleich(lauf(j.runId).tmux_closed_at, null, 'and the record still expects it open')
+      // The ordinary retention cleans it up later; leave that to the sandbox cleanup.
+      db.prepare('DELETE FROM runs WHERE id=?').run(j.runId)   // keep the pagination count stable
+    } finally {
+      db.prepare(`DELETE FROM settings WHERE key='archive_session_on'`).run()
+    }
+  })
+  await pruefe('a keep time defers the close to the watcher pass', async () => {
+    db.prepare(`INSERT INTO settings(key,value) VALUES('archive_session_keep_hours','2')
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run()
+    try {
+      const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Archiv-keep' })
+      const sess = await sessionMerken(j.runId)
+      wahr(sess, 'a session stands')
+      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+      await formular(`/api/runs/${j.runId}/archive`, {})
+      gleich(lauf(j.runId).archived_at !== null, true, 'archived')
+      gleich((await sh('tmux', ['has-session', '-t', `=${sess}`])).ok, true, 'inside the keep window: still there')
+      // Two hours pass, and the watcher closes what the archive left standing.
+      db.prepare(`UPDATE runs SET archived_at=datetime('now','-3 hours') WHERE id=?`).run(j.runId)
+      await watcherTick()
+      gleich((await sh('tmux', ['has-session', '-t', `=${sess}`])).ok, false, 'after the keep time the session is gone')
+      gleich(lauf(j.runId).tmux_closed_at !== null, true, 'the record agrees')
+      sessions.delete(sess)
+      db.prepare('DELETE FROM runs WHERE id=?').run(j.runId)   // keep the pagination count stable
+    } finally {
+      db.prepare(`DELETE FROM settings WHERE key='archive_session_keep_hours'`).run()
+    }
   })
   await pruefe('the archive is paginated', async () => {
     // 55 archived runs → 2 pages of 50. Inserted directly: only the archive page

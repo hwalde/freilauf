@@ -2,7 +2,7 @@
 import { readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import db, { getRepo, getRun, setSetting, addEvent, announceRun } from './db.mjs'
+import db, { getRepo, getRun, setSetting, addEvent, announceRun, allSettings } from './db.mjs'
 import { handleReport } from './reports.mjs'
 import { modelList, orEndpoints, standVon, effortOptionen } from './models.mjs'
 import { providersForHarness, listCodingAgents } from './coding-agents.mjs'
@@ -355,6 +355,17 @@ async function api(req, res, url) {
     }
     db.prepare(`UPDATE runs SET archived_at=COALESCE(archived_at, datetime('now')) WHERE id=?`).run(run.id)
     announceRun(run.id, 'archived')
+    // Archiving is the operator's "put this finished work away" — the session
+    // it left standing goes with it, by default right away (keep 0). A configured
+    // delay or a switched-off rule leaves it to the watcher (closeArchivedSessions).
+    // killSessions reconciles the record exactly like the sessions page does.
+    if (run.tmux_session) {
+      const { archiveSessionKeepMs, killSessions } = await import('./sessions.mjs')
+      if (archiveSessionKeepMs(allSettings()) === 0) {
+        try { await killSessions([run.tmux_session], 'archive') }
+        catch (err) { console.error('[archive]', err.message) }
+      }
+    }
     const b = await form(req)
     return answer(req, res, 200, { ok: true, archived: true }, b.back || `/runs/${run.id}`)
   }
