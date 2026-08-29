@@ -86,8 +86,11 @@ export function neuerSandkasten({ praefix = 'cc-hub-test-', behalten = false } =
 
     // Quota fixture: otherwise the real ~/.claude/quota.json would decide the budget
     // gates and the suite would be green or red depending on the day.
+    // Both weeks, the way a real account reports them: the general one binds
+    // every run, the per-model one only a run on that model (server/quota.mjs).
     writeFileSync(join(SB, 'quota.json'), JSON.stringify({
-      five_hour: { used_percentage: 1, resets_at: 1800000000 }, seven_day_fable: { used_percentage: 0 },
+      five_hour: { used_percentage: 1, resets_at: 1800000000 },
+      seven_day: { used_percentage: 0 }, seven_day_fable: { used_percentage: 0 },
     }))
 
     await sh('git', ['init', '-q', '--bare', ORIGIN])

@@ -363,6 +363,71 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('Which 7-day window binds: the general one always, a per-model one only for that model')
+
+  // The bug: `seven` was the MAXIMUM of every weekly window, so a Fable week at
+  // 96 % deferred a run on Sonnet — a window that run does not draw from at all.
+  // The general week binds everything; a scoped one binds its own model.
+  const quotaWindows = {
+    five: 3, resets_at: '2026-08-29T12:00:00.000Z',
+    seven: 96, seven_general: 40, seven_resets_at: '2026-08-30T06:00:00.000Z',
+    weekly_scoped: [{ label: 'Fable', pct: 96, resets_at: '2026-08-30T05:00:00.000Z' }],
+  }
+
+  await pruefe('the model identifier decides, in every spelling it comes in', async () => {
+    const { windowAppliesToModel } = await quotaMit('{}', 12)
+    wahr(windowAppliesToModel('Fable', 'fable'), 'the alias')
+    wahr(windowAppliesToModel('Fable', 'claude-fable-5'), 'the full identifier')
+    wahr(windowAppliesToModel('Claude Fable 5', 'fable'), "a label that spells the vendor's name out")
+    falsch(windowAppliesToModel('Fable', 'claude-sonnet-5'), 'a different model')
+    falsch(windowAppliesToModel('Opus', 'claude-fable-5'), 'and the other way round')
+    wahr(windowAppliesToModel('Fable', ''), 'no model at all: conservative, every window binds')
+    wahr(windowAppliesToModel('Fable', null), 'and null is no model either')
+    wahr(windowAppliesToModel('7d', 'claude-sonnet-5'),
+      'a label that names no model cannot be ruled out, so it binds')
+  })
+
+  await pruefe('a full per-model week defers that model and nothing else', async () => {
+    const { claudeGateBlocked, sevenFor } = await quotaMit('{}', 13)
+    gleich(sevenFor(quotaWindows, 'claude-fable-5'), 96, 'the fable run sees its own week')
+    gleich(sevenFor(quotaWindows, 'claude-sonnet-5'), 40, 'the sonnet run sees the general one')
+    wahr(claudeGateBlocked(quotaWindows, 'fable').blocked, 'fable is deferred')
+    falsch(claudeGateBlocked(quotaWindows, 'claude-sonnet-5').blocked, 'sonnet starts')
+    wahr(claudeGateBlocked(quotaWindows).blocked,
+      'without a model every window binds — the run may be on the CLI default')
+  })
+
+  await pruefe('the general week defers every model', async () => {
+    const { claudeGateBlocked } = await quotaMit('{}', 14)
+    const q = { ...quotaWindows, seven: 97, seven_general: 97 }
+    wahr(claudeGateBlocked(q, 'claude-sonnet-5').blocked, 'sonnet')
+    wahr(claudeGateBlocked(q, 'fable').blocked, 'fable')
+  })
+
+  await pruefe('the block names the window and hands out ITS reset time', async () => {
+    const { claudeGateBlocked } = await quotaMit('{}', 15)
+    const g = claudeGateBlocked(quotaWindows, 'fable')
+    wahr(/Fable/.test(g.reason), `the reason names the window: ${g.reason}`)
+    gleich(g.resets_at, '2026-08-30T05:00:00.000Z', "the blocking window's own reset, not the 5-hour one")
+    const f = claudeGateBlocked({ ...quotaWindows, five: 99 }, 'claude-sonnet-5')
+    gleich(f.resets_at, '2026-08-29T12:00:00.000Z', 'a 5-hour block hands out the 5-hour reset')
+  })
+
+  await pruefe('only a claude run is measured against claude windows', async () => {
+    const { sevenForRun } = await quotaMit('{}', 16)
+    gleich(sevenForRun({ harness: 'claude', model: 'claude-sonnet-5' }, quotaWindows), 40, 'claude/sonnet')
+    gleich(sevenForRun({ harness: 'claude', model: 'fable' }, quotaWindows), 96, 'claude/fable')
+    gleich(sevenForRun({ harness: 'hermes', model: 'deepseek/deepseek-v4' }, quotaWindows), 96,
+      'another harness: its model says nothing about these windows, so nothing is filtered out')
+  })
+
+  await pruefe('an object carrying no window list is taken at its word', async () => {
+    const { sevenFor, claudeGateBlocked } = await quotaMit('{}', 17)
+    gleich(sevenFor({ five: 0, seven: 88 }, 'fable'), 88, 'the number it has is the answer')
+    wahr(claudeGateBlocked({ five: 0, seven: 95 }, 'claude-sonnet-5').blocked, 'and it still gates')
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Claude usage: the account answers, the file is the fallback')
 
   // The bug this group was written for: quota.json is maintained by a status

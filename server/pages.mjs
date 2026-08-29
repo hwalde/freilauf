@@ -432,11 +432,13 @@ async function sideRail(repoId) {
     // "Cursor CLI" — two letters that name nothing. The harness id at least
     // reads as itself.
     // The rail is the folded sidebar's whole glance, so its weekly figure is the
-    // BINDING one — `seven`, the highest of the weekly windows — not the general
+    // FULLEST window — `seven`, the highest of the weekly ones — not the general
     // one. They are not the same number: a per-model week at 88 % next to a
-    // general week at 78 % is what the budget gate acts on, and a rail showing
-    // 78 would read as comfortable right up to the point where runs get deferred.
-    // The panel below it still breaks the windows out one by one.
+    // general week at 78 % is what defers the runs on that model, and a rail
+    // showing 78 would read as comfortable right up to the point where they get
+    // deferred. Which window binds a given run is a question about that run's
+    // model (quota.mjs) and cannot be answered by one dot; the panel below
+    // breaks the windows out one by one and names each of them.
     const werte = d.kind === 'claude'
       ? [['5h', d.five], ['7d', d.seven]]
       : [[u.harness.slice(0, 3), d.pct]]

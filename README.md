@@ -64,7 +64,8 @@ cc-hub is what you use when you are not:
 - **Subscription usage** — Claude's 5-hour and 7-day windows, Cursor's spend for
   the current cycle, OpenRouter credits — in the sidebar of every page, and a
   **quota gate** that defers scheduled starts before they burn into an empty
-  quota. The same sidebar says what every tmux session on the machine costs in
+  quota — and defers only what that window really binds: Claude's general week
+  gates every run, a per-model week only the runs on that model. The same sidebar says what every tmux session on the machine costs in
   memory, re-measured every eight minutes: a session outlives its agent on
   purpose, so that bill runs quietly.
 - **No-code flows**: a graphical designer for what happens after a run — message

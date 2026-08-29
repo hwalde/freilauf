@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import db, { getRepo, addEvent } from './db.mjs'
 import { RUNS_DIR, WORKTREES_DIR, kurzid, sh } from './util.mjs'
-import { claudeQuota } from './quota.mjs'
+import { claudeQuota, sevenForRun } from './quota.mjs'
 import { skillPromptZusatz } from './zusaetze.mjs'
 import { deliverGoal } from './goal.mjs'
 import { getHarness } from './harnesses/index.mjs'
@@ -361,11 +361,14 @@ export async function launchRun(runId) {
   // guessing at a branch. Read again on a retry, because the worktree is reused.
   const baseSha = await sh('git', ['-C', workdir, 'rev-parse', 'HEAD'])
   const q = claudeQuota()
+  // The 7-day window recorded is the one this run draws from — its own model's,
+  // plus the general one (quota.mjs). The cost delta at the end reads the same
+  // window, so the two ends of that subtraction are about one thing.
   db.prepare(`UPDATE runs SET status='running', workdir_effective=?, worktree=?, branch_expected=?,
               main_sha_start=?, base_sha=?, quota5_start=?, quota7_start=? WHERE id=?`)
     .run(workdir, workdir !== repo.path ? workdir : null, branchExpected,
       mainSha.ok ? mainSha.stdout.trim() : null, baseSha.ok ? baseSha.stdout.trim() : null,
-      q.five, q.seven, runId)
+      q.five, sevenForRun(run, q), runId)
   addEvent(runId, 'started', { workdir, harness: run.harness, model: run.model,
     provider: run.provider ?? null, effort: run.effort ?? null })
 

@@ -68,7 +68,9 @@ Zeit, in der du das nicht tust:
 - **Subscription-Verbrauch** — Claudes 5-Stunden- und 7-Tage-Fenster, Cursors
   Ausgaben im laufenden Zyklus, OpenRouter-Guthaben — in der Seitenleiste jeder
   Seite, plus ein **Budget-Gate**, das geplante Starts zurückstellt, bevor sie
-  in ein leeres Kontingent laufen. Dieselbe Seitenleiste zeigt, was alle
+  in ein leeres Kontingent laufen — und nur das, was das Fenster wirklich
+  betrifft: Claudes allgemeine Woche bremst jeden Lauf, eine modellbezogene
+  Woche nur die Läufe auf diesem Modell. Dieselbe Seitenleiste zeigt, was alle
   tmux-Sessions der Maschine an Speicher kosten, alle acht Minuten neu gemessen:
   Eine Session überlebt ihren Agenten absichtlich — diese Rechnung läuft leise
   mit.

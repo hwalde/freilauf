@@ -9,7 +9,7 @@ import { RUNS_DIR, sh } from './util.mjs'
 import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd } from './reports.mjs'
 import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
 import { deliverPendingGoals } from './goal.mjs'
-import { claudeQuota } from './quota.mjs'
+import { claudeQuota, sevenForRun } from './quota.mjs'
 import { refreshClaudeLimits } from './claude-usage.mjs'
 import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText } from './detect.mjs'
 import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, offeneVorfaelle, detektorLog, msVon, brauchtMensch } from './incidents.mjs'
@@ -192,9 +192,10 @@ async function watchRun(run) {
     await logScannen(run)
     // cursor's second end channel, independent of any hook (see below).
     if (await cursorTurnEndDetected(run)) return
-    // red: a Claude window is at 100 %
+    // red: a Claude window that concerns THIS run is at 100 % — its own model's
+    // week and the general one, not a per-model week it does not draw from.
     const q = claudeQuota()
-    if ((q.five ?? 0) >= 100 || (q.seven ?? 0) >= 100) addEventOnce(run.id, 'anomaly:quota_full')
+    if ((q.five ?? 0) >= 100 || (sevenForRun(run, q) ?? 0) >= 100) addEventOnce(run.id, 'anomaly:quota_full')
   }
 
 }
@@ -497,17 +498,25 @@ async function measureActivity(run) {
   return out
 }
 
-/** Costs at run end: Claude = delta of the 7-day quota in percentage points → €. */
+/**
+ * Costs at run end: Claude = delta of the 7-day quota in percentage points → €.
+ *
+ * The week read here is the run's own (`sevenForRun`) — the same one
+ * runner.mjs wrote into quota7_start, so the two ends of the subtraction
+ * describe one window. Taking the maximum instead made a run on Sonnet
+ * expensive because somebody else's Fable week filled up while it ran.
+ */
 function finishCosts(run) {
   const q = claudeQuota()
+  const seven = sevenForRun(run, q)
   const aboPreis = Number(db.prepare(`SELECT value FROM settings WHERE key='abo_price'`).get()?.value ?? 200) || 200
   let costEur = null
-  if (run.harness === 'claude' && run.quota7_start != null && q.seven != null) {
-    const delta = Math.max(0, q.seven - run.quota7_start)
+  if (run.harness === 'claude' && run.quota7_start != null && seven != null) {
+    const delta = Math.max(0, seven - run.quota7_start)
     costEur = Math.round((delta / 100 / 4.348 * aboPreis) * 100) / 100
   }
   db.prepare(`UPDATE runs SET quota5_end=?, quota7_end=?, cost_eur=?, ended_at=COALESCE(ended_at, datetime('now')) WHERE id=?`)
-    .run(q.five, q.seven, costEur, run.id)
+    .run(q.five, seven, costEur, run.id)
 }
 
 // ---------- retry deferred runs ----------
@@ -518,7 +527,7 @@ async function retryDeferred() {
   // scheduler pulls in the runner and the watcher is loaded by hub.mjs first.
   const { budgetGate } = await import('./scheduler.mjs')
   for (const run of deferred) {
-    if (await budgetGate(run.harness)) continue
+    if (await budgetGate(run.harness, run.model ?? null)) continue
     db.prepare(`UPDATE runs SET status='running' WHERE id=?`).run(run.id)
     addEvent(run.id, 'deferred_retry')
     const { launchRun } = await import('./runner.mjs')
