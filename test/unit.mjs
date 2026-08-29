@@ -441,7 +441,7 @@ try {
 
   await pruefe('thresholds are configurable per window; defaults stay 90/95', async () => {
     const { claudeGateBlocked } = await quotaMit('{}', 18)
-    const q = { five: 80, seven: 88, weekly_scoped: [] }
+    const q = { five: 80, seven: 88 }
     falsch(claudeGateBlocked(q).blocked, 'defaults: 80 % and 88 % pass')
     wahr(claudeGateBlocked(q, null, { five: 75, seven: 90 }).blocked, 'a 5 h threshold of 75 blocks the 80 %')
     falsch(claudeGateBlocked(q, null, { five: 85, seven: 90 }).blocked, 'a 5 h threshold of 85 lets the 80 % pass')
@@ -504,6 +504,110 @@ try {
     } finally {
       global.fetch = echt
       delete process.env.DEEPSEEK_API_KEY
+    }
+  })
+
+  await pruefe('budgetGate routes by provider and honours the on/off switches', async () => {
+    // The scheduler loads quota.mjs on ITS import, so the fixture path and the
+    // settings must stand before that import happens.
+    const quotaPfad = join(sandkasten, 'quota-budgetgate.json')
+    writeFileSync(quotaPfad, JSON.stringify({
+      five_hour: { used_percentage: 97, resets_at: 1800000000 },
+      seven_day: { used_percentage: 98 },
+    }))
+    process.env.CCHUB_QUOTA_JSON = quotaPfad
+    const { setSetting } = await import('../server/db.mjs')
+    const { budgetGate } = await import('../server/scheduler.mjs')
+    setSetting('claude_gate_on', '1')
+    setSetting('deepseek_gate_on', '1')
+    setSetting('openrouter_gate_on', '1')
+    setSetting('deepseek_min_usd', '2')
+    setSetting('openrouter_min_eur', '5')
+    const echt = global.fetch
+    const alt = {
+      DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
+      OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
+      CCHUB_CURSOR_AUTH: process.env.CCHUB_CURSOR_AUTH,
+    }
+    const cursorAuth = join(sandkasten, 'cursor-auth.json')
+    writeFileSync(cursorAuth, JSON.stringify({ accessToken: 't' }))
+    process.env.DEEPSEEK_API_KEY = 'ds-test'
+    process.env.OPENROUTER_API_KEY = 'or-test'
+    process.env.CCHUB_CURSOR_AUTH = cursorAuth
+    global.fetch = async (url) => {
+      const u = String(url)
+      if (u.includes('deepseek')) return { ok: true, json: async () => ({ is_available: true, balance_infos: [{ currency: 'USD', total_balance: '1' }] }) }
+      if (u.includes('GetCurrentPeriodUsage')) return { ok: true, json: async () => ({ planUsage: { limit: 2000, totalSpend: 1990 } }) }
+      if (u.includes('GetAggregatedUsageEvents')) return { ok: true, json: async () => ({ totalCostCents: 1990 }) }
+      if (u.includes('full_stripe_profile')) return { ok: true, json: async () => ({ membershipType: 'pro' }) }
+      return { ok: true, json: async () => ({ data: { total_credits: 100, total_usage: 99.5 } }) }
+    }
+    try {
+      const ds = await budgetGate('hermes', 'deepseek/deepseek-v4', 'deepseek')
+      wahr(!!ds && /DeepSeek/.test(ds.reason), 'a deepseek run is gated by the DeepSeek balance')
+      const or = await budgetGate('opencode', 'openrouter/x', 'openrouter')
+      wahr(!!or && /OpenRouter/.test(or.reason), 'an openrouter run by the OpenRouter balance')
+      const fb = await budgetGate('opencode', 'whatever', null)
+      wahr(!!fb && /OpenRouter/.test(fb.reason), 'no provider falls back to the OpenRouter gate')
+      falsch(await budgetGate('opencode', 'x', 'opencode-zen'),
+        'opencode-zen reports no balance — no signal, no block')
+      const claude = await budgetGate('claude', 'claude-sonnet-5')
+      wahr(!!claude && /Claude quota/.test(claude.reason), 'a claude run by the claude gate')
+      const cursor = await budgetGate('cursor', 'auto')
+      wahr(!!cursor && /Cursor/.test(cursor.reason), 'a cursor run by the cursor gate')
+
+      setSetting('deepseek_gate_on', '0')
+      falsch(await budgetGate('hermes', 'deepseek/deepseek-v4', 'deepseek'),
+        'switched off, the DeepSeek gate cannot block')
+      setSetting('openrouter_gate_on', '0')
+      falsch(await budgetGate('opencode', 'x', null),
+        'switched off, the OpenRouter gate cannot block')
+      setSetting('claude_gate_on', '0')
+      falsch(await budgetGate('claude', 'claude-sonnet-5'),
+        'switched off, the claude gate cannot block even a full quota')
+      setSetting('cursor_gate_on', '0')
+      falsch(await budgetGate('cursor', 'auto'),
+        'switched off, the cursor gate cannot block')
+    } finally {
+      global.fetch = echt
+      for (const [k, v] of Object.entries(alt)) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v
+      }
+      setSetting('claude_gate_on', '1')
+      setSetting('deepseek_gate_on', '1')
+      setSetting('openrouter_gate_on', '1')
+      setSetting('cursor_gate_on', '1')
+    }
+  })
+
+  await pruefe('cursor gate measures the included usage against its own threshold', async () => {
+    const echt = global.fetch
+    const auth = join(sandkasten, 'cursor-gate-auth.json')
+    writeFileSync(auth, JSON.stringify({ accessToken: 't' }))
+    const alt = process.env.CCHUB_CURSOR_AUTH
+    process.env.CCHUB_CURSOR_AUTH = auth
+    const cu = (nr) => import(`../server/quota.mjs?cu=${nr}`)
+    global.fetch = async (url) => {
+      const u = String(url)
+      if (u.includes('GetCurrentPeriodUsage')) return { ok: true, json: async () => ({ planUsage: { limit: 2000, totalSpend: 1990 } }) }
+      if (u.includes('GetAggregatedUsageEvents')) return { ok: true, json: async () => ({ totalCostCents: 1990 }) }
+      return { ok: true, json: async () => ({ membershipType: 'pro' }) }
+    }
+    try {
+      const { cursorGateBlocked } = await cu(1)
+      const g = await cursorGateBlocked(95, 20)
+      wahr(g.blocked, '99.5 % blocks against a threshold of 95')
+      enthaelt(g.reason, 'Cursor', 'the reason names the provider')
+
+      const { cursorGateBlocked: g2 } = await cu(2)
+      falsch((await g2(99.9, 20)).blocked, '99.5 % passes against a threshold of 99.9')
+
+      process.env.CCHUB_CURSOR_AUTH = join(sandkasten, 'missing-cursor-gate-auth.json')
+      const { cursorGateBlocked: g3 } = await cu(3)
+      falsch((await g3(95, 20)).blocked, 'no token → no signal → the gate stays open')
+    } finally {
+      global.fetch = echt
+      if (alt === undefined) delete process.env.CCHUB_CURSOR_AUTH; else process.env.CCHUB_CURSOR_AUTH = alt
     }
   })
 

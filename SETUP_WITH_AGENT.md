@@ -198,7 +198,7 @@ tooling. The seams that were designed to be pulled on:
 | change what every agent is told | Settings → **Platform prompt suffix** (added, never replacing the platform rules), or a **repo prompt** per repository |
 | give agents an opt-in capability | drop a folder with a `SKILL.md` into `~/agents/zusaetze/` — it appears as a checkbox in the run forms. Deliberately *not* `.claude/skills`, so nothing loads automatically |
 | do something after a run finishes or a merge lands | **no-code flows** — a graphical designer, no code needed: message running agents, start follow-up runs and wait, extract data from a report via LLM, branch, loop, Telegram, HTTP, shell command → [`server/flows/AGENTS.md`](server/flows/AGENTS.md) |
-| change when a run is allowed to start | the budget gate + `repos.max_parallel` in `server/scheduler.mjs` |
+| change when a run is allowed to start | Settings → **Budget gates** (optional per provider), else `repos.max_parallel` — `server/scheduler.mjs`; a deferred run can be started anyway from its detail page |
 | change a run that is not over | the "Edit this run" card on its detail page: the expected duration of a running run, plus the prompt and the repo of one that has not started yet — `server/run-edit.mjs` decides what a status allows |
 | add a UI language | a new `lang/<code>.json` with the same keys, plus the language list — see `server/i18n.mjs` |
 
@@ -245,7 +245,7 @@ If your task is to change cc-hub rather than just run it:
 |---|---|
 | Everything, in depth (architecture, decisions, pitfalls) | `AGENTS.md` |
 | What a run *is*; forms, validation, agent lifecycle | `server/run-def.mjs` |
-| Starting a run, schedules, budget gate | `server/scheduler.mjs` |
+| Starting a run, schedules, budget gate | `server/scheduler.mjs`, `server/quota.mjs` |
 | Worktrees, prompt assembly, session launch | `server/runner.mjs`, `bin/cc-start` |
 | Reports coming back in | `server/reports.mjs`, `bin/cc-report` |
 | Watching from the outside; anomalies | `server/watcher.mjs`, `server/detect.mjs` |

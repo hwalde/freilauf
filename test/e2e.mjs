@@ -900,6 +900,84 @@ try {
     quotaSchreiben(0, 0)   // back to the sandbox fixture
   })
 
+  // The gate is a rule the OPERATOR configures — and the reason a full quota
+  // must not block everything is that the rule must be switchable and adjustable
+  // per window. Settings are read live (server/scheduler.mjs), so writing the
+  // table is the whole test.
+  const setSetting = (k, v) => db.prepare(`INSERT INTO settings(key,value) VALUES(?,?)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(k, v)
+
+  await pruefe('the claude gate can be switched off entirely', async () => {
+    setSetting('claude_gate_on', '0')
+    quotaSchreiben(99)
+    const j = await laufStarten({ repo_id: repoId, model: 'claude-fable-5', prompt: 'E2E-Gate-Off' })
+    wahr(!!j.runId && !j.deferred, `a full fable week no longer defers (${JSON.stringify(j)})`)
+    gleich(lauf(j.runId).status, 'running', 'the run starts')
+    await sessionMerken(j.runId)
+    quotaSchreiben(0, 0)
+    setSetting('claude_gate_on', '1')
+  })
+
+  await pruefe('the fable window has its own threshold', async () => {
+    setSetting('claude_gate_fable', '80')
+    quotaSchreiben(85, 30)   // fable 85 %: below 95, above the new 80
+    const j = await laufStarten({ repo_id: repoId, model: 'claude-fable-5', prompt: 'E2E-Fable-Schwelle' })
+    wahr(!!j.runId && j.deferred, `fable 85 % defers against its own threshold of 80 (${JSON.stringify(j)})`)
+    await formular(`/api/runs/${j.runId}/kill`, {})
+    const s = await laufStarten({ repo_id: repoId, model: 'claude-sonnet-5', prompt: 'E2E-Fable-Schwelle-2' })
+    wahr(!!s.runId && !s.deferred, `a sonnet run ignores the fable threshold (${JSON.stringify(s)})`)
+    await sessionMerken(s.runId)
+    quotaSchreiben(0, 0)
+    setSetting('claude_gate_fable', '95')
+  })
+
+  await pruefe('a deferred run can be started anyway, from the endpoint', async () => {
+    quotaSchreiben(99)
+    const j = await laufStarten({ repo_id: repoId, model: 'claude-fable-5', prompt: 'E2E-Force' })
+    wahr(!!j.runId && j.deferred, 'deferred as before')
+    const r = await formular(`/api/runs/${j.runId}/start`, {})
+    gleich(r.status, 200, 'the endpoint answers 200')
+    gleich(lauf(j.runId).status, 'running', 'the run is running')
+    enthaelt(ereignisse(j.runId).join(','), 'forced_start', 'the forced start is recorded')
+    await sessionMerken(j.runId)
+    quotaSchreiben(0, 0)
+  })
+
+  await pruefe('the start-anyway button sits on the detail page and in the overview', async () => {
+    quotaSchreiben(99)
+    const j = await laufStarten({ repo_id: repoId, model: 'claude-fable-5', prompt: 'E2E-Force-UI' })
+    wahr(!!j.runId && j.deferred, 'deferred')
+    const seite = await hol(`/runs/${j.runId}`).then(r => r.text())
+    enthaelt(seite, `action="/api/runs/${j.runId}/start"`, 'the detail banner offers the button')
+    enthaelt(seite, 'Start anyway', 'and it is the operator-facing word')
+    const uebersicht = await hol(`/?repo=${repoId}`).then(r => r.text())
+    enthaelt(uebersicht, `action="/api/runs/${j.runId}/start"`, 'the overview row carries it too')
+    await formular(`/api/runs/${j.runId}/start`, {})
+    await sessionMerken(j.runId)
+    quotaSchreiben(0, 0)
+  })
+
+  await pruefe('only a deferred run may be started this way', async () => {
+    const laufend = await laufStarten({ repo_id: repoId, model: 'claude-sonnet-5', prompt: 'E2E-Force-Nein' })
+    wahr(!!laufend.runId && !laufend.deferred, 'a run that is not deferred')
+    const r = await formular(`/api/runs/${laufend.runId}/start`, {})
+    gleich(r.status, 400, 'the endpoint refuses')
+    gleich(lauf(laufend.runId).status, 'running', 'and leaves the run alone')
+    await sessionMerken(laufend.runId)
+  })
+
+  await pruefe('a deferred run still starts by itself once the gate opens', async () => {
+    quotaSchreiben(99)
+    const j = await laufStarten({ repo_id: repoId, model: 'claude-fable-5', prompt: 'E2E-AutoRetry' })
+    wahr(!!j.runId && j.deferred, 'deferred by the gate')
+    quotaSchreiben(0, 0)
+    await watcherTick()
+    await warteAuf(() => lauf(j.runId)?.status === 'running',
+      { was: 'the watcher starts it once the gate opens', timeoutMs: 8000 })
+    enthaelt(ereignisse(j.runId).join(','), 'deferred_retry', 'the watcher path is the non-forced one')
+    await sessionMerken(j.runId)
+  })
+
   // ------------------------------------------------------------------
   // The goal is the one definition field that does NOT travel in the prompt
   // file: `/goal <condition>` exists only inside the session, so the hub types

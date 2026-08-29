@@ -362,3 +362,52 @@ export async function deepseekGateBlocked(minimum = 2) {
   }
   return { blocked: false }
 }
+
+let cursorGateCache = { at: 0, pct: null, cycle_end: null }
+
+/**
+ * true = defer the start of a cursor run.
+ *
+ * cursor runs on its subscription, so the account's own usage answer is the
+ * measure: spend divided by the included amount of the running period. Two ways
+ * that number can be missing, and both mean "no signal, do not block":
+ *
+ *  - no token / no API answer at all (the plugin returns null);
+ *  - the account reports no included amount and `includedFallback` is empty.
+ *
+ * The cursor usage lives on the harness plugin — asked directly, like the
+ * provider gates ask the provider plugin, for the same cycle reason
+ * (usage.mjs reaches the database, which reaches the harness registry, which
+ * imports this module).
+ */
+export async function cursorGateBlocked(threshold = 95, includedFallback = 20) {
+  const { getHarness } = await import('./harnesses/index.mjs')
+  const plugin = getHarness('cursor')
+  if (!plugin?.usage) return { blocked: false }
+  let pct = cursorGateCache.pct
+  if (pct === null || Date.now() - cursorGateCache.at >= 120_000) {
+    try {
+      const data = await plugin.usage()
+      if (!data) {
+        cursorGateCache = { at: Date.now(), pct: null, cycle_end: null }
+      } else {
+        const included = data.included_usd != null
+          ? data.included_usd : (Number(includedFallback) || 20)
+        pct = data.spent_usd != null && included
+          ? Math.round((data.spent_usd / included) * 1000) / 10 : null
+        cursorGateCache = { at: Date.now(), pct, cycle_end: data.cycle_end ?? null }
+      }
+    } catch {
+      // keep the old cache — the previous answer is still the best one there is
+    }
+  }
+  if (pct === null) return { blocked: false }   // no signal → do not block
+  if (pct >= threshold) {
+    return {
+      blocked: true,
+      reason: `Cursor usage: ${pct} % of the included period`,
+      resets_at: cursorGateCache.cycle_end ?? null,
+    }
+  }
+  return { blocked: false }
+}

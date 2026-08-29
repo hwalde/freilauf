@@ -233,8 +233,8 @@ Three lifecycle operations, all in `server/run-def.mjs` next to `saveAgent`:
 
 And there is exactly **one** way from a definition to a running run:
 **`startRun(def, { repoId, agentId, promptExtra, title, startMode, startAt })`**
-in `server/scheduler.mjs` — including the budget gate (`budgetGate(harness)`,
-also used by the watcher when picking a deferred run back up).
+in `server/scheduler.mjs` — including the budget gate (`budgetGate(harness, model,
+provider)`, also used by the watcher when picking a deferred run back up).
 `startForAgent(agent)` is only its wrapper for a stored definition.
 
 `keep_on_branch` (0/1) is the newest field and went exactly that way: the form
@@ -642,12 +642,12 @@ the surface name or a bare `7d`).
 
 Where it is asked, and why each of them:
 
-- **`budgetGate(harness, model)`** (scheduler.mjs) — the model travels with
-  every call: from the definition on the way in, from the run row when the
-  watcher picks a deferred run back up. A block also **names the window** in its
-  reason and hands out **that window's** reset time; a 7-day block used to
-  publish the 5-hour reset into the deferred event and into Telegram as the
-  moment the run would start again.
+- **`budgetGate(harness, model, provider)`** (scheduler.mjs) — the model
+  travels with every call: from the definition on the way in, from the run row
+  when the watcher picks a deferred run back up. A block also **names the
+  window** in its reason and hands out **that window's** reset time; a 7-day
+  block used to publish the 5-hour reset into the deferred event and into
+  Telegram as the moment the run would start again.
 - **`anomaly:quota_full`** (watcher) — a red flag on a run for somebody else's
   window is noise.
 - **`quota7_start` / `quota7_end`** (runner.mjs, `finishCosts`) — both ends of
@@ -656,6 +656,41 @@ Where it is asked, and why each of them:
 
 Only the **display** still asks for the maximum: `seven` is the account's worst
 case, which is what one dot on the rail can honestly show.
+
+#### The gate is a rule the operator configures — and can overrule
+
+The thresholds were hardcoded (5 h ≥ 90, 7 d ≥ 95) and the settings page still
+carried a "quota threshold" field that nothing read — the gate looked
+configurable and was not, and a DeepSeek or OpenRouter run was measured against
+whichever gate a claude budget was blamed for. Both are fixed by one rule:
+**what a run draws from decides which gate is asked, and every gate is optional.**
+
+- `budgetGate(harness, model, provider)` routes by provider: claude runs go to
+  the claude gate, a run with `provider='deepseek'` to the DeepSeek balance
+  gate, everything else to the OpenRouter gate (the historical default for the
+  provider-based harnesses).
+- Every gate has an **on/off switch** and its own **threshold**, all under
+  Settings → Budget gates: `claude_gate_on/_5h/_7d/_fable`,
+  `openrouter_gate_on` + `openrouter_min_eur`, `deepseek_gate_on` +
+  `deepseek_min_usd`. A cleared numeric field falls back to its default (the
+  fable week to the general 7-day threshold). `quota_threshold` is gone — it
+  was the field the gate never read.
+- **Each window is judged against its own threshold.** `claudeGateBlocked`
+  measures the 5-hour window against `_5h`, the general week against `_7d`, a
+  per-model week called "Fable" against `_fable` — so a fable run can be
+  deferred earlier (or later) than everything else without touching the general
+  week. The reason names the blocking window and its reset time.
+- **The DeepSeek gate** asks the provider plugin directly (same cycle rule as
+  OpenRouter): it blocks on the account's own `is_available=false` verdict or
+  on a USD balance below the threshold. A CNY-only account reports no USD,
+  which is "no signal" — the gate stays open, like a missing key.
+- **A deferred run can be started anyway.** The gate is a rule that must not
+  overrule a deliberate decision (same principle as `repos.max_parallel`), so
+  the detail page and the overview row carry a "Start anyway" button
+  (`POST /api/runs/<id>/start`, event `forced_start`). It shares one function
+  with the watcher's auto-retry — `startDeferredRun(runId, { forced })` — and
+  only a `deferred` run may go: a scheduled one is waiting for its time, not
+  for a quota.
 
 The e2e sandbox points `CCHUB_CLAUDE_CREDENTIALS` at a file that does not exist,
 so the suite never touches the real endpoint (same fence as `CCHUB_CURSOR_AUTH`)

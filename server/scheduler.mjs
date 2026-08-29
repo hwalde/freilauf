@@ -3,7 +3,8 @@
 import db, { addEvent } from './db.mjs'
 import { scheduleDue, parseDbUtc } from './util.mjs'
 import { createRun, launchRun } from './runner.mjs'
-import { claudeGateBlocked, claudeQuota, deepseekGateBlocked, openrouterGateBlocked } from './quota.mjs'
+import { claudeGateBlocked, claudeQuota, cursorGateBlocked, deepseekGateBlocked, openrouterGateBlocked } from './quota.mjs'
+import { getProvider } from './providers/index.mjs'
 import { notifyRun } from './reports.mjs'
 import { defFromAgent } from './run-def.mjs'
 import { fallbackTitle, applyGeneratedTitle } from './title.mjs'
@@ -100,6 +101,8 @@ function flagSetting(key, fallback) {
  *   three configurable thresholds (5 h, general 7 d, the fable week). A run on
  *   a per-model week is measured against THAT week's threshold, a run on any
  *   other model against the general one (quota.mjs).
+ * - **cursor** runs draw on the cursor subscription: the cursor gate measures
+ *   the included usage of the running period against its own threshold.
  * - a run with `provider='deepseek'` draws on the DeepSeek balance.
  * - everything else (openrouter, no provider named) draws on OpenRouter credits
  *   — the historical default for the provider-based harnesses.
@@ -122,11 +125,29 @@ export async function budgetGate(harness, model = null, provider = null) {
     })
     return g.blocked ? g : null
   }
+  if (harness === 'cursor') {
+    if (!flagSetting('cursor_gate_on', true)) return null
+    const g = await cursorGateBlocked(
+      numSetting('cursor_gate_pct', 95),
+      numSetting('cursor_included_usd', 20))
+    return g.blocked ? g : null
+  }
   if (provider === 'deepseek') {
     if (!flagSetting('deepseek_gate_on', true)) return null
     const g = await deepseekGateBlocked(numSetting('deepseek_min_usd', 2))
     return g.blocked ? g : null
   }
+  if (provider === 'openrouter') {
+    if (!flagSetting('openrouter_gate_on', true)) return null
+    const g = await openrouterGateBlocked(numSetting('openrouter_min_eur', 5))
+    return g.blocked ? g : null
+  }
+  // A known provider WITHOUT a balance contract (opencode-zen) draws on nothing
+  // the hub can meter — no gate, same as a provider without a key. Unknown or
+  // missing providers keep the historical default: the OpenRouter gate, which is
+  // what a hand-typed `openrouter/…` model is.
+  const plugin = getProvider(provider)
+  if (plugin && !plugin.balance) return null
   if (!flagSetting('openrouter_gate_on', true)) return null
   const g = await openrouterGateBlocked(numSetting('openrouter_min_eur', 5))
   return g.blocked ? g : null

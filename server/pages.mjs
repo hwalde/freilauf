@@ -1484,6 +1484,9 @@ export async function pageSettings(req, res, url) {
       <label>${e(t('settings.gate_deepseek_on'))} <select name="deepseek_gate_on"><option value="1" ${(s.deepseek_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.deepseek_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
       <label>${e(t('settings.gate_deepseek_min'))} <input name="deepseek_min_usd" type="number" step="0.5" min="0" value="${e(s.deepseek_min_usd ?? '2')}">
         <span class="dim">${e(t('settings.gate_deepseek_min_hint'))}</span></label>
+      <label>${e(t('settings.gate_cursor_on'))} <select name="cursor_gate_on"><option value="1" ${(s.cursor_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.cursor_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+      <label>${e(t('settings.gate_cursor_pct'))} <input name="cursor_gate_pct" type="number" step="0.5" min="0" max="100" value="${e(s.cursor_gate_pct ?? '95')}">
+        <span class="dim">${e(t('settings.gate_cursor_pct_hint'))}</span></label>
     </fieldset>
     <label>${e(t('settings.abo_price'))} <input name="abo_price" type="number" value="${e(s.abo_price ?? '200')}">
       <span class="dim">${e(t('settings.abo_price_hint'))}</span></label>
@@ -2127,7 +2130,8 @@ export async function repoSave(req, res, url, formBody) {
 const SETTINGS_KEYS = ['pipeline_on', 'telegram_token', 'telegram_chat',
   'claude_gate_on', 'claude_gate_5h', 'claude_gate_7d', 'claude_gate_fable',
   'openrouter_gate_on', 'openrouter_min_eur', 'deepseek_gate_on', 'deepseek_min_usd',
-  'abo_price', 'cursor_included_usd', 'session_keep_hours', 'archive_session_on', 'archive_session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
+  'cursor_gate_on', 'cursor_gate_pct', 'cursor_included_usd',
+  'abo_price', 'session_keep_hours', 'archive_session_on', 'archive_session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
   'llm_check_on', 'llm_check_model', 'llm_check_or_provider',
   'llm_title_on', 'llm_title_model', 'llm_title_or_provider',
   'llm_extras_on', 'llm_extras_model', 'llm_extras_or_provider', 'ui_language']

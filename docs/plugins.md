@@ -124,11 +124,14 @@ provider with its own `ok` flag) for the usage panel and `GET /api/usage`. It
 asks only providers that at least one **enabled** coding agent may use and that
 actually have a credential — a balance nobody can act on is noise.
 
-**The budget gate does NOT go through that aggregator.** `openrouterGateBlocked()`
-in `quota.mjs` calls the plugin directly, because `balances.mjs` reaches the
-database via `coding-agents.mjs`, and `db.mjs` imports the harness registry,
-which imports `quota.mjs` — routing the gate through the aggregator closes
-exactly the cycle this document warns about above.
+**The budget gate does NOT go through that aggregator.** The gate functions in
+`quota.mjs` (`openrouterGateBlocked`, `deepseekGateBlocked`) call the plugin
+directly, because `balances.mjs` reaches the database via `coding-agents.mjs`,
+and `db.mjs` imports the harness registry, which imports `quota.mjs` — routing
+the gate through the aggregator closes exactly the cycle this document warns
+about above. `budgetGate(harness, model, provider)` in `scheduler.mjs` routes by
+provider and reads the thresholds/on-off switches from the settings; each gate
+is optional (Settings → Budget gates).
 
 ### Adding a new provider
 
