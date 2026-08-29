@@ -522,13 +522,13 @@ export async function usagePanel() {
   if (!usage.length && !balances.length) return ''
   // A reset within the next day is a time, everything beyond it needs the date
   // too — '16:30' alone says nothing about a window that runs for a week.
-  const uhrzeit = (d) => `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
-  const datum = (d) => `${String(d.getUTCDate()).padStart(2, '0')}.${String(d.getUTCMonth() + 1).padStart(2, '0')}.`
+  const hhmm = (d) => `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
+  const ddmm = (d) => `${String(d.getUTCDate()).padStart(2, '0')}.${String(d.getUTCMonth() + 1).padStart(2, '0')}.`
   const resetText = (iso) => {
     const ms = Date.parse(iso)
     if (!Number.isFinite(ms)) return ''
     const d = new Date(ms)
-    return (ms - Date.now() > 24 * 3600_000 ? `${datum(d)} ` : '') + `${uhrzeit(d)} UTC`
+    return (ms - Date.now() > 24 * 3600_000 ? `${ddmm(d)} ` : '') + `${hhmm(d)} UTC`
   }
   // When a window was READ, for a reading that is not the current one. Same idea
   // in the other direction: a time alone is a lie about a value taken two days
@@ -536,10 +536,10 @@ export async function usagePanel() {
   const stampText = (ms) => {
     if (!Number.isFinite(ms) || ms <= 0) return ''
     const d = new Date(ms)
-    const heute = new Date()
-    const selberTag = d.getUTCFullYear() === heute.getUTCFullYear()
-      && d.getUTCMonth() === heute.getUTCMonth() && d.getUTCDate() === heute.getUTCDate()
-    return (selberTag ? '' : `${datum(d)} `) + `${uhrzeit(d)} UTC`
+    const today = new Date()
+    const sameDay = d.getUTCFullYear() === today.getUTCFullYear()
+      && d.getUTCMonth() === today.getUTCMonth() && d.getUTCDate() === today.getUTCDate()
+    return (sameDay ? '' : `${ddmm(d)} `) + `${hhmm(d)} UTC`
   }
   const rows = usage.map(u => {
     if (!u.ok) return `<div class="usage-row"><b>${e(u.label)}</b> <span class="dim">${e(t('usage.unavailable'))}</span></div>`

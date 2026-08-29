@@ -15,6 +15,11 @@
 // running a claude session, and it goes stale SILENTLY (see claude-usage.mjs
 // for the measurement that started this).
 //
+// And for the per-model week it is not even a straight fallback any more: that
+// window has THREE possible sources (the live answer, the last live answer, the
+// file) and `mergeScoped()` below picks by age, because all three describe the
+// same period and only one of them is current. Rule 5 in AGENTS.md.
+//
 // Claude has THREE windows, not two: the 5-hour one, the general 7-day one and
 // per-model 7-day ones (currently fable). They are reported separately
 // (seven_general / seven_fable / weekly_scoped) so the panel can show which one
