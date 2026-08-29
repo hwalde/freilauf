@@ -8,6 +8,7 @@
 //
 // Usage:  node test/unit.mjs
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, chmodSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gruppe, pruefe, gleich, wahr, falsch, enthaelt, bericht, zaehler } from './mini.mjs'
@@ -2403,6 +2404,106 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('Worktree extras suggestion (extras-suggest.mjs)')
+  const ex = await import('../server/extras-suggest.mjs')
+
+  await pruefe('the algorithmic checks come first and need no model', async () => {
+    const key = process.env.OPENROUTER_API_KEY
+    process.env.OPENROUTER_API_KEY = 'k'
+    try {
+      const leer = await ex.suggestExtras('')
+      falsch(leer.ok, 'empty path is refused')
+      const weg = await ex.suggestExtras('/does/not/exist')
+      falsch(weg.ok, 'missing directory is refused')
+      enthaelt(weg.error, 'does/not/exist', 'and names the path')
+      const keinGit = await ex.suggestExtras(sandkasten)
+      falsch(keinGit.ok, 'a directory without .git is refused')
+      enthaelt(keinGit.error, 'git', 'and says so')
+    } finally {
+      if (key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = key
+    }
+  })
+  await pruefe('the suggestion is normalized: only untracked entries, only known modes, deduped', () => {
+    const ctx = {
+      entries: [{ name: '.env', dir: false }, { name: 'referenz', dir: true }, { name: 'src', dir: true }],
+      tracked: new Set(['src']),
+      ignored: new Set(['.env']),
+    }
+    const gut = ex.normalizeExtras([
+      { path: '.env', mode: 'copy' },
+      { path: 'referenz', mode: 'link' },
+      { path: 'referenz', mode: 'copy' },          // duplicate
+      { path: 'src', mode: 'link' },               // tracked → out
+      { path: 'erfunden', mode: 'copy' },          // not in the listing → out
+      { path: '.env', mode: 'kaputt' },            // unknown mode → out
+      { path: '', mode: 'copy' },                  // empty path → out
+    ], ctx)
+    gleich(JSON.stringify(gut), JSON.stringify([{ path: '.env', mode: 'copy' }, { path: 'referenz/', mode: 'link' }]),
+      'the two valid suggestions survive, a directory carries its trailing slash')
+  })
+  await pruefe('nonsense from the model is an empty list, not a crash', () => {
+    const ctx = { entries: [{ name: '.env', dir: false }], tracked: new Set(), ignored: new Set() }
+    gleich(ex.normalizeExtras(null, ctx).length, 0, 'null')
+    gleich(ex.normalizeExtras({ extras: 'nicht-liste' }, ctx).length, 0, 'non-list')
+    gleich(ex.normalizeExtras({}, ctx).length, 0, 'empty object')
+  })
+  await pruefe('off means off: no model, no key, or the switch — and the default model is preset', () => {
+    const key = process.env.OPENROUTER_API_KEY
+    delete process.env.OPENROUTER_API_KEY
+    falsch(ex.extrasLlmActive(), 'no key = off')
+    if (key !== undefined) process.env.OPENROUTER_API_KEY = key
+    gleich(ex.extrasModel(), ex.DEFAULT_EXTRAS_MODEL, 'default model while nothing is configured')
+  })
+  await pruefe('a real repo is turned into a prompt and the answer normalized', async () => {
+    // A tiny real git repo: README tracked, .env and referenz/ untracked+ignored.
+    const repo = join(sandkasten, 'extras-repo')
+    mkdirSync(repo, { recursive: true })
+    writeFileSync(join(repo, 'README.md'), '# x\n')
+    writeFileSync(join(repo, '.gitignore'), '.env\nreferenz/\n')
+    writeFileSync(join(repo, '.env'), 'GEHEIM=1\n')
+    mkdirSync(join(repo, 'referenz'))
+    writeFileSync(join(repo, 'referenz', 'a.txt'), 'ref\n')
+    const git = (a) => execFileSync('git', ['-C', repo, ...a], { stdio: ['ignore', 'pipe', 'ignore'] })
+    git(['init', '-q', '-b', 'main'])
+    git(['config', 'user.email', 'u@t'])
+    git(['config', 'user.name', 'U'])
+    git(['add', '-A'])
+    git(['commit', '-qm', 'init'])
+
+    const echt = globalThis.fetch
+    const key = process.env.OPENROUTER_API_KEY
+    const basis = process.env.CCHUB_OPENROUTER_BASE
+    let koerper = null
+    globalThis.fetch = async (url, opts) => {
+      koerper = JSON.parse(opts.body)
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: JSON.stringify({ extras: [
+            { path: '.env', mode: 'copy' }, { path: 'referenz', mode: 'link' }, { path: 'erfunden', mode: 'copy' },
+          ] }) } }],
+        }),
+      }
+    }
+    try {
+      process.env.OPENROUTER_API_KEY = 'k'
+      process.env.CCHUB_OPENROUTER_BASE = 'http://stub'
+      const r = await ex.suggestExtras(repo)
+      wahr(r.ok, `ok (${r.error ?? ''})`)
+      gleich(JSON.stringify(r.extras),
+        JSON.stringify([{ path: '.env', mode: 'copy' }, { path: 'referenz/', mode: 'link' }]),
+        'the two real entries survive, the invented one is dropped')
+      gleich(koerper.model, ex.DEFAULT_EXTRAS_MODEL, 'the configured model is sent')
+      enthaelt(koerper.messages[1].content, 'referenz', 'the prompt carries the listing')
+    } finally {
+      globalThis.fetch = echt
+      if (key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = key
+      if (basis === undefined) delete process.env.CCHUB_OPENROUTER_BASE; else process.env.CCHUB_OPENROUTER_BASE = basis
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Planned start of a single run (run-def.mjs)')
 
   await pruefe('without a choice a run starts immediately, as it always did', () => {
@@ -2677,6 +2778,30 @@ try {
     ]
     const k = se.autoCloseCandidates(liste, 3600_000, jetzt).map(s => s.name)
     gleich(k.join(','), 'mit-lauf', 'a foreign session is only ended by hand')
+  })
+
+  await pruefe('the memory reading is measured on ONE clock: the cache is the update interval', async () => {
+    // The sidebar asks for this on every page and re-fetches itself every 30 s;
+    // what keeps `tmux list-sessions` and a `ps` over the whole machine from
+    // running that often is this cache alone. So the cache IS the eight-minute
+    // interval, and that is what is tested here — not the number, which belongs
+    // to whatever tmux happens to hold on the machine running the suite.
+    se._sessionMemoryReset()
+    const a = await se.sessionMemory()
+    wahr(a && Number.isFinite(a.rssKb) && a.rssKb >= 0, `a measurement (${JSON.stringify(a)})`)
+    wahr(a.sessions >= 0 && a.running >= 0 && a.running <= a.sessions,
+      'the running ones are a subset of all of them')
+    gleich(a.intervalMs, 8 * 60_000, 'eight minutes by default, and it travels with the value')
+    gleich(await se.sessionMemory(), a, 'a second call inside the window measures nothing anew')
+    // Expired: what comes back is still the old object (stale-while-revalidate —
+    // no page render may wait on three subprocesses), and the refresh behind it
+    // replaces it.
+    se._sessionMemoryAge(9 * 60_000)
+    gleich(await se.sessionMemory(), a, 'an expired entry is handed back as it stands')
+    await new Promise(r => setTimeout(r, 300))
+    const b = await se.sessionMemory()
+    wahr(b.measuredAtMs >= a.measuredAtMs, 'and behind it a fresh measurement landed')
+    se._sessionMemoryReset()
   })
 
   // ------------------------------------------------------------------

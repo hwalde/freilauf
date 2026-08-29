@@ -1265,6 +1265,12 @@ try {
       const { sessionKeepMs } = await import('../server/sessions.mjs')
       gleich(sessionKeepMs({ session_keep_hours: '0.5' }), 1800_000, 'half an hour')
     })
+    await pruefe('the worktree-extras LLM is configured on the settings page', async () => {
+      const html = await (await hol('/settings')).text()
+      for (const feld of ['name="llm_extras_on"', 'name="llm_extras_model"', 'name="llm_extras_or_provider"']) {
+        enthaelt(html, feld, `field ${feld}`)
+      }
+    })
   }
 
   // ------------------------------------------------------------------
@@ -2210,6 +2216,29 @@ try {
     enthaelt(html, REPO, 'prefilled with what is stored')
     enthaelt(html, 'main', 'and the base branch')
   })
+  await pruefe('the repo form carries the extras finder: button and dialog, with the warning', async () => {
+    const html = await (await hol('/repos/edit')).text()
+    enthaelt(html, 'id="extras-find"', 'the button')
+    enthaelt(html, 'id="extras-dialog"', 'the modal')
+    enthaelt(html, 'id="extras-start"', 'its start button')
+    enthaelt(html, 'Worktree extras', 'the label of the field it fills')
+    enthaelt(html, 'completely replaces', 'the warning that existing entries are not kept')
+  })
+  await pruefe('the extras suggestion checks algorithmically before any model is asked', async () => {
+    const leer = await (await formular('/api/repos/extras-suggest', { path: '' })).json()
+    falsch(leer.ok, 'empty path is refused')
+    const weg = await (await formular('/api/repos/extras-suggest', { path: join(SB, 'gibt-es-nicht') })).json()
+    falsch(weg.ok, 'missing directory is refused')
+    enthaelt(weg.error, 'gibt-es-nicht', 'and names the path')
+    const keinGit = await (await formular('/api/repos/extras-suggest', { path: SB })).json()
+    falsch(keinGit.ok, 'a directory without .git is refused')
+    enthaelt(keinGit.error, 'git', 'and says so')
+  })
+  await pruefe('a git repo without an OpenRouter key reports the LLM as off', async () => {
+    const j = await (await formular('/api/repos/extras-suggest', { path: REPO })).json()
+    falsch(j.ok, 'not ok without a key')
+    enthaelt(j.error, 'OPENROUTER_API_KEY', 'names the missing key')
+  })
   await pruefe('the agents page shows the schedule and all three actions of a row', async () => {
     // An agent with a real schedule, deliberately left switched OFF: the scheduler
     // only ever picks up active ones, so this row cannot start anything by itself.
@@ -2390,6 +2419,24 @@ try {
     const leer = await (await hol('/api/fragments/runs-body?repo=999999')).text()
     enthaelt(leer, 'colspan="7"', 'the empty state spans all seven')
     enthaelt(leer, 'no runs yet', 'and says so')
+  })
+  await pruefe('the sidebar says what every tmux session on this machine costs', async () => {
+    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const leiste = html.slice(html.indexOf('id="status-sidebar"'), html.indexOf('</aside>'))
+    enthaelt(leiste, 'id="side-mem"', 'the block is there')
+    enthaelt(leiste, 'tmux memory', 'by its name from lang/en.json')
+    // A figure, and a way to the page that breaks it down per session.
+    wahr(/id="side-mem"[\s\S]*?<a href="\/sessions"><b>(\d+(\.\d+)?\s(MB|GB)|0 MB)<\/b><\/a>/.test(leiste),
+      `a memory figure linked to /sessions (${leiste.slice(leiste.indexOf('id="side-mem"'), leiste.indexOf('id="side-mem"') + 240)})`)
+    enthaelt(leiste, 'sessions', 'and how many sessions it is spread over')
+    // The reading is up to eight minutes old, and the block says so instead of
+    // presenting itself as live — the panel's whole honesty rests on that line.
+    enthaelt(leiste, 'measured every 8 min', 'the update interval, read out of the answer')
+    // It is on EVERY page, like the rest of the sidebar: a bill that runs
+    // quietly must not need a navigation to be seen.
+    for (const pfad of ['/agents', '/settings', '/sessions']) {
+      enthaelt(await (await hol(pfad)).text(), 'id="side-mem"', `${pfad}: there too`)
+    }
   })
   await pruefe('the sidebar fragment renders the same aside the page does', async () => {
     const r = await hol(`/api/fragments/sidebar?repo=${repoId}`)

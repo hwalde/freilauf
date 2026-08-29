@@ -261,6 +261,16 @@ ul.side-counts a:hover .dim { color: inherit; }
 ul.side-counts .n { font-size: var(--fs-title); font-weight: 600; min-width: 1.2em; text-align: right; font-variant-numeric: tabular-nums; }
 ul.side-counts .dim { font-size: inherit; }
 ul.side-counts .overall { flex: 0 0 auto; }
+/* tmux memory: what every session on the machine holds together. One figure, at
+   the weight of the pipeline state above it, linking to the page that breaks it
+   down per session — and under it, in small, how often it is measured, because
+   the reading is up to eight minutes old. The link takes the text colour like
+   the counts above do: inside the sidebar the blue would read as the loudest
+   thing in the column, which this is not. */
+#side-mem b { font-size: var(--fs-title); font-variant-numeric: tabular-nums; }
+#side-mem a { text-decoration: none; color: inherit; }
+#side-mem a:hover { color: var(--accent-act-hover); }
+#side-mem .dim { font-size: 12px; }
 /* In the sidebar a usage row is a GROUP, not a line. Claude carries three
    windows and Cursor a reset note, and as a wrapping flex row (the wide
    layout's shape) label, plan and windows simply flowed into each other — one
@@ -603,6 +613,12 @@ header select:hover { background: rgba(255, 255, 255, .14); }
    the browser's own [hidden] rule, which is why the schedule block already
    needed its own version of this line. One rule for all of them. */
 label[hidden] { display: none; }
+
+/* ---- loading spinner (the worktree-extras dialog) ---------------------- */
+.spinner { display: inline-block; width: 1em; height: 1em; vertical-align: -0.15em;
+  border: 2px solid var(--border-ghost); border-top-color: var(--accent-act-hover);
+  border-radius: 50%; animation: cc-spin .8s linear infinite; }
+@keyframes cc-spin { to { transform: rotate(360deg); } }
 
 /* ---- Quick Run: the button in the header and its dialog ----
    Reachable from every page, because the moment one wants to send a task off is

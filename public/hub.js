@@ -327,6 +327,64 @@
     }
   }
 
+  // ---- "Find worktree extras" dialog (repo create/edit form) ----
+  // The button sits next to the worktree-extras textarea; the dialog shows the
+  // path from the form's path field and, once started, asks the hub — which
+  // checks existence and "is a git project" algorithmically first and only then
+  // calls the model. The answer REPLACES the textarea completely, which the
+  // dialog warns about before the start button becomes useful.
+  const extrasBtn = document.getElementById('extras-find')
+  const extrasDialog = document.getElementById('extras-dialog')
+  if (extrasBtn && extrasDialog) {
+    const form = extrasBtn.closest('form')
+    const pathIn = form && form.querySelector('input[name=path]')
+    const extrasTa = form && form.querySelector('textarea[name=worktree_extras]')
+    const pathOut = document.getElementById('extras-path')
+    const errorOut = document.getElementById('extras-error')
+    const workingOut = document.getElementById('extras-working')
+    const startBtn = document.getElementById('extras-start')
+
+    extrasBtn.addEventListener('click', function () {
+      errorOut.hidden = true
+      workingOut.hidden = true
+      pathOut.textContent = pathIn && pathIn.value.trim() ? pathIn.value.trim() : '—'
+      extrasDialog.showModal()
+    })
+    extrasDialog.querySelectorAll('[data-extras-close]').forEach(function (b) {
+      b.addEventListener('click', function () { extrasDialog.close() })
+    })
+
+    startBtn.addEventListener('click', function () {
+      const p = pathIn ? pathIn.value.trim() : ''
+      if (!p) {
+        errorOut.textContent = T('js.extras_no_path', 'Enter the path first.')
+        errorOut.hidden = false
+        return
+      }
+      startBtn.disabled = true
+      errorOut.hidden = true
+      workingOut.hidden = false
+      const body = new URLSearchParams()
+      body.append('path', p)
+      fetch('/api/repos/extras-suggest', { method: 'POST', body: body, headers: { accept: 'application/json' } })
+        .then(function (r) { return r.json() })
+        .then(function (j) {
+          if (!j.ok) throw new Error(j.error || T('js.error_generic', 'request failed'))
+          if (extrasTa) extrasTa.value = JSON.stringify(j.extras, null, 2)
+          extrasDialog.close()
+          window.cchubToast(T('js.extras_done', 'Worktree extras: {n}', { n: j.extras.length }), { kind: 'ok' })
+        })
+        .catch(function (err) {
+          errorOut.textContent = err.message
+          errorOut.hidden = false
+        })
+        .finally(function () {
+          startBtn.disabled = false
+          workingOut.hidden = true
+        })
+    })
+  }
+
   // ---- inline renaming of a run (overview + detail page) ----
   // Renaming touches only the RUN. An agent keeps its name — that is the whole
   // point: the same agent may run twice and each run gets called what it is.
