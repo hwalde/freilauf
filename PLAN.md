@@ -1,80 +1,52 @@
-# PLAN — edit a run before and during its life (tree 3)
+# PLAN — carry the weekly "daily" collapse to main with a clean GATES.md (tree 3)
 
 ## Goal
 
-Three operator wishes, all about a run that exists but has not finished:
+Run fbb33d06 implemented the "weekly schedule covering all seven weekdays
+reads 'daily'" feature and committed it (e9c3bd5), but the push to main was
+blocked: the committed GATES.md carried machine-specific evidence
+(`/home/...` paths, the machine's login name), which `pruefe-vor-push.sh`
+correctly refuses. The feature never reached main; it lives on the backup
+branch `run/fbb33d06`.
 
-1. **Running runs** (especially single runs) get a changeable **expected
-   duration** — the traffic-light thresholds (soft_overrun at 80 %, overrun at
-   100 %) and the metrics/overview read `runs.expected_minutes` live, so a new
-   value takes effect without touching the agent.
-2. **Not-yet-started runs** (`scheduled`, `deferred`) get a changeable
-   **prompt** — `launchRun()` reads `runs.prompt` when it starts, so the new
-   text is what the session actually launches with.
-3. **Not-yet-started runs** can be **moved to another repo** — the worktree is
-   created from the repo at launch, so changing `runs.repo_id` moves the run's
-   future, not its past.
+This run carries that feature onto current main, with a GATES.md whose
+evidence is machine-free (the full evidence stays in the gitignored
+`.unlazy/`), and lets the hub's integrator merge it.
 
 ## Depth tree
 
 ```
-Root: let the operator edit parts of a run that still has a future
-├── 1  Server: what may be edited per status, applied in one place
-│    └── 1.1  server/run-edit.mjs (new): runEditAllowed() permission matrix,
-│              editRun() validates + applies + writes the 'edited' event and
-│              re-derives a prompt-derived title
-│    └── 1.2  server/web.mjs: POST /api/runs/<id>/edit — form or fetch, with
-│              problemPage for an HTML error
-├── 2  Detail page: the "Edit this run" card
-│    └── 2.1  server/pages.mjs: runEditCard() — rendered on pageRun AND in the
-│              run-detail fragment, fields per runEditAllowed()
-│    └── 2.2  public/hub.js: the fragment swap must not throw away what is
-│              being typed in the card (#run-edit :focus), and the card must
-│              disappear once the run is no longer editable
-│    └── 2.3  lang/en.json, lang/de.json, lang/zh.json: new keys, identical
-│              key set across all three (unit test enforces it)
-├── 3  Verify
-│    ├── 3.1  test/unit.mjs: the permission matrix and editRun() decisions
-│    ├── 3.2  test/e2e.mjs: schedule a run → edit prompt + duration + move it →
-│            it starts with the new prompt in the new repo; a running run's
-│            duration edit; rejected edits for a started run
-│    └── 3.3  test/browser.mjs: the card renders on the detail page with the
-│            fields the status allows
-└── 4  Docs
-     └── 4.1  AGENTS.md + SETUP_WITH_AGENT.md: the run is editable before and
-              during its life — where, and what each status allows
+Root: the weekly one-liner collapse lands on main, GATES.md clean of private values
+├── 1  Server: scheduleText() in server/util.mjs decides the collapse
+│    └── 1.1  all 7 weekdays selected AND schedule_weeks <= 1 →
+│              t('sched.daily_line', { time }) instead of the weekly_line
+├── 2  i18n: one new key in all three language files
+│    └── 2.1  lang/en.json + lang/de.json + lang/zh.json: sched.daily_line
+│              ("daily at {time}" / "täglich um {time}" / "每天 {time}")
+├── 3  Tests: the collapse, the multi-week exception, the unchanged partial
+│         selection (test/unit.mjs)
+└── 4  Clean merge surface
+     └── 4.1  GATES.md evidence without machine paths — a pre-push hook that
+               refuses /home/... must stay quiet (pruefe-vor-push.sh)
+     └── 4.2  the hub's integrator merges; origin/main carries the feature
 ```
 
 ## Decisions
 
-- **`runs.expected_minutes` is the only thing duration editing touches.** The
-  already-running agent is deliberately NOT told — the value in its prompt is
-  informational; the watcher's thresholds, the metrics and the overview read
-  the column live. New prompt/duration edits for a *running* run would fight
-  the session, so only the duration is offered there.
-- **"Not started" = `scheduled` + `deferred`.** Both have no session and no
-  worktree; both start through `launchRun()` which reads the stored prompt.
-  A `deferred` run waits on quota exactly as a `scheduled` one waits on its
-  time — same editability, same rule.
-- **A prompt change re-derives a prompt-derived title.** If the run's title is
-  still the fallback of the OLD prompt (i.e. nobody renamed it), it becomes the
-  fallback of the NEW prompt and `applyGeneratedTitle()` gets another chance —
-  an operator name or an LLM title is never overwritten.
-- **Moving to the repo the run already lives in is a no-op, not an error.**
-  The combined form pre-fills the repo select; a duration-only edit would
-  otherwise fail on its own untouched field.
-- **One combined card on the detail page**, a `<details>` that is closed by
-  default, fields rendered per `runEditAllowed()`. Classic `<form method=post>`
-  + redirect, like the archive button — the fragment live-updates the card
-  afterwards, and the run-detail fragment swap is skipped while the card has
-  focus so nothing is lost mid-typing.
-- **The 'edited' event goes through `addEvent()`** like every other run
-  transition, so the detail page's event list and the live channel stay honest
-  without a second announce path.
+- **Reuse the feature commit's content, not its GATES.md.** The code, i18n and
+  test changes from e9c3bd5 apply cleanly to current main (verified with
+  `git apply --check`); the GATES.md of that commit is exactly the problem, so
+  it is replaced by one whose evidence is machine-free.
+- **The evidence must never contain the working directory.** The gate checker
+  records `cwd=/home/...` by default; for the pushed ledger the evidence states
+  only the outcome. This is the repo's own precedent (commit 4680116 "GATES:
+  strip machine-specific evidence before pushing").
+- **Do not push to main by hand.** The hub integrates on `cc-report done`; the
+  pushed tree is the same, so the pre-push hook is checked against the local
+  committed state before reporting.
 
 ## Status log
 
-- [x] 2026-08-28: plan written
-- [x] 2026-08-28: leaves 1–4 implemented; unit (241), e2e (224, incl. the new
-      "Edit a run before and during its life" group), browser (50, incl. the
-      A15 card group), proxy (4), deploy (9) green; all four gates met
+- [x] 2026-08-29: plan written
+- [x] 2026-08-29: feature applied, gates verified (unit 260, browser 52, e2e 231),
+      pre-push hook OK on the committed state, committed; report done sent

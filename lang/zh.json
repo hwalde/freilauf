@@ -430,6 +430,7 @@
   "sched.once_on": "一次，于 {ts}",
   "sched.once_none": "一次（无时间点）",
   "sched.weekly_word": "每周",
+  "sched.daily_line": "每天 {time}",
   "sched.weekly_line": "{takt}：{days} {time}",
   "sched.no_days": "（无日期）",
   "sched.manual": "手动",

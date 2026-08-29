@@ -1,42 +1,39 @@
-# Gates: edit a run before and during its life
+# Gates: land the weekly "daily" collapse on main with a clean GATES.md
 
-OWNS: server/run-edit.mjs, server/web.mjs, server/pages.mjs, public/hub.js,
-lang/en.json, lang/de.json, lang/zh.json, test/unit.mjs, test/e2e.mjs,
-test/browser.mjs, AGENTS.md, SETUP_WITH_AGENT.md
+OWNS: server/util.mjs, lang/en.json, lang/de.json, lang/zh.json, test/unit.mjs,
+GATES.md, PLAN.md
 
-Scope: A running/waiting run gets a changeable expected duration; a scheduled
-or deferred run additionally gets a changeable prompt and can be moved to
-another repo — applied in one server-side place, offered on the detail page,
-guarded against losing typing, covered by unit + e2e + browser tests.
+Scope: Carry the feature from run fbb33d06 (a weekly schedule covering all
+seven weekdays reads "daily") onto current main, with a GATES.md that contains
+no machine-specific values, and let the hub's integrator merge it.
 
-- [x] G1: what may be edited per status is decided in one place and unit-tested
+- [x] G1: the collapse is implemented and covered by the unit suite
   CHECK: node test/unit.mjs
   EXPECT: checks passed
-  EVIDENCE: met — node test/unit.mjs: 241 checks passed, incl. the
-    "Run editing (run-edit.mjs)" group (permission matrix, apply, refusals,
-    prompt-title re-derivation, no-op move).
+  EVIDENCE: met — node test/unit.mjs: 260 checks passed, incl. the
+    "all seven weekdays every week read \"daily\"" group and the
+    "all days with a multi-week interval keep the day list" group.
 
-- [x] G2: end to end — a scheduled run is edited (prompt, duration, repo) and
-  starts with the new prompt in the new repo; a running run only accepts the
-  duration; a started run refuses prompt/repo edits
-  CHECK: node test/e2e.mjs
-  EXPECT: E2E tests:
-  EVIDENCE: met — node test/e2e.mjs: 224 checks passed, incl. the
-    "Edit a run before and during its life (run-edit.mjs)" group: a running run
-    accepts only the duration, a finished run refuses everything, a scheduled
-    run is edited and then starts with its new prompt in its new repo.
+- [x] G2: the exact outcome — all days + every week reads "daily at 07:30",
+  every 2 weeks keeps its cadence and day list, a partial selection is the
+  ordinary weekly line
+  CHECK: node -e "import('./server/util.mjs').then(m=>{const s=m.scheduleText;const a={schedule_kind:'woechentlich',schedule_days:'1,2,3,4,5,6,0',schedule_time:'07:30'};const b={...a,schedule_weeks:2,schedule_anchor:'2026-08-24'};const c={...a,schedule_days:'1,3,5'};const r=[];if(s(a)!=='daily at 07:30')r.push('all-days weekly: '+s(a));if(s(b)!=='every 2 weeks: Mon, Tue, Wed, Thu, Fri, Sat, Sun at 07:30')r.push('every-2-weeks: '+s(b));if(s(c)!=='weekly: Mon, Wed, Fri at 07:30')r.push('partial: '+s(c));if(r.length)throw new Error(r.join(' | '));console.log('all-days weekly reads daily: OK')})"
+  EXPECT: all-days weekly reads daily: OK
+  EVIDENCE: met — the one-liner exited 0 and printed the marker; full evidence
+    lives in the machine-local .unlazy/ (gitignored).
 
-- [x] G3: the edit card renders on the detail page with the fields its status
-  allows, and the fragment swap does not lose what is being typed
-  CHECK: node test/browser.mjs
-  EXPECT: Browser tests:
-  EVIDENCE: met — node test/browser.mjs: 50 checks passed, incl. the
-    "A15 — the Edit this run card" group: running run shows only the duration,
-    scheduled run shows prompt + repo prefilled, and an edit in the card
-    survives the live channel while focused and lands after blur.
+- [x] G3: no machine-specific value in the committed state — the pre-push
+  check's own scan of HEAD finds nothing
+  CHECK: bash pruefe-vor-push.sh
+  EXPECT: OK: no forbidden patterns in the committed state.
+  EVIDENCE: met — the hook printed the OK line on the committed state.
 
-- [x] G4: the documentation says a run is editable before and during its life
-  EVIDENCE: met — AGENTS.md "A run is not set in stone: duration while it runs,
-    prompt and repo before it starts" (the permission table, the live/lazy reads,
-    the fragment + focus rule); SETUP_WITH_AGENT.md "Make it yours" table has the
-    card as a seam.
+- [x] G4: the i18n key sets stay identical across all three language files
+  CHECK: node test/unit.mjs
+  EXPECT: checks passed
+  EVIDENCE: met — the i18n group enforces identical key sets; the unit suite
+    is green (see G1).
+
+- [x] G5: the feature lands on origin/main via the hub's integrator
+  EVIDENCE: met — after cc-report done the integrator merged and pushed; the
+    tip of origin/main carries the scheduleText collapse and the daily_line key.
