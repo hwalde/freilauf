@@ -1,48 +1,53 @@
-# PLAN — report messages begin with the repo/run or repo/AGENT header (tree 3)
+# PLAN — the run detail page shows its prompt in a collapsible block near the top (tree 3)
 
 ## Goal
 
-The Telegram messages that carry a run's report should identify, at first
-glance, which repo and which run or agent is reporting. Before this change the
-header sat behind the status line and read `— single run @ repo (harness/model)`
-or `— <agent> @ repo (harness/model)`. The operator wanted the attribution
-first, and a dedicated shape for agent runs.
+The run detail page (`/runs/<id>`) never shows the run's prompt — the very
+task the run was told to do is the one thing not on its own page. A finished
+run keeps only its title and chips; to see what it was asked one has to guess
+from the report. This change puts the prompt on the detail page, folded away
+(`<details>`), high up so the page answers "what was this run told to do?" at
+a glance.
 
 ## Depth tree
 
 ```
-Root: report messages begin with the repo/run or repo/AGENT header
-├── 1  Header helper: server/reports.mjs
-│    ├── 1.1  reportHeader(run): single run → `<repo> / <run-title> REPORT:`
-│    └── 1.2  reportHeader(run): agent run → `<repo> / AGENT <agent-name> REPORT:`
-├── 2  The three report-carrying messages use it
-│    ├── 2.1  done (doneText): header + report, status line after the report
-│    ├── 2.2  failed: same header + body shape, `❌ Run failed · <harness>` last
-│    └── 2.3  help: same header + body shape, `🆘 Help call · <harness>` last
-├── 3  Verification
-│    ├── 3.1  scripts/gates-msg-header.mjs: exact header output for both kinds
-│    ├── 3.2  unit suite (270 checks)
-│    └── 3.3  e2e suite (244 checks)
-└── 4  Teardown race in test/sandkasten.mjs: retry the rmSync — a detached
-         run_merged flow command (`sleep 1; touch`) can still land in the
-         sandbox while the suite cleans up (pre-existing flake, surfaced by 3.3)
+Root: run detail page shows the prompt in a collapsible block near the top
+├── 1  Render the block (server/pages.mjs)
+│    └── 1.1  runPromptCard(run) — <details id="run-prompt">, collapsed, <pre> content
+│         └── 1.1.1  placed in pageRun between runDetailHead and runChips
+├── 2  i18n (lang/en.json, lang/de.json, lang/zh.json)
+│    └── 2.1  run.prompt key in all three files (identical key sets enforced by unit test)
+├── 3  Styling (public/hub.css)
+│    └── 3.1  details.run-prompt — card look like details.run-edit
+└── 4  Tests
+     ├── 4.1  browser: block present, collapsed, unfolds on click, sits above the edit card
+     └── 4.2  e2e: block on the page, prompt text present, between title and chips
 ```
 
 ## Decisions
 
-- **The status line follows the report.** The request fixes the *beginning* of
-  the message; `✅ Done · Duration: … · Merged into main: …` stays, but after
-  the report body instead of before it.
-- **`laufKopf` is replaced, not extended.** Its inline `— name @ repo
-  (harness/model)` had no place in the new header; the harness/model label
-  moved into the status line (`harnessLabel`).
-- **`test/sandkasten.mjs` teardown is hardened** (bounded retry on `rmSync`):
-  the `ENOTEMPTY` was a pre-existing race, not a regression of this change, but
-  a suite that dies in cleanup after all checks pass makes every gate flaky.
+- **`<details>` collapsed by default.** "Aufklappbar" is the request; the block
+  is the one thing the page needs when it needs it, and a long prompt must not
+  dominate the page it is folded into. One click opens it.
+- **Not part of the run-detail fragment.** The prompt does not change while a
+  run works, and the fragment swap would reset the open state of a `<details>`
+  on every event — the operator reading the prompt would have it closed under
+  him. Same rule as the goal card, which is page-only for the same reason.
+- **Between title and chips.** "Weit oben" reads as the first block under the
+  title; the fact-chips follow. The prompt is content, the chips are metadata.
+- **Dedicated i18n key `run.prompt`** ("Prompt" / "Prompt" / "提示词") rather
+  than reusing the form label `runform.prompt` — a section heading is not a
+  field label, and the key-set test keeps the three files honest.
 
 ## Status log
 
 - [x] 2026-08-29: plan written
-- [x] 2026-08-29: header implemented, three messages updated, gate script
-      written; unit 270 + e2e 244 green, GATES.md clean of machine paths;
-      committed, report done sent
+- [x] 2026-08-29: implemented (runPromptCard in pages.mjs, placement in pageRun,
+      i18n run.prompt en/de/zh, details.run-prompt in hub.css); unit 262, e2e 236,
+      browser 53, proxy 4, deploy 9 all green; GATES.md all four met via the
+      checker with machine-free evidence; committed
+- [x] 2026-08-29: merged origin/main (report-header run a27e6f9) — only
+      PLAN.md/GATES.md conflicted (both are per-run ledgers, kept mine); after
+      the merge unit 270, browser 56, e2e 245 all green; GATES.md evidence
+      rewritten machine-free, pre-push check OK

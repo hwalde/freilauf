@@ -1,42 +1,38 @@
-# Gates: report messages begin with the repo/run or repo/AGENT header
+# Gates: the run detail page shows its prompt in a collapsible block near the top
 
-OWNS: server/reports.mjs, scripts/gates-msg-header.mjs, test/sandkasten.mjs,
-GATES.md, PLAN.md
+OWNS: server/pages.mjs, public/hub.css, lang/en.json, lang/de.json, lang/zh.json,
+test/browser.mjs, test/e2e.mjs, PLAN.md, GATES.md
 
-Scope: The Telegram messages that carry a run's report — `done`, `failed`,
-`help` — begin with a header that names the repo and the reporting entity:
-`<repo> / <run-title> REPORT:` for a single run, `<repo> / AGENT <agent-name>
-REPORT:` for an agent run, followed by a blank line and the report body. The
-status line (✅ Done / ❌ Run failed / 🆘 Help call + harness + duration +
-branch + merge + incidents) follows the report instead of preceding it.
+Scope: The run detail page renders the run's prompt in a collapsed `<details>`
+block high on the page — between the title and the fact chips. The block is
+styled like the existing detail-page cards, carries a dedicated i18n key in all
+three languages, and is verified by a browser test (presence, collapsed state,
+toggle, position) and an e2e assertion (prompt text on the page, position).
 
-- [x] G1: `doneText` begins with the header and the report for a single run,
-      and the status line follows the report
-  CHECK: node test/unit.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — the unit suite passed 270 checks (all groups green). Full
-    evidence lives in the machine-local .unlazy/ (gitignored).
-
-- [x] G2: `doneText` names an agent run as `AGENT <agent-name>` and a single
-      run by its title
-  CHECK: node scripts/gates-msg-header.mjs
-  EXPECT: message-header gates OK
-  EVIDENCE: met — the check script printed its success marker; the unit suite
-    exercises the same functions. Full evidence lives in the machine-local
-    .unlazy/ (gitignored).
-
-- [x] G3: the `failed` and `help` messages begin with the same header + body
-      shape, the status marker moved after the body
-  CHECK: node test/unit.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — same unit suite as G1 (270 checks), the failed/help strings
-    are built from the same `reportHeader` helper as `doneText`. Full evidence
-    lives in the machine-local .unlazy/ (gitignored).
-
-- [x] G4: no message-text regression in the e2e suite
+- [x] G1: the run detail page renders the prompt block between title and chips
   CHECK: node test/e2e.mjs
   EXPECT: checks passed
-  EVIDENCE: met — the e2e suite passed 244 checks, including the message-text
-    paths and the sandbox teardown (hardenened against a detached flow
-    command racing the cleanup). Full evidence lives in the machine-local
-    .unlazy/ (gitignored).
+  EVIDENCE: met — the e2e suite passed 245 checks, incl. "the detail page shows
+    the prompt in a collapsible block near the top": the page carries
+    `id="run-prompt"`, the run's prompt text, and the three markers in order
+    title → prompt → chips. Full evidence lives in the machine-local .unlazy/
+    (gitignored).
+
+- [x] G2: the block is collapsed by default and unfolds on the summary click
+  CHECK: node test/browser.mjs
+  EXPECT: checks passed
+  EVIDENCE: met — the browser suite passed 56 checks, incl. "the prompt block
+    sits between title and chips, folded away, and unfolds": `#run-prompt` is
+    closed at page load, stands between `#run-head` and `ul.chips`, carries the
+    prompt text, and opens on the summary click.
+
+- [x] G3: the i18n key sets stay identical across all three language files
+  CHECK: node test/unit.mjs
+  EXPECT: checks passed
+  EVIDENCE: met — the unit suite passed 270 checks, incl. the key-set test; the
+    new `run.prompt` key exists in en, de and zh with non-empty values.
+
+- [x] G4: the whole unit suite stays green with the new key
+  CHECK: node test/unit.mjs
+  EXPECT: checks passed
+  EVIDENCE: met — the same 270-check run covers this gate (see G3).

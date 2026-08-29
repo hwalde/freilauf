@@ -618,6 +618,15 @@ try {
     enthaelt(await (await hol(`/runs/${R1}`)).text(), 'alles erledigt', 'report on the page')
   })
 
+  await pruefe('the detail page shows the prompt in a collapsible block near the top', async () => {
+    const html = await (await hol(`/runs/${R1}`)).text()
+    enthaelt(html, 'id="run-prompt"', 'the prompt block exists')
+    enthaelt(html, 'E2E-Auftrag: nichts tun.', 'the run\'s prompt text is on the page')
+    const reihe = ['id="run-head"', 'id="run-prompt"', 'class="chips"'].map(s => html.indexOf(s))
+    wahr(reihe[0] !== -1 && reihe[1] !== -1 && reihe[2] !== -1, 'title, prompt block and chips all rendered')
+    gleich(reihe[0] < reihe[1] && reihe[1] < reihe[2], true, 'title → prompt → chips (prompt sits near the top)')
+  })
+
   // ------------------------------------------------------------------
   gruppe('cursor: a run ends even without cc-report')
 

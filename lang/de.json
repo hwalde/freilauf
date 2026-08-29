@@ -164,6 +164,7 @@
   "run.archive_hint": "Ein archivierter Lauf ist aus der Übersicht ausgeblendet, bleibt hier aber vollständig lesbar.",
   "run.archived_since": "archiviert {ts}",
   "run.report": "Report",
+  "run.prompt": "Prompt",
   "run.metrics": "Metriken",
   "run.runtime": "Laufzeit",
   "run.tokens": "Tokens",
