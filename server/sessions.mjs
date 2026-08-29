@@ -9,6 +9,7 @@
 //
 // This module is the one place that knows about sessions:
 //   - listSessions()           what tmux has, enriched with the run behind it
+//   - sessionMemory()          what all of them cost together, cached
 //   - killSessions()           end them, and keep the run records honest
 //   - reconcileClosedSession() what an ended session means for its run
 //   - sessionKeepMs()          how long a finished session may stay
@@ -268,6 +269,70 @@ export async function listSessions() {
   out.sort((a, b) => (a.createdMs ?? 0) - (b.createdMs ?? 0))
   return out
 }
+
+// -------------------------------------------------- what they cost together
+
+/**
+ * The memory of ALL tmux sessions on this machine, as the status sidebar shows
+ * it — total RSS of every session's process tree, how many sessions there are
+ * and how many of them still carry a working agent. Foreign sessions count too:
+ * the question the panel answers is what the MACHINE is holding, not what this
+ * hub booked.
+ *
+ * It goes through listSessions(), so the sidebar's total and the sessions
+ * page's own summary are the same number by construction — the panel exists to
+ * make the page's reading visible everywhere, not to compute a second one.
+ *
+ * Cached for eight minutes, and that TTL is the update interval: the sidebar
+ * re-fetches its fragment every 30 s (hub.js), and this cache decides how often
+ * `tmux list-sessions`/`list-panes`/`ps` are really run behind it — the same
+ * division of labour usage.mjs and balances.mjs have with the vendor APIs. A
+ * `ps -eo` over every process on the machine is not something a page render
+ * should pay for more often than the number can meaningfully change.
+ */
+const MEM_CACHE_MS = Number(process.env.CCHUB_SESSION_MEM_CACHE_MS ?? 8 * 60_000)
+let memCache = { at: 0, value: null }
+// One measurement in flight, released by the promise and not at the end of the
+// body — with no tmux server the body has an `await` but could still resolve
+// before the assignment below; see usage.mjs for what that cost there.
+let memInflight = null
+
+export async function sessionMemory({ force = false } = {}) {
+  const cached = memCache.value
+  if (!force && cached && Date.now() - memCache.at < MEM_CACHE_MS) return cached
+  if (memInflight) return !force && cached ? cached : memInflight
+  const task = (async () => {
+    const sessions = await listSessions()
+    const value = {
+      sessions: sessions.length,
+      running: sessions.filter(s => s.state === 'agent_running').length,
+      rssKb: sessions.reduce((sum, s) => sum + (s.resources?.rssKb ?? 0), 0),
+      measuredAtMs: Date.now(),
+      // The panel says how often this is taken, so a reading up to eight
+      // minutes old cannot pass itself off as live. It travels WITH the value
+      // because the TTL is configurable — a hardcoded "8" in a translation
+      // would be a lie the moment someone sets the variable.
+      intervalMs: MEM_CACHE_MS,
+    }
+    memCache = { at: Date.now(), value }
+    return value
+  })()
+  memInflight = task
+  const release = () => { if (memInflight === task) memInflight = null }
+  task.then(release, release)
+  // Stale-while-revalidate, for the reason every panel on this sidebar is:
+  // statusSidebar() awaits this on EVERY page, and the measurement shells out
+  // three times. An expired entry is handed back as it stands while the fresh
+  // one is measured behind it; the sidebar's own timer brings it in.
+  if (!force && cached) return cached
+  return task
+}
+
+/** Test hook: let the cache age by `ms`, so staleness can be tested without waiting. */
+export function _sessionMemoryAge(ms) { memCache.at -= ms }
+
+/** Test hook: drop the cache. */
+export function _sessionMemoryReset() { memCache = { at: 0, value: null }; memInflight = null }
 
 // ---------------------------------------------------------------- ending
 

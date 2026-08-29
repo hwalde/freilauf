@@ -789,7 +789,8 @@ count links to `/?repo=…&status=…`, the overview's one filter; when the othe
 repos together hold more of the same status, the sum across ALL repos follows as
 a dimmed `(y overall)` suffix outside the link, shown only when it differs), open
 incidents split the way `incidents.mjs` splits them, subscription usage and
-provider balances (`usagePanel()`, `id="usage-panel"`).
+provider balances (`usagePanel()`, `id="usage-panel"`), and what every tmux
+session on the machine holds together (`memoryBlock()`, `id="side-mem"`).
 
 Before this, status stood in three places and fully on exactly one page: two
 quota bars in the header, the pipeline switch as running text beside them, and
@@ -868,6 +869,20 @@ application comes out of it.
   (usage.mjs/balances.mjs, now one minute, `CCHUB_USAGE_CACHE_MS`/
   `CCHUB_BALANCE_CACHE_MS` in the suite) decide how often the vendors are
   really called, and the stale-while-revalidate refresh lands on the next tick.
+- **The tmux memory block works exactly that way, on an eight-minute clock.**
+  `sessionMemory()` (sessions.mjs, `CCHUB_SESSION_MEM_CACHE_MS`) measures the
+  total RSS of every tmux session on the machine — foreign ones included, the
+  question is what the MACHINE holds — through `listSessions()`, so the sidebar's
+  total and the sessions page's own summary are the same number by construction.
+  Its cache **is** the update interval: the 30-second timer above asks the same
+  fragment, and this TTL decides how often `tmux list-sessions`/`list-panes` and
+  a `ps` over every process really run. Stale-while-revalidate like the two
+  panels beside it, warmed in `hub.mjs` at startup, and the block **says how
+  often it measures** (the exact time is the tooltip) — a reading up to eight
+  minutes old that presents itself as live is the quiet staleness the claude
+  quota panel was already caught on. Not a ticking relative time, because the
+  same markup is rendered into the page and into the fragment and the e2e suite
+  holds those two to be byte for byte identical.
 - Under ~1000 px it drops **below** the content. A table narrowed by the
   sidebar is the one thing it must never cause.
 
@@ -1458,6 +1473,10 @@ bill ran for days (thirty sessions, 15 GB, measured).
   command, and **RSS/CPU of the whole process tree** (one `ps`, summed from the
   pane PID down) — the pane itself is only a shell and would understate it by an
   order of magnitude.
+- **The sum of all of it is in the status sidebar**, on every page
+  (`sessionMemory()`, see there): the bill this page exists for runs quietly, so
+  the one number that says how big it has grown must not need a navigation to be
+  seen.
 
 ### The work is done — who is still there, and who only left a screen
 

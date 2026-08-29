@@ -2775,6 +2775,30 @@ try {
     gleich(k.join(','), 'mit-lauf', 'a foreign session is only ended by hand')
   })
 
+  await pruefe('the memory reading is measured on ONE clock: the cache is the update interval', async () => {
+    // The sidebar asks for this on every page and re-fetches itself every 30 s;
+    // what keeps `tmux list-sessions` and a `ps` over the whole machine from
+    // running that often is this cache alone. So the cache IS the eight-minute
+    // interval, and that is what is tested here — not the number, which belongs
+    // to whatever tmux happens to hold on the machine running the suite.
+    se._sessionMemoryReset()
+    const a = await se.sessionMemory()
+    wahr(a && Number.isFinite(a.rssKb) && a.rssKb >= 0, `a measurement (${JSON.stringify(a)})`)
+    wahr(a.sessions >= 0 && a.running >= 0 && a.running <= a.sessions,
+      'the running ones are a subset of all of them')
+    gleich(a.intervalMs, 8 * 60_000, 'eight minutes by default, and it travels with the value')
+    gleich(await se.sessionMemory(), a, 'a second call inside the window measures nothing anew')
+    // Expired: what comes back is still the old object (stale-while-revalidate —
+    // no page render may wait on three subprocesses), and the refresh behind it
+    // replaces it.
+    se._sessionMemoryAge(9 * 60_000)
+    gleich(await se.sessionMemory(), a, 'an expired entry is handed back as it stands')
+    await new Promise(r => setTimeout(r, 300))
+    const b = await se.sessionMemory()
+    wahr(b.measuredAtMs >= a.measuredAtMs, 'and behind it a fresh measurement landed')
+    se._sessionMemoryReset()
+  })
+
   // ------------------------------------------------------------------
   gruppe('Integration: finish gate, integrator, escalation (integrate.mjs)')
 
