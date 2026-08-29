@@ -430,6 +430,7 @@
   "sched.once_on": "einmalig am {ts}",
   "sched.once_none": "einmalig (kein Termin)",
   "sched.weekly_word": "wöchentlich",
+  "sched.daily_line": "täglich um {time}",
   "sched.weekly_line": "{takt}: {days} um {time}",
   "sched.no_days": "(keine Tage)",
   "sched.manual": "manuell",

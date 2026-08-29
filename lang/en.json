@@ -430,6 +430,7 @@
   "sched.once_on": "once on {ts}",
   "sched.once_none": "once (no date)",
   "sched.weekly_word": "weekly",
+  "sched.daily_line": "daily at {time}",
   "sched.weekly_line": "{takt}: {days} at {time}",
   "sched.no_days": "(no days)",
   "sched.manual": "manual",

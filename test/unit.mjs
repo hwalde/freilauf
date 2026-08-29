@@ -156,6 +156,18 @@ try {
     gleich(scheduleText({ schedule_kind: 'manuell' }), 'manual', 'manual')
     enthaelt(scheduleText({ schedule_kind: 'cron', schedule: '0 6 * * *' }), '0 6 * * *', 'cron')
   })
+  await pruefe('all seven weekdays every week read "daily"', () => {
+    const alle = { ...woe, schedule_days: '1,2,3,4,5,6,0' }
+    gleich(scheduleText(alle), 'daily at 07:30', 'all days every week = daily')
+    const alleOhneTakt = { ...alle, schedule_weeks: undefined }
+    gleich(scheduleText(alleOhneTakt), 'daily at 07:30', 'missing interval means every week')
+  })
+  await pruefe('all days with a multi-week interval keep the day list', () => {
+    const alleZwei = { ...woe, schedule_days: '0,1,2,3,4,5,6', schedule_weeks: 2, schedule_anchor: '2026-08-24' }
+    enthaelt(scheduleText(alleZwei), 'every 2 weeks', 'cadence kept')
+    enthaelt(scheduleText(alleZwei), 'Sun', 'days still listed')
+    enthaelt(scheduleText(alleZwei), 'Mon', 'days still listed')
+  })
   await pruefe('stays readable with incomplete settings', () => {
     const t = scheduleText({ schedule_kind: 'woechentlich' })
     wahr(typeof t === 'string' && t.length > 0, 'returns text instead of throwing')

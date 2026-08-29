@@ -227,9 +227,17 @@ export function scheduleText(agent) {
       ? t('sched.once_on', { ts: String(agent.run_at).replace('T', ' ') })
       : t('sched.once_none')
     case 'woechentlich': {
-      const days = String(agent.schedule_days ?? '').split(',').filter(x => x !== '')
-        .map(x => { const w = WOCHENTAGE.find(w => w.n === Number(x)); return w ? t(w.key) : x }).join(', ')
+      const roh = String(agent.schedule_days ?? '').split(',').filter(x => x !== '')
       const n = Number(agent.schedule_weeks) || 1
+      // Every weekday at the same time, every week — that is just "daily", and
+      // listing all seven days would say the same thing longer. A multi-week
+      // cadence is NOT daily, so it keeps its day list.
+      const alleWochentage = roh.length >= WOCHENTAGE.length &&
+        roh.every(x => WOCHENTAGE.some(w => w.n === Number(x)))
+      if (alleWochentage && n === 1) {
+        return t('sched.daily_line', { time: agent.schedule_time ?? '??:??' })
+      }
+      const days = roh.map(x => { const w = WOCHENTAGE.find(w => w.n === Number(x)); return w ? t(w.key) : x }).join(', ')
       const takt = n === 1 ? t('sched.weekly_word') : t('sched.every_n_weeks', { n })
       return t('sched.weekly_line', { takt, days: days || t('sched.no_days'), time: agent.schedule_time ?? '??:??' })
     }
