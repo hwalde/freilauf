@@ -210,6 +210,10 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // production grace period for it.
       CCHUB_GOAL_DELAY_MS: '100',
       CCHUB_GOAL_WAIT_MS: '10000',
+      // The cleanup auto-trigger reads the machine's REAL tmux memory (the
+      // sandbox shares the tmux server); a live hub must not start cleanup
+      // runs because of THIS suite. The manual path stays fully testable.
+      CCHUB_CLEANUP_AUTO_OFF: '1',
       NODE_OPTIONS: '--disable-warning=ExperimentalWarning',
     }
     // A suite may override or add to the hub's environment — e.g. shorten the
@@ -265,6 +269,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     process.env.CCHUB_CURSOR_DIR = join(SB, 'cursor')
     process.env.CCHUB_GOAL_DELAY_MS = '100'
     process.env.CCHUB_GOAL_WAIT_MS = '10000'
+    process.env.CCHUB_CLEANUP_AUTO_OFF = '1'
     delete process.env.OPENROUTER_API_KEY
     const { tick } = await import('../server/watcher.mjs')
     return tick

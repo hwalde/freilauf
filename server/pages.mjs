@@ -33,6 +33,7 @@ import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
 import { resumeCommand } from './integrate.mjs'
 import { listSessions, sessionMemory, sessionKeepHours, currentKeepMs, paneAlive, archiveSessionKeepHours } from './sessions.mjs'
+import { cleanupSettings, cleanupConfigured, cleanupPrompt, cleanupRunInFlight, startCleanupRun } from './cleanup.mjs'
 import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
 import { flowRunKeepDays } from './flows/db.mjs'
 // The flow block of the detail page is rendered in server/flows/ and belongs to
@@ -374,11 +375,24 @@ async function memoryBlock() {
   let mem = null
   try { mem = await sessionMemory() } catch { mem = null }
   if (!mem) return ''
+  const cleanup = cleanupConfigured() ? cleanupSettings() : null
+  const free = cleanup
+    ? `<div class="mem-free">
+        <button type="button" class="btn ghost mem-free-open">${e(t('side.mem_free'))}</button>
+        <form class="mem-free-form" hidden>
+          <input type="number" name="target" min="0" step="0.1" value="${e(String(cleanup.targetGb))}"
+                 placeholder="${e(t('side.mem_free_ph'))}" aria-label="${e(t('side.mem_free_ph'))}">
+          <button type="submit">${e(t('side.mem_free_go'))}</button>
+          <button type="button" class="mini mem-free-cancel" aria-label="${e(t('side.mem_free_cancel'))}">✕</button>
+        </form>
+      </div>`
+    : `<a class="side-cleanup-link" href="/settings/cleanup">${e(t('side.mem_free_none'))}</a>`
   return `<div class="side-block" id="side-mem"><span class="side-label">${e(t('side.mem'))}</span>
     <div><a href="/sessions"><b>${e(mem.rssKb ? byteText(mem.rssKb) : '0 MB')}</b></a>
       <span class="dim">${e(t('side.mem_sessions', { n: mem.sessions }))}</span></div>
     <div class="dim"${mem.measuredAtMs ? ` title="${e(fmtDateTime(mem.measuredAtMs))}"` : ''}>${
-      e(t('side.mem_every', { min: Math.max(1, Math.round(mem.intervalMs / 60_000)) }))}</div></div>`
+      e(t('side.mem_every', { min: Math.max(1, Math.round(mem.intervalMs / 60_000)) }))}</div>
+    ${free}</div>`
 }
 
 /**
@@ -1398,9 +1412,27 @@ export async function pageSessions(req, res, url) {
   const runningCount = sessions.filter(s => s.state === 'agent_running').length
   const rssTotal = sessions.reduce((n, s) => n + s.resources.rssKb, 0)
   const hours = Math.round(currentKeepMs() / 3_600_000 * 10) / 10
+  const cleanup = cleanupSettings()
+  const cleanupBox = cleanupConfigured(cleanup)
+    ? `<div class="card cleanup-card">
+    <h3>${e(t('sessions.free_title'))}</h3>
+    <p class="dim">${e(t('sessions.free_hint'))}</p>
+    <form class="cleanup-free" id="cleanup-free">
+      <input type="number" name="target" min="0" step="0.1" value="${e(String(cleanup.targetGb))}"
+             placeholder="${e(t('sessions.free_ph'))}" aria-label="${e(t('sessions.free_ph'))}">
+      <input name="keep" placeholder="${e(t('sessions.free_keep_ph'))}" aria-label="${e(t('sessions.free_keep_ph'))}">
+      <button type="submit">${e(t('sessions.free_btn'))}</button>
+      <span class="cleanup-result" id="cleanup-result"></span>
+    </form>
+  </div>`
+    : `<div class="card">
+    <h3>${e(t('sessions.free_title'))}</h3>
+    <p class="dim">${e(t('sessions.free_none'))} <a href="/settings/cleanup">${e(t('nav.settings'))}</a></p>
+  </div>`
   const body = `
   <h2>${e(t('sessions.title'))}</h2>
   <p class="dim">${e(t('sessions.intro'))}</p>
+  ${cleanupBox}
   <div class="sess-bar">
     <label class="chk"><input type="checkbox" id="sess-show-running"> ${e(t('sessions.show_running'))}</label>
     <label class="chk"><input type="checkbox" id="sess-all"> ${e(t('sessions.select_all'))}</label>
@@ -1445,6 +1477,8 @@ export async function pageSettings(req, res, url) {
      <span class="dim">${e(t('settings.favorites_hint'))}</span></p>
   <p><a class="btn" href="/settings/merge">${e(t('merge.settings_title'))}</a>
      <span class="dim">${e(t('settings.merge_hint', { setup: mergeSettingsSummary() }))}</span></p>
+  <p><a class="btn" href="/settings/cleanup">${e(t('cleanup.settings_title'))}</a>
+     <span class="dim">${e(t('settings.cleanup_hint', { setup: cleanupSettingsSummary() }))}</span></p>
   <form method="post" action="/settings/save" class="settings form-grid">
     <label>${e(t('settings.language'))} <select name="ui_language">${Object.entries(LANGUAGES).map(([code, label]) =>
       `<option value="${code}" ${(s.ui_language ?? 'en') === code ? 'selected' : ''}>${e(label)}</option>`).join('')}</select></label>
@@ -1641,6 +1675,96 @@ export function mergeSettingsSummary() {
   if (!harness) return t('merge.not_configured')
   const model = db.prepare(`SELECT value FROM settings WHERE key='merge_resolver_model'`).get()?.value
   return [harnessLabel(harness) || harness, model].filter(Boolean).join(' / ')
+}
+
+// ---------------- tmux cleanup (Settings → tmux cleanup) ----------------
+//
+// The setup for the tmux-cleanup agent: which coding agent runs it (the SAME
+// runSetupFields block the run forms use, only styled for a settings page), on
+// which threshold (GB) it starts by itself, down to which target (GB) it must
+// free, and the prompt. Editing the prompt edits the template; the live values
+// are filled in at start time (server/cleanup.mjs).
+
+function cleanupWerte(s) {
+  return {
+    harness: s.cleanup_harness ?? '',
+    provider: s.cleanup_provider ?? '',
+    or_provider: s.cleanup_or_provider ?? '',
+    model: s.cleanup_model ?? '',
+    effort: s.cleanup_effort ?? '',
+  }
+}
+
+export async function pageCleanupSettings(req, res, url) {
+  const s = Object.fromEntries(db.prepare('SELECT key,value FROM settings').all().map(r => [r.key, r.value]))
+  const werte = cleanupWerte(s)
+  const repos = db.prepare('SELECT id, name FROM repos ORDER BY name').all()
+  const repoSel = repos.length
+    ? `<label>${e(t('cleanup.repo'))} <select name="cleanup_repo_id">${repos.map(r =>
+        `<option value="${r.id}" ${String(s.cleanup_repo_id ?? repos[0].id) === String(r.id) ? 'selected' : ''}>${e(r.name)}</option>`).join('')}</select>
+      <span class="dim">${e(t('cleanup.repo_hint'))}</span></label>`
+    : ''
+  const body = `<h2>${e(t('cleanup.settings_title'))}</h2>
+  <p class="dim">${e(t('cleanup.settings_intro'))}</p>
+  ${werte.harness ? '' : `<p class="warn">${e(t('cleanup.no_agent'))}</p>`}
+  <form method="post" action="/settings/cleanup" class="settings form-grid">
+    <label>${e(t('cleanup.on'))} <select name="cleanup_on">
+      <option value="1" ${s.cleanup_on === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option>
+      <option value="0" ${s.cleanup_on !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option>
+    </select>
+      <span class="dim">${e(t('cleanup.on_hint'))}</span></label>
+    ${runSetupFields(werte, { wrapClass: 'cleanup-setup' })}
+    <label>${e(t('cleanup.threshold'))} <input name="cleanup_threshold_gb" type="number" min="0" step="0.5" value="${e(String(cleanupSettings().thresholdGb))}">
+      <span class="dim">${e(t('cleanup.threshold_hint'))}</span></label>
+    <label>${e(t('cleanup.target'))} <input name="cleanup_target_gb" type="number" min="0" step="0.5" value="${e(String(cleanupSettings().targetGb))}">
+      <span class="dim">${e(t('cleanup.target_hint'))}</span></label>
+    <label>${e(t('cleanup.cooldown'))} <input name="cleanup_cooldown_min" type="number" min="0" step="5" value="${e(String(cleanupSettings().cooldownMin))}">
+      <span class="dim">${e(t('cleanup.cooldown_hint'))}</span></label>
+    ${repoSel}
+    <label>${e(t('cleanup.prompt'))}
+      <textarea name="cleanup_prompt" rows="12">${e(s.cleanup_prompt ?? '')}</textarea>
+      <span class="dim">${e(t('cleanup.prompt_hint'))}</span></label>
+    <div class="btn-row"><button>${e(t('settings.save'))}</button>
+      <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>
+  </form>
+  ${cleanupRunInFlight() ? `<p class="dim">${e(t('cleanup.running_note'))}</p>` : ''}`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(await layout(req, t('cleanup.settings_title'), '/settings', body))
+}
+
+export async function cleanupSettingsSave(req, res, url, formBody) {
+  const b = await formBody()
+  const problems = []
+  if (String(b.harness ?? '').trim()) {
+    const setup = await runSetupFromForm(b, problems)
+    if (problems.length) return problemPage(req, res, t('cleanup.settings_title'), problems, '/settings/cleanup')
+    setSetting('cleanup_harness', setup.harness)
+    setSetting('cleanup_provider', setup.provider ?? '')
+    setSetting('cleanup_or_provider', setup.orProvider ?? '')
+    setSetting('cleanup_model', setup.model ?? '')
+    setSetting('cleanup_effort', setup.effort ?? '')
+  } else {
+    for (const k of ['harness', 'provider', 'or_provider', 'model', 'effort']) {
+      setSetting(`cleanup_${k}`, '')
+    }
+  }
+  setSetting('cleanup_on', b.cleanup_on === '1' ? '1' : '0')
+  const zahlen = { cleanup_threshold_gb: 5, cleanup_target_gb: 2, cleanup_cooldown_min: 60 }
+  for (const [k, fallback] of Object.entries(zahlen)) {
+    const n = Number(b[k])
+    setSetting(k, String(Number.isFinite(n) && n >= 0 ? n : fallback))
+  }
+  if (b.cleanup_repo_id) setSetting('cleanup_repo_id', String(b.cleanup_repo_id))
+  setSetting('cleanup_prompt', String(b.cleanup_prompt ?? ''))
+  redirect(res, '/settings/cleanup')
+}
+
+/** One line for the settings page: what the cleanup agent is, or that there is none. */
+export function cleanupSettingsSummary() {
+  const s = cleanupSettings()
+  if (!s.harness) return t('cleanup.not_configured')
+  const model = s.model ? `/${s.model}` : ''
+  return `${s.on ? t('layout.on') : t('layout.off')} · ${s.thresholdGb} GB → ${s.targetGb} GB · ${harnessLabel(s.harness) || s.harness}${model}`
 }
 
 // ---------------- coding agents (Settings → Coding agents) ----------------

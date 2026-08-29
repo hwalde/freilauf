@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# cc-session-cleanup — end tmux sessions to free memory, for the tmux-cleanup
+# agent (Settings → tmux cleanup). It measures what a session really costs and
+# when it was last active, protects what must stay, and decides — oldest
+# inactive first — which sessions have to go so the machine's total tmux memory
+# drops to a target.
+#
+# Usage:
+#   cc-session-cleanup                  list every session: activity age + memory
+#   cc-session-cleanup --target-gb N    show which to end to reach ≤ N GB total
+#   cc-session-cleanup --target-gb N --kill   actually end them
+#   cc-session-cleanup --keep "a b"     never touch these session names
+#   cc-session-cleanup --db PATH        hub database (default: ~/.local/share/cc-hub/cc-hub.db)
+#
+# The memory of a session is the RSS of its whole process tree below the pane's
+# shell (the shell alone understates it by an order of magnitude) — the same
+# number the hub's Sessions page shows. Activity is #{window_activity}, the last
+# pane output (NOT #{session_activity}, which only a client attach moves), per
+# session the youngest window.
+#
+# Protected by default: the sessions of running runs (from the hub DB, fail-soft
+# if the DB is unreadable), the --keep list, and e2e/skill-carrier sessions.
+# Never kills without an explicit --kill.
+set -uo pipefail
+
+TARGET="" KEEP="" KILL=0 DB=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target-gb) TARGET="${2:-}"; shift 2 ;;
+    --keep) KEEP="${2:-}"; shift 2 ;;
+    --kill) KILL=1; shift ;;
+    --db) DB="${2:-}"; shift 2 ;;
+    --help|-h) sed -n '2,12p' "$0"; exit 0 ;;
+    *) echo "cc-session-cleanup: unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+[[ -z "$DB" ]] && DB="${CCHUB_CLEANUP_DB:-$HOME/.local/share/cc-hub/cc-hub.db}"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# ---- 1. activity: max window_activity per session ----
+# name|act_sec, only sessions tmux really has.
+tmux list-windows -a -F '#{session_name}|#{window_activity}' 2>/dev/null \
+  | awk -F'|' '{ if ($2 > m[$1]) m[$1]=$2 } END { for (s in m) print s"|"m[s] }' > "$TMP/act"
+
+# ---- 2. memory: process-tree RSS per session ----
+# The pane's shell pid per session (first non-dead, else first); then the tree
+# below it. A dead pane (remain-on-exit) has no process left — RSS 0, which is
+# honest: the screen costs nothing.
+tmux list-panes -a -F '#{session_name}|#{pane_dead}|#{pane_pid}' 2>/dev/null \
+  | awk -F'|' '$3 != "" && $3 != "0" { if (!($1 in g)) { print $3" "$1; g[$1]=1 } }' > "$TMP/pids"
+
+ps -eo pid=,ppid=,rss= 2>/dev/null > "$TMP/ps"
+
+# pid session  →  rss_kb session  (tree sum, one pass over the ps snapshot)
+awk '
+  NR==FNR {
+    pid=$1; ppid=$2; rss=$3
+    mem[pid]=rss + 0
+    ch[ppid]=ch[ppid] " " pid
+    next
+  }
+  {
+    root=$1; session=$2
+    total=0; qi=0; delete seen
+    q[qi++]=root
+    while (qi > 0) {
+      p=q[--qi]
+      if (seen[p]) continue
+      seen[p]=1
+      total += mem[p] + 0
+      n=split(ch[p], kids, " ")
+      for (i=1; i<=n; i++) if (kids[i] != "") q[qi++]=kids[i]
+    }
+    print session"|"total
+  }
+' "$TMP/ps" "$TMP/pids" > "$TMP/rss"
+
+# ---- 3. protect: running runs (hub DB), --keep, e2e/skill-carrier ----
+> "$TMP/protect"
+if [[ -n "$KEEP" ]]; then
+  for n in $KEEP; do echo "$n" >> "$TMP/protect"; done
+fi
+if [[ -r "$DB" ]]; then
+  sqlite3 "$DB" "SELECT tmux_session FROM runs WHERE status IN ('running','waiting_help') AND tmux_session IS NOT NULL;" 2>/dev/null >> "$TMP/protect"
+fi
+declare -A PROTECT
+while IFS= read -r n; do [[ -n "$n" ]] && PROTECT["$n"]=1; done < "$TMP/protect"
+
+is_protected() {
+  local n="$1"
+  [[ -n "${PROTECT[$n]:-}" ]] && return 0
+  case "$n" in cc-e2e-*|cc-skill-traeger-*) return 0 ;; esac
+  return 1
+}
+
+# ---- 4. join activity + memory, oldest activity first ----
+# sec|session|kb
+awk -F'|' 'NR==FNR { a[$1]=$2; next } { s=$1; kb=$2; if (a[s] != "") print a[s]"|"s"|"kb }' \
+  "$TMP/act" "$TMP/rss" \
+  | sort -n > "$TMP/rows"   # ascending: oldest (smallest last-activity) first
+
+total_kb=0
+while IFS='|' read -r sec s kb; do
+  [[ "$kb" =~ ^[0-9]+$ ]] || kb=0
+  total_kb=$((total_kb + kb))
+done < "$TMP/rows"
+
+# ---- 5. decision: oldest inactive first until target ----
+target_kb=$(( ${TARGET:-0} * 1024 * 1024 ))
+remaining_kb=$total_kb
+while IFS='|' read -r sec s kb; do
+  [[ "$kb" =~ ^[0-9]+$ ]] || kb=0
+  if is_protected "$s"; then
+    status="protect"
+  elif [[ -n "$TARGET" && $remaining_kb -le $target_kb ]]; then
+    status="keep"
+  else
+    status="kill"
+    remaining_kb=$((remaining_kb - kb))
+  fi
+  printf '%s|%s|%s|%s\n' "$sec" "$s" "$kb" "$status"
+done < "$TMP/rows" > "$TMP/plan"
+
+# a plan without --target-gb never kills
+KILL_LIST=""
+if [[ -n "$TARGET" ]]; then
+  KILL_LIST="$(awk -F'|' '$4 == "kill" { printf "%s ", $2 }' "$TMP/plan")"
+fi
+
+cat "$TMP/plan"
+
+# ---- 6. execute ----
+if [[ -n "$KILL_LIST" && "$KILL" = 1 ]]; then
+  for n in $KILL_LIST; do
+    tmux kill-session -t "=$n" 2>/dev/null && echo "killed: $n" || echo "kill failed: $n"
+  done
+fi
+
+# ---- 7. summary ----
+# "killed" counts what actually happened — a plan (no --kill) killed nothing,
+# however many sessions it marked for death.
+if [[ "$KILL" = 1 ]]; then
+  killed="$([[ -n "$KILL_LIST" ]] && echo "$KILL_LIST" | wc -w || echo 0)"
+else
+  killed=0
+fi
+freed_kb=$((total_kb - remaining_kb))
+printf '\nfreed_gb=%.1f current_gb=%.1f killed=%d\n' \
+  "$(awk -v k=$freed_kb 'BEGIN{printf "%.1f", k/1024/1024}')" \
+  "$(awk -v k=$remaining_kb 'BEGIN{printf "%.1f", k/1024/1024}')" \
+  "$killed"

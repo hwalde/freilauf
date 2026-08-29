@@ -916,6 +916,85 @@
     syncFilter()
   }
 
+  // ---- tmux memory cleanup: sidebar button + Sessions page box ----
+  // Both ask the same question ("free memory down to which GB?") and both start
+  // the same configured cleanup agent. The sidebar control lives inside #side-mem,
+  // which the live channel REPLACES whole every 30 s — so the triggers listen on
+  // document (delegation survives the swaps) and re-scope on every click.
+  function startCleanup(body, done) {
+    fetch('/api/cleanup/start', { method: 'POST', body: body, headers: { accept: 'application/json' } })
+      .then(function (r) {
+        return r.json().then(function (j) { return { status: r.status, j: j } })
+      })
+      .then(function (x) {
+        var j = x.j
+        if (x.status !== 200 || !j.ok) {
+          if (done) done({ ok: false, error: j.error || T('js.cleanup_failed', 'Could not start the cleanup agent.') })
+          return
+        }
+        window.cchubToast(T('js.cleanup_started', 'Memory cleanup started — target {target} GB', { target: j.targetGb }), {
+          href: '/runs/' + j.runId, linkText: T('js.toast_open', 'open'),
+        })
+        if (done) done({ ok: true })
+      })
+      .catch(function () {
+        if (done) done({ ok: false, error: T('js.cleanup_failed', 'Could not start the cleanup agent.') })
+      })
+  }
+
+  document.addEventListener('click', function (ev) {
+    var open = ev.target.closest && ev.target.closest('.mem-free-open')
+    if (open) {
+      var wrap = open.closest('.mem-free')
+      var form = wrap && wrap.querySelector('.mem-free-form')
+      if (form) {
+        form.hidden = !form.hidden
+        if (!form.hidden) { var inp = form.querySelector('input'); if (inp) inp.focus() }
+      }
+      return
+    }
+    var cancel = ev.target.closest && ev.target.closest('.mem-free-cancel')
+    if (cancel) {
+      var f = cancel.closest('.mem-free-form')
+      if (f) f.hidden = true
+    }
+  })
+
+  document.addEventListener('submit', function (ev) {
+    var form = ev.target
+    if (form && form.classList.contains('mem-free-form')) {
+      ev.preventDefault()
+      var t = form.querySelector('input[name="target"]')
+      var body = new URLSearchParams()
+      body.set('target_gb', (t && t.value) || '')
+      body.set('source', 'sidebar')
+      startCleanup(body, function (res) {
+        if (res && !res.ok) window.cchubToast(res.error, { kind: 'err' })
+      })
+      return
+    }
+    if (form && form.id === 'cleanup-free') {
+      ev.preventDefault()
+      var t2 = form.querySelector('input[name="target"]')
+      var keep = form.querySelector('input[name="keep"]')
+      var body2 = new URLSearchParams()
+      body2.set('target_gb', (t2 && t2.value) || '')
+      body2.set('keep', (keep && keep.value) || '')
+      body2.set('source', 'sessions')
+      var out = document.getElementById('cleanup-result')
+      var btn = form.querySelector('button')
+      if (out) out.textContent = '…'
+      if (btn) btn.disabled = true
+      startCleanup(body2, function (res) {
+        if (btn) btn.disabled = false
+        if (out) {
+          if (res && res.ok) { out.textContent = '' }
+          else if (res) out.textContent = res.error
+        }
+      })
+    }
+  })
+
   // ---- status sidebar: collapsible, and the state survives the page ----
   //
   // The open/closed class sits on the SHELL, not on the sidebar: the live
