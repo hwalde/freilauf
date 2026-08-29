@@ -259,6 +259,61 @@ function extrasDialog() {
 }
 
 /**
+ * The "free memory" dialog — the ONE modal both triggers (the sidebar's small
+ * button and the box on the Sessions page) open. It asks the single thing a
+ * manual cleanup needs: the target, in GB. The optional keep-runs field is
+ * rendered only on the Sessions page, where naming the runs to protect is a
+ * natural part of the manual action — everywhere else a cleanup starts with
+ * "target, go".
+ *
+ * `memGb` is the current total tmux memory, shown so the answer is a number
+ * on the same scale as the question. It is the sidebar's cached measurement
+ * (sessionMemory) — the same number the block next to the button shows.
+ */
+async function cleanupDialog({ withKeep = false, memGb = null } = {}) {
+  const s = cleanupSettings()
+  const current = memGb != null
+    ? `<p class="dim">${e(t('cleanup.dialog_current', { gb: memGb }))}</p>`
+    : ''
+  const keepField = withKeep
+    ? `<label>${e(t('cleanup.dialog_keep'))} <input name="keep" placeholder="${e(t('sessions.free_keep_ph'))}">
+        <span class="dim">${e(t('cleanup.dialog_keep_hint'))}</span></label>`
+    : ''
+  return `<dialog id="cleanup-dialog" class="qr cleanup">
+    <h3>${e(t('sessions.free_title'))} <button type="button" class="mini" data-cleanup-close aria-label="${e(t('qr.cancel'))}">✕</button></h3>
+    <p class="dim">${e(t('cleanup.dialog_hint'))}</p>
+    ${current}
+    <form id="cleanup-dialog-form" class="form-grid">
+      <label>${e(t('cleanup.target'))} <input type="number" name="target" min="0" step="0.1" value="${e(String(s.targetGb))}">
+        <span class="dim">${e(t('cleanup.target_hint'))}</span></label>
+      ${keepField}
+      <p class="err" id="cleanup-dialog-error" hidden></p>
+      <menu class="qr-actions">
+        <button type="button" class="ghost" data-cleanup-close>${e(t('qr.cancel'))}</button>
+        <button type="submit">${e(t('sessions.free_btn'))}</button>
+      </menu>
+    </form>
+  </dialog>`
+}
+
+/**
+ * The cleanup dialog for the current page. Rendered only when a cleanup agent is
+ * configured (then there is a trigger to open it); the keep field is the
+ * Sessions page's own manual concern. The memory shown next to the target is the
+ * sidebar's cached measurement — the same number the block beside the button
+ * shows, so the two can never disagree.
+ */
+async function cleanupDialogHtml(active) {
+  if (!cleanupConfigured()) return ''
+  let memGb = null
+  try {
+    const m = await sessionMemory()
+    if (m?.rssKb) memGb = +(m.rssKb / 1024 / 1024).toFixed(1)
+  } catch { /* no tmux: the dialog still opens, just without the reading */ }
+  return cleanupDialog({ withKeep: active === '/sessions', memGb })
+}
+
+/**
  * ONE quota bar for the whole application.
  *
  * There used to be two: `bar()` in the header and `pctBar()` in the usage
@@ -378,13 +433,7 @@ async function memoryBlock() {
   const cleanup = cleanupConfigured() ? cleanupSettings() : null
   const free = cleanup
     ? `<div class="mem-free">
-        <button type="button" class="btn ghost mem-free-open">${e(t('side.mem_free'))}</button>
-        <form class="mem-free-form" hidden>
-          <input type="number" name="target" min="0" step="0.1" value="${e(String(cleanup.targetGb))}"
-                 placeholder="${e(t('side.mem_free_ph'))}" aria-label="${e(t('side.mem_free_ph'))}">
-          <button type="submit">${e(t('side.mem_free_go'))}</button>
-          <button type="button" class="mini mem-free-cancel" aria-label="${e(t('side.mem_free_cancel'))}">✕</button>
-        </form>
+        <button type="button" class="btn ghost mem-free-open" data-cleanup-open>${e(t('side.mem_free'))}</button>
       </div>`
     : `<a class="side-cleanup-link" href="/settings/cleanup">${e(t('side.mem_free_none'))}</a>`
   return `<div class="side-block" id="side-mem"><span class="side-label">${e(t('side.mem'))}</span>
@@ -553,6 +602,7 @@ ${setupBanner()}
 ${await statusSidebar(effRepo)}
 </div>
 ${quickRunDialog(repos, effRepo)}
+${await cleanupDialogHtml(active)}
 <div class="toasts" id="cchub-toasts" aria-live="polite"></div>
 ${withTerminal ? '<script src="/static/xterm.js"></script><script src="/static/addon-fit.js"></script>' : ''}
 <script>window.CCHUB_I18N=${JSON.stringify(clientCatalog())}</script>
@@ -1417,13 +1467,10 @@ export async function pageSessions(req, res, url) {
     ? `<div class="card cleanup-card">
     <h3>${e(t('sessions.free_title'))}</h3>
     <p class="dim">${e(t('sessions.free_hint'))}</p>
-    <form class="cleanup-free" id="cleanup-free">
-      <input type="number" name="target" min="0" step="0.1" value="${e(String(cleanup.targetGb))}"
-             placeholder="${e(t('sessions.free_ph'))}" aria-label="${e(t('sessions.free_ph'))}">
-      <input name="keep" placeholder="${e(t('sessions.free_keep_ph'))}" aria-label="${e(t('sessions.free_keep_ph'))}">
-      <button type="submit">${e(t('sessions.free_btn'))}</button>
-      <span class="cleanup-result" id="cleanup-result"></span>
-    </form>
+    <div class="btn-row">
+      <button type="button" class="cleanup-free-open" data-cleanup-open>${e(t('sessions.free_btn'))}</button>
+      <span class="dim">${e(t('sessions.free_keep_hint'))}</span>
+    </div>
   </div>`
     : `<div class="card">
     <h3>${e(t('sessions.free_title'))}</h3>

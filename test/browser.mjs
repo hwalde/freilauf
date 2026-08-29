@@ -1247,12 +1247,18 @@ try {
     const p = await neueSeite('/')
     await wartePage(p, () => !!document.querySelector('.mem-free-open'), null, 'the small sidebar free-memory button')
     const p2 = await neueSeite('/sessions')
-    await wartePage(p2, () => !!document.getElementById('cleanup-free'), null, 'the prominent Sessions box')
-    enthaelt(await p2.textContent('#cleanup-free'), 'Free memory', 'its button')
-    sauber(p); sauber(p2)
-    await p.close(); await p2.close()
+    await wartePage(p2, () => !!document.querySelector('.cleanup-free-open'), null, 'the Sessions-page button')
+    // The one shared modal is on the page, with an explanation and the target field.
+    const d = await p2.$eval('#cleanup-dialog', el => ({ open: el.open, keep: !!el.querySelector('input[name=keep]') }))
+    gleich(d.open, false, 'the modal is closed to begin with')
+    gleich(d.keep, true, 'the keep field is on the Sessions page')
+    const p1 = await neueSeite('/')
+    const d1 = await p1.$eval('#cleanup-dialog', el => ({ keep: !!el.querySelector('input[name=keep]') }))
+    gleich(d1.keep, false, 'but not on the overview')
+    sauber(p); sauber(p2); sauber(p1)
+    await p.close(); await p2.close(); await p1.close()
   })
-  await pruefe('the sidebar button reveals the target field and starts the agent', async () => {
+  await pruefe('the sidebar button opens the modal and starts the agent', async () => {
     const p = await neueSeite('/')
     // An earlier test may have folded the sidebar away (the choice is persisted in
     // localStorage) — the button lives inside the folded-away body.
@@ -1261,9 +1267,10 @@ try {
     await wartePage(p, () => !!document.querySelector('.mem-free-open') &&
       getComputedStyle(document.querySelector('.mem-free-open')).display !== 'none', null, 'the small sidebar free-memory button')
     await p.click('.mem-free-open')
-    gleich(await p.$eval('.mem-free-form', f => f.hidden), false, 'the target field appears')
-    await p.fill('.mem-free-form input[name=target]', '0.5')
-    await p.click('.mem-free-form button[type=submit]')
+    gleich(await p.$eval('#cleanup-dialog', d => d.open), true, 'the modal opens')
+    enthaelt(await p.textContent('#cleanup-dialog'), 'Free memory', 'with a title')
+    await p.fill('#cleanup-dialog-form input[name=target]', '0.5')
+    await p.click('#cleanup-dialog-form button[type=submit]')
     await wartePage(p, () => !!document.querySelector('.toast a'), null, 'the toast with a link to the run')
     const href = await p.$eval('.toast a', a => a.getAttribute('href'))
     CL_ERSTER = href.split('/').pop()
@@ -1273,25 +1280,28 @@ try {
     sk.sessions.add(s)
     gleich(db.prepare('SELECT kind FROM events WHERE run_id=? AND kind=?').get(CL_ERSTER, 'cleanup_run')?.kind,
       'cleanup_run', 'marked as a cleanup run')
-    // The second attempt while one is running shows the reason, not a second run —
-    // the form is still open from the first click.
+    // The second attempt while one is running shows the reason inside the modal,
+    // not a second run.
     const vorher = db.prepare(`SELECT count(*) c FROM runs WHERE status IN ('running','waiting_help')`).get().c
-    await p.fill('.mem-free-form input[name=target]', '0.5')
-    await p.click('.mem-free-form button[type=submit]')
-    await wartePage(p, () => !!document.querySelector('.toast.err'), null, 'the error toast')
+    await p.click('.mem-free-open')
+    await p.click('#cleanup-dialog-form button[type=submit]')
+    await wartePage(p, () => !document.getElementById('cleanup-dialog-error').hidden, null, 'the modal error')
+    enthaelt(await p.textContent('#cleanup-dialog-error'), 'already in progress', 'it names the reason')
     gleich(db.prepare(`SELECT count(*) c FROM runs WHERE status IN ('running','waiting_help')`).get().c, vorher,
       'no second run')
     sauber(p)
     await p.close()
   })
-  await pruefe('the Sessions box starts the agent with a keep list', async () => {
+  await pruefe('the Sessions button opens the modal and starts the agent with a keep list', async () => {
     // End the first run so a new one may start.
     await melden(CL_ERSTER, 'done', 'freed some GB.')
     const p = await neueSeite('/sessions')
-    await wartePage(p, () => !!document.getElementById('cleanup-free'), null, 'the prominent Sessions box')
-    await p.fill('#cleanup-free input[name=target]', '0.5')
-    await p.fill('#cleanup-free input[name=keep]', CL_ERSTER)
-    await p.click('#cleanup-free button[type=submit]')
+    await wartePage(p, () => !!document.querySelector('.cleanup-free-open'), null, 'the Sessions-page button')
+    await p.click('.cleanup-free-open')
+    gleich(await p.$eval('#cleanup-dialog', d => d.open), true, 'the modal opens')
+    await p.fill('#cleanup-dialog-form input[name=target]', '0.5')
+    await p.fill('#cleanup-dialog-form input[name=keep]', CL_ERSTER)
+    await p.click('#cleanup-dialog-form button[type=submit]')
     await wartePage(p, () => !!document.querySelector('.toast a'), null, 'the toast with a link to the new run')
     const href = await p.$eval('.toast a', a => a.getAttribute('href'))
     const id = href.split('/').pop()

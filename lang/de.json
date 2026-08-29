@@ -839,13 +839,9 @@
   "form.keep_needs_branch": "Arbeit auf einem Branch zu lassen braucht einen Branch — wähle „neu“ oder „vorhandener“.",
   "merge.kept_on_branch": "auf dem Branch gelassen",
   "side.mem_free": "Speicher freigeben",
-  "side.mem_free_ph": "Ziel-GB",
-  "side.mem_free_go": "Freigeben",
-  "side.mem_free_cancel": "schließen",
   "side.mem_free_none": "Speicher freigeben: Cleanup-Agent konfigurieren",
   "sessions.free_title": "Jetzt Speicher freigeben",
   "sessions.free_hint": "Du möchtest Speicher freigeben? Lasse einen Agenten die ältesten inaktiven tmux-Sessions jetzt beenden.",
-  "sessions.free_ph": "Ziel-GB",
   "sessions.free_keep_ph": "Runs, die erhalten bleiben (IDs)",
   "sessions.free_btn": "Speicher freigeben",
   "sessions.free_none": "Noch kein Cleanup-Agent konfiguriert — einrichten unter",
@@ -872,5 +868,10 @@
   "cleanup.bad_target": "Ungültiges Ziel — bitte eine Zahl in GB.",
   "cleanup.no_repo": "Kein Repo zum Arbeiten.",
   "js.cleanup_started": "Speicherfreigabe gestartet — Ziel {target} GB",
-  "js.cleanup_failed": "Der Cleanup-Agent konnte nicht gestartet werden."
+  "js.cleanup_failed": "Der Cleanup-Agent konnte nicht gestartet werden.",
+  "cleanup.dialog_hint": "Lasse einen Agenten die ältesten inaktiven tmux-Sessions beenden, bis der gespeicherte tmux-Speicher der Maschine höchstens das Ziel erreicht. Laufende Agenten und die unten genannten Sessions werden nie angefasst.",
+  "cleanup.dialog_current": "Aktuell belegt: {gb} GB",
+  "cleanup.dialog_keep": "Sessions dieser Runs erhalten",
+  "cleanup.dialog_keep_hint": "Run-IDs, deren tmux-Sessions erhalten bleiben müssen — kommagetrennt. Mehr Kontext braucht der Agent dazu nicht.",
+  "sessions.free_keep_hint": "Du kannst Runs nennen, deren tmux-Sessions erhalten bleiben müssen — der Agent beendet zuerst die ältesten inaktiven."
 }

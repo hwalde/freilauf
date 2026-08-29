@@ -839,13 +839,9 @@
   "form.keep_needs_branch": "Keeping the work on a branch needs a branch — choose “new” or “existing”.",
   "merge.kept_on_branch": "kept on branch",
   "side.mem_free": "Free memory",
-  "side.mem_free_ph": "target GB",
-  "side.mem_free_go": "Free",
-  "side.mem_free_cancel": "close",
   "side.mem_free_none": "free memory: configure the cleanup agent",
   "sessions.free_title": "Free memory now",
   "sessions.free_hint": "Would you like to free memory? Have an agent end the oldest inactive tmux sessions now.",
-  "sessions.free_ph": "target GB",
   "sessions.free_keep_ph": "runs to keep (ids)",
   "sessions.free_btn": "Free memory",
   "sessions.free_none": "No cleanup agent configured yet — set one up under",
@@ -872,5 +868,10 @@
   "cleanup.bad_target": "Invalid target — a number of GB, please.",
   "cleanup.no_repo": "No repo to work in.",
   "js.cleanup_started": "Memory cleanup started — target {target} GB",
-  "js.cleanup_failed": "Could not start the cleanup agent."
+  "js.cleanup_failed": "Could not start the cleanup agent.",
+  "cleanup.dialog_hint": "Have an agent end the oldest inactive tmux sessions until the tmux memory of the machine is at most the target. Running agents and sessions you name below are never touched.",
+  "cleanup.dialog_current": "Currently in use: {gb} GB",
+  "cleanup.dialog_keep": "Keep these runs’ sessions",
+  "cleanup.dialog_keep_hint": "Run ids whose tmux sessions must stay — comma-separated. The agent needs no other context beyond that.",
+  "sessions.free_keep_hint": "You can name runs whose tmux sessions must stay — the agent ends the oldest inactive ones first."
 }

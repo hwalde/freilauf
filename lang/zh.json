@@ -839,13 +839,9 @@
   "form.keep_needs_branch": "要把成果保留在分支上就得有一个分支——请选择“新建”或“已有”。",
   "merge.kept_on_branch": "保留在分支上",
   "side.mem_free": "释放内存",
-  "side.mem_free_ph": "目标 GB",
-  "side.mem_free_go": "释放",
-  "side.mem_free_cancel": "关闭",
   "side.mem_free_none": "释放内存：配置清理代理",
   "sessions.free_title": "现在释放内存",
   "sessions.free_hint": "想释放内存吗？让代理现在结束最旧的闲置 tmux 会话。",
-  "sessions.free_ph": "目标 GB",
   "sessions.free_keep_ph": "要保留的运行（ID）",
   "sessions.free_btn": "释放内存",
   "sessions.free_none": "尚未配置清理代理 — 请在以下位置设置",
@@ -872,5 +868,10 @@
   "cleanup.bad_target": "目标无效——请输入 GB 数值。",
   "cleanup.no_repo": "没有可用于工作的仓库。",
   "js.cleanup_started": "已开始释放内存——目标 {target} GB",
-  "js.cleanup_failed": "无法启动清理代理。"
+  "js.cleanup_failed": "无法启动清理代理。",
+  "cleanup.dialog_hint": "让一个代理结束最旧的闲置 tmux 会话，直到机器占用的 tmux 内存不超过目标值。运行中的代理和你下面指定的会话绝不会被触碰。",
+  "cleanup.dialog_current": "当前占用：{gb} GB",
+  "cleanup.dialog_keep": "保留这些运行的会话",
+  "cleanup.dialog_keep_hint": "必须保留其 tmux 会话的运行 ID — 逗号分隔。代理不需要其它上下文。",
+  "sessions.free_keep_hint": "你可以指定必须保留 tmux 会话的运行 —— 代理会先结束最旧的闲置会话。"
 }

@@ -917,10 +917,13 @@
   }
 
   // ---- tmux memory cleanup: sidebar button + Sessions page box ----
-  // Both ask the same question ("free memory down to which GB?") and both start
-  // the same configured cleanup agent. The sidebar control lives inside #side-mem,
-  // which the live channel REPLACES whole every 30 s — so the triggers listen on
-  // document (delegation survives the swaps) and re-scope on every click.
+  // Both triggers (the small button in the sidebar's tmux block and the button
+  // on the Sessions page) open the SAME modal and ask the same question — free
+  // the machine's tmux memory down to which GB. The modal is rendered by the
+  // server (layout), so the triggers only open it; the dialog's submit starts
+  // the configured agent. The sidebar is replaced whole every 30 s, so the
+  // triggers listen on document — delegation survives the swap, and the one
+  // modal is stable on the page, never inside a replaced block.
   function startCleanup(body, done) {
     fetch('/api/cleanup/start', { method: 'POST', body: body, headers: { accept: 'application/json' } })
       .then(function (r) {
@@ -942,57 +945,47 @@
       })
   }
 
+  function cleanupDialog() { return document.getElementById('cleanup-dialog') }
+  function openCleanupDialog(source) {
+    var d = cleanupDialog()
+    if (!d) return
+    d.dataset.source = source || 'manual'
+    if (!d.open) d.showModal()
+  }
+  function closeCleanupDialog() {
+    var d = cleanupDialog()
+    if (d && d.open) d.close()
+  }
+
   document.addEventListener('click', function (ev) {
-    var open = ev.target.closest && ev.target.closest('.mem-free-open')
-    if (open) {
-      var wrap = open.closest('.mem-free')
-      var form = wrap && wrap.querySelector('.mem-free-form')
-      if (form) {
-        form.hidden = !form.hidden
-        if (!form.hidden) { var inp = form.querySelector('input'); if (inp) inp.focus() }
-      }
-      return
-    }
-    var cancel = ev.target.closest && ev.target.closest('.mem-free-cancel')
-    if (cancel) {
-      var f = cancel.closest('.mem-free-form')
-      if (f) f.hidden = true
-    }
+    if (ev.target.closest && ev.target.closest('.mem-free-open')) { openCleanupDialog('sidebar'); return }
+    if (ev.target.closest && ev.target.closest('.cleanup-free-open')) { openCleanupDialog('sessions'); return }
+    if (ev.target.closest && ev.target.closest('[data-cleanup-close]')) { closeCleanupDialog(); return }
+    // A click on the backdrop closes the modal, like any plain dialog — but not
+    // one that lands inside it, which would close it the moment it is clicked.
+    var d = cleanupDialog()
+    if (d && d.open && ev.target === d) closeCleanupDialog()
   })
 
   document.addEventListener('submit', function (ev) {
     var form = ev.target
-    if (form && form.classList.contains('mem-free-form')) {
-      ev.preventDefault()
-      var t = form.querySelector('input[name="target"]')
-      var body = new URLSearchParams()
-      body.set('target_gb', (t && t.value) || '')
-      body.set('source', 'sidebar')
-      startCleanup(body, function (res) {
-        if (res && !res.ok) window.cchubToast(res.error, { kind: 'err' })
-      })
-      return
-    }
-    if (form && form.id === 'cleanup-free') {
-      ev.preventDefault()
-      var t2 = form.querySelector('input[name="target"]')
-      var keep = form.querySelector('input[name="keep"]')
-      var body2 = new URLSearchParams()
-      body2.set('target_gb', (t2 && t2.value) || '')
-      body2.set('keep', (keep && keep.value) || '')
-      body2.set('source', 'sessions')
-      var out = document.getElementById('cleanup-result')
-      var btn = form.querySelector('button')
-      if (out) out.textContent = '…'
-      if (btn) btn.disabled = true
-      startCleanup(body2, function (res) {
-        if (btn) btn.disabled = false
-        if (out) {
-          if (res && res.ok) { out.textContent = '' }
-          else if (res) out.textContent = res.error
-        }
-      })
-    }
+    if (!form || form.id !== 'cleanup-dialog-form') return
+    ev.preventDefault()
+    var t = form.querySelector('input[name="target"]')
+    var keep = form.querySelector('input[name="keep"]')
+    var body = new URLSearchParams()
+    body.set('target_gb', (t && t.value) || '')
+    body.set('source', (cleanupDialog() && cleanupDialog().dataset.source) || 'manual')
+    if (keep) body.set('keep', (keep && keep.value) || '')
+    var err = document.getElementById('cleanup-dialog-error')
+    if (err) err.hidden = true
+    var btn = form.querySelector('button[type="submit"]')
+    if (btn) btn.disabled = true
+    startCleanup(body, function (res) {
+      if (btn) btn.disabled = false
+      if (!res || res.ok) { closeCleanupDialog() }
+      else if (err) { err.textContent = res.error; err.hidden = false }
+    })
   })
 
   // ---- status sidebar: collapsible, and the state survives the page ----
