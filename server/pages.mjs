@@ -22,6 +22,7 @@ import {
   favoriteFromForm, favoriteTemplate, favoriteSummary, FAVORITES_MAX,
 } from './favorites.mjs'
 import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } from './title.mjs'
+import { extrasModelsMru, rememberExtrasModel, DEFAULT_EXTRAS_MODEL } from './extras-suggest.mjs'
 import { runEditAllowed } from './run-edit.mjs'
 import { getHarness, harnessLabel, detectInstalled } from './harnesses/index.mjs'
 import { providerLabel } from './providers/index.mjs'
@@ -230,6 +231,29 @@ function quickRunDialog(repos, selectedRepo) {
   return `<dialog id="qr-dialog" class="qr">
     <h3>⚡ ${e(t('qr.title'))} <button type="button" class="mini" data-qr-close aria-label="${e(t('qr.cancel'))}">✕</button></h3>
     ${body}
+  </dialog>`
+}
+
+/**
+ * The "find worktree extras" dialog — repo create AND edit form. The repo path
+ * is read from the form's path field when the button opens the dialog; the hub
+ * checks path existence and "is a git project" algorithmically first (the
+ * endpoint answers those without a model), and only a path that passes both
+ * reaches the LLM. The warning before starting is load-bearing: the suggestion
+ * REPLACES the current JSON completely, it does not extend it.
+ */
+function extrasDialog() {
+  return `<dialog id="extras-dialog" class="qr">
+    <h3>${e(t('repos.extras_dialog_title'))} <button type="button" class="mini" data-extras-close aria-label="${e(t('qr.cancel'))}">✕</button></h3>
+    <p class="dim">${e(t('repos.extras_dialog_hint'))}</p>
+    <p>${e(t('repos.path'))}: <code id="extras-path"></code></p>
+    <p class="warn">${e(t('repos.extras_warn'))}</p>
+    <p class="err" id="extras-error" hidden></p>
+    <p id="extras-working" hidden><span class="spinner"></span> ${e(t('repos.extras_working'))}</p>
+    <menu class="qr-actions">
+      <button type="button" class="ghost" data-extras-close>${e(t('qr.cancel'))}</button>
+      <button type="button" id="extras-start">${e(t('repos.extras_start'))}</button>
+    </menu>
   </dialog>`
 }
 
@@ -1418,6 +1442,14 @@ export async function pageSettings(req, res, url) {
         <span class="dim">${e(t('settings.title_model_hint', { model: DEFAULT_TITLE_MODEL }))}</span></label>
       <label>${e(t('settings.llm_or_provider'))} <input name="llm_title_or_provider" value="${e(s.llm_title_or_provider ?? '')}" placeholder="${e(t('settings.llm_or_ph'))}"></label>
     </fieldset>
+    <fieldset><legend>${e(t('settings.extras_legend'))}</legend>
+      <p class="dim">${e(t('settings.extras_hint'))} ${process.env.OPENROUTER_API_KEY ? '' : `<b class="warn">${e(t('settings.llm_missing_key'))}</b>`}</p>
+      <label>${e(t('settings.extras_on'))} <select name="llm_extras_on"><option value="1" ${(s.llm_extras_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.llm_extras_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+      <label>${e(t('settings.extras_model'))} <input name="llm_extras_model" list="extras-mru" value="${e(s.llm_extras_model || DEFAULT_EXTRAS_MODEL)}" placeholder="${e(DEFAULT_EXTRAS_MODEL)}">
+        <datalist id="extras-mru">${[...new Set([DEFAULT_EXTRAS_MODEL, ...extrasModelsMru()])].map(m => `<option value="${e(m)}">`).join('')}</datalist>
+        <span class="dim">${e(t('settings.extras_model_hint', { model: DEFAULT_EXTRAS_MODEL }))}</span></label>
+      <label>${e(t('settings.llm_or_provider'))} <input name="llm_extras_or_provider" value="${e(s.llm_extras_or_provider ?? '')}" placeholder="${e(t('settings.llm_or_ph'))}"></label>
+    </fieldset>
     <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
   </form>
   ${url.searchParams.get('telegram') === 'ok' ? `<p class="ok">✓ ${e(t('settings.telegram_ok'))}</p>` : ''}
@@ -1960,10 +1992,13 @@ export async function repoEdit(req, res, url) {
     <label>${e(t('repos.path_label'))} <input name="path" value="${e(r.path ?? '')}" placeholder="~/projects/my-project" required></label>
     <label>${e(t('repos.base'))} <input name="base_branch" value="${e(r.base_branch ?? 'main')}"></label>
     <label>${e(t('repos.prompt_label'))} <textarea name="prompt" rows="6">${e(r.prompt ?? '')}</textarea></label>
-    <label>${e(t('repos.extras_label'))} <textarea name="worktree_extras" rows="5">${e(r.worktree_extras ?? '[]')}</textarea></label>
+    <label>${e(t('repos.extras_label'))} <textarea name="worktree_extras" rows="5">${e(r.worktree_extras ?? '[]')}</textarea>
+      <span class="btn-row"><button type="button" class="ghost" id="extras-find">${e(t('repos.extras_find'))}</button>
+      <span class="dim">${e(t('repos.extras_find_hint'))}</span></span></label>
     ${integrationFields(r)}
     <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
-  </form>`
+  </form>
+  ${extrasDialog()}`
   // This form belongs to ONE repo, like a run's detail page: switching the
   // header repo cannot make it show another one, so it hands its own repo over
   // and layout() adds the note saying so. A NEW repo has none yet — the page
@@ -2020,7 +2055,8 @@ export async function repoSave(req, res, url, formBody) {
 const SETTINGS_KEYS = ['pipeline_on', 'telegram_token', 'telegram_chat', 'quota_threshold',
   'openrouter_min_eur', 'abo_price', 'cursor_included_usd', 'session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
   'llm_check_on', 'llm_check_model', 'llm_check_or_provider',
-  'llm_title_on', 'llm_title_model', 'llm_title_or_provider', 'ui_language']
+  'llm_title_on', 'llm_title_model', 'llm_title_or_provider',
+  'llm_extras_on', 'llm_extras_model', 'llm_extras_or_provider', 'ui_language']
 
 export async function settingsSave(req, res, url, formBody) {
   const b = await formBody()
@@ -2044,6 +2080,7 @@ export async function settingsSave(req, res, url, formBody) {
   // "Used" means saved: only now does the model enter the MRU list.
   if (Object.hasOwn(b, 'llm_check_model')) llmModellMerken(b.llm_check_model)
   if (Object.hasOwn(b, 'llm_title_model')) rememberTitleModel(b.llm_title_model)
+  if (Object.hasOwn(b, 'llm_extras_model')) rememberExtrasModel(b.llm_extras_model)
   redirect(res, '/settings')
 }
 
