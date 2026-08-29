@@ -733,3 +733,31 @@ form.form-grid label:not(.chk):not(.weekday) > .fav-tip { grid-column: 3; }
     --accent-act-hover: #6ea8fe;
   }
 }
+
+/* ---- tmux memory cleanup: the free-memory triggers ----
+   Two places ask the same question ("free memory down to which GB?"): the small
+   button in the sidebar's tmux block and the prominent box on the Sessions page.
+   Same logic (POST /api/cleanup/start), different weights. */
+
+/* Sidebar: an OUTLINE button on purpose — the block is a reading, and the
+   trigger must not shout over it. */
+.side-block .mem-free { margin-top: var(--sp-8); }
+.mem-free .btn.ghost { padding: var(--sp-3) var(--sp-8); font-size: var(--fs-small); }
+.mem-free-form { display: flex; gap: var(--sp-6); align-items: center; margin-top: var(--sp-6); }
+.mem-free-form input { width: 5em; max-width: 5em; padding: var(--sp-3) var(--sp-6); font-size: var(--fs-small); }
+.mem-free-form button { padding: var(--sp-3) var(--sp-8); font-size: var(--fs-small); }
+.mem-free-form button.mini { background: none; border: 0; color: var(--text-dim); cursor: pointer; padding: 0 var(--sp-2); }
+.side-cleanup-link { display: inline-block; margin-top: var(--sp-8); color: var(--text-dim); font-size: var(--fs-small); }
+
+/* Sessions page: the same trigger, the weight it deserves at the top of the
+   page it is about. */
+.cleanup-card { border-left-color: var(--accent); }
+.cleanup-card h3 { margin: 0 0 var(--sp-6); }
+.cleanup-free { display: flex; gap: var(--sp-10); align-items: center; flex-wrap: wrap; }
+.cleanup-free input[type="number"] { width: 8em; max-width: 8em; }
+.cleanup-free input[name="keep"] { flex: 1 1 260px; max-width: 340px; }
+.cleanup-result { color: var(--err); font-size: var(--fs-small); }
+
+/* The agent+provider+model block reused on the settings page (runSetupFields
+   with wrapClass) reads as a section there. */
+form.form-grid fieldset.cleanup-setup { margin: var(--sp-12) 0; padding: var(--sp-10) var(--sp-12); }

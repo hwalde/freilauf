@@ -175,11 +175,21 @@ function modelFields(a = {}) {
  * provider, with which model and effort. Split out of `runDefFields` because a
  * favorite (server/favorites.mjs) is exactly this part and nothing else — the
  * prompt, the branch rule and the duration belong to the task, not to the setup.
+ *
+ * It is the ONE reusable agent+provider+model selection of the whole hub: the
+ * agent form, the single-run form, the favorites and the merge settings all
+ * render this same block, and a new settings page embeds it the same way. The
+ * only customization is a STYLING option (`opts.wrapClass`) — a class on the
+ * wrapping <fieldset> so a place can present the identical logic differently
+ * (a settings page vs. the run form). Without it the markup is exactly what it
+ * always was, so no existing caller changes.
  */
-export function runSetupFields(a = {}) {
-  return `
+export function runSetupFields(a = {}, opts = {}) {
+  const block = `
   <label>${e(t('agents.harness'))} <select name="harness">${harnessOptions(a.harness)}</select></label>
   ${modelFields(a)}`
+  if (opts.wrapClass) return `<fieldset class="${e(opts.wrapClass)}">${block}</fieldset>`
+  return block
 }
 
 /**
