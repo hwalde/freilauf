@@ -50,14 +50,14 @@ export async function handleReport(runId, body, via = 'http') {
       // Never merged automatically — but named: what a failed run left behind is
       // a fact the operator should not have to go looking for.
       const assessment = await assessAfterEnd(runId)
-      await notifyRun(runId, 'failed', `❌ Run failed${laufKopf(run)}\n${text}${assessment}`, { fileName: `failed-${runId.slice(0, 8)}.md`, fileContent: text })
+      await notifyRun(runId, 'failed', `${reportHeader(run)}\n\n${text}\n\n❌ Run failed · ${harnessLabel(run)}${assessment}`, { fileName: `failed-${runId.slice(0, 8)}.md`, fileContent: text })
       break
     }
     case 'help': {
       db.prepare(`UPDATE runs SET status='waiting_help', help_text=? WHERE id=?`).run(text, runId)
       addEvent(runId, 'help')
       // The question MUST arrive completely — truncated it cannot be answered.
-      await notifyRun(runId, 'help', `🆘 Help call${laufKopf(run)}\n${text}`, { fileName: `help-${runId.slice(0, 8)}.md`, fileContent: text, dedupe: false })
+      await notifyRun(runId, 'help', `${reportHeader(run)}\n\n${text}\n\n🆘 Help call · ${harnessLabel(run)}`, { fileName: `help-${runId.slice(0, 8)}.md`, fileContent: text, dedupe: false })
       break
     }
     case 'progress': {
@@ -234,18 +234,28 @@ function clearAnomalies(runId, kinds) {
   for (const kind of kinds) stmt.run(runId, kind)
 }
 
-/** Header line with agent/repo/harness — so the message is attributable without a click. */
-function laufKopf(run) {
+/** "claude/sonnet" — the harness and model as one label for the status line. */
+function harnessLabel(run) {
+  return `${run.harness}${run.model ? '/' + run.model : ''}`
+}
+
+/**
+ * The header a report message begins with: which repo, and whether an agent or
+ * a single run is reporting. A single run is named by its title, an agent run
+ * by "AGENT <name>" — so the message is attributable without a click.
+ */
+function reportHeader(run) {
+  const p = db.prepare('SELECT name FROM repos WHERE id=?').get(run.repo_id)?.name ?? '?'
   const a = run.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name : null
-  const p = db.prepare('SELECT name FROM repos WHERE id=?').get(run.repo_id)?.name
-  return ` — ${a ?? 'single run'} @ ${p ?? '?'} (${run.harness}${run.model ? '/' + run.model : ''})`
+  const name = a ? `AGENT ${a}` : (run.title ?? 'run')
+  return `${p} / ${name} REPORT:`
 }
 
 /**
  * The "done" message. `mergeLine` is what the integration has to say about this
- * run — `Merged into main: abc1234`, or `Nothing to merge (no commits)`. It sits
- * on the second line next to duration and branch, because "where is the work
- * now" is the first thing one wants from a finished run.
+ * run — `Merged into main: abc1234`, or `Nothing to merge (no commits)`. The
+ * report itself sits right under the header; the status line with duration,
+ * branch, merge result and incidents follows it.
  */
 export function doneText(run, report, mergeLine = null) {
   const dur = run.started_at
@@ -256,8 +266,9 @@ export function doneText(run, report, mergeLine = null) {
   const branch = run.branch_reported || run.branch_expected
   const zeile2 = [dur, branch ? `Branch: ${branch}` : null, run.pr_url ? `PR: ${run.pr_url}` : null,
     mergeLine].filter(Boolean).join(' · ')
+  const status = `✅ Done · ${harnessLabel(run)}${zeile2 ? ' · ' + zeile2 : ''}${vf}`
   // Full report; over 4096 chars notify() truncates and notifyLong() attaches the file.
-  return `✅ Done${laufKopf(run)}\n${zeile2}${vf}\n\n${report || '(no report text)'}`
+  return `${reportHeader(run)}\n\n${report || '(no report text)'}\n\n${status}`
 }
 
 /**

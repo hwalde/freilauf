@@ -315,7 +315,15 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     } catch { /* no run ever started: nothing to clean up */ }
     for (const s of alle) await sh('tmux', ['kill-session', '-t', `=${s}`]).catch(() => {})
     if (behalten) console.log(`\nSandbox kept: ${SB}`)
-    else rmSync(SB, { recursive: true, force: true })
+    else {
+      // A detached flow command (a `sleep 1; touch` in the run_merged tests) can
+      // still land in the sandbox while rmSync sweeps it — retry briefly instead
+      // of letting the whole suite die on a leftover it did not cause.
+      for (let versuch = 0; versuch < 8; versuch++) {
+        try { rmSync(SB, { recursive: true, force: true }); break }
+        catch { await new Promise(r => setTimeout(r, 200)) }
+      }
+    }
   }
 
   return {
