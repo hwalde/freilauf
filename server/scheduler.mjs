@@ -3,7 +3,7 @@
 import db, { addEvent } from './db.mjs'
 import { scheduleDue, parseDbUtc } from './util.mjs'
 import { createRun, launchRun } from './runner.mjs'
-import { claudeGateBlocked, openrouterGateBlocked } from './quota.mjs'
+import { claudeGateBlocked, claudeQuota, openrouterGateBlocked } from './quota.mjs'
 import { notifyRun } from './reports.mjs'
 import { defFromAgent } from './run-def.mjs'
 import { fallbackTitle, applyGeneratedTitle } from './title.mjs'
@@ -78,11 +78,17 @@ export function repoAtCapacity(repoId) {
  * The budget gate for a harness: claude runs on the subscription quota,
  * everything else on OpenRouter credits. Also used by the watcher when it picks
  * a deferred run back up — one rule, one place.
+ *
+ * The MODEL belongs to the question for claude: the general 7-day window binds
+ * every run, a per-model one only a run on that model (quota.mjs). Every caller
+ * has it — the definition on the way in, the run row on the way back up — so
+ * every caller hands it over.
+ *
  * Returns the blocking reason, or null when the start may happen.
  */
-export async function budgetGate(harness) {
+export async function budgetGate(harness, model = null) {
   const g = harness === 'claude'
-    ? claudeGateBlocked()
+    ? claudeGateBlocked(claudeQuota(), model)
     : await openrouterGateBlocked(Number(db.prepare(`SELECT value FROM settings WHERE key='openrouter_min_eur'`).get()?.value ?? 5) || 5)
   return g.blocked ? g : null
 }
@@ -134,7 +140,7 @@ export async function startRun(def, {
   }
 
   // Budget gate BEFORE the start; blocked → defer (retry in the watcher), do not discard.
-  const gate = await budgetGate(def.harness)
+  const gate = await budgetGate(def.harness, def.model ?? null)
   if (gate) {
     db.prepare(`UPDATE runs SET status='deferred' WHERE id=?`).run(runId)
     addEvent(runId, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null })
@@ -193,7 +199,7 @@ export async function pickUpScheduled(nowMs = Date.now()) {
 
     // Same gate as at an immediate start — a waiting run must not start into an
     // exhausted quota either; it moves on to 'deferred' and the watcher retries.
-    const gate = await budgetGate(run.harness)
+    const gate = await budgetGate(run.harness, run.model ?? null)
     if (gate) {
       db.prepare(`UPDATE runs SET status='deferred' WHERE id=?`).run(run.id)
       addEvent(run.id, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null })
