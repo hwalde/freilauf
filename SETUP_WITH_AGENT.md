@@ -136,7 +136,13 @@ The hub starts empty on purpose. In this order:
    part — an optional **repo prompt** that is added to *every* run of that repo,
    plus `merge_mode`. Start with `merge_mode = off` (agents keep their work on
    their branch) and switch to `hub` once you trust the setup; `hub` is what
-   turns "the agent says it is done" into "the work is on `main`".
+   turns "the agent says it is done" into "the work is on `main`". For the
+   **worktree extras** (files a worktree needs but git does not carry — a `.env`,
+   a linked `node_modules`) the form offers **Find worktree extras**: a model
+   looks at the repository and suggests the list. That needs an OpenRouter key
+   and the model is chosen under **Settings → Worktree extras**; without it the
+   button says why. The suggestion **replaces** the current list — it never
+   extends it.
 3. **Start a single run.** Small, boring task, a repo you do not mind. Watch it
    in the browser terminal. This is the fastest way to learn what the system
    does — much faster than reading `AGENTS.md`.

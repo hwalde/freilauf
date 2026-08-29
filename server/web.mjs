@@ -28,6 +28,7 @@ import {
   integrationSection, problemPage, runEditCard,
 } from './pages.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
+import { suggestExtras } from './extras-suggest.mjs'
 import { editRun } from './run-edit.mjs'
 import { mergeByHand, skipMerge, resetIntegration } from './integrate.mjs'
 import { redirect, body as readBody, parseForm, rememberRepo, requestRepo } from './web-helpers.mjs'
@@ -505,6 +506,14 @@ async function api(req, res, url) {
   if (req.method === 'POST' && path === '/api/settings/pipeline') {
     setSetting('pipeline_on', (await form(req)).value === '1' ? '1' : '0')
     return json(res, 200, { ok: true })
+  }
+  // The repo form's "find worktree extras": algorithmic checks first (path
+  // exists, is a git project), then a single OpenRouter call. Errors are already
+  // translated and arrive as `{ ok:false, error }` — the modal shows them as-is.
+  if (req.method === 'POST' && path === '/api/repos/extras-suggest') {
+    const b = await form(req)
+    const r = await suggestExtras(b.path ?? '')
+    return json(res, r.ok ? 200 : 400, r)
   }
   // Without this closing answer any unknown /api/ path would stay UNANSWERED —
   // the browser then waits until timeout instead of showing an error.
