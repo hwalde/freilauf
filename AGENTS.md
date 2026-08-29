@@ -518,9 +518,9 @@ fragment rendered from a seven-hour-old file:
 | 7 d | 77 % | 78 % |
 | 7 d Fable | 80 % | **88 %** |
 
-Eight points on the window that **binds**: `seven` is the maximum of the weekly
-values and the budget gate defers a start at 95 %, so a stale 80 lets runs into a
-quota that is nearly gone.
+Eight points on the window that **binds a run on that model** (see below): the
+budget gate defers a start at 95 %, so a stale 80 lets runs into a quota that is
+nearly gone.
 
 **`server/claude-usage.mjs`** asks the account itself —
 `GET https://api.anthropic.com/api/oauth/usage`, bearer token out of
@@ -587,10 +587,61 @@ answer and shuts out the file fallback for a whole TTL. And an answer carrying n
 window at all is **not an answer**: returning it would let an empty success
 shadow the file for the same TTL.
 
-The **rail** (the folded sidebar's whole glance) shows `seven`, the binding
-maximum — not the general week. They are not the same number, and a rail reading
+The **rail** (the folded sidebar's whole glance) shows `seven`, the fullest
+window — not the general week. They are not the same number, and a rail reading
 78 next to a per-model week at 88 reads as comfortable right up to the point
-where runs get deferred. The panel below still breaks the windows out one by one.
+where the runs on that model get deferred. The panel below still breaks the
+windows out one by one and names each of them.
+
+#### Which 7-day window binds is a question about the RUN, not about the account
+
+`seven` — the maximum of the weekly windows — was what the budget gate, the
+"quota full" anomaly and the cost delta all read. So a Fable week at 96 %
+deferred a run on **Sonnet**, a window that run does not draw from at all, and
+`cc-hub` sat still with 60 % of its general week unused.
+
+The rule is one sentence: **the general week binds every claude run, a per-model
+week only a run on that model.** Four functions in `quota.mjs` carry it, and
+every caller that knows a model asks one of them instead of `seven`:
+
+| Function | Answers |
+|---|---|
+| `windowAppliesToModel(label, model)` | does this per-model window concern that model? |
+| `weeklyBinding(quota, model)` | the fullest window that does — with its name and its reset time |
+| `sevenFor(quota, model)` | the same as a bare percentage |
+| `sevenForRun(run, quota)` | the same for a run row; a non-claude harness filters nothing |
+
+**The match is on the model IDENTIFIER, because that is the only thing a run
+carries.** The account names its scoped window with a display name (`Fable`),
+and the same model reaches the CLI as the alias `fable` and as
+`claude-fable-5` — so a naming token of the label occurring in the identifier is
+the whole test. Nothing about fable is hardcoded: an `Opus` window matches
+`claude-opus-5` by the same rule, and the words that name no model (`claude`
+first of all, or a label like `Claude Fable 5` would match every claude
+identifier there is) are filtered out of it.
+
+Two cases deliberately answer **yes** and stay conservative, because letting a
+run into a window that is full costs more than deferring it: a run with **no
+model** (claude then picks its own default and the hub does not know which one),
+and a window whose label names no model at all (`claude-usage.mjs` falls back to
+the surface name or a bare `7d`).
+
+Where it is asked, and why each of them:
+
+- **`budgetGate(harness, model)`** (scheduler.mjs) — the model travels with
+  every call: from the definition on the way in, from the run row when the
+  watcher picks a deferred run back up. A block also **names the window** in its
+  reason and hands out **that window's** reset time; a 7-day block used to
+  publish the 5-hour reset into the deferred event and into Telegram as the
+  moment the run would start again.
+- **`anomaly:quota_full`** (watcher) — a red flag on a run for somebody else's
+  window is noise.
+- **`quota7_start` / `quota7_end`** (runner.mjs, `finishCosts`) — both ends of
+  the cost subtraction now describe one window. Taking the maximum made a run on
+  Sonnet expensive because a Fable week filled up while it ran.
+
+Only the **display** still asks for the maximum: `seven` is the account's worst
+case, which is what one dot on the rail can honestly show.
 
 The e2e sandbox points `CCHUB_CLAUDE_CREDENTIALS` at a file that does not exist,
 so the suite never touches the real endpoint (same fence as `CCHUB_CURSOR_AUTH`)
