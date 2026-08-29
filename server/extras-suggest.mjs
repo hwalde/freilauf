@@ -143,8 +143,10 @@ export function normalizeExtras(parsed, ctx) {
 
 /**
  * Algorithmic checks first, then the model — and only the untracked/ignored
- * entries it confirms against the real directory come back. Returns
- * `{ ok: true, extras, model }` or `{ ok: false, error }` (already translated).
+ * entries it confirms against the real directory come back. An empty list is a
+ * valid answer, not an error: the form then gets `[]` like any other result.
+ * Returns `{ ok: true, extras, model }` or `{ ok: false, error }` (already
+ * translated).
  */
 export async function suggestExtras(path, { timeoutMs = 60_000 } = {}) {
   const p = String(path ?? '').trim().replace(/^~/, process.env.HOME ?? '')
@@ -193,6 +195,5 @@ export async function suggestExtras(path, { timeoutMs = 60_000 } = {}) {
     return { ok: false, error: t('repos.extras_parse') }
   }
   const extras = normalizeExtras(parsed, ctx)
-  if (!extras.length) return { ok: false, error: t('repos.extras_none') }
   return { ok: true, extras, model }
 }
