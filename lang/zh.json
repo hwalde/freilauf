@@ -167,6 +167,7 @@
   "run.archive_hint": "已归档的运行在概览中隐藏，但仍可在此完整查看。",
   "run.archived_since": "归档于 {ts}",
   "run.report": "报告",
+  "run.prompt": "提示词",
   "run.metrics": "指标",
   "run.runtime": "运行时长",
   "run.tokens": "Token",
