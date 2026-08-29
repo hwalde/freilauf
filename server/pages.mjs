@@ -31,7 +31,7 @@ import { TYP_TEXT } from './detect.mjs'
 import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
 import { resumeCommand } from './integrate.mjs'
-import { listSessions, sessionKeepHours, currentKeepMs, paneAlive } from './sessions.mjs'
+import { listSessions, sessionMemory, sessionKeepHours, currentKeepMs, paneAlive } from './sessions.mjs'
 import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
 import { flowRunKeepDays } from './flows/db.mjs'
 // The flow block of the detail page is rendered in server/flows/ and belongs to
@@ -325,6 +325,39 @@ function incidentBlock(repoId) {
 }
 
 /**
+ * What every tmux session on this machine costs in memory, together.
+ *
+ * It belongs on every page and not only on /sessions, because that is the
+ * reading one does not go looking for: a session outlives its agent on purpose
+ * (`cc-start --keep`), so the bill runs quietly and only ever surprises. Thirty
+ * sessions and 15 GB is a measured number from this installation, and nothing
+ * in the hub said so until one navigated to the page that lists them.
+ *
+ * The value comes from sessionMemory(), whose eight-minute cache IS the update
+ * interval: the sidebar re-fetches itself every 30 s, and behind that the tmux
+ * and `ps` calls happen at most every eight minutes. So the block SAYS that,
+ * with the exact measuring time in the tooltip — a number that is up to eight
+ * minutes old and presents itself as live is the quiet staleness the claude
+ * quota panel was already caught on.
+ *
+ * The interval is read out of the answer rather than written into the string,
+ * because the TTL is an environment variable. And the measuring time is a
+ * `title`, not a ticking relative time: this block is rendered both into the
+ * page and into the sidebar fragment, and the e2e suite holds those two to be
+ * byte for byte identical — a text that changes every second could not be.
+ */
+async function memoryBlock() {
+  let mem = null
+  try { mem = await sessionMemory() } catch { mem = null }
+  if (!mem) return ''
+  return `<div class="side-block" id="side-mem"><span class="side-label">${e(t('side.mem'))}</span>
+    <div><a href="/sessions"><b>${e(mem.rssKb ? byteText(mem.rssKb) : '0 MB')}</b></a>
+      <span class="dim">${e(t('side.mem_sessions', { n: mem.sessions }))}</span></div>
+    <div class="dim"${mem.measuredAtMs ? ` title="${e(fmtDateTime(mem.measuredAtMs))}"` : ''}>${
+      e(t('side.mem_every', { min: Math.max(1, Math.round(mem.intervalMs / 60_000)) }))}</div></div>`
+}
+
+/**
  * The status sidebar — on every page, right of the content.
  *
  * Before this, status stood in three places and only ever fully on the
@@ -412,6 +445,7 @@ export async function statusSidebar(repoId = null) {
     ${workBlock(repoId)}
     ${incidentBlock(repoId)}
     ${await usagePanel()}
+    ${await memoryBlock()}
   </div>
 </aside>`
 }

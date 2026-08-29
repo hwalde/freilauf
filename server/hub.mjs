@@ -11,6 +11,7 @@ import { getSetting } from './db.mjs'
 import { seedIfEmpty } from './coding-agents.mjs'
 import { subscriptionUsage } from './usage.mjs'
 import { providerBalances } from './balances.mjs'
+import { sessionMemory } from './sessions.mjs'
 import { setLanguage } from './i18n.mjs'
 
 // UI language (default English) and, on a fresh installation, the optional
@@ -47,6 +48,10 @@ server.listen(PORT, HOST, () => {
   // server, and a failure here simply leaves the panel to the next caller.
   subscriptionUsage().catch(() => {})
   providerBalances().catch(() => {})
+  // Same reason, a local one: the sidebar's memory reading shells out to tmux
+  // and `ps` over every process on the machine, and without a warm cache the
+  // first page view after a restart is the one that pays for it.
+  sessionMemory().catch(() => {})
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
