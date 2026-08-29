@@ -90,6 +90,10 @@ Zeit, in der du das nicht tust:
 - **Telegram**-Benachrichtigungen mit Link direkt auf den Lauf.
 - **Mehrsprachige Oberfläche**: English (Standard), 中文, Deutsch —
   Einstellungen → UI language.
+- **Eine Uhr und ein Zahlenformat**: Jede Zeitangabe — auch in der Sidebar — in
+  der unter Einstellungen → Zeit und Zahlen gewählten Zeitzone (Automatisch:
+  Deutsch → Europe/Berlin, Chinesisch → Asia/Shanghai, Englisch → Serverzeit);
+  Zahlen und Prozentangaben nutzen die Trennzeichen der UI-Sprache.
 
 ## Sicherheitsmodell — bitte diesen Abschnitt lesen
 

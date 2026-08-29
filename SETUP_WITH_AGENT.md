@@ -153,7 +153,10 @@ The hub starts empty on purpose. In this order:
     inactive tmux sessions to free memory — a threshold starts it by itself,
     a target says how far it must free, and the small button in the sidebar's
     tmux block plus the box on the Sessions page start it by hand),
-    **Settings → UI language** (English, 中文, Deutsch).
+    **Settings → UI language** (English, 中文, Deutsch) and **Settings → Time
+    and numbers** (the timezone every displayed time — sidebar included — is
+    shown in, defaulting to the UI language; numbers and percentages follow
+    the UI language's separators).
 
 Nothing about the pipeline switch is subtle: `cchub pipeline off` stops
 *scheduled* starts. Manual starts always work — a limit that overrules a

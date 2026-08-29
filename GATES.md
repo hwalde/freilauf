@@ -1,38 +1,40 @@
-# Gates: the run detail page shows its prompt in a collapsible block near the top
+# Gates: central timezone + number/percentage formatting
 
-OWNS: server/pages.mjs, public/hub.css, lang/en.json, lang/de.json, lang/zh.json,
-test/browser.mjs, test/e2e.mjs, PLAN.md, GATES.md
+OWNS: server/util.mjs, server/pages.mjs, server/hub.mjs, server/flows/web.mjs,
+public/hub.js, lang/en.json, lang/de.json, lang/zh.json,
+test/unit.mjs, test/e2e.mjs, test/browser.mjs, PLAN.md, GATES.md
 
-Scope: The run detail page renders the run's prompt in a collapsed `<details>`
-block high on the page — between the title and the fact chips. The block is
-styled like the existing detail-page cards, carries a dedicated i18n key in all
-three languages, and is verified by a browser test (presence, collapsed state,
-toggle, position) and an e2e assertion (prompt text on the page, position).
+Scope: A timezone selectable centrally under Settings that every time display —
+sidebar and detail pages included — follows, plus number and percentage
+formatting that follows the UI language. Verified by unit tests (helpers and
+i18n key sets), an e2e test (settings save + a converted timestamp on a page)
+and a browser test (the relative-time tooltip uses the configured timezone).
 
-- [x] G1: the run detail page renders the prompt block between title and chips
+- [x] G1: unit suite green with the new central-format helpers
+  CHECK: node test/unit.mjs
+  EXPECT: /central format[\s\S]*Unit tests: \d+ checks passed/
+  EVIDENCE: met — the unit suite passed 280 checks via the checker, incl. the
+    four new "central format" tests (timezone resolution by language and by
+    explicit choice, fmtClock/fmtDatePart conversion, fmtDateTime/fmtDbUtc,
+    fmtNum/fmtPercent per UI locale, tzAbbrev). Raw evidence is
+    machine-local under ~/.unlazy/ (gitignored).
+
+- [x] G2: e2e suite green with the settings-save and timezone-render test
   CHECK: node test/e2e.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — the e2e suite passed 245 checks, incl. "the detail page shows
-    the prompt in a collapsible block near the top": the page carries
-    `id="run-prompt"`, the run's prompt text, and the three markers in order
-    title → prompt → chips. Full evidence lives in the machine-local .unlazy/
-    (gitignored).
+  EXPECT: /timezone[\s\S]*E2E tests: \d+ checks passed/
+  EVIDENCE: met — the e2e suite passed 253 checks via the checker, incl. "the
+    settings page offers the timezone and saves it" and "times on a page render
+    in the configured timezone" (12:00 UTC shows 08:00 New York, window.CCHUB_TZ
+    injected).
 
-- [x] G2: the block is collapsed by default and unfolds on the summary click
+- [x] G3: browser suite green with the configured-timezone tooltip test
   CHECK: node test/browser.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — the browser suite passed 56 checks, incl. "the prompt block
-    sits between title and chips, folded away, and unfolds": `#run-prompt` is
-    closed at page load, stands between `#run-head` and `ul.chips`, carries the
-    prompt text, and opens on the summary click.
+  EXPECT: /configured timezone[\s\S]*Browser tests: \d+ checks passed/
+  EVIDENCE: met — the browser suite passed 57 checks via the checker, incl.
+    "the relative-time tooltip follows the configured timezone" (the tooltip
+    reads the New York clock after the setting is saved).
 
-- [x] G3: the i18n key sets stay identical across all three language files
-  CHECK: node test/unit.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — the unit suite passed 270 checks, incl. the key-set test; the
-    new `run.prompt` key exists in en, de and zh with non-empty values.
-
-- [x] G4: the whole unit suite stays green with the new key
-  CHECK: node test/unit.mjs
-  EXPECT: checks passed
-  EVIDENCE: met — the same 270-check run covers this gate (see G3).
+- [x] G4: proxy and deploy suites still green
+  CHECK: node test/proxy.mjs && node test/deploy.mjs
+  EXPECT: /Proxy tests: \d+ checks passed[\s\S]*deploy: \d+ checks passed/
+  EVIDENCE: met — proxy 4 and deploy 9 checks passed via the checker.

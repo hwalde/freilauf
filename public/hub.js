@@ -40,6 +40,7 @@
       if (!Number.isFinite(ms)) return
       el.textContent = relTimeText(ms, now)
       el.title = new Date(ms).toLocaleString(lang, {
+        timeZone: window.CCHUB_TZ || undefined,
         year: 'numeric', month: '2-digit', day: '2-digit',
         hour: '2-digit', minute: '2-digit', second: '2-digit'
       })
@@ -568,7 +569,7 @@
 
     const provLabel = document.getElementById('prov-label')
     const provHint = document.getElementById('prov-hint')
-    const zeitText = (iso) => { try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) } catch { return '' } }
+    const zeitText = (iso) => { try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: window.CCHUB_TZ || undefined }) } catch { return '' } }
 
     // Every harness can use different providers — subscription-based ones none
     // at all (there is only the account). Hence the selection is re-fetched on
