@@ -1,64 +1,78 @@
-# PLAN — tmux sessions of archived runs are closed (configurable, default immediately) (tree 3)
+# PLAN — the tmux-cleanup agent with a selectable setup (tree 3)
 
 ## Goal
 
-Today, archiving a run (`runs.archived_at`) leaves its tmux session standing;
-the session is only closed by the ordinary retention (`session_keep_hours`,
-counting from the run's end). The operator's gesture "put this finished work
-away" should also close the session it left behind — by default right away.
-
-New rule: **archiving a finished run closes its tmux session.** Two settings
-control it, both under Settings → Sessions:
-
-- `archive_session_on` (0/1, default on) — the whole rule can be switched off;
-  an archived session then follows the ordinary retention like any other.
-- `archive_session_keep_hours` (default 0) — how long after archiving the
-  session may stay. 0 = close right away, the default.
-
-Enforcement on two paths: the archive route closes immediately when the keep
-time is 0; a watcher pass closes archived runs' sessions once `archived_at +
-keep` has passed — which also catches runs archived before this feature existed.
+Let the operator pick an agent+provider+model in Settings (via the existing
+`runSetupFields()` element, extended with a styling option), and use that
+setup for a special "tmux cleanup" agent: it ends the oldest inactive tmux
+sessions until the machine's tmux memory is below a target GB. The feature has
+an on/off switch and a threshold (GB) at which the watcher starts the agent
+automatically. Two manual triggers: an unobtrusive button in the sidebar's
+tmux memory block, and a prominent box on the Sessions page with an optional
+"keep these runs' sessions" field. A helper script does the measuring and the
+killing; the agent reports "XY GB freed, Z GB remain" via Telegram.
 
 ## Depth tree
 
 ```
-Root: archiving a run closes its tmux session (default immediately, configurable off/delay)
-├── 1  Settings surface
-│    └── 1.1  archive_session_on switch + archive_session_keep_hours input
-│         └── 1.1.1  SETTINGS_KEYS allowlist + settings form + i18n (en/de/zh)
-├── 2  Decision logic, pure (server/sessions.mjs)
-│    └── 2.1  archiveSessionKeepMs / archiveSessionKeepHours / shouldCloseArchived
-│         └── 2.1.1  counts from archived_at; null when the rule is off
-├── 3  Enforcement
-│    ├── 3.1  archive route (web.mjs): keep == 0 → killSessions() right away
-│    └── 3.2  watcher pass closeArchivedSessions(): close once archived_at + keep passed
-│         └── 3.2.1  also covers runs archived before the feature, and keep > 0
-└── 4  Tests + docs
-     ├── 4.1  unit: archiveSessionKeepMs/Hours, shouldCloseArchived (test/unit.mjs)
-     ├── 4.2  e2e: default closes, off keeps, delay defers then closes (test/e2e.mjs)
-     └── 4.3  AGENTS.md documents the rule
+Root: a configurable agent frees tmux memory down to a target, on a switch + threshold
+├── 1  Reusable element
+│    └── 1.1  runSetupFields(a, { wrapClass }) — a styling option, default unchanged
+├── 2  Server logic (server/cleanup.mjs)
+│    ├── 2.1  cleanupSettings() — on/off, threshold/target GB, cooldown, repo, setup
+│    ├── 2.2  cleanupPrompt() — the id=7 prompt adapted to memory, with {target_gb}
+│    │         {threshold_gb} {keep_line} {sessions_url} placeholders
+│    ├── 2.3  startCleanupRun() — ordinary startRun path, no flows, 'cleanup_run' event
+│    ├── 2.4  cleanupRunInFlight() / lastCleanupRun() — dedupe + cooldown
+│    └── 2.5  maybeAutoCleanup() — watcher gate: on + memory ≥ threshold → start
+├── 3  Agent helper script
+│    └── 3.1  bin/cc-session-cleanup — measures activity+RSS, protects running runs
+│             and --keep, decides oldest-inactive-first to a target, --kill executes
+│             └── 3.1.1  installed by setup/02-install-scripts.sh
+├── 4  Settings page + API
+│    ├── 4.1  GET/POST /settings/cleanup — on/off, runSetupFields, GB fields, prompt
+│    └── 4.2  POST /api/cleanup/start — target_gb + keep (run ids → session names)
+├── 5  UI
+│    ├── 5.1  sidebar tmux block: ghost "free memory" button + inline target input
+│    └── 5.2  Sessions page: hint box with target input + keep field
+├── 6  Watcher auto-trigger (server/watcher.mjs → maybeAutoCleanup)
+└── 7  i18n + CSS + docs + tests
+     ├── 7.1  lang/en.json + de.json + zh.json (identical key sets)
+     ├── 7.2  CSS for the sidebar control and the Sessions box
+     ├── 7.3  unit tests (element option, planning, prompt, dedupe)
+     ├── 7.4  e2e tests (start path, no double start, script protects)
+     └── 7.5  browser tests (sidebar + sessions triggers)
 ```
 
 ## Decisions
 
-- **Separate on/off switch and keep time.** The task asks for both "disabled in
-  settings" and "how long archived sessions stay". One key each, following the
-  existing pattern (`pipeline_on`, `session_keep_hours`).
-- **Count from `archived_at`, not from the run's end.** The gesture is "I put it
-  into the archive" — the clock starts there. The ordinary retention already
-  counts from the run's end; this is a second, stricter rule on top.
-- **Immediate close in the archive route.** "0 = sofort löschen" means the
-  click closes the session, not the next watcher tick. The watcher pass is the
-  net under it (keep > 0, a run archived while the hub was down, tmux hiccups).
-- **`killSessions([name], 'archive')`** so an already-gone session is a no-op
-  and the run record is reconciled exactly like the sessions page does it.
-- **The default is ON with keep 0** — that is the "always deleted" the task
-  demands; the settings are the exceptions, not the rule.
+- **The reusable element already exists** (`runSetupFields()` + `runSetupFromForm()`,
+  used by both run forms, the favorites and the merge settings). It only needs the
+  styling option the operator asked for — `wrapClass`. Default output is unchanged,
+  which is a unit-tested property.
+- **The cleanup agent is a normal single run** through `startRun()`: budget gate,
+  overview, watcher, finish gate, Telegram report all apply. `branch_mode='keiner'`
+  and `flows=NULL` keep it out of any integration. It works in a detached worktree
+  of a configurable repo and is told never to commit.
+- **Dedupe via an event**, not a new column: `addEvent(runId, 'cleanup_run', …)`.
+  A run carrying that event is a cleanup run; in-flight = status running/deferred.
+  The auto-trigger has a cooldown so a run that cannot reach the target does not
+  start again every 30 s.
+- **The prompt is the id=7 prompt adapted to memory** (German, as the original),
+  with the target/keep/URL filled in at start time from settings. The URL comes
+  from `publicBase()` — the machine's real URL never enters the repo.
+- **The helper script measures itself** (`#{window_activity}`, process-tree RSS,
+  sqlite for running runs) and implements the greedy decision in awk, mirroring
+  the id=7 prompt's proven commands. Plan mode never kills; `--kill` only with
+  an explicit target.
+- **On/off governs the automatic watcher trigger.** A deliberate manual "free
+  memory" click works whenever a cleanup agent is configured.
 
 ## Status log
 
-- [x] 2026-08-29: plan written
-- [x] 2026-08-29: implemented (sessions.mjs pure logic, archive route, watcher
-      pass, settings form + SETTINGS_KEYS, i18n en/de/zh, AGENTS.md);
-      unit 262, e2e 235, browser 52, proxy 4, deploy 9 all green;
-      GATES.md all six met with machine-free evidence; committed
+- [x] plan written
+- [x] implemented: reusable element option, server/cleanup.mjs, the helper
+      script, settings page + API, sidebar button + Sessions box, watcher gate,
+      i18n + CSS, unit/e2e/browser tests, SETUP_WITH_AGENT.md + the three
+      READMEs. Test runs: unit 270, e2e 244, browser 55, proxy 4, deploy 9.
+      Pre-push hook OK on the committed state. Reported done.

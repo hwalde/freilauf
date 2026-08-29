@@ -2907,6 +2907,106 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('tmux cleanup: the memory-freeing agent')
+
+  await pruefe('the cleanup settings page renders the reusable setup block', async () => {
+    const html = await (await hol('/settings/cleanup')).text()
+    gleich(html.includes('<fieldset class="cleanup-setup">'), true, 'the agent+provider+model block, wrapped for a settings page')
+    enthaelt(html, 'name="harness"', 'with the harness select')
+    enthaelt(html, 'name="cleanup_on"', 'the on/off switch')
+    enthaelt(html, 'name="cleanup_threshold_gb"', 'the threshold field')
+    enthaelt(html, 'name="cleanup_target_gb"', 'the target field')
+    enthaelt(html, 'name="cleanup_prompt"', 'the prompt textarea')
+  })
+  await pruefe('the cleanup settings save stores agent + switch + numbers', async () => {
+    const r = await formular('/settings/cleanup', {
+      harness: 'claude', cleanup_on: '1', cleanup_threshold_gb: '3', cleanup_target_gb: '1',
+      cleanup_cooldown_min: '10', cleanup_repo_id: String(repoId), cleanup_prompt: '',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'redirect back')
+    gleich(db.prepare(`SELECT value FROM settings WHERE key='cleanup_harness'`).get().value, 'claude', 'agent stored')
+    gleich(db.prepare(`SELECT value FROM settings WHERE key='cleanup_on'`).get().value, '1', 'switch on')
+    gleich(db.prepare(`SELECT value FROM settings WHERE key='cleanup_threshold_gb'`).get().value, '3', 'threshold')
+    gleich(db.prepare(`SELECT value FROM settings WHERE key='cleanup_target_gb'`).get().value, '1', 'target')
+    gleich(db.prepare(`SELECT value FROM settings WHERE key='cleanup_cooldown_min'`).get().value, '10', 'cooldown')
+    // The prompt was not changed: the built-in memory template stays the template.
+    gleich(db.prepare(`SELECT value FROM settings WHERE key='cleanup_prompt'`).get().value, '', 'prompt empty = the built-in template')
+  })
+  await pruefe('the settings page summary names the configured cleanup agent', async () => {
+    const html = await (await hol('/settings')).text()
+    enthaelt(html, 'cleanup', 'the settings index links to the cleanup page')
+    enthaelt(html, 'Claude Code', 'and names the configured agent in its summary')
+  })
+
+  let CL = null
+  await pruefe('the sidebar and the sessions page show the free-memory controls', async () => {
+    const sitzung = (await sh('tmux', ['list-sessions', '-F', '#{session_name}'])).stdout.trim()
+    if (!sitzung) return uebersprungen('side memory block', 'no tmux server in this environment')
+    const sidebar = await (await hol('/api/fragments/sidebar')).text()
+    enthaelt(sidebar, 'class="mem-free"', 'the small button in the sidebar tmux block')
+    const page = await (await hol('/sessions')).text()
+    enthaelt(page, 'id="cleanup-free"', 'the prominent box on the Sessions page')
+    enthaelt(page, 'name="keep"', 'with the keep-runs field')
+  })
+  await pruefe('the cleanup agent starts through the ordinary run path', async () => {
+    const r = await formular('/api/cleanup/start', { target_gb: '2', keep: '', source: 'sessions' })
+    const j = await r.json()
+    gleich(r.status, 200, `started (${JSON.stringify(j)})`)
+    wahr(!!j.runId, 'run id')
+    CL = j.runId
+    await sessionMerken(CL)
+    const l = lauf(CL)
+    gleich(l.harness, 'claude', 'configured coding agent')
+    gleich(l.flows, null, 'no attached flows')
+    enthaelt(l.prompt, 'höchstens 2 GB', 'the prompt carries the target')
+    enthaelt(l.prompt, 'Ohne Ausnahmen', 'and the default keep sentence')
+    enthaelt(ereignisse(CL).join(','), 'cleanup_run', 'marked as a cleanup run')
+  })
+  await pruefe('a second start is refused while one is in flight', async () => {
+    const j = await (await formular('/api/cleanup/start', { target_gb: '2' })).json()
+    gleich(j.ok, false, 'refused')
+    enthaelt(j.error, 'already in progress', 'and names the reason')
+  })
+  await pruefe('a manual keep list turns run ids into protected session names', async () => {
+    const r = await formular('/api/cleanup/start', { target_gb: '1', keep: lauf(CL).id })
+    // The first run is still in flight — the keep resolution happens before the
+    // in-flight check? No: in-flight is checked first, so this must stay refused.
+    const j = await r.json()
+    gleich(j.ok, false, 'still refused while the first run is going')
+  })
+  await pruefe('the cleanup run ends like any other and frees the gate', async () => {
+    const r = await hol(`/api/runs/${CL}/report`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'done', text: 'CL1 GB freed.' }),
+    })
+    gleich(r.status, 200, 'report accepted')
+    gleich(lauf(CL).status, 'done', 'done')
+    const wieder = await (await formular('/api/cleanup/start', { target_gb: '1', keep: lauf(CL).id })).json()
+    gleich(wieder.ok, true, 'a new start is possible after the run ended')
+    wahr(!!wieder.runId, 'and it starts')
+    await sessionMerken(wieder.runId)
+    const keepLauf = lauf(wieder.runId)
+    enthaelt(keepLauf.prompt, 'Diese Sessions bleiben auf jeden Fall erhalten', 'the keep line is present')
+    enthaelt(keepLauf.prompt, lauf(CL).tmux_session, 'naming the kept run\'s session')
+    await formular(`/api/runs/${wieder.runId}/kill`, {})
+  })
+  await pruefe('the agent helper script protects and kills nothing in plan mode', async () => {
+    const skript = join(PROJEKT, 'bin', 'cc-session-cleanup')
+    const s1 = 'cc-aufraum-test-1', s2 = 'cc-aufraum-test-2'
+    await sh('tmux', ['new-session', '-d', '-s', s1, 'sleep 300'])
+    await sh('tmux', ['new-session', '-d', '-s', s2, 'sleep 300'])
+    sessions.add(s1); sessions.add(s2)
+    const plan = await sh('bash', [skript, '--target-gb', '0', '--db', join(SB, 'data', 'cc-hub.db')])
+    enthaelt(plan.stdout, '|kill', 'plan mode names sessions to kill')
+    enthaelt(plan.stdout, 'killed=0', 'but kills nothing without --kill')
+    const mitKeep = await sh('bash', [skript, '--target-gb', '0', '--keep', s1, '--db', join(SB, 'data', 'cc-hub.db')])
+    enthaelt(mitKeep.stdout, `${s1}|`, 'the kept session is listed')
+    enthaelt(mitKeep.stdout, '|protect', 'and marked protected')
+    await sh('tmux', ['kill-session', '-t', `=${s1}`])
+    await sh('tmux', ['kill-session', '-t', `=${s2}`])
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Integration: a run is done when its work is on the base branch')
 
   // Everything below only happens because the repo asks for it. Turning it on

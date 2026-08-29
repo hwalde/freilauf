@@ -147,9 +147,13 @@ The hub starts empty on purpose. In this order:
    in the browser terminal. This is the fastest way to learn what the system
    does — much faster than reading `AGENTS.md`.
 4. **Then make it an agent**: same form plus a name and a schedule.
-5. Optional: **Settings → Telegram** (setup assistant), **Settings → Favorites**
-   (the setup half of a run under a name, feeds the Quick Run button in the
-   header), **Settings → UI language** (English, 中文, Deutsch).
+ 5. Optional: **Settings → Telegram** (setup assistant), **Settings → Favorites**
+    (the setup half of a run under a name, feeds the Quick Run button in the
+    header), **Settings → tmux cleanup** (a special agent that ends the oldest
+    inactive tmux sessions to free memory — a threshold starts it by itself,
+    a target says how far it must free, and the small button in the sidebar's
+    tmux block plus the box on the Sessions page start it by hand),
+    **Settings → UI language** (English, 中文, Deutsch).
 
 Nothing about the pipeline switch is subtle: `cchub pipeline off` stops
 *scheduled* starts. Manual starts always work — a limit that overrules a

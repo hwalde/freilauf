@@ -70,7 +70,11 @@ cc-hub is what you use when you are not:
   its own threshold (Settings → Budget gates), and a deferred run can be
   **started anyway** from its detail page. The same sidebar says what every tmux session on the machine costs in
   memory, re-measured every eight minutes: a session outlives its agent on
-  purpose, so that bill runs quietly.
+  purpose, so that bill runs quietly. A configurable **tmux cleanup agent**
+  (Settings → tmux cleanup, the same agent+provider+model selection as the run
+  forms) ends the oldest inactive sessions when the memory exceeds a threshold,
+  down to a target you choose — or on demand, from the sidebar's tmux block and
+  from a box on the Sessions page.
 - **No-code flows**: a graphical designer for what happens after a run — message
   running agents, start follow-up runs and wait for them, extract structured
   data from a report via LLM, branch, loop, Telegram, HTTP, shell command

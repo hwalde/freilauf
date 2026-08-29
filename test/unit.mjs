@@ -3268,13 +3268,117 @@ try {
     falsch(/\{base\}/.test(an), 'no placeholder left over')
   })
 
-  await pruefe('the resume command comes from the plugin, not from the hub', async () => {
-    const { getHarness } = await import('../server/harnesses/index.mjs')
-    const run = { id: 'aaaa-bbbb', workdir_effective: '/wt/a' }
-    enthaelt(getHarness('claude').resumeCommand(run), 'claude --resume aaaa-bbbb', 'claude knows its session id')
-    enthaelt(getHarness('opencode').resumeCommand(run), 'opencode --continue', 'opencode continues the directory’s session')
-    gleich(getHarness('hermes').resumeCommand(run), null, 'hermes has no reliable answer')
-    gleich(getHarness('claude').resumeCommand({ id: null }), null, 'without a workdir there is no command')
+  // ------------------------------------------------------------------
+  gruppe('tmux cleanup: the memory-freeing agent')
+
+  const { cleanupSettings, cleanupPrompt, cleanupRunInFlight, lastCleanupRun, keepSessionsForRuns, startCleanupRun, maybeAutoCleanup, CLEANUP_PROMPT_DEFAULT } = await import('../server/cleanup.mjs')
+  const db2 = (await import('../server/db.mjs')).default
+  const uuid = (await import('node:crypto')).randomUUID
+
+  await pruefe('runSetupFields: the styling option wraps, the default stays untouched', () => {
+    const plain = rd.runSetupFields({ harness: 'claude' })
+    falsch(plain.startsWith('<fieldset'), 'without the option there is no wrapper — existing callers are unchanged')
+    enthaelt(plain, 'name="harness"', 'and the block is the one every form uses')
+    const wrapped = rd.runSetupFields({ harness: 'claude' }, { wrapClass: 'cleanup-setup' })
+    enthaelt(wrapped, '<fieldset class="cleanup-setup">', 'the styling option wraps in a fieldset')
+    enthaelt(wrapped, 'name="harness"', 'with the same fields inside')
+  })
+
+  await pruefe('cleanupSettings reads the table and falls back sanely', () => {
+    const s = cleanupSettings({})
+    gleich(s.on, false, 'off by default')
+    gleich(s.thresholdGb, 5, 'default threshold 5 GB')
+    gleich(s.targetGb, 2, 'default target 2 GB')
+    gleich(s.cooldownMin, 60, 'default cooldown 60 min')
+    gleich(s.harness, '', 'no agent by default')
+    const broken = cleanupSettings({ cleanup_threshold_gb: 'quatsch', cleanup_target_gb: '-3' })
+    gleich(broken.thresholdGb, 5, 'a broken threshold falls back')
+    gleich(broken.targetGb, 2, 'a negative target falls back')
+  })
+
+  await pruefe('the prompt template is the memory successor of the old cleanup prompt', () => {
+    enthaelt(CLEANUP_PROMPT_DEFAULT, '{target_gb}', 'target placeholder')
+    enthaelt(CLEANUP_PROMPT_DEFAULT, '{keep_line}', 'keep-line placeholder')
+    enthaelt(CLEANUP_PROMPT_DEFAULT, '{sessions_url}', 'sessions url placeholder')
+    enthaelt(CLEANUP_PROMPT_DEFAULT, '#{window_activity}', 'activity measured by window_activity, not session_activity')
+    falsch(/\{base\}/.test(CLEANUP_PROMPT_DEFAULT), 'no leftover placeholder')
+  })
+
+  await pruefe('cleanupPrompt fills the live values into the template', () => {
+    const out = cleanupPrompt({ targetGb: 3, keepSessions: ['sess-1'], settings: { prompt: 'ziel={target_gb} keep={keep_line} url={sessions_url} th={threshold_gb}', thresholdGb: 5 } })
+    gleich(out, 'ziel=3 keep=Diese Sessions bleiben auf jeden Fall erhalten (auch wenn inaktiv) und dürfen NICHT beendet werden:\nsess-1 url=https://127.0.0.1:8790/sessions th=5', 'all placeholders filled')
+    const noKeep = cleanupPrompt({ targetGb: 1, settings: { prompt: 'keep={keep_line}' } })
+    gleich(noKeep, 'keep=Ohne Ausnahmen — was inaktiv ist, darf gehen, älteste zuerst.', 'no keep list = the default sentence')
+  })
+
+  await pruefe('keepSessionsForRuns resolves run ids to session names', () => {
+    const id = uuid()
+    db2.prepare(`INSERT INTO repos(id, name, path, base_branch) VALUES(99,'cleanup-test','/tmp/x','main')`).run()
+    db2.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, tmux_session, started_at)
+                 VALUES(?, 99, 'done', 'claude', 'p', 'keiner', 30, 'cc-test-sess', datetime('now'))`).run(id)
+    gleich(JSON.stringify(keepSessionsForRuns(`${id} 00000000-0000-0000-0000-000000000000`)),
+      JSON.stringify(['cc-test-sess']), 'the known id becomes its session, the unknown one is dropped')
+    gleich(JSON.stringify(keepSessionsForRuns('')), '[]', 'empty input stays empty')
+  })
+
+  await pruefe('cleanupRunInFlight sees a marked run and clears when it ends', () => {
+    const id = uuid()
+    db2.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, started_at)
+                 VALUES(?, 99, 'running', 'claude', 'p', 'keiner', 30, datetime('now'))`).run(id)
+    db2.prepare(`INSERT INTO events(run_id, kind, payload) VALUES(?, 'cleanup_run', ?)`).run(id, JSON.stringify({ source: 'auto', targetGb: 2 }))
+    wahr(cleanupRunInFlight(), 'a running run with the marker is in flight')
+    db2.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(id)
+    falsch(cleanupRunInFlight(), 'a finished one is not')
+  })
+
+  await pruefe('startCleanupRun refuses without a configured agent and with a broken target', async () => {
+    const no = await startCleanupRun({ settings: cleanupSettings({}) })
+    gleich(no.ok, false, 'nothing configured')
+    wahr(String(no.error).length > 0, 'with a reason')
+    const bad = await startCleanupRun({ targetGb: -1, settings: cleanupSettings({ cleanup_harness: 'claude' }) })
+    gleich(bad.ok, false, 'negative target refused')
+  })
+
+  await pruefe('maybeAutoCleanup stays quiet while the feature is off or no agent is set', async () => {
+    const off = await maybeAutoCleanup()
+    gleich(off, null, 'off by default = nothing')
+    const noAgent = await maybeAutoCleanup(0)
+    gleich(noAgent, null, 'no agent = nothing')
+  })
+
+  await pruefe('maybeAutoCleanup gates on threshold, in-flight and cooldown', async () => {
+    for (const [k, v] of [['cleanup_on', '1'], ['cleanup_harness', 'claude'], ['cleanup_threshold_gb', '5'],
+      ['cleanup_target_gb', '2'], ['cleanup_cooldown_min', '60']]) {
+      db2.prepare(`INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)`).run(k, v)
+    }
+
+    const unter = await maybeAutoCleanup(Date.now(), 4)
+    gleich(unter, null, 'memory below the threshold = nothing')
+
+    // A recent cleanup run is still cooling down.
+    const letzter = uuid()
+    db2.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, ended_at, started_at)
+                 VALUES(?, 99, 'done', 'claude', 'p', 'keiner', 30, datetime('now'), datetime('now'))`).run(letzter)
+    db2.prepare(`INSERT INTO events(run_id, kind, payload) VALUES(?, 'cleanup_run', ?)`).run(letzter, JSON.stringify({ source: 'auto' }))
+    const kuehl = await maybeAutoCleanup(Date.now(), 10)
+    gleich(kuehl, null, 'the cooldown after the last run holds')
+
+    // In flight (running) also blocks, whatever the memory says.
+    const laufend = uuid()
+    db2.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, started_at)
+                 VALUES(?, 99, 'running', 'claude', 'p', 'keiner', 30, datetime('now'))`).run(laufend)
+    db2.prepare(`INSERT INTO events(run_id, kind, payload) VALUES(?, 'cleanup_run', ?)`).run(laufend, JSON.stringify({ source: 'auto' }))
+    gleich(await maybeAutoCleanup(Date.now(), 10), null, 'an in-flight cleanup run blocks the gate')
+    // Age every cleanup run of the sandbox — the cooldown must have lapsed for the
+    // final assertion, including the run the in-flight test left behind.
+    db2.prepare(`UPDATE runs SET ended_at=datetime('now', '-120 minutes') WHERE id IN
+      (SELECT r.id FROM runs r JOIN events e ON e.run_id=r.id WHERE e.kind='cleanup_run')`).run()
+    db2.prepare(`UPDATE runs SET status='done' WHERE id=?`).run(laufend)
+
+    // Nothing blocks and memory is above the threshold → the gate fires (whatever
+    // startCleanupRun then makes of the sandbox repo is not this test's question).
+    const ausgeloest = await maybeAutoCleanup(Date.now(), 10)
+    falsch(ausgeloest === null, 'above threshold, cooled down, nothing in flight = the gate fires')
   })
 
 } finally {

@@ -76,7 +76,11 @@ Zeit, in der du das nicht tust:
   seiner Detailseite **trotzdem starten**. Dieselbe Seitenleiste zeigt, was alle
   tmux-Sessions der Maschine an Speicher kosten, alle acht Minuten neu gemessen:
   Eine Session überlebt ihren Agenten absichtlich — diese Rechnung läuft leise
-  mit.
+  mit. Ein konfigurierbarer **tmux-Cleanup-Agent** (Einstellungen → tmux-Aufräumen,
+  dieselbe Agent+Provider+Modell-Auswahl wie in den Lauf-Formularen) beendet die
+  ältesten inaktiven Sessions, wenn der Speicher einen Schwellenwert überschreitet,
+  bis zu einem frei wählbaren Ziel — oder auf Zuruf, über den Button im
+  tmux-Block der Seitenleiste und eine Box auf der Sessions-Seite.
 - **No-Code-Flows**: ein grafischer Designer für das, was nach einem Lauf
   passiert — laufenden Agenten eine Nachricht schicken, Folgeläufe starten und
   auf sie warten, per LLM strukturierte Daten aus einem Report ziehen,
