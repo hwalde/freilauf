@@ -108,8 +108,9 @@ function flagSetting(key, fallback) {
  *   — the historical default for the provider-based harnesses.
  *
  * Each gate is off when its settings switch (`claude_gate_on`,
- * `openrouter_gate_on`, `deepseek_gate_on`) is '0'. A gate that is switched off
- * cannot block — the operator decided that the window does not govern starts.
+ * `cursor_gate_on`, `openrouter_gate_on`, `deepseek_gate_on`) is '0'. A gate
+ * that is switched off cannot block — the operator decided that the window does
+ * not govern starts.
  *
  * Returns the blocking reason, or null when the start may happen.
  */
