@@ -1,78 +1,83 @@
-# PLAN — the tmux-cleanup agent with a selectable setup (tree 3)
+# PLAN — central timezone + number/percentage formatting (tree 3)
 
 ## Goal
 
-Let the operator pick an agent+provider+model in Settings (via the existing
-`runSetupFields()` element, extended with a styling option), and use that
-setup for a special "tmux cleanup" agent: it ends the oldest inactive tmux
-sessions until the machine's tmux memory is below a target GB. The feature has
-an on/off switch and a threshold (GB) at which the watcher starts the agent
-automatically. Two manual triggers: an unobtrusive button in the sidebar's
-tmux memory block, and a prominent box on the Sessions page with an optional
-"keep these runs' sessions" field. A helper script does the measuring and the
-killing; the agent reports "XY GB freed, Z GB remain" via Telegram.
+The hub renders times in the server's local timezone and appends raw UTC stamps
+in a few places (`… UTC`), while the browser's own relative-time tooltips use the
+*client* machine's timezone — so the exact time in a tooltip depends on who asks.
+Numbers and percentages are formatted with hardcoded `toFixed()` and ASCII dots,
+regardless of UI language. This change makes all of it centrally controllable:
+a timezone setting under Settings (default: per UI language) that every time
+display follows — sidebar included — and number/percentage formatting that
+follows the UI language automatically.
 
 ## Depth tree
 
 ```
-Root: a configurable agent frees tmux memory down to a target, on a switch + threshold
-├── 1  Reusable element
-│    └── 1.1  runSetupFields(a, { wrapClass }) — a styling option, default unchanged
-├── 2  Server logic (server/cleanup.mjs)
-│    ├── 2.1  cleanupSettings() — on/off, threshold/target GB, cooldown, repo, setup
-│    ├── 2.2  cleanupPrompt() — the id=7 prompt adapted to memory, with {target_gb}
-│    │         {threshold_gb} {keep_line} {sessions_url} placeholders
-│    ├── 2.3  startCleanupRun() — ordinary startRun path, no flows, 'cleanup_run' event
-│    ├── 2.4  cleanupRunInFlight() / lastCleanupRun() — dedupe + cooldown
-│    └── 2.5  maybeAutoCleanup() — watcher gate: on + memory ≥ threshold → start
-├── 3  Agent helper script
-│    └── 3.1  bin/cc-session-cleanup — measures activity+RSS, protects running runs
-│             and --keep, decides oldest-inactive-first to a target, --kill executes
-│             └── 3.1.1  installed by setup/02-install-scripts.sh
-├── 4  Settings page + API
-│    ├── 4.1  GET/POST /settings/cleanup — on/off, runSetupFields, GB fields, prompt
-│    └── 4.2  POST /api/cleanup/start — target_gb + keep (run ids → session names)
-├── 5  UI
-│    ├── 5.1  sidebar tmux block: ghost "free memory" button + inline target input
-│    └── 5.2  Sessions page: hint box with target input + keep field
-├── 6  Watcher auto-trigger (server/watcher.mjs → maybeAutoCleanup)
-└── 7  i18n + CSS + docs + tests
-     ├── 7.1  lang/en.json + de.json + zh.json (identical key sets)
-     ├── 7.2  CSS for the sidebar control and the Sessions box
-     ├── 7.3  unit tests (element option, planning, prompt, dedupe)
-     ├── 7.4  e2e tests (start path, no double start, script protects)
-     └── 7.5  browser tests (sidebar + sessions triggers)
+Root: central timezone + number/percentage formatting
+├── 1  Format core (server/util.mjs)
+│    └── 1.1  timezone state (setTimezone/uiTimezone/validTz), timezoneForLanguage,
+│    │        TIMEZONE_OPTIONS
+│    │    └── 1.1.1  fmtDateTime uses uiTimezone()
+│    └── 1.2  fmtDbUtc (DB UTC string → configured tz), tzAbbrev,
+│              fmtNum / fmtPercent / fmtMoney (Intl.NumberFormat per UI locale)
+├── 2  Settings + client config
+│    └── 2.1  ui_timezone in SETTINGS_KEYS + settingsSave → setTimezone();
+│    │        hub.mjs startup applies it (like setLanguage)
+│    └── 2.2  settings form block (select + hints), i18n keys settings.format_*
+│    │        in en/de/zh
+│    │    └── 2.2.1  layout() injects window.CCHUB_TZ = uiTimezone()
+├── 3  Server-side time displays in the configured timezone
+│    └── 3.1  usage panel reset/stamp text (pages.mjs) — tz abbreviation instead
+│    │        of " UTC"
+│    │    └── 3.1.1  lastAnomaly, vorfallZelle, globalesBanner, run chips,
+│    │              runMetrics, runEvents, vorfallAbschnitt via fmtDbUtc
+│    └── 3.2  flows pages (started/ended/resume, log clock) via fmtDbUtc
+├── 4  Numbers & percentages via fmtNum/fmtPercent
+│    └── 4.1  quotaBar pct, rail-dot titles, sessions CPU %, run costs,
+│             usage panel money, provider balances
+└── 5  Client side (public/hub.js)
+     └── 5.1  reltime title + zeitText use window.CCHUB_TZ
+     └── 5.2  relative text unchanged (timezone-free by construction)
 ```
 
 ## Decisions
 
-- **The reusable element already exists** (`runSetupFields()` + `runSetupFromForm()`,
-  used by both run forms, the favorites and the merge settings). It only needs the
-  styling option the operator asked for — `wrapClass`. Default output is unchanged,
-  which is a unit-tested property.
-- **The cleanup agent is a normal single run** through `startRun()`: budget gate,
-  overview, watcher, finish gate, Telegram report all apply. `branch_mode='keiner'`
-  and `flows=NULL` keep it out of any integration. It works in a detached worktree
-  of a configurable repo and is told never to commit.
-- **Dedupe via an event**, not a new column: `addEvent(runId, 'cleanup_run', …)`.
-  A run carrying that event is a cleanup run; in-flight = status running/deferred.
-  The auto-trigger has a cooldown so a run that cannot reach the target does not
-  start again every 30 s.
-- **The prompt is the id=7 prompt adapted to memory** (German, as the original),
-  with the target/keep/URL filled in at start time from settings. The URL comes
-  from `publicBase()` — the machine's real URL never enters the repo.
-- **The helper script measures itself** (`#{window_activity}`, process-tree RSS,
-  sqlite for running runs) and implements the greedy decision in awk, mirroring
-  the id=7 prompt's proven commands. Plan mode never kills; `--kill` only with
-  an explicit target.
-- **On/off governs the automatic watcher trigger.** A deliberate manual "free
-  memory" click works whenever a cleanup agent is configured.
+- **Timezone is an explicit setting; the default follows the language.**
+  `ui_timezone` (empty = auto). Auto maps German → `Europe/Berlin`, Chinese →
+  `Asia/Shanghai`, English → the server's own timezone (current behaviour). An
+  explicitly chosen timezone always wins over the language — the language is the
+  default, never the override. This is the "an die Sprache koppeln" the request
+  asked about, with an escape hatch.
+- **Numbers and percentages follow the UI language, no extra setting.** A decimal
+  separator is a property of a locale, not of a machine; coupling it to the
+  language is the whole point ("das gleiche für Zahlen und Prozentzahlen").
+  Implemented through `Intl.NumberFormat(currentLanguage(), …)` in one helper —
+  `toFixed` and string `%` concatenation go away, so the same figure reads
+  `78.5 %` in English and `78,5 %` in German.
+- **`fmtRelativeTime` and the live relative text stay untouched.** A relative
+  distance ("4 minutes ago") is timezone-free by construction; only the exact
+  timestamps (tooltips, chips, incidents, resets) carry a timezone.
+- **Raw " UTC" suffixes become the configured zone's abbreviation.** The reset
+  times in the usage panel and the incident stamps appended `UTC` by hand; they
+  now render in the configured zone and carry its abbreviation (e.g. `CEST`,
+  `GMT+8`), so a converted time cannot be mistaken for a UTC one.
+- **Timezone lives in the display layer, not in the data.** DB stays UTC
+  (`datetime('now')`); only rendering converts. Schedules (`run_at`,
+  `schedule_time`) are entered in the operator's local wall clock and are not
+  converted — they describe a local appointment, not an instant.
 
 ## Status log
 
-- [x] plan written
-- [x] implemented: reusable element option, server/cleanup.mjs, the helper
-      script, settings page + API, sidebar button + Sessions box, watcher gate,
-      i18n + CSS, unit/e2e/browser tests, SETUP_WITH_AGENT.md + the three
-      READMEs. Test runs: unit 270, e2e 244, browser 55, proxy 4, deploy 9.
-      Pre-push hook OK on the committed state. Reported done.
+- [x] 2026-08-29: plan written
+- [x] 2026-08-29: implemented — format core in util.mjs (setTimezone,
+      timezoneForLanguage, uiTimezone, validTz, tzAbbrev, fmtDbUtc, fmtClock,
+      fmtDatePart, fmtNum, fmtPercent, fmtMoney, TIMEZONE_OPTIONS);
+      settings (ui_timezone key + form block + i18n en/de/zh, hub.mjs startup,
+      layout injects window.CCHUB_TZ); server displays converted (usage panel
+      reset/stamp with tz abbreviation, incidents, anomalies, run chips/metrics/
+      events, flows pages, incident Telegram); numbers/percentages through
+      fmtNum/fmtPercent (quotaBar, rail, cpu, run costs, usage money, balances,
+      byteText); hub.js reltime title + zeitText follow CCHUB_TZ.
+      Tests: unit 280, e2e 253, browser 57, proxy 4, deploy 9 all green.
+      GATES.md all four met via the checker, evidence rewritten machine-free.

@@ -62,10 +62,14 @@ cc-hub is what you use when you are not:
 - **Incidents**: rate limits and provider outages are detected through several
   independent channels and raised once, not five times.
 - **Subscription usage** — Claude's 5-hour and 7-day windows, Cursor's spend for
-  the current cycle, OpenRouter credits — in the sidebar of every page, and a
-  **quota gate** that defers scheduled starts before they burn into an empty
-  quota — and defers only what that window really binds: Claude's general week
-  gates every run, a per-model week only the runs on that model. The same sidebar says what every tmux session on the machine costs in
+  the current cycle, OpenRouter and DeepSeek credits — in the sidebar of every
+  page, and a **budget gate** that defers starts before they burn into an empty
+  quota. What a run draws from decides which gate is asked, and only that:
+  Claude's general week gates every claude run, a per-model week only the runs
+  on that model, a cursor run the cursor period usage, a DeepSeek run its own
+  balance. Each gate is **optional** with its own threshold (Settings → Budget
+  gates), and a deferred run can be **started anyway** from its detail page.
+  The same sidebar says what every tmux session on the machine costs in
   memory, re-measured every eight minutes: a session outlives its agent on
   purpose, so that bill runs quietly. A configurable **tmux cleanup agent**
   (Settings → tmux cleanup, the same agent+provider+model selection as the run
@@ -78,6 +82,10 @@ cc-hub is what you use when you are not:
   ([server/flows/AGENTS.md](server/flows/AGENTS.md)).
 - **Telegram** notifications with a link straight to the run.
 - **Multilingual UI**: English (default), 中文, Deutsch — Settings → UI language.
+- **One clock and one number format**: every time — sidebar included — is shown
+  in the timezone chosen under Settings → Time and numbers (auto: German →
+  Europe/Berlin, Chinese → Asia/Shanghai, English → the server's timezone);
+  numbers and percentages use the UI language's separators.
 
 ## Security model — please read this one
 

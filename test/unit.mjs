@@ -24,7 +24,9 @@ const d = (s) => new Date(s)
 
 try {
   const { cronMatches, validCron, scheduleDue, scheduleText, stripAnsi, escapeHtml,
-    fmtDuration, parseDbUtc, fmtRelativeTime, fmtDateTime, kurzid } = await import('../server/util.mjs')
+    fmtDuration, parseDbUtc, toDbUtc, fmtRelativeTime, fmtDateTime, kurzid,
+    fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent,
+    uiTimezone, timezoneForLanguage, setTimezone, validTz, tzAbbrev, TIMEZONE_OPTIONS } = await import('../server/util.mjs')
   const { parseForm, cookieRepo, rememberRepo, requestRepo } = await import('../server/web-helpers.mjs')
 
   // ------------------------------------------------------------------
@@ -297,6 +299,53 @@ try {
     wahr(/\d{2}:\d{2}:\d{2}/.test(de), 'has a clock time: ' + de)
     gleich(fmtDateTime(NaN, 'en'), '', 'invalid')
   })
+  await pruefe('central format: the timezone resolves by language and by explicit choice', () => {
+    gleich(timezoneForLanguage('de'), 'Europe/Berlin', 'German → Berlin')
+    gleich(timezoneForLanguage('zh'), 'Asia/Shanghai', 'Chinese → Shanghai')
+    gleich(timezoneForLanguage('en'), null, 'English names no zone → server default')
+    gleich(timezoneForLanguage('xx'), null, 'unknown language names no zone')
+    wahr(validTz('Europe/Berlin'), 'a real IANA name is valid')
+    falsch(validTz('Mars/Olympus'), 'nonsense is not')
+    falsch(validTz(''), 'empty is not')
+    wahr(TIMEZONE_OPTIONS.includes('Europe/Berlin'), 'the settings list carries the common zones')
+  })
+  await pruefe('central format: fmtClock and fmtDatePart convert to the configured zone', () => {
+    const ms = Date.parse('2026-08-25T12:00:00Z')
+    setTimezone('Europe/Berlin')
+    gleich(fmtClock(ms), '14:00', 'Berlin is UTC+2 in August')
+    gleich(fmtDatePart(ms), '25.08.', 'the date part travels with the zone')
+    setTimezone('America/New_York')
+    gleich(fmtClock(ms), '08:00', 'New York is UTC-4 in August')
+    setTimezone('')                            // back to auto
+    gleich(fmtClock(NaN), '', 'invalid ms is empty')
+    gleich(fmtDatePart(NaN), '', 'invalid ms is empty')
+  })
+  await pruefe('central format: fmtDateTime and fmtDbUtc follow the configured zone', () => {
+    const ms = Date.parse('2026-08-25T12:00:00Z')
+    setTimezone('Europe/Berlin')
+    const de = fmtDateTime(ms, 'de')
+    wahr(de.includes('25.08.2026') && de.includes('14:00'), 'Berlin afternoon, German: ' + de)
+    gleich(fmtDbUtc('2026-08-25 12:00:00'), fmtDateTime(ms), 'DB UTC string == the instant')
+    gleich(fmtDbUtc(''), '', 'empty DB stamp')
+    setTimezone('')
+  })
+  await pruefe('central format: numbers and percentages follow the UI locale', async () => {
+    const { setLanguage } = await import('../server/i18n.mjs')
+    setLanguage('de')
+    gleich(fmtNum(1234.5, { maximumFractionDigits: 1 }), '1.234,5', 'German thousands+decimal')
+    gleich(fmtPercent(78.5), '78,5 %', 'German percentage')
+    gleich(fmtPercent(null), '?', 'missing stays a question mark')
+    setLanguage('en')
+    gleich(fmtNum(1234.5, { maximumFractionDigits: 1 }), '1,234.5', 'English thousands+decimal')
+    gleich(fmtPercent(78.5), '78.5 %', 'English percentage')
+    setLanguage('en')
+  })
+  await pruefe('central format: tzAbbrev names the configured zone', () => {
+    const ms = Date.parse('2026-08-25T12:00:00Z')
+    setTimezone('Europe/Berlin')
+    wahr(String(tzAbbrev(ms)).length > 0, 'a Berlin summer stamp has an abbreviation')
+    setTimezone('')
+  })
   await pruefe('kurzid returns the first UUID block', () => {
     gleich(kurzid('1d005159-78bd-4cc1-a889-07617871af2e'), '1d005159', 'UUID')
   })
@@ -433,10 +482,203 @@ try {
       'another harness: its model says nothing about these windows, so nothing is filtered out')
   })
 
+  await pruefe('quotaFullWindow names the window that is full and binds the run', async () => {
+    const { quotaFullWindow } = await quotaMit('{}', 20)
+    // 5-hour window full: it binds every claude run and comes first.
+    gleich(JSON.stringify(quotaFullWindow({ five: 100, resets_at: 'R5', weekly_scoped: [] }, 'claude-sonnet-5')),
+      '{"label":"5h","pct":100,"resets_at":"R5"}', '5 h full')
+    // A 7-day window full: the run's own model's window, named like the panel.
+    gleich(JSON.stringify(quotaFullWindow({
+      ...quotaWindows, five: 0,
+      weekly_scoped: [{ label: 'Fable', pct: 100, resets_at: 'R-F' }],
+    }, 'fable')), '{"label":"7d Fable","pct":100,"resets_at":"R-F"}', 'fable week full, named')
+    // The general week full, for a run whose own week is fine.
+    const general = { ...quotaWindows, five: 0, seven_general: 100, weekly_scoped: [{ label: 'Fable', pct: 40, resets_at: 'X' }] }
+    gleich(JSON.stringify(quotaFullWindow(general, 'claude-sonnet-5')),
+      '{"label":"7d","pct":100,"resets_at":"2026-08-30T06:00:00.000Z"}', 'general week, labelled 7d')
+    // A window full that is NOT this run's — sonnet is not affected by fable.
+    const fremd = { ...quotaWindows, five: 0, seven_general: 40, weekly_scoped: [{ label: 'Fable', pct: 100, resets_at: 'R-F' }] }
+    gleich(quotaFullWindow(fremd, 'claude-sonnet-5'), null, 'somebody else\u2019s window is not the run\u2019s')
+    // Nothing binds at 100 % → null (the run is not flagged).
+    gleich(quotaFullWindow({ ...quotaWindows, five: 0, seven_general: 40 }, 'claude-sonnet-5'), null, 'nothing full')
+  })
+
   await pruefe('an object carrying no window list is taken at its word', async () => {
     const { sevenFor, claudeGateBlocked } = await quotaMit('{}', 17)
     gleich(sevenFor({ five: 0, seven: 88 }, 'fable'), 88, 'the number it has is the answer')
     wahr(claudeGateBlocked({ five: 0, seven: 95 }, 'claude-sonnet-5').blocked, 'and it still gates')
+  })
+
+  await pruefe('thresholds are configurable per window; defaults stay 90/95', async () => {
+    const { claudeGateBlocked } = await quotaMit('{}', 18)
+    const q = { five: 80, seven: 88 }
+    falsch(claudeGateBlocked(q).blocked, 'defaults: 80 % and 88 % pass')
+    wahr(claudeGateBlocked(q, null, { five: 75, seven: 90 }).blocked, 'a 5 h threshold of 75 blocks the 80 %')
+    falsch(claudeGateBlocked(q, null, { five: 85, seven: 90 }).blocked, 'a 5 h threshold of 85 lets the 80 % pass')
+    wahr(claudeGateBlocked(q, null, { five: 90, seven: 85 }).blocked, 'a 7 d threshold of 85 blocks the 88 %')
+  })
+
+  await pruefe('the fable week has its own threshold', async () => {
+    const { claudeGateBlocked } = await quotaMit('{}', 19)
+    const q = {
+      five: 0, seven: 94, seven_general: 90, seven_resets_at: 'Y',
+      weekly_scoped: [{ label: 'Fable', pct: 92, resets_at: 'X' }],
+    }
+    falsch(claudeGateBlocked(q, 'fable').blocked, 'defaults: fable 92 % passes')
+    const g = claudeGateBlocked(q, 'fable', { fable: 90 })
+    wahr(g.blocked, 'fable 92 % blocks against its own threshold of 90')
+    enthaelt(g.reason, 'Fable', 'the reason names the fable window')
+    gleich(g.resets_at, 'X', 'the fable window hands out its own reset time')
+    falsch(claudeGateBlocked(q, 'claude-sonnet-5', { fable: 90 }).blocked,
+      'a run on another model is not held back by the fable threshold')
+  })
+
+  await pruefe('deepseek gate: the account verdict, low USD, and no signal', async () => {
+    const echt = global.fetch
+    process.env.DEEPSEEK_API_KEY = 'ds-test'
+    const ds = (nr) => import(`../server/quota.mjs?ds=${nr}`)
+    try {
+      const { deepseekGateBlocked: g1 } = await ds(1)
+      global.fetch = async () => ({ ok: true, json: async () => ({
+        is_available: false, balance_infos: [{ currency: 'USD', total_balance: '50' }],
+      }) })
+      const b = await g1(2)
+      wahr(b.blocked, 'available=false blocks even with plenty of money')
+      enthaelt(b.reason, 'unavailable', 'the reason names the verdict')
+
+      const { deepseekGateBlocked: g2 } = await ds(2)
+      global.fetch = async () => ({ ok: true, json: async () => ({
+        is_available: true, balance_infos: [{ currency: 'USD', total_balance: '1' }],
+      }) })
+      const low = await g2(2)
+      wahr(low.blocked, 'USD 1 below the minimum of 2 blocks')
+      enthaelt(low.reason, 'DeepSeek', 'the reason names the provider')
+
+      const { deepseekGateBlocked: g3 } = await ds(3)
+      global.fetch = async () => ({ ok: true, json: async () => ({
+        is_available: true, balance_infos: [{ currency: 'CNY', total_balance: '7000' }],
+      }) })
+      const cny = await g3(2)
+      falsch(cny.blocked, 'a CNY-only account reports no USD — no signal, no block')
+
+      const { deepseekGateBlocked: g4 } = await ds(4)
+      global.fetch = async () => ({ ok: true, json: async () => ({
+        is_available: true, balance_infos: [{ currency: 'USD', total_balance: '7' }],
+      }) })
+      const ok = await g4(2)
+      falsch(ok.blocked, 'USD 7 above the minimum passes')
+
+      const { deepseekGateBlocked: g5 } = await ds(5)
+      delete process.env.DEEPSEEK_API_KEY
+      falsch((await g5(2)).blocked, 'without a key the gate stays open')
+    } finally {
+      global.fetch = echt
+      delete process.env.DEEPSEEK_API_KEY
+    }
+  })
+
+  await pruefe('budgetGate routes by provider and honours the on/off switches', async () => {
+    // The scheduler loads quota.mjs on ITS import, so the fixture path and the
+    // settings must stand before that import happens.
+    const quotaPfad = join(sandkasten, 'quota-budgetgate.json')
+    writeFileSync(quotaPfad, JSON.stringify({
+      five_hour: { used_percentage: 97, resets_at: 1800000000 },
+      seven_day: { used_percentage: 98 },
+    }))
+    process.env.CCHUB_QUOTA_JSON = quotaPfad
+    const { setSetting } = await import('../server/db.mjs')
+    const { budgetGate } = await import('../server/scheduler.mjs')
+    setSetting('claude_gate_on', '1')
+    setSetting('deepseek_gate_on', '1')
+    setSetting('openrouter_gate_on', '1')
+    setSetting('deepseek_min_usd', '2')
+    setSetting('openrouter_min_eur', '5')
+    const echt = global.fetch
+    const alt = {
+      DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
+      OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
+      CCHUB_CURSOR_AUTH: process.env.CCHUB_CURSOR_AUTH,
+    }
+    const cursorAuth = join(sandkasten, 'cursor-auth.json')
+    writeFileSync(cursorAuth, JSON.stringify({ accessToken: 't' }))
+    process.env.DEEPSEEK_API_KEY = 'ds-test'
+    process.env.OPENROUTER_API_KEY = 'or-test'
+    process.env.CCHUB_CURSOR_AUTH = cursorAuth
+    global.fetch = async (url) => {
+      const u = String(url)
+      if (u.includes('deepseek')) return { ok: true, json: async () => ({ is_available: true, balance_infos: [{ currency: 'USD', total_balance: '1' }] }) }
+      if (u.includes('GetCurrentPeriodUsage')) return { ok: true, json: async () => ({ planUsage: { limit: 2000, totalSpend: 1990 } }) }
+      if (u.includes('GetAggregatedUsageEvents')) return { ok: true, json: async () => ({ totalCostCents: 1990 }) }
+      if (u.includes('full_stripe_profile')) return { ok: true, json: async () => ({ membershipType: 'pro' }) }
+      return { ok: true, json: async () => ({ data: { total_credits: 100, total_usage: 99.5 } }) }
+    }
+    try {
+      const ds = await budgetGate('hermes', 'deepseek/deepseek-v4', 'deepseek')
+      wahr(!!ds && /DeepSeek/.test(ds.reason), 'a deepseek run is gated by the DeepSeek balance')
+      const or = await budgetGate('opencode', 'openrouter/x', 'openrouter')
+      wahr(!!or && /OpenRouter/.test(or.reason), 'an openrouter run by the OpenRouter balance')
+      const fb = await budgetGate('opencode', 'whatever', null)
+      wahr(!!fb && /OpenRouter/.test(fb.reason), 'no provider falls back to the OpenRouter gate')
+      falsch(await budgetGate('opencode', 'x', 'opencode-zen'),
+        'opencode-zen reports no balance — no signal, no block')
+      const claude = await budgetGate('claude', 'claude-sonnet-5')
+      wahr(!!claude && /Claude quota/.test(claude.reason), 'a claude run by the claude gate')
+      const cursor = await budgetGate('cursor', 'auto')
+      wahr(!!cursor && /Cursor/.test(cursor.reason), 'a cursor run by the cursor gate')
+
+      setSetting('deepseek_gate_on', '0')
+      falsch(await budgetGate('hermes', 'deepseek/deepseek-v4', 'deepseek'),
+        'switched off, the DeepSeek gate cannot block')
+      setSetting('openrouter_gate_on', '0')
+      falsch(await budgetGate('opencode', 'x', null),
+        'switched off, the OpenRouter gate cannot block')
+      setSetting('claude_gate_on', '0')
+      falsch(await budgetGate('claude', 'claude-sonnet-5'),
+        'switched off, the claude gate cannot block even a full quota')
+      setSetting('cursor_gate_on', '0')
+      falsch(await budgetGate('cursor', 'auto'),
+        'switched off, the cursor gate cannot block')
+    } finally {
+      global.fetch = echt
+      for (const [k, v] of Object.entries(alt)) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v
+      }
+      setSetting('claude_gate_on', '1')
+      setSetting('deepseek_gate_on', '1')
+      setSetting('openrouter_gate_on', '1')
+      setSetting('cursor_gate_on', '1')
+    }
+  })
+
+  await pruefe('cursor gate measures the included usage against its own threshold', async () => {
+    const echt = global.fetch
+    const auth = join(sandkasten, 'cursor-gate-auth.json')
+    writeFileSync(auth, JSON.stringify({ accessToken: 't' }))
+    const alt = process.env.CCHUB_CURSOR_AUTH
+    process.env.CCHUB_CURSOR_AUTH = auth
+    const cu = (nr) => import(`../server/quota.mjs?cu=${nr}`)
+    global.fetch = async (url) => {
+      const u = String(url)
+      if (u.includes('GetCurrentPeriodUsage')) return { ok: true, json: async () => ({ planUsage: { limit: 2000, totalSpend: 1990 } }) }
+      if (u.includes('GetAggregatedUsageEvents')) return { ok: true, json: async () => ({ totalCostCents: 1990 }) }
+      return { ok: true, json: async () => ({ membershipType: 'pro' }) }
+    }
+    try {
+      const { cursorGateBlocked } = await cu(1)
+      const g = await cursorGateBlocked(95, 20)
+      wahr(g.blocked, '99.5 % blocks against a threshold of 95')
+      enthaelt(g.reason, 'Cursor', 'the reason names the provider')
+
+      const { cursorGateBlocked: g2 } = await cu(2)
+      falsch((await g2(99.9, 20)).blocked, '99.5 % passes against a threshold of 99.9')
+
+      process.env.CCHUB_CURSOR_AUTH = join(sandkasten, 'missing-cursor-gate-auth.json')
+      const { cursorGateBlocked: g3 } = await cu(3)
+      falsch((await g3(95, 20)).blocked, 'no token → no signal → the gate stays open')
+    } finally {
+      global.fetch = echt
+      if (alt === undefined) delete process.env.CCHUB_CURSOR_AUTH; else process.env.CCHUB_CURSOR_AUTH = alt
+    }
   })
 
   // ------------------------------------------------------------------
@@ -2660,19 +2902,19 @@ try {
   const { runEditAllowed, editRun } = await import('../server/run-edit.mjs')
   const { fallbackTitle: fb } = await import('../server/title.mjs')
 
-  await pruefe('the permission matrix: a scheduled/deferred run is fully editable, a running one only its duration', () => {
+  await pruefe('the permission matrix: a scheduled run is fully editable, a deferred one has no start time, a running one only its duration', () => {
     const erlaubt = (s) => JSON.stringify(runEditAllowed({ status: s }))
-    gleich(erlaubt('scheduled'), '{"duration":true,"prompt":true,"repo":true}', 'scheduled')
-    gleich(erlaubt('deferred'), '{"duration":true,"prompt":true,"repo":true}', 'deferred')
-    gleich(erlaubt('running'), '{"duration":true,"prompt":false,"repo":false}', 'running')
-    gleich(erlaubt('waiting_help'), '{"duration":true,"prompt":false,"repo":false}', 'waiting for a human is still running')
+    gleich(erlaubt('scheduled'), '{"duration":true,"prompt":true,"repo":true,"startTime":true,"branch":true}', 'scheduled')
+    gleich(erlaubt('deferred'), '{"duration":true,"prompt":true,"repo":true,"startTime":false,"branch":true}', 'deferred: no start time — it waits on quota, not on a time')
+    gleich(erlaubt('running'), '{"duration":true,"prompt":false,"repo":false,"startTime":false,"branch":false}', 'running')
+    gleich(erlaubt('waiting_help'), '{"duration":true,"prompt":false,"repo":false,"startTime":false,"branch":false}', 'waiting for a human is still running')
     for (const s of ['done', 'failed', 'aborted']) {
-      gleich(erlaubt(s), '{"duration":false,"prompt":false,"repo":false}', `${s}: nothing left to edit`)
+      gleich(erlaubt(s), '{"duration":false,"prompt":false,"repo":false,"startTime":false,"branch":false}', `${s}: nothing left to edit`)
     }
-    gleich(JSON.stringify(runEditAllowed(null)), '{"duration":false,"prompt":false,"repo":false}', 'no run')
+    gleich(JSON.stringify(runEditAllowed(null)), '{"duration":false,"prompt":false,"repo":false,"startTime":false,"branch":false}', 'no run')
   })
 
-  await pruefe('editing a scheduled run: prompt, duration and repo are applied and recorded', () => {
+  await pruefe('editing a scheduled run: prompt, duration, repo, branch and start time are applied and recorded', async () => {
     edb.exec(`DELETE FROM repos WHERE name IN ('edit-repo-a','edit-repo-b')`)
     edb.prepare(`INSERT INTO repos(name, path, base_branch) VALUES('edit-repo-a','/tmp/edit-a','main')`).run()
     edb.prepare(`INSERT INTO repos(name, path, base_branch) VALUES('edit-repo-b','/tmp/edit-b','main')`).run()
@@ -2683,35 +2925,135 @@ try {
                  VALUES(?,?,'scheduled','claude','E2E alt', 'keiner', 45, ?, 'at', '2030-01-01 00:00:00')`)
       .run(id, a, fb('E2E alt'))
     const problems = []
-    const r = editRun(id, { prompt: 'E2E neu', expectedMinutes: '120', repoId: b }, problems)
+    const r = await editRun(id, {
+      prompt: 'E2E neu', expectedMinutes: '120', repoId: b,
+      branchMode: 'neu', branchPattern: 'agent/edit',
+      startMode: 'at', startAt: '2030-01-05 09:30',
+    }, problems)
     gleich(problems.length, 0, `no problems (${problems.join(', ')})`)
     gleich(r.ok, true, 'applied')
     const lauf = edb.prepare('SELECT * FROM runs WHERE id=?').get(id)
     gleich(lauf.prompt, 'E2E neu', 'new prompt')
     gleich(lauf.expected_minutes, 120, 'new duration')
     gleich(lauf.repo_id, b, 'moved to the other repo')
+    gleich(lauf.branch_mode, 'neu', 'new branch mode')
+    gleich(lauf.branch_pattern, 'agent/edit', 'new branch pattern')
+    gleich(lauf.start_mode, 'at', 'start mode stays at')
+    // Same local-time reading the form's own parser makes of the input; the DB
+    // stores whatever that is in UTC, so the expected value is derived from the
+    // same Date.parse and stays correct in every timezone.
+    gleich(lauf.start_at, toDbUtc(Date.parse('2030-01-05 09:30')), 'the start time moved')
     gleich(lauf.title, fb('E2E neu'), 'a prompt-derived title follows the prompt')
-    gleich(edb.prepare(`SELECT kind FROM events WHERE run_id=? AND kind='edited'`).get(id).kind, 'edited', 'the edit is an event')
+    const ev = edb.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='edited'`).get(id)
+    gleich(ev.payload, JSON.stringify({ fields: ['duration', 'prompt', 'repo', 'start', 'branch'], repo_id: b }), 'the event names every changed field, and the move names its target')
   })
 
-  await pruefe('a renamed run keeps its name when the prompt changes', () => {
+  await pruefe('a planned run can be told to wait for the repo ("idle")', async () => {
+    const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
+    const id = 'edit-run-idle'
+    edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title, start_mode, start_at)
+                 VALUES(?,?,'scheduled','claude','p','keiner',45,NULL,'at','2030-01-01 00:00:00')`).run(id, a)
+    const problems = []
+    const r = await editRun(id, { startMode: 'idle' }, problems)
+    gleich(problems.length, 0, `no problems (${problems.join(', ')})`)
+    gleich(r.ok, true, 'applied')
+    const lauf = edb.prepare('SELECT * FROM runs WHERE id=?').get(id)
+    gleich(lauf.start_mode, 'idle', 'now waiting for the repo')
+    gleich(lauf.start_at, null, 'the point in time is gone')
+  })
+
+  await pruefe('a planned run can be told "start now" — that is an action, not a column write', async () => {
+    const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
+    const id = 'edit-run-now'
+    edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title, start_mode, start_at)
+                 VALUES(?,?,'scheduled','claude','p','keiner',45,NULL,'at','2030-01-01 00:00:00')`).run(id, a)
+    const problems = []
+    // Nothing else changes — "now" alone must not bounce off the nothing-to-save wall.
+    const r = await editRun(id, { startMode: 'now' }, problems)
+    gleich(problems.length, 0, `no problems (${problems.join(', ')})`)
+    gleich(r.ok, true, 'accepted')
+    gleich(r.startNow, true, 'the caller is told to start it')
+    const lauf = edb.prepare('SELECT * FROM runs WHERE id=?').get(id)
+    gleich(lauf.start_mode, 'at', 'no stored mode for "now"')
+    gleich(lauf.start_at, '2030-01-01 00:00:00', 'the columns stay — the run starts instead')
+  })
+
+  await pruefe('"in n minutes" is resolved to a point in time at edit time too', async () => {
+    const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
+    const id = 'edit-run-in'
+    edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title, start_mode, start_at)
+                 VALUES(?,?,'scheduled','claude','p','keiner',45,NULL,'idle',NULL)`).run(id, a)
+    const vorher = Date.now()
+    const problems = []
+    const r = await editRun(id, { startMode: 'in', startInMinutes: '90' }, problems)
+    const nachher = Date.now()
+    gleich(problems.length, 0, `no problems (${problems.join(', ')})`)
+    gleich(r.ok, true, 'applied')
+    const lauf = edb.prepare('SELECT * FROM runs WHERE id=?').get(id)
+    gleich(lauf.start_mode, 'at', '"in" becomes "at"')
+    const ms = parseDbUtc(lauf.start_at)
+    // A second of slack below: the stored stamp is truncated to whole seconds.
+    wahr(ms >= vorher + 90 * 60_000 - 1000 && ms <= nachher + 90 * 60_000, '90 minutes from now, resolved here')
+  })
+
+  await pruefe('a deferred run cannot be given a new start time', async () => {
+    const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
+    const id = 'edit-run-def'
+    edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title)
+                 VALUES(?,?,'deferred','claude','p','keiner',45,NULL)`).run(id, a)
+    const problems = []
+    await editRun(id, { startMode: 'at', startAt: '2030-02-02 10:00' }, problems)
+    gleich(problems.length, 1, `refused (${problems.join(', ')})`)
+    enthaelt(problems[0], 'waiting for its start', 'the reason says only a waiting run')
+  })
+
+  await pruefe('the branch rule is validated like the run form validates it', async () => {
+    const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
+    const id = 'edit-run-branch'
+    edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title)
+                 VALUES(?,?,'scheduled','claude','p','keiner',45,NULL)`).run(id, a)
+    const p1 = []
+    await editRun(id, { branchMode: 'neu' }, p1)
+    gleich(p1.length, 1, `a branch needs a pattern (${p1.join(', ')})`)
+    const p2 = []
+    await editRun(id, { branchMode: 'keiner', keepOnBranch: 1 }, p2)
+    gleich(p2.length, 1, `keeping work on a branch needs a branch (${p2.join(', ')})`)
+    const p3 = []
+    await editRun(id, { branchMode: 'kaputt' }, p3)
+    // The same double report the run form produces: an unknown mode AND the
+    // pattern that a non-'keiner' mode requires.
+    wahr(p3.length >= 1, `an unknown mode is refused (${p3.join(', ')})`)
+    const p4 = []
+    // A fixed branch named after the base branch is refused when that worktree
+    // holds it — but the test repos do not exist, so branchWorktree answers null
+    // and the edit goes through; the launch-time check catches it there.
+    const r = await editRun(id, { branchMode: 'fest', branchPattern: 'main', keepOnBranch: 1 }, p4)
+    gleich(p4.length, 0, `no problems (${p4.join(', ')})`)
+    gleich(r.ok, true, 'applied')
+    const lauf = edb.prepare('SELECT * FROM runs WHERE id=?').get(id)
+    gleich(lauf.branch_mode, 'fest', 'fixed branch set')
+    gleich(lauf.branch_pattern, 'main', 'with its pattern')
+    gleich(lauf.keep_on_branch, 1, 'and the keep flag')
+  })
+
+  await pruefe('a renamed run keeps its name when the prompt changes', async () => {
     const id = 'edit-run-0002'
     edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title)
                  VALUES(?,?,'scheduled','claude','E2E alt 2','keiner',45,'Renamed by hand')`)
       .run(id, edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id)
     const problems = []
-    editRun(id, { prompt: 'E2E neu 2' }, problems)
+    await editRun(id, { prompt: 'E2E neu 2' }, problems)
     gleich(problems.length, 0, `no problems (${problems.join(', ')})`)
     gleich(edb.prepare('SELECT title FROM runs WHERE id=?').get(id).title, 'Renamed by hand', 'an operator name wins')
   })
 
-  await pruefe('moving to the repo the run already lives in is a no-op, not an error', () => {
+  await pruefe('moving to the repo the run already lives in is a no-op, not an error', async () => {
     const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
     const id = 'edit-run-0003'
     edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title)
                  VALUES(?,?,'scheduled','claude','p','keiner',45,NULL)`).run(id, a)
     const problems = []
-    editRun(id, { repoId: a }, problems)
+    await editRun(id, { repoId: a }, problems)
     // The combined form pre-fills the select; a duration-only edit must not
     // fail on its own untouched field. With ONLY the repo submitted nothing
     // changed at all, which is the honest 'nothing to save'.
@@ -2719,55 +3061,67 @@ try {
     gleich(problems[0], 'Nothing to save.', 'the message names it')
   })
 
-  await pruefe('a running run accepts only its duration', () => {
+  await pruefe('a running run accepts only its duration', async () => {
     const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
     const id = 'edit-run-0004'
     edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title)
                  VALUES(?,?,'running','claude','lauf','keiner',45,NULL)`).run(id, a)
     const p1 = []
-    editRun(id, { prompt: 'anders' }, p1)
+    await editRun(id, { prompt: 'anders' }, p1)
     gleich(p1.length, 1, `prompt refused for a started run (${p1.join(', ')})`)
     const p2 = []
-    editRun(id, { repoId: edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-b'`).get().id }, p2)
+    await editRun(id, { repoId: edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-b'`).get().id }, p2)
     gleich(p2.length, 1, `move refused for a started run (${p2.join(', ')})`)
+    const p2b = []
+    await editRun(id, { branchMode: 'neu', branchPattern: 'x' }, p2b)
+    gleich(p2b.length, 1, `branch rule refused for a started run (${p2b.join(', ')})`)
+    const p2c = []
+    await editRun(id, { startMode: 'at', startAt: '2030-03-03 10:00' }, p2c)
+    gleich(p2c.length, 1, `start time refused for a started run (${p2c.join(', ')})`)
     const p3 = []
-    const ok = editRun(id, { expectedMinutes: '7' }, p3)
+    const ok = await editRun(id, { expectedMinutes: '7' }, p3)
     gleich(p3.length, 0, `duration accepted (${p3.join(', ')})`)
     gleich(ok.ok, true, 'applied')
     gleich(edb.prepare('SELECT expected_minutes FROM runs WHERE id=?').get(id).expected_minutes, 7, 'new duration')
     gleich(edb.prepare('SELECT prompt FROM runs WHERE id=?').get(id).prompt, 'lauf', 'prompt untouched')
   })
 
-  await pruefe('a finished run is not editable at all', () => {
+  await pruefe('a finished run is not editable at all', async () => {
     const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
     const id = 'edit-run-0005'
     edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title)
                  VALUES(?,?,'done','claude','fertig','keiner',45,NULL)`).run(id, a)
     const problems = []
-    editRun(id, { expectedMinutes: '1' }, problems)
+    await editRun(id, { expectedMinutes: '1' }, problems)
     gleich(problems.length, 1, `refused (${problems.join(', ')})`)
   })
 
-  await pruefe('invalid input is a problem, never a partial write', () => {
+  await pruefe('invalid input is a problem, never a partial write', async () => {
     const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
     const id = 'edit-run-0006'
     edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title)
                  VALUES(?,?,'scheduled','claude','p','keiner',45,NULL)`).run(id, a)
     const p1 = []
-    editRun(id, { prompt: '   ' }, p1)
+    await editRun(id, { prompt: '   ' }, p1)
     gleich(p1.length, 1, `empty prompt (${p1.join(', ')})`)
     const p2 = []
-    editRun(id, { expectedMinutes: '0' }, p2)
+    await editRun(id, { expectedMinutes: '0' }, p2)
     gleich(p2.length, 1, `zero minutes (${p2.join(', ')})`)
     const p3 = []
-    editRun(id, { expectedMinutes: 'abc' }, p3)
+    await editRun(id, { expectedMinutes: 'abc' }, p3)
     gleich(p3.length, 1, `nonsense (${p3.join(', ')})`)
     const p4 = []
-    editRun(id, { repoId: '99999' }, p4)
+    await editRun(id, { repoId: '99999' }, p4)
     gleich(p4.length, 1, `unknown repo (${p4.join(', ')})`)
     const p5 = []
-    editRun('does-not-exist', { prompt: 'x' }, p5)
-    gleich(p5.length, 1, `unknown run (${p5.join(', ')})`)
+    await editRun(id, { startMode: 'at', startAt: 'nonsense' }, p5)
+    gleich(p5.length, 1, `unreadable start time (${p5.join(', ')})`)
+    const p6 = []
+    await editRun(id, { startMode: 'someday' }, p6)
+    gleich(p6.length, 1, `unknown start mode (${p6.join(', ')})`)
+    const p7 = []
+    await editRun('does-not-exist', { prompt: 'x' }, p7)
+    gleich(p7.length, 1, `unknown run (${p7.join(', ')})`)
     const lauf = edb.prepare('SELECT * FROM runs WHERE id=?').get(id)
     gleich(lauf.prompt, 'p', 'nothing of the failed edits landed')
     gleich(lauf.expected_minutes, 45, 'duration untouched')

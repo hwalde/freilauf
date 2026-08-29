@@ -233,8 +233,8 @@ Three lifecycle operations, all in `server/run-def.mjs` next to `saveAgent`:
 
 And there is exactly **one** way from a definition to a running run:
 **`startRun(def, { repoId, agentId, promptExtra, title, startMode, startAt })`**
-in `server/scheduler.mjs` — including the budget gate (`budgetGate(harness)`,
-also used by the watcher when picking a deferred run back up).
+in `server/scheduler.mjs` — including the budget gate (`budgetGate(harness, model,
+provider)`, also used by the watcher when picking a deferred run back up).
 `startForAgent(agent)` is only its wrapper for a stored definition.
 
 `keep_on_branch` (0/1) is the newest field and went exactly that way: the form
@@ -375,20 +375,22 @@ with a keep > 0, one archived while the hub was down, one from before the rule
 existed. A restored run does not get its session back; a session is not
 recreated.
 
-### A run is not set in stone: duration while it runs, prompt and repo before it starts
+### A run is not set in stone: duration while it runs, prompt, repo, branch rule and start time before it starts
 
-Three things about an existing run can be changed, and the rule behind all
-three is: **whatever is read at the moment it is used can be edited until then.**
+Five things about an existing run can be changed, and the rule behind all of
+them is: **whatever is read at the moment it is used can be edited until then.**
 `server/run-edit.mjs` is the one place that decides what a status allows
 (`runEditAllowed()`), and the "Edit this run" card on the detail page
 (`runEditCard()`) renders from exactly that table — the form can never offer an
 edit the endpoint (`POST /api/runs/<id>/edit`) would refuse:
 
-| Field | `scheduled` / `deferred` | `running` / `waiting_help` | `done` / `failed` / `aborted` |
-|---|---|---|---|
-| **expected duration** | ✓ | ✓ | — |
-| **prompt** | ✓ | — | — |
-| **repo** | ✓ | — | — |
+| Field | `scheduled` | `deferred` | `running` / `waiting_help` | `done` / `failed` / `aborted` |
+|---|---|---|---|---|
+| **expected duration** | ✓ | ✓ | ✓ | — |
+| **prompt** | ✓ | ✓ | — | — |
+| **repo** | ✓ | ✓ | — | — |
+| **branch rule** | ✓ | ✓ | — | — |
+| **start time** | ✓ | — | — | — |
 
 - **The duration is read live.** The watcher's traffic-light thresholds
   (soft_overrun at 80 %, overrun at 100 %), the metrics and the overview all
@@ -398,14 +400,28 @@ edit the endpoint (`POST /api/runs/<id>/edit`) would refuse:
   urgently stops being silent). The running agent is deliberately NOT told: the
   minutes in its prompt are informational, and editing a session that stands
   would fight it.
-- **The prompt and the repo are read at launch.** `launchRun()` reads
-  `runs.prompt`, the repo's `base_branch`/`prompt`/extras and `runs.repo_id`
-  when it starts, so changing them moves the run's *future*, not its past. A
-  started run has no way back to this — its session is already running the old
-  text in a worktree of the old repo, hence the refusal.
+- **The prompt, the repo and the branch rule are read at launch.**
+  `launchRun()` reads `runs.prompt`, the repo's `base_branch`/`prompt`/extras
+  and `runs.repo_id` when it starts, and `makeWorktree()` reads the branch mode,
+  pattern and keep-on-branch (the agent's prompt quotes the sentence they
+  produce) — so changing them moves the run's *future*, not its past. A started
+  run has no way back to this — its session is already running the old text in
+  a worktree of the old repo, hence the refusal.
 - **"Not started" = `scheduled` + `deferred`.** Both have no session and no
   worktree, and both reach `launchRun()` eventually; a `deferred` run waits on
   quota exactly as a `scheduled` one waits on its time — same rule, same edit.
+- **The start time is edited the way it was planned.** A `scheduled` run's card
+  embeds the SAME block the single-run form plans one with
+  (`runStartTimeFields`, prefilled with what the run currently waits for) and
+  the edit goes through the SAME parser (`runStartFromForm`), so re-deciding
+  the "when" cannot mean something else than the form's own reading of the same
+  inputs. "at" and "in" write a new point in time, "idle" makes the run wait
+  for a free repo — and "now" **starts it immediately**
+  (`scheduler.startScheduledNow`, same budget gate as at any other start; a
+  blocked one becomes `deferred` instead of dying). Deliberately NOT offered on
+  a `deferred` run: it waits on quota, and `retryDeferred` starts it the moment
+  the gate opens whatever `start_at` says — a start-time edit there would be a
+  lie.
 - **A prompt change re-derives a prompt-derived title.** If the run's title is
   still the fallback of the old prompt (nobody renamed it, no LLM answer
   landed), it becomes the fallback of the new one and the title LLM gets
@@ -416,7 +432,10 @@ edit the endpoint (`POST /api/runs/<id>/edit`) would refuse:
 - **The card is part of the run-detail fragment**, so a status change (a
   scheduled run starts) swaps the fields by themselves; hub.js skips that swap
   while the card has focus (`#run-edit :focus`) so an edit is never thrown away
-  mid-typing, and removes the card once the fragment no longer renders one.
+  mid-typing, and removes the card once the fragment no longer renders one. The
+  schedule block inside it is driven by the same `data-start-switch` handler as
+  the run form and the Quick-Run dialog — bound as **event delegation**, because
+  a direct listener would die when the fragment replaces the card.
 
 ### Favorites and Quick Run: the setup without the task
 
@@ -642,20 +661,66 @@ the surface name or a bare `7d`).
 
 Where it is asked, and why each of them:
 
-- **`budgetGate(harness, model)`** (scheduler.mjs) — the model travels with
-  every call: from the definition on the way in, from the run row when the
-  watcher picks a deferred run back up. A block also **names the window** in its
-  reason and hands out **that window's** reset time; a 7-day block used to
-  publish the 5-hour reset into the deferred event and into Telegram as the
-  moment the run would start again.
+- **`budgetGate(harness, model, provider)`** (scheduler.mjs) — the model
+  travels with every call: from the definition on the way in, from the run row
+  when the watcher picks a deferred run back up. A block also **names the
+  window** in its reason and hands out **that window's** reset time; a 7-day
+  block used to publish the 5-hour reset into the deferred event and into
+  Telegram as the moment the run would start again.
 - **`anomaly:quota_full`** (watcher) — a red flag on a run for somebody else's
-  window is noise.
+  window is noise, in both directions: only a **claude** run is measured against
+  the claude windows at all (a run on another harness draws nothing from them,
+  so an exhausted claude quota must not colour its row red), and within claude
+  only a window that binds THIS run's model can flag it. The event **names the
+  window** (`quotaFullWindow()`: '5h', '7d', '7d Fable') and the overview prints
+  it, so "quota exhausted" comes with the answer to whose quota ran out.
 - **`quota7_start` / `quota7_end`** (runner.mjs, `finishCosts`) — both ends of
   the cost subtraction now describe one window. Taking the maximum made a run on
   Sonnet expensive because a Fable week filled up while it ran.
 
 Only the **display** still asks for the maximum: `seven` is the account's worst
 case, which is what one dot on the rail can honestly show.
+
+#### The gate is a rule the operator configures — and can overrule
+
+The thresholds were hardcoded (5 h ≥ 90, 7 d ≥ 95) and the settings page still
+carried a "quota threshold" field that nothing read — the gate looked
+configurable and was not, and a DeepSeek or OpenRouter run was measured against
+whichever gate a claude budget was blamed for. Both are fixed by one rule:
+**what a run draws from decides which gate is asked, and every gate is optional.**
+
+- `budgetGate(harness, model, provider)` routes by provider: claude runs go to
+  the claude gate, a cursor run to the cursor usage gate, a run with
+  `provider='deepseek'` to the DeepSeek balance gate, everything else to the
+  OpenRouter gate (the historical default for the provider-based harnesses).
+- Every gate has an **on/off switch** and its own **threshold**, all under
+  Settings → Budget gates: `claude_gate_on/_5h/_7d/_fable`,
+  `cursor_gate_on` + `cursor_gate_pct`, `openrouter_gate_on` +
+  `openrouter_min_eur`, `deepseek_gate_on` + `deepseek_min_usd`. A cleared
+  numeric field falls back to its default (the fable week to the general 7-day
+  threshold). `quota_threshold` is gone — it was the field the gate never read.
+- **Each window is judged against its own threshold.** `claudeGateBlocked`
+  measures the 5-hour window against `_5h`, the general week against `_7d`, a
+  per-model week called "Fable" against `_fable` — so a fable run can be
+  deferred earlier (or later) than everything else without touching the general
+  week. The reason names the blocking window and its reset time.
+- **The DeepSeek gate** asks the provider plugin directly (same cycle rule as
+  OpenRouter): it blocks on the account's own `is_available=false` verdict or
+  on a USD balance below the threshold. A CNY-only account reports no USD,
+  which is "no signal" — the gate stays open, like a missing key.
+- **The cursor gate** measures the running period's usage — spend divided by
+  the included amount, from the account's own `GetCurrentPeriodUsage` (the
+  same answer the usage panel shows) — against `cursor_gate_pct`. The included
+  amount is only assumed when that endpoint stays silent
+  (`cursor_included_usd`). No token, no answer, no included amount: all three
+  mean no signal, and the gate stays open.
+- **A deferred run can be started anyway.** The gate is a rule that must not
+  overrule a deliberate decision (same principle as `repos.max_parallel`), so
+  the detail page and the overview row carry a "Start anyway" button
+  (`POST /api/runs/<id>/start`, event `forced_start`). It shares one function
+  with the watcher's auto-retry — `startDeferredRun(runId, { forced })` — and
+  only a `deferred` run may go: a scheduled one is waiting for its time, not
+  for a quota.
 
 The e2e sandbox points `CCHUB_CLAUDE_CREDENTIALS` at a file that does not exist,
 so the suite never touches the real endpoint (same fence as `CCHUB_CURSOR_AUTH`)

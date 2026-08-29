@@ -4,7 +4,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRepo, getRun } from './db.mjs'
-import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime, hubVersion } from './util.mjs'
+import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime, fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent, tzAbbrev, uiTimezone, setTimezone, TIMEZONE_OPTIONS, hubVersion } from './util.mjs'
 import { cookieRepo, requestRepo } from './web-helpers.mjs'
 import { providerBalances } from './balances.mjs'
 import {
@@ -105,13 +105,23 @@ const AMPEL_DOT = {
  * raw for as long as it had a column of its own to hide in. Same treatment as
  * an incident type in `typName()`: a key if there is one, the raw kind if the
  * watcher ever invents a new one — a page must not go blank over a word.
+ *
+ * Some anomalies carry a named subject in their payload — `quota_full` names
+ * the window it saw full ('5h', '7d Fable', …) — and that word goes into the
+ * line, because "quota exhausted" without the window is exactly the case where
+ * one cannot tell whose quota ran out.
  */
 function lastAnomaly(runId) {
-  const r = db.prepare(`SELECT kind, ts FROM events WHERE run_id=? AND (kind LIKE 'anomaly:%' OR kind='help') ORDER BY id DESC LIMIT 1`).get(runId)
+  const r = db.prepare(`SELECT kind, ts, payload FROM events WHERE run_id=? AND (kind LIKE 'anomaly:%' OR kind='help') ORDER BY id DESC LIMIT 1`).get(runId)
   if (!r) return null
   const key = `anomaly.${String(r.kind).replace(/^anomaly:/, '')}`
   const name = t(key) === key ? r.kind : t(key)
-  return `${name} (${r.ts})`
+  let fenster = ''
+  try {
+    const p = JSON.parse(r.payload ?? 'null')
+    if (p && p.window) fenster = `${p.window} · `
+  } catch {}
+  return `${name} (${fenster}${fmtDbUtc(r.ts)})`
 }
 
 /** Name of an incident type, also for 'provider_down:openrouter'. */
@@ -138,7 +148,7 @@ function vorfallZelle(runId, repoId, runStatus = null) {
     // '!' marks the ones that are waiting for hands — in a table of many runs
     // that mark is the whole difference between a to-do and a note.
     const handeln = brauchtMensch(v, runStatus)
-    const titel = `${typName(v.typ)} · ${t('incidents.last')} ${v.zuletzt_gesehen} UTC${v.beleg ? `\n${v.beleg}` : ''}`
+    const titel = `${typName(v.typ)} · ${t('incidents.last')} ${fmtDbUtc(v.zuletzt_gesehen)}${v.beleg ? `\n${v.beleg}` : ''}`
     return `<span class="incident ${SEVERITY_CLASS[v.schwere]}" title="${e(titel)}">${handeln ? '❗ ' : ''}${e(typName(v.typ))} ${v.anzahl}×</span>
     <form method="post" action="/api/incidents/${v.id}/resolve" class="inline" onclick="event.stopPropagation()">
       <input type="hidden" name="back" value="/?repo=${repoId}"><button title="${e(t('incidents.resolve_hint'))}">${e(t(handeln ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`
@@ -149,7 +159,7 @@ function vorfallZelle(runId, repoId, runStatus = null) {
 function globalesBanner() {
   const offen = offeneVorfaelle(null)
   if (!offen.length) return ''
-  return `<div class="banner red">${offen.map(v => `🔴 <b>${e(typName(v.typ))}</b> ${e(t('incidents.global_since', { ts: v.erst_gesehen }))} (${e(t('incidents.checked', { n: v.anzahl }))}) — ${e(v.beleg ?? '')}
+  return `<div class="banner red">${offen.map(v => `🔴 <b>${e(typName(v.typ))}</b> ${e(t('incidents.global_since', { ts: fmtDbUtc(v.erst_gesehen) }))} (${e(t('incidents.checked', { n: v.anzahl }))}) — ${e(v.beleg ?? '')}
     <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/"><button>${e(t(brauchtMensch(v) ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`).join('<br>')}</div>`
 }
 
@@ -326,7 +336,7 @@ async function cleanupDialogHtml(active) {
 export function quotaBar(pct, { label = '', note = '', title = '' } = {}) {
   const klasse = pct == null ? '' : pct >= 90 ? 'r' : pct >= 80 ? 'y' : ''
   return `<span class="quota"${title ? ` title="${e(title)}"` : ''}>${
-    label ? `<span class="quota-label">${e(label)}</span>` : ''}<span class="track"><span class="fill ${klasse}" style="width:${Math.min(pct ?? 0, 100)}%"></span></span><span class="quota-pct">${pct ?? '?'} %</span>${
+    label ? `<span class="quota-label">${e(label)}</span>` : ''}<span class="track"><span class="fill ${klasse}" style="width:${Math.min(pct ?? 0, 100)}%"></span></span><span class="quota-pct">${fmtPercent(pct)}</span>${
     note ? `<span class="dim">${e(note)}</span>` : ''}</span>`
 }
 
@@ -508,7 +518,7 @@ async function sideRail(repoId) {
     for (const [kurz, pct] of werte) {
       if (pct == null) continue
       const klasse = pct >= 90 ? 'r' : pct >= 80 ? 'y' : ''
-      teile.push(`<span class="rail-dot" title="${e(u.label)} ${e(kurz)}: ${pct} %">
+      teile.push(`<span class="rail-dot" title="${e(u.label)} ${e(kurz)}: ${e(fmtPercent(pct))}">
         <span class="rail-bar ${klasse}"><i style="height:${Math.min(pct, 100)}%"></i></span>
         <span class="rail-label">${e(kurz)}</span></span>`)
     }
@@ -605,7 +615,7 @@ ${quickRunDialog(repos, effRepo)}
 ${await cleanupDialogHtml(active)}
 <div class="toasts" id="cchub-toasts" aria-live="polite"></div>
 ${withTerminal ? '<script src="/static/xterm.js"></script><script src="/static/addon-fit.js"></script>' : ''}
-<script>window.CCHUB_I18N=${JSON.stringify(clientCatalog())}</script>
+<script>window.CCHUB_I18N=${JSON.stringify(clientCatalog())};window.CCHUB_TZ=${JSON.stringify(uiTimezone())}</script>
 <script src="/static/hub.js"></script></body></html>`
 }
 
@@ -621,25 +631,22 @@ export async function usagePanel() {
   try { balances = await providerBalances() } catch { balances = [] }
   if (!usage.length && !balances.length) return ''
   // A reset within the next day is a time, everything beyond it needs the date
-  // too — '16:30' alone says nothing about a window that runs for a week.
-  const hhmm = (d) => `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
-  const ddmm = (d) => `${String(d.getUTCDate()).padStart(2, '0')}.${String(d.getUTCMonth() + 1).padStart(2, '0')}.`
+  // too — '16:30' alone says nothing about a window that runs for a week. Both
+  // read the CONFIGURED timezone (not UTC) and carry that zone's abbreviation,
+  // so a converted time cannot be mistaken for a UTC one.
   const resetText = (iso) => {
     const ms = Date.parse(iso)
     if (!Number.isFinite(ms)) return ''
-    const d = new Date(ms)
-    return (ms - Date.now() > 24 * 3600_000 ? `${ddmm(d)} ` : '') + `${hhmm(d)} UTC`
+    return (ms - Date.now() > 24 * 3600_000 ? `${fmtDatePart(ms)} ` : '') + `${fmtClock(ms)} ${tzAbbrev(ms)}`
   }
   // When a window was READ, for a reading that is not the current one. Same idea
   // in the other direction: a time alone is a lie about a value taken two days
-  // ago, so anything but today carries its date.
+  // ago, so anything but today carries its date. "Today" is judged in the same
+  // timezone the time is shown in, so the two cannot disagree at a zone boundary.
   const stampText = (ms) => {
     if (!Number.isFinite(ms) || ms <= 0) return ''
-    const d = new Date(ms)
-    const today = new Date()
-    const sameDay = d.getUTCFullYear() === today.getUTCFullYear()
-      && d.getUTCMonth() === today.getUTCMonth() && d.getUTCDate() === today.getUTCDate()
-    return (sameDay ? '' : `${ddmm(d)} `) + `${hhmm(d)} UTC`
+    const sameDay = fmtDatePart(ms) === fmtDatePart(Date.now())
+    return (sameDay ? '' : `${fmtDatePart(ms)} `) + `${fmtClock(ms)} ${tzAbbrev(ms)}`
   }
   const rows = usage.map(u => {
     if (!u.ok) return `<div class="usage-row"><b>${e(u.label)}</b> <span class="dim">${e(t('usage.unavailable'))}</span></div>`
@@ -681,7 +688,7 @@ export async function usagePanel() {
       // amount is the configured fallback does the text say so (tilde).
       const money = d.spent_usd != null
         ? t(d.included_estimated ? 'usage.spent_est' : 'usage.spent',
-          { usd: d.spent_usd.toFixed(2), included: d.included_usd })
+          { usd: fmtNum(d.spent_usd, { maximumFractionDigits: 2 }), included: fmtNum(d.included_usd, { maximumFractionDigits: 2 }) })
         : ''
       const days = d.cycle_end != null
         ? Math.max(0, Math.ceil((Date.parse(d.cycle_end) - Date.now()) / 86_400_000)) : null
@@ -702,9 +709,10 @@ export async function usagePanel() {
       // granted/topped_up are DeepSeek's split and stay in the tooltip: the
       // figure that matters on screen is what is left.
       const detail = a.granted != null && a.topped_up != null
-        ? t('usage.balance_detail', { granted: a.granted, topped_up: a.topped_up }) : ''
+        ? t('usage.balance_detail',
+          { granted: fmtNum(a.granted, { maximumFractionDigits: 2 }), topped_up: fmtNum(a.topped_up, { maximumFractionDigits: 2 }) }) : ''
       return `<span${detail ? ` title="${e(detail)}"` : ''}>${
-        e(t('usage.remaining', { amount: a.remaining, currency: a.currency }))}</span>`
+        e(t('usage.remaining', { amount: fmtNum(a.remaining, { maximumFractionDigits: 2 }), currency: a.currency }))}</span>`
     }).join(' <span class="dim">·</span> ')
     // `available:false` is the provider's own verdict and outranks the number
     // next to it — promotional credit can expire while the figure looks healthy.
@@ -770,6 +778,15 @@ export function runRow(r, ctx) {
           <input type="hidden" name="back" value="/?repo=${repoId}">
           <button type="submit" class="act" title="${e(t('overview.archive'))}" aria-label="${e(t('overview.archive'))}">${e(t('overview.archive_short'))}</button></form>`
     : ''
+  // The budget gate held a run back and the operator disagrees — one click in
+  // the row starts it anyway (POST /start, no gate). Same pattern as the
+  // archive button: a small action button, hover for the full word, and the
+  // click must not navigate to the detail page.
+  const startBtn = r.status === 'deferred'
+    ? `<form method="post" action="/api/runs/${r.id}/start" class="inline" onclick="event.stopPropagation()">
+          <input type="hidden" name="back" value="/?repo=${repoId}">
+          <button type="submit" class="act" title="${e(t('start.force_start'))}" aria-label="${e(t('start.force_start'))}">${e(t('start.force_start_short'))}</button></form>`
+    : ''
   // The row stays clickable as a whole, the title is additionally a real link —
   // otherwise the detail page would be unreachable by keyboard. The title cell
   // swallows the row click: renaming must not navigate away.
@@ -793,7 +810,7 @@ export function runRow(r, ctx) {
       <td>${wartend ? '' : (durMin > 0 ? e(t('unit.minutes', { n: durMin })) : '')}<span class="dim"> / ${e(t('unit.minutes', { n: r.expected_minutes }))}</span></td>
       <td class="two-line">${branch ? e(branch) : '<span class="leer">–</span>'}${
         r.pr_url ? `<span class="dim"><a href="${e(r.pr_url)}" onclick="event.stopPropagation()">PR</a></span>` : ''}</td>
-      <td>${vorfallZelle(r.id, repoId, r.status)}${archivBtn}</td>
+      <td>${vorfallZelle(r.id, repoId, r.status)}${startBtn}${archivBtn}</td>
     </tr>`
 }
 
@@ -1074,6 +1091,7 @@ export async function pageRun(req, res, url, id) {
   const inFlight = ['running', 'waiting_help'].includes(run.status)
   const body = `
   ${runDetailHead(run, { title: titel })}
+  ${runPromptCard(run)}
   ${runChips(run, repo, herkunft)}
   ${runEditCard(run)}
   ${integrationSection(run, repo)}
@@ -1132,6 +1150,24 @@ export function terminalState(live, sessionOpen, inFlight) {
 }
 
 /**
+ * The run's prompt, folded away near the top of the detail page.
+ *
+ * Its own block rather than a chip: the prompt IS the run — everything else on
+ * the page answers "what became of it". A <details> keeps a long prompt from
+ * dominating the page until it is asked for, and the block deliberately does
+ * NOT live in the run-detail fragment: the prompt does not change while a run
+ * works, and the fragment swap would close the block under whoever is reading
+ * it on every event. Same rule as the goal card, which is page-only for the
+ * same reason.
+ */
+export function runPromptCard(run) {
+  const text = String(run.prompt ?? '').trim()
+  if (!text) return ''
+  return `<details class="run-prompt" id="run-prompt"><summary>${e(t('run.prompt'))}</summary>
+    <pre>${e(text)}</pre></details>`
+}
+
+/**
  * The goal of a run, and whether it ever reached the session.
  *
  * Its own block rather than a chip: a condition is a sentence, and "was it sent
@@ -1165,6 +1201,17 @@ export function runDetailHead(run, ctx) {
     // there is no session to end, only a record to set to 'aborted'.
     ? `<div class="banner waiting" id="run-banner">⏳ ${wartetAuf(run)}
        <form method="post" action="/api/runs/${id}/kill" class="inline"><button class="danger">${e(t('start.cancel'))}</button></form></div>`
+    : ''}
+  ${run.status === 'deferred'
+    // The budget gate held the run back, and the operator disagrees — that is
+    // what the button is for: the gate is a rule that must not overrule a
+    // deliberate decision (same principle as repos.max_parallel). POST /start
+    // starts it without asking the gate again; cancel stays available.
+    ? `<div class="banner waiting" id="run-banner">🟡 ${wartetAuf(run)}
+       <div class="btn-row">
+         <form method="post" action="/api/runs/${id}/start" class="inline"><button>${e(t('start.force_start'))}</button></form>
+         <form method="post" action="/api/runs/${id}/kill" class="inline"><button class="danger">${e(t('start.cancel'))}</button></form>
+       </div></div>`
     : ''}
   ${['done', 'failed', 'aborted'].includes(run.status)
     // One click into the archive / back out of it. An archived run is hidden
@@ -1264,8 +1311,8 @@ export function runChips(run, repo, herkunft) {
     ${chip('agents.model', run.model)}
     ${chip('model.provider', run.provider
       ? run.provider + (run.or_provider ? ` (${t('run.pinned')}: ${run.or_provider})` : '') : null)}
-    ${chip('run.start', run.started_at)}
-    ${chip('run.end', run.ended_at)}
+    ${chip('run.start', run.started_at ? fmtDbUtc(run.started_at) : null)}
+    ${chip('run.end', run.ended_at ? fmtDbUtc(run.ended_at) : null)}
     ${chip('run.expectation', t('unit.minutes', { n: run.expected_minutes }))}
     ${run.workdir_effective ? chip('run.workdir', `<code>${e(run.workdir_effective)}</code>`, { raw: true }) : ''}
     ${skillListe(run.skills).length ? chip('skills.title', skillAnzeige(run.skills).join(', ')) : ''}
@@ -1277,8 +1324,11 @@ export function runChips(run, repo, herkunft) {
  * can be changed, folded away like the goal. The fields are rendered from
  * runEditAllowed(), the SAME table the API applies: a running run gets only
  * the expected duration (the watcher's thresholds and the metrics read the
- * column live), a scheduled or deferred run additionally the prompt and the
- * repo (both read at launch). A finished run gets no card at all.
+ * column live), a scheduled or deferred run additionally the prompt, the repo
+ * and the branch rule (all read at launch), and a scheduled run its start time
+ * — through the same block the single-run form plans one with, so the operator
+ * re-decides the "when" exactly the way it was decided the first time. A
+ * finished run gets no card at all.
  *
  * The card is part of the run-detail fragment, so a status change (a scheduled
  * run starts) swaps the fields by themselves — and hub.js skips that swap while
@@ -1286,7 +1336,7 @@ export function runChips(run, repo, herkunft) {
  */
 export function runEditCard(run) {
   const erlaubt = runEditAllowed(run)
-  if (!erlaubt.duration && !erlaubt.prompt && !erlaubt.repo) return ''
+  if (!erlaubt.duration && !erlaubt.prompt && !erlaubt.repo && !erlaubt.startTime && !erlaubt.branch) return ''
   const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
   const zeilen = []
   if (erlaubt.duration) {
@@ -1305,6 +1355,23 @@ export function runEditCard(run) {
     </select>
     <span class="dim">${e(t('run.edit.repo_hint'))}</span></label>`)
   }
+  if (erlaubt.branch) {
+    // The same block the run forms use — repo-switching inside the card flips
+    // the explanations through its data-merge-modes/bases, exactly as in the
+    // Quick-Run dialog.
+    zeilen.push(branchFields(run, branchContext(run.repo_id)))
+  }
+  if (erlaubt.startTime) {
+    // Prefilled with what the run currently waits for: the DB holds UTC, the
+    // <input type="datetime-local"> wants local time on this machine (the same
+    // assumption runStartFromForm makes the other way round).
+    const at = parseDbUtc(run.start_at)
+    zeilen.push(runStartTimeFields({
+      start_mode: run.start_mode,
+      start_at: Number.isFinite(at) ? toDateTimeLocal(at) : '',
+    }))
+    zeilen.push(`<p class="dim">${e(t('run.edit.start_hint'))}</p>`)
+  }
   return `<details class="run-edit" id="run-edit">
     <summary>${e(t('run.edit'))}</summary>
     <form method="post" action="/api/runs/${e(run.id)}/edit" class="settings form-grid">
@@ -1312,6 +1379,13 @@ export function runEditCard(run) {
       <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
     </form>
   </details>`
+}
+
+/** DB UTC ('YYYY-MM-DD HH:MM:SS') → local time in the datetime-local shape. */
+function toDateTimeLocal(ms) {
+  const d = new Date(ms)
+  const z = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}T${z(d.getHours())}:${z(d.getMinutes())}`
 }
 
 /**
@@ -1324,18 +1398,18 @@ export function runMetrics(run) {
   return `<dl class="metrics" id="run-metrics">
     ${zeile('run.runtime', `${fmtLaufzeit(run)} <span class="dim">/ ${e(t('run.expectation'))} ${e(t('unit.minutes', { n: run.expected_minutes }))}</span>`)}
     ${zeile('run.tokens', e(t('run.tokens_value', { in: run.tokens_in ?? 0, out: run.tokens_out ?? 0 })))}
-    ${zeile('run.costs', run.cost_eur != null ? e(run.cost_eur.toFixed(2)) + ' € (' + e(t('run.abo_delta')) + ')' : run.cost_usd != null ? e(run.cost_usd.toFixed(4)) + ' $' : '–')}
-    ${zeile('run.activity', e(run.last_activity_at ?? '–'))}
+    ${zeile('run.costs', run.cost_eur != null ? e(fmtNum(run.cost_eur, { maximumFractionDigits: 2 })) + ' € (' + e(t('run.abo_delta')) + ')' : run.cost_usd != null ? e(fmtNum(run.cost_usd, { maximumFractionDigits: 4 })) + ' $' : '–')}
+    ${zeile('run.activity', e(run.last_activity_at ? fmtDbUtc(run.last_activity_at) : '–'))}
     ${zeile('run.branch_reported', `${e(run.branch_reported ?? '–')} <span class="dim">/ ${e(t('run.branch_expected'))} ${e(run.branch_expected ?? '–')}</span>`)}
     ${zeile('run.pr', run.pr_url ? `<a href="${e(run.pr_url)}">${e(run.pr_url)}</a>` : '–')}
-    ${zeile('run.exit', `${run.exit_code ?? '–'}${run.tmux_closed_at ? ` <span class="dim">/ ${e(t('run.tmux_closed'))} ${e(run.tmux_closed_at)}</span>` : ''}`)}
+    ${zeile('run.exit', `${run.exit_code ?? '–'}${run.tmux_closed_at ? ` <span class="dim">/ ${e(t('run.tmux_closed'))} ${e(fmtDbUtc(run.tmux_closed_at))}</span>` : ''}`)}
   </dl>`
 }
 
 /** The run's history, oldest first — without the Telegram bookkeeping. */
 export function runEvents(runId) {
   const events = db.prepare(`SELECT * FROM events WHERE run_id=? AND kind NOT LIKE 'telegram_sent%' ORDER BY id`).all(runId)
-  return `<ul class="events" id="run-events">${events.map(ev => `<li><span class="dim">${e(ev.ts)}</span> ${e(ev.kind)}</li>`).join('') || `<li class="dim">${e(t('run.none'))}</li>`}</ul>`
+  return `<ul class="events" id="run-events">${events.map(ev => `<li><span class="dim">${e(fmtDbUtc(ev.ts))}</span> ${e(ev.kind)}</li>`).join('') || `<li class="dim">${e(t('run.none'))}</li>`}</ul>`
 }
 
 function fmtLaufzeit(run) {
@@ -1354,9 +1428,9 @@ export function vorfallAbschnitt(runId, runStatus = null) {
   if (!alle.length) return ''
   const zeile = (v) => `<li class="incident-row ${v.geloest_am ? 'resolved' : SEVERITY_CLASS[v.schwere]}">
     <b>${e(typName(v.typ))}</b> <span class="dim">(${e(v.quelle)}, ${e(t(SEVERITY_TEXT[v.schwere] ?? 'incidents.severity_red'))})</span>
-    · ${v.anzahl}× · ${e(t('incidents.first'))} ${e(v.erst_gesehen)} · ${e(t('incidents.last'))} ${e(v.zuletzt_gesehen)} UTC
+    · ${v.anzahl}× · ${e(t('incidents.first'))} ${e(fmtDbUtc(v.erst_gesehen))} · ${e(t('incidents.last'))} ${e(fmtDbUtc(v.zuletzt_gesehen))}
     ${v.wieder_geoeffnet ? `· ${e(t('incidents.reopened', { n: v.wieder_geoeffnet }))}` : ''}
-    ${v.geloest_am ? `· ${e(t('incidents.resolved_at'))} ${e(v.geloest_am)} (${e(v.geloest_von ?? '')})` : `
+    ${v.geloest_am ? `· ${e(t('incidents.resolved_at'))} ${e(fmtDbUtc(v.geloest_am))} (${e(v.geloest_von ?? '')})` : `
       <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/runs/${runId}"><button>${e(t(brauchtMensch(v, runStatus) ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`}
     ${v.beleg ? `<br><code class="evidence">${e(v.beleg)}</code>` : ''}</li>`
   const offen = alle.filter(v => !v.geloest_am), zu = alle.filter(v => v.geloest_am)
@@ -1415,7 +1489,7 @@ const STATE_CLASS = {
 
 function byteText(kb) {
   if (!kb) return '–'
-  return kb >= 1024 * 1024 ? `${(kb / 1024 / 1024).toFixed(1)} GB` : `${Math.round(kb / 1024)} MB`
+  return kb >= 1024 * 1024 ? `${fmtNum(kb / 1024 / 1024, { maximumFractionDigits: 1 })} GB` : `${Math.round(kb / 1024)} MB`
 }
 
 /**
@@ -1450,7 +1524,7 @@ export function sessionRow(s, ctx = {}) {
     <td>${age}</td>
     <td>${activity}</td>
     <td>${e(s.command || '–')}<div class="dim">${e(t('sessions.processes'))}: ${s.resources.count}</div></td>
-    <td>${e(byteText(s.resources.rssKb))}<div class="dim">${s.resources.cpu.toFixed(1)} % CPU</div></td>
+    <td>${e(byteText(s.resources.rssKb))}<div class="dim">${e(fmtNum(s.resources.cpu, { maximumFractionDigits: 1 }))} % CPU</div></td>
     <td>${s.windows}/${s.paneCount}${s.attached ? ` <b>${e(t('sessions.attached'))}</b>` : ''}</td>
     <td class="dim"><code>${e(s.path)}</code></td>
     <td><button type="button" class="danger sess-kill">${e(t('sessions.end'))}</button></td>
@@ -1529,11 +1603,32 @@ export async function pageSettings(req, res, url) {
   <form method="post" action="/settings/save" class="settings form-grid">
     <label>${e(t('settings.language'))} <select name="ui_language">${Object.entries(LANGUAGES).map(([code, label]) =>
       `<option value="${code}" ${(s.ui_language ?? 'en') === code ? 'selected' : ''}>${e(label)}</option>`).join('')}</select></label>
+    <fieldset><legend>${e(t('settings.format_legend'))}</legend>
+      <p class="dim">${e(t('settings.format_hint'))}</p>
+      <label>${e(t('settings.timezone'))} <select name="ui_timezone"><option value="" ${!s.ui_timezone ? 'selected' : ''}>${e(t('settings.timezone_auto'))}</option>
+        ${TIMEZONE_OPTIONS.map(z => `<option value="${z}" ${s.ui_timezone === z ? 'selected' : ''}>${z}</option>`).join('')}</select></label>
+      <p class="dim">${e(t('settings.numbers_hint'))}</p>
+    </fieldset>
     <label>${e(t('settings.pipeline'))} <select name="pipeline_on"><option value="1" ${s.pipeline_on === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${s.pipeline_on !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
     <label>${e(t('settings.telegram_token'))} <input name="telegram_token" type="password" value="${e(s.telegram_token ?? '')}"></label>
     <label>${e(t('settings.telegram_chat'))} <input name="telegram_chat" value="${e(s.telegram_chat ?? '')}"></label>
-    <label>${e(t('settings.quota_threshold'))} <input name="quota_threshold" type="number" value="${e(s.quota_threshold ?? '90')}"></label>
-    <label>${e(t('settings.openrouter_min'))} <input name="openrouter_min_eur" type="number" step="0.5" value="${e(s.openrouter_min_eur ?? '5')}"></label>
+    <fieldset><legend>${e(t('settings.gates_legend'))}</legend>
+      <p class="dim">${e(t('settings.gates_hint'))}</p>
+      <label>${e(t('settings.gate_claude_on'))} <select name="claude_gate_on"><option value="1" ${(s.claude_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.claude_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+      <label>${e(t('settings.gate_claude_5h'))} <input name="claude_gate_5h" type="number" step="0.5" min="0" max="100" value="${e(s.claude_gate_5h ?? '90')}"></label>
+      <label>${e(t('settings.gate_claude_7d'))} <input name="claude_gate_7d" type="number" step="0.5" min="0" max="100" value="${e(s.claude_gate_7d ?? '95')}">
+        <span class="dim">${e(t('settings.gate_claude_7d_hint'))}</span></label>
+      <label>${e(t('settings.gate_claude_fable'))} <input name="claude_gate_fable" type="number" step="0.5" min="0" max="100" value="${e(s.claude_gate_fable ?? '95')}">
+        <span class="dim">${e(t('settings.gate_claude_fable_hint'))}</span></label>
+      <label>${e(t('settings.gate_openrouter_on'))} <select name="openrouter_gate_on"><option value="1" ${(s.openrouter_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.openrouter_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+      <label>${e(t('settings.openrouter_min'))} <input name="openrouter_min_eur" type="number" step="0.5" min="0" value="${e(s.openrouter_min_eur ?? '5')}"></label>
+      <label>${e(t('settings.gate_deepseek_on'))} <select name="deepseek_gate_on"><option value="1" ${(s.deepseek_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.deepseek_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+      <label>${e(t('settings.gate_deepseek_min'))} <input name="deepseek_min_usd" type="number" step="0.5" min="0" value="${e(s.deepseek_min_usd ?? '2')}">
+        <span class="dim">${e(t('settings.gate_deepseek_min_hint'))}</span></label>
+      <label>${e(t('settings.gate_cursor_on'))} <select name="cursor_gate_on"><option value="1" ${(s.cursor_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.cursor_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+      <label>${e(t('settings.gate_cursor_pct'))} <input name="cursor_gate_pct" type="number" step="0.5" min="0" max="100" value="${e(s.cursor_gate_pct ?? '95')}">
+        <span class="dim">${e(t('settings.gate_cursor_pct_hint'))}</span></label>
+    </fieldset>
     <label>${e(t('settings.abo_price'))} <input name="abo_price" type="number" value="${e(s.abo_price ?? '200')}">
       <span class="dim">${e(t('settings.abo_price_hint'))}</span></label>
     <label>${e(t('settings.cursor_included'))} <input name="cursor_included_usd" type="number" step="1" value="${e(s.cursor_included_usd ?? '20')}">
@@ -2263,11 +2358,15 @@ export async function repoSave(req, res, url, formBody) {
  * fallback for an installation that has not saved the new field yet
  * (sessionKeepMs), and an empty write would silently reset it.
  */
-const SETTINGS_KEYS = ['pipeline_on', 'telegram_token', 'telegram_chat', 'quota_threshold',
-  'openrouter_min_eur', 'abo_price', 'cursor_included_usd', 'session_keep_hours', 'archive_session_on', 'archive_session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
+const SETTINGS_KEYS = ['pipeline_on', 'telegram_token', 'telegram_chat',
+  'claude_gate_on', 'claude_gate_5h', 'claude_gate_7d', 'claude_gate_fable',
+  'openrouter_gate_on', 'openrouter_min_eur', 'deepseek_gate_on', 'deepseek_min_usd',
+  'cursor_gate_on', 'cursor_gate_pct', 'cursor_included_usd',
+  'abo_price', 'session_keep_hours', 'archive_session_on', 'archive_session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
   'llm_check_on', 'llm_check_model', 'llm_check_or_provider',
   'llm_title_on', 'llm_title_model', 'llm_title_or_provider',
-  'llm_extras_on', 'llm_extras_model', 'llm_extras_or_provider', 'ui_language']
+  'llm_extras_on', 'llm_extras_model', 'llm_extras_or_provider', 'ui_language',
+  'ui_timezone']
 
 export async function settingsSave(req, res, url, formBody) {
   const b = await formBody()
@@ -2288,6 +2387,8 @@ export async function settingsSave(req, res, url, formBody) {
   }
   // The language takes effect immediately — the redirect below already renders in it.
   if (Object.hasOwn(b, 'ui_language')) setLanguage(b.ui_language ?? 'en')
+  // Same for the timezone: an empty value means "auto (per UI language)".
+  if (Object.hasOwn(b, 'ui_timezone')) setTimezone(b.ui_timezone ?? '')
   // "Used" means saved: only now does the model enter the MRU list.
   if (Object.hasOwn(b, 'llm_check_model')) llmModellMerken(b.llm_check_model)
   if (Object.hasOwn(b, 'llm_title_model')) rememberTitleModel(b.llm_title_model)

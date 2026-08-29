@@ -236,6 +236,25 @@ try {
     await p.close()
   })
 
+  await pruefe('the relative-time tooltip follows the configured timezone', async () => {
+    // 12:00 UTC on 2026-08-25 is 08:00 in New York (EDT, UTC-4). The tooltip is
+    // re-rendered by hub.js from window.CCHUB_TZ — it must read the configured
+    // clock, not the browser machine's.
+    const ur = db.prepare('SELECT started_at FROM runs WHERE id=?').get(R_ALT).started_at
+    db.prepare("UPDATE runs SET started_at='2026-08-25 12:00:00' WHERE id=?").run(R_ALT)
+    await formular('/settings/save', { ui_timezone: 'America/New_York' })
+    try {
+      const p = await neueSeite(`/?repo=${repoId}`)
+      const titel = await p.getAttribute(`tr[onclick*="${R_ALT}"] time.reltime`, 'title')
+      enthaelt(titel, '08:00', `title in New York time (${titel})`)
+      sauber(p)
+      await p.close()
+    } finally {
+      db.prepare('UPDATE runs SET started_at=? WHERE id=?').run(ur, R_ALT)
+      await formular('/settings/save', { ui_timezone: '' })
+    }
+  })
+
   // ------------------------------------------------------------------ A2
   gruppe('A2 — the repo switcher in the header')
 
@@ -1031,16 +1050,33 @@ try {
     gleich(await p.$eval('#run-edit input[name=expected_minutes]', el => el.value), '45', 'the duration input is prefilled')
     gleich(await p.$$eval('#run-edit textarea[name=prompt]', els => els.length), 0, 'no prompt textarea for a started run')
     gleich(await p.$$eval('#run-edit select[name=repo_id]', els => els.length), 0, 'no repo select for a started run')
+    gleich(await p.$$eval('#run-edit select[name=start_mode]', els => els.length), 0, 'no start-time block for a started run')
+    gleich(await p.$$eval('#run-edit input[name=branch_mode]', els => els.length), 0, 'no branch rule for a started run')
     sauber(p)
     await p.close()
   })
 
-  await pruefe('a scheduled run offers prompt and repo too, prefilled', async () => {
+  await pruefe('a scheduled run offers prompt, repo, branch and its start time too, prefilled', async () => {
     const p = await neueSeite(`/runs/${R_GEPLANT}`)
     await p.click('#run-edit summary')
     gleich(await p.$eval('#run-edit textarea[name=prompt]', el => el.value), 'Browser-Lauf geplant', 'the prompt is prefilled')
     wahr((await p.$$eval('#run-edit select[name=repo_id] option', els => els.length)) >= 2, 'both repos are offered')
     gleich(await p.$eval('#run-edit select[name=repo_id]', el => el.value), String(repoId), 'the current repo is selected')
+    gleich(await p.$eval('#run-edit select[name=start_mode]', el => el.value), 'at', 'the start kind is prefilled')
+    wahr(await p.$eval('#run-edit input[name=start_at]', el => el.value !== ''), 'the date-time is prefilled')
+    gleich(await p.$eval('#run-edit input[name=branch_mode][value=keiner]', el => el.checked), true, 'the branch rule is prefilled')
+    // The branch rule reacts INSIDE the card too (it is a swap-in-able block).
+    gleich(await p.$eval('#run-edit [data-branch-pattern]', el => el.hidden), true, 'no pattern for "no branch"')
+    await p.click('#run-edit input[name=branch_mode][value=neu]')
+    gleich(await p.$eval('#run-edit [data-branch-pattern]', el => el.hidden), false, 'picking a branch reveals the pattern')
+    // The start-switch works INSIDE the card — and must not touch the Quick-Run
+    // dialog that sits in every page's layout (the same fieldset scoping A4
+    // guards on the run form).
+    await p.selectOption('#run-edit select[name=start_mode]', 'idle')
+    gleich(await p.$eval('#run-edit .st[data-mode="at"]', el => el.hidden), true, 'the card hides its date block')
+    gleich(await p.$eval('#run-edit .st[data-mode="idle"]', el => el.hidden), false, 'and shows the idle hint')
+    gleich(await p.$eval('#qr-form select[data-start-switch]', el => el.value), 'now', 'the dialog keeps its own choice')
+    gleich(await p.$eval('#qr-form .st[data-mode="at"]', el => el.hidden), true, 'and the dialog stays untouched')
     sauber(p)
     await p.close()
   })
@@ -1065,6 +1101,27 @@ try {
     await formular(`/api/runs/${R_GEPLANT}/edit`, { expected_minutes: '44' })
     await wartePage(p, () => (document.querySelector('#run-edit input[name=expected_minutes]')?.value) === '44',
       null, 'the card to carry the new duration after the swap')
+    sauber(p)
+    await p.close()
+  })
+
+  // ------------------------------------------------------------------ A16
+  gruppe('A16 — the collapsible prompt on the detail page')
+
+  await pruefe('the prompt block sits between title and chips, folded away, and unfolds', async () => {
+    const p = await neueSeite(`/runs/${R_LIVE}`)
+    const karte = await p.$('#run-prompt')
+    wahr(!!karte, 'the prompt block exists')
+    gleich(await p.$eval('#run-prompt', el => el.open), false, 'collapsed by default')
+    // Position: after the title, before the fact chips — "weit oben".
+    const oben = await p.evaluate(() => {
+      const reihe = [...document.querySelectorAll('#run-head, #run-prompt, ul.chips')]
+      return reihe.map(el => el.id || 'chips').join(',')
+    })
+    gleich(oben, 'run-head,run-prompt,chips', 'title → prompt → chips')
+    enthaelt(await p.textContent('#run-prompt pre'), 'Browser-Lauf laeuft', 'the prompt text is inside')
+    await p.click('#run-prompt summary')
+    gleich(await p.$eval('#run-prompt', el => el.open), true, 'and unfolds on the summary click')
     sauber(p)
     await p.close()
   })

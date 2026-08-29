@@ -3,7 +3,8 @@
 import db, { addEvent } from './db.mjs'
 import { scheduleDue, parseDbUtc } from './util.mjs'
 import { createRun, launchRun } from './runner.mjs'
-import { claudeGateBlocked, claudeQuota, openrouterGateBlocked } from './quota.mjs'
+import { claudeGateBlocked, claudeQuota, cursorGateBlocked, deepseekGateBlocked, openrouterGateBlocked } from './quota.mjs'
+import { getProvider } from './providers/index.mjs'
 import { notifyRun } from './reports.mjs'
 import { defFromAgent } from './run-def.mjs'
 import { fallbackTitle, applyGeneratedTitle } from './title.mjs'
@@ -75,21 +76,81 @@ export function repoAtCapacity(repoId) {
 }
 
 /**
- * The budget gate for a harness: claude runs on the subscription quota,
- * everything else on OpenRouter credits. Also used by the watcher when it picks
- * a deferred run back up — one rule, one place.
+ * A numeric setting with a fallback. The settings page writes every field as a
+ * string, so '' must be treated as "not set", never as 0 — an operator who
+ * clears a field must get the default back, not a gate that blocks everything.
+ */
+function numSetting(key, fallback) {
+  const v = db.prepare(`SELECT value FROM settings WHERE key=?`).get(key)?.value
+  const n = Number(v)
+  return (v !== undefined && v !== null && String(v).trim() !== '' && Number.isFinite(n)) ? n : fallback
+}
+
+/** A 0/1 setting with a fallback for installations that have never saved it. */
+function flagSetting(key, fallback) {
+  const v = db.prepare(`SELECT value FROM settings WHERE key=?`).get(key)?.value
+  if (v === undefined || v === null || String(v).trim() === '') return fallback
+  return v === '1'
+}
+
+/**
+ * The budget gate for a run: what the run draws from decides which gate is
+ * asked, and every gate can be configured — even switched off entirely.
  *
- * The MODEL belongs to the question for claude: the general 7-day window binds
- * every run, a per-model one only a run on that model (quota.mjs). Every caller
- * has it — the definition on the way in, the run row on the way back up — so
- * every caller hands it over.
+ * - **claude** runs draw on the subscription quota: the claude gate with its
+ *   three configurable thresholds (5 h, general 7 d, the fable week). A run on
+ *   a per-model week is measured against THAT week's threshold, a run on any
+ *   other model against the general one (quota.mjs).
+ * - **cursor** runs draw on the cursor subscription: the cursor gate measures
+ *   the included usage of the running period against its own threshold.
+ * - a run with `provider='deepseek'` draws on the DeepSeek balance.
+ * - everything else (openrouter, no provider named) draws on OpenRouter credits
+ *   — the historical default for the provider-based harnesses.
+ *
+ * Each gate is off when its settings switch (`claude_gate_on`,
+ * `cursor_gate_on`, `openrouter_gate_on`, `deepseek_gate_on`) is '0'. A gate
+ * that is switched off cannot block — the operator decided that the window does
+ * not govern starts.
  *
  * Returns the blocking reason, or null when the start may happen.
  */
-export async function budgetGate(harness, model = null) {
-  const g = harness === 'claude'
-    ? claudeGateBlocked(claudeQuota(), model)
-    : await openrouterGateBlocked(Number(db.prepare(`SELECT value FROM settings WHERE key='openrouter_min_eur'`).get()?.value ?? 5) || 5)
+export async function budgetGate(harness, model = null, provider = null) {
+  if (harness === 'claude') {
+    if (!flagSetting('claude_gate_on', true)) return null
+    const seven = numSetting('claude_gate_7d', 95)
+    const g = claudeGateBlocked(claudeQuota(), model, {
+      five: numSetting('claude_gate_5h', 90),
+      seven,
+      // Cleared fable field = the fable week follows the general 7-day threshold.
+      fable: numSetting('claude_gate_fable', seven),
+    })
+    return g.blocked ? g : null
+  }
+  if (harness === 'cursor') {
+    if (!flagSetting('cursor_gate_on', true)) return null
+    const g = await cursorGateBlocked(
+      numSetting('cursor_gate_pct', 95),
+      numSetting('cursor_included_usd', 20))
+    return g.blocked ? g : null
+  }
+  if (provider === 'deepseek') {
+    if (!flagSetting('deepseek_gate_on', true)) return null
+    const g = await deepseekGateBlocked(numSetting('deepseek_min_usd', 2))
+    return g.blocked ? g : null
+  }
+  if (provider === 'openrouter') {
+    if (!flagSetting('openrouter_gate_on', true)) return null
+    const g = await openrouterGateBlocked(numSetting('openrouter_min_eur', 5))
+    return g.blocked ? g : null
+  }
+  // A known provider WITHOUT a balance contract (opencode-zen) draws on nothing
+  // the hub can meter — no gate, same as a provider without a key. Unknown or
+  // missing providers keep the historical default: the OpenRouter gate, which is
+  // what a hand-typed `openrouter/…` model is.
+  const plugin = getProvider(provider)
+  if (plugin && !plugin.balance) return null
+  if (!flagSetting('openrouter_gate_on', true)) return null
+  const g = await openrouterGateBlocked(numSetting('openrouter_min_eur', 5))
   return g.blocked ? g : null
 }
 
@@ -140,7 +201,7 @@ export async function startRun(def, {
   }
 
   // Budget gate BEFORE the start; blocked → defer (retry in the watcher), do not discard.
-  const gate = await budgetGate(def.harness, def.model ?? null)
+  const gate = await budgetGate(def.harness, def.model ?? null, def.provider ?? null)
   if (gate) {
     db.prepare(`UPDATE runs SET status='deferred' WHERE id=?`).run(runId)
     addEvent(runId, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null })
@@ -199,7 +260,7 @@ export async function pickUpScheduled(nowMs = Date.now()) {
 
     // Same gate as at an immediate start — a waiting run must not start into an
     // exhausted quota either; it moves on to 'deferred' and the watcher retries.
-    const gate = await budgetGate(run.harness, run.model ?? null)
+    const gate = await budgetGate(run.harness, run.model ?? null, run.provider ?? null)
     if (gate) {
       db.prepare(`UPDATE runs SET status='deferred' WHERE id=?`).run(run.id)
       addEvent(run.id, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null })
@@ -216,4 +277,54 @@ export async function pickUpScheduled(nowMs = Date.now()) {
     if (!r.ok) notifyRun(run.id, 'start_failed', `Planned start failed: ${r.error}`)
   }
   return started
+}
+
+/**
+ * A deferred run actually starts. Two callers, one rule:
+ *
+ * - the watcher's `retryDeferred` — the gate opened by itself, the run may
+ *   start (forced = false);
+ * - the detail page's "Start anyway" button — the OPERATOR decided that the
+ *   window does not govern THIS run, so the gate is not asked again
+ *   (forced = true).
+ *
+ * `started_at` becomes the real start, exactly as for a planned run: otherwise
+ * the overview would count the deferred waiting time as runtime and the run
+ * would look overdue the moment it began.
+ */
+export async function startDeferredRun(runId, { forced = false } = {}) {
+  const run = db.prepare(`SELECT * FROM runs WHERE id=? AND status='deferred'`).get(runId)
+  if (!run) return { ok: false, error: 'not deferred' }
+  db.prepare(`UPDATE runs SET status='running', started_at=datetime('now'),
+              last_activity_at=datetime('now') WHERE id=?`).run(runId)
+  addEvent(runId, forced ? 'forced_start' : 'deferred_retry', {})
+  const r = await launchRun(runId)
+  if (!r.ok) notifyRun(runId, 'start_failed', `Start after deferral failed: ${r.error}`)
+  return r
+}
+
+/**
+ * A PLANNED run is told "start now" — the editing card's way of saying that a
+ * run waiting for its time is waiting no more. Exactly the "now" choice of the
+ * single-run form, applied to a run that already exists: the same budget gate
+ * as at any other start (a blocked one becomes `deferred`, the watcher retries
+ * it like any deferred run), and the same treatment of `started_at` as in
+ * pickUpScheduled() — the waiting time must not count as runtime.
+ */
+export async function startScheduledNow(runId) {
+  const run = db.prepare(`SELECT * FROM runs WHERE id=? AND status='scheduled'`).get(runId)
+  if (!run) return { ok: false, error: 'not scheduled' }
+  const gate = await budgetGate(run.harness, run.model ?? null, run.provider ?? null)
+  if (gate) {
+    db.prepare(`UPDATE runs SET status='deferred' WHERE id=?`).run(runId)
+    addEvent(runId, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null })
+    notifyRun(runId, 'deferred', `🟡 Start deferred — ${gate.reason}${gate.resets_at ? ` (reset: ${gate.resets_at})` : ''}`)
+    return { ok: true, runId, deferred: true }
+  }
+  db.prepare(`UPDATE runs SET status='running', started_at=datetime('now'),
+              last_activity_at=datetime('now') WHERE id=?`).run(runId)
+  addEvent(runId, 'scheduled_start', { start_mode: 'now', start_at: null })
+  const r = await launchRun(runId)
+  if (!r.ok) notifyRun(runId, 'start_failed', `Planned start failed: ${r.error}`)
+  return r.ok ? { ok: true, runId } : { ok: false, runId, error: r.error }
 }

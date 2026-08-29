@@ -11,7 +11,7 @@ import { subscriptionUsage } from './usage.mjs'
 import { providerBalances } from './balances.mjs'
 import { sseHandler } from './events.mjs'
 import { launchRun } from './runner.mjs'
-import { startRun } from './scheduler.mjs'
+import { startRun, startDeferredRun, startScheduledNow } from './scheduler.mjs'
 import { runDefFromForm, runStartFromForm, saveAgent, rememberRunChoice, lastRunChoiceFor } from './run-def.mjs'
 import { runTitle, TITLE_MAX } from './title.mjs'
 import {
@@ -449,25 +449,54 @@ async function api(req, res, url) {
     const r = await launchRun(m[1])
     return answer(req, res, r.ok ? 200 : 500, r, `/runs/${m[1]}`)
   }
+  // "Start anyway": an operator clicking a deferred run into life. The budget
+  // gate deferred it for a reason, so the button is the operator's deliberate
+  // decision that the window does not govern THIS run — the gate is not asked
+  // again (scheduler.startDeferredRun, the same function the watcher's auto
+  // retry uses, only marked as forced). Only 'deferred' may go: a scheduled
+  // run is waiting for its time, not for a quota, and gets its own cancel.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/start$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    if (run.status !== 'deferred') {
+      return answer(req, res, 400, { ok: false, error: t('start.err_not_deferred') }, `/runs/${m[1]}`)
+    }
+    const r = await startDeferredRun(m[1], { forced: true })
+    return answer(req, res, r.ok ? 200 : 500, r, `/runs/${m[1]}`)
+  }
   // Edit a run that still has a future: the expected duration of a running one
   // (the watcher's thresholds and the metrics read it live), and — while the
-  // run has not started — its prompt and its repo as well. What each status
-  // allows is decided in server/run-edit.mjs, the same table the detail page
-  // renders the card from, so the form can never offer an edit the endpoint
-  // would refuse. A classic form post lands back on the run; a fetch gets JSON.
+  // run has not started — its prompt, its repo, its branch rule and, for a
+  // planned run, its start time as well. What each status allows is decided in
+  // server/run-edit.mjs, the same table the detail page renders the card from,
+  // so the form can never offer an edit the endpoint would refuse. A classic
+  // form post lands back on the run; a fetch gets JSON. Editing a planned run
+  // to "start now" launches it right here (startScheduledNow, the same budget
+  // gate as at any other start).
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/edit$/))) {
     const run = getRun(m[1])
     if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
     const b = await form(req)
     const problems = []
-    const r = editRun(m[1], {
+    const branchFelt = b.branch_mode !== undefined
+    const r = await editRun(m[1], {
       expectedMinutes: b.expected_minutes !== undefined ? b.expected_minutes : null,
       prompt: b.prompt !== undefined ? b.prompt : null,
       repoId: b.repo_id !== undefined ? b.repo_id : null,
+      startMode: b.start_mode !== undefined ? b.start_mode : null,
+      startAt: b.start_at !== undefined ? b.start_at : null,
+      startInMinutes: b.start_in_minutes !== undefined ? b.start_in_minutes : null,
+      branchMode: branchFelt ? b.branch_mode : null,
+      branchPattern: branchFelt ? b.branch_pattern : null,
+      keepOnBranch: branchFelt ? (b.keep_on_branch === '1' || b.keep_on_branch === 'on' ? 1 : 0) : null,
     }, problems)
     if (problems.length) {
       if (wantsHtml(req)) return problemPage(req, res, t('run.edit'), problems, `/runs/${run.id}`)
       return json(res, 400, { ok: false, error: problems.join(' · ') })
+    }
+    if (r.startNow) {
+      const gestartet = await startScheduledNow(run.id)
+      return answer(req, res, gestartet.ok ? 200 : 500, gestartet, `/runs/${run.id}`)
     }
     return answer(req, res, r.ok ? 200 : 400, r, `/runs/${run.id}`)
   }

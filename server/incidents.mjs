@@ -12,7 +12,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { addEvent } from './db.mjs'
-import { RUNS_DIR } from './util.mjs'
+import { RUNS_DIR, fmtDbUtc } from './util.mjs'
 import { notify, detailUrl } from './telegram.mjs'
 import { TYP_TEXT } from './detect.mjs'
 
@@ -193,7 +193,7 @@ async function telegramVorfall(row, ereignis, grund = null) {
   } else {
     zeilen.push('Global (provider pulse), affects all running agents.')
   }
-  zeilen.push(`Source: ${row.quelle} · since ${row.erst_gesehen} UTC · last ${row.zuletzt_gesehen} UTC · ${row.anzahl}×${row.wieder_geoeffnet ? ` · reopened ${row.wieder_geoeffnet}×` : ''}`)
+  zeilen.push(`Source: ${row.quelle} · since ${fmtDbUtc(row.erst_gesehen)} · last ${fmtDbUtc(row.zuletzt_gesehen)} · ${row.anzahl}×${row.wieder_geoeffnet ? ` · reopened ${row.wieder_geoeffnet}×` : ''}`)
   if (grund) zeilen.push(`Reason: ${grund}`)
   if (row.beleg) zeilen.push(`Evidence: ${row.beleg}`)
   if (row.run_id) zeilen.push(`Run: ${row.run_id}`)

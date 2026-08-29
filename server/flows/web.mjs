@@ -11,7 +11,7 @@ import { normalizeTrigger, runFlowNow, TRIGGER_KINDS, OUTCOMES } from './trigger
 import { agentsWithFlow, setFlowAttachments, forgetFlow, WHEN_KINDS } from './attach.mjs'
 import { stopFlowRun } from './engine.mjs'
 import { layout } from '../pages.mjs'
-import { escapeHtml as e, validCron } from '../util.mjs'
+import { escapeHtml as e, validCron, fmtDbUtc, fmtDateTime, fmtClock } from '../util.mjs'
 import { redirect, body as readBody, parseForm } from '../web-helpers.mjs'
 import { enabledCodingAgents } from '../coding-agents.mjs'
 import { harnessLabel } from '../harnesses/index.mjs'
@@ -164,7 +164,7 @@ async function pageRuns(req, res, url) {
     <td><a href="/flows/runs/${fr.id}">${e(fr.flow_name)}</a></td>
     <td>${statusBadge(fr.status)}</td>
     <td>${e(t(`flows.trigger.${fr.context.trigger?.kind ?? 'manual'}`))}${fr.trigger_run_id ? ` · <a href="/runs/${fr.trigger_run_id}">${e(fr.context.trigger?.run?.agent_name || t('overview.single_run'))}</a>` : ''}</td>
-    <td>${e(fr.started_at)}</td><td>${e(fr.ended_at ?? '')}</td>
+    <td>${e(fmtDbUtc(fr.started_at))}</td><td>${e(fr.ended_at ? fmtDbUtc(fr.ended_at) : '')}</td>
     <td class="dim">${e(fr.error ?? (fr.log.at(-1)?.msg ?? ''))}</td></tr>`).join('')
   const body = `
   <p><a class="btn" href="${e(flowId ? `/flows/edit?id=${flowId}` : backTarget(url))}">${e(t('flows.editor.back'))}</a></p>
@@ -176,17 +176,17 @@ async function pageRuns(req, res, url) {
 async function pageRunDetail(req, res, id) {
   const fr = getFlowRun(id)
   if (!fr) return html(res, 404, await layout(req, t('nav.flows'), '/flows', `<p>${e(t('web.not_found'))}</p>`))
-  const log = fr.log.map(l => `<tr class="${l.ok ? '' : 'err'}"><td class="dim">${e(l.ts.slice(11, 19))}</td><td>${e(l.name || '')}<span class="dim"> ${e(l.type)}</span></td><td>${e(l.msg)}${l.ms != null ? ` <span class="dim">${l.ms} ms</span>` : ''}</td></tr>`).join('')
+  const log = fr.log.map(l => `<tr class="${l.ok ? '' : 'err'}"><td class="dim">${e(fmtClock(Date.parse(l.ts), { seconds: true }))}</td><td>${e(l.name || '')}<span class="dim"> ${e(l.type)}</span></td><td>${e(l.msg)}${l.ms != null ? ` <span class="dim">${l.ms} ms</span>` : ''}</td></tr>`).join('')
   const trig = fr.context.trigger ?? {}
   const body = `
   <p><a class="btn" href="/flows/runs?flow=${fr.flow_id ?? ''}">${e(t('flows.editor.back'))}</a>
   ${fr.flow_id ? `<a class="btn" href="/flows/edit?id=${fr.flow_id}">${e(t('flows.edit'))}</a>` : ''}
   ${['running', 'waiting'].includes(fr.status) ? `<form method="post" action="/api/flow-runs/${fr.id}/stop" class="inline"><button class="danger">${e(t('flows.runs.stop'))}</button></form>` : ''}</p>
   <div class="card"><b>${e(fr.flow_name)}</b> — ${statusBadge(fr.status)}
-    <div class="dim">${e(t('flows.runs.started'))}: ${e(fr.started_at)} · ${e(t('flows.runs.ended'))}: ${e(fr.ended_at ?? '–')}</div>
+    <div class="dim">${e(t('flows.runs.started'))}: ${e(fmtDbUtc(fr.started_at))} · ${e(t('flows.runs.ended'))}: ${e(fr.ended_at ? fmtDbUtc(fr.ended_at) : '–')}</div>
     <div>${e(t('flows.trigger'))}: ${e(t(`flows.trigger.${trig.kind ?? 'manual'}`))}${trig.run ? ` · <a href="/runs/${trig.run.id}">${e(trig.run.agent_name || t('overview.single_run'))} (${e(trig.run.outcome)})</a>` : ''}</div>
     ${fr.wait_run_id ? `<div>${e(t('flows.runs.waiting_on'))}: <a href="/runs/${fr.wait_run_id}">${e(fr.wait_run_id)}</a></div>` : ''}
-    ${fr.resume_at ? `<div>${e(t('flows.runs.resume_at'))}: ${e(fr.resume_at)}</div>` : ''}
+    ${fr.resume_at ? `<div>${e(t('flows.runs.resume_at'))}: ${e(fmtDateTime(Date.parse(fr.resume_at)))}</div>` : ''}
     ${fr.error ? `<div class="err">${e(t('flows.runs.error'))}: ${e(fr.error)}</div>` : ''}
   </div>
   <h3>${e(t('flows.runs.log'))}</h3>

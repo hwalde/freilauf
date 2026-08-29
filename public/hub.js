@@ -40,6 +40,7 @@
       if (!Number.isFinite(ms)) return
       el.textContent = relTimeText(ms, now)
       el.title = new Date(ms).toLocaleString(lang, {
+        timeZone: window.CCHUB_TZ || undefined,
         year: 'numeric', month: '2-digit', day: '2-digit',
         hour: '2-digit', minute: '2-digit', second: '2-digit'
       })
@@ -122,13 +123,22 @@
   // ---- planned start: show only the chosen kind's block ----
   // Per fieldset, not per page: the Quick-Run dialog sits in every page's layout,
   // so the single-run form carries this block twice. Scoping to the surrounding
-  // fieldset is what keeps the two from switching each other.
+  // fieldset is what keeps the two from switching each other. Delegated instead
+  // of bound directly because the block also lives inside the swap-in-able
+  // "Edit this run" card — a direct listener dies when the fragment replaces
+  // #run-edit, and a silently dead start-time switch would be a card that does
+  // nothing.
+  document.addEventListener('change', function (e) {
+    const startSel = e.target && e.target.closest && e.target.closest('select[data-start-switch]')
+    if (!startSel) return
+    const box = startSel.closest('fieldset') || document
+    const bloecke = Array.from(box.querySelectorAll('.st'))
+    bloecke.forEach(b => { b.hidden = b.dataset.mode !== startSel.value })
+  })
   document.querySelectorAll('select[data-start-switch]').forEach(function (startSel) {
     const box = startSel.closest('fieldset') || document
     const bloecke = Array.from(box.querySelectorAll('.st'))
-    const syncStart = () => bloecke.forEach(b => { b.hidden = b.dataset.mode !== startSel.value })
-    startSel.addEventListener('change', syncStart)
-    syncStart()
+    bloecke.forEach(b => { b.hidden = b.dataset.mode !== startSel.value })
   })
 
   // ---- the branch rule: a choice that explains itself ----
@@ -139,38 +149,52 @@
   // markup, `data-merge-mode` on the fieldset decides) — so the static case
   // needs nothing from here.
   //
-  // What does need JS is the one form that can change repo without rebuilding
-  // the page: the Quick-Run dialog has a repo <select>, and picking another repo
+  // What does need JS is a form that can change repo without rebuilding the
+  // page: the Quick-Run dialog has a repo <select>, and picking another repo
   // there can turn a run that gets merged into one that does not. The header's
-  // repo switcher reloads, so it is none of this code's business.
-  document.querySelectorAll('[data-branch-choice]').forEach(function (box) {
-    const form = box.closest('form') || document
+  // repo switcher reloads, so it is none of this code's business. The "Edit
+  // this run" card carries the same block AND is part of the run-detail
+  // fragment — so everything here is delegated, or a swapped-in card would
+  // silently stop reacting (same reason as the start-time switch above).
+  function syncBranchBox(box, repoSel) {
     const pattern = box.querySelector('[data-branch-pattern]')
-    const keep = box.querySelector('[data-hub-only]')
     const radios = Array.from(box.querySelectorAll('input[name=branch_mode]'))
     const gewaehlt = () => (radios.find(r => r.checked) || {}).value || 'keiner'
-    const syncPattern = () => { if (pattern) pattern.hidden = gewaehlt() === 'keiner' }
-    radios.forEach(r => r.addEventListener('change', syncPattern))
-    syncPattern()
-
+    if (pattern) pattern.hidden = gewaehlt() === 'keiner'
+    if (!repoSel) return
     let modes = {}, bases = {}
     try { modes = JSON.parse(box.dataset.mergeModes || '{}') } catch (e) { modes = {} }
     try { bases = JSON.parse(box.dataset.mergeBases || '{}') } catch (e) { bases = {} }
-    const repoSel = form.querySelector && form.querySelector('select[name=repo_id]')
-    if (!repoSel) return
-    repoSel.addEventListener('change', function () {
-      const modus = modes[repoSel.value] === 'hub' ? 'hub' : 'off'
-      box.dataset.mergeMode = modus
-      // A base branch is part of the sentence, and it belongs to the repo — so
-      // the explanations say the name of the branch one actually picked.
-      const base = bases[repoSel.value]
-      if (base) box.querySelectorAll('[data-base]').forEach(el => { el.textContent = base })
-      if (!keep) return
-      keep.hidden = modus !== 'hub'
-      // Hidden AND unticked: a box one cannot see must not still submit, and
-      // "keep the work here" means nothing in a repo the hub does not integrate.
-      if (keep.hidden) keep.querySelectorAll('input[type=checkbox]').forEach(c => { c.checked = false })
-    })
+    const modus = modes[repoSel.value] === 'hub' ? 'hub' : 'off'
+    box.dataset.mergeMode = modus
+    // A base branch is part of the sentence, and it belongs to the repo — so
+    // the explanations say the name of the branch one actually picked.
+    const base = bases[repoSel.value]
+    if (base) box.querySelectorAll('[data-base]').forEach(el => { el.textContent = base })
+    const keep = box.querySelector('[data-hub-only]')
+    if (!keep) return
+    keep.hidden = modus !== 'hub'
+    // Hidden AND unticked: a box one cannot see must not still submit, and
+    // "keep the work here" means nothing in a repo the hub does not integrate.
+    if (keep.hidden) keep.querySelectorAll('input[type=checkbox]').forEach(c => { c.checked = false })
+  }
+  document.querySelectorAll('[data-branch-choice]').forEach(function (box) {
+    const form = box.closest('form') || document
+    syncBranchBox(box, form.querySelector && form.querySelector('select[name=repo_id]'))
+  })
+  document.addEventListener('change', function (e) {
+    const t = e.target
+    if (!t || !t.closest) return
+    if (t.closest('input[name=branch_mode]')) {
+      const box = t.closest('[data-branch-choice]')
+      if (box) syncBranchBox(box, null)
+      return
+    }
+    if (t.matches && t.matches('select[name=repo_id]')) {
+      const form = t.form || t.closest('form')
+      if (!form) return
+      form.querySelectorAll('[data-branch-choice]').forEach(function (box) { syncBranchBox(box, t) })
+    }
   })
 
   // ---- toasts: say what happened without taking the page away ----
@@ -568,7 +592,7 @@
 
     const provLabel = document.getElementById('prov-label')
     const provHint = document.getElementById('prov-hint')
-    const zeitText = (iso) => { try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) } catch { return '' } }
+    const zeitText = (iso) => { try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: window.CCHUB_TZ || undefined }) } catch { return '' } }
 
     // Every harness can use different providers — subscription-based ones none
     // at all (there is only the account). Hence the selection is re-fetched on
