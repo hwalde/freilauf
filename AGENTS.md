@@ -666,15 +666,15 @@ whichever gate a claude budget was blamed for. Both are fixed by one rule:
 **what a run draws from decides which gate is asked, and every gate is optional.**
 
 - `budgetGate(harness, model, provider)` routes by provider: claude runs go to
-  the claude gate, a run with `provider='deepseek'` to the DeepSeek balance
-  gate, everything else to the OpenRouter gate (the historical default for the
-  provider-based harnesses).
+  the claude gate, a cursor run to the cursor usage gate, a run with
+  `provider='deepseek'` to the DeepSeek balance gate, everything else to the
+  OpenRouter gate (the historical default for the provider-based harnesses).
 - Every gate has an **on/off switch** and its own **threshold**, all under
   Settings → Budget gates: `claude_gate_on/_5h/_7d/_fable`,
-  `openrouter_gate_on` + `openrouter_min_eur`, `deepseek_gate_on` +
-  `deepseek_min_usd`. A cleared numeric field falls back to its default (the
-  fable week to the general 7-day threshold). `quota_threshold` is gone — it
-  was the field the gate never read.
+  `cursor_gate_on` + `cursor_gate_pct`, `openrouter_gate_on` +
+  `openrouter_min_eur`, `deepseek_gate_on` + `deepseek_min_usd`. A cleared
+  numeric field falls back to its default (the fable week to the general 7-day
+  threshold). `quota_threshold` is gone — it was the field the gate never read.
 - **Each window is judged against its own threshold.** `claudeGateBlocked`
   measures the 5-hour window against `_5h`, the general week against `_7d`, a
   per-model week called "Fable" against `_fable` — so a fable run can be
@@ -684,6 +684,12 @@ whichever gate a claude budget was blamed for. Both are fixed by one rule:
   OpenRouter): it blocks on the account's own `is_available=false` verdict or
   on a USD balance below the threshold. A CNY-only account reports no USD,
   which is "no signal" — the gate stays open, like a missing key.
+- **The cursor gate** measures the running period's usage — spend divided by
+  the included amount, from the account's own `GetCurrentPeriodUsage` (the
+  same answer the usage panel shows) — against `cursor_gate_pct`. The included
+  amount is only assumed when that endpoint stays silent
+  (`cursor_included_usd`). No token, no answer, no included amount: all three
+  mean no signal, and the gate stays open.
 - **A deferred run can be started anyway.** The gate is a rule that must not
   overrule a deliberate decision (same principle as `repos.max_parallel`), so
   the detail page and the overview row carry a "Start anyway" button
