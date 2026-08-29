@@ -70,4 +70,9 @@ Root: a configurable agent frees tmux memory down to a target, on a switch + thr
 
 ## Status log
 
-- [ ] plan written
+- [x] plan written
+- [x] implemented: reusable element option, server/cleanup.mjs, the helper
+      script, settings page + API, sidebar button + Sessions box, watcher gate,
+      i18n + CSS, unit/e2e/browser tests, SETUP_WITH_AGENT.md + the three
+      READMEs. Test runs: unit 270, e2e 244, browser 55, proxy 4, deploy 9.
+      Pre-push hook OK on the committed state. Reported done.

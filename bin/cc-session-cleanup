@@ -139,7 +139,13 @@ if [[ -n "$KILL_LIST" && "$KILL" = 1 ]]; then
 fi
 
 # ---- 7. summary ----
-killed="$([[ -n "$KILL_LIST" ]] && echo "$KILL_LIST" | wc -w || echo 0)"
+# "killed" counts what actually happened — a plan (no --kill) killed nothing,
+# however many sessions it marked for death.
+if [[ "$KILL" = 1 ]]; then
+  killed="$([[ -n "$KILL_LIST" ]] && echo "$KILL_LIST" | wc -w || echo 0)"
+else
+  killed=0
+fi
 freed_kb=$((total_kb - remaining_kb))
 printf '\nfreed_gb=%.1f current_gb=%.1f killed=%d\n' \
   "$(awk -v k=$freed_kb 'BEGIN{printf "%.1f", k/1024/1024}')" \

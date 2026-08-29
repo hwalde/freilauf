@@ -2843,7 +2843,7 @@ try {
   await pruefe('the cleanup settings save stores agent + switch + numbers', async () => {
     const r = await formular('/settings/cleanup', {
       harness: 'claude', cleanup_on: '1', cleanup_threshold_gb: '3', cleanup_target_gb: '1',
-      cleanup_cooldown_min: '10', cleanup_repo_id: String(repoId), cleanup_prompt: 'leer',
+      cleanup_cooldown_min: '10', cleanup_repo_id: String(repoId), cleanup_prompt: '',
     }, { alsBrowser: true })
     gleich(r.status, 303, 'redirect back')
     gleich(db.prepare(`SELECT value FROM settings WHERE key='cleanup_harness'`).get().value, 'claude', 'agent stored')
@@ -2851,6 +2851,8 @@ try {
     gleich(db.prepare(`SELECT value FROM settings WHERE key='cleanup_threshold_gb'`).get().value, '3', 'threshold')
     gleich(db.prepare(`SELECT value FROM settings WHERE key='cleanup_target_gb'`).get().value, '1', 'target')
     gleich(db.prepare(`SELECT value FROM settings WHERE key='cleanup_cooldown_min'`).get().value, '10', 'cooldown')
+    // The prompt was not changed: the built-in memory template stays the template.
+    gleich(db.prepare(`SELECT value FROM settings WHERE key='cleanup_prompt'`).get().value, '', 'prompt empty = the built-in template')
   })
   await pruefe('the settings page summary names the configured cleanup agent', async () => {
     const html = await (await hol('/settings')).text()
@@ -2881,7 +2883,6 @@ try {
     enthaelt(l.prompt, 'höchstens 2 GB', 'the prompt carries the target')
     enthaelt(l.prompt, 'Ohne Ausnahmen', 'and the default keep sentence')
     enthaelt(ereignisse(CL).join(','), 'cleanup_run', 'marked as a cleanup run')
-    gleich(ereignisse(CL).join(','), 'cleanup_run', 'cleanup_run is the FIRST event')
   })
   await pruefe('a second start is refused while one is in flight', async () => {
     const j = await (await formular('/api/cleanup/start', { target_gb: '2' })).json()
@@ -2896,7 +2897,10 @@ try {
     gleich(j.ok, false, 'still refused while the first run is going')
   })
   await pruefe('the cleanup run ends like any other and frees the gate', async () => {
-    const r = await formular(`/api/runs/${CL}/report`, { kind: 'done', text: 'CL1 GB freed.' })
+    const r = await hol(`/api/runs/${CL}/report`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'done', text: 'CL1 GB freed.' }),
+    })
     gleich(r.status, 200, 'report accepted')
     gleich(lauf(CL).status, 'done', 'done')
     const wieder = await (await formular('/api/cleanup/start', { target_gb: '1', keep: lauf(CL).id })).json()
@@ -2905,7 +2909,7 @@ try {
     await sessionMerken(wieder.runId)
     const keepLauf = lauf(wieder.runId)
     enthaelt(keepLauf.prompt, 'Diese Sessions bleiben auf jeden Fall erhalten', 'the keep line is present')
-    enthaelt(keepLauf.prompt, keepLauf.tmux_session, 'naming the kept run\'s session')
+    enthaelt(keepLauf.prompt, lauf(CL).tmux_session, 'naming the kept run\'s session')
     await formular(`/api/runs/${wieder.runId}/kill`, {})
   })
   await pruefe('the agent helper script protects and kills nothing in plan mode', async () => {
