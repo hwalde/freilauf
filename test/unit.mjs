@@ -3513,6 +3513,30 @@ try {
     falsch(cleanupRunInFlight(), 'a finished one is not')
   })
 
+  await pruefe('a finished cleanup run drops the memory cache — the sidebar never serves the old number', async () => {
+    // The sidebar re-fetches its fragment on the run's end event (~2 s later in
+    // hub.js); what that render then shows is decided by this cache alone. A
+    // cleanup run frees memory while it works, so its end must invalidate — an
+    // ordinary run's end must not, the eight-minute clock exists for it.
+    se._sessionMemoryReset()
+    const a = await se.sessionMemory()
+    const ordinaer = uuid()
+    db2.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, started_at)
+                 VALUES(?, 99, 'done', 'claude', 'p', 'keiner', 30, datetime('now'))`).run(ordinaer)
+    falsch(se.refreshSessionMemoryAfterRun(ordinaer), 'no cleanup marker = no invalidation')
+    gleich(await se.sessionMemory(), a, 'the cached reading survives an ordinary run')
+
+    const raeumer = uuid()
+    db2.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, started_at)
+                 VALUES(?, 99, 'done', 'claude', 'p', 'keiner', 30, datetime('now'))`).run(raeumer)
+    db2.prepare(`INSERT INTO events(run_id, kind, payload) VALUES(?, 'cleanup_run', ?)`).run(raeumer, JSON.stringify({ source: 'sidebar' }))
+    wahr(se.refreshSessionMemoryAfterRun(raeumer), 'the cleanup marker invalidates')
+    const b = await se.sessionMemory()
+    wahr(b !== a && b.measuredAtMs >= a.measuredAtMs, 'and the next reading is a fresh measurement')
+    falsch(se.refreshSessionMemoryAfterRun(null), 'no run id = no invalidation')
+    se._sessionMemoryReset()
+  })
+
   await pruefe('startCleanupRun refuses without a configured agent and with a broken target', async () => {
     const no = await startCleanupRun({ settings: cleanupSettings({}) })
     gleich(no.ok, false, 'nothing configured')

@@ -1013,6 +1013,16 @@ application comes out of it.
   quota panel was already caught on. Not a ticking relative time, because the
   same markup is rendered into the page and into the fragment and the e2e suite
   holds those two to be byte for byte identical.
+- **A cleanup run's end invalidates that cache.** The memory-freeing agent ends
+  tmux sessions while it works, so the moment it reports, its number is already
+  a lie. `refreshSessionMemoryAfterRun()` (sessions.mjs) drops the cache and
+  starts a fresh measurement for every run carrying the `cleanup_run` event —
+  called from `handleReport()` BEFORE the end event is published (the client
+  answers that event by re-fetching the sidebar fragment ~2 s later, and that
+  render then carries the fresh value) and from `reconcileClosedSession()`, so
+  a killed or vanished cleanup session is covered too. Any other run leaves the
+  cache alone: a session still standing after an ordinary run is exactly what
+  the retention measures.
 - Under ~1000 px it drops **below** the content. A table narrowed by the
   sidebar is the one thing it must never cause.
 

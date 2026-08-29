@@ -374,6 +374,31 @@ export function _sessionMemoryAge(ms) { memCache.at -= ms }
 /** Test hook: drop the cache. */
 export function _sessionMemoryReset() { memCache = { at: 0, value: null }; memInflight = null }
 
+/**
+ * The work of a CLEANUP run is already done when it reports: it ends tmux
+ * sessions while it works, so once it is over the sidebar's memory block must
+ * not go on serving a number measured up to eight minutes earlier. The cache is
+ * dropped here and a fresh measurement started right away — the run's own
+ * end event brings the sidebar back within ~2 s (hub.js), and the fragment then
+ * renders the fresh value instead of the stale one. The measurement is warmed
+ * fire-and-forget so the fragment render does not have to wait on the three
+ * subprocesses; it would only do so if it beat the warm call, and one bounded
+ * wait is exactly what a deliberate invalidation is for.
+ *
+ * Any other run touches nothing and returns false: a session still standing
+ * after an ordinary run is precisely what the retention measures, and the
+ * eight-minute clock is what keeps a `ps -eo` over every process off every page
+ * render.
+ */
+export function refreshSessionMemoryAfterRun(runId) {
+  if (!runId) return false
+  const isCleanup = db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind='cleanup_run' LIMIT 1`).get(runId)
+  if (!isCleanup) return false
+  memCache = { at: 0, value: null }
+  sessionMemory().catch(() => {})
+  return true
+}
+
 // ---------------------------------------------------------------- ending
 
 /**
@@ -397,6 +422,9 @@ export function reconcileClosedSession(runId, source = 'session') {
   const run = getRun(runId)
   if (!run) return null
   db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(runId)
+  // A session is gone — whatever ended it. If its run was a cleanup run, the
+  // memory it freed must reach the sidebar now, not on the next cache expiry.
+  refreshSessionMemoryAfterRun(runId)
   if (!['running', 'waiting_help'].includes(run.status)) {
     if (!run.tmux_closed_at) addEvent(runId, 'tmux_closed', { source })
     return 'closed'

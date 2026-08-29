@@ -30,6 +30,17 @@ export async function handleReport(runId, body, via = 'http') {
     text = text ? `${text}\n\n${body.file}` : body.file
   }
 
+  // A terminal report for a CLEANUP run is the moment its work becomes visible
+  // in the numbers: the agent freed memory while it worked, and the sidebar's
+  // block must not go on serving a reading measured up to eight minutes earlier
+  // (refreshSessionMemoryAfterRun in sessions.mjs). Done here, BEFORE the end
+  // event below is published — the client answers that event by re-fetching the
+  // sidebar fragment ~2 s later, and that render then carries the fresh value.
+  // Any other run leaves the cache alone.
+  if (['done', 'failed', '_pane_died'].includes(kind)) {
+    import('./sessions.mjs').then(m => m.refreshSessionMemoryAfterRun(runId)).catch(() => {})
+  }
+
   switch (kind) {
     case 'done': {
       // The finish gate: with repos.merge_mode='hub' a `done` report is CHECKED
