@@ -54,6 +54,7 @@
   "usage.title": "Subscription usage",
   "usage.unavailable": "usage not available",
   "usage.resets": "resets {time}",
+  "usage.as_of": "as of {time}",
   "usage.resets_in": "resets in {days} d",
   "usage.spent": "{usd} $ of {included} $ included",
   "usage.spent_est": "{usd} $ of ~{included} $ included (configured fallback)",

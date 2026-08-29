@@ -54,6 +54,7 @@
   "usage.title": "Abo-Verbrauch",
   "usage.unavailable": "Verbrauch nicht abrufbar",
   "usage.resets": "Reset {time}",
+  "usage.as_of": "Stand {time}",
   "usage.resets_in": "Reset in {days} T",
   "usage.spent": "{usd} $ von {included} $ inklusive",
   "usage.spent_est": "{usd} $ von ~{included} $ inklusive (konfigurierter Ersatzwert)",

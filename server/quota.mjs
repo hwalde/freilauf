@@ -25,7 +25,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { getProvider, providerHasKey } from './providers/index.mjs'
 import { providerCtx } from './models.mjs'
-import { claudeLimits } from './claude-usage.mjs'
+import { claudeLimits, rememberedScoped } from './claude-usage.mjs'
 
 const QUOTA_PATH = process.env.CCHUB_QUOTA_JSON ?? `${homedir()}/.claude/quota.json`
 
@@ -52,12 +52,53 @@ function quotaFile() {
       // The file has exactly one slot for a per-model week and calls it fable.
       // The live source has a list; this is that list with at most one entry in
       // it, so both sides hand the same shape to everything downstream.
+      //
+      // `at` is what makes the merge below possible: this one window carries its
+      // own `fetched_at`, because the script that writes it runs on its own
+      // occasions and not with the rest of the file — measured 45 hours behind
+      // the neighbouring five_hour block. Without a date we deliberately say 0
+      // rather than the file's mtime: the mtime belongs to the status line's
+      // write, and dating this window by it would claim a freshness it does not
+      // have — which is the jump this whole merge exists to stop.
       weekly_scoped: fable === null ? []
-        : [{ label: 'Fable', pct: fable, resets_at: isoTime(q?.seven_day_fable?.resets_at) }],
+        : [{
+          label: 'Fable', pct: fable, resets_at: isoTime(q?.seven_day_fable?.resets_at),
+          at: Number.isFinite(Number(q?.seven_day_fable?.fetched_at))
+            ? Number(q.seven_day_fable.fetched_at) * 1000 : 0,
+        }],
     }
   } catch {
     return { five: null, resets_at: null, seven_general: null, seven_resets_at: null, weekly_scoped: [] }
   }
+}
+
+/**
+ * The per-model weeks out of three sources: the current live answer, the last
+ * live answer (claude-usage.mjs remembers it), and the file.
+ *
+ * Merged PER LABEL and decided by AGE, because all three describe the same
+ * window and only one of them is current. The live answer wins outright; where
+ * it says nothing — the endpoint answers 429, the token expired, the TTL ran
+ * out, or the account simply reports no scoped window at that moment — the
+ * newer of the two remaining readings wins. Before this, the file won that case
+ * unconditionally, and the file's per-model window is written by a script from
+ * another project on its own occasions: the bar fell from the account's 88 % to
+ * a two-day-old 80 % and back on every gap in the live answer.
+ *
+ * A reading that is not the live one is marked `stale` and carries the time it
+ * was taken, so the panel can say so instead of presenting an old number as a
+ * current one — the silent staleness this module's whole history is about.
+ */
+function mergeScoped(live, remembered, file, now) {
+  const out = new Map()
+  const key = (w) => String(w.label ?? '').toLowerCase()
+  for (const w of file ?? []) out.set(key(w), { ...w, at: w.at ?? 0, stale: true })
+  for (const w of remembered ?? []) {
+    const prev = out.get(key(w))
+    if (!prev || (w.at ?? 0) > (prev.at ?? 0)) out.set(key(w), { ...w, stale: true })
+  }
+  for (const w of live ?? []) out.set(key(w), { ...w, at: now, stale: false })
+  return [...out.values()]
 }
 
 /**
@@ -74,11 +115,11 @@ function quotaFile() {
  * fills — `refreshClaudeLimits()`, from the watcher and from the usage
  * aggregator.
  */
-export function claudeQuota() {
+export function claudeQuota(now = Date.now()) {
   const file = quotaFile()
   const live = claudeLimits()
   const prefer = (a, b) => (a !== null && a !== undefined ? a : b)
-  const scoped = live?.weekly_scoped?.length ? live.weekly_scoped : file.weekly_scoped
+  const scoped = mergeScoped(live?.weekly_scoped, rememberedScoped(now), file.weekly_scoped, now)
   // 'fable' keeps its own two fields because the gate, the cost estimate and the
   // e2e suite all name it; it is simply the scoped window that calls itself that.
   const fable = scoped.find(w => /fable/i.test(w.label)) ?? null
