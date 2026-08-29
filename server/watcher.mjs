@@ -525,13 +525,10 @@ async function retryDeferred() {
   if (!deferred.length) return
   // Same gate as at the start (scheduler.mjs) — dynamic import, because the
   // scheduler pulls in the runner and the watcher is loaded by hub.mjs first.
-  const { budgetGate } = await import('./scheduler.mjs')
+  const { budgetGate, startDeferredRun } = await import('./scheduler.mjs')
   for (const run of deferred) {
-    if (await budgetGate(run.harness, run.model ?? null)) continue
-    db.prepare(`UPDATE runs SET status='running' WHERE id=?`).run(run.id)
-    addEvent(run.id, 'deferred_retry')
-    const { launchRun } = await import('./runner.mjs')
-    launchRun(run.id).then(r => {
+    if (await budgetGate(run.harness, run.model ?? null, run.provider ?? null)) continue
+    startDeferredRun(run.id).then(r => {
       if (!r.ok) notifyRun(run.id, 'start_failed', `Start after deferral failed: ${r.error}`)
     }).catch(() => {})
   }

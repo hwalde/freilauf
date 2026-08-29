@@ -191,33 +191,42 @@ export function windowAppliesToModel(label, model) {
 }
 
 /**
- * The 7-day window that binds for a run on `model`: the general week and the
- * per-model weeks that concern this model, whichever is fuller. null when the
- * account reports no week at all.
+ * The 7-day windows that concern a run on `model`, as a list: the general week
+ * and the per-model weeks that concern this model. This is the one place the
+ * window set is built — the gate and the display both read it, so they can never
+ * disagree about which windows exist for a run.
  *
  * An object that carries no window list is taken at its word (`quota.seven`) —
  * that is what the callers who only ever had two numbers pass.
  */
-export function sevenFor(quota = claudeQuota(), model = null) {
-  const w = weeklyBinding(quota, model)
-  return w ? w.pct : null
-}
-
-/** The same, with the window's name and reset time — what a gate reason says. */
-export function weeklyBinding(quota = claudeQuota(), model = null) {
+export function weeklyWindows(quota = claudeQuota(), model = null) {
   if (!Array.isArray(quota?.weekly_scoped)) {
     const pct = quota?.seven ?? null
-    return pct === null ? null : { pct, label: null, resets_at: quota?.seven_resets_at ?? null }
+    return pct === null ? [] : [{ pct, label: null, resets_at: quota?.seven_resets_at ?? null }]
   }
-  const windows = [
+  return [
     ...(quota.seven_general === null || quota.seven_general === undefined ? []
       : [{ pct: quota.seven_general, label: null, resets_at: quota.seven_resets_at ?? null }]),
     ...quota.weekly_scoped
       .filter(w => w.pct !== null && w.pct !== undefined && windowAppliesToModel(w.label, model))
       .map(w => ({ pct: w.pct, label: w.label ?? null, resets_at: w.resets_at ?? null })),
   ]
+}
+
+/** The fullest of the windows that concern a run on `model` — null when there is none. */
+export function weeklyBinding(quota = claudeQuota(), model = null) {
+  const windows = weeklyWindows(quota, model)
   if (!windows.length) return null
   return windows.reduce((a, b) => (b.pct > a.pct ? b : a))
+}
+
+/**
+ * The 7-day window that binds for a run on `model`, as a percentage. null when
+ * the account reports no week at all.
+ */
+export function sevenFor(quota = claudeQuota(), model = null) {
+  const w = weeklyBinding(quota, model)
+  return w ? w.pct : null
 }
 
 /**
@@ -263,20 +272,37 @@ async function openrouterRemaining() {
  * header). Left out, every window binds — the conservative answer, and the one
  * a caller without a model wants.
  *
+ * The thresholds are configurable — the settings page owns the numbers
+ * (scheduler.mjs reads them and passes them in, because this module must not
+ * import the database). Each window is measured against ITS OWN threshold: the
+ * 5-hour one against `five`, the general week and every non-fable per-model week
+ * against `seven`, a per-model week called "Fable" against `fable`. A window
+ * blocks when it reaches its own threshold; the reason names the blocking
+ * window(s) and hands out the fullest one's reset time.
+ *
  * The reset time is the BLOCKING window's own: a 7-day block used to hand out
  * the 5-hour reset, which then travelled into the deferred event and into
  * Telegram as the moment the run would start again.
  */
-export function claudeGateBlocked(quota = claudeQuota(), model = null) {
-  const week = weeklyBinding(quota, model)
-  const seven = week ? week.pct : null
-  const fiveBlocks = (quota.five ?? 0) >= 90
-  if (fiveBlocks || (seven ?? 0) >= 95) {
-    const name = week?.label ? `7d ${week.label}` : '7d'
+export function claudeGateBlocked(quota = claudeQuota(), model = null,
+  { five = 90, seven = 95, fable = 95 } = {}) {
+  const fiveBlocks = (quota.five ?? 0) >= five
+  // Windows that reach their OWN threshold — the general week and any per-model
+  // week that concerns this model, each judged against its own number.
+  const blocking = weeklyWindows(quota, model)
+    .map(w => ({ ...w, threshold: /fable/i.test(String(w.label ?? '')) ? fable : seven }))
+    .filter(w => (w.pct ?? 0) >= w.threshold)
+    .sort((a, b) => (b.pct ?? 0) - (a.pct ?? 0))
+  if (fiveBlocks || blocking.length) {
+    const name = (w) => (w.label ? `7d ${w.label}` : '7d')
+    const teile = [
+      ...(fiveBlocks ? [`5h ${quota.five ?? '?'} %`] : []),
+      ...blocking.map(w => `${name(w)} ${w.pct ?? '?'} %`),
+    ]
     return {
       blocked: true,
-      reason: `Claude quota: 5h ${quota.five ?? '?'} % / ${name} ${seven ?? '?'} %`,
-      resets_at: fiveBlocks ? quota.resets_at : (week?.resets_at ?? quota.resets_at ?? null),
+      reason: `Claude quota: ${teile.join(' / ')}`,
+      resets_at: fiveBlocks ? quota.resets_at : (blocking[0]?.resets_at ?? quota.resets_at ?? null),
     }
   }
   return { blocked: false }
@@ -290,6 +316,49 @@ export async function openrouterGateBlocked(minimum = 5) {
   if (remaining === null) return { blocked: false }   // no key / no signal → do not block
   if (remaining < minimum) {
     return { blocked: true, reason: `OpenRouter credits low: ${remaining} $` }
+  }
+  return { blocked: false }
+}
+
+let deepseekCache = { at: 0, value: null, available: null }
+
+/**
+ * true = defer the start of a run on the DeepSeek provider.
+ *
+ * Asks the provider plugin for the account balance (same direct call as the
+ * OpenRouter gate, same reason — see openrouterRemaining). Two things block:
+ *
+ *  - `available === false` — the provider's own verdict that calls no longer go
+ *    through (promotional credit expired while the figure still looks healthy);
+ *  - the USD balance below `minimum`. A DeepSeek account can hold several
+ *    currencies at once; the gate looks at the USD pot, the currency the
+ *    setting is denominated in. A CNY-only account reports no USD, which is
+ *    "no signal" — and the gate stays open exactly like a missing key.
+ */
+export async function deepseekGateBlocked(minimum = 2) {
+  const plugin = getProvider('deepseek')
+  const ctx = providerCtx()
+  if (!plugin?.balance || !providerHasKey('deepseek', ctx.env)) return { blocked: false }
+  let remaining = deepseekCache.value
+  let available = deepseekCache.available
+  if (deepseekCache.value === null || Date.now() - deepseekCache.at >= 120_000) {
+    try {
+      const b = await plugin.balance(ctx)
+      if (b) {
+        remaining = (b?.amounts ?? []).find(a => a.currency === 'USD')?.remaining ?? null
+        available = b?.available ?? null
+      }
+      deepseekCache = { at: Date.now(), value: remaining, available }
+    } catch {
+      // keep the old cache — the previous answer is still the best one there is
+    }
+  }
+  if (available === false) {
+    return { blocked: true, reason: 'DeepSeek balance unavailable — the account reports calls are blocked' }
+  }
+  if (remaining === null) return { blocked: false }   // no signal → do not block
+  if (remaining < minimum) {
+    return { blocked: true, reason: `DeepSeek credits low: ${remaining} $` }
   }
   return { blocked: false }
 }

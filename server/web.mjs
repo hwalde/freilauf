@@ -11,7 +11,7 @@ import { subscriptionUsage } from './usage.mjs'
 import { providerBalances } from './balances.mjs'
 import { sseHandler } from './events.mjs'
 import { launchRun } from './runner.mjs'
-import { startRun } from './scheduler.mjs'
+import { startRun, startDeferredRun } from './scheduler.mjs'
 import { runDefFromForm, runStartFromForm, saveAgent, rememberRunChoice, lastRunChoiceFor } from './run-def.mjs'
 import { runTitle, TITLE_MAX } from './title.mjs'
 import {
@@ -413,6 +413,21 @@ async function api(req, res, url) {
     resetIntegration(m[1])
     addEvent(m[1], 'retry', { previous_status: run.status })
     const r = await launchRun(m[1])
+    return answer(req, res, r.ok ? 200 : 500, r, `/runs/${m[1]}`)
+  }
+  // "Start anyway": an operator clicking a deferred run into life. The budget
+  // gate deferred it for a reason, so the button is the operator's deliberate
+  // decision that the window does not govern THIS run — the gate is not asked
+  // again (scheduler.startDeferredRun, the same function the watcher's auto
+  // retry uses, only marked as forced). Only 'deferred' may go: a scheduled
+  // run is waiting for its time, not for a quota, and gets its own cancel.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/start$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    if (run.status !== 'deferred') {
+      return answer(req, res, 400, { ok: false, error: t('start.err_not_deferred') }, `/runs/${m[1]}`)
+    }
+    const r = await startDeferredRun(m[1], { forced: true })
     return answer(req, res, r.ok ? 200 : 500, r, `/runs/${m[1]}`)
   }
   // Edit a run that still has a future: the expected duration of a running one

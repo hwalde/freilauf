@@ -439,6 +439,74 @@ try {
     wahr(claudeGateBlocked({ five: 0, seven: 95 }, 'claude-sonnet-5').blocked, 'and it still gates')
   })
 
+  await pruefe('thresholds are configurable per window; defaults stay 90/95', async () => {
+    const { claudeGateBlocked } = await quotaMit('{}', 18)
+    const q = { five: 80, seven: 88, weekly_scoped: [] }
+    falsch(claudeGateBlocked(q).blocked, 'defaults: 80 % and 88 % pass')
+    wahr(claudeGateBlocked(q, null, { five: 75, seven: 90 }).blocked, 'a 5 h threshold of 75 blocks the 80 %')
+    falsch(claudeGateBlocked(q, null, { five: 85, seven: 90 }).blocked, 'a 5 h threshold of 85 lets the 80 % pass')
+    wahr(claudeGateBlocked(q, null, { five: 90, seven: 85 }).blocked, 'a 7 d threshold of 85 blocks the 88 %')
+  })
+
+  await pruefe('the fable week has its own threshold', async () => {
+    const { claudeGateBlocked } = await quotaMit('{}', 19)
+    const q = {
+      five: 0, seven: 94, seven_general: 90, seven_resets_at: 'Y',
+      weekly_scoped: [{ label: 'Fable', pct: 92, resets_at: 'X' }],
+    }
+    falsch(claudeGateBlocked(q, 'fable').blocked, 'defaults: fable 92 % passes')
+    const g = claudeGateBlocked(q, 'fable', { fable: 90 })
+    wahr(g.blocked, 'fable 92 % blocks against its own threshold of 90')
+    enthaelt(g.reason, 'Fable', 'the reason names the fable window')
+    gleich(g.resets_at, 'X', 'the fable window hands out its own reset time')
+    falsch(claudeGateBlocked(q, 'claude-sonnet-5', { fable: 90 }).blocked,
+      'a run on another model is not held back by the fable threshold')
+  })
+
+  await pruefe('deepseek gate: the account verdict, low USD, and no signal', async () => {
+    const echt = global.fetch
+    process.env.DEEPSEEK_API_KEY = 'ds-test'
+    const ds = (nr) => import(`../server/quota.mjs?ds=${nr}`)
+    try {
+      const { deepseekGateBlocked: g1 } = await ds(1)
+      global.fetch = async () => ({ ok: true, json: async () => ({
+        is_available: false, balance_infos: [{ currency: 'USD', total_balance: '50' }],
+      }) })
+      const b = await g1(2)
+      wahr(b.blocked, 'available=false blocks even with plenty of money')
+      enthaelt(b.reason, 'unavailable', 'the reason names the verdict')
+
+      const { deepseekGateBlocked: g2 } = await ds(2)
+      global.fetch = async () => ({ ok: true, json: async () => ({
+        is_available: true, balance_infos: [{ currency: 'USD', total_balance: '1' }],
+      }) })
+      const low = await g2(2)
+      wahr(low.blocked, 'USD 1 below the minimum of 2 blocks')
+      enthaelt(low.reason, 'DeepSeek', 'the reason names the provider')
+
+      const { deepseekGateBlocked: g3 } = await ds(3)
+      global.fetch = async () => ({ ok: true, json: async () => ({
+        is_available: true, balance_infos: [{ currency: 'CNY', total_balance: '7000' }],
+      }) })
+      const cny = await g3(2)
+      falsch(cny.blocked, 'a CNY-only account reports no USD — no signal, no block')
+
+      const { deepseekGateBlocked: g4 } = await ds(4)
+      global.fetch = async () => ({ ok: true, json: async () => ({
+        is_available: true, balance_infos: [{ currency: 'USD', total_balance: '7' }],
+      }) })
+      const ok = await g4(2)
+      falsch(ok.blocked, 'USD 7 above the minimum passes')
+
+      const { deepseekGateBlocked: g5 } = await ds(5)
+      delete process.env.DEEPSEEK_API_KEY
+      falsch((await g5(2)).blocked, 'without a key the gate stays open')
+    } finally {
+      global.fetch = echt
+      delete process.env.DEEPSEEK_API_KEY
+    }
+  })
+
   // ------------------------------------------------------------------
   gruppe('Claude usage: the account answers, the file is the fallback')
 
