@@ -58,3 +58,7 @@ Root: archiving a run closes its tmux session (default immediately, configurable
 ## Status log
 
 - [x] 2026-08-29: plan written
+- [x] 2026-08-29: implemented (sessions.mjs pure logic, archive route, watcher
+      pass, settings form + SETTINGS_KEYS, i18n en/de/zh, AGENTS.md);
+      unit 262, e2e 235, browser 52, proxy 4, deploy 9 all green;
+      GATES.md all six met with machine-free evidence; committed
