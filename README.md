@@ -70,7 +70,11 @@ cc-hub is what you use when you are not:
 - **Terminal in the browser** (xterm.js over WebSocket, read-only by default) —
   watch a run, type into it, answer a help call.
 - **Reports** via `cc-report` (done / failed / help / progress / branch / pr),
-  with an `inbox.jsonl` fallback when the hub is unreachable.
+  with an `inbox.jsonl` fallback when the hub is unreachable. A finished run
+  can report again — type follow-up work into its session, and the agent's
+  next `cc-report done` is merged, triggers the flows and reaches Telegram as
+  a *follow-up report*. A checkbox under the terminal silences Telegram for a
+  run you are watching anyway.
 - **Integration**: the hub merges finished runs into the base branch itself,
   serially per repo, in a worktree of its own — dirty worktree, conflict or a
   failing merge check escalate to the agent first and to you only if it cannot

@@ -77,7 +77,12 @@ Zeit, in der du das nicht tust:
 - **Terminal im Browser** (xterm.js über WebSocket, standardmäßig read-only) —
   zuschauen, hineintippen, einen Hilferuf beantworten.
 - **Reports** über `cc-report` (done / failed / help / progress / branch / pr),
-  mit `inbox.jsonl` als Rückfallebene, wenn der Hub nicht erreichbar ist.
+  mit `inbox.jsonl` als Rückfallebene, wenn der Hub nicht erreichbar ist. Ein
+  fertiger Lauf kann erneut berichten — Nacharbeit in seine Session tippen, und
+  das nächste `cc-report done` des Agenten wird gemergt, löst die Flows aus und
+  kommt als *Nacharbeits-Report* auf Telegram an. Eine Checkbox unter dem
+  Terminal stellt Telegram für einen Lauf stumm, den man ohnehin gerade
+  beobachtet.
 - **Integration**: Der Hub merged fertige Läufe selbst in den Basis-Branch,
   seriell pro Repo, in einem eigenen Worktree — ein dreckiger Worktree, ein
   Konflikt oder ein roter Merge-Check eskalieren erst an den Agenten und erst

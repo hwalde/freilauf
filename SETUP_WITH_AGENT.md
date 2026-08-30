@@ -36,7 +36,11 @@ Six facts and you can reason about the whole system:
 3. **The agent reports back with `bin/cc-report`** (`done`, `failed`, `help`,
    `progress`, `branch`, `pr`). The hub also watches from the outside — tmux
    state, logs, transcripts, hooks — because an agent that hit a rate limit
-   cannot report anything.
+   cannot report anything. A run that is already over can report **again**:
+   the operator types follow-up work into the agent's session, the agent runs
+   `cc-report done` once more, and the hub treats it as a *follow-up report* —
+   same checks, same merge, same flows, announced as "FOLLOW-UP REPORT #n". The
+   prompt tells the agent so (`FOLLOWUP_RULES` in `server/runner.mjs`).
 4. **The hub does the merging, not the agent** (when a repo is set to
    `merge_mode = hub`). A run is `done` when its work is on the base branch.
    If the worktree is dirty or the merge conflicts, the still-living agent is

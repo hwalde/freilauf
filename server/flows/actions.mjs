@@ -57,6 +57,12 @@ export function runInfo(runId) {
     branch: run.branch_reported || run.branch_expected || '',
     pr_url: run.pr_url ?? '',
     report: run.report_md ?? '',
+    // A finished run can report AGAIN (server/reports.mjs, follow-up reports):
+    // `report` then carries all of it, `last_report` only the latest text — the
+    // one a flow that fires on the follow-up usually wants — and `followups`
+    // says how many there were (0 for a run that reported once).
+    followups: run.followups ?? 0,
+    last_report: run.followup_md ?? run.report_md ?? '',
     help_text: run.help_text ?? '',
     exit_code: run.exit_code ?? null,
     duration_min: Number.isFinite(startMs) ? Math.round((endMs - startMs) / 60000) : 0,

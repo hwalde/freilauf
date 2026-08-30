@@ -287,6 +287,17 @@ export function undispatchedMerges() {
   return db.prepare(`SELECT * FROM runs WHERE merge_status = 'merged' AND merge_dispatched = 0
                      ORDER BY merged_at`).all()
 }
+/**
+ * A finished run has reported AGAIN (a follow-up report, server/reports.mjs):
+ * its `run_finished` flows fire once more, and — when the follow-up's work was
+ * merged — so do the `run_merged` ones. The marks are simply taken back; the
+ * next `flowsTick()` treats the run as if it had just ended, which is exactly
+ * what happened.
+ */
+export function rearmDispatch(runId, { merged = false } = {}) {
+  db.prepare('UPDATE runs SET flow_dispatched = 0 WHERE id = ?').run(runId)
+  if (merged) db.prepare(`UPDATE runs SET merge_dispatched = 0 WHERE id = ? AND merge_status = 'merged'`).run(runId)
+}
 export function markMergeDispatched(runId) {
   db.prepare('UPDATE runs SET merge_dispatched = 1 WHERE id = ?').run(runId)
 }

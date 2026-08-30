@@ -468,6 +468,23 @@ async function api(req, res, url) {
     }
     return answer(req, res, 200, { ok: true }, `/runs/${run.id}`)
   }
+  // The Telegram checkbox under the terminal: on (the default of every run) or
+  // off for THIS run. Off silences every message about the run — its reports,
+  // the follow-up ones first of all, its alarms and its incidents — and nothing
+  // else: the integration, the flows and the events happen exactly as before
+  // (reports.mjs, notifyRun). Read at send time, so the click takes effect on
+  // the next message, whatever is in flight.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/telegram$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const b = await form(req)
+    const on = ['1', 'on', 'true'].includes(String(b.on ?? '').trim()) ? 1 : 0
+    if (on !== (run.telegram_on === 0 ? 0 : 1)) {
+      db.prepare('UPDATE runs SET telegram_on=? WHERE id=?').run(on, run.id)
+      addEvent(run.id, on ? 'telegram_on' : 'telegram_off', {})
+    }
+    return answer(req, res, 200, { ok: true, telegram_on: on }, `/runs/${run.id}`)
+  }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/kill$/))) {
     const run = getRun(m[1])
     const { sh } = await import('./util.mjs')
@@ -506,8 +523,9 @@ async function api(req, res, url) {
     // would sit hidden in the overview while it works. And the goal starts over
     // with it: a retry is a NEW session, and a `/goal` typed into the old one is
     // gone with it (server/goal.mjs).
+    // …and the follow-up reports of the old attempt go with the old report.
     db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL, archived_at=NULL,
-                goal_sent_at=NULL WHERE id=?`).run(m[1])
+                goal_sent_at=NULL, followups=0, followup_md=NULL, followup_open=0 WHERE id=?`).run(m[1])
     // …and so does the integration: everything the finish gate and the
     // integrator wrote about the previous attempt is gone.
     resetIntegration(m[1])

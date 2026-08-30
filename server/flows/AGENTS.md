@@ -23,11 +23,20 @@ context = {
 `RunInfo` (built by `actions.runInfo()`) is everything a flow may know about a
 run: `id, short_id, status, outcome ('done'|'failed'|'aborted'), ended_normally,
 agent_id, agent_name, repo_id, repo_name, repo_path, harness, model, provider,
-branch, pr_url, report, help_text, exit_code, duration_min, started_at, ended_at,
-incidents, worktree, url, flow_run_id, merge_status, merged_sha`. "Did the run
-end normally or was it aborted?" is `outcome` / `ended_normally`; whether its
-work has landed on the base branch is `merge_status` (the merge integrator's
-column — read here, never written).
+branch, pr_url, report, followups, last_report, help_text, exit_code,
+duration_min, started_at, ended_at, incidents, worktree, url, flow_run_id,
+merge_status, merged_sha`. "Did the run end normally or was it aborted?" is
+`outcome` / `ended_normally`; whether its work has landed on the base branch is
+`merge_status` (the merge integrator's column — read here, never written).
+
+A finished run can report **again** (`server/reports.mjs`, follow-up reports:
+the operator typed more work into the session and the agent ran `cc-report
+done` once more). Its `run_finished` flows then fire once more, and so do the
+`run_merged` ones when the follow-up's work was merged (`rearmDispatch()` in
+`db.mjs` takes the dispatch marks back). `report` carries everything the run
+ever reported, `last_report` only the latest text — the one a flow fired by a
+follow-up usually wants — and `followups` counts them (0 for a run that
+reported once).
 
 Text fields in steps are **templates**: `{{trigger.run.report}}`,
 `{{vars.review.branch}}`, `{{x | default: text}}`. A single `{{path}}` used as
