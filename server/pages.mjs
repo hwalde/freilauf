@@ -25,7 +25,10 @@ import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } fro
 import { extrasModelsMru, rememberExtrasModel, DEFAULT_EXTRAS_MODEL } from './extras-suggest.mjs'
 import { runEditAllowed } from './run-edit.mjs'
 import { getHarness, harnessLabel, detectInstalled } from './harnesses/index.mjs'
-import { providerLabel } from './providers/index.mjs'
+import { getProvider, providerLabel } from './providers/index.mjs'
+// What a coding agent holds in its OWN credential store — asked of the plugin,
+// cached there, `null` when it cannot be established. See providerChoiceBlock().
+import { harnessOwnCredentials } from './models.mjs'
 import { subscriptionUsage } from './usage.mjs'
 import { ampelAusVorfaellen, offeneVorfaelle, alleVorfaelle, brauchtMensch } from './incidents.mjs'
 import { TYP_TEXT } from './detect.mjs'
@@ -2035,15 +2038,85 @@ export function cleanupSettingsSummary() {
   return `${s.on ? t('layout.on') : t('layout.off')} · ${s.thresholdGb} GB → ${s.targetGb} GB · ${harnessLabel(s.harness) || s.harness}${model}`
 }
 
-// ---------------- coding agents (Settings → Coding agents) ----------------
+// ---------------- the model providers of one coding agent ----------------
+//
+// ONE renderer, exported, called by the Plugins page and by the coding-agent
+// form below. It used to be two copies of the same eight lines, and they had
+// already drifted: one printed a hint next to a provider, the other did not, so
+// the same DeepSeek was described in two different ways depending on which page
+// one had reached it from. Same rule as the fragments — a block a user can meet
+// twice has exactly one function behind it.
 
-function providerCheckboxes(plugin, chosen, prefix) {
-  if (plugin.subscription || !(plugin.providers ?? []).length) {
-    return `<p class="dim">${e(t('ca.no_providers'))}</p>`
+/**
+ * Can this provider be used with no credential at all?
+ *
+ * Deliberately an EXPLICIT `required: false` on every declared credential, not
+ * the absence of `required`: `credentialSpec()` normalises a provider that
+ * predates the field to `required: false`, and reading that as "optional" would
+ * promise free models where there are none. OpenCode Zen says it outright, and
+ * that is what this answers to.
+ */
+function credentialOptional(providerId) {
+  const declared = getProvider(providerId)?.credentials
+  return Array.isArray(declared) && declared.length > 0
+    && declared.every(c => c && c.required === false)
+}
+
+/**
+ * One sentence per provider: is there a credential for it, and whose?
+ *
+ * The page used to print "works without an own key" here, off a hard-coded list
+ * on the coding-agent plugin — a guess about somebody else's configuration, and
+ * one that reads like a fault report. The order below is what makes it an
+ * answer instead:
+ *
+ *  1. the coding agent's OWN credential store, when the plugin can be asked
+ *     (`ownCredentials`) — that is the fact the operator cannot see from here;
+ *  2. a credential cc-hub holds, environment variable or stored value alike;
+ *  3. the coding agent's declared key-free access — the fallback for when 1
+ *     could not be established, and the place where "only the free models" is
+ *     the honest half of the sentence;
+ *  4. nothing, which is worth saying plainly: this provider will not work.
+ */
+function providerAccess(plugin, providerId, own) {
+  const agent = plugin.label
+  if (own && own.includes(providerId)) return t('provider.access_agent_key', { agent })
+  if (pluginHasCredential(providerId)) return t('provider.access_hub_key', { agent })
+  if ((plugin.keyFreeProviders ?? []).includes(providerId)) {
+    return credentialOptional(providerId)
+      ? t('provider.access_free_models', { agent })
+      : t('provider.access_agent_free', { agent })
   }
-  return plugin.providers.map(pid => `<label class="chk">
-    <input type="checkbox" name="${e(prefix)}" value="${e(pid)}" ${chosen.has(pid) ? 'checked' : ''}>
-    ${e(providerLabel(pid))}${(plugin.keyFreeProviders ?? []).includes(pid) ? ` <span class="dim">(${e(t('provider.keyfree'))})</span>` : ''}</label>`).join('')
+  return t('provider.access_missing', { agent })
+}
+
+/**
+ * The inside of the "allowed model providers" fieldset: the explanation, what
+ * the coding agent brings by itself, and one checkbox per provider carrying the
+ * sentence above.
+ *
+ * Async because asking a coding agent what it holds may touch the machine; the
+ * probe is cached in models.mjs and fails soft to "unknown", so a card is never
+ * held up by it.
+ */
+export async function providerChoiceBlock(plugin, chosen, { name = 'providers' } = {}) {
+  if (plugin.subscription || !(plugin.providers ?? []).length) {
+    return `<p class="dim">${e(t('plugins.no_providers'))}</p>`
+  }
+  let own = null
+  try { own = await harnessOwnCredentials(plugin.id) } catch { own = null }
+  // What the coding agent contributes, said once instead of implied per row.
+  // hermes brings nothing and used to say nothing, which left the reader of an
+  // opencode card wondering what the difference was meant to be.
+  const brings = own !== null
+    ? `<p class="dim">${e(t('plugins.providers_agent_own', { agent: plugin.label }))}</p>`
+    : (plugin.keyFreeProviders ?? []).length === 0
+      ? `<p class="dim">${e(t('plugins.providers_agent_none', { agent: plugin.label }))}</p>`
+      : ''
+  const boxes = plugin.providers.map(pid => `<label class="chk">
+    <input type="checkbox" name="${e(name)}" value="${e(pid)}" ${chosen.has(pid) ? 'checked' : ''}>
+    ${e(providerLabel(pid))} <span class="dim">— ${e(providerAccess(plugin, pid, own))}</span></label>`).join('')
+  return `<p class="dim">${e(t('plugins.providers_hint'))}</p>${brings}${boxes}`
 }
 
 export async function pageCodingAgents(req, res, url) {
@@ -2051,7 +2124,10 @@ export async function pageCodingAgents(req, res, url) {
   const installed = await detectInstalled()
   const installedById = new Map(installed.map(i => [i.id, i.installed]))
 
-  const rows = configured.map(a => {
+  // Both lists await the shared provider block (it may ask the coding agent
+  // what credentials it holds), so they are built concurrently rather than one
+  // card after the other.
+  const rows = (await Promise.all(configured.map(async a => {
     const plugin = a.plugin
     if (!plugin) {
       return `<div class="card"><b>${e(a.harness)}</b> <span class="err">${e(t('ca.plugin_missing'))}</span>
@@ -2063,21 +2139,20 @@ export async function pageCodingAgents(req, res, url) {
     <form method="post" action="/settings/coding-agents/save">
       <input type="hidden" name="harness" value="${e(a.harness)}">
       <label class="chk"><input type="checkbox" name="enabled" value="1" ${a.enabled ? 'checked' : ''}> ${e(t('ca.enabled'))}</label>
-      <fieldset><legend>${e(t('ca.providers_legend'))}</legend>
-        <p class="dim">${e(t('ca.providers_hint'))}</p>
-        ${providerCheckboxes(plugin, chosen, 'providers')}
+      <fieldset><legend>${e(t('plugins.providers_legend'))}</legend>
+        ${await providerChoiceBlock(plugin, chosen)}
       </fieldset>
       <button>${e(t('settings.save'))}</button>
     </form>
     <form method="post" action="/settings/coding-agents/delete" class="inline" onsubmit="return confirm(${e(JSON.stringify(t('ca.delete_confirm', { label: plugin.label })))})">
       <input type="hidden" name="id" value="${a.id}"><button class="danger">${e(t('ca.delete'))}</button></form>
   </div>`
-  }).join('')
+  }))).join('')
 
   const addable = unconfiguredHarnessIds().map(id => getHarness(id)).filter(Boolean)
     // Installed ones first — those are the natural suggestions.
     .sort((a, b) => (installedById.get(b.id) ? 1 : 0) - (installedById.get(a.id) ? 1 : 0))
-  const addBlocks = addable.map(plugin => `
+  const addBlocks = (await Promise.all(addable.map(async plugin => `
   <div class="card">
     <h3>${e(plugin.label)} ${installedById.get(plugin.id)
       ? `<span class="ok">✓ ${e(t('ca.detected'))}</span>`
@@ -2086,12 +2161,12 @@ export async function pageCodingAgents(req, res, url) {
     <form method="post" action="/settings/coding-agents/save">
       <input type="hidden" name="harness" value="${e(plugin.id)}">
       <input type="hidden" name="enabled" value="1">
-      <fieldset><legend>${e(t('ca.providers_legend'))}</legend>
-        ${providerCheckboxes(plugin, new Set(plugin.providers ?? []), 'providers')}
+      <fieldset><legend>${e(t('plugins.providers_legend'))}</legend>
+        ${await providerChoiceBlock(plugin, new Set(plugin.providers ?? []))}
       </fieldset>
       <button>${e(t('ca.add'))}</button>
     </form>
-  </div>`).join('')
+  </div>`))).join('')
 
   const body = `
   <h2>${e(t('ca.title'))}</h2>

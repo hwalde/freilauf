@@ -4,11 +4,31 @@
 // credentials found for provider 'opencode-zen'"). It validates nothing about
 // effort levels and silently runs with the default on nonsense — the hub must
 // therefore only offer levels that the model actually knows.
-import { getProvider } from '../providers/index.mjs'
 import { HTTP_5XX } from './patterns.mjs'
 import { runCli, cliFailure } from './cli-llm.mjs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+
+// A model provider's descriptor — never through a static import.
+// `../providers/index.mjs` re-exports the plugin registry, and the registry's
+// module body builds `{claude, opencode, hermes, …}` out of THIS file:
+// importing it up here makes this plugin unimportable on its own (measured:
+// `ReferenceError: Cannot access 'hermes' before initialization`), which breaks
+// the contract docs/plugins.md and cli-llm.mjs both state. Two ways to ask:
+//
+//   providerOf(ctx, id)     synchronous, so only the injected context can
+//                           answer it; without a context the answer is null.
+//   providerLate(ctx, id)   where an await is allowed: the context first, and
+//                           otherwise the registry through a LAZY import, which
+//                           resolves fine because by call time every module has
+//                           finished evaluating.
+const providerOf = (ctx, id) => ctx?.provider?.(id) ?? null
+
+async function providerLate(ctx, id) {
+  const p = providerOf(ctx, id)
+  if (p) return p
+  try { return (await import('../providers/index.mjs')).getProvider(id) } catch { return null }
+}
 
 const execFileAsync = promisify(execFile)
 const flat = (t) => String(t ?? '').replace(/\s+/g, ' ')
@@ -41,7 +61,18 @@ const plugin = {
 
   subscription: false,
   providers: ['openrouter', 'opencode-zen', 'deepseek'],
-  keyFreeProviders: [],      // hermes needs credentials for every provider
+  // hermes needs credentials for EVERY provider — measured, it refuses even the
+  // free Zen models ("No usable credentials found for provider 'opencode-zen'").
+  // An empty list here is therefore a statement and not an omission, and the
+  // provider block on the Plugins page prints it as one: next to a coding agent
+  // that brings none of its own, silence used to leave the reader guessing why
+  // opencode said something about its keys and hermes did not.
+  //
+  // Deliberately NO `ownCredentials()`: hermes stores what `hermes setup` was
+  // given, but nothing about that location has been measured here, and a
+  // capability that guesses is worse than one that is absent — absent means
+  // "ask the declaration", guessed means "the page states it as fact".
+  keyFreeProviders: [],
 
   pulseId: (run) => run.provider ?? null,
   pulseTargets: {},
@@ -79,7 +110,7 @@ const plugin = {
       const reg = (await ctx.registry()) ?? {}
       const out = []
       for (const id of plugin.providers) {
-        const prov = getProvider(id)
+        const prov = await providerLate(ctx, id)
         const models = reg?.[prov?.mdKey ?? id]?.models ?? {}
         for (const [model, m] of Object.entries(models)) {
           out.push({ id: `${id}/${model}`, name: `${prov?.label ?? id}: ${m?.name ?? model}` })
@@ -159,11 +190,17 @@ const plugin = {
     if (run.effort) args.push('--effort', run.effort)
     // The credential, resolved the way the operator configured it — a stored
     // value, a variable they named, or the provider's own declared one
-    // (`ctx.secret()`, server/plugins/store.mjs). Without a context this is the
-    // plain environment read it always was. It travels as `--env` because a
-    // tmux session inherits nothing; the NAME stays whichever declared variable
-    // the environment already holds, so hermes keeps reading the one it knows.
-    const prov = getProvider(run.provider)
+    // (`ctx.secret()`, server/plugins/store.mjs). It travels as `--env` because
+    // a tmux session inherits nothing; the NAME stays whichever declared
+    // variable the environment already holds, so hermes keeps reading the one
+    // it knows.
+    //
+    // This function is SYNCHRONOUS, so the lazy import the async paths use is
+    // not available here: without a context there is no descriptor and hence no
+    // declared variable names, and no key travels. `runner.mjs` — the only
+    // caller that launches a run — always passes one; a one-argument call is a
+    // plugin author probing the descriptor, and it must answer rather than throw.
+    const prov = providerOf(ctx, run.provider)
     const key = ctx?.secret?.('api_key') || (prov?.envKeys ?? []).map(n => process.env[n]).find(Boolean) || null
     if (key) {
       const names = prov?.envKeys ?? []

@@ -562,9 +562,28 @@ actually run with, and each of them removes a hardcoded vendor from the hub:
 **A plugin is handed a context, never `process.env` or `db.mjs`.**
 `pluginCtx(id)` (`server/plugins/context.mjs`) carries `json()` (fetch with a
 timeout and the one `HTTP <n>` error shape), `registry()` (the cached models.dev
-snapshot), `env`, `secret()`, `setting()` and `log()`. That single indirection
-is what makes an external package work without importing anything of ours *and*
-makes the operator's own credential honoured everywhere at once.
+snapshot), `provider(id)` (another provider's descriptor), `env`, `secret()`,
+`setting()` and `log()`. That single indirection is what makes an external
+package work without importing anything of ours *and* makes the operator's own
+credential honoured everywhere at once.
+
+**`provider(id)` is on there because the static import was a cycle.**
+`providers/index.mjs` re-exports the registry, and the registry's module body
+builds `{claude, opencode, hermes, cursor}` out of the very plugin files that
+would import it — so `import { getProvider } from '../providers/index.mjs'` at
+the top of `harnesses/opencode.mjs` and `harnesses/hermes.mjs` made those two
+files unimportable **on their own** (`ReferenceError: Cannot access 'opencode'
+before initialization`). It was invisible inside the running hub, where
+`registry.mjs` is always reached first, and it broke the rule
+[docs/plugins.md](docs/plugins.md) and `harnesses/cli-llm.mjs` both state. The
+context resolves at **call** time, after every module has evaluated; where a
+context is missing and an `await` is allowed the lazy
+`(await import('../providers/index.mjs')).getProvider(id)` does the same job. In
+a **synchronous** method there is no third way, so `modelArgs()` without a
+context uses the provider id verbatim and passes no credential — `runner.mjs`,
+the only caller that launches a run, always hands one over. `test/echt.mjs`
+imports every plugin file in a process of its own, because that is the only
+place the cycle shows.
 
 ### Configured plugins, and where they are configured
 
@@ -664,6 +683,16 @@ answers stop being reproducible:
 | `native` | the schema goes over the wire as a schema; nothing is added to the prompt |
 | `json_object` | the vendor promises valid JSON but takes no schema, so the flag goes out **and** the prompt carries the shape |
 | `prompt` | the schema is a paragraph of strict instructions and nothing else |
+
+**`native` says the schema TRAVELS natively, not that the model obeys it.**
+claude's `--json-schema` is a forced tool call, and a model may decline a tool:
+five runs of one adversarial prompt on `haiku` gave four with
+`stop_reason: tool_use` and a conforming `structured_output`, and a fifth with
+`stop_reason: end_turn`, no `structured_output` and prose in `result`. The
+declaration is still right — the schema really does go over the wire, so the
+strict paragraph really is unnecessary — and that is exactly why the two lines
+under it are not optional: the adapter falls back to `result` when
+`structured_output` is missing, and the reprompt below catches what that leaves.
 
 Whatever comes back is read tolerantly (`json.mjs` — fences stripped, prose cut
 by a character scanner that respects strings, the common damages repaired; it
@@ -1988,8 +2017,12 @@ cursor, like hermes, has **no** hook for API errors (its hook enum knows
 `preToolUse`/`postToolUse`, … — nothing for a failed call), and there is no open
 pulse endpoint for `api2.cursor.sh`:
 `providerVonLauf()` deliberately returns `null` there ("not monitored", not
-"healthy"). In return cursor rejects an unknown model **loudly** (`Cannot use
-this model: …`) — unlike opencode and hermes, which swallow nonsense silently.
+"healthy"). In return cursor rejects an unknown model **loudly and by name**
+(`Cannot use this model: …`) — unlike opencode and hermes. hermes swallows
+nonsense silently; opencode does complain, but as a generic `UnknownError` /
+"Unexpected server error" that reads exactly like a provider outage (see
+Pitfalls), which is arguably worse than silence because it points at the wrong
+culprit.
 
 Log and transcript are read by **offset** (`runs.log_offset` /
 `transcript_offset`): only new bytes, every line counts once. Every decision is
@@ -2062,6 +2095,16 @@ errors (`post_api_request` only fires after success).
   from the launcher after the TUI has drawn (it waits for the status bar, not
   for a fixed number of seconds). Enter on an empty editor is a no-op in
   opencode — measured — so the case that submitted by itself is not harmed.
+- **opencode reports an unknown model as a server fault.** A model id it does not
+  know answers `{"type":"error","name":"UnknownError","data":{"message":
+  "Unexpected server error"}}` — byte for byte what a genuine upstream outage
+  produces, with no "no such model" anywhere in it. So a typo in a model id and a
+  broken vendor look identical from the outside, and telling them apart cost an
+  hour. On `UnknownError`, check the id against `opencode models --pure` **before**
+  believing the outage. Related, and the other half of the same trap: OpenCode
+  Zen's free models (`*-free`) are a shared pool that rotates through 429/500/503
+  constantly, so a 5xx from one of them is "try later", not a defect — anything
+  built on them must not raise an incident or fail a test on the first one.
 - **`\b5\d\d\b` is not an HTTP status.** cursor's own status line
   `⠠⠛ Globbing  555 tokens` opened a "Provider error" incident, because the
   pattern matches a token count just as happily as a 503. A status code counts

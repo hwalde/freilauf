@@ -217,6 +217,7 @@ because the plugin asks `ctx.secret()` instead of reading a fixed name.
 |---|---|
 | `json(url, headers = {}, init = {})` | `fetch` with `AbortSignal.timeout` (8 s default, `init.timeoutMs` overrides — an LLM completion needs more than a catalog fetch). A non-2xx answer throws `HTTP <status>`, the one error shape every caller in the hub matches on. The signal is set **after** the init spread, so an init object cannot disarm the timeout |
 | `registry()` | the cached models.dev snapshot (6 h; parallel askers share one request; a failed refresh keeps serving the previous snapshot) |
+| `provider(id)` | another **provider's** descriptor, or `null` — resolved through the registry at **call** time |
 | `env` | `process.env`, for legacy reads — prefer `secret()` |
 | `secret(key = 'api_key')` | the resolved credential, or `null` |
 | `setting(key, fallback)` | this plugin's own declared setting value |
@@ -244,6 +245,24 @@ declared falls back to the namespaced `plugin_<id>_<key>`.
 helper and the registry (the model-catalog fetches predate credentials);
 `secret()` then answers `null` rather than guessing.
 
+**`ctx.provider(id)` exists because a static import of it is a cycle.** A
+provider-based coding agent has to know a provider's opencode prefix, its
+models.dev key and the environment variables it declares — and
+`server/providers/index.mjs` re-exports the plugin registry, whose module body
+builds `{claude, opencode, hermes, cursor}` out of the very plugin files that
+would be importing it. `import { getProvider } from '../providers/index.mjs'` at
+the top of `harnesses/opencode.mjs` therefore made that file unimportable on its
+own — `ReferenceError: Cannot access 'opencode' before initialization`, and
+invisible while the hub runs because the registry is always reached first.
+`ctx.provider(id)` resolves at **call** time, which is after every module has
+finished evaluating. A plugin that needs the answer where no context is at hand
+and an `await` is allowed uses the lazy import instead
+(`(await import('../providers/index.mjs')).getProvider(id)`), the same pattern
+`quota.mjs` is reached with. **In a synchronous method there is no third way**:
+`modelArgs()` without a context has no provider descriptor, so it uses the
+provider id verbatim and passes no credential. That is a degradation and not a
+lie — `runner.mjs`, the only caller that launches a run, always passes one.
+
 **Who builds a context is a caller, never a plugin.** `models.mjs`,
 `quota.mjs`, `balances.mjs`, `usage.mjs`, `scheduler.mjs` and `runner.mjs` each
 call `pluginCtx(id)` and pass it in. One detail worth knowing: `runner.mjs`
@@ -268,7 +287,8 @@ and does without.
 | `sessionTag` | string | tmux session prefix part: sessions are named `cc-<sessionTag><name>` (`''`, `'oc-'`, `'he-'`, `'cu-'`) |
 | `subscription` | boolean | `true` = models come from the account, no provider selection (claude, cursor) |
 | `providers` | string[] | provider plugin ids this harness can use (empty for subscription harnesses) |
-| `keyFreeProviders` | string[] | subset of `providers` usable **without** an own credential |
+| `keyFreeProviders` | string[] | subset of `providers` this coding agent reaches **without** an own credential. A **declaration**, and the answer of last resort: `modelArgs()` decides "this run is missing a key" on it on the launch path, where nothing may be probed, and the Plugins page falls back to it when `ownCredentials()` cannot be asked |
+| `ownCredentials(ctx)` | async fn (optional) | which model providers this CLI holds credentials for **itself** — `null` (could not be asked), `[]` (asked, holds none), or the ids. Cached by `harnessOwnCredentials()` in `models.mjs`; see below |
 | `descriptionKey` | i18n key (optional) | 1–3 sentences shown on the plugin's card |
 | `credentials` | `[{key, envKeys[], labelKey, helpKey?, required?}]` (optional) | what the operator can configure; see below |
 | `settings` | `SettingField[]` (optional) | operator-configurable fields rendered on the plugin's card |
@@ -313,6 +333,65 @@ variable it knows; only a credential that comes from nowhere else goes out under
 every declared name. It has to travel as `--env` at all because **a tmux session
 inherits nothing** — a variable that is not passed here does not exist over
 there.
+
+### `ownCredentials(ctx)` — who supplies the key, asked instead of guessed
+
+Under every model provider on a coding agent's card the Plugins page prints one
+sentence: whose key this provider is reached with. That sentence used to be
+derived from `keyFreeProviders` alone and read *"works without an own key"* — a
+hard-coded guess about somebody else's configuration, and one that sounds like a
+fault report standing next to a provider that works perfectly well.
+
+`ownCredentials(ctx)` is the optional capability that turns the guess into an
+answer: the CLI is asked what it actually holds. It is given the ordinary
+injected context (`pluginCtx(id)`), so `ctx.env` rather than a bare `process.env`
+read is what makes it testable.
+
+| Answer | Means | What the caller does with it |
+|---|---|---|
+| `null` | the question could not be answered — not installed, never logged in, unreadable, or a store shape this code does not recognise | falls back to the declared `keyFreeProviders`. **Never rendered as a claim**: "unknown" is not something the operator may read as a fact about their machine |
+| `[]` | the CLI was asked and holds no credentials at all | a real answer, and printed as one |
+| `[providerId, …]` | the providers **of this plugin** the CLI has its own access data for | the row says so (`provider.access_agent_key`), and the card says once that this agent keeps credentials of its own |
+
+Four rules, each of them load-bearing:
+
+- **The caller caches it, not the plugin** — `harnessOwnCredentials(harness)` in
+  `server/models.mjs`, through the same cache `effortLevels()` uses (5 min TTL).
+  A plugin file may not import that module, and a page renders one card per
+  registered harness. The cached value is wrapped in an object on purpose: the
+  cache helper treats a bare `null` as "nothing cached", so the *unknown* answer
+  would otherwise re-probe on every single render.
+- **It is fail-soft in every direction.** A probe that throws is an unknown
+  answer, never a failed page — `harnessOwnCredentials()` catches, and
+  `providerChoiceBlock()` in `pages.mjs` catches again around the call. A plugin
+  that does not implement the capability arrives at `null` by the same route, so
+  nothing has to special-case its absence.
+- **It may touch the machine, so it is never on the launch path.**
+  `modelArgs()` still decides "this run is missing a key" on the declared
+  `keyFreeProviders`: a start may not wait on a file read or a spawned process,
+  and a declaration cannot fail. The two are the same question asked in two
+  places with different budgets — which is exactly why `keyFreeProviders` stays.
+- **Only ids ever leave the function.** The store it reads holds the keys
+  themselves; a value must never travel towards a page.
+
+**Absence is a legitimate answer.** `hermes.mjs` deliberately declines to
+implement it: hermes stores whatever `hermes setup` was given, but nothing about
+that location has been measured here, and a capability that guesses is worse than
+one that is missing — missing means "ask the declaration", guessed means "the
+page states it as fact".
+
+**Why opencode reads `auth.json` rather than parsing `opencode auth list`.** Both
+were measured. The command prints a boxed TUI listing carrying the vendors'
+*display* names ("DeepSeek") wrapped in ANSI colour codes, so using it would mean
+matching prose back onto provider ids — and re-doing that on every wording change
+upstream — and it costs a process on top. The file
+(`$XDG_DATA_HOME/opencode/auth.json`, else `~/.local/share/opencode/auth.json`)
+is keyed by opencode's **own provider id**, which is exactly what the provider
+plugins' `ocPrefix` already maps onto, so the mapping is the one the rest of that
+plugin uses anyway. The price is a path that belongs to opencode's internals, and
+that price is paid by the `null` contract: no file, no permission, or a top-level
+shape that is not "provider id → entry" all answer *unknown* instead of the
+confident lie "holds nothing".
 
 ### The launch declaration
 
@@ -394,7 +473,7 @@ The minimum: `id`, `label`, a `fetchModels` function, and either `envKeys` or
 | `envKeys` | string[] | env vars holding a credential; passed into the agent session via `cc-start --env` and used for "is this provider offerable?" |
 | `credentials` | `[{key, envKeys[], labelKey, helpKey?, required?}]` (optional) | the same thing, declared: what the Plugins page renders and what `ctx.secret()` resolves through. A provider that declares only `envKeys` is read as one credential called `api_key` (`credentialSpec()`), so every caller sees one list instead of two cases |
 | `descriptionKey` | i18n key (optional) | 1–3 sentences on the plugin's card |
-| `ocPrefix` | string | model prefix opencode uses for this provider (pitfall: Zen is `opencode`, not `opencode-zen`) |
+| `ocPrefix` | string | opencode's **own** id for this provider: the model prefix, and the key its credential store is keyed by — which is what `ownCredentials()` reads (pitfall: Zen is `opencode`, not `opencode-zen`) |
 | `mdKey` | string | key of this provider in the models.dev registry (effort levels) |
 | `pulse` | `{url, okStatus[]}` | health-pulse endpoint (watcher) |
 | `settings` | `SettingField[]` (optional) | operator-configurable fields on the plugin's card |
@@ -570,6 +649,24 @@ the strict prompt as well. opencode-zen declares `prompt` for exactly that
 reason: it is a proxy in front of many upstream models and documents nothing
 about `response_format`.
 
+**`native` means the schema travels natively — not that the model obeys it.**
+claude's `--json-schema` is implemented as a **forced tool call**, and a model
+may decline a tool. Measured: five runs of one adversarial prompt on `haiku` —
+four came back `stop_reason: tool_use` with a conforming `structured_output`,
+the fifth came back `stop_reason: end_turn`, with **no** `structured_output` at
+all and prose sitting in `result`. So `native` is the right declaration (the
+schema really does go over the wire, and the strict paragraph really is
+unnecessary), and "it enforces the schema" would be one word too strong.
+
+What makes the mode reliable is what stands behind it, and both halves are
+load-bearing: the claude adapter reads `structured_output` and, when it is
+absent, hands back `j.result` as the answer text instead of an empty one — so
+the declining run's prose reaches the layer above rather than vanishing — and
+`server/llm` then reads that text tolerantly (`json.mjs`) and, when it is really
+not JSON, reprompts **once** with the exact complaint. A `native` source
+therefore still goes through the tolerant reader and the validator like every
+other one; nothing in `server/llm` is skipped for it except the strict prompt.
+
 ### The `req` a `complete()` receives
 
 | Field | Meaning |
@@ -676,18 +773,30 @@ Versions probed: claude 2.1.251, opencode 1.18.25, hermes 0.20.5, cursor-agent
 | `llm.schema` | `'native'` | `'prompt'` | `'prompt'` | `'prompt'` |
 | answer read from | `structured_output`, else `result` | concatenated `text` parts of the NDJSON stream | raw stdout | `result` of the single envelope |
 | failure shows on | stdout envelope, `is_error: true` | stdout NDJSON `type:'error'` | stdout, plain text | **stderr** |
-| latency | 2.9 s lean | 4.5 s | 6.7 s | 6.2 s |
-| input floor | ~1.9 k lean / **55 k default** | **~30 k hard floor** | n/a | ~8.5 k |
+| latency | 2.5 s lean | 3.3 s | 2.8 s | 6.7 s |
+| input floor | **3 476 lean** / 55 k default | **31 027 hard floor** | n/a | ~14 k incl. cache reads |
+
+The two rows above are the last real-integration run's own measurements
+(`node test/echt.mjs`), one trivial question per CLI, and they are worth
+re-reading whenever a vendor ships: a first probe put claude's floor at ~1.9 k,
+opencode's at ~30 k and cursor's at ~8.5 k, and every one of those was low.
+cursor's number in particular is only honest when **cache reads are counted in**
+— they are input the account pays for, and leaving them out is what made it look
+half the size.
 
 `exit code ≠ 0` is the only universal failure signal. Three vendor-specific
 traps, all of which cost time:
 
 - **claude's `subtype` lies.** It still says `"success"` on a failed call.
   `is_error: true` is the field to read.
-- **claude's lean flag set is not optional.** The same question costs $0.112
-  with the default flags and $0.0026 with these — **42 times** as much — because
-  claude otherwise loads settings, MCP servers, slash commands and the whole
-  tool surface before it says a word. And the prompt goes on **stdin, never
+- **claude's lean flag set is not optional.** The default flags make claude load
+  settings, MCP servers, slash commands and the whole tool surface before it
+  says a word, and the operator pays for all of it as input on every single
+  call. How much dearer that is depends on the model, so do not carry one
+  headline number around: it is **several times**, and the last measurement is
+  **3.9× on haiku** ($0.0186 with the default flags against $0.0048 with these).
+  An earlier probe on a costlier model came out at 42×. The direction is the
+  fact; the factor is a reading. And the prompt goes on **stdin, never
   positionally**: `--tools ""` is variadic and would eat it.
   ```js
   ['-p','--output-format','json','--model',model,
@@ -698,15 +807,33 @@ traps, all of which cost time:
   ```
 - **opencode's stderr must be ignored.** It writes dozens of "unknown format
   uint64" lines on every single run; treating that as failure would mean the
-  source never works at all. Its ~30 k token input floor is why only free or
-  cheap models make sense there.
+  source never works at all. Its input floor of 31 027 tokens is why only free
+  or cheap models make sense there.
   ```js
   ['run','--pure','--format','json','-m',`${provider}/${model}`, prompt]
   ```
+- **opencode reports an unknown model as a server fault.** A model id it does
+  not know comes back as
+  `{"type":"error","name":"UnknownError","data":{"message":"Unexpected server
+  error"}}` — byte for byte what a genuine upstream outage produces. There is no
+  "no such model" anywhere in it, so a typo in a model id and a broken vendor
+  are indistinguishable from the outside; diagnosing that cost an hour. When
+  opencode answers `UnknownError`, **check the model id against
+  `opencode models --pure` before believing the outage.**
+- **OpenCode Zen's free models rotate through 429/500/503 constantly.** The
+  `*-free` ids are a shared pool, and a run of a handful of calls will meet all
+  three codes. Anything that depends on them must read a 5xx as **"try later"**,
+  never as a defect: an incident, a red test or an alert raised on the first one
+  is a false alarm about somebody else's queue. Pick a paid id for anything that
+  has to answer now.
 - **hermes's three muzzle flags are all load-bearing.** Without
   `--safe-mode --reasoning none -t ''` stdout came back as 4420 bytes of a boxed
   reasoning block, because hermes' own system prompt mandates tool use even for
-  arithmetic. The prompt goes on stdin via `--query-file -`.
+  arithmetic. The prompt goes on stdin via `--query-file -`. Its model ids are
+  `<cc-hub provider id>/<model>` — the hub's own provider id in front, not the
+  vendor's marketing name — which is why `hermes.llm.models()` builds the list
+  out of models.dev with `id` prefixed by the plugin's own provider ids (451
+  available at the last measurement).
   ```js
   ['chat','--query-file','-','-Q','--safe-mode','--reasoning','none','-t','',
    '-m',`${provider}/${model}`,'--run-budget','120']
@@ -840,7 +967,9 @@ credentials". `/settings/coding-agents` is a 303 redirect to it.
    "Not now" button, plus the "Scan again" line and when the last scan was.
 2. **Coding agents** — one card per registered harness plugin, configured or
    not, which is what subsumes the old "add a coding agent" list: enabled
-   switch, the allowed model providers as checkboxes (unchanged semantics),
+   switch, the allowed model providers as checkboxes — each carrying one
+   sentence saying **whose** key it is reached with, from `ownCredentials()`
+   where the plugin can be asked and from `keyFreeProviders` where it cannot —
    install state from `detectInstalled()` with the install hint when it is
    missing, the credentials block, the plugin's own `settings` fields, and for
    an external package its version and a "Remove".
@@ -912,6 +1041,10 @@ Three page-level rules worth knowing:
 8. Optional: `gate` if this coding agent runs on an account the hub can meter,
    and `llm` if its CLI can answer a one-shot question. For `llm`, read the
    three rules in `cli-llm.mjs` first and declare `overhead: true`.
+   `ownCredentials(ctx)` too — but **only if the CLI's credential store has been
+   measured**: it decides a sentence the Plugins page states as fact, and a
+   guess there is worse than leaving the capability out (see above). Declare
+   `keyFreeProviders` either way; that is what the launch path reads.
 9. Done: install detection, the discovery scan, the forms, the Plugins page, the
    detection patterns, the pulse and the budget-gate routing all follow the
    registry. Configure the new coding agent under Settings → Plugins.
@@ -927,8 +1060,13 @@ Three page-level rules worth knowing:
    the fallback, never as a bare `process.env` lookup: that is the whole reason
    the operator's own key and their own variable name work.
 3. Reference the id from the `providers` list of every harness plugin that can
-   use it (plus `keyFreeProviders` when no own key is needed), and register the
-   plugin in `server/providers/index.mjs`' registry for a built-in.
+   use it, and register the plugin in `server/providers/index.mjs`' registry for
+   a built-in. Add it to that harness's `keyFreeProviders` when the CLI reaches
+   it with no own key: that list is the launch path's answer and the Plugins
+   page's fallback, not a description of the operator's machine —
+   `ownCredentials()` is what asks the CLI itself. If the harness is opencode,
+   set `ocPrefix` as well; both the model ids and the credential probe map
+   through it.
 4. Document the credential environment variable in `env.example`.
 5. Add the plugin's i18n keys to all three `lang/*.json` catalogs.
 6. Optional: `balance()` — the usage panel then shows it without a line of UI

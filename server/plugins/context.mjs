@@ -9,6 +9,7 @@
 //
 //   json(url, headers, init)   fetch with a timeout; throws `HTTP <status>`
 //   registry()                 the cached models.dev snapshot
+//   provider(id)               another provider's descriptor, resolved at CALL time
 //   env                        process.env (legacy reads; prefer secret())
 //   secret(key = 'api_key')    the resolved credential — stored, named, declared
 //   setting(key, fallback)     this plugin's own setting value
@@ -26,7 +27,7 @@
 import { getSetting } from '../db.mjs'
 import { credentialValue } from './store.mjs'
 import { pluginFields, pluginSettingKey } from './settings.mjs'
-import { getPlugin } from './registry.mjs'
+import { getPlugin, getProvider } from './registry.mjs'
 
 /** Vendor calls made from a plugin: 8 seconds, exactly as before. */
 const TIMEOUT_MS = 8_000
@@ -118,6 +119,19 @@ export function pluginCtx(pluginId = null) {
   return {
     json: pluginJson,
     registry: modelRegistry,
+    // Another plugin's descriptor — the one thing a harness plugin genuinely
+    // needs from outside itself: opencode and hermes address a MODEL PROVIDER
+    // and have to know its opencode prefix, its models.dev key and the
+    // environment variables it declares.
+    //
+    // It has to be a function on the context rather than an import, and the
+    // reason is a real cycle: `providers/index.mjs` re-exports the registry,
+    // and the registry's module body builds `{claude, opencode, hermes, …}` out
+    // of the very plugin files that would be importing it. A static import
+    // there makes the plugin unimportable on its own — measured, `ReferenceError:
+    // Cannot access 'opencode' before initialization`. Resolving here happens at
+    // CALL time, which is after every module has finished evaluating.
+    provider: (id) => getProvider(id),
     env: process.env,
     secret: (key = 'api_key') => (id ? credentialValue(id, key) : null),
     setting: (key, fallback = null) => settingOf(id, key, fallback),
