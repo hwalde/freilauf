@@ -36,24 +36,38 @@ if [[ -z "$RUN_ID" ]]; then
     exit 3
 fi
 
-TEXT="" ; FILE_ARG="" ; ERR=""
+TEXT="" ; FILE_ARG="" ; ERR="" ; SESSION_ID=""
 # Claude calls the StopFailure hook without arguments and delivers the event as JSON
-# on stdin: { "error": "rate_limit", "last_assistant_message": "…" }.
-if [[ "$KIND" == "_api_error" ]]; then
-    if [[ -n "${1:-}" ]]; then
-        ERR="$1"; shift; TEXT="${*:-}"
+# on stdin: { "error": "rate_limit", "last_assistant_message": "…", "session_id": "…" }.
+# The other hook kinds (Stop, SessionEnd, Notification) get the same JSON shape.
+# session_id is forwarded so the hub can tell the run's OWN session from a claude
+# process the agent spawned (which inherits hooks and CC_RUN_ID but carries its own
+# session id) — its failures must not land on the run as incidents.
+if [[ "$KIND" == "_api_error" || "$KIND" == "_turn_end" || "$KIND" == "_exit" || "$KIND" == "_idle" ]]; then
+    HOOK_JSON=""
+    if [[ "$KIND" == "_api_error" ]]; then
+        if [[ -n "${1:-}" ]]; then
+            ERR="$1"; shift; TEXT="${*:-}"
+        elif [[ ! -t 0 ]]; then
+            HOOK_JSON="$(cat 2>/dev/null || true)"
+        else
+            ERR="unknown"
+        fi
     elif [[ ! -t 0 ]]; then
         HOOK_JSON="$(cat 2>/dev/null || true)"
+    fi
+    if [[ -n "$HOOK_JSON" ]]; then
         ERR="$(printf '%s' "$HOOK_JSON" | python3 -c 'import json,sys
 try: j=json.load(sys.stdin); print(j.get("error") or "unknown")
 except Exception: print("unknown")' 2>/dev/null || echo unknown)"
         TEXT="$(printf '%s' "$HOOK_JSON" | python3 -c 'import json,sys
 try: j=json.load(sys.stdin); print((j.get("last_assistant_message") or j.get("error_details") or "")[:300])
 except Exception: pass' 2>/dev/null || true)"
-    else
-        ERR="unknown"
+        SESSION_ID="$(printf '%s' "$HOOK_JSON" | python3 -c 'import json,sys
+try: j=json.load(sys.stdin); print(j.get("session_id") or "")
+except Exception: pass' 2>/dev/null || true)"
     fi
-    set --
+    if [[ "$KIND" == "_api_error" ]]; then set --; fi
 fi
 if [[ -n "${1:-}" ]]; then
     if [[ "$KIND" == "done" && "${1:-}" == "--file" ]]; then
@@ -65,9 +79,9 @@ if [[ -n "${1:-}" ]]; then
 fi
 
 # Build the payload as JSON with python3 (quoting-safe, no jq dependency).
-PAYLOAD="$(python3 - "$KIND" "$TEXT" "$FILE_ARG" "$ERR" <<'PY'
-import json, sys, os
-kind, text, file_arg, err = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+PAYLOAD="$(python3 - "$KIND" "$TEXT" "$FILE_ARG" "$ERR" "$SESSION_ID" <<'PY'
+import json, sys
+kind, text, file_arg, err, session_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 body = {"kind": kind}
 if kind == "_api_error":
     body["error"] = err or "unknown"
@@ -85,6 +99,8 @@ else:
             body["file"] = fh.read()
     elif text:
         body["text"] = text
+if session_id:
+    body["session_id"] = session_id
 print(json.dumps(body))
 PY
 )"

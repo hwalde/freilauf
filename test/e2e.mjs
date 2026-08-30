@@ -15,6 +15,7 @@
 //                               ~/.local/bin/cc-start (consumes quota!)
 //   node test/e2e.mjs --keep    keep the sandbox after the run (debugging)
 import { execFile } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, lstatSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -62,6 +63,11 @@ let watcherTick = null
 async function watcherVorbereiten() { watcherTick = await sk.watcherVorbereiten() }
 
 // ---------------------------------------------------------------- Database
+// The cc-report of THIS checkout — the one this suite is testing. The copy in
+// ~/.local/bin can lag behind (it is installed by the deploy), and the
+// session-id forwarding under test exists only in this file's version.
+const CC_REPORT_REPO = fileURLToPath(new URL('../bin/cc-report', import.meta.url))
+
 const lauf = (id) => db.prepare('SELECT * FROM runs WHERE id=?').get(id)
 const ereignisse = (id) => db.prepare('SELECT kind FROM events WHERE run_id=? ORDER BY id').all(id).map(e => e.kind)
 const agent = (name) => db.prepare('SELECT * FROM agents WHERE name=?').get(name)
@@ -1140,6 +1146,15 @@ try {
     enthaelt(zeile, `/api/incidents/${v[0].id}/resolve`, 'and the action to clear it sits in the same cell')
     enthaelt(zeile, 'Dismiss', 'named for the group it belongs to — noticed, not to-do')
   })
+  await pruefe('the sidebar\'s incident counts link into the overview filtered to incident runs', async () => {
+    const seite = await (await hol(`/?repo=${repoId}`)).text()
+    enthaelt(seite, 'incidents=1', 'the sidebar links the counts into the filtered overview')
+    const gefiltert = await (await hol(`/?repo=${repoId}&incidents=1`)).text()
+    wahr(gefiltert.split('<tr ').some(z => z.includes(RH)), 'the run with the incident is in the filtered list')
+    const fragment = await (await hol(`/api/fragments/runs-body?repo=${repoId}&incidents=1`)).text()
+    enthaelt(fragment, 'data-incidents="1"', 'the filter travels with the tbody, so live updates keep it')
+    enthaelt(fragment, RH, 'and the fragment shows the same selection the page did')
+  })
   await pruefe('the same match counts only once per pass (offset)', async () => {
     await watcherTick(); await watcherTick()
     gleich(vorfaelle(RH)[0].anzahl, 1, 'anzahl stays 1')
@@ -1230,6 +1245,37 @@ try {
     enthaelt(v.beleg, 'session limit', 'evidence from last_assistant_message')
     gleich(lauf(RC).rate_limit_hits, 1, 'rate_limit_hits')
   })
+  await pruefe('a hook report from a FOREIGN claude session (a process the agent spawned) is ignored', async () => {
+    // The false alarm of 2026-08-30: an agent testing a fake model id spawned its
+    // own claude; the child inherited the worktree's hooks AND CC_RUN_ID, and its
+    // StopFailure opened a red "Model unavailable" on the healthy parent run.
+    const hookJson = JSON.stringify({ hook_event_name: 'StopFailure', error: 'model_not_found',
+      session_id: '11111111-2222-4333-8444-555555555555',
+      last_assistant_message: 'Model not found: nosuch/model-xyz.' })
+    const r = await new Promise((resolve) => {
+      const p = execFile(CC_REPORT_REPO, ['_api_error'],
+        { env: { ...process.env, CC_RUN_ID: RC, CC_HUB_URL: BASIS } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
+      p.stdin.end(hookJson)
+    })
+    wahr(r.ok, `cc-report ok (${r.stderr})`)
+    falsch(vorfaelle(RC).some(v => v.typ === 'model_error'), 'no model_error incident on the run')
+    // The decision is traceable in the detector's protocol — it says WHY.
+    const proto = readFileSync(join(SB, 'runs', RC, 'detektor.jsonl'), 'utf8').split('\n').filter(Boolean)
+      .map(l => JSON.parse(l)).filter(e => e.art === 'verworfen')
+    wahr(proto.some(e => String(e.grund).includes('foreign claude session')), 'and the protocol says why')
+    // The run's OWN session (the hub started it with --session-id <run id>) still reports:
+    const eigen = JSON.stringify({ hook_event_name: 'StopFailure', error: 'model_not_found', session_id: RC,
+      last_assistant_message: 'Model not found: really/missing-model.' })
+    const r2 = await new Promise((resolve) => {
+      const p = execFile(CC_REPORT_REPO, ['_api_error'],
+        { env: { ...process.env, CC_RUN_ID: RC, CC_HUB_URL: BASIS } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
+      p.stdin.end(eigen)
+    })
+    wahr(r2.ok, `cc-report ok (${r2.stderr})`)
+    const v = vorfaelle(RC).find(x => x.typ === 'model_error')
+    wahr(!!v, 'the run\'s own session still opens the incident')
+    enthaelt(v.beleg, 'really/missing-model', 'with the evidence')
+  })
   await pruefe('hook and transcript see the same event → not counted twice', async () => {
     const r = lauf(RC)
     const dir = join(SB, 'claude-projects', r.workdir_effective.replaceAll('/', '-'))
@@ -1264,6 +1310,54 @@ try {
     const v = vorfaelle(j.runId)[0]
     wahr(!!v.geloest_am, 'closed')
     enthaelt(v.geloest_von, 'auto:', 'automatic')
+  })
+  await pruefe('a red incident that recovered on its own resolves itself — and un-rings on Telegram', async () => {
+    const j = await laufStarten({ repo_id: repoId, harness: 'claude', prompt: 'E2E-Vorfall-erholt', expected_minutes: '45' })
+    await sessionMerken(j.runId)
+    // Hand-crafted red incident, not yet announced, notification NOT yet due
+    // (the suite runs with delay 0 — the due point is set by hand here).
+    db.prepare(`INSERT INTO incidents(run_id, typ, quelle, schwere, erst_gesehen, zuletzt_gesehen, beleg, notify_at)
+                VALUES(?,?,?,?,datetime('now'),datetime('now'),'Everything is broken.', datetime('now','+10 minutes'))`)
+      .run(j.runId, 'provider_error', 'hook:claude', 'rot')
+    const { vorfaelleMeldenFaellig } = await import('../server/incidents.mjs')
+    await vorfaelleMeldenFaellig()
+    falsch(ereignisse(j.runId).some(k => k === 'telegram_sent'), 'not due yet: no Telegram')
+    // Due and still open → the alarm.
+    db.prepare(`UPDATE incidents SET notify_at=datetime('now','-1 second') WHERE run_id=?`).run(j.runId)
+    await vorfaelleMeldenFaellig()
+    const tg = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='telegram_sent' ORDER BY id DESC LIMIT 1`).get(j.runId)
+    wahr(!!tg && JSON.parse(tg.payload).type === 'incident:provider_error', 'due: Telegram fires')
+    wahr(!!vorfaelle(j.runId)[0].gemeldet_am, 'recorded as announced')
+    // The agent demonstrably works again (activity AFTER the occurrence, no
+    // recurrence) → resolves itself, and the announced alarm is un-rung.
+    db.prepare(`UPDATE incidents SET zuletzt_gesehen=datetime('now','-11 minutes'), erst_gesehen=datetime('now','-11 minutes') WHERE run_id=?`).run(j.runId)
+    db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(j.runId)
+    await watcherTick()
+    const v = vorfaelle(j.runId)[0]
+    enthaelt(v.geloest_von, 'auto:', 'resolved by itself')
+    const tg2 = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='telegram_sent' ORDER BY id DESC LIMIT 1`).get(j.runId)
+    wahr(!!tg2 && JSON.parse(tg2.payload).type === 'incident_resolved:provider_error', 'and the recovery is announced')
+  })
+  await pruefe('raising the expected duration retracts the overrun statement', async () => {
+    const j = await laufStarten({ repo_id: repoId, harness: 'hermes', prompt: 'E2E-Dauer-Edit', expected_minutes: '90' })
+    await sessionMerken(j.runId)
+    await watcherTick()
+    // The run "is" far over its expected duration and never reported progress:
+    db.prepare(`UPDATE runs SET started_at=datetime('now','-120 minutes') WHERE id=?`).run(j.runId)
+    await watcherTick()
+    wahr(ereignisse(j.runId).includes('anomaly:overrun'), 'overrun anomaly')
+    wahr(ereignisse(j.runId).includes('telegram_sent:overrun'), 'and Telegram heard about it')
+    // The operator raises the duration — the statement the old value produced is withdrawn:
+    const r = await formular(`/api/runs/${j.runId}/edit`, { expected_minutes: '240' })
+    gleich(r.status, 200, `edit ok (${JSON.stringify(await r.json().catch(() => r.text()))})`)
+    gleich(lauf(j.runId).expected_minutes, 240, 'new duration stored')
+    wahr(ereignisse(j.runId).includes('cleared:anomaly:overrun'), 'the anomaly event is history, renamed')
+    falsch(ereignisse(j.runId).includes('telegram_sent:overrun'), 'the Telegram flag with it')
+    // A genuine overrun of the NEW duration can page once again:
+    db.prepare(`UPDATE runs SET started_at=datetime('now','-300 minutes') WHERE id=?`).run(j.runId)
+    await watcherTick()
+    gleich(ereignisse(j.runId).filter(k => k === 'anomaly:overrun').length, 1, 'the anomaly fires anew against the new value')
+    wahr(ereignisse(j.runId).includes('telegram_sent:overrun'), 'and Telegram hears about the new overrun')
   })
   await pruefe('provider pulse: two failures → global incident with banner, recovery closes it', async () => {
     let antwort = 500

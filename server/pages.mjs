@@ -409,9 +409,13 @@ function openIncidents(repoId) {
 function incidentBlock(repoId) {
   const { offen, handeln, noticed } = openIncidents(repoId)
   if (!offen) return ''
-  return `<div class="side-block"><span class="side-label">${e(t('incidents.title'))}</span>
-    ${handeln ? `<div><b class="err">${handeln}</b> ${e(t('incidents.needs_you_short'))}</div>` : ''}
-    ${noticed ? `<div><b class="warn">${noticed}</b> ${e(t('incidents.noticed_short'))}</div>` : ''}</div>`
+  // The counts link into the overview filtered to the runs that carry an open
+  // incident — the same gesture as the work-in-flight block above: a click on
+  // a number shows the rows behind it, not a hunt through every run.
+  const ziel = `/?repo=${repoId}&amp;incidents=1`
+  return `<div class="side-block side-incidents"><span class="side-label">${e(t('incidents.title'))}</span>
+    ${handeln ? `<div><a href="${ziel}"><b class="err">${handeln}</b> ${e(t('incidents.needs_you_short'))}</a></div>` : ''}
+    ${noticed ? `<div><a href="${ziel}"><b class="warn">${noticed}</b> ${e(t('incidents.noticed_short'))}</a></div>` : ''}</div>`
 }
 
 /**
@@ -731,18 +735,24 @@ export async function pageOverview(req, res, url) {
   // 'scheduled' sits with 'deferred': both are runs that exist and are WAITING —
   // that is exactly what one wants to see at a glance, not somewhere below the
   // finished ones. Archived runs have left the overview entirely (Archive page).
-  // The status filter the sidebar's "work in flight" counts link to. Anything
-  // else in the parameter is simply no filter — a URL must not be able to
-  // invent a status the CHECK constraint does not know.
+  // The status filter the sidebar's "work in flight" counts link to, and the
+  // incidents filter the sidebar's incident counts link to. Anything else in
+  // the parameter is simply no filter — a URL must not be able to invent a
+  // status the CHECK constraint does not know.
   const wanted = url.searchParams.get('status')
   const filter = WORK_STATUSES.includes(wanted) ? wanted : null
-  const runs = overviewRuns(sel.id, filter)
+  const nurVorfaelle = url.searchParams.get('incidents') === '1'
+  const runs = overviewRuns(sel.id, filter, nurVorfaelle)
+  const filterHinweis = [
+    filter ? e(t('overview.filtered', { status: statusText(filter) })) : null,
+    nurVorfaelle ? e(t('overview.filtered_incidents')) : null,
+  ].filter(Boolean).join(' · ')
   const body = `
   <div class="btn-row"><a class="btn" href="/runs/new?repo=${sel.id}">${e(t('overview.start_single'))}</a>
      <a class="btn ghost" href="/archive?repo=${sel.id}">${e(t('nav.archive'))}</a>
-     ${filter ? `<span class="dim">${e(t('overview.filtered', { status: statusText(filter) }))}</span>
+     ${filterHinweis ? `<span class="dim">${filterHinweis}</span>
        <a class="btn" href="/?repo=${sel.id}">${e(t('overview.filter_clear'))}</a>` : ''}</div>
-  ${overviewTable(runs, { repoId: sel.id, status: filter })}`
+  ${overviewTable(runs, { repoId: sel.id, status: filter, incidents: nurVorfaelle })}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.overview'), '/', body, sel.id))
 }
 
@@ -853,10 +863,12 @@ export function runRows(runs, ctx) {
  * to see at a glance rather than below the finished ones. Archived runs have
  * left the overview entirely (Archive page).
  */
-export function overviewRuns(repoId, status = null) {
+export function overviewRuns(repoId, status = null, incidentsOnly = false) {
   const s = WORK_STATUSES.includes(status) ? status : null
   return db.prepare(`SELECT * FROM runs WHERE repo_id=? AND archived_at IS NULL
-    AND (? IS NULL OR status = ?) ORDER BY
+    AND (? IS NULL OR status = ?)
+    ${incidentsOnly ? `AND id IN (SELECT run_id FROM incidents WHERE geloest_am IS NULL AND run_id IS NOT NULL)` : ''}
+    ORDER BY
     CASE status WHEN 'waiting_help' THEN 0 WHEN 'failed' THEN 1 WHEN 'running' THEN 2
                 WHEN 'deferred' THEN 3 WHEN 'scheduled' THEN 4 ELSE 5 END,
     started_at DESC LIMIT 200`).all(repoId, s, s)
@@ -865,12 +877,12 @@ export function overviewRuns(repoId, status = null) {
 /**
  * The tbody on its own — the swap target when a row has to appear or vanish.
  *
- * It carries the active status filter as a data attribute so the live channel
- * can ask for the SAME selection again. Without it the first update would
- * quietly replace a filtered list with the unfiltered one.
+ * It carries the active filters as data attributes so the live channel can ask
+ * for the SAME selection again. Without it the first update would quietly
+ * replace a filtered list with the unfiltered one.
  */
 export function runsBody(runs, ctx) {
-  return `<tbody id="runs-body"${ctx.status ? ` data-status="${e(ctx.status)}"` : ''}>${runRows(runs, ctx)}</tbody>`
+  return `<tbody id="runs-body"${ctx.status ? ` data-status="${e(ctx.status)}"` : ''}${ctx.incidents ? ' data-incidents="1"' : ''}>${runRows(runs, ctx)}</tbody>`
 }
 
 /** The overview table around the rows; the tbody is the anchor for new rows. */

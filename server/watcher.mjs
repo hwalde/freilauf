@@ -11,8 +11,8 @@ import { transcriptState as cursorTranscriptState } from './cursor-transcript.mj
 import { deliverPendingGoals } from './goal.mjs'
 import { claudeQuota, sevenForRun, quotaFullWindow } from './quota.mjs'
 import { refreshClaudeLimits } from './claude-usage.mjs'
-import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText } from './detect.mjs'
-import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, offeneVorfaelle, detektorLog, msVon, brauchtMensch } from './incidents.mjs'
+import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText, vorfallWeggrund } from './detect.mjs'
+import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, vorfaelleMeldenFaellig, offeneVorfaelle, detektorLog, msVon } from './incidents.mjs'
 import { pruefeTreffer, pruefLlmAktiv } from './pruefer.mjs'
 import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
@@ -73,6 +73,7 @@ export async function tick() {
   // this is what keeps its live half from going stale under them. Never throws.
   await refreshClaudeLimits()
   await vorfaelleBewerten()
+  await vorfaelleMeldenFaellig()
   await providerPuls()
   await finishCostsPass()
   await checkFinishedBranches()
@@ -328,52 +329,49 @@ async function cursorTurnEndDetected(run) {
 }
 
 /**
- * Assess yellow log incidents by time and count: retry loop or silence after the
- * hit → red (+ Telegram). If, on the other hand, the agent keeps working for half
- * an hour without it recurring, it was nothing → closed automatically.
+ * Assess open incidents by time and state, in two directions:
+ *
+ *   UP   yellow log incidents escalate (retry loop or silence after the hit) →
+ *        red + Telegram — bewerteLogTreffer's judgment, unchanged.
+ *   DOWN everything that demonstrably went away resolves ITSELF
+ *        (vorfallWeggrund in detect.mjs): the run came through, the agent kept
+ *        working after the occurrence, or a yellow hit was never repeated. The
+ *        operator then has one thing fewer to click away — and an incident that
+ *        was announced on Telegram also announces its recovery
+ *        (vorfallVerwerfen), so an alarm that rang is un-rung.
+ *
+ * What deliberately stays open: a red incident on a failed/aborted run (the
+ * reason it did not come through — the operator decides), and merge_blocked
+ * (the integrator's ladder, not time's).
  */
 async function vorfaelleBewerten() {
-  const rows = db.prepare(`SELECT i.*, r.last_activity_at, r.status FROM incidents i
-    JOIN runs r ON r.id = i.run_id
-    WHERE i.geloest_am IS NULL AND i.schwere = 'gelb' AND i.quelle LIKE 'log%'`).all()
+  const rows = db.prepare(`SELECT i.*, r.last_activity_at, r.status AS run_status FROM incidents i
+    LEFT JOIN runs r ON r.id = i.run_id
+    WHERE i.geloest_am IS NULL`).all()
   const jetzt = Date.now()
+
+  // UP: the yellow log incidents, by count and silence — as always.
   for (const v of rows) {
-    const letzteAkt = v.last_activity_at ? msVon(v.last_activity_at) : null
-    const zuletzt = msVon(v.zuletzt_gesehen)
+    if (!(v.schwere === 'gelb' && v.quelle?.startsWith('log'))) continue
+    if (!['running', 'waiting_help'].includes(v.run_status ?? '')) continue
     const stufe = bewerteLogTreffer({ anzahl: v.anzahl, erstGesehenMs: msVon(v.erst_gesehen),
-      zuletztGesehenMs: zuletzt, letzteAktivitaetMs: letzteAkt, jetztMs: jetzt })
+      zuletztGesehenMs: msVon(v.zuletzt_gesehen), letzteAktivitaetMs: v.last_activity_at ? msVon(v.last_activity_at) : null,
+      jetztMs: jetzt })
     if (stufe === 'rot') {
       const grund = v.anzahl >= 2 ? `${v.anzahl}× within a short time` : 'no activity since the hit'
       await vorfallEskalieren(v.id, grund)
-    } else if (letzteAkt != null && letzteAkt > zuletzt && jetzt - zuletzt > 30 * 60_000) {
-      vorfallVerwerfen(v.id, 'expired: agent kept working')
-    } else if (!['running', 'waiting_help'].includes(v.status) && jetzt - zuletzt > 30 * 60_000) {
-      vorfallVerwerfen(v.id, 'expired: run ended')
-    } else if (letzteAkt == null && jetzt - zuletzt > 30 * 60_000) {
-      // cursor/hermes: no activity source, so neither "kept working" nor
-      // "silent" can be proven. What did not recur within half an hour was
-      // noise — that is the only statement available here, and it is enough.
-      vorfallVerwerfen(v.id, 'expired: no recurrence')
     }
   }
-  vorfaelleNachErfolgSchliessen()
-}
 
-/**
- * A run that came through ('done') has already answered what a rate limit or a
- * provider hiccup during it meant: nothing. Those incidents close with the run.
- * Asking a human to click away a question that answered itself is what made
- * "resolve" feel like busywork.
- *
- * What needs a human stays open (brauchtMensch): a login, a credit balance or a
- * wrong model ID does not get better on its own — the next run walks into it
- * again.
- */
-function vorfaelleNachErfolgSchliessen() {
-  const rows = db.prepare(`SELECT i.*, r.status FROM incidents i JOIN runs r ON r.id = i.run_id
-    WHERE i.geloest_am IS NULL AND r.status = 'done'`).all()
+  // DOWN: the condition is gone — resolve without asking.
   for (const v of rows) {
-    if (!brauchtMensch(v, v.status)) vorfallVerwerfen(v.id, 'run finished successfully')
+    if (v.geloest_am !== null) continue   // just escalated above stays red, just resolved stays resolved
+    const grund = vorfallWeggrund({
+      typ: v.typ, schwere: v.schwere, runStatus: v.run_status ?? null,
+      letzteAktivitaetMs: v.last_activity_at ? msVon(v.last_activity_at) : null,
+      zuletztGesehenMs: msVon(v.zuletzt_gesehen), jetztMs: jetzt,
+    })
+    if (grund) await vorfallVerwerfen(v.id, grund)
   }
 }
 
@@ -413,7 +411,7 @@ async function providerPuls(jetzt = Date.now()) {
     if (!ok && f[name] >= 2) {
       await vorfallMelden(null, { typ, quelle: 'puls', schwere: 'rot', beleg: `${name}: ${f[name]} consecutive checks without a response` })
     } else if (ok) {
-      for (const v of offeneVorfaelle(null)) if (v.typ === typ) vorfallVerwerfen(v.id, 'erholt')
+      for (const v of offeneVorfaelle(null)) if (v.typ === typ) await vorfallVerwerfen(v.id, 'erholt')
     }
   }
 }

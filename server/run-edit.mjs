@@ -38,6 +38,7 @@ import db, { getRepo, getRun, addEvent } from './db.mjs'
 import { fallbackTitle, applyGeneratedTitle } from './title.mjs'
 import { runStartFromForm, BRANCH_MODES } from './run-def.mjs'
 import { branchWorktree } from './runner.mjs'
+import { clearAnomalies } from './reports.mjs'
 import { t } from './i18n.mjs'
 
 /**
@@ -219,6 +220,16 @@ export async function editRun(runId, {
       // as at the original start.
       applyGeneratedTitle(runId, String(prompt)).catch(() => {})
     }
+  }
+
+  if (geaendert.includes('duration')) {
+    // A raised expected duration RETRACTS the "runs longer than expected"
+    // statement the old value produced: the anomaly events go the same way they
+    // go on a progress report (renamed to 'cleared:*', so the traffic light
+    // falls back and the watcher can fire them anew against the NEW value),
+    // and the overrun Telegram flag with them — a genuine overrun of the new
+    // duration pages once again instead of staying silent behind the old flag.
+    clearAnomalies(runId, ['anomaly:soft_overrun', 'anomaly:overrun', 'telegram_sent:overrun'])
   }
 
   addEvent(runId, 'edited', { fields: geaendert, ...(geaendert.includes('repo') ? { repo_id: Number(repoId) } : {}) })
