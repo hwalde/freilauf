@@ -3804,7 +3804,10 @@ try {
       gleich(db.prepare(`SELECT enabled FROM plugin_config WHERE plugin_id='hermes'`).get().enabled, 0, 'switched off')
 
       // 3. a stored credential VALUE
-      const geheim = 'sk-e2e-do-not-render-me'
+      // Deliberately NOT in a real key's shape ("sk-…"): pruefe-vor-push.sh greps the
+      // committed state for exactly that, and a canary that trips the secret scanner
+      // would block every push over a string invented to be harmless.
+      const geheim = 'e2e-canary-do-not-render-me'
       gleich((await formular('/settings/plugins/save', {
         id: 'deepseek', enabled: '1', cred_api_key_mode: 'value', cred_api_key_value: geheim,
       }, { alsBrowser: true })).status, 303, 'credential saved')
