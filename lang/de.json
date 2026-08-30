@@ -1119,5 +1119,11 @@
   "run.pinned_unresolved": "kein passender Anbieter gefunden — unangepinnt gestartet",
   "js.or_auto_ok": "auto → {best} ({quant}){cache}",
   "js.or_auto_fail": "auto: kein passender Anbieter ({err})",
-  "js.or_cached": "zwischengespeichert"
+  "js.or_cached": "zwischengespeichert",
+  "flows.field.orMode": "Serving-Provider (OpenRouter)",
+  "flows.field.orProvider": "Anbieter-Tag (Pin)",
+  "flows.field.orQuant": "Mindest-Quantisierung",
+  "flows.field.orRegion": "Anbieter-Region",
+  "flows.field.orMaxIn": "Max. Eingabepreis (USD/Mio)",
+  "flows.field.orMaxOut": "Max. Ausgabepreis (USD/Mio)"
 }

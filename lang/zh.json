@@ -1119,5 +1119,11 @@
   "run.pinned_unresolved": "未找到满足条件的服务商 — 未固定启动",
   "js.or_auto_ok": "自动 → {best}（{quant}）{cache}",
   "js.or_auto_fail": "自动：没有满足条件的服务商（{err}）",
-  "js.or_cached": "已缓存"
+  "js.or_cached": "已缓存",
+  "flows.field.orMode": "服务节点（OpenRouter）",
+  "flows.field.orProvider": "服务商标签（固定）",
+  "flows.field.orQuant": "最低量化精度",
+  "flows.field.orRegion": "服务商地区",
+  "flows.field.orMaxIn": "输入价格上限（USD/百万）",
+  "flows.field.orMaxOut": "输出价格上限（USD/百万）"
 }

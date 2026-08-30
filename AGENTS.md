@@ -1038,10 +1038,20 @@ best-provider routing"). What the rest of the hub has to know:
   scheduler.mjs resolves auto to a concrete order BEFORE `createRun()` and
   freezes it into the run's definition copy; every failure launches unpinned
   and logs — a start never fails on its own convenience feature.
-- The hub's own LLM jobs (`llm_*_or_provider`) accept `auto` as the value, and
-  `complete()` resolves it with the same cache. `GET /api/or-routing` is the
-  preview endpoint the form's auto hint asks — same cache, so the preview
-  cannot promise what the start would not deliver.
+- **Every OpenRouter call site of the hub carries the same three modes now.**
+  The settings page's own LLM jobs (title, check, extras) render the SAME
+  open/auto/pin widget with the folded requirements, stored as
+  `llm_<purpose>_or_routing` (JSON) next to the historic `llm_<purpose>_or_provider`
+  tag; `settingsSave()` derives the two stored values from the mode, and only
+  where the body actually carried the block (fragment saves of unrelated
+  sections must not reset a configured routing). The consumers pass it as
+  `orRouting` to `llmJson()` → `complete()`. The flow designer's
+  "start single run" step carries the same choice as flat fields
+  (`orMode`/`orProvider`/`orQuant`/`orRegion`/`orMaxIn`/`orMaxOut`),
+  validated by `defFromFlowProps()` the same way the form validates it; the
+  "start agent" step inherits the agent's stored definition and needs nothing.
+  `GET /api/or-routing` is the preview endpoint the form's auto hint asks —
+  same cache, so the preview cannot promise what the start would not deliver.
 
 ## The live channel: a run announces itself
 

@@ -21,6 +21,22 @@ import { llmJson } from './llm/index.mjs'
 import { getSource, defaultSource, missingCredential } from './llm/sources.mjs'
 
 /**
+ * The stored auto-routing config of one of the hub's own LLM jobs — the same
+ * requirements widget the run forms carry, saved on the settings page. Tolerant
+ * of nulls and junk: no config, a broken blob — all mean "no auto routing",
+ * the plain serving-provider setting then decides alone.
+ */
+function orRoutingAusSetting(key) {
+  const v = getSetting(key)
+  if (!v) return null
+  try {
+    const cfg = JSON.parse(v)
+    return cfg?.mode === 'auto' ? cfg : null
+  } catch { return null }
+}
+
+
+/**
  * The default: DeepSeek V4 Flash at OpenRouter, ~$0.05/$0.10 per million tokens
  * (a title costs roughly a hundredth of a cent), supports structured outputs
  * and needs no reasoning for this. Freely changeable in the settings — the
@@ -139,6 +155,7 @@ export async function generateTitle(prompt, { timeoutMs = 30_000 } = {}) {
     schemaName: SCHEMA_NAME,
     purpose: 'title',
     servingProvider: (getSetting('llm_title_or_provider') ?? '').trim() || null,
+    orRouting: orRoutingAusSetting('llm_title_or_routing'),
     maxTokens: 200,
     temperature: 0,
     timeoutMs,

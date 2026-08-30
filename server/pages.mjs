@@ -4,6 +4,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRepo, getRun } from './db.mjs'
+import { KNOWN_QUANTIZATIONS, REGIONS, parseRoutingConfig } from './providers/openrouter-routing.mjs'
 import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime, fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent, tzAbbrev, uiTimezone, setTimezone, TIMEZONE_OPTIONS, hubVersion } from './util.mjs'
 import { cookieRepo, requestRepo } from './web-helpers.mjs'
 import { providerBalances } from './balances.mjs'
@@ -1721,14 +1722,19 @@ function sourceOptionText(src) {
 }
 
 /**
- * The source picker of one of the hub's own LLM jobs, plus the two things that
+ * The source picker of one of the hub's own LLM jobs, plus the things that
  * hang on the chosen source: the overhead warning (a coding agent starts a
- * whole session for one question) and the OpenRouter serving-provider pin,
- * which means nothing anywhere else.
+ * whole session for one question) and the OpenRouter serving-provider routing —
+ * the SAME three modes and requirements the run forms carry (open / auto /
+ * pin, with quantization, region and price caps folded away behind
+ * <details>), stored under `llm_<purpose>_or_routing` and resolved through the
+ * same plugin capability and cache. A provider choice that means something
+ * only on OpenRouter means nothing anywhere else.
  *
- * The pin is hidden AND disabled when it does not apply. A hidden field that
- * still submits is a trap this project has been bitten by before — and here it
- * would send an OpenRouter endpoint tag along with a DeepSeek answer.
+ * The whole routing block is hidden AND disabled when it does not apply. A
+ * hidden field that still submits is a trap this project has been bitten by
+ * before — and here it would send an OpenRouter endpoint tag along with a
+ * DeepSeek answer.
  */
 function llmSourceFields(prefix, s, sources) {
   const key = `${prefix}_source`
@@ -1743,13 +1749,46 @@ function llmSourceFields(prefix, s, sources) {
        data-overhead="${src.overhead ? '1' : '0'}">${e(sourceOptionText(src))}</option>`).join('')
   const overhead = !!chosen?.overhead
   const pin = current === DEFAULT_SOURCE
+  let cfg = {}
+  try { cfg = JSON.parse(s[`${prefix}_or_routing`] ?? '') ?? {} } catch { /* old rows and nulls */ }
+  const tag = s[`${prefix}_or_provider`] ?? ''
+  const mode = cfg?.mode === 'auto' ? 'auto' : tag ? 'pin' : 'offen'
   return `<label>${e(t('settings.llm_source'))}
       <select name="${e(key)}" data-llm-source data-llm-prefix="${e(prefix)}">${stale}${options}</select>
       <span class="dim">${e(t('settings.llm_source_explain'))}</span></label>
     <p class="warn" data-llm-overhead ${overhead ? '' : 'hidden'}>${e(t('settings.llm_source_overhead'))}</p>
-    <label data-llm-pin ${pin ? '' : 'hidden'}>${e(t('settings.llm_or_provider'))}
-      <input name="${e(prefix)}_or_provider" value="${e(s[`${prefix}_or_provider`] ?? '')}"
-        placeholder="${e(t('settings.llm_or_ph'))}" ${pin ? '' : 'disabled'}></label>`
+    <fieldset class="schedule" data-llm-pin ${pin ? '' : 'hidden'}>
+      <div class="btn-row" role="radiogroup" aria-label="${e(t('or.legend'))}">
+        <label class="chk"><input type="radio" name="${e(prefix)}_or_mode" value="offen" ${mode === 'offen' ? 'checked' : ''}> ${e(t('or.mode_offen'))}</label>
+        <label class="chk"><input type="radio" name="${e(prefix)}_or_mode" value="auto" ${mode === 'auto' ? 'checked' : ''}> ${e(t('or.mode_auto'))}</label>
+        <label class="chk"><input type="radio" name="${e(prefix)}_or_mode" value="pin" ${mode === 'pin' ? 'checked' : ''}> ${e(t('or.mode_pin'))}</label>
+      </div>
+      <label data-or-pin-field ${mode === 'pin' ? '' : 'hidden'}>${e(t('settings.llm_or_provider'))}
+        <input name="${e(prefix)}_or_provider" value="${e(tag)}"
+          placeholder="${e(t('settings.llm_or_ph'))}"></label>
+      <details data-or-auto-details ${mode === 'auto' ? 'open' : ''} hidden>
+        <summary>${e(t('or.auto_details'))}</summary>
+        <label>${e(t('or.quant'))}
+          <select name="${e(prefix)}_or_quant">
+            <option value="">${e(t('or.quant_auto'))}</option>
+            ${KNOWN_QUANTIZATIONS.map(q => `<option value="${q}" ${cfg.quant_min === q ? 'selected' : ''}>${q}</option>`).join('')}
+          </select>
+          <span class="dim">${e(t('or.quant_hint'))}</span>
+        </label>
+        <label>${e(t('or.region'))}
+          <select name="${e(prefix)}_or_region">
+            ${REGIONS.map(r => `<option value="${r}" ${(cfg.location ?? 'all') === r ? 'selected' : ''}>${e(t('or.region_' + r))}</option>`).join('')}
+          </select>
+        </label>
+        <label>${e(t('or.max_in'))}
+          <input type="number" step="0.01" min="0" name="${e(prefix)}_or_max_in" value="${e(cfg.max_in ?? '')}">
+          <span class="dim">${e(t('or.max_hint'))}</span>
+        </label>
+        <label>${e(t('or.max_out'))}
+          <input type="number" step="0.01" min="0" name="${e(prefix)}_or_max_out" value="${e(cfg.max_out ?? '')}">
+        </label>
+      </details>
+    </fieldset>`
 }
 
 export async function pageSettings(req, res, url) {
@@ -2642,6 +2681,33 @@ export async function settingsSave(req, res, url, formBody) {
   // companion field carrying the 0.
   for (const k of settingsKeys()) {
     if (Object.hasOwn(b, k)) setSetting(k, b[k] ?? '')
+  }
+  // The LLM jobs' serving-provider routing is THREE form fields (mode + the
+  // pin tag + the auto requirements) but TWO stored values — the same
+  // derivation the run form does in providerFromForm(). Only where the body
+  // actually carried the routing block: the settings page saves a fragment at
+  // a time, and a save of an unrelated section must not reset a configured
+  // routing (the same rule the loop above follows).
+  for (const p of ['title', 'check', 'extras']) {
+    if (!Object.hasOwn(b, `${p}_or_mode`)) continue
+    const mode = b[`${p}_or_mode`]
+    if (mode === 'pin') {
+      setSetting(`llm_${p}_or_provider`, String(b[`${p}_or_provider`] ?? '').trim())
+      setSetting(`llm_${p}_or_routing`, '')
+    } else if (mode === 'auto') {
+      const cfg = parseRoutingConfig({
+        quant_min: b[`${p}_or_quant`] ?? '', location: b[`${p}_or_region`] ?? 'all',
+        max_in: b[`${p}_or_max_in`] ?? '', max_out: b[`${p}_or_max_out`] ?? '',
+      })
+      setSetting(`llm_${p}_or_provider`, '')
+      // A broken requirement stores NOTHING rather than a half config — the
+      // caller then keeps the open routing instead of a config that cannot
+      // resolve; the widget re-opens with the old values for correcting.
+      setSetting(`llm_${p}_or_routing`, cfg?.error ? '' : JSON.stringify(cfg))
+    } else {
+      setSetting(`llm_${p}_or_provider`, '')
+      setSetting(`llm_${p}_or_routing`, '')
+    }
   }
   // The language takes effect immediately — the redirect below already renders in it.
   if (Object.hasOwn(b, 'ui_language')) setLanguage(b.ui_language ?? 'en')

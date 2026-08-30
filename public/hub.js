@@ -271,6 +271,23 @@
     llmLoadModels(sel)
   })
 
+  // ---- the LLM jobs' serving-provider routing: mode decides the fields ----
+  // Same three modes as the run forms (open / auto / pin); the settings page
+  // renders one block per LLM job, so this is DELEGATED and namespaced by the
+  // field names rather than by ids.
+  document.addEventListener('change', function (ev) {
+    const box = ev.target && ev.target.closest && ev.target.closest('[data-llm-pin]')
+    if (!box || ev.target.name?.indexOf('_or_mode') < 0) return
+    const mode = (box.querySelector('input[name$=_or_mode]:checked') || {}).value || 'offen'
+    const pinField = box.querySelector('[data-or-pin-field]')
+    const autoDetails = box.querySelector('[data-or-auto-details]')
+    if (pinField) pinField.hidden = mode !== 'pin'
+    if (autoDetails) {
+      autoDetails.hidden = mode !== 'auto'
+      autoDetails.open = mode === 'auto'
+    }
+  })
+
   // ---- a credential: show only the field the chosen mode needs ----
   //
   // "Where the key comes from" is a dropdown with two answers, and the block

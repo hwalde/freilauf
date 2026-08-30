@@ -154,7 +154,18 @@ const plugin = {
           json_schema: { name: req.schemaName || 'answer', strict: true, schema: req.schema },
         }
       }
-      if (req.servingProvider && req.servingProvider !== 'auto') {
+      // Three shapes reach this one point — the settings pages, the run starts
+      // and the flows all resolve through the SAME capability and cache:
+      //   orRouting        the requirements config (mode 'auto'), resolved
+      //                    per model with the stored quant/region/price caps
+      //   servingProvider 'auto' — the default requirements, per model
+      //   servingProvider a tag — the old single-provider pin
+      if (req.orRouting?.mode === 'auto') {
+        try {
+          const r = await plugin.routing.resolveForRun(ctx, req.model, req.orRouting)
+          if (r.ok) body.provider = { order: r.order, allow_fallbacks: false }
+        } catch { /* free routing is the old behaviour and stays reachable */ }
+      } else if (req.servingProvider && req.servingProvider !== 'auto') {
         body.provider = { order: [req.servingProvider], allow_fallbacks: false }
       } else if (req.servingProvider === 'auto') {
         // "auto" = the hub's best-provider selection for THIS model, with the
