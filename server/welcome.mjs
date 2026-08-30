@@ -57,6 +57,8 @@ export const LLM_SOURCE_KEYS = ['llm_title_source', 'llm_check_source', 'llm_ext
 const STEPS = 5
 const HOME = '/'
 const SETUP_DOC = 'https://github.com/hwalde/freilauf/blob/main/SETUP_WITH_AGENT.md'
+/** The README's FAQ — "can I use my subscription", "what about security", and the rest. */
+const README_FAQ = 'https://github.com/hwalde/freilauf#faq'
 
 /** A `<p class="dim">` explanation — the shape the Plugins page uses (PLAN §2). */
 const explain = (key) => `<p class="dim">${e(t(key))}</p>`
@@ -149,9 +151,16 @@ function setupDocCard() {
 // ---------------------------------------------------------------------------
 
 function step1() {
+  // The first screen is the pitch, not the manual: the tagline, the "imagine"
+  // paragraph, and the one paragraph that explains the name — a freewheel is a
+  // ratchet, free and only ever forward. The manual is what the next steps are.
   return `<div class="card">
       <h3>${e(t('welcome.s1_title'))}</h3>
       <p>${e(t('welcome.s1_body'))}</p>
+    </div>
+    <div class="card">
+      <h3>${e(t('welcome.s1_why_title'))}</h3>
+      <p>${e(t('welcome.s1_why_body'))}</p>
     </div>
     ${setupDocCard()}
     <form method="post" action="/welcome/hello" class="form-grid">
@@ -426,6 +435,7 @@ function step5() {
         <a class="btn ghost" href="/settings/notifications">${e(t('welcome.s5_notify'))}</a>
       </div>
       <p class="dim">${e(t('notify.optional'))}</p>
+      <p class="dim">${e(t('welcome.s5_faq_hint'))} <a href="${e(README_FAQ)}" target="_blank" rel="noreferrer noopener">README → FAQ</a></p>
     </div>
     ${setupDocCard()}
     <form method="post" action="/welcome/done" class="form-grid">
