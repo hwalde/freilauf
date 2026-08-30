@@ -1016,7 +1016,7 @@ best-provider routing"). What the rest of the hub has to know:
   max input/output price (USD per Mio). Providers without a quantization
   statement are always out — `null` is "no statement", never "unquantized".
 - **The rank, not an enumeration, is the guarantee** (learned from the
-  internal-project project): a `quantizations` enumeration ages upward — the
+  measured source algorithm): a `quantizations` enumeration ages upward — the
   day an endpoint reports fp16, an enumeration would lock out MORE precision
   than asked for. The rank stands in `openrouter-routing.mjs` alone and is
   never copied into a request; `quantizationsFrom(min)` derives the API

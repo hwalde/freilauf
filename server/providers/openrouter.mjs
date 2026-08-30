@@ -24,7 +24,7 @@ const apiKey = (ctx) => ctx?.secret?.('api_key') || ctx?.env?.OPENROUTER_API_KEY
 // The selection is CACHED PER MODEL AND CONFIG: the next run that picks the
 // same model with the same requirements gets the same provider order, not a
 // re-rolled one — a selection that hops between runs is exactly the variance
-// the internal-project project built its pins against. The cache lives in a
+// the source algorithm built its pins against. The cache lives in a
 // JSON file next to the other hub data (claude-windows.json precedent): it
 // survives the hub's frequent deploys, and a built-in plugin file must not
 // reach the database anyway (docs/plugins.md, import rules).

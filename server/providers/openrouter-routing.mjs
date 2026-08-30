@@ -1,14 +1,14 @@
 // cc-hub — OpenRouter best-provider selection (pure logic).
 //
-// Ported in spirit from the measured algorithm of ~/projects/internal-project
-// (orchestrators/shared-scripts/llm_client.py + modell_preflight.py), generalized
-// from its fixed "fp8" policy to a configurable one. This file imports NOTHING of
+// Ported in spirit from a measured in-house algorithm (LLM client + model
+// preflight of a production pipeline), generalized from its fixed "fp8" policy
+// to a configurable one. This file imports NOTHING of
 // the hub — a built-in plugin file may not import db.mjs / i18n.mjs
 // (docs/plugins.md, "What a plugin may import") — so it is unit-testable as is
 // and safely imported by both the provider plugin and server code.
 //
-// The decision rule (same shape as the internal-project PO decision of
-// 2026-08-19, generalized):
+// The decision rule (same shape as the measured PO decision it was ported
+// from, generalized):
 //
 //   eligible := quantization KNOWN (null/unknown never counts as a level)
 //             ∧ quantization at least `quant_min` when one is set
@@ -23,8 +23,8 @@
 //               quant_min set → every qualifying endpoint, cheapest first
 //             → order = their tags, up to `depth` of them: cheapest first, but
 //               with reachable fallbacks behind it (a one-name list is the
-//               failure mode that cost internal-project a whole run: one 429
-//               and nothing was left).
+//               failure mode the source algorithm measured: one 429 and
+//               nothing was left).
 
 // ── The quantization order ────────────────────────────────────────────────────
 //

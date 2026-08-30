@@ -520,8 +520,8 @@ OpenRouter catalog serves one model from many hosting vendors, and those
 disagree in quantization (fp4 … bf16), price (up to 3× for the same weights) and
 health (`status`, `uptime_last_30m`) — none of which the free routing decides
 in the caller's favour. The hub therefore ships an automatic best-provider
-selection, ported from the measured algorithm of the internal-project project
-(`modell_preflight.py` / `llm_client.py` there) and generalized from its fixed
+selection, ported from a measured in-house algorithm (a production pipeline's
+LLM client and model preflight) and generalized from its fixed
 fp8 policy:
 
 ```js
@@ -544,7 +544,7 @@ routing: {
   before price breaks the tie; with a minimum everything at or above it
   competes on price. The result is an ordered chain (`provider.order` +
   `allow_fallbacks: false`), not one name — a one-name list is the failure mode
-  the internal-project project measured as "one 429 and the whole run falls".
+  the source algorithm measured as "one 429 and the whole run falls".
 - **Cached per model+config** (`~/.local/share/cc-hub/openrouter-routing.json`,
   `CCHUB_OR_ROUTING_JSON`), TTL 24 h: the same model with the same requirements
   gets the SAME order on the next run, not a re-rolled one. A failed fetch
