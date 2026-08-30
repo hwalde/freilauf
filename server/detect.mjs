@@ -247,7 +247,11 @@ export function fremdeClaudeSession(runId, harness, sessionId) {
  */
 export function vorfallWeggrund({ typ, schwere, runStatus, letzteAktivitaetMs, zuletztGesehenMs, jetztMs,
   arbeitMs = 10 * 60_000, stilleMs = 30 * 60_000 }) {
-  if (typ === 'merge_blocked' || String(typ).startsWith('provider_down:')) return null
+  // tmux_gone/tmux_unreachable say something about the MACHINE, not about this
+  // run: tmux answering again does not undo the sessions that died, and the
+  // watcher closes the transient one itself the moment it gets an answer.
+  if (typ === 'merge_blocked' || typ === 'tmux_gone' || typ === 'tmux_unreachable'
+      || String(typ).startsWith('provider_down:')) return null
   const zuletzt = Number(zuletztGesehenMs)
   // Number(null) is 0 AND finite — the trap this repo has been bitten by before.
   // null means "no activity source", never "activity at the epoch".
@@ -285,5 +289,7 @@ export const TYP_TEXT = {
   model_error: 'Model unavailable',
   provider_down: 'Provider unreachable',
   merge_blocked: 'Not merged',
+  tmux_gone: 'All tmux sessions gone',
+  tmux_unreachable: 'tmux not answering',
   unbekannt: 'API error',
 }

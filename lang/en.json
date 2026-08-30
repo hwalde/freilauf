@@ -1045,6 +1045,8 @@
   "merge.unmerged_both": "not merged: commits and uncommitted changes",
   "merge.skipped_by_operator": "merge skipped",
   "incident.merge_blocked": "Not merged",
+  "incident.tmux_gone": "All tmux sessions gone",
+  "incident.tmux_unreachable": "tmux not answering",
   "repos.last_push": "last backup push: {ts}",
   "run.marked_done_note": "_(marked done by the operator)_",
   "api.unknown_repo": "unknown repo",

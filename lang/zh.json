@@ -1045,6 +1045,8 @@
   "merge.unmerged_both": "未合并：既有提交也有未提交的改动",
   "merge.skipped_by_operator": "已跳过合并",
   "incident.merge_blocked": "未合并",
+  "incident.tmux_gone": "所有 tmux 会话消失",
+  "incident.tmux_unreachable": "tmux 无响应",
   "repos.last_push": "上次备份推送：{ts}",
   "run.marked_done_note": "_（由操作者标记为完成）_",
   "api.unknown_repo": "未知的仓库",
