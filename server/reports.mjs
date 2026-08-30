@@ -29,8 +29,13 @@ const HOOK_KINDS = ['_turn_end', '_exit', '_api_error', '_rate_limit', '_idle']
  */
 export async function handleReport(runId, body, via = 'http') {
   const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
+  if (!run) return { ok: false, error: 'unknown or already finished run' }
+  // A run that is over can still be spoken to — its agent is still sitting in
+  // the session, and the operator types more work into it. What it reports
+  // then is a FOLLOW-UP (see handleFollowUp), not an error.
+  if (['done', 'failed', 'aborted'].includes(run.status)) return handleFollowUp(run, body, via)
   // Planning 11: only accept existing runs in running/waiting_help.
-  if (!run || !['running', 'waiting_help'].includes(run.status)) return { ok: false, error: 'unknown or already finished run' }
+  if (!['running', 'waiting_help'].includes(run.status)) return { ok: false, error: 'unknown or already finished run' }
   const kind = String(body.kind || '')
   // A hook report from a claude session that is NOT this run's own: the agent
   // spawned its own claude (a probe, an error-handling test), which inherited
@@ -206,6 +211,211 @@ export async function finishByTurnEnd(runId, source) {
   return true
 }
 
+// ------------------------------------------------------------ follow-up reports
+//
+// Three of the four coding agents stay in their TUI after `cc-report done`, and
+// the run's terminal stays writable for exactly that reason: the operator reads
+// the report, sees that something is not finished, and types the rest into the
+// same session. The agent does it, commits — and until this existed nothing
+// happened next: `handleReport()` refused a finished run, so the commits sat in
+// the worktree, no merge, no flow, no message.
+//
+// A report from a finished run is therefore a FOLLOW-UP REPORT. Deliberately the
+// SAME command (`cc-report done --file …`) and not a second one: the agent has
+// just used it, it is the one instruction every prompt carries, and a second
+// verb would be a second thing to forget. The hub can tell the two apart by
+// itself — the run's status says whether this is the first report or another
+// one — and the agent does not need to know.
+//
+// What a follow-up does, in the order it happens:
+//   1. the text is appended to `report_md` under its own heading and kept on
+//      its own in `followup_md`; `followups` counts them;
+//   2. the finish gate runs exactly as for the first report (dirt, commits,
+//      conflict), and the integrator merges — `followup_open` is what tells the
+//      integrator's end (`finishMerged`, `closeKept`, `blockRun`) that this
+//      integration belongs to a follow-up;
+//   3. the attached flows fire again (`rearmDispatch`), the merged ones too;
+//   4. Telegram hears "FOLLOW-UP REPORT #n" — never deduplicated, because every
+//      follow-up is news, and only while the run's Telegram checkbox is on.
+//
+// The status of the run does NOT change: a `done` run stays `done`, a `failed`
+// one stays `failed` (its record is the truth about the first attempt; what
+// the follow-up delivered is in the merge line and the report).
+
+/** The kinds a finished run still answers to. Hooks are handled apart. */
+const FOLLOWUP_KINDS = ['done', 'failed', 'help', 'progress', 'branch', 'pr']
+
+/**
+ * Should a turn end on a FINISHED run count as its follow-up report?
+ *
+ * Only for a coding agent whose turn end is its run end (cursor: the TUI stays
+ * standing, nothing else ever says the work is over), and only when there is
+ * something to integrate — the worktree's tip has moved past what was merged
+ * last. A follow-up that changed nothing (an answer, a list) has to be reported
+ * with `cc-report done` by the agent itself; the net exists for the commits
+ * that would otherwise never reach the base branch. Pure, so the rule can be
+ * stated in a test.
+ */
+export function wantsTurnEndFollowUp(run, tip, harness) {
+  if (!run || !['done', 'failed', 'aborted'].includes(run.status)) return false
+  if (run.finish_state || run.followup_open) return false        // already reporting
+  if (!harness?.turnEndsRun) return false
+  if (!tip || !run.merged_sha) return false                        // nothing to compare against
+  return tip !== run.merged_sha
+}
+
+async function handleFollowUp(run, body, via) {
+  const runId = run.id
+  const kind = String(body.kind || '')
+  if (HOOK_KINDS.includes(kind) && fremdeClaudeSession(runId, run.harness, body.session_id)) {
+    detektorLog(runId, { art: 'verworfen', grund: 'hook report from a foreign claude session (a process the agent spawned)', kind, session: body.session_id })
+    return { ok: true, message: null }
+  }
+  // The agent of a follow-up in the gate is gone — the escalation, as for a
+  // first report. Every other hook on a finished run is what it always was: nothing.
+  if (['_exit', '_pane_died'].includes(kind)) {
+    if (run.finish_state) { addEvent(runId, kind === '_exit' ? 'exit' : 'pane_died', { exit: body.exit ?? null }); await escalateGone(runId) }
+    return { ok: true, message: null }
+  }
+  if (kind === '_turn_end') {
+    await followUpByTurnEnd(run, 'stop hook')
+    return { ok: true, message: null }
+  }
+  if (kind.startsWith('_')) return { ok: false, error: 'unknown or already finished run' }
+  if (!FOLLOWUP_KINDS.includes(kind)) return { ok: false, error: `unknown kind '${kind}'` }
+
+  let text = typeof body.text === 'string' ? body.text : ''
+  if (typeof body.file === 'string') {
+    if (body.file.length > MAX_REPORT) return { ok: false, error: 'payload too large' }
+    text = text ? `${text}\n\n${body.file}` : body.file
+  }
+  switch (kind) {
+    case 'done':
+      return followUpDone(run, text, via)
+    case 'failed': {
+      // The follow-up did not work out. The run's own status is not touched —
+      // it describes the first attempt — but the operator hears it.
+      appendReport(runId, `**Follow-up failed:** ${text}`)
+      addEvent(runId, 'followup_failed', { text: text.slice(0, 500) })
+      await notifyRun(runId, 'followup_failed', `${followUpHeader(run, 'FOLLOW-UP FAILED')}\n\n${text}\n\n❌ Follow-up failed · ${harnessLabel(run)}`,
+        { fileName: `followup-failed-${runId.slice(0, 8)}.md`, fileContent: text, dedupe: false })
+      return { ok: true }
+    }
+    case 'help': {
+      db.prepare(`UPDATE runs SET help_text=? WHERE id=?`).run(text, runId)
+      addEvent(runId, 'help', { followup: true })
+      await notifyRun(runId, 'help', `${followUpHeader(run, 'FOLLOW-UP HELP CALL')}\n\n${text}\n\n🆘 Help call · ${harnessLabel(run)}`,
+        { fileName: `help-${runId.slice(0, 8)}.md`, fileContent: text, dedupe: false })
+      return { ok: true }
+    }
+    case 'progress':
+      addEvent(runId, 'progress', { text, followup: true })
+      db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(runId)
+      return { ok: true }
+    case 'branch':
+      db.prepare('UPDATE runs SET branch_reported=? WHERE id=?').run(String(body.branch || ''), runId)
+      addEvent(runId, 'branch', { branch: body.branch })
+      return { ok: true }
+    case 'pr':
+      db.prepare('UPDATE runs SET pr_url=? WHERE id=?').run(String(body.pr || ''), runId)
+      addEvent(runId, 'pr', { pr: body.pr })
+      return { ok: true }
+  }
+  return { ok: false, error: `unknown kind '${kind}'` }
+}
+
+/** The follow-up text goes UNDER the first report, with a heading that says which one it is. */
+function appendReport(runId, text, n = null) {
+  const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+  const heading = n == null ? `## Follow-up (${stamp})` : `## Follow-up report #${n} (${stamp})`
+  const block = `\n\n---\n${heading}\n\n${text || '(no report text)'}`
+  db.prepare(`UPDATE runs SET report_md = COALESCE(report_md, '') || ? WHERE id=?`).run(block, runId)
+}
+
+/**
+ * A `done` from a finished run. The report is stored first, then the gate runs
+ * like it would for a first report — a follow-up whose worktree is dirty is
+ * told so in the same words, through the same channel.
+ */
+async function followUpDone(run, text, via) {
+  const runId = run.id
+  // A follow-up that is still in the gate: the agent reports again after M1/M2,
+  // exactly as a first run does. Its text was already appended; the gate is
+  // simply asked again.
+  if (run.followup_open && run.finish_state) {
+    const gate = await finishGate(runId, '', via)
+    if (gate?.hold) return { ok: true, message: gate.message ?? null }
+    const fresh = db.prepare('SELECT * FROM runs WHERE id=?').get(runId)
+    return completeFollowUp(runId, { mergeLine: gate?.mergeLine ?? null, merged: false, message: true, followups: fresh.followups })
+  }
+  const n = (run.followups ?? 0) + 1
+  appendReport(runId, text, n)
+  // `finish_started_at` is reset on purpose: the first gate's clock is long over,
+  // and the deadline counts from THIS report. `followup_open` is what the
+  // integrator's end reads to announce the merge as a follow-up's.
+  db.prepare(`UPDATE runs SET followups=?, followup_md=?, followup_open=1, finish_started_at=NULL WHERE id=?`)
+    .run(n, text || null, runId)
+  addEvent(runId, 'followup_reported', { n })
+  const gate = await finishGate(runId, '', via)
+  if (gate?.hold) return { ok: true, message: gate.message ?? null }
+  return completeFollowUp(runId, { mergeLine: gate?.mergeLine ?? null, merged: false, message: true, followups: n })
+}
+
+/**
+ * cursor's net, for a follow-up: the turn ended on a finished run, and the
+ * worktree holds commits nobody merged. The transcript's last answer is the
+ * report, like finishByTurnEnd() does it for a first run.
+ */
+export async function followUpByTurnEnd(run, source) {
+  const harness = getHarness(run.harness)
+  if (!harness?.turnEndsRun) return false
+  let tip = null
+  try { tip = await (await import('./integrate.mjs')).tipOfRun(run) } catch { tip = null }
+  if (!wantsTurnEndFollowUp(run, tip, harness)) return false
+  const state = run.harness === 'cursor' ? transcriptState(run) : null
+  const note = `_(cc-hub took this as a follow-up report: the agent ended its turn with new commits and without calling \`cc-report done\` — noticed via ${source}.)_`
+  const text = [state?.lastAnswer, note].filter(Boolean).join('\n\n')
+  addEvent(run.id, 'turn_end_finished', { source, transcript: !!state?.lastAnswer, followup: true })
+  await followUpDone(run, text, 'internal')
+  return true
+}
+
+/**
+ * The follow-up has left the gate — merged, nothing to merge, kept on its
+ * branch, or blocked. Called from here (no gate, or nothing to merge) and from
+ * the integrator's three ends (server/integrate.mjs). One function, so the
+ * three things that make a follow-up visible cannot come apart: the event, the
+ * flows firing again, the Telegram message.
+ *
+ * `notify: false` is for a BLOCKED follow-up: the block itself is announced by
+ * the integrator (T_BLOCKED_*), and a second message about the same run at the
+ * same moment would be one too many.
+ */
+export async function completeFollowUp(runId, { mergeLine = null, merged = false, notify = true, message = false, followups = null } = {}) {
+  const run = db.prepare('SELECT * FROM runs WHERE id=?').get(runId)
+  if (!run) return { ok: false, error: 'unknown run' }
+  const n = followups ?? run.followups
+  // How long the follow-up took: since the previous report of this run.
+  const prev = db.prepare(`SELECT ts FROM events WHERE run_id=? AND kind IN ('done','followup_done','followup_failed')
+    ORDER BY id DESC LIMIT 1`).get(runId)?.ts
+  const prevMs = prev ? Date.parse(prev.replace(' ', 'T') + 'Z') : NaN
+  const minutes = Number.isFinite(prevMs) ? Math.round((Date.now() - prevMs) / 60000) : null
+  db.prepare('UPDATE runs SET followup_open=0 WHERE id=?').run(runId)
+  addEvent(runId, 'followup_done', { n, merged, merge: mergeLine })
+  if (notify) {
+    await notifyRun(runId, 'followup', followUpText(run, run.followup_md, mergeLine, { n, minutes }),
+      { fileName: `followup-${n}-${runId.slice(0, 8)}.md`, fileContent: run.followup_md ?? '', dedupe: false })
+  }
+  // The run "ended again": whatever hangs on its end runs once more.
+  try {
+    const m = await import('./flows/db.mjs')
+    m.rearmDispatch(runId, { merged })
+  } catch (err) { console.error('[flows]', err.message) }
+  import('./flows/triggers.mjs').then(m => m.flowsTick()).catch(e => console.error('[flows]', e.message))
+  if (!message) return { ok: true }
+  return { ok: true, message: `cc-hub: follow-up report #${n} received${mergeLine ? ` — ${mergeLine}` : ''}. It reaches the operator like the first one. Nothing more to do; stay in this session.` }
+}
+
 /**
  * The finish gate, reached by a dynamic import so the cycle stays open in one
  * direction only: server/integrate.mjs imports this module for notifyRun() and
@@ -280,11 +490,48 @@ function harnessLabel(run) {
  * a single run is reporting. A single run is named by its title, an agent run
  * by "AGENT <name>" — so the message is attributable without a click.
  */
-function reportHeader(run) {
+function reportHeader(run, word = 'REPORT') {
   const p = db.prepare('SELECT name FROM repos WHERE id=?').get(run.repo_id)?.name ?? '?'
   const a = run.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name : null
   const name = a ? `AGENT ${a}` : (run.title ?? 'run')
-  return `${p} / ${name} REPORT:`
+  return `${p} / ${name} ${word}:`
+}
+
+/**
+ * The header of everything a finished run says: the same shape as the first
+ * report's, with the word that tells the reader on Telegram that this is NOT
+ * the run's first message — "FOLLOW-UP REPORT #2" instead of "REPORT". Whoever
+ * reads it knows without opening the hub that the run was already over and that
+ * somebody asked for more.
+ */
+export function followUpHeader(run, word = 'FOLLOW-UP REPORT', n = null) {
+  return reportHeader(run, n ? `${word} #${n}` : word)
+}
+
+/**
+ * The "follow-up done" message — the counterpart of doneText() for a report
+ * after the run's end. `minutes` is the time since the previous report, which
+ * is what a follow-up's duration means; the run's own start is long ago.
+ */
+export function followUpText(run, report, mergeLine = null, { n = 1, minutes = null } = {}) {
+  const branch = run.branch_reported || run.branch_expected
+  const zeile2 = [minutes != null ? `Follow-up time: ${minutes} min` : null, branch ? `Branch: ${branch}` : null,
+    run.pr_url ? `PR: ${run.pr_url}` : null, mergeLine].filter(Boolean).join(' · ')
+  const status = `✅ Follow-up #${n} done · ${harnessLabel(run)}${zeile2 ? ' · ' + zeile2 : ''}`
+  return `${followUpHeader(run, 'FOLLOW-UP REPORT', n)}\n\n${report || '(no report text)'}\n\n${status}`
+}
+
+/**
+ * Is Telegram on for this run? The checkbox under the terminal
+ * (`runs.telegram_on`), read at the moment a message would go out — so
+ * unticking it silences everything that comes AFTER the click, the follow-up
+ * reports first of all. A run that does not exist answers "on": the caller
+ * knows nothing about it and should not lose a message over a lookup.
+ */
+export function telegramOnFor(runId) {
+  if (!runId) return true
+  const row = db.prepare('SELECT telegram_on FROM runs WHERE id=?').get(runId)
+  return !row || row.telegram_on !== 0
 }
 
 /**
@@ -320,6 +567,14 @@ export async function notifyRun(runId, type, text, lang = null) {
   const have = db.prepare('SELECT 1 FROM events WHERE run_id = ? AND kind = ? LIMIT 1').get(runId, flag)
   // Help calls are never duplicates: every question needs an answer.
   if (have && lang?.dedupe !== false) return false
+  // The run's own switch (the checkbox under its terminal). Off means: this
+  // message is not sent, and it is written down that it was not — the flag is
+  // deliberately NOT set, so switching Telegram back on lets the same type
+  // through again. Everything else about the report happened already.
+  if (!telegramOnFor(runId)) {
+    addEvent(runId, 'telegram_muted', { type })
+    return false
+  }
   const voll = `${text}\n\nRun: ${runId}`
   const ok = lang
     ? await notifyLong(voll, { fileName: lang.fileName, fileContent: lang.fileContent, url: detailUrl(runId) })

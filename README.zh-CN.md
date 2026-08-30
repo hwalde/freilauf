@@ -60,7 +60,9 @@ tmux 会话中工作；cc-hub 负责启动它们、观察它们、收集它们�
 - **浏览器中的终端**（xterm.js over WebSocket，默认只读）—— 观看运行、向其中输入、
   回答求助。
 - **报告** 通过 `cc-report` 上报（done / failed / help / progress / branch / pr）；
-  hub 不可达时回落到 `inbox.jsonl`。
+  hub 不可达时回落到 `inbox.jsonl`。已完成的运行可以再次报告——在它的会话里输入
+  后续工作，智能体下一次 `cc-report done` 会被合并、触发流程，并作为*后续报告*
+  送达 Telegram。终端下方的复选框可以让你正在盯着的运行不再发 Telegram。
 - **集成**：hub 自己把完成的运行合并进基础分支，按仓库串行，在专属的 worktree 中
   进行 —— 工作区不干净、发生冲突或合并检查失败时，先退回给智能体处理，实在不行
   才升级给你。

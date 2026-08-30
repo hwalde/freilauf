@@ -4139,6 +4139,74 @@ try {
     falsch(/\{base\}/.test(an), 'no placeholder left over')
   })
 
+  await pruefe('the prompt tells the agent how to report follow-up work — once per batch, same command', async () => {
+    const { platformSuffix } = await import('../server/runner.mjs')
+    const run = { id: 'r1', harness: 'claude', workdir_effective: '/wt/a', expected_minutes: 30 }
+    const off = platformSuffix(run, 'No branch.', {}, { merge_mode: 'off', base_branch: 'main' })
+    enthaelt(off, 'AFTER YOU HAVE REPORTED DONE', 'the block is there with the integration off too')
+    enthaelt(off, 'FOLLOW-UP REPORT', 'and names what the hub makes of it')
+    enthaelt(off, 'report ONCE at the end, not once per', 'one report per batch of follow-up work')
+    enthaelt(off, 'It is the same command on purpose', 'the same command, and it says why')
+    falsch(off.includes('origin/main merged into your branch once more'), 'no merge clause where nobody merges')
+    falsch(off.includes('integration into main'), 'and no integration among the processes')
+    const on = platformSuffix(run, 'No branch.', {}, { merge_mode: 'hub', base_branch: 'trunk' })
+    enthaelt(on, 'origin/trunk merged into your branch once more', 'under hub the follow-up merges the base again')
+    enthaelt(on, 'integration into trunk', 'and integration is named as what fires again')
+    falsch(/\{(base|followup_merge|followup_processes)\}/.test(on), 'no placeholder left over')
+    const kept = platformSuffix({ ...run, keep_on_branch: 1 }, 'Keep.', {}, { merge_mode: 'hub', base_branch: 'trunk' })
+    falsch(kept.includes('merged into your branch once more'), 'a kept run is not told to merge the base')
+    // The block comes LAST: it describes what happens after the finishing steps.
+    wahr(on.indexOf('HOW THIS RUN ENDS') < on.indexOf('AFTER YOU HAVE REPORTED DONE'), 'after the finishing block')
+  })
+
+  await pruefe('a turn end on a finished run is a follow-up only for cursor, and only with new commits', async () => {
+    const { wantsTurnEndFollowUp, followUpText } = await import('../server/reports.mjs')
+    const cursor = { turnEndsRun: true }
+    const done = { status: 'done', merged_sha: 'aaa', finish_state: null, followup_open: 0 }
+    wahr(wantsTurnEndFollowUp(done, 'bbb', cursor), 'tip moved past the merge: follow-up')
+    falsch(wantsTurnEndFollowUp(done, 'aaa', cursor), 'tip is what was merged: nothing to report')
+    falsch(wantsTurnEndFollowUp(done, null, cursor), 'no tip (worktree gone): nothing')
+    falsch(wantsTurnEndFollowUp({ ...done, merged_sha: null }, 'bbb', cursor), 'never merged (merge mode off): no comparison, no net')
+    falsch(wantsTurnEndFollowUp({ ...done, finish_state: 'checking' }, 'bbb', cursor), 'already in the gate')
+    falsch(wantsTurnEndFollowUp({ ...done, followup_open: 1 }, 'bbb', cursor), 'a follow-up already open')
+    falsch(wantsTurnEndFollowUp({ ...done, status: 'running' }, 'bbb', cursor), 'a running run is finishByTurnEnd\'s business')
+    falsch(wantsTurnEndFollowUp(done, 'bbb', { turnEndsRun: false }), 'claude: a turn end is a note')
+    falsch(wantsTurnEndFollowUp(done, 'bbb', null), 'unknown harness')
+    // The message names what it is, on both lines.
+    const text = followUpText({ id: 'r1', harness: 'claude', model: 'sonnet', repo_id: -1 }, 'fixed the tests', 'Merged into main: abc1234', { n: 2, minutes: 7 })
+    enthaelt(text, 'FOLLOW-UP REPORT #2:', 'the header says which report this is')
+    enthaelt(text, 'fixed the tests', 'the follow-up text')
+    enthaelt(text, '✅ Follow-up #2 done · claude/sonnet', 'the status line')
+    enthaelt(text, 'Follow-up time: 7 min', 'time since the previous report, not the run\'s duration')
+    enthaelt(text, 'Merged into main: abc1234', 'and the merge line')
+    falsch(text.includes('Duration:'), 'no run duration — the run started long ago')
+  })
+
+  await pruefe('rearmDispatch lets the flows of a finished run fire again', async () => {
+    const { default: db } = await import('../server/db.mjs')
+    const { rearmDispatch } = await import('../server/flows/db.mjs')
+    const repoId = db.prepare(`INSERT INTO repos (name, path) VALUES ('rearm', '/tmp/rearm') RETURNING id`).get().id
+    const id = 'rearm000-0000-4000-8000-000000000001'
+    db.prepare(`INSERT INTO runs (id, repo_id, harness, status, prompt, branch_mode, expected_minutes, started_at, ended_at,
+      flow_dispatched, merge_dispatched, merge_status) VALUES (?, ?, 'claude', 'done', 'x', 'keiner', 30, datetime('now'), datetime('now'), 1, 1, 'merged')`)
+      .run(id, repoId)
+    rearmDispatch(id)
+    let r = db.prepare('SELECT flow_dispatched, merge_dispatched FROM runs WHERE id=?').get(id)
+    gleich(r.flow_dispatched, 0, 'run_finished fires again')
+    gleich(r.merge_dispatched, 1, 'but not run_merged — nothing was merged')
+    db.prepare('UPDATE runs SET flow_dispatched=1 WHERE id=?').run(id)
+    rearmDispatch(id, { merged: true })
+    r = db.prepare('SELECT flow_dispatched, merge_dispatched FROM runs WHERE id=?').get(id)
+    gleich(r.flow_dispatched, 0, 'both, when the follow-up merged')
+    gleich(r.merge_dispatched, 0, 'run_merged too')
+    db.prepare(`UPDATE runs SET merge_status='nothing', merge_dispatched=1 WHERE id=?`).run(id)
+    rearmDispatch(id, { merged: true })
+    gleich(db.prepare('SELECT merge_dispatched FROM runs WHERE id=?').get(id).merge_dispatched, 1,
+      'a run that is not merged cannot fire a merge, whatever the caller says')
+    db.prepare('DELETE FROM runs WHERE id=?').run(id)
+    db.prepare('DELETE FROM repos WHERE id=?').run(repoId)
+  })
+
   // ------------------------------------------------------------------
   gruppe('tmux cleanup: the memory-freeing agent')
 

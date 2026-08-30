@@ -1509,6 +1509,82 @@ The remote is the backup, and that is a rule beyond the integrator:
    Remote branches are **not** deleted after a merge in v1: visible history is
    cheaper than an accidental deletion.
 
+### Follow-up reports: a finished run can report again
+
+Three of the four coding agents stay in their TUI after `cc-report done`, and
+the run's terminal stays writable for exactly that reason (see "The work is
+done — who is still there"). So the ordinary shape of a day is: the report
+arrives, the operator sees that something is not finished, types the rest into
+the same session, the agent does it and commits — and until this existed
+**nothing happened next**. `handleReport()` refused a finished run, the
+commits sat in the worktree, no merge, no flow, no message.
+
+A report from a finished run is a **follow-up report** now
+(`handleFollowUp()` in `reports.mjs`). Four decisions, each deliberate:
+
+- **The same command, not a second one.** The agent runs `cc-report done
+  --file <report>` again, exactly as the prompt already told it to. The hub
+  tells a first report from a follow-up by the run's status; the agent does
+  not have to know, and a second verb would be a second thing to forget. The
+  prompt's last block (`FOLLOWUP_RULES` in `runner.mjs`) says so, says that
+  the same platform processes run again (integration, flows), asks for a
+  report about ONLY the follow-up work, and asks for **one report per batch**:
+  several requests in one go are one report at the end, not one per request —
+  every report is a message to a person's phone. A mere answer that changed
+  nothing is not reported unless the human asked for it.
+- **Same gate, same integrator, same escalation.** The follow-up's text is
+  appended to `report_md` under `## Follow-up report #n (…)` and kept on its
+  own in `followup_md`; `followups` counts them. Then `finishGate()` runs as
+  for a first report (`finish_started_at` is reset — the deadline counts from
+  THIS report), the integrator merges, and `followup_open` is what tells its
+  three ends — `finishMerged`, `closeKept`, `blockRun` — that this integration
+  belongs to a follow-up. They call `completeFollowUp()`, the one function
+  that makes a follow-up visible: the `followup_done` event, the flows fired
+  again (`rearmDispatch()` in `flows/db.mjs` takes `flow_dispatched` back,
+  and `merge_dispatched` too when the follow-up merged), and Telegram.
+  Nothing about the merge itself is different, which is why `merged_sha`
+  simply moves to the new tip.
+- **The status does not change.** A `done` run stays `done`, a `failed` one
+  stays `failed`: the record is the truth about the first attempt, and what
+  the follow-up delivered is in the merge line and the report. `finishMerged`
+  and `escalate` write `status` conditionally for that reason. A run whose
+  agent reports `failed`, `help` or `progress` after its end gets the event
+  and the message (help calls and failures are never deduplicated) and keeps
+  its status; hooks on a finished run are what they always were — nothing —
+  except `_exit`/`_pane_died` on a follow-up in the gate (the agent is gone:
+  `escalate('agent_gone')`, and `reconcileClosedSession()` does the same for
+  a vanished session) and cursor's `_turn_end`.
+- **cursor's net exists for follow-ups too, and only for commits.**
+  `wantsTurnEndFollowUp()`: a turn end on a finished cursor run counts as its
+  follow-up report when the worktree's tip has moved past `merged_sha` — the
+  case where work would otherwise never reach the base branch. A follow-up
+  that changed nothing (an answer, a list) has to be reported by the agent
+  itself; without a `merged_sha` (merge mode off) there is nothing to compare
+  against and the net stays out of it.
+
+**Telegram says which one it is.** A follow-up arrives as `<repo> / <name>
+FOLLOW-UP REPORT #n:` with a `✅ Follow-up #n done` status line that carries
+the time since the previous report instead of the run's duration
+(`followUpText()`), never deduplicated (type `followup`). A blocked follow-up
+sends only the block (`T_BLOCKED_*`, now `dedupe: false` — a run blocked
+twice is blocked twice), not a second message about the same moment.
+
+**And the checkbox under the terminal is the answer to "I am sitting right
+here".** `runs.telegram_on` (default 1 for every run, `telegramSwitch()` in
+pages.mjs, `POST /api/runs/<id>/telegram`) is read at send time by
+`notifyRun()` and by the incident alarms: unticked means **no Telegram about
+this run** — reports, follow-ups, alarms, incidents — and nothing else
+changes. The integration, the flows and the events happen exactly as before;
+a suppressed message is written down as `telegram_muted`, and the
+`telegram_sent:*` flag is deliberately NOT set, so switching the box back on
+lets the same type through again. It sits under `#term` and outside the
+run-detail fragment for the same reason the terminal does: a live update must
+not flip a box the operator just clicked. Deliberately no time-based
+heuristic ("the operator wrote into the session two minutes ago, so do not
+page"): whether a report is wanted on the phone is the operator's call, and a
+box says it in one click where a guess would sometimes be wrong in the
+expensive direction.
+
 ### Visibility, and the one rule the whole thing hangs on
 
 The overview's status cell carries the finish state under the status word (and
