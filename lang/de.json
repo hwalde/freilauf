@@ -776,6 +776,7 @@
   "overview.branch_pr": "Branch/PR",
   "overview.origin": "Herkunft",
   "overview.filtered": "nur „{status}“",
+  "overview.filtered_incidents": "nur Runs mit offenen Vorfällen",
   "overview.filter_clear": "Alle zeigen",
   "run.id_label": "Lauf",
   "run.pr": "PR",

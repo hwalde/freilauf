@@ -629,11 +629,13 @@ async function fragmentApi(req, res, url) {
   if (path === '/api/fragments/runs-body') {
     const repo = url.searchParams.get('repo')
     if (!repo) return fragment(res, '')
-    // The status filter travels with the request. Without it the first live
-    // update would replace a filtered list by the unfiltered one — the page
-    // would silently stop showing what the user asked it to show.
+    // The status and incidents filters travel with the request. Without them
+    // the first live update would replace a filtered list by the unfiltered
+    // one — the page would silently stop showing what the user asked it to
+    // show.
     const status = url.searchParams.get('status')
-    return fragment(res, runsBody(overviewRuns(+repo, status), { repoId: +repo, status }))
+    const incidents = url.searchParams.get('incidents') === '1'
+    return fragment(res, runsBody(overviewRuns(+repo, status, incidents), { repoId: +repo, status, incidents }))
   }
 
   // A row of the overview. Archived counts as gone: the overview does not show

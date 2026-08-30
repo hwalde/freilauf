@@ -214,6 +214,9 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // sandbox shares the tmux server); a live hub must not start cleanup
       // runs because of THIS suite. The manual path stays fully testable.
       CCHUB_CLEANUP_AUTO_OFF: '1',
+      // Incidents page WITHOUT the production grace period — the suite asserts
+      // Telegram immediately after the event; the delay itself has its own test.
+      CCHUB_INCIDENT_NOTIFY_DELAY_MS: '0',
       NODE_OPTIONS: '--disable-warning=ExperimentalWarning',
     }
     // A suite may override or add to the hub's environment — e.g. shorten the
@@ -270,6 +273,9 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     process.env.CCHUB_GOAL_DELAY_MS = '100'
     process.env.CCHUB_GOAL_WAIT_MS = '10000'
     process.env.CCHUB_CLEANUP_AUTO_OFF = '1'
+    // Same reason as in the hub environment above: no production grace period
+    // in the suite (the delayed-notification test drives notify_at by hand).
+    process.env.CCHUB_INCIDENT_NOTIFY_DELAY_MS = '0'
     delete process.env.OPENROUTER_API_KEY
     const { tick } = await import('../server/watcher.mjs')
     return tick

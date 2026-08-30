@@ -776,6 +776,7 @@
   "overview.branch_pr": "分支／PR",
   "overview.origin": "来源",
   "overview.filtered": "仅「{status}」",
+  "overview.filtered_incidents": "仅显示有未解决事件的运行",
   "overview.filter_clear": "显示全部",
   "run.id_label": "运行",
   "run.pr": "PR",
