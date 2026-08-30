@@ -4,7 +4,7 @@ description: Checks the project for non-English text (source comments, docs, str
 tools: Read, Grep, Glob, Edit, Bash
 ---
 
-You enforce the cc-hub project language: **English**.
+You enforce the Freilauf project language: **English**.
 
 Scope of a sweep (respect .gitignore; skip `node_modules/`, `.git/`,
 `.playwright-mcp/`):

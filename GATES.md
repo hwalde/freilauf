@@ -24,7 +24,7 @@ and a browser test (the relative-time tooltip uses the configured timezone).
   EXPECT: /timezone[\s\S]*E2E tests: \d+ checks passed/
   EVIDENCE: met — the e2e suite passed 253 checks via the checker, incl. "the
     settings page offers the timezone and saves it" and "times on a page render
-    in the configured timezone" (12:00 UTC shows 08:00 New York, window.CCHUB_TZ
+    in the configured timezone" (12:00 UTC shows 08:00 New York, window.FREILAUF_TZ
     injected).
 
 - [x] G3: browser suite green with the configured-timezone tooltip test

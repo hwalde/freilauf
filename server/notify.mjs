@@ -1,4 +1,4 @@
-// cc-hub — the notification facade.
+// Freilauf — the notification facade.
 //
 // Everything the hub has to say to a human goes through `notify()`: a run that
 // finished, an incident, a blocked merge, a failed LLM call, a flow's own
@@ -266,7 +266,7 @@ export async function sendTest(id) {
   if (!notifierConfigured(entry.id)) return { ok: false, errorKey: 'notify.err_not_configured' }
   const msg = normalizeMessage({
     kind: 'test',
-    text: safeT('notify.test_message', 'cc-hub: test message. The channel works.'),
+    text: safeT('notify.test_message', 'Freilauf: test message. The channel works.'),
     url: detailUrl(null),
   })
   try {

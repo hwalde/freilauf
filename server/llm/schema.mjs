@@ -1,4 +1,4 @@
-// cc-hub — the minimal JSON-Schema subset the hub's own LLM calls need.
+// Freilauf — the minimal JSON-Schema subset the hub's own LLM calls need.
 //
 // There is no Ajv here and there must not be one: this project has zero runtime
 // dependencies, and the schemas it actually uses are small and known. Four

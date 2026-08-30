@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # fw-inspect.sh — READ-ONLY firewall inventory (run with sudo).
 # Collects everything about the existing ufw configuration so it can be reviewed
-# BEFORE the cc-hub rules are applied (04-firewall.sh):
+# BEFORE the Freilauf rules are applied (04-firewall.sh):
 #   sudo ./setup/fw-inspect.sh
 # Changes NOTHING. The output can be handed back to the agent 1:1.
 set -uo pipefail
 
-VPN_PORT="${CCHUB_VPN_PORT:-8790}"
-LOCAL_PORT="${CCHUB_LOCAL_PORT:-8791}"
+VPN_PORT="${FREILAUF_VPN_PORT:-8790}"
+LOCAL_PORT="${FREILAUF_LOCAL_PORT:-8791}"
 
 line() { printf '\n========== %s ==========\n' "$1"; }
 
@@ -44,7 +44,7 @@ printf 'Rules in user6.rules: %s\n' "$(grep -c '### tuple ###' /etc/ufw/user6.ru
 line "8. INTERFACE wg0 (WireGuard)"
 ip -br addr show wg0 2>/dev/null || echo "wg0 DOES NOT EXIST"
 
-line "9. LISTENING PORTS (relevant to cc-hub)"
+line "9. LISTENING PORTS (relevant to Freilauf)"
 ss -tlnp | grep -E ":(${VPN_PORT}|${LOCAL_PORT})\\b" || echo "no matches for ${VPN_PORT}/${LOCAL_PORT}"
 
 line "10. EXISTING RULES FOR THESE PORTS (incl. comments)"
@@ -57,7 +57,7 @@ iptables --version
 
 line "12. PREVIEW: what 04-firewall.sh WOULD add (not executed!)"
 cat <<EOF
-  ufw allow in on wg0 to any port $VPN_PORT proto tcp comment 'cc-hub VPN-Zugang'
+  ufw allow in on wg0 to any port $VPN_PORT proto tcp comment 'Freilauf VPN-Zugang'
   ufw deny in to any port $VPN_PORT proto tcp
 EOF
 echo

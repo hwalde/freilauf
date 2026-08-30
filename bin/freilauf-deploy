@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
-# cchub-deploy — brings a commit of cc-hub live.
+# freilauf-deploy — brings a commit of Freilauf live.
 #
 # The hub used to be started by systemd from the checkout its operator works in.
 # A restart therefore loaded whatever happened to lie in that directory: half
 # finished edits, or — after a merge to origin/main — the state from before the
 # merge, for as long as nobody ran `git pull` there. Both have happened.
 #
-# This script owns a checkout of its own (~/agents/deploy/cc-hub by default,
-# CCHUB_DEPLOY_DIR overrides it). Nobody works in it, it is always DETACHED on a
+# This script owns a checkout of its own (~/agents/deploy/freilauf by default,
+# FREILAUF_DEPLOY_DIR overrides it). Nobody works in it, it is always DETACHED on a
 # commit, so `git status` stays empty and `git checkout` can never be refused by
 # local work. The operator's own checkout is never touched by this script.
 #
-#   cchub-deploy                deploy origin/<base> (fetch, checkout, deps, scripts,
+#   freilauf-deploy                deploy origin/<base> (fetch, checkout, deps, scripts,
 #                               units, restart, health check, rollback on failure)
-#   cchub-deploy <ref|sha>      deploy that commit instead
-#   cchub-deploy --init [--from <dir> | --url <url>]
+#   freilauf-deploy <ref|sha>      deploy that commit instead
+#   freilauf-deploy --init [--from <dir> | --url <url>]
 #                               create the deploy checkout (clone), then deploy
-#   cchub-deploy --status       deployed sha, origin/<base> sha, ahead-by, last deploy
-#   cchub-deploy --rollback     redeploy the previously deployed sha
+#   freilauf-deploy --status       deployed sha, origin/<base> sha, ahead-by, last deploy
+#   freilauf-deploy --rollback     redeploy the previously deployed sha
+#   freilauf-deploy --migrate      switch an installation still living under the old
+#                               name (cc-hub) over to this one — see
+#                               setup/migrate-from-cc-hub.sh. Takes --dry-run.
 #
 #   --force      deploy even when the target is already checked out
 #   --no-wait    do not wait for a running deploy, fail instead
@@ -27,24 +30,39 @@
 #             · 2 the rollback itself is not healthy — a human is needed
 #
 # Test hooks (deliberately undocumented in --help, used by test/deploy.mjs):
-#   CCHUB_DEPLOY_HEALTH_SECONDS  how long the health check retries (default 20)
+#   FREILAUF_DEPLOY_HEALTH_SECONDS  how long the health check retries (default 20)
 set -euo pipefail
 
-ENV_FILE="${CCHUB_ENV_FILE:-$HOME/.config/cc-hub/env}"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Paths, the FREILAUF_*/CCHUB_* fallback and the unit resolver. This script is
+# what deploys the FIRST commit under the new name onto an installation that is
+# still entirely old — old config directory, old deploy checkout, old systemd
+# unit — so not one of those may be assumed here.
+if [[ ! -r "$SELF_DIR/fl-paths.sh" ]]; then
+    printf '%s\n' "Error: $SELF_DIR/fl-paths.sh is missing — reinstall with setup/02-install-scripts.sh." >&2
+    exit 1
+fi
+# shellcheck source=fl-paths.sh
+. "$SELF_DIR/fl-paths.sh"
+
+ENV_FILE="$(fl_env_file)"
 # shellcheck disable=SC1090
 [[ -f "$ENV_FILE" ]] && . "$ENV_FILE"
 
-DEPLOY_DIR="${CCHUB_DEPLOY_DIR:-$HOME/agents/deploy/cc-hub}"
+DEPLOY_DIR="$(fl_deploy_dir)"
 STATE_DIR="$(dirname "$DEPLOY_DIR")"
-LOG_FILE="$STATE_DIR/cc-hub-deploy.log"
+LOG_FILE="$STATE_DIR/freilauf-deploy.log"
 LOCK_FILE="$STATE_DIR/.lock"
 PREV_FILE="$STATE_DIR/previous-sha"
-LOCAL_PORT="${CCHUB_LOCAL_PORT:-8791}"
-HEALTH_SECONDS="${CCHUB_DEPLOY_HEALTH_SECONDS:-20}"
-DB_FILE="${CCHUB_DATA_DIR:-$HOME/.local/share/cc-hub}/cc-hub.db"
-SYSTEMD_DIR="$HOME/.config/systemd/user"
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOCAL_PORT="$(fl_env LOCAL_PORT 8791)"
+HEALTH_SECONDS="$(fl_env DEPLOY_HEALTH_SECONDS 20)"
+DB_FILE="$(fl_db_file)"
+SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 HEALTH_REASON=""
+# The unit names are asked for where they are USED, not here: `fl_unit` caches
+# its answer, and a deploy that finds nothing to do (or a --status) must leave
+# systemd alone entirely — which is exactly what the deploy suite asserts.
 
 log() {
     local line="[$(date '+%F %T')] $*"
@@ -54,12 +72,14 @@ log() {
 
 die() { log "ERROR: $*"; exit 2; }
 
-usage() { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # ------------------------------------------------------------------ arguments
-MODE=deploy REF="" FROM="" URL="" FORCE=0 NO_WAIT=0 NOTIFY=0
+MODE=deploy REF="" FROM="" URL="" FORCE=0 NO_WAIT=0 NOTIFY=0 MIGRATE_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --migrate)  MODE=migrate ;;
+        --dry-run)  MIGRATE_ARGS+=("--dry-run") ;;
         --init)     MODE=init ;;
         --status)   MODE=status ;;
         --rollback) MODE=rollback ;;
@@ -78,17 +98,20 @@ done
 mkdir -p "$STATE_DIR"
 
 # ------------------------------------------------------------------ the base branch
-# The branch a plain `cchub-deploy` deploys. The hub knows it per repo, so ask the
+# The branch a plain `freilauf-deploy` deploys. The hub knows it per repo, so ask the
 # hub's own database — but only if it is really there; opening a missing file would
-# CREATE an empty database. Everything about this falls back to `main`.
+# CREATE an empty database. The repository row may still be called `cc-hub` — the
+# migration deliberately does not rename it, because that row is the operator's
+# own checkout — so the new name is asked for first and the old one accepted
+# after it. Everything about this falls back to `main`.
 base_branch() {
-    if [[ -n "${CCHUB_DEPLOY_BASE:-}" ]]; then printf '%s' "$CCHUB_DEPLOY_BASE"; return; fi
+    if [[ -n "${FREILAUF_DEPLOY_BASE:-}" ]]; then printf '%s' "$FREILAUF_DEPLOY_BASE"; return; fi
     if [[ -f "$DB_FILE" ]]; then
         local b
         b="$(node --disable-warning=ExperimentalWarning -e '
 const {DatabaseSync}=require("node:sqlite");
 const db=new DatabaseSync(process.argv[1]);
-const r=db.prepare("SELECT base_branch FROM repos WHERE name=?").get("cc-hub");
+const r=db.prepare("SELECT base_branch FROM repos WHERE name IN (?,?) ORDER BY CASE name WHEN ? THEN 0 ELSE 1 END LIMIT 1").get("freilauf","cc-hub","freilauf");
 process.stdout.write(r&&r.base_branch?String(r.base_branch):"");' "$DB_FILE" 2>/dev/null || true)"
         [[ -n $b ]] && { printf '%s' "$b"; return; }
     fi
@@ -96,19 +119,19 @@ process.stdout.write(r&&r.base_branch?String(r.base_branch):"");' "$DB_FILE" 2>/
 }
 
 # ------------------------------------------------------------------ notification
-# Best effort in every direction: no channel configured, no network, no cc-notify
+# Best effort in every direction: no channel configured, no network, no fl-notify
 # on the PATH — the deploy is not affected by any of it.
 #
 # This used to be a second, independent Telegram implementation right here: read
 # `telegram_token` and `telegram_chat` out of the SQLite database and curl the
-# Bot API. `cc-notify` loads the plugins and calls the hub's own notification
+# Bot API. `fl-notify` loads the plugins and calls the hub's own notification
 # facade instead, so a failed deploy reaches whatever the operator configured —
 # and nothing at all when they configured none, which is a supported state and
 # never a reason to fail a deploy.
 notify_out() {
     local text="$1"
-    command -v cc-notify >/dev/null 2>&1 || return 0
-    cc-notify --quiet --kind deploy "$text" >/dev/null 2>&1 || true
+    command -v fl-notify >/dev/null 2>&1 || return 0
+    fl-notify --quiet --kind deploy "$text" >/dev/null 2>&1 || true
 }
 
 # ------------------------------------------------------------------ git helpers
@@ -163,8 +186,8 @@ install_deps() {
     printf '%s\n' "$want" >"$DEPLOY_DIR/.deploy-lock-hash"
 }
 
-# The cc-* scripts in ~/.local/bin must always match the hub that is running —
-# cc-report talks to it, cc-start starts runs for it. Remembering that by hand is
+# The fl-* scripts in ~/.local/bin must always match the hub that is running —
+# fl-report talks to it, fl-start starts runs for it. Remembering that by hand is
 # what a deploy script exists to stop.
 install_scripts() {
     log "installing scripts into ~/.local/bin"
@@ -191,17 +214,18 @@ sync_units() {
 }
 
 # ------------------------------------------------------------------ restart + health
-vpn_active() { [[ "$(systemctl --user is-active cchub-vpn.service 2>/dev/null || true)" == active ]]; }
+vpn_active() { [[ "$(systemctl --user is-active "$(fl_vpn_unit)" 2>/dev/null || true)" == active ]]; }
 
 restart_hub() {
-    local vpn_was="$1"
-    log "systemctl --user restart cchub.service"
-    systemctl --user restart cchub.service
-    # cchub-vpn.service has Requires=cchub.service, so a restart of the hub takes
+    local vpn_was="$1" unit vpn
+    unit="$(fl_unit)"; vpn="$(fl_vpn_unit)"
+    log "systemctl --user restart $unit"
+    systemctl --user restart "$unit"
+    # The VPN unit has Requires= on the hub unit, so a restart of the hub takes
     # it down with it. Access that was on before the deploy has to be on after it.
     if [[ "$vpn_was" == 1 ]] && ! vpn_active; then
-        log "access was on — starting cchub-vpn.service again"
-        systemctl --user start cchub-vpn.service || log "WARNING: cchub-vpn.service did not start"
+        log "access was on — starting $vpn again"
+        systemctl --user start "$vpn" || log "WARNING: $vpn did not start"
     fi
 }
 
@@ -212,7 +236,8 @@ restart_hub() {
 # is what the failure message carries when the health check really failed.
 journal_errors() {
     local since="$1"
-    journalctl --user -u cchub -n 30 --since "$since" --no-pager 2>/dev/null \
+    local unit; unit="$(fl_unit)"
+    journalctl --user -u "${unit%.service}" -n 30 --since "$since" --no-pager 2>/dev/null \
         | grep -E 'Error|Exception' || true
 }
 
@@ -220,15 +245,16 @@ journal_errors() {
 # else — a syntax error, a failed import, a port already taken — shows up here as
 # a connection that is refused for as long as we are willing to wait.
 health_check() {
-    local i code=000
+    local i code=000 unit
+    unit="$(fl_unit)"
     for ((i = 0; i < HEALTH_SECONDS; i++)); do
         code="$(curl -sS -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${LOCAL_PORT}/" 2>/dev/null || printf '000')"
         if [[ "$code" == 200 ]]; then
-            if [[ "$(systemctl --user is-active cchub.service 2>/dev/null || true)" == active ]]; then
+            if [[ "$(systemctl --user is-active "$unit" 2>/dev/null || true)" == active ]]; then
                 HEALTH_REASON=""
                 return 0
             fi
-            HEALTH_REASON="HTTP 200 but cchub.service is not active"
+            HEALTH_REASON="HTTP 200 but $unit is not active"
             return 1
         fi
         sleep 1
@@ -239,7 +265,7 @@ health_check() {
 
 # ------------------------------------------------------------------ the deploy
 do_deploy() {
-    have_checkout || die "no deploy checkout at $DEPLOY_DIR — run: cchub-deploy --init [--from <dir> | --url <url>]"
+    have_checkout || die "no deploy checkout at $DEPLOY_DIR — run: freilauf-deploy --init [--from <dir> | --url <url>]"
 
     log "fetch origin"
     g fetch --prune --quiet origin || log "WARNING: fetch failed — working with what is already here"
@@ -269,7 +295,7 @@ do_deploy() {
         if [[ -n $ok_errs ]]; then log "note: the journal mentions errors since the restart:
 $ok_errs"; fi
         log "deployed $(sha_short "$target") ($(subject_of "$target"))"
-        if [[ $NOTIFY == 1 ]]; then notify_out "cc-hub deployed $(sha_short "$target"): $(subject_of "$target")"; fi
+        if [[ $NOTIFY == 1 ]]; then notify_out "Freilauf deployed $(sha_short "$target"): $(subject_of "$target")"; fi
         return 0
     fi
 
@@ -285,13 +311,13 @@ $errs"; fi
     restart_hub "$vpn_was"
     if health_check; then
         log "deploy of $(sha_short "$target") FAILED ($reason), rolled back to $(sha_short "$current")"
-        notify_out "cc-hub deploy of $(sha_short "$target") FAILED ($reason). Rolled back to $(sha_short "$current") — the hub is up again."
+        notify_out "Freilauf deploy of $(sha_short "$target") FAILED ($reason). Rolled back to $(sha_short "$current") — the hub is up again."
         exit 1
     fi
     log "ROLLBACK to $(sha_short "$current") is NOT healthy either ($HEALTH_REASON) — a human is needed"
     log "journal:
 $(journal_errors "$since")"
-    notify_out "cc-hub deploy of $(sha_short "$target") FAILED and the rollback to $(sha_short "$current") is not healthy either. The hub is DOWN — please look at it."
+    notify_out "Freilauf deploy of $(sha_short "$target") FAILED and the rollback to $(sha_short "$current") is not healthy either. The hub is DOWN — please look at it."
     exit 2
 }
 
@@ -332,7 +358,7 @@ do_rollback() {
 }
 
 do_status() {
-    have_checkout || { echo "Deploy dir:   $DEPLOY_DIR (does not exist yet — cchub-deploy --init)"; return 0; }
+    have_checkout || { echo "Deploy dir:   $DEPLOY_DIR (does not exist yet — freilauf-deploy --init)"; return 0; }
     local base current target ahead
     base="$(base_branch)"
     g fetch --prune --quiet origin 2>/dev/null || true
@@ -346,7 +372,7 @@ do_status() {
         if [[ "$ahead" == 0 ]]; then
             echo "Ahead:        up to date"
         else
-            echo "Ahead:        origin/$base is $ahead ahead — cchub deploy"
+            echo "Ahead:        origin/$base is $ahead ahead — freilauf deploy"
         fi
     else
         echo "origin/$base:  unknown (no fetch)"
@@ -354,7 +380,21 @@ do_status() {
     echo "Last deploy:  $(grep -E 'deployed |rolled back|FAILED' "$LOG_FILE" 2>/dev/null | tail -1 || true)"
 }
 
+# ------------------------------------------------------------------ migration
+# The one explicit operator step that moves an installation from the old name to
+# this one. It lives in setup/ because it is setup, and it is reachable from
+# here because `freilauf-deploy` is what an operator has on their PATH.
+do_migrate() {
+    local script="" c
+    for c in "$SELF_DIR/../setup/migrate-from-cc-hub.sh" "$DEPLOY_DIR/setup/migrate-from-cc-hub.sh"; do
+        [[ -r "$c" ]] && { script="$c"; break; }
+    done
+    [[ -n "$script" ]] || die "migrate-from-cc-hub.sh not found (looked next to this script and in $DEPLOY_DIR/setup)"
+    exec bash "$script" "${MIGRATE_ARGS[@]+"${MIGRATE_ARGS[@]}"}"
+}
+
 case "$MODE" in
+    migrate)  do_migrate ;;
     status)   do_status ;;
     init)     take_lock; do_init ;;
     rollback) take_lock; do_rollback ;;

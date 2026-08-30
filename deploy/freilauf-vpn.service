@@ -1,0 +1,19 @@
+# Freilauf VPN access (TLS on wg0). Fail-closed: NOT automatically active after reboot.
+[Unit]
+Description=Freilauf VPN access (TLS on wg0)
+After=freilauf.service
+Requires=freilauf.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/freilauf/env
+# Same checkout as the hub itself — see the comment in freilauf.service.
+WorkingDirectory=%h/agents/deploy/freilauf
+ExecStart=/usr/bin/node %h/agents/deploy/freilauf/vpn-proxy.mjs
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

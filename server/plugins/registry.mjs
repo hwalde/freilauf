@@ -1,4 +1,4 @@
-// cc-hub — the one plugin registry.
+// Freilauf — the one plugin registry.
 //
 // Coding agents ("harnesses") and model providers used to live in two static
 // index files that imported their built-ins and exported a frozen object. That

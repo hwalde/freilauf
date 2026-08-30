@@ -1,4 +1,4 @@
-// cc-hub — provider plugin: OpenCode Zen.
+// Freilauf — provider plugin: OpenCode Zen.
 //
 // Pitfall: opencode addresses Zen with the model prefix 'opencode' — NOT
 // 'opencode-zen' (the docs say otherwise, but `opencode models --pure` is the

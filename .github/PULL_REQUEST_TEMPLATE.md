@@ -12,7 +12,7 @@ Delete anything below that does not apply — this is a checklist, not a form to
 
 - [ ] `node test/unit.mjs && node test/e2e.mjs` are green
 - [ ] `node test/browser.mjs` (touched `public/hub.js`) / `test/proxy.mjs`
-      (touched `vpn-proxy.mjs`) / `test/deploy.mjs` (touched `bin/cchub-deploy`)
+      (touched `vpn-proxy.mjs`) / `test/deploy.mjs` (touched `bin/freilauf-deploy`)
 - [ ] New UI strings go through i18n and exist in **all three** `lang/*.json`
 - [ ] README changes applied to `README.md`, `README.zh-CN.md` **and** `README.de.md`
 - [ ] `SETUP_WITH_AGENT.md` updated if setup, prompts, plugin contracts or flow

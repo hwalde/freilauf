@@ -1,4 +1,4 @@
-// cc-hub — settings a plugin declares for itself.
+// Freilauf — settings a plugin declares for itself.
 //
 // A plugin carries two groups of operator-configurable fields: `settings`
 // (rendered on the Plugins page, next to the plugin) and `gate.fields` (the

@@ -1,4 +1,4 @@
-// cc-hub flows — triggers. Four kinds:
+// Freilauf flows — triggers. Four kinds:
 //   run_finished  a run this flow is ATTACHED to reached done/failed/aborted
 //   run_merged    the work of a run landed on the repo's base branch
 //   cron          5-field cron expression, evaluated every tick (minute-debounced)

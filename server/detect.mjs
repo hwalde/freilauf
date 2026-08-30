@@ -1,10 +1,10 @@
-// cc-hub — detection of rate limits and provider failures from text. Pure
+// Freilauf — detection of rate limits and provider failures from text. Pure
 // logic: no database, no filesystem — everything here is testable with fixed
 // inputs.
 //
 // Why this is needed at all: on a rate limit or provider outage the agent
 // itself can no longer report — without an API there is no tool call, so no
-// cc-report. The platform has to see it from the outside. There are three
+// fl-report. The platform has to see it from the outside. There are three
 // sources, in this order of reliability:
 //
 //   hook        claude 'StopFailure' (delivers a fixed error enum), opencode
@@ -92,7 +92,7 @@ const AUSNAHMEN = [
   // Work on exactly this code. Case-insensitive since a capital "Incidents:"
   // (the hub's own section heading, scrolling through the agent's terminal)
   // slipped past the lowercase version and landed in the DB as a rate limit.
-  /cc-hub|detect\.mjs|incidents?\b|test\/(unit|e2e)/i,
+  /freilauf|cc-hub|detect\.mjs|incidents?\b|test\/(unit|e2e)/i,
   /\b(describe|it|test|expect)\(/,          // test code
   /retry_after|retryAfter|rateLimit[A-Z]|rate_limit_hits|RATE_LIMIT/, // identifiers in source
   // A call with a quoted/bracketed argument list is source code, not output —
@@ -212,11 +212,11 @@ export function bewerteLogTreffer({ anzahl, erstGesehenMs, zuletztGesehenMs, let
  * The hub launches claude with `--session-id <run id>` (runner.mjs), so the run's
  * own session carries the run id as its session id — and every Claude hook event
  * delivers that id on stdin. A claude process the AGENT spawns (a probe, a test of
- * error handling, a sub-harness) inherits the worktree's hooks AND CC_RUN_ID, but
+ * error handling, a sub-harness) inherits the worktree's hooks AND FL_RUN_ID, but
  * gets its own session id: its failures are the run's subject matter, not the run's
  * provider problems. Measured 2026-08-30: an agent testing a fake model id
  * (`nosuch/model-xyz`) opened a red "Model unavailable" incident on its own,
- * perfectly healthy run. Unknown (no session id, older cc-report) → the run's own —
+ * perfectly healthy run. Unknown (no session id, older fl-report) → the run's own —
  * the guard may only ever narrow, never swallow.
  */
 export function fremdeClaudeSession(runId, harness, sessionId) {

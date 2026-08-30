@@ -1,4 +1,4 @@
-// cc-hub — favorites: the setup of a run, saved under a name.
+// Freilauf — favorites: the setup of a run, saved under a name.
 //
 // Picking a coding agent, a provider, a model out of ~200 slugs and an effort
 // level is the part of starting a run that is the same every time and answers
@@ -24,13 +24,14 @@ import { attachmentsFromForm, attachmentSummary } from './flows/attach.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import { providerLabel } from './providers/index.mjs'
 import { t } from './i18n.mjs'
+import { env } from './env.mjs'
 
 /**
  * How many favorites there may be. A favorite is a shortcut, and a list one has
  * to read is not one — the Quick-Run dialog shall be a glance, not a search.
  * Overridable for an installation that really wants more.
  */
-export const FAVORITES_MAX = Number(process.env.CCHUB_FAVORITES_MAX ?? 3) || 3
+export const FAVORITES_MAX = Number(env('FAVORITES_MAX') ?? 3) || 3
 
 export function listFavorites() {
   return db.prepare('SELECT * FROM favorites ORDER BY id').all()

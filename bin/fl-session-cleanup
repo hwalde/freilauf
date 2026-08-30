@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# cc-session-cleanup — end tmux sessions to free memory, for the tmux-cleanup
+# fl-session-cleanup — end tmux sessions to free memory, for the tmux-cleanup
 # agent (Settings → tmux cleanup). It measures what a session really costs and
 # when it was last active, protects what must stay, and decides — oldest
 # inactive first — which sessions have to go so the machine's total tmux memory
 # drops to a target.
 #
 # Usage:
-#   cc-session-cleanup                  list every session: activity age + memory
-#   cc-session-cleanup --target-gb N    show which to end to reach ≤ N GB total
-#   cc-session-cleanup --target-gb N --kill   actually end them
-#   cc-session-cleanup --keep "a b"     never touch these session names
-#   cc-session-cleanup --db PATH        hub database (default: ~/.local/share/cc-hub/cc-hub.db)
+#   fl-session-cleanup                  list every session: activity age + memory
+#   fl-session-cleanup --target-gb N    show which to end to reach ≤ N GB total
+#   fl-session-cleanup --target-gb N --kill   actually end them
+#   fl-session-cleanup --keep "a b"     never touch these session names
+#   fl-session-cleanup --db PATH        hub database (default: the hub's own, see bin/fl-paths.sh)
 #
 # The memory of a session is the RSS of its whole process tree below the pane's
 # shell (the shell alone understates it by an order of magnitude) — the same
@@ -31,10 +31,19 @@ while [[ $# -gt 0 ]]; do
     --kill) KILL=1; shift ;;
     --db) DB="${2:-}"; shift 2 ;;
     --help|-h) sed -n '2,12p' "$0"; exit 0 ;;
-    *) echo "cc-session-cleanup: unknown option: $1" >&2; exit 2 ;;
+    *) echo "fl-session-cleanup: unknown option: $1" >&2; exit 2 ;;
   esac
 done
-[[ -z "$DB" ]] && DB="${CCHUB_CLEANUP_DB:-$HOME/.local/share/cc-hub/cc-hub.db}"
+if [[ -z "$DB" ]]; then
+  # shellcheck source=fl-paths.sh
+  FL_PATHS="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/fl-paths.sh"
+  [[ -r "$FL_PATHS" ]] && . "$FL_PATHS"
+  if declare -F fl_db_file >/dev/null 2>&1; then
+    DB="$(fl_env CLEANUP_DB)"; [[ -n "$DB" ]] || DB="$(fl_db_file)"
+  else
+    DB="${FREILAUF_CLEANUP_DB:-${CCHUB_CLEANUP_DB:-}}"
+  fi
+fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -91,7 +100,7 @@ while IFS= read -r n; do [[ -n "$n" ]] && PROTECT["$n"]=1; done < "$TMP/protect"
 is_protected() {
   local n="$1"
   [[ -n "${PROTECT[$n]:-}" ]] && return 0
-  case "$n" in cc-e2e-*|cc-skill-traeger-*) return 0 ;; esac
+  case "$n" in fl-e2e-*|fl-skill-traeger-*|cc-e2e-*|cc-skill-traeger-*) return 0 ;; esac
   return 1
 }
 

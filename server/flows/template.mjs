@@ -1,4 +1,4 @@
-// cc-hub flows — pure helpers: {{path}} templates, dotted-path lookup and the
+// Freilauf flows — pure helpers: {{path}} templates, dotted-path lookup and the
 // condition operators. No I/O, no database — this is what the unit tests cover.
 
 /** Read `a.b.0.c` from an object; undefined when any segment is missing. */

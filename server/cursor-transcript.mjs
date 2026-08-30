@@ -1,4 +1,4 @@
-// cc-hub — cursor's transcript: the channel that works without a hook.
+// Freilauf — cursor's transcript: the channel that works without a hook.
 //
 // cursor writes every conversation as JSONL to
 //   <data dir>/projects/<slug>/agent-transcripts/<session id>/<session id>.jsonl
@@ -18,8 +18,9 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash } from 'node:crypto'
+import { env } from './env.mjs'
 
-const DATA_DIR = () => process.env.CCHUB_CURSOR_DIR ?? process.env.CURSOR_DATA_DIR ?? `${homedir()}/.cursor`
+const DATA_DIR = () => env('CURSOR_DIR') ?? process.env.CURSOR_DATA_DIR ?? `${homedir()}/.cursor`
 
 /**
  * cursor's own slug rule, read from the binary (2026.08.11-e8db854): every
@@ -76,7 +77,7 @@ export function transcriptPath(run) {
  *                history, not the end of the run.
  *   lastAnswer   the last text an assistant message carried — the agent's own
  *                closing summary, and hence the best report text available for a
- *                run that never called cc-report.
+ *                run that never called fl-report.
  */
 export function stateFromJsonl(text) {
   let turnEnded = null

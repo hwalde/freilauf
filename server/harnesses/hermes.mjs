@@ -1,4 +1,4 @@
-// cc-hub — coding agent plugin: hermes.
+// Freilauf — coding agent plugin: hermes.
 //
 // hermes is provider-based and DEMANDS a key for every provider ("No usable
 // credentials found for provider 'opencode-zen'"). It validates nothing about
@@ -20,10 +20,10 @@ const plugin = {
   label: 'Hermes',
   bin: 'hermes',
   installHint: 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash   (then: hermes setup)',
-  sessionTag: 'he-',         // tmux sessions: cc-he-<name>
+  sessionTag: 'he-',         // tmux sessions: fl-he-<name>
 
   /**
-   * How bin/cc-start calls this CLI (see claude.mjs for why the built-in `case`
+   * How bin/fl-start calls this CLI (see claude.mjs for why the built-in `case`
    * in that script, not this block, is what a hermes run is launched from).
    * Note the effort flag: hermes calls the same thing `--reasoning`, which is
    * exactly the kind of per-CLI naming a declaration exists to carry.
@@ -134,8 +134,8 @@ const plugin = {
   },
 
   /**
-   * CLI arguments for cc-start. hermes separates both: model bare (or
-   * author/slug), provider as an own argument. cc-start translates --effort
+   * CLI arguments for fl-start. hermes separates both: model bare (or
+   * author/slug), provider as an own argument. fl-start translates --effort
    * into hermes' --reasoning.
    */
   /**

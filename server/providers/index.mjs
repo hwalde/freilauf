@@ -1,4 +1,4 @@
-// cc-hub — model provider plugin registry.
+// Freilauf — model provider plugin registry.
 //
 // A "provider" here is an inference provider that serves models to
 // provider-based coding agents (opencode, hermes). Each built-in provider is

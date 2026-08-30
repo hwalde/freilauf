@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cc-hub — verification for the agent lifecycle gates (GATES.md G1/G2):
+// Freilauf — verification for the agent lifecycle gates (GATES.md G1/G2):
 //   node test/verify-agent-lifecycle.mjs --migration   old agents table → UNIQUE(repo_id, name)
 //   node test/verify-agent-lifecycle.mjs --lifecycle   uniqueness, move suffix, delete keeps runs
 // Runs against throwaway data directories; the real hub database is never touched.
@@ -10,12 +10,12 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 const MODUS = process.argv[2] ?? '--migration'
-const sandkasten = mkdtempSync(join(tmpdir(), 'cc-hub-agentver-'))
+const sandkasten = mkdtempSync(join(tmpdir(), 'Freilauf-agentver-'))
 
 async function migration() {
   const dataDir = join(sandkasten, 'migration')
   mkdirSync(dataDir, { recursive: true })
-  const dbPath = join(dataDir, 'cc-hub.db')
+  const dbPath = join(dataDir, 'freilauf.db')
 
   // Old schema, exactly as the hub shipped it before this feature: a globally
   // UNIQUE name (column-level) AND the CHECK on `harness` that listed the four
@@ -49,7 +49,7 @@ async function migration() {
   `)
   alt.close()
 
-  process.env.CCHUB_DATA_DIR = dataDir
+  process.env.FREILAUF_DATA_DIR = dataDir
   await import('../server/db.mjs')   // runs all migrations on the old database
 
   const dbs = new DatabaseSync(dbPath)
@@ -78,7 +78,7 @@ async function migration() {
 async function lifecycle() {
   const dataDir = join(sandkasten, 'lifecycle')
   mkdirSync(dataDir, { recursive: true })
-  process.env.CCHUB_DATA_DIR = dataDir
+  process.env.FREILAUF_DATA_DIR = dataDir
   const { default: db } = await import('../server/db.mjs')
   const { saveAgent, agentNameTaken, moveSuffix, moveAgent, deleteAgent } = await import('../server/run-def.mjs')
 

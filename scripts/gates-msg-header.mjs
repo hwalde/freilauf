@@ -5,8 +5,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const sb = mkdtempSync(join(tmpdir(), 'cchub-msg-hdr-'))
-process.env.CCHUB_DATA_DIR = join(sb, 'data')
+const sb = mkdtempSync(join(tmpdir(), 'freilauf-msg-hdr-'))
+process.env.FREILAUF_DATA_DIR = join(sb, 'data')
 
 try {
   const { default: db } = await import('../server/db.mjs')

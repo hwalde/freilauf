@@ -1,4 +1,4 @@
-// cc-hub — SQLite via node:sqlite (zero dependencies; the fallback better-sqlite3
+// Freilauf — SQLite via node:sqlite (zero dependencies; the fallback better-sqlite3
 // would be API-compatible enough to swap out this wrapper).
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
@@ -7,11 +7,16 @@ import { homedir } from 'node:os'
 // events.mjs imports nothing at all — deliberately, so that the module which
 // everything writes through can be imported from anywhere without a cycle.
 import { publish } from './events.mjs'
+import { env } from './env.mjs'
+import { dataDir, dbPath } from './paths.mjs'
 
-const DATA_DIR = process.env.CCHUB_DATA_DIR ?? join(homedir(), '.local', 'share', 'cc-hub')
+const DATA_DIR = dataDir()
 mkdirSync(DATA_DIR, { recursive: true })
 
-export const DB_PATH = join(DATA_DIR, 'cc-hub.db')
+// `dbPath()` answers both halves of the question at once: the directory may
+// still be the one from before the rename, and inside it the file may still be
+// called `cc-hub.db`. A database that exists is never left behind.
+export const DB_PATH = dbPath()
 export const db = new DatabaseSync(DB_PATH)
 db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;')
 
@@ -229,7 +234,7 @@ addColumn('runs', 'resolver_run_id', 'TEXT')     // the conflict run working for
 addColumn('runs', 'resolves_run_id', 'TEXT')     // set on a conflict run: the run it works for
 // ---- follow-up reports: a finished run can report again ----
 // After `done` the coding agent is still sitting in its session, and the
-// operator often types more work into it. `cc-report done` from a finished run
+// operator often types more work into it. `fl-report done` from a finished run
 // is a FOLLOW-UP report (server/reports.mjs, handleFollowUp): same finish gate,
 // same integration, same flows — announced as "FOLLOW-UP REPORT #n".
 addColumn('runs', 'followups', 'INTEGER NOT NULL DEFAULT 0')      // follow-up reports accepted so far

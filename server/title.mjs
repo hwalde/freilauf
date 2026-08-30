@@ -1,4 +1,4 @@
-// cc-hub — the title of a run.
+// Freilauf — the title of a run.
 //
 // Every run needs a name one can recognize it by in the overview. An agent run
 // has one for free: the agent's. A single run has none — it is not stored

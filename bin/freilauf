@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# freilauf — controls the Freilauf hub. Planung 4.8 + 9.
+#   freilauf on|off|status|url|logs|restart|stop|start
+#   freilauf deploy [ref]
+#   freilauf pipeline on|off|status
+set -euo pipefail
+
+# Where things live, and which systemd unit really runs this hub — an
+# installation that has not been migrated yet keeps the old paths and is run by
+# `cchub.service`, and restarting the wrong unit would leave it down.
+FL_PATHS="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/fl-paths.sh"
+if [[ ! -r "$FL_PATHS" ]]; then
+    printf '%s\n' "Error: $FL_PATHS is missing — reinstall with setup/02-install-scripts.sh." >&2
+    exit 1
+fi
+# shellcheck source=fl-paths.sh
+. "$FL_PATHS"
+
+ENV_FILE="$(fl_env_file)"
+# shellcheck disable=SC1090
+[[ -f "$ENV_FILE" ]] && . "$ENV_FILE"
+LOCAL_PORT="$(fl_env LOCAL_PORT 8791)"
+VPN_PORT="$(fl_env VPN_PORT 8790)"
+VPN_BIND="$(fl_env VPN_BIND "<VPN IP not set>")"
+
+usage() {
+    cat <<'EOF'
+Usage: freilauf <command>
+
+  on            start the VPN proxy  → website reachable from outside (WireGuard)
+  off           stop the VPN proxy   → website local-only again (fail-closed)
+  status        state of all three switches + processes
+  url           print the VPN URL
+  logs          journalctl --user of the hub unit
+  start|stop|restart   control the hub process (scheduler/watcher/UI)
+
+  deploy [ref]  bring a commit live: fetch, check out in the hub's own deploy
+                checkout, dependencies, scripts, restart, health check —
+                and roll back if the hub does not come up (freilauf-deploy)
+
+  pipeline on|off|status   global AND gate for scheduled agent starts
+
+Switch model: access (VPN proxy) · pipeline (scheduler gate) · agent (active flag
+in the UI). Hub, scheduler, watcher, notifications and running agents keep running
+independently of the access switch.
+EOF
+}
+
+db_pipeline() {
+    node --disable-warning=ExperimentalWarning -e '
+const {DatabaseSync}=require("node:sqlite");
+const db=new DatabaseSync(process.argv[1]);
+const r=db.prepare("SELECT value FROM settings WHERE key=?").get("pipeline_on");
+process.stdout.write((r&&r.value==="1")?"on":"off");' "$(fl_db_file)" 2>/dev/null || echo '?'
+}
+
+set_pipeline() {
+    node --disable-warning=ExperimentalWarning -e '
+const {DatabaseSync}=require("node:sqlite");
+const db=new DatabaseSync(process.argv[1]);
+db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run("pipeline_on", process.argv[2]);' "$(fl_db_file)" "$1"
+}
+
+case "${1:-}" in
+    on)
+        systemctl --user start "$(fl_vpn_unit)"
+        echo "Access on: https://${VPN_BIND}:${VPN_PORT}"
+        ;;
+    off)
+        systemctl --user stop "$(fl_vpn_unit)"
+        echo "Access off (hub keeps running locally)."
+        ;;
+    status)
+        hub="$(systemctl --user is-active "$(fl_unit)" 2>/dev/null || true)" ; hub="${hub:-unknown}"
+        vpn="$(systemctl --user is-active "$(fl_vpn_unit)" 2>/dev/null || true)"; vpn="${vpn:-unknown}"
+        echo "Hub process:  $hub   (127.0.0.1:${LOCAL_PORT}, $(fl_unit))"
+        echo "Access (VPN): $vpn   (https://${VPN_BIND}:${VPN_PORT})"
+        echo "Pipeline:     $(db_pipeline)"
+        echo "Running agent sessions: $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -cE '^(fl|cc)-' || true)"
+        # Which commit is actually running, and whether origin has moved on. The
+        # deploy script is the only thing that knows its checkout, so it answers.
+        if command -v freilauf-deploy >/dev/null 2>&1; then
+            freilauf-deploy --status 2>/dev/null | grep -E '^(Deployed|Ahead):' || true
+        fi
+        ;;
+    deploy)
+        shift
+        command -v freilauf-deploy >/dev/null 2>&1 || {
+            echo "freilauf-deploy is not installed — run ./setup/02-install-scripts.sh" >&2; exit 2; }
+        exec freilauf-deploy "$@"
+        ;;
+    url)
+        echo "https://${VPN_BIND}:${VPN_PORT}"
+        ;;
+    logs)
+        exec journalctl --user -u "$(fl_unit_short)" -f -n 100
+        ;;
+    start)
+        systemctl --user start "$(fl_unit)" ;;
+    stop)
+        systemctl --user stop "$(fl_unit)" ;;
+    restart)
+        systemctl --user restart "$(fl_unit)" ;;
+    pipeline)
+        case "${2:-status}" in
+            on)  set_pipeline 1; echo "Pipeline on." ;;
+            off) set_pipeline 0; echo "Pipeline off — agent flags remain unchanged." ;;
+            status) echo "Pipeline: $(db_pipeline)" ;;
+            *) usage; exit 2 ;;
+        esac ;;
+    -h|--help|"" ) usage ;;
+    *) usage; exit 2 ;;
+esac

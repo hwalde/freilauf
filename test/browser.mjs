@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cc-hub — browser tests: what public/hub.js actually does, in a real browser.
+// Freilauf — browser tests: what public/hub.js actually does, in a real browser.
 //
 // Why this suite exists: hub.js was 746 lines with not one test, because no
 // browser ran in the suite. Every other check in this project stops at the HTML
@@ -54,7 +54,7 @@ if (!browser) {
 }
 
 // ---------------------------------------------------------------- sandbox
-const sk = neuerSandkasten({ praefix: 'cc-hub-browser-', behalten: BEHALTEN })
+const sk = neuerSandkasten({ praefix: 'Freilauf-browser-', behalten: BEHALTEN })
 const { hol, formular } = sk
 let db = null
 let kontext = null
@@ -193,7 +193,7 @@ async function datenAnlegen() {
 try {
   console.log(`Sandbox: ${sk.SB}`)
   await sk.bauen()
-  await sk.hubStarten({ env: { CCHUB_USAGE_CACHE_MS: '300', CCHUB_BALANCE_CACHE_MS: '300' } })
+  await sk.hubStarten({ env: { FREILAUF_USAGE_CACHE_MS: '300', FREILAUF_BALANCE_CACHE_MS: '300' } })
   db = sk.db
   kontext = await browser.newContext({ viewport: { width: 1400, height: 900 } })
   await datenAnlegen()
@@ -238,7 +238,7 @@ try {
 
   await pruefe('the relative-time tooltip follows the configured timezone', async () => {
     // 12:00 UTC on 2026-08-25 is 08:00 in New York (EDT, UTC-4). The tooltip is
-    // re-rendered by hub.js from window.CCHUB_TZ — it must read the configured
+    // re-rendered by hub.js from window.FREILAUF_TZ — it must read the configured
     // clock, not the browser machine's.
     const ur = db.prepare('SELECT started_at FROM runs WHERE id=?').get(R_ALT).started_at
     db.prepare("UPDATE runs SET started_at='2026-08-25 12:00:00' WHERE id=?").run(R_ALT)
@@ -331,14 +331,14 @@ try {
     await p.click('#side-toggle')
     falsch(await p.isVisible('#side-body'), 'folded away')
     gleich(await p.$eval('#side-toggle', b => b.getAttribute('aria-expanded')), 'false', 'and says that too')
-    gleich(await p.evaluate(() => localStorage.getItem('cchub.sidebar.open')), '0', 'the choice is written down')
+    gleich(await p.evaluate(() => localStorage.getItem('freilauf.sidebar.open')), '0', 'the choice is written down')
     // Another page, same choice — that is the whole point of writing it down.
     await p.goto(sk.basis + '/agents', { waitUntil: 'load' })
     falsch(await p.isVisible('#side-body'), 'still folded on the next page')
     wahr(await p.isVisible('#side-toggle'), 'but the way back is still reachable')
     await p.click('#side-toggle')
     wahr(await p.isVisible('#side-body'), 'and opens again')
-    gleich(await p.evaluate(() => localStorage.getItem('cchub.sidebar.open')), '1', 'which is written down as well')
+    gleich(await p.evaluate(() => localStorage.getItem('freilauf.sidebar.open')), '1', 'which is written down as well')
     sauber(p)
     await p.close()
   })
@@ -365,13 +365,13 @@ try {
   // The sidebar's statistics (subscription usage, provider balances) move on
   // their OWN clock: a long-running agent burns quota without firing a single
   // run event, and before the poll the panel sat frozen at page-load values.
-  // The poll (window.CCHUB_SIDEBAR_POLL_MS) plus the shortened server caches
-  // (the sandbox hub starts with CCHUB_USAGE_CACHE_MS=300) turn that minute into
+  // The poll (window.FREILAUF_SIDEBAR_POLL_MS) plus the shortened server caches
+  // (the sandbox hub starts with FREILAUF_USAGE_CACHE_MS=300) turn that minute into
   // seconds — the page itself behaves exactly as in production, only faster.
   gruppe('The status sidebar statistics refresh on their own')
 
   await pruefe('the Claude usage percentage is updated without a run event', async () => {
-    const p = await neueSeite(`/?repo=${repoId}`, () => { window.CCHUB_SIDEBAR_POLL_MS = 1500 })
+    const p = await neueSeite(`/?repo=${repoId}`, () => { window.FREILAUF_SIDEBAR_POLL_MS = 1500 })
     // The sandbox quota.json fixture starts at 1 % — read what the panel shows.
     const liest5h = () => p.$$eval('#usage-panel .quota', (qs) => {
       for (const q of qs) {
@@ -533,7 +533,7 @@ try {
     gleich(await an.$eval(feld, f => f.dataset.mergeMode), 'hub', 'the integrating repo says so')
     wahr(await an.isVisible(`${feld} [data-explain="hub"]`), 'the hub explanation is shown')
     falsch(await an.isVisible(`${feld} [data-explain="off"]`), 'and the off one is not')
-    enthaelt(await an.textContent(`${feld} [data-explain="hub"]`), 'cc-hub merges',
+    enthaelt(await an.textContent(`${feld} [data-explain="hub"]`), 'Freilauf merges',
       'hub: the hub merges it, whatever the rule is called')
     wahr(await an.isVisible(`${feld} [data-hub-only]`), 'and "keep on branch" is offered')
     sauber(an)
@@ -603,7 +603,7 @@ try {
     const p = await neueSeite(`/?repo=${repoId}`)
     await p.click('#qr-open')
     await p.selectOption('#qr-fav', String(FAV2))
-    gleich(await p.evaluate(() => localStorage.getItem('cchub.quickrun.favorite')), String(FAV2),
+    gleich(await p.evaluate(() => localStorage.getItem('freilauf.quickrun.favorite')), String(FAV2),
       'remembered in localStorage')
     await p.reload({ waitUntil: 'load' })
     gleich(await p.$eval('#qr-fav', s => s.value), String(FAV2), 'preselected after a reload')
@@ -618,7 +618,7 @@ try {
     await p.selectOption('#qr-fav', String(FAV1))
     await p.fill('#qr-form textarea[name=prompt]', 'Browser-Quickrun: tu etwas')
     await p.click('#qr-form button[type=submit]')
-    await p.waitForSelector('#cchub-toasts .toast', { timeout: 15_000 })
+    await p.waitForSelector('#freilauf-toasts .toast', { timeout: 15_000 })
 
     gleich(await p.$eval('#qr-dialog', d => d.open), false, 'the dialog closed itself')
     gleich(await p.$eval('#qr-form textarea[name=prompt]', el => el.value), '', 'the task is cleared')
@@ -628,8 +628,8 @@ try {
     gleich(await p.$eval('#qr-form select[data-start-switch]', s => s.value), 'now', 'the start time stands')
     gleich(new URL(p.url()).pathname, '/', 'and the page one started from is still the page one is on')
 
-    enthaelt(await p.textContent('#cchub-toasts .toast span'), 'Run started', 'the toast says what happened')
-    const href = await p.$eval('#cchub-toasts .toast a', a => a.getAttribute('href'))
+    enthaelt(await p.textContent('#freilauf-toasts .toast span'), 'Run started', 'the toast says what happened')
+    const href = await p.$eval('#freilauf-toasts .toast a', a => a.getAttribute('href'))
     wahr(/^\/runs\/[0-9a-f-]{36}$/.test(href), `with a link to the run (${href})`)
     gleich(db.prepare('SELECT count(*) c FROM runs').get().c, vorher + 1, 'exactly one run was created')
     const neu = laufRow(href.slice('/runs/'.length))
@@ -700,9 +700,9 @@ try {
       'the favorite\'s coding agent')
     gleich(await neu.$eval('form.settings #model', el => el.value), 'claude-opus-5', 'and its model')
 
-    gleich(await neu.evaluate(() => sessionStorage.getItem('cchub:qrfull')), null,
+    gleich(await neu.evaluate(() => sessionStorage.getItem('freilauf:qrfull')), null,
       'the parked state is consumed on the way in')
-    gleich(await p.evaluate(() => sessionStorage.getItem('cchub:qrfull')), null,
+    gleich(await p.evaluate(() => sessionStorage.getItem('freilauf:qrfull')), null,
       'and not left over in the opener either')
 
     wahr(popupFehler.length === 0, `the new window's console stays quiet (${popupFehler.join(' | ')})`)
@@ -772,7 +772,7 @@ try {
     await p.click('h2 [data-title-edit]')
     await p.fill('h2 input.title-input', 'Auf der Detailseite benannt')
     await p.keyboard.press('Enter')
-    await wartePage(p, () => document.title === 'cc-hub — Auf der Detailseite benannt',
+    await wartePage(p, () => document.title === 'Freilauf — Auf der Detailseite benannt',
       null, 'document.title to follow')
     gleich(laufRow(R_ALT).title, 'Auf der Detailseite benannt', 'and the run carries the name')
     sauber(p)
@@ -1316,8 +1316,8 @@ try {
     // The sidebar's tmux block measures the real tmux server — give it one
     // session so there is something to show, and register it for the cleanup.
     const { execFile } = await import('node:child_process')
-    await new Promise((r) => execFile('tmux', ['new-session', '-d', '-s', 'cc-browser-mem', 'sleep 300'], () => r()))
-    sk.sessions.add('cc-browser-mem')
+    await new Promise((r) => execFile('tmux', ['new-session', '-d', '-s', 'fl-browser-mem', 'sleep 300'], () => r()))
+    sk.sessions.add('fl-browser-mem')
     await formular('/settings/cleanup', {
       harness: 'claude', cleanup_on: '1', cleanup_threshold_gb: '1', cleanup_target_gb: '0.5',
       cleanup_cooldown_min: '5',
@@ -1340,7 +1340,7 @@ try {
     const p = await neueSeite('/')
     // An earlier test may have folded the sidebar away (the choice is persisted in
     // localStorage) — the button lives inside the folded-away body.
-    await p.evaluate(() => { try { localStorage.setItem('cchub.sidebar.open', '1') } catch (err) { /* private mode */ } })
+    await p.evaluate(() => { try { localStorage.setItem('freilauf.sidebar.open', '1') } catch (err) { /* private mode */ } })
     await p.reload()
     await wartePage(p, () => !!document.querySelector('.mem-free-open') &&
       getComputedStyle(document.querySelector('.mem-free-open')).display !== 'none', null, 'the small sidebar free-memory button')

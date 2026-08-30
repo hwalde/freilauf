@@ -1,4 +1,4 @@
-// cc-hub — installing and removing external plugin packages.
+// Freilauf — installing and removing external plugin packages.
 //
 // Installing is a directory copy plus a load: the operator points at a
 // directory that holds a `plugin.json`, the hub validates the manifest FIRST

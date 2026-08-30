@@ -1,4 +1,4 @@
-// cc-hub flows — the production `api` object the steps run against. This is the
+// Freilauf flows — the production `api` object the steps run against. This is the
 // ONLY file in the flow module that touches the rest of the hub for side effects
 // (tmux, notifications, run creation). Tests pass a stub with the same shape.
 import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'

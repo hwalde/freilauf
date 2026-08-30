@@ -37,7 +37,7 @@ server/notifiers/          built-in notification channels
   telegram.mjs             the only built-in one
 server/notify.mjs          THE facade: notify(), notifiersConfigured(), sendTest()
 server/notifications.mjs   Settings → Notifications, and the setup-wizard dispatcher
-bin/cc-notify              the same facade from outside the hub process (deploy scripts)
+bin/fl-notify              the same facade from outside the hub process (deploy scripts)
 server/llm/
   json.mjs     tolerant JSON extraction and repair (pure)
   schema.mjs   the minimal JSON-Schema subset: validate/coerce, and explain to a model
@@ -64,10 +64,10 @@ server/notifiers/<id>.mjs      shipped notification channels
 ```
 
 An external plugin is a **package directory** under the plugin directory
-(`CCHUB_PLUGIN_DIR`, default `~/.local/share/cc-hub/plugins`):
+(`FREILAUF_PLUGIN_DIR`, default `~/.local/share/freilauf/plugins`):
 
 ```
-<CCHUB_PLUGIN_DIR>/<id>/
+<FREILAUF_PLUGIN_DIR>/<id>/
     plugin.json     the manifest
     index.mjs       export default { …descriptor }
 ```
@@ -90,10 +90,10 @@ registry's metadata.
 `loadExternalPlugins()` runs in `hub.mjs` **before anything reads the
 registry**: a plugin that arrives after the first form was rendered is a plugin
 the operator cannot choose. A missing plugin directory is the normal case, not
-an error. `CCHUB_PLUGIN_DIR` has to be a test fence as much as a setting: a
+an error. `FREILAUF_PLUGIN_DIR` has to be a test fence as much as a setting: a
 suite that does not point it into its own sandbox loads the operator's real
 external packages and stops being reproducible — the same fence
-`CCHUB_AGENTS_SEED` and `CCHUB_CLAUDE_CREDENTIALS` already are.
+`FREILAUF_AGENTS_SEED` and `FREILAUF_CLAUDE_CREDENTIALS` already are.
 
 **One bad package never costs the hub.** Every step of loading is caught, and
 the failure is recorded rather than thrown: a manifest that will not parse, a
@@ -279,7 +279,7 @@ and does without.
 | `label` | string | display name in the UI |
 | `bin` | string | executable checked with `command -v` (install detection, discovery scan) |
 | `installHint` | string | one-liner shown when the CLI is not installed |
-| `sessionTag` | string | tmux session prefix part: sessions are named `cc-<sessionTag><name>` (`''`, `'oc-'`, `'he-'`, `'cu-'`) |
+| `sessionTag` | string | tmux session prefix part: sessions are named `fl-<sessionTag><name>` (`''`, `'oc-'`, `'he-'`, `'cu-'`) |
 | `subscription` | boolean | `true` = models come from the account, no provider selection (claude, cursor) |
 | `providers` | string[] | provider plugin ids this harness can use (empty for subscription harnesses) |
 | `keyFreeProviders` | string[] | subset of `providers` usable **without** an own credential |
@@ -288,18 +288,18 @@ and does without.
 | `settings` | `SettingField[]` (optional) | operator-configurable fields rendered on the plugin's card |
 | `gate` | `{label?, switchKey?, fields[], check(ctx, values, run)}` (optional) | the budget gate for runs on this coding agent — claude and cursor declare one |
 | `llm` | `{schema, overhead?, models(ctx), complete(ctx, req)}` (optional) | this coding agent can answer the hub's own questions; see below |
-| `launch` | `{promptMode, args[], interactiveArgs?, bin?, sessionTag?, installHint?, stderrLog?, submitNudge?}` (optional) | how `bin/cc-start` calls this CLI. **Without it an external coding agent cannot start a run at all**; see "The launch declaration" |
+| `launch` | `{promptMode, args[], interactiveArgs?, bin?, sessionTag?, installHint?, stderrLog?, submitNudge?}` (optional) | how `bin/fl-start` calls this CLI. **Without it an external coding agent cannot start a run at all**; see "The launch declaration" |
 | `pulseId(run)` | fn → string\|null | which pulse target to check while this run is active; `null` = explicitly *not monitored*, which is not the same as healthy |
 | `pulseTargets` | object | extra pulse targets `{id: {url, okStatus[]}}` beyond the provider plugins (claude contributes `anthropic`) |
 | `logPatterns` | `[{typ, re}]` | narrow regexes for the pipe-pane log scan; `typ` ∈ `TYPEN` from `detect.mjs` |
 | `turnEndsRun` | boolean (optional) | `true` = the end of a turn ends the RUN (`_turn_end` → `finishByTurnEnd()` in `reports.mjs`). Set it when the CLI keeps running after the work is done, so neither `_pane_died` nor `_exit` will ever come — cursor's TUI does exactly that |
-| `hookFiles({ccReport})` | fn (optional) | files the hub writes into the workspace before the start: `[{path, content}]`, `path` relative to the worktree. `ccReport` is the absolute path of `cc-report` — hook commands must not depend on `PATH`. An existing file is never overwritten, and `harnessOwnedPaths()` keeps these paths out of the worktree cleanup's dirty check |
+| `hookFiles({ccReport})` | fn (optional) | files the hub writes into the workspace before the start: `[{path, content}]`, `path` relative to the worktree. `ccReport` is the absolute path of `fl-report` — hook commands must not depend on `PATH`. An existing file is never overwritten, and `harnessOwnedPaths()` keeps these paths out of the worktree cleanup's dirty check |
 | `goal` | `{max, command(condition)}` (optional) | this CLI takes a SECOND prompt, one that says when the run is done — claude's `/goal <condition>`. `max` is the longest condition it accepts, `command()` builds the line. Presence is the whole capability check: the form shows the goal field only for these harnesses (`harnessesWithGoal()`), and `server/goal.mjs` types the line into the session after the start, because a slash command has no CLI flag |
 | `promptRules` | string (optional) | extra prompt lines for this harness, appended to the platform rules by `platformSuffix()` — also to a custom template from the settings, because they describe the machine, not the operator's house rules |
 | `fetchModels()` | async fn | model list for subscription harnesses (cached by `models.mjs`) |
 | `effortLevels()` | async fn (optional) | levels the CLI itself accepts (probed; cached 24 h) |
 | `effortOptions({provider, model, helpers})` | async fn | levels for a concrete combination; returns `{stufen, standard?, pflicht?, quelle?, hinweisKey}` — `stufen: null` hides the form field. `helpers` = `{ownLevels, registryEffort, openrouterEffort}` |
-| `modelArgs(run, ctx)` | fn | CLI arguments for `cc-start`; returns `{args, fehlt}` (`fehlt` = provider ids whose credential is missing). **Two arguments now** — see below |
+| `modelArgs(run, ctx)` | fn | CLI arguments for `fl-start`; returns `{args, fehlt}` (`fehlt` = provider ids whose credential is missing). **Two arguments now** — see below |
 | `resumeCommand(run)` | fn (optional) | the shell command a HUMAN continues this run's session with, `cd <workdir> && …` included; `null` when the CLI has no reliable way (hermes). Called by `server/integrate.mjs` for every escalation message, the run's detail page and the failed/aborted Telegram texts. Only the plugin knows how its CLI names a session — claude gets `--session-id <run id>` from the hub and can name it back, cursor's id is its transcript's directory, opencode continues the last session of the worktree |
 | `usage(ctx)` | async fn | subscription usage for the overview panel, or `null`. Shapes in `usage.mjs`: `{kind:'claude', five, seven, seven_general, seven_fable, weekly_scoped, live, resets_at, plan}` / `{kind:'cursor', plan, spent_usd, included_usd, included_estimated?, remaining_usd, pct, cycle_end}` |
 
@@ -330,8 +330,8 @@ there.
 
 ### The launch declaration
 
-The tmux side lives in bash, and `bin/cc-start` has to keep working with **no
-hub behind it** — a human types `cc-start -H opencode` on the command line. So
+The tmux side lives in bash, and `bin/fl-start` has to keep working with **no
+hub behind it** — a human types `fl-start -H opencode` on the command line. So
 the four shipped coding agents keep a `case` of their own in that script, and
 that case, not the plugin, is what a claude/opencode/hermes/cursor run is
 launched from.
@@ -340,7 +340,7 @@ launched from.
 `launchSpec(harness)` in `server/runner.mjs` resolves it, the hub writes it into
 the run directory as `launch.json` (mode `0600`, never into the worktree — a
 stray file there counts as uncommitted work at the finish gate), and
-`cc-start --spec <file>` reads it with `jq`. `launchable(harness)` asks the same
+`fl-start --spec <file>` reads it with `jq`. `launchable(harness)` asks the same
 question **before** a worktree exists, so a coding agent nothing can start says
 so instead of leaving a tmux session running nothing.
 
@@ -365,7 +365,7 @@ launch: {
   whether it is set. Placeholders inside a string: `{model} {provider} {effort}
   {mode} {session_id} {settings} {workdir} {session} {prompt_file} {stderr_log}
   {home}`.
-- **`{prompt}` must be a WHOLE argument**, never part of one — cc-start
+- **`{prompt}` must be a WHOLE argument**, never part of one — fl-start
   substitutes the shell variable holding the text there, and an interactive start
   simply drops that argument.
 - **`promptMode`** decides how the text arrives: `argv` puts it in the `{prompt}`
@@ -377,22 +377,22 @@ launch: {
   silently passed through — the same rule as `--effort` for cursor. A declaration
   that says nothing about `{effort}` means this CLI has no effort flag, and a
   form that offered one would be lying.
-- **`sessionTag` is what keeps `cc-attach` and `cc-kill` honest.** Sessions are
-  named `cc-<sessionTag><name>`; cc-start appends `<id>:<tag>` to
-  `~/.local/share/cc-hub/harness-tags` (`CCHUB_HARNESS_TAGS`) the first time it
-  launches such an agent, and `bin/cc-harness-tags.sh` reads that file. Those two
-  scripts read tmux, not the hub's database — without the tag file a `cc-fa-*`
+- **`sessionTag` is what keeps `fl-attach` and `fl-kill` honest.** Sessions are
+  named `fl-<sessionTag><name>`; fl-start appends `<id>:<tag>` to
+  `~/.local/share/freilauf/harness-tags` (`FREILAUF_HARNESS_TAGS`) the first time it
+  launches such an agent, and `bin/fl-harness-tags.sh` reads that file. Those two
+  scripts read tmux, not the hub's database — without the tag file a `fl-fa-*`
   session answers "claude", which is what the untagged name has always meant.
 - **`submitNudge`** is the generic form of the Enter that opencode needs: wait
   for a string to appear on the pane, then press Enter once. A TUI that swallows
   a long prompt needs it, and a declaration is the only way a coding agent this
   script has never heard of can ask for the same thing. Only the object form is
-  passed through — cc-start asks `jq` for `.submitNudge.waitFor`, and a bare
+  passed through — fl-start asks `jq` for `.submitNudge.waitFor`, and a bare
   `true` would be an error there rather than a default.
 
 The built-in plugins declare `launch` anyway (claude's is next to its `case`'s
 command line, and both produce the same argv). It is not read for them —
-`launchSpec()` returns `null` for the four cc-start knows — but it is the shape a
+`launchSpec()` returns `null` for the four fl-start knows — but it is the shape a
 third party's coding agent is read from, written down where the rest of that
 plugin lives. **Keep the two in step if a command line ever changes.**
 
@@ -405,7 +405,7 @@ The minimum: `id`, `label`, a `fetchModels` function, and either `envKeys` or
 |---|---|---|
 | `id` | string | registry key; also the value stored in `agents.provider` / `runs.provider` |
 | `label` | string | display name — it is a column heading in a 268 px sidebar, so keep it short |
-| `envKeys` | string[] | env vars holding a credential; passed into the agent session via `cc-start --env` and used for "is this provider offerable?" |
+| `envKeys` | string[] | env vars holding a credential; passed into the agent session via `fl-start --env` and used for "is this provider offerable?" |
 | `credentials` | `[{key, envKeys[], labelKey, helpKey?, required?}]` (optional) | the same thing, declared: what the Plugins page renders and what `ctx.secret()` resolves through. A provider that declares only `envKeys` is read as one credential called `api_key` (`credentialSpec()`), so every caller sees one list instead of two cases |
 | `descriptionKey` | i18n key (optional) | 1–3 sentences on the plugin's card |
 | `ocPrefix` | string | model prefix opencode uses for this provider (pitfall: Zen is `opencode`, not `opencode-zen`) |
@@ -595,18 +595,18 @@ not told again after it. The column behind the per-run checkbox is still
 same "a migration for nothing" rule that leaves `openrouter_min_eur` holding
 dollars.
 
-### `bin/cc-notify`: the facade from outside
+### `bin/fl-notify`: the facade from outside
 
-`bin/cchub-deploy` has to be able to report a failed deploy at a moment when the
+`bin/freilauf-deploy` has to be able to report a failed deploy at a moment when the
 hub may be the thing that is down, so it cannot POST to it. It used to read
 `telegram_token` and `telegram_chat` out of the SQLite database and curl the Bot
 API — a second, independent Telegram implementation in bash that no facade could
 reach and no other channel could be added to.
 
-`cc-notify "<text>" [--url u] [--kind k] [--run id] [--file f] [--strict] [--quiet]`
+`fl-notify "<text>" [--url u] [--kind k] [--run id] [--file f] [--strict] [--quiet]`
 loads the plugin directory and calls the same facade. It finds the hub's modules
-via `CCHUB_ROOT`, then its own checkout, then `CCHUB_DEPLOY_DIR` /
-`~/agents/deploy/cc-hub`, then `~/projects/cc-hub`, and confirms each candidate
+via `FREILAUF_ROOT`, then its own checkout, then `FREILAUF_DEPLOY_DIR` /
+`~/agents/deploy/freilauf`, then `~/projects/freilauf`, and confirms each candidate
 by `server/notify.mjs` actually being there. Exit `0` when delivered **or when
 nothing is configured** — both are fine, and a deploy must not fail because
 there is nobody to tell; `--strict` turns the second one into a `1`.
@@ -961,7 +961,7 @@ and the same row shape, so its call sites and both test groups keep working.
 ### Seeding
 
 On first start with no coding agent configured, the hub seeds from
-`~/.config/cc-hub/coding-agents.json` (override: `CCHUB_AGENTS_SEED`):
+`~/.config/freilauf/coding-agents.json` (override: `FREILAUF_AGENTS_SEED`):
 
 ```json
 { "coding_agents": [
@@ -1077,10 +1077,10 @@ Three page-level rules worth knowing:
    plugin directory.
 3. **Say how the CLI is launched.** An **external** plugin declares `launch`
    (see "The launch declaration"): the hub writes it into the run directory and
-   `cc-start --spec` starts the session from it — no bash edit, no hub release.
+   `fl-start --spec` starts the session from it — no bash edit, no hub release.
    A plugin with no `launch` cannot start a run, and `launchable()` says so
    before a worktree exists. A **built-in** added to `server/harnesses/` gets a
-   `case` in `bin/cc-start` instead, because that script must keep working with
+   `case` in `bin/fl-start` instead, because that script must keep working with
    no hub behind it; declare `launch` next to it anyway, and keep the two in
    step.
 4. Add every new i18n key the plugin names (`descriptionKey`, `labelKey`,
@@ -1088,7 +1088,7 @@ Three page-level rules worth knowing:
    `lang/de.json`, `lang/zh.json`. A unit test enforces identical key sets and
    non-empty values; a plugin may not name a string that is not there.
 5. If the CLI reports API errors through a hook of its own, wire it to
-   `cc-report _api_error` (see the opencode plugin installed by
+   `fl-report _api_error` (see the opencode plugin installed by
    `setup/02-install-scripts.sh`). Otherwise the pipe-pane log scan is the only
    source, and `logPatterns` should stay narrow — a menu line reading "Upgrade
    to Max for higher rate limits" once sat in the database as a rate limit on a
@@ -1154,12 +1154,12 @@ Three page-level rules worth knowing:
 6. Optional: `test()` if a test message should look different from a real one,
    and `setup` if the channel needs a guided setup rather than a form.
 7. Done. The card, the enabled switch, the credentials block, the test button,
-   the flow `notify` step, `bin/cc-notify` and every message the hub sends all
+   the flow `notify` step, `bin/fl-notify` and every message the hub sends all
    follow the registry. Configure it under **Settings → Notifications**.
 
 ## Known limits, stated rather than hidden
 
-- **The four shipped coding agents keep their own `case` in `bin/cc-start`**,
+- **The four shipped coding agents keep their own `case` in `bin/fl-start`**,
   and that is deliberate rather than pending: the script has to work with no hub
   behind it, so for claude, opencode, hermes and cursor the command line lives
   there and is the single source of truth. An external plugin needs no bash edit

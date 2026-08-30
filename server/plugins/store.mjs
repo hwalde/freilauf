@@ -1,4 +1,4 @@
-// cc-hub — plugin configuration in the database.
+// Freilauf — plugin configuration in the database.
 //
 // The registry says what the hub COULD drive; this module holds what the
 // operator has actually configured: which plugins are enabled, which model
@@ -206,7 +206,7 @@ export function credentialSpec(plugin) {
  *  2. the environment variable the operator NAMED for it,
  *  3. the first of the plugin's own declared variables that is set.
  *
- * A stored value lives in the local SQLite database (`~/.local/share/cc-hub`,
+ * A stored value lives in the local SQLite database (`~/.local/share/freilauf`,
  * the hub's own data directory) as plain text — the same file that already
  * holds every other configured secret. It is offered because a machine cannot always be
  * given another environment variable; where it can, naming the variable is the

@@ -1,4 +1,4 @@
-// cc-hub flows — execution engine. Walks a designer definition step by step,
+// Freilauf flows — execution engine. Walks a designer definition step by step,
 // persists after every step (context, frames, log) so a flow run survives a hub
 // restart and can suspend: "wait for run X to end" or "resume at time T".
 //

@@ -1,9 +1,9 @@
-// cc-hub — the sandbox a test suite runs a real hub in.
+// Freilauf — the sandbox a test suite runs a real hub in.
 //
 // This used to live inside test/e2e.mjs. It moved out when a second suite
 // (test/browser.mjs) needed exactly the same thing: a hub of its own, with its
 // own database, its own runs/worktrees directories, its own test repo and a
-// cc-start stub instead of a real coding agent. Copying those ~150 lines would
+// fl-start stub instead of a real coding agent. Copying those ~150 lines would
 // have been the same drift AGENTS.md describes for run-def.mjs — two sandboxes
 // that slowly stop being the same sandbox.
 //
@@ -54,11 +54,11 @@ export async function freierPort() {
  *                  kept sandbox says which run it belongs to
  * @param behalten  keep the directory instead of deleting it (debugging)
  */
-export function neuerSandkasten({ praefix = 'cc-hub-test-', behalten = false } = {}) {
+export function neuerSandkasten({ praefix = 'freilauf-test-', behalten = false } = {}) {
   const SB = mkdtempSync(join(tmpdir(), praefix))
   const REPO = join(SB, 'repo')
   const ORIGIN = join(SB, 'origin.git')
-  const STUB = join(SB, 'bin', 'cc-start')
+  const STUB = join(SB, 'bin', 'fl-start')
   const FEHLSTART = join(SB, 'fehlstart-an')
   // Every session the stub below created, written by the stub itself. The `sessions`
   // set next to it is what individual tests register by hand — and THAT is what used
@@ -69,7 +69,7 @@ export function neuerSandkasten({ praefix = 'cc-hub-test-', behalten = false } =
   // RSS while the machine sat in swap.
   //
   // The stub knows the name it just created and cannot forget to write it down, so
-  // the list belongs to it. Still no pattern across all `cc-*`: this file holds
+  // the list belongs to it. Still no pattern across all `fl-*`: this file holds
   // exactly the sessions THIS sandbox produced, and nothing else is touched.
   const SESSIONSLISTE = join(SB, 'sessions.txt')
   const sessions = new Set()          // what a test registered by hand; killed as well
@@ -114,7 +114,7 @@ export function neuerSandkasten({ praefix = 'cc-hub-test-', behalten = false } =
     await g('remote', 'add', 'origin', ORIGIN)
     await g('push', '-q', '-u', 'origin', 'main')
 
-    // Stub cc-start: creates a real tmux session with a harmless "agent", speaks the
+    // Stub fl-start: creates a real tmux session with a harmless "agent", speaks the
     // same interface as the original and reports the same success line.
     writeFileSync(STUB, `#!/usr/bin/env bash
 set -euo pipefail
@@ -135,11 +135,11 @@ while [[ $# -gt 0 ]]; do
 done
 WORKDIR="\${POS[0]:-$PWD}"
 
-# Smoke-test run: pass through to the REAL cc-start (also covers the cc-* scripts).
+# Smoke-test run: pass through to the REAL fl-start (also covers the fl-* scripts).
 # Not exec: the session it creates has to be written down too, or --echt would
 # leak exactly what the stub path no longer does.
 if [[ -n "$PROMPTFILE" && -r "$PROMPTFILE" ]] && grep -q 'E2E-ECHT' "$PROMPTFILE"; then
-  AUSGABE=$("${homedir()}/.local/bin/cc-start" "\${ALLE[@]}") || { echo "$AUSGABE"; exit 1; }
+  AUSGABE=$("${homedir()}/.local/bin/fl-start" "\${ALLE[@]}") || { echo "$AUSGABE"; exit 1; }
   echo "$AUSGABE"
   echo "$AUSGABE" | sed -n "s/^Session '\\([^']*\\)' .*/\\1/p" >> "${SESSIONSLISTE}"
   exit 0
@@ -151,19 +151,19 @@ if [[ -f "${FEHLSTART}" ]]; then
   exit 1
 fi
 
-SESSION="cc-$NAME"; [[ -n "$ID" ]] && SESSION="$SESSION-$ID"
-n=2; while tmux has-session -t "=$SESSION" 2>/dev/null; do SESSION="cc-$NAME-$ID-$n"; n=$((n+1)); done
+SESSION="fl-$NAME"; [[ -n "$ID" ]] && SESSION="$SESSION-$ID"
+n=2; while tmux has-session -t "=$SESSION" 2>/dev/null; do SESSION="fl-$NAME-$ID-$n"; n=$((n+1)); done
 RUNNER="${SB}/runner-$$.sh"
 cat > "$RUNNER" <<'INNER'
 echo "=== E2E-Agent gestartet ==="
 echo "workdir: $PWD"
-echo "CC_RUN_ID=\${CC_RUN_ID:-<leer>}"
-[[ -n "\${CC_PROMPTFILE:-}" && -r "\$CC_PROMPTFILE" ]] && { echo "--- Prompt ---"; cat "\$CC_PROMPTFILE"; }
+echo "FL_RUN_ID=\${FL_RUN_ID:-<leer>}"
+[[ -n "\${FL_PROMPTFILE:-}" && -r "\$FL_PROMPTFILE" ]] && { echo "--- Prompt ---"; cat "\$FL_PROMPTFILE"; }
 echo "bereit fuer Eingaben:"
 while IFS= read -r zeile; do echo "[agent sah] $zeile"; done
 INNER
 echo "$SESSION" >> "${SESSIONSLISTE}"
-tmux new-session -d -x 200 -y 50 "\${ENVS[@]}" -e "CC_PROMPTFILE=$PROMPTFILE" -s "$SESSION" -c "$WORKDIR" bash "$RUNNER"
+tmux new-session -d -x 200 -y 50 "\${ENVS[@]}" -e "FL_PROMPTFILE=$PROMPTFILE" -s "$SESSION" -c "$WORKDIR" bash "$RUNNER"
 if [[ -n "$LOG" ]]; then mkdir -p "$(dirname "$LOG")"; tmux pipe-pane -o -t "=$SESSION:" "cat >> '$LOG'"; fi
 [[ -n "$KEEP" ]] && tmux set-option -t "=$SESSION:" -q remain-on-exit on
 echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
@@ -173,7 +173,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
 
   /**
    * Start the hub on a free port.
-   * `echteAgenten` hands the runs to the real ~/.local/bin/cc-start (and needs the
+   * `echteAgenten` hands the runs to the real ~/.local/bin/fl-start (and needs the
    * provider keys back in the environment); everything else keeps the stub.
    */
   async function hubStarten({ echteAgenten = false, keys = {}, env = {}, willkommen = false } = {}) {
@@ -181,61 +181,66 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     zustand.basis = `http://127.0.0.1:${zustand.port}`
     const umgebung = {
       ...process.env,
-      CCHUB_LOCAL_PORT: String(zustand.port),
-      CCHUB_DATA_DIR: join(SB, 'data'),
-      CCHUB_RUNS_DIR: join(SB, 'runs'),
-      CCHUB_WORKTREES_DIR: join(SB, 'worktrees'),
-      CCHUB_INTEGRATE_DIR: join(SB, 'integrate'),
+      FREILAUF_LOCAL_PORT: String(zustand.port),
+      FREILAUF_DATA_DIR: join(SB, 'data'),
+      FREILAUF_RUNS_DIR: join(SB, 'runs'),
+      FREILAUF_WORKTREES_DIR: join(SB, 'worktrees'),
+      FREILAUF_INTEGRATE_DIR: join(SB, 'integrate'),
       // The suite owns the integrator's clock: two processes on one integration
       // worktree is a race nobody wants to debug. The hub still integrates on
       // the report path, which is where it matters.
-      CCHUB_INTEGRATOR_OFF: '1',
-      CCHUB_QUOTA_JSON: join(SB, 'quota.json'),
+      FREILAUF_INTEGRATOR_OFF: '1',
+      FREILAUF_QUOTA_JSON: join(SB, 'quota.json'),
+      // The report CLI the prompt names and the claude hooks call. Without it
+      // the hub points at ~/.local/bin/fl-report — whatever the last deploy
+      // installed there, or nothing at all on a machine that has not deployed
+      // this release yet. Same fence as FREILAUF_START_SCRIPT below.
+      FREILAUF_REPORT_SCRIPT: join(PROJEKT, 'bin', 'fl-report'),
       // No credentials file means no token, and no token means the live usage
       // endpoint (server/claude-usage.mjs) is never asked — the quota fixture
       // above stays the only source, the way the fixture's comment promises.
       // It also keeps the operator's real plan string out of the suite, which
       // the plan lookup in harnesses/claude.mjs used to read straight from $HOME.
-      CCHUB_CLAUDE_CREDENTIALS: join(SB, 'missing-claude-credentials.json'),
-      CCHUB_CLAUDE_PROJECTS: join(SB, 'claude-projects'),
-      CCHUB_ZUSAETZE_DIR: join(SB, 'zusaetze'),
-      CCHUB_PULS_AUS: '1',          // no provider pulse against real endpoints from the suite
-      CCHUB_CURSOR_AUTH: join(SB, 'missing-cursor-auth.json'),   // cursor usage stays silent in the sandbox
-      CCHUB_CURSOR_DIR: join(SB, 'cursor'),      // fake cursor transcripts; the real ~/.cursor is never touched
+      FREILAUF_CLAUDE_CREDENTIALS: join(SB, 'missing-claude-credentials.json'),
+      FREILAUF_CLAUDE_PROJECTS: join(SB, 'claude-projects'),
+      FREILAUF_ZUSAETZE_DIR: join(SB, 'zusaetze'),
+      FREILAUF_PULS_AUS: '1',          // no provider pulse against real endpoints from the suite
+      FREILAUF_CURSOR_AUTH: join(SB, 'missing-cursor-auth.json'),   // cursor usage stays silent in the sandbox
+      FREILAUF_CURSOR_DIR: join(SB, 'cursor'),      // fake cursor transcripts; the real ~/.cursor is never touched
       // "Fresh installation" tests must not pick up the operator's seed file
-      // (~/.config/cc-hub/coding-agents.json) — point at a file that does not exist.
-      CCHUB_AGENTS_SEED: join(SB, 'no-seed.json'),
+      // (~/.config/freilauf/coding-agents.json) — point at a file that does not exist.
+      FREILAUF_AGENTS_SEED: join(SB, 'no-seed.json'),
       // The same fence, one layer out: without it the hub would load the
-      // OPERATOR's external plugin packages (~/.local/share/cc-hub/plugins) and
+      // OPERATOR's external plugin packages (~/.local/share/freilauf/plugins) and
       // the suite would be green or red depending on what is installed on the
       // machine it runs on. The directory starts empty; the plugin tests
       // install into it themselves.
-      CCHUB_PLUGIN_DIR: join(SB, 'plugins'),
+      FREILAUF_PLUGIN_DIR: join(SB, 'plugins'),
       // The goal waits for the TUI to draw before it is typed in (server/goal.mjs).
       // The stub prints immediately, so the suite must not sit through the
       // production grace period for it.
-      CCHUB_GOAL_DELAY_MS: '100',
-      CCHUB_GOAL_WAIT_MS: '10000',
+      FREILAUF_GOAL_DELAY_MS: '100',
+      FREILAUF_GOAL_WAIT_MS: '10000',
       // The cleanup auto-trigger reads the machine's REAL tmux memory (the
       // sandbox shares the tmux server); a live hub must not start cleanup
       // runs because of THIS suite. The manual path stays fully testable.
-      CCHUB_CLEANUP_AUTO_OFF: '1',
+      FREILAUF_CLEANUP_AUTO_OFF: '1',
       // Incidents page WITHOUT the production grace period — the suite asserts
       // the alarm immediately after the event; the delay itself has its own test.
-      CCHUB_INCIDENT_NOTIFY_DELAY_MS: '0',
+      FREILAUF_INCIDENT_NOTIFY_DELAY_MS: '0',
       NODE_OPTIONS: '--disable-warning=ExperimentalWarning',
     }
     // A suite may override or add to the hub's environment — e.g. shorten the
     // usage/balance caches so a browser test does not wait a full minute.
     for (const [k, v] of Object.entries(env)) umgebung[k] = v
     if (echteAgenten) {
-      // No CCHUB_CC_START: the hub uses ~/.local/bin/cc-start and thereby the real
+      // No FREILAUF_START_SCRIPT: the hub uses ~/.local/bin/fl-start and thereby the real
       // harnesses. The provider key must go back into the environment, otherwise
       // opencode/hermes starts and dies only at the first API call.
-      delete umgebung.CCHUB_CC_START
+      delete umgebung.FREILAUF_START_SCRIPT
       for (const [k, v] of Object.entries(keys)) if (v) umgebung[k] = v
     } else {
-      umgebung.CCHUB_CC_START = STUB
+      umgebung.FREILAUF_START_SCRIPT = STUB
       delete umgebung.OPENROUTER_API_KEY    // no real API calls from the stub part
     }
     const hub = spawn(process.execPath, [join(PROJEKT, 'server', 'hub.mjs')], { env: umgebung, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -248,7 +253,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     await warteAuf(async () => (await hol('/')).status === 200,
       { was: `hub at ${zustand.basis} responds`, timeoutMs: 15_000 })
 
-    zustand.db = new DatabaseSync(join(SB, 'data', 'cc-hub.db'))
+    zustand.db = new DatabaseSync(join(SB, 'data', 'freilauf.db'))
     // The hub holds its own connection and writes in the background (scheduler,
     // watcher); a direct write here must WAIT for it instead of failing instantly
     // with "database is locked" (the hub's own connection uses busy_timeout 5000).
@@ -276,30 +281,31 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
   /**
    * The watcher ticks inside the hub every 30 s. Instead of waiting, a suite also
    * triggers the same pass itself — same database, same code, but immediately.
-   * This writes the CCHUB_* variables into THIS process, so it belongs to the one
+   * This writes the FREILAUF_* variables into THIS process, so it belongs to the one
    * sandbox a suite works with.
    */
   async function watcherVorbereiten() {
-    process.env.CCHUB_DATA_DIR = join(SB, 'data')
-    process.env.CCHUB_RUNS_DIR = join(SB, 'runs')
-    process.env.CCHUB_WORKTREES_DIR = join(SB, 'worktrees')
-    process.env.CCHUB_INTEGRATE_DIR = join(SB, 'integrate')
-    process.env.CCHUB_INTEGRATOR_OFF = '1'
-    process.env.CCHUB_QUOTA_JSON = join(SB, 'quota.json')
-    process.env.CCHUB_CLAUDE_CREDENTIALS = join(SB, 'missing-claude-credentials.json')
-    process.env.CCHUB_CC_START = STUB
-    process.env.CCHUB_CLAUDE_PROJECTS = join(SB, 'claude-projects')
-    process.env.CCHUB_ZUSAETZE_DIR = join(SB, 'zusaetze')
-    process.env.CCHUB_PLUGIN_DIR = join(SB, 'plugins')
-    process.env.CCHUB_PULS_AUS = '1'
-    process.env.CCHUB_CURSOR_AUTH = join(SB, 'missing-cursor-auth.json')
-    process.env.CCHUB_CURSOR_DIR = join(SB, 'cursor')
-    process.env.CCHUB_GOAL_DELAY_MS = '100'
-    process.env.CCHUB_GOAL_WAIT_MS = '10000'
-    process.env.CCHUB_CLEANUP_AUTO_OFF = '1'
+    process.env.FREILAUF_DATA_DIR = join(SB, 'data')
+    process.env.FREILAUF_RUNS_DIR = join(SB, 'runs')
+    process.env.FREILAUF_WORKTREES_DIR = join(SB, 'worktrees')
+    process.env.FREILAUF_INTEGRATE_DIR = join(SB, 'integrate')
+    process.env.FREILAUF_INTEGRATOR_OFF = '1'
+    process.env.FREILAUF_QUOTA_JSON = join(SB, 'quota.json')
+    process.env.FREILAUF_REPORT_SCRIPT = join(PROJEKT, 'bin', 'fl-report')
+    process.env.FREILAUF_CLAUDE_CREDENTIALS = join(SB, 'missing-claude-credentials.json')
+    process.env.FREILAUF_START_SCRIPT = STUB
+    process.env.FREILAUF_CLAUDE_PROJECTS = join(SB, 'claude-projects')
+    process.env.FREILAUF_ZUSAETZE_DIR = join(SB, 'zusaetze')
+    process.env.FREILAUF_PLUGIN_DIR = join(SB, 'plugins')
+    process.env.FREILAUF_PULS_AUS = '1'
+    process.env.FREILAUF_CURSOR_AUTH = join(SB, 'missing-cursor-auth.json')
+    process.env.FREILAUF_CURSOR_DIR = join(SB, 'cursor')
+    process.env.FREILAUF_GOAL_DELAY_MS = '100'
+    process.env.FREILAUF_GOAL_WAIT_MS = '10000'
+    process.env.FREILAUF_CLEANUP_AUTO_OFF = '1'
     // Same reason as in the hub environment above: no production grace period
     // in the suite (the delayed-notification test drives notify_at by hand).
-    process.env.CCHUB_INCIDENT_NOTIFY_DELAY_MS = '0'
+    process.env.FREILAUF_INCIDENT_NOTIFY_DELAY_MS = '0'
     delete process.env.OPENROUTER_API_KEY
     const { tick } = await import('../server/watcher.mjs')
     return tick
@@ -338,7 +344,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     if (zustand.aufgeraeumt) return
     zustand.aufgeraeumt = true
     await hubStoppen()
-    // ONLY the sessions we created ourselves — never a pattern across all cc-*.
+    // ONLY the sessions we created ourselves — never a pattern across all fl-*.
     // The stub's own list first (it cannot forget one), then whatever a test
     // registered by hand; a Set, so a name in both is killed once.
     const alle = new Set(sessions)

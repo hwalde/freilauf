@@ -1,4 +1,4 @@
-// cc-hub — regex fragments shared by the log patterns of the coding-agent plugins.
+// Freilauf — regex fragments shared by the log patterns of the coding-agent plugins.
 //
 // Lives here and not in detect.mjs because detect.mjs imports the plugin
 // registry: the plugins must not import back from it.

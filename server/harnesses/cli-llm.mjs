@@ -1,4 +1,4 @@
-// cc-hub — running a coding agent's CLI as a one-shot model source.
+// Freilauf — running a coding agent's CLI as a one-shot model source.
 //
 // A coding agent can answer the hub's own small questions (a run title, whether
 // a log line is a real outage, what a report contains) on the subscription the
@@ -143,7 +143,7 @@ export function ndjson(text) {
  * models.mjs — that module reaches the registry, which imports the plugin files.
  */
 export async function cliLines(command, { timeoutMs = 120_000 } = {}) {
-  const file = join(tmpdir(), `cc-hub-cli-${process.pid}-${Date.now()}.txt`)
+  const file = join(tmpdir(), `freilauf-cli-${process.pid}-${Date.now()}.txt`)
   try {
     const r = await runCli('sh', ['-c', `${command} > ${JSON.stringify(file)}`], { timeoutMs })
     if (r.spawnError || r.timedOut || r.code !== 0) return []

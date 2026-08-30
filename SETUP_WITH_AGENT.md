@@ -1,7 +1,7 @@
-# Setting up cc-hub — a guide written for coding agents
+# Setting up Freilauf — a guide written for coding agents
 
 **You are a coding agent (Claude Code, opencode, cursor-agent, …) and someone
-asked you to install, understand or adapt cc-hub. This file is for you.**
+asked you to install, understand or adapt Freilauf. This file is for you.**
 
 Humans: hand this file to your agent — *"read SETUP_WITH_AGENT.md and set this
 up for me"* — and answer the handful of questions it will ask. Everything here
@@ -14,7 +14,7 @@ at the end tells you which file to open. Two rules before anything else:
 - **Never invent machine-specific values.** Ports, IP addresses, hostnames,
   certificate paths and API keys are things you *ask the human for* — see
   [Questions for the human](#2-questions-for-the-human).
-- **Adapt this project.** cc-hub is one operator's opinions turned into code.
+- **Adapt this project.** Freilauf is one operator's opinions turned into code.
   It is a starting point, not a product with a support contract — see
   [Make it yours](#make-it-yours).
 
@@ -22,7 +22,7 @@ at the end tells you which file to open. Two rules before anything else:
 
 ## 1. The mental model — read this before running anything
 
-cc-hub is a **web UI that runs other coding agents for you**, unattended.
+Freilauf is a **web UI that runs other coding agents for you**, unattended.
 Six facts and you can reason about the whole system:
 
 1. **A run is one agent working on one task.** It gets its own **git worktree**
@@ -33,12 +33,12 @@ Six facts and you can reason about the whole system:
    An "agent" is just a run definition that also has a name and a schedule.
    This lives in `server/run-def.mjs`, and there is exactly one way from a
    definition to a running run: `startRun()` in `server/scheduler.mjs`.
-3. **The agent reports back with `bin/cc-report`** (`done`, `failed`, `help`,
+3. **The agent reports back with `bin/fl-report`** (`done`, `failed`, `help`,
    `progress`, `branch`, `pr`). The hub also watches from the outside — tmux
    state, logs, transcripts, hooks — because an agent that hit a rate limit
    cannot report anything. A run that is already over can report **again**:
    the operator types follow-up work into the agent's session, the agent runs
-   `cc-report done` once more, and the hub treats it as a *follow-up report* —
+   `fl-report done` once more, and the hub treats it as a *follow-up report* —
    same checks, same merge, same flows, announced as "FOLLOW-UP REPORT #n". The
    prompt tells the agent so (`FOLLOWUP_RULES` in `server/runner.mjs`).
 4. **The hub does the merging, not the agent** (when a repo is set to
@@ -47,14 +47,14 @@ Six facts and you can reason about the whole system:
    told to fix it, and only then a human. `server/integrate.mjs`.
 5. **Coding agents and model providers are plugins** — built-ins under
    `server/harnesses/` and `server/providers/`, external packages in
-   `CCHUB_PLUGIN_DIR` (default `~/.local/share/cc-hub/plugins`), loaded at
+   `FREILAUF_PLUGIN_DIR` (default `~/.local/share/freilauf/plugins`), loaded at
    startup. A plugin may bring its own credentials, its own budget-gate
    thresholds, the ability to answer the hub's own small questions, and a
-   `launch` declaration that lets `bin/cc-start` start a CLI nobody shipped
+   `launch` declaration that lets `bin/fl-start` start a CLI nobody shipped
    here. Adding support for a new CLI is adding a package, not editing ten call
    sites. [`docs/plugins.md`](docs/plugins.md).
-6. **The service runs from its own checkout** (`~/agents/deploy/cc-hub`), never
-   from the directory a human edits in. `cchub deploy` moves it forward, health
+6. **The service runs from its own checkout** (`~/agents/deploy/freilauf`), never
+   from the directory a human edits in. `freilauf deploy` moves it forward, health
    checks it and rolls back if it fails.
 
 Security model in one line: **the hub can drive tmux, which is shell access.**
@@ -71,18 +71,18 @@ ends up on the open internet. Ask the human, all at once:
 
 | Question | Why it cannot be guessed |
 |---|---|
-| **Which WireGuard address should the UI bind to?** (`CCHUB_VPN_BIND`) | There is deliberately no default. Without a value the proxy refuses to start — that is the fence against ending up on `0.0.0.0`. |
-| **Which two ports?** (`CCHUB_VPN_PORT`, `CCHUB_LOCAL_PORT`) | The values in `env.example` are placeholders. Pick something free and unremarkable. |
-| **Which hostnames may address it?** (`CCHUB_ALLOWED_HOSTS`) | Rebinding/CSRF fence. Only the VPN IP and names whose DNS the operator controls. Every name must also be in the certificate. |
-| **Do certificates exist, or should you create them?** | `~/.local/certs/cc-hub/dev-cert.pem` + `dev-key.pem`, e.g. via [mkcert](https://github.com/FiloSottile/mkcert), SANs = the VPN IP and any hostname above. |
+| **Which WireGuard address should the UI bind to?** (`FREILAUF_VPN_BIND`) | There is deliberately no default. Without a value the proxy refuses to start — that is the fence against ending up on `0.0.0.0`. |
+| **Which two ports?** (`FREILAUF_VPN_PORT`, `FREILAUF_LOCAL_PORT`) | The values in `env.example` are placeholders. Pick something free and unremarkable. |
+| **Which hostnames may address it?** (`FREILAUF_ALLOWED_HOSTS`) | Rebinding/CSRF fence. Only the VPN IP and names whose DNS the operator controls. Every name must also be in the certificate. |
+| **Do certificates exist, or should you create them?** | `~/.local/certs/freilauf/dev-cert.pem` + `dev-key.pem`, e.g. via [mkcert](https://github.com/FiloSottile/mkcert), SANs = the VPN IP and any hostname above. |
 | **Which coding agent CLIs are installed and licensed?** | `claude`, `opencode`, `hermes`, `cursor-agent` — the hub only offers what the operator configures. |
-| **Which API keys, if any?** | `OPENROUTER_API_KEY` etc. **Ask for them to be pasted into `~/.config/cc-hub/env` by the human** — or, if that machine makes environment variables awkward, let the human enter them in the UI under Settings → Plugins. Do not read them, echo them, or put them in a commit, a log or your report. |
-| **Any external plugin packages to install?** (`CCHUB_PLUGIN_DIR`) | Optional. Default `~/.local/share/cc-hub/plugins`; a missing directory is the normal case. Only set it if the human already has packages somewhere else. |
-| **Notifications?** | **Optional, and nothing depends on them.** cc-hub runs fully with no channel configured — it schedules, watches, merges and records exactly the same, it just stays quiet. If the human does want one, it is set up in the UI afterwards (Settings → Notifications), and any credential it needs is entered there, not by you. |
+| **Which API keys, if any?** | `OPENROUTER_API_KEY` etc. **Ask for them to be pasted into `~/.config/freilauf/env` by the human** — or, if that machine makes environment variables awkward, let the human enter them in the UI under Settings → Plugins. Do not read them, echo them, or put them in a commit, a log or your report. |
+| **Any external plugin packages to install?** (`FREILAUF_PLUGIN_DIR`) | Optional. Default `~/.local/share/freilauf/plugins`; a missing directory is the normal case. Only set it if the human already has packages somewhere else. |
+| **Notifications?** | **Optional, and nothing depends on them.** Freilauf runs fully with no channel configured — it schedules, watches, merges and records exactly the same, it just stays quiet. If the human does want one, it is set up in the UI afterwards (Settings → Notifications), and any credential it needs is entered there, not by you. |
 
 If the human does not know, say what the value is *for* and offer the safe
 default (VPN-only, fail-closed). Do not proceed on a guess for
-`CCHUB_VPN_BIND` or `CCHUB_ALLOWED_HOSTS`.
+`FREILAUF_VPN_BIND` or `FREILAUF_ALLOWED_HOSTS`.
 
 ---
 
@@ -101,17 +101,17 @@ Then, in order — each step prints what to do next:
 
 ```bash
 ./setup/01-npm-install.sh       # deps for THIS checkout (tests, editing, running by hand)
-./setup/02-install-scripts.sh   # cc-* + cchub + cchub-deploy → ~/.local/bin, opencode plugin, extra skills
-./setup/03-install-services.sh  # ~/.config/cc-hub/env (from env.example) + systemd user units
+./setup/02-install-scripts.sh   # fl-* + freilauf + freilauf-deploy → ~/.local/bin, opencode plugin, extra skills
+./setup/03-install-services.sh  # ~/.config/freilauf/env (from env.example) + systemd user units
 ```
 
-Now **the human edits `~/.config/cc-hub/env`** with the answers from section 2
-(at minimum `CCHUB_VPN_BIND` and `CCHUB_ALLOWED_HOSTS`) and places the
+Now **the human edits `~/.config/freilauf/env`** with the answers from section 2
+(at minimum `FREILAUF_VPN_BIND` and `FREILAUF_ALLOWED_HOSTS`) and places the
 certificates. API keys may go in the same file, or be entered in the UI later
 (Settings → Plugins) — the hub resolves a stored value first, then a variable
 the operator named, then the plugin's own declared variables. External plugin
-packages, if any, go into `CCHUB_PLUGIN_DIR` (default
-`~/.local/share/cc-hub/plugins`, created by nobody — a missing directory is
+packages, if any, go into `FREILAUF_PLUGIN_DIR` (default
+`~/.local/share/freilauf/plugins`, created by nobody — a missing directory is
 normal); `--spec`-launched coding agents need `jq`, which is already a
 prerequisite. Then the firewall, which needs root:
 
@@ -126,18 +126,54 @@ bind address.
 Finally, create the checkout the **service** runs from and bring it live:
 
 ```bash
-cchub-deploy --init --from "$PWD"   # clone into ~/agents/deploy/cc-hub and deploy it
-cchub status                        # hub process, VPN access, pipeline, sessions, deployed sha
-cchub on                            # start the TLS proxy → reachable over WireGuard
+freilauf-deploy --init --from "$PWD"   # clone into ~/agents/deploy/freilauf and deploy it
+freilauf status                        # hub process, VPN access, pipeline, sessions, deployed sha
+freilauf on                            # start the TLS proxy → reachable over WireGuard
 ```
 
 **Verify from a VPN client, not from the server.** `curl` against the VPN IP
 from the machine itself travels over `lo` and proves nothing about the
 firewall. This is a real trap and it is in `AGENTS.md` under "Pitfalls".
 
-Troubleshooting, in the order that pays off: `cchub status` → `cchub logs` →
-`systemctl --user status cchub.service`. A hub that will not start is almost
-always a missing value in `~/.config/cc-hub/env` or a missing certificate.
+Troubleshooting, in the order that pays off: `freilauf status` → `freilauf logs` →
+`systemctl --user status freilauf.service`. A hub that will not start is almost
+always a missing value in `~/.config/freilauf/env` or a missing certificate.
+
+### Upgrading an installation that still says cc-hub
+
+This project was called **cc-hub** until recently, and everything about it was
+named accordingly: `~/.config/cc-hub`, `~/.local/share/cc-hub/cc-hub.db`,
+`~/agents/deploy/cc-hub`, `cchub.service`, the `CCHUB_*` variables, the
+`cc-start`/`cc-report`/… scripts, `CC_RUN_ID` inside a run, and `cc-` as the
+tmux session prefix.
+
+**Nothing forces you to change any of it.** The code released under the new name
+reads both: every path resolves new-then-old, every variable
+`FREILAUF_X`-then-`CCHUB_X`, `~/.local/bin` keeps a shim under every old script
+name, sessions of both prefixes are listed and attachable, and the deploy script
+restarts whichever unit is really running. A deploy onto an un-migrated
+installation is an ordinary deploy.
+
+When you want the names to match, that is one command:
+
+```bash
+freilauf-deploy --migrate --dry-run   # prints every step, changes nothing
+freilauf-deploy --migrate             # or: ./setup/migrate-from-cc-hub.sh
+```
+
+It stops the old services, moves the three directories (rewriting `CCHUB_` →
+`FREILAUF_` inside `env` and keeping a backup), renames the database and the
+deploy log, repoints the deploy checkout's `origin` at
+`github.com/hwalde/freilauf`, installs and enables `freilauf.service`, removes
+the old unit files, rewrites `cchub-deploy` inside stored flows, deletes the old
+opencode plugin file, reinstalls the scripts and starts the hub — switching VPN
+access back on only if it was on. It is idempotent, and it refuses rather than
+merges if it finds both an old and a new directory.
+
+It does **not** touch `~/agents/runs`, `~/agents/worktrees`, `~/agents/integrate`
+or `~/agents/zusaetze` (those were never named after the product), your own
+checkout, or the hub's repository row called `cc-hub` — that row is your
+checkout, and its name is yours. It prints what is left for you at the end.
 
 ---
 
@@ -183,7 +219,7 @@ The hub starts empty on purpose, and the first thing a browser sees says so:
     the plugin brings one, a link to its own setup assistant. Telegram is the
     only channel that ships (its assistant walks through the BotFather token,
     the chat id and a test message; the old `/telegram-setup` address redirects
-    there). **With no channel configured cc-hub runs fully and quietly** — it
+    there). **With no channel configured Freilauf runs fully and quietly** — it
     schedules, watches, merges, records and reports exactly the same, it just
     says nothing out loud. Nothing nags about it, nothing errors, and no step of
     the Welcome wizard requires it. Another channel is a plugin package with
@@ -199,7 +235,7 @@ The hub starts empty on purpose, and the first thing a browser sees says so:
     shown in, defaulting to the UI language; numbers and percentages follow
     the UI language's separators).
 
-Nothing about the pipeline switch is subtle: `cchub pipeline off` stops
+Nothing about the pipeline switch is subtle: `freilauf pipeline off` stops
 *scheduled* starts. Manual starts always work — a limit that overrules a
 deliberate decision is a limit people work around.
 
@@ -207,22 +243,22 @@ deliberate decision is a limit people work around.
 
 ## 5. Keeping your machine's values out of the repository
 
-cc-hub is developed with a **private sister repository** that holds everything
+Freilauf is developed with a **private sister repository** that holds everything
 machine- and operator-specific, and the public repo stays free of it. Copy the
 pattern if you fork — it is small and it works:
 
 - `CLAUDE.local.md` next to `CLAUDE.md`, **gitignored**: the real ports, the VPN
   address, hostnames, certificate paths. Claude Code loads both files, so your
   agent has the full picture while the public repo has none of it.
-- `~/.config/cc-hub/env` — the only place API keys live. Never in the repo, and
+- `~/.config/freilauf/env` — the only place API keys live. Never in the repo, and
   `chmod 600`.
-- `~/.config/cc-hub/coding-agents.json` — an optional **seed**: on first start
+- `~/.config/freilauf/coding-agents.json` — an optional **seed**: on first start
   with an empty configuration, the hub creates your coding agents and providers
   from it. This is what makes a fresh machine reproducible.
 - `pruefe-vor-push.sh` — a pre-push hook that greps the **committed** state for
   private IPs, home paths, key formats and bot tokens. Its generic patterns
   are in the script; the operator's own patterns live *outside* the repo, in
-  `~/.config/cc-hub/verbotene-muster`, because a list of secret values is itself
+  `~/.config/freilauf/verbotene-muster`, because a list of secret values is itself
   a list of secret values.
 
 **As an agent working in this repository, treat that as binding**: no real
@@ -241,7 +277,7 @@ tooling. The seams that were designed to be pulled on:
 
 | You want to… | Pull on this seam |
 |---|---|
-| drive a coding agent CLI that is not supported | a **plugin package** in `CCHUB_PLUGIN_DIR` — a `plugin.json` plus a descriptor with a `launch` declaration, and `bin/cc-start --spec` starts it without a line of bash. Inside this repo instead: a file in `server/harnesses/` plus a `case` in `cc-start` → [`docs/plugins.md`](docs/plugins.md) |
+| drive a coding agent CLI that is not supported | a **plugin package** in `FREILAUF_PLUGIN_DIR` — a `plugin.json` plus a descriptor with a `launch` declaration, and `bin/fl-start --spec` starts it without a line of bash. Inside this repo instead: a file in `server/harnesses/` plus a `case` in `fl-start` → [`docs/plugins.md`](docs/plugins.md) |
 | use another model provider | a plugin package of the same shape, or a file in `server/providers/` → same doc |
 | be notified somewhere other than Telegram — Slack, a webhook, e-mail, a script | a **notifier plugin**: the same package shape with `"kind": "notifier"`, a descriptor whose minimum is `id`, `label` and `async send(message, ctx)`, and whatever `settings` / `credentials` it needs. Inside this repo instead: a file in `server/notifiers/`. Configure it under Settings → Notifications → [`docs/plugins.md`](docs/plugins.md) |
 | not be notified at all | do nothing — that is the default, and it is a complete installation |
@@ -262,13 +298,13 @@ welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 7. Working *on* this repository — the rules that will bite you
 
-If your task is to change cc-hub rather than just run it:
+If your task is to change Freilauf rather than just run it:
 
 - **Project language is English.** Source, comments, docs, commit messages.
   (`lang/de.json` and `lang/zh.json` are the exception, obviously.) There is a
   subagent for this: `.claude/agents/english-enforcer.md`.
 - **No hardcoded UI strings.** Everything goes through `t('key')` /
-  `window.CCHUB_I18N`, and `lang/en.json`, `de.json`, `zh.json` must carry the
+  `window.FREILAUF_I18N`, and `lang/en.json`, `de.json`, `zh.json` must carry the
   same key set — a unit test fails otherwise. Subagent:
   `.claude/agents/i18n-checker.md`.
 - **The README exists in three languages** (`README.md`, `README.zh-CN.md`,
@@ -280,7 +316,7 @@ If your task is to change cc-hub rather than just run it:
   this project — a unit test enforces both halves.
 - **Run the tests.** `node test/unit.mjs` (~1 s) and `node test/e2e.mjs` (~40 s)
   at minimum; `test/browser.mjs`, `test/proxy.mjs` and `test/deploy.mjs` when
-  you touched `public/hub.js`, `vpn-proxy.mjs` or `bin/cchub-deploy`. The e2e
+  you touched `public/hub.js`, `vpn-proxy.mjs` or `bin/freilauf-deploy`. The e2e
   suite is sandboxed — its own port, database, repo and tmux sessions — so it is
   safe to run next to a live hub.
 - **Read `AGENTS.md` before you get creative.** In particular the "Pitfalls"
@@ -298,20 +334,20 @@ If your task is to change cc-hub rather than just run it:
 | Everything, in depth (architecture, decisions, pitfalls) | `AGENTS.md` |
 | What a run *is*; forms, validation, agent lifecycle | `server/run-def.mjs` |
 | Starting a run, schedules, budget gate | `server/scheduler.mjs`, `server/quota.mjs` |
-| Worktrees, prompt assembly, session launch | `server/runner.mjs`, `bin/cc-start` |
-| Reports coming back in | `server/reports.mjs`, `bin/cc-report` |
+| Worktrees, prompt assembly, session launch | `server/runner.mjs`, `bin/fl-start` |
+| Reports coming back in | `server/reports.mjs`, `bin/fl-report` |
 | Watching from the outside; anomalies | `server/watcher.mjs`, `server/detect.mjs` |
 | Merging a finished run into the base branch | `server/integrate.mjs` |
 | Rate limits / provider outages | `server/incidents.mjs`, `server/harnesses/patterns.mjs` |
 | Plugins — coding agents, model providers, notification channels: the contract, in depth | **`docs/plugins.md`** (the one document to hand an agent for this), `server/harnesses/`, `server/providers/`, `server/notifiers/` |
-| Saying something to a human — the facade, the page, the CLI | `server/notify.mjs`, `server/notifications.mjs`, `bin/cc-notify` |
+| Saying something to a human — the facade, the page, the CLI | `server/notify.mjs`, `server/notifications.mjs`, `bin/fl-notify` |
 | Loading, validating, storing and configuring plugins | `server/plugins/` (`registry`, `loader`, `manifest`, `store`, `install`, `discovery`, `settings`, `context`, `web`) |
 | The hub's own LLM calls: sources, structured output, alerts | `server/llm/` (`index` = `llmJson()`, `sources`, `schema`, `json`, `alerts`) |
 | The first-run wizard | `server/welcome.mjs` |
 | No-code flows | `server/flows/` + its own `AGENTS.md` |
 | Pages, sidebar, live channel | `server/pages.mjs`, `server/events.mjs`, `public/hub.js` |
 | TLS proxy, HTTP/2, the network edge | `vpn-proxy.mjs`, `test/proxy.mjs` |
-| Deploying, rollback, health check | `bin/cchub-deploy`, `test/deploy.mjs` |
+| Deploying, rollback, health check | `bin/freilauf-deploy`, `test/deploy.mjs` |
 | Schema, migrations, the one place events are written | `server/db.mjs` |
 | UI strings | `server/i18n.mjs`, `lang/*.json` |
 
@@ -323,9 +359,9 @@ If your task is to change cc-hub rather than just run it:
 [ ] asked the human for: VPN bind, ports, allowed hosts, certs, CLIs, keys
 [ ] prerequisites verified (node ≥ 22, tmux, git, jq, curl, wg, one agent CLI)
 [ ] setup/01 → 02 → 03 run, output read, not just executed
-[ ] ~/.config/cc-hub/env filled in by the human; certificates in place
+[ ] ~/.config/freilauf/env filled in by the human; certificates in place
 [ ] setup/04-firewall.sh run (or handed to the human with the exact command)
-[ ] cchub-deploy --init --from "$PWD"  →  cchub status  →  cchub on
+[ ] freilauf-deploy --init --from "$PWD"  →  freilauf status  →  freilauf on
 [ ] reachability verified FROM A VPN CLIENT, not from the server
 [ ] Welcome wizard answered (or deliberately skipped)
 [ ] Settings → Plugins: at least one coding agent enabled, its providers ticked,

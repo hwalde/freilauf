@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# cc-report — agents report back to cc-hub (Planung 6).
+# fl-report — agents report back to Freilauf (Planung 6).
 # Usage:
-#   cc-report done [--file report.md | "text"]     Run completed — or, from a run that
+#   fl-report done [--file report.md | "text"]     Run completed — or, from a run that
 #                                                  is already over, a FOLLOW-UP report:
 #                                                  same command, the hub tells them apart
-#   cc-report failed "reason"                      Run failed
-#   cc-report help "question/problem"              Call for help (run stays open, waits)
-#   cc-report progress "status"                    Progress / taking longer
-#   cc-report branch <name>                        Branch reported
-#   cc-report pr <url>                             Pull request reported
-#   cc-report _api_error [error] ["text"]         Rate-limit/provider error (from hooks);
+#   fl-report failed "reason"                      Run failed
+#   fl-report help "question/problem"              Call for help (run stays open, waits)
+#   fl-report progress "status"                    Progress / taking longer
+#   fl-report branch <name>                        Branch reported
+#   fl-report pr <url>                             Pull request reported
+#   fl-report _api_error [error] ["text"]         Rate-limit/provider error (from hooks);
 #                                                  without arguments: Claude hook JSON on stdin
-#   cc-report _turn_end|_exit|_rate_limit|_idle|_pane_died [exit]   internal hooks
+#   fl-report _turn_end|_exit|_rate_limit|_idle|_pane_died [exit]   internal hooks
 #
-# Source: CC_RUN_ID + CC_HUB_URL from the environment. Fallback when the hub is not
+# Source: FL_RUN_ID + FL_HUB_URL from the environment (CC_RUN_ID/CC_HUB_URL are
+# still accepted, for sessions started before the rename). Fallback when the hub is not
 # reachable: JSON line to ~/agents/runs/<id>/inbox.jsonl — the watcher collects it.
 set -euo pipefail
 
@@ -31,10 +32,14 @@ case "$KIND" in
     *) printf 'unknown kind: %s\n' "$KIND" >&2; exit 2 ;;
 esac
 
-RUN_ID="${CC_RUN_ID:-}"
-HUB="${CC_HUB_URL:-http://127.0.0.1:8791}"
+# The old names for one transition release. A session that started before the
+# rename carries CC_RUN_ID/CC_HUB_URL and calls this script through the
+# `cc-report` shim; its prompt, its claude hooks and its .cursor/hooks.json were
+# all written then, and none of them can be rewritten from here.
+RUN_ID="${FL_RUN_ID:-${CC_RUN_ID:-}}"
+HUB="${FL_HUB_URL:-${CC_HUB_URL:-http://127.0.0.1:8791}}"
 if [[ -z "$RUN_ID" ]]; then
-    echo "cc-report: CC_RUN_ID is not set — pointless outside a cc-hub run." >&2
+    echo "fl-report: FL_RUN_ID is not set — pointless outside a Freilauf run." >&2
     exit 3
 fi
 
@@ -43,7 +48,7 @@ TEXT="" ; FILE_ARG="" ; ERR="" ; SESSION_ID=""
 # on stdin: { "error": "rate_limit", "last_assistant_message": "…", "session_id": "…" }.
 # The other hook kinds (Stop, SessionEnd, Notification) get the same JSON shape.
 # session_id is forwarded so the hub can tell the run's OWN session from a claude
-# process the agent spawned (which inherits hooks and CC_RUN_ID but carries its own
+# process the agent spawned (which inherits hooks and FL_RUN_ID but carries its own
 # session id) — its failures must not land on the run as incidents.
 if [[ "$KIND" == "_api_error" || "$KIND" == "_turn_end" || "$KIND" == "_exit" || "$KIND" == "_idle" ]]; then
     HOOK_JSON=""
@@ -55,7 +60,7 @@ if [[ "$KIND" == "_api_error" || "$KIND" == "_turn_end" || "$KIND" == "_exit" ||
         # not a terminal — it does NOT say anybody is going to write to it or ever
         # close it. A real hook hands over its JSON and closes at once, so the
         # timeout costs nothing there; every OTHER caller that inherited an open
-        # pipe (a script, a test, a hand-typed `cc-report _turn_end`) would
+        # pipe (a script, a test, a hand-typed `fl-report _turn_end`) would
         # otherwise block forever. This used to apply to _api_error alone; the day
         # it was extended to _turn_end/_exit/_idle it became a hang on the events
         # that fire constantly — and _exit runs from SessionEnd, which claude waits for.
@@ -68,7 +73,7 @@ if [[ "$KIND" == "_api_error" || "$KIND" == "_turn_end" || "$KIND" == "_exit" ||
         # not a terminal — it does NOT say anybody is going to write to it or ever
         # close it. A real hook hands over its JSON and closes at once, so the
         # timeout costs nothing there; every OTHER caller that inherited an open
-        # pipe (a script, a test, a hand-typed `cc-report _turn_end`) would
+        # pipe (a script, a test, a hand-typed `fl-report _turn_end`) would
         # otherwise block forever. This used to apply to _api_error alone; the day
         # it was extended to _turn_end/_exit/_idle it became a hang on the events
         # that fire constantly — and _exit runs from SessionEnd, which claude waits for.
@@ -99,9 +104,9 @@ fi
 # Build the payload as JSON with python3 (quoting-safe, no jq dependency).
 PAYLOAD="$(python3 - "$KIND" "$TEXT" "$FILE_ARG" "$ERR" "$SESSION_ID" <<'PY'
 # `os` is used below for os.path.isfile — it was lost once, and the failure is
-# invisible until the ONE call that matters: `cc-report done --file <report>`
+# invisible until the ONE call that matters: `fl-report done --file <report>`
 # dies with a NameError, so an agent finishes its work and cannot say so.
-# `cc-report progress` keeps working, because an empty file argument
+# `fl-report progress` keeps working, because an empty file argument
 # short-circuits the isfile() call — which is exactly why it went unnoticed.
 import json, os, sys
 kind, text, file_arg, err, session_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
@@ -137,7 +142,7 @@ send() {
 
 FALLBACK_DIR="$HOME/agents/runs/$RUN_ID"
 if OUT="$(send 2>/dev/null)"; then
-    # cc-hub may ANSWER a report instead of just accepting it: with the repo's
+    # Freilauf may ANSWER a report instead of just accepting it: with the repo's
     # integration switched on, `done` is checked (worktree clean? branch still
     # mergeable?) and the answer says what is still missing. Printing it puts the
     # text into the agent's running turn as this tool's own output — the cheapest
@@ -155,5 +160,5 @@ fi
 # Fallback: hub not reachable → inbox.jsonl (the watcher collects it, Planung 6).
 mkdir -p "$FALLBACK_DIR" 2>/dev/null || true
 printf '%s\n' "$PAYLOAD" >> "$FALLBACK_DIR/inbox.jsonl"
-echo "cc-report: hub not reachable — the report is in inbox.jsonl, the watcher will pick it up." >&2
+echo "fl-report: hub not reachable — the report is in inbox.jsonl, the watcher will pick it up." >&2
 exit 0

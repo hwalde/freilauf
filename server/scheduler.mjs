@@ -1,4 +1,4 @@
-// cc-hub — scheduler (planning 4.2/4.8): the agents' cron expressions, global
+// Freilauf — scheduler (planning 4.2/4.8): the agents' cron expressions, global
 // pipeline AND gate, budget gate with deferral instead of discarding.
 import db, { addEvent } from './db.mjs'
 import { scheduleDue, parseDbUtc } from './util.mjs'

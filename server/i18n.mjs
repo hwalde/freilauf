@@ -1,4 +1,4 @@
-// cc-hub — UI internationalization.
+// Freilauf — UI internationalization.
 //
 // The web UI is multilingual: English is the default, German and Chinese are
 // selectable in the settings. All UI strings live in lang/<code>.json (flat
@@ -16,8 +16,9 @@
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { env } from './env.mjs'
 
-const LANG_DIR = process.env.CCHUB_LANG_DIR
+const LANG_DIR = env('LANG_DIR')
   ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'lang')
 
 export const LANGUAGES = { en: 'English', de: 'Deutsch', zh: '中文' }

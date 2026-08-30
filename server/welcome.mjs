@@ -1,4 +1,4 @@
-// cc-hub — the Welcome wizard (PLAN §3.12).
+// Freilauf — the Welcome wizard (PLAN §3.12).
 //
 // A fresh installation has nothing: no coding agent, no model provider, no
 // repository. Every page it renders is therefore about something the operator
@@ -56,7 +56,7 @@ export const LLM_SOURCE_KEYS = ['llm_title_source', 'llm_check_source', 'llm_ext
 
 const STEPS = 5
 const HOME = '/'
-const SETUP_DOC = 'https://github.com/hwalde/cc-hub/blob/main/SETUP_WITH_AGENT.md'
+const SETUP_DOC = 'https://github.com/hwalde/freilauf/blob/main/SETUP_WITH_AGENT.md'
 
 /** A `<p class="dim">` explanation — the shape the Plugins page uses (PLAN §2). */
 const explain = (key) => `<p class="dim">${e(t(key))}</p>`
@@ -65,11 +65,11 @@ const explain = (key) => `<p class="dim">${e(t(key))}</p>`
 // should the wizard be shown at all?
 // ---------------------------------------------------------------------------
 
-const SKIP_COOKIE = 'cchub_welcome'
+const SKIP_COOKIE = 'freilauf_welcome'
 
 /** Has this browser said "not now" in the current session? */
 export function welcomeSkipped(req) {
-  return /(?:^|;\s*)cchub_welcome=skip(?:;|$)/.test(req?.headers?.cookie ?? '')
+  return /(?:^|;\s*)freilauf_welcome=skip(?:;|$)/.test(req?.headers?.cookie ?? '')
 }
 
 /**

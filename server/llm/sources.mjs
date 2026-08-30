@@ -1,4 +1,4 @@
-// cc-hub — the model-source registry for the hub's OWN questions.
+// Freilauf — the model-source registry for the hub's OWN questions.
 //
 // The hub asks a model four things: a name for a run (title.mjs), whether a log
 // line is a real outage (pruefer.mjs), what a report contains (flows/llm.mjs)

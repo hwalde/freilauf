@@ -1,5 +1,5 @@
-// cc-hub flows — designer page (vanilla JS on top of sequential-workflow-designer).
-// Everything it needs comes from window.CCHUB_FLOWS: the i18n catalog (flows.*),
+// Freilauf flows — designer page (vanilla JS on top of sequential-workflow-designer).
+// Everything it needs comes from window.FREILAUF_FLOWS: the i18n catalog (flows.*),
 // the step registry (meta.steps — one source of truth with server/flows/steps.mjs),
 // select lists (agents, repos, harnesses) and the flow being edited.
 //
@@ -14,7 +14,7 @@ import {
   entryFor, opsForType, valuesFor, UNARY_OPS,
 } from '/static/flows/varschema.mjs'
 
-const { i18n, meta, flow } = window.CCHUB_FLOWS
+const { i18n, meta, flow } = window.FREILAUF_FLOWS
 const { Designer, Uid } = window.sequentialWorkflowDesigner
 const T = (key, params = {}) => String(i18n[key] ?? key).replace(/\{(\w+)\}/g, (_, k) => params[k] ?? `{${k}}`)
 const stepMeta = Object.fromEntries(meta.steps.map(s => [s.type, s]))

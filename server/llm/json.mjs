@@ -1,4 +1,4 @@
-// cc-hub — tolerant JSON extraction and repair for model answers.
+// Freilauf — tolerant JSON extraction and repair for model answers.
 //
 // A model that has no native structured output does what it was trained on: it
 // wraps the JSON in a markdown fence, writes "Sure, here is the JSON:" in front

@@ -1,4 +1,4 @@
-// cc-hub flows — the typed variable catalog: which variables exist at a given
+// Freilauf flows — the typed variable catalog: which variables exist at a given
 // point in a definition, of which type and with which allowed values.
 //
 // This is what turns "type {{vars.extracted.needs_review}} and hope" into a

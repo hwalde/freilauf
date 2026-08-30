@@ -26,7 +26,7 @@ Root: central timezone + number/percentage formatting
 │    │        hub.mjs startup applies it (like setLanguage)
 │    └── 2.2  settings form block (select + hints), i18n keys settings.format_*
 │    │        in en/de/zh
-│    │    └── 2.2.1  layout() injects window.CCHUB_TZ = uiTimezone()
+│    │    └── 2.2.1  layout() injects window.FREILAUF_TZ = uiTimezone()
 ├── 3  Server-side time displays in the configured timezone
 │    └── 3.1  usage panel reset/stamp text (pages.mjs) — tz abbreviation instead
 │    │        of " UTC"
@@ -37,7 +37,7 @@ Root: central timezone + number/percentage formatting
 │    └── 4.1  quotaBar pct, rail-dot titles, sessions CPU %, run costs,
 │             usage panel money, provider balances
 └── 5  Client side (public/hub.js)
-     └── 5.1  reltime title + zeitText use window.CCHUB_TZ
+     └── 5.1  reltime title + zeitText use window.FREILAUF_TZ
      └── 5.2  relative text unchanged (timezone-free by construction)
 ```
 
@@ -74,10 +74,10 @@ Root: central timezone + number/percentage formatting
       timezoneForLanguage, uiTimezone, validTz, tzAbbrev, fmtDbUtc, fmtClock,
       fmtDatePart, fmtNum, fmtPercent, fmtMoney, TIMEZONE_OPTIONS);
       settings (ui_timezone key + form block + i18n en/de/zh, hub.mjs startup,
-      layout injects window.CCHUB_TZ); server displays converted (usage panel
+      layout injects window.FREILAUF_TZ); server displays converted (usage panel
       reset/stamp with tz abbreviation, incidents, anomalies, run chips/metrics/
       events, flows pages, incident Telegram); numbers/percentages through
       fmtNum/fmtPercent (quotaBar, rail, cpu, run costs, usage money, balances,
-      byteText); hub.js reltime title + zeitText follow CCHUB_TZ.
+      byteText); hub.js reltime title + zeitText follow FREILAUF_TZ.
       Tests: unit 280, e2e 253, browser 57, proxy 4, deploy 9 all green.
       GATES.md all four met via the checker, evidence rewritten machine-free.

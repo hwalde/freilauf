@@ -1,4 +1,4 @@
-// cc-hub — throttled, deduplicated alerts for the hub's own LLM calls.
+// Freilauf — throttled, deduplicated alerts for the hub's own LLM calls.
 //
 // The problem this exists for: a provider that fails does not fail once. A
 // wrong key fails on EVERY call, and the hub makes one per run title, one per

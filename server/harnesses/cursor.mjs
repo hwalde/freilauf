@@ -1,4 +1,4 @@
-// cc-hub — coding agent plugin: cursor (cursor-agent CLI).
+// Freilauf — coding agent plugin: cursor (cursor-agent CLI).
 //
 // cursor runs like claude only on its subscription: no provider, no --effort.
 // The ~200 flat model IDs are base × effort level × fast, already multiplied
@@ -12,21 +12,22 @@ import { promisify } from 'node:util'
 import { HTTP_5XX } from './patterns.mjs'
 import { transcriptPath } from '../cursor-transcript.mjs'
 import { runCli, cliFailure } from './cli-llm.mjs'
+import { env } from '../env.mjs'
 
 const execFileAsync = promisify(execFile)
 
-const AUTH_FILE = () => process.env.CCHUB_CURSOR_AUTH ?? `${homedir()}/.config/cursor/auth.json`
-const API = () => process.env.CCHUB_CURSOR_API ?? 'https://api2.cursor.sh'
+const AUTH_FILE = () => env('CURSOR_AUTH') ?? `${homedir()}/.config/cursor/auth.json`
+const API = () => env('CURSOR_API') ?? 'https://api2.cursor.sh'
 
 const plugin = {
   id: 'cursor',
   label: 'Cursor CLI',
   bin: 'cursor-agent',
   installHint: 'curl https://cursor.com/install -fsS | bash   (then: cursor-agent login)',
-  sessionTag: 'cu-',         // tmux sessions: cc-cu-<name>
+  sessionTag: 'cu-',         // tmux sessions: fl-cu-<name>
 
   /**
-   * How bin/cc-start calls this CLI (see claude.mjs for why the built-in `case`
+   * How bin/fl-start calls this CLI (see claude.mjs for why the built-in `case`
    * in that script, not this block, is what a cursor run is launched from).
    *
    * The prompt is a POSITIONAL argument after `--`, never `-p`: `-p/--print`
@@ -54,14 +55,14 @@ const plugin = {
    * The turn end IS the end of the run. cursor's TUI stays standing after the
    * work is done ('→ Add a follow-up'), so the pane never dies and the last
    * safety net every other harness has does not exist here. Without this flag a
-   * cursor run whose agent forgot `cc-report done` stood on 'running' FOREVER —
+   * cursor run whose agent forgot `fl-report done` stood on 'running' FOREVER —
    * and since a single run with the start mode "when no other run of this repo
    * is going" waits for exactly that, one forgotten report blocked the whole
    * queue behind it (observed 2026-08-25: four runs, among them the one meant to
    * fix this).
    *
    * reports.mjs closes the run on `_turn_end` when this is set — but only from
-   * status 'running': a `cc-report help` puts the run on 'waiting_help' and the
+   * status 'running': a `fl-report help` puts the run on 'waiting_help' and the
    * agent ends its turn exactly as it should while waiting for the answer.
    */
   turnEndsRun: true,
@@ -73,14 +74,14 @@ const plugin = {
    *
    * 'stop' fires when the agent finishes its turn while the session stays alive
    * (measured with 2026.08.11-e8db854: payload status "completed", and the
-   * session's environment — CC_RUN_ID included — is inherited, which is what
-   * makes cc-report work from here at all). 'sessionEnd' is the second net for
+   * session's environment — FL_RUN_ID included — is inherited, which is what
+   * makes fl-report work from here at all). 'sessionEnd' is the second net for
    * the case where the process really exits; it detaches with setsid because a
    * hook a dying process takes down with it reports nothing (the lesson from
    * claude's StopFailure).
    */
-  hookFiles({ ccReport }) {
-    const cmd = (...args) => `${ccReport} ${args.join(' ')}`
+  hookFiles({ flReport }) {
+    const cmd = (...args) => `${flReport} ${args.join(' ')}`
     return [{
       path: '.cursor/hooks.json',
       content: JSON.stringify({
@@ -101,11 +102,11 @@ const plugin = {
    * there is nothing left to call from.
    */
   promptRules: [
-    'You are running as `cursor-agent` under cc-hub, and your turn ending is what ends this run.',
-    'The platform closes the run the moment you stop, so the `cc-report done --file {report_file}`',
+    'You are running as `cursor-agent` under Freilauf, and your turn ending is what ends this run.',
+    'The platform closes the run the moment you stop, so the `fl-report done --file {report_file}`',
     'call below has to be your LAST tool call, inside this same turn — afterwards there is nothing',
     'left to call it from. A summary printed into the chat is not a report: nobody reads the TUI.',
-    '`cc-report` is an ordinary program on PATH; run it with your shell tool like any other command.',
+    '`fl-report` is an ordinary program on PATH; run it with your shell tool like any other command.',
   ].join('\n'),
 
   // cursor has NO hook for API errors (its hook enum knows beforeShellExecution,
@@ -230,7 +231,7 @@ const plugin = {
     return { stufen: null, hinweisKey: 'effort.cursor_in_id' }
   },
 
-  /** CLI arguments for cc-start: ONLY --model with a verbatim ID from `cursor-agent models`. */
+  /** CLI arguments for fl-start: ONLY --model with a verbatim ID from `cursor-agent models`. */
   /**
    * `cursor-agent --resume [chatId]` (measured against the CLI's own --help).
    * The chat id is the transcript's directory name — the same file the hub reads

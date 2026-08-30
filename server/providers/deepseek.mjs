@@ -1,4 +1,4 @@
-// cc-hub — provider plugin: DeepSeek (direct API).
+// Freilauf — provider plugin: DeepSeek (direct API).
 
 /**
  * The credential, resolved the way the operator configured it — a stored value,

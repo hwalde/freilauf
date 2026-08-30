@@ -1,4 +1,4 @@
-// cc-hub — small HTTP helpers shared by pages.mjs and web.mjs.
+// Freilauf — small HTTP helpers shared by pages.mjs and web.mjs.
 export function redirect(res, loc) {
   res.writeHead(303, { location: loc }).end()
 }
@@ -35,11 +35,11 @@ export function parseForm(text) {
 // (re-)writes it whenever a page request arrives with a valid ?repo=, so a URL
 // someone followed also becomes the persisted choice.
 
-const REPO_COOKIE = 'cchub_repo'
+const REPO_COOKIE = 'freilauf_repo'
 
-/** The repo id stored in the cchub_repo cookie, or null. */
+/** The repo id stored in the freilauf_repo cookie, or null. */
 export function cookieRepo(req) {
-  const m = /(?:^|;\s*)cchub_repo=(\d+)(?:;|$)/.exec(req.headers.cookie ?? '')
+  const m = /(?:^|;\s*)freilauf_repo=(\d+)(?:;|$)/.exec(req.headers.cookie ?? '')
   return m ? Number(m[1]) : null
 }
 

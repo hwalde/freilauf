@@ -4,7 +4,9 @@
 #
 # Two pattern sources:
 #   1. Generic patterns here in the script (private IPs, key formats, home paths).
-#   2. ~/.config/cc-hub/verbotene-muster — one regex per line, '#' = comment.
+#   2. <config>/verbotene-muster — one regex per line, '#' = comment.
+#      <config> is ~/.config/freilauf, or ~/.config/cc-hub while an installation
+#      still lives under the old name (bin/fl-paths.sh answers which).
 #      Deliberately OUTSIDE the repo: the patterns describe exactly the values that
 #      do not belong in the repo, and therefore must not appear in it themselves.
 set -uo pipefail
@@ -24,13 +26,16 @@ MUSTER=(
     '-----BEGIN( [A-Z]+)? PRIVATE KEY-----'
     '@(gmail|googlemail|gmx|web)\.'                      # private email addresses
 )
-if [[ -f "$HOME/.config/cc-hub/verbotene-muster" ]]; then
+# shellcheck source=bin/fl-paths.sh
+. "$(dirname "$0")/bin/fl-paths.sh"
+MUSTERDATEI="$(fl_config_dir)/verbotene-muster"
+if [[ -f "$MUSTERDATEI" ]]; then
     while IFS= read -r zeile; do
         [[ -z "$zeile" || "$zeile" == \#* ]] && continue
         MUSTER+=("$zeile")
-    done < "$HOME/.config/cc-hub/verbotene-muster"
+    done < "$MUSTERDATEI"
 else
-    echo "NOTE: ~/.config/cc-hub/verbotene-muster is missing — only the generic patterns apply." >&2
+    echo "NOTE: $MUSTERDATEI is missing — only the generic patterns apply." >&2
 fi
 
 # What is checked is the committed state (HEAD), not the working tree: that is what a

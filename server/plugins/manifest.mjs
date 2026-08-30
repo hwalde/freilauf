@@ -1,4 +1,4 @@
-// cc-hub — plugin manifest and descriptor validation.
+// Freilauf — plugin manifest and descriptor validation.
 //
 // Pure functions: no I/O, no database, no registry. That is deliberate — this
 // is the one part of the plugin machinery that can be unit-tested without a

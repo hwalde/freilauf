@@ -1,4 +1,4 @@
-// cc-hub — find worktree extras for a repo via an LLM (Settings → Worktree extras).
+// Freilauf — find worktree extras for a repo via an LLM (Settings → Worktree extras).
 //
 // The repo form's "find worktree extras" button asks this endpoint. It is a
 // SINGLE structured call, not an agent: no tmux session, no worktree, no flows —
@@ -184,7 +184,7 @@ export async function suggestExtras(path, { timeoutMs = 60_000 } = {}) {
   // The error stays TRANSLATED, and stays split by stage: the form shows the
   // operator a sentence in their own language, and which sentence it is says
   // whether the vendor was unreachable or answered with something unusable.
-  // (`CCHUB_OPENROUTER_BASE` still works: it is the OpenRouter plugin that
+  // (`FREILAUF_OPENROUTER_BASE` still works: it is the OpenRouter plugin that
   //  reads it now, so the stub the unit suite points this call at is reached
   //  through the adapter instead of through a fetch written out here.)
   if (!r.ok) {

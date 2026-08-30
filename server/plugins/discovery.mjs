@@ -1,4 +1,4 @@
-// cc-hub — what is already on this machine?
+// Freilauf — what is already on this machine?
 //
 // A fresh installation has nothing configured and no way of knowing that the
 // operator already has three coding agent CLIs installed and two API keys in

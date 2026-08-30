@@ -1,6 +1,6 @@
-// cc-hub — loading external plugin packages from disk.
+// Freilauf — loading external plugin packages from disk.
 //
-// A package is one directory under CCHUB_PLUGIN_DIR holding a `plugin.json`
+// A package is one directory under FREILAUF_PLUGIN_DIR holding a `plugin.json`
 // manifest and the module it names (default `index.mjs`, `export default` the
 // descriptor). Nothing else about it is special: once registered it is the
 // same kind of object the built-in files export.
@@ -15,10 +15,12 @@ import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { validateManifest } from './manifest.mjs'
 import { registerPlugin, addRegistryError } from './registry.mjs'
+import { env } from '../env.mjs'
+import { dataDir } from '../paths.mjs'
 
 /** Where external plugin packages live. */
 export function pluginDir() {
-  return process.env.CCHUB_PLUGIN_DIR ?? join(homedir(), '.local', 'share', 'cc-hub', 'plugins')
+  return env('PLUGIN_DIR') ?? join(dataDir(), 'plugins')
 }
 
 /** Read and validate one package's `plugin.json`. Never throws. */

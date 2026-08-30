@@ -1,4 +1,4 @@
-// cc-hub — the run definition: ONE description of what a run is made of.
+// Freilauf — the run definition: ONE description of what a run is made of.
 //
 // An agent and a single run differ in exactly two things: an agent has a name
 // and a schedule and can be started again, a single run cannot. Everything else
@@ -63,7 +63,7 @@ export const BRANCH_MODE_INFO = {
     explain: { off: 'branch.none.explain_off', hub: 'branch.none.explain_hub' },
     rule: {
       off: 'No branch — the worktree is detached; changes are throwaway changes.',
-      hub: 'No branch — the worktree is detached; cc-hub merges your commits into {base} when you report done.',
+      hub: 'No branch — the worktree is detached; Freilauf merges your commits into {base} when you report done.',
       // Deliberately no 'keep': there is no branch to keep the work on.
     },
   },
@@ -72,8 +72,8 @@ export const BRANCH_MODE_INFO = {
     explain: { off: 'branch.new.explain_off', hub: 'branch.new.explain_hub' },
     rule: {
       off: 'Create a new branch, name following the pattern {branch}.',
-      hub: 'Create a new branch, name following the pattern {branch}; cc-hub merges it into {base} when you report done.',
-      keep: 'Create a new branch, name following the pattern {branch}. The work STAYS on that branch: cc-hub will not merge it into {base}. Commit everything and push the branch before you report done.',
+      hub: 'Create a new branch, name following the pattern {branch}; Freilauf merges it into {base} when you report done.',
+      keep: 'Create a new branch, name following the pattern {branch}. The work STAYS on that branch: Freilauf will not merge it into {base}. Commit everything and push the branch before you report done.',
     },
   },
   fest: {
@@ -81,8 +81,8 @@ export const BRANCH_MODE_INFO = {
     explain: { off: 'branch.fixed.explain_off', hub: 'branch.fixed.explain_hub' },
     rule: {
       off: 'Work on the existing branch {branch}.',
-      hub: 'Work on the existing branch {branch}; cc-hub merges it into {base} when you report done.',
-      keep: 'Work on the existing branch {branch}. The work STAYS on that branch: cc-hub will not merge it into {base}. Commit everything and push the branch before you report done.',
+      hub: 'Work on the existing branch {branch}; Freilauf merges it into {base} when you report done.',
+      keep: 'Work on the existing branch {branch}. The work STAYS on that branch: Freilauf will not merge it into {base}. Commit everything and push the branch before you report done.',
     },
   },
 }

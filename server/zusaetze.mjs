@@ -1,4 +1,4 @@
-// cc-hub — extra skills: selectable work instructions for runs and agents.
+// Freilauf — extra skills: selectable work instructions for runs and agents.
 //
 // DELIBERATELY not a .claude/skills folder: there every claude instance would
 // load the skill automatically. These skills (e.g. "unlazy" against lazy small
@@ -13,9 +13,10 @@ import { readdirSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { t } from './i18n.mjs'
+import { env } from './env.mjs'
 
 export function zusaetzeDir() {
-  return process.env.CCHUB_ZUSAETZE_DIR ?? join(homedir(), 'agents', 'zusaetze')
+  return env('ZUSAETZE_DIR') ?? join(homedir(), 'agents', 'zusaetze')
 }
 
 /** Frontmatter fields (name, description) from a SKILL.md — tolerant, no YAML parser. */

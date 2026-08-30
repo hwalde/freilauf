@@ -1,8 +1,8 @@
-// cc-hub — notification channel plugin registry.
+// Freilauf — notification channel plugin registry.
 //
 // A "notifier" is a channel the hub can say something on: Telegram is the only
 // built-in one, a webhook, a Slack app or an SMTP sender is a package under
-// CCHUB_PLUGIN_DIR. Each built-in notifier is one file in this directory
+// FREILAUF_PLUGIN_DIR. Each built-in notifier is one file in this directory
 // exporting a plain descriptor object — see docs/plugins.md for the contract.
 //
 // The registry itself lives in server/plugins/registry.mjs, so an external

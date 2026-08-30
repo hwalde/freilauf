@@ -1,7 +1,7 @@
-// cc-hub — tmux sessions: what is running on this machine, what it costs and
+// Freilauf — tmux sessions: what is running on this machine, what it costs and
 // how it is ended.
 //
-// A run works in its own tmux session, and `cc-start --keep` sets
+// A run works in its own tmux session, and `fl-start --keep` sets
 // remain-on-exit: the session therefore OUTLIVES the agent on purpose — the
 // screen stays readable afterwards. The price is a process that keeps its
 // memory for as long as the session stands, and with a retention measured in
@@ -20,6 +20,7 @@
 import db, { getRun, addEvent, allSettings } from './db.mjs'
 import { sh, parseDbUtc } from './util.mjs'
 import { t } from './i18n.mjs'
+import { env } from './env.mjs'
 
 // session_path is free text and comes LAST, so a tab inside it cannot shift
 // any other field (the parser rejoins the remainder).
@@ -255,7 +256,7 @@ export async function sessionAlive(name) {
 /**
  * Is there still a PROCESS in this session one could type to?
  *
- * A standing session is not the same thing as a reachable agent: `cc-start
+ * A standing session is not the same thing as a reachable agent: `fl-start
  * --keep` sets remain-on-exit, so the session outlives its process on purpose
  * — the screen stays readable, but there is nobody left to answer. That is
  * exactly where the coding agents differ: claude, opencode and cursor stay in
@@ -330,7 +331,7 @@ export async function listSessions() {
  * `ps -eo` over every process on the machine is not something a page render
  * should pay for more often than the number can meaningfully change.
  */
-const MEM_CACHE_MS = Number(process.env.CCHUB_SESSION_MEM_CACHE_MS ?? 8 * 60_000)
+const MEM_CACHE_MS = Number(env('SESSION_MEM_CACHE_MS') ?? 8 * 60_000)
 let memCache = { at: 0, value: null }
 // One measurement in flight, released by the promise and not at the end of the
 // body — with no tmux server the body has an `await` but could still resolve
@@ -509,7 +510,7 @@ export async function killSessions(names, source = 'web') {
 /**
  * Sessions the watcher may close by itself. Deliberately only those carrying a
  * run of THIS hub: the e2e suite and other instances share the same tmux
- * server, and a pattern across all cc-* sessions would kill theirs.
+ * server, and a pattern across every `fl-` and `cc-` session would kill theirs.
  */
 export function autoCloseCandidates(sessions, keepMs, nowMs = Date.now()) {
   return sessions.filter(s => s.run && shouldAutoClose(s, s.run, keepMs, nowMs))

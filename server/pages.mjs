@@ -1,4 +1,4 @@
-// cc-hub — pages: server-rendered HTML, vanilla JS, red/yellow/green as the
+// Freilauf — pages: server-rendered HTML, vanilla JS, red/yellow/green as the
 // only colors (planning 10). Repo switcher + switch states in the header.
 // All UI strings go through i18n (lang/<code>.json; English is the default).
 import { existsSync } from 'node:fs'
@@ -36,7 +36,7 @@ import { listSessions, sessionMemory, sessionKeepHours, currentKeepMs, paneAlive
 import { cleanupSettings, cleanupConfigured, cleanupPrompt, cleanupRunInFlight, startCleanupRun } from './cleanup.mjs'
 import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
 import { flowRunKeepDays } from './flows/db.mjs'
-// "cc-hub found N things on this machine it could use" — derived, not passed,
+// "Freilauf found N things on this machine it could use" — derived, not passed,
 // exactly like setupBanner() above: the layout calls it on every page and it
 // answers out of the discovery table. It lives with the page that answers it.
 import { discoveryBanner } from './plugins/web.mjs'
@@ -53,6 +53,7 @@ import { llmSources, DEFAULT_SOURCE } from './llm/sources.mjs'
 // piece of a page, whichever module happens to build it.
 export { flowSection }
 import { t, LANGUAGES, currentLanguage, setLanguage, clientCatalog } from './i18n.mjs'
+import { env } from './env.mjs'
 
 /**
  * Input errors belong on a page with a way back — not in a 500 ("internal
@@ -435,7 +436,7 @@ function incidentBlock(repoId) {
  *
  * It belongs on every page and not only on /sessions, because that is the
  * reading one does not go looking for: a session outlives its agent on purpose
- * (`cc-start --keep`), so the bill runs quietly and only ever surprises. Thirty
+ * (`fl-start --keep`), so the bill runs quietly and only ever surprises. Thirty
  * sessions and 15 GB is a measured number from this installation, and nothing
  * in the hub said so until one navigated to the page that lists them.
  *
@@ -578,7 +579,7 @@ export async function layout(req, title, active, content, selectedRepo = null, w
   //
   //   1. an explicit ?repo= in the request      — the switcher itself speaking
   //   2. the repo context the page handed over  — the run, the agent, the list
-  //   3. the cchub_repo cookie, then the first repo
+  //   3. the freilauf_repo cookie, then the first repo
   //
   // The switcher, the sidebar and the Quick Run dialog all read this ONE value,
   // so the header can never show one repo while the sidebar talks about another.
@@ -611,13 +612,13 @@ export async function layout(req, title, active, content, selectedRepo = null, w
     : `<a href="/repos" class="warn">${e(t('layout.no_repo'))}</a>`
   return `<!doctype html><html lang="${e(currentLanguage())}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>cc-hub — ${e(title)}</title>
+<title>Freilauf — ${e(title)}</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6fed'/%3E%3Cpath d='M9 11l5 5-5 5' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M17 21h7' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/xterm.css"><link rel="stylesheet" href="/static/hub.css"></head>
 <body${selectedRepo == null ? '' : ` data-repo="${e(String(selectedRepo))}"`}>
 ${setupBanner()}
 <header>
-  <span class="brand">cc-hub</span>
+  <span class="brand">Freilauf</span>
   <nav>${nav}</nav>
   <span class="spacer"></span>
   ${repoSel}
@@ -629,9 +630,9 @@ ${await statusSidebar(effRepo)}
 </div>
 ${quickRunDialog(repos, effRepo)}
 ${await cleanupDialogHtml(active)}
-<div class="toasts" id="cchub-toasts" aria-live="polite"></div>
+<div class="toasts" id="freilauf-toasts" aria-live="polite"></div>
 ${withTerminal ? '<script src="/static/xterm.js"></script><script src="/static/addon-fit.js"></script>' : ''}
-<script>window.CCHUB_I18N=${JSON.stringify(clientCatalog())};window.CCHUB_TZ=${JSON.stringify(uiTimezone())}</script>
+<script>window.FREILAUF_I18N=${JSON.stringify(clientCatalog())};window.FREILAUF_TZ=${JSON.stringify(uiTimezone())}</script>
 <script src="/static/hub.js"></script></body></html>`
 }
 
@@ -939,7 +940,7 @@ function wartetAuf(run) {
 // Finished runs the overview should not show any more. The record stays complete
 // (report, log, incidents) and reachable under its detail page — it only leaves
 // the at-a-glance list. Paginated, newest-archived first.
-const ARCHIV_SEITE = Number(process.env.CCHUB_ARCHIVE_PAGE_SIZE ?? 50) || 50
+const ARCHIV_SEITE = Number(env('ARCHIVE_PAGE_SIZE') ?? 50) || 50
 
 export async function pageArchive(req, res, url) {
   const sel = selectRepo(req, url)
@@ -987,7 +988,7 @@ function selectRepo(req, url) {
   const want = url.searchParams.get('repo')
   let sel = want ? getRepo(+want) : null
   // No ?repo= — or one naming a repo that no longer exists: fall back to the
-  // repo chosen in the header, which travels as the cchub_repo cookie.
+  // repo chosen in the header, which travels as the freilauf_repo cookie.
   if (!sel) sel = cookieRepo(req) ? getRepo(cookieRepo(req)) : null
   if (!sel) sel = db.prepare('SELECT * FROM repos ORDER BY name LIMIT 1').get() ?? null
   return sel   // null = no repo yet → pages show a setup hint
@@ -1085,7 +1086,7 @@ export async function pageRun(req, res, url, id) {
   // Log (ANSI-cleaned), last excerpt
   const { readFileSync, existsSync, statSync } = await import('node:fs')
   const { join } = await import('node:path')
-  const logf = join(process.env.CCHUB_RUNS_DIR ?? `${process.env.HOME}/agents/runs`, id, 'log.txt')
+  const logf = join(env('RUNS_DIR') ?? `${process.env.HOME}/agents/runs`, id, 'log.txt')
   let logHtml = `<p class="dim">${e(t('run.no_log'))}</p>`
   if (existsSync(logf)) {
     try {
@@ -1132,9 +1133,9 @@ export async function pageRun(req, res, url, id) {
     <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
     ${notifySwitch(run)}
     ${live && !inFlight ? `<p class="dim">${e(t('run.session_after_hint'))}</p>` : ''}
-    ${live ? `<form onsubmit="return cchubSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>` : ''}
+    ${live ? `<form onsubmit="return freilaufSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>` : ''}
     ${inFlight
-      ? (live ? `<form onsubmit="return cchubKill('${id}')"><button class="danger">${e(t('run.kill'))}</button></form>` : '')
+      ? (live ? `<form onsubmit="return freilaufKill('${id}')"><button class="danger">${e(t('run.kill'))}</button></form>` : '')
       // The run is over — only the session is left. Ending it here must NOT go
       // through /runs/<id>/kill: that sets 'aborted', and it would turn a run
       // that came through cleanly into a failed one. /api/sessions/kill is the
@@ -1497,7 +1498,7 @@ export function vorfallAbschnitt(runId, runStatus = null) {
   ${offen.length ? `<form method="post" action="/api/runs/${runId}/incidents/resolve-all"><button>${e(t('incidents.resolve_all'))}</button>
     <span class="dim">${e(t('incidents.resolve_hint'))}</span></form>` : ''}
   ${zu.length ? `<details><summary class="dim">${e(t('incidents.resolved_n', { n: zu.length }))}</summary><ul class="incidents">${zu.map(zeile).join('')}</ul></details>` : ''}
-  <p class="dim">${e(t('incidents.detector_log'))}: <code>${e(join(process.env.CCHUB_RUNS_DIR ?? `${process.env.HOME}/agents/runs`, runId, 'detektor.jsonl'))}</code></p>`
+  <p class="dim">${e(t('incidents.detector_log'))}: <code>${e(join(env('RUNS_DIR') ?? `${process.env.HOME}/agents/runs`, runId, 'detektor.jsonl'))}</code></p>`
 }
 
 // ---------------- repos ----------------

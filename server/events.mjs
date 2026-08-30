@@ -1,4 +1,4 @@
-// cc-hub — in-process event bus and its SSE fan-out (`GET /api/events`).
+// Freilauf — in-process event bus and its SSE fan-out (`GET /api/events`).
 //
 // Why this can be so small: HTTP, scheduler and watcher all run in ONE process
 // (hub.mjs). Whoever changes a run is in the same memory as whoever holds the

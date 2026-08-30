@@ -1,7 +1,12 @@
-// cc-hub — provider plugin: OpenRouter.
+// Freilauf — provider plugin: OpenRouter.
+//
+// The one import is `env.mjs`, and it is safe as a STATIC one where the rest of
+// the hub's modules are not: that file imports nothing at all, so it cannot be
+// part of the registry cycle the lazy-import rule in AGENTS.md exists for.
+import { env } from '../env.mjs'
 
 /** The chat-completions endpoint. Overridable so the e2e suite can stub it. */
-const CHAT_URL = () => process.env.CCHUB_OPENROUTER_BASE ?? 'https://openrouter.ai/api/v1/chat/completions'
+const CHAT_URL = () => env('OPENROUTER_BASE') ?? 'https://openrouter.ai/api/v1/chat/completions'
 
 /**
  * The credential, resolved the way the operator configured it.
@@ -17,7 +22,7 @@ const plugin = {
   label: 'OpenRouter',
 
   // Env vars that hold a credential for this provider. The hub passes them into
-  // the agent's tmux session via `cc-start --env` (tmux does NOT inherit the
+  // the agent's tmux session via `fl-start --env` (tmux does NOT inherit the
   // environment) and uses them to decide whether the provider can be offered.
   envKeys: ['OPENROUTER_API_KEY'],
 
@@ -73,7 +78,7 @@ const plugin = {
     /**
      * One chat completion. This call used to be copy-pasted into four callers
      * (run title, incident check, flow `extract`, worktree extras), each with
-     * its own error style and only one of them honouring CCHUB_OPENROUTER_BASE.
+     * its own error style and only one of them honouring FREILAUF_OPENROUTER_BASE.
      *
      * `provider: { order, allow_fallbacks: false }` is OpenRouter's serving-
      * provider pin — the same field the run form calls "serving provider".
@@ -100,8 +105,8 @@ const plugin = {
       const j = await ctx.json(CHAT_URL(), {
         Authorization: `Bearer ${key}`,
         'content-type': 'application/json',
-        'HTTP-Referer': 'https://github.com/hwalde/cc-hub',
-        'X-Title': `cc-hub ${req.purpose || 'request'}`,
+        'HTTP-Referer': 'https://github.com/hwalde/freilauf',
+        'X-Title': `Freilauf ${req.purpose || 'request'}`,
       }, { method: 'POST', body: JSON.stringify(body), timeoutMs: req.timeoutMs ?? 60_000 })
       const raw = j?.choices?.[0]?.message?.content
       return {

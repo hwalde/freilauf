@@ -1,10 +1,10 @@
-// cc-hub — small vanilla JS: repo switcher, terminal client (xterm.js), form helpers.
-// UI strings come from window.CCHUB_I18N (injected by the layout); English
+// Freilauf — small vanilla JS: repo switcher, terminal client (xterm.js), form helpers.
+// UI strings come from window.FREILAUF_I18N (injected by the layout); English
 // fallbacks are inlined so the file also works standalone.
 (function () {
   'use strict'
 
-  var I18N = window.CCHUB_I18N || {}
+  var I18N = window.FREILAUF_I18N || {}
   function T(key, fallback, params) {
     var raw = I18N[key] || fallback
     return String(raw).replace(/\{(\w+)\}/g, function (_, k) {
@@ -40,7 +40,7 @@
       if (!Number.isFinite(ms)) return
       el.textContent = relTimeText(ms, now)
       el.title = new Date(ms).toLocaleString(lang, {
-        timeZone: window.CCHUB_TZ || undefined,
+        timeZone: window.FREILAUF_TZ || undefined,
         year: 'numeric', month: '2-digit', day: '2-digit',
         hour: '2-digit', minute: '2-digit', second: '2-digit'
       })
@@ -61,7 +61,7 @@
       // their own (settings, sessions, repos) keep it instead of resetting to
       // the first repo. The server re-writes the same cookie whenever a page
       // request names a repo, so both sides agree on one value.
-      document.cookie = 'cchub_repo=' + encodeURIComponent(repoSwitch.value)
+      document.cookie = 'freilauf_repo=' + encodeURIComponent(repoSwitch.value)
         + '; Path=/; Max-Age=31536000; SameSite=Lax'
       location.href = u.pathname + u.search
     })
@@ -76,7 +76,7 @@
   // against the restored values. What the dialog does not ask for (coding
   // agent, provider, model, effort, skills, flows) is not parked and stays as
   // the server rendered it — the favorite that travels in the URL.
-  const QRFULL_KEY = 'cchub:qrfull'
+  const QRFULL_KEY = 'freilauf:qrfull'
   if (location.pathname === '/runs/new') {
     const laufForm = document.querySelector('form.settings')
     if (laufForm) {
@@ -275,9 +275,9 @@
   // A Quick Run starts from wherever one is standing; being torn to a detail page
   // is exactly what would make it not quick. So the answer arrives here — with a
   // link for whoever does want to look.
-  window.cchubToast = function (text, opts) {
+  window.freilaufToast = function (text, opts) {
     opts = opts || {}
-    const box = document.getElementById('cchub-toasts')
+    const box = document.getElementById('freilauf-toasts')
     if (!box) return
     const el = document.createElement('div')
     el.className = 'toast ' + (opts.kind || 'ok')
@@ -310,7 +310,7 @@
     const favSel = document.getElementById('qr-fav')
     const favInfo = document.getElementById('qr-fav-info')
     const fehler = document.getElementById('qr-error')
-    const FAV_KEY = 'cchub.quickrun.favorite'
+    const FAV_KEY = 'freilauf.quickrun.favorite'
 
     const zeigeFav = function () {
       if (!favSel || !favInfo) return
@@ -389,11 +389,11 @@
             : j.deferred
               ? T('js.qr_deferred', 'Run deferred (quota/credit): {name}', { name: name })
               : T('js.qr_started', 'Run started: {name}', { name: name })
-          window.cchubToast(text, { kind: j.deferred ? 'warn' : 'ok', href: '/runs/' + j.runId })
+          window.freilaufToast(text, { kind: j.deferred ? 'warn' : 'ok', href: '/runs/' + j.runId })
         })
         .catch(function (err) {
           if (fehler) { fehler.hidden = false; fehler.textContent = err.message }
-          else window.cchubToast(err.message, { kind: 'err' })
+          else window.freilaufToast(err.message, { kind: 'err' })
         })
         .finally(function () { if (btn) btn.disabled = false })
     })
@@ -470,7 +470,7 @@
           if (!j.ok) throw new Error(j.error || T('js.error_generic', 'request failed'))
           if (extrasTa) extrasTa.value = JSON.stringify(j.extras, null, 2)
           extrasDialog.close()
-          window.cchubToast(T('js.extras_done', 'Worktree extras: {n}', { n: j.extras.length }), { kind: 'ok' })
+          window.freilaufToast(T('js.extras_done', 'Worktree extras: {n}', { n: j.extras.length }), { kind: 'ok' })
         })
         .catch(function (err) {
           errorOut.textContent = err.message
@@ -542,7 +542,7 @@
           if (!j.ok) throw new Error(j.error || T('js.error_generic', 'request failed'))
           schliessen(j.title || neu)
           // The browser tab carries the title on the detail page.
-          if (location.pathname === '/runs/' + runId) document.title = 'cc-hub — ' + (j.title || neu)
+          if (location.pathname === '/runs/' + runId) document.title = 'Freilauf — ' + (j.title || neu)
         })
         .catch(err => {
           alert(T('js.rename_failed', 'Renaming failed: ') + err.message)
@@ -562,7 +562,7 @@
   // no way back to the form at all. Two halves fix that — the link carries where
   // to return to (the editor's Back button uses it), and what stands in the form
   // is parked in sessionStorage until it comes back.
-  const STASH_PREFIX = 'cchub:form:'
+  const STASH_PREFIX = 'freilauf:form:'
   function ohneFlowParam() {
     const u = new URL(location.href)
     u.searchParams.delete('flow')
@@ -666,7 +666,7 @@
 
     const provLabel = document.getElementById('prov-label')
     const provHint = document.getElementById('prov-hint')
-    const zeitText = (iso) => { try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: window.CCHUB_TZ || undefined }) } catch { return '' } }
+    const zeitText = (iso) => { try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: window.FREILAUF_TZ || undefined }) } catch { return '' } }
 
     // Every harness can use different providers — subscription-based ones none
     // at all (there is only the account). Hence the selection is re-fetched on
@@ -867,9 +867,9 @@
   }
 
   // ---- send text into a session / end run (detail page) ----
-  // NOT async: 'onsubmit="return cchubSend(...)"' would otherwise receive a
+  // NOT async: 'onsubmit="return freilaufSend(...)"' would otherwise receive a
   // promise — always truthy, and the browser would also submit classically.
-  window.cchubSend = function (form, url) {
+  window.freilaufSend = function (form, url) {
     const ta = form.querySelector('textarea')
     if (!ta.value.trim()) return false
     const body = new URLSearchParams()
@@ -890,7 +890,7 @@
   // the agent's window, because tmux runs with window-size=latest. Ending a run
   // is also a deliberate act where a fresh page is the honest answer: the send
   // and kill forms have to disappear, and they sit outside the fragment.
-  window.cchubKill = function (id) {
+  window.freilaufKill = function (id) {
     if (!confirm(T('js.kill_confirm', 'Really end this run?'))) return false
     fetch('/api/runs/' + id + '/kill', { method: 'POST' }).then(() => location.reload())
     return false
@@ -925,7 +925,7 @@
     const selectAll = document.getElementById('sess-all')
     const killBtn = document.getElementById('sess-kill-selected')
     const hiddenNote = document.getElementById('sess-hidden')
-    const STORE_KEY = 'cchub.sessions.showRunning'
+    const STORE_KEY = 'freilauf.sessions.showRunning'
 
     const rows = function () {
       return Array.from(sessTable.querySelectorAll('tbody tr[data-session]'))
@@ -1051,7 +1051,7 @@
           if (done) done({ ok: false, error: j.error || T('js.cleanup_failed', 'Could not start the cleanup agent.') })
           return
         }
-        window.cchubToast(T('js.cleanup_started', 'Memory cleanup started — target {target} GB', { target: j.targetGb }), {
+        window.freilaufToast(T('js.cleanup_started', 'Memory cleanup started — target {target} GB', { target: j.targetGb }), {
           href: '/runs/' + j.runId, linkText: T('js.toast_open', 'open'),
         })
         if (done) done({ ok: true })
@@ -1112,10 +1112,10 @@
   // called again after each swap — it reads the one truth (localStorage) and
   // writes it to the two places that show it, the shell and the button.
   //
-  // Every localStorage access in try/catch, like cchub.sessions.showRunning:
+  // Every localStorage access in try/catch, like freilauf.sessions.showRunning:
   // in a private window the accessor itself throws, and a status panel is not
   // worth a page that stops working.
-  var SIDEBAR_KEY = 'cchub.sidebar.open'
+  var SIDEBAR_KEY = 'freilauf.sidebar.open'
   function sidebarOpen() {
     try { return localStorage.getItem(SIDEBAR_KEY) !== '0' } catch (err) { return true }
   }
@@ -1276,7 +1276,7 @@
     // stale-while-revalidate refresh lands on the next tick. Skipped while the
     // tab is hidden; browsers throttle timers there anyway.
     // Overridable for the browser suite, which must not wait thirty seconds.
-    const POLL_MS = Math.max(1000, Number(window.CCHUB_SIDEBAR_POLL_MS) || 30_000)
+    const POLL_MS = Math.max(1000, Number(window.FREILAUF_SIDEBAR_POLL_MS) || 30_000)
     setInterval(() => {
       if (document.hidden) return
       statusAktualisieren().catch(() => {})

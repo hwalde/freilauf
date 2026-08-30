@@ -1,4 +1,4 @@
-// cc-hub — mini test runner for unit.mjs and e2e.mjs.
+// Freilauf — mini test runner for unit.mjs and e2e.mjs.
 // No framework: count, print plain text, set the exit code. Nothing more is needed,
 // and it keeps the suite dependency-free like the rest of the project.
 

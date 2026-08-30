@@ -1,4 +1,4 @@
-// cc-hub — processing of agent reports (cc-report → POST /api/runs/<id>/report
+// Freilauf — processing of agent reports (fl-report → POST /api/runs/<id>/report
 // or fallback inbox.jsonl collected by the watcher). Planning 6 + 11.
 import db, { addEvent } from './db.mjs'
 // `notifyChannels` and not `notify`: `completeFollowUp()` below takes an option
@@ -14,9 +14,9 @@ import { transcriptState } from './cursor-transcript.mjs'
 const MAX_REPORT = 200 * 1024   // planning 11: report ≤ 200 kB
 
 /**
- * The kinds the harness hooks deliver through cc-report. A claude hook event
+ * The kinds the harness hooks deliver through fl-report. A claude hook event
  * carries its own session id — and a claude process the AGENT spawned (a probe,
- * a test) inherits the worktree's hooks and CC_RUN_ID while carrying its own
+ * a test) inherits the worktree's hooks and FL_RUN_ID while carrying its own
  * session id. Without the guard its failures land on this run as red incidents.
  */
 const HOOK_KINDS = ['_turn_end', '_exit', '_api_error', '_rate_limit', '_idle']
@@ -25,7 +25,7 @@ const HOOK_KINDS = ['_turn_end', '_exit', '_api_error', '_rate_limit', '_idle']
  * Process one report event. Returns `{ ok, message? }`.
  *
  * `via` says how the report reached the hub, and the finish gate needs it: with
- * 'http' the agent is standing in its own `cc-report` call and the answer travels
+ * 'http' the agent is standing in its own `fl-report` call and the answer travels
  * back as that tool's output — the cheapest moment there is. Every other channel
  * has no call to answer, so the same text is typed into the tmux session
  * instead (see server/integrate.mjs).
@@ -42,10 +42,10 @@ export async function handleReport(runId, body, via = 'http') {
   const kind = String(body.kind || '')
   // A hook report from a claude session that is NOT this run's own: the agent
   // spawned its own claude (a probe, an error-handling test), which inherited
-  // the worktree's hooks and CC_RUN_ID. Its API errors are the run's subject
+  // the worktree's hooks and FL_RUN_ID. Its API errors are the run's subject
   // matter, not the run's provider problems — logged for the detector's
-  // protocol, ignored otherwise. cc-report only sends session_id when the hook
-  // JSON carried one, so an older cc-report changes nothing here.
+  // protocol, ignored otherwise. fl-report only sends session_id when the hook
+  // JSON carried one, so an older fl-report changes nothing here.
   if (HOOK_KINDS.includes(kind) && fremdeClaudeSession(runId, run.harness, body.session_id)) {
     detektorLog(runId, { art: 'verworfen', grund: 'hook report from a foreign claude session (a process the agent spawned)',
       kind, session: body.session_id })
@@ -181,18 +181,18 @@ export async function handleReport(runId, body, via = 'http') {
  * This exists for one harness shape: cursor works through the task and then
  * stays in its TUI at "→ Add a follow-up". The pane never dies, the process
  * never exits, so `_pane_died` and `_exit` never come. Whoever waits for
- * `cc-report done` there waits forever, and everything the repo has queued
+ * `fl-report done` there waits forever, and everything the repo has queued
  * behind that run waits with it.
  *
  * Only from status 'running': `waiting_help` means the agent asked a question
  * and is deliberately idle until a human answers — ending its turn is the
  * correct behaviour there, not the end of the work. And a run that reported
- * properly is already 'done' by the time the hook fires (cc-report is a tool
+ * properly is already 'done' by the time the hook fires (fl-report is a tool
  * call INSIDE the turn, the hook comes after it), so this only ever catches the
  * case it is meant for.
  *
  * The report text comes from the harness's transcript: the agent's own closing
- * words are what a human would have gotten had it called cc-report. Everything
+ * words are what a human would have gotten had it called fl-report. Everything
  * else — the notification, events, flows, cost accounting — happens because this goes
  * back through the normal 'done' path instead of writing the row itself.
  *
@@ -203,12 +203,12 @@ export async function finishByTurnEnd(runId, source) {
   if (!run || run.status !== 'running') return false
   if (!getHarness(run.harness)?.turnEndsRun) return false
   const state = run.harness === 'cursor' ? transcriptState(run) : null
-  const note = `_(cc-hub closed this run: the agent ended its turn without calling \`cc-report done\` `
+  const note = `_(Freilauf closed this run: the agent ended its turn without calling \`fl-report done\` `
     + `— noticed via ${source}. The text above is the agent's own closing message`
     + `${state?.lastAnswer ? '' : ', which the transcript did not yield'}.)_`
   const text = [state?.lastAnswer, note].filter(Boolean).join('\n\n')
   addEvent(runId, 'turn_end_finished', { source, transcript: !!state?.lastAnswer })
-  // 'internal': there is no cc-report call to answer here, so the finish gate
+  // 'internal': there is no fl-report call to answer here, so the finish gate
   // types its answer into the session instead (server/integrate.mjs).
   await handleReport(runId, { kind: 'done', text }, 'internal')
   return true
@@ -216,7 +216,7 @@ export async function finishByTurnEnd(runId, source) {
 
 // ------------------------------------------------------------ follow-up reports
 //
-// Three of the four coding agents stay in their TUI after `cc-report done`, and
+// Three of the four coding agents stay in their TUI after `fl-report done`, and
 // the run's terminal stays writable for exactly that reason: the operator reads
 // the report, sees that something is not finished, and types the rest into the
 // same session. The agent does it, commits — and until this existed nothing
@@ -224,7 +224,7 @@ export async function finishByTurnEnd(runId, source) {
 // the worktree, no merge, no flow, no message.
 //
 // A report from a finished run is therefore a FOLLOW-UP REPORT. Deliberately the
-// SAME command (`cc-report done --file …`) and not a second one: the agent has
+// SAME command (`fl-report done --file …`) and not a second one: the agent has
 // just used it, it is the one instruction every prompt carries, and a second
 // verb would be a second thing to forget. The hub can tell the two apart by
 // itself — the run's status says whether this is the first report or another
@@ -256,7 +256,7 @@ const FOLLOWUP_KINDS = ['done', 'failed', 'help', 'progress', 'branch', 'pr']
  * standing, nothing else ever says the work is over), and only when there is
  * something to integrate — the worktree's tip has moved past what was merged
  * last. A follow-up that changed nothing (an answer, a list) has to be reported
- * with `cc-report done` by the agent itself; the net exists for the commits
+ * with `fl-report done` by the agent itself; the net exists for the commits
  * that would otherwise never reach the base branch. Pure, so the rule can be
  * stated in a test.
  */
@@ -377,7 +377,7 @@ export async function followUpByTurnEnd(run, source) {
   try { tip = await (await import('./integrate.mjs')).tipOfRun(run) } catch { tip = null }
   if (!wantsTurnEndFollowUp(run, tip, harness)) return false
   const state = run.harness === 'cursor' ? transcriptState(run) : null
-  const note = `_(cc-hub took this as a follow-up report: the agent ended its turn with new commits and without calling \`cc-report done\` — noticed via ${source}.)_`
+  const note = `_(Freilauf took this as a follow-up report: the agent ended its turn with new commits and without calling \`fl-report done\` — noticed via ${source}.)_`
   const text = [state?.lastAnswer, note].filter(Boolean).join('\n\n')
   addEvent(run.id, 'turn_end_finished', { source, transcript: !!state?.lastAnswer, followup: true })
   await followUpDone(run, text, 'internal')
@@ -417,7 +417,7 @@ export async function completeFollowUp(runId, { mergeLine = null, merged = false
   } catch (err) { console.error('[flows]', err.message) }
   import('./flows/triggers.mjs').then(m => m.flowsTick()).catch(e => console.error('[flows]', e.message))
   if (!message) return { ok: true }
-  return { ok: true, message: `cc-hub: follow-up report #${n} received${mergeLine ? ` — ${mergeLine}` : ''}. It reaches the operator like the first one. Nothing more to do; stay in this session.` }
+  return { ok: true, message: `Freilauf: follow-up report #${n} received${mergeLine ? ` — ${mergeLine}` : ''}. It reaches the operator like the first one. Nothing more to do; stay in this session.` }
 }
 
 /**

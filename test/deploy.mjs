@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cc-hub — bin/cchub-deploy in a sandbox of its own.
+// Freilauf — bin/freilauf-deploy in a sandbox of its own.
 //
 // Why a file of its own, next to test/proxy.mjs: what is tested here is not the
 // hub but the SHELL SCRIPT that brings a commit of it live — a bare origin, a
@@ -10,15 +10,15 @@
 // Which is exactly why nothing here may reach outside the sandbox:
 //
 //   HOME             → the sandbox, so setup/02-install-scripts.sh writes its
-//                      cc-* scripts, the opencode plugin and the systemd units
+//                      fl-* scripts, the opencode plugin and the systemd units
 //                      into the sandbox and never into the operator's ~/.local/bin
-//   CCHUB_DEPLOY_DIR → the sandbox
+//   FREILAUF_DEPLOY_DIR → the sandbox
 //   PATH             → a shim directory FIRST, holding systemctl, curl, npm,
-//                      journalctl and cc-notify. They log every call and answer
+//                      journalctl and fl-notify. They log every call and answer
 //                      what the test tells them to: `curl` prints the HTTP status
 //                      from a file (that is how the unhealthy deploy is
 //                      provoked), `npm` creates node_modules instead of
-//                      installing anything, and `cc-notify` is only counted —
+//                      installing anything, and `fl-notify` is only counted —
 //                      the deploy script must not need a configured channel, or
 //                      a hub nobody set one up for could not be deployed.
 //
@@ -28,20 +28,27 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, cpSync, existsSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { gruppe, pruefe, uebersprungen, gleich, wahr, falsch, enthaelt, bericht, zaehler } from './mini.mjs'
 
 const start = Date.now()
 const PROJEKT = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
-const SKRIPT = join(PROJEKT, 'bin', 'cchub-deploy')
+const SKRIPT = join(PROJEKT, 'bin', 'freilauf-deploy')
 
-const SB = mkdtempSync(join(tmpdir(), 'cc-hub-deploy-'))
+const SB = mkdtempSync(join(tmpdir(), 'freilauf-deploy-'))
 const HOME = join(SB, 'home')
 const ORIGIN = join(SB, 'origin.git')
 const WORK = join(SB, 'work')
-const DEPLOY = join(SB, 'deploy', 'cc-hub')
+const DEPLOY = join(SB, 'deploy', 'freilauf')
 const SHIM = join(SB, 'shim')
 const CALLS = join(SB, 'calls.log')
 const STATUS_FILE = join(SB, 'http-status')
+// Which systemd unit the shim reports as ACTIVE. That is the whole input to the
+// unit-name resolver in bin/fl-paths.sh: an installation that has not been
+// migrated yet is still run by cchub.service, and a deploy that restarted
+// anything else would leave the hub down.
+const ACTIVE_FILE = join(SB, 'active-unit')
+const setActiveUnit = (name) => writeFileSync(ACTIVE_FILE, name + '\n')
 
 function sh(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, { encoding: 'utf8', ...opts })
@@ -51,7 +58,7 @@ function sh(cmd, args, opts = {}) {
 const git = (dir, ...args) => sh('git', ['-C', dir, '-c', 'user.email=t@example.invalid', '-c', 'user.name=test',
   '-c', 'commit.gpgsign=false', ...args])
 
-/** cchub-deploy, with everything pointed at the sandbox. */
+/** freilauf-deploy, with everything pointed at the sandbox. */
 function deploy(...args) {
   return sh('bash', [SKRIPT, ...args], {
     cwd: SB,
@@ -59,15 +66,38 @@ function deploy(...args) {
       ...process.env,
       HOME,
       PATH: `${SHIM}:${process.env.PATH}`,
-      CCHUB_ENV_FILE: join(SB, 'no-such-env'),   // never read the operator's config
-      CCHUB_DEPLOY_DIR: DEPLOY,
-      CCHUB_DEPLOY_BASE: 'main',
-      CCHUB_DATA_DIR: join(SB, 'data'),          // no database → nothing to notify, base falls back
-      CCHUB_LOCAL_PORT: '9999',
-      CCHUB_DEPLOY_HEALTH_SECONDS: '2',          // 20 s of retrying would make the suite crawl
-      CCHUB_SKIP_EXTRAS: '1',                    // setup/02 must not clone from GitHub here
-      CCHUB_TEST_CALLS: CALLS,
-      CCHUB_TEST_STATUS: STATUS_FILE,
+      FREILAUF_ENV_FILE: join(SB, 'no-such-env'),   // never read the operator's config
+      FREILAUF_DEPLOY_DIR: DEPLOY,
+      FREILAUF_DEPLOY_BASE: 'main',
+      FREILAUF_DATA_DIR: join(SB, 'data'),          // no database → nothing to notify, base falls back
+      FREILAUF_LOCAL_PORT: '9999',
+      FREILAUF_DEPLOY_HEALTH_SECONDS: '2',          // 20 s of retrying would make the suite crawl
+      FREILAUF_SKIP_EXTRAS: '1',                    // setup/02 must not clone from GitHub here
+      FREILAUF_TEST_CALLS: CALLS,
+      FREILAUF_TEST_STATUS: STATUS_FILE,
+      FREILAUF_TEST_ACTIVE: ACTIVE_FILE,
+      // Explicit, so a machine that has these set in its own environment cannot
+      // send the script outside the sandbox: everything here resolves through
+      // ${XDG_CONFIG_HOME:-$HOME/.config}.
+      XDG_CONFIG_HOME: join(HOME, '.config'),
+      XDG_DATA_HOME: join(HOME, '.local', 'share'),
+    },
+  })
+}
+
+/** setup/migrate-from-cc-hub.sh, with the same sandbox fences. */
+function migrate(...args) {
+  return sh('bash', [join(PROJEKT, 'setup', 'migrate-from-cc-hub.sh'), ...args], {
+    cwd: SB,
+    env: {
+      ...process.env,
+      HOME,
+      PATH: `${SHIM}:${process.env.PATH}`,
+      XDG_CONFIG_HOME: join(HOME, '.config'),
+      XDG_DATA_HOME: join(HOME, '.local', 'share'),
+      FREILAUF_TEST_CALLS: CALLS,
+      FREILAUF_TEST_ACTIVE: ACTIVE_FILE,
+      FREILAUF_SKIP_EXTRAS: '1',   // setup/02 must not clone from GitHub here
     },
   })
 }
@@ -78,11 +108,11 @@ const resetCalls = () => writeFileSync(CALLS, '')
 /** The HTTP statuses the curl shim will answer, in order; the last one repeats. */
 const setStatus = (...codes) => writeFileSync(STATUS_FILE, codes.join('\n') + '\n')
 const head = () => git(DEPLOY, 'rev-parse', 'HEAD').out.trim()
-const deployLog = () => readFileSync(join(SB, 'deploy', 'cc-hub-deploy.log'), 'utf8')
+const deployLog = () => readFileSync(join(SB, 'deploy', 'freilauf-deploy.log'), 'utf8')
 
 function shim(name, body) {
   const p = join(SHIM, name)
-  writeFileSync(p, `#!/usr/bin/env bash\nprintf '${name} %s\\n' "$*" >> "$CCHUB_TEST_CALLS"\n${body}\n`)
+  writeFileSync(p, `#!/usr/bin/env bash\nprintf '${name} %s\\n' "$*" >> "$FREILAUF_TEST_CALLS"\n${body}\n`)
   chmodSync(p, 0o755)
 }
 
@@ -93,12 +123,17 @@ function buildSandbox() {
   writeFileSync(CALLS, '')
   setStatus('200')
 
-  // systemd: is-active answers for the two units the script asks about; every
-  // other verb simply succeeds. The vpn unit is inactive, as after a reboot.
+  // systemd: is-active answers for whichever unit the test declared active (that
+  // is what the unit-name resolver reads), is-enabled says "disabled" for
+  // everything, and every other verb simply succeeds. Both VPN units are
+  // inactive, as after a reboot.
+  setActiveUnit('freilauf.service')
   shim('systemctl', `
+aktiv="$(cat "$FREILAUF_TEST_ACTIVE" 2>/dev/null || echo freilauf.service)"
 case "$*" in
-  *"is-active cchub-vpn.service"*) echo inactive; exit 3 ;;
-  *"is-active cchub.service"*)     echo active;   exit 0 ;;
+  *"is-active $aktiv"*) echo active; exit 0 ;;
+  *is-active*)          echo inactive; exit 3 ;;
+  *is-enabled*)         echo disabled; exit 1 ;;
 esac
 exit 0`)
   // curl: the health check reads its status from a file the test writes — one
@@ -106,16 +141,16 @@ exit 0`)
   // what makes "the deploy is unhealthy but the rollback is fine" expressible at
   // all.
   shim('curl', `
-s="$(head -1 "$CCHUB_TEST_STATUS")"
-rest="$(tail -n +2 "$CCHUB_TEST_STATUS")"
-if [[ -n "$rest" ]]; then printf '%s\\n' "$rest" > "$CCHUB_TEST_STATUS"; fi
+s="$(head -1 "$FREILAUF_TEST_STATUS")"
+rest="$(tail -n +2 "$FREILAUF_TEST_STATUS")"
+if [[ -n "$rest" ]]; then printf '%s\\n' "$rest" > "$FREILAUF_TEST_STATUS"; fi
 printf '%s' "$s"
 exit 0`)
-  // cc-notify: counted, never run. The real one loads the hub's plugins and
+  // fl-notify: counted, never run. The real one loads the hub's plugins and
   // calls the notification facade; here the only question is whether the deploy
   // script reaches for it at all, and that it survives it not being there (the
   // `command -v` guard, exercised by the deploys that do not fail).
-  shim('cc-notify', 'exit 0')
+  shim('fl-notify', 'exit 0')
   // npm: creates what npm ci would leave behind, and nothing else. Compiling
   // node-pty in a test is exactly the cost the lockfile-hash check exists to avoid.
   shim('npm', 'mkdir -p node_modules; exit 0')
@@ -146,13 +181,13 @@ function newCommit(message, file = 'marker.txt', content = String(Date.now())) {
 // ------------------------------------------------------------------ run
 try {
   if (sh('git', ['--version']).code !== 0) {
-    gruppe('cchub-deploy')
+    gruppe('freilauf-deploy')
     uebersprungen('the whole suite', 'git is missing')
   } else {
     buildSandbox()
 
     // ------------------------------------------------------------------
-    gruppe('cchub-deploy --init: the deploy checkout comes into being')
+    gruppe('freilauf-deploy --init: the deploy checkout comes into being')
 
     const c1 = git(WORK, 'rev-parse', 'HEAD').out.trim()
 
@@ -165,10 +200,10 @@ try {
         'and DETACHED — nobody commits here, and git status stays empty')
       gleich(callCount('npm ci'), 1, 'npm ci ran exactly once')
       wahr(existsSync(join(DEPLOY, '.deploy-lock-hash')), 'the lockfile hash is written down')
-      wahr(existsSync(join(HOME, '.local/bin/cc-report')), 'the cc-* scripts went into ~/.local/bin')
-      wahr(existsSync(join(HOME, '.local/bin/cchub-deploy')), 'including the deploy script itself')
-      wahr(existsSync(join(HOME, '.config/systemd/user/cchub.service')), 'and the units are in place')
-      gleich(callCount('restart cchub.service'), 1, 'the hub was restarted once')
+      wahr(existsSync(join(HOME, '.local/bin/fl-report')), 'the fl-* scripts went into ~/.local/bin')
+      wahr(existsSync(join(HOME, '.local/bin/freilauf-deploy')), 'including the deploy script itself')
+      wahr(existsSync(join(HOME, '.config/systemd/user/freilauf.service')), 'and the units are in place')
+      gleich(callCount('restart freilauf.service'), 1, 'the hub was restarted once')
     })
 
     // ------------------------------------------------------------------
@@ -193,7 +228,7 @@ try {
       const r = deploy()
       gleich(r.code, 0, `exit code (${r.out}${r.err})`)
       gleich(head(), c2, 'the checkout stands on the new commit')
-      gleich(callCount('restart cchub.service'), 1, 'restarted once')
+      gleich(callCount('restart freilauf.service'), 1, 'restarted once')
       gleich(readFileSync(join(SB, 'deploy', 'previous-sha'), 'utf8').trim(), c1,
         'previous-sha is what was running before — that IS the rollback')
       enthaelt(r.out, 'deployed', 'and it says what it deployed')
@@ -210,21 +245,21 @@ try {
 
     await pruefe('an unhealthy hub sends the checkout back and exits 1', () => {
       resetCalls()
-      // Two 000 for the health check of the new commit (CCHUB_DEPLOY_HEALTH_SECONDS=2),
+      // Two 000 for the health check of the new commit (FREILAUF_DEPLOY_HEALTH_SECONDS=2),
       // then 200: the rollback has to come up, otherwise this is the exit-2 case.
       setStatus('000', '000', '200')
       const r = deploy()
       gleich(r.code, 1, `exit code (${r.out}${r.err})`)
       gleich(head(), c2, 'the checkout is back on the commit that was running')
-      wahr(callCount('restart cchub.service') >= 2, 'restarted a second time, for the rollback')
+      wahr(callCount('restart freilauf.service') >= 2, 'restarted a second time, for the rollback')
       enthaelt(r.out, 'rolled back', 'the reason is in the output')
       enthaelt(deployLog(), 'rolled back', 'and in the deploy log')
       enthaelt(deployLog(), c3.slice(0, 7), 'naming the commit that failed')
-      // A FAILURE always notifies — through cc-notify, so it reaches whatever
+      // A FAILURE always notifies — through fl-notify, so it reaches whatever
       // channel the operator configured, and nothing at all when they
       // configured none. It used to be a second Telegram implementation in
       // bash, reading the bot token out of the database with a curl behind it.
-      wahr(callCount('cc-notify') >= 1, 'and the operator was told, through the notification CLI')
+      wahr(callCount('fl-notify') >= 1, 'and the operator was told, through the notification CLI')
       enthaelt(calls(), '--kind deploy', 'the message says what it is about')
     })
 
@@ -234,7 +269,7 @@ try {
     await pruefe('a changed package-lock.json means npm ci, an unchanged one does not', () => {
       setStatus('200')
       const lock = JSON.parse(readFileSync(join(WORK, 'package-lock.json'), 'utf8'))
-      lock.cchubTestMarker = 'changed'
+      lock.freilaufTestMarker = 'changed'
       newCommit('fourth commit: lockfile changed', 'package-lock.json', JSON.stringify(lock, null, 2))
       resetCalls()
       let r = deploy()
@@ -268,7 +303,7 @@ try {
       const r = deploy('--rollback')
       gleich(r.code, 0, `exit code (${r.out}${r.err})`)
       gleich(head(), before, 'the checkout stands on the previous commit again')
-      gleich(callCount('restart cchub.service'), 1, 'and the hub was restarted for it')
+      gleich(callCount('restart freilauf.service'), 1, 'and the hub was restarted for it')
     })
 
     // ------------------------------------------------------------------
@@ -280,15 +315,232 @@ try {
       let r = deploy()
       gleich(r.code, 0, `exit code (${r.out}${r.err})`)
       gleich(head(), c, 'deployed')
-      gleich(callCount('cc-notify'), 0, 'an ordinary success says nothing')
+      gleich(callCount('fl-notify'), 0, 'an ordinary success says nothing')
 
       const c2b = newCommit('and this one is announced')
       resetCalls()
       r = deploy('--notify')
       gleich(r.code, 0, `exit code (${r.out}${r.err})`)
       gleich(head(), c2b, 'deployed')
-      gleich(callCount('cc-notify'), 1, 'with --notify it announces itself once')
+      gleich(callCount('fl-notify'), 1, 'with --notify it announces itself once')
       enthaelt(calls(), '--kind deploy', 'and says what the message is about')
+    })
+
+    // ------------------------------------------------------------------
+    gruppe('The old names keep working (transition shims)')
+
+    await pruefe('every old script name is installed as a shim next to the new one', () => {
+      const bin = join(HOME, '.local', 'bin')
+      for (const [alt, neu] of [['cc-start', 'fl-start'], ['cc-attach', 'fl-attach'], ['cc-kill', 'fl-kill'],
+        ['cc-help', 'fl-help'], ['cc-report', 'fl-report'], ['cc-notify', 'fl-notify'],
+        ['cc-oc-sync-agents', 'fl-oc-sync-agents'], ['cc-session-cleanup', 'fl-session-cleanup'],
+        ['cchub', 'freilauf'], ['cchub-deploy', 'freilauf-deploy']]) {
+        wahr(existsSync(join(bin, alt)), `${alt} exists`)
+        enthaelt(readFileSync(join(bin, alt), 'utf8'), `/${neu}" "$@"`, `${alt} execs ${neu}`)
+      }
+      // The two sourced libraries have to land there as well: fl-attach, fl-kill,
+      // fl-help, freilauf and freilauf-deploy all look for them next to themselves.
+      wahr(existsSync(join(bin, 'fl-harness-tags.sh')), 'fl-harness-tags.sh')
+      wahr(existsSync(join(bin, 'fl-paths.sh')), 'fl-paths.sh')
+    })
+
+    await pruefe('a shim really reaches the new script — this is what an in-flight run calls', () => {
+      // The prompt of a run that started before the rename says `cc-report`, and
+      // its claude hooks and .cursor/hooks.json say it too. None of those can be
+      // rewritten from here, so the name has to keep working.
+      const r = sh('bash', [join(HOME, '.local', 'bin', 'cc-report'), 'progress', 'hallo'], {
+        env: { ...process.env, FL_RUN_ID: '', CC_RUN_ID: '' },
+      })
+      enthaelt(r.err, 'fl-report:', 'the shim landed in fl-report (which then says it has no run id)')
+      gleich(r.code, 3, 'and exits with fl-report\'s own code, not the shell\'s')
+    })
+
+    await pruefe('and fl-report still answers to the OLD environment variable', () => {
+      // A tmux session that is running right now carries CC_RUN_ID, set at a
+      // start that happened before this release existed.
+      const r = sh('bash', [join(HOME, '.local', 'bin', 'cc-report'), 'progress', 'hallo'], {
+        env: { ...process.env, CC_RUN_ID: 'r1', CC_HUB_URL: 'http://127.0.0.1:1' },
+      })
+      // No hub on that port, so it files the report in the inbox instead — which
+      // is exactly the proof that it got as far as having a run id.
+      enthaelt(r.err, 'hub not reachable', 'it got a run id from CC_RUN_ID and tried')
+    })
+
+    await pruefe('the opencode plugin is renamed, and the old file is REMOVED', () => {
+      const dir = join(HOME, '.config', 'opencode', 'plugins')
+      // opencode loads every file in that directory: leaving the old one there
+      // would report every idle and every API error twice.
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'cc-hub.js'), '// the old one\n')
+      sh('bash', [join(PROJEKT, 'setup', '02-install-scripts.sh')], {
+        env: { ...process.env, HOME, PATH: `${SHIM}:${process.env.PATH}`, FREILAUF_SKIP_EXTRAS: '1' },
+      })
+      falsch(existsSync(join(dir, 'cc-hub.js')), 'the old plugin file is gone')
+      wahr(existsSync(join(dir, 'freilauf.js')), 'and the new one is there')
+      const js = readFileSync(join(dir, 'freilauf.js'), 'utf8')
+      enthaelt(js, 'export const Freilauf', 'exported under the new name')
+      enthaelt(js, 'process.env.CC_RUN_ID', 'and it still reads the old run-id variable')
+    })
+
+    // ------------------------------------------------------------------
+    gruppe('Which unit runs this hub')
+
+    await pruefe('an installation still run by cchub.service is restarted as cchub.service', () => {
+      // This is the case the whole transition hangs on: the first deploy of the
+      // renamed code lands on a machine whose hub is still the old unit. A
+      // resolver that went by "is the new unit file installed?" would restart a
+      // unit that is neither enabled nor started — and the hub would stay down.
+      setActiveUnit('cchub.service')
+      const c = newCommit('a commit deployed onto an un-migrated installation')
+      resetCalls()
+      const r = deploy()
+      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
+      gleich(head(), c, 'deployed')
+      gleich(callCount('restart cchub.service'), 1, 'the OLD unit was restarted')
+      gleich(callCount('restart freilauf.service'), 0, 'and the new one was left alone')
+    })
+
+    await pruefe('once freilauf.service is the one running, that is the one restarted', () => {
+      setActiveUnit('freilauf.service')
+      const c = newCommit('a commit deployed onto a migrated installation')
+      resetCalls()
+      const r = deploy()
+      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
+      gleich(head(), c, 'deployed')
+      gleich(callCount('restart freilauf.service'), 1, 'the new unit')
+      gleich(callCount('restart cchub.service'), 0, 'and never the old one again')
+    })
+
+    // ------------------------------------------------------------------
+    gruppe('setup/migrate-from-cc-hub.sh: the one explicit step')
+
+    // A whole installation as it looks before the migration: old config
+    // directory, old data directory with the old database name, old deploy
+    // checkout with the old remote, old units, old opencode plugin.
+    const ALT_CFG = join(HOME, '.config', 'cc-hub')
+    const ALT_DAT = join(HOME, '.local', 'share', 'cc-hub')
+    const ALT_DEP = join(HOME, 'agents', 'deploy', 'cc-hub')
+    const NEU_CFG = join(HOME, '.config', 'freilauf')
+    const NEU_DAT = join(HOME, '.local', 'share', 'freilauf')
+    const NEU_DEP = join(HOME, 'agents', 'deploy', 'freilauf')
+    const SYSD = join(HOME, '.config', 'systemd', 'user')
+
+    function alteInstallation() {
+      for (const d of [ALT_CFG, ALT_DAT, join(HOME, 'agents', 'deploy'), SYSD,
+        join(HOME, '.config', 'opencode', 'plugins')]) mkdirSync(d, { recursive: true })
+      writeFileSync(join(ALT_CFG, 'env'),
+        '# comment stays\nCCHUB_LOCAL_PORT=9999\nCCHUB_CC_START=/x/cc-start\nOPENROUTER_API_KEY=geheim\n')
+      writeFileSync(join(ALT_CFG, 'verbotene-muster'), 'nichts\n')
+      // A real database, with a flow whose command still says cchub-deploy.
+      const db = new DatabaseSync(join(ALT_DAT, 'cc-hub.db'))
+      db.exec('CREATE TABLE IF NOT EXISTS flows (id INTEGER PRIMARY KEY, name TEXT UNIQUE, definition TEXT)')
+      db.prepare('INSERT OR REPLACE INTO flows(id, name, definition) VALUES(1, ?, ?)')
+        .run('Restart cc-hub after merge', JSON.stringify({ sequence: [{ command: 'sleep 3; cchub-deploy' }] }))
+      db.close()
+      writeFileSync(join(HOME, 'agents', 'deploy', 'cc-hub-deploy.log'), '[old] deployed abc1234\n')
+      sh('git', ['clone', '--quiet', ORIGIN, ALT_DEP])
+      git(ALT_DEP, 'remote', 'set-url', 'origin', 'https://github.com/hwalde/cc-hub.git')
+      writeFileSync(join(SYSD, 'cchub.service'), '[Service]\nExecStart=/bin/true\n')
+      writeFileSync(join(SYSD, 'cchub-vpn.service'), '[Service]\nExecStart=/bin/true\n')
+      writeFileSync(join(HOME, '.config', 'opencode', 'plugins', 'cc-hub.js'), '// old\n')
+      setActiveUnit('cchub.service')
+    }
+
+    await pruefe('--dry-run prints every step and changes nothing', () => {
+      alteInstallation()
+      resetCalls()
+      const r = migrate('--dry-run')
+      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
+      enthaelt(r.out, 'DRY RUN', 'it says so')
+      enthaelt(r.out, ALT_CFG, 'and names the configuration directory it would move')
+      enthaelt(r.out, 'would:', 'every action is only printed')
+      wahr(existsSync(join(ALT_CFG, 'env')), 'the old config is untouched')
+      wahr(existsSync(join(ALT_DAT, 'cc-hub.db')), 'the old database is untouched')
+      wahr(existsSync(ALT_DEP), 'the old deploy checkout is untouched')
+      falsch(existsSync(NEU_CFG), 'and nothing new was created')
+      // Asking is not changing: the dry run still wants to know whether the VPN
+      // was on, so `is-active` is fair game. Nothing that MOVES systemd is.
+      for (const verb of ['stop', 'start', 'enable', 'disable', 'daemon-reload']) {
+        gleich(callCount(`systemctl ${verb}`) + callCount(`systemctl --user ${verb}`), 0,
+          `no systemctl ${verb}`)
+      }
+    })
+
+    await pruefe('the migration moves configuration, data, deploy checkout and units', () => {
+      resetCalls()
+      const r = migrate()
+      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
+
+      falsch(existsSync(ALT_CFG), 'the old configuration directory is gone')
+      wahr(existsSync(join(NEU_CFG, 'env')), 'the env file moved')
+      const env = readFileSync(join(NEU_CFG, 'env'), 'utf8')
+      enthaelt(env, 'FREILAUF_LOCAL_PORT=9999', 'CCHUB_ became FREILAUF_')
+      enthaelt(env, 'FREILAUF_START_SCRIPT=/x/cc-start', 'and the one variable that changed its whole name')
+      enthaelt(env, 'OPENROUTER_API_KEY=geheim', 'everything else is byte for byte what it was')
+      enthaelt(env, '# comment stays', 'comments included')
+      wahr(existsSync(join(NEU_CFG, 'env.bak-cc-hub')), 'with a backup of the original')
+      wahr(existsSync(join(NEU_CFG, 'verbotene-muster')), 'the private pattern file came along')
+
+      falsch(existsSync(ALT_DAT), 'the old data directory is gone')
+      wahr(existsSync(join(NEU_DAT, 'freilauf.db')), 'the database is renamed')
+      falsch(existsSync(join(NEU_DAT, 'cc-hub.db')), 'and not left behind under the old name')
+
+      falsch(existsSync(ALT_DEP), 'the old deploy checkout is gone')
+      wahr(existsSync(join(NEU_DEP, '.git')), 'and it is a checkout at the new path')
+      enthaelt(git(NEU_DEP, 'remote', 'get-url', 'origin').out, 'hwalde/freilauf',
+        'its remote follows the renamed GitHub repository')
+      wahr(existsSync(join(HOME, 'agents', 'deploy', 'freilauf-deploy.log')), 'the deploy log is renamed')
+      enthaelt(readFileSync(join(HOME, 'agents', 'deploy', 'freilauf-deploy.log'), 'utf8'), 'abc1234',
+        'and it still holds what it held')
+
+      falsch(existsSync(join(SYSD, 'cchub.service')), 'the old unit file is removed')
+      falsch(existsSync(join(SYSD, 'cchub-vpn.service')), 'the old VPN unit too')
+      wahr(existsSync(join(SYSD, 'freilauf.service')), 'the new unit is installed')
+      enthaelt(calls(), 'disable cchub.service', 'the old unit was disabled')
+      enthaelt(calls(), 'enable freilauf.service', 'the new one enabled')
+      enthaelt(calls(), 'start freilauf.service', 'and started')
+      falsch(existsSync(join(HOME, '.config', 'opencode', 'plugins', 'cc-hub.js')),
+        'the old opencode plugin is removed — two of them would report everything twice')
+    })
+
+    await pruefe('a stored flow stops calling a command that no longer exists', () => {
+      const db = new DatabaseSync(join(NEU_DAT, 'freilauf.db'))
+      const row = db.prepare('SELECT name, definition FROM flows WHERE id=1').get()
+      db.close()
+      enthaelt(row.definition, 'freilauf-deploy', 'the command was rewritten')
+      falsch(row.definition.includes('cchub-deploy'), 'and the old one is gone')
+      gleich(row.name, 'Restart Freilauf after merge', 'the flow is called what it does')
+    })
+
+    await pruefe('the VPN stays as it was — off is off (fail-closed)', () => {
+      // cchub-vpn.service was inactive before the migration, so nothing may
+      // switch access on behind the operator's back.
+      falsch(calls().includes('start freilauf-vpn.service'), 'access was not switched on')
+    })
+
+    await pruefe('running it a second time is a no-op, not a mess', () => {
+      resetCalls()
+      const r = migrate()
+      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
+      enthaelt(r.out, 'already at', 'it says the directories are already where they belong')
+      wahr(existsSync(join(NEU_CFG, 'env')), 'the configuration is still there')
+      wahr(existsSync(join(NEU_DAT, 'freilauf.db')), 'the database is still there')
+      wahr(existsSync(join(NEU_DEP, '.git')), 'the deploy checkout is still there')
+      const env = readFileSync(join(NEU_CFG, 'env'), 'utf8')
+      falsch(env.includes('CCHUB_'), 'and the env file was not rewritten into nonsense')
+      enthaelt(env, 'FREILAUF_LOCAL_PORT=9999', 'it still says what it said')
+    })
+
+    await pruefe('two config directories are refused, never merged', () => {
+      // The one state a script must not resolve on the operator's behalf.
+      mkdirSync(ALT_CFG, { recursive: true })
+      writeFileSync(join(ALT_CFG, 'env'), 'CCHUB_LOCAL_PORT=1\n')
+      const r = migrate()
+      gleich(r.code, 0, 'it does not fail — it says what it found')
+      enthaelt(r.out, 'BOTH', 'and names the problem')
+      wahr(existsSync(join(ALT_CFG, 'env')), 'the old one is untouched')
+      wahr(existsSync(join(NEU_CFG, 'env')), 'and so is the new one')
+      rmSync(ALT_CFG, { recursive: true, force: true })
     })
 
     // ------------------------------------------------------------------

@@ -1,4 +1,4 @@
-// cc-hub — the tmux-cleanup agent: a special single run that ends the oldest
+// Freilauf — the tmux-cleanup agent: a special single run that ends the oldest
 // inactive tmux sessions until the machine's tmux memory is below a target GB.
 //
 // It is configured under Settings → tmux cleanup (server/pages.mjs), reusing
@@ -15,9 +15,10 @@
 // a detached worktree and is told never to commit, so under merge_mode='hub'
 // the finish gate finds nothing to merge and closes it cleanly. It carries no
 // flows (nothing the operator started should cascade into them).
-import db, { getSetting, setSetting, addEvent, allSettings } from './db.mjs'
+import db, { getSetting, setSetting, addEvent, allSettings, DB_PATH } from './db.mjs'
 import { t } from './i18n.mjs'
 import { publicBase } from './util.mjs'
+import { env } from './env.mjs'
 
 /**
  * The prompt template behind the cleanup agent — the memory-driven successor of
@@ -25,9 +26,9 @@ import { publicBase } from './util.mjs'
  * sessions the target is a memory budget. What may be edited in Settings is this
  * template; the placeholders are filled at start time.
  *
- * `{target_gb}` and `{sessions_url}` are always replaced by the hub; `{keep_line}`
- * by the optional keep list; `{freed_gb}` / `{current_gb}` are the numbers the
- * AGENT measures and must write into its report.
+ * `{target_gb}`, `{sessions_url}` and `{db}` are always replaced by the hub;
+ * `{keep_line}` by the optional keep list; `{freed_gb}` / `{current_gb}` are the
+ * numbers the AGENT measures and must write into its report.
  */
 export const CLEANUP_PROMPT_DEFAULT = [
 'Beende tmux-Sessions, um Speicher freizugeben. Ziel: Der von ALLEN tmux-Sessions belegte Speicher soll auf höchstens {target_gb} GB gesenkt werden.',
@@ -58,23 +59,23 @@ export const CLEANUP_PROMPT_DEFAULT = [
 '',
 '- **Laufende Runs.** Vorher abfragen und ausnehmen:',
 '```bash',
-'sqlite3 "$HOME/.local/share/cc-hub/cc-hub.db" "SELECT tmux_session FROM runs WHERE status IN (\'running\',\'waiting_help\') AND tmux_session IS NOT NULL;"',
+'sqlite3 "{db}" "SELECT tmux_session FROM runs WHERE status IN (\'running\',\'waiting_help\') AND tmux_session IS NOT NULL;"',
 '```',
 'Die eigene Session dieses Runs steht da mit drin und ist damit geschützt.',
-'- **Laufende e2e-Suiten.** Sessions mit `cc-e2e-`, frisch entstandene `cc-einzel-…` im Minutenbereich und `cc-skill-traeger-…`.',
+'- **Laufende e2e-Suiten.** Sessions mit `fl-e2e-`/`cc-e2e-`, frisch entstandene `fl-einzel-…`/`cc-einzel-…` im Minutenbereich und `fl-skill-traeger-…`/`cc-skill-traeger-…`.',
 '- **Die Runs selbst.** Gelöscht wird ausschließlich die tmux-Session. Keine Zeile in `runs`, kein Verzeichnis unter `~/agents/runs`, kein Worktree.',
 '- **Commits.** Du machst in diesem Arbeitsverzeichnis KEINE Commits und änderst keine Dateien — es ist nur eine leere Hülle.',
 '',
 'Gelöscht wird mit exaktem Namensmatch: `tmux kill-session -t "=<name>"`.',
 '',
-'## Das Hilfsskript `cc-session-cleanup`',
+'## Das Hilfsskript `fl-session-cleanup`',
 '',
-'cc-hub installiert ein Skript auf `~/.local/bin`, das Messen und Entscheiden zuverlässig macht — nutze es zuerst:',
+'Freilauf installiert ein Skript auf `~/.local/bin`, das Messen und Entscheiden zuverlässig macht — nutze es zuerst:',
 '',
-'- `cc-session-cleanup` — listet alle Sessions mit Aktivitätsalter und Speicher',
-'- `cc-session-cleanup --target-gb N` — zeigt, welche beendet werden müssen, um auf ≤ N GB zu kommen (älteste inaktive zuerst)',
-'- `cc-session-cleanup --target-gb N --kill` — beendet sie wirklich',
-'- `cc-session-cleanup --keep "name1 name2"` — diese Sessions nie anfassen',
+'- `fl-session-cleanup` — listet alle Sessions mit Aktivitätsalter und Speicher',
+'- `fl-session-cleanup --target-gb N` — zeigt, welche beendet werden müssen, um auf ≤ N GB zu kommen (älteste inaktive zuerst)',
+'- `fl-session-cleanup --target-gb N --kill` — beendet sie wirklich',
+'- `fl-session-cleanup --keep "name1 name2"` — diese Sessions nie anfassen',
 '',
 'Kontrolliere mit dem Skript (oder den Kommandos oben), ob das Ziel erreicht ist.',
 '',
@@ -147,6 +148,14 @@ export function cleanupPrompt({ targetGb = null, keepSessions = [], thresholdGb 
     .replaceAll('{threshold_gb}', thresholdGb == null ? String(s.thresholdGb) : String(thresholdGb))
     .replaceAll('{keep_line}', keepLine)
     .replaceAll('{sessions_url}', `${publicBase()}/sessions`)
+    // The database path, and NOT a decoration: the query above is what protects
+    // the sessions of running runs. Pointed at a file that does not exist,
+    // sqlite3 creates an empty one and answers with no rows — the agent would
+    // then see nothing to protect and kill live runs. So a template stored
+    // before the rename gets its literal old path rewritten too, rather than
+    // being left to fail in exactly that direction.
+    .replaceAll('$HOME/.local/share/cc-hub/cc-hub.db', DB_PATH)
+    .replaceAll('{db}', DB_PATH)
 }
 
 /** Is a cleanup run already going (running, waiting or deferred)? */
@@ -208,12 +217,12 @@ export async function startCleanupRun({ targetGb = null, keep = null, source = '
  * Returns the start result or null when nothing is due.
  *
  * `memGb` is the measured total in GB; a test passes it directly instead of
- * asking sessionMemory() (which reads the machine's real tmux). `CCHUB_CLEANUP_AUTO_OFF=1`
+ * asking sessionMemory() (which reads the machine's real tmux). `FREILAUF_CLEANUP_AUTO_OFF=1`
  * disables the gate entirely (the test suites run next to a live hub and must
  * not start cleanup runs against its memory).
  */
 export async function maybeAutoCleanup(nowMs = Date.now(), memGb = null) {
-  if (process.env.CCHUB_CLEANUP_AUTO_OFF === '1') return null
+  if (env('CLEANUP_AUTO_OFF') === '1') return null
   const s = cleanupSettings()
   if (!s.on || !s.harness) return null
   if (cleanupRunInFlight()) return null

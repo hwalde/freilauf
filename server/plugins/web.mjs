@@ -1,4 +1,4 @@
-// cc-hub — the Plugins page (Settings → Plugins).
+// Freilauf — the Plugins page (Settings → Plugins).
 //
 // One page for the whole question "what can this hub drive, and with whose
 // credentials". It replaces Settings → Coding agents, which only ever knew one
@@ -58,7 +58,7 @@ export function kindLabel(kind) {
 // ---------------- the banner ----------------
 
 /**
- * "cc-hub found N things on this machine it could use."
+ * "Freilauf found N things on this machine it could use."
  *
  * DERIVED, not passed — the same shape as `setupBanner()`: the layout calls it
  * on every page, and it answers out of the database. Asking happens once,

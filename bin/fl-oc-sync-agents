@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cc-oc-sync-agents — Converts Claude Code agents (.claude/agents/*.md)
+"""fl-oc-sync-agents — Converts Claude Code agents (.claude/agents/*.md)
 into OpenCode agents (.opencode/agents/*.md) within the same project.
 
 Why conversion instead of a 1:1 copy (verified empirically, opencode 1.18.20):
@@ -12,14 +12,14 @@ The conversion:
   * removes tools: lines (opencode governs this via permission/deny;
     without a value the agent inherits the global permissions — deliberately permissive)
   * removes model: lines (the agent uses the session model; model choice via
-    cc-start --model or opencode.json)
+    fl-start --model or opencode.json)
   * adds "mode: subagent"
   * leaves name/description/body unchanged
 
 The .claude/agents/*.md files stay untouched (Claude Code behaves as before).
 Idempotent: regenerates the files freshly from the source on every run.
 
-Usage: cc-oc-sync-agents [project-directory]   (default: current directory)
+Usage: fl-oc-sync-agents [project-directory]   (default: current directory)
 """
 import os
 import re

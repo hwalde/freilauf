@@ -1,39 +1,40 @@
 #!/usr/bin/env bash
 # Terminates a running coding-agent session (claude/opencode/hermes/cursor, with a
 # safety prompt).
-# Usage: cc-kill [options] [session-name]
+# Usage: fl-kill [options] [session-name]
 set -euo pipefail
 
 # The session tags and the reverse lookup live in one file, next to this one —
-# they used to be a copy here and another one in cc-attach, and both had gone
+# they used to be a copy here and another one in fl-attach, and both had gone
 # stale in the same place (cursor was missing from them).
-CC_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc-harness-tags.sh"
-if [[ ! -r "$CC_LIB" ]]; then
-    printf '%s\n' "Error: $CC_LIB is missing — reinstall with setup/02-install-scripts.sh." >&2
+FL_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/fl-harness-tags.sh"
+if [[ ! -r "$FL_LIB" ]]; then
+    printf '%s\n' "Error: $FL_LIB is missing — reinstall with setup/02-install-scripts.sh." >&2
     exit 1
 fi
-# shellcheck source=cc-harness-tags.sh
-. "$CC_LIB"
+# shellcheck source=fl-harness-tags.sh
+. "$FL_LIB"
 
-PREFIX="$CC_PREFIX"
+PREFIX="$FL_PREFIX"
 
 usage() {
     cat <<'EOF'
-Usage: cc-kill [options] [session-name]
+Usage: fl-kill [options] [session-name]
 
-  session-name   Pick a session directly (with or without the cc-/cc-oc-/cc-he-/cc-cu-
+  session-name   Pick a session directly (with or without the fl-/fl-oc-/fl-he-/fl-cu-
                  prefix). If omitted: selection list (or directly, if only one is running).
+                 Sessions from before the rename (cc-…) are listed and addressed too.
 
 Options:
   -H, --harness HARNESS   Only show sessions of this harness:
                           claude | opencode | hermes | cursor
-      --yes               Terminate without asking (for cc-hub; the confirmation
+      --yes               Terminate without asking (for Freilauf; the confirmation
                           is handled by the UI there).
-  -h, --help            Overview of all cc commands.
+  -h, --help            Overview of all fl-* commands.
 EOF
 }
 
-[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && exec cc-help
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && exec fl-help
 [[ "${1:-}" == "--usage" ]] && { usage; exit 0; }
 
 # Split off --yes (non-interactive) before the harness argument.
@@ -52,20 +53,20 @@ err() { printf '%s\n' "$*" >&2; }
 HARNESS=""
 if [[ "${1:-}" == "-H" || "${1:-}" == "--harness" ]]; then
     HARNESS="${2:-}"
-    if cc_harness_known "$HARNESS"; then
+    if fl_harness_known "$HARNESS"; then
         shift 2
     else
-        err "Error: unknown harness '$HARNESS'. Allowed: $(cc_harness_ids)"
+        err "Error: unknown harness '$HARNESS'. Allowed: $(fl_harness_ids)"
         exit 2
     fi
 fi
 
-# Derive a session's harness from its name (cc-harness-tags.sh).
-harness_of() { cc_harness_of "$1"; }
+# Derive a session's harness from its name (fl-harness-tags.sh).
+harness_of() { fl_harness_of "$1"; }
 
 mapfile -t ROWS < <(tmux list-sessions \
     -F '#{session_name}|#{t:session_created}|#{?session_attached,attached,free}|#{session_path}' \
-    2>/dev/null | grep "^$PREFIX" || true)
+    2>/dev/null | grep -E "$(fl_session_re)" || true)
 
 SESSIONS=()
 for row in "${ROWS[@]}"; do
@@ -120,8 +121,11 @@ kill_session() {
 if [[ -n "${1:-}" ]]; then
     TARGET="$1"
     for s in "${SESSIONS[@]}"; do
-        bare="$(cc_harness_bare "$s")"    # remove cc- and the harness tag
-        if [[ "$s" == "$TARGET" || "$s" == "$PREFIX$TARGET" || "$bare" == "$TARGET" ]]; then
+        bare="$(fl_harness_bare "$s")"    # remove the prefix and the harness tag
+        treffer=""
+        [[ "$s" == "$TARGET" || "$bare" == "$TARGET" ]] && treffer=1
+        for p in "${FL_PREFIXES[@]}"; do [[ "$s" == "$p$TARGET" ]] && treffer=1; done
+        if [[ -n "$treffer" ]]; then
             kill_session "$s"
             exit 0
         fi

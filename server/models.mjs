@@ -1,4 +1,4 @@
-// cc-hub — model lists and reasoning-effort levels, orchestrated across the
+// Freilauf — model lists and reasoning-effort levels, orchestrated across the
 // plugin registries (server/providers, server/harnesses). All remote fetches
 // happen HERE, in the server: the browser only reaches the hub on 127.0.0.1
 // and must not contact foreign hosts.
@@ -108,7 +108,7 @@ export function providerCtx(providerId = null) {
  * worse than none — hence the detour through a temp file.
  */
 async function opencodeCliListe() {
-  const file = join(tmpdir(), `cc-hub-opencode-models-${process.pid}.txt`)
+  const file = join(tmpdir(), `freilauf-opencode-models-${process.pid}.txt`)
   try {
     await execFileAsync('sh', ['-c', `opencode models --pure > ${JSON.stringify(file)}`], { timeout: 120_000 })
     return readFileSync(file, 'utf8')

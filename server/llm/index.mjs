@@ -1,10 +1,10 @@
-// cc-hub — `llmJson()`: the one way the hub asks a model a question.
+// Freilauf — `llmJson()`: the one way the hub asks a model a question.
 //
 // Four callers ask one — the run title, the incident check, a flow's `extract`
 // step and the worktree-extras suggestion. Before this module each of them
 // carried its own copy of the same forty lines: OpenRouter's URL, the bearer
 // header, `response_format`, `JSON.parse(choices[0].message.content)`. Four
-// copies of one call is how a seam like `CCHUB_OPENROUTER_BASE` ends up
+// copies of one call is how a seam like `FREILAUF_OPENROUTER_BASE` ends up
 // honoured in exactly one of them (it did), and how a source that is not
 // OpenRouter cannot be added at all.
 //

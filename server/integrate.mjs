@@ -1,6 +1,6 @@
-// cc-hub — integration: a run is done when its work is on the base branch.
+// Freilauf — integration: a run is done when its work is on the base branch.
 //
-// Before this module a run ended when the agent called `cc-report done`. What it
+// Before this module a run ended when the agent called `fl-report done`. What it
 // had committed then sat in its worktree and its branch, and whether it ever
 // reached `main` depended on whether the agent did it itself — which is how a
 // repository's reflog came to hold two resets on main, a cherry-pick duplicate
@@ -39,62 +39,63 @@ import { vorfallMelden, offeneVorfaelle, vorfallVerwerfen } from './incidents.mj
 import { getHarness } from './harnesses/index.mjs'
 import { fallbackTitle, TITLE_MAX } from './title.mjs'
 import { t } from './i18n.mjs'
+import { env } from './env.mjs'
 
-export const INTEGRATE_DIR = process.env.CCHUB_INTEGRATE_DIR ?? join(homedir(), 'agents', 'integrate')
+export const INTEGRATE_DIR = env('INTEGRATE_DIR') ?? join(homedir(), 'agents', 'integrate')
 
 /** The states the check loop owns. 'merging' belongs to the integrator alone. */
 const LOOP_STATES = ['checking', 'awaiting_commit', 'awaiting_merge', 'check_failed']
 
 /** At most two git checks at a time — a repo with ten runs finishing must not fork twenty. */
-const CHECK_PARALLEL = Number(process.env.CCHUB_FINISH_PARALLEL ?? 2) || 2
+const CHECK_PARALLEL = Number(env('FINISH_PARALLEL') ?? 2) || 2
 
 // ---------------------------------------------------------------- the texts
 //
 // Constants with {placeholders}, like PLATFORM_RULES in runner.mjs: these go to
 // an AGENT or into a notification, not to the UI — they are never translated.
 
-export const M1 = `cc-hub: report received — but the run is NOT finished yet.
+export const M1 = `Freilauf: report received — but the run is NOT finished yet.
 Your worktree has uncommitted changes:
 {files}
 A run is only done when its work is committed. Either commit them (\`git add … && git commit\`) or discard them if they are not part of the work (\`git checkout -- <file>\`, \`git clean -f <file>\`). Do not move files outside the worktree to get around this.
-Then run \`cc-report done --file {report_file}\` again. cc-hub re-checks every few seconds and closes the run as soon as the worktree is clean; after {timeout} minutes it escalates to the operator.`
+Then run \`fl-report done --file {report_file}\` again. Freilauf re-checks every few seconds and closes the run as soon as the worktree is clean; after {timeout} minutes it escalates to the operator.`
 
-export const M2 = `cc-hub: report received — but the run is NOT finished yet.
+export const M2 = `Freilauf: report received — but the run is NOT finished yet.
 Your branch cannot be merged into {base}: origin/{base} has moved, and the merge conflicts in
 {files}
 Resolve it now, while you still know what you changed and why:
   git fetch origin && git merge origin/{base}
-Resolve every conflict so that BOTH intentions survive — yours and what already landed on {base} (listed below). Then run the tests, commit the merge, push if your branch has an upstream, and run \`cc-report done --file {report_file}\` again.
-Do NOT merge into or push to {base} yourself: cc-hub merges your branch once it is clean.
+Resolve every conflict so that BOTH intentions survive — yours and what already landed on {base} (listed below). Then run the tests, commit the merge, push if your branch has an upstream, and run \`fl-report done --file {report_file}\` again.
+Do NOT merge into or push to {base} yourself: Freilauf merges your branch once it is clean.
 Landed on {base} since you started:
 {landed_runs}`
 
-export const M3 = `cc-hub: report received. Worktree clean, branch mergeable — cc-hub is merging it into {base} now. Nothing more to do; stay in this session.`
+export const M3 = `Freilauf: report received. Worktree clean, branch mergeable — Freilauf is merging it into {base} now. Nothing more to do; stay in this session.`
 
-export const M4 = `cc-hub: your branch merges cleanly into {base}, but the merge check failed on the merged result:
+export const M4 = `Freilauf: your branch merges cleanly into {base}, but the merge check failed on the merged result:
   $ {merge_check}
 {output_tail}
-Fix the cause on your branch (fetch and merge origin/{base} first if you have not), commit, and run \`cc-report done --file {report_file}\` again.`
+Fix the cause on your branch (fetch and merge origin/{base} first if you have not), commit, and run \`fl-report done --file {report_file}\` again.`
 
-export const M5A = `cc-hub: {base} has moved — run "{title}" was merged ({sha7}). It changed files you are working on too:
+export const M5A = `Freilauf: {base} has moved — run "{title}" was merged ({sha7}). It changed files you are working on too:
 {overlap_files}
 Bring the change in now, before you build further on the old state:
   git fetch origin && git merge origin/{base}
 Resolve conflicts so that both intentions survive, then continue with your task.`
 
-export const M5B = `cc-hub: FYI — {base} has moved: run "{title}" was merged ({sha7}), {n} file(s) changed, none of them touched by you so far. No action needed now. As usual, merge origin/{base} into your branch before you report done.`
+export const M5B = `Freilauf: FYI — {base} has moved: run "{title}" was merged ({sha7}), {n} file(s) changed, none of them touched by you so far. No action needed now. As usual, merge origin/{base} into your branch before you report done.`
 
 export const P_CONFLICT = `Your task: make the branch \`{branch}\` mergeable into \`{base}\` again.
 
-A previous run — "{orig_title}" (cc-hub run {orig_id}) — did the work on this branch and has ended. The branch cannot be merged into origin/{base}: {reason}. Files involved:
+A previous run — "{orig_title}" (Freilauf run {orig_id}) — did the work on this branch and has ended. The branch cannot be merged into origin/{base}: {reason}. Files involved:
 {files}
 
 Do this:
 1. \`git fetch origin && git merge origin/{base}\`
-2. Resolve every conflict so that BOTH intentions survive: what the previous run wanted (its report is below) and what already landed on {base} (listed below). Do not drop either side just to make the conflict disappear. If the two really cannot coexist, stop and ask: \`cc-report help "<what conflicts and why>"\`.
+2. Resolve every conflict so that BOTH intentions survive: what the previous run wanted (its report is below) and what already landed on {base} (listed below). Do not drop either side just to make the conflict disappear. If the two really cannot coexist, stop and ask: \`fl-report help "<what conflicts and why>"\`.
 3. {check_line}
 4. Commit the merge. Keep the branch's history: no rebase, no force-push. Push if the branch has an upstream.
-5. Report done as described in the platform rules. cc-hub merges the branch into {base} itself — never push to {base} yourself.
+5. Report done as described in the platform rules. Freilauf merges the branch into {base} itself — never push to {base} yourself.
 
 --- Report of the previous run ---
 {orig_report}
@@ -117,7 +118,7 @@ Nothing was merged. Decide on the detail page: commit & merge, discard & merge, 
 Attach: tmux attach -t ={session}
 Resume: {resume_cmd}`
 
-export const T_DIVERGED = `🔴 {repo}: local {base} has diverged from origin/{base} ({n} local, {m} remote commits). cc-hub never force-pushes — please reconcile by hand in {path}. Until then those local commits are not backed up; cc-hub's own merges land on origin only.`
+export const T_DIVERGED = `🔴 {repo}: local {base} has diverged from origin/{base} ({n} local, {m} remote commits). Freilauf never force-pushes — please reconcile by hand in {path}. Until then those local commits are not backed up; Freilauf's own merges land on origin only.`
 
 export const T_BLOCKED_CONFLICT = `🔴 Branch {branch} could not be merged into {base}: {attempts} conflict run(s) did not get it clean. Files:
 {files}
@@ -472,17 +473,17 @@ function reportFile(runId) { return join(RUNS_DIR, runId, 'report.md') }
 
 /**
  * What has landed on the base branch since this run started, as the agent needs
- * to read it: the cc-hub runs whose merge commits sit in that range, newest
- * first. A range with no cc-hub run in it says so instead of staying blank —
+ * to read it: the Freilauf runs whose merge commits sit in that range, newest
+ * first. A range with no Freilauf run in it says so instead of staying blank —
  * "nothing changed" and "somebody pushed by hand" are different facts.
  */
 export async function landedRuns(repo, run, max = 5) {
   const base = run.base_sha
-  if (!base) return '- (no cc-hub runs; changes came from outside)'
+  if (!base) return '- (no Freilauf runs; changes came from outside)'
   const r = await sh('git', ['-C', repo.path, 'rev-list', `${base}..origin/${repo.base_branch}`])
-  if (!r.ok) return '- (no cc-hub runs; changes came from outside)'
+  if (!r.ok) return '- (no Freilauf runs; changes came from outside)'
   const shas = new Set(r.stdout.split('\n').map(s => s.trim()).filter(Boolean))
-  if (!shas.size) return '- (no cc-hub runs; changes came from outside)'
+  if (!shas.size) return '- (no Freilauf runs; changes came from outside)'
   const rows = db.prepare(`SELECT id, title, merged_sha, report_md FROM runs
     WHERE repo_id=? AND merged_sha IS NOT NULL ORDER BY merged_at DESC LIMIT 50`).all(repo.id)
   const lines = []
@@ -492,7 +493,7 @@ export async function landedRuns(repo, run, max = 5) {
     lines.push(`- "${row.title ?? kurzid(row.id)}" (${row.merged_sha.slice(0, 7)}): ${summary}`)
     if (lines.length >= max) break
   }
-  return lines.length ? lines.join('\n') : '- (no cc-hub runs; changes came from outside)'
+  return lines.length ? lines.join('\n') : '- (no Freilauf runs; changes came from outside)'
 }
 
 /** The message that belongs to a check result. */
@@ -516,7 +517,7 @@ async function messageFor(run, repo, result) {
 /**
  * Deliver a message to the agent.
  *
- * `via='http'` means the agent is standing in its `cc-report` call right now:
+ * `via='http'` means the agent is standing in its `fl-report` call right now:
  * the answer travels back as the tool's own output, which is the cheapest moment
  * there is. Every other channel (the inbox fallback, cursor's turn-end
  * detection) has no such call to answer, so the text is typed into the tmux
@@ -771,7 +772,7 @@ let timer = null
  * nobody wants to debug. The hub still integrates on the report path — the
  * suite simply owns the clock.
  */
-export function integratorTimerOff() { return process.env.CCHUB_INTEGRATOR_OFF === '1' }
+export function integratorTimerOff() { return env('INTEGRATOR_OFF') === '1' }
 
 export function startIntegrator() {
   if (timer || integratorTimerOff()) return
@@ -868,8 +869,8 @@ async function integrateOne(runId, opts = {}) {
   const beforeSha = (await sh('git', ['-C', dir, 'rev-parse', 'HEAD'])).stdout.trim()
   const title = run.title ?? kurzid(runId)
   const merged = await sh('git', ['-C', dir,
-    '-c', 'user.name=cc-hub', '-c', 'user.email=cc-hub@localhost',
-    'merge', '--no-ff', '-m', `Merge run ${kurzid(runId)}: ${title}\n\ncc-hub run ${runId}`, tip])
+    '-c', 'user.name=Freilauf', '-c', 'user.email=Freilauf@localhost',
+    'merge', '--no-ff', '-m', `Merge run ${kurzid(runId)}: ${title}\n\nFreilauf run ${runId}`, tip])
   if (!merged.ok) {
     await sh('git', ['-C', dir, 'merge', '--abort'])
     return backToConflict(runId, repo, 'merge conflict')
@@ -1126,7 +1127,7 @@ export async function escalate(runId, reason) {
   if (reason === 'blocked_no_remote') {
     return blockRun(runId, repo, 'blocked_no_remote', fill(T_BLOCKED_ERROR, {
       branch: branchOf(run), base: repo.base_branch,
-      reason: 'the repository has no origin remote — cc-hub never merges in the operator\'s checkout',
+      reason: 'the repository has no origin remote — Freilauf never merges in the operator\'s checkout',
     }))
   }
   if (reason === 'merge_error') {
@@ -1398,7 +1399,7 @@ function checkTail(runId) {
 export function truncateReport(run, max = 20 * 1024) {
   const text = String(run.report_md ?? '')
   if (text.length <= max) return text || '(no report)'
-  return text.slice(0, max) + `\n[… truncated by cc-hub, full report: ${join(RUNS_DIR, run.id, 'report.md')}]`
+  return text.slice(0, max) + `\n[… truncated by Freilauf, full report: ${join(RUNS_DIR, run.id, 'report.md')}]`
 }
 
 /**
@@ -1483,8 +1484,8 @@ export async function mergeByHand(runId, leftovers = null) {
     // This is the AGENT's worktree, not the operator's checkout — committing
     // here is the hub tidying up after its own run, which is why it is allowed.
     await sh('git', ['-C', run.workdir_effective,
-      '-c', 'user.name=cc-hub', '-c', 'user.email=cc-hub@localhost',
-      'commit', '-m', `Leftover changes from run ${kurzid(runId)}, committed by cc-hub on the operator's request`])
+      '-c', 'user.name=Freilauf', '-c', 'user.email=Freilauf@localhost',
+      'commit', '-m', `Leftover changes from run ${kurzid(runId)}, committed by Freilauf on the operator's request`])
   } else if (leftovers === 'discard') {
     await sh('git', ['-C', run.workdir_effective, 'checkout', '--', '.'])
     await sh('git', ['-C', run.workdir_effective, 'clean', '-fd'])

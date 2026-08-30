@@ -1,4 +1,4 @@
-// cc-hub — the context a plugin is handed.
+// Freilauf — the context a plugin is handed.
 //
 // A plugin never touches `process.env` or `db.mjs` itself. Everything it may
 // need arrives through this object, and that is what makes two things possible

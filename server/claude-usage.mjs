@@ -1,7 +1,7 @@
-// cc-hub — Claude's subscription windows, asked of the account instead of read
+// Freilauf — Claude's subscription windows, asked of the account instead of read
 // off the floor.
 //
-// WHY THIS FILE EXISTS. `~/.claude/quota.json` is not cc-hub's file, and it is
+// WHY THIS FILE EXISTS. `~/.claude/quota.json` is not Freilauf's file, and it is
 // not claude's either: claude NEVER writes it (see quota.mjs). It hands the
 // windows to the STATUS LINE, and a status line only renders while an
 // interactive session is open. A third window — the per-model weekly one — is
@@ -9,7 +9,7 @@
 // the same machine, which runs when that project's own quota gate runs and not
 // otherwise.
 //
-// So the panel's freshness depended on two things cc-hub does not control, and
+// So the panel's freshness depended on two things Freilauf does not control, and
 // the failure was silent in the worst way: the numbers looked current. Measured
 // on 2026-08-28, with the sidebar's own 30 s refresh working perfectly — it was
 // re-fetching a fragment rendered from a seven-hour-old file:
@@ -38,7 +38,7 @@
 // FOUR RULES, each of them load-bearing:
 //
 //   1. **Never write quota.json.** It belongs to the status line and to that
-//      other project's script. cc-hub reads it, as a fallback, and nothing else.
+//      other project's script. Freilauf reads it, as a fallback, and nothing else.
 //   2. **Never refresh the OAuth token.** An expired token is a reason to stay
 //      silent, not to go and mint a new one: racing claude for its own
 //      credentials file could invalidate the operator's live session, and no
@@ -56,19 +56,21 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
+import { env } from './env.mjs'
+import { dataDir } from './paths.mjs'
 
 // Both read at CALL time, not at module load: the suites point them at a stub
 // and a fixture after this module is already in the graph.
-const USAGE_URL = () => process.env.CCHUB_CLAUDE_USAGE_URL
+const USAGE_URL = () => env('CLAUDE_USAGE_URL')
   ?? 'https://api.anthropic.com/api/oauth/usage'
-const CREDENTIALS = () => process.env.CCHUB_CLAUDE_CREDENTIALS
+const CREDENTIALS = () => env('CLAUDE_CREDENTIALS')
   ?? `${homedir()}/.claude/.credentials.json`
 
 // How long a fetched answer counts as the truth. A minute matches usage.mjs's
 // own cache, which is what the sidebar's 30 s timer really asks; there is no
 // point in being fresher than the thing that renders it.
-const TTL_MS = Number(process.env.CCHUB_CLAUDE_USAGE_TTL_MS ?? 60_000)
-const TIMEOUT_MS = Number(process.env.CCHUB_CLAUDE_USAGE_TIMEOUT_MS ?? 8_000)
+const TTL_MS = Number(env('CLAUDE_USAGE_TTL_MS') ?? 60_000)
+const TIMEOUT_MS = Number(env('CLAUDE_USAGE_TIMEOUT_MS') ?? 8_000)
 
 let cache = { at: 0, value: null }
 let inflight = null
@@ -119,15 +121,14 @@ const isoTime = (v) => {
 // straight back to the two-day-old file value. Own file, never quota.json —
 // rule 1 above stands. The path is derived rather than imported from db.mjs:
 // db.mjs imports the harness registry, which imports this module.
-const MEMORY_PATH = () => process.env.CCHUB_CLAUDE_WINDOWS_JSON
-  ?? join(process.env.CCHUB_DATA_DIR ?? join(homedir(), '.local', 'share', 'cc-hub'),
-    'claude-windows.json')
+const MEMORY_PATH = () => env('CLAUDE_WINDOWS_JSON')
+  ?? join(dataDir(), 'claude-windows.json')
 
 // How long a remembered window counts for when it carries no reset time of its
 // own. With one, that time decides: knowledge from before a window rolled over
 // is worthless, and a memory that could never expire would keep the budget gate
 // deferring runs against a quota that has long since been refilled.
-const MEMORY_TTL_MS = Number(process.env.CCHUB_CLAUDE_WINDOW_MEMORY_MS ?? 24 * 3600_000)
+const MEMORY_TTL_MS = Number(env('CLAUDE_WINDOW_MEMORY_MS') ?? 24 * 3600_000)
 
 let memory = null   // label → { label, pct, resets_at, at }
 

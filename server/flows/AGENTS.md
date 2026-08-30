@@ -1,4 +1,4 @@
-# cc-hub flows — no-code automation on top of runs
+# Freilauf flows — no-code automation on top of runs
 
 `server/flows/` is a self-contained module: it owns its tables, its pages, its
 API and its client (`public/flows.js`, `public/flows.css`). The rest of the hub
@@ -30,7 +30,7 @@ merge_status, merged_sha`. "Did the run end normally or was it aborted?" is
 `merge_status` (the merge integrator's column — read here, never written).
 
 A finished run can report **again** (`server/reports.mjs`, follow-up reports:
-the operator typed more work into the session and the agent ran `cc-report
+the operator typed more work into the session and the agent ran `fl-report
 done` once more). Its `run_finished` flows then fire once more, and so do the
 `run_merged` ones when the follow-up's work was merged (`rearmDispatch()` in
 `db.mjs` takes the dispatch marks back). `report` carries everything the run
@@ -226,7 +226,7 @@ row, not a stack frame.
 ### Restarting the hub from a flow
 
 The case that made `shell_command` carry a `detach` switch at all: "after every
-merge, restart cc-hub". A step that restarts the hub kills the process that is
+merge, restart Freilauf". A step that restarts the hub kills the process that is
 executing it — the flow run would stay on `running` and, per the rule above, be
 marked failed on the way back up, every single time.
 
@@ -241,7 +241,7 @@ command looks like.
 
 So the operator's flow is: trigger `run_merged`, one `shell_command`,
 `detach` ticked, and a `sleep` in front of the command —
-`sleep 3; cchub-deploy`. The sleep is what gives the answer time to reach the
+`sleep 3; freilauf-deploy`. The sleep is what gives the answer time to reach the
 browser.
 
 **One step, and deliberately no condition after it.** The flow used to be three:
@@ -249,8 +249,8 @@ pull the working checkout, branch on whether the pull worked, restart or send a
 message. Only the first two of those could ever report anything —
 whatever the restart does happens after the process running the flow is gone. So
 everything that has to be judged *after* the restart belongs in the script:
-`cchub-deploy` checks that the hub answers, rolls back to the previous commit if
-it does not, and notifies itself (through `bin/cc-notify`, so it reaches whatever
+`freilauf-deploy` checks that the hub answers, rolls back to the previous commit if
+it does not, and notifies itself (through `bin/fl-notify`, so it reaches whatever
 channel the operator configured — and nothing at all when they configured none).
 See "Deploying: the service runs from its own checkout" in the root `AGENTS.md`.
 
@@ -368,7 +368,7 @@ Plus `util.sendToSession()` (shared with the run detail page's message form).
 
 ## Designer page (`public/flows.js`)
 
-Loads `window.CCHUB_FLOWS = { i18n, meta, flow }` injected by `web.mjs`
+Loads `window.FREILAUF_FLOWS = { i18n, meta, flow }` injected by `web.mjs`
 (`i18n` = the `flows.*` catalog, `meta` = `editorMeta()`). Toolbox groups and
 step defaults come from `meta.steps`; the root editor edits the trigger; the
 step editor renders `fields`. It is an **ES module** and imports
@@ -425,4 +425,4 @@ order, conditional branch variables, the drop position, `pathProblem`,
 end-to-end with a stub `api` (branching,
 outputs, wait/resume on a run, delay, stop, step failure, for-each including a
 wait inside the body). The persistence runs
-against the unit sandbox database (`CCHUB_DATA_DIR`).
+against the unit sandbox database (`FREILAUF_DATA_DIR`).

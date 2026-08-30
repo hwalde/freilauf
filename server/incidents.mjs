@@ -1,4 +1,4 @@
-// cc-hub — incidents: the alarm model for rate limits, provider outages and the like.
+// Freilauf — incidents: the alarm model for rate limits, provider outages and the like.
 //
 // An incident is ONE record per (run, type). It gets opened, keeps counting further
 // occurrences (anzahl, zuletzt_gesehen), can be resolved by a human — and REOPENS
@@ -15,6 +15,7 @@ import db, { addEvent } from './db.mjs'
 import { RUNS_DIR, fmtDbUtc } from './util.mjs'
 import { notify, notifyMuted, detailUrl } from './notify.mjs'
 import { TYP_TEXT } from './detect.mjs'
+import { env } from './env.mjs'
 
 /**
  * How long a red incident waits BEFORE the notification fires. The delay is a grace
@@ -24,7 +25,7 @@ import { TYP_TEXT } from './detect.mjs'
  * blocked runs stay silent for exactly this long and then ring; everything that
  * recovers within the window never pages. 0 = immediately (the test suite).
  */
-const NOTIFY_DELAY_MS = Number(process.env.CCHUB_INCIDENT_NOTIFY_DELAY_MS ?? 10 * 60_000)
+const NOTIFY_DELAY_MS = Number(env('INCIDENT_NOTIFY_DELAY_MS') ?? 10 * 60_000)
 
 /** Timestamp in DB format (UTC, 'YYYY-MM-DD HH:MM:SS'). */
 export function dbZeit(ms = Date.now()) {

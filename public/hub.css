@@ -1,4 +1,4 @@
-/* cc-hub — plain: tables, forms, one terminal. Red/yellow/green as the only colors. */
+/* Freilauf — plain: tables, forms, one terminal. Red/yellow/green as the only colors. */
 :root { color-scheme: light dark; }
 
 /* ---- Design tokens ----------------------------------------------------
@@ -800,7 +800,7 @@ form.form-grid fieldset.cleanup-setup { margin: var(--sp-12) 0; padding: var(--s
 table.plugin-packages code { word-break: break-all; }
 table.plugin-packages tr.broken td { background: var(--err-deep-soft); }
 
-/* "cc-hub found N things on this machine it could use" — a suggestion, not an
+/* "Freilauf found N things on this machine it could use" — a suggestion, not an
    alarm: the accent, like the other-repo note, not the plain banner's red. */
 .banner.discovery { border-left-color: var(--accent); background: var(--accent-soft-bg);
   display: flex; gap: var(--sp-12); align-items: center; flex-wrap: wrap; }

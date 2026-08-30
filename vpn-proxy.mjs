@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * TLS reverse proxy in front of cc-hub (Planung 5).
+ * TLS reverse proxy in front of Freilauf (Planung 5).
  *
- *  - NO host rewrite: cc-hub has no loopback restriction, the request passes
+ *  - NO host rewrite: Freilauf has no loopback restriction, the request passes
  *    through to 127.0.0.1 unchanged.
  *  - Rebinding/cross-site fence: the Host MUST be in the allowlist,
  *    the Origin must match the requested authority exactly, Sec-Fetch-Site: cross-site
@@ -16,7 +16,7 @@
  *
  * This proxy used to be `https.createServer` — HTTP/1.1 only. A browser opens at
  * most **6 connections per origin** over HTTP/1.1, and since the live channel
- * exists (`server/events.mjs`) **every open cc-hub tab holds one of them open
+ * exists (`server/events.mjs`) **every open Freilauf tab holds one of them open
  * forever**: an EventSource is a response that never ends. Four tabs left the
  * page two connections to load itself through; six left it none, and every
  * request simply queued in the browser until a tab was closed. That is what
@@ -48,33 +48,35 @@
 import http from 'node:http'
 import http2 from 'node:http2'
 import { readFileSync } from 'node:fs'
+import { env } from './server/env.mjs'
+import { certDir } from './server/paths.mjs'
 
-const BIND = process.env.CCHUB_VPN_BIND
+const BIND = env('VPN_BIND')
 if (!BIND) {
-  console.error('[cc-hub-vpn] CCHUB_VPN_BIND is not set (the VPN address the proxy binds to).')
-  console.error('[cc-hub-vpn] Deliberately no default: this service must never end up on 0.0.0.0.')
+  console.error('[freilauf-vpn] FREILAUF_VPN_BIND is not set (the VPN address the proxy binds to).')
+  console.error('[freilauf-vpn] Deliberately no default: this service must never end up on 0.0.0.0.')
   process.exit(1)
 }
-const PORT = Number(process.env.CCHUB_VPN_PORT ?? 8790)
+const PORT = Number(env('VPN_PORT') ?? 8790)
 const TARGET_HOST = '127.0.0.1'
-const TARGET_PORT = Number(process.env.CCHUB_LOCAL_PORT ?? 8791)
-const CERT_DIR = process.env.CCHUB_CERT_DIR ?? `${process.env.HOME}/.local/certs/cc-hub`
+const TARGET_PORT = Number(env('LOCAL_PORT') ?? 8791)
+const CERT_DIR = certDir()
 
 const LOOPBACK_AUTHORITY = `${TARGET_HOST}:${TARGET_PORT}`
 
-const ALLOWED_HOSTS = (process.env.CCHUB_ALLOWED_HOSTS ?? `${BIND}:${PORT}`)
+const ALLOWED_HOSTS = (env('ALLOWED_HOSTS') ?? `${BIND}:${PORT}`)
   .split(',')
   .map((entry) => entry.trim().toLowerCase())
   .filter(Boolean)
 
 for (const entry of ALLOWED_HOSTS) {
   if (!/^[a-z0-9.\-]+(:\d+)?$|^\[[0-9a-f:]+\](:\d+)?$/.test(entry)) {
-    console.error(`[cc-hub-vpn] CCHUB_ALLOWED_HOSTS: ${JSON.stringify(entry)} is not a host[:port] authority`)
+    console.error(`[freilauf-vpn] FREILAUF_ALLOWED_HOSTS: ${JSON.stringify(entry)} is not a host[:port] authority`)
     process.exit(1)
   }
 }
 if (ALLOWED_HOSTS.length === 0) {
-  console.error('[cc-hub-vpn] CCHUB_ALLOWED_HOSTS is empty — no request could get through')
+  console.error('[freilauf-vpn] FREILAUF_ALLOWED_HOSTS is empty — no request could get through')
   process.exit(1)
 }
 
@@ -152,7 +154,7 @@ function acceptedAuthority(method, headers) {
 
 /** Log the 403 with its reason to the journal — otherwise you sit in the browser guessing. */
 function logReject(method, urlPath, h) {
-  console.warn(`[cc-hub-vpn] 403 ${method} ${urlPath} — ${rejectReason(method, h)}`
+  console.warn(`[freilauf-vpn] 403 ${method} ${urlPath} — ${rejectReason(method, h)}`
     + ` (host=${h.host ?? '-'} origin=${h.origin ?? '-'} sec-fetch-site=${h['sec-fetch-site'] ?? '-'}`
     + ` sec-fetch-mode=${h['sec-fetch-mode'] ?? '-'} sec-fetch-dest=${h['sec-fetch-dest'] ?? '-'})`)
 }
@@ -194,7 +196,7 @@ const server = http2.createSecureServer(options, (req, res) => {
   res.on('close', () => upstream.destroy())
   upstream.on('error', (err) => {
     if (res.destroyed || res.closed) return
-    console.warn(`[cc-hub-vpn] upstream: ${err.message}`)
+    console.warn(`[freilauf-vpn] upstream: ${err.message}`)
     if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' })
     res.end('bad gateway\n')
   })
@@ -242,7 +244,7 @@ server.on('upgrade', (req, socket, head) => {
   })
   upstream.on('response', () => socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n'))
   upstream.on('error', (err) => {
-    console.warn(`[cc-hub-vpn] upgrade: ${err.message}`)
+    console.warn(`[freilauf-vpn] upgrade: ${err.message}`)
     socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n')
   })
   socket.on('close', () => upstream.destroy())
@@ -253,16 +255,16 @@ server.on('upgrade', (req, socket, head) => {
 
 server.on('error', (err) => {
   if (err.code === 'EADDRNOTAVAIL') {
-    console.error(`[cc-hub-vpn] ${BIND} does not exist — is the VPN interface up?`)
+    console.error(`[freilauf-vpn] ${BIND} does not exist — is the VPN interface up?`)
   } else {
-    console.error(`[cc-hub-vpn] ${err.message}`)
+    console.error(`[freilauf-vpn] ${err.message}`)
   }
   process.exit(1)
 })
 
 server.listen(PORT, BIND, () => {
-  console.log(`[cc-hub-vpn] ${BIND}:${PORT} -> http://${LOOPBACK_AUTHORITY} (h2 + http/1.1)`)
-  console.log(`[cc-hub-vpn] allowed authorities: ${ALLOWED_HOSTS.join(', ')}`)
+  console.log(`[freilauf-vpn] ${BIND}:${PORT} -> http://${LOOPBACK_AUTHORITY} (h2 + http/1.1)`)
+  console.log(`[freilauf-vpn] allowed authorities: ${ALLOWED_HOSTS.join(', ')}`)
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

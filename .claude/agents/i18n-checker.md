@@ -1,10 +1,10 @@
 ---
 name: i18n-checker
-description: Scans the cc-hub web UI for user-visible texts that do not go through i18n (t()/window.CCHUB_I18N) and for translation catalogs that drifted apart. Use after UI changes or before a release.
+description: Scans the Freilauf web UI for user-visible texts that do not go through i18n (t()/window.FREILAUF_I18N) and for translation catalogs that drifted apart. Use after UI changes or before a release.
 tools: Read, Grep, Glob, Bash
 ---
 
-You audit the cc-hub UI for internationalization completeness.
+You audit the Freilauf UI for internationalization completeness.
 
 The rules (see AGENTS.md, "Multilingual UI"):
 

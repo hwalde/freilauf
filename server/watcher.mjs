@@ -1,4 +1,4 @@
-// cc-hub — watcher (planning 4.4, 4.5, 4.7): observes runs via tmux, the harnesses'
+// Freilauf — watcher (planning 4.4, 4.5, 4.7): observes runs via tmux, the harnesses'
 // transcript/DB and the inbox fallback; anomalies (traffic light), budget retry,
 // cost estimation, auto-close of finished sessions (server/sessions.mjs), worktree cleanup.
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
@@ -20,6 +20,7 @@ import { flowsTick } from './flows/triggers.mjs'
 import { reconcileClosedSession, tmuxSessionMap, shouldAutoClose, currentKeepMs, shouldCloseArchived, archiveSessionKeepMs } from './sessions.mjs'
 import { integrateTick, pushOperatorBase, integratorTimerOff, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 import { maybeAutoCleanup } from './cleanup.mjs'
+import { env } from './env.mjs'
 
 let timer = null
 
@@ -36,7 +37,7 @@ export function stopWatcher() { clearInterval(timer); timer = null }
  * shows a run that does not exist, and the terminal has nothing to attach to.
  *
  * 'gnadenfristSek' (grace period in seconds) guards against tearing down a run
- * that was created just now and whose cc-start is still working. At hub start-up
+ * that was created just now and whose fl-start is still working. At hub start-up
  * the grace period is 0: whatever is there must come from an earlier process.
  */
 export function verwaisteLaeufeAbschliessen(gnadenfristSek = 300) {
@@ -98,7 +99,7 @@ export async function tick() {
   try { await flowsTick() } catch (e) { console.error('[flows]', e.message) }
 }
 
-// ---------- inbox fallback (cc-report could not reach the hub) ----------
+// ---------- inbox fallback (fl-report could not reach the hub) ----------
 async function collectInboxes() {
   let dirs = []
   try { dirs = readdirSync(RUNS_DIR) } catch { return }
@@ -111,7 +112,7 @@ async function collectInboxes() {
     try { lines = readFileSync(f, 'utf8').split('\n').filter(Boolean) } catch { continue }
     if (!lines.length) continue
     for (const line of lines) {
-      // 'inbox': there is no cc-report call left to answer, so the finish gate
+      // 'inbox': there is no fl-report call left to answer, so the finish gate
       // types its answer into the session instead.
       try { await handleReport(id, JSON.parse(line), 'inbox') } catch (e) { console.error('[inbox]', e.message) }
     }
@@ -135,7 +136,7 @@ async function watchRun(run) {
   let st = { pane_dead: '?', dead_status: '', dead_time: '', pid: '', cmd: '' }
   if (run.tmux_session) {
     if (!await sessionLebt(run.tmux_session)) {
-      // Session gone entirely (reboot, manual cc-kill, the sessions page). Mark
+      // Session gone entirely (reboot, manual fl-kill, the sessions page). Mark
       // it closed right away, otherwise the worktree cleanup waits forever for
       // tmux_closed_at — AND end the run: nothing can report for it any more, so
       // leaving it on 'running' means the overview shows a run that does not
@@ -218,7 +219,7 @@ async function watchRun(run) {
 /** Path of the Claude transcript: known in advance thanks to --session-id (planning 7.1). */
 export function claudeTranskriptPfad(run) {
   const dirName = run.workdir_effective.replaceAll('/', '-')
-  return `${process.env.CCHUB_CLAUDE_PROJECTS ?? `${homedir()}/.claude/projects`}/${dirName}/${run.id}.jsonl`
+  return `${env('CLAUDE_PROJECTS') ?? `${homedir()}/.claude/projects`}/${dirName}/${run.id}.jsonl`
 }
 
 /** Read a file starting at offset; returns { text, size }. If too far behind, only the tail. */
@@ -397,8 +398,8 @@ export function providerVonLauf(run) {
   return id && PULS[id] ? id : null
 }
 async function providerPuls(jetzt = Date.now()) {
-  if (process.env.CCHUB_PULS_AUS === '1') return
-  const takt = Number(process.env.CCHUB_PULS_TAKT_MS ?? 5 * 60_000)
+  if (env('PULS_AUS') === '1') return
+  const takt = Number(env('PULS_TAKT_MS') ?? 5 * 60_000)
   if (jetzt - pulsZustand.zuletztMs < takt) return
   pulsZustand.zuletztMs = jetzt
   const aktiv = db.prepare(`SELECT harness, provider FROM runs WHERE status IN ('running','waiting_help')`).all()
@@ -416,7 +417,7 @@ async function providerPuls(jetzt = Date.now()) {
   }
 }
 async function pulsPruefen(name) {
-  const ziel = process.env.CCHUB_PULS_URL_TEST ? { url: process.env.CCHUB_PULS_URL_TEST, okStatus: [200] } : PULS[name]
+  const ziel = env('PULS_URL_TEST') ? { url: env('PULS_URL_TEST'), okStatus: [200] } : PULS[name]
   if (!ziel) return true
   try {
     const res = await fetch(ziel.url, { method: 'GET', signal: AbortSignal.timeout(10_000) })

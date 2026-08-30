@@ -1,4 +1,4 @@
-// cc-hub flows — attaching flows to a run definition.
+// Freilauf flows — attaching flows to a run definition.
 //
 // A flow is not something you go looking for in a menu: it hangs on the agent
 // or the single run whose end shall start it. That attachment IS the

@@ -1,4 +1,4 @@
-// cc-hub — terminal in the browser (planning 7.4): node-pty spawns `tmux attach-session`;
+// Freilauf — terminal in the browser (planning 7.4): node-pty spawns `tmux attach-session`;
 // resize frame "\0{cols,rows}"; pty.kill() only terminates the tmux client, never the session.
 // Write access hangs on `?ro=0` and is fail-closed: if the parameter is missing or holds
 // anything else, we attach with `-r` AND discard every input. The client sets
@@ -8,7 +8,10 @@ import pty from 'node-pty'
 import { getRun } from './db.mjs'
 import { sh } from './util.mjs'
 
-const SESSION_RE = /^cc-[A-Za-z0-9_-]+$/   // planning 11
+// Both prefixes: `fl-` is what a run gets today, `cc-` is what a session
+// started before the rename still carries — and a run keeps the session NAME it
+// was given, so an old run's terminal has to stay openable.
+export const SESSION_RE = /^(?:fl|cc)-[A-Za-z0-9_-]+$/   // planning 11
 
 export function startTerminalServer(httpServer) {
   const wss = new WebSocketServer({ noServer: true })

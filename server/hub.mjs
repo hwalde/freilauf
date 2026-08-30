@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// cc-hub — main entry point: HTTP + WS + scheduler + watcher in one process (planning 5).
+// Freilauf — main entry point: HTTP + WS + scheduler + watcher in one process (planning 5).
 import http from 'node:http'
 import process from 'node:process'
 import { loadExternalPlugins } from './plugins/loader.mjs'
+import { env } from './env.mjs'
 
 // External plugin packages join the registry HERE, before any module that
 // reads it has been evaluated — a coding agent that arrives after the first
@@ -36,27 +37,27 @@ setLanguage(getSetting('ui_language') ?? 'en')
 setTimezone(getSetting('ui_timezone') ?? '')
 seedIfEmpty()
 
-const PORT = Number(process.env.CCHUB_LOCAL_PORT ?? 8791)
+const PORT = Number(env('LOCAL_PORT') ?? 8791)
 const HOST = '127.0.0.1'   // planning 11: the app is NEVER reachable any other way
 
 const server = http.createServer((req, res) => route(req, res))
 startTerminalServer(server)
 
 server.listen(PORT, HOST, () => {
-  console.log(`[cc-hub] running on http://${HOST}:${PORT}`)
+  console.log(`[freilauf] running on http://${HOST}:${PORT}`)
   // First clean up what an earlier process left behind mid-start:
   // no grace period, because these runs cannot be ours any more.
   const verwaist = verwaisteLaeufeAbschliessen(0)
-  if (verwaist) console.log(`[cc-hub] closed ${verwaist} interrupted run(s) (no session)`)
+  if (verwaist) console.log(`[freilauf] closed ${verwaist} interrupted run(s) (no session)`)
   startScheduler()
   startWatcher()
   // The finish gate's own timer: it wakes every 5 s, much denser than the
   // watcher, because an agent told "commit first" usually does it in seconds.
   startIntegrator()
   // The pipeline state comes from the DB. Access from the outside is NOT a
-  // setting of this process — it is cchub-vpn.service, which deliberately does
-  // not start on its own (fail-closed) and is switched with `cchub on|off`.
-  console.log(`[cc-hub] pipeline=${getSetting('pipeline_on') === '1' ? 'on' : 'off'} (from the DB)`)
+  // setting of this process — it is freilauf-vpn.service, which deliberately does
+  // not start on its own (fail-closed) and is switched with `freilauf on|off`.
+  console.log(`[freilauf] pipeline=${getSetting('pipeline_on') === '1' ? 'on' : 'off'} (from the DB)`)
   // Warm the two panels the status sidebar is built from, before a browser can
   // ask for them. Both are stale-while-revalidate now (usage.mjs), so the ONLY
   // request that can still wait on a vendor's API is the one that finds no

@@ -2,7 +2,7 @@
 # Starts a coding-agent session inside a tmux session (survives SSH logout).
 # Harnesses: claude (default) | opencode | hermes.
 #   Any OTHER coding agent is launched from a declaration handed in with --spec
-#   (see "Launch spec" below) — that is how a cc-hub plugin nobody shipped here
+#   (see "Launch spec" below) — that is how a Freilauf plugin nobody shipped here
 #   still gets a tmux session.
 #   claude:   interactive in bypassPermissions mode; autonomous (-p) in dontAsk mode.
 #   opencode: interactive with --auto; autonomous (-p) as 'opencode --auto --prompt' (TUI,
@@ -10,15 +10,23 @@
 #   hermes:   interactive with --yolo; autonomous (-p) as 'hermes chat -q --yolo'.
 #   cursor:   cursor-agent with --force --trust; autonomous as a positional prompt (TUI,
 #             works through the task and then stays open -- like opencode).
-# Usage: cc-start [options] [session-name] [working-directory]
+# Usage: fl-start [options] [session-name] [working-directory]
 set -euo pipefail
 
-PREFIX="cc-"
+PREFIX="fl-"
 USAGE_SH="$HOME/.claude/usage.sh"
+
+# Where this installation keeps its things, and the FREILAUF_*/CCHUB_* fallback
+# behind every seam — one file, sourced by every script in bin/. OPTIONAL here:
+# only the --spec path reaches for it (the tag file), and this script has to
+# keep working with nothing installed but tmux.
+FL_PATHS="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/fl-paths.sh"
+# shellcheck source=fl-paths.sh
+[[ -r "$FL_PATHS" ]] && . "$FL_PATHS"
 
 usage() {
     cat <<'EOF'
-Usage: cc-start [options] [session-name] [working-directory]
+Usage: fl-start [options] [session-name] [working-directory]
 
   session-name   Name of the session (default: name of the working directory)
   directory      Working directory for the agent (default: current directory)
@@ -29,7 +37,7 @@ Choosing a harness (default: claude):
       --effort LEVEL      Reasoning effort. '--effort' for claude, '--reasoning'
                           for hermes (same option, different name). NOT possible for
                           opencode: only 'opencode run' knows a --variant there, the
-                          TUI does not; cc-hub sets it via OPENCODE_CONFIG_CONTENT
+                          TUI does not; Freilauf sets it via OPENCODE_CONFIG_CONTENT
                           instead. NOT possible for cursor: there the level is already
                           part of the model ID (e.g. claude-opus-5-xhigh, -low, -max).
       --provider PROVIDER Inference provider, ONLY for hermes (e.g. deepseek, openrouter,
@@ -63,13 +71,13 @@ Options:
   -a, --attach          Attach immediately even on an autonomous start (watch).
       --no-trust        Do NOT pre-confirm the trust dialog (claude only).
       --dry-run         Only show what would be started. Start nothing.
-      --- cc-hub integration (Planung §9) ---
+      --- Freilauf integration (Planung §9) ---
       --env KEY=VAL     Environment variable for the session (repeatable,
                         passed through as tmux new-session -e).
       --log FILE        Record a full transcript of the session from the start
                         (tmux pipe-pane into FILE).
       --keep            Keep the session open after the process ends (remain-on-exit)
-                        + pane-died hook (cc-report _pane_died).
+                        + pane-died hook (fl-report _pane_died).
       --spec FILE       Launch declaration (JSON) of a coding agent this script
                         ships no case for. Required for any -H other than
                         claude/opencode/hermes/cursor, ignored for those four.
@@ -83,22 +91,24 @@ Options:
   -h, --help            This help.
 
 Examples:
-  cc-start                                  # claude interactive, current directory
-  cc-start -H opencode video ~/projects/example  # opencode interactive (--auto)
-  cc-start -H opencode --model openrouter/stealth/ox-alpha video ~/projects/example
-  cc-start -H opencode -p "Get the tests green" build ~/projects/example
+  fl-start                                  # claude interactive, current directory
+  fl-start -H opencode video ~/projects/example  # opencode interactive (--auto)
+  fl-start -H opencode --model openrouter/stealth/ox-alpha video ~/projects/example
+  fl-start -H opencode -p "Get the tests green" build ~/projects/example
                                             # opencode autonomous, no model choice
-  cc-start -H hermes -p "Analyze the logs" logs ~/projects/example
-  cc-start -f ~/task.md nightrun ~/projects/example   # claude autonomous
+  fl-start -H hermes -p "Analyze the logs" logs ~/projects/example
+  fl-start -f ~/task.md nightrun ~/projects/example   # claude autonomous
 
-Session names: cc-<name> (claude), cc-oc-<name> (opencode), cc-he-<name> (hermes),
-               cc-cu-<name> (cursor), cc-<sessionTag><name> for a --spec harness.
-View/select: cc-attach [-H harness], terminate: cc-kill, overview: cc-help
+Session names: fl-<name> (claude), fl-oc-<name> (opencode), fl-he-<name> (hermes),
+               fl-cu-<name> (cursor), fl-<sessionTag><name> for a --spec harness.
+               (Sessions started before the rename are called cc-… — fl-attach,
+               fl-kill and fl-help still list and address those.)
+View/select: fl-attach [-H harness], terminate: fl-kill, overview: fl-help
 
 Launch spec (--spec FILE) — one JSON object describing how to call the CLI:
   {
     "bin":         "myagent",        REQUIRED. Looked up with 'command -v'.
-    "sessionTag":  "my-",            tmux prefix: cc-<sessionTag><name>. Default "".
+    "sessionTag":  "my-",            tmux prefix: fl-<sessionTag><name>. Default "".
     "installHint": "npm i -g …",     printed when the binary is missing.
     "promptMode":  "argv",           argv | stdin | file  — how the prompt arrives.
     "args":        [ … ],            REQUIRED. Argument template, autonomous start.
@@ -112,8 +122,8 @@ Launch spec (--spec FILE) — one JSON object describing how to call the CLI:
   whether it is set. Placeholders inside a string: {model} {provider} {effort}
   {session_id} {settings} {mode} {workdir} {session} {prompt_file} {stderr_log}
   {home}. "{prompt}" must be a WHOLE argument, never part of one.
-  A non-empty "sessionTag" is noted in ~/.local/share/cc-hub/harness-tags
-  (override: CCHUB_HARNESS_TAGS) so cc-attach and cc-kill can name the coding
+  A non-empty "sessionTag" is noted in ~/.local/share/freilauf/harness-tags
+  (override: FREILAUF_HARNESS_TAGS) so fl-attach and fl-kill can name the coding
   agent behind such a session instead of calling it claude.
   promptMode: argv -> the {prompt} argument carries the text; stdin -> the prompt
   is fed in on standard input; file -> use {prompt_file}, the file survives the
@@ -133,9 +143,9 @@ Notes per harness:
             CAUTION: cursor also reads CLAUDE.md, .claude/skills and .claude/agents
             (verified by measurement) — a run therefore sees more than just the prompt.
             The TUI STAYS OPEN after the work is done, so the pane never dies.
-            cc-hub therefore puts a '.cursor/hooks.json' into the workspace whose
-            'stop' hook calls cc-report; started by hand there is no run to report
-            to and the session simply stays standing until cc-kill.
+            Freilauf therefore puts a '.cursor/hooks.json' into the workspace whose
+            'stop' hook calls fl-report; started by hand there is no run to report
+            to and the session simply stays standing until fl-kill.
 EOF
 }
 
@@ -200,14 +210,14 @@ while [[ $# -gt 0 ]]; do
         --id)             [[ $# -ge 2 ]] || { err "Error: $1 requires a short ID."; exit 2; }
                           ID_SUFFIX="$2"; shift 2 ;;
         --)               shift; POS+=("$@"); break ;;
-        -*)               err "Unknown option: $1  (cc-start --help)"; exit 2 ;;
+        -*)               err "Unknown option: $1  (fl-start --help)"; exit 2 ;;
         *)                POS+=("$1"); shift ;;
     esac
 done
 
 # --- Launch spec (--spec) --------------------------------------------------
 # Everything this script knows about claude/opencode/hermes/cursor is spelled
-# out in a 'case' per harness below. A coding agent that arrived as a cc-hub
+# out in a 'case' per harness below. A coding agent that arrived as a Freilauf
 # plugin has no case here and never will — so it brings its own description
 # instead, and the hub hands it over as a JSON file. Read once, up front, so the
 # allowlist right after this can tell "unknown harness" from "harness we were
@@ -237,7 +247,7 @@ case "$HARNESS" in
     *) if [[ -z "$SPEC_JSON" ]]; then
            err "Error: unknown harness '$HARNESS'. Built in: claude opencode hermes cursor"
            err "Any other coding agent is launched from its own declaration:"
-           err "  cc-start --spec <launch.json> -H $HARNESS ..."
+           err "  fl-start --spec <launch.json> -H $HARNESS ..."
            exit 2
        fi
        SPEC_MODE=1 ;;
@@ -286,17 +296,19 @@ if [[ -n "$SPEC_MODE" ]]; then
     esac
     jq -e 'has("interactiveArgs")' >/dev/null 2>&1 <<<"$SPEC_JSON" && SPEC_ARGS_KEY="interactiveArgs"
 
-    # Note the tag down for cc-attach and cc-kill. Those two read tmux, not the
+    # Note the tag down for fl-attach and fl-kill. Those two read tmux, not the
     # hub's database, so this start is the only moment on this machine where
-    # anybody knows that 'cc-fa-' means 'fakeagent' — without it an external
+    # anybody knows that 'fl-fa-' means 'fakeagent' — without it an external
     # coding agent's sessions would be listed as claude's, which is exactly the
     # bug cursor sat in for months. Append-once and fail-soft in every
     # direction: a session that starts is worth more than a tidy table.
-    if [[ -z "$DRY_RUN" && -n "$SPEC_TAG" && "$HARNESS" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
-        CC_TAGFILE="${CCHUB_HARNESS_TAGS:-${XDG_DATA_HOME:-$HOME/.local/share}/cc-hub/harness-tags}"
-        if ! grep -qxF "$HARNESS:$SPEC_TAG" "$CC_TAGFILE" 2>/dev/null; then
-            mkdir -p "$(dirname "$CC_TAGFILE")" 2>/dev/null || true
-            printf '%s:%s\n' "$HARNESS" "$SPEC_TAG" >> "$CC_TAGFILE" 2>/dev/null || true
+    if [[ -z "$DRY_RUN" && -n "$SPEC_TAG" && "$HARNESS" =~ ^[a-z0-9][a-z0-9-]*$ ]] \
+       && declare -F fl_data_dir >/dev/null 2>&1; then
+        FL_TAGFILE="$(fl_env HARNESS_TAGS)"
+        [[ -n "$FL_TAGFILE" ]] || FL_TAGFILE="$(fl_data_dir)/harness-tags"
+        if ! grep -qxF "$HARNESS:$SPEC_TAG" "$FL_TAGFILE" 2>/dev/null; then
+            mkdir -p "$(dirname "$FL_TAGFILE")" 2>/dev/null || true
+            printf '%s:%s\n' "$HARNESS" "$SPEC_TAG" >> "$FL_TAGFILE" 2>/dev/null || true
         fi
     fi
 
@@ -333,7 +345,7 @@ fi
 if [[ -n "$EFFORT" && "$HARNESS" == "opencode" ]]; then
     # Passing it through with no effect would be worse than an error: opencode only
     # knows --variant for 'opencode run', and here the TUI runs. The way there is
-    # agent.<default>.variant in OPENCODE_CONFIG_CONTENT — cc-hub sets that itself.
+    # agent.<default>.variant in OPENCODE_CONFIG_CONTENT — Freilauf sets that itself.
     err "Error: --effort does not exist for opencode (set via OPENCODE_CONFIG_CONTENT there)."
     exit 2
 fi
@@ -405,7 +417,7 @@ elif [[ "$MODE" != "dontAsk" && "$MODE" != "bypassPermissions" ]]; then
 fi
 
 # Positional arguments: [session-name] [working-directory]. If the name is already set
-# via --name (that is how cc-hub calls this), the directory moves up to position 1 —
+# via --name (that is how Freilauf calls this), the directory moves up to position 1 —
 # otherwise the agent would start in the CALLER's working directory instead of the worktree.
 if [[ -n "$NAME_ARG" ]]; then
     WORKDIR="${POS[0]:-$PWD}"
@@ -415,7 +427,7 @@ fi
 [[ -d "$WORKDIR" ]] || { err "Error: directory '$WORKDIR' does not exist."; exit 1; }
 WORKDIR="$(cd "$WORKDIR" && pwd)"
 
-# Build the session name: cc-<name> (claude), cc-oc-<name> (opencode), cc-he-<name> (hermes).
+# Build the session name: fl-<name> (claude), fl-oc-<name> (opencode), fl-he-<name> (hermes).
 HTAG=""
 case "$HARNESS" in
     opencode) HTAG="oc-" ;;
@@ -423,7 +435,7 @@ case "$HARNESS" in
     cursor)   HTAG="cu-" ;;
 esac
 # A --spec harness brings its own tag, so its sessions are as recognizable as
-# cc-oc-/cc-he-/cc-cu- are. An empty tag is legal: it then looks like claude's.
+# fl-oc-/fl-he-/fl-cu- are. An empty tag is legal: it then looks like claude's.
 [[ -n "$SPEC_MODE" ]] && HTAG="$SPEC_TAG"
 RAW_NAME="${NAME_ARG:-${POS[0]:-$(basename "$WORKDIR")}}"
 BASE_NAME="$PREFIX$HTAG$(printf '%s' "$RAW_NAME" | tr -c 'A-Za-z0-9_-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')"
@@ -445,7 +457,7 @@ done
 # opencode writes schema warnings from the MCP servers ("unknown format ... ignored")
 # to stderr — right into the TUI, which wrecks the display. stderr therefore goes to
 # a log file; real errors end up there and the TUI stays clean.
-OC_ERRLOG="$HOME/.local/share/opencode/log/cc-$SESSION-stderr.log"
+OC_ERRLOG="$HOME/.local/share/opencode/log/$SESSION-stderr.log"
 mkdir -p "$(dirname "$OC_ERRLOG")" 2>/dev/null || true
 
 # Where the prompt and the mini launcher are dropped for an autonomous start.
@@ -453,8 +465,8 @@ mkdir -p "$(dirname "$OC_ERRLOG")" 2>/dev/null || true
 # {prompt_file} placeholder has to resolve for '--dry-run' too — the values
 # depend on nothing but the session name and this process.
 TDIR="${TMPDIR:-/tmp}"
-PF="$TDIR/cc-prompt-$SESSION-$$.txt"
-LF="$TDIR/cc-launch-$SESSION-$$.sh"
+PF="$TDIR/fl-prompt-$SESSION-$$.txt"
+LF="$TDIR/fl-launch-$SESSION-$$.sh"
 
 # --- The --spec command line ------------------------------------------------
 # The same job the four cmd_interactive()/cmd_autonomous() cases do, only read
@@ -506,7 +518,7 @@ spec_cmd() {
         if [[ "$el" == '{prompt}' ]]; then
             # Only in an autonomous start does the launcher hold the text; an
             # interactive one simply drops the argument.
-            [[ -n "$AUTONOM" ]] && out+=' "$CC_PROMPT"'
+            [[ -n "$AUTONOM" ]] && out+=' "$FL_PROMPT"'
         else
             out+=" $(q "$el")"
         fi
@@ -570,9 +582,9 @@ cmd_autonomous() {
         [[ -n "$CLAUDE_SETTINGS" ]]   && claude_args+=" --settings $(q "$CLAUDE_SETTINGS")"
     }
     case "$HARNESS" in
-        claude)  printf '%s --permission-mode %s%s "$CC_PROMPT"' "$(q "$BIN")" "$(q "$MODE")" "$claude_args" ;;
-        opencode) printf '%s --auto%s --prompt "$CC_PROMPT" 2>>%s' "$(q "$BIN")" "$model_args" "$(q "$OC_ERRLOG")" ;;
-        hermes)  printf '%s chat -q "$CC_PROMPT" --yolo%s' "$(q "$BIN")" "$model_args" ;;
+        claude)  printf '%s --permission-mode %s%s "$FL_PROMPT"' "$(q "$BIN")" "$(q "$MODE")" "$claude_args" ;;
+        opencode) printf '%s --auto%s --prompt "$FL_PROMPT" 2>>%s' "$(q "$BIN")" "$model_args" "$(q "$OC_ERRLOG")" ;;
+        hermes)  printf '%s chat -q "$FL_PROMPT" --yolo%s' "$(q "$BIN")" "$model_args" ;;
         # cursor: the prompt is a POSITIONAL argument, not -p. '-p/--print' would be
         # wrong here -- it prints and exits, the session would be gone immediately.
         # This way the TUI works through the task and then stays open (like opencode),
@@ -581,7 +593,7 @@ cmd_autonomous() {
         # "Do you trust the contents of this directory?" (verified by measurement).
         cursor)  printf '%s --force --trust' "$(q "$BIN")"
                  [[ -n "$MODEL" ]] && printf ' --model %s' "$(q "$MODEL")"
-                 printf ' -- "$CC_PROMPT"'
+                 printf ' -- "$FL_PROMPT"'
                  : ;;
     esac
 }
@@ -650,13 +662,13 @@ trust_workdir() {
          '.projects = ((.projects // {}) | .[$d] = ((.[$d] // {}) + {hasTrustDialogAccepted: true}))' \
          "$cfg" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
         chmod --reference="$cfg" "$tmp" 2>/dev/null || chmod 600 "$tmp"
-        cp -p "$cfg" "$cfg.bak-cc-start" 2>/dev/null || true
+        cp -p "$cfg" "$cfg.bak-fl-start" 2>/dev/null || true
         mv "$tmp" "$cfg"
         echo "Trust dialog pre-confirmed for $dir (~/.claude.json)."
     else
         rm -f "$tmp"
         err "Warning: could not set the trust flag. The session may stay stuck on the"
-        err "'Do you trust this folder?' question — run 'cc-attach' once and press Enter."
+        err "'Do you trust this folder?' question — run 'fl-attach' once and press Enter."
     fi
 }
 
@@ -719,7 +731,7 @@ if [[ -n "$DRY_RUN" ]]; then
     else
         echo "Mode:           auto-approve (--auto or --yolo)"
     fi
-    echo "Command:        $(if [[ -n "$AUTONOM" ]]; then cmd_autonomous | sed 's/\$CC_PROMPT/<prompt>/'; else cmd_interactive; fi)"
+    echo "Command:        $(if [[ -n "$AUTONOM" ]]; then cmd_autonomous | sed 's/\$FL_PROMPT/<prompt>/'; else cmd_interactive; fi)"
     [[ -n "$AUTONOM" ]] && { echo "--- Prompt ---"; printf '%s\n' "$PROMPT"; }
     echo "--- Quota (claude only) ---"
     quota_hinweis
@@ -761,7 +773,10 @@ else
     # themselves at startup, right after being read (TDIR/PF/LF are set further
     # up, where the spec's {prompt_file} can already resolve).
     # Clean up leftovers of aborted starts (older than one day), fail-safe.
-    find "$TDIR" -maxdepth 1 \( -name 'cc-prompt-*.txt' -o -name 'cc-launch-*.sh' \) \
+    # Both spellings: a start aborted before the rename left cc-prompt-*/cc-launch-*
+    # behind, and nothing else on this machine would ever collect those.
+    find "$TDIR" -maxdepth 1 \( -name 'fl-prompt-*.txt' -o -name 'fl-launch-*.sh' \
+                                -o -name 'cc-prompt-*.txt' -o -name 'cc-launch-*.sh' \) \
         -mtime +1 -delete 2>/dev/null || true
 
     printf '%s' "$PROMPT" > "$PF"
@@ -769,7 +784,10 @@ else
     {
         printf '#!/usr/bin/env bash\n'
         printf 'cd %s\n' "$(q "$WORKDIR")"
-        printf 'CC_PROMPT="$(cat %s)"\n' "$(q "$PF")"
+        printf 'FL_PROMPT="$(cat %s)"\n' "$(q "$PF")"
+        # The old name, for one transition release: a launch spec or a wrapper
+        # written before the rename may still reach for $CC_PROMPT.
+        printf 'CC_PROMPT="$FL_PROMPT"\n'
         if [[ -n "$SPEC_MODE" && "$SPEC_PROMPT_MODE" == "file" ]]; then
             # promptMode 'file': the CLI reads the prompt from that very path, so
             # only the launcher may delete itself. The sweep above collects the
@@ -784,7 +802,7 @@ else
             # A here-string, not a pipe: the redirection is set up before exec, so
             # the CLI still becomes the pane's own process and pane-died keeps
             # meaning what it means everywhere else.
-            printf 'exec %s <<< "$CC_PROMPT"\n' "$(cmd_autonomous)"
+            printf 'exec %s <<< "$FL_PROMPT"\n' "$(cmd_autonomous)"
         else
             printf 'exec %s\n' "$(cmd_autonomous)"
         fi
@@ -798,10 +816,10 @@ else
     fi
 fi
 
-# cc-hub integration: start the full transcript IMMEDIATELY after new-session (otherwise
+# Freilauf integration: start the full transcript IMMEDIATELY after new-session (otherwise
 # the beginning is missing), keep the session open after process end + report pane-died
 # (Planung 7.2). An error HERE would be especially treacherous: the session is already
-# running, but 'set -e' would abort cc-start — the caller would see a failed start while
+# running, but 'set -e' would abort fl-start — the caller would see a failed start while
 # the session kept running orphaned. So clean up instead of leaving orphans behind.
 tmux_or_die() {
     if ! tmux "$@" 2>&1; then
@@ -822,7 +840,7 @@ fi
 if [[ -n "$KEEP" ]]; then
     tmux_or_die set-option -t "=$SESSION:" -q remain-on-exit on
     # set-hook likewise needs a target with ':' — "=name" alone: "no such window".
-    tmux_or_die set-hook -t "=$SESSION:" pane-died 'run-shell "cc-report _pane_died #{pane_dead_status}"'
+    tmux_or_die set-hook -t "=$SESSION:" pane-died 'run-shell "fl-report _pane_died #{pane_dead_status}"'
 fi
 
 tmux set-option -t "=$SESSION:" -q history-limit 50000
@@ -834,7 +852,7 @@ tmux set-window-option -t "=$SESSION:" -q aggressive-resize on
 sleep 1
 if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     err "Error: session ended immediately — the start command is dying."
-    err "Test directly: $(if [[ -n "$AUTONOM" ]]; then cmd_autonomous | sed 's/\$CC_PROMPT/<prompt>/'; else cmd_interactive; fi)"
+    err "Test directly: $(if [[ -n "$AUTONOM" ]]; then cmd_autonomous | sed 's/\$FL_PROMPT/<prompt>/'; else cmd_interactive; fi)"
     [[ -n "$AUTONOM" ]] && rm -f "$PF" "$LF" 2>/dev/null
     exit 1
 fi
@@ -842,8 +860,8 @@ fi
 echo "Session '$SESSION' started in $WORKDIR (harness: $HARNESS)"
 
 if [[ -n "$AUTONOM" && -z "$ATTACH" ]]; then
-    echo "Running autonomously in the background. Watch:  cc-attach $SESSION"
-    echo "Terminate:                                      cc-kill $SESSION"
+    echo "Running autonomously in the background. Watch:  fl-attach $SESSION"
+    echo "Terminate:                                      fl-kill $SESSION"
     exit 0
 fi
 

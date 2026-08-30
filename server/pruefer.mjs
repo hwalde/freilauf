@@ -1,4 +1,4 @@
-// cc-hub — check LLM (optional): second opinion on the detector's log hits.
+// Freilauf — check LLM (optional): second opinion on the detector's log hits.
 //
 // The scanner finds lines that look like a rate limit or provider error. But it
 // cannot know whether the agent carries on afterwards or whether it was just a menu

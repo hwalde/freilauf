@@ -1,4 +1,4 @@
-// cc-hub flows — HTTP: pages (/flows, /flows/edit, /flows/runs, /flows/runs/<id>)
+// Freilauf flows — HTTP: pages (/flows, /flows/edit, /flows/runs, /flows/runs/<id>)
 // and JSON API (/api/flows/*, /api/flow-runs/*). Mounted by ../web.mjs; the
 // page chrome comes from ../pages.mjs (layout), everything else is local.
 import db, {
@@ -152,7 +152,7 @@ async function pageEditor(req, res, url) {
       <button>${e(t('flows.run_now'))}</button></form>` : ''}
   </div>
   <div id="flow-designer"></div>
-  <script>window.CCHUB_FLOWS=${JSON.stringify({ i18n: clientCatalog('flows.'), meta: editorMeta(), flow: data }).replace(/</g, '\\u003c')}</script>
+  <script>window.FREILAUF_FLOWS=${JSON.stringify({ i18n: clientCatalog('flows.'), meta: editorMeta(), flow: data }).replace(/</g, '\\u003c')}</script>
   <script src="/static/swd.js"></script><script src="/static/flows.js" type="module"></script>`
   html(res, 200, await layout(req, data.name || t('flows.new'), '/flows', body))
 }

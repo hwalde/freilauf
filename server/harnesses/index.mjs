@@ -1,4 +1,4 @@
-// cc-hub — coding agent (harness) plugin registry.
+// Freilauf — coding agent (harness) plugin registry.
 //
 // A "coding agent" is a CLI harness the hub can drive inside a tmux session
 // (Claude Code, opencode, hermes, cursor-agent). Each built-in one is a file in

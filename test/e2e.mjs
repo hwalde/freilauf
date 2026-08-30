@@ -1,18 +1,18 @@
 #!/usr/bin/env node
-// cc-hub — end-to-end tests against a REAL hub process in a sandbox.
+// Freilauf — end-to-end tests against a REAL hub process in a sandbox.
 //
 // Why a dedicated hub instead of testing against the running one: the suite must be
 // safe to run at any time alongside live operation. It therefore starts a second hub
 // on a free port with its own database, its own runs/worktrees directories and its own
 // test repo. The production hub, its database, ~/agents and its tmux sessions are
 // never touched. Only sessions this suite created itself are cleaned up (their names
-// are recorded) — never by pattern-matching across all cc-*.
+// are recorded) — never by pattern-matching across all fl-*.
 //
 // Usage:
 //   node test/e2e.mjs           stub instead of real agents: fast, no cost
 //   node test/e2e.mjs --echt    additionally ONE real run per harness (claude,
 //                               opencode, hermes) through the real
-//                               ~/.local/bin/cc-start (consumes quota!)
+//                               ~/.local/bin/fl-start (consumes quota!)
 //   node test/e2e.mjs --keep    keep the sandbox after the run (debugging)
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -29,9 +29,9 @@ const ECHT = process.argv.includes('--echt')
 // Capture the provider key NOW: the stub part deletes it from the environment in a
 // moment, but the real-run part still needs it.
 const ECHT_KEYS = { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY }
-const ECHT_MODELL = process.env.CCHUB_TEST_MODELL ?? 'deepseek/deepseek-v4-flash-0731'
+const ECHT_MODELL = process.env.FREILAUF_TEST_MODELL ?? 'deepseek/deepseek-v4-flash-0731'
 // Zen: one of the free models — runs without a key.
-const ZEN_MODELL = process.env.CCHUB_TEST_ZEN_MODELL ?? 'nemotron-3.5-lightning-free'
+const ZEN_MODELL = process.env.FREILAUF_TEST_ZEN_MODELL ?? 'nemotron-3.5-lightning-free'
 const BEHALTEN = process.argv.includes('--keep')
 const start = Date.now()
 
@@ -39,7 +39,7 @@ const start = Date.now()
 // Both come from test/sandkasten.mjs: the browser suite runs against exactly the
 // same sandbox, and one copy of that construction is enough. The names below stay
 // what the tests in this file have always used.
-const sk = neuerSandkasten({ praefix: 'cc-hub-e2e-', behalten: BEHALTEN })
+const sk = neuerSandkasten({ praefix: 'Freilauf-e2e-', behalten: BEHALTEN })
 const { SB, REPO, ORIGIN, FEHLSTART, sessions, hol, formular } = sk
 let db = null
 let PORT = 0
@@ -63,10 +63,10 @@ let watcherTick = null
 async function watcherVorbereiten() { watcherTick = await sk.watcherVorbereiten() }
 
 // ---------------------------------------------------------------- Database
-// The cc-report of THIS checkout — the one this suite is testing. The copy in
+// The fl-report of THIS checkout — the one this suite is testing. The copy in
 // ~/.local/bin can lag behind (it is installed by the deploy), and the
 // session-id forwarding under test exists only in this file's version.
-const CC_REPORT_REPO = fileURLToPath(new URL('../bin/cc-report', import.meta.url))
+const FL_REPORT_REPO = fileURLToPath(new URL('../bin/fl-report', import.meta.url))
 
 const lauf = (id) => db.prepare('SELECT * FROM runs WHERE id=?').get(id)
 const ereignisse = (id) => db.prepare('SELECT kind FROM events WHERE run_id=? ORDER BY id').all(id).map(e => e.kind)
@@ -510,7 +510,7 @@ try {
   await pruefe('prompt.md contains the task and the platform suffix', () => {
     const p = readFileSync(join(SB, 'runs', R1, 'prompt.md'), 'utf8')
     enthaelt(p, 'E2E-Auftrag', 'own task')
-    enthaelt(p, 'cc-report done', 'platform rules')
+    enthaelt(p, 'fl-report done', 'platform rules')
     enthaelt(p, R1, 'run ID')
   })
   await pruefe('a per-repo prompt is added to every run', async () => {
@@ -531,7 +531,7 @@ try {
     wahr(!!s, 'session in the database')
     wahr((await sh('tmux', ['has-session', '-t', `=${s}`])).ok, `session ${s} is alive`)
   })
-  await pruefe('log file is created (cc-start --log → pipe-pane)', () => {
+  await pruefe('log file is created (fl-start --log → pipe-pane)', () => {
     // The CONTENT is checked only after the first send: pipe-pane attaches only
     // after startup, so the initial output can escape it.
     wahr(existsSync(join(SB, 'runs', R1, 'log.txt')), 'log.txt created')
@@ -587,10 +587,14 @@ try {
   })
 
   // ------------------------------------------------------------------
-  gruppe('Sending text and reports (cc-report)')
+  gruppe('Sending text and reports (fl-report)')
 
-  const ccReport = (runId, args) => sh(join(homedir(), '.local', 'bin', 'cc-report'), args, {
-    env: { ...process.env, CC_RUN_ID: runId, CC_HUB_URL: BASIS },
+  // The fl-report of THIS checkout, like FL_REPORT_REPO above and for the same
+  // reason: ~/.local/bin holds whatever the last deploy installed, and a suite
+  // that asks the machine what it has installed is a suite that is green or red
+  // depending on the machine.
+  const flReport = (runId, args) => sh(FL_REPORT_REPO, args, {
+    env: { ...process.env, FL_RUN_ID: runId, FL_HUB_URL: BASIS },
   })
 
   await pruefe('sending via the API lands in the tmux session', async () => {
@@ -611,16 +615,16 @@ try {
     gleich(r.headers.get('location'), `/runs/${R1}`, 'target')
   })
   await pruefe('progress, branch and PR are taken over', async () => {
-    wahr((await ccReport(R1, ['progress', 'laeuft weiter'])).ok, 'progress')
-    wahr((await ccReport(R1, ['branch', 'agent/e2e/gemeldet'])).ok, 'branch')
-    wahr((await ccReport(R1, ['pr', 'https://example.invalid/pr/1'])).ok, 'pr')
+    wahr((await flReport(R1, ['progress', 'laeuft weiter'])).ok, 'progress')
+    wahr((await flReport(R1, ['branch', 'agent/e2e/gemeldet'])).ok, 'branch')
+    wahr((await flReport(R1, ['pr', 'https://example.invalid/pr/1'])).ok, 'pr')
     const l = lauf(R1)
     gleich(l.branch_reported, 'agent/e2e/gemeldet', 'branch')
     gleich(l.pr_url, 'https://example.invalid/pr/1', 'PR')
     wahr(ereignisse(R1).includes('progress'), 'event progress')
   })
   await pruefe('a call for help sets the run to waiting_help', async () => {
-    wahr((await ccReport(R1, ['help', 'Variante A oder B?'])).ok, 'help')
+    wahr((await flReport(R1, ['help', 'Variante A oder B?'])).ok, 'help')
     const l = lauf(R1)
     gleich(l.status, 'waiting_help', 'status')
     enthaelt(l.help_text, 'Variante A', 'question stored')
@@ -634,7 +638,7 @@ try {
   await pruefe('final report lands in the run and on the page', async () => {
     const datei = join(SB, 'report.md')
     writeFileSync(datei, '# Bericht\n- alles erledigt\n')
-    wahr((await ccReport(R1, ['done', '--file', datei])).ok, 'done')
+    wahr((await flReport(R1, ['done', '--file', datei])).ok, 'done')
     const l = lauf(R1)
     gleich(l.status, 'done', 'status')
     enthaelt(l.report_md, 'alles erledigt', 'report stored')
@@ -651,11 +655,11 @@ try {
   })
 
   // ------------------------------------------------------------------
-  gruppe('cursor: a run ends even without cc-report')
+  gruppe('cursor: a run ends even without fl-report')
 
   // The hole this closes: cursor's TUI stays standing after the work is done
   // ('→ Add a follow-up'), so the pane never dies and no process ever exits. A
-  // run whose agent forgot `cc-report done` therefore stood on 'running'
+  // run whose agent forgot `fl-report done` therefore stood on 'running'
   // forever — and a single run waiting for "when the repo is free" waited behind
   // it just as long (observed 2026-08-25 with four runs, one of them the one
   // meant to fix exactly this).
@@ -681,18 +685,18 @@ try {
     RCU = await cursorRun('E2E-cursor-turn-end')
     const f = join(lauf(RCU).workdir_effective, '.cursor', 'hooks.json')
     const j = JSON.parse(readFileSync(f, 'utf8'))
-    enthaelt(j.hooks.stop[0].command, 'cc-report _turn_end', 'stop reports the turn end')
-    enthaelt(j.hooks.sessionEnd[0].command, 'cc-report _exit', 'sessionEnd is the second net')
+    enthaelt(j.hooks.stop[0].command, 'fl-report _turn_end', 'stop reports the turn end')
+    enthaelt(j.hooks.sessionEnd[0].command, 'fl-report _exit', 'sessionEnd is the second net')
   })
   await pruefe('the prompt tells cursor how the run ends, with a copy-ready command', async () => {
     const p = readFileSync(join(SB, 'runs', RCU, 'prompt.md'), 'utf8')
-    enthaelt(p, `cc-report done --file ${join(SB, 'runs', RCU, 'report.md')}`, 'exact command, exact path')
+    enthaelt(p, `fl-report done --file ${join(SB, 'runs', RCU, 'report.md')}`, 'exact command, exact path')
     enthaelt(p, 'cursor-agent', 'the harness gets its own rules')
     falsch(p.includes('{report_file}'), 'no placeholder left over')
   })
   await pruefe('the stop hook closes the run and keeps the agent\'s own words', async () => {
     writeTranscript(RCU, TURN_END)
-    wahr((await ccReport(RCU, ['_turn_end'])).ok, '_turn_end accepted')
+    wahr((await flReport(RCU, ['_turn_end'])).ok, '_turn_end accepted')
     const l = lauf(RCU)
     gleich(l.status, 'done', 'status')
     enthaelt(l.report_md, AGENT_TEXT, 'the closing message becomes the report')
@@ -701,12 +705,12 @@ try {
   })
   await pruefe('a turn end while waiting for help does NOT close the run', async () => {
     const id = await cursorRun('E2E-cursor-help')
-    wahr((await ccReport(id, ['help', 'A or B?'])).ok, 'help')
+    wahr((await flReport(id, ['help', 'A or B?'])).ok, 'help')
     gleich(lauf(id).status, 'waiting_help', 'waiting')
     // Ending the turn is exactly right here: the agent asked and is idle until a
     // human answers. Closing the run on it would throw the question away.
     writeTranscript(id, TURN_END)
-    await ccReport(id, ['_turn_end'])
+    await flReport(id, ['_turn_end'])
     await watcherTick()
     gleich(lauf(id).status, 'waiting_help', 'still waiting')
   })
@@ -736,8 +740,8 @@ try {
     const id = await cursorRun('E2E-cursor-doppelmeldung')
     writeTranscript(id, TURN_END)
     await watcherTick()                  // transcript channel closes it
-    await ccReport(id, ['_turn_end'])    // stop hook, on the same finished turn
-    await ccReport(id, ['_exit'])        // sessionEnd's net on top
+    await flReport(id, ['_turn_end'])    // stop hook, on the same finished turn
+    await flReport(id, ['_exit'])        // sessionEnd's net on top
     await watcherTick()
     gleich(lauf(id).status, 'done', 'done')
     const kinds = ereignisse(id)
@@ -751,7 +755,7 @@ try {
     // end stays what it always was — a note.
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-claude-turn-end', expected_minutes: '45' })
     await sessionMerken(j.runId)
-    wahr((await ccReport(j.runId, ['_turn_end'])).ok, '_turn_end accepted')
+    wahr((await flReport(j.runId, ['_turn_end'])).ok, '_turn_end accepted')
     gleich(lauf(j.runId).status, 'running', 'keeps running')
   })
 
@@ -772,7 +776,7 @@ try {
     wahr(k.includes('anomaly:soft_overrun'), 'anomaly:soft_overrun')
   })
   await pruefe('a progress report clears the anomalies again', async () => {
-    wahr((await ccReport(R3, ['progress', 'melde mich, dauert laenger'])).ok, 'progress')
+    wahr((await flReport(R3, ['progress', 'melde mich, dauert laenger'])).ok, 'progress')
     const k = ereignisse(R3)
     falsch(k.includes('anomaly:overrun'), 'anomaly:overrun is gone')
     wahr(k.includes('cleared:anomaly:overrun'), 'marked as resolved')
@@ -1247,14 +1251,14 @@ try {
     gleich(v[0].quelle, 'transcript', 'source')
     gleich(v[0].erst_gesehen, '2026-08-11 08:05:00', 'timestamp from the transcript, not "now"')
   })
-  await pruefe('hook report (cc-report _api_error via stdin) → RED; rate limit counter increments', async () => {
+  await pruefe('hook report (fl-report _api_error via stdin) → RED; rate limit counter increments', async () => {
     const hookJson = JSON.stringify({ hook_event_name: 'StopFailure', error: 'rate_limit', last_assistant_message: "You've hit your session limit · resets 8:36pm" })
     const r = await new Promise((resolve) => {
-      const p = execFile(join(homedir(), '.local', 'bin', 'cc-report'), ['_api_error'],
-        { env: { ...process.env, CC_RUN_ID: RC, CC_HUB_URL: BASIS } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
+      const p = execFile(FL_REPORT_REPO, ['_api_error'],
+        { env: { ...process.env, FL_RUN_ID: RC, FL_HUB_URL: BASIS } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
       p.stdin.end(hookJson)
     })
-    wahr(r.ok, `cc-report ok (${r.stderr})`)
+    wahr(r.ok, `fl-report ok (${r.stderr})`)
     const v = vorfaelle(RC).find(x => x.typ === 'rate_limit')
     wahr(!!v, 'incident rate_limit')
     gleich(v.schwere, 'rot', 'red')
@@ -1264,17 +1268,17 @@ try {
   })
   await pruefe('a hook report from a FOREIGN claude session (a process the agent spawned) is ignored', async () => {
     // The false alarm of 2026-08-30: an agent testing a fake model id spawned its
-    // own claude; the child inherited the worktree's hooks AND CC_RUN_ID, and its
+    // own claude; the child inherited the worktree's hooks AND FL_RUN_ID, and its
     // StopFailure opened a red "Model unavailable" on the healthy parent run.
     const hookJson = JSON.stringify({ hook_event_name: 'StopFailure', error: 'model_not_found',
       session_id: '11111111-2222-4333-8444-555555555555',
       last_assistant_message: 'Model not found: nosuch/model-xyz.' })
     const r = await new Promise((resolve) => {
-      const p = execFile(CC_REPORT_REPO, ['_api_error'],
-        { env: { ...process.env, CC_RUN_ID: RC, CC_HUB_URL: BASIS } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
+      const p = execFile(FL_REPORT_REPO, ['_api_error'],
+        { env: { ...process.env, FL_RUN_ID: RC, FL_HUB_URL: BASIS } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
       p.stdin.end(hookJson)
     })
-    wahr(r.ok, `cc-report ok (${r.stderr})`)
+    wahr(r.ok, `fl-report ok (${r.stderr})`)
     falsch(vorfaelle(RC).some(v => v.typ === 'model_error'), 'no model_error incident on the run')
     // The decision is traceable in the detector's protocol — it says WHY.
     const proto = readFileSync(join(SB, 'runs', RC, 'detektor.jsonl'), 'utf8').split('\n').filter(Boolean)
@@ -1284,11 +1288,11 @@ try {
     const eigen = JSON.stringify({ hook_event_name: 'StopFailure', error: 'model_not_found', session_id: RC,
       last_assistant_message: 'Model not found: really/missing-model.' })
     const r2 = await new Promise((resolve) => {
-      const p = execFile(CC_REPORT_REPO, ['_api_error'],
-        { env: { ...process.env, CC_RUN_ID: RC, CC_HUB_URL: BASIS } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
+      const p = execFile(FL_REPORT_REPO, ['_api_error'],
+        { env: { ...process.env, FL_RUN_ID: RC, FL_HUB_URL: BASIS } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
       p.stdin.end(eigen)
     })
-    wahr(r2.ok, `cc-report ok (${r2.stderr})`)
+    wahr(r2.ok, `fl-report ok (${r2.stderr})`)
     const v = vorfaelle(RC).find(x => x.typ === 'model_error')
     wahr(!!v, 'the run\'s own session still opens the incident')
     enthaelt(v.beleg, 'really/missing-model', 'with the evidence')
@@ -1381,9 +1385,9 @@ try {
     const http = await import('node:http')
     const hs = http.createServer((req, res) => { res.writeHead(antwort).end('{}') })
     await new Promise(r => hs.listen(0, '127.0.0.1', r))
-    process.env.CCHUB_PULS_AUS = '0'
-    process.env.CCHUB_PULS_TAKT_MS = '0'
-    process.env.CCHUB_PULS_URL_TEST = `http://127.0.0.1:${hs.address().port}/`
+    process.env.FREILAUF_PULS_AUS = '0'
+    process.env.FREILAUF_PULS_TAKT_MS = '0'
+    process.env.FREILAUF_PULS_URL_TEST = `http://127.0.0.1:${hs.address().port}/`
     try {
       await watcherTick()
       gleich(db.prepare(`SELECT count(*) c FROM incidents WHERE run_id IS NULL`).get().c, 0, 'one failure is not enough')
@@ -1397,9 +1401,9 @@ try {
       gleich(db.prepare(`SELECT count(*) c FROM incidents WHERE run_id IS NULL AND geloest_am IS NULL`).get().c, 0, 'recovered → closed')
       enthaelt(db.prepare(`SELECT geloest_von FROM incidents WHERE run_id IS NULL LIMIT 1`).get().geloest_von, 'erholt', 'reason')
     } finally {
-      process.env.CCHUB_PULS_AUS = '1'
-      delete process.env.CCHUB_PULS_URL_TEST
-      delete process.env.CCHUB_PULS_TAKT_MS
+      process.env.FREILAUF_PULS_AUS = '1'
+      delete process.env.FREILAUF_PULS_URL_TEST
+      delete process.env.FREILAUF_PULS_TAKT_MS
       hs.close()
     }
   })
@@ -1427,7 +1431,7 @@ try {
 
   // Simulation with REAL Claude Code: a mini server answers 429 with the
   // subscription-limit headers, Claude aborts, the StopFailure hook reports via
-  // cc-report to this sandbox hub. No quota consumed, no network — but the full path.
+  // fl-report to this sandbox hub. No quota consumed, no network — but the full path.
   if (vorhanden('claude')) {
     await pruefe('REAL: Claude Code + simulated 429 → StopFailure hook → incident rate_limit', async () => {
       const http = await import('node:http')
@@ -1458,7 +1462,11 @@ try {
         const r = await new Promise((resolve) => execFile('claude',
           ['-p', 'sag hallo', '--model', 'sonnet', '--settings', settingsDatei, '--session-id', j.runId],
           { cwd: arbeitsdir, timeout: 120_000, env: { ...process.env, ANTHROPIC_BASE_URL: `http://127.0.0.1:${mock.address().port}`,
-            CC_RUN_ID: j.runId, CC_HUB_URL: BASIS, PATH: `${join(homedir(), '.local', 'bin')}:${process.env.PATH}` } },
+            FL_RUN_ID: j.runId, FL_HUB_URL: BASIS,
+            // The hooks call `fl-report` by name and find it on PATH. In production
+            // that is ~/.local/bin, filled by the deploy before it restarts the hub;
+            // here it is this checkout, because that is what the suite tests.
+            PATH: `${join(PROJEKT, 'bin')}:${join(homedir(), '.local', 'bin')}:${process.env.PATH}` } },
           (err, stdout, stderr) => resolve({ err, stdout: String(stdout), stderr: String(stderr) })))
         enthaelt(r.stdout + r.stderr, 'limit', `Claude reports the limit (${(r.stdout + r.stderr).slice(-200)})`)
         await warteAuf(() => vorfaelle(j.runId).some(v => v.typ === 'rate_limit'), { was: 'incident via the hook', timeoutMs: 15_000 })
@@ -1568,8 +1576,8 @@ try {
       db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(RN)
       const html = await (await hol(`/runs/${RN}`)).text()
       enthaelt(html, 'data-live="1"', 'the terminal is offered with write access')
-      enthaelt(html, `cchubSend(this,'/api/runs/${RN}/send')`, 'and the send form is there')
-      falsch(html.includes(`cchubKill('${RN}')`), 'but no "end run" — that run is over')
+      enthaelt(html, `freilaufSend(this,'/api/runs/${RN}/send')`, 'and the send form is there')
+      falsch(html.includes(`freilaufKill('${RN}')`), 'but no "end run" — that run is over')
       enthaelt(html, 'name="session"', 'instead: end the session it left standing')
     })
 
@@ -1679,7 +1687,7 @@ try {
   })
 
   await pruefe('a run created just now is NOT swept up by this', async () => {
-    // Counter-check: while cc-start is still working, a run rightly has no session.
+    // Counter-check: while fl-start is still working, a run rightly has no session.
     const id = 'bbbbbbbb-1111-4222-8333-444444444444'
     db.prepare(`INSERT INTO runs(id,repo_id,status,harness,prompt,branch_mode,expected_minutes,started_at)
                 VALUES(?,?,'running','claude','x','keiner',45, datetime('now'))`).run(id, repoId)
@@ -1696,7 +1704,7 @@ try {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Fehlstart', branch_mode: 'neu', branch_pattern: 'agent/e2e-fehl/{kurz}' })
     R2 = j.runId
     gleich(lauf(R2).status, 'failed', 'status')
-    enthaelt(lauf(R2).report_md, 'cc-start', 'reason named')
+    enthaelt(lauf(R2).report_md, 'fl-start', 'reason named')
   })
   await pruefe('retry uses the same worktree and starts up', async () => {
     const vorher = lauf(R2).workdir_effective
@@ -2403,7 +2411,7 @@ try {
     // Markup, unavoidably: the designer is a client application and these two are
     // the seam it hangs on — the catalog it boots from and the module that boots
     // it. Everything else about the page is checked through the API below.
-    enthaelt(html, 'window.CCHUB_FLOWS', 'the editor state is injected')
+    enthaelt(html, 'window.FREILAUF_FLOWS', 'the editor state is injected')
     enthaelt(html, '/static/flows.js', 'the designer module is pulled in')
     enthaelt(html, 'Save', 'and the button that saves what was drawn')
   })
@@ -2557,7 +2565,7 @@ try {
   })
   await pruefe('the editor really arrives with that trigger and repo already set', async () => {
     const html = await (await hol(`/flows/edit?trigger=run_merged&repo=${repoId}`)).text()
-    const m = html.match(/window\.CCHUB_FLOWS=(\{.*?\})<\/script>/s)
+    const m = html.match(/window\.FREILAUF_FLOWS=(\{.*?\})<\/script>/s)
     wahr(!!m, 'the editor state is injected')
     const flow = JSON.parse(m[1]).flow
     gleich(flow.trigger.kind, 'run_merged', 'the trigger the button asked for')
@@ -2871,22 +2879,22 @@ try {
   })
 
   // ------------------------------------------------------------------
-  // The repo chosen in the header travels as the cchub_repo cookie, so a page
+  // The repo chosen in the header travels as the freilauf_repo cookie, so a page
   // that carries no ?repo= of its own (a menu click, a context-less page) keeps
   // the choice instead of falling back to the first repo. The cookie is written
   // twice: by the client when the switcher changes, and by the server whenever a
   // page request names a repo — both must agree, so the "back" links and the
   // sidebar counts persist the choice exactly like the select does.
-  gruppe('The repo choice sticks (cchub_repo cookie)')
+  gruppe('The repo choice sticks (freilauf_repo cookie)')
 
-  await pruefe('a page request that names a repo answers with the cchub_repo cookie', async () => {
+  await pruefe('a page request that names a repo answers with the freilauf_repo cookie', async () => {
     const r = await hol(`/?repo=${repoId}`)
     gleich(r.status, 200, 'status')
-    enthaelt(r.headers.get('set-cookie') ?? '', `cchub_repo=${repoId}`, 'the cookie is set')
+    enthaelt(r.headers.get('set-cookie') ?? '', `freilauf_repo=${repoId}`, 'the cookie is set')
     // A page that names no repo stays silent — the switcher itself is the only
     // place that may remember a choice, not every stray link.
     const ohne = await hol('/settings')
-    falsch((ohne.headers.get('set-cookie') ?? '').includes('cchub_repo='), 'no repo named, no cookie written')
+    falsch((ohne.headers.get('set-cookie') ?? '').includes('freilauf_repo='), 'no repo named, no cookie written')
   })
   await pruefe('without ?repo= the persisted choice wins over the first repo', async () => {
     const zwei = await formular('/repos/edit', {
@@ -2896,21 +2904,21 @@ try {
     const zweiId = db.prepare(`SELECT id FROM repos WHERE name='e2e-zwei'`).get().id
     // The first repo by name is 'e2e' — without the cookie the overview would
     // show it. With the cookie it must show the persisted one instead.
-    const overview = await (await hol('/', { headers: { cookie: `cchub_repo=${zweiId}` } })).text()
+    const overview = await (await hol('/', { headers: { cookie: `freilauf_repo=${zweiId}` } })).text()
     enthaelt(overview, `id="repo-switch"`, 'header has the switcher')
     const kopf = overview.slice(overview.indexOf('<header'), overview.indexOf('</header>'))
     enthaelt(kopf, `option value="${zweiId}" selected`, 'the persisted repo is selected in the header')
     enthaelt(overview, `<body data-repo="${zweiId}"`, 'and the page context is that repo')
     // A context page (agents) honors it too — its "create" button belongs to it.
-    const agents = await (await hol('/agents', { headers: { cookie: `cchub_repo=${zweiId}` } })).text()
+    const agents = await (await hol('/agents', { headers: { cookie: `freilauf_repo=${zweiId}` } })).text()
     enthaelt(agents, `/agents/edit?repo=${zweiId}`, 'the agents page belongs to the persisted repo')
     // And a context-less page (settings) keeps it in the header.
-    const settings = await (await hol('/settings', { headers: { cookie: `cchub_repo=${zweiId}` } })).text()
+    const settings = await (await hol('/settings', { headers: { cookie: `freilauf_repo=${zweiId}` } })).text()
     const kopf2 = settings.slice(settings.indexOf('<header'), settings.indexOf('</header>'))
     enthaelt(kopf2, `option value="${zweiId}" selected`, 'settings keeps the persisted repo in the header')
   })
   await pruefe('an invalid cookie (deleted repo) falls back instead of an empty page', async () => {
-    const html = await (await hol('/', { headers: { cookie: 'cchub_repo=999999' } })).text()
+    const html = await (await hol('/', { headers: { cookie: 'freilauf_repo=999999' } })).text()
     enthaelt(html, 'id="repo-switch"', 'page renders')
     falsch(html.includes('data-repo="999999"'), 'not the deleted id')
   })
@@ -2931,7 +2939,7 @@ try {
     // filter, and the events of THIS run must keep arriving.
     enthaelt(html, `<body data-repo="${repoId}"`, 'the run is still the run')
     enthaelt(html, `data-repo="${zweiId}"`, 'the sidebar counts the chosen repo')
-    enthaelt(r.headers.get('set-cookie') ?? '', `cchub_repo=${zweiId}`, 'and the choice is persisted')
+    enthaelt(r.headers.get('set-cookie') ?? '', `freilauf_repo=${zweiId}`, 'and the choice is persisted')
     // Without the parameter nothing changes: the page's own repo answers.
     const ohne = await (await hol(`/runs/${run.id}`)).text()
     const kopfOhne = ohne.slice(ohne.indexOf('<header'), ohne.indexOf('</header>'))
@@ -2964,7 +2972,7 @@ try {
     const archiv = await (await hol(`/archive?repo=${zweiId}`)).text()
     falsch(archiv.includes('banner other-repo'), 'the archive neither')
     // And a page without any repo context (settings) cannot be on the wrong one.
-    const einst = await (await hol('/settings', { headers: { cookie: `cchub_repo=${zweiId}` } })).text()
+    const einst = await (await hol('/settings', { headers: { cookie: `freilauf_repo=${zweiId}` } })).text()
     falsch(einst.includes('banner other-repo'), 'nor a page without a repo context')
   })
 
@@ -3058,7 +3066,7 @@ try {
   // ------------------------------------------------------------------
   // The timezone is a display setting: it goes through the ordinary save route,
   // is stored like any other setting, and makes the very next page render its
-  // times in the chosen zone — chips and the injected window.CCHUB_TZ, which is
+  // times in the chosen zone — chips and the injected window.FREILAUF_TZ, which is
   // what keeps the browser's tooltips on the same clock as the server's.
   gruppe('The display timezone is a central setting')
 
@@ -3085,7 +3093,7 @@ try {
       // 12:00 UTC on 2026-08-25 is 08:00 in New York (EDT, UTC-4) — the chip
       // must read the configured clock, not UTC and not the server's.
       enthaelt(detail, '08:00', 'the run start chip reads the New York clock')
-      enthaelt(detail, 'window.CCHUB_TZ="America/New_York"', 'the browser is told the same zone')
+      enthaelt(detail, 'window.FREILAUF_TZ="America/New_York"', 'the browser is told the same zone')
     } finally {
       await formular('/settings/save', { ui_timezone: '' }, { alsBrowser: true })
     }
@@ -3277,15 +3285,15 @@ try {
     await formular(`/api/runs/${wieder.runId}/kill`, {})
   })
   await pruefe('the agent helper script protects and kills nothing in plan mode', async () => {
-    const skript = join(PROJEKT, 'bin', 'cc-session-cleanup')
-    const s1 = 'cc-aufraum-test-1', s2 = 'cc-aufraum-test-2'
+    const skript = join(PROJEKT, 'bin', 'fl-session-cleanup')
+    const s1 = 'fl-aufraum-test-1', s2 = 'fl-aufraum-test-2'
     await sh('tmux', ['new-session', '-d', '-s', s1, 'sleep 300'])
     await sh('tmux', ['new-session', '-d', '-s', s2, 'sleep 300'])
     sessions.add(s1); sessions.add(s2)
-    const plan = await sh('bash', [skript, '--target-gb', '0', '--db', join(SB, 'data', 'cc-hub.db')])
+    const plan = await sh('bash', [skript, '--target-gb', '0', '--db', join(SB, 'data', 'freilauf.db')])
     enthaelt(plan.stdout, '|kill', 'plan mode names sessions to kill')
     enthaelt(plan.stdout, 'killed=0', 'but kills nothing without --kill')
-    const mitKeep = await sh('bash', [skript, '--target-gb', '0', '--keep', s1, '--db', join(SB, 'data', 'cc-hub.db')])
+    const mitKeep = await sh('bash', [skript, '--target-gb', '0', '--keep', s1, '--db', join(SB, 'data', 'freilauf.db')])
     enthaelt(mitKeep.stdout, `${s1}|`, 'the kept session is listed')
     enthaelt(mitKeep.stdout, '|protect', 'and marked protected')
     await sh('tmux', ['kill-session', '-t', `=${s1}`])
@@ -3314,7 +3322,7 @@ try {
     return db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
   }
 
-  /** A report exactly as cc-report sends it — and the hub's answer to it. */
+  /** A report exactly as fl-report sends it — and the hub's answer to it. */
   async function sendReport(runId, body) {
     const r = await hol(`/api/runs/${runId}/report`, {
       method: 'POST',
@@ -3384,7 +3392,7 @@ try {
     await writeAndCommit(cleanRun.wt, 'clean.txt', 'clean\n', 'E2E: clean run')
     const antwort = await sendReport(cleanRun.id, { kind: 'done', text: 'Everything went fine.' })
     wahr(antwort.ok, 'accepted')
-    enthaelt(antwort.message ?? '', 'cc-hub is merging it into main', 'the answer says what happens now')
+    enthaelt(antwort.message ?? '', 'Freilauf is merging it into main', 'the answer says what happens now')
     await warteAuf(() => lauf(cleanRun.id).merge_status === 'merged',
       { was: 'the run is merged', timeoutMs: 30_000 })
     const r = lauf(cleanRun.id)
@@ -3692,12 +3700,12 @@ try {
       'and nobody is asked to do anything: the operator did this on purpose')
   })
 
-  // ---- 10. cc-report prints the hub's answer ----
-  await pruefe('the real bin/cc-report prints the hub\'s answer and files nothing', async () => {
+  // ---- 10. fl-report prints the hub's answer ----
+  await pruefe('the real bin/fl-report prints the hub\'s answer and files nothing', async () => {
     const l = await mergeRun()
     writeFileSync(join(l.wt, 'unsaid.txt'), 'x\n')
-    const r = await sh(join(PROJEKT, 'bin', 'cc-report'), ['done', 'from the real script'], {
-      env: { ...process.env, CC_RUN_ID: l.id, CC_HUB_URL: BASIS, HOME: SB },
+    const r = await sh(join(PROJEKT, 'bin', 'fl-report'), ['done', 'from the real script'], {
+      env: { ...process.env, FL_RUN_ID: l.id, FL_HUB_URL: BASIS, HOME: SB },
     })
     wahr(r.ok, `exit 0 (${r.stderr})`)
     enthaelt(r.stdout, 'NOT finished yet', 'the answer reaches the agent as this tool\'s output')
@@ -3733,8 +3741,8 @@ try {
     // rule instead of standing next to it and contradicting it.
     const prompt = readFileSync(join(SB, 'runs', l.id, 'prompt.md'), 'utf8')
     enthaelt(prompt, 'STAYS on that branch', 'the agent is told the work stays put')
-    enthaelt(prompt, 'cc-hub will not merge it into main', 'and who will not merge it')
-    falsch(prompt.includes('cc-hub merges your work into main itself'),
+    enthaelt(prompt, 'Freilauf will not merge it into main', 'and who will not merge it')
+    falsch(prompt.includes('Freilauf merges your work into main itself'),
       'and NOT the merge rule as well — two rules about one thing is one too many')
 
     await writeAndCommit(l.wt, 'kept.txt', 'stays here\n', 'E2E: work that stays on its branch')
@@ -3781,7 +3789,7 @@ try {
   await pruefe('under hub, "no branch" no longer promises throwaway work', async () => {
     const l = await mergeRun({ branch_mode: 'keiner' })
     const prompt = readFileSync(join(SB, 'runs', l.id, 'prompt.md'), 'utf8')
-    enthaelt(prompt, 'cc-hub merges your commits into main', 'it says what really happens')
+    enthaelt(prompt, 'Freilauf merges your commits into main', 'it says what really happens')
     falsch(prompt.includes('throwaway'), 'and not the opposite, in the same prompt as the merge rule')
     await formular(`/api/runs/${l.id}/kill`, {})
   })
@@ -3825,7 +3833,7 @@ try {
     await writeAndCommit(followed.wt, 'second.txt', 'second\n', 'E2E: the follow-up')
     const antwort = await sendReport(followed.id, { kind: 'done', text: 'Added the second file, as asked.' })
     wahr(antwort.ok, 'a finished run is not refused')
-    enthaelt(antwort.message ?? '', 'cc-hub is merging it into main', 'the same answer a first report gets')
+    enthaelt(antwort.message ?? '', 'Freilauf is merging it into main', 'the same answer a first report gets')
     await warteAuf(() => lauf(followed.id).followup_open === 0 && lauf(followed.id).merged_sha !== firstSha,
       { was: 'the follow-up is merged', timeoutMs: 30_000 })
     const r = lauf(followed.id)
@@ -3927,7 +3935,7 @@ try {
     const prompt = readFileSync(join(SB, 'runs', l.id, 'prompt.md'), 'utf8')
     enthaelt(prompt, 'No branch — the worktree is detached; changes are throwaway changes.',
       'the old sentence, byte for byte')
-    falsch(prompt.includes('cc-hub merges'), 'and nothing about merging at all')
+    falsch(prompt.includes('Freilauf merges'), 'and nothing about merging at all')
     const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
     enthaelt(html, 'data-merge-mode="off"', 'the form says so too')
     enthaelt(html, 'data-hub-only hidden', 'and the keep box is not even offered')
@@ -4424,7 +4432,7 @@ export default {
       // "Skip for now" is a session answer and must not bounce into a loop.
       const skip = await hol('/?welcome=skip', alsBrowser)
       gleich(skip.status, 200, 'skipping lands on the overview')
-      wahr(String(skip.headers.get('set-cookie') ?? '').includes('cchub_welcome'),
+      wahr(String(skip.headers.get('set-cookie') ?? '').includes('freilauf_welcome'),
         'and marks the browser so the link does not bounce back')
 
       // The box is honoured from any step, not only the last one.
@@ -4448,7 +4456,7 @@ export default {
 
   // ------------------------------------------------------------------
   if (ECHT) {
-    // From here on with the REAL cc-start and real harnesses. Deliberately a second
+    // From here on with the REAL fl-start and real harnesses. Deliberately a second
     // hub start: the stub part above must stay deterministic and free of charge.
     await hubStoppen()
     await hubStarten({ echteAgenten: true })
@@ -4487,7 +4495,7 @@ export default {
           repo_id: repoId, harness: h.name,
           ...(h.provider ? { provider: h.provider, model: h.model } : {}),
           prompt: `Lege im aktuellen Verzeichnis die Datei ${marke} an mit genau einer Zeile: ${h.name} lief. `
-            + `Fuehre danach genau dieses Kommando aus: cc-report done "${h.name}-Rauchtest fertig"`,
+            + `Fuehre danach genau dieses Kommando aus: fl-report done "${h.name}-Rauchtest fertig"`,
           branch_mode: 'keiner', expected_minutes: '10',
         })
         wahr(!!j.runId, `run started (${JSON.stringify(j)})`)

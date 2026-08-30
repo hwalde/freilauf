@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
-# Overview of the cc-* scripts (coding agents in tmux: claude | opencode | hermes).
+# Overview of the fl-* scripts (coding agents in tmux: claude | opencode | hermes).
 set -euo pipefail
 
-PREFIX="cc-"
+# The session tags, the reverse lookup and the prefixes live in one file next to
+# this one — fl-help used to carry its own third copy of that table, which is
+# how it came to know opencode and hermes but never cursor.
+FL_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/fl-harness-tags.sh"
+if [[ ! -r "$FL_LIB" ]]; then
+    printf '%s\n' "Error: $FL_LIB is missing — reinstall with setup/02-install-scripts.sh." >&2
+    exit 1
+fi
+# shellcheck source=fl-harness-tags.sh
+. "$FL_LIB"
 
 # Colors only when output goes to a terminal
 if [[ -t 1 ]]; then
@@ -14,11 +23,11 @@ fi
 cat <<EOF
 ${B}Coding agents in tmux — overview${R}
 ${D}The agent keeps running in a tmux session, even after you log out of the server.${R}
-${D}Harnesses: ${C}claude${R} (default) | ${C}opencode${R} | ${C}hermes${R} — selectable with ${C}cc-start -H${R}.${D}${R}
+${D}Harnesses: ${C}claude${R} (default) | ${C}opencode${R} | ${C}hermes${R} — selectable with ${C}fl-start -H${R}.${D}${R}
 
 ${B}COMMANDS${R}
 
-  ${C}cc-start${R} [-H harness] [--model model] [name] [directory]
+  ${C}fl-start${R} [-H harness] [--model model] [name] [directory]
       Starts a new agent session and attaches you to it.
         -H, --harness     claude (default) | opencode | hermes
         --model MODEL     Model for opencode/hermes (format provider/model,
@@ -28,48 +37,51 @@ ${B}COMMANDS${R}
         name              Session name (default: name of the working directory)
         directory         Working directory (default: current directory)
 
-  ${C}cc-start -p${R} "task" [-H harness] [name] [directory]   ${D}# AUTONOMOUS${R}
+  ${C}fl-start -p${R} "task" [-H harness] [name] [directory]   ${D}# AUTONOMOUS${R}
       Starts the session with a task in no-questions mode; it never asks,
       runs detached in the background and never hangs on a dialog.
         claude   -> --permission-mode dontAsk   (allowed things run, risky things are refused)
         opencode -> opencode --auto --prompt     (TUI: works autonomously, stays operable)
         hermes   -> hermes chat -q --yolo        (auto-approve)
       ${C}-f file${R} reads the task from a file, ${C}-a${R} still attaches immediately,
-      ${C}--dry-run${R} only shows. Details: cc-start --help
+      ${C}--dry-run${R} only shows. Details: fl-start --help
 
-  ${C}cc-attach${R} [-H harness] [name]
+  ${C}fl-attach${R} [-H harness] [name]
       Lists the running sessions (with harness labels) and attaches you to the
       chosen one. With only one session: attaches directly. With [name]:
       no questions asked. This is also what you use after a dropped connection.
       ${C}-p${R} "text" types a prompt into the running session and submits it,
       ${C}-n${R} only sends, without attaching (for scripts/cron).
 
-  ${C}cc-kill${R} [-H harness] [name]
+  ${C}fl-kill${R} [-H harness] [name]
       Terminates a session. For safety you must type the session name
       in full.
 
-  ${C}cc-help${R}
+  ${C}fl-help${R}
       This overview.
 
-  ${C}cchub${R} on|off|status|url|logs|restart|stop
-  ${C}cchub pipeline${R} on|off|status
-      cc-hub: web interface for agents (reachable via VPN only).
+  ${C}freilauf${R} on|off|status|url|logs|restart|stop
+  ${C}freilauf pipeline${R} on|off|status
+      Freilauf: web interface for agents (reachable via VPN only).
         on/off          VPN access to the website (the hub keeps running locally)
         status          state of the three switches (access, pipeline, processes)
         pipeline on/off global AND gate for scheduled agent starts
                         (agent flags are NOT modified by this)
-      UI-started runs go through cc-start; finished sessions stay open for
+      UI-started runs go through fl-start; finished sessions stay open for
       3 days by default and are then closed automatically.
 
-  ${C}cc-report${R} done|failed|help|progress "text"   ·   branch <name>   ·   pr <url>
-      An agent's report to cc-hub (needs CC_RUN_ID/CC_HUB_URL from the
+  ${C}fl-report${R} done|failed|help|progress "text"   ·   branch <name>   ·   pr <url>
+      An agent's report to Freilauf (needs FL_RUN_ID/FL_HUB_URL from the
       session environment). done --file report.md reads the report from a file;
       help calls a human and leaves the run open (waiting_help).
 
 ${B}SESSION NAMES${R}
-  cc-<name>      = claude      (legacy sessions without a tag count as claude)
-  cc-oc-<name>   = opencode
-  cc-he-<name>   = hermes
+  fl-<name>      = claude      (sessions without a tag count as claude)
+  fl-oc-<name>   = opencode
+  fl-he-<name>   = hermes
+  fl-cu-<name>   = cursor
+  ${D}Sessions started before the rename are called cc-… and are still listed,
+  attachable and killable — only new ones get the fl- prefix.${R}
 
 ${B}KEYS INSIDE THE SESSION${R}
 
@@ -80,13 +92,13 @@ ${B}KEYS INSIDE THE SESSION${R}
 ${B}TYPICAL WORKFLOW${R}
 
   cd ~/projects/myproject
-  cc-start                 ${D}# start a claude session, work${R}
-  cc-start -H opencode -p "Get the tests green" build   ${D}# opencode autonomous${R}
+  fl-start                 ${D}# start a claude session, work${R}
+  fl-start -H opencode -p "Get the tests green" build   ${D}# opencode autonomous${R}
   ${D}# Ctrl+b, d           → detach${R}
   exit                     ${D}# end SSH, the agent keeps running${R}
   ${D}# ... log in again later ...${R}
-  cc-attach                ${D}# pick the session and continue working${R}
-  cc-kill                  ${D}# when you no longer need it${R}
+  fl-attach                ${D}# pick the session and continue working${R}
+  fl-kill                  ${D}# when you no longer need it${R}
 
 ${B}HARNESS NOTES${R}
 
@@ -102,7 +114,7 @@ ${B}HARNESS NOTES${R}
     safety stands and falls with your deny rules — you deliberately chose to
     do without them (version control as the safety net).
     One-time: 'opencode auth login' (e.g. openrouter) for stealth/ox-alpha:
-    cc-start -H opencode --model openrouter/stealth/ox-alpha ...
+    fl-start -H opencode --model openrouter/stealth/ox-alpha ...
     Without --model: opencode uses the most recently used model.
     Reads CLAUDE.md (also in subdirectories), ~/.claude/skills and .claude/skills directly.
 
@@ -122,24 +134,18 @@ EOF
 # Show the current state
 echo
 if ! tmux has-session 2>/dev/null; then
-    echo "${B}CURRENT${R}  No running agent session. Start with: cc-start"
+    echo "${B}CURRENT${R}  No running agent session. Start with: fl-start"
     exit 0
 fi
 
-harness_of() {
-    case "$1" in
-        "${PREFIX}oc-"*) echo "opencode" ;;
-        "${PREFIX}he-"*) echo "hermes" ;;
-        *) echo "claude" ;;
-    esac
-}
+harness_of() { fl_harness_of "$1"; }
 
 mapfile -t ROWS < <(tmux list-sessions \
     -F '#{session_name}|#{t:session_created}|#{?session_attached,attached,free}|#{session_path}' \
-    2>/dev/null | grep "^$PREFIX" || true)
+    2>/dev/null | grep -E "$(fl_session_re)" || true)
 
 if [[ ${#ROWS[@]} -eq 0 ]]; then
-    echo "${B}CURRENT${R}  No running agent session. Start with: cc-start"
+    echo "${B}CURRENT${R}  No running agent session. Start with: fl-start"
     exit 0
 fi
 

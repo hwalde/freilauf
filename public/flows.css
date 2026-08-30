@@ -1,4 +1,4 @@
-/* cc-hub flows — designer page. Only what the flow pages need; the rest comes from hub.css. */
+/* Freilauf flows — designer page. Only what the flow pages need; the rest comes from hub.css. */
 .flow-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
 .flow-head #flow-name { max-width: 320px; font-weight: 600; }
 .flow-head label.chk { margin: 0; }

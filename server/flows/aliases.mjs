@@ -1,4 +1,4 @@
-// cc-hub flows — step types that were renamed.
+// Freilauf flows — step types that were renamed.
 //
 // A step's `type` is persisted: in `flows.definition` and in the definition
 // snapshot every `flow_runs` row carries. Renaming one is therefore a data

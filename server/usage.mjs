@@ -1,4 +1,4 @@
-// cc-hub — subscription usage of the configured coding agents.
+// Freilauf — subscription usage of the configured coding agents.
 //
 // Each harness plugin may implement usage() and report what its subscription
 // account has consumed (Claude: the 5-hour window and every 7-day window —
@@ -8,11 +8,12 @@
 // a hanging endpoint must never block a page render.
 import { enabledCodingAgents } from './coding-agents.mjs'
 import { pluginCtx } from './plugins/context.mjs'
+import { env } from './env.mjs'
 
 // A minute, not two: the sidebar now re-fetches on its own timer (hub.js), so
 // the numbers it shows are only as fresh as this window. The suite shortens it
-// further (CCHUB_USAGE_CACHE_MS) because a browser test must not wait a minute.
-const CACHE_MS = Number(process.env.CCHUB_USAGE_CACHE_MS ?? 60_000)
+// further (FREILAUF_USAGE_CACHE_MS) because a browser test must not wait a minute.
+const CACHE_MS = Number(env('USAGE_CACHE_MS') ?? 60_000)
 let cache = { at: 0, key: '', value: null }
 
 /**

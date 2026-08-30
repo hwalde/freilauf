@@ -1,4 +1,4 @@
-// cc-hub — Settings → Notifications (`/settings/notifications`).
+// Freilauf — Settings → Notifications (`/settings/notifications`).
 //
 // One page for the whole question "where does this hub say things, and does it
 // have to say them anywhere at all". The answer to the second half is NO, and

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// cc-notify — say something through whatever notification channels this hub has
+// fl-notify — say something through whatever notification channels this hub has
 // configured. Best effort, from OUTSIDE the hub process.
 //
-//   cc-notify "the deploy rolled back"
-//   cc-notify --url https://hub.example/runs/… --kind deploy "text"
-//   echo "text" | cc-notify -
+//   fl-notify "the deploy rolled back"
+//   fl-notify --url https://hub.example/runs/… --kind deploy "text"
+//   echo "text" | fl-notify -
 //
-// Why this exists: `bin/cchub-deploy` has to be able to report a failed deploy,
+// Why this exists: `bin/freilauf-deploy` has to be able to report a failed deploy,
 // and at that moment the hub may well be the thing that is down — so it cannot
 // POST to it. It used to read `telegram_token` and `telegram_chat` out of the
 // SQLite database and curl the Bot API itself: a second, independent Telegram
@@ -36,16 +36,20 @@ const HERE = dirname(fileURLToPath(import.meta.url))
  * `setup/02-install-scripts.sh` COPIES this file into `~/.local/bin`, so its
  * own directory is only the answer when it is run straight out of a checkout.
  * The order is: an explicit override, the checkout this file sits in, the
- * deploy checkout the service runs from, the usual working copy. Each candidate
+ * deploy checkout the service runs from, the usual working copy — the last two
+ * under the new name first and the old one after it, because an installation
+ * that has not been migrated yet still has them under `cc-hub`. Each candidate
  * is confirmed by the module actually being there — guessing a directory and
  * failing with a stack trace would be worse than saying nothing.
  */
 function hubRoot() {
   const candidates = [
-    process.env.CCHUB_ROOT,
+    process.env.FREILAUF_ROOT ?? process.env.CCHUB_ROOT,
     resolve(HERE, '..'),
-    process.env.CCHUB_DEPLOY_DIR,
+    process.env.FREILAUF_DEPLOY_DIR ?? process.env.CCHUB_DEPLOY_DIR,
+    join(homedir(), 'agents', 'deploy', 'freilauf'),
     join(homedir(), 'agents', 'deploy', 'cc-hub'),
+    join(homedir(), 'projects', 'freilauf'),
     join(homedir(), 'projects', 'cc-hub'),
   ].filter(Boolean)
   for (const dir of candidates) {
@@ -55,7 +59,7 @@ function hubRoot() {
 }
 
 function usage(code = 0) {
-  process.stdout.write(`Usage: cc-notify [options] <text | ->
+  process.stdout.write(`Usage: fl-notify [options] <text | ->
 
   <text>            the message; "-" reads it from stdin
   --url <url>       a link to carry with it (a channel may render it as a button)
@@ -95,13 +99,13 @@ async function readStdin() {
 }
 
 const text = words.length === 1 && words[0] === '-' ? (await readStdin()).trim() : words.join(' ')
-if (!text) { say('cc-notify: nothing to say'); process.exit(opt.strict ? 1 : 0) }
+if (!text) { say('fl-notify: nothing to say'); process.exit(opt.strict ? 1 : 0) }
 
 const root = hubRoot()
 if (!root) {
   // Not an error the caller can do anything about mid-deploy, and not a reason
   // to fail one: say so and get out of the way.
-  say('cc-notify: cannot find the cc-hub modules (set CCHUB_ROOT) — nothing sent')
+  say('fl-notify: cannot find the Freilauf modules (set FREILAUF_ROOT) — nothing sent')
   process.exit(opt.strict ? 1 : 0)
 }
 
@@ -120,15 +124,15 @@ try {
   const { notify, notifiersConfigured } = await import(pathToFileURL(join(root, 'server', 'notify.mjs')).href)
 
   if (!notifiersConfigured()) {
-    say('cc-notify: no notifier configured — nothing sent')
+    say('fl-notify: no notifier configured — nothing sent')
     process.exit(opt.strict ? 1 : 0)
   }
   const r = await notify({ kind: opt.kind, text, url: opt.url, runId: opt.run, attachment })
   const failed = r.results.filter(x => !x.ok)
-  say(`cc-notify: delivered to ${r.delivered}/${r.results.length}`
+  say(`fl-notify: delivered to ${r.delivered}/${r.results.length}`
     + (failed.length ? ` (failed: ${failed.map(x => `${x.id} — ${x.error}`).join('; ')})` : ''))
   process.exit(r.sent ? 0 : 1)
 } catch (err) {
-  say(`cc-notify: ${err?.message ?? err}`)
+  say(`fl-notify: ${err?.message ?? err}`)
   process.exit(1)
 }

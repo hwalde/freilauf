@@ -1,4 +1,4 @@
-// cc-hub — editing a stored run: what may change while it still has a future.
+// Freilauf — editing a stored run: what may change while it still has a future.
 //
 // Five operator wishes, one answer each, and all of them read the database at
 // the moment they are used, so an edit needs no migration of anything already

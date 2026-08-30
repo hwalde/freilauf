@@ -1,4 +1,4 @@
-// cc-hub — HTTP: server-rendered HTML + JSON API (planning 5).
+// Freilauf — HTTP: server-rendered HTML + JSON API (planning 5).
 import { readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -338,8 +338,8 @@ async function api(req, res, url) {
   // The report endpoint answers 200 with `{ ok, message }`, and the message is
   // the point: with the repo's integration switched on the finish gate has
   // something to SAY back ("your worktree is dirty", "this conflicts"), and
-  // cc-report prints it into the agent's running turn. It must be a 2xx —
-  // cc-report treats anything else as "hub unreachable" and files the report in
+  // fl-report prints it into the agent's running turn. It must be a 2xx —
+  // fl-report treats anything else as "hub unreachable" and files the report in
   // inbox.jsonl, where the watcher would replay it.
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/report$/))) {
     let b = {}
@@ -610,7 +610,7 @@ async function api(req, res, url) {
   }
   // ---- integration by hand (server/integrate.mjs, buttons on the detail page) ----
   //
-  // "Mark as done" is exactly what `cc-report done` is, only typed by a human:
+  // "Mark as done" is exactly what `fl-report done` is, only typed by a human:
   // same path, same finish gate, same everything.
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/mark-done$/))) {
     const run = getRun(m[1])

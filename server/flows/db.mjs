@@ -1,4 +1,4 @@
-// cc-hub flows — persistence. Own tables (flows, flow_runs) plus three retrofitted
+// Freilauf flows — persistence. Own tables (flows, flow_runs) plus three retrofitted
 // columns on runs: `flow_dispatched` (has the "run finished" trigger already been
 // evaluated for this run?), `merge_dispatched` (the same question for the
 // "run merged" trigger) and `flow_run_id` (which flow run started this run, if

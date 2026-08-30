@@ -1,4 +1,4 @@
-# cc-hub
+# Freilauf
 
 Web UI for managing autonomous coding agents (claude / opencode / hermes / cursor).
 Agents run in tmux sessions, every run in its own git worktree. The hub schedules,
@@ -75,7 +75,7 @@ saying so next to it.
 The web UI is multilingual: **English is the default**, German and Chinese are
 selectable under Settings → UI language. All UI strings go through
 `server/i18n.mjs` (`t('key')`); client-side strings reach `public/hub.js` via
-the injected `window.CCHUB_I18N` catalog.
+the injected `window.FREILAUF_I18N` catalog.
 
 - Language files: **`lang/en.json`** (reference), **`lang/de.json`**,
   **`lang/zh.json`** — flat `key → string` maps with `{placeholder}`
@@ -90,40 +90,40 @@ the injected `window.CCHUB_I18N` catalog.
 
 ```
 Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux sessions
-(via WireGuard)    vpn-proxy.mjs           server/hub.mjs      cc-<name>-<id>
-                   cchub-vpn.service       cchub.service       cc-oc-/he-/cu-…
-                   └──── both units run from ~/agents/deploy/cc-hub ────┘
-                         (the deploy checkout; bin/cchub-deploy owns it)
+(via WireGuard)    vpn-proxy.mjs           server/hub.mjs      fl-<name>-<id>
+                   freilauf-vpn.service    freilauf.service    fl-oc-/he-/cu-…
+                   └──── both units run from ~/agents/deploy/freilauf ────┘
+                         (the deploy checkout; bin/freilauf-deploy owns it)
 
-~/projects/cc-hub  = where a HUMAN works. No service starts from it any more.
+~/projects/freilauf  = where a HUMAN works. No service starts from it any more.
 
-(8790/8791 are the code defaults; the real values come from ~/.config/cc-hub/env.)
+(8790/8791 are the code defaults; the real values come from ~/.config/freilauf/env.)
 ```
 
 - **`server/hub.mjs`** binds firmly to `127.0.0.1` — never directly reachable from
   the network. HTTP + WebSocket terminal + scheduler + watcher run in this one process.
 - **`vpn-proxy.mjs`** binds exclusively to the WireGuard address. If the firewall
   fails, nothing listens to the outside anyway. Host allowlist + origin check are the
-  rebinding/CSRF fence (`CCHUB_ALLOWED_HOSTS` in `~/.config/cc-hub/env`).
-- **systemd user units**: `cchub.service` starts automatically, `cchub-vpn.service`
-  deliberately does **not** (fail-closed). Control: `cchub on|off|status|logs`.
-  Both start `%h/agents/deploy/cc-hub/…` — a checkout that belongs to the hub
+  rebinding/CSRF fence (`FREILAUF_ALLOWED_HOSTS` in `~/.config/freilauf/env`).
+- **systemd user units**: `freilauf.service` starts automatically, `freilauf-vpn.service`
+  deliberately does **not** (fail-closed). Control: `freilauf on|off|status|logs`.
+  Both start `%h/agents/deploy/freilauf/…` — a checkout that belongs to the hub
   alone, never the one a human edits in (see "Deploying" below).
-- **Runs** are created exclusively via `bin/cc-start` (installed to
-  `~/.local/bin`); agents report back via `bin/cc-report` (HTTP to the hub,
-  fallback `inbox.jsonl`). All `cc-*` scripts are part of this repo (`bin/`),
+- **Runs** are created exclusively via `bin/fl-start` (installed to
+  `~/.local/bin`); agents report back via `bin/fl-report` (HTTP to the hub,
+  fallback `inbox.jsonl`). All `fl-*` scripts are part of this repo (`bin/`),
   installed by `setup/02-install-scripts.sh`.
-- State: SQLite at `~/.local/share/cc-hub/cc-hub.db`, run data in `~/agents/runs`,
+- State: SQLite at `~/.local/share/freilauf/freilauf.db`, run data in `~/agents/runs`,
   worktrees in `~/agents/worktrees`, external plugin packages in
-  `~/.local/share/cc-hub/plugins` (`CCHUB_PLUGIN_DIR`). All paths can be
-  redirected via `CCHUB_*` variables — exactly that is what the test suite lives
-  on, and `CCHUB_PLUGIN_DIR` is a **test fence** as much as a setting: a suite
+  `~/.local/share/freilauf/plugins` (`FREILAUF_PLUGIN_DIR`). All paths can be
+  redirected via `FREILAUF_*` variables — exactly that is what the test suite lives
+  on, and `FREILAUF_PLUGIN_DIR` is a **test fence** as much as a setting: a suite
   that does not point it into its own sandbox loads the operator's real packages
   and stops being reproducible.
 
 ### Deploying: the service runs from its own checkout
 
-The units used to start `%h/projects/cc-hub/server/hub.mjs` — the directory the
+The units used to start `%h/projects/freilauf/server/hub.mjs` — the directory the
 operator and interactive coding sessions work in. So a restart loaded *whatever
 lay in that directory*: half-finished edits, or the state from before the last
 merge, for as long as nobody ran `git pull` there. Both happened, and the second
@@ -131,8 +131,8 @@ one is in "Pitfalls" with the hour it cost. It also contradicted the rule the
 integrator is built on: `integrate.mjs` deliberately never merges in the working
 checkout — but the service started out of it.
 
-The hub therefore runs from **`~/agents/deploy/cc-hub`**, and
-**`bin/cchub-deploy`** owns that directory:
+The hub therefore runs from **`~/agents/deploy/freilauf`**, and
+**`bin/freilauf-deploy`** owns that directory:
 
 - a **clone of its own** (`--init [--from <dir> | --url <url>]`), not a
   `git worktree` of the working copy: a worktree hangs on that copy's `.git`, and
@@ -144,7 +144,7 @@ The hub therefore runs from **`~/agents/deploy/cc-hub`**, and
   `node_modules`, gitignored, excluded from the deploy's `git clean`). `node-pty`
   compiles natively; doing that on every deploy would turn a five-second restart
   into minutes.
-- `~/.config/cc-hub/env`, the database, `~/agents/runs`, `~/agents/worktrees`,
+- `~/.config/freilauf/env`, the database, `~/agents/runs`, `~/agents/worktrees`,
   `~/agents/integrate` and the certificates stay where they are — the hub
   resolves them from `$HOME`, and everything inside the repo (`public/`,
   `lang/*.json`, `node_modules` for the static xterm files, the flow modules
@@ -152,23 +152,23 @@ The hub therefore runs from **`~/agents/deploy/cc-hub`**, and
   directory. `WorkingDirectory` in the unit is therefore a courtesy, not a
   requirement: a hub started by hand from anywhere still finds its files.
 
-`cchub-deploy [ref]` is one path with a fence at the end:
+`freilauf-deploy [ref]` is one path with a fence at the end:
 
 1. `flock` — two deploys at once do not exist (`--no-wait` fails instead of
    waiting).
 2. `fetch`, target = `<ref>` or `origin/<base>` (base from the hub's own DB for
-   the repo named `cc-hub`, else `main`, override `CCHUB_DEPLOY_BASE`).
+   the repo named `Freilauf`, else `main`, override `FREILAUF_DEPLOY_BASE`).
 3. target == what is checked out and no `--force` → `already deployed`, exit 0,
    **no restart**. A restart is not free: it kills flow runs in flight.
 4. write `previous-sha`, `checkout --detach`, `git clean -fdx` (minus
    `node_modules` and the hash file), dependencies if the lockfile moved,
-   `setup/02-install-scripts.sh` — so `cc-report` and `cc-start` in `~/.local/bin`
+   `setup/02-install-scripts.sh` — so `fl-report` and `fl-start` in `~/.local/bin`
    always match the hub that is running; that used to be a step one had to
    remember. Unit files are installed only when they really differ, then one
    `daemon-reload`.
-5. restart `cchub.service`, and start `cchub-vpn.service` again if it *was* on —
-   `Requires=cchub.service` takes it down with the hub.
-6. **health check**: `curl` against `127.0.0.1:$CCHUB_LOCAL_PORT` until it answers
+5. restart `freilauf.service`, and start `freilauf-vpn.service` again if it *was* on —
+   `Requires=freilauf.service` takes it down with the hub.
+6. **health check**: `curl` against `127.0.0.1:$FREILAUF_LOCAL_PORT` until it answers
    `200` (20 s), plus `systemctl is-active`. The journal since the restart is
    read and printed but is **not** a verdict of its own: the hub writes the word
    "Error" in the course of normal operation (a provider that answered badly, an
@@ -177,31 +177,92 @@ The hub therefore runs from **`~/agents/deploy/cc-hub`**, and
 7. not healthy → **rollback** to `previous-sha`, the same steps again, health
    check again. Exit 1 with `deploy of <sha> FAILED (<reason>), rolled back to
    <previous>`. Rollback also unhealthy → exit 2, and the journal with it.
-8. **A notification on failure, always** — through `bin/cc-notify`, which loads
+8. **A notification on failure, always** — through `bin/fl-notify`, which loads
    the plugins and calls the hub's own facade, so it reaches whatever channel the
    operator configured and nothing at all when they configured none. On success
-   only with `--notify`. Best effort in every direction: no `cc-notify` on the
+   only with `--notify`. Best effort in every direction: no `fl-notify` on the
    PATH, no channel, no network, no consequence. (It used to be a second,
    independent Telegram implementation in bash — read the bot token out of the
    database, curl the Bot API — which no facade could reach and no other channel
    could ever be added to.)
 
-`cchub deploy [ref]` is the front door, `cchub restart` stays a plain restart
-without a deploy, and `cchub status` names the deployed sha and how far
-`origin/<base>` has moved on (`cchub-deploy --status`, `--rollback`).
+`freilauf deploy [ref]` is the front door, `freilauf restart` stays a plain restart
+without a deploy, and `freilauf status` names the deployed sha and how far
+`origin/<base>` has moved on (`freilauf-deploy --status`, `--rollback`).
 
 **The sidebar prints the running sha** (`hubVersion()` in `util.mjs`,
 `headerStatus()`): asked once, at the module's own directory, cached, empty when
 there is no git. Deliberately no "N behind origin" — that would be a `git fetch`
 on every page render.
 
-And the flow **"Restart cc-hub after merge"** is now a single detached
-`shell_command`: `sleep 3; cchub-deploy`. It used to pull the working checkout,
+And the flow **"Restart Freilauf after merge"** is now a single detached
+`shell_command`: `sleep 3; freilauf-deploy`. It used to pull the working checkout,
 branch on whether that worked and restart — three steps, of which only the first
 two could ever report anything, because a step that restarts the hub kills the
 process running the flow (see `server/flows/AGENTS.md`, "Restarting the hub from
 a flow"). Everything that has to be checked *after* the restart therefore has to
 be checked by the script, and it is: health check, rollback, notification.
+
+### The rename: this used to be called cc-hub, and the old names still answer
+
+The project was `cc-hub` and its scripts were `cc-start`, `cc-report`, `cc-attach`,
+`cc-kill`, `cc-help`, `cc-notify`, `cc-session-cleanup`, `cc-oc-sync-agents`, with
+`cchub`/`cchub-deploy` as the CLI, `CCHUB_*` as every seam, `CC_RUN_ID` as what an
+agent carried, `cc-` as the tmux prefix and `cchub.service` as the unit. All of it
+is `Freilauf` / `freilauf` / `fl-*` / `FREILAUF_*` / `FL_*` / `fl-` /
+`freilauf.service` now.
+
+**A rename cannot reach the places those names are written down.** They sit in an
+operator's `~/.config/…/env`, in a systemd unit, in a cron line, in the prompt of
+a run that is working right now, in the `.cursor/hooks.json` and the claude
+settings inside that run's worktree, and in the name of the tmux session it is
+sitting in. And the first deploy of this code is done BY the old
+`cchub-deploy`, INTO the old checkout, restarted by the old unit, with
+`EnvironmentFile=~/.config/cc-hub/env`. So the release under the new name has to
+run, unchanged, in the old world:
+
+| Seam | Where the rule lives | What it does |
+|---|---|---|
+| environment variables | `server/env.mjs` (`env('X')`), `fl_env` in `bin/fl-paths.sh` | `FREILAUF_X`, then `CCHUB_X`, then the caller's own default. `CCHUB_CC_START`/`CCHUB_CC_REPORT` changed their whole name, so they are named aliases of `FREILAUF_START_SCRIPT`/`FREILAUF_REPORT_SCRIPT` |
+| directories and the database | `server/paths.mjs` (`pick`), the same functions in `bin/fl-paths.sh` | the new path when it exists, the old one when only that exists, the new one otherwise — config dir, data dir, deploy dir, cert dir, and `freilauf.db` vs `cc-hub.db` inside whichever data dir won |
+| script names | `setup/02-install-scripts.sh` | installs the `fl-*` scripts AND a one-line shim under every old name (`exec "$(dirname "$0")/fl-…" "$@"`) |
+| agent-side variables | `bin/fl-report`, the opencode plugin | `FL_RUN_ID` falling back to `CC_RUN_ID`, `FL_HUB_URL` to `CC_HUB_URL`; `runner.mjs` exports BOTH pairs into a new session |
+| tmux prefix | `bin/fl-harness-tags.sh` (`FL_PREFIXES`), `server/terminal.mjs` | `fl-` is what is created; `fl-` **and** `cc-` are listed, attached to, killed and opened in the terminal |
+| systemd unit | `fl_unit` / `fl_vpn_unit` in `bin/fl-paths.sh` | the unit that is really **active or enabled** — not the unit file that exists, because a deploy copies the new files in long before anything enables them |
+
+Three of those deserve the reason spelled out. **The env helper returns
+`undefined`, never a default**, so `Number(env('X') ?? 60_000)` still means what
+it meant — the `Number('')` entry under "Pitfalls" is exactly the trap a helper
+that "helpfully" normalised would double. **`dbPath()` asks two questions at
+once**, because the directory may still be the old one *and* the file inside it
+may still carry the old name; creating `freilauf.db` next to a populated
+`cc-hub.db` would look like a hub that lost every run it ever did. And the
+**unit resolver goes by what systemd is running**, because `sync_units` installs
+`freilauf.service` on the very first deploy — a resolver that went by file
+existence would then restart a unit that is neither enabled nor started, and
+leave the hub down.
+
+**`setup/migrate-from-cc-hub.sh`** (also `freilauf-deploy --migrate`) is the one
+explicit step that ends all of the above: it stops the old units, moves the three
+directories, rewrites `CCHUB_` → `FREILAUF_` inside `env` (backup next to it,
+everything else byte for byte), renames the database and the deploy log, repoints
+the deploy checkout's `origin` at the renamed GitHub repository, installs and
+enables `freilauf.service`, removes the old unit files, rewrites `cchub-deploy`
+inside stored flow definitions, deletes the old opencode plugin file (opencode
+loads every file in that directory — two of them would report every idle and
+every API error twice), re-runs `setup/02-install-scripts.sh`, and starts the hub
+again, switching access back on only if it was on. Idempotent, `--dry-run`, and
+it **refuses rather than merges** when both an old and a new directory exist —
+that is the one state a script must not resolve on the operator's behalf. What it
+deliberately leaves alone: `~/agents/runs`, `~/agents/worktrees`,
+`~/agents/integrate`, `~/agents/zusaetze` (never named after the product), the
+operator's own checkout, and the hub's `repos` row called `cc-hub` — that row is
+their checkout, and its name is theirs.
+
+The shims and the fallbacks are for **one** transition release. A later commit
+deletes `setup/02-install-scripts.sh`'s shim block, the `CCHUB_`/`CC_` halves of
+the two env helpers, the old halves of `pick()`, the `cc-` prefix in
+`FL_PREFIXES` and `SESSION_RE`, and the migration script itself.
 
 ## The run definition: agent and single run are the same thing
 
@@ -370,7 +431,7 @@ anyway, so archiving it would hide work that is not over. One click per row in
 the overview (`POST /api/runs/<id>/archive`) or on the detail page; the
 **Archive** page (`/archive`, per repo like the overview) lists them
 newest-archived first with pagination (50 per page,
-`CCHUB_ARCHIVE_PAGE_SIZE`) and a restore button
+`FREILAUF_ARCHIVE_PAGE_SIZE`) and a restore button
 (`POST /api/runs/<id>/unarchive`). Nothing else in the code filters on
 `archived_at` — the watcher, the flows and the incidents keep their view of a
 run whether it is archived or not.
@@ -465,7 +526,7 @@ Favorites) is exactly that half under a name: harness, provider, model, serving
 provider, effort — plus the two opt-ins that behave like a setting rather than
 like a task, the **extra skills including their dial** and the **attached
 flows**. Deliberately not part of it: prompt, branch rule, expected duration,
-start time. Room for `FAVORITES_MAX` of them (3, `CCHUB_FAVORITES_MAX`), because
+start time. Room for `FAVORITES_MAX` of them (3, `FREILAUF_FAVORITES_MAX`), because
 a shortcut one has to read is not one.
 
 The **Quick Run** button sits in the header of *every* page and opens a dialog
@@ -483,7 +544,7 @@ than the dialog asks, the run stops being quick. It opens the FULL single-run
 form in a new window (`/runs/new?repo=…&favorite=…`): the favorite becomes the
 form's template (`favoriteTemplate()` in favorites.mjs, the counterpart of
 `favoriteToFormBody()`), and hub.js parks the task, the branch rule and the
-start time in `sessionStorage` (key `cchub:qrfull`) — a window opened by the
+start time in `sessionStorage` (key `freilauf:qrfull`) — a window opened by the
 opener inherits a copy, and the form page restores the fields onto the MAIN
 form before its start-time and branch syncs run. What the dialog does not ask
 for stays as the favorite's template rendered it; there is still no second
@@ -534,7 +595,7 @@ plugins**: a descriptor object per file, collected by one mutable registry
 folders is a front door that **re-exports the registry's own objects**, the same
 identity and not a copy, which is why every importer survived the rebuild
 untouched. An **external** plugin is a package directory under
-`CCHUB_PLUGIN_DIR` (default `~/.local/share/cc-hub/plugins`) holding a
+`FREILAUF_PLUGIN_DIR` (default `~/.local/share/freilauf/plugins`) holding a
 `plugin.json` manifest and a module with the descriptor as its default export;
 `loadExternalPlugins()` registers them in `hub.mjs` *before anything reads the
 registry*, because a plugin that arrives after the first form was rendered is a
@@ -563,7 +624,7 @@ actually run with, and each of them removes a hardcoded vendor from the hub:
 | `credentials` | the operator may supply an **own API key**, or name a **different environment variable** — resolved once in `credentialValue()` (stored value → named variable → the plugin's declared `envKeys`) and reached everywhere through `ctx.secret()` | Plugins page, `modelArgs()`, `balance()`, the LLM layer |
 | `gate` | thresholds and a `check()` — the plugin's own budget gate | Settings → Budget gates renders it **by itself** |
 | `llm` | this plugin can answer the hub's own four direct questions | the model-source pickers under Settings |
-| `launch` | how to start this CLI in a tmux session — `bin/cc-start --spec` | `launchSpec()` in runner.mjs, for an external coding agent |
+| `launch` | how to start this CLI in a tmux session — `bin/fl-start --spec` | `launchSpec()` in runner.mjs, for an external coding agent |
 
 **A plugin is handed a context, never `process.env` or `db.mjs`.**
 `pluginCtx(id)` (`server/plugins/context.mjs`) carries `json()` (fetch with a
@@ -596,7 +657,7 @@ Coding agents, which is now a 303 redirect. One page answers the whole question
 found on the machine, one card per coding agent, one per model provider, and the
 external packages with their versions, paths and load errors. The optional seed
 is unchanged — on first start with nothing configured the hub imports
-`~/.config/cc-hub/coding-agents.json` (override: `CCHUB_AGENTS_SEED`).
+`~/.config/freilauf/coding-agents.json` (override: `FREILAUF_AGENTS_SEED`).
 
 **Discovery asks once.** `scanSystem()` records, for every registered plugin,
 whether its CLI is on the `PATH` and whether any of its declared credential
@@ -612,12 +673,12 @@ writes the answer — so a dismissal stays dismissed across restarts.
 Telegram used to be wired into ~30 files: `server/telegram.mjs` plus direct
 imports in reports, incidents, the watcher, the integrator, the LLM alerts, the
 flow actions and a second implementation of the whole thing in bash inside
-`bin/cchub-deploy`. So "which channel" was not a question anybody could answer
+`bin/freilauf-deploy`. So "which channel" was not a question anybody could answer
 differently, and an installation that wanted none had to leave a token unset and
 hope every caller checked.
 
 A **notifier** is the third plugin kind now — same registry, same duplicate-id
-rule, same external packages under `CCHUB_PLUGIN_DIR` (`"kind": "notifier"`),
+rule, same external packages under `FREILAUF_PLUGIN_DIR` (`"kind": "notifier"`),
 same `registryErrors()`. The full contract is in
 [docs/plugins.md](docs/plugins.md); what the rest of the hub has to know is
 this:
@@ -645,8 +706,8 @@ this:
   registered notifier — enabled flag, its settings, its credentials, a "send
   test message" button, a link to its wizard — built from the same card blocks
   the Plugins page uses. It opens by saying that all of it is optional.
-- **`bin/cc-notify "<text>"`** is the facade from outside the hub process, for
-  `cchub-deploy`: it loads the plugins and calls `notify()`. Exit 0 when
+- **`bin/fl-notify "<text>"`** is the facade from outside the hub process, for
+  `freilauf-deploy`: it loads the plugins and calls `notify()`. Exit 0 when
   delivered *or* when nothing is configured — a deploy must not fail because
   there is nobody to tell.
 - **The flow step is `notify`**, channel-neutral. `telegram` is still accepted
@@ -685,7 +746,7 @@ Two rules about getting out of it, because a wizard one cannot leave is worse
 than no wizard: the checkbox is on **every** step, not only the last (with the
 hidden `0` companion — an unticked box is simply absent from a POST body, so
 without it the wizard could never be switched back on); and **"Skip for now" is
-a session answer**, a `cchub_welcome` session cookie the `/` redirect honours,
+a session answer**, a `freilauf_welcome` session cookie the `/` redirect honours,
 because a plain link back to `/` would otherwise bounce straight into the wizard
 again.
 
@@ -696,7 +757,7 @@ log line is a real outage, what a report contains, which worktree extras a
 repository wants. All four used to be hardcoded OpenRouter, each with its own
 copy of the URL, the bearer header, `response_format` and
 `JSON.parse(choices[0].message.content)`. Four copies of one call is how a seam
-like `CCHUB_OPENROUTER_BASE` ends up honoured in exactly one of them (it did),
+like `FREILAUF_OPENROUTER_BASE` ends up honoured in exactly one of them (it did),
 and how a source that is not OpenRouter cannot be added at all.
 
 **`llmJson()`** (`server/llm/index.mjs`) is the one entry point now, and it
@@ -767,11 +828,11 @@ in as a fallback and the UI marks the value as estimated.
 
 #### Claude's windows come from the account, not off the floor
 
-`~/.claude/quota.json` is not cc-hub's file, and it is not claude's either:
+`~/.claude/quota.json` is not Freilauf's file, and it is not claude's either:
 claude **never writes it**. It hands the windows to the **status line**, and a
 status line only renders while an interactive session is open; the per-model
 week (`seven_day_fable`) is put there by a script belonging to an entirely
-different project. So the panel's freshness hung on two things cc-hub does not
+different project. So the panel's freshness hung on two things Freilauf does not
 control, and it failed **silently** — the numbers looked current. Measured
 2026-08-28, with the sidebar's own 30 s refresh working perfectly, re-fetching a
 fragment rendered from a seven-hour-old file:
@@ -798,7 +859,7 @@ window finally has the reset time the file never carried for it.
 Five rules, each load-bearing:
 
 1. **Never write `quota.json`.** It belongs to the status line and to that other
-   project's script. cc-hub reads it — as the **fallback** — and nothing else.
+   project's script. Freilauf reads it — as the **fallback** — and nothing else.
 2. **Never refresh the OAuth token.** An expired token is a reason to stay
    silent, not to mint a new one: racing claude for its own credentials file
    could invalidate the operator's live session, and no panel is worth that.
@@ -827,7 +888,7 @@ And a fifth one, learned from the bar that would not stand still:
    bar jumped 88 → 80 → 88 → 80, and always fell to the older number.
    `claude-usage.mjs` therefore keeps the scoped windows of the last live answer
    — per label, with the time they were read, in
-   `~/.local/share/cc-hub/claude-windows.json` (`CCHUB_CLAUDE_WINDOWS_JSON`),
+   `~/.local/share/freilauf/claude-windows.json` (`FREILAUF_CLAUDE_WINDOWS_JSON`),
    because this hub deploys often and a restart would drop straight back to the
    file. `mergeScoped()` in quota.mjs decides per label: the live answer wins,
    otherwise the **newer** of the remembered reading and the file's — the file
@@ -862,7 +923,7 @@ windows out one by one and names each of them.
 `seven` — the maximum of the weekly windows — was what the budget gate, the
 "quota full" anomaly and the cost delta all read. So a Fable week at 96 %
 deferred a run on **Sonnet**, a window that run does not draw from at all, and
-`cc-hub` sat still with 60 % of its general week unused.
+`Freilauf` sat still with 60 % of its general week unused.
 
 The rule is one sentence: **the general week binds every claude run, a per-model
 week only a run on that model.** Four functions in `quota.mjs` carry it, and
@@ -974,8 +1035,8 @@ whichever gate a claude budget was blamed for. Both are fixed by one rule:
   only a `deferred` run may go: a scheduled one is waiting for its time, not
   for a quota.
 
-The e2e sandbox points `CCHUB_CLAUDE_CREDENTIALS` at a file that does not exist,
-so the suite never touches the real endpoint (same fence as `CCHUB_CURSOR_AUTH`)
+The e2e sandbox points `FREILAUF_CLAUDE_CREDENTIALS` at a file that does not exist,
+so the suite never touches the real endpoint (same fence as `FREILAUF_CURSOR_AUTH`)
 and the quota fixture stays the only source — which also keeps the operator's
 real plan string out of the suite.
 
@@ -1094,7 +1155,7 @@ browser and `hub.mjs`, all measured on the running installation.
 
 `vpn-proxy.mjs` was `https.createServer` — HTTP/1.1 only. A browser opens at most
 **6 connections per origin** over HTTP/1.1, and since the live channel exists
-**every open cc-hub tab holds one of them open forever**: an EventSource is a
+**every open Freilauf tab holds one of them open forever**: an EventSource is a
 response that never ends. Four tabs left the page two connections to load itself
 through; six left it none, and every further request simply queued in the browser
 until a tab was closed.
@@ -1194,7 +1255,7 @@ application comes out of it.
 - The header kept **context** (repo switcher) and one **action** (Quick Run) and
   gave up status. It is a line high and has to stay that way.
 - **The chosen repo is remembered.** The switcher's choice travels as the
-  `cchub_repo` cookie, so a page that carries no `?repo=` of its own (a menu
+  `freilauf_repo` cookie, so a page that carries no `?repo=` of its own (a menu
   click, a context-less page like settings) keeps the selection instead of
   falling back to the first repo — the reset the overview used to do on every
   navigation. The cookie is written twice on purpose: by the client when the
@@ -1242,7 +1303,7 @@ application comes out of it.
   on a run id, and the one that is not (the tbody) exists only on pages that
   follow the switcher, where the two repos are the same value anyway.
 - **The fold lives on the shell**, not on the sidebar: `#shell.side-closed`,
-  written from `localStorage['cchub.sidebar.open']` in try/catch. The live
+  written from `localStorage['freilauf.sidebar.open']` in try/catch. The live
   channel replaces `#status-sidebar` **whole** — blocks appear and disappear
   (no open incidents, no incident block), and an element that is not in the DOM
   cannot be swapped in by its own id — so a class on the sidebar itself would
@@ -1253,15 +1314,15 @@ application comes out of it.
 - Fragment route: `GET /api/fragments/sidebar?repo=`, rendered by the same
   function the page uses. `/api/fragments/header-status` and `…/usage` still
   exist; the client simply asks for the whole aside instead.
-- **It refreshes itself every 30 s** (hub.js, `window.CCHUB_SIDEBAR_POLL_MS` in
+- **It refreshes itself every 30 s** (hub.js, `window.FREILAUF_SIDEBAR_POLL_MS` in
   the browser suite). The run events alone were not enough: a long-running
   agent fires none, and the usage/balance numbers sat frozen at page-load
   values. The timer asks the same fragment, the server's panel caches
-  (usage.mjs/balances.mjs, now one minute, `CCHUB_USAGE_CACHE_MS`/
-  `CCHUB_BALANCE_CACHE_MS` in the suite) decide how often the vendors are
+  (usage.mjs/balances.mjs, now one minute, `FREILAUF_USAGE_CACHE_MS`/
+  `FREILAUF_BALANCE_CACHE_MS` in the suite) decide how often the vendors are
   really called, and the stale-while-revalidate refresh lands on the next tick.
 - **The tmux memory block works exactly that way, on an eight-minute clock.**
-  `sessionMemory()` (sessions.mjs, `CCHUB_SESSION_MEM_CACHE_MS`) measures the
+  `sessionMemory()` (sessions.mjs, `FREILAUF_SESSION_MEM_CACHE_MS`) measures the
   total RSS of every tmux session on the machine — foreign ones included, the
   question is what the MACHINE holds — through `listSessions()`, so the sidebar's
   total and the sessions page's own summary are the same number by construction.
@@ -1311,7 +1372,7 @@ grid would bring switched-off schedule fields back, visible *and* submitted.
 mergeable; the hub integrates. That one rule is what this whole section is
 about, and everything below follows from it.
 
-Before it, a run ended when the agent called `cc-report done`. What it had
+Before it, a run ended when the agent called `fl-report done`. What it had
 committed then sat in its worktree and its branch, and whether it ever reached
 `main` depended on whether the agent did it itself — which is how this
 repository's reflog came to hold two `reset`s on main, a cherry-pick duplicate
@@ -1329,7 +1390,7 @@ the prompt).
 ### The finish gate: `runs.finish_state`, not a new status
 
 `handleReport(runId, {kind:'done'})` is where every end channel already met —
-`cc-report done`, cursor's `finishByTurnEnd()`, the inbox fallback. So the check
+`fl-report done`, cursor's `finishByTurnEnd()`, the inbox fallback. So the check
 hangs there. It stores the report first (it is safe from that moment on,
 whatever the agent does next), then asks three questions in this order:
 
@@ -1355,15 +1416,15 @@ makes "did this run commit anything" and "what does it want merged" answerable
 without guessing at a branch. A run from before that column falls back to
 `git merge-base <tip> origin/{base}`.
 
-### The answer has to reach the agent, so `cc-report` prints it
+### The answer has to reach the agent, so `fl-report` prints it
 
-`cc-report` used to call `curl -fsS` and throw the answer away. It now reads the
+`fl-report` used to call `curl -fsS` and throw the answer away. It now reads the
 response and prints the `message` field on stdout — which puts the text into the
 agent's **running turn** as that tool's own output, the cheapest moment there
 is. Two consequences worth keeping:
 
 - **`POST /api/runs/<id>/report` must answer 2xx.** Anything else is "hub
-  unreachable" to `cc-report`, which files the report in `inbox.jsonl` for the
+  unreachable" to `fl-report`, which files the report in `inbox.jsonl` for the
   watcher to replay. A finish gate that answered 4xx would loop.
 - Channels with no call to answer (`finishByTurnEnd`, the inbox) get the same
   text typed into the tmux session instead — `handleReport` takes a
@@ -1409,7 +1470,7 @@ the chain can never tear. That this needs neither a broker nor a database lock
 is the same argument `events.mjs` rests on: HTTP, scheduler and watcher are one
 process.
 
-The merge happens in `~/agents/integrate/<repo>` (`CCHUB_INTEGRATE_DIR`), a
+The merge happens in `~/agents/integrate/<repo>` (`FREILAUF_INTEGRATE_DIR`), a
 detached worktree that belongs to the hub and is cleaned before every job. **Not
 in the operator's checkout**, and that is not politeness: git refuses to push
 into a branch that is checked out there, a branch belongs to exactly one
@@ -1572,7 +1633,7 @@ The remote is the backup, and that is a rule beyond the integrator:
 
 ### Follow-up reports: a finished run can report again
 
-Three of the four coding agents stay in their TUI after `cc-report done`, and
+Three of the four coding agents stay in their TUI after `fl-report done`, and
 the run's terminal stays writable for exactly that reason (see "The work is
 done — who is still there"). So the ordinary shape of a day is: the report
 arrives, the operator sees that something is not finished, types the rest into
@@ -1583,7 +1644,7 @@ commits sat in the worktree, no merge, no flow, no message.
 A report from a finished run is a **follow-up report** now
 (`handleFollowUp()` in `reports.mjs`). Four decisions, each deliberate:
 
-- **The same command, not a second one.** The agent runs `cc-report done
+- **The same command, not a second one.** The agent runs `fl-report done
   --file <report>` again, exactly as the prompt already told it to. The hub
   tells a first report from a follow-up by the run's status; the agent does
   not have to know, and a second verb would be a second thing to forget. The
@@ -1679,20 +1740,33 @@ node test/e2e.mjs --echt    # additionally ONE real run per harness (consumes qu
 node test/e2e.mjs --keep    # keep the sandbox (debugging)
 node test/browser.mjs       # public/hub.js in a real Chromium — ~10 s
 node test/proxy.mjs         # vpn-proxy.mjs against a stub upstream — <1 s
-node test/deploy.mjs        # bin/cchub-deploy against a bare origin — ~3 s
+node test/deploy.mjs        # bin/freilauf-deploy against a bare origin — ~3 s
 ```
 
 `test/deploy.mjs` is the odd one out because the thing it tests restarts
 services and installs scripts into `~/.local/bin`. It therefore runs with `HOME`,
-`CCHUB_DEPLOY_DIR` and `PATH` all pointed into a sandbox, the last of them at a
+`FREILAUF_DEPLOY_DIR` and `PATH` all pointed into a sandbox, the last of them at a
 shim directory holding `systemctl`, `curl`, `npm` and `journalctl`: they log
 every call and answer what the test dictates — `curl` reads its HTTP status from
 a file, one per line, each consumed once, which is what makes "the deploy is
 unhealthy but the rollback is fine" expressible at all. Git, `flock` and the
 checkout are real; that is the half a stub could not test.
 
+The same suite covers the whole rename transition, because that is where it
+lives: `systemctl`'s shim reads the name of the ACTIVE unit from a file, so
+"deployed onto an installation that is still run by `cchub.service`" and
+"deployed onto a migrated one" are two tests instead of an argument; the shims
+are checked by really running `~/.local/bin/cc-report` and reading what
+`fl-report` said back; and `setup/migrate-from-cc-hub.sh` runs against a whole
+fake old installation built inside the sandbox `HOME` — old config directory
+with `CCHUB_` keys, old data directory with `cc-hub.db`, an old deploy checkout
+with the old remote, old unit files, the old opencode plugin, and a `flows` row
+whose command still says `cchub-deploy`. `--dry-run` first (and nothing that
+moves systemd may be called), then the real run, then a second run to prove it is
+a no-op, then the both-directories-exist case, which must refuse.
+
 The e2e suite starts a **second hub** on a free port with its own database, its
-own test repo and its own `cc-start` stub. It may therefore run at any time
+own test repo and its own `fl-start` stub. It may therefore run at any time
 alongside production: the production database, `~/agents` and foreign tmux
 sessions are never touched, and only sessions the suite created itself are
 killed (also on Ctrl-C). Watcher passes are triggered directly instead of
@@ -1710,7 +1784,7 @@ gigabytes of RSS while it sat in swap. The leftovers are recognizable by their
 `-2` suffix — the stub's own collision loop, firing because a retry reuses the
 run id while the first session is still standing. The stub knows the name it
 created and cannot forget to write it down, so `$SB/sessions.txt` is the list and
-`aufraeumen()` reads it. Still no pattern across all `cc-*`: that file holds
+`aufraeumen()` reads it. Still no pattern across all `fl-*`: that file holds
 exactly the sessions THIS sandbox produced.
 
 The sandbox repo has a **bare `origin`** next to it, which is what lets the
@@ -1720,7 +1794,7 @@ work is on the base branch" walks a clean run through to a merge commit on
 conflict, watches a conflict run take over and both runs end up merged, hits the
 attempt limit, kills an agent mid-gate, fails a merge check, and pushes an
 operator commit to origin. The suite **owns the integrator's clock**
-(`CCHUB_INTEGRATOR_OFF=1`): two processes driving one integration worktree is a
+(`FREILAUF_INTEGRATOR_OFF=1`): two processes driving one integration worktree is a
 race nobody wants to debug, so the hub still integrates on the report path and
 the suite calls `integrateTick(nowMs)` itself. The last test in the group turns
 `merge_mode` back to `off` — everything before it is the proof that without the
@@ -1763,7 +1837,7 @@ list in a call site:
 
 | What | From | Why not otherwise |
 |---|---|---|
-| Which coding agents exist at all | the registry: `server/harnesses/` plus every external package under `CCHUB_PLUGIN_DIR` | a coding agent known only at runtime cannot be a literal anywhere; that is the CHECK the rebuild deleted |
+| Which coding agents exist at all | the registry: `server/harnesses/` plus every external package under `FREILAUF_PLUGIN_DIR` | a coding agent known only at runtime cannot be a literal anywhere; that is the CHECK the rebuild deleted |
 | Which providers exist at all | the registry: `server/providers/` plus external packages | same |
 | Providers per harness | harness plugin (`providers`, `keyFreeProviders`) ∩ operator selection | claude runs only on the subscription; hermes needs a key for Zen/DeepSeek, opencode does not |
 | Whether a provider may be offered at all | `pluginHasCredential(id)` — stored value, named variable, or a declared one in the environment | it used to be `providerHasKey()`, which reads `process.env` and nothing else, so a key the operator stored in the UI was honoured at launch and still missing from the form |
@@ -1777,7 +1851,7 @@ list in a call site:
 | Effort opencode | model catalog (`~/.cache/opencode/models.json`) | opencode discards an unknown variant **silently** |
 | Effort cursor | is part **of the model ID** (`…-low/-medium/-high/-xhigh/-max`) | cursor-agent has no `--effort`; the field stays out of the form |
 
-Pass-through: claude `--effort`, hermes `--reasoning` (cc-start translates),
+Pass-through: claude `--effort`, hermes `--reasoning` (fl-start translates),
 opencode via `OPENCODE_CONFIG_CONTENT` with `agent.build.{model,variant}` — the
 variant only works when the model is set in the same block. Verification:
 `~/.local/state/opencode/model.json` records the last used variant per model.
@@ -1809,7 +1883,7 @@ also read are `.claude/settings.json`, `.claude/settings.local.json`,
 `.claude/commands` and Claude **hooks**. There is **no** local switch for it —
 `allow_third_party_plugin_imports` is a server-side team/enterprise field.
 
-Consequence for cc-hub: a cursor run pulls in `~/.claude/skills` and the
+Consequence for Freilauf: a cursor run pulls in `~/.claude/skills` and the
 worktree's `CLAUDE.md` **automatically**. The opt-in idea behind
 `~/agents/zusaetze/` (deliberately no `.claude/skills` folder) therefore only
 half applies to cursor — the run sees more than its prompt plus the checked
@@ -1820,7 +1894,7 @@ extras.
 **cursor's TUI stays standing after the work is done** ("→ Add a follow-up").
 The pane never dies, the process never exits — so `_pane_died` and `_exit`, the
 last safety nets under every other harness, never fire. Until this was built, a
-cursor run whose agent forgot `cc-report done` stood on `running` **forever**,
+cursor run whose agent forgot `fl-report done` stood on `running` **forever**,
 and a single run waiting for "when no other run of this repo is going" waited
 behind it just as long. Measured on 2026-08-25: one forgotten report held up four
 runs, among them the one meant to fix exactly this.
@@ -1843,7 +1917,7 @@ Only from status `running`. `waiting_help` means the agent asked a question and
 is deliberately idle until a human answers — ending its turn is correct there,
 not the end of the work (the answer via `/api/runs/<id>/send` puts it back on
 `running`). A run that reported properly is already `done` when the hook fires,
-because `cc-report` is a tool call *inside* the turn and the hook comes after it
+because `fl-report` is a tool call *inside* the turn and the hook comes after it
 — so this only ever catches the case it is meant for. What it writes as the
 report is the agent's own closing message from the transcript, plus one line
 saying that the platform, not the agent, closed the run.
@@ -1873,13 +1947,13 @@ plan. `platformSuffix()` builds four sections, and the order is the point:
 4. **how the run ends** — last, because that is what runs actually fail on:
    write the report to `{report_file}` (→ `~/agents/runs/<id>/report.md`,
    deliberately outside the worktree so a report file cannot leave it dirty),
-   then `cc-report done --file <that path>`, then stop.
+   then `fl-report done --file <that path>`, then stop.
 
 **Section 4 cannot be removed, and that is a lesson rather than a preference.**
 The settings field used to *replace* this whole block. It is called a suffix, it
 starts out empty and it looks like a free notepad — so the day somebody wrote
 their own working rules into it, every prompt on this hub silently lost the
-sentence "at the end always `cc-report done`". The runs kept working and kept not
+sentence "at the end always `fl-report done`". The runs kept working and kept not
 reporting. Whatever is written there is an addition now, placed where it reads
 like one; for rules that concern a single repository the repo prompt is still the
 better place.
@@ -1940,7 +2014,7 @@ Architecture, step registry contract and the integration seams:
 hub *recorded*; this one shows what the machine is actually *holding* — and it
 is the only place where a session can be ended by hand.
 
-A session deliberately outlives its agent: `cc-start --keep` sets
+A session deliberately outlives its agent: `fl-start --keep` sets
 `remain-on-exit`, so the screen stays readable afterwards. The price is a
 process keeping its memory until the session goes, and with the old rule that
 bill ran for days (thirty sessions, 15 GB, measured).
@@ -1969,12 +2043,12 @@ Three of the four coding agents keep running after the task is finished, and
 that is not a detail of the terminal but the reason it exists (measured
 2026-08-27, one trivial prompt each):
 
-| Coding agent | Command (`cc-start`) | When the work is done |
+| Coding agent | Command (`fl-start`) | When the work is done |
 |---|---|---|
-| claude | `claude --permission-mode dontAsk "$CC_PROMPT"` | stays in its TUI, pane alive — production sessions on `done` runs still had a live `claude` pane 19 h later |
-| opencode | `opencode --auto --prompt "$CC_PROMPT"` | stays in its TUI, pane alive |
-| cursor | `cursor-agent --force --trust -- "$CC_PROMPT"` | stays at "→ Add a follow-up", pane alive — this is what `finishByTurnEnd()` exists for |
-| hermes | `hermes chat -q "$CC_PROMPT" --yolo` | **exits.** `-q` is "single query (non-interactive mode)": it prints its answer plus a `hermes --resume …` line and the process ends (measured: dead pane, status 0, 9 s after the start) |
+| claude | `claude --permission-mode dontAsk "$FL_PROMPT"` | stays in its TUI, pane alive — production sessions on `done` runs still had a live `claude` pane 19 h later |
+| opencode | `opencode --auto --prompt "$FL_PROMPT"` | stays in its TUI, pane alive |
+| cursor | `cursor-agent --force --trust -- "$FL_PROMPT"` | stays at "→ Add a follow-up", pane alive — this is what `finishByTurnEnd()` exists for |
+| hermes | `hermes chat -q "$FL_PROMPT" --yolo` | **exits.** `-q` is "single query (non-interactive mode)": it prints its answer plus a `hermes --resume …` line and the process ends (measured: dead pane, status 0, 9 s after the start) |
 
 So a standing session and a reachable agent are two different facts, and only
 `pane_dead` tells them apart — `remain-on-exit` keeps hermes's screen exactly
@@ -2014,7 +2088,7 @@ therefore takes the **earlier** of the run's end and the process's end.
 
 Automatic closing only ever touches sessions **that carry a run of this hub**.
 The e2e suite and other hub instances share the same tmux server, and a pattern
-across all `cc-*` would kill theirs; a foreign session is listed and ended by
+across all `fl-*` would kill theirs; a foreign session is listed and ended by
 hand, never by the watcher.
 
 ## Extra skills (opt-in)
@@ -2025,7 +2099,7 @@ folder with a SKILL.md appears as a checkbox in the agent and single-run forms
 (`zusaetze.mjs`); when selected, the prompt gets the instruction to read and
 apply the SKILL.md (full path). Installed commit-pinned via
 `setup/02-install-scripts.sh` (currently: `unlazy` for lazy/small models), not
-part of this repo. Path override for tests: `CCHUB_ZUSAETZE_DIR`.
+part of this repo. Path override for tests: `FREILAUF_ZUSAETZE_DIR`.
 
 ## Incidents (rate limit, provider outage)
 
@@ -2037,9 +2111,9 @@ principle):
 
 | Source | Harness | Immediately red? |
 |---|---|---|
-| Hook `StopFailure` → `cc-report _api_error` | claude | yes (fixed enum) |
+| Hook `StopFailure` → `fl-report _api_error` | claude | yes (fixed enum) |
 | Transcript JSONL `isApiErrorMessage` + `error` | claude | yes (second channel, with timestamp) |
-| Plugin `session.error` → `cc-report _api_error` | opencode | yes |
+| Plugin `session.error` → `fl-report _api_error` | opencode | yes |
 | pipe-pane log, patterns per harness (plugin `logPatterns`, orchestrated in `detect.mjs`) | all; for hermes and cursor the **only** source | no: yellow; red on repetition within 10 min or 5 min of silence — or when the optional check LLM confirms it (Settings → Incident check: `llm_check_source` + `llm_check_model`, any plugin declaring `llm`) |
 | Provider pulse (plugin pulse targets, every 5 min) | global | after 2 failures, closes on recovery |
 
@@ -2057,13 +2131,13 @@ reports a real error (claude, opencode) or at least the agent's activity
 
 **A hook report from a foreign claude session is ignored.** The run's own claude
 is started with `--session-id <run id>`, and every Claude hook event delivers
-that id on stdin — `cc-report` forwards it. A claude process the AGENT spawns (a
-probe, a test of error handling) inherits the worktree's hooks AND `CC_RUN_ID`
+that id on stdin — `fl-report` forwards it. A claude process the AGENT spawns (a
+probe, a test of error handling) inherits the worktree's hooks AND `FL_RUN_ID`
 but carries its own session id, and its API errors are the run's subject matter,
 not the run's provider problems. Measured 2026-08-30: an agent testing a fake
 model id (`nosuch/model-xyz`) opened a red "Model unavailable" on its own healthy
 run. The guard (`fremdeClaudeSession()` in detect.mjs, applied in `handleReport`)
-only ever narrows: no session id (an older cc-report) means the run's own.
+only ever narrows: no session id (an older fl-report) means the run's own.
 
 **Silence is only an argument where activity is measured.** `measureActivity()`
 has a source for claude (transcript mtime), opencode (session store) and cursor
@@ -2092,7 +2166,7 @@ sidebar and the notifications stop counting it as open:
 ### The notification grace period — and the un-ringing
 
 A red incident does **not** page immediately: `notify_at` stores
-`occurrence + CCHUB_INCIDENT_NOTIFY_DELAY_MS` (default 10 min,
+`occurrence + FREILAUF_INCIDENT_NOTIFY_DELAY_MS` (default 10 min,
 0 = immediately), and the watcher pass `vorfaelleMeldenFaellig()` sends only
 what has come due and is STILL open. An incident that resolves itself within
 the grace period never pages. An incident that WAS announced also announces its
@@ -2164,7 +2238,7 @@ errors (`post_api_request` only fires after success).
   browser rewraps the agent's window to its size while watching — with and
   without write access alike. The remedy would be `window-size manual` on the
   session.
-- **`cc-start` positional arguments.** `cc-start [name] [directory]`; when the
+- **`fl-start` positional arguments.** `fl-start [name] [directory]`; when the
   name is set via `--name` (that is how the hub calls it), the directory moves
   to position 1. Otherwise the agent starts in the CALLER's working directory
   instead of the worktree.
@@ -2182,7 +2256,7 @@ errors (`post_api_request` only fires after success).
   `authentication_failed`, `billing_error`, `model_not_found`, …) The process is
   gone within 100 ms after the event and tears the hook down; `SessionEnd` on
   the other hand is awaited. The hook must therefore detach immediately:
-  `setsid -f cc-report _api_error` — the child inherits the stdin pipe with the
+  `setsid -f fl-report _api_error` — the child inherits the stdin pipe with the
   JSON. Simulating without quota: a mini HTTP server answering 429 with
   `anthropic-ratelimit-unified-status: rejected`, and `ANTHROPIC_BASE_URL`
   pointed at it (that is how `test/e2e.mjs` does it).
@@ -2198,7 +2272,7 @@ errors (`post_api_request` only fires after success).
   by itself — measured with opencode 1.18.23: ~2 KB goes, ~20 KB stays put. A
   real hub prompt (task + platform rules + extra skills) is past that, and the
   failure is silent in every direction: tmux session alive, no line in the log,
-  the run simply never starts working. `cc-start` therefore presses Enter once
+  the run simply never starts working. `fl-start` therefore presses Enter once
   from the launcher after the TUI has drawn (it waits for the status bar, not
   for a fixed number of seconds). Enter on an empty editor is a no-op in
   opencode — measured — so the case that submitted by itself is not harmed.
@@ -2207,7 +2281,7 @@ errors (`post_api_request` only fires after success).
   pattern matches a token count just as happily as a 503. A status code counts
   only next to an error word (`HTTP_5XX` in `harnesses/patterns.mjs`, shared by
   cursor/hermes/opencode and `typVonText`).
-- **An agent working on cc-hub reads its own alarm texts into the log.** One
+- **An agent working on Freilauf reads its own alarm texts into the log.** One
   cursor run produced three incidents in seven minutes, all from its own screen:
   the token count above, the hub's section heading `Incidents: rate limit and
   provider errors (auto-alarm)`, and the e2e suite's success line
@@ -2225,7 +2299,7 @@ errors (`post_api_request` only fires after success).
   keeps producing output cannot.
 - **`cursor-agent -p` is wrong for a run.** `-p/--print` prints and exits — the
   tmux session would be gone immediately. The prompt belongs as a **positional
-  argument** after `--` (`cursor-agent --force --trust -- "$CC_PROMPT"`); the
+  argument** after `--` (`cursor-agent --force --trust -- "$FL_PROMPT"`); the
   TUI then works through the task and stays up afterwards, like opencode.
 - **Without `--trust` cursor hangs at the dialog** "Do you trust the contents of
   this directory?" — the session lives but does nothing. Same pattern as
@@ -2309,11 +2383,12 @@ errors (`post_api_request` only fires after success).
   markup** the moment the string contains a quote — and a translated
   confirmation text eventually does. It needs `e(JSON.stringify(...))`: JSON for
   the JavaScript, HTML escaping for the attribute, in that order.
-- **`bin/cc-attach` and `bin/cc-kill` each carried their own copy of the session
+- **`bin/fl-attach` and `bin/fl-kill` each carried their own copy of the session
   prefix → harness table, and both had gone stale in the same way**: `cursor`
-  was missing, so every `cc-cu-*` session was reported as claude. There is one
-  copy now, `bin/cc-harness-tags.sh`, sourced by both — and a coding agent that
-  arrived as a plugin brings its own tag in its launch spec, which `cc-start`
-  notes into `~/.local/share/cc-hub/harness-tags` the first time it launches
-  one. These two scripts read tmux, not the hub's database; that file is the only
-  place on the machine that knows `cc-fa-` means `fakeagent`.
+  was missing, so every `-cu-` session was reported as claude. There is one
+  copy now, `bin/fl-harness-tags.sh`, sourced by all three of them (`fl-help`
+  had a third copy) — and a coding agent that arrived as a plugin brings its own
+  tag in its launch spec, which `fl-start` notes into
+  `~/.local/share/freilauf/harness-tags` the first time it launches one. These
+  scripts read tmux, not the hub's database; that file is the only place on the
+  machine that knows `fl-fa-` means `fakeagent`.

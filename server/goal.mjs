@@ -1,10 +1,10 @@
-// cc-hub — the goal: a SECOND prompt, typed into the session after the start.
+// Freilauf — the goal: a SECOND prompt, typed into the session after the start.
 //
 // A run's prompt says what to do. A goal says when it is DONE: claude's
 // `/goal <condition>` sets a completion condition, checks it after every turn
 // and takes another turn by itself for as long as it does not hold. That is the
 // difference to everything else in the run definition — the goal is not a flag
-// cc-start could pass on. The command exists only INSIDE the session, so the
+// fl-start could pass on. The command exists only INSIDE the session, so the
 // hub types it in, after the initial prompt has gone off.
 //
 // Hence this module, and hence one delivery function for both ways in:
@@ -20,18 +20,19 @@
 import db, { addEvent } from './db.mjs'
 import { sendToSession, sh } from './util.mjs'
 import { goalSpec } from './harnesses/index.mjs'
+import { env } from './env.mjs'
 
 /** Milliseconds from an env variable, with a default for anything unusable. */
 const ms = (v, fallback) => Number.isFinite(+v) && +v >= 0 ? +v : fallback
 
 /** How long to wait for the TUI to draw before giving up on this attempt. */
-const waitMs = () => ms(process.env.CCHUB_GOAL_WAIT_MS, 60_000)
+const waitMs = () => ms(env('GOAL_WAIT_MS'), 60_000)
 
 /**
  * Grace after the pane has drawn. Output is not the same thing as an editor
  * that accepts input — the first thing every TUI paints is its frame.
  */
-const graceMs = () => ms(process.env.CCHUB_GOAL_DELAY_MS, 3_000)
+const graceMs = () => ms(env('GOAL_DELAY_MS'), 3_000)
 
 const schlafen = (dauer) => new Promise(resolve => setTimeout(resolve, dauer))
 

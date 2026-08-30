@@ -1,4 +1,4 @@
-// cc-hub — configured coding agents.
+// Freilauf — configured coding agents.
 //
 // The harness plugins (server/harnesses) describe what the hub COULD drive;
 // this module holds what the operator has actually CONFIGURED in the settings.
@@ -25,6 +25,8 @@ import { providerFuerHarness } from './models.mjs'
 import {
   listPluginConfigs, pluginConfig, setPluginConfig, setPluginProviders,
 } from './plugins/store.mjs'
+import { env } from './env.mjs'
+import { configDir } from './paths.mjs'
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS coding_agents (
@@ -108,7 +110,7 @@ export function deleteCodingAgent(id) {
 
 /** Path of the optional seed file (private setup repos install it there). */
 export function seedFilePath() {
-  return process.env.CCHUB_AGENTS_SEED ?? join(homedir(), '.config', 'cc-hub', 'coding-agents.json')
+  return env('AGENTS_SEED') ?? join(configDir(), 'coding-agents.json')
 }
 
 /**

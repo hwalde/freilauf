@@ -1,19 +1,20 @@
-// cc-hub — small helpers without external dependencies.
+// Freilauf — small helpers without external dependencies.
 import { homedir } from 'node:os'
 import { execFile, execFileSync } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { t, currentLanguage } from './i18n.mjs'
+import { env } from './env.mjs'
 
 export const HOME = homedir()
-export const RUNS_DIR = process.env.CCHUB_RUNS_DIR ?? `${HOME}/agents/runs`
-export const WORKTREES_DIR = process.env.CCHUB_WORKTREES_DIR ?? `${HOME}/agents/worktrees`
+export const RUNS_DIR = env('RUNS_DIR') ?? `${HOME}/agents/runs`
+export const WORKTREES_DIR = env('WORKTREES_DIR') ?? `${HOME}/agents/worktrees`
 
 /**
  * The commit this hub process is running from, as a short sha — and the empty
  * string when that cannot be answered (a tarball instead of a checkout, no git).
  *
- * Since the service runs from its own deploy checkout (bin/cchub-deploy), "which
+ * Since the service runs from its own deploy checkout (bin/freilauf-deploy), "which
  * version is live" stopped being a thing one can see by looking at a directory.
  * The sidebar prints this on every page.
  *
@@ -50,9 +51,9 @@ export function kurzid(uuid) { return uuid.split('-')[0] }
  * about this installation, and no notifier plugin has to re-export it.
  */
 export function publicBase() {
-  // Without CCHUB_PUBLIC_URL the links point nowhere — the note is in env.example.
-  return (process.env.CCHUB_PUBLIC_URL
-    || `https://127.0.0.1:${process.env.CCHUB_VPN_PORT ?? 8790}`).replace(/\/+$/, '')
+  // Without FREILAUF_PUBLIC_URL the links point nowhere — the note is in env.example.
+  return (env('PUBLIC_URL')
+    || `https://127.0.0.1:${env('VPN_PORT') ?? 8790}`).replace(/\/+$/, '')
 }
 
 /** The detail page of one run, or the overview when there is no run. */

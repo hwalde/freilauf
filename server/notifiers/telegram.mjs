@@ -1,4 +1,4 @@
-// cc-hub — notifier plugin: Telegram.
+// Freilauf — notifier plugin: Telegram.
 //
 // Everything this file holds used to be `server/telegram.mjs`, imported
 // directly by ten modules: sendMessage with parse_mode HTML, link preview off,
@@ -38,10 +38,20 @@ const chatId = (ctx) => String(ctx?.setting?.('chat') ?? '').trim()
  * `parameters.retry_after`, and honouring it is the difference between a
  * delayed message and a dropped one.
  */
+/**
+ * The Bot API base, overridable so the e2e suite can stub it. Read off
+ * `ctx.env` rather than through `server/env.mjs`, because `ctx.env` is what a
+ * plugin is handed; the old variable name is honoured for one transition
+ * release, like every other seam of this hub.
+ */
+function telegramBase(ctx) {
+  return ctx?.env?.FREILAUF_TELEGRAM_BASE ?? ctx?.env?.CCHUB_TELEGRAM_BASE ?? 'https://api.telegram.org'
+}
+
 async function api(ctx, method, body, { timeoutMs = 15_000 } = {}) {
   const tok = token(ctx)
   if (!tok) return { ok: false, reason: 'no token', errorKey: 'tg.err_no_token' }
-  const base = ctx?.env?.CCHUB_TELEGRAM_BASE ?? 'https://api.telegram.org'
+  const base = telegramBase(ctx)
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const isForm = body instanceof FormData
@@ -176,7 +186,7 @@ const setup = {
     async chats(ctx, page) {
       const tok = token(ctx)
       if (!tok) return { status: 400, body: { ok: false, error: page.t('tg.no_token') } }
-      const bs = ctx?.env?.CCHUB_TELEGRAM_BASE ?? 'https://api.telegram.org'
+      const bs = telegramBase(ctx)
       try {
         const res = await fetch(`${bs}/bot${tok}/getUpdates?limit=100`, { signal: AbortSignal.timeout(15_000) })
         const j = await res.json()
@@ -213,7 +223,7 @@ const plugin = {
    * Both fields keep the settings keys they have always had. That is the whole
    * point of `settingKey`, and it is why this rebuild needed no settings
    * migration: an installation that upgrades finds its token exactly where it
-   * left it, and `bin/cc-notify` reads the same row.
+   * left it, and `bin/fl-notify` reads the same row.
    *
    * `required: true` is what `notifierConfigured()` reads — a Telegram without
    * a token or without a chat is not a channel, it is a blank form, and the

@@ -1,4 +1,4 @@
-// cc-hub flows — structured extraction. Same channel as the check LLM
+// Freilauf flows — structured extraction. Same channel as the check LLM
 // (pruefer.mjs): the default model is `llm_check_model` and the default source
 // `llm_check_source`, both overridable per step (`model`, `source`). An unset
 // source reads as `provider:openrouter` — the call this file used to make

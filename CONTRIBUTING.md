@@ -1,4 +1,4 @@
-# Contributing to cc-hub
+# Contributing to Freilauf
 
 **Pull requests are very welcome.** Bug reports, plugin files for further coding
 agents or model providers, translations, documentation fixes — all of it. You do
@@ -14,7 +14,7 @@ Both are written to be read by agents.
 - **Project language is English** — source, comments, documentation, commit
   messages. (`lang/de.json` and `lang/zh.json` are the obvious exception.)
 - **No hardcoded UI strings.** Everything user-visible goes through `t('key')`
-  on the server and `window.CCHUB_I18N` in the browser. `lang/en.json`,
+  on the server and `window.FREILAUF_I18N` in the browser. `lang/en.json`,
   `lang/de.json` and `lang/zh.json` must carry the **same key set** with
   non-empty values — a unit test enforces it. Add English first; if you cannot
   translate, say so in the PR and translate the key with your best attempt
@@ -55,15 +55,15 @@ Both are written to be read by agents.
 node test/unit.mjs && node test/e2e.mjs     # required
 node test/browser.mjs                       # if you touched public/hub.js  (needs playwright)
 node test/proxy.mjs                         # if you touched vpn-proxy.mjs
-node test/deploy.mjs                        # if you touched bin/cchub-deploy
-bash -n bin/cc-start                        # if you touched a bin/ script (unit.mjs does this too)
+node test/deploy.mjs                        # if you touched bin/freilauf-deploy
+bash -n bin/fl-start                        # if you touched a bin/ script (unit.mjs does this too)
 ./pruefe-vor-push.sh                        # no private values in the commits
 ```
 
 The e2e suite is sandboxed — its own port, database, test repo, plugin directory
 and tmux sessions — so it is safe to run next to a live hub. If you add a suite
-or a fixture that loads plugins, point `CCHUB_PLUGIN_DIR` into the sandbox: it
-is a test fence exactly like `CCHUB_AGENTS_SEED`, and without it the suite loads
+or a fixture that loads plugins, point `FREILAUF_PLUGIN_DIR` into the sandbox: it
+is a test fence exactly like `FREILAUF_AGENTS_SEED`, and without it the suite loads
 whatever the operator happens to have installed and stops being reproducible.
 
 ## What makes a PR easy to merge
@@ -80,5 +80,5 @@ whatever the operator happens to have installed and stops being reproducible.
 
 ## Licensing of contributions
 
-cc-hub is licensed under [CC BY 4.0](LICENSE). By opening a pull request you
+Freilauf is licensed under [CC BY 4.0](LICENSE). By opening a pull request you
 agree that your contribution is published under the same license.

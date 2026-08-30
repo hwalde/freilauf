@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Something in cc-hub does not behave as described
+about: Something in Freilauf does not behave as described
 labels: bug
 ---
 
@@ -14,10 +14,10 @@ it is specific to one.
 **Output that helps** — please redact ports, addresses, hostnames and keys:
 
 ```
-cchub status
-cchub logs        # the lines around the problem
+freilauf status
+freilauf logs        # the lines around the problem
 node --version
-git -C ~/agents/deploy/cc-hub rev-parse --short HEAD   # or the sha in the sidebar
+git -C ~/agents/deploy/freilauf rev-parse --short HEAD   # or the sha in the sidebar
 ```
 
 **Anything else** — an incident on the run's detail page, the run's report, a

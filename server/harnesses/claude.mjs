@@ -1,4 +1,4 @@
-// cc-hub — coding agent plugin: claude (Claude Code CLI).
+// Freilauf — coding agent plugin: claude (Claude Code CLI).
 //
 // claude runs exclusively on the Claude subscription: there is no provider
 // selection, only the model choice. Usage data comes from the account's own
@@ -17,6 +17,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { refreshClaudeLimits } from '../claude-usage.mjs'
 import { runCli, cliFailure } from './cli-llm.mjs'
+import { env } from '../env.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -29,13 +30,13 @@ const plugin = {
   label: 'Claude Code',
   bin: 'claude',
   installHint: 'Native Claude Code installation (https://claude.com/claude-code), `claude` on the PATH.',
-  sessionTag: '',            // tmux sessions: cc-<name>
+  sessionTag: '',            // tmux sessions: fl-<name>
 
   /**
-   * How bin/cc-start calls this CLI. See docs/plugins.md, "The launch
-   * declaration"; the placeholders are the values of cc-start's own options.
+   * How bin/fl-start calls this CLI. See docs/plugins.md, "The launch
+   * declaration"; the placeholders are the values of fl-start's own options.
    *
-   * claude is one of the four coding agents cc-start ships a `case` of its own
+   * claude is one of the four coding agents fl-start ships a `case` of its own
    * for, and that case — not this block — is what a claude run is launched
    * from: the script has to work standalone, with no hub to hand it a spec.
    * The declaration is here because it is the same launch line written down
@@ -96,7 +97,7 @@ const plugin = {
    *
    * There is NO command-line flag for it. The command exists only inside the
    * session, which is why the hub types it in after the start instead of
-   * handing it to cc-start (server/goal.mjs). 4000 characters is the limit the
+   * handing it to fl-start (server/goal.mjs). 4000 characters is the limit the
    * command itself documents.
    */
   goal: {
@@ -250,7 +251,7 @@ const plugin = {
   },
 
   /**
-   * CLI arguments for cc-start. claude takes model and effort as separate flags.
+   * CLI arguments for fl-start. claude takes model and effort as separate flags.
    *
    * The second parameter is the plugin context every other harness uses to
    * resolve its provider credentials; claude runs on the subscription and has
@@ -284,7 +285,7 @@ const plugin = {
     let plan = null
     try {
       const cred = JSON.parse(readFileSync(
-        process.env.CCHUB_CLAUDE_CREDENTIALS ?? `${homedir()}/.claude/.credentials.json`, 'utf8'))
+        env('CLAUDE_CREDENTIALS') ?? `${homedir()}/.claude/.credentials.json`, 'utf8'))
       const o = cred?.claudeAiOauth
       if (o?.subscriptionType) plan = o.subscriptionType + (o.rateLimitTier ? ` (${o.rateLimitTier})` : '')
     } catch { /* no credentials file — plan stays unknown */ }

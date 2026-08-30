@@ -1,4 +1,4 @@
-// cc-hub flows — the step registry: ONE place that describes every building block
+// Freilauf flows — the step registry: ONE place that describes every building block
 // (what the designer shows, which properties it has, how it executes).
 //
 // Each step: { type, component ('task'|'switch'|'container'), group, branches?, fields,
@@ -195,7 +195,7 @@ export const STEPS = [
       then: { type: 'object', props: { ok: { type: 'boolean' }, detached: { type: 'boolean' } } },
       otherwise: { type: 'object', props: { ok: { type: 'boolean' }, exit_code: { type: 'number' }, stdout: { type: 'string' }, stderr: { type: 'string' } } } },
     fields: [
-      { key: 'command', kind: 'textarea', required: true, placeholder: 'sleep 3; systemctl --user restart cchub.service' },
+      { key: 'command', kind: 'textarea', required: true, placeholder: 'sleep 3; systemctl --user restart freilauf.service' },
       { key: 'cwd', kind: 'text', default: '{{trigger.run.repo_path}}' },
       { key: 'timeoutMinutes', kind: 'number', default: 10 },
       { key: 'detach', kind: 'checkbox', default: false },

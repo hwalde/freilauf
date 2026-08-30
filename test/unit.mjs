@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cc-hub — unit tests for the functions with real logic and edge cases.
+// Freilauf — unit tests for the functions with real logic and edge cases.
 //
 // Deliberately NOT tested: SQL strings, HTML snippets, CSS classes, column orders,
 // exact message texts, private helper functions. Such tests would only cement the
@@ -17,8 +17,8 @@ const start = Date.now()
 
 // Own data directory: importing runner.mjs pulls in db.mjs, which would otherwise
 // touch the real hub database.
-const sandkasten = mkdtempSync(join(tmpdir(), 'cc-hub-unit-'))
-process.env.CCHUB_DATA_DIR = join(sandkasten, 'data')
+const sandkasten = mkdtempSync(join(tmpdir(), 'freilauf-unit-'))
+process.env.FREILAUF_DATA_DIR = join(sandkasten, 'data')
 
 const d = (s) => new Date(s)
 
@@ -204,19 +204,19 @@ try {
   // ------------------------------------------------------------------
   gruppe('Repo choice cookie (web-helpers)')
 
-  await pruefe('cookieRepo reads the cchub_repo value out of the Cookie header', () => {
-    gleich(cookieRepo({ headers: { cookie: 'cchub_repo=7' } }), 7, 'bare')
-    gleich(cookieRepo({ headers: { cookie: 'other=1; cchub_repo=7' } }), 7, 'among other cookies')
-    gleich(cookieRepo({ headers: { cookie: 'other=1; cchub_repo=7; x=y' } }), 7, 'with a trailing cookie')
-    gleich(cookieRepo({ headers: { cookie: 'cchub_repo=abc' } }), null, 'non-numeric value')
-    gleich(cookieRepo({ headers: { cookie: 'cchub_repo=' } }), null, 'empty value')
+  await pruefe('cookieRepo reads the freilauf_repo value out of the Cookie header', () => {
+    gleich(cookieRepo({ headers: { cookie: 'freilauf_repo=7' } }), 7, 'bare')
+    gleich(cookieRepo({ headers: { cookie: 'other=1; freilauf_repo=7' } }), 7, 'among other cookies')
+    gleich(cookieRepo({ headers: { cookie: 'other=1; freilauf_repo=7; x=y' } }), 7, 'with a trailing cookie')
+    gleich(cookieRepo({ headers: { cookie: 'freilauf_repo=abc' } }), null, 'non-numeric value')
+    gleich(cookieRepo({ headers: { cookie: 'freilauf_repo=' } }), null, 'empty value')
     gleich(cookieRepo({ headers: {} }), null, 'no Cookie header at all')
   })
-  await pruefe('rememberRepo writes a long-lived cchub_repo cookie', () => {
+  await pruefe('rememberRepo writes a long-lived freilauf_repo cookie', () => {
     let gesetzt = null
     rememberRepo({ setHeader: (k, v) => { gesetzt = [k, v] } }, 3)
     gleich(gesetzt[0], 'set-cookie', 'header name')
-    enthaelt(gesetzt[1], 'cchub_repo=3', 'value')
+    enthaelt(gesetzt[1], 'freilauf_repo=3', 'value')
     enthaelt(gesetzt[1], 'Max-Age=31536000', 'long-lived — the choice stays until it is changed')
     enthaelt(gesetzt[1], 'Path=/', 'valid on every page')
   })
@@ -358,7 +358,7 @@ try {
   const quotaMit = async (inhalt, nr) => {
     const pfad = join(sandkasten, `quota${nr}.json`)
     if (inhalt !== null) writeFileSync(pfad, inhalt)
-    process.env.CCHUB_QUOTA_JSON = pfad
+    process.env.FREILAUF_QUOTA_JSON = pfad
     return import(`../server/quota.mjs?fixture=${nr}`)
   }
 
@@ -585,7 +585,7 @@ try {
       five_hour: { used_percentage: 97, resets_at: 1800000000 },
       seven_day: { used_percentage: 98 },
     }))
-    process.env.CCHUB_QUOTA_JSON = quotaPfad
+    process.env.FREILAUF_QUOTA_JSON = quotaPfad
     const { setSetting } = await import('../server/db.mjs')
     const { budgetGate } = await import('../server/scheduler.mjs')
     setSetting('claude_gate_on', '1')
@@ -597,13 +597,13 @@ try {
     const alt = {
       DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
       OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
-      CCHUB_CURSOR_AUTH: process.env.CCHUB_CURSOR_AUTH,
+      FREILAUF_CURSOR_AUTH: process.env.FREILAUF_CURSOR_AUTH,
     }
     const cursorAuth = join(sandkasten, 'cursor-auth.json')
     writeFileSync(cursorAuth, JSON.stringify({ accessToken: 't' }))
     process.env.DEEPSEEK_API_KEY = 'ds-test'
     process.env.OPENROUTER_API_KEY = 'or-test'
-    process.env.CCHUB_CURSOR_AUTH = cursorAuth
+    process.env.FREILAUF_CURSOR_AUTH = cursorAuth
     global.fetch = async (url) => {
       const u = String(url)
       if (u.includes('deepseek')) return { ok: true, json: async () => ({ is_available: true, balance_infos: [{ currency: 'USD', total_balance: '1' }] }) }
@@ -714,8 +714,8 @@ try {
     const echt = global.fetch
     const auth = join(sandkasten, 'cursor-gate-auth.json')
     writeFileSync(auth, JSON.stringify({ accessToken: 't' }))
-    const alt = process.env.CCHUB_CURSOR_AUTH
-    process.env.CCHUB_CURSOR_AUTH = auth
+    const alt = process.env.FREILAUF_CURSOR_AUTH
+    process.env.FREILAUF_CURSOR_AUTH = auth
     const cu = (nr) => import(`../server/quota.mjs?cu=${nr}`)
     global.fetch = async (url) => {
       const u = String(url)
@@ -732,12 +732,12 @@ try {
       const { cursorGateBlocked: g2 } = await cu(2)
       falsch((await g2(99.9, 20)).blocked, '99.5 % passes against a threshold of 99.9')
 
-      process.env.CCHUB_CURSOR_AUTH = join(sandkasten, 'missing-cursor-gate-auth.json')
+      process.env.FREILAUF_CURSOR_AUTH = join(sandkasten, 'missing-cursor-gate-auth.json')
       const { cursorGateBlocked: g3 } = await cu(3)
       falsch((await g3(95, 20)).blocked, 'no token → no signal → the gate stays open')
     } finally {
       global.fetch = echt
-      if (alt === undefined) delete process.env.CCHUB_CURSOR_AUTH; else process.env.CCHUB_CURSOR_AUTH = alt
+      if (alt === undefined) delete process.env.FREILAUF_CURSOR_AUTH; else process.env.FREILAUF_CURSOR_AUTH = alt
     }
   })
 
@@ -896,14 +896,14 @@ try {
   })
 
   await pruefe('without a credentials file nothing is fetched and nothing throws', async () => {
-    const before = process.env.CCHUB_CLAUDE_CREDENTIALS
-    process.env.CCHUB_CLAUDE_CREDENTIALS = join(sandkasten, 'no-such-credentials.json')
+    const before = process.env.FREILAUF_CLAUDE_CREDENTIALS
+    process.env.FREILAUF_CLAUDE_CREDENTIALS = join(sandkasten, 'no-such-credentials.json')
     // No URL is set either: were a request made anyway, this would hang or throw
     // rather than quietly pass.
     gleich(await cu.refreshClaudeLimits({ force: true }), null, 'no token, no answer')
     gleich(cu.claudeLimits(), null, 'and nothing cached')
-    if (before === undefined) delete process.env.CCHUB_CLAUDE_CREDENTIALS
-    else process.env.CCHUB_CLAUDE_CREDENTIALS = before
+    if (before === undefined) delete process.env.FREILAUF_CLAUDE_CREDENTIALS
+    else process.env.FREILAUF_CLAUDE_CREDENTIALS = before
   })
 
   await pruefe('an expired token is not used and is not refreshed', async () => {
@@ -911,13 +911,13 @@ try {
     writeFileSync(credPath, JSON.stringify({
       claudeAiOauth: { accessToken: 'x', refreshToken: 'y', expiresAt: Date.now() - 1000 },
     }))
-    const before = process.env.CCHUB_CLAUDE_CREDENTIALS
-    process.env.CCHUB_CLAUDE_CREDENTIALS = credPath
+    const before = process.env.FREILAUF_CLAUDE_CREDENTIALS
+    process.env.FREILAUF_CLAUDE_CREDENTIALS = credPath
     gleich(await cu.refreshClaudeLimits({ force: true }), null, 'expired means silent')
     const after = JSON.parse(readFileSync(credPath, 'utf8'))
     gleich(after.claudeAiOauth.accessToken, 'x', 'the credentials file is never written back')
-    if (before === undefined) delete process.env.CCHUB_CLAUDE_CREDENTIALS
-    else process.env.CCHUB_CLAUDE_CREDENTIALS = before
+    if (before === undefined) delete process.env.FREILAUF_CLAUDE_CREDENTIALS
+    else process.env.FREILAUF_CLAUDE_CREDENTIALS = before
   })
 
   // ------------------------------------------------------------------
@@ -937,20 +937,20 @@ try {
   })
   await pruefe('names the agent\'s report-back channels', () => {
     const t = platformSuffix(lauf, 'egal', {})
-    enthaelt(t, 'cc-report done', 'completion report')
-    enthaelt(t, 'cc-report help', 'call for help')
+    enthaelt(t, 'fl-report done', 'completion report')
+    enthaelt(t, 'fl-report help', 'call for help')
   })
   await pruefe('the operator\'s own rules are an ADDITION and cannot delete the finishing command', () => {
     // This field used to REPLACE the whole block. It is called a suffix, it
     // starts out empty and it looks like a free notepad — so the day somebody
     // wrote their working rules into it, every prompt on this hub silently lost
-    // "at the end always cc-report done". The runs kept working and kept not
+    // "at the end always fl-report done". The runs kept working and kept not
     // reporting; one of them held up the queue for a day.
     const t = platformSuffix(lauf, 'REGEL', { prompt_suffix: 'Immer Tests schreiben. Lauf {run_id}.' })
     enthaelt(t, 'Immer Tests schreiben.', 'the addition is there')
     enthaelt(t, 'Lauf abc-123.', 'and its placeholders are filled too')
     enthaelt(t, 'Platform rules', 'the platform rules stay')
-    enthaelt(t, 'cc-report done --file', 'and so does the finishing command')
+    enthaelt(t, 'fl-report done --file', 'and so does the finishing command')
     wahr(t.indexOf('Immer Tests schreiben.') < t.indexOf('HOW THIS RUN ENDS'),
       'how the run ends stands last — that is what runs fail on')
   })
@@ -960,12 +960,12 @@ try {
     falsch(leer.includes('Operator rules'), 'no empty section header')
   })
   await pruefe('the finishing command names a concrete file outside the working directory', () => {
-    // A run died of a vague instruction: "cc-report done --file <report.md>" left
+    // A run died of a vague instruction: "fl-report done --file <report.md>" left
     // both the path and the fact that it is mandatory to the model's judgement.
     // Now the command is copy-and-paste ready — and the file lies next to the
     // run's log, not in the worktree, which a report file would leave dirty.
     const t = platformSuffix(lauf, 'egal', {})
-    enthaelt(t, 'cc-report done --file /', 'absolute path in the command')
+    enthaelt(t, 'fl-report done --file /', 'absolute path in the command')
     enthaelt(t, 'abc-123/report.md', 'the run\'s own report file')
     falsch(t.includes('{report_file}'), 'placeholder is resolved')
     falsch(t.includes(`${lauf.workdir_effective}/report.md`), 'not inside the worktree')
@@ -1091,11 +1091,11 @@ try {
     // cursor wants a flat list of { command } per event. claude's
     // { matcher, hooks: [...] } shape would be rejected — and a rejected hook
     // file is exactly the silent failure this whole detection is about.
-    const [datei, ...weitere] = HP.cursor.hookFiles({ ccReport: '/bin/cc-report' })
+    const [datei, ...weitere] = HP.cursor.hookFiles({ flReport: '/bin/fl-report' })
     gleich(weitere.length, 0, 'one file')
     gleich(datei.path, '.cursor/hooks.json', 'in the workspace, where cursor looks')
     const j = JSON.parse(datei.content)
-    gleich(j.hooks.stop[0].command, '/bin/cc-report _turn_end', 'stop reports the turn end')
+    gleich(j.hooks.stop[0].command, '/bin/fl-report _turn_end', 'stop reports the turn end')
     enthaelt(j.hooks.sessionEnd[0].command, '_exit', 'sessionEnd is the second net')
     enthaelt(j.hooks.sessionEnd[0].command, 'setsid', 'a dying process must not take the hook with it')
     falsch(JSON.stringify(j).includes('"matcher"'), 'no claude shape')
@@ -1143,7 +1143,7 @@ try {
   })
 
   await pruefe('the transcript directory follows cursor\'s own slug rule', () => {
-    process.env.CCHUB_CURSOR_DIR = '/c'
+    process.env.FREILAUF_CURSOR_DIR = '/c'
     try {
       gleich(projectDirs('/srv/agents/worktrees/repo/ab12-detached')[0],
         '/c/projects/srv-agents-worktrees-repo-ab12-detached', 'non-alphanumeric becomes -, ends trimmed')
@@ -1154,7 +1154,7 @@ try {
       gleich(long.length, 2, 'plain form and shortened form')
       gleich(long[1].length, 92, 'the shortened one is exactly 92 characters')
       wahr(/-[0-9a-f]{7}$/.test(long[1]), 'with the hash cursor appends')
-    } finally { delete process.env.CCHUB_CURSOR_DIR }
+    } finally { delete process.env.FREILAUF_CURSOR_DIR }
   })
 
   // ------------------------------------------------------------------
@@ -1219,7 +1219,7 @@ try {
       '⠀⠞ Running  597 tokens',
       'Incidents: rate limit and provider errors (auto-alarm)',
       '✓ cursor: run passes through the pipeline and "Cannot use this model" is detected',
-      '✓ hook report (cc-report _api_error via stdin) → RED; rate limit counter increments',
+      '✓ hook report (fl-report _api_error via stdin) → RED; rate limit counter increments',
       // These two — this file's own lines — turned a running claude agent red.
       "    gleich(scanneZeilen('cursor', ['API Error: 503', 'upstream connection error (502)']).length, 2, 'real status codes')",
       "    const c = scanneZeilen('claude', [\"You've hit your session limit · resets 8:36pm (Europe/Berlin)\"])",
@@ -1328,12 +1328,12 @@ try {
 
   // The false alarm of 2026-08-30: an agent testing a fake model id
   // (`nosuch/model-xyz`) spawned its own claude, which inherited the worktree's
-  // hooks and CC_RUN_ID — its StopFailure landed on the healthy parent run as a
+  // hooks and FL_RUN_ID — its StopFailure landed on the healthy parent run as a
   // red "Model unavailable". The session id is the discriminator.
   await pruefe('a claude hook report from a foreign session is recognized', () => {
     const runId = 'a4a392ae-9a66-46db-bd03-4d4636465841'
     falsch(fremdeClaudeSession(runId, 'claude', runId), 'the run\'s own session (--session-id <run id>)')
-    falsch(fremdeClaudeSession(runId, 'claude', ''), 'no session id (older cc-report): the run\'s own')
+    falsch(fremdeClaudeSession(runId, 'claude', ''), 'no session id (older fl-report): the run\'s own')
     falsch(fremdeClaudeSession(runId, 'claude', null), 'null: the run\'s own')
     falsch(fremdeClaudeSession(runId, 'cursor', 'andere-session'), 'the guard is claude-only')
     wahr(fremdeClaudeSession(runId, 'claude', '0f7c3b1e-0000-4000-8000-000000000000'),
@@ -1411,7 +1411,7 @@ try {
   // ------------------------------------------------------------------
   gruppe('Extra skills (zusaetze.mjs)')
   const zdir = join(sandkasten, 'zusaetze')
-  process.env.CCHUB_ZUSAETZE_DIR = zdir
+  process.env.FREILAUF_ZUSAETZE_DIR = zdir
   mkdirSync(join(zdir, 'unlazy'), { recursive: true })
   writeFileSync(join(zdir, 'unlazy', 'SKILL.md'),
     '---\nname: unlazy\ndescription: Enforces completion discipline for lazy models.\n---\n\n# Unlazy\n')
@@ -1478,7 +1478,7 @@ try {
       wahr(typeof p.pulseId === 'function', `${p.id}: pulseId`)
     }
     // >= and not ==: the registry is mutable now, and an external package in
-    // CCHUB_PLUGIN_DIR is allowed to be in it. What must hold is that the four
+    // FREILAUF_PLUGIN_DIR is allowed to be in it. What must hold is that the four
     // built-ins are all still there.
     wahr(harnessIds().length >= 4, `at least the four built-in coding agents (got ${harnessIds().length})`)
     for (const id of ['claude', 'opencode', 'hermes', 'cursor']) wahr(harnessIds().includes(id), `built-in ${id}`)
@@ -1617,8 +1617,8 @@ try {
   await pruefe('cursor usage() takes spend, included amount and cycle from GetCurrentPeriodUsage', async () => {
     const auth = join(sandkasten, 'cursor-auth.json')
     writeFileSync(auth, JSON.stringify({ accessToken: 'tok' }))
-    const altAuth = process.env.CCHUB_CURSOR_AUTH
-    process.env.CCHUB_CURSOR_AUTH = auth
+    const altAuth = process.env.FREILAUF_CURSOR_AUTH
+    process.env.FREILAUF_CURSOR_AUTH = auth
     const echt = globalThis.fetch
     globalThis.fetch = async (url) => {
       const antwort = String(url).endsWith('GetCurrentPeriodUsage')
@@ -1637,8 +1637,8 @@ try {
       gleich(d.cycle_end, '2026-09-14T16:45:55.000Z', 'cycle end')
     } finally {
       globalThis.fetch = echt
-      if (altAuth === undefined) delete process.env.CCHUB_CURSOR_AUTH
-      else process.env.CCHUB_CURSOR_AUTH = altAuth
+      if (altAuth === undefined) delete process.env.FREILAUF_CURSOR_AUTH
+      else process.env.FREILAUF_CURSOR_AUTH = altAuth
     }
   })
   await pruefe('cursor model list puts "auto" first and marks it', async () => {
@@ -2307,7 +2307,7 @@ try {
   }
 
   try {
-    await pruefe('the four built-ins need no spec — cc-start already knows them', () => {
+    await pruefe('the four built-ins need no spec — fl-start already knows them', () => {
       // A spec for claude would be a second description of the same launch
       // line, and the two would drift. `launchable` still says yes.
       for (const id of ['claude', 'opencode', 'hermes', 'cursor']) {
@@ -2349,9 +2349,9 @@ try {
       falsch('interactiveArgs' in spec, 'nothing is invented that was not declared')
       falsch('submitNudge' in spec, 'and a nudge that was not asked for is absent')
     })
-    await pruefe('a coding agent with neither a cc-start case nor a launch block cannot be started', () => {
+    await pruefe('a coding agent with neither a fl-start case nor a launch block cannot be started', () => {
       // Better to refuse before a worktree exists than to read it out of
-      // cc-start's stderr afterwards — a tmux session running nothing.
+      // fl-start's stderr afterwards — a tmux session running nothing.
       wahr(eintragen(testHarness({ id: 'unit-nolaunch' })).ok, 'registered')
       wahr(launchSpec('unit-nolaunch') === null, 'no spec')
       falsch(launchable('unit-nolaunch'), 'and not startable')
@@ -3062,7 +3062,7 @@ try {
   })
 
   // ------------------------------------------------------------------
-  // Every shell file in this repo is installed and run on a machine — cchub-deploy
+  // Every shell file in this repo is installed and run on a machine — freilauf-deploy
   // even runs setup/02 on every single deploy. A typo in one of them is not a
   // failing test somewhere, it is a hub that does not come back up, and `bash -n`
   // is the cheapest possible fence against exactly that.
@@ -3128,12 +3128,12 @@ try {
   await pruefe('seedIfEmpty only fills an empty table and skips invalid entries', async () => {
     const seed = join(sandkasten, 'seed.json')
     writeFileSync(seed, JSON.stringify({ coding_agents: [{ harness: 'claude' }, { harness: 'quatsch' }] }))
-    process.env.CCHUB_AGENTS_SEED = seed
+    process.env.FREILAUF_AGENTS_SEED = seed
     gleich(ca.seedIfEmpty(), 0, 'table not empty: nothing seeded')
     ca.deleteCodingAgent(ca.codingAgentFor('opencode').id)
     gleich(ca.seedIfEmpty(), 1, 'empty table: valid entries seeded')
     wahr(ca.isHarnessEnabled('claude'), 'claude seeded')
-    delete process.env.CCHUB_AGENTS_SEED
+    delete process.env.FREILAUF_AGENTS_SEED
   })
 
   // A balance nobody can act on is noise: the panel asks only providers that an
@@ -3332,7 +3332,7 @@ try {
       'Work on the existing branch long-lived.', 'existing branch, off')
 
     // Under 'hub' the same three say what really happens.
-    enthaelt(rule('keiner', { base: 'main', hubMerges: true }), 'cc-hub merges your commits into main',
+    enthaelt(rule('keiner', { base: 'main', hubMerges: true }), 'Freilauf merges your commits into main',
       'no branch under hub does NOT promise throwaway work')
     falsch(rule('keiner', { base: 'main', hubMerges: true }).includes('throwaway'), 'no leftover promise')
     enthaelt(rule('neu', { branch: 'b', base: 'trunk', hubMerges: true }), 'merges it into trunk', 'the repo\'s own base branch')
@@ -3683,7 +3683,7 @@ try {
 
     const echt = globalThis.fetch
     const key = process.env.OPENROUTER_API_KEY
-    const basis = process.env.CCHUB_OPENROUTER_BASE
+    const basis = process.env.FREILAUF_OPENROUTER_BASE
     let koerper = null
     globalThis.fetch = async (url, opts) => {
       koerper = JSON.parse(opts.body)
@@ -3698,7 +3698,7 @@ try {
     }
     try {
       process.env.OPENROUTER_API_KEY = 'k'
-      process.env.CCHUB_OPENROUTER_BASE = 'http://stub'
+      process.env.FREILAUF_OPENROUTER_BASE = 'http://stub'
       const r = await ex.suggestExtras(repo)
       wahr(r.ok, `ok (${r.error ?? ''})`)
       gleich(JSON.stringify(r.extras),
@@ -3709,7 +3709,7 @@ try {
     } finally {
       globalThis.fetch = echt
       if (key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = key
-      if (basis === undefined) delete process.env.CCHUB_OPENROUTER_BASE; else process.env.CCHUB_OPENROUTER_BASE = basis
+      if (basis === undefined) delete process.env.FREILAUF_OPENROUTER_BASE; else process.env.FREILAUF_OPENROUTER_BASE = basis
       rmSync(repo, { recursive: true, force: true })
     }
   })
@@ -3729,21 +3729,21 @@ try {
 
     const echt = globalThis.fetch
     const key = process.env.OPENROUTER_API_KEY
-    const basis = process.env.CCHUB_OPENROUTER_BASE
+    const basis = process.env.FREILAUF_OPENROUTER_BASE
     globalThis.fetch = async () => ({
       ok: true,
       json: async () => ({ choices: [{ message: { content: JSON.stringify({ extras: [] }) } }] }),
     })
     try {
       process.env.OPENROUTER_API_KEY = 'k'
-      process.env.CCHUB_OPENROUTER_BASE = 'http://stub'
+      process.env.FREILAUF_OPENROUTER_BASE = 'http://stub'
       const r = await ex.suggestExtras(repo)
       wahr(r.ok, `ok — an empty answer is an answer (${r.error ?? ''})`)
       gleich(JSON.stringify(r.extras), '[]', 'and the field gets exactly that')
     } finally {
       globalThis.fetch = echt
       if (key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = key
-      if (basis === undefined) delete process.env.CCHUB_OPENROUTER_BASE; else process.env.CCHUB_OPENROUTER_BASE = basis
+      if (basis === undefined) delete process.env.FREILAUF_OPENROUTER_BASE; else process.env.FREILAUF_OPENROUTER_BASE = basis
       rmSync(repo, { recursive: true, force: true })
     }
   })
@@ -4030,14 +4030,14 @@ try {
   const se = await import('../server/sessions.mjs')
   // Exactly the two format strings sessions.mjs asks tmux for, tab-separated.
   const SESSION_LINES = [
-    'cc-einzel-aaaa\t1787600000\t0\t1\t1787600500\t/srv/worktrees/a',
-    'cc-einzel-bbbb\t1787500000\t1\t2\t1787500900\t/srv/worktrees/b',
+    'fl-einzel-aaaa\t1787600000\t0\t1\t1787600500\t/srv/worktrees/a',
+    'fl-einzel-bbbb\t1787500000\t1\t2\t1787500900\t/srv/worktrees/b',
   ].join('\n')
 
   await pruefe('a session line becomes a session, the path may contain tabs', () => {
     const s = se.parseSessions(SESSION_LINES + '\ncc-tab\t1787400000\t0\t1\t1787400000\t/srv/a\tb')
     gleich(s.length, 3, 'three sessions')
-    gleich(s[0].name, 'cc-einzel-aaaa', 'name')
+    gleich(s[0].name, 'fl-einzel-aaaa', 'name')
     gleich(s[0].createdMs, 1787600000000, 'created in ms')
     falsch(s[0].attached, 'not attached')
     wahr(s[1].attached, 'attached')
@@ -4052,9 +4052,9 @@ try {
 
   await pruefe('panes decide whether a session still works', () => {
     const s = se.mergePanes(se.parseSessions(SESSION_LINES), [
-      'cc-einzel-aaaa\t0\t111\t\t\tclaude',
-      'cc-einzel-bbbb\t1\t222\t0\t1787501000\tbash',
-      'cc-einzel-bbbb\t1\t223\t0\t1787502000\tbash',
+      'fl-einzel-aaaa\t0\t111\t\t\tclaude',
+      'fl-einzel-bbbb\t1\t222\t0\t1787501000\tbash',
+      'fl-einzel-bbbb\t1\t223\t0\t1787502000\tbash',
     ].join('\n'))
     falsch(s[0].dead, 'a live pane keeps the session alive')
     gleich(s[0].command, 'claude', 'command of the live pane')
@@ -4270,7 +4270,7 @@ try {
     const m1 = ig.fill(ig.M1, { files: '  a.txt', report_file: '/runs/x/report.md', timeout: 15 })
     enthaelt(m1, 'NOT finished yet', 'says the run is not over')
     enthaelt(m1, '  a.txt', 'the file')
-    enthaelt(m1, 'cc-report done --file /runs/x/report.md', 'the exact command')
+    enthaelt(m1, 'fl-report done --file /runs/x/report.md', 'the exact command')
     enthaelt(m1, 'after 15 minutes', 'the deadline')
     falsch(/\{[a-z_]+\}/.test(m1), 'no placeholder left over')
 
@@ -4290,7 +4290,7 @@ try {
       resolver_extra: '',
     })
     enthaelt(p, 'make the branch `resolve/abc1234` mergeable', 'its own branch')
-    enthaelt(p, '"Add a goal field" (cc-hub run aaaa-bbbb)', 'the run it works for')
+    enthaelt(p, '"Add a goal field" (Freilauf run aaaa-bbbb)', 'the run it works for')
     enthaelt(p, 'BOTH intentions survive', 'the rule that keeps work from being dropped')
     enthaelt(p, 'It did the thing.', 'the original report')
     enthaelt(p, 'never push to main yourself', 'the ground rule')
@@ -4302,7 +4302,7 @@ try {
     gleich(kurz, 'short', 'a short report is passed through')
     const lang = ig.truncateReport({ id: 'r1', report_md: 'x'.repeat(100) }, 20)
     wahr(lang.startsWith('x'.repeat(20)), 'cut at the cap')
-    enthaelt(lang, 'truncated by cc-hub', 'says it was cut')
+    enthaelt(lang, 'truncated by Freilauf', 'says it was cut')
     enthaelt(lang, 'report.md', 'names the full report')
     gleich(ig.truncateReport({ id: 'r1', report_md: null }), '(no report)', 'no report at all')
   })
@@ -4337,13 +4337,13 @@ try {
     const { platformSuffix } = await import('../server/runner.mjs')
     const run = { id: 'r1', harness: 'claude', workdir_effective: '/wt/a', expected_minutes: 30 }
     const out = platformSuffix(run, 'No branch.', {}, { merge_mode: 'off', base_branch: 'main' })
-    falsch(out.includes('cc-hub merges your work'), 'with merge_mode off the prompt is what it always was')
-    falsch(out.includes('cc-report prints'), 'and the finishing block is unchanged too')
+    falsch(out.includes('Freilauf merges your work'), 'with merge_mode off the prompt is what it always was')
+    falsch(out.includes('fl-report prints'), 'and the finishing block is unchanged too')
     const an = platformSuffix(run, 'No branch.', {}, { merge_mode: 'hub', base_branch: 'trunk' })
-    enthaelt(an, 'cc-hub merges your work into trunk itself', 'the base branch is named')
+    enthaelt(an, 'Freilauf merges your work into trunk itself', 'the base branch is named')
     enthaelt(an, 'Never merge into or push to trunk yourself', 'and so is the ground rule')
-    enthaelt(an, 'cc-report prints cc-hub\'s answer', 'the finishing block says the answer is worth reading')
-    enthaelt(an, 'cc-report done --file', 'and step 2 is still there — it is not removable')
+    enthaelt(an, 'fl-report prints Freilauf\'s answer', 'the finishing block says the answer is worth reading')
+    enthaelt(an, 'fl-report done --file', 'and step 2 is still there — it is not removable')
     falsch(/\{base\}/.test(an), 'no placeholder left over')
   })
 
@@ -4462,9 +4462,9 @@ try {
     const id = uuid()
     db2.prepare(`INSERT INTO repos(id, name, path, base_branch) VALUES(99,'cleanup-test','/tmp/x','main')`).run()
     db2.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, tmux_session, started_at)
-                 VALUES(?, 99, 'done', 'claude', 'p', 'keiner', 30, 'cc-test-sess', datetime('now'))`).run(id)
+                 VALUES(?, 99, 'done', 'claude', 'p', 'keiner', 30, 'fl-test-sess', datetime('now'))`).run(id)
     gleich(JSON.stringify(keepSessionsForRuns(`${id} 00000000-0000-0000-0000-000000000000`)),
-      JSON.stringify(['cc-test-sess']), 'the known id becomes its session, the unknown one is dropped')
+      JSON.stringify(['fl-test-sess']), 'the known id becomes its session, the unknown one is dropped')
     gleich(JSON.stringify(keepSessionsForRuns('')), '[]', 'empty input stays empty')
   })
 
@@ -4550,6 +4550,155 @@ try {
     // startCleanupRun then makes of the sandbox repo is not this test's question).
     const ausgeloest = await maybeAutoCleanup(Date.now(), 10)
     falsch(ausgeloest === null, 'above threshold, cooled down, nothing in flight = the gate fires')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('The rename: every seam answers to both names')
+
+  const { env, envIs, envNames } = await import('../server/env.mjs')
+  const { pick, configDir, dataDir, deployDir, dbPath, certDir } = await import('../server/paths.mjs')
+
+  /** Run fn with these variables set, and put the environment back afterwards. */
+  const mitUmgebung = (vars, fn) => {
+    const vorher = {}
+    for (const [k, v] of Object.entries(vars)) {
+      vorher[k] = process.env[k]
+      if (v === undefined) delete process.env[k]; else process.env[k] = v
+    }
+    try { return fn() } finally {
+      for (const [k, v] of Object.entries(vorher)) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v
+      }
+    }
+  }
+
+  await pruefe('env(): the new name wins, the old one still answers, neither is undefined', () => {
+    mitUmgebung({ FREILAUF_TESTVAR: 'neu', CCHUB_TESTVAR: 'alt' }, () =>
+      gleich(env('TESTVAR'), 'neu', 'both set'))
+    mitUmgebung({ FREILAUF_TESTVAR: undefined, CCHUB_TESTVAR: 'alt' }, () =>
+      gleich(env('TESTVAR'), 'alt', 'only the old one — the whole point of the fallback'))
+    mitUmgebung({ FREILAUF_TESTVAR: undefined, CCHUB_TESTVAR: undefined }, () =>
+      gleich(env('TESTVAR'), undefined, 'neither'))
+  })
+
+  await pruefe('env() takes the full name too, and passes an empty string through', () => {
+    mitUmgebung({ FREILAUF_TESTVAR: 'x' }, () =>
+      gleich(env('FREILAUF_TESTVAR'), 'x', 'the full name is the same question'))
+    // `''` has to stay a VALUE. Every caller writes `Number(env(...) ?? default)`
+    // or `env(...) ?? default`, and turning an empty string into "not set" here
+    // would silently change what an operator wrote in their env file.
+    mitUmgebung({ FREILAUF_TESTVAR: '', CCHUB_TESTVAR: 'alt' }, () =>
+      gleich(env('TESTVAR'), '', 'an empty new value is not "unset"'))
+  })
+
+  await pruefe('the two variables that changed NAME, not just prefix', () => {
+    // CCHUB_CC_START/CC_REPORT became FREILAUF_START_SCRIPT/REPORT_SCRIPT: the
+    // `CC_` in the middle stopped meaning anything when the scripts became fl-*.
+    mitUmgebung({ FREILAUF_START_SCRIPT: undefined, CCHUB_CC_START: '/old/cc-start' }, () =>
+      gleich(env('START_SCRIPT'), '/old/cc-start', 'START_SCRIPT falls back to CCHUB_CC_START'))
+    mitUmgebung({ FREILAUF_REPORT_SCRIPT: undefined, CCHUB_CC_REPORT: '/old/cc-report' }, () =>
+      gleich(env('REPORT_SCRIPT'), '/old/cc-report', 'REPORT_SCRIPT falls back to CCHUB_CC_REPORT'))
+    mitUmgebung({ FREILAUF_START_SCRIPT: '/new/fl-start', CCHUB_CC_START: '/old/cc-start' }, () =>
+      gleich(env('START_SCRIPT'), '/new/fl-start', 'and the new name still wins'))
+    gleich(envNames('START_SCRIPT').join(','), 'FREILAUF_START_SCRIPT,CCHUB_CC_START', 'both names are nameable')
+    gleich(envNames('DATA_DIR').join(','), 'FREILAUF_DATA_DIR,CCHUB_DATA_DIR', 'the ordinary pair')
+  })
+
+  await pruefe('envIs() is the same question for the "=== 1" switches', () => {
+    mitUmgebung({ FREILAUF_PULS_AUS: undefined, CCHUB_PULS_AUS: '1' }, () =>
+      wahr(envIs('PULS_AUS', '1'), 'the old switch still switches'))
+    mitUmgebung({ FREILAUF_PULS_AUS: '0', CCHUB_PULS_AUS: '1' }, () =>
+      falsch(envIs('PULS_AUS', '1'), 'and the new one overrules it'))
+  })
+
+  await pruefe('pick(): the new path, unless only the old one is there', () => {
+    const neu = join(sandkasten, 'pick-neu'), alt = join(sandkasten, 'pick-alt')
+    gleich(pick(neu, alt), neu, 'neither exists → the new one (a fresh install never creates the old layout)')
+    mkdirSync(alt, { recursive: true })
+    gleich(pick(neu, alt), alt, 'only the old one exists → keep using it')
+    mkdirSync(neu, { recursive: true })
+    gleich(pick(neu, alt), neu, 'both exist → the new one')
+  })
+
+  await pruefe('the directories follow that rule, and an explicit variable overrules it', () => {
+    const heim = join(sandkasten, 'heim')
+    const cfg = join(heim, '.config'), dat = join(heim, '.local', 'share')
+    mkdirSync(join(cfg, 'cc-hub'), { recursive: true })
+    mkdirSync(join(dat, 'cc-hub'), { recursive: true })
+    writeFileSync(join(dat, 'cc-hub', 'cc-hub.db'), '')
+    mitUmgebung({ XDG_CONFIG_HOME: cfg, XDG_DATA_HOME: dat, HOME: heim,
+                  FREILAUF_DATA_DIR: undefined, CCHUB_DATA_DIR: undefined,
+                  FREILAUF_DEPLOY_DIR: undefined, CCHUB_DEPLOY_DIR: undefined,
+                  FREILAUF_CERT_DIR: undefined, CCHUB_CERT_DIR: undefined }, () => {
+      gleich(configDir(), join(cfg, 'cc-hub'), 'an un-migrated config directory keeps being used')
+      gleich(dataDir(), join(dat, 'cc-hub'), 'so does the data directory')
+      // And inside it the file may still carry the old name. Creating freilauf.db
+      // next to a populated cc-hub.db would look like a hub that lost every run.
+      gleich(dbPath(), join(dat, 'cc-hub', 'cc-hub.db'), 'the old database file is not left behind')
+      gleich(deployDir(), join(heim, 'agents', 'deploy', 'freilauf'), 'nothing there → the new deploy path')
+      gleich(certDir(), join(heim, '.local', 'certs', 'freilauf'), 'nothing there → the new cert path')
+    })
+    mitUmgebung({ XDG_CONFIG_HOME: cfg, XDG_DATA_HOME: dat, HOME: heim,
+                  FREILAUF_DATA_DIR: '/somewhere/else' }, () => {
+      gleich(dataDir(), '/somewhere/else', 'an explicit variable is the answer, existing or not')
+      gleich(dbPath(), join('/somewhere/else', 'freilauf.db'), 'and the database follows it, under the new name')
+    })
+    mitUmgebung({ XDG_CONFIG_HOME: cfg, XDG_DATA_HOME: dat, HOME: heim,
+                  FREILAUF_DATA_DIR: undefined, CCHUB_DATA_DIR: join(dat, 'cc-hub') }, () => {
+      gleich(dataDir(), join(dat, 'cc-hub'), 'the OLD variable name still points the hub at its data')
+    })
+  })
+
+  await pruefe('bin/fl-paths.sh answers the same questions in bash', () => {
+    const heim = join(sandkasten, 'bash-heim')
+    mkdirSync(join(heim, '.config', 'cc-hub'), { recursive: true })
+    mkdirSync(join(heim, '.local', 'share', 'freilauf'), { recursive: true })
+    writeFileSync(join(heim, '.local', 'share', 'freilauf', 'freilauf.db'), '')
+    const lib = new URL('../bin/fl-paths.sh', import.meta.url).pathname
+    const frage = (ausdruck) => execFileSync('bash', ['-c', `. ${JSON.stringify(lib)}; ${ausdruck}`], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: heim, XDG_CONFIG_HOME: join(heim, '.config'),
+             XDG_DATA_HOME: join(heim, '.local', 'share'),
+             FREILAUF_DATA_DIR: '', CCHUB_DATA_DIR: '', PATH: '/usr/bin:/bin' },
+    }).trim()
+    gleich(frage('fl_config_dir'), join(heim, '.config', 'cc-hub'), 'the old config directory')
+    gleich(frage('fl_data_dir'), join(heim, '.local', 'share', 'freilauf'), 'the new data directory')
+    gleich(frage('fl_db_file'), join(heim, '.local', 'share', 'freilauf', 'freilauf.db'), 'the database')
+    gleich(frage('fl_env_file'), join(heim, '.config', 'cc-hub', 'env'), 'the env file goes with the config dir')
+    // The same fallback the server side has — written once per language, and
+    // this is the check that the two languages agree.
+    gleich(execFileSync('bash', ['-c', `. ${JSON.stringify(lib)}; fl_env FOO bar`],
+      { encoding: 'utf8', env: { ...process.env, CCHUB_FOO: 'alt', FREILAUF_FOO: '' } }).trim().replace(/\n$/, ''),
+      '', 'an empty new value wins in bash too')
+    gleich(execFileSync('bash', ['-c', `. ${JSON.stringify(lib)}; fl_env FOO bar`],
+      { encoding: 'utf8', env: { ...process.env, CCHUB_FOO: 'alt' } }).trim(),
+      'alt', 'the old name answers')
+    gleich(execFileSync('bash', ['-c', `. ${JSON.stringify(lib)}; fl_env FOO bar`],
+      { encoding: 'utf8', env: { ...process.env } }).trim(),
+      'bar', 'and the default when neither is set')
+  })
+
+  await pruefe('the tmux prefix: fl- is what is created, cc- is still recognised', () => {
+    const lib = new URL('../bin/fl-harness-tags.sh', import.meta.url).pathname
+    const frage = (ausdruck) => execFileSync('bash', ['-c', `. ${JSON.stringify(lib)}; ${ausdruck}`],
+      { encoding: 'utf8', env: { ...process.env, FREILAUF_HARNESS_TAGS: join(sandkasten, 'no-tags') } }).trim()
+    gleich(frage('printf %s "$FL_PREFIX"'), 'fl-', 'new sessions are fl-')
+    gleich(frage('fl_session_re'), '^(fl-|cc-)', 'both prefixes are listed')
+    gleich(frage('fl_harness_of fl-oc-nacht'), 'opencode', 'a new opencode session')
+    gleich(frage('fl_harness_of cc-oc-nacht'), 'opencode', 'and an old one, started before the rename')
+    gleich(frage('fl_harness_of cc-nacht'), 'claude', 'an untagged old session is claude, as it always was')
+    gleich(frage('fl_harness_bare fl-cu-nacht'), 'nacht', 'the bare name, new prefix')
+    gleich(frage('fl_harness_bare cc-cu-nacht'), 'nacht', 'the bare name, old prefix')
+  })
+
+  await pruefe('a session name from before the rename still opens its terminal', async () => {
+    // runs.tmux_session stores the NAME, so an old run keeps pointing at cc-…;
+    // the terminal route validates that name against a pattern before attaching.
+    const { SESSION_RE } = await import('../server/terminal.mjs')
+    wahr(SESSION_RE.test('fl-nacht-a1b2'), 'a new session')
+    wahr(SESSION_RE.test('cc-oc-nacht-a1b2'), 'an old one')
+    falsch(SESSION_RE.test('xx-nacht'), 'and nothing else')
+    falsch(SESSION_RE.test('fl-nacht; rm -rf /'), 'still nothing shell-shaped')
   })
 
 } finally {

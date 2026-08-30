@@ -1,25 +1,25 @@
-# cc-hub web UI + scheduler + watcher (127.0.0.1 only)
+# Freilauf web UI + scheduler + watcher (127.0.0.1 only)
 [Unit]
-Description=cc-hub (agent management, 127.0.0.1 only)
+Description=Freilauf (agent management, 127.0.0.1 only)
 After=network.target
 
 [Service]
 Type=simple
 Environment=NODE_OPTIONS=--disable-warning=ExperimentalWarning
 # systemd user services start with a minimal PATH that lacks ~/.local/bin. Without this
-# line, cc-start finds neither 'claude' nor 'opencode'/'hermes', and the agent in the
-# tmux session inherits the same PATH — 'cc-report' would be unfindable there as well.
+# line, fl-start finds neither 'claude' nor 'opencode'/'hermes', and the agent in the
+# tmux session inherits the same PATH — 'fl-report' would be unfindable there as well.
 Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-EnvironmentFile=%h/.config/cc-hub/env
-# The service runs from a checkout of its own (bin/cchub-deploy owns it), NOT from
+EnvironmentFile=%h/.config/freilauf/env
+# The service runs from a checkout of its own (bin/freilauf-deploy owns it), NOT from
 # the operator's working copy: a restart there loads whatever lies in the directory
 # — half-finished edits, or the state from before the last merge. WorkingDirectory
 # only decides where a relative path would be resolved; the hub resolves everything
 # it needs from import.meta.url or $HOME, so it also runs when started by hand.
-# A different deploy path (CCHUB_DEPLOY_DIR) means editing this unit: systemd does
+# A different deploy path (FREILAUF_DEPLOY_DIR) means editing this unit: systemd does
 # not expand EnvironmentFile variables inside ExecStart.
-WorkingDirectory=%h/agents/deploy/cc-hub
-ExecStart=/usr/bin/node %h/agents/deploy/cc-hub/server/hub.mjs
+WorkingDirectory=%h/agents/deploy/freilauf
+ExecStart=/usr/bin/node %h/agents/deploy/freilauf/server/hub.mjs
 # Only kill the node main process on stop/restart. With the default
 # (control-group) a tmux server that happened to be spawned by a hub-started
 # run (first tmux session after a reboot) would live in this unit's cgroup —

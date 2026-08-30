@@ -1,4 +1,4 @@
-// cc-hub — the Claude quota windows, and the meters a budget gate reads.
+// Freilauf — the Claude quota windows, and the meters a budget gate reads.
 //
 // Two halves. The bottom one is generic — ask a plugin what its account still
 // holds or has spent, cache it, compare it against a threshold the plugin
@@ -57,8 +57,9 @@ import { getPlugin } from './plugins/registry.mjs'
 import { pluginCtx } from './plugins/context.mjs'
 import { pluginHasCredential } from './plugins/store.mjs'
 import { claudeLimits, rememberedScoped } from './claude-usage.mjs'
+import { env } from './env.mjs'
 
-const QUOTA_PATH = process.env.CCHUB_QUOTA_JSON ?? `${homedir()}/.claude/quota.json`
+const QUOTA_PATH = env('QUOTA_JSON') ?? `${homedir()}/.claude/quota.json`
 
 /** What the file knows — the fallback half, unchanged in meaning. */
 function quotaFile() {

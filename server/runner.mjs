@@ -1,5 +1,5 @@
-// cc-hub — run creation: run directory, worktree, prompt suffix, start via
-// cc-start (the single start path, so CLI and UI produce identical runs —
+// Freilauf — run creation: run directory, worktree, prompt suffix, start via
+// fl-start (the single start path, so CLI and UI produce identical runs —
 // planning §5).
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, writeFileSync, cpSync, symlinkSync, existsSync } from 'node:fs'
@@ -15,18 +15,19 @@ import { pluginCtx } from './plugins/context.mjs'
 import { isHarnessEnabled } from './coding-agents.mjs'
 import { branchRuleText } from './run-def.mjs'
 import { t } from './i18n.mjs'
+import { env } from './env.mjs'
 
 const PLATFORM_RULES = [
   '---',
-  'Platform rules (cc-hub, run {run_id}):',
+  'Platform rules (Freilauf, run {run_id}):',
   '- Working directory: {workdir}. Branch rule: {branch_rule}.',
   '- Expected maximum working time: {expected_minutes} min. If you need considerably longer,',
-  '  report it: `cc-report progress "<where you stand, why longer>"`.',
+  '  report it: `fl-report progress "<where you stand, why longer>"`.',
   '- If you create a branch or pull request, report it immediately:',
-  '  `cc-report branch <name>` or `cc-report pr <url>`.',
+  '  `fl-report branch <name>` or `fl-report pr <url>`.',
   '- If you need a human decision or discovered a big problem:',
-  '  `cc-report help "<question/problem>"` — then WAIT for the answer in this session.',
-  '- On failure: `cc-report failed "<reason>"`.',
+  '  `fl-report help "<question/problem>"` — then WAIT for the answer in this session.',
+  '- On failure: `fl-report failed "<reason>"`.',
 ].join('\n')
 
 /**
@@ -36,14 +37,14 @@ const PLATFORM_RULES = [
  * changed. Inserted after the branch line, because that is where the agent is
  * being told what its work lives on.
  */
-const MERGE_RULE = '- Integration: when this run ends, cc-hub merges your work into {base} itself. '
+const MERGE_RULE = '- Integration: when this run ends, Freilauf merges your work into {base} itself. '
   + 'Never merge into or push to {base} yourself. Before you report done: commit everything, '
   + 'then `git fetch origin && git merge origin/{base}` and resolve conflicts — you know your '
-  + 'changes best; later nobody will. cc-hub checks your worktree when you report and tells you '
+  + 'changes best; later nobody will. Freilauf checks your worktree when you report and tells you '
   + 'if something is left.'
 
 /** …and its counterpart in the finishing instruction: the answer is worth reading. */
-const MERGE_FINISH_LINE = '     cc-report prints cc-hub\'s answer. If it says the run is not '
+const MERGE_FINISH_LINE = '     fl-report prints Freilauf\'s answer. If it says the run is not '
   + 'finished yet, do what it says and report again.'
 
 const FINISH_RULES = [
@@ -51,7 +52,7 @@ const FINISH_RULES = [
   '  1. Write your report to {report_file} — what was done, what is open,',
   '     what should be reviewed. That path is outside the repository on purpose:',
   '     a report file inside the working directory would leave it dirty.',
-  '  2. Run: cc-report done --file {report_file}',
+  '  2. Run: fl-report done --file {report_file}',
   '  3. Only then stop. Do not end the session yourself; the platform cleans up.',
   'Printing a summary is NOT a report — nobody reads your terminal. Only step 2 tells',
   'the platform the run is finished; without it a human has to close it by hand.',
@@ -71,8 +72,8 @@ const FOLLOWUP_RULES = [
   'A human may come back into this session and ask for more (a fix, a change, a question).',
   'Do that work as usual. When it is finished — everything committed{followup_merge} — write a',
   'report about ONLY the follow-up work to {report_file} (overwrite the file) and run',
-  '  cc-report done --file {report_file}',
-  'again. It is the same command on purpose: cc-hub knows this run is already over and',
+  '  fl-report done --file {report_file}',
+  'again. It is the same command on purpose: Freilauf knows this run is already over and',
   'treats it as a FOLLOW-UP REPORT — it reaches the human, and it triggers the same',
   'platform processes as the first report{followup_processes}. If the human asked for',
   'several things at once, do all of them and report ONCE at the end, not once per',
@@ -100,7 +101,7 @@ const FOLLOWUP_PROCESSES_CLAUSE = ' (integration into {base}, the flows that han
  * design preference: the settings field used to REPLACE this whole block. It is
  * called a suffix, it starts out empty and it looks like a free notepad — so the
  * moment somebody wrote their own working rules into it, every prompt on this
- * hub silently lost the sentence "at the end always `cc-report done`". The runs
+ * hub silently lost the sentence "at the end always `fl-report done`". The runs
  * kept working and kept not reporting; one of them held up the queue for a day.
  * Whatever the operator writes is now an ADDITION, placed where it reads like
  * one.
@@ -113,7 +114,7 @@ export function platformSuffix(run, branchRule, settings, repo = null) {
   const hubMerges = repo?.merge_mode === 'hub'
   const base = repo?.base_branch || 'main'
   // A run that keeps its work on its branch gets the branch sentence and nothing
-  // else: it already says the work stays put and that cc-hub will not merge it,
+  // else: it already says the work stays put and that Freilauf will not merge it,
   // and MERGE_RULE would promise the opposite two lines above. Two rules about
   // the same thing is one too many — that is the lesson the whole branch table
   // was written from.
@@ -138,36 +139,36 @@ export function platformSuffix(run, branchRule, settings, repo = null) {
     .replaceAll('{expected_minutes}', String(run.expected_minutes))
 }
 
-/** Path of cc-report as the hub knows it — hook commands must not depend on PATH. */
-export function ccReportPath() {
-  return process.env.CCHUB_CC_REPORT ?? `${homedir()}/.local/bin/cc-report`
+/** Path of fl-report as the hub knows it — hook commands must not depend on PATH. */
+export function flReportPath() {
+  return env('REPORT_SCRIPT') ?? `${homedir()}/.local/bin/fl-report`
 }
 
 /**
- * The coding agents `bin/cc-start` spells out itself, in a `case` per harness.
+ * The coding agents `bin/fl-start` spells out itself, in a `case` per harness.
  *
- * That script has to work with no hub behind it — a human runs `cc-start -H
+ * That script has to work with no hub behind it — a human runs `fl-start -H
  * opencode` on the command line — so for these four the command line lives
  * there and is the single source of truth. Every OTHER coding agent has no case
  * in that script and never will: it arrives as a plugin, brings a `launch`
  * declaration, and the hub hands that over as a file (`--spec`).
  *
  * This set is therefore the exact shape of a known limit, not a preference: it
- * disappears the day cc-start reads the declaration for all of them, and until
+ * disappears the day fl-start reads the declaration for all of them, and until
  * then it is what keeps a claude/opencode/hermes/cursor run byte for byte what
  * it always was.
  */
-const CC_START_BUILTIN_HARNESSES = new Set(['claude', 'opencode', 'hermes', 'cursor'])
+const FL_START_BUILTIN_HARNESSES = new Set(['claude', 'opencode', 'hermes', 'cursor'])
 
 /**
- * The launch declaration handed to `cc-start --spec`, or `null` when the script
+ * The launch declaration handed to `fl-start --spec`, or `null` when the script
  * already knows this coding agent.
  *
  * Resolved rather than passed through: `bin`, `sessionTag` and `installHint`
  * are ordinary descriptor fields, and a plugin that says nothing about them
  * inside `launch` means the ones it declared next to its id. `sessionTag` in
  * particular used to be read by nobody at all — the tmux prefix lived only in
- * cc-start's own case — which is why an external coding agent's sessions would
+ * fl-start's own case — which is why an external coding agent's sessions would
  * otherwise all have looked like claude's.
  *
  * Written into the run directory, never into the worktree: everything the hub
@@ -175,7 +176,7 @@ const CC_START_BUILTIN_HARNESSES = new Set(['claude', 'opencode', 'hermes', 'cur
  * counts as uncommitted work at the finish gate.
  */
 export function launchSpec(harness) {
-  if (CC_START_BUILTIN_HARNESSES.has(harness)) return null
+  if (FL_START_BUILTIN_HARNESSES.has(harness)) return null
   const plugin = getHarness(harness)
   const launch = plugin?.launch
   if (!launch || !Array.isArray(launch.args) || launch.args.length === 0) return null
@@ -189,20 +190,20 @@ export function launchSpec(harness) {
   }
   if (Array.isArray(launch.interactiveArgs)) spec.interactiveArgs = launch.interactiveArgs
   if (typeof launch.stderrLog === 'string' && launch.stderrLog) spec.stderrLog = launch.stderrLog
-  // Only the object form: cc-start asks jq for `.submitNudge.waitFor`, and a
+  // Only the object form: fl-start asks jq for `.submitNudge.waitFor`, and a
   // bare `true` would be an error there rather than a default.
   if (launch.submitNudge && typeof launch.submitNudge === 'object') spec.submitNudge = launch.submitNudge
   return spec
 }
 
 /**
- * Can this coding agent be started at all? A harness cc-start has no case for
+ * Can this coding agent be started at all? A harness fl-start has no case for
  * and that declares no `launch` would produce a tmux session running nothing —
- * better to say so before a worktree exists than to read it out of cc-start's
+ * better to say so before a worktree exists than to read it out of fl-start's
  * stderr afterwards.
  */
 export function launchable(harness) {
-  return CC_START_BUILTIN_HARNESSES.has(harness) || !!launchSpec(harness)
+  return FL_START_BUILTIN_HARNESSES.has(harness) || !!launchSpec(harness)
 }
 
 /**
@@ -216,7 +217,7 @@ export function launchable(harness) {
  * Returns the paths actually written, relative to the workdir.
  */
 export function writeHarnessHooks(harness, workdir) {
-  const files = getHarness(harness)?.hookFiles?.({ ccReport: ccReportPath() }) ?? []
+  const files = getHarness(harness)?.hookFiles?.({ flReport: flReportPath() }) ?? []
   const written = []
   for (const f of files) {
     const target = join(workdir, f.path)
@@ -235,7 +236,7 @@ export function writeHarnessHooks(harness, workdir) {
  * same trap the worktree extras once fell into).
  */
 export function harnessOwnedPaths(harness) {
-  return (getHarness(harness)?.hookFiles?.({ ccReport: 'x' }) ?? [])
+  return (getHarness(harness)?.hookFiles?.({ flReport: 'x' }) ?? [])
     .map(d => String(d.path).split('/')[0])
 }
 
@@ -350,18 +351,18 @@ export function claudeSettingsJson() {
   const hook = (cmd) => [{ hooks: [{ type: 'command', command: cmd }] }]
   return JSON.stringify({
     hooks: {
-      Stop: hook('cc-report _turn_end'),
-      SessionEnd: hook('cc-report _exit'),
-      Notification: hook('cc-report _idle'),
+      Stop: hook('fl-report _turn_end'),
+      SessionEnd: hook('fl-report _exit'),
+      Notification: hook('fl-report _idle'),
       // Rate limit, overloaded, auth, billing …: Claude names the reason as a
       // fixed enum on stdin. Verified with Claude Code 2.1.241 (simulated 429
       // with anthropic-ratelimit-unified-status: rejected → error: "rate_limit").
       // NOTE: Claude does NOT wait for this hook — the process is gone within
       // 100 ms and takes the hook with it (measured: 'cat' gets through,
-      // 'sleep 0.1' does not). Hence 'setsid -f': cc-report keeps running
+      // 'sleep 0.1' does not). Hence 'setsid -f': fl-report keeps running
       // detached in its own session and reads the event from the inherited
       // stdin pipe.
-      StopFailure: hook('setsid -f cc-report _api_error >/dev/null 2>&1'),
+      StopFailure: hook('setsid -f fl-report _api_error >/dev/null 2>&1'),
     },
   })
 }
@@ -401,7 +402,7 @@ export function harnessModelArgs(run) {
 }
 
 /**
- * Starts a prepared run: worktree, prompt, cc-start.
+ * Starts a prepared run: worktree, prompt, fl-start.
  * Returns { ok, session?, error? }.
  */
 export async function launchRun(runId) {
@@ -483,8 +484,15 @@ export async function launchRun(runId) {
   const args = ['--harness', run.harness,
     '--name', (agent?.name ?? 'einzel').toLowerCase().replaceAll(/[^a-z0-9_-]/g, '-'),
     '--id', kurz,
+    '--env', `FL_RUN_ID=${runId}`,
+    '--env', `FL_HUB_URL=http://127.0.0.1:${env('LOCAL_PORT') ?? '8791'}`,
+    // The old names travel with them for one transition release. A run started
+    // by this hub is fine either way, but the WORKTREE it starts in may still
+    // hold a `.cursor/hooks.json` or a claude settings block written before the
+    // rename, and those call `cc-report`, which reads `CC_RUN_ID`. Cheap
+    // insurance; the next release drops these two lines.
     '--env', `CC_RUN_ID=${runId}`,
-    '--env', 'CC_HUB_URL=http://127.0.0.1:' + (process.env.CCHUB_LOCAL_PORT ?? '8791'),
+    '--env', `CC_HUB_URL=http://127.0.0.1:${env('LOCAL_PORT') ?? '8791'}`,
     '--log', join(runDir, 'log.txt'), '--keep',
     '-f', join(runDir, 'prompt.md'), workdir]
   const modelArgs = harnessModelArgs(run)
@@ -495,7 +503,7 @@ export async function launchRun(runId) {
     addEvent(runId, 'warn', { fehlender_key: modelArgs.fehlt.join(', ') })
   }
   if (run.harness === 'claude') args.unshift('--session-id', runId, '--settings', claudeSettingsJson())
-  // A coding agent cc-start has no case for is launched from its own
+  // A coding agent fl-start has no case for is launched from its own
   // declaration. The file lives next to prompt.md in the run directory — NOT in
   // the worktree, which has to stay clean for the finish gate.
   const spec = launchSpec(run.harness)
@@ -505,13 +513,13 @@ export async function launchRun(runId) {
     args.unshift('--spec', specPath)
   }
 
-  const r = await sh(process.env.CCHUB_CC_START ?? `${homedir()}/.local/bin/cc-start`, args, { timeout: 120_000 })
-  // cc-start's success line ("Session '<name>' started …"); the German wording
+  const r = await sh(env('START_SCRIPT') ?? `${homedir()}/.local/bin/fl-start`, args, { timeout: 120_000 })
+  // fl-start's success line ("Session '<name>' started …"); the German wording
   // is still accepted for older installed scripts.
   const m = r.stdout.match(/Session '([^']+)' (?:started|gestartet)/)
   const session = m ? m[1] : null
   if (!r.ok || !session) {
-    failRun(runId, `Start failed (cc-start):\n\n${r.stderr || r.stdout}`)
+    failRun(runId, `Start failed (fl-start):\n\n${r.stderr || r.stdout}`)
     return { ok: false, error: r.stderr || r.stdout }
   }
   db.prepare('UPDATE runs SET tmux_session=? WHERE id=?').run(session, runId)

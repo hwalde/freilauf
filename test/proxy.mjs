@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cc-hub — the TLS proxy in front of the hub (vpn-proxy.mjs).
+// Freilauf — the TLS proxy in front of the hub (vpn-proxy.mjs).
 //
 // Why this file exists at its own name rather than inside e2e.mjs: everything
 // tested here is about the TRANSPORT, and the e2e suite deliberately talks to
@@ -85,7 +85,7 @@ async function main() {
     return
   }
 
-  const certDir = mkdtempSync(join(tmpdir(), 'cc-hub-proxy-'))
+  const certDir = mkdtempSync(join(tmpdir(), 'Freilauf-proxy-'))
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes',
     '-keyout', join(certDir, 'dev-key.pem'), '-out', join(certDir, 'dev-cert.pem'),
     '-days', '2', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'],
@@ -99,11 +99,11 @@ async function main() {
   const proxy = spawn(process.execPath, [join(PROJEKT, 'vpn-proxy.mjs')], {
     env: {
       ...process.env,
-      CCHUB_VPN_BIND: BIND,
-      CCHUB_VPN_PORT: String(proxyPort),
-      CCHUB_LOCAL_PORT: String(hubPort),
-      CCHUB_CERT_DIR: certDir,
-      CCHUB_ALLOWED_HOSTS: `${BIND}:${proxyPort}`,
+      FREILAUF_VPN_BIND: BIND,
+      FREILAUF_VPN_PORT: String(proxyPort),
+      FREILAUF_LOCAL_PORT: String(hubPort),
+      FREILAUF_CERT_DIR: certDir,
+      FREILAUF_ALLOWED_HOSTS: `${BIND}:${proxyPort}`,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })

@@ -1,4 +1,4 @@
-// cc-hub — coding agent plugin: opencode.
+// Freilauf — coding agent plugin: opencode.
 //
 // opencode is provider-based: it knows Zen (free models even without a key),
 // DeepSeek (bundled access, measured: a run on deepseek/deepseek-v4-flash goes
@@ -18,10 +18,10 @@ const plugin = {
   label: 'opencode',
   bin: 'opencode',
   installHint: 'npm install -g opencode-ai   (or: curl -fsSL https://opencode.ai/install | bash)',
-  sessionTag: 'oc-',         // tmux sessions: cc-oc-<name>
+  sessionTag: 'oc-',         // tmux sessions: fl-oc-<name>
 
   /**
-   * How bin/cc-start calls this CLI (see claude.mjs for why the built-in `case`
+   * How bin/fl-start calls this CLI (see claude.mjs for why the built-in `case`
    * in that script, not this block, is what an opencode run is launched from).
    *
    * Two things here are not decoration. `stderrLog`: opencode writes the MCP
@@ -37,7 +37,7 @@ const plugin = {
     promptMode: 'argv',
     args: ['--auto', { when: 'model', args: ['--model', '{model}'] }, '--prompt', '{prompt}'],
     interactiveArgs: ['--auto'],
-    stderrLog: '{home}/.local/share/opencode/log/cc-{session}-stderr.log',
+    stderrLog: '{home}/.local/share/opencode/log/{session}-stderr.log',
     submitNudge: { waitFor: 'ctrl+p', timeoutSec: 90 },
   },
 
@@ -121,7 +121,7 @@ const plugin = {
   },
 
   /**
-   * CLI arguments for cc-start. opencode addresses the provider via a prefix on
+   * CLI arguments for fl-start. opencode addresses the provider via a prefix on
    * the model; effort and serving-provider pinning both travel in ONE merged
    * OPENCODE_CONFIG_CONTENT (global plugins and MCP servers survive that).
    */
@@ -174,7 +174,7 @@ const plugin = {
         provider: { order: [run.or_provider], allow_fallbacks: false },
       } } } } }
     }
-    // Effort: '--variant' exists only for 'opencode run', cc-start launches the
+    // Effort: '--variant' exists only for 'opencode run', fl-start launches the
     // TUI. The way in is agent.<default>.variant — and it only works when the
     // model is set in the same block (measured: --model alone is not enough).
     if (run.effort) {
