@@ -3,8 +3,9 @@
 import db, { addEvent } from './db.mjs'
 import { scheduleDue, parseDbUtc } from './util.mjs'
 import { createRun, launchRun } from './runner.mjs'
-import { claudeGateBlocked, claudeQuota, cursorGateBlocked, deepseekGateBlocked, openrouterGateBlocked } from './quota.mjs'
-import { getProvider } from './providers/index.mjs'
+import { getPlugin } from './plugins/registry.mjs'
+import { pluginCtx } from './plugins/context.mjs'
+import { pluginFields, pluginSettingKey } from './plugins/settings.mjs'
 import { notifyRun } from './reports.mjs'
 import { defFromAgent } from './run-def.mjs'
 import { fallbackTitle, applyGeneratedTitle } from './title.mjs'
@@ -94,64 +95,95 @@ function flagSetting(key, fallback) {
 }
 
 /**
+ * The provider whose gate answers when a run names none the hub knows.
+ *
+ * This is history, not a preference: every provider-based harness ran on
+ * OpenRouter before there was a provider column, and a hand-typed
+ * `openrouter/author/slug` model still arrives here with `provider = null`.
+ * Dropping the fallthrough would let exactly those runs start into an empty
+ * account — which is what the gate exists to prevent.
+ */
+const LEGACY_DEFAULT_GATE = 'openrouter'
+
+/**
+ * The declared thresholds of one gate, typed and named the way its `check`
+ * wants them: `{ <fieldKey>: value }`.
+ *
+ * A field the operator cleared falls back to the field's own default — the
+ * settings page writes every input as a string, so '' has to mean "not set" and
+ * never 0. A field whose default is null stays null on purpose: that is how
+ * claude's fable threshold says "follow the general 7-day one", a fallback only
+ * the plugin can compute.
+ */
+function gateValues(plugin) {
+  const out = {}
+  for (const field of pluginFields(plugin, 'gate')) {
+    const key = pluginSettingKey(plugin.id, field)
+    out[field.key] = field.type === 'switch'
+      ? flagSetting(key, field.default === undefined ? true : !!Number(field.default))
+      : field.type === 'number'
+        ? numSetting(key, field.default === null || field.default === undefined ? null : Number(field.default))
+        : (db.prepare(`SELECT value FROM settings WHERE key=?`).get(key)?.value ?? field.default ?? null)
+  }
+  return out
+}
+
+/** The key of a gate's on/off switch — `gate_on` unless the plugin renames it. */
+function gateSwitchKey(plugin) { return plugin?.gate?.switchKey ?? 'gate_on' }
+
+/**
+ * Ask one plugin's gate. Returns the blocking reason or null.
+ *
+ * The switch is handled here rather than in every `check`, so a plugin cannot
+ * forget it: a gate the operator has switched off must not be able to block,
+ * because switching it off IS the decision that this window does not govern
+ * starts. Everything else — which number, which window, what the reason says —
+ * belongs to the plugin, and the run travels along because claude's answer
+ * depends on the MODEL (a Fable week says nothing about a run on Sonnet).
+ */
+async function askGate(plugin, run) {
+  if (typeof plugin?.gate?.check !== 'function') return null
+  const values = gateValues(plugin)
+  const sw = gateSwitchKey(plugin)
+  if (sw in values && !values[sw]) return null
+  try {
+    const g = await plugin.gate.check(pluginCtx(plugin.id), values, run)
+    return g && g.reason ? g : null
+  } catch (e) {
+    // A gate that throws must not stop the hub from starting runs: a broken
+    // plugin is a reason to say so in the log, never to block the pipeline.
+    console.warn(`[gate] ${plugin.id}: ${e.message}`)
+    return null
+  }
+}
+
+/**
  * The budget gate for a run: what the run draws from decides which gate is
- * asked, and every gate can be configured — even switched off entirely.
+ * asked, and every gate is declared by the plugin that owns the account behind
+ * it (`gate` in the descriptor, see docs/plugins.md).
  *
- * - **claude** runs draw on the subscription quota: the claude gate with its
- *   three configurable thresholds (5 h, general 7 d, the fable week). A run on
- *   a per-model week is measured against THAT week's threshold, a run on any
- *   other model against the general one (quota.mjs).
- * - **cursor** runs draw on the cursor subscription: the cursor gate measures
- *   the included usage of the running period against its own threshold.
- * - a run with `provider='deepseek'` draws on the DeepSeek balance.
- * - everything else (openrouter, no provider named) draws on OpenRouter credits
- *   — the historical default for the provider-based harnesses.
+ * 1. the CODING AGENT's gate, when it declares one — claude and cursor run on
+ *    their own subscription, and no provider is involved at all;
+ * 2. otherwise the MODEL PROVIDER's gate — OpenRouter credits, the DeepSeek
+ *    balance;
+ * 3. otherwise nothing. A known provider WITHOUT a gate (opencode-zen reports
+ *    no balance) draws on nothing the hub can meter, and an unknown or absent
+ *    one falls through to LEGACY_DEFAULT_GATE for the reason given there.
  *
- * Each gate is off when its settings switch (`claude_gate_on`,
- * `cursor_gate_on`, `openrouter_gate_on`, `deepseek_gate_on`) is '0'. A gate
- * that is switched off cannot block — the operator decided that the window does
- * not govern starts.
+ * This used to be an if-chain on the four literals 'claude', 'cursor',
+ * 'deepseek' and 'openrouter', with the thresholds read here and the gate logic
+ * in quota.mjs — so an installed plugin could not bring a gate of its own, and
+ * the settings page carried a "quota threshold" field nothing ever read.
  *
  * Returns the blocking reason, or null when the start may happen.
  */
 export async function budgetGate(harness, model = null, provider = null) {
-  if (harness === 'claude') {
-    if (!flagSetting('claude_gate_on', true)) return null
-    const seven = numSetting('claude_gate_7d', 95)
-    const g = claudeGateBlocked(claudeQuota(), model, {
-      five: numSetting('claude_gate_5h', 90),
-      seven,
-      // Cleared fable field = the fable week follows the general 7-day threshold.
-      fable: numSetting('claude_gate_fable', seven),
-    })
-    return g.blocked ? g : null
-  }
-  if (harness === 'cursor') {
-    if (!flagSetting('cursor_gate_on', true)) return null
-    const g = await cursorGateBlocked(
-      numSetting('cursor_gate_pct', 95),
-      numSetting('cursor_included_usd', 20))
-    return g.blocked ? g : null
-  }
-  if (provider === 'deepseek') {
-    if (!flagSetting('deepseek_gate_on', true)) return null
-    const g = await deepseekGateBlocked(numSetting('deepseek_min_usd', 2))
-    return g.blocked ? g : null
-  }
-  if (provider === 'openrouter') {
-    if (!flagSetting('openrouter_gate_on', true)) return null
-    const g = await openrouterGateBlocked(numSetting('openrouter_min_eur', 5))
-    return g.blocked ? g : null
-  }
-  // A known provider WITHOUT a balance contract (opencode-zen) draws on nothing
-  // the hub can meter — no gate, same as a provider without a key. Unknown or
-  // missing providers keep the historical default: the OpenRouter gate, which is
-  // what a hand-typed `openrouter/…` model is.
-  const plugin = getProvider(provider)
-  if (plugin && !plugin.balance) return null
-  if (!flagSetting('openrouter_gate_on', true)) return null
-  const g = await openrouterGateBlocked(numSetting('openrouter_min_eur', 5))
-  return g.blocked ? g : null
+  const run = { harness, model, provider }
+  const hp = getPlugin(harness)
+  if (hp?.gate) return askGate(hp, run)
+  const pp = provider ? getPlugin(provider) : null
+  if (pp) return pp.gate ? askGate(pp, run) : null
+  return askGate(getPlugin(LEGACY_DEFAULT_GATE), run)
 }
 
 /**

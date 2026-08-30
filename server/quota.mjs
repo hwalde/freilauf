@@ -1,4 +1,12 @@
-// cc-hub — budget gates (planning 4.2): Claude quota and OpenRouter credits.
+// cc-hub — the Claude quota windows, and the meters a budget gate reads.
+//
+// Two halves. The bottom one is generic — ask a plugin what its account still
+// holds or has spent, cache it, compare it against a threshold the plugin
+// declared — and names no vendor at all. This one, the top half, is Claude's
+// window mathematics, and it is here rather than in the claude plugin because
+// four different things read it: the gate, the "quota full" anomaly, the cost
+// delta and the usage panel. One of those four disagreeing with the others is
+// the bug that split the windows apart in the first place.
 //
 // TWO SOURCES, and the order matters. The live one is the account's own usage
 // endpoint (claude-usage.mjs) — that is the truth. `~/.claude/quota.json` is the
@@ -41,8 +49,13 @@
 // therefore the whole rule — see windowAppliesToModel().
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { getProvider, providerHasKey } from './providers/index.mjs'
-import { providerCtx } from './models.mjs'
+// The registry, not one of the two index files: this module asks about plugins
+// of BOTH kinds now (a provider's balance, a coding agent's subscription
+// usage), and a gate that had to know which index a plugin lives in would be
+// the provider-specific knowledge this file is being emptied of.
+import { getPlugin } from './plugins/registry.mjs'
+import { pluginCtx } from './plugins/context.mjs'
+import { pluginHasCredential } from './plugins/store.mjs'
 import { claudeLimits, rememberedScoped } from './claude-usage.mjs'
 
 const QUOTA_PATH = process.env.CCHUB_QUOTA_JSON ?? `${homedir()}/.claude/quota.json`
@@ -257,31 +270,130 @@ export function quotaFullWindow(quota = claudeQuota(), model = null) {
   return null
 }
 
-let creditsCache = { at: 0, value: null }
+// ================= the metered sources a budget gate reads =================
+//
+// Two shapes, and NOTHING in here names a provider or a coding agent any more.
+// It used to: `openrouterCredits()` carried one vendor's URL, auth header and
+// response shape, and when DeepSeek and cursor followed, the whole thing was
+// copied twice. What is left is the part that is genuinely the same for all of
+// them — ask the plugin, cache the answer, compare against a threshold — while
+// WHICH plugin, WHICH threshold and WHAT the reason says is declared by the
+// plugin itself (`gate` in the descriptor, see docs/plugins.md).
+//
+// Deliberately still asking the plugin DIRECTLY rather than going through
+// balances.mjs/usage.mjs: those two reach the database through
+// coding-agents.mjs, and the gate sits on the launch path. One number from one
+// plugin does not need an aggregator.
+
+/** Two minutes: a balance that moved a cent must not cost a start a round trip. */
+const METER_TTL_MS = 120_000
+
+const balanceCache = new Map()   // pluginId -> { at, remaining, available }
+const usageCache = new Map()     // pluginId -> { at, pct, cycle_end }
 
 /**
- * Remaining OpenRouter credit in US dollars — null when there is no key, no
- * answer, and no earlier answer to fall back on.
+ * What a provider still holds, in one currency — `{ remaining, available }` or
+ * null when there is nothing to go on.
  *
- * Deliberately asks the provider plugin directly instead of going through
- * balances.mjs: that module reaches the database via coding-agents.mjs, and
- * db.mjs imports the harness registry, which imports THIS file. Routing the
- * gate through the aggregator would close exactly the cycle docs/plugins.md
- * warns about. The gate needs one number from one plugin, so it asks it.
+ * null is "no signal", never "zero": no plugin, no `balance()` contract, no
+ * credential, no answer and no earlier answer all end here, and a gate that
+ * blocked on any of them would defer runs over a provider it simply cannot see.
+ * A failed refresh keeps the previous reading — it is still the best there is.
  */
-async function openrouterRemaining() {
-  const plugin = getProvider('openrouter')
-  const ctx = providerCtx()
-  if (!plugin?.balance || !providerHasKey('openrouter', ctx.env)) return null
-  if (creditsCache.value !== null && Date.now() - creditsCache.at < 120_000) return creditsCache.value
+export async function providerRemaining(pluginId, currency = 'USD') {
+  const plugin = getPlugin(pluginId)
+  if (!plugin?.balance) return null
+  const cached = balanceCache.get(pluginId)
+  if (cached && Date.now() - cached.at < METER_TTL_MS) return cached
+  const ctx = pluginCtx(pluginId)
+  // The credential, resolved the way the operator configured it — a stored
+  // value or a variable they named counts, not only the plugin's own default.
+  if (!pluginHasCredential(pluginId, ctx.env)) return cached ?? null
   try {
     const b = await plugin.balance(ctx)
-    const usd = (b?.amounts ?? []).find(a => a.currency === 'USD')?.remaining ?? null
-    creditsCache = { at: Date.now(), value: usd }
-    return usd
+    const entry = {
+      at: Date.now(),
+      remaining: (b?.amounts ?? []).find(a => a.currency === currency)?.remaining ?? null,
+      available: b?.available ?? null,
+    }
+    balanceCache.set(pluginId, entry)
+    return entry
   } catch {
-    return creditsCache.value
+    return cached ?? null
   }
+}
+
+/** The name a gate's reason line uses: what the plugin calls its own gate, else its label. */
+function gateName(plugin, pluginId, label) {
+  return label ?? plugin?.gate?.label ?? plugin?.label ?? pluginId
+}
+
+/**
+ * A gate on an account BALANCE. `{ blocked: false }` or `{ blocked, reason }`.
+ *
+ * `unavailableBlocks` is for the one provider that reports a verdict of its
+ * own: DeepSeek's `is_available === false` says calls no longer go through, and
+ * that outranks the figure next to it — promotional credit expires while the
+ * number still looks healthy.
+ */
+export async function balanceGateBlocked(pluginId, {
+  minimum = 0, currency = 'USD', unavailableBlocks = false, label = null,
+} = {}) {
+  const plugin = getPlugin(pluginId)
+  const name = gateName(plugin, pluginId, label)
+  const b = await providerRemaining(pluginId, currency)
+  if (!b) return { blocked: false }                       // no signal -> do not block
+  if (unavailableBlocks && b.available === false) {
+    return { blocked: true, reason: `${name} balance unavailable — the account reports calls are blocked` }
+  }
+  if (b.remaining === null) return { blocked: false }      // no signal -> do not block
+  if (b.remaining < minimum) return { blocked: true, reason: `${name} credits low: ${b.remaining} $` }
+  return { blocked: false }
+}
+
+/**
+ * A gate on a SUBSCRIPTION's included usage — spend divided by the included
+ * amount of the running period, as the account itself reports it.
+ *
+ * Three ways the number can be missing, and all three mean "no signal, do not
+ * block": no token, no answer from the account, and no included amount with an
+ * empty `includedFallback`. The fallback is only ever a fallback: where the
+ * account states the amount, that is what the bar and this gate measure against.
+ */
+export async function usageGateBlocked(pluginId, {
+  threshold = 95, includedFallback = 20, label = null,
+} = {}) {
+  const plugin = getPlugin(pluginId)
+  if (!plugin?.usage) return { blocked: false }
+  const name = gateName(plugin, pluginId, label)
+  let entry = usageCache.get(pluginId)
+  if (!entry || entry.pct === null || Date.now() - entry.at >= METER_TTL_MS) {
+    try {
+      const data = await plugin.usage(pluginCtx(pluginId))
+      if (!data) {
+        entry = { at: Date.now(), pct: null, cycle_end: null }
+      } else {
+        const included = data.included_usd != null ? data.included_usd : (Number(includedFallback) || 0)
+        entry = {
+          at: Date.now(),
+          pct: data.spent_usd != null && included ? Math.round((data.spent_usd / included) * 1000) / 10 : null,
+          cycle_end: data.cycle_end ?? null,
+        }
+      }
+      usageCache.set(pluginId, entry)
+    } catch {
+      // keep the old entry — the previous answer is still the best one there is
+    }
+  }
+  if (!entry || entry.pct === null) return { blocked: false }
+  if (entry.pct >= threshold) {
+    return {
+      blocked: true,
+      reason: `${name} usage: ${entry.pct} % of the included period`,
+      resets_at: entry.cycle_end ?? null,
+    }
+  }
+  return { blocked: false }
 }
 
 /**
@@ -326,107 +438,24 @@ export function claudeGateBlocked(quota = claudeQuota(), model = null,
   }
   return { blocked: false }
 }
-// The setting behind `minimum` is still called `openrouter_min_eur` (renaming a
-// stored key would need a migration for nothing), but OpenRouter denominates
-// its credits in DOLLARS — the old reason line printed a euro sign next to a
-// dollar figure.
-export async function openrouterGateBlocked(minimum = 5) {
-  const remaining = await openrouterRemaining()
-  if (remaining === null) return { blocked: false }   // no key / no signal → do not block
-  if (remaining < minimum) {
-    return { blocked: true, reason: `OpenRouter credits low: ${remaining} $` }
-  }
-  return { blocked: false }
-}
 
-let deepseekCache = { at: 0, value: null, available: null }
+// ================= the named gates, kept for the callers that predate the
+// plugin contract =================
+//
+// The real declaration is each plugin's own `gate` (see docs/plugins.md); these
+// three are one line apiece and hold no logic. They exist because the unit
+// suite cache-busts THIS module to get a fresh meter cache for each case it
+// walks through — a delegation into the plugin would import the un-busted
+// module back and hand it the reading from the previous case.
+//
+// The names in them are plugin IDS, not knowledge about a vendor: what the
+// reason says, which threshold applies and whether the account's own verdict
+// counts all come from the plugin.
+export const openrouterGateBlocked = (minimum = 5) =>
+  balanceGateBlocked('openrouter', { minimum })
 
-/**
- * true = defer the start of a run on the DeepSeek provider.
- *
- * Asks the provider plugin for the account balance (same direct call as the
- * OpenRouter gate, same reason — see openrouterRemaining). Two things block:
- *
- *  - `available === false` — the provider's own verdict that calls no longer go
- *    through (promotional credit expired while the figure still looks healthy);
- *  - the USD balance below `minimum`. A DeepSeek account can hold several
- *    currencies at once; the gate looks at the USD pot, the currency the
- *    setting is denominated in. A CNY-only account reports no USD, which is
- *    "no signal" — and the gate stays open exactly like a missing key.
- */
-export async function deepseekGateBlocked(minimum = 2) {
-  const plugin = getProvider('deepseek')
-  const ctx = providerCtx()
-  if (!plugin?.balance || !providerHasKey('deepseek', ctx.env)) return { blocked: false }
-  let remaining = deepseekCache.value
-  let available = deepseekCache.available
-  if (deepseekCache.value === null || Date.now() - deepseekCache.at >= 120_000) {
-    try {
-      const b = await plugin.balance(ctx)
-      if (b) {
-        remaining = (b?.amounts ?? []).find(a => a.currency === 'USD')?.remaining ?? null
-        available = b?.available ?? null
-      }
-      deepseekCache = { at: Date.now(), value: remaining, available }
-    } catch {
-      // keep the old cache — the previous answer is still the best one there is
-    }
-  }
-  if (available === false) {
-    return { blocked: true, reason: 'DeepSeek balance unavailable — the account reports calls are blocked' }
-  }
-  if (remaining === null) return { blocked: false }   // no signal → do not block
-  if (remaining < minimum) {
-    return { blocked: true, reason: `DeepSeek credits low: ${remaining} $` }
-  }
-  return { blocked: false }
-}
+export const deepseekGateBlocked = (minimum = 2) =>
+  balanceGateBlocked('deepseek', { minimum, unavailableBlocks: true })
 
-let cursorGateCache = { at: 0, pct: null, cycle_end: null }
-
-/**
- * true = defer the start of a cursor run.
- *
- * cursor runs on its subscription, so the account's own usage answer is the
- * measure: spend divided by the included amount of the running period. Two ways
- * that number can be missing, and both mean "no signal, do not block":
- *
- *  - no token / no API answer at all (the plugin returns null);
- *  - the account reports no included amount and `includedFallback` is empty.
- *
- * The cursor usage lives on the harness plugin — asked directly, like the
- * provider gates ask the provider plugin, for the same cycle reason
- * (usage.mjs reaches the database, which reaches the harness registry, which
- * imports this module).
- */
-export async function cursorGateBlocked(threshold = 95, includedFallback = 20) {
-  const { getHarness } = await import('./harnesses/index.mjs')
-  const plugin = getHarness('cursor')
-  if (!plugin?.usage) return { blocked: false }
-  let pct = cursorGateCache.pct
-  if (pct === null || Date.now() - cursorGateCache.at >= 120_000) {
-    try {
-      const data = await plugin.usage()
-      if (!data) {
-        cursorGateCache = { at: Date.now(), pct: null, cycle_end: null }
-      } else {
-        const included = data.included_usd != null
-          ? data.included_usd : (Number(includedFallback) || 20)
-        pct = data.spent_usd != null && included
-          ? Math.round((data.spent_usd / included) * 1000) / 10 : null
-        cursorGateCache = { at: Date.now(), pct, cycle_end: data.cycle_end ?? null }
-      }
-    } catch {
-      // keep the old cache — the previous answer is still the best one there is
-    }
-  }
-  if (pct === null) return { blocked: false }   // no signal → do not block
-  if (pct >= threshold) {
-    return {
-      blocked: true,
-      reason: `Cursor usage: ${pct} % of the included period`,
-      resets_at: cursorGateCache.cycle_end ?? null,
-    }
-  }
-  return { blocked: false }
-}
+export const cursorGateBlocked = (threshold = 95, includedFallback = 20) =>
+  usageGateBlocked('cursor', { threshold, includedFallback })

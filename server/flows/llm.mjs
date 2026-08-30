@@ -1,7 +1,11 @@
-// cc-hub flows — structured extraction via OpenRouter (json_schema response
-// format). Same channel as the check LLM (pruefer.mjs): the API key comes from
-// OPENROUTER_API_KEY, the default model from the setting `llm_check_model`.
+// cc-hub flows — structured extraction. Same channel as the check LLM
+// (pruefer.mjs): the default model is `llm_check_model` and the default source
+// `llm_check_source`, both overridable per step (`model`, `source`). An unset
+// source reads as `provider:openrouter` — the call this file used to make
+// itself.
 import { getSetting } from '../db.mjs'
+import { llmJson } from '../llm/index.mjs'
+import { defaultSource } from '../llm/sources.mjs'
 
 const MAX_CHARS = 60_000     // context cap for the extraction input (cost + latency)
 
@@ -36,46 +40,47 @@ Never invent branch names, URLs or numbers. Answer exclusively in the given JSON
 
 /**
  * Ask the model to fill the fields from `text`. Returns the parsed object.
- * Throws with a clear message when key/model are missing or the call fails —
+ * Throws with a clear message when the model is missing or the call fails —
  * the flow run then shows exactly why the step failed.
+ *
+ * `source` here is the MODEL SOURCE (`provider:openrouter`, `agent:claude`, …),
+ * not the extract step's own `source` property — that one names where the text
+ * comes from (report, log, transcript, custom) and is a different question that
+ * happens to share a word. A step field wiring this one through therefore wants
+ * a name of its own (`llmSource`), or the two would collide in `props`.
  */
-export async function extractStructured({ text, instructions = '', fields, model = null }) {
-  const key = process.env.OPENROUTER_API_KEY
-  if (!key) throw new Error('extract: OPENROUTER_API_KEY is not set')
+export async function extractStructured({ text, instructions = '', fields, model = null, source = null }) {
   const useModel = model || getSetting('llm_check_model')
   if (!useModel) throw new Error('extract: no model — set one in the step or under Settings → check LLM')
+  const useSource = String(source ?? '').trim()
+    || (getSetting('llm_check_source') ?? '').trim()
+    || defaultSource()
   const schema = schemaFromFields(fields)
   if (!schema.required.length) throw new Error('extract: no valid fields')
 
   let input = String(text ?? '')
   if (input.length > MAX_CHARS) input = input.slice(0, MAX_CHARS / 2) + '\n…\n' + input.slice(-MAX_CHARS / 2)
   const user = `${instructions ? `Instructions:\n${instructions}\n\n` : ''}Text:\n\`\`\`\n${input}\n\`\`\``
-  const body = {
-    model: useModel,
-    messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }],
-    response_format: { type: 'json_schema', json_schema: { name: 'flow_extract', strict: true, schema } },
-    temperature: 0,
-    max_tokens: 2000,
-  }
-  const orProvider = getSetting('llm_check_or_provider')
-  if (orProvider) body.provider = { order: [orProvider], allow_fallbacks: false }
 
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      'content-type': 'application/json',
-      'HTTP-Referer': 'https://github.com/hwalde/cc-hub',
-      'X-Title': 'cc-hub flows',
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120_000),
+  const r = await llmJson({
+    source: useSource,
+    model: useModel,
+    system: SYSTEM,
+    prompt: user,
+    schema,
+    schemaName: 'flow_extract',
+    purpose: 'extract',
+    servingProvider: getSetting('llm_check_or_provider') || null,
+    maxTokens: 2000,
+    temperature: 0,
+    timeoutMs: 120_000,
   })
-  if (!res.ok) throw new Error(`extract: OpenRouter HTTP ${res.status}`)
-  const j = await res.json()
-  const raw = j?.choices?.[0]?.message?.content
-  let out
-  try { out = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw)) } catch { throw new Error('extract: model answer is not JSON') }
+  // This one THROWS, unlike the other three callers — a flow step that could
+  // not extract anything has failed, and the flow run must say so in its log
+  // rather than carry an empty object into the steps below it. The `extract: `
+  // prefix is what makes that log line readable, so it stays on every message.
+  if (!r.ok) throw new Error(`extract: ${r.error}`)
+  const out = r.data
   if (!out || typeof out !== 'object') throw new Error('extract: model answer is not an object')
   // Fill missing fields so templates downstream never see undefined.
   for (const name of schema.required) if (!(name in out)) out[name] = schema.properties[name].type === 'array' ? [] : schema.properties[name].type === 'number' ? 0 : schema.properties[name].type === 'boolean' ? false : ''

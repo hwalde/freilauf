@@ -10,6 +10,10 @@ for s in cc-start cc-attach cc-kill cc-help cc-report cc-oc-sync-agents cchub cc
     install -m 755 "$ROOT/bin/$s" "$HOME/.local/bin/$s"
     echo "    $s"
 done
+# Sourced by cc-attach and cc-kill, never executed — hence 644 and no shebang.
+# It has to land next to them, because that is where they look for it.
+install -m 644 "$ROOT/bin/cc-harness-tags.sh" "$HOME/.local/bin/cc-harness-tags.sh"
+echo "    cc-harness-tags.sh (library)"
 
 echo "==> opencode plugin (session.idle / session.error → cc-report)"
 mkdir -p "$HOME/.config/opencode/plugins"

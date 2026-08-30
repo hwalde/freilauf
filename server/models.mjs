@@ -13,13 +13,14 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { getHarness } from './harnesses/index.mjs'
 import { t } from './i18n.mjs'
-import { getProvider, providerLabel, providerHasKey } from './providers/index.mjs'
+import { getProvider, providerLabel } from './providers/index.mjs'
+import { pluginCtx, pluginJson, modelRegistry } from './plugins/context.mjs'
+import { pluginHasCredential } from './plugins/store.mjs'
 const execFileAsync = promisify(execFile)
 
 const LISTE_MS = 6 * 60 * 60 * 1000   // model lists rarely change
 const ENDPUNKTE_MS = 15 * 60 * 1000   // serving providers fluctuate more often
 const HARNESS_MS = 24 * 60 * 60 * 1000 // effort levels only change on CLI updates
-const ZEITLIMIT = 8_000
 
 /**
  * Which providers can a harness offer HERE and NOW? Capability comes from the
@@ -27,6 +28,13 @@ const ZEITLIMIT = 8_000
  * harness can use it key-free — the dropdown must only show what will actually
  * run. (Restriction to the operator's per-coding-agent selection happens in
  * coding-agents.mjs on top of this.)
+ *
+ * "Has a credential" is `pluginHasCredential()`, the SAME question the budget
+ * gate, balances.mjs and the Plugins page ask — not `providerHasKey()`, which
+ * only ever looked at `process.env`. A provider whose key the operator stored
+ * as a value on the Plugins page was honoured at launch (the run gets it
+ * through `secret()`) and never offered in the run form: configured, working,
+ * invisible.
  */
 export function providerFuerHarness(harness) {
   const plugin = getHarness(harness)
@@ -34,7 +42,7 @@ export function providerFuerHarness(harness) {
   const out = []
   for (const id of plugin.providers ?? []) {
     const keyFree = (plugin.keyFreeProviders ?? []).includes(id)
-    if (!keyFree && !providerHasKey(id)) continue
+    if (!keyFree && !pluginHasCredential(id)) continue
     out.push({ id, label: providerLabel(id), ...(keyFree ? { hinweisKey: 'provider.keyfree' } : {}) })
   }
   return out
@@ -71,21 +79,25 @@ async function holen(key, maxAge, fetchFn) {
   return p
 }
 
-async function json(url, headers = {}) {
-  const res = await fetch(url, { headers, signal: AbortSignal.timeout(ZEITLIMIT) })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  return res.json()
-}
+// The fetch helper and the models.dev snapshot live in the plugin context now
+// (server/plugins/context.mjs), so a plugin gets exactly ONE implementation of
+// the timeout, of the `HTTP <status>` error shape and of that cache — whether
+// it is asked for a model list here, for a balance from quota.mjs or for a
+// completion from server/llm.
+const json = pluginJson
+const registry = modelRegistry
 
-/** Names and prices from the registry opencode itself uses. */
-async function registry() {
-  return holen('models.dev', LISTE_MS, () => json('https://models.dev/api.json'))
-    .then(r => r.liste ?? {})
-}
-
-/** Helper context injected into provider plugins. */
-export function providerCtx() {
-  return { json, registry, env: process.env }
+/**
+ * Helper context injected into provider plugins.
+ *
+ * Delegates to `pluginCtx()`, which adds what this one could never have: the
+ * credential the operator configured (`secret()`) and the plugin's own settings
+ * (`setting()`). Callers that name the provider get those; the handful that do
+ * not — the catalog fetches, which predate credentials — get the same fetch
+ * helper they always had.
+ */
+export function providerCtx(providerId = null) {
+  return pluginCtx(providerId)
 }
 
 /**
@@ -129,7 +141,7 @@ async function opencodeIds(provider) {
 function katalog(provider) {
   const plugin = getProvider(provider)
   if (!plugin) return Promise.resolve({ liste: null, veraltet: false, fehler: t('api.unknown_provider', { provider }) })
-  return holen(provider, LISTE_MS, () => plugin.fetchModels(providerCtx()))
+  return holen(provider, LISTE_MS, () => plugin.fetchModels(providerCtx(provider)))
 }
 
 export async function modelList(provider, harness = null) {

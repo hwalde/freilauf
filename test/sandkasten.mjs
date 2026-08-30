@@ -77,7 +77,7 @@ export function neuerSandkasten({ praefix = 'cc-hub-test-', behalten = false } =
   const zustand = { hub: null, db: null, port: 0, basis: '', aufgeraeumt: false }
 
   async function bauen() {
-    for (const d of ['data', 'runs', 'worktrees', 'integrate', 'bin']) mkdirSync(join(SB, d), { recursive: true })
+    for (const d of ['data', 'runs', 'worktrees', 'integrate', 'bin', 'plugins']) mkdirSync(join(SB, d), { recursive: true })
 
     // Extra-skill dummy (planning: opt-in skills outside the skill autoload folders)
     mkdirSync(join(SB, 'zusaetze', 'e2e-fleiss'), { recursive: true })
@@ -122,7 +122,7 @@ NAME=e2e; ID=""; ENVS=(); LOG=""; KEEP=""; PROMPTFILE=""; POS=()
 ALLE=("$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --harness|--model|--session-id|--settings) shift 2 ;;
+    --harness|--model|--session-id|--settings|--spec) shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
     --id)   ID="$2";   shift 2 ;;
     --env)  ENVS+=("-e" "$2"); shift 2 ;;
@@ -176,7 +176,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
    * `echteAgenten` hands the runs to the real ~/.local/bin/cc-start (and needs the
    * provider keys back in the environment); everything else keeps the stub.
    */
-  async function hubStarten({ echteAgenten = false, keys = {}, env = {} } = {}) {
+  async function hubStarten({ echteAgenten = false, keys = {}, env = {}, willkommen = false } = {}) {
     zustand.port = await freierPort()
     zustand.basis = `http://127.0.0.1:${zustand.port}`
     const umgebung = {
@@ -205,6 +205,12 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // "Fresh installation" tests must not pick up the operator's seed file
       // (~/.config/cc-hub/coding-agents.json) — point at a file that does not exist.
       CCHUB_AGENTS_SEED: join(SB, 'no-seed.json'),
+      // The same fence, one layer out: without it the hub would load the
+      // OPERATOR's external plugin packages (~/.local/share/cc-hub/plugins) and
+      // the suite would be green or red depending on what is installed on the
+      // machine it runs on. The directory starts empty; the plugin tests
+      // install into it themselves.
+      CCHUB_PLUGIN_DIR: join(SB, 'plugins'),
       // The goal waits for the TUI to draw before it is typed in (server/goal.mjs).
       // The stub prints immediately, so the suite must not sit through the
       // production grace period for it.
@@ -247,7 +253,24 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     // watcher); a direct write here must WAIT for it instead of failing instantly
     // with "database is locked" (the hub's own connection uses busy_timeout 5000).
     zustand.db.exec('PRAGMA busy_timeout = 10000;')
+    // The Welcome wizard is what a FRESH installation meets: `GET /` redirects
+    // to /welcome for a browser navigation while `welcome_hide` is unset, and a
+    // sandbox is a fresh installation every single time. Every suite here asks
+    // for `/` expecting the overview, so the wizard is switched off by default
+    // — measured on the day the redirect landed: 29 of the browser suite's 57
+    // checks went red, every one of them a `page.goto('/')` on the wizard.
+    //
+    // The wizard itself is tested by clearing this key again (e2e), which is
+    // the honest way round: opting IN to the redirect in the one place that is
+    // about it, rather than every other suite opting out of it.
+    if (willkommen === false) setzeEinstellung('welcome_hide', '1')
     return zustand.db
+  }
+
+  /** Write one settings row into the sandbox database (the hub reads it live). */
+  function setzeEinstellung(key, value) {
+    zustand.db.prepare(`INSERT INTO settings(key, value) VALUES(?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(String(key), String(value))
   }
 
   /**
@@ -267,6 +290,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     process.env.CCHUB_CC_START = STUB
     process.env.CCHUB_CLAUDE_PROJECTS = join(SB, 'claude-projects')
     process.env.CCHUB_ZUSAETZE_DIR = join(SB, 'zusaetze')
+    process.env.CCHUB_PLUGIN_DIR = join(SB, 'plugins')
     process.env.CCHUB_PULS_AUS = '1'
     process.env.CCHUB_CURSOR_AUTH = join(SB, 'missing-cursor-auth.json')
     process.env.CCHUB_CURSOR_DIR = join(SB, 'cursor')
@@ -339,8 +363,9 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
 
   return {
     SB, REPO, ORIGIN, FEHLSTART, sessions, SESSIONSLISTE,
+    PLUGINS: join(SB, 'plugins'),
     bauen, hubStarten, hubStoppen, watcherVorbereiten, aufraeumen,
-    hol, formular,
+    hol, formular, setzeEinstellung,
     get db() { return zustand.db },
     get port() { return zustand.port },
     get basis() { return zustand.basis },

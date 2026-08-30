@@ -41,9 +41,14 @@ Six facts and you can reason about the whole system:
    `merge_mode = hub`). A run is `done` when its work is on the base branch.
    If the worktree is dirty or the merge conflicts, the still-living agent is
    told to fix it, and only then a human. `server/integrate.mjs`.
-5. **Coding agents and model providers are plugins** — one file each under
-   `server/harnesses/` and `server/providers/`. Adding support for a new CLI is
-   adding a file, not editing ten call sites. [`docs/plugins.md`](docs/plugins.md).
+5. **Coding agents and model providers are plugins** — built-ins under
+   `server/harnesses/` and `server/providers/`, external packages in
+   `CCHUB_PLUGIN_DIR` (default `~/.local/share/cc-hub/plugins`), loaded at
+   startup. A plugin may bring its own credentials, its own budget-gate
+   thresholds, the ability to answer the hub's own small questions, and a
+   `launch` declaration that lets `bin/cc-start` start a CLI nobody shipped
+   here. Adding support for a new CLI is adding a package, not editing ten call
+   sites. [`docs/plugins.md`](docs/plugins.md).
 6. **The service runs from its own checkout** (`~/agents/deploy/cc-hub`), never
    from the directory a human edits in. `cchub deploy` moves it forward, health
    checks it and rolls back if it fails.
@@ -67,7 +72,8 @@ ends up on the open internet. Ask the human, all at once:
 | **Which hostnames may address it?** (`CCHUB_ALLOWED_HOSTS`) | Rebinding/CSRF fence. Only the VPN IP and names whose DNS the operator controls. Every name must also be in the certificate. |
 | **Do certificates exist, or should you create them?** | `~/.local/certs/cc-hub/dev-cert.pem` + `dev-key.pem`, e.g. via [mkcert](https://github.com/FiloSottile/mkcert), SANs = the VPN IP and any hostname above. |
 | **Which coding agent CLIs are installed and licensed?** | `claude`, `opencode`, `hermes`, `cursor-agent` — the hub only offers what the operator configures. |
-| **Which API keys, if any?** | `OPENROUTER_API_KEY` etc. **Ask for them to be pasted into `~/.config/cc-hub/env` by the human.** Do not read them, echo them, or put them in a commit, a log or your report. |
+| **Which API keys, if any?** | `OPENROUTER_API_KEY` etc. **Ask for them to be pasted into `~/.config/cc-hub/env` by the human** — or, if that machine makes environment variables awkward, let the human enter them in the UI under Settings → Plugins. Do not read them, echo them, or put them in a commit, a log or your report. |
+| **Any external plugin packages to install?** (`CCHUB_PLUGIN_DIR`) | Optional. Default `~/.local/share/cc-hub/plugins`; a missing directory is the normal case. Only set it if the human already has packages somewhere else. |
 | **Telegram notifications?** | Optional. The bot token and chat id are entered in the UI's setup assistant, not by you. |
 
 If the human does not know, say what the value is *for* and offer the safe
@@ -97,7 +103,13 @@ Then, in order — each step prints what to do next:
 
 Now **the human edits `~/.config/cc-hub/env`** with the answers from section 2
 (at minimum `CCHUB_VPN_BIND` and `CCHUB_ALLOWED_HOSTS`) and places the
-certificates. Then the firewall, which needs root:
+certificates. API keys may go in the same file, or be entered in the UI later
+(Settings → Plugins) — the hub resolves a stored value first, then a variable
+the operator named, then the plugin's own declared variables. External plugin
+packages, if any, go into `CCHUB_PLUGIN_DIR` (default
+`~/.local/share/cc-hub/plugins`, created by nobody — a missing directory is
+normal); `--spec`-launched coding agents need `jq`, which is already a
+prerequisite. Then the firewall, which needs root:
 
 ```bash
 sudo ./setup/04-firewall.sh     # ufw: the VPN port only on wg0, denied everywhere else
@@ -127,11 +139,24 @@ always a missing value in `~/.config/cc-hub/env` or a missing certificate.
 
 ## 4. First five minutes in the UI
 
-The hub starts empty on purpose. In this order:
+The hub starts empty on purpose, and the first thing a browser sees says so:
 
-1. **Settings → Coding agents.** Nothing runs until at least one is configured
-   and enabled. The add dialog detects installed CLIs. For each, tick the model
-   providers it may use. *(A banner nags on every page until you do this.)*
+0. **The Welcome wizard.** `GET /` redirects to `/welcome` — five server-
+   rendered steps that walk through what is installed on this machine, the first
+   coding agent, the first model provider and the source for the hub's own small
+   questions. Every step has a "Skip for now" (a session answer) and a **"Do not
+   show this again"** checkbox that switches it off for good; it is also
+   reachable at `/welcome` afterwards. Nothing in it can create a state the rest
+   of the hub chokes on — it writes through the same functions the Plugins page
+   uses — so the fastest correct path is to answer it rather than skip it.
+1. **Settings → Plugins** (`/settings/plugins`; the old Settings → Coding agents
+   URL redirects here). Nothing runs until at least one coding agent is
+   configured and enabled. One card per coding agent — enabled switch, install
+   state, and the model providers it may use — one per model provider, and the
+   external packages with their versions and any load errors. This is also where
+   a provider gets a credential without touching the environment: either the
+   **name** of the variable to read, or the value itself. *(A banner nags on
+   every page until a coding agent is configured.)*
 2. **Repos → add a repository.** Path, base branch, and — this is the useful
    part — an optional **repo prompt** that is added to *every* run of that repo,
    plus `merge_mode`. Start with `merge_mode = off` (agents keep their work on
@@ -139,9 +164,10 @@ The hub starts empty on purpose. In this order:
    turns "the agent says it is done" into "the work is on `main`". For the
    **worktree extras** (files a worktree needs but git does not carry — a `.env`,
    a linked `node_modules`) the form offers **Find worktree extras**: a model
-   looks at the repository and suggests the list. That needs an OpenRouter key
-   and the model is chosen under **Settings → Worktree extras**; without it the
-   button says why. The suggestion **replaces** the current list — it never
+   looks at the repository and suggests the list. Which model answers is chosen
+   under **Settings → Worktree extras**, and it may be any configured model
+   provider *or* a coding agent on its own subscription; without a usable source
+   the button says why. The suggestion **replaces** the current list — it never
    extends it.
 3. **Start a single run.** Small, boring task, a repo you do not mind. Watch it
    in the browser terminal. This is the fastest way to learn what the system
@@ -200,12 +226,14 @@ tooling. The seams that were designed to be pulled on:
 
 | You want to… | Pull on this seam |
 |---|---|
-| drive a coding agent CLI that is not supported | a new file in `server/harnesses/` + a `case` in `bin/cc-start` → [`docs/plugins.md`](docs/plugins.md) |
-| use another model provider | a new file in `server/providers/` → same doc |
+| drive a coding agent CLI that is not supported | a **plugin package** in `CCHUB_PLUGIN_DIR` — a `plugin.json` plus a descriptor with a `launch` declaration, and `bin/cc-start --spec` starts it without a line of bash. Inside this repo instead: a file in `server/harnesses/` plus a `case` in `cc-start` → [`docs/plugins.md`](docs/plugins.md) |
+| use another model provider | a plugin package of the same shape, or a file in `server/providers/` → same doc |
+| have the hub's own small questions answered by something else | Settings → the source picker on each of Run titles / Incident check / Worktree extras: any plugin declaring `llm`, including a **coding agent on your existing subscription** (marked, because a session per question is slower and dearer) |
+| give a provider a key without touching the environment | Settings → **Plugins**: name a different environment variable, or store the value |
 | change what every agent is told | Settings → **Platform prompt suffix** (added, never replacing the platform rules), or a **repo prompt** per repository |
 | give agents an opt-in capability | drop a folder with a `SKILL.md` into `~/agents/zusaetze/` — it appears as a checkbox in the run forms. Deliberately *not* `.claude/skills`, so nothing loads automatically |
 | do something after a run finishes or a merge lands | **no-code flows** — a graphical designer, no code needed: message running agents, start follow-up runs and wait, extract data from a report via LLM, branch, loop, Telegram, HTTP, shell command → [`server/flows/AGENTS.md`](server/flows/AGENTS.md) |
-| change when a run is allowed to start | Settings → **Budget gates** (optional per provider), else `repos.max_parallel` — `server/scheduler.mjs`; a deferred run can be started anyway from its detail page |
+| change when a run is allowed to start | Settings → **Budget gates** — the fieldset is generated from whichever plugins declare a `gate`, so a new one appears there by itself; else `repos.max_parallel` — `server/scheduler.mjs`; a deferred run can be started anyway from its detail page |
 | change a run that is not over | the "Edit this run" card on its detail page: the expected duration of a running run, plus the prompt, the repo, the branch rule and — for a planned run — its start time of one that has not started yet — `server/run-edit.mjs` decides what a status allows |
 | add a UI language | a new `lang/<code>.json` with the same keys, plus the language list — see `server/i18n.mjs` |
 
@@ -258,7 +286,10 @@ If your task is to change cc-hub rather than just run it:
 | Watching from the outside; anomalies | `server/watcher.mjs`, `server/detect.mjs` |
 | Merging a finished run into the base branch | `server/integrate.mjs` |
 | Rate limits / provider outages | `server/incidents.mjs`, `server/harnesses/patterns.mjs` |
-| Coding agent + provider plugins | `server/harnesses/`, `server/providers/`, `docs/plugins.md` |
+| Coding agent + provider plugins — the contract, in depth | **`docs/plugins.md`** (the one document to hand an agent for this), `server/harnesses/`, `server/providers/` |
+| Loading, validating, storing and configuring plugins | `server/plugins/` (`registry`, `loader`, `manifest`, `store`, `install`, `discovery`, `settings`, `context`, `web`) |
+| The hub's own LLM calls: sources, structured output, alerts | `server/llm/` (`index` = `llmJson()`, `sources`, `schema`, `json`, `alerts`) |
+| The first-run wizard | `server/welcome.mjs` |
 | No-code flows | `server/flows/` + its own `AGENTS.md` |
 | Pages, sidebar, live channel | `server/pages.mjs`, `server/events.mjs`, `public/hub.js` |
 | TLS proxy, HTTP/2, the network edge | `vpn-proxy.mjs`, `test/proxy.mjs` |
@@ -278,7 +309,11 @@ If your task is to change cc-hub rather than just run it:
 [ ] setup/04-firewall.sh run (or handed to the human with the exact command)
 [ ] cchub-deploy --init --from "$PWD"  →  cchub status  →  cchub on
 [ ] reachability verified FROM A VPN CLIENT, not from the server
-[ ] Settings → Coding agents configured; at least one repo added
+[ ] Welcome wizard answered (or deliberately skipped)
+[ ] Settings → Plugins: at least one coding agent enabled, its providers ticked,
+    credentials present (environment variable or stored value)
+[ ] a model source chosen for the hub's own questions (run titles at minimum)
+[ ] at least one repo added
 [ ] one small single run started and watched end to end
 [ ] no ports, addresses, hostnames or keys ended up in a commit
     (./pruefe-vor-push.sh is green)

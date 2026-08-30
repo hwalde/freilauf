@@ -197,6 +197,80 @@
     }
   })
 
+  // ---- the hub's own questions: which model source answers them ----
+  //
+  // Three fieldsets ask the same thing in a row (incident check, run title,
+  // worktree extras), and the welcome wizard asks it again. So nothing here
+  // knows an id: everything is scoped to the fieldset the <select> sits in, and
+  // the listener is DELEGATED — a wizard step or a fragment may replace the
+  // block, and a direct listener would die with it while the picker still
+  // looked alive.
+  const llmMru = new WeakMap()   // <datalist> -> what the server rendered into it
+
+  function llmBox(sel) { return sel.closest('fieldset') || sel.closest('form') || document }
+
+  function llmSyncSource(sel) {
+    const box = llmBox(sel)
+    const opt = sel.selectedOptions[0]
+    // A coding agent starts a whole session for one question — slower and more
+    // expensive than a model provider. The plugin says so (`llm.overhead`), the
+    // option carries it, and the warning follows the choice.
+    const warn = box.querySelector('[data-llm-overhead]')
+    if (warn) warn.hidden = !(opt && opt.dataset.overhead === '1')
+    // Pinning a serving provider is an OpenRouter thing and means nothing
+    // anywhere else. Hidden AND disabled: a field one cannot see must not still
+    // submit — it would send an OpenRouter endpoint tag with somebody else's
+    // answer.
+    const pin = box.querySelector('[data-llm-pin]')
+    if (pin) {
+      const passt = sel.value === 'provider:openrouter'
+      pin.hidden = !passt
+      pin.querySelectorAll('input').forEach(function (i) { i.disabled = !passt })
+    }
+  }
+
+  async function llmLoadModels(sel) {
+    const box = llmBox(sel)
+    const input = box.querySelector('input[list]')
+    const liste = input && document.getElementById(input.getAttribute('list'))
+    if (!liste) return
+    // The server-rendered suggestions are the recently used models — they stay,
+    // whatever the source answers, and they are what the list falls back to
+    // when it answers nothing at all.
+    if (!llmMru.has(liste)) {
+      llmMru.set(liste, {
+        html: liste.innerHTML,
+        ids: Array.prototype.map.call(liste.querySelectorAll('option'), function (o) { return o.value }),
+      })
+    }
+    const snap = llmMru.get(liste)
+    liste.innerHTML = snap.html
+    try {
+      const j = await (await fetch('/api/llm-models?source=' + encodeURIComponent(sel.value))).json()
+      if (!j.ok || !j.models || !j.models.length) return
+      j.models.forEach(function (m) {
+        if (snap.ids.indexOf(m.id) >= 0) return
+        const o = document.createElement('option')
+        o.value = m.id
+        if (m.name && m.name !== m.id) o.textContent = m.name
+        liste.append(o)
+      })
+    } catch {
+      /* no list: the model field is free text and always works */
+    }
+  }
+
+  document.querySelectorAll('select[data-llm-source]').forEach(function (sel) {
+    llmSyncSource(sel)
+    llmLoadModels(sel)
+  })
+  document.addEventListener('change', function (ev) {
+    const sel = ev.target && ev.target.closest && ev.target.closest('select[data-llm-source]')
+    if (!sel) return
+    llmSyncSource(sel)
+    llmLoadModels(sel)
+  })
+
   // ---- toasts: say what happened without taking the page away ----
   // A Quick Run starts from wherever one is standing; being torn to a detail page
   // is exactly what would make it not quick. So the answer arrives here — with a

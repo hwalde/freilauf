@@ -1,19 +1,32 @@
 #!/usr/bin/env bash
-# Terminates a running coding-agent session (claude/opencode/hermes, with a safety prompt).
+# Terminates a running coding-agent session (claude/opencode/hermes/cursor, with a
+# safety prompt).
 # Usage: cc-kill [options] [session-name]
 set -euo pipefail
 
-PREFIX="cc-"
+# The session tags and the reverse lookup live in one file, next to this one —
+# they used to be a copy here and another one in cc-attach, and both had gone
+# stale in the same place (cursor was missing from them).
+CC_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc-harness-tags.sh"
+if [[ ! -r "$CC_LIB" ]]; then
+    printf '%s\n' "Error: $CC_LIB is missing — reinstall with setup/02-install-scripts.sh." >&2
+    exit 1
+fi
+# shellcheck source=cc-harness-tags.sh
+. "$CC_LIB"
+
+PREFIX="$CC_PREFIX"
 
 usage() {
     cat <<'EOF'
 Usage: cc-kill [options] [session-name]
 
-  session-name   Pick a session directly (with or without the cc-/cc-oc-/cc-he- prefix).
-                 If omitted: selection list (or directly, if only one is running).
+  session-name   Pick a session directly (with or without the cc-/cc-oc-/cc-he-/cc-cu-
+                 prefix). If omitted: selection list (or directly, if only one is running).
 
 Options:
-  -H, --harness HARNESS   Only show sessions of this harness: claude | opencode | hermes
+  -H, --harness HARNESS   Only show sessions of this harness:
+                          claude | opencode | hermes | cursor
       --yes               Terminate without asking (for cc-hub; the confirmation
                           is handled by the UI there).
   -h, --help            Overview of all cc commands.
@@ -34,24 +47,21 @@ for a in "$@"; do
 done
 set -- "${ARGS[@]:-}"
 
+err() { printf '%s\n' "$*" >&2; }
+
 HARNESS=""
 if [[ "${1:-}" == "-H" || "${1:-}" == "--harness" ]]; then
     HARNESS="${2:-}"
-    case "$HARNESS" in
-        claude|opencode|hermes) shift 2 ;;
-        *) err() { printf '%s\n' "$*" >&2; }; err "Error: unknown harness '$HARNESS'. Allowed: claude opencode hermes"; exit 2 ;;
-    esac
+    if cc_harness_known "$HARNESS"; then
+        shift 2
+    else
+        err "Error: unknown harness '$HARNESS'. Allowed: $(cc_harness_ids)"
+        exit 2
+    fi
 fi
 
-err() { printf '%s\n' "$*" >&2; }
-
-harness_of() {
-    case "$1" in
-        "$PREFIX"oc-*) echo "opencode" ;;
-        "$PREFIX"he-*) echo "hermes" ;;
-        *) echo "claude" ;;
-    esac
-}
+# Derive a session's harness from its name (cc-harness-tags.sh).
+harness_of() { cc_harness_of "$1"; }
 
 mapfile -t ROWS < <(tmux list-sessions \
     -F '#{session_name}|#{t:session_created}|#{?session_attached,attached,free}|#{session_path}' \
@@ -110,8 +120,7 @@ kill_session() {
 if [[ -n "${1:-}" ]]; then
     TARGET="$1"
     for s in "${SESSIONS[@]}"; do
-        bare="${s#$PREFIX}"
-        bare="${bare#oc-}"; bare="${bare#he-}"
+        bare="$(cc_harness_bare "$s")"    # remove cc- and the harness tag
         if [[ "$s" == "$TARGET" || "$s" == "$PREFIX$TARGET" || "$bare" == "$TARGET" ]]; then
             kill_session "$s"
             exit 0

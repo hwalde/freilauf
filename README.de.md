@@ -41,16 +41,35 @@ Zeit, in der du das nicht tust:
 - **Ein fertiger Lauf heißt: die Arbeit ist auf `main`.** Der Hub merged auf
   Wunsch selbst, prüft die Behauptung des Laufs, bevor er sie glaubt, und
   schickt den noch lebenden Agenten zurück, um Fehlendes nachzuliefern.
-- **Ein Ort für vier CLIs.** Welche Coding-Agenten der Hub fahren darf und
-  welche Modell-Provider jeder davon nutzen darf, ist eine Einstellung — keine
-  Codeänderung.
+- **Ein Ort für vier CLIs — und für ein fünftes, von dem hier niemand gehört
+  hat.** Welche Coding-Agenten der Hub fahren darf und welche Modell-Provider
+  jeder davon nutzen darf, ist eine Einstellung — keine Codeänderung; und ein
+  Coding-Agent oder Provider, der als Plugin-Paket kommt, braucht gar keine
+  Änderung an diesem Repository.
 
 ## Was drin ist
 
-- **Coding-Agenten als Plugins** — claude, opencode, hermes, cursor. In der
-  Oberfläche konfiguriert (Einstellungen → Coding agents); der Hinzufügen-Dialog
-  erkennt installierte CLIs. Neue Coding-Agenten und Provider sind einzelne
-  Dateien ([docs/plugins.md](docs/plugins.md)).
+- **Ein fünfstufiger Willkommens-Assistent** beim ersten Besuch: was auf dieser
+  Maschine installiert ist, der erste Coding-Agent, der erste Modell-Provider
+  und welches Modell die eigenen kleinen Fragen des Hubs beantwortet.
+  Überspringbar, und dauerhaft abschaltbar.
+- **Coding-Agenten und Modell-Provider sind Plugins** — claude, opencode,
+  hermes, cursor sowie OpenRouter/DeepSeek/OpenCode Zen sind mitgeliefert, und
+  **ein Dritter kann ein Paket auf die Maschine legen** (`CCHUB_PLUGIN_DIR`),
+  das beim Start dazukommt. Ein Plugin kann seine eigene API-Schlüssel-Behandlung
+  mitbringen, seine eigenen Budget-Schwellen und eine Start-Deklaration, mit der
+  der tmux-Starter ein CLI ausführt, das hier nie jemand gesehen hat
+  ([docs/plugins.md](docs/plugins.md)).
+- **Eine Plugins-Seite** (Einstellungen → Plugins) installiert, konfiguriert,
+  aktiviert und entfernt sie und zeigt, was ein Scan beim Start auf der Maschine
+  gefunden hat. Der Schlüssel eines Providers darf in einer
+  Umgebungsvariablen deiner Wahl liegen — oder direkt dort eingetragen werden,
+  für eine Maschine, auf der eine weitere Variable lästig ist.
+- **Die eigenen kleinen Fragen des Hubs** — einen Lauf benennen, beurteilen ob
+  eine Logzeile eine echte Störung ist, einen Report lesen, Worktree-Extras
+  vorschlagen — gehen pro Aufgabe an die Modellquelle, die du wählst. Dazu
+  gehört **ein Coding-Agent auf einem Abo, das du ohnehin bezahlst**; genau das
+  macht den Hub ohne jeden API-Schlüssel brauchbar.
 - **Agenten und Einzelläufe** aus einem Formular: Coding-Agent, Modell,
   Reasoning-Stufe, Prompt, Repo, Branch-Regel, Zeitplan. Ein **Quick-Run**-Knopf
   auf jeder Seite startet einen Lauf aus einem gespeicherten Favoriten mit zwei
@@ -137,11 +156,14 @@ cchub status                        # Hub-Prozess, VPN-Zugang, Pipeline, Session
 cchub on                            # VPN-Proxy starten → über WireGuard erreichbar
 ```
 
-**Das Erste in der Oberfläche:** unter **Einstellungen → Coding agents** deine
-Coding-Agenten anlegen — auf einer frischen Installation weist ein Banner auf
-jeder Seite darauf hin. Eine optionale Seed-Datei
-`~/.config/cc-hub/coding-agents.json` füllt das beim ersten Start vor; genau das
-macht ein geskriptetes Setup reproduzierbar.
+**Das Erste in der Oberfläche:** ein **Willkommens-Assistent** — der erste
+Besuch auf `/` landet dort. Er führt durch das, was auf der Maschine installiert
+ist, den ersten Coding-Agenten, den ersten Modell-Provider und das Modell, das
+die eigenen kleinen Fragen des Hubs beantwortet; „Nicht mehr anzeigen" legt ihn
+still. Alles davon ist auch später unter **Einstellungen → Plugins** erreichbar,
+worauf auf einer frischen Installation ein Banner hinweist. Eine optionale
+Seed-Datei `~/.config/cc-hub/coding-agents.json` füllt die Coding-Agenten beim
+ersten Start vor; genau das macht ein geskriptetes Setup reproduzierbar.
 
 > Erreichbarkeit **von einem VPN-Client aus** prüfen, niemals mit `curl` auf dem
 > Server selbst: Diese Anfrage läuft über `lo` und sagt nichts über deine
@@ -188,10 +210,13 @@ laufenden Hub laufen.
 
 cc-hub ist der Arbeitsablauf eines Betreibers, in Code gegossen, veröffentlicht
 weil er dir vielleicht einen Monat spart. **Forke es, ändere es, reiß Teile
-raus.** Die Nähte, an denen gezogen werden soll: Harness- und Provider-Plugins,
-der Plattform-Prompt-Zusatz, Repo-Prompts, opt-in-Zusatzskills in
-`~/agents/zusaetze/` und die No-Code-Flows. Die Tabelle steht in
-[SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md).
+raus.** Die Nähte, an denen gezogen werden soll: **Plugins für Coding-Agenten
+und Modell-Provider — auch als Pakete, die vollständig außerhalb dieses
+Repositorys leben**, der Plattform-Prompt-Zusatz, Repo-Prompts,
+opt-in-Zusatzskills in `~/agents/zusaetze/`, die Modellquelle hinter den eigenen
+Fragen des Hubs und die No-Code-Flows. Die Tabelle steht in
+[SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md), der vollständige Plugin-Vertrag in
+[docs/plugins.md](docs/plugins.md).
 
 ## Mitmachen
 

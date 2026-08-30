@@ -2,18 +2,33 @@
 // cc-hub — main entry point: HTTP + WS + scheduler + watcher in one process (planning 5).
 import http from 'node:http'
 import process from 'node:process'
-import { route } from './web.mjs'
-import { startTerminalServer } from './terminal.mjs'
-import { startScheduler, stopScheduler } from './scheduler.mjs'
-import { startWatcher, stopWatcher, verwaisteLaeufeAbschliessen } from './watcher.mjs'
-import { startIntegrator, stopIntegrator } from './integrate.mjs'
-import { getSetting } from './db.mjs'
-import { seedIfEmpty } from './coding-agents.mjs'
-import { subscriptionUsage } from './usage.mjs'
-import { providerBalances } from './balances.mjs'
-import { sessionMemory } from './sessions.mjs'
-import { setLanguage } from './i18n.mjs'
-import { setTimezone } from './util.mjs'
+import { loadExternalPlugins } from './plugins/loader.mjs'
+
+// External plugin packages join the registry HERE, before any module that
+// reads it has been evaluated — a coding agent that arrives after the first
+// form was rendered is one the operator cannot choose, and the seed below
+// validates against the registry too.
+//
+// That is why every import after this line is a DYNAMIC one: `import`
+// statements are hoisted and all run before the first statement in the body,
+// so a static import list would load the whole application first and this
+// await would come too late. Top-level await is what makes the plain
+// statement order true again.
+await loadExternalPlugins()
+
+const { route } = await import('./web.mjs')
+const { startTerminalServer } = await import('./terminal.mjs')
+const { startScheduler, stopScheduler } = await import('./scheduler.mjs')
+const { startWatcher, stopWatcher, verwaisteLaeufeAbschliessen } = await import('./watcher.mjs')
+const { startIntegrator, stopIntegrator } = await import('./integrate.mjs')
+const { getSetting } = await import('./db.mjs')
+const { seedIfEmpty } = await import('./coding-agents.mjs')
+const { subscriptionUsage } = await import('./usage.mjs')
+const { providerBalances } = await import('./balances.mjs')
+const { sessionMemory } = await import('./sessions.mjs')
+const { setLanguage } = await import('./i18n.mjs')
+const { setTimezone } = await import('./util.mjs')
+const { scanSystem } = await import('./plugins/discovery.mjs')
 
 // UI language (default English) and, on a fresh installation, the optional
 // coding agent seed file (installed e.g. by a private setup repo).
@@ -54,6 +69,11 @@ server.listen(PORT, HOST, () => {
   // and `ps` over every process on the machine, and without a warm cache the
   // first page view after a restart is the one that pays for it.
   sessionMemory().catch(() => {})
+  // What is already on this machine — installed coding agent CLIs, API keys in
+  // the environment. Deliberately AFTER listen and fire-and-forget: it shells
+  // out once per coding agent plugin, and a start must never wait on that.
+  // Never on a request path either; the Plugins page reads the stored result.
+  try { scanSystem().catch(() => {}) } catch { /* a scan is a suggestion, never a requirement */ }
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

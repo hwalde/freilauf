@@ -39,15 +39,31 @@ cc-hub is what you use when you are not:
 - **A finished run means the work is on `main`.** Optionally the hub does the
   merging itself, checks the run's claim before believing it, and sends the
   still-living agent back to fix what is missing.
-- **One place for four CLIs.** Which coding agents the hub may drive, and which
-  model providers each may use, is a setting — not a code change.
+- **One place for four CLIs — and for a fifth nobody here has heard of.** Which
+  coding agents the hub may drive, and which model providers each may use, is a
+  setting, not a code change; and a coding agent or provider that ships as a
+  plugin package needs no change to this repository at all.
 
 ## What's in the box
 
-- **Coding agents as plugins** — claude, opencode, hermes, cursor. Configured in
-  the UI (Settings → Coding agents); the add dialog detects installed CLIs. New
-  coding agents and providers are single files
-  ([docs/plugins.md](docs/plugins.md)).
+- **A five-step Welcome wizard** on first visit: what is installed on this
+  machine, the first coding agent, the first model provider, and which model
+  answers the hub's own small questions. Skippable, and switchable off for good.
+- **Coding agents and model providers are plugins** — claude, opencode, hermes,
+  cursor and OpenRouter/DeepSeek/OpenCode Zen ship with it, and a **third party
+  can drop a package on the machine** (`CCHUB_PLUGIN_DIR`) that joins them at
+  startup. A plugin may bring its own API-key handling, its own budget-gate
+  thresholds, and a launch declaration that lets the tmux starter run a CLI
+  nobody here has ever heard of ([docs/plugins.md](docs/plugins.md)).
+- **One Plugins page** (Settings → Plugins) installs, configures, enables and
+  removes them, and shows what a startup scan found on the machine. A provider's
+  key can live in an environment variable of your choosing — or be entered right
+  there, for a machine where adding a variable is awkward.
+- **The hub's own small questions** — naming a run, judging whether a log line is
+  a real outage, reading a report, suggesting worktree extras — go to whichever
+  model source you pick per job. That includes **a coding agent on a
+  subscription you already pay for**, which is what lets the hub run useful with
+  no API key anywhere.
 - **Agents and single runs** from one form: coding agent, model, reasoning
   effort, prompt, repo, branch rule, schedule. A **Quick Run** button on every
   page starts one from a saved favorite in two fields.
@@ -128,10 +144,14 @@ cchub status                        # hub process, VPN access, pipeline, session
 cchub on                            # start the VPN proxy → reachable over WireGuard
 ```
 
-**First thing in the UI:** add your coding agents under **Settings → Coding
-agents** — a banner points there on a fresh install. An optional seed file
-`~/.config/cc-hub/coding-agents.json` pre-populates this on first start, which
-is what makes a scripted setup reproducible.
+**First thing in the UI:** a **Welcome wizard** — the first visit to `/` lands
+there. It walks through what is installed on the machine, your first coding
+agent, your first model provider and the model that answers the hub's own small
+questions; "Do not show this again" retires it. Everything it does is also
+reachable later under **Settings → Plugins**, where a banner points on a fresh
+install. An optional seed file `~/.config/cc-hub/coding-agents.json`
+pre-populates the coding agents on first start, which is what makes a scripted
+setup reproducible.
 
 > Verify reachability **from a VPN client**, never with `curl` on the server
 > itself: that request travels over `lo` and says nothing about your firewall.
@@ -174,9 +194,12 @@ sessions, so it is safe to run next to a live hub.
 
 cc-hub is one operator's workflow turned into code, published because it might
 save you a month. **Fork it, change it, rip parts out.** The seams meant to be
-pulled on: harness and provider plugins, the platform prompt suffix, per-repo
-prompts, opt-in extra skills in `~/agents/zusaetze/`, and the no-code flows.
-[SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md) has the table.
+pulled on: **coding agent and model provider plugins — including packages that
+live outside this repository entirely**, the platform prompt suffix, per-repo
+prompts, opt-in extra skills in `~/agents/zusaetze/`, the model source behind
+the hub's own questions, and the no-code flows.
+[SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md) has the table;
+[docs/plugins.md](docs/plugins.md) has the plugin contract in full.
 
 ## Contributing
 

@@ -1372,6 +1372,132 @@ try {
     sauber(p)
     await p.close()
   })
+  // ------------------------------------------------------------------
+  gruppe('A17 — the model source for the hub\'s own questions')
+
+  // Three fieldsets on the Settings page ask the same thing in a row (incident
+  // check, run title, worktree extras) and the welcome wizard asks it again —
+  // so nothing in hub.js knows an id here: everything is scoped to the fieldset
+  // the <select> sits in, and the listener is delegated. Both of those are
+  // silent when they break: the datalist simply stays as the server rendered
+  // it, and the warning simply never appears.
+  //
+  // `/api/llm-models` is intercepted rather than answered for real: asking a
+  // model provider means a request to a vendor, and asking a coding agent means
+  // starting its CLI. What is under test is the client, and a stub also lets
+  // the request itself be asserted.
+  const quellenSeite = async () => {
+    const p = await neueSeite(null)
+    p.gefragt = []
+    await p.route('**/api/llm-models*', async (route) => {
+      const source = new URL(route.request().url()).searchParams.get('source')
+      p.gefragt.push(source)
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ok: true,
+          source,
+          models: [{ id: `${source}/one`, name: 'Model One' }, { id: `${source}/two`, name: `${source}/two` }],
+        }),
+      })
+    })
+    await p.goto(sk.basis + '/settings', { waitUntil: 'load' })
+    return p
+  }
+  const listenWerte = (p, id) => p.$$eval(`#${id} option`, os => os.map(o => o.value))
+
+  await pruefe('every source picker fills its own model datalist, and keeps what the server put there', async () => {
+    const p = await quellenSeite()
+    await wartePage(p, () => document.querySelectorAll('#title-mru option').length > 1,
+      null, 'the title datalist to be filled from the API')
+
+    // Each of the three fieldsets asked once, for the source IT carries.
+    gleich(p.gefragt.length, 3, `three questions, one per job (${p.gefragt.join(', ')})`)
+    wahr(p.gefragt.every(s => s === 'provider:openrouter'),
+      `all three at their stored source (${p.gefragt.join(', ')})`)
+
+    const werte = await listenWerte(p, 'title-mru')
+    wahr(werte.includes('provider:openrouter/one'), `the answer landed in the list (${werte.join(', ')})`)
+    wahr(werte.includes('provider:openrouter/two'), 'both entries')
+    // The recently-used models the server rendered are not replaced by a
+    // vendor's catalog — they are what the field falls back to.
+    const vorgabe = await p.$eval('input[name=llm_title_model]', i => i.value)
+    wahr(werte.includes(vorgabe), `the server-rendered suggestion survived (${vorgabe})`)
+    // …and a name that is not the id is shown as the option's label.
+    gleich(await p.$eval('#title-mru option[value="provider:openrouter/one"]', o => o.textContent), 'Model One',
+      'a model with a name of its own shows it')
+    sauber(p)
+    await p.close()
+  })
+
+  await pruefe('choosing a coding agent shows the overhead warning and disables the OpenRouter pin', async () => {
+    const p = await quellenSeite()
+    await wartePage(p, () => document.querySelectorAll('#title-mru option').length > 1, null, 'the first fill')
+
+    const feld = 'fieldset:has(select[name=llm_check_source])'
+    // Before: a model provider, so no warning and the pin applies.
+    gleich(await p.$eval(`${feld} [data-llm-overhead]`, el => el.hidden), true, 'no warning at a provider source')
+    gleich(await p.$eval(`${feld} [data-llm-pin]`, el => el.hidden), false, 'the pin is offered')
+    gleich(await p.$eval('input[name=llm_check_or_provider]', i => i.disabled), false, 'and it submits')
+
+    await p.selectOption('select[name=llm_check_source]', 'agent:claude')
+    await wartePage(p, () => !document.querySelector('fieldset:has(select[name="llm_check_source"]) [data-llm-overhead]').hidden,
+      null, 'the overhead warning to appear')
+    const warnung = await p.textContent(`${feld} [data-llm-overhead]`)
+    wahr(warnung.trim().length > 0, `the warning has a text (${warnung.trim().slice(0, 60)})`)
+
+    // Hidden AND disabled. A hidden field that still submits is a trap this
+    // project has been bitten by before — here it would send an OpenRouter
+    // endpoint tag along with somebody else's answer.
+    gleich(await p.$eval(`${feld} [data-llm-pin]`, el => el.hidden), true, 'the pin is hidden')
+    gleich(await p.$eval('input[name=llm_check_or_provider]', i => i.disabled), true, 'and disabled, not merely invisible')
+
+    // The change is scoped to its own fieldset — the other two are untouched.
+    gleich(await p.$eval('fieldset:has(select[name=llm_title_source]) [data-llm-overhead]', el => el.hidden), true,
+      'the run-title fieldset keeps its own state')
+    gleich(await p.$eval('input[name=llm_title_or_provider]', i => i.disabled), false, 'and its pin still submits')
+
+    // The new source was asked for its models, and the list grew rather than
+    // losing what was already in it.
+    await wartePage(p, () => Array.prototype.some.call(
+      document.querySelectorAll('#llm-mru option'), o => o.value === 'agent:claude/one'),
+    null, 'the models of the newly chosen source')
+    gleich(p.gefragt.at(-1), 'agent:claude', 'the request carried the chosen source')
+
+    // …and back again: both halves must be reversible, or the warning would
+    // simply stay on the page for ever after one look at a coding agent.
+    await p.selectOption('select[name=llm_check_source]', 'provider:openrouter')
+    await wartePage(p, () => document.querySelector('fieldset:has(select[name="llm_check_source"]) [data-llm-overhead]').hidden,
+      null, 'the warning to go away again')
+    gleich(await p.$eval(`${feld} [data-llm-pin]`, el => el.hidden), false, 'the pin is back')
+    gleich(await p.$eval('input[name=llm_check_or_provider]', i => i.disabled), false, 'and submits again')
+    // Switching source does not cost the recently-used entries.
+    const werte = await listenWerte(p, 'llm-mru')
+    wahr(werte.includes('provider:openrouter/one'), `the provider's models are back (${werte.join(', ')})`)
+    falsch(werte.includes('agent:claude/one'), 'and the previous source\'s are gone')
+    sauber(p)
+    await p.close()
+  })
+
+  await pruefe('a source that answers nothing leaves the field working', async () => {
+    // The model input is free text and must keep working whatever a vendor
+    // says — an empty answer, an error, a broken connection.
+    const p = await neueSeite(null)
+    await p.route('**/api/llm-models*', route => route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ ok: false, error: 'nobody is answering' }),
+    }))
+    await p.goto(sk.basis + '/settings', { waitUntil: 'load' })
+    const vorgabe = await p.$eval('input[name=llm_title_model]', i => i.value)
+    const werte = await listenWerte(p, 'title-mru')
+    wahr(werte.includes(vorgabe), 'the server-rendered suggestions are still there')
+    await p.selectOption('select[name=llm_title_source]', 'provider:deepseek')
+    await p.waitForTimeout(200)
+    wahr((await listenWerte(p, 'title-mru')).includes(vorgabe), 'and a switch does not empty the list either')
+    sauber(p)
+    await p.close()
+  })
 } catch (err) {
   console.log(`\nAborted: ${err.stack}`)
   zaehler.fehler.push({ name: 'Test run', grund: err.message })

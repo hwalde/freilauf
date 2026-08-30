@@ -6,8 +6,8 @@
 // quota.json as the fallback; Cursor: spend, included amount and cycle end of
 // the running period via the CLI token). Everything is best-effort and cached:
 // a hanging endpoint must never block a page render.
-import { getSetting } from './db.mjs'
 import { enabledCodingAgents } from './coding-agents.mjs'
+import { pluginCtx } from './plugins/context.mjs'
 
 // A minute, not two: the sidebar now re-fetches on its own timer (hub.js), so
 // the numbers it shows are only as fresh as this window. The suite shortens it
@@ -66,21 +66,15 @@ export async function subscriptionUsage({ force = false } = {}) {
       const plugin = agent.plugin
       if (!plugin?.usage) continue
       let data = null
-      try { data = await plugin.usage() } catch { data = null }
+      // The plugin is handed its own context, so what it reports can depend on
+      // what the operator configured for it — the included amount cursor falls
+      // back on used to be looked up HERE, which meant this aggregator knew one
+      // vendor's field names and the budget gate computed the same percentage a
+      // second time. Both now come out of the plugin, once.
+      try { data = await plugin.usage(pluginCtx(agent.harness)) } catch { data = null }
       if (!data) {
         if (plugin.subscription) out.push({ harness: agent.harness, label: plugin.label, ok: false })
         continue
-      }
-      if (data.kind === 'cursor') {
-        // The included amount comes from Cursor itself (GetCurrentPeriodUsage).
-        // Only when that endpoint stays silent does the configured fallback step
-        // in — and then the UI says so instead of presenting a guess as a fact.
-        if (data.included_usd == null) {
-          data.included_usd = Number(getSetting?.('cursor_included_usd') ?? 20) || 20
-          data.included_estimated = true
-        }
-        data.pct = data.spent_usd != null && data.included_usd
-          ? Math.round((data.spent_usd / data.included_usd) * 1000) / 10 : null
       }
       out.push({ harness: agent.harness, label: plugin.label, ok: true, data })
     }
