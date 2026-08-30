@@ -1,243 +1,332 @@
-# cc-hub
+# Freilauf
 
 [English](README.md) · [中文](README.zh-CN.md) · **Deutsch**
 
-**Eine Weboberfläche, die deine Coding-Agenten für dich laufen lässt — geplant,
-unbeaufsichtigt und von außen beobachtet.** Claude Code, opencode, hermes und
-cursor-agent arbeiten jeweils in einem eigenen Git-Worktree in einer eigenen
-tmux-Session; cc-hub startet sie, beobachtet sie, sammelt ihre Reports, merged
-ihre Arbeit und meldet sich per Telegram, wenn etwas dich braucht.
+**Hör auf, Agenten zu managen. Lasse sie in deinem Projekt frei laufen!**
 
-> ### 🤖 Aufsetzen? Lass es deinen Agenten machen.
-> Du benutzt ohnehin schon einen Coding-Agenten. Zeig ihm
+Stell dir vor: Du hast nicht mehr zwanzig Terminals gleichzeitig offen, sondern
+eine Oberfläche, in der du regelmäßige Jobs vergibst wie *„Toten Code finden
+und eliminieren"*, *„Testabdeckung erhöhen"*, *„Bugs fixen"* … — und damit
+Agenten definierst, die regelmäßig an deinem Projekt arbeiten, selbst wenn du
+schläfst. Du kannst jederzeit neue Jobs vergeben. Über eine Web-Oberfläche
+behältst du die Übersicht, kannst in jeden Agenten hineinschauen, Flows
+konfigurieren und dich benachrichtigen lassen. Du gehst mit deinen Kollegen ins
+Café, und dein Handy vibriert, weil wieder ein Job fertig ist. Das ist dir egal
+— denn du genießt die Auszeit, um wieder auf neue Ideen zu kommen.
+
+Das ist Freilauf: eine selbst gehostete Web-Oberfläche, die ein **festes Team
+aus Coding-Agenten** — Claude Code, opencode, hermes, cursor oder jeden
+Agenten, der als Plugin dazukommt — nach Plan betreibt. Jeder Lauf arbeitet in
+seinem eigenen Git-Worktree in seiner eigenen tmux-Session, wird auf Kosten,
+Fortschritt und Fehler beobachtet und liefert seine Arbeit dort ab, wo du sie
+haben willst: **auf einem Branch zum Review — oder gemerged auf `main`, sobald
+du dem Gate vertraust.**
+
+> ### 🤖 Einrichten? Lass das deinen Agenten machen.
+> Du benutzt bereits einen Coding-Agenten. Zeig ihm
 > **[SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md)** — eine Anleitung, die *für*
-> Agenten geschrieben ist: Sie erklärt das System, fragt dich die Handvoll
-> Werte, die sie nicht raten kann, und installiert es.
-> *"Lies SETUP_WITH_AGENT.md und richte mir das ein."*
-> (Das Dokument ist englisch — Projektsprache.)
+> Agenten geschrieben ist: Sie erklärt das System, stellt dir die wenigen
+> Fragen, die er nicht erraten kann, und installiert es. *„Lies
+> SETUP_WITH_AGENT.md und richte das für mich ein."*
 
-```
-Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux-Sessions
-(über WireGuard)   vpn-proxy.mjs           server/hub.mjs      cc-<name>-<id>
-                   cchub-vpn.service       cchub.service       cc-oc-/he-/cu-…
-                   └──── beide laufen aus dem Deploy-Checkout ────┘
-                         (~/agents/deploy/cc-hub, siehe unten)
-```
+## Warum „Freilauf"
 
-## Wofür du das willst
+Der Freilauf ist das Teil am Fahrrad, das weiterrollt, wenn du aufhörst zu
+treten. Und er ist kein Loslassen ins Nichts — er ist eine **Sperrklinke**: Er
+lässt das Rad frei laufen, aber nur vorwärts. Genau so ist Freilauf gebaut. Ein
+Lauf ist erst fertig, wenn seine Arbeit angekommen ist. Nichts lebt nur auf
+dieser Maschine. Kein Agent merged oder pusht jemals auf deinen Basis-Branch —
+das tut Freilauf, und es geht nur vorwärts.
 
-Dein Coding-Agent funktioniert gut, solange du davor sitzt. cc-hub ist für die
-Zeit, in der du das nicht tust:
+## Was Freilauf tut
 
-- **Aufgabe hinlegen und weggehen.** Jeder Lauf bekommt einen eigenen Worktree
-  und eine eigene tmux-Session, also kommen sich Läufe nie in die Quere — und du
-  kannst dich später auf jeden davon aufschalten und den ganzen Bildschirm lesen.
-- **Arbeit planen.** „Jede Nacht um 2 die offenen Issues durchsehen." Ein *Agent*
-  ist eine gespeicherte Laufdefinition plus Name und Zeitplan; ein *Einzellauf*
-  ist dasselbe Formular ohne diese beiden.
-- **Wissen, wenn es schiefging — auch wenn der Agent es nicht mehr sagen kann.**
-  Ein Agent im Rate Limit kann nichts mehr melden, also beobachtet der Hub von
-  außen: tmux-Zustand, Logs, Transcripts, Hooks, Provider-Puls.
-- **Ein fertiger Lauf heißt: die Arbeit ist auf `main`.** Der Hub merged auf
-  Wunsch selbst, prüft die Behauptung des Laufs, bevor er sie glaubt, und
-  schickt den noch lebenden Agenten zurück, um Fehlendes nachzuliefern.
-- **Ein Ort für vier CLIs — und für ein fünftes, von dem hier niemand gehört
-  hat.** Welche Coding-Agenten der Hub fahren darf und welche Modell-Provider
-  jeder davon nutzen darf, ist eine Einstellung — keine Codeänderung; und ein
-  Coding-Agent oder Provider, der als Plugin-Paket kommt, braucht gar keine
-  Änderung an diesem Repository.
-
-## Was drin ist
-
-- **Ein fünfstufiger Willkommens-Assistent** beim ersten Besuch: was auf dieser
-  Maschine installiert ist, der erste Coding-Agent, der erste Modell-Provider
-  und welches Modell die eigenen kleinen Fragen des Hubs beantwortet.
-  Überspringbar, und dauerhaft abschaltbar.
-- **Coding-Agenten und Modell-Provider sind Plugins** — claude, opencode,
-  hermes, cursor sowie OpenRouter/DeepSeek/OpenCode Zen sind mitgeliefert, und
-  **ein Dritter kann ein Paket auf die Maschine legen** (`CCHUB_PLUGIN_DIR`),
-  das beim Start dazukommt. Ein Plugin kann seine eigene API-Schlüssel-Behandlung
-  mitbringen, seine eigenen Budget-Schwellen und eine Start-Deklaration, mit der
-  der tmux-Starter ein CLI ausführt, das hier nie jemand gesehen hat
-  ([docs/plugins.md](docs/plugins.md)).
-- **Eine Plugins-Seite** (Einstellungen → Plugins) installiert, konfiguriert,
-  aktiviert und entfernt sie und zeigt, was ein Scan beim Start auf der Maschine
-  gefunden hat. Der Schlüssel eines Providers darf in einer
-  Umgebungsvariablen deiner Wahl liegen — oder direkt dort eingetragen werden,
-  für eine Maschine, auf der eine weitere Variable lästig ist.
-- **Die eigenen kleinen Fragen des Hubs** — einen Lauf benennen, beurteilen ob
-  eine Logzeile eine echte Störung ist, einen Report lesen, Worktree-Extras
-  vorschlagen — gehen pro Aufgabe an die Modellquelle, die du wählst. Dazu
-  gehört **ein Coding-Agent auf einem Abo, das du ohnehin bezahlst**; genau das
-  macht den Hub ohne jeden API-Schlüssel brauchbar.
-- **Agenten und Einzelläufe** aus einem Formular: Coding-Agent, Modell,
-  Reasoning-Stufe, Prompt, Repo, Branch-Regel, Zeitplan. Ein **Quick-Run**-Knopf
-  auf jeder Seite startet einen Lauf aus einem gespeicherten Favoriten mit zwei
-  Feldern.
-- **Terminal im Browser** (xterm.js über WebSocket, standardmäßig read-only) —
-  zuschauen, hineintippen, einen Hilferuf beantworten.
-- **Reports** über `cc-report` (done / failed / help / progress / branch / pr),
-  mit `inbox.jsonl` als Rückfallebene, wenn der Hub nicht erreichbar ist. Ein
-  fertiger Lauf kann erneut berichten — Nacharbeit in seine Session tippen, und
-  das nächste `cc-report done` des Agenten wird gemergt, löst die Flows aus und
-  kommt als *Nacharbeits-Report* auf Telegram an. Eine Checkbox unter dem
-  Terminal stellt Telegram für einen Lauf stumm, den man ohnehin gerade
-  beobachtet.
-- **Integration**: Der Hub merged fertige Läufe selbst in den Basis-Branch,
-  seriell pro Repo, in einem eigenen Worktree — ein dreckiger Worktree, ein
-  Konflikt oder ein roter Merge-Check eskalieren erst an den Agenten und erst
-  dann an dich.
-- **Incidents**: Rate Limits und Provider-Ausfälle werden über mehrere
-  unabhängige Kanäle erkannt und einmal gemeldet, nicht fünfmal.
-- **Subscription-Verbrauch** — Claudes 5-Stunden- und 7-Tage-Fenster, Cursors
-  Ausgaben im laufenden Zyklus, OpenRouter- und DeepSeek-Guthaben — in der
-  Seitenleiste jeder Seite, plus ein **Budget-Gate**, das Starts zurückstellt,
-  bevor sie in ein leeres Kontingent laufen — und nur das, was das Fenster
-  wirklich betrifft: Claudes allgemeine Woche bremst jeden Claude-Lauf, eine
-  modellbezogene Woche nur die Läufe auf diesem Modell, ein Cursor-Lauf nur den
-  Cursor-Zeitraum, ein DeepSeek-Lauf nur sein eigenes Guthaben. Jedes Gate ist
-  **optional** mit eigener Schwelle (Einstellungen → Budget-Gates), und ein
-  zurückgestellter Lauf lässt sich von seiner Detailseite **trotzdem starten**.
-  Dieselbe Seitenleiste zeigt, was alle
-  tmux-Sessions der Maschine an Speicher kosten, alle acht Minuten neu gemessen:
-  Eine Session überlebt ihren Agenten absichtlich — diese Rechnung läuft leise
-  mit. Ein konfigurierbarer **tmux-Cleanup-Agent** (Einstellungen → tmux-Aufräumen,
-  dieselbe Agent+Provider+Modell-Auswahl wie in den Lauf-Formularen) beendet die
-  ältesten inaktiven Sessions, wenn der Speicher einen Schwellenwert überschreitet,
-  bis zu einem frei wählbaren Ziel — oder auf Zuruf, über den Button im
-  tmux-Block der Seitenleiste und eine Box auf der Sessions-Seite.
-- **No-Code-Flows**: ein grafischer Designer für das, was nach einem Lauf
-  passiert — laufenden Agenten eine Nachricht schicken, Folgeläufe starten und
-  auf sie warten, per LLM strukturierte Daten aus einem Report ziehen,
-  verzweigen, über Listen laufen, Telegram, HTTP, Shell-Kommando
+- **Ein Arbeitsplatz pro Lauf.** Jeder Lauf bekommt seinen eigenen
+  Git-Worktree und seine eigene tmux-Session. Kein Agent tritt dem anderen auf
+  die Füße — und keiner dir; du kannst dich später an jede Session hängen und
+  den ganzen Bildschirm lesen.
+- **Rollen statt Tickets.** Ein *Agent* ist eine Rolle mit einem Zeitplan: der
+  Reviewer, der jede Nacht läuft, der Tote-Code-Sucher am Sonntag, der
+  Doku-Pfleger nach jedem Merge. Ein *Einzellauf* ist dasselbe Formular ohne
+  Namen und Zeitplan — und ein **Quick-Run**-Button auf jeder Seite startet
+  einen aus einem gespeicherten Favoriten mit zwei Feldern.
+- **Beobachtet, nicht geglaubt.** Ein Budget-Gate vor dem Start (Claudes
+  5-Stunden- und 7-Tage-Fenster, Cursors Abrechnungsperiode, OpenRouter- und
+  DeepSeek-Guthaben — jedes optional, jedes mit eigener Schwelle), Fortschritt
+  und Kosten währenddessen, Vorfälle, wenn ein Anbieter ausfällt oder ein
+  Rate-Limit zuschlägt (von außen erkannt, denn ein Agent im Rate-Limit kann
+  nichts mehr melden), ein Report am Ende — und ein **Finish-Gate**, das dem
+  Agenten nicht glaubt, dass er fertig ist: Freilauf prüft den Worktree, sagt
+  einem noch laufenden Agenten, was fehlt, merged in einem eigenen
+  Integrations-Worktree, startet bei einem Konflikt einen Konfliktlauf und
+  ruft dich zuletzt.
+- **Flows ohne Code.** Wenn ein Lauf endet, kann ein Flow einem anderen
+  Agenten schreiben, den nächsten Lauf starten und auf ihn warten,
+  strukturierte Daten per LLM aus einem Report ziehen, verzweigen, schleifen,
+  dich benachrichtigen, eine URL aufrufen, ein Shell-Kommando ausführen
   ([server/flows/AGENTS.md](server/flows/AGENTS.md)).
-- **Telegram**-Benachrichtigungen mit Link direkt auf den Lauf.
-- **Mehrsprachige Oberfläche**: English (Standard), 中文, Deutsch —
-  Einstellungen → UI language.
-- **Eine Uhr und ein Zahlenformat**: Jede Zeitangabe — auch in der Sidebar — in
-  der unter Einstellungen → Zeit und Zahlen gewählten Zeitzone (Automatisch:
-  Deutsch → Europe/Berlin, Chinesisch → Asia/Shanghai, Englisch → Serverzeit);
-  Zahlen und Prozentangaben nutzen die Trennzeichen der UI-Sprache.
+- **Ein Fenster.** Was läuft, was es kostet, was herausgekommen ist, was dich
+  braucht — die Übersicht, ein Live-Terminal im Browser (xterm.js,
+  standardmäßig nur lesend) und Benachrichtigungen mit Link direkt zum Lauf.
+  Die Seitenleiste zeigt deine Abo-Fenster, Provider-Guthaben und was jede
+  tmux-Session auf der Maschine an Speicher kostet; ein konfigurierbarer
+  Aufräum-Agent beendet die ältesten untätigen Sessions, wenn es zu viel wird.
+- **Alles Herstellerspezifische ist ein Plugin.** Coding-Agenten,
+  Modell-Provider und Benachrichtigungsdienste sind Plugins mit dokumentiertem
+  Vertrag ([docs/plugins.md](docs/plugins.md)); ein Dritter kann ein Paket auf
+  die Maschine legen, das beim Start dazukommt — mit eigener
+  API-Key-Verwaltung, eigenen Budget-Schwellen und eigener Start-Deklaration.
+  Eine **Plugins-Seite** und ein fünfschrittiger **Welcome-Assistent**
+  konfigurieren sie; die kleinen Fragen des Hubs selbst (einen Lauf benennen,
+  eine Logzeile beurteilen, einen Report lesen) kann ein Coding-Agent auf dem
+  Abo beantworten, das du ohnehin bezahlst.
+- **Mehrsprachige Oberfläche**: Englisch (Standard), 中文, Deutsch — eine Uhr
+  und ein Zahlenformat auf jeder Seite.
 
-## Sicherheitsmodell — bitte diesen Abschnitt lesen
+## Drei Wege hinein
 
-Der Hub kann tmux steuern. **Das ist Shell-Zugriff.** Deshalb:
+- **Nebeneinander.** Euer Team entwickelt; das Agenten-Team nimmt die Arbeit,
+  die keiner gern macht — toter Code, Reviews, Abhängigkeiten, Übersetzungen,
+  die Doku. Ergebnisse kommen als Branch zum Review; ihr entscheidet, was auf
+  `main` geht. Hier fangen die meisten an, und viele bleiben hier.
+- **Von Hand.** Ein Einzellauf, wenn ihr einen braucht: die Migration, das
+  Aufräumen, der eine Bug, für den gerade niemand Zeit hat.
+- **Vollautonom.** Menschen schreiben Issues und Feature-Wünsche; das Team
+  macht alles andere, und Freilauf merged. Zeitpläne, Budget-Gates, das
+  Finish-Gate, Konfliktläufe und die Eskalation an einen Menschen sind, was das
+  betreibbar macht statt leichtsinnig. Niemand muss heute dort stehen — die
+  Rampe ist dieselbe.
 
-- `server/hub.mjs` bindet **fest an `127.0.0.1`**; es gibt keinen direkten Weg
-  aus dem Netz.
-- Davor sitzt `vpn-proxy.mjs` (TLS) und bindet **ausschließlich an die eigene
-  WireGuard-Adresse**. `CCHUB_VPN_BIND` ist Pflicht — es gibt bewusst keinen
-  Default. **WireGuard ist die Auth-Schicht; cc-hub hat keinen eigenen Login.**
-- Host-Allowlist + Origin-Prüfung (`CCHUB_ALLOWED_HOSTS`) sind der Zaun gegen
-  DNS-Rebinding und CSRF; `Sec-Fetch-Site: cross-site` wird abgewiesen.
-- **Fail-closed**: `cchub-vpn.service` startet nach einem Reboot bewusst *nicht*
-  von selbst (`cchub on` schaltet den Zugang frei), und
-  `setup/04-firewall.sh` erlaubt den VPN-Port nur auf `wg0` und verbietet ihn
-  überall sonst.
+**Du gibst keine Kontrolle ab. Du verschiebst sie eine Ebene nach oben.** Ein
+Teamleiter sitzt auch nicht neben jedem Entwickler und liest mit: Er vereinbart,
+was zu tun ist, setzt die Regeln und liest die Ergebnisse. Genau das ist ab
+jetzt deine Arbeit — Rollen, Zeitpläne, Budgets, das Finish-Gate, wann ein
+Mensch gerufen wird. Den Rest macht das Team, und Freilauf zeigt dir alles
+davon an einem Ort.
 
-**Betreibe den Hub in einem erreichbaren Netz niemals ohne diese Schichten.**
+Und es muss keine Software sein. Ein Lauf endet mit einem Merge, weil Code das
+braucht; die Bausteine — Rollen, Zeitpläne, Flows, LLM-Extraktion,
+Benachrichtigungen, HTTP, Shell — haben für eine Marketing-Routine, eine
+Doku-Pipeline oder einen Backoffice-Prozess dieselbe Form: etwas, das pünktlich
+passieren, beobachtet und berichtet werden muss.
 
-## Installation
+## Loslegen
 
-Voraussetzungen: Linux mit systemd (User-Units), Node.js ≥ 22 (`node:sqlite`),
-tmux, git, jq, curl, ein WireGuard-Interface und mindestens ein Agenten-CLI
-(`claude`, `opencode`, `hermes`, `cursor-agent`) im `PATH`. Zertifikate z. B.
-mit [mkcert](https://github.com/FiloSottile/mkcert).
+Der kurze Weg: Gib deinem Coding-Agenten den Pfad zu diesem Repository und
+sag *„Lies SETUP_WITH_AGENT.md und installiere Freilauf."* Er kennt die
+Schritte unten, fragt dich nur, was er nicht erraten kann (deine
+WireGuard-Adresse, die Hostnamen, wo die Zertifikate liegen) und prüft das
+Ergebnis.
+
+Der lange Weg, der Vollständigkeit halber. Voraussetzungen: Linux mit systemd
+(User-Units), Node.js ≥ 22 (`node:sqlite`), tmux, git, jq, curl, ein
+WireGuard-Interface und mindestens ein Agenten-CLI (`claude`, `opencode`,
+`hermes`, `cursor-agent`) im `PATH`. Zertifikate z. B. mit
+[mkcert](https://github.com/FiloSottile/mkcert).
 
 ```bash
-./setup/01-npm-install.sh       # node-pty, ws, xterm.js — für DIESEN Checkout (Tests, Entwicklung)
-./setup/02-install-scripts.sh   # cc-start/-attach/-kill/-help/-report + cchub + cchub-deploy → ~/.local/bin
-./setup/03-install-services.sh  # ~/.config/cc-hub/env (aus env.example) + systemd-Units
+./setup/01-npm-install.sh       # node-pty, ws, xterm.js — für DIESEN Checkout (Tests, Bearbeiten)
+./setup/02-install-scripts.sh   # fl-start/-attach/-kill/-help/-report/-notify + freilauf + freilauf-deploy → ~/.local/bin
+./setup/03-install-services.sh  # ~/.config/freilauf/env (aus env.example) + systemd-Units
 sudo ./setup/04-firewall.sh     # ufw: VPN-Port nur auf wg0 (einmalig)
 ```
 
-Danach mindestens `CCHUB_VPN_BIND` und `CCHUB_ALLOWED_HOSTS` in
-`~/.config/cc-hub/env` setzen (siehe [`env.example`](env.example)), die
-Zertifikate hinlegen und die erste Version live bringen:
+Dann in `~/.config/freilauf/env` mindestens `FREILAUF_VPN_BIND` und
+`FREILAUF_ALLOWED_HOSTS` setzen (siehe [`env.example`](env.example)), die
+Zertifikate ablegen und die erste Version live bringen:
 
 ```bash
-cchub-deploy --init --from "$PWD"   # klont nach ~/agents/deploy/cc-hub und deployt
-cchub status                        # Hub-Prozess, VPN-Zugang, Pipeline, Sessions, deployte Sha
-cchub on                            # VPN-Proxy starten → über WireGuard erreichbar
+freilauf-deploy --init --from "$PWD"   # klont nach ~/agents/deploy/freilauf und deployt
+freilauf status                        # Hub-Prozess, VPN-Zugang, Pipeline, Sessions, deployter Commit
+freilauf on                            # VPN-Proxy starten → über WireGuard erreichbar
 ```
 
-**Das Erste in der Oberfläche:** ein **Willkommens-Assistent** — der erste
-Besuch auf `/` landet dort. Er führt durch das, was auf der Maschine installiert
-ist, den ersten Coding-Agenten, den ersten Modell-Provider und das Modell, das
-die eigenen kleinen Fragen des Hubs beantwortet; „Nicht mehr anzeigen" legt ihn
-still. Alles davon ist auch später unter **Einstellungen → Plugins** erreichbar,
-worauf auf einer frischen Installation ein Banner hinweist. Eine optionale
-Seed-Datei `~/.config/cc-hub/coding-agents.json` füllt die Coding-Agenten beim
-ersten Start vor; genau das macht ein geskriptetes Setup reproduzierbar.
+**Das Erste in der Oberfläche:** ein **Welcome-Assistent** — der erste Besuch
+von `/` landet dort. Er geht durch, was auf der Maschine installiert ist, deinen
+ersten Coding-Agenten, deinen ersten Modell-Provider und das Modell, das die
+kleinen Fragen des Hubs beantwortet; Benachrichtigungen sind optional und
+lassen sich später unter Einstellungen → Benachrichtigungen ergänzen. „Nicht
+mehr anzeigen" beendet ihn. Eine optionale Seed-Datei
+`~/.config/freilauf/coding-agents.json` befüllt die Coding-Agenten beim ersten
+Start vor — das macht ein skriptgesteuertes Setup reproduzierbar.
 
-> Erreichbarkeit **von einem VPN-Client aus** prüfen, niemals mit `curl` auf dem
-> Server selbst: Diese Anfrage läuft über `lo` und sagt nichts über deine
+> Die Erreichbarkeit **von einem VPN-Client aus** prüfen, nie mit `curl` auf
+> dem Server selbst: Diese Anfrage läuft über `lo` und sagt nichts über deine
 > Firewall.
 
 ### Eine Version live bringen
 
-Die systemd-Units starten `~/agents/deploy/cc-hub` — ein Klon, der allein dem
-Hub gehört und immer detached auf einem Commit steht. Der Checkout, in dem du
-arbeitest, betreibt nie einen Dienst; unfertige Arbeit kann also nie ausgeliefert
+Die systemd-Units starten `~/agents/deploy/freilauf` — einen Klon, der allein
+dem Hub gehört, immer detached auf einem Commit. Der Checkout, in dem du
+arbeitest, betreibt nie einen Dienst; unfertige Arbeit kann so nie ausgeliefert
 werden.
 
 ```bash
-cchub deploy            # fetch, origin/main auschecken, Abhängigkeiten (nur wenn das Lockfile
-                        # sich bewegt hat), cc-*-Skripte neu installieren, Neustart,
-                        # Health-Check — Rollback, wenn er fehlschlägt
-cchub deploy <ref>      # stattdessen diesen Commit
-cchub-deploy --status   # deployte Sha, Origin-Sha, wie weit zurück
-cchub-deploy --rollback # zurück auf den zuvor deployten Commit
+freilauf deploy            # fetch, origin/main auschecken, Abhängigkeiten (nur wenn sich das Lockfile bewegt hat),
+                           # fl-*-Skripte neu installieren, Neustart, Health-Check — Rollback, wenn er scheitert
+freilauf deploy <ref>      # stattdessen diesen Commit
+freilauf-deploy --status   # deployter Commit, origin-Commit, wie weit dahinter
+freilauf-deploy --rollback # zurück zum zuvor deployten Commit
 ```
 
-Ein fehlgeschlagenes Deploy rollt auf den laufenden Commit zurück und meldet das
-per Telegram. Die laufende Sha steht in der Seitenleiste jeder Seite — „ist meine
-Änderung live?" ist damit ein Blick. `cchub restart` bleibt, was es sagt: ein
-Neustart, ohne Deploy.
+Ein gescheiterter Deploy rollt auf den laufenden Commit zurück und
+benachrichtigt dich. Der laufende Commit steht in der Seitenleiste jeder Seite
+— *„ist meine Änderung live?"* ist ein Blick. `freilauf restart` bleibt, was es
+sagt: ein Neustart, ohne Deploy.
+
+## Sicherheitsmodell — bitte lesen
+
+Der Hub kann tmux steuern. **Das ist Shell-Zugriff.** Deshalb:
+
+- `server/hub.mjs` bindet **fest an `127.0.0.1`**; aus dem Netz gibt es keinen
+  direkten Weg.
+- Davor sitzt `vpn-proxy.mjs` (TLS), der **ausschließlich an deine eigene
+  WireGuard-Adresse** bindet. `FREILAUF_VPN_BIND` ist Pflicht — es gibt bewusst
+  keinen Default. **WireGuard ist die Auth-Schicht; Freilauf hat keinen eigenen
+  Login.**
+- Host-Allowlist + Origin-Check (`FREILAUF_ALLOWED_HOSTS`) zäunen DNS-Rebinding
+  und CSRF ein; `Sec-Fetch-Site: cross-site` wird abgelehnt.
+- **Fail-closed**: `freilauf-vpn.service` startet nach einem Reboot bewusst
+  *nicht* (`freilauf on` schaltet den Zugang frei), und `setup/04-firewall.sh`
+  erlaubt den VPN-Port nur auf `wg0` und verbietet ihn überall sonst.
+- Jeder Lauf arbeitet in seinem eigenen Worktree; Agenten mergen und pushen nie
+  auf den Basis-Branch — das tut Freilauf; und alles, was ein Lauf tut, ist
+  hinterher ein Report, ein Ereignis oder ein Vorfall, den man lesen kann.
+
+**Betreibe den Hub nie in einem erreichbaren Netz ohne diese Schichten.**
+
+## FAQ
+
+**Was ist der Unterschied zu Harness Engineering?**
+Harness Engineering — die Doku, Tests, Linter und Rückkopplungen, die einen
+einzelnen Coding-Agenten wie Claude Code befähigen, vollautonom zu arbeiten und
+trotzdem Qualität abzuliefern — ist Arbeit in deinem Repository. Freilauf ist
+die Ebene darüber: Es nimmt Agenten, die so vertrauenswürdig gemacht wurden,
+und lässt **viele von ihnen regelmäßig und unbeaufsichtigt arbeiten** — nach
+Plan, isoliert, beobachtet, integriert, eskaliert. Freilauf ersetzt Harness
+Engineering nicht; es baut darauf auf. Ein gut gebauter Harness ist genau das,
+was einen Agenten wert macht, nach Plan zu laufen.
+
+**Kann ich meinen Coding-Agenten mitnehmen (Claude Code, GitHub Copilot, …)?**
+Claude Code, opencode, hermes und cursor-agent sind eingebaut. Ein
+Coding-Agent, der es nicht ist — Copilot CLI, Codex CLI, was auch immer als
+Nächstes kommt — ist eine Plugin-Datei (oder ein Paket außerhalb dieses
+Repositorys) mit einer Start-Deklaration; [docs/plugins.md](docs/plugins.md)
+hat den Vertrag. Am einfachsten: Sag deinem Agenten *„lies docs/plugins.md und
+füge X als Coding-Agent-Plugin hinzu"*.
+
+**Kann ich meine Lizenz nutzen (z. B. ein Claude-Max-Abo)?**
+Ja. Claude Code läuft auf deinem Claude-Abo, cursor auf seinem — Freilauf
+startet das CLI, das du ohnehin hast, und ruft für einen Lauf nie selbst die
+API des Herstellers auf. Es liest sogar die Nutzungsfenster deines Abos und
+verschiebt einen Start, bevor ein Kontingent leer ist.
+
+**Brauche ich API-Keys? Entstehen teure API-Kosten?**
+Es sind keine Keys nötig. Dein Abo deckt Claude-Code- und cursor-Läufe;
+opencode läuft ohne Key auf den kostenlosen Modellen von OpenCode Zen; hermes
+braucht einen Provider-Key (OpenRouter oder DeepSeek). Die kleinen Fragen des
+Hubs selbst kann ein Coding-Agent auf deinem Abo beantworten — eine ganze
+Installation kann also ohne einen einzigen API-Key laufen. Du zahlst, was dein
+Abo oder dein Provider dir berechnet — Freilauf selbst kostet nichts.
+
+**Was benötige ich?**
+Einen Linux-Server mit systemd-User-Units (Ubuntu funktioniert), Node.js ≥ 22,
+tmux, git, jq, curl, mindestens ein Coding-Agent-CLI im `PATH` und einen
+gesicherten Zugang zur Web-Oberfläche — Freilaufs Proxy bindet ausschließlich
+an eine WireGuard-Adresse. Aber keine Sorge: Dein Agent richtet das alles ein
+([SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md)) und fragt dich nur, was er nicht
+erraten kann.
+
+**Welche Coding-Agenten und Provider werden unterstützt?**
+Coding-Agenten: Claude Code, opencode, hermes, cursor-agent. Modell-Provider:
+OpenRouter, DeepSeek, OpenCode Zen. Benachrichtigungen: Telegram. Alle drei
+Sorten sind Plugins — ein weiteres ist eine Datei, und dein Agent kann sie
+schreiben.
+
+**Darf ich das Projekt kommerziell nutzen?**
+Ja. [CC BY 4.0](LICENSE): nutzen, ändern, verkaufen — den Autor nennen und
+zurückverlinken.
+
+**Darf ich das Projekt weiterentwickeln?**
+Unbedingt — und schick mir unbedingt deinen Pull Request. Dein Agent weiß, wie
+das geht ([CONTRIBUTING.md](CONTRIBUTING.md)).
+
+**Mit welchen Kosten muss ich rechnen?**
+Mit gar keinen. Keine Lizenzgebühr, kein gehosteter Dienst, keine Telemetrie.
+
+**Wie sieht es mit Sicherheit aus?**
+Der Hub ist nur über dein eigenes VPN erreichbar, hat keinen eigenen Login,
+weil WireGuard *der* Login ist, arbeitet fail-closed und hält jeden Agenten in
+seinem eigenen Worktree. Das ganze Modell steht oben unter
+[Sicherheitsmodell](#sicherheitsmodell--bitte-lesen) — lies es, bevor du
+irgendetwas erreichbar machst.
+
+**Kann ich die Agenten auch vom Terminal aus steuern?**
+Ja. Jeder Lauf ist eine tmux-Session; `fl-attach` bringt dich hinein, und ein
+schlichtes `tmux attach` geht genauso. Das Browser-Terminal zeigt dieselbe
+Session.
+
+**Kann ich weitere Benachrichtigungsdienste hinzufügen?**
+Ja — Benachrichtigungen sind Plugins. Telegram ist eingebaut, keiner ist
+Pflicht, und ein Webhook-, Slack- oder E-Mail-Benachrichtiger ist eine kleine
+Plugin-Datei ([docs/plugins.md](docs/plugins.md)).
+
+**Wie installiere ich das?**
+Gib deinem Coding-Agenten den Pfad zum Repository und sag *„Lies
+SETUP_WITH_AGENT.md und installiere Freilauf."* Die manuellen Schritte stehen
+unter [Loslegen](#loslegen).
+
+**Ich habe Fragen.**
+Gerne! Erstelle ein GitHub-Issue oder schreib mir eine E-Mail — die Adresse
+steht auf [entwickler-training.de](https://entwickler-training.de).
+
+**Wir überlegen, das bei uns in der Firma einzuführen. Gibt es ein
+Beratungsgespräch?**
+Ja — bitte auf [entwickler-training.de](https://entwickler-training.de) ein
+Beratungsgespräch buchen. Danke! Ich biete nicht nur Beratung an, sondern ganze
+Trainings.
 
 ## Tests
 
 ```bash
-node test/unit.mjs          # reine Logik (Cron, Zeitpläne, Budget-Gate, Parser, Registries, i18n, Docs) — ~1 s
-node test/e2e.mjs           # kompletter Hub im Sandkasten, Stub statt echter Agenten — ~40 s
+node test/unit.mjs          # reine Logik (Cron, Zeitpläne, Quota-Gate, Parser, Registries, i18n, Docs) — ~1 s
+node test/e2e.mjs           # kompletter Hub in einer Sandbox, Stub statt echter Agenten — ~40 s
 node test/e2e.mjs --echt    # zusätzlich EIN echter Lauf pro Harness (verbraucht Kontingent)
-node test/browser.mjs       # public/hub.js in echtem Chromium — ~10 s (braucht playwright)
+node test/browser.mjs       # public/hub.js in einem echten Chromium — ~10 s (braucht playwright)
 node test/proxy.mjs         # vpn-proxy.mjs gegen einen Stub-Upstream — <1 s
-node test/deploy.mjs        # bin/cchub-deploy gegen ein bare origin — ~3 s
+node test/deploy.mjs        # bin/freilauf-deploy gegen ein bare origin — ~3 s
 ```
 
 Die e2e-Suite startet einen zweiten Hub auf einem freien Port mit eigener
-Datenbank, eigenem Test-Repo und eigenem `cc-start`-Stub — sie fasst weder
-Produktivdaten noch fremde tmux-Sessions an und darf deshalb neben einem
-laufenden Hub laufen.
+Datenbank, eigenem Test-Repo und eigenem `fl-start`-Stub — sie berührt weder
+Produktionsdaten noch fremde tmux-Sessions und läuft gefahrlos neben einem
+Live-Hub.
 
 ## Mach es zu deinem
 
-cc-hub ist der Arbeitsablauf eines Betreibers, in Code gegossen, veröffentlicht
-weil er dir vielleicht einen Monat spart. **Forke es, ändere es, reiß Teile
-raus.** Die Nähte, an denen gezogen werden soll: **Plugins für Coding-Agenten
-und Modell-Provider — auch als Pakete, die vollständig außerhalb dieses
-Repositorys leben**, der Plattform-Prompt-Zusatz, Repo-Prompts,
-opt-in-Zusatzskills in `~/agents/zusaetze/`, die Modellquelle hinter den eigenen
-Fragen des Hubs und die No-Code-Flows. Die Tabelle steht in
-[SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md), der vollständige Plugin-Vertrag in
-[docs/plugins.md](docs/plugins.md).
+Freilauf ist der Arbeitsablauf eines Betreibers, in Code gegossen —
+veröffentlicht, weil es dir einen Monat sparen könnte. **Fork es, ändere es,
+reiß Teile heraus.** Die Nähte, an denen gezogen werden darf: Coding-Agent-,
+Modell-Provider- und Benachrichtigungs-Plugins — auch als Pakete ganz außerhalb
+dieses Repositorys —, das Plattform-Prompt-Suffix, Prompts pro Repo, optionale
+Zusatz-Skills, die Modellquelle hinter den Fragen des Hubs und die No-Code-Flows.
+[SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md) hat die Tabelle;
+[docs/plugins.md](docs/plugins.md) den vollständigen Plugin-Vertrag.
 
 ## Mitmachen
 
-**Pull Requests sind sehr willkommen** — Fehlerberichte, Plugin-Dateien für
-weitere Coding-Agenten oder Provider, Übersetzungen, Doku-Korrekturen. Die
-Grundregeln und die Checkliste vor dem Absenden stehen in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+**Pull Requests sind sehr willkommen** — Bug-Reports, Plugin-Dateien für
+weitere Coding-Agenten, Provider oder Benachrichtiger, Übersetzungen,
+Doku-Korrekturen gleichermaßen. Die Spielregeln und die Checkliste vor dem
+Einreichen stehen in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Entwicklerwissen — Architekturentscheidungen, Eigenheiten der einzelnen
-Harnesses und eine lange Liste von Fallen, die schon jemanden einen Nachmittag
+Entwicklerwissen — Architekturentscheidungen, Eigenheiten der Harnesses und
+eine lange Liste von Fallstricken, die schon jemanden einen Nachmittag
 gekostet haben — steht in [AGENTS.md](AGENTS.md), geschrieben für Menschen
 **und** Coding-Agenten.
 
 ## Lizenz
 
-[CC BY 4.0](LICENSE) — nutzen, ändern, kommerziell einsetzen. Nur mit
-Namensnennung: **Herbert Walde** nennen, auf
-<https://github.com/hwalde/cc-hub> verlinken, die Lizenz verlinken und angeben,
-ob du etwas geändert hast.
+[CC BY 4.0](LICENSE) — nutzen, ändern, kommerziell ausliefern. Nur die
+Urheberangabe: **Herbert Walde** nennen, auf
+<https://github.com/hwalde/freilauf> zurückverlinken, die Lizenz verlinken und
+sagen, wenn du etwas geändert hast.

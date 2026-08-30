@@ -1,12 +1,24 @@
-# cc-hub
+# Freilauf
 
 **English** · [中文](README.zh-CN.md) · [Deutsch](README.de.md)
 
-**A web UI that runs your coding agents for you — scheduled, unattended, and
-watched from the outside.** Claude Code, opencode, hermes and cursor-agent each
-work in their own git worktree inside their own tmux session; cc-hub starts
-them, watches them, collects their reports, merges their work and pings you on
-Telegram when something needs you.
+**Stop managing agents. Let them run free in your project.**
+
+Imagine: you no longer have twenty terminals open at once. You have one place
+where you hand out recurring jobs — *"find and eliminate dead code"*, *"raise
+the test coverage"*, *"fix bugs"* … — and with every job you define an agent
+that works on your project regularly, even while you sleep. You can hand out
+new jobs at any time. A web UI keeps you in the picture: you can look into
+every agent, configure flows, and have yourself notified. You go for a coffee
+with your colleagues and your phone buzzes because another job is done. You
+don't mind — you are enjoying the break that lets new ideas come.
+
+That is Freilauf: a self-hosted web UI that runs a **standing team of coding
+agents** — Claude Code, opencode, hermes, cursor, or any agent that arrives as
+a plugin — on a schedule. Every run works in its own git worktree inside its
+own tmux session, is watched for cost, progress and errors, and delivers its
+work where you want it: **on a branch for review, or merged into `main` once
+you trust the gate.**
 
 > ### 🤖 Setting it up? Let your agent do it.
 > You already use a coding agent. Point it at
@@ -14,98 +26,141 @@ Telegram when something needs you.
 > that explains the system, asks you the handful of questions it cannot guess,
 > and installs it. *"Read SETUP_WITH_AGENT.md and set this up for me."*
 
-```
-Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux sessions
-(via WireGuard)    vpn-proxy.mjs           server/hub.mjs      cc-<name>-<id>
-                   cchub-vpn.service       cchub.service       cc-oc-/he-/cu-…
-                   └─ both run from the deploy checkout ─┘
-                      (~/agents/deploy/cc-hub, see below)
-```
+## Why "Freilauf"
 
-## Why you might want this
+*Freilauf* is German for a bicycle's freewheel: the part that keeps rolling
+when you stop pedalling. And it is not the absence of control — it is a
+**ratchet**: it lets the wheel run free, and only ever forward. That is how
+Freilauf is built. A run is done only when its work has arrived. Nothing lives
+only on this machine. No agent ever merges or pushes to your base branch —
+Freilauf does, and it only goes forward.
 
-You have a coding agent that works well when you are sitting in front of it.
-cc-hub is what you use when you are not:
+*(Say "fry-lowf". Chinese: 弗莱劳夫.)*
 
-- **Give it a task and walk away.** A run gets its own worktree and its own tmux
-  session, so runs never step on each other and you can attach to any of them
-  later and read the whole screen.
-- **Schedule work.** "Every night at 2, look at the open issues." An *agent* is a
-  saved run definition plus a name and a schedule; a *single run* is the same
-  form without them.
-- **Know when it went wrong — even when the agent can't tell you.** An agent
-  that hit a rate limit cannot report anything, so the hub watches from outside:
-  tmux state, logs, transcripts, hooks, provider pulse.
-- **A finished run means the work is on `main`.** Optionally the hub does the
-  merging itself, checks the run's claim before believing it, and sends the
-  still-living agent back to fix what is missing.
-- **One place for four CLIs — and for a fifth nobody here has heard of.** Which
-  coding agents the hub may drive, and which model providers each may use, is a
-  setting, not a code change; and a coding agent or provider that ships as a
-  plugin package needs no change to this repository at all.
+## What Freilauf does
 
-## What's in the box
-
-- **A five-step Welcome wizard** on first visit: what is installed on this
-  machine, the first coding agent, the first model provider, and which model
-  answers the hub's own small questions. Skippable, and switchable off for good.
-- **Coding agents and model providers are plugins** — claude, opencode, hermes,
-  cursor and OpenRouter/DeepSeek/OpenCode Zen ship with it, and a **third party
-  can drop a package on the machine** (`CCHUB_PLUGIN_DIR`) that joins them at
-  startup. A plugin may bring its own API-key handling, its own budget-gate
-  thresholds, and a launch declaration that lets the tmux starter run a CLI
-  nobody here has ever heard of ([docs/plugins.md](docs/plugins.md)).
-- **One Plugins page** (Settings → Plugins) installs, configures, enables and
-  removes them, and shows what a startup scan found on the machine. A provider's
-  key can live in an environment variable of your choosing — or be entered right
-  there, for a machine where adding a variable is awkward.
-- **The hub's own small questions** — naming a run, judging whether a log line is
-  a real outage, reading a report, suggesting worktree extras — go to whichever
-  model source you pick per job. That includes **a coding agent on a
-  subscription you already pay for**, which is what lets the hub run useful with
-  no API key anywhere.
-- **Agents and single runs** from one form: coding agent, model, reasoning
-  effort, prompt, repo, branch rule, schedule. A **Quick Run** button on every
-  page starts one from a saved favorite in two fields.
-- **Terminal in the browser** (xterm.js over WebSocket, read-only by default) —
-  watch a run, type into it, answer a help call.
-- **Reports** via `cc-report` (done / failed / help / progress / branch / pr),
-  with an `inbox.jsonl` fallback when the hub is unreachable. A finished run
-  can report again — type follow-up work into its session, and the agent's
-  next `cc-report done` is merged, triggers the flows and reaches Telegram as
-  a *follow-up report*. A checkbox under the terminal silences Telegram for a
-  run you are watching anyway.
-- **Integration**: the hub merges finished runs into the base branch itself,
-  serially per repo, in a worktree of its own — dirty worktree, conflict or a
-  failing merge check escalate to the agent first and to you only if it cannot
-  fix it.
-- **Incidents**: rate limits and provider outages are detected through several
-  independent channels and raised once, not five times.
-- **Subscription usage** — Claude's 5-hour and 7-day windows, Cursor's spend for
-  the current cycle, OpenRouter and DeepSeek credits — in the sidebar of every
-  page, and a **budget gate** that defers starts before they burn into an empty
-  quota. What a run draws from decides which gate is asked, and only that:
-  Claude's general week gates every claude run, a per-model week only the runs
-  on that model, a cursor run the cursor period usage, a DeepSeek run its own
-  balance. Each gate is **optional** with its own threshold (Settings → Budget
-  gates), and a deferred run can be **started anyway** from its detail page.
-  The same sidebar says what every tmux session on the machine costs in
-  memory, re-measured every eight minutes: a session outlives its agent on
-  purpose, so that bill runs quietly. A configurable **tmux cleanup agent**
-  (Settings → tmux cleanup, the same agent+provider+model selection as the run
-  forms) ends the oldest inactive sessions when the memory exceeds a threshold,
-  down to a target you choose — or on demand, from the sidebar's tmux block and
-  from a box on the Sessions page.
-- **No-code flows**: a graphical designer for what happens after a run — message
-  running agents, start follow-up runs and wait for them, extract structured
-  data from a report via LLM, branch, loop, Telegram, HTTP, shell command
+- **A workspace per run.** Every run gets its own git worktree and its own
+  tmux session. Agents never step on each other — or on you — and you can
+  attach to any of them later and read the whole screen.
+- **Roles, not tickets.** An *agent* is a role with a schedule: the reviewer
+  that runs every night, the dead-code hunter on Sundays, the docs keeper after
+  every merge. A *single run* is the same form without the name and the
+  schedule — and a **Quick Run** button on every page starts one from a saved
+  favorite in two fields.
+- **Watched, not trusted.** A budget gate before the start (Claude's 5-hour and
+  7-day windows, Cursor's period, OpenRouter and DeepSeek credits — each
+  optional, each with its own threshold), progress and cost while it runs,
+  incidents when a provider fails or a rate limit hits (detected from the
+  outside, because an agent that hit a rate limit cannot report anything), a
+  report at the end — and a **finish gate** that does not take the agent's word
+  for it: Freilauf checks the worktree, tells a still-running agent what is
+  missing, merges in an integration worktree of its own, starts a conflict run
+  when a merge fails, and calls you last.
+- **Flows without code.** When a run ends, a flow can message another agent,
+  start the next run and wait for it, extract structured data from a report via
+  LLM, branch, loop, notify you, call a URL, run a shell command
   ([server/flows/AGENTS.md](server/flows/AGENTS.md)).
-- **Telegram** notifications with a link straight to the run.
-- **Multilingual UI**: English (default), 中文, Deutsch — Settings → UI language.
-- **One clock and one number format**: every time — sidebar included — is shown
-  in the timezone chosen under Settings → Time and numbers (auto: German →
-  Europe/Berlin, Chinese → Asia/Shanghai, English → the server's timezone);
-  numbers and percentages use the UI language's separators.
+- **One window.** What runs, what it costs, what came out, what needs you — the
+  overview, a live terminal in the browser (xterm.js, read-only by default),
+  and notifications with a link straight to the run. The sidebar shows your
+  subscription windows, provider balances and what every tmux session on the
+  machine costs in memory; a configurable cleanup agent ends the oldest idle
+  sessions when it grows too large.
+- **Everything vendor-specific is a plugin.** Coding agents, model providers
+  and notification services are plugins with a documented contract
+  ([docs/plugins.md](docs/plugins.md)); a third party can drop a package on
+  the machine that joins them at startup, with its own API-key handling, its
+  own budget-gate thresholds and its own launch declaration. A **Plugins page**
+  and a five-step **Welcome wizard** configure them; the hub's own small
+  questions (naming a run, judging a log line, reading a report) can be
+  answered by a coding agent on a subscription you already pay for.
+- **Multilingual UI**: English (default), 中文, Deutsch — one clock and one
+  number format across every page.
+
+## Three ways in
+
+- **Side by side.** Your team develops; the agent team takes the work nobody
+  enjoys — dead code, reviews, dependency bumps, translations, the docs.
+  Results arrive as branches for review; you decide what lands on `main`.
+  Most people start here, and many stay.
+- **By hand.** A single run when you need one: the migration, the cleanup, the
+  one bug nobody has time for.
+- **Fully autonomous.** Humans file issues and feature requests; the team does
+  everything else, and Freilauf merges. Schedules, budget gates, the finish
+  gate, conflict runs and escalation to a human are what make that operable
+  rather than reckless. Nobody has to stand there today — the on-ramp is the
+  same.
+
+**You don't give up control. You move it up one level.** A team lead doesn't
+sit next to every developer reading along either: they agree on what gets
+done, set the rules, and read the results. That is your job from now on —
+roles, schedules, budgets, the finish gate, when a human gets called. The team
+does the rest, and Freilauf shows you all of it in one place.
+
+And it is not only software. A run ends in a merge because code needs one; the
+building blocks — roles, schedules, flows, LLM extraction, notifications, HTTP,
+shell — have the same shape for a marketing routine, a documentation pipeline
+or a back-office process: something that has to happen on time, be watched,
+and be reported.
+
+## Getting started
+
+The short way: give your coding agent the path to this repository and say
+*"Read SETUP_WITH_AGENT.md and install Freilauf."* It knows the steps below,
+asks you only what it cannot guess (your WireGuard address, the host names,
+where the certificates are) and verifies the result.
+
+The long way, for the record. Prerequisites: Linux with systemd (user units),
+Node.js ≥ 22 (`node:sqlite`), tmux, git, jq, curl, a WireGuard interface, and
+at least one agent CLI (`claude`, `opencode`, `hermes`, `cursor-agent`) on the
+`PATH`. Certificates e.g. with [mkcert](https://github.com/FiloSottile/mkcert).
+
+```bash
+./setup/01-npm-install.sh       # node-pty, ws, xterm.js — for THIS checkout (tests, editing)
+./setup/02-install-scripts.sh   # fl-start/-attach/-kill/-help/-report/-notify + freilauf + freilauf-deploy → ~/.local/bin
+./setup/03-install-services.sh  # ~/.config/freilauf/env (from env.example) + systemd units
+sudo ./setup/04-firewall.sh     # ufw: VPN port only on wg0 (one-time)
+```
+
+Then set at least `FREILAUF_VPN_BIND` and `FREILAUF_ALLOWED_HOSTS` in
+`~/.config/freilauf/env` (see [`env.example`](env.example)), place the
+certificates, and bring the first version live:
+
+```bash
+freilauf-deploy --init --from "$PWD"   # clones into ~/agents/deploy/freilauf, deploys it
+freilauf status                        # hub process, VPN access, pipeline, sessions, deployed sha
+freilauf on                            # start the VPN proxy → reachable over WireGuard
+```
+
+**First thing in the UI:** a **Welcome wizard** — the first visit to `/` lands
+there. It walks through what is installed on the machine, your first coding
+agent, your first model provider and the model that answers the hub's own
+small questions; notifications are optional and can be added later under
+Settings → Notifications. "Do not show this again" retires it. An optional
+seed file `~/.config/freilauf/coding-agents.json` pre-populates the coding
+agents on first start, which is what makes a scripted setup reproducible.
+
+> Verify reachability **from a VPN client**, never with `curl` on the server
+> itself: that request travels over `lo` and says nothing about your firewall.
+
+### Bringing a version live
+
+The systemd units start `~/agents/deploy/freilauf` — a clone that belongs to
+the hub alone, always detached on one commit. The checkout you work in never
+runs a service, so uncommitted work can never end up being served.
+
+```bash
+freilauf deploy            # fetch, check out origin/main, deps (only if the lockfile moved),
+                           # reinstall the fl-* scripts, restart, health check — rollback if it fails
+freilauf deploy <ref>      # that commit instead
+freilauf-deploy --status   # deployed sha, origin sha, how far behind
+freilauf-deploy --rollback # back to the previously deployed commit
+```
+
+A failed deploy rolls back to the commit that was running and notifies you.
+The running sha is printed in the sidebar of every page, so *"is my change
+live?"* is a glance. `freilauf restart` stays what it says — a restart, without
+a deploy.
 
 ## Security model — please read this one
 
@@ -114,70 +169,104 @@ The hub can control tmux. **That is shell access.** So:
 - `server/hub.mjs` binds **firmly to `127.0.0.1`**; there is no direct path from
   the network.
 - In front sits `vpn-proxy.mjs` (TLS), which binds **exclusively to your own
-  WireGuard address**. `CCHUB_VPN_BIND` is mandatory — there is deliberately no
-  default. **WireGuard is the auth layer; cc-hub has no login of its own.**
-- Host allowlist + origin check (`CCHUB_ALLOWED_HOSTS`) fence off DNS rebinding
-  and CSRF; `Sec-Fetch-Site: cross-site` is rejected.
-- **Fail-closed**: `cchub-vpn.service` deliberately does *not* start after a
-  reboot (`cchub on` enables access), and `setup/04-firewall.sh` allows the VPN
-  port only on `wg0`, denying it everywhere else.
+  WireGuard address**. `FREILAUF_VPN_BIND` is mandatory — there is deliberately
+  no default. **WireGuard is the auth layer; Freilauf has no login of its own.**
+- Host allowlist + origin check (`FREILAUF_ALLOWED_HOSTS`) fence off DNS
+  rebinding and CSRF; `Sec-Fetch-Site: cross-site` is rejected.
+- **Fail-closed**: `freilauf-vpn.service` deliberately does *not* start after a
+  reboot (`freilauf on` enables access), and `setup/04-firewall.sh` allows the
+  VPN port only on `wg0`, denying it everywhere else.
+- Every run works in its own worktree; agents never merge or push to the base
+  branch — Freilauf does; and everything a run does is a report, an event or an
+  incident you can read afterwards.
 
 **Never run the hub in a reachable network without these layers.**
 
-## Installation
+## FAQ
 
-Prerequisites: Linux with systemd (user units), Node.js ≥ 22 (`node:sqlite`),
-tmux, git, jq, curl, a WireGuard interface, and at least one agent CLI
-(`claude`, `opencode`, `hermes`, `cursor-agent`) on the `PATH`. Certificates
-e.g. with [mkcert](https://github.com/FiloSottile/mkcert).
+**What is the difference to harness engineering?**
+Harness engineering — the docs, tests, linters and feedback loops that let one
+coding agent such as Claude Code work autonomously and still deliver quality —
+is work inside your repository. Freilauf is the level above it: it takes agents
+that have been made trustworthy that way and lets **many of them work regularly
+and unattended** — scheduled, isolated, watched, integrated, escalated.
+Freilauf does not replace harness engineering; it builds on it. A well-built
+harness is exactly what makes an agent worth running on a schedule.
 
-```bash
-./setup/01-npm-install.sh       # node-pty, ws, xterm.js — for THIS checkout (tests, editing)
-./setup/02-install-scripts.sh   # cc-start/-attach/-kill/-help/-report + cchub + cchub-deploy → ~/.local/bin
-./setup/03-install-services.sh  # ~/.config/cc-hub/env (from env.example) + systemd units
-sudo ./setup/04-firewall.sh     # ufw: VPN port only on wg0 (one-time)
-```
+**Can I bring my own coding agent (Claude Code, GitHub Copilot, …)?**
+Claude Code, opencode, hermes and cursor-agent are built in. A coding agent
+that is not — Copilot CLI, Codex CLI, whatever comes next — is a plugin file
+(or a package outside this repository) with a launch declaration;
+[docs/plugins.md](docs/plugins.md) has the contract. The simplest way: tell
+your agent *"read docs/plugins.md and add X as a coding-agent plugin"*.
 
-Then set at least `CCHUB_VPN_BIND` and `CCHUB_ALLOWED_HOSTS` in
-`~/.config/cc-hub/env` (see [`env.example`](env.example)), place the
-certificates, and bring the first version live:
+**Can I use my subscription (e.g. a Claude Max plan)?**
+Yes. Claude Code runs on your Claude subscription and cursor on yours —
+Freilauf starts the CLI you already have, it never calls the vendor's API for
+a run itself. It even reads the subscription's usage windows and defers a start
+before a quota is empty.
 
-```bash
-cchub-deploy --init --from "$PWD"   # clones into ~/agents/deploy/cc-hub, deploys it
-cchub status                        # hub process, VPN access, pipeline, sessions, deployed sha
-cchub on                            # start the VPN proxy → reachable over WireGuard
-```
+**Do I need API keys? Will I run up expensive API costs?**
+No keys are required. Your subscription covers Claude Code and cursor runs;
+opencode works without a key on OpenCode Zen's free models; hermes needs a
+provider key (OpenRouter or DeepSeek). The hub's own small questions can be
+answered by a coding agent on your subscription, so a whole installation can
+run with no API key anywhere. What you pay is whatever your subscription or
+provider bills you — Freilauf itself costs nothing.
 
-**First thing in the UI:** a **Welcome wizard** — the first visit to `/` lands
-there. It walks through what is installed on the machine, your first coding
-agent, your first model provider and the model that answers the hub's own small
-questions; "Do not show this again" retires it. Everything it does is also
-reachable later under **Settings → Plugins**, where a banner points on a fresh
-install. An optional seed file `~/.config/cc-hub/coding-agents.json`
-pre-populates the coding agents on first start, which is what makes a scripted
-setup reproducible.
+**What do I need?**
+A Linux machine with systemd user units (Ubuntu works), Node.js ≥ 22, tmux,
+git, jq, curl, at least one coding-agent CLI on the `PATH`, and a secured way
+to reach the web UI — Freilauf's proxy binds exclusively to a WireGuard
+address. Don't worry: your agent sets all of it up
+([SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md)) and asks you only what it cannot
+guess.
 
-> Verify reachability **from a VPN client**, never with `curl` on the server
-> itself: that request travels over `lo` and says nothing about your firewall.
+**Which coding agents and providers are supported?**
+Coding agents: Claude Code, opencode, hermes, cursor-agent. Model providers:
+OpenRouter, DeepSeek, OpenCode Zen. Notifications: Telegram. All three kinds
+are plugins — adding another is one file, and your agent can write it.
 
-### Bringing a version live
+**May I use it commercially?**
+Yes. [CC BY 4.0](LICENSE): use it, change it, sell it — name the author and
+link back.
 
-The systemd units start `~/agents/deploy/cc-hub` — a clone that belongs to the
-hub alone, always detached on one commit. The checkout you work in never runs a
-service, so uncommitted work can never end up being served.
+**May I develop it further?**
+Absolutely — and please send your pull request. Your agent knows how
+([CONTRIBUTING.md](CONTRIBUTING.md)).
 
-```bash
-cchub deploy            # fetch, check out origin/main, deps (only if the lockfile moved),
-                        # reinstall the cc-* scripts, restart, health check — rollback if it fails
-cchub deploy <ref>      # that commit instead
-cchub-deploy --status   # deployed sha, origin sha, how far behind
-cchub-deploy --rollback # back to the previously deployed commit
-```
+**What does it cost?**
+Nothing. No license fee, no hosted service, no telemetry.
 
-A failed deploy rolls back to the commit that was running and tells you on
-Telegram. The running sha is printed in the sidebar of every page, so *"is my
-change live?"* is a glance. `cchub restart` stays what it says — a restart,
-without a deploy.
+**What about security?**
+The hub is only ever reachable through your own VPN, has no login of its own
+because WireGuard *is* the login, works fail-closed, and keeps every agent in
+its own worktree. The whole model is in
+[Security model](#security-model--please-read-this-one) above — read it before
+you expose anything.
+
+**Can I control the agents from the terminal too?**
+Yes. Every run is a tmux session; `fl-attach` drops you into it, and plain
+`tmux attach` works as well. The browser terminal shows the same session.
+
+**Can I add other notification services?**
+Yes — notifications are plugins. Telegram ships built in, none is required, and
+a webhook, Slack or e-mail notifier is a small plugin file
+([docs/plugins.md](docs/plugins.md)).
+
+**How do I install it?**
+Give your coding agent the path to the repository and say *"Read
+SETUP_WITH_AGENT.md and install Freilauf."* The manual steps are under
+[Getting started](#getting-started).
+
+**I have questions.**
+Gladly! Open a GitHub issue, or write me an e-mail — the address is on
+[entwickler-training.de](https://entwickler-training.de).
+
+**We are thinking about introducing this in our company. Is there consulting?**
+Yes — please book a consultation at
+[entwickler-training.de](https://entwickler-training.de). I don't only consult;
+I run whole trainings.
 
 ## Tests
 
@@ -187,20 +276,20 @@ node test/e2e.mjs           # complete hub in a sandbox, stub instead of real ag
 node test/e2e.mjs --echt    # additionally ONE real run per harness (consumes quota)
 node test/browser.mjs       # public/hub.js in a real Chromium — ~10 s (needs playwright)
 node test/proxy.mjs         # vpn-proxy.mjs against a stub upstream — <1 s
-node test/deploy.mjs        # bin/cchub-deploy against a bare origin — ~3 s
+node test/deploy.mjs        # bin/freilauf-deploy against a bare origin — ~3 s
 ```
 
 The e2e suite starts a second hub on a free port with its own database, test
-repo and `cc-start` stub — it touches neither production data nor foreign tmux
+repo and `fl-start` stub — it touches neither production data nor foreign tmux
 sessions, so it is safe to run next to a live hub.
 
 ## Make it yours
 
-cc-hub is one operator's workflow turned into code, published because it might
-save you a month. **Fork it, change it, rip parts out.** The seams meant to be
-pulled on: **coding agent and model provider plugins — including packages that
-live outside this repository entirely**, the platform prompt suffix, per-repo
-prompts, opt-in extra skills in `~/agents/zusaetze/`, the model source behind
+Freilauf is one operator's workflow turned into code, published because it
+might save you a month. **Fork it, change it, rip parts out.** The seams meant
+to be pulled on: coding agent, model provider and notification plugins —
+including packages that live outside this repository entirely — the platform
+prompt suffix, per-repo prompts, opt-in extra skills, the model source behind
 the hub's own questions, and the no-code flows.
 [SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md) has the table;
 [docs/plugins.md](docs/plugins.md) has the plugin contract in full.
@@ -208,8 +297,9 @@ the hub's own questions, and the no-code flows.
 ## Contributing
 
 **Pull requests are very welcome** — bug reports, plugin files for further
-coding agents or providers, translations, documentation fixes alike. The ground
-rules and the pre-submit checklist are in [CONTRIBUTING.md](CONTRIBUTING.md).
+coding agents, providers or notifiers, translations, documentation fixes alike.
+The ground rules and the pre-submit checklist are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 Developer knowledge — architecture decisions, harness quirks, and a long list of
 pitfalls that already cost somebody an afternoon — lives in
@@ -219,5 +309,5 @@ pitfalls that already cost somebody an afternoon — lives in
 
 [CC BY 4.0](LICENSE) — use it, change it, ship it commercially. Just give
 credit: name **Herbert Walde**, link back to
-<https://github.com/hwalde/cc-hub>, link the license, and say if you changed
+<https://github.com/hwalde/freilauf>, link the license, and say if you changed
 something.
