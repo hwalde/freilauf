@@ -10,6 +10,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { HTTP_5XX } from './patterns.mjs'
 import { runCli, cliFailure, cliLines, ndjson } from './cli-llm.mjs'
+import { quantizationsFrom } from '../providers/openrouter-routing.mjs'
 
 // A model provider's descriptor — never through a static import.
 // `../providers/index.mjs` re-exports the plugin registry, and the registry's
@@ -251,11 +252,23 @@ const plugin = {
     if (needsKey && !key) fehlt.push(run.provider)
 
     const cfg = {}
-    // Pin the serving provider (OpenRouter routing).
-    if (run.or_provider && run.provider === 'openrouter') {
-      cfg.provider = { openrouter: { models: { [run.model]: { options: {
-        provider: { order: [run.or_provider], allow_fallbacks: false },
-      } } } } }
+    // Pin the serving provider (OpenRouter routing). Two shapes:
+    //   or_routing.mode 'auto' — the hub resolved the best-provider order at
+    //     start (scheduler.mjs); the run carries the order and, when a minimum
+    //     quantization was required, the API-level enumeration as a SECOND
+    //     fence: names drift (measured, see openrouter-routing.mjs), the filter
+    //     greps against the state.
+    //   or_provider — the old single-tag pin, byte for byte as before.
+    if (run.provider === 'openrouter' && (run.or_routing?.order?.length || run.or_provider)) {
+      const order = run.or_routing?.order?.length ? run.or_routing.order : [run.or_provider]
+      const provider = { order, allow_fallbacks: false }
+      const minQuant = run.or_routing?.quant_min
+      if (minQuant) {
+        // Imported at the top of this file — a module that imports nothing of
+        // the hub's, so it cannot close a cycle (same licence as patterns.mjs).
+        try { provider.quantizations = quantizationsFrom(minQuant) } catch { /* an unknown level stays out rather than lying in the request */ }
+      }
+      cfg.provider = { openrouter: { models: { [run.model]: { options: { provider } } } } }
     }
     // Effort: '--variant' exists only for 'opencode run', cc-start launches the
     // TUI. The way in is agent.<default>.variant — and it only works when the

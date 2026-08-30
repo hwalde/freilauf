@@ -261,8 +261,24 @@ function quickRunDialog(repos, selectedRepo) {
 }
 
 /**
+ * The routing note a run whose serving provider was resolved by "auto" carries:
+ * the requirements it asked for and the order it got — the run page answers
+ * "what did this run actually launch with" without a trip to the log.
+ */
+function runRoutingNote(orRouting) {
+  const cfg = runRoutingJson(orRouting)
+  if (!cfg || cfg.mode !== 'auto') return ''
+  const order = Array.isArray(cfg.order) && cfg.order.length ? cfg.order.join(' → ') : (cfg.best ? `${cfg.best}` : '')
+  return ` (${t('or.mode_auto')}${cfg.unresolved ? ` — ${t('run.pinned_unresolved')}` : ''}${order ? `: ${order}` : ''})`
+}
+
+/** Tolerant reader: the column is TEXT and may hold junk from older rows. */
+function runRoutingJson(s) {
+  try { return JSON.parse(s ?? '') ?? null } catch { return null }
+}
+
+/**
  * The "find worktree extras" dialog — repo create AND edit form. The repo path
- * is read from the form's path field when the button opens the dialog; the hub
  * checks path existence and "is a git project" algorithmically first (the
  * endpoint answers those without a model), and only a path that passes both
  * reaches the LLM. The warning before starting is load-bearing: the suggestion
@@ -1355,7 +1371,9 @@ export function runChips(run, repo, herkunft) {
     ${chip('agents.harness', harnessLabel(run.harness))}
     ${chip('agents.model', run.model)}
     ${chip('model.provider', run.provider
-      ? run.provider + (run.or_provider ? ` (${t('run.pinned')}: ${run.or_provider})` : '') : null)}
+      ? run.provider + (runRoutingJson(run.or_routing)?.mode === 'auto'
+        ? runRoutingNote(run.or_routing)
+        : run.or_provider ? ` (${t('run.pinned')}: ${run.or_provider})` : '') : null)}
     ${chip('run.start', run.started_at ? fmtDbUtc(run.started_at) : null)}
     ${chip('run.end', run.ended_at ? fmtDbUtc(run.ended_at) : null)}
     ${chip('run.expectation', t('unit.minutes', { n: run.expected_minutes }))}
@@ -1915,6 +1933,7 @@ export async function pageMergeSettings(req, res, url) {
     harness: s.merge_resolver_harness ?? '',
     provider: s.merge_resolver_provider ?? '',
     or_provider: s.merge_resolver_or_provider ?? '',
+    or_routing: s.merge_resolver_or_routing ?? '',
     model: s.merge_resolver_model ?? '',
     effort: s.merge_resolver_effort ?? '',
     skills: s.merge_resolver_skills ?? null,
@@ -1946,11 +1965,12 @@ export async function mergeSettingsSave(req, res, url, formBody) {
     setSetting('merge_resolver_harness', setup.harness)
     setSetting('merge_resolver_provider', setup.provider ?? '')
     setSetting('merge_resolver_or_provider', setup.orProvider ?? '')
+    setSetting('merge_resolver_or_routing', setup.orRouting ? JSON.stringify(setup.orRouting) : '')
     setSetting('merge_resolver_model', setup.model ?? '')
     setSetting('merge_resolver_effort', setup.effort ?? '')
     setSetting('merge_resolver_skills', skillsAusFormular(b) ?? '')
   } else {
-    for (const k of ['harness', 'provider', 'or_provider', 'model', 'effort', 'skills']) {
+    for (const k of ['harness', 'provider', 'or_provider', 'or_routing', 'model', 'effort', 'skills']) {
       setSetting(`merge_resolver_${k}`, '')
     }
   }
@@ -1979,6 +1999,7 @@ function cleanupWerte(s) {
     harness: s.cleanup_harness ?? '',
     provider: s.cleanup_provider ?? '',
     or_provider: s.cleanup_or_provider ?? '',
+    or_routing: s.cleanup_or_routing ?? '',
     model: s.cleanup_model ?? '',
     effort: s.cleanup_effort ?? '',
   }
@@ -2030,10 +2051,11 @@ export async function cleanupSettingsSave(req, res, url, formBody) {
     setSetting('cleanup_harness', setup.harness)
     setSetting('cleanup_provider', setup.provider ?? '')
     setSetting('cleanup_or_provider', setup.orProvider ?? '')
+    setSetting('cleanup_or_routing', setup.orRouting ? JSON.stringify(setup.orRouting) : '')
     setSetting('cleanup_model', setup.model ?? '')
     setSetting('cleanup_effort', setup.effort ?? '')
   } else {
-    for (const k of ['harness', 'provider', 'or_provider', 'model', 'effort']) {
+    for (const k of ['harness', 'provider', 'or_provider', 'or_routing', 'model', 'effort']) {
       setSetting(`cleanup_${k}`, '')
     }
   }

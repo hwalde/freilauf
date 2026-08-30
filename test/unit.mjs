@@ -17,8 +17,14 @@ const start = Date.now()
 
 // Own data directory: importing runner.mjs pulls in db.mjs, which would otherwise
 // touch the real hub database.
+// Own data directory: importing runner.mjs pulls in db.mjs, which would otherwise
+// touch the real hub database.
 const sandkasten = mkdtempSync(join(tmpdir(), 'cc-hub-unit-'))
 process.env.CCHUB_DATA_DIR = join(sandkasten, 'data')
+// The OpenRouter best-provider cache is a file next to the hub's real data —
+// the suite points it into its own sandbox or a suite run would read (and
+// overwrite) the operator's live selections.
+process.env.CCHUB_OR_ROUTING_JSON = join(sandkasten, 'openrouter-routing.json')
 
 const d = (s) => new Date(s)
 
@@ -3302,6 +3308,113 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('OpenRouter best-provider selection (openrouter-routing.mjs)')
+  const orr = await import('../server/providers/openrouter-routing.mjs')
+
+  await pruefe('the quantization parser reads the wide family onto one scale', () => {
+    gleich(orr.parseQuantization('fp8').rank, orr.parseQuantization('FP8 ').rank, 'case and spelling do not matter')
+    gleich(orr.parseQuantization('q4_K_M').bits, 4, 'a GGUF-style q4 quantization parses')
+    gleich(orr.parseQuantization('q4_K_M').rank, orr.parseQuantization('int4').rank, 'q4 and int4 land on the same rank')
+    wahr(orr.parseQuantization('bf16').rank > orr.parseQuantization('fp8').rank, 'bf16 is more precise than fp8')
+    gleich(orr.parseQuantization('bf16').rank, orr.parseQuantization('fp16').rank, 'bf16 and fp16 tie — both are 16 bits')
+    gleich(orr.parseQuantization('int8').rank < orr.parseQuantization('fp8').rank, true, 'int8 sits BELOW fp8: same bits, unsafe direction excluded')
+    gleich(orr.parseQuantization('unknown'), null, 'unknown means "no information", never a level')
+    gleich(orr.parseQuantization(''), null, 'empty stays empty')
+    gleich(orr.parseQuantization('nvfp4'), null, 'a genuinely unknown spelling is reported as unknown')
+    gleich(orr.unknownQuantizations(['fp8', 'nvfp4', 'q5_k_s']).join(','), 'nvfp4', 'the gap is named, not silently passed')
+  })
+
+  await pruefe('“fp8 or better” is a lower bound, not an enumeration the future ages out', () => {
+    gleich(orr.quantizationsFrom('fp8').join(','), 'fp8,fp16,bf16,fp32', 'fp8 admits bf16 and fp16 — more precision, not less')
+    gleich(orr.quantizationsFrom('fp8').includes('fp4'), false, 'fp4 is below the floor and stays out')
+    gleich(orr.quantizationsFrom('q4').includes('fp8'), true, 'q4 parses onto the same scale (int-4 ≈ fp4 or better)')
+    wahr(orr.quantizationsFrom('bf16').includes('fp16'), true, 'the tie holds in the enumeration too')
+    wahr(!!orr.parseRoutingConfig({ quant_min: 'nvfp4' }).error,
+      'an unknown minimum is an ERROR, never a silent no-filter')
+  })
+
+  await pruefe('the selection filters, ranks and names its reasons', () => {
+    const eps = [
+      { tag: 'cheap/fp4', provider_name: 'Cheap', quantization: 'fp4', status: 0,
+        uptime_last_30m: 100, supported_parameters: ['tools'], pricing: { prompt: '0.00000005', completion: '0.0000001' } },
+      { tag: 'sila/fp8', provider_name: 'SiliconFlow', quantization: 'fp8', status: 0,
+        uptime_last_30m: 100, supported_parameters: ['tools'], pricing: { prompt: '0.00000014', completion: '0.00000028' } },
+      { tag: 'morph/bf16', provider_name: 'Morph', quantization: 'bf16', status: 0,
+        uptime_last_30m: 99, supported_parameters: ['tools'], pricing: { prompt: '0.000000139', completion: '0.000000278' } },
+      { tag: 'who/cares', provider_name: 'WhoKnows', quantization: 'unknown', status: 0, pricing: {} },
+      { tag: 'krank/fp8', provider_name: 'Sick', quantization: 'fp8', status: -2,
+        uptime_last_30m: 60, pricing: { prompt: '0.00000001', completion: '0.0000001' } },
+      { tag: 'ohne/werkzeug', provider_name: 'NoTools', quantization: 'fp8', status: 0,
+        supported_parameters: ['temperature'], pricing: { prompt: '0.00000001', completion: '0.0000001' } },
+    ]
+    // No minimum: the BEST quantization a healthy provider serves — fp4 loses
+    // to bf16 even though it is cheaper. That is the whole point of the rule.
+    const auto = orr.selectBestProvider(eps, orr.parseRoutingConfig({}))
+    gleich(auto.best, 'morph/bf16', 'bf16 beats fp8 beats fp4 at the top')
+    wahr(!auto.order.includes('cheap/fp4'), 'fp4 does not sneak into the order')
+    // With a minimum it is a FLOOR: everything at or above it competes on price.
+    const fp8 = orr.selectBestProvider(eps, orr.parseRoutingConfig({ quant_min: 'fp8' }))
+    gleich(fp8.order.join('|'), 'morph/bf16|sila/fp8', 'fp8-minimum narrows to fp8-or-better, cheapest first')
+    // Unknown quantization is NEVER a match — and every drop says why.
+    wahr(auto.dropped.some(d => d.tag === 'who/cares' && d.reason.includes('quantization')),
+      'a null quantization is never counted as a match')
+    wahr(fp8.dropped.some(d => d.tag === 'ohne/werkzeug' && d.reason.includes('tool support')),
+      'the tool-less endpoint is dropped, named')
+    wahr(fp8.dropped.some(d => d.reason.includes('degraded')), 'the degraded provider is named as degraded')
+    // Region + price caps exclude, and unknown regions go with them.
+    const cn = orr.selectBestProvider([
+      { tag: 'sila/fp8', provider_name: 'SiliconFlow', quantization: 'fp8', status: 0, pricing: { prompt: '0.00000014', completion: '0.00000028' } },
+      { tag: 'parasail/fp8', provider_name: 'Parasail', quantization: 'fp8', status: 0, pricing: { prompt: '0.0000001', completion: '0.0000002' } },
+    ], orr.parseRoutingConfig({ location: 'cn' }))
+    gleich(cn.best, 'sila/fp8', 'the region requirement keeps the placed provider, drops the rest')
+    wahr(cn.dropped.some(d => d.tag === 'parasail/fp8' && d.reason.includes('region')), 'the region rule is the named reason')
+    const deckel = orr.selectBestProvider(eps, orr.parseRoutingConfig({ quant_min: 'fp8', max_in: '0.1' }))
+    falsch(deckel.ok, 'a cap that fits nobody filters everything — and says so')
+  })
+
+  await pruefe('the config parses tolerantly and validates loudly', () => {
+    const cfg = orr.parseRoutingConfig({ quant_min: 'fp8', location: 'DE', max_in: ' 1.5 ', max_out: '' })
+    gleich(cfg.quant_min, 'fp8', 'the minimum survives')
+    gleich(cfg.location, 'de', 'regions are normalized')
+    gleich(cfg.max_in, 1.5, 'a number string becomes a number')
+    gleich(cfg.max_out, undefined, 'an empty cap means "no cap", never 0')
+    gleich(orr.parseRoutingConfig({ quant_min: 'fp8' }).location, 'all', 'no region means everywhere')
+    const murks = orr.parseRoutingConfig({ quant_min: 'nope' })
+    gleich(murks.error !== undefined, true, 'an unknown minimum is an ERROR, never a silent no-filter')
+    gleich(orr.routingConfigKey(orr.parseRoutingConfig({ location: 'us' })),
+      orr.routingConfigKey(orr.parseRoutingConfig({ location: 'us', quant_min: '' })),
+      'the cache key names the requirements, not the form fields')
+  })
+
+  await pruefe('the plugin resolves and CACHES per model+config', async () => {
+    const { default: plugin } = await import('../server/providers/openrouter.mjs')
+    let fetches = 0
+    const ctx = { json: async () => { fetches++; return { data: { endpoints: [
+      { tag: 'a/fp8', provider_name: 'A', quantization: 'fp8', status: 0, uptime_last_30m: 100,
+        supported_parameters: ['tools'], pricing: { prompt: '0.0000001', completion: '0.0000002' } },
+      { tag: 'b/fp8', provider_name: 'B', quantization: 'fp8', status: 0, uptime_last_30m: 100,
+        pricing: { prompt: '0.0000002', completion: '0.0000004' } },
+    ] } } } }
+    const cfg = orr.parseRoutingConfig({ quant_min: 'fp8' })
+    const erst = await plugin.routing.resolve(ctx, 'test/modell', cfg)
+    wahr(erst.ok && erst.best === 'a/fp8', `the cheapest healthy fp8 provider wins (${erst.best})`)
+    gleich(erst.cached, false, 'a first answer is fresh')
+    const zweite = await plugin.routing.resolve(ctx, 'test/modell', cfg)
+    gleich(fetches, 1, 'the SAME model+config is served from the cache')
+    wahr(zweite.cached, 'and marked as cached')
+    const andere = await plugin.routing.resolve(ctx, 'test/modell', orr.parseRoutingConfig({ quant_min: 'bf16' }))
+    gleich(fetches, 2, 'a DIFFERENT config is a different question — asked again')
+    falsch(andere.ok, 'a stricter requirement than the fixtures serve answers nothing (bf16: none)')
+    // A forced refresh against a dead endpoint: the stale cache answer arrives,
+    // marked veraltet — never a fresh failure dressed up as a selection.
+    const ctxTot = { json: async () => { throw new Error('down') } }
+    const veraltet = await plugin.routing.resolve(ctxTot, 'test/modell', cfg, { refresh: true })
+    wahr(veraltet.ok && veraltet.veraltet, `a failed fetch falls back to the stale answer (${veraltet.reason})`)
+    const murks = await plugin.routing.resolveForRun(ctx, 'test/modell', { mode: 'auto', quant_min: 'nvfp4' })
+    falsch(murks.ok, 'an unparseable requirement never resolves to an order')
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Favorites: the setup of a run under a name (favorites.mjs)')
   const fv = await import('../server/favorites.mjs')
 
@@ -3356,7 +3469,7 @@ try {
       harness: 'opencode', model: 'z-ai/glm-4.6', provider: 'openrouter', or_provider: 'novita',
       effort: null, skills: null, flows: null,
     })
-    gleich(body.or_pin, '1', 'the pin is set again from the stored value')
+    gleich(body.or_mode, 'pin', 'the pin is set again from the stored value')
     const def = await rd.runDefFromForm({ ...body, prompt: 'x', branch_mode: 'keiner' }, [])
     gleich(def.orProvider, 'novita', 'opencode + OpenRouter: passed through')
   })

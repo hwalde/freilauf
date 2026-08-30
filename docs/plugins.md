@@ -513,6 +513,65 @@ provider with its own `ok` flag) for the usage panel and `GET /api/usage`. It
 asks only providers that at least one **enabled** coding agent may use and that
 actually have a credential — a balance nobody can act on is noise.
 
+### OpenRouter best-provider routing (`routing` capability)
+
+The third optional provider capability, beside `balance` and `llm`. The
+OpenRouter catalog serves one model from many hosting vendors, and those
+disagree in quantization (fp4 … bf16), price (up to 3× for the same weights) and
+health (`status`, `uptime_last_30m`) — none of which the free routing decides
+in the caller's favour. The hub therefore ships an automatic best-provider
+selection, ported from the measured algorithm of the internal-project project
+(`modell_preflight.py` / `llm_client.py` there) and generalized from its fixed
+fp8 policy:
+
+```js
+routing: {
+  parseConfig, endpointFits, quantizationsFrom,   // re-exports of the pure module
+  async resolve(ctx, modelId, cfg, { refresh }) → { ok, order, best, quant, prices, dropped, cached, veraltet, at },
+  async resolveForRun(ctx, modelId, storedRouting),   // the run shape (start path)
+}
+```
+
+- **The decision rule lives in `server/providers/openrouter-routing.mjs`**, a
+  module that imports nothing of the hub, so the provider plugin, the harness
+  plugins and the unit suite judge one endpoint list by ONE code. Eligible :=
+  quantization **known** (null/unknown is never a match — the measured
+  fallstrick: OpenRouter routes null to the strongest quantized host) ∧ at
+  least `quant_min` ("fp8 or better" — a lower bound computed from one rank
+  table, never an enumeration the future ages out) ∧ healthy (`status >= 0`,
+  uptime ≥ 90 % when reported) ∧ tool support ∧ region ∧ price caps. Ranked:
+  without a minimum, the BEST quantization a healthy provider serves wins
+  before price breaks the tie; with a minimum everything at or above it
+  competes on price. The result is an ordered chain (`provider.order` +
+  `allow_fallbacks: false`), not one name — a one-name list is the failure mode
+  the internal-project project measured as "one 429 and the whole run falls".
+- **Cached per model+config** (`~/.local/share/cc-hub/openrouter-routing.json`,
+  `CCHUB_OR_ROUTING_JSON`), TTL 24 h: the same model with the same requirements
+  gets the SAME order on the next run, not a re-rolled one. A failed fetch
+  serves the stale answer marked `veraltet` — never a fresh failure dressed up
+  as a selection.
+- **The requirements the form asks for** (`or-routing` fieldset, mode "auto",
+  folded away): minimum quantization (a lower bound on the same scale the
+  parser normalizes fp4/fp5/q4/nf4/mxfp4/int8/fp8/bf16/… onto), provider region
+  (US / EU / DE / China; a provider the region map cannot place is dropped),
+  max input and output price (USD per million tokens). Providers reporting no
+  quantization are always out — `quantization: null` means "no statement", not
+  "unquantized".
+- **Only opencode receives it per run.** The pin and the auto config travel in
+  `OPENCODE_CONFIG_CONTENT`
+  (`provider: { order, allow_fallbacks: false, quantizations? }`); hermes has
+  no per-run provider routing (only its global failover config), and claude and
+  cursor run on subscriptions. The form shows the block for OpenRouter on every
+  harness and says where it cannot take effect.
+- **The resolution happens at start, once** (`resolveRouting()` in
+  `scheduler.mjs`, before `createRun`), and is frozen into the run's definition
+  copy: the run page shows what it really launched with. Fail-soft by
+  construction — any failure launches unpinned and logs the reason; a start
+  never fails on its own convenience feature.
+- The hub's own LLM jobs accept `auto` in their serving-provider fields
+  (`llm_*_or_provider`), resolved by the same cache in `complete()` — default
+  requirements, per model.
+
 ## Gates: the budget gate is plugin-declared
 
 `budgetGate(harness, model, provider)` in `scheduler.mjs` keeps its signature

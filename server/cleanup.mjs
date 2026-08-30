@@ -105,10 +105,16 @@ export function cleanupSettings(settings = null) {
     harness: s.cleanup_harness || '',
     provider: s.cleanup_provider || '',
     orProvider: s.cleanup_or_provider || '',
+    orRouting: parseRoutingSetting(s.cleanup_or_routing),
     model: s.cleanup_model || '',
     effort: s.cleanup_effort || '',
     prompt: s.cleanup_prompt || '',
   }
+}
+
+/** The routing config blob out of the settings table — tolerant of nulls and junk. */
+function parseRoutingSetting(v) {
+  try { return JSON.parse(v || '') ?? null } catch { return null }
 }
 
 /** Is a cleanup agent configured at all (the manual buttons need one)? */

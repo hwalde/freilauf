@@ -59,6 +59,7 @@ export async function favoriteFromForm(b, problems = []) {
     model: setup.model,
     provider: setup.provider,
     or_provider: setup.orProvider,
+    or_routing: setup.orRouting ? JSON.stringify(setup.orRouting) : null,
     effort: setup.effort,
     skills: skillsAusFormular(b),
     flows: attachmentsFromForm(b),
@@ -79,15 +80,15 @@ export function saveFavorite({ id = null, fav }) {
   if (taken && taken.id !== Number(id)) problems.push(t('fav.err_name_taken', { name: fav.name }))
   if (problems.length) return { ok: false, problems }
   if (id) {
-    db.prepare(`UPDATE favorites SET name=?, harness=?, model=?, provider=?, or_provider=?, effort=?,
+    db.prepare(`UPDATE favorites SET name=?, harness=?, model=?, provider=?, or_provider=?, or_routing=?, effort=?,
                 skills=?, flows=?, updated_at=datetime('now') WHERE id=?`)
-      .run(fav.name, fav.harness, fav.model, fav.provider, fav.or_provider, fav.effort,
+      .run(fav.name, fav.harness, fav.model, fav.provider, fav.or_provider, fav.or_routing ?? null, fav.effort,
         fav.skills, fav.flows, Number(id))
     return { ok: true, id: Number(id) }
   }
-  const r = db.prepare(`INSERT INTO favorites(name,harness,model,provider,or_provider,effort,skills,flows)
-                        VALUES(?,?,?,?,?,?,?,?)`)
-    .run(fav.name, fav.harness, fav.model, fav.provider, fav.or_provider, fav.effort, fav.skills, fav.flows)
+  const r = db.prepare(`INSERT INTO favorites(name,harness,model,provider,or_provider,or_routing,effort,skills,flows)
+                        VALUES(?,?,?,?,?,?,?,?,?)`)
+    .run(fav.name, fav.harness, fav.model, fav.provider, fav.or_provider, fav.or_routing ?? null, fav.effort, fav.skills, fav.flows)
   return { ok: true, id: Number(r.lastInsertRowid) }
 }
 
@@ -120,6 +121,7 @@ export function favoriteTemplate(fav) {
     model: fav.model ?? '',
     provider: fav.provider ?? '',
     or_provider: fav.or_provider ?? '',
+    or_routing: fav.or_routing ?? '',
     effort: fav.effort ?? '',
     skills: fav.skills ?? null,
     flows: fav.flows ?? null,
@@ -132,6 +134,12 @@ export function favoriteSummary(fav) {
   if (fav.provider) teile.push(providerLabel(fav.provider))
   if (fav.model) teile.push(fav.model)
   if (fav.or_provider) teile.push(`${t('run.pinned')}: ${fav.or_provider}`)
+  if (fav.or_routing) {
+    try {
+      const c = JSON.parse(fav.or_routing)
+      if (c?.mode === 'auto') teile.push(`${t('or.mode_auto')}${c.quant_min ? ` ≥ ${c.quant_min}` : ''}`)
+    } catch { /* broken blob: say nothing rather than crash a list */ }
+  }
   if (fav.effort) teile.push(`${t('model.effort')} ${fav.effort}`)
   const skills = skillAnzeige(fav.skills)
   if (skills.length) teile.push(`${t('skills.title')}: ${skills.join(', ')}`)

@@ -13,6 +13,37 @@ import { fallbackTitle, applyGeneratedTitle } from './title.mjs'
 let timer = null
 const fired = new Map()   // "agentId@YYYY-MM-DDTHH:MM" -> true
 
+/**
+ * "Serving provider: auto" resolved to a CONCRETE order at start.
+ *
+ * The stored config carries requirements, not providers — what actually serves
+ * the run is decided here, once, and frozen into the run's definition copy:
+ * the run then shows what it really launched with, and a rerun of the same
+ * agent re-resolves against the (cached, 24 h) then-current answer.
+ *
+ * Fail-soft by construction: no OpenRouter plugin, no model, no endpoint data,
+ * any throw — all mean "launch unpinned", the same behaviour the setting had
+ * before it existed. A start never fails on its own convenience feature, and
+ * the reason lands in the journal.
+ */
+async function resolveRouting(def) {
+  if (def.harness !== 'opencode' || def.provider !== 'openrouter') return def
+  if (def.orRouting?.mode !== 'auto') return def
+  const plugin = getPlugin('openrouter')?.plugin
+  if (!plugin?.routing) return def
+  try {
+    const r = await plugin.routing.resolveForRun(pluginCtx('openrouter'), def.model ?? '', def.orRouting)
+    if (r.ok) {
+      return { ...def, orProvider: r.best, orRouting: { ...def.orRouting, order: r.order, resolved_at: r.at } }
+    }
+    console.error('[scheduler] OpenRouter auto routing:', r.reason)
+    return { ...def, orRouting: { ...def.orRouting, order: [], unresolved: r.reason ?? true } }
+  } catch (e) {
+    console.error('[scheduler] OpenRouter auto routing:', e.message)
+    return { ...def, orRouting: { ...def.orRouting, order: [], unresolved: e.message } }
+  }
+}
+
 export function startScheduler() {
   if (timer) return
   timer = setInterval(() => tick().catch(e => console.error('[scheduler]', e.message)), 30_000)
@@ -212,9 +243,13 @@ export async function startRun(def, {
   const chosen = String(title ?? '').trim() || agentName || null
   const startTitle = chosen ?? fallbackTitle(def.prompt)
 
+  // "auto" needs its provider order BEFORE the definition copy is written —
+  // the run must record what it actually launched with.
+  const resolved = await resolveRouting(def)
+
   let runId
   try {
-    runId = createRun({ ...def, repoId, agentId, promptExtra, title: startTitle || null })
+    runId = createRun({ ...resolved, repoId, agentId, promptExtra, title: startTitle || null })
   } catch (e) {
     return { ok: false, error: e.message }
   }

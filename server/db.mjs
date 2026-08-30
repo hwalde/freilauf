@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS favorites (
   model TEXT,
   provider TEXT,
   or_provider TEXT,
+  or_routing TEXT,
   effort TEXT,
   skills TEXT,
   flows TEXT,
@@ -157,6 +158,12 @@ addColumn('agents', 'provider', 'TEXT')
 addColumn('agents', 'or_provider', 'TEXT')   // fixed OpenRouter serving provider (tag)
 addColumn('runs', 'provider', 'TEXT')
 addColumn('runs', 'or_provider', 'TEXT')
+// OpenRouter serving-provider routing config (JSON): { mode:'auto', quant_min?,
+// location?, max_in?, max_out? } — the pin's tag stays in or_provider, the auto
+// config lives here and resolves to a provider order at start (scheduler.mjs).
+addColumn('agents', 'or_routing', 'TEXT')
+addColumn('runs', 'or_routing', 'TEXT')
+addColumn('favorites', 'or_routing', 'TEXT')
 // Reasoning effort per run. NULL = as before: the harness uses its own default.
 addColumn('agents', 'effort', 'TEXT')
 addColumn('runs', 'effort', 'TEXT')

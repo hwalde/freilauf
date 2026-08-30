@@ -1263,6 +1263,7 @@ export function resolverSetup() {
     harness: getSetting('merge_resolver_harness') || '',
     provider: getSetting('merge_resolver_provider') || '',
     orProvider: getSetting('merge_resolver_or_provider') || '',
+    orRouting: (() => { try { return JSON.parse(getSetting('merge_resolver_or_routing') || '') ?? null } catch { return null } })(),
     model: getSetting('merge_resolver_model') || '',
     effort: getSetting('merge_resolver_effort') || '',
     skills: getSetting('merge_resolver_skills') || null,
