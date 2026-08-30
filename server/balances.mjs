@@ -10,9 +10,10 @@
 // shape of exactly one vendor hard-coded into it, which is the kind of
 // provider-specific knowledge docs/plugins.md says belongs in the plugin. The
 // moment a second provider reports a balance, the copy would have started.
-import { getProvider, providerHasKey } from './providers/index.mjs'
+import { getProvider } from './providers/index.mjs'
 import { enabledCodingAgents } from './coding-agents.mjs'
-import { providerCtx } from './models.mjs'
+import { pluginCtx } from './plugins/context.mjs'
+import { pluginHasCredential } from './plugins/store.mjs'
 
 // A minute, not two — same reason as usage.mjs: the sidebar re-fetches on its
 // own timer, and a balance shown is only as fresh as this window. The suite
@@ -54,12 +55,16 @@ export async function providerBalances({ force = false } = {}) {
   if (!force && cached && Date.now() - cache.at < CACHE_MS) return cached
   if (inflight && inflight.key === key) return !force && cached ? cached : inflight.promise
   const task = (async () => {
-    const ctx = providerCtx()
     const out = []
     for (const id of relevantProviderIds()) {
       const plugin = getProvider(id)
       if (!plugin?.balance) continue
-      if (!providerHasKey(id, ctx.env)) continue
+      const ctx = pluginCtx(id)
+      // The credential the OPERATOR configured, not only the one the plugin
+      // declares: a key stored for the provider or read from a variable they
+      // named makes its balance visible here exactly as an exported
+      // OPENROUTER_API_KEY always did.
+      if (!pluginHasCredential(id, ctx.env)) continue
       let data = null
       try { data = await plugin.balance(ctx) } catch { data = null }
       out.push(data

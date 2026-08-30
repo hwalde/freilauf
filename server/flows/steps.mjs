@@ -15,6 +15,7 @@
 import { render, resolve, compare, OPS, varName, toList } from './template.mjs'
 import { placementErrors, definitionWarnings } from './varschema.mjs'
 import { RUN_DEF_FLOW_FIELDS, defFromFlowProps } from '../run-def.mjs'
+import { llmSources } from '../llm/sources.mjs'
 
 // A target selector aimed at the trigger run needs one to exist.
 const TARGET_PLACEMENT = { needsRun: { whenField: 'target', is: 'trigger_run' } }
@@ -138,6 +139,21 @@ export const STEPS = [
       { key: 'text', kind: 'textarea', showIf: { source: 'custom' } },
       { key: 'instructions', kind: 'textarea', placeholder: 'What to extract and how to judge it.' },
       { key: 'fields', kind: 'fields', required: true },
+      // WHERE THE MODEL COMES FROM, not where the text comes from. `source`
+      // above is the text (report / log / transcript / custom) and is stored in
+      // saved flows, so it cannot be renamed — hence the second, longer name.
+      // Empty = whatever Settings → check LLM points at.
+      //
+      // A getter, because the list of sources is not known when this module is
+      // loaded: external plugin packages register during startup, and a plugin
+      // the operator switches off must stop being offered. `stepsMeta()` is
+      // serialized per request, and JSON.stringify runs the getter.
+      {
+        key: 'llmSource',
+        kind: 'select',
+        default: '',
+        get options() { return ['', ...llmSources().map(s => s.id)] },
+      },
       { key: 'model', kind: 'text', placeholder: 'empty = check-LLM model from the settings' },
       { key: 'outputVar', kind: 'text', default: 'extracted' },
     ],
@@ -151,7 +167,11 @@ export const STEPS = [
       }
       const fields = Array.isArray(props.fields) ? props.fields.filter(f => f?.name) : []
       if (!fields.length) throw new Error('extract: no fields defined')
-      const out = await api.extract({ text, instructions: props.instructions || '', fields, model: props.model || null })
+      const out = await api.extract({
+        text, instructions: props.instructions || '', fields,
+        model: props.model || null,
+        source: props.llmSource || null,
+      })
       return { msg: `extracted ${Object.keys(out).length} field(s)`, output: out }
     },
   },

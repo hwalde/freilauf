@@ -1,21 +1,32 @@
 #!/usr/bin/env bash
-# Lists running coding-agent sessions (claude/opencode/hermes), attaches to one of
-# them, and can optionally type a prompt into the running session.
+# Lists running coding-agent sessions (claude/opencode/hermes/cursor), attaches to
+# one of them, and can optionally type a prompt into the running session.
 # Usage: cc-attach [options] [session-name]
 set -euo pipefail
 
-PREFIX="cc-"
+# The session tags and the reverse lookup live in one file, next to this one —
+# they used to be a copy here and another one in cc-kill, and both had gone
+# stale in the same place (cursor was missing from them).
+CC_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cc-harness-tags.sh"
+if [[ ! -r "$CC_LIB" ]]; then
+    printf '%s\n' "Error: $CC_LIB is missing — reinstall with setup/02-install-scripts.sh." >&2
+    exit 1
+fi
+# shellcheck source=cc-harness-tags.sh
+. "$CC_LIB"
+
+PREFIX="$CC_PREFIX"
 
 usage() {
     cat <<'EOF'
 Usage: cc-attach [options] [session-name]
 
-  session-name   Pick a session directly (with or without the cc-/cc-oc-/cc-he- prefix).
-                 If omitted: selection list (or directly, if only one is running).
+  session-name   Pick a session directly (with or without the cc-/cc-oc-/cc-he-/cc-cu-
+                 prefix). If omitted: selection list (or directly, if only one is running).
 
 Options:
   -H, --harness HARNESS   Only show/address sessions of this harness:
-                          claude | opencode | hermes
+                          claude | opencode | hermes | cursor
   -p, --prompt TEXT     Type this prompt into the chosen session and submit it,
                         then attach.
   -f, --prompt-file FILE Read the prompt from a file (instead of -p).
@@ -59,11 +70,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -n "$HARNESS" ]]; then
-    case "$HARNESS" in
-        claude|opencode|hermes) ;;
-        *) err "Error: unknown harness '$HARNESS'. Allowed: claude opencode hermes"; exit 2 ;;
-    esac
+if [[ -n "$HARNESS" ]] && ! cc_harness_known "$HARNESS"; then
+    err "Error: unknown harness '$HARNESS'. Allowed: $(cc_harness_ids)"
+    exit 2
 fi
 
 if [[ -n "$PROMPT_FILE" ]]; then
@@ -75,14 +84,8 @@ if [[ -n "$NO_ATTACH" && -z "$PROMPT" ]]; then
     err "Error: --no-attach without a prompt does nothing."; exit 2
 fi
 
-# Derive a session's harness from its name: cc-oc-* -> opencode, cc-he-* -> hermes, else claude.
-harness_of() {
-    case "$1" in
-        "$PREFIX"oc-*) echo "opencode" ;;
-        "$PREFIX"he-*) echo "hermes" ;;
-        *) echo "claude" ;;
-    esac
-}
+# Derive a session's harness from its name (cc-harness-tags.sh).
+harness_of() { cc_harness_of "$1"; }
 
 mapfile -t ROWS < <(tmux list-sessions \
     -F '#{session_name}|#{t:session_created}|#{?session_attached,attached,free}|#{session_path}' \
@@ -101,7 +104,7 @@ if [[ ${#SESSIONS[@]} -eq 0 ]]; then
     else
         echo "No running agent session found."
     fi
-    echo "Start a new session with: cc-start [-H claude|opencode|hermes] [-p \"prompt\"] [name] [directory]"
+    echo "Start a new session with: cc-start [-H $(cc_harness_ids | tr ' ' '|')] [-p \"prompt\"] [name] [directory]"
     exit 1
 fi
 
@@ -142,8 +145,7 @@ finish() {
 # Direct selection via argument (with or without prefix/harness tag)
 if [[ -n "$TARGET" ]]; then
     for s in "${SESSIONS[@]}"; do
-        bare="${s#$PREFIX}"               # remove cc-
-        bare="${bare#oc-}"; bare="${bare#he-}"   # remove the harness tag
+        bare="$(cc_harness_bare "$s")"    # remove cc- and the harness tag
         if [[ "$s" == "$TARGET" || "$s" == "$PREFIX$TARGET" || "$bare" == "$TARGET" ]]; then
             finish "$s"
             exit 0

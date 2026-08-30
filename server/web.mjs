@@ -21,13 +21,23 @@ import {
   agentDelete, agentMovePage, agentMovePost,
   repoEdit, repoSave, settingsSave, settingsTestTelegram,
   telegramSetup, telegramTokenSave, telegramChatSave, telegramChats,
-  pageCodingAgents, codingAgentSave, codingAgentDelete,
+  codingAgentSave, codingAgentDelete,
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
   pageMergeSettings, mergeSettingsSave,
   pageCleanupSettings, cleanupSettingsSave, cleanupSettingsSummary,
   headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
   integrationSection, problemPage, runEditCard,
 } from './pages.mjs'
+import {
+  pagePlugins, pluginsSave, pluginsAdd, pluginsRemove,
+  pluginsInstall, pluginsUninstall, pluginsScan, pluginsDiscovery,
+} from './plugins/web.mjs'
+import { llmSources, sourceModels, getSource } from './llm/sources.mjs'
+import {
+  pageWelcome, welcomeHello, welcomeScan, welcomeAgents,
+  welcomeProvider, welcomeLlm, welcomeDone,
+  shouldShowWelcome, markWelcomeSkipped,
+} from './welcome.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
 import { startCleanupRun } from './cleanup.mjs'
 import { suggestExtras } from './extras-suggest.mjs'
@@ -119,7 +129,29 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'POST' && path === '/telegram-setup/token') return telegramTokenSave(req, res, url, formBody)
   if (req.method === 'POST' && path === '/telegram-setup/chat') return telegramChatSave(req, res, url, formBody)
 
+  // --- Welcome wizard ---
+  // Reachable whatever `welcome_hide` says, and it never redirects to itself:
+  // the redirect below is the only place that sends anybody here.
+  if (req.method === 'GET' && path === '/welcome') return pageWelcome(req, res, url)
+  if (req.method === 'POST' && path === '/welcome/hello') return welcomeHello(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/welcome/scan') return welcomeScan(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/welcome/agents') return welcomeAgents(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/welcome/provider') return welcomeProvider(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/welcome/llm') return welcomeLlm(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/welcome/done') return welcomeDone(req, res, url, formBody)
+
   // --- pages ---
+  // A fresh installation meets the wizard instead of an overview with nothing in
+  // it. Three fences, and each of them is load-bearing:
+  //   - only a BROWSER NAVIGATION (`wantsHtml`) — a fragment fetch or an API
+  //     caller asking for `/` must never be answered with a redirect to HTML;
+  //   - only while `welcome_hide` is unset (the checkbox on every wizard step);
+  //   - `?welcome=skip` is the wizard's own "Skip for now" coming back, and it
+  //     marks the browser session so the link cannot bounce into a loop.
+  if (req.method === 'GET' && path === '/') {
+    if (url.searchParams.get('welcome') === 'skip') markWelcomeSkipped(res)
+    else if (wantsHtml(req) && shouldShowWelcome(req)) return redirect(res, '/welcome')
+  }
   if (req.method === 'GET' && path === '/') return pageOverview(req, res, url)
   if (req.method === 'GET' && path === '/archive') return pageArchive(req, res, url)
   if (req.method === 'GET' && path === '/agents') return pageAgents(req, res, url)
@@ -140,8 +172,22 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'GET' && path === '/settings') return pageSettings(req, res, url)
   if (req.method === 'POST' && path === '/settings/save') return settingsSave(req, res, url, formBody)
   if (req.method === 'POST' && path === '/settings/test-telegram') return settingsTestTelegram(req, res)
-  // Coding agents (Settings → Coding agents)
-  if (req.method === 'GET' && path === '/settings/coding-agents') return pageCodingAgents(req, res, url)
+  // Plugins (Settings → Plugins) — coding agents, model providers, credentials
+  // and the installed packages, all on one page.
+  if (req.method === 'GET' && path === '/settings/plugins') return pagePlugins(req, res, url)
+  if (req.method === 'POST' && path === '/settings/plugins/save') return pluginsSave(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/settings/plugins/add') return pluginsAdd(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/settings/plugins/remove') return pluginsRemove(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/settings/plugins/install') return pluginsInstall(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/settings/plugins/uninstall') return pluginsUninstall(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/settings/plugins/scan') return pluginsScan(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/settings/plugins/discovery') return pluginsDiscovery(req, res, url, formBody)
+  // The old Coding-agents page became the Plugins page's second section. The
+  // GET is a redirect rather than a 404 because the address is in bookmarks,
+  // in the setup banner and in the docs; the two POSTs stay because a tab
+  // opened before the deploy would otherwise lose what was typed into it.
+  // Nothing on the new page posts to them.
+  if (req.method === 'GET' && path === '/settings/coding-agents') return redirect(res, '/settings/plugins')
   if (req.method === 'POST' && path === '/settings/coding-agents/save') return codingAgentSave(req, res, url, formBody)
   if (req.method === 'POST' && path === '/settings/coding-agents/delete') return codingAgentDelete(req, res, url, formBody)
   // Favorites (Settings → Favorites) — the saved setup a Quick Run starts from.
@@ -233,6 +279,26 @@ async function api(req, res, url) {
     return json(res, 200, r.liste
       ? { ok: true, provider, models: r.liste, veraltet: r.veraltet, stand: standVon(provider) }
       : { ok: false, error: r.fehler ?? t('api.model_list_unreachable') })
+  }
+  // The sources that can answer the hub's OWN questions (run titles, the
+  // incident check, a flow's extract, the worktree-extras suggestion) — model
+  // providers and coding agents in one flat list, because a coding agent's
+  // model ids already carry the provider (see server/llm/sources.mjs).
+  if (req.method === 'GET' && path === '/api/llm-sources') {
+    return json(res, 200, { ok: true, sources: llmSources() })
+  }
+  // The models of ONE such source. Same manners as /api/models above: always
+  // 200, `ok:false` on failure, because the model field keeps its free-text
+  // input and a picker must not break a form over a vendor that went quiet.
+  if (req.method === 'GET' && path === '/api/llm-models') {
+    const source = url.searchParams.get('source') ?? ''
+    if (!getSource(source)) {
+      return json(res, 200, { ok: false, error: t('api.unknown_llm_source', { source }) })
+    }
+    const models = await sourceModels(source)
+    return json(res, 200, models.length
+      ? { ok: true, source, models }
+      : { ok: false, error: t('api.model_list_unreachable') })
   }
   // Which effort levels this combination REALLY accepts. Always answers 200:
   // without an answer the form simply hides the field.

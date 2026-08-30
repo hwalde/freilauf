@@ -130,8 +130,14 @@ try {
         { harness, enabled: '1', ...(providers.length ? { providers } : {}) }, { alsBrowser: true })
       gleich(r.status, 303, harness)
     }
-    gleich(db.prepare('SELECT count(*) c FROM coding_agents WHERE enabled=1').get().c, 4, 'four enabled')
-    gleich(JSON.parse(db.prepare(`SELECT providers FROM coding_agents WHERE harness='opencode'`).get().providers).length, 3, 'providers stored')
+    // The rows live in `plugin_config` now (kind='harness'), with the allowed
+    // model providers inside the `config` JSON — one table for coding agents
+    // and model providers alike, because a provider had no place to carry an
+    // enabled flag or a credential before it.
+    gleich(db.prepare(`SELECT count(*) c FROM plugin_config WHERE kind='harness' AND enabled=1`).get().c, 4, 'four enabled')
+    const opencodeConfig = JSON.parse(
+      db.prepare(`SELECT config FROM plugin_config WHERE plugin_id='opencode'`).get().config)
+    gleich(opencodeConfig.providers.length, 3, 'providers stored')
   })
   await pruefe('unknown coding agent is rejected by the settings form', async () => {
     const r = await formular('/settings/coding-agents/save', { harness: 'gpt', enabled: '1' }, { alsBrowser: true })
@@ -141,9 +147,17 @@ try {
     falsch((await (await hol('/')).text()).includes('banner setup'), 'no banner')
   })
   await pruefe('settings page lists the configured coding agents', async () => {
-    const html = await (await hol('/settings/coding-agents')).text()
+    const html = await (await hol('/settings/plugins')).text()
     enthaelt(html, 'Claude Code', 'label')
     enthaelt(html, 'cursor-agent', 'binary name')
+  })
+  await pruefe('the old coding-agents address still leads there', async () => {
+    // A 303 and not a 404: the address is in bookmarks, in the setup banner
+    // and in the docs, and an operator who follows one of those must land on
+    // the page the section moved to.
+    const r = await hol('/settings/coding-agents')
+    gleich(r.status, 303, 'redirect')
+    gleich(r.headers.get('location'), '/settings/plugins', 'to the plugins page')
   })
   await pruefe('usage API answers with the Claude quota from the fixture', async () => {
     const j = await (await hol('/api/usage')).json()
@@ -2526,10 +2540,15 @@ try {
     falsch(keinGit.ok, 'a directory without .git is refused')
     enthaelt(keinGit.error, 'git', 'and says so')
   })
-  await pruefe('a git repo without an OpenRouter key reports the LLM as off', async () => {
+  await pruefe('a git repo without a credential for its model source reports the LLM as off', async () => {
+    // The message stopped naming OPENROUTER_API_KEY when the four direct LLM
+    // calls became source-driven: the source may be any model provider, or a
+    // coding agent, so the sentence names the SETTING that switches it on and
+    // where to put a credential. What it must still do is refuse and say why.
     const j = await (await formular('/api/repos/extras-suggest', { path: REPO })).json()
     falsch(j.ok, 'not ok without a key')
-    enthaelt(j.error, 'OPENROUTER_API_KEY', 'names the missing key')
+    enthaelt(j.error, 'no key', 'names the missing credential as the reason')
+    enthaelt(j.error, 'Worktree extras', 'and where to change it')
   })
   await pruefe('the agents page shows the schedule and all three actions of a row', async () => {
     // An agent with a real schedule, deliberately left switched OFF: the scheduler
@@ -3698,6 +3717,324 @@ try {
     const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
     enthaelt(html, 'data-merge-mode="off"', 'the form says so too')
     enthaelt(html, 'data-hub-only hidden', 'and the keep box is not even offered')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Plugins: the page, an external package, the discovery scan and the wizard')
+
+  // Deliberately the LAST stub group: it registers plugins into a process-wide
+  // registry and it answers the discovery findings, so everything above must
+  // have run against the hub as it ships. Every package it builds is removed
+  // again by its own last test.
+  const PAKETE = join(SB, 'pakete')
+
+  /** Write a plugin package into a directory of the sandbox (never into the plugin dir). */
+  function paketBauen(name, manifest, quelle) {
+    const dir = join(PAKETE, name)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'plugin.json'), JSON.stringify(manifest, null, 2))
+    writeFileSync(join(dir, manifest.main ?? 'index.mjs'), quelle)
+    return dir
+  }
+
+  const EXT_PROVIDER = `export default {
+  id: 'e2e-provider',
+  kind: 'provider',
+  label: 'E2E Model Provider',
+  envKeys: ['E2E_PROVIDER_KEY'],
+  ocPrefix: 'e2e',
+  mdKey: 'e2e',
+  pulse: { url: 'https://example.invalid/health' },
+  async fetchModels() { return [{ id: 'e2e-mini', name: 'E2E Mini' }] },
+}
+`
+  // `bin: 'sh'` is the point of this one: the discovery scan asks the shell
+  // whether a coding agent's binary exists, and a test that depends on claude
+  // being installed on the machine running it is not a test.
+  const EXT_AGENT = `export default {
+  id: 'e2e-agent',
+  kind: 'harness',
+  label: 'E2E Coding Agent',
+  bin: 'sh',
+  installHint: 'it is already on every machine',
+  subscription: false,
+  providers: [],
+  logPatterns: [{ typ: 'rate_limit', re: /e2e-never-matches-anything/ }],
+  modelArgs: () => [],
+  effortOptions: () => [],
+  usage: async () => null,
+  pulseId: () => null,
+}
+`
+
+  await pruefe('the Plugins page lists the coding agents, the model providers and the packages', async () => {
+    const r = await hol('/settings/plugins')
+    gleich(r.status, 200, 'status')
+    const html = await r.text()
+    // The two sections that replaced the old Coding-agents page…
+    enthaelt(html, 'Claude Code', 'a coding agent by its label')
+    enthaelt(html, 'cursor-agent', 'and one by its binary')
+    enthaelt(html, 'OpenRouter', 'a model provider')
+    enthaelt(html, 'DeepSeek', 'and another one')
+    // …plus the two the page is new for.
+    enthaelt(html, '/settings/plugins/save', 'every card posts to the save route')
+    enthaelt(html, '/settings/plugins/install', 'the install form')
+    enthaelt(html, '/settings/plugins/scan', 'the scan button')
+    enthaelt(html, 'name="cred_api_key_env"', 'a credential can be pointed at another variable')
+    enthaelt(html, 'name="cred_api_key_value"', 'or carry a value of its own')
+  })
+
+  await pruefe('a save round-trips the enabled flag, the provider selection and a credential', async () => {
+    const providerVorher = JSON.parse(
+      db.prepare(`SELECT config FROM plugin_config WHERE plugin_id='hermes'`).get().config).providers
+    try {
+      // 1. the provider selection of a coding agent
+      const r1 = await formular('/settings/plugins/save',
+        { id: 'hermes', enabled: '1', providers: ['deepseek'] }, { alsBrowser: true })
+      gleich(r1.status, 303, 'saved')
+      const hermes = db.prepare(`SELECT * FROM plugin_config WHERE plugin_id='hermes'`).get()
+      gleich(hermes.enabled, 1, 'enabled')
+      gleich(JSON.parse(hermes.config).providers.join(','), 'deepseek', 'only the ticked provider survived')
+
+      // 2. the enabled flag really switches off — the hidden `0` companion is
+      //    what makes that possible at all (a form sends nothing for an
+      //    unticked box).
+      const r2 = await formular('/settings/plugins/save', { id: 'hermes', enabled: '0' }, { alsBrowser: true })
+      gleich(r2.status, 303, 'saved')
+      gleich(db.prepare(`SELECT enabled FROM plugin_config WHERE plugin_id='hermes'`).get().enabled, 0, 'switched off')
+
+      // 3. a stored credential VALUE
+      const geheim = 'sk-e2e-do-not-render-me'
+      gleich((await formular('/settings/plugins/save', {
+        id: 'deepseek', enabled: '1', cred_api_key_mode: 'value', cred_api_key_value: geheim,
+      }, { alsBrowser: true })).status, 303, 'credential saved')
+      const cfg = JSON.parse(db.prepare(`SELECT config FROM plugin_config WHERE plugin_id='deepseek'`).get().config)
+      gleich(cfg.credentials.api_key.mode, 'value', 'stored as a value')
+      gleich(cfg.credentials.api_key.value, geheim, 'and it is the value that was typed')
+
+      // THE assertion of this test: a page renders, and a page is shared,
+      // logged and screenshotted. The value must never come back out of it.
+      const html = await (await hol('/settings/plugins')).text()
+      falsch(html.includes(geheim), 'the credential value is nowhere in the HTML')
+      enthaelt(html, 'value=""', 'the password field is rendered empty')
+
+      // 4. an empty password field means "keep what is stored" — walking
+      //    through the form again must not wipe a key.
+      gleich((await formular('/settings/plugins/save',
+        { id: 'deepseek', enabled: '1', cred_api_key_mode: 'value', cred_api_key_value: '' },
+        { alsBrowser: true })).status, 303, 'saved again')
+      gleich(JSON.parse(db.prepare(`SELECT config FROM plugin_config WHERE plugin_id='deepseek'`).get().config)
+        .credentials.api_key.value, geheim, 'the stored value survived an empty submit')
+
+      // 5. an environment variable NAME instead — the better answer where a
+      //    machine can be given one, and the only half that may be shown.
+      gleich((await formular('/settings/plugins/save', {
+        id: 'deepseek', enabled: '1', cred_api_key_mode: 'env', cred_api_key_env: 'MY_OWN_DEEPSEEK_KEY',
+      }, { alsBrowser: true })).status, 303, 'saved')
+      const cfg2 = JSON.parse(db.prepare(`SELECT config FROM plugin_config WHERE plugin_id='deepseek'`).get().config)
+      gleich(cfg2.credentials.api_key.mode, 'env', 'reads the environment now')
+      gleich(cfg2.credentials.api_key.envVar, 'MY_OWN_DEEPSEEK_KEY', 'under the name the operator gave')
+      falsch('value' in cfg2.credentials.api_key, 'and the stored value is gone, not shadowed')
+      const html2 = await (await hol('/settings/plugins')).text()
+      enthaelt(html2, 'MY_OWN_DEEPSEEK_KEY', 'the NAME is shown')
+      falsch(html2.includes(geheim), 'the value still is not')
+    } finally {
+      await formular('/settings/plugins/save',
+        { id: 'hermes', enabled: '1', providers: providerVorher }, { alsBrowser: true })
+    }
+  })
+
+  await pruefe('an unknown plugin id is a readable problem, not a 500', async () => {
+    const r = await formular('/settings/plugins/save', { id: 'no-such-plugin', enabled: '1' }, { alsBrowser: true })
+    gleich(r.status, 400, 'refused')
+    enthaelt(await r.text(), 'no-such-plugin', 'and the page names it')
+  })
+
+  await pruefe('an external package is installed from a directory and joins the registry', async () => {
+    const dir = paketBauen('e2e-provider', {
+      api: 1, id: 'e2e-provider', kind: 'provider', name: 'E2E Model Provider', version: '0.4.2',
+      description: 'A model provider built by the e2e suite.',
+    }, EXT_PROVIDER)
+
+    const r = await formular('/settings/plugins/install', { path: dir }, { alsBrowser: true })
+    gleich(r.status, 303, `installed (${r.status === 400 ? await r.text() : ''})`.slice(0, 400))
+    // It is COPIED into the plugin directory, not linked: the operator's own
+    // directory may move, and a service must not die because it did.
+    wahr(existsSync(join(sk.PLUGINS, 'e2e-provider', 'plugin.json')), 'the package landed in the plugin directory')
+
+    const html = await (await hol('/settings/plugins')).text()
+    enthaelt(html, 'E2E Model Provider', 'the plugin has a card')
+    enthaelt(html, '0.4.2', 'the packages table names its version')
+    enthaelt(html, 'e2e-provider', 'and its id')
+    // A registered provider is choosable wherever a provider is chosen — the
+    // whole point of the registry being mutable.
+    enthaelt(await (await hol('/api/coding-agents/detect')).text(), 'ok', 'the detect API still answers')
+  })
+
+  await pruefe('a package whose id is already taken is refused, and nothing is written', async () => {
+    // Refused BEFORE anything is copied: a package shadowing `claude` could
+    // replace the coding agent every run is started with, without saying so.
+    const dopplung = paketBauen('e2e-provider-again', {
+      api: 1, id: 'e2e-provider', kind: 'provider', name: 'A second one', version: '9.9.9',
+    }, EXT_PROVIDER)
+    const r = await formular('/settings/plugins/install', { path: dopplung }, { alsBrowser: true })
+    gleich(r.status, 400, 'refused')
+    enthaelt(await r.text(), 'already taken', 'and it says why')
+    falsch(existsSync(join(sk.PLUGINS, 'e2e-provider-again')), 'nothing new on disk')
+    // The original is untouched, version and all.
+    enthaelt(await (await hol('/settings/plugins')).text(), '0.4.2', 'the installed one still stands')
+
+    const kaputt = paketBauen('e2e-broken', {
+      api: 2, id: 'e2e-broken', kind: 'provider', name: 'From the future', version: '1.0.0',
+    }, EXT_PROVIDER)
+    const r2 = await formular('/settings/plugins/install', { path: kaputt }, { alsBrowser: true })
+    gleich(r2.status, 400, 'a manifest for another api version is refused too')
+    enthaelt(await r2.text(), 'api', 'naming the field')
+
+    const r3 = await formular('/settings/plugins/install', { path: join(SB, 'does-not-exist') }, { alsBrowser: true })
+    gleich(r3.status, 400, 'a path that is not a directory is refused')
+    gleich((await formular('/settings/plugins/install', { path: '' }, { alsBrowser: true })).status, 400, 'and an empty one')
+  })
+
+  await pruefe('the scan finds a coding agent on this machine and the banner asks about it once', async () => {
+    // An external coding agent whose binary is `sh`: present on every machine
+    // the suite can run on, so the finding is deterministic.
+    const dir = paketBauen('e2e-agent', {
+      api: 1, id: 'e2e-agent', kind: 'harness', name: 'E2E Coding Agent', version: '1.2.3',
+      description: 'A coding agent built by the e2e suite.',
+    }, EXT_AGENT)
+    gleich((await formular('/settings/plugins/install', { path: dir }, { alsBrowser: true })).status, 303, 'installed')
+
+    gleich((await formular('/settings/plugins/scan', {}, { alsBrowser: true })).status, 303, 'scanned')
+    const row = db.prepare(`SELECT * FROM discovery WHERE id='harness:e2e-agent'`).get()
+    wahr(!!row, 'the scan wrote a row for it')
+    gleich(JSON.parse(row.detail).bin, 'sh', 'and recorded WHICH binary it found')
+    wahr(row.answer === null, 'nobody has been asked yet')
+    // A found credential is NAMED, never read — the row carries a variable
+    // name and no value, because it is shown in the UI and travels with a
+    // database dump.
+    falsch(JSON.stringify(row.detail).includes('sk-'), 'no secret in a discovery row')
+
+    enthaelt(await (await hol('/')).text(), 'banner discovery', 'the banner appears on an ordinary page')
+    enthaelt(await (await hol('/settings/plugins')).text(), 'E2E Coding Agent', 'and the finding has a card')
+
+    // Answering is what "asked once" means: a page that only SHOWS something
+    // has not asked anybody anything.
+    gleich((await formular('/settings/plugins/discovery',
+      { id: 'harness:e2e-agent', answer: 'dismissed' }, { alsBrowser: true })).status, 303, 'answered')
+    const nachher = db.prepare(`SELECT * FROM discovery WHERE id='harness:e2e-agent'`).get()
+    gleich(nachher.answer, 'dismissed', 'the answer is recorded')
+    wahr(!!nachher.asked_at, 'together with the moment it was asked')
+    falsch((await (await hol('/')).text()).includes('banner discovery'), 'and it stops asking')
+
+    // …and a second scan does not un-answer it.
+    gleich((await formular('/settings/plugins/scan', {}, { alsBrowser: true })).status, 303, 'scanned again')
+    gleich(db.prepare(`SELECT answer FROM discovery WHERE id='harness:e2e-agent'`).get().answer, 'dismissed',
+      'a rescan never overwrites an answer')
+  })
+
+  await pruefe('"Add" from a finding switches the plugin on and answers the suggestion', async () => {
+    // Put the finding back the way a fresh machine would have it.
+    db.prepare(`UPDATE discovery SET answer=NULL, asked_at=NULL WHERE id='harness:e2e-agent'`).run()
+    gleich((await formular('/settings/plugins/add', { id: 'e2e-agent' }, { alsBrowser: true })).status, 303, 'added')
+    const cfg = db.prepare(`SELECT * FROM plugin_config WHERE plugin_id='e2e-agent'`).get()
+    wahr(!!cfg, 'the plugin is configured now')
+    gleich(cfg.enabled, 1, 'and switched on')
+    gleich(cfg.source, 'external', 'recorded as an external package')
+    gleich(db.prepare(`SELECT answer FROM discovery WHERE id='harness:e2e-agent'`).get().answer, 'added', 'and the finding is answered')
+  })
+
+  await pruefe('an external package is uninstalled again — directory, registry and configuration', async () => {
+    for (const id of ['e2e-agent', 'e2e-provider']) {
+      const r = await formular('/settings/plugins/uninstall', { id }, { alsBrowser: true })
+      gleich(r.status, 303, `${id} removed`)
+      falsch(existsSync(join(sk.PLUGINS, id)), `${id}: the directory is gone`)
+      wahr(!db.prepare('SELECT 1 FROM plugin_config WHERE plugin_id=?').get(id), `${id}: its configuration too`)
+      wahr(!db.prepare('SELECT 1 FROM discovery WHERE plugin_id=?').get(id), `${id}: and its findings`)
+    }
+    const html = await (await hol('/settings/plugins')).text()
+    falsch(html.includes('E2E Model Provider'), 'the page no longer offers it')
+    falsch(html.includes('E2E Coding Agent'), 'nor the coding agent')
+    // A built-in is never removable: it is part of the running code, and a
+    // registry disagreeing with the imports would be a lie.
+    const r = await formular('/settings/plugins/uninstall', { id: 'claude' }, { alsBrowser: true })
+    gleich(r.status, 400, 'a built-in is refused')
+    enthaelt(await r.text(), 'built-in', 'and it says so')
+    // And the hub still works with everything the suite installed gone.
+    gleich((await hol('/settings/plugins')).status, 200, 'the page still renders')
+    gleich((await hol('/')).status, 200, 'and so does the overview')
+  })
+
+  await pruefe('the welcome wizard answers on every step and each POST moves one step on', async () => {
+    for (let step = 1; step <= 5; step++) {
+      const r = await hol(`/welcome?step=${step}`)
+      gleich(r.status, 200, `step ${step} renders`)
+      const html = await r.text()
+      enthaelt(html, `${step} of 5`, `step ${step} says where it is`)
+      enthaelt(html, 'name="welcome_hide"', `step ${step} carries the "do not show again" box`)
+      enthaelt(html, 'welcome=skip', `step ${step} offers the way out`)
+    }
+    // An out-of-range step is step 1, not a 404: the address is typed by hand
+    // and by a bookmark, and neither deserves an error page.
+    gleich((await hol('/welcome?step=99')).status, 200, 'a nonsense step still renders')
+    gleich((await hol('/welcome?step=abc')).status, 200, 'and so does a non-number')
+
+    const schritte = [
+      ['/welcome/hello', {}, '/welcome?step=2'],
+      ['/welcome/scan', {}, '/welcome?step=2'],
+      ['/welcome/agents', {}, '/welcome?step=3'],
+      ['/welcome/provider', { id: 'openrouter' }, '/welcome?step=4'],
+      ['/welcome/llm', {}, '/welcome?step=5'],
+      ['/welcome/done', {}, '/'],
+    ]
+    for (const [pfad, daten, ziel] of schritte) {
+      const r = await formular(pfad, daten, { alsBrowser: true })
+      gleich(r.status, 303, `${pfad} redirects`)
+      gleich(r.headers.get('location'), ziel, `${pfad} → ${ziel}`)
+    }
+    // Step 3 really configured the provider it was handed.
+    gleich(db.prepare(`SELECT enabled FROM plugin_config WHERE plugin_id='openrouter'`).get().enabled, 1,
+      'the chosen model provider is switched on')
+    // A provider the hub does not know is a readable problem, not a stored row.
+    const schlecht = await formular('/welcome/provider', { id: 'not-a-provider' }, { alsBrowser: true })
+    gleich(schlecht.status, 400, 'an unknown provider is refused')
+  })
+
+  await pruefe('ticking "do not show again" is what stops GET / from redirecting', async () => {
+    const alsBrowser = { headers: { accept: 'text/html,application/xhtml+xml' } }
+    try {
+      // A fresh installation: the wizard is what `GET /` shows, but only for a
+      // BROWSER navigation — an API caller asking for `/` must never be
+      // answered with a redirect to HTML.
+      sk.setzeEinstellung('welcome_hide', '0')
+      const alsMensch = await hol('/', alsBrowser)
+      gleich(alsMensch.status, 303, 'a browser navigation goes to the wizard')
+      gleich(alsMensch.headers.get('location'), '/welcome', 'to /welcome')
+      gleich((await hol('/')).status, 200, 'a fetch without an Accept header gets the overview')
+      gleich((await hol('/api/usage')).status, 200, 'and the API is untouched')
+      // "Skip for now" is a session answer and must not bounce into a loop.
+      const skip = await hol('/?welcome=skip', alsBrowser)
+      gleich(skip.status, 200, 'skipping lands on the overview')
+      wahr(String(skip.headers.get('set-cookie') ?? '').includes('cchub_welcome'),
+        'and marks the browser so the link does not bounce back')
+
+      // The box is honoured from any step, not only the last one.
+      gleich((await formular('/welcome/hello', { welcome_hide: '1' }, { alsBrowser: true })).status, 303, 'ticked on step 1')
+      gleich(db.prepare(`SELECT value FROM settings WHERE key='welcome_hide'`).get().value, '1', 'the setting is written')
+      const danach = await hol('/', alsBrowser)
+      gleich(danach.status, 200, 'and the overview is the overview again')
+      enthaelt(await danach.text(), 'Quick Run', 'really the hub, not the wizard')
+      // …and it can be switched back on, which is what the hidden `0`
+      // companion exists for: an unticked box sends NOTHING, so without a
+      // field carrying `0` the wizard could only ever be switched off.
+      enthaelt(await (await hol('/welcome')).text(),
+        '<input type="hidden" name="welcome_hide" value="0">', 'the form ships that companion')
+      gleich((await formular('/welcome/hello', { welcome_hide: '0' }, { alsBrowser: true })).status, 303, 'unticked')
+      gleich(db.prepare(`SELECT value FROM settings WHERE key='welcome_hide'`).get().value, '0', 'switched back on')
+      gleich((await hol('/', alsBrowser)).status, 303, 'and the wizard is back')
+    } finally {
+      sk.setzeEinstellung('welcome_hide', '1')
+    }
   })
 
   // ------------------------------------------------------------------

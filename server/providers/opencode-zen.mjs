@@ -3,15 +3,74 @@
 // Pitfall: opencode addresses Zen with the model prefix 'opencode' — NOT
 // 'opencode-zen' (the docs say otherwise, but `opencode models --pure` is the
 // authority).
-export default {
+
+/** The credential, resolved the way the operator configured it. */
+const apiKey = (ctx) => ctx?.secret?.('api_key')
+  || ctx?.env?.OPENCODE_API_KEY || ctx?.env?.OPENCODE_ZEN_API_KEY || null
+
+const plugin = {
   id: 'opencode-zen',
   label: 'OpenCode Zen',
   envKeys: ['OPENCODE_API_KEY', 'OPENCODE_ZEN_API_KEY'],
+  credentials: [{
+    key: 'api_key',
+    envKeys: ['OPENCODE_API_KEY', 'OPENCODE_ZEN_API_KEY'],
+    labelKey: 'plugins.cred_api_key',
+    // Not required: Zen serves free models without a key, which is exactly why
+    // opencode lists it under `keyFreeProviders`.
+    required: false,
+  }],
   ocPrefix: 'opencode',
   mdKey: 'opencode',
   // No public unauthenticated pulse endpoint that is distinct from the catalog;
   // the catalog URL answers 200 without a key, which is good enough as a pulse.
   pulse: { url: 'https://opencode.ai/zen/v1/models', okStatus: [200] },
+
+  // NO `gate`, deliberately: Zen reports no balance (there is no `balance()`
+  // below), so there is no number a gate could measure. A gate that can only
+  // ever answer "no signal" would be a form field that does nothing — and the
+  // budget gate already treats a provider without a gate as "draws on nothing
+  // the hub can meter", which is the truth here.
+
+  /**
+   * Zen can answer the hub's own questions: it is an OpenAI-compatible endpoint
+   * and the free models make it the cheapest source there is.
+   *
+   * `prompt` and not `json_object`: Zen is a proxy in front of many upstream
+   * models and documents nothing about `response_format` — a mode that is
+   * silently ignored is worse than one that was never claimed, because the
+   * caller would then skip the strict prompt as well. Declaring `prompt` costs
+   * a paragraph of instructions and works on every model behind it.
+   */
+  llm: {
+    schema: 'prompt',
+    async models(ctx) { return plugin.fetchModels(ctx) },
+    async complete(ctx, req = {}) {
+      const messages = []
+      if (req.system) messages.push({ role: 'system', content: String(req.system) })
+      messages.push({ role: 'user', content: String(req.prompt ?? '') })
+      const key = apiKey(ctx)
+      const headers = { 'content-type': 'application/json' }
+      // A key is optional here — the free models answer without one.
+      if (key) headers.Authorization = `Bearer ${key}`
+      const j = await ctx.json('https://opencode.ai/zen/v1/chat/completions', headers, {
+        method: 'POST',
+        body: JSON.stringify({
+          model: req.model,
+          messages,
+          temperature: req.temperature ?? 0,
+          max_tokens: req.maxTokens ?? 1000,
+        }),
+        timeoutMs: req.timeoutMs ?? 60_000,
+      })
+      const raw = j?.choices?.[0]?.message?.content
+      return {
+        text: typeof raw === 'string' ? raw : JSON.stringify(raw ?? ''),
+        usage: j?.usage ?? null,
+        raw: j,
+      }
+    },
+  },
 
   /**
    * Vendor catalog: also contains models that will not run without a Zen key.
@@ -29,3 +88,5 @@ export default {
     })).sort((a, b) => a.id.localeCompare(b.id))
   },
 }
+
+export default plugin

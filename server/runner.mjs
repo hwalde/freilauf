@@ -11,6 +11,7 @@ import { claudeQuota, sevenForRun } from './quota.mjs'
 import { skillPromptZusatz } from './zusaetze.mjs'
 import { deliverGoal } from './goal.mjs'
 import { getHarness } from './harnesses/index.mjs'
+import { pluginCtx } from './plugins/context.mjs'
 import { isHarnessEnabled } from './coding-agents.mjs'
 import { branchRuleText } from './run-def.mjs'
 import { t } from './i18n.mjs'
@@ -110,6 +111,68 @@ export function platformSuffix(run, branchRule, settings, repo = null) {
 /** Path of cc-report as the hub knows it — hook commands must not depend on PATH. */
 export function ccReportPath() {
   return process.env.CCHUB_CC_REPORT ?? `${homedir()}/.local/bin/cc-report`
+}
+
+/**
+ * The coding agents `bin/cc-start` spells out itself, in a `case` per harness.
+ *
+ * That script has to work with no hub behind it — a human runs `cc-start -H
+ * opencode` on the command line — so for these four the command line lives
+ * there and is the single source of truth. Every OTHER coding agent has no case
+ * in that script and never will: it arrives as a plugin, brings a `launch`
+ * declaration, and the hub hands that over as a file (`--spec`).
+ *
+ * This set is therefore the exact shape of a known limit, not a preference: it
+ * disappears the day cc-start reads the declaration for all of them, and until
+ * then it is what keeps a claude/opencode/hermes/cursor run byte for byte what
+ * it always was.
+ */
+const CC_START_BUILTIN_HARNESSES = new Set(['claude', 'opencode', 'hermes', 'cursor'])
+
+/**
+ * The launch declaration handed to `cc-start --spec`, or `null` when the script
+ * already knows this coding agent.
+ *
+ * Resolved rather than passed through: `bin`, `sessionTag` and `installHint`
+ * are ordinary descriptor fields, and a plugin that says nothing about them
+ * inside `launch` means the ones it declared next to its id. `sessionTag` in
+ * particular used to be read by nobody at all — the tmux prefix lived only in
+ * cc-start's own case — which is why an external coding agent's sessions would
+ * otherwise all have looked like claude's.
+ *
+ * Written into the run directory, never into the worktree: everything the hub
+ * puts inside a worktree it has to clean up again, and a stray file there
+ * counts as uncommitted work at the finish gate.
+ */
+export function launchSpec(harness) {
+  if (CC_START_BUILTIN_HARNESSES.has(harness)) return null
+  const plugin = getHarness(harness)
+  const launch = plugin?.launch
+  if (!launch || !Array.isArray(launch.args) || launch.args.length === 0) return null
+  const spec = {
+    harness,
+    bin: launch.bin || plugin.bin,
+    sessionTag: launch.sessionTag ?? plugin.sessionTag ?? '',
+    installHint: launch.installHint ?? plugin.installHint ?? '',
+    promptMode: launch.promptMode || 'argv',
+    args: launch.args,
+  }
+  if (Array.isArray(launch.interactiveArgs)) spec.interactiveArgs = launch.interactiveArgs
+  if (typeof launch.stderrLog === 'string' && launch.stderrLog) spec.stderrLog = launch.stderrLog
+  // Only the object form: cc-start asks jq for `.submitNudge.waitFor`, and a
+  // bare `true` would be an error there rather than a default.
+  if (launch.submitNudge && typeof launch.submitNudge === 'object') spec.submitNudge = launch.submitNudge
+  return spec
+}
+
+/**
+ * Can this coding agent be started at all? A harness cc-start has no case for
+ * and that declares no `launch` would produce a tmux session running nothing —
+ * better to say so before a worktree exists than to read it out of cc-start's
+ * stderr afterwards.
+ */
+export function launchable(harness) {
+  return CC_START_BUILTIN_HARNESSES.has(harness) || !!launchSpec(harness)
 }
 
 /**
@@ -294,10 +357,17 @@ export function createRun({ repoId, agentId = null, harness, model = null, provi
  * Model/provider arguments for the chosen harness — delegated to the coding
  * agent plugin. Without a provider (legacy rows) 'model' goes out verbatim as
  * before.
+ *
+ * The plugin is handed a context so it can resolve the credential the OPERATOR
+ * configured — a stored value, or an environment variable they named — instead
+ * of only the one the provider declares. The context is built for the PROVIDER
+ * where the run names one, because that is whose key travels into the session;
+ * a subscription harness (claude, cursor) has no provider and ignores it.
  */
 export function harnessModelArgs(run) {
   const plugin = getHarness(run.harness)
-  return plugin ? plugin.modelArgs(run) : { args: [], fehlt: [] }
+  if (!plugin) return { args: [], fehlt: [] }
+  return plugin.modelArgs(run, pluginCtx(run.provider || run.harness))
 }
 
 /**
@@ -312,6 +382,14 @@ export async function launchRun(runId) {
   const kurz = kurzid(runId)
   const runDir = join(RUNS_DIR, runId)
   mkdirSync(runDir, { recursive: true })
+
+  // Asked BEFORE the worktree: a coding agent nothing can launch produces a
+  // clean failure here instead of a worktree, a session and a puzzled operator.
+  if (!launchable(run.harness)) {
+    const msg = t('run.no_launch_spec', { harness: run.harness })
+    failRun(runId, msg)
+    return { ok: false, error: msg }
+  }
 
   let workdir = repo.path
   let branchExpected = null
@@ -387,6 +465,15 @@ export async function launchRun(runId) {
     addEvent(runId, 'warn', { fehlender_key: modelArgs.fehlt.join(', ') })
   }
   if (run.harness === 'claude') args.unshift('--session-id', runId, '--settings', claudeSettingsJson())
+  // A coding agent cc-start has no case for is launched from its own
+  // declaration. The file lives next to prompt.md in the run directory — NOT in
+  // the worktree, which has to stay clean for the finish gate.
+  const spec = launchSpec(run.harness)
+  if (spec) {
+    const specPath = join(runDir, 'launch.json')
+    writeFileSync(specPath, JSON.stringify(spec, null, 2), { mode: 0o600 })
+    args.unshift('--spec', specPath)
+  }
 
   const r = await sh(process.env.CCHUB_CC_START ?? `${homedir()}/.local/bin/cc-start`, args, { timeout: 120_000 })
   // cc-start's success line ("Session '<name>' started …"); the German wording

@@ -1,19 +1,30 @@
 // cc-hub — configured coding agents.
 //
 // The harness plugins (server/harnesses) describe what the hub COULD drive;
-// this module holds what the operator has actually CONFIGURED in the settings
-// (Settings → Coding agents). Forms only offer configured & enabled coding
-// agents, and each configured coding agent carries its own provider selection.
+// this module holds what the operator has actually CONFIGURED in the settings.
+// Forms only offer configured & enabled coding agents, and each configured
+// coding agent carries its own provider selection.
 //
 // A fresh installation starts with NO coding agents — every page then shows a
 // banner pointing to the settings. A seed file (installed e.g. by a private
 // setup repo) can pre-populate the configuration on first start.
+//
+// Since coding agents and model providers became one kind of thing — plugins —
+// the storage is `plugin_config` (server/plugins/store.mjs), which carries both
+// kinds plus credentials and per-plugin settings. This module stays as it was
+// from the outside: an ADAPTER with the same exported API and the same row
+// shape, so its call sites and both test groups keep working. The old
+// `coding_agents` table is still created below and left untouched after the
+// one-time migration, so a rollback to an earlier hub finds its data.
 import { readFileSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import db from './db.mjs'
 import { getHarness, harnessIds } from './harnesses/index.mjs'
 import { providerFuerHarness } from './models.mjs'
+import {
+  listPluginConfigs, pluginConfig, setPluginConfig, setPluginProviders,
+} from './plugins/store.mjs'
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS coding_agents (
@@ -26,17 +37,27 @@ CREATE TABLE IF NOT EXISTS coding_agents (
 );
 `)
 
-function parseProviders(row) {
-  try { return JSON.parse(row.providers || '[]') } catch { return [] }
+/**
+ * A `plugin_config` row in the shape this module has always handed out:
+ * `id` is the row's own id (the delete form posts it), `harness` the plugin id.
+ */
+function asCodingAgent(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    harness: row.plugin_id,
+    enabled: row.enabled,
+    providers: JSON.stringify(row.config.providers),
+    providerIds: row.config.providers,
+    plugin: getHarness(row.plugin_id),   // null when the plugin was removed
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }
 }
 
 /** All configured coding agents (also disabled ones) with plugin metadata. */
 export function listCodingAgents() {
-  return db.prepare('SELECT * FROM coding_agents ORDER BY harness').all().map(row => ({
-    ...row,
-    providerIds: parseProviders(row),
-    plugin: getHarness(row.harness),   // null when the plugin was removed
-  }))
+  return listPluginConfigs('harness').map(asCodingAgent)
 }
 
 /** Only enabled coding agents whose plugin still exists. */
@@ -45,8 +66,8 @@ export function enabledCodingAgents() {
 }
 
 export function codingAgentFor(harness) {
-  const row = db.prepare('SELECT * FROM coding_agents WHERE harness = ?').get(harness)
-  return row ? { ...row, providerIds: parseProviders(row), plugin: getHarness(row.harness) } : null
+  const row = pluginConfig(harness)
+  return row && row.kind === 'harness' ? asCodingAgent(row) : null
 }
 
 export function isHarnessEnabled(harness) {
@@ -75,19 +96,14 @@ export function saveCodingAgent({ harness, enabled = 1, providers = [] }) {
   const problems = []
   const plugin = getHarness(harness)
   if (!plugin) problems.push(`unknown coding agent: ${harness}`)
-  const allowed = new Set(plugin?.providers ?? [])
-  const chosen = [...new Set(providers)].filter(p => allowed.has(p))
   if (problems.length) return { ok: false, problems }
-  db.prepare(`INSERT INTO coding_agents(harness, enabled, providers)
-              VALUES(?,?,?)
-              ON CONFLICT(harness) DO UPDATE SET enabled = excluded.enabled,
-                providers = excluded.providers, updated_at = datetime('now')`)
-    .run(harness, enabled ? 1 : 0, JSON.stringify(chosen))
+  setPluginConfig(harness, { kind: 'harness', enabled: enabled ? 1 : 0 })
+  setPluginProviders(harness, providers)   // drops anything the plugin does not declare
   return { ok: true, problems: [] }
 }
 
 export function deleteCodingAgent(id) {
-  db.prepare('DELETE FROM coding_agents WHERE id = ?').run(id)
+  db.prepare(`DELETE FROM plugin_config WHERE rowid = ? AND kind = 'harness'`).run(id)
 }
 
 /** Path of the optional seed file (private setup repos install it there). */
@@ -98,12 +114,11 @@ export function seedFilePath() {
 /**
  * Seed the configuration on first start: only when NO coding agent is
  * configured yet and the seed file exists. Idempotent by construction — a
- * table with rows is never touched, so operator edits always win.
+ * configuration with rows is never touched, so operator edits always win.
  * Returns the number of seeded coding agents (0 = nothing done).
  */
 export function seedIfEmpty() {
-  const count = db.prepare('SELECT count(*) AS c FROM coding_agents').get().c
-  if (count > 0) return 0
+  if (listCodingAgents().length > 0) return 0
   const file = seedFilePath()
   if (!existsSync(file)) return 0
   let seed

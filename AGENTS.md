@@ -113,8 +113,12 @@ Browser --https--> <wg-IP>:8790 --http--> 127.0.0.1:8791 --> tmux sessions
   fallback `inbox.jsonl`). All `cc-*` scripts are part of this repo (`bin/`),
   installed by `setup/02-install-scripts.sh`.
 - State: SQLite at `~/.local/share/cc-hub/cc-hub.db`, run data in `~/agents/runs`,
-  worktrees in `~/agents/worktrees`. All paths can be redirected via `CCHUB_*`
-  variables — exactly that is what the test suite lives on.
+  worktrees in `~/agents/worktrees`, external plugin packages in
+  `~/.local/share/cc-hub/plugins` (`CCHUB_PLUGIN_DIR`). All paths can be
+  redirected via `CCHUB_*` variables — exactly that is what the test suite lives
+  on, and `CCHUB_PLUGIN_DIR` is a **test fence** as much as a setting: a suite
+  that does not point it into its own sandbox loads the operator's real packages
+  and stops being reproducible.
 
 ### Deploying: the service runs from its own checkout
 
@@ -310,16 +314,20 @@ stored anywhere, it only exists as a prompt. So `runs.title` carries a name for
 1. what was typed into the single-run form's title field, otherwise
 2. the agent's name, otherwise
 3. the first meaningful line of the prompt (`fallbackTitle`) — and in the
-   background a cheap model at OpenRouter replaces it with a real one.
+   background a cheap model replaces it with a real one.
 
 The generated title **never** holds a start up: the run carries the fallback
 from the first moment and `applyGeneratedTitle()` writes over it afterwards —
 and only if it is still the fallback, so a rename by hand always wins over the
 model. Everything about this is fail-soft (`server/title.mjs`), the exact
-opposite of the check LLM: without a key, switched off or on any error the run
-simply keeps the fallback. Model and on/off live under **Settings → Run
-titles** (`llm_title_model`, default `deepseek/deepseek-v4-flash`, ~$0.05 per
-million input tokens — a title costs a fraction of a cent).
+opposite of the check LLM: without a usable source, switched off or on any error
+the run simply keeps the fallback. Source, model and on/off live under
+**Settings → Run titles** — `llm_title_source` (unset = `provider:openrouter`,
+which is what it always was) and `llm_title_model` (default
+`deepseek/deepseek-v4-flash`, ~$0.05 per million input tokens — a title costs a
+fraction of a cent). It is **not OpenRouter-only any more**: any plugin
+declaring `llm` can answer, including a coding agent on a subscription that is
+already being paid for.
 
 Every run can be **renamed inline** in the overview and on its detail page
 (`POST /api/runs/<id>/title`, pencil next to the title). That touches only the
@@ -499,27 +507,184 @@ edited on a page of their own rather than three side by side, because the
 provider/model/effort block is driven through `#prov`, `#model` and `#effort`,
 and three of those would be three elements sharing one id.
 
-## Plugin architecture: coding agents and providers
+## Plugin architecture: coding agents and model providers
 
-Coding agents (harnesses) and model providers are **plugins** — one file each
-under `server/harnesses/` and `server/providers/`, registered in the respective
-`index.mjs`. Everything harness-specific (capabilities, log error patterns, CLI
-argument building, effort handling, subscription usage, install detection) lives
-in the plugin file; the rest of the code consults the registries.
+> **The depth is one document: [docs/plugins.md](docs/plugins.md).** It is the
+> reference a capable LLM is meant to be handed on its own — the full descriptor
+> contract for both kinds, the injected context, the gate, `llm` and `launch`
+> declarations, the storage, and how to add either. What follows here is what
+> the *rest of the hub* has to know about it, and nothing that is written down
+> there.
 
-**Full contract and how to add a new coding agent or provider:
-[docs/plugins.md](docs/plugins.md).**
+Coding agents (harnesses) and model providers are **dynamically loaded
+plugins**: a descriptor object per file, collected by one mutable registry
+(`server/plugins/registry.mjs`). Built-ins live where they always did —
+`server/harnesses/<id>.mjs`, `server/providers/<id>.mjs`; `index.mjs` in both
+folders is a front door that **re-exports the registry's own objects**, the same
+identity and not a copy, which is why every importer survived the rebuild
+untouched. An **external** plugin is a package directory under
+`CCHUB_PLUGIN_DIR` (default `~/.local/share/cc-hub/plugins`) holding a
+`plugin.json` manifest and a module with the descriptor as its default export;
+`loadExternalPlugins()` registers them in `hub.mjs` *before anything reads the
+registry*, because a plugin that arrives after the first form was rendered is a
+plugin the operator cannot choose. One bad package never costs the hub: every
+load failure is collected (`registryErrors()`) and printed on the Plugins page
+instead of thrown, and a **duplicate id is refused, never overridden** — a
+package calling itself `claude` must not be able to replace the coding agent the
+operator's runs start with.
 
-### Configured coding agents
+**What made this possible was deleting a `CHECK`.** `db.mjs` used to generate
+`CHECK(harness IN (…))` on the `agents` table out of the harness registry, so
+`db.mjs` imported the registry — and that import was the cycle: a coding agent
+known only at runtime cannot be named in a constraint written at schema time,
+plugin files were forbidden to import `db.mjs`, and the budget gate could not go
+through the aggregators. `harnessCheckAufloesen()` removes the clause once and
+idempotently. Nothing is lost, because the database never decided this:
+`runDefFromForm()`, `saveAgent()`, `createRun()` and `saveCodingAgent()` all
+validate against the registry and always did — which is also why `runs.harness`
+has carried no CHECK since the beginning.
 
-The plugins describe what the hub *could* drive; what it *may* drive is
-configured under **Settings → Coding agents** (table `coding_agents`): per
-coding agent an enabled flag and the selection of allowed providers. Forms only
-offer configured & enabled coding agents; a fresh installation has none and
-shows a banner on every page. `server/coding-agents.mjs` holds the logic,
-including the optional seed: on first start with an empty table the hub imports
-`~/.config/cc-hub/coding-agents.json` (override: `CCHUB_AGENTS_SEED`) — the
-private setup repo installs that file.
+Four optional declarations are what turn a file into something an operator can
+actually run with, and each of them removes a hardcoded vendor from the hub:
+
+| Declaration | What it buys | Where it surfaces |
+|---|---|---|
+| `credentials` | the operator may supply an **own API key**, or name a **different environment variable** — resolved once in `credentialValue()` (stored value → named variable → the plugin's declared `envKeys`) and reached everywhere through `ctx.secret()` | Plugins page, `modelArgs()`, `balance()`, the LLM layer |
+| `gate` | thresholds and a `check()` — the plugin's own budget gate | Settings → Budget gates renders it **by itself** |
+| `llm` | this plugin can answer the hub's own four direct questions | the model-source pickers under Settings |
+| `launch` | how to start this CLI in a tmux session — `bin/cc-start --spec` | `launchSpec()` in runner.mjs, for an external coding agent |
+
+**A plugin is handed a context, never `process.env` or `db.mjs`.**
+`pluginCtx(id)` (`server/plugins/context.mjs`) carries `json()` (fetch with a
+timeout and the one `HTTP <n>` error shape), `registry()` (the cached models.dev
+snapshot), `env`, `secret()`, `setting()` and `log()`. That single indirection
+is what makes an external package work without importing anything of ours *and*
+makes the operator's own credential honoured everywhere at once.
+
+### Configured plugins, and where they are configured
+
+The registry says what the hub **could** drive; **`plugin_config`** holds what
+the operator has **configured** — one row per plugin, both kinds, with an
+enabled flag, the allowed providers of a coding agent, the credentials and the
+plugin's own settings. `coding_agents` only ever knew coding agents, so a model
+provider had no place to carry an enabled flag or a key of its own; the old
+table is migrated once (guarded by the settings key `plugins_migrated`) and then
+**left in place untouched**, so a rollback to an earlier hub finds its data.
+`server/coding-agents.mjs` survives as a byte-compatible adapter over the new
+table — its call sites and both test groups never noticed.
+
+An unconfigured **coding agent is off**, an unconfigured **provider is on**, and
+that asymmetry is deliberate: a fresh installation has no coding agent and nags
+until one is configured, while providers had no enable flag before this table
+and inventing an off-by-default one would have switched off working
+installations.
+
+The page moved: **Settings → Plugins** (`/settings/plugins`) replaces Settings →
+Coding agents, which is now a 303 redirect. One page answers the whole question
+"what can this hub drive, and with whose credentials": what the startup scan
+found on the machine, one card per coding agent, one per model provider, and the
+external packages with their versions, paths and load errors. The optional seed
+is unchanged — on first start with nothing configured the hub imports
+`~/.config/cc-hub/coding-agents.json` (override: `CCHUB_AGENTS_SEED`).
+
+**Discovery asks once.** `scanSystem()` records, for every registered plugin,
+whether its CLI is on the `PATH` and whether any of its declared credential
+variables is set — from `hub.mjs` after the server listens, fire-and-forget, and
+again from the "Scan again" button. A **found credential is named, never read**:
+the row carries the NAME of the variable and nothing else, because a discovery
+row is rendered into a page and travels with a database copy. The banner above
+the content shows what is worth suggesting, and answering it (Add or Not now)
+writes the answer — so a dismissal stays dismissed across restarts.
+
+### The Welcome wizard
+
+A fresh installation has nothing, so every page it renders is about something
+the operator has not got yet — and the one document that would fix all of it,
+`SETUP_WITH_AGENT.md`, is a file in a checkout nobody was told about.
+**`server/welcome.mjs`** is the five screens that say so: hello and the pointer
+to that document, what the scan found, a model provider, the source for the
+hub's own questions, and what to do next. `GET /` redirects to `/welcome` for a
+browser navigation until the operator ticks **"Do not show this again"**
+(`welcome_hide`).
+
+It is built in the shape of `/telegram-setup` and for the same reasons: server-
+rendered steps, each its own `<form method="post">` to its own endpoint, state
+in `settings` / `plugin_config` / `discovery` from the moment a form is
+submitted — closing the tab in the middle loses nothing, and a reload cannot
+show a state the database does not hold. Every write goes through the same
+functions the Plugins page writes through, so **the wizard cannot create a state
+the rest of the hub chokes on**.
+
+Two rules about getting out of it, because a wizard one cannot leave is worse
+than no wizard: the checkbox is on **every** step, not only the last (with the
+hidden `0` companion — an unticked box is simply absent from a POST body, so
+without it the wizard could never be switched back on); and **"Skip for now" is
+a session answer**, a `cchub_welcome` session cookie the `/` redirect honours,
+because a plain link back to `/` would otherwise bounce straight into the wizard
+again.
+
+### The hub's own questions: `server/llm/`
+
+The hub asks a small model four things of its own — a name for a run, whether a
+log line is a real outage, what a report contains, which worktree extras a
+repository wants. All four used to be hardcoded OpenRouter, each with its own
+copy of the URL, the bearer header, `response_format` and
+`JSON.parse(choices[0].message.content)`. Four copies of one call is how a seam
+like `CCHUB_OPENROUTER_BASE` ends up honoured in exactly one of them (it did),
+and how a source that is not OpenRouter cannot be added at all.
+
+**`llmJson()`** (`server/llm/index.mjs`) is the one entry point now, and it
+**never throws** — the four callers have four different error styles and every
+one of them expects a value. What stays in the callers is what genuinely differs
+and must not be unified: their error style (a title fails soft to null, the
+check fails loud, a flow step throws, the extras endpoint returns a translated
+message), their throttles and their defaults. Only the transport is shared.
+
+A **source** is `provider:<id>` or `agent:<id>` — a model provider that declares
+`llm`, or a **coding agent** that does. The two are one flat list on purpose: a
+coding agent's model identifiers already carry the provider
+(`anthropic/claude-…`, `openrouter/…`), so there is no second "which provider"
+field anywhere and the model picker is filled by the chosen source's own
+`models()`. A bare value with no prefix means `provider:openrouter` — not a
+convenience but the backwards-compatible reading of everything the settings
+table holds today, which is what makes an installation that changes nothing
+behave byte for byte as it did.
+
+The strategy comes from the source's declared `llm.schema`, and **the adapters
+do no coaxing of their own**, because two places persuading one model is how
+answers stop being reproducible:
+
+| declared | what happens |
+|---|---|
+| `native` | the schema goes over the wire as a schema; nothing is added to the prompt |
+| `json_object` | the vendor promises valid JSON but takes no schema, so the flag goes out **and** the prompt carries the shape |
+| `prompt` | the schema is a paragraph of strict instructions and nothing else |
+
+Whatever comes back is read tolerantly (`json.mjs` — fences stripped, prose cut
+by a character scanner that respects strings, the common damages repaired; it
+**never evaluates** the text), measured against the schema (`schema.mjs`, whose
+`validate()` also **coerces**: a small model answering `"true"` is right about
+the answer and wrong about the type), and on failure asked for again **exactly
+once** with the complaint attached (`llm_retries`, default 1). Then it gives up
+and says so, with a `stage` of `config` / `transport` / `parse` / `validate`.
+A **transport failure is not reprompted**: a 401, a timeout or a missing binary
+does not become right by asking the same thing again.
+
+**Telegram must never be bombarded** (`alerts.mjs`): one message per failure
+*signature* (`purpose|source|model|errorClass`) per `llm_alert_window_min`
+(default 30), the suppressed occurrences counted and named in the next message
+for that signature, a global ceiling of `llm_alert_max_per_hour` (default 6),
+switchable off with `llm_alert_on`, and fail-soft in every direction. And
+deliberately **no alert for a `config` stage**: a feature switched off, a source
+nobody configured a key for, an empty model field — those are states the
+operator chose, and alarming about them is exactly the channel-that-cries-wolf
+this module exists to prevent.
+
+**A coding agent as a model source declares `overhead: true`**, and the UI says
+so wherever such a source can be picked: it starts a whole session to answer one
+question, slower and dearer than a model provider. It is also the one way to run
+the hub with nothing configured but a subscription that is already being paid
+for — which is why the Welcome wizard offers it.
 
 ### Subscription usage
 
@@ -689,16 +854,37 @@ configurable and was not, and a DeepSeek or OpenRouter run was measured against
 whichever gate a claude budget was blamed for. Both are fixed by one rule:
 **what a run draws from decides which gate is asked, and every gate is optional.**
 
-- `budgetGate(harness, model, provider)` routes by provider: claude runs go to
-  the claude gate, a cursor run to the cursor usage gate, a run with
-  `provider='deepseek'` to the DeepSeek balance gate, everything else to the
-  OpenRouter gate (the historical default for the provider-based harnesses).
-- Every gate has an **on/off switch** and its own **threshold**, all under
-  Settings → Budget gates: `claude_gate_on/_5h/_7d/_fable`,
-  `cursor_gate_on` + `cursor_gate_pct`, `openrouter_gate_on` +
-  `openrouter_min_eur`, `deepseek_gate_on` + `deepseek_min_usd`. A cleared
-  numeric field falls back to its default (the fable week to the general 7-day
-  threshold). `quota_threshold` is gone — it was the field the gate never read.
+- **Every gate is declared by the plugin that owns the account behind it**
+  (`gate` in the descriptor), and `budgetGate(harness, model, provider)` names
+  no vendor at all any more. It asks the **coding agent's** gate when it
+  declares one (claude and cursor run on their own subscription, and no provider
+  is involved), otherwise the **model provider's** (OpenRouter credits, the
+  DeepSeek balance), otherwise nothing — a known provider without a gate
+  (opencode-zen reports no balance) draws on nothing the hub can meter. The old
+  fallthrough survives as the named constant `LEGACY_DEFAULT_GATE =
+  'openrouter'`: every provider-based harness ran on OpenRouter before there was
+  a provider column, and a hand-typed `openrouter/author/slug` model still
+  arrives with `provider = null`.
+- **The switch is handled by the caller, not by `check`.** `askGate()` reads the
+  gate's on/off value and answers `null` without asking the plugin, so a plugin
+  cannot forget it — switching a gate off *is* the decision that this window
+  does not govern starts. And **a gate that throws does not block**: a broken
+  plugin is a reason to say so in the log, never to stop the hub starting runs.
+- Every gate still has an **on/off switch** and its own **thresholds**, all
+  under Settings → Budget gates — but the fieldset is **generated** from
+  `gatePlugins()`, so an installed plugin's gate appears there by itself and a
+  disabled one does not. Nothing about claude, cursor, OpenRouter or DeepSeek is
+  typed into `pages.mjs`. The historic keys are unchanged
+  (`claude_gate_on/_5h/_7d/_fable`, `cursor_gate_on` + `cursor_gate_pct`,
+  `openrouter_gate_on` + `openrouter_min_eur`, `deepseek_gate_on` +
+  `deepseek_min_usd`), because a `SettingField` may declare a `settingKey` — the
+  escape hatch that let the whole rebuild happen with **no settings migration**.
+  A field without one is stored as `plugin_<id>_<key>`, which is what makes two
+  plugins declaring a `threshold` harmless. A cleared numeric field falls back
+  to the field's own default (the fable week to the general 7-day threshold);
+  `''` has to mean "not set" and never `0`, because the settings page writes
+  every input as a string. `quota_threshold` is gone — it was the field the gate
+  never read.
 - **Each window is judged against its own threshold.** `claudeGateBlocked`
   measures the 5-hour window against `_5h`, the general week against `_7d`, a
   per-model week called "Fable" against `_fable` — so a fable run can be
@@ -747,9 +933,14 @@ Two consequences worth knowing. The panel printed `{eur} €` for a dollar figur
 until the currency became part of the answer; the setting behind the gate is
 still called `openrouter_min_eur`, because renaming a stored key would need a
 migration for nothing. And **the budget gate does NOT go through the
-aggregator** — `balances.mjs` reaches the database via `coding-agents.mjs`, and
-`db.mjs` imports the harness registry, which imports `quota.mjs`. The gate needs
-one number from one plugin, so it asks that plugin directly.
+aggregator**: it needs one number from one plugin, and it sits on the launch
+path, so it asks that plugin directly through the two vendor-free meters that
+stayed behind in `quota.mjs` — `balanceGateBlocked(pluginId, …)` for a provider
+that reports a balance and `usageGateBlocked(pluginId, …)` for an account that
+reports spend against an included amount. (That used to be a *hard* rule, forced
+by the import cycle `balances.mjs → coding-agents.mjs → db.mjs → harness
+registry`. The cycle is gone with the CHECK; the reason to keep it is now
+simply that an aggregator is the wrong thing to wake up for one number.)
 
 **Both caches are keyed on the configuration, not only on time**
 (`usage.mjs`, `balances.mjs`): the set of enabled coding agents decides who is
@@ -1418,11 +1609,16 @@ whoever has no browser must not sit in front of a red test.
 ## Models, providers and reasoning effort
 
 None of this is typed into the code — everything comes from its authoritative
-source:
+source, and since the rebuild "the code" means the plugin registry rather than a
+list in a call site:
 
 | What | From | Why not otherwise |
 |---|---|---|
+| Which coding agents exist at all | the registry: `server/harnesses/` plus every external package under `CCHUB_PLUGIN_DIR` | a coding agent known only at runtime cannot be a literal anywhere; that is the CHECK the rebuild deleted |
+| Which providers exist at all | the registry: `server/providers/` plus external packages | same |
 | Providers per harness | harness plugin (`providers`, `keyFreeProviders`) ∩ operator selection | claude runs only on the subscription; hermes needs a key for Zen/DeepSeek, opencode does not |
+| Whether a provider may be offered at all | `pluginHasCredential(id)` — stored value, named variable, or a declared one in the environment | it used to be `providerHasKey()`, which reads `process.env` and nothing else, so a key the operator stored in the UI was honoured at launch and still missing from the form |
+| Models for the hub's OWN questions | the chosen source plugin's `llm.models()` | the picker is one flat list of sources; the model list belongs to whichever one is picked |
 | Models for opencode | `opencode models --pure` | opencode's provider list is credential-gated; the vendor catalog contains models that would fail here immediately |
 | Models for hermes | vendor API or `models.dev` | hermes has no own list |
 | Models for claude | maintained list in `server/harnesses/claude.mjs` | without an API key there is no catalog; free input always stays possible |
@@ -1695,7 +1891,7 @@ principle):
 | Hook `StopFailure` → `cc-report _api_error` | claude | yes (fixed enum) |
 | Transcript JSONL `isApiErrorMessage` + `error` | claude | yes (second channel, with timestamp) |
 | Plugin `session.error` → `cc-report _api_error` | opencode | yes |
-| pipe-pane log, patterns per harness (plugin `logPatterns`, orchestrated in `detect.mjs`) | all; for hermes and cursor the **only** source | no: yellow; red on repetition within 10 min or 5 min of silence — or when the optional check LLM (settings, OpenRouter) confirms it |
+| pipe-pane log, patterns per harness (plugin `logPatterns`, orchestrated in `detect.mjs`) | all; for hermes and cursor the **only** source | no: yellow; red on repetition within 10 min or 5 min of silence — or when the optional check LLM confirms it (Settings → Incident check: `llm_check_source` + `llm_check_model`, any plugin declaring `llm`) |
 | Provider pulse (plugin pulse targets, every 5 min) | global | after 2 failures, closes on recovery |
 
 **A working agent is never escalated.** `bewerteLogTreffer()` starts with a veto:
@@ -1888,3 +2084,47 @@ errors (`post_api_request` only fires after success).
   needed: the service runs from a checkout nobody edits (see "Deploying"), and
   the sidebar prints the sha it is running, so "is my change live?" is a glance
   instead of a guess.
+- **`claude.mjs` must import `quota.mjs` LAZILY.** A static import at the top of
+  the file closes the ring `plugins/registry.mjs → harnesses/claude.mjs →
+  quota.mjs → plugins/context.mjs → plugins/store.mjs → plugins/registry.mjs`,
+  and `store.mjs` does real work at module evaluation: it creates
+  `plugin_config` and `discovery` and runs the one-time migration out of
+  `coding_agents`, which calls `pluginSource()` **back into a registry that is
+  still evaluating its own module body**. `META` and `HARNESS_PLUGINS` are in
+  their temporal dead zone at that moment and the first thing to touch them dies
+  there — with a `ReferenceError` from a file nobody was editing. Both places in
+  claude.mjs that need the windows are `async` anyway, so
+  `await import('../quota.mjs')` inside the function costs nothing. The provider
+  gates do the same, for the same reason. **The rule: a plugin file that needs
+  something from the hub's own modules imports it inside the function that uses
+  it.**
+- **`SETTINGS_KEYS` had to become a FUNCTION.** It was a module-level constant,
+  and a module-level constant is evaluated before `loadExternalPlugins()` has
+  registered anything — so a plugin's declared thresholds rendered on the
+  settings form, were submitted by the browser, and were then **silently dropped
+  by the allowlist on save**. A form field that looks like it saved and did not
+  is the worst shape a bug can take. It is `[...STATIC_KEYS,
+  ...allPluginSettingKeys()]`, evaluated per save.
+- **`Number('')` is `0` AND finite.** An unconfigured alert window therefore read
+  as a zero-minute window and an unconfigured ceiling as zero messages — silence
+  dressed up as a configuration. Every numeric setting has to check for the empty
+  string *before* it converts, and only then honour an explicit `0` the operator
+  typed. Exactly the trap `Number(null)` already has an entry for under "Claude's
+  windows come from the account".
+- **A `<form>` inside a `<form>` is not nesting, it is a parse error.** The HTML
+  parser drops the inner one and its button submits the **outer** — on the
+  Plugins page that would have meant "Remove" quietly *saving* the plugin. Same
+  family as "`<form>` closes an open `<p>`" above: the card's footer forms stand
+  outside the save form, never inside it.
+- **`confirm(${JSON.stringify(...)})` inside a `"`-quoted attribute is broken
+  markup** the moment the string contains a quote — and a translated
+  confirmation text eventually does. It needs `e(JSON.stringify(...))`: JSON for
+  the JavaScript, HTML escaping for the attribute, in that order.
+- **`bin/cc-attach` and `bin/cc-kill` each carried their own copy of the session
+  prefix → harness table, and both had gone stale in the same way**: `cursor`
+  was missing, so every `cc-cu-*` session was reported as claude. There is one
+  copy now, `bin/cc-harness-tags.sh`, sourced by both — and a coding agent that
+  arrived as a plugin brings its own tag in its launch spec, which `cc-start`
+  notes into `~/.local/share/cc-hub/harness-tags` the first time it launches
+  one. These two scripts read tmux, not the hub's database; that file is the only
+  place on the machine that knows `cc-fa-` means `fakeagent`.

@@ -1,97 +1,407 @@
-# Plugin architecture: coding agents and providers
+# Plugin architecture: coding agents and model providers
 
-cc-hub treats the supported coding agent CLIs ("harnesses") and the model
-providers as **plugins**: one plain-object descriptor per file, collected by a
-registry. Adding support for a new coding agent or provider means adding one
-file and registering it — the rest of the hub (forms, run start, log detection,
-provider pulse, usage panel, database CHECK constraint) follows the registries.
+Coding agents (the CLI "harnesses" the hub drives in a tmux session) and model
+providers are **plugins**: one plain-object descriptor per file, collected by a
+registry. Everything else in the hub — forms, run start, log detection, the
+provider pulse, the usage panel, the budget gate, the hub's own LLM calls —
+consults that registry rather than naming a vendor.
+
+Until recently the two registries were static objects built at import time, and
+adding a coding agent meant editing the hub. They are **mutable** now, and a
+third party can drop a package on the machine that joins them at startup. That
+one change is what the rest of this document is about: what a package looks
+like, what a descriptor may declare, what a plugin is handed instead of the
+process environment, and which of the old rules survived.
 
 ```
-server/harnesses/          coding agent plugins
-  index.mjs                registry: HARNESS_PLUGINS, getHarness(), detectInstalled()
+server/plugins/
+  registry.mjs   THE registry: HARNESS_PLUGINS, PROVIDER_PLUGINS, register/unregister, errors
+  manifest.mjs   manifest + descriptor validation — pure, no I/O, unit-testable
+  loader.mjs     loadExternalPlugins(): read the plugin directory, validate, register
+  install.mjs    install from a directory, uninstall, list packages (broken ones included)
+  store.mjs      table plugin_config: enabled, providers, credentials, per-plugin settings
+  settings.mjs   plugin-declared SettingField → settings key, value, gate list
+  context.mjs    pluginCtx(id): what a plugin is handed instead of process.env / db.mjs
+  discovery.mjs  scanSystem(): which CLIs are installed, which credential variables are set
+  web.mjs        the Plugins page and its routes
+server/harnesses/          built-in coding agents
+  index.mjs                front door — re-exports the registry, unchanged for its importers
   claude.mjs  opencode.mjs  hermes.mjs  cursor.mjs
-server/providers/          model provider plugins
-  index.mjs                registry: PROVIDER_PLUGINS, getProvider(), providerHasKey()
+  cli-llm.mjs              spawning a coding agent CLI as a one-shot model source
+server/providers/          built-in model providers
+  index.mjs                front door — re-exports the registry
   openrouter.mjs  deepseek.mjs  opencode-zen.mjs
-server/coding-agents.mjs   operator configuration (Settings → Coding agents) + seed
+server/llm/
+  json.mjs     tolerant JSON extraction and repair (pure)
+  schema.mjs   the minimal JSON-Schema subset: validate/coerce, and explain to a model
+  alerts.mjs   throttled, deduplicated Telegram alerts for failed LLM calls
+server/coding-agents.mjs   the old coding-agent API, now an adapter over plugin_config
 server/usage.mjs           aggregates plugin usage() for the UI
+server/balances.mjs        aggregates plugin balance() for the UI
 ```
 
-**Ground rules for plugin files**
+## What a plugin is, and where it lives
 
-- Plugins are pure data plus functions with injected helpers.
-- They must **not** import `db.mjs` or `i18n.mjs` — `db.mjs` imports the harness
-  registry itself (to keep the CHECK on `agents.harness` in sync), so that would
-  be an import cycle. UI strings are therefore expressed as **i18n keys**
-  (`hinweisKey`), resolved by the callers.
-- Everything a plugin claims should come from an authoritative source (the CLI
-  itself, the vendor API, a measured behavior) — see the table in
-  [AGENTS.md](../AGENTS.md).
+A plugin is a **descriptor object**: data plus functions, with no state of its
+own and nothing imported from the hub. It is either a `harness` (a coding agent)
+or a `provider` (a model provider); the two contracts overlap in their optional
+halves (`credentials`, `settings`, `gate`, `llm`) and differ in everything a run
+needs.
+
+Built-in plugins live where they always did:
+
+```
+server/harnesses/<id>.mjs      shipped coding agents
+server/providers/<id>.mjs      shipped model providers
+```
+
+An external plugin is a **package directory** under the plugin directory
+(`CCHUB_PLUGIN_DIR`, default `~/.local/share/cc-hub/plugins`):
+
+```
+<CCHUB_PLUGIN_DIR>/<id>/
+    plugin.json     the manifest
+    index.mjs       export default { …descriptor }
+```
+
+```json
+{ "api": 1, "id": "mistral", "kind": "provider", "name": "Mistral",
+  "version": "1.0.0", "description": "…", "main": "index.mjs",
+  "homepage": "https://…", "author": "…" }
+```
+
+`validateManifest()` (manifest.mjs) enforces: `api` must be exactly `1`; `id`
+matches `^[a-z0-9][a-z0-9-]{1,39}$`; `kind` is `harness` or `provider`; `name`
+and `version` are present; `main` defaults to `index.mjs` and may neither start
+with `/` nor contain `..` — a manifest must not be able to import something else
+on the machine. The returned value is a **normalized copy** carrying only the
+fields the hub reads, so a manifest cannot smuggle extra keys into the
+registry's metadata.
+
+`loadExternalPlugins()` runs in `hub.mjs` **before anything reads the
+registry**: a plugin that arrives after the first form was rendered is a plugin
+the operator cannot choose. A missing plugin directory is the normal case, not
+an error. `CCHUB_PLUGIN_DIR` has to be a test fence as much as a setting: a
+suite that does not point it into its own sandbox loads the operator's real
+external packages and stops being reproducible — the same fence
+`CCHUB_AGENTS_SEED` and `CCHUB_CLAUDE_CREDENTIALS` already are.
+
+**One bad package never costs the hub.** Every step of loading is caught, and
+the failure is recorded rather than thrown: a manifest that will not parse, a
+`main` that does not exist, a module that throws on import, a descriptor that
+fails validation, an id collision. `listPackages()` additionally lists what lies
+in the plugin directory and did *not* register, so "I installed it and nothing
+happened" has an answer on the Plugins page.
+
+## The registry
+
+`server/plugins/registry.mjs` owns `HARNESS_PLUGINS` and `PROVIDER_PLUGINS`.
+`server/harnesses/index.mjs` and `server/providers/index.mjs` are now front
+doors that **re-export those very objects** — the same identity, not a copy — so
+all their importers were untouched by the rebuild and a plugin registered later
+is simply present in the object every importer already holds. That is the whole
+reason the registry is mutable: by the time a package on disk has been read,
+every static importer has long since captured the object.
+
+| Function | Answers |
+|---|---|
+| `registerPlugin(desc, {source, manifest, dir})` | add a descriptor; `{ok}` or `{ok:false,error}` |
+| `unregisterPlugin(id)` | remove an external plugin; a **built-in is refused** |
+| `allPlugins()` | every registered plugin with `{id, kind, source, manifest, dir, plugin}` |
+| `getPlugin(id)` | one descriptor, whichever kind it is |
+| `pluginKind/pluginSource/pluginManifest/pluginDirOf` | its metadata |
+| `registryErrors()` / `addRegistryError(where, error)` | every load failure, newest last |
+| `harnessIds/getHarness/harnessLabel/goalSpec/harnessesWithGoal/detectInstalled` | the harness half |
+| `providerIds/getProvider/providerLabel/providerHasKey` | the provider half |
+| `binaryPresent(bin)` | `command -v` — never throws, a missing binary is a normal answer |
+
+**Load order**: the built-ins are registered at module evaluation (they are
+static imports of this file), then `loadExternalPlugins()` walks the plugin
+directory in `readdir` order. Dotted entries and non-directories are skipped
+without complaint; a symlinked package is followed.
+
+**A duplicate id is refused, never overridden.** A package calling itself
+`claude` would otherwise be able to replace the coding agent the operator's runs
+are started with, and say nothing about it. The refusal is recorded in
+`registryErrors()` with which source already holds the id, and the same check
+runs a second time in `installFromDirectory()` — *before* anything is copied to
+disk, so a colliding package is not even written.
+
+**`registryErrors()` collects instead of throwing**, and that is the point:
+errors are developer-facing English sentences, rendered **verbatim** on the
+Plugins page next to the package that produced them. They are not UI strings and
+are deliberately not translated — a load failure one cannot search for is worse
+than an untranslated one.
+
+## Import rules — what changed, and the one trap that is measured
+
+### The CHECK on `agents.harness` is gone
+
+`db.mjs` used to generate a `CHECK(harness IN (…))` on the `agents` table from
+the harness registry, which meant `db.mjs` imported the registry. **That import
+was the cycle** that made dynamic loading impossible:
+
+- a plugin loaded from disk arrives long after the schema was written, and a
+  coding agent that is only known at runtime cannot be named in a constraint
+  that is written at schema time;
+- plugin files were forbidden to import `db.mjs`, because that closed the ring;
+- `quota.mjs` needed a dynamic import to reach a harness;
+- the budget gate could not go through `balances.mjs` / `usage.mjs`.
+
+`harnessCheckAufloesen()` in db.mjs removes the clause once and idempotently,
+with the same `tabelleUmziehen()` technique the old `harnessCheckErweitern()`
+used: the new table header is fetched from `sqlite_master` and edited at that
+one spot, so retrofitted columns, defaults and the UNIQUE survive; copying is
+column-wise by name. A fresh database never had the clause and is left alone; an
+unrecognized shape is left alone too, with a warning — better to touch nothing
+than to rebuild a table blindly.
+
+**Nothing is lost.** Which harness is acceptable was never decided by the
+database: `runDefFromForm()`, `saveAgent()`, `createRun()` and
+`saveCodingAgent()` all validate against the registry and always did. The CHECK
+only ever turned a bug into a 500 one layer further down — which is why
+`runs.harness` has carried no CHECK since the beginning.
+
+### What a plugin may import
+
+- An **external** plugin may import whatever it likes, `db.mjs` included: the
+  cycle is gone. It should not need to — everything it can want arrives in
+  `pluginCtx` — and a plugin that imports nothing of ours is the one that
+  survives a refactor.
+- A **built-in** plugin file (`server/harnesses/*.mjs`,
+  `server/providers/*.mjs`) still must not import `db.mjs`, `i18n.mjs`,
+  `models.mjs` or `plugins/context.mjs`. They are imported *by* the registry, so
+  anything they pull in is pulled in during the registry's own evaluation. UI
+  strings are therefore i18n **keys** (`labelKey`, `hintKey`, `hinweisKey`,
+  `descriptionKey`), resolved by the callers.
+- `server/harnesses/cli-llm.mjs` and `server/harnesses/patterns.mjs` are the two
+  shared helpers a plugin file may import, precisely because neither imports
+  anything of the hub's. `cli-llm.mjs` repeats the "read a listing through a
+  file, not a pipe" detour that also lives in `models.mjs` for exactly this
+  reason.
+
+### `claude.mjs` imports `quota.mjs` lazily, and that is load-bearing
+
+`server/harnesses/claude.mjs` reaches `quota.mjs` in three places — the gate's
+`check`, `usage()`, and nothing else — and every one of them uses
+`await import('../quota.mjs')` rather than a static import at the top of the
+file. This is not a style preference. A static import closes this ring:
+
+```
+plugins/registry.mjs → harnesses/claude.mjs → quota.mjs
+      → plugins/context.mjs → plugins/store.mjs → plugins/registry.mjs
+```
+
+`store.mjs` does real work at module evaluation: it creates `plugin_config` and
+`discovery` and runs the one-time migration out of `coding_agents`, and that
+migration calls `pluginSource()` **back into the registry** — which, on this
+path, is still halfway through evaluating its own module body. The bindings it
+would need (`META`, `HARNESS_PLUGINS`) are in their temporal dead zone, and the
+first thing to touch them dies there. Both places in claude.mjs that need the
+windows are `async` anyway, so the lazy import costs nothing.
+
+The rule that follows: **a plugin file that needs something from the hub's own
+modules imports it inside the function that uses it.** The provider gates do the
+same (`await import('../quota.mjs')` inside `check`), for the same reason.
+
+## The injected context
+
+A plugin never touches `process.env` or `db.mjs` itself. `pluginCtx(pluginId)`
+(context.mjs) is what it is handed instead, and that single indirection is what
+makes two things work at once: an external package does its job without
+importing anything of ours, and the **operator's own credential** — a stored
+value, or a differently named environment variable — is honoured everywhere,
+because the plugin asks `ctx.secret()` instead of reading a fixed name.
+
+| Member | What it does |
+|---|---|
+| `json(url, headers = {}, init = {})` | `fetch` with `AbortSignal.timeout` (8 s default, `init.timeoutMs` overrides — an LLM completion needs more than a catalog fetch). A non-2xx answer throws `HTTP <status>`, the one error shape every caller in the hub matches on. The signal is set **after** the init spread, so an init object cannot disarm the timeout |
+| `registry()` | the cached models.dev snapshot (6 h; parallel askers share one request; a failed refresh keeps serving the previous snapshot) |
+| `env` | `process.env`, for legacy reads — prefer `secret()` |
+| `secret(key = 'api_key')` | the resolved credential, or `null` |
+| `setting(key, fallback)` | this plugin's own declared setting value |
+| `log(msg)` | one fail-soft console line, prefixed with the plugin id |
+
+`json` and `registry` used to be `providerCtx()` in models.mjs; they live here
+now and models.mjs delegates, so there is exactly one implementation of the
+timeout, of the error shape and of the models.dev cache.
+
+**Credential resolution order** (`credentialValue()` in store.mjs), implemented
+once and used by everything:
+
+1. an explicit value the operator stored for this plugin
+   (`config.credentials[key].value`);
+2. `process.env[config.credentials[key].envVar]` — the variable the operator
+   *named* for this plugin;
+3. the first of the plugin's own declared `credentials[].envKeys` that is set in
+   the environment.
+
+`ctx.setting(key, fallback)` resolves through the plugin's own field
+declarations, so a historic `settingKey` is honoured; a key the plugin never
+declared falls back to the namespaced `plugin_<id>_<key>`.
+
+`pluginCtx(null)` is legal for the handful of callers that only want the fetch
+helper and the registry (the model-catalog fetches predate credentials);
+`secret()` then answers `null` rather than guessing.
+
+**Who builds a context is a caller, never a plugin.** `models.mjs`,
+`quota.mjs`, `balances.mjs`, `usage.mjs`, `scheduler.mjs` and `runner.mjs` each
+call `pluginCtx(id)` and pass it in. One detail worth knowing: `runner.mjs`
+hands `modelArgs` the context of `run.provider || run.harness`, because the
+credential a run needs belongs to the **provider**, not to the coding agent
+spawning it.
 
 ## Coding agent plugin contract (`server/harnesses/<id>.mjs`)
+
+The minimum `validateDescriptor()` enforces before a harness is registered:
+`id`, `label`, `bin`, a boolean `subscription`, an array `providers`, a
+non-empty `logPatterns`, and the four functions `modelArgs`, `effortOptions`,
+`usage`, `pulseId`. Everything else is optional by design — the hub asks for it
+and does without.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | string | registry key; also the value stored in `agents.harness` / `runs.harness` |
 | `label` | string | display name in the UI |
-| `bin` | string | executable checked with `command -v` (install detection in the add dialog) |
+| `bin` | string | executable checked with `command -v` (install detection, discovery scan) |
 | `installHint` | string | one-liner shown when the CLI is not installed |
 | `sessionTag` | string | tmux session prefix part: sessions are named `cc-<sessionTag><name>` (`''`, `'oc-'`, `'he-'`, `'cu-'`) |
 | `subscription` | boolean | `true` = models come from the account, no provider selection (claude, cursor) |
 | `providers` | string[] | provider plugin ids this harness can use (empty for subscription harnesses) |
-| `keyFreeProviders` | string[] | subset of `providers` usable **without** an own API key |
-| `pulseId(run)` | fn → string\|null | which pulse target to check while this run is active; `null` = explicitly not monitored |
+| `keyFreeProviders` | string[] | subset of `providers` usable **without** an own credential |
+| `descriptionKey` | i18n key (optional) | 1–3 sentences shown on the plugin's card |
+| `credentials` | `[{key, envKeys[], labelKey, helpKey?, required?}]` (optional) | what the operator can configure; see below |
+| `settings` | `SettingField[]` (optional) | operator-configurable fields rendered on the plugin's card |
+| `gate` | `{label?, switchKey?, fields[], check(ctx, values, run)}` (optional) | the budget gate for runs on this coding agent — claude and cursor declare one |
+| `llm` | `{schema, overhead?, models(ctx), complete(ctx, req)}` (optional) | this coding agent can answer the hub's own questions; see below |
+| `launch` | `{promptMode, args[], interactiveArgs?, bin?, sessionTag?, installHint?, stderrLog?, submitNudge?}` (optional) | how `bin/cc-start` calls this CLI. **Without it an external coding agent cannot start a run at all**; see "The launch declaration" |
+| `pulseId(run)` | fn → string\|null | which pulse target to check while this run is active; `null` = explicitly *not monitored*, which is not the same as healthy |
 | `pulseTargets` | object | extra pulse targets `{id: {url, okStatus[]}}` beyond the provider plugins (claude contributes `anthropic`) |
 | `logPatterns` | `[{typ, re}]` | narrow regexes for the pipe-pane log scan; `typ` ∈ `TYPEN` from `detect.mjs` |
-| `turnEndsRun` | boolean (optional) | `true` = the end of a turn ends the RUN, not just a note (`_turn_end` → `finishByTurnEnd()` in `reports.mjs`). Set it when the CLI keeps running after the work is done, so neither `_pane_died` nor `_exit` will ever come — cursor's TUI does exactly that |
+| `turnEndsRun` | boolean (optional) | `true` = the end of a turn ends the RUN (`_turn_end` → `finishByTurnEnd()` in `reports.mjs`). Set it when the CLI keeps running after the work is done, so neither `_pane_died` nor `_exit` will ever come — cursor's TUI does exactly that |
 | `hookFiles({ccReport})` | fn (optional) | files the hub writes into the workspace before the start: `[{path, content}]`, `path` relative to the worktree. `ccReport` is the absolute path of `cc-report` — hook commands must not depend on `PATH`. An existing file is never overwritten, and `harnessOwnedPaths()` keeps these paths out of the worktree cleanup's dirty check |
 | `goal` | `{max, command(condition)}` (optional) | this CLI takes a SECOND prompt, one that says when the run is done — claude's `/goal <condition>`. `max` is the longest condition it accepts, `command()` builds the line. Presence is the whole capability check: the form shows the goal field only for these harnesses (`harnessesWithGoal()`), and `server/goal.mjs` types the line into the session after the start, because a slash command has no CLI flag |
 | `promptRules` | string (optional) | extra prompt lines for this harness, appended to the platform rules by `platformSuffix()` — also to a custom template from the settings, because they describe the machine, not the operator's house rules |
 | `fetchModels()` | async fn | model list for subscription harnesses (cached by `models.mjs`) |
 | `effortLevels()` | async fn (optional) | levels the CLI itself accepts (probed; cached 24 h) |
 | `effortOptions({provider, model, helpers})` | async fn | levels for a concrete combination; returns `{stufen, standard?, pflicht?, quelle?, hinweisKey}` — `stufen: null` hides the form field. `helpers` = `{ownLevels, registryEffort, openrouterEffort}` |
-| `modelArgs(run)` | fn | CLI arguments for `cc-start`; returns `{args, fehlt}` (`fehlt` = provider ids whose key is missing) |
+| `modelArgs(run, ctx)` | fn | CLI arguments for `cc-start`; returns `{args, fehlt}` (`fehlt` = provider ids whose credential is missing). **Two arguments now** — see below |
 | `resumeCommand(run)` | fn (optional) | the shell command a HUMAN continues this run's session with, `cd <workdir> && …` included; `null` when the CLI has no reliable way (hermes). Called by `server/integrate.mjs` for every escalation message, the run's detail page and the failed/aborted Telegram texts. Only the plugin knows how its CLI names a session — claude gets `--session-id <run id>` from the hub and can name it back, cursor's id is its transcript's directory, opencode continues the last session of the worktree |
-| `usage()` | async fn | subscription usage for the overview panel, or `null` (see `usage.mjs` for the shapes: `{kind:'claude', five, seven, seven_general, seven_fable, resets_at, plan}` / `{kind:'cursor', plan, spent_usd, included_usd, remaining_usd, cycle_end}`) |
+| `usage(ctx)` | async fn | subscription usage for the overview panel, or `null`. Shapes in `usage.mjs`: `{kind:'claude', five, seven, seven_general, seven_fable, weekly_scoped, live, resets_at, plan}` / `{kind:'cursor', plan, spent_usd, included_usd, included_estimated?, remaining_usd, pct, cycle_end}` |
 
-### Adding a new coding agent
+### `modelArgs(run, ctx)` takes a context now
 
-1. Create `server/harnesses/<id>.mjs` with the fields above and register it in
-   `server/harnesses/index.mjs`.
-2. Teach `bin/cc-start` how to launch the CLI (the launch command lines are the
-   one part the bash script keeps itself: add a `case` for the harness, its
-   autonomous/interactive command and the session tag). This is a known,
-   documented limitation of the plugin pattern — the tmux side lives in bash.
-3. Add any new i18n `hinweisKey` strings to all three `lang/*.json` files.
-4. If the harness reports API errors through a hook of its own, wire it to
-   `cc-report _api_error` (see the opencode plugin installed by
-   `setup/02-install-scripts.sh`).
-5. Ask how a run of this harness **ends**. If the process exits when the work is
-   done, `_pane_died`/`_exit` already cover it. If the CLI stays up instead
-   (cursor), the harness needs `turnEndsRun` plus a channel that reports the turn
-   end — a `hookFiles` entry, and ideally a second, hook-free source; see
-   "cursor: when a run is over" in [AGENTS.md](../AGENTS.md).
-6. Optional but worth it: `resumeCommand(run)`. Every escalation the
-   integration produces ends with "here is how you pick this session up"; a
-   harness without it names the worktree instead. Find out from the CLI's own
-   `--help` rather than guessing — a command that opens somebody ELSE's
-   conversation is worse than no command.
-7. Done: the database CHECK, the settings page, install detection, forms,
-   detection patterns and the pulse follow the registry automatically. Configure
-   the new coding agent under Settings → Coding agents.
+The second parameter is what makes an operator-supplied credential reach a run
+at all. `opencode.mjs` and `hermes.mjs` resolve the key as
 
-## Provider plugin contract (`server/providers/<id>.mjs`)
+```js
+const key = ctx?.secret?.('api_key')
+  || (prov?.envKeys ?? []).map(n => process.env[n]).find(Boolean) || null
+```
+
+— `ctx.secret()` first (stored value, named variable, declared variable), the
+plain environment read as the fallback for a caller that passes no context (the
+unit suite is one). `claude.mjs` and `cursor.mjs` accept the parameter and
+ignore it: they run on a subscription and have no provider credential, and the
+signature stays the same across the four so a caller never has to ask which kind
+it is holding.
+
+Under **which name** the key travels is decided by what the environment already
+holds: the names the provider declares that are *set* are passed through as
+`--env NAME=value`, so the agent inside the tmux session keeps reading the
+variable it knows; only a credential that comes from nowhere else goes out under
+every declared name. It has to travel as `--env` at all because **a tmux session
+inherits nothing** — a variable that is not passed here does not exist over
+there.
+
+### The launch declaration
+
+The tmux side lives in bash, and `bin/cc-start` has to keep working with **no
+hub behind it** — a human types `cc-start -H opencode` on the command line. So
+the four shipped coding agents keep a `case` of their own in that script, and
+that case, not the plugin, is what a claude/opencode/hermes/cursor run is
+launched from.
+
+**Every other coding agent is launched from its `launch` declaration.**
+`launchSpec(harness)` in `server/runner.mjs` resolves it, the hub writes it into
+the run directory as `launch.json` (mode `0600`, never into the worktree — a
+stray file there counts as uncommitted work at the finish gate), and
+`cc-start --spec <file>` reads it with `jq`. `launchable(harness)` asks the same
+question **before** a worktree exists, so a coding agent nothing can start says
+so instead of leaving a tmux session running nothing.
+
+```js
+launch: {
+  promptMode: 'argv',                  // argv | stdin | file
+  args: [                              // autonomous start
+    '--permission-mode', '{mode}',
+    { when: 'model',  args: ['--model', '{model}'] },
+    { when: 'effort', args: ['--effort', '{effort}'] },
+    '{prompt}',
+  ],
+  interactiveArgs: [ … ],              // optional; default: `args` without the prompt
+  // bin, sessionTag, installHint fall back to the descriptor's own fields
+  stderrLog: '{home}/.cache/myagent/{session}.log',   // optional, appended with 2>>
+  submitNudge: { waitFor: 'ctrl+p', timeoutSec: 90 }, // optional, see below
+}
+```
+
+- **An entry is a string or a conditional group.** `{ when, unless, args }` names
+  one of `model | provider | effort | prompt | session_id | settings` and asks
+  whether it is set. Placeholders inside a string: `{model} {provider} {effort}
+  {mode} {session_id} {settings} {workdir} {session} {prompt_file} {stderr_log}
+  {home}`.
+- **`{prompt}` must be a WHOLE argument**, never part of one — cc-start
+  substitutes the shell variable holding the text there, and an interactive start
+  simply drops that argument.
+- **`promptMode`** decides how the text arrives: `argv` puts it in the `{prompt}`
+  argument, `stdin` feeds it in with a here-string (a here-string and not a pipe,
+  so the CLI still becomes the pane's own process and `pane-died` keeps meaning
+  what it means everywhere else), `file` hands over `{prompt_file}` and leaves
+  the file in place for the CLI to read.
+- **An option whose placeholder the spec never mentions is REFUSED**, not
+  silently passed through — the same rule as `--effort` for cursor. A declaration
+  that says nothing about `{effort}` means this CLI has no effort flag, and a
+  form that offered one would be lying.
+- **`sessionTag` is what keeps `cc-attach` and `cc-kill` honest.** Sessions are
+  named `cc-<sessionTag><name>`; cc-start appends `<id>:<tag>` to
+  `~/.local/share/cc-hub/harness-tags` (`CCHUB_HARNESS_TAGS`) the first time it
+  launches such an agent, and `bin/cc-harness-tags.sh` reads that file. Those two
+  scripts read tmux, not the hub's database — without the tag file a `cc-fa-*`
+  session answers "claude", which is what the untagged name has always meant.
+- **`submitNudge`** is the generic form of the Enter that opencode needs: wait
+  for a string to appear on the pane, then press Enter once. A TUI that swallows
+  a long prompt needs it, and a declaration is the only way a coding agent this
+  script has never heard of can ask for the same thing. Only the object form is
+  passed through — cc-start asks `jq` for `.submitNudge.waitFor`, and a bare
+  `true` would be an error there rather than a default.
+
+The built-in plugins declare `launch` anyway (claude's is next to its `case`'s
+command line, and both produce the same argv). It is not read for them —
+`launchSpec()` returns `null` for the four cc-start knows — but it is the shape a
+third party's coding agent is read from, written down where the rest of that
+plugin lives. **Keep the two in step if a command line ever changes.**
+
+## Model provider plugin contract (`server/providers/<id>.mjs`)
+
+The minimum: `id`, `label`, a `fetchModels` function, and either `envKeys` or
+`credentials`.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | string | registry key; also the value stored in `agents.provider` / `runs.provider` |
-| `label` | string | display name |
-| `envKeys` | string[] | env vars holding a credential; passed into the agent session via `cc-start --env` (tmux does not inherit the environment) and used for "is this provider offerable?" |
+| `label` | string | display name — it is a column heading in a 268 px sidebar, so keep it short |
+| `envKeys` | string[] | env vars holding a credential; passed into the agent session via `cc-start --env` and used for "is this provider offerable?" |
+| `credentials` | `[{key, envKeys[], labelKey, helpKey?, required?}]` (optional) | the same thing, declared: what the Plugins page renders and what `ctx.secret()` resolves through. A provider that declares only `envKeys` is read as one credential called `api_key` (`credentialSpec()`), so every caller sees one list instead of two cases |
+| `descriptionKey` | i18n key (optional) | 1–3 sentences on the plugin's card |
 | `ocPrefix` | string | model prefix opencode uses for this provider (pitfall: Zen is `opencode`, not `opencode-zen`) |
 | `mdKey` | string | key of this provider in the models.dev registry (effort levels) |
 | `pulse` | `{url, okStatus[]}` | health-pulse endpoint (watcher) |
-| `fetchModels(ctx)` | async fn | model catalog; `ctx` = `{json, registry, env}` (`json` = fetch helper with timeout, `registry()` = cached models.dev snapshot) |
-| `balance(ctx)` | async fn, optional | account balance in the normalized shape below; `null` = no key, no answer, nothing to report |
+| `settings` | `SettingField[]` (optional) | operator-configurable fields on the plugin's card |
+| `gate` | `{label?, switchKey?, fields[], check(ctx, values, run)}` (optional) | the budget gate for a run drawing on this provider |
+| `llm` | `{schema, overhead?, models(ctx), complete(ctx, req)}` (optional) | this provider can answer the hub's own questions |
+| `fetchModels(ctx)` | async fn | model catalog |
+| `balance(ctx)` | async fn (optional) | account balance in the normalized shape below; `null` = no key, no answer, nothing to report |
 
 ### `balance()` — the normalized shape
 
@@ -124,34 +434,351 @@ provider with its own `ok` flag) for the usage panel and `GET /api/usage`. It
 asks only providers that at least one **enabled** coding agent may use and that
 actually have a credential — a balance nobody can act on is noise.
 
-**The budget gate does NOT go through that aggregator.** The gate functions in
-`quota.mjs` (`openrouterGateBlocked`, `deepseekGateBlocked`, `cursorGateBlocked`)
-call the plugin directly, because `balances.mjs` / `usage.mjs` reach the database
-via `coding-agents.mjs`, and `db.mjs` imports the harness registry, which imports
-`quota.mjs` — routing the gate through the aggregator closes exactly the cycle
-this document warns about above. `budgetGate(harness, model, provider)` in
-`scheduler.mjs` routes by provider and reads the thresholds/on-off switches from
-the settings; each gate is optional (Settings → Budget gates).
+## Gates: the budget gate is plugin-declared
 
-### Adding a new provider
+`budgetGate(harness, model, provider)` in `scheduler.mjs` keeps its signature
+and its behaviour, and stopped knowing any vendor. It used to be an if-chain on
+the four literals `'claude'`, `'cursor'`, `'deepseek'`, `'openrouter'`, with the
+thresholds read in the scheduler and the logic in `quota.mjs` — so an installed
+plugin could not bring a gate of its own, and the settings page carried a "quota
+threshold" field nothing ever read.
 
-1. Create `server/providers/<id>.mjs`, register it in
-   `server/providers/index.mjs`.
-2. Reference the id from the `providers` list of every harness plugin that can
-   use it (plus `keyFreeProviders` when no own key is needed).
-3. Document the credential env var in `env.example`.
-4. Enable the provider per coding agent under Settings → Coding agents.
-5. Optional: implement `balance()` — the usage panel then shows it without a
-   line of UI code.
+**Routing** — what the run draws from decides which gate is asked:
 
-## Operator configuration and seeding
+1. the **coding agent's** gate, when it declares one. claude and cursor run on
+   their own subscription and no provider is involved at all.
+2. otherwise the **model provider's** gate — OpenRouter credits, the DeepSeek
+   balance. A known provider *without* a gate (opencode-zen reports no balance)
+   draws on nothing the hub can meter, and answers `null`.
+3. otherwise `LEGACY_DEFAULT_GATE = 'openrouter'`. This is history, not a
+   preference: every provider-based harness ran on OpenRouter before there was a
+   provider column, and a hand-typed `openrouter/author/slug` model still
+   arrives with `provider = null`. Dropping the fallthrough would let exactly
+   those runs start into an empty account.
 
-`server/coding-agents.mjs` stores which plugins the operator actually enabled
-(table `coding_agents`: harness, enabled, providers as JSON). Forms and
-`createRun()` only accept configured & enabled coding agents; the provider
-dropdown is capability ∩ operator selection ∩ available credentials.
+**The declaration:**
 
-On first start with an empty table the hub seeds from
+```js
+gate: {
+  label: 'Cursor',            // optional — what the reason line calls this account
+  switchKey: 'gate_on',       // optional — the field key of the on/off switch
+  fields: [ SettingField, … ],
+  async check(ctx, values, run) { … }   // → null (open) | { reason, resets_at? }
+}
+```
+
+- **`fields` are rendered under Settings → Budget gates** for every registered,
+  enabled plugin that declares them (`gatePlugins()`), and every declared key
+  joins the settings allowlist (`allPluginSettingKeys()`).
+- **`values` are typed before `check` sees them** (`gateValues()` in
+  scheduler.mjs): a `switch` becomes a boolean, a `number` a number, anything
+  else the stored string. A field the operator **cleared** falls back to the
+  field's own `default` — the settings page writes every input as a string, so
+  `''` has to mean "not set" and never `0`. A field whose default is `null`
+  stays `null` on purpose: that is how claude's fable threshold says "follow the
+  general 7-day one", a fallback only the plugin can compute.
+- **The on/off switch is handled by the caller, not by `check`.** `askGate()`
+  reads `values[switchKey]` and returns `null` without asking the plugin, so a
+  plugin cannot forget it — switching a gate off *is* the decision that this
+  window does not govern starts.
+- **`run` is `{harness, model, provider}`.** It travels because claude's answer
+  depends on the MODEL: a Fable week at 96 % says nothing about a run on Sonnet
+  (see "Which 7-day window binds" in [AGENTS.md](../AGENTS.md)).
+- **A gate that throws does not block.** `askGate()` catches, warns with the
+  plugin id, and answers `null`. A broken plugin is a reason to say so in the
+  log, never to stop the hub starting runs.
+
+### `settingKey`: the escape hatch that keeps history
+
+```
+SettingField = { key, type: 'number'|'text'|'password'|'select'|'switch',
+                 default, labelKey, hintKey?, options?, min?, max?, step?, settingKey? }
+```
+
+A field without `settingKey` is stored as `plugin_<id>_<key>`, which is what
+makes two plugins declaring a field called `threshold` harmless. A field **with**
+one is stored under exactly that name — and that is why the rebuild needed no
+settings migration at all: the built-in gates declare the keys they have always
+used (`claude_gate_on`, `claude_gate_5h`, `claude_gate_7d`,
+`claude_gate_fable`, `cursor_gate_on`, `cursor_gate_pct`, `cursor_included_usd`,
+`openrouter_gate_on`, `openrouter_min_eur`, `deepseek_gate_on`,
+`deepseek_min_usd`). `openrouter_min_eur` holds a **dollar** figure and keeps
+its name for the same reason: renaming a stored key would need a migration for
+nothing.
+
+### The generic meters in `quota.mjs`
+
+The gate logic moved into the plugins; what stayed behind in `quota.mjs` is the
+claude-window mathematics and **two meters that name no vendor**:
+
+| Function | Measures | Used by |
+|---|---|---|
+| `balanceGateBlocked(pluginId, {minimum, currency, unavailableBlocks, label})` | the plugin's `balance()` | openrouter, deepseek |
+| `usageGateBlocked(pluginId, {threshold, includedFallback, label})` | the plugin's `usage()` — spend ÷ included amount of the running period | cursor |
+| `claudeGateBlocked(quota, model, {five, seven, fable})` | the claude windows, each against its own threshold | claude |
+| `providerRemaining(pluginId, currency)` | one cached balance reading (2 min TTL) | the two above |
+
+`unavailableBlocks` is for the one provider that reports a verdict of its own:
+DeepSeek's `is_available === false` outranks the figure next to it, because
+promotional credit expires while the number still looks healthy.
+
+**No signal never blocks.** No plugin, no `balance()`, no credential, no answer
+and no earlier answer all end in `null`, and a gate that blocked on any of them
+would defer runs over a provider it simply cannot see. A failed refresh keeps
+the previous reading — it is still the best there is.
+
+**The gate still asks the plugin directly, not the aggregators.**
+`balances.mjs` and `usage.mjs` reach the database through `coding-agents.mjs`,
+and the gate sits on the launch path; one number from one plugin does not need
+an aggregator. `openrouterGateBlocked`, `deepseekGateBlocked` and
+`cursorGateBlocked` still exist as one-line wrappers, and the reason is
+specific: the unit suite cache-busts `quota.mjs` to get a fresh meter cache per
+case, and a delegation into the plugin would import the un-busted module back
+and hand it the previous case's reading.
+
+## The `llm` capability: the hub's own questions
+
+The hub asks a small model a few things of its own — a name for each run,
+whether a log line is a real outage, what a report contains, which worktree
+extras a repository wants. All four calls used to be hardcoded OpenRouter, each
+with its own copy of the request and its own error style. A plugin that declares
+`llm` can answer them instead.
+
+```js
+llm: {
+  schema: 'native' | 'json_object' | 'prompt',
+  overhead?: true,
+  async models(ctx),                 // → [{id, name}]
+  async complete(ctx, req),          // → { text, usage?, raw? }   throws on failure
+}
+```
+
+### The three `schema` modes
+
+`schema` is a **declaration of what the source can enforce**, and the layer
+above (`server/llm`) picks its strategy from it:
+
+| Value | What the adapter does | Who declares it |
+|---|---|---|
+| `native` | pass the JSON schema over the wire — `response_format: {type:'json_schema', json_schema:{name, strict:true, schema}}`, or claude's `--json-schema` flag | openrouter, claude |
+| `json_object` | ask for valid JSON without a schema (`response_format: {type:'json_object'}`); the **shape** still has to be described in the prompt | deepseek |
+| `prompt` | nothing at all — the strict instructions and the schema description are the only thing there is | opencode-zen, opencode, hermes, cursor |
+
+Declaring less than the truth costs a paragraph of tokens; declaring more than
+the truth means a mode that is **silently ignored**, and then the caller skips
+the strict prompt as well. opencode-zen declares `prompt` for exactly that
+reason: it is a proxy in front of many upstream models and documents nothing
+about `response_format`.
+
+### The `req` a `complete()` receives
+
+| Field | Meaning |
+|---|---|
+| `model` | the model identifier, in whatever shape this source names its models |
+| `system` | system text. A source with no system-prompt flag folds it into the prompt itself (`${system}\n\n${prompt}`) |
+| `prompt` | the user prompt |
+| `schema` | the JSON schema, when the caller wants structured output. **Its presence is the request for strict mode** — that is what `json_object` keys off |
+| `schemaName` | a name for the schema (`native` sources pass it along) |
+| `maxTokens` | default 1000 in the HTTP adapters |
+| `temperature` | default 0 |
+| `timeoutMs` | 60 s for an HTTP provider, 180 s for a CLI |
+| `servingProvider` | OpenRouter's serving-provider pin — `provider: {order:[x], allow_fallbacks:false}` |
+| `purpose` | the caller's name (`title`, `check`, `extract`, `extras`); OpenRouter sends it as `X-Title` |
+
+The answer is `{ text, usage, raw }`. **`text` is always a string** — a source
+whose API hands back an object stringifies it (claude's `structured_output`,
+cursor's `result`). A transport failure **throws**; it does not return a
+falsy answer, because "the model said nothing" and "the call did not happen"
+are different facts and the alert channel keys on which one it was.
+
+### Adapters do no coaxing
+
+An adapter sends the request and reports the answer. It does **not** append
+instructions, does not strip fences, does not retry and does not validate. All
+of that belongs to `server/llm`, once, for every source:
+
+- `json.mjs` — tolerant extraction: strip markdown fences, cut leading and
+  trailing prose by scanning for the first balanced `{`/`[` while respecting
+  strings and escapes, then repair the common damages (trailing commas,
+  single-quoted keys, smart quotes, `NaN`/`Infinity`). It **never evaluates**
+  the text — not `eval`, not `new Function`, not `vm` — and it uses a character
+  scanner rather than a regex, because a `}` inside a string value closes
+  nothing and no regular expression knows that.
+- `schema.mjs` — `validate()` coerces as well as checks (`"true"` → `true`,
+  `"3"` → `3`, a single value into a one-element array), because a small model
+  answering `"true"` is right about the answer and wrong about the type; and
+  `strictPrompt()` / `describeForPrompt()` / `repairPrompt()` are how a schema
+  is explained to a source that cannot be handed one. There is no Ajv and there
+  must not be: this project has zero runtime dependencies.
+- `alerts.mjs` — one throttled Telegram message per failure *signature*
+  (`purpose|source|model|errorClass`), what was suppressed in between counted
+  and named in the next message, a global hourly ceiling, and everything
+  fail-soft.
+
+Two places coaxing one model is how the answers stop being reproducible. The
+English strings in `schema.mjs` are **prompt text sent to a model**, deliberately
+not `t()` keys — a prompt that changed with the operator's UI language would
+change the model's answer with it. An i18n sweep must leave them alone.
+
+`server/llm/sources.mjs` (the model-source registry: providers with `llm` plus
+harnesses with `llm`) and `server/llm/index.mjs` (`llmJson()`, the one entry
+point every direct LLM call goes through) sit on top of these three: they are
+the layer that picks the strategy from the source's declared `schema`, runs the
+extraction, validates and coerces, reprompts once with the exact complaint, and
+raises the alert when even that fails. **A plugin never sees any of it** — the
+capability described above is the whole contract, and it is complete whichever
+state those two modules are in.
+
+### `overhead: true`
+
+A coding agent starts a whole session to answer one question. It is slower and
+dearer than a model provider, and `overhead: true` is what makes the UI say so
+wherever such a source can be picked. It is also the one way to try the hub out
+with nothing configured but a coding agent and a subscription that is already
+being paid for.
+
+## Coding agents as model sources — the measured facts
+
+`server/harnesses/cli-llm.mjs` holds the half all four CLIs share: spawning.
+Three rules, each learned the hard way.
+
+1. **stdin is always redirected.** claude burns a fixed three seconds waiting on
+   a terminal that never speaks; opencode wants `/dev/null`. Whatever the prompt
+   is, it goes in and the pipe is closed immediately, so a CLI reading "until
+   EOF" gets its EOF.
+2. **There is always a wall-clock timeout, with a `SIGKILL` behind the polite
+   signal.** The child is spawned `detached`, in a process group of its own, and
+   the timeout signals the **group** — measured: `sh -c "sleep 30"` with a one
+   second timeout returned after thirty, because killing only the spawned shell
+   left the `sleep` it had forked holding the stdout pipe. After the grace
+   period the helper *answers* rather than waiting for `close`, which would wait
+   for every inherited pipe.
+3. **stdout and stderr are captured separately.** They disagree about which one
+   carries an error, and merging them makes one CLI's noise look like another's
+   failure.
+
+`runCli()` returns `{code, signal, stdout, stderr, timedOut, spawnError}` and
+never throws for a process that merely failed — a binary that is not installed
+is a normal answer here. `cliFailure()` turns that into the one error shape, so
+a caller can tell a timeout from a missing binary from the CLI's own complaint.
+`ndjson()` parses streamed events tolerantly. `cliLines()` reads a listing
+command's output **through a file, never a pipe**: `opencode models --pure`
+prints 568 lines and loses chunks at process exit through a pipe (measured: 168,
+244, 260, 307 instead of 360 OpenRouter models, with perfectly stable output in
+a shell), and a silently halved catalog is worse than none.
+
+Versions probed: claude 2.1.251, opencode 1.18.25, hermes 0.20.5, cursor-agent
+2026.08.25.
+
+| | claude | opencode | hermes | cursor-agent |
+|---|---|---|---|---|
+| schema support | **native `--json-schema`** | none | none | none |
+| `llm.schema` | `'native'` | `'prompt'` | `'prompt'` | `'prompt'` |
+| answer read from | `structured_output`, else `result` | concatenated `text` parts of the NDJSON stream | raw stdout | `result` of the single envelope |
+| failure shows on | stdout envelope, `is_error: true` | stdout NDJSON `type:'error'` | stdout, plain text | **stderr** |
+| latency | 2.9 s lean | 4.5 s | 6.7 s | 6.2 s |
+| input floor | ~1.9 k lean / **55 k default** | **~30 k hard floor** | n/a | ~8.5 k |
+
+`exit code ≠ 0` is the only universal failure signal. Three vendor-specific
+traps, all of which cost time:
+
+- **claude's `subtype` lies.** It still says `"success"` on a failed call.
+  `is_error: true` is the field to read.
+- **claude's lean flag set is not optional.** The same question costs $0.112
+  with the default flags and $0.0026 with these — **42 times** as much — because
+  claude otherwise loads settings, MCP servers, slash commands and the whole
+  tool surface before it says a word. And the prompt goes on **stdin, never
+  positionally**: `--tools ""` is variadic and would eat it.
+  ```js
+  ['-p','--output-format','json','--model',model,
+   '--safe-mode','--setting-sources','','--strict-mcp-config',
+   '--disable-slash-commands','--no-session-persistence',
+   '--system-prompt',system,'--tools','',
+   '--json-schema',JSON.stringify(schema)]
+  ```
+- **opencode's stderr must be ignored.** It writes dozens of "unknown format
+  uint64" lines on every single run; treating that as failure would mean the
+  source never works at all. Its ~30 k token input floor is why only free or
+  cheap models make sense there.
+  ```js
+  ['run','--pure','--format','json','-m',`${provider}/${model}`, prompt]
+  ```
+- **hermes's three muzzle flags are all load-bearing.** Without
+  `--safe-mode --reasoning none -t ''` stdout came back as 4420 bytes of a boxed
+  reasoning block, because hermes' own system prompt mandates tool use even for
+  arithmetic. The prompt goes on stdin via `--query-file -`.
+  ```js
+  ['chat','--query-file','-','-Q','--safe-mode','--reasoning','none','-t','',
+   '-m',`${provider}/${model}`,'--run-budget','120']
+  ```
+- **cursor needs `--trust`, or it hangs.** Without it the CLI sits at "Do you
+  trust the contents of this directory?" and nothing happens at all.
+  `--mode ask` is the only way to make it read-only.
+  ```js
+  ['-p','--output-format','json','--model',modelId,'--trust','--mode','ask', prompt]
+  ```
+
+**There is no second "which provider" field anywhere**, and that is a
+consequence rather than a simplification: opencode's and hermes's own model
+identifiers already carry the provider (`anthropic/claude-…`, `openrouter/…`).
+The source picker is one flat list and the model picker below it is filled by
+that source's own `models()`.
+
+## Operator configuration, storage and seeding
+
+The registry says what the hub **could** drive; `plugin_config` holds what the
+operator has **configured**.
+
+```sql
+plugin_config(
+  plugin_id  TEXT PRIMARY KEY,
+  kind       TEXT NOT NULL,                    -- harness | provider
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  config     TEXT NOT NULL DEFAULT '{}',       -- {providers:[], credentials:{}, settings:{}}
+  source     TEXT NOT NULL DEFAULT 'builtin',  -- builtin | external
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')))
+```
+
+One table for both kinds, because the two questions are the same question:
+`coding_agents` only ever knew coding agents, so a model provider had no place
+to carry an enabled flag, a credential or a setting of its own.
+
+**`isPluginEnabled(id)` defaults differently per kind, on purpose.** An
+unconfigured coding agent is **off** — a fresh installation deliberately has
+none and shows a banner until one is configured. An unconfigured provider is
+**on**: there was no enable flag for providers before this table, and inventing
+an off-by-default one would switch off working installations.
+
+**Credentials are stored as a mode, not as a value.**
+`setCredential(pluginId, key, {mode, envVar, value})`: `'env'` stores the name
+of the variable to read, `'value'` stores the secret itself, anything else
+forgets the override so the plugin's declared variables apply again. A stored
+value lives in the hub's local SQLite database as plain text — the same file
+that already holds the Telegram token. It is offered because a machine cannot
+always be given another environment variable; where it can, naming the variable
+is the better answer and the UI says so. **An empty `value` submit means "keep
+what is stored"**: the form renders a password field it cannot pre-fill, and
+saving the form must not silently delete a key.
+
+### The one-time migration out of `coding_agents`
+
+Guarded by the settings key `plugins_migrated`, not by "is the new table empty":
+an operator who deletes every coding agent after the migration must not get the
+old rows back on the next restart. Each row becomes a `plugin_config` row with
+`kind='harness'` and `config={"providers":[…]}`. **The old table is left in
+place untouched** and nothing reads it any more, so a rollback to an earlier hub
+finds its data.
+
+`server/coding-agents.mjs` is now an **adapter** over `plugin_config` with a
+byte-compatible exported API (`listCodingAgents`, `enabledCodingAgents`,
+`codingAgentFor`, `isHarnessEnabled`, `providersForHarness`, `saveCodingAgent`,
+`deleteCodingAgent`, `seedFilePath`, `seedIfEmpty`, `unconfiguredHarnessIds`)
+and the same row shape, so its call sites and both test groups keep working.
+
+### Seeding
+
+On first start with no coding agent configured, the hub seeds from
 `~/.config/cc-hub/coding-agents.json` (override: `CCHUB_AGENTS_SEED`):
 
 ```json
@@ -161,4 +788,166 @@ On first start with an empty table the hub seeds from
 ] }
 ```
 
-The seed never overwrites an existing configuration — operator edits win.
+The seed goes through `saveCodingAgent()`, so a harness or provider the registry
+does not know never reaches the database, and it never overwrites an existing
+configuration — operator edits win.
+
+## Discovery: what is on this machine, asked once
+
+`scanSystem()` (discovery.mjs) asks, for every **registered** plugin: is this
+coding agent's binary on the PATH, and is any of this provider's declared
+credential variables set? Results are upserted into the `discovery` table. It is
+called from `hub.mjs` **after** the server listens, fire-and-forget and wrapped
+in try/catch — never on a request path, never blocking a start — and again from
+the "Scan again" button.
+
+```sql
+discovery(
+  id          TEXT PRIMARY KEY,   -- '<kind>:<pluginId>'
+  kind        TEXT NOT NULL,
+  plugin_id   TEXT NOT NULL,
+  detail      TEXT,               -- JSON: {bin} or {envVar}
+  detected_at TEXT NOT NULL DEFAULT (datetime('now')),
+  asked_at    TEXT,
+  answer      TEXT)               -- added | dismissed
+```
+
+Two rules the module hangs on:
+
+- **A found credential is named, never read.** The row carries the NAME of the
+  environment variable and nothing else. A discovery row is rendered into a page
+  and could travel with a database copy; a secret in it would be a secret in
+  places nobody expects one.
+- **The operator is asked once.** The upsert never overwrites `asked_at` or
+  `answer`, and the write happens when the operator **answers** (Add or Not
+  now), not when a page renders — a page that only shows something has not asked
+  anybody anything. Dismissing therefore stays dismissed across restarts.
+
+`openDiscoveries()` is what is worth suggesting: registered, unconfigured, and
+unanswered. `discoveryBanner()` renders it above the content on every page and
+is **derived, not passed** — the layout calls it and it answers out of the
+database. Its "Not now" dismisses **all** open findings at once: from a banner
+there is nothing to tell them apart by, and a banner one cannot get rid of is
+worse than no banner.
+
+## The Plugins page — `/settings/plugins`
+
+One page for the whole question "what can this hub drive, and with whose
+credentials". `/settings/coding-agents` is a 303 redirect to it.
+
+1. **Found on this machine** — the unanswered discovery rows, each with what was
+   found (the binary, or the *name* of an environment variable), an "Add" and a
+   "Not now" button, plus the "Scan again" line and when the last scan was.
+2. **Coding agents** — one card per registered harness plugin, configured or
+   not, which is what subsumes the old "add a coding agent" list: enabled
+   switch, the allowed model providers as checkboxes (unchanged semantics),
+   install state from `detectInstalled()` with the install hint when it is
+   missing, the credentials block, the plugin's own `settings` fields, and for
+   an external package its version and a "Remove".
+3. **Model providers** — one card per registered provider plugin: enabled
+   switch, the credentials block, badges for "can answer the hub's own
+   questions" (`llm`), "balance visible" (`balance`) and "credential present",
+   the plugin's own `settings` fields, version and "Remove" for an external one.
+4. **Plugin packages** — every external package with id, kind, name, version,
+   path and its load error as it stands; the registry's error list below it; an
+   "Install from a directory" form; and a note that built-ins cannot be removed.
+
+Routes: `GET /settings/plugins`, and `POST` to `…/save`, `…/add`, `…/remove`
+(forget a plugin's configuration; the plugin stays registered), `…/install`,
+`…/uninstall` (delete an external package's directory and its configuration),
+`…/scan`, `…/discovery`. Validation failures go to `problemPage()`, success
+redirects back.
+
+Three page-level rules worth knowing:
+
+- **A credential is named, never shown.** The page says whether a key was found
+  and which variable it came from; the value never reaches the markup.
+- **Every switch carries a hidden companion field with `0`.** A `<form>` sends
+  nothing at all for an unticked checkbox, so without it a saved form could
+  never switch anything **off**. All of them go through one `checkbox()` helper
+  so the rule cannot be forgotten in one place only.
+- **The card footer stands outside the save form.** A `<form>` inside a `<form>`
+  is not nesting, it is a parse error: the parser drops the inner one and its
+  button submits the outer — which here would mean "Remove" quietly *saving* the
+  plugin.
+
+## Adding a new coding agent
+
+1. Create `server/harnesses/<id>.mjs` (built-in) or a package directory with a
+   `plugin.json` and an `index.mjs` (external). Export the descriptor as the
+   **default export**. `validateDescriptor()` requires `id`, `label`, `bin`,
+   `subscription`, `providers`, a non-empty `logPatterns`, and `modelArgs`,
+   `effortOptions`, `usage`, `pulseId`.
+2. Register it: add it to `HARNESS_PLUGINS` in `server/plugins/registry.mjs` for
+   a built-in; an external package registers itself when the hub loads the
+   plugin directory.
+3. **Say how the CLI is launched.** An **external** plugin declares `launch`
+   (see "The launch declaration"): the hub writes it into the run directory and
+   `cc-start --spec` starts the session from it — no bash edit, no hub release.
+   A plugin with no `launch` cannot start a run, and `launchable()` says so
+   before a worktree exists. A **built-in** added to `server/harnesses/` gets a
+   `case` in `bin/cc-start` instead, because that script must keep working with
+   no hub behind it; declare `launch` next to it anyway, and keep the two in
+   step.
+4. Add every new i18n key the plugin names (`descriptionKey`, `labelKey`,
+   `hintKey`, `hinweisKey`) to **all three** catalogs — `lang/en.json`,
+   `lang/de.json`, `lang/zh.json`. A unit test enforces identical key sets and
+   non-empty values; a plugin may not name a string that is not there.
+5. If the CLI reports API errors through a hook of its own, wire it to
+   `cc-report _api_error` (see the opencode plugin installed by
+   `setup/02-install-scripts.sh`). Otherwise the pipe-pane log scan is the only
+   source, and `logPatterns` should stay narrow — a menu line reading "Upgrade
+   to Max for higher rate limits" once sat in the database as a rate limit on a
+   production run.
+6. Ask how a run of this harness **ends**. If the process exits when the work is
+   done, `_pane_died` / `_exit` already cover it. If the CLI stays up instead
+   (cursor), the harness needs `turnEndsRun` plus a channel that reports the turn
+   end — a `hookFiles` entry, and ideally a second, hook-free source; see
+   "cursor: when a run is over" in [AGENTS.md](../AGENTS.md).
+7. Optional but worth it: `resumeCommand(run)`. Every escalation the integration
+   produces ends with "here is how you pick this session up"; a harness without
+   it names the worktree instead. Find out from the CLI's own `--help` rather
+   than guessing — a command that opens somebody ELSE's conversation is worse
+   than no command.
+8. Optional: `gate` if this coding agent runs on an account the hub can meter,
+   and `llm` if its CLI can answer a one-shot question. For `llm`, read the
+   three rules in `cli-llm.mjs` first and declare `overhead: true`.
+9. Done: install detection, the discovery scan, the forms, the Plugins page, the
+   detection patterns, the pulse and the budget-gate routing all follow the
+   registry. Configure the new coding agent under Settings → Plugins.
+
+## Adding a new model provider
+
+1. Create `server/providers/<id>.mjs` or an external package. Minimum: `id`,
+   `label`, `fetchModels(ctx)`, and either `envKeys` or `credentials`. Declare
+   `credentials` — `envKeys` alone still works and is read as one `api_key`
+   credential, but only a declared credential carries a label and a help text on
+   the Plugins page.
+2. Resolve the key as `ctx.secret('api_key')` with the plain environment read as
+   the fallback, never as a bare `process.env` lookup: that is the whole reason
+   the operator's own key and their own variable name work.
+3. Reference the id from the `providers` list of every harness plugin that can
+   use it (plus `keyFreeProviders` when no own key is needed), and register the
+   plugin in `server/providers/index.mjs`' registry for a built-in.
+4. Document the credential environment variable in `env.example`.
+5. Add the plugin's i18n keys to all three `lang/*.json` catalogs.
+6. Optional: `balance()` — the usage panel then shows it without a line of UI
+   code, and a `gate` can measure against it with `balanceGateBlocked(id, …)`.
+7. Optional: `llm` — declare honestly which of the three schema modes the
+   endpoint really supports.
+8. Enable the provider under Settings → Plugins, and allow it per coding agent
+   on that agent's card.
+
+## Known limits, stated rather than hidden
+
+- **The four shipped coding agents keep their own `case` in `bin/cc-start`**,
+  and that is deliberate rather than pending: the script has to work with no hub
+  behind it, so for claude, opencode, hermes and cursor the command line lives
+  there and is the single source of truth. An external plugin needs no bash edit
+  at all — it declares `launch` and the hub hands that over with `--spec`. The
+  limit that remains is the duplication: a built-in's `case` and its `launch`
+  block are two copies of one command line, and nothing checks that they agree.
+- **`--spec` needs `jq`.** It is a documented prerequisite of the project, but a
+  machine without it can still start the four built-ins and nothing else.
+- **i18n is not generated.** A plugin declares keys; somebody has to put them in
+  three catalogs.

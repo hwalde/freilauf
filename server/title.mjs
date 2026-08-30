@@ -12,7 +12,13 @@
 // meaningful line of the prompt. A title never holds a start up and never lets
 // one fail: generation happens AFTER the run exists and only replaces the
 // fallback if it is still there.
+//
+// The transport moved into `server/llm` (`llmJson`): which source answers is
+// `llm_title_source`, and an installation that never sets it reads
+// `provider:openrouter` — exactly the call this file used to make itself.
 import db, { getSetting, mruList, mruRemember, announceRun } from './db.mjs'
+import { llmJson } from './llm/index.mjs'
+import { getSource, defaultSource, missingCredential } from './llm/sources.mjs'
 
 /**
  * The default: DeepSeek V4 Flash at OpenRouter, ~$0.05/$0.10 per million tokens
@@ -31,13 +37,25 @@ export function titleModel() {
   return (getSetting('llm_title_model') ?? '').trim() || DEFAULT_TITLE_MODEL
 }
 
+/** Which source answers this question. Unset = OpenRouter, as it always was. */
+export function titleSource() {
+  return (getSetting('llm_title_source') ?? '').trim() || defaultSource()
+}
+
 /**
  * On unless switched off: unlike the check LLM this needs no decision from the
- * operator — a model is preset, and without an OpenRouter key the whole thing
+ * operator — a model is preset, and without a usable source the whole thing
  * silently stays with the fallback anyway.
+ *
+ * "Usable" is what the OpenRouter key check was a special case of: the source
+ * exists, is switched on, and has every credential it declares as required.
+ * A coding-agent source declares none, so picking one is enough to make this
+ * true — which is the point of offering them.
  */
 export function titleLlmActive() {
-  return (getSetting('llm_title_on') ?? '1') === '1' && !!titleModel() && !!process.env.OPENROUTER_API_KEY
+  if ((getSetting('llm_title_on') ?? '1') !== '1' || !titleModel()) return false
+  const src = getSource(titleSource())
+  return !!src && missingCredential(src.pluginId, src.plugin) === null
 }
 
 export function titleModelsMru() { return mruList(MRU_KEY) }
@@ -71,16 +89,13 @@ export function fallbackTitle(prompt, max = TITLE_MAX) {
   return ''
 }
 
+const SCHEMA_NAME = 'run_title'
 const SCHEMA = {
-  name: 'run_title',
-  strict: true,
-  schema: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['title'],
-    properties: {
-      title: { type: 'string', description: 'the title, at most 8 words, no final period' },
-    },
+  type: 'object',
+  additionalProperties: false,
+  required: ['title'],
+  properties: {
+    title: { type: 'string', description: 'the title, at most 8 words, no final period' },
   },
 }
 
@@ -98,49 +113,42 @@ Answer exclusively in the given JSON schema.`
  * Ask for a title. Returns the title or null (off, no key, error, empty answer).
  * The context is capped: a title comes from the first paragraphs, and nothing
  * about that is worth paying for a 50k-token prompt.
+ *
+ * One thing this call used to carry and no longer can: OpenRouter's
+ * `reasoning: { enabled: false }`. A title is not a thinking task and the levy
+ * for reasoning tokens is larger than the whole request — but that field is
+ * OpenRouter's alone, and the completion contract (`llm.complete`, see
+ * docs/plugins.md) has no place for it. The knob belongs in the OpenRouter
+ * plugin, not in a caller that must work against three other sources; keeping a
+ * private fetch here to save it would put the copy back that this whole layer
+ * exists to remove. Preset model, small prompt, `max_tokens: 200`: the cost
+ * stays a fraction of a cent either way.
  */
 export async function generateTitle(prompt, { timeoutMs = 30_000 } = {}) {
   if (!titleLlmActive()) return null
   const text = String(prompt ?? '').trim()
   if (!text) return null
   const model = titleModel()
-  const body = {
-    model,
-    messages: [
-      { role: 'system', content: SYSTEM },
-      { role: 'user', content: text.length > 6000 ? text.slice(0, 6000) + '\n…' : text },
-    ],
-    response_format: { type: 'json_schema', json_schema: SCHEMA },
-    // A title is not a thinking task; the levy for reasoning tokens would be
-    // larger than the whole request.
-    reasoning: { enabled: false },
-    temperature: 0,
-    max_tokens: 200,
-  }
-  const orProvider = (getSetting('llm_title_or_provider') ?? '').trim()
-  if (orProvider) body.provider = { order: [orProvider], allow_fallbacks: false }
 
-  try {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        'content-type': 'application/json',
-        'HTTP-Referer': 'https://github.com/hwalde/cc-hub',
-        'X-Title': 'cc-hub run title',
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-    if (!res.ok) return null
-    const j = await res.json()
-    const raw = j?.choices?.[0]?.message?.content
-    const parsed = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw))
-    const title = shorten(String(parsed?.title ?? '').replace(/^["'\s]+|["'.\s]+$/g, ''))
-    return title.length >= 3 ? title : null
-  } catch {
-    return null
-  }
+  const r = await llmJson({
+    source: titleSource(),
+    model,
+    system: SYSTEM,
+    prompt: text.length > 6000 ? text.slice(0, 6000) + '\n…' : text,
+    schema: SCHEMA,
+    schemaName: SCHEMA_NAME,
+    purpose: 'title',
+    servingProvider: (getSetting('llm_title_or_provider') ?? '').trim() || null,
+    maxTokens: 200,
+    temperature: 0,
+    timeoutMs,
+  })
+  // Fail-soft, unchanged: every reason to have no title — off, no credential,
+  // a broken vendor, an answer that is not a title — is the same reason to keep
+  // the fallback, and none of them is worth a thrown error on the launch path.
+  if (!r.ok) return null
+  const title = shorten(String(r.data?.title ?? '').replace(/^["'\s]+|["'.\s]+$/g, ''))
+  return title.length >= 3 ? title : null
 }
 
 /**

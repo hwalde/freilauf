@@ -2,8 +2,9 @@
 //
 // The repo form's "find worktree extras" button asks this endpoint. It is a
 // SINGLE structured call, not an agent: no tmux session, no worktree, no flows —
-// the question "what should a worktree also carry?" is answered by a model at
-// OpenRouter, the same channel the title LLM and the check LLM use.
+// the question "what should a worktree also carry?" is answered by a model, on
+// the same channel the title LLM and the check LLM use (`llm_extras_source`,
+// unset = `provider:openrouter`).
 //
 // Everything that can be decided without a model is decided without one:
 //   1. algorithmically: the path exists and is a git project,
@@ -17,6 +18,8 @@ import { join, basename } from 'node:path'
 import { getSetting, mruList, mruRemember } from './db.mjs'
 import { sh } from './util.mjs'
 import { t } from './i18n.mjs'
+import { llmJson } from './llm/index.mjs'
+import { getSource, defaultSource, missingCredential } from './llm/sources.mjs'
 
 export const DEFAULT_EXTRAS_MODEL = 'deepseek/deepseek-v4-flash'
 const MRU_KEY = 'llm_extras_models_mru'
@@ -27,33 +30,41 @@ export function extrasModel() {
   return (getSetting('llm_extras_model') ?? '').trim() || DEFAULT_EXTRAS_MODEL
 }
 
-/** On unless switched off, like the title LLM: a model is preset, the key is the gate. */
+/** Which source answers this question. Unset = OpenRouter, as it always was. */
+export function extrasSource() {
+  return (getSetting('llm_extras_source') ?? '').trim() || defaultSource()
+}
+
+/**
+ * On unless switched off, like the title LLM: a model is preset, and the
+ * source's credential is the gate — for the default source that is exactly the
+ * OpenRouter key this used to read out of the environment.
+ */
 export function extrasLlmActive() {
-  return (getSetting('llm_extras_on') ?? '1') === '1' && !!process.env.OPENROUTER_API_KEY
+  if ((getSetting('llm_extras_on') ?? '1') !== '1') return false
+  const src = getSource(extrasSource())
+  return !!src && missingCredential(src.pluginId, src.plugin) === null
 }
 
 export function extrasModelsMru() { return mruList(MRU_KEY) }
 export function rememberExtrasModel(model) { mruRemember(MRU_KEY, model) }
 
+const SCHEMA_NAME = 'worktree_extras'
 const SCHEMA = {
-  name: 'worktree_extras',
-  strict: true,
-  schema: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['extras'],
-    properties: {
-      extras: {
-        type: 'array',
-        description: 'the untracked/ignored top-level entries a worktree should also have',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['path', 'mode'],
-          properties: {
-            path: { type: 'string', description: 'the exact top-level entry name from the listing' },
-            mode: { type: 'string', enum: ['copy', 'link'] },
-          },
+  type: 'object',
+  additionalProperties: false,
+  required: ['extras'],
+  properties: {
+    extras: {
+      type: 'array',
+      description: 'the untracked/ignored top-level entries a worktree should also have',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['path', 'mode'],
+        properties: {
+          path: { type: 'string', description: 'the exact top-level entry name from the listing' },
+          mode: { type: 'string', enum: ['copy', 'link'] },
         },
       },
     },
@@ -157,43 +168,35 @@ export async function suggestExtras(path, { timeoutMs = 60_000 } = {}) {
 
   const ctx = await gatherContext(p)
   const model = extrasModel()
-  const body = {
+  const r = await llmJson({
+    source: extrasSource(),
     model,
-    messages: [
-      { role: 'system', content: SYSTEM },
-      { role: 'user', content: buildPrompt(ctx) },
-    ],
-    response_format: { type: 'json_schema', json_schema: SCHEMA },
+    system: SYSTEM,
+    prompt: buildPrompt(ctx),
+    schema: SCHEMA,
+    schemaName: SCHEMA_NAME,
+    purpose: 'extras',
+    servingProvider: (getSetting('llm_extras_or_provider') ?? '').trim() || null,
+    maxTokens: 1000,
     temperature: 0,
-    max_tokens: 1000,
+    timeoutMs,
+  })
+  // The error stays TRANSLATED, and stays split by stage: the form shows the
+  // operator a sentence in their own language, and which sentence it is says
+  // whether the vendor was unreachable or answered with something unusable.
+  // (`CCHUB_OPENROUTER_BASE` still works: it is the OpenRouter plugin that
+  //  reads it now, so the stub the unit suite points this call at is reached
+  //  through the adapter instead of through a fetch written out here.)
+  if (!r.ok) {
+    if (r.stage === 'parse' || r.stage === 'validate') return { ok: false, error: t('repos.extras_parse') }
+    const detail = String(r.error)
+    const http = /HTTP (\d{3})/.exec(detail)
+    if (http) return { ok: false, error: t('repos.extras_http', { code: http[1] }) }
+    return { ok: false, error: t('repos.extras_net', { err: detail }) }
   }
-  const orProvider = (getSetting('llm_extras_or_provider') ?? '').trim()
-  if (orProvider) body.provider = { order: [orProvider], allow_fallbacks: false }
-  const base = process.env.CCHUB_OPENROUTER_BASE ?? 'https://openrouter.ai/api/v1/chat/completions'
-
-  let roh
-  try {
-    const res = await fetch(base, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        'content-type': 'application/json',
-        'HTTP-Referer': 'https://github.com/hwalde/cc-hub',
-        'X-Title': 'cc-hub worktree extras',
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-    if (!res.ok) return { ok: false, error: t('repos.extras_http', { code: res.status }) }
-    roh = (await res.json())?.choices?.[0]?.message?.content
-  } catch (e) {
-    return { ok: false, error: t('repos.extras_net', { err: e.message }) }
-  }
-
-  let parsed
-  try { parsed = JSON.parse(typeof roh === 'string' ? roh : JSON.stringify(roh)) } catch {
-    return { ok: false, error: t('repos.extras_parse') }
-  }
-  const extras = normalizeExtras(parsed, ctx)
+  // The model is still not trusted: `normalizeExtras` measures every path
+  // against the real directory. The schema says the shape is right, never that
+  // the paths exist.
+  const extras = normalizeExtras(r.data, ctx)
   return { ok: true, extras, model }
 }

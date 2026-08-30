@@ -4,12 +4,19 @@
 // selection, only the model choice. Usage data comes from the account's own
 // usage endpoint (../claude-usage.mjs), with ~/.claude/quota.json as fallback
 // (written by the statusline after every response).
+//
+// quota.mjs is imported LAZILY, and that is load-bearing rather than a matter
+// of taste: the plugin registry imports this file, quota.mjs reaches the plugin
+// context and through it the database, and the database module in turn is
+// reached while the registry is still evaluating. A static import here closes
+// that ring and the first thing to touch it dies in a temporal dead zone. Both
+// places that need the claude windows are async anyway.
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { claudeQuota } from '../quota.mjs'
 import { refreshClaudeLimits } from '../claude-usage.mjs'
+import { runCli, cliFailure } from './cli-llm.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -17,12 +24,41 @@ const flat = (t) => String(t ?? '').replace(/\s+/g, ' ')
 const levelsFrom = (t) => t.split(/,|\bor\b/).map(x => x.trim().toLowerCase())
   .filter(x => /^[a-z]+$/.test(x))
 
-export default {
+const plugin = {
   id: 'claude',
   label: 'Claude Code',
   bin: 'claude',
   installHint: 'Native Claude Code installation (https://claude.com/claude-code), `claude` on the PATH.',
   sessionTag: '',            // tmux sessions: cc-<name>
+
+  /**
+   * How bin/cc-start calls this CLI. See docs/plugins.md, "The launch
+   * declaration"; the placeholders are the values of cc-start's own options.
+   *
+   * claude is one of the four coding agents cc-start ships a `case` of its own
+   * for, and that case — not this block — is what a claude run is launched
+   * from: the script has to work standalone, with no hub to hand it a spec.
+   * The declaration is here because it is the same launch line written down
+   * where the rest of this plugin lives, and because it is the shape a THIRD
+   * PARTY's coding agent is read from. Both produce the same argv; keep them in
+   * step if the command line ever changes.
+   */
+  launch: {
+    promptMode: 'argv',
+    args: [
+      '--permission-mode', '{mode}',
+      { when: 'model', args: ['--model', '{model}'] },
+      { when: 'effort', args: ['--effort', '{effort}'] },
+      { when: 'session_id', args: ['--session-id', '{session_id}'] },
+      { when: 'settings', args: ['--settings', '{settings}'] },
+      '{prompt}',
+    ],
+    interactiveArgs: [
+      '--permission-mode', '{mode}',
+      { when: 'model', args: ['--model', '{model}'] },
+      { when: 'effort', args: ['--effort', '{effort}'] },
+    ],
+  },
 
   // Subscription-based: model list belongs to the account, no provider dropdown.
   subscription: true,
@@ -66,6 +102,97 @@ export default {
   goal: {
     max: 4000,
     command: (condition) => `/goal ${condition}`,
+  },
+
+  /**
+   * The budget gate for a claude run.
+   *
+   * Three windows, three thresholds, and each window is measured against ITS
+   * OWN: the 5-hour one, the general week, and a per-model week called "Fable".
+   * A cleared fable field means "follow the general 7-day threshold" — which is
+   * why that field declares no default of its own; a hardcoded 95 there would
+   * silently stop following a general threshold the operator moved.
+   *
+   * WHICH week binds is a question about the RUN, not about the account, so the
+   * check is handed the run's model: a Fable week at 96 % says nothing about a
+   * run on Sonnet. The mathematics stays in quota.mjs — the anomaly, the cost
+   * delta and the usage panel read the same windows, and one of the three
+   * disagreeing with this gate is exactly the bug that split them apart.
+   */
+  gate: {
+    fields: [
+      { key: 'gate_on', settingKey: 'claude_gate_on', type: 'switch', default: 1, labelKey: 'settings.gate_claude_on' },
+      { key: 'five', settingKey: 'claude_gate_5h', type: 'number', default: 90, min: 0, max: 100, step: 0.5, labelKey: 'settings.gate_claude_5h' },
+      { key: 'seven', settingKey: 'claude_gate_7d', type: 'number', default: 95, min: 0, max: 100, step: 0.5, labelKey: 'settings.gate_claude_7d', hintKey: 'settings.gate_claude_7d_hint' },
+      { key: 'fable', settingKey: 'claude_gate_fable', type: 'number', default: null, min: 0, max: 100, step: 0.5, labelKey: 'settings.gate_claude_fable', hintKey: 'settings.gate_claude_fable_hint' },
+    ],
+    async check(ctx, values = {}, run = {}) {
+      const { claudeGateBlocked, claudeQuota } = await import('../quota.mjs')
+      const seven = values.seven ?? 95
+      const g = claudeGateBlocked(claudeQuota(), run?.model ?? null, {
+        five: values.five ?? 90,
+        seven,
+        // Cleared fable field = the fable week follows the general threshold.
+        fable: values.fable ?? seven,
+      })
+      return g.blocked ? g : null
+    },
+  },
+
+  /**
+   * claude can answer the hub's own small questions — on the subscription the
+   * operator already pays for, which is what makes a hub with no API key
+   * anywhere still able to name its runs.
+   *
+   * `overhead: true` is not modesty: a coding agent starts a whole session for
+   * one question. It is slower and dearer than a model provider, and the UI
+   * says so wherever this source can be picked.
+   */
+  llm: {
+    schema: 'native',
+    overhead: true,
+    async models() { return plugin.fetchModels() },
+
+    /**
+     * One question, one session, no tools.
+     *
+     * The LEAN FLAG SET IS NOT OPTIONAL — measured: the default flags cost
+     * $0.112 for the same question the lean ones answer for $0.0026, 42 times
+     * as much, because claude otherwise loads settings, MCP servers, slash
+     * commands and the whole tool surface before it says a word. And the prompt
+     * goes on STDIN, never positionally: `--tools ""` is variadic and would eat
+     * it.
+     *
+     * Failure is `exit != 0` or `is_error: true`. Deliberately NOT `subtype` —
+     * that field still says "success" on a failed call.
+     */
+    async complete(ctx, req = {}) {
+      const args = ['-p', '--output-format', 'json']
+      if (req.model) args.push('--model', String(req.model))
+      args.push('--safe-mode', '--setting-sources', '', '--strict-mcp-config',
+        '--disable-slash-commands', '--no-session-persistence')
+      if (req.system) args.push('--system-prompt', String(req.system))
+      args.push('--tools', '')
+      // The one CLI of the four that takes a JSON schema. That is what makes
+      // this source `schema: 'native'`: no coaxing paragraph in the prompt.
+      if (req.schema) args.push('--json-schema', JSON.stringify(req.schema))
+
+      const r = await runCli('claude', args, {
+        stdin: String(req.prompt ?? ''),
+        timeoutMs: req.timeoutMs ?? 180_000,
+      })
+      let j = null
+      try { j = JSON.parse(r.stdout) } catch { /* not an envelope — handled below */ }
+      if (r.code !== 0 || !j || j.is_error === true) throw cliFailure('claude', r, j?.result)
+      const structured = j.structured_output
+      return {
+        text: structured === undefined || structured === null
+          ? String(j.result ?? '')
+          : JSON.stringify(structured),
+        usage: j.usage ?? null,
+        raw: j,
+      }
+    },
   },
 
   /**
@@ -122,8 +249,15 @@ export default {
     return `cd ${run.workdir_effective} && claude --resume ${run.id}`
   },
 
-  /** CLI arguments for cc-start. claude takes model and effort as separate flags. */
-  modelArgs(run) {
+  /**
+   * CLI arguments for cc-start. claude takes model and effort as separate flags.
+   *
+   * The second parameter is the plugin context every other harness uses to
+   * resolve its provider credentials; claude runs on the subscription and has
+   * none, so it is accepted and ignored — the signature stays the same across
+   * the four plugins.
+   */
+  modelArgs(run, _ctx = null) {
     const args = []
     if (!run.model) return { args, fehlt: [] }
     args.push('--model', run.model)
@@ -145,6 +279,7 @@ export default {
    */
   async usage() {
     await refreshClaudeLimits()
+    const { claudeQuota } = await import('../quota.mjs')
     const q = claudeQuota()
     let plan = null
     try {
@@ -166,3 +301,5 @@ export default {
     }
   },
 }
+
+export default plugin

@@ -650,6 +650,66 @@ try {
     }
   })
 
+  await pruefe('budgetGate asks the coding agent first, the provider second, OpenRouter last', async () => {
+    // The three steps of the routing, and the two that the test above does not
+    // reach: a claude run carries a provider too (from a favorite, from a
+    // stored definition), and an id the hub does not know at all must still
+    // land somewhere rather than starting ungated.
+    const { setSetting } = await import('../server/db.mjs')
+    const { budgetGate } = await import('../server/scheduler.mjs')
+    const { registerPlugin, unregisterPlugin } = await import('../server/plugins/registry.mjs')
+    const echt = global.fetch
+    const alt = { or: process.env.OPENROUTER_API_KEY, ds: process.env.DEEPSEEK_API_KEY }
+    process.env.OPENROUTER_API_KEY = 'or-test'
+    delete process.env.DEEPSEEK_API_KEY
+    setSetting('claude_gate_on', '1')
+    setSetting('openrouter_gate_on', '1')
+    setSetting('openrouter_min_eur', '5')
+    global.fetch = async () => ({ ok: true, json: async () => ({ data: { total_credits: 100, total_usage: 99.5 } }) })
+    const eigene = []
+    try {
+      // 1. The coding agent's own gate wins. claude runs on its subscription;
+      //    a provider travelling along says nothing about that account, and
+      //    asking the OpenRouter balance about a claude run would be a block
+      //    for somebody else's money.
+      const claude = await budgetGate('claude', 'claude-sonnet-5', 'openrouter')
+      wahr(!!claude && /Claude quota/.test(claude.reason),
+        `the claude gate answers even with a provider present (${claude?.reason})`)
+
+      // 2. A provider that declares no gate is no signal — opencode-zen
+      //    reports no balance, and "unknown" must never mean "blocked".
+      falsch(await budgetGate('opencode', 'x', 'opencode-zen'), 'a gateless provider blocks nothing')
+
+      // 3. LEGACY_DEFAULT_GATE: a provider the hub has never heard of falls
+      //    through to OpenRouter, which is where the provider-based harnesses
+      //    have always been measured.
+      const unbekannt = await budgetGate('opencode', 'x', 'no-such-provider')
+      wahr(!!unbekannt && /OpenRouter/.test(unbekannt.reason),
+        `an unknown provider falls back to the legacy gate (${unbekannt?.reason})`)
+
+      // A gate that throws must not stop the hub from starting runs: a broken
+      // plugin is a reason to say so in the log, never to block the pipeline.
+      const kaputt = {
+        id: 'unit-gate-throws', kind: 'harness', label: 'G', bin: 'g', subscription: true, providers: [],
+        logPatterns: [{ typ: 'rate_limit', re: /x/ }],
+        modelArgs: () => [], effortOptions: () => [], usage: async () => null, pulseId: () => null,
+        gate: { fields: [], check: async () => { throw new Error('plugin is broken') } },
+      }
+      if (registerPlugin(kaputt, { source: 'external' }).ok) eigene.push(kaputt.id)
+      falsch(await budgetGate('unit-gate-throws', 'm'), 'a throwing gate is an open gate')
+
+      // …and a gate that answers something useless is not an answer either.
+      const stumm = { ...kaputt, id: 'unit-gate-mute', gate: { fields: [], check: async () => ({ }) } }
+      if (registerPlugin(stumm, { source: 'external' }).ok) eigene.push(stumm.id)
+      falsch(await budgetGate('unit-gate-mute', 'm'), 'a block with no reason does not block')
+    } finally {
+      global.fetch = echt
+      for (const id of eigene) unregisterPlugin(id)
+      if (alt.or === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = alt.or
+      if (alt.ds !== undefined) process.env.DEEPSEEK_API_KEY = alt.ds
+    }
+  })
+
   await pruefe('cursor gate measures the included usage against its own threshold', async () => {
     const echt = global.fetch
     const auth = join(sandkasten, 'cursor-gate-auth.json')
@@ -1351,6 +1411,7 @@ try {
   gruppe('Plugin registries (coding agents + providers)')
   const { HARNESS_PLUGINS, harnessIds } = await import('../server/harnesses/index.mjs')
   const { PROVIDER_PLUGINS, getProvider, providerHasKey } = await import('../server/providers/index.mjs')
+  const { validateDescriptor } = await import('../server/plugins/manifest.mjs')
 
   await pruefe('every coding agent plugin carries the required fields', () => {
     for (const p of Object.values(HARNESS_PLUGINS)) {
@@ -1363,7 +1424,61 @@ try {
       wahr(typeof p.usage === 'function', `${p.id}: usage`)
       wahr(typeof p.pulseId === 'function', `${p.id}: pulseId`)
     }
-    gleich(harnessIds().length, 4, 'four built-in coding agents')
+    // >= and not ==: the registry is mutable now, and an external package in
+    // CCHUB_PLUGIN_DIR is allowed to be in it. What must hold is that the four
+    // built-ins are all still there.
+    wahr(harnessIds().length >= 4, `at least the four built-in coding agents (got ${harnessIds().length})`)
+    for (const id of ['claude', 'opencode', 'hermes', 'cursor']) wahr(harnessIds().includes(id), `built-in ${id}`)
+  })
+
+  // The optional half of the contract (docs/plugins.md). Every one of these
+  // fields may be absent — a plugin without them stays valid, which is the
+  // assertion that matters: the checks below run only WHEN a field is there,
+  // and a `for` over an empty list is the passing case.
+  await pruefe('the optional plugin fields are shaped right where they exist — and optional where they do not', () => {
+    const alle = [...Object.values(HARNESS_PLUGINS), ...Object.values(PROVIDER_PLUGINS)]
+    wahr(alle.length >= 7, 'both registries are populated')
+    for (const p of alle) {
+      if (p.credentials !== undefined) {
+        wahr(Array.isArray(p.credentials), `${p.id}: credentials is a list`)
+        for (const c of p.credentials) {
+          wahr(!!c.key && typeof c.key === 'string', `${p.id}: credential has a key`)
+          wahr(Array.isArray(c.envKeys), `${p.id}.${c.key}: envKeys is a list`)
+          if (c.required !== undefined) wahr(typeof c.required === 'boolean', `${p.id}.${c.key}: required is a flag`)
+        }
+      }
+      if (p.gate !== undefined) {
+        wahr(typeof p.gate.check === 'function', `${p.id}: gate.check`)
+        wahr(Array.isArray(p.gate.fields), `${p.id}: gate.fields is a list`)
+        for (const f of p.gate.fields) {
+          wahr(!!f.key, `${p.id}: gate field has a key`)
+          wahr(['number', 'text', 'password', 'select', 'switch'].includes(f.type), `${p.id}.${f.key}: known field type`)
+        }
+      }
+      if (p.llm !== undefined) {
+        wahr(typeof p.llm.complete === 'function', `${p.id}: llm.complete`)
+        wahr(['native', 'json_object', 'prompt'].includes(p.llm.schema), `${p.id}: llm.schema is one of the three`)
+        if (p.llm.models !== undefined) wahr(typeof p.llm.models === 'function', `${p.id}: llm.models`)
+        if (p.llm.overhead !== undefined) wahr(typeof p.llm.overhead === 'boolean', `${p.id}: llm.overhead is a flag`)
+      }
+      if (p.launch !== undefined) {
+        wahr(Array.isArray(p.launch.args) && p.launch.args.length > 0, `${p.id}: launch.args`)
+        wahr(['argv', 'stdin', 'file'].includes(p.launch.promptMode ?? 'argv'), `${p.id}: known promptMode`)
+      }
+      if (p.settings !== undefined) wahr(Array.isArray(p.settings), `${p.id}: settings is a list`)
+    }
+    // And the negative half, so "optional" is not merely an untested word: a
+    // descriptor carrying none of the four still passes validateDescriptor.
+    const bare = {
+      id: 'bare-provider', label: 'Bare', envKeys: ['BARE_KEY'], fetchModels: async () => [],
+    }
+    wahr(validateDescriptor(bare, 'provider').ok, 'a provider with no credentials/gate/llm/launch is valid')
+    const bareHarness = {
+      id: 'bare-agent', label: 'Bare', bin: 'bare', subscription: false, providers: [],
+      logPatterns: [{ typ: 'rate_limit', re: /x/ }],
+      modelArgs: () => [], effortOptions: () => [], usage: async () => null, pulseId: () => null,
+    }
+    wahr(validateDescriptor(bareHarness, 'harness').ok, 'a coding agent with none of them is valid')
   })
   await pruefe('harness provider references resolve to provider plugins', () => {
     for (const p of Object.values(HARNESS_PLUGINS)) {
@@ -1489,6 +1604,527 @@ try {
       falsch(liste[1].auto, 'nothing else is auto')
     } finally { process.env.PATH = altPath }
   })
+
+  // ------------------------------------------------------------------
+  gruppe('Plugin manifests: what a stranger\'s package must say (plugins/manifest.mjs)')
+
+  // This is the one part of the plugin machinery that needs no sandbox and no
+  // database — and it is what decides whether somebody else's directory is
+  // allowed anywhere near the hub. Pure functions, so the edge cases are cheap.
+  const { validateManifest, PLUGIN_API } = await import('../server/plugins/manifest.mjs')
+  const gutesManifest = (over = {}) => ({
+    api: 1, id: 'mistral', kind: 'provider', name: 'Mistral', version: '1.0.0',
+    description: 'Mistral models', homepage: 'https://example.invalid', author: 'Someone', ...over,
+  })
+
+  await pruefe('a good manifest is accepted and normalized', () => {
+    const r = validateManifest(gutesManifest())
+    wahr(r.ok, `accepted (${r.problems.join('; ')})`)
+    gleich(r.value.id, 'mistral', 'id')
+    gleich(r.value.kind, 'provider', 'kind')
+    gleich(r.value.version, '1.0.0', 'version')
+    // `main` is defaulted rather than demanded: a package that says nothing
+    // about it means the file every example ships.
+    gleich(r.value.main, 'index.mjs', 'main defaults to index.mjs')
+    gleich(r.value.api, PLUGIN_API, 'the api the hub speaks')
+  })
+  await pruefe('an explicit main is kept, one pointing outside the package is refused', () => {
+    gleich(validateManifest(gutesManifest({ main: 'src/plugin.mjs' })).value.main, 'src/plugin.mjs', 'kept')
+    // A manifest that could name `../../.ssh/id_rsa` would let a package import
+    // anything on the machine — the loader is handed a relative name or nothing.
+    falsch(validateManifest(gutesManifest({ main: '../evil.mjs' })).ok, 'a path escaping the package')
+    falsch(validateManifest(gutesManifest({ main: '/etc/passwd' })).ok, 'an absolute path')
+    falsch(validateManifest(gutesManifest({ main: '' })).ok, 'an empty main')
+  })
+  await pruefe('a manifest for another api version is refused, and says so', () => {
+    const r = validateManifest(gutesManifest({ api: 2 }))
+    falsch(r.ok, 'refused')
+    wahr(r.value === null, 'nothing to register')
+    wahr(r.problems.some(p => /api/i.test(p)), `the problem names the api (${r.problems.join('; ')})`)
+    falsch(validateManifest(gutesManifest({ api: '1' })).ok, 'a string "1" is not the number 1')
+    falsch(validateManifest(gutesManifest({ api: undefined })).ok, 'no api at all')
+  })
+  await pruefe('a bad id is refused — the id is a directory name and a database key', () => {
+    for (const id of ['Mistral', 'x', '', 'mi stral', '-lead', 'mistral!', 'a'.repeat(41)]) {
+      falsch(validateManifest(gutesManifest({ id })).ok, `refused: ${JSON.stringify(id)}`)
+    }
+    for (const id of ['ab', 'mistral-large', 'x9', 'a'.repeat(40)]) {
+      wahr(validateManifest(gutesManifest({ id })).ok, `accepted: ${JSON.stringify(id)}`)
+    }
+  })
+  await pruefe('a bad kind is refused — there are exactly two', () => {
+    for (const kind of ['harness', 'provider']) wahr(validateManifest(gutesManifest({ kind })).ok, kind)
+    for (const kind of ['Harness', 'model', '', undefined]) {
+      falsch(validateManifest(gutesManifest({ kind })).ok, `refused: ${JSON.stringify(kind)}`)
+    }
+  })
+  await pruefe('name and version are demanded; anything that is not an object is refused outright', () => {
+    falsch(validateManifest(gutesManifest({ name: '  ' })).ok, 'a blank name')
+    falsch(validateManifest(gutesManifest({ version: undefined })).ok, 'no version')
+    for (const junk of [null, 'text', 42, ['a']]) falsch(validateManifest(junk).ok, `refused: ${JSON.stringify(junk)}`)
+  })
+
+  await pruefe('validateDescriptor holds both kinds to their minimum', () => {
+    const p = { id: 'p', label: 'P', envKeys: ['P_KEY'], fetchModels: async () => [] }
+    wahr(validateDescriptor(p, 'provider').ok, 'a minimal provider')
+    // `credentials` is the richer form of `envKeys`; either one satisfies it.
+    wahr(validateDescriptor({ ...p, envKeys: undefined, credentials: [{ key: 'api_key', envKeys: ['P_KEY'] }] }, 'provider').ok,
+      'credentials instead of envKeys')
+    falsch(validateDescriptor({ ...p, envKeys: undefined }, 'provider').ok, 'neither of the two')
+    falsch(validateDescriptor({ ...p, fetchModels: undefined }, 'provider').ok, 'no fetchModels')
+    falsch(validateDescriptor({ ...p, label: '' }, 'provider').ok, 'no label')
+
+    const h = {
+      id: 'h', label: 'H', bin: 'hbin', subscription: false, providers: [],
+      logPatterns: [{ typ: 'rate_limit', re: /x/ }],
+      modelArgs: () => [], effortOptions: () => [], usage: async () => null, pulseId: () => null,
+    }
+    wahr(validateDescriptor(h, 'harness').ok, 'a minimal coding agent')
+    falsch(validateDescriptor({ ...h, bin: undefined }, 'harness').ok, 'no bin')
+    falsch(validateDescriptor({ ...h, subscription: 'yes' }, 'harness').ok, 'subscription must be a boolean')
+    falsch(validateDescriptor({ ...h, logPatterns: [] }, 'harness').ok, 'an empty log pattern list')
+    falsch(validateDescriptor({ ...h, pulseId: null }, 'harness').ok, 'a missing function')
+    // …and the optional fields really are optional in BOTH directions: adding
+    // them must not make a valid descriptor invalid either.
+    wahr(validateDescriptor({ ...h, credentials: [{ key: 'k', envKeys: [] }], gate: { fields: [], check: async () => null }, llm: { schema: 'prompt', complete: async () => ({}) }, launch: { args: ['x'] } }, 'harness').ok,
+      'all four optional fields present')
+    falsch(validateDescriptor(h, 'model-source').ok, 'an unknown kind')
+    falsch(validateDescriptor(null, 'harness').ok, 'no descriptor at all')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('The hub\'s own LLM calls: tolerant JSON (llm/json.mjs)')
+
+  const { extractJson } = await import('../server/llm/json.mjs')
+
+  await pruefe('valid JSON is returned untouched — no repair may "fix" a correct answer', () => {
+    const r = extractJson('{"title":"Fix the finish gate"}')
+    wahr(r.ok, 'parsed')
+    gleich(r.value.title, 'Fix the finish gate', 'value')
+    gleich(r.repaired.length, 0, 'nothing was repaired')
+  })
+  await pruefe('a markdown fence with prose around it is cut out', () => {
+    const r = extractJson('Sure, here is the JSON:\n```json\n{"title":"x"}\n```\nHope that helps!')
+    wahr(r.ok, 'parsed')
+    gleich(r.value.title, 'x', 'value')
+    enthaelt(r.note, 'fence', 'the note says where it was found')
+    // The same without a language tag, and with a fence the model never closed.
+    wahr(extractJson('```\n{"a":1}\n```').ok, 'no language tag')
+    wahr(extractJson('here:\n```json\n{"a":1}').ok, 'an unclosed fence')
+  })
+  await pruefe('a } inside a string value does not close the object', () => {
+    // This is why the scan is a character scanner and not a regular expression:
+    // a report sentence with a brace in it is the first thing that breaks one.
+    const r = extractJson('{"title":"a } b","note":"and ] too","n":1}')
+    wahr(r.ok, 'parsed')
+    gleich(r.value.title, 'a } b', 'the brace stayed inside the string')
+    gleich(r.value.note, 'and ] too', 'so did the bracket')
+    gleich(r.value.n, 1, 'and the object really did close at the end')
+    // Prose after a document that contains a brace must not shorten it either.
+    const r2 = extractJson('Result: {"t":"} done"} — that is all.')
+    wahr(r2.ok && r2.value.t === '} done', 'cut out of prose without losing the brace')
+  })
+  await pruefe('a trailing comma is repaired, and the repair is named', () => {
+    const r = extractJson('{"a":1,"b":[1,2,],}')
+    wahr(r.ok, 'parsed')
+    gleich(r.value.b.length, 2, 'the array kept its two entries')
+    wahr(r.repaired.some(x => /trailing comma/.test(x)), `named (${r.repaired.join(', ')})`)
+  })
+  await pruefe('single-quoted keys and values are re-quoted', () => {
+    const r = extractJson("{'title': 'it\\'s fine', unquoted: 3}")
+    wahr(r.ok, 'parsed')
+    gleich(r.value.title, "it's fine", 'the escaped quote survived')
+    gleich(r.value.unquoted, 3, 'a bare key was quoted')
+  })
+  await pruefe('typographic quotes are replaced with straight ones', () => {
+    const r = extractJson('{“title”: “Schön”}')
+    wahr(r.ok, 'parsed')
+    gleich(r.value.title, 'Schön', 'value')
+    wahr(r.repaired.some(x => /typographic/.test(x)), `named (${r.repaired.join(', ')})`)
+  })
+  await pruefe('NaN and Infinity become null rather than a parse failure', () => {
+    const r = extractJson('{"a": NaN, "b": Infinity, "c": -Infinity, "d": +3}')
+    wahr(r.ok, 'parsed')
+    wahr(r.value.a === null && r.value.b === null && r.value.c === null, 'the three non-numbers are null')
+    gleich(r.value.d, 3, 'a stray leading + is dropped')
+  })
+  await pruefe('a truncated document fails cleanly — no fragment is ever returned', () => {
+    // The dangerous failure is not "it did not parse", it is "it parsed into
+    // half an answer". Both shapes must answer ok:false with nothing in value.
+    for (const text of ['{"a": "unterminat', '{"a": 1', '{"list": [1, 2', '{"a": "x\\']) {
+      const r = extractJson(text)
+      falsch(r.ok, `refused: ${JSON.stringify(text)}`)
+      wahr(r.value === null, 'and value is null, not a fragment')
+    }
+    const prosa = extractJson('I am afraid I cannot do that.')
+    falsch(prosa.ok, 'prose with no JSON in it at all')
+    enthaelt(prosa.note, 'no candidate parsed', 'and the note says what was tried')
+    const leer = extractJson('')
+    falsch(leer.ok, 'an empty answer')
+    enthaelt(leer.note, 'no JSON document found', 'and that one says there was nothing to try')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('The hub\'s own LLM calls: the schema subset (llm/schema.mjs)')
+
+  const { validate: schemaValidate, strictPrompt } = await import('../server/llm/schema.mjs')
+  const SCHEMA = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['title'],
+    properties: {
+      title: { type: 'string' },
+      n: { type: 'integer' },
+      ok: { type: 'boolean' },
+      mode: { type: 'string', enum: ['copy', 'link'] },
+      list: { type: 'array', items: { type: 'string' } },
+    },
+  }
+
+  await pruefe('a required field that is missing is a problem, with its path', () => {
+    const r = schemaValidate(SCHEMA, {})
+    falsch(r.ok, 'not valid')
+    gleich(r.problems.length, 1, 'exactly the one problem')
+    gleich(r.problems[0].path, 'data.title', 'the path a model can act on')
+    enthaelt(r.problems[0].message, 'required', 'and what is wrong')
+    // An OPTIONAL field that is missing is not a problem — it becomes null so
+    // nothing downstream ever meets undefined.
+    wahr(r.value.n === null, 'a missing optional is null')
+  })
+  await pruefe('an enum violation names the path and the allowed values', () => {
+    const r = schemaValidate(SCHEMA, { title: 't', mode: 'sideways' })
+    falsch(r.ok, 'not valid')
+    gleich(r.problems[0].path, 'data.mode', 'path')
+    enthaelt(r.problems[0].message, '"copy"', 'the allowed values are listed')
+    enthaelt(r.problems[0].message, '"link"', 'both of them')
+    // A near miss is a coercion, not a failure: models answer "Copy" often
+    // enough that rejecting it would cost an otherwise correct answer.
+    const near = schemaValidate(SCHEMA, { title: 't', mode: ' Copy ' })
+    wahr(near.ok, 'a near miss is accepted')
+    gleich(near.value.mode, 'copy', 'and corrected to the declared spelling')
+  })
+  await pruefe('the coercions: "true" is a boolean, "3" is a number, one value is a one-element array', () => {
+    const r = schemaValidate(SCHEMA, { title: 't', n: '3', ok: 'true', list: 'only-one' })
+    wahr(r.ok, `valid (${JSON.stringify(r.problems)})`)
+    gleich(r.value.n, 3, 'numeric string')
+    gleich(r.value.ok, true, 'boolean word')
+    wahr(Array.isArray(r.value.list) && r.value.list.length === 1 && r.value.list[0] === 'only-one',
+      'a single value became a one-element list')
+    gleich(schemaValidate(SCHEMA, { title: 't', ok: 'no' }).value.ok, false, '"no" is false')
+    gleich(schemaValidate(SCHEMA, { title: 't', ok: 1 }).value.ok, true, '1 is true')
+    gleich(schemaValidate(SCHEMA, { title: 42 }).value.title, '42', 'a number where a string was asked for')
+    // What is NOT coerced: something that says nothing about the answer.
+    falsch(schemaValidate(SCHEMA, { title: 't', n: 'many' }).ok, '"many" is not a number')
+    falsch(schemaValidate(SCHEMA, { title: 't', ok: 'perhaps' }).ok, '"perhaps" is not a boolean')
+    falsch(schemaValidate(SCHEMA, { title: { a: 1 } }).ok, 'an object where a string was asked for')
+  })
+  await pruefe('additionalProperties:false drops what was not asked for, it does not fail', () => {
+    // A model that volunteers a "reasoning" field next to a correct answer has
+    // still answered correctly.
+    const r = schemaValidate(SCHEMA, { title: 't', reasoning: 'because', extra: [1, 2] })
+    wahr(r.ok, 'still valid')
+    falsch('reasoning' in r.value, 'the extra field is gone')
+    falsch('extra' in r.value, 'and so is the other one')
+    // Without the keyword the extra field is kept — that is the difference.
+    const offen = schemaValidate({ type: 'object', properties: { title: { type: 'string' } } },
+      { title: 't', reasoning: 'because' })
+    gleich(offen.value.reasoning, 'because', 'an open schema keeps it')
+  })
+  await pruefe('a nested problem carries the full path', () => {
+    const r = schemaValidate(SCHEMA, { title: 't', list: ['a', 7, { b: 1 }] })
+    falsch(r.ok, 'not valid')
+    gleich(r.problems[0].path, 'data.list[2]', 'the offending index is named')
+    gleich(r.value.list[1], '7', 'the coercible neighbour was still coerced')
+  })
+  await pruefe('the strict prompt forbids exactly what models do wrong', () => {
+    const p = strictPrompt(SCHEMA, { schemaName: 'run_title' })
+    enthaelt(p, 'run_title', 'the schema is named')
+    enthaelt(p, 'code fences', 'fences are forbidden')
+    enthaelt(p, 'Schema:', 'the schema itself is shown')
+    enthaelt(p, '"title"', 'including its fields')
+    // The example teaches the SHAPE; the enum contributes a real value because
+    // that is the one place a real value teaches instead of tempting a copy.
+    enthaelt(p, '"copy"', 'the enum names its first value in the example')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('The hub\'s own LLM calls: the alarm throttle (llm/alerts.mjs)')
+
+  // The problem this exists for: a wrong key fails on EVERY call, and the hub
+  // makes one per run title, one per log hit, one per flow step. The clock is
+  // injected (`nowMs`, like integrateTick) so none of this waits.
+  const { llmAlert, _alertReset, _alertState, alertSignature } = await import('../server/llm/alerts.mjs')
+  const { setSetting: setzen, getSetting: lesen } = await import('../server/db.mjs')
+  const T0 = 1_700_000_000_000
+  const gesendet = []
+  const echtesFetch = global.fetch
+  const alarmVorher = {
+    token: lesen('telegram_token'), chat: lesen('telegram_chat'),
+    on: lesen('llm_alert_on'), fenster: lesen('llm_alert_window_min'), max: lesen('llm_alert_max_per_hour'),
+  }
+  const alarmAufbauen = () => {
+    setzen('telegram_token', 'unit-token')
+    setzen('telegram_chat', '42')
+    setzen('llm_alert_on', '1')
+    setzen('llm_alert_window_min', '30')
+    setzen('llm_alert_max_per_hour', '6')
+    gesendet.length = 0
+    _alertReset()
+    global.fetch = async (url, init) => {
+      gesendet.push(JSON.parse(init.body).text)
+      return { ok: true, status: 200, json: async () => ({ ok: true }) }
+    }
+  }
+  const alarm = (over = {}) => llmAlert({
+    purpose: 'title', source: 'provider:openrouter', model: 'm', errorClass: 'http_401', ...over,
+  })
+
+  try {
+    await pruefe('the first failure is sent, a second one inside the window is counted instead', async () => {
+      alarmAufbauen()
+      gleich((await alarm({ nowMs: T0 })).reason, 'sent', 'the first one goes out')
+      const zweite = await alarm({ nowMs: T0 + 60_000 })
+      gleich(zweite.reason, 'throttled', 'the second is held back')
+      gleich(zweite.suppressed, 1, 'and counted')
+      gleich((await alarm({ nowMs: T0 + 120_000 })).suppressed, 2, 'the count grows')
+      gleich(gesendet.length, 1, 'still one message on the wire')
+    })
+    await pruefe('what was suppressed is named in the next message for that signature', async () => {
+      // Silence about 47 swallowed failures would be a worse lie than 47
+      // messages — the count is the whole reason the throttle is allowed.
+      const nach = await alarm({ nowMs: T0 + 31 * 60_000 })
+      gleich(nach.reason, 'sent', 'past the window it goes out again')
+      gleich(gesendet.length, 2, 'the second message')
+      enthaelt(gesendet[1], '2 further failures', 'it names what was held back')
+      gleich(_alertState().signatures[alertSignature({ purpose: 'title', source: 'provider:openrouter', model: 'm', errorClass: 'http_401' })].suppressed, 0,
+        'and a DELIVERED message forgets the count')
+    })
+    await pruefe('a different signature is a different failure and is not throttled by the first', async () => {
+      alarmAufbauen()
+      gleich((await alarm({ nowMs: T0 })).reason, 'sent', 'the first')
+      gleich((await alarm({ nowMs: T0, errorClass: 'no_json' })).reason, 'sent', 'another error class')
+      gleich((await alarm({ nowMs: T0, purpose: 'check' })).reason, 'sent', 'another caller')
+      gleich((await alarm({ nowMs: T0, model: 'other' })).reason, 'sent', 'another model')
+      gleich(gesendet.length, 4, 'four messages, four signatures')
+      gleich((await alarm({ nowMs: T0 })).reason, 'throttled', 'but the first signature is still held')
+    })
+    await pruefe('the hourly ceiling holds across all signatures, and says how many it swallowed', async () => {
+      alarmAufbauen()
+      setzen('llm_alert_max_per_hour', '2')
+      for (const p of ['title', 'check']) gleich((await alarm({ nowMs: T0, purpose: p })).reason, 'sent', p)
+      gleich((await alarm({ nowMs: T0, purpose: 'extract' })).reason, 'ceiling', 'the third is over the ceiling')
+      gleich((await alarm({ nowMs: T0, purpose: 'extras' })).reason, 'ceiling', 'and so is the fourth')
+      gleich(gesendet.length, 2, 'two messages an hour means two messages')
+      gleich(_alertState().ceilingSuppressed, 2, 'and the hub knows how many it kept back')
+      // An hour later the window has rolled and the ceiling reports itself.
+      gleich((await alarm({ nowMs: T0 + 61 * 60_000, purpose: 'extract' })).reason, 'sent', 'an hour on')
+      enthaelt(gesendet.at(-1), 'held back', 'the message names the ceiling')
+    })
+    await pruefe('llm_alert_on=0 silences it completely', async () => {
+      alarmAufbauen()
+      setzen('llm_alert_on', '0')
+      const r = await alarm({ nowMs: T0 })
+      gleich(r.reason, 'off', 'switched off')
+      gleich(gesendet.length, 0, 'nothing on the wire')
+    })
+    await pruefe('an empty window or ceiling setting falls back to the default, not to zero', async () => {
+      // Number('') is 0 AND finite — without the guard an unconfigured hub
+      // would read every default as "never" (a ceiling of 0 messages).
+      alarmAufbauen()
+      setzen('llm_alert_window_min', '')
+      setzen('llm_alert_max_per_hour', '')
+      gleich((await alarm({ nowMs: T0 })).reason, 'sent', 'the default ceiling still lets one through')
+      gleich((await alarm({ nowMs: T0 + 60_000 })).reason, 'throttled', 'the default window still throttles')
+    })
+    await pruefe('a broken alarm channel is never the caller\'s problem', async () => {
+      // A title, a flow step or a log hit must not be able to fail because the
+      // alarm channel is having a bad day — in either of its two bad days.
+      alarmAufbauen()
+      global.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) })
+      const abgelehnt = await alarm({ nowMs: T0 })
+      wahr(abgelehnt.sent === false, 'Telegram refused it')
+      gleich(abgelehnt.reason, 'unreachable', 'and that is the answer, not a throw')
+      // A failed send KEEPS the count, so the next message still names those
+      // failures — only a delivered one may forget them.
+      alarmAufbauen()
+      const kaputt = await alarm({ nowMs: T0, purpose: { toString() { throw new Error('boom') } } })
+      wahr(kaputt.sent === false, 'something inside threw')
+      gleich(kaputt.reason, 'error', 'and it came back as a result all the same')
+    })
+  } finally {
+    global.fetch = echtesFetch
+    _alertReset()
+    // The token must not survive into the groups below: they would start
+    // talking to api.telegram.org for real.
+    setzen('telegram_token', alarmVorher.token ?? '')
+    setzen('telegram_chat', alarmVorher.chat ?? '')
+    setzen('llm_alert_on', alarmVorher.on ?? '1')
+    setzen('llm_alert_window_min', alarmVorher.fenster ?? '')
+    setzen('llm_alert_max_per_hour', alarmVorher.max ?? '')
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Model sources and plugin settings (llm/sources.mjs, plugins/settings.mjs)')
+
+  const { parseSource, sourceId, DEFAULT_SOURCE } = await import('../server/llm/sources.mjs')
+
+  await pruefe('an unprefixed source reads as provider:openrouter — that is the whole backwards compatibility', () => {
+    // Every stored `llm_*_source` an existing installation has is empty or a
+    // legacy value. Reading those as OpenRouter is what makes a hub that
+    // changes nothing behave byte for byte as it did.
+    gleich(DEFAULT_SOURCE, 'provider:openrouter', 'the documented default')
+    for (const value of ['', '   ', null, undefined, 'openrouter', 'deepseek/deepseek-v4-flash', 'weird:thing']) {
+      const s = parseSource(value)
+      gleich(`${s.kind}:${s.pluginId}`, 'provider:openrouter', `${JSON.stringify(value)} reads as the default`)
+    }
+  })
+  await pruefe('provider:x and agent:x are read as themselves', () => {
+    gleich(parseSource('provider:deepseek').kind, 'provider', 'provider kind')
+    gleich(parseSource('provider:deepseek').pluginId, 'deepseek', 'provider id')
+    gleich(parseSource('agent:claude').kind, 'agent', 'agent kind')
+    gleich(parseSource('agent:claude').pluginId, 'claude', 'agent id')
+    gleich(parseSource('  provider: deepseek  ').pluginId, 'deepseek', 'whitespace is trimmed')
+    // An id with a dash in it is the ordinary case (opencode-zen).
+    gleich(parseSource('provider:opencode-zen').pluginId, 'opencode-zen', 'a dashed id')
+  })
+  await pruefe('sourceId is parseSource\'s inverse, and calls a harness an agent', () => {
+    gleich(sourceId('provider', 'deepseek'), 'provider:deepseek', 'a provider')
+    // The registry says `harness`; the source string says `agent`, because that
+    // is the word the picker shows.
+    gleich(sourceId('harness', 'claude'), 'agent:claude', 'a coding agent')
+    for (const id of ['provider:deepseek', 'agent:claude']) {
+      const s = parseSource(id)
+      gleich(sourceId(s.kind, s.pluginId), id, `round trip: ${id}`)
+    }
+  })
+
+  const { pluginSettingKey, allPluginSettingKeys, pluginFields } =
+    await import('../server/plugins/settings.mjs')
+
+  await pruefe('a declared settingKey keeps history; without one the key is namespaced', () => {
+    // This is what makes the rebuild need NO settings migration: the built-in
+    // gates declare the keys they have always used.
+    gleich(pluginSettingKey('claude', { key: 'g5h', settingKey: 'claude_gate_5h' }), 'claude_gate_5h', 'the historic key')
+    gleich(pluginSettingKey('mistral', { key: 'threshold' }), 'plugin_mistral_threshold', 'namespaced')
+    // Two plugins declaring the same field name is harmless, which is the point.
+    wahr(pluginSettingKey('a', { key: 'threshold' }) !== pluginSettingKey('b', { key: 'threshold' }),
+      'two plugins, two keys')
+  })
+  await pruefe('allPluginSettingKeys carries every historic gate key', () => {
+    // A key missing from this list is silently dropped by the settings form's
+    // allowlist — the threshold would look configurable and never stick.
+    const keys = allPluginSettingKeys()
+    for (const k of ['claude_gate_on', 'claude_gate_5h', 'claude_gate_7d', 'claude_gate_fable',
+      'cursor_gate_on', 'cursor_gate_pct', 'cursor_included_usd',
+      'openrouter_gate_on', 'openrouter_min_eur', 'deepseek_gate_on', 'deepseek_min_usd']) {
+      wahr(keys.includes(k), `${k} is in the allowlist`)
+    }
+    gleich(keys.length, new Set(keys).size, 'no duplicates')
+  })
+  await pruefe('pluginFields answers with a list for anything, including nothing', () => {
+    gleich(pluginFields(null).length, 0, 'no plugin')
+    gleich(pluginFields({}, 'gate').length, 0, 'no gate')
+    gleich(pluginFields({ settings: 'nonsense' }).length, 0, 'a settings field that is not a list')
+    gleich(pluginFields({ settings: [{ key: 'a' }, {}, null, { key: '' }] }).length, 1, 'entries without a key are dropped')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('The launch declaration: how an external coding agent is started (runner.mjs)')
+
+  const { registerPlugin, unregisterPlugin } = await import('../server/plugins/registry.mjs')
+  const { launchSpec, launchable } = await import('../server/runner.mjs')
+  const testHarness = (over = {}) => ({
+    kind: 'harness', label: 'Test agent', bin: 'testbin', subscription: false, providers: [],
+    logPatterns: [{ typ: 'rate_limit', re: /x/ }],
+    modelArgs: () => [], effortOptions: () => [], usage: async () => null, pulseId: () => null, ...over,
+  })
+  const eingetragen = []
+  const eintragen = (desc) => {
+    const r = registerPlugin(desc, { source: 'external' })
+    if (r.ok) eingetragen.push(desc.id)
+    return r
+  }
+
+  try {
+    await pruefe('the four built-ins need no spec — cc-start already knows them', () => {
+      // A spec for claude would be a second description of the same launch
+      // line, and the two would drift. `launchable` still says yes.
+      for (const id of ['claude', 'opencode', 'hermes', 'cursor']) {
+        wahr(launchSpec(id) === null, `${id}: no spec`)
+        wahr(launchable(id), `${id}: startable all the same`)
+      }
+    })
+    await pruefe('an external descriptor\'s launch declaration is resolved into a spec', () => {
+      wahr(eintragen(testHarness({
+        id: 'unit-launch', sessionTag: 'ul', installHint: 'npm i -g unit-launch',
+        launch: {
+          args: ['run', '--model', '{model}', '{prompt}'],
+          promptMode: 'argv',
+          interactiveArgs: ['-i'],
+          stderrLog: '{home}/unit-launch.log',
+          submitNudge: { waitFor: 'ctrl+p', timeoutSec: 90 },
+        },
+      })).ok, 'registered')
+      const spec = launchSpec('unit-launch')
+      wahr(!!spec, 'a spec came out')
+      gleich(spec.harness, 'unit-launch', 'the harness is named in the spec')
+      // Resolved, not passed through: bin/sessionTag/installHint are ordinary
+      // descriptor fields, and a launch block that says nothing about them
+      // means the ones declared next to the id.
+      gleich(spec.bin, 'testbin', 'bin comes from the descriptor')
+      gleich(spec.sessionTag, 'ul', 'session tag')
+      gleich(spec.installHint, 'npm i -g unit-launch', 'install hint')
+      gleich(spec.args.join(' '), 'run --model {model} {prompt}', 'the arguments as declared')
+      gleich(spec.promptMode, 'argv', 'prompt mode')
+      gleich(spec.interactiveArgs.join(' '), '-i', 'interactive arguments')
+      gleich(spec.submitNudge.waitFor, 'ctrl+p', 'the submit nudge survives as an object')
+      wahr(launchable('unit-launch'), 'and it is startable')
+    })
+    await pruefe('a launch block may name its own bin, and defaults promptMode to argv', () => {
+      wahr(eintragen(testHarness({ id: 'unit-ownbin', launch: { bin: 'other-bin', args: ['go'] } })).ok, 'registered')
+      const spec = launchSpec('unit-ownbin')
+      gleich(spec.bin, 'other-bin', 'the launch block wins over the descriptor')
+      gleich(spec.promptMode, 'argv', 'the default prompt mode')
+      falsch('interactiveArgs' in spec, 'nothing is invented that was not declared')
+      falsch('submitNudge' in spec, 'and a nudge that was not asked for is absent')
+    })
+    await pruefe('a coding agent with neither a cc-start case nor a launch block cannot be started', () => {
+      // Better to refuse before a worktree exists than to read it out of
+      // cc-start's stderr afterwards — a tmux session running nothing.
+      wahr(eintragen(testHarness({ id: 'unit-nolaunch' })).ok, 'registered')
+      wahr(launchSpec('unit-nolaunch') === null, 'no spec')
+      falsch(launchable('unit-nolaunch'), 'and not startable')
+      // An empty or malformed args list is the same answer, not a broken spec.
+      wahr(eintragen(testHarness({ id: 'unit-emptyargs', launch: { args: [] } })).ok, 'registered')
+      falsch(launchable('unit-emptyargs'), 'an empty args list is no declaration')
+      wahr(eintragen(testHarness({ id: 'unit-badargs', launch: { args: 'run' } })).ok, 'registered')
+      falsch(launchable('unit-badargs'), 'a string is no argument list')
+      falsch(launchable('never-registered'), 'an unknown coding agent')
+    })
+    await pruefe('an id that is already taken is refused, never silently overridden', () => {
+      // A package shadowing `claude` could replace the coding agent every run
+      // is started with, without saying so anywhere.
+      const r = registerPlugin(testHarness({ id: 'claude' }), { source: 'external' })
+      falsch(r.ok, 'refused')
+      enthaelt(r.error, 'already taken', 'and it says why')
+      gleich(launchSpec('claude'), null, 'the built-in is untouched')
+      falsch(registerPlugin(testHarness({ id: 'Not Valid' }), { source: 'external' }).ok, 'an invalid id')
+      falsch(registerPlugin(testHarness({ id: 'unit-nokind', kind: 'model' }), { source: 'external' }).ok, 'an unknown kind')
+      falsch(registerPlugin({ id: 'unit-broken', kind: 'harness', label: 'B' }, { source: 'external' }).ok,
+        'a descriptor that does not meet the contract')
+    })
+    await pruefe('a built-in is never unregistered; an external one is', () => {
+      falsch(unregisterPlugin('claude').ok, 'a built-in stays — it is part of the running code')
+      wahr(unregisterPlugin('unit-badargs').ok, 'an external one goes')
+      eingetragen.splice(eingetragen.indexOf('unit-badargs'), 1)
+      falsch(launchable('unit-badargs'), 'and is gone from the registry')
+      falsch(unregisterPlugin('unit-badargs').ok, 'twice is not a thing')
+    })
+  } finally {
+    // The registry is process-wide: leaving test plugins in it would show up in
+    // every group after this one.
+    for (const id of eingetragen) unregisterPlugin(id)
+  }
 
   // ------------------------------------------------------------------
   gruppe('i18n: catalogs and translation')

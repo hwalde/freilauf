@@ -762,3 +762,60 @@ dialog.qr.cleanup form.form-grid label:first-of-type { margin-top: 0; }
 /* The agent+provider+model block reused on the settings page (runSetupFields
    with wrapClass) reads as a section there. */
 form.form-grid fieldset.cleanup-setup { margin: var(--sp-12) 0; padding: var(--sp-10) var(--sp-12); }
+
+/* ---- Plugins page (server/plugins/web.mjs) ----
+   Additive only: the cards, the badges and the packages table. Everything else
+   on that page is the existing .card / form.form-grid / .btn-row vocabulary. */
+.plugin-card h3 { margin: 0 0 var(--sp-6); }
+.plugin-card h3 .dim { font-weight: 400; }
+.plugin-card form.form-grid { margin: var(--sp-8) 0 0; }
+/* The footer stands outside the save form (a form inside a form is a parse
+   error), so it needs the separation the form no longer gives it. */
+.plugin-footer { margin: var(--sp-8) 0 0; padding-top: var(--sp-8);
+  border-top: 1px solid var(--border); }
+
+/* What a plugin can do, at a glance: read, not clicked. */
+.plugin-badges { display: flex; gap: var(--sp-6); flex-wrap: wrap; margin: var(--sp-6) 0 var(--sp-4); }
+.plugin-badge { display: inline-block; padding: 1px var(--sp-8); border-radius: var(--radius-pill);
+  border: 1px solid var(--border); background: var(--surface-card);
+  font-size: var(--fs-small); color: var(--text-dim); }
+.plugin-badge.ok { border-color: var(--ok); color: var(--ok-text); }
+
+/* One credential: presence, the variable NAME, and the two fields. The value
+   itself is never rendered — see credentialsBlock(). */
+.cred { padding: var(--sp-6) 0; }
+.cred + .cred { margin-top: var(--sp-8); border-top: 1px solid var(--border); }
+.cred > b { margin-right: var(--sp-6); }
+.cred > p.dim { margin: var(--sp-2) 0 var(--sp-6); }
+
+/* Plugin packages: a load error is the reason the row exists, so it wraps
+   rather than being cut off. */
+table.plugin-packages code { word-break: break-all; }
+table.plugin-packages tr.broken td { background: var(--err-deep-soft); }
+
+/* "cc-hub found N things on this machine it could use" — a suggestion, not an
+   alarm: the accent, like the other-repo note, not the plain banner's red. */
+.banner.discovery { border-left-color: var(--accent); background: var(--accent-soft-bg);
+  display: flex; gap: var(--sp-12); align-items: center; flex-wrap: wrap; }
+
+/* ---- Settings: the generated budget gates -------------------------------
+   One block per plugin that declares thresholds. Without the separator the
+   fields of four plugins read as one long list, and "which on/off switch
+   belongs to which account" is exactly the question this page has to answer at
+   a glance. Purely additive: the labels inside are the form grid's own. */
+.gate-block + .gate-block { margin-top: var(--sp-12); padding-top: var(--sp-12);
+  border-top: 1px solid var(--border); }
+.gate-block > h4 { margin: 0; font-size: var(--fs-small); color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: .04em; }
+
+/* The overhead warning under a model-source picker. It is a sibling of the
+   labels, not a grid item of one, so it is indented to the field column by
+   hand — 13em caption plus the grid's own gap, the two numbers the
+   form.form-grid rule above is built from. */
+form.form-grid p.warn[data-llm-overhead] {
+  margin: calc(-1 * var(--sp-4)) 0 var(--sp-10) calc(13em + var(--sp-12));
+  font-size: var(--fs-small);
+}
+@media (max-width: 700px) {
+  form.form-grid p.warn[data-llm-overhead] { margin-left: 0; }
+}

@@ -6,6 +6,7 @@
 // therefore only offer levels that the model actually knows.
 import { getProvider } from '../providers/index.mjs'
 import { HTTP_5XX } from './patterns.mjs'
+import { runCli, cliFailure } from './cli-llm.mjs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
@@ -14,12 +15,29 @@ const flat = (t) => String(t ?? '').replace(/\s+/g, ' ')
 const levelsFrom = (t) => t.split(/,|\bor\b/).map(x => x.trim().toLowerCase())
   .filter(x => /^[a-z]+$/.test(x))
 
-export default {
+const plugin = {
   id: 'hermes',
   label: 'Hermes',
   bin: 'hermes',
   installHint: 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash   (then: hermes setup)',
   sessionTag: 'he-',         // tmux sessions: cc-he-<name>
+
+  /**
+   * How bin/cc-start calls this CLI (see claude.mjs for why the built-in `case`
+   * in that script, not this block, is what a hermes run is launched from).
+   * Note the effort flag: hermes calls the same thing `--reasoning`, which is
+   * exactly the kind of per-CLI naming a declaration exists to carry.
+   */
+  launch: {
+    promptMode: 'argv',
+    args: [
+      'chat', '-q', '{prompt}', '--yolo',
+      { when: 'model', args: ['--model', '{model}'] },
+      { when: 'provider', args: ['--provider', '{provider}'] },
+      { when: 'effort', args: ['--reasoning', '{effort}'] },
+    ],
+    interactiveArgs: ['--yolo'],
+  },
 
   subscription: false,
   providers: ['openrouter', 'opencode-zen', 'deepseek'],
@@ -36,6 +54,56 @@ export default {
     { typ: 'billing_error', re: /\b402\b|insufficient|billing/i },
     { typ: 'provider_error', re: new RegExp(`API call failed|Retrying in .*\\(|overloaded|${HTTP_5XX.source}|APIConnectionError|InternalServerError|ServiceUnavailable`, 'i') },
   ],
+
+  /**
+   * hermes can answer the hub's own small questions, on the providers it is
+   * configured for. Its model reference is `provider/model`, so — like
+   * opencode's — the id already carries the provider and there is no second
+   * field to fill in.
+   *
+   * `schema: 'prompt'`: hermes takes no schema. The three muzzle flags below
+   * are all load-bearing, and that was measured rather than assumed — without
+   * them stdout came back as 4420 bytes of a boxed reasoning block, because
+   * hermes' own system prompt mandates tool use even for arithmetic.
+   */
+  llm: {
+    schema: 'prompt',
+    overhead: true,
+
+    /**
+     * hermes has no model list of its own, so the catalog every other consumer
+     * of it uses answers instead — models.dev, narrowed to the providers this
+     * coding agent can address at all, in hermes' own `provider/model` shape.
+     */
+    async models(ctx) {
+      const reg = (await ctx.registry()) ?? {}
+      const out = []
+      for (const id of plugin.providers) {
+        const prov = getProvider(id)
+        const models = reg?.[prov?.mdKey ?? id]?.models ?? {}
+        for (const [model, m] of Object.entries(models)) {
+          out.push({ id: `${id}/${model}`, name: `${prov?.label ?? id}: ${m?.name ?? model}` })
+        }
+      }
+      return out.sort((a, b) => a.id.localeCompare(b.id))
+    },
+
+    async complete(ctx, req = {}) {
+      const prompt = req.system ? `${req.system}\n\n${req.prompt ?? ''}` : String(req.prompt ?? '')
+      // The prompt goes on stdin (`--query-file -`); -Q is the quiet one-shot,
+      // and --safe-mode / --reasoning none / -t '' are what stop it reasoning
+      // and reaching for tools it does not need here.
+      const args = ['chat', '--query-file', '-', '-Q', '--safe-mode', '--reasoning', 'none', '-t', '']
+      if (req.model) args.push('-m', String(req.model))
+      args.push('--run-budget', '120')
+      const r = await runCli('hermes', args, { stdin: prompt, timeoutMs: req.timeoutMs ?? 180_000 })
+      // hermes reports its failures on STDOUT as plain text, so there is no
+      // envelope to inspect: the exit code is the only signal, and the raw
+      // stdout is the answer.
+      if (r.code !== 0) throw cliFailure('hermes', r)
+      return { text: r.stdout.trim(), usage: null, raw: r.stdout }
+    },
+  },
 
   /** hermes names its levels only in the help text for --reasoning; there is no other source. */
   async effortLevels() {
@@ -79,7 +147,7 @@ export default {
    */
   resumeCommand() { return null },
 
-  modelArgs(run) {
+  modelArgs(run, ctx = null) {
     const args = []
     const fehlt = []
     if (!run.model) return { args, fehlt }
@@ -89,13 +157,25 @@ export default {
     }
     args.push('--model', run.model, '--provider', run.provider)
     if (run.effort) args.push('--effort', run.effort)
-    const plugin = getProvider(run.provider)
-    for (const name of plugin?.envKeys ?? []) {
-      if (process.env[name]) args.push('--env', `${name}=${process.env[name]}`)
+    // The credential, resolved the way the operator configured it — a stored
+    // value, a variable they named, or the provider's own declared one
+    // (`ctx.secret()`, server/plugins/store.mjs). Without a context this is the
+    // plain environment read it always was. It travels as `--env` because a
+    // tmux session inherits nothing; the NAME stays whichever declared variable
+    // the environment already holds, so hermes keeps reading the one it knows.
+    const prov = getProvider(run.provider)
+    const key = ctx?.secret?.('api_key') || (prov?.envKeys ?? []).map(n => process.env[n]).find(Boolean) || null
+    if (key) {
+      const names = prov?.envKeys ?? []
+      const set = names.filter(n => process.env[n])
+      for (const name of (set.length ? set : names)) args.push('--env', `${name}=${key}`)
     }
-    if (!(plugin?.envKeys ?? []).some(n => process.env[n])) fehlt.push(run.provider)
+    // hermes demands credentials for every provider — there is no key-free one.
+    if (!key) fehlt.push(run.provider)
     return { args, fehlt }
   },
 
   async usage() { return null },
 }
+
+export default plugin

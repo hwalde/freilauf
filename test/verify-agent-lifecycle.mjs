@@ -18,9 +18,14 @@ async function migration() {
   const dbPath = join(dataDir, 'cc-hub.db')
 
   // Old schema, exactly as the hub shipped it before this feature: a globally
-  // UNIQUE name (column-level). The runs table is NOT pre-created here — db.mjs
-  // builds it fresh, and the test proves the rebuild preserved the agents and
-  // their ids by inserting a run against the migrated agent afterwards.
+  // UNIQUE name (column-level) AND the CHECK on `harness` that listed the four
+  // built-in coding agents. Both are gone now and both are checked below — the
+  // CHECK because it was the import cycle that blocked dynamic plugin loading
+  // (db.mjs had to ask the harness registry to write the rule), so a plugin
+  // read from disk could not have been named in it at schema time at all.
+  // The runs table is NOT pre-created here — db.mjs builds it fresh, and the
+  // test proves the rebuild preserved the agents and their ids by inserting a
+  // run against the migrated agent afterwards.
   const alt = new DatabaseSync(dbPath)
   alt.exec(`
     CREATE TABLE agents (
@@ -51,8 +56,17 @@ async function migration() {
   const sql = dbs.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'`).get().sql
   assert.match(sql, /UNIQUE\s*\(\s*repo_id\s*,\s*name\s*\)/, 'table-level UNIQUE(repo_id, name) in place')
   assert.doesNotMatch(sql, /name\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i, 'column-level global UNIQUE gone')
+  // The CHECK is REMOVED, not merely survived: the fixture above shipped with
+  // it, so a green assertion here can only mean the migration ran.
+  assert.doesNotMatch(sql, /CHECK\s*\(\s*harness\b/i, 'CHECK(harness IN (…)) removed by the migration')
   assert.equal(dbs.prepare('SELECT count(*) c FROM agents').get().c, 2, 'agents survived the rebuild')
   assert.equal(dbs.prepare('SELECT name FROM agents WHERE id=?').get(1).name, 'nightly', 'agent ids stable')
+  // …and that is what it is for: a coding agent the hub does not ship can be
+  // stored. Under the old rule this INSERT died with a CHECK constraint
+  // failure, which is exactly why an external harness plugin was impossible.
+  dbs.prepare(`INSERT INTO agents(repo_id, name, harness, prompt) VALUES(1,'external','mistral-cli','x')`).run()
+  assert.equal(dbs.prepare(`SELECT harness FROM agents WHERE name='external'`).get().harness, 'mistral-cli',
+    'a harness id no built-in declares is accepted')
   // A run can still be created against the migrated agent — the reference holds.
   dbs.prepare(`INSERT INTO runs(id, repo_id, agent_id, title, harness, prompt, branch_mode, expected_minutes)
                VALUES('run-old', 1, 1, 'nightly run', 'claude', 'p', 'keiner', 45)`).run()

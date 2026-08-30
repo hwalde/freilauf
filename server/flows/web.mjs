@@ -75,7 +75,7 @@ async function pageList(req, res) {
         <a class="btn" href="/flows/runs?flow=${f.id}">${e(t('flows.runs'))}</a>
         <form method="post" action="/api/flows/${f.id}/run" class="inline"><button>${e(t('flows.run_now'))}</button></form>
         <form method="post" action="/api/flows/${f.id}/toggle" class="inline"><button>${e(f.active ? t('flows.turn_off') : t('flows.turn_on'))}</button></form>
-        <form method="post" action="/api/flows/${f.id}/delete" class="inline" onsubmit="return confirm(${JSON.stringify(t('flows.delete_confirm'))})"><button class="danger">${e(t('flows.delete'))}</button></form>
+        <form method="post" action="/api/flows/${f.id}/delete" class="inline" onsubmit="return confirm(${e(JSON.stringify(t('flows.delete_confirm')))})"><button class="danger">${e(t('flows.delete'))}</button></form>
       </td></tr>`
   }).join('')
   const body = `

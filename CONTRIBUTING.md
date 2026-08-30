@@ -25,10 +25,22 @@ Both are written to be read by agents.
 - **Keep `SETUP_WITH_AGENT.md` current.** If your change touches installation,
   the prompt an agent receives, the plugin contracts or the flow building
   blocks, update it in the same PR.
-- **New coding agents and providers are plugins** — one file under
-  `server/harnesses/` or `server/providers/`, registered in the respective
-  `index.mjs`. Please do not hardcode harness specifics anywhere else; the
-  contract is in [docs/plugins.md](docs/plugins.md).
+- **New coding agents and model providers are plugins**, and since the registry
+  became dynamic that is more true than it used to be: a built-in is one file
+  under `server/harnesses/` or `server/providers/`, registered in
+  `server/plugins/registry.mjs` — and anything a *third party* ships is a
+  package directory with a `plugin.json`, which needs no change to this
+  repository at all. Before opening a PR that adds a vendor, ask whether it has
+  to live here: a plugin package you publish yourself is released on your
+  schedule, not ours. If it does belong here, please do not hardcode harness or
+  provider specifics anywhere outside the plugin file — thresholds go in `gate`,
+  keys in `credentials`, the launch command line in `launch`, and the hub's own
+  LLM calls in `llm`. The contract is in
+  [docs/plugins.md](docs/plugins.md), which is the one document to read (or to
+  hand your agent) before writing a plugin.
+- **A plugin's UI strings are i18n keys** (`descriptionKey`, `labelKey`,
+  `hintKey`, `hinweisKey`), added to all three catalogs in the same PR. A plugin
+  may not name a string that is not there, and a unit test says so.
 - **Every directory with an `AGENTS.md` gets a `CLAUDE.md` next to it containing
   exactly one line — `@AGENTS.md`.** Never put content into a `CLAUDE.md` here.
   A unit test checks both halves.
@@ -44,11 +56,15 @@ node test/unit.mjs && node test/e2e.mjs     # required
 node test/browser.mjs                       # if you touched public/hub.js  (needs playwright)
 node test/proxy.mjs                         # if you touched vpn-proxy.mjs
 node test/deploy.mjs                        # if you touched bin/cchub-deploy
+bash -n bin/cc-start                        # if you touched a bin/ script (unit.mjs does this too)
 ./pruefe-vor-push.sh                        # no private values in the commits
 ```
 
-The e2e suite is sandboxed — its own port, database, test repo and tmux sessions
-— so it is safe to run next to a live hub.
+The e2e suite is sandboxed — its own port, database, test repo, plugin directory
+and tmux sessions — so it is safe to run next to a live hub. If you add a suite
+or a fixture that loads plugins, point `CCHUB_PLUGIN_DIR` into the sandbox: it
+is a test fence exactly like `CCHUB_AGENTS_SEED`, and without it the suite loads
+whatever the operator happens to have installed and stops being reproducible.
 
 ## What makes a PR easy to merge
 

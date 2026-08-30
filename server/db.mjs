@@ -4,7 +4,6 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { harnessIds } from './harnesses/index.mjs'
 // events.mjs imports nothing at all — deliberately, so that the module which
 // everything writes through can be imported from anywhere without a cycle.
 import { publish } from './events.mjs'
@@ -37,7 +36,9 @@ CREATE TABLE IF NOT EXISTS agents (
   -- "nightly". The one-time migration in agentNameUniquePerRepo() rebuilds
   -- existing databases, which still carry the old global UNIQUE on name.
   name TEXT NOT NULL,
-  harness TEXT NOT NULL CHECK(harness IN (${harnessIds().map(id => `'${id}'`).join(',')})),
+  -- No CHECK on the harness: coding agents are PLUGINS, and one may be loaded
+  -- from disk after this file ran (see harnessCheckAufloesen() below).
+  harness TEXT NOT NULL,
   model TEXT,
   prompt TEXT NOT NULL,
   branch_mode TEXT NOT NULL CHECK(branch_mode IN ('keiner','neu','fest')),
@@ -52,8 +53,9 @@ CREATE TABLE IF NOT EXISTS agents (
 -- Favoriten: die SETUP-Hälfte einer Laufdefinition unter einem Namen (Coding Agent,
 -- Provider, Modell, Effort, Extra-Skills, angehängte Flows). Bewusst OHNE Prompt,
 -- Branch-Regel und Dauer — die gehören zur Aufgabe, nicht zur Einstellung.
--- Bewusst auch ohne CHECK auf harness: siehe harnessCheckErweitern() weiter unten,
--- eine CHECK-Regel wäre bei jedem neuen Plugin ein Tabellen-Neubau.
+-- Deliberately without a CHECK on harness: see harnessCheckAufloesen() below —
+-- a CHECK rule would be a table rebuild for every new plugin, and since coding
+-- agents can be loaded from disk it could not be written at schema time at all.
 CREATE TABLE IF NOT EXISTS favorites (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
@@ -212,7 +214,7 @@ addColumn('repos', 'last_push_at', 'TEXT')
 // Per run: where it started from, where it stands in the finish gate, and what
 // became of its commits. finish_state is a SUB-state of 'running' on purpose —
 // runs.status carries a CHECK, and a new value there would be a table rebuild
-// (harnessCheckErweitern); besides, the run really is still running: its
+// (see tabelleUmziehen); besides, the run really is still running: its
 // terminal is writable, messages reach it, a human can step in.
 addColumn('runs', 'base_sha', 'TEXT')            // HEAD of the worktree right after creation
 addColumn('runs', 'finish_state', 'TEXT')        // NULL|checking|awaiting_commit|awaiting_merge|merging|check_failed
@@ -223,35 +225,48 @@ addColumn('runs', 'merged_at', 'TEXT')
 addColumn('runs', 'merge_attempts', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('runs', 'resolver_run_id', 'TEXT')     // the conflict run working for this run
 addColumn('runs', 'resolves_run_id', 'TEXT')     // set on a conflict run: the run it works for
-// New harness in the CHECK rule of 'agents'. SQLite cannot change a CHECK (no ALTER
-// for that), and 'CREATE TABLE IF NOT EXISTS' no longer takes effect on an existing
-// database — the old rule would still be in place there and saving a cursor agent
-// would run into a constraint error. So rebuild once.
-//
-// The new table header is NOT typed in here but fetched from sqlite_master and
-// replaced only at that one spot: this guarantees that all retrofitted columns,
-// their defaults and the UNIQUE on 'name' survive. Copying is done column-wise
-// by name, so the order does not matter.
-function harnessCheckErweitern() {
+/**
+ * Drop the CHECK rule on `agents.harness` — once, idempotently.
+ *
+ * WHY: that CHECK was generated from the harness plugin registry, so db.mjs had
+ * to `import { harnessIds }` from it. THAT import is the cycle which made
+ * dynamic plugin loading impossible: a plugin loaded from disk arrives long
+ * after this file ran, plugins were forbidden to import db.mjs (they would
+ * close the cycle), quota.mjs needed a dynamic import to get at a harness, and
+ * the budget gate could not go through the aggregators. A coding agent that is
+ * only known at runtime cannot be written into a constraint that is written at
+ * schema time — so the constraint goes.
+ *
+ * Nothing is lost by that: which harness is acceptable was NEVER decided by the
+ * database. `runDefFromForm()`, `saveAgent()`, `createRun()` and
+ * `saveCodingAgent()` all validate against the registry and always did; the
+ * CHECK only ever turned a bug into a 500 one layer further down. `runs.harness`
+ * has carried no CHECK for exactly this reason since the beginning.
+ *
+ * The new table header is NOT typed in here but fetched from sqlite_master and
+ * edited at that one spot: this guarantees that all retrofitted columns, their
+ * defaults and the UNIQUE survive. Copying is done column-wise by name, so the
+ * order does not matter.
+ */
+function harnessCheckAufloesen() {
   const sql = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'`).get()?.sql
   if (!sql) return
-  // Wanted: exactly the ids from the coding agent plugin registry. A new
-  // harness therefore only needs its plugin file — the CHECK follows.
-  const wanted = harnessIds()
-  const m = sql.match(/harness IN \(([^)]*)\)/)
+  if (!/CHECK\s*\(\s*harness\b/i.test(sql)) return   // fresh database, or already resolved
+  const m = sql.match(/,?\s*CHECK\s*\(\s*harness\s+IN\s*\([^)]*\)\s*\)/i)
   if (!m) {
     // Unexpected shape: better touch nothing than rebuild a table blindly.
     console.warn('[db] agents.harness: CHECK rule not recognized — no rebuild')
     return
   }
-  const have = [...m[1].matchAll(/'([^']*)'/g)].map(x => x[1])
-  if (have.length === wanted.length && wanted.every(id => have.includes(id))) return   // already current
+  // The clause sits inline behind the column type ("harness TEXT NOT NULL
+  // CHECK(...)"), so removing it leaves a valid column definition; a leading
+  // comma is only swallowed when the match really started with one.
   const neuSql = sql
-    .replace(m[0], `harness IN (${wanted.map(id => `'${id}'`).join(',')})`)
+    .replace(m[0], m[0].trimStart().startsWith(',') ? ',' : '')
     .replace(/CREATE TABLE (IF NOT EXISTS )?["'`]?agents["'`]?/i, 'CREATE TABLE agents_neu')
 
   tabelleUmziehen(neuSql)
-  console.log(`[db] agents.harness: CHECK rebuilt for (${harnessIds().join(', ')})`)
+  console.log('[db] agents.harness: CHECK removed — coding agents are plugins now')
 }
 
 /**
@@ -282,7 +297,7 @@ function tabelleUmziehen(neuSql) {
  * Agent names are unique per REPO, not per hub (the CREATE TABLE above carries
  * UNIQUE(repo_id, name)); databases created before that change still hold a
  * column-level UNIQUE on name. SQLite cannot drop such a UNIQUE — so rebuild
- * once, with the same care as harnessCheckErweitern(). Idempotent: a fresh
+ * once, with the same care as harnessCheckAufloesen(). Idempotent: a fresh
  * database already has the new rule and nothing happens.
  */
 function agentNameUniquePerRepo() {
@@ -309,7 +324,7 @@ function agentNameUniquePerRepo() {
   tabelleUmziehen(neu)
   console.log('[db] agents.name: UNIQUE rebuilt per repo (repo_id, name)')
 }
-harnessCheckErweitern()
+harnessCheckAufloesen()
 agentNameUniquePerRepo()
 
 // Existing agents with a cron expression keep their behavior.

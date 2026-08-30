@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Starts a coding-agent session inside a tmux session (survives SSH logout).
 # Harnesses: claude (default) | opencode | hermes.
+#   Any OTHER coding agent is launched from a declaration handed in with --spec
+#   (see "Launch spec" below) — that is how a cc-hub plugin nobody shipped here
+#   still gets a tmux session.
 #   claude:   interactive in bypassPermissions mode; autonomous (-p) in dontAsk mode.
 #   opencode: interactive with --auto; autonomous (-p) as 'opencode --auto --prompt' (TUI,
 #             works through the task on its own while staying operable).
@@ -21,7 +24,8 @@ Usage: cc-start [options] [session-name] [working-directory]
   directory      Working directory for the agent (default: current directory)
 
 Choosing a harness (default: claude):
-  -H, --harness HARNESS   claude | opencode | hermes | cursor
+  -H, --harness HARNESS   claude | opencode | hermes | cursor — or the id of any
+                          other coding agent, which then needs --spec.
       --effort LEVEL      Reasoning effort. '--effort' for claude, '--reasoning'
                           for hermes (same option, different name). NOT possible for
                           opencode: only 'opencode run' knows a --variant there, the
@@ -66,6 +70,10 @@ Options:
                         (tmux pipe-pane into FILE).
       --keep            Keep the session open after the process ends (remain-on-exit)
                         + pane-died hook (cc-report _pane_died).
+      --spec FILE       Launch declaration (JSON) of a coding agent this script
+                        ships no case for. Required for any -H other than
+                        claude/opencode/hermes/cursor, ignored for those four.
+                        Needs jq. Format: see "Launch spec" below.
       --name NAME       Session base name without prefix (overrides the positional argument).
       --id SHORT        Suffix for the session name (collision safety,
                         e.g. a short run ID).
@@ -84,8 +92,33 @@ Examples:
   cc-start -f ~/task.md nightrun ~/projects/example   # claude autonomous
 
 Session names: cc-<name> (claude), cc-oc-<name> (opencode), cc-he-<name> (hermes),
-               cc-cu-<name> (cursor).
+               cc-cu-<name> (cursor), cc-<sessionTag><name> for a --spec harness.
 View/select: cc-attach [-H harness], terminate: cc-kill, overview: cc-help
+
+Launch spec (--spec FILE) — one JSON object describing how to call the CLI:
+  {
+    "bin":         "myagent",        REQUIRED. Looked up with 'command -v'.
+    "sessionTag":  "my-",            tmux prefix: cc-<sessionTag><name>. Default "".
+    "installHint": "npm i -g …",     printed when the binary is missing.
+    "promptMode":  "argv",           argv | stdin | file  — how the prompt arrives.
+    "args":        [ … ],            REQUIRED. Argument template, autonomous start.
+    "interactiveArgs": [ … ],        optional; default: "args" without the prompt.
+    "stderrLog":   "<path>",         optional; stderr is appended there (2>>).
+    "submitNudge": { "waitFor": "ctrl+p", "timeoutSec": 90 }
+  }
+  An entry of "args" is either a string or a conditional group
+  { "when": "model", "unless": "provider", "args": [ … ] } — "when"/"unless" name
+  one of model | provider | effort | prompt | session_id | settings and ask
+  whether it is set. Placeholders inside a string: {model} {provider} {effort}
+  {session_id} {settings} {mode} {workdir} {session} {prompt_file} {stderr_log}
+  {home}. "{prompt}" must be a WHOLE argument, never part of one.
+  A non-empty "sessionTag" is noted in ~/.local/share/cc-hub/harness-tags
+  (override: CCHUB_HARNESS_TAGS) so cc-attach and cc-kill can name the coding
+  agent behind such a session instead of calling it claude.
+  promptMode: argv -> the {prompt} argument carries the text; stdin -> the prompt
+  is fed in on standard input; file -> use {prompt_file}, the file survives the
+  start. An option whose placeholder the spec never mentions is REFUSED rather
+  than passed through with no effect (same rule as --effort for cursor).
 
 Notes per harness:
   claude:   dontAsk NEVER asks. Allowed things run, risky things are REFUSED (never hangs).
@@ -128,6 +161,7 @@ CLAUDE_SESSION_ID=""
 CLAUDE_SETTINGS=""
 NAME_ARG=""
 ID_SUFFIX=""
+SPEC=""
 POS=()
 
 while [[ $# -gt 0 ]]; do
@@ -159,6 +193,8 @@ while [[ $# -gt 0 ]]; do
                           CLAUDE_SESSION_ID="$2"; shift 2 ;;
         --settings)       [[ $# -ge 2 ]] || { err "Error: $1 requires JSON."; exit 2; }
                           CLAUDE_SETTINGS="$2"; shift 2 ;;
+        --spec)           [[ $# -ge 2 ]] || { err "Error: $1 requires a file path."; exit 2; }
+                          SPEC="$2"; shift 2 ;;
         --name)           [[ $# -ge 2 ]] || { err "Error: $1 requires a name."; exit 2; }
                           NAME_ARG="$2"; shift 2 ;;
         --id)             [[ $# -ge 2 ]] || { err "Error: $1 requires a short ID."; exit 2; }
@@ -169,10 +205,121 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# --- Launch spec (--spec) --------------------------------------------------
+# Everything this script knows about claude/opencode/hermes/cursor is spelled
+# out in a 'case' per harness below. A coding agent that arrived as a cc-hub
+# plugin has no case here and never will — so it brings its own description
+# instead, and the hub hands it over as a JSON file. Read once, up front, so the
+# allowlist right after this can tell "unknown harness" from "harness we were
+# told about".
+SPEC_MODE=""            # set when THIS run is launched from the spec
+SPEC_JSON=""
+SPEC_BIN=""
+SPEC_TAG=""
+SPEC_INSTALL_HINT=""
+SPEC_PROMPT_MODE="argv"
+SPEC_ERRLOG=""
+SPEC_ARGS_KEY="args"
+if [[ -n "$SPEC" ]]; then
+    [[ -r "$SPEC" ]] || { err "Error: launch spec not readable: $SPEC"; exit 2; }
+    # jq is otherwise optional in this script (the trust flag degrades without
+    # it). Here it is not: a launch declaration is JSON, and guessing at it with
+    # sed would be a quoting bug waiting to start the wrong command.
+    command -v jq >/dev/null 2>&1 || {
+        err "Error: --spec needs jq (apt install jq / brew install jq)."; exit 2; }
+    SPEC_JSON="$(cat "$SPEC")"
+    jq -e 'type == "object"' >/dev/null 2>&1 <<<"$SPEC_JSON" || {
+        err "Error: launch spec is not a JSON object: $SPEC"; exit 2; }
+fi
+
 case "$HARNESS" in
     claude|opencode|hermes|cursor) ;;
-    *) err "Error: unknown harness '$HARNESS'. Allowed: claude opencode hermes cursor"; exit 2 ;;
+    *) if [[ -z "$SPEC_JSON" ]]; then
+           err "Error: unknown harness '$HARNESS'. Built in: claude opencode hermes cursor"
+           err "Any other coding agent is launched from its own declaration:"
+           err "  cc-start --spec <launch.json> -H $HARNESS ..."
+           exit 2
+       fi
+       SPEC_MODE=1 ;;
 esac
+
+if [[ -n "$SPEC_JSON" && -z "$SPEC_MODE" ]]; then
+    # Not an error: the hub may hand the file over unconditionally. But the four
+    # built-in command lines are the ones this script spells out itself, and
+    # silently launching them from somewhere else would make two sources of
+    # truth out of one.
+    err "Note: --spec is ignored for the built-in coding agent '$HARNESS'."
+fi
+
+# Read a value out of the spec; empty when it is not there.
+spec_str() { jq -r "$1 // empty" <<<"$SPEC_JSON" 2>/dev/null || true; }
+
+# Does the spec mention this placeholder anywhere in its argument templates?
+# That is the whole capability check: an option whose value would never reach
+# the command line is refused instead of being silently swallowed — the same
+# rule --effort for cursor has followed all along.
+spec_uses() {
+    spec_tokens | grep -Fq -- "{$1}"
+}
+
+# Every string in 'args' + 'interactiveArgs', groups flattened, one per line.
+spec_tokens() {
+    jq -r '[(.args // []), (.interactiveArgs // [])] | add
+           | map(if type == "object" then (.args // []) else [.] end) | add // []
+           | map(tostring) | .[]' <<<"$SPEC_JSON" 2>/dev/null || true
+}
+
+if [[ -n "$SPEC_MODE" ]]; then
+    SPEC_BIN="$(spec_str '.bin')"
+    [[ -n "$SPEC_BIN" ]] || { err "Error: launch spec has no \"bin\": $SPEC"; exit 2; }
+    jq -e '(.args | type) == "array" and (.args | length) > 0' >/dev/null 2>&1 <<<"$SPEC_JSON" || {
+        err "Error: launch spec has no non-empty \"args\" array: $SPEC"; exit 2; }
+    # The session tag becomes part of a tmux session name, so it is held to the
+    # same characters the name itself is.
+    SPEC_TAG="$(spec_str '.sessionTag' | tr -cd 'A-Za-z0-9_-')"
+    SPEC_INSTALL_HINT="$(spec_str '.installHint')"
+    SPEC_PROMPT_MODE="$(spec_str '.promptMode')"
+    [[ -n "$SPEC_PROMPT_MODE" ]] || SPEC_PROMPT_MODE="argv"
+    case "$SPEC_PROMPT_MODE" in
+        argv|stdin|file) ;;
+        *) err "Error: launch spec has an unknown \"promptMode\" '$SPEC_PROMPT_MODE' (argv|stdin|file)."; exit 2 ;;
+    esac
+    jq -e 'has("interactiveArgs")' >/dev/null 2>&1 <<<"$SPEC_JSON" && SPEC_ARGS_KEY="interactiveArgs"
+
+    # Note the tag down for cc-attach and cc-kill. Those two read tmux, not the
+    # hub's database, so this start is the only moment on this machine where
+    # anybody knows that 'cc-fa-' means 'fakeagent' — without it an external
+    # coding agent's sessions would be listed as claude's, which is exactly the
+    # bug cursor sat in for months. Append-once and fail-soft in every
+    # direction: a session that starts is worth more than a tidy table.
+    if [[ -z "$DRY_RUN" && -n "$SPEC_TAG" && "$HARNESS" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+        CC_TAGFILE="${CCHUB_HARNESS_TAGS:-${XDG_DATA_HOME:-$HOME/.local/share}/cc-hub/harness-tags}"
+        if ! grep -qxF "$HARNESS:$SPEC_TAG" "$CC_TAGFILE" 2>/dev/null; then
+            mkdir -p "$(dirname "$CC_TAGFILE")" 2>/dev/null || true
+            printf '%s:%s\n' "$HARNESS" "$SPEC_TAG" >> "$CC_TAGFILE" 2>/dev/null || true
+        fi
+    fi
+
+    # The per-harness flag rules, asked of the declaration instead of hard-coded.
+    for opt in model provider effort; do
+        val=""
+        case "$opt" in
+            model)    val="$MODEL" ;;
+            provider) val="$PROVIDER" ;;
+            effort)   val="$EFFORT" ;;
+        esac
+        if [[ -n "$val" ]] && ! spec_uses "$opt"; then
+            err "Error: --$opt does not exist for '$HARNESS' (its launch spec never uses {$opt})."
+            exit 2
+        fi
+    done
+    if [[ -n "$CLAUDE_SESSION_ID" ]] && ! spec_uses session_id; then
+        err "Note: --session-id has no place in '$HARNESS''s launch spec (ignored)."
+    fi
+    if [[ -n "$CLAUDE_SETTINGS" ]] && ! spec_uses settings; then
+        err "Note: --settings has no place in '$HARNESS''s launch spec (ignored)."
+    fi
+fi
 
 if [[ -n "$EFFORT" && "$HARNESS" == "cursor" ]]; then
     # Passing it through with no effect would be worse than an error: cursor-agent has
@@ -191,7 +338,9 @@ if [[ -n "$EFFORT" && "$HARNESS" == "opencode" ]]; then
     exit 2
 fi
 
-if [[ -n "$PROVIDER" && "$HARNESS" != "hermes" ]]; then
+# The three rules above are about the four harnesses this script spells out; a
+# --spec harness was already asked the same questions of its own declaration.
+if [[ -z "$SPEC_MODE" ]] && [[ -n "$PROVIDER" && "$HARNESS" != "hermes" ]]; then
     # Only hermes has its own --provider. opencode decides via the prefix in the model
     # name, claude not at all — passing it through would be silently ineffective.
     err "Error: --provider only exists for hermes (for opencode the provider is part of the --model prefix)."
@@ -199,7 +348,7 @@ if [[ -n "$PROVIDER" && "$HARNESS" != "hermes" ]]; then
 fi
 
 
-if [[ -n "$CLAUDE_SESSION_ID" || -n "$CLAUDE_SETTINGS" ]] && [[ "$HARNESS" != "claude" ]]; then
+if [[ -z "$SPEC_MODE" ]] && [[ -n "$CLAUDE_SESSION_ID" || -n "$CLAUDE_SETTINGS" ]] && [[ "$HARNESS" != "claude" ]]; then
     err "Note: --session-id/--settings only take effect with claude (ignored)."
 fi
 
@@ -221,6 +370,10 @@ case "$HARNESS" in
     hermes)  BIN="$(command -v hermes || true)" ;;
     cursor)  BIN="$(command -v cursor-agent || true)" ;;
 esac
+# A --spec harness names its own executable.
+if [[ -z "$BIN" && -n "$SPEC_MODE" ]]; then
+    BIN="$(command -v "$SPEC_BIN" || true)"
+fi
 if [[ -z "$BIN" ]]; then
     err "Error: '$HARNESS' not found in PATH."
     case "$HARNESS" in
@@ -229,6 +382,10 @@ if [[ -z "$BIN" ]]; then
         hermes)  err "Installation: curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash" ;;
         cursor)  err "Installation: curl https://cursor.com/install -fsS | bash   (then: cursor-agent login)" ;;
     esac
+    if [[ -n "$SPEC_MODE" ]]; then
+        err "Missing binary: $SPEC_BIN"
+        [[ -n "$SPEC_INSTALL_HINT" ]] && err "Installation: $SPEC_INSTALL_HINT"
+    fi
     exit 1
 fi
 
@@ -265,6 +422,9 @@ case "$HARNESS" in
     hermes)   HTAG="he-" ;;
     cursor)   HTAG="cu-" ;;
 esac
+# A --spec harness brings its own tag, so its sessions are as recognizable as
+# cc-oc-/cc-he-/cc-cu- are. An empty tag is legal: it then looks like claude's.
+[[ -n "$SPEC_MODE" ]] && HTAG="$SPEC_TAG"
 RAW_NAME="${NAME_ARG:-${POS[0]:-$(basename "$WORKDIR")}}"
 BASE_NAME="$PREFIX$HTAG$(printf '%s' "$RAW_NAME" | tr -c 'A-Za-z0-9_-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')"
 [[ -n "$ID_SUFFIX" ]] && BASE_NAME="${BASE_NAME}-$(printf '%s' "$ID_SUFFIX" | tr -c 'A-Za-z0-9_-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')"
@@ -288,7 +448,100 @@ done
 OC_ERRLOG="$HOME/.local/share/opencode/log/cc-$SESSION-stderr.log"
 mkdir -p "$(dirname "$OC_ERRLOG")" 2>/dev/null || true
 
+# Where the prompt and the mini launcher are dropped for an autonomous start.
+# Computed HERE rather than down in that branch because the spec's
+# {prompt_file} placeholder has to resolve for '--dry-run' too — the values
+# depend on nothing but the session name and this process.
+TDIR="${TMPDIR:-/tmp}"
+PF="$TDIR/cc-prompt-$SESSION-$$.txt"
+LF="$TDIR/cc-launch-$SESSION-$$.sh"
+
+# --- The --spec command line ------------------------------------------------
+# The same job the four cmd_interactive()/cmd_autonomous() cases do, only read
+# out of the declaration instead of written down here. jq resolves the
+# conditional groups and the placeholders; the quoting stays in bash, with the
+# same q() the built-in cases use, so a model name with a space cannot become
+# two arguments.
+if [[ -n "$SPEC_MODE" ]]; then
+    SPEC_ERRLOG="$(spec_str '.stderrLog' \
+        | sed -e "s|{home}|$HOME|g" -e "s|{session}|$SESSION|g")"
+    [[ -n "$SPEC_ERRLOG" ]] && mkdir -p "$(dirname "$SPEC_ERRLOG")" 2>/dev/null || true
+fi
+
+# Emit the resolved argument list, one base64 line per argument. base64 because
+# an argument may contain anything at all — a newline in a --settings JSON would
+# otherwise split it in two.
+spec_argv() {
+    local key="$1" have_prompt=""
+    [[ -n "$AUTONOM" ]] && have_prompt=1
+    jq -r --arg key "$key" --arg model "$MODEL" --arg provider "$PROVIDER" \
+          --arg effort "$EFFORT" --arg prompt "$have_prompt" --arg mode "$MODE" \
+          --arg session_id "$CLAUDE_SESSION_ID" --arg settings "$CLAUDE_SETTINGS" \
+          --arg workdir "$WORKDIR" --arg session "$SESSION" --arg prompt_file "$PF" \
+          --arg stderr_log "$SPEC_ERRLOG" --arg home "$HOME" '
+        { model: $model, provider: $provider, effort: $effort, prompt: $prompt,
+          session_id: $session_id, settings: $settings } as $set
+        | def keep:
+            (.when // null) as $w | (.unless // null) as $u
+            | ((($w == null) or (($set[$w] // "") != ""))
+               and (($u == null) or (($set[$u] // "") == "")));
+          (.[$key] // [])
+        | map(if type == "object" then (if keep then (.args // []) else [] end) else [.] end)
+        | add // []
+        | map(tostring
+              | gsub("\\{model\\}"; $model) | gsub("\\{provider\\}"; $provider)
+              | gsub("\\{effort\\}"; $effort) | gsub("\\{mode\\}"; $mode)
+              | gsub("\\{session_id\\}"; $session_id) | gsub("\\{settings\\}"; $settings)
+              | gsub("\\{workdir\\}"; $workdir) | gsub("\\{session\\}"; $session)
+              | gsub("\\{prompt_file\\}"; $prompt_file) | gsub("\\{stderr_log\\}"; $stderr_log)
+              | gsub("\\{home\\}"; $home))
+        | .[] | @base64' <<<"$SPEC_JSON"
+}
+
+spec_cmd() {
+    local key="$1" out="" el b64
+    while IFS= read -r b64; do
+        [[ -n "$b64" ]] || continue
+        el="$(printf '%s' "$b64" | base64 -d)"
+        if [[ "$el" == '{prompt}' ]]; then
+            # Only in an autonomous start does the launcher hold the text; an
+            # interactive one simply drops the argument.
+            [[ -n "$AUTONOM" ]] && out+=' "$CC_PROMPT"'
+        else
+            out+=" $(q "$el")"
+        fi
+    done < <(spec_argv "$key")
+    printf '%s%s' "$(q "$BIN")" "$out"
+    [[ -n "$SPEC_ERRLOG" ]] && printf ' 2>>%s' "$(q "$SPEC_ERRLOG")"
+    :
+}
+
+# The generic form of oc_submit_nudge(): wait for a string to appear on the
+# pane, then press Enter once. A TUI that swallows a long --prompt needs it
+# (measured for opencode; see there), and a declaration is the only way a
+# harness this script has never heard of can ask for the same thing.
+spec_submit_nudge() {
+    local wait_for timeout
+    jq -e '(.submitNudge | type) == "object"' >/dev/null 2>&1 <<<"$SPEC_JSON" || return 0
+    wait_for="$(spec_str '.submitNudge.waitFor')"
+    timeout="$(spec_str '.submitNudge.timeoutSec')"
+    [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=90
+    printf '(\n'
+    if [[ -n "$wait_for" ]]; then
+        # Wait for the TUI to say it is there, not for a fixed number of seconds:
+        # MCP servers can take a while, and an Enter before the editor exists
+        # goes nowhere.
+        printf '  i=0\n  while [[ $i -lt %s ]]; do\n' "$timeout"
+        printf '      sleep 1\n'
+        printf '      tmux capture-pane -p -t "$TMUX_PANE" 2>/dev/null | grep -qF -- %s && break\n' "$(q "$wait_for")"
+        printf '      i=$((i + 1))\n  done\n'
+    fi
+    printf '  sleep 1\n'
+    printf '  tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null\n) >/dev/null 2>&1 &\n'
+}
+
 cmd_interactive() {
+    [[ -n "$SPEC_MODE" ]] && { spec_cmd "$SPEC_ARGS_KEY"; return 0; }
     case "$HARNESS" in
         claude)  printf '%s --permission-mode %s' "$(q "$BIN")" "$(q "$MODE")"
                  [[ -n "$MODEL" ]]  && printf ' --model %s' "$(q "$MODEL")"
@@ -303,6 +556,7 @@ cmd_interactive() {
 }
 
 cmd_autonomous() {
+    [[ -n "$SPEC_MODE" ]] && { spec_cmd args; return 0; }
     local model_args=""
     [[ -n "$MODEL" ]] && model_args=" --model $(q "$MODEL")"
     [[ -n "$PROVIDER" ]] && model_args+=" --provider $(q "$PROVIDER")"
@@ -457,6 +711,11 @@ if [[ -n "$DRY_RUN" ]]; then
         fi
     elif [[ "$HARNESS" == "cursor" ]]; then
         echo "Mode:           auto-approve (--force) + workspace pre-trusted (--trust)"
+    elif [[ -n "$SPEC_MODE" ]]; then
+        echo "Spec:           $SPEC"
+        echo "Prompt via:     $SPEC_PROMPT_MODE"
+        [[ -n "$SPEC_ERRLOG" ]] && echo "stderr log:     $SPEC_ERRLOG"
+        :
     else
         echo "Mode:           auto-approve (--auto or --yolo)"
     fi
@@ -499,10 +758,8 @@ if [[ -z "$AUTONOM" ]]; then
 else
     # Autonomous: drop the prompt and a mini launcher as files. This sidesteps every
     # quoting trap when passing multi-line prompts through tmux. Both files delete
-    # themselves at startup, right after being read.
-    TDIR="${TMPDIR:-/tmp}"
-    PF="$TDIR/cc-prompt-$SESSION-$$.txt"
-    LF="$TDIR/cc-launch-$SESSION-$$.sh"
+    # themselves at startup, right after being read (TDIR/PF/LF are set further
+    # up, where the spec's {prompt_file} can already resolve).
     # Clean up leftovers of aborted starts (older than one day), fail-safe.
     find "$TDIR" -maxdepth 1 \( -name 'cc-prompt-*.txt' -o -name 'cc-launch-*.sh' \) \
         -mtime +1 -delete 2>/dev/null || true
@@ -513,9 +770,24 @@ else
         printf '#!/usr/bin/env bash\n'
         printf 'cd %s\n' "$(q "$WORKDIR")"
         printf 'CC_PROMPT="$(cat %s)"\n' "$(q "$PF")"
-        printf 'rm -f %s %s\n' "$(q "$PF")" "$(q "$LF")"
+        if [[ -n "$SPEC_MODE" && "$SPEC_PROMPT_MODE" == "file" ]]; then
+            # promptMode 'file': the CLI reads the prompt from that very path, so
+            # only the launcher may delete itself. The sweep above collects the
+            # prompt file a day later.
+            printf 'rm -f %s\n' "$(q "$LF")"
+        else
+            printf 'rm -f %s %s\n' "$(q "$PF")" "$(q "$LF")"
+        fi
         [[ "$HARNESS" == "opencode" ]] && oc_submit_nudge
-        printf 'exec %s\n' "$(cmd_autonomous)"
+        [[ -n "$SPEC_MODE" ]] && spec_submit_nudge
+        if [[ -n "$SPEC_MODE" && "$SPEC_PROMPT_MODE" == "stdin" ]]; then
+            # A here-string, not a pipe: the redirection is set up before exec, so
+            # the CLI still becomes the pane's own process and pane-died keeps
+            # meaning what it means everywhere else.
+            printf 'exec %s <<< "$CC_PROMPT"\n' "$(cmd_autonomous)"
+        else
+            printf 'exec %s\n' "$(cmd_autonomous)"
+        fi
     } > "$LF"
     chmod 700 "$LF"
 

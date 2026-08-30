@@ -11,18 +11,34 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { HTTP_5XX } from './patterns.mjs'
 import { transcriptPath } from '../cursor-transcript.mjs'
+import { runCli, cliFailure } from './cli-llm.mjs'
 
 const execFileAsync = promisify(execFile)
 
 const AUTH_FILE = () => process.env.CCHUB_CURSOR_AUTH ?? `${homedir()}/.config/cursor/auth.json`
 const API = () => process.env.CCHUB_CURSOR_API ?? 'https://api2.cursor.sh'
 
-export default {
+const plugin = {
   id: 'cursor',
   label: 'Cursor CLI',
   bin: 'cursor-agent',
   installHint: 'curl https://cursor.com/install -fsS | bash   (then: cursor-agent login)',
   sessionTag: 'cu-',         // tmux sessions: cc-cu-<name>
+
+  /**
+   * How bin/cc-start calls this CLI (see claude.mjs for why the built-in `case`
+   * in that script, not this block, is what a cursor run is launched from).
+   *
+   * The prompt is a POSITIONAL argument after `--`, never `-p`: `-p/--print`
+   * prints and exits, so the tmux session would be gone immediately. `--trust`
+   * is mandatory — without it the TUI hangs on "Do you trust the contents of
+   * this directory?". Both measured, both load-bearing.
+   */
+  launch: {
+    promptMode: 'argv',
+    args: ['--force', '--trust', { when: 'model', args: ['--model', '{model}'] }, '--', '{prompt}'],
+    interactiveArgs: ['--force', '--trust', { when: 'model', args: ['--model', '{model}'] }],
+  },
 
   subscription: true,
   providers: [],
@@ -106,6 +122,71 @@ export default {
   ],
 
   /**
+   * The included amount of the running period.
+   *
+   * Cursor documents it NOWHERE (the pricing page says only "a set amount of
+   * model usage") and its public APIs are admin-only, so the account's own
+   * dashboard endpoint is the one source — and it has no contract. This field
+   * is the fallback for when it stays silent, and it is a plain setting rather
+   * than a gate field because the usage PANEL reads it too: a number the bar
+   * measures against does not belong behind a budget-gate switch.
+   */
+  settings: [
+    { key: 'included_usd', settingKey: 'cursor_included_usd', type: 'number', default: 20, min: 0, step: 1, labelKey: 'settings.cursor_included', hintKey: 'settings.cursor_included_hint' },
+  ],
+
+  /**
+   * The budget gate for a cursor run: the included usage of the running period
+   * against its own threshold. `label` is what the reason line says — the
+   * plugin's own label is "Cursor CLI", and a gate reason is about the account,
+   * not about the binary.
+   */
+  gate: {
+    label: 'Cursor',
+    fields: [
+      { key: 'gate_on', settingKey: 'cursor_gate_on', type: 'switch', default: 1, labelKey: 'settings.gate_cursor_on' },
+      { key: 'pct', settingKey: 'cursor_gate_pct', type: 'number', default: 95, min: 0, max: 100, step: 0.5, labelKey: 'settings.gate_cursor_pct', hintKey: 'settings.gate_cursor_pct_hint' },
+    ],
+    async check(ctx, values = {}) {
+      const { usageGateBlocked } = await import('../quota.mjs')
+      const g = await usageGateBlocked(plugin.id, {
+        threshold: values.pct ?? 95,
+        includedFallback: Number(ctx?.setting?.('included_usd', 20)) || 20,
+      })
+      return g.blocked ? g : null
+    },
+  },
+
+  /**
+   * cursor can answer the hub's own small questions on its subscription.
+   *
+   * `--mode ask` is the only way to make cursor-agent read-only, and `--trust`
+   * is mandatory: without it the CLI sits at "Do you trust the contents of this
+   * directory?" and nothing happens at all. There is no schema flag and no
+   * system-prompt flag, hence `schema: 'prompt'` and the system text folded
+   * into the prompt.
+   */
+  llm: {
+    schema: 'prompt',
+    overhead: true,
+    async models() { return plugin.fetchModels() },
+    async complete(ctx, req = {}) {
+      const prompt = req.system ? `${req.system}\n\n${req.prompt ?? ''}` : String(req.prompt ?? '')
+      const args = ['-p', '--output-format', 'json']
+      if (req.model) args.push('--model', String(req.model))
+      args.push('--trust', '--mode', 'ask', prompt)
+      const r = await runCli('cursor-agent', args, { timeoutMs: req.timeoutMs ?? 180_000 })
+      let j = null
+      try { j = JSON.parse(r.stdout.trim()) } catch { /* handled below */ }
+      // cursor is the one of the four that reports on STDERR — the others all
+      // keep their complaint in the stream the answer comes on.
+      if (r.code !== 0 || !j) throw cliFailure('cursor-agent', r, String(r.stderr || '').trim() || null)
+      const text = typeof j.result === 'string' ? j.result : JSON.stringify(j.result ?? '')
+      return { text, usage: j.usage ?? null, raw: j }
+    },
+  },
+
+  /**
    * Model list. The single authoritative source is `cursor-agent models`: the
    * list is ACCOUNT-BOUND (it comes from the server, not the binary), and the
    * CLI names exactly this list when rejecting an unknown model.
@@ -163,7 +244,7 @@ export default {
     return `cd ${run.workdir_effective} && cursor-agent --resume ${id}`
   },
 
-  modelArgs(run) {
+  modelArgs(run, _ctx = null) {
     const args = []
     if (!run.model) return { args, fehlt: [] }
     args.push('--model', run.model)
@@ -186,7 +267,7 @@ export default {
    * It is internal and has no contract: when it fails, included_usd stays null
    * and usage.mjs falls back to the configured amount.
    */
-  async usage() {
+  async usage(ctx = null) {
     let token
     try { token = JSON.parse(readFileSync(AUTH_FILE(), 'utf8')).accessToken } catch { return null }
     if (!token) return null
@@ -203,15 +284,32 @@ export default {
     const usd = (cents) => (cents == null || !Number.isFinite(Number(cents)) ? null : Math.round(Number(cents)) / 100)
     const plan = period?.planUsage ?? null
     const endMs = Number(period?.billingCycleEnd)
+    const spent = usd(plan?.totalSpend) ?? usd(agg?.totalCostCents)
+    // The included amount comes from Cursor itself. Only when that endpoint
+    // stays silent does the configured fallback step in — and then the answer
+    // SAYS so, so the UI can mark the bar as an estimate instead of presenting
+    // a guess as a fact. This used to live in usage.mjs, where the aggregator
+    // knew a vendor's field names and the budget gate had to compute the same
+    // percentage a second time.
+    let included = usd(plan?.limit)
+    let estimated = false
+    if (included == null) {
+      included = Number(ctx?.setting?.('included_usd', 20)) || 20
+      estimated = true
+    }
     return {
       kind: 'cursor',
       plan: profile?.membershipType ?? profile?.individualMembershipType ?? null,
       // The period endpoint's own total belongs to its own limit — mixing it
       // with the aggregation would make bar and tooltip disagree by a cent.
-      spent_usd: usd(plan?.totalSpend) ?? usd(agg?.totalCostCents),
-      included_usd: usd(plan?.limit),
+      spent_usd: spent,
+      included_usd: included,
+      ...(estimated ? { included_estimated: true } : {}),
       remaining_usd: usd(plan?.remaining),
+      pct: spent != null && included ? Math.round((spent / included) * 1000) / 10 : null,
       cycle_end: Number.isFinite(endMs) && endMs > 0 ? new Date(endMs).toISOString() : null,
     }
   },
 }
+
+export default plugin

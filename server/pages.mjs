@@ -36,6 +36,18 @@ import { listSessions, sessionMemory, sessionKeepHours, currentKeepMs, paneAlive
 import { cleanupSettings, cleanupConfigured, cleanupPrompt, cleanupRunInFlight, startCleanupRun } from './cleanup.mjs'
 import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
 import { flowRunKeepDays } from './flows/db.mjs'
+// "cc-hub found N things on this machine it could use" — derived, not passed,
+// exactly like setupBanner() above: the layout calls it on every page and it
+// answers out of the discovery table. It lives with the page that answers it.
+import { discoveryBanner } from './plugins/web.mjs'
+// The budget-gate thresholds are no longer typed into this file: every plugin
+// that declares a gate brings its own fields, and the historic keys survive
+// because a built-in field names them itself (`settingKey`).
+import { gatePlugins, pluginFields, pluginSettingKey, allPluginSettingKeys } from './plugins/settings.mjs'
+import { pluginHasCredential } from './plugins/store.mjs'
+// Which model source answers the hub's own questions — the picker above each
+// of the three LLM model fields.
+import { llmSources, DEFAULT_SOURCE } from './llm/sources.mjs'
 // The flow block of the detail page is rendered in server/flows/ and belongs to
 // that module; it is re-exported here so a fragment has ONE place to ask for a
 // piece of a page, whichever module happens to build it.
@@ -608,7 +620,7 @@ ${setupBanner()}
   <button type="button" id="qr-open" class="qr-open" title="${e(t('qr.hint'))}">⚡ ${e(t('qr.title'))}</button>
 </header>
 <div class="shell" id="shell">
-<main>${globalesBanner()}${otherRepo}${content}</main>
+<main>${globalesBanner()}${discoveryBanner(active || '/')}${otherRepo}${content}</main>
 ${await statusSidebar(effRepo)}
 </div>
 ${quickRunDialog(repos, effRepo)}
@@ -1261,7 +1273,7 @@ export function integrationSection(run, repo) {
 
   const btn = (action, label, extra = '', confirmKey = null) => `
     <form method="post" action="/api/runs/${e(run.id)}/${action}" class="inline"${
-      confirmKey ? ` onsubmit="return confirm(${JSON.stringify(t(confirmKey))})"` : ''}>${extra}
+      confirmKey ? ` onsubmit="return confirm(${e(JSON.stringify(t(confirmKey)))})"` : ''}>${extra}
       <button>${e(t(label))}</button></form>`
 
   const buttons = []
@@ -1587,13 +1599,124 @@ export function sessionsTable(sessions, ctx = {}) {
 }
 
 // ---------------- settings ----------------
+
+/** The 1/0 select every switch on this page has always been. */
+function onOff(name, on, extra = '') {
+  return `<select name="${e(name)}"${extra}>
+    <option value="1" ${on ? 'selected' : ''}>${e(t('layout.on'))}</option>
+    <option value="0" ${on ? '' : 'selected'}>${e(t('layout.off'))}</option></select>`
+}
+
+/**
+ * One `SettingField` a plugin declared, rendered into THIS form.
+ *
+ * The name is `pluginSettingKey()` and nothing else: for a built-in gate that
+ * is the key the settings table has always carried (`claude_gate_5h`,
+ * `openrouter_min_eur`, …), which is why generating these fields migrates
+ * nothing and loses nothing.
+ *
+ * `default: null` is a value, not a missing one — `claude_gate_fable` declares
+ * it on purpose, because an EMPTY fable threshold means "follow the 7-day one".
+ * Rendering the 7-day default into it would turn that rule off by displaying it.
+ */
+function settingsField(pluginId, field, s) {
+  const name = pluginSettingKey(pluginId, field)
+  const stored = s[name]
+  const value = stored === undefined || stored === null ? (field.default ?? '') : stored
+  const label = e(t(field.labelKey ?? field.key))
+  const hint = field.hintKey ? ` <span class="dim">${e(t(field.hintKey))}</span>` : ''
+  if (field.type === 'switch') {
+    return `<label>${label} ${onOff(name, String(value) === '1' || value === true || value === 1)}${hint}</label>`
+  }
+  if (field.type === 'select') {
+    const options = (field.options ?? []).map(o => {
+      const id = typeof o === 'string' ? o : o.value
+      const text = typeof o === 'string' ? o : t(o.labelKey ?? o.label ?? o.value)
+      return `<option value="${e(id)}" ${String(value) === String(id) ? 'selected' : ''}>${e(text)}</option>`
+    }).join('')
+    return `<label>${label} <select name="${e(name)}">${options}</select>${hint}</label>`
+  }
+  const type = field.type === 'number' ? 'number' : field.type === 'password' ? 'password' : 'text'
+  const num = field.type === 'number'
+    ? `${field.min !== undefined ? ` min="${e(field.min)}"` : ''}${field.max !== undefined ? ` max="${e(field.max)}"` : ''}${field.step !== undefined ? ` step="${e(field.step)}"` : ''}`
+    : ''
+  return `<label>${label} <input type="${type}" name="${e(name)}" value="${e(value)}"${num}>${hint}</label>`
+}
+
+/**
+ * Budget gates: one block per plugin that declares thresholds, in the
+ * registry's order. Nothing about claude, cursor, OpenRouter or DeepSeek is
+ * typed here any more — an installed plugin's gate appears by itself, and a
+ * disabled one does not (`gatePlugins()` filters on that).
+ */
+function gatesFieldset(s) {
+  const blocks = gatePlugins().map(p => `
+    <div class="gate-block">
+      <h4>${e(p.plugin.gate?.label ?? p.plugin.label ?? p.id)}</h4>
+      ${pluginFields(p.plugin, 'gate').map(f => settingsField(p.id, f, s)).join('')}
+    </div>`).join('')
+  return `<fieldset><legend>${e(t('settings.gates_legend'))}</legend>
+      <p class="dim">${e(t('settings.gates_hint'))}</p>
+      ${blocks || `<p class="dim">${e(t('settings.gates_none'))}</p>`}
+    </fieldset>`
+}
+
+/** What one entry of the source picker reads like. */
+function sourceOptionText(src) {
+  const parts = [src.label]
+  if (src.kind === 'agent') parts.push(t('settings.llm_source_agent'))
+  if (!src.ready) parts.push(t('settings.llm_source_not_ready'))
+  return parts.length > 1 ? `${parts[0]} — ${parts.slice(1).join(', ')}` : parts[0]
+}
+
+/**
+ * The source picker of one of the hub's own LLM jobs, plus the two things that
+ * hang on the chosen source: the overhead warning (a coding agent starts a
+ * whole session for one question) and the OpenRouter serving-provider pin,
+ * which means nothing anywhere else.
+ *
+ * The pin is hidden AND disabled when it does not apply. A hidden field that
+ * still submits is a trap this project has been bitten by before — and here it
+ * would send an OpenRouter endpoint tag along with a DeepSeek answer.
+ */
+function llmSourceFields(prefix, s, sources) {
+  const key = `${prefix}_source`
+  const current = String(s[key] ?? '').trim() || DEFAULT_SOURCE
+  const chosen = sources.find(x => x.id === current) ?? null
+  // A source whose plugin was removed or switched off is still offered — as
+  // itself, marked. Dropping it from the list would silently re-point the job
+  // at OpenRouter the next time somebody saves an unrelated field.
+  const stale = chosen ? '' : `<option value="${e(current)}" selected>${e(t('settings.llm_source_unknown', { source: current }))}</option>`
+  const options = sources.map(src =>
+    `<option value="${e(src.id)}" ${src.id === current ? 'selected' : ''}
+       data-overhead="${src.overhead ? '1' : '0'}">${e(sourceOptionText(src))}</option>`).join('')
+  const overhead = !!chosen?.overhead
+  const pin = current === DEFAULT_SOURCE
+  return `<label>${e(t('settings.llm_source'))}
+      <select name="${e(key)}" data-llm-source data-llm-prefix="${e(prefix)}">${stale}${options}</select>
+      <span class="dim">${e(t('settings.llm_source_explain'))}</span></label>
+    <p class="warn" data-llm-overhead ${overhead ? '' : 'hidden'}>${e(t('settings.llm_source_overhead'))}</p>
+    <label data-llm-pin ${pin ? '' : 'hidden'}>${e(t('settings.llm_or_provider'))}
+      <input name="${e(prefix)}_or_provider" value="${e(s[`${prefix}_or_provider`] ?? '')}"
+        placeholder="${e(t('settings.llm_or_ph'))}" ${pin ? '' : 'disabled'}></label>`
+}
+
 export async function pageSettings(req, res, url) {
   const s = Object.fromEntries(db.prepare('SELECT key,value FROM settings').all().map(r => [r.key, r.value]))
+  const sources = llmSources()
+  // The old warning read `process.env.OPENROUTER_API_KEY` and said "the key is
+  // missing" whatever source the job pointed at. It is a statement about ONE
+  // source now, and about the credential as the rest of the hub resolves it.
+  const missingKey = (prefix) => {
+    const id = String(s[`${prefix}_source`] ?? '').trim() || DEFAULT_SOURCE
+    if (id !== DEFAULT_SOURCE || pluginHasCredential('openrouter')) return ''
+    return ` <b class="warn">${e(t('settings.llm_missing_key'))}</b>`
+  }
   const body = `
   <h2>${e(t('nav.settings'))}</h2>
   <p class="dim">${e(t('settings.global_hint'))}</p>
-  <p><a class="btn" href="/settings/coding-agents">${e(t('ca.title'))}</a>
-     <span class="dim">${e(t('settings.coding_agents_hint'))}</span></p>
+  <p><a class="btn" href="/settings/plugins">${e(t('plugins.title'))}</a>
+     <span class="dim">${e(t('settings.plugins_hint'))}</span></p>
   <p><a class="btn" href="/settings/favorites">${e(t('fav.title'))}</a>
      <span class="dim">${e(t('settings.favorites_hint'))}</span></p>
   <p><a class="btn" href="/settings/merge">${e(t('merge.settings_title'))}</a>
@@ -1612,27 +1735,9 @@ export async function pageSettings(req, res, url) {
     <label>${e(t('settings.pipeline'))} <select name="pipeline_on"><option value="1" ${s.pipeline_on === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${s.pipeline_on !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
     <label>${e(t('settings.telegram_token'))} <input name="telegram_token" type="password" value="${e(s.telegram_token ?? '')}"></label>
     <label>${e(t('settings.telegram_chat'))} <input name="telegram_chat" value="${e(s.telegram_chat ?? '')}"></label>
-    <fieldset><legend>${e(t('settings.gates_legend'))}</legend>
-      <p class="dim">${e(t('settings.gates_hint'))}</p>
-      <label>${e(t('settings.gate_claude_on'))} <select name="claude_gate_on"><option value="1" ${(s.claude_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.claude_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
-      <label>${e(t('settings.gate_claude_5h'))} <input name="claude_gate_5h" type="number" step="0.5" min="0" max="100" value="${e(s.claude_gate_5h ?? '90')}"></label>
-      <label>${e(t('settings.gate_claude_7d'))} <input name="claude_gate_7d" type="number" step="0.5" min="0" max="100" value="${e(s.claude_gate_7d ?? '95')}">
-        <span class="dim">${e(t('settings.gate_claude_7d_hint'))}</span></label>
-      <label>${e(t('settings.gate_claude_fable'))} <input name="claude_gate_fable" type="number" step="0.5" min="0" max="100" value="${e(s.claude_gate_fable ?? '95')}">
-        <span class="dim">${e(t('settings.gate_claude_fable_hint'))}</span></label>
-      <label>${e(t('settings.gate_openrouter_on'))} <select name="openrouter_gate_on"><option value="1" ${(s.openrouter_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.openrouter_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
-      <label>${e(t('settings.openrouter_min'))} <input name="openrouter_min_eur" type="number" step="0.5" min="0" value="${e(s.openrouter_min_eur ?? '5')}"></label>
-      <label>${e(t('settings.gate_deepseek_on'))} <select name="deepseek_gate_on"><option value="1" ${(s.deepseek_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.deepseek_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
-      <label>${e(t('settings.gate_deepseek_min'))} <input name="deepseek_min_usd" type="number" step="0.5" min="0" value="${e(s.deepseek_min_usd ?? '2')}">
-        <span class="dim">${e(t('settings.gate_deepseek_min_hint'))}</span></label>
-      <label>${e(t('settings.gate_cursor_on'))} <select name="cursor_gate_on"><option value="1" ${(s.cursor_gate_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.cursor_gate_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
-      <label>${e(t('settings.gate_cursor_pct'))} <input name="cursor_gate_pct" type="number" step="0.5" min="0" max="100" value="${e(s.cursor_gate_pct ?? '95')}">
-        <span class="dim">${e(t('settings.gate_cursor_pct_hint'))}</span></label>
-    </fieldset>
+    ${gatesFieldset(s)}
     <label>${e(t('settings.abo_price'))} <input name="abo_price" type="number" value="${e(s.abo_price ?? '200')}">
       <span class="dim">${e(t('settings.abo_price_hint'))}</span></label>
-    <label>${e(t('settings.cursor_included'))} <input name="cursor_included_usd" type="number" step="1" value="${e(s.cursor_included_usd ?? '20')}">
-      <span class="dim">${e(t('settings.cursor_included_hint'))}</span></label>
     <label>${e(t('settings.session_keep'))} <input name="session_keep_hours" type="number" min="0" step="0.5" value="${e(String(sessionKeepHours(s)))}">
       <span class="dim">${e(t('settings.session_keep_hint'))}</span></label>
     <label>${e(t('settings.archive_session'))} <select name="archive_session_on"><option value="1" ${(s.archive_session_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.archive_session_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select>
@@ -1642,29 +1747,38 @@ export async function pageSettings(req, res, url) {
     <label>${e(t('settings.flow_runs_keep'))} <input name="flow_runs_keep_days" type="number" min="0" step="1" value="${e(String(flowRunKeepDays(s)))}">
       <span class="dim">${e(t('settings.flow_runs_keep_hint'))}</span></label>
     <label>${e(t('settings.prompt_suffix'))} <textarea name="prompt_suffix" rows="12">${e(s.prompt_suffix ?? '')}</textarea></label>
-    <fieldset><legend>${e(t('settings.llm_legend'))}</legend>
-      <p class="dim">${e(t('settings.llm_hint'))} ${process.env.OPENROUTER_API_KEY ? '' : `<b class="warn">${e(t('settings.llm_missing_key'))}</b>`}</p>
+    <fieldset data-llm-job><legend>${e(t('settings.llm_legend'))}</legend>
+      <p class="dim">${e(t('settings.llm_hint'))}${missingKey('llm_check')}</p>
       <label>${e(t('settings.llm_on'))} <select name="llm_check_on"><option value="0" ${s.llm_check_on !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option><option value="1" ${s.llm_check_on === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option></select></label>
+      ${llmSourceFields('llm_check', s, sources)}
       <label>${e(t('settings.llm_model'))} <input name="llm_check_model" list="llm-mru" value="${e(s.llm_check_model ?? '')}" placeholder="vendor/model">
         <datalist id="llm-mru">${llmModelleMru().map(m => `<option value="${e(m)}">`).join('')}</datalist>
         <span class="dim">${e(t('settings.llm_mru_hint'))}</span></label>
-      <label>${e(t('settings.llm_or_provider'))} <input name="llm_check_or_provider" value="${e(s.llm_check_or_provider ?? '')}" placeholder="${e(t('settings.llm_or_ph'))}"></label>
     </fieldset>
-    <fieldset><legend>${e(t('settings.title_legend'))}</legend>
-      <p class="dim">${e(t('settings.title_hint'))} ${process.env.OPENROUTER_API_KEY ? '' : `<b class="warn">${e(t('settings.llm_missing_key'))}</b>`}</p>
+    <fieldset data-llm-job><legend>${e(t('settings.title_legend'))}</legend>
+      <p class="dim">${e(t('settings.title_hint'))}${missingKey('llm_title')}</p>
       <label>${e(t('settings.title_on'))} <select name="llm_title_on"><option value="1" ${(s.llm_title_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.llm_title_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+      ${llmSourceFields('llm_title', s, sources)}
       <label>${e(t('settings.title_model'))} <input name="llm_title_model" list="title-mru" value="${e(s.llm_title_model || DEFAULT_TITLE_MODEL)}" placeholder="${e(DEFAULT_TITLE_MODEL)}">
         <datalist id="title-mru">${[...new Set([DEFAULT_TITLE_MODEL, ...titleModelsMru()])].map(m => `<option value="${e(m)}">`).join('')}</datalist>
         <span class="dim">${e(t('settings.title_model_hint', { model: DEFAULT_TITLE_MODEL }))}</span></label>
-      <label>${e(t('settings.llm_or_provider'))} <input name="llm_title_or_provider" value="${e(s.llm_title_or_provider ?? '')}" placeholder="${e(t('settings.llm_or_ph'))}"></label>
     </fieldset>
-    <fieldset><legend>${e(t('settings.extras_legend'))}</legend>
-      <p class="dim">${e(t('settings.extras_hint'))} ${process.env.OPENROUTER_API_KEY ? '' : `<b class="warn">${e(t('settings.llm_missing_key'))}</b>`}</p>
+    <fieldset data-llm-job><legend>${e(t('settings.extras_legend'))}</legend>
+      <p class="dim">${e(t('settings.extras_hint'))}${missingKey('llm_extras')}</p>
       <label>${e(t('settings.extras_on'))} <select name="llm_extras_on"><option value="1" ${(s.llm_extras_on ?? '1') === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${(s.llm_extras_on ?? '1') !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+      ${llmSourceFields('llm_extras', s, sources)}
       <label>${e(t('settings.extras_model'))} <input name="llm_extras_model" list="extras-mru" value="${e(s.llm_extras_model || DEFAULT_EXTRAS_MODEL)}" placeholder="${e(DEFAULT_EXTRAS_MODEL)}">
         <datalist id="extras-mru">${[...new Set([DEFAULT_EXTRAS_MODEL, ...extrasModelsMru()])].map(m => `<option value="${e(m)}">`).join('')}</datalist>
         <span class="dim">${e(t('settings.extras_model_hint', { model: DEFAULT_EXTRAS_MODEL }))}</span></label>
-      <label>${e(t('settings.llm_or_provider'))} <input name="llm_extras_or_provider" value="${e(s.llm_extras_or_provider ?? '')}" placeholder="${e(t('settings.llm_or_ph'))}"></label>
+    </fieldset>
+    <fieldset><legend>${e(t('settings.llm_ops_legend'))}</legend>
+      <p class="dim">${e(t('settings.llm_ops_hint'))}</p>
+      <label>${e(t('settings.llm_retries'))} <input name="llm_retries" type="number" min="0" max="5" step="1" value="${e(s.llm_retries ?? '1')}">
+        <span class="dim">${e(t('settings.llm_retries_hint'))}</span></label>
+      <label>${e(t('settings.llm_alert_on'))} ${onOff('llm_alert_on', (s.llm_alert_on ?? '1') === '1')}
+        <span class="dim">${e(t('settings.llm_alert_hint'))}</span></label>
+      <label>${e(t('settings.llm_alert_window'))} <input name="llm_alert_window_min" type="number" min="1" step="1" value="${e(s.llm_alert_window_min ?? '30')}"></label>
+      <label>${e(t('settings.llm_alert_max'))} <input name="llm_alert_max_per_hour" type="number" min="1" step="1" value="${e(s.llm_alert_max_per_hour ?? '6')}"></label>
     </fieldset>
     <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
   </form>
@@ -1692,7 +1806,7 @@ export async function pageFavorites(req, res, url) {
     <p class="dim">${e(favoriteSummary(f))}</p>
     <div class="btn-row"><a class="btn" href="/settings/favorites/edit?id=${f.id}">${e(t('agents.edit'))}</a>
       <form method="post" action="/settings/favorites/delete" class="inline"
-            onsubmit="return confirm(${JSON.stringify(t('fav.delete_confirm', { name: f.name }))})">
+            onsubmit="return confirm(${e(JSON.stringify(t('fav.delete_confirm', { name: f.name })))})">
         <input type="hidden" name="id" value="${f.id}"><button class="danger">${e(t('ca.delete'))}</button></form></div>
   </div>`).join('')
   const voll = favs.length >= FAVORITES_MAX
@@ -1943,7 +2057,7 @@ export async function pageCodingAgents(req, res, url) {
       </fieldset>
       <button>${e(t('settings.save'))}</button>
     </form>
-    <form method="post" action="/settings/coding-agents/delete" class="inline" onsubmit="return confirm(${JSON.stringify(t('ca.delete_confirm', { label: plugin.label }))})">
+    <form method="post" action="/settings/coding-agents/delete" class="inline" onsubmit="return confirm(${e(JSON.stringify(t('ca.delete_confirm', { label: plugin.label })))})">
       <input type="hidden" name="id" value="${a.id}"><button class="danger">${e(t('ca.delete'))}</button></form>
   </div>`
   }).join('')
@@ -2096,7 +2210,7 @@ export async function agentEdit(req, res, url) {
   const danger = id ? `
   <div class="btn-row">
     <a class="btn ghost" href="/agents/move?id=${id}&repo=${repoId}">${e(t('agents.move'))}</a>
-    <form method="post" action="/agents/delete" class="inline" onsubmit="return confirm(${JSON.stringify(t('agents.delete_confirm', { name: a.name }))})"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button class="danger">${e(t('agents.delete'))}</button></form>
+    <form method="post" action="/agents/delete" class="inline" onsubmit="return confirm(${e(JSON.stringify(t('agents.delete_confirm', { name: a.name })))})"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button class="danger">${e(t('agents.delete'))}</button></form>
   </div>` : ''
   const body = `<h2>${e(id ? t('agentform.title_edit') : t('agentform.title_new'))}</h2>
   <form method="post" action="/agents/edit${id ? `?id=${id}` : ''}" class="settings form-grid">${agentFields(a, repoId)}
@@ -2358,15 +2472,32 @@ export async function repoSave(req, res, url, formBody) {
  * fallback for an installation that has not saved the new field yet
  * (sessionKeepMs), and an empty write would silently reset it.
  */
-const SETTINGS_KEYS = ['pipeline_on', 'telegram_token', 'telegram_chat',
-  'claude_gate_on', 'claude_gate_5h', 'claude_gate_7d', 'claude_gate_fable',
-  'openrouter_gate_on', 'openrouter_min_eur', 'deepseek_gate_on', 'deepseek_min_usd',
-  'cursor_gate_on', 'cursor_gate_pct', 'cursor_included_usd',
+const STATIC_KEYS = ['pipeline_on', 'telegram_token', 'telegram_chat',
   'abo_price', 'session_keep_hours', 'archive_session_on', 'archive_session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
-  'llm_check_on', 'llm_check_model', 'llm_check_or_provider',
-  'llm_title_on', 'llm_title_model', 'llm_title_or_provider',
-  'llm_extras_on', 'llm_extras_model', 'llm_extras_or_provider', 'ui_language',
-  'ui_timezone']
+  'llm_check_on', 'llm_check_model', 'llm_check_or_provider', 'llm_check_source',
+  'llm_title_on', 'llm_title_model', 'llm_title_or_provider', 'llm_title_source',
+  'llm_extras_on', 'llm_extras_model', 'llm_extras_or_provider', 'llm_extras_source',
+  'llm_retries', 'llm_alert_on', 'llm_alert_window_min', 'llm_alert_max_per_hour',
+  'ui_language', 'ui_timezone']
+
+/**
+ * The allowlist, computed per request rather than once at import.
+ *
+ * A module-level constant would be built while this file is still being
+ * imported — before `loadExternalPlugins()` has run, so an external plugin's
+ * thresholds would be missing from it. They would then render on the form and
+ * be dropped on save: configurable-looking and silently not saved, which is
+ * the exact failure this allowlist exists to prevent. `allPluginSettingKeys()`
+ * walks a Map of a handful of entries; the cost is nothing next to the write.
+ *
+ * The gate keys that used to stand here by hand (`claude_gate_5h`,
+ * `openrouter_min_eur`, `cursor_included_usd`, …) are exactly what it returns
+ * now: a built-in plugin declares its historic `settingKey`, so the list is
+ * the same strings from a different source.
+ */
+function settingsKeys() {
+  return [...STATIC_KEYS, ...allPluginSettingKeys()]
+}
 
 export async function settingsSave(req, res, url, formBody) {
   const b = await formBody()
@@ -2382,7 +2513,7 @@ export async function settingsSave(req, res, url, formBody) {
   // NOT be safe for a checkbox: an unchecked one is simply absent, so its "off"
   // would read as "not mentioned". A checkbox added here needs a hidden
   // companion field carrying the 0.
-  for (const k of SETTINGS_KEYS) {
+  for (const k of settingsKeys()) {
     if (Object.hasOwn(b, k)) setSetting(k, b[k] ?? '')
   }
   // The language takes effect immediately — the redirect below already renders in it.
