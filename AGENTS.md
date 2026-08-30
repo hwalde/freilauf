@@ -986,6 +986,63 @@ flag, and every later call got that one stale promise for the life of the
 process. Both only became visible when the status sidebar started asking on
 every page, the first of which happens before anything is configured.
 
+### Best-provider selection for OpenRouter (`serving provider: auto`)
+
+OpenRouter serves one model from many serving providers that disagree in
+quantization (fp4 … bf16), price (up to 3× for the same slug) and health — the
+free routing regularly lands on a stronger-quantized host under the same model
+name. The hub therefore ships an automatic best-provider selection next to the
+old single-tag pin. The pure decision rule lives in
+**`server/providers/openrouter-routing.mjs`** (no hub imports — the same licence
+as `cli-llm.mjs`), the I/O and the cache in the OpenRouter plugin's `routing`
+capability, and the whole contract is in `docs/plugins.md` ("OpenRouter
+best-provider routing"). What the rest of the hub has to know:
+
+- **The form block has three modes**: *open* (OpenRouter routes freely — the
+  old default), *auto* (the hub selects) and *pin* (one tag, the old
+  checkbox). One widget, so "pin" and "auto" can never be stored as two
+  contradictory statements about one run; `runs.or_provider` keeps the pinned
+  tag, `runs.or_routing` (agents/runs/favorites) holds the auto requirements
+  JSON. **Visible on every harness when the provider is OpenRouter** — the old
+  checkbox hid the whole question on anything but opencode, which read as a
+  bug; where the setting cannot be passed through (hermes has no per-run
+  provider routing, measured), the block says so and `providerFromForm()`
+  drops it, exactly as it always dropped the pin.
+- **The auto requirements fold away** behind `<details>`: minimum
+  quantization (a LOWER bound — "fp8" admits bf16 and fp32, excludes fp4;
+  the parser accepts the wide family fp4/fp5/fp6/q4/q4_K_M/nf4/awq/int8/fp8/
+  bf16/… and ranks them by effective precision), provider region
+  (US / EU / DE / China; anything the region map cannot place drops out),
+  max input/output price (USD per Mio). Providers without a quantization
+  statement are always out — `null` is "no statement", never "unquantized".
+- **The rank, not an enumeration, is the guarantee** (learned from the
+  measured source algorithm): a `quantizations` enumeration ages upward — the
+  day an endpoint reports fp16, an enumeration would lock out MORE precision
+  than asked for. The rank stands in `openrouter-routing.mjs` alone and is
+  never copied into a request; `quantizationsFrom(min)` derives the API
+  enumeration from it. `int8` deliberately ranks BELOW `fp8`: same bits, unsafe
+  direction of a lower bound. `fp16`/`bf16` tie deliberately.
+- **No minimum = the best quantization a reliable provider serves.** With a
+  minimum, everything at or above it competes on price. Both rules end in an
+  ordered chain (up to four tags), not a single pick: the cheapest provider is
+  the most rate-limited one, and an `order` of one name was exactly the
+  failure that started the whole subject over there.
+- **Cached per model+config, 24 h**, in
+  `~/.local/share/cc-hub/openrouter-routing.json` (`CCHUB_OR_ROUTING_JSON` —
+  a test fence like `CCHUB_CURSOR_AUTH`): the next run that picks the same
+  model with the same requirements gets the SAME order, not a re-rolled one. A
+  fresh failure falls back to the stale answer marked `veraltet`, never to
+  nothing — an unpinned call is the worse failure.
+- **Only opencode receives it per run** (measured: hermes has no per-run
+  provider routing; its `providers:` config is global). `resolveRouting()` in
+  scheduler.mjs resolves auto to a concrete order BEFORE `createRun()` and
+  freezes it into the run's definition copy; every failure launches unpinned
+  and logs — a start never fails on its own convenience feature.
+- The hub's own LLM jobs (`llm_*_or_provider`) accept `auto` as the value, and
+  `complete()` resolves it with the same cache. `GET /api/or-routing` is the
+  preview endpoint the form's auto hint asks — same cache, so the preview
+  cannot promise what the start would not deliver.
+
 ## The live channel: a run announces itself
 
 The hub rendered a whole page and then never spoke again. A title generated

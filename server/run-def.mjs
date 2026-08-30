@@ -31,6 +31,7 @@ import { branchWorktree } from './runner.mjs'
 import { skillFelder, skillsAusFormular, skillListe, eintragName, eintragWert } from './zusaetze.mjs'
 import { flowAttachFields, attachmentsFromForm, parseAttachments } from './flows/attach.mjs'
 import { t } from './i18n.mjs'
+import { KNOWN_QUANTIZATIONS, REGIONS, parseRoutingConfig } from './providers/openrouter-routing.mjs'
 
 /** 'keiner' = detached worktree, 'neu' = create a branch, 'fest' = use an existing one. */
 export const BRANCH_MODES = ['keiner', 'neu', 'fest']
@@ -136,6 +137,73 @@ function harnessOptions(selected) {
  * API hangs, a text field is still there immediately to type the slug into.
  * <datalist> provides the search for free.
  */
+/**
+ * The OpenRouter serving-provider routing block — ONE widget with three modes:
+ *
+ *   offen  OpenRouter routes freely (the old default; no provider block sent)
+ *   auto   the hub's best-provider selection: it fetches the model's endpoints,
+ *          filters them against the requirements below (quantization, region,
+ *          price caps, health, tool support), and pins the cheapest qualifying
+ *          providers as an ordered fallback chain — cached per model+config
+ *   pin    one serving provider, chosen by tag from the endpoint list
+ *
+ * Visible for provider=openrouter on EVERY harness — the pin can only be
+ * PASSED THROUGH for opencode (the CLI carries it in OPENCODE_CONFIG_CONTENT);
+ * hermes has no per-run provider routing. Where it cannot be passed the note
+ * says so, and providerFromForm() drops the setting as it always did — visible
+ * silence beats a field that pretends to do something.
+ *
+ * The auto requirements fold away behind <details> — they are the exception,
+ * not the rule, and an always-open wall of fields teaches people to stop
+ * reading forms.
+ */
+function orRoutingFields(a = {}) {
+  let cfg = {}
+  try { cfg = JSON.parse(a.or_routing ?? '') ?? {} } catch { /* old rows and nulls */ }
+  const auto = cfg?.mode === 'auto' || (!a.or_provider && cfg?.quant_min !== undefined)
+  const mode = a.or_provider ? 'pin' : (auto ? 'auto' : 'offen')
+  return `
+  <fieldset class="schedule" id="or-routing" hidden>
+    <legend>${e(t('or.legend'))}</legend>
+    <div class="btn-row" role="radiogroup" aria-label="${e(t('or.legend'))}">
+      <label class="chk"><input type="radio" name="or_mode" value="offen" ${mode === 'offen' ? 'checked' : ''}>
+        ${e(t('or.mode_offen'))}</label>
+      <label class="chk"><input type="radio" name="or_mode" value="auto" ${mode === 'auto' ? 'checked' : ''}>
+        ${e(t('or.mode_auto'))}</label>
+      <label class="chk"><input type="radio" name="or_mode" value="pin" ${mode === 'pin' ? 'checked' : ''}>
+        ${e(t('or.mode_pin'))}</label>
+    </div>
+    <label id="or-prov-label" ${mode === 'pin' ? '' : 'hidden'}>${e(t('or.provider_label'))}
+      <select name="or_provider" id="or-prov"><option value="${e(a.or_provider ?? '')}">${e(a.or_provider ?? '')}</option></select>
+    </label>
+    <details id="or-auto-details" ${mode === 'auto' ? 'open' : ''} hidden>
+      <summary>${e(t('or.auto_details'))}</summary>
+      <label>${e(t('or.quant'))}
+        <select name="or_quant" id="or-quant">
+          <option value="">${e(t('or.quant_auto'))}</option>
+          ${KNOWN_QUANTIZATIONS.map(q => `<option value="${q}" ${cfg.quant_min === q ? 'selected' : ''}>${q}</option>`).join('')}
+        </select>
+        <span class="dim">${e(t('or.quant_hint'))}</span>
+      </label>
+      <label>${e(t('or.region'))}
+        <select name="or_region">
+          ${REGIONS.map(r => `<option value="${r}" ${(cfg.location ?? 'all') === r ? 'selected' : ''}>${e(t('or.region_' + r))}</option>`).join('')}
+        </select>
+      </label>
+      <label>${e(t('or.max_in'))}
+        <input type="number" step="0.01" min="0" name="or_max_in" value="${e(cfg.max_in ?? '')}">
+        <span class="dim">${e(t('or.max_hint'))}</span>
+      </label>
+      <label>${e(t('or.max_out'))}
+        <input type="number" name="or_max_out" step="0.01" min="0" value="${cfg.max_out ?? ''}">
+      </label>
+    </details>
+    <p class="dim">${e(t('or.hint'))}</p>
+    <p class="warn" id="or-unsupported" hidden>${e(t('or.pin_unsupported'))}</p>
+    <p class="dim" id="or-auto-hint" hidden></p>
+  </fieldset>`
+}
+
 function modelFields(a = {}) {
   return `
   <label id="prov-label">${e(t('model.provider'))}
@@ -159,15 +227,7 @@ function modelFields(a = {}) {
     <span class="dim" id="effort-hint"></span>
   </label>
 
-  <fieldset class="schedule" id="or-routing" hidden>
-    <legend>${e(t('or.legend'))}</legend>
-    <label class="chk"><input type="checkbox" name="or_pin" value="1" id="or-pin" ${a.or_provider ? 'checked' : ''}>
-      ${e(t('or.pin'))}</label>
-    <label id="or-prov-label" ${a.or_provider ? '' : 'hidden'}>${e(t('or.provider_label'))}
-      <select name="or_provider" id="or-prov"><option value="${e(a.or_provider ?? '')}">${e(a.or_provider ?? '')}</option></select>
-    </label>
-    <p class="dim">${e(t('or.hint'))}</p>
-  </fieldset>`
+  ${orRoutingFields(a)}`
 }
 
 /**
@@ -304,9 +364,15 @@ export function runDefFields(a = {}, ctx = {}) {
 // ---------------------------------------------------------- form → definition
 
 /**
- * Provider fields from the form. A serving provider is ONLY taken over when it
- * can technically be passed through (opencode + OpenRouter + checkbox) —
+ * Provider fields from the form. A serving-provider choice is ONLY taken over
+ * when it can technically be passed through (opencode + OpenRouter) —
  * otherwise the DB would hold a promise that silently falls off at start.
+ *
+ * Three modes: `offen` (no provider block — the old default), `pin` (the tag
+ * in or_provider) and `auto` (the requirements config, resolved to an ordered
+ * provider chain at start — server/scheduler.mjs startRun, via the OpenRouter
+ * plugin's routing capability). The parsed config is validated here: a
+ * nonsense quantization minimum is a PROBLEM, never a silent "no filter".
  */
 function providerFromForm(b, problems) {
   const provider = b.provider ?? ''
@@ -319,10 +385,30 @@ function providerFromForm(b, problems) {
     problems.push(plugin?.subscription
       ? t('form.subscription_no_provider', { harness: b.harness })
       : t('form.provider_unavailable', { provider, harness: b.harness, list: allowed.join(', ') || '—' }))
-    return { provider: null, or_provider: null }
+    return { provider: null, or_provider: null, orRouting: null }
   }
-  const pin = b.or_pin === '1' && b.harness === 'opencode' && provider === 'openrouter'
-  return { provider: provider || null, or_provider: pin ? (b.or_provider?.trim() || null) : null }
+  // The serving-provider routing only survives where it can be passed through
+  // at all (opencode + OpenRouter) — the same gate the pin always had.
+  const passable = b.harness === 'opencode' && provider === 'openrouter'
+  if (provider !== 'openrouter') return { provider: provider || null, or_provider: null, orRouting: null }
+
+  if (b.or_mode === 'pin') {
+    return { provider, or_provider: b.or_provider?.trim() || null, orRouting: null }
+  }
+  if (b.or_mode === 'auto') {
+    const cfg = parseRoutingConfig({
+      quant_min: b.or_quant ?? '', location: b.or_region ?? 'all',
+      max_in: b.or_max_in ?? '', max_out: b.or_max_out ?? '',
+    })
+    if (cfg.error) {
+      problems.push(t('form.or_quant_unknown', { quant: cfg.error.replace('unknown quantization ', '') }))
+      return { provider: provider || null, or_provider: null, orRouting: null }
+    }
+    if (!passable) return { provider, or_provider: null, orRouting: null }
+    return { provider, or_provider: null, orRouting: cfg }
+  }
+  // "offen" (and anything that is not pin/auto): the empty default.
+  return { provider: provider || null, or_provider: null, orRouting: null }
 }
 
 /**
@@ -405,6 +491,7 @@ export async function runSetupFromForm(b, problems = []) {
     model: b.model?.trim() || null,
     provider: pv.provider,
     orProvider: pv.or_provider,
+    orRouting: pv.orRouting ?? null,
     effort,
   }
 }
@@ -456,15 +543,21 @@ export async function runDefFromForm(b, problems = []) {
  * and `attachmentsFromForm()` read.
  */
 export function setupToFormBody(setup = {}) {
+  const routing = setup.orRouting ?? parseRoutingJson(setup.or_routing)
+  const mode = routing?.mode === 'auto' ? 'auto' : (setup.or_provider ?? setup.orProvider) ? 'pin' : 'offen'
   const body = {
     harness: setup.harness,
     model: setup.model ?? '',
     provider: setup.provider ?? '',
     effort: setup.effort ?? '',
-    // The serving provider only survives where it can be passed through at all
-    // (opencode + OpenRouter); providerFromForm() decides that, as always.
-    or_pin: (setup.or_provider ?? setup.orProvider) ? '1' : '',
+    // The serving-provider routing only survives where it can be passed through
+    // at all (opencode + OpenRouter); providerFromForm() decides that, as always.
+    or_mode: mode,
     or_provider: setup.or_provider ?? setup.orProvider ?? '',
+    or_quant: routing?.quant_min ?? '',
+    or_region: routing?.location ?? 'all',
+    or_max_in: routing?.max_in ?? '',
+    or_max_out: routing?.max_out ?? '',
     skills_list: [],
     flows_list: [],
   }
@@ -483,6 +576,16 @@ export function setupToFormBody(setup = {}) {
 
 // -------------------------------------------------------- agent row ↔ definition
 
+/** The routing config in the shape the DB column holds (JSON), or NULL. */
+export function routingJson(routing) {
+  return routing ? JSON.stringify(routing) : null
+}
+
+/** The DB column back into the config object — tolerant of old rows and nulls. */
+export function parseRoutingJson(s) {
+  try { return JSON.parse(s ?? '') ?? null } catch { return null }
+}
+
 /** Agent row (DB columns) → definition, the shape createRun() and the flows expect. */
 export function defFromAgent(agent) {
   return {
@@ -490,6 +593,7 @@ export function defFromAgent(agent) {
     model: agent.model ?? null,
     provider: agent.provider ?? null,
     orProvider: agent.or_provider ?? null,
+    orRouting: parseRoutingJson(agent.or_routing),
     effort: agent.effort ?? null,
     prompt: agent.prompt,
     goal: agent.goal ?? null,
@@ -514,22 +618,22 @@ export function saveAgent({ id = null, repoId, name, def, schedule = null, activ
     // again from exactly that freshly written value.
     db.prepare(`UPDATE agents SET name=?, harness=?, model=?, prompt=?, goal=?, branch_mode=?, branch_pattern=?,
                 keep_on_branch=?, expected_minutes=?, schedule=?, schedule_kind=?, schedule_days=?, schedule_time=?,
-                schedule_weeks=?, schedule_anchor=?, run_at=?, provider=?, or_provider=?, effort=?,
+                schedule_weeks=?, schedule_anchor=?, run_at=?, provider=?, or_provider=?, or_routing=?, effort=?,
                 skills=?, flows=?, active=?, updated_at=datetime('now') WHERE id=?`).run(
       name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode, def.branchPattern,
       def.keepOnBranch ? 1 : 0,
       def.expectedMinutes, zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
-      def.provider, def.orProvider, def.effort, def.skills, def.flows ?? null, active, id)
+      def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null, active, id)
     return id
   }
   const r = db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,goal,branch_mode,branch_pattern,keep_on_branch,expected_minutes,
               schedule,schedule_kind,schedule_days,schedule_time,schedule_weeks,schedule_anchor,run_at,
-              provider,or_provider,effort,skills,flows,active)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+              provider,or_provider,or_routing,effort,skills,flows,active)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     repoId, name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode,
     def.branchPattern, def.keepOnBranch ? 1 : 0, def.expectedMinutes,
     zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
-    def.provider, def.orProvider, def.effort, def.skills, def.flows ?? null, active)
+    def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null, active)
   return Number(r.lastInsertRowid)
 }
 
@@ -695,6 +799,7 @@ function setupOf(v = {}) {
     provider: v.provider ?? null,
     model: v.model ?? null,
     or_provider: v.or_provider ?? null,
+    or_routing: v.or_routing ?? null,
     effort: v.effort ?? null,
   }
 }
@@ -722,6 +827,7 @@ export function rememberRunChoice(def) {
     provider: def.provider ?? null,
     model: def.model ?? null,
     or_provider: def.orProvider ?? null,
+    or_routing: def.orRouting ?? null,
     effort: def.effort ?? null,
   })
   setSetting(LAST_CHOICE_KEY, JSON.stringify(store))

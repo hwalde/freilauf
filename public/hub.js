@@ -696,9 +696,15 @@
     const hinweis = document.getElementById('model-hint')
     const harnessSel = document.querySelector('select[name=harness]')
     const routing = document.getElementById('or-routing')
-    const pin = document.getElementById('or-pin')
+    const orModeRadios = routing ? Array.from(routing.querySelectorAll('input[name=or_mode]')) : []
     const orProv = document.getElementById('or-prov')
     const orProvLabel = document.getElementById('or-prov-label')
+    const orAutoDetails = document.getElementById('or-auto-details')
+    const orAutoHint = document.getElementById('or-auto-hint')
+    const orUnsupported = document.getElementById('or-unsupported')
+    const orQuant = document.getElementById('or-quant')
+
+    const orMode = () => orModeRadios.find(r => r.checked)?.value || 'offen'
 
     const provLabel = document.getElementById('prov-label')
     const provHint = document.getElementById('prov-hint')
@@ -786,12 +792,20 @@
     }
 
     function syncRouting() {
-      // The serving provider can only be passed through per run for opencode;
-      // hermes only knows a global entry in ~/.hermes/config.yaml for this.
-      const moeglich = harnessSel?.value === 'opencode' && provSel.value === 'openrouter'
-      routing.hidden = !moeglich
-      if (!moeglich && pin) pin.checked = false
-      if (orProvLabel) orProvLabel.hidden = !(pin && pin.checked)
+      // The block shows whenever OpenRouter is the provider — on EVERY harness.
+      // Whether it can take effect is another question (opencode carries the
+      // provider block in OPENCODE_CONFIG_CONTENT; hermes only knows a global
+      // entry in ~/.hermes/config.yaml), and the note says so instead of
+      // hiding the choice: the visible silence beats a field that pretends.
+      const offen = provSel.value === 'openrouter'
+      if (routing) routing.hidden = !offen
+      if (orUnsupported) orUnsupported.hidden = !(offen && harnessSel?.value !== 'opencode')
+      const mode = orMode()
+      if (orProvLabel) orProvLabel.hidden = mode !== 'pin'
+      if (orAutoDetails) {
+        orAutoDetails.hidden = mode !== 'auto'
+        orAutoDetails.open = mode === 'auto'
+      }
     }
 
     const effLabel = document.getElementById('effort-label')
@@ -829,7 +843,7 @@
 
     let timer
     async function ladeEndpunkte() {
-      if (!pin?.checked || !modelInput.value.trim()) return
+      if (!modelInput.value.trim()) return
       orProv.innerHTML = '<option value="">' + T('js.loading', 'loading …') + '</option>'
       try {
         const r = await fetch('/api/or-endpoints?model=' + encodeURIComponent(modelInput.value.trim()))
@@ -850,6 +864,44 @@
     }
 
     /**
+     * Auto mode's live preview: what the selection WOULD pin for this model
+     * under the current requirements. Asks the same endpoint the start path
+     * resolves through — same cache, so the preview cannot promise something
+     * the start would not deliver. A failure shows its reason instead of a
+     * checkbox that pretends nothing is happening.
+     */
+    async function ladeAutoVorschau() {
+      if (!orAutoHint) return
+      const model = modelInput.value.trim()
+      if (!model || !routing || routing.hidden || orMode() !== 'auto') { orAutoHint.hidden = true; return }
+      const params = new URLSearchParams({
+        model,
+        quant: orQuant?.value ?? '',
+        region: routing.querySelector('select[name=or_region]')?.value ?? 'all',
+        max_in: routing.querySelector('input[name=or_max_in]')?.value ?? '',
+        max_out: routing.querySelector('input[name=or_max_out]')?.value ?? '',
+      })
+      try {
+        const j = await (await fetch('/api/or-routing?' + params)).json()
+        if (!j.ok) {
+          orAutoHint.textContent = T('js.or_auto_fail', 'auto: no qualifying provider ({err})', { err: j.error || '?' })
+          orAutoHint.hidden = false
+          return
+        }
+        const preis = (j.prices || []).find(p => p.tag === j.best)
+        orAutoHint.textContent = T('js.or_auto_ok', 'auto → {best} ({quant}){cache}', {
+          best: j.best,
+          quant: j.quant || '?',
+          cache: j.cached ? ' · ' + T('js.or_cached', 'cached') : '',
+        }) + (preis && preis.in_usd_mio != null
+          ? ' · $' + preis.in_usd_mio + '/' + preis.out_usd_mio + ' /Mio' : '')
+        orAutoHint.hidden = false
+      } catch {
+        orAutoHint.hidden = true
+      }
+    }
+
+    /**
      * Switching the coding agent replaces provider, model, serving provider and
      * effort with what THAT coding agent was last run with — it does not carry
      * the previous one's setup over. Those settings are not merely unhelpful
@@ -859,7 +911,7 @@
      * it means: empty, not "whatever was standing there".
      */
     async function harnessGewechselt() {
-      let c = { provider: '', model: '', or_provider: '', effort: '' }
+      let c = { provider: '', model: '', or_provider: '', or_routing: '', effort: '' }
       try {
         const j = await (await fetch('/api/run-choice?harness=' +
           encodeURIComponent(harnessSel?.value ?? ''))).json()
@@ -869,7 +921,18 @@
       provSel.value = c.provider || ''
       modelInput.value = c.model || ''
       if (effSel) { effSel.dataset.gewaehlt = c.effort || ''; effSel.value = '' }
-      if (pin) pin.checked = !!c.or_provider
+      let cfg = {}
+      try { cfg = JSON.parse(c.or_routing || '') ?? {} } catch { /* old choice: no routing stored */ }
+      const mode = c.or_provider ? 'pin' : (cfg.mode === 'auto' ? 'auto' : 'offen')
+      orModeRadios.forEach(r => { r.checked = r.value === mode })
+      if (orQuant) orQuant.value = cfg.quant_min || ''
+      const setField = (name, v) => {
+        const el = routing?.querySelector(`[name=${name}]`)
+        if (el && v != null) el.value = v
+      }
+      setField('or_region', cfg.location)
+      setField('or_max_in', cfg.max_in)
+      setField('or_max_out', cfg.max_out)
       if (orProv) {
         orProv.innerHTML = ''
         if (c.or_provider) {
@@ -882,24 +945,33 @@
       await ladeProvider()      // fills the provider list and, through it, the models
       syncRouting()
       await ladeEffort()
-      if (pin?.checked) ladeEndpunkte()
+      if (provSel.value === 'openrouter' && orMode() === 'pin') ladeEndpunkte()
     }
 
     provSel.addEventListener('change', () => {
       provSel.dataset.gewaehlt = provSel.value; ladeModelle(); syncRouting(); ladeEffort()
     })
     harnessSel?.addEventListener('change', harnessGewechselt)
-    pin?.addEventListener('change', () => { syncRouting(); ladeEndpunkte() })
+    orModeRadios.forEach(r => r.addEventListener('change', () => {
+      syncRouting()
+      if (orMode() === 'pin') ladeEndpunkte()
+      if (orMode() === 'auto') ladeAutoVorschau()
+    }))
+    orQuant?.addEventListener('change', ladeAutoVorschau)
+    routing?.querySelector('select[name=or_region]')?.addEventListener('change', ladeAutoVorschau)
+    routing?.querySelector('input[name=or_max_in]')?.addEventListener('change', ladeAutoVorschau)
+    routing?.querySelector('input[name=or_max_out]')?.addEventListener('change', ladeAutoVorschau)
     effSel?.addEventListener('change', () => { effSel.dataset.gewaehlt = effSel.value })
-    modelInput.addEventListener('change', () => { ladeEndpunkte(); ladeEffort() })
+    modelInput.addEventListener('change', () => { ladeEndpunkte(); ladeAutoVorschau(); ladeEffort() })
     modelInput.addEventListener('input', () => {
       clearTimeout(timer)
-      timer = setTimeout(() => { ladeEndpunkte(); ladeEffort() }, 400)
+      timer = setTimeout(() => { ladeEndpunkte(); ladeAutoVorschau(); ladeEffort() }, 400)
     })
     syncRouting()
     ladeProvider()
     ladeEffort()
-    if (pin?.checked) ladeEndpunkte()
+    if (provSel.value === 'openrouter' && orMode() === 'pin') ladeEndpunkte()
+    if (provSel.value === 'openrouter' && orMode() === 'auto') ladeAutoVorschau()
   }
 
   // ---- send text into a session / end run (detail page) ----

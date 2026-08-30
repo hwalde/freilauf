@@ -52,7 +52,10 @@ Six facts and you can reason about the whole system:
    thresholds, the ability to answer the hub's own small questions, and a
    `launch` declaration that lets `bin/cc-start` start a CLI nobody shipped
    here. Adding support for a new CLI is adding a package, not editing ten call
-   sites. [`docs/plugins.md`](docs/plugins.md).
+   sites. [`docs/plugins.md`](docs/plugins.md). One provider plugin may also
+   declare **best-provider routing**: for OpenRouter the form can select the
+   serving provider automatically (quantization, region and price requirements,
+   cached per model) instead of pinning one tag by hand.
 6. **The service runs from its own checkout** (`~/agents/deploy/cc-hub`), never
    from the directory a human edits in. `cchub deploy` moves it forward, health
    checks it and rolls back if it fails.

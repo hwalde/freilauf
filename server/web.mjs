@@ -39,6 +39,7 @@ import {
   shouldShowWelcome, markWelcomeSkipped,
 } from './welcome.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
+import { getPlugin } from './plugins/registry.mjs'
 import { startCleanupRun } from './cleanup.mjs'
 import { suggestExtras } from './extras-suggest.mjs'
 import { editRun } from './run-edit.mjs'
@@ -258,6 +259,7 @@ async function api(req, res, url) {
         provider: c.provider ?? '',
         model: c.model ?? '',
         or_provider: c.or_provider ?? '',
+        or_routing: c.or_routing ?? '',
         effort: c.effort ?? '',
       },
     })
@@ -328,6 +330,31 @@ async function api(req, res, url) {
     return json(res, 200, r.liste
       ? { ok: true, endpoints: r.liste, veraltet: r.veraltet }
       : { ok: false, error: r.fehler ?? t('api.endpoints_unreachable') })
+  }
+
+  // The best-provider selection for a model under the given requirements —
+  // the form's "auto" mode calls this so the operator SEES what would be
+  // pinned instead of trusting a checkbox. Same plugin the runs resolve
+  // through, same cache — a preview never disagrees with the start.
+  if (req.method === 'GET' && path === '/api/or-routing') {
+    const model = url.searchParams.get('model') ?? ''
+    const plugin = getPlugin('openrouter')?.plugin
+    if (!plugin?.routing) return json(res, 200, { ok: false, error: t('api.endpoints_unreachable') })
+    const cfg = plugin.routing.parseConfig({
+      quant_min: url.searchParams.get('quant') ?? '',
+      location: url.searchParams.get('location') ?? 'all',
+      max_in: url.searchParams.get('max_in') ?? '',
+      max_out: url.searchParams.get('max_out') ?? '',
+    })
+    try {
+      const r = await plugin.routing.resolve(pluginCtx('openrouter'), model.trim(), cfg)
+      return json(res, 200, r.ok
+        ? { ok: true, best: r.best, order: r.order, quant: r.quant, at: r.at,
+            cached: !!r.cached, veraltet: !!r.veraltet, prices: r.prices ?? [], dropped: r.dropped ?? [] }
+        : { ok: false, error: r.reason ?? t('api.endpoints_unreachable') })
+    } catch (e) {
+      return json(res, 200, { ok: false, error: e.message })
+    }
   }
   // The report endpoint answers 200 with `{ ok, message }`, and the message is
   // the point: with the repo's integration switched on the finish gate has
