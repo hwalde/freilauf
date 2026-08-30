@@ -865,6 +865,17 @@ export const RUN_DEF_FLOW_FIELDS = [
   { key: 'provider', kind: 'text', placeholder: 'openrouter / opencode-zen / … (as in the run form)' },
   { key: 'model', kind: 'text' },
   { key: 'effort', kind: 'text' },
+  // The OpenRouter serving-provider routing — the SAME three modes the run
+  // form carries, only flatter (the designer has no folding): offen routes
+  // freely, pin takes one tag, auto resolves the best provider per model at
+  // start from the requirements below (provider + model must be openrouter
+  // for any of it to reach the run).
+  { key: 'orMode', kind: 'select', options: ['offen', 'auto', 'pin'], default: 'offen' },
+  { key: 'orProvider', kind: 'text', placeholder: 'provider tag, e.g. parasail/fp8', showIf: { orMode: 'pin' } },
+  { key: 'orQuant', kind: 'text', placeholder: 'min. quantization: fp8 / bf16 / q4 …', showIf: { orMode: 'auto' } },
+  { key: 'orRegion', kind: 'select', options: ['all', 'us', 'eu', 'de', 'cn'], default: 'all', showIf: { orMode: 'auto' } },
+  { key: 'orMaxIn', kind: 'number', placeholder: 'USD/Mio', showIf: { orMode: 'auto' } },
+  { key: 'orMaxOut', kind: 'number', placeholder: 'USD/Mio', showIf: { orMode: 'auto' } },
   { key: 'prompt', kind: 'textarea', required: true, placeholder: 'Review the report:\n{{trigger.run.report}}' },
   // The second prompt (claude: '/goal <condition>'), typed into the session
   // after the start — see server/goal.mjs. A coding agent that knows none
@@ -878,11 +889,27 @@ export const RUN_DEF_FLOW_FIELDS = [
 
 /** Flow step properties (already rendered templates) → definition. */
 export function defFromFlowProps(props) {
+  // The routing, validated the way the run form validates it — a nonsense
+  // minimum becomes NO routing rather than a run that cannot start, and the
+  // pin travels only where the provider is OpenRouter.
+  const orMode = ['auto', 'pin'].includes(props.orMode) ? props.orMode : null
+  let orProvider = null
+  let orRouting = null
+  if (props.provider === 'openrouter' && orMode === 'pin' && String(props.orProvider ?? '').trim()) {
+    orProvider = String(props.orProvider).trim()
+  } else if (props.provider === 'openrouter' && orMode === 'auto') {
+    const cfg = parseRoutingConfig({
+      quant_min: props.orQuant ?? '', location: props.orRegion ?? 'all',
+      max_in: props.orMaxIn ?? '', max_out: props.orMaxOut ?? '',
+    })
+    if (!cfg?.error) orRouting = cfg
+  }
   return {
     harness: props.harness,
     model: props.model || null,
     provider: props.provider || null,
-    orProvider: null,
+    orProvider,
+    orRouting,
     effort: props.effort || null,
     prompt: props.prompt,
     // Through the same gate as the form's: a coding agent without a goal spec

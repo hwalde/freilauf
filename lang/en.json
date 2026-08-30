@@ -1119,5 +1119,11 @@
   "run.pinned_unresolved": "no qualifying provider found — launched unpinned",
   "js.or_auto_ok": "auto → {best} ({quant}){cache}",
   "js.or_auto_fail": "auto: no qualifying provider ({err})",
-  "js.or_cached": "cached"
+  "js.or_cached": "cached",
+  "flows.field.orMode": "Serving provider (OpenRouter)",
+  "flows.field.orProvider": "Provider tag (pin)",
+  "flows.field.orQuant": "Minimum quantization",
+  "flows.field.orRegion": "Provider region",
+  "flows.field.orMaxIn": "Max. input price (USD/Mio)",
+  "flows.field.orMaxOut": "Max. output price (USD/Mio)"
 }

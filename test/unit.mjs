@@ -3307,6 +3307,24 @@ try {
     gleich(rd.defFromAgent({ goal: 'tests are green' }).goal, 'tests are green', 'and the agent row carries it')
   })
 
+  await pruefe('the flow step carries the serving-provider routing like every form', () => {
+    const base = { harness: 'opencode', provider: 'openrouter', model: 'z-ai/glm-5.2', prompt: 'x', branchMode: 'keiner' }
+    gleich(rd.defFromFlowProps({ ...base, orMode: 'offen' }).orRouting, null, 'open = no routing')
+    const auto = rd.defFromFlowProps({ ...base, orMode: 'auto', orQuant: 'fp8', orRegion: 'eu', orMaxIn: '1.5' })
+    gleich(JSON.stringify(auto.orRouting), JSON.stringify({ mode: 'auto', quant_min: 'fp8', location: 'eu', max_in: 1.5 }),
+      'auto requirements become the config')
+    const pin = rd.defFromFlowProps({ ...base, orMode: 'pin', orProvider: 'parasail/fp8' })
+    gleich(pin.orProvider, 'parasail/fp8', 'the pin survives the flow step')
+    gleich(pin.orRouting, null, 'pin and auto are one statement, never both')
+    // Not passable, or nonsense — both are NO routing, never a broken run.
+    gleich(rd.defFromFlowProps({ ...base, provider: 'deepseek', orMode: 'pin', orProvider: 'x' }).orProvider, null,
+      'a routing on a non-OpenRouter provider is dropped')
+    gleich(rd.defFromFlowProps({ ...base, orMode: 'auto', orQuant: 'quatsch' }).orRouting, null,
+      'a nonsense minimum is dropped, the flow run still starts')
+    gleich(rd.defFromFlowProps({ ...base, orMode: 'auto', orQuant: 'fp8' }).orRouting.location, 'all',
+      'an unset region means everywhere, as in the form')
+  })
+
   // ------------------------------------------------------------------
   gruppe('OpenRouter best-provider selection (openrouter-routing.mjs)')
   const orr = await import('../server/providers/openrouter-routing.mjs')

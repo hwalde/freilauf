@@ -7,6 +7,22 @@ import { getSetting } from '../db.mjs'
 import { llmJson } from '../llm/index.mjs'
 import { defaultSource } from '../llm/sources.mjs'
 
+/**
+ * The stored auto-routing config of one of the hub's own LLM jobs — the same
+ * requirements widget the run forms carry, saved on the settings page. Tolerant
+ * of nulls and junk: no config, a broken blob — all mean "no auto routing",
+ * the plain serving-provider setting then decides alone.
+ */
+function orRoutingAusSetting(key) {
+  const v = getSetting(key)
+  if (!v) return null
+  try {
+    const cfg = JSON.parse(v)
+    return cfg?.mode === 'auto' ? cfg : null
+  } catch { return null }
+}
+
+
 const MAX_CHARS = 60_000     // context cap for the extraction input (cost + latency)
 
 const TYPE_MAP = {
@@ -71,6 +87,7 @@ export async function extractStructured({ text, instructions = '', fields, model
     schemaName: 'flow_extract',
     purpose: 'extract',
     servingProvider: getSetting('llm_check_or_provider') || null,
+    orRouting: orRoutingAusSetting('llm_check_or_routing'),
     maxTokens: 2000,
     temperature: 0,
     timeoutMs: 120_000,

@@ -738,7 +738,8 @@ other one; nothing in `server/llm` is skipped for it except the strict prompt.
 | `maxTokens` | default 1000 in the HTTP adapters |
 | `temperature` | default 0 |
 | `timeoutMs` | 60 s for an HTTP provider, 180 s for a CLI |
-| `servingProvider` | OpenRouter's serving-provider pin — `provider: {order:[x], allow_fallbacks:false}` |
+| `servingProvider` | OpenRouter's serving-provider pin — `provider: {order:[x], allow_fallbacks:false}`; the value `auto` resolves the best provider per model with default requirements |
+| `orRouting` | an auto-routing config `{mode:'auto', quant_min?, location?, max_in?, max_out?}` — resolved per model through the plugin's `routing` capability and cache; takes precedence over `servingProvider` |
 | `purpose` | the caller's name (`title`, `check`, `extract`, `extras`); OpenRouter sends it as `X-Title` |
 
 The answer is `{ text, usage, raw }`. **`text` is always a string** — a source
