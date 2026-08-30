@@ -1160,7 +1160,7 @@ try {
   // ------------------------------------------------------------------
   gruppe('Detection: rate limit / provider errors (detect.mjs)')
   const { typVonClaudeFehler, typVonText, terminalText, scanneZeilen, scanneNeueBytes,
-    transkriptFehler, bewerteLogTreffer } = await import('../server/detect.mjs')
+    transkriptFehler, bewerteLogTreffer, fremdeClaudeSession, vorfallWeggrund } = await import('../server/detect.mjs')
 
   await pruefe('Claude\'s StopFailure enum is mapped completely', () => {
     gleich(typVonClaudeFehler('rate_limit'), 'rate_limit', 'rate_limit')
@@ -1324,6 +1324,59 @@ try {
     gleich(bewerteLogTreffer({ anzahl: 5, erstGesehenMs: t0, zuletztGesehenMs: t0 + 2 * 60_000, letzteAktivitaetMs: t0 + 3 * 60_000, jetztMs: t0 + 4 * 60_000 }), 'gelb', '5× but the agent kept working')
     gleich(bewerteLogTreffer({ anzahl: 5, erstGesehenMs: t0, zuletztGesehenMs: t0 + 2 * 60_000, letzteAktivitaetMs: t0 + 3 * 60_000, jetztMs: t0 + 60 * 60_000 }), 'gelb', 'and an hour later still not')
     gleich(bewerteLogTreffer({ anzahl: 5, erstGesehenMs: t0, zuletztGesehenMs: t0 + 2 * 60_000, letzteAktivitaetMs: t0 + 60_000, jetztMs: t0 + 4 * 60_000 }), 'rot', 'no work after the last match: the loop stands')
+  })
+
+  // The false alarm of 2026-08-30: an agent testing a fake model id
+  // (`nosuch/model-xyz`) spawned its own claude, which inherited the worktree's
+  // hooks and CC_RUN_ID — its StopFailure landed on the healthy parent run as a
+  // red "Model unavailable". The session id is the discriminator.
+  await pruefe('a claude hook report from a foreign session is recognized', () => {
+    const runId = 'a4a392ae-9a66-46db-bd03-4d4636465841'
+    falsch(fremdeClaudeSession(runId, 'claude', runId), 'the run\'s own session (--session-id <run id>)')
+    falsch(fremdeClaudeSession(runId, 'claude', ''), 'no session id (older cc-report): the run\'s own')
+    falsch(fremdeClaudeSession(runId, 'claude', null), 'null: the run\'s own')
+    falsch(fremdeClaudeSession(runId, 'cursor', 'andere-session'), 'the guard is claude-only')
+    wahr(fremdeClaudeSession(runId, 'claude', '0f7c3b1e-0000-4000-8000-000000000000'),
+      'a claude with its own session id is a process the agent spawned')
+  })
+
+  // Auto-resolve: an incident whose condition is demonstrably gone closes
+  // itself — the run came through, or the agent demonstrably kept working
+  // after the occurrence. Silence proves nothing for red (a blocked agent is
+  // silent too), so red resolves only on positive evidence.
+  await pruefe('vorfallWeggrund: gone is gone — done runs, work after the hit, expired yellow', () => {
+    const t0 = Date.parse('2026-08-30T08:14:19Z')
+    const config = (ueber) => ({ zuletztGesehenMs: t0, jetztMs: t0 + 20 * 60_000, ...ueber })
+    // The run came through: the incident during it answered itself.
+    gleich(vorfallWeggrund(config({ typ: 'model_error', schwere: 'rot', runStatus: 'done', letzteAktivitaetMs: null })),
+      'run finished successfully', 'done run: even auth/billing/model close')
+    // A red incident on a run that is still going: only measurable work after
+    // the occurrence and no recurrence since resolves it.
+    gleich(vorfallWeggrund(config({ typ: 'model_error', schwere: 'rot', runStatus: 'running',
+      letzteAktivitaetMs: t0 + 60_000 })), 'agent kept working after it', 'work after the hit')
+    gleich(vorfallWeggrund(config({ typ: 'model_error', schwere: 'rot', runStatus: 'running',
+      letzteAktivitaetMs: t0 + 60_000, jetztMs: t0 + 5 * 60_000 })), null, 'too soon after the hit')
+    gleich(vorfallWeggrund(config({ typ: 'rate_limit', schwere: 'rot', runStatus: 'running',
+      letzteAktivitaetMs: t0 - 60_000 })), null, 'silence proves nothing for red')
+    gleich(vorfallWeggrund(config({ typ: 'rate_limit', schwere: 'rot', runStatus: 'running',
+      letzteAktivitaetMs: null })), null, 'no activity source (hermes): red stays')
+    // A red incident on a failed run is WHY it failed — a human decides.
+    gleich(vorfallWeggrund(config({ typ: 'auth_error', schwere: 'rot', runStatus: 'failed',
+      letzteAktivitaetMs: t0 + 60_000 })), null, 'red on a failed run stays')
+    // Yellow: the old 30-minute rule, generalized.
+    gleich(vorfallWeggrund(config({ typ: 'rate_limit', schwere: 'gelb', runStatus: 'running',
+      letzteAktivitaetMs: t0 + 60_000, jetztMs: t0 + 31 * 60_000 })), 'expired: agent kept working', 'yellow: agent worked on')
+    gleich(vorfallWeggrund(config({ typ: 'rate_limit', schwere: 'gelb', runStatus: 'running',
+      letzteAktivitaetMs: t0 + 60_000, jetztMs: t0 + 20 * 60_000 })), null, 'yellow: less than half an hour')
+    gleich(vorfallWeggrund(config({ typ: 'rate_limit', schwere: 'gelb', runStatus: 'running',
+      letzteAktivitaetMs: null, jetztMs: t0 + 31 * 60_000 })), 'expired: no recurrence', 'yellow without an activity source')
+    gleich(vorfallWeggrund(config({ typ: 'rate_limit', schwere: 'gelb', runStatus: 'aborted',
+      letzteAktivitaetMs: null, jetztMs: t0 + 31 * 60_000 })), 'expired: run ended', 'yellow on an ended run')
+    // Never by time alone:
+    gleich(vorfallWeggrund(config({ typ: 'merge_blocked', schwere: 'rot', runStatus: 'running',
+      letzteAktivitaetMs: t0 + 60_000 })), null, 'merge_blocked is the integrator\'s decision')
+    gleich(vorfallWeggrund(config({ typ: 'provider_down:deepseek', schwere: 'rot', runStatus: 'running',
+      letzteAktivitaetMs: t0 + 60_000 })), null, 'provider_down has its own recovery loop')
   })
 
   // ------------------------------------------------------------------

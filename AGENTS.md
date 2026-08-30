@@ -405,7 +405,12 @@ edit the endpoint (`POST /api/runs/<id>/edit`) would refuse:
   read `runs.expected_minutes` per pass, so a new value takes effect at once —
   which is what changing it on a *running* run is for (a single run that turns
   out to need longer stops firing false alarms; one that is being watched less
-  urgently stops being silent). The running agent is deliberately NOT told: the
+  urgently stops being silent). Raising it also RETRACTS the statement the old
+  value produced: `anomaly:soft_overrun`/`anomaly:overrun` go the same
+  `cleared:*` way they go on a progress report (clearAnomalies in reports.mjs,
+  exported for exactly this caller), and the `telegram_sent:overrun` flag with
+  them — so a genuine overrun of the NEW duration can page once again. The
+  running agent is deliberately NOT told: the
   minutes in its prompt are informational, and editing a session that stands
   would fight it.
 - **The prompt, the repo and the branch rule are read at launch.**
@@ -1109,7 +1114,11 @@ First page view after a restart: 1.15 s before, 11 ms after.
 count links to `/?repo=…&status=…`, the overview's one filter; when the other
 repos together hold more of the same status, the sum across ALL repos follows as
 a dimmed `(y overall)` suffix outside the link, shown only when it differs), open
-incidents split the way `incidents.mjs` splits them, subscription usage and
+incidents split the way `incidents.mjs` splits them (both counts link to
+`/?repo=…&incidents=1`, the overview filtered to the runs that carry an open
+incident — the same gesture as the work-in-flight counts: a click on a number
+shows the rows behind it; the filter travels as `data-incidents` on the tbody so
+live updates keep it), subscription usage and
 provider balances (`usagePanel()`, `id="usage-panel"`), and what every tmux
 session on the machine holds together (`memoryBlock()`, `id="side-mem"`).
 
@@ -1906,6 +1915,16 @@ applies to it; claude, opencode and cursor each have a second channel that
 reports a real error (claude, opencode) or at least the agent's activity
 (cursor) independently of the log.
 
+**A hook report from a foreign claude session is ignored.** The run's own claude
+is started with `--session-id <run id>`, and every Claude hook event delivers
+that id on stdin — `cc-report` forwards it. A claude process the AGENT spawns (a
+probe, a test of error handling) inherits the worktree's hooks AND `CC_RUN_ID`
+but carries its own session id, and its API errors are the run's subject matter,
+not the run's provider problems. Measured 2026-08-30: an agent testing a fake
+model id (`nosuch/model-xyz`) opened a red "Model unavailable" on its own healthy
+run. The guard (`fremdeClaudeSession()` in detect.mjs, applied in `handleReport`)
+only ever narrows: no session id (an older cc-report) means the run's own.
+
 **Silence is only an argument where activity is measured.** `measureActivity()`
 has a source for claude (transcript mtime), opencode (session store) and cursor
 (transcript mtime, see "cursor: when a run is over"); for hermes it has none and
@@ -1914,6 +1933,34 @@ returns nothing. `bewerteLogTreffer()` therefore reads
 yellow log hit on that harness turned red five minutes later while the agent was
 happily working. There, repetition and the check LLM are the escalation paths; a
 hit that has not recurred within 30 min expires by itself.
+
+### Gone is gone: incidents resolve themselves
+
+An incident whose condition is demonstrably gone closes itself
+(`vorfallWeggrund()` in detect.mjs, applied in the watcher's `vorfaelleBewerten`
+pass). The record stays — history, counts, the detector's protocol — but the
+sidebar and Telegram stop counting it as open:
+
+| Situation | What happens |
+|---|---|
+| run reached `done` | every incident of the run closes (`merge_blocked` excepted — the integrator's ladder is not time's) |
+| red, run still going | resolves only on **positive evidence**: measurable work after the last occurrence and no recurrence for 10 min. Silence proves nothing — a genuinely blocked agent is silent too |
+| yellow | the old 30-minute rule, generalized: no recurrence within half an hour was noise |
+| red on `failed`/`aborted` | stays open — that is WHY the run did not come through |
+| `merge_blocked`, `provider_down:*` | never by time: the integrator and the pulse own their recovery paths |
+
+### The Telegram grace period — and the un-ringing
+
+A red incident does **not** page immediately: `notify_at` stores
+`occurrence + CCHUB_INCIDENT_NOTIFY_DELAY_MS` (default 10 min,
+0 = immediately), and the watcher pass `vorfaelleMeldenFaellig()` sends only
+what has come due and is STILL open. An incident that resolves itself within
+the grace period never pages. An incident that WAS announced also announces its
+recovery (`✅ Resolved: …`) when it auto-resolves — an alarm that rang is
+un-rung, or the operator keeps a problem in mind that no longer exists. The
+message names the run first: title, agent or single run, repo, harness/model —
+"which work is this about" is the reader's first question, and a bare uuid does
+not answer it.
 
 ### Does it need a human? (`brauchtMensch`)
 
@@ -1927,11 +1974,13 @@ answer. `incidents.mjs` splits it:
 | **Noticed** | everything else — rate limit, provider hiccup, global pulse. The hub deferred, retried, or the run simply carried on. | "Dismiss" |
 
 Neither button changes anything about the run; both only silence the entry here
-and on Telegram, and a recurrence reopens it. What the watcher adds: incidents in
-the "noticed" group **close by themselves** when the run reaches `done` — a run
-that came through has already answered what the hiccup during it meant. The
-Telegram message states the group in its second line, so the reader can tell a
-"get up" from a "noted" without opening the hub.
+and on Telegram, and a recurrence reopens it. What the watcher adds: incidents
+**close by themselves** when their condition demonstrably went away (see "Gone
+is gone" above) — since the evidence rule generalized, that includes the
+"needs you" types on a run that reached `done`: a run that came through has
+already answered what a model or auth hiccup during it meant. The Telegram
+message states the group in its second line, so the reader can tell a "get up"
+from a "noted" without opening the hub.
 
 cursor, like hermes, has **no** hook for API errors (its hook enum knows
 `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `afterFileEdit`,

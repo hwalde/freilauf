@@ -261,6 +261,11 @@ ul.side-counts a:hover .dim { color: inherit; }
 ul.side-counts .n { font-size: var(--fs-title); font-weight: 600; min-width: 1.2em; text-align: right; font-variant-numeric: tabular-nums; }
 ul.side-counts .dim { font-size: inherit; }
 ul.side-counts .overall { flex: 0 0 auto; }
+/* The incident block's counts are links into the filtered overview, and take
+   the text colour like every other count in this column: inside the sidebar
+   the blue would read as the loudest thing in it. */
+.side-incidents a { text-decoration: none; color: inherit; }
+.side-incidents a:hover { color: var(--accent-act-hover); }
 /* tmux memory: what every session on the machine holds together. One figure, at
    the weight of the pipeline state above it, linking to the page that breaks it
    down per session — and under it, in small, how often it is measured, because

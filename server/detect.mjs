@@ -207,6 +207,72 @@ export function bewerteLogTreffer({ anzahl, erstGesehenMs, zuletztGesehenMs, let
 }
 
 /**
+ * Is this hook report from the run's OWN claude session?
+ *
+ * The hub launches claude with `--session-id <run id>` (runner.mjs), so the run's
+ * own session carries the run id as its session id — and every Claude hook event
+ * delivers that id on stdin. A claude process the AGENT spawns (a probe, a test of
+ * error handling, a sub-harness) inherits the worktree's hooks AND CC_RUN_ID, but
+ * gets its own session id: its failures are the run's subject matter, not the run's
+ * provider problems. Measured 2026-08-30: an agent testing a fake model id
+ * (`nosuch/model-xyz`) opened a red "Model unavailable" incident on its own,
+ * perfectly healthy run. Unknown (no session id, older cc-report) → the run's own —
+ * the guard may only ever narrow, never swallow.
+ */
+export function fremdeClaudeSession(runId, harness, sessionId) {
+  if (harness !== 'claude') return false
+  const s = String(sessionId ?? '').trim()
+  return s !== '' && s !== String(runId ?? '')
+}
+
+/**
+ * Should an open incident close itself because its condition demonstrably went
+ * away? Returns the reason (→ resolve) or null (→ leave open). Pure logic — the
+ * caller supplies the run's state, the watcher applies it.
+ *
+ *   merge_blocked        the integrator's decision (merge now / skip), never time's.
+ *   provider_down:*      the pulse has its own recovery loop.
+ *   run done             the run answered what the hiccup meant: nothing.
+ *                        (A red incident on a failed/aborted run stays — that is
+ *                        WHY it did not come through, the operator decides.)
+ *   running + red        measurable work AFTER the last occurrence and no
+ *                        recurrence since: the error demonstrably did not block
+ *                        the agent (the same veto bewerteLogTreffer applies).
+ *                        Silence proves nothing here — a genuinely blocked agent
+ *                        also produces none — so red resolves only on positive
+ *                        evidence.
+ *   yellow               the existing rule, generalized: 30 min without recurrence
+ *                        was noise. Unknown activity counts as non-recurrence for
+ *                        yellow only.
+ */
+export function vorfallWeggrund({ typ, schwere, runStatus, letzteAktivitaetMs, zuletztGesehenMs, jetztMs,
+  arbeitMs = 10 * 60_000, stilleMs = 30 * 60_000 }) {
+  if (typ === 'merge_blocked' || String(typ).startsWith('provider_down:')) return null
+  const zuletzt = Number(zuletztGesehenMs)
+  // Number(null) is 0 AND finite — the trap this repo has been bitten by before.
+  // null means "no activity source", never "activity at the epoch".
+  const hatAktivitaet = letzteAktivitaetMs != null
+  const aktiv = Number(letzteAktivitaetMs)
+  if (runStatus === 'done') return 'run finished successfully'
+  if (runStatus === 'running' || runStatus === 'waiting_help') {
+    if (schwere === 'rot') {
+      if (hatAktivitaet && Number.isFinite(aktiv) && aktiv > zuletzt && jetztMs - zuletzt >= arbeitMs)
+        return 'agent kept working after it'
+      return null
+    }
+    if (hatAktivitaet && Number.isFinite(aktiv) && aktiv > zuletzt && jetztMs - zuletzt >= stilleMs)
+      return 'expired: agent kept working'
+    if (!hatAktivitaet && jetztMs - zuletzt >= stilleMs) return 'expired: no recurrence'
+    return null
+  }
+  if (runStatus === 'failed' || runStatus === 'aborted') {
+    if (schwere === 'gelb' && jetztMs - zuletzt >= stilleMs) return 'expired: run ended'
+    return null
+  }
+  return null
+}
+
+/**
  * Human-readable name per type (overview, Telegram). English fallback — the
  * web UI translates via i18n key `incident.<typ>` and only uses this map when
  * a key is missing.

@@ -1199,8 +1199,10 @@
       const tbody = document.getElementById('runs-body')
       if (!tbody) return
       const status = tbody.dataset.status || ''
+      const incidents = tbody.dataset.incidents || ''
       const html = await holeFragment('/api/fragments/runs-body' + (repo ? '?repo=' + encodeURIComponent(repo) : '?')
-        + (status ? '&status=' + encodeURIComponent(status) : ''))
+        + (status ? '&status=' + encodeURIComponent(status) : '')
+        + (incidents ? '&incidents=' + encodeURIComponent(incidents) : ''))
       if (html === null) return
       if (document.querySelector('#runs-body .title-inline input')) return
       tauscheNachId(html)

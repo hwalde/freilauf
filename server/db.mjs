@@ -127,7 +127,9 @@ CREATE TABLE IF NOT EXISTS incidents (
   beleg TEXT,
   geloest_am TEXT,
   geloest_von TEXT,
-  wieder_geoeffnet INTEGER NOT NULL DEFAULT 0
+  wieder_geoeffnet INTEGER NOT NULL DEFAULT 0,
+  notify_at TEXT,
+  gemeldet_am TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_incidents_run ON incidents(run_id, geloest_am);
 CREATE INDEX IF NOT EXISTS idx_runs_repo ON runs(repo_id, started_at);
@@ -225,6 +227,11 @@ addColumn('runs', 'merged_at', 'TEXT')
 addColumn('runs', 'merge_attempts', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('runs', 'resolver_run_id', 'TEXT')     // the conflict run working for this run
 addColumn('runs', 'resolves_run_id', 'TEXT')     // set on a conflict run: the run it works for
+// Incidents: the delayed Telegram (notify_at = when the grace period ends and the
+// alarm becomes due) and whether it was EVER announced (gemeldet_am) — the latter
+// decides whether an auto-resolve also announces the recovery (server/incidents.mjs).
+addColumn('incidents', 'notify_at', 'TEXT')
+addColumn('incidents', 'gemeldet_am', 'TEXT')
 /**
  * Drop the CHECK rule on `agents.harness` — once, idempotently.
  *

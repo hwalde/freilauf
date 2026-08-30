@@ -3,12 +3,20 @@
 import db, { addEvent } from './db.mjs'
 import { notify, notifyLong, detailUrl } from './telegram.mjs'
 import { sh } from './util.mjs'
-import { vorfallMelden } from './incidents.mjs'
-import { typVonClaudeFehler, typVonText, TYP_TEXT } from './detect.mjs'
+import { vorfallMelden, detektorLog } from './incidents.mjs'
+import { typVonClaudeFehler, typVonText, TYP_TEXT, fremdeClaudeSession } from './detect.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { transcriptState } from './cursor-transcript.mjs'
 
 const MAX_REPORT = 200 * 1024   // planning 11: report ≤ 200 kB
+
+/**
+ * The kinds the harness hooks deliver through cc-report. A claude hook event
+ * carries its own session id — and a claude process the AGENT spawned (a probe,
+ * a test) inherits the worktree's hooks and CC_RUN_ID while carrying its own
+ * session id. Without the guard its failures land on this run as red incidents.
+ */
+const HOOK_KINDS = ['_turn_end', '_exit', '_api_error', '_rate_limit', '_idle']
 
 /**
  * Process one report event. Returns `{ ok, message? }`.
@@ -24,6 +32,17 @@ export async function handleReport(runId, body, via = 'http') {
   // Planning 11: only accept existing runs in running/waiting_help.
   if (!run || !['running', 'waiting_help'].includes(run.status)) return { ok: false, error: 'unknown or already finished run' }
   const kind = String(body.kind || '')
+  // A hook report from a claude session that is NOT this run's own: the agent
+  // spawned its own claude (a probe, an error-handling test), which inherited
+  // the worktree's hooks and CC_RUN_ID. Its API errors are the run's subject
+  // matter, not the run's provider problems — logged for the detector's
+  // protocol, ignored otherwise. cc-report only sends session_id when the hook
+  // JSON carried one, so an older cc-report changes nothing here.
+  if (HOOK_KINDS.includes(kind) && fremdeClaudeSession(runId, run.harness, body.session_id)) {
+    detektorLog(runId, { art: 'verworfen', grund: 'hook report from a foreign claude session (a process the agent spawned)',
+      kind, session: body.session_id })
+    return { ok: true, message: null }
+  }
   let text = typeof body.text === 'string' ? body.text : ''
   if (typeof body.file === 'string') {
     if (body.file.length > MAX_REPORT) return { ok: false, error: 'payload too large' }
@@ -239,8 +258,14 @@ export function addEventOnce(runId, kind, payload = null) {
  * (pages.mjs searches for 'anomaly:%') and addEventOnce fires again on
  * recurrence. The 'telegram_sent:*' flags stay on purpose: the same type must
  * not produce a second message either (planning 4.5).
+ *
+ * Exported because one other decision belongs to the same rule: when the
+ * operator RAISES a running run's expected duration (run-edit.mjs), the
+ * "longer than expected" statement the old value produced is retracted the
+ * same way — and its Telegram flag with it, so a genuine overrun of the NEW
+ * duration can page once again.
  */
-function clearAnomalies(runId, kinds) {
+export function clearAnomalies(runId, kinds) {
   const stmt = db.prepare(`UPDATE events SET kind = 'cleared:' || kind WHERE run_id = ? AND kind = ?`)
   for (const kind of kinds) stmt.run(runId, kind)
 }
