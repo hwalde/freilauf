@@ -2036,6 +2036,55 @@ not exist. The watcher uses the same function when it finds a session gone (it
 used to only set `tmux_closed_at` and leave the status alone), and so does the
 retention pass.
 
+### "tmux did not answer" is not "the session is gone"
+
+That distinction did not exist, and its absence was the one way this hub could
+end a working agent for no reason. `tmux list-sessions` and `tmux has-session`
+report "there is no server" and "I could not answer you" through the **same
+exit code**, and both call sites spent that as *gone*: `sessionLebt()` was
+`sh(...).ok`, and `tmuxSessions()` returned `[]` on any failure. So one flaky
+subprocess — the 30 s timeout in `sh()`, a fork that failed under memory
+pressure, a server too busy to answer, a missing binary — made `watchRun()`
+abort that run, and made the retention pass declare **every** tracked session
+missing in one go. The run's own record then said `tmux session ended`, which
+was not what had happened. Same family as `--no-optional-locks` reading an empty
+status as a clean worktree, and `Number('')` reading as a configured `0`.
+
+`tmuxVerdict(r)` is the three answers, pure and tested without a tmux server:
+
+| verdict | what it means | measured wording (tmux 3.4) |
+|---|---|---|
+| `ok` | the command answered; its output is the truth | exit 0 |
+| `no_server` | there is demonstrably no server, so no sessions. The empty truth | `error connecting to <socket> (No such file or directory)`, older: `no server running on <socket>` |
+| `unreachable` | the hub learned **nothing** | everything else |
+
+Four rules follow from it, and each one is a place where "nothing" used to be
+spent as "gone":
+
+- **`tmuxSnapshot()` carries the verdict**; `ok: false` means "no answer", never
+  "empty". `tmuxSessions()` is its thin wrapper and keeps returning a bare list,
+  which is right for the DISPLAY callers (the sessions page, the memory block) —
+  showing nothing is the honest rendering of an unanswered question. Anything
+  that **ends a run** reads the verdict. `tmuxSessionMap()` is gone on purpose:
+  a Map cannot carry a verdict, and that is exactly how an unreachable tmux
+  arrived as "no sessions anywhere".
+- **`sessionGone(name)` is tri-state** — `true` / `false` / `null`. `watchRun()`
+  skips a run entirely on `null` and tries again in 30 s: not knowing is a
+  reason to wait, never a reason to end somebody's work. A session that really
+  is gone stays gone and is caught on the next tick.
+- **A live run's disappearance is confirmed twice** (`confirmGone()`): the
+  listing says the session is missing, and `has-session` is then asked directly
+  by name. Only `running`/`waiting_help` pays for that second call — for a
+  finished run the listing is bookkeeping, for a live one it is somebody's work.
+- **Losing every session at once is one fact, not N.** `tmux_gone` (tmux
+  positively reports no server while the hub tracked ≥ 2 open sessions) and
+  `tmux_unreachable` (no answer at all; the cleanup passes then do nothing)
+  are global incidents in the "Needs you" group, and neither resolves by time —
+  tmux answering again does not undo the sessions that died. Before this, a dead
+  tmux server produced 22 silent `tmux_closed` rows plus one aborted run
+  blaming its own session, and the only route to the real cause was reading the
+  event log by hand.
+
 **Retention is in hours and counts from the agent's end** (Settings → keep the
 tmux session open, `session_keep_hours`, `0` = right away; the old
 `retention_days` is still read as a fallback for an installation that has not
@@ -2300,6 +2349,13 @@ errors (`post_api_request` only fires after success).
   clean", so every dirty run sailed straight through to a merge. Correct is
   `git -C <dir> --no-optional-locks status --porcelain`. Found by the e2e test
   that was written for exactly that case, not by reading the code.
+- **`tmux` reports "no server" and "I cannot answer" with the same exit code.**
+  Reading the second as the first is how the hub came to abort a healthy run:
+  `sh('tmux', ['has-session', …]).ok` is false for a timeout, a failed fork and
+  a missing binary just as much as for a session that is really gone, and the
+  watcher answers "gone" by ending the run. Classify the stderr
+  (`tmuxVerdict()`), never the exit code alone — and where the answer is
+  unknown, do nothing and ask again next pass.
 - **`capture-pane` needs the colon too.** `tmux capture-pane -p -t "=name"`
   answers "can't find pane" — the same trap `pipe-pane` and `set-hook` already
   have an entry for above. `-t "=name:"` is what works, and a test that asserts

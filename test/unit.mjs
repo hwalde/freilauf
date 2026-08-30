@@ -4062,6 +4062,34 @@ try {
       'keep 0 closes a finished run right away, even with a live pane')
   })
 
+  // The bug this exists for: 'no answer' used to be indistinguishable from
+  // 'nothing there', and the watcher spends 'nothing there' by ABORTING runs.
+  // One failed tmux call therefore ended every running run on the machine.
+  await pruefe('tmux "I cannot answer" is never read as "there is nothing"', () => {
+    gleich(se.tmuxVerdict({ ok: true, stdout: 'cc-einzel-1\t1\t0\t1\t1\t/tmp', stderr: '' }), 'ok', 'an answer is an answer')
+    // Measured against tmux 3.4, both wordings.
+    gleich(se.tmuxVerdict({ ok: false, stdout: '', stderr: 'error connecting to /tmp/tmux-1000/default (No such file or directory)' }),
+      'no_server', 'no socket: there really is no session')
+    gleich(se.tmuxVerdict({ ok: false, stdout: '', stderr: 'no server running on /tmp/tmux-1000/default' }),
+      'no_server', 'the older wording says the same')
+    // Everything below used to arrive as an empty session list.
+    gleich(se.tmuxVerdict({ ok: false, stdout: '', stderr: '', code: 'ETIMEDOUT' }), 'unreachable', "sh()'s 30 s timeout")
+    gleich(se.tmuxVerdict({ ok: false, stdout: '', stderr: '', code: 'ENOENT' }), 'unreachable', 'no tmux binary')
+    gleich(se.tmuxVerdict({ ok: false, stdout: '', stderr: 'fork failed: Cannot allocate memory' }),
+      'unreachable', 'a fork that failed under memory pressure')
+    gleich(se.tmuxVerdict({ ok: false, stdout: '', stderr: 'server exited unexpectedly' }), 'unreachable', 'a server that died mid-answer')
+  })
+
+  await pruefe('one session is gone, is there, or did not say', () => {
+    gleich(se.sessionGoneFrom({ ok: true, stdout: '', stderr: '' }), false, 'has-session succeeded: it is there')
+    gleich(se.sessionGoneFrom({ ok: false, stdout: '', stderr: "can't find session: cc-einzel-1" }), true, 'tmux named it: gone')
+    gleich(se.sessionGoneFrom({ ok: false, stdout: '', stderr: 'error connecting to /tmp/tmux-1000/default (No such file or directory)' }),
+      true, 'no server at all: gone')
+    // null is the whole point — the caller must not end a run on it.
+    gleich(se.sessionGoneFrom({ ok: false, stdout: '', stderr: '', code: 'ETIMEDOUT' }), null, 'a timeout says nothing')
+    gleich(se.sessionGoneFrom({ ok: false, stdout: '', stderr: 'fork failed: Cannot allocate memory' }), null, 'a failed fork says nothing')
+  })
+
   await pruefe('the state is what the page shows, and it decides what is hidden', () => {
     const lebt = { dead: false }, tot = { dead: true }
     gleich(se.sessionState(lebt, { status: 'running' }), 'agent_running', 'running')

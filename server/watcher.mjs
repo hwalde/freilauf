@@ -12,12 +12,12 @@ import { deliverPendingGoals } from './goal.mjs'
 import { claudeQuota, sevenForRun, quotaFullWindow } from './quota.mjs'
 import { refreshClaudeLimits } from './claude-usage.mjs'
 import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText, vorfallWeggrund } from './detect.mjs'
-import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, vorfaelleMeldenFaellig, offeneVorfaelle, detektorLog, msVon } from './incidents.mjs'
+import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, vorfaelleMeldenFaellig, offeneVorfaelle, vorfallLoesen, detektorLog, msVon } from './incidents.mjs'
 import { pruefeTreffer, pruefLlmAktiv } from './pruefer.mjs'
 import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
 import { flowsTick } from './flows/triggers.mjs'
-import { reconcileClosedSession, tmuxSessionMap, shouldAutoClose, currentKeepMs, shouldCloseArchived, archiveSessionKeepMs } from './sessions.mjs'
+import { reconcileClosedSession, tmuxSnapshot, sessionGone, shouldAutoClose, currentKeepMs, shouldCloseArchived, archiveSessionKeepMs } from './sessions.mjs'
 import { integrateTick, pushOperatorBase, integratorTimerOff, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 import { maybeAutoCleanup } from './cleanup.mjs'
 
@@ -124,17 +124,34 @@ async function collectInboxes() {
  * Is the session still alive? Only has-session answers that honestly.
  * 'tmux display -p -t "=name"' returns exit 0 with empty output for a session that
  * does NOT exist — checks built on that therefore never trigger.
+ *
+ * Three answers, not two: true / false / null ("tmux did not say"). The null is
+ * the whole point. This used to be `sh(...).ok`, so EVERY way that one
+ * subprocess can fail — the 30 s timeout in sh(), a fork that fails under
+ * memory pressure, a server too busy to answer, an EINTR — read as "the session
+ * is gone", and watchRun() answers that by ABORTING the run. One flaky tmux
+ * call was enough to kill a working agent, and the run's own record then said
+ * 'tmux session ended', which is not what happened. Same family as
+ * '--no-optional-locks' reading an empty status as a clean worktree.
  */
 async function sessionLebt(session) {
-  const r = await sh('tmux', ['has-session', '-t', `=${session}`])
-  return r.ok
+  const gone = await sessionGone(session)
+  return gone === null ? null : !gone
 }
 
 // ---------- single run ----------
 async function watchRun(run) {
   let st = { pane_dead: '?', dead_status: '', dead_time: '', pid: '', cmd: '' }
   if (run.tmux_session) {
-    if (!await sessionLebt(run.tmux_session)) {
+    const lebt = await sessionLebt(run.tmux_session)
+    // null = tmux did not answer. Skip this run for this pass and try again in
+    // 30 s: not knowing is a reason to wait, never a reason to end somebody's
+    // work. A session that is really gone stays gone and is caught next tick.
+    if (lebt === null) {
+      console.error(`[watcher] ${run.id}: tmux gave no answer about ${run.tmux_session} — leaving the run alone`)
+      return
+    }
+    if (!lebt) {
       // Session gone entirely (reboot, manual cc-kill, the sessions page). Mark
       // it closed right away, otherwise the worktree cleanup waits forever for
       // tmux_closed_at — AND end the run: nothing can report for it any more, so
@@ -625,15 +642,77 @@ async function closeOldSessions() {
   const rows = db.prepare(`SELECT * FROM runs WHERE tmux_session IS NOT NULL AND tmux_closed_at IS NULL`).all()
   if (!rows.length) return
   const keepMs = currentKeepMs()
-  const live = await tmuxSessionMap()
+  const snap = await tmuxSnapshot()
+  // No usable answer: do nothing at all this pass. Every run below would
+  // otherwise look session-less at once — the listing's failure would end all
+  // of them (see tmuxVerdict in sessions.mjs).
+  if (!snap.ok) { await tmuxUnreachable(snap.reason); return }
+  await tmuxAnswered()
+  const live = new Map(snap.sessions.map(s => [s.name, s]))
+  await tmuxServerGone(rows, live)
   const now = Date.now()
   for (const run of rows) {
     const session = live.get(run.tmux_session)
-    if (!session) { reconcileClosedSession(run.id, 'watcher'); continue }   // no longer exists
+    if (!session) {                                                        // no longer exists
+      if (!await confirmGone(run)) continue
+      reconcileClosedSession(run.id, 'watcher')
+      continue
+    }
     if (!shouldAutoClose(session, run, keepMs, now)) continue
     await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
     reconcileClosedSession(run.id, 'retention')
     addEvent(run.id, 'tmux_closed', { reason: 'retention' })
+  }
+}
+
+/**
+ * The listing says this run's session is missing. For a run that is OVER that
+ * is bookkeeping and the listing is good enough. For one that is still going,
+ * acting on it ABORTS somebody's work — so it is asked a second time, directly
+ * and by name, and only a confirmed 'gone' counts. Two independent answers
+ * instead of one, exactly where the mistake is expensive.
+ */
+async function confirmGone(run) {
+  if (!['running', 'waiting_help'].includes(run.status)) return true
+  const gone = await sessionGone(run.tmux_session)
+  if (gone === true) return true
+  console.error(`[watcher] ${run.id}: listing said ${run.tmux_session} is gone, has-session said ${gone === false ? 'it is there' : 'nothing'} — leaving the run alone`)
+  return false
+}
+
+/**
+ * Every session at once is not N runs ending — it is the tmux server going
+ * away, and the operator has to hear that as ONE fact. Without it the day this
+ * happened produced 22 silent 'tmux_closed' rows and an aborted run whose
+ * record blamed its own session, so the only way to the real cause was to read
+ * the event log by hand.
+ *
+ * Raised only on the unambiguous shape: tmux positively reports no server while
+ * the hub was tracking at least two open sessions.
+ */
+async function tmuxServerGone(rows, live) {
+  if (live.size || rows.length < 2) return
+  await vorfallMelden(null, {
+    typ: 'tmux_gone', quelle: 'watcher', schwere: 'rot',
+    beleg: `tmux reports no running server, ${rows.length} sessions of this hub were open. `
+         + `Everything that was working in them is gone; nothing of this was done by cc-hub.`,
+  })
+}
+
+/** tmux cannot be asked at all. Runs then hang on 'running' with no explanation — say so. */
+async function tmuxUnreachable(reason) {
+  console.error('[watcher] tmux unreachable:', reason)
+  await vorfallMelden(null, {
+    typ: 'tmux_unreachable', quelle: 'watcher', schwere: 'rot',
+    beleg: `tmux gave no answer: ${String(reason).slice(0, 400)}. `
+         + `Session cleanup is paused until it does — no run is ended on a guess.`,
+  })
+}
+
+/** tmux answers again: the transient outage above is over and closes itself. */
+async function tmuxAnswered() {
+  for (const v of offeneVorfaelle(null)) {
+    if (v.typ === 'tmux_unreachable') vorfallLoesen(v.id, 'watcher')
   }
 }
 
@@ -652,11 +731,17 @@ async function closeArchivedSessions() {
   if (!rows.length) return
   const keepMs = archiveSessionKeepMs(allSettings())
   if (keepMs == null) return
-  const live = await tmuxSessionMap()
+  const snap = await tmuxSnapshot()
+  if (!snap.ok) return                        // no answer, no decisions — see closeOldSessions
+  const live = new Map(snap.sessions.map(s => [s.name, s]))
   const now = Date.now()
   for (const run of rows) {
     const session = live.get(run.tmux_session)
-    if (!session) { reconcileClosedSession(run.id, 'watcher'); continue }   // no longer exists
+    if (!session) {                                                        // no longer exists
+      if (!await confirmGone(run)) continue
+      reconcileClosedSession(run.id, 'watcher')
+      continue
+    }
     if (!shouldCloseArchived(run, keepMs, now)) continue
     await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
     reconcileClosedSession(run.id, 'archive')

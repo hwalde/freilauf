@@ -54,7 +54,11 @@ export const MENSCH_TYPEN = new Set(['auth_error', 'billing_error', 'model_error
   // A branch that did not make it onto the base branch stays where it is until
   // somebody decides: merge it, commit the leftovers, or skip it. Waiting does
   // not help, so this belongs in the group that asks for hands.
-  'merge_blocked'])
+  'merge_blocked',
+  // The machine lost the tmux server, and with it every agent session at once.
+  // Nothing the hub can retry, and a fact somebody has to see: the runs behind
+  // those sessions stopped mid-work, whatever the reason was.
+  'tmux_gone', 'tmux_unreachable'])
 
 /**
  * Does this incident need a human — or is it just an observation?

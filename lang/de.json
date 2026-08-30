@@ -1045,6 +1045,8 @@
   "merge.unmerged_both": "nicht gemerged: Commits und uncommittete Änderungen",
   "merge.skipped_by_operator": "Merge übersprungen",
   "incident.merge_blocked": "Nicht gemerged",
+  "incident.tmux_gone": "Alle tmux-Sessions weg",
+  "incident.tmux_unreachable": "tmux antwortet nicht",
   "repos.last_push": "letzter Backup-Push: {ts}",
   "run.marked_done_note": "_(vom Betreiber als fertig markiert)_",
   "api.unknown_repo": "unbekanntes Repo",
