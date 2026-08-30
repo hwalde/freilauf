@@ -629,9 +629,28 @@ actually run with, and each of them removes a hardcoded vendor from the hub:
 **A plugin is handed a context, never `process.env` or `db.mjs`.**
 `pluginCtx(id)` (`server/plugins/context.mjs`) carries `json()` (fetch with a
 timeout and the one `HTTP <n>` error shape), `registry()` (the cached models.dev
-snapshot), `env`, `secret()`, `setting()` and `log()`. That single indirection
-is what makes an external package work without importing anything of ours *and*
-makes the operator's own credential honoured everywhere at once.
+snapshot), `provider(id)` (another provider's descriptor), `env`, `secret()`,
+`setting()` and `log()`. That single indirection is what makes an external
+package work without importing anything of ours *and* makes the operator's own
+credential honoured everywhere at once.
+
+**`provider(id)` is on there because the static import was a cycle.**
+`providers/index.mjs` re-exports the registry, and the registry's module body
+builds `{claude, opencode, hermes, cursor}` out of the very plugin files that
+would import it — so `import { getProvider } from '../providers/index.mjs'` at
+the top of `harnesses/opencode.mjs` and `harnesses/hermes.mjs` made those two
+files unimportable **on their own** (`ReferenceError: Cannot access 'opencode'
+before initialization`). It was invisible inside the running hub, where
+`registry.mjs` is always reached first, and it broke the rule
+[docs/plugins.md](docs/plugins.md) and `harnesses/cli-llm.mjs` both state. The
+context resolves at **call** time, after every module has evaluated; where a
+context is missing and an `await` is allowed the lazy
+`(await import('../providers/index.mjs')).getProvider(id)` does the same job. In
+a **synchronous** method there is no third way, so `modelArgs()` without a
+context uses the provider id verbatim and passes no credential — `runner.mjs`,
+the only caller that launches a run, always hands one over. `test/echt.mjs`
+imports every plugin file in a process of its own, because that is the only
+place the cycle shows.
 
 ### Configured plugins, and where they are configured
 
@@ -786,6 +805,16 @@ answers stop being reproducible:
 | `native` | the schema goes over the wire as a schema; nothing is added to the prompt |
 | `json_object` | the vendor promises valid JSON but takes no schema, so the flag goes out **and** the prompt carries the shape |
 | `prompt` | the schema is a paragraph of strict instructions and nothing else |
+
+**`native` says the schema TRAVELS natively, not that the model obeys it.**
+claude's `--json-schema` is a forced tool call, and a model may decline a tool:
+five runs of one adversarial prompt on `haiku` gave four with
+`stop_reason: tool_use` and a conforming `structured_output`, and a fifth with
+`stop_reason: end_turn`, no `structured_output` and prose in `result`. The
+declaration is still right — the schema really does go over the wire, so the
+strict paragraph really is unnecessary — and that is exactly why the two lines
+under it are not optional: the adapter falls back to `result` when
+`structured_output` is missing, and the reprompt below catches what that leaves.
 
 Whatever comes back is read tolerantly (`json.mjs` — fences stripped, prose cut
 by a character scanner that respects strings, the common damages repaired; it
@@ -1078,6 +1107,73 @@ ran to completion (flag reset included) *before* the assignment that set the
 flag, and every later call got that one stale promise for the life of the
 process. Both only became visible when the status sidebar started asking on
 every page, the first of which happens before anything is configured.
+
+### Best-provider selection for OpenRouter (`serving provider: auto`)
+
+OpenRouter serves one model from many serving providers that disagree in
+quantization (fp4 … bf16), price (up to 3× for the same slug) and health — the
+free routing regularly lands on a stronger-quantized host under the same model
+name. The hub therefore ships an automatic best-provider selection next to the
+old single-tag pin. The pure decision rule lives in
+**`server/providers/openrouter-routing.mjs`** (no hub imports — the same licence
+as `cli-llm.mjs`), the I/O and the cache in the OpenRouter plugin's `routing`
+capability, and the whole contract is in `docs/plugins.md` ("OpenRouter
+best-provider routing"). What the rest of the hub has to know:
+
+- **The form block has three modes**: *open* (OpenRouter routes freely — the
+  old default), *auto* (the hub selects) and *pin* (one tag, the old
+  checkbox). One widget, so "pin" and "auto" can never be stored as two
+  contradictory statements about one run; `runs.or_provider` keeps the pinned
+  tag, `runs.or_routing` (agents/runs/favorites) holds the auto requirements
+  JSON. **Visible on every harness when the provider is OpenRouter** — the old
+  checkbox hid the whole question on anything but opencode, which read as a
+  bug; where the setting cannot be passed through (hermes has no per-run
+  provider routing, measured), the block says so and `providerFromForm()`
+  drops it, exactly as it always dropped the pin.
+- **The auto requirements fold away** behind `<details>`: minimum
+  quantization (a LOWER bound — "fp8" admits bf16 and fp32, excludes fp4;
+  the parser accepts the wide family fp4/fp5/fp6/q4/q4_K_M/nf4/awq/int8/fp8/
+  bf16/… and ranks them by effective precision), provider region
+  (US / EU / DE / China; anything the region map cannot place drops out),
+  max input/output price (USD per Mio). Providers without a quantization
+  statement are always out — `null` is "no statement", never "unquantized".
+- **The rank, not an enumeration, is the guarantee** (learned from the
+  measured source algorithm): a `quantizations` enumeration ages upward — the
+  day an endpoint reports fp16, an enumeration would lock out MORE precision
+  than asked for. The rank stands in `openrouter-routing.mjs` alone and is
+  never copied into a request; `quantizationsFrom(min)` derives the API
+  enumeration from it. `int8` deliberately ranks BELOW `fp8`: same bits, unsafe
+  direction of a lower bound. `fp16`/`bf16` tie deliberately.
+- **No minimum = the best quantization a reliable provider serves.** With a
+  minimum, everything at or above it competes on price. Both rules end in an
+  ordered chain (up to four tags), not a single pick: the cheapest provider is
+  the most rate-limited one, and an `order` of one name was exactly the
+  failure that started the whole subject over there.
+- **Cached per model+config, 24 h**, in
+  `~/.local/share/freilauf/openrouter-routing.json` (`FREILAUF_OR_ROUTING_JSON` —
+  a test fence like `FREILAUF_CURSOR_AUTH`): the next run that picks the same
+  model with the same requirements gets the SAME order, not a re-rolled one. A
+  fresh failure falls back to the stale answer marked `veraltet`, never to
+  nothing — an unpinned call is the worse failure.
+- **Only opencode receives it per run** (measured: hermes has no per-run
+  provider routing; its `providers:` config is global). `resolveRouting()` in
+  scheduler.mjs resolves auto to a concrete order BEFORE `createRun()` and
+  freezes it into the run's definition copy; every failure launches unpinned
+  and logs — a start never fails on its own convenience feature.
+- **Every OpenRouter call site of the hub carries the same three modes now.**
+  The settings page's own LLM jobs (title, check, extras) render the SAME
+  open/auto/pin widget with the folded requirements, stored as
+  `llm_<purpose>_or_routing` (JSON) next to the historic `llm_<purpose>_or_provider`
+  tag; `settingsSave()` derives the two stored values from the mode, and only
+  where the body actually carried the block (fragment saves of unrelated
+  sections must not reset a configured routing). The consumers pass it as
+  `orRouting` to `llmJson()` → `complete()`. The flow designer's
+  "start single run" step carries the same choice as flat fields
+  (`orMode`/`orProvider`/`orQuant`/`orRegion`/`orMaxIn`/`orMaxOut`),
+  validated by `defFromFlowProps()` the same way the form validates it; the
+  "start agent" step inherits the agent's stored definition and needs nothing.
+  `GET /api/or-routing` is the preview endpoint the form's auto hint asks —
+  same cache, so the preview cannot promise what the start would not deliver.
 
 ## The live channel: a run announces itself
 
@@ -2078,6 +2174,55 @@ not exist. The watcher uses the same function when it finds a session gone (it
 used to only set `tmux_closed_at` and leave the status alone), and so does the
 retention pass.
 
+### "tmux did not answer" is not "the session is gone"
+
+That distinction did not exist, and its absence was the one way this hub could
+end a working agent for no reason. `tmux list-sessions` and `tmux has-session`
+report "there is no server" and "I could not answer you" through the **same
+exit code**, and both call sites spent that as *gone*: `sessionLebt()` was
+`sh(...).ok`, and `tmuxSessions()` returned `[]` on any failure. So one flaky
+subprocess — the 30 s timeout in `sh()`, a fork that failed under memory
+pressure, a server too busy to answer, a missing binary — made `watchRun()`
+abort that run, and made the retention pass declare **every** tracked session
+missing in one go. The run's own record then said `tmux session ended`, which
+was not what had happened. Same family as `--no-optional-locks` reading an empty
+status as a clean worktree, and `Number('')` reading as a configured `0`.
+
+`tmuxVerdict(r)` is the three answers, pure and tested without a tmux server:
+
+| verdict | what it means | measured wording (tmux 3.4) |
+|---|---|---|
+| `ok` | the command answered; its output is the truth | exit 0 |
+| `no_server` | there is demonstrably no server, so no sessions. The empty truth | `error connecting to <socket> (No such file or directory)`, older: `no server running on <socket>` |
+| `unreachable` | the hub learned **nothing** | everything else |
+
+Four rules follow from it, and each one is a place where "nothing" used to be
+spent as "gone":
+
+- **`tmuxSnapshot()` carries the verdict**; `ok: false` means "no answer", never
+  "empty". `tmuxSessions()` is its thin wrapper and keeps returning a bare list,
+  which is right for the DISPLAY callers (the sessions page, the memory block) —
+  showing nothing is the honest rendering of an unanswered question. Anything
+  that **ends a run** reads the verdict. `tmuxSessionMap()` is gone on purpose:
+  a Map cannot carry a verdict, and that is exactly how an unreachable tmux
+  arrived as "no sessions anywhere".
+- **`sessionGone(name)` is tri-state** — `true` / `false` / `null`. `watchRun()`
+  skips a run entirely on `null` and tries again in 30 s: not knowing is a
+  reason to wait, never a reason to end somebody's work. A session that really
+  is gone stays gone and is caught on the next tick.
+- **A live run's disappearance is confirmed twice** (`confirmGone()`): the
+  listing says the session is missing, and `has-session` is then asked directly
+  by name. Only `running`/`waiting_help` pays for that second call — for a
+  finished run the listing is bookkeeping, for a live one it is somebody's work.
+- **Losing every session at once is one fact, not N.** `tmux_gone` (tmux
+  positively reports no server while the hub tracked ≥ 2 open sessions) and
+  `tmux_unreachable` (no answer at all; the cleanup passes then do nothing)
+  are global incidents in the "Needs you" group, and neither resolves by time —
+  tmux answering again does not undo the sessions that died. Before this, a dead
+  tmux server produced 22 silent `tmux_closed` rows plus one aborted run
+  blaming its own session, and the only route to the real cause was reading the
+  event log by hand.
+
 **Retention is in hours and counts from the agent's end** (Settings → keep the
 tmux session open, `session_keep_hours`, `0` = right away; the old
 `retention_days` is still read as a fallback for an installation that has not
@@ -2202,8 +2347,12 @@ cursor, like hermes, has **no** hook for API errors (its hook enum knows
 `preToolUse`/`postToolUse`, … — nothing for a failed call), and there is no open
 pulse endpoint for `api2.cursor.sh`:
 `providerVonLauf()` deliberately returns `null` there ("not monitored", not
-"healthy"). In return cursor rejects an unknown model **loudly** (`Cannot use
-this model: …`) — unlike opencode and hermes, which swallow nonsense silently.
+"healthy"). In return cursor rejects an unknown model **loudly and by name**
+(`Cannot use this model: …`) — unlike opencode and hermes. hermes swallows
+nonsense silently; opencode does complain, but as a generic `UnknownError` /
+"Unexpected server error" that reads exactly like a provider outage (see
+Pitfalls), which is arguably worse than silence because it points at the wrong
+culprit.
 
 Log and transcript are read by **offset** (`runs.log_offset` /
 `transcript_offset`): only new bytes, every line counts once. Every decision is
@@ -2276,6 +2425,16 @@ errors (`post_api_request` only fires after success).
   from the launcher after the TUI has drawn (it waits for the status bar, not
   for a fixed number of seconds). Enter on an empty editor is a no-op in
   opencode — measured — so the case that submitted by itself is not harmed.
+- **opencode reports an unknown model as a server fault.** A model id it does not
+  know answers `{"type":"error","name":"UnknownError","data":{"message":
+  "Unexpected server error"}}` — byte for byte what a genuine upstream outage
+  produces, with no "no such model" anywhere in it. So a typo in a model id and a
+  broken vendor look identical from the outside, and telling them apart cost an
+  hour. On `UnknownError`, check the id against `opencode models --pure` **before**
+  believing the outage. Related, and the other half of the same trap: OpenCode
+  Zen's free models (`*-free`) are a shared pool that rotates through 429/500/503
+  constantly, so a 5xx from one of them is "try later", not a defect — anything
+  built on them must not raise an incident or fail a test on the first one.
 - **`\b5\d\d\b` is not an HTTP status.** cursor's own status line
   `⠠⠛ Globbing  555 tokens` opened a "Provider error" incident, because the
   pattern matches a token count just as happily as a 503. A status code counts
@@ -2328,6 +2487,13 @@ errors (`post_api_request` only fires after success).
   clean", so every dirty run sailed straight through to a merge. Correct is
   `git -C <dir> --no-optional-locks status --porcelain`. Found by the e2e test
   that was written for exactly that case, not by reading the code.
+- **`tmux` reports "no server" and "I cannot answer" with the same exit code.**
+  Reading the second as the first is how the hub came to abort a healthy run:
+  `sh('tmux', ['has-session', …]).ok` is false for a timeout, a failed fork and
+  a missing binary just as much as for a session that is really gone, and the
+  watcher answers "gone" by ending the run. Classify the stderr
+  (`tmuxVerdict()`), never the exit code alone — and where the answer is
+  unknown, do nothing and ask again next pass.
 - **`capture-pane` needs the colon too.** `tmux capture-pane -p -t "=name"`
   answers "can't find pane" — the same trap `pipe-pane` and `set-hook` already
   have an entry for above. `-t "=name:"` is what works, and a test that asserts

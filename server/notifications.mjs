@@ -87,7 +87,7 @@ function card({ id, plugin }) {
     <div class="btn-row">${test}${setupLink}</div>
     ${pluginSource(id) === 'external' && pluginManifest(id)?.version
       ? `<p class="dim">${e(t('plugins.version', { version: pluginManifest(id).version }))}</p>` : ''}
-    ${cardFooter(id, plugin.label)}
+    ${cardFooter(id, plugin.label, 'notifier')}
   </div>`
 }
 

@@ -780,6 +780,10 @@ form.form-grid fieldset.cleanup-setup { margin: var(--sp-12) 0; padding: var(--s
    error), so it needs the separation the form no longer gives it. */
 .plugin-footer { margin: var(--sp-8) 0 0; padding-top: var(--sp-8);
   border-top: 1px solid var(--border); }
+/* Two removals live here and they mean very different things (see cardFooter):
+   each carries the sentence that says which. On its own line — a button whose
+   explanation has been squeezed onto the end of the row is one nobody reads. */
+.plugin-footer .footer-hint { flex-basis: 100%; margin: calc(-1 * var(--sp-6)) 0 var(--sp-6); }
 
 /* What a plugin can do, at a glance: read, not clicked. */
 .plugin-badges { display: flex; gap: var(--sp-6); flex-wrap: wrap; margin: var(--sp-6) 0 var(--sp-4); }

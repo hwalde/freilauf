@@ -858,7 +858,7 @@ try {
     const runForm = await (await hol(`/runs/new?repo=${repoId}`)).text()
     const agentForm = await (await hol(`/agents/edit?repo=${repoId}`)).text()
     for (const feld of ['name="harness"', 'id="prov"', 'name="model"', 'id="effort"', 'name="prompt"',
-      'name="branch_mode"', 'name="branch_pattern"', 'name="expected_minutes"', 'name="or_pin"']) {
+      'name="branch_mode"', 'name="branch_pattern"', 'name="expected_minutes"', 'name="or_mode"']) {
       wahr(runForm.includes(feld) && agentForm.includes(feld), `${feld} in both forms`)
     }
     falsch(runForm.includes('name="schedule_kind"'), 'only the agent has a schedule')

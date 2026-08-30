@@ -369,17 +369,18 @@ export function claudeSettingsJson() {
 
 /** Creates the run record (definition copy) and returns the run ID. */
 export function createRun({ repoId, agentId = null, harness, model = null, provider = null,
-  orProvider = null, effort = null, prompt, promptExtra = null, goal = null, branchMode, branchPattern = null,
+  orProvider = null, orRouting = null, effort = null, prompt, promptExtra = null, goal = null, branchMode, branchPattern = null,
   keepOnBranch = 0, expectedMinutes, skills = null, flows = null, title = null }) {
   if (!getHarness(harness)) throw new Error(t('run.unknown_harness', { harness }))
   if (!isHarnessEnabled(harness)) throw new Error(t('run.harness_not_configured', { harness }))
   if (!prompt?.trim()) throw new Error(t('run.empty_prompt'))
   const id = randomUUID()
-  db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, model, provider, or_provider,
+  db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, model, provider, or_provider, or_routing,
               effort, prompt, prompt_extra, goal, branch_mode, branch_pattern, keep_on_branch,
               expected_minutes, skills, flows, title, last_activity_at)
-              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? , datetime('now'))`)
-    .run(id, repoId, agentId, harness, model, provider, orProvider, effort, prompt, promptExtra,
+              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? , datetime('now'))`)
+    .run(id, repoId, agentId, harness, model, provider, orProvider,
+      orRouting ? JSON.stringify(orRouting) : null, effort, prompt, promptExtra,
       goal, branchMode, branchPattern, keepOnBranch ? 1 : 0, expectedMinutes, skills, flows, title)
   return id
 }

@@ -21,6 +21,22 @@ import { t } from './i18n.mjs'
 import { llmJson } from './llm/index.mjs'
 import { getSource, defaultSource, missingCredential } from './llm/sources.mjs'
 
+/**
+ * The stored auto-routing config of one of the hub's own LLM jobs — the same
+ * requirements widget the run forms carry, saved on the settings page. Tolerant
+ * of nulls and junk: no config, a broken blob — all mean "no auto routing",
+ * the plain serving-provider setting then decides alone.
+ */
+function orRoutingAusSetting(key) {
+  const v = getSetting(key)
+  if (!v) return null
+  try {
+    const cfg = JSON.parse(v)
+    return cfg?.mode === 'auto' ? cfg : null
+  } catch { return null }
+}
+
+
 export const DEFAULT_EXTRAS_MODEL = 'deepseek/deepseek-v4-flash'
 const MRU_KEY = 'llm_extras_models_mru'
 /** How many suggestions may come back — more is noise, not help. */
@@ -177,6 +193,7 @@ export async function suggestExtras(path, { timeoutMs = 60_000 } = {}) {
     schemaName: SCHEMA_NAME,
     purpose: 'extras',
     servingProvider: (getSetting('llm_extras_or_provider') ?? '').trim() || null,
+    orRouting: orRoutingAusSetting('llm_extras_or_routing'),
     maxTokens: 1000,
     temperature: 0,
     timeoutMs,

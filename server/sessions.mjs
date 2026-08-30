@@ -15,8 +15,8 @@
 //   - sessionKeepMs()          how long a finished session may stay
 //
 // The parsing and deciding parts are pure functions (parseSessions, mergePanes,
-// parsePs, processTree, finishedAtMs, shouldAutoClose, sessionState) so they can
-// be tested without a tmux server.
+// parsePs, processTree, finishedAtMs, shouldAutoClose, sessionState,
+// tmuxVerdict, sessionGoneFrom) so they can be tested without a tmux server.
 import db, { getRun, addEvent, allSettings } from './db.mjs'
 import { sh, parseDbUtc } from './util.mjs'
 import { t } from './i18n.mjs'
@@ -234,23 +234,93 @@ export function sessionState(session, run) {
 
 // ---------------------------------------------------------------- tmux access
 
-/** Raw session list including panes. Empty when tmux is not reachable. */
-export async function tmuxSessions() {
-  const list = await sh('tmux', ['list-sessions', '-F', SESSION_FIELDS])
-  if (!list.ok) return []                   // "no server running on …" is not an error here
-  const sessions = parseSessions(list.stdout)
-  if (!sessions.length) return sessions
-  const panes = await sh('tmux', ['list-panes', '-a', '-F', PANE_FIELDS])
-  return mergePanes(sessions, panes.ok ? panes.stdout : '')
+/**
+ * tmux says "no server" and "I could not answer you" through the SAME exit
+ * code, and reading the second one as the first is how a single bad moment
+ * ends every run on the machine.
+ *
+ *   'ok'          the command answered; its output is the truth.
+ *   'no_server'   there is demonstrably no tmux server — so there are no
+ *                 sessions. Also the truth, just the empty one.
+ *   'unreachable' anything else: a server too busy to answer, a fork that
+ *                 failed under memory pressure, the 30 s timeout in sh(), a
+ *                 missing binary, a socket in a broken state. The hub learned
+ *                 NOTHING here, and "nothing" must never be spent as "gone" —
+ *                 the callers that end runs act only on 'ok'/'no_server'.
+ *
+ * Measured against tmux 3.4: a missing server answers `error connecting to
+ * <socket> (No such file or directory)` on stderr, exit 1; older paths say
+ * `no server running on <socket>`. Both are matched, everything else is not.
+ * Pure over sh()'s result so the classification is testable without tmux.
+ */
+const NO_SERVER_RE = /no server running on|no current server|error connecting to .*\((No such file or directory|Connection refused)\)/i
+
+export function tmuxVerdict(r) {
+  if (r?.ok) return 'ok'
+  return NO_SERVER_RE.test(String(r?.stderr ?? '') + String(r?.stdout ?? '')) ? 'no_server' : 'unreachable'
 }
 
-/** name → session, for the watcher (one listing instead of one call per run). */
-export async function tmuxSessionMap() {
-  return new Map((await tmuxSessions()).map(s => [s.name, s]))
+/**
+ * What `tmux has-session` really said about one name:
+ *   true   it is demonstrably gone (tmux named the session, or there is no
+ *          server at all)
+ *   false  it is there
+ *   null   tmux gave no answer — the caller must not act on that
+ * Pure, for the same reason as tmuxVerdict.
+ */
+export function sessionGoneFrom(r) {
+  const verdict = tmuxVerdict(r)
+  if (verdict === 'ok') return false
+  if (verdict === 'no_server') return true
+  return /can't find session|session not found|no such session/i.test(
+    String(r?.stderr ?? '') + String(r?.stdout ?? '')) ? true : null
 }
+
+/**
+ * The session list together with the verdict on whether it can be believed.
+ * `ok: false` means "no answer", NEVER "empty" — see tmuxVerdict.
+ */
+export async function tmuxSnapshot() {
+  const list = await sh('tmux', ['list-sessions', '-F', SESSION_FIELDS])
+  const verdict = tmuxVerdict(list)
+  if (verdict === 'unreachable') {
+    return { ok: false, sessions: [], reason: (list.stderr || list.stdout).trim() || `tmux list-sessions failed (${list.code})` }
+  }
+  if (verdict === 'no_server') return { ok: true, sessions: [], reason: 'no_server' }
+  const sessions = parseSessions(list.stdout)
+  if (!sessions.length) return { ok: true, sessions, reason: 'ok' }
+  const panes = await sh('tmux', ['list-panes', '-a', '-F', PANE_FIELDS])
+  return { ok: true, sessions: mergePanes(sessions, panes.ok ? panes.stdout : ''), reason: 'ok' }
+}
+
+/**
+ * Raw session list including panes. Empty when tmux is not reachable — which is
+ * right for the DISPLAY callers (the sessions page, the memory block): showing
+ * nothing is the honest rendering of an unanswered question. Anything that ENDS
+ * a run asks tmuxSnapshot() instead and reads its verdict.
+ */
+export async function tmuxSessions() {
+  return (await tmuxSnapshot()).sessions
+}
+
+// Deliberately no tmuxSessionMap() any more. The watcher used to build its
+// name → session map from tmuxSessions(), and a Map cannot carry the verdict:
+// an unreachable tmux arrived as a map with nothing in it, and every run in the
+// pass then looked session-less at once. Whoever needs the map builds it from
+// tmuxSnapshot().sessions AFTER reading snapshot.ok.
 
 export async function sessionAlive(name) {
   return (await sh('tmux', ['has-session', '-t', `=${name}`])).ok
+}
+
+/**
+ * Is this session demonstrably gone? true / false / null (no answer) — the
+ * tri-state sessionAlive() cannot express. Every caller that would END a run
+ * on the answer uses this one.
+ */
+export async function sessionGone(name) {
+  if (!name) return null
+  return sessionGoneFrom(await sh('tmux', ['has-session', '-t', `=${name}`]))
 }
 
 /**

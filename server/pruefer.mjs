@@ -16,6 +16,22 @@ import { TYPEN } from './detect.mjs'
 import { llmJson } from './llm/index.mjs'
 import { getSource, defaultSource, missingCredential } from './llm/sources.mjs'
 
+/**
+ * The stored auto-routing config of one of the hub's own LLM jobs — the same
+ * requirements widget the run forms carry, saved on the settings page. Tolerant
+ * of nulls and junk: no config, a broken blob — all mean "no auto routing",
+ * the plain serving-provider setting then decides alone.
+ */
+function orRoutingAusSetting(key) {
+  const v = getSetting(key)
+  if (!v) return null
+  try {
+    const cfg = JSON.parse(v)
+    return cfg?.mode === 'auto' ? cfg : null
+  } catch { return null }
+}
+
+
 const MIN_ABSTAND_MS = 10 * 60_000    // per run at most one request every 10 min
 const MAX_ZEICHEN = 12_000            // context cap: cost and latency
 const zuletzt = new Map()             // runId → ms of the last request
@@ -90,6 +106,7 @@ export async function pruefeTreffer({ runId, harness, treffer, zeilen, jetztMs =
     schemaName: SCHEMA_NAME,
     purpose: 'check',
     servingProvider: getSetting('llm_check_or_provider') || null,
+    orRouting: orRoutingAusSetting('llm_check_or_routing'),
     maxTokens: 600,
     temperature: 0,
     timeoutMs: 60_000,

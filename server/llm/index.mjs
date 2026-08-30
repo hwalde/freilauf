@@ -64,6 +64,10 @@ function fail(stage, error) { return { ok: false, stage, error: String(error) } 
  * @param {string} [req.schemaName]       name for it (`run_title`, `flow_extract`, …)
  * @param {string} req.purpose            the caller: title | check | extract | extras
  * @param {string} [req.servingProvider]  OpenRouter's serving-provider pin; ignored elsewhere
+ * @param {object} [req.orRouting]        OpenRouter auto-routing config
+ *                                        ({mode:'auto', quant_min?, location?, max_in?, max_out?});
+ *                                        resolved to a provider order through the plugin's
+ *                                        routing capability — cached per model+config
  * @param {number} [req.maxTokens]
  * @param {number} [req.temperature]
  * @param {number} [req.timeoutMs]
@@ -76,7 +80,7 @@ function fail(stage, error) { return { ok: false, stage, error: String(error) } 
  */
 export async function llmJson({
   source, model, prompt, system, schema, schemaName, purpose = 'llm',
-  servingProvider = null, maxTokens, temperature, timeoutMs,
+  servingProvider = null, orRouting = null, maxTokens, temperature, timeoutMs,
 } = {}) {
   const sourceKey = String(source ?? '').trim() || defaultSource()
   const src = getSource(sourceKey)
@@ -108,6 +112,7 @@ export async function llmJson({
     purpose,
     maxTokens, temperature, timeoutMs,
     servingProvider: servingProvider || null,
+    orRouting: orRouting ?? null,
   })
 
   const first = strict ? `${base}\n\n${strict}` : base
@@ -119,12 +124,22 @@ export async function llmJson({
   let problems = []
 
   while (attempt <= retries) {
-    // A repair round quotes the previous answer and the exact complaint back;
-    // the strict block is repeated for a non-native source because the second
-    // attempt is a fresh, stateless call — there is no conversation to carry it.
+    // A repair round quotes the previous answer and the exact complaint back,
+    // and repeats BOTH the question and the strict block — the second attempt
+    // is a fresh, stateless call, so anything not repeated here is gone.
+    //
+    // The question used to be the one thing left out, and the failure that
+    // caused is the worst kind: the repair round still produced a
+    // schema-VALID answer, so the caller could not tell. Measured against a
+    // real model on 2026-08-30: asked "what is two plus two", told only that
+    // its first answer was not JSON, it came back with `{"answer": 0}` — a
+    // run title about nothing, an incident verdict about no incident, an
+    // `extract` with the right fields and invented values. A wrong answer that
+    // validates is worse than an honest failure, which is what the whole
+    // `{ok:false}` half of this module exists to give the caller.
     const userText = attempt === 0
       ? first
-      : [repairPrompt(text, problems), strict].filter(Boolean).join('\n\n')
+      : ['The question was:', base, repairPrompt(text, problems), strict].filter(Boolean).join('\n\n')
 
     let answer
     try {

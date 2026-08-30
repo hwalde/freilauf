@@ -42,6 +42,7 @@ import {
   shouldShowWelcome, markWelcomeSkipped,
 } from './welcome.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
+import { getPlugin } from './plugins/registry.mjs'
 import { startCleanupRun } from './cleanup.mjs'
 import { suggestExtras } from './extras-suggest.mjs'
 import { editRun } from './run-edit.mjs'
@@ -151,8 +152,16 @@ async function dispatch(req, res, url, path, formBody) {
   }
 
   // --- Welcome wizard ---
-  // Reachable whatever `welcome_hide` says, and it never redirects to itself:
-  // the redirect below is the only place that sends anybody here.
+  // Reachable whatever the two wizard flags say, and it never redirects to
+  // itself: the redirect below is the only place that sends anybody here.
+  //
+  // The page has two modes and decides between them itself (welcome.mjs,
+  // `welcomeLocked`): while the redirect below would send a browser here and the
+  // wizard has never been walked to its end (`welcome_done`), it renders in its
+  // own minimal shell with no navigation and no way out but the one it offers —
+  // otherwise it is an ordinary page inside `layout()`. Lock-in and forced
+  // redirect are therefore the same condition, which is what keeps the hub from
+  // ever locking somebody into a page it did not send them to.
   if (req.method === 'GET' && path === '/welcome') return pageWelcome(req, res, url)
   if (req.method === 'POST' && path === '/welcome/hello') return welcomeHello(req, res, url, formBody)
   if (req.method === 'POST' && path === '/welcome/scan') return welcomeScan(req, res, url, formBody)
@@ -166,7 +175,12 @@ async function dispatch(req, res, url, path, formBody) {
   // it. Three fences, and each of them is load-bearing:
   //   - only a BROWSER NAVIGATION (`wantsHtml`) — a fragment fetch or an API
   //     caller asking for `/` must never be answered with a redirect to HTML;
-  //   - only while `welcome_hide` is unset (the checkbox on every wizard step);
+  //   - only while `welcome_hide` is unset — the checkbox, which lives on the
+  //     wizard's LAST step while somebody is being walked through it (the offer
+  //     to leave belongs at the end) and on every step once it is an ordinary
+  //     page. Finishing pre-ticks it, so a completed setup stops greeting;
+  //     `welcome_done` records the finishing itself and is what unlocks the
+  //     page, deliberately a different statement from "stop sending me here";
   //   - `?welcome=skip` is the wizard's own "Skip for now" coming back, and it
   //     marks the browser session so the link cannot bounce into a loop.
   if (req.method === 'GET' && path === '/') {
@@ -264,6 +278,7 @@ async function api(req, res, url) {
         provider: c.provider ?? '',
         model: c.model ?? '',
         or_provider: c.or_provider ?? '',
+        or_routing: c.or_routing ?? '',
         effort: c.effort ?? '',
       },
     })
@@ -334,6 +349,31 @@ async function api(req, res, url) {
     return json(res, 200, r.liste
       ? { ok: true, endpoints: r.liste, veraltet: r.veraltet }
       : { ok: false, error: r.fehler ?? t('api.endpoints_unreachable') })
+  }
+
+  // The best-provider selection for a model under the given requirements —
+  // the form's "auto" mode calls this so the operator SEES what would be
+  // pinned instead of trusting a checkbox. Same plugin the runs resolve
+  // through, same cache — a preview never disagrees with the start.
+  if (req.method === 'GET' && path === '/api/or-routing') {
+    const model = url.searchParams.get('model') ?? ''
+    const plugin = getPlugin('openrouter')?.plugin
+    if (!plugin?.routing) return json(res, 200, { ok: false, error: t('api.endpoints_unreachable') })
+    const cfg = plugin.routing.parseConfig({
+      quant_min: url.searchParams.get('quant') ?? '',
+      location: url.searchParams.get('location') ?? 'all',
+      max_in: url.searchParams.get('max_in') ?? '',
+      max_out: url.searchParams.get('max_out') ?? '',
+    })
+    try {
+      const r = await plugin.routing.resolve(pluginCtx('openrouter'), model.trim(), cfg)
+      return json(res, 200, r.ok
+        ? { ok: true, best: r.best, order: r.order, quant: r.quant, at: r.at,
+            cached: !!r.cached, veraltet: !!r.veraltet, prices: r.prices ?? [], dropped: r.dropped ?? [] }
+        : { ok: false, error: r.reason ?? t('api.endpoints_unreachable') })
+    } catch (e) {
+      return json(res, 200, { ok: false, error: e.message })
+    }
   }
   // The report endpoint answers 200 with `{ ok, message }`, and the message is
   // the point: with the repo's integration switched on the finish gate has

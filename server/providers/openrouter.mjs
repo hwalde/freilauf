@@ -1,9 +1,17 @@
 // Freilauf — provider plugin: OpenRouter.
 //
-// The one import is `env.mjs`, and it is safe as a STATIC one where the rest of
-// the hub's modules are not: that file imports nothing at all, so it cannot be
-// part of the registry cycle the lazy-import rule in AGENTS.md exists for.
+// The two imports are `env.mjs` and `paths.mjs`, and they are safe as STATIC
+// ones where the rest of the hub's modules are not: env.mjs imports nothing at
+// all and paths.mjs imports only it, so neither can be part of the registry
+// cycle the lazy-import rule in AGENTS.md exists for.
 import { env } from '../env.mjs'
+import { dataDir } from '../paths.mjs'
+
+import { dirname, join } from 'node:path'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  parseRoutingConfig, routingConfigKey, selectBestProvider, endpointFits, quantizationsFrom,
+} from './openrouter-routing.mjs'
 
 /** The chat-completions endpoint. Overridable so the e2e suite can stub it. */
 const CHAT_URL = () => env('OPENROUTER_BASE') ?? 'https://openrouter.ai/api/v1/chat/completions'
@@ -16,6 +24,57 @@ const CHAT_URL = () => env('OPENROUTER_BASE') ?? 'https://openrouter.ai/api/v1/c
  * contexts that predate credentials (the unit suite injects one of those).
  */
 const apiKey = (ctx) => ctx?.secret?.('api_key') || ctx?.env?.OPENROUTER_API_KEY || null
+
+// ── Best-provider selection cache ─────────────────────────────────────────────
+//
+// The selection is CACHED PER MODEL AND CONFIG: the next run that picks the
+// same model with the same requirements gets the same provider order, not a
+// re-rolled one — a selection that hops between runs is exactly the variance
+// the source algorithm built its pins against. The cache lives in a
+// JSON file next to the other hub data (claude-windows.json precedent): it
+// survives the hub's frequent deploys, and a built-in plugin file must not
+// reach the database anyway (docs/plugins.md, import rules).
+//
+// TTL 24 h — long enough that the same settings really do produce the same
+// answer, short enough that price and health drift get picked up. A FRESH
+// answer never falls back to a stale one, and a failed fetch serves the stale
+// entry marked `veraltet` rather than nothing: a slightly old selection is
+// still better than silently routing wherever OpenRouter pleases.
+
+const ROUTING_TTL_MS = 24 * 60 * 60 * 1000
+const routingCacheFile = () =>
+  env('OR_ROUTING_JSON') ?? join(dataDir(), 'openrouter-routing.json')
+
+function readRoutingCache() {
+  try { return JSON.parse(readFileSync(routingCacheFile(), 'utf8')) } catch { return {} }
+}
+
+function writeRoutingCache(cache) {
+  const file = routingCacheFile()
+  try {
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, JSON.stringify(cache, null, 1))
+  } catch (e) { console.error('openrouter routing cache:', e.message) }
+}
+
+export const ROUTING_KEY = (model, cfg) => `${model}::${routingConfigKey(cfg)}`
+
+/** The endpoints of one model, narrowed to what the selection reads. */
+async function fetchRoutingEndpoints(ctx, modelId) {
+  if (!/^[\w.~\-]+\/[\w.~\-:]+$/.test(modelId)) throw new Error(`not a model id: ${modelId}`)
+  // The id is validated against its shape, so it goes into the path verbatim —
+  // percent-encoding the separator is exactly how the API answers "no model".
+  const j = await ctx.json(`https://openrouter.ai/api/v1/models/${modelId}/endpoints`)
+  return (j?.data?.endpoints ?? []).map(ep => ({
+    tag: ep.tag,
+    provider_name: ep.provider_name ?? null,
+    quantization: ep.quantization ?? null,
+    status: ep.status,
+    uptime_last_30m: ep.uptime_last_30m ?? null,
+    supported_parameters: ep.supported_parameters ?? [],
+    pricing: ep.pricing ?? {},
+  })).filter(ep => ep.tag)
+}
 
 const plugin = {
   id: 'openrouter',
@@ -101,7 +160,29 @@ const plugin = {
           json_schema: { name: req.schemaName || 'answer', strict: true, schema: req.schema },
         }
       }
-      if (req.servingProvider) body.provider = { order: [req.servingProvider], allow_fallbacks: false }
+      // Three shapes reach this one point — the settings pages, the run starts
+      // and the flows all resolve through the SAME capability and cache:
+      //   orRouting        the requirements config (mode 'auto'), resolved
+      //                    per model with the stored quant/region/price caps
+      //   servingProvider 'auto' — the default requirements, per model
+      //   servingProvider a tag — the old single-provider pin
+      if (req.orRouting?.mode === 'auto') {
+        try {
+          const r = await plugin.routing.resolveForRun(ctx, req.model, req.orRouting)
+          if (r.ok) body.provider = { order: r.order, allow_fallbacks: false }
+        } catch { /* free routing is the old behaviour and stays reachable */ }
+      } else if (req.servingProvider && req.servingProvider !== 'auto') {
+        body.provider = { order: [req.servingProvider], allow_fallbacks: false }
+      } else if (req.servingProvider === 'auto') {
+        // "auto" = the hub's best-provider selection for THIS model, with the
+        // default requirements. Cached per model; a failure here is fail-soft —
+        // the call goes out unpinned rather than failing, the same degradation
+        // a routing config nobody could resolve means at launch.
+        try {
+          const r = await plugin.routing.resolve(ctx, req.model, {})
+          if (r.ok) body.provider = { order: r.order, allow_fallbacks: false }
+        } catch { /* free routing is the old behaviour and stays reachable */ }
+      }
       const j = await ctx.json(CHAT_URL(), {
         Authorization: `Bearer ${key}`,
         'content-type': 'application/json',
@@ -162,6 +243,70 @@ const plugin = {
             pflicht: m.reasoning.mandatory === true }
         : null,
     })).sort((a, b) => a.id.localeCompare(b.id))
+  },
+
+  /**
+   * Best-provider selection ("serving provider: auto").
+   *
+   * `resolve(ctx, modelId, cfg)` answers with the provider order for THIS
+   * model under THIS requirements config, cached per model+config (24 h, see
+   * the block above). Pure filtering lives in openrouter-routing.mjs; this is
+   * the I/O half: fetch the endpoint list, consult the cache, persist the new
+   * answer, and on any failure fall back to a stale cached answer rather than
+   * to nothing.
+   *
+   * `parseRoutingConfig` / `endpointFits` / `quantizationsFrom` are re-exported
+   * so the harness plugins (opencode's OPENCODE_CONFIG_CONTENT) and the API
+   * route build the SAME order from the SAME stored config — a second copy of
+   * the decision rule would drift exactly the way the run definition once did.
+   */
+  routing: {
+    parseConfig: parseRoutingConfig,
+    endpointFits,
+    quantizationsFrom,
+    async resolve(ctx, modelId, cfg, { refresh = false } = {}) {
+      const key = ROUTING_KEY(modelId, cfg)
+      const cache = readRoutingCache()
+      const entry = cache[key]
+      const fresh = entry && !refresh && (Date.now() - new Date(entry.at).getTime()) < ROUTING_TTL_MS
+      if (fresh) return { ...entry.result, cached: true, at: entry.at }
+
+      let result = null
+      let fetchError = null
+      try {
+        const endpoints = await fetchRoutingEndpoints(ctx, modelId)
+        result = selectBestProvider(endpoints, cfg ?? {})
+      } catch (e) { fetchError = e }
+
+      if (!result?.ok) {
+        // Nothing usable NOW: a stale answer beats an unpinned call — but only
+        // a stale answer, never a fresh failure dressed up as one.
+        if (entry?.result?.ok) {
+          return { ...entry.result, veraltet: true, at: entry.at,
+                   reason: result?.reason ?? fetchError?.message ?? null }
+        }
+        return { ok: false, order: [], best: null,
+                 reason: result?.reason ?? fetchError?.message ?? 'endpoints unreachable' }
+      }
+
+      const at = new Date().toISOString()
+      cache[key] = { model: modelId, cfg: cfg ?? {}, result, at }
+      writeRoutingCache(cache)
+      return { ...result, cached: false, at }
+    },
+
+    /**
+     * The order for a RUN's stored routing config, the shape opencode.mjs
+     * reads into OPENCODE_CONFIG_CONTENT. Used by startRun() at launch and by
+     * the /api/or-routing preview.
+     */
+    async resolveForRun(ctx, modelId, storedRouting) {
+      const cfg = parseRoutingConfig(storedRouting ?? {})
+      if (!cfg || cfg.error) {
+        return { ok: false, reason: cfg?.error ?? 'no auto routing configured' }
+      }
+      return plugin.routing.resolve(ctx, modelId, cfg)
+    },
   },
 }
 

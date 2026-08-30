@@ -27,8 +27,10 @@ import { escapeHtml as e, fmtDateTime } from '../util.mjs'
 import { setSetting } from '../db.mjs'
 import { redirect } from '../web-helpers.mjs'
 import { t } from '../i18n.mjs'
-import { layout, problemPage } from '../pages.mjs'
-import { providerLabel } from '../providers/index.mjs'
+// `providerChoiceBlock` lives in pages.mjs and is imported rather than copied:
+// the same block is reachable from two pages, and the two copies it used to be
+// had already drifted apart — see the comment above it there.
+import { layout, problemPage, providerChoiceBlock } from '../pages.mjs'
 import {
   allPlugins, registryErrors, getPlugin, pluginKind, pluginSource,
   pluginManifest, detectInstalled,
@@ -98,14 +100,19 @@ export function checkbox(name, on, label, extra = '') {
     <label class="chk"><input type="checkbox" name="${e(name)}" value="1" ${on ? 'checked' : ''}> ${e(label)}${extra}</label>`
 }
 
-/** The allowed model providers of a coding agent — the semantics of the old page. */
-function providerCheckboxes(plugin, chosen) {
-  if (plugin.subscription || !(plugin.providers ?? []).length) {
-    return `<p class="dim">${e(t('plugins.no_providers'))}</p>`
-  }
-  return plugin.providers.map(pid => `<label class="chk">
-    <input type="checkbox" name="providers" value="${e(pid)}" ${chosen.has(pid) ? 'checked' : ''}>
-    ${e(providerLabel(pid))}${(plugin.keyFreeProviders ?? []).includes(pid) ? ` <span class="dim">(${e(t('provider.keyfree'))})</span>` : ''}</label>`).join('')
+/**
+ * Is this credential explicitly declared optional?
+ *
+ * OpenCode Zen is: it serves its free models with no key at all, and a key only
+ * adds the paid ones. Saying "no key found yet" there reads like a fault on a
+ * provider that is working — which is the whole reason this exists. The test is
+ * an explicit `required: false` and never the absence of the field, because
+ * `credentialSpec()` normalises a plugin that predates it to exactly that value.
+ */
+function credentialOptional(plugin, key) {
+  const declared = Array.isArray(plugin?.credentials)
+    ? plugin.credentials.find(c => c && c.key === key) : null
+  return !!declared && declared.required === false
 }
 
 /**
@@ -131,6 +138,18 @@ function credentialState(pluginId, spec, env = process.env) {
  * always. The password field is deliberately never pre-filled — there is
  * nothing to show and `setCredential()` reads an empty submit as "keep what is
  * stored", so a save cannot silently delete a key.
+ *
+ * Two rules the fields themselves follow:
+ *
+ *  - **Only the field the chosen mode needs is on the page.** The block used to
+ *    show "Name of the environment variable" AND "Value" side by side whatever
+ *    the dropdown said, so half of it was always asking for something that
+ *    would be ignored. Hidden AND `disabled`: this project has been bitten by a
+ *    hidden field that still submitted, and every `form.form-grid` selector
+ *    carries `:not([hidden])` for the same reason.
+ *  - **The server renders the right one already.** hub.js keeps it in step
+ *    while the dropdown is used, but the Welcome wizard renders this same block
+ *    and a first paint must not depend on a script having run.
  */
 export function credentialsBlock(pluginId, plugin) {
   const specs = credentialSpec(plugin)
@@ -138,28 +157,34 @@ export function credentialsBlock(pluginId, plugin) {
   const rows = specs.map(spec => {
     const entry = pluginConfig(pluginId)?.config.credentials?.[spec.key] ?? null
     const mode = entry?.mode === 'value' ? 'value' : 'env'
+    const optional = credentialOptional(plugin, spec.key)
     const state = credentialState(pluginId, spec)
     const status = state.present
       ? (state.via === 'stored'
         ? `<span class="ok">✓ ${e(t('plugins.cred_present_stored'))}</span>`
         : `<span class="ok">✓ ${e(t('plugins.cred_present_env', { name: state.name }))}</span>`)
-      : `<span class="dim">${e(t('plugins.cred_missing'))}</span>`
+      // A provider that works without a key must not be reported as if
+      // something were broken — see credentialOptional().
+      : `<span class="dim">${e(t(optional ? 'plugins.cred_missing_optional' : 'plugins.cred_missing'))}</span>`
     const declared = (spec.envKeys ?? []).length
       ? `<p class="dim">${e(t('plugins.cred_declared', { names: spec.envKeys.join(', ') }))}</p>` : ''
+    const opt = optional ? `<p class="dim">${e(t('plugins.cred_optional'))}</p>` : ''
     const help = spec.helpKey ? `<p class="dim">${e(t(spec.helpKey))}</p>` : ''
+    const off = (want) => (mode === want ? '' : ' hidden')
+    const dis = (want) => (mode === want ? '' : ' disabled')
     return `<div class="cred">
       <b>${e(t(spec.labelKey))}</b> ${status}
-      ${declared}${help}
+      ${declared}${opt}${help}
       <label>${e(t('plugins.cred_mode'))}
         <select name="cred_${e(spec.key)}_mode">
           <option value="env" ${mode === 'env' ? 'selected' : ''}>${e(t('plugins.cred_mode_env'))}</option>
           <option value="value" ${mode === 'value' ? 'selected' : ''}>${e(t('plugins.cred_mode_value'))}</option>
         </select></label>
-      <label>${e(t('plugins.cred_envvar'))}
-        <input type="text" name="cred_${e(spec.key)}_env" value="${e(entry?.envVar ?? (spec.envKeys ?? [])[0] ?? '')}" autocomplete="off" spellcheck="false">
+      <label${off('env')}>${e(t('plugins.cred_envvar'))}
+        <input type="text" name="cred_${e(spec.key)}_env" value="${e(entry?.envVar ?? (spec.envKeys ?? [])[0] ?? '')}" autocomplete="off" spellcheck="false"${dis('env')}>
         <span class="dim">${e(t('plugins.cred_envvar_hint'))}</span></label>
-      <label>${e(t('plugins.cred_value'))}
-        <input type="password" name="cred_${e(spec.key)}_value" value="" autocomplete="new-password">
+      <label${off('value')}>${e(t('plugins.cred_value'))}
+        <input type="password" name="cred_${e(spec.key)}_value" value="" autocomplete="new-password"${dis('value')}>
         <span class="dim">${e(t('plugins.cred_value_hint'))}</span></label>
     </div>`
   }).join('')
@@ -202,29 +227,47 @@ export function settingsBlock(pluginId, plugin) {
 }
 
 /**
- * The card's footer: what belongs to the plugin rather than to its settings —
- * forgetting the configuration, and for an external package its version and
- * the way to remove it.
+ * The card's footer: what belongs to the plugin rather than to its settings.
  *
- * It stands OUTSIDE the save form on purpose. A `<form>` inside a `<form>` is
- * not nesting, it is a parse error: the HTML parser drops the inner one and
- * its button ends up submitting the outer form — which here would mean
- * "Remove" quietly saving the plugin instead of removing it.
+ * There are TWO removals here and they are not the same thing, which is what
+ * "Forget configuration" managed to say accurately and nobody managed to read:
+ *
+ *  - **taking it out of the selection** — the configuration is dropped and the
+ *    coding agent or model provider stops being offered in the forms. Nothing
+ *    leaves this machine: the programme stays installed, and adding it back is
+ *    one click. Every plugin has this;
+ *  - **deleting the package** — an EXTERNAL plugin's directory is removed from
+ *    the machine for good. Only an external package has this.
+ *
+ * They therefore get different words, different colours and different confirm
+ * texts, and the harmless one carries a sentence saying what it does not do —
+ * the reader of a button labelled "Remove" has every reason to expect the worse
+ * of the two.
+ *
+ * The footer stands OUTSIDE the save form on purpose. A `<form>` inside a
+ * `<form>` is not nesting, it is a parse error: the HTML parser drops the inner
+ * one and its button ends up submitting the outer form — which here would mean
+ * a removal quietly saving the plugin instead.
  */
-export function cardFooter(id, label) {
+export function cardFooter(id, label, kind) {
+  const forgetLabel = kind === 'provider'
+    ? 'plugins.forget_provider'
+    : kind === 'notifier' ? 'plugins.forget_notifier' : 'plugins.forget_harness'
   const forget = pluginConfig(id)
     ? `<form method="post" action="/settings/plugins/remove" class="inline"
-        onsubmit="return confirm(${e(JSON.stringify(t('plugins.reset_confirm', { label })))})">
+        onsubmit="return confirm(${e(JSON.stringify(t('plugins.forget_confirm', { label })))})">
         <input type="hidden" name="id" value="${e(id)}">
-        <button class="ghost">${e(t('plugins.reset'))}</button></form>` : ''
+        <button class="ghost">${e(t(forgetLabel))}</button></form>
+      <span class="dim footer-hint">${e(t('plugins.forget_hint'))}</span>` : ''
   let external = ''
   if (pluginSource(id) === 'external') {
     const version = pluginManifest(id)?.version ?? ''
     external = `<span class="dim">${e(t('plugins.external'))}${version ? ` · ${e(t('plugins.version', { version }))}` : ''}</span>
       <form method="post" action="/settings/plugins/uninstall" class="inline"
-        onsubmit="return confirm(${e(JSON.stringify(t('plugins.remove_confirm', { label })))})">
+        onsubmit="return confirm(${e(JSON.stringify(t('plugins.uninstall_confirm', { label })))})">
         <input type="hidden" name="id" value="${e(id)}">
-        <button class="danger">${e(t('plugins.remove'))}</button></form>`
+        <button class="danger">${e(t('plugins.uninstall'))}</button></form>
+      <span class="dim footer-hint">${e(t('plugins.uninstall_hint'))}</span>`
   }
   if (!forget && !external) return ''
   return `<div class="btn-row plugin-footer">${forget}${external}</div>`
@@ -279,7 +322,7 @@ async function harnessSection() {
   try { installed = await detectInstalled() } catch { installed = [] }
   const installedById = new Map(installed.map(i => [i.id, i.installed]))
 
-  const cards = allPlugins().filter(p => p.kind === 'harness').map(({ id, plugin }) => {
+  const cards = (await Promise.all(allPlugins().filter(p => p.kind === 'harness').map(async ({ id, plugin }) => {
     const configured = pluginConfig(id)
     const chosen = new Set(configured ? configured.config.providers : (plugin.providers ?? []))
     const isInstalled = installedById.get(id)
@@ -297,15 +340,14 @@ async function harnessSection() {
         <input type="hidden" name="id" value="${e(id)}">
         ${checkbox('enabled', !!configured && configured.enabled === 1, t('plugins.enabled'))}
         <fieldset><legend>${e(t('plugins.providers_legend'))}</legend>
-          ${explain('plugins.providers_hint')}
-          ${providerCheckboxes(plugin, chosen)}</fieldset>
+          ${await providerChoiceBlock(plugin, chosen)}</fieldset>
         ${credentialsBlock(id, plugin)}
         ${settingsBlock(id, plugin)}
         <div class="btn-row"><button>${e(t(configured ? 'settings.save' : 'plugins.add'))}</button></div>
       </form>
-      ${cardFooter(id, plugin.label)}
+      ${cardFooter(id, plugin.label, 'harness')}
     </div>`
-  }).join('')
+  }))).join('')
 
   return `<h2>${e(t('plugins.agents_title'))}</h2>
     ${explain('plugins.agents_explain')}
@@ -333,7 +375,7 @@ function providerSection() {
         ${settingsBlock(id, plugin)}
         <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
       </form>
-      ${cardFooter(id, plugin.label)}
+      ${cardFooter(id, plugin.label, 'provider')}
     </div>`
   }).join('')
 
@@ -356,9 +398,9 @@ function packagesSection() {
     <td>${e(p.source)}</td>
     <td>${p.error ? `<code class="evidence">${e(p.error)}</code>` : ''}</td>
     <td>${p.error ? '' : `<form method="post" action="/settings/plugins/uninstall" class="inline"
-      onsubmit="return confirm(${e(JSON.stringify(t('plugins.remove_confirm', { label: p.name })))})">
+      onsubmit="return confirm(${e(JSON.stringify(t('plugins.uninstall_confirm', { label: p.name })))})">
       <input type="hidden" name="id" value="${e(p.id)}">
-      <button class="danger">${e(t('plugins.remove'))}</button></form>`}</td></tr>`).join('')
+      <button class="danger">${e(t('plugins.uninstall'))}</button></form>`}</td></tr>`).join('')
 
   // Registry errors are developer-facing English sentences (a broken manifest,
   // a refused id collision). They are rendered VERBATIM: translating a load
