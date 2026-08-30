@@ -51,15 +51,9 @@ if [[ "$KIND" == "_api_error" || "$KIND" == "_turn_end" || "$KIND" == "_exit" ||
         if [[ -n "${1:-}" ]]; then
             ERR="$1"; shift; TEXT="${*:-}"
         elif [[ ! -t 0 ]]; then
-            # BOUNDED read, and that is load-bearing. `[[ ! -t 0 ]]` only says stdin is
-        # not a terminal — it does NOT say anybody is going to write to it or ever
-        # close it. A real hook hands over its JSON and closes at once, so the
-        # timeout costs nothing there; every OTHER caller that inherited an open
-        # pipe (a script, a test, a hand-typed `cc-report _turn_end`) would
-        # otherwise block forever. This used to apply to _api_error alone; the day
-        # it was extended to _turn_end/_exit/_idle it became a hang on the events
-        # that fire constantly — and _exit runs from SessionEnd, which claude waits for.
-        HOOK_JSON="$(timeout 2 cat 2>/dev/null || true)"
+            # Bounded read — see the identical comment below; this is the original
+            # _api_error path and it must not block either.
+            HOOK_JSON="$(timeout 2 cat 2>/dev/null || true)"
         else
             ERR="unknown"
         fi
