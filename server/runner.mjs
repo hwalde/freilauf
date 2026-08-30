@@ -58,6 +58,33 @@ const FINISH_RULES = [
 ].join('\n')
 
 /**
+ * What happens AFTER the report: the operator reads it, finds something
+ * unfinished and types more into this very session. The agent has to know that
+ * the same two steps apply again — the same command, deliberately (see
+ * reports.mjs, "follow-up reports"): the hub tells a first report from a
+ * follow-up by itself, and a second verb would be a second thing to forget.
+ * The one rule that is new is the batching one: several requests in one go
+ * are ONE report, not one per request — each report reaches a human's phone.
+ */
+const FOLLOWUP_RULES = [
+  'AFTER YOU HAVE REPORTED DONE — follow-up work:',
+  'A human may come back into this session and ask for more (a fix, a change, a question).',
+  'Do that work as usual. When it is finished — everything committed{followup_merge} — write a',
+  'report about ONLY the follow-up work to {report_file} (overwrite the file) and run',
+  '  cc-report done --file {report_file}',
+  'again. It is the same command on purpose: cc-hub knows this run is already over and',
+  'treats it as a FOLLOW-UP REPORT — it reaches the human, and it triggers the same',
+  'platform processes as the first report{followup_processes}. If the human asked for',
+  'several things at once, do all of them and report ONCE at the end, not once per',
+  'request: every report is a message to a person. Do not report a mere answer to a',
+  'question that changed nothing unless the human asked for a report of it.',
+].join('\n')
+
+/** …and the two half sentences that only hold where the hub integrates. */
+const FOLLOWUP_MERGE_CLAUSE = ', and origin/{base} merged into your branch once more'
+const FOLLOWUP_PROCESSES_CLAUSE = ' (integration into {base}, the flows that hang on this run)'
+
+/**
  * The prompt block that turns a task into a RUN: where to work, how long it may
  * take, and above all how to report back.
  *
@@ -96,9 +123,12 @@ export function platformSuffix(run, branchRule, settings, repo = null) {
   const finish = hubMerges
     ? FINISH_RULES.replace('  3. Only then stop.', `${MERGE_FINISH_LINE}\n  3. Only then stop.`)
     : FINISH_RULES
+  const followUp = FOLLOWUP_RULES
+    .replace('{followup_merge}', hubMerges && !run.keep_on_branch ? FOLLOWUP_MERGE_CLAUSE : '')
+    .replace('{followup_processes}', hubMerges ? FOLLOWUP_PROCESSES_CLAUSE : '')
   return [rules,
     own && `Operator rules (apply to every run of this hub):\n${own}`,
-    harnessRules, finish]
+    harnessRules, finish, followUp]
     .filter(Boolean).join('\n\n')
     .replaceAll('{base}', base)
     .replaceAll('{run_id}', run.id)

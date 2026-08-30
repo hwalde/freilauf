@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # cc-report — agents report back to cc-hub (Planung 6).
 # Usage:
-#   cc-report done [--file report.md | "text"]     Run completed
+#   cc-report done [--file report.md | "text"]     Run completed — or, from a run that
+#                                                  is already over, a FOLLOW-UP report:
+#                                                  same command, the hub tells them apart
 #   cc-report failed "reason"                      Run failed
 #   cc-report help "question/problem"              Call for help (run stays open, waits)
 #   cc-report progress "status"                    Progress / taking longer
@@ -16,7 +18,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 [[ $# -ge 1 ]] || { usage >&2; exit 2; }

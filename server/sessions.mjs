@@ -427,6 +427,15 @@ export function reconcileClosedSession(runId, source = 'session') {
   refreshSessionMemoryAfterRun(runId)
   if (!['running', 'waiting_help'].includes(run.status)) {
     if (!run.tmux_closed_at) addEvent(runId, 'tmux_closed', { source })
+    // A finished run whose FOLLOW-UP is in the finish gate (reports.mjs): its
+    // agent is gone mid-report, and that is the same escalation as for a first
+    // report — not a silent wait for the gate's deadline.
+    if (run.finish_state && source !== 'web') {
+      import('./integrate.mjs')
+        .then(m => m.escalate(runId, 'agent_gone'))
+        .catch(err => console.error('[integrate]', err.message))
+      return 'escalated'
+    }
     return 'closed'
   }
   if (run.finish_state && source !== 'web') {

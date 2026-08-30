@@ -1234,6 +1234,27 @@ try {
     await p.close()
   })
 
+  await pruefe('the Telegram box under the terminal switches the run with one click and survives a live update', async () => {
+    const p = await neueSeite(`/runs/${R_LIVE}`)
+    await wartePage(p, () => !!document.querySelector('#term .xterm-rows'), null, 'the terminal to be up')
+    gleich(await p.$eval('#telegram-on', el => el.checked), true, 'ticked by default')
+    await p.click('#telegram-on')
+    await warteAuf(() => db.prepare('SELECT telegram_on FROM runs WHERE id=?').get(R_LIVE).telegram_on === 0,
+      { was: 'the click to reach the database' })
+    gleich(await p.$eval('#telegram-on', el => el.checked), false, 'and the box shows it')
+    // The box sits outside the fragment, like the terminal it sits under: a live
+    // update of the page must not flip a box the operator just clicked.
+    await formular(`/api/runs/${R_LIVE}/title`, { title: 'Muted, and updated' })
+    await wartePage(p, () => document.querySelector('#run-head [data-title-text]')?.textContent === 'Muted, and updated',
+      null, 'the heading to carry the new title')
+    gleich(await p.$eval('#telegram-on', el => el.checked), false, 'the box is untouched by the swap')
+    await p.click('#telegram-on')
+    await warteAuf(() => db.prepare('SELECT telegram_on FROM runs WHERE id=?').get(R_LIVE).telegram_on === 1,
+      { was: 'the second click to reach the database' })
+    sauber(p)
+    await p.close()
+  })
+
   await pruefe('the channel reconnects by itself and keeps working', async () => {
     const p = await neueSeite(`/?repo=${repoId}`)
     // Drop the stream from the browser side; EventSource has to come back on its

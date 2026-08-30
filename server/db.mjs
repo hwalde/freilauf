@@ -227,6 +227,18 @@ addColumn('runs', 'merged_at', 'TEXT')
 addColumn('runs', 'merge_attempts', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('runs', 'resolver_run_id', 'TEXT')     // the conflict run working for this run
 addColumn('runs', 'resolves_run_id', 'TEXT')     // set on a conflict run: the run it works for
+// ---- follow-up reports: a finished run can report again ----
+// After `done` the coding agent is still sitting in its session, and the
+// operator often types more work into it. `cc-report done` from a finished run
+// is a FOLLOW-UP report (server/reports.mjs, handleFollowUp): same finish gate,
+// same integration, same flows — announced as "FOLLOW-UP REPORT #n".
+addColumn('runs', 'followups', 'INTEGER NOT NULL DEFAULT 0')      // follow-up reports accepted so far
+addColumn('runs', 'followup_md', 'TEXT')                           // the latest follow-up's own text
+addColumn('runs', 'followup_open', 'INTEGER NOT NULL DEFAULT 0')  // 1 while a follow-up is in the gate / being merged
+// Telegram per run: the checkbox under the terminal. 0 silences every message
+// ABOUT this run (reports, alarms, incidents) — nothing else changes: the
+// integration, the flows and the events happen exactly as before.
+addColumn('runs', 'telegram_on', 'INTEGER NOT NULL DEFAULT 1')
 // Incidents: the delayed Telegram (notify_at = when the grace period ends and the
 // alarm becomes due) and whether it was EVER announced (gemeldet_am) — the latter
 // decides whether an auto-resolve also announces the recovery (server/incidents.mjs).

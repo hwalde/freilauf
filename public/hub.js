@@ -931,6 +931,22 @@
     fetch('/api/runs/' + id + '/kill', { method: 'POST' }).then(() => location.reload())
     return false
   }
+  // The Telegram checkbox under the terminal: one request per click, nothing
+  // reloads. The box is optimistic — it shows the click at once — and is put
+  // back only when the server refuses, so a flaky request never leaves the page
+  // claiming a silence the hub does not keep.
+  const tgBox = document.getElementById('telegram-on')
+  if (tgBox) {
+    tgBox.addEventListener('change', () => {
+      const wanted = tgBox.checked
+      const body = new URLSearchParams()
+      body.set('on', wanted ? '1' : '0')
+      fetch('/api/runs/' + tgBox.dataset.run + '/telegram', { method: 'POST', body })
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() })
+        .then(j => { tgBox.checked = j.telegram_on === 1 })
+        .catch(err => { tgBox.checked = !wanted; alert(T('js.send_failed', 'Send failed: ') + err.message) })
+    })
+  }
 
   // ---- sessions page: filter, multi-select, non-blocking ending ----
   // Nothing here reloads the page. A click marks its row as "ending …" in the

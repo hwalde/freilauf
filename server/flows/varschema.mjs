@@ -51,6 +51,8 @@ export const RUN_SHAPE = {
     branch: { type: 'string' },
     pr_url: { type: 'string' },
     report: { type: 'string' },
+    followups: { type: 'number' },
+    last_report: { type: 'string' },
     help_text: { type: 'string' },
     exit_code: { type: 'number' },
     duration_min: { type: 'number' },

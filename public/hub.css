@@ -458,6 +458,8 @@ ul.events li { padding: 3px 0; border-bottom: 1px dashed var(--border); }
         border: 2px solid transparent; }
 /* Make it visible where keyboard input currently goes — otherwise you type into the void. */
 #term:focus-within { border-color: var(--ok-text); }
+/* The Telegram switch of the run, right under the terminal (telegramSwitch in pages.mjs). */
+.telegram-switch { margin: var(--sp-8) 0; flex-wrap: wrap; }
 .err { color: var(--err); } .warn { color: var(--warn-text); } .ok { color: var(--ok-text); }
 /* Schedule selection in the agent form */
 fieldset.schedule { border: 1px solid var(--border-field); border-radius: var(--radius-8); padding: var(--sp-10) var(--sp-14); margin: var(--sp-6) 0; }

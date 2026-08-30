@@ -1133,6 +1133,7 @@ export async function pageRun(req, res, url, id) {
     : ''}
   <details ${live ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(terminalState(live, sessionOpen, inFlight))}</summary>
     <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
+    ${telegramSwitch(run)}
     ${live && !inFlight ? `<p class="dim">${e(t('run.session_after_hint'))}</p>` : ''}
     ${live ? `<form onsubmit="return cchubSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>` : ''}
     ${inFlight
@@ -1161,6 +1162,23 @@ export async function pageRun(req, res, url, id) {
   <h3>${e(t('run.events'))}</h3>${runEvents(id)}
   <h3>${e(t('run.log'))}</h3>${logHtml}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, titel, '/', body, run.repo_id, true))
+}
+
+/**
+ * The Telegram checkbox, right under the terminal — because that is where the
+ * operator stands when the box matters: reading the report, typing the rest
+ * into the session, and NOT wanting the phone to ring about a follow-up they
+ * are watching land. Ticked for every run by default; unticking silences every
+ * Telegram message about THIS run (reports, follow-ups, alarms, incidents) and
+ * nothing else — the integration and the flows are not touched. Not part of the
+ * run-detail fragment, like the terminal it sits under: a live update must not
+ * flip a box the operator just clicked.
+ */
+export function telegramSwitch(run) {
+  const on = run.telegram_on !== 0
+  return `<label class="chk telegram-switch" id="telegram-switch">
+    <input type="checkbox" id="telegram-on" data-run="${e(run.id)}"${on ? ' checked' : ''}>
+    ${e(t('run.telegram_on'))} <span class="dim">${e(t('run.telegram_on_hint'))}</span></label>`
 }
 
 /**

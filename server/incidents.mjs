@@ -276,8 +276,21 @@ async function telegramVorfall(row, ereignis, grund = null) {
   // The evidence ABOVE the bookkeeping: it is what answers "is this real?".
   if (row.beleg) zeilen.push(`Evidence: ${row.beleg}`)
   zeilen.push(`Source: ${row.quelle} · since ${fmtDbUtc(row.erst_gesehen)} · last ${fmtDbUtc(row.zuletzt_gesehen)} · ${row.anzahl}×${row.wieder_geoeffnet ? ` · reopened ${row.wieder_geoeffnet}×` : ''}`)
+  if (telegramMuted(row.run_id)) { addEvent(row.run_id, 'telegram_muted', { type: `incident:${row.typ}` }); return }
   const ok = await notify(zeilen.join('\n'), row.run_id ? detailUrl(row.run_id) : detailUrl(null))
   if (row.run_id) addEvent(row.run_id, 'telegram_sent', { type: `incident:${row.typ}`, delivered: ok })
+}
+
+/**
+ * The run's Telegram checkbox (`runs.telegram_on`, the one under its terminal)
+ * silences the alarms ABOUT that run too — an operator who unticked it is
+ * sitting in front of the session and sees what happens there. A global
+ * incident carries no run and is never muted by it. Read here rather than
+ * through reports.mjs, because that module imports this one.
+ */
+function telegramMuted(runId) {
+  if (!runId) return false
+  return db.prepare('SELECT telegram_on FROM runs WHERE id=?').get(runId)?.telegram_on === 0
 }
 
 /** The counterpart of the alarm: an announced incident that cleared itself. */
@@ -291,6 +304,7 @@ async function telegramAufgeloest(row, grund) {
     zeilen.push('Global (provider pulse).')
   }
   zeilen.push(`Recovered on its own (${grund}) · ${row.anzahl}× observed, last ${fmtDbUtc(row.zuletzt_gesehen)} · nothing left to do.`)
+  if (telegramMuted(row.run_id)) { addEvent(row.run_id, 'telegram_muted', { type: `incident_resolved:${row.typ}` }); return }
   const ok = await notify(zeilen.join('\n'), row.run_id ? detailUrl(row.run_id) : detailUrl(null))
   if (row.run_id) addEvent(row.run_id, 'telegram_sent', { type: `incident_resolved:${row.typ}`, delivered: ok })
 }

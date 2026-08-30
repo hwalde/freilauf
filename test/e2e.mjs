@@ -3795,6 +3795,107 @@ try {
     await formular(`/api/runs/${j.runId}/kill`, {})
   })
 
+  // ---- 8b. follow-up reports: a finished run reports again ----
+  let followed = null
+  await pruefe('a done report from a finished run is a follow-up: merged again, announced as such, flows fired again', async () => {
+    await repoMerge({ merge_mode: 'hub' })
+    followed = await mergeRun()
+    await writeAndCommit(followed.wt, 'first.txt', 'first\n', 'E2E: the first report')
+    await sendReport(followed.id, { kind: 'done', text: 'The task is done.' })
+    await warteAuf(() => lauf(followed.id).merge_status === 'merged', { was: 'merged the first time', timeoutMs: 30_000 })
+    const firstSha = lauf(followed.id).merged_sha
+    // The first merge's flow run is dispatched a tick after the merge — wait
+    // for it, or the count below would compare against a number read too early.
+    await warteAuf(() => flowRunsFor(followed.id).length === 1, { was: 'the first merge fired the flow', timeoutMs: 15_000 })
+    gleich(lauf(followed.id).telegram_on, 1, 'Telegram is on for every run from the start')
+
+    // The operator typed more into the session, the agent did it and reports again.
+    await writeAndCommit(followed.wt, 'second.txt', 'second\n', 'E2E: the follow-up')
+    const antwort = await sendReport(followed.id, { kind: 'done', text: 'Added the second file, as asked.' })
+    wahr(antwort.ok, 'a finished run is not refused')
+    enthaelt(antwort.message ?? '', 'cc-hub is merging it into main', 'the same answer a first report gets')
+    await warteAuf(() => lauf(followed.id).followup_open === 0 && lauf(followed.id).merged_sha !== firstSha,
+      { was: 'the follow-up is merged', timeoutMs: 30_000 })
+    const r = lauf(followed.id)
+    gleich(r.status, 'done', 'still done — the status is the first attempt\'s truth')
+    gleich(r.followups, 1, 'one follow-up counted')
+    gleich(r.merge_status, 'merged', 'merged')
+    gleich(r.finish_state, null, 'and out of the gate')
+    wahr((await g(REPO, 'merge-base', '--is-ancestor', r.merged_sha, 'origin/main')).ok, 'the follow-up commit is on origin/main')
+    enthaelt(r.report_md, 'The task is done.', 'the first report is kept')
+    enthaelt(r.report_md, '## Follow-up report #1', 'and the follow-up stands under its own heading')
+    enthaelt(r.report_md, 'Added the second file', 'with its text')
+    gleich(r.followup_md, 'Added the second file, as asked.', 'the latest follow-up on its own')
+    const ev = ereignisse(followed.id)
+    enthaelt(ev.join(','), 'followup_reported', 'recorded on the way in')
+    enthaelt(ev.join(','), 'followup_done', 'and on the way out')
+    gleich(ev.filter(k => k === 'telegram_sent:done').length, 1, 'the done message was sent once, for the first report')
+    gleich(ev.filter(k => k === 'telegram_sent:followup').length, 1, 'and the follow-up is its own message')
+    gleich(ev.filter(k => k === 'merged').length, 2, 'two merges, one per report')
+    gleich(ev.filter(k => k === 'finish_started').length, 2, 'and the gate ran once per report')
+    await warteAuf(() => flowRunsFor(followed.id).length === 2,
+      { was: 'the run_merged flow fires again for the follow-up\'s merge', timeoutMs: 15_000 })
+    gleich(triggerOf(flowRunsFor(followed.id).at(-1)).merge.sha, r.merged_sha, 'with the new merge\'s facts')
+    gleich(triggerOf(flowRunsFor(followed.id).at(-1)).run.followups, 1, 'and the run info says it is a follow-up')
+    gleich(triggerOf(flowRunsFor(followed.id).at(-1)).run.last_report, 'Added the second file, as asked.', 'last_report is the follow-up text')
+  })
+
+  await pruefe('a follow-up without new commits is reported, not merged — and a dirty one is held like a first report', async () => {
+    const antwort = await sendReport(followed.id, { kind: 'done', text: 'Here is the list you asked for: a, b, c.' })
+    wahr(antwort.ok, 'accepted')
+    enthaelt(antwort.message ?? '', 'follow-up report #2 received', 'the answer says which report it was')
+    enthaelt(antwort.message ?? '', 'Nothing to merge', 'and that there was nothing to merge')
+    const r = lauf(followed.id)
+    gleich(r.followups, 2, 'counted')
+    gleich(r.followup_open, 0, 'closed at once')
+    gleich(r.finish_state, null, 'no gate left open')
+    gleich(ereignisse(followed.id).filter(k => k === 'telegram_sent:followup').length, 2, 'announced anyway — the operator asked for it')
+    // Dirty: the same M1, and the run stays where it is until the agent commits.
+    writeFileSync(join(followed.wt, 'half.txt'), 'not committed\n')
+    const held = await sendReport(followed.id, { kind: 'done', text: 'done with the third thing' })
+    enthaelt(held.message ?? '', 'NOT finished yet', 'the same answer as for a first report')
+    enthaelt(held.message ?? '', 'half.txt', 'and the file is named')
+    gleich(lauf(followed.id).finish_state, 'awaiting_commit', 'in the gate')
+    gleich(lauf(followed.id).followup_open, 1, 'as a follow-up')
+    gleich(lauf(followed.id).status, 'done', 'and the status is untouched')
+    await g(followed.wt, 'add', '-A')
+    await g(followed.wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: the third thing')
+    await integrate.integrateTick()
+    await warteAuf(() => lauf(followed.id).followup_open === 0, { was: 'the follow-up is merged once clean', timeoutMs: 30_000 })
+    gleich(lauf(followed.id).followups, 3, 'third follow-up')
+    gleich(ereignisse(followed.id).filter(k => k === 'followup_reported').length, 3, 'reported three times — the re-report after M1 is not a fourth')
+  })
+
+  await pruefe('the checkbox under the terminal silences Telegram for the run and nothing else', async () => {
+    const html = await (await hol(`/runs/${followed.id}`)).text()
+    enthaelt(html, 'id="telegram-on"', 'the box is on the detail page')
+    enthaelt(html, `data-run="${followed.id}"`, 'and knows its run')
+    wahr(/id="telegram-on"[^>]*checked/.test(html), 'ticked by default')
+    const off = await (await formular(`/api/runs/${followed.id}/telegram`, { on: '0' })).json()
+    gleich(off.telegram_on, 0, 'switched off')
+    gleich(lauf(followed.id).telegram_on, 0, 'stored')
+    enthaelt(ereignisse(followed.id).join(','), 'telegram_off', 'and recorded')
+    falsch(/id="telegram-on"[^>]*checked/.test(await (await hol(`/runs/${followed.id}`)).text()), 'the page shows it unticked')
+    const before = ereignisse(followed.id).filter(k => k === 'telegram_sent:followup').length
+    await writeAndCommit(followed.wt, 'quiet.txt', 'quiet\n', 'E2E: a quiet follow-up')
+    await sendReport(followed.id, { kind: 'done', text: 'quietly done' })
+    await warteAuf(() => lauf(followed.id).followup_open === 0 && lauf(followed.id).followups === 4,
+      { was: 'the quiet follow-up is merged', timeoutMs: 30_000 })
+    wahr((await g(REPO, 'merge-base', '--is-ancestor', lauf(followed.id).merged_sha, 'origin/main')).ok,
+      'merged all the same — the box is about Telegram only')
+    gleich(ereignisse(followed.id).filter(k => k === 'telegram_sent:followup').length, before, 'no Telegram')
+    enthaelt(ereignisse(followed.id).join(','), 'telegram_muted', 'but it is written down that there was none')
+    const on = await (await formular(`/api/runs/${followed.id}/telegram`, { on: '1' })).json()
+    gleich(on.telegram_on, 1, 'and back on')
+    gleich(lauf(followed.id).telegram_on, 1, 'stored')
+    // A help call from a finished run reaches the operator too, and changes nothing about the run.
+    const help = await sendReport(followed.id, { kind: 'help', text: 'Which of the two?' })
+    wahr(help.ok, 'help from a finished run is accepted')
+    gleich(lauf(followed.id).status, 'done', 'the status stays')
+    gleich(lauf(followed.id).help_text, 'Which of the two?', 'the question is stored')
+    gleich(ereignisse(followed.id).filter(k => k === 'telegram_sent:help').length, 1, 'and sent')
+  })
+
   // ---- 9. with merge_mode off nothing of this happens ----
   await pruefe('with the integration switched off a done report closes the run as it always did', async () => {
     await repoMerge({ merge_mode: 'off' })
@@ -3815,6 +3916,25 @@ try {
     const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
     enthaelt(html, 'data-merge-mode="off"', 'the form says so too')
     enthaelt(html, 'data-hub-only hidden', 'and the keep box is not even offered')
+
+    // …and a follow-up with the integration off is a report and nothing more:
+    // appended, announced, the flows fired again — no gate, no merge.
+    const { flowsTick } = await import('../server/flows/triggers.mjs')
+    await flowsTick()
+    gleich(lauf(l.id).flow_dispatched, 1, 'the first end was dispatched')
+    const again = await sendReport(l.id, { kind: 'done', text: 'and the follow-up, off mode' })
+    wahr(again.ok, 'accepted')
+    enthaelt(again.message ?? '', 'follow-up report #1 received', 'the agent is told what it was')
+    const f = lauf(l.id)
+    gleich(f.status, 'done', 'done stays done')
+    gleich(f.followups, 1, 'counted')
+    gleich(f.finish_state, null, 'no gate')
+    gleich(f.merge_status, null, 'no verdict')
+    enthaelt(f.report_md, 'plain old done', 'the first report')
+    enthaelt(f.report_md, '## Follow-up report #1', 'and the follow-up under it')
+    gleich(ereignisse(l.id).filter(k => k === 'telegram_sent:followup').length, 1, 'announced')
+    await flowsTick()
+    gleich(lauf(l.id).flow_dispatched, 1, 'the "run finished" triggers were evaluated again')
   })
 
   // ------------------------------------------------------------------

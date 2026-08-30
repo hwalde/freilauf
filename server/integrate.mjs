@@ -34,7 +34,7 @@ import { homedir } from 'node:os'
 import db, { getRepo, getRun, addEvent, getSetting } from './db.mjs'
 import { RUNS_DIR, kurzid, sh, sendToSession, parseDbUtc } from './util.mjs'
 import { harnessOwnedPaths, applyExtras } from './runner.mjs'
-import { notifyRun, doneText } from './reports.mjs'
+import { notifyRun, doneText, completeFollowUp } from './reports.mjs'
 import { vorfallMelden, offeneVorfaelle, vorfallVerwerfen } from './incidents.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { fallbackTitle, TITLE_MAX } from './title.mjs'
@@ -300,6 +300,8 @@ async function tipOf(run) {
   const r = await sh('git', ['-C', run.workdir_effective, 'rev-parse', 'HEAD'])
   return r.ok ? r.stdout.trim() : null
 }
+/** The same, for reports.mjs: "has the worktree moved past what was merged?" */
+export const tipOfRun = tipOf
 
 /**
  * Where the run started. Normally recorded at launch; a run from before that
@@ -448,6 +450,10 @@ export async function runFinishCheck(run, { force = false } = {}) {
   if (!tip) return { state: 'error', files: [], error: 'worktree gone' }
   const base = await baseShaOf(run, repo, tip)
   if (base && tip === base) return { state: 'nothing', files: [], tip }
+  // A follow-up report (reports.mjs) whose worktree still stands where the last
+  // integration left it: nothing new to merge. Without this the tip would be
+  // dry-run, found mergeable and "merged" a second time as an ancestor.
+  if (run.merged_sha && tip === run.merged_sha) return { state: 'nothing', files: [], tip }
 
   const unchanged = !force && lastTip.get(run.id) === tip
   if (unchanged && run.finish_state === 'awaiting_merge') return { state: 'awaiting_merge', files: [], tip, stale: true }
@@ -640,6 +646,12 @@ async function applyCheckResult(run, repo, result, via) {
     }
     case 'nothing': {
       setFinishState(run.id, null)
+      // A follow-up that brought no commits leaves the run's merge status as it
+      // is: its earlier work IS merged, and "nothing" would say the opposite.
+      if (run.followup_open) {
+        addEvent(run.id, 'merge_nothing', { followup: true })
+        return { hold: false, mergeLine: 'Nothing to merge (no new commits)' }
+      }
       db.prepare(`UPDATE runs SET merge_status='nothing' WHERE id=?`).run(run.id)
       addEvent(run.id, 'merge_nothing', {})
       return { hold: false, mergeLine: 'Nothing to merge (no commits)' }
@@ -661,9 +673,12 @@ async function applyCheckResult(run, repo, result, via) {
  * reached from the loop, the same three things have to happen here.
  */
 async function closeKept(runId, repo, mergeLine) {
+  nextCheckAt.delete(runId)
+  // A follow-up that kept its work on the branch: the run was done already —
+  // only the follow-up is closed, announced as such (reports.mjs).
+  if (getRun(runId)?.followup_open) return completeFollowUp(runId, { mergeLine, merged: false })
   db.prepare(`UPDATE runs SET status='done', ended_at=COALESCE(ended_at, datetime('now')) WHERE id=?`).run(runId)
   addEvent(runId, 'done')
-  nextCheckAt.delete(runId)
   const run = getRun(runId)
   await notifyRun(runId, 'done', doneText(run, run.report_md, mergeLine),
     { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: run.report_md ?? '' })
@@ -938,17 +953,30 @@ async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = nu
     ? (await sh('git', ['-C', dir, 'diff', '--name-only', `${beforeSha}..${mergedSha}`]))
       .stdout.split('\n').map(x => x.trim()).filter(Boolean)
     : []
+  // Read BEFORE the update: whether this integration belongs to a follow-up
+  // report is a fact about the run as it stood when the merge started, and a
+  // follow-up's run is 'done' on both sides of the update. A failed run whose
+  // work is merged by hand ("Merge now") is deliberately NOT a follow-up — that
+  // is why the column exists instead of a guess from the status.
+  const followUp = !!getRun(runId)?.followup_open
   db.prepare(`UPDATE runs SET merge_status='merged', merged_sha=?, merged_at=datetime('now'),
-              finish_state=NULL, status='done', ended_at=COALESCE(ended_at, datetime('now')) WHERE id=?`)
+              finish_state=NULL, status=CASE WHEN followup_open=1 THEN status ELSE 'done' END,
+              ended_at=COALESCE(ended_at, datetime('now')) WHERE id=?`)
     .run(tip, runId)
-  addEvent(runId, 'merged', already ? { already: true, sha: tip, files } : { sha, files })
+  addEvent(runId, 'merged', already ? { already: true, sha: tip, files, followup: followUp } : { sha, files, followup: followUp })
   nextCheckAt.delete(runId)
   lastTip.delete(runId)
 
   const run = getRun(runId)
   const line = `Merged into ${repo.base_branch}: ${String(tip).slice(0, 7)}`
-  await notifyRun(runId, 'done', doneText(run, run.report_md, line),
-    { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: run.report_md ?? '' })
+  if (followUp) {
+    // "FOLLOW-UP REPORT #n" instead of a second "Done" — and the flows fire
+    // again, the merged ones included (reports.mjs, completeFollowUp).
+    await completeFollowUp(runId, { mergeLine: line, merged: true })
+  } else {
+    await notifyRun(runId, 'done', doneText(run, run.report_md, line),
+      { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: run.report_md ?? '' })
+  }
 
   // A conflict run works FOR another run: the result counts for both, and the
   // original — which has been sitting in 'resolving' without a done message —
@@ -961,19 +989,24 @@ async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = nu
       // The same payload the original would have carried had it merged itself:
       // whatever reads a merge — "main has moved", the flow trigger — must not
       // have to care which run happened to carry it over the line.
-      addEvent(orig.id, 'merged', { sha: tip, files, by_resolver: runId })
+      addEvent(orig.id, 'merged', { sha: tip, files, by_resolver: runId, followup: !!orig.followup_open })
       closeMergeIncidents(orig.id)
       const fresh = getRun(orig.id)
-      await notifyRun(orig.id, 'done', doneText(fresh, fresh.report_md,
-        `Merged into ${repo.base_branch}: ${String(tip).slice(0, 7)} (by conflict run ${kurzid(runId)})`),
-      { fileName: `report-${orig.id.slice(0, 8)}.md`, fileContent: fresh.report_md ?? '' })
+      const origLine = `Merged into ${repo.base_branch}: ${String(tip).slice(0, 7)} (by conflict run ${kurzid(runId)})`
+      if (orig.followup_open) {
+        await completeFollowUp(orig.id, { mergeLine: origLine, merged: true })
+      } else {
+        await notifyRun(orig.id, 'done', doneText(fresh, fresh.report_md, origLine),
+          { fileName: `report-${orig.id.slice(0, 8)}.md`, fileContent: fresh.report_md ?? '' })
+      }
     }
   }
   closeMergeIncidents(runId)
 
   if (!already && mergedSha && dir) await notifyBaseMoved(repo, run, { files, mergedSha })
 
-  // Flows see a run whose work really is on the base branch.
+  // Flows see a run whose work really is on the base branch. (A follow-up's
+  // merge was already dispatched by completeFollowUp; a second tick is idle.)
   import('./flows/triggers.mjs').then(m => m.flowsTick()).catch(e => console.error('[flows]', e.message))
 }
 
@@ -1078,7 +1111,10 @@ export async function escalate(runId, reason) {
   const dirty = await dirtyFiles(run, repo)
 
   if (wasWaiting) {
-    db.prepare(`UPDATE runs SET finish_state=NULL, status='done',
+    // A follow-up keeps the status the run already had: a 'failed' run whose
+    // follow-up got stuck must not come out of it as 'done'.
+    db.prepare(`UPDATE runs SET finish_state=NULL,
+                status=CASE WHEN followup_open=1 THEN status ELSE 'done' END,
                 ended_at=COALESCE(ended_at, datetime('now')) WHERE id=?`).run(runId)
     // The run really ended here, so what hangs on its end has to fire — the
     // ordinary 'done' path does this too.
@@ -1207,9 +1243,16 @@ async function blockRun(runId, repo, status, text) {
     typ: 'merge_blocked', quelle: 'integrate', schwere: 'rot',
     beleg: `${status}: ${branchOf(getRun(runId))} → ${repo.base_branch}`,
   })
+  // Never deduplicated: a run blocked once, merged by hand, and blocked again
+  // on a FOLLOW-UP is blocked twice, and the second time is news too.
   await notifyRun(runId, 'merge_blocked', fill(text, {
     backup: ref ? `\nCommitted part backed up as origin/${ref}; the uncommitted files exist only in the worktree.` : '',
-  }))
+  }), { dedupe: false })
+  // A blocked follow-up leaves the gate here. The block was just announced, so
+  // the follow-up itself stays quiet — but its flows fire, like at any end.
+  if (getRun(runId)?.followup_open) {
+    await completeFollowUp(runId, { mergeLine: `Not merged (${status})`, merged: false, notify: false })
+  }
 }
 
 // ------------------------------------------------------------- conflict runs
@@ -1490,7 +1533,7 @@ export function skipMerge(runId) {
 /** Retry clears every trace of the integration — the run starts over. */
 export function resetIntegration(runId) {
   db.prepare(`UPDATE runs SET finish_state=NULL, finish_started_at=NULL, merge_status=NULL,
-              merged_sha=NULL, merged_at=NULL, resolver_run_id=NULL WHERE id=?`).run(runId)
+              merged_sha=NULL, merged_at=NULL, resolver_run_id=NULL, followup_open=0 WHERE id=?`).run(runId)
   nextCheckAt.delete(runId)
   lastTip.delete(runId)
   lastMessage.delete(runId)
