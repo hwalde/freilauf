@@ -21,6 +21,11 @@ const execFileAsync = promisify(execFile)
 const LISTE_MS = 6 * 60 * 60 * 1000   // model lists rarely change
 const ENDPUNKTE_MS = 15 * 60 * 1000   // serving providers fluctuate more often
 const HARNESS_MS = 24 * 60 * 60 * 1000 // effort levels only change on CLI updates
+// A coding agent's own credential store: cheap to read, but it changes the
+// moment the operator logs the CLI in, and the Plugins page is exactly where
+// they would go to look afterwards. Five minutes is short enough that "I just
+// added it" is not contradicted for long.
+const OWN_CRED_MS = 5 * 60 * 1000
 
 /**
  * Which providers can a harness offer HERE and NOW? Capability comes from the
@@ -43,9 +48,39 @@ export function providerFuerHarness(harness) {
   for (const id of plugin.providers ?? []) {
     const keyFree = (plugin.keyFreeProviders ?? []).includes(id)
     if (!keyFree && !pluginHasCredential(id)) continue
-    out.push({ id, label: providerLabel(id), ...(keyFree ? { hinweisKey: 'provider.keyfree' } : {}) })
+    // The hint says what it MEANS for the operator, not by which mechanism it
+    // comes about: "works without an own key" read like a fault report next to
+    // a provider that was working perfectly well. The Plugins page can say more
+    // than this (it asks the coding agent what it really holds); a dropdown
+    // entry has room for the consequence and nothing else.
+    out.push({ id, label: providerLabel(id), ...(keyFree ? { hinweisKey: 'provider.no_key_needed' } : {}) })
   }
   return out
+}
+
+/**
+ * Which model providers does this coding agent hold credentials for ITSELF?
+ *
+ * The plugin capability (`ownCredentials(ctx)`, see server/harnesses/opencode.mjs
+ * and docs/plugins.md) is optional, may probe the machine, and answers `null`
+ * for "could not be established" — which the UI must never render as a claim.
+ * Callers get exactly those three answers back: `null` (unknown, fall back to
+ * the declared `keyFreeProviders`), `[]` (asked, holds none) or the ids.
+ *
+ * Cached here rather than in the plugin, the way `effortLevels()` already is:
+ * a plugin file may not import this module, and the page asks once per card.
+ * A probe that throws is an unknown answer, never a failed page.
+ */
+export async function harnessOwnCredentials(harness) {
+  const plugin = getHarness(harness)
+  if (typeof plugin?.ownCredentials !== 'function') return null
+  // Wrapped in an object because `holen()` treats a cached null as "nothing
+  // cached" — the unknown answer would otherwise re-probe on every render.
+  const r = await holen(`owncreds:${plugin.id}`, OWN_CRED_MS, async () => {
+    const ids = await plugin.ownCredentials(pluginCtx(plugin.id))
+    return { ids: Array.isArray(ids) ? ids.map(String) : null }
+  })
+  return r.liste?.ids ?? null
 }
 
 // ---------------- cache infrastructure ----------------

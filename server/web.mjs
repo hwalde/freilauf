@@ -130,8 +130,16 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'POST' && path === '/telegram-setup/chat') return telegramChatSave(req, res, url, formBody)
 
   // --- Welcome wizard ---
-  // Reachable whatever `welcome_hide` says, and it never redirects to itself:
-  // the redirect below is the only place that sends anybody here.
+  // Reachable whatever the two wizard flags say, and it never redirects to
+  // itself: the redirect below is the only place that sends anybody here.
+  //
+  // The page has two modes and decides between them itself (welcome.mjs,
+  // `welcomeLocked`): while the redirect below would send a browser here and the
+  // wizard has never been walked to its end (`welcome_done`), it renders in its
+  // own minimal shell with no navigation and no way out but the one it offers —
+  // otherwise it is an ordinary page inside `layout()`. Lock-in and forced
+  // redirect are therefore the same condition, which is what keeps the hub from
+  // ever locking somebody into a page it did not send them to.
   if (req.method === 'GET' && path === '/welcome') return pageWelcome(req, res, url)
   if (req.method === 'POST' && path === '/welcome/hello') return welcomeHello(req, res, url, formBody)
   if (req.method === 'POST' && path === '/welcome/scan') return welcomeScan(req, res, url, formBody)
@@ -145,7 +153,12 @@ async function dispatch(req, res, url, path, formBody) {
   // it. Three fences, and each of them is load-bearing:
   //   - only a BROWSER NAVIGATION (`wantsHtml`) — a fragment fetch or an API
   //     caller asking for `/` must never be answered with a redirect to HTML;
-  //   - only while `welcome_hide` is unset (the checkbox on every wizard step);
+  //   - only while `welcome_hide` is unset — the checkbox, which lives on the
+  //     wizard's LAST step while somebody is being walked through it (the offer
+  //     to leave belongs at the end) and on every step once it is an ordinary
+  //     page. Finishing pre-ticks it, so a completed setup stops greeting;
+  //     `welcome_done` records the finishing itself and is what unlocks the
+  //     page, deliberately a different statement from "stop sending me here";
   //   - `?welcome=skip` is the wizard's own "Skip for now" coming back, and it
   //     marks the browser session so the link cannot bounce into a loop.
   if (req.method === 'GET' && path === '/') {

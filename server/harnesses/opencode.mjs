@@ -5,9 +5,33 @@
 // through without an own key) and OpenRouter (needs a key). Effort is passed
 // via OPENCODE_CONFIG_CONTENT with agent.build.{model,variant} — the variant
 // only takes effect when the model is set in the SAME block.
-import { getProvider } from '../providers/index.mjs'
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { HTTP_5XX } from './patterns.mjs'
 import { runCli, cliFailure, cliLines, ndjson } from './cli-llm.mjs'
+
+// A model provider's descriptor — never through a static import.
+// `../providers/index.mjs` re-exports the plugin registry, and the registry's
+// module body builds `{claude, opencode, …}` out of THIS file: importing it up
+// here makes this plugin unimportable on its own (measured: `ReferenceError:
+// Cannot access 'opencode' before initialization`), which breaks the contract
+// docs/plugins.md and cli-llm.mjs both state. Two ways to ask instead:
+//
+//   providerOf(ctx, id)       synchronous, so only the injected context can
+//                             answer it. Without a context the answer is null
+//                             and the caller falls back to the provider id.
+//   providerLate(ctx, id)     where an await is allowed: the context first, and
+//                             otherwise the registry through a LAZY import,
+//                             which resolves fine because by call time every
+//                             module has evaluated.
+const providerOf = (ctx, id) => ctx?.provider?.(id) ?? null
+
+async function providerLate(ctx, id) {
+  const p = providerOf(ctx, id)
+  if (p) return p
+  try { return (await import('../providers/index.mjs')).getProvider(id) } catch { return null }
+}
 
 // The default agent of opencode; the model/variant choice lives under this key.
 // 'opencode debug config' has no own entry here, the status line shows "Build".
@@ -46,7 +70,59 @@ const plugin = {
   // Providers that work WITHOUT an own key: opencode brings its own access for
   // DeepSeek and the free Zen models (measured — both runs went through).
   // Warning without a key would be a false alarm there.
+  //
+  // This list is a DECLARATION, and it is only the fallback: what opencode
+  // really holds is asked of opencode itself in `ownCredentials()` below. The
+  // list stays because it is what `modelArgs()` decides "this run is missing a
+  // key" on, on the launch path, where nothing may be probed.
   keyFreeProviders: ['opencode-zen', 'deepseek'],
+
+  /**
+   * Which model providers has opencode ITSELF been given credentials for?
+   *
+   * The hub used to answer this out of `keyFreeProviders` alone and print
+   * "works without an own key" next to a provider — a guess, and one that reads
+   * like a fault report rather than an answer. opencode knows the truth, so it
+   * is asked.
+   *
+   * **The credential store is read, not `opencode auth list`.** Both were
+   * measured. The command prints a boxed TUI listing with the vendors' DISPLAY
+   * names ("DeepSeek") and ANSI colour codes around them, so using it would mean
+   * matching prose back onto provider ids and re-doing that on every wording
+   * change; it also costs a process. The file is keyed by opencode's own
+   * provider id — exactly what `ocPrefix` already maps onto — so the mapping is
+   * the one the rest of this plugin uses anyway. The price is that the path is
+   * opencode's internal one, which is why every failure here is `null`:
+   *
+   *   null      the question could not be answered (no file, no permission, a
+   *             shape this code does not recognise). The caller falls back to
+   *             `keyFreeProviders` and NEVER renders "unknown" as a claim.
+   *   []        opencode was asked and holds no credentials at all.
+   *   [ids…]    the providers of THIS plugin opencode has its own access data
+   *             for.
+   *
+   * Only ids and nothing else leave this function. The file holds the keys
+   * themselves; a value must never travel towards a page.
+   */
+  async ownCredentials(ctx = null) {
+    const env = ctx?.env ?? process.env
+    const base = env.XDG_DATA_HOME || join(env.HOME || homedir(), '.local', 'share')
+    let raw
+    try {
+      raw = JSON.parse(readFileSync(join(base, 'opencode', 'auth.json'), 'utf8'))
+    } catch {
+      return null      // not installed, never logged in, unreadable — unknown
+    }
+    // A shape that is not "provider id → entry" is a version this code does not
+    // know. Answering "nothing configured" for it would be a confident lie.
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+    const out = []
+    for (const id of plugin.providers) {
+      const entry = raw[(await providerLate(ctx, id))?.ocPrefix ?? id]
+      if (entry && typeof entry === 'object') out.push(id)
+    }
+    return out
+  },
 
   pulseId: (run) => run.provider ?? null,
   pulseTargets: {},
@@ -144,14 +220,21 @@ const plugin = {
       args.push('--model', run.model)
       return { args, fehlt }
     }
-    const prov = getProvider(run.provider)
+    // This one is SYNCHRONOUS, so the lazy import the async paths use is not
+    // available: without a context there is no provider descriptor at all, and
+    // the two fallbacks below (the provider id as the opencode prefix, no
+    // declared variable names) are what a context-less call gets. That is a
+    // degradation and not a lie — `runner.mjs`, the only caller that launches a
+    // run, always passes one; a one-argument call is a plugin author probing
+    // the descriptor, and it must answer rather than throw.
+    const prov = providerOf(ctx, run.provider)
     args.push('--model', `${prov?.ocPrefix ?? run.provider}/${run.model}`)
 
     // The credential, resolved the way the OPERATOR configured it: a value
     // stored for the provider, an environment variable they named for it, or
     // the provider's own declared variable — `ctx.secret()` answers all three
-    // in that order (server/plugins/store.mjs). Without a context this falls
-    // back to the plain environment read, which is what the unit suite passes.
+    // in that order (server/plugins/store.mjs). Without a context there is
+    // neither a secret nor a list of declared names, so no key travels.
     //
     // It has to travel as `--env` because a tmux session inherits nothing: a
     // name that is not passed here does not exist over there. Under WHICH name

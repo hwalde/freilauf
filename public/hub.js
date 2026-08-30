@@ -271,6 +271,42 @@
     llmLoadModels(sel)
   })
 
+  // ---- a credential: show only the field the chosen mode needs ----
+  //
+  // "Where the key comes from" is a dropdown with two answers, and the block
+  // used to show BOTH fields under it whatever one picked — so half of it was
+  // always asking for something that would be ignored, and picking "stored in
+  // cc-hub" left a box labelled "Name of the environment variable" underneath.
+  //
+  // Hidden AND disabled, the same pair as the OpenRouter pin above: a field one
+  // cannot see must not still submit. The server renders the correct state
+  // already (server/plugins/web.mjs) — this only keeps it in step while the
+  // dropdown is used.
+  //
+  // Selected by FIELD NAME rather than by a data attribute, because the same
+  // block is rendered by two modules: the Plugins page and the Welcome wizard,
+  // which share the names `cred_<key>_mode|_env|_value` and nothing else. And
+  // delegated, because a wizard step is a fresh page and a plugin card can be
+  // re-rendered under it.
+  function credSync(sel) {
+    const prefix = sel.name.slice(0, -('_mode'.length))
+    const box = sel.closest('.cred') || sel.form || document
+    ;[['_env', 'env'], ['_value', 'value']].forEach(function (paar) {
+      const field = box.querySelector('[name="' + prefix + paar[0] + '"]')
+      if (!field) return
+      const passt = sel.value === paar[1]
+      const label = field.closest('label') || field
+      label.hidden = !passt
+      field.disabled = !passt
+    })
+  }
+  const CRED_MODE = 'select[name^="cred_"][name$="_mode"]'
+  document.querySelectorAll(CRED_MODE).forEach(credSync)
+  document.addEventListener('change', function (ev) {
+    const sel = ev.target && ev.target.closest && ev.target.closest(CRED_MODE)
+    if (sel) credSync(sel)
+  })
+
   // ---- toasts: say what happened without taking the page away ----
   // A Quick Run starts from wherever one is standing; being torn to a detail page
   // is exactly what would make it not quick. So the answer arrives here — with a

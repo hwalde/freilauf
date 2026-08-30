@@ -16,9 +16,16 @@ const plugin = {
     key: 'api_key',
     envKeys: ['OPENCODE_API_KEY', 'OPENCODE_ZEN_API_KEY'],
     labelKey: 'plugins.cred_api_key',
-    // Not required: Zen serves free models without a key, which is exactly why
-    // opencode lists it under `keyFreeProviders`.
+    // `required: false` is a STATEMENT here, not an omission, and the Plugins
+    // page reads it as one: an explicit false is what turns "no key found yet"
+    // — which reads like a fault on a provider that is working perfectly well —
+    // into "no key, and none is needed". Zen serves its free models to anyone,
+    // which is also why opencode lists it under `keyFreeProviders`.
     required: false,
+    // What the key actually buys, said next to the field that asks for it. The
+    // generic "this is optional" line comes from the page; this is the half
+    // only the plugin knows.
+    helpKey: 'plugins.cred_zen_optional',
   }],
   ocPrefix: 'opencode',
   mdKey: 'opencode',

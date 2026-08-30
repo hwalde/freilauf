@@ -119,12 +119,22 @@ export async function llmJson({
   let problems = []
 
   while (attempt <= retries) {
-    // A repair round quotes the previous answer and the exact complaint back;
-    // the strict block is repeated for a non-native source because the second
-    // attempt is a fresh, stateless call — there is no conversation to carry it.
+    // A repair round quotes the previous answer and the exact complaint back,
+    // and repeats BOTH the question and the strict block — the second attempt
+    // is a fresh, stateless call, so anything not repeated here is gone.
+    //
+    // The question used to be the one thing left out, and the failure that
+    // caused is the worst kind: the repair round still produced a
+    // schema-VALID answer, so the caller could not tell. Measured against a
+    // real model on 2026-08-30: asked "what is two plus two", told only that
+    // its first answer was not JSON, it came back with `{"answer": 0}` — a
+    // run title about nothing, an incident verdict about no incident, an
+    // `extract` with the right fields and invented values. A wrong answer that
+    // validates is worse than an honest failure, which is what the whole
+    // `{ok:false}` half of this module exists to give the caller.
     const userText = attempt === 0
       ? first
-      : [repairPrompt(text, problems), strict].filter(Boolean).join('\n\n')
+      : ['The question was:', base, repairPrompt(text, problems), strict].filter(Boolean).join('\n\n')
 
     let answer
     try {
