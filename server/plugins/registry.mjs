@@ -23,6 +23,7 @@ import cursor from '../harnesses/cursor.mjs'
 import openrouter from '../providers/openrouter.mjs'
 import deepseek from '../providers/deepseek.mjs'
 import opencodeZen from '../providers/opencode-zen.mjs'
+import telegram from '../notifiers/telegram.mjs'
 import { validateDescriptor, PLUGIN_ID_RE, PLUGIN_KINDS } from './manifest.mjs'
 
 /** Coding agent plugins, keyed by id. Mutable — external packages join here. */
@@ -35,17 +36,30 @@ export const PROVIDER_PLUGINS = {
   'opencode-zen': opencodeZen,
 }
 
+/**
+ * Notification channel plugins, keyed by id. Mutable, like the other two.
+ *
+ * Telegram is the only built-in one and is deliberately not special: the hub
+ * asks the facade (`server/notify.mjs`), the facade asks whoever is registered
+ * and configured, and an installation with nothing configured simply says
+ * nothing at all.
+ */
+export const NOTIFIER_PLUGINS = { telegram }
+
 // id -> { kind, source: 'builtin' | 'external', manifest, dir }
 const META = new Map()
 for (const id of Object.keys(HARNESS_PLUGINS)) META.set(id, { kind: 'harness', source: 'builtin', manifest: null, dir: null })
 for (const id of Object.keys(PROVIDER_PLUGINS)) META.set(id, { kind: 'provider', source: 'builtin', manifest: null, dir: null })
+for (const id of Object.keys(NOTIFIER_PLUGINS)) META.set(id, { kind: 'notifier', source: 'builtin', manifest: null, dir: null })
 
 // Load failures, id collisions and broken descriptors. Nothing here stops the
 // hub: one bad package must never cost the operator the other ones, so every
 // failure is collected and shown on the Plugins page instead of thrown.
 const ERRORS = []
 
-function bucket(kind) { return kind === 'harness' ? HARNESS_PLUGINS : PROVIDER_PLUGINS }
+const BUCKETS = { harness: HARNESS_PLUGINS, provider: PROVIDER_PLUGINS, notifier: NOTIFIER_PLUGINS }
+
+function bucket(kind) { return BUCKETS[kind] ?? PROVIDER_PLUGINS }
 
 /**
  * Record a load failure. `where` is what the operator can act on — a package
@@ -200,4 +214,15 @@ export function providerLabel(id) { return PROVIDER_PLUGINS[id]?.label ?? id }
  */
 export function providerHasKey(id, env = process.env) {
   return (getProvider(id)?.envKeys ?? []).some(name => !!env[name])
+}
+
+// ---------------- the notifier half ----------------
+
+export function notifierIds() { return Object.keys(NOTIFIER_PLUGINS) }
+export function getNotifier(id) { return NOTIFIER_PLUGINS[id] ?? null }
+export function notifierLabel(id) { return NOTIFIER_PLUGINS[id]?.label ?? id }
+
+/** The notifiers that bring a server-rendered setup wizard of their own. */
+export function notifiersWithSetup() {
+  return notifierIds().filter(id => typeof NOTIFIER_PLUGINS[id]?.setup?.render === 'function')
 }

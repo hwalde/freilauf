@@ -235,11 +235,14 @@ addColumn('runs', 'resolves_run_id', 'TEXT')     // set on a conflict run: the r
 addColumn('runs', 'followups', 'INTEGER NOT NULL DEFAULT 0')      // follow-up reports accepted so far
 addColumn('runs', 'followup_md', 'TEXT')                           // the latest follow-up's own text
 addColumn('runs', 'followup_open', 'INTEGER NOT NULL DEFAULT 0')  // 1 while a follow-up is in the gate / being merged
-// Telegram per run: the checkbox under the terminal. 0 silences every message
-// ABOUT this run (reports, alarms, incidents) — nothing else changes: the
-// integration, the flows and the events happen exactly as before.
+// Notifications per run: the checkbox under the terminal. 0 silences every
+// message ABOUT this run (reports, alarms, incidents), on every configured
+// channel — nothing else changes: the integration, the flows and the events
+// happen exactly as before. The column keeps its original name: renaming one
+// means rebuilding the table, and a stored name is not worth a migration (the
+// same rule that leaves `openrouter_min_eur` holding dollars).
 addColumn('runs', 'telegram_on', 'INTEGER NOT NULL DEFAULT 1')
-// Incidents: the delayed Telegram (notify_at = when the grace period ends and the
+// Incidents: the delayed notification (notify_at = when the grace period ends and the
 // alarm becomes due) and whether it was EVER announced (gemeldet_am) — the latter
 // decides whether an auto-resolve also announces the recovery (server/incidents.mjs).
 addColumn('incidents', 'notify_at', 'TEXT')

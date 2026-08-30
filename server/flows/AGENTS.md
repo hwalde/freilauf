@@ -53,7 +53,8 @@ objects as JSON, missing values as an empty string. Templates never throw.
 | `varschema.mjs` | pure: the **typed variable catalog** — which variables exist where, of which type, with which allowed values; plus the placement rules |
 | `steps.mjs` | **the step registry** — one entry per building block: designer metadata (`fields`), defaults, validation and `run()` |
 | `engine.mjs` | executes a definition: frame stack, persistence after every step, suspend/resume (`wait`, `delay`), stop |
-| `actions.mjs` | the production `api` object steps run against (tmux, Telegram, agent/run start, LLM, HTTP) — the only file with side effects |
+| `actions.mjs` | the production `api` object steps run against (tmux, notifications, agent/run start, LLM, HTTP) — the only file with side effects |
+| `aliases.mjs` | pure, import-free: step types that were renamed (`telegram` → `notify`) and `renameSteps()`. A leaf module because both `steps.mjs` and `db.mjs` need it and they cannot import each other |
 | `llm.mjs` | structured extraction via OpenRouter `json_schema` (`schemaFromFields`, `extractStructured`) |
 | `triggers.mjs` | `run_finished`/`run_merged`/`cron`/`manual`, `flowsForRun`, `flowsForMerge`, `flowsTick()` (dispatcher), `runFlowNow()` |
 | `web.mjs` | pages `/flows`, `/flows/edit`, `/flows/runs`, `/flows/runs/<id>`; API `/api/flows/*`, `/api/flow-runs/*` |
@@ -109,7 +110,8 @@ Steps never touch the database or tmux themselves — everything goes through
 | `shell_command` | runs a command on the hub machine as the hub's user. A non-zero exit code is a **result** (`vars.<out>.ok/exit_code/stdout/stderr`), not a failure of the step — only a command that could not run at all (no such working directory, spawn error, timeout) throws. With `detach` it is started in its own session (`setsid -f`) and the step ends at once with `{ ok, detached }` — see "Restarting the hub from a flow" |
 | `extract` | LLM fills user-defined fields from report / terminal log tail / claude transcript / custom text |
 | `for_each` | container: repeats its body per element of a list (`maxItems` caps it); the element is `vars.<itemVar>` |
-| `set_var`, `http_request`, `condition`, `switch_outcome`, `delay`, `stop`, `telegram`, `note` | as named |
+| `notify` | one message to the notification channels configured under Settings → Notifications, optionally with an attachment. With none configured it reports `not delivered` and the flow carries on — a hub that says nothing anywhere is a supported installation, not a failed step |
+| `set_var`, `http_request`, `condition`, `switch_outcome`, `delay`, `stop`, `note` | as named |
 
 Target selector (`send_message`, `kill_run`): `trigger_run`, `agent` (running runs
 of that agent), `repo`, `all_running`, `run_id` (template).
@@ -118,9 +120,22 @@ of that agent), `repo`, `all_running`, `run_id` (template).
 (claude's JSONL — what the agent said and did, not what the terminal drew; other
 harnesses have none, so it falls back to the log), `report_and_log`, `custom`.
 
-`telegram` links to the trigger run's detail page, otherwise to its own flow run.
+`notify` links to the trigger run's detail page, otherwise to its own flow run.
 Deliberately **not** through `notifyRun()`: that dedupe belongs to the watcher's
 alarms and would swallow a second flow message about the same run.
+
+**Its type used to be `telegram`, and a step's type is stored data** — it sits in
+`flows.definition` and in the definition snapshot every `flow_runs` row carries.
+So the rename is handled twice, and both halves are wanted: `renameSteps()`
+(`aliases.mjs`) rewrites a definition on the way OUT of the database, in
+`hydrate()` and in `hydrateRun()`, so the designer, the validator and the
+variable catalog only ever see today's name and the new one is written back the
+next time the flow is saved; and `STEP_MAP.telegram` is an alias of
+`STEP_MAP.notify`, so a definition that reaches the engine some other way — an
+older client posting one, a suspended run resumed from a row nobody rewrote —
+finds its step instead of failing with "unknown step type". The alias is
+deliberately **not** in `STEPS`: the toolbox offers one notify block, not two,
+and `stepsMeta()` is built from `STEPS`.
 
 ## Typed variables (`varschema.mjs`)
 
@@ -231,12 +246,13 @@ browser.
 
 **One step, and deliberately no condition after it.** The flow used to be three:
 pull the working checkout, branch on whether the pull worked, restart or send a
-Telegram message. Only the first two of those could ever report anything —
+message. Only the first two of those could ever report anything —
 whatever the restart does happens after the process running the flow is gone. So
 everything that has to be judged *after* the restart belongs in the script:
 `cchub-deploy` checks that the hub answers, rolls back to the previous commit if
-it does not, and writes to Telegram itself. See "Deploying: the service runs from
-its own checkout" in the root `AGENTS.md`.
+it does not, and notifies itself (through `bin/cc-notify`, so it reaches whatever
+channel the operator configured — and nothing at all when they configured none).
+See "Deploying: the service runs from its own checkout" in the root `AGENTS.md`.
 
 The command runs **as the hub's user on the hub machine**. That is nothing new
 (the hub starts coding agents with full shell access anyway), but it is said in

@@ -13,6 +13,7 @@
 // Side effects never happen here directly — everything goes through `api`, so the
 // engine stays testable and the coupling to the rest of the hub is one file.
 import { render, resolve, compare, OPS, varName, toList } from './template.mjs'
+import { STEP_ALIASES, renameSteps } from './aliases.mjs'
 import { placementErrors, definitionWarnings } from './varschema.mjs'
 import { RUN_DEF_FLOW_FIELDS, defFromFlowProps } from '../run-def.mjs'
 import { llmSources } from '../llm/sources.mjs'
@@ -290,18 +291,26 @@ export const STEPS = [
   },
 
   // ---------------- notify ----------------
+  //
+  // Channel-neutral: the step says something, the configured notifiers decide
+  // where. It used to be `type: 'telegram'` and that type string is stored in
+  // every saved flow definition, so the old name is still accepted — see
+  // `STEP_ALIASES` below.
   {
-    type: 'telegram', component: 'task', group: 'notify', output: true,
+    type: 'notify', component: 'task', group: 'notify', output: true,
     outputShape: { type: 'object', props: { delivered: { type: 'boolean' } } },
     fields: [
       { key: 'text', kind: 'textarea', required: true, placeholder: '🔁 {{trigger.run.agent_name}} finished: {{trigger.run.outcome}}' },
       { key: 'attachment', kind: 'textarea', placeholder: '{{trigger.run.report}} — sent as a file when non-empty' },
-      { key: 'outputVar', kind: 'text', default: 'telegram' },
+      { key: 'outputVar', kind: 'text', default: 'notify' },
     ],
     async run(props, ctx, api, info) {
-      const ok = await api.telegram(render(props.text, ctx), render(props.attachment, ctx),
+      const ok = await api.notify(render(props.text, ctx), render(props.attachment, ctx),
         { runId: ctx.trigger?.run?.id ?? null, flowRunId: info?.flowRunId ?? null })
-      return { msg: ok ? 'sent' : 'not delivered (token/chat missing or unreachable)', output: { delivered: ok } }
+      // "no notifier configured" is not a failure of the step: a hub that says
+      // nothing anywhere is a supported installation, and a flow that went red
+      // over it would be reporting the operator's own choice as a fault.
+      return { msg: ok ? 'sent' : 'not delivered (no notifier configured, or unreachable)', output: { delivered: ok } }
     },
   },
   {
@@ -313,6 +322,15 @@ export const STEPS = [
 
 export const STEP_MAP = Object.fromEntries(STEPS.map(s => [s.type, s]))
 export const GROUPS = ['agents', 'data', 'control', 'notify']
+
+// Renamed step types live in `aliases.mjs` — a leaf module, because
+// `flows/db.mjs` needs the same table and cannot import this file (steps.mjs →
+// run-def.mjs → flows/attach.mjs → flows/db.mjs would close a ring).
+//
+// The alias in STEP_MAP is deliberately NOT in `STEPS`: the toolbox must offer
+// one notify block, not two, and `stepsMeta()` is built from `STEPS`.
+for (const [from, to] of Object.entries(STEP_ALIASES)) STEP_MAP[from] = STEP_MAP[to]
+export { STEP_ALIASES, renameSteps }
 
 /** Defaults for a fresh step of this type (designer toolbox). */
 export function defaultProps(type) {

@@ -6,6 +6,7 @@
 // themselves (`merge_status`, `merged_sha`, `resolves_run_id`, …) belong to the
 // merge integrator and are only ever read here.
 import db, { getSetting } from '../db.mjs'
+import { renameSteps } from './aliases.mjs'
 import { randomUUID } from 'node:crypto'
 
 db.exec(`
@@ -128,7 +129,12 @@ function hydrate(row) {
   return {
     ...row,
     trigger: parse(row.trigger, { kind: 'manual' }),
-    definition: parse(row.definition, { properties: {}, sequence: [] }),
+    // Step types that were renamed are rewritten on the way OUT of the database
+    // (`renameSteps`), never with an UPDATE over every row: a rewrite that runs
+    // on read cannot half-fail, and a flow that is never opened again is never
+    // touched. It is written back in today's names the next time the flow is
+    // saved.
+    definition: renameSteps(parse(row.definition, { properties: {}, sequence: [] })),
   }
 }
 
@@ -191,12 +197,21 @@ export function deleteFlow(id) { db.prepare('DELETE FROM flows WHERE id = ?').ru
 export function toggleFlow(id) { db.prepare('UPDATE flows SET active = 1 - active WHERE id = ?').run(id) }
 
 // ---------------- flow runs ----------------
+
+/** The definition snapshot inside a flow run's state, with renamed steps. */
+function renameState(state) {
+  if (!state || typeof state !== 'object' || !state.definition) return state
+  return { ...state, definition: renameSteps(state.definition) }
+}
+
 function hydrateRun(row) {
   if (!row) return null
   return {
     ...row,
     context: parse(row.context, { trigger: {}, vars: {} }),
-    state: parse(row.state, { frames: [] }),
+    // The state carries the SNAPSHOT of the definition the run started with, so
+    // a run suspended before a step was renamed resumes with today's names too.
+    state: renameState(parse(row.state, { frames: [] })),
     log: parse(row.log, []),
   }
 }

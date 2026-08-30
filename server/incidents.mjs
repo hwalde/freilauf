@@ -3,8 +3,8 @@
 // An incident is ONE record per (run, type). It gets opened, keeps counting further
 // occurrences (anzahl, zuletzt_gesehen), can be resolved by a human — and REOPENS
 // when the problem occurs again after being resolved. Like a car alarm: you can turn
-// it off, but on the next break-in it wails again. Telegram fires on opening and on
-// every reopening, not on every single occurrence.
+// it off, but on the next break-in it wails again. The notification fires on opening
+// and on every reopening, not on every single occurrence.
 //
 // Every decision additionally lands in <run>/detektor.jsonl — so one can later trace
 // what was scanned, what matched and why something was (not) reported. Rate limits
@@ -13,11 +13,11 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { addEvent } from './db.mjs'
 import { RUNS_DIR, fmtDbUtc } from './util.mjs'
-import { notify, detailUrl } from './telegram.mjs'
+import { notify, notifyMuted, detailUrl } from './notify.mjs'
 import { TYP_TEXT } from './detect.mjs'
 
 /**
- * How long a red incident waits BEFORE Telegram fires. The delay is a grace
+ * How long a red incident waits BEFORE the notification fires. The delay is a grace
  * period in which the incident can resolve itself (the agent retries and gets
  * through, the hit was the agent's own probe on its screen) — the operator then
  * hears nothing at all instead of an alarm that answered itself. Genuinely
@@ -92,8 +92,8 @@ export function vorfall(id) { return db.prepare('SELECT * FROM incidents WHERE i
  *   'neu' | 'wieder' | 'zusatz' | 'dedupe' | 'eskaliert'
  *
  * - Open incident of the same type: anzahl++, zuletzt_gesehen; an upgrade
- *   yellow→red (e.g. the hook confirms what the log scanner only suspected) notifies Telegram.
- * - Resolved incident and the occurrence lies AFTER the resolution: reopen + Telegram.
+ *   yellow→red (e.g. the hook confirms what the log scanner only suspected) notifies.
+ * - Resolved incident and the occurrence lies AFTER the resolution: reopen + notify.
  * - Occurrence BEFORE the resolution (straggler from the transcript): only count it.
  * - Two sources see the same event (hook + transcript within 90 s): do not
  *   count it twice.
@@ -140,20 +140,20 @@ export async function vorfallMelden(runId, { typ, quelle, schwere = 'rot', beleg
   if (runId) addEvent(runId, `incident:${ereignis}`, { typ, quelle, schwere: row.schwere, id: row.id })
 
   const melden = !stillMelden && row.schwere === 'rot' && ['neu', 'wieder', 'eskaliert'].includes(ereignis)
-  if (melden) await telegramPlanen(row.id, tsMs)
+  if (melden) await scheduleNotification(row.id, tsMs)
   return { vorfall: row, ereignis }
 }
 
 /**
- * Schedule (or, with a zero delay, send now) the Telegram for a red incident.
+ * Schedule (or, with a zero delay, send now) the notification for a red incident.
  * `notify_at` is when it becomes due; vorfaelleMeldenFaellig() — the watcher
  * pass — sends everything that has come due and is STILL open. An incident that
  * resolves itself before then never pages (that is the point of the delay).
  */
-async function telegramPlanen(id, tsMs = Date.now()) {
+async function scheduleNotification(id, tsMs = Date.now()) {
   if (NOTIFY_DELAY_MS <= 0) {
     const row = vorfall(id)
-    await telegramVorfall(row, row.wieder_geoeffnet ? 'wieder' : 'neu')
+    await notifyIncident(row, row.wieder_geoeffnet ? 'wieder' : 'neu')
     db.prepare(`UPDATE incidents SET gemeldet_am = ?, notify_at = NULL WHERE id = ?`).run(dbZeit(), id)
     return
   }
@@ -167,7 +167,7 @@ async function telegramPlanen(id, tsMs = Date.now()) {
  * grace period is one that did not resolve itself; that is the alarm.
  *
  * Rows with a notify_at only exist when a delay is configured (with delay 0 the
- * alarm goes out immediately at telegramPlanen) — or when a test set one by hand.
+ * alarm goes out immediately at scheduleNotification()) — or when a test set one by hand.
  */
 export async function vorfaelleMeldenFaellig(jetztMs = Date.now()) {
   const rows = db.prepare(`SELECT id FROM incidents
@@ -176,7 +176,7 @@ export async function vorfaelleMeldenFaellig(jetztMs = Date.now()) {
   for (const { id } of rows) {
     const row = vorfall(id)
     if (!row || row.geloest_am !== null || row.gemeldet_am !== null) continue
-    await telegramVorfall(row, row.wieder_geoeffnet ? 'wieder' : 'neu')
+    await notifyIncident(row, row.wieder_geoeffnet ? 'wieder' : 'neu')
     db.prepare(`UPDATE incidents SET gemeldet_am = ?, notify_at = NULL WHERE id = ?`).run(dbZeit(), id)
   }
 }
@@ -193,7 +193,7 @@ export async function vorfallEskalieren(id, grund) {
   // is the moment the incident becomes an alarm, so it pages (with the same
   // grace period; escalation BY SILENCE means the agent has been stuck a while
   // already, so the delay only ever applies to the still-ambiguous cases).
-  await telegramPlanen(id, Date.now())
+  await scheduleNotification(id, Date.now())
   return neu
 }
 
@@ -217,7 +217,7 @@ export function vorfaelleLoesen(runId, von = 'web') {
  * An incident that resolved itself. The record stays (history, counts, the
  * detector's protocol) — but it no longer needs anybody, and the sidebar and
  * every open page learn so through the event. One that WAS announced on
- * Telegram also announces its recovery: an alarm that rings must un-ring, or
+ * the recovery is announced too: an alarm that rings must un-ring, or
  * the operator keeps a problem in mind that no longer exists.
  */
 export async function vorfallVerwerfen(id, grund) {
@@ -227,7 +227,7 @@ export async function vorfallVerwerfen(id, grund) {
     .run(dbZeit(), `auto:${grund}`, id)
   detektorLog(row.run_id, { art: 'verworfen', id, typ: row.typ, grund })
   if (row.run_id) addEvent(row.run_id, 'incident:auto_resolved', { typ: row.typ, id, grund })
-  if (row.gemeldet_am !== null) await telegramAufgeloest(vorfall(id), grund)
+  if (row.gemeldet_am !== null) await notifyResolved(vorfall(id), grund)
   return vorfall(id)
 }
 
@@ -240,7 +240,7 @@ export function ampelAusVorfaellen(runId) {
 }
 
 /**
- * What a run is called in a Telegram message: the title first — "which work is
+ * What a run is called in a notification: the title first — "which work is
  * this about" is the reader's first question, and a bare uuid does not answer
  * it. The agent's name, the repo and the harness/model travel with it, so the
  * message is attributable without opening the hub.
@@ -257,7 +257,7 @@ function runKennung(runId) {
   return { zeile: `Run: ${titel} · ${wer} · repo ${run.repo ?? '?'} · ${modell}`, run }
 }
 
-async function telegramVorfall(row, ereignis, grund = null) {
+async function notifyIncident(row, ereignis, grund = null) {
   const kopf = row.wieder_geoeffnet ? '🔴 AGAIN: ' : '🔴 '
   const name = TYP_TEXT[row.typ] ?? row.typ
   const zeilen = [`${kopf}${name}`]
@@ -276,25 +276,21 @@ async function telegramVorfall(row, ereignis, grund = null) {
   // The evidence ABOVE the bookkeeping: it is what answers "is this real?".
   if (row.beleg) zeilen.push(`Evidence: ${row.beleg}`)
   zeilen.push(`Source: ${row.quelle} · since ${fmtDbUtc(row.erst_gesehen)} · last ${fmtDbUtc(row.zuletzt_gesehen)} · ${row.anzahl}×${row.wieder_geoeffnet ? ` · reopened ${row.wieder_geoeffnet}×` : ''}`)
-  if (telegramMuted(row.run_id)) { addEvent(row.run_id, 'telegram_muted', { type: `incident:${row.typ}` }); return }
-  const ok = await notify(zeilen.join('\n'), row.run_id ? detailUrl(row.run_id) : detailUrl(null))
-  if (row.run_id) addEvent(row.run_id, 'telegram_sent', { type: `incident:${row.typ}`, delivered: ok })
+  if (notifyMuted(row.run_id)) { addEvent(row.run_id, 'notify_muted', { type: `incident:${row.typ}` }); return }
+  const r = await notify({ kind: 'incident', runId: row.run_id ?? null, text: zeilen.join('\n'),
+    url: row.run_id ? detailUrl(row.run_id) : detailUrl(null) })
+  if (row.run_id) addEvent(row.run_id, 'notified', { type: `incident:${row.typ}`, delivered: r.sent })
 }
 
-/**
- * The run's Telegram checkbox (`runs.telegram_on`, the one under its terminal)
- * silences the alarms ABOUT that run too — an operator who unticked it is
- * sitting in front of the session and sees what happens there. A global
- * incident carries no run and is never muted by it. Read here rather than
- * through reports.mjs, because that module imports this one.
- */
-function telegramMuted(runId) {
-  if (!runId) return false
-  return db.prepare('SELECT telegram_on FROM runs WHERE id=?').get(runId)?.telegram_on === 0
-}
+// The run's notification checkbox (the one under its terminal) silences the
+// alarms ABOUT that run too — an operator who unticked it is sitting in front of
+// the session and sees what happens there. A global incident carries no run and
+// is never muted by it. `notifyMuted()` comes from notify.mjs, which imports
+// neither this module nor reports.mjs: the second, inverted copy that used to
+// stand here existed only because those two import each other.
 
 /** The counterpart of the alarm: an announced incident that cleared itself. */
-async function telegramAufgeloest(row, grund) {
+async function notifyResolved(row, grund) {
   const name = TYP_TEXT[row.typ] ?? row.typ
   const zeilen = [`✅ Resolved: ${name}`]
   if (row.run_id) {
@@ -304,7 +300,8 @@ async function telegramAufgeloest(row, grund) {
     zeilen.push('Global (provider pulse).')
   }
   zeilen.push(`Recovered on its own (${grund}) · ${row.anzahl}× observed, last ${fmtDbUtc(row.zuletzt_gesehen)} · nothing left to do.`)
-  if (telegramMuted(row.run_id)) { addEvent(row.run_id, 'telegram_muted', { type: `incident_resolved:${row.typ}` }); return }
-  const ok = await notify(zeilen.join('\n'), row.run_id ? detailUrl(row.run_id) : detailUrl(null))
-  if (row.run_id) addEvent(row.run_id, 'telegram_sent', { type: `incident_resolved:${row.typ}`, delivered: ok })
+  if (notifyMuted(row.run_id)) { addEvent(row.run_id, 'notify_muted', { type: `incident_resolved:${row.typ}` }); return }
+  const r = await notify({ kind: 'incident', runId: row.run_id ?? null, text: zeilen.join('\n'),
+    url: row.run_id ? detailUrl(row.run_id) : detailUrl(null) })
+  if (row.run_id) addEvent(row.run_id, 'notified', { type: `incident_resolved:${row.typ}`, delivered: r.sent })
 }

@@ -12,6 +12,7 @@
 //   env                        process.env (legacy reads; prefer secret())
 //   secret(key = 'api_key')    the resolved credential — stored, named, declared
 //   setting(key, fallback)     this plugin's own setting value
+//   setSetting(key, value)     write one of this plugin's OWN settings
 //   log(msg)                   one fail-soft console line, prefixed with the id
 //
 // `json` and `registry` used to live in models.mjs as `providerCtx()`. They are
@@ -23,7 +24,7 @@
 // a PLUGIN FILE still must not. Plugins receive the context, they do not build
 // one. That is also why nothing here is imported by `server/harnesses/*.mjs` or
 // `server/providers/*.mjs`.
-import { getSetting } from '../db.mjs'
+import { getSetting, setSetting } from '../db.mjs'
 import { credentialValue } from './store.mjs'
 import { pluginFields, pluginSettingKey } from './settings.mjs'
 import { getPlugin } from './registry.mjs'
@@ -109,6 +110,20 @@ function settingOf(pluginId, key, fallback = null) {
 }
 
 /**
+ * The settings-table key one of this plugin's own field keys writes to —
+ * exactly the name `settingOf()` reads, so a declared `settingKey` is honoured
+ * in both directions and a key the plugin never declared is namespaced.
+ */
+function settingKeyOf(pluginId, key) {
+  const plugin = getPlugin(pluginId)
+  for (const group of ['settings', 'gate']) {
+    const field = pluginFields(plugin, group).find(f => f.key === key)
+    if (field) return pluginSettingKey(pluginId, field)
+  }
+  return `plugin_${pluginId}_${key}`
+}
+
+/**
  * The context for one plugin. `pluginId` may be null for the handful of callers
  * that only want the fetch helper and the registry (the model catalog fetches
  * predate credentials); `secret()` then answers null instead of guessing.
@@ -121,6 +136,17 @@ export function pluginCtx(pluginId = null) {
     env: process.env,
     secret: (key = 'api_key') => (id ? credentialValue(id, key) : null),
     setting: (key, fallback = null) => settingOf(id, key, fallback),
+    // The counterpart of `setting()`, and the only write a plugin gets. It goes
+    // through the same field resolution, so a plugin can only ever write ITS
+    // OWN settings: a declared `settingKey` or the namespaced
+    // `plugin_<id>_<key>`, never an arbitrary row of the settings table. A
+    // setup wizard a plugin brings needs it — there is nothing else it could
+    // store its token in.
+    setSetting: (key, value) => {
+      if (!id) return false
+      setSetting(settingKeyOf(id, key), value === null || value === undefined ? '' : String(value))
+      return true
+    },
     log: (msg) => { try { console.log(`[plugin ${id ?? '?'}] ${msg}`) } catch { /* a log line never fails a run */ } },
   }
 }

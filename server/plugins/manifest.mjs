@@ -15,8 +15,8 @@ export const PLUGIN_API = 1
 /** Plugin ids: lowercase, digits and dashes, 2..40 characters, never leading dash. */
 export const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]{1,39}$/
 
-/** The two kinds of plugin the hub knows. */
-export const PLUGIN_KINDS = ['harness', 'provider']
+/** The kinds of plugin the hub knows. */
+export const PLUGIN_KINDS = ['harness', 'provider', 'notifier']
 
 function isPlainObject(v) {
   return !!v && typeof v === 'object' && !Array.isArray(v)
@@ -114,6 +114,12 @@ export function validateDescriptor(desc, kind) {
     for (const fn of ['modelArgs', 'effortOptions', 'usage', 'pulseId']) {
       if (typeof desc[fn] !== 'function') problems.push(`coding agent: "${fn}" must be a function`)
     }
+  } else if (kind === 'notifier') {
+    // One function and nothing else. Everything a notifier needs to be
+    // configurable — `settings`, `credentials`, `setup`, `test` — is optional,
+    // because the smallest useful notifier is a webhook with a URL in a setting
+    // and a `send` that posts to it.
+    if (typeof desc.send !== 'function') problems.push('notifier: "send" must be a function')
   } else {
     const hasEnvKeys = Array.isArray(desc.envKeys)
     const hasCredentials = Array.isArray(desc.credentials)

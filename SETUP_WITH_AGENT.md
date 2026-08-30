@@ -78,7 +78,7 @@ ends up on the open internet. Ask the human, all at once:
 | **Which coding agent CLIs are installed and licensed?** | `claude`, `opencode`, `hermes`, `cursor-agent` — the hub only offers what the operator configures. |
 | **Which API keys, if any?** | `OPENROUTER_API_KEY` etc. **Ask for them to be pasted into `~/.config/cc-hub/env` by the human** — or, if that machine makes environment variables awkward, let the human enter them in the UI under Settings → Plugins. Do not read them, echo them, or put them in a commit, a log or your report. |
 | **Any external plugin packages to install?** (`CCHUB_PLUGIN_DIR`) | Optional. Default `~/.local/share/cc-hub/plugins`; a missing directory is the normal case. Only set it if the human already has packages somewhere else. |
-| **Telegram notifications?** | Optional. The bot token and chat id are entered in the UI's setup assistant, not by you. |
+| **Notifications?** | **Optional, and nothing depends on them.** cc-hub runs fully with no channel configured — it schedules, watches, merges and records exactly the same, it just stays quiet. If the human does want one, it is set up in the UI afterwards (Settings → Notifications), and any credential it needs is entered there, not by you. |
 
 If the human does not know, say what the value is *for* and offer the safe
 default (VPN-only, fail-closed). Do not proceed on a guess for
@@ -177,7 +177,18 @@ The hub starts empty on purpose, and the first thing a browser sees says so:
    in the browser terminal. This is the fastest way to learn what the system
    does — much faster than reading `AGENTS.md`.
 4. **Then make it an agent**: same form plus a name and a schedule.
- 5. Optional: **Settings → Telegram** (setup assistant), **Settings → Favorites**
+ 5. **Settings → Notifications** (`/settings/notifications`) — *optional, and
+    genuinely so.* One card per notification channel the hub can drive: enabled
+    flag, its settings, its credentials, a "send test message" button and, when
+    the plugin brings one, a link to its own setup assistant. Telegram is the
+    only channel that ships (its assistant walks through the BotFather token,
+    the chat id and a test message; the old `/telegram-setup` address redirects
+    there). **With no channel configured cc-hub runs fully and quietly** — it
+    schedules, watches, merges, records and reports exactly the same, it just
+    says nothing out loud. Nothing nags about it, nothing errors, and no step of
+    the Welcome wizard requires it. Another channel is a plugin package with
+    `"kind": "notifier"` (see `docs/plugins.md`).
+ 6. Optional: **Settings → Favorites**
     (the setup half of a run under a name, feeds the Quick Run button in the
     header), **Settings → tmux cleanup** (a special agent that ends the oldest
     inactive tmux sessions to free memory — a threshold starts it by itself,
@@ -209,7 +220,7 @@ pattern if you fork — it is small and it works:
   with an empty configuration, the hub creates your coding agents and providers
   from it. This is what makes a fresh machine reproducible.
 - `pruefe-vor-push.sh` — a pre-push hook that greps the **committed** state for
-  private IPs, home paths, key formats and Telegram tokens. Its generic patterns
+  private IPs, home paths, key formats and bot tokens. Its generic patterns
   are in the script; the operator's own patterns live *outside* the repo, in
   `~/.config/cc-hub/verbotene-muster`, because a list of secret values is itself
   a list of secret values.
@@ -232,11 +243,13 @@ tooling. The seams that were designed to be pulled on:
 |---|---|
 | drive a coding agent CLI that is not supported | a **plugin package** in `CCHUB_PLUGIN_DIR` — a `plugin.json` plus a descriptor with a `launch` declaration, and `bin/cc-start --spec` starts it without a line of bash. Inside this repo instead: a file in `server/harnesses/` plus a `case` in `cc-start` → [`docs/plugins.md`](docs/plugins.md) |
 | use another model provider | a plugin package of the same shape, or a file in `server/providers/` → same doc |
+| be notified somewhere other than Telegram — Slack, a webhook, e-mail, a script | a **notifier plugin**: the same package shape with `"kind": "notifier"`, a descriptor whose minimum is `id`, `label` and `async send(message, ctx)`, and whatever `settings` / `credentials` it needs. Inside this repo instead: a file in `server/notifiers/`. Configure it under Settings → Notifications → [`docs/plugins.md`](docs/plugins.md) |
+| not be notified at all | do nothing — that is the default, and it is a complete installation |
 | have the hub's own small questions answered by something else | Settings → the source picker on each of Run titles / Incident check / Worktree extras: any plugin declaring `llm`, including a **coding agent on your existing subscription** (marked, because a session per question is slower and dearer) |
 | give a provider a key without touching the environment | Settings → **Plugins**: name a different environment variable, or store the value |
 | change what every agent is told | Settings → **Platform prompt suffix** (added, never replacing the platform rules), or a **repo prompt** per repository |
 | give agents an opt-in capability | drop a folder with a `SKILL.md` into `~/agents/zusaetze/` — it appears as a checkbox in the run forms. Deliberately *not* `.claude/skills`, so nothing loads automatically |
-| do something after a run finishes or a merge lands | **no-code flows** — a graphical designer, no code needed: message running agents, start follow-up runs and wait, extract data from a report via LLM, branch, loop, Telegram, HTTP, shell command → [`server/flows/AGENTS.md`](server/flows/AGENTS.md) |
+| do something after a run finishes or a merge lands | **no-code flows** — a graphical designer, no code needed: message running agents, start follow-up runs and wait, extract data from a report via LLM, branch, loop, notify, HTTP, shell command → [`server/flows/AGENTS.md`](server/flows/AGENTS.md) |
 | change when a run is allowed to start | Settings → **Budget gates** — the fieldset is generated from whichever plugins declare a `gate`, so a new one appears there by itself; else `repos.max_parallel` — `server/scheduler.mjs`; a deferred run can be started anyway from its detail page |
 | change a run that is not over | the "Edit this run" card on its detail page: the expected duration of a running run, plus the prompt, the repo, the branch rule and — for a planned run — its start time of one that has not started yet — `server/run-edit.mjs` decides what a status allows |
 | add a UI language | a new `lang/<code>.json` with the same keys, plus the language list — see `server/i18n.mjs` |
@@ -290,7 +303,8 @@ If your task is to change cc-hub rather than just run it:
 | Watching from the outside; anomalies | `server/watcher.mjs`, `server/detect.mjs` |
 | Merging a finished run into the base branch | `server/integrate.mjs` |
 | Rate limits / provider outages | `server/incidents.mjs`, `server/harnesses/patterns.mjs` |
-| Coding agent + provider plugins — the contract, in depth | **`docs/plugins.md`** (the one document to hand an agent for this), `server/harnesses/`, `server/providers/` |
+| Plugins — coding agents, model providers, notification channels: the contract, in depth | **`docs/plugins.md`** (the one document to hand an agent for this), `server/harnesses/`, `server/providers/`, `server/notifiers/` |
+| Saying something to a human — the facade, the page, the CLI | `server/notify.mjs`, `server/notifications.mjs`, `bin/cc-notify` |
 | Loading, validating, storing and configuring plugins | `server/plugins/` (`registry`, `loader`, `manifest`, `store`, `install`, `discovery`, `settings`, `context`, `web`) |
 | The hub's own LLM calls: sources, structured output, alerts | `server/llm/` (`index` = `llmJson()`, `sources`, `schema`, `json`, `alerts`) |
 | The first-run wizard | `server/welcome.mjs` |

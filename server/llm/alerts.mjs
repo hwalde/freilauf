@@ -1,4 +1,4 @@
-// cc-hub — throttled, deduplicated Telegram alerts for the hub's own LLM calls.
+// cc-hub — throttled, deduplicated alerts for the hub's own LLM calls.
 //
 // The problem this exists for: a provider that fails does not fail once. A
 // wrong key fails on EVERY call, and the hub makes one per run title, one per
@@ -24,7 +24,7 @@
 // with — and a throttle that survives a restart would be wrong anyway: after a
 // deploy the operator wants to hear whether it is still broken.
 import { getSetting } from '../db.mjs'
-import { notify, detailUrl } from '../telegram.mjs'
+import { notify, detailUrl } from '../notify.mjs'
 import { t } from '../i18n.mjs'
 
 const HOUR_MS = 3_600_000
@@ -100,9 +100,9 @@ export async function llmAlert({ purpose, source, model, errorClass, text, nowMs
     attempts = attempts.filter(ts => nowMs - ts < HOUR_MS)
     if (attempts.length >= maxPerHour) { ceilingSuppressed++; return suppress('ceiling') }
 
-    // The window is spent on the ATTEMPT, not on the delivery: notify() retries
-    // a network failure three times with sleeps in between, and doing that on
-    // every failed model call would be its own outage.
+    // The window is spent on the ATTEMPT, not on the delivery: a channel may
+    // retry a network failure several times with sleeps in between, and doing
+    // that on every failed model call would be its own outage.
     st.lastAttemptAt = nowMs
     attempts.push(nowMs)
 
@@ -117,7 +117,7 @@ export async function llmAlert({ purpose, source, model, errorClass, text, nowMs
     }
     if (ceilingSuppressed > 0) lines.push(t('llm.alert_ceiling', { count: ceilingSuppressed }))
 
-    const ok = await notify(lines.join('\n'), detailUrl(null))
+    const ok = (await notify({ kind: 'llm_alert', text: lines.join('\n'), url: detailUrl(null) })).sent
     if (ok) {
       // Only a delivered message may forget what it reported. A failed send
       // keeps the count so the NEXT message still names those failures.
@@ -127,8 +127,8 @@ export async function llmAlert({ purpose, source, model, errorClass, text, nowMs
     }
     return { sent: !!ok, reason: ok ? 'sent' : 'unreachable' }
   } catch {
-    // No token, no chat, no network, a renamed field — all of them mean the
-    // alarm did not go out, and none of them mean the caller failed.
+    // No channel, no credential, no network, a renamed field — all of them mean
+    // the alarm did not go out, and none of them mean the caller failed.
     return { sent: false, reason: 'error' }
   }
 }

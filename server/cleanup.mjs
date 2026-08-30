@@ -11,13 +11,13 @@
 //   - from the Sessions page (prominent box + target input + keep-runs field).
 //
 // A cleanup run is an ORDINARY single run through startRun(): budget gate,
-// overview, watcher, finish gate and the Telegram report all apply. It works in
+// overview, watcher, finish gate and the report notification all apply. It works in
 // a detached worktree and is told never to commit, so under merge_mode='hub'
 // the finish gate finds nothing to merge and closes it cleanly. It carries no
 // flows (nothing the operator started should cascade into them).
 import db, { getSetting, setSetting, addEvent, allSettings } from './db.mjs'
 import { t } from './i18n.mjs'
-import { publicBase } from './telegram.mjs'
+import { publicBase } from './util.mjs'
 
 /**
  * The prompt template behind the cleanup agent — the memory-driven successor of
@@ -78,7 +78,7 @@ export const CLEANUP_PROMPT_DEFAULT = [
 '',
 'Kontrolliere mit dem Skript (oder den Kommandos oben), ob das Ziel erreicht ist.',
 '',
-'## Bericht (wird nach Telegram geschickt)',
+'## Bericht (wird als Benachrichtigung verschickt, falls ein Kanal eingerichtet ist)',
 '',
 'Schreibe in deinen Abschlussreport einen Satz GENAU dieser Form — die URLs sind schon eingesetzt, ersetze nur die beiden Zahlen durch die von dir gemessenen GB-Werte (eine Nachkommastelle):',
 '',

@@ -218,8 +218,11 @@ try {
     const r = await hol('/api/gibtsnicht', { timeoutMs: 5000 })
     gleich(r.status, 404, 'status')
   })
-  await pruefe('Telegram chats without a token report the reason', async () => {
-    const j = await (await hol('/api/telegram/chats', { timeoutMs: 5000 })).json()
+  await pruefe('a notifier wizard\'s own JSON route answers without a credential', async () => {
+    // `/api/telegram/chats` became `/settings/notifications/telegram/json/chats`:
+    // reading the bot's chats is knowledge about Telegram, and it travels with
+    // the plugin rather than with the hub's API surface.
+    const j = await (await hol('/settings/notifications/telegram/json/chats', { timeoutMs: 5000 })).json()
     falsch(j.ok, 'ok')
     wahr(typeof j.error === 'string' && j.error.length > 0, 'error message')
   })
@@ -719,12 +722,12 @@ try {
     gleich(lauf(id).status, 'done', 'closed by the watcher')
     enthaelt(lauf(id).report_md, AGENT_TEXT, 'same report text')
   })
-  await pruefe('all three end channels together ring Telegram exactly once', async () => {
+  await pruefe('all three end channels together notify exactly once', async () => {
     // cursor's run end is detected THREE times on purpose — stop hook (fast),
     // transcript (the net that survives a repo's own hooks.json), sessionEnd's
     // `_exit`. Every one of them ends in handleReport(), and handleReport() is
-    // what sends the Telegram message: if they were not fenced off, one finished
-    // run would ring the phone three times about the same thing.
+    // what notifies: if they were not fenced off, one finished run would ring
+    // the phone three times about the same thing.
     //
     // Three fences hold, and this test is here so none of them can be removed
     // quietly: handleReport() only accepts a run in running/waiting_help,
@@ -738,8 +741,8 @@ try {
     await watcherTick()
     gleich(lauf(id).status, 'done', 'done')
     const kinds = ereignisse(id)
-    const ende = kinds.filter(k => /^telegram_sent:(done|failed|pane_died|exit_without_report)$/.test(k))
-    gleich(ende.join(','), 'telegram_sent:done', 'exactly one end message, and it is the done one')
+    const ende = kinds.filter(k => /^notified:(done|failed|pane_died|exit_without_report)$/.test(k))
+    gleich(ende.join(','), 'notified:done', 'exactly one end message, and it is the done one')
     gleich(kinds.filter(k => k === 'done').length, 1, 'the run was closed exactly once')
     gleich(kinds.filter(k => k === 'turn_end_finished').length, 1, 'only the channel that got there first closes it')
   })
@@ -1134,7 +1137,7 @@ try {
   })
 
   let RH = null   // "hermes" run (the stub ignores the harness; the hub's patterns do not)
-  await pruefe('hermes: first log match is noted YELLOW, without Telegram', async () => {
+  await pruefe('hermes: first log match is noted YELLOW, without a notification', async () => {
     const j = await laufStarten({ repo_id: repoId, harness: 'hermes', prompt: 'E2E-Vorfall-hermes', expected_minutes: '45' })
     RH = j.runId
     wahr(!!RH, 'run created')
@@ -1148,7 +1151,7 @@ try {
     gleich(v[0].schwere, 'gelb', 'yellow')
     gleich(v[0].quelle, 'log', 'source')
     enthaelt(v[0].beleg, 'Retrying', 'evidence is the line')
-    falsch(ereignisse(RH).some(k => k === 'telegram_sent'), 'no Telegram for yellow')
+    falsch(ereignisse(RH).some(k => k === 'notified'), 'no notification for yellow')
     // In the overview the incident is a compact badge inside the run's OWN row,
     // and the action that clears it is still in that cell — it is only hidden
     // until the row is hovered (the same rule the pencil and the archive button
@@ -1173,15 +1176,15 @@ try {
     await watcherTick(); await watcherTick()
     gleich(vorfaelle(RH)[0].anzahl, 1, 'anzahl stays 1')
   })
-  await pruefe('repetition within 10 min → RED (retry loop), Telegram attempt recorded', async () => {
+  await pruefe('repetition within 10 min → RED (retry loop), notification attempt recorded', async () => {
     logAnhaengen(RH, '⚠️  API call failed (attempt 2/5): RateLimitError (HTTP 429)\n')
     await watcherTick()
     const v = vorfaelle(RH)[0]
     gleich(v.anzahl, 2, 'anzahl 2')
     gleich(v.schwere, 'rot', 'red')
     wahr(ereignisse(RH).includes('incident:eskaliert'), `escalated (has: ${ereignisse(RH).join(', ')})`)
-    const tg = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='telegram_sent' ORDER BY id DESC LIMIT 1`).get(RH)
-    wahr(!!tg && JSON.parse(tg.payload).type === 'incident:rate_limit', 'Telegram send for the incident (without a token: delivered=false, but attempted)')
+    const tg = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='notified' ORDER BY id DESC LIMIT 1`).get(RH)
+    wahr(!!tg && JSON.parse(tg.payload).type === 'incident:rate_limit', 'the incident was announced (with no channel configured: delivered=false, but attempted)')
     enthaelt(await (await hol(`/runs/${RH}`)).text(), 'Incidents', 'detail page shows the section')
   })
   await pruefe('resolving via the UI withdraws the alarm', async () => {
@@ -1325,7 +1328,7 @@ try {
     wahr(!!v.geloest_am, 'closed')
     enthaelt(v.geloest_von, 'auto:', 'automatic')
   })
-  await pruefe('a red incident that recovered on its own resolves itself — and un-rings on Telegram', async () => {
+  await pruefe('a red incident that recovered on its own resolves itself — and un-rings', async () => {
     const j = await laufStarten({ repo_id: repoId, harness: 'claude', prompt: 'E2E-Vorfall-erholt', expected_minutes: '45' })
     await sessionMerken(j.runId)
     // Hand-crafted red incident, not yet announced, notification NOT yet due
@@ -1335,12 +1338,12 @@ try {
       .run(j.runId, 'provider_error', 'hook:claude', 'rot')
     const { vorfaelleMeldenFaellig } = await import('../server/incidents.mjs')
     await vorfaelleMeldenFaellig()
-    falsch(ereignisse(j.runId).some(k => k === 'telegram_sent'), 'not due yet: no Telegram')
+    falsch(ereignisse(j.runId).some(k => k === 'notified'), 'not due yet: nothing announced')
     // Due and still open → the alarm.
     db.prepare(`UPDATE incidents SET notify_at=datetime('now','-1 second') WHERE run_id=?`).run(j.runId)
     await vorfaelleMeldenFaellig()
-    const tg = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='telegram_sent' ORDER BY id DESC LIMIT 1`).get(j.runId)
-    wahr(!!tg && JSON.parse(tg.payload).type === 'incident:provider_error', 'due: Telegram fires')
+    const tg = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='notified' ORDER BY id DESC LIMIT 1`).get(j.runId)
+    wahr(!!tg && JSON.parse(tg.payload).type === 'incident:provider_error', 'due: the alarm fires')
     wahr(!!vorfaelle(j.runId)[0].gemeldet_am, 'recorded as announced')
     // The agent demonstrably works again (activity AFTER the occurrence, no
     // recurrence) → resolves itself, and the announced alarm is un-rung.
@@ -1349,7 +1352,7 @@ try {
     await watcherTick()
     const v = vorfaelle(j.runId)[0]
     enthaelt(v.geloest_von, 'auto:', 'resolved by itself')
-    const tg2 = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='telegram_sent' ORDER BY id DESC LIMIT 1`).get(j.runId)
+    const tg2 = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='notified' ORDER BY id DESC LIMIT 1`).get(j.runId)
     wahr(!!tg2 && JSON.parse(tg2.payload).type === 'incident_resolved:provider_error', 'and the recovery is announced')
   })
   await pruefe('raising the expected duration retracts the overrun statement', async () => {
@@ -1360,18 +1363,18 @@ try {
     db.prepare(`UPDATE runs SET started_at=datetime('now','-120 minutes') WHERE id=?`).run(j.runId)
     await watcherTick()
     wahr(ereignisse(j.runId).includes('anomaly:overrun'), 'overrun anomaly')
-    wahr(ereignisse(j.runId).includes('telegram_sent:overrun'), 'and Telegram heard about it')
+    wahr(ereignisse(j.runId).includes('notified:overrun'), 'and the operator heard about it')
     // The operator raises the duration — the statement the old value produced is withdrawn:
     const r = await formular(`/api/runs/${j.runId}/edit`, { expected_minutes: '240' })
     gleich(r.status, 200, `edit ok (${JSON.stringify(await r.json().catch(() => r.text()))})`)
     gleich(lauf(j.runId).expected_minutes, 240, 'new duration stored')
     wahr(ereignisse(j.runId).includes('cleared:anomaly:overrun'), 'the anomaly event is history, renamed')
-    falsch(ereignisse(j.runId).includes('telegram_sent:overrun'), 'the Telegram flag with it')
+    falsch(ereignisse(j.runId).includes('notified:overrun'), 'the notification flag with it')
     // A genuine overrun of the NEW duration can page once again:
     db.prepare(`UPDATE runs SET started_at=datetime('now','-300 minutes') WHERE id=?`).run(j.runId)
     await watcherTick()
     gleich(ereignisse(j.runId).filter(k => k === 'anomaly:overrun').length, 1, 'the anomaly fires anew against the new value')
-    wahr(ereignisse(j.runId).includes('telegram_sent:overrun'), 'and Telegram hears about the new overrun')
+    wahr(ereignisse(j.runId).includes('notified:overrun'), 'and the operator hears about the new overrun')
   })
   await pruefe('provider pulse: two failures → global incident with banner, recovery closes it', async () => {
     let antwort = 500
@@ -2412,7 +2415,7 @@ try {
     }
     wahr(j.steps.every(s => s.type && s.component && s.group && Array.isArray(s.fields)),
       'every step names its type, component, group and fields — that is what the property editor renders from')
-    wahr(j.steps.some(s => s.type === 'telegram') && j.steps.some(s => s.type === 'switch_outcome'),
+    wahr(j.steps.some(s => s.type === 'notify') && j.steps.some(s => s.type === 'switch_outcome'),
       'known building blocks are in the registry')
     wahr(j.triggerKinds.includes('run_finished'), 'the trigger that an attachment is')
     wahr(j.groups.every(g => j.steps.some(s => s.group === g)), 'no toolbox group without a step in it')
@@ -2698,17 +2701,23 @@ try {
     gleich(neu.status, 200, 'a fresh favorite form answers as well')
     enthaelt(await neu.text(), 'New favorite', 'with its own title')
   })
-  await pruefe('the Telegram assistant walks through its three steps', async () => {
-    const r = await hol('/telegram-setup')
+  await pruefe('the Telegram plugin brings its own setup wizard, and the old address still finds it', async () => {
+    const alt = await hol('/telegram-setup', { redirect: 'manual' })
+    gleich(alt.status, 303, 'the historic address redirects')
+    gleich(alt.headers.get('location'), '/settings/notifications/telegram', 'to the plugin\'s own wizard')
+    const r = await hol('/settings/notifications/telegram')
     gleich(r.status, 200, 'status')
     const html = await r.text()
-    enthaelt(html, 'Telegram setup', 'title')
     for (const schritt of ['Step 1 — bot token', 'Step 2 — find the chat ID', 'Step 3 — test']) {
       enthaelt(html, schritt, schritt)
     }
-    enthaelt(html, '/telegram-setup/token', 'step 1 posts the token to its route')
+    enthaelt(html, '/settings/notifications/telegram/token', 'step 1 posts the token to the plugin\'s own action')
     enthaelt(html, 'name="telegram_token"', 'and has the field for it')
-    enthaelt(html, '/settings/test-telegram', 'step 3 sends the test message')
+    enthaelt(html, '/settings/notifications/telegram/test', 'step 3 sends the test message')
+    enthaelt(html, '/settings/notifications/telegram/json/chats', 'step 2 asks the plugin\'s own JSON route')
+    // A plugin that brings no wizard has no page, and an id nobody registered
+    // certainly not — a 200 there would be a page rendering nothing.
+    gleich((await hol('/settings/notifications/no-such-notifier')).status, 400, 'an unknown notifier has no wizard')
   })
 
   // ------------------------------------------------------------------
@@ -2963,7 +2972,10 @@ try {
   // POST /settings/save writes only the keys the request actually carried. The
   // old version looped `b[k] ?? ''` over the whole key list, so a body with one
   // field blanked the other fifteen — switching the language would have wiped
-  // the Telegram token. Three things have to hold at once, and only all three
+  // a stored secret. `telegram_token` is the canary precisely because it is now
+  // a PLUGIN-declared key: it reaches the allowlist through
+  // `allPluginSettingKeys()`, so this also proves that half still works. Three
+  // things have to hold at once, and only all three
   // together describe the rule: an absent key is untouched, a present but empty
   // one is still cleared (that is how a text field is emptied on purpose), and a
   // key nobody declared never reaches the settings table.
@@ -3385,7 +3397,7 @@ try {
     enthaelt(ev.join(','), 'finish_started', 'the gate is recorded')
     enthaelt(ev.join(','), 'finish_clean', 'and its verdict')
     enthaelt(ev.join(','), 'merged', 'and the merge')
-    gleich(ev.filter(k => k === 'telegram_sent:done').length, 1, 'Telegram hears about it exactly once')
+    gleich(ev.filter(k => k === 'notified:done').length, 1, 'the operator hears about it exactly once')
   })
 
 
@@ -3500,12 +3512,12 @@ try {
     await warteAuf(() => lauf(resolver.id).merge_status === 'merged', { was: 'the resolver is merged', timeoutMs: 30_000 })
     gleich(lauf(conflicted.id).merge_status, 'merged', 'and so is the run it worked for')
     gleich(lauf(conflicted.id).merged_sha, lauf(resolver.id).merged_sha, 'the same commit for both')
-    gleich(ereignisse(conflicted.id).filter(k => k === 'telegram_sent:done').length, 1,
+    gleich(ereignisse(conflicted.id).filter(k => k === 'notified:done').length, 1,
       'the original run hears about its merge exactly once, and only now')
     // A conflict run is the integrator's tool: it never speaks for itself, and
     // nothing hangs on its end.
-    gleich(ereignisse(resolver.id).filter(k => k.startsWith('telegram_sent')).length, 0,
-      'and the conflict run itself says nothing on Telegram')
+    gleich(ereignisse(resolver.id).filter(k => k.startsWith('notified')).length, 0,
+      'and the conflict run itself announces nothing of its own')
     gleich(lauf(resolver.id).flow_dispatched, 1, 'no flow ever fires for it')
     gleich(lauf(resolver.id).flows, null, 'and it carries no attachments to fire')
     const mergedEvent = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='merged'`).get(conflicted.id)
@@ -3556,7 +3568,7 @@ try {
     gleich(orig.merge_status, 'blocked_conflict', 'no second attempt — a human decides')
     const openIncident = db.prepare(`SELECT * FROM incidents WHERE run_id=? AND typ='merge_blocked' AND geloest_am IS NULL`).get(l.id)
     wahr(!!openIncident, 'an open incident, so it shows up in the sidebar')
-    enthaelt(ereignisse(l.id).join(','), 'telegram_sent:merge_blocked', 'and Telegram was told')
+    enthaelt(ereignisse(l.id).join(','), 'notified:merge_blocked', 'and the operator was told')
     // And the operator can act on it without leaving the run's page.
     const html = await (await hol(`/runs/${l.id}`)).text()
     enthaelt(html, 'id="run-integration"', 'the detail page has an Integration line')
@@ -3573,7 +3585,7 @@ try {
     gleich(lauf(r1.id).merge_status, null, 'the failed conflict run carries no verdict of its own')
     falsch(!!db.prepare(`SELECT 1 FROM incidents WHERE run_id=? AND typ='merge_blocked'`).get(r1.id),
       'and no incident: what went wrong there is the original run\'s problem')
-    gleich(ereignisse(r1.id).filter(k => k.startsWith('telegram_sent')).length, 0,
+    gleich(ereignisse(r1.id).filter(k => k.startsWith('notified')).length, 0,
       'and it never rang the phone')
     falsch((await (await hol(`/runs/${r1.id}`)).text()).includes(`/api/runs/${r1.id}/retry`),
       'a conflict run has no retry button — "Merge now" on the original starts a fresh one')
@@ -3807,7 +3819,7 @@ try {
     // The first merge's flow run is dispatched a tick after the merge — wait
     // for it, or the count below would compare against a number read too early.
     await warteAuf(() => flowRunsFor(followed.id).length === 1, { was: 'the first merge fired the flow', timeoutMs: 15_000 })
-    gleich(lauf(followed.id).telegram_on, 1, 'Telegram is on for every run from the start')
+    gleich(lauf(followed.id).telegram_on, 1, 'notifications are on for every run from the start')
 
     // The operator typed more into the session, the agent did it and reports again.
     await writeAndCommit(followed.wt, 'second.txt', 'second\n', 'E2E: the follow-up')
@@ -3829,8 +3841,8 @@ try {
     const ev = ereignisse(followed.id)
     enthaelt(ev.join(','), 'followup_reported', 'recorded on the way in')
     enthaelt(ev.join(','), 'followup_done', 'and on the way out')
-    gleich(ev.filter(k => k === 'telegram_sent:done').length, 1, 'the done message was sent once, for the first report')
-    gleich(ev.filter(k => k === 'telegram_sent:followup').length, 1, 'and the follow-up is its own message')
+    gleich(ev.filter(k => k === 'notified:done').length, 1, 'the done message was sent once, for the first report')
+    gleich(ev.filter(k => k === 'notified:followup').length, 1, 'and the follow-up is its own message')
     gleich(ev.filter(k => k === 'merged').length, 2, 'two merges, one per report')
     gleich(ev.filter(k => k === 'finish_started').length, 2, 'and the gate ran once per report')
     await warteAuf(() => flowRunsFor(followed.id).length === 2,
@@ -3849,7 +3861,7 @@ try {
     gleich(r.followups, 2, 'counted')
     gleich(r.followup_open, 0, 'closed at once')
     gleich(r.finish_state, null, 'no gate left open')
-    gleich(ereignisse(followed.id).filter(k => k === 'telegram_sent:followup').length, 2, 'announced anyway — the operator asked for it')
+    gleich(ereignisse(followed.id).filter(k => k === 'notified:followup').length, 2, 'announced anyway — the operator asked for it')
     // Dirty: the same M1, and the run stays where it is until the agent commits.
     writeFileSync(join(followed.wt, 'half.txt'), 'not committed\n')
     const held = await sendReport(followed.id, { kind: 'done', text: 'done with the third thing' })
@@ -3866,34 +3878,37 @@ try {
     gleich(ereignisse(followed.id).filter(k => k === 'followup_reported').length, 3, 'reported three times — the re-report after M1 is not a fourth')
   })
 
-  await pruefe('the checkbox under the terminal silences Telegram for the run and nothing else', async () => {
+  await pruefe('the checkbox under the terminal silences the notifications for the run and nothing else', async () => {
     const html = await (await hol(`/runs/${followed.id}`)).text()
-    enthaelt(html, 'id="telegram-on"', 'the box is on the detail page')
+    enthaelt(html, 'id="notify-on"', 'the box is on the detail page')
     enthaelt(html, `data-run="${followed.id}"`, 'and knows its run')
-    wahr(/id="telegram-on"[^>]*checked/.test(html), 'ticked by default')
-    const off = await (await formular(`/api/runs/${followed.id}/telegram`, { on: '0' })).json()
-    gleich(off.telegram_on, 0, 'switched off')
-    gleich(lauf(followed.id).telegram_on, 0, 'stored')
-    enthaelt(ereignisse(followed.id).join(','), 'telegram_off', 'and recorded')
-    falsch(/id="telegram-on"[^>]*checked/.test(await (await hol(`/runs/${followed.id}`)).text()), 'the page shows it unticked')
-    const before = ereignisse(followed.id).filter(k => k === 'telegram_sent:followup').length
+    wahr(/id="notify-on"[^>]*checked/.test(html), 'ticked by default')
+    const off = await (await formular(`/api/runs/${followed.id}/notify`, { on: '0' })).json()
+    gleich(off.notify_on, 0, 'switched off')
+    gleich(off.telegram_on, 0, 'and the old field name still answers, for whoever reads it')
+    gleich(lauf(followed.id).telegram_on, 0, 'stored (the column keeps its historic name)')
+    enthaelt(ereignisse(followed.id).join(','), 'notify_off', 'and recorded')
+    falsch(/id="notify-on"[^>]*checked/.test(await (await hol(`/runs/${followed.id}`)).text()), 'the page shows it unticked')
+    const before = ereignisse(followed.id).filter(k => k === 'notified:followup').length
     await writeAndCommit(followed.wt, 'quiet.txt', 'quiet\n', 'E2E: a quiet follow-up')
     await sendReport(followed.id, { kind: 'done', text: 'quietly done' })
     await warteAuf(() => lauf(followed.id).followup_open === 0 && lauf(followed.id).followups === 4,
       { was: 'the quiet follow-up is merged', timeoutMs: 30_000 })
     wahr((await g(REPO, 'merge-base', '--is-ancestor', lauf(followed.id).merged_sha, 'origin/main')).ok,
-      'merged all the same — the box is about Telegram only')
-    gleich(ereignisse(followed.id).filter(k => k === 'telegram_sent:followup').length, before, 'no Telegram')
-    enthaelt(ereignisse(followed.id).join(','), 'telegram_muted', 'but it is written down that there was none')
+      'merged all the same — the box is about the messages only')
+    gleich(ereignisse(followed.id).filter(k => k === 'notified:followup').length, before, 'nothing announced')
+    enthaelt(ereignisse(followed.id).join(','), 'notify_muted', 'but it is written down that there was none')
+    // The old address is an alias, not a redirect: whatever still posts to it
+    // has to keep working.
     const on = await (await formular(`/api/runs/${followed.id}/telegram`, { on: '1' })).json()
-    gleich(on.telegram_on, 1, 'and back on')
+    gleich(on.notify_on, 1, 'and back on, through the old route')
     gleich(lauf(followed.id).telegram_on, 1, 'stored')
     // A help call from a finished run reaches the operator too, and changes nothing about the run.
     const help = await sendReport(followed.id, { kind: 'help', text: 'Which of the two?' })
     wahr(help.ok, 'help from a finished run is accepted')
     gleich(lauf(followed.id).status, 'done', 'the status stays')
     gleich(lauf(followed.id).help_text, 'Which of the two?', 'the question is stored')
-    gleich(ereignisse(followed.id).filter(k => k === 'telegram_sent:help').length, 1, 'and sent')
+    gleich(ereignisse(followed.id).filter(k => k === 'notified:help').length, 1, 'and sent')
   })
 
   // ---- 9. with merge_mode off nothing of this happens ----
@@ -3932,7 +3947,7 @@ try {
     gleich(f.merge_status, null, 'no verdict')
     enthaelt(f.report_md, 'plain old done', 'the first report')
     enthaelt(f.report_md, '## Follow-up report #1', 'and the follow-up under it')
-    gleich(ereignisse(l.id).filter(k => k === 'telegram_sent:followup').length, 1, 'announced')
+    gleich(ereignisse(l.id).filter(k => k === 'notified:followup').length, 1, 'announced')
     await flowsTick()
     gleich(lauf(l.id).flow_dispatched, 1, 'the "run finished" triggers were evaluated again')
   })
@@ -4184,6 +4199,179 @@ try {
     // And the hub still works with everything the suite installed gone.
     gleich((await hol('/settings/plugins')).status, 200, 'the page still renders')
     gleich((await hol('/')).status, 200, 'and so does the overview')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Notifications: optional, and a channel is a plugin')
+
+  // This group runs inside the plugins group's fence and for the same reason:
+  // it registers a plugin into a process-wide registry, and it is the FIRST
+  // thing in the whole suite that gives this hub a working notification
+  // channel. Everything above ran with none configured — which is exactly the
+  // state the first test below asserts is a complete installation and not a
+  // missing step.
+  const NOTIFY_LOG = join(SB, 'notified.jsonl')
+
+  // A notifier that writes what it was handed to a file: the only way to assert
+  // on the MESSAGE the hub composes without talking to somebody's API. Its
+  // `outfile` is a declared setting, so configuring it goes through the very
+  // form an operator uses.
+  const EXT_NOTIFIER = `import { appendFileSync } from 'node:fs'
+export default {
+  id: 'e2e-notifier',
+  kind: 'notifier',
+  label: 'E2E Notifier',
+  settings: [{ key: 'outfile', type: 'text', required: true, labelKey: 'e2e.outfile' }],
+  async send(message, ctx) {
+    const file = ctx.setting('outfile')
+    if (!file) return { ok: false, error: 'no outfile configured' }
+    appendFileSync(file, JSON.stringify({
+      kind: message.kind, text: message.text, url: message.url, runId: message.runId,
+      attachment: message.attachment ? message.attachment.fileName : null,
+      linkLabel: message.linkLabel,
+    }) + '\\n')
+    return { ok: true }
+  },
+}
+`
+  const gemeldet = () => (existsSync(NOTIFY_LOG)
+    ? readFileSync(NOTIFY_LOG, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+    : [])
+
+  await pruefe('with no channel configured the page says so, and every notifying path is a silent no-op', async () => {
+    const r = await hol('/settings/notifications')
+    gleich(r.status, 200, 'the page renders')
+    const html = await r.text()
+    enthaelt(html, 'No channel is configured', 'and states the quiet installation as a state, not a problem')
+    enthaelt(html, 'Notifications are optional', 'saying outright that nothing here has to be filled in')
+    enthaelt(html, 'Telegram', 'the built-in channel has a card')
+    enthaelt(html, '/settings/notifications/save', 'which posts to the save route')
+    // Nothing anywhere nags about it: the banner slot on an ordinary page is
+    // for coding agents and discoveries, never for a missing notifier.
+    falsch((await (await hol('/')).text()).includes('banner notify'), 'no banner on the overview')
+
+    // The test button refuses rather than reporting a success nobody had.
+    const t1 = await formular('/settings/notifications/test', { id: 'telegram' }, { alsBrowser: true })
+    gleich(t1.status, 303, 'the button answers')
+    // The reason is TRANSLATED before it travels: it is rendered to the
+    // operator, and the Telegram wizard's own step 3 reaches this same path.
+    enthaelt(decodeURIComponent(t1.headers.get('location')), 'not configured yet',
+      'and says which of the two it was, in the operator\'s language')
+
+    // And the run path: a report still writes its flag, with delivered=false,
+    // so a hub that is switched on later does not fire a backlog.
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E: quiet report', branch_mode: 'keiner', expected_minutes: '5' })
+    await sessionMerken(j.runId)
+    await warteAuf(() => lauf(j.runId).status === 'running', { was: 'the run is up' })
+    await sendReport(j.runId, { kind: 'done', text: 'nothing to hear' })
+    await warteAuf(() => lauf(j.runId).status === 'done', { was: 'the run is done' })
+    const flagge = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='notified:done'`).get(j.runId)
+    wahr(!!flagge, 'the run is marked as told')
+    gleich(JSON.parse(flagge.payload).delivered, false, 'and honestly says nothing was delivered')
+    falsch(existsSync(NOTIFY_LOG), 'no channel wrote anything')
+  })
+
+  await pruefe('an external notifier package joins the registry and gets a card of its own', async () => {
+    const dir = paketBauen('e2e-notifier', {
+      api: 1, id: 'e2e-notifier', kind: 'notifier', name: 'E2E Notifier', version: '2.0.0',
+      description: 'A notification channel built by the e2e suite.',
+    }, EXT_NOTIFIER)
+    const r = await formular('/settings/plugins/install', { path: dir }, { alsBrowser: true })
+    gleich(r.status, 303, `installed (${r.status === 400 ? await r.text() : ''})`.slice(0, 400))
+
+    const html = await (await hol('/settings/notifications')).text()
+    enthaelt(html, 'E2E Notifier', 'the package has a card on the notifications page')
+    enthaelt(html, 'Telegram', 'next to the built-in one')
+    gleich((html.match(/action="\/settings\/notifications\/save"/g) ?? []).length, 2, 'one card per registered notifier')
+    // It is registered but not yet ready: a declared `required` setting with no
+    // value is what "not configured" means, and the hub is still quiet.
+    enthaelt(html, 'No channel is configured', 'a registered channel is not a configured one')
+
+    // A duplicate id is refused for a notifier exactly as for the other kinds.
+    const wieder = paketBauen('e2e-notifier-again', {
+      api: 1, id: 'e2e-notifier', kind: 'notifier', name: 'A second one', version: '9.9.9',
+    }, EXT_NOTIFIER)
+    const r2 = await formular('/settings/plugins/install', { path: wieder }, { alsBrowser: true })
+    gleich(r2.status, 400, 'the duplicate is refused')
+    enthaelt(await r2.text(), 'already taken', 'and it says why')
+  })
+
+  await pruefe('configuring it makes the hub speak — and the message carries what a channel needs', async () => {
+    const r = await formular('/settings/notifications/save',
+      { id: 'e2e-notifier', enabled: '1', set_outfile: NOTIFY_LOG }, { alsBrowser: true })
+    gleich(r.status, 303, 'saved')
+    enthaelt(await (await hol('/settings/notifications')).text(), 'At least one channel is configured',
+      'and the page changes its mind about the installation')
+
+    const t = await formular('/settings/notifications/test', { id: 'e2e-notifier' }, { alsBrowser: true })
+    gleich(t.headers.get('location'), '/settings/notifications?test=ok', 'the test message went out')
+    const [erste] = gemeldet()
+    wahr(!!erste, 'the plugin really received it')
+    gleich(erste.kind, 'test', 'the message says what it is about')
+    wahr(String(erste.text).length > 0, 'and carries text')
+    wahr(String(erste.url ?? '').startsWith('http'), 'plus a link the channel may render')
+    wahr(String(erste.linkLabel ?? '').length > 0, 'with a label for it')
+  })
+
+  await pruefe('a run report reaches the configured channel, attachment and all', async () => {
+    const vorher = gemeldet().length
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E: a loud report', branch_mode: 'keiner', expected_minutes: '5' })
+    await sessionMerken(j.runId)
+    await warteAuf(() => lauf(j.runId).status === 'running', { was: 'the run is up' })
+    await sendReport(j.runId, { kind: 'done', text: 'loud and clear' })
+    await warteAuf(() => gemeldet().length > vorher, { was: 'the channel heard about the run', timeoutMs: 20_000 })
+    const m = gemeldet().at(-1)
+    gleich(m.kind, 'run', 'the message names what it is about')
+    gleich(m.runId, j.runId, 'and which run')
+    enthaelt(m.text, 'loud and clear', 'the report is in it')
+    wahr(String(m.attachment ?? '').endsWith('.md'), 'and the full report travels as an attachment')
+    gleich(JSON.parse(db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='notified:done'`)
+      .get(j.runId).payload).delivered, true, 'the flag records the delivery')
+  })
+
+  await pruefe('the notify flow step sends through the configured channels — under its new name and its old one', async () => {
+    for (const [typ, text] of [['notify', 'from the notify step'], ['telegram', 'from a flow saved before the rename']]) {
+      const vorher = gemeldet().length
+      const r = await jsonPost('/api/flows/save', {
+        name: `E2E-Notify-${typ}`, active: true, trigger: { kind: 'manual' },
+        definition: { properties: {}, sequence: [{
+          id: `e2e-${typ}`, componentType: 'task', type: typ, name: 'say it',
+          properties: { text, attachment: '', outputVar: 'out' },
+        }] },
+      })
+      const j = await r.json()
+      // A stored `telegram` step is not an error and not a migration: it is an
+      // ALIAS, so the flow saves, validates and runs as the notify step it is.
+      wahr(j.ok && !!j.id, `${typ}: flow saved (${JSON.stringify(j).slice(0, 200)})`)
+      // Through the route, not the function: "run now" is a button, and the
+      // route is what an operator's click reaches.
+      gleich((await formular(`/api/flows/${j.id}/run`, {}, { alsBrowser: true })).status, 303, `${typ}: run now`)
+      await warteAuf(() => gemeldet().length > vorher, { was: `${typ}: the message went out`, timeoutMs: 15_000 })
+      const m = gemeldet().at(-1)
+      gleich(m.kind, 'flow', `${typ}: the message says it comes from a flow`)
+      enthaelt(m.text, text, `${typ}: with the rendered text`)
+      const fr = db.prepare('SELECT * FROM flow_runs WHERE flow_id=? ORDER BY started_at DESC LIMIT 1').get(j.id)
+      gleich(fr.status, 'done', `${typ}: the flow run finished`)
+      gleich(JSON.parse(fr.context).vars.out.delivered, true, `${typ}: and recorded the delivery`)
+    }
+    // The designer only ever offers the new name.
+    const meta = await (await hol('/api/flows/meta')).json()
+    falsch(meta.steps.some(x => x.type === 'telegram'), 'the toolbox offers one notify block, not two')
+  })
+
+  await pruefe('switching the channel off silences it again, and uninstalling removes it', async () => {
+    const vorher = gemeldet().length
+    gleich((await formular('/settings/notifications/save',
+      { id: 'e2e-notifier', enabled: '0', set_outfile: NOTIFY_LOG }, { alsBrowser: true })).status, 303, 'switched off')
+    const t = await formular('/settings/notifications/test', { id: 'e2e-notifier' }, { alsBrowser: true })
+    enthaelt(decodeURIComponent(t.headers.get('location')), 'switched off', 'the test button says which of the two it is')
+    gleich(gemeldet().length, vorher, 'and nothing was written')
+
+    gleich((await formular('/settings/plugins/uninstall', { id: 'e2e-notifier' }, { alsBrowser: true })).status, 303, 'uninstalled')
+    falsch(existsSync(join(sk.PLUGINS, 'e2e-notifier')), 'the directory is gone')
+    const html = await (await hol('/settings/notifications')).text()
+    falsch(html.includes('E2E Notifier'), 'the page no longer offers it')
+    enthaelt(html, 'No channel is configured', 'and the hub is quiet again — which is a complete installation')
   })
 
   await pruefe('the welcome wizard answers on every step and each POST moves one step on', async () => {

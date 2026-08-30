@@ -332,12 +332,12 @@ async function cursorTurnEndDetected(run) {
  * Assess open incidents by time and state, in two directions:
  *
  *   UP   yellow log incidents escalate (retry loop or silence after the hit) →
- *        red + Telegram — bewerteLogTreffer's judgment, unchanged.
+ *        red + a notification — bewerteLogTreffer's judgment, unchanged.
  *   DOWN everything that demonstrably went away resolves ITSELF
  *        (vorfallWeggrund in detect.mjs): the run came through, the agent kept
  *        working after the occurrence, or a yellow hit was never repeated. The
  *        operator then has one thing fewer to click away — and an incident that
- *        was announced on Telegram also announces its recovery
+ *        that was announced also announces its recovery
  *        (vorfallVerwerfen), so an alarm that rang is un-rung.
  *
  * What deliberately stays open: a red incident on a failed/aborted run (the

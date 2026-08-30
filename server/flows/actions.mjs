@@ -1,13 +1,16 @@
 // cc-hub flows — the production `api` object the steps run against. This is the
 // ONLY file in the flow module that touches the rest of the hub for side effects
-// (tmux, Telegram, run creation). Tests pass a stub with the same shape.
+// (tmux, notifications, run creation). Tests pass a stub with the same shape.
 import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import db, { addEvent } from '../db.mjs'
 import { RUNS_DIR, sh, sendToSession, kurzid } from '../util.mjs'
 import { terminalText } from '../detect.mjs'
-import { notify, notifyLong, detailUrl, publicBase } from '../telegram.mjs'
+// Imported under a different name: the api object below has a method called
+// `notify` too, and one of the two reading as the other is a trap worth a line.
+import { notify as notifyChannels } from '../notify.mjs'
+import { detailUrl, publicBase } from '../util.mjs'
 import { startForAgent, startRun } from '../scheduler.mjs'
 import { extractStructured } from './llm.mjs'
 import { markStartedByFlow } from './db.mjs'
@@ -203,18 +206,28 @@ export const actions = {
   },
 
   /**
-   * Telegram message from a flow. The link points where the reader wants to go:
-   * the run the flow is about, otherwise the flow run itself. Deliberately NOT
-   * through notifyRun() — its dedupe is meant for the watcher's own alarms and
-   * would swallow a second flow message about the same run.
+   * A message from a flow to whatever channels are configured. The link points
+   * where the reader wants to go: the run the flow is about, otherwise the flow
+   * run itself. Deliberately NOT through notifyRun() — its dedupe is meant for
+   * the watcher's own alarms and would swallow a second flow message about the
+   * same run.
+   *
+   * With nothing configured this answers `false` and the step says so in its
+   * log line; it is not an error, and the flow carries on.
    */
-  async telegram(text, attachment = '', link = {}) {
+  async notify(text, attachment = '', link = {}) {
     const url = link.runId ? detailUrl(link.runId)
       : link.flowRunId ? `${publicBase()}/flows/runs/${link.flowRunId}`
         : `${publicBase()}/flows`
     const full = `${text}\n\n${url}`
-    if (attachment?.trim()) return notifyLong(full, { fileName: 'flow-attachment.md', fileContent: attachment })
-    return notify(full)
+    const r = await notifyChannels({
+      kind: 'flow',
+      runId: link.runId ?? null,
+      text: full,
+      url,
+      attachment: attachment?.trim() ? { fileName: 'flow-attachment.md', content: attachment } : null,
+    })
+    return r.sent
   },
 
   /** Text of a run for extraction: report, terminal log tail, or both. */

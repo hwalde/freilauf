@@ -1,0 +1,134 @@
+#!/usr/bin/env node
+// cc-notify — say something through whatever notification channels this hub has
+// configured. Best effort, from OUTSIDE the hub process.
+//
+//   cc-notify "the deploy rolled back"
+//   cc-notify --url https://hub.example/runs/… --kind deploy "text"
+//   echo "text" | cc-notify -
+//
+// Why this exists: `bin/cchub-deploy` has to be able to report a failed deploy,
+// and at that moment the hub may well be the thing that is down — so it cannot
+// POST to it. It used to read `telegram_token` and `telegram_chat` out of the
+// SQLite database and curl the Bot API itself: a second, independent Telegram
+// implementation in bash, which a facade in `server/` could not reach and which
+// no other channel could ever be added to.
+//
+// Now it loads the plugins and calls the same facade the hub calls. A deploy
+// failure therefore reaches whatever the operator configured — and NOTHING, in
+// silence and with exit code 0, when they configured none. That last part is
+// the point: notifications are optional, and a deploy must not fail because
+// there is nobody to tell.
+//
+// Exit codes: 0 = delivered, or nothing configured (both are fine); 1 = there
+// were channels and none of them took it. `--strict` makes "nothing configured"
+// an exit 1 too, for a caller that really wants to know.
+import { existsSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { homedir } from 'node:os'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+
+/**
+ * Where the hub's own modules live.
+ *
+ * `setup/02-install-scripts.sh` COPIES this file into `~/.local/bin`, so its
+ * own directory is only the answer when it is run straight out of a checkout.
+ * The order is: an explicit override, the checkout this file sits in, the
+ * deploy checkout the service runs from, the usual working copy. Each candidate
+ * is confirmed by the module actually being there — guessing a directory and
+ * failing with a stack trace would be worse than saying nothing.
+ */
+function hubRoot() {
+  const candidates = [
+    process.env.CCHUB_ROOT,
+    resolve(HERE, '..'),
+    process.env.CCHUB_DEPLOY_DIR,
+    join(homedir(), 'agents', 'deploy', 'cc-hub'),
+    join(homedir(), 'projects', 'cc-hub'),
+  ].filter(Boolean)
+  for (const dir of candidates) {
+    if (existsSync(join(dir, 'server', 'notify.mjs'))) return dir
+  }
+  return null
+}
+
+function usage(code = 0) {
+  process.stdout.write(`Usage: cc-notify [options] <text | ->
+
+  <text>            the message; "-" reads it from stdin
+  --url <url>       a link to carry with it (a channel may render it as a button)
+  --kind <kind>     what this is about: deploy | system | run | … (default: system)
+  --run <id>        the run this concerns, when there is one
+  --file <path>     attach this file's content (a channel decides whether to use it)
+  --strict          exit 1 when no notifier is configured
+  -q, --quiet       print nothing
+  -h, --help        this text
+`)
+  process.exit(code)
+}
+
+const args = process.argv.slice(2)
+if (!args.length || args.includes('-h') || args.includes('--help')) usage(args.length ? 0 : 2)
+
+const opt = { kind: 'system', url: null, run: null, file: null, strict: false, quiet: false }
+const words = []
+for (let i = 0; i < args.length; i++) {
+  const a = args[i]
+  if (a === '--url') opt.url = args[++i]
+  else if (a === '--kind') opt.kind = args[++i]
+  else if (a === '--run') opt.run = args[++i]
+  else if (a === '--file') opt.file = args[++i]
+  else if (a === '--strict') opt.strict = true
+  else if (a === '-q' || a === '--quiet') opt.quiet = true
+  else words.push(a)
+}
+
+const say = (s) => { if (!opt.quiet) process.stdout.write(s + '\n') }
+
+/** stdin, read whole. Only when the caller asked for it with "-". */
+async function readStdin() {
+  const chunks = []
+  for await (const c of process.stdin) chunks.push(c)
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+const text = words.length === 1 && words[0] === '-' ? (await readStdin()).trim() : words.join(' ')
+if (!text) { say('cc-notify: nothing to say'); process.exit(opt.strict ? 1 : 0) }
+
+const root = hubRoot()
+if (!root) {
+  // Not an error the caller can do anything about mid-deploy, and not a reason
+  // to fail one: say so and get out of the way.
+  say('cc-notify: cannot find the cc-hub modules (set CCHUB_ROOT) — nothing sent')
+  process.exit(opt.strict ? 1 : 0)
+}
+
+let attachment = null
+if (opt.file) {
+  try { attachment = { fileName: opt.file.split('/').pop() || 'attachment.md', content: readFileSync(opt.file, 'utf8') } }
+  catch { attachment = null }   // a missing attachment must not swallow the message
+}
+
+try {
+  // The plugin directory is walked first, exactly as `hub.mjs` does it: an
+  // external notifier package has to be registered before anything reads the
+  // registry, or the operator's own channel is the one that stays silent.
+  const { loadExternalPlugins } = await import(pathToFileURL(join(root, 'server', 'plugins', 'loader.mjs')).href)
+  await loadExternalPlugins()
+  const { notify, notifiersConfigured } = await import(pathToFileURL(join(root, 'server', 'notify.mjs')).href)
+
+  if (!notifiersConfigured()) {
+    say('cc-notify: no notifier configured — nothing sent')
+    process.exit(opt.strict ? 1 : 0)
+  }
+  const r = await notify({ kind: opt.kind, text, url: opt.url, runId: opt.run, attachment })
+  const failed = r.results.filter(x => !x.ok)
+  say(`cc-notify: delivered to ${r.delivered}/${r.results.length}`
+    + (failed.length ? ` (failed: ${failed.map(x => `${x.id} — ${x.error}`).join('; ')})` : ''))
+  process.exit(r.sent ? 0 : 1)
+} catch (err) {
+  say(`cc-notify: ${err?.message ?? err}`)
+  process.exit(1)
+}

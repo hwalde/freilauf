@@ -1130,7 +1130,7 @@ export async function pageRun(req, res, url, id) {
     : ''}
   <details ${live ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(terminalState(live, sessionOpen, inFlight))}</summary>
     <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
-    ${telegramSwitch(run)}
+    ${notifySwitch(run)}
     ${live && !inFlight ? `<p class="dim">${e(t('run.session_after_hint'))}</p>` : ''}
     ${live ? `<form onsubmit="return cchubSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>` : ''}
     ${inFlight
@@ -1162,20 +1162,23 @@ export async function pageRun(req, res, url, id) {
 }
 
 /**
- * The Telegram checkbox, right under the terminal — because that is where the
- * operator stands when the box matters: reading the report, typing the rest
+ * The notification checkbox, right under the terminal — because that is where
+ * the operator stands when the box matters: reading the report, typing the rest
  * into the session, and NOT wanting the phone to ring about a follow-up they
  * are watching land. Ticked for every run by default; unticking silences every
- * Telegram message about THIS run (reports, follow-ups, alarms, incidents) and
- * nothing else — the integration and the flows are not touched. Not part of the
- * run-detail fragment, like the terminal it sits under: a live update must not
- * flip a box the operator just clicked.
+ * message about THIS run (reports, follow-ups, alarms, incidents) on every
+ * configured channel and nothing else — the integration and the flows are not
+ * touched. Not part of the run-detail fragment, like the terminal it sits
+ * under: a live update must not flip a box the operator just clicked.
+ *
+ * The column behind it is still `runs.telegram_on` (renaming a column is a
+ * table rebuild); the id, the route and the label are channel-neutral.
  */
-export function telegramSwitch(run) {
+export function notifySwitch(run) {
   const on = run.telegram_on !== 0
-  return `<label class="chk telegram-switch" id="telegram-switch">
-    <input type="checkbox" id="telegram-on" data-run="${e(run.id)}"${on ? ' checked' : ''}>
-    ${e(t('run.telegram_on'))} <span class="dim">${e(t('run.telegram_on_hint'))}</span></label>`
+  return `<label class="chk notify-switch" id="notify-switch">
+    <input type="checkbox" id="notify-on" data-run="${e(run.id)}"${on ? ' checked' : ''}>
+    ${e(t('run.notify_on'))} <span class="dim">${e(t('run.notify_on_hint'))}</span></label>`
 }
 
 /**
@@ -1448,9 +1451,12 @@ export function runMetrics(run) {
   </dl>`
 }
 
-/** The run's history, oldest first — without the Telegram bookkeeping. */
+/** The run's history, oldest first — without the notification bookkeeping. */
 export function runEvents(runId) {
-  const events = db.prepare(`SELECT * FROM events WHERE run_id=? AND kind NOT LIKE 'telegram_sent%' ORDER BY id`).all(runId)
+  // Both names: `notified%` is what is written today, `telegram_sent%` what
+  // rows from before the notification rebuild carry.
+  const events = db.prepare(`SELECT * FROM events WHERE run_id=?
+      AND kind NOT LIKE 'notified%' AND kind NOT LIKE 'telegram_sent%' ORDER BY id`).all(runId)
   return `<ul class="events" id="run-events">${events.map(ev => `<li><span class="dim">${e(fmtDbUtc(ev.ts))}</span> ${e(ev.kind)}</li>`).join('') || `<li class="dim">${e(t('run.none'))}</li>`}</ul>`
 }
 
@@ -1763,8 +1769,6 @@ export async function pageSettings(req, res, url) {
       <p class="dim">${e(t('settings.numbers_hint'))}</p>
     </fieldset>
     <label>${e(t('settings.pipeline'))} <select name="pipeline_on"><option value="1" ${s.pipeline_on === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${s.pipeline_on !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
-    <label>${e(t('settings.telegram_token'))} <input name="telegram_token" type="password" value="${e(s.telegram_token ?? '')}"></label>
-    <label>${e(t('settings.telegram_chat'))} <input name="telegram_chat" value="${e(s.telegram_chat ?? '')}"></label>
     ${gatesFieldset(s)}
     <label>${e(t('settings.abo_price'))} <input name="abo_price" type="number" value="${e(s.abo_price ?? '200')}">
       <span class="dim">${e(t('settings.abo_price_hint'))}</span></label>
@@ -1812,10 +1816,9 @@ export async function pageSettings(req, res, url) {
     </fieldset>
     <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
   </form>
-  ${url.searchParams.get('telegram') === 'ok' ? `<p class="ok">✓ ${e(t('settings.telegram_ok'))}</p>` : ''}
-  ${url.searchParams.get('telegram') === 'fehler' ? `<p class="err">${e(t('settings.telegram_fail'))}</p>` : ''}
-  <p><a class="btn" href="/telegram-setup">${e(t('settings.telegram_setup'))}</a></p>
-  <form method="post" action="/settings/test-telegram"><button>${e(t('settings.telegram_test'))}</button></form>`
+  <h3>${e(t('notify.title'))}</h3>
+  <p class="dim">${e(t('notify.settings_pointer'))}</p>
+  <p><a class="btn" href="/settings/notifications">${e(t('notify.open'))}</a></p>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.settings'), '/settings', body))
 }
 
@@ -2142,7 +2145,6 @@ export async function codingAgentDelete(req, res, url, formBody) {
 import { redirect } from './web-helpers.mjs'
 import { startForAgent, startRun } from './scheduler.mjs'
 import { setSetting } from './db.mjs'
-import { sendTest } from './telegram.mjs'
 
 export async function runNewPost(req, res, url, formBody) {
   const b = await formBody()
@@ -2502,7 +2504,7 @@ export async function repoSave(req, res, url, formBody) {
  * fallback for an installation that has not saved the new field yet
  * (sessionKeepMs), and an empty write would silently reset it.
  */
-const STATIC_KEYS = ['pipeline_on', 'telegram_token', 'telegram_chat',
+const STATIC_KEYS = ['pipeline_on',
   'abo_price', 'session_keep_hours', 'archive_session_on', 'archive_session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
   'llm_check_on', 'llm_check_model', 'llm_check_or_provider', 'llm_check_source',
   'llm_title_on', 'llm_title_model', 'llm_title_or_provider', 'llm_title_source',
@@ -2534,7 +2536,7 @@ export async function settingsSave(req, res, url, formBody) {
   // Write only what the request actually CARRIED. This used to be `b[k] ?? ''`
   // over the whole list, which meant a body with one field blanked the other
   // fifteen — a settings page that saves a fragment at a time would have wiped
-  // the Telegram token the first time somebody switched the language. The e2e
+  // a stored secret the first time somebody switched the language. The e2e
   // suite still has to post everything back to change one value; that was the
   // symptom, and this is the cause.
   //
@@ -2557,110 +2559,3 @@ export async function settingsSave(req, res, url, formBody) {
   redirect(res, '/settings')
 }
 
-export async function settingsTestTelegram(req, res) {
-  // Without feedback this button clicks into the void: success and failure looked identical.
-  const ok = await sendTest()
-  redirect(res, `/settings?telegram=${ok ? 'ok' : 'fehler'}`)
-}
-
-// ---------------- Telegram setup assistant (planning 7.6, interactive) ----------------
-// Guides through: 1) enter BotFather token  2) send /start to the bot
-//                 3) pick the chat from getUpdates  4) send a test message.
-
-export async function telegramSetup(req, res, url) {
-  const s = Object.fromEntries(db.prepare(`SELECT key,value FROM settings`).all().map(r => [r.key, r.value]))
-  const tokenSet = !!s.telegram_token
-  const chatSet = !!s.telegram_chat
-
-  const step1 = `
-  <div class="card ${tokenSet ? 'ok' : ''}">
-    <h3>${e(t('tg.step1'))}</h3>
-    <p class="dim">${e(t('tg.step1_hint'))}</p>
-    <form method="post" action="/telegram-setup/token" class="inline">
-      <input name="telegram_token" type="password" placeholder="${e(t('tg.token_ph'))}" size="50" required>
-      <button>${e(t('tg.token_save'))}</button>
-    </form>
-    ${tokenSet ? `<p class="ok">✓ ${e(t('tg.token_saved'))}</p>` : ''}
-  </div>`
-
-  const step2 = `
-  <div class="card ${chatSet ? 'ok' : ''}">
-    <h3>${e(t('tg.step2'))}</h3>
-    <p class="dim">${e(t('tg.step2_hint'))}</p>
-    <button id="tg-fetch">${e(t('tg.fetch'))}</button>
-    <div id="tg-chats"></div>
-    ${chatSet ? `<p class="ok">✓ ${e(t('tg.chat_saved'))}: <code>${e(s.telegram_chat)}</code></p>` : ''}
-  </div>`
-
-  const step3 = `
-  <div class="card">
-    <h3>${e(t('tg.step3'))}</h3>
-    <form method="post" action="/settings/test-telegram"><button>${e(t('tg.send_test'))}</button></form>
-    <p class="dim">${e(t('tg.step3_hint'))}</p>
-  </div>`
-
-  const body = `
-  <h2>${e(t('tg.title'))}</h2>
-  ${step1}${step2}${step3}
-  <script>
-  document.getElementById('tg-fetch')?.addEventListener('click', async () => {
-    const box = document.getElementById('tg-chats')
-    box.textContent = '…'
-    try {
-      const r = await fetch('/api/telegram/chats')
-      const j = await r.json()
-      if (!j.ok) { box.innerHTML = '<p class="err">' + j.error + '</p>'; return }
-      if (!j.chats.length) { box.innerHTML = '<p class="warn">${e(t('tg.no_chats'))}</p>'; return }
-      box.innerHTML = j.chats.map(c =>
-        '<form method="post" action="/telegram-setup/chat"><input type="hidden" name="chat_id" value="' + c.id + '">' +
-        '<button>${e(t('tg.use'))}: ' + c.label + ' (ID ' + c.id + ')</button></form>').join('')
-    } catch (e2) { box.textContent = String(e2) }
-  })
-  </script>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('tg.title'), '/settings', body))
-}
-
-export async function telegramTokenSave(req, res, url, formBody) {
-  const b = await formBody()
-  const token = b.telegram_token?.trim()
-  if (!/^\d+:[A-Za-z0-9_-]+$/.test(token ?? '')) { res.writeHead(400).end(t('tg.token_invalid')); return }
-  setSetting('telegram_token', token)
-  redirect(res, '/telegram-setup')
-}
-
-export async function telegramChatSave(req, res, url, formBody) {
-  const b = await formBody()
-  if (!/^-?\d+$/.test(b.chat_id ?? '')) { res.writeHead(400).end(t('tg.chat_invalid')); return }
-  setSetting('telegram_chat', b.chat_id)
-  redirect(res, '/telegram-setup')
-}
-
-/** Read getUpdates and return known chats, deduplicated. */
-export async function telegramChats(_req, res) {
-  const token = db.prepare(`SELECT value FROM settings WHERE key='telegram_token'`).get()?.value
-  if (!token) return jsonOut(res, 400, { ok: false, error: t('tg.no_token') })
-  try {
-    const r = await fetch(`https://api.telegram.org/bot${token}/getUpdates?limit=100`, { signal: AbortSignal.timeout(15_000) })
-    const j = await r.json()
-    if (!j.ok) return jsonOut(res, 200, { ok: false, error: t('tg.api_error', { msg: j.description ?? t('tg.unknown_error') }) })
-    const byId = new Map()
-    for (const u of j.result ?? []) {
-      for (const key of ['message', 'edited_message', 'channel_post', 'my_chat_member']) {
-        const chat = u[key]?.chat
-        if (!chat) continue
-        const text = u[key]?.text || u[key]?.caption || ''
-        const label = [chat.first_name, chat.last_name, chat.title, chat.username && '@' + chat.username].filter(Boolean).join(' ')
-        const prev = byId.get(chat.id)
-        if (!prev) byId.set(chat.id, { id: chat.id, label: label || t('tg.chat_fallback', { id: chat.id }), last_text: text })
-        else if (text) prev.last_text = text
-      }
-    }
-    jsonOut(res, 200, { ok: true, chats: [...byId.values()] })
-  } catch (err) {
-    jsonOut(res, 200, { ok: false, error: t('tg.unreachable', { err: err.message }) })
-  }
-}
-
-function jsonOut(res, code, obj) {
-  res.writeHead(code, { 'content-type': 'application/json' }).end(JSON.stringify(obj))
-}

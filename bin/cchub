@@ -29,7 +29,7 @@ Usage: cchub <command>
   pipeline on|off|status   global AND gate for scheduled agent starts
 
 Switch model: access (VPN proxy) · pipeline (scheduler gate) · agent (active flag
-in the UI). Hub, scheduler, watcher, Telegram and running agents keep running
+in the UI). Hub, scheduler, watcher, notifications and running agents keep running
 independently of the access switch.
 EOF
 }

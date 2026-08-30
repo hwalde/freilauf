@@ -1,12 +1,13 @@
-# Plugin architecture: coding agents and model providers
+# Plugin architecture: coding agents, model providers and notification channels
 
-Coding agents (the CLI "harnesses" the hub drives in a tmux session) and model
-providers are **plugins**: one plain-object descriptor per file, collected by a
-registry. Everything else in the hub — forms, run start, log detection, the
-provider pulse, the usage panel, the budget gate, the hub's own LLM calls —
-consults that registry rather than naming a vendor.
+Coding agents (the CLI "harnesses" the hub drives in a tmux session), model
+providers and notification channels are **plugins**: one plain-object descriptor
+per file, collected by a registry. Everything else in the hub — forms, run
+start, log detection, the provider pulse, the usage panel, the budget gate, the
+hub's own LLM calls, every message it sends a human — consults that registry
+rather than naming a vendor.
 
-Until recently the two registries were static objects built at import time, and
+Until recently the registries were static objects built at import time, and
 adding a coding agent meant editing the hub. They are **mutable** now, and a
 third party can drop a package on the machine that joins them at startup. That
 one change is what the rest of this document is about: what a package looks
@@ -15,7 +16,7 @@ process environment, and which of the old rules survived.
 
 ```
 server/plugins/
-  registry.mjs   THE registry: HARNESS_PLUGINS, PROVIDER_PLUGINS, register/unregister, errors
+  registry.mjs   THE registry: HARNESS_PLUGINS, PROVIDER_PLUGINS, NOTIFIER_PLUGINS, register/unregister, errors
   manifest.mjs   manifest + descriptor validation — pure, no I/O, unit-testable
   loader.mjs     loadExternalPlugins(): read the plugin directory, validate, register
   install.mjs    install from a directory, uninstall, list packages (broken ones included)
@@ -31,10 +32,16 @@ server/harnesses/          built-in coding agents
 server/providers/          built-in model providers
   index.mjs                front door — re-exports the registry
   openrouter.mjs  deepseek.mjs  opencode-zen.mjs
+server/notifiers/          built-in notification channels
+  index.mjs                front door — re-exports the registry
+  telegram.mjs             the only built-in one
+server/notify.mjs          THE facade: notify(), notifiersConfigured(), sendTest()
+server/notifications.mjs   Settings → Notifications, and the setup-wizard dispatcher
+bin/cc-notify              the same facade from outside the hub process (deploy scripts)
 server/llm/
   json.mjs     tolerant JSON extraction and repair (pure)
   schema.mjs   the minimal JSON-Schema subset: validate/coerce, and explain to a model
-  alerts.mjs   throttled, deduplicated Telegram alerts for failed LLM calls
+  alerts.mjs   throttled, deduplicated alerts for failed LLM calls
 server/coding-agents.mjs   the old coding-agent API, now an adapter over plugin_config
 server/usage.mjs           aggregates plugin usage() for the UI
 server/balances.mjs        aggregates plugin balance() for the UI
@@ -43,16 +50,17 @@ server/balances.mjs        aggregates plugin balance() for the UI
 ## What a plugin is, and where it lives
 
 A plugin is a **descriptor object**: data plus functions, with no state of its
-own and nothing imported from the hub. It is either a `harness` (a coding agent)
-or a `provider` (a model provider); the two contracts overlap in their optional
-halves (`credentials`, `settings`, `gate`, `llm`) and differ in everything a run
-needs.
+own and nothing imported from the hub. It is a `harness` (a coding agent), a
+`provider` (a model provider) or a `notifier` (a notification channel); the
+three contracts overlap in their optional halves (`credentials`, `settings`) and
+differ in everything else.
 
 Built-in plugins live where they always did:
 
 ```
 server/harnesses/<id>.mjs      shipped coding agents
 server/providers/<id>.mjs      shipped model providers
+server/notifiers/<id>.mjs      shipped notification channels
 ```
 
 An external plugin is a **package directory** under the plugin directory
@@ -71,7 +79,8 @@ An external plugin is a **package directory** under the plugin directory
 ```
 
 `validateManifest()` (manifest.mjs) enforces: `api` must be exactly `1`; `id`
-matches `^[a-z0-9][a-z0-9-]{1,39}$`; `kind` is `harness` or `provider`; `name`
+matches `^[a-z0-9][a-z0-9-]{1,39}$`; `kind` is `harness`, `provider` or
+`notifier`; `name`
 and `version` are present; `main` defaults to `index.mjs` and may neither start
 with `/` nor contain `..` — a manifest must not be able to import something else
 on the machine. The returned value is a **normalized copy** carrying only the
@@ -95,13 +104,14 @@ happened" has an answer on the Plugins page.
 
 ## The registry
 
-`server/plugins/registry.mjs` owns `HARNESS_PLUGINS` and `PROVIDER_PLUGINS`.
-`server/harnesses/index.mjs` and `server/providers/index.mjs` are now front
-doors that **re-export those very objects** — the same identity, not a copy — so
-all their importers were untouched by the rebuild and a plugin registered later
-is simply present in the object every importer already holds. That is the whole
-reason the registry is mutable: by the time a package on disk has been read,
-every static importer has long since captured the object.
+`server/plugins/registry.mjs` owns `HARNESS_PLUGINS`, `PROVIDER_PLUGINS` and
+`NOTIFIER_PLUGINS`. `server/harnesses/index.mjs`, `server/providers/index.mjs`
+and `server/notifiers/index.mjs` are front doors that **re-export those very
+objects** — the same identity, not a copy — so all their importers were
+untouched by the rebuild and a plugin registered later is simply present in the
+object every importer already holds. That is the whole reason the registry is
+mutable: by the time a package on disk has been read, every static importer has
+long since captured the object.
 
 | Function | Answers |
 |---|---|
@@ -113,6 +123,7 @@ every static importer has long since captured the object.
 | `registryErrors()` / `addRegistryError(where, error)` | every load failure, newest last |
 | `harnessIds/getHarness/harnessLabel/goalSpec/harnessesWithGoal/detectInstalled` | the harness half |
 | `providerIds/getProvider/providerLabel/providerHasKey` | the provider half |
+| `notifierIds/getNotifier/notifierLabel/notifiersWithSetup` | the notifier half |
 | `binaryPresent(bin)` | `command -v` — never throws, a missing binary is a normal answer |
 
 **Load order**: the built-ins are registered at module evaluation (they are
@@ -168,12 +179,14 @@ only ever turned a bug into a 500 one layer further down — which is why
   cycle is gone. It should not need to — everything it can want arrives in
   `pluginCtx` — and a plugin that imports nothing of ours is the one that
   survives a refactor.
-- A **built-in** plugin file (`server/harnesses/*.mjs`,
-  `server/providers/*.mjs`) still must not import `db.mjs`, `i18n.mjs`,
+- A **built-in** plugin file (`server/harnesses/*.mjs`, `server/providers/*.mjs`,
+  `server/notifiers/*.mjs`) still must not import `db.mjs`, `i18n.mjs`,
   `models.mjs` or `plugins/context.mjs`. They are imported *by* the registry, so
   anything they pull in is pulled in during the registry's own evaluation. UI
   strings are therefore i18n **keys** (`labelKey`, `hintKey`, `hinweisKey`,
-  `descriptionKey`), resolved by the callers.
+  `descriptionKey`), resolved by the callers — and where a plugin renders a
+  whole page (a notifier's `setup`), the translator is **handed in** rather than
+  imported.
 - `server/harnesses/cli-llm.mjs` and `server/harnesses/patterns.mjs` are the two
   shared helpers a plugin file may import, precisely because neither imports
   anything of the hub's. `cli-llm.mjs` repeats the "read a listing through a
@@ -220,6 +233,7 @@ because the plugin asks `ctx.secret()` instead of reading a fixed name.
 | `env` | `process.env`, for legacy reads — prefer `secret()` |
 | `secret(key = 'api_key')` | the resolved credential, or `null` |
 | `setting(key, fallback)` | this plugin's own declared setting value |
+| `setSetting(key, value)` | write one of this plugin's OWN settings — resolved through the same field declaration, so a declared `settingKey` is honoured in both directions and a plugin can never write another plugin's row. A notifier's setup wizard needs it; there is nothing else it could store its token in |
 | `log(msg)` | one fail-soft console line, prefixed with the plugin id |
 
 `json` and `registry` used to be `providerCtx()` in models.mjs; they live here
@@ -433,6 +447,169 @@ Rules a plugin must keep:
 provider with its own `ok` flag) for the usage panel and `GET /api/usage`. It
 asks only providers that at least one **enabled** coding agent may use and that
 actually have a credential — a balance nobody can act on is noise.
+
+## Notifier plugin contract (`server/notifiers/<id>.mjs`)
+
+The minimum `validateDescriptor()` enforces: `id`, `label`, and a `send`
+function. Everything that makes a channel configurable is optional, because the
+smallest useful notifier is a webhook with a URL in a setting and a `send` that
+posts to it.
+
+**Notifications are optional, and that is a contract too.** A hub with no
+notifier configured schedules, watches, merges, records and reports exactly as
+one with three — it simply says nothing out loud. Nothing in the hub treats that
+as a problem: no banner, no warning, no required step in the Welcome wizard, no
+error from any call site. Whatever you write here must keep that true.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | registry key; also the directory name of an external package and the last path segment of its setup wizard |
+| `label` | string | display name on the Notifications page |
+| `descriptionKey` | i18n key (optional) | 1–3 sentences on the channel's card |
+| `settings` | `SettingField[]` (optional) | operator-configurable fields, the same shape the gates use — including the `settingKey` escape hatch. A field marked `required: true` is part of the default answer to "is this channel configured?" |
+| `credentials` | `[{key, envKeys[], labelKey, helpKey?, required?}]` (optional) | exactly the provider declaration, rendered by the same block and resolved through `ctx.secret()` |
+| `configured(ctx)` | fn → boolean (optional) | overrides the default readiness rule below, for a channel whose readiness is not a matter of filled-in fields |
+| `send(message, ctx)` | async fn | **the contract.** Deliver one normalized message; return `{ ok, error? }` |
+| `test(message, ctx)` | async fn (optional) | what the "send test message" button calls; without it the button calls `send`. **Same signature as `send`** — the facade calls whichever exists with the same two arguments |
+| `setup` | `{ labelKey?, render, actions?, json? }` (optional) | a server-rendered setup wizard the plugin brings; see below |
+
+### The message
+
+`send()` receives one normalized object. The hub composes it; how it is rendered
+belongs entirely to the channel — Telegram turns it into escaped HTML with an
+inline button, a webhook would turn it into JSON, an SMTP notifier into a
+subject and a body.
+
+```js
+{
+  kind: 'run' | 'incident' | 'llm_alert' | 'flow' | 'repo' | 'deploy' | 'test' | 'system',
+  text: 'the message, plain text, newline-separated',
+  html: null,                       // optional pre-rendered HTML; the hub never sets it
+  url: 'https://hub…/runs/<id>',    // optional deep link
+  linkLabel: 'Open detail page',    // translated label for that link
+  runId: '<uuid>' | null,           // the run this is about, when there is one
+  attachment: { fileName, content } | null,
+}
+```
+
+Four rules a `send()` must keep:
+
+- **Never throw for a delivery that merely failed.** `{ ok: false, error: '…' }`
+  is the answer; the facade logs it through a throttle and carries on with the
+  other channels. A thrown error is caught too, but it costs the error message
+  its shape. Add `errorKey: 'my.key'` when the failure has a NAME the operator
+  should read in their own language ("no bot token saved") — the "send test
+  message" button renders it, and an untranslated `error` there would be English
+  on a German page. `error` stays as the developer-facing fallback, and a
+  package that knows nothing about i18n still produces something readable.
+- **`text` is the content, `html` is a courtesy.** The hub composes plain text
+  and nothing else, so a channel that renders only `html` would render nothing.
+- **The attachment is optional to USE.** It exists because a report has to
+  arrive complete and most channels truncate; a channel with no file concept
+  ignores it, and one that has to choose sends the text and appends the file
+  only when the text really does not fit (Telegram's rule: over 4096 characters,
+  or a file worth more than ~3000).
+- **`url` is a link, not a promise.** Render it as a button, append it to the
+  text, or drop it.
+
+### Is it configured?
+
+`notifierConfigured(id)` (notify.mjs) is the question that decides whether the
+hub speaks at all, and the default rule reads the declaration: every `required`
+setting must hold a non-empty value, and every `required` credential must
+resolve. A plugin may answer for itself with `configured(ctx)`. Anything that
+throws while being asked is "not configured" — a broken channel is not a reason
+to fail a run.
+
+**A registered notifier is ENABLED by default**, like a model provider and for a
+reason one step stronger: an installation that already had a token in `settings`
+has no `plugin_config` row for it either, and an off-by-default notifier would
+silence a channel that worked the minute before the upgrade. Enabled is not
+configured; the fresh installation stays quiet all the same.
+
+### `setup`: a wizard the plugin brings
+
+Some channels need more than a form — Telegram wants a BotFather token, then a
+chat id read out of `getUpdates`, then a test message. That is knowledge about
+Telegram and it travels with the plugin:
+
+```js
+setup: {
+  labelKey: 'notify.setup_open',
+  async render(ctx, page, url) { return '<div class="card">…</div>' },
+  actions: { token: async (ctx, page, body) => ({ ok: true }) | ({ error: '…' }) },
+  json:    { chats: async (ctx, page, url) => ({ status?, body }) },
+}
+```
+
+The hub serves three routes for it, and nothing else:
+
+| Route | Calls |
+|---|---|
+| `GET /settings/notifications/<id>` | `setup.render()`, wrapped in the ordinary layout |
+| `POST /settings/notifications/<id>/<name>` | `setup.actions[name]` — `{ error }` renders a problem page, anything else redirects back to the wizard |
+| `GET /settings/notifications/<id>/json/<name>` | `setup.json[name]` — its `body` is sent as JSON |
+
+`test` is offered to every wizard **without the plugin declaring it**: sending
+one message is the last step of every setup there is.
+
+`page` is `{ t, e, base }` — the translator, the HTML escaper, and this
+plugin's own base path. Handing the translator IN is what lets a *built-in*
+plugin render a translated page without importing `i18n.mjs`; the import rule
+above is not negotiable, and a wizard that could only speak English would be a
+poor trade for it. Writing goes through `ctx.setSetting()`, so a wizard can only
+ever store its own plugin's settings.
+
+An external plugin cannot add server routes of its own — these three are all
+there is. For most channels that is plenty: a webhook, a Slack app or an SMTP
+sender is fully described by `settings` and `credentials`, and needs no `setup`
+at all.
+
+### The facade: `server/notify.mjs`
+
+Nothing in the hub imports a notifier. Every message goes through one function,
+and that indirection is what makes the channel swappable *and* optional.
+
+| Function | Answers |
+|---|---|
+| `notify(message)` | send to every enabled, configured notifier — in parallel, every failure caught. `{ sent, delivered, results }`; never throws |
+| `notifyLong(text, {fileName, fileContent, url, kind, runId})` | the same, in the shape the report callers think in |
+| `notifiersConfigured()` | would a message go anywhere at all? |
+| `configuredNotifiers()` / `notifierPlugins()` / `notifierConfigured(id)` | the list, and the readiness of one |
+| `sendTest(id)` | the "send test message" button; names `disabled` / `not configured` rather than reporting a success nobody had |
+| `notifyOnFor(runId)` / `notifyMuted(runId)` | the per-run checkbox under the terminal |
+| `publicBase()` / `detailUrl(runId)` | re-exported from `util.mjs`, where they belong: a link is a fact about the installation, not about a channel |
+
+Per-notifier failures are logged **through a throttle** — one line per
+`(notifier, reason)` per ten minutes, with what was suppressed named in the next
+one. A wrong token fails on every single message the hub sends, and a journal
+that repeats that is a journal nobody reads (the same argument `llm/alerts.mjs`
+is built on, one layer out).
+
+**The per-run dedupe is deliberately NOT here.** `notifyRun()` in `reports.mjs`
+owns it, because "has the operator been told this once?" is a fact about the
+RUN. Its flag is the event `notified:<type>`; the old name `telegram_sent:<type>`
+is still read, so a run that was told about its overrun before the rebuild is
+not told again after it. The column behind the per-run checkbox is still
+`runs.telegram_on` — renaming a column means rebuilding the table, which is the
+same "a migration for nothing" rule that leaves `openrouter_min_eur` holding
+dollars.
+
+### `bin/cc-notify`: the facade from outside
+
+`bin/cchub-deploy` has to be able to report a failed deploy at a moment when the
+hub may be the thing that is down, so it cannot POST to it. It used to read
+`telegram_token` and `telegram_chat` out of the SQLite database and curl the Bot
+API — a second, independent Telegram implementation in bash that no facade could
+reach and no other channel could be added to.
+
+`cc-notify "<text>" [--url u] [--kind k] [--run id] [--file f] [--strict] [--quiet]`
+loads the plugin directory and calls the same facade. It finds the hub's modules
+via `CCHUB_ROOT`, then its own checkout, then `CCHUB_DEPLOY_DIR` /
+`~/agents/deploy/cc-hub`, then `~/projects/cc-hub`, and confirms each candidate
+by `server/notify.mjs` actually being there. Exit `0` when delivered **or when
+nothing is configured** — both are fine, and a deploy must not fail because
+there is nobody to tell; `--strict` turns the second one into a `1`.
 
 ## Gates: the budget gate is plugin-declared
 
@@ -732,7 +909,7 @@ operator has **configured**.
 ```sql
 plugin_config(
   plugin_id  TEXT PRIMARY KEY,
-  kind       TEXT NOT NULL,                    -- harness | provider
+  kind       TEXT NOT NULL,                    -- harness | provider | notifier
   enabled    INTEGER NOT NULL DEFAULT 1,
   config     TEXT NOT NULL DEFAULT '{}',       -- {providers:[], credentials:{}, settings:{}}
   source     TEXT NOT NULL DEFAULT 'builtin',  -- builtin | external
@@ -740,15 +917,20 @@ plugin_config(
   updated_at TEXT NOT NULL DEFAULT (datetime('now')))
 ```
 
-One table for both kinds, because the two questions are the same question:
+One table for all three kinds, because they are the same question:
 `coding_agents` only ever knew coding agents, so a model provider had no place
-to carry an enabled flag, a credential or a setting of its own.
+to carry an enabled flag, a credential or a setting of its own, and a
+notification channel had no place at all.
 
 **`isPluginEnabled(id)` defaults differently per kind, on purpose.** An
 unconfigured coding agent is **off** — a fresh installation deliberately has
-none and shows a banner until one is configured. An unconfigured provider is
-**on**: there was no enable flag for providers before this table, and inventing
-an off-by-default one would switch off working installations.
+none and shows a banner until one is configured. An unconfigured provider or
+notifier is **on**: there was no enable flag for either before this table, and
+inventing an off-by-default one would switch off working installations. For a
+notifier the argument goes one step further: an installation that already had a
+Telegram token in `settings` has no row here either, and an off-by-default
+channel would have gone silent on upgrade. Enabled is not configured, so a fresh
+installation stays quiet all the same.
 
 **Credentials are stored as a mode, not as a value.**
 `setCredential(pluginId, key, {mode, envVar, value})`: `'env'` stores the name
@@ -817,7 +999,9 @@ Two rules the module hangs on:
 - **A found credential is named, never read.** The row carries the NAME of the
   environment variable and nothing else. A discovery row is rendered into a page
   and could travel with a database copy; a secret in it would be a secret in
-  places nobody expects one.
+  places nobody expects one. A notifier is scanned the same way a provider is —
+  by its declared credential variables — so one that declares none (Telegram
+  keeps its token in a setting) simply produces no finding.
 - **The operator is asked once.** The upsert never overwrites `asked_at` or
   `answer`, and the write happens when the operator **answers** (Add or Not
   now), not when a page renders — a page that only shows something has not asked
@@ -849,8 +1033,18 @@ credentials". `/settings/coding-agents` is a 303 redirect to it.
    questions" (`llm`), "balance visible" (`balance`) and "credential present",
    the plugin's own `settings` fields, version and "Remove" for an external one.
 4. **Plugin packages** — every external package with id, kind, name, version,
-   path and its load error as it stands; the registry's error list below it; an
-   "Install from a directory" form; and a note that built-ins cannot be removed.
+   path and its load error as it stands (a notifier package appears here too);
+   the registry's error list below it; an "Install from a directory" form; and a
+   note that built-ins cannot be removed.
+
+Notification channels are **not** on this page — they have one of their own,
+`/settings/notifications`, because the question there is different: not "what
+can this hub drive" but "where does it say things, and does it have to say them
+anywhere at all". It renders the same card blocks (`checkbox`,
+`credentialsBlock`, `settingsBlock`, `cardFooter` are exported from
+`plugins/web.mjs` for exactly that) plus a test button and a link to the
+plugin's own setup wizard, and it opens by saying that all of it is optional.
+`/telegram-setup` is a 303 to the Telegram plugin's wizard.
 
 Routes: `GET /settings/plugins`, and `POST` to `…/save`, `…/add`, `…/remove`
 (forget a plugin's configuration; the plugin stays registered), `…/install`,
@@ -938,6 +1132,31 @@ Three page-level rules worth knowing:
 8. Enable the provider under Settings → Plugins, and allow it per coding agent
    on that agent's card.
 
+## Adding a new notification channel
+
+1. Create `server/notifiers/<id>.mjs` (built-in) or a package directory with a
+   `plugin.json` carrying `"kind": "notifier"` and an `index.mjs` (external).
+   Export the descriptor as the **default export**. `validateDescriptor()`
+   requires `id`, `label` and `send` — nothing else.
+2. Declare what the operator has to fill in as `settings` (and/or
+   `credentials`), and mark the fields that make the channel usable
+   `required: true` — that is how the hub knows whether it may speak at all.
+   Read them with `ctx.setting()` / `ctx.secret()`, never from `process.env`.
+3. Write `send(message, ctx)`. Return `{ ok: true }` or
+   `{ ok: false, error: '…' }`; do not throw for a delivery that merely failed.
+   Render from `message.text`; use `url`, `runId` and `attachment` if your
+   channel has a place for them, and ignore them if it does not.
+4. Register a built-in in `NOTIFIER_PLUGINS` in `server/plugins/registry.mjs`;
+   an external package registers itself when the hub loads the plugin directory.
+5. Add every i18n key the descriptor names (`descriptionKey`, the fields'
+   `labelKey`/`hintKey`) to **all three** catalogs — `lang/en.json`,
+   `lang/de.json`, `lang/zh.json`. A unit test enforces identical key sets.
+6. Optional: `test()` if a test message should look different from a real one,
+   and `setup` if the channel needs a guided setup rather than a form.
+7. Done. The card, the enabled switch, the credentials block, the test button,
+   the flow `notify` step, `bin/cc-notify` and every message the hub sends all
+   follow the registry. Configure it under **Settings → Notifications**.
+
 ## Known limits, stated rather than hidden
 
 - **The four shipped coding agents keep their own `case` in `bin/cc-start`**,
@@ -951,3 +1170,11 @@ Three page-level rules worth knowing:
   machine without it can still start the four built-ins and nothing else.
 - **i18n is not generated.** A plugin declares keys; somebody has to put them in
   three catalogs.
+- **An external plugin cannot add routes.** A notifier's `setup` gets the three
+  addresses listed above and nothing more. That is enough for a guided setup and
+  not enough for an arbitrary page, which is the trade this contract makes on
+  purpose: three routes the hub owns are three routes it can reason about.
+- **`alerts.mjs` mentions no channel any more**, but it still keys its throttle
+  on the failure signature and not on the channel. Two configured notifiers
+  therefore share one alert window — which is right (the failure is the news,
+  not the number of ways it was announced) and worth knowing.

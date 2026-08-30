@@ -44,6 +44,17 @@ import { pluginFields, pluginSettingKey, pluginSettingValue } from './settings.m
 /** A `<p class="dim">` explanation — every section carries one (see PLAN §2). */
 const explain = (key) => `<p class="dim">${e(t(key))}</p>`
 
+/**
+ * What a plugin kind is called in the UI. One function rather than the ternary
+ * it used to be in three places: a third kind (`notifier`) made the ternary
+ * answer "model provider" for it, which is a wrong label rendered confidently.
+ */
+export function kindLabel(kind) {
+  return t(kind === 'harness' ? 'plugins.kind_harness'
+    : kind === 'notifier' ? 'plugins.kind_notifier'
+      : 'plugins.kind_provider')
+}
+
 // ---------------- the banner ----------------
 
 /**
@@ -82,7 +93,7 @@ export function discoveryBanner(backTo = '/') {
  * `0`. Every switch on this page goes through here, so the rule cannot be
  * forgotten in one place only.
  */
-function checkbox(name, on, label, extra = '') {
+export function checkbox(name, on, label, extra = '') {
   return `<input type="hidden" name="${e(name)}" value="0">
     <label class="chk"><input type="checkbox" name="${e(name)}" value="1" ${on ? 'checked' : ''}> ${e(label)}${extra}</label>`
 }
@@ -121,7 +132,7 @@ function credentialState(pluginId, spec, env = process.env) {
  * nothing to show and `setCredential()` reads an empty submit as "keep what is
  * stored", so a save cannot silently delete a key.
  */
-function credentialsBlock(pluginId, plugin) {
+export function credentialsBlock(pluginId, plugin) {
   const specs = credentialSpec(plugin)
   if (!specs.length) return ''
   const rows = specs.map(spec => {
@@ -183,7 +194,7 @@ function settingField(pluginId, field) {
   return `<label>${label} <input type="${type}" name="${e(name)}" value="${shown}"${num}>${hint}</label>`
 }
 
-function settingsBlock(pluginId, plugin) {
+export function settingsBlock(pluginId, plugin) {
   const fields = pluginFields(plugin, 'settings')
   if (!fields.length) return ''
   return `<fieldset><legend>${e(t('plugins.settings_legend'))}</legend>
@@ -200,7 +211,7 @@ function settingsBlock(pluginId, plugin) {
  * its button ends up submitting the outer form — which here would mean
  * "Remove" quietly saving the plugin instead of removing it.
  */
-function cardFooter(id, label) {
+export function cardFooter(id, label) {
   const forget = pluginConfig(id)
     ? `<form method="post" action="/settings/plugins/remove" class="inline"
         onsubmit="return confirm(${e(JSON.stringify(t('plugins.reset_confirm', { label })))})">
@@ -240,7 +251,7 @@ function discoverySection() {
         : t('plugins.found_bin', { bin: row.detail?.bin ?? row.plugin_id }))
       : t('plugins.found_env', { name: row.detail?.envVar ?? '' })
     return `<div class="card plugin-card">
-      <h3>${e(label)} <span class="dim">${e(t(row.kind === 'harness' ? 'plugins.kind_harness' : 'plugins.kind_provider'))}</span></h3>
+      <h3>${e(label)} <span class="dim">${e(kindLabel(row.kind))}</span></h3>
       <p>${e(what)}</p>
       <div class="btn-row">
         <form method="post" action="/settings/plugins/add" class="inline">
@@ -338,7 +349,7 @@ function packagesSection() {
   try { packages = listPackages() } catch { packages = [] }
   const rows = packages.map(p => `<tr${p.error ? ' class="broken"' : ''}>
     <td><code>${e(p.id)}</code></td>
-    <td>${e(p.kind ? t(p.kind === 'harness' ? 'plugins.kind_harness' : 'plugins.kind_provider') : '—')}</td>
+    <td>${e(p.kind ? kindLabel(p.kind) : '—')}</td>
     <td>${e(p.name)}</td>
     <td>${e(p.version || '—')}</td>
     <td><code>${e(p.path)}</code></td>
@@ -391,6 +402,7 @@ export async function pagePlugins(req, res, url) {
   const body = `
   <h2>${e(t('plugins.title'))}</h2>
   ${explain('plugins.intro')}
+  <p class="dim">${e(t('plugins.notifiers_pointer'))} <a href="/settings/notifications">${e(t('notify.title'))}</a></p>
   ${found.html}
   ${found.scanLine}
   ${await harnessSection()}
@@ -437,12 +449,27 @@ export async function pluginsSave(req, res, url, formBody) {
       value: b[`cred_${spec.key}_value`] ?? '',
     })
   }
+  saveDeclaredSettings(id, plugin, b)
+  redirect(res, BACK)
+}
+
+/**
+ * Write the plugin's own declared settings out of a submitted form body.
+ *
+ * A `password` field is treated the way a credential is: the form renders it
+ * empty because there is nothing it may show, so an empty submit means "keep
+ * what is stored" and never "delete it". Without that rule, opening a card and
+ * pressing Save would silently wipe the very token the card exists to hold —
+ * and a form that looks like it saved and did not is the worst shape a bug can
+ * take (see AGENTS.md on SETTINGS_KEYS).
+ */
+export function saveDeclaredSettings(id, plugin, b) {
   for (const field of pluginFields(plugin, 'settings')) {
     const raw = b[`set_${field.key}`]
     if (raw === undefined) continue
+    if (field.type === 'password' && String(raw) === '') continue
     setSetting(pluginSettingKey(id, field), String(raw))
   }
-  redirect(res, BACK)
 }
 
 /**

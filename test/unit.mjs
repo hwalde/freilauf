@@ -1705,9 +1705,9 @@ try {
       wahr(validateManifest(gutesManifest({ id })).ok, `accepted: ${JSON.stringify(id)}`)
     }
   })
-  await pruefe('a bad kind is refused — there are exactly two', () => {
-    for (const kind of ['harness', 'provider']) wahr(validateManifest(gutesManifest({ kind })).ok, kind)
-    for (const kind of ['Harness', 'model', '', undefined]) {
+  await pruefe('a bad kind is refused — there are exactly three', () => {
+    for (const kind of ['harness', 'provider', 'notifier']) wahr(validateManifest(gutesManifest({ kind })).ok, kind)
+    for (const kind of ['Harness', 'model', 'notify', '', undefined]) {
       falsch(validateManifest(gutesManifest({ kind })).ok, `refused: ${JSON.stringify(kind)}`)
     }
   })
@@ -1741,6 +1741,18 @@ try {
     // them must not make a valid descriptor invalid either.
     wahr(validateDescriptor({ ...h, credentials: [{ key: 'k', envKeys: [] }], gate: { fields: [], check: async () => null }, llm: { schema: 'prompt', complete: async () => ({}) }, launch: { args: ['x'] } }, 'harness').ok,
       'all four optional fields present')
+    // A notifier's minimum is one function. Everything that makes it
+    // configurable — settings, credentials, a setup wizard, a test — is
+    // optional, because the smallest useful channel is a webhook with a URL in
+    // a setting and a `send` that posts to it.
+    const n = { id: 'n', label: 'N', send: async () => ({ ok: true }) }
+    wahr(validateDescriptor(n, 'notifier').ok, 'a minimal notifier')
+    falsch(validateDescriptor({ ...n, send: undefined }, 'notifier').ok, 'no send')
+    falsch(validateDescriptor({ ...n, send: 'yes' }, 'notifier').ok, 'send is not a function')
+    falsch(validateDescriptor({ ...n, label: '' }, 'notifier').ok, 'no label')
+    wahr(validateDescriptor({ ...n, settings: [{ key: 'url', type: 'text' }], credentials: [{ key: 'k', envKeys: [] }], setup: { render: async () => '' }, test: async () => ({ ok: true }) }, 'notifier').ok,
+      'and every optional half present')
+
     falsch(validateDescriptor(h, 'model-source').ok, 'an unknown kind')
     falsch(validateDescriptor(null, 'harness').ok, 'no descriptor at all')
   })
@@ -1995,7 +2007,7 @@ try {
       alarmAufbauen()
       global.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) })
       const abgelehnt = await alarm({ nowMs: T0 })
-      wahr(abgelehnt.sent === false, 'Telegram refused it')
+      wahr(abgelehnt.sent === false, 'the channel refused it')
       gleich(abgelehnt.reason, 'unreachable', 'and that is the answer, not a throw')
       // A failed send KEEPS the count, so the next message still names those
       // failures — only a delivered one may forget them.
@@ -2015,6 +2027,202 @@ try {
     setzen('llm_alert_window_min', alarmVorher.fenster ?? '')
     setzen('llm_alert_max_per_hour', alarmVorher.max ?? '')
   }
+
+  // ------------------------------------------------------------------
+  gruppe('Notifications: the third plugin kind, and a hub that says nothing (notify.mjs)')
+
+  // The rule this whole group exists for: NOTHING configured is a complete
+  // installation. `notify()` is then a silent no-op — no throw, no rejection,
+  // no half-sent message — and every caller in the hub gets a value back it can
+  // ignore.
+  const notifyMod = await import('../server/notify.mjs')
+  const {
+    registerPlugin: registriere, unregisterPlugin: entferne,
+    getPlugin: holePlugin, pluginKind: artVon, registryErrors: registerFehler,
+  } = await import('../server/plugins/registry.mjs')
+  const { setPluginConfig, isPluginEnabled } = await import('../server/plugins/store.mjs')
+  const { default: unitDb } = await import('../server/db.mjs')
+
+  await pruefe('the built-in Telegram notifier is registered as its own kind', () => {
+    gleich(artVon('telegram'), 'notifier', 'the registry knows what it is')
+    const p = holePlugin('telegram')
+    wahr(typeof p?.send === 'function', 'it can send')
+    // Its two settings keep the keys they have always had — that is what makes
+    // the whole rebuild a no-migration change.
+    const keys = (p.settings ?? []).map(f => f.settingKey)
+    gleich(keys.sort().join(','), 'telegram_chat,telegram_token', 'the historic settings keys')
+    wahr((p.settings ?? []).every(f => f.required), 'both are required, which is what "configured" means here')
+    wahr(notifyMod.notifierPlugins().some(x => x.id === 'telegram'), 'and the facade lists it')
+  })
+
+  await pruefe('a duplicate notifier id is refused, never overridden', () => {
+    const vorher = registerFehler().length
+    const r = registriere({ id: 'telegram', kind: 'notifier', label: 'Not really', send: async () => ({ ok: true }) })
+    falsch(r.ok, 'refused')
+    enthaelt(r.error, 'already taken', 'and it says why')
+    gleich(registerFehler().length, vorher + 1, 'the refusal is recorded for the Plugins page')
+    gleich(holePlugin('telegram').label, 'Telegram', 'the built-in still stands')
+  })
+
+  {
+    // A notifier of the suite's own, registered for the length of this block:
+    // the only way to assert on the MESSAGE the hub composes.
+    const empfangen = []
+    const stub = {
+      id: 'unit-notifier', kind: 'notifier', label: 'Unit Notifier',
+      settings: [{ key: 'target', type: 'text', required: true, labelKey: 'unit.target' }],
+      async send(message) { empfangen.push(message); return { ok: true } },
+    }
+    const reg = registriere(stub, { source: 'external' })
+    try {
+      await pruefe('an external notifier joins the registry and is configured like any other plugin', () => {
+        wahr(reg.ok, `registered (${reg.error ?? ''})`)
+        gleich(artVon('unit-notifier'), 'notifier', 'as a notifier')
+        // Registered is not configured: a `required` setting with no value is
+        // exactly what keeps the hub quiet.
+        falsch(notifyMod.notifierConfigured('unit-notifier'), 'not configured yet')
+        // An unconfigured notifier is nevertheless ENABLED — the provider rule,
+        // and for a reason one step stronger: an installation that already had
+        // a token has no plugin_config row either, and an off-by-default
+        // notifier would silence a channel that worked the minute before.
+        wahr(isPluginEnabled('unit-notifier'), 'but switched on by default')
+      })
+
+      await pruefe('with nothing configured notify() is a silent no-op, and says so calmly', async () => {
+        falsch(notifyMod.notifiersConfigured(), 'nothing is configured')
+        const r = await notifyMod.notify({ kind: 'system', text: 'nobody hears this' })
+        falsch(r.sent, 'nothing was sent')
+        gleich(r.delivered, 0, 'nothing was delivered')
+        gleich(r.results.length, 0, 'and nobody was even asked')
+        gleich(empfangen.length, 0, 'the stub heard nothing')
+        // The one thing it must never do.
+        const leer = await notifyMod.notify('')
+        falsch(leer.sent, 'an empty message is not an error either')
+      })
+
+      await pruefe('a configured notifier receives the normalized message', async () => {
+        setzen('plugin_unit-notifier_target', '/dev/null')
+        wahr(notifyMod.notifierConfigured('unit-notifier'), 'the required setting is filled in')
+        wahr(notifyMod.notifiersConfigured(), 'so the hub has a channel')
+        const r = await notifyMod.notify({ kind: 'run', runId: 'r-1', text: 'hello', url: 'https://x.invalid/runs/r-1',
+          attachment: { fileName: 'report.md', content: 'the whole report' } })
+        wahr(r.sent, 'delivered')
+        gleich(r.results.length, 1, 'one channel was asked')
+        const m = empfangen.at(-1)
+        gleich(m.kind, 'run', 'kind')
+        gleich(m.runId, 'r-1', 'runId')
+        gleich(m.text, 'hello', 'text')
+        gleich(m.attachment.fileName, 'report.md', 'the attachment travels as a file name plus content')
+        wahr(String(m.linkLabel).length > 0, 'the link carries a label the channel can render')
+        gleich(m.html, null, 'html is offered but the hub composes plain text')
+      })
+
+      await pruefe('a bare string is accepted, and an empty attachment is no attachment', async () => {
+        await notifyMod.notify('just a line')
+        gleich(empfangen.at(-1).text, 'just a line', 'the string became the text')
+        gleich(empfangen.at(-1).kind, 'system', 'with the default kind')
+        await notifyMod.notify({ text: 'x', attachment: { fileName: 'a.md', content: '' } })
+        gleich(empfangen.at(-1).attachment, null, 'an empty file is dropped rather than sent as nothing')
+      })
+
+      await pruefe('a channel that throws costs its own message and nothing else', async () => {
+        notifyMod._notifyLogReset()
+        const kaputt = {
+          id: 'unit-broken', kind: 'notifier', label: 'Broken',
+          async send() { throw new Error('the api is on fire') },
+        }
+        const r2 = registriere(kaputt, { source: 'external' })
+        wahr(r2.ok, 'the broken one is registered too')
+        try {
+          const r = await notifyMod.notify({ kind: 'system', text: 'through both' })
+          wahr(r.sent, 'the working channel still took it')
+          gleich(r.delivered, 1, 'exactly one delivery')
+          gleich(r.results.length, 2, 'both were asked')
+          const bad = r.results.find(x => x.id === 'unit-broken')
+          falsch(bad.ok, 'the broken one failed')
+          enthaelt(bad.error, 'on fire', 'with its own message')
+          gleich(empfangen.at(-1).text, 'through both', 'and the good one got the message')
+        } finally { entferne('unit-broken') }
+      })
+
+      await pruefe('sendTest calls test() with the SAME arguments as send()', async () => {
+        // The facade calls whichever of the two exists with `(message, ctx)`. A
+        // plugin declaring `test(ctx, message)` would hand the message to the
+        // context parameter and nothing would notice — the built-in Telegram
+        // notifier did exactly that until this test existed.
+        const gesehen = []
+        const zwei = {
+          id: 'unit-two', kind: 'notifier', label: 'Two',
+          async send(message, ctx) { gesehen.push(['send', message, ctx]); return { ok: true } },
+          async test(message, ctx) { gesehen.push(['test', message, ctx]); return { ok: true } },
+        }
+        wahr(registriere(zwei, { source: 'external' }).ok, 'registered')
+        try {
+          const r = await notifyMod.sendTest('unit-two')
+          wahr(r.ok, 'the test message went out')
+          const [was, message, ctx] = gesehen.at(-1)
+          gleich(was, 'test', 'test() wins over send() when it exists')
+          gleich(message.kind, 'test', 'the FIRST argument is the message')
+          wahr(typeof ctx?.setting === 'function', 'and the SECOND is the plugin context')
+          wahr(String(message.text).length > 0, 'which carries text')
+        } finally {
+          entferne('unit-two')
+          unitDb.prepare('DELETE FROM plugin_config WHERE plugin_id=?').run('unit-two')
+        }
+      })
+
+      await pruefe('switching it off silences it, and sendTest says which of the two it was', async () => {
+        setPluginConfig('unit-notifier', { kind: 'notifier', enabled: 0 })
+        falsch(notifyMod.notifiersConfigured(), 'a disabled channel is no channel')
+        const vorher = empfangen.length
+        await notifyMod.notify('into the void')
+        gleich(empfangen.length, vorher, 'nothing was sent')
+        // The reason comes back as an i18n KEY, not as an English word: it is
+        // rendered to the operator on the Notifications page (and reached from
+        // the Telegram wizard's own step 3), so a raw sentence there would be
+        // English text on a German UI.
+        const t1 = await notifyMod.sendTest('unit-notifier')
+        falsch(t1.ok, 'the test refuses')
+        gleich(t1.errorKey, 'notify.err_disabled', 'naming the reason, translatably')
+        setPluginConfig('unit-notifier', { kind: 'notifier', enabled: 1 })
+        setzen('plugin_unit-notifier_target', '')
+        gleich((await notifyMod.sendTest('unit-notifier')).errorKey, 'notify.err_not_configured', 'the other reason is its own answer')
+        gleich((await notifyMod.sendTest('nope')).errorKey, 'notify.err_unknown', 'and an id nobody registered is a third')
+        const katalog = JSON.parse(readFileSync(new URL('../lang/en.json', import.meta.url), 'utf8'))
+        for (const k of ['notify.err_disabled', 'notify.err_not_configured', 'notify.err_unknown']) {
+          wahr(!!katalog[k], `${k} really exists in the catalog`)
+        }
+      })
+    } finally {
+      entferne('unit-notifier')
+      unitDb.prepare('DELETE FROM plugin_config WHERE plugin_id IN (?,?)').run('unit-notifier', 'unit-broken')
+      setzen('plugin_unit-notifier_target', '')
+    }
+  }
+
+  await pruefe('the notify flow step keeps its old type name as an alias, never as a second block', async () => {
+    const { STEP_MAP, STEP_ALIASES, renameSteps, stepsMeta } = await import('../server/flows/steps.mjs')
+    gleich(STEP_ALIASES.telegram, 'notify', 'the rename is declared once')
+    wahr(STEP_MAP.notify === STEP_MAP.telegram, 'a stored `telegram` step resolves to the notify step')
+    falsch(stepsMeta().some(x => x.type === 'telegram'), 'but the toolbox offers one block, not two')
+
+    // A definition read out of the database comes back in today's names —
+    // inside branches and container bodies too, because a rename that stops at
+    // the top level renames half a flow.
+    const alt = { properties: {}, sequence: [
+      { id: 'a', type: 'telegram', properties: { text: 'x' } },
+      { id: 'b', type: 'condition', branches: { true: [{ id: 'c', type: 'telegram', properties: {} }], false: [] } },
+      { id: 'd', type: 'for_each', sequence: [{ id: 'e', type: 'telegram', properties: {} }] },
+    ] }
+    const neu = renameSteps(alt)
+    gleich(neu.sequence[0].type, 'notify', 'at the top level')
+    gleich(neu.sequence[1].branches.true[0].type, 'notify', 'inside a branch')
+    gleich(neu.sequence[2].sequence[0].type, 'notify', 'inside a container body')
+    gleich(alt.sequence[0].type, 'telegram', 'and the input was not mutated')
+    // Anything it cannot walk comes back as it came, rather than throwing.
+    gleich(renameSteps(null), null, 'null')
+    gleich(renameSteps({ sequence: 'nonsense' }).sequence, 'nonsense', 'a shape it does not know')
+  })
 
   // ------------------------------------------------------------------
   gruppe('Model sources and plugin settings (llm/sources.mjs, plugins/settings.mjs)')
@@ -2311,7 +2519,7 @@ try {
   await pruefe('validateDefinition: unknown types, required fields (showIf-aware), branches', () => {
     gleich(validateDefinition({ sequence: [] }).length, 0, 'empty is valid')
     wahr(validateDefinition({ sequence: [{ type: 'teleport' }] })[0].includes('unknown step type'), 'unknown type')
-    const tg = { id: 'a', type: 'telegram', name: 'tg', properties: defaultProps('telegram') }
+    const tg = { id: 'a', type: 'notify', name: 'notify', properties: defaultProps('notify') }
     wahr(validateDefinition({ sequence: [tg] }).some(p => p.includes("'text' is required")), 'required text')
     tg.properties.text = 'hi'; gleich(validateDefinition({ sequence: [tg] }).length, 0, 'filled → valid')
     const sm = { id: 'b', type: 'send_message', properties: { ...defaultProps('send_message'), target: 'all_running', text: 'x' } }
@@ -2461,7 +2669,7 @@ try {
     killRun: async (run) => { calls.push(['kill', run.id]); return true },
     startAgent: async (agentId, extra) => { calls.push(['startAgent', agentId, extra]); return { ok: true, runId: 'new-run' } },
     startSingle: async (opts) => { calls.push(['startSingle', opts.prompt]); return { ok: true, runId: 'single-run' } },
-    telegram: async (text) => { calls.push(['telegram', text]); return true },
+    notify: async (text) => { calls.push(['notify', text]); return true },
     runText: async () => 'report text',
     extract: async ({ fields }) => Object.fromEntries(fields.map(f => [f.name, 'v'])),
     http: async () => ({ status: 200, ok: true, body: '{}', json: {} }),
@@ -2473,7 +2681,7 @@ try {
     const def = { sequence: [
       step('switch_outcome', { value: '' }, { branches: {
         done: [step('note', { text: 'was done' })],
-        failed: [step('set_var', { outputVar: 'reason', value: 'failed: {{trigger.run.report}}' }), step('telegram', { text: '{{vars.reason}}', outputVar: 'tg' })],
+        failed: [step('set_var', { outputVar: 'reason', value: 'failed: {{trigger.run.report}}' }), step('notify', { text: '{{vars.reason}}', outputVar: 'tg' })],
         aborted: [],
       } }),
       step('note', { text: 'after switch {{vars.reason}}' }),
@@ -2482,8 +2690,8 @@ try {
     const fr = fdb.getFlowRun(id)
     gleich(fr.status, 'done', 'finished')
     gleich(fr.context.vars.reason, 'failed: broke', 'set_var rendered')
-    gleich(fr.context.vars.tg.delivered, true, 'telegram output stored')
-    gleich(calls.find(c => c[0] === 'telegram')[1], 'failed: broke', 'telegram received the rendered text')
+    gleich(fr.context.vars.tg.delivered, true, 'notify output stored')
+    gleich(calls.find(c => c[0] === 'notify')[1], 'failed: broke', 'the notify step received the rendered text')
     wahr(fr.log.some(l => l.msg === 'after switch failed: broke'), 'continued after the switch')
     falsch(fr.log.some(l => l.msg === 'was done'), 'other branch not executed')
   })
@@ -4099,7 +4307,7 @@ try {
     gleich(ig.truncateReport({ id: 'r1', report_md: null }), '(no report)', 'no report at all')
   })
 
-  await pruefe('the Telegram assessment names the numbers and the way back in', () => {
+  await pruefe('the assessment message names the numbers and the way back in', () => {
     const run = { harness: 'claude', id: 'aaaa-bbbb-cccc-dddd', workdir_effective: '/wt/a' }
     const both = ig.assessText(run, { status: 'unmerged_both', commits: 2, dirty: 3 })
     enthaelt(both, '2 commit(s)', 'commits')

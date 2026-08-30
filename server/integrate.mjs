@@ -25,7 +25,7 @@
 //                     one process, so a queue is a promise chain — the same
 //                     argument events.mjs is built on.
 //   the escalation    when the agent does not deliver: a fresh conflict run, and
-//                     as the last step a human, with an incident and Telegram.
+//                     as the last step a human, with an incident and a notification.
 //
 // All of it is off unless the repo says `merge_mode='hub'`.
 import { existsSync, mkdirSync } from 'node:fs'
@@ -51,7 +51,7 @@ const CHECK_PARALLEL = Number(process.env.CCHUB_FINISH_PARALLEL ?? 2) || 2
 // ---------------------------------------------------------------- the texts
 //
 // Constants with {placeholders}, like PLATFORM_RULES in runner.mjs: these go to
-// an AGENT or to Telegram, not to the UI — they are never translated.
+// an AGENT or into a notification, not to the UI — they are never translated.
 
 export const M1 = `cc-hub: report received — but the run is NOT finished yet.
 Your worktree has uncommitted changes:
@@ -103,7 +103,7 @@ Do this:
 {landed_runs}
 {resolver_extra}`
 
-/** Telegram, one paragraph per assessment of a run that did NOT end with done. */
+/** One paragraph per assessment of a run that did NOT end with done. */
 export const T_ASSESS = {
   unmerged_commits: 'Not merged — the run did not end with done. The branch has {n} commit(s) and no uncommitted changes, so git could merge them safely. But look first: a failed run\'s work is not automatically wanted. To merge anyway, use "Merge now" on the run\'s detail page.',
   unmerged_both: 'Not merged. The branch has {n} commit(s), BUT the worktree also has {m} uncommitted file(s). Nothing was merged. On the detail page you can commit or discard the leftovers and merge, or leave everything as it is.',
@@ -362,7 +362,7 @@ const pushedAt = new Map()   // repoId → ms of the last operator-commit push
  * one worktree, and that one has files in it somebody is editing).
  *
  * Never --force. A diverged base branch is a human's problem, and the hub says
- * so once (global incident + Telegram) instead of picking a winner.
+ * so once (global incident + notification) instead of picking a winner.
  */
 export async function pushOperatorBase(nowMs = Date.now()) {
   const repos = db.prepare(`SELECT * FROM repos WHERE merge_mode='hub'`).all()
@@ -395,8 +395,8 @@ async function pushOneRepo(repo) {
       beleg: `${base} has diverged from origin/${base}: ${ahead} local, ${behind} remote commits`,
     })
     if (['neu', 'wieder'].includes(ereignis)) {
-      const { notify } = await import('./telegram.mjs')
-      await notify(fill(T_DIVERGED, { repo: repo.name, base, n: ahead, m: behind, path: repo.path }))
+      const { notify } = await import('./notify.mjs')
+      await notify({ kind: 'repo', text: fill(T_DIVERGED, { repo: repo.name, base, n: ahead, m: behind, path: repo.path }) })
     }
     return
   }
@@ -550,7 +550,7 @@ async function deliver(run, message, via, key) {
  * no worktree) — the caller then does exactly what it always did. Otherwise:
  *   { hold: true, message }   the run stays 'running', the agent has work left
  *   { hold: false, mergeLine} nothing to merge: close it as before, with a line
- *                             in the Telegram text saying so
+ *                             in the notification text saying so
  */
 export async function finishGate(runId, text, via = 'http') {
   const run = getRun(runId)
@@ -941,7 +941,7 @@ async function backToConflict(runId, repo, reason) {
 
 /**
  * The run's work is on the base branch. ONLY now is it done — that is the whole
- * point of this module — and only now does Telegram hear about it, the other
+ * point of this module — and only now does the operator hear about it, the other
  * agents of the repo learn that the base branch moved, and the flows fire.
  */
 async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = null, dir = null, already = false } = {}) {
@@ -1228,7 +1228,7 @@ async function conflictFilesOf(repo, run) {
 }
 
 /**
- * The whole "needs a human" step: status, backup, incident, Telegram.
+ * The whole "needs a human" step: status, backup, incident, notification.
  *
  * The backup comes first and on purpose: a run whose work did not reach the base
  * branch is exactly the run whose commits would otherwise live on this disk
@@ -1442,7 +1442,7 @@ export async function assessUnmerged(runId) {
   return { status, commits, dirty: dirty.length }
 }
 
-/** The paragraph that belongs under a failed/aborted Telegram message. */
+/** The paragraph that belongs under a failed/aborted notification. */
 export function assessText(run, assessment) {
   if (!assessment) return ''
   const body = fill(T_ASSESS[assessment.status] ?? '', { n: assessment.commits, m: assessment.dirty })

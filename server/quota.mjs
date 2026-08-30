@@ -413,7 +413,7 @@ export async function usageGateBlocked(pluginId, {
  *
  * The reset time is the BLOCKING window's own: a 7-day block used to hand out
  * the 5-hour reset, which then travelled into the deferred event and into
- * Telegram as the moment the run would start again.
+ * into the notification as the moment the run would start again.
  */
 export function claudeGateBlocked(quota = claudeQuota(), model = null,
   { five = 90, seven = 95, fable = 95 } = {}) {

@@ -19,8 +19,7 @@ import {
   pageArchive,
   runNewPost, agentEdit, agentSave, agentToggle, agentStart,
   agentDelete, agentMovePage, agentMovePost,
-  repoEdit, repoSave, settingsSave, settingsTestTelegram,
-  telegramSetup, telegramTokenSave, telegramChatSave, telegramChats,
+  repoEdit, repoSave, settingsSave,
   codingAgentSave, codingAgentDelete,
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
   pageMergeSettings, mergeSettingsSave,
@@ -32,6 +31,10 @@ import {
   pagePlugins, pluginsSave, pluginsAdd, pluginsRemove,
   pluginsInstall, pluginsUninstall, pluginsScan, pluginsDiscovery,
 } from './plugins/web.mjs'
+import {
+  pageNotifications, notificationsSave, notificationsTest,
+  notifierSetupPage, notifierSetupAction, notifierSetupJson,
+} from './notifications.mjs'
 import { llmSources, sourceModels, getSource } from './llm/sources.mjs'
 import {
   pageWelcome, welcomeHello, welcomeScan, welcomeAgents,
@@ -124,10 +127,28 @@ async function dispatch(req, res, url, path, formBody) {
   // --- JSON API ---
   if (path.startsWith('/api/')) return api(req, res, url)
 
-  // --- Telegram setup assistant ---
-  if (req.method === 'GET' && path === '/telegram-setup') return telegramSetup(req, res, url)
-  if (req.method === 'POST' && path === '/telegram-setup/token') return telegramTokenSave(req, res, url, formBody)
-  if (req.method === 'POST' && path === '/telegram-setup/chat') return telegramChatSave(req, res, url, formBody)
+  // --- Notifications (Settings → Notifications) ---
+  // `/telegram-setup` was the one setup wizard the hub knew by name; it is the
+  // Telegram plugin's own now, and the old address keeps working.
+  if (path === '/telegram-setup' || path.startsWith('/telegram-setup/')) {
+    return redirect(res, '/settings/notifications/telegram')
+  }
+  if (req.method === 'GET' && path === '/settings/notifications') return pageNotifications(req, res, url)
+  if (req.method === 'POST' && path === '/settings/notifications/save') return notificationsSave(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/settings/notifications/test') return notificationsTest(req, res, url, formBody)
+  // Everything below `/settings/notifications/<id>` belongs to that notifier's
+  // own setup wizard: the page, one POST per step, one GET per JSON call it
+  // makes. The plugin brings the content; this is only the address.
+  let m
+  if ((m = path.match(/^\/settings\/notifications\/([a-z0-9][a-z0-9-]{1,39})$/)) && req.method === 'GET') {
+    return notifierSetupPage(req, res, url, m[1])
+  }
+  if ((m = path.match(/^\/settings\/notifications\/([a-z0-9][a-z0-9-]{1,39})\/json\/([a-z0-9_-]{1,40})$/)) && req.method === 'GET') {
+    return notifierSetupJson(req, res, url, m[1], m[2])
+  }
+  if ((m = path.match(/^\/settings\/notifications\/([a-z0-9][a-z0-9-]{1,39})\/([a-z0-9_-]{1,40})$/)) && req.method === 'POST') {
+    return notifierSetupAction(req, res, url, m[1], m[2], formBody)
+  }
 
   // --- Welcome wizard ---
   // Reachable whatever `welcome_hide` says, and it never redirects to itself:
@@ -171,7 +192,6 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'POST' && path === '/repos/edit') return repoSave(req, res, url, formBody)
   if (req.method === 'GET' && path === '/settings') return pageSettings(req, res, url)
   if (req.method === 'POST' && path === '/settings/save') return settingsSave(req, res, url, formBody)
-  if (req.method === 'POST' && path === '/settings/test-telegram') return settingsTestTelegram(req, res)
   // Plugins (Settings → Plugins) — coding agents, model providers, credentials
   // and the installed packages, all on one page.
   if (req.method === 'GET' && path === '/settings/plugins') return pagePlugins(req, res, url)
@@ -217,7 +237,6 @@ async function api(req, res, url) {
   if (req.method === 'GET' && path === '/api/events') return sseHandler(req, res, url)
   // Pieces of a page, rendered by the very functions the page uses (pages.mjs).
   if (req.method === 'GET' && path.startsWith('/api/fragments/')) return fragmentApi(req, res, url)
-  if (req.method === 'GET' && path === '/api/telegram/chats') return telegramChats(req, res)
   if (path.startsWith('/api/flows') || path.startsWith('/api/flow-runs')) return flowApi(req, res, url)
 
   // Which providers the chosen harness can use — plugin capability, restricted
@@ -468,22 +487,27 @@ async function api(req, res, url) {
     }
     return answer(req, res, 200, { ok: true }, `/runs/${run.id}`)
   }
-  // The Telegram checkbox under the terminal: on (the default of every run) or
-  // off for THIS run. Off silences every message about the run — its reports,
-  // the follow-up ones first of all, its alarms and its incidents — and nothing
-  // else: the integration, the flows and the events happen exactly as before
-  // (reports.mjs, notifyRun). Read at send time, so the click takes effect on
-  // the next message, whatever is in flight.
-  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/telegram$/))) {
+  // The notification checkbox under the terminal: on (the default of every run)
+  // or off for THIS run. Off silences every message about the run — its reports,
+  // the follow-up ones first of all, its alarms and its incidents — on every
+  // configured channel, and nothing else: the integration, the flows and the
+  // events happen exactly as before (reports.mjs, notifyRun). Read at send time,
+  // so the click takes effect on the next message, whatever is in flight.
+  //
+  // `/telegram` stays as an alias of `/notify`, and the answer carries BOTH
+  // keys: the route and the JSON field are somebody else's contract the moment
+  // they exist, and there is nothing to gain from breaking one. The column is
+  // still `telegram_on` for the reason db.mjs states.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/(?:notify|telegram)$/))) {
     const run = getRun(m[1])
     if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
     const b = await form(req)
     const on = ['1', 'on', 'true'].includes(String(b.on ?? '').trim()) ? 1 : 0
     if (on !== (run.telegram_on === 0 ? 0 : 1)) {
       db.prepare('UPDATE runs SET telegram_on=? WHERE id=?').run(on, run.id)
-      addEvent(run.id, on ? 'telegram_on' : 'telegram_off', {})
+      addEvent(run.id, on ? 'notify_on' : 'notify_off', {})
     }
-    return answer(req, res, 200, { ok: true, telegram_on: on }, `/runs/${run.id}`)
+    return answer(req, res, 200, { ok: true, notify_on: on, telegram_on: on }, `/runs/${run.id}`)
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/kill$/))) {
     const run = getRun(m[1])
@@ -509,7 +533,7 @@ async function api(req, res, url) {
     // stop?" has one answer to look for rather than two.
     addEvent(m[1], 'aborted', { by: 'user' })
     // An end somebody ASKED for is an abort, even in the finish gate — and what
-    // it leaves behind is assessed like any other unfinished run (no Telegram:
+    // it leaves behind is assessed like any other unfinished run (no notification:
     // whoever clicked the button knows).
     const { assessLater } = await import('./sessions.mjs')
     assessLater(m[1], false)

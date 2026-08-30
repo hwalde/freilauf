@@ -167,7 +167,7 @@ export async function llmJson({
     }
   }
 
-  // One throttled, deduplicated Telegram alert — and deliberately NOT for a
+  // One throttled, deduplicated alert — and deliberately NOT for a
   // `config` stage. A feature that is switched off, a source nobody configured
   // a key for, a model field left empty: none of those are an outage, they are
   // a state the operator chose, and alarming about them would be the "channel

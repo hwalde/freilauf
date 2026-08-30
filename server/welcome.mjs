@@ -7,7 +7,7 @@
 // in a checkout nobody has been told about. The wizard is the five screens that
 // say so.
 //
-// It is built in the shape of `/telegram-setup`, and for the same reasons:
+// It is built in the shape of the notifier setup wizards, and for the same reasons:
 //
 //   - **Server-rendered steps, never a client-side state machine.** Each step is
 //     a `<form method="post">` to an endpoint of its own; what the operator
@@ -423,7 +423,9 @@ function step5() {
         <a class="btn" href="/repos">${e(t('welcome.s5_repo'))}</a>
         <a class="btn" href="/agents">${e(t('welcome.s5_agent'))}</a>
         <a class="btn ghost" href="/settings/plugins">${e(t('welcome.s5_plugins'))}</a>
+        <a class="btn ghost" href="/settings/notifications">${e(t('welcome.s5_notify'))}</a>
       </div>
+      <p class="dim">${e(t('notify.optional'))}</p>
     </div>
     ${setupDocCard()}
     <form method="post" action="/welcome/done" class="form-grid">

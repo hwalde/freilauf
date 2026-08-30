@@ -178,7 +178,7 @@ export function transkriptFehler(jsonlText) {
  *
  *   rot   – several hits in a short time (retry loop) OR silence (no activity)
  *           since the last hit for longer than 'stilleMs'
- *   gelb  – first, single hit: note it, traffic light yellow, NO Telegram
+ *   gelb  – first, single hit: note it, traffic light yellow, NO notification
  *
  * Measurable work AFTER the last hit vetoes BOTH paths. An agent that is still
  * producing output is demonstrably not blocked by an API error, so the hit was
@@ -273,7 +273,7 @@ export function vorfallWeggrund({ typ, schwere, runStatus, letzteAktivitaetMs, z
 }
 
 /**
- * Human-readable name per type (overview, Telegram). English fallback — the
+ * Human-readable name per type (overview, notifications). English fallback — the
  * web UI translates via i18n key `incident.<typ>` and only uses this map when
  * a key is missing.
  */

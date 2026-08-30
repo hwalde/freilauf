@@ -39,6 +39,27 @@ export function hubVersion() {
 
 export function kurzid(uuid) { return uuid.split('-')[0] }
 
+/**
+ * Public base URL for the links the hub puts into a message: the hostname
+ * rather than the IP, so the link matches the certificate in the reader's
+ * browser.
+ *
+ * It used to live in `telegram.mjs`, and it never belonged there: `cleanup.mjs`
+ * builds a prompt with it and `flows/actions.mjs` fills `{{trigger.run.url}}`
+ * with it — neither is a notification. Here it is what it always was, a fact
+ * about this installation, and no notifier plugin has to re-export it.
+ */
+export function publicBase() {
+  // Without CCHUB_PUBLIC_URL the links point nowhere — the note is in env.example.
+  return (process.env.CCHUB_PUBLIC_URL
+    || `https://127.0.0.1:${process.env.CCHUB_VPN_PORT ?? 8790}`).replace(/\/+$/, '')
+}
+
+/** The detail page of one run, or the overview when there is no run. */
+export function detailUrl(runId) {
+  return runId ? `${publicBase()}/runs/${runId}` : `${publicBase()}/`
+}
+
 /** Strip ANSI + CR from the pipe-pane log for the HTML log view (planning 7.2). */
 export function stripAnsi(s) {
   return s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r/g, '')

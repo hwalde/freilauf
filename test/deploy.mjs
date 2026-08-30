@@ -13,11 +13,14 @@
 //                      cc-* scripts, the opencode plugin and the systemd units
 //                      into the sandbox and never into the operator's ~/.local/bin
 //   CCHUB_DEPLOY_DIR → the sandbox
-//   PATH             → a shim directory FIRST, holding systemctl, curl, npm and
-//                      journalctl. They log every call and answer what the test
-//                      tells them to: `curl` prints the HTTP status from a file
-//                      (that is how the unhealthy deploy is provoked), `npm`
-//                      creates node_modules instead of installing anything.
+//   PATH             → a shim directory FIRST, holding systemctl, curl, npm,
+//                      journalctl and cc-notify. They log every call and answer
+//                      what the test tells them to: `curl` prints the HTTP status
+//                      from a file (that is how the unhealthy deploy is
+//                      provoked), `npm` creates node_modules instead of
+//                      installing anything, and `cc-notify` is only counted —
+//                      the deploy script must not need a configured channel, or
+//                      a hub nobody set one up for could not be deployed.
 //
 // The git commands, the flock and the checkout are REAL — that is the half of the
 // script a stub could not test.
@@ -59,7 +62,7 @@ function deploy(...args) {
       CCHUB_ENV_FILE: join(SB, 'no-such-env'),   // never read the operator's config
       CCHUB_DEPLOY_DIR: DEPLOY,
       CCHUB_DEPLOY_BASE: 'main',
-      CCHUB_DATA_DIR: join(SB, 'data'),          // no database → no Telegram, base falls back
+      CCHUB_DATA_DIR: join(SB, 'data'),          // no database → nothing to notify, base falls back
       CCHUB_LOCAL_PORT: '9999',
       CCHUB_DEPLOY_HEALTH_SECONDS: '2',          // 20 s of retrying would make the suite crawl
       CCHUB_SKIP_EXTRAS: '1',                    // setup/02 must not clone from GitHub here
@@ -101,14 +104,18 @@ exit 0`)
   // curl: the health check reads its status from a file the test writes — one
   // status per line, each consumed once, the last one staying forever. That is
   // what makes "the deploy is unhealthy but the rollback is fine" expressible at
-  // all. A call to the Telegram API is only counted, never made.
+  // all.
   shim('curl', `
-case "$*" in *api.telegram.org*) exit 0 ;; esac
 s="$(head -1 "$CCHUB_TEST_STATUS")"
 rest="$(tail -n +2 "$CCHUB_TEST_STATUS")"
 if [[ -n "$rest" ]]; then printf '%s\\n' "$rest" > "$CCHUB_TEST_STATUS"; fi
 printf '%s' "$s"
 exit 0`)
+  // cc-notify: counted, never run. The real one loads the hub's plugins and
+  // calls the notification facade; here the only question is whether the deploy
+  // script reaches for it at all, and that it survives it not being there (the
+  // `command -v` guard, exercised by the deploys that do not fail).
+  shim('cc-notify', 'exit 0')
   // npm: creates what npm ci would leave behind, and nothing else. Compiling
   // node-pty in a test is exactly the cost the lockfile-hash check exists to avoid.
   shim('npm', 'mkdir -p node_modules; exit 0')
@@ -213,6 +220,12 @@ try {
       enthaelt(r.out, 'rolled back', 'the reason is in the output')
       enthaelt(deployLog(), 'rolled back', 'and in the deploy log')
       enthaelt(deployLog(), c3.slice(0, 7), 'naming the commit that failed')
+      // A FAILURE always notifies — through cc-notify, so it reaches whatever
+      // channel the operator configured, and nothing at all when they
+      // configured none. It used to be a second Telegram implementation in
+      // bash, reading the bot token out of the database with a curl behind it.
+      wahr(callCount('cc-notify') >= 1, 'and the operator was told, through the notification CLI')
+      enthaelt(calls(), '--kind deploy', 'the message says what it is about')
     })
 
     // ------------------------------------------------------------------
@@ -256,6 +269,26 @@ try {
       gleich(r.code, 0, `exit code (${r.out}${r.err})`)
       gleich(head(), before, 'the checkout stands on the previous commit again')
       gleich(callCount('restart cchub.service'), 1, 'and the hub was restarted for it')
+    })
+
+    // ------------------------------------------------------------------
+    gruppe('Notifying is best effort, and optional')
+
+    await pruefe('a successful deploy stays quiet unless --notify says otherwise', () => {
+      const c = newCommit('a commit worth announcing')
+      resetCalls()
+      let r = deploy()
+      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
+      gleich(head(), c, 'deployed')
+      gleich(callCount('cc-notify'), 0, 'an ordinary success says nothing')
+
+      const c2b = newCommit('and this one is announced')
+      resetCalls()
+      r = deploy('--notify')
+      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
+      gleich(head(), c2b, 'deployed')
+      gleich(callCount('cc-notify'), 1, 'with --notify it announces itself once')
+      enthaelt(calls(), '--kind deploy', 'and says what the message is about')
     })
 
     // ------------------------------------------------------------------

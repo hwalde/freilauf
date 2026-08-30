@@ -221,7 +221,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // runs because of THIS suite. The manual path stays fully testable.
       CCHUB_CLEANUP_AUTO_OFF: '1',
       // Incidents page WITHOUT the production grace period — the suite asserts
-      // Telegram immediately after the event; the delay itself has its own test.
+      // the alarm immediately after the event; the delay itself has its own test.
       CCHUB_INCIDENT_NOTIFY_DELAY_MS: '0',
       NODE_OPTIONS: '--disable-warning=ExperimentalWarning',
     }

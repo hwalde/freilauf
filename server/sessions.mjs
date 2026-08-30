@@ -455,14 +455,14 @@ export function reconcileClosedSession(runId, source = 'session') {
 /**
  * An aborted run leaves work behind too. The assessment always happens (the
  * detail page shows it); only the run the WATCHER aborted — a session that
- * vanished on its own, which nobody was watching for — also says so on Telegram.
+ * vanished on its own, which nobody was watching for — also says so to the operator.
  * An operator who just clicked "end session" does not need a message about it.
  */
-export function assessLater(runId, telegram = false) {
+export function assessLater(runId, announce = false) {
   import('./integrate.mjs')
     .then(async (m) => {
       const assessment = await m.assessUnmerged(runId)
-      if (!telegram || !assessment || (!assessment.commits && !assessment.dirty)) return
+      if (!announce || !assessment || (!assessment.commits && !assessment.dirty)) return
       const { notifyRun } = await import('./reports.mjs')
       const run = getRun(runId)
       await notifyRun(runId, 'aborted_unmerged',

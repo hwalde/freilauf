@@ -127,14 +127,21 @@ export function setPluginConfig(id, patch = {}) {
 /**
  * Is this plugin switched on?
  *
- * `defaultOn` is what an UNCONFIGURED plugin answers, and the two kinds differ
- * on purpose: a coding agent must be configured before the hub starts runs
- * with it (a fresh installation deliberately has none), while a model provider
- * has always been usable the moment its credential existed — there was no
- * enable flag for providers before this table, and inventing an off-by-default
- * one would switch off working installations.
+ * `defaultOn` is what an UNCONFIGURED plugin answers, and a coding agent is the
+ * one kind that differs: it must be configured before the hub starts runs with
+ * it (a fresh installation deliberately has none), while a model provider has
+ * always been usable the moment its credential existed — there was no enable
+ * flag for providers before this table, and inventing an off-by-default one
+ * would switch off working installations.
+ *
+ * A NOTIFIER follows the provider rule, and for the same reason one step
+ * further on: an installation that already has a Telegram token in `settings`
+ * has no `plugin_config` row for it either, and an off-by-default notifier
+ * would silence a channel that was working the minute before the upgrade. The
+ * fresh installation stays quiet all the same — being enabled is not being
+ * configured, and `notifiersConfigured()` asks the second question.
  */
-export function isPluginEnabled(id, defaultOn = pluginKind(id) === 'provider') {
+export function isPluginEnabled(id, defaultOn = pluginKind(id) !== 'harness') {
   const row = pluginConfig(id)
   if (!row) return !!defaultOn
   return row.enabled === 1
@@ -201,7 +208,7 @@ export function credentialSpec(plugin) {
  *
  * A stored value lives in the local SQLite database (`~/.local/share/cc-hub`,
  * the hub's own data directory) as plain text — the same file that already
- * holds the Telegram token. It is offered because a machine cannot always be
+ * holds every other configured secret. It is offered because a machine cannot always be
  * given another environment variable; where it can, naming the variable is the
  * better answer, and the UI says so.
  */

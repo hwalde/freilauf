@@ -21,7 +21,7 @@
 #
 #   --force      deploy even when the target is already checked out
 #   --no-wait    do not wait for a running deploy, fail instead
-#   --notify     Telegram on success too (a FAILURE always notifies)
+#   --notify     notify on success too (a FAILURE always notifies)
 #
 # Exit codes: 0 deployed (or already deployed) · 1 deploy failed, rolled back
 #             · 2 the rollback itself is not healthy — a human is needed
@@ -95,23 +95,20 @@ process.stdout.write(r&&r.base_branch?String(r.base_branch):"");' "$DB_FILE" 2>/
     printf 'main'
 }
 
-# ------------------------------------------------------------------ Telegram
-# Best effort in every direction: no database, no token, no network — the deploy
-# is not affected by any of it. Token and chat come from the hub's settings, read
-# the way bin/cchub reads the pipeline switch.
-telegram() {
-    local text="$1" pair token chat
-    [[ -f "$DB_FILE" ]] || return 0
-    pair="$(node --disable-warning=ExperimentalWarning -e '
-const {DatabaseSync}=require("node:sqlite");
-const db=new DatabaseSync(process.argv[1]);
-const g=(k)=>{const r=db.prepare("SELECT value FROM settings WHERE key=?").get(k); return r&&r.value?String(r.value):""};
-process.stdout.write(g("telegram_token")+"\n"+g("telegram_chat"));' "$DB_FILE" 2>/dev/null || true)"
-    token="$(printf '%s\n' "$pair" | sed -n 1p)"
-    chat="$(printf '%s\n' "$pair" | sed -n 2p)"
-    [[ -n $token && -n $chat ]] || return 0
-    curl -sS -m 10 -o /dev/null -X POST "https://api.telegram.org/bot${token}/sendMessage" \
-        --data-urlencode "chat_id=${chat}" --data-urlencode "text=${text}" >/dev/null 2>&1 || true
+# ------------------------------------------------------------------ notification
+# Best effort in every direction: no channel configured, no network, no cc-notify
+# on the PATH — the deploy is not affected by any of it.
+#
+# This used to be a second, independent Telegram implementation right here: read
+# `telegram_token` and `telegram_chat` out of the SQLite database and curl the
+# Bot API. `cc-notify` loads the plugins and calls the hub's own notification
+# facade instead, so a failed deploy reaches whatever the operator configured —
+# and nothing at all when they configured none, which is a supported state and
+# never a reason to fail a deploy.
+notify_out() {
+    local text="$1"
+    command -v cc-notify >/dev/null 2>&1 || return 0
+    cc-notify --quiet --kind deploy "$text" >/dev/null 2>&1 || true
 }
 
 # ------------------------------------------------------------------ git helpers
@@ -272,7 +269,7 @@ do_deploy() {
         if [[ -n $ok_errs ]]; then log "note: the journal mentions errors since the restart:
 $ok_errs"; fi
         log "deployed $(sha_short "$target") ($(subject_of "$target"))"
-        if [[ $NOTIFY == 1 ]]; then telegram "cc-hub deployed $(sha_short "$target"): $(subject_of "$target")"; fi
+        if [[ $NOTIFY == 1 ]]; then notify_out "cc-hub deployed $(sha_short "$target"): $(subject_of "$target")"; fi
         return 0
     fi
 
@@ -288,13 +285,13 @@ $errs"; fi
     restart_hub "$vpn_was"
     if health_check; then
         log "deploy of $(sha_short "$target") FAILED ($reason), rolled back to $(sha_short "$current")"
-        telegram "cc-hub deploy of $(sha_short "$target") FAILED ($reason). Rolled back to $(sha_short "$current") — the hub is up again."
+        notify_out "cc-hub deploy of $(sha_short "$target") FAILED ($reason). Rolled back to $(sha_short "$current") — the hub is up again."
         exit 1
     fi
     log "ROLLBACK to $(sha_short "$current") is NOT healthy either ($HEALTH_REASON) — a human is needed"
     log "journal:
 $(journal_errors "$since")"
-    telegram "cc-hub deploy of $(sha_short "$target") FAILED and the rollback to $(sha_short "$current") is not healthy either. The hub is DOWN — please look at it."
+    notify_out "cc-hub deploy of $(sha_short "$target") FAILED and the rollback to $(sha_short "$current") is not healthy either. The hub is DOWN — please look at it."
     exit 2
 }
 

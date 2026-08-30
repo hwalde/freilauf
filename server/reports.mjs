@@ -1,7 +1,10 @@
 // cc-hub — processing of agent reports (cc-report → POST /api/runs/<id>/report
 // or fallback inbox.jsonl collected by the watcher). Planning 6 + 11.
 import db, { addEvent } from './db.mjs'
-import { notify, notifyLong, detailUrl } from './telegram.mjs'
+// `notifyChannels` and not `notify`: `completeFollowUp()` below takes an option
+// literally called `notify`, and a parameter that silently shadows a module
+// import is the kind of trap that only shows up the day somebody moves a line.
+import { notify as notifyChannels, notifyOnFor, detailUrl } from './notify.mjs'
 import { sh } from './util.mjs'
 import { vorfallMelden, detektorLog } from './incidents.mjs'
 import { typVonClaudeFehler, typVonText, TYP_TEXT, fremdeClaudeSession } from './detect.mjs'
@@ -190,7 +193,7 @@ export async function handleReport(runId, body, via = 'http') {
  *
  * The report text comes from the harness's transcript: the agent's own closing
  * words are what a human would have gotten had it called cc-report. Everything
- * else — Telegram, events, flows, cost accounting — happens because this goes
+ * else — the notification, events, flows, cost accounting — happens because this goes
  * back through the normal 'done' path instead of writing the row itself.
  *
  * Returns true when the run was closed here.
@@ -235,8 +238,9 @@ export async function finishByTurnEnd(runId, source) {
 //      integrator's end (`finishMerged`, `closeKept`, `blockRun`) that this
 //      integration belongs to a follow-up;
 //   3. the attached flows fire again (`rearmDispatch`), the merged ones too;
-//   4. Telegram hears "FOLLOW-UP REPORT #n" — never deduplicated, because every
-//      follow-up is news, and only while the run's Telegram checkbox is on.
+//   4. the configured channels hear "FOLLOW-UP REPORT #n" — never deduplicated,
+//      because every follow-up is news, and only while the run's notification
+//      checkbox is on.
 //
 // The status of the run does NOT change: a `done` run stays `done`, a `failed`
 // one stays `failed` (its record is the truth about the first attempt; what
@@ -385,7 +389,7 @@ export async function followUpByTurnEnd(run, source) {
  * branch, or blocked. Called from here (no gate, or nothing to merge) and from
  * the integrator's three ends (server/integrate.mjs). One function, so the
  * three things that make a follow-up visible cannot come apart: the event, the
- * flows firing again, the Telegram message.
+ * flows firing again, the message to the operator.
  *
  * `notify: false` is for a BLOCKED follow-up: the block itself is announced by
  * the integrator (T_BLOCKED_*), and a second message about the same run at the
@@ -441,7 +445,7 @@ async function escalateGone(runId) {
 
 /**
  * What a run that did not end with 'done' left behind, as a paragraph for the
- * Telegram message. Empty where the repo does not want the hub to integrate.
+ * notification message. Empty where the repo does not want the hub to integrate.
  */
 export async function assessAfterEnd(runId) {
   try {
@@ -466,13 +470,13 @@ export function addEventOnce(runId, kind, payload = null) {
  * Anomalies "resolve themselves" through progress. The events remain as
  * history but are renamed to 'cleared:*' — the traffic light falls back
  * (pages.mjs searches for 'anomaly:%') and addEventOnce fires again on
- * recurrence. The 'telegram_sent:*' flags stay on purpose: the same type must
+ * recurrence. The 'notified:*' flags stay on purpose: the same type must
  * not produce a second message either (planning 4.5).
  *
  * Exported because one other decision belongs to the same rule: when the
  * operator RAISES a running run's expected duration (run-edit.mjs), the
  * "longer than expected" statement the old value produced is retracted the
- * same way — and its Telegram flag with it, so a genuine overrun of the NEW
+ * same way — and its notification flag with it, so a genuine overrun of the NEW
  * duration can page once again.
  */
 export function clearAnomalies(runId, kinds) {
@@ -499,7 +503,7 @@ function reportHeader(run, word = 'REPORT') {
 
 /**
  * The header of everything a finished run says: the same shape as the first
- * report's, with the word that tells the reader on Telegram that this is NOT
+ * report's, with the word that tells the reader that this is NOT
  * the run's first message — "FOLLOW-UP REPORT #2" instead of "REPORT". Whoever
  * reads it knows without opening the hub that the run was already over and that
  * somebody asked for more.
@@ -521,18 +525,6 @@ export function followUpText(run, report, mergeLine = null, { n = 1, minutes = n
   return `${followUpHeader(run, 'FOLLOW-UP REPORT', n)}\n\n${report || '(no report text)'}\n\n${status}`
 }
 
-/**
- * Is Telegram on for this run? The checkbox under the terminal
- * (`runs.telegram_on`), read at the moment a message would go out — so
- * unticking it silences everything that comes AFTER the click, the follow-up
- * reports first of all. A run that does not exist answers "on": the caller
- * knows nothing about it and should not lose a message over a lookup.
- */
-export function telegramOnFor(runId) {
-  if (!runId) return true
-  const row = db.prepare('SELECT telegram_on FROM runs WHERE id=?').get(runId)
-  return !row || row.telegram_on !== 0
-}
 
 /**
  * The "done" message. `mergeLine` is what the integration has to say about this
@@ -555,7 +547,32 @@ export function doneText(run, report, mergeLine = null) {
 }
 
 /**
- * Telegram with dedupe per (run, type) — planning 4.5: only one message per anomaly type.
+ * The per-run "already said this once" flag.
+ *
+ * It used to be called `telegram_sent:<type>`, and after the notification
+ * rebuild that name would be a lie in the data: the flag is set when the
+ * message went to WHATEVER channels are configured — a webhook, an e-mail, or
+ * nothing at all. So it is `notified:<type>` now, and the old name is still
+ * READ (`notifiedFlags()`), because a run that was told about its overrun
+ * yesterday must not be told again today just because the hub was deployed in
+ * between.
+ *
+ * `runs.telegram_on`, the column behind the checkbox, deliberately keeps ITS
+ * name: renaming a column is a table rebuild, and this project's own rule about
+ * `openrouter_min_eur` says that is a migration for nothing. An event kind is
+ * different — it is queried by name, rendered into a run's history, and asserted
+ * on in the tests.
+ */
+export const notifiedFlag = (type) => `notified:${type}`
+
+/** Both names of one flag: what is written today, and what older rows carry. */
+export function notifiedFlags(type) {
+  return [notifiedFlag(type), `telegram_sent:${type}`]
+}
+
+/**
+ * One message about a run, with dedupe per (run, type) — planning 4.5: only one
+ * message per anomaly type, whichever channels carry it.
  */
 export async function notifyRun(runId, type, text, lang = null) {
   // A conflict run is the integrator's tool, not work the operator asked for.
@@ -563,24 +580,35 @@ export async function notifyRun(runId, type, text, lang = null) {
   // the done line naming it after the merge, T-BLOCKED-CONFLICT when it did not
   // get there. No flag event either: there is nothing to deduplicate.
   if (db.prepare('SELECT resolves_run_id FROM runs WHERE id=?').get(runId)?.resolves_run_id) return false
-  const flag = `telegram_sent:${type}`
-  const have = db.prepare('SELECT 1 FROM events WHERE run_id = ? AND kind = ? LIMIT 1').get(runId, flag)
+  const [flag, legacy] = notifiedFlags(type)
+  const have = db.prepare('SELECT 1 FROM events WHERE run_id = ? AND kind IN (?,?) LIMIT 1').get(runId, flag, legacy)
   // Help calls are never duplicates: every question needs an answer.
   if (have && lang?.dedupe !== false) return false
   // The run's own switch (the checkbox under its terminal). Off means: this
   // message is not sent, and it is written down that it was not — the flag is
-  // deliberately NOT set, so switching Telegram back on lets the same type
+  // deliberately NOT set, so switching the box back on lets the same type
   // through again. Everything else about the report happened already.
-  if (!telegramOnFor(runId)) {
-    addEvent(runId, 'telegram_muted', { type })
+  if (!notifyOnFor(runId)) {
+    addEvent(runId, 'notify_muted', { type })
     return false
   }
   const voll = `${text}\n\nRun: ${runId}`
-  const ok = lang
-    ? await notifyLong(voll, { fileName: lang.fileName, fileContent: lang.fileContent, url: detailUrl(runId) })
-    : await notify(voll, detailUrl(runId))
+  // One call, whether or not there is a file: the facade normalizes both, and a
+  // channel decides for itself whether a long report travels as an attachment.
+  const r = await notifyChannels({
+    kind: 'run',
+    runId,
+    text: voll,
+    url: detailUrl(runId),
+    attachment: lang?.fileContent ? { fileName: lang.fileName, content: lang.fileContent } : null,
+  })
+  const ok = r.sent
+  // The flag is written whether or not a channel took it — including when there
+  // is no channel at all. It records that the hub HAS said this about this run,
+  // and a hub with notifications switched off must not queue up a backlog that
+  // fires the day one is configured.
   addEvent(runId, flag, { delivered: ok })
-  addEvent(runId, 'telegram_sent', { type })
+  addEvent(runId, 'notified', { type })
   return ok
 }
 

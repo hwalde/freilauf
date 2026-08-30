@@ -2,7 +2,8 @@
 
 Web UI for managing autonomous coding agents (claude / opencode / hermes / cursor).
 Agents run in tmux sessions, every run in its own git worktree. The hub schedules,
-observes, collects reports and notifies via Telegram.
+observes, collects reports and — optionally — notifies through a notification
+plugin (Telegram ships with it).
 
 > **No private information in this file.** Everything machine- and operator-specific
 > (real ports, VPN addresses, hostnames, firewall details, certificate paths) belongs
@@ -176,9 +177,14 @@ The hub therefore runs from **`~/agents/deploy/cc-hub`**, and
 7. not healthy → **rollback** to `previous-sha`, the same steps again, health
    check again. Exit 1 with `deploy of <sha> FAILED (<reason>), rolled back to
    <previous>`. Rollback also unhealthy → exit 2, and the journal with it.
-8. **Telegram on failure, always** (token and chat read from `settings`, the way
-   `bin/cchub` reads the pipeline switch); on success only with `--notify`. Best
-   effort in every direction — no database, no token, no network, no consequence.
+8. **A notification on failure, always** — through `bin/cc-notify`, which loads
+   the plugins and calls the hub's own facade, so it reaches whatever channel the
+   operator configured and nothing at all when they configured none. On success
+   only with `--notify`. Best effort in every direction: no `cc-notify` on the
+   PATH, no channel, no network, no consequence. (It used to be a second,
+   independent Telegram implementation in bash — read the bot token out of the
+   database, curl the Bot API — which no facade could reach and no other channel
+   could ever be added to.)
 
 `cchub deploy [ref]` is the front door, `cchub restart` stays a plain restart
 without a deploy, and `cchub status` names the deployed sha and how far
@@ -195,7 +201,7 @@ branch on whether that worked and restart — three steps, of which only the fir
 two could ever report anything, because a step that restarts the hub kills the
 process running the flow (see `server/flows/AGENTS.md`, "Restarting the hub from
 a flow"). Everything that has to be checked *after* the restart therefore has to
-be checked by the script, and it is: health check, rollback, Telegram.
+be checked by the script, and it is: health check, rollback, notification.
 
 ## The run definition: agent and single run are the same thing
 
@@ -408,7 +414,7 @@ edit the endpoint (`POST /api/runs/<id>/edit`) would refuse:
   urgently stops being silent). Raising it also RETRACTS the statement the old
   value produced: `anomaly:soft_overrun`/`anomaly:overrun` go the same
   `cleared:*` way they go on a progress report (clearAnomalies in reports.mjs,
-  exported for exactly this caller), and the `telegram_sent:overrun` flag with
+  exported for exactly this caller), and the `notified:overrun` flag with
   them — so a genuine overrun of the NEW duration can page once again. The
   running agent is deliberately NOT told: the
   minutes in its prompt are informational, and editing a session that stands
@@ -601,6 +607,61 @@ row is rendered into a page and travels with a database copy. The banner above
 the content shows what is worth suggesting, and answering it (Add or Not now)
 writes the answer — so a dismissal stays dismissed across restarts.
 
+### Notifications are a plugin, and they are optional
+
+Telegram used to be wired into ~30 files: `server/telegram.mjs` plus direct
+imports in reports, incidents, the watcher, the integrator, the LLM alerts, the
+flow actions and a second implementation of the whole thing in bash inside
+`bin/cchub-deploy`. So "which channel" was not a question anybody could answer
+differently, and an installation that wanted none had to leave a token unset and
+hope every caller checked.
+
+A **notifier** is the third plugin kind now — same registry, same duplicate-id
+rule, same external packages under `CCHUB_PLUGIN_DIR` (`"kind": "notifier"`),
+same `registryErrors()`. The full contract is in
+[docs/plugins.md](docs/plugins.md); what the rest of the hub has to know is
+this:
+
+- **`server/notify.mjs` is the only way anything is said.** `notify(message)`
+  dispatches to every enabled, configured notifier in parallel, catches every
+  failure, and **never throws**. `notifiersConfigured()` is the question of
+  whether a message would go anywhere at all.
+- **NOTHING configured is a complete installation.** The hub schedules,
+  watches, merges, records and reports exactly as it does with three channels —
+  it simply stays quiet. There is no banner, no warning, no required step in the
+  Welcome wizard, and no call site that treats it as an error. That is the whole
+  point, and it is what every future change here has to keep true.
+- **The message is normalized**: `{ kind, text, url, linkLabel, runId,
+  attachment }`. The hub composes plain text; how a channel renders it — HTML
+  with an inline button, a JSON body, a mail — is the channel's business. That
+  is what lets a third party's webhook or Slack package be a drop-in.
+- **`server/notifiers/telegram.mjs`** is the one built-in, and it is not
+  special: its token and chat are ordinary declared `settings` carrying
+  `settingKey: 'telegram_token'` / `'telegram_chat'`, so **no settings
+  migration** was needed and an existing installation finds its token exactly
+  where it left it. Its old `/telegram-setup` wizard is now the plugin's own
+  `setup` declaration, and `/telegram-setup` is a 303 to it.
+- **Settings → Notifications** (`/settings/notifications`) is one card per
+  registered notifier — enabled flag, its settings, its credentials, a "send
+  test message" button, a link to its wizard — built from the same card blocks
+  the Plugins page uses. It opens by saying that all of it is optional.
+- **`bin/cc-notify "<text>"`** is the facade from outside the hub process, for
+  `cchub-deploy`: it loads the plugins and calls `notify()`. Exit 0 when
+  delivered *or* when nothing is configured — a deploy must not fail because
+  there is nobody to tell.
+- **The flow step is `notify`**, channel-neutral. `telegram` is still accepted
+  as a stored step type (`server/flows/aliases.mjs`), because a step's type is
+  data that sits in every saved flow.
+
+**The per-run flag was renamed and the column was not**, and the difference is
+the rule: `notifyRun()` writes `notified:<type>` (and still READS
+`telegram_sent:<type>`, so a run told about its overrun before the deploy is not
+told again after it), because an event kind is queried by name and rendered into
+a run's history — a stored kind that says "telegram" after a message went to
+Slack is a lie in the data. `runs.telegram_on` keeps its name, because renaming
+a column is a table rebuild and this project's own rule about
+`openrouter_min_eur` says that is a migration for nothing.
+
 ### The Welcome wizard
 
 A fresh installation has nothing, so every page it renders is about something
@@ -612,7 +673,7 @@ hub's own questions, and what to do next. `GET /` redirects to `/welcome` for a
 browser navigation until the operator ticks **"Do not show this again"**
 (`welcome_hide`).
 
-It is built in the shape of `/telegram-setup` and for the same reasons: server-
+It is built in the shape of the notifier setup wizards and for the same reasons: server-
 rendered steps, each its own `<form method="post">` to its own endpoint, state
 in `settings` / `plugin_config` / `discovery` from the moment a form is
 submitted — closing the tab in the middle loses nothing, and a reload cannot
@@ -675,7 +736,7 @@ and says so, with a `stage` of `config` / `transport` / `parse` / `validate`.
 A **transport failure is not reprompted**: a 401, a timeout or a missing binary
 does not become right by asking the same thing again.
 
-**Telegram must never be bombarded** (`alerts.mjs`): one message per failure
+**The channel must never be bombarded** (`alerts.mjs`): one message per failure
 *signature* (`purpose|source|model|errorClass`) per `llm_alert_window_min`
 (default 30), the suppressed occurrences counted and named in the next message
 for that signature, a global ceiling of `llm_alert_max_per_hour` (default 6),
@@ -836,7 +897,7 @@ Where it is asked, and why each of them:
   when the watcher picks a deferred run back up. A block also **names the
   window** in its reason and hands out **that window's** reset time; a 7-day
   block used to publish the 5-hour reset into the deferred event and into
-  Telegram as the moment the run would start again.
+  the notification as the moment the run would start again.
 - **`anomaly:quota_full`** (watcher) — a red flag on a run for somebody else's
   window is noise, in both directions: only a **claude** run is measured against
   the claude windows at all (a run on another harness draws nothing from them,
@@ -1276,7 +1337,7 @@ whatever the agent does next), then asks three questions in this order:
    a run's work on `main` is the more expensive mistake, so nothing is merged
    while the worktree is dirty — not even the committed part.
 2. **no commits at all?** (`tip == base_sha`) → nothing to merge, the run closes
-   as it always did and the Telegram line says so.
+   as it always did and the done message says so.
 3. **still mergeable?** — a **dry run with `git merge-tree --write-tree
    --name-only origin/{base} <tip>`**. Measured with git 2.43: exit 1 on
    conflict, the conflicting paths on stdout, and `git status` afterwards empty.
@@ -1361,7 +1422,7 @@ Then: `git merge --no-ff` (always, so every run is findable as a merge commit),
 the optional `repos.merge_check` **on the merged result**, and
 `git push origin HEAD:{base}`. A rejected push is retried once from the top
 (somebody was faster); a second rejection is treated as a conflict. Only after
-the push does the run become `done`, does Telegram hear about it, do the other
+the push does the run become `done`, does the operator hear about it, do the other
 agents learn that `main` moved, and do the flows fire — a flow then sees a run
 whose work really is on `main`.
 
@@ -1369,10 +1430,10 @@ whose work really is on `main`.
 
 | Situation | `merge_status` | What happens |
 |---|---|---|
-| worktree still dirty | `blocked_dirty` | **nothing is merged**, incident + Telegram, three one-click answers on the detail page |
+| worktree still dirty | `blocked_dirty` | **nothing is merged**, incident + notification, three one-click answers on the detail page |
 | conflict, or a red merge check | `resolving` → `blocked_conflict` | a conflict run, up to `repos.merge_max_attempts` of them; then a human |
-| git/network/auth error | `blocked_error` | incident + Telegram, "Merge now" retries |
-| no `origin` remote | `blocked_no_remote` | incident + Telegram; the hub never merges in the operator's checkout |
+| git/network/auth error | `blocked_error` | incident + notification, "Merge now" retries |
+| no `origin` remote | `blocked_no_remote` | incident + notification; the hub never merges in the operator's checkout |
 | ended `failed`/`aborted` | `unmerged_*` | never merged automatically — named, backed up, and the operator decides |
 
 A **conflict run** is an ordinary single run through `startRun()`: budget gate,
@@ -1434,7 +1495,7 @@ branch. What the integrator then does is a **short** version of the finish gate:
   M1 is the same message as ever;
 - **no dry run, no merge**; instead the branch is pushed to origin (the same
   `backupBranch()` the backup rule uses), `merge_status='kept_on_branch'`,
-  event `branch_kept`, and the Telegram done line reads
+  event `branch_kept`, and the done message reads
   `Kept on branch <name> — not merged, as configured`;
 - a **failed push is an escalation**, like a merge that cannot be pushed:
   the operator wants nothing living only on this machine;
@@ -1458,7 +1519,7 @@ off:
 
 | What | Why |
 |---|---|
-| **No Telegram of its own**, in any state — `notifyRun()` returns at the top | The operator hears about the run it works FOR: T-RESOLVING at the start, the done line naming the resolver after the merge, T-BLOCKED-CONFLICT when it did not get there. Three messages about one problem is two too many. |
+| **No notification of its own**, in any state — `notifyRun()` returns at the top | The operator hears about the run it works FOR: T-RESOLVING at the start, the done line naming the resolver after the merge, T-BLOCKED-CONFLICT when it did not get there. Three messages about one problem is two too many. |
 | **No flows** — `flows=NULL`, `flow_dispatched=1`, `merge_dispatched=1` at creation | A flow must not fire for a run the operator never started, and the *merge* it carries belongs to the run it worked FOR: `run_merged` fires once per integration, on the original. Both flags are set at creation rather than at the end, because that is what the triggers poll on — and `dispatchMerges()` skips a `resolves_run_id` row for the same reason, so the two sides agree instead of depending on each other. |
 | **No generated title** | It is called `Resolve conflicts: <original title>`; a model would only make that less clear. |
 | **Never `unmerged_*` / `blocked_*`, never a `merge_blocked` incident** | Everything that goes wrong here is mapped onto the original: `escalate(original, 'resolver_failed')` → attempts → the next conflict run or `blocked_conflict`. It only ever carries `merged` or nothing. |
@@ -1483,7 +1544,7 @@ and the flow step switch such a run back to `running` first.
 `assessUnmerged()` runs on every path a run can end badly and writes
 `unmerged_commits` / `unmerged_both` / `unmerged_dirty` / `nothing`. A failed
 run's work is not automatically wanted — but it is **named**, so nobody has to go
-looking, and the Telegram message carries the paragraph plus the resume command
+looking, and the notification carries the paragraph plus the resume command
 (`resumeCommand(run)`, a plugin capability, see `docs/plugins.md`). The detail
 page has the buttons: merge now, commit or discard the leftovers and merge, or
 skip. That is why there is no `merge_when` setting.
@@ -1501,7 +1562,7 @@ The remote is the backup, and that is a rule beyond the integrator:
    repo). A **push touches no working tree**, which is why it is the one git
    command the hub runs in the operator's checkout — `merge`, `checkout` and
    `reset` stay forbidden there. Diverged? **Never `--force`**: a global incident
-   plus Telegram, and a human reconciles it. Success sets `repos.last_push_at`,
+   plus a notification, and a human reconciles it. Success sets `repos.last_push_at`,
    shown on the Repos page.
 3. **Work that nobody merged is pushed as a branch** — the run's own branch, or
    `run/<short id>` for a detached worktree (`branch_backed_up`). Same intention
@@ -1541,7 +1602,7 @@ A report from a finished run is a **follow-up report** now
   belongs to a follow-up. They call `completeFollowUp()`, the one function
   that makes a follow-up visible: the `followup_done` event, the flows fired
   again (`rearmDispatch()` in `flows/db.mjs` takes `flow_dispatched` back,
-  and `merge_dispatched` too when the follow-up merged), and Telegram.
+  and `merge_dispatched` too when the follow-up merged), and the notification.
   Nothing about the merge itself is different, which is why `merged_sha`
   simply moves to the new tip.
 - **The status does not change.** A `done` run stays `done`, a `failed` one
@@ -1562,7 +1623,7 @@ A report from a finished run is a **follow-up report** now
   itself; without a `merged_sha` (merge mode off) there is nothing to compare
   against and the net stays out of it.
 
-**Telegram says which one it is.** A follow-up arrives as `<repo> / <name>
+**The message says which one it is.** A follow-up arrives as `<repo> / <name>
 FOLLOW-UP REPORT #n:` with a `✅ Follow-up #n done` status line that carries
 the time since the previous report instead of the run's duration
 (`followUpText()`), never deduplicated (type `followup`). A blocked follow-up
@@ -1570,14 +1631,17 @@ sends only the block (`T_BLOCKED_*`, now `dedupe: false` — a run blocked
 twice is blocked twice), not a second message about the same moment.
 
 **And the checkbox under the terminal is the answer to "I am sitting right
-here".** `runs.telegram_on` (default 1 for every run, `telegramSwitch()` in
-pages.mjs, `POST /api/runs/<id>/telegram`) is read at send time by
-`notifyRun()` and by the incident alarms: unticked means **no Telegram about
-this run** — reports, follow-ups, alarms, incidents — and nothing else
+here".** `runs.telegram_on` (default 1 for every run, `notifySwitch()` in
+pages.mjs, `POST /api/runs/<id>/notify`) is read at send time by `notifyRun()`
+and by the incident alarms: unticked means **no message about this run** on any
+configured channel — reports, follow-ups, alarms, incidents — and nothing else
 changes. The integration, the flows and the events happen exactly as before;
-a suppressed message is written down as `telegram_muted`, and the
-`telegram_sent:*` flag is deliberately NOT set, so switching the box back on
-lets the same type through again. It sits under `#term` and outside the
+a suppressed message is written down as `notify_muted`, and the `notified:*`
+flag is deliberately NOT set, so switching the box back on lets the same type
+through again. The COLUMN keeps its historic name: renaming one is a table
+rebuild, which is the same "a migration for nothing" rule that leaves
+`openrouter_min_eur` holding dollars — and `/api/runs/<id>/telegram` stays as an
+alias of the route for the same reason. It sits under `#term` and outside the
 run-detail fragment for the same reason the terminal does: a live update must
 not flip a box the operator just clicked. Deliberately no time-based
 heuristic ("the operator wrote into the session two minutes ago, so do not
@@ -1786,14 +1850,14 @@ saying that the platform, not the agent, closed the run.
 
 **Detecting the end three times must still notify once.** Two channels here plus
 `sessionEnd`'s `_exit` all run into `handleReport()`, and `handleReport()` is
-what writes to Telegram — so the fences against a run ringing the phone three
-times about the same thing are load-bearing, not incidental: `handleReport()`
-accepts a run only in `running`/`waiting_help`, `finishByTurnEnd()` fires only
-from `running`, and `notifyRun()` carries a `telegram_sent:<type>` flag per run.
-Whichever channel gets there first closes the run; the others find it finished
-and fall out. The e2e suite fires all three at one run and asserts a single
-`telegram_sent:done` ("all three end channels together ring Telegram exactly
-once") — remove any of the three fences and that test goes red.
+what notifies — so the fences against a run ringing the phone three times about
+the same thing are load-bearing, not incidental: `handleReport()` accepts a run
+only in `running`/`waiting_help`, `finishByTurnEnd()` fires only from `running`,
+and `notifyRun()` carries a `notified:<type>` flag per run. Whichever channel
+gets there first closes the run; the others find it finished and fall out. The
+e2e suite fires all three at one run and asserts a single `notified:done` ("all
+three end channels together notify exactly once") — remove any of the three
+fences and that test goes red.
 
 The hook file is the hub's, not the agent's work: `harnessOwnedPaths()` keeps
 the worktree cleanup from counting it as uncommitted changes (the same trap the
@@ -1826,7 +1890,7 @@ better place.
 client) that reacts to finished runs, a cron schedule or a button with
 building blocks: message running agents, start agents/single runs (optionally
 waiting for their result), extract structured data from a report via LLM,
-branch on the outcome, loop over a list, Telegram, HTTP, delay.
+branch on the outcome, loop over a list, notify, HTTP, delay.
 
 **A flow is not a place you navigate to** — there is no "Flows" nav entry. A
 flow hangs on the agent or the single run whose end starts it: both forms carry
@@ -1968,7 +2032,7 @@ part of this repo. Path override for tests: `CCHUB_ZUSAETZE_DIR`.
 On a rate limit or provider outage the agent cannot report anything — without an
 API there is no tool call. Detection therefore runs from the outside, in three
 stages, all ending in `incidents` (one record per run and type; resolve via
-button, **reopens** on recurrence and notifies via Telegram again — auto-alarm
+button, **reopens** on recurrence and notifies again — auto-alarm
 principle):
 
 | Source | Harness | Immediately red? |
@@ -2015,7 +2079,7 @@ hit that has not recurred within 30 min expires by itself.
 An incident whose condition is demonstrably gone closes itself
 (`vorfallWeggrund()` in detect.mjs, applied in the watcher's `vorfaelleBewerten`
 pass). The record stays — history, counts, the detector's protocol — but the
-sidebar and Telegram stop counting it as open:
+sidebar and the notifications stop counting it as open:
 
 | Situation | What happens |
 |---|---|
@@ -2025,7 +2089,7 @@ sidebar and Telegram stop counting it as open:
 | red on `failed`/`aborted` | stays open — that is WHY the run did not come through |
 | `merge_blocked`, `provider_down:*` | never by time: the integrator and the pulse own their recovery paths |
 
-### The Telegram grace period — and the un-ringing
+### The notification grace period — and the un-ringing
 
 A red incident does **not** page immediately: `notify_at` stores
 `occurrence + CCHUB_INCIDENT_NOTIFY_DELAY_MS` (default 10 min,
@@ -2050,13 +2114,13 @@ answer. `incidents.mjs` splits it:
 | **Noticed** | everything else — rate limit, provider hiccup, global pulse. The hub deferred, retried, or the run simply carried on. | "Dismiss" |
 
 Neither button changes anything about the run; both only silence the entry here
-and on Telegram, and a recurrence reopens it. What the watcher adds: incidents
+and in the notifications, and a recurrence reopens it. What the watcher adds: incidents
 **close by themselves** when their condition demonstrably went away (see "Gone
 is gone" above) — since the evidence rule generalized, that includes the
 "needs you" types on a run that reached `done`: a run that came through has
-already answered what a model or auth hiccup during it meant. The Telegram
-message states the group in its second line, so the reader can tell a "get up"
-from a "noted" without opening the hub.
+already answered what a model or auth hiccup during it meant. The notification
+states the group in its second line, so the reader can tell a "get up" from a
+"noted" without opening the hub.
 
 cursor, like hermes, has **no** hook for API errors (its hook enum knows
 `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `afterFileEdit`,

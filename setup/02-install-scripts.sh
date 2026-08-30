@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "==> cc scripts into ~/.local/bin"
 mkdir -p "$HOME/.local/bin"
-for s in cc-start cc-attach cc-kill cc-help cc-report cc-oc-sync-agents cchub cchub-deploy cc-session-cleanup; do
+for s in cc-start cc-attach cc-kill cc-help cc-report cc-notify cc-oc-sync-agents cchub cchub-deploy cc-session-cleanup; do
     install -m 755 "$ROOT/bin/$s" "$HOME/.local/bin/$s"
     echo "    $s"
 done
