@@ -49,12 +49,28 @@ if [[ "$KIND" == "_api_error" || "$KIND" == "_turn_end" || "$KIND" == "_exit" ||
         if [[ -n "${1:-}" ]]; then
             ERR="$1"; shift; TEXT="${*:-}"
         elif [[ ! -t 0 ]]; then
-            HOOK_JSON="$(cat 2>/dev/null || true)"
+            # BOUNDED read, and that is load-bearing. `[[ ! -t 0 ]]` only says stdin is
+        # not a terminal — it does NOT say anybody is going to write to it or ever
+        # close it. A real hook hands over its JSON and closes at once, so the
+        # timeout costs nothing there; every OTHER caller that inherited an open
+        # pipe (a script, a test, a hand-typed `cc-report _turn_end`) would
+        # otherwise block forever. This used to apply to _api_error alone; the day
+        # it was extended to _turn_end/_exit/_idle it became a hang on the events
+        # that fire constantly — and _exit runs from SessionEnd, which claude waits for.
+        HOOK_JSON="$(timeout 2 cat 2>/dev/null || true)"
         else
             ERR="unknown"
         fi
     elif [[ ! -t 0 ]]; then
-        HOOK_JSON="$(cat 2>/dev/null || true)"
+        # BOUNDED read, and that is load-bearing. `[[ ! -t 0 ]]` only says stdin is
+        # not a terminal — it does NOT say anybody is going to write to it or ever
+        # close it. A real hook hands over its JSON and closes at once, so the
+        # timeout costs nothing there; every OTHER caller that inherited an open
+        # pipe (a script, a test, a hand-typed `cc-report _turn_end`) would
+        # otherwise block forever. This used to apply to _api_error alone; the day
+        # it was extended to _turn_end/_exit/_idle it became a hang on the events
+        # that fire constantly — and _exit runs from SessionEnd, which claude waits for.
+        HOOK_JSON="$(timeout 2 cat 2>/dev/null || true)"
     fi
     if [[ -n "$HOOK_JSON" ]]; then
         ERR="$(printf '%s' "$HOOK_JSON" | python3 -c 'import json,sys
@@ -80,7 +96,12 @@ fi
 
 # Build the payload as JSON with python3 (quoting-safe, no jq dependency).
 PAYLOAD="$(python3 - "$KIND" "$TEXT" "$FILE_ARG" "$ERR" "$SESSION_ID" <<'PY'
-import json, sys
+# `os` is used below for os.path.isfile — it was lost once, and the failure is
+# invisible until the ONE call that matters: `cc-report done --file <report>`
+# dies with a NameError, so an agent finishes its work and cannot say so.
+# `cc-report progress` keeps working, because an empty file argument
+# short-circuits the isfile() call — which is exactly why it went unnoticed.
+import json, os, sys
 kind, text, file_arg, err, session_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 body = {"kind": kind}
 if kind == "_api_error":

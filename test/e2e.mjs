@@ -1448,8 +1448,12 @@ try {
       writeFileSync(settingsDatei, claudeSettingsJson())
       const arbeitsdir = join(SB, 'claude-429-cwd'); mkdirSync(arbeitsdir, { recursive: true })
       try {
+        // --session-id is what makes this the RUN'S OWN claude. runner.mjs passes it on
+        // every real start, and handleReport()'s foreign-session guard compares the hook's
+        // session id against the run id: without it this probe is indistinguishable from a
+        // claude the agent spawned itself, and its 429 is correctly discarded.
         const r = await new Promise((resolve) => execFile('claude',
-          ['-p', 'sag hallo', '--model', 'sonnet', '--settings', settingsDatei],
+          ['-p', 'sag hallo', '--model', 'sonnet', '--settings', settingsDatei, '--session-id', j.runId],
           { cwd: arbeitsdir, timeout: 120_000, env: { ...process.env, ANTHROPIC_BASE_URL: `http://127.0.0.1:${mock.address().port}`,
             CC_RUN_ID: j.runId, CC_HUB_URL: BASIS, PATH: `${join(homedir(), '.local', 'bin')}:${process.env.PATH}` } },
           (err, stdout, stderr) => resolve({ err, stdout: String(stdout), stderr: String(stderr) })))
