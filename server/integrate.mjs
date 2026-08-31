@@ -1540,9 +1540,3 @@ export function resetIntegration(runId) {
   lastTip.delete(runId)
   lastMessage.delete(runId)
 }
-
-/** Test hook: forget the in-memory schedule so a check happens on the next tick. */
-export function _resetState() {
-  fetchedAt.clear(); lastTip.clear(); nextCheckAt.clear(); lastMessage.clear()
-  chains.clear(); queued.clear(); pushFails.clear()
-}

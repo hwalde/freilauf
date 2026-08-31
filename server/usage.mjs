@@ -101,8 +101,5 @@ export async function subscriptionUsage({ force = false } = {}) {
   return task
 }
 
-/** Test hook: let the cache age by `ms`, so staleness can be tested without waiting. */
-export function _usageCacheAge(ms) { cache.at -= ms }
-
 /** Test hook: drop the cache. */
 export function _usageCacheReset() { cache = { at: 0, key: '', value: null }; inflight = null }

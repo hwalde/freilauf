@@ -13,7 +13,7 @@
 //      files (a .env), "link" for large or shared directories (node_modules,
 //      reference material),
 //   4. validate the answer against the real directory (never trust the model).
-import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, existsSync } from 'node:fs'
 import { join, basename } from 'node:path'
 import { getSetting, mruList, mruRemember } from './db.mjs'
 import { sh } from './util.mjs'

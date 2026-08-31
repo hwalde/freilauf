@@ -10,7 +10,7 @@
 // carry a credential, a setting or an enabled flag. The old table is left
 // in place untouched after the one-time migration, so a rollback works.
 import db, { getSetting, setSetting } from '../db.mjs'
-import { getPlugin, pluginKind, pluginSource, allPlugins } from './registry.mjs'
+import { getPlugin, pluginKind, pluginSource } from './registry.mjs'
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS plugin_config (
@@ -151,11 +151,6 @@ export function setPluginEnabled(id, on) {
   return setPluginConfig(id, { enabled: on ? 1 : 0 })
 }
 
-/** The model providers the operator allowed for this coding agent. */
-export function pluginProviders(id) {
-  return pluginConfig(id)?.config.providers ?? []
-}
-
 /**
  * Store the allowed model providers of a coding agent. Only ids the plugin
  * itself declares survive — an unknown provider never reaches the database.
@@ -261,11 +256,4 @@ export function pluginHasCredential(pluginId, env = process.env) {
 export function forgetPlugin(id) {
   db.prepare('DELETE FROM plugin_config WHERE plugin_id = ?').run(String(id))
   db.prepare('DELETE FROM discovery WHERE plugin_id = ?').run(String(id))
-}
-
-/** Registered plugins of one kind that the operator has switched on. */
-export function enabledPlugins(kind = null) {
-  return allPlugins()
-    .filter(p => (!kind || p.kind === kind) && isPluginEnabled(p.id))
-    .map(p => p.plugin)
 }

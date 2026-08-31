@@ -15,7 +15,7 @@
 // a detached worktree and is told never to commit, so under merge_mode='hub'
 // the finish gate finds nothing to merge and closes it cleanly. It carries no
 // flows (nothing the operator started should cascade into them).
-import db, { getSetting, setSetting, addEvent, allSettings, DB_PATH } from './db.mjs'
+import db, { addEvent, allSettings, DB_PATH } from './db.mjs'
 import { t } from './i18n.mjs'
 import { publicBase } from './util.mjs'
 import { env } from './env.mjs'
@@ -248,7 +248,3 @@ export async function maybeAutoCleanup(nowMs = Date.now(), memGb = null) {
   }
   return startCleanupRun({ source: 'auto', settings: s })
 }
-
-// Exposed for the unit tests (same access the settings page has).
-export function _cleanupGetSetting(key) { return getSetting(key, null) }
-export function _cleanupSetSetting(key, value) { setSetting(key, value) }
