@@ -58,6 +58,32 @@ Claude Code、opencode、hermes、cursor，或任何以插件形式加入的智�
   判断日志行、读取报告）可以由你已经付费订阅的编码智能体来回答。
 - **多语言界面**：英语（默认）、中文、德语——所有页面统一的时钟和数字格式。
 
+## Freilauf 界面一览
+
+*一个小型演示安装（「acme-shop」），带着一支常驻的智能体团队；界面语言按安装
+自行选择。*
+
+![概览页与状态侧栏](docs/screenshots/overview.zh.png)
+*概览页。每次运行一行——Documentation Updater 正在工作中，Payments SDK 迁移
+已排期，Dependency Updater 在等待配额窗口，Tech Debt Solver 的成果早已合入；
+右侧侧栏显示打开的事件、订阅用量和整台机器的 tmux 内存。*
+
+![运行详情页与实时终端](docs/screenshots/run-detail.zh.png)
+*运行内部。实时终端里能看到智能体正在干活；周围是这次运行的定义、预期时长，
+以及当智能体报告完成时检查工作区的完成门槛。*
+
+![单次运行表单](docs/screenshots/run-new.zh.png)
+*启动一次单次运行。任务、模型与推理力度、分支规则、可选技能、运行结束后
+触发的流程，以及什么时候启动——也可以一键存成带时间表的智能体。*
+
+![无代码流程设计器](docs/screenshots/flow-builder.zh.png)
+*无代码流程。这个流程从已结束运行的报告中提取摘要与风险等级，按结果分支并
+发送通知——挂在 Documentation Updater 上，它每次运行结束都会触发。*
+
+![智能体页面](docs/screenshots/agents.zh.png)
+*常驻团队。每个智能体是一个角色：一段提示词、一个时间表、一个预算和挂在它
+身上的流程——随时可以手动启动。*
+
 ## 三种进入方式
 
 - **并肩工作。** 你们的团队负责开发；智能体团队接手没人爱干的活——死代码、评审、

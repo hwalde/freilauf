@@ -77,6 +77,36 @@ Freilauf does, and it only goes forward.
 - **Multilingual UI**: English (default), 中文, Deutsch — one clock and one
   number format across every page.
 
+## Freilauf in pictures
+
+*A small demo installation ("acme-shop") with a standing team of agents; the
+UI language is selectable per installation.*
+
+![The overview with the status sidebar](docs/screenshots/overview.png)
+*The overview. One row per run — the Documentation Updater is working right
+now, a Payments SDK migration is scheduled, the Dependency Updater waits for
+its quota window, the Tech Debt Solver's work is already merged — with open
+incidents, subscription windows and the machine's tmux memory in the sidebar.*
+
+![A run's detail page with the live terminal](docs/screenshots/run-detail.png)
+*Inside a run. The live terminal shows the agent working; around it the run's
+definition, expected duration, and the finish gate that checks the worktree
+when the agent reports done.*
+
+![The single-run form](docs/screenshots/run-new.png)
+*Starting a single run. Task, model and reasoning effort, branch rule, opt-in
+skills, the flows that fire when the run ends, and when it should start —
+optionally saved as an agent with a schedule.*
+
+![The no-code flow designer](docs/screenshots/flow-builder.png)
+*Flows without code. This one extracts a summary and a risk rating from a
+finished run's report, branches on the outcome, and notifies — attached to the
+Documentation Updater so it fires every time that agent ends a run.*
+
+![The agents page](docs/screenshots/agents.png)
+*The standing team. Each agent is a role: a prompt, a schedule, a budget and
+the flows that hang on it — startable at any time by hand.*
+
 ## Three ways in
 
 - **Side by side.** Your team develops; the agent team takes the work nobody
