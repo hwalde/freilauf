@@ -29,11 +29,16 @@ not merely "pass".
     exactly. This is the suite that holds the three catalogs to identical key
     sets, so it also proves the 18 removed translation keys went out of all
     three. Raw transcript is machine-local under ~/.unlazy/ (gitignored).
+    exactly. This is the suite that holds the three catalogs to identical key
+    sets, so it also proves the 18 removed translation keys went out of all
+    three. Raw transcript is machine-local under ~/.unlazy/ (gitignored).
 
 - [x] G2: e2e suite green at the baseline count — every page and route still answers
   CHECK: env -u FREILAUF_PUBLIC_URL -u CCHUB_PUBLIC_URL -u CCHUB_VPN_PORT -u FREILAUF_VPN_PORT -u CC_RUN_ID -u CC_HUB_URL -u FL_RUN_ID -u FL_HUB_URL node test/e2e.mjs
   EXPECT: /E2E tests: 280 checks passed/
   EVIDENCE: met — exit 0, `E2E tests: 280 checks passed`, the pre-change count exactly.
+    Covers the routes that outlived the page removed here: the
+    `/settings/coding-agents` 303 and both `/settings/coding-agents/save` posts.
     Covers the routes that outlived the page removed here: the `/settings/coding-agents`
     303 and both `/settings/coding-agents/save` posts.
 
@@ -48,6 +53,8 @@ not merely "pass".
   EVIDENCE: met — exit 0, `Proxy tests: 4 checks passed` and `deploy: 22 checks passed`,
     both the pre-change counts. The deploy suite is what exercises the cc-hub
     transition shims, none of which this change touches.
+    both the pre-change counts. The deploy suite is what exercises the cc-hub
+    transition shims, none of which this change touches.
 
 - [x] G5: not one removed name survives anywhere in the tracked tree
   CHECK: if git grep -qE 'pageCodingAgents|pluginProviders|enabledPlugins|pluginSettingValues|allDiscoveries|firstJsonValue|TELEGRAM_LIMITS|CAPTION_MAX|currentArchiveKeepMs|_cleanupGetSetting|_cleanupSetSetting|_resetState|_sourcesReset|_registryReset|_usageCacheAge|runform\.branch_mode|settings\.coding_agents_hint|ca\.providers_legend|ca\.providers_hint|ca\.no_providers|ca\.intro|ca\.none|ca\.add_title|ca\.all_configured|ca\.detect_note|ca\.installed|ca\.not_installed|ca\.install_hint|ca\.detected|ca\.enabled|ca\.delete_confirm|ca\.add|ca\.plugin_missing' -- . ':(exclude)PLAN.md' ':(exclude)GATES.md'; then echo "remnants found"; exit 1; else echo "removal is complete"; fi
@@ -56,13 +63,20 @@ not merely "pass".
     file (source, tests, docs, shell, catalogs) for all 15 removed identifiers
     and all 18 removed translation keys finds nothing outside PLAN.md/GATES.md,
     which name them as the record of the change.
+    file (source, tests, docs, shell, catalogs) for all 15 removed identifiers
+    and all 18 removed translation keys finds nothing outside PLAN.md/GATES.md,
+    which name them as the record of the change.
 
 - [x] G6: the same absence pattern DOES match the pre-change tree
-      (the negative control for G5 — an absence check that cannot fail proves nothing)
-  CHECK: if git grep -qE 'pageCodingAgents|pluginProviders|enabledPlugins|pluginSettingValues|allDiscoveries|firstJsonValue|TELEGRAM_LIMITS|CAPTION_MAX|currentArchiveKeepMs|_cleanupGetSetting|_cleanupSetSetting|_resetState|_sourcesReset|_registryReset|_usageCacheAge|runform\.branch_mode|settings\.coding_agents_hint|ca\.providers_legend|ca\.providers_hint|ca\.no_providers|ca\.intro|ca\.none|ca\.add_title|ca\.all_configured|ca\.detect_note|ca\.installed|ca\.not_installed|ca\.install_hint|ca\.detected|ca\.enabled|ca\.delete_confirm|ca\.add|ca\.plugin_missing' HEAD -- . ':(exclude)PLAN.md' ':(exclude)GATES.md'; then echo "control holds"; else echo "control failed"; exit 1; fi
+      (the negative control for G5 — an absence check that cannot fail proves nothing.
+      Pinned to the sha, not to HEAD: once this change is committed, HEAD is the
+      cleaned tree and the control would silently stop controlling anything)
+  CHECK: if git grep -qE 'pageCodingAgents|pluginProviders|enabledPlugins|pluginSettingValues|allDiscoveries|firstJsonValue|TELEGRAM_LIMITS|CAPTION_MAX|currentArchiveKeepMs|_cleanupGetSetting|_cleanupSetSetting|_resetState|_sourcesReset|_registryReset|_usageCacheAge|runform\.branch_mode|settings\.coding_agents_hint|ca\.providers_legend|ca\.providers_hint|ca\.no_providers|ca\.intro|ca\.none|ca\.add_title|ca\.all_configured|ca\.detect_note|ca\.installed|ca\.not_installed|ca\.install_hint|ca\.detected|ca\.enabled|ca\.delete_confirm|ca\.add|ca\.plugin_missing' 3956d3d -- . ':(exclude)PLAN.md' ':(exclude)GATES.md'; then echo "control holds"; else echo "control failed"; exit 1; fi
   EXPECT: control holds
   EVIDENCE: met — exit 0, printed `control holds`. The identical pattern run against
-    `HEAD` matches 83 lines, so G5's silence is a measurement and not a broken
+    `3956d3d`, the commit before this change, matches 83 lines — so G5's silence
+    is a measurement and not a broken expression.
+    `3956d3d` — the commit before this change — matches 83 lines, so G5's silence is a measurement and not a broken
     expression.
 
 - [x] G7: the two orphaned verification scripts still pass — they were KEPT,
@@ -70,6 +84,11 @@ not merely "pass".
   CHECK: node scripts/gates-msg-header.mjs && node test/verify-agent-lifecycle.mjs --migration && node test/verify-agent-lifecycle.mjs --lifecycle
   EXPECT: /message-header gates OK[\s\S]*migration verification passed[\s\S]*lifecycle verification passed/
   EVIDENCE: met — exit 0, all three markers printed. Both scripts are unreferenced by
+    package.json and by every suite, and both are the ONLY coverage of what they
+    check (the `repo / AGENT name REPORT:` header; the `UNIQUE(repo_id, name)`
+    rebuild, the move suffix, delete-keeps-runs). Deleting them would have traded
+    a dead-file count for a real coverage hole, so they were kept.
+    All seven gates were re-executed with --reverify against the committed tree.
     package.json and by every suite, and both are the ONLY coverage of what they
     check (the `repo / AGENT name REPORT:` header; the `UNIQUE(repo_id, name)`
     rebuild, the move suffix, delete-keeps-runs). Deleting them would have traded
