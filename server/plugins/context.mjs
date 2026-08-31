@@ -84,9 +84,6 @@ export async function modelRegistry() {
   return task
 }
 
-/** Test hook: drop the models.dev snapshot. */
-export function _registryReset() { registryCache = { at: 0, value: null }; registryInflight = null }
-
 /**
  * One declared setting of this plugin.
  *

@@ -17,7 +17,6 @@
 // `coding_agents` table is still created below and left untouched after the
 // one-time migration, so a rollback to an earlier hub finds its data.
 import { readFileSync, existsSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import db from './db.mjs'
 import { getHarness, harnessIds } from './harnesses/index.mjs'

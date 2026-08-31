@@ -76,11 +76,6 @@ export function openDiscoveries() {
     .map(row => ({ ...shape(row), plugin: registered.get(row.plugin_id).plugin }))
 }
 
-/** Every discovery row, answered ones included (the Plugins page shows them). */
-export function allDiscoveries() {
-  return db.prepare('SELECT * FROM discovery ORDER BY kind, plugin_id').all().map(shape)
-}
-
 /**
  * The operator answered a suggestion: `added` or `dismissed`. Writing
  * `asked_at` here rather than at render time is what makes "asked once" true —

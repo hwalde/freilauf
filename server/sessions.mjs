@@ -209,9 +209,6 @@ export function shouldCloseArchived(run, keepMs, nowMs = Date.now()) {
   return nowMs - archivedMs >= keepMs
 }
 
-/** The archive keep time in force right now (watcher and archive route read the same value). */
-export function currentArchiveKeepMs() { return archiveSessionKeepMs(allSettings()) }
-
 /** Is this session over its keep time? */
 export function shouldAutoClose(session, run, keepMs, nowMs = Date.now()) {
   const finished = finishedAtMs(session, run)

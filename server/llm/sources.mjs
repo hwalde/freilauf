@@ -232,10 +232,3 @@ export async function sourceModels(id) {
   inflight.set(key, task)
   return task
 }
-
-/** Test hook — mirrors `_alertReset()` / `_registryReset()`. */
-export function _sourcesReset() {
-  cache.clear()
-  inflight.clear()
-  installed.clear()
-}

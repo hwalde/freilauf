@@ -80,7 +80,7 @@ async function lifecycle() {
   mkdirSync(dataDir, { recursive: true })
   process.env.FREILAUF_DATA_DIR = dataDir
   const { default: db } = await import('../server/db.mjs')
-  const { saveAgent, agentNameTaken, moveSuffix, moveAgent, deleteAgent } = await import('../server/run-def.mjs')
+  const { saveAgent, agentNameTaken, moveAgent, deleteAgent } = await import('../server/run-def.mjs')
 
   db.prepare(`INSERT INTO repos(name, path) VALUES('r1','/x/r1'),('r2','/x/r2')`).run()
   const [r1, r2] = db.prepare('SELECT id FROM repos ORDER BY id').all()

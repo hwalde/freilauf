@@ -129,15 +129,6 @@ function balancedCandidates(s, max = MAX_CANDIDATES) {
   return out
 }
 
-/**
- * The first balanced JSON document in `text` as a string, or null.
- * Exported because it is the useful half of this module on its own.
- */
-export function firstJsonValue(text) {
-  const found = balancedCandidates(String(text ?? ''), 1)
-  return found.length ? found[0] : null
-}
-
 // ---------------------------------------------------------------------------
 // markdown fences
 // ---------------------------------------------------------------------------

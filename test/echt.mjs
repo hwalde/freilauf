@@ -47,7 +47,7 @@
 //
 // NEVER print a credential. Everything below names variables, never values.
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync } from 'node:fs'
-import { tmpdir, homedir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gruppe, pruefe, uebersprungen, gleich, wahr, falsch, enthaelt, warteAuf, bericht, zaehler } from './mini.mjs'
 import { neuerSandkasten, sh, vorhanden } from './sandkasten.mjs'

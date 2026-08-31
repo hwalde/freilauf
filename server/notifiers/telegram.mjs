@@ -18,7 +18,6 @@
 // have always been, so no installation has anything to migrate.
 
 const TEXT_MAX = 4096
-const CAPTION_MAX = 1024
 
 function escapeHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -277,10 +276,5 @@ const plugin = {
     return plugin.send(message, ctx)
   },
 }
-
-// Telegram's caption limit is documented here rather than in a comment nobody
-// finds: a caption is not used at all today (the file travels with the text
-// message that precedes it), and the constant states the ceiling in case it is.
-export const TELEGRAM_LIMITS = { TEXT_MAX, CAPTION_MAX }
 
 export default plugin

@@ -11,7 +11,6 @@
 // with the next directory.
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { validateManifest } from './manifest.mjs'
 import { registerPlugin, addRegistryError } from './registry.mjs'

@@ -39,15 +39,6 @@ export function pluginSettingValue(pluginId, field) {
   return v === null || v === undefined ? (field?.default ?? null) : v
 }
 
-/** Every field of one group as `{ fieldKey: value }` — what a `check()` is handed. */
-export function pluginSettingValues(plugin, group = 'settings') {
-  const out = {}
-  for (const field of pluginFields(plugin, group)) {
-    out[field.key] = pluginSettingValue(plugin.id, field)
-  }
-  return out
-}
-
 /**
  * Every settings key declared by any REGISTERED plugin.
  *

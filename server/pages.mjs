@@ -8,10 +8,7 @@ import { KNOWN_QUANTIZATIONS, REGIONS, parseRoutingConfig } from './providers/op
 import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime, fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent, tzAbbrev, uiTimezone, setTimezone, TIMEZONE_OPTIONS, hubVersion } from './util.mjs'
 import { cookieRepo, requestRepo } from './web-helpers.mjs'
 import { providerBalances } from './balances.mjs'
-import {
-  enabledCodingAgents, listCodingAgents, saveCodingAgent,
-  deleteCodingAgent, unconfiguredHarnessIds,
-} from './coding-agents.mjs'
+import { enabledCodingAgents, saveCodingAgent, deleteCodingAgent } from './coding-agents.mjs'
 import {
   runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
   runTitleField, runStartTimeFields, runStartFromForm,
@@ -25,7 +22,7 @@ import {
 import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } from './title.mjs'
 import { extrasModelsMru, rememberExtrasModel, DEFAULT_EXTRAS_MODEL } from './extras-suggest.mjs'
 import { runEditAllowed } from './run-edit.mjs'
-import { getHarness, harnessLabel, detectInstalled } from './harnesses/index.mjs'
+import { harnessLabel } from './harnesses/index.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
 // cached there, `null` when it cannot be established. See providerChoiceBlock().
@@ -37,7 +34,7 @@ import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
 import { resumeCommand } from './integrate.mjs'
 import { listSessions, sessionMemory, sessionKeepHours, currentKeepMs, paneAlive, archiveSessionKeepHours } from './sessions.mjs'
-import { cleanupSettings, cleanupConfigured, cleanupPrompt, cleanupRunInFlight, startCleanupRun } from './cleanup.mjs'
+import { cleanupSettings, cleanupConfigured, cleanupRunInFlight } from './cleanup.mjs'
 import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
 import { flowRunKeepDays } from './flows/db.mjs'
 // "Freilauf found N things on this machine it could use" — derived, not passed,
@@ -2200,65 +2197,6 @@ export async function providerChoiceBlock(plugin, chosen, { name = 'providers' }
     <input type="checkbox" name="${e(name)}" value="${e(pid)}" ${chosen.has(pid) ? 'checked' : ''}>
     ${e(providerLabel(pid))} <span class="dim">— ${e(providerAccess(plugin, pid, own))}</span></label>`).join('')
   return `<p class="dim">${e(t('plugins.providers_hint'))}</p>${brings}${boxes}`
-}
-
-export async function pageCodingAgents(req, res, url) {
-  const configured = listCodingAgents()
-  const installed = await detectInstalled()
-  const installedById = new Map(installed.map(i => [i.id, i.installed]))
-
-  // Both lists await the shared provider block (it may ask the coding agent
-  // what credentials it holds), so they are built concurrently rather than one
-  // card after the other.
-  const rows = (await Promise.all(configured.map(async a => {
-    const plugin = a.plugin
-    if (!plugin) {
-      return `<div class="card"><b>${e(a.harness)}</b> <span class="err">${e(t('ca.plugin_missing'))}</span>
-      <form method="post" action="/settings/coding-agents/delete" class="inline"><input type="hidden" name="id" value="${a.id}"><button class="danger">${e(t('ca.delete'))}</button></form></div>`
-    }
-    const chosen = new Set(a.providerIds)
-    return `<div class="card ${a.enabled ? 'ok' : ''}">
-    <h3>${e(plugin.label)} <span class="dim">(${e(plugin.bin)}${installedById.get(a.harness) ? ` — ${e(t('ca.installed'))}` : ` — <b class="warn">${e(t('ca.not_installed'))}</b>`})</span></h3>
-    <form method="post" action="/settings/coding-agents/save">
-      <input type="hidden" name="harness" value="${e(a.harness)}">
-      <label class="chk"><input type="checkbox" name="enabled" value="1" ${a.enabled ? 'checked' : ''}> ${e(t('ca.enabled'))}</label>
-      <fieldset><legend>${e(t('plugins.providers_legend'))}</legend>
-        ${await providerChoiceBlock(plugin, chosen)}
-      </fieldset>
-      <button>${e(t('settings.save'))}</button>
-    </form>
-    <form method="post" action="/settings/coding-agents/delete" class="inline" onsubmit="return confirm(${e(JSON.stringify(t('ca.delete_confirm', { label: plugin.label })))})">
-      <input type="hidden" name="id" value="${a.id}"><button class="danger">${e(t('ca.delete'))}</button></form>
-  </div>`
-  }))).join('')
-
-  const addable = unconfiguredHarnessIds().map(id => getHarness(id)).filter(Boolean)
-    // Installed ones first — those are the natural suggestions.
-    .sort((a, b) => (installedById.get(b.id) ? 1 : 0) - (installedById.get(a.id) ? 1 : 0))
-  const addBlocks = (await Promise.all(addable.map(async plugin => `
-  <div class="card">
-    <h3>${e(plugin.label)} ${installedById.get(plugin.id)
-      ? `<span class="ok">✓ ${e(t('ca.detected'))}</span>`
-      : `<span class="dim">${e(t('ca.not_installed'))}</span>`}</h3>
-    ${installedById.get(plugin.id) ? '' : `<p class="dim">${e(t('ca.install_hint'))}: <code>${e(plugin.installHint)}</code></p>`}
-    <form method="post" action="/settings/coding-agents/save">
-      <input type="hidden" name="harness" value="${e(plugin.id)}">
-      <input type="hidden" name="enabled" value="1">
-      <fieldset><legend>${e(t('plugins.providers_legend'))}</legend>
-        ${await providerChoiceBlock(plugin, new Set(plugin.providers ?? []))}
-      </fieldset>
-      <button>${e(t('ca.add'))}</button>
-    </form>
-  </div>`))).join('')
-
-  const body = `
-  <h2>${e(t('ca.title'))}</h2>
-  <p class="dim">${e(t('ca.intro'))}</p>
-  ${rows || `<p class="dim">${e(t('ca.none'))}</p>`}
-  <h2>${e(t('ca.add_title'))}</h2>
-  ${addBlocks || `<p class="dim">${e(t('ca.all_configured'))}</p>`}
-  <p class="dim">${e(t('ca.detect_note'))}</p>`
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('ca.title'), '/settings', body))
 }
 
 export async function codingAgentSave(req, res, url, formBody) {

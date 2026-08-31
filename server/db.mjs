@@ -3,7 +3,6 @@
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
 // events.mjs imports nothing at all — deliberately, so that the module which
 // everything writes through can be imported from anywhere without a cycle.
 import { publish } from './events.mjs'

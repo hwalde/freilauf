@@ -30,7 +30,7 @@ try {
   const { cronMatches, validCron, scheduleDue, scheduleText, stripAnsi, escapeHtml,
     fmtDuration, parseDbUtc, toDbUtc, fmtRelativeTime, fmtDateTime, kurzid,
     fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent,
-    uiTimezone, timezoneForLanguage, setTimezone, validTz, tzAbbrev, TIMEZONE_OPTIONS } = await import('../server/util.mjs')
+    timezoneForLanguage, setTimezone, validTz, tzAbbrev, TIMEZONE_OPTIONS } = await import('../server/util.mjs')
   const { parseForm, cookieRepo, rememberRepo, requestRepo } = await import('../server/web-helpers.mjs')
 
   // ------------------------------------------------------------------
@@ -4575,7 +4575,7 @@ try {
   // ------------------------------------------------------------------
   gruppe('tmux cleanup: the memory-freeing agent')
 
-  const { cleanupSettings, cleanupPrompt, cleanupRunInFlight, lastCleanupRun, keepSessionsForRuns, startCleanupRun, maybeAutoCleanup, CLEANUP_PROMPT_DEFAULT } = await import('../server/cleanup.mjs')
+  const { cleanupSettings, cleanupPrompt, cleanupRunInFlight, keepSessionsForRuns, startCleanupRun, maybeAutoCleanup, CLEANUP_PROMPT_DEFAULT } = await import('../server/cleanup.mjs')
   const db2 = (await import('../server/db.mjs')).default
   const uuid = (await import('node:crypto')).randomUUID
 

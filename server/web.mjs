@@ -23,7 +23,7 @@ import {
   codingAgentSave, codingAgentDelete,
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
   pageMergeSettings, mergeSettingsSave,
-  pageCleanupSettings, cleanupSettingsSave, cleanupSettingsSummary,
+  pageCleanupSettings, cleanupSettingsSave,
   headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
   integrationSection, problemPage, runEditCard,
 } from './pages.mjs'
