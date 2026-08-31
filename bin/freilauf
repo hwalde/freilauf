@@ -82,6 +82,18 @@ case "${1:-}" in
         if command -v freilauf-deploy >/dev/null 2>&1; then
             freilauf-deploy --status 2>/dev/null | grep -E '^(Deployed|Ahead):' || true
         fi
+        # A merge that the post-merge hook wanted to deploy and could not — because a
+        # run was active, because the push had not happened yet. Without this line it
+        # would stay behind silently, which is the one failure mode the hook exists to
+        # prevent (deploy-after-merge.sh writes the file, a deploy clears it).
+        pending="$(dirname "$(fl_deploy_dir)")/deploy-pending"
+        if [[ -f "$pending" ]]; then
+            p_short="$(sed -n 's/^short=//p' "$pending")"
+            p_reason="$(sed -n 's/^reason=//p' "$pending")"
+            p_detail="$(sed -n 's/^detail=//p' "$pending")"
+            echo "Deploy pending: ${p_short:-?} (${p_reason:-?}) — ${p_detail:-}"
+            echo "                run 'freilauf deploy' when it suits you"
+        fi
         ;;
     deploy)
         shift

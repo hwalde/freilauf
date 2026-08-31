@@ -94,6 +94,59 @@ export const Freilauf = async ({ $ }) => {
 }
 EOF
 
+# ---------------------------------------------------------------- git hooks
+# Both hooks are versioned in the repository and LINKED rather than copied, so a
+# later change to the script is live without reinstalling anything:
+#   pre-push     pruefe-vor-push.sh    — keeps private values out of a push
+#   post-merge   deploy-after-merge.sh — decides whether a merge may go live now
+#
+# OPT-IN, and that is not politeness — it is the only correct behaviour. This
+# script is not only run by hand: `freilauf-deploy` runs it on every deploy
+# (bin/freilauf-deploy, install_scripts) and `setup/migrate-from-cc-hub.sh` runs it
+# during a migration — the latter with the OPERATOR'S checkout as $ROOT, because
+# that is where the migration script lives. Installing hooks as a side effect of
+# either would arm a post-merge deploy on a machine whose owner never asked for
+# one, and test/deploy.mjs (which exercises --migrate) would reach out of its
+# sandbox and arm it on the developer's own repository. It did, before this was
+# a flag.
+#
+# So: `bash setup/02-install-scripts.sh --hooks`, once, deliberately.
+INSTALL_HOOKS="${FREILAUF_INSTALL_HOOKS:-0}"
+for arg in "$@"; do
+    case "$arg" in
+        --hooks)    INSTALL_HOOKS=1 ;;
+        --no-hooks) INSTALL_HOOKS=0 ;;
+    esac
+done
+
+# An existing hook that is a real file belongs to the operator and is left alone —
+# a setup script that silently overwrites someone's own hook is one nobody runs twice.
+link_hook() {
+    local name="$1" script="$2" ziel="$HOOKS/$1"
+    if [[ -e "$ziel" && ! -L "$ziel" ]]; then
+        echo "    $name: left alone (there is already a hook of your own there)"
+        return 0
+    fi
+    ln -sfn "$ROOT/$script" "$ziel"
+    echo "    $name -> $script"
+}
+
+if [[ "$INSTALL_HOOKS" != 1 ]]; then
+    echo "==> git hooks: not installed (add --hooks to link pre-push and post-merge)"
+# shellcheck source=../bin/fl-paths.sh
+elif . "$ROOT/bin/fl-paths.sh" && [[ "$ROOT" == "$(fl_deploy_dir)" ]]; then
+    echo "==> git hooks: skipped (this is the deploy checkout, nothing is merged here)"
+elif HOOK_BASE="$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null)" && [[ -n "$HOOK_BASE" ]]; then
+    [[ "$HOOK_BASE" == /* ]] || HOOK_BASE="$ROOT/$HOOK_BASE"
+    HOOKS="$HOOK_BASE/hooks"
+    echo "==> git hooks into $HOOKS"
+    mkdir -p "$HOOKS"
+    link_hook pre-push   pruefe-vor-push.sh
+    link_hook post-merge deploy-after-merge.sh
+else
+    echo "==> git hooks: skipped ($ROOT is not a git checkout)"
+fi
+
 echo "==> Extra skills into ~/agents/zusaetze (opt-in per agent/run, NO auto-loading)"
 # Deliberately NOT under .claude/skills: there, every claude instance would load the
 # skill automatically. Freilauf offers these folders as checkboxes in the form and, on

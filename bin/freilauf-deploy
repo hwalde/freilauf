@@ -295,6 +295,10 @@ do_deploy() {
         if [[ -n $ok_errs ]]; then log "note: the journal mentions errors since the restart:
 $ok_errs"; fi
         log "deployed $(sha_short "$target") ($(subject_of "$target"))"
+        # Whatever the post-merge hook could not deploy at the time is deployed now.
+        # Cleared only on the healthy path: a rollback leaves the note standing,
+        # because then something really is still waiting to go live.
+        rm -f "$STATE_DIR/deploy-pending"
         if [[ $NOTIFY == 1 ]]; then notify_out "Freilauf deployed $(sha_short "$target"): $(subject_of "$target")"; fi
         return 0
     fi

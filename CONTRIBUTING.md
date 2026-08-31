@@ -47,7 +47,10 @@ Both are written to be read by agents.
 - **Nothing machine-specific in the repository.** No real ports, IP addresses,
   hostnames, home paths, certificates or keys — the defaults in `env.example`
   are deliberately fictional. `./pruefe-vor-push.sh` greps the committed state
-  for exactly that, and it is installable as a pre-push hook.
+  for exactly that, and it is installable as a pre-push hook:
+  `bash setup/02-install-scripts.sh --hooks` links it, together with
+  `deploy-after-merge.sh` as `post-merge`. Both are opt-in — a deploy and a
+  migration run that same setup script, and neither may arm a hook behind your back.
 
 ## Before you open the PR
 
@@ -56,6 +59,7 @@ node test/unit.mjs && node test/e2e.mjs     # required
 node test/browser.mjs                       # if you touched public/hub.js  (needs playwright)
 node test/proxy.mjs                         # if you touched vpn-proxy.mjs
 node test/deploy.mjs                        # if you touched bin/freilauf-deploy
+node test/post-merge.mjs                    # if you touched deploy-after-merge.sh
 bash -n bin/fl-start                        # if you touched a bin/ script (unit.mjs does this too)
 ./pruefe-vor-push.sh                        # no private values in the commits
 ```
