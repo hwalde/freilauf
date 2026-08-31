@@ -82,6 +82,36 @@ das tut Freilauf, und es geht nur vorwärts.
 - **Mehrsprachige Oberfläche**: Englisch (Standard), 中文, Deutsch — eine Uhr
   und ein Zahlenformat auf jeder Seite.
 
+## Freilauf in Bildern
+
+*Eine kleine Demo-Installation („acme-shop") mit einer stehenden Agentenmannschaft;
+die Oberflächensprache lässt sich pro Installation umstellen.*
+
+![Die Übersicht mit der Status-Leiste](docs/screenshots/overview.de.png)
+*Die Übersicht. Eine Zeile pro Lauf — der Documentation Updater arbeitet gerade,
+die Payments-SDK-Migration ist geplant, der Dependency Updater wartet auf sein
+Kontingent, die Arbeit des Tech Debt Solvers ist längst gemerged — dazu offene
+Vorfälle, Abo-Fenster und der tmux-Speicher der Maschine in der Leiste rechts.*
+
+![Die Detailseite eines Laufs mit dem Live-Terminal](docs/screenshots/run-detail.de.png)
+*In einem Lauf. Das Live-Terminal zeigt den Agenten bei der Arbeit; rundherum
+die Definition des Laufs, die erwartete Dauer und das Finish-Gate,
+das beim Report den Worktree prüft.*
+
+![Das Einzellauf-Formular](docs/screenshots/run-new.de.png)
+*Ein Einzellauf starten. Aufgabe, Modell und Denk-Aufwand, Branch-Regel,
+Zusatz-Skills, die Flows, die nach dem Lauf starten, und wann er startet —
+auf Wunsch als Agent mit Zeitplan gespeichert.*
+
+![Der No-Code-Flow-Editor](docs/screenshots/flow-builder.de.png)
+*Flows ohne Code. Dieser hier extrahiert aus dem Report eines beendeten Laufs
+Zusammenfassung und Risiko, verzweigt nach dem Ergebnis und benachrichtigt —
+angehängt an den Documentation Updater, also bei jedem seiner Läufe.*
+
+![Die Agenten-Seite](docs/screenshots/agents.de.png)
+*Die stehende Mannschaft. Jeder Agent ist eine Rolle: ein Prompt, ein Zeitplan,
+ein Budget und die Flows, die an ihm hängen — jederzeit von Hand startbar.*
+
 ## Drei Wege hinein
 
 - **Nebeneinander.** Euer Team entwickelt; das Agenten-Team nimmt die Arbeit,
