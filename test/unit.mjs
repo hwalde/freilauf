@@ -2033,6 +2033,115 @@ try {
   }
 
   // ------------------------------------------------------------------
+  gruppe('llmJson: transport classification and the OpenRouter recovery round')
+  const { llmJson, classifyTransportError } = await import('../server/llm/index.mjs')
+  const { setLanguage: sprache } = await import('../server/i18n.mjs')
+  const { setSetting: setz, getSetting: lese } = await import('../server/db.mjs')
+  sprache('en')   // the assertions below read the English catalog
+
+  await pruefe('classifyTransportError names the failure from the status code', () => {
+    gleich(classifyTransportError(new Error('HTTP 401')).kind, 'http_401', 'auth')
+    gleich(classifyTransportError(new Error('HTTP 402')).kind, 'http_402', 'credits')
+    gleich(classifyTransportError(new Error('HTTP 404')).kind, 'http_404', 'model')
+    gleich(classifyTransportError(new Error('HTTP 429')).kind, 'http_429', 'rate limit')
+    gleich(classifyTransportError(new Error('HTTP 503')).kind, 'http_5xx', '5xx are one class')
+    gleich(classifyTransportError(new Error('HTTP 500')).kind, 'http_5xx', '500 too')
+    gleich(classifyTransportError(new Error('HTTP 503')).code, 503, 'the code is kept for the message')
+    const timeout = new Error('This operation was aborted')
+    timeout.name = 'TimeoutError'
+    gleich(classifyTransportError(timeout).kind, 'timeout', 'a timeout is its own class')
+    gleich(classifyTransportError(new Error('ENOTFOUND api.openrouter.ai')).kind, 'transport', 'anything else stays generic')
+  })
+  await pruefe('a non-2xx answer fails with a classified, translated detail — and no reprompt', async () => {
+    const keyAlt = process.env.OPENROUTER_API_KEY
+    process.env.OPENROUTER_API_KEY = 'unit-key'
+    const echt = globalThis.fetch
+    let chats = 0
+    globalThis.fetch = async () => { chats++; return { ok: false, status: 429, json: async () => ({}) } }
+    try {
+      const r = await llmJson({
+        source: 'provider:openrouter', model: 'a/b', prompt: 'x',
+        schema: { type: 'object', required: ['title'], properties: { title: { type: 'string' } } },
+        schemaName: 'run_title', purpose: 'title',
+      })
+      falsch(r.ok, 'the call failed')
+      gleich(r.stage, 'transport', 'the bucket stays transport')
+      gleich(r.kind, 'http_429', 'and the specific class is carried for the caller')
+      gleich(chats, 1, 'a transport failure is never reprompted')
+      enthaelt(r.error, 'Rate limit reached (HTTP 429)', 'the detail names the problem in English')
+      enthaelt(r.error, 'too often', 'and what it means')
+    } finally {
+      globalThis.fetch = echt
+      if (keyAlt !== undefined) process.env.OPENROUTER_API_KEY = keyAlt
+      else delete process.env.OPENROUTER_API_KEY
+    }
+  })
+  await pruefe('a parse failure on OpenRouter re-asks once through a FRESH best-provider selection', async () => {
+    const keyAlt = process.env.OPENROUTER_API_KEY
+    process.env.OPENROUTER_API_KEY = 'unit-key'
+    const echt = globalThis.fetch
+    let chats = 0
+    let endpoints = 0
+    globalThis.fetch = async (url) => {
+      if (String(url).endsWith('/endpoints')) {
+        endpoints++
+        return { ok: true, json: async () => ({ data: { endpoints: [
+          { tag: 'p/fp8', provider_name: 'P', quantization: 'fp8', status: 0, uptime_last_30m: 100,
+            supported_parameters: ['tools'], pricing: { prompt: '0.0000001', completion: '0.0000002' } },
+        ] } }) }
+      }
+      chats++
+      // The model answers prose every time — the exact failure from the alert.
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'Here is my title: best provider wins.' } }] }) }
+    }
+    const frage = {
+      source: 'provider:openrouter', model: 'deepseek/deepseek-v4-flash', prompt: 'Rewrite the login form',
+      schema: { type: 'object', required: ['title'], properties: { title: { type: 'string' } } },
+      schemaName: 'run_title', purpose: 'title', maxTokens: 200,
+    }
+    try {
+      const r = await llmJson(frage)
+      gleich(chats, 3, 'first + repair + recovery round = three calls')
+      gleich(endpoints, 1, 'the recovery round re-selects the serving provider')
+      falsch(r.ok, 'prose is prose — the honest failure still arrives')
+      gleich(r.stage, 'parse', 'and stays a parse problem')
+      enthaelt(r.error, 'could not be read as JSON', 'the detail says what happened')
+      enthaelt(r.error, 'Re-selecting the best serving provider', 'and that the recovery round was already spent')
+      const zweite = await llmJson(frage)
+      gleich(endpoints, 2, 'the SECOND recovery round still resolves FRESH — the cache is bypassed')
+      falsch(zweite.ok, 'and still fails honestly')
+    } finally {
+      globalThis.fetch = echt
+      if (keyAlt !== undefined) process.env.OPENROUTER_API_KEY = keyAlt
+      else delete process.env.OPENROUTER_API_KEY
+    }
+  })
+  await pruefe('llmAlert names a classified failure in the operator\'s language', async () => {
+    const { llmAlert, _alertReset } = await import('../server/llm/alerts.mjs')
+    const tokenVorher = lese('telegram_token')
+    const chatVorher = lese('telegram_chat')
+    const echt = globalThis.fetch
+    const gesendet = []
+    setz('telegram_token', 'unit-token')
+    setz('telegram_chat', '42')
+    _alertReset()
+    globalThis.fetch = async (url, init) => { gesendet.push(JSON.parse(init.body).text); return { ok: true, json: async () => ({ ok: true }) } }
+    try {
+      const r = await llmAlert({ purpose: 'title', source: 'provider:openrouter', model: 'm', errorClass: 'http_429', text: 'Rate limit reached (HTTP 429) — the provider is being asked too often.' })
+      gleich(r.reason, 'sent', 'the alert went out')
+      enthaelt(gesendet[0], 'What went wrong: rate limit', 'the kind line is translated')
+      enthaelt(gesendet[0], 'Detail: Rate limit reached (HTTP 429)', 'and the detail follows')
+      // An unknown class falls back to the code, never to a made-up sentence.
+      await llmAlert({ purpose: 'title', source: 'provider:openrouter', model: 'm', errorClass: 'http_408', text: 'x' })
+      enthaelt(gesendet.at(-1), 'What went wrong: http_408', 'unknown classes stay honest')
+    } finally {
+      globalThis.fetch = echt
+      _alertReset()
+      setz('telegram_token', tokenVorher ?? '')
+      setz('telegram_chat', chatVorher ?? '')
+    }
+  })
+  // ------------------------------------------------------------------
   gruppe('Notifications: the third plugin kind, and a hub that says nothing (notify.mjs)')
 
   // The rule this whole group exists for: NOTHING configured is a complete
