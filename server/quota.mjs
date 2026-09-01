@@ -47,7 +47,7 @@
 // and the same model reaches the CLI as the alias `fable` and as
 // `claude-fable-5`. A name token of the label appearing in the identifier is
 // therefore the whole rule — see windowAppliesToModel().
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 // The registry, not one of the two index files: this module asks about plugins
 // of BOTH kinds now (a provider's balance, a coding agent's subscription
@@ -56,7 +56,7 @@ import { homedir } from 'node:os'
 import { getPlugin } from './plugins/registry.mjs'
 import { pluginCtx } from './plugins/context.mjs'
 import { pluginHasCredential } from './plugins/store.mjs'
-import { claudeLimits, rememberedScoped } from './claude-usage.mjs'
+import { claudeLimits, rememberedGeneral, rememberedScoped } from './claude-usage.mjs'
 import { env } from './env.mjs'
 
 const QUOTA_PATH = env('QUOTA_JSON') ?? `${homedir()}/.claude/quota.json`
@@ -65,6 +65,14 @@ const QUOTA_PATH = env('QUOTA_JSON') ?? `${homedir()}/.claude/quota.json`
 function quotaFile() {
   try {
     const q = JSON.parse(readFileSync(QUOTA_PATH, 'utf8'))
+    // When the file was last written. For five_hour and seven_day that IS a
+    // meaningful date: the status line writes exactly these two windows, and
+    // only while an interactive session renders it — so a file untouched for
+    // hours carries windows nobody has seen since. (The per-model week is the
+    // exception further down: it is written by another project's script, whose
+    // own fetched_at is the only honest date for it.)
+    let writtenAt = 0
+    try { writtenAt = statSync(QUOTA_PATH).mtimeMs } catch { /* no mtime, no date */ }
     const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null)
     // The status line writes what claude hands it — which is sometimes a float
     // artifact (28.000000000000004). Rounding once here, to one decimal like the
@@ -78,8 +86,10 @@ function quotaFile() {
     const fable = round1(num(q?.seven_day_fable?.used_percentage))
     return {
       five: round1(num(q?.five_hour?.used_percentage)),
+      five_at: writtenAt,
       resets_at: isoTime(q?.five_hour?.resets_at),
       seven_general: round1(num(q?.seven_day?.used_percentage)),
+      seven_at: writtenAt,
       seven_resets_at: isoTime(q?.seven_day?.resets_at),
       // The file has exactly one slot for a per-model week and calls it fable.
       // The live source has a list; this is that list with at most one entry in
@@ -134,6 +144,30 @@ function mergeScoped(live, remembered, file, now) {
 }
 
 /**
+ * One general window (5 h or the general week) out of the same three sources,
+ * decided by the same principle: the newest reading wins.
+ *
+ * The live answer speaks with `now`, the remembered one with the time it was
+ * read, the file with its mtime (the status line writes exactly these two
+ * windows, so that date means something — see quotaFile). A 429 stretch no
+ * longer drops the bar to whatever the file happened to hold: the last live
+ * answer stands until something NEWER says otherwise, and the winner that is
+ * not the live one carries its `at` so the panel can print "as of …".
+ */
+function mergeGeneral(livePct, liveResets, remembered, filePct, fileResets, fileAt, now) {
+  const cands = []
+  if (livePct !== null && livePct !== undefined) {
+    cands.push({ pct: livePct, resets_at: liveResets ?? null, at: now, live: true })
+  }
+  if (remembered) cands.push({ pct: remembered.pct, resets_at: remembered.resets_at ?? null, at: remembered.at, live: false })
+  if (filePct !== null && filePct !== undefined) {
+    cands.push({ pct: filePct, resets_at: fileResets ?? null, at: fileAt ?? 0, live: false })
+  }
+  if (!cands.length) return null
+  return cands.reduce((a, b) => (b.at > a.at ? b : a))
+}
+
+/**
  * The Claude windows: live where the account answered, out of the file for
  * whatever it did not.
  *
@@ -150,21 +184,29 @@ function mergeScoped(live, remembered, file, now) {
 export function claudeQuota(now = Date.now()) {
   const file = quotaFile()
   const live = claudeLimits()
-  const prefer = (a, b) => (a !== null && a !== undefined ? a : b)
+  const remembered = rememberedGeneral(now)
   const scoped = mergeScoped(live?.weekly_scoped, rememberedScoped(now), file.weekly_scoped, now)
   // 'fable' keeps its own two fields because the gate, the cost estimate and the
   // e2e suite all name it; it is simply the scoped window that calls itself that.
   const fable = scoped.find(w => /fable/i.test(w.label)) ?? null
-  const sevenGeneral = prefer(live?.seven_general, file.seven_general)
+  const fiveW = mergeGeneral(live?.five, live?.resets_at, remembered.five,
+    file.five, file.resets_at, file.five_at, now)
+  const sevenW = mergeGeneral(live?.seven_general, live?.seven_resets_at, remembered.seven_general,
+    file.seven_general, file.seven_resets_at, file.seven_at, now)
+  const sevenGeneral = sevenW?.pct ?? null
   const weeks = [sevenGeneral, ...scoped.map(w => w.pct)].filter(v => v !== null && v !== undefined)
   return {
-    five: prefer(live?.five, file.five),
+    five: fiveW?.pct ?? null,
     seven: weeks.length ? Math.max(...weeks) : null,
     seven_general: sevenGeneral,
     seven_fable: fable ? fable.pct : null,
-    resets_at: prefer(live?.resets_at, file.resets_at),
-    seven_resets_at: prefer(live?.seven_resets_at, file.seven_resets_at),
+    resets_at: fiveW?.resets_at ?? null,
+    seven_resets_at: sevenW?.resets_at ?? null,
     seven_fable_resets_at: fable ? fable.resets_at : null,
+    // When a window's value is NOT from the current live answer, the time it
+    // was read — the panel prints "as of …" next to it. null = live.
+    five_at: fiveW && !fiveW.live ? fiveW.at : null,
+    seven_general_at: sevenW && !sevenW.live ? sevenW.at : null,
     // Every per-model week the account reports, each under the vendor's own
     // display name — so a second scoped model reaches the panel without a code
     // change. `live: true` is what lets the panel say where the numbers are from.

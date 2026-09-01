@@ -904,34 +904,43 @@ Five rules, each load-bearing:
    the status line's minutes-old 5-hour window is still worth having. A live
    answer older than the TTL is dropped — an hour-old live number is worse than
    the file, which a running claude session at least keeps moving.
+   **A failed refresh backs off** instead of being retried on the next pass:
+   each failure doubles the wait (2 min → 30 min cap, `CLAUDE_USAGE_BACKOFF_MS`/
+   `CLAUDE_USAGE_BACKOFF_MAX_MS`), the vendor's `Retry-After` wins when it is
+   longer, and a success clears it. Measured 2026-09-01: the account rate-limits
+   this endpoint, and the old failure path left the cache empty — so the hub
+   asked again every watcher pass, exactly when it had been told to wait.
 
 And a fifth one, learned from the bar that would not stand still:
 
-5. **A per-model week is remembered, and the sources are merged by AGE.** The
-   account reports the scoped window only sometimes — and a 429, an expired
-   token or an expired TTL look exactly the same from here: no scoped window in
-   the live half. Rule 4's per-field merge then handed that window to the file,
-   whose `seven_day_fable` is written by that other project's script on its own
-   occasions: measured 2026-08-29, 80 % with a `fetched_at` **45 hours** older
-   than the `five_hour` block written into the same file the same minute. So the
-   bar jumped 88 → 80 → 88 → 80, and always fell to the older number.
-   `claude-usage.mjs` therefore keeps the scoped windows of the last live answer
-   — per label, with the time they were read, in
-   `~/.local/share/freilauf/claude-windows.json` (`FREILAUF_CLAUDE_WINDOWS_JSON`),
-   because this hub deploys often and a restart would drop straight back to the
-   file. `mergeScoped()` in quota.mjs decides per label: the live answer wins,
-   otherwise the **newer** of the remembered reading and the file's — the file
-   still wins when its `fetched_at` says it is fresher, and it is dated 0 when it
-   carries none rather than by the file's mtime, which belongs to the status
-   line's write and would claim a freshness that window does not have. A
-   remembered window past its own `resets_at` is **forgotten** (24 h when it
-   carries none): stale-but-conservative is fine for a display and not fine for
-   the budget gate, which would otherwise defer runs against a quota that has
-   long since refilled. Everything that is not the current live reading is
-   marked `stale` and carries its `at`, and the panel prints "as of …" next to
-   it — a number that looks current and is two days old is the failure this
-   whole section exists about, and hiding the jump without naming the age would
-   only have made it quieter.
+5. **The last live answer is remembered, and the sources are merged by AGE.** A
+   429, an expired token or an expired TTL all look the same from here: no live
+   window at all. For the per-model week the file's `seven_day_fable` then
+   stepped in — written by that other project's script on its own occasions:
+   measured 2026-08-29, 80 % with a `fetched_at` **45 hours** older than the
+   `five_hour` block written into the same file the same minute. So the bar
+   jumped 88 → 80 → 88 → 80, and always fell to the older number. And the same
+   jump ran the other way for the general windows: a rate-limited stretch made
+   the 5-hour bar drop to whatever the file last held and back on every gap.
+   `claude-usage.mjs` therefore keeps **every** window of the last live answer —
+   the general ones per field, the scoped ones per label, each with the time it
+   was read, in `~/.local/share/freilauf/claude-windows.json`
+   (`FREILAUF_CLAUDE_WINDOWS_JSON`), because this hub deploys often and a
+   restart would drop straight back to older knowledge. quota.mjs decides per
+   window: the live answer wins, otherwise the **newest** reading — the file
+   wins when its date says it is fresher (for `five_hour`/`seven_day` that date
+   is the file's mtime, which is honest for exactly those two windows, because
+   the status line writes them and only while a session is open; the per-model
+   week is dated 0 unless its own `fetched_at` says otherwise, since the file's
+   mtime belongs to a window that entry does not describe). A remembered window
+   past its own `resets_at` is **forgotten** (24 h when it carries none):
+   stale-but-conservative is fine for a display and not fine for the budget
+   gate, which would otherwise defer runs against a quota that has long since
+   refilled. Everything that is not the current live reading is marked `stale`
+   and carries its `at`, and the panel prints "as of …" next to it — a number
+   that looks current and is two days old is the failure this whole section
+   exists about, and hiding the jump without naming the age would only have
+   made it quieter.
 
 Two traps the tests now pin down. `Number(null)` is `0` **and finite**, and the
 endpoint really does send nulls for windows the account does not have
