@@ -49,8 +49,21 @@ export function kurzid(uuid) { return uuid.split('-')[0] }
  * builds a prompt with it and `flows/actions.mjs` fills `{{trigger.run.url}}`
  * with it — neither is a notification. Here it is what it always was, a fact
  * about this installation, and no notifier plugin has to re-export it.
+ *
+ * Which host answers is the operator's call, not a constant in the code:
+ * Settings → "Public host" names the hostname the certificate belongs to
+ * (e.g. `hub.example.internal`), and the PORT is always the live VPN port —
+ * a port change therefore needs no settings edit. Without a hostname the
+ * historic seam `FREILAUF_PUBLIC_URL` (a full URL) answers, then the IP
+ * fallback. The value is injected like the timezone (this module stays free of
+ * db.mjs, see i18n.mjs for why): `setPublicHost()` is called by the hub at
+ * startup and again when the setting is saved.
  */
+let publicHost = ''
+export function setPublicHost(v) { publicHost = String(v ?? '').trim() }
+
 export function publicBase() {
+  if (publicHost) return `https://${publicHost}:${env('VPN_PORT') ?? 8790}`
   // Without FREILAUF_PUBLIC_URL the links point nowhere — the note is in env.example.
   return (env('PUBLIC_URL')
     || `https://127.0.0.1:${env('VPN_PORT') ?? 8790}`).replace(/\/+$/, '')

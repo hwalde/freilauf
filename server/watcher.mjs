@@ -111,13 +111,25 @@ async function collectInboxes() {
     let lines = []
     try { lines = readFileSync(f, 'utf8').split('\n').filter(Boolean) } catch { continue }
     if (!lines.length) continue
+    const rest = []
     for (const line of lines) {
       // 'inbox': there is no fl-report call left to answer, so the finish gate
       // types its answer into the session instead.
-      try { await handleReport(id, JSON.parse(line), 'inbox') } catch (e) { console.error('[inbox]', e.message) }
+      try {
+        const r = await handleReport(id, JSON.parse(line), 'inbox')
+        // A report the hub REFUSES is a deterministic answer — replaying it can
+        // never make it right, so it is dropped like the HTTP path would have
+        // (a refused report must not loop every watcher pass). Only a THROWN
+        // error is kept: it may be transient (a locked database, a hiccup), and
+        // an inbox that swallowed a report is a report that never arrives.
+        if (r && r.ok === false) continue
+      } catch (e) {
+        console.error('[inbox]', e.message)
+        rest.push(line)
+      }
     }
-    // clear what has been processed
-    writeFileSync(f, '')
+    // Keep what failed, clear the rest — a cleared inbox line has no second chance.
+    writeFileSync(f, rest.length ? rest.join('\n') + '\n' : '')
   }
 }
 

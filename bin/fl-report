@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # fl-report — agents report back to Freilauf (Planung 6).
 # Usage:
-#   fl-report done [--file report.md | "text"]     Run completed — or, from a run that
+#   fl-report done [--file report.md [--detail report-detail.md] | "text"]
+#                                                  Run completed — or, from a run that
 #                                                  is already over, a FOLLOW-UP report:
-#                                                  same command, the hub tells them apart
+#                                                  same command, the hub tells them apart.
+#                                                  --detail hands the hub the DETAILED
+#                                                  version: the text is the short report
+#                                                  (what it was about + the result), the
+#                                                  detail travels as the attached document.
 #   fl-report failed "reason"                      Run failed
 #   fl-report help "question/problem"              Call for help (run stays open, waits)
 #   fl-report progress "status"                    Progress / taking longer
@@ -43,7 +48,7 @@ if [[ -z "$RUN_ID" ]]; then
     exit 3
 fi
 
-TEXT="" ; FILE_ARG="" ; ERR="" ; SESSION_ID=""
+TEXT="" ; FILE_ARG="" ; DETAIL_ARG="" ; ERR="" ; SESSION_ID=""
 # Claude calls the StopFailure hook without arguments and delivers the event as JSON
 # on stdin: { "error": "rate_limit", "last_assistant_message": "…", "session_id": "…" }.
 # The other hook kinds (Stop, SessionEnd, Notification) get the same JSON shape.
@@ -90,20 +95,26 @@ if [[ -n "${1:-}" ]]; then
     if [[ "$KIND" == "done" && "${1:-}" == "--file" ]]; then
         FILE_ARG="${2:-}"
         [[ -r "$FILE_ARG" ]] || { echo "Report file not readable: $FILE_ARG" >&2; exit 2; }
+        # The detailed version is optional and only valid for `done`: `--detail`
+        # always follows the `--file` it belongs to.
+        if [[ "${3:-}" == "--detail" ]]; then
+            DETAIL_ARG="${4:-}"
+            [[ -r "$DETAIL_ARG" ]] || { echo "Detail report file not readable: $DETAIL_ARG" >&2; exit 2; }
+        fi
     else
         TEXT="$*"
     fi
 fi
 
 # Build the payload as JSON with python3 (quoting-safe, no jq dependency).
-PAYLOAD="$(python3 - "$KIND" "$TEXT" "$FILE_ARG" "$ERR" "$SESSION_ID" <<'PY'
+PAYLOAD="$(python3 - "$KIND" "$TEXT" "$FILE_ARG" "$DETAIL_ARG" "$ERR" "$SESSION_ID" <<'PY'
 # `os` is used below for os.path.isfile — it was lost once, and the failure is
 # invisible until the ONE call that matters: `fl-report done --file <report>`
 # dies with a NameError, so an agent finishes its work and cannot say so.
 # `fl-report progress` keeps working, because an empty file argument
 # short-circuits the isfile() call — which is exactly why it went unnoticed.
 import json, os, sys
-kind, text, file_arg, err, session_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+kind, text, file_arg, detail_arg, err, session_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
 body = {"kind": kind}
 if kind == "_api_error":
     body["error"] = err or "unknown"
@@ -119,6 +130,9 @@ else:
     if file_arg and os.path.isfile(file_arg):
         with open(file_arg, encoding="utf-8", errors="replace") as fh:
             body["file"] = fh.read()
+        if detail_arg and os.path.isfile(detail_arg):
+            with open(detail_arg, encoding="utf-8", errors="replace") as fh:
+                body["detail"] = fh.read()
     elif text:
         body["text"] = text
 if session_id:

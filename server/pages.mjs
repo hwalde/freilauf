@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRepo, getRun } from './db.mjs'
 import { KNOWN_QUANTIZATIONS, REGIONS, parseRoutingConfig } from './providers/openrouter-routing.mjs'
-import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime, fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent, tzAbbrev, uiTimezone, setTimezone, TIMEZONE_OPTIONS, hubVersion } from './util.mjs'
+import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime, fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent, tzAbbrev, uiTimezone, setTimezone, setPublicHost, TIMEZONE_OPTIONS, hubVersion, publicBase } from './util.mjs'
 import { cookieRepo, requestRepo } from './web-helpers.mjs'
 import { providerBalances } from './balances.mjs'
 import { enabledCodingAgents, saveCodingAgent, deleteCodingAgent } from './coding-agents.mjs'
@@ -1170,6 +1170,7 @@ export async function pageRun(req, res, url, id) {
        <span class="dim">${e(t('run.retry_hint'))}</span></form>`
     : ''}
   ${run.report_md ? `<h3>${e(t('run.report'))}</h3><pre>${e(run.report_md)}</pre>` : ''}
+  ${run.report_detail_md ? `<h3>${e(t('run.detail_report'))}</h3><pre>${e(run.report_detail_md)}</pre>` : ''}
   ${flowSection(run)}
   ${vorfallAbschnitt(id, run.status)}
   <h3>${e(t('run.metrics'))}</h3>
@@ -1825,6 +1826,11 @@ export async function pageSettings(req, res, url) {
       <label>${e(t('settings.timezone'))} <select name="ui_timezone"><option value="" ${!s.ui_timezone ? 'selected' : ''}>${e(t('settings.timezone_auto'))}</option>
         ${TIMEZONE_OPTIONS.map(z => `<option value="${z}" ${s.ui_timezone === z ? 'selected' : ''}>${z}</option>`).join('')}</select></label>
       <p class="dim">${e(t('settings.numbers_hint'))}</p>
+    </fieldset>
+    <fieldset><legend>${e(t('settings.public_legend'))}</legend>
+      <p class="dim">${e(t('settings.public_hint'))}</p>
+      <label>${e(t('settings.public_host'))} <input name="public_host" type="text" placeholder="hub.example.internal" value="${e(s.public_host ?? '')}">
+        <span class="dim">${e(t('settings.public_host_hint', { url: `${publicBase()}/runs/<id>` }))}</span></label>
     </fieldset>
     <label>${e(t('settings.pipeline'))} <select name="pipeline_on"><option value="1" ${s.pipeline_on === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${s.pipeline_on !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
     ${gatesFieldset(s)}
@@ -2581,6 +2587,7 @@ export async function repoSave(req, res, url, formBody) {
  */
 const STATIC_KEYS = ['pipeline_on',
   'abo_price', 'session_keep_hours', 'archive_session_on', 'archive_session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
+  'public_host',
   'llm_check_on', 'llm_check_model', 'llm_check_or_provider', 'llm_check_source',
   'llm_title_on', 'llm_title_model', 'llm_title_or_provider', 'llm_title_source',
   'llm_extras_on', 'llm_extras_model', 'llm_extras_or_provider', 'llm_extras_source',
@@ -2654,6 +2661,8 @@ export async function settingsSave(req, res, url, formBody) {
   if (Object.hasOwn(b, 'ui_language')) setLanguage(b.ui_language ?? 'en')
   // Same for the timezone: an empty value means "auto (per UI language)".
   if (Object.hasOwn(b, 'ui_timezone')) setTimezone(b.ui_timezone ?? '')
+  // …and for the public host, which the notification links read live.
+  if (Object.hasOwn(b, 'public_host')) setPublicHost(b.public_host ?? '')
   // "Used" means saved: only now does the model enter the MRU list.
   if (Object.hasOwn(b, 'llm_check_model')) llmModellMerken(b.llm_check_model)
   if (Object.hasOwn(b, 'llm_title_model')) rememberTitleModel(b.llm_title_model)

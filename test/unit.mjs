@@ -30,7 +30,7 @@ try {
   const { cronMatches, validCron, scheduleDue, scheduleText, stripAnsi, escapeHtml,
     fmtDuration, parseDbUtc, toDbUtc, fmtRelativeTime, fmtDateTime, kurzid,
     fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent,
-    timezoneForLanguage, setTimezone, validTz, tzAbbrev, TIMEZONE_OPTIONS } = await import('../server/util.mjs')
+    timezoneForLanguage, setTimezone, validTz, tzAbbrev, TIMEZONE_OPTIONS, setPublicHost, publicBase } = await import('../server/util.mjs')
   const { parseForm, cookieRepo, rememberRepo, requestRepo } = await import('../server/web-helpers.mjs')
 
   // ------------------------------------------------------------------
@@ -4571,6 +4571,33 @@ try {
     enthaelt(lang, 'truncated by Freilauf', 'says it was cut')
     enthaelt(lang, 'report.md', 'names the full report')
     gleich(ig.truncateReport({ id: 'r1', report_md: null }), '(no report)', 'no report at all')
+    gleich(ig.truncateReport({ id: 'r1', report_md: 'short', report_detail_md: 'long detail' }, 20), 'long detail',
+      'the DETAILED report is the context a resolver wants')
+    enthaelt(ig.truncateReport({ id: 'r1', report_md: 'short', report_detail_md: 'x'.repeat(100) }, 20),
+      'report-detail.md', 'and the note names the file the whole report actually lives in')
+  })
+
+  await pruefe('publicBase: a configured host wins, the port stays live, the env seam still answers', async () => {
+    const vorherUrl = process.env.FREILAUF_PUBLIC_URL
+    const vorherVpn = process.env.FREILAUF_VPN_PORT
+    delete process.env.FREILAUF_PUBLIC_URL
+    delete process.env.FREILAUF_VPN_PORT
+    setPublicHost('')
+    try {
+      gleich(publicBase(), 'https://127.0.0.1:8790', 'no host, no env: the local fallback with the code default port')
+      process.env.FREILAUF_VPN_PORT = '47830'
+      setPublicHost('hub.example.internal')
+      gleich(publicBase(), 'https://hub.example.internal:47830', 'the configured hostname with the LIVE port')
+      setPublicHost('')
+      process.env.FREILAUF_PUBLIC_URL = 'https://alt.internal:9999'
+      gleich(publicBase(), 'https://alt.internal:9999', 'without a configured host the env seam (a full URL) answers')
+      setPublicHost('   ')
+      gleich(publicBase(), 'https://alt.internal:9999', 'whitespace is not a host')
+    } finally {
+      if (vorherUrl === undefined) delete process.env.FREILAUF_PUBLIC_URL; else process.env.FREILAUF_PUBLIC_URL = vorherUrl
+      if (vorherVpn === undefined) delete process.env.FREILAUF_VPN_PORT; else process.env.FREILAUF_VPN_PORT = vorherVpn
+      setPublicHost('')
+    }
   })
 
   await pruefe('the assessment message names the numbers and the way back in', () => {
@@ -4610,6 +4637,10 @@ try {
     enthaelt(an, 'Never merge into or push to trunk yourself', 'and so is the ground rule')
     enthaelt(an, 'fl-report prints Freilauf\'s answer', 'the finishing block says the answer is worth reading')
     enthaelt(an, 'fl-report done --file', 'and step 2 is still there — it is not removable')
+    enthaelt(an, '--detail', 'the detail report travels along in the same command')
+    enthaelt(an, 'report-detail.md', 'and names its path')
+    enthaelt(an, 'the SHORT report', 'the two parts are named')
+    enthaelt(an, 'DETAILED report', 'and what each of them is for')
     falsch(/\{base\}/.test(an), 'no placeholder left over')
   })
 
@@ -4654,6 +4685,26 @@ try {
     enthaelt(text, 'Follow-up time: 7 min', 'time since the previous report, not the run\'s duration')
     enthaelt(text, 'Merged into main: abc1234', 'and the merge line')
     falsch(text.includes('Duration:'), 'no run duration — the run started long ago')
+  })
+
+  await pruefe('a replayed report is recognised so a lost HTTP answer cannot send it twice', async () => {
+    const { isReplayedReport } = await import('../server/reports.mjs')
+    const run = { report_md: 'The task is done.', followup_md: null, help_text: null }
+    wahr(isReplayedReport(run, 'done', 'The task is done.'), 'the identical first report is a replay')
+    falsch(isReplayedReport(run, 'done', 'A genuinely new follow-up report.'), 'a new follow-up is not')
+    const mitFu = {
+      report_md: 'The task is done.\n\n---\n## Follow-up report #1 (x)\n\nAdded the second file.',
+      followup_md: 'Added the second file.', help_text: null,
+    }
+    wahr(isReplayedReport(mitFu, 'done', 'Added the second file.'), 'the latest follow-up replayed')
+    wahr(isReplayedReport(mitFu, 'done', 'The task is done.'), 'the first report replayed after follow-ups')
+    falsch(isReplayedReport(mitFu, 'done', 'something else entirely'), 'still no false positive')
+    wahr(isReplayedReport({ report_md: '**Failed:** it broke', followup_md: null, help_text: null }, 'failed', 'it broke'),
+      'a failed report replayed')
+    wahr(isReplayedReport({ report_md: 'x', followup_md: null, help_text: 'are you there?' }, 'help', 'are you there?'),
+      'a help call replayed')
+    falsch(isReplayedReport({ report_md: 'x', followup_md: null, help_text: null }, 'done', ''), 'empty text is never a replay')
+    falsch(isReplayedReport(null, 'done', 'anything'), 'a missing run answers no')
   })
 
   await pruefe('rearmDispatch lets the flows of a finished run fire again', async () => {

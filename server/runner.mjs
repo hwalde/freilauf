@@ -49,10 +49,16 @@ const MERGE_FINISH_LINE = '     fl-report prints Freilauf\'s answer. If it says 
 
 const FINISH_RULES = [
   'HOW THIS RUN ENDS — two commands, and they are not optional:',
-  '  1. Write your report to {report_file} — what was done, what is open,',
-  '     what should be reviewed. That path is outside the repository on purpose:',
-  '     a report file inside the working directory would leave it dirty.',
-  '  2. Run: fl-report done --file {report_file}',
+  '  1. Write TWO report files, both in simple language:',
+  '     {report_file} — the SHORT report: what the task was and the result,',
+  '       compact (a few lines to a short paragraph). This is the message text',
+  '       the operator receives.',
+  '     {report_detail_file} — the DETAILED report: the full write-up — what',
+  '       was done, what is open, what should be reviewed. This is what travels',
+  '       as the attached document.',
+  '     Both paths are outside the repository on purpose: a report file inside',
+  '     the working directory would leave it dirty.',
+  '  2. Run: fl-report done --file {report_file} --detail {report_detail_file}',
   '  3. Only then stop. Do not end the session yourself; the platform cleans up.',
   'Printing a summary is NOT a report — nobody reads your terminal. Only step 2 tells',
   'the platform the run is finished; without it a human has to close it by hand.',
@@ -71,8 +77,10 @@ const FOLLOWUP_RULES = [
   'AFTER YOU HAVE REPORTED DONE — follow-up work:',
   'A human may come back into this session and ask for more (a fix, a change, a question).',
   'Do that work as usual. When it is finished — everything committed{followup_merge} — write a',
-  'report about ONLY the follow-up work to {report_file} (overwrite the file) and run',
-  '  fl-report done --file {report_file}',
+  'report about ONLY the follow-up work, again as TWO files to the same paths as the first',
+  'report: {report_file} (the SHORT version, overwrite it) and {report_detail_file} (the',
+  'DETAILED version, overwrite it), then run',
+  '  fl-report done --file {report_file} --detail {report_detail_file}',
   'again. It is the same command on purpose: Freilauf knows this run is already over and',
   'treats it as a FOLLOW-UP REPORT — it reaches the human, and it triggers the same',
   'platform processes as the first report{followup_processes}. If the human asked for',
@@ -135,6 +143,7 @@ export function platformSuffix(run, branchRule, settings, repo = null) {
     .replaceAll('{run_id}', run.id)
     .replaceAll('{workdir}', run.workdir_effective)
     .replaceAll('{report_file}', join(RUNS_DIR, run.id, 'report.md'))
+    .replaceAll('{report_detail_file}', join(RUNS_DIR, run.id, 'report-detail.md'))
     .replaceAll('{branch_rule}', branchRule)
     .replaceAll('{expected_minutes}', String(run.expected_minutes))
 }

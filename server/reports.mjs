@@ -56,6 +56,12 @@ export async function handleReport(runId, body, via = 'http') {
     if (body.file.length > MAX_REPORT) return { ok: false, error: 'payload too large' }
     text = text ? `${text}\n\n${body.file}` : body.file
   }
+  // The DETAILED version of the report (fl-report --detail): the short report
+  // is the message text, the detail is the attached document. Optional — a run
+  // without one behaves exactly as before, and the document then carries the
+  // full report again.
+  const detail = typeof body.detail === 'string' ? body.detail : ''
+  if (detail.length > MAX_REPORT) return { ok: false, error: 'payload too large' }
 
   // A terminal report for a CLEANUP run is the moment its work becomes visible
   // in the numbers: the agent freed memory while it worked, and the sidebar's
@@ -74,11 +80,19 @@ export async function handleReport(runId, body, via = 'http') {
       // rather than believed — is the worktree clean, does the branch still
       // merge? null means this repo does not want the hub to integrate, and
       // then everything below is byte for byte what it always was.
+      //
+      // The DETAILED report is stored BEFORE the gate runs: when the run has
+      // work to merge the gate holds and the notification happens in the
+      // integrator, so the detail has to be in the database already by then.
+      if (detail) db.prepare(`UPDATE runs SET report_detail_md=? WHERE id=?`).run(detail, runId)
       const gate = await finishGate(runId, text, via)
       if (gate?.hold) return { ok: true, message: gate.message ?? null }
-      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now'), report_md=? WHERE id=?`).run(text || null, runId)
+      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now'), report_md=?,
+                  report_detail_md=COALESCE(report_detail_md, ?) WHERE id=?`)
+        .run(text || null, detail || null, runId)
       addEvent(runId, 'done')
-      await notifyRun(runId, 'done', doneText(run, text, gate?.mergeLine ?? null), { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: text })
+      await notifyRun(runId, 'done', doneText(run, text, gate?.mergeLine ?? null),
+        { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: detail || text })
       break
     }
     case 'failed': {
@@ -92,10 +106,18 @@ export async function handleReport(runId, body, via = 'http') {
       break
     }
     case 'help': {
+      // A replayed help call (the inbox path) while the run is ALREADY waiting
+      // on this very question must not ring again — `dedupe:false` exists so a
+      // NEW question is always heard, and `isReplayedReport` guards the other
+      // side of it.
+      const schon = run.status === 'waiting_help' && run.help_text === text
       db.prepare(`UPDATE runs SET status='waiting_help', help_text=? WHERE id=?`).run(text, runId)
       addEvent(runId, 'help')
       // The question MUST arrive completely — truncated it cannot be answered.
-      await notifyRun(runId, 'help', `${reportHeader(run)}\n\n${text}\n\n🆘 Help call · ${harnessLabel(run)}`, { fileName: `help-${runId.slice(0, 8)}.md`, fileContent: text, dedupe: false })
+      if (!schon) {
+        await notifyRun(runId, 'help', `${reportHeader(run)}\n\n${text}\n\n🆘 Help call · ${harnessLabel(run)}`,
+          { fileName: `help-${runId.slice(0, 8)}.md`, fileContent: text, dedupe: false })
+      }
       break
     }
     case 'progress': {
@@ -293,9 +315,16 @@ async function handleFollowUp(run, body, via) {
     if (body.file.length > MAX_REPORT) return { ok: false, error: 'payload too large' }
     text = text ? `${text}\n\n${body.file}` : body.file
   }
+  const detail = typeof body.detail === 'string' ? body.detail : ''
+  if (detail.length > MAX_REPORT) return { ok: false, error: 'payload too large' }
+  // A replayed inbox line (fl-report wrote it because the hub's answer got
+  // lost — a slow finish gate, a dropped connection) is the SAME report the
+  // run already carried. The run is over, so the replay arrives here as a
+  // follow-up — and an identical text must not ring a second time.
+  if (isReplayedReport(run, kind, text)) return { ok: true, message: null }
   switch (kind) {
     case 'done':
-      return followUpDone(run, text, via)
+      return followUpDone(run, text, detail, via)
     case 'failed': {
       // The follow-up did not work out. The run's own status is not touched —
       // it describes the first attempt — but the operator hears it.
@@ -337,16 +366,39 @@ function appendReport(runId, text, n = null) {
 }
 
 /**
+ * Has this exact report already been processed? The one real double-send of a
+ * report is the inbox replay: `fl-report` writes inbox.jsonl when the hub's
+ * HTTP answer is lost (curl timed out after the hub had already processed the
+ * report), and the watcher replays it. The run is over by then, so the replay
+ * arrives as a follow-up — an identical text must not become a second message.
+ *
+ * Pure, so the rule can be stated in a test. Compares the report text against
+ * what the run already holds: the first report, the latest follow-up, a help
+ * question, or a failed report's text.
+ */
+export function isReplayedReport(run, kind, text) {
+  if (!text) return false
+  if (kind === 'help') return run?.help_text === text
+  if (kind === 'failed') return run?.report_md === `**Failed:** ${text}`
+  if (run?.followup_md === text) return true
+  if (run?.report_md === text) return true
+  // The FIRST report replayed after follow-ups were appended: it is now a
+  // prefix of report_md (the follow-ups stand under their own headings).
+  return typeof run?.report_md === 'string' && run.report_md.startsWith(text + '\n\n---')
+}
+
+/**
  * A `done` from a finished run. The report is stored first, then the gate runs
  * like it would for a first report — a follow-up whose worktree is dirty is
  * told so in the same words, through the same channel.
  */
-async function followUpDone(run, text, via) {
+async function followUpDone(run, text, detail, via) {
   const runId = run.id
   // A follow-up that is still in the gate: the agent reports again after M1/M2,
   // exactly as a first run does. Its text was already appended; the gate is
   // simply asked again.
   if (run.followup_open && run.finish_state) {
+    if (detail) db.prepare(`UPDATE runs SET followup_detail_md=? WHERE id=?`).run(detail, runId)
     const gate = await finishGate(runId, '', via)
     if (gate?.hold) return { ok: true, message: gate.message ?? null }
     const fresh = db.prepare('SELECT * FROM runs WHERE id=?').get(runId)
@@ -357,8 +409,9 @@ async function followUpDone(run, text, via) {
   // `finish_started_at` is reset on purpose: the first gate's clock is long over,
   // and the deadline counts from THIS report. `followup_open` is what the
   // integrator's end reads to announce the merge as a follow-up's.
-  db.prepare(`UPDATE runs SET followups=?, followup_md=?, followup_open=1, finish_started_at=NULL WHERE id=?`)
-    .run(n, text || null, runId)
+  db.prepare(`UPDATE runs SET followups=?, followup_md=?, followup_detail_md=?,
+              followup_open=1, finish_started_at=NULL WHERE id=?`)
+    .run(n, text || null, detail || null, runId)
   addEvent(runId, 'followup_reported', { n })
   const gate = await finishGate(runId, '', via)
   if (gate?.hold) return { ok: true, message: gate.message ?? null }
@@ -408,7 +461,7 @@ export async function completeFollowUp(runId, { mergeLine = null, merged = false
   addEvent(runId, 'followup_done', { n, merged, merge: mergeLine })
   if (notify) {
     await notifyRun(runId, 'followup', followUpText(run, run.followup_md, mergeLine, { n, minutes }),
-      { fileName: `followup-${n}-${runId.slice(0, 8)}.md`, fileContent: run.followup_md ?? '', dedupe: false })
+      { fileName: `followup-${n}-${runId.slice(0, 8)}.md`, fileContent: run.followup_detail_md ?? run.followup_md ?? '', dedupe: false })
   }
   // The run "ended again": whatever hangs on its end runs once more.
   try {
@@ -592,7 +645,7 @@ export async function notifyRun(runId, type, text, lang = null) {
     addEvent(runId, 'notify_muted', { type })
     return false
   }
-  const voll = `${text}\n\nRun: ${runId}`
+  const voll = `${text}\n\nRun: ${runId}\n🔗 ${detailUrl(runId)}`
   // One call, whether or not there is a file: the facade normalizes both, and a
   // channel decides for itself whether a long report travels as an attachment.
   const r = await notifyChannels({
