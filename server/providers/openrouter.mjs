@@ -168,8 +168,17 @@ const plugin = {
       //   servingProvider a tag — the old single-provider pin
       if (req.orRouting?.mode === 'auto') {
         try {
-          const r = await plugin.routing.resolveForRun(ctx, req.model, req.orRouting)
-          if (r.ok) body.provider = { order: r.order, allow_fallbacks: false }
+          // The stored blob is re-parsed the same way resolveForRun() used to,
+          // so a corrupt config silently means "no routing" instead of routing
+          // against garbage requirements. `orRoutingRefresh` then forces a
+          // FRESH resolve instead of the 24 h cache — the OpenRouter recovery
+          // round of llmJson asks for it, because the cached order is exactly
+          // the one that just answered unusably.
+          const cfg = parseRoutingConfig(req.orRouting ?? {})
+          if (cfg && !cfg.error) {
+            const r = await plugin.routing.resolve(ctx, req.model, cfg, { refresh: req.orRoutingRefresh === true })
+            if (r.ok) body.provider = { order: r.order, allow_fallbacks: false }
+          }
         } catch { /* free routing is the old behaviour and stays reachable */ }
       } else if (req.servingProvider && req.servingProvider !== 'auto') {
         body.provider = { order: [req.servingProvider], allow_fallbacks: false }
