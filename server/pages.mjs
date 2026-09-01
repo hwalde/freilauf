@@ -726,10 +726,11 @@ export async function usagePanel() {
       // many there are and what they are called, and the day a second one
       // appears it belongs in the panel without a code change.
       //
-      // A per-model window may be the LAST live reading rather than the current
-      // one (quota.mjs merges the sources by age; the account reports the scoped
-      // window only sometimes). The bar then keeps standing where it stood — but
-      // it says when it was read, because a number that looks current and is two
+      // A window may be the LAST live reading rather than the current one
+      // (quota.mjs merges the sources by age; the account reports the scoped
+      // window only sometimes, and a rate-limited stretch holds the general
+      // ones back too). The bar then keeps standing where it stood — but it
+      // says when it was read, because a number that looks current and is two
       // days old is exactly the failure this module was rebuilt over.
       const fenster = (label, pct, iso, stampMs = null) => {
         if (pct == null) return ''
@@ -742,8 +743,8 @@ export async function usagePanel() {
       const scoped = (d.weekly_scoped ?? [])
         .map(w => fenster(`7d ${w.label}`, w.pct, w.resets_at, w.stale ? w.at : null)).join('')
       return `<div class="usage-row"><b>${e(u.label)}</b>${d.plan ? ` <span class="dim">${e(d.plan)}</span>` : ''}
-        ${fenster('5h', d.five, d.resets_at)}
-        ${fenster('7d', d.seven_general, d.seven_resets_at)}
+        ${fenster('5h', d.five, d.resets_at, d.five_at)}
+        ${fenster('7d', d.seven_general, d.seven_resets_at, d.seven_general_at)}
         ${scoped}</div>`
     }
     if (d.kind === 'cursor') {

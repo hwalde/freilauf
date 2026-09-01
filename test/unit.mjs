@@ -7,7 +7,7 @@
 // computes or decides — schedules, cron, form parsing, quota gate, text processing.
 //
 // Usage:  node test/unit.mjs
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, chmodSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, chmodSync, utimesSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -922,6 +922,105 @@ try {
     gleich(after.claudeAiOauth.accessToken, 'x', 'the credentials file is never written back')
     if (before === undefined) delete process.env.FREILAUF_CLAUDE_CREDENTIALS
     else process.env.FREILAUF_CLAUDE_CREDENTIALS = before
+  })
+
+  // Measured 2026-09-01: the account rate-limits this endpoint (429), and the
+  // hub's answer to a failure was to keep asking every watcher pass. A failed
+  // answer must start a backoff, or a polite poller becomes a hammer exactly
+  // when the vendor asks for a pause.
+  await pruefe('a 429 backs off — the endpoint is not asked again right away', async () => {
+    cu._claudeLimitsReset()
+    const credPath = join(sandkasten, 'backoff-credentials.json')
+    writeFileSync(credPath, JSON.stringify({
+      claudeAiOauth: { accessToken: 'x', refreshToken: 'y', expiresAt: Date.now() + 3600_000 },
+    }))
+    const before = process.env.FREILAUF_CLAUDE_CREDENTIALS
+    process.env.FREILAUF_CLAUDE_CREDENTIALS = credPath
+    const echt = global.fetch
+    let aufrufe = 0
+    global.fetch = async () => {
+      aufrufe++
+      return { ok: false, status: 429, headers: { get: () => null }, json: async () => ({}) }
+    }
+    try {
+      gleich(await cu.refreshClaudeLimits(), null, 'a 429 is no answer')
+      gleich(await cu.refreshClaudeLimits(), null, 'the stale-but-usable rule keeps the answer null')
+      gleich(aufrufe, 1, 'one 429, then the backoff keeps the endpoint alone')
+      gleich(cu.claudeLimits(), null, 'a failure is not cached as one')
+    } finally {
+      global.fetch = echt
+      if (before === undefined) delete process.env.FREILAUF_CLAUDE_CREDENTIALS
+      else process.env.FREILAUF_CLAUDE_CREDENTIALS = before
+      cu._claudeLimitsReset()
+    }
+  })
+
+  await pruefe('Retry-After is honoured and a success clears the backoff', async () => {
+    cu._claudeLimitsReset()
+    const credPath = join(sandkasten, 'backoff-credentials.json')
+    writeFileSync(credPath, JSON.stringify({
+      claudeAiOauth: { accessToken: 'x', refreshToken: 'y', expiresAt: Date.now() + 3600_000 },
+    }))
+    const before = process.env.FREILAUF_CLAUDE_CREDENTIALS
+    process.env.FREILAUF_CLAUDE_CREDENTIALS = credPath
+    const echt = global.fetch
+    let aufrufe = 0
+    let antwort = () => ({ ok: false, status: 429, headers: { get: (h) => String(h).toLowerCase() === 'retry-after' ? '600' : null }, json: async () => ({}) })
+    global.fetch = async () => { aufrufe++; return antwort() }
+    try {
+      await cu.refreshClaudeLimits()
+      await cu.refreshClaudeLimits()
+      gleich(aufrufe, 1, 'the vendor said wait 600 s, and that outranks the own backoff')
+      antwort = () => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => realResponse })
+      const live = await cu.refreshClaudeLimits({ force: true })
+      gleich(live?.five, 5, 'a forced refresh goes through the backoff and succeeds')
+      gleich(aufrufe, 2)
+      cu._claudeLimitsSet(cu._parseLimits(realResponse), Date.now() - 3600_000)   // cache aged
+      await cu.refreshClaudeLimits()
+      gleich(aufrufe, 3, 'and the success cleared the backoff: the next expired cache asks again')
+    } finally {
+      global.fetch = echt
+      if (before === undefined) delete process.env.FREILAUF_CLAUDE_CREDENTIALS
+      else process.env.FREILAUF_CLAUDE_CREDENTIALS = before
+      cu._claudeLimitsReset()
+    }
+  })
+
+  // The jump the merge now prevents, this time for the GENERAL windows: a
+  // rate-limited stretch dropped the 5-hour bar to whatever quota.json last
+  // held and back, on every gap in the live answer.
+  await pruefe('a rate-limited stretch keeps the last live answer standing', async () => {
+    const pfad = join(sandkasten, 'quota21.json')
+    writeFileSync(pfad, JSON.stringify({ five_hour: { used_percentage: 3 }, seven_day: { used_percentage: 77 } }))
+    const alt = new Date(Date.now() - 3600_000)
+    utimesSync(pfad, alt, alt)   // a file nobody has rewritten for an hour
+    process.env.FREILAUF_QUOTA_JSON = pfad
+    const { claudeQuota } = await import('../server/quota.mjs?fixture=21')
+    cu._claudeLimitsReset()
+    cu._claudeLimitsSet({ five: 5, resets_at: null, seven_general: 78, seven_resets_at: null, weekly_scoped: [] },
+      Date.now() - 300_000)   // last live answer, five minutes ago
+    const q = claudeQuota()
+    gleich(q.five, 5, 'the 5-hour bar stands instead of dropping to the hour-old file')
+    gleich(q.seven_general, 78, 'the week too')
+    wahr(q.five_at > 0, 'and says when the 5-hour value was read')
+    wahr(q.seven_general_at > 0, 'and when the week was read')
+    falsch(q.live, 'while honestly no longer claiming to be live')
+    cu._claudeLimitsReset()
+  })
+
+  await pruefe('a file rewritten after the last live answer wins — the status line keeps it moving', async () => {
+    const pfad = join(sandkasten, 'quota22.json')
+    writeFileSync(pfad, JSON.stringify({ five_hour: { used_percentage: 42 }, seven_day: { used_percentage: 11 } }))
+    process.env.FREILAUF_QUOTA_JSON = pfad
+    const { claudeQuota } = await import('../server/quota.mjs?fixture=22')
+    cu._claudeLimitsReset()
+    cu._claudeLimitsSet({ five: 5, resets_at: null, seven_general: 78, seven_resets_at: null, weekly_scoped: [] },
+      Date.now() - 300_000)
+    const q = claudeQuota()
+    gleich(q.five, 42, 'a status line wrote this window after the account last answered')
+    gleich(q.seven_general, 11, 'in both windows')
+    wahr(q.five_at > 0, 'a file-sourced value carries its as-of time too')
+    cu._claudeLimitsReset()
   })
 
   // ------------------------------------------------------------------

@@ -295,6 +295,10 @@ const plugin = {
       seven_general: q.seven_general, seven_fable: q.seven_fable,
       resets_at: q.resets_at, seven_resets_at: q.seven_resets_at,
       seven_fable_resets_at: q.seven_fable_resets_at,
+      // When a value is NOT from the current live answer, when it was read —
+      // the panel prints "as of …" instead of passing an old number off as
+      // current. null = the account itself answered.
+      five_at: q.five_at, seven_general_at: q.seven_general_at,
       // Every per-model week under its own name, and whether the account itself
       // answered. The panel renders the list; the two `fable` fields above stay
       // because the gate, the cost estimate and /api/usage's consumers name them.

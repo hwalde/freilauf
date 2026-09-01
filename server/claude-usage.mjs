@@ -66,14 +66,27 @@ const USAGE_URL = () => env('CLAUDE_USAGE_URL')
 const CREDENTIALS = () => env('CLAUDE_CREDENTIALS')
   ?? `${homedir()}/.claude/.credentials.json`
 
-// How long a fetched answer counts as the truth. A minute matches usage.mjs's
-// own cache, which is what the sidebar's 30 s timer really asks; there is no
-// point in being fresher than the thing that renders it.
-const TTL_MS = Number(env('CLAUDE_USAGE_TTL_MS') ?? 60_000)
+// How long a fetched answer counts as the truth. Two minutes, not one: the
+// account rate-limits this endpoint (measured 2026-09-01, a sustained 429 with
+// the hub polling once a minute), and a usage panel does not get more truthful
+// by being a minute fresher — the sidebar's own numbers move slowly. The suite
+// shortens both windows via the env overrides.
+const TTL_MS = Number(env('CLAUDE_USAGE_TTL_MS') ?? 120_000)
 const TIMEOUT_MS = Number(env('CLAUDE_USAGE_TIMEOUT_MS') ?? 8_000)
+
+// Backoff after a FAILED refresh. A 429 answered with another request 30 s
+// later is how a polite poller becomes a hammer: the failure left the cache
+// empty, so every watcher pass fired again. Now each failure doubles the wait
+// (2 min, 4, 8 … capped at 30 min), the vendor's own Retry-After overrides
+// when it is longer, and a success clears the whole thing. One failed minute
+// must never cost the account a steady stream of rejected requests.
+const BACKOFF_MS = Number(env('CLAUDE_USAGE_BACKOFF_MS') ?? 120_000)
+const BACKOFF_MAX_MS = Number(env('CLAUDE_USAGE_BACKOFF_MAX_MS') ?? 30 * 60_000)
 
 let cache = { at: 0, value: null }
 let inflight = null
+let backoffUntil = 0
+let failures = 0
 
 /**
  * Round like quota.mjs does — the vendor sends floats, every consumer wants one
@@ -97,7 +110,7 @@ const isoTime = (v) => {
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null
 }
 
-// ---------------- the per-model windows are REMEMBERED ----------------
+// ---------------- the last live answer is REMEMBERED ----------------
 //
 // WHY. The account does not report a per-model week the way it reports the other
 // two. `limits[]` carries the scoped entry while the account has one to report;
@@ -110,17 +123,25 @@ const isoTime = (v) => {
 // with every gap in the live answer, and the number it jumped to was the older
 // of the two.
 //
-// A weekly window is not a live measurement one can re-take at will: it belongs
-// to a period, and between two live answers the best knowledge about it is the
-// last live answer. So the scoped windows are kept — per label, with the time
-// they were read — and quota.mjs merges by that time (see `mergeScoped` there),
-// newest reading winning. The bar then stands still instead of falling back to
-// something older than what it already showed.
+// The same jump existed for the 5-hour and the general 7-day window, just with
+// the roles swapped: there the file IS written by a running status line and can
+// be fresher than the account — but a 429 stretch made claudeQuota() drop to
+// whatever the file last held (measured 2026-09-01: five 0 % out of the file
+// against the account's real number) and back the moment the endpoint answered
+// again. One gap, one visible jump, per minute if the endpoint rate-limits.
+//
+// A window is not a live measurement one can re-take at will: it belongs to a
+// period, and between two live answers the best knowledge about it is the last
+// live answer. So EVERY window of the last successful answer is kept — the
+// general ones per field, the scoped ones per label — each with the time it was
+// read, and quota.mjs merges by that time (see `mergeScoped` / the field merge
+// there), newest reading winning. The bars then stand still instead of
+// flipping to a source that happens to answer.
 //
 // On disk, because this hub deploys often and a restart would otherwise drop
-// straight back to the two-day-old file value. Own file, never quota.json —
-// rule 1 above stands. The path is derived rather than imported from db.mjs:
-// db.mjs imports the harness registry, which imports this module.
+// straight back to older knowledge. Own file, never quota.json — rule 1 above
+// stands. The path is derived rather than imported from db.mjs: db.mjs imports
+// the harness registry, which imports this module.
 const MEMORY_PATH = () => env('CLAUDE_WINDOWS_JSON')
   ?? join(dataDir(), 'claude-windows.json')
 
@@ -130,38 +151,85 @@ const MEMORY_PATH = () => env('CLAUDE_WINDOWS_JSON')
 // deferring runs against a quota that has long since been refilled.
 const MEMORY_TTL_MS = Number(env('CLAUDE_WINDOW_MEMORY_MS') ?? 24 * 3600_000)
 
-let memory = null   // label → { label, pct, resets_at, at }
+let memory = null   // { scoped: Map<label, window>, general: { five, seven_general } }
 
 function loadMemory() {
   if (memory) return memory
-  memory = new Map()
+  const m = { scoped: new Map(), general: { five: null, seven_general: null } }
   try {
     const raw = JSON.parse(readFileSync(MEMORY_PATH(), 'utf8'))
     for (const w of Array.isArray(raw?.weekly_scoped) ? raw.weekly_scoped : []) {
       const pct = round1(w?.pct)
       const at = Number(w?.at)
       if (!w?.label || pct === null || !Number.isFinite(at)) continue
-      memory.set(String(w.label), { label: String(w.label), pct, resets_at: isoTime(w?.resets_at), at })
+      m.scoped.set(String(w.label), { label: String(w.label), pct, resets_at: isoTime(w?.resets_at), at })
+    }
+    for (const key of ['five', 'seven_general']) {
+      const w = raw?.general?.[key]
+      const pct = round1(w?.pct)
+      const at = Number(w?.at)
+      if (pct === null || !Number.isFinite(at)) continue
+      m.general[key] = { pct, resets_at: isoTime(w?.resets_at), at }
     }
   } catch { /* no memory yet, a broken file, no read access — all the same */ }
-  return memory
+  memory = m
+  return m
 }
 
-/** Keep what a live answer said about the per-model weeks. Never throws. */
-function rememberScoped(list, at) {
+/** Keep what a live answer said about every window. Never throws. */
+function rememberWindows(list, at) {
   const mem = loadMemory()
   let changed = false
-  for (const w of list ?? []) {
-    const prev = mem.get(w.label)
+  // The general windows, per field. `at` is when THIS answer was read, so a
+  // source that last spoke hours ago loses to the file a status line has just
+  // rewritten — the merge in quota.mjs decides by age.
+  for (const [key, pct, resets] of [
+    ['five', list?.five, list?.resets_at],
+    ['seven_general', list?.seven_general, list?.seven_resets_at],
+  ]) {
+    if (pct === null || pct === undefined) continue
+    const prev = mem.general[key]
     if (prev && prev.at >= at) continue
-    mem.set(w.label, { label: w.label, pct: w.pct, resets_at: w.resets_at ?? null, at })
+    mem.general[key] = { pct, resets_at: resets ?? null, at }
+    changed = true
+  }
+  // The per-model windows, per label.
+  for (const w of list?.weekly_scoped ?? []) {
+    const prev = mem.scoped.get(w.label)
+    if (prev && prev.at >= at) continue
+    mem.scoped.set(w.label, { label: w.label, pct: w.pct, resets_at: w.resets_at ?? null, at })
     changed = true
   }
   if (!changed) return
   try {
     mkdirSync(dirname(MEMORY_PATH()), { recursive: true })
-    writeFileSync(MEMORY_PATH(), JSON.stringify({ weekly_scoped: [...mem.values()] }))
+    writeFileSync(MEMORY_PATH(), JSON.stringify({
+      general: mem.general,
+      weekly_scoped: [...mem.scoped.values()],
+    }))
   } catch { /* a panel is not worth an exception on the refresh path */ }
+}
+
+/**
+ * Whether a remembered window still counts. One rule for both kinds: a window
+ * WITH a reset time dies at that time (knowledge from before a window rolled
+ * over is worthless), one without dies of age.
+ */
+function rememberedAlive(w, now) {
+  const reset = Date.parse(w.resets_at)
+  return Number.isFinite(reset) ? reset > now : now - w.at < MEMORY_TTL_MS
+}
+
+/**
+ * The last live reading of the two general windows, each with the time it was
+ * read — or null where there is none or it has rolled over. quota.mjs treats
+ * these as one more source with a date on it: older than a live answer, and
+ * against the file a question of who spoke last.
+ */
+export function rememberedGeneral(now = Date.now()) {
+  const mem = loadMemory()
+  const win = (w) => (w && rememberedAlive(w, now) ? { ...w } : null)
+  return { five: win(mem.general.five), seven_general: win(mem.general.seven_general) }
 }
 
 /**
@@ -171,9 +239,8 @@ function rememberScoped(list, at) {
  */
 export function rememberedScoped(now = Date.now()) {
   const out = []
-  for (const w of loadMemory().values()) {
-    const reset = Date.parse(w.resets_at)
-    if (Number.isFinite(reset) ? reset <= now : now - w.at >= MEMORY_TTL_MS) continue
+  for (const w of loadMemory().scoped.values()) {
+    if (!rememberedAlive(w, now)) continue
     out.push({ ...w })
   }
   return out
@@ -234,14 +301,20 @@ function parseLimits(json) {
 /**
  * Fetch the account's windows and cache them. Returns the snapshot, or null when
  * there is no live answer to be had — the caller then simply keeps whatever
- * `claudeQuota()` reads out of the file.
+ * `claudeQuota()` reads out of the file and out of the remembered last answer.
  *
  * Never throws, never waits on a second caller: one request is in flight at a
  * time, and the release hangs on the PROMISE rather than standing at the end of
  * the body — the same trap usage.mjs documents, and for the same reason.
+ *
+ * A failed answer starts the backoff (see the constants above): while it runs,
+ * no request is made at all — the account said "later", and asking again every
+ * watcher pass is how a poller becomes a hammer. `force` bypasses it; that is
+ * for tests and for the one caller that explicitly wants a fresh answer.
  */
 export async function refreshClaudeLimits({ force = false } = {}) {
   if (!force && cache.value && Date.now() - cache.at < TTL_MS) return cache.value
+  if (!force && Date.now() < backoffUntil) return cache.value ?? null
   if (inflight) return inflight
   const task = (async () => {
     const token = accessToken()
@@ -251,15 +324,34 @@ export async function refreshClaudeLimits({ force = false } = {}) {
         headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
         signal: AbortSignal.timeout(TIMEOUT_MS),
       })
-      if (!res.ok) return null
+      if (!res.ok) {
+        failures++
+        // The vendor's own Retry-After wins when it is the longer wait. It may
+        // arrive as seconds or as a date; anything unparsable is ignored.
+        let wait = Math.min(BACKOFF_MS * 2 ** (failures - 1), BACKOFF_MAX_MS)
+        const ra = res.headers?.get?.('retry-after')
+        const raSec = Number(ra)
+        const raMs = Number.isFinite(raSec) && ra > 0 ? raSec * 1000
+          : Number.isFinite(Date.parse(ra)) ? Date.parse(ra) - Date.now() : 0
+        if (raMs > wait) wait = raMs
+        backoffUntil = Date.now() + wait
+        return null
+      }
       const parsed = parseLimits(await res.json())
       if (parsed) {
         const at = Date.now()
         cache = { at, value: parsed }
-        rememberScoped(parsed.weekly_scoped, at)
+        rememberWindows(parsed, at)
       }
+      failures = 0
+      backoffUntil = 0
       return parsed
-    } catch { return null }   // network, timeout, parse — all the same answer
+    } catch {
+      failures++
+      backoffUntil = Date.now()
+        + Math.min(BACKOFF_MS * 2 ** (failures - 1), BACKOFF_MAX_MS)
+      return null   // network, timeout, parse — all the same answer
+    }
   })()
   inflight = task
   const release = () => { if (inflight === task) inflight = null }
@@ -284,14 +376,16 @@ export function claudeLimits() {
 export function _claudeLimitsReset() {
   cache = { at: 0, value: null }
   inflight = null
-  memory = new Map()
-  try { writeFileSync(MEMORY_PATH(), JSON.stringify({ weekly_scoped: [] })) } catch { /* nothing to clear */ }
+  backoffUntil = 0
+  failures = 0
+  memory = { scoped: new Map(), general: { five: null, seven_general: null } }
+  try { writeFileSync(MEMORY_PATH(), JSON.stringify({ general: {}, weekly_scoped: [] })) } catch { /* nothing to clear */ }
 }
 
 /** Test hook: plant a snapshot without a network round trip — remembered like a real one. */
 export function _claudeLimitsSet(value, at = Date.now()) {
   cache = { at, value }
-  if (value) rememberScoped(value.weekly_scoped, at)
+  if (value) rememberWindows(value, at)
 }
 
 /** Test hook: exposed so the parser can be tested against a recorded response. */
