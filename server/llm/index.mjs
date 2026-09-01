@@ -36,6 +36,7 @@ import { extractJson } from './json.mjs'
 import { validate, strictPrompt, repairPrompt, formatProblems } from './schema.mjs'
 import { llmAlert } from './alerts.mjs'
 import { getSource, defaultSource, missingCredential } from './sources.mjs'
+import { t } from '../i18n.mjs'
 
 /** One reprompt by default; `0` switches the second attempt off entirely. */
 const DEFAULT_RETRIES = 1
@@ -50,7 +51,54 @@ function retryBudget() {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_RETRIES
 }
 
-function fail(stage, error) { return { ok: false, stage, error: String(error) } }
+function fail(stage, error, kind = null) {
+  const out = { ok: false, stage, error: String(error) }
+  if (kind) out.kind = kind
+  return out
+}
+
+/**
+ * Classify a transport failure into the errorClass the alert deduplicates on.
+ *
+ * `HTTP <status>` is the ONE error shape every adapter throws (docs/plugins.md,
+ * `ctx.json`); the status code is what tells "out of credits" (402) from
+ * "rate limit" (429) from "the provider is down" (5xx) apart — which is the
+ * question the operator's alert has to answer. The 5xx family shares one class
+ * so a failing server that alternates 500/502/503 pages once, not three times.
+ * Everything else — a timeout, a network error, a broken adapter — is a plain
+ * `transport`.
+ *
+ * @returns {{ kind: string, code: number|null, error: string }}
+ */
+export function classifyTransportError(err) {
+  const msg = String(err?.message ?? err ?? '')
+  const m = /HTTP (\d{3})/.exec(msg)
+  if (m) {
+    const code = Number(m[1])
+    return { kind: code >= 500 ? 'http_5xx' : `http_${code}`, code, error: msg }
+  }
+  const name = String(err?.name ?? '')
+  if (name === 'TimeoutError' || name === 'AbortError' || /time\s*out|timeout/i.test(msg)) {
+    return { kind: 'timeout', code: null, error: msg }
+  }
+  return { kind: 'transport', code: null, error: msg }
+}
+
+/**
+ * The human-readable, translated sentence for a classified transport failure.
+ * A known status gets its own key (`llm.err_http_429` …), any other HTTP code
+ * the generic `llm.err_http_other` (which still names the code), a timeout and
+ * a bare transport failure their own texts.
+ */
+function transportText(c) {
+  if (c.code == null) {
+    if (c.kind === 'timeout') return t('llm.err_timeout')
+    return t('llm.err_transport', { error: c.error })
+  }
+  const specific = t(`llm.err_${c.kind}`)
+  if (specific !== `llm.err_${c.kind}`) return specific
+  return t('llm.err_http_other', { code: c.code })
+}
 
 /**
  * Ask a model a question and get a value back.
@@ -99,7 +147,7 @@ export async function llmJson({
   const base = String(prompt ?? '')
   const ctx = pluginCtx(src.pluginId)
 
-  const call = async (userText) => src.plugin.llm.complete(ctx, {
+  const call = async (userText, auto = false) => src.plugin.llm.complete(ctx, {
     model,
     system: system ?? null,
     prompt: userText,
@@ -111,8 +159,13 @@ export async function llmJson({
     schemaName: schemaName ?? '',
     purpose,
     maxTokens, temperature, timeoutMs,
-    servingProvider: servingProvider || null,
-    orRouting: orRouting ?? null,
+    // The OpenRouter recovery round re-selects the serving provider with a
+    // FRESH resolve (`orRoutingRefresh`): the operator's own config — free
+    // routing, a pin, or auto — was already tried and answered unusably, and
+    // the 24 h cache would only hand back the same order that just failed.
+    servingProvider: auto ? null : (servingProvider || null),
+    orRouting: auto ? { mode: 'auto' } : (orRouting ?? null),
+    orRoutingRefresh: auto ? true : undefined,
   })
 
   const first = strict ? `${base}\n\n${strict}` : base
@@ -122,8 +175,25 @@ export async function llmJson({
   let stage = 'transport'
   let error = 'no answer'
   let problems = []
+  let kind = null
+  // OpenRouter has a best-provider selection (the `routing` capability); a
+  // source that cannot re-select gets no recovery round, only the budget above.
+  const canReselect = src.pluginId === 'openrouter' && typeof src.plugin?.routing?.resolve === 'function'
+  let autoRound = false
 
-  while (attempt <= retries) {
+  while (true) {
+    // The ordinary budget is `llm_retries` + 1 calls. When a `parse` or
+    // `validate` failure has SPENT it, OpenRouter gets exactly ONE recovery
+    // round: the same question again, but through a freshly re-selected best
+    // provider — a different serving endpoint is the one thing that can make a
+    // model that keeps answering prose actually obey the schema. A transport
+    // failure never reprompts (it does not become right by asking again) and
+    // never triggers the recovery round.
+    const budgetSpent = attempt > retries
+    const needsAuto = canReselect && !autoRound && budgetSpent && (stage === 'parse' || stage === 'validate')
+    if (budgetSpent && !needsAuto) break
+    if (needsAuto) autoRound = true
+
     // A repair round quotes the previous answer and the exact complaint back,
     // and repeats BOTH the question and the strict block — the second attempt
     // is a fresh, stateless call, so anything not repeated here is gone.
@@ -143,13 +213,17 @@ export async function llmJson({
 
     let answer
     try {
-      answer = await call(userText)
+      answer = await call(userText, autoRound)
     } catch (err) {
       // Transport failures are NOT reprompted: a 401, a timeout or a missing
       // binary does not become right by asking the same thing again, and the
-      // retry would double the latency of every broken call.
+      // retry would double the latency of every broken call. The status code
+      // still NAMES the problem — credits, rate limit, outage — in the
+      // operator's language (`classifyTransportError` + `transportText`).
+      const c = classifyTransportError(err)
+      kind = c.kind
       stage = 'transport'
-      error = err?.message ? String(err.message) : 'the model source did not answer'
+      error = transportText(c)
       break
     }
 
@@ -157,8 +231,12 @@ export async function llmJson({
     const parsed = extractJson(text)
     if (!parsed.ok) {
       stage = 'parse'
-      error = `the answer is not JSON (${parsed.note})`
-      problems = [error]
+      // The `problems` fed back to the model stay ENGLISH on purpose — a
+      // repair prompt must not change with the operator's UI language
+      // (schema.mjs, "NOTE ON LANGUAGE"). Only the human-facing `error` is
+      // translated.
+      problems = [`the answer is not JSON (${parsed.note})`]
+      error = autoRound ? t('llm.err_parse_auto', { note: parsed.note }) : t('llm.err_parse', { note: parsed.note })
       attempt++
       continue
     }
@@ -166,7 +244,8 @@ export async function llmJson({
     if (!checked.ok) {
       stage = 'validate'
       problems = checked.problems
-      error = `the answer does not match the schema:\n${formatProblems(checked.problems)}`
+      error = (autoRound ? t('llm.err_validate_auto') : t('llm.err_validate')) +
+        (checked.problems.length ? `\n${formatProblems(checked.problems)}` : '')
       attempt++
       continue
     }
@@ -188,6 +267,9 @@ export async function llmJson({
   // a state the operator chose, and alarming about them would be the "channel
   // that cries wolf" alerts.mjs exists to prevent. Config problems are visible
   // where they are made — in the settings form and in the caller's own answer.
-  await llmAlert({ purpose, source: src.id, model, errorClass: stage, text: error })
-  return fail(stage, error)
+  // The errorClass is the SPECIFIC failure (`http_429`, `parse`), not the broad
+  // stage — two status codes are two different problems and must throttle
+  // apart.
+  await llmAlert({ purpose, source: src.id, model, errorClass: kind ?? stage, text: error })
+  return fail(stage, error, kind)
 }

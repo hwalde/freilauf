@@ -109,8 +109,14 @@ export async function llmAlert({ purpose, source, model, errorClass, text, nowMs
     const lines = [
       t('llm.alert_title', { purpose: String(purpose ?? '?') }),
       t('llm.alert_where', { source: String(source ?? '?'), model: String(model ?? '?') }),
-      t('llm.alert_kind', { kind: String(errorClass ?? '?') }),
     ]
+    // The kind line names the failure in the operator's language: the errorClass
+    // is a machine code (`http_429`, `parse`) and its label lives under
+    // `llm.kind_<class>`. A class with no label falls back to the code itself —
+    // an honest `http_408` beats an invented English sentence.
+    const kindKey = `llm.kind_${String(errorClass ?? '').replace(/[^A-Za-z0-9_-]/g, '')}`
+    const kindLabel = t(kindKey)
+    lines.push(t('llm.alert_kind', { kind: kindLabel === kindKey ? String(errorClass ?? '?') : kindLabel }))
     if (text) lines.push(t('llm.alert_detail', { text: String(text).slice(0, 600) }))
     if (st.suppressed > 0) {
       lines.push(t('llm.alert_more', { count: st.suppressed, since: clock(st.suppressedSince || nowMs) }))
