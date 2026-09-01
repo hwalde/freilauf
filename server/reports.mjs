@@ -327,7 +327,10 @@ async function handleFollowUp(run, body, via) {
       return followUpDone(run, text, detail, via)
     case 'failed': {
       // The follow-up did not work out. The run's own status is not touched —
-      // it describes the first attempt — but the operator hears it.
+      // it describes the first attempt — but the operator hears it. The
+      // commission is over either way: the clock and its "longer than expected"
+      // statement go the way they go on a delivered follow-up.
+      endFollowUpCommission(runId)
       appendReport(runId, `**Follow-up failed:** ${text}`)
       addEvent(runId, 'followup_failed', { text: text.slice(0, 500) })
       await notifyRun(runId, 'followup_failed', `${followUpHeader(run, 'FOLLOW-UP FAILED')}\n\n${text}\n\n❌ Follow-up failed · ${harnessLabel(run)}`,
@@ -344,6 +347,11 @@ async function handleFollowUp(run, body, via) {
     case 'progress':
       addEvent(runId, 'progress', { text, followup: true })
       db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(runId)
+      // The traffic light falls back while the agent demonstrably works — the
+      // same thing a progress report does for a first attempt (above). The
+      // notification flag is NOT cleared: like a first run, a follow-up that
+      // reported progress does not page about the overrun a second time.
+      clearAnomalies(runId, ['anomaly:followup_soft_overrun', 'anomaly:followup_overrun'])
       return { ok: true }
     case 'branch':
       db.prepare('UPDATE runs SET branch_reported=? WHERE id=?').run(String(body.branch || ''), runId)
@@ -388,6 +396,19 @@ export function isReplayedReport(run, kind, text) {
 }
 
 /**
+ * The follow-up commission is answered or given up: the clock (`followup_since`,
+ * set by the send route) stops and the watcher's "longer than expected"
+ * statement about it is retracted the same way a raised duration retracts one
+ * (run-edit.mjs). While the follow-up is in the gate the run still displays as
+ * working — through `followup_open`, which the integrator's ends clear.
+ */
+function endFollowUpCommission(runId) {
+  db.prepare('UPDATE runs SET followup_since=NULL WHERE id=?').run(runId)
+  clearAnomalies(runId, ['anomaly:followup_soft_overrun', 'anomaly:followup_overrun',
+    ...notifiedFlags('followup_overrun')])
+}
+
+/**
  * A `done` from a finished run. The report is stored first, then the gate runs
  * like it would for a first report — a follow-up whose worktree is dirty is
  * told so in the same words, through the same channel.
@@ -405,6 +426,10 @@ async function followUpDone(run, text, detail, via) {
     return completeFollowUp(runId, { mergeLine: gate?.mergeLine ?? null, merged: false, message: true, followups: fresh.followups })
   }
   const n = (run.followups ?? 0) + 1
+  // The commission is answered: the clock stops here and its "longer than
+  // expected" statement is retracted. While the gate / merge runs the run still
+  // displays as working — through `followup_open`, not through the clock.
+  endFollowUpCommission(runId)
   appendReport(runId, text, n)
   // `finish_started_at` is reset on purpose: the first gate's clock is long over,
   // and the deadline counts from THIS report. `followup_open` is what the

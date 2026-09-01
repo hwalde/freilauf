@@ -85,13 +85,13 @@ const SEVERITY_TEXT = { rot: 'incidents.severity_red', gelb: 'incidents.severity
 function ampel(run) {
   const vf = ampelAusVorfaellen(run.id)
   const red = vf === 'rot' || ['waiting_help', 'failed'].includes(run.status)
-    || db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind LIKE 'anomaly:%' AND kind NOT IN ('anomaly:no_activity','anomaly:soft_overrun','anomaly:unpushed') LIMIT 1`).get(run.id)
+    || db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind LIKE 'anomaly:%' AND kind NOT IN ('anomaly:no_activity','anomaly:soft_overrun','anomaly:followup_soft_overrun','anomaly:unpushed') LIMIT 1`).get(run.id)
   // A run in the finish gate is at least yellow: it has reported, and something
   // is still keeping its work off the base branch. A blocked_* one is red
   // through its incident anyway.
   const yellow = !red && (
     vf === 'gelb' || run.status === 'deferred' || !!run.finish_state
-    || db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind IN ('anomaly:no_activity','anomaly:soft_overrun','anomaly:unpushed') LIMIT 1`).get(run.id))
+    || db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind IN ('anomaly:no_activity','anomaly:soft_overrun','anomaly:followup_soft_overrun','anomaly:unpushed') LIMIT 1`).get(run.id))
   return red ? 'red' : yellow ? 'yellow' : 'green'
 }
 
@@ -401,18 +401,48 @@ export function statusText(status) {
   return txt === key ? String(status) : txt
 }
 
+/**
+ * Is a FINISHED run working again? True while a follow-up commission is open:
+ * the operator typed new work into the session (`followup_since`, cleared when
+ * the follow-up reports or its session ends), or a follow-up is in the gate /
+ * being merged (`followup_open`). The run's `status` keeps telling the truth
+ * about the first attempt — what changed is displayed: "running" again, with a
+ * line saying it is follow-up work.
+ */
+export function followUpActive(run) {
+  return !!run && ['done', 'failed', 'aborted'].includes(run.status)
+    && !!(run.followup_since || run.followup_open)
+}
+
+/** The status word a run displays under — "running" while a follow-up is open. */
+export function displayStatus(run) {
+  return followUpActive(run) ? 'running' : run.status
+}
+
 /** How much work is in flight in this repo, per status, linked into the overview. */
 function workBlock(repoId) {
   if (repoId == null) return ''
   const zeilen = WORK_STATUSES.map(s => {
     const n = db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND status=?`).get(repoId, s).c
-    if (!n) return null
+    // A finished run with an open follow-up commission is work in flight and is
+    // counted where the operator looks for it: under "running". The same rows
+    // the status filter (overviewRuns) puts behind that link.
+    const nachfolge = s === 'running'
+      ? db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL
+          AND status IN ('done','failed','aborted') AND followup_since IS NOT NULL`).get(repoId).c
+      : 0
+    const gesamtN = db.prepare(`SELECT count(*) c FROM runs WHERE archived_at IS NULL AND status=?`).get(s).c
+    const gesamtNachfolge = s === 'running'
+      ? db.prepare(`SELECT count(*) c FROM runs WHERE archived_at IS NULL
+          AND status IN ('done','failed','aborted') AND followup_since IS NOT NULL`).get().c
+      : 0
+    if (!(n + nachfolge)) return null
     return {
       status: s,
-      n,
+      n: n + nachfolge,
       // The sum of ALL repos for that status — the reading "1 running" that does
       // not add up only makes sense against the other repos' loads.
-      gesamt: db.prepare(`SELECT count(*) c FROM runs WHERE archived_at IS NULL AND status=?`).get(s).c,
+      gesamt: gesamtN + gesamtNachfolge,
     }
   }).filter(Boolean)
   if (!zeilen.length) return `<div class="side-block"><span class="side-label">${e(t('side.work'))}</span>
@@ -838,8 +868,9 @@ export function runRow(r, ctx) {
   // (harness/model, branch/PR) that reads as one line.
   return `<tr id="run-${e(r.id)}" onclick="location='/runs/${r.id}'">
       <td class="status-cell">
-        <span class="status-line">${AMPEL_DOT[ampel(r)]()} ${e(statusText(r.status))}</span>
+        <span class="status-line">${AMPEL_DOT[ampel(r)]()} ${e(statusText(displayStatus(r)))}</span>
         ${wartend ? `<div class="dim">${wartetAuf(r)}</div>` : ''}
+        ${r.followup_since ? `<div class="dim">${e(t('run.followup_active', { ts: fmtDbUtc(r.followup_since) }))}</div>` : ''}
         ${integrationLine(r)}
         ${anomaly ? `<div class="dim">${e(anomaly)}</div>` : ''}</td>
       <td class="title-cell" onclick="event.stopPropagation()">
@@ -896,12 +927,16 @@ export function runRows(runs, ctx) {
 export function overviewRuns(repoId, status = null, incidentsOnly = false) {
   const s = WORK_STATUSES.includes(status) ? status : null
   return db.prepare(`SELECT * FROM runs WHERE repo_id=? AND archived_at IS NULL
-    AND (? IS NULL OR status = ?)
+    AND (? IS NULL OR status = ?
+        OR (? = 'running' AND status IN ('done','failed','aborted') AND followup_since IS NOT NULL))
     ${incidentsOnly ? `AND id IN (SELECT run_id FROM incidents WHERE geloest_am IS NULL AND run_id IS NOT NULL)` : ''}
     ORDER BY
-    CASE status WHEN 'waiting_help' THEN 0 WHEN 'failed' THEN 1 WHEN 'running' THEN 2
-                WHEN 'deferred' THEN 3 WHEN 'scheduled' THEN 4 ELSE 5 END,
-    started_at DESC LIMIT 200`).all(repoId, s, s)
+    -- A finished run with an open follow-up commission IS work in flight: it
+    -- sorts with the running ones, not below the finished ones.
+    CASE WHEN followup_since IS NOT NULL AND status IN ('done','failed','aborted') THEN 2
+         WHEN status = 'waiting_help' THEN 0 WHEN status = 'failed' THEN 1 WHEN status = 'running' THEN 2
+         WHEN status = 'deferred' THEN 3 WHEN status = 'scheduled' THEN 4 ELSE 5 END,
+    started_at DESC LIMIT 200`).all(repoId, s, s, s)
 }
 
 /**
@@ -1131,6 +1166,10 @@ export async function pageRun(req, res, url, id) {
   // Is this run itself still going? That decides the BUTTON, not the typing:
   // ending a run that is over would rewrite its 'done' to 'aborted'.
   const inFlight = ['running', 'waiting_help'].includes(run.status)
+  // …but a finished run with an open follow-up commission is working again, and
+  // the TERMINAL says so (summary + no "retention keeps counting" hint). The
+  // button stays the finished one: whatever ends such a run ends its SESSION.
+  const arbeitet = inFlight || followUpActive(run)
   const body = `
   ${runDetailHead(run, { title: titel })}
   ${runPromptCard(run)}
@@ -1146,10 +1185,10 @@ export async function pageRun(req, res, url, id) {
       // done: show as history, not as an open question
       : `<p class="dim"><b>${e(t('run.help_answered'))}:</b> ${e(run.help_text)}${run.help_answer ? ` → <i>${e(run.help_answer)}</i>` : ''}</p>`
     : ''}
-  <details ${live ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(terminalState(live, sessionOpen, inFlight))}</summary>
+  <details ${live ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(terminalState(live, sessionOpen, arbeitet))}</summary>
     <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
     ${notifySwitch(run)}
-    ${live && !inFlight ? `<p class="dim">${e(t('run.session_after_hint'))}</p>` : ''}
+    ${live && !arbeitet ? `<p class="dim">${e(t('run.session_after_hint'))}</p>` : ''}
     ${live ? `<form onsubmit="return freilaufSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>` : ''}
     ${inFlight
       ? (live ? `<form onsubmit="return freilaufKill('${id}')"><button class="danger">${e(t('run.kill'))}</button></form>` : '')
@@ -1258,7 +1297,11 @@ export function goalCard(run) {
 export function runDetailHead(run, ctx) {
   const id = run.id
   const titel = ctx.title
-  return `<h2 id="run-head">${AMPEL_DOT[ampel(run)]()} ${titleInline(id, titel)} <span class="status-chip">${e(statusText(run.status))}</span></h2>
+  return `<h2 id="run-head">${AMPEL_DOT[ampel(run)]()} ${titleInline(id, titel)} <span class="status-chip">${e(statusText(displayStatus(run)))}</span></h2>
+  ${followUpActive(run)
+    ? `<div class="banner waiting" id="run-banner">${e(t('run.followup_banner'))}
+       ${run.followup_since ? `<span class="dim">${e(t('run.followup_active', { ts: fmtDbUtc(run.followup_since) }))}</span>` : ''}</div>`
+    : ''}
   ${run.status === 'scheduled'
     // A planned run must be revocable — otherwise a start you thought better of
     // sits in the future with no way to stop it. 'kill' is exactly right here:

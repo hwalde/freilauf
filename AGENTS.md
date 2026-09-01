@@ -1780,6 +1780,39 @@ A report from a finished run is a **follow-up report** now
   itself; without a `merged_sha` (merge mode off) there is nothing to compare
   against and the net stays out of it.
 
+**The commission is its own half, and it is what the operator sees.** The
+follow-up REPORT is the end of the story; its start is the moment the operator
+types instructions into a finished run's session (`POST /api/runs/<id>/send`).
+That send is a **follow-up commission** now — the exact moment, deterministic,
+because a human typing into the session IS the commissioning, and neither
+activity nor tmux output can say it earlier or more precisely (an idle TUI
+produces no activity, and a log line proves nothing — the log scanner's whole
+lesson). `runs.followup_since` carries it, and three things hang on it:
+
+- **The run displays as running again.** `status` keeps the first attempt's
+  truth, but the overview and the detail page show the running word, the
+  follow-up line names the moment (`run.followup_active`), the sidebar counts
+  the run under "running" and the overview sorts and filters it there
+  (`followUpActive()` / `displayStatus()` in pages.mjs). The terminal summary
+  says "live" again; the button under it stays the finished one — ending such
+  a run ends its SESSION, never its record.
+- **The expected duration applies from the commission** (`watchFollowUps()` in
+  watcher.mjs, its own pass — `watchRun()` only ever sees running runs): soft
+  overrun at 80 % (`anomaly:followup_soft_overrun`, yellow, like
+  `anomaly:soft_overrun`), overrun at 100 % with a notification
+  (`followup_overrun` — its own type, so a first attempt's page does not mute
+  the follow-up's). Each new instruction restarts the clock and retracts the
+  old statement the way a raised duration retracts one; a follow-up `progress`
+  report clears the anomalies (but not the flag, like a first run); the clock
+  stops when the follow-up reports (`endFollowUpCommission()`), when the
+  session is closed (kill route, `reconcileClosedSession()`) — or when the
+  watcher finds the pane dead (`followup_agent_gone`): a process that exited
+  can never report, so waiting out the deadline would only produce a
+  misleading alarm.
+- **The duration stays editable while the commission is open**
+  (`runEditAllowed()`): a finished run with `followup_since`/`followup_open`
+  allows exactly what a running one does — the live-read expected duration.
+
 **The message says which one it is.** A follow-up arrives as `<repo> / <name>
 FOLLOW-UP REPORT #n:` with a `✅ Follow-up #n done` status line that carries
 the time since the previous report instead of the run's duration

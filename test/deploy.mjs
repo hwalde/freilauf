@@ -358,8 +358,13 @@ try {
     await pruefe('and fl-report still answers to the OLD environment variable', () => {
       // A tmux session that is running right now carries CC_RUN_ID, set at a
       // start that happened before this release existed.
+      // Fenced against the CALLER's own run environment: a suite started by an
+      // agent inside a Freilauf worktree inherits FL_RUN_ID/FL_HUB_URL, and the
+      // new names win — without the fence the check would report to the real
+      // hub (or nothing) instead of proving what it is here to prove.
+      const { FL_RUN_ID: _r, FL_HUB_URL: _h, ...uebrig } = process.env
       const r = sh('bash', [join(HOME, '.local', 'bin', 'cc-report'), 'progress', 'hallo'], {
-        env: { ...process.env, CC_RUN_ID: 'r1', CC_HUB_URL: 'http://127.0.0.1:1' },
+        env: { ...uebrig, CC_RUN_ID: 'r1', CC_HUB_URL: 'http://127.0.0.1:1' },
       })
       // No hub on that port, so it files the report in the inbox instead — which
       // is exactly the proof that it got as far as having a run id.
