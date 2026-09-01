@@ -4046,6 +4046,18 @@ try {
     for (const s of ['done', 'failed', 'aborted']) {
       gleich(erlaubt(s), '{"duration":false,"prompt":false,"repo":false,"startTime":false,"branch":false}', `${s}: nothing left to edit`)
     }
+    // A finished run with an open follow-up commission is working again — its
+    // duration is read live by the watcher's overrun thresholds, exactly as for
+    // a running run.
+    const followup = (extra) => JSON.stringify(runEditAllowed({ status: 'done', ...extra }))
+    gleich(followup({ followup_since: '2026-01-01 00:00:00' }),
+      '{"duration":true,"prompt":false,"repo":false,"startTime":false,"branch":false}',
+      'a follow-up commission reopens the duration for editing')
+    gleich(followup({ followup_open: 1 }),
+      '{"duration":true,"prompt":false,"repo":false,"startTime":false,"branch":false}',
+      'a follow-up in the gate too')
+    gleich(followup({}), '{"duration":false,"prompt":false,"repo":false,"startTime":false,"branch":false}',
+      'a plain finished run stays closed')
     gleich(JSON.stringify(runEditAllowed(null)), '{"duration":false,"prompt":false,"repo":false,"startTime":false,"branch":false}', 'no run')
   })
 
@@ -4579,9 +4591,16 @@ try {
 
   await pruefe('publicBase: a configured host wins, the port stays live, the env seam still answers', async () => {
     const vorherUrl = process.env.FREILAUF_PUBLIC_URL
+    const vorherUrlAlt = process.env.CCHUB_PUBLIC_URL
     const vorherVpn = process.env.FREILAUF_VPN_PORT
+    const vorherVpnAlt = process.env.CCHUB_VPN_PORT
     delete process.env.FREILAUF_PUBLIC_URL
+    // The rename left BOTH names of every seam alive (env.mjs), and this machine's
+    // shell exports the old ones — the suite must fence both or the operator's
+    // values leak into the "no host, no env" fallback assertion.
+    delete process.env.CCHUB_PUBLIC_URL
     delete process.env.FREILAUF_VPN_PORT
+    delete process.env.CCHUB_VPN_PORT
     setPublicHost('')
     try {
       gleich(publicBase(), 'https://127.0.0.1:8790', 'no host, no env: the local fallback with the code default port')
@@ -4595,7 +4614,9 @@ try {
       gleich(publicBase(), 'https://alt.internal:9999', 'whitespace is not a host')
     } finally {
       if (vorherUrl === undefined) delete process.env.FREILAUF_PUBLIC_URL; else process.env.FREILAUF_PUBLIC_URL = vorherUrl
+      if (vorherUrlAlt === undefined) delete process.env.CCHUB_PUBLIC_URL; else process.env.CCHUB_PUBLIC_URL = vorherUrlAlt
       if (vorherVpn === undefined) delete process.env.FREILAUF_VPN_PORT; else process.env.FREILAUF_VPN_PORT = vorherVpn
+      if (vorherVpnAlt === undefined) delete process.env.CCHUB_VPN_PORT; else process.env.CCHUB_VPN_PORT = vorherVpnAlt
       setPublicHost('')
     }
   })
@@ -4769,8 +4790,24 @@ try {
   })
 
   await pruefe('cleanupPrompt fills the live values into the template', () => {
-    const out = cleanupPrompt({ targetGb: 3, keepSessions: ['sess-1'], settings: { prompt: 'ziel={target_gb} keep={keep_line} url={sessions_url} th={threshold_gb}', thresholdGb: 5 } })
-    gleich(out, 'ziel=3 keep=Diese Sessions bleiben auf jeden Fall erhalten (auch wenn inaktiv) und dürfen NICHT beendet werden:\nsess-1 url=https://127.0.0.1:8790/sessions th=5', 'all placeholders filled')
+    // The public URL and the VPN port are env seams with BOTH names (env.mjs) —
+    // this machine's shell exports the old ones, and the assertion wants the
+    // code defaults.
+    const vorher = [process.env.FREILAUF_PUBLIC_URL, process.env.CCHUB_PUBLIC_URL,
+      process.env.FREILAUF_VPN_PORT, process.env.CCHUB_VPN_PORT]
+    delete process.env.FREILAUF_PUBLIC_URL
+    delete process.env.CCHUB_PUBLIC_URL
+    delete process.env.FREILAUF_VPN_PORT
+    delete process.env.CCHUB_VPN_PORT
+    try {
+      const out = cleanupPrompt({ targetGb: 3, keepSessions: ['sess-1'], settings: { prompt: 'ziel={target_gb} keep={keep_line} url={sessions_url} th={threshold_gb}', thresholdGb: 5 } })
+      gleich(out, 'ziel=3 keep=Diese Sessions bleiben auf jeden Fall erhalten (auch wenn inaktiv) und dürfen NICHT beendet werden:\nsess-1 url=https://127.0.0.1:8790/sessions th=5', 'all placeholders filled')
+    } finally {
+      if (vorher[0] !== undefined) process.env.FREILAUF_PUBLIC_URL = vorher[0]; else delete process.env.FREILAUF_PUBLIC_URL
+      if (vorher[1] !== undefined) process.env.CCHUB_PUBLIC_URL = vorher[1]; else delete process.env.CCHUB_PUBLIC_URL
+      if (vorher[2] !== undefined) process.env.FREILAUF_VPN_PORT = vorher[2]; else delete process.env.FREILAUF_VPN_PORT
+      if (vorher[3] !== undefined) process.env.CCHUB_VPN_PORT = vorher[3]; else delete process.env.CCHUB_VPN_PORT
+    }
     const noKeep = cleanupPrompt({ targetGb: 1, settings: { prompt: 'keep={keep_line}' } })
     gleich(noKeep, 'keep=Ohne Ausnahmen — was inaktiv ist, darf gehen, älteste zuerst.', 'no keep list = the default sentence')
   })

@@ -1584,18 +1584,25 @@ try {
     await pruefe('a message reaches the session of a finished run', async () => {
       const r = await formular(`/api/runs/${RN}/send`, { text: 'weiter geht es' })
       gleich(r.status, 200, 'accepted')
-      wahr(ereignisse(RN).includes('message_sent'), `recorded (has: ${ereignisse(RN).join(', ')})`)
+      // A message into a finished run is a follow-up COMMISSION now: recorded
+      // under its own name, and the run is clocked from this moment
+      // (followup_started, watchFollowUps) — the plain message_sent kind is
+      // for a run that is still going.
+      wahr(ereignisse(RN).includes('followup_started'), `recorded (has: ${ereignisse(RN).join(', ')})`)
+      wahr(!!lauf(RN).followup_since, 'and the commission is clocked')
       gleich(lauf(RN).status, 'done', 'and the run stays done')
     })
 
     await pruefe('"end run" on a finished run does NOT rewrite it to aborted', async () => {
       // The button is gone from the page, but the endpoint is reachable — and a
       // run that came through cleanly must not become a failed one because
-      // somebody closed its leftover session.
+      // somebody closed its leftover session. The open follow-up commission
+      // goes with the session: nothing can report for it any more.
       const r = await formular(`/api/runs/${RN}/kill`, {})
       gleich(r.status, 200, 'accepted')
       gleich(lauf(RN).status, 'done', 'still done')
       wahr(lauf(RN).tmux_closed_at !== null, 'only the session is marked closed')
+      gleich(lauf(RN).followup_since, null, 'and the follow-up commission is given up with the session')
     })
 
     await pruefe('without a session there is no write access left', async () => {
@@ -3917,6 +3924,80 @@ try {
     gleich(lauf(followed.id).status, 'done', 'the status stays')
     gleich(lauf(followed.id).help_text, 'Which of the two?', 'the question is stored')
     gleich(ereignisse(followed.id).filter(k => k === 'notified:help').length, 1, 'and sent')
+  })
+
+  // ---- 8c. follow-up commissions: the operator types more work into a finished run ----
+  await pruefe('a message into a finished run is a follow-up commission: the run displays as running again and is clocked', async () => {
+    const vor = await formular(`/api/runs/${followed.id}/send`, { text: 'Please also document the new file.' })
+    wahr(vor.ok, 'the send is accepted')
+    const r = lauf(followed.id)
+    wahr(!!r.followup_since, 'the commission is clocked from now')
+    gleich(r.status, 'done', 'the status still tells the truth about the first attempt')
+    const ev = ereignisse(followed.id)
+    enthaelt(ev.join(','), 'followup_started', 'recorded as a commission')
+    falsch(ev.includes('message_sent'), 'and not as a plain message — that kind is for live runs')
+    // The pages agree: the status word is "running" again, with the follow-up line.
+    const detail = await (await hol(`/runs/${followed.id}`)).text()
+    enthaelt(detail, 'status-chip">Running<', 'the detail page displays it as running')
+    enthaelt(detail, 'Follow-up work since', 'and says since when')
+    const laufend = await (await hol(`/?repo=${repoId}&status=running`)).text()
+    enthaelt(laufend, `/runs/${followed.id}`, 'the overview’s running filter shows the commissioned run')
+    enthaelt(laufend, 'Follow-up work since', 'with the follow-up line in the status cell')
+
+    // The watcher holds the follow-up to the run's expected duration, counting
+    // from the commission — the same clock a first attempt works against.
+    db.prepare(`UPDATE runs SET followup_since=datetime('now', '-36 minutes') WHERE id=?`).run(followed.id)
+    await watcherTick()
+    enthaelt(ereignisse(followed.id).join(','), 'anomaly:followup_soft_overrun', '80 % of the expected duration: yellow')
+    falsch(ereignisse(followed.id).includes('anomaly:followup_overrun'), 'but not yet red')
+    db.prepare(`UPDATE runs SET followup_since=datetime('now', '-46 minutes') WHERE id=?`).run(followed.id)
+    await watcherTick()
+    enthaelt(ereignisse(followed.id).join(','), 'anomaly:followup_overrun', 'past the expected duration without a report: red')
+    enthaelt(ereignisse(followed.id).join(','), 'notified:followup_overrun', 'and the operator hears it')
+    await watcherTick()
+    gleich(ereignisse(followed.id).filter(k => k === 'notified:followup_overrun').length, 1, 'the next pass does not page again')
+
+    // New instructions restart the clock — and retract the old overrun statement
+    // the same way a raised duration retracts one, so a genuine overrun of the
+    // new commission can page again.
+    await formular(`/api/runs/${followed.id}/send`, { text: 'And add tests, too.' })
+    falsch(ereignisse(followed.id).includes('anomaly:followup_overrun'), 'the new commission clears the old statement')
+    falsch(ereignisse(followed.id).includes('notified:followup_overrun'), 'and its notification flag with it')
+    wahr(!!lauf(followed.id).followup_since, 'and is clocked from now')
+
+    // The follow-up report ends the commission: clock stopped, statement gone.
+    const antwort = await sendReport(followed.id, { kind: 'done', text: 'Documented and tested, as asked.' })
+    wahr(antwort.ok, 'the report is accepted')
+    await warteAuf(() => lauf(followed.id).followup_open === 0 && lauf(followed.id).followups === 5,
+      { was: 'the follow-up is processed', timeoutMs: 30_000 })
+    gleich(lauf(followed.id).followup_since, null, 'the commission is answered: the clock stopped')
+    falsch(ereignisse(followed.id).includes('anomaly:followup_overrun'), 'no leftover statement')
+    gleich(lauf(followed.id).status, 'done', 'and the status is still the first attempt’s truth')
+  })
+
+  await pruefe('a follow-up whose agent is gone is not held to a deadline that can never be met', async () => {
+    // A dead pane can never report — holding the commission to its deadline
+    // would produce a misleading alarm after the run's expected duration. The
+    // watcher gives it up and says why. remain-on-exit keeps the SESSION alive
+    // while the process inside is dead, which is exactly the shape hermes
+    // leaves behind.
+    const sname = 'fl-followup-dead'
+    sessions.add(sname)
+    await sh('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', sname])
+    await sh('tmux', ['set-option', '-t', `=${sname}:`, 'remain-on-exit', 'on'])
+    await sh('tmux', ['send-keys', '-t', `=${sname}:`, 'exit', 'Enter'])
+    await warteAuf(async () => {
+      const r = await sh('tmux', ['display', '-p', '-t', `=${sname}:`, '#{pane_dead}'])
+      return r.ok && r.stdout.trim() === '1'
+    }, { was: 'the pane is dead', timeoutMs: 5000 })
+    const id = 'f0110ade-0000-4000-8000-000000000001'
+    db.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, tmux_session, started_at, followup_since)
+                VALUES(?, ?, 'done', 'hermes', 'p', 'keiner', 45, ?, datetime('now'), datetime('now'))`)
+      .run(id, repoId, sname)
+    await watcherTick()
+    gleich(lauf(id).followup_since, null, 'the commission is given up')
+    enthaelt(ereignisse(id).join(','), 'followup_agent_gone', 'and it is written down why')
+    db.prepare('DELETE FROM runs WHERE id=?').run(id)
   })
 
   // ---- 9. with merge_mode off nothing of this happens ----

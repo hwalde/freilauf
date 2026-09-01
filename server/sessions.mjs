@@ -495,6 +495,11 @@ export function reconcileClosedSession(runId, source = 'session') {
   refreshSessionMemoryAfterRun(runId)
   if (!['running', 'waiting_help'].includes(run.status)) {
     if (!run.tmux_closed_at) addEvent(runId, 'tmux_closed', { source })
+    // A session is the only way a follow-up can report — with it gone, an open
+    // follow-up commission (web.mjs /send) can never be answered. The run
+    // falls back to displaying as finished; an escalation below takes care of
+    // a follow-up that was already in the gate.
+    if (run.followup_since) db.prepare('UPDATE runs SET followup_since=NULL WHERE id=?').run(runId)
     // A finished run whose FOLLOW-UP is in the finish gate (reports.mjs): its
     // agent is gone mid-report, and that is the same escalation as for a first
     // report — not a silent wait for the gate's deadline.

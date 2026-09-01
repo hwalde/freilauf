@@ -246,6 +246,12 @@ addColumn('runs', 'resolves_run_id', 'TEXT')     // set on a conflict run: the r
 addColumn('runs', 'followups', 'INTEGER NOT NULL DEFAULT 0')      // follow-up reports accepted so far
 addColumn('runs', 'followup_md', 'TEXT')                           // the latest follow-up's own text
 addColumn('runs', 'followup_open', 'INTEGER NOT NULL DEFAULT 0')  // 1 while a follow-up is in the gate / being merged
+// Follow-up COMMISSION: set the moment a human sends instructions into a finished
+// run's session (web.mjs /send), cleared when the follow-up reports, fails or its
+// session ends. While it stands the run displays as "running" again (pages.mjs),
+// and the watcher holds the run to its expected duration from this moment
+// (watcher.mjs watchFollowUps) — a follow-up that never reports is captured.
+addColumn('runs', 'followup_since', 'TEXT')
 // ---- two-part reports: the short version is the message, the detail is the document ----
 // The agent writes a SHORT report (what it was about + the result, compact and in
 // simple language — that is what the notification text carries) and a DETAILED

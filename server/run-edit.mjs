@@ -62,6 +62,13 @@ export function runEditAllowed(run) {
   if (['running', 'waiting_help'].includes(run.status)) {
     return { duration: true, prompt: false, repo: false, startTime: false, branch: false }
   }
+  // A finished run with an open follow-up commission is working again — the
+  // watcher's overrun thresholds read `expected_minutes` live for it exactly as
+  // for a running run, so the same argument as above applies: raising it takes
+  // effect at once and retracts the "longer than expected" statement (editRun).
+  if (['done', 'failed', 'aborted'].includes(run.status) && (run.followup_since || run.followup_open)) {
+    return { duration: true, prompt: false, repo: false, startTime: false, branch: false }
+  }
   return { duration: false, prompt: false, repo: false, startTime: false, branch: false }
 }
 
@@ -231,7 +238,12 @@ export async function editRun(runId, {
     // duration pages once again instead of staying silent behind the old flag.
     // Both names of the flag: what is written today, and what a run from before
     // the notification rebuild carries (see notifiedFlags in reports.mjs).
-    clearAnomalies(runId, ['anomaly:soft_overrun', 'anomaly:overrun', ...notifiedFlags('overrun')])
+    // The follow-up kinds belong here for the same reason: the expected
+    // duration of an open follow-up commission is read live too, and a genuine
+    // overrun of the NEW duration must be able to page again.
+    clearAnomalies(runId, ['anomaly:soft_overrun', 'anomaly:overrun',
+      'anomaly:followup_soft_overrun', 'anomaly:followup_overrun',
+      ...notifiedFlags('overrun'), ...notifiedFlags('followup_overrun')])
   }
 
   addEvent(runId, 'edited', { fields: geaendert, ...(geaendert.includes('repo') ? { repo_id: Number(repoId) } : {}) })

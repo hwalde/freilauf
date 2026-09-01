@@ -3,7 +3,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import db, { getRepo, getRun, setSetting, addEvent, announceRun, allSettings } from './db.mjs'
-import { handleReport } from './reports.mjs'
+import { handleReport, clearAnomalies, notifiedFlags } from './reports.mjs'
 import { modelList, orEndpoints, standVon, effortOptionen } from './models.mjs'
 import { providersForHarness, listCodingAgents } from './coding-agents.mjs'
 import { detectInstalled } from './harnesses/index.mjs'
@@ -522,6 +522,20 @@ async function api(req, res, url) {
                   finish_started_at=CASE WHEN finish_state IS NULL THEN finish_started_at
                                          ELSE datetime('now') END WHERE id=?`).run(text, run.id)
       addEvent(run.id, 'help_answered', { text: text.slice(0, 500) })
+    } else if (['done', 'failed', 'aborted'].includes(run.status)) {
+      // A message into a FINISHED run's session is a follow-up COMMISSION: the
+      // operator read the report and asked for more. The run's status keeps
+      // telling the truth about the first attempt, but from this moment it
+      // displays as running again (pages.mjs), and the watcher holds it to its
+      // expected duration counting from NOW — a follow-up that works on and on
+      // without reporting is captured, exactly like a first attempt (watcher.mjs
+      // watchFollowUps). Every new instruction restarts the clock, so the old
+      // "longer than expected" statement of a previous commission is retracted
+      // the same way a raised duration retracts it (run-edit.mjs).
+      db.prepare(`UPDATE runs SET followup_since=datetime('now') WHERE id=?`).run(run.id)
+      addEvent(run.id, 'followup_started', { text: text.slice(0, 500) })
+      clearAnomalies(run.id, ['anomaly:followup_soft_overrun', 'anomaly:followup_overrun',
+        ...notifiedFlags('followup_overrun')])
     } else {
       addEvent(run.id, 'message_sent', { text: text.slice(0, 500) })
     }
@@ -561,7 +575,9 @@ async function api(req, res, url) {
     // terminal statuses count: a 'scheduled' or 'deferred' run is cancelled
     // through this very endpoint, and cancelling it IS setting it to 'aborted'.
     if (['done', 'failed', 'aborted'].includes(run?.status ?? '')) {
-      db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(m[1])
+      // With the session goes the way a follow-up could report: an open
+      // follow-up commission (web.mjs /send) is given up with it.
+      db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')), followup_since=NULL WHERE id=?`).run(m[1])
       if (run && !run.tmux_closed_at) addEvent(m[1], 'tmux_closed', { source: 'user' })
       return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
     }
@@ -589,7 +605,7 @@ async function api(req, res, url) {
     // gone with it (server/goal.mjs).
     // …and the follow-up reports of the old attempt go with the old report.
     db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL, archived_at=NULL,
-                goal_sent_at=NULL, followups=0, followup_md=NULL, followup_open=0 WHERE id=?`).run(m[1])
+                goal_sent_at=NULL, followups=0, followup_md=NULL, followup_open=0, followup_since=NULL WHERE id=?`).run(m[1])
     // …and so does the integration: everything the finish gate and the
     // integrator wrote about the previous attempt is gone.
     resetIntegration(m[1])

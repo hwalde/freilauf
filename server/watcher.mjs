@@ -5,8 +5,8 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, openSyn
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import db, { getRepo, addEvent, allSettings } from './db.mjs'
-import { RUNS_DIR, sh } from './util.mjs'
-import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd } from './reports.mjs'
+import { RUNS_DIR, sh, parseDbUtc } from './util.mjs'
+import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd, followUpHeader } from './reports.mjs'
 import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
 import { deliverPendingGoals } from './goal.mjs'
 import { claudeQuota, sevenForRun, quotaFullWindow } from './quota.mjs'
@@ -73,6 +73,10 @@ export async function tick() {
   // cost delta written at a run's end. Both read claudeQuota() synchronously —
   // this is what keeps its live half from going stale under them. Never throws.
   await refreshClaudeLimits()
+  // Follow-up commissions: a finished run the operator typed new work into is
+  // held to its expected duration from the moment of the commission, like any
+  // first attempt (see below).
+  try { await watchFollowUps() } catch (e) { console.error('[watcher]', e.message) }
   await vorfaelleBewerten()
   await vorfaelleMeldenFaellig()
   await providerPuls()
@@ -243,6 +247,58 @@ async function watchRun(run) {
     }
   }
 
+}
+
+// ---------- follow-up commissions ----------
+/**
+ * A finished run the operator typed new work into (`followup_since`, set by the
+ * send route) is working again — and from the moment of the commission it is
+ * held to the same expectation as a first attempt: `expected_minutes`, soft
+ * overrun at 80 %, overrun with a notification at 100 %. Before this, a
+ * follow-up that worked on and on without reporting was invisible: watchRun()
+ * only ever sees running runs, and nothing else clocked the follow-up.
+ *
+ * The clock ends when the follow-up reports (reports.mjs, endFollowUpCommission),
+ * when its session is closed (reconcileClosedSession) — or here, when the pane
+ * turns out dead: a process that has exited can never report, so waiting out
+ * the deadline would only produce a misleading alarm. The event says so, and
+ * the run falls back to displaying as finished.
+ */
+async function watchFollowUps() {
+  const rows = db.prepare(`SELECT * FROM runs WHERE followup_since IS NOT NULL
+    AND status IN ('done','failed','aborted')`).all()
+  for (const run of rows) {
+    // The session was closed on purpose (kill route, retention, archive):
+    // nothing can report any more. reconcileClosedSession usually cleared the
+    // flag already — this is the net under it.
+    if (run.tmux_closed_at) {
+      db.prepare('UPDATE runs SET followup_since=NULL WHERE id=?').run(run.id)
+      continue
+    }
+    if (run.tmux_session) {
+      // The colon target: without it a live session can be missed (AGENTS.md).
+      const r = await sh('tmux', ['display', '-p', '-t', `=${run.tmux_session}:`, '#{pane_dead}'])
+      // No answer: tmux said nothing. The closeOldSessions pass owns the "is
+      // the session still there" question and its consequences — wait.
+      if (!r.ok || !r.stdout.trim()) continue
+      if (r.stdout.trim() === '1') {
+        db.prepare('UPDATE runs SET followup_since=NULL WHERE id=?').run(run.id)
+        addEvent(run.id, 'followup_agent_gone')
+        continue
+      }
+    }
+    // A follow-up that HAS reported is in the gate or being merged — its
+    // deadline is the finish gate's (`finish_started_at`), not this clock.
+    if (run.finish_state || run.followup_open) continue
+    const expectedMs = run.expected_minutes * 60_000
+    const elapsed = Date.now() - parseDbUtc(run.followup_since)
+    if (elapsed > 0.8 * expectedMs) addEventOnce(run.id, 'anomaly:followup_soft_overrun')
+    if (elapsed > expectedMs) {
+      addEventOnce(run.id, 'anomaly:followup_overrun')
+      await notifyRun(run.id, 'followup_overrun',
+        `${followUpHeader(run, 'FOLLOW-UP OVERRUN')}\n\n🔴 Follow-up work exceeds the expected duration (${run.expected_minutes} min) without a follow-up report.`)
+    }
+  }
 }
 
 /** Path of the Claude transcript: known in advance thanks to --session-id (planning 7.1). */
