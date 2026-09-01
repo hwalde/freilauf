@@ -246,6 +246,14 @@ addColumn('runs', 'resolves_run_id', 'TEXT')     // set on a conflict run: the r
 addColumn('runs', 'followups', 'INTEGER NOT NULL DEFAULT 0')      // follow-up reports accepted so far
 addColumn('runs', 'followup_md', 'TEXT')                           // the latest follow-up's own text
 addColumn('runs', 'followup_open', 'INTEGER NOT NULL DEFAULT 0')  // 1 while a follow-up is in the gate / being merged
+// ---- two-part reports: the short version is the message, the detail is the document ----
+// The agent writes a SHORT report (what it was about + the result, compact and in
+// simple language — that is what the notification text carries) and a DETAILED
+// report (the full write-up, also in simple language — that is what travels as
+// the attached document). Both optional: a run without a detail behaves exactly
+// as before, and the document then carries the full report again.
+addColumn('runs', 'report_detail_md', 'TEXT')      // the first report's detailed version
+addColumn('runs', 'followup_detail_md', 'TEXT')    // the latest follow-up's detailed version
 // Notifications per run: the checkbox under the terminal. 0 silences every
 // message ABOUT this run (reports, alarms, incidents), on every configured
 // channel — nothing else changes: the integration, the flows and the events

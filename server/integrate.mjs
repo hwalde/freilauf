@@ -682,7 +682,7 @@ async function closeKept(runId, repo, mergeLine) {
   addEvent(runId, 'done')
   const run = getRun(runId)
   await notifyRun(runId, 'done', doneText(run, run.report_md, mergeLine),
-    { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: run.report_md ?? '' })
+    { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: run.report_detail_md ?? run.report_md ?? '' })
   import('./flows/triggers.mjs').then(m => m.flowsTick()).catch(e => console.error('[flows]', e.message))
 }
 
@@ -976,7 +976,7 @@ async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = nu
     await completeFollowUp(runId, { mergeLine: line, merged: true })
   } else {
     await notifyRun(runId, 'done', doneText(run, run.report_md, line),
-      { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: run.report_md ?? '' })
+      { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: run.report_detail_md ?? run.report_md ?? '' })
   }
 
   // A conflict run works FOR another run: the result counts for both, and the
@@ -998,7 +998,7 @@ async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = nu
         await completeFollowUp(orig.id, { mergeLine: origLine, merged: true })
       } else {
         await notifyRun(orig.id, 'done', doneText(fresh, fresh.report_md, origLine),
-          { fileName: `report-${orig.id.slice(0, 8)}.md`, fileContent: fresh.report_md ?? '' })
+          { fileName: `report-${orig.id.slice(0, 8)}.md`, fileContent: fresh.report_detail_md ?? fresh.report_md ?? '' })
       }
     }
   }
@@ -1396,11 +1396,12 @@ function checkTail(runId) {
   try { return JSON.parse(ev?.payload ?? '{}').tail ?? '' } catch { return '' }
 }
 
-/** The original's report as context — capped, and saying so where it was cut. */
+/** The original's report as context — capped, and saying so where it was cut. The DETAILED version is the useful one for a resolver; the short report falls back. */
 export function truncateReport(run, max = 20 * 1024) {
-  const text = String(run.report_md ?? '')
+  const text = String(run.report_detail_md ?? run.report_md ?? '')
   if (text.length <= max) return text || '(no report)'
-  return text.slice(0, max) + `\n[… truncated by Freilauf, full report: ${join(RUNS_DIR, run.id, 'report.md')}]`
+  const file = run.report_detail_md ? 'report-detail.md' : 'report.md'
+  return text.slice(0, max) + `\n[… truncated by Freilauf, full report: ${join(RUNS_DIR, run.id, file)}]`
 }
 
 /**

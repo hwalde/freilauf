@@ -28,13 +28,14 @@ const { subscriptionUsage } = await import('./usage.mjs')
 const { providerBalances } = await import('./balances.mjs')
 const { sessionMemory } = await import('./sessions.mjs')
 const { setLanguage } = await import('./i18n.mjs')
-const { setTimezone } = await import('./util.mjs')
+const { setTimezone, setPublicHost } = await import('./util.mjs')
 const { scanSystem } = await import('./plugins/discovery.mjs')
 
 // UI language (default English) and, on a fresh installation, the optional
 // coding agent seed file (installed e.g. by a private setup repo).
 setLanguage(getSetting('ui_language') ?? 'en')
 setTimezone(getSetting('ui_timezone') ?? '')
+setPublicHost(getSetting('public_host') ?? '')
 seedIfEmpty()
 
 const PORT = Number(env('LOCAL_PORT') ?? 8791)

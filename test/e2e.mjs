@@ -4236,6 +4236,7 @@ export default {
     appendFileSync(file, JSON.stringify({
       kind: message.kind, text: message.text, url: message.url, runId: message.runId,
       attachment: message.attachment ? message.attachment.fileName : null,
+      attachmentContent: message.attachment ? message.attachment.content : null,
       linkLabel: message.linkLabel,
     }) + '\\n')
     return { ok: true }
@@ -4335,6 +4336,62 @@ export default {
     wahr(String(m.attachment ?? '').endsWith('.md'), 'and the full report travels as an attachment')
     gleich(JSON.parse(db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='notified:done'`)
       .get(j.runId).payload).delivered, true, 'the flag records the delivery')
+  })
+
+  await pruefe('a report with a DETAILED version: the text is the short report, the document is the detail', async () => {
+    const vorher = gemeldet().length
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E: two-part report', branch_mode: 'keiner', expected_minutes: '5' })
+    await sessionMerken(j.runId)
+    await warteAuf(() => lauf(j.runId).status === 'running', { was: 'the run is up' })
+    await sendReport(j.runId, {
+      kind: 'done',
+      text: 'Kurz: Frage beantwortet, nichts zu mergen.',
+      detail: 'Ausfuehrlich: alle Details zur Antwort, Schritt fuer Schritt.',
+    })
+    await warteAuf(() => gemeldet().length > vorher, { was: 'the channel heard about the run', timeoutMs: 20_000 })
+    const m = gemeldet().at(-1)
+    enthaelt(m.text, 'Kurz: Frage beantwortet', 'the TEXT is the short report')
+    falsch(m.text.includes('Schritt fuer Schritt'), 'the detail is not duplicated into the text')
+    gleich(m.attachmentContent, 'Ausfuehrlich: alle Details zur Antwort, Schritt fuer Schritt.',
+      'the DOCUMENT is the detailed report')
+    gleich(lauf(j.runId).report_detail_md, 'Ausfuehrlich: alle Details zur Antwort, Schritt fuer Schritt.',
+      'and it is stored on the run')
+    enthaelt(m.text, `/runs/${j.runId}`, 'the message carries the run link')
+  })
+
+  await pruefe('fl-report --detail hands the detailed report to the hub', async () => {
+    const vorher = gemeldet().length
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E: fl-report detail', branch_mode: 'keiner', expected_minutes: '5' })
+    await sessionMerken(j.runId)
+    await warteAuf(() => lauf(j.runId).status === 'running', { was: 'the run is up' })
+    const kurz = join(SB, 'runs', j.runId, 'report.md')
+    const detail = join(SB, 'runs', j.runId, 'report-detail.md')
+    writeFileSync(kurz, 'Kurztext von fl-report')
+    writeFileSync(detail, 'Detailtext von fl-report')
+    const r = await flReport(j.runId, ['done', '--file', kurz, '--detail', detail])
+    wahr(r.ok, 'the report goes through')
+    await warteAuf(() => gemeldet().length > vorher, { was: 'the channel heard about the run', timeoutMs: 20_000 })
+    const m = gemeldet().at(-1)
+    gleich(m.runId, j.runId, 'and which run')
+    enthaelt(m.text, 'Kurztext von fl-report', 'the short file is the message text')
+    gleich(m.attachmentContent, 'Detailtext von fl-report', 'the detail file is the document')
+  })
+
+  await pruefe('a replayed inbox report is not sent a second time', async () => {
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E: replay dedupe', branch_mode: 'keiner', expected_minutes: '5' })
+    await sessionMerken(j.runId)
+    await warteAuf(() => lauf(j.runId).status === 'running', { was: 'the run is up' })
+    const body = { kind: 'done', text: 'same report, once' }
+    await sendReport(j.runId, body)
+    await warteAuf(() => lauf(j.runId).status === 'done', { was: 'the run is done' })
+    gleich(gemeldet().filter(x => x.runId === j.runId).length, 1, 'one message for the report')
+    // fl-report lost the hub's answer and wrote the SAME payload to the inbox;
+    // the watcher replays it — the identical text must not ring a second time.
+    writeFileSync(join(SB, 'runs', j.runId, 'inbox.jsonl'), JSON.stringify(body) + '\n')
+    await watcherTick()
+    gleich(gemeldet().filter(x => x.runId === j.runId).length, 1, 'the replayed line does not ring again')
+    gleich(lauf(j.runId).followups, 0, 'and it was not mistaken for a follow-up')
+    gleich(readFileSync(join(SB, 'runs', j.runId, 'inbox.jsonl'), 'utf8'), '', 'the processed line is cleared')
   })
 
   await pruefe('the notify flow step sends through the configured channels — under its new name and its old one', async () => {

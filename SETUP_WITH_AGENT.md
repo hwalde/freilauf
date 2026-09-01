@@ -33,14 +33,21 @@ Six facts and you can reason about the whole system:
    An "agent" is just a run definition that also has a name and a schedule.
    This lives in `server/run-def.mjs`, and there is exactly one way from a
    definition to a running run: `startRun()` in `server/scheduler.mjs`.
-3. **The agent reports back with `bin/fl-report`** (`done`, `failed`, `help`,
-   `progress`, `branch`, `pr`). The hub also watches from the outside — tmux
-   state, logs, transcripts, hooks — because an agent that hit a rate limit
-   cannot report anything. A run that is already over can report **again**:
-   the operator types follow-up work into the agent's session, the agent runs
-   `fl-report done` once more, and the hub treats it as a *follow-up report* —
-   same checks, same merge, same flows, announced as "FOLLOW-UP REPORT #n". The
-   prompt tells the agent so (`FOLLOWUP_RULES` in `server/runner.mjs`).
+ 3. **The agent reports back with `bin/fl-report`** (`done`, `failed`, `help`,
+    `progress`, `branch`, `pr`). The hub also watches from the outside — tmux
+    state, logs, transcripts, hooks — because an agent that hit a rate limit
+    cannot report anything. A run that is already over can report **again**:
+    the operator types follow-up work into the agent's session, the agent runs
+    `fl-report done` once more, and the hub treats it as a *follow-up report* —
+    same checks, same merge, same flows, announced as "FOLLOW-UP REPORT #n". The
+    prompt tells the agent so (`FOLLOWUP_RULES` in `server/runner.mjs`).
+ 4. **A report has a short and a detailed half.** The prompt asks the agent for
+    two files: a *short* report (what the task was and the result, compact, in
+    simple language) that becomes the notification **text**, and a *detailed*
+    report (the full write-up, also in simple language) that travels as the
+    attached **document** (`fl-report done --file … --detail …`). Both optional:
+    a run without a detail behaves exactly as before, and the document then
+    carries the full report again.
 4. **The hub does the merging, not the agent** (when a repo is set to
    `merge_mode = hub`). A run is `done` when its work is on the base branch.
    If the worktree is dirty or the merge conflicts, the still-living agent is
@@ -287,6 +294,7 @@ tooling. The seams that were designed to be pulled on:
 | have the hub's own small questions answered by something else | Settings → the source picker on each of Run titles / Incident check / Worktree extras: any plugin declaring `llm`, including a **coding agent on your existing subscription** (marked, because a session per question is slower and dearer) |
 | give a provider a key without touching the environment | Settings → **Plugins**: name a different environment variable, or store the value |
 | change what every agent is told | Settings → **Platform prompt suffix** (added, never replacing the platform rules), or a **repo prompt** per repository |
+| point the notification links at your own hostname | Settings → **Notification links**: a `Public hostname` (the name that matches your certificate), and the port follows the live VPN port automatically. Without one, `FREILAUF_PUBLIC_URL` (a full URL, in `~/.config/freilauf/env`) or the local address answers — `publicBase()` in `server/util.mjs` |
 | give agents an opt-in capability | drop a folder with a `SKILL.md` into `~/agents/zusaetze/` — it appears as a checkbox in the run forms. Deliberately *not* `.claude/skills`, so nothing loads automatically |
 | do something after a run finishes or a merge lands | **no-code flows** — a graphical designer, no code needed: message running agents, start follow-up runs and wait, extract data from a report via LLM, branch, loop, notify, HTTP, shell command → [`server/flows/AGENTS.md`](server/flows/AGENTS.md) |
 | change when a run is allowed to start | Settings → **Budget gates** — the fieldset is generated from whichever plugins declare a `gate`, so a new one appears there by itself; else `repos.max_parallel` — `server/scheduler.mjs`; a deferred run can be started anyway from its detail page |
