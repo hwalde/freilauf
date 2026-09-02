@@ -56,7 +56,7 @@
 // | mode | when | what it looks like |
 // |---|---|---|
 // | **locked** | the wizard is what `GET /` sends a browser to, and it has never been walked to the end | its own minimal shell: brand, step counter, content. No nav, no repo switcher, no Quick Run, no banners. No "skip" link, no "do not show this again" — except the one deliberate exit on step 1 and the checkbox on the last step |
-// | **unlocked** | anything else — completed, or the operator has already said "stop showing me this", or skipped for this session | an ordinary page through `layout()`: full navigation, a way back to the hub, the skip link and the checkbox on every step |
+// | **unlocked** | anything else — completed, or the operator has already said "stop showing me this", or skipped for this session | an ordinary page through `layout()`: full navigation, the checkbox on every step, and next to the primary button the one way out — "Save and back to Freilauf" |
 //
 // `welcomeLocked()` is that one line: `shouldShowWelcome(req) && !welcomeCompleted()`.
 // Which means lock-in and forced redirect are the SAME condition — the hub never
@@ -94,6 +94,31 @@
 // spelled out. Not a link in a row of links: leaving is a decision, and the
 // price of it — a hub that cannot start a run yet — is named where it is made.
 // From step 2 on there is Back, and Back walks to step 1.
+//
+// ---------------------------------------------------------------------------
+// **4. And leaving an UNLOCKED wizard threw the checkbox away.**
+// ---------------------------------------------------------------------------
+//
+// A returning operator's gesture is one gesture: "I have done this — stop
+// greeting me." So they tick "Do not show this again" and then look for the
+// button that leaves. Every candidate was wrong:
+//
+//   - the primary said "Start the setup", which is not what somebody who has
+//     finished it is doing, so they did not press it;
+//   - "Skip for now" and "Back to Freilauf" were `<a href>` LINKS in the footer,
+//     outside the form the box lives in — a click on either navigated away and
+//     the ticked box was never submitted;
+//   - "Back to Freilauf" pointed at `/`, which redirects a browser straight back
+//     to `/welcome` while `welcome_hide` is unset. The one link that promised
+//     the hub delivered the wizard again.
+//
+// Three shapes, one outcome: the wizard came back, having been told twice not
+// to. The rule now is that **on an unlocked page every way off the page is a
+// submit of the form the checkbox is in** — `primary()` renders the exit as a
+// `<button name="exit">` next to the primary one, `stepFoot()` is the step
+// counter and nothing else, and `afterStep()` saves, marks the session and
+// redirects home. The banner's own button is the single remaining link, and it
+// points at `?welcome=skip` so it cannot bounce either.
 import { escapeHtml as e, fmtDateTime } from './util.mjs'
 import { getSetting, setSetting } from './db.mjs'
 import { redirect } from './web-helpers.mjs'
@@ -262,27 +287,40 @@ function applyHide(b) {
   if (Object.hasOwn(b, WELCOME_HIDE)) setSetting(WELCOME_HIDE, b[WELCOME_HIDE] === '1' ? '1' : '0')
 }
 
-/** The primary button — it SAVES and it ADVANCES, and it is labelled as both. */
+/**
+ * The buttons under a step: the primary one, the way out, and Back.
+ *
+ * The primary SAVES and ADVANCES, and it is labelled as both.
+ *
+ * **The way out is a submit, never a link** — and that is the fourth finding.
+ * On an unlocked page the "do not show this again" box stands in this very
+ * form, so a returning operator's whole gesture is: tick the box, then leave.
+ * With the exit as an `<a href>` that click threw the box away and the wizard
+ * greeted them again on the next page load, which is precisely what they had
+ * just asked it to stop doing. A `<button name="exit">` submits the form the
+ * box is in, so leaving cannot lose the decision made next to it.
+ *
+ * Not on the last step: its primary button already leaves, and two buttons
+ * going to the same place is the "which one do I press" complaint again.
+ */
 function primary(label, ctx, step) {
   const back = step > 1
     ? `<a class="btn ghost" href="/welcome?step=${step - 1}">${e(t('welcome.back'))}</a>` : ''
-  return `<div class="btn-row"><button>${e(label)}</button>${back}</div>`
+  const exit = !ctx.locked && step < STEPS
+    ? `<button class="ghost" name="exit" value="1">${e(t('welcome.save_exit'))}</button>` : ''
+  return `<div class="btn-row"><button>${e(label)}</button>${exit}${back}</div>`
 }
 
 /**
- * The footer under a step: where the reader stands, and — on an unlocked page —
- * the ordinary ways off it.
+ * The footer under a step: where the reader stands.
  *
- * The step counter is the only thing a locked step gets. The skip link and the
- * link back into the hub exist only where the wizard is not the initial setup
- * any more; while it is, the one exit stands on step 1 and says what it costs.
+ * It used to carry the two ways off the page as links — "Skip for now" and
+ * "Back to Freilauf" — and both of them dropped the checkbox above them (see
+ * `primary`). The exits are submit buttons in the form now, so the footer is
+ * the step counter and nothing else, in both modes.
  */
-function stepFoot(ctx, step) {
-  if (ctx.locked) return `<p class="dim">${e(t('welcome.step_of', { n: step, total: STEPS }))}</p>`
-  return `<div class="btn-row welcome-nav">
-    <a class="ghost" href="${SKIP_HREF}">${e(t('welcome.skip'))}</a>
-    <a class="ghost" href="${HOME}">${e(t('welcome.back_to_hub'))}</a>
-    <span class="dim">${e(t('welcome.step_of', { n: step, total: STEPS }))}</span></div>`
+function stepFoot(step) {
+  return `<p class="dim">${e(t('welcome.step_of', { n: step, total: STEPS }))}</p>`
 }
 
 /** The pointer this whole wizard exists to make: hand the setup to an agent. */
@@ -309,10 +347,19 @@ function leaveCard() {
   </div>`
 }
 
-/** The note an unlocked visitor gets: this is a page, not a cage. */
+/**
+ * The note an unlocked visitor gets: this is a page, not a cage.
+ *
+ * Its button goes to `SKIP_HREF` rather than `HOME`, because `HOME` is a lie
+ * here: an operator who finished the setup but never ticked the box is sent
+ * back to `/welcome` by `GET /` the moment they get there, so the one link that
+ * says "back to Freilauf" bounced straight into the page it left. `?welcome=skip`
+ * marks the browser session and lands on the overview. The permanent answer is
+ * the checkbox below, and the button next to it saves it.
+ */
 function revisitNote() {
   return `<div class="banner other-repo">${e(t('welcome.revisit_note'))}
-    <a class="btn" href="${HOME}">${e(t('welcome.back_to_hub'))}</a></div>`
+    <a class="btn" href="${SKIP_HREF}">${e(t('welcome.back_to_hub'))}</a></div>`
 }
 
 // ---------------------------------------------------------------------------
@@ -401,10 +448,14 @@ function step1(ctx) {
     ${setupDocCard()}
     <form method="post" action="/welcome/hello" class="form-grid">
       ${hideField(ctx, 1)}
-      ${primary(t('welcome.start_btn'), ctx, 1)}
+      ${/* "Start the setup" is what a first walkthrough is doing; somebody who
+            has been through it is not starting anything, and a button that says
+            so is one the reader cannot press — which leaves them looking for a
+            different one and losing the checkbox on the way. */''}
+      ${primary(t(ctx.locked ? 'welcome.start_btn' : 'welcome.revisit_btn'), ctx, 1)}
     </form>
     ${ctx.locked ? leaveCard() : ''}
-    ${stepFoot(ctx, 1)}`
+    ${stepFoot(1)}`
 }
 
 // ---------------------------------------------------------------------------
@@ -489,7 +540,7 @@ async function step2(ctx) {
         ${primary(t('welcome.save_next'), ctx, 2)}
       </form>
     </div>
-    ${stepFoot(ctx, 2)}`
+    ${stepFoot(2)}`
 }
 
 // ---------------------------------------------------------------------------
@@ -577,7 +628,7 @@ function step3(ctx, url) {
           ${primary(t('welcome.save_next'), ctx, 3)}
         </form>
       </div>
-      ${stepFoot(ctx, 3)}`
+      ${stepFoot(3)}`
   }
   // Which provider is pre-selected is a question about the URL and about what is
   // already configured — never about the client. Picking one is a radio inside
@@ -623,7 +674,7 @@ function step3(ctx, url) {
       ${hideField(ctx, 3)}
       ${primary(t('welcome.save_next'), ctx, 3)}
     </form>
-    ${stepFoot(ctx, 3)}`
+    ${stepFoot(3)}`
 }
 
 // ---------------------------------------------------------------------------
@@ -655,7 +706,7 @@ function step4(ctx) {
           ${primary(t('welcome.save_next'), ctx, 4)}
         </form>
       </div>
-      ${stepFoot(ctx, 4)}`
+      ${stepFoot(4)}`
   }
   const known = new Set(sources.map(s => s.id))
   const stored = LLM_SOURCE_KEYS.map(k => (getSetting(k) ?? '').trim() || defaultSource())
@@ -699,7 +750,7 @@ function step4(ctx) {
         ${primary(t('welcome.save_next'), ctx, 4)}
       </form>
     </div>
-    ${stepFoot(ctx, 4)}`
+    ${stepFoot(4)}`
 }
 
 // ---------------------------------------------------------------------------
@@ -725,7 +776,7 @@ function step5(ctx) {
       ${hideField(ctx, 5)}
       ${primary(t('welcome.finish_btn'), ctx, 5)}
     </form>
-    ${stepFoot(ctx, 5)}`
+    ${stepFoot(5)}`
 }
 
 // ---------------------------------------------------------------------------
@@ -739,6 +790,15 @@ export async function pageWelcome(req, res, url) {
   const raw = Number(url?.searchParams?.get('step') ?? 1)
   const step = Number.isInteger(raw) && raw >= 1 && raw <= STEPS ? raw : 1
   const ctx = { locked: welcomeLocked(req) }
+  // Seeing the wizard as an ORDINARY page is itself the "not now" answer, and
+  // saying so here is what makes every other way off it work. An unlocked page
+  // is drawn inside `layout()`, so it carries the full navigation — and "Overview"
+  // points at `/`, which sends a browser straight back to `/welcome` while
+  // `welcome_hide` is unset. Rebuilding the wizard's own exits would have left
+  // that loop standing one link to the left. Harmless where the mark is already
+  // there, and never set while the reader is locked in: there, being sent back
+  // is the point.
+  if (!ctx.locked) markWelcomeSkipped(res)
   const body = step === 1 ? step1(ctx)
     : step === 2 ? await step2(ctx)
       : step === 3 ? step3(ctx, url)
@@ -757,10 +817,29 @@ export async function pageWelcome(req, res, url) {
 
 const to = (res, step) => redirect(res, `/welcome?step=${step}`)
 
+/**
+ * Where a submitted step goes: on to the next one, or out into the hub.
+ *
+ * `exit` is the way-out button of an unlocked step (see `primary`). It is a
+ * submit of the step's own form on purpose, so `applyHide()` has already run by
+ * the time this decides anything — leaving cannot lose the checkbox that stands
+ * next to the button.
+ *
+ * And leaving MARKS THE BROWSER SESSION, whether the box was ticked or not.
+ * Without that, an operator who left the box alone would be sent right back
+ * here by `GET /`, which is the loop this whole exit exists to end: they came
+ * to say "not this again" and the page reappeared anyway.
+ */
+function afterStep(res, b, step) {
+  if (b.exit === '1') { markWelcomeSkipped(res); return redirect(res, HOME) }
+  return to(res, step)
+}
+
 /** Step 1 → 2. It stores nothing but the checkbox. */
 export async function welcomeHello(req, res, url, formBody) {
-  applyHide(await formBody())
-  to(res, 2)
+  const b = await formBody()
+  applyHide(b)
+  afterStep(res, b, 2)
 }
 
 /** "Scan again" — re-read the machine and come back to step 2. */
@@ -806,7 +885,7 @@ export async function welcomeAgents(req, res, url, formBody) {
   try {
     for (const row of open) answerDiscovery(row.id, wanted.has(row.plugin_id) ? 'added' : 'dismissed')
   } catch (err) { console.warn('[welcome] discovery answer failed:', err.message) }
-  to(res, 3)
+  afterStep(res, b, 3)
 }
 
 /**
@@ -826,7 +905,7 @@ export async function welcomeProvider(req, res, url, formBody) {
   const b = await formBody()
   applyHide(b)
   const id = String(b.id ?? '').trim()
-  if (!id) return to(res, 4)
+  if (!id) return afterStep(res, b, 4)
   const plugin = getPlugin(id)
   if (!plugin || pluginKind(id) !== 'provider') {
     return problemPage(req, res, t('welcome.title'), [t('welcome.problem_unknown', { id })], '/welcome?step=3')
@@ -840,7 +919,7 @@ export async function welcomeProvider(req, res, url, formBody) {
   }
   // Setting a provider up here IS the answer to the scan's suggestion about it.
   try { answerDiscovery(`provider:${id}`, 'added') } catch { /* a finding is a nicety, never a failure */ }
-  to(res, 4)
+  afterStep(res, b, 4)
 }
 
 /**
@@ -871,7 +950,7 @@ export async function welcomeLlm(req, res, url, formBody) {
     const v = String(chosen[i] ?? '').trim()
     if (v) setSetting(key, v)
   })
-  to(res, 5)
+  afterStep(res, b, 5)
 }
 
 /**

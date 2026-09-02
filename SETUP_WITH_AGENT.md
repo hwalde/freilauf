@@ -194,9 +194,13 @@ The hub starts empty on purpose, and the first thing a browser sees says so:
 0. **The Welcome wizard.** `GET /` redirects to `/welcome` — five server-
    rendered steps that walk through what is installed on this machine, the first
    coding agent, the first model provider and the source for the hub's own small
-   questions. Every step has a "Skip for now" (a session answer) and a **"Do not
-   show this again"** checkbox that switches it off for good; it is also
-   reachable at `/welcome` afterwards. Nothing in it can create a state the rest
+   questions. During the first walkthrough the only way out is the "Leave the
+   setup for now" card on step 1 (a session answer). Afterwards `/welcome` is an
+   ordinary page: every step carries a **"Do not show this again"** checkbox
+   that switches the greeting off for good, and next to the primary button a
+   "Save and back to Freilauf" that stores the checkbox on the way out — the
+   ways off the page are submits of the form the box is in, never links beside
+   it. Nothing in it can create a state the rest
    of the hub chokes on — it writes through the same functions the Plugins page
    uses — so the fastest correct path is to answer it rather than skip it.
 1. **Settings → Plugins** (`/settings/plugins`; the old Settings → Coding agents
