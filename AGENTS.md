@@ -761,13 +761,28 @@ show a state the database does not hold. Every write goes through the same
 functions the Plugins page writes through, so **the wizard cannot create a state
 the rest of the hub chokes on**.
 
-Two rules about getting out of it, because a wizard one cannot leave is worse
-than no wizard: the checkbox is on **every** step, not only the last (with the
-hidden `0` companion — an unticked box is simply absent from a POST body, so
-without it the wizard could never be switched back on); and **"Skip for now" is
-a session answer**, a `freilauf_welcome` session cookie the `/` redirect honours,
-because a plain link back to `/` would otherwise bounce straight into the wizard
-again.
+Three rules about getting out of it, because a wizard one cannot leave is worse
+than no wizard:
+
+- the checkbox is on **every** step of an unlocked page, not only the last (with
+  the hidden `0` companion — an unticked box is simply absent from a POST body,
+  so without it the wizard could never be switched back on);
+- **leaving is a session answer too**, a `freilauf_welcome` cookie the `/`
+  redirect honours, because a plain link back to `/` would otherwise bounce
+  straight into the wizard again;
+- and **every way off an unlocked page is a submit of the form the checkbox is
+  in**. That was the expensive one. A returning operator makes one gesture —
+  tick "Do not show this again", then leave — and the exits were `<a href>`
+  links in the footer, outside that form: the tick was never submitted, so the
+  wizard greeted them again on the very next page load, having been told twice
+  not to. `primary()` therefore renders the way out as a
+  `<button name="exit">` next to the primary button, `stepFoot()` is the step
+  counter and nothing else, and `afterStep()` saves the box, marks the session
+  and redirects home. The banner's own button is the single remaining link and
+  points at `?welcome=skip`, never at `/`. On step 1 the primary button is also
+  labelled for who is reading it: "Start the setup" while locked, "Go through
+  the setup again" for a revisit — a button that describes something the reader
+  is not doing is a button they will not press.
 
 ### The hub's own questions: `server/llm/`
 

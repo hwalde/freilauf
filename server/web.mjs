@@ -181,8 +181,11 @@ async function dispatch(req, res, url, path, formBody) {
   //     page. Finishing pre-ticks it, so a completed setup stops greeting;
   //     `welcome_done` records the finishing itself and is what unlocks the
   //     page, deliberately a different statement from "stop sending me here";
-  //   - `?welcome=skip` is the wizard's own "Skip for now" coming back, and it
-  //     marks the browser session so the link cannot bounce into a loop.
+  //   - `?welcome=skip` is the wizard's own way out coming back — the locked
+  //     "Leave the setup for now" card and the revisiting operator's banner
+  //     button — and it marks the browser session so neither can bounce into a
+  //     loop. (An unlocked step's "Save and back to Freilauf" is a form submit
+  //     and marks the session itself; it never travels through this route.)
   if (req.method === 'GET' && path === '/') {
     if (url.searchParams.get('welcome') === 'skip') markWelcomeSkipped(res)
     else if (wantsHtml(req) && shouldShowWelcome(req)) return redirect(res, '/welcome')

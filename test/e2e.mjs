@@ -4528,6 +4528,16 @@ export default {
       enthaelt(html, `${step} of 5`, `step ${step} says where it is`)
       enthaelt(html, 'name="welcome_hide"', `step ${step} carries the "do not show again" box`)
       enthaelt(html, 'welcome=skip', `step ${step} offers the way out`)
+      // …and on an unlocked page that way out is a SUBMIT of the very form the
+      // box is in, not a link beside it. A link is what threw a ticked box
+      // away, and the wizard then greeted the operator it had just been told
+      // to stop greeting.
+      if (step < 5) enthaelt(html, 'name="exit" value="1"', `step ${step} leaves by submitting, not by navigating`)
+      // Opening the wizard as an ordinary page IS the "not now" answer. Without
+      // it the nav's own "Overview" link — `layout()` draws it around every
+      // unlocked step — would bounce the reader right back here.
+      wahr(String(r.headers.get('set-cookie') ?? '').includes('freilauf_welcome'),
+        `step ${step} marks the session, so every link off the page works`)
     }
     // An out-of-range step is step 1, not a 404: the address is typed by hand
     // and by a bookmark, and neither deserves an error page.
@@ -4587,6 +4597,22 @@ export default {
       gleich((await formular('/welcome/hello', { welcome_hide: '0' }, { alsBrowser: true })).status, 303, 'unticked')
       gleich(db.prepare(`SELECT value FROM settings WHERE key='welcome_hide'`).get().value, '0', 'switched back on')
       gleich((await hol('/', alsBrowser)).status, 303, 'and the wizard is back')
+
+      // The way out of an unlocked wizard saves the box on its way. This is the
+      // gesture a returning operator actually makes — tick it, then leave — and
+      // it used to be a link outside the form, so the tick never arrived.
+      const raus = await formular('/welcome/hello', { welcome_hide: '1', exit: '1' }, { alsBrowser: true })
+      gleich(raus.status, 303, 'leaving redirects')
+      gleich(raus.headers.get('location'), '/', 'into the hub, not on to step 2')
+      gleich(db.prepare(`SELECT value FROM settings WHERE key='welcome_hide'`).get().value, '1',
+        'and the ticked box was saved on the way out')
+      // Untouched box, same exit: the session mark is what keeps `GET /` from
+      // sending the operator straight back to the page they just left.
+      sk.setzeEinstellung('welcome_hide', '0')
+      const rausOhne = await formular('/welcome/hello', { welcome_hide: '0', exit: '1' }, { alsBrowser: true })
+      gleich(rausOhne.headers.get('location'), '/', 'leaving without ticking still leaves')
+      wahr(String(rausOhne.headers.get('set-cookie') ?? '').includes('freilauf_welcome'),
+        'and marks the session, so the redirect cannot bounce it back')
     } finally {
       sk.setzeEinstellung('welcome_hide', '1')
     }
