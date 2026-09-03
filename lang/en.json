@@ -159,6 +159,8 @@
   "run.terminal_dead": "(process ended — scrollback only, nobody answers)",
   "run.terminal_fullscreen": "Full screen",
   "run.terminal_fullscreen_exit": "Leave full screen (Esc)",
+  "run.terminal_cinema": "Cinema mode",
+  "run.terminal_cinema_exit": "Leave cinema mode",
   "run.session_after_hint": "This run is finished and its report is written. Whatever you send here is follow-up work in the same session: when the agent reports done again, it arrives as a follow-up report of this run — checked, merged and announced like the first one, labelled as a follow-up. The session closes by itself once the keep time is up (Settings → tmux session).",
   "run.notify_on": "Notifications for this run",
   "run.notify_on_hint": "Unticked: no messages about this run — its reports, follow-up reports, alarms and incidents — on any channel. Everything else (integration, flows) happens as usual.",

@@ -2825,6 +2825,21 @@ errors (`post_api_request` only fires after success).
   that already watches `#term`. The way back out is also an icon in the
   terminal's own top right corner, because a keyboard-only exit is a dead end
   for anyone who reached full screen with the mouse.
+- **Cinema mode is the same line's second icon, and it measures instead of
+  guessing.** `.term-cinema` on `#term-wrap` plus `body.term-cinema-on`: the
+  page stays a page, `main` becomes a flex column, the terminal takes `order:
+  -1` and the full width, and the status sidebar is hidden — everything that
+  stood above the terminal is below it, one scroll away. The HEIGHT is written
+  by hub.js as `--cinema-h` from the terminal's own measured top edge, because
+  a `calc(100vh - …)` constant is right on one page and one line too tall on
+  the next — and one line too tall is exactly what pushes the terminal out of
+  the fold the mode exists for. `#term-wrap.term-cinema:not(.term-full)` keeps
+  full screen the winner where both are on. The choice is remembered **per
+  run** (`localStorage['freilauf.cinema.<run id>']`, in try/catch like the
+  sidebar fold): a reload comes back into it, and the next run's report does
+  not. The button toggles, so it carries both labels — `title` and
+  `data-title-exit`, both rendered by `pages.mjs` through `t()`, so the swap
+  needs no `js.*` strings of its own.
 - **`fl-start` positional arguments.** `fl-start [name] [directory]`; when the
   name is set via `--name` (that is how the hub calls it), the directory moves
   to position 1. Otherwise the agent starts in the CALLER's working directory

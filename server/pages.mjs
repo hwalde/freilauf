@@ -1208,7 +1208,14 @@ export async function pageRun(req, res, url, id) {
     // one decides the screen is too small. Only where there IS a screen: a run
     // whose session is gone shows a sentence, and a sentence in full screen is
     // still a sentence.
-    sessionOpen ? `<button type="button" id="term-full" class="icon-btn term-full-btn" title="${e(t('run.terminal_fullscreen'))}" aria-label="${e(t('run.terminal_fullscreen'))}">⛶</button>` : ''}</summary>
+    sessionOpen ? `<button type="button" id="term-full" class="icon-btn term-full-btn" title="${e(t('run.terminal_fullscreen'))}" aria-label="${e(t('run.terminal_fullscreen'))}">⛶</button>` : ''}${
+    // Cinema mode next to it — the same line, one step less drastic: the screen
+    // stays a page, the terminal just gets all of it above the fold. Both
+    // titles are rendered here rather than as js.* strings, because the button
+    // toggles and its label has to say which way it now goes; hub.js swaps
+    // them. The buttons float right, so the one written FIRST sits rightmost —
+    // the full-screen icon keeps the corner it has always had.
+    sessionOpen ? `<button type="button" id="term-cinema" class="icon-btn term-cinema-btn" aria-pressed="false" title="${e(t('run.terminal_cinema'))}" aria-label="${e(t('run.terminal_cinema'))}" data-title-exit="${e(t('run.terminal_cinema_exit'))}">▭</button>` : ''}</summary>
     <div id="term-wrap">
       ${sessionOpen ? `<button type="button" id="term-full-exit" class="icon-btn term-exit" title="${e(t('run.terminal_fullscreen_exit'))}" aria-label="${e(t('run.terminal_fullscreen_exit'))}">✕</button>` : ''}
       <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>

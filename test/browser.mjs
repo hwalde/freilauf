@@ -1183,6 +1183,62 @@ try {
     await p.close()
   })
 
+  // Cinema mode is the other half of the same gesture, and it breaks in ways a
+  // server test cannot see: a height that no longer fits above the fold, a
+  // sidebar that stays, an order that never moves the terminal to the top — and
+  // the memory, which is the one thing here that outlives the page.
+  await pruefe('cinema mode lifts the terminal above the fold, and is remembered per run', async () => {
+    const p = await neueSeite(`/runs/${R_LIVE}`)
+    await p.waitForSelector('#term .xterm-screen', { timeout: 15_000 })
+    const kasten = () => p.$eval('#term', el => {
+      const r = el.getBoundingClientRect()
+      return { oben: r.top + window.scrollY, hoch: r.height, breit: r.width, unten: r.bottom, sicht: window.innerHeight }
+    })
+    const kopf = () => p.$eval('#run-head', el => el.getBoundingClientRect().top + window.scrollY)
+    const zeilen = () => p.$$eval('#term .xterm-rows > div', els => els.length)
+    const vorher = await kasten()
+    const zeilenVorher = await zeilen()
+    wahr(await kopf() < vorher.oben, 'the run\'s heading stands above the terminal to begin with')
+    wahr(await p.isVisible('#status-sidebar'), 'and the status sidebar is there')
+
+    await p.click('#term-cinema')
+    wahr(await p.$eval('body', el => el.classList.contains('term-cinema-on')), 'the icon switches the mode on')
+    wahr(await p.$eval('details.run-term', el => el.open), 'the details stayed open, not toggled shut')
+    gleich(await p.getAttribute('#term-cinema', 'aria-pressed'), 'true', 'the button says it is pressed')
+    gleich(await p.getAttribute('#term-cinema', 'title'),
+      await p.getAttribute('#term-cinema', 'data-title-exit'), 'and now offers the way out')
+    falsch(await p.isVisible('#status-sidebar'), 'the sidebar is gone')
+    const drin = await kasten()
+    wahr(drin.oben < await kopf(), 'the terminal moved above everything that stood over it')
+    wahr(drin.breit > vorher.breit, 'it takes the full width')
+    wahr(drin.hoch > vorher.hoch, 'and it is taller than the 480px it has in the page')
+    // The whole point of the mode: it still fits above the fold. Two pixels of
+    // slack, because a measured height lands on a fractional device pixel.
+    wahr(drin.unten <= drin.sicht + 2, `it still fits above the fold (${drin.unten} <= ${drin.sicht})`)
+    await wartePage(p, (n) => document.querySelectorAll('#term .xterm-rows > div').length > n,
+      zeilenVorher, 'xterm to refit to the new size')
+
+    // The memory is per run and survives a reload — the live channel's own way
+    // of ending up on this page again.
+    await p.reload({ waitUntil: 'load' })
+    await p.waitForSelector('#term .xterm-screen', { timeout: 15_000 })
+    wahr(await p.$eval('body', el => el.classList.contains('term-cinema-on')), 'a reload comes back into cinema mode')
+    falsch(await p.isVisible('#status-sidebar'), 'sidebar still away')
+
+    await p.click('#term-cinema')
+    falsch(await p.$eval('body', el => el.classList.contains('term-cinema-on')), 'the same icon closes it again')
+    wahr(await p.isVisible('#status-sidebar'), 'and the sidebar comes back')
+    gleich(await p.getAttribute('#term-cinema', 'aria-pressed'), 'false', 'the button is unpressed')
+    // …and the memory is really gone, or every later test on this run would
+    // render in cinema mode (the whole suite shares one browser context).
+    const q = await neueSeite(`/runs/${R_LIVE}`)
+    falsch(await q.$eval('body', el => el.classList.contains('term-cinema-on')), 'a fresh page is an ordinary one again')
+    sauber(q)
+    await q.close()
+    sauber(p)
+    await p.close()
+  })
+
   await pruefe('a page without a terminal starts none and stays quiet', async () => {
     const p = await neueSeite(`/?repo=${repoId}`)
     gleich(await p.$$eval('#term', els => els.length), 0, 'no terminal box on the overview')
