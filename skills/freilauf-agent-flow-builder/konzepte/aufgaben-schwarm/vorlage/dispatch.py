@@ -224,9 +224,7 @@ def hub_ids() -> dict:
     if not pfad.is_file():
         return {}
     try:
-        konf = json.loads(pfad.read_text(encoding="utf-8"))
-        projekt_slug(konf)          # Namensraum für state_dir() festlegen
-        return konf
+        return json.loads(pfad.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         return {}
 
@@ -241,7 +239,9 @@ def konfig_pfad(repo: Path, explizit: str = "") -> Path:
 def konfig_laden(repo: Path, explizit: str = "") -> dict:
     pfad = konfig_pfad(repo, explizit)
     try:
-        return json.loads(pfad.read_text(encoding="utf-8"))
+        konf = json.loads(pfad.read_text(encoding="utf-8"))
+        projekt_slug(konf)          # Namensraum für state_dir() festlegen
+        return konf
     except OSError as e:
         raise SystemExit(fehler("konfig", f"{pfad} nicht lesbar ({e.strerror}).",
                                 naechster_schritt=f"--repo <pfad zum checkout> oder --konfig "

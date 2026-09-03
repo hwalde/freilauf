@@ -6,7 +6,7 @@ oft starten, wie das Aufkommen es rechtfertigt.
 
 Es gibt vier Worker-Agenten in zwei Bahnen:
 
-- die gewöhnliche Bahn — „Schwarm-Worker (GLM)" und „Schwarm-Worker (DeepSeek, trivial)" — für
+- die gewöhnliche Bahn — der Regel-Worker und der billige Spezialist für die trivialen Fälle — für
   die triviale und normale Arbeit. Sie ist die Regel und löst den Großteil. Beide bleiben
   dauerhaft eingeschaltet; skaliert wird nicht durch Ein-/Ausschalten, sondern durch mehrfaches
   Starten desselben Agenten — das ist geprüft und erlaubt: Zwei Starts auf dieselbe Agenten-ID
@@ -50,26 +50,28 @@ stehen, fasst du nicht an — im selben Repository laufen fremde Agenten.
 `python {{MOTOR_ORDNER}}/dispatch.py lage --json` rechnet die Regel bereits aus. Die vier Werte, auf die
 es ankommt:
 
-- `worker_starts_soll` — so oft startest du „Schwarm-Worker (GLM)".
-- `deepseek_starts_soll` — so oft startest du „Schwarm-Worker (DeepSeek, trivial)" (0 oder 1).
+- `worker_starts_soll` — so oft startest du den Regel-Worker.
+- `deepseek_starts_soll` — so oft startest du den billigen Spezialisten (0 oder 1).
+  Der Schlüssel heißt aus historischen Gründen so; gemeint ist der zweite Worker der
+  gewöhnlichen Bahn, welches Modell auch immer er fährt.
 - `stark_route` — `fable`, `gemini` oder `keine`: welchen der beiden starken Worker du startest.
 - `stark_starts_soll` — 0 oder 1, nie mehr.
 
 Die Regel dahinter, damit du das Ergebnis prüfen kannst:
 
-| offene, unbelegte Aufgaben | GLM-Starts |
+| offene, unbelegte Aufgaben | Starts des Regel-Workers |
 |---|---|
 | 0 | keiner |
 | 1–3 | 1 |
 | 4–8 | 2 |
 | ab 9 | 3 |
 
-- Ein DeepSeek-Start, sobald mindestens eine triviale Aufgabe frei ist und das
-  DeepSeek-Guthaben über der Schwelle liegt. Er bekommt seinen Platz vor den GLM-Starts.
+- Ein Start des Spezialisten, sobald mindestens eine triviale Aufgabe frei ist und sein
+  Guthaben über der Schwelle liegt. Er bekommt seinen Platz vor dem Regel-Worker.
 - Obergrenze `max_worker` für die gewöhnliche Bahn, abzüglich der bereits laufenden
   gewöhnlichen Läufe. Beide Zahlen aus `lage` sind darauf schon gedeckelt — wer sie startet,
   kann den Schwarm nicht aufschaukeln.
-- OpenRouter unter der Schwelle: keine GLM-Starts. Budget rot, Tages-Ampel rot oder
+- Guthaben des Regel-Anbieters unter der Schwelle: keine Starts des Regel-Workers. Budget rot, Tages-Ampel rot oder
   `halt: true`: gar keine Starts.
 
 Weicht `worker_starts_soll` von deiner eigenen Rechnung ab, folgst du der kleineren Zahl und
@@ -113,7 +115,7 @@ anderen der beiden.
    `stark_route` auf `fable` steht; die laufenden Schwarm-Läufe über `freilauf-runs`
    gegenprüfen, wenn `laufend` unplausibel wirkt.
 5. Starten — über den Weg des Skills `freilauf-agents`, in dieser Reihenfolge: erst der starke
-   Worker (falls `stark_starts_soll` 1 ist), dann die DeepSeek-Starts, dann die GLM-Starts.
+   Worker (falls `stark_starts_soll` 1 ist), dann den Spezialisten, dann den Regel-Worker.
    Zwischen zwei Starts wartest du `versatz_minuten` Minuten (der Wert steht in `lage --json`
    unter `startplan.versatz_minuten`). Ein `sleep` ist dafür in Ordnung — du bist ohnehin
    kurzlebig. Der Zeitversatz verhindert, dass zwei Worker im selben Moment nach derselben
