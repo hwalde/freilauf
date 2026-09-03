@@ -139,6 +139,8 @@
   "start.force_start": "仍要启动",
   "start.force_start_short": "启动",
   "start.err_not_deferred": "只能以此方式启动已推迟的运行。",
+  "start.start_now": "立即启动",
+  "start.err_not_scheduled": "只能以此方式启动已计划未来时刻的运行。",
   "branch.none": "无",
   "branch.new": "新建分支",
   "branch.fixed": "使用固定分支",
