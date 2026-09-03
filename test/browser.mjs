@@ -1501,6 +1501,42 @@ try {
     await p.close()
   })
 
+  await pruefe('the fallback picker shows its model field and asks only on change', async () => {
+    // The fallback select is its own container ([data-llm-fb]), NOT the
+    // primary's wiring: it must not double the page-load requests (the test
+    // above pins three, one per job) and must not fight the primary over one
+    // warning. The model field is hidden while no fallback is chosen, and the
+    // models of a chosen one are fetched on CHANGE only.
+    const p = await quellenSeite()
+    await wartePage(p, () => document.querySelectorAll('#title-mru option').length > 1, null, 'the first fill')
+    gleich(p.gefragt.length, 3, 'the fallback adds no request of its own on page load')
+
+    const feld = 'fieldset:has(select[name=llm_check_fallback])'
+    gleich(await p.$eval(`${feld} [data-llm-fb-model]`, el => el.hidden), true, 'no fallback: no model field')
+
+    await p.selectOption('select[name=llm_check_fallback]', 'agent:claude')
+    await wartePage(p, () => !document.querySelector('fieldset:has(select[name="llm_check_fallback"]) [data-llm-fb-model]').hidden,
+      null, 'the model field to appear with the fallback')
+    gleich(await p.$eval(`${feld} [data-llm-fb-overhead]`, el => el.hidden), false, 'the overhead warning follows the fallback too')
+    await wartePage(p, () => Array.prototype.some.call(
+      document.querySelectorAll('fieldset select[name="llm_check_fallback"] ~ * #llm_check_fb_list option, #llm_check_fb_list option'),
+      o => o.value === 'agent:claude/one'),
+      null, 'the fallback model list to be filled on change')
+    gleich(p.gefragt.at(-1), 'agent:claude', 'the request carried the fallback source')
+
+    // The other fieldsets are untouched — scoping again.
+    gleich(await p.$eval('fieldset:has(select[name="llm_title_fallback"]) [data-llm-fb-model]', el => el.hidden), true,
+      'the run-title fieldset keeps its own fallback state')
+
+    // Emptying the fallback hides the model field again — reversible.
+    await p.selectOption('select[name=llm_check_fallback]', '')
+    await wartePage(p, () => document.querySelector('fieldset:has(select[name="llm_check_fallback"]) [data-llm-fb-model]').hidden,
+      null, 'the model field to go away again')
+    gleich(await p.$eval(`${feld} [data-llm-fb-overhead]`, el => el.hidden), true, 'and the warning with it')
+    sauber(p)
+    await p.close()
+  })
+
   await pruefe('a source that answers nothing leaves the field working', async () => {
     // The model input is free text and must keep working whatever a vendor
     // says — an empty answer, an error, a broken connection.

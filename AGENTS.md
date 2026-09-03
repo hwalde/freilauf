@@ -839,7 +839,43 @@ the answer and wrong about the type), and on failure asked for again **exactly
 once** with the complaint attached (`llm_retries`, default 1). Then it gives up
 and says so, with a `stage` of `config` / `transport` / `parse` / `validate`.
 A **transport failure is not reprompted**: a 401, a timeout or a missing binary
-does not become right by asking the same thing again.
+does not become right by asking the same thing again — it moves DOWN THE CHAIN
+instead.
+
+### The chain: fallback first, backoff second (`server/llm/job.mjs`)
+
+Every place that picks a model source for one of the hub's own questions plans
+the same shape now, in **one** module: **`server/llm/job.mjs`**. The plan is a
+chain — the primary source (`llm_<p>_source`) first, then the fallbacks
+(`llm_<p>_fallback`, a select in each of the three settings fieldsets; the
+value reads as a comma-separated list, so a hand-edited row may carry an
+ordered chain, and the parse is deliberately STRICT: junk means "no fallback",
+never OpenRouter). `llmJson()` executes the plan:
+
+| Failure | What happens |
+|---|---|
+| `transport` on one entry (5xx, rate limit, timeout, network) | the **next source of the chain** takes the question — no backoff, no wait; the fallback exists precisely so the answer does not have to wait for the primary to recover |
+| `config` on one entry (unknown source, missing credential) | skipped the same way, but NOT counted as an attempt — no amount of waiting makes a missing key appear; an all-config chain returns the **primary's** config answer and alerts nobody |
+| the whole chain down | **exponential backoff with jitter** (`backoffDelayMs()` — the pause doubles per round, ±50 % jitter, `llm_retry_base_ms`/`llm_retry_max_ms` as floor and ceiling), and the chain is walked again, until `llm_retry_attempts` (default 10, **hard cap 10**) transport attempts have been made in total; the FIRST walk always runs to the end, so a configured fallback is tried even at 0 |
+| `parse` / `validate` on one entry | NEITHER: the source answered, so the provider is up — the repair rounds on the same source are the answer, and falling back would hide which source cannot obey the schema |
+
+One exhausted call raises exactly ONE alert, keyed on the primary (the job the
+operator configured) and naming every source that was tried. A fallback needs
+its own model name (`llm_<p>_fallback_model`, empty = the primary's model) —
+**unless it is an agent source**: `llmJson()` accepts an AGENT source without a
+model (claude picks its own default), which is what makes
+**`agent:claude` — claude's print-only mode (`claude -p`, lean flag set, no
+session persistence) — a zero-config fallback** every question on the hub can
+degrade to. The fallback picker offers the same flat list as the primary
+(providers, then agents), and the gates (`titleLlmActive` & co.) ask
+`chainUsable()`: a primary without a key and a fallback that has one is a
+working job, not an off one.
+
+The three callers' private `orRoutingAusSetting()` copies died here too —
+`jobRouting()` is the one reader of the per-job routing settings. The flow
+`extract` step inherits the check job's chain and may name its own fallback
+(`fallback`, `fallbackModel`) per step. What a chain does NOT change: the four
+callers' error styles, throttles and context caps stay exactly where they were.
 
 **The channel must never be bombarded** (`alerts.mjs`): one message per failure
 *signature* (`purpose|source|model|errorClass`) per `llm_alert_window_min`

@@ -2154,6 +2154,8 @@ try {
   await pruefe('a non-2xx answer fails with a classified, translated detail — and no reprompt', async () => {
     const keyAlt = process.env.OPENROUTER_API_KEY
     process.env.OPENROUTER_API_KEY = 'unit-key'
+    const versucheAlt = lese('llm_retry_attempts')
+    setz('llm_retry_attempts', '0')   // this test pins the NO-REPROMPT rule, not the retry policy
     const echt = globalThis.fetch
     let chats = 0
     globalThis.fetch = async () => { chats++; return { ok: false, status: 429, json: async () => ({}) } }
@@ -2166,9 +2168,157 @@ try {
       falsch(r.ok, 'the call failed')
       gleich(r.stage, 'transport', 'the bucket stays transport')
       gleich(r.kind, 'http_429', 'and the specific class is carried for the caller')
-      gleich(chats, 1, 'a transport failure is never reprompted')
+      gleich(chats, 1, 'a transport failure is never reprompted — with the retry budget at 0, exactly one call')
       enthaelt(r.error, 'Rate limit reached (HTTP 429)', 'the detail names the problem in English')
       enthaelt(r.error, 'too often', 'and what it means')
+    } finally {
+      globalThis.fetch = echt
+      setz('llm_retry_attempts', versucheAlt ?? '')
+      if (keyAlt !== undefined) process.env.OPENROUTER_API_KEY = keyAlt
+      else delete process.env.OPENROUTER_API_KEY
+    }
+  })
+  await pruefe('a transport failure walks the chain to the fallback before any retry', async () => {
+    const keyAlt = process.env.OPENROUTER_API_KEY
+    process.env.OPENROUTER_API_KEY = 'unit-key'
+    const versucheAlt = lese('llm_retry_attempts')
+    setz('llm_retry_attempts', '0')   // the fallback is tried even at 0 — the whole point of the first walk
+    const echt = globalThis.fetch
+    const aufrufe = { or: 0, zen: 0 }
+    globalThis.fetch = async (url, init) => {
+      const u = String(url)
+      if (u.includes('openrouter.ai')) {
+        aufrufe.or++
+        return { ok: false, status: 503, json: async () => ({}) }
+      }
+      if (u.includes('opencode.ai/zen/v1/chat')) {
+        aufrufe.zen++
+        return { ok: true, json: async () => ({ choices: [{ message: { content: '{"title":"Fixed login"}' } }] }) }
+      }
+      return { ok: false, status: 404, json: async () => ({}) }
+    }
+    try {
+      const r = await llmJson({
+        source: 'provider:openrouter', model: 'a/b',
+        fallbacks: [{ source: 'provider:opencode-zen', model: 'zen-model' }],
+        prompt: 'x',
+        schema: { type: 'object', required: ['title'], properties: { title: { type: 'string' } } },
+        schemaName: 'run_title', purpose: 'title',
+      })
+      wahr(r.ok, 'the fallback answered')
+      gleich(r.source, 'provider:opencode-zen', 'the result names the source that actually answered')
+      gleich(r.model, 'zen-model', 'and the model it answered with')
+      gleich(aufrufe.or, 1, 'the primary was asked once')
+      gleich(aufrufe.zen, 1, 'the fallback took over — no backoff, no wait')
+      gleich(r.data.title, 'Fixed login', 'the answer came from the fallback')
+    } finally {
+      globalThis.fetch = echt
+      setz('llm_retry_attempts', versucheAlt ?? '')
+      if (keyAlt !== undefined) process.env.OPENROUTER_API_KEY = keyAlt
+      else delete process.env.OPENROUTER_API_KEY
+    }
+  })
+  await pruefe('a misconfigured primary does not block a working fallback — and an all-config chain stays a config answer', async () => {
+    const keyAlt = process.env.OPENROUTER_API_KEY
+    delete process.env.OPENROUTER_API_KEY   // the primary now has no credential: a config answer, not an outage
+    const echt = globalThis.fetch
+    let zen = 0
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('opencode.ai/zen/v1/chat')) {
+        zen++
+        return { ok: true, json: async () => ({ choices: [{ message: { content: '{"title":"Still named"}' } }] }) }
+      }
+      return { ok: false, status: 404, json: async () => ({}) }
+    }
+    try {
+      const r = await llmJson({
+        source: 'provider:openrouter', model: 'a/b',
+        fallbacks: [{ source: 'provider:opencode-zen', model: 'zen-model' }],
+        prompt: 'x',
+        schema: { type: 'object', required: ['title'], properties: { title: { type: 'string' } } },
+        schemaName: 'run_title', purpose: 'title',
+      })
+      wahr(r.ok, 'a skipped config entry is not a verdict about the chain')
+      gleich(r.source, 'provider:opencode-zen', 'the fallback carried the question')
+      const zwei = await llmJson({
+        source: 'provider:openrouter', model: 'a/b',
+        fallbacks: [{ source: 'provider:nope', model: 'm' }],
+        prompt: 'x',
+        schema: { type: 'object', required: ['title'], properties: { title: { type: 'string' } } },
+        schemaName: 'run_title', purpose: 'title',
+      })
+      falsch(zwei.ok, 'nothing usable in the whole chain')
+      gleich(zwei.stage, 'config', 'all-config is a CONFIG answer, never a transport failure')
+      enthaelt(zwei.error, 'OpenRouter', 'the error names the PRIMARY — what the operator chose')
+      gleich(zen, 1, 'the unusable second chain entry was never fetched')
+    } finally {
+      globalThis.fetch = echt
+      if (keyAlt !== undefined) process.env.OPENROUTER_API_KEY = keyAlt
+    }
+  })
+  await pruefe('when the whole chain is down, the chain retries with backoff — bounded by llm_retry_attempts', async () => {
+    const keyAlt = process.env.OPENROUTER_API_KEY
+    process.env.OPENROUTER_API_KEY = 'unit-key'
+    const alt = { a: lese('llm_retry_attempts'), b: lese('llm_retry_base_ms'), c: lese('llm_retry_max_ms') }
+    setz('llm_retry_attempts', '3')
+    setz('llm_retry_base_ms', '1')
+    setz('llm_retry_max_ms', '4')
+    const echt = globalThis.fetch
+    let chats = 0
+    globalThis.fetch = async () => { chats++; return { ok: false, status: 503, json: async () => ({}) } }
+    try {
+      const r = await llmJson({
+        source: 'provider:openrouter', model: 'a/b', prompt: 'x',
+        schema: { type: 'object', required: ['title'], properties: { title: { type: 'string' } } },
+        schemaName: 'run_title', purpose: 'title',
+      })
+      falsch(r.ok, 'the provider stayed down')
+      gleich(r.stage, 'transport', 'and the failure stays a transport failure')
+      gleich(chats, 3, 'exactly llm_retry_attempts attempts, pauses included')
+    } finally {
+      globalThis.fetch = echt
+      setz('llm_retry_attempts', alt.a ?? '')
+      setz('llm_retry_base_ms', alt.b ?? '')
+      setz('llm_retry_max_ms', alt.c ?? '')
+      if (keyAlt !== undefined) process.env.OPENROUTER_API_KEY = keyAlt
+      else delete process.env.OPENROUTER_API_KEY
+    }
+  })
+  await pruefe('backoffDelayMs doubles with jitter and never leaves the ceiling', async () => {
+    const { backoffDelayMs } = await import('../server/llm/index.mjs')
+    const politik = { baseMs: 1000, maxMs: 4000 }
+    for (let i = 0; i < 50; i++) {
+      const r0 = backoffDelayMs(0, politik)
+      wahr(r0 >= 500 && r0 <= 1500, `round 0 jitters within half the base (${r0})`)
+      const r2 = backoffDelayMs(2, politik)
+      wahr(r2 >= 2000 && r2 <= 4000, `round 2 is capped at maxMs (${r2})`)
+    }
+    gleich(backoffDelayMs(10, { baseMs: 1000, maxMs: 0 }), 0, 'a zero ceiling stays zero — an explicit 0 is honoured')
+  })
+  await pruefe('a parse failure does NOT fall back — the provider is up, the answer is the problem', async () => {
+    const keyAlt = process.env.OPENROUTER_API_KEY
+    process.env.OPENROUTER_API_KEY = 'unit-key'
+    const echt = globalThis.fetch
+    let or = 0
+    let zen = 0
+    globalThis.fetch = async (url) => {
+      const u = String(url)
+      if (u.includes('openrouter.ai')) { or++; return { ok: true, json: async () => ({ choices: [{ message: { content: 'prose, no JSON' } }] }) } }
+      if (u.includes('opencode.ai/zen/v1/chat')) { zen++; return { ok: true, json: async () => ({ choices: [{ message: { content: '{"title":"Would have worked"}' } }] }) } }
+      return { ok: false, status: 404, json: async () => ({}) }
+    }
+    try {
+      const r = await llmJson({
+        source: 'provider:openrouter', model: 'a/b',
+        fallbacks: [{ source: 'provider:opencode-zen', model: 'zen-model' }],
+        prompt: 'x',
+        schema: { type: 'object', required: ['title'], properties: { title: { type: 'string' } } },
+        schemaName: 'run_title', purpose: 'title',
+      })
+      falsch(r.ok, 'prose is prose')
+      gleich(r.stage, 'parse', 'an answer problem stays an answer problem')
+      wahr(or >= 2, 'the repair rounds ran on the primary')
+      gleich(zen, 0, 'the fallback was never asked — falling back would hide which source cannot obey the schema')
     } finally {
       globalThis.fetch = echt
       if (keyAlt !== undefined) process.env.OPENROUTER_API_KEY = keyAlt
@@ -2468,6 +2618,62 @@ try {
     for (const id of ['provider:deepseek', 'agent:claude']) {
       const s = parseSource(id)
       gleich(sourceId(s.kind, s.pluginId), id, `round trip: ${id}`)
+    }
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('The LLM job chain: fallback planning (llm/job.mjs)')
+  const job = await import('../server/llm/job.mjs')
+
+  await pruefe('parseFallbackList is STRICT, the opposite of parseSource — junk means no fallback', async () => {
+    gleich(job.parseFallbackList('').join(','), '', 'empty')
+    gleich(job.parseFallbackList(null).join(','), '', 'null')
+    gleich(job.parseFallbackList('agent:claude').join(','), 'agent:claude', 'one source')
+    gleich(job.parseFallbackList('agent:claude, provider:deepseek').join(','), 'agent:claude,provider:deepseek', 'an ordered chain, whitespace ignored')
+    // A half-typed value must never silently re-point a fallback at OpenRouter.
+    gleich(job.parseFallbackList('deepseek').join(','), '', 'an unprefixed id is NOT the default here')
+    gleich(job.parseFallbackList('agent:x!y provider:deepseek').join(','), 'provider:deepseek', 'a broken id is dropped, the rest survives')
+    gleich(job.parseFallbackList('provider:opencode-zen').join(','), 'provider:opencode-zen', 'a dashed id survives')
+  })
+  await pruefe('jobFallbacks inherits the primary model unless a fallback model is set', async () => {
+    const alt = { a: lese('llm_title_fallback'), b: lese('llm_title_fallback_model') }
+    setz('llm_title_fallback', 'agent:claude,provider:deepseek')
+    try {
+      const ohne = job.jobFallbacks('title', 'deepseek/deepseek-v4-flash')
+      gleich(ohne.length, 2, 'both entries are planned')
+      gleich(ohne[0].model, 'deepseek/deepseek-v4-flash', 'the primary model is inherited')
+      gleich(ohne[1].source, 'provider:deepseek', 'in order')
+      setz('llm_title_fallback_model', 'anthropic/claude-sonnet-4')
+      const mit = job.jobFallbacks('title', 'deepseek/deepseek-v4-flash')
+      gleich(mit[0].model, 'anthropic/claude-sonnet-4', 'an explicit fallback model wins')
+    } finally {
+      setz('llm_title_fallback', alt.a ?? '')
+      setz('llm_title_fallback_model', alt.b ?? '')
+    }
+  })
+  await pruefe('chainUsable is true when the PRIMARY is broken but a fallback is not', async () => {
+    const keyAlt = process.env.OPENROUTER_API_KEY
+    delete process.env.OPENROUTER_API_KEY   // OpenRouter unusable: no credential
+    const alt = lese('llm_title_fallback')
+    // An unconfigured coding agent is OFF — the same rule that keeps a fresh
+    // installation free of agents. The fallback picker only ever offers enabled
+    // sources, and usability follows the same gate.
+    const { setPluginConfig: setzePlugin, pluginConfig: pluginAn } = await import('../server/plugins/store.mjs')
+    const { default: jobDb } = await import('../server/db.mjs')
+    const claudeVorher = pluginAn('claude')
+    setzePlugin('claude', { enabled: 1 })
+    try {
+      setz('llm_title_fallback', '')
+      falsch(job.chainUsable('title', 'm'), 'no fallback: the broken primary decides')
+      setz('llm_title_fallback', 'agent:claude')
+      wahr(job.chainUsable('title', 'm'), 'an agent fallback needs no credential, no model')
+      setz('llm_title_fallback', 'provider:nope')
+      falsch(job.chainUsable('title', 'm'), 'an unknown fallback source is not usable')
+    } finally {
+      setz('llm_title_fallback', alt ?? '')
+      if (claudeVorher) setzePlugin('claude', { enabled: claudeVorher.enabled })
+      else jobDb.prepare('DELETE FROM plugin_config WHERE plugin_id=?').run('claude')
+      if (keyAlt !== undefined) process.env.OPENROUTER_API_KEY = keyAlt
     }
   })
 

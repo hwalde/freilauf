@@ -271,6 +271,51 @@
     llmLoadModels(sel)
   })
 
+  // ---- the fallback picker of an LLM job ----
+  //
+  // Its own container (`[data-llm-fb]`) and its own select attribute, NOT the
+  // primary's: the primary wiring above scopes itself to the fieldset, and a
+  // second `select[data-llm-source]` in the same fieldset would fight it over
+  // one warning. The model datalist is filled on CHANGE only — the page load
+  // stays at one request per job, and the field is free text anyway.
+  function llmSyncFallback(sel) {
+    const box = sel.closest('[data-llm-fb-block]')
+    if (!box) return
+    const opt = sel.selectedOptions[0]
+    const warn = box.querySelector('[data-llm-fb-overhead]')
+    if (warn) warn.hidden = !(opt && opt.dataset.overhead === '1')
+    const model = box.querySelector('[data-llm-fb-model]')
+    if (model) model.hidden = !sel.value
+  }
+
+  async function llmLoadFallbackModels(sel) {
+    if (!sel.value) return
+    const box = sel.closest('[data-llm-fb-block]')
+    const input = box && box.querySelector('input[list]')
+    const liste = input && document.getElementById(input.getAttribute('list'))
+    if (!liste || liste.options.length) return
+    try {
+      const j = await (await fetch('/api/llm-models?source=' + encodeURIComponent(sel.value))).json()
+      if (!j.ok || !j.models || !j.models.length) return
+      j.models.forEach(function (m) {
+        const o = document.createElement('option')
+        o.value = m.id
+        if (m.name && m.name !== m.id) o.textContent = m.name
+        liste.append(o)
+      })
+    } catch {
+      /* no list: the model field is free text and always works */
+    }
+  }
+
+  document.querySelectorAll('select[data-llm-fb]').forEach(llmSyncFallback)
+  document.addEventListener('change', function (ev) {
+    const sel = ev.target && ev.target.closest && ev.target.closest('select[data-llm-fb]')
+    if (!sel) return
+    llmSyncFallback(sel)
+    llmLoadFallbackModels(sel)
+  })
+
   // ---- the LLM jobs' serving-provider routing: mode decides the fields ----
   // Same three modes as the run forms (open / auto / pin); the settings page
   // renders one block per LLM job, so this is DELEGATED and namespaced by the

@@ -956,13 +956,22 @@ not `t()` keys — a prompt that changed with the operator's UI language would
 change the model's answer with it. An i18n sweep must leave them alone.
 
 `server/llm/sources.mjs` (the model-source registry: providers with `llm` plus
-harnesses with `llm`) and `server/llm/index.mjs` (`llmJson()`, the one entry
-point every direct LLM call goes through) sit on top of these three: they are
-the layer that picks the strategy from the source's declared `schema`, runs the
-extraction, validates and coerces, reprompts once with the exact complaint, and
-raises the alert when even that fails. **A plugin never sees any of it** — the
+harnesses with `llm`), `server/llm/job.mjs` (the ONE planner that turns a
+purpose into a chain of sources — primary, then the configured fallbacks — and
+reads the per-job routing settings) and `server/llm/index.mjs` (`llmJson()`,
+the one entry point every direct LLM call goes through) sit on top of these
+three: they are the layer that picks the strategy from the source's declared
+`schema`, walks the chain when a source is unreachable (a transport failure
+takes the next source, no wait; the whole chain down triggers exponential
+backoff with jitter, at most `llm_retry_attempts` — hard cap 10 — attempts),
+runs the extraction, validates and coerces, reprompts once with the exact
+complaint, and raises one alert naming every source it tried when even the
+backoff cannot save the call. **A plugin never sees any of it** — the
 capability described above is the whole contract, and it is complete whichever
-state those two modules are in.
+state those modules are in. A plugin also never knows which position in the
+chain it answered at: a fallback entry is an ordinary source id resolved
+through the same registry, with the same `llm.complete`, the same `purpose`
+header and the same `orRouting` (which stays inert outside OpenRouter).
 
 ### `overhead: true`
 
