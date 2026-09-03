@@ -25,6 +25,7 @@ import {
   pageMergeSettings, mergeSettingsSave,
   pageCleanupSettings, cleanupSettingsSave,
   pageSkillSettings, skillSettingsSave, skillSettingsSync,
+  repoToggle, repoDelete,
   headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
   integrationSection, problemPage, runEditCard,
 } from './pages.mjs'
@@ -210,6 +211,12 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'GET' && path === '/repos') return pageRepos(req, res, url)
   if (req.method === 'GET' && path === '/repos/edit') return repoEdit(req, res, url)
   if (req.method === 'POST' && path === '/repos/edit') return repoSave(req, res, url, formBody)
+  // Switching a repo off is the reversible alternative to deleting it; deleting
+  // needs the repo's name in `confirm` and refuses while work is in flight.
+  // Both live here rather than under /api/: they are page actions, and the
+  // agent-facing skill deliberately tells an agent to leave the delete alone.
+  if (req.method === 'POST' && path === '/repos/toggle') return repoToggle(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/repos/delete') return repoDelete(req, res, url, formBody)
   if (req.method === 'GET' && path === '/settings') return pageSettings(req, res, url)
   if (req.method === 'POST' && path === '/settings/save') return settingsSave(req, res, url, formBody)
   // Plugins (Settings → Plugins) — coding agents, model providers, credentials

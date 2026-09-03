@@ -464,6 +464,11 @@ escalation ladder, what a conflict run is, or what `keep_on_branch` changes.
   turns up when the session was simply killed. See §2.
 - **A `deferred` run is not broken.** The budget gate parked it; it starts by
   itself. Force it only with `/start`, and only if the operator agrees.
+- **A start into an inactive repo is refused.** A repo can be deactivated
+  (`repos.active = 0`), which takes it out of every repo dropdown and stops both
+  scheduled and manual starts; its existing runs stay fully readable with an
+  explicit `?repo=<id>`. If a start is refused with a problem naming the repo,
+  that is why — see `../freilauf-repos/SKILL.md`.
 - **Killing a finished run does not un-finish it** — it only closes the session.
   Killing a *live* one writes `aborted` over whatever it was.
 - **Branch mode `fest` with a branch another worktree holds is refused**, the

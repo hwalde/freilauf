@@ -286,6 +286,12 @@ is `../freilauf-flows/SKILL.md`.
 - **Do not invent a model id.** opencode reports an unknown model as
   `UnknownError: Unexpected server error` — indistinguishable from a real
   provider outage. Copy ids from `/api/models` (see `../freilauf-models/SKILL.md`).
+- **An inactive repo starts nothing.** A repo can be deactivated
+  (`repos.active = 0`): it vanishes from every repo dropdown, its agents are
+  skipped by the scheduler, and a manual start is refused with a problem naming
+  the repo. So "the agent did not fire" and "the repo is not in the list" are
+  frequently the same cause. `fl-api /api/repos` shows `active` on every row;
+  `../freilauf-repos/SKILL.md` has what deactivating does and does not do.
 - **`schedule_time` and `run_at` and cron are the hub machine's local time**,
   not UTC. The run rows in the API are UTC.
 - **`einmalig` rewrites itself.** After it fires, `schedule_kind` is `manuell`

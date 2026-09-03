@@ -6,9 +6,10 @@ description: >
   mode. Use this skill when someone asks to add a project to the hub, says a
   repo is missing from the dropdown, wants a `.env` or `node_modules` inside
   every worktree, wants instructions that apply to every run of one project,
-  wants Freilauf to merge finished work into main (or to stop doing that), asks
-  to delete or rename a repo, asks how many runs a project may do at once, or
-  asks where worktrees live on disk — even if the word "Freilauf" is never used.
+  wants Freilauf to merge finished work into main (or to stop doing that), wants
+  a project put away, deactivated or reactivated, asks to delete or rename a
+  repo, asks how many runs a project may do at once, or asks where worktrees
+  live on disk — even if the word "Freilauf" is never used.
 license: CC BY 4.0
 metadata:
   project: Freilauf
@@ -36,10 +37,11 @@ Read this whole file before changing a repo. Read
 | **write** (create) | `POST /repos/edit` |
 | **write** (update) | `POST /repos/edit?id=<id>` |
 | suggest worktree extras | `POST /api/repos/extras-suggest` (body: `path`) |
-| delete | **does not exist** — see below |
+| **deactivate / activate** | `POST /repos/toggle` (body: `id`, optional `active=1\|0`) |
+| delete | `POST /repos/delete` — **exists, and is not yours to call.** See "Deleting" |
 
-There is exactly **one** write route, and it takes the *whole* form. See
-"Editing overwrites everything" before you POST.
+There is exactly **one** write route for the repo's fields, and it takes the
+*whole* form. See "Editing overwrites everything" before you POST.
 
 ## Listing
 
@@ -56,8 +58,12 @@ fl-api /api/repos
     "prompt": null, "created_at": "2026-01-02 10:00:00",
     "merge_mode": "off", "merge_check": null,
     "finish_timeout_min": 15, "merge_max_attempts": 2, "conflict_parallel": 1,
-    "notify_running": 1, "max_parallel": 0, "last_push_at": null } ] }
+    "notify_running": 1, "max_parallel": 0, "last_push_at": null,
+    "active": 1 } ] }
 ```
+
+`fl-api /api/repos active=1` lists only the active ones — which is what every
+repo dropdown in the UI shows. See "Deactivating a repo".
 
 `worktree_extras` is the raw stored text; `extras` is the same thing parsed —
 use `extras`. Ordered by `name`.
@@ -132,40 +138,80 @@ checkbox, because an unchecked box is simply absent from a POST body and
 "absent" would otherwise be indistinguishable from "not mentioned". When you
 POST by hand, send `notify_running=1` or `notify_running=0` explicitly.
 
-## Deleting: you cannot, through the hub
+## Deactivating a repo — the reversible way to put one away
 
-There is **no delete route and no `DELETE FROM repos` anywhere in `server/`**.
-The repo list has no delete button. This is deliberate: a repo row is the anchor
-of every run, agent and worktree that ever belonged to it.
+`repos.active` (0/1, `1` for every repo that existed before the column) is what
+"I am done with this project for now" looks like. It is the answer to almost
+every "can you remove this repo" — reversible, loses nothing, and one call:
 
-What to do instead, in order of preference:
+```bash
+fl-api -X POST /repos/toggle id=<id> active=0     # deactivate
+fl-api -X POST /repos/toggle id=<id> active=1     # activate again
+fl-api -X POST /repos/toggle id=<id>              # flip, whichever it was
+```
 
-1. **Rename it** (`name`) or **point it at another checkout** (`path`). Both are
-   ordinary edits. Renaming changes where new worktrees go — see gotchas.
-2. **Leave it and stop using it.** Set `max_parallel` to a low number, deactivate
-   its agents, and it costs nothing. A repo with no runs is one row.
-3. **Delete the row in SQLite directly** — *unsupported*. Stop the hub
-   (`freilauf off`) and edit the database (`freilauf.db` in the hub's data
-   directory, resolved by `server/paths.mjs`; an installation from before the
-   rename may still carry `cc-hub.db`). What happens depends on a pragma:
+Send `active` explicitly whenever you know which state you want. The flip is
+for a button, not for a script: two scripts flipping the same repo end up
+where they started.
 
-   - `agents.repo_id` is `REFERENCES repos(id) ON DELETE CASCADE`;
-     `runs.repo_id` is a plain `REFERENCES repos(id)` with **no** delete action.
-   - SQLite enforces foreign keys only when `PRAGMA foreign_keys = ON` is set
-     **on that connection**, and it is off by default — the hub sets only
-     `journal_mode` and `busy_timeout` at startup. So with the pragma **off**
-     (the likely case in a `sqlite3` shell) the delete succeeds and orphans
-     everything: the repo's agents and runs survive as rows pointing at an id
-     that is gone. Their detail pages lose the repo block, the worktree path
-     and the base branch; integration, "main has moved" and the repo filter
-     resolve nothing. With the pragma **on**, the agents cascade away — and
-     the delete is *refused* outright as long as any run still references the
-     repo.
-   - Either way, worktrees under `~/agents/worktrees/<name>/` and run
-     directories under `~/agents/runs/<id>/` are **not** removed. Clean them
-     up by hand.
+Like `/repos/edit`, this is a page action: **success is a 303**, so `fl-api`
+exits 1 because a redirect is not 2xx. That is not a failure — confirm with
+`fl-api --status -X POST …`, or just re-read `fl-api /api/repos`. An unknown
+`id` is an HTML 400 problem page.
 
-   Tell the operator all of this before doing it; do not do it unasked.
+**What deactivating does** — know all of it before you offer it:
+
+| | |
+|---|---|
+| **gone from every repo dropdown** | the header switcher and the Quick-Run dialog (one list feeds both), the "move this run to another repo" select on a run's page, the agent-move target, the tmux-cleanup settings, and the flow designer's repo field. The single-run and agent forms have no dropdown of their own — they take the repo from the header switcher, which is filtered, so an inactive repo cannot be reached from them either |
+| **no new work starts** | the scheduler skips its agents (a `schedule_skipped` event says why), a planned single run is not picked up, and a *manual* start is refused with a readable problem naming the repo |
+| **history stays reachable** | an explicit `?repo=<id>` still renders its overview, its archive, its run detail pages and the sidebar. Only the *fallback* — which repo you get when you name none — skips an inactive one |
+| **nothing is deleted** | not one row, not one file. Runs, agents, reports, events and incidents are all still there, and activating it again restores exactly the state it had |
+| **still visible on `/repos`** | marked inactive, with the button to bring it back |
+| **runs already in flight are not stopped** | deactivating is about what starts next. Abort them yourself if that is what you meant |
+
+`fl-api /api/repos` shows `active` on every row and takes a filter:
+`active=1` (only active), `active=0` (only inactive), omitted = all. **The
+dropdowns show only the active ones, so a repo missing from a form while
+`/api/repos` still lists it is almost always an inactive repo, not a bug.**
+
+## Deleting: only a human, only in the UI
+
+`POST /repos/delete` exists. **Do not call it, and do not help anybody call it
+from a script.** When someone asks you to delete a repo, say what is below and
+hand the job back:
+
+> Deleting a repository is only done in the Freilauf UI, on the **Repos** page:
+> the row's delete button opens a confirmation that lists exactly what will be
+> lost and makes you type the repo's name. I can deactivate it for you instead —
+> that hides it from every dropdown, stops new runs, and loses nothing.
+
+Three reasons that is the rule and not timidity:
+
+1. **It is irreversible and it takes the history with it.** The row, its agents,
+   its runs, and every event, report and incident hanging off those runs. There
+   is no archive and no undo.
+2. **The hub has no authentication.** Anything reachable from `fl-api` is
+   reachable by any process on the machine, including a coding agent that
+   misread an instruction. The route therefore requires `confirm` to equal the
+   repo's exact name — a fence against exactly this, and one you should not
+   walk around by looking the name up.
+3. **The dialog is the feature.** It reads the real counts out of the database,
+   names the paths that stay behind, and offers deactivating instead. A script
+   call skips the one part that makes the decision an informed one.
+
+What deletion leaves alone, so you can answer the question without calling it:
+the **git checkout at `path` is never touched**; the worktrees under
+`~/agents/worktrees/<name>/` and the run directories under
+`~/agents/runs/<id>/` stay on disk; a `run_merged` flow that was scoped to that
+repo survives and simply never fires again. It is also **refused while any run
+of the repo is still `running`, `waiting_help`, `scheduled` or `deferred`** —
+so "delete it" on a busy repo is a "finish or abort those runs first" in any
+case, which is another good reason to deactivate instead.
+
+And the two ordinary alternatives, which are often what was actually meant:
+**rename it** (`name`) or **point it at a different checkout** (`path`). Both
+are plain edits. Renaming changes where new worktrees go — see gotchas.
 
 ## What each column does at runtime
 
@@ -340,9 +386,10 @@ somebody is editing is how work is lost.
 - **Changing `merge_mode` does not retro-fit running runs.** It is read at the
   moment a report arrives, so a run that reports after the switch is treated
   under the new mode; one that already finished is not.
-- **Deleting a flow, an agent or a run never deletes a repo**, and the hub has
-  no way to delete a repo at all — see "Deleting" for what a direct SQLite
-  delete would and would not take with it.
+- **Deleting a flow, an agent or a run never deletes a repo.** Deleting a *repo*
+  does take its agents and runs with it — which is why that route is the human's
+  and not yours. Offer `POST /repos/toggle` with `active=0` instead; see
+  "Deactivating a repo" and "Deleting".
 - For any harness / provider / model / effort decision that comes up while
   setting up a repo's agents, use `../freilauf-models/SKILL.md` and
   `fl-api /api/favorites`. Nothing about the model lives on the repo row.

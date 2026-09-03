@@ -766,6 +766,15 @@ dialog.qr.cleanup > p.dim { margin: 0 0 var(--sp-10); line-height: 1.5; }
 dialog.qr.cleanup form.form-grid { margin: 0; }
 dialog.qr.cleanup form.form-grid label:first-of-type { margin-top: 0; }
 
+/* A deactivated repository stays on the Repos page — that is the whole point of
+   deactivating rather than deleting — but it must not read as an active one. */
+tr.repo-off > td { opacity: .6; }
+tr.repo-off > td:first-child { opacity: 1; }
+dialog.qr.repo-del { width: min(600px, 94vw); }
+dialog.qr.repo-del p.warn, dialog.qr.repo-del p.err { margin: var(--sp-8) 0; }
+dialog.qr.repo-del label { display: block; margin: var(--sp-12) 0 0; }
+dialog.qr.repo-del label input { width: 100%; }
+
 /* ---- Settings -> Freilauf skills (server/pages.mjs, server/welcome.mjs) ----
    One list shape for four different questions on that page — what is shipped,
    where it goes, what is installed, what a removal would take. They are read

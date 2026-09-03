@@ -830,6 +830,31 @@ try {
     cu._claudeLimitsReset()
   })
 
+  // Measured: these two assertions above failed in 6 of 30 suite runs, and the
+  // cause was not the test. `statSync().mtimeMs` is a FLOAT with sub-millisecond
+  // precision, `Date.now()` is an integer millisecond — so a quota.json written
+  // inside the current millisecond carries an `at` LARGER than `now`
+  // (1788443185118.0244 against 1788443185118) and won the age comparison
+  // against a live answer that had just arrived. In production the status line
+  // writes that file continuously while a session renders. The rule the module
+  // documents is "the live answer wins outright, the newest of the rest wins
+  // where it says nothing", and this pins it without depending on a clock: the
+  // file's mtime is unambiguously in the future of the `now` handed in.
+  await pruefe('a file dated in the future does not beat a live answer', async () => {
+    const { claudeQuota } = await quotaMit(JSON.stringify({
+      five_hour: { used_percentage: 3 }, seven_day: { used_percentage: 77 },
+    }), 12)
+    cu._claudeLimitsSet({ five: 5, resets_at: null, seven_general: 78, seven_resets_at: null, weekly_scoped: [] })
+    // A `now` an hour before the file was written — the file's mtime is then
+    // newer than "now" by an hour instead of by a fraction of a millisecond.
+    const q = claudeQuota(Date.now() - 3600_000)
+    gleich(q.five, 5, 'the account still decides the 5-hour window')
+    gleich(q.seven_general, 78, 'and the week')
+    wahr(q.live, 'and the answer says so')
+    gleich(q.five_at, null, 'a live window carries no "as of" stamp')
+    cu._claudeLimitsReset()
+  })
+
   await pruefe('a live answer that has aged out falls back to the file', async () => {
     const { claudeQuota } = await quotaMit(JSON.stringify({
       five_hour: { used_percentage: 7 }, seven_day: { used_percentage: 12 },
@@ -1746,6 +1771,64 @@ try {
     dbMod.prepare("DELETE FROM settings WHERE key IN ('skills_install','skills_auto_update')").run()
     gleich(dbMod.prepare('SELECT count(*) c FROM plugin_config').get().c, 0, 'plugin_config is empty again')
     falsch(skillsMod.skillsInstallOn(), 'and the switch is back off')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Repos: deactivating, and the fences in front of deleting')
+
+  const repoMod = await import('../server/pages.mjs')
+  const schedMod = await import('../server/scheduler.mjs')
+  const repoDb = (await import('../server/db.mjs')).default
+
+  await pruefe('repoInactive is only true for a repo that is really switched off', () => {
+    const id = repoDb.prepare('INSERT INTO repos(name,path) VALUES(?,?)').run('unit-aktiv', '/tmp/unit-aktiv').lastInsertRowid
+    const aus = repoDb.prepare('INSERT INTO repos(name,path,active) VALUES(?,?,0)').run('unit-aus', '/tmp/unit-aus').lastInsertRowid
+    falsch(schedMod.repoInactive(id), 'an active repo')
+    wahr(schedMod.repoInactive(aus), 'a deactivated one')
+    // A repo that does not exist is NOT "deactivated" — whatever is wrong
+    // there, the ordinary unknown-repo path says it better.
+    falsch(schedMod.repoInactive(999999), 'a repo that does not exist')
+    repoDb.prepare("DELETE FROM repos WHERE name LIKE 'unit-a%'").run()
+    gleich(repoDb.prepare("SELECT count(*) c FROM repos WHERE name LIKE 'unit-a%'").get().c, 0, 'cleaned up again')
+  })
+
+  await pruefe('the delete facts count what would really be lost, in flight included', () => {
+    const id = repoDb.prepare('INSERT INTO repos(name,path) VALUES(?,?)').run('unit-fakten', '/tmp/unit-fakten').lastInsertRowid
+    // try/finally, because this group writes into the sandbox database every
+    // later group reads: a throw in the middle must not leave a repo behind.
+    try {
+      const leer = repoMod.repoDeleteFacts(id)
+      gleich(leer.runs, 0, 'a fresh repo has nothing to lose')
+      gleich(leer.inFlight, 0, 'and nothing in flight')
+
+      const agentId = repoDb.prepare(`INSERT INTO agents(repo_id,name,harness,prompt,branch_mode,expected_minutes)
+        VALUES(?,?,'claude','x','keiner',45)`).run(id, 'unit-agent').lastInsertRowid
+      const lauf = (rid, status, report) => repoDb.prepare(`INSERT INTO runs(id,repo_id,agent_id,harness,prompt,branch_mode,expected_minutes,status,report_md)
+        VALUES(?,?,?,'claude','x','keiner',45,?,?)`).run(rid, id, agentId, status, report)
+      lauf('unit-r1', 'done', '# report')
+      lauf('unit-r2', 'running', null)
+      repoDb.prepare(`INSERT INTO events(run_id,kind) VALUES('unit-r1','started')`).run()
+      repoDb.prepare(`INSERT INTO incidents(run_id,typ,quelle) VALUES('unit-r1','rate_limit','log')`).run()
+
+      const f = repoMod.repoDeleteFacts(id)
+      gleich(f.runs, 2, 'both runs')
+      gleich(f.agents, 1, 'the agent')
+      gleich(f.reports, 1, 'only the run that really wrote a report')
+      gleich(f.events, 1, 'its event')
+      gleich(f.incidents, 1, 'its incident')
+      gleich(f.inFlight, 1, 'and the running one is what blocks a delete')
+    } finally {
+      repoDb.prepare("DELETE FROM events WHERE run_id LIKE 'unit-r%'").run()
+      repoDb.prepare("DELETE FROM incidents WHERE run_id LIKE 'unit-r%'").run()
+      repoDb.prepare('DELETE FROM runs WHERE repo_id=?').run(id)
+      repoDb.prepare('DELETE FROM agents WHERE repo_id=?').run(id)
+      repoDb.prepare('DELETE FROM repos WHERE id=?').run(id)
+    }
+  })
+
+  await pruefe('the group leaves no repo behind for the groups after it', () => {
+    gleich(repoDb.prepare("SELECT count(*) c FROM repos WHERE name LIKE 'unit-%'").get().c, 0,
+      'every row this group inserted is gone again')
   })
 
   // ------------------------------------------------------------------
@@ -3993,7 +4076,13 @@ try {
     gleich(rd.defFromAgent({ ...agentRow, keep_on_branch: 0 }).keepOnBranch, 0, 'and back off again')
     // saveAgent writes it, defFromAgent reads it back: the round trip a stored
     // agent takes every time it starts.
-    const id = rd.saveAgent({ repoId: 1, name: `keep-${Date.now()}`, def: await rd.runDefFromForm({
+    // NOT a hardcoded repo id: this suite shares one database and several groups
+    // insert repos, so "1" is whichever row happened to be first. It broke the
+    // day a group before this one inserted and removed a repo of its own.
+    const { default: dbKeep } = await import('../server/db.mjs')
+    const keepRepo = dbKeep.prepare('SELECT id FROM repos ORDER BY id LIMIT 1').get()?.id
+      ?? dbKeep.prepare(`INSERT INTO repos(name,path) VALUES('keep-repo','/tmp/keep-repo') RETURNING id`).get().id
+    const id = rd.saveAgent({ repoId: keepRepo, name: `keep-${Date.now()}`, def: await rd.runDefFromForm({
       harness: 'claude', prompt: 'p', branch_mode: 'fest', branch_pattern: 'long-lived', keep_on_branch: '1',
     }, []) })
     const { default: db2 } = await import('../server/db.mjs')

@@ -223,6 +223,14 @@ The hub starts empty on purpose, and the first thing a browser sees says so:
    provider *or* a coding agent on its own subscription; without a usable source
    the button says why. The suggestion **replaces** the current list — it never
    extends it.
+   Each row also carries **Deactivate** and **Delete**. Deactivating is the one
+   to reach for: the repo vanishes from every repo dropdown and starts nothing
+   new, while every run, agent and report it owns stays intact and reachable —
+   and one click brings it back. Deleting is permanent, takes the runs, agents,
+   events and incidents with it, refuses while any run is still going or
+   planned, and makes you type the repo's name; it never touches your git
+   checkout, the worktrees or the run directories. Its confirmation offers
+   deactivating instead.
 3. **Start a single run.** Small, boring task, a repo you do not mind. Watch it
    in the browser terminal. This is the fastest way to learn what the system
    does — much faster than reading `AGENTS.md`.
@@ -315,6 +323,7 @@ tooling. The seams that were designed to be pulled on:
 | point the notification links at your own hostname | Settings → **Notification links**: a `Public hostname` (the name that matches your certificate), and the port follows the live VPN port automatically. Without one, `FREILAUF_PUBLIC_URL` (a full URL, in `~/.config/freilauf/env`) or the local address answers — `publicBase()` in `server/util.mjs` |
 | give agents an opt-in capability | drop a folder with a `SKILL.md` into `~/agents/zusaetze/` — it appears as a checkbox in the run forms. Deliberately *not* `.claude/skills`, so nothing loads automatically |
 | teach your coding agents how to drive Freilauf itself | Settings → **Freilauf skills** installs the agent skills under `skills/` into the directories your configured coding agents read. Where those are is a **plugin declaration** (`skills: { user, project }`), so a new coding agent brings its own — `server/skills.mjs`, [`docs/plugins.md`](docs/plugins.md) |
+| put a project away without losing its history | **Repos → Deactivate**: gone from every dropdown, starts nothing new, everything it owns kept and reachable, reversible in one click. `POST /repos/toggle` (`id`, `active=1\|0`) is the same thing from a script — `server/pages.mjs`, and the "Putting a repository away" section in [`AGENTS.md`](AGENTS.md) |
 | script the hub from a shell or from inside a run | `fl-api` — `fl-api /api/runs repo=3 status=running`, `fl-api /api/runs/<id>`, `fl-api -X POST /api/runs/<id>/title title=…`. The read-only half is `server/read-api.mjs`; every write still goes through the ordinary POST routes, which validate |
 | do something after a run finishes or a merge lands | **no-code flows** — a graphical designer, no code needed: message running agents, start follow-up runs and wait, extract data from a report via LLM, branch, loop, notify, HTTP, shell command → [`server/flows/AGENTS.md`](server/flows/AGENTS.md) |
 | change when a run is allowed to start | Settings → **Budget gates** — the fieldset is generated from whichever plugins declare a `gate`, so a new one appears there by itself; else `repos.max_parallel` — `server/scheduler.mjs`; a deferred run can be started anyway from its detail page |
