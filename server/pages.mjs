@@ -1446,7 +1446,7 @@ export function runChips(run, repo, herkunft) {
       ? run.provider + (runRoutingJson(run.or_routing)?.mode === 'auto'
         ? runRoutingNote(run.or_routing)
         : run.or_provider ? ` (${t('run.pinned')}: ${run.or_provider})` : '') : null)}
-    ${chip('run.start', run.started_at ? fmtDbUtc(run.started_at) : null)}
+    ${chip('run.start', runStartZeit(run) ? fmtDbUtc(runStartZeit(run)) : null)}
     ${chip('run.end', run.ended_at ? fmtDbUtc(run.ended_at) : null)}
     ${chip('run.expectation', t('unit.minutes', { n: run.expected_minutes }))}
     ${run.workdir_effective ? chip('run.workdir', `<code>${e(run.workdir_effective)}</code>`, { raw: true }) : ''}
@@ -1551,10 +1551,28 @@ export function runEvents(runId) {
   return `<ul class="events" id="run-events">${events.map(ev => `<li><span class="dim">${e(fmtDbUtc(ev.ts))}</span> ${e(ev.kind)}</li>`).join('') || `<li class="dim">${e(t('run.none'))}</li>`}</ul>`
 }
 
+/**
+ * The runtime figure of the metrics block. A run that is still WAITING to start
+ * (scheduled, deferred) carries its PLANNING time in `started_at` — the column's
+ * default is the moment the row was created, the real start is only written into
+ * it when the run launches (pickUpScheduled / startDeferredRun). Counting from
+ * it would present the waiting time as runtime — and would call the run
+ * "running", which a scheduled run is not. The overview already shows no
+ * duration for such a run; the detail page has to say the same thing. Only once
+ * the run is actually going (or has gone) does the figure mean "runtime".
+ */
 function fmtLaufzeit(run) {
+  if (run.status === 'scheduled' || run.status === 'deferred') return '–'
   const endeMs = run.ended_at ? Date.parse(run.ended_at.replace(' ', 'T') + 'Z') : Date.now()
   const min = Math.round((endeMs - Date.parse(run.started_at.replace(' ', 'T') + 'Z')) / 60000)
   return `${t('unit.minutes', { n: min })}${run.ended_at ? '' : ' (' + t('run.running') + ')'}`
+}
+
+/** The moment a run's clock really starts — or started. Null while it still waits to launch. */
+function runStartZeit(run) {
+  if (run.status === 'scheduled') return run.start_mode === 'at' ? (run.start_at || null) : null
+  if (run.status === 'deferred') return null
+  return run.started_at || null
 }
 
 /**

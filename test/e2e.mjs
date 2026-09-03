@@ -1938,6 +1938,17 @@ try {
     enthaelt(zeile, 'starts at', 'and says what it is waiting for')
     enthaelt(zeile, 'Planned run', 'with its title')
   })
+  await pruefe('a planned run does not yet show a runtime — it has not started', async () => {
+    // The detail page must say the same as the overview, which shows no duration
+    // for a planned run. started_at still holds the PLANNING moment (the real
+    // start is written when the run launches), so counting from it — or calling
+    // the run "running" — would present waiting as runtime.
+    const html = await (await hol(`/runs/${GEPLANT}`)).text()
+    const i = html.indexOf('id="run-metrics"')
+    const metrik = i < 0 ? '' : html.slice(i, i + 600)
+    enthaelt(metrik, '>– <span class="dim">/ Expectation', 'runtime is a dash, not elapsed minutes')
+    falsch(metrik.includes('(running)'), 'it does not call a planned run running')
+  })
   await pruefe('when the moment has come the watcher starts it', async () => {
     db.prepare(`UPDATE runs SET start_at=datetime('now','-1 minutes') WHERE id=?`).run(GEPLANT)
     await watcherTick()
