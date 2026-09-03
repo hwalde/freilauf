@@ -1,26 +1,12 @@
 // Freilauf flows — structured extraction. Same channel as the check LLM
 // (pruefer.mjs): the default model is `llm_check_model` and the default source
-// `llm_check_source`, both overridable per step (`model`, `source`). An unset
-// source reads as `provider:openrouter` — the call this file used to make
-// itself.
+// `llm_check_source`, both overridable per step (`model`, `llmSource`), and the
+// fallback chain comes from the same job resolution as everywhere else
+// (`llm/job.mjs`) — a step may name its own fallback (`fallback`,
+// `fallbackModel`), otherwise the check job's fallback applies.
 import { getSetting } from '../db.mjs'
 import { llmJson } from '../llm/index.mjs'
-import { defaultSource } from '../llm/sources.mjs'
-
-/**
- * The stored auto-routing config of one of the hub's own LLM jobs — the same
- * requirements widget the run forms carry, saved on the settings page. Tolerant
- * of nulls and junk: no config, a broken blob — all mean "no auto routing",
- * the plain serving-provider setting then decides alone.
- */
-function orRoutingAusSetting(key) {
-  const v = getSetting(key)
-  if (!v) return null
-  try {
-    const cfg = JSON.parse(v)
-    return cfg?.mode === 'auto' ? cfg : null
-  } catch { return null }
-}
+import { jobFallbacks, jobRouting, jobSource } from '../llm/job.mjs'
 
 
 const MAX_CHARS = 60_000     // context cap for the extraction input (cost + latency)
@@ -65,12 +51,10 @@ Never invent branch names, URLs or numbers. Answer exclusively in the given JSON
  * happens to share a word. A step field wiring this one through therefore wants
  * a name of its own (`llmSource`), or the two would collide in `props`.
  */
-export async function extractStructured({ text, instructions = '', fields, model = null, source = null }) {
+export async function extractStructured({ text, instructions = '', fields, model = null, source = null, fallback = null, fallbackModel = null }) {
   const useModel = model || getSetting('llm_check_model')
   if (!useModel) throw new Error('extract: no model — set one in the step or under Settings → check LLM')
-  const useSource = String(source ?? '').trim()
-    || (getSetting('llm_check_source') ?? '').trim()
-    || defaultSource()
+  const useSource = String(source ?? '').trim() || jobSource('check')
   const schema = schemaFromFields(fields)
   if (!schema.required.length) throw new Error('extract: no valid fields')
 
@@ -78,16 +62,24 @@ export async function extractStructured({ text, instructions = '', fields, model
   if (input.length > MAX_CHARS) input = input.slice(0, MAX_CHARS / 2) + '\n…\n' + input.slice(-MAX_CHARS / 2)
   const user = `${instructions ? `Instructions:\n${instructions}\n\n` : ''}Text:\n\`\`\`\n${input}\n\`\`\``
 
+  // The step may name its own fallback (`fallback`, `fallbackModel`); with
+  // neither, the check job's fallback chain applies — the step is one of the
+  // hub's own questions and inherits the same resilience.
+  const stepFallback = String(fallback ?? '').trim()
+  const fallbacks = stepFallback
+    ? [{ source: stepFallback, model: String(fallbackModel ?? '').trim() || useModel }]
+    : jobFallbacks('check', useModel)
+
   const r = await llmJson({
     source: useSource,
     model: useModel,
+    fallbacks,
+    ...jobRouting('check'),
     system: SYSTEM,
     prompt: user,
     schema,
     schemaName: 'flow_extract',
     purpose: 'extract',
-    servingProvider: getSetting('llm_check_or_provider') || null,
-    orRouting: orRoutingAusSetting('llm_check_or_routing'),
     maxTokens: 2000,
     temperature: 0,
     timeoutMs: 120_000,

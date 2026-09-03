@@ -296,6 +296,7 @@ tooling. The seams that were designed to be pulled on:
 | be notified somewhere other than Telegram — Slack, a webhook, e-mail, a script | a **notifier plugin**: the same package shape with `"kind": "notifier"`, a descriptor whose minimum is `id`, `label` and `async send(message, ctx)`, and whatever `settings` / `credentials` it needs. Inside this repo instead: a file in `server/notifiers/`. Configure it under Settings → Notifications → [`docs/plugins.md`](docs/plugins.md) |
 | not be notified at all | do nothing — that is the default, and it is a complete installation |
 | have the hub's own small questions answered by something else | Settings → the source picker on each of Run titles / Incident check / Worktree extras: any plugin declaring `llm`, including a **coding agent on your existing subscription** (marked, because a session per question is slower and dearer) |
+| keep those questions working when the provider is down | the **fallback picker** next to each source: a second source the question goes to when the first is unreachable, before any retry begins. `agent:claude` (print-only mode) needs no model and no key — a zero-config fallback |
 | give a provider a key without touching the environment | Settings → **Plugins**: name a different environment variable, or store the value |
 | change what every agent is told | Settings → **Platform prompt suffix** (added, never replacing the platform rules), or a **repo prompt** per repository |
 | point the notification links at your own hostname | Settings → **Notification links**: a `Public hostname` (the name that matches your certificate), and the port follows the live VPN port automatically. Without one, `FREILAUF_PUBLIC_URL` (a full URL, in `~/.config/freilauf/env`) or the local address answers — `publicBase()` in `server/util.mjs` |
@@ -357,7 +358,7 @@ If your task is to change Freilauf rather than just run it:
 | Plugins — coding agents, model providers, notification channels: the contract, in depth | **`docs/plugins.md`** (the one document to hand an agent for this), `server/harnesses/`, `server/providers/`, `server/notifiers/` |
 | Saying something to a human — the facade, the page, the CLI | `server/notify.mjs`, `server/notifications.mjs`, `bin/fl-notify` |
 | Loading, validating, storing and configuring plugins | `server/plugins/` (`registry`, `loader`, `manifest`, `store`, `install`, `discovery`, `settings`, `context`, `web`) |
-| The hub's own LLM calls: sources, structured output, alerts | `server/llm/` (`index` = `llmJson()`, `sources`, `schema`, `json`, `alerts`) |
+| The hub's own LLM calls: sources, fallback chain, structured output, alerts | `server/llm/` (`index` = `llmJson()`, `job` = the per-job chain planner, `sources`, `schema`, `json`, `alerts`) |
 | The first-run wizard | `server/welcome.mjs` |
 | No-code flows | `server/flows/` + its own `AGENTS.md` |
 | Pages, sidebar, live channel | `server/pages.mjs`, `server/events.mjs`, `public/hub.js` |

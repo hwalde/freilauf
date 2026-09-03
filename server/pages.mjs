@@ -1840,6 +1840,44 @@ function llmSourceFields(prefix, s, sources) {
     </fieldset>`
 }
 
+/**
+ * The FALLBACK picker of one of the hub's own LLM jobs — the second source the
+ * question goes to when the first is down (a provider outage, a rate limit, a
+ * timeout), before any retry begins. Stored under `llm_<prefix>_fallback` (one
+ * source id; the stored value reads as a list, so a hand-edited row may carry
+ * an ordered chain) plus `llm_<prefix>_fallback_model`, because the fallback
+ * usually speaks a different vendor's model names.
+ *
+ * Its own container (`data-llm-fb`) and its own attribute (`data-llm-fb` on
+ * the select), NOT the primary's: the primary picker's client wiring scopes
+ * itself to the fieldset and would otherwise find two selects fighting over
+ * one warning. Empty = no fallback — an installation that changes nothing
+ * behaves exactly as before.
+ */
+function llmFallbackFields(prefix, s, sources) {
+  const key = `${prefix}_fallback`
+  const current = String(s[key] ?? '').trim()
+  const chosen = sources.find(x => x.id === current) ?? null
+  const stale = current && !chosen
+    ? `<option value="${e(current)}" selected>${e(t('settings.llm_source_unknown', { source: current }))}</option>`
+    : ''
+  const options = sources.map(src =>
+    `<option value="${e(src.id)}" ${src.id === current ? 'selected' : ''}
+       data-overhead="${src.overhead ? '1' : '0'}">${e(sourceOptionText(src))}</option>`).join('')
+  const overhead = !!chosen?.overhead
+  const fbModel = s[`${prefix}_fallback_model`] ?? ''
+  return `<div data-llm-fb-block>
+    <label>${e(t('settings.llm_fallback'))}
+      <select name="${e(key)}" data-llm-fb><option value="" ${!current ? 'selected' : ''}>${e(t('settings.llm_fallback_none'))}</option>${stale}${options}</select>
+      <span class="dim">${e(t('settings.llm_fallback_hint'))}</span></label>
+    <p class="warn" data-llm-fb-overhead ${overhead ? '' : 'hidden'}>${e(t('settings.llm_source_overhead'))}</p>
+    <label data-llm-fb-model ${current ? '' : 'hidden'}>${e(t('settings.llm_fallback_model'))}
+      <input name="${e(prefix)}_fallback_model" value="${e(fbModel)}" list="${e(prefix)}_fb_list" placeholder="${e(t('settings.llm_fallback_model_ph'))}">
+      <datalist id="${e(prefix)}_fb_list"></datalist>
+      <span class="dim">${e(t('settings.llm_fallback_model_hint'))}</span></label>
+  </div>`
+}
+
 export async function pageSettings(req, res, url) {
   const s = Object.fromEntries(db.prepare('SELECT key,value FROM settings').all().map(r => [r.key, r.value]))
   const sources = llmSources()
@@ -1896,6 +1934,7 @@ export async function pageSettings(req, res, url) {
       <label>${e(t('settings.llm_model'))} <input name="llm_check_model" list="llm-mru" value="${e(s.llm_check_model ?? '')}" placeholder="vendor/model">
         <datalist id="llm-mru">${llmModelleMru().map(m => `<option value="${e(m)}">`).join('')}</datalist>
         <span class="dim">${e(t('settings.llm_mru_hint'))}</span></label>
+      ${llmFallbackFields('llm_check', s, sources)}
     </fieldset>
     <fieldset data-llm-job><legend>${e(t('settings.title_legend'))}</legend>
       <p class="dim">${e(t('settings.title_hint'))}${missingKey('llm_title')}</p>
@@ -1904,6 +1943,7 @@ export async function pageSettings(req, res, url) {
       <label>${e(t('settings.title_model'))} <input name="llm_title_model" list="title-mru" value="${e(s.llm_title_model || DEFAULT_TITLE_MODEL)}" placeholder="${e(DEFAULT_TITLE_MODEL)}">
         <datalist id="title-mru">${[...new Set([DEFAULT_TITLE_MODEL, ...titleModelsMru()])].map(m => `<option value="${e(m)}">`).join('')}</datalist>
         <span class="dim">${e(t('settings.title_model_hint', { model: DEFAULT_TITLE_MODEL }))}</span></label>
+      ${llmFallbackFields('llm_title', s, sources)}
     </fieldset>
     <fieldset data-llm-job><legend>${e(t('settings.extras_legend'))}</legend>
       <p class="dim">${e(t('settings.extras_hint'))}${missingKey('llm_extras')}</p>
@@ -1912,11 +1952,18 @@ export async function pageSettings(req, res, url) {
       <label>${e(t('settings.extras_model'))} <input name="llm_extras_model" list="extras-mru" value="${e(s.llm_extras_model || DEFAULT_EXTRAS_MODEL)}" placeholder="${e(DEFAULT_EXTRAS_MODEL)}">
         <datalist id="extras-mru">${[...new Set([DEFAULT_EXTRAS_MODEL, ...extrasModelsMru()])].map(m => `<option value="${e(m)}">`).join('')}</datalist>
         <span class="dim">${e(t('settings.extras_model_hint', { model: DEFAULT_EXTRAS_MODEL }))}</span></label>
+      ${llmFallbackFields('llm_extras', s, sources)}
     </fieldset>
     <fieldset><legend>${e(t('settings.llm_ops_legend'))}</legend>
       <p class="dim">${e(t('settings.llm_ops_hint'))}</p>
       <label>${e(t('settings.llm_retries'))} <input name="llm_retries" type="number" min="0" max="5" step="1" value="${e(s.llm_retries ?? '1')}">
         <span class="dim">${e(t('settings.llm_retries_hint'))}</span></label>
+      <label>${e(t('settings.llm_retry_attempts'))} <input name="llm_retry_attempts" type="number" min="0" max="10" step="1" value="${e(s.llm_retry_attempts ?? '10')}">
+        <span class="dim">${e(t('settings.llm_retry_attempts_hint'))}</span></label>
+      <label>${e(t('settings.llm_retry_base'))} <input name="llm_retry_base_ms" type="number" min="0" step="100" value="${e(s.llm_retry_base_ms ?? '2000')}">
+        <span class="dim">${e(t('settings.llm_retry_base_hint'))}</span></label>
+      <label>${e(t('settings.llm_retry_max'))} <input name="llm_retry_max_ms" type="number" min="0" step="1000" value="${e(s.llm_retry_max_ms ?? '30000')}">
+        <span class="dim">${e(t('settings.llm_retry_max_hint'))}</span></label>
       <label>${e(t('settings.llm_alert_on'))} ${onOff('llm_alert_on', (s.llm_alert_on ?? '1') === '1')}
         <span class="dim">${e(t('settings.llm_alert_hint'))}</span></label>
       <label>${e(t('settings.llm_alert_window'))} <input name="llm_alert_window_min" type="number" min="1" step="1" value="${e(s.llm_alert_window_min ?? '30')}"></label>
@@ -2632,10 +2679,11 @@ export async function repoSave(req, res, url, formBody) {
 const STATIC_KEYS = ['pipeline_on',
   'abo_price', 'session_keep_hours', 'archive_session_on', 'archive_session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
   'public_host',
-  'llm_check_on', 'llm_check_model', 'llm_check_or_provider', 'llm_check_source',
-  'llm_title_on', 'llm_title_model', 'llm_title_or_provider', 'llm_title_source',
-  'llm_extras_on', 'llm_extras_model', 'llm_extras_or_provider', 'llm_extras_source',
-  'llm_retries', 'llm_alert_on', 'llm_alert_window_min', 'llm_alert_max_per_hour',
+  'llm_check_on', 'llm_check_model', 'llm_check_or_provider', 'llm_check_source', 'llm_check_fallback', 'llm_check_fallback_model',
+  'llm_title_on', 'llm_title_model', 'llm_title_or_provider', 'llm_title_source', 'llm_title_fallback', 'llm_title_fallback_model',
+  'llm_extras_on', 'llm_extras_model', 'llm_extras_or_provider', 'llm_extras_source', 'llm_extras_fallback', 'llm_extras_fallback_model',
+  'llm_retries', 'llm_retry_attempts', 'llm_retry_base_ms', 'llm_retry_max_ms',
+  'llm_alert_on', 'llm_alert_window_min', 'llm_alert_max_per_hour',
   'ui_language', 'ui_timezone']
 
 /**

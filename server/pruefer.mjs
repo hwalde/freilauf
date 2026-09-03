@@ -14,23 +14,7 @@
 import { getSetting, mruList, mruRemember } from './db.mjs'
 import { TYPEN } from './detect.mjs'
 import { llmJson } from './llm/index.mjs'
-import { getSource, defaultSource, missingCredential } from './llm/sources.mjs'
-
-/**
- * The stored auto-routing config of one of the hub's own LLM jobs — the same
- * requirements widget the run forms carry, saved on the settings page. Tolerant
- * of nulls and junk: no config, a broken blob — all mean "no auto routing",
- * the plain serving-provider setting then decides alone.
- */
-function orRoutingAusSetting(key) {
-  const v = getSetting(key)
-  if (!v) return null
-  try {
-    const cfg = JSON.parse(v)
-    return cfg?.mode === 'auto' ? cfg : null
-  } catch { return null }
-}
-
+import { chainUsable, jobFallbacks, jobRouting, jobSource } from './llm/job.mjs'
 
 const MIN_ABSTAND_MS = 10 * 60_000    // per run at most one request every 10 min
 const MAX_ZEICHEN = 12_000            // context cap: cost and latency
@@ -38,19 +22,19 @@ const zuletzt = new Map()             // runId → ms of the last request
 
 /** Which source answers this question. Unset = OpenRouter, as it always was. */
 export function pruefSource() {
-  return (getSetting('llm_check_source') ?? '').trim() || defaultSource()
+  return jobSource('check')
 }
 
 /**
  * Off unless the operator switched it on AND named a model — unchanged. What
- * used to be "and an OpenRouter key is set" is now "and the chosen source has
- * the credentials it declares as required", which is the same sentence with the
- * vendor taken out of it.
+ * used to be "and an OpenRouter key is set" is now "and at least one source of
+ * the job's chain — the primary or a configured fallback — has the credentials
+ * it declares as required" (`chainUsable` in llm/job.mjs), which is the same
+ * sentence with the vendor taken out of it.
  */
 export function pruefLlmAktiv() {
   if (getSetting('llm_check_on') !== '1' || !getSetting('llm_check_model')) return false
-  const src = getSource(pruefSource())
-  return !!src && missingCredential(src.pluginId, src.plugin) === null
+  return chainUsable('check', getSetting('llm_check_model'))
 }
 
 /** Most recently used models — "used" means: saved in the settings. */
@@ -100,13 +84,13 @@ export async function pruefeTreffer({ runId, harness, treffer, zeilen, jetztMs =
   const r = await llmJson({
     source: pruefSource(),
     model,
+    fallbacks: jobFallbacks('check', model),
+    ...jobRouting('check'),
     system: SYSTEM,
     prompt: user,
     schema: SCHEMA,
     schemaName: SCHEMA_NAME,
     purpose: 'check',
-    servingProvider: getSetting('llm_check_or_provider') || null,
-    orRouting: orRoutingAusSetting('llm_check_or_routing'),
     maxTokens: 600,
     temperature: 0,
     timeoutMs: 60_000,

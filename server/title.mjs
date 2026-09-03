@@ -18,23 +18,7 @@
 // `provider:openrouter` — exactly the call this file used to make itself.
 import db, { getSetting, mruList, mruRemember, announceRun } from './db.mjs'
 import { llmJson } from './llm/index.mjs'
-import { getSource, defaultSource, missingCredential } from './llm/sources.mjs'
-
-/**
- * The stored auto-routing config of one of the hub's own LLM jobs — the same
- * requirements widget the run forms carry, saved on the settings page. Tolerant
- * of nulls and junk: no config, a broken blob — all mean "no auto routing",
- * the plain serving-provider setting then decides alone.
- */
-function orRoutingAusSetting(key) {
-  const v = getSetting(key)
-  if (!v) return null
-  try {
-    const cfg = JSON.parse(v)
-    return cfg?.mode === 'auto' ? cfg : null
-  } catch { return null }
-}
-
+import { chainUsable, jobFallbacks, jobRouting, jobSource } from './llm/job.mjs'
 
 /**
  * The default: DeepSeek V4 Flash at OpenRouter, ~$0.05/$0.10 per million tokens
@@ -55,7 +39,7 @@ export function titleModel() {
 
 /** Which source answers this question. Unset = OpenRouter, as it always was. */
 export function titleSource() {
-  return (getSetting('llm_title_source') ?? '').trim() || defaultSource()
+  return jobSource('title')
 }
 
 /**
@@ -63,15 +47,16 @@ export function titleSource() {
  * operator — a model is preset, and without a usable source the whole thing
  * silently stays with the fallback anyway.
  *
- * "Usable" is what the OpenRouter key check was a special case of: the source
- * exists, is switched on, and has every credential it declares as required.
- * A coding-agent source declares none, so picking one is enough to make this
- * true — which is the point of offering them.
+ * "Usable" is what the OpenRouter key check was a special case of — asked once
+ * for the whole chain now (`chainUsable` in llm/job.mjs): the primary source
+ * OR any configured fallback must exist, be switched on, and have every
+ * credential it declares as required. A coding-agent source declares none, so
+ * picking one is enough to make this true — which is the point of offering
+ * them.
  */
 export function titleLlmActive() {
   if ((getSetting('llm_title_on') ?? '1') !== '1' || !titleModel()) return false
-  const src = getSource(titleSource())
-  return !!src && missingCredential(src.pluginId, src.plugin) === null
+  return chainUsable('title', titleModel())
 }
 
 export function titleModelsMru() { return mruList(MRU_KEY) }
@@ -149,13 +134,13 @@ export async function generateTitle(prompt, { timeoutMs = 30_000 } = {}) {
   const r = await llmJson({
     source: titleSource(),
     model,
+    fallbacks: jobFallbacks('title', model),
+    ...jobRouting('title'),
     system: SYSTEM,
     prompt: text.length > 6000 ? text.slice(0, 6000) + '\n…' : text,
     schema: SCHEMA,
     schemaName: SCHEMA_NAME,
     purpose: 'title',
-    servingProvider: (getSetting('llm_title_or_provider') ?? '').trim() || null,
-    orRouting: orRoutingAusSetting('llm_title_or_routing'),
     maxTokens: 200,
     temperature: 0,
     timeoutMs,

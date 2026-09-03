@@ -156,6 +156,16 @@ export const STEPS = [
         get options() { return ['', ...llmSources().map(s => s.id)] },
       },
       { key: 'model', kind: 'text', placeholder: 'empty = check-LLM model from the settings' },
+      // The same fallback every other place that picks a model source offers:
+      // a second source, tried when the first is down (transport). Empty =
+      // the check job's fallback from the settings.
+      {
+        key: 'fallback',
+        kind: 'select',
+        default: '',
+        get options() { return ['', ...llmSources().map(s => s.id)] },
+      },
+      { key: 'fallbackModel', kind: 'text', placeholder: 'empty = the primary model, or the fallback agent default' },
       { key: 'outputVar', kind: 'text', default: 'extracted' },
     ],
     async run(props, ctx, api) {
@@ -172,6 +182,8 @@ export const STEPS = [
         text, instructions: props.instructions || '', fields,
         model: props.model || null,
         source: props.llmSource || null,
+        fallback: props.fallback || null,
+        fallbackModel: props.fallbackModel || null,
       })
       return { msg: `extracted ${Object.keys(out).length} field(s)`, output: out }
     },
