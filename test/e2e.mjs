@@ -4775,7 +4775,13 @@ export default {
     // overwrite a preference the operator left on.
     enthaelt(html, '<div id="skills-auto" hidden>', 'the update row is hidden while the installation is off')
     enthaelt(html, 'id="skills-pick" hidden', 'and so is the per-skill picker')
-    gleich((html.match(/name="skills_selected"[^>]*disabled/g) ?? []).length, 6,
+    // Derived, not typed in: the subject here is "every box the picker renders
+    // is disabled", and a literal turns shipping one more skill into a failure
+    // of this check instead of a change in what it is about. `shared` skills
+    // are not rendered as boxes at all, which is the assertion two lines up.
+    const pickbar = (await (await hol('/api/skills')).json()).skills.filter(s => s.role !== 'shared').length
+    wahr(pickbar >= 6, `the picker has boxes to disable (${pickbar})`)
+    gleich((html.match(/name="skills_selected"[^>]*disabled/g) ?? []).length, pickbar,
       'with every one of its boxes disabled, so a save cannot rewrite the selection unseen')
     falsch(html.includes('name="skills_pick"'), 'and the marker that says "this form carried the picker" is absent')
     gleich((html.match(/name="skills_auto_update"[^>]*disabled/g) ?? []).length, 2,

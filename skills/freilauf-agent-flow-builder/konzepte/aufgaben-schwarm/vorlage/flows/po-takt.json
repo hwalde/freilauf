@@ -1,0 +1,133 @@
+{
+  "_hinweis": "Der zweite und letzte Cron des Schwarms: einmal täglich um 04:00 nachsehen, ob eine Frage auf einen Menschen wartet, und nur dann den PO-Agenten wecken. Bewusst ein eigener kleiner Flow und kein Zweig im Wächter: Der Wächter läuft alle zwei Stunden, der PO-Vortrag soll einmal am Tag kommen — beides in einem Flow hieße, die Tagesgrenze im Flow nachzubauen. Der Hub kann 'gab es in den letzten 24 h einen Lauf dieses Agenten' nicht ausdrücken: `count_runs` filtert nach Status, nicht nach Zeitfenster. Der Cron IST deshalb die Tagesgrenze. Verglichen wird `po_da=1` und nicht `po_offen`: `po_offen` ist -1, wenn die Zählung scheiterte, und „nicht ermittelbar\" darf keinen Vortrag auslösen — eine Bedingung auf `not_contains po_offen=0` täte genau das. Marken (vom Skript ersetzt, KEINE Flow-Templates): @REPO_PFAD@, @REPO_ID@, @PO_AGENT_ID@.",
+  "id": null,
+  "name": "Schwarm-PO-Takt",
+  "active": true,
+  "trigger": {
+    "kind": "cron",
+    "expr": "0 4 * * *"
+  },
+  "definition": {
+    "properties": {},
+    "sequence": [
+      {
+        "id": "p1",
+        "componentType": "task",
+        "type": "shell_command",
+        "name": "Wartet etwas auf einen Menschen?",
+        "properties": {
+          "command": "git fetch -q origin && git checkout -q --detach origin/@BASIS_BRANCH@ && python @MOTOR_ORDNER@/dispatch.py lage --json",
+          "cwd": "@FLOW_CWD@",
+          "timeoutMinutes": "5",
+          "detach": false,
+          "outputVar": "lage"
+        }
+      },
+      {
+        "id": "q0",
+        "componentType": "switch",
+        "type": "condition",
+        "name": "Konnte die Lage überhaupt gezählt werden?",
+        "properties": {
+          "left": "{{vars.lage.ok}}",
+          "op": "truthy",
+          "right": ""
+        },
+        "branches": {
+          "true": [
+            {
+              "id": "p2",
+              "componentType": "switch",
+              "type": "condition",
+              "name": "Offene PO-Fragen?",
+              "properties": {
+                "left": "{{vars.lage.stdout}}",
+                "op": "contains",
+                "right": "po_da=1 "
+              },
+              "branches": {
+                "true": [
+                  {
+                    "id": "p3",
+                    "componentType": "task",
+                    "type": "count_runs",
+                    "name": "Läuft der PO-Agent schon?",
+                    "properties": {
+                      "repoId": "@REPO_ID@",
+                      "statuses": "running,scheduled,deferred",
+                      "titlePrefix": "",
+                      "agentId": "@PO_AGENT_ID@",
+                      "outputVar": "povoll"
+                    }
+                  },
+                  {
+                    "id": "p4",
+                    "componentType": "switch",
+                    "type": "condition",
+                    "name": "Kein PO-Lauf unterwegs?",
+                    "properties": {
+                      "left": "{{vars.povoll.count}}",
+                      "op": "eq",
+                      "right": "0"
+                    },
+                    "branches": {
+                      "true": [
+                        {
+                          "id": "p5",
+                          "componentType": "task",
+                          "type": "start_agent",
+                          "name": "PO-Entscheidungen vortragen lassen",
+                          "properties": {
+                            "agentId": "@PO_AGENT_ID@",
+                            "promptExtra": "Ausgelöst vom PO-Takt: Es stehen Fragen mit `wartet_auf: po` offen. Trag sie vor wie in deinem Prompt beschrieben.",
+                            "wait": false,
+                            "outputVar": "po"
+                          }
+                        }
+                      ],
+                      "false": [
+                        {
+                          "id": "p6",
+                          "componentType": "task",
+                          "type": "note",
+                          "name": "PO-Lauf wartet noch",
+                          "properties": {
+                            "text": "{{vars.povoll.count}} PO-Lauf läuft gerade noch — kein zweiter Vortrag derselben Fragen. Achtung, dieser Schutz greift nur, solange der Lauf wirklich läuft: Der PO-Agent meldet sich nach dem Vortrag mit `fl-report done` und nimmt die Antwort des Menschen als Folge-Beauftragung entgegen. Ein wartender Lauf steht also auf `done` und wird hier nicht gezählt — dass derselbe Vortrag am nächsten Tag wiederholt wird, ist gewollt und nicht dieser Bedingung angelastet.\n{{vars.povoll.titles}}"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "false": [
+                  {
+                    "id": "p7",
+                    "componentType": "task",
+                    "type": "note",
+                    "name": "Nichts vorzutragen",
+                    "properties": {
+                      "text": "Keine Aufgabe wartet auf den PO, oder die Zählung war nicht möglich, oder der HALT-Marker steht. Der PO-Agent wird nicht gestartet — auch dieser Takt kostet kein Token.\n{{vars.lage.stdout}}"
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "false": [
+            {
+              "id": "q9",
+              "componentType": "task",
+              "type": "notify",
+              "name": "Wächter blind",
+              "properties": {
+                "text": "Der PO-Takt konnte die Lage nicht zählen: `dispatch.py lage --json` endete mit Exit {{vars.lage.exit_code}}.\n{{vars.lage.stderr}}\n\nOffene PO-Fragen werden deshalb heute nicht vorgetragen — das ist kein „nichts vorzutragen\", sondern ein Ausfall.",
+                "attachment": "",
+                "outputVar": "notify"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

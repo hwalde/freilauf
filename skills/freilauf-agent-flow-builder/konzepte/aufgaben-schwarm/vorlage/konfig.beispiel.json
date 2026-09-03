@@ -1,0 +1,181 @@
+{
+  "_lies_mich": "Vorlage der Schwarm-Konfig. Kopiere sie im Zielrepo nach <motor-ordner>/konfig.json und ersetze jeden Wert, der mit '<AUSFÜLLEN' beginnt. Solange einer davon steht, brechen dispatch.py und freilauf_einrichten.py mit einer Liste der offenen Schlüssel ab, statt mit Platzhaltern zu arbeiten. Schlüssel, die mit '_' beginnen, sind Erklärungen und werden nie geprüft und nie gelesen. Der Block 'repo' ist der Adapter auf das Aufgaben-Register des Zielrepos — alles Repo-Spezifische steht dort und nirgendwo sonst. Fertige Kommandozeilen liefern die Adapter-Beschreibungen im Konzept-Ordner (adapter/befund-register.md, adapter/github-issues/ADAPTER.md, adapter/EIGENER-ADAPTER.md).",
+
+  "_motor_version_hinweis": "Fassung des Motors (dispatch.py, freilauf_einrichten.py, prompts/, flows/), aus der diese Kopie stammt. Nicht ändern beim Einrichten — die Zahl sagt später, gegen welche Vorlagen-Fassung zu diffen ist (siehe AKTUALISIEREN.md).",
+  "motor_version": "1.1.0",
+
+  "_repo_hinweis": "Der Adapter-Block. Jedes Kommando läuft über bash im Wurzelverzeichnis des Repos. Die Platzhalter <id>, <schwere>, <n> und $FL_RUN_ID bleiben in den Kommandos stehen; der Motor bzw. der Worker füllt sie.",
+  "repo": {
+    "_repo_id": "Die Freilauf-Repo-ID dieses Projekts. Ablesen: fl-api /api/repos.",
+    "repo_id": "<AUSFÜLLEN: Freilauf-Repo-ID als Zahl, z. B. 1 — fl-api /api/repos>",
+
+    "_name": "Der Repo-Name, nur für Meldungen.",
+    "name": "<AUSFÜLLEN: Repo-Name, z. B. mein-projekt>",
+
+    "_woerter": "Wie der Prompt über eine Aufgabe spricht. Einzahl und Mehrzahl, z. B. Befund/Befunde, Ticket/Tickets, Issue/Issues.",
+    "aufgaben_wort": "<AUSFÜLLEN: Einzahl, z. B. Aufgabe>",
+    "aufgaben_wort_mehrzahl": "<AUSFÜLLEN: Mehrzahl, z. B. Aufgaben>",
+
+    "_register_beschreibung": "Ein Halbsatz im Dativ, der sagt, wo die Aufgaben liegen und womit man sie bedient. Er wird in den ersten Satz des Worker-Prompts eingesetzt: 'Deine Arbeitsvorräte liegen in ...'.",
+    "register_beschreibung": "<AUSFÜLLEN: z. B. dem Aufgaben-Register `register/` — eine Markdown-Datei je Eintrag, bedient über `python register/befund.py`>",
+
+    "_regeln_datei": "Die Datei mit den Projektregeln, die der Worker vor dem Arbeiten liest.",
+    "regeln_datei": "<AUSFÜLLEN: z. B. CLAUDE.md oder AGENTS.md>",
+
+    "_aufgaben_liste_json": "Muss die offenen, unbelegten Aufgaben als JSON-Liste auf stdout drucken. Eine byte-stabile Schlusszeile dahinter stört nicht — der Motor liest den JSON-Kopf mit raw_decode. Jedes Element trägt die Felder aus listen_felder.",
+    "aufgaben_liste_json": "<AUSFÜLLEN: Kommando, das die freien Aufgaben als JSON druckt>",
+
+    "_listen_felder": "Die Feldnamen im JSON. Links der Name, den der Motor kennt, rechts der Name, den dein Werkzeug druckt. Pflicht sind id und schwere; die übrigen dürfen auf einen nicht vorhandenen Namen zeigen, dann fehlen sie einfach.",
+    "listen_felder": {
+      "id": "id", "schwere": "schwere", "art": "art", "titel": "titel",
+      "fundort": "fundort", "versuche": "versuche", "angelegt": "angelegt"
+    },
+
+    "_aufgabe_holen": "Holt genau eine freie Aufgabe und reserviert sie atomar für diesen Lauf. <schwere> füllt der Motor je Bahn, $FL_RUN_ID setzt Freilauf im Lauf. Ohne echte Reservierung greifen zwei parallele Läufe nach derselben Aufgabe.",
+    "aufgabe_holen": "<AUSFÜLLEN: Kommando, das eine Aufgabe holt und belegt, mit <schwere> und $FL_RUN_ID>",
+
+    "_aufgabe_holen_zusatz_gescheitert": "Was an aufgabe_holen angehängt wird, damit es nur schon gescheiterte Aufgaben liefert (<n> füllt stark_min_versuche). Nur die starke Bahn benutzt es. Kennt dein Werkzeug keine Versuchszählung: leer lassen — die starke Bahn holt dann nur Blockiertes.",
+    "aufgabe_holen_zusatz_gescheitert": "",
+
+    "_aufgabe_holen_zusatz_stark": "Was an BEIDE Hol-Kommandos der starken Bahn angehängt wird, damit auch eine Aufgabe am Versuchs-Deckel noch gefunden wird — sonst bleibt eine vom PO wieder freigegebene Aufgabe für immer unsichtbar. Leer lassen, wenn dein Werkzeug keinen Deckel kennt.",
+    "aufgabe_holen_zusatz_stark": "",
+
+    "_aufgabe_ansehen": "Zeigt eine Aufgabe in voller Länge, mit Vorgeschichte und Notizen.",
+    "aufgabe_ansehen": "<AUSFÜLLEN: Kommando, das eine Aufgabe vollständig zeigt, mit <id>>",
+
+    "_aufgabe_abschliessen": "Schließt eine erledigte Aufgabe und nimmt den Beleg entgegen (das gefahrene Kommando samt Ergebnis).",
+    "aufgabe_abschliessen": "<AUSFÜLLEN: Kommando zum Abschließen, mit <id> und einem Beleg-Text>",
+
+    "_aufgabe_zurueckgeben": "Protokolliert einen Fehlversuch mit Grund und gibt die Reservierung wieder frei. Zwei Kommandos dürfen mit && verkettet werden.",
+    "aufgabe_zurueckgeben": "<AUSFÜLLEN: Kommando(s) für Fehlversuch protokollieren und freigeben, mit <id>>",
+
+    "_aufgabe_notiz": "Hängt einen Zwischenstand an eine Aufgabe an.",
+    "aufgabe_notiz": "<AUSFÜLLEN: Kommando für eine Notiz, mit <id> und Text>",
+
+    "_aufgabe_neu": "Legt eine neue Aufgabe an — der Worker braucht es, wenn ihm außerhalb seines Auftrags etwas auffällt.",
+    "aufgabe_neu": "<AUSFÜLLEN: Kommando, das eine neue Aufgabe anlegt>",
+
+    "_belegungen_zeigen": "Zeigt, wer welche Aufgabe reserviert hält. Steht in den Meldetexten des Nachlauf-Flows.",
+    "belegungen_zeigen": "<AUSFÜLLEN: Kommando, das die Reservierungen zeigt>",
+
+    "_po_hinweis": "Die fünf Kommandos des PO-Agenten. Fehlt po_liste_json, meldet lage po_offen=-1 und po_da=0 — der PO-Takt schweigt dann, statt täglich ins Leere zu starten. Ohne PO-Agenten alle fünf leer lassen und po_agent.id auf null.",
+    "po_liste_json": "",
+    "po_ansehen": "",
+    "po_entscheid_notieren": "",
+    "po_freigeben": "",
+    "po_an_menschen": "",
+
+    "_aufgaben_hinweis": "Fallstricke deines Werkzeugs, die der Worker kennen muss — eine bekannte Fehlanzeige, eine Option, die immer mitzugeben ist. Leer lassen, wenn es keine gibt.",
+    "aufgaben_hinweis": "",
+
+    "_gate": "Was grün sein muss, bevor der Worker abschließt. Ein Kommando; scheitert es, schließt der Worker nicht ab.",
+    "gate": "<AUSFÜLLEN: Prüf-Kommando, z. B. ein Lint über das Register>",
+
+    "_zusatz_gates": "Weitere Prüfungen, je als ein Satz mit dem Kommando darin. Leere Liste ist erlaubt.",
+    "zusatz_gates": [],
+
+    "_regeln_snippet": "Die zwei bis vier Schreibregeln des Repos, die im Worker-Prompt stehen sollen — als Aufzählung mit '- ' je Zeile.",
+    "regeln_snippet": "<AUSFÜLLEN: Schreibregeln des Repos als Aufzählung, oder leer>",
+
+    "_doku_pflicht": "Was der Worker vor einem Commit an Dokumentation nachziehen muss. Fassung für Harnesses ohne Subagents (opencode und andere).",
+    "doku_pflicht": "<AUSFÜLLEN: Doku-Pflicht vor dem Commit, oder ein Satz, dass es keine gibt>",
+
+    "_doku_pflicht_subagent": "Dieselbe Pflicht in der Fassung für einen Claude-Worker, der einen Subagenten starten kann. Leer lassen, dann gilt doku_pflicht für alle.",
+    "doku_pflicht_subagent": ""
+  },
+
+  "_po_agent_hinweis": "Der Agent, der die Fragen mit der Marke 'wartet auf PO' einem Menschen vorträgt. Er wird nur AKTUALISIERT, nie neu angelegt: Trag die Hub-ID eines bestehenden Agenten ein (fl-api /api/agents), oder lass id auf null — dann bleibt der PO-Zweig aus, und der PO-Takt-Flow läuft ins Leere, ohne etwas zu starten. Sein Cron bleibt leer: geweckt wird er vom Flow 'Schwarm-PO-Takt', und nur wenn po_offen > 0.",
+  "po_agent": {
+    "id": null,
+    "name": "PO Entscheidungen präsentieren",
+    "route": "glm",
+    "cron": "",
+    "minuten": 30,
+    "prompt_datei": "po-praesentation.md"
+  },
+
+  "_worker_hinweis": "Vier Worker-Agenten in zwei Bahnen. Keiner hat einen eigenen Cron (leeres cron ⇒ schedule_kind manuell): Der einzige Takt ist der Wächter-Flow, und er weckt nur den Dispatcher; die Worker startet allein der Dispatcher. So kostet ein Tag ohne offene Aufgaben null Agenten-Läufe. Bahn 1 (schluessel glm/ds) ist die gewöhnliche Arbeit, skaliert über die Zahl der Starts desselben Agenten. Bahn 2 (stark: true) sind die zwei starken Worker für blockierte und schon gescheiterte Aufgaben; höchstens einer davon läuft gleichzeitig. Die Schlüssel glm, ds, fable und gemini sind Namen von Steckplätzen, keine Modellnamen — die Flow-Vorlagen adressieren die Worker darüber. Braucht dein Projekt nur eine Bahn, lösche die beiden starken Einträge und setz stark_max_parallel auf 0.",
+  "worker_agenten": [
+    { "schluessel": "glm", "name": "Schwarm-Worker (GLM)", "route": "glm",
+      "cron": "", "schweregrade": ["trivial", "normal"], "start_aktiv": true },
+    { "schluessel": "ds",  "name": "Schwarm-Worker (DeepSeek, trivial)", "route": "deepseek",
+      "cron": "", "schweregrade": ["trivial"], "start_aktiv": true },
+    { "schluessel": "fable", "name": "Schwarm-Worker (stark, Fable)", "route": "fable",
+      "cron": "", "schweregrade": ["blockiert", "normal"], "start_aktiv": true,
+      "stark": true, "minuten": 60 },
+    { "schluessel": "gemini", "name": "Schwarm-Worker (stark, Gemini)", "route": "gemini",
+      "cron": "", "schweregrade": ["blockiert", "normal"], "start_aktiv": true,
+      "stark": true, "minuten": 60 }
+  ],
+
+  "_abgeloeste_hinweis": "Namen von Agenten und Flows, die eine frühere Fassung dieses Schwarms angelegt hat. freilauf_einrichten.py löscht die Flows und meldet die Agenten (--aufraeumen löscht sie). Beim Einrichten in einem neuen Repo bleiben beide Listen leer.",
+  "_abgeloeste_flows": [],
+  "_abgeloeste_agenten": [],
+
+  "_staffel_hinweis": "Wie viele gewöhnliche Läufe bei wie vielen freien Aufgaben starten. Über allem steht max_worker abzüglich der schon laufenden Schwarm-Läufe; lage liefert die Zahl bereits gedeckelt. versatz_minuten ist der Abstand zwischen zwei Starts — er verhindert, dass zwei Worker im selben Moment nach derselben Aufgabe greifen.",
+  "startstufen": [
+    { "ab_kandidaten": 1, "starts": 1 },
+    { "ab_kandidaten": 4, "starts": 2 },
+    { "ab_kandidaten": 9, "starts": 3 }
+  ],
+  "max_worker": 3,
+  "versatz_minuten": 3,
+
+  "_paket_hinweis": "Wie viele Aufgaben ein Worker sich je Schweregrad selbst nimmt. Die starke Bahn nimmt immer genau eine, egal was hier steht.",
+  "paketgroesse": { "trivial": 4, "normal": 2, "blockiert": 1 },
+  "worker_minuten": 45,
+  "dispatcher_minuten": 15,
+
+  "_tages_budget_hinweis": "Was der Schwarm an einem Kalendertag (UTC) an echtem API-Geld ausgeben darf, summiert aus cost_usd seiner Läufe. Ab der Grenze steht die Tages-Ampel auf gelb: die gewöhnliche Bahn läuft weiter, die starke fällt aus. Ab dem Doppelten steht sie auf rot: gar keine Starts. Ein Abo-Lauf meldet kein cost_usd — sein Preis ist der Anteil an der Wochenquote, und deren Deckel ist fable_7d_max. budgets sind die Guthaben-Schwellen je Anbieter; setz sie über Freilaufs eigenes Budget-Gate, damit die Ampel vorher rot wird.",
+  "_flow_checkout_hinweis": "Der Arbeitsordner der beiden Cron-Flows. Er MUSS ein eigener, detached Checkout sein und darf nicht der Checkout sein, in dem gearbeitet wird: Freilauf mergt nach origin/<basis>, zieht den Arbeits-Checkout des Menschen aber nie nach — er kann auf einem alten Commit stehen, der den Motor-Ordner noch gar nicht enthält, und die Flows laufen dann ins Leere. Ein `git worktree` des Arbeits-Checkouts wäre der falsche Weg: Er teilt sich dessen .git und damit Stash, Index und Worktree-Liste. Leerer Wert ⇒ <zustandsordner>/checkout. Voraussetzung: git-Lesezugriff auf origin von dieser Maschine.",
+  "flow_checkout": "",
+
+  "budgets": { "openrouter_min_usd": 8, "deepseek_min_usd": 3 },
+  "tages_budget_usd": 5,
+
+  "_stark_hinweis": "Die Regler der starken Bahn. fable_7d_max ist die Schwelle für die Abo-Wochennutzung: darunter fährt die Abo-Route, darüber das Ausweich-Modell. claude_5h_max spiegelt Freilaufs eigenes Claude-Gate — liegt das 5-Stunden-Fenster darüber, würde ein Abo-Start ohnehin nur deferred. Ist die Zahl unbekannt oder als stale gemeldet, gilt die konservative Sicht: Ausweich-Modell. stark_min_versuche ist die Zahl der Fehlversuche, ab der die starke Bahn eine Aufgabe übernimmt.",
+  "fable_7d_max": 80,
+  "claude_5h_max": 90,
+  "stark_max_parallel": 1,
+  "stark_minuten": 60,
+  "stark_min_versuche": 2,
+  "_versuchs_deckel_hinweis": "Ab wie vielen Fehlversuchen eine Aufgabe an einen Menschen geht. Der Wert MUSS zu dem passen, was das Aufgaben-Werkzeug selbst tut — es setzt beim Erreichen dieser Zahl die Marke für den Menschen. Die starke Bahn zählt EINSCHLIESSLICH dieses Werts: Eine wieder freigegebene Aufgabe behält ihren Zähler, und wer sie herauszählt, lässt sie für immer liegen.",
+  "versuchs_deckel": 3,
+
+  "_stark_ausweich_hinweis": "Das Modell der Ausweich-Route, wenn die Abo-Route nicht darf. Wechseln heißt: diesen Wert ändern und freilauf_einrichten.py fahren. Der Agent behält dabei seinen Namen — er passt dann nicht mehr auf das Modell.",
+  "stark_ausweich_modell": "google/gemini-3.8-flash",
+
+  "_routen_hinweis": "Die Modell-Routen. Jede Route ist ein Satz Felder für die Agenten-Anlage im Hub. Vor dem ersten Lauf gegen die eigene Installation prüfen: fl-api /api/models und fl-api /api/favorites — eine erfundene Modell-ID meldet opencode als 'Unexpected server error' und ist von einem Anbieter-Ausfall nicht zu unterscheiden. Ein Abo-Harness (claude, cursor) bekommt keinen provider. modell_regler zeigt auf einen Schlüssel weiter oben, aus dem die Modell-ID kommt.",
+  "routen": {
+    "glm": {
+      "harness": "opencode", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
+      "effort": "high", "or_mode": "pin", "or_provider": "z-ai/fp8"
+    },
+    "deepseek": {
+      "harness": "opencode", "provider": "deepseek", "model": "deepseek-v4-flash",
+      "effort": "high"
+    },
+    "fable": {
+      "harness": "claude", "model": "fable", "effort": "high"
+    },
+    "gemini": {
+      "harness": "opencode", "provider": "openrouter", "model": "google/gemini-3.8-flash",
+      "modell_regler": "stark_ausweich_modell",
+      "effort": "high", "or_mode": "auto", "or_quant": "fp8"
+    }
+  },
+  "dispatcher_route": "glm",
+  "_dispatcher_cron_hinweis": "Leer lassen. Der Dispatcher hat keinen eigenen Cron — er wird vom Wächter-Flow und vom Nachlauf geweckt. Ein Cron hier wäre ein zweiter Antrieb und liefe auch an leeren Tagen.",
+  "dispatcher_cron": "",
+  "dispatcher_name": "Schwarm-Dispatcher",
+
+  "_branch_hinweis": "branch_mode: keiner (loser Worktree), neu (eigener Branch je Lauf) oder fest. Bei 'neu' braucht der Hub zusätzlich ein Branch-Muster — dann ist die Agenten-Anlage über die Vorlage anzupassen.",
+  "branch_mode": "keiner",
+
+  "_schweregrade_hinweis": "Die Schweregrade der gewöhnlichen Bahn, in der Reihenfolge, in der ein Worker sie probiert. Kennt dein Register keine Schweregrade: setz [\"normal\"] und gib allen Aufgaben schwere 'normal'. blockiert_erlaubt gilt ausschließlich für die starke Bahn — ein gewöhnlicher Worker greift nie nach einer blockierten Aufgabe.",
+  "schweregrade": ["trivial", "normal"],
+  "blockiert_erlaubt": true,
+
+  "_extract_hinweis": "Leer lassen heißt: der extract-Schritt des Nachlauf-Flows erbt Quelle, Modell und Fallback-Kette des Hub-eigenen Prüf-Jobs. Das ist die driftfreie Wahl — eine hier eingetragene Modell-ID veraltet still und lässt den Flow eines Tages mit HTTP 404 scheitern. Nur eintragen, wenn dieser Schritt wirklich ein anderes Modell braucht als der Prüf-Job.",
+  "extract_modell": { "llmSource": "", "model": "" }
+}

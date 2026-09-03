@@ -1712,6 +1712,57 @@ try {
       'and it is the same answer the loader gives — one place decides where packages live')
   })
 
+  // The delivery path was written before any skill needed more than SKILL.md,
+  // references/ and scripts/, so nothing about it was ever shape-aware — and
+  // that is worth pinning rather than assuming. `freilauf-agent-flow-builder`
+  // ships a nested tree with Python, JSON and prompt files in it; if somebody
+  // ever "tidies" payloadFiles() into an extension list, this is what says no.
+  await pruefe('a skill may ship a nested tree of non-markdown files, and all of it is delivered', async () => {
+    const { mkdtempSync, cpSync, writeFileSync, rmSync } = await import('node:fs')
+    const { join: j } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const builder = skillsMod.availableSkills().find(s => s.name === 'freilauf-agent-flow-builder')
+    wahr(!!builder, 'the concept skill is among the shipped ones')
+    wahr(builder.files > 10, `its whole tree is counted, not just the top level (${builder.files} files)`)
+
+    // The hash has to answer to every file, at any depth and of any type —
+    // otherwise a changed template ships as "already current" forever.
+    const tmp = mkdtempSync(j(tmpdir(), 'fl-skill-'))
+    try {
+      const kopie = j(tmp, 'freilauf-agent-flow-builder')
+      cpSync(builder.dir, kopie, { recursive: true })
+      gleich(skillsMod.skillHash(kopie), builder.hash, 'a faithful copy hashes identically')
+      const tief = j(kopie, 'konzepte', 'aufgaben-schwarm', 'vorlage', 'flows', 'takt-soll.json')
+      writeFileSync(tief, '{"changed": true}\n')
+      falsch(skillsMod.skillHash(kopie) === builder.hash,
+        'a JSON file four levels down changes the hash — no extension list, no folder whitelist')
+    } finally { rmSync(tmp, { recursive: true, force: true }) }
+  })
+
+  // The one thing a shipping skill must NOT answer to. An agent that runs the
+  // shipped Python in place writes __pycache__ into the INSTALLED copy; if that
+  // counted, the hub would report a copy nobody touched as edited by hand, at
+  // every sync, forever.
+  await pruefe('python bytecode is not part of a skill — at either end', async () => {
+    const { mkdtempSync, cpSync, mkdirSync: md, writeFileSync, rmSync, existsSync: ex } = await import('node:fs')
+    const { join: j } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const builder = skillsMod.availableSkills().find(s => s.name === 'freilauf-agent-flow-builder')
+    const tmp = mkdtempSync(j(tmpdir(), 'fl-pyc-'))
+    try {
+      const kopie = j(tmp, 'freilauf-agent-flow-builder')
+      cpSync(builder.dir, kopie, { recursive: true })
+      const cache = j(kopie, 'konzepte', 'aufgaben-schwarm', 'vorlage', '__pycache__')
+      md(cache, { recursive: true })
+      writeFileSync(j(cache, 'dispatch.cpython-312.pyc'), 'not source\n')
+      gleich(skillsMod.skillHash(kopie), builder.hash,
+        'a __pycache__ written by running the skill leaves the hash exactly where it was')
+      writeFileSync(j(kopie, 'stray.pyc'), 'not source\n')
+      gleich(skillsMod.skillHash(kopie), builder.hash, 'and so does a loose .pyc beside SKILL.md')
+      wahr(ex(j(kopie, 'stray.pyc')), 'the file really is there — it is ignored, not deleted')
+    } finally { rmSync(tmp, { recursive: true, force: true }) }
+  })
+
   await pruefe('every shipped skill is a valid Agent Skill: name matches its directory, spec keys only', async () => {
     const { readdirSync: rd, readFileSync: rf, existsSync: ex } = await import('node:fs')
     const { join: j } = await import('node:path')

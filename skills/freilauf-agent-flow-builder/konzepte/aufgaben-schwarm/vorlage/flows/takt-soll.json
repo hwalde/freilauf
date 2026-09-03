@@ -1,0 +1,134 @@
+{
+  "_hinweis": "Der Wächter — seit 2026-09-03 der EINZIGE Cron des Schwarms und der einzige Grund, warum überhaupt etwas anläuft. Alle Agenten (Dispatcher, Worker, PO) stehen auf schedule_kind=manuell; dieser Flow weckt den Dispatcher, und der Dispatcher startet die Worker. Der Flow startet selbst KEINEN Worker: Welcher Worker, wie viele und auf welcher Route — das ist Triage- und Quoten-Arbeit und gehört in den Dispatcher, nicht in eine Bedingungs-Leiter. Kernaussage: Ist nichts zu tun, kostet der Takt einen Shell-Aufruf und eine Notiz — kein Agenten-Lauf, kein Token. Marken (vom Skript ersetzt, KEINE Flow-Templates): @REPO_PFAD@, @REPO_ID@, @DISPATCHER_AGENT_ID@.",
+  "_warum_ein_flag": "Die Bedingung lautet 'kandidaten_gesamt=0 UND kandidaten_schwer=0'. Ein Flow kennt kein UND — zwei geschachtelte Bedingungen hießen denselben Start-Teilbaum zweimal im JSON, und die zweite Fassung veraltet still. Deshalb rechnet dispatch.py die Verknüpfung und legt sie als `arbeit_da=0|1` in die Schlusszeile. Verglichen wird mit `contains` samt Leerzeichen am Ende, damit `arbeit_da=0` nicht auf einen längeren Wert passt.",
+  "id": null,
+  "name": "Schwarm-Takt (ohne LLM, count_runs)",
+  "active": true,
+  "trigger": {
+    "kind": "cron",
+    "expr": "0 */2 * * *"
+  },
+  "definition": {
+    "properties": {},
+    "sequence": [
+      {
+        "id": "w1",
+        "componentType": "task",
+        "type": "shell_command",
+        "name": "Lage zählen (repo-spezifisch)",
+        "properties": {
+          "command": "git fetch -q origin && git checkout -q --detach origin/@BASIS_BRANCH@ && python @MOTOR_ORDNER@/dispatch.py lage --json",
+          "cwd": "@FLOW_CWD@",
+          "timeoutMinutes": "5",
+          "detach": false,
+          "outputVar": "lage"
+        }
+      },
+      {
+        "id": "v0",
+        "componentType": "switch",
+        "type": "condition",
+        "name": "Konnte die Lage überhaupt gezählt werden?",
+        "properties": {
+          "left": "{{vars.lage.ok}}",
+          "op": "truthy",
+          "right": ""
+        },
+        "branches": {
+          "true": [
+            {
+              "id": "w2",
+              "componentType": "switch",
+              "type": "condition",
+              "name": "Ist überhaupt Arbeit da?",
+              "properties": {
+                "left": "{{vars.lage.stdout}}",
+                "op": "contains",
+                "right": "arbeit_da=1 "
+              },
+              "branches": {
+                "true": [
+                  {
+                    "id": "w3",
+                    "componentType": "task",
+                    "type": "count_runs",
+                    "name": "Läuft schon ein Dispatcher?",
+                    "properties": {
+                      "repoId": "@REPO_ID@",
+                      "statuses": "running,scheduled,deferred",
+                      "titlePrefix": "",
+                      "agentId": "@DISPATCHER_AGENT_ID@",
+                      "outputVar": "dispvoll"
+                    }
+                  },
+                  {
+                    "id": "w4",
+                    "componentType": "switch",
+                    "type": "condition",
+                    "name": "Kein Dispatcher unterwegs?",
+                    "properties": {
+                      "left": "{{vars.dispvoll.count}}",
+                      "op": "eq",
+                      "right": "0"
+                    },
+                    "branches": {
+                      "true": [
+                        {
+                          "id": "w5",
+                          "componentType": "task",
+                          "type": "start_agent",
+                          "name": "Dispatcher wecken",
+                          "properties": {
+                            "agentId": "@DISPATCHER_AGENT_ID@",
+                            "promptExtra": "Ausgelöst vom Wächter-Takt. Es liegt Arbeit an. Rechne die Lage und starte die Worker entsprechend — die gewöhnliche Bahn nach der Staffel, die starke nach `stark_route`. Halte dein 15-Minuten-Budget ein.",
+                            "wait": false,
+                            "outputVar": "dispatcher"
+                          }
+                        }
+                      ],
+                      "false": [
+                        {
+                          "id": "w6",
+                          "componentType": "task",
+                          "type": "note",
+                          "name": "Dispatcher läuft schon",
+                          "properties": {
+                            "text": "{{vars.dispvoll.count}} Dispatcher-Läufe sind unterwegs — kein zweiter. Zwei Dispatcher rechnen dieselbe Staffel und starten sie doppelt.\n{{vars.dispvoll.titles}}"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "false": [
+                  {
+                    "id": "w7",
+                    "componentType": "task",
+                    "type": "note",
+                    "name": "Leerlauf — nichts zu tun, nichts gestartet",
+                    "properties": {
+                      "text": "Keine freie Aufgabe und nichts für die starke Bahn. Es wird kein Agent gestartet: Dieser Takt kostet einen Shell-Aufruf und diese Zeile, kein Token.\n{{vars.lage.stdout}}"
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "false": [
+            {
+              "id": "v9",
+              "componentType": "task",
+              "type": "notify",
+              "name": "Wächter blind",
+              "properties": {
+                "text": "Der Wächter-Takt konnte die Lage nicht zählen: `dispatch.py lage --json` endete mit Exit {{vars.lage.exit_code}}.\n{{vars.lage.stderr}}\n\nSolange das so bleibt, startet NICHTS mehr — kein Dispatcher, keine Worker. Das ist kein Leerlauf, sondern ein blinder Wächter. Häufigste Ursache: `schwarm/` liegt nicht im Arbeitsverzeichnis des Flows (Ordner noch nicht nach main gemergt).",
+                "attachment": "",
+                "outputVar": "notify"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
