@@ -1203,8 +1203,16 @@ export async function pageRun(req, res, url, id) {
       // done: show as history, not as an open question
       : `<p class="dim"><b>${e(t('run.help_answered'))}:</b> ${e(run.help_text)}${run.help_answer ? ` → <i>${e(run.help_answer)}</i>` : ''}</p>`
     : ''}
-  <details ${live ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(terminalState(live, sessionOpen, arbeitet))}</summary>
-    <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
+  <details class="run-term" ${live ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(terminalState(live, sessionOpen, arbeitet))}${
+    // The way in is on the toggle line, because that is the line one is on when
+    // one decides the screen is too small. Only where there IS a screen: a run
+    // whose session is gone shows a sentence, and a sentence in full screen is
+    // still a sentence.
+    sessionOpen ? `<button type="button" id="term-full" class="icon-btn term-full-btn" title="${e(t('run.terminal_fullscreen'))}" aria-label="${e(t('run.terminal_fullscreen'))}">⛶</button>` : ''}</summary>
+    <div id="term-wrap">
+      ${sessionOpen ? `<button type="button" id="term-full-exit" class="icon-btn term-exit" title="${e(t('run.terminal_fullscreen_exit'))}" aria-label="${e(t('run.terminal_fullscreen_exit'))}">✕</button>` : ''}
+      <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
+    </div>
     ${notifySwitch(run)}
     ${live && !arbeitet ? `<p class="dim">${e(t('run.session_after_hint'))}</p>` : ''}
     ${live ? `<form onsubmit="return freilaufSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>` : ''}

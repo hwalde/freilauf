@@ -2813,6 +2813,18 @@ errors (`post_api_request` only fires after success).
   browser rewraps the agent's window to its size while watching — with and
   without write access alike. The remedy would be `window-size manual` on the
   session.
+- **Esc belongs to the agent's TUI, so the full-screen terminal asks the
+  browser for it.** The icon on the terminal's toggle line puts `#term-wrap`
+  into `.term-full` (fixed, inset 0) **and** calls `requestFullscreen()` on it.
+  The class alone would already be full screen — but then Esc would have to be
+  taken off xterm by hand on every page, and an operator who wants to send Esc
+  into a TUI could never do it again. Under the native API the browser eats the
+  key itself, fires `fullscreenchange`, and the class comes off there; the
+  capture-phase `keydown` handler in hub.js is only the fallback for a request
+  that was refused. xterm refits itself either way, through the ResizeObserver
+  that already watches `#term`. The way back out is also an icon in the
+  terminal's own top right corner, because a keyboard-only exit is a dead end
+  for anyone who reached full screen with the mouse.
 - **`fl-start` positional arguments.** `fl-start [name] [directory]`; when the
   name is set via `--name` (that is how the hub calls it), the directory moves
   to position 1. Otherwise the agent starts in the CALLER's working directory
