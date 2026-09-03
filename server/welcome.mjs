@@ -131,6 +131,8 @@ import {
 } from './plugins/store.mjs'
 import { scanSystem, openDiscoveries, answerDiscovery, lastScanAt } from './plugins/discovery.mjs'
 import { llmSources, defaultSource } from './llm/sources.mjs'
+import { availableSkills, skillTargets, syncSkills, installedOverview } from './skills.mjs'
+import { harnessLabel } from './harnesses/index.mjs'
 
 /** The settings key that stops `GET /` from sending a browser here. */
 export const WELCOME_HIDE = 'welcome_hide'
@@ -146,7 +148,7 @@ export const WELCOME_DONE = 'welcome_done'
 /** The three settings keys step 4 writes. */
 export const LLM_SOURCE_KEYS = ['llm_title_source', 'llm_check_source', 'llm_extras_source']
 
-const STEPS = 5
+const STEPS = 6
 const HOME = '/'
 const SKIP_HREF = '/?welcome=skip'
 const SETUP_DOC = 'https://github.com/hwalde/freilauf/blob/main/SETUP_WITH_AGENT.md'
@@ -427,6 +429,16 @@ function ackSources() {
     : ack(t('welcome.ack_llm_split', {
       title: label(chosen[0]), check: label(chosen[1]), extras: label(chosen[2]),
     }))
+}
+
+/** Step 6 opens with what step 5 stored. */
+function ackSkills() {
+  if (getSetting('skills_install') !== '1') return ack(t('welcome.ack_skills_none'))
+  let dirs = []
+  try { dirs = installedOverview().map(r => r.dir) } catch { dirs = [] }
+  return dirs.length
+    ? ack(t('welcome.ack_skills', { dirs: dirs.join(', ') }))
+    : ack(t('welcome.ack_skills_empty'))
 }
 
 // ---------------------------------------------------------------------------
@@ -754,38 +766,88 @@ function step4(ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// step 5 — done, and the offer to leave
+// step 5 — the hub's own agent skills
+//
+// The one screen of this wizard that offers to write into somebody else's
+// configuration directories, so it says exactly which ones and why, and the
+// answer is one checkbox either way. It stands AFTER the coding agents have
+// been chosen on purpose: which directories the hub would write to falls out
+// of those choices (server/skills.mjs), and asking before them would mean
+// naming none.
 // ---------------------------------------------------------------------------
 
 function step5(ctx) {
+  let skills = []
+  let targets = []
+  try { skills = availableSkills(); targets = skillTargets().targets } catch { /* a wizard step never breaks over this */ }
+  const list = skills.length
+    ? `<ul class="skill-list">${skills.map(s =>
+        `<li><b>${e(s.title)}</b>${s.description ? ` — <span class="dim">${e(s.description.slice(0, 200))}</span>` : ''}</li>`).join('')}</ul>`
+    : `<p class="dim">${e(t('flskills.none_shipped'))}</p>`
+  const where = targets.length
+    ? `<p class="dim">${e(t('welcome.s5_where'))}</p><ul class="skill-list">${targets.map(tg =>
+        `<li><code>${e(tg.dir)}</code> <span class="dim">${e(t('flskills.serves', { agents: tg.harnesses.map(id => harnessLabel(id)).join(', ') }))}</span></li>`).join('')}</ul>`
+    : `<p class="dim">${e(t('welcome.s5_nowhere'))}</p>`
+  // Pre-ticked, and that is the recommendation rather than a trick: the step
+  // above it explains what the skills are, the directories are named, and one
+  // click undoes it. A wizard that asks a question and then defaults to "no"
+  // is a wizard whose answer nobody ever gives.
+  const install = getSetting('skills_install')
+  const auto = getSetting('skills_auto_update')
+  const on = install == null || install === '' ? true : install === '1'
+  const autoOn = auto == null || auto === '' ? true : auto === '1'
   return `${ackSources()}
     <div class="card">
-      <h3>${e(t('welcome.s5_title'))}</h3>
-      <p>${e(t('welcome.s5_body'))}</p>
+      ${explain('welcome.s5_explain')}
+      ${list}
+      ${where}
+      <p class="dim">${e(t('flskills.intro2'))}</p>
+      <form method="post" action="/welcome/skills" class="form-grid">
+        <input type="hidden" name="skills_install" value="0">
+        <label class="chk"><input type="checkbox" name="skills_install" value="1" ${on ? 'checked' : ''}> ${e(t('flskills.install'))}</label>
+        <input type="hidden" name="skills_auto_update" value="0">
+        <label class="chk"><input type="checkbox" name="skills_auto_update" value="1" ${autoOn ? 'checked' : ''}> ${e(t('flskills.auto'))}</label>
+        <p class="dim">${e(t('welcome.s5_later'))}</p>
+        ${hideField(ctx, 5)}
+        ${primary(t('welcome.save_next'), ctx, 5)}
+      </form>
+    </div>
+    ${stepFoot(5)}`
+}
+
+// ---------------------------------------------------------------------------
+// step 6 — done, and the offer to leave
+// ---------------------------------------------------------------------------
+
+function step6(ctx) {
+  return `${ackSkills()}
+    <div class="card">
+      <h3>${e(t('welcome.s6_title'))}</h3>
+      <p>${e(t('welcome.s6_body'))}</p>
       <div class="btn-row">
-        <a class="btn ghost" href="/repos">${e(t('welcome.s5_repo'))}</a>
-        <a class="btn ghost" href="/agents">${e(t('welcome.s5_agent'))}</a>
-        <a class="btn ghost" href="/settings/plugins">${e(t('welcome.s5_plugins'))}</a>
-        <a class="btn ghost" href="/settings/notifications">${e(t('welcome.s5_notify'))}</a>
+        <a class="btn ghost" href="/repos">${e(t('welcome.s6_repo'))}</a>
+        <a class="btn ghost" href="/agents">${e(t('welcome.s6_agent'))}</a>
+        <a class="btn ghost" href="/settings/plugins">${e(t('welcome.s6_plugins'))}</a>
+        <a class="btn ghost" href="/settings/notifications">${e(t('welcome.s6_notify'))}</a>
       </div>
       <p class="dim">${e(t('notify.optional'))}</p>
-      <p class="dim">${e(t('welcome.s5_faq_hint'))} <a href="${e(README_FAQ)}" target="_blank" rel="noreferrer noopener">README → FAQ</a></p>
+      <p class="dim">${e(t('welcome.s6_faq_hint'))} <a href="${e(README_FAQ)}" target="_blank" rel="noreferrer noopener">README → FAQ</a></p>
     </div>
     ${setupDocCard()}
     <form method="post" action="/welcome/done" class="form-grid">
-      ${hideField(ctx, 5)}
-      ${primary(t('welcome.finish_btn'), ctx, 5)}
+      ${hideField(ctx, 6)}
+      ${primary(t('welcome.finish_btn'), ctx, 6)}
     </form>
-    ${stepFoot(5)}`
+    ${stepFoot(6)}`
 }
 
 // ---------------------------------------------------------------------------
 // the page
 // ---------------------------------------------------------------------------
 
-const HEADINGS = ['welcome.q1', 'welcome.q2', 'welcome.q3', 'welcome.q4', 'welcome.q5']
+const HEADINGS = ['welcome.q1', 'welcome.q2', 'welcome.q3', 'welcome.q4', 'welcome.q5', 'welcome.q6']
 
-/** `GET /welcome[?step=1..5]` — always reachable, whatever the two flags say. */
+/** `GET /welcome[?step=1..6]` — always reachable, whatever the two flags say. */
 export async function pageWelcome(req, res, url) {
   const raw = Number(url?.searchParams?.get('step') ?? 1)
   const step = Number.isInteger(raw) && raw >= 1 && raw <= STEPS ? raw : 1
@@ -803,7 +865,8 @@ export async function pageWelcome(req, res, url) {
     : step === 2 ? await step2(ctx)
       : step === 3 ? step3(ctx, url)
         : step === 4 ? step4(ctx)
-          : step5(ctx)
+          : step === 5 ? step5(ctx)
+            : step6(ctx)
   const page = `<h2>${e(t(HEADINGS[step - 1]))}</h2>${body}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
     .end(ctx.locked
@@ -951,6 +1014,27 @@ export async function welcomeLlm(req, res, url, formBody) {
     if (v) setSetting(key, v)
   })
   afterStep(res, b, 5)
+}
+
+/**
+ * Step 5 → 6: the hub's own agent skills.
+ *
+ * Saving IS the installation. The two checkboxes are settings, and
+ * `syncSkills()` is what makes the file system agree with them — in both
+ * directions, so somebody who walks the wizard again and unticks the box gets
+ * the copies removed rather than a setting that contradicts the disk.
+ *
+ * It cannot fail the step: `syncSkills()` never throws, and a directory that
+ * could not be written is reported on Settings → Freilauf skills, which is
+ * where somebody can do something about it.
+ */
+export async function welcomeSkills(req, res, url, formBody) {
+  const b = await formBody()
+  applyHide(b)
+  setSetting('skills_install', b.skills_install === '1' ? '1' : '0')
+  setSetting('skills_auto_update', b.skills_auto_update === '1' ? '1' : '0')
+  try { syncSkills({ force: true }) } catch { /* never hold the wizard up over a file copy */ }
+  afterStep(res, b, 6)
 }
 
 /**

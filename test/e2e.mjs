@@ -278,6 +278,21 @@ try {
   // ------------------------------------------------------------------
   gruppe('Agents: create and validate')
 
+  await pruefe('active is a checkbox, and a spelled-out "0" means off rather than on', async () => {
+    // The form's box carries no hidden `0` companion, so ABSENT is what off
+    // means there. A caller scripting this route writes `active=0` instead —
+    // and the string '0' is truthy, so it used to switch the agent ON.
+    const basis = { repo_id: repoId, harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'manuell' }
+    const aktiv = (name) => db.prepare('SELECT active FROM agents WHERE repo_id=? AND name=?').get(repoId, name)?.active
+    await formular('/agents/edit', { ...basis, name: 'schalter-an', active: '1' }, { alsBrowser: true })
+    gleich(aktiv('schalter-an'), 1, "'1' switches it on")
+    await formular('/agents/edit', { ...basis, name: 'schalter-null', active: '0' }, { alsBrowser: true })
+    gleich(aktiv('schalter-null'), 0, "'0' switches it off — it is compared, not coerced")
+    await formular('/agents/edit', { ...basis, name: 'schalter-fehlt' }, { alsBrowser: true })
+    gleich(aktiv('schalter-fehlt'), 0, 'and an absent field is off, the way an unticked box arrives')
+    db.prepare("DELETE FROM agents WHERE name LIKE 'schalter-%'").run()
+  })
+
   await pruefe('unknown harness is rejected', async () => {
     const r = await formular('/agents/edit', { repo_id: repoId, name: 'a1', harness: 'gpt', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'manuell' }, { alsBrowser: true })
     gleich(r.status, 400, 'status')
@@ -4520,19 +4535,174 @@ export default {
     enthaelt(html, 'No channel is configured', 'and the hub is quiet again — which is a complete installation')
   })
 
+  // ------------------------------------------------------------------
+  gruppe("Freilauf skills: the page, the installation, and the read-only API")
+
+  await pruefe('the settings page names what is shipped and where it would go', async () => {
+    const html = await (await hol('/settings/skills')).text()
+    enthaelt(html, 'freilauf-models', 'the shipped skills are listed by name')
+    enthaelt(html, 'name="skills_install"', 'the installation switch is there')
+    enthaelt(html, 'name="skills_auto_update"', 'and the automatic-update switch')
+    enthaelt(html, 'type="hidden" name="skills_install" value="0"',
+      'each carries its hidden 0 companion — without it an unticked box would read as "not mentioned"')
+    enthaelt(html, 'id="skills-remove-dialog"', 'the confirmation dialog is rendered by the server')
+    enthaelt(html, 'data-was-on=', 'and the form records the state it was rendered with')
+  })
+
+  // The target directories are DERIVED from the enabled coding agents, so the
+  // test derives them too — hardcoding `.claude/skills` here would turn a
+  // change to the plugin set into a failure of this test instead of a change in
+  // its subject. Every path lies inside the sandbox home
+  // (FREILAUF_SKILLS_HOME), never in the operator's real one.
+  const skillZiele = async () => (await (await hol('/api/skills')).json()).targets.map(t => t.dir)
+
+  await pruefe('switching the installation on writes into the covering directories, off takes it back', async () => {
+    const vorher = await skillZiele()
+    wahr(vorher.length >= 1, 'there is at least one target directory')
+    wahr(vorher.every(d => d.startsWith(join(SB, 'skillhome'))),
+      'and every one of them is inside the sandbox home, not the operator\'s')
+
+    const eingeschaltet = await formular('/settings/skills',
+      { skills_install: '1', skills_auto_update: '1' }, { alsBrowser: true })
+    gleich(eingeschaltet.status, 303, 'saving redirects')
+    gleich(db.prepare("SELECT value FROM settings WHERE key='skills_install'").get().value, '1', 'the switch is stored')
+    for (const wurzel of vorher) {
+      const ziel = join(wurzel, 'freilauf-models')
+      wahr(existsSync(join(ziel, 'SKILL.md')), `${wurzel}: the skill is really on disk`)
+      wahr(existsSync(join(ziel, '.freilauf-skill.json')), `${wurzel}: with the marker that makes it removable`)
+    }
+
+    const seite = await (await hol('/settings/skills')).text()
+    enthaelt(seite, vorher[0], 'the page now shows where it went')
+
+    const aus = await formular('/settings/skills', { skills_install: '0', skills_auto_update: '1' }, { alsBrowser: true })
+    gleich(aus.status, 303, 'switching off redirects too')
+    for (const wurzel of vorher) falsch(existsSync(join(wurzel, 'freilauf-models')), `${wurzel}: the copy is gone`)
+  })
+
+  await pruefe('a "sync now" post re-establishes the state without changing the settings', async () => {
+    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { alsBrowser: true })
+    const ziel = join((await skillZiele())[0], 'freilauf-models')
+    rmSync(ziel, { recursive: true, force: true })
+    const r = await formular('/settings/skills/sync', {}, { alsBrowser: true })
+    gleich(r.status, 303, 'the button redirects')
+    wahr(existsSync(join(ziel, 'SKILL.md')), 'and the missing copy is back')
+    await formular('/settings/skills', { skills_install: '0', skills_auto_update: '1' }, { alsBrowser: true })
+  })
+
+  await pruefe('a directory the hub did not write is named on the page instead of overwritten', async () => {
+    const wurzel = (await (await hol('/api/skills')).json()).targets[0]?.dir
+      ?? join(SB, 'skillhome', '.claude', 'skills')
+    const fremd = join(wurzel, 'freilauf-models')
+    mkdirSync(fremd, { recursive: true })
+    writeFileSync(join(fremd, 'SKILL.md'), '---\nname: freilauf-models\n---\nnot ours\n')
+    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { alsBrowser: true })
+    enthaelt(readFileSync(join(fremd, 'SKILL.md'), 'utf8'), 'not ours', 'the foreign file is untouched')
+    const html = await (await hol('/settings/skills')).text()
+    enthaelt(html, fremd, 'and the page names the directory it could not write')
+    // Switching off must not take it either.
+    await formular('/settings/skills', { skills_install: '0', skills_auto_update: '1' }, { alsBrowser: true })
+    wahr(existsSync(join(fremd, 'SKILL.md')), 'switching off leaves a foreign skill alone')
+    rmSync(fremd, { recursive: true, force: true })
+  })
+
+  await pruefe('GET /api/skills answers what is shipped, where it goes and what is installed', async () => {
+    const j = await (await hol('/api/skills')).json()
+    wahr(j.ok, 'ok')
+    wahr(Array.isArray(j.skills) && j.skills.length >= 1, 'the shipped skills')
+    wahr(j.skills.every(s => s.name && s.description), 'each with a name and a description')
+    wahr(Array.isArray(j.harnesses) && j.harnesses.some(h => h.id === 'claude'), 'every registered coding agent')
+    wahr(j.harnesses.find(h => h.id === 'claude').user.some(p => p.includes('.claude/skills')),
+      'and the directories it declares')
+    gleich(j.install, false, 'the switch is off again after the test above')
+  })
+
+  await pruefe('the read-only API answers for repos, agents, runs, favorites and sessions', async () => {
+    const repos = await (await hol('/api/repos')).json()
+    wahr(repos.ok && repos.repos.some(r => r.id === repoId), 'the repo is listed')
+    wahr(Array.isArray(repos.repos[0].extras), 'with its worktree extras parsed')
+
+    const agents = await (await hol(`/api/agents?repo=${repoId}`)).json()
+    wahr(agents.ok && Array.isArray(agents.agents), 'agents answer')
+
+    const runs = await (await hol(`/api/runs?repo=${repoId}&limit=5`)).json()
+    wahr(runs.ok && Array.isArray(runs.runs), 'runs answer')
+    wahr(runs.runs.length <= 5, 'and the limit is honoured')
+    wahr(runs.runs.every(r => r.short_id && r.id), 'every row carries its short id')
+
+    const favs = await (await hol('/api/favorites')).json()
+    wahr(favs.ok && Array.isArray(favs.favorites) && Number.isFinite(favs.max), 'favorites answer')
+
+    // An unknown run is a 404 with a reason, not a 500 and not an empty 200.
+    const fehlt = await hol('/api/runs/00000000-0000-0000-0000-000000000000')
+    gleich(fehlt.status, 404, 'an unknown run is a 404')
+  })
+
+  await pruefe('GET /api/runs/<id> carries the files, the events and a liveness verdict', async () => {
+    const j = await (await hol(`/api/runs/${R1}`)).json()
+    wahr(j.ok, 'ok')
+    gleich(j.run.id, R1, 'the run')
+    wahr(Array.isArray(j.events) && j.events.length > 0, 'its events')
+    wahr(Array.isArray(j.incidents), 'its incidents')
+    wahr(j.files.report.path.includes(R1), 'the report path')
+    wahr(typeof j.files.report.exists === 'boolean', 'with an exists flag, so nobody has to guess the path')
+    // The whole point of the block: "done" says the run reported, not that the
+    // process is gone — three of the four coding agents stay in their TUI.
+    wahr(['working', 'idle_in_tui', 'process_gone', 'no_session', 'unknown'].includes(j.liveness.verdict),
+      `liveness verdict is one of the five (${j.liveness.verdict})`)
+    wahr([true, false, null].includes(j.liveness.pane_alive),
+      'pane_alive is a tri-state — null means tmux could not be asked, never "gone"')
+  })
+
+  await pruefe("the skill's own run-alive script answers against a live hub", async () => {
+    // A script shipped inside a skill is a promise like any other line in it.
+    // Run it the way an agent would: fl-api on PATH, FL_HUB_URL from the
+    // session — which is exactly what a run's environment carries.
+    const skript = join(PROJEKT, 'skills', 'freilauf-runs', 'scripts', 'run-alive.sh')
+    const lauf = (args) => new Promise((res) => execFile('bash', [skript, ...args], {
+      env: { ...process.env, PATH: `${join(PROJEKT, 'bin')}:${process.env.PATH}`, FL_HUB_URL: sk.basis },
+      timeout: 30_000,
+    }, (err, stdout, stderr) => res({ code: err?.code ?? 0, stdout, stderr })))
+
+    const hilfe = await lauf(['--help'])
+    gleich(hilfe.code, 0, '--help works')
+    enthaelt(hilfe.stdout, 'run-alive.sh', 'and says what it is')
+
+    const einer = await lauf([R1])
+    gleich(einer.code, 0, `one run answers (${einer.stderr})`)
+    enthaelt(einer.stdout, 'VERDICT', 'the header')
+    enthaelt(einer.stdout, R1.slice(0, 8), 'and the run it was asked about')
+    // The verdict column is the whole point: it is one of the five words, and
+    // it is NOT the status column.
+    wahr(/\b(working|idle_in_tui|process_gone|no_session|unknown)\b/.test(einer.stdout),
+      `a verdict is printed (${einer.stdout.trim()})`)
+
+    const liste = await lauf(['--repo', String(repoId)])
+    gleich(liste.code, 0, `a whole repo answers (${liste.stderr})`)
+    wahr(liste.stdout.split('\n').filter(Boolean).length >= 2, 'header plus at least one run')
+
+    const quatsch = await lauf(['--wat'])
+    gleich(quatsch.code, 2, 'an unknown option is a usage error, not a crash')
+  })
+
+  await pruefe('the search finds a run by its title, its prompt and its id', async () => {
+    const nachTitel = await (await hol(`/api/runs?repo=${repoId}&q=${encodeURIComponent(R1.slice(0, 8))}&archived=all`)).json()
+    wahr(nachTitel.runs.some(r => r.id === R1), 'by the beginning of its id')
+  })
+
   await pruefe('the welcome wizard answers on every step and each POST moves one step on', async () => {
-    for (let step = 1; step <= 5; step++) {
+    for (let step = 1; step <= 6; step++) {
       const r = await hol(`/welcome?step=${step}`)
       gleich(r.status, 200, `step ${step} renders`)
       const html = await r.text()
-      enthaelt(html, `${step} of 5`, `step ${step} says where it is`)
+      enthaelt(html, `${step} of 6`, `step ${step} says where it is`)
       enthaelt(html, 'name="welcome_hide"', `step ${step} carries the "do not show again" box`)
       enthaelt(html, 'welcome=skip', `step ${step} offers the way out`)
       // …and on an unlocked page that way out is a SUBMIT of the very form the
       // box is in, not a link beside it. A link is what threw a ticked box
       // away, and the wizard then greeted the operator it had just been told
       // to stop greeting.
-      if (step < 5) enthaelt(html, 'name="exit" value="1"', `step ${step} leaves by submitting, not by navigating`)
+      if (step < 6) enthaelt(html, 'name="exit" value="1"', `step ${step} leaves by submitting, not by navigating`)
       // Opening the wizard as an ordinary page IS the "not now" answer. Without
       // it the nav's own "Overview" link — `layout()` draws it around every
       // unlocked step — would bounce the reader right back here.
@@ -4550,6 +4720,10 @@ export default {
       ['/welcome/agents', {}, '/welcome?step=3'],
       ['/welcome/provider', { id: 'openrouter' }, '/welcome?step=4'],
       ['/welcome/llm', {}, '/welcome?step=5'],
+      // Step 5 asks about the hub's own agent skills. It is answered with the
+      // box UNticked here, so the suite's own sandbox home stays empty; the
+      // installation itself is exercised by the "Freilauf skills" group.
+      ['/welcome/skills', { skills_install: '0', skills_auto_update: '1' }, '/welcome?step=6'],
       ['/welcome/done', {}, '/'],
     ]
     for (const [pfad, daten, ziel] of schritte) {

@@ -168,6 +168,18 @@ export function goalSpec(id) { return HARNESS_PLUGINS[id]?.goal ?? null }
 export function harnessesWithGoal() { return harnessIds().filter(id => HARNESS_PLUGINS[id].goal) }
 
 /**
+ * Where a coding agent looks for agent skills, or null when it declares
+ * nothing. `{ user: [path], project: [path] }` — `~` allowed in the user
+ * paths, project paths relative to a workspace root. See server/skills.mjs.
+ */
+export function skillSpec(id) { return HARNESS_PLUGINS[id]?.skills ?? null }
+
+/** The coding agents the hub can install its own skills for. */
+export function harnessesWithSkills() {
+  return harnessIds().filter(id => (HARNESS_PLUGINS[id].skills?.user ?? []).length)
+}
+
+/**
  * Which of the registered plugins are actually installed on this machine?
  * Used by the "add coding agent" dialog to suggest what can be added.
  * `command -v` is the portable way to ask the shell; a missing binary is a

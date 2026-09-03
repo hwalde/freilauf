@@ -1310,6 +1310,45 @@ try {
     await p.close()
   })
 
+  gruppe('A18 — the Freilauf-skills removal confirmation')
+  await pruefe('unticking the installation asks before anything is deleted', async () => {
+    // Switch it on through the ordinary form first, so the page really renders
+    // with `data-was-on="1"` — that attribute is what makes the question
+    // askable at all, and a test that set it by hand would test nothing.
+    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { alsBrowser: true })
+    const p = await neueSeite('/settings/skills')
+    gleich(await p.$eval('#skills-form', f => f.dataset.wasOn), '1', 'the form knows it was on')
+    gleich(await p.$eval('#skills-remove-dialog', d => d.open), false, 'the dialog is closed to begin with')
+
+    // Saving with the box still ticked must NOT ask.
+    await p.click('#skills-form button')
+    await p.waitForLoadState('load')
+    gleich(await p.$eval('#skills-remove-dialog', d => d.open), false, 'saving unchanged asks nothing')
+
+    // Unticking and saving DOES ask, and nothing is submitted yet.
+    await p.uncheck('#skills-form input[type=checkbox][name=skills_install]')
+    await p.click('#skills-form button')
+    await wartePage(p, () => document.getElementById('skills-remove-dialog').open, null, 'the confirmation')
+    enthaelt(await p.textContent('#skills-remove-dialog'), 'freilauf-models',
+      'and it names the directories that would go')
+    gleich(await p.$eval('#skills-form input[type=checkbox][name=skills_install]', b => b.checked), false, 'the box stays as clicked')
+
+    // Cancel leaves everything alone — the setting is still on.
+    await p.click('#skills-remove-dialog [data-skills-close]')
+    gleich(await p.$eval('#skills-remove-dialog', d => d.open), false, 'cancel closes it')
+    gleich(sk.db.prepare("SELECT value FROM settings WHERE key='skills_install'").get().value, '1',
+      'and nothing was saved')
+
+    // Confirming submits the form for real.
+    await p.click('#skills-form button')
+    await wartePage(p, () => document.getElementById('skills-remove-dialog').open, null, 'the confirmation again')
+    await Promise.all([p.waitForLoadState('load'), p.click('#skills-remove-confirm')])
+    gleich(sk.db.prepare("SELECT value FROM settings WHERE key='skills_install'").get().value, '0',
+      'confirming really switches it off')
+    sauber(p)
+    await p.close()
+  })
+
   gruppe('A12 — the tmux-cleanup triggers')
   let CL_ERSTER = ''
   await pruefe('the sidebar and the Sessions page offer the configured cleanup agent', async () => {

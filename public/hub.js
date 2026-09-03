@@ -1274,6 +1274,50 @@
     })
   })
 
+  // ---- Settings -> Freilauf skills: confirm before the files go ----
+  //
+  // Unticking "install the skills" is the one settings change on this hub that
+  // DELETES something from directories that belong to other programs, so it
+  // does not happen on a stray click. The dialog is rendered by the server on
+  // that page and already lists the exact directories — nothing here composes a
+  // sentence, which is also why none of this needs a `js.*` translation.
+  //
+  // The form's own `data-was-on` is what makes the question askable at all: it
+  // records the state the page was RENDERED with, so unticking a box that was
+  // already off is not a removal and asks nothing.
+  function skillsDialog() { return document.getElementById('skills-remove-dialog') }
+  function closeSkillsDialog() {
+    var d = skillsDialog()
+    if (d && d.open) d.close()
+  }
+
+  document.addEventListener('click', function (ev) {
+    if (!ev.target.closest) return
+    if (ev.target.closest('[data-skills-close]')) { closeSkillsDialog(); return }
+    if (ev.target.closest('#skills-remove-confirm')) {
+      var form = document.getElementById('skills-form')
+      closeSkillsDialog()
+      // `dataset.confirmed` is the one-shot pass: the submit handler below lets
+      // it through and clears it again, so a second edit asks again.
+      if (form) { form.dataset.confirmed = '1'; form.submit() }
+      return
+    }
+    var d = skillsDialog()
+    if (d && d.open && ev.target === d) closeSkillsDialog()
+  })
+
+  document.addEventListener('submit', function (ev) {
+    var form = ev.target
+    if (!form || form.id !== 'skills-form') return
+    if (form.dataset.confirmed === '1') { delete form.dataset.confirmed; return }
+    var box = form.querySelector('input[type="checkbox"][name="skills_install"]')
+    var d = skillsDialog()
+    // Only the transition on -> off asks. Everything else saves straight away.
+    if (!box || box.checked || form.dataset.wasOn !== '1' || !d) return
+    ev.preventDefault()
+    if (!d.open) d.showModal()
+  })
+
   // ---- status sidebar: collapsible, and the state survives the page ----
   //
   // The open/closed class sits on the SHELL, not on the sidebar: the live

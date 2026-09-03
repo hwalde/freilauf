@@ -75,10 +75,18 @@ das tut Freilauf, und es geht nur vorwärts.
   Vertrag ([docs/plugins.md](docs/plugins.md)); ein Dritter kann ein Paket auf
   die Maschine legen, das beim Start dazukommt — mit eigener
   API-Key-Verwaltung, eigenen Budget-Schwellen und eigener Start-Deklaration.
-  Eine **Plugins-Seite** und ein fünfschrittiger **Welcome-Assistent**
+  Eine **Plugins-Seite** und ein sechsschrittiger **Welcome-Assistent**
   konfigurieren sie; die kleinen Fragen des Hubs selbst (einen Lauf benennen,
   eine Logzeile beurteilen, einen Report lesen) kann ein Coding-Agent auf dem
   Abo beantworten, das du ohnehin bezahlst.
+- **Er bringt deinen Agenten bei, ihn zu bedienen.** Freilauf liefert eigene
+  **Agent-Skills** mit (im offenen Format von [agentskills.io](https://agentskills.io)),
+  die erklären, wie man Läufe findet und liest, Agenten und Repositories anlegt,
+  Flows baut, die Statusanzeige liest und ein Modell wählt. Einschalten kopiert
+  sie in die Verzeichnisse, die deine Coding-Agenten ohnehin lesen — eine Kopie
+  je Verzeichnis, so gewählt, dass kein Agent denselben Skill doppelt bekommt —
+  und Ausschalten entfernt genau die Kopien, die Freilauf geschrieben hat, und
+  sonst nichts.
 - **Mehrsprachige Oberfläche**: Englisch (Standard), 中文, Deutsch — eine Uhr
   und ein Zahlenformat auf jeder Seite.
 

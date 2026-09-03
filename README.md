@@ -71,9 +71,16 @@ Freilauf does, and it only goes forward.
   ([docs/plugins.md](docs/plugins.md)); a third party can drop a package on
   the machine that joins them at startup, with its own API-key handling, its
   own budget-gate thresholds and its own launch declaration. A **Plugins page**
-  and a five-step **Welcome wizard** configure them; the hub's own small
+  and a six-step **Welcome wizard** configure them; the hub's own small
   questions (naming a run, judging a log line, reading a report) can be
   answered by a coding agent on a subscription you already pay for.
+- **It teaches your agents to drive it.** Freilauf ships **agent skills**
+  (the open [agentskills.io](https://agentskills.io) format) that explain how
+  to find and read runs, create agents and repositories, build flows, read the
+  status panel and pick a model. Switch them on and they are copied into the
+  directories your coding agents already read — one copy per directory, chosen
+  so that no agent gets the same skill twice — and removed again, exactly and
+  only the copies Freilauf wrote, when you switch them off.
 - **Multilingual UI**: English (default), 中文, Deutsch — one clock and one
   number format across every page.
 
@@ -319,8 +326,9 @@ Freilauf is one operator's workflow turned into code, published because it
 might save you a month. **Fork it, change it, rip parts out.** The seams meant
 to be pulled on: coding agent, model provider and notification plugins —
 including packages that live outside this repository entirely — the platform
-prompt suffix, per-repo prompts, opt-in extra skills, the model source behind
-the hub's own questions, and the no-code flows.
+prompt suffix, per-repo prompts, opt-in extra skills, the agent skills the hub
+ships for your coding agents, the model source behind the hub's own questions,
+and the no-code flows.
 [SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md) has the table;
 [docs/plugins.md](docs/plugins.md) has the plugin contract in full.
 

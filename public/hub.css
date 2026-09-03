@@ -766,6 +766,14 @@ dialog.qr.cleanup > p.dim { margin: 0 0 var(--sp-10); line-height: 1.5; }
 dialog.qr.cleanup form.form-grid { margin: 0; }
 dialog.qr.cleanup form.form-grid label:first-of-type { margin-top: 0; }
 
+/* ---- Settings -> Freilauf skills (server/pages.mjs, server/welcome.mjs) ----
+   One list shape for four different questions on that page — what is shipped,
+   where it goes, what is installed, what a removal would take. They are read
+   one after another, so they share the spacing rather than each inventing it. */
+ul.skill-list { margin: var(--sp-8) 0 var(--sp-12); padding-left: var(--sp-16); line-height: 1.6; }
+ul.skill-list code { word-break: break-all; }
+dialog.qr.cleanup ul.skill-list { max-height: 40vh; overflow-y: auto; }
+
 /* The agent+provider+model block reused on the settings page (runSetupFields
    with wrapClass) reads as a section there. */
 form.form-grid fieldset.cleanup-setup { margin: var(--sp-12) 0; padding: var(--sp-10) var(--sp-12); }

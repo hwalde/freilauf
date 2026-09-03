@@ -42,6 +42,9 @@ import {
 import { installFromDirectory, uninstallPlugin, listPackages } from './install.mjs'
 import { scanSystem, openDiscoveries, answerDiscovery, lastScanAt } from './discovery.mjs'
 import { pluginFields, pluginSettingKey, pluginSettingValue } from './settings.mjs'
+// Last in this list on purpose: it reaches back into the registry and the
+// store, and both are already evaluated by the time this line runs.
+import { syncSkillsQuiet } from '../skills.mjs'
 
 /** A `<p class="dim">` explanation — every section carries one (see PLAN §2). */
 const explain = (key) => `<p class="dim">${e(t(key))}</p>`
@@ -492,6 +495,7 @@ export async function pluginsSave(req, res, url, formBody) {
     })
   }
   saveDeclaredSettings(id, plugin, b)
+  syncSkillsQuiet('plugin saved')
   redirect(res, BACK)
 }
 
@@ -528,6 +532,7 @@ export async function pluginsAdd(req, res, url, formBody) {
   setPluginConfig(id, { kind, source: pluginSource(id) ?? 'builtin', enabled: 1 })
   if (kind === 'harness') setPluginProviders(id, plugin.providers ?? [])
   answerDiscovery(`${kind}:${id}`, 'added')
+  syncSkillsQuiet('plugin added')
   redirect(res, safeBack(b.back ?? BACK))
 }
 
@@ -537,6 +542,7 @@ export async function pluginsRemove(req, res, url, formBody) {
   const id = String(b.id ?? '').trim()
   if (!getPlugin(id)) return problemPage(req, res, t('plugins.title'), [t('plugins.problem_unknown', { id })], BACK)
   forgetPlugin(id)
+  syncSkillsQuiet('plugin forgotten')
   redirect(res, BACK)
 }
 
@@ -549,6 +555,7 @@ export async function pluginsInstall(req, res, url, formBody) {
   // The error is a developer-facing English sentence from install.mjs and is
   // shown as it stands: it names the manifest field or the colliding id.
   if (!r.ok) return problemPage(req, res, t('plugins.title'), [r.error], BACK)
+  syncSkillsQuiet('plugin installed')
   redirect(res, BACK)
 }
 
@@ -557,6 +564,7 @@ export async function pluginsUninstall(req, res, url, formBody) {
   const b = await formBody()
   const r = uninstallPlugin(String(b.id ?? '').trim())
   if (!r.ok) return problemPage(req, res, t('plugins.title'), [r.error], BACK)
+  syncSkillsQuiet('plugin uninstalled')
   redirect(res, BACK)
 }
 

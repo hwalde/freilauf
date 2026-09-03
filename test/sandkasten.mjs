@@ -77,7 +77,7 @@ export function neuerSandkasten({ praefix = 'freilauf-test-', behalten = false }
   const zustand = { hub: null, db: null, port: 0, basis: '', aufgeraeumt: false }
 
   async function bauen() {
-    for (const d of ['data', 'runs', 'worktrees', 'integrate', 'bin', 'plugins']) mkdirSync(join(SB, d), { recursive: true })
+    for (const d of ['data', 'runs', 'worktrees', 'integrate', 'bin', 'plugins', 'skillhome']) mkdirSync(join(SB, d), { recursive: true })
 
     // Extra-skill dummy (planning: opt-in skills outside the skill autoload folders)
     mkdirSync(join(SB, 'zusaetze', 'e2e-fleiss'), { recursive: true })
@@ -216,6 +216,13 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // machine it runs on. The directory starts empty; the plugin tests
       // install into it themselves.
       FREILAUF_PLUGIN_DIR: join(SB, 'plugins'),
+      // The hub's own agent skills resolve their target directories against
+      // $HOME (~/.claude/skills and friends), so this is the same fence one
+      // layer further out — and here it is not merely about reproducibility:
+      // without it a suite run would install into, and later DELETE from, the
+      // operator's real skill directories. See server/skills.mjs.
+      FREILAUF_SKILLS_HOME: join(SB, 'skillhome'),
+      FREILAUF_SKILLS_STATE: join(SB, 'data', 'skills-installed.json'),
       // The goal waits for the TUI to draw before it is typed in (server/goal.mjs).
       // The stub prints immediately, so the suite must not sit through the
       // production grace period for it.
@@ -297,6 +304,8 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     process.env.FREILAUF_CLAUDE_PROJECTS = join(SB, 'claude-projects')
     process.env.FREILAUF_ZUSAETZE_DIR = join(SB, 'zusaetze')
     process.env.FREILAUF_PLUGIN_DIR = join(SB, 'plugins')
+    process.env.FREILAUF_SKILLS_HOME = join(SB, 'skillhome')
+    process.env.FREILAUF_SKILLS_STATE = join(SB, 'data', 'skills-installed.json')
     process.env.FREILAUF_PULS_AUS = '1'
     process.env.FREILAUF_CURSOR_AUTH = join(SB, 'missing-cursor-auth.json')
     process.env.FREILAUF_CURSOR_DIR = join(SB, 'cursor')

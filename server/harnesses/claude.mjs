@@ -106,6 +106,21 @@ const plugin = {
   },
 
   /**
+   * Where claude looks for agent skills — the directories `server/skills.mjs`
+   * may install the hub's own skills into. Documented by Claude Code itself:
+   * personal skills in `~/.claude/skills/<name>/SKILL.md`, project skills in
+   * `.claude/skills/` of the checkout (and every parent up to the repo root).
+   *
+   * The list is ordered by this plugin's own preference; the resolver treats
+   * that order as a tie-break only, because COVERAGE decides — and this one
+   * directory happens to be the one cursor and opencode read as well.
+   */
+  skills: {
+    user: ['~/.claude/skills'],
+    project: ['.claude/skills'],
+  },
+
+  /**
    * The budget gate for a claude run.
    *
    * Three windows, three thresholds, and each window is measured against ITS
