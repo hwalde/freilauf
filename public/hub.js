@@ -1664,6 +1664,73 @@
     })
   }())
 
+  // ---- the terminal, cinema mode: the screen above the fold, and nothing else ----
+  // Full screen is the whole display and takes the page with it; cinema mode is
+  // the smaller gesture one actually wants while working: the terminal moves to
+  // the top, takes the full width, and is exactly as tall as the viewport still
+  // has room for. Everything that stood above it — and the status sidebar with
+  // it — is below it now, one scroll away.
+  //
+  // Three things it does not leave to CSS:
+  //   - the HEIGHT is measured, not guessed. What sits above the terminal in
+  //     this mode is the header plus the summary line, and a banner may join
+  //     them; a `calc(100vh - 200px)` would be right on one page and wrong on
+  //     the next, and being one line too tall is what pushes it out of the very
+  //     fold the mode exists for.
+  //   - the button carries BOTH labels (data-title-exit) and swaps them, because
+  //     it toggles: a button that still says "cinema mode" while one is in it
+  //     says nothing about where the click leads.
+  //   - the choice is remembered PER RUN in localStorage, so a reload — the live
+  //     channel's own way of ending up on the same page — comes back into it.
+  //     Per run and not globally: one long-running agent is worth watching this
+  //     way, the next run's report is not.
+  ;(function () {
+    const wrap = document.getElementById('term-wrap')
+    const btn = document.getElementById('term-cinema')
+    const box = document.getElementById('term')
+    if (!wrap || !btn || !box) return
+    const det = btn.closest('details')
+    const runId = (location.pathname.match(/^\/runs\/([0-9a-f-]{36})$/) || [])[1]
+    const key = runId ? 'freilauf.cinema.' + runId : null
+    const titelAn = btn.getAttribute('title') || ''
+    const titelAus = btn.dataset.titleExit || titelAn
+    const kino = () => wrap.classList.contains('term-cinema')
+    // The terminal's own top edge is the only thing that matters here: whatever
+    // stands above it stays above it, so the room left over is the answer.
+    // xterm refits itself — the ResizeObserver below watches #term.
+    const messen = () => {
+      if (!kino()) return
+      const oben = box.getBoundingClientRect().top + window.scrollY
+      wrap.style.setProperty('--cinema-h', Math.max(240, window.innerHeight - oben - 12) + 'px')
+    }
+    const paint = (v) => {
+      wrap.classList.toggle('term-cinema', v)
+      document.body.classList.toggle('term-cinema-on', v)
+      btn.setAttribute('title', v ? titelAus : titelAn)
+      btn.setAttribute('aria-label', v ? titelAus : titelAn)
+      btn.setAttribute('aria-pressed', v ? 'true' : 'false')
+      if (v) {
+        if (det) det.open = true
+        messen()
+      } else wrap.style.removeProperty('--cinema-h')
+    }
+    btn.addEventListener('click', (ev) => {
+      // Same reason as the full-screen button: it sits in the <summary>, and a
+      // click there would fold the terminal away instead of enlarging it.
+      ev.preventDefault()
+      ev.stopPropagation()
+      const v = !kino()
+      paint(v)
+      // The mode is about what is above the fold, so put the page there.
+      if (v) { try { window.scrollTo(0, 0) } catch {} }
+      try { if (key) v ? localStorage.setItem(key, '1') : localStorage.removeItem(key) } catch {}
+    })
+    window.addEventListener('resize', messen)
+    let gemerkt = false
+    try { gemerkt = !!key && localStorage.getItem(key) === '1' } catch {}
+    if (gemerkt) paint(true)
+  }())
+
   // ---- terminal: xterm.js + resize frame \0{cols},{rows} (planning 7.4) ----
   // xterm.js provides the globals 'Terminal' and 'FitAddon' — not 'Term'.
   const termBox = document.getElementById('term')

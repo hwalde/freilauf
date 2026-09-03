@@ -488,6 +488,25 @@ details.run-term > summary::after { content: ""; display: block; clear: both; }
   background: var(--surface-term); padding: var(--sp-8); }
 #term-wrap.term-full #term { height: 100%; border-radius: 0; }
 body.term-full-on { overflow: hidden; }
+/* Cinema mode (the shape YouTube's has): not full screen — the page stays a
+   page — but the terminal alone owns what is above the fold. It moves to the
+   TOP of the content (order: -1, which is why main becomes a flex column),
+   takes the whole width, and its height is measured against the viewport by
+   hub.js, which writes --cinema-h. Everything that stood above it stands below
+   it now, and the status sidebar goes away entirely: a wide terminal next to a
+   268px column of numbers is exactly what one turns this on to get rid of.
+   Scrolling down still reaches every other block of the page.
+   Only the terminal gets the extra width — prose and forms keep their measure,
+   or the mode would trade one unreadable layout for another. */
+body.term-cinema-on .shell { grid-template-columns: minmax(0, 1fr); }
+body.term-cinema-on .shell > aside { display: none; }
+body.term-cinema-on .shell > main { max-width: none; display: flex; flex-direction: column; }
+body.term-cinema-on .shell > main > :not(details.run-term) { max-width: 1200px; width: 100%; }
+body.term-cinema-on details.run-term { order: -1; }
+/* Full screen wins where both are on: it sizes #term to its fixed box, and a
+   measured viewport height would fight it. */
+#term-wrap.term-cinema:not(.term-full) #term { height: var(--cinema-h, 70vh); }
+.term-cinema-btn { float: right; margin-right: var(--sp-6); }
 /* The notification switch of the run, right under the terminal (notifySwitch in pages.mjs). */
 .notify-switch { margin: var(--sp-8) 0; flex-wrap: wrap; }
 .err { color: var(--err); } .warn { color: var(--warn-text); } .ok { color: var(--ok-text); }
