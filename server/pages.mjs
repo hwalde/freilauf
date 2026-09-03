@@ -40,7 +40,11 @@ import { flowRunKeepDays } from './flows/db.mjs'
 // "Freilauf found N things on this machine it could use" — derived, not passed,
 // exactly like setupBanner() above: the layout calls it on every page and it
 // answers out of the discovery table. It lives with the page that answers it.
-import { discoveryBanner } from './plugins/web.mjs'
+import { discoveryBanner, checkbox } from './plugins/web.mjs'
+import {
+  availableSkills, harnessSkillRoots, skillTargets, installedOverview, removalPlan,
+  skillConflicts, skillsInstallOn, skillsAutoUpdate, syncSkills, rootExists,
+} from './skills.mjs'
 // The budget-gate thresholds are no longer typed into this file: every plugin
 // that declares a gate brings its own fields, and the historic keys survive
 // because a built-in field names them itself (`settingKey`).
@@ -1900,6 +1904,8 @@ export async function pageSettings(req, res, url) {
      <span class="dim">${e(t('settings.merge_hint', { setup: mergeSettingsSummary() }))}</span></p>
   <p><a class="btn" href="/settings/cleanup">${e(t('cleanup.settings_title'))}</a>
      <span class="dim">${e(t('settings.cleanup_hint', { setup: cleanupSettingsSummary() }))}</span></p>
+  <p><a class="btn" href="/settings/skills">${e(t('flskills.title'))}</a>
+     <span class="dim">${e(t('settings.skills_hint', { state: t(skillsInstallOn() ? 'layout.on' : 'layout.off') }))}</span></p>
   <form method="post" action="/settings/save" class="settings form-grid">
     <label>${e(t('settings.language'))} <select name="ui_language">${Object.entries(LANGUAGES).map(([code, label]) =>
       `<option value="${code}" ${(s.ui_language ?? 'en') === code ? 'selected' : ''}>${e(label)}</option>`).join('')}</select></label>
@@ -2207,6 +2213,144 @@ export async function cleanupSettingsSave(req, res, url, formBody) {
   redirect(res, '/settings/cleanup')
 }
 
+// ---------------------------------------------------------------------------
+// Settings → Freilauf skills
+//
+// Its own page rather than a fieldset in the big form, and for the reason the
+// big form's own comment gives: `/settings/save` writes settings and nothing
+// else, while switching this one off DELETES FILES. A handler that owns the
+// whole request is what can act on the transition — and it is also what makes
+// "install now" and "remove now" one code path with the state it re-establishes.
+
+/** One row per skill this build ships — what the operator is being offered. */
+function skillCatalogList() {
+  const skills = availableSkills()
+  if (!skills.length) return `<p class="dim">${e(t('flskills.none_shipped'))}</p>`
+  return `<ul class="skill-list">${skills.map(s =>
+    `<li><b>${e(s.title)}</b>${s.description ? ` — <span class="dim">${e(s.description.slice(0, 240))}</span>` : ''}</li>`).join('')}</ul>`
+}
+
+/** Which directories this installation writes to, and whom each of them serves. */
+function skillTargetList() {
+  const roots = harnessSkillRoots()
+  const { targets, skipped } = skillTargets(roots)
+  const off = roots.filter(r => !r.enabled)
+  const rows = targets.length
+    ? `<ul class="skill-list">${targets.map(tg =>
+        `<li><code>${e(tg.dir)}</code>${rootExists(tg.dir) ? '' : ` <span class="dim">${e(t('flskills.will_create'))}</span>`}
+          <br><span class="dim">${e(t('flskills.serves', { agents: tg.harnesses.map(id => harnessLabel(id)).join(', ') }))}</span></li>`).join('')}</ul>`
+    : `<p class="warn">${e(t('flskills.no_targets'))}</p>`
+  const skippedNote = skipped.length
+    ? `<p class="dim">${e(t('flskills.skipped', { agents: skipped.map(x => x.label).join(', ') }))}</p>` : ''
+  const offNote = off.length
+    ? `<p class="dim">${e(t('flskills.not_configured', { agents: off.map(x => x.label).join(', ') }))}</p>` : ''
+  return `${rows}${skippedNote}${offNote}`
+}
+
+/** Where the project-level directories are — declared, never written to by the hub. */
+function skillProjectList() {
+  const roots = harnessSkillRoots().filter(r => r.project.length)
+  if (!roots.length) return ''
+  return `<details><summary>${e(t('flskills.project_legend'))}</summary>
+    <p class="dim">${e(t('flskills.project_hint'))}</p>
+    <ul class="skill-list">${roots.map(r =>
+      `<li><b>${e(r.label)}</b> — ${r.project.map(p => `<code>${e(p)}</code>`).join(', ')}</li>`).join('')}</ul></details>`
+}
+
+/**
+ * What the hub cannot write, and why. Recomputed per render, so a directory
+ * cleared by hand stops being listed on the next reload — a warning that
+ * outlives its cause is a warning people learn to scroll past.
+ */
+function skillConflictList() {
+  const conflicts = skillConflicts()
+  if (!conflicts.length) return ''
+  return `<p class="warn">${e(t('flskills.conflicts'))}</p>
+    <ul class="skill-list">${conflicts.map(c => `<li><code>${e(c.dir)}</code></li>`).join('')}</ul>`
+}
+
+/** What is on disk right now, per directory. */
+function skillInstalledList() {
+  const installed = installedOverview()
+  if (!installed.length) return `<p class="dim">${e(t('flskills.nothing_installed'))}</p>`
+  return `<ul class="skill-list">${installed.map(root =>
+    `<li><code>${e(root.dir)}</code><br><span class="dim">${root.skills.map(sk =>
+      `${e(sk.name)}${sk.current ? '' : ` (${e(t('flskills.outdated'))})`}`).join(', ')}</span></li>`).join('')}</ul>`
+}
+
+/**
+ * The confirmation the operator sees before the files go. Rendered server-side
+ * — the dialog carries its own translated text, so nothing has to travel as a
+ * `js.*` key, which is the same rule the cleanup dialog follows.
+ */
+function skillRemoveDialog() {
+  const plan = removalPlan()
+  const list = plan.length
+    ? `<ul class="skill-list">${plan.map(p =>
+        `<li><code>${e(p.dir)}</code>${p.owned ? '' : ` <span class="dim">${e(t('flskills.remove_foreign'))}</span>`}</li>`).join('')}</ul>`
+    : `<p class="dim">${e(t('flskills.nothing_installed'))}</p>`
+  return `<dialog id="skills-remove-dialog" class="qr cleanup">
+    <h3>${e(t('flskills.remove_title'))} <button type="button" class="mini" data-skills-close aria-label="${e(t('qr.cancel'))}">✕</button></h3>
+    <p>${e(t('flskills.remove_body'))}</p>
+    ${list}
+    <menu class="qr-actions">
+      <button type="button" class="ghost" data-skills-close>${e(t('qr.cancel'))}</button>
+      <button type="button" id="skills-remove-confirm">${e(t('flskills.remove_confirm'))}</button>
+    </menu>
+  </dialog>`
+}
+
+export async function pageSkillSettings(req, res, url) {
+  const on = skillsInstallOn()
+  const report = url?.searchParams?.get('synced') === '1'
+  const body = `<h2>${e(t('flskills.title'))}</h2>
+  <p class="dim">${e(t('flskills.intro'))}</p>
+  <p class="dim">${e(t('flskills.intro2'))}</p>
+  ${report ? `<p class="card ok">${e(t('flskills.synced'))}</p>` : ''}
+  <h3>${e(t('flskills.catalog_legend'))}</h3>
+  ${skillCatalogList()}
+  <form method="post" action="/settings/skills" class="settings form-grid" id="skills-form" data-was-on="${on ? '1' : '0'}">
+    <fieldset><legend>${e(t('flskills.switches_legend'))}</legend>
+      ${checkbox('skills_install', on, t('flskills.install'), ` <span class="dim">${e(t('flskills.install_hint'))}</span>`)}
+      ${checkbox('skills_auto_update', skillsAutoUpdate(), t('flskills.auto'), ` <span class="dim">${e(t('flskills.auto_hint'))}</span>`)}
+    </fieldset>
+    <div class="btn-row"><button>${e(t('settings.save'))}</button>
+      <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>
+  </form>
+  <h3>${e(t('flskills.targets_legend'))}</h3>
+  <p class="dim">${e(t('flskills.targets_hint'))}</p>
+  ${skillTargetList()}
+  ${skillProjectList()}
+  <h3>${e(t('flskills.installed_legend'))}</h3>
+  ${skillInstalledList()}
+  ${skillConflictList()}
+  <form method="post" action="/settings/skills/sync" class="inline">
+    <button class="ghost">${e(t('flskills.sync_now'))}</button>
+  </form>
+  ${skillRemoveDialog()}`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(await layout(req, t('flskills.title'), '/settings', body))
+}
+
+export async function skillSettingsSave(req, res, url, formBody) {
+  const b = await formBody()
+  // The hidden `0` companion is what makes an unticked box distinguishable from
+  // a field the request never carried — see the settingsSave() comment.
+  if (Object.hasOwn(b, 'skills_install')) setSetting('skills_install', b.skills_install === '1' ? '1' : '0')
+  if (Object.hasOwn(b, 'skills_auto_update')) setSetting('skills_auto_update', b.skills_auto_update === '1' ? '1' : '0')
+  // Saving IS the action: switching on installs, switching off removes. A
+  // setting that describes the file system and then waits for a separate button
+  // is a setting that lies until somebody presses it.
+  syncSkills({ force: true })
+  redirect(res, '/settings/skills?synced=1')
+}
+
+export async function skillSettingsSync(req, res, url, formBody) {
+  await formBody()
+  syncSkills({ force: true })
+  redirect(res, '/settings/skills?synced=1')
+}
+
 /** One line for the settings page: what the cleanup agent is, or that there is none. */
 export function cleanupSettingsSummary() {
   const s = cleanupSettings()
@@ -2425,7 +2569,13 @@ export async function agentEdit(req, res, url) {
 export async function agentSave(req, res, url, formBody) {
   const id = url.searchParams.get('id')
   const b = await formBody()
-  const active = b.active ? 1 : 0
+  // A checkbox that is not ticked is simply absent from the body, so ABSENT is
+  // what "off" means here — the form carries no hidden `0` companion. But the
+  // string `'0'` is truthy in JavaScript, so a caller that spells the off state
+  // out (`active=0`, which is what anybody scripting this route writes) used to
+  // switch the agent ON. Same family as the `Number('')` entry in AGENTS.md:
+  // a value that arrives as a string has to be compared, never coerced.
+  const active = b.active === '1' || b.active === 'on' || b.active === 'true' ? 1 : 0
   const back = `/agents/edit${id ? `?id=${id}&repo=${b.repo_id ?? ''}` : `?repo=${b.repo_id ?? ''}`}`
   const problems = []
   const name = (b.name ?? '').trim()

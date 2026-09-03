@@ -125,6 +125,23 @@ const plugin = {
     return out
   },
 
+  /**
+   * Where opencode looks for agent skills. Its own configuration table (in the
+   * binary, and on opencode.ai/docs/skills) names three tiers: global skills
+   * under `~/.config/opencode/skill(s)/`, project skills under
+   * `.opencode/skill(s)/`, and — the row that matters here — "External skills
+   * (auto-loaded)" from `~/.claude/skills/` and `~/.agents/skills/`.
+   *
+   * So a copy in `~/.claude/skills` serves claude, cursor AND opencode, which
+   * is what makes the covering set two directories rather than four. Its own
+   * directory still comes first: preference is the tie-break when coverage
+   * does not decide.
+   */
+  skills: {
+    user: ['~/.config/opencode/skill', '~/.claude/skills', '~/.agents/skills'],
+    project: ['.opencode/skill', '.claude/skills', '.agents/skills'],
+  },
+
   pulseId: (run) => run.provider ?? null,
   pulseTargets: {},
 

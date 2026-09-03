@@ -747,9 +747,12 @@ a column is a table rebuild and this project's own rule about
 A fresh installation has nothing, so every page it renders is about something
 the operator has not got yet — and the one document that would fix all of it,
 `SETUP_WITH_AGENT.md`, is a file in a checkout nobody was told about.
-**`server/welcome.mjs`** is the five screens that say so: hello and the pointer
+**`server/welcome.mjs`** is the six screens that say so: hello and the pointer
 to that document, what the scan found, a model provider, the source for the
-hub's own questions, and what to do next. `GET /` redirects to `/welcome` for a
+hub's own questions, whether to install the hub's own agent skills, and what to
+do next. `STEPS` is the single counter — the breadcrumb, the header, the
+"step n of total" line and the clamp on `?step=` all derive from it, so adding
+a screen is that constant plus a `stepN()`, a heading key and an endpoint. `GET /` redirects to `/welcome` for a
 browser navigation until the operator ticks **"Do not show this again"**
 (`welcome_hide`).
 
@@ -2332,12 +2335,128 @@ hand, never by the watcher.
 ## Extra skills (opt-in)
 
 `~/agents/zusaetze/<name>/SKILL.md` — **deliberately not** a `.claude/skills`
-folder, otherwise every claude instance would load them automatically. Every
+folder, otherwise every claude instance would load them automatically. (The
+hub's OWN skills, one section further down, do live in those directories, and
+for the opposite reason: they are about the hub, they are opt-in at
+installation rather than per run, and an agent never reaches for them unless
+the task is about Freilauf.) Every
 folder with a SKILL.md appears as a checkbox in the agent and single-run forms
 (`zusaetze.mjs`); when selected, the prompt gets the instruction to read and
 apply the SKILL.md (full path). Installed commit-pinned via
 `setup/02-install-scripts.sh` (currently: `unlazy` for lazy/small models), not
 part of this repo. Path override for tests: `FREILAUF_ZUSAETZE_DIR`.
+
+## Freilauf's own agent skills — shipped, installed, kept current
+
+`skills/<name>/SKILL.md` in this repository is a family of **agent skills**
+written to the open Agent Skills specification (agentskills.io): short
+instruction files that teach ANY coding agent how to drive this hub — find and
+read runs, create and edit agents and repositories, build flows, read the
+status sidebar, and pick a model. They are the answer to a gap that had nothing
+to do with features: everything the hub does was reachable from a script, and
+nothing told an agent *how*.
+
+They are **not** the mechanism in `zusaetze.mjs`, and the difference is the
+whole design. The extra skills are opt-in per run and therefore deliberately
+stay out of `.claude/skills`, because everything there is loaded
+automatically. These are the opposite by intent — they are about the hub
+itself, they are useless to a run that is not talking to it, and an agent's
+description matcher never reaches for them otherwise. That is why they may live
+in the automatic directories, and why the whole thing is **off** until the
+operator says yes.
+
+### Where they go falls out of the plugins, and comes to two directories
+
+Where a coding agent looks for skills is the coding agent's own knowledge, so
+it is a plugin declaration next to `launch`, `goal` and `hookFiles` —
+`skills: { user: [...], project: [...] }`, user level and project level
+separately (see [docs/plugins.md](docs/plugins.md)). All four shipped
+declarations were read out of the installed CLIs, not guessed:
+
+| Coding agent | user level | project level |
+|---|---|---|
+| claude | `~/.claude/skills` | `.claude/skills` |
+| cursor | `~/.cursor/skills`, `~/.claude/skills`, `~/.agents/skills` | the same names inside the workspace |
+| opencode | `~/.config/opencode/skill`, and **auto-loaded** `~/.claude/skills`, `~/.agents/skills` | `.opencode/skill`, `.claude/skills`, `.agents/skills` |
+| hermes | `~/.hermes/skills` | `.hermes/skills`, `.agents/skills` (trusted checkouts only) |
+
+**A skill installed twice is a skill answered twice**, so the installer does not
+walk the coding agents — it computes the smallest set of directories that
+covers all of them (`coveringUserRoots()`, a greedy set cover with a
+deterministic tie-break: coverage first, then the summed preference rank, then
+the path). For all four that is **two** directories, because only hermes stands
+apart; for a machine running cursor alone it is `~/.cursor/skills`, its own.
+Neither answer is written down anywhere.
+
+The hub writes at **user level only**. The project declarations are shown on
+the settings page and nothing else — the hub never writes into a repository,
+which is also why none of this touches `harnessOwnedPaths()` or the finish
+gate's dirty check.
+
+### Removal may only ever take back what the hub wrote
+
+Every installed directory carries `.freilauf-skill.json`, and
+`<dataDir>/skills-installed.json` (`FREILAUF_SKILLS_STATE`) lists them. The
+marker is the primary answer because it travels WITH the directory: a fresh
+data directory loses the state file but not the knowledge of who wrote the
+copy. A directory of the operator's own under a name the hub also ships is
+**refused, never overwritten**, and reported as a conflict — on the way in and
+on the way out.
+
+**Copies, not symlinks.** Claude Code documents that it follows a symlinked
+skill directory; the other three document nothing either way, and a symlink
+into the deploy checkout dies the day that checkout is moved or re-cloned.
+
+### Two switches, and saving IS the action
+
+`skills_install` (default off) and `skills_auto_update` (default on), on their
+own page — **Settings → Freilauf skills** — rather than in the big settings
+form, because saving here *deletes files* and a handler that owns the whole
+request is what can act on the transition. `syncSkills()` is one function for
+both directions: install off removes everything the hub wrote, install on
+ensures every skill exists in every target directory. Content is only refreshed
+when automatic updating is on, and "current" is **measured** (`skillHash()` over
+the target directory), not remembered from the marker — otherwise a copy edited
+by hand would look current for ever and the switch would quietly mean "keep the
+marker up to date".
+
+It re-syncs at startup and after **every** write on the Plugins page, because
+that is exactly when the set of target directories changes: a coding agent
+switched on may read a directory nothing has been written to yet, and one
+switched off leaves copies behind that nothing else would remove.
+`syncSkillsQuiet()` never throws and logs only when something moved.
+
+The **Welcome wizard** asks once, as step 5 — after the coding agents are
+chosen, because which directories the hub would write to falls out of those
+choices, and asking earlier would mean naming none.
+
+### `FREILAUF_SKILLS_HOME` is a test fence, and a load-bearing one
+
+Every other sandbox variable points into the suite's own directory, but a
+coding agent's skill directory is derived from `$HOME`. Without this variable a
+suite run would install into — and later **delete from** — the operator's real
+`~/.claude/skills`. A suite that does not set it is not merely unreproducible,
+it is destructive. `test/sandkasten.mjs` and `test/unit.mjs` both set it.
+
+### The read-only JSON API the skills talk to
+
+Screen scraping is how a skill goes stale the first time a column moves, so
+`server/read-api.mjs` answers the questions that had no answer before: `GET
+/api/repos`, `/api/agents`, `/api/runs` (with `repo`, `status`, `agent`, `q`,
+`archived`, `limit`), `/api/runs/<uuid>` (the row plus its events, incidents,
+file paths, worktree and a **liveness** block), `/api/favorites`,
+`/api/sessions`, `/api/skills`. It is **read only** — every change still goes
+through the existing POST routes, because a second write path is a second set
+of rules to keep in step and `run-def.mjs` exists precisely so there is only
+one. `bin/fl-api` is the shell front door (`fl-api /api/runs repo=3
+status=running`), and it resolves the hub's URL itself.
+
+The `liveness` block is the one thing a run's own row cannot say: `status:
+"done"` means the run reported, not that the process is gone — three of the four
+coding agents stay in their TUI afterwards. It carries `pane_alive` as a
+**tri-state** (`null` = tmux could not be asked, which is not "gone") and a
+`verdict` of `working` / `idle_in_tui` / `process_gone` / `no_session` /
+`unknown`.
 
 ## Incidents (rate limit, provider outage)
 
@@ -2627,6 +2746,15 @@ errors (`post_api_request` only fires after success).
   by the allowlist on save**. A form field that looks like it saved and did not
   is the worst shape a bug can take. It is `[...STATIC_KEYS,
   ...allPluginSettingKeys()]`, evaluated per save.
+- **The string `'0'` is truthy, and a checkbox read with `b.x ? 1 : 0` believes
+  it.** The agent form's `active` box carries no hidden `0` companion — absent
+  IS off there, which is right for a form. But `agentSave` coerced instead of
+  comparing, so a caller who spelled the off state out (`active=0`, which is
+  what anybody scripting `POST /agents/edit` writes) switched the agent **on**.
+  Same family as `Number('')` below: a value that arrives as a string has to be
+  compared against the values that mean yes, never coerced. The fix is
+  `b.active === '1' || b.active === 'on' || b.active === 'true'`, the shape
+  `keep_on_branch` already used.
 - **`Number('')` is `0` AND finite.** An unconfigured alert window therefore read
   as a zero-minute window and an unconfigured ceiling as zero messages — silence
   dressed up as a configuration. Every numeric setting has to check for the empty

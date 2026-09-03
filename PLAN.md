@@ -1,128 +1,143 @@
-# PLAN — dead-code elimination (tree 3)
+# PLAN — Freilauf skills: authored, installed, kept current, offered (tree 4)
 
 ## Goal
 
-Find code that nothing reaches any more and remove it — with the burden of
-proof on removal, not on keeping. A symbol is only removed when a full-text
-scan over **every** file in the repository (source, tests, docs, shell,
-translations, HTML) finds no reference to it beyond its own declaration, and
-when a reading of the surrounding code confirms it is neither a documented
-public seam nor reached through a dynamically built name.
+Freilauf ships a family of **agent skills** that teach any coding agent how to
+drive this hub — its agents, repos, runs, flows, statistics and its model
+choices. They are part of this repository, they are installed at **user level**
+into the directories the installed coding agents really read, they are kept
+current, and they are offered once during the Welcome wizard.
 
-Three things this repository does make a naive sweep dangerous, and each one
-is a rule in this plan:
+Four things make this more than "write six Markdown files", and each is a rule
+in this plan:
 
-- **Names are built at runtime.** `t('status.' + run.status)`,
-  `t(\`flows.step.${type}\`)`, `t(\`welcome.nav_${i + 1}\`)` — 200 of the 1164
-  translation keys look orphaned to a literal search and are not. Only a key
-  whose whole prefix family is statically written may be touched.
-- **Deliberate survivors look dead.** The `cc-hub` → `Freilauf` shims, the
-  `CCHUB_*`/`CC_*` fallbacks, the `telegram` flow-step alias, the
-  `location.reload()` after a kill, `runs.telegram_on` — AGENTS.md states why
-  each exists. None of them is dead code.
-- **An export is not a call site.** ~110 symbols are exported and used only
-  inside their own file (test seams, plugin surface, historical structure).
-  That is over-export, not dead code; removing the keyword is churn with a
-  risk and no benefit, so it is reported, not changed.
+- **Where a coding agent looks for skills is the coding agent's own knowledge.**
+  It therefore belongs in its plugin descriptor, like `launch`, `goal` and
+  `hookFiles` — separately for user level and project level. The hub must not
+  carry a table of vendor paths.
+- **A skill installed twice is a skill answered twice.** Three of the four
+  shipped coding agents read `~/.claude/skills`; only hermes does not. So the
+  installer computes the **smallest set of directories that covers every enabled
+  coding agent**, and installs once per directory — not once per agent.
+- **Removal must never touch somebody else's file.** The installer records what
+  it wrote (path + content hash) and removes only that. A directory that holds a
+  skill of the operator's own under the same name is left alone and reported.
+- **A recommendation goes stale the moment it is copied.** The static model
+  advice lives in one skill (`freilauf-models`); everything installation-specific
+  — which coding agents are configured, which favorites exist, which models a
+  provider serves — is *asked at runtime* through the hub's own API, never baked
+  into the file.
+
+## Measured facts this plan rests on
+
+Read out of the installed CLIs on this machine, not assumed:
+
+| Coding agent | user-level skill roots | project-level skill roots |
+|---|---|---|
+| claude | `~/.claude/skills` | `.claude/skills` |
+| cursor | `~/.cursor/skills`, `~/.claude/skills`, `~/.codex/skills`, `~/.grok/skills`, `~/.agents/skills` | the same names inside the workspace |
+| opencode | `~/.config/opencode/skill`, plus **auto-loaded** `~/.claude/skills` and `~/.agents/skills` | `.opencode/skill` |
+| hermes | `~/.hermes/skills` | `.hermes/skills`, `.agents/skills` (trusted repos only) |
+
+Sources: cursor's `skill-path-utils.ts` search list inside
+`~/.local/share/cursor-agent/versions/*/index.js`; opencode's own configuration
+table inside its binary (`Global skills`, `External skills (auto-loaded)`);
+`hermes skills trust --help` and `hermes_cli/config_defaults.py`;
+`~/.claude/skills` for claude.
+
+Consequence: the covering set for all four is **two** directories,
+`~/.claude/skills` (claude + cursor + opencode) and `~/.hermes/skills` (hermes).
+Nothing about that is hardcoded — it falls out of the declarations.
 
 ## Depth tree
 
 ```
-Root: eliminate dead code
-├── 1  Server JavaScript
-│   ├── 1.1  Dead exported production symbols
-│   │    ├── 1.1.1  pages.mjs pageCodingAgents — the page the Plugins page replaced
-│   │    ├── 1.1.2  plugin layer: store.pluginProviders / store.enabledPlugins /
-│   │    │          settings.pluginSettingValues / discovery.allDiscoveries
-│   │    └── 1.1.3  misc: llm/json.firstJsonValue, telegram TELEGRAM_LIMITS +
-│   │               CAPTION_MAX, sessions.currentArchiveKeepMs
-│   ├── 1.2  Test seams no suite calls
-│   │    ├── 1.2.1  cleanup._cleanupGetSetting / _cleanupSetSetting
-│   │    ├── 1.2.2  integrate._resetState
-│   │    └── 1.2.3  llm/sources._sourcesReset, plugins/context._registryReset,
-│   │               usage._usageCacheAge
-│   └── 1.3  Dead imports (the binding is the only occurrence in the file)
-│        ├── 1.3.1  node:os homedir in coding-agents / db / plugins/loader
-│        ├── 1.3.2  node:fs statSync in extras-suggest
-│        └── 1.3.3  cross-module: pages.mjs cleanupPrompt+startCleanupRun,
-│                   web.mjs cleanupSettingsSummary, and the db.mjs imports
-│                   orphaned by 1.2.1
-├── 2  Non-JS assets
-│   ├── 2.1  Translation catalogs (en/de/zh in one edit — the parity test)
-│   │    ├── 2.1.1  orphaned before this change: runform.branch_mode,
-│   │    │          settings.coding_agents_hint, ca.providers_legend,
-│   │    │          ca.providers_hint, ca.no_providers
-│   │    └── 2.1.2  orphaned BY 1.1.1: the ca.* keys only pageCodingAgents used
-│   ├── 2.2  public/hub.css — measured: 0 of 119 classes unreferenced. Nothing to do
-│   └── 2.3  bin/*, setup/* — measured: 0 of 46 shell functions unreferenced. Nothing to do
-└── 3  Files and test hygiene
-     ├── 3.1  unused destructured bindings in test/unit.mjs and
-     │        test/verify-agent-lifecycle.mjs
-     ├── 3.2  test/echt.mjs homedir
-     └── 3.3  orphaned-but-passing verification scripts — REPORTED, not deleted
+root — Freilauf skills
+├── 1  The platform seam
+│   ├── 1.1  Declaration and resolution
+│   │   ├── 1.1.1  `skills` declaration on the harness contract (4 plugins + docs)
+│   │   └── 1.1.2  server/skills.mjs — covering set, install, remove, sync, state
+│   ├── 1.2  Operator surface
+│   │   ├── 1.2.1  Settings → Skills (two switches, save, i18n ×3)
+│   │   ├── 1.2.2  The removal confirmation (hub.js modal + CSS)
+│   │   ├── 1.2.3  The Welcome wizard step
+│   │   └── 1.2.4  Sync triggers (startup, settings save, plugin install/enable)
+│   └── 1.3  What the skills talk to
+│       ├── 1.3.1  Read-only JSON API the skills need
+│       └── 1.3.2  bin/fl-api — the CLI a skill actually calls
+├── 2  The skills
+│   ├── 2.1  The shared one
+│   │   └── 2.1.1  freilauf-models
+│   ├── 2.2  Work
+│   │   ├── 2.2.1  freilauf-runs
+│   │   └── 2.2.2  freilauf-agents
+│   └── 2.3  Structure
+│       ├── 2.3.1  freilauf-repos
+│       ├── 2.3.2  freilauf-flows
+│       └── 2.3.3  freilauf-stats
+└── 3  Proof
+    ├── 3.1  Tests (unit, e2e, browser)
+    └── 3.2  Documentation (AGENTS.md, docs/plugins.md, SETUP_WITH_AGENT.md, READMEs ×3)
 ```
 
-## Decisions
+## Contracts fixed before any leaf starts
 
-- **A passing test is never dead code.** `scripts/gates-msg-header.mjs` and
-  `test/verify-agent-lifecycle.mjs` are unreferenced by `package.json`, by any
-  suite and by any document — but both still run green, and both cover
-  behaviour (the `repo / AGENT name REPORT:` message header; the
-  `UNIQUE(repo_id, name)` rebuild, the move suffix, delete-keeps-runs) that
-  **no** maintained suite covers. Deleting them would trade a dead-file count
-  for a real coverage hole. They stay, and the report names them.
-- **A name written into the reference documentation is not orphaned.** That is
-  the line this change draws, and three findings sit on the other side of it —
-  each provably uncalled, each left alone, each named in the report:
-  - `openrouterGateBlocked` (quota.mjs) is the one of three one-line wrappers
-    (`openrouter` / `deepseek` / `cursor`) that no test calls today, and
-    `docs/plugins.md` names all three together with the reason they exist (the
-    unit suite cache-busts `quota.mjs`, and a delegation into the plugin would
-    hand back the previous case's reading).
-  - `server/notifiers/index.mjs` and the four registry functions only it
-    re-exports (`notifierIds`, `getNotifier`, `notifierLabel`,
-    `notifiersWithSetup`) have no importer — `notify.mjs` reaches the registry
-    directly through `allPlugins()`. But `docs/plugins.md` describes that file
-    as one of the three front doors next to `harnesses/index.mjs` and
-    `providers/index.mjs` and lists those four functions in its API table, so
-    it is a declared surface, not a leftover.
-  - `unconfiguredHarnessIds` (coding-agents.mjs) lost its last caller with
-    `pageCodingAgents` — and `coding-agents.mjs` is documented as a
-    **byte-compatible adapter** whose exported API is deliberately preserved so
-    a rollback and both test groups keep working. `seedFilePath` in the same
-    list is in the same position.
-- **`_usageCacheAge` went, `_balanceCacheAge` stayed** — not symmetry for its
-  own sake: the balances one IS called by the unit suite, the usage one is
-  called by nothing.
-- **A test seam nothing calls IS dead.** `_cleanupGetSetting`,
-  `_cleanupSetSetting`, `_resetState`, `_sourcesReset`, `_registryReset` and
-  `_usageCacheAge` exist only to be called from a suite, and no suite calls
-  them. Their siblings that ARE called (`_alertReset`, `_notifyLogReset`,
-  `_balanceCacheReset`, `_usageCacheReset`, `_sessionMemoryReset/_Age`) stay
-  untouched.
-- **The database schema is not touched.** A column is dropped by rebuilding
-  the table, and this project's own rule (`openrouter_min_eur` holding dollars,
-  `runs.telegram_on` after the notifier rebuild) is that such a rebuild is a
-  migration for nothing. Nothing found there anyway.
-- **Removal cascades are re-measured, not assumed.** Deleting a function can
-  orphan the import it was the only user of (`getSetting`/`setSetting` in
-  cleanup.mjs) or another symbol whose only mention was its doc comment
-  (`_registryReset`, named only in the comment above `_sourcesReset`). The
-  scan is therefore run again after the edits, and its ZERO list must be empty
-  of anything not on the documented keep list.
+### The plugin declaration
 
-## Status log
+```js
+// server/harnesses/<id>.mjs
+skills: {
+  // Ordered by the plugin's own preference; the resolver treats the order as a
+  // tie-break only, because coverage decides. Paths starting with '~' are
+  // resolved against the home directory.
+  user:    ['~/.claude/skills'],
+  // Relative to a workspace/worktree root. Declared for completeness and shown
+  // on the Plugins page; the installer does not write into a repository.
+  project: ['.claude/skills'],
+}
+```
 
-- [x] 2026-08-31: scanned — 13 zero-reference symbols, 11 dead imports,
-      3 unused destructured bindings, 5 orphaned translation keys before the
-      page removal, 0 dead CSS classes, 0 dead shell functions, 0 unreferenced
-      source files.
-- [x] 2026-08-31: plan and gates written before the first edit.
-- [x] 2026-08-31: implemented — 15 identifiers, 18 translation keys and 12 dead
-      import bindings removed across 20 files; ~200 lines gone, nothing added.
-      Every removal cascade re-measured afterwards: the scanner's
-      zero-reference list is empty and no import binding is unused any more.
-- [x] 2026-08-31: verified — GATES.md 7 of 7 met through the checker, every
-      suite at exactly its pre-change count (unit 361, e2e 280, browser 61,
-      proxy 4, deploy 22), and the absence check proved against a positive
-      control on `HEAD`.
+Absent = this coding agent has no skill mechanism the hub knows about; it is
+skipped without comment.
+
+### The state file
+
+`<dataDir>/skills-installed.json` (`FREILAUF_SKILLS_STATE` overrides it):
+
+```json
+{ "version": 1,
+  "entries": [ { "dir": "~/.claude/skills/freilauf-runs",   // absolute in the real file
+                 "skill": "freilauf-runs", "hash": "<sha256 of the payload>",
+                 "at": "2026-09-03T10:00:00Z" } ] }
+```
+
+### The settings keys
+
+- `skills_install` — `'1'` / `'0'`, default `'0'`. User-level installation on.
+- `skills_auto_update` — `'1'` / `'0'`, default `'1'`. Re-sync on start and on
+  every plugin change.
+
+### The source of the skills
+
+`skills/<name>/SKILL.md` in this repository, plus optional
+`skills/<name>/scripts/`, `skills/<name>/references/`. Copied verbatim.
+
+## Ownership
+
+| Leaf | owns |
+|---|---|
+| 1.1.1 | `server/harnesses/*.mjs`, `docs/plugins.md` (contract table + new section) |
+| 1.1.2 | `server/skills.mjs` |
+| 1.2.1 | `server/pages.mjs` (settings section), `server/web.mjs` (route), `lang/*.json` |
+| 1.2.2 | `public/hub.js`, `public/hub.css` |
+| 1.2.3 | `server/welcome.mjs` |
+| 1.2.4 | `server/hub.mjs`, `server/plugins/web.mjs` |
+| 1.3.1 | `server/web.mjs` (JSON routes) |
+| 1.3.2 | `bin/fl-api`, `setup/02-install-scripts.sh` |
+| 2.x | `skills/**` |
+| 3.1 | `test/unit.mjs`, `test/e2e.mjs`, `test/browser.mjs` |
+| 3.2 | `AGENTS.md`, `SETUP_WITH_AGENT.md`, `README*.md` |
+
+The leaves under 1.2 touch shared files (`pages.mjs`, `web.mjs`), so they run
+**sequentially in this session**, not as concurrent subagents. Only the leaves
+under 2 are dispatched in parallel — they own disjoint directories.

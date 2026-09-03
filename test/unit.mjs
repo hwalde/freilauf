@@ -23,6 +23,11 @@ process.env.FREILAUF_DATA_DIR = join(sandkasten, 'data')
 // the suite points it into its own sandbox or a suite run would read (and
 // overwrite) the operator's live selections.
 process.env.FREILAUF_OR_ROUTING_JSON = join(sandkasten, 'openrouter-routing.json')
+// The hub's own agent skills resolve their target directories against $HOME
+// (~/.claude/skills and friends). Without this fence a suite run would install
+// into — and later DELETE from — the operator's real skill directories.
+process.env.FREILAUF_SKILLS_HOME = join(sandkasten, 'skillhome')
+process.env.FREILAUF_SKILLS_STATE = join(sandkasten, 'skills-installed.json')
 
 const d = (s) => new Date(s)
 
@@ -1562,6 +1567,186 @@ try {
     falsch(skillPromptZusatz('["unlazy"]').includes('tree'), 'no tree line without a value')
   })
 
+
+  // ------------------------------------------------------------------
+  gruppe('Freilauf skills: where they go, and what may be removed')
+
+  const skillsMod = await import('../server/skills.mjs')
+  const { setPluginConfig: skillsPluginConfig } = await import('../server/plugins/store.mjs')
+  const { setSetting: setzeEinstellung } = await import('../server/db.mjs')
+
+  await pruefe('a user path is resolved against the skills home, an absolute one is left alone', () => {
+    gleich(skillsMod.expandHome('~/.claude/skills', '/h'), '/h/.claude/skills', 'tilde')
+    gleich(skillsMod.expandHome('~', '/h'), '/h', 'bare tilde')
+    gleich(skillsMod.expandHome('/opt/skills', '/h'), '/opt/skills', 'absolute')
+    gleich(skillsMod.expandHome('', '/h'), '', 'empty stays empty')
+  })
+
+  await pruefe('every shipped skill is a valid Agent Skill: name matches its directory, spec keys only', async () => {
+    const { readdirSync: rd, readFileSync: rf, existsSync: ex } = await import('node:fs')
+    const { join: j } = await import('node:path')
+    const root = new URL('../skills', import.meta.url).pathname
+    const dirs = rd(root, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name)
+    wahr(dirs.length >= 1, 'at least one skill is shipped')
+    // The open spec (agentskills.io) allows exactly these six; Claude Code's
+    // packaging path REFUSES anything else, so a stray key is a hard failure
+    // somewhere the test suite would never see it.
+    const erlaubt = new Set(['name', 'description', 'license', 'compatibility', 'metadata', 'allowed-tools'])
+    for (const name of dirs) {
+      const datei = j(root, name, 'SKILL.md')
+      wahr(ex(datei), `${name}: SKILL.md exists`)
+      const text = rf(datei, 'utf8')
+      wahr(text.startsWith('---\n'), `${name}: frontmatter starts on line 1`)
+      const block = text.match(/^---\n([\s\S]*?)\n---/)[1]
+      const schluessel = block.split('\n').filter(z => /^\S/.test(z)).map(z => z.split(':')[0])
+      for (const k of schluessel) wahr(erlaubt.has(k), `${name}: '${k}' is a spec key`)
+      wahr(/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name) && name.length <= 64, `${name}: legal skill name`)
+      gleich(block.match(/^name:\s*(.+)$/m)?.[1].trim(), name, `${name}: frontmatter name is the directory name`)
+    }
+  })
+
+  await pruefe('a shipped skill has a description that could trigger, and stays under the caps', () => {
+    for (const s of skillsMod.availableSkills()) {
+      wahr(s.description.length > 40, `${s.name}: description is more than a label`)
+      wahr(s.description.length <= 1024, `${s.name}: description within the spec limit`)
+      gleich(s.title, s.name, `${s.name}: parsed name`)
+    }
+  })
+
+  await pruefe('every coding agent that declares skill directories declares lists of strings', async () => {
+    const { HARNESS_PLUGINS: HP } = await import('../server/harnesses/index.mjs')
+    for (const p of Object.values(HP)) {
+      if (!p.skills) continue
+      for (const gruppeName of ['user', 'project']) {
+        const liste = p.skills[gruppeName] ?? []
+        wahr(Array.isArray(liste), `${p.id}: ${gruppeName} is a list`)
+        for (const eintrag of liste) wahr(typeof eintrag === 'string' && eintrag.trim(), `${p.id}: ${gruppeName} entry is a path`)
+      }
+      falsch((p.skills.project ?? []).some(x => x.startsWith('/') || x.startsWith('~')),
+        `${p.id}: a project path is relative to a workspace`)
+    }
+  })
+
+  // The covering set is the whole point of the declaration: three of the four
+  // shipped coding agents read ~/.claude/skills, so a machine with all four
+  // gets TWO directories and not four. Built from synthetic declarations so the
+  // rule is tested, not the current contents of the four plugin files.
+  const rolle = (id, user, i = 0) => ({ id, label: id, enabled: true, user, project: [] })
+  await pruefe('the covering set is the smallest one, and deterministic', () => {
+    const claude = rolle('claude', ['/h/.claude/skills'])
+    const cursor = rolle('cursor', ['/h/.cursor/skills', '/h/.claude/skills', '/h/.agents/skills'])
+    const oc = rolle('opencode', ['/h/.config/opencode/skill', '/h/.claude/skills', '/h/.agents/skills'])
+    const hermes = rolle('hermes', ['/h/.hermes/skills'])
+    const dirs = (list) => skillsMod.coveringUserRoots(list).map(x => x.dir)
+
+    gleich(dirs([claude]).join(), '/h/.claude/skills', 'claude alone')
+    gleich(dirs([cursor]).join(), '/h/.cursor/skills', 'cursor alone gets its OWN directory, not the shared one')
+    gleich(dirs([oc]).join(), '/h/.config/opencode/skill', 'opencode alone the same')
+    gleich(dirs([claude, cursor, oc, hermes]).join(), '/h/.claude/skills,/h/.hermes/skills',
+      'all four: two directories, because only hermes stands apart')
+    gleich(dirs([cursor, oc]).join(), '/h/.claude/skills',
+      'a tie on coverage is broken by the summed preference, not by chance')
+    const alle = skillsMod.coveringUserRoots([claude, cursor, oc, hermes])
+    gleich(alle.find(x => x.dir.endsWith('.claude/skills')).harnesses.join(), 'claude,cursor,opencode',
+      'and the directory names who it serves')
+  })
+
+  await pruefe('a coding agent without a declaration covers nobody and is reported', () => {
+    const stumm = { id: 'stumm', label: 'stumm', enabled: true, user: [], project: [] }
+    gleich(skillsMod.coveringUserRoots([stumm]).length, 0, 'nothing to cover it with')
+  })
+
+  // The install/remove round trip against a home of its own. The state file and
+  // the target home are both redirected at the top of this suite, so nothing
+  // here can reach the operator's real directories.
+  await pruefe('install, refresh, repair, and remove only what the hub wrote', async () => {
+    const { readFileSync: rf, writeFileSync: wf, mkdirSync: md, existsSync: ex, readdirSync: rd } = await import('node:fs')
+    const { join: j } = await import('node:path')
+    const HOME = process.env.FREILAUF_SKILLS_HOME
+    for (const id of ['claude', 'opencode', 'hermes']) skillsPluginConfig(id, { kind: 'harness', source: 'builtin', enabled: 1 })
+    setzeEinstellung('skills_install', '1')
+    setzeEinstellung('skills_auto_update', '1')
+
+    const erst = skillsMod.syncSkills()
+    const anzahl = skillsMod.availableSkills().length
+    gleich(erst.targets.length, 2, 'two target directories for these three coding agents')
+    gleich(erst.installed.length, anzahl * 2, 'every skill in every target')
+    gleich(erst.errors.length, 0, 'and nothing failed')
+    const ziel = j(HOME, '.claude', 'skills', 'freilauf-models')
+    wahr(ex(j(ziel, 'SKILL.md')), 'the file is really there')
+    wahr(ex(j(ziel, skillsMod.MARKER)), 'and carries the marker that makes it removable')
+
+    const zweit = skillsMod.syncSkills()
+    gleich(zweit.installed.length + zweit.updated.length, 0, 'a second pass changes nothing')
+
+    // A hand-edited copy is not current, and "keep them up to date" has to mean it.
+    wf(j(ziel, 'SKILL.md'), 'tampered')
+    gleich(skillsMod.syncSkills().updated.length, 1, 'the edited copy is refreshed')
+    wahr(rf(j(ziel, 'SKILL.md'), 'utf8').startsWith('---'), 'and really rewritten')
+
+    // ...unless automatic updating is off, which is the whole meaning of that switch.
+    wf(j(ziel, 'SKILL.md'), 'tampered again')
+    setzeEinstellung('skills_auto_update', '0')
+    gleich(skillsMod.syncSkills().updated.length, 0, 'with updates off nothing is touched')
+    gleich(rf(j(ziel, 'SKILL.md'), 'utf8'), 'tampered again', 'the copy stays as it is')
+    setzeEinstellung('skills_auto_update', '1')
+    skillsMod.syncSkills()
+
+    // A skill of the operator's own, in the same directory, under a name the hub
+    // does not ship: never touched, on the way in or on the way out.
+    const eigen = j(HOME, '.claude', 'skills', 'meins')
+    md(eigen, { recursive: true })
+    wf(j(eigen, 'SKILL.md'), '---\nname: meins\n---\n')
+    skillsMod.syncSkills()
+    wahr(ex(j(eigen, 'SKILL.md')), 'a foreign skill survives a sync')
+
+    // Switching a coding agent off takes its directory with it — and only it.
+    skillsPluginConfig('hermes', { kind: 'harness', source: 'builtin', enabled: 0 })
+    const ohneHermes = skillsMod.syncSkills()
+    gleich(ohneHermes.removed.length, anzahl, 'the hermes copies go')
+    falsch(ex(j(HOME, '.hermes', 'skills', 'freilauf-models')), 'really gone')
+    wahr(ex(j(ziel, 'SKILL.md')), 'and the shared directory is untouched')
+
+    // Switching the whole thing off removes what the hub wrote, and nothing else.
+    setzeEinstellung('skills_install', '0')
+    const aus = skillsMod.syncSkills()
+    gleich(aus.removed.length, anzahl, 'every remaining copy')
+    gleich(rd(j(HOME, '.claude', 'skills')).join(), 'meins', "the operator's own skill is all that is left")
+    gleich(skillsMod.readState().entries.length, 0, 'and the hub remembers nothing it no longer owns')
+  })
+
+  await pruefe('a directory the hub did not write is refused instead of overwritten', async () => {
+    const { writeFileSync: wf, mkdirSync: md, existsSync: ex } = await import('node:fs')
+    const { join: j } = await import('node:path')
+    const HOME = process.env.FREILAUF_SKILLS_HOME
+    const name = skillsMod.availableSkills()[0].name
+    const kollision = j(HOME, '.claude', 'skills', name)
+    md(kollision, { recursive: true })
+    wf(j(kollision, 'SKILL.md'), '---\nname: ' + name + '\n---\nnot ours\n')
+    setzeEinstellung('skills_install', '1')
+    const r = skillsMod.syncSkills()
+    wahr(r.conflicts.some(c => c.dir === kollision), 'the collision is reported')
+    gleich((await import('node:fs')).readFileSync(j(kollision, 'SKILL.md'), 'utf8').includes('not ours'), true,
+      'and the file is left exactly as it was')
+    setzeEinstellung('skills_install', '0')
+    skillsMod.syncSkills()
+    wahr(ex(j(kollision, 'SKILL.md')), 'switching off does not delete it either')
+  })
+
+
+  // This group is the only one in the suite that CONFIGURES coding agents, and
+  // the sandbox database is shared with every group after it — "not configured
+  // = not enabled" and the seeding test both read that table. So it hands the
+  // database back the way it found it, and says so out loud rather than leaving
+  // a later red test to be blamed on the plugin code.
+  await pruefe('the round trip leaves no configuration behind for the groups after it', async () => {
+    const { forgetPlugin } = await import('../server/plugins/store.mjs')
+    const dbMod = (await import('../server/db.mjs')).default
+    for (const id of ['claude', 'opencode', 'hermes', 'cursor']) forgetPlugin(id)
+    dbMod.prepare("DELETE FROM settings WHERE key IN ('skills_install','skills_auto_update')").run()
+    gleich(dbMod.prepare('SELECT count(*) c FROM plugin_config').get().c, 0, 'plugin_config is empty again')
+    falsch(skillsMod.skillsInstallOn(), 'and the switch is back off')
+  })
 
   // ------------------------------------------------------------------
   gruppe('Plugin registries (coding agents + providers)')
@@ -4909,9 +5094,12 @@ try {
     setPublicHost('')
     try {
       gleich(publicBase(), 'https://127.0.0.1:8790', 'no host, no env: the local fallback with the code default port')
-      process.env.FREILAUF_VPN_PORT = '47830'
+      // A deliberately fictional port, like every other value in this repo:
+      // the operator's real one is a forbidden pattern (pruefe-vor-push.sh),
+      // and a test fixture is a committed file like any other.
+      process.env.FREILAUF_VPN_PORT = '9443'
       setPublicHost('hub.example.internal')
-      gleich(publicBase(), 'https://hub.example.internal:47830', 'the configured hostname with the LIVE port')
+      gleich(publicBase(), 'https://hub.example.internal:9443', 'the configured hostname with the LIVE port')
       setPublicHost('')
       process.env.FREILAUF_PUBLIC_URL = 'https://alt.internal:9999'
       gleich(publicBase(), 'https://alt.internal:9999', 'without a configured host the env seam (a full URL) answers')

@@ -74,6 +74,24 @@ const plugin = {
   // "ask the declaration", guessed means "the page states it as fact".
   keyFreeProviders: [],
 
+  /**
+   * Where hermes looks for agent skills. Measured on the installed CLI rather
+   * than guessed: `hermes skills trust --help` names the repo-local tiers
+   * (`./.hermes/skills`, `./.agents/skills`, and only for a trusted checkout),
+   * and its configuration defaults document `~/.hermes/skills/` as the one
+   * user-level root — `skills.external_dirs` is empty out of the box.
+   *
+   * hermes is deliberately the coding agent that does NOT read
+   * `~/.claude/skills`, which is why a machine running all four ends up with
+   * two target directories instead of one. Nothing here is a fallback: an
+   * undeclared directory would be a guess, and this plugin already refuses to
+   * guess elsewhere (`ownCredentials`).
+   */
+  skills: {
+    user: ['~/.hermes/skills'],
+    project: ['.hermes/skills', '.agents/skills'],
+  },
+
   pulseId: (run) => run.provider ?? null,
   pulseTargets: {},
 

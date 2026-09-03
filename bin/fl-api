@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# fl-api — talk to the local Freilauf hub from a shell, and get JSON back.
+#
+# Usage:
+#   fl-api <path> [name=value ...]              GET (values become query parameters)
+#   fl-api -X POST <path> [name=value ...]      POST, form-encoded body
+#   fl-api --url                                print the hub's base URL and exit
+#   fl-api --raw <path> ...                     do not pretty-print the answer
+#   fl-api --status <path> ...                  print "<HTTP code> <path>" to stderr too
+#
+# Examples:
+#   fl-api /api/repos
+#   fl-api /api/runs repo=3 status=running limit=20
+#   fl-api /api/runs/1a2b3c4d-....
+#   fl-api -X POST /api/runs/<id>/title title="Nightly docs sweep"
+#
+# A name may be repeated; it is sent as a repeated field, which is what the
+# hub's multi-checkbox fields (skills, flows, session) expect.
+#
+# The hub listens on 127.0.0.1 only and has no authentication — being able to
+# run this command on the machine IS the authorization. Never expose the local
+# port; the outside path is the VPN proxy (see AGENTS.md).
+#
+# Exit codes: 0 = HTTP 2xx, 1 = HTTP error (the body is still printed),
+#             2 = usage error, 3 = the hub could not be reached.
+set -euo pipefail
+
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
+
+FL_PATHS="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/fl-paths.sh"
+# Sourcing is best effort: inside a run FL_HUB_URL already says everything, and
+# a missing library must not stop an agent from asking the hub a question.
+# shellcheck source=fl-paths.sh
+[[ -r "$FL_PATHS" ]] && . "$FL_PATHS"
+
+hub_base() {
+    # Inside a run the session carries the URL — that is the authoritative one,
+    # because it is the hub that started this very run. CC_HUB_URL is what a
+    # session from before the rename carries.
+    if [[ -n "${FL_HUB_URL:-${CC_HUB_URL:-}}" ]]; then
+        printf '%s' "${FL_HUB_URL:-$CC_HUB_URL}"; return 0
+    fi
+    local port=8791
+    if declare -f fl_env >/dev/null 2>&1; then
+        local envfile; envfile="$(fl_env_file)"
+        # shellcheck disable=SC1090
+        [[ -f "$envfile" ]] && . "$envfile"
+        port="$(fl_env LOCAL_PORT 8791)"
+    else
+        port="${FREILAUF_LOCAL_PORT:-${CCHUB_LOCAL_PORT:-8791}}"
+    fi
+    printf 'http://127.0.0.1:%s' "$port"
+}
+
+METHOD=GET ; PRETTY=1 ; SHOW_STATUS=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -X|--method) METHOD="${2:-GET}"; shift 2 ;;
+        --raw)       PRETTY=0; shift ;;
+        --status)    SHOW_STATUS=1; shift ;;
+        --url)       hub_base; echo; exit 0 ;;
+        -h|--help)   usage; exit 0 ;;
+        --)          shift; break ;;
+        -*)          printf 'fl-api: unknown option %s\n' "$1" >&2; usage >&2; exit 2 ;;
+        *)           break ;;
+    esac
+done
+
+[[ $# -ge 1 ]] || { usage >&2; exit 2; }
+PATH_ARG="$1"; shift
+[[ "$PATH_ARG" == /* ]] || PATH_ARG="/$PATH_ARG"
+
+BASE="$(hub_base)"
+BODY=() ; QUERY=()
+for pair in "$@"; do
+    [[ "$pair" == *=* ]] || { printf 'fl-api: "%s" is not name=value\n' "$pair" >&2; exit 2; }
+    if [[ "$METHOD" == GET ]]; then QUERY+=(--data-urlencode "$pair"); else BODY+=(--data-urlencode "$pair"); fi
+done
+
+# `--get` makes curl put --data-urlencode pairs into the query string instead of
+# a body, so one encoder covers both directions and nothing has to be escaped by
+# hand here.
+CURL=(curl -sS -m 30 -w '\n%{http_code}' -X "$METHOD" -H 'accept: application/json')
+[[ "$METHOD" == GET ]] && CURL+=(--get)
+CURL+=("${QUERY[@]}" "${BODY[@]}" "$BASE$PATH_ARG")
+
+if ! OUT="$("${CURL[@]}" 2>&1)"; then
+    printf 'fl-api: the hub at %s did not answer.\n%s\n' "$BASE" "$OUT" >&2
+    printf 'Is it running? `freilauf status` says; `freilauf logs` shows why not.\n' >&2
+    exit 3
+fi
+
+CODE="${OUT##*$'\n'}"
+BODY_TEXT="${OUT%$'\n'*}"
+[[ "$SHOW_STATUS" == 1 ]] && printf 'HTTP %s %s\n' "$CODE" "$PATH_ARG" >&2
+
+if [[ "$PRETTY" == 1 ]] && command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$BODY_TEXT" | python3 -c 'import json,sys
+raw = sys.stdin.read()
+try: print(json.dumps(json.loads(raw), indent=2, ensure_ascii=False))
+except Exception: sys.stdout.write(raw)' || printf '%s\n' "$BODY_TEXT"
+else
+    printf '%s\n' "$BODY_TEXT"
+fi
+
+[[ "$CODE" == 2* ]] || exit 1
+exit 0

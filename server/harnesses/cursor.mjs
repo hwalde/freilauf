@@ -109,6 +109,25 @@ const plugin = {
     '`fl-report` is an ordinary program on PATH; run it with your shell tool like any other command.',
   ].join('\n'),
 
+  /**
+   * Where cursor looks for agent skills. Read out of the CLI itself
+   * (`src/utils/skill-path-utils.ts` in the bundle), which carries the search
+   * list verbatim: `.cursor/skills`, `.claude/skills`, `.codex/skills`,
+   * `.grok/skills`, `.agents/skills` — each of them both under `$HOME` and
+   * inside the workspace, plus the bundled `.cursor/skills-cursor` that
+   * belongs to cursor and is deliberately NOT listed here.
+   *
+   * `.claude/skills` is marked `thirdParty` in that list and is gated on
+   * `thirdPartyExtensibilityEnabled`, which defaults to on and has no local
+   * switch — the same mechanism AGENTS.md already records for `CLAUDE.md` and
+   * `.claude/agents`. Its own directory comes first so a machine with only
+   * cursor on it gets the native one.
+   */
+  skills: {
+    user: ['~/.cursor/skills', '~/.claude/skills', '~/.agents/skills'],
+    project: ['.cursor/skills', '.claude/skills', '.agents/skills'],
+  },
+
   // cursor has NO hook for API errors (its hook enum knows beforeShellExecution,
   // afterFileEdit, stop, sessionEnd, beforeSubmitPrompt — nothing for a failed
   // call), so the log scan is the only source. 'Cannot use this model' is

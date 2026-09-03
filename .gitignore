@@ -28,3 +28,9 @@ opencode.json
 
 # Unlazy work-tree tracking artifacts (machine-specific)
 .unlazy/
+
+# Python bytecode a skill's bundled script leaves behind. It would otherwise be
+# copied into every installed skill directory (server/skills.mjs copies the
+# directory verbatim) and change the content hash on every run.
+__pycache__/
+*.pyc

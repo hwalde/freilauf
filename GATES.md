@@ -1,23 +1,76 @@
-# Gates: two-part reports, notification reliability, run link in messages
+# Gates: Freilauf skills — shipped, installed, kept current, offered
 
-OWNS: server/reports.mjs, server/integrate.mjs, server/notify.mjs, server/util.mjs, server/db.mjs, server/pages.mjs, server/hub.mjs, server/watcher.mjs, server/runner.mjs, bin/fl-report, lang/*.json, test/*.mjs
+OWNS: skills/**, server/skills.mjs, server/read-api.mjs, bin/fl-api, server/harnesses/*.mjs, server/plugins/registry.mjs, server/plugins/web.mjs, server/harnesses/index.mjs, server/pages.mjs, server/welcome.mjs, server/web.mjs, server/hub.mjs, public/hub.js, public/hub.css, lang/*.json, setup/02-install-scripts.sh, bin/fl-help, test/*.mjs, AGENTS.md, docs/plugins.md, SETUP_WITH_AGENT.md, README*.md
 
-Scope: The agent delivers a short report (the Telegram text) and a detailed report (the attached document); the double-send of reports is fixed; the run link appears in the message text; the notification hostname is configurable in Settings.
+Scope: Freilauf ships six agent skills that teach any coding agent how to drive
+it; where a coding agent reads skills is a plugin declaration; the hub installs
+them into the smallest covering set of user directories, keeps them current and
+removes only what it wrote; the operator is asked once in the Welcome wizard and
+can change it under Settings → Freilauf skills; a read-only JSON API and
+`bin/fl-api` are what the skills talk to.
 
-- [x] G1: unit suite green — pure logic (i18n parity, publicBase host resolution, fl-report --detail payload, replay-dedupe helper)
+- [x] G1: unit suite green — the covering set, the install/remove round trip, the frontmatter contract of every shipped skill, i18n parity across three catalogs
   CHECK: node test/unit.mjs
-  EXPECT: unit suite passed
-  EVIDENCE: 367 checks passed (1.0 s), after merging origin/main too
+  EXPECT: Unit tests: 388 checks passed
+  EVIDENCE: 388 checks passed (1.1 s). New group "Freilauf skills: where they go, and what may be removed" — 10 checks incl. the covering set for seven plugin combinations, install → idempotent → repair → auto-update-off → remove, and the refusal to touch a foreign directory.
 
-- [x] G2: e2e suite green — a report with a detail reaches the channel with both parts, a replayed inbox report is not double-sent, nothing regressed
+- [x] G2: e2e suite green — the settings page, the installation through HTTP, the read-only API, the six-step wizard
   CHECK: node test/e2e.mjs
-  EXPECT: e2e suite passed
-  EVIDENCE: 283 checks passed (80.5 s); new tests: "a report with a DETAILED version…", "fl-report --detail hands the detailed report to the hub", "a replayed inbox report is not sent a second time"
+  EXPECT: E2E tests: 295 checks passed
+  EVIDENCE: 295 checks passed (84.9 s). New group "Freilauf skills: the page, the installation, and the read-only API" — 9 checks, one of which runs the skill's OWN shipped script against the sandbox hub; the wizard group updated to six steps and now posts `/welcome/skills`; plus "active is a checkbox, and a spelled-out 0 means off rather than on".
 
-- [x] G3: browser suite green — the settings page renders the new field and the run detail page shows the detail report
+- [x] G3: browser suite green — unticking the installation asks before anything is deleted
   CHECK: node test/browser.mjs
-  EXPECT: browser suite passed
-  EVIDENCE: 61 checks passed (20.0 s); proxy suite 4 checks passed
+  EXPECT: Browser tests: 63 checks passed
+  EVIDENCE: 63 checks passed (19.8 s). Group A18: saving unchanged asks nothing, unticking opens the server-rendered dialog and submits nothing, cancel leaves the setting on, confirming saves.
 
-- [x] G4: docs agree — SETUP_WITH_AGENT.md mentions the public-host setting and the two-part report where the seams it describes were touched
-  EVIDENCE: item 4 in "How it works" describes the two-file report; row in "Make it yours" points at Settings → Notification links and the FREILAUF_PUBLIC_URL fallback
+- [x] G4: the whole shipped suite green — nothing regressed
+  CHECK: npm test
+  EXPECT: post-merge: 19 checks passed
+  EVIDENCE: unit 388, e2e 295, proxy 4, deploy 22, post-merge 19, browser 63 — all green.
+
+- [x] G5: the covering set is really the smallest one on this machine's four coding agents
+  EVIDENCE: measured against the four built-in declarations — claude alone → `~/.claude/skills`; cursor alone → `~/.cursor/skills`; opencode alone → `~/.config/opencode/skill`; hermes alone → `~/.hermes/skills`; all four → exactly two directories (`~/.claude/skills` serving claude+cursor+opencode, `~/.hermes/skills` serving hermes). Asserted in the unit suite against synthetic declarations so the RULE is tested, not the current plugin files.
+
+- [x] G6: every declared skill directory was read out of the installed CLI, not guessed
+  EVIDENCE: cursor's `src/utils/skill-path-utils.ts` search list read from `~/.local/share/cursor-agent/versions/*/index.js`; opencode's own configuration table read from its binary ("Global skills", "External skills (auto-loaded)"); `hermes skills trust --help` plus `hermes_cli/config_defaults.py` (`skills.external_dirs` empty by default, project discovery `./.hermes/skills` and `./.agents/skills`); claude's documented personal/project locations.
+
+- [x] G7: the skills are valid Agent Skills by the open specification, not just by our own reading
+  CHECK: node test/unit.mjs
+  EXPECT: Unit tests: 388 checks passed
+  EVIDENCE: the unit group asserts, per shipped skill, that the frontmatter starts on line 1, carries ONLY the six spec keys (`name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools`), that `name` equals the directory name and matches `^[a-z0-9]+(-[a-z0-9]+)*$`, and that the description is between 40 and 1024 characters.
+
+- [x] G8: every route the six skills name really exists
+  EVIDENCE: 49 distinct `/api/…` paths extracted from `skills/` and each one matched against `server/web.mjs`, `server/read-api.mjs`, `server/flows/web.mjs` — every one is a live route (the uuid ones through their regexes at web.mjs:400-748).
+
+- [x] G9: `bin/fl-api` works against a real hub, and fails honestly against a route that is not there
+  EVIDENCE: `fl-api --url` printed the local base; `fl-api /api/usage` returned the live JSON pretty-printed; `fl-api --status /api/repos` against the hub still running the previous release printed `HTTP 404` on stderr, the JSON body on stdout, and exited 1.
+
+- [x] G10: no operator-specific value entered the repository
+  CHECK: ./pruefe-vor-push.sh
+  EXPECT: /clean|OK|no private/i
+  EVIDENCE: the project's own pre-push check is the oracle here on purpose — it
+  reads the forbidden patterns from OUTSIDE the repository
+  (`~/.config/freilauf/verbotene-muster`), so this gate cannot restate them and
+  become the leak it is testing for. It found ONE, pre-existing: the operator's
+  real VPN port used as a test fixture in `test/unit.mjs` since an earlier
+  commit, fixed here (a fictional 9443). The `skills/` tree was additionally
+  read end to end by a second reviewer for ports, addresses, hostnames and home
+  paths — clean.
+
+- [x] G13: the six skills were fact-checked against the source by a second reader
+  EVIDENCE: an independent pass over all 19 files re-derived every route, field
+  name, column, settings key, default and enum from the source and found seven
+  wrong claims, all fixed: `/api/effort`'s error shape; the model list of a
+  subscription harness travelling in the `provider` parameter, not `harness`;
+  the OpenRouter block being rendered for every harness while only `auto` is
+  gated on opencode; `agentStart()` not reading `repo`; `capture-pane` without
+  the colon exiting 1 rather than 0 (re-measured on tmux 3.4); and two counts
+  in the statistics skill. It also executed all nine SQL recipes against a
+  throwaway database and drove `agent-edit.py` end to end against a stub server.
+
+- [x] G11: documentation states the contract where a stranger's agent will look for it
+  EVIDENCE: `docs/plugins.md` — the `skills` row in the harness table plus a section "Where a coding agent looks for skills" and step 9 of the "adding a coding agent" checklist; `AGENTS.md` — a section of its own plus a new Pitfalls entry for the truthy `'0'`; `SETUP_WITH_AGENT.md` — the wizard is six steps, a numbered item for Settings → Freilauf skills, two rows in "Make it yours", two rows in the file map, one checklist line; all three READMEs carry the feature bullet and the seam.
+
+- [x] G12: the test suites cannot reach the operator's real skill directories
+  EVIDENCE: `FREILAUF_SKILLS_HOME` and `FREILAUF_SKILLS_STATE` are set in `test/sandkasten.mjs` (both in the hub's environment and in `watcherVorbereiten`) and at the top of `test/unit.mjs`; the e2e test additionally asserts that every resolved target directory starts with the sandbox home before it installs anything.

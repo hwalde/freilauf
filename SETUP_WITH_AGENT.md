@@ -191,10 +191,10 @@ checkout, and its name is yours. It prints what is left for you at the end.
 
 The hub starts empty on purpose, and the first thing a browser sees says so:
 
-0. **The Welcome wizard.** `GET /` redirects to `/welcome` — five server-
+0. **The Welcome wizard.** `GET /` redirects to `/welcome` — six server-
    rendered steps that walk through what is installed on this machine, the first
-   coding agent, the first model provider and the source for the hub's own small
-   questions. During the first walkthrough the only way out is the "Leave the
+   coding agent, the first model provider, the source for the hub's own small
+   questions and whether to install Freilauf's own agent skills. During the first walkthrough the only way out is the "Leave the
    setup for now" card on step 1 (a session answer). Afterwards `/welcome` is an
    ordinary page: every step carries a **"Do not show this again"** checkbox
    that switches the greeting off for good, and next to the primary button a
@@ -238,7 +238,20 @@ The hub starts empty on purpose, and the first thing a browser sees says so:
     says nothing out loud. Nothing nags about it, nothing errors, and no step of
     the Welcome wizard requires it. Another channel is a plugin package with
     `"kind": "notifier"` (see `docs/plugins.md`).
- 6. Optional: **Settings → Favorites**
+ 6. **Settings → Freilauf skills** (`/settings/skills`) — *optional, and asked
+    once in the wizard.* Freilauf ships agent skills of its own under `skills/`
+    that teach any coding agent how to drive the hub: find and read runs, create
+    and edit agents and repositories, build flows, read the status sidebar, pick
+    a model. Two switches: install them at user level, and keep them up to date.
+    Switching the first one on copies them into the smallest set of directories
+    that covers every coding agent you configured — for the four shipped ones
+    that is `~/.claude/skills` (claude, cursor and opencode all read it) and
+    `~/.hermes/skills`. Which directories a coding agent reads is part of its
+    **plugin** (`skills: { user, project }`, see `docs/plugins.md`), so a fifth
+    coding agent brings its own and needs no change here. Switching it off
+    removes exactly the copies Freilauf wrote — each carries a marker file — and
+    leaves a skill of your own under the same name alone.
+ 7. Optional: **Settings → Favorites**
     (the setup half of a run under a name, feeds the Quick Run button in the
     header), **Settings → tmux cleanup** (a special agent that ends the oldest
     inactive tmux sessions to free memory — a threshold starts it by itself,
@@ -301,6 +314,8 @@ tooling. The seams that were designed to be pulled on:
 | change what every agent is told | Settings → **Platform prompt suffix** (added, never replacing the platform rules), or a **repo prompt** per repository |
 | point the notification links at your own hostname | Settings → **Notification links**: a `Public hostname` (the name that matches your certificate), and the port follows the live VPN port automatically. Without one, `FREILAUF_PUBLIC_URL` (a full URL, in `~/.config/freilauf/env`) or the local address answers — `publicBase()` in `server/util.mjs` |
 | give agents an opt-in capability | drop a folder with a `SKILL.md` into `~/agents/zusaetze/` — it appears as a checkbox in the run forms. Deliberately *not* `.claude/skills`, so nothing loads automatically |
+| teach your coding agents how to drive Freilauf itself | Settings → **Freilauf skills** installs the agent skills under `skills/` into the directories your configured coding agents read. Where those are is a **plugin declaration** (`skills: { user, project }`), so a new coding agent brings its own — `server/skills.mjs`, [`docs/plugins.md`](docs/plugins.md) |
+| script the hub from a shell or from inside a run | `fl-api` — `fl-api /api/runs repo=3 status=running`, `fl-api /api/runs/<id>`, `fl-api -X POST /api/runs/<id>/title title=…`. The read-only half is `server/read-api.mjs`; every write still goes through the ordinary POST routes, which validate |
 | do something after a run finishes or a merge lands | **no-code flows** — a graphical designer, no code needed: message running agents, start follow-up runs and wait, extract data from a report via LLM, branch, loop, notify, HTTP, shell command → [`server/flows/AGENTS.md`](server/flows/AGENTS.md) |
 | change when a run is allowed to start | Settings → **Budget gates** — the fieldset is generated from whichever plugins declare a `gate`, so a new one appears there by itself; else `repos.max_parallel` — `server/scheduler.mjs`; a deferred run can be started anyway from its detail page |
 | change a run that is not over | the "Edit this run" card on its detail page: the expected duration of a running run, plus the prompt, the repo, the branch rule and — for a planned run — its start time of one that has not started yet — `server/run-edit.mjs` decides what a status allows |
@@ -360,6 +375,8 @@ If your task is to change Freilauf rather than just run it:
 | Loading, validating, storing and configuring plugins | `server/plugins/` (`registry`, `loader`, `manifest`, `store`, `install`, `discovery`, `settings`, `context`, `web`) |
 | The hub's own LLM calls: sources, fallback chain, structured output, alerts | `server/llm/` (`index` = `llmJson()`, `job` = the per-job chain planner, `sources`, `schema`, `json`, `alerts`) |
 | The first-run wizard | `server/welcome.mjs` |
+| The agent skills Freilauf ships, and where they get installed | `skills/`, `server/skills.mjs`, the `skills` declaration in `docs/plugins.md` |
+| The read-only JSON API those skills talk to | `server/read-api.mjs`, `bin/fl-api` |
 | No-code flows | `server/flows/` + its own `AGENTS.md` |
 | Pages, sidebar, live channel | `server/pages.mjs`, `server/events.mjs`, `public/hub.js` |
 | TLS proxy, HTTP/2, the network edge | `vpn-proxy.mjs`, `test/proxy.mjs` |
@@ -383,6 +400,7 @@ If your task is to change Freilauf rather than just run it:
 [ ] Settings → Plugins: at least one coding agent enabled, its providers ticked,
     credentials present (environment variable or stored value)
 [ ] a model source chosen for the hub's own questions (run titles at minimum)
+[ ] Settings → Freilauf skills answered (install them, or deliberately not)
 [ ] at least one repo added
 [ ] one small single run started and watched end to end
 [ ] no ports, addresses, hostnames or keys ended up in a commit

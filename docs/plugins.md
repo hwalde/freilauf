@@ -315,6 +315,7 @@ and does without.
 | `turnEndsRun` | boolean (optional) | `true` = the end of a turn ends the RUN (`_turn_end` → `finishByTurnEnd()` in `reports.mjs`). Set it when the CLI keeps running after the work is done, so neither `_pane_died` nor `_exit` will ever come — cursor's TUI does exactly that |
 | `hookFiles({ccReport})` | fn (optional) | files the hub writes into the workspace before the start: `[{path, content}]`, `path` relative to the worktree. `ccReport` is the absolute path of `fl-report` — hook commands must not depend on `PATH`. An existing file is never overwritten, and `harnessOwnedPaths()` keeps these paths out of the worktree cleanup's dirty check |
 | `goal` | `{max, command(condition)}` (optional) | this CLI takes a SECOND prompt, one that says when the run is done — claude's `/goal <condition>`. `max` is the longest condition it accepts, `command()` builds the line. Presence is the whole capability check: the form shows the goal field only for these harnesses (`harnessesWithGoal()`), and `server/goal.mjs` types the line into the session after the start, because a slash command has no CLI flag |
+| `skills` | `{user: string[], project: string[]}` (optional) | where this coding agent looks for **agent skills**, user level and project level separately. `~` is allowed in the user paths; the project paths are relative to a workspace root. `server/skills.mjs` installs the hub's own skills into the smallest set of user directories that covers every configured coding agent — see "Where a coding agent looks for skills" below. Absent = this coding agent has no skill mechanism the hub knows about, and it is skipped without comment |
 | `promptRules` | string (optional) | extra prompt lines for this harness, appended to the platform rules by `platformSuffix()` — also to a custom template from the settings, because they describe the machine, not the operator's house rules |
 | `fetchModels()` | async fn | model list for subscription harnesses (cached by `models.mjs`) |
 | `effortLevels()` | async fn (optional) | levels the CLI itself accepts (probed; cached 24 h) |
@@ -406,6 +407,64 @@ plugin uses anyway. The price is a path that belongs to opencode's internals, an
 that price is paid by the `null` contract: no file, no permission, or a top-level
 shape that is not "provider id → entry" all answer *unknown* instead of the
 confident lie "holds nothing".
+
+### Where a coding agent looks for skills
+
+Freilauf ships **agent skills** of its own (`skills/<name>/SKILL.md` in this
+repository) that teach any coding agent how to drive the hub. Installing them
+means writing into directories that belong to somebody else's program, so the
+question "which directories" is the coding agent's own knowledge and belongs in
+its descriptor:
+
+```js
+skills: {
+  // Ordered by this plugin's own preference. The resolver treats that order as
+  // a TIE-BREAK only, because coverage decides.
+  user:    ['~/.claude/skills'],
+  // Relative to a workspace root. Declared for completeness and shown on
+  // Settings → Freilauf skills; the hub never writes into a repository.
+  project: ['.claude/skills'],
+}
+```
+
+The four shipped declarations were read out of the CLIs themselves, not
+guessed: claude's documented personal/project locations, cursor's own
+`skill-path-utils` search list (`.cursor/skills`, `.claude/skills`,
+`.codex/skills`, `.grok/skills`, `.agents/skills`, each under `$HOME` and in the
+workspace), opencode's configuration table (`~/.config/opencode/skill(s)`, plus
+`~/.claude/skills` and `~/.agents/skills` as "external skills, auto-loaded"),
+and hermes's `~/.hermes/skills` with `./.hermes/skills` and `./.agents/skills`
+for a trusted checkout.
+
+**The point of declaring it rather than hardcoding it is the covering set.**
+`coveringUserRoots()` in `server/skills.mjs` picks the smallest set of
+directories such that every enabled coding agent has one of its own in it —
+greedy, and deterministic: most coding agents covered wins, then the lowest
+summed preference rank, then the path alphabetically. For the four shipped
+plugins that comes out as **two** directories (`~/.claude/skills` for claude,
+cursor and opencode; `~/.hermes/skills` for hermes), and for a machine running
+cursor alone it comes out as `~/.cursor/skills`. Nothing about either answer is
+written down anywhere — both fall out of the declarations, which is what makes a
+fifth coding agent free.
+
+Three rules a new declaration has to keep:
+
+- **Only what has been measured.** hermes deliberately declares no
+  `ownCredentials` because nothing about its credential store was measured
+  here; the same standard applies to this. A guessed directory is worse than a
+  missing one — missing means the coding agent is listed as unserved on the
+  settings page, guessed means the hub writes files where nothing reads them.
+- **User paths may start with `~`, project paths may not.** A project path that
+  is absolute or tilde-anchored is not a project path; the unit suite refuses
+  one.
+- **The hub writes only at user level.** A project-level declaration is
+  information — it tells the operator where a skill of their own belongs inside
+  a checkout — and `harnessOwnedPaths()` therefore does not have to know about
+  any of this: nothing is ever written into a worktree.
+
+Installation itself is off until the operator says yes, in the Welcome wizard
+or under Settings → Freilauf skills, and every copy carries a marker file so a
+removal can only ever take back what the hub wrote.
 
 ### The launch declaration
 
@@ -1309,9 +1368,16 @@ Three page-level rules worth knowing:
    measured**: it decides a sentence the Plugins page states as fact, and a
    guess there is worse than leaving the capability out (see above). Declare
    `keyFreeProviders` either way; that is what the launch path reads.
-9. Done: install detection, the discovery scan, the forms, the Plugins page, the
-   detection patterns, the pulse and the budget-gate routing all follow the
-   registry. Configure the new coding agent under Settings → Plugins.
+9. Optional: `skills`, the two lists of directories this CLI reads agent skills
+   from (see "Where a coding agent looks for skills"). Only declare a directory
+   you have **measured** — the CLI's own documentation, or its search list read
+   out of the binary. Without it the coding agent is simply listed as unserved
+   on Settings → Freilauf skills, which is the honest answer; with a wrong one
+   the hub writes files where nothing reads them.
+10. Done: install detection, the discovery scan, the forms, the Plugins page, the
+    detection patterns, the pulse, the budget-gate routing and the skill
+    installer all follow the registry. Configure the new coding agent under
+    Settings → Plugins.
 
 ## Adding a new model provider
 

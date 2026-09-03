@@ -24,6 +24,7 @@ import {
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
   pageMergeSettings, mergeSettingsSave,
   pageCleanupSettings, cleanupSettingsSave,
+  pageSkillSettings, skillSettingsSave, skillSettingsSync,
   headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
   integrationSection, problemPage, runEditCard,
 } from './pages.mjs'
@@ -38,7 +39,7 @@ import {
 import { llmSources, sourceModels, getSource } from './llm/sources.mjs'
 import {
   pageWelcome, welcomeHello, welcomeScan, welcomeAgents,
-  welcomeProvider, welcomeLlm, welcomeDone,
+  welcomeProvider, welcomeLlm, welcomeSkills, welcomeDone,
   shouldShowWelcome, markWelcomeSkipped,
 } from './welcome.mjs'
 import { getFavorite, favoriteToFormBody } from './favorites.mjs'
@@ -46,6 +47,7 @@ import { getPlugin } from './plugins/registry.mjs'
 import { startCleanupRun } from './cleanup.mjs'
 import { suggestExtras } from './extras-suggest.mjs'
 import { editRun } from './run-edit.mjs'
+import { readApi } from './read-api.mjs'
 import { mergeByHand, skipMerge, resetIntegration } from './integrate.mjs'
 import { redirect, body as readBody, parseForm, rememberRepo, requestRepo } from './web-helpers.mjs'
 import { vorfallLoesen, vorfaelleLoesen, vorfall } from './incidents.mjs'
@@ -168,6 +170,7 @@ async function dispatch(req, res, url, path, formBody) {
   if (req.method === 'POST' && path === '/welcome/agents') return welcomeAgents(req, res, url, formBody)
   if (req.method === 'POST' && path === '/welcome/provider') return welcomeProvider(req, res, url, formBody)
   if (req.method === 'POST' && path === '/welcome/llm') return welcomeLlm(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/welcome/skills') return welcomeSkills(req, res, url, formBody)
   if (req.method === 'POST' && path === '/welcome/done') return welcomeDone(req, res, url, formBody)
 
   // --- pages ---
@@ -240,6 +243,12 @@ async function dispatch(req, res, url, path, formBody) {
   // tmux cleanup (Settings → tmux cleanup) — the memory-freeing agent's setup.
   if (req.method === 'GET' && path === '/settings/cleanup') return pageCleanupSettings(req, res, url)
   if (req.method === 'POST' && path === '/settings/cleanup') return cleanupSettingsSave(req, res, url, formBody)
+  // Freilauf's own agent skills (server/skills.mjs) — the two switches, and the
+  // sync they trigger. Its own page because saving here DELETES FILES, and a
+  // handler that owns the whole request is what can act on that transition.
+  if (req.method === 'GET' && path === '/settings/skills') return pageSkillSettings(req, res, url)
+  if (req.method === 'POST' && path === '/settings/skills') return skillSettingsSave(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/settings/skills/sync') return skillSettingsSync(req, res, url, formBody)
   // No-code flows (server/flows/) — own router, own pages.
   if (path === '/flows' || path.startsWith('/flows/')) return flowRoute(req, res, url)
   res.writeHead(404, { 'content-type': 'text/plain' }); res.end(t('web.not_found'))
@@ -255,6 +264,10 @@ async function api(req, res, url) {
   // Pieces of a page, rendered by the very functions the page uses (pages.mjs).
   if (req.method === 'GET' && path.startsWith('/api/fragments/')) return fragmentApi(req, res, url)
   if (path.startsWith('/api/flows') || path.startsWith('/api/flow-runs')) return flowApi(req, res, url)
+  // Read-only JSON: repos, agents, runs, favorites, sessions, skills. Stands
+  // here so it can decline (`false`) and let the specific routes below answer —
+  // a GET it does not know is not its business.
+  if (req.method === 'GET' && await readApi(req, res, url)) return
 
   // Which providers the chosen harness can use — plugin capability, restricted
   // to the operator's per-coding-agent selection and available credentials.

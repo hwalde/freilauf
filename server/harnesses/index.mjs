@@ -18,5 +18,7 @@ export {
   harnessLabel,
   goalSpec,
   harnessesWithGoal,
+  skillSpec,
+  harnessesWithSkills,
   detectInstalled,
 } from '../plugins/registry.mjs'

@@ -30,6 +30,7 @@ const { sessionMemory } = await import('./sessions.mjs')
 const { setLanguage } = await import('./i18n.mjs')
 const { setTimezone, setPublicHost } = await import('./util.mjs')
 const { scanSystem } = await import('./plugins/discovery.mjs')
+const { syncSkillsQuiet } = await import('./skills.mjs')
 
 // UI language (default English) and, on a fresh installation, the optional
 // coding agent seed file (installed e.g. by a private setup repo).
@@ -76,6 +77,12 @@ server.listen(PORT, HOST, () => {
   // out once per coding agent plugin, and a start must never wait on that.
   // Never on a request path either; the Plugins page reads the stored result.
   try { scanSystem().catch(() => {}) } catch { /* a scan is a suggestion, never a requirement */ }
+  // The hub's own agent skills. Here rather than before `listen` because it
+  // touches the file system of directories that belong to other programs, and
+  // because it depends on the plugin registry being complete — which it is only
+  // after `loadExternalPlugins()` at the top of this file. Off by default, so on
+  // an installation that never said yes this is one settings read and nothing else.
+  syncSkillsQuiet('startup')
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

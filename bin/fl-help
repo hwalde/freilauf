@@ -75,6 +75,13 @@ ${B}COMMANDS${R}
       session environment). done --file report.md reads the report from a file;
       help calls a human and leaves the run open (waiting_help).
 
+  ${C}fl-api${R} <path> [name=value ...]   ·   -X POST <path> …   ·   --url
+      Ask the hub anything, and get JSON back: fl-api /api/runs repo=3
+      status=running, fl-api /api/runs/<uuid> (the row plus its events,
+      incidents, files and whether its agent is still alive), fl-api /api/repos,
+      /api/agents, /api/favorites, /api/sessions, /api/usage. Writing goes
+      through the same POST routes the web UI uses.
+
 ${B}SESSION NAMES${R}
   fl-<name>      = claude      (sessions without a tag count as claude)
   fl-oc-<name>   = opencode
