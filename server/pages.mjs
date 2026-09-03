@@ -1339,8 +1339,14 @@ export function runDetailHead(run, ctx) {
     // A planned run must be revocable — otherwise a start you thought better of
     // sits in the future with no way to stop it. 'kill' is exactly right here:
     // there is no session to end, only a record to set to 'aborted'.
+    // And the green one starts it ahead of its time — startScheduledNow, the
+    // same budget gate as at any other start (a blocked one becomes deferred,
+    // it does not die at the first API call).
     ? `<div class="banner waiting" id="run-banner">⏳ ${wartetAuf(run)}
-       <form method="post" action="/api/runs/${id}/kill" class="inline"><button class="danger">${e(t('start.cancel'))}</button></form></div>`
+       <div class="btn-row">
+         <form method="post" action="/api/runs/${id}/start-now" class="inline"><button class="success">${e(t('start.start_now'))}</button></form>
+         <form method="post" action="/api/runs/${id}/kill" class="inline"><button class="danger">${e(t('start.cancel'))}</button></form>
+       </div></div>`
     : ''}
   ${run.status === 'deferred'
     // The budget gate held the run back, and the operator disagrees — that is

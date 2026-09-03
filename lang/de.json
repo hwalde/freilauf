@@ -139,6 +139,8 @@
   "start.force_start": "Trotzdem starten",
   "start.force_start_short": "Starten",
   "start.err_not_deferred": "Nur ein zurückgestellter Lauf kann so gestartet werden.",
+  "start.start_now": "Jetzt starten",
+  "start.err_not_scheduled": "Nur ein geplanter Lauf kann so gestartet werden.",
   "branch.none": "keiner",
   "branch.new": "legt neuen an",
   "branch.fixed": "benutzt festen",
