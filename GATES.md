@@ -27,7 +27,7 @@ can change it under Settings → Freilauf skills; a read-only JSON API and
 - [x] G4: the whole shipped suite green — nothing regressed
   CHECK: npm test
   EXPECT: post-merge: 19 checks passed
-  EVIDENCE: unit 388, e2e 295, proxy 4, deploy 22, post-merge 19, browser 63 — all green.
+  EVIDENCE: unit 392, e2e 300, proxy 4, deploy 22, post-merge 19, browser 66 — all green.
 
 - [x] G5: the covering set is really the smallest one on this machine's four coding agents
   EVIDENCE: measured against the four built-in declarations — claude alone → `~/.claude/skills`; cursor alone → `~/.cursor/skills`; opencode alone → `~/.config/opencode/skill`; hermes alone → `~/.hermes/skills`; all four → exactly two directories (`~/.claude/skills` serving claude+cursor+opencode, `~/.hermes/skills` serving hermes). Asserted in the unit suite against synthetic declarations so the RULE is tested, not the current plugin files.
@@ -57,6 +57,36 @@ can change it under Settings → Freilauf skills; a read-only JSON API and
   commit, fixed here (a fictional 9443). The `skills/` tree was additionally
   read end to end by a second reviewer for ports, addresses, hostnames and home
   paths — clean.
+
+- [x] G14: a repository can be deactivated and (in the UI, by a human) deleted
+  CHECK: node test/e2e.mjs
+  EXPECT: E2E tests: 300 checks passed
+  EVIDENCE: 300 checks passed. New group "Repos: deactivating takes one out of
+  every dropdown, deleting needs its name" — 5 checks: explicit `active=0|1`
+  and the flip; absence from the header switcher, the Quick-Run dialog, the
+  move target, the cleanup settings and the flow designer's list, while the
+  Repos page still lists it marked; a manual start refused BY NAME with no row
+  left behind and the overview/archive/sidebar still rendering for it; the
+  delete refused on a wrong `confirm` and again on a run in flight; and the
+  delete taking runs, agents, events and incidents while `<repo>/.git` survives.
+  Unit adds 3 checks (`repoInactive` tri-state, `repoDeleteFacts` counts, and a
+  cleanup check that the group leaves the shared database as it found it) and
+  the browser suite 3 (the button dead until the typed name matches exactly, the
+  field cleared on reopen, cancel changing nothing, "deactivate instead", and a
+  real delete) — unit 392, browser 66.
+
+- [x] G15: two defects the feature work turned up were fixed, not worked around
+  EVIDENCE: (1) `mergeGeneral()` in `quota.mjs` chose the claude quota window by
+  age across all three sources, but `statSync().mtimeMs` is a float and
+  `Date.now()` an integer millisecond — so a `quota.json` written inside the
+  current millisecond carried an `at` LARGER than `now`
+  (1788443185118.0244 vs 1788443185118) and beat a live account answer. Measured
+  at 6 failures in 30 suite runs; the rule was always "the live answer wins
+  outright", which `mergeScoped()` already did. Fixed, pinned by a test that
+  counter-checks (it fails without the fix), 40 consecutive clean runs after.
+  (2) `test/unit.mjs` hardcoded `repoId: 1` in the run-definition group, which
+  broke the moment another group inserted and removed a repo of its own; it now
+  looks the id up. Both written up in the Pitfalls section.
 
 - [x] G13: the six skills were fact-checked against the source by a second reader
   EVIDENCE: an independent pass over all 19 files re-derived every route, field

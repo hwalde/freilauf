@@ -123,7 +123,13 @@ export async function readApi(req, res, url) {
 
   // ---- repos -------------------------------------------------------------
   if (path === '/api/repos') {
-    const repos = db.prepare('SELECT * FROM repos ORDER BY name').all()
+    // Every repo by default, each carrying its `active` flag — a read API shows
+    // what is there. `active=1` / `active=0` narrows it; the UI's dropdowns show
+    // only the active ones, so a repo missing from a form while this route
+    // still lists it is an inactive repo rather than a bug.
+    const want = url.searchParams.get('active')
+    const where = want === '1' ? ' WHERE active=1' : want === '0' ? ' WHERE active=0' : ''
+    const repos = db.prepare(`SELECT * FROM repos${where} ORDER BY name`).all()
       .map(r => ({ ...r, extras: JSON.parse(r.worktree_extras || '[]') }))
     json(res, 200, { ok: true, repos })
     return true

@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRepo, getRun } from './db.mjs'
 import { KNOWN_QUANTIZATIONS, REGIONS, parseRoutingConfig } from './providers/openrouter-routing.mjs'
-import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime, fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent, tzAbbrev, uiTimezone, setTimezone, setPublicHost, TIMEZONE_OPTIONS, hubVersion, publicBase } from './util.mjs'
+import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime, fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent, tzAbbrev, uiTimezone, setTimezone, setPublicHost, TIMEZONE_OPTIONS, hubVersion, publicBase, WORKTREES_DIR, RUNS_DIR } from './util.mjs'
 import { cookieRepo, requestRepo } from './web-helpers.mjs'
 import { providerBalances } from './balances.mjs'
 import { enabledCodingAgents, saveCodingAgent, deleteCodingAgent } from './coding-agents.mjs'
@@ -623,7 +623,11 @@ export async function layout(req, title, active, content, selectedRepo = null, w
   const nav = [['/', t('nav.overview')], ['/agents', t('nav.agents')], ['/sessions', t('nav.sessions')],
     ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
     .map(([href, label]) => `<a href="${href}" class="${active === href ? 'on' : ''}">${e(label)}</a>`).join('')
-  const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
+  // Only ACTIVE repos are offered. This one query feeds both the header
+  // switcher and the Quick-Run dialog (which takes the list as a parameter), so
+  // deactivating a repo removes it from both at once — see "Deactivating and
+  // deleting a repo" in AGENTS.md.
+  const repos = db.prepare('SELECT id,name FROM repos WHERE active=1 ORDER BY name').all()
   // Which repo the HEADER stands on — three answers in this order, and the
   // order is the whole point (see the switcher on a page that belongs to ONE
   // repo, below):
@@ -1043,11 +1047,19 @@ export async function pageArchive(req, res, url) {
 
 function selectRepo(req, url) {
   const want = url.searchParams.get('repo')
+  // An EXPLICIT ?repo= resolves whatever it names, active or not. That is what
+  // makes deactivating better than deleting: the overview, the archive, the run
+  // pages and the sidebar of an inactive repo all stay reachable by their own
+  // links. Only the two FALLBACKS below skip an inactive repo — nobody should
+  // land on one by accident.
   let sel = want ? getRepo(+want) : null
   // No ?repo= — or one naming a repo that no longer exists: fall back to the
   // repo chosen in the header, which travels as the freilauf_repo cookie.
-  if (!sel) sel = cookieRepo(req) ? getRepo(cookieRepo(req)) : null
-  if (!sel) sel = db.prepare('SELECT * FROM repos ORDER BY name LIMIT 1').get() ?? null
+  if (!sel) {
+    const c = cookieRepo(req) ? getRepo(cookieRepo(req)) : null
+    sel = c && c.active ? c : null
+  }
+  if (!sel) sel = db.prepare('SELECT * FROM repos WHERE active=1 ORDER BY name LIMIT 1').get() ?? null
   return sel   // null = no repo yet → pages show a setup hint
 }
 
@@ -1451,7 +1463,8 @@ export function runChips(run, repo, herkunft) {
 export function runEditCard(run) {
   const erlaubt = runEditAllowed(run)
   if (!erlaubt.duration && !erlaubt.prompt && !erlaubt.repo && !erlaubt.startTime && !erlaubt.branch) return ''
-  const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
+  // Moving a run into a deactivated repo is not an offer worth making.
+  const repos = db.prepare('SELECT id,name FROM repos WHERE active=1 ORDER BY name').all()
   const zeilen = []
   if (erlaubt.duration) {
     zeilen.push(`<label>${e(t('runform.expected'))}
@@ -1571,22 +1584,182 @@ export function vorfallAbschnitt(runId, runStatus = null) {
 
 // ---------------- repos ----------------
 export async function pageRepos(req, res, url) {
+  // EVERY repo, active or not — this is the one page an inactive one has to
+  // stay visible on, or deactivating would be a way of losing a repository
+  // rather than of putting it away.
   const repos = db.prepare('SELECT * FROM repos ORDER BY name').all()
   const rows = repos.map(r => {
     const p = (r.prompt ?? '').trim()
     const kurz = p ? (p.length > 60 ? p.slice(0, 60) + '…' : p) : ''
-    return `<tr><td>${e(r.name)}</td><td><code>${e(r.path)}</code></td><td>${e(r.base_branch)}</td>
+    const aus = r.active === 0
+    return `<tr${aus ? ' class="repo-off"' : ''}><td>${e(r.name)}
+      ${aus ? `<div class="dim">${e(t('repos.inactive_mark'))}</div>` : ''}</td>
+    <td><code>${e(r.path)}</code></td><td>${e(r.base_branch)}</td>
     <td class="dim">${e(r.worktree_extras)}</td>
     <td>${kurz ? `<span class="dim" title="${e(p)}">${e(kurz)}</span>` : `<span class="dim">—</span>`}</td>
     <td>${e(r.merge_mode === 'hub' ? t('merge.mode_hub') : t('merge.mode_off'))}${mergeFlowsHint(r.id)}
       ${r.last_push_at ? `<div class="dim">${e(t('repos.last_push', { ts: r.last_push_at }))}</div>` : ''}</td>
-    <td><a href="/repos/edit?id=${r.id}">${e(t('agents.edit'))}</a></td></tr>`
+    <td><div class="btn-row">
+      <a class="btn" href="/repos/edit?id=${r.id}">${e(t('agents.edit'))}</a>
+      <form method="post" action="/repos/toggle" class="inline">
+        <input type="hidden" name="id" value="${r.id}">
+        <input type="hidden" name="active" value="${aus ? '1' : '0'}">
+        <button class="ghost">${e(t(aus ? 'repos.activate' : 'repos.deactivate'))}</button>
+      </form>
+      <button type="button" class="ghost repo-delete-open" data-repo="${r.id}">${e(t('repos.delete'))}</button>
+    </div></td></tr>`
   }).join('')
   const body = `
   <p><a class="btn" href="/repos/edit">${e(t('repos.create'))}</a></p>
   <table class="list"><thead><tr><th>${e(t('repos.name'))}</th><th>${e(t('repos.path'))}</th><th>${e(t('repos.base'))}</th><th>${e(t('repos.extras'))}</th><th>${e(t('repos.prompt'))}</th><th>${e(t('repos.integration_legend'))}</th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="7" class="dim">${e(t('repos.none'))}</td></tr>`}</tbody></table>`
+  <tbody>${rows || `<tr><td colspan="7" class="dim">${e(t('repos.none'))}</td></tr>`}</tbody></table>
+  ${repos.map(repoDeleteDialog).join('')}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.repos'), '/repos', body))
+}
+
+/**
+ * What a repo's deletion would really cost, counted rather than described.
+ * `runs` includes archived ones — "archived" is not "gone", and somebody about
+ * to lose their history should see the whole number.
+ */
+export function repoDeleteFacts(repoId) {
+  const one = (sql) => db.prepare(sql).get(repoId)?.c ?? 0
+  return {
+    agents: one('SELECT count(*) c FROM agents WHERE repo_id=?'),
+    runs: one('SELECT count(*) c FROM runs WHERE repo_id=?'),
+    reports: one(`SELECT count(*) c FROM runs WHERE repo_id=? AND report_md IS NOT NULL AND report_md <> ''`),
+    events: one('SELECT count(*) c FROM events WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)'),
+    incidents: one('SELECT count(*) c FROM incidents WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)'),
+    inFlight: one(`SELECT count(*) c FROM runs WHERE repo_id=?
+      AND status IN ('running','waiting_help','scheduled','deferred')`),
+  }
+}
+
+/**
+ * The confirmation before a repository goes.
+ *
+ * One dialog per row, server-rendered — the counts and the paths are facts out
+ * of the database and off the disk layout, and a client that composed them
+ * would be guessing. The name has to be typed: `hub.js` keeps the delete button
+ * disabled until it matches, and `repoDelete()` checks it again, because the
+ * hub has no authentication and a fence that only exists in the browser is not
+ * a fence.
+ *
+ * The second action is the point of the whole feature: deactivating is almost
+ * always what the operator actually wants, so it is offered HERE, at the moment
+ * they are about to do the irreversible thing instead.
+ */
+function repoDeleteDialog(r) {
+  const f = repoDeleteFacts(r.id)
+  const wt = join(WORKTREES_DIR, r.name)
+  return `<dialog id="repo-del-${r.id}" class="qr cleanup repo-del" data-name="${e(r.name)}">
+    <h3>${e(t('repos.del_title', { name: r.name }))}
+      <button type="button" class="mini" data-repo-del-close aria-label="${e(t('qr.cancel'))}">✕</button></h3>
+    <p class="warn">${e(t('repos.del_lose', {
+      runs: f.runs, agents: f.agents, reports: f.reports, events: f.events, incidents: f.incidents,
+    }))}</p>
+    <p>${e(t('repos.del_keeps_checkout'))} <code>${e(r.path)}</code></p>
+    <p class="dim">${e(t('repos.del_leftovers'))}</p>
+    <ul class="skill-list"><li><code>${e(wt)}</code></li><li><code>${e(RUNS_DIR)}/&lt;run id&gt;</code></li></ul>
+    ${f.inFlight
+      ? `<p class="err">${e(t('repos.del_in_flight', { n: f.inFlight }))}</p>`
+      : `<label>${e(t('repos.del_type_name', { name: r.name }))}
+          <input type="text" class="repo-del-name" autocomplete="off" spellcheck="false"></label>`}
+    <menu class="qr-actions">
+      <button type="button" class="ghost" data-repo-del-close>${e(t('qr.cancel'))}</button>
+      <form method="post" action="/repos/toggle" class="inline">
+        <input type="hidden" name="id" value="${r.id}">
+        <input type="hidden" name="active" value="0">
+        <button class="ghost repo-del-deactivate">${e(t('repos.del_deactivate_instead'))}</button>
+      </form>
+      <form method="post" action="/repos/delete" class="inline">
+        <input type="hidden" name="id" value="${r.id}">
+        <input type="hidden" name="confirm" value="" class="repo-del-confirm">
+        <button class="repo-del-go" ${f.inFlight ? 'disabled' : 'disabled'}>${e(t('repos.del_go'))}</button>
+      </form>
+    </menu>
+  </dialog>`
+}
+
+/**
+ * Switch a repository off, or on again. `active` sets it explicitly, an absent
+ * `active` flips it — the button sends the value it means, a script should too.
+ *
+ * `'0'` is compared, never coerced: the string is truthy in JavaScript, and
+ * that exact trap made `POST /agents/edit` read `active=0` as "switch it on"
+ * (see the Pitfalls section in AGENTS.md).
+ */
+export async function repoToggle(req, res, url, formBody) {
+  const b = await formBody()
+  const repo = getRepo(+(b.id ?? 0))
+  if (!repo) return problemPage(req, res, t('nav.repos'), [t('api.unknown_repo')], '/repos')
+  const wanted = b.active === undefined ? (repo.active === 0 ? 1 : 0)
+    : (b.active === '1' || b.active === 'on' || b.active === 'true') ? 1 : 0
+  db.prepare('UPDATE repos SET active=? WHERE id=?').run(wanted, repo.id)
+  const back = String(b.back ?? '')
+  redirect(res, back.startsWith('/') && !back.startsWith('//') ? back : '/repos')
+}
+
+/**
+ * Delete a repository — the row, its agents, its runs and everything hanging
+ * off those runs.
+ *
+ * Two fences, and both are load-bearing:
+ *
+ *   - **`confirm` must equal the repo's name.** The hub has no authentication,
+ *     so anything reachable over HTTP is reachable by any process on this
+ *     machine, a coding agent included. Typing the name is what makes this an
+ *     act rather than a request, and it is why the agent-facing skill can say
+ *     "you cannot delete a repo, ask the human".
+ *   - **Work in flight refuses.** A `running`, `waiting_help`, `scheduled` or
+ *     `deferred` run would be deleted out from under a live tmux session.
+ *     Finish or abort them first; the refusal says how many there are.
+ *
+ * Everything is deleted EXPLICITLY, child rows first, in one transaction — and
+ * the ORDER is not cosmetic. `foreign_keys` really is ON here (measured: the
+ * table-rebuild dance in db.mjs switches it back on and leaves it there), so
+ * `DELETE FROM repos` would be REFUSED while a run still references the row.
+ * Doing it in this order also means the operation is all-or-nothing: a failure
+ * half way through leaves the repository exactly as it was rather than
+ * half-emptied.
+ *
+ * What it deliberately does not touch: the git checkout at `repos.path`, the
+ * worktrees, the run directories, and a `run_merged` flow that was scoped to
+ * this repo (it survives and simply never fires again). The dialog says all of
+ * that before the click.
+ */
+export async function repoDelete(req, res, url, formBody) {
+  const b = await formBody()
+  const repo = getRepo(+(b.id ?? 0))
+  if (!repo) return problemPage(req, res, t('nav.repos'), [t('api.unknown_repo')], '/repos')
+  const facts = repoDeleteFacts(repo.id)
+  const problems = []
+  if (String(b.confirm ?? '') !== repo.name) problems.push(t('repos.del_err_confirm', { name: repo.name }))
+  if (facts.inFlight) problems.push(t('repos.del_err_in_flight', { n: facts.inFlight, name: repo.name }))
+  if (problems.length) return problemPage(req, res, t('nav.repos'), problems, '/repos')
+
+  // `db.exec('BEGIN')` and not `db.transaction(...)`: this hub runs on
+  // `node:sqlite`, whose DatabaseSync has no `transaction()` — that is
+  // better-sqlite3's API, and reaching for it here cost a 500 and one e2e run
+  // to notice. Same shape as `tabelleUmziehen()` in db.mjs.
+  db.exec('BEGIN')
+  try {
+    db.prepare('DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
+    db.prepare('DELETE FROM incidents WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
+    db.prepare('DELETE FROM runs WHERE repo_id=?').run(repo.id)
+    db.prepare('DELETE FROM agents WHERE repo_id=?').run(repo.id)
+    db.prepare('DELETE FROM repos WHERE id=?').run(repo.id)
+    db.exec('COMMIT')
+  } catch (err) {
+    try { db.exec('ROLLBACK') } catch { /* already rolled back */ }
+    // A half-deleted repository is the one outcome worse than a refused delete,
+    // so the operator gets the reason and the repo stays exactly as it was.
+    return problemPage(req, res, t('nav.repos'), [t('repos.del_err_failed', { name: repo.name, err: err.message })], '/repos')
+  }
+  console.log(`[freilauf] repo '${repo.name}' deleted: ${facts.runs} run(s), ${facts.agents} agent(s), `
+    + `${facts.events} event(s), ${facts.incidents} incident(s). Checkout at ${repo.path} untouched.`)
+  const back = String(b.back ?? '')
+  redirect(res, back.startsWith('/') && !back.startsWith('//') ? back : '/repos')
 }
 
 // ---------------- tmux sessions ----------------
@@ -2151,7 +2324,7 @@ function cleanupWerte(s) {
 export async function pageCleanupSettings(req, res, url) {
   const s = Object.fromEntries(db.prepare('SELECT key,value FROM settings').all().map(r => [r.key, r.value]))
   const werte = cleanupWerte(s)
-  const repos = db.prepare('SELECT id, name FROM repos ORDER BY name').all()
+  const repos = db.prepare('SELECT id, name FROM repos WHERE active=1 ORDER BY name').all()
   const repoSel = repos.length
     ? `<label>${e(t('cleanup.repo'))} <select name="cleanup_repo_id">${repos.map(r =>
         `<option value="${r.id}" ${String(s.cleanup_repo_id ?? repos[0].id) === String(r.id) ? 'selected' : ''}>${e(r.name)}</option>`).join('')}</select>
@@ -2550,7 +2723,7 @@ export async function agentEdit(req, res, url) {
   const a = id ? db.prepare('SELECT * FROM agents WHERE id=?').get(+id) : lastRunChoice()
   const repoId = id
     ? a.repo_id
-    : +(url.searchParams.get('repo') ?? cookieRepo(req) ?? db.prepare('SELECT id FROM repos ORDER BY name LIMIT 1').get()?.id ?? 0)
+    : +(url.searchParams.get('repo') ?? cookieRepo(req) ?? db.prepare('SELECT id FROM repos WHERE active=1 ORDER BY name LIMIT 1').get()?.id ?? 0)
   // The destructive actions belong ON this page — the agent's detail page —
   // never in the overview. Delete is a separate form that requires the confirm
   // dialog; move goes to its own page because a collision needs a date-time
@@ -2611,7 +2784,8 @@ export async function agentDelete(req, res, url, formBody) {
 export async function agentMovePage(req, res, url) {
   const agent = db.prepare('SELECT * FROM agents WHERE id=?').get(+url.searchParams.get('id'))
   if (!agent) { res.writeHead(404).end(t('agents.not_found')); return }
-  const repos = db.prepare('SELECT id,name FROM repos ORDER BY name').all()
+  // A deactivated repo is not a move target.
+  const repos = db.prepare('SELECT id,name FROM repos WHERE active=1 ORDER BY name').all()
   const body = `
   <h2>${e(t('agents.move_title', { name: agent.name }))}</h2>
   <form method="post" action="/agents/move" class="settings form-grid">

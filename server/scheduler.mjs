@@ -9,6 +9,7 @@ import { pluginFields, pluginSettingKey } from './plugins/settings.mjs'
 import { notifyRun } from './reports.mjs'
 import { defFromAgent } from './run-def.mjs'
 import { fallbackTitle, applyGeneratedTitle } from './title.mjs'
+import { t } from './i18n.mjs'
 
 let timer = null
 const fired = new Map()   // "agentId@YYYY-MM-DDTHH:MM" -> true
@@ -71,6 +72,13 @@ async function tick() {
       addEvent(busy.id, 'schedule_skipped', { agent: agent.name, slot })
       continue
     }
+    // The repo is switched off. Same shape as the ceiling below: the slot is
+    // already marked as fired, so this is a skipped appointment and not a queue.
+    if (repoInactive(agent.repo_id)) {
+      const any = db.prepare(`SELECT id FROM runs WHERE repo_id=? ORDER BY started_at DESC LIMIT 1`).get(agent.repo_id)
+      if (any) addEvent(any.id, 'schedule_skipped', { agent: agent.name, slot, reason: 'repo_inactive' })
+      continue
+    }
     // The repo's own ceiling (repos.max_parallel). The slot is marked as fired
     // above, so this is a skipped appointment, not a queue — the next one comes
     // when the schedule says so.
@@ -88,6 +96,24 @@ async function tick() {
   }
   // Bound the map
   if (fired.size > 500) for (const k of fired.keys()) { if (!k.endsWith(slot)) fired.delete(k) }
+}
+
+/**
+ * Is this repository switched off?
+ *
+ * A deactivated repo (`repos.active = 0`) is the reversible alternative the
+ * delete dialog offers, and "it stops producing new work" is half of what makes
+ * it worth offering — otherwise a repo the operator has put away keeps starting
+ * nightly runs. It gates BOTH kinds of start, unlike `max_parallel`: a manual
+ * start is a deliberate decision about a run, not about the repository, and the
+ * decision to put the repository away was made deliberately too.
+ *
+ * A repo that no longer exists answers `false`: whatever is wrong there, it is
+ * not "deactivated", and the ordinary "unknown repo" path says it better.
+ */
+export function repoInactive(repoId) {
+  const r = db.prepare('SELECT active FROM repos WHERE id=?').get(repoId)
+  return !!r && r.active === 0
 }
 
 /**
@@ -243,6 +269,15 @@ export async function startRun(def, {
   const chosen = String(title ?? '').trim() || agentName || null
   const startTitle = chosen ?? fallbackTitle(def.prompt)
 
+  // A switched-off repository starts nothing, by hand or otherwise. Checked
+  // HERE rather than in each of the six callers (the two forms, Quick Run, the
+  // "start now" button, and the two flow steps), and before `createRun()` —
+  // a refused start must not leave a row behind.
+  if (repoInactive(repoId)) {
+    const name = db.prepare('SELECT name FROM repos WHERE id=?').get(repoId)?.name ?? String(repoId)
+    return { ok: false, error: t('repos.inactive_no_start', { name }) }
+  }
+
   // "auto" needs its provider order BEFORE the definition copy is written —
   // the run must record what it actually launched with.
   const resolved = await resolveRouting(def)
@@ -321,6 +356,10 @@ export async function pickUpScheduled(nowMs = Date.now()) {
     } else {
       continue   // no waiting kind: nothing to wait for, nothing to decide
     }
+    // Switched-off repo: the run keeps waiting rather than failing. Activating
+    // the repo again is all it takes, and an 'at' start that came due while the
+    // repo was off is caught up the way any missed one is.
+    if (repoInactive(run.repo_id)) continue
     // A planned run is a scheduled start too — it simply waits one more pass.
     if (repoAtCapacity(run.repo_id)) continue
     busy.add(run.repo_id)

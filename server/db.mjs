@@ -224,6 +224,12 @@ addColumn('repos', 'max_parallel', 'INTEGER NOT NULL DEFAULT 0')   // 0 = unlimi
 // When the hub last pushed the operator's own base-branch commits to origin.
 // The remote is the backup: nothing may exist only on this machine.
 addColumn('repos', 'last_push_at', 'TEXT')
+// Is this repository still in use? `0` takes it out of every repo dropdown and
+// stops it producing new work, while leaving every row it owns intact and
+// reachable — the reversible half of "I am done with this project", and the
+// alternative the delete dialog offers. DEFAULT 1, so every repo that existed
+// before this column stays exactly as it was.
+addColumn('repos', 'active', 'INTEGER NOT NULL DEFAULT 1')
 // Per run: where it started from, where it stands in the finish gate, and what
 // became of its commits. finish_state is a SUB-state of 'running' on purpose —
 // runs.status carries a CHECK, and a new value there would be a table rebuild

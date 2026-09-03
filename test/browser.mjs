@@ -1310,6 +1310,64 @@ try {
     await p.close()
   })
 
+  gruppe('A19 — the repo-delete confirmation, and "deactivate instead"')
+  await pruefe('the delete button stays dead until the name is typed exactly', async () => {
+    const id = sk.db.prepare(`INSERT INTO repos(name,path,base_branch)
+      VALUES('browser-del','${sk.REPO}','main') RETURNING id`).get().id
+    const p = await neueSeite('/repos')
+    const dlg = '#repo-del-' + id
+    gleich(await p.$eval(dlg, d => d.open), false, 'closed to begin with')
+    await p.click(`.repo-delete-open[data-repo="${id}"]`)
+    gleich(await p.$eval(dlg, d => d.open), true, 'the row opens its own dialog')
+    // Everything the operator needs before an irreversible click.
+    const text = await p.textContent(dlg)
+    enthaelt(text, 'browser-del', 'it names the repo')
+    enthaelt(text, sk.REPO, 'and the checkout it will NOT touch')
+    gleich(await p.$eval(`${dlg} .repo-del-go`, b => b.disabled), true, 'the delete button starts disabled')
+
+    await p.fill(`${dlg} .repo-del-name`, 'browser-de')
+    gleich(await p.$eval(`${dlg} .repo-del-go`, b => b.disabled), true, 'a near miss does not arm it')
+    await p.fill(`${dlg} .repo-del-name`, 'browser-del')
+    gleich(await p.$eval(`${dlg} .repo-del-go`, b => b.disabled), false, 'the exact name arms it')
+    gleich(await p.$eval(`${dlg} .repo-del-confirm`, i => i.value), 'browser-del',
+      'and the hidden field that actually travels carries the name')
+
+    // Cancel changes nothing at all.
+    await p.click(`${dlg} [data-repo-del-close]`)
+    gleich(await p.$eval(dlg, d => d.open), false, 'cancel closes it')
+    gleich(sk.db.prepare('SELECT count(*) c FROM repos WHERE id=?').get(id).c, 1, 'and the repo is still there')
+    // Reopening starts empty again — a name left in the field would arm the
+    // button before anybody typed anything.
+    await p.click(`.repo-delete-open[data-repo="${id}"]`)
+    gleich(await p.$eval(`${dlg} .repo-del-name`, i => i.value), '', 'the field is empty again')
+    gleich(await p.$eval(`${dlg} .repo-del-go`, b => b.disabled), true, 'and the button dead again')
+    sauber(p)
+    await p.close()
+  })
+
+  await pruefe('"deactivate instead" is the way out of the dialog, and it works', async () => {
+    const id = sk.db.prepare(`SELECT id FROM repos WHERE name='browser-del'`).get().id
+    const p = await neueSeite('/repos')
+    await p.click(`.repo-delete-open[data-repo="${id}"]`)
+    await Promise.all([p.waitForLoadState('load'), p.click(`#repo-del-${id} .repo-del-deactivate`)])
+    gleich(sk.db.prepare('SELECT active FROM repos WHERE id=?').get(id).active, 0, 'the repo is deactivated')
+    gleich(sk.db.prepare('SELECT count(*) c FROM repos WHERE id=?').get(id).c, 1, 'and still very much there')
+    enthaelt(await p.textContent('body'), 'browser-del', 'the Repos page still lists it')
+    sauber(p)
+    await p.close()
+  })
+
+  await pruefe('confirming really deletes it', async () => {
+    const id = sk.db.prepare(`SELECT id FROM repos WHERE name='browser-del'`).get().id
+    const p = await neueSeite('/repos')
+    await p.click(`.repo-delete-open[data-repo="${id}"]`)
+    await p.fill(`#repo-del-${id} .repo-del-name`, 'browser-del')
+    await Promise.all([p.waitForLoadState('load'), p.click(`#repo-del-${id} .repo-del-go`)])
+    gleich(sk.db.prepare('SELECT count(*) c FROM repos WHERE id=?').get(id).c, 0, 'gone')
+    sauber(p)
+    await p.close()
+  })
+
   gruppe('A18 — the Freilauf-skills removal confirmation')
   await pruefe('unticking the installation asks before anything is deleted', async () => {
     // Switch it on through the ordinary form first, so the page really renders

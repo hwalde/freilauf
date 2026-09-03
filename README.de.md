@@ -79,6 +79,12 @@ das tut Freilauf, und es geht nur vorwärts.
   konfigurieren sie; die kleinen Fragen des Hubs selbst (einen Lauf benennen,
   eine Logzeile beurteilen, einen Report lesen) kann ein Coding-Agent auf dem
   Abo beantworten, das du ohnehin bezahlst.
+- **Ein Projekt lässt sich weglegen, ohne es zu verlieren.** Ein deaktiviertes
+  Repository verschwindet aus jedem Auswahlfeld und startet nichts Neues,
+  während jeder Lauf, jeder Agent und jeder Bericht darin erhalten und
+  erreichbar bleibt — ein Klick holt es zurück. Löschen geht auch: dafür muss
+  man seinen Namen eintippen, es wird verweigert, solange noch etwas läuft, und
+  dein Git-Checkout wird nie angefasst.
 - **Er bringt deinen Agenten bei, ihn zu bedienen.** Freilauf liefert eigene
   **Agent-Skills** mit (im offenen Format von [agentskills.io](https://agentskills.io)),
   die erklären, wie man Läufe findet und liest, Agenten und Repositories anlegt,

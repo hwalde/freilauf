@@ -2346,6 +2346,94 @@ apply the SKILL.md (full path). Installed commit-pinned via
 `setup/02-install-scripts.sh` (currently: `unlazy` for lazy/small models), not
 part of this repo. Path override for tests: `FREILAUF_ZUSAETZE_DIR`.
 
+## Putting a repository away: deactivating, and the one delete in the hub
+
+A repo row was create-and-edit only, and the third option people wanted was
+"get this out of my way". It has two answers now, and the whole design is about
+making sure the reversible one is the one they reach for.
+
+### Deactivating is the answer, and it is reversible
+
+`repos.active` (0/1, DEFAULT 1 so every repo that predates the column is
+active). `POST /repos/toggle` — `id`, an optional `active=1|0` to set it
+explicitly, an absent `active` to flip. The button sends the value it means; a
+script should too, because two flips are a no-op.
+
+What it does, and each half is load-bearing:
+
+- **Gone from every repo-selection dropdown.** One query in `layout()` feeds
+  both the header switcher and the Quick-Run dialog (the dialog takes the list
+  as a parameter), so that is one place, not two. Plus `runEditCard()`'s
+  "move this run", `agentMovePage()`, the agent form's repo fallback, the
+  tmux-cleanup settings, `cleanup.mjs`'s default repo, and `reposList()` in
+  `flows/web.mjs` for the designer's `repo` field.
+- **It starts nothing.** `repoInactive(repoId)` in `scheduler.mjs` is asked by
+  the tick (a `schedule_skipped` event with `reason: 'repo_inactive'`), by
+  `pickUpScheduled()` (the planned run keeps waiting rather than failing — the
+  repo coming back is all it needs), and by `startRun()` itself. The last one
+  is why it is checked in ONE place rather than in the six callers, and why it
+  is checked *before* `createRun()`: a refused start must not leave a row
+  behind. Unlike `max_parallel` it gates the manual path too — a manual start
+  is a deliberate decision about a *run*, and putting the *repository* away was
+  a deliberate decision as well.
+- **Its history stays reachable, and that is what makes it better than
+  deleting.** `selectRepo()` resolves an explicit `?repo=` through `getRepo()`,
+  which does not filter; only its two fallbacks (the cookie and "the first
+  repo") skip an inactive one. So the overview, the archive, the run pages and
+  the sidebar all still answer for it — nobody just *lands* there.
+- **It stays on the Repos page**, marked, with the button to bring it back.
+  That page is the one place that deliberately lists every repo: a repository
+  one cannot see again is a repository one has lost.
+- **Runs already in flight are not stopped.** Deactivating is about what starts
+  next.
+- **`pushOperatorBase()` deliberately keeps running for it.** That pass is the
+  "nothing lives only on this machine" rule, not a start: it pushes the
+  operator's own base-branch commits to origin, touches no working tree, and
+  stopping it on a deactivated repo would mean a repository put away quietly
+  stops being backed up. `branchContext()` is left unfiltered for the same kind
+  of reason — it is a repoId → merge-mode map, and filtering it would blank the
+  branch-rule sentence on the pages of an inactive repo's existing runs. So is
+  the repo-name map behind `GET /api/agents`, or an agent in an inactive repo
+  would lose the name of the repository it lives in.
+
+### Deleting exists, and it is fenced twice
+
+`POST /repos/delete` — `id` and `confirm`, which must equal the repo's exact
+name. It removes the row, its agents, its runs, and the `events` and
+`incidents` hanging off those runs, child rows first in one `BEGIN`/`COMMIT`.
+
+- **The `confirm` token is not decoration.** This hub has no authentication, so
+  everything reachable over HTTP is reachable by any process on the machine — a
+  coding agent that misread an instruction included. Typing the name is what
+  turns the call into an act, and it is what lets the agent-facing skill say
+  "you cannot delete a repo, ask the human" and mean it. The browser keeps the
+  button disabled until the typed name matches; the server checks it again,
+  because a fence that only exists in the browser is not one.
+- **Work in flight refuses.** A `running`, `waiting_help`, `scheduled` or
+  `deferred` run would be deleted out from under a live tmux session. The
+  refusal says how many.
+- **The order of the deletes is required, not tidy.** `foreign_keys` really is
+  ON here — `tabelleUmziehen()` switches it back on and leaves it there
+  (measured; an earlier version of this section's own skill documentation
+  claimed the opposite) — so `DELETE FROM repos` is *refused* while a run still
+  references the row. Doing it child-first in a transaction also makes the
+  operation all-or-nothing: a failure half way leaves the repository as it was,
+  which is the one outcome better than a refused delete.
+- **What it deliberately does not touch**, and the dialog says all of it before
+  the click: the git checkout at `repos.path`, the worktrees under
+  `~/agents/worktrees/<name>/`, the run directories under `~/agents/runs/<id>/`,
+  and a `run_merged` flow that was scoped to this repo (it survives and simply
+  never fires again). Freilauf removes its own bookkeeping, never somebody's
+  code.
+- **The dialog is the feature.** It reads the real counts out of the database
+  (`repoDeleteFacts()`), names the paths that stay, requires the name, and — the
+  reason it exists in this shape — offers **"just deactivate it instead"** right
+  there, at the moment somebody is about to do the irreversible thing.
+
+`node:sqlite`'s `DatabaseSync` has **no `.transaction()`**; that is
+better-sqlite3's API, and reaching for it here cost a 500 and one e2e run to
+notice. `BEGIN`/`COMMIT`/`ROLLBACK` through `db.exec`, like `tabelleUmziehen()`.
+
 ## Freilauf's own agent skills — shipped, installed, kept current
 
 `skills/<name>/SKILL.md` in this repository is a family of **agent skills**
@@ -2746,6 +2834,20 @@ errors (`post_api_request` only fires after success).
   by the allowlist on save**. A form field that looks like it saved and did not
   is the worst shape a bug can take. It is `[...STATIC_KEYS,
   ...allPluginSettingKeys()]`, evaluated per save.
+- **`statSync().mtimeMs` is a FLOAT, `Date.now()` is an integer millisecond** —
+  so a file written inside the current millisecond carries a timestamp that is
+  *larger than now*, and any "which of these readings is newest" comparison
+  hands it the win. `mergeGeneral()` in `quota.mjs` compared the live account
+  answer, the remembered one and `quota.json`'s mtime that way, and the file
+  beat a live answer that had just arrived: measured at
+  `seven_general_at = 1788443185118.0244` against a `now` of `1788443185118`,
+  which made the unit suite's two merge assertions fail in **6 of 30 runs** —
+  and in production the status line writes that file continuously while a
+  session renders. The rule was never "newest wins" in the first place: it is
+  "**the live answer wins outright**, the newest of the rest wins where it says
+  nothing", which is what `mergeScoped()` had always done by applying the live
+  windows last. Do not compare a clock against a file's mtime and expect a
+  total order.
 - **The string `'0'` is truthy, and a checkbox read with `b.x ? 1 : 0` believes
   it.** The agent form's `active` box carries no hidden `0` companion — absent
   IS off there, which is right for a form. But `agentSave` coerced instead of

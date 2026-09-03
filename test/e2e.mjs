@@ -4536,6 +4536,113 @@ export default {
   })
 
   // ------------------------------------------------------------------
+  gruppe('Repos: deactivating takes one out of every dropdown, deleting needs its name')
+
+  await pruefe('a repo can be switched off and on again, explicitly or by flipping', async () => {
+    const id = db.prepare(`INSERT INTO repos(name,path,base_branch) VALUES('e2e-off','${REPO}','main') RETURNING id`).get().id
+    const aktiv = () => db.prepare('SELECT active FROM repos WHERE id=?').get(id).active
+    gleich(aktiv(), 1, 'a new repo is active')
+    gleich((await formular('/repos/toggle', { id: String(id), active: '0' }, { alsBrowser: true })).status, 303, 'switching off redirects')
+    gleich(aktiv(), 0, "and '0' really means off — the string is truthy, so it has to be compared")
+    await formular('/repos/toggle', { id: String(id) }, { alsBrowser: true })
+    gleich(aktiv(), 1, 'no `active` flips it')
+    await formular('/repos/toggle', { id: String(id) }, { alsBrowser: true })
+    gleich(aktiv(), 0, 'and flips it back')
+    gleich((await formular('/repos/toggle', { id: '999999' }, { alsBrowser: true })).status, 400, 'an unknown repo is a readable refusal')
+  })
+
+  await pruefe('an inactive repo is gone from every repo dropdown but still on the Repos page', async () => {
+    const row = db.prepare(`SELECT * FROM repos WHERE name='e2e-off'`).get()
+    // Deactivated by the test above.
+    gleich(row.active, 0, 'precondition: it is off')
+
+    // The header switcher and the Quick-Run dialog share one query, so both are
+    // covered by the overview's HTML.
+    const start = await (await hol(`/?repo=${repoId}`)).text()
+    falsch(start.includes('>e2e-off<'), 'not in the header switcher or the Quick-Run dialog')
+    // Every other place a repo can be picked.
+    falsch((await (await hol('/agents/move?id=1')).text()).includes('>e2e-off<'), 'not a move target')
+    falsch((await (await hol('/settings/cleanup')).text()).includes('>e2e-off<'), 'not in the cleanup settings')
+    const meta = await (await hol('/api/flows/meta')).json()
+    falsch(meta.repos.some(r => r.name === 'e2e-off'), "not in the flow designer's repo list")
+    // ...but the Repos page shows it, marked, or deactivating would be a way of
+    // losing a repository rather than of putting one away.
+    const seite = await (await hol('/repos')).text()
+    enthaelt(seite, 'e2e-off', 'the Repos page lists it')
+    enthaelt(seite, 'repo-off', 'and marks it as deactivated')
+    enthaelt(seite, '/repos/toggle', 'with the button to bring it back')
+
+    // /api/repos shows it with its flag, and filters on request.
+    const alle = await (await hol('/api/repos')).json()
+    wahr(alle.repos.some(r => r.name === 'e2e-off' && r.active === 0), 'the API lists it with active:0')
+    falsch((await (await hol('/api/repos?active=1')).json()).repos.some(r => r.name === 'e2e-off'), 'active=1 filters it out')
+    wahr((await (await hol('/api/repos?active=0')).json()).repos.some(r => r.name === 'e2e-off'), 'active=0 finds only it')
+  })
+
+  await pruefe('an inactive repo starts nothing, and its history stays reachable', async () => {
+    const row = db.prepare(`SELECT * FROM repos WHERE name='e2e-off'`).get()
+    // A manual start is refused — by name, so the operator knows why.
+    const j = await (await hol('/api/runs', {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      body: new URLSearchParams({
+        repo_id: String(row.id), harness: 'claude', prompt: 'should not start',
+        branch_mode: 'keiner', expected_minutes: '10',
+      }).toString(),
+    })).json()
+    falsch(j.ok && j.runId, `no run was created (${JSON.stringify(j)})`)
+    enthaelt(JSON.stringify(j), 'e2e-off', 'and the refusal names the repo')
+    gleich(db.prepare('SELECT count(*) c FROM runs WHERE repo_id=?').get(row.id).c, 0, 'not even a row')
+
+    // Its own pages still render when they are asked for by id — that is what
+    // makes deactivating better than deleting.
+    gleich((await hol(`/?repo=${row.id}`)).status, 200, 'the overview')
+    gleich((await hol(`/archive?repo=${row.id}`)).status, 200, 'the archive')
+    gleich((await hol(`/api/fragments/sidebar?repo=${row.id}`)).status, 200, 'and the sidebar fragment')
+  })
+
+  await pruefe('deleting refuses without the exact name, and while work is in flight', async () => {
+    const id = db.prepare(`INSERT INTO repos(name,path,base_branch) VALUES('e2e-del','${REPO}','main') RETURNING id`).get().id
+    const da = () => db.prepare('SELECT count(*) c FROM repos WHERE id=?').get(id).c
+
+    gleich((await formular('/repos/delete', { id: String(id) }, { alsBrowser: true })).status, 400, 'no confirm at all')
+    gleich((await formular('/repos/delete', { id: String(id), confirm: 'e2e-de' }, { alsBrowser: true })).status, 400, 'a near miss')
+    gleich(da(), 1, 'and the repo is still there after both')
+
+    // A run in flight is the second fence: deleting would pull the ground out
+    // from under a live tmux session.
+    db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status)
+      VALUES('e2e-del-run',?,'claude','x','keiner',10,'running')`).run(id)
+    const r = await formular('/repos/delete', { id: String(id), confirm: 'e2e-del' }, { alsBrowser: true })
+    gleich(r.status, 400, 'the right name is not enough while a run is going')
+    gleich(da(), 1, 'still there')
+    db.prepare(`UPDATE runs SET status='done' WHERE id='e2e-del-run'`).run()
+  })
+
+  await pruefe('deleting takes the runs, agents, events and incidents — and nothing off the disk', async () => {
+    const id = db.prepare(`SELECT id FROM repos WHERE name='e2e-del'`).get().id
+    const agentId = db.prepare(`INSERT INTO agents(repo_id,name,harness,prompt,branch_mode,expected_minutes)
+      VALUES(?,'e2e-del-agent','claude','x','keiner',10) RETURNING id`).get(id).id
+    db.prepare(`UPDATE runs SET agent_id=? WHERE id='e2e-del-run'`).run(agentId)
+    db.prepare(`INSERT INTO events(run_id,kind) VALUES('e2e-del-run','started')`).run()
+    db.prepare(`INSERT INTO incidents(run_id,typ,quelle) VALUES('e2e-del-run','rate_limit','log')`).run()
+
+    // The dialog states the facts, and they are the real counts.
+    const seite = await (await hol('/repos')).text()
+    enthaelt(seite, 'repo-del-' + id, 'the confirmation dialog is on the page')
+    enthaelt(seite, REPO, 'and names the checkout it will not touch')
+
+    const r = await formular('/repos/delete', { id: String(id), confirm: 'e2e-del' }, { alsBrowser: true })
+    gleich(r.status, 303, 'the right name on a quiet repo goes through')
+    gleich(db.prepare('SELECT count(*) c FROM repos WHERE id=?').get(id).c, 0, 'the repo')
+    gleich(db.prepare('SELECT count(*) c FROM agents WHERE repo_id=?').get(id).c, 0, 'its agents')
+    gleich(db.prepare(`SELECT count(*) c FROM runs WHERE id='e2e-del-run'`).get().c, 0, 'its runs')
+    gleich(db.prepare(`SELECT count(*) c FROM events WHERE run_id='e2e-del-run'`).get().c, 0, 'their events')
+    gleich(db.prepare(`SELECT count(*) c FROM incidents WHERE run_id='e2e-del-run'`).get().c, 0, 'and their incidents')
+    // The one thing it must never do.
+    wahr(existsSync(join(REPO, '.git')), 'the git checkout is untouched')
+  })
+
+  // ------------------------------------------------------------------
   gruppe("Freilauf skills: the page, the installation, and the read-only API")
 
   await pruefe('the settings page names what is shipped and where it would go', async () => {

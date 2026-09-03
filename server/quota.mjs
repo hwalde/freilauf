@@ -164,6 +164,20 @@ function mergeGeneral(livePct, liveResets, remembered, filePct, fileResets, file
     cands.push({ pct: filePct, resets_at: fileResets ?? null, at: fileAt ?? 0, live: false })
   }
   if (!cands.length) return null
+  // The LIVE answer wins outright — it is not one reading among three, it is
+  // the account speaking now. `mergeScoped` has always done this (it applies
+  // the live windows last, overwriting); this function compared all three by
+  // age instead, and that is a difference with teeth: `statSync().mtimeMs` is
+  // a FLOAT with sub-millisecond precision while `Date.now()` is an integer
+  // millisecond, so a file written inside the current millisecond carries an
+  // `at` that is *larger* than `now` and beat the live answer. Measured: the
+  // unit suite's two merge assertions failed in 6 of 30 runs on exactly that,
+  // with `seven_general_at` reading 1788443185118.0244 against a `now` of
+  // 1788443185118 — and in production the status line writes that file
+  // continuously while a session renders, so a stale window could win over a
+  // fresh one. Same family as the jump this whole merge exists to stop.
+  const live = cands.find(c => c.live)
+  if (live) return live
   return cands.reduce((a, b) => (b.at > a.at ? b : a))
 }
 

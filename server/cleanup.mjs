@@ -191,7 +191,7 @@ export async function startCleanupRun({ targetGb = null, keep = null, source = '
   if (cleanupRunInFlight()) return { ok: false, error: t('cleanup.in_flight') }
   const target = targetGb == null ? s.targetGb : Number(targetGb)
   if (!Number.isFinite(target) || target < 0) return { ok: false, error: t('cleanup.bad_target') }
-  const repoId = s.repoId ?? db.prepare('SELECT id FROM repos ORDER BY name LIMIT 1').get()?.id ?? null
+  const repoId = s.repoId ?? db.prepare('SELECT id FROM repos WHERE active=1 ORDER BY name LIMIT 1').get()?.id ?? null
   if (!repoId) return { ok: false, error: t('cleanup.no_repo') }
 
   const keepNames = keepSessionsForRuns(keep)

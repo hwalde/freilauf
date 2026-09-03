@@ -1274,6 +1274,58 @@
     })
   })
 
+  // ---- Repos: confirm before a repository goes ----
+  //
+  // One dialog per row, rendered by the server with the real counts and the
+  // real paths in it. This code does exactly two things: open and close it, and
+  // keep the delete button disabled until the typed name matches the repo's.
+  // The server checks the name again — the hub has no authentication, and a
+  // fence that only exists in the browser is not a fence.
+  //
+  // Delegation on `document`, not a listener per row: the Repos page is
+  // re-rendered whole on every navigation, and a direct listener would be gone.
+  function repoDelDialog(id) { return document.getElementById('repo-del-' + id) }
+  function closeRepoDel() {
+    var open = document.querySelector('dialog.repo-del[open]')
+    if (open) open.close()
+  }
+
+  document.addEventListener('click', function (ev) {
+    if (!ev.target.closest) return
+    var opener = ev.target.closest('.repo-delete-open')
+    if (opener) {
+      var d = repoDelDialog(opener.dataset.repo)
+      if (d && !d.open) {
+        // Always reopened empty: a name left in the field from a previous look
+        // would arm the button before anybody typed anything.
+        var field = d.querySelector('.repo-del-name')
+        if (field) field.value = ''
+        var go = d.querySelector('.repo-del-go')
+        if (go) go.disabled = true
+        var hidden = d.querySelector('.repo-del-confirm')
+        if (hidden) hidden.value = ''
+        d.showModal()
+      }
+      return
+    }
+    if (ev.target.closest('[data-repo-del-close]')) { closeRepoDel(); return }
+    var open = document.querySelector('dialog.repo-del[open]')
+    if (open && ev.target === open) closeRepoDel()
+  })
+
+  document.addEventListener('input', function (ev) {
+    var field = ev.target
+    if (!field.classList || !field.classList.contains('repo-del-name')) return
+    var d = field.closest('dialog.repo-del')
+    if (!d) return
+    var matches = field.value === d.dataset.name
+    var go = d.querySelector('.repo-del-go')
+    var hidden = d.querySelector('.repo-del-confirm')
+    // The hidden field is what actually travels; the visible one is the gesture.
+    if (hidden) hidden.value = matches ? field.value : ''
+    if (go) go.disabled = !matches
+  })
+
   // ---- Settings -> Freilauf skills: confirm before the files go ----
   //
   // Unticking "install the skills" is the one settings change on this hub that

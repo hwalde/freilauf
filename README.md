@@ -74,6 +74,11 @@ Freilauf does, and it only goes forward.
   and a six-step **Welcome wizard** configure them; the hub's own small
   questions (naming a run, judging a log line, reading a report) can be
   answered by a coding agent on a subscription you already pay for.
+- **A project can be put away without being lost.** Deactivate a repository and
+  it disappears from every dropdown and starts nothing new, while every run,
+  agent and report it owns stays intact and reachable — one click brings it
+  back. Deleting one is possible too, needs its name typed, refuses while work
+  is in flight, and never touches your git checkout.
 - **It teaches your agents to drive it.** Freilauf ships **agent skills**
   (the open [agentskills.io](https://agentskills.io) format) that explain how
   to find and read runs, create agents and repositories, build flows, read the
