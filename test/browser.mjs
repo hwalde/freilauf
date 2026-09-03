@@ -1152,6 +1152,37 @@ try {
     await p.close()
   })
 
+  await pruefe('the terminal goes full screen and Esc brings it back', async () => {
+    const p = await neueSeite(`/runs/${R_LIVE}`)
+    await p.waitForSelector('#term .xterm-screen', { timeout: 15_000 })
+    const hoch = () => p.$eval('#term', el => el.getBoundingClientRect().height)
+    const zeilen = () => p.$$eval('#term .xterm-rows > div', els => els.length)
+    const vorher = await hoch()
+    const zeilenVorher = await zeilen()
+    falsch(await p.$eval('#term-wrap', el => el.classList.contains('term-full')), 'it starts in the page')
+    falsch(await p.isVisible('#term-full-exit'), 'and the way out is not offered yet')
+    await p.click('#term-full')
+    wahr(await p.$eval('#term-wrap', el => el.classList.contains('term-full')), 'the icon blows it up')
+    wahr(await p.$eval('details.run-term', el => el.open), 'and the details stayed open, not toggled shut')
+    wahr(await p.isVisible('#term-full-exit'), 'the way out is in the terminal now')
+    wahr(await hoch() > vorher, 'the terminal really is bigger')
+    // The refit hangs on the ResizeObserver over #term, so xterm has to follow
+    // by itself — a full-screen box still showing 480 pixels worth of rows is
+    // the failure this assertion is here for.
+    await wartePage(p, (n) => document.querySelectorAll('#term .xterm-rows > div').length > n,
+      zeilenVorher, 'xterm to refit to the new size')
+    await p.keyboard.press('Escape')
+    await wartePage(p, () => !document.querySelector('#term-wrap').classList.contains('term-full'),
+      null, 'Esc to bring it back into the page')
+    falsch(await p.$eval('body', el => el.classList.contains('term-full-on')), 'and the page scrolls again')
+    // …and the icon in the corner is the other way out.
+    await p.click('#term-full')
+    await p.click('#term-full-exit')
+    falsch(await p.$eval('#term-wrap', el => el.classList.contains('term-full')), 'the corner icon closes it too')
+    sauber(p)
+    await p.close()
+  })
+
   await pruefe('a page without a terminal starts none and stays quiet', async () => {
     const p = await neueSeite(`/?repo=${repoId}`)
     gleich(await p.$$eval('#term', els => els.length), 0, 'no terminal box on the overview')

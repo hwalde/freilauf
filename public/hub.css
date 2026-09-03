@@ -464,9 +464,30 @@ ul.chips li code { background: none; padding: 0; }
 ul.events { list-style: none; padding-left: 0; }
 ul.events li { padding: 3px 0; border-bottom: 1px dashed var(--border); }
 #term { height: 480px; background: var(--surface-term); border-radius: var(--radius-8); padding: var(--sp-4);
-        border: 2px solid transparent; }
+        border: 2px solid transparent; box-sizing: border-box; }
 /* Make it visible where keyboard input currently goes — otherwise you type into the void. */
 #term:focus-within { border-color: var(--ok-text); }
+/* Full screen for the terminal. The class is what does the work — the native
+   Fullscreen API is asked for on top of it (hub.js), so the same rules hold
+   whether the browser granted it or not. */
+#term-wrap { position: relative; }
+details.run-term > summary { cursor: pointer; }
+/* The button floats, so the summary has to end after it — otherwise it hangs
+   over the terminal below. */
+details.run-term > summary::after { content: ""; display: block; clear: both; }
+.icon-btn { background: transparent; color: var(--text); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-6); padding: var(--sp-2) var(--sp-8); font-size: var(--fs-small);
+  line-height: 1.4; cursor: pointer; }
+.icon-btn:hover { background: var(--surface-hover); }
+.term-full-btn { float: right; }
+/* The way out sits in the terminal's own top right corner, and only exists
+   while there is something to come out of. */
+.term-exit { position: absolute; top: var(--sp-8); right: var(--sp-8); z-index: 2; }
+#term-wrap:not(.term-full) .term-exit { display: none; }
+#term-wrap.term-full { position: fixed; inset: 0; z-index: 1200; box-sizing: border-box;
+  background: var(--surface-term); padding: var(--sp-8); }
+#term-wrap.term-full #term { height: 100%; border-radius: 0; }
+body.term-full-on { overflow: hidden; }
 /* The notification switch of the run, right under the terminal (notifySwitch in pages.mjs). */
 .notify-switch { margin: var(--sp-8) 0; flex-wrap: wrap; }
 .err { color: var(--err); } .warn { color: var(--warn-text); } .ok { color: var(--ok-text); }

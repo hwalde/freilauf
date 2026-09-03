@@ -1605,6 +1605,65 @@
     quelle.onerror = () => { document.body.dataset.live = '0' }
   }())
 
+  // ---- the terminal, full screen: an icon in, Esc or an icon back out ----
+  // The class on #term-wrap is what actually makes it full screen, and the
+  // native Fullscreen API is asked for on top of it. Both, on purpose:
+  //   - the class alone always works (a rejected request, an iframe, a browser
+  //     that refuses without a gesture it liked), so the feature never silently
+  //     does nothing;
+  //   - the native API is what makes ESC the BROWSER's key. Under it the key
+  //     never reaches xterm, so the agent's TUI keeps its Escape everywhere
+  //     except while the operator has deliberately blown the terminal up.
+  // The keydown listener below is therefore the fallback for exactly the case
+  // where the request did not go through, and it is bound in the capture phase
+  // for the same reason: xterm's textarea would otherwise send the key on.
+  // It runs before the xterm block and outside it, so a terminal that cannot be
+  // built (no session, no xterm globals) still leaves nothing half-wired.
+  ;(function () {
+    const wrap = document.getElementById('term-wrap')
+    const enter = document.getElementById('term-full')
+    const exit = document.getElementById('term-full-exit')
+    if (!wrap || !enter || !exit) return
+    const full = () => wrap.classList.contains('term-full')
+    // xterm refits itself: the ResizeObserver in the block below watches #term,
+    // and #term changes size the moment this class lands.
+    const paint = (v) => {
+      wrap.classList.toggle('term-full', v)
+      document.body.classList.toggle('term-full-on', v)
+    }
+    const auf = () => {
+      paint(true)
+      if (wrap.requestFullscreen) { try { wrap.requestFullscreen().catch(() => {}) } catch {} }
+    }
+    const zu = () => {
+      paint(false)
+      if (document.fullscreenElement === wrap && document.exitFullscreen) {
+        try { document.exitFullscreen().catch(() => {}) } catch {}
+      }
+    }
+    enter.addEventListener('click', (ev) => {
+      // The button sits in the <summary>: a click there toggles the <details>,
+      // and closing the terminal one just asked to enlarge is not the gesture.
+      ev.preventDefault()
+      ev.stopPropagation()
+      const det = enter.closest('details')
+      if (det && !det.open) det.open = true
+      auf()
+    })
+    exit.addEventListener('click', (ev) => { ev.preventDefault(); zu() })
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape' || !full()) return
+      ev.preventDefault()
+      ev.stopPropagation()
+      zu()
+    }, true)
+    // The browser's own way out (Esc under the native API, or the user leaving
+    // full screen any other way) has to take the class with it.
+    document.addEventListener('fullscreenchange', () => {
+      if (!document.fullscreenElement && full()) paint(false)
+    })
+  }())
+
   // ---- terminal: xterm.js + resize frame \0{cols},{rows} (planning 7.4) ----
   // xterm.js provides the globals 'Terminal' and 'FitAddon' — not 'Term'.
   const termBox = document.getElementById('term')

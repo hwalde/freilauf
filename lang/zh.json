@@ -157,6 +157,8 @@
   "run.terminal_closed": "（已结束，回看）",
   "run.terminal_after": "（运行已结束 —— 编码代理仍留在它的会话里）",
   "run.terminal_dead": "（进程已退出 —— 仅剩回看，无人应答）",
+  "run.terminal_fullscreen": "全屏",
+  "run.terminal_fullscreen_exit": "退出全屏（Esc）",
   "run.session_after_hint": "本次运行已完成，报告已写好。你在这里发送的内容属于同一会话中的后续工作：当智能体再次报告 done 时，它会作为本次运行的后续报告到达 —— 像第一份一样被检查、合并和通知，并标记为后续报告。保留时间一到，会话会自行关闭（设置 → tmux 会话）。",
   "run.notify_on": "本次运行的通知",
   "run.notify_on_hint": "取消勾选：不再通过任何渠道发送关于本次运行的消息——包括报告、后续报告、告警和事件。其余一切（集成、流程）照常进行。",

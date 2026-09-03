@@ -157,6 +157,8 @@
   "run.terminal_closed": "(beendet, Scrollback)",
   "run.terminal_after": "(Lauf vorbei — der Coding-Agent sitzt noch in seiner Session)",
   "run.terminal_dead": "(Prozess beendet — nur Scrollback, es antwortet niemand mehr)",
+  "run.terminal_fullscreen": "Vollbild",
+  "run.terminal_fullscreen_exit": "Vollbild verlassen (Esc)",
   "run.session_after_hint": "Dieser Lauf ist abgeschlossen, sein Report ist geschrieben. Was du hier schickst, ist Nacharbeit in derselben Session: meldet der Agent erneut done, kommt das als Nacharbeits-Report dieses Laufs an — geprüft, gemergt und gemeldet wie der erste, als Nacharbeit gekennzeichnet. Die Session schließt sich von selbst, sobald die Haltezeit um ist (Einstellungen → tmux-Session).",
   "run.notify_on": "Benachrichtigungen zu diesem Lauf",
   "run.notify_on_hint": "Nicht angehakt: keine Nachrichten über diesen Lauf — seine Reports, Folge-Reports, Alarme und Vorfälle — über keinen Kanal. Alles andere (Integration, Flows) passiert wie gewohnt.",
