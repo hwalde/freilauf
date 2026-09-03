@@ -120,8 +120,18 @@ through 429/500/503 constantly — a 5xx from it means "try later", not "broken"
 |---|---|---|---|
 | `z-ai/glm-5.3-flash` | `opencode` / `openrouter` | `high` | software development, very strong for the money |
 | `google/gemini-3.8-flash` | `opencode` / `openrouter` | `medium`, `high` for hard work | a step smarter than glm-5.3-flash, and dearer |
-| `deepseek/deepseek-v4-flash-0731` | `opencode` / `openrouter` | `medium` or `high` | workhorse: simple tasks and plenty of development work |
-| `deepseek-v4-flash` | `opencode` / `deepseek` | `medium` or `high` | the same workhorse bought directly from DeepSeek |
+| `deepseek/deepseek-v4-flash-0731` | `opencode` / `openrouter` | `high` | workhorse: simple tasks and plenty of development work |
+| `deepseek-v4-flash` | `opencode` / `deepseek` | `high` | the same workhorse bought directly from DeepSeek |
+
+**The levels differ per model — ask, do not assume.**
+`fl-api /api/effort harness=opencode provider=<provider> model=<id>` answers for
+the exact combination. Measured on this installation on 2026-09-03: both DeepSeek
+rows and `z-ai/glm-5.3-flash` offer `low, high, max` and **no `medium`**, while
+`google/gemini-3.8-flash` offers `low, medium, high` and no `max`. For opencode
+the levels come straight out of the models.dev catalog
+(`reasoning.supported_efforts`, `server/providers/openrouter.mjs`) — nothing maps
+one name onto another, so a `medium` sent to a model that has none is discarded
+in silence and the run reasons at the model's default.
 
 **For the three OpenRouter rows: pin the quantization.** OpenRouter serves one
 model from many serving providers whose quantization differs by a factor of
