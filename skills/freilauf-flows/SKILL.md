@@ -248,7 +248,8 @@ and removes it from every agent.
 
 ## The building blocks
 
-Fifteen step types. **Read `references/steps.md` before writing any step you
+Seventeen step types. `count_runs` and `toggle_agent` exist **since 2026-09-03**.
+**Read `references/steps.md` before writing any step you
 have not written before** — it has every property, every default, every output
 shape, and which strings are templated.
 
@@ -258,10 +259,12 @@ shape, and which strings are templated.
 | `start_agent` | start a configured agent; `wait` suspends until it ends |
 | `start_single_run` | start an ad-hoc run from a full run definition; `wait` as above |
 | `kill_run` | kill the session of the target runs and mark them aborted |
+| `toggle_agent` | switch an agent's schedule on/off/over, optionally start a run |
 | `extract` | LLM fills fields you declare from a report / log / transcript / custom text |
 | `set_var` | store a value under `vars.<name>` |
 | `shell_command` | run a command on the hub machine; exit code is a result, not a failure |
 | `http_request` | call a webhook/API; status, body and parsed JSON become variables |
+| `count_runs` | how many runs the hub has right now → `{count, ids, titles}` |
 | `condition` | compare two values → `true` / `false` branch |
 | `switch_outcome` | branch on a finished run's outcome → `done` / `failed` / `aborted` |
 | `for_each` | container: repeat its body per list element |

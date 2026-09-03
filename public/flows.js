@@ -280,7 +280,8 @@ function rootEditor() {
 
 // ---------------- step editor ----------------
 function optionLabel(fieldKey, value) {
-  const prefix = { target: 'flows.target.', source: 'flows.source.', op: 'flows.op.', branchMode: 'flows.branch_mode.', orRegion: 'or.region.', orMode: 'or.mode_' }[fieldKey]
+  const prefix = { target: 'flows.target.', source: 'flows.source.', op: 'flows.op.', branchMode: 'flows.branch_mode.',
+    orRegion: 'or.region.', orMode: 'or.mode_', active: 'flows.agent_state.' }[fieldKey]
   return prefix ? T(prefix + value) : value
 }
 

@@ -160,6 +160,26 @@ export const actions = {
     return db.prepare(`SELECT * FROM runs ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY started_at DESC LIMIT 50`).all(...args)
   },
 
+  /**
+   * Runs for COUNTING — `{ id, title, status, repo_id, agent_id }` each, newest
+   * first, and deliberately **without a LIMIT**.
+   *
+   * `findRuns` above answers the other question: "which live runs do I act on
+   * now?", where fifty is a sane ceiling and the full row is what `sendToRun`
+   * and `killRun` need. A count that silently stops at fifty is not a count —
+   * it is a number that agrees with reality right up to the moment the answer
+   * starts to matter. So this one stays narrow in columns instead of in rows.
+   */
+  async listRuns({ repoId = null, agentId = null, statuses = null } = {}) {
+    const where = [], args = []
+    if (repoId) { where.push('repo_id = ?'); args.push(repoId) }
+    if (agentId) { where.push('agent_id = ?'); args.push(agentId) }
+    if (statuses?.length) { where.push(`status IN (${statuses.map(() => '?').join(',')})`); args.push(...statuses) }
+    return db.prepare(`SELECT id, title, status, repo_id, agent_id FROM runs
+                       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+                       ORDER BY started_at DESC`).all(...args)
+  },
+
   async sendToRun(run, text) {
     if (!run.tmux_session) return { ok: false }
     const r = await sendToSession(run.tmux_session, text)
@@ -194,6 +214,59 @@ export const actions = {
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId)
     if (!agent) return { ok: false, error: `agent ${agentId} does not exist` }
     const r = await startForAgent(agent, promptExtra)
+    if (r.runId) markStartedByFlow(r.runId, flowRunId)
+    return r
+  },
+
+  /**
+   * The stored agent as a flow may see it: `{ id, name, repo_id, active }`, or
+   * `null` for an id nobody has. Its one caller is `toggle_agent` in "toggle"
+   * mode, which cannot name the state it wants without reading the one it has —
+   * and a step reads state through here, never off the database itself.
+   */
+  async agentInfo(agentId) {
+    const a = db.prepare('SELECT id, name, repo_id, active FROM agents WHERE id = ?').get(agentId)
+    return a ? { id: a.id, name: a.name, repo_id: a.repo_id, active: a.active === 1 } : null
+  },
+
+  /**
+   * Switch an agent's schedule on or off — the row behind the toggle on the
+   * agents page. Answers `{ ok, id, name, active_before, active_after }`, and
+   * `{ ok: false, error }` for an id that does not exist.
+   *
+   * `active = 0` gates the SCHEDULED starts only (the `WHERE active = 1` in
+   * `scheduler.mjs`'s tick). A manual start, a flow start and an API start all
+   * walk past it, deliberately — the switch means "stop firing by yourself",
+   * not "this agent is forbidden".
+   */
+  async setAgentActive(agentId, on) {
+    const agent = db.prepare('SELECT id, name, active FROM agents WHERE id = ?').get(agentId)
+    if (!agent) return { ok: false, error: `agent ${agentId} does not exist` }
+    const after = on ? 1 : 0
+    // Written even when the value does not change: `updated_at` is what the
+    // agents page reports on, and "somebody confirmed this state" is a fact.
+    db.prepare(`UPDATE agents SET active = ?, updated_at = datetime('now') WHERE id = ?`).run(after, agentId)
+    return { ok: true, id: agent.id, name: agent.name, active_before: agent.active === 1, active_after: after === 1 }
+  },
+
+  /**
+   * Start this agent, but only if it is not busy already — the same
+   * `startForAgent()` the "start now" button uses, with one query in front.
+   * Answers `{ ok: true, runId: null, busy: true }` when a run of this agent is
+   * still going.
+   *
+   * Busy is `running`, `waiting_help` **and `deferred`**: a deferred run has not
+   * started yet, but it is queued and it WILL start, so letting a second one
+   * through would put two runs of the same agent on the same repository — the
+   * very thing the caller asked to prevent, only later and harder to see.
+   */
+  async startAgentIfIdle(agentId, flowRunId) {
+    const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId)
+    if (!agent) return { ok: false, error: `agent ${agentId} does not exist` }
+    const busy = db.prepare(`SELECT id FROM runs WHERE agent_id = ?
+                             AND status IN ('running','waiting_help','deferred') LIMIT 1`).get(agentId)
+    if (busy) return { ok: true, runId: null, busy: true }
+    const r = await startForAgent(agent)
     if (r.runId) markStartedByFlow(r.runId, flowRunId)
     return r
   },

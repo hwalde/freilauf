@@ -3862,6 +3862,221 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // "How many runs are going right now?" — the one number a flow that hands out
+  // work cannot do without, and the one it used to have to fetch through a
+  // shell_command calling the hub's own HTTP API. The two places it can quietly
+  // lie are the filter (a status nobody knows must not widen it) and the case
+  // folding of the title prefix (German titles are not ASCII).
+  gruppe('Flows: count_runs')
+
+  const countStub = (rows) => {
+    const seen = []
+    return { api: { ...stubApi, listRuns: async (f) => { seen.push(f); return rows } }, seen }
+  }
+  const countRun = async (properties, rows) => {
+    const { api, seen } = countStub(rows)
+    const id = await engine.startFlowRun(
+      { id: null, name: 'counter', definition: { sequence: [step('count_runs', properties)] } },
+      { kind: 'cron' }, api)
+    return { fr: fdb.getFlowRun(id), seen }
+  }
+  const COUNT_ROWS = [
+    { id: 'r-1', title: 'Nightly docs sweep', status: 'running' },
+    { id: 'r-2', title: 'nightly cleanup', status: 'running' },
+    { id: 'r-3', title: 'Nächtlicher Umbau', status: 'running' },
+    { id: 'r-4', title: null, status: 'running' },
+  ]
+
+  await pruefe('count_runs: registry entry, defaults and the shape it promises', () => {
+    const meta = STEP_MAP.count_runs
+    wahr(!!meta && meta.output && meta.group === 'data', 'in the registry, in the data group, with an output')
+    wahr(STEPS.some(s => s.type === 'count_runs'), 'and in the list the editor is built from')
+    falsch(!!meta.placement, 'no placement rule — it reads the hub, not the trigger run')
+    const props = defaultProps('count_runs')
+    gleich(props.outputVar, 'runs', 'default output variable')
+    gleich(props.statuses, 'running', 'by default it counts what is going right now')
+    gleich(props.repoId, '', 'no repo chosen = every repo')
+    gleich(props.agentId, '', 'and no agent chosen = every agent')
+    const paths = vs.shapePaths('vars.runs', vs.outputShapeOf(
+      { id: 'c', type: 'count_runs', properties: props }, meta)).map(p => `${p.path}:${p.type}`).join(',')
+    enthaelt(paths, 'vars.runs.count:number', 'the number a condition compares')
+    enthaelt(paths, 'vars.runs.ids:string_list', 'the ids a for_each walks')
+    enthaelt(paths, 'vars.runs.titles:string_list', 'and the titles a message can name')
+    gleich(validateDefinition({ sequence: [{ id: 'c', type: 'count_runs', properties: props }] }, { kind: 'cron' }).length, 0,
+      'legal under a schedule, where there is no run at all')
+  })
+
+  await pruefe('count_runs: repo, agent and status reach the query — the title prefix filters the answer', async () => {
+    const { fr, seen } = await countRun(
+      { repoId: '7', agentId: '3', statuses: 'running, waiting_help', titlePrefix: '', outputVar: 'runs' }, COUNT_ROWS)
+    gleich(fr.status, 'done', 'the step finished')
+    gleich(seen[0].repoId, 7, 'the repo goes to the query as a number')
+    gleich(seen[0].agentId, 3, 'and so does the agent')
+    gleich(seen[0].statuses.join(','), 'running,waiting_help', 'the comma-separated list becomes a list, trimmed')
+    gleich(fr.context.vars.runs.count, 4, 'nothing filtered away')
+    gleich(fr.context.vars.runs.ids.join(','), 'r-1,r-2,r-3,r-4', 'the ids come back in order')
+    gleich(fr.context.vars.runs.titles[3], '', 'a run without a title reports an empty one, never undefined')
+    wahr(fr.log.some(l => l.msg === '4 Runs'), 'the log names the number')
+  })
+
+  await pruefe('count_runs: an empty repo, agent and status list mean "all of them"', async () => {
+    const { seen } = await countRun({ repoId: '', agentId: '', statuses: '', titlePrefix: '', outputVar: 'runs' }, COUNT_ROWS)
+    gleich(seen[0].repoId, null, 'no repo = every repo')
+    gleich(seen[0].agentId, null, 'no agent = every agent')
+    gleich(seen[0].statuses, null, 'no status = every status, the same rule')
+  })
+
+  await pruefe('count_runs: the title prefix ignores case, umlauts included', async () => {
+    const a = await countRun({ repoId: '', agentId: '', statuses: 'running', titlePrefix: 'nightly', outputVar: 'runs' }, COUNT_ROWS)
+    gleich(a.fr.context.vars.runs.count, 2, 'both spellings of "Nightly" count')
+    gleich(a.fr.context.vars.runs.ids.join(','), 'r-1,r-2', 'and only those')
+    const b = await countRun({ repoId: '', agentId: '', statuses: 'running', titlePrefix: 'NÄCHTLICH', outputVar: 'runs' }, COUNT_ROWS)
+    gleich(b.fr.context.vars.runs.count, 1, 'Ä folds to ä — SQLite LIKE would have missed this one')
+    const c = await countRun({ repoId: '', agentId: '', statuses: 'running', titlePrefix: 'weekly', outputVar: 'runs' }, COUNT_ROWS)
+    gleich(c.fr.context.vars.runs.count, 0, 'a prefix nothing starts with counts nothing')
+    gleich(c.fr.context.vars.runs.ids.length, 0, 'and hands on an empty list, not a missing one')
+    wahr(c.fr.log.some(l => l.msg === '0 Runs'), 'zero is a result the log states as plainly as any other')
+  })
+
+  await pruefe('count_runs: the prefix and the status list are templates', async () => {
+    const { fr, seen } = await countRun(
+      { repoId: '', agentId: '', statuses: '{{vars.wanted}}', titlePrefix: '{{vars.prefix}}', outputVar: 'runs' }, COUNT_ROWS)
+    void fr
+    gleich(seen.length, 1, 'the step ran')
+    const { api, seen: seen2 } = countStub(COUNT_ROWS)
+    const id = await engine.startFlowRun({ id: null, name: 'templated', definition: { sequence: [
+      step('set_var', { outputVar: 'wanted', value: 'waiting_help' }),
+      step('set_var', { outputVar: 'prefix', value: 'nightly' }),
+      step('count_runs', { repoId: '', agentId: '', statuses: '{{vars.wanted}}', titlePrefix: '{{vars.prefix}}', outputVar: 'runs' }),
+    ] } }, { kind: 'cron' }, api)
+    const fr2 = fdb.getFlowRun(id)
+    gleich(seen2[0].statuses.join(','), 'waiting_help', 'the status list came out of a variable')
+    gleich(fr2.context.vars.runs.count, 2, 'and so did the prefix')
+  })
+
+  await pruefe('count_runs: a status nobody knows fails the step instead of counting everything', async () => {
+    const { api } = countStub(COUNT_ROWS)
+    const id = await engine.startFlowRun({ id: null, name: 'typo', definition: { sequence: [
+      step('count_runs', { repoId: '', agentId: '', statuses: 'runnning', titlePrefix: '', outputVar: 'runs' }),
+      step('note', { text: 'never' }),
+    ] } }, { kind: 'cron' }, api)
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'failed', 'a typo is not a filter that quietly matches every run')
+    enthaelt(fr.error, 'runnning', 'the error names what it did not recognise')
+    enthaelt(fr.error, 'waiting_help', 'and lists what it would have accepted')
+    falsch(fr.log.some(l => l.msg === 'never'), 'nothing after it ran on a wrong number')
+  })
+
+  // ------------------------------------------------------------------
+  // Switching an agent's schedule from inside a flow. The two places it could
+  // quietly do the wrong thing: starting a run for an agent it just switched
+  // OFF, and starting a second run for an agent that is already busy — which is
+  // the one thing "start right away" was given a guard for.
+  gruppe('Flows: toggle_agent')
+
+  const agentStub = (agents, busyIds = []) => {
+    const calls = []
+    const rows = new Map(agents.map(a => [a.id, { ...a }]))
+    return { calls, api: {
+      ...stubApi,
+      agentInfo: async (id) => (rows.has(id) ? { ...rows.get(id) } : null),
+      setAgentActive: async (id, on) => {
+        calls.push(['setAgentActive', id, on])
+        const a = rows.get(id)
+        if (!a) return { ok: false, error: `agent ${id} does not exist` }
+        const before = a.active
+        a.active = !!on
+        return { ok: true, id: a.id, name: a.name, active_before: before, active_after: a.active }
+      },
+      startAgentIfIdle: async (id) => {
+        calls.push(['startAgentIfIdle', id])
+        if (busyIds.includes(id)) return { ok: true, runId: null, busy: true }
+        return { ok: true, runId: `run-of-${id}` }
+      },
+    } }
+  }
+  const toggleRun = async (properties, agents, busyIds = []) => {
+    const { api, calls } = agentStub(agents, busyIds)
+    const id = await engine.startFlowRun(
+      { id: null, name: 'switcher', definition: { sequence: [step('toggle_agent', properties)] } },
+      { kind: 'cron' }, api)
+    return { fr: fdb.getFlowRun(id), calls }
+  }
+  const NIGHTLY = [{ id: 4, name: 'nightly', active: true }]
+
+  await pruefe('toggle_agent: registry entry, defaults and the shape it promises', () => {
+    const meta = STEP_MAP.toggle_agent
+    wahr(!!meta && meta.output && meta.group === 'agents', 'in the registry, in the agents group, with an output')
+    wahr(STEPS.some(s => s.type === 'toggle_agent'), 'and in the list the editor is built from')
+    falsch(!!meta.placement, 'no placement rule — it switches an agent, it does not read the trigger run')
+    const props = defaultProps('toggle_agent')
+    gleich(props.active, 'on', 'switching on is the default')
+    gleich(props.startNow, false, 'and it does not start anything unasked')
+    gleich(props.outputVar, 'agent', 'default output variable')
+    const paths = vs.shapePaths('vars.agent', vs.outputShapeOf(
+      { id: 'tg', type: 'toggle_agent', properties: props }, meta)).map(p => `${p.path}:${p.type}`).join(',')
+    for (const p of ['vars.agent.id:number', 'vars.agent.name:string', 'vars.agent.active_before:boolean',
+      'vars.agent.active_after:boolean', 'vars.agent.started_run_id:string']) enthaelt(paths, p, p)
+    wahr(validateDefinition({ sequence: [{ id: 'tg', type: 'toggle_agent', properties: { ...props, agentId: '' } }] })
+      .some(p => p.includes("'agentId' is required")), 'without an agent it is not a step')
+    gleich(validateDefinition({ sequence: [{ id: 'tg', type: 'toggle_agent', properties: { ...props, agentId: 4 } }] },
+      { kind: 'cron' }).length, 0, 'legal under a schedule, where there is no run at all')
+  })
+
+  await pruefe('toggle_agent: on, off and over — and the state it reports is before → after', async () => {
+    const an = await toggleRun({ agentId: '4', active: 'on', startNow: false, outputVar: 'agent' },
+      [{ id: 4, name: 'nightly', active: false }])
+    gleich(an.calls[0].join(':'), 'setAgentActive:4:true', 'switching on asks for true')
+    gleich(an.fr.context.vars.agent.active_before, false, 'it was off')
+    gleich(an.fr.context.vars.agent.active_after, true, 'and is on now')
+    gleich(an.fr.context.vars.agent.name, 'nightly', 'the name comes back for the message that follows')
+    wahr(an.fr.log.some(l => l.msg === 'nightly: off → on'), 'the log names both ends of the change')
+
+    const aus = await toggleRun({ agentId: '4', active: 'off', startNow: false, outputVar: 'agent' }, NIGHTLY)
+    gleich(aus.calls[0].join(':'), 'setAgentActive:4:false', 'switching off asks for false')
+    gleich(aus.fr.context.vars.agent.active_after, false, 'and it is off')
+
+    const um1 = await toggleRun({ agentId: '4', active: 'toggle', startNow: false, outputVar: 'agent' }, NIGHTLY)
+    gleich(um1.calls[0].join(':'), 'setAgentActive:4:false', 'toggle on an active agent switches it off')
+    const um2 = await toggleRun({ agentId: '4', active: 'toggle', startNow: false, outputVar: 'agent' },
+      [{ id: 4, name: 'nightly', active: false }])
+    gleich(um2.calls[0].join(':'), 'setAgentActive:4:true', 'and on an inactive one switches it on')
+  })
+
+  await pruefe('toggle_agent: "start right away" starts one — and never for an agent it just switched off', async () => {
+    const an = await toggleRun({ agentId: '4', active: 'on', startNow: true, outputVar: 'agent' },
+      [{ id: 4, name: 'nightly', active: false }])
+    wahr(an.calls.some(c => c[0] === 'startAgentIfIdle'), 'switched on, so it starts')
+    gleich(an.fr.context.vars.agent.started_run_id, 'run-of-4', 'and hands the run id on')
+    enthaelt(an.fr.log.map(l => l.msg).join(' '), 'started run run-of-4', 'the log says which run')
+
+    const aus = await toggleRun({ agentId: '4', active: 'off', startNow: true, outputVar: 'agent' }, NIGHTLY)
+    falsch(aus.calls.some(c => c[0] === 'startAgentIfIdle'),
+      'switched OFF with the box still ticked starts nothing — the ticked box is not a second command')
+    gleich(aus.fr.context.vars.agent.started_run_id, null, 'and the output says so')
+  })
+
+  await pruefe('toggle_agent: a busy agent is skipped — a result, not a failure', async () => {
+    const { fr } = await toggleRun({ agentId: '4', active: 'on', startNow: true, outputVar: 'agent' }, NIGHTLY, [4])
+    gleich(fr.status, 'done', 'the flow run carries on')
+    gleich(fr.context.vars.agent.started_run_id, null, 'nothing was started')
+    gleich(fr.context.vars.agent.active_after, true, 'but the switch itself did happen')
+    enthaelt(fr.log.map(l => l.msg).join(' '), 'skipped (agent is busy)', 'and the log says it was skipped')
+  })
+
+  await pruefe('toggle_agent: an agent nobody has fails the step', async () => {
+    const { api } = agentStub(NIGHTLY)
+    const id = await engine.startFlowRun({ id: null, name: 'ghost', definition: { sequence: [
+      step('toggle_agent', { agentId: '99', active: 'on', startNow: false, outputVar: 'agent' }),
+      step('note', { text: 'never' }),
+    ] } }, { kind: 'cron' }, api)
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'failed', 'a flow that switches nothing must not report success')
+    enthaelt(fr.error, '99', 'the error names the id')
+    falsch(fr.log.some(l => l.msg === 'never'), 'and nothing after it ran')
+  })
+
   gruppe('Docs: AGENTS.md / CLAUDE.md pairing')
 
   await pruefe('every AGENTS.md has a CLAUDE.md next to it that only includes it', async () => {
