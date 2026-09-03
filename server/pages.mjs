@@ -44,6 +44,7 @@ import { discoveryBanner, checkbox } from './plugins/web.mjs'
 import {
   availableSkills, harnessSkillRoots, skillTargets, installedOverview, removalPlan,
   skillConflicts, foreignCopies, skillsInstallOn, skillsAutoUpdate, syncSkills, rootExists,
+  selectedSkillNames,
 } from './skills.mjs'
 // The budget-gate thresholds are no longer typed into this file: every plugin
 // that declares a gate brings its own fields, and the historic keys survive
@@ -2427,13 +2428,25 @@ export function skillScopeNote() {
  * an agent's matcher fire; cutting them at 240 characters ended sentences
  * mid-word and read as a rendering fault.
  */
-function skillCatalogList() {
+function skillCatalogList(installOn) {
   const all = availableSkills()
   const skills = all.filter(s => s.role !== 'shared')
   if (!skills.length) return `<p class="dim">${e(t('flskills.none_shipped'))}</p>`
   const shared = all.length - skills.length
-  return `<ul class="skill-list">${skills.map(s =>
-    `<li><b>${e(s.title)}</b>${s.description ? ` — <span class="dim">${e(s.description)}</span>` : ''}</li>`).join('')}</ul>
+  // Absent = all of them, which is what an installation that said yes before
+  // this setting existed has on disk. Only a save from this form writes a list.
+  const want = selectedSkillNames()
+  const on = (name) => want === null || want.includes(name)
+  // Same rule as the update switch: while the installation is off these are
+  // switches about nothing, so they are hidden AND disabled — a hidden field
+  // that still submits would rewrite the selection nobody could see.
+  const off = installOn ? '' : ' disabled'
+  return `<ul class="skill-list" id="skills-pick"${installOn ? '' : ' hidden'}>${skills.map(s => `<li>
+      <label class="chk"><input type="checkbox" name="skills_selected" value="${e(s.name)}" ${on(s.name) ? 'checked' : ''}${off}>
+      <b>${e(s.title)}</b></label>
+      ${s.description ? `<div class="dim">${e(s.description)}</div>` : ''}</li>`).join('')}</ul>
+    ${installOn ? '' : `<ul class="skill-list">${skills.map(s =>
+      `<li><b>${e(s.title)}</b>${s.description ? ` — <span class="dim">${e(s.description)}</span>` : ''}</li>`).join('')}</ul>`}
     ${shared ? `<p class="dim">${e(t('flskills.shared_note', { n: shared }))}</p>` : ''}`
 }
 
@@ -2549,7 +2562,13 @@ function skillRemoveDialog() {
 function autoUpdateRow(installOn) {
   const on = skillsAutoUpdate()
   const off = installOn ? '' : ' disabled'
-  return `<div id="skills-auto"${installOn ? '' : ' hidden'}>
+  // Updating is ALREADY paused for a foreign copy — `syncSkills()` checks the
+  // installation id before it ever compares content, so it structurally cannot
+  // run over one. What was missing is saying so: a switch that reads "on" while
+  // some directories are deliberately untouched is a switch that lies.
+  const paused = installOn && on && foreignCopies().length
+    ? `<p class="warn">${e(t('flskills.update_paused'))}</p>` : ''
+  return `${paused}<div id="skills-auto"${installOn ? '' : ' hidden'}>
     <input type="hidden" name="skills_auto_update" value="0"${off}>
     <label class="chk"><input type="checkbox" name="skills_auto_update" value="1" ${on ? 'checked' : ''}${off}>
       ${e(t('flskills.auto'))} <span class="dim">${e(t('flskills.auto_hint'))}</span></label>
@@ -2564,11 +2583,16 @@ export async function pageSkillSettings(req, res, url) {
   <p class="dim">${e(t('flskills.intro2'))}</p>
   ${skillScopeNote()}
   ${report ? `<p class="card ok">${e(t('flskills.synced'))}</p>` : ''}
-  <h3>${e(t('flskills.catalog_legend'))}</h3>
-  ${skillCatalogList()}
   <form method="post" action="/settings/skills" class="settings form-grid" id="skills-form" data-was-on="${on ? '1' : '0'}">
     <fieldset><legend>${e(t('flskills.switches_legend'))}</legend>
       ${checkbox('skills_install', on, t('flskills.install'), ` <span class="dim">${e(t('flskills.install_hint'))}</span>`)}
+    </fieldset>
+    <fieldset><legend>${e(t('flskills.catalog_legend'))}</legend>
+      ${on ? '<input type="hidden" name="skills_pick" value="1">' : ''}
+      <p class="dim">${e(t(on ? 'flskills.pick_hint' : 'flskills.pick_off'))}</p>
+      ${skillCatalogList(on)}
+    </fieldset>
+    <fieldset><legend>${e(t('flskills.update_legend'))}</legend>
       ${autoUpdateRow(on)}
     </fieldset>
     <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
@@ -2595,6 +2619,17 @@ export async function skillSettingsSave(req, res, url, formBody) {
   // a field the request never carried — see the settingsSave() comment.
   if (Object.hasOwn(b, 'skills_install')) setSetting('skills_install', b.skills_install === '1' ? '1' : '0')
   if (Object.hasOwn(b, 'skills_auto_update')) setSetting('skills_auto_update', b.skills_auto_update === '1' ? '1' : '0')
+  // The selection travels as repeated checkboxes, so parseForm hands it over as
+  // `skills_selected_list`. A ticked box is present and an unticked one is
+  // simply absent — which is why the marker below is what tells "none selected"
+  // from "this form did not carry the block at all". Without it, saving with
+  // the installation off (where the boxes are disabled) would wipe the
+  // selection nobody could see.
+  if (b.skills_pick === '1') {
+    const picked = b.skills_selected_list ?? (b.skills_selected ? [b.skills_selected] : [])
+    const known = new Set(availableSkills().filter(s => s.role !== 'shared').map(s => s.name))
+    setSetting('skills_selected', JSON.stringify([...new Set(picked.filter(n => known.has(n)))]))
+  }
   // Saving IS the action: switching on installs, switching off removes. A
   // setting that describes the file system and then waits for a separate button
   // is a setting that lies until somebody presses it.

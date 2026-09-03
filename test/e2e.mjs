@@ -4664,6 +4664,10 @@ export default {
     // nothing: hidden AND disabled, so its hidden `0` companion cannot post and
     // overwrite a preference the operator left on.
     enthaelt(html, '<div id="skills-auto" hidden>', 'the update row is hidden while the installation is off')
+    enthaelt(html, 'id="skills-pick" hidden', 'and so is the per-skill picker')
+    gleich((html.match(/name="skills_selected"[^>]*disabled/g) ?? []).length, 6,
+      'with every one of its boxes disabled, so a save cannot rewrite the selection unseen')
+    falsch(html.includes('name="skills_pick"'), 'and the marker that says "this form carried the picker" is absent')
     gleich((html.match(/name="skills_auto_update"[^>]*disabled/g) ?? []).length, 2,
       'and both of its inputs are disabled, so neither travels')
     falsch(/<div class="btn-row"><button>[^<]*<\/button>\s*<a /.test(html),
@@ -4716,6 +4720,51 @@ export default {
     await formular('/settings/skills', { skills_install: '0' }, { alsBrowser: true })
     gleich(wert(), '1', 'and a save without the field does not turn it off')
     gleich(db.prepare("SELECT value FROM settings WHERE key='skills_install'").get().value, '0', 'while the installation really went off')
+  })
+
+  await pruefe('only the selected skills are installed, and deselecting removes just that one', async () => {
+    const HOME = join(SB, 'skillhome')
+    const wurzel = async () => (await (await hol('/api/skills')).json()).targets[0].dir
+    const da = async (name) => existsSync(join(await wurzel(), name, 'SKILL.md'))
+
+    // Everything, which is what an installation that said yes before this
+    // setting existed already has on disk.
+    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { alsBrowser: true })
+    wahr(await da('freilauf-runs'), 'runs is there')
+    wahr(await da('freilauf-agents'), 'agents too')
+    wahr(await da('freilauf-models'), 'and the shared one, which nobody picks')
+
+    // Now pick two. The third goes; the shared one rides along.
+    await formular('/settings/skills', {
+      skills_install: '1', skills_auto_update: '1', skills_pick: '1',
+      skills_selected: ['freilauf-runs', 'freilauf-repos'],
+    }, { alsBrowser: true })
+    wahr(await da('freilauf-runs'), 'a selected skill stays')
+    wahr(await da('freilauf-repos'), 'and the other one')
+    falsch(await da('freilauf-agents'), 'the deselected one is removed')
+    wahr(await da('freilauf-models'), 'the shared one rides along with whatever is selected')
+    gleich(db.prepare("SELECT value FROM settings WHERE key='skills_selected'").get().value,
+      JSON.stringify(['freilauf-runs', 'freilauf-repos']), 'and the choice is stored')
+
+    // A save WITHOUT the picker block must not rewrite the selection — with the
+    // installation off the boxes are disabled, so nothing would travel and an
+    // unguarded read would wipe a choice nobody could see.
+    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '0' }, { alsBrowser: true })
+    gleich(db.prepare("SELECT value FROM settings WHERE key='skills_selected'").get().value,
+      JSON.stringify(['freilauf-runs', 'freilauf-repos']), 'the selection survives a save that did not carry it')
+    wahr(await da('freilauf-runs'), 'and nothing was reinstalled behind it')
+
+    // Selecting nothing takes even the shared one: it exists for the others.
+    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '1', skills_pick: '1' },
+      { alsBrowser: true })
+    falsch(await da('freilauf-runs'), 'nothing selected, nothing installed')
+    falsch(await da('freilauf-models'), 'the shared one goes with them')
+
+    // Back to all of them for the checks after this one.
+    db.prepare("DELETE FROM settings WHERE key='skills_selected'").run()
+    await formular('/settings/skills/sync', {}, { alsBrowser: true })
+    wahr(await da('freilauf-runs'), 'an absent selection means all of them again')
+    await formular('/settings/skills', { skills_install: '0', skills_auto_update: '1' }, { alsBrowser: true })
   })
 
   await pruefe('a "sync now" post re-establishes the state without changing the settings', async () => {
@@ -4857,6 +4906,40 @@ export default {
       'branch_mode=keiner'])
     gleich(gut.code, 0, `a sound definition exits 0 (${gut.stdout})`)
     enthaelt(gut.stdout, '/api/runs', 'and hands back the command to post it')
+
+    const quatsch = await lauf(['nonsense'])
+    gleich(quatsch.code, 2, 'an unknown command is a usage error')
+  })
+
+  await pruefe("the plugin skill's tool finds the contract and reads the registry", async () => {
+    // The whole point of this one is that it must not restate `docs/plugins.md`
+    // — so if it cannot FIND that file it is worth nothing. The resolution is
+    // therefore the first assertion, and the section index the second: an
+    // agent that has to read 1450 lines to find one contract reads none of it.
+    const skript = join(PROJEKT, 'skills', 'freilauf-plugins', 'scripts', 'fl-plugins.py')
+    const lauf = (args) => new Promise((res) => execFile('python3', [skript, ...args], {
+      env: { ...process.env, FL_HUB_URL: BASIS },
+      timeout: 40_000,
+    }, (err, stdout, stderr) => res({ code: err?.code ?? 0, stdout, stderr })))
+
+    const uebersicht = await lauf([])
+    gleich(uebersicht.code, 0, `no arguments is the overview (${uebersicht.stderr})`)
+    enthaelt(uebersicht.stdout, 'Freilauf plugins', 'and it says what it is')
+    enthaelt(uebersicht.stdout, '`docs [text]`', 'listing the commands rather than the data')
+
+    const docs = await lauf(['docs'])
+    gleich(docs.code, 0, `docs answers (${docs.stderr})`)
+    enthaelt(docs.stdout, join(PROJEKT, 'docs', 'plugins.md'), 'resolving the real file')
+    enthaelt(docs.stdout, 'Coding agent plugin contract', 'and printing its sections')
+    enthaelt(docs.stdout, 'Notifier plugin contract', 'all three kinds among them')
+
+    const liste = await lauf(['list'])
+    gleich(liste.code, 0, `list answers (${liste.stderr})`)
+    enthaelt(liste.stdout, 'Coding agents', 'the registered coding agents')
+    enthaelt(liste.stdout, 'External packages', 'and the external packages')
+    // There IS no JSON route for the registry, and a tool that quietly showed
+    // half the answer would be worse than one that names the gap.
+    enthaelt(liste.stdout, '/settings/notifications', 'saying where the rest of the answer is')
 
     const quatsch = await lauf(['nonsense'])
     gleich(quatsch.code, 2, 'an unknown command is a usage error')

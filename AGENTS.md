@@ -2508,6 +2508,29 @@ the target directory), not remembered from the marker — otherwise a copy edite
 by hand would look current for ever and the switch would quietly mean "keep the
 marker up to date".
 
+**Which skills** is the operator's choice too (`skills_selected`, a JSON list
+under "What is shipped"). Absent means ALL, and that is the
+backwards-compatible reading rather than a convenience: an installation that
+said yes before the setting existed has every skill on disk, and a default of
+"none" would uninstall them on the next sync. Deselecting one takes the ordinary
+removal path, so it is still marker-guarded and still only ever takes back what
+the hub wrote. The `shared` skill is not selectable — nobody picks it — and
+rides along whenever anything else is selected, going only when nothing is.
+Keeping them current stays **one global switch**, because it is a statement
+about maintenance and not about any particular skill.
+
+The picker and the update switch are both `hidden` AND `disabled` while the
+installation is off, and the form carries a `skills_pick` marker: a save that
+did not carry the picker must not be read as "nothing selected", or saving from
+a page where the boxes were invisible would wipe a choice nobody could see.
+
+**Automatic updating is already paused for a copy another installation wrote** —
+the foreign check in `syncSkills()` sits before the content comparison, so it
+structurally cannot run over one. What was missing was saying so: while that
+question is unanswered the page says updating is paused for those directories.
+A switch that reads "on" while some directories are deliberately untouched is a
+switch that lies.
+
 It re-syncs at startup and after **every** write on the Plugins page, because
 that is exactly when the set of target directories changes: a coding agent
 switched on may read a directory nothing has been written to yet, and one
@@ -2556,6 +2579,17 @@ database lives in it), the local URL, the runs and worktrees directories (all
 configurable, so a skill that hardcoded `~/agents/runs` would be wrong on half
 the machines) and the running sha. The scripts read the file lying beside them.
 
+Two of those coordinates are about the hub's own **files** rather than its API,
+and they exist because one document is too long to copy: `app_dir` is the
+directory the hub's code runs from — resolved from `skills.mjs` itself, the same
+`import.meta.url` idiom as `skillsSourceDir()` and for the same reason, never
+from `deployDir()` (a hub started by hand out of a checkout is still that
+checkout's hub) and never from the cwd. `plugin_dir` is where an external plugin
+package is installed to. Together they are what lets `freilauf-plugins` find
+`docs/plugins.md` and list the installed packages **without a single line of
+that contract being restated in a skill** — which is the one thing that would
+have made the plugin skill worse than no skill at all.
+
 Their order is: `FL_HUB_URL` (set in every run Freilauf starts, so a run always
 reaches **its own** hub) → `FREILAUF_HUB_URL` (by hand) → the calling card →
 `FREILAUF_LOCAL_PORT` from the operator's `env` → `127.0.0.1:8791`. Each
@@ -2600,6 +2634,15 @@ come next.
 - **`run-alive.py`** — the status/verdict gap for one run, a repo or a status.
 - **`agent-edit.py`** — the read-modify-write round trip `POST /agents/edit`
   needs, because that route is a full replace and not a patch.
+- **`fl-plugins.py`** — the plugin skill's whole reason to exist is that
+  [docs/plugins.md](docs/plugins.md) already IS the contract, so the skill must
+  not restate a line of it; `docs` finds that file on this machine and prints
+  its section index, so an agent reads the two sections its kind needs instead
+  of 1450 lines. `list` says what is registered (and names what only the
+  Plugins page can answer — there is no JSON route for the registry),
+  `install`/`uninstall`/`scan` post to the web UI's own routes and read the
+  303-or-problem-page answer honestly, and `new <kind> <id>` scaffolds a
+  package that already satisfies `validateManifest()`/`validateDescriptor()`.
 
 ### `FREILAUF_SKILLS_HOME` is a test fence, and a load-bearing one
 
