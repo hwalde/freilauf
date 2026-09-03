@@ -27,7 +27,7 @@ can change it under Settings → Freilauf skills; a read-only JSON API and
 - [x] G4: the whole shipped suite green — nothing regressed
   CHECK: npm test
   EXPECT: post-merge: 19 checks passed
-  EVIDENCE: unit 394, e2e 302, proxy 4, deploy 22, post-merge 19, browser 66 — all green.
+  EVIDENCE: unit 396, e2e 304, proxy 4, deploy 22, post-merge 19, browser 66 — all green.
 
 - [x] G5: the covering set is really the smallest one on this machine's four coding agents
   EVIDENCE: measured against the four built-in declarations — claude alone → `~/.claude/skills`; cursor alone → `~/.cursor/skills`; opencode alone → `~/.config/opencode/skill`; hermes alone → `~/.hermes/skills`; all four → exactly two directories (`~/.claude/skills` serving claude+cursor+opencode, `~/.hermes/skills` serving hermes). Asserted in the unit suite against synthetic declarations so the RULE is tested, not the current plugin files.
@@ -113,6 +113,33 @@ can change it under Settings → Freilauf skills; a read-only JSON API and
   definition exits 0 and hands back the `fl-api -X POST /api/runs …` line. The
   e2e group runs it against the sandbox hub. Byte-identity of the three shipped
   copies is a unit check.
+
+- [x] G18: a seventh skill teaches an agent to write a plugin, without a second copy of the contract
+  CHECK: node test/e2e.mjs
+  EXPECT: E2E tests: 304 checks passed
+  EVIDENCE: `skills/freilauf-plugins/` — 155 lines that deliberately restate
+  nothing from `docs/plugins.md` (1463 lines) and instead find it and index it.
+  Written by an Opus subagent against a fixed contract and reviewed here: all
+  three scaffolds (`new harness|provider|notifier`) were run and passed the REAL
+  `validateManifest()` and `validateDescriptor()`; `docs` resolves this checkout
+  and lists the section line numbers; the install/uninstall/scan routes were
+  matched against `server/web.mjs:228-231`. `installationFacts()` gained
+  `app_dir` (from `import.meta.url`, not `deployDir()` and not the cwd) and
+  `plugin_dir`. One wording bug fixed on review ("Found via found by …").
+
+- [x] G19: the operator picks WHICH skills, and updating cannot run over an unanswered question
+  CHECK: node test/e2e.mjs
+  EXPECT: E2E tests: 304 checks passed
+  EVIDENCE: `skills_selected` (absent = all, so an installation that said yes
+  earlier is not silently emptied). The e2e group installs everything, picks
+  two and asserts the third is removed while the shared skill rides along,
+  saves without the picker block and asserts the choice survives, then selects
+  nothing and asserts even the shared skill goes. Unit adds the pure rule
+  including the unreadable-value case (falls back to all, never to none).
+  Browser adds the picker to the hidden-AND-disabled round trip. Automatic
+  updating was ALREADY structurally unable to touch a foreign copy — the check
+  precedes the content comparison — and the page now says so instead of showing
+  a switch that reads "on" while directories are deliberately untouched.
 
 - [x] G13: the six skills were fact-checked against the source by a second reader
   EVIDENCE: an independent pass over all 19 files re-derived every route, field

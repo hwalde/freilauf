@@ -1607,6 +1607,27 @@ try {
     gleich(skillsMod.expandHome('', '/h'), '', 'empty stays empty')
   })
 
+  // The calling card is the ONLY thing a user-level skill has to go on: it is
+  // read by sessions Freilauf never started, in projects that know nothing
+  // about it. `app_dir` is what lets the plugin skill find `docs/plugins.md`
+  // — the whole plugin contract, far too long to restate in a skill — so a
+  // value that does not really point at the hub's code is a skill that reads
+  // nothing and says nothing.
+  await pruefe('the calling card names the hub, its data AND its own code', async () => {
+    const { existsSync: ex } = await import('node:fs')
+    const { join: j, isAbsolute } = await import('node:path')
+    const f = skillsMod.installationFacts()
+    for (const k of ['id', 'url', 'data_dir', 'runs_dir', 'worktrees_dir', 'app_dir', 'plugin_dir']) {
+      wahr(f[k], `${k} is set`)
+    }
+    wahr(isAbsolute(f.app_dir), 'app_dir is absolute — resolved from the module, not from the cwd')
+    wahr(ex(j(f.app_dir, 'docs', 'plugins.md')), 'and it really holds the plugin contract')
+    wahr(ex(j(f.app_dir, 'server', 'skills.mjs')), 'and the hub it was resolved from')
+    wahr(isAbsolute(f.plugin_dir), 'plugin_dir is absolute')
+    gleich(f.plugin_dir, (await import('../server/plugins/loader.mjs')).pluginDir(),
+      'and it is the same answer the loader gives — one place decides where packages live')
+  })
+
   await pruefe('every shipped skill is a valid Agent Skill: name matches its directory, spec keys only', async () => {
     const { readdirSync: rd, readFileSync: rf, existsSync: ex } = await import('node:fs')
     const { join: j } = await import('node:path')
@@ -1738,6 +1759,32 @@ try {
     gleich(aus.removed.length, anzahl, 'every remaining copy')
     gleich(rd(j(HOME, '.claude', 'skills')).join(), 'meins', "the operator's own skill is all that is left")
     gleich(skillsMod.readState().entries.length, 0, 'and the hub remembers nothing it no longer owns')
+  })
+
+  await pruefe('the selection decides what is installed, and absent means all of them', async () => {
+    const { setSetting: setz, default: dbSel } = await import('../server/db.mjs')
+    const alle = skillsMod.availableSkills()
+    const nichtGeteilt = alle.filter(s => s.role !== 'shared').map(s => s.name)
+    const geteilt = alle.filter(s => s.role === 'shared').map(s => s.name)
+    wahr(geteilt.length >= 1, 'there is a shared skill nobody picks')
+    const namen = () => skillsMod.selectedSkills().map(s => s.name)
+    try {
+      // Absent is ALL, and that is the backwards-compatible reading: an
+      // installation that said yes before this setting existed must not have
+      // its skills uninstalled by the next sync.
+      setz('skills_selected', '')
+      gleich(namen().length, alle.length, 'no selection stored = every shipped skill')
+      setz('skills_selected', JSON.stringify([nichtGeteilt[0]]))
+      gleich(namen().sort().join(), [nichtGeteilt[0], ...geteilt].sort().join(),
+        'one picked, and the shared one rides along because the others load it')
+      setz('skills_selected', '[]')
+      gleich(namen().length, 0, 'nothing picked takes the shared one too — it exists for the others')
+      setz('skills_selected', 'not json{')
+      gleich(namen().length, alle.length, 'an unreadable selection falls back to all, never to none')
+    } finally {
+      // The sandbox database is shared with every group after this one.
+      dbSel.prepare("DELETE FROM settings WHERE key='skills_selected'").run()
+    }
   })
 
   await pruefe('a directory the hub did not write is refused instead of overwritten', async () => {

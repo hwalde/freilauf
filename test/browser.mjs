@@ -1406,9 +1406,16 @@ try {
     await p.uncheck('#skills-form input[type=checkbox][name=skills_install]')
     gleich(await p.$eval('#skills-auto', d => d.hidden), true, 'unticking hides it at once, without a save')
     gleich(await p.$$eval('#skills-auto input', (l) => l.every(i => i.disabled)), true, 'and disables both inputs')
+    // The per-skill picker follows the same rule, and for the same reason: a
+    // hidden checkbox that still submitted would rewrite the selection unseen.
+    gleich(await p.$eval('#skills-pick', d => d.hidden), true, 'the picker goes with it')
+    gleich(await p.$$eval('#skills-pick input', (l) => l.length > 0 && l.every(i => i.disabled)), true,
+      'and every one of its boxes is disabled')
     await p.check('#skills-form input[type=checkbox][name=skills_install]')
     gleich(await p.$eval('#skills-auto', d => d.hidden), false, 'ticking brings it back')
     gleich(await p.$$eval('#skills-auto input', (l) => l.every(i => !i.disabled)), true, 'enabled again')
+    gleich(await p.$eval('#skills-pick', d => d.hidden), false, 'and the picker with it')
+    gleich(await p.$$eval('#skills-pick input', (l) => l.every(i => !i.disabled)), true, 'enabled again too')
     await p.uncheck('#skills-form input[type=checkbox][name=skills_install]')
     await p.click('#skills-form button')
     await wartePage(p, () => document.getElementById('skills-remove-dialog').open, null, 'the confirmation')

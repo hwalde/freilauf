@@ -14,6 +14,14 @@ one change is what the rest of this document is about: what a package looks
 like, what a descriptor may declare, what a plugin is handed instead of the
 process environment, and which of the old rules survived.
 
+> **Handing this to a coding agent?** Give it the `freilauf-plugins` skill
+> (`skills/freilauf-plugins/`, installed at user level by Settings → Freilauf
+> skills). It locates *this file* on the machine, prints its section index so
+> only the relevant sections are read, and covers what a document cannot: how to
+> reach this installation, and the commands that install, enable and remove a
+> package. It deliberately restates none of the contract below — **this file
+> stays the source of truth.**
+
 ```
 server/plugins/
   registry.mjs   THE registry: HARNESS_PLUGINS, PROVIDER_PLUGINS, NOTIFIER_PLUGINS, register/unregister, errors

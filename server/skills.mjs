@@ -49,6 +49,7 @@ import { RUNS_DIR, WORKTREES_DIR, hubVersion } from './util.mjs'
 import { getSetting } from './db.mjs'
 import { allPlugins } from './plugins/registry.mjs'
 import { isPluginEnabled } from './plugins/store.mjs'
+import { pluginDir } from './plugins/loader.mjs'
 
 /** The file an installed skill directory carries so the hub recognises its own work. */
 export const MARKER = '.freilauf-skill.json'
@@ -68,6 +69,36 @@ export function skillsStateFile() {
 /** The two switches (Settings → Skills). Installation is off until it is asked for. */
 export function skillsInstallOn() { return getSetting('skills_install') === '1' }
 export function skillsAutoUpdate() { return getSetting('skills_auto_update', '1') === '1' }
+
+/**
+ * Which skills the operator wants — the selection under "What is shipped".
+ *
+ * ABSENT means ALL, and that is the backwards-compatible reading rather than a
+ * convenience: an installation that already said yes has every skill on disk,
+ * and a new setting that defaulted to "none" would silently uninstall them on
+ * the next sync. Only a save from the form writes an explicit list.
+ *
+ * A `shared` skill is never in the list because it is never offered — nobody
+ * picks `freilauf-models`, the other skills load it by relative path. It rides
+ * along whenever anything else is selected, and goes when nothing is.
+ */
+export function selectedSkillNames() {
+  const raw = getSetting('skills_selected')
+  if (raw == null || raw === '') return null            // null = all of them
+  try {
+    const list = JSON.parse(raw)
+    return Array.isArray(list) ? list.map(String) : null
+  } catch { return null }
+}
+
+/** The skills an installation would actually write, selection and role applied. */
+export function selectedSkills(all = availableSkills()) {
+  const want = selectedSkillNames()
+  const offered = all.filter(s => s.role !== 'shared')
+  const chosen = want === null ? offered : offered.filter(s => want.includes(s.name))
+  if (!chosen.length) return []
+  return [...chosen, ...all.filter(s => s.role === 'shared')]
+}
 
 /**
  * The home directory the user-level declarations are resolved against.
@@ -322,6 +353,16 @@ function copySkill(source, target) {
  * restarts and deploys, and it is not a secret. The directories travel too,
  * because they are all configurable (`FREILAUF_RUNS_DIR` and friends) and a
  * skill that hardcoded `~/agents/runs` would be wrong on half the machines.
+ *
+ * `app_dir` is the hub's own code, and it is resolved from THIS MODULE — the
+ * same idiom as `skillsSourceDir()` above, and for the reason AGENTS.md states
+ * about the deploy: everything inside the repo is found from `import.meta.url`
+ * and never from the process's working directory. It is not `deployDir()`
+ * either: a hub started by hand out of a checkout is still the hub whose
+ * `docs/` a skill wants to read. It is what lets the plugin skill find
+ * `docs/plugins.md`, which is the whole plugin contract and far too long to
+ * restate anywhere else. `plugin_dir` is where an external package is installed
+ * to, so a skill can list what is there without asking the hub.
  */
 export function installationFacts() {
   const port = env('LOCAL_PORT') ?? '8791'
@@ -331,6 +372,8 @@ export function installationFacts() {
     data_dir: dataDir(),
     runs_dir: RUNS_DIR,
     worktrees_dir: WORKTREES_DIR,
+    app_dir: resolve(dirname(fileURLToPath(import.meta.url)), '..'),
+    plugin_dir: pluginDir(),
     version: hubVersion() || null,
   }
 }
@@ -407,7 +450,7 @@ export function syncSkills({ force = false, install = null, autoUpdate = null, a
   const state = readState()
   const report = { on, installed: [], updated: [], removed: [], unchanged: [], conflicts: [], foreign: [], errors: [], targets: [], skipped: [] }
 
-  const skills = availableSkills()
+  const skills = selectedSkills()
   const { targets, skipped } = on ? skillTargets() : { targets: [], skipped: [] }
   report.targets = targets
   report.skipped = skipped
@@ -489,7 +532,7 @@ export function skillConflicts() {
   const state = readState()
   const out = []
   for (const t of skillTargets().targets) {
-    for (const s of availableSkills()) {
+    for (const s of selectedSkills()) {
       const dir = join(t.dir, s.name)
       if (existsSync(dir) && !ownedByHub(dir, state)) out.push({ dir, skill: s.name })
     }
@@ -506,7 +549,7 @@ export function foreignCopies() {
   if (!skillsInstallOn()) return []
   const out = []
   for (const t of skillTargets().targets) {
-    for (const s of availableSkills()) {
+    for (const s of selectedSkills()) {
       const dir = join(t.dir, s.name)
       if (!existsSync(dir)) continue
       const fremd = foreignInstallation(dir)

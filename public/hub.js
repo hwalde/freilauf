@@ -1366,11 +1366,18 @@
   document.addEventListener('change', function (ev) {
     var box = ev.target
     if (!box.name || box.name !== 'skills_install' || box.type !== 'checkbox') return
-    var row = document.getElementById('skills-auto')
-    if (!row) return
-    row.hidden = !box.checked
-    var felder = row.querySelectorAll('input')
-    for (var i = 0; i < felder.length; i++) felder[i].disabled = !box.checked
+    // The update switch and the per-skill picker are both switches about nothing
+    // while the installation is off, and both must be DISABLED and not merely
+    // hidden: a hidden checkbox that still submits would rewrite a selection
+    // nobody could see.
+    var rows = [document.getElementById('skills-auto'), document.getElementById('skills-pick')]
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r]
+      if (!row) continue
+      row.hidden = !box.checked
+      var felder = row.querySelectorAll('input')
+      for (var i = 0; i < felder.length; i++) felder[i].disabled = !box.checked
+    }
   })
 
   document.addEventListener('submit', function (ev) {
