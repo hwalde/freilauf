@@ -1,0 +1,242 @@
+{
+  "_hinweis": "Vorlage des run_finished-Flows 'Schwarm-Nachlauf'. Gespeichert wird sie von schwarm/freilauf_einrichten.py, das die Marken @DISPATCHER_AGENT_ID@, @EXTRACT_QUELLE@ und @EXTRACT_MODELL@ vorher ersetzt (KEINE Flow-Templates: agentId, llmSource und model werden vom Flow-Motor nicht gerendert). Die Attachments an alle Worker-Agenten setzt dasselbe Skript. Der Report wird bewusst per extract-Step gelesen — Freilaufs eigener LLM-Baustein — statt mit eigener Parserei.",
+  "_zwei_korrekturen": "2026-09-03, beide aus gemessenen Fehlläufen: (1) Der Dispatcher wurde nach einem Worker geweckt, der nach 53 Sekunden gescheitert war — jetzt gehen drei Bedingungen voraus: outcome ist 'done', der Worker fand überhaupt Arbeit, und er hat etwas bewegt (Feld 'fortschritt' aus dem extract). Nach failed/aborted bleibt nur das notify weiter unten. (2) Zwei Dispatcher liefen parallel und starteten dieselbe Staffel doppelt — jetzt zählt s12 vor dem start_agent die Dispatcher-Läufe (agentId, Status running/scheduled/deferred) und s13 lässt nur bei 0 durch. Die switch_outcome-Leiter s5 bleibt unverändert: Sie meldet, sie startet nicht.",
+
+  "id": null,
+  "name": "Schwarm-Nachlauf",
+  "active": true,
+  "trigger": { "kind": "run_finished" },
+  "definition": {
+    "properties": {},
+    "sequence": [
+      {
+        "id": "s1",
+        "componentType": "task",
+        "type": "extract",
+        "name": "Worker-Report lesen",
+        "properties": {
+          "source": "report",
+          "sourceRun": "{{trigger.run.id}}",
+          "text": "",
+          "instructions": "Der Report stammt von einem Worker des Aufgaben-Schwarms. Seine letzte Zeile hat die Form 'SCHWARM_WORKER erledigt=<n> gegenstandslos=<n> offen=<n> hilfe=<0|1> ids_erledigt=<...> ids_offen=<...>'. Nimm die Zahlen aus dieser Zeile, wenn sie da ist; fehlt sie, lies sie aus dem Fließtext. 'nichts_zu_tun' ist wahr, wenn der Worker gar keine Aufgabe bekommen hat (alle drei Zahlen 0 und der Report sagt sinngemäß, es sei nichts frei gewesen). 'fortschritt' ist NUR in zwei Fällen wahr: (1) erledigt + gegenstandslos ist zusammen mindestens 1, oder (2) der Report sagt ausdrücklich, dass der Worker aufhörte, weil sein Zeitbudget zu Ende war, obwohl noch freie Aufgaben da waren. In jedem anderen Fall ist 'fortschritt' falsch — auch bei einem Werkzeugfehler, bei einem Abbruch, bei einem Lauf, der nur zurückgegeben hat, und bei einem Lauf, der nach wenigen Sekunden endete.",
+          "fields": [
+            { "name": "nichts_zu_tun", "type": "boolean", "description": "Der Worker fand keine freie Aufgabe und hat sofort aufgehört", "enumValues": "" },
+            { "name": "fortschritt", "type": "boolean", "description": "Mindestens eine Aufgabe geschlossen (erledigt + gegenstandslos >= 1) ODER wegen erschöpftem Zeitbudget aufgehört, obwohl noch Aufgaben frei waren", "enumValues": "" },
+            { "name": "erledigt", "type": "number", "description": "Anzahl reparierter und geschlossener Aufgaben", "enumValues": "" },
+            { "name": "gegenstandslos", "type": "number", "description": "Anzahl als gegenstandslos geschlossener Aufgaben", "enumValues": "" },
+            { "name": "offen", "type": "number", "description": "Anzahl zurückgegebener Aufgaben", "enumValues": "" },
+            { "name": "hilfe", "type": "boolean", "description": "Ein Mensch muss entscheiden", "enumValues": "" },
+            { "name": "zusammenfassung", "type": "string", "description": "Ein Satz: was dieser Worker erreicht hat", "enumValues": "" }
+          ],
+          "llmSource": "@EXTRACT_QUELLE@",
+          "model": "@EXTRACT_MODELL@",
+          "fallback": "",
+          "fallbackModel": "",
+          "outputVar": "ergebnis"
+        }
+      },
+      {
+        "id": "s9",
+        "componentType": "task",
+        "type": "count_runs",
+        "name": "Wie voll ist der Schwarm gerade?",
+        "properties": {
+          "repoId": "@REPO_ID@",
+          "statuses": "running,waiting_help,scheduled,deferred",
+          "titlePrefix": "Schwarm",
+          "agentId": "",
+          "outputVar": "imflug"
+        }
+      },
+      {
+        "id": "s12",
+        "componentType": "task",
+        "type": "count_runs",
+        "name": "Läuft schon ein Dispatcher?",
+        "properties": {
+          "repoId": "@REPO_ID@",
+          "statuses": "running,scheduled,deferred",
+          "titlePrefix": "",
+          "agentId": "@DISPATCHER_AGENT_ID@",
+          "outputVar": "dispvoll"
+        }
+      },
+      {
+        "id": "s20",
+        "componentType": "switch",
+        "type": "condition",
+        "name": "Ist der Worker sauber durchgelaufen?",
+        "properties": {
+          "left": "{{trigger.run.outcome}}",
+          "op": "eq",
+          "right": "done"
+        },
+        "branches": {
+          "true": [
+            {
+              "id": "s2",
+              "componentType": "switch",
+              "type": "condition",
+              "name": "Gab es Arbeit?",
+              "properties": {
+                "left": "{{vars.ergebnis.nichts_zu_tun}}",
+                "op": "falsy",
+                "right": ""
+              },
+              "branches": {
+                "true": [
+                  {
+                    "id": "s21",
+                    "componentType": "switch",
+                    "type": "condition",
+                    "name": "Hat er etwas bewegt?",
+                    "properties": { "left": "{{vars.ergebnis.fortschritt}}", "op": "truthy", "right": "" },
+                    "branches": {
+                      "true": [
+                        {
+                          "id": "s10",
+                          "componentType": "switch",
+                          "type": "condition",
+                          "name": "Noch Platz im Schwarm?",
+                          "properties": { "left": "{{vars.imflug.count}}", "op": "lt", "right": "@MAX_WORKER@" },
+                          "branches": {
+                            "true": [
+                              {
+                                "id": "s13",
+                                "componentType": "switch",
+                                "type": "condition",
+                                "name": "Kein Dispatcher unterwegs?",
+                                "properties": { "left": "{{vars.dispvoll.count}}", "op": "eq", "right": "0" },
+                                "branches": {
+                                  "true": [
+                                    {
+                                      "id": "s3",
+                                      "componentType": "task",
+                                      "type": "start_agent",
+                                      "name": "Dispatcher neu rechnen lassen",
+                                      "properties": {
+                                        "agentId": "@DISPATCHER_AGENT_ID@",
+                                        "promptExtra": "Ausgelöst vom Nachlauf-Flow: ein Worker ist gerade fertig geworden ({{vars.ergebnis.erledigt}} erledigt, {{vars.ergebnis.gegenstandslos}} gegenstandslos, {{vars.ergebnis.offen}} zurückgegeben). Rechne die Staffel neu und starte die Worker entsprechend. Halte dein 15-Minuten-Budget ein.",
+                                        "wait": false,
+                                        "outputVar": "dispatcher"
+                                      }
+                                    }
+                                  ],
+                                  "false": [
+                                    {
+                                      "id": "s14",
+                                      "componentType": "task",
+                                      "type": "note",
+                                      "name": "Dispatcher läuft schon",
+                                      "properties": {
+                                        "text": "{{vars.dispvoll.count}} Dispatcher-Läufe sind bereits unterwegs — kein zweiter. Zwei Dispatcher rechnen dieselbe Staffel und starten sie doppelt.\n{{vars.dispvoll.titles}}"
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                            ],
+                            "false": [
+                              {
+                                "id": "s11",
+                                "componentType": "task",
+                                "type": "note",
+                                "name": "Schwarm voll",
+                                "properties": {
+                                  "text": "{{vars.imflug.count}} Schwarm-Läufe in der Luft — der Dispatcher wird nicht geweckt, er könnte ohnehin nichts starten.\n{{vars.imflug.titles}}"
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      ],
+                      "false": [
+                        {
+                          "id": "s15",
+                          "componentType": "task",
+                          "type": "note",
+                          "name": "Kein Fortschritt",
+                          "properties": {
+                            "text": "Worker {{trigger.run.short_id}} hat eine Aufgabe angefasst, aber nichts geschlossen und auch nicht sein Zeitbudget ausgeschöpft — der Dispatcher wird nicht geweckt. Ihn jetzt zu starten hieße, denselben Fall sofort noch einmal zu ziehen.\n{{vars.ergebnis.zusammenfassung}}"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "false": [
+                  {
+                    "id": "s4",
+                    "componentType": "task",
+                    "type": "note",
+                    "name": "Leerlauf",
+                    "properties": {
+                      "text": "Worker {{trigger.run.short_id}} fand nichts Freies — der Schwarm bleibt, wie er ist. {{vars.ergebnis.zusammenfassung}}"
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "false": [
+            {
+              "id": "s16",
+              "componentType": "task",
+              "type": "note",
+              "name": "Nicht sauber beendet",
+              "properties": {
+                "text": "Worker {{trigger.run.short_id}} endete als '{{trigger.run.outcome}}' — der Dispatcher wird nicht geweckt. Gemeldet wird der Fehlschlag weiter unten; nachzuziehen ist der Takt vom nächsten Cron, nicht von einem Lauf, der gerade gescheitert ist."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "id": "s5",
+        "componentType": "switch",
+        "type": "switch_outcome",
+        "name": "Wie ist der Worker ausgegangen?",
+        "properties": { "value": "{{trigger.run.outcome}}" },
+        "branches": {
+          "done": [
+            {
+              "id": "s6",
+              "componentType": "task",
+              "type": "note",
+              "name": "Worker fertig",
+              "properties": {
+                "text": "done {{trigger.run.short_id}} ({{trigger.run.agent_name}}): erledigt={{vars.ergebnis.erledigt}} gegenstandslos={{vars.ergebnis.gegenstandslos}} offen={{vars.ergebnis.offen}} hilfe={{vars.ergebnis.hilfe}} — {{vars.ergebnis.zusammenfassung}}"
+              }
+            }
+          ],
+          "failed": [
+            {
+              "id": "s7",
+              "componentType": "task",
+              "type": "notify",
+              "name": "Fehlschlag melden",
+              "properties": {
+                "text": "Schwarm-Worker gescheitert: {{trigger.run.agent_name}} / {{trigger.run.short_id}} (Modell {{trigger.run.model}}). Reservierte Aufgaben bleiben stehen — nachsehen mit: @BELEGUNGEN_KOMMANDO@",
+                "attachment": "",
+                "outputVar": "notify"
+              }
+            }
+          ],
+          "aborted": [
+            {
+              "id": "s8",
+              "componentType": "task",
+              "type": "notify",
+              "name": "Abbruch melden",
+              "properties": {
+                "text": "Schwarm-Worker abgebrochen: {{trigger.run.agent_name}} / {{trigger.run.short_id}} (Modell {{trigger.run.model}}). Reservierte Aufgaben bleiben stehen — nachsehen mit: @BELEGUNGEN_KOMMANDO@",
+                "attachment": "",
+                "outputVar": "notify"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

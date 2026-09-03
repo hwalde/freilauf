@@ -41,7 +41,7 @@ import {
   cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { env } from './env.mjs'
 import { dataDir } from './paths.mjs'
@@ -148,11 +148,28 @@ function frontmatter(text) {
   return out
 }
 
+/**
+ * What is never part of a skill: the marker, and the droppings a Python
+ * interpreter leaves where it ran.
+ *
+ * The second one is not tidiness. A skill that ships Python gets a
+ * `__pycache__/` written INTO THE INSTALLED COPY the first time an agent runs
+ * one of those files in place. That directory then belongs to no source, so
+ * `installedHash()` stops matching the marker's hash and the hub reports a copy
+ * nobody touched as edited by hand — every sync, forever. Ignoring the bytecode
+ * at both ends (it is derived, machine- and interpreter-version-specific, and
+ * `.gitignore` already keeps it out of the repository) is what makes "is this
+ * copy current?" a question about content again.
+ */
+function ignoredEntry(name) {
+  return name === MARKER || name === '__pycache__' || name.endsWith('.pyc')
+}
+
 /** Every file of a skill directory, relative and sorted — the marker excluded. */
 function payloadFiles(dir, base = dir) {
   const out = []
   for (const d of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-    if (d.name === MARKER) continue
+    if (ignoredEntry(d.name)) continue
     const full = join(dir, d.name)
     if (d.isDirectory()) out.push(...payloadFiles(full, base))
     else if (d.isFile()) out.push({ rel: full.slice(base.length + 1).split('\\').join('/'), full })
@@ -335,7 +352,13 @@ export function foreignInstallation(dir) {
 function copySkill(source, target) {
   rmSync(target, { recursive: true, force: true })
   mkdirSync(dirname(target), { recursive: true })
-  cpSync(source, target, { recursive: true, dereference: true })
+  // The same exclusion the hash uses, for the same reason: a `__pycache__` the
+  // source happens to carry must not become part of a copy whose whole job is
+  // to hash identically to it.
+  cpSync(source, target, {
+    recursive: true, dereference: true,
+    filter: (src) => !ignoredEntry(basename(src)),
+  })
 }
 
 /**

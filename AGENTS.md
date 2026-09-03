@@ -2679,6 +2679,42 @@ come next.
   303-or-problem-page answer honestly, and `new <kind> <id>` scaffolds a
   package that already satisfies `validateManifest()`/`validateDescriptor()`.
 
+### A skill is a whole directory, not `SKILL.md` plus two known folders
+
+Seven of the shipped skills are `SKILL.md` with `references/` and `scripts/`
+next to it, and it would be easy to read that shape as the contract. It is not.
+`freilauf-agent-flow-builder` is the first one that ships a tree of its own —
+`konzepte/<concept>/` with the rationale, the walkthrough, `vorlage/` (the
+template of an engine: Python, JSON flow definitions, prompt files) and
+`adapter/`. That works because nothing in the pipeline was ever shape-aware:
+`payloadFiles()` recurses through whatever it finds and hashes every file byte
+for byte, and `installSkill()` is one
+`cpSync(source, target, { recursive: true })`. No extension list, no folder
+whitelist, nothing to extend when a skill brings a new kind of file.
+
+Two consequences worth stating, because both are easy to get wrong later:
+
+- **The hash covers the whole tree.** Touching one JSON file deep inside
+  `vorlage/` changes the skill's hash, and the next sync replaces the installed
+  copy. That is exactly right, and it is also why an installed copy somebody
+  edited by hand is reported as modified rather than silently kept.
+- **`vorlage/` is not `scripts/`.** The Python under `scripts/` is a tool the
+  agent RUNS against this hub. The Python under `konzepte/*/vorlage/` is a
+  template the agent COPIES into somebody else's repository and edits there. The
+  `fl-options.py` byte-identity check does not reach it — it filters on
+  `scripts/fl-options.py` — and neither should any future rule about the hub's
+  own CLI tools.
+
+And one exclusion, which the first Python-shipping skill made necessary:
+`__pycache__/` and `*.pyc` are ignored by `payloadFiles()` **and** by
+`copySkill()`. Not for tidiness. An agent that runs a shipped Python file *in
+place* writes bytecode into the INSTALLED copy; that directory belongs to no
+source, so `installedHash()` stops matching the marker and the hub reports a
+copy nobody touched as edited by hand — at every sync, forever. Ignoring
+derived, interpreter-version-specific bytes at both ends keeps "is this copy
+current?" a question about content. `.gitignore` already keeps them out of the
+repository, so this is about the installed side.
+
 ### `FREILAUF_SKILLS_HOME` is a test fence, and a load-bearing one
 
 Every other sandbox variable points into the suite's own directory, but a
