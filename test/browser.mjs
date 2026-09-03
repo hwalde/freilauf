@@ -1324,6 +1324,20 @@ try {
     enthaelt(text, 'browser-del', 'it names the repo')
     enthaelt(text, sk.REPO, 'and the checkout it will NOT touch')
     gleich(await p.$eval(`${dlg} .repo-del-go`, b => b.disabled), true, 'the delete button starts disabled')
+    // It is the one button here that destroys something, so it must not look
+    // like the two beside it — and a disabled button has to look disabled, or a
+    // red button that does nothing on click reads as broken.
+    const rot = await p.$eval(`${dlg} .repo-del-go`, (b) => {
+      const c = getComputedStyle(b)
+      return { bg: c.backgroundColor, opacity: c.opacity, cursor: c.cursor }
+    })
+    const ghost = await p.$eval(`${dlg} .repo-del-deactivate`, (b) => getComputedStyle(b).backgroundColor)
+    falsch(rot.bg === ghost, `the delete button does not share the ghost background (${rot.bg})`)
+    wahr(Number(rot.opacity) < 1, `disabled is visible (opacity ${rot.opacity})`)
+    gleich(rot.cursor, 'not-allowed', 'and the cursor says so too')
+    // The channel is the `danger` class, which is this project's destructive
+    // colour everywhere else (kill a run, end a session, delete a flow).
+    wahr(await p.$eval(`${dlg} .repo-del-go`, b => b.classList.contains('danger')), 'through the house danger class')
 
     await p.fill(`${dlg} .repo-del-name`, 'browser-de')
     gleich(await p.$eval(`${dlg} .repo-del-go`, b => b.disabled), true, 'a near miss does not arm it')
@@ -1384,6 +1398,17 @@ try {
     gleich(await p.$eval('#skills-remove-dialog', d => d.open), false, 'saving unchanged asks nothing')
 
     // Unticking and saving DOES ask, and nothing is submitted yet.
+    // "Keep them up to date" is a switch about nothing without an installation:
+    // unticking makes it disappear, and — the load-bearing half — DISABLES both
+    // of its inputs, so the hidden `0` companion cannot post and overwrite a
+    // preference the operator left on.
+    gleich(await p.$eval('#skills-auto', d => d.hidden), false, 'the update row is there while the installation is on')
+    await p.uncheck('#skills-form input[type=checkbox][name=skills_install]')
+    gleich(await p.$eval('#skills-auto', d => d.hidden), true, 'unticking hides it at once, without a save')
+    gleich(await p.$$eval('#skills-auto input', (l) => l.every(i => i.disabled)), true, 'and disables both inputs')
+    await p.check('#skills-form input[type=checkbox][name=skills_install]')
+    gleich(await p.$eval('#skills-auto', d => d.hidden), false, 'ticking brings it back')
+    gleich(await p.$$eval('#skills-auto input', (l) => l.every(i => !i.disabled)), true, 'enabled again')
     await p.uncheck('#skills-form input[type=checkbox][name=skills_install]')
     await p.click('#skills-form button')
     await wartePage(p, () => document.getElementById('skills-remove-dialog').open, null, 'the confirmation')

@@ -1358,6 +1358,21 @@
     if (d && d.open && ev.target === d) closeSkillsDialog()
   })
 
+  // "Keep them up to date" is a switch about nothing while the installation is
+  // off, so it is not on the page at all then. Hiding it is not enough: its
+  // hidden `0` companion would keep posting, and a save with the installation
+  // off would quietly overwrite a preference the operator had left on. So both
+  // inputs are disabled along with it — the same rule the goal field follows.
+  document.addEventListener('change', function (ev) {
+    var box = ev.target
+    if (!box.name || box.name !== 'skills_install' || box.type !== 'checkbox') return
+    var row = document.getElementById('skills-auto')
+    if (!row) return
+    row.hidden = !box.checked
+    var felder = row.querySelectorAll('input')
+    for (var i = 0; i < felder.length; i++) felder[i].disabled = !box.checked
+  })
+
   document.addEventListener('submit', function (ev) {
     var form = ev.target
     if (!form || form.id !== 'skills-form') return

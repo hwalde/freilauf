@@ -27,7 +27,7 @@ can change it under Settings → Freilauf skills; a read-only JSON API and
 - [x] G4: the whole shipped suite green — nothing regressed
   CHECK: npm test
   EXPECT: post-merge: 19 checks passed
-  EVIDENCE: unit 392, e2e 300, proxy 4, deploy 22, post-merge 19, browser 66 — all green.
+  EVIDENCE: unit 394, e2e 302, proxy 4, deploy 22, post-merge 19, browser 66 — all green.
 
 - [x] G5: the covering set is really the smallest one on this machine's four coding agents
   EVIDENCE: measured against the four built-in declarations — claude alone → `~/.claude/skills`; cursor alone → `~/.cursor/skills`; opencode alone → `~/.config/opencode/skill`; hermes alone → `~/.hermes/skills`; all four → exactly two directories (`~/.claude/skills` serving claude+cursor+opencode, `~/.hermes/skills` serving hermes). Asserted in the unit suite against synthetic declarations so the RULE is tested, not the current plugin files.
@@ -87,6 +87,32 @@ can change it under Settings → Freilauf skills; a read-only JSON API and
   (2) `test/unit.mjs` hardcoded `repoId: 1` in the run-definition group, which
   broke the moment another group inserted and removed a repo of its own; it now
   looks the id up. Both written up in the Pitfalls section.
+
+- [x] G16: a skill knows where its hub is, on any machine and with more than one installation
+  CHECK: node test/e2e.mjs
+  EXPECT: E2E tests: 302 checks passed
+  EVIDENCE: the installation writes its coordinates into `.freilauf-skill.json`
+  next to every skill it installs and refreshes them on every sync, even with
+  content updates off. The scripts resolve `FL_HUB_URL` → `FREILAUF_HUB_URL` →
+  that card → the operator's `env` → the default, probing each with
+  `/api/usage` (a route every release has had, so a hub OLDER than the skill is
+  reported as "deploy it" and not as "no hub"). Verified by hand against the
+  live hub, and against a two-installation fixture: A installs, B refuses all
+  six copies and names A's data directory, B adopts and the card is rewritten
+  to B's URL.
+
+- [x] G17: everything the UI offers as a dropdown is answerable from a script
+  CHECK: node test/e2e.mjs
+  EXPECT: E2E tests: 302 checks passed
+  EVIDENCE: `fl-options.py` prints repos, agents, configured coding agents, one
+  coding agent's providers/models/effort levels, favorites and flows, and
+  `check k=v …` validates a run definition against this installation — measured
+  on the live hub: it caught a provider sent to a subscription harness, a model
+  that does not exist (with "did you mean: opus"), an effort level that is not
+  offered (with the five that are) and a missing prompt, exit 1; a sound
+  definition exits 0 and hands back the `fl-api -X POST /api/runs …` line. The
+  e2e group runs it against the sandbox hub. Byte-identity of the three shipped
+  copies is a unit check.
 
 - [x] G13: the six skills were fact-checked against the source by a second reader
   EVIDENCE: an independent pass over all 19 files re-derived every route, field

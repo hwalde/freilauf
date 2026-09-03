@@ -1826,6 +1826,38 @@ try {
     }
   })
 
+  await pruefe('the options script is byte-identical in every skill that ships it', async () => {
+    const { readFileSync: rf, readdirSync: rd, existsSync: ex } = await import('node:fs')
+    const { join: j } = await import('node:path')
+    const root = new URL('../skills', import.meta.url).pathname
+    // A skill directory is copied standalone, so a shared tool has to exist in
+    // each skill that needs it. Three copies is three chances to drift, which is
+    // exactly what this pins: they must be the SAME file, byte for byte.
+    const kopien = rd(root, { withFileTypes: true })
+      .filter(d => d.isDirectory() && ex(j(root, d.name, 'scripts', 'fl-options.py')))
+      .map(d => [d.name, rf(j(root, d.name, 'scripts', 'fl-options.py'))])
+    wahr(kopien.length >= 2, `more than one skill ships it (${kopien.length})`)
+    for (const [name, inhalt] of kopien.slice(1)) {
+      wahr(inhalt.equals(kopien[0][1]), `${name} matches ${kopien[0][0]} byte for byte`)
+    }
+  })
+
+  await pruefe('every shipped script is executable and free of a python cache', async () => {
+    const { readdirSync: rd, statSync: st, existsSync: ex } = await import('node:fs')
+    const { join: j } = await import('node:path')
+    const root = new URL('../skills', import.meta.url).pathname
+    for (const d of rd(root, { withFileTypes: true }).filter(x => x.isDirectory())) {
+      const dir = j(root, d.name, 'scripts')
+      if (!ex(dir)) continue
+      falsch(ex(j(dir, '__pycache__')), `${d.name}: no __pycache__ was committed`)
+      for (const f of rd(dir)) {
+        // A script a skill points at has to be runnable where it lands: the
+        // installer copies modes through, so the bit has to be right here.
+        wahr((st(j(dir, f)).mode & 0o111) !== 0, `${d.name}/scripts/${f} is executable`)
+      }
+    }
+  })
+
   await pruefe('the group leaves no repo behind for the groups after it', () => {
     gleich(repoDb.prepare("SELECT count(*) c FROM repos WHERE name LIKE 'unit-%'").get().c, 0,
       'every row this group inserted is gone again')

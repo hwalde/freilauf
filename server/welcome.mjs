@@ -123,7 +123,7 @@ import { escapeHtml as e, fmtDateTime } from './util.mjs'
 import { getSetting, setSetting } from './db.mjs'
 import { redirect } from './web-helpers.mjs'
 import { t, currentLanguage } from './i18n.mjs'
-import { layout, problemPage } from './pages.mjs'
+import { layout, problemPage, skillScopeNote } from './pages.mjs'
 import { allPlugins, getPlugin, pluginKind, pluginSource, detectInstalled } from './plugins/registry.mjs'
 import {
   setPluginConfig, setPluginProviders, setCredential,
@@ -780,9 +780,14 @@ function step5(ctx) {
   let skills = []
   let targets = []
   try { skills = availableSkills(); targets = skillTargets().targets } catch { /* a wizard step never breaks over this */ }
-  const list = skills.length
-    ? `<ul class="skill-list">${skills.map(s =>
-        `<li><b>${e(s.title)}</b>${s.description ? ` — <span class="dim">${e(s.description.slice(0, 200))}</span>` : ''}</li>`).join('')}</ul>`
+  // The `shared` one is left out and the descriptions are not cut: same two
+  // reasons as on the settings page (skillCatalogList in pages.mjs).
+  const offen = skills.filter(x => x.role !== 'shared')
+  const list = offen.length
+    ? `<ul class="skill-list">${offen.map(s =>
+        `<li><b>${e(s.title)}</b>${s.description ? ` — <span class="dim">${e(s.description)}</span>` : ''}</li>`).join('')}</ul>`
+      + (skills.length > offen.length
+        ? `<p class="dim">${e(t('flskills.shared_note', { n: skills.length - offen.length }))}</p>` : '')
     : `<p class="dim">${e(t('flskills.none_shipped'))}</p>`
   const where = targets.length
     ? `<p class="dim">${e(t('welcome.s5_where'))}</p><ul class="skill-list">${targets.map(tg =>
@@ -802,6 +807,7 @@ function step5(ctx) {
       ${list}
       ${where}
       <p class="dim">${e(t('flskills.intro2'))}</p>
+      ${skillScopeNote()}
       <form method="post" action="/welcome/skills" class="form-grid">
         <input type="hidden" name="skills_install" value="0">
         <label class="chk"><input type="checkbox" name="skills_install" value="1" ${on ? 'checked' : ''}> ${e(t('flskills.install'))}</label>

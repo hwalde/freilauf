@@ -237,7 +237,7 @@ export async function readApi(req, res, url) {
       ok: true,
       install: skillsInstallOn(),
       auto_update: skillsAutoUpdate(),
-      skills: availableSkills().map(s => ({ name: s.name, title: s.title, description: s.description, hash: s.hash })),
+      skills: availableSkills().map(s => ({ name: s.name, title: s.title, description: s.description, role: s.role, hash: s.hash })),
       harnesses: roots,
       targets,
       skipped,
