@@ -248,9 +248,9 @@ and removes it from every agent.
 
 ## The building blocks
 
-Sixteen step types. The sixteenth, `count_runs`, comes from branch
-**`feat/count-runs-step` and is not on `main` yet** — an installation that has
-not taken that branch does not have it.
+Seventeen step types. `count_runs` and `toggle_agent` come from branch **`feat/count-runs-step`
+and are not on `main` yet** — an installation that has not taken that branch
+does not have them.
 **Read `references/steps.md` before writing any step you
 have not written before** — it has every property, every default, every output
 shape, and which strings are templated.
@@ -261,6 +261,7 @@ shape, and which strings are templated.
 | `start_agent` | start a configured agent; `wait` suspends until it ends |
 | `start_single_run` | start an ad-hoc run from a full run definition; `wait` as above |
 | `kill_run` | kill the session of the target runs and mark them aborted |
+| `toggle_agent` | switch an agent's schedule on/off/over, optionally start a run (feat/count-runs-step) |
 | `extract` | LLM fills fields you declare from a report / log / transcript / custom text |
 | `set_var` | store a value under `vars.<name>` |
 | `shell_command` | run a command on the hub machine; exit code is a result, not a failure |

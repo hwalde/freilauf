@@ -107,6 +107,7 @@ Steps never touch the database or tmux themselves — everything goes through
 | `start_agent` | `startForAgent(agent, promptExtra)` — quota gate applies; `wait` suspends until the run ends |
 | `start_single_run` | the same `startRun(def, …)` the run form uses — quota gate applies. Its property fields ARE the run definition (`RUN_DEF_FLOW_FIELDS` from `server/run-def.mjs`), so a field cannot exist in the form and be missing here |
 | `kill_run` | kills the tmux session of target runs, marks them aborted |
+| `toggle_agent` | switches an agent's schedule `on`, `off` or `toggle` → `{id, name, active_before, active_after, started_run_id}`. The agents page's own toggle, reachable from a flow, so "this nightly job has failed three times, stop it firing until somebody looks" is a block instead of a human. `startNow` starts a run at once, but **only after switching ON** — a ticked box is not a second command — and **only when no run of this agent is `running`/`waiting_help`/`deferred`**; otherwise the step reports it skipped and leaves `started_run_id` null, which is a result to branch on rather than a failure |
 | `shell_command` | runs a command on the hub machine as the hub's user. A non-zero exit code is a **result** (`vars.<out>.ok/exit_code/stdout/stderr`), not a failure of the step — only a command that could not run at all (no such working directory, spawn error, timeout) throws. With `detach` it is started in its own session (`setsid -f`) and the step ends at once with `{ ok, detached }` — see "Restarting the hub from a flow" |
 | `extract` | LLM fills user-defined fields from report / terminal log tail / claude transcript / custom text |
 | `count_runs` | how many runs the hub has right now, filtered by repo, status, agent and title prefix → `{count, ids, titles}`. `repos.max_parallel` is the **scheduler's** ceiling and nothing else — a flow start and an API start walk past it, so a flow that hands out work has to count for itself. Before this block that meant a `shell_command` calling the hub's own HTTP API plus a `condition` on its body: three blocks and a round trip for one integer the database already had. A status the operator mistyped **fails the step** instead of being dropped: dropping it would widen the filter and produce a plausible, wrong number |
@@ -120,6 +121,15 @@ of that agent), `repo`, `all_running`, `run_id` (template).
 `extract` sources: `report`, `log` (pipe-pane tail, cleaned), `transcript`
 (claude's JSONL — what the agent said and did, not what the terminal drew; other
 harnesses have none, so it falls back to the log), `report_and_log`, `custom`.
+
+`toggle_agent` reads and writes through `api.agentInfo()`, `api.setAgentActive()`
+and `api.startAgentIfIdle()` — three thin functions in `actions.mjs` on top of
+the agents table and `startForAgent()`. `agentInfo` exists because "toggle"
+cannot name the state it wants without reading the one it has, and a step reads
+state through the `api`, never off the database. `active = 0` gates the
+**scheduled** starts only (the `WHERE active = 1` in the scheduler's tick): a
+manual, flow or API start still works, which is why "switched off" is a
+reversible pause and not a lock.
 
 `count_runs` reads through `api.listRuns()`, which is deliberately a second query
 next to `api.findRuns()` rather than a parameter on it. They answer different
@@ -443,3 +453,9 @@ comma-separated status list trimmed into a list, empty meaning "all of them"),
 the case-insensitive title prefix with an umlaut title SQLite's `LIKE` would
 miss, the empty result, `statuses`/`titlePrefix` as templates, and the mistyped
 status that fails the step instead of counting everything.
+
+`test/unit.mjs`, group "Flows: toggle_agent": the registry entry and the promised
+shape, `on`/`off`/`toggle` against a stub that carries the agent's state, the
+"start right away" box that starts nothing when the same step just switched the
+agent OFF, the busy agent that is skipped without failing the flow run, and an
+agent id nobody has.

@@ -4,13 +4,13 @@ Source of truth: `server/flows/steps.mjs` (fields, defaults, `run()`),
 `server/flows/actions.mjs` (what the `api` really does),
 `server/run-def.mjs` (`RUN_DEF_FLOW_FIELDS`, `defFromFlowProps`).
 
-Sixteen step types. There is no seventeenth — do not invent one.
+Seventeen step types. There is no eighteenth — do not invent one.
 
-The sixteenth, `count_runs`, comes from branch **`feat/count-runs-step` and is
-not on `main` yet** — an installation that has not taken that branch does not
-have it. Ask `fl-api /api/flows/meta` before you write one, or
-`fl-api /api/flows/step-defaults type=count_runs`, which answers `{}` for a type
-the hub does not know.
+`count_runs` and `toggle_agent` come from branch **`feat/count-runs-step`
+and are not on `main` yet** — an installation that has not taken that branch
+does not have them. Ask `fl-api /api/flows/meta`
+before you write one, or `fl-api /api/flows/step-defaults type=<type>`, which
+answers `{}` for a type the hub does not know.
 
 ## Index
 
@@ -20,6 +20,7 @@ the hub does not know.
 | `start_agent` | `task` | agents | yes | `run` |
 | `start_single_run` | `task` | agents | yes | `run` |
 | `kill_run` | `task` | agents | yes | `killed` |
+| `toggle_agent` | `task` | agents | yes | `agent` |
 | `extract` | `task` | data | yes | `extracted` |
 | `set_var` | `task` | data | yes | `value` |
 | `shell_command` | `task` | data | yes | `shell` |
@@ -54,6 +55,7 @@ verbatim, so `{{…}}` in them is a literal that will break the step.
 | `start_agent` | `promptExtra` | `agentId`, `wait` |
 | `start_single_run` | `model`, `prompt`, `branchPattern` | `harness`, `provider`, `effort`, `goal`, `branchMode`, `keepOnBranch`, `expectedMinutes`, `repoId`, every `or*` field |
 | `kill_run` | `runId` | `target`, `agentId`, `repoId` |
+| `toggle_agent` | — | `agentId`, `active`, `startNow` |
 | `extract` | `text` (source `custom` only), `sourceRun` | **`instructions`**, `fields`, `model`, `llmSource`, `fallback`, `fallbackModel` |
 | `set_var` | `value` | `outputVar` |
 | `shell_command` | `command`, `cwd`, `timeoutMinutes` | `detach` |
@@ -172,6 +174,41 @@ Output `{ count, run_ids }` — **`count` counts runs it acted on, not runs it
 really aborted**: `killRun()` always returns true, while the `aborted` event and
 the status change only happen for a run in `running`/`waiting_help`/`deferred`.
 Same placement rule as `send_message`.
+
+### `toggle_agent`
+
+Switches an agent's **schedule** on, off or over — the toggle on the agents page,
+reachable from a flow. What it is for: "the nightly job has failed three times in
+a row, stop it firing until somebody looks", and the flow that switches it back
+on afterwards.
+
+| property | default | notes |
+|---|---|---|
+| `agentId` | `''` | **required**, number. Not templated |
+| `active` | `on` | `on` \| `off` \| `toggle`. Not templated |
+| `startNow` | `false` | checkbox, shown only for `active=on`. Not templated |
+| `outputVar` | `agent` | |
+
+Output `{ id: number, name: string, active_before: boolean, active_after: boolean,
+started_run_id: string|null }`.
+
+- **`off` stops the SCHEDULE and nothing else.** A manual start, a flow start and
+  an API start all still work — the switch is a reversible pause, not a lock.
+- `startNow` starts a run **only after switching on**: with `active=off` the
+  ticked box is ignored, because a ticked box is not a second command.
+- It also starts nothing while a run of this agent is `running`, `waiting_help`
+  or **`deferred`** (a deferred run has not begun but it is queued and it will).
+  The step then logs `übersprungen (agent is busy)` and leaves
+  `started_run_id` null — a **result** to branch on, not a failure.
+- An agent id nobody has **throws**: a step that switched nothing must not report
+  success.
+- No placement rule — legal in a `cron` flow like everywhere else.
+
+```jsonc
+{ "id": "t1", "componentType": "task", "type": "toggle_agent", "name": "Stop the nightly",
+  "properties": { "agentId": 4, "active": "off", "startNow": false, "outputVar": "agent" } }
+// then: { "type": "notify", "properties": { "text": "{{vars.agent.name}} is now off" } }
+```
 
 ---
 

@@ -3968,6 +3968,115 @@ try {
     falsch(fr.log.some(l => l.msg === 'never'), 'nothing after it ran on a wrong number')
   })
 
+  // ------------------------------------------------------------------
+  // Switching an agent's schedule from inside a flow. The two places it could
+  // quietly do the wrong thing: starting a run for an agent it just switched
+  // OFF, and starting a second run for an agent that is already busy — which is
+  // the one thing "start right away" was given a guard for.
+  gruppe('Flows: toggle_agent')
+
+  const agentStub = (agents, busyIds = []) => {
+    const calls = []
+    const rows = new Map(agents.map(a => [a.id, { ...a }]))
+    return { calls, api: {
+      ...stubApi,
+      agentInfo: async (id) => (rows.has(id) ? { ...rows.get(id) } : null),
+      setAgentActive: async (id, on) => {
+        calls.push(['setAgentActive', id, on])
+        const a = rows.get(id)
+        if (!a) return { ok: false, error: `agent ${id} does not exist` }
+        const before = a.active
+        a.active = !!on
+        return { ok: true, id: a.id, name: a.name, active_before: before, active_after: a.active }
+      },
+      startAgentIfIdle: async (id) => {
+        calls.push(['startAgentIfIdle', id])
+        if (busyIds.includes(id)) return { ok: true, runId: null, busy: true }
+        return { ok: true, runId: `run-of-${id}` }
+      },
+    } }
+  }
+  const toggleRun = async (properties, agents, busyIds = []) => {
+    const { api, calls } = agentStub(agents, busyIds)
+    const id = await engine.startFlowRun(
+      { id: null, name: 'switcher', definition: { sequence: [step('toggle_agent', properties)] } },
+      { kind: 'cron' }, api)
+    return { fr: fdb.getFlowRun(id), calls }
+  }
+  const NIGHTLY = [{ id: 4, name: 'nightly', active: true }]
+
+  await pruefe('toggle_agent: registry entry, defaults and the shape it promises', () => {
+    const meta = STEP_MAP.toggle_agent
+    wahr(!!meta && meta.output && meta.group === 'agents', 'in the registry, in the agents group, with an output')
+    wahr(STEPS.some(s => s.type === 'toggle_agent'), 'and in the list the editor is built from')
+    falsch(!!meta.placement, 'no placement rule — it switches an agent, it does not read the trigger run')
+    const props = defaultProps('toggle_agent')
+    gleich(props.active, 'on', 'switching on is the default')
+    gleich(props.startNow, false, 'and it does not start anything unasked')
+    gleich(props.outputVar, 'agent', 'default output variable')
+    const paths = vs.shapePaths('vars.agent', vs.outputShapeOf(
+      { id: 'tg', type: 'toggle_agent', properties: props }, meta)).map(p => `${p.path}:${p.type}`).join(',')
+    for (const p of ['vars.agent.id:number', 'vars.agent.name:string', 'vars.agent.active_before:boolean',
+      'vars.agent.active_after:boolean', 'vars.agent.started_run_id:string']) enthaelt(paths, p, p)
+    wahr(validateDefinition({ sequence: [{ id: 'tg', type: 'toggle_agent', properties: { ...props, agentId: '' } }] })
+      .some(p => p.includes("'agentId' is required")), 'without an agent it is not a step')
+    gleich(validateDefinition({ sequence: [{ id: 'tg', type: 'toggle_agent', properties: { ...props, agentId: 4 } }] },
+      { kind: 'cron' }).length, 0, 'legal under a schedule, where there is no run at all')
+  })
+
+  await pruefe('toggle_agent: on, off and over — and the state it reports is before → after', async () => {
+    const an = await toggleRun({ agentId: '4', active: 'on', startNow: false, outputVar: 'agent' },
+      [{ id: 4, name: 'nightly', active: false }])
+    gleich(an.calls[0].join(':'), 'setAgentActive:4:true', 'switching on asks for true')
+    gleich(an.fr.context.vars.agent.active_before, false, 'it was off')
+    gleich(an.fr.context.vars.agent.active_after, true, 'and is on now')
+    gleich(an.fr.context.vars.agent.name, 'nightly', 'the name comes back for the message that follows')
+    wahr(an.fr.log.some(l => l.msg === 'nightly: off → on'), 'the log names both ends of the change')
+
+    const aus = await toggleRun({ agentId: '4', active: 'off', startNow: false, outputVar: 'agent' }, NIGHTLY)
+    gleich(aus.calls[0].join(':'), 'setAgentActive:4:false', 'switching off asks for false')
+    gleich(aus.fr.context.vars.agent.active_after, false, 'and it is off')
+
+    const um1 = await toggleRun({ agentId: '4', active: 'toggle', startNow: false, outputVar: 'agent' }, NIGHTLY)
+    gleich(um1.calls[0].join(':'), 'setAgentActive:4:false', 'toggle on an active agent switches it off')
+    const um2 = await toggleRun({ agentId: '4', active: 'toggle', startNow: false, outputVar: 'agent' },
+      [{ id: 4, name: 'nightly', active: false }])
+    gleich(um2.calls[0].join(':'), 'setAgentActive:4:true', 'and on an inactive one switches it on')
+  })
+
+  await pruefe('toggle_agent: "start right away" starts one — and never for an agent it just switched off', async () => {
+    const an = await toggleRun({ agentId: '4', active: 'on', startNow: true, outputVar: 'agent' },
+      [{ id: 4, name: 'nightly', active: false }])
+    wahr(an.calls.some(c => c[0] === 'startAgentIfIdle'), 'switched on, so it starts')
+    gleich(an.fr.context.vars.agent.started_run_id, 'run-of-4', 'and hands the run id on')
+    enthaelt(an.fr.log.map(l => l.msg).join(' '), 'started run run-of-4', 'the log says which run')
+
+    const aus = await toggleRun({ agentId: '4', active: 'off', startNow: true, outputVar: 'agent' }, NIGHTLY)
+    falsch(aus.calls.some(c => c[0] === 'startAgentIfIdle'),
+      'switched OFF with the box still ticked starts nothing — the ticked box is not a second command')
+    gleich(aus.fr.context.vars.agent.started_run_id, null, 'and the output says so')
+  })
+
+  await pruefe('toggle_agent: a busy agent is skipped — a result, not a failure', async () => {
+    const { fr } = await toggleRun({ agentId: '4', active: 'on', startNow: true, outputVar: 'agent' }, NIGHTLY, [4])
+    gleich(fr.status, 'done', 'the flow run carries on')
+    gleich(fr.context.vars.agent.started_run_id, null, 'nothing was started')
+    gleich(fr.context.vars.agent.active_after, true, 'but the switch itself did happen')
+    enthaelt(fr.log.map(l => l.msg).join(' '), 'übersprungen', 'and the log says it was skipped')
+  })
+
+  await pruefe('toggle_agent: an agent nobody has fails the step', async () => {
+    const { api } = agentStub(NIGHTLY)
+    const id = await engine.startFlowRun({ id: null, name: 'ghost', definition: { sequence: [
+      step('toggle_agent', { agentId: '99', active: 'on', startNow: false, outputVar: 'agent' }),
+      step('note', { text: 'never' }),
+    ] } }, { kind: 'cron' }, api)
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'failed', 'a flow that switches nothing must not report success')
+    enthaelt(fr.error, '99', 'the error names the id')
+    falsch(fr.log.some(l => l.msg === 'never'), 'and nothing after it ran')
+  })
+
   gruppe('Docs: AGENTS.md / CLAUDE.md pairing')
 
   await pruefe('every AGENTS.md has a CLAUDE.md next to it that only includes it', async () => {

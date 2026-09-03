@@ -134,6 +134,54 @@ export const STEPS = [
       return { msg: `aborted ${ids.length} run(s)`, output: { count: ids.length, run_ids: ids } }
     },
   },
+  // Switching an agent's schedule on or off was a thing only a human could do,
+  // on the agents page. A flow that reacts to what it finds — "the nightly job
+  // has failed three times, stop it firing until somebody looks" — had no way to
+  // say so, and neither had the flow that switches it back on afterwards.
+  {
+    type: 'toggle_agent', component: 'task', group: 'agents', output: true,
+    outputShape: { type: 'object', props: {
+      id: { type: 'number' }, name: { type: 'string' },
+      active_before: { type: 'boolean' }, active_after: { type: 'boolean' },
+      started_run_id: { type: 'string' } } },
+    fields: [
+      { key: 'agentId', kind: 'agent', required: true },
+      { key: 'active', kind: 'select', options: ['on', 'off', 'toggle'], default: 'on' },
+      { key: 'startNow', kind: 'checkbox', default: false, showIf: { active: 'on' } },
+      { key: 'outputVar', kind: 'text', default: 'agent' },
+    ],
+    async run(props, ctx, api, info) {
+      const agentId = Number(props.agentId) || null
+      if (!agentId) throw new Error('toggle_agent: no agent chosen')
+      const mode = props.active || 'on'
+      // 'toggle' has to know the state before it can name the one it wants, so
+      // it reads it the only way a step may — through the api, off the same row
+      // setAgentActive is about to write.
+      let want
+      if (mode === 'toggle') {
+        const before = await api.agentInfo(agentId)
+        if (!before) throw new Error(`toggle_agent: agent ${agentId} does not exist`)
+        want = !before.active
+      } else want = mode === 'on'
+      const r = await api.setAgentActive(agentId, want)
+      if (!r.ok) throw new Error(`toggle_agent: ${r.error || 'could not switch the agent'}`)
+
+      const out = { id: r.id, name: r.name, active_before: r.active_before, active_after: r.active_after, started_run_id: null }
+      const state = `${r.name}: ${r.active_before ? 'on' : 'off'} → ${r.active_after ? 'on' : 'off'}`
+      // Only after switching ON, and only when the box is ticked: an agent that
+      // was just switched off must not be started by the same step.
+      if (!(props.startNow && r.active_after)) return { msg: state, output: out }
+
+      const s = await api.startAgentIfIdle(agentId, info.flowRunId)
+      if (!s.ok) throw new Error(`toggle_agent: ${s.error || 'run start failed'}`)
+      // A run of this agent is still going, so no second one is started. That is
+      // the requested behaviour and therefore a result, not a failure — the step
+      // says "skipped" and the flow reads `started_run_id: null` to branch on.
+      if (!s.runId) return { msg: `${state} — übersprungen (agent is busy)`, output: out }
+      out.started_run_id = s.runId
+      return { msg: `${state} — started run ${s.runId}`, output: out }
+    },
+  },
 
   // ---------------- data ----------------
   {
