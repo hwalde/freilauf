@@ -4,7 +4,7 @@
 import db, {
   listFlows, getFlow, saveFlow, deleteFlow, toggleFlow, listFlowRuns, getFlowRun, autoFlowName,
 } from './db.mjs'
-import { stepsMeta, GROUPS, validateDefinition, definitionHints, defaultProps } from './steps.mjs'
+import { stepsMeta, GROUPS, validateDefinition, definitionHints } from './steps.mjs'
 import { OPS } from './template.mjs'
 import { FIELD_TYPES } from './llm.mjs'
 import { normalizeTrigger, runFlowNow, TRIGGER_KINDS, OUTCOMES } from './triggers.mjs'
@@ -251,9 +251,12 @@ export async function flowApi(req, res, url) {
     const f = getFlow(+m[1])
     return f ? json(res, 200, { ok: true, flow: f }) : json(res, 404, { ok: false })
   }
-  if (req.method === 'GET' && path === '/api/flows/step-defaults') {
-    return json(res, 200, { ok: true, properties: defaultProps(url.searchParams.get('type') ?? '') })
-  }
+  // A step's default properties are deliberately NOT an endpoint of their own.
+  // `stepsMeta()` already ships every step's `fields` — defaults included — into
+  // the editor page, and `toolboxStep()` in public/flows.js derives the property
+  // object from them with the same loop `defaultProps()` runs. A request for the
+  // same answer would be a second copy of that rule, free to drift from the one
+  // the toolbox actually uses.
   if (req.method === 'POST' && (m = path.match(/^\/api\/flows\/(\d+)\/run$/))) {
     const f = getFlow(+m[1])
     if (!f) return answer(req, res, 404, { ok: false, error: 'unknown flow' }, '/flows')

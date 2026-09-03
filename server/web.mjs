@@ -24,7 +24,7 @@ import {
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
   pageMergeSettings, mergeSettingsSave,
   pageCleanupSettings, cleanupSettingsSave,
-  headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
+  headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents,
   integrationSection, problemPage, runEditCard,
 } from './pages.mjs'
 import {
@@ -827,14 +827,11 @@ async function fragmentApi(req, res, url) {
       + runEditCard(run) + integrationSection(run, getRepo(run.repo_id)) + runMetrics(run) + runEvents(run.id))
   }
 
-  // A session row. listSessions() asks tmux, so this is the one fragment that
-  // costs a process — and the reason the sessions page does not poll it in bulk.
-  if (path === '/api/fragments/session-row') {
-    const name = url.searchParams.get('name') ?? ''
-    const { listSessions } = await import('./sessions.mjs')
-    const s = name ? (await listSessions()).find(x => x.name === name) : null
-    return fragment(res, s ? sessionRow(s, {}) : '')
-  }
+  // There is deliberately no per-session fragment. The sessions page ends a
+  // session optimistically in the browser (hub.js marks the row "ending …" in
+  // the same tick and strikes it through when the server confirms), so a row
+  // never has to be re-rendered from here — and asking would cost a
+  // `tmux list-sessions` plus a `ps` over every process for one row.
 
   return json(res, 404, { ok: false, error: `unknown API path: ${req.method} ${path}` })
 }

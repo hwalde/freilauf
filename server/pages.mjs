@@ -655,7 +655,7 @@ export async function layout(req, title, active, content, selectedRepo = null, w
   const otherRepo = ownRepo != null && effRepo != null && ownRepo !== effRepo && known(ownRepo)
     ? otherRepoBanner(ownRepo, effRepo, repos) : ''
   const repoSel = repos.length
-    ? `<label class="dim">${e(t('layout.repo'))}</label> <select id="repo-switch" data-active="${e(active)}">${repos.map(r => `<option value="${r.id}" ${r.id == effRepo ? 'selected' : ''}>${e(r.name)}</option>`).join('')}</select>`
+    ? `<label class="dim">${e(t('layout.repo'))}</label> <select id="repo-switch">${repos.map(r => `<option value="${r.id}" ${r.id == effRepo ? 'selected' : ''}>${e(r.name)}</option>`).join('')}</select>`
     : `<a href="/repos" class="warn">${e(t('layout.no_repo'))}</a>`
   return `<!doctype html><html lang="${e(currentLanguage())}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1803,7 +1803,7 @@ function llmSourceFields(prefix, s, sources) {
   const tag = s[`${prefix}_or_provider`] ?? ''
   const mode = cfg?.mode === 'auto' ? 'auto' : tag ? 'pin' : 'offen'
   return `<label>${e(t('settings.llm_source'))}
-      <select name="${e(key)}" data-llm-source data-llm-prefix="${e(prefix)}">${stale}${options}</select>
+      <select name="${e(key)}" data-llm-source>${stale}${options}</select>
       <span class="dim">${e(t('settings.llm_source_explain'))}</span></label>
     <p class="warn" data-llm-overhead ${overhead ? '' : 'hidden'}>${e(t('settings.llm_source_overhead'))}</p>
     <fieldset class="schedule" data-llm-pin ${pin ? '' : 'hidden'}>
