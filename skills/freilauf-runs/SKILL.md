@@ -36,6 +36,35 @@ Repeat a name to send a list (`skills=unlazy skills=other`). Exit code 0 = HTTP
 `../freilauf-models/SKILL.md`** — and the operator's saved setups
 (`fl-api /api/favorites`) outrank every recommendation in it.
 
+
+## Start here
+
+```bash
+<skill-dir>/scripts/fl-options.py            # what you can choose, and where the hub is
+<skill-dir>/scripts/fl-options.py check ...  # validate a run definition BEFORE you post it
+```
+
+**Never guess a repo id, an agent id, a coding agent, a provider, a model or an
+effort level.** Every one of them is a dropdown in the web UI, and
+`fl-options.py` prints the same lists — for THIS installation, which is the only
+one that counts. It also finds the hub by itself; if nothing answers,
+`fl-options.py where` says what it tried and what to do.
+
+### Where is the hub, on this machine?
+
+The scripts work it out, in this order, and `fl-options.py where` shows it:
+
+1. `FL_HUB_URL` — set inside every run Freilauf starts, so a run always talks to
+   **its own** hub even if the machine has two installations.
+2. `FREILAUF_HUB_URL` — export it to point a shell at one deliberately.
+3. the calling card `.freilauf-skill.json` next to this skill: Freilauf writes
+   its own address there when it installs the skill, and keeps it current.
+4. `FREILAUF_LOCAL_PORT` from `~/.config/freilauf/env`.
+5. `http://127.0.0.1:8791`, the code default.
+
+`fl-api` is the raw client and follows the same idea; it is always on the PATH
+inside a run. Outside one, prefer the scripts — they are self-contained.
+
 ## 1. Find a run
 
 ```bash
@@ -120,9 +149,9 @@ repo and prints the status and the verdict side by side — which is the only wa
 to see that they disagree:
 
 ```bash
-<skill-dir>/scripts/run-alive.sh <run-uuid>
-<skill-dir>/scripts/run-alive.sh --repo <id>
-<skill-dir>/scripts/run-alive.sh --status running
+<skill-dir>/scripts/run-alive.py <run-uuid>
+<skill-dir>/scripts/run-alive.py --repo <id>
+<skill-dir>/scripts/run-alive.py --status running
 ```
 
 ```text
@@ -131,9 +160,10 @@ SHORT     STATUS        VERDICT       SESSION                    LAST ACTIVITY  
 5e6f7a8b  running       unknown       fl-nightly-5e6f7a8b        2026-09-03 09:02:11  Flaky test hunt
 ```
 
-Exit codes: 0 printed something, 1 no run matched, 2 usage, 3 the hub did not
-answer (or is older than this skill and does not know the route). It needs
-`fl-api` and `python3` on the PATH.
+It shows the 15 newest and says how many it held back (`--all` for everything).
+Exit codes: 0 printed something, 1 no run matched, 2 usage, 3 no hub answered.
+Needs only `python3` — it talks to the hub itself and finds it the way
+"Start here" describes.
 
 ### The same question from a shell
 

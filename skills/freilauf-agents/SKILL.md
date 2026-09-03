@@ -31,6 +31,20 @@ harness/provider/model/effort decision read `../freilauf-models/SKILL.md`
 **before** you fill those fields in — and the operator's favorites
 (`fl-api /api/favorites`) come before any recommendation in it.
 
+
+## Start here
+
+```bash
+<skill-dir>/scripts/fl-options.py            # what you can choose, and where the hub is
+<skill-dir>/scripts/fl-options.py check ...  # validate a run definition BEFORE you post it
+```
+
+**Never guess a repo id, an agent id, a coding agent, a provider, a model or an
+effort level.** Every one of them is a dropdown in the web UI, and
+`fl-options.py` prints the same lists — for THIS installation, which is the only
+one that counts. It also finds the hub by itself; if nothing answers,
+`fl-options.py where` says what it tried and what to do.
+
 ## The tool
 
 `fl-api <path> [name=value …]` (GET) and `fl-api -X POST <path> [name=value …]`

@@ -4647,9 +4647,27 @@ export default {
 
   await pruefe('the settings page names what is shipped and where it would go', async () => {
     const html = await (await hol('/settings/skills')).text()
-    enthaelt(html, 'freilauf-models', 'the shipped skills are listed by name')
+    enthaelt(html, 'freilauf-runs', 'the shipped skills are listed by name')
+    // The shared reference is installed but NOT offered: nobody picks it, the
+    // other skills load it themselves. A footnote says one more is coming
+    // along, without naming it.
+    falsch(html.includes('<b>freilauf-models</b>'), 'the shared skill is not in the list')
+    enthaelt(html, 'shared reference', 'but the page admits one more is installed')
+    // Descriptions are printed in full — cutting them ended sentences mid-word.
+    enthaelt(html, 'even when the word Freilauf is never said', 'and a description is not truncated')
+    // Where they land and what cannot be scoped — with somewhere to say so.
+    enthaelt(html, 'user level', 'the page says they are installed at user level')
+    enthaelt(html, 'github.com/hwalde/freilauf/issues', 'and links the issue tracker for per-project scoping')
     enthaelt(html, 'name="skills_install"', 'the installation switch is there')
     enthaelt(html, 'name="skills_auto_update"', 'and the automatic-update switch')
+    // With the installation off, "keep them up to date" is a switch about
+    // nothing: hidden AND disabled, so its hidden `0` companion cannot post and
+    // overwrite a preference the operator left on.
+    enthaelt(html, '<div id="skills-auto" hidden>', 'the update row is hidden while the installation is off')
+    gleich((html.match(/name="skills_auto_update"[^>]*disabled/g) ?? []).length, 2,
+      'and both of its inputs are disabled, so neither travels')
+    falsch(/<div class="btn-row"><button>[^<]*<\/button>\s*<a /.test(html),
+      'the form offers one action and no link beside it')
     enthaelt(html, 'type="hidden" name="skills_install" value="0"',
       'each carries its hidden 0 companion — without it an unticked box would read as "not mentioned"')
     enthaelt(html, 'id="skills-remove-dialog"', 'the confirmation dialog is rendered by the server')
@@ -4685,6 +4703,19 @@ export default {
     const aus = await formular('/settings/skills', { skills_install: '0', skills_auto_update: '1' }, { alsBrowser: true })
     gleich(aus.status, 303, 'switching off redirects too')
     for (const wurzel of vorher) falsch(existsSync(join(wurzel, 'freilauf-models')), `${wurzel}: the copy is gone`)
+  })
+
+  await pruefe('saving with the update row absent leaves the stored preference alone', async () => {
+    const wert = () => db.prepare("SELECT value FROM settings WHERE key='skills_auto_update'").get()?.value
+    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { alsBrowser: true })
+    gleich(wert(), '1', 'it is on to begin with')
+    // The browser hides AND disables the row when the installation goes off, so
+    // a real save from that page carries no `skills_auto_update` at all. The
+    // stored preference has to survive that, or switching the installation back
+    // on would silently find updates off.
+    await formular('/settings/skills', { skills_install: '0' }, { alsBrowser: true })
+    gleich(wert(), '1', 'and a save without the field does not turn it off')
+    gleich(db.prepare("SELECT value FROM settings WHERE key='skills_install'").get().value, '0', 'while the installation really went off')
   })
 
   await pruefe('a "sync now" post re-establishes the state without changing the settings', async () => {
@@ -4765,19 +4796,19 @@ export default {
     // A script shipped inside a skill is a promise like any other line in it.
     // Run it the way an agent would: fl-api on PATH, FL_HUB_URL from the
     // session — which is exactly what a run's environment carries.
-    const skript = join(PROJEKT, 'skills', 'freilauf-runs', 'scripts', 'run-alive.sh')
-    const lauf = (args) => new Promise((res) => execFile('bash', [skript, ...args], {
+    const skript = join(PROJEKT, 'skills', 'freilauf-runs', 'scripts', 'run-alive.py')
+    const lauf = (args) => new Promise((res) => execFile('python3', [skript, ...args], {
       env: { ...process.env, PATH: `${join(PROJEKT, 'bin')}:${process.env.PATH}`, FL_HUB_URL: sk.basis },
       timeout: 30_000,
     }, (err, stdout, stderr) => res({ code: err?.code ?? 0, stdout, stderr })))
 
     const hilfe = await lauf(['--help'])
     gleich(hilfe.code, 0, '--help works')
-    enthaelt(hilfe.stdout, 'run-alive.sh', 'and says what it is')
+    enthaelt(hilfe.stdout, 'run-alive', 'and says what it is')
 
     const einer = await lauf([R1])
     gleich(einer.code, 0, `one run answers (${einer.stderr})`)
-    enthaelt(einer.stdout, 'VERDICT', 'the header')
+    enthaelt(einer.stdout, 'verdict', 'the header')
     enthaelt(einer.stdout, R1.slice(0, 8), 'and the run it was asked about')
     // The verdict column is the whole point: it is one of the five words, and
     // it is NOT the status column.
@@ -4790,6 +4821,45 @@ export default {
 
     const quatsch = await lauf(['--wat'])
     gleich(quatsch.code, 2, 'an unknown option is a usage error, not a crash')
+  })
+
+  await pruefe("the skills' options tool answers against a live hub", async () => {
+    // Every dropdown in the UI is a list this must be able to print, and the
+    // check must catch a wrong value with the valid ones next to it — that is
+    // the whole point of shipping it.
+    const skript = join(PROJEKT, 'skills', 'freilauf-runs', 'scripts', 'fl-options.py')
+    const lauf = (args) => new Promise((res) => execFile('python3', [skript, ...args], {
+      env: { ...process.env, FL_HUB_URL: BASIS },
+      timeout: 40_000,
+    }, (err, stdout, stderr) => res({ code: err?.code ?? 0, stdout, stderr })))
+
+    const uebersicht = await lauf([])
+    gleich(uebersicht.code, 0, `no arguments is the overview (${uebersicht.stderr})`)
+    enthaelt(uebersicht.stdout, 'Freilauf options', 'and it says what it is')
+    enthaelt(uebersicht.stdout, '`repos`', 'listing the commands rather than the data')
+
+    const repos = await lauf(['repos'])
+    gleich(repos.code, 0, 'repos answers')
+    enthaelt(repos.stdout, 'e2e', 'with the sandbox repo in it')
+
+    const wo = await lauf(['where'])
+    gleich(wo.code, 0, 'where answers')
+    enthaelt(wo.stdout, BASIS, 'naming the hub it found')
+
+    // The fill-in help: a wrong value must come back with the valid ones.
+    const schlecht = await lauf(['check', 'harness=claude', 'effort=maximum', 'repo_id=' + repoId])
+    gleich(schlecht.code, 1, 'a broken definition exits 1')
+    enthaelt(schlecht.stdout, 'WRONG', 'and says which field is wrong')
+    enthaelt(schlecht.stdout, 'effort', 'naming it')
+    enthaelt(schlecht.stdout, 'MISSING', 'plus what is missing entirely')
+
+    const gut = await lauf(['check', 'harness=claude', 'repo_id=' + repoId, 'prompt=do a thing',
+      'branch_mode=keiner'])
+    gleich(gut.code, 0, `a sound definition exits 0 (${gut.stdout})`)
+    enthaelt(gut.stdout, '/api/runs', 'and hands back the command to post it')
+
+    const quatsch = await lauf(['nonsense'])
+    gleich(quatsch.code, 2, 'an unknown command is a usage error')
   })
 
   await pruefe('the search finds a run by its title, its prompt and its id', async () => {

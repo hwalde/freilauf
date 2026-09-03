@@ -45,6 +45,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { env } from './env.mjs'
 import { dataDir } from './paths.mjs'
+import { RUNS_DIR, WORKTREES_DIR, hubVersion } from './util.mjs'
 import { getSetting } from './db.mjs'
 import { allPlugins } from './plugins/registry.mjs'
 import { isPluginEnabled } from './plugins/store.mjs'
@@ -98,13 +99,21 @@ function frontmatter(text) {
   if (!m) return out
   let key = null
   for (const raw of m[1].split(/\r?\n/)) {
+    // `metadata.freilauf_role` is read wherever it sits under `metadata:`.
+    // A tolerant scan rather than a YAML parser, for the same reason the two
+    // fields below are read that way — and `metadata` is the spec's own place
+    // for a client's private key.
+    const rolle = raw.match(/^\s+freilauf_role:\s*(.+)$/)
+    if (rolle) { out.freilauf_role = rolle[1].trim().replace(/^["']|["']$/g, ''); key = null; continue }
     const f = raw.match(/^(name|description):\s*(.*)$/)
     if (f) { key = f[1]; out[key] = f[2].trim(); continue }
     // A folded scalar (`description: >`) continues on the indented lines below.
     if (key && /^\s+\S/.test(raw)) out[key] = `${out[key]} ${raw.trim()}`.trim()
     else if (/^\S/.test(raw)) key = null
   }
-  for (const k of Object.keys(out)) out[k] = out[k].replace(/^["'>|]\s*/, '').replace(/["']$/, '').trim()
+  for (const k of ['name', 'description']) {
+    if (out[k] !== undefined) out[k] = out[k].replace(/^["'>|]\s*/, '').replace(/["']$/, '').trim()
+  }
   return out
 }
 
@@ -150,6 +159,11 @@ export function availableSkills() {
       name: d.name,
       title: fm.name ?? d.name,
       description: fm.description ?? '',
+      // `shared` = a reference the OTHER skills load, not something the
+      // operator picks. It is installed like any other (the others point at
+      // it by relative path), but the pages do not list it: a settings page
+      // that offers a thing nobody chooses is a settings page with noise in it.
+      role: fm.freilauf_role ?? '',
       dir,
       hash: skillHash(dir),
       files: payloadFiles(dir).length,
@@ -261,11 +275,28 @@ function writeState(state) {
  * answer, for a marker somebody deleted.
  */
 export function ownedByHub(dir, state = readState()) {
-  try {
-    const m = JSON.parse(readFileSync(join(dir, MARKER), 'utf8'))
-    if (m && m.freilauf === true) return true
-  } catch { /* no marker, or not ours */ }
+  if (markerOf(dir)) return true
   return state.entries.some(e => e.dir === dir)
+}
+
+/**
+ * Was this copy installed by a DIFFERENT Freilauf on this machine?
+ *
+ * Two installations sharing `~/.claude/skills` is a real possibility the moment
+ * somebody runs a second hub, and silently overwriting the other one's copies —
+ * and its coordinates, which its skills' scripts read — would be the worst
+ * outcome: both installations would keep taking the directory back from each
+ * other and neither would ever be right. So it is a QUESTION, not a decision:
+ * `syncSkills()` leaves such a directory alone and reports it, and the settings
+ * page asks whether it belongs to another installation or whether the config
+ * should simply be brought up to date.
+ *
+ * `null` = not ours to worry about (no marker, or the same installation).
+ */
+export function foreignInstallation(dir) {
+  const m = markerOf(dir)
+  if (!m?.installation) return null
+  return sameInstallation(m.installation, installationFacts()) ? null : m.installation
 }
 
 // ---------------------------------------------------------------- installing
@@ -276,10 +307,71 @@ function copySkill(source, target) {
   cpSync(source, target, { recursive: true, dereference: true })
 }
 
+/**
+ * Who installed this copy, and how to reach them.
+ *
+ * A skill is installed at USER level, so it is read by sessions that Freilauf
+ * never started — a human's own claude session in some unrelated project. There
+ * `FL_HUB_URL` is not set, `~/.local/bin` may not be on the PATH, and on a
+ * machine with two installations there is no single right answer anyway. So the
+ * installation writes its own coordinates NEXT TO the skill it installs, and
+ * the skill's scripts read the file lying beside them.
+ *
+ * `id` is the data directory: it is what actually distinguishes two
+ * installations on one machine (the database lives in it), it is stable across
+ * restarts and deploys, and it is not a secret. The directories travel too,
+ * because they are all configurable (`FREILAUF_RUNS_DIR` and friends) and a
+ * skill that hardcoded `~/agents/runs` would be wrong on half the machines.
+ */
+export function installationFacts() {
+  const port = env('LOCAL_PORT') ?? '8791'
+  return {
+    id: dataDir(),
+    url: `http://127.0.0.1:${port}`,
+    data_dir: dataDir(),
+    runs_dir: RUNS_DIR,
+    worktrees_dir: WORKTREES_DIR,
+    version: hubVersion() || null,
+  }
+}
+
+/** Same installation? Compared on the id — the two may legitimately differ in port. */
+function sameInstallation(a, b) { return !!a && !!b && a.id === b.id }
+
+/**
+ * The marker of an installed copy, or null. Never throws — a directory with an
+ * unreadable marker is simply one we know nothing about.
+ */
+export function markerOf(dir) {
+  try {
+    const m = JSON.parse(readFileSync(join(dir, MARKER), 'utf8'))
+    return m && m.freilauf === true ? m : null
+  } catch { return null }
+}
+
 function writeMarker(target, skill) {
   writeFileSync(join(target, MARKER), `${JSON.stringify({
     freilauf: true, skill: skill.name, hash: skill.hash, at: new Date().toISOString(),
+    installation: installationFacts(),
   }, null, 2)}\n`)
+}
+
+/**
+ * Keep the coordinates current without touching the payload.
+ *
+ * The port can move, the data directory can move, a deploy changes the version
+ * — and none of that is a change to the SKILL, so it must happen even with
+ * automatic updates switched off: that switch is about the skill's content, not
+ * about whether the file next to it still tells the truth. Written only when it
+ * really differs, so a sync on every plugin save is not a write storm.
+ */
+function refreshMarker(dir, skill) {
+  const m = markerOf(dir)
+  if (!m) return false
+  const now = installationFacts()
+  if (JSON.stringify(m.installation ?? null) === JSON.stringify(now)) return false
+  writeFileSync(join(dir, MARKER), `${JSON.stringify({ ...m, installation: now }, null, 2)}\n`)
+  return true
 }
 
 /**
@@ -309,11 +401,11 @@ function installedHash(dir) {
  *
  * Never throws. The report is machine-readable; the page translates it.
  */
-export function syncSkills({ force = false, install = null, autoUpdate = null } = {}) {
+export function syncSkills({ force = false, install = null, autoUpdate = null, adopt = false } = {}) {
   const on = install ?? skillsInstallOn()
   const refresh = force || (autoUpdate ?? skillsAutoUpdate())
   const state = readState()
-  const report = { on, installed: [], updated: [], removed: [], unchanged: [], conflicts: [], errors: [], targets: [], skipped: [] }
+  const report = { on, installed: [], updated: [], removed: [], unchanged: [], conflicts: [], foreign: [], errors: [], targets: [], skipped: [] }
 
   const skills = availableSkills()
   const { targets, skipped } = on ? skillTargets() : { targets: [], skipped: [] }
@@ -339,6 +431,12 @@ export function syncSkills({ force = false, install = null, autoUpdate = null } 
     try {
       const there = existsSync(dir)
       if (there && !ownedByHub(dir, state)) { report.conflicts.push({ dir, skill: skill.name, reason: 'not_ours' }); continue }
+      // Another Freilauf on this machine wrote this copy. Not ours to take:
+      // overwriting it would also overwrite the coordinates ITS skills read,
+      // and the two installations would take the directory from each other for
+      // ever. Reported as a question instead — `adopt` is the answer.
+      const fremd = there && !adopt ? foreignInstallation(dir) : null
+      if (fremd) { report.foreign.push({ dir, skill: skill.name, installation: fremd }); continue }
       const have = there ? installedHash(dir) : null
       // What the state file records is what is REALLY in that directory, which
       // with updates switched off is not the same as what this build ships.
@@ -350,6 +448,10 @@ export function syncSkills({ force = false, install = null, autoUpdate = null } 
         report.unchanged.push(dir)
         hash = have ?? skill.hash
         at = state.entries.find(e => e.dir === dir)?.at ?? at   // installed then, not verified now
+        // The payload is left alone, the coordinates are not: a moved port or a
+        // new deploy sha has to reach the file the skill's scripts read even
+        // when automatic content updates are off.
+        refreshMarker(dir, skill)
       } else {
         copySkill(skill.dir, dir)
         writeMarker(dir, skill)
@@ -390,6 +492,25 @@ export function skillConflicts() {
     for (const s of availableSkills()) {
       const dir = join(t.dir, s.name)
       if (existsSync(dir) && !ownedByHub(dir, state)) out.push({ dir, skill: s.name })
+    }
+  }
+  return out
+}
+
+/**
+ * Copies in our own target directories that another Freilauf installed —
+ * recomputed per render, like `skillConflicts()`, so an answered question stops
+ * being asked. `[{ dir, skill, installation }]`.
+ */
+export function foreignCopies() {
+  if (!skillsInstallOn()) return []
+  const out = []
+  for (const t of skillTargets().targets) {
+    for (const s of availableSkills()) {
+      const dir = join(t.dir, s.name)
+      if (!existsSync(dir)) continue
+      const fremd = foreignInstallation(dir)
+      if (fremd) out.push({ dir, skill: s.name, installation: fremd })
     }
   }
   return out

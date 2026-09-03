@@ -2518,6 +2518,89 @@ The **Welcome wizard** asks once, as step 5 — after the coding agents are
 chosen, because which directories the hub would write to falls out of those
 choices, and asking earlier would mean naming none.
 
+Three rules about how the two pages present this, each of them a correction:
+
+- **A `shared` skill is installed but not listed.** `freilauf-models` carries
+  `metadata.freilauf_role: shared` in its own frontmatter — the spec's own place
+  for a client's private key — and `availableSkills()` reads it out. The other
+  five load it by relative path; nobody picks it, and a list that offers a thing
+  nobody chooses is a list with noise in it. A footnote says one more comes
+  along, without naming it, so the count of installed directories still adds up.
+- **Descriptions are printed in full.** They are long because their job is to
+  make an agent's matcher fire; truncating them at 240 characters ended
+  sentences mid-word and read as a rendering fault rather than as a summary.
+- **"Keep them up to date" only exists while the installation is on**, and it is
+  `hidden` AND `disabled`, never just hidden. `checkbox()`'s hidden `0`
+  companion would otherwise post `skills_auto_update=0` on every save made with
+  the installation off, quietly overwriting a preference the operator had left
+  on — the same trap the goal field already carries a rule about. Disabled,
+  neither input travels, `Object.hasOwn()` is false, and the stored value
+  survives. `hub.js` flips both on the install checkbox's own change event.
+
+Both pages also say, in one paragraph, that the skills go in at **user level**
+and are therefore available in every project, that scoping them per project is
+not supported today, and where to ask for it (`skillScopeNote()`, shared by the
+settings page and the wizard step).
+
+### How an installed skill knows where its hub is
+
+A skill is installed at USER level, so it is read by sessions Freilauf never
+started — a human's own claude session in an unrelated project. There
+`FL_HUB_URL` is unset, `~/.local/bin` may not be on the PATH, and on a machine
+with two installations there is no single right answer anyway.
+
+So the installation writes its own coordinates **next to the skill it
+installs**: `.freilauf-skill.json` carries an `installation` block with the
+data directory (the id — it is what actually distinguishes two hubs, and the
+database lives in it), the local URL, the runs and worktrees directories (all
+configurable, so a skill that hardcoded `~/agents/runs` would be wrong on half
+the machines) and the running sha. The scripts read the file lying beside them.
+
+Their order is: `FL_HUB_URL` (set in every run Freilauf starts, so a run always
+reaches **its own** hub) → `FREILAUF_HUB_URL` (by hand) → the calling card →
+`FREILAUF_LOCAL_PORT` from the operator's `env` → `127.0.0.1:8791`. Each
+candidate is probed with `/api/usage` and **not** with a route the skills
+themselves use: a hub older than the skill answers 404 for those, and "no hub
+found" would send the reader after the wrong problem entirely.
+
+`refreshMarker()` keeps the block current **even when automatic content updates
+are off** — a moved port is not a change to the skill, and that switch is about
+the skill's content, not about whether the file next to it still tells the truth.
+
+### Two installations on one machine is a question, not a race
+
+Both would target `~/.claude/skills`, and whoever synced last would own it —
+including the coordinates the OTHER installation's skills read. They would take
+the directory from each other for ever and neither would be right.
+
+So `syncSkills()` compares the marker's `installation.id` with its own and
+**leaves a foreign copy alone**, reporting it. Settings → Freilauf skills then
+asks the only question worth asking: is this another installation's, or is it
+mine wearing a new data directory? The second answer is one button
+(`adopt`), which is deliberately an explicit act — a sync that adopted by itself
+would be exactly the silent takeover the check exists to prevent.
+
+### The tools the skills ship
+
+`skills/*/scripts/`, standard library Python only, no venv, and written to the
+principles a coding agent needs rather than a human's: no arguments prints the
+overview, output is Markdown, the lists are capped with a drill-down hint
+instead of dumped, and every answer ends in the command that would sensibly
+come next.
+
+- **`fl-options.py`** — every dropdown the web UI has, as a list: repos, agents,
+  configured coding agents, one coding agent's providers/models/effort levels,
+  favorites, flows. Plus `check k=v …`, which validates a run definition against
+  THIS installation and names the valid values for whatever is wrong, and
+  `new`, which prints a ready command pre-filled from a favorite. It is shipped
+  by the runs, agents and flows skills, **byte-identical** — a unit test pins
+  that, because three copies is three chances to drift and a skill directory is
+  installed standalone, so an import of a sibling skill would break the moment
+  somebody copied one and not the other.
+- **`run-alive.py`** — the status/verdict gap for one run, a repo or a status.
+- **`agent-edit.py`** — the read-modify-write round trip `POST /agents/edit`
+  needs, because that route is a full replace and not a patch.
+
 ### `FREILAUF_SKILLS_HOME` is a test fence, and a load-bearing one
 
 Every other sandbox variable points into the suite's own directory, but a

@@ -349,6 +349,15 @@ table.list td:last-child, table.list th:last-child { white-space: nowrap; }
 .btn.ghost, button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border-strong); }
 .btn.ghost:hover, button.ghost:hover { background: var(--surface-hover); color: var(--accent-act-hover); text-decoration: none; }
 button.danger { background: var(--err); }
+/* A disabled button has to LOOK disabled. Every button here sets its own
+   background and colour, so the browser's default greying never applies — a
+   red "delete permanently" that is waiting for a typed confirmation would
+   otherwise look fully armed and read as broken when the click does nothing.
+   Covers the Sessions page's "end selected" too, which had the same problem. */
+.btn:disabled, button:disabled { opacity: .45; cursor: not-allowed; }
+.btn:disabled:hover, button:disabled:hover { background: var(--accent); }
+button.ghost:disabled:hover { background: transparent; }
+button.danger:disabled:hover { background: var(--err); }
 form.inline { display: inline; }
 label { display: block; margin: var(--sp-10) 0; }
 label.chk { display: flex; align-items: center; gap: var(--sp-8); }

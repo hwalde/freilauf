@@ -43,7 +43,7 @@ import { flowRunKeepDays } from './flows/db.mjs'
 import { discoveryBanner, checkbox } from './plugins/web.mjs'
 import {
   availableSkills, harnessSkillRoots, skillTargets, installedOverview, removalPlan,
-  skillConflicts, skillsInstallOn, skillsAutoUpdate, syncSkills, rootExists,
+  skillConflicts, foreignCopies, skillsInstallOn, skillsAutoUpdate, syncSkills, rootExists,
 } from './skills.mjs'
 // The budget-gate thresholds are no longer typed into this file: every plugin
 // that declares a gate brings its own fields, and the historic keys survive
@@ -1648,6 +1648,15 @@ export function repoDeleteFacts(repoId) {
  * The second action is the point of the whole feature: deactivating is almost
  * always what the operator actually wants, so it is offered HERE, at the moment
  * they are about to do the irreversible thing instead.
+ *
+ * The delete button carries `danger` and the other two are `ghost`: this is the
+ * one button in the dialog that destroys something, and it may not look like
+ * its neighbours. Nothing here is the accent colour on purpose — a destructive
+ * dialog should have no inviting primary action.
+ *
+ * It ships `disabled` without exception. `hub.js` arms it only once the typed
+ * name matches, and with work in flight there is no name field at all, so it
+ * can never be armed at all — which is why there is no condition on it.
  */
 function repoDeleteDialog(r) {
   const f = repoDeleteFacts(r.id)
@@ -1675,7 +1684,7 @@ function repoDeleteDialog(r) {
       <form method="post" action="/repos/delete" class="inline">
         <input type="hidden" name="id" value="${r.id}">
         <input type="hidden" name="confirm" value="" class="repo-del-confirm">
-        <button class="repo-del-go" ${f.inFlight ? 'disabled' : 'disabled'}>${e(t('repos.del_go'))}</button>
+        <button class="repo-del-go danger" disabled>${e(t('repos.del_go'))}</button>
       </form>
     </menu>
   </dialog>`
@@ -2395,12 +2404,37 @@ export async function cleanupSettingsSave(req, res, url, formBody) {
 // whole request is what can act on the transition — and it is also what makes
 // "install now" and "remove now" one code path with the state it re-establishes.
 
-/** One row per skill this build ships — what the operator is being offered. */
+// Where a wish about this feature goes. Named once and shared with the Welcome
+// wizard, which says the same thing to somebody seeing it for the first time.
+export const FREILAUF_ISSUES_URL = 'https://github.com/hwalde/freilauf/issues'
+
+/** The paragraph that answers "where do these end up, and can I scope them?" */
+export function skillScopeNote() {
+  return `<p class="dim">${e(t('flskills.user_level'))}
+    <a href="${e(FREILAUF_ISSUES_URL)}" target="_blank" rel="noreferrer noopener">${e(FREILAUF_ISSUES_URL)}</a></p>`
+}
+
+/**
+ * One row per skill this build ships — what the operator is being offered.
+ *
+ * A `shared` skill is left OUT: it is a reference the other skills load, not
+ * something anybody picks, and a list that offers a thing nobody chooses is a
+ * list with noise in it. It is still installed, so the count of directories
+ * further down is one higher than this list is long — hence the footnote, which
+ * says so without naming it.
+ *
+ * Descriptions are printed IN FULL. They are long, because their job is to make
+ * an agent's matcher fire; cutting them at 240 characters ended sentences
+ * mid-word and read as a rendering fault.
+ */
 function skillCatalogList() {
-  const skills = availableSkills()
+  const all = availableSkills()
+  const skills = all.filter(s => s.role !== 'shared')
   if (!skills.length) return `<p class="dim">${e(t('flskills.none_shipped'))}</p>`
+  const shared = all.length - skills.length
   return `<ul class="skill-list">${skills.map(s =>
-    `<li><b>${e(s.title)}</b>${s.description ? ` — <span class="dim">${e(s.description.slice(0, 240))}</span>` : ''}</li>`).join('')}</ul>`
+    `<li><b>${e(s.title)}</b>${s.description ? ` — <span class="dim">${e(s.description)}</span>` : ''}</li>`).join('')}</ul>
+    ${shared ? `<p class="dim">${e(t('flskills.shared_note', { n: shared }))}</p>` : ''}`
 }
 
 /** Which directories this installation writes to, and whom each of them serves. */
@@ -2442,6 +2476,29 @@ function skillConflictList() {
     <ul class="skill-list">${conflicts.map(c => `<li><code>${e(c.dir)}</code></li>`).join('')}</ul>`
 }
 
+/**
+ * Copies another Freilauf on this machine wrote — a question, not a warning.
+ *
+ * Overwriting them would also overwrite the coordinates THAT installation's
+ * skills read, and the two hubs would take the directory from each other for
+ * ever. So the operator answers it: either those copies belong to the other
+ * installation and should be left alone, or this is the same installation
+ * wearing a new data directory and the configuration should be brought up to
+ * date. The second is one button.
+ */
+function skillForeignBlock() {
+  const fremd = foreignCopies()
+  if (!fremd.length) return ''
+  const wo = [...new Set(fremd.map(f => f.installation.id))]
+  return `<p class="warn">${e(t('flskills.foreign', { n: fremd.length, where: wo.join(', ') }))}</p>
+    <ul class="skill-list">${fremd.map(f => `<li><code>${e(f.dir)}</code></li>`).join('')}</ul>
+    <form method="post" action="/settings/skills/sync" class="inline">
+      <input type="hidden" name="adopt" value="1">
+      <button class="ghost">${e(t('flskills.foreign_adopt'))}</button>
+    </form>
+    <p class="dim">${e(t('flskills.foreign_leave'))}</p>`
+}
+
 /** What is on disk right now, per directory. */
 function skillInstalledList() {
   const installed = installedOverview()
@@ -2473,22 +2530,48 @@ function skillRemoveDialog() {
   </dialog>`
 }
 
+/**
+ * "Keep them up to date" — only there while the installation is on, because
+ * without an installation it is a switch about nothing.
+ *
+ * Both inputs carry `disabled` while it is hidden, and that is the rule this
+ * project already learned once on the goal field: a hidden field that still
+ * submits is a value nobody can see or correct. Here the consequence is
+ * specific — `checkbox()`'s hidden `0` companion would post
+ * `skills_auto_update=0` every time the operator saved with the installation
+ * off, quietly overwriting a preference they had left ON. Disabled, neither
+ * input travels, `Object.hasOwn(b, …)` is false, and the stored value survives
+ * untouched until the row is real again.
+ *
+ * hub.js flips both the `hidden` and the two `disabled` on the install
+ * checkbox's own change event, so it appears and disappears without a save.
+ */
+function autoUpdateRow(installOn) {
+  const on = skillsAutoUpdate()
+  const off = installOn ? '' : ' disabled'
+  return `<div id="skills-auto"${installOn ? '' : ' hidden'}>
+    <input type="hidden" name="skills_auto_update" value="0"${off}>
+    <label class="chk"><input type="checkbox" name="skills_auto_update" value="1" ${on ? 'checked' : ''}${off}>
+      ${e(t('flskills.auto'))} <span class="dim">${e(t('flskills.auto_hint'))}</span></label>
+  </div>`
+}
+
 export async function pageSkillSettings(req, res, url) {
   const on = skillsInstallOn()
   const report = url?.searchParams?.get('synced') === '1'
   const body = `<h2>${e(t('flskills.title'))}</h2>
   <p class="dim">${e(t('flskills.intro'))}</p>
   <p class="dim">${e(t('flskills.intro2'))}</p>
+  ${skillScopeNote()}
   ${report ? `<p class="card ok">${e(t('flskills.synced'))}</p>` : ''}
   <h3>${e(t('flskills.catalog_legend'))}</h3>
   ${skillCatalogList()}
   <form method="post" action="/settings/skills" class="settings form-grid" id="skills-form" data-was-on="${on ? '1' : '0'}">
     <fieldset><legend>${e(t('flskills.switches_legend'))}</legend>
       ${checkbox('skills_install', on, t('flskills.install'), ` <span class="dim">${e(t('flskills.install_hint'))}</span>`)}
-      ${checkbox('skills_auto_update', skillsAutoUpdate(), t('flskills.auto'), ` <span class="dim">${e(t('flskills.auto_hint'))}</span>`)}
+      ${autoUpdateRow(on)}
     </fieldset>
-    <div class="btn-row"><button>${e(t('settings.save'))}</button>
-      <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>
+    <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
   </form>
   <h3>${e(t('flskills.targets_legend'))}</h3>
   <p class="dim">${e(t('flskills.targets_hint'))}</p>
@@ -2496,6 +2579,7 @@ export async function pageSkillSettings(req, res, url) {
   ${skillProjectList()}
   <h3>${e(t('flskills.installed_legend'))}</h3>
   ${skillInstalledList()}
+  ${skillForeignBlock()}
   ${skillConflictList()}
   <form method="post" action="/settings/skills/sync" class="inline">
     <button class="ghost">${e(t('flskills.sync_now'))}</button>
@@ -2519,8 +2603,12 @@ export async function skillSettingsSave(req, res, url, formBody) {
 }
 
 export async function skillSettingsSync(req, res, url, formBody) {
-  await formBody()
-  syncSkills({ force: true })
+  const b = await formBody()
+  // `adopt` is the answer to the question above: take over the copies another
+  // installation wrote and put our own coordinates in them. Deliberately an
+  // explicit act — a sync that adopted by itself would be the silent takeover
+  // the whole check exists to prevent.
+  syncSkills({ force: true, adopt: b.adopt === '1' })
   redirect(res, '/settings/skills?synced=1')
 }
 

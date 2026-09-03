@@ -11,6 +11,7 @@ license: CC BY 4.0
 metadata:
   project: Freilauf
   source: https://github.com/hwalde/freilauf
+  freilauf_role: shared
 ---
 
 # Picking the model for a Freilauf run
@@ -69,6 +70,17 @@ Rules:
 
 A recommendation for a coding agent that is not installed, or a provider with no
 credential, is a run that fails at its first API call. Check:
+
+The Freilauf skills for runs, agents and flows ship a tool that prints all of
+this, and validates a combination before you post it:
+
+```bash
+<skill-dir>/scripts/fl-options.py coding-agents   # which are configured here
+<skill-dir>/scripts/fl-options.py agent opencode  # its providers, models, effort levels
+<skill-dir>/scripts/fl-options.py check harness=opencode provider=deepseek model=... effort=...
+```
+
+The raw endpoints, if you would rather ask directly:
 
 ```bash
 fl-api /api/coding-agents/detect          # which CLIs exist, which are configured
