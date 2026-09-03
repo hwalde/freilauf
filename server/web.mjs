@@ -651,6 +651,20 @@ async function api(req, res, url) {
     const r = await startDeferredRun(m[1], { forced: true })
     return answer(req, res, r.ok ? 200 : 500, r, `/runs/${m[1]}`)
   }
+  // "Start now": a planned run started ahead of its time. The same function the
+  // edit card's "now" choice uses (startScheduledNow) — including the budget
+  // gate, so a start into an exhausted quota becomes 'deferred' rather than
+  // dying at the first API call. Only a 'scheduled' run may go: a deferred one
+  // is waiting for quota, not for a moment, and has its own /start.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/start-now$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    if (run.status !== 'scheduled') {
+      return answer(req, res, 400, { ok: false, error: t('start.err_not_scheduled') }, `/runs/${m[1]}`)
+    }
+    const r = await startScheduledNow(m[1])
+    return answer(req, res, r.ok ? 200 : 500, r, `/runs/${m[1]}`)
+  }
   // Edit a run that still has a future: the expected duration of a running one
   // (the watcher's thresholds and the metrics read it live), and — while the
   // run has not started — its prompt, its repo, its branch rule and, for a

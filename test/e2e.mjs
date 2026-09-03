@@ -1958,6 +1958,33 @@ try {
     await sessionMerken(GEPLANT)
     enthaelt(ereignisse(GEPLANT).join(','), 'scheduled_start', 'recorded as a planned start')
   })
+  await pruefe('a planned run can be started ahead of its time, from the endpoint', async () => {
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-StartNow', title: 'Start now run', start_mode: 'in', start_in_minutes: '60' })
+    const id = j.runId
+    gleich(lauf(id).status, 'scheduled', 'waiting first')
+    const r = await formular(`/api/runs/${id}/start-now`, {})
+    gleich(r.status, 200, 'the endpoint answers 200')
+    gleich(lauf(id).status, 'running', 'the run is running ahead of its time')
+    enthaelt(ereignisse(id).join(','), 'scheduled_start', 'recorded as a planned start')
+    await sessionMerken(id)
+  })
+  await pruefe('only a planned run may be started this way', async () => {
+    const laufend = await laufStarten({ repo_id: repoId, prompt: 'E2E-StartNow-Nein' })
+    wahr(!!laufend.runId && !laufend.scheduled, 'a run that is not planned')
+    const r = await formular(`/api/runs/${laufend.runId}/start-now`, {})
+    gleich(r.status, 400, 'the endpoint refuses')
+    gleich(lauf(laufend.runId).status, 'running', 'and leaves the run alone')
+    await sessionMerken(laufend.runId)
+  })
+  await pruefe('the start-now button sits on the detail banner next to the cancel', async () => {
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-StartNow-UI', title: 'Start now UI', start_mode: 'in', start_in_minutes: '60' })
+    const seite = await hol(`/runs/${j.runId}`).then(r => r.text())
+    enthaelt(seite, `action="/api/runs/${j.runId}/start-now"`, 'the banner offers the start-now button')
+    enthaelt(seite, 'button class="success"', 'and it is the green one')
+    enthaelt(seite, `action="/api/runs/${j.runId}/kill"`, 'the cancel stays beside it')
+    await formular(`/api/runs/${j.runId}/start-now`, {})
+    await sessionMerken(j.runId)
+  })
   await pruefe('"when the repo is free" waits for exactly that', async () => {
     // The groups before left runs behind; the question here is only about the
     // blocker this test starts itself.

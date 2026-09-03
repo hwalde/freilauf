@@ -349,6 +349,10 @@ table.list td:last-child, table.list th:last-child { white-space: nowrap; }
 .btn.ghost, button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border-strong); }
 .btn.ghost:hover, button.ghost:hover { background: var(--surface-hover); color: var(--accent-act-hover); text-decoration: none; }
 button.danger { background: var(--err); }
+/* The green counterpart of .danger: a deliberate, positive action on a record
+   that is otherwise only read or cancelled — the planned run's "start now"
+   beside its red cancel. var(--ok) is the traffic light's green. */
+button.success { background: var(--ok); }
 /* A disabled button has to LOOK disabled. Every button here sets its own
    background and colour, so the browser's default greying never applies — a
    red "delete permanently" that is waiting for a typed confirmation would
@@ -358,6 +362,7 @@ button.danger { background: var(--err); }
 .btn:disabled:hover, button:disabled:hover { background: var(--accent); }
 button.ghost:disabled:hover { background: transparent; }
 button.danger:disabled:hover { background: var(--err); }
+button.success:disabled:hover { background: var(--ok); }
 form.inline { display: inline; }
 label { display: block; margin: var(--sp-10) 0; }
 label.chk { display: flex; align-items: center; gap: var(--sp-8); }
