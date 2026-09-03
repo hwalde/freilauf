@@ -65,8 +65,10 @@ JSON string as stored. The HTML page is `/agents?repo=<id>`.
 Columns worth knowing: `active` (0/1), `harness`, `model`, `provider`, `effort`,
 `or_provider`, `or_routing`, `prompt`, `goal`, `branch_mode`, `branch_pattern`,
 `keep_on_branch`, `expected_minutes`, `skills`, `flows`, `schedule_kind`,
-`schedule_days`, `schedule_time`, `schedule_weeks`, `schedule_anchor`, `run_at`,
-`schedule`, `created_at`, `updated_at`.
+`schedule_days`, `schedule_time`, `schedule_slots`, `schedule_weeks`,
+`schedule_anchor`, `run_at`, `schedule`, `created_at`, `updated_at`.
+`schedule_slots` is a raw JSON string too, for the same reason as `or_routing`:
+it is sent back exactly as it came.
 
 ## 2. Three things about writing, before you write anything
 
@@ -96,7 +98,7 @@ python3 <skill-dir>/scripts/agent-edit.py --id 7 prompt=@new-prompt.md
 
 Read `references/editing.md` when you want to build the body by hand, when a
 save came back 400, or for the row → form-body mapping the four non-obvious
-fields need (`or_routing`, `skills`, `flows`, `schedule_days`).
+fields need (`or_routing`, `skills`, `flows`, `schedule_days`/`schedule_slots`).
 
 **Several wire values are German** and must be sent verbatim:
 `branch_mode` ∈ `keiner` | `neu` | `fest`, `schedule_kind` ∈ `manuell` |
@@ -176,6 +178,17 @@ The full list with its i18n keys is in `references/editing.md`.
 | `woechentlich` | on each selected weekday at every one of its times, every `schedule_weeks` weeks counted in **whole weeks from the anchor's Monday**. The times are the same on every day (`schedule_time`) unless `schedule_slots` gives each weekday its own |
 | `einmalig` | once, as soon as `run_at` has passed. A start missed while the hub was off is caught up — and the agent then **rewrites itself to `manuell`** |
 | `cron` | whenever the expression matches the current minute |
+
+**Prefer `woechentlich` over `cron` where it can say the same thing.** Not a
+rule — cron is a supported kind and nobody is stopped from using it — but a
+recommendation, and the reason is the human who reads the agent list later:
+`woechentlich` renders as "weekly: Tue 08:00, 11:00 · Wed 14:17", a cron
+expression renders as `0 8,11 * * 2` and has to be decoded. Since a weekly
+schedule can carry several times per day and different times per weekday, most
+of what people used to reach for cron for is now expressible in the readable
+kind. Reach for `cron` when the schedule genuinely needs what only cron has —
+a day of the month, a month, or a `*/n` step ("every 15 minutes") — or when the
+operator asks for cron by name.
 
 **Cron is a minimal 5-field dialect** (`server/util.mjs`): `minute hour day
 month weekday`, evaluated in the hub machine's **local** time. Supported per
@@ -312,7 +325,9 @@ is `../freilauf-flows/SKILL.md`.
 - **`einmalig` rewrites itself.** After it fires, `schedule_kind` is `manuell`
   and `run_at` is NULL. An agent that "did not fire twice" fired once by design.
 - **Repeated fields need the value repeated on the command line**
-  (`skills=unlazy skills=other`), not comma-joined. `schedule_days` too.
+  (`skills=unlazy skills=other`), not comma-joined. `schedule_days` too —
+  `schedule_time` accepts both (`schedule_time=08:00 schedule_time=11:00` or
+  `schedule_time=08:00,11:00`).
 - **Weekday numbering is `0`=Sunday**, matching JavaScript's `getDay()`, in both
   `schedule_days` and the cron weekday field.
 - Creating an agent *and* starting a run in one JSON round trip:
