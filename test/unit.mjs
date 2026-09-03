@@ -4062,7 +4062,7 @@ try {
     gleich(fr.status, 'done', 'the flow run carries on')
     gleich(fr.context.vars.agent.started_run_id, null, 'nothing was started')
     gleich(fr.context.vars.agent.active_after, true, 'but the switch itself did happen')
-    enthaelt(fr.log.map(l => l.msg).join(' '), 'übersprungen', 'and the log says it was skipped')
+    enthaelt(fr.log.map(l => l.msg).join(' '), 'skipped (agent is busy)', 'and the log says it was skipped')
   })
 
   await pruefe('toggle_agent: an agent nobody has fails the step', async () => {

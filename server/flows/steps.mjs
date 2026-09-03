@@ -177,7 +177,7 @@ export const STEPS = [
       // A run of this agent is still going, so no second one is started. That is
       // the requested behaviour and therefore a result, not a failure — the step
       // says "skipped" and the flow reads `started_run_id: null` to branch on.
-      if (!s.runId) return { msg: `${state} — übersprungen (agent is busy)`, output: out }
+      if (!s.runId) return { msg: `${state} — skipped (agent is busy)`, output: out }
       out.started_run_id = s.runId
       return { msg: `${state} — started run ${s.runId}`, output: out }
     },

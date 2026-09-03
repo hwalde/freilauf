@@ -6,11 +6,10 @@ Source of truth: `server/flows/steps.mjs` (fields, defaults, `run()`),
 
 Seventeen step types. There is no eighteenth — do not invent one.
 
-`count_runs` and `toggle_agent` come from branch **`feat/count-runs-step`
-and are not on `main` yet** — an installation that has not taken that branch
-does not have them. Ask `fl-api /api/flows/meta`
-before you write one, or `fl-api /api/flows/step-defaults type=<type>`, which
-answers `{}` for a type the hub does not know.
+`count_runs` and `toggle_agent` exist **since 2026-09-03**. An installation older
+than that does not have them: ask `fl-api /api/flows/meta` before you write one,
+or `fl-api /api/flows/step-defaults type=<type>`, which answers `{}` for a type
+the hub does not know.
 
 ## Index
 
@@ -198,7 +197,7 @@ started_run_id: string|null }`.
   ticked box is ignored, because a ticked box is not a second command.
 - It also starts nothing while a run of this agent is `running`, `waiting_help`
   or **`deferred`** (a deferred run has not begun but it is queued and it will).
-  The step then logs `übersprungen (agent is busy)` and leaves
+  The step then logs `skipped (agent is busy)` and leaves
   `started_run_id` null — a **result** to branch on, not a failure.
 - An agent id nobody has **throws**: a step that switched nothing must not report
   success.

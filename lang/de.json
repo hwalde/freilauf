@@ -949,7 +949,7 @@
   "flows.field.active": "Umschalten auf",
   "flows.field.active.hint": "„Aus\" stoppt nur den ZEITPLAN — ein Start von Hand, aus einem Flow und über die API funktioniert weiterhin.",
   "flows.field.startNow": "sofort einen Lauf starten",
-  "flows.field.startNow.hint": "Nur nach dem Einschalten, und nur wenn gerade kein Lauf dieses Agenten läuft, auf Hilfe wartet oder zurückgestellt ist. Sonst meldet der Schritt „übersprungen\" und started_run_id in der Ausgabevariable bleibt leer.",
+  "flows.field.startNow.hint": "Nur nach dem Einschalten, und nur wenn gerade kein Lauf dieses Agenten läuft, auf Hilfe wartet oder zurückgestellt ist. Sonst meldet der Schritt „skipped\" und started_run_id in der Ausgabevariable bleibt leer.",
   "flows.field.wait": "warten, bis der Lauf endet (Ergebnis → Ausgabevariable)",
   "flows.field.harness": "Coding-Agent",
   "flows.field.provider": "Provider",
