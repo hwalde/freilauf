@@ -160,6 +160,26 @@ export const actions = {
     return db.prepare(`SELECT * FROM runs ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY started_at DESC LIMIT 50`).all(...args)
   },
 
+  /**
+   * Runs for COUNTING — `{ id, title, status, repo_id, agent_id }` each, newest
+   * first, and deliberately **without a LIMIT**.
+   *
+   * `findRuns` above answers the other question: "which live runs do I act on
+   * now?", where fifty is a sane ceiling and the full row is what `sendToRun`
+   * and `killRun` need. A count that silently stops at fifty is not a count —
+   * it is a number that agrees with reality right up to the moment the answer
+   * starts to matter. So this one stays narrow in columns instead of in rows.
+   */
+  async listRuns({ repoId = null, agentId = null, statuses = null } = {}) {
+    const where = [], args = []
+    if (repoId) { where.push('repo_id = ?'); args.push(repoId) }
+    if (agentId) { where.push('agent_id = ?'); args.push(agentId) }
+    if (statuses?.length) { where.push(`status IN (${statuses.map(() => '?').join(',')})`); args.push(...statuses) }
+    return db.prepare(`SELECT id, title, status, repo_id, agent_id FROM runs
+                       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+                       ORDER BY started_at DESC`).all(...args)
+  },
+
   async sendToRun(run, text) {
     if (!run.tmux_session) return { ok: false }
     const r = await sendToSession(run.tmux_session, text)

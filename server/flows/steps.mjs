@@ -21,6 +21,13 @@ import { llmSources } from '../llm/sources.mjs'
 // A target selector aimed at the trigger run needs one to exist.
 const TARGET_PLACEMENT = { needsRun: { whenField: 'target', is: 'trigger_run' } }
 
+// The statuses a run may have — the CHECK on `runs.status` in server/db.mjs.
+// Repeated here as a literal instead of imported because this file is the
+// registry the designer and the unit tests load; a status the operator mistyped
+// has to come back as a readable sentence from the step, not as an empty filter
+// or a constraint error out of SQLite.
+const RUN_STATUSES = ['scheduled', 'deferred', 'running', 'waiting_help', 'done', 'failed', 'aborted']
+
 const TARGET_FIELDS = [
   { key: 'target', kind: 'select', options: ['trigger_run', 'agent', 'repo', 'all_running', 'run_id'], default: 'agent' },
   { key: 'agentId', kind: 'agent', showIf: { target: 'agent' } },
@@ -243,6 +250,57 @@ export const STEPS = [
       }
       const r = await api.http({ url: render(props.url, ctx), method: props.method || 'POST', headers, body: render(props.body, ctx) })
       return { msg: `HTTP ${r.status}`, output: r }
+    },
+  },
+  // How many runs are there right now? `repos.max_parallel` answers that for the
+  // SCHEDULER only — a flow start and an API start walk past it — so a flow that
+  // hands out work had to improvise the number with a shell_command calling the
+  // hub's own API and a condition on its body. That is three blocks, a network
+  // round trip and a JSON parse for one integer the database already knows.
+  {
+    type: 'count_runs', component: 'task', group: 'data', output: true,
+    outputShape: { type: 'object', props: {
+      count: { type: 'number' }, ids: { type: 'string_list' }, titles: { type: 'string_list' } } },
+    // No placement rule: it reads the hub's own state, never the trigger run, so
+    // it is as legal under `cron` as it is after a finished run.
+    fields: [
+      { key: 'repoId', kind: 'repo' },
+      { key: 'statuses', kind: 'text', default: 'running', placeholder: RUN_STATUSES.join(', ') },
+      { key: 'titlePrefix', kind: 'text', placeholder: 'nightly ' },
+      { key: 'agentId', kind: 'agent' },
+      { key: 'outputVar', kind: 'text', default: 'runs' },
+    ],
+    async run(props, ctx, api) {
+      const statuses = render(props.statuses, ctx).split(',').map(s => s.trim()).filter(Boolean)
+      // A status nobody knows is rejected rather than dropped. Dropping it would
+      // widen the filter instead of narrowing it — a typo would count every run
+      // in the database and the flow would take the wrong branch on a number
+      // that looks perfectly plausible.
+      const unknown = statuses.filter(s => !RUN_STATUSES.includes(s))
+      if (unknown.length) {
+        throw new Error(`count_runs: unknown status ${unknown.join(', ')} — allowed: ${RUN_STATUSES.join(', ')}`)
+      }
+      const runs = await api.listRuns({
+        repoId: Number(props.repoId) || null,
+        agentId: Number(props.agentId) || null,
+        // Nothing chosen = every status, the same way an empty repo means every repo.
+        statuses: statuses.length ? statuses : null,
+      })
+      // The title filter is applied here, not in SQL: SQLite's LIKE folds ASCII
+      // case only, so `Nächtlich` would not match a `nächtlich` prefix, while
+      // JavaScript's toLowerCase() gets the umlauts right.
+      const prefix = render(props.titlePrefix, ctx).trim().toLowerCase()
+      const hits = prefix
+        ? runs.filter(r => String(r.title ?? '').toLowerCase().startsWith(prefix))
+        : runs
+      return {
+        msg: `${hits.length} Runs`,
+        output: {
+          count: hits.length,
+          ids: hits.map(r => r.id),
+          titles: hits.map(r => String(r.title ?? '')),
+        },
+      }
     },
   },
 

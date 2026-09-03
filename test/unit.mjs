@@ -3862,6 +3862,112 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // "How many runs are going right now?" — the one number a flow that hands out
+  // work cannot do without, and the one it used to have to fetch through a
+  // shell_command calling the hub's own HTTP API. The two places it can quietly
+  // lie are the filter (a status nobody knows must not widen it) and the case
+  // folding of the title prefix (German titles are not ASCII).
+  gruppe('Flows: count_runs')
+
+  const countStub = (rows) => {
+    const seen = []
+    return { api: { ...stubApi, listRuns: async (f) => { seen.push(f); return rows } }, seen }
+  }
+  const countRun = async (properties, rows) => {
+    const { api, seen } = countStub(rows)
+    const id = await engine.startFlowRun(
+      { id: null, name: 'counter', definition: { sequence: [step('count_runs', properties)] } },
+      { kind: 'cron' }, api)
+    return { fr: fdb.getFlowRun(id), seen }
+  }
+  const COUNT_ROWS = [
+    { id: 'r-1', title: 'Nightly docs sweep', status: 'running' },
+    { id: 'r-2', title: 'nightly cleanup', status: 'running' },
+    { id: 'r-3', title: 'Nächtlicher Umbau', status: 'running' },
+    { id: 'r-4', title: null, status: 'running' },
+  ]
+
+  await pruefe('count_runs: registry entry, defaults and the shape it promises', () => {
+    const meta = STEP_MAP.count_runs
+    wahr(!!meta && meta.output && meta.group === 'data', 'in the registry, in the data group, with an output')
+    wahr(STEPS.some(s => s.type === 'count_runs'), 'and in the list the editor is built from')
+    falsch(!!meta.placement, 'no placement rule — it reads the hub, not the trigger run')
+    const props = defaultProps('count_runs')
+    gleich(props.outputVar, 'runs', 'default output variable')
+    gleich(props.statuses, 'running', 'by default it counts what is going right now')
+    gleich(props.repoId, '', 'no repo chosen = every repo')
+    gleich(props.agentId, '', 'and no agent chosen = every agent')
+    const paths = vs.shapePaths('vars.runs', vs.outputShapeOf(
+      { id: 'c', type: 'count_runs', properties: props }, meta)).map(p => `${p.path}:${p.type}`).join(',')
+    enthaelt(paths, 'vars.runs.count:number', 'the number a condition compares')
+    enthaelt(paths, 'vars.runs.ids:string_list', 'the ids a for_each walks')
+    enthaelt(paths, 'vars.runs.titles:string_list', 'and the titles a message can name')
+    gleich(validateDefinition({ sequence: [{ id: 'c', type: 'count_runs', properties: props }] }, { kind: 'cron' }).length, 0,
+      'legal under a schedule, where there is no run at all')
+  })
+
+  await pruefe('count_runs: repo, agent and status reach the query — the title prefix filters the answer', async () => {
+    const { fr, seen } = await countRun(
+      { repoId: '7', agentId: '3', statuses: 'running, waiting_help', titlePrefix: '', outputVar: 'runs' }, COUNT_ROWS)
+    gleich(fr.status, 'done', 'the step finished')
+    gleich(seen[0].repoId, 7, 'the repo goes to the query as a number')
+    gleich(seen[0].agentId, 3, 'and so does the agent')
+    gleich(seen[0].statuses.join(','), 'running,waiting_help', 'the comma-separated list becomes a list, trimmed')
+    gleich(fr.context.vars.runs.count, 4, 'nothing filtered away')
+    gleich(fr.context.vars.runs.ids.join(','), 'r-1,r-2,r-3,r-4', 'the ids come back in order')
+    gleich(fr.context.vars.runs.titles[3], '', 'a run without a title reports an empty one, never undefined')
+    wahr(fr.log.some(l => l.msg === '4 Runs'), 'the log names the number')
+  })
+
+  await pruefe('count_runs: an empty repo, agent and status list mean "all of them"', async () => {
+    const { seen } = await countRun({ repoId: '', agentId: '', statuses: '', titlePrefix: '', outputVar: 'runs' }, COUNT_ROWS)
+    gleich(seen[0].repoId, null, 'no repo = every repo')
+    gleich(seen[0].agentId, null, 'no agent = every agent')
+    gleich(seen[0].statuses, null, 'no status = every status, the same rule')
+  })
+
+  await pruefe('count_runs: the title prefix ignores case, umlauts included', async () => {
+    const a = await countRun({ repoId: '', agentId: '', statuses: 'running', titlePrefix: 'nightly', outputVar: 'runs' }, COUNT_ROWS)
+    gleich(a.fr.context.vars.runs.count, 2, 'both spellings of "Nightly" count')
+    gleich(a.fr.context.vars.runs.ids.join(','), 'r-1,r-2', 'and only those')
+    const b = await countRun({ repoId: '', agentId: '', statuses: 'running', titlePrefix: 'NÄCHTLICH', outputVar: 'runs' }, COUNT_ROWS)
+    gleich(b.fr.context.vars.runs.count, 1, 'Ä folds to ä — SQLite LIKE would have missed this one')
+    const c = await countRun({ repoId: '', agentId: '', statuses: 'running', titlePrefix: 'weekly', outputVar: 'runs' }, COUNT_ROWS)
+    gleich(c.fr.context.vars.runs.count, 0, 'a prefix nothing starts with counts nothing')
+    gleich(c.fr.context.vars.runs.ids.length, 0, 'and hands on an empty list, not a missing one')
+    wahr(c.fr.log.some(l => l.msg === '0 Runs'), 'zero is a result the log states as plainly as any other')
+  })
+
+  await pruefe('count_runs: the prefix and the status list are templates', async () => {
+    const { fr, seen } = await countRun(
+      { repoId: '', agentId: '', statuses: '{{vars.wanted}}', titlePrefix: '{{vars.prefix}}', outputVar: 'runs' }, COUNT_ROWS)
+    void fr
+    gleich(seen.length, 1, 'the step ran')
+    const { api, seen: seen2 } = countStub(COUNT_ROWS)
+    const id = await engine.startFlowRun({ id: null, name: 'templated', definition: { sequence: [
+      step('set_var', { outputVar: 'wanted', value: 'waiting_help' }),
+      step('set_var', { outputVar: 'prefix', value: 'nightly' }),
+      step('count_runs', { repoId: '', agentId: '', statuses: '{{vars.wanted}}', titlePrefix: '{{vars.prefix}}', outputVar: 'runs' }),
+    ] } }, { kind: 'cron' }, api)
+    const fr2 = fdb.getFlowRun(id)
+    gleich(seen2[0].statuses.join(','), 'waiting_help', 'the status list came out of a variable')
+    gleich(fr2.context.vars.runs.count, 2, 'and so did the prefix')
+  })
+
+  await pruefe('count_runs: a status nobody knows fails the step instead of counting everything', async () => {
+    const { api } = countStub(COUNT_ROWS)
+    const id = await engine.startFlowRun({ id: null, name: 'typo', definition: { sequence: [
+      step('count_runs', { repoId: '', agentId: '', statuses: 'runnning', titlePrefix: '', outputVar: 'runs' }),
+      step('note', { text: 'never' }),
+    ] } }, { kind: 'cron' }, api)
+    const fr = fdb.getFlowRun(id)
+    gleich(fr.status, 'failed', 'a typo is not a filter that quietly matches every run')
+    enthaelt(fr.error, 'runnning', 'the error names what it did not recognise')
+    enthaelt(fr.error, 'waiting_help', 'and lists what it would have accepted')
+    falsch(fr.log.some(l => l.msg === 'never'), 'nothing after it ran on a wrong number')
+  })
+
   gruppe('Docs: AGENTS.md / CLAUDE.md pairing')
 
   await pruefe('every AGENTS.md has a CLAUDE.md next to it that only includes it', async () => {

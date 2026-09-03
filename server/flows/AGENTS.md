@@ -109,6 +109,7 @@ Steps never touch the database or tmux themselves — everything goes through
 | `kill_run` | kills the tmux session of target runs, marks them aborted |
 | `shell_command` | runs a command on the hub machine as the hub's user. A non-zero exit code is a **result** (`vars.<out>.ok/exit_code/stdout/stderr`), not a failure of the step — only a command that could not run at all (no such working directory, spawn error, timeout) throws. With `detach` it is started in its own session (`setsid -f`) and the step ends at once with `{ ok, detached }` — see "Restarting the hub from a flow" |
 | `extract` | LLM fills user-defined fields from report / terminal log tail / claude transcript / custom text |
+| `count_runs` | how many runs the hub has right now, filtered by repo, status, agent and title prefix → `{count, ids, titles}`. `repos.max_parallel` is the **scheduler's** ceiling and nothing else — a flow start and an API start walk past it, so a flow that hands out work has to count for itself. Before this block that meant a `shell_command` calling the hub's own HTTP API plus a `condition` on its body: three blocks and a round trip for one integer the database already had. A status the operator mistyped **fails the step** instead of being dropped: dropping it would widen the filter and produce a plausible, wrong number |
 | `for_each` | container: repeats its body per element of a list (`maxItems` caps it); the element is `vars.<itemVar>` |
 | `notify` | one message to the notification channels configured under Settings → Notifications, optionally with an attachment. With none configured it reports `not delivered` and the flow carries on — a hub that says nothing anywhere is a supported installation, not a failed step |
 | `set_var`, `http_request`, `condition`, `switch_outcome`, `delay`, `stop`, `note` | as named |
@@ -119,6 +120,15 @@ of that agent), `repo`, `all_running`, `run_id` (template).
 `extract` sources: `report`, `log` (pipe-pane tail, cleaned), `transcript`
 (claude's JSONL — what the agent said and did, not what the terminal drew; other
 harnesses have none, so it falls back to the log), `report_and_log`, `custom`.
+
+`count_runs` reads through `api.listRuns()`, which is deliberately a second query
+next to `api.findRuns()` rather than a parameter on it. They answer different
+questions: `findRuns` says "which live runs do I act on now?" — full rows,
+`LIMIT 50`, which is exactly right for `send_message` and `kill_run`. A count
+that stops at fifty is not a count, so `listRuns` drops the limit and narrows the
+columns instead (`id, title, status, repo_id, agent_id`). The title prefix is
+matched in the step, not in SQL: SQLite's `LIKE` folds ASCII case only, so a
+German title would fail to match its own prefix.
 
 `notify` links to the trigger run's detail page, otherwise to its own flow run.
 Deliberately **not** through `notifyRun()`: that dedupe belongs to the watcher's
@@ -426,3 +436,10 @@ end-to-end with a stub `api` (branching,
 outputs, wait/resume on a run, delay, stop, step failure, for-each including a
 wait inside the body). The persistence runs
 against the unit sandbox database (`FREILAUF_DATA_DIR`).
+
+`test/unit.mjs`, group "Flows: count_runs": the registry entry and the promised
+shape, what really reaches `api.listRuns` (repo and agent as numbers, the
+comma-separated status list trimmed into a list, empty meaning "all of them"),
+the case-insensitive title prefix with an umlaut title SQLite's `LIKE` would
+miss, the empty result, `statuses`/`titlePrefix` as templates, and the mistyped
+status that fails the step instead of counting everything.

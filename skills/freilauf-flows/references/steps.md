@@ -4,7 +4,13 @@ Source of truth: `server/flows/steps.mjs` (fields, defaults, `run()`),
 `server/flows/actions.mjs` (what the `api` really does),
 `server/run-def.mjs` (`RUN_DEF_FLOW_FIELDS`, `defFromFlowProps`).
 
-Fifteen step types. There is no sixteenth — do not invent one.
+Sixteen step types. There is no seventeenth — do not invent one.
+
+The sixteenth, `count_runs`, comes from branch **`feat/count-runs-step` and is
+not on `main` yet** — an installation that has not taken that branch does not
+have it. Ask `fl-api /api/flows/meta` before you write one, or
+`fl-api /api/flows/step-defaults type=count_runs`, which answers `{}` for a type
+the hub does not know.
 
 ## Index
 
@@ -18,6 +24,7 @@ Fifteen step types. There is no sixteenth — do not invent one.
 | `set_var` | `task` | data | yes | `value` |
 | `shell_command` | `task` | data | yes | `shell` |
 | `http_request` | `task` | data | yes | `http` |
+| `count_runs` | `task` | data | yes | `runs` |
 | `condition` | `switch` (`true`/`false`) | control | no | — |
 | `switch_outcome` | `switch` (`done`/`failed`/`aborted`) | control | no | — |
 | `for_each` | `container` | control | no (writes the item vars) | — |
@@ -51,6 +58,7 @@ verbatim, so `{{…}}` in them is a literal that will break the step.
 | `set_var` | `value` | `outputVar` |
 | `shell_command` | `command`, `cwd`, `timeoutMinutes` | `detach` |
 | `http_request` | `url`, `body`, header **values** | `method`, header **names** |
+| `count_runs` | `statuses`, `titlePrefix` | `repoId`, `agentId` |
 | `condition` | `left`, `right` | `op` |
 | `switch_outcome` | `value` | — |
 | `for_each` | `list` | `itemVar`, `maxItems` |
@@ -247,6 +255,44 @@ at 20 000 characters, `json` is `null` when the response is not JSON, the
 timeout is 60 s, and `content-type: application/json` is added when a body is
 sent and no content-type was given. A 4xx/5xx is a **result** (`ok:false`), not
 a step failure; a network error or timeout throws.
+
+
+### `count_runs`
+
+How many runs the hub has **right now** — the number a flow needs before it hands
+out more work. `repos.max_parallel` does not answer it: that ceiling belongs to
+the scheduler, and a run started by a flow or by the API walks straight past it.
+Before this block the only way was a `shell_command` calling
+`fl-api /api/runs repo=1 status=running`, a JSON parse and a `condition` on the
+result.
+
+| property | default | notes |
+|---|---|---|
+| `repoId` | `''` | number; empty = every repo. NOT templated |
+| `statuses` | `running` | comma-separated, templated. `scheduled`, `deferred`, `running`, `waiting_help`, `done`, `failed`, `aborted` — empty = every status |
+| `titlePrefix` | `''` | templated; counts only runs whose title starts with it, case-insensitively (umlauts included). Empty = every title |
+| `agentId` | `''` | number; empty = every agent. NOT templated |
+| `outputVar` | `runs` | |
+
+Output `{ count: number, ids: string_list, titles: string_list }`, ordered newest
+first. A run without a title contributes an empty string, never `undefined`. The
+log line is `<n> Runs`.
+
+**A status the hub does not know fails the step** (`count_runs: unknown status
+runnning — allowed: …`) rather than being dropped. Dropping it would *widen* the
+filter, and a flow would branch on a number that looks perfectly plausible and is
+wrong. There is no `queued`; the seven names above are the whole list
+(`runs.status` CHECK in `server/db.mjs`).
+
+No placement rule — it reads the hub's own state, never the trigger run, so it is
+as legal under `cron` as it is after a finished run.
+
+```jsonc
+{ "id": "c1", "componentType": "task", "type": "count_runs", "name": "How busy are we?",
+  "properties": { "repoId": 1, "statuses": "running, waiting_help",
+                  "titlePrefix": "nightly ", "agentId": "", "outputVar": "busy" } }
+// then: { "type": "condition", "properties": { "left": "{{vars.busy.count}}", "op": "lt", "right": "3" } }
+```
 
 ---
 
