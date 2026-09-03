@@ -4,7 +4,12 @@ Source of truth: `server/flows/steps.mjs` (fields, defaults, `run()`),
 `server/flows/actions.mjs` (what the `api` really does),
 `server/run-def.mjs` (`RUN_DEF_FLOW_FIELDS`, `defFromFlowProps`).
 
-Fifteen step types. There is no sixteenth — do not invent one.
+Seventeen step types. There is no eighteenth — do not invent one.
+
+`count_runs` and `toggle_agent` exist **since 2026-09-03**. An installation older
+than that does not have them: ask `fl-api /api/flows/meta` before you write one,
+or `fl-api /api/flows/step-defaults type=<type>`, which answers `{}` for a type
+the hub does not know.
 
 ## Index
 
@@ -14,10 +19,12 @@ Fifteen step types. There is no sixteenth — do not invent one.
 | `start_agent` | `task` | agents | yes | `run` |
 | `start_single_run` | `task` | agents | yes | `run` |
 | `kill_run` | `task` | agents | yes | `killed` |
+| `toggle_agent` | `task` | agents | yes | `agent` |
 | `extract` | `task` | data | yes | `extracted` |
 | `set_var` | `task` | data | yes | `value` |
 | `shell_command` | `task` | data | yes | `shell` |
 | `http_request` | `task` | data | yes | `http` |
+| `count_runs` | `task` | data | yes | `runs` |
 | `condition` | `switch` (`true`/`false`) | control | no | — |
 | `switch_outcome` | `switch` (`done`/`failed`/`aborted`) | control | no | — |
 | `for_each` | `container` | control | no (writes the item vars) | — |
@@ -47,10 +54,12 @@ verbatim, so `{{…}}` in them is a literal that will break the step.
 | `start_agent` | `promptExtra` | `agentId`, `wait` |
 | `start_single_run` | `model`, `prompt`, `branchPattern` | `harness`, `provider`, `effort`, `goal`, `branchMode`, `keepOnBranch`, `expectedMinutes`, `repoId`, every `or*` field |
 | `kill_run` | `runId` | `target`, `agentId`, `repoId` |
+| `toggle_agent` | — | `agentId`, `active`, `startNow` |
 | `extract` | `text` (source `custom` only), `sourceRun` | **`instructions`**, `fields`, `model`, `llmSource`, `fallback`, `fallbackModel` |
 | `set_var` | `value` | `outputVar` |
 | `shell_command` | `command`, `cwd`, `timeoutMinutes` | `detach` |
 | `http_request` | `url`, `body`, header **values** | `method`, header **names** |
+| `count_runs` | `statuses`, `titlePrefix` | `repoId`, `agentId` |
 | `condition` | `left`, `right` | `op` |
 | `switch_outcome` | `value` | — |
 | `for_each` | `list` | `itemVar`, `maxItems` |
@@ -165,6 +174,41 @@ really aborted**: `killRun()` always returns true, while the `aborted` event and
 the status change only happen for a run in `running`/`waiting_help`/`deferred`.
 Same placement rule as `send_message`.
 
+### `toggle_agent`
+
+Switches an agent's **schedule** on, off or over — the toggle on the agents page,
+reachable from a flow. What it is for: "the nightly job has failed three times in
+a row, stop it firing until somebody looks", and the flow that switches it back
+on afterwards.
+
+| property | default | notes |
+|---|---|---|
+| `agentId` | `''` | **required**, number. Not templated |
+| `active` | `on` | `on` \| `off` \| `toggle`. Not templated |
+| `startNow` | `false` | checkbox, shown only for `active=on`. Not templated |
+| `outputVar` | `agent` | |
+
+Output `{ id: number, name: string, active_before: boolean, active_after: boolean,
+started_run_id: string|null }`.
+
+- **`off` stops the SCHEDULE and nothing else.** A manual start, a flow start and
+  an API start all still work — the switch is a reversible pause, not a lock.
+- `startNow` starts a run **only after switching on**: with `active=off` the
+  ticked box is ignored, because a ticked box is not a second command.
+- It also starts nothing while a run of this agent is `running`, `waiting_help`
+  or **`deferred`** (a deferred run has not begun but it is queued and it will).
+  The step then logs `skipped (agent is busy)` and leaves
+  `started_run_id` null — a **result** to branch on, not a failure.
+- An agent id nobody has **throws**: a step that switched nothing must not report
+  success.
+- No placement rule — legal in a `cron` flow like everywhere else.
+
+```jsonc
+{ "id": "t1", "componentType": "task", "type": "toggle_agent", "name": "Stop the nightly",
+  "properties": { "agentId": 4, "active": "off", "startNow": false, "outputVar": "agent" } }
+// then: { "type": "notify", "properties": { "text": "{{vars.agent.name}} is now off" } }
+```
+
 ---
 
 ## data
@@ -247,6 +291,44 @@ at 20 000 characters, `json` is `null` when the response is not JSON, the
 timeout is 60 s, and `content-type: application/json` is added when a body is
 sent and no content-type was given. A 4xx/5xx is a **result** (`ok:false`), not
 a step failure; a network error or timeout throws.
+
+
+### `count_runs`
+
+How many runs the hub has **right now** — the number a flow needs before it hands
+out more work. `repos.max_parallel` does not answer it: that ceiling belongs to
+the scheduler, and a run started by a flow or by the API walks straight past it.
+Before this block the only way was a `shell_command` calling
+`fl-api /api/runs repo=1 status=running`, a JSON parse and a `condition` on the
+result.
+
+| property | default | notes |
+|---|---|---|
+| `repoId` | `''` | number; empty = every repo. NOT templated |
+| `statuses` | `running` | comma-separated, templated. `scheduled`, `deferred`, `running`, `waiting_help`, `done`, `failed`, `aborted` — empty = every status |
+| `titlePrefix` | `''` | templated; counts only runs whose title starts with it, case-insensitively (umlauts included). Empty = every title |
+| `agentId` | `''` | number; empty = every agent. NOT templated |
+| `outputVar` | `runs` | |
+
+Output `{ count: number, ids: string_list, titles: string_list }`, ordered newest
+first. A run without a title contributes an empty string, never `undefined`. The
+log line is `<n> Runs`.
+
+**A status the hub does not know fails the step** (`count_runs: unknown status
+runnning — allowed: …`) rather than being dropped. Dropping it would *widen* the
+filter, and a flow would branch on a number that looks perfectly plausible and is
+wrong. There is no `queued`; the seven names above are the whole list
+(`runs.status` CHECK in `server/db.mjs`).
+
+No placement rule — it reads the hub's own state, never the trigger run, so it is
+as legal under `cron` as it is after a finished run.
+
+```jsonc
+{ "id": "c1", "componentType": "task", "type": "count_runs", "name": "How busy are we?",
+  "properties": { "repoId": 1, "statuses": "running, waiting_help",
+                  "titlePrefix": "nightly ", "agentId": "", "outputVar": "busy" } }
+// then: { "type": "condition", "properties": { "left": "{{vars.busy.count}}", "op": "lt", "right": "3" } }
+```
 
 ---
 

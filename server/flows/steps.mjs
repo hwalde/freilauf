@@ -21,6 +21,13 @@ import { llmSources } from '../llm/sources.mjs'
 // A target selector aimed at the trigger run needs one to exist.
 const TARGET_PLACEMENT = { needsRun: { whenField: 'target', is: 'trigger_run' } }
 
+// The statuses a run may have — the CHECK on `runs.status` in server/db.mjs.
+// Repeated here as a literal instead of imported because this file is the
+// registry the designer and the unit tests load; a status the operator mistyped
+// has to come back as a readable sentence from the step, not as an empty filter
+// or a constraint error out of SQLite.
+const RUN_STATUSES = ['scheduled', 'deferred', 'running', 'waiting_help', 'done', 'failed', 'aborted']
+
 const TARGET_FIELDS = [
   { key: 'target', kind: 'select', options: ['trigger_run', 'agent', 'repo', 'all_running', 'run_id'], default: 'agent' },
   { key: 'agentId', kind: 'agent', showIf: { target: 'agent' } },
@@ -125,6 +132,54 @@ export const STEPS = [
       const ids = []
       for (const run of runs) { if (await api.killRun(run)) ids.push(run.id) }
       return { msg: `aborted ${ids.length} run(s)`, output: { count: ids.length, run_ids: ids } }
+    },
+  },
+  // Switching an agent's schedule on or off was a thing only a human could do,
+  // on the agents page. A flow that reacts to what it finds — "the nightly job
+  // has failed three times, stop it firing until somebody looks" — had no way to
+  // say so, and neither had the flow that switches it back on afterwards.
+  {
+    type: 'toggle_agent', component: 'task', group: 'agents', output: true,
+    outputShape: { type: 'object', props: {
+      id: { type: 'number' }, name: { type: 'string' },
+      active_before: { type: 'boolean' }, active_after: { type: 'boolean' },
+      started_run_id: { type: 'string' } } },
+    fields: [
+      { key: 'agentId', kind: 'agent', required: true },
+      { key: 'active', kind: 'select', options: ['on', 'off', 'toggle'], default: 'on' },
+      { key: 'startNow', kind: 'checkbox', default: false, showIf: { active: 'on' } },
+      { key: 'outputVar', kind: 'text', default: 'agent' },
+    ],
+    async run(props, ctx, api, info) {
+      const agentId = Number(props.agentId) || null
+      if (!agentId) throw new Error('toggle_agent: no agent chosen')
+      const mode = props.active || 'on'
+      // 'toggle' has to know the state before it can name the one it wants, so
+      // it reads it the only way a step may — through the api, off the same row
+      // setAgentActive is about to write.
+      let want
+      if (mode === 'toggle') {
+        const before = await api.agentInfo(agentId)
+        if (!before) throw new Error(`toggle_agent: agent ${agentId} does not exist`)
+        want = !before.active
+      } else want = mode === 'on'
+      const r = await api.setAgentActive(agentId, want)
+      if (!r.ok) throw new Error(`toggle_agent: ${r.error || 'could not switch the agent'}`)
+
+      const out = { id: r.id, name: r.name, active_before: r.active_before, active_after: r.active_after, started_run_id: null }
+      const state = `${r.name}: ${r.active_before ? 'on' : 'off'} → ${r.active_after ? 'on' : 'off'}`
+      // Only after switching ON, and only when the box is ticked: an agent that
+      // was just switched off must not be started by the same step.
+      if (!(props.startNow && r.active_after)) return { msg: state, output: out }
+
+      const s = await api.startAgentIfIdle(agentId, info.flowRunId)
+      if (!s.ok) throw new Error(`toggle_agent: ${s.error || 'run start failed'}`)
+      // A run of this agent is still going, so no second one is started. That is
+      // the requested behaviour and therefore a result, not a failure — the step
+      // says "skipped" and the flow reads `started_run_id: null` to branch on.
+      if (!s.runId) return { msg: `${state} — skipped (agent is busy)`, output: out }
+      out.started_run_id = s.runId
+      return { msg: `${state} — started run ${s.runId}`, output: out }
     },
   },
 
@@ -243,6 +298,57 @@ export const STEPS = [
       }
       const r = await api.http({ url: render(props.url, ctx), method: props.method || 'POST', headers, body: render(props.body, ctx) })
       return { msg: `HTTP ${r.status}`, output: r }
+    },
+  },
+  // How many runs are there right now? `repos.max_parallel` answers that for the
+  // SCHEDULER only — a flow start and an API start walk past it — so a flow that
+  // hands out work had to improvise the number with a shell_command calling the
+  // hub's own API and a condition on its body. That is three blocks, a network
+  // round trip and a JSON parse for one integer the database already knows.
+  {
+    type: 'count_runs', component: 'task', group: 'data', output: true,
+    outputShape: { type: 'object', props: {
+      count: { type: 'number' }, ids: { type: 'string_list' }, titles: { type: 'string_list' } } },
+    // No placement rule: it reads the hub's own state, never the trigger run, so
+    // it is as legal under `cron` as it is after a finished run.
+    fields: [
+      { key: 'repoId', kind: 'repo' },
+      { key: 'statuses', kind: 'text', default: 'running', placeholder: RUN_STATUSES.join(', ') },
+      { key: 'titlePrefix', kind: 'text', placeholder: 'nightly ' },
+      { key: 'agentId', kind: 'agent' },
+      { key: 'outputVar', kind: 'text', default: 'runs' },
+    ],
+    async run(props, ctx, api) {
+      const statuses = render(props.statuses, ctx).split(',').map(s => s.trim()).filter(Boolean)
+      // A status nobody knows is rejected rather than dropped. Dropping it would
+      // widen the filter instead of narrowing it — a typo would count every run
+      // in the database and the flow would take the wrong branch on a number
+      // that looks perfectly plausible.
+      const unknown = statuses.filter(s => !RUN_STATUSES.includes(s))
+      if (unknown.length) {
+        throw new Error(`count_runs: unknown status ${unknown.join(', ')} — allowed: ${RUN_STATUSES.join(', ')}`)
+      }
+      const runs = await api.listRuns({
+        repoId: Number(props.repoId) || null,
+        agentId: Number(props.agentId) || null,
+        // Nothing chosen = every status, the same way an empty repo means every repo.
+        statuses: statuses.length ? statuses : null,
+      })
+      // The title filter is applied here, not in SQL: SQLite's LIKE folds ASCII
+      // case only, so `Nächtlich` would not match a `nächtlich` prefix, while
+      // JavaScript's toLowerCase() gets the umlauts right.
+      const prefix = render(props.titlePrefix, ctx).trim().toLowerCase()
+      const hits = prefix
+        ? runs.filter(r => String(r.title ?? '').toLowerCase().startsWith(prefix))
+        : runs
+      return {
+        msg: `${hits.length} Runs`,
+        output: {
+          count: hits.length,
+          ids: hits.map(r => r.id),
+          titles: hits.map(r => String(r.title ?? '')),
+        },
+      }
     },
   },
 
