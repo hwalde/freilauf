@@ -524,6 +524,34 @@ fieldset.schedule label[hidden] { display: none; }
 .weekdays .weekday { display: inline-flex; align-items: center; gap: var(--sp-5); border: 1px solid var(--border-field);
   border-radius: var(--radius-pill); padding: var(--sp-4) var(--sp-12); cursor: pointer; user-select: none; background: var(--surface-card); }
 .weekdays .weekday:has(input:checked) { background: var(--ok-text); border-color: var(--ok-text); color: var(--text-inverse); }
+/* Weekly: the same times on every chosen day, or a list per weekday. Two
+   radios rather than a checkbox, because they are two readable statements —
+   "every day the same" is the answer most schedules give, and it must stay the
+   one that needs no reading. */
+.sched-modes { display: flex; flex-wrap: wrap; gap: var(--sp-14); margin: var(--sp-8) 0 var(--sp-4); }
+.sched-modes .mode { display: inline-flex; align-items: center; gap: var(--sp-6); cursor: pointer; }
+fieldset.schedule .zpm[hidden] { display: none; }
+/* A time is a chip: the value stays editable in place (correcting 08:00 to
+   09:00 must not mean delete-and-add), the × takes it away. */
+.times { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-6); }
+.times .time-chip { display: inline-flex; align-items: center; gap: var(--sp-2);
+  border: 1px solid var(--border-field); border-radius: var(--radius-pill);
+  padding: var(--sp-2) var(--sp-4) var(--sp-2) var(--sp-10); background: var(--surface-card); }
+.times .time-chip input[type=time] { border: 0; background: none; padding: 0; color: inherit; font: inherit; }
+.times .time-del { border: 0; background: none; cursor: pointer; color: var(--text-dim);
+  font-size: 1.05em; line-height: 1; padding: 0 var(--sp-5); }
+.times .time-del:hover { color: var(--err); }
+.times .time-del[hidden] { display: none; }
+.times .time-add { border: 1px dashed var(--border-field); border-radius: var(--radius-pill);
+  background: none; color: var(--accent-act-hover); cursor: pointer; padding: var(--sp-4) var(--sp-10); }
+/* One row per weekday, all seven of them: a day without a time is a day that
+   does not run, and that is easier to read as an empty row than as a checkbox
+   somewhere else saying the same thing a second time. */
+.day-times { display: grid; grid-template-columns: 4.5em minmax(0, 1fr); gap: var(--sp-6) var(--sp-10);
+  align-items: center; margin: var(--sp-8) 0; }
+.day-times .day-row { display: contents; }
+.day-times .day-name { color: var(--text-dim); }
+.day-times .day-row:has(.time-chip) .day-name { color: inherit; font-weight: 600; }
 /* Planned start in the single-run form — same block switching as the schedule. */
 fieldset.schedule .st[hidden] { display: none; }
 

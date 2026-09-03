@@ -331,6 +331,78 @@ try {
     gleich(a.schedule_weeks, 2, 'cadence')
     gleich(a.schedule_anchor, '2026-08-24', 'anchor week')
   })
+  await pruefe('several times on the same days land in one column', async () => {
+    const r = await formular('/agents/edit', {
+      repo_id: repoId, name: 'e2e-mehrzeit', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
+      expected_minutes: '30', schedule_kind: 'woechentlich', schedule_mode: 'same',
+      schedule_days: ['2'], schedule_time: ['11:00', '08:00', ''], schedule_weeks: '1', active: '1',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'redirect')
+    const a = agent('e2e-mehrzeit')
+    gleich(a.schedule_time, '08:00,11:00', 'sorted, the emptied chip dropped')
+    gleich(a.schedule_slots, null, 'the same times everywhere need no per-day list')
+  })
+  await pruefe('times per weekday are stored as slots, and the days follow from them', async () => {
+    const r = await formular('/agents/edit', {
+      repo_id: repoId, name: 'e2e-protag', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
+      expected_minutes: '30', schedule_kind: 'woechentlich', schedule_mode: 'per_day',
+      schedule_day_time_2: ['08:00', '11:00'], schedule_day_time_3: ['14:17'],
+      schedule_days: ['1'], schedule_time: '06:00', schedule_weeks: '1', active: '1',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'redirect')
+    const a = agent('e2e-protag')
+    gleich(a.schedule_slots, '{"2":["08:00","11:00"],"3":["14:17"]}', 'the per-day list')
+    gleich(a.schedule_days, '2,3', 'the days that have times — not the checkboxes of the other mode')
+    gleich(a.schedule_time, null, "the other mode's time does not survive alongside")
+  })
+  await pruefe('a schedule_slots JSON is the same thing said in one field', async () => {
+    const r = await formular('/agents/edit', {
+      repo_id: repoId, name: 'e2e-slots-json', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
+      expected_minutes: '30', schedule_kind: 'woechentlich',
+      schedule_slots: '{"2":["08:00","11:00"],"3":["14:17"]}', schedule_weeks: '1', active: '1',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'redirect')
+    const a = agent('e2e-slots-json')
+    gleich(a.schedule_slots, '{"2":["08:00","11:00"],"3":["14:17"]}', 'stored as given')
+    gleich(a.schedule_days, '2,3', 'days derived')
+  })
+  await pruefe('per-day without a single time, and unreadable times, are rejected', async () => {
+    const leer = await formular('/agents/edit', {
+      repo_id: repoId, name: 'e2e-protag-leer', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
+      schedule_kind: 'woechentlich', schedule_mode: 'per_day', schedule_weeks: '1',
+    }, { alsBrowser: true })
+    gleich(leer.status, 400, 'no day has a time')
+    const kaputt = await formular('/agents/edit', {
+      repo_id: repoId, name: 'e2e-protag-kaputt', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
+      schedule_kind: 'woechentlich', schedule_mode: 'per_day', schedule_day_time_2: 'bald', schedule_weeks: '1',
+    }, { alsBrowser: true })
+    gleich(kaputt.status, 400, 'a half-typed time is not silently dropped')
+    const json = await formular('/agents/edit', {
+      repo_id: repoId, name: 'e2e-slots-kaputt', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
+      schedule_kind: 'woechentlich', schedule_slots: 'kein json', schedule_weeks: '1',
+    }, { alsBrowser: true })
+    gleich(json.status, 400, 'unreadable JSON')
+  })
+  await pruefe('switching from per-day back to the same times drops the slots', async () => {
+    const id = agent('e2e-protag').id
+    const r = await formular(`/agents/edit?id=${id}`, {
+      repo_id: repoId, name: 'e2e-protag', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
+      expected_minutes: '30', schedule_kind: 'woechentlich', schedule_mode: 'same',
+      schedule_days: ['1'], schedule_time: '06:00', schedule_weeks: '1', active: '1',
+    }, { alsBrowser: true })
+    gleich(r.status, 303, 'redirect')
+    const a = agent('e2e-protag')
+    gleich(a.schedule_slots, null, 'the per-day list is gone, not left to outrank the columns')
+    gleich(a.schedule_time, '06:00', 'and the simple time is what runs')
+  })
+  await pruefe('the form comes back in the mode the agent was saved in', async () => {
+    const id = agent('e2e-slots-json').id
+    const html = await (await hol(`/agents/edit?id=${id}`)).text()
+    wahr(/value="per_day"[^>]*\n?[^>]*checked/.test(html), 'per-day mode preselected')
+    wahr(/name="schedule_day_time_2" value="08:00"/.test(html), "Tuesday's first time")
+    wahr(/name="schedule_day_time_2" value="11:00"/.test(html), "Tuesday's second time")
+    wahr(/name="schedule_day_time_3" value="14:17"/.test(html), "Wednesday's own time")
+  })
   await pruefe('switching to manual clears the schedule fields', async () => {
     const id = agent('e2e-woechentlich').id
     const r = await formular(`/agents/edit?id=${id}`, {

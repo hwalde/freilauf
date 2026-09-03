@@ -134,7 +134,8 @@ an empty one. The write is `POST /agents/edit` for a new agent and
 | `flow_when_<flowId>` | — | `always` (default) / `done` / `failed` / `not_done` / `aborted` |
 | `schedule_kind` | — | see §4; absent means `manuell` |
 | `schedule_days` | with `woechentlich` | **repeated**, `0`=Sunday … `6`=Saturday |
-| `schedule_time` | with `woechentlich` | `HH:MM`, the hub machine's local time |
+| `schedule_time` | with `woechentlich` | `HH:MM`, the hub machine's local time. **Several are allowed**, comma-separated (`08:00,11:00`) or as a repeated field — they then apply to every selected day |
+| `schedule_slots` | instead of the two above | different times per weekday, as JSON: `{"2":["08:00","11:00"],"3":["14:17"]}`. It **outranks** `schedule_days`/`schedule_time`, so send either this or those two, never both |
 | `schedule_weeks` | with `woechentlich` | `1`–`4` |
 | `schedule_anchor` | when `schedule_weeks` > 1 | `YYYY-MM-DD` |
 | `run_at` | with `einmalig` | `YYYY-MM-DDTHH:MM`, local time |
@@ -163,7 +164,7 @@ A refusal is a list of English sentences. The ones you will actually hit:
 | bad branch mode / missing pattern | `Unknown branch expectation: …` / `Branch pattern is missing…` |
 | `fest` on a branch another worktree holds | `Branch "…" is already checked out in …` |
 | keep-on-branch without a branch | `Keeping the work on a branch needs a branch…` |
-| schedule | `Please select at least one weekday.` · `Time is missing or invalid (format HH:MM).` · `Interval must be 1, 2, 3 or 4 weeks.` · `A multi-week interval needs an anchor week.` · `Please give a valid date.` · `Cron expression is missing.` · `"…" is not a 5-field cron …` |
+| schedule | `Please select at least one weekday.` · `Please give at least one time on at least one weekday.` · `The times per weekday could not be read …` · `Time is missing or invalid (format HH:MM).` · `Interval must be 1, 2, 3 or 4 weeks.` · `A multi-week interval needs an anchor week.` · `Please give a valid date.` · `Cron expression is missing.` · `"…" is not a 5-field cron …` |
 
 The full list with its i18n keys is in `references/editing.md`.
 
@@ -172,7 +173,7 @@ The full list with its i18n keys is in `references/editing.md`.
 | `schedule_kind` | fires |
 |---|---|
 | `manuell` | never by itself — only "start now", a flow or the API |
-| `woechentlich` | on each selected weekday at `schedule_time`, every `schedule_weeks` weeks counted in **whole weeks from the anchor's Monday** |
+| `woechentlich` | on each selected weekday at every one of its times, every `schedule_weeks` weeks counted in **whole weeks from the anchor's Monday**. The times are the same on every day (`schedule_time`) unless `schedule_slots` gives each weekday its own |
 | `einmalig` | once, as soon as `run_at` has passed. A start missed while the hub was off is caught up — and the agent then **rewrites itself to `manuell`** |
 | `cron` | whenever the expression matches the current minute |
 

@@ -32,7 +32,8 @@ process.env.FREILAUF_SKILLS_STATE = join(sandkasten, 'skills-installed.json')
 const d = (s) => new Date(s)
 
 try {
-  const { cronMatches, validCron, scheduleDue, scheduleText, stripAnsi, escapeHtml,
+  const { cronMatches, validCron, scheduleDue, scheduleText, weeklySlots, slotsUniform, splitTimes,
+    stripAnsi, escapeHtml,
     fmtDuration, parseDbUtc, toDbUtc, fmtRelativeTime, fmtDateTime, kurzid,
     fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent,
     timezoneForLanguage, setTimezone, validTz, tzAbbrev, TIMEZONE_OPTIONS, setPublicHost, publicBase } = await import('../server/util.mjs')
@@ -131,6 +132,45 @@ try {
     const kuenftig = { ...woe, schedule_weeks: 2, schedule_anchor: '2027-01-11' }
     falsch(scheduleDue(kuenftig, d('2026-08-24T07:30:00')), 'before the anchor')
   })
+  await pruefe('several times on the same days: every one of them is due', () => {
+    const zwei = { ...woe, schedule_time: '08:00,11:00' }
+    wahr(scheduleDue(zwei, d('2026-08-24T08:00:00')), 'Monday 08:00')
+    wahr(scheduleDue(zwei, d('2026-08-24T11:00:00')), 'Monday 11:00')
+    falsch(scheduleDue(zwei, d('2026-08-24T09:00:00')), 'in between')
+    falsch(scheduleDue(zwei, d('2026-08-25T08:00:00')), 'Tuesday is not chosen')
+  })
+  await pruefe('times per weekday: each day only at its own times', () => {
+    const proTag = {
+      schedule_kind: 'woechentlich', schedule_weeks: 1,
+      schedule_slots: '{"2":["08:00","11:00"],"3":["14:17"]}',
+    }
+    wahr(scheduleDue(proTag, d('2026-08-25T08:00:00')), 'Tuesday 08:00')
+    wahr(scheduleDue(proTag, d('2026-08-25T11:00:00')), 'Tuesday 11:00')
+    wahr(scheduleDue(proTag, d('2026-08-26T14:17:00')), 'Wednesday 14:17')
+    falsch(scheduleDue(proTag, d('2026-08-26T08:00:00')), "Wednesday does not inherit Tuesday's times")
+    falsch(scheduleDue(proTag, d('2026-08-25T14:17:00')), "Tuesday does not inherit Wednesday's")
+    falsch(scheduleDue(proTag, d('2026-08-24T08:00:00')), 'Monday has no times at all')
+  })
+  await pruefe('the per-day list outranks the flat columns, and the cadence still applies', () => {
+    const gemischt = { ...woe, schedule_slots: '{"2":["08:00"]}' }
+    wahr(scheduleDue(gemischt, d('2026-08-25T08:00:00')), 'the slots decide')
+    falsch(scheduleDue(gemischt, d('2026-08-24T07:30:00')), 'the old columns do not run alongside')
+    const alle14 = { ...gemischt, schedule_weeks: 2, schedule_anchor: '2026-08-24' }
+    wahr(scheduleDue(alle14, d('2026-08-25T08:00:00')), 'anchor week')
+    falsch(scheduleDue(alle14, d('2026-09-01T08:00:00')), 'following week')
+  })
+  await pruefe('junk in the times is ignored, never guessed at', () => {
+    falsch(scheduleDue({ ...woe, schedule_time: 'irgendwann' }, d('2026-08-24T07:30:00')), 'unreadable time')
+    // Unreadable slots are no statement at all, so the flat columns are still
+    // the schedule — an agent must not silently stop running over a damaged
+    // JSON string, and a form-saved per-day agent has no times in them anyway.
+    wahr(scheduleDue({ ...woe, schedule_slots: 'kein json' }, d('2026-08-24T07:30:00')),
+      'unreadable slots leave the columns in charge')
+    falsch(scheduleDue({ schedule_kind: 'woechentlich', schedule_days: '1,3,5', schedule_slots: 'kein json' },
+      d('2026-08-24T07:30:00')), 'and with no time in them, nothing runs')
+    falsch(scheduleDue({ schedule_kind: 'woechentlich', schedule_slots: '{"9":["08:00"]}' }, d('2026-08-25T08:00:00')),
+      'weekday 9 does not exist')
+  })
   await pruefe('incomplete settings are never due', () => {
     falsch(scheduleDue({ schedule_kind: 'woechentlich', schedule_time: '07:30' }, d('2026-08-24T07:30:00')), 'no days')
     falsch(scheduleDue({ schedule_kind: 'woechentlich', schedule_days: '1' }, d('2026-08-24T07:30:00')), 'no time')
@@ -182,6 +222,50 @@ try {
   await pruefe('stays readable with incomplete settings', () => {
     const t = scheduleText({ schedule_kind: 'woechentlich' })
     wahr(typeof t === 'string' && t.length > 0, 'returns text instead of throwing')
+  })
+  await pruefe('several times are all named, on one line', () => {
+    const zwei = { ...woe, schedule_time: '08:00,11:00' }
+    enthaelt(scheduleText(zwei), '08:00, 11:00', 'both times')
+    enthaelt(scheduleText(zwei), 'Mon, Wed, Fri', 'days unchanged')
+    gleich(scheduleText({ ...woe, schedule_days: '0,1,2,3,4,5,6', schedule_time: '06:00,18:00' }),
+      'daily at 06:00, 18:00', 'all seven days every week stays "daily"')
+  })
+  await pruefe('different times per day are listed per day', () => {
+    const proTag = { schedule_kind: 'woechentlich', schedule_weeks: 1,
+      schedule_slots: '{"3":["14:17"],"2":["08:00","11:00"]}' }
+    const txt = scheduleText(proTag)
+    enthaelt(txt, 'Tue 08:00, 11:00', 'Tuesday with both its times')
+    enthaelt(txt, 'Wed 14:17', 'Wednesday with its own')
+    wahr(txt.indexOf('Tue') < txt.indexOf('Wed'), 'the week is read in its own order, not in the JSON key order')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('Schedules: the two storages become one shape (weeklySlots)')
+
+  await pruefe('the flat columns give every chosen day the same times', () => {
+    const s = weeklySlots({ schedule_days: '5,1', schedule_time: '11:00,08:00' })
+    gleich(s.length, 2, 'two days')
+    gleich(s[0].day, 1, 'Monday first — the order a week is read in')
+    gleich(s[0].times.join(','), '08:00,11:00', 'times sorted')
+    gleich(s[1].times.join(','), '08:00,11:00', 'the same on the second day')
+    wahr(slotsUniform(s), 'and that is the uniform case')
+  })
+  await pruefe('schedule_slots gives every day its own', () => {
+    const s = weeklySlots({ schedule_days: '1', schedule_time: '07:30', schedule_slots: '{"2":["08:00"],"3":["14:17"]}' })
+    gleich(s.map(x => x.day).join(','), '2,3', 'the slots decide which days')
+    falsch(slotsUniform(s), 'different times are not uniform')
+  })
+  await pruefe('nothing usable is an empty schedule, not a crash', () => {
+    gleich(weeklySlots({}).length, 0, 'empty agent')
+    gleich(weeklySlots({ schedule_days: '1' }).length, 0, 'days without a time')
+    gleich(weeklySlots({ schedule_time: '08:00' }).length, 0, 'time without a day')
+    gleich(weeklySlots({ schedule_slots: '{}' }).length, 0, 'empty slots')
+    falsch(slotsUniform([]), 'and an empty schedule is not "uniform"')
+  })
+  await pruefe('splitTimes keeps times, drops the rest, sorts and deduplicates', () => {
+    gleich(splitTimes('11:00, 08:00 ,11:00').join(','), '08:00,11:00', 'string')
+    gleich(splitTimes(['08:00', 'bald', '', '25:00', '08:61']).join(','), '08:00', 'list')
+    gleich(splitTimes(null).length, 0, 'nothing')
   })
 
   // ------------------------------------------------------------------

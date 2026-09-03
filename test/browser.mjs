@@ -479,6 +479,41 @@ try {
     await p.close()
   })
 
+  await pruefe('the two weekly modes show one block each', async () => {
+    const p = await neueSeite(`/agents/edit?repo=${repoId}`)
+    await p.selectOption('#schedule-kind', 'woechentlich')
+    wahr(await p.isVisible('.zpm[data-mode="same"]'), 'the same times are the default')
+    falsch(await p.isVisible('.zpm[data-mode="per_day"]'), 'the per-day grid stays away')
+    await p.check('input[name=schedule_mode][value="per_day"]')
+    wahr(await p.isVisible('.zpm[data-mode="per_day"]'), 'per-day grid')
+    falsch(await p.isVisible('.zpm[data-mode="same"]'), 'and the other one goes')
+    gleich(await p.locator('.day-times .day-row').count(), 7, 'one row per weekday, empty ones included')
+    sauber(p)
+    await p.close()
+  })
+
+  await pruefe('a time is added an hour later, removed again, and the last one cannot go', async () => {
+    const p = await neueSeite(`/agents/edit?repo=${repoId}`)
+    await p.selectOption('#schedule-kind', 'woechentlich')
+    const box = '.zpm[data-mode="same"] .times'
+    gleich(await p.locator(`${box} input[type=time]`).count(), 1, 'one time to start with')
+    falsch(await p.isVisible(`${box} .time-del`), 'and it carries no delete button')
+    await p.click(`${box} .time-add`)
+    gleich(await p.locator(`${box} input[type=time]`).count(), 2, 'a second one')
+    gleich(await p.locator(`${box} input[type=time]`).nth(1).inputValue(), '07:00', 'an hour after the first')
+    wahr(await p.locator(`${box} .time-del`).first().isVisible(), 'now both can go')
+    // A per-day row may become empty — that is how a weekday is switched off.
+    await p.check('input[name=schedule_mode][value="per_day"]')
+    const tag = '.day-times .day-row:nth-child(2) .times'
+    await p.click(`${tag} .time-add`)
+    gleich(await p.locator(`${tag} input[type=time]`).count(), 1, 'Tuesday has a time')
+    wahr(await p.isVisible(`${tag} .time-del`), 'and it may be taken away again')
+    await p.click(`${tag} .time-del`)
+    gleich(await p.locator(`${tag} input[type=time]`).count(), 0, 'the day is switched off')
+    sauber(p)
+    await p.close()
+  })
+
   // ------------------------------------------------------------------ A4
   gruppe('A4 — the planned start switches per fieldset, not per page')
 
