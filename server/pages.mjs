@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRepo, getRun } from './db.mjs'
 import { KNOWN_QUANTIZATIONS, REGIONS, parseRoutingConfig } from './providers/openrouter-routing.mjs'
-import { escapeHtml as e, validCron, WOCHENTAGE, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime, fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent, tzAbbrev, uiTimezone, setTimezone, setPublicHost, TIMEZONE_OPTIONS, hubVersion, publicBase, WORKTREES_DIR, RUNS_DIR } from './util.mjs'
+import { escapeHtml as e, validCron, WOCHENTAGE, weeklySlots, slotsUniform, splitTimes, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime, fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent, tzAbbrev, uiTimezone, setTimezone, setPublicHost, TIMEZONE_OPTIONS, hubVersion, publicBase, WORKTREES_DIR, RUNS_DIR } from './util.mjs'
 import { cookieRepo, requestRepo } from './web-helpers.mjs'
 import { providerBalances } from './balances.mjs'
 import { enabledCodingAgents, saveCodingAgent, deleteCodingAgent } from './coding-agents.mjs'
@@ -13,7 +13,7 @@ import {
   runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
   runTitleField, runStartTimeFields, runStartFromForm,
   runSetupFields, runSetupFromForm, branchFields, branchContext,
-  agentNameTaken, moveAgent, deleteAgent,
+  agentNameTaken, moveAgent, deleteAgent, EMPTY_SCHEDULE,
 } from './run-def.mjs'
 import {
   listFavorites, getFavorite, saveFavorite, deleteFavorite,
@@ -2816,16 +2816,38 @@ export async function runNewPost(req, res, url, formBody) {
  * (switching lives in hub.js). Cron stays as an expert field — the other three
  * kinds cover what 5-field cron cannot express (n-weekly, one-off date).
  */
-function zeitplanFelder(a = {}) {
+/**
+ * One editable list of times: a chip per time, plus the button that adds one.
+ * `min1` keeps the last chip's delete button away — the "same times" list may
+ * not become empty, a weekday's list may (that is how a day is switched off).
+ */
+function timeList(name, times, { min1 = false } = {}) {
+  const chips = times.map(v => `
+    <span class="time-chip"><input type="time" name="${e(name)}" value="${e(v)}" required>
+      <button type="button" class="time-del" title="${e(t('sched.remove_time'))}" aria-label="${e(t('sched.remove_time'))}">×</button></span>`).join('')
+  return `<div class="times" data-time-name="${e(name)}" data-min1="${min1 ? '1' : '0'}"
+      data-del-title="${e(t('sched.remove_time'))}">
+    ${chips}<button type="button" class="time-add">+ ${e(t('sched.add_time'))}</button>
+  </div>`
+}
+
+function scheduleFields(a = {}) {
   const kind = a.schedule_kind ?? 'manuell'
-  const tage = String(a.schedule_days ?? '').split(',').filter(x => x !== '').map(Number)
   const heute = new Date().toISOString().slice(0, 10)
+  // Both storages arrive as one shape, so the form does not have to know which
+  // one the agent carries — only which MODE the operator last chose, and that
+  // is exactly what a filled schedule_slots says.
+  const slots = weeklySlots(a)
+  const mode = a.schedule_slots ? 'per_day' : 'same'
+  const days = slots.map(s => s.day)
+  const sharedTimes = slots.length && slotsUniform(slots) ? slots[0].times : (slots[0]?.times ?? ['06:00'])
   const arten = [
     ['manuell', t('sched.kind_manual')],
     ['woechentlich', t('sched.kind_weekly')],
     ['einmalig', t('sched.kind_once')],
     ['cron', t('sched.kind_cron')],
   ]
+  const modes = [['same', t('sched.mode_same')], ['per_day', t('sched.mode_per_day')]]
   return `
   <fieldset class="schedule">
     <legend>${e(t('sched.legend'))}</legend>
@@ -2834,11 +2856,30 @@ function zeitplanFelder(a = {}) {
     </select></label>
 
     <div class="zp" data-kind="woechentlich">
-      <div class="weekdays">${WOCHENTAGE.map(w => `
-        <label class="weekday"><input type="checkbox" name="schedule_days" value="${w.n}"
-          ${tage.includes(w.n) ? 'checked' : ''}> ${e(t(w.key))}</label>`).join('')}
+      <div class="sched-modes" role="radiogroup" aria-label="${e(t('sched.mode_legend'))}">
+        ${modes.map(([v, txt]) => `<label class="chk mode"><input type="radio" name="schedule_mode" value="${v}"
+          ${mode === v ? 'checked' : ''}> ${e(txt)}</label>`).join('')}
       </div>
-      <label>${e(t('sched.time'))} <input type="time" name="schedule_time" value="${e(a.schedule_time ?? '06:00')}"></label>
+
+      <div class="zpm" data-mode="same">
+        <div class="weekdays">${WOCHENTAGE.map(w => `
+          <label class="weekday"><input type="checkbox" name="schedule_days" value="${w.n}"
+            ${days.includes(w.n) ? 'checked' : ''}> ${e(t(w.key))}</label>`).join('')}
+        </div>
+        <label class="times-label">${e(t('sched.time'))}
+          ${timeList('schedule_time', sharedTimes, { min1: true })}</label>
+      </div>
+
+      <div class="zpm" data-mode="per_day">
+        <div class="day-times">${WOCHENTAGE.map(w => `
+          <div class="day-row">
+            <span class="day-name">${e(t(w.key))}</span>
+            ${timeList(`schedule_day_time_${w.n}`, slots.find(s => s.day === w.n)?.times ?? [])}
+          </div>`).join('')}
+        </div>
+        <p class="dim">${e(t('sched.per_day_hint'))}</p>
+      </div>
+
       <label>${e(t('sched.interval'))} <select name="schedule_weeks">
         ${[1, 2, 3, 4].map(n => `<option value="${n}" ${Number(a.schedule_weeks ?? 1) === n ? 'selected' : ''}>${e(n === 1 ? t('sched.every_week') : t('sched.every_n_weeks', { n }))}</option>`).join('')}
       </select></label>
@@ -2866,7 +2907,7 @@ function agentFields(a = {}, repoId) {
   <label>${e(t('agents.name'))} <input name="name" value="${e(a.name ?? '')}" required></label>
   ${runDefFields(a, branchContext(repoId))}
   <input type="hidden" name="repo_id" value="${repoId}">
-  ${zeitplanFelder(a)}
+  ${scheduleFields(a)}
   <label class="chk"><input type="checkbox" name="active" value="1" ${a.active ?? 1 ? 'checked' : ''}> ${e(t('agents.active'))}</label>`
 }
 
@@ -2914,7 +2955,7 @@ export async function agentSave(req, res, url, formBody) {
   // the same name, which is what the move feature relies on.
   else if (agentNameTaken(+b.repo_id, name, id ? +id : null)) problems.push(t('agents.name_taken', { name }))
   const def = await runDefFromForm(b, problems)
-  const zp = zeitplanAusFormular(b, problems)
+  const zp = scheduleFromForm(b, problems)
   if (problems.length) return problemPage(req, res, t('agentform.title_edit'), problems, back)
 
   saveAgent({ id: id ? +id : null, repoId: +b.repo_id, name, def, schedule: zp, active })
@@ -2971,40 +3012,88 @@ export async function agentMovePost(req, res, url, formBody) {
 }
 
 /**
+ * The times of one form field, with a complaint about anything that is neither
+ * a time nor empty. An emptied input IS the gesture "this time is gone" — but a
+ * half-typed one must not be swallowed, or a schedule would silently be a
+ * different schedule than the one that was submitted.
+ */
+function timesFromField(b, name, problems) {
+  const raw = (b[`${name}_list`] ?? (b[name] === undefined ? [] : [b[name]])).map(x => String(x ?? '').trim())
+  const good = splitTimes(raw)
+  if (raw.some(x => x !== '' && !good.includes(x))) problems.push(t('sched.err_time'))
+  return good
+}
+
+/**
  * Read and validate the schedule from the form. Only the fields of the chosen
  * kind are taken over — otherwise old leftovers would survive a switch and the
- * agent would keep running after a change to "manual".
+ * agent would keep running after a change to "manual". The same is true one
+ * level down for the weekly kind's two modes: exactly one of them is stored, so
+ * the times of the other cannot come back to life on the next save.
  */
-function zeitplanAusFormular(b, problems) {
-  const leer = { schedule: null, kind: 'manuell', days: null, time: null, weeks: null, anchor: null, run_at: null }
+function scheduleFromForm(b, problems) {
+  const empty = { ...EMPTY_SCHEDULE }
   switch (b.schedule_kind) {
     case 'woechentlich': {
-      // Several same-named checkboxes: the URLSearchParams collector in
-      // web-helpers keeps only the last value — hence the days arrive as a list.
-      const tage = (b.schedule_days_list ?? []).map(Number).filter(n => n >= 0 && n <= 6)
-      if (!tage.length) problems.push(t('sched.err_days'))
-      if (!/^\d{2}:\d{2}$/.test(b.schedule_time ?? '')) problems.push(t('sched.err_time'))
       const weeks = Number(b.schedule_weeks) || 1
       if (![1, 2, 3, 4].includes(weeks)) problems.push(t('sched.err_weeks'))
       if (weeks > 1 && !/^\d{4}-\d{2}-\d{2}$/.test(b.schedule_anchor ?? '')) {
         problems.push(t('sched.err_anchor'))
       }
-      return { ...leer, kind: 'woechentlich', days: tage.sort().join(','), time: b.schedule_time,
-        weeks, anchor: weeks > 1 ? b.schedule_anchor : null }
+      const cadence = { weeks, anchor: weeks > 1 ? b.schedule_anchor : null }
+
+      // Different times per weekday. Two spellings, one validator: the form's
+      // one field per day, and a ready-made `schedule_slots` JSON for whoever
+      // writes this over the API instead of through the browser.
+      if (b.schedule_mode === 'per_day' || (b.schedule_slots && b.schedule_mode === undefined)) {
+        const slots = {}
+        if (b.schedule_slots) {
+          let obj = null
+          try { obj = JSON.parse(b.schedule_slots) } catch { /* reported below */ }
+          if (!obj || typeof obj !== 'object' || Array.isArray(obj)) problems.push(t('sched.err_slots'))
+          for (const [key, times] of Object.entries(obj ?? {})) {
+            const n = Number(key)
+            if (!Number.isInteger(n) || n < 0 || n > 6) { problems.push(t('sched.err_slots')); continue }
+            const list = splitTimes(times)
+            if (list.length) slots[n] = list
+          }
+        } else {
+          for (const w of WOCHENTAGE) {
+            const list = timesFromField(b, `schedule_day_time_${w.n}`, problems)
+            if (list.length) slots[w.n] = list
+          }
+        }
+        const withTimes = Object.keys(slots).map(Number)
+        if (!withTimes.length) problems.push(t('sched.err_day_times'))
+        // schedule_days stays filled with the days that have times: it is what
+        // "which days does this agent run on" is read from everywhere outside
+        // weeklySlots(), and a NULL there would read as "none".
+        return { ...empty, kind: 'woechentlich', ...cadence,
+          days: withTimes.sort((x, y) => x - y).join(','), time: null, slots: JSON.stringify(slots) }
+      }
+
+      // Several same-named checkboxes: the URLSearchParams collector in
+      // web-helpers keeps only the last value — hence the days arrive as a list.
+      const days = (b.schedule_days_list ?? []).map(Number).filter(n => n >= 0 && n <= 6)
+      if (!days.length) problems.push(t('sched.err_days'))
+      const times = timesFromField(b, 'schedule_time', problems)
+      if (!times.length) problems.push(t('sched.err_time'))
+      return { ...empty, kind: 'woechentlich', ...cadence,
+        days: [...new Set(days)].sort((x, y) => x - y).join(','), time: times.join(','), slots: null }
     }
     case 'einmalig': {
       const at = (b.run_at ?? '').trim()
       if (!at || Number.isNaN(new Date(at).getTime())) problems.push(t('sched.err_at'))
-      return { ...leer, kind: 'einmalig', run_at: at }
+      return { ...empty, kind: 'einmalig', run_at: at }
     }
     case 'cron': {
       const c = (b.schedule ?? '').trim()
       if (!c) problems.push(t('sched.err_cron_missing'))
       else if (!validCron(c)) problems.push(t('sched.err_cron', { expr: c }))
-      return { ...leer, kind: 'cron', schedule: c }
+      return { ...empty, kind: 'cron', schedule: c }
     }
     default:
-      return leer
+      return empty
   }
 }
 

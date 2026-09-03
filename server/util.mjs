@@ -317,6 +317,70 @@ export const WOCHENTAGE = [
 
 const zwei = (n) => String(n).padStart(2, '0')
 
+/** Weekday numbers in the order a week is read: Monday first, Sunday last. */
+const WEEK_ORDER = WOCHENTAGE.map(w => w.n)
+
+/** "07:30,11:00" → ['07:30','11:00'] — trimmed, validated, deduplicated, sorted. */
+export function splitTimes(value) {
+  const raw = Array.isArray(value) ? value : String(value ?? '').split(',')
+  const out = []
+  for (const item of raw) {
+    const time = String(item ?? '').trim()
+    if (/^\d{2}:\d{2}$/.test(time) && +time.slice(0, 2) <= 23 && +time.slice(3) <= 59 && !out.includes(time)) {
+      out.push(time)
+    }
+  }
+  return out.sort()
+}
+
+/** `schedule_slots` JSON → [{day, times}] — null when it says nothing usable. */
+function parseSlots(json) {
+  if (!json) return null
+  let obj
+  try { obj = JSON.parse(json) } catch { return null }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null
+  const out = []
+  for (const [key, times] of Object.entries(obj)) {
+    const day = Number(key)
+    if (!Number.isInteger(day) || day < 0 || day > 6) continue
+    const liste = splitTimes(times)
+    if (liste.length) out.push({ day, times: liste })
+  }
+  return out.length ? sortWeek(out) : null
+}
+
+const sortWeek = (slots) => slots.sort((a, b) => WEEK_ORDER.indexOf(a.day) - WEEK_ORDER.indexOf(b.day))
+
+/**
+ * A weekly schedule as ONE shape: per weekday the times it runs at, in the
+ * order a week is read.
+ *
+ * Two storages meet here and nowhere else. The flat columns
+ * (`schedule_days` + `schedule_time`) say "the same times on every chosen day"
+ * — which is what almost every schedule is, and what every agent written
+ * before this existed says. `schedule_slots` is the escalation: a time list
+ * per weekday, for "Tuesday at 08:00 and 11:00, Wednesday at 14:17". Whoever
+ * reads a schedule asks this function and never has to know which of the two
+ * an agent carries.
+ */
+export function weeklySlots(agent) {
+  const slots = parseSlots(agent?.schedule_slots)
+  if (slots) return slots
+  // The empty string has to be thrown out BEFORE the conversion: Number('') is
+  // 0 and a valid weekday, so an agent with no days at all would run on Sundays.
+  const days = String(agent?.schedule_days ?? '').split(',')
+    .map(x => String(x).trim()).filter(x => x !== '')
+    .map(Number).filter(n => Number.isInteger(n) && n >= 0 && n <= 6)
+  const times = splitTimes(agent?.schedule_time)
+  if (!days.length || !times.length) return []
+  return sortWeek([...new Set(days)].map(day => ({ day, times })))
+}
+
+/** Do all days of a weekly schedule run at the same times? */
+export function slotsUniform(slots) {
+  return slots.length > 0 && slots.every(s => s.times.join(',') === slots[0].times.join(','))
+}
+
 /** Monday 00:00 of the week the date falls in (local time). */
 function wochenstart(d) {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate())
@@ -335,10 +399,11 @@ export function scheduleDue(agent, now = new Date()) {
       return !!agent.schedule?.trim() && cronMatches(agent.schedule, now)
 
     case 'woechentlich': {
-      if (!agent.schedule_time || !agent.schedule_days) return false
-      if (agent.schedule_time !== `${zwei(now.getHours())}:${zwei(now.getMinutes())}`) return false
-      const tage = String(agent.schedule_days).split(',').map(Number)
-      if (!tage.includes(now.getDay())) return false
+      // Per weekday its own times — the flat columns and `schedule_slots` are
+      // both read through weeklySlots(), so this asks one question either way.
+      const heute = weeklySlots(agent).find(s => s.day === now.getDay())
+      if (!heute) return false
+      if (!heute.times.includes(`${zwei(now.getHours())}:${zwei(now.getMinutes())}`)) return false
       const n = Number(agent.schedule_weeks) || 1
       if (n <= 1) return true
       // Every-n-weeks counts whole weeks from the anchor week — not from the day.
@@ -369,19 +434,25 @@ export function scheduleText(agent) {
       ? t('sched.once_on', { ts: String(agent.run_at).replace('T', ' ') })
       : t('sched.once_none')
     case 'woechentlich': {
-      const roh = String(agent.schedule_days ?? '').split(',').filter(x => x !== '')
+      const slots = weeklySlots(agent)
       const n = Number(agent.schedule_weeks) || 1
+      const takt = n === 1 ? t('sched.weekly_word') : t('sched.every_n_weeks', { n })
+      const dayName = (d) => { const w = WOCHENTAGE.find(w => w.n === d); return w ? t(w.key) : String(d) }
+      if (!slots.length) {
+        return t('sched.weekly_line', { takt, days: t('sched.no_days'), time: '??:??' })
+      }
+      // Different times per day cannot be folded into one "at <time>" — each
+      // day is named with its own list instead.
+      if (!slotsUniform(slots)) {
+        const liste = slots.map(s => t('sched.day_times', { day: dayName(s.day), times: s.times.join(', ') }))
+        return t('sched.weekly_days_line', { takt, list: liste.join(' · ') })
+      }
+      const time = slots[0].times.join(', ')
       // Every weekday at the same time, every week — that is just "daily", and
       // listing all seven days would say the same thing longer. A multi-week
       // cadence is NOT daily, so it keeps its day list.
-      const alleWochentage = roh.length >= WOCHENTAGE.length &&
-        roh.every(x => WOCHENTAGE.some(w => w.n === Number(x)))
-      if (alleWochentage && n === 1) {
-        return t('sched.daily_line', { time: agent.schedule_time ?? '??:??' })
-      }
-      const days = roh.map(x => { const w = WOCHENTAGE.find(w => w.n === Number(x)); return w ? t(w.key) : x }).join(', ')
-      const takt = n === 1 ? t('sched.weekly_word') : t('sched.every_n_weeks', { n })
-      return t('sched.weekly_line', { takt, days: days || t('sched.no_days'), time: agent.schedule_time ?? '??:??' })
+      if (slots.length >= WOCHENTAGE.length && n === 1) return t('sched.daily_line', { time })
+      return t('sched.weekly_line', { takt, days: slots.map(s => dayName(s.day)).join(', '), time })
     }
     default: return t('sched.manual')
   }

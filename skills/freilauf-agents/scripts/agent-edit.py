@@ -129,10 +129,16 @@ def body_from_row(a):
     kind = a.get("schedule_kind") or "manuell"
     add("schedule_kind", kind)
     if kind == "woechentlich":
-        for day in str(a.get("schedule_days") or "").split(","):
-            if day.strip() != "":
-                add("schedule_days", day.strip())
-        add("schedule_time", a.get("schedule_time"))
+        # Different times per weekday are one field and outrank the two flat
+        # ones — sending both would be two statements about the same schedule.
+        if a.get("schedule_slots"):
+            slots = a["schedule_slots"]
+            add("schedule_slots", slots if isinstance(slots, str) else json.dumps(slots))
+        else:
+            for day in str(a.get("schedule_days") or "").split(","):
+                if day.strip() != "":
+                    add("schedule_days", day.strip())
+            add("schedule_time", a.get("schedule_time"))
         add("schedule_weeks", a.get("schedule_weeks") or 1)
         if a.get("schedule_anchor"):
             add("schedule_anchor", a.get("schedule_anchor"))

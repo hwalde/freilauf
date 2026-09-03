@@ -12,6 +12,15 @@
     })
   }
 
+  // The time a freshly added schedule chip starts at: an hour after the last
+  // one, capped at 23:00 so it never wraps into the previous day.
+  function nextTime(last) {
+    var m = /^(\d{2}):(\d{2})$/.exec(last || '')
+    if (!m) return '09:00'
+    var hour = Math.min(23, Number(m[1]) + 1)
+    return ('0' + hour).slice(-2) + ':' + m[2]
+  }
+
   // ---- relative timestamps (overview): live "n seconds ago", exact time on hover ----
   // Signed, like fmtRelativeTime in server/util.mjs: a started run looks back,
   // a planned one forward ("in 20 minutes"). Keep the unit ladder in sync.
@@ -118,6 +127,69 @@
       takt.addEventListener('change', syncAnker)
       syncAnker()
     }
+
+    // Weekly, one level down: the same times on every chosen day, or a list per
+    // weekday. Only the chosen mode is READ on the server, so the other one's
+    // inputs may stay in the DOM — switching back and forth costs nothing that
+    // was typed.
+    const modes = Array.from(document.querySelectorAll('input[name=schedule_mode]'))
+    if (modes.length) {
+      const modeBlocks = Array.from(document.querySelectorAll('.zpm'))
+      const syncMode = () => {
+        const chosen = modes.find(m => m.checked)?.value
+        modeBlocks.forEach(b => { b.hidden = b.dataset.mode !== chosen })
+      }
+      modes.forEach(m => m.addEventListener('change', syncMode))
+      syncMode()
+    }
+
+    // ---- the time chips: add, remove, and never an empty "same times" list ----
+    const syncTimes = (box) => {
+      const chips = Array.from(box.querySelectorAll('.time-chip'))
+      // With a single time left, removing it would leave a schedule with no
+      // time at all — a state the server refuses, so the button says so by
+      // not being there. A weekday's list may go empty: that switches it off.
+      chips.forEach(c => {
+        const del = c.querySelector('.time-del')
+        if (del) del.hidden = box.dataset.min1 === '1' && chips.length < 2
+      })
+    }
+    Array.from(document.querySelectorAll('.times')).forEach(syncTimes)
+
+    document.addEventListener('click', function (ev) {
+      const add = ev.target.closest && ev.target.closest('.time-add')
+      if (add) {
+        const box = add.closest('.times')
+        const last = Array.from(box.querySelectorAll('input[type=time]')).pop()
+        const chip = document.createElement('span')
+        chip.className = 'time-chip'
+        const input = document.createElement('input')
+        input.type = 'time'
+        input.name = box.dataset.timeName
+        input.required = true
+        // An hour after the last one, so a second time is one click and no
+        // typing in the usual case — and never an empty input, which would be
+        // a time the server drops without saying so.
+        input.value = nextTime(last && last.value)
+        const del = document.createElement('button')
+        del.type = 'button'
+        del.className = 'time-del'
+        del.title = box.dataset.delTitle || ''
+        del.setAttribute('aria-label', del.title)
+        del.textContent = '×'
+        chip.append(input, del)
+        box.insertBefore(chip, add)
+        syncTimes(box)
+        input.focus()
+        return
+      }
+      const del = ev.target.closest && ev.target.closest('.time-del')
+      if (del) {
+        const box = del.closest('.times')
+        del.closest('.time-chip').remove()
+        syncTimes(box)
+      }
+    })
   }
 
   // ---- planned start: show only the chosen kind's block ----

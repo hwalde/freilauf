@@ -607,32 +607,41 @@ export function defFromAgent(agent) {
 }
 
 /**
+ * No schedule at all — and the shape every schedule is spread over, so a new
+ * schedule column cannot be forgotten by the callers that build a partial one.
+ */
+export const EMPTY_SCHEDULE = {
+  schedule: null, kind: 'manuell', days: null, time: null, slots: null,
+  weeks: null, anchor: null, run_at: null,
+}
+
+/**
  * Create or update an agent from a definition — the only place that writes the
  * agents table. `schedule` may be omitted (the single-run form's "save as
  * agent" saves the definition without a schedule; the agent then runs manually).
  */
 export function saveAgent({ id = null, repoId, name, def, schedule = null, active = 1 }) {
-  const zp = schedule ?? { schedule: null, kind: 'manuell', days: null, time: null, weeks: null, anchor: null, run_at: null }
+  const zp = { ...EMPTY_SCHEDULE, ...(schedule ?? {}) }
   if (id) {
     // A single UPDATE — before, 'active' was first set to 1 and then derived
     // again from exactly that freshly written value.
     db.prepare(`UPDATE agents SET name=?, harness=?, model=?, prompt=?, goal=?, branch_mode=?, branch_pattern=?,
                 keep_on_branch=?, expected_minutes=?, schedule=?, schedule_kind=?, schedule_days=?, schedule_time=?,
-                schedule_weeks=?, schedule_anchor=?, run_at=?, provider=?, or_provider=?, or_routing=?, effort=?,
+                schedule_slots=?, schedule_weeks=?, schedule_anchor=?, run_at=?, provider=?, or_provider=?, or_routing=?, effort=?,
                 skills=?, flows=?, active=?, updated_at=datetime('now') WHERE id=?`).run(
       name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode, def.branchPattern,
       def.keepOnBranch ? 1 : 0,
-      def.expectedMinutes, zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
+      def.expectedMinutes, zp.schedule, zp.kind, zp.days, zp.time, zp.slots, zp.weeks, zp.anchor, zp.run_at,
       def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null, active, id)
     return id
   }
   const r = db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,goal,branch_mode,branch_pattern,keep_on_branch,expected_minutes,
-              schedule,schedule_kind,schedule_days,schedule_time,schedule_weeks,schedule_anchor,run_at,
+              schedule,schedule_kind,schedule_days,schedule_time,schedule_slots,schedule_weeks,schedule_anchor,run_at,
               provider,or_provider,or_routing,effort,skills,flows,active)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     repoId, name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode,
     def.branchPattern, def.keepOnBranch ? 1 : 0, def.expectedMinutes,
-    zp.schedule, zp.kind, zp.days, zp.time, zp.weeks, zp.anchor, zp.run_at,
+    zp.schedule, zp.kind, zp.days, zp.time, zp.slots, zp.weeks, zp.anchor, zp.run_at,
     def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null, active)
   return Number(r.lastInsertRowid)
 }

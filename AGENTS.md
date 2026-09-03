@@ -328,6 +328,41 @@ deliberately **not** part of the definition: the repo (it is the context, and
 the switcher in the header sets it), the name and the schedule (they make an
 agent an agent).
 
+### The weekly schedule: a day carries times, not a time
+
+A weekly schedule used to be one time for all chosen days — "Tuesday at 08:00
+**and** 11:00, Wednesday at 14:17" was only expressible as a cron expression,
+which is the expert field precisely because most people should never need it.
+It is now the ordinary form, and both halves of the generalization go through
+**one** reader, `weeklySlots(agent)` in `util.mjs`:
+
+| Storage | Says | When |
+|---|---|---|
+| `schedule_days` + `schedule_time` | the same times on every chosen day; `schedule_time` may name **several**, comma-separated (`08:00,11:00`) | the usual case, and every agent written before this existed |
+| `schedule_slots` (JSON, `{"2":["08:00","11:00"],"3":["14:17"]}`) | each weekday its own times, and a weekday that is not in it does not run | the escalation, and it **outranks** the two columns |
+
+Two storages and no drift, because nothing downstream knows which of them an
+agent carries: `scheduleDue()`, `scheduleText()` and the form all read
+`weeklySlots()` and get `[{day, times}]` in the order a week is read. The flat
+columns stayed for the same reason `openrouter_min_eur` still holds dollars —
+they are what every existing row, the read API, the agent skill and
+`agent-edit.py` speak, and a migration would have bought nothing. `schedule_days`
+is therefore kept filled in the per-day case too, with the days that have
+times: it is what "which days does this agent run on" is read from outside
+`weeklySlots()`, and NULL there would read as "none".
+
+The form has one radio pair for it — "same times on every selected day" /
+"different times per weekday" — and **only the chosen mode is stored**, exactly
+as only the chosen `schedule_kind` is: leftovers from the other mode would be a
+second, contradictory statement about one schedule, and the one that outranks
+would silently win. In per-day mode the weekday checkboxes are gone; the grid
+of seven rows IS the day selection, because a day with no time is a day that
+does not run and saying that twice is how the two say different things. A time
+is a chip whose value stays editable in place, `Number('')`'s cousin is fenced
+off (an emptied chip means "removed", a half-typed one is a refusal, never a
+silently dropped time), and a new chip starts an hour after the last one so a
+second time is one click and no typing.
+
 The repo is not just the path — under **Repos** each repo can carry its own
 **repo prompt** (`repos.prompt`): instructions that are added to **every** run
 of that repo, agents and single runs alike. Like `base_branch` and

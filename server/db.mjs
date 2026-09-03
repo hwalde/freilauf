@@ -149,7 +149,10 @@ function addColumn(table, name, definition) {
 // Schedules beyond cron (weekly with weekdays/time, every n weeks, one-off)
 addColumn('agents', 'schedule_kind', `TEXT NOT NULL DEFAULT 'manuell'`)
 addColumn('agents', 'schedule_days', 'TEXT')      // "1,2,5" — 0=Sun … 6=Sat
-addColumn('agents', 'schedule_time', 'TEXT')      // "06:30"
+addColumn('agents', 'schedule_time', 'TEXT')      // "06:30", or several: "08:00,11:00"
+// Different times per weekday: {"2":["08:00","11:00"],"3":["14:17"]}. NULL as long
+// as every chosen day runs at the same times — then the two columns above say it.
+addColumn('agents', 'schedule_slots', 'TEXT')
 addColumn('agents', 'schedule_weeks', 'INTEGER')  // 1 = every week, 2 = every second …
 addColumn('agents', 'schedule_anchor', 'TEXT')    // "2026-08-23" start week for every-n-weeks
 addColumn('agents', 'run_at', 'TEXT')             // "2026-08-24T06:30" for the one-off start
