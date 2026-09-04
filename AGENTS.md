@@ -2926,6 +2926,58 @@ yellow log hit on that harness turned red five minutes later while the agent was
 happily working. There, repetition and the check LLM are the escalation paths; a
 hit that has not recurred within 30 min expires by itself.
 
+**And the traffic light follows the same rule, which it did not used to.**
+`anomaly:no_activity` hangs on `lastAct`, and where nothing is measured that
+falls back to the run's START — so every hermes run longer than a quarter of an
+hour flagged itself as idle while it worked, in the one place the operator
+looks first. `measureActivity()` therefore answers `measured` as well: true in
+the three branches that have a source, false in the fallthrough. The flag lives
+next to the code that implements it rather than in a second list, so a harness
+that gains a source gains the flag in the same edit.
+
+**A statement about silence is retracted when the silence ends.** `no_activity`
+used to be cleared by a progress report alone (reports.mjs), so a run that had
+been quiet once carried "no activity" in the overview for the rest of its life —
+and "no activity" under a running run reads as "this agent is not running". The
+watcher now takes it back the moment the run is measurably working again
+(`retractNoActivity()`, the same `clearAnomalies()` mechanism a raised expected
+duration uses to retract its overrun). It announces explicitly, because nothing
+was ADDED: the live channel hangs on `addEvent()`, and a retraction no page
+hears about sits in the overview until the next unrelated event.
+
+### opencode's activity: a run is a session TREE
+
+`server/opencode-store.mjs` — split off from watcher.mjs the way
+`cursor-transcript.mjs` is, and for the same reason: a harness's activity source
+is its own subject, and the half that decides something has to be testable
+against a fixture instead of against the operator's live store
+(`FREILAUF_OPENCODE_DB` is that fence, and the e2e sandbox sets it).
+
+opencode's task tool opens a **child session per subagent, in the same
+directory**. The hub asked for "the newest session of this worktree", so it
+landed on whichever subagent had started last — usually one that had already
+finished. Measured on run f2d4af1d (2026-09-04, glm-5.3-flash): the run's own
+session wrote messages continuously from 15:16 to 15:36, and `last_activity_at`
+stood at **15:13:17**, the end of a subagent that had lived 71 seconds. At
+15:28:37 the watcher wrote `anomaly:no_activity` under a run that was working,
+which is exactly the failure the section above is about. The tokens went the
+same way: the row said 49 133 in / 5 049 out and $0.015, while the tree had
+spent 303 513 / 24 012 and $0.14.
+
+So the **root** is the newest parentless session of the worktree created with
+this run, the **descendants** come off the `parent_id` index and not off the
+directory (a subagent may work somewhere else), activity is the newest timestamp
+anywhere in the tree, and tokens and cost are **summed** over it — a subagent's
+tokens are the operator's tokens.
+
+**And the timestamp comes from three tables**, because `session.time_updated`
+moves once per completed message: in the same run one message ran 15:32:31 →
+15:36:38, four minutes in which the session row said nothing at all. `message`
+and `part` rows move while the turn is still going (a tool call changing state,
+streamed text), and `part` is the finest signal this store has. Both fallbacks —
+a store without `parent_id`, and a directory with no parentless session — return
+what the old code returned, so the change can never answer less than before.
+
 ### Gone is gone: incidents resolve themselves
 
 An incident whose condition is demonstrably gone closes itself
@@ -3131,6 +3183,12 @@ errors (`post_api_request` only fires after success).
   workers never failed — they piled up as live sessions, which is how the machine
   came to hold 44 GB in tmux; and a run that cannot report is invisible as a
   fault, because "running" is exactly what it still says.
+- **"The newest session in this directory" is not the run's session.** opencode
+  opens a child session per subagent in the same worktree, so the newest one is
+  usually a subagent — and one that has already finished, which is why the hub
+  read a working run as idle and billed it a fraction of its real tokens (see
+  "opencode's activity: a run is a session TREE"). Whenever a vendor's store is
+  matched by directory, ask whether that vendor puts more than one row in it.
 - **opencode reports an unknown model as a server fault.** A model id it does not
   know answers `{"type":"error","name":"UnknownError","data":{"message":
   "Unexpected server error"}}` — byte for byte what a genuine upstream outage
