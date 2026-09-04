@@ -1834,6 +1834,20 @@ try {
     gleich(e.art, 'http', 'HTTP response')
     gleich(e.status, 410, 'status')
   })
+  await pruefe('retry after an abort clears the old session close — the terminal is offered again', async () => {
+    const r = await formular(`/api/runs/${R2}/retry`, {}, { alsBrowser: true })
+    gleich(r.status, 303, 'redirect instead of JSON')
+    await sessionMerken(R2)
+    const l = lauf(R2)
+    gleich(l.status, 'running', 'running again')
+    gleich(l.tmux_closed_at, null, 'tmux_closed_at of the aborted attempt is gone — else pageRun() shows "no session"')
+    const seite = await (await hol(`/runs/${R2}`)).text()
+    wahr(seite.includes('data-session="1"'), 'detail page renders a terminal for the new session')
+    // Leave the run somewhere the rest of the suite can ignore it.
+    await formular(`/api/runs/${R2}/kill`, {})
+    const l2 = lauf(R2)
+    sessions.delete(l2.tmux_session)
+  })
   await pruefe('cancel on a FAILED run aborts it — the click decides, not the race', async () => {
     // The button is rendered while the run is going, so a click can land after
     // the watcher has already written 'failed' (pane died in between — the
