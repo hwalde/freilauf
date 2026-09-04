@@ -169,6 +169,12 @@ that really changed.
 { "ok": true, "runId": "1a2b3c4d-…", "deferred": false, "scheduled": false }
 ```
 
+- `pending: true` (**`/api/runs/quick` only**) — the run row exists and the
+  budget gate let it through, but the launch is still running in the hub: the
+  worktree checkout and the tmux session are seconds of work, and a quick start
+  does not wait for them. Poll `GET /api/runs/<id>` until `tmux_session` is set
+  (or the status turns `deferred`/`failed`) instead of reading the session in
+  the same breath. `POST /api/runs` waits and never says `pending`.
 - `scheduled: true` — it is waiting for its time or for an idle repo.
 - `deferred: true` — the **budget gate** parked it. That is not an error and not
   a reason to retry: the watcher starts it as soon as the window refills.
