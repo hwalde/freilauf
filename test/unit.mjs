@@ -1365,6 +1365,30 @@ try {
     rmSync(wt, { recursive: true, force: true })
   })
 
+  await pruefe('offloading never makes the prompt LONGER than leaving it alone', () => {
+    // Measured 2026-09-04, run 88a012cf: a 4127 B prompt whose task was a single
+    // question sat just past the 4000 threshold, and offloading produced a
+    // 4215 B launch prompt — bigger than the original, for a file in somebody's
+    // worktree and a tool call the agent did not need. Only the TASK can be
+    // offloaded; the platform framing has to stay inline. So what decides is the
+    // saving, not the total.
+    const wt = mkdtempSync(join(tmpdir(), 'fl-offload2-'))
+    const platform = 'P'.repeat(3600)
+    for (const task of ['Wieviel Bugs sind offen?', 'T'.repeat(1024), 'T'.repeat(2048), 'T'.repeat(12000)]) {
+      const ganz = Buffer.byteLength([task, platform].join('\n\n'))
+      const r = offloadPrompt('opencode', wt, task, platform)
+      wahr(Buffer.byteLength(r.prompt) <= ganz,
+        `task ${task.length} B: launch prompt is never longer (${Buffer.byteLength(r.prompt)} vs ${ganz})`)
+      if (r.taskFile) rmSync(join(wt, TASK_DIR), { recursive: true, force: true })
+    }
+    // A task worth a file still goes to one — the fence must not switch the
+    // feature off, only keep it from firing where it buys nothing.
+    const gross = offloadPrompt('opencode', wt, 'T'.repeat(12000), platform)
+    wahr(gross.taskFile, 'a 12 KB task is still offloaded')
+    wahr(Buffer.byteLength(gross.prompt) < 5000, 'and the launch prompt really is short')
+    rmSync(wt, { recursive: true, force: true })
+  })
+
   await pruefe('a harness that declares no limit never offloads', () => {
     // claude and cursor take the prompt as an argument without complaint; only
     // a harness that says it cannot gets the indirection.
