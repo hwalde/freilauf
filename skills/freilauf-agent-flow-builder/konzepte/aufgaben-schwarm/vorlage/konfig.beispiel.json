@@ -155,7 +155,7 @@
   "flow_checkout": "",
 
   "budgets": { "openrouter_min_usd": 8, "deepseek_min_usd": 3 },
-  "tages_budget_usd": 5,
+  "tages_budget_usd": 40,
 
   "_stark_hinweis": "Die Regler der starken Bahn. fable_7d_max ist die Schwelle für die Abo-Wochennutzung: darunter fährt die Abo-Route, darüber das Ausweich-Modell. claude_5h_max spiegelt Freilaufs eigenes Claude-Gate — liegt das 5-Stunden-Fenster darüber, würde ein Abo-Start ohnehin nur deferred. Ist die Zahl unbekannt oder als stale gemeldet, gilt die konservative Sicht: Ausweich-Modell. stark_min_versuche ist die Zahl der Fehlversuche, ab der die starke Bahn eine Aufgabe übernimmt.",
   "fable_7d_max": 80,
