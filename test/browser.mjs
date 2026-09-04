@@ -1409,6 +1409,76 @@ try {
     await p.close()
   })
 
+  gruppe('A20 — the overview: pick several runs, archive them at once')
+
+  await pruefe('select all, untick a few, archive the rest', async () => {
+    // The gesture this exists for: forty finished runs of which four are worth
+    // keeping. Three here, one of them kept.
+    const ids = []
+    for (const n of [1, 2, 3]) {
+      const id = await laufStarten({ repo_id: String(repoId), prompt: `Browser-Bulk ${n}` })
+      await melden(id, 'done', 'fertig')
+      ids.push(id)
+    }
+    const p = await neueSeite(`/?repo=${repoId}`)
+    await wartePage(p, (id) => !!document.getElementById(`run-${id}`), ids[2], 'the new rows to be listed')
+
+    gleich(await p.$eval('#runs-archive-selected', el => el.disabled), true, 'nothing selected, nothing to press')
+    await p.click('#runs-all')
+    const alle = await p.$$eval('#runs-body .run-pick', els => els.length)
+    wahr(alle >= 3, `every archivable run has a box (${alle})`)
+    gleich(await p.$eval('#runs-archive-selected', el => el.disabled), false, 'the button woke up')
+    enthaelt(await p.textContent('#runs-archive-selected'), `(${alle})`, 'the label counts the selection')
+    // A run still in flight carries no box at all — "select all" can never
+    // promise something the server would refuse.
+    gleich(await p.$$eval(`#run-${R_LIVE} .run-pick`, els => els.length), 0, 'a running run cannot be selected')
+
+    // Untick the keepers: everything except the three that were just made.
+    const behalten = await p.$$eval('#runs-body .run-pick', (els, meine) =>
+      els.map(el => el.value).filter(v => !meine.includes(v)), ids)
+    for (const id of behalten) await p.uncheck(`#run-${id} .run-pick`)
+    enthaelt(await p.textContent('#runs-archive-selected'), '(3)', 'three left over')
+    gleich(await p.$eval('#runs-all', el => el.checked), false, 'and "select all" says so')
+
+    await p.click('#runs-archive-selected')
+    for (const id of ids) {
+      await wartePage(p, (x) => !document.getElementById(`run-${x}`), id, 'the archived row to disappear')
+      wahr(!!laufRow(id).archived_at, 'archived in the database')
+    }
+    for (const id of behalten) gleich(laufRow(id).archived_at, null, 'an unticked run stays in the overview')
+    gleich(await p.$eval('#runs-archive-selected', el => el.disabled), true, 'the selection is spent')
+    sauber(p)
+    await p.close()
+  })
+
+  await pruefe('a tick survives the live channel replacing the table', async () => {
+    // The selection lives in a Set, not in the checkboxes: the tbody is
+    // re-rendered whenever somebody else's run appears, and a tick that lived
+    // only in the DOM would go with it.
+    const meiner = await laufStarten({ repo_id: String(repoId), prompt: 'Browser-Bulk-bleibt' })
+    await melden(meiner, 'done', 'fertig')
+    const p = await neueSeite(`/?repo=${repoId}`)
+    await wartePage(p, () => document.body.dataset.live === '1', null, 'the live channel to be connected')
+    await wartePage(p, (id) => !!document.getElementById(`run-${id}`), meiner, 'the row to be listed')
+    await p.check(`#run-${meiner} .run-pick`)
+    enthaelt(await p.textContent('#runs-archive-selected'), '(1)', 'one selected')
+
+    // A new run: the whole tbody is replaced (the empty state and the sort order
+    // live there, so a row cannot be appended).
+    const fremder = await laufStarten({ repo_id: String(repoId), prompt: 'Browser-Bulk-fremd' })
+    await wartePage(p, (id) => !!document.getElementById(`run-${id}`), fremder, 'the foreign row to arrive')
+    gleich(await p.$eval(`#run-${meiner} .run-pick`, el => el.checked), true, 'the tick is still there after the swap')
+    enthaelt(await p.textContent('#runs-archive-selected'), '(1)', 'and the count did not move')
+
+    // The same for a single ROW being replaced — its own run reporting.
+    await formular(`/api/runs/${meiner}/title`, { title: 'Renamed under the tick' })
+    await wartePage(p, (id) => document.querySelector(`#run-${id} [data-title-text]`)?.textContent === 'Renamed under the tick',
+      meiner, 'the row to carry the new title')
+    gleich(await p.$eval(`#run-${meiner} .run-pick`, el => el.checked), true, 'the row swap kept it too')
+    sauber(p)
+    await p.close()
+  })
+
   gruppe('A11 — the worktree-extras dialog')
   await pruefe('it opens and the client refuses an empty path', async () => {
     const p = await neueSeite('/repos/edit')

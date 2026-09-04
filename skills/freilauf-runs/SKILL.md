@@ -358,6 +358,7 @@ events and incidents stay.
 | force a deferred start | `-X POST /api/runs/<id>/start` | only `deferred`; skips the budget gate, event `forced_start` |
 | run it again | `-X POST /api/runs/<id>/retry` | clears report, follow-ups, integration state and archive flag, then launches a **new session** |
 | archive | `-X POST /api/runs/<id>/archive` | only `done`/`failed`/`aborted`; also closes the tmux session (immediately by default) |
+| archive several | `-X POST /api/runs/archive run=<id> run=<id> …` | the same rule per run; answers `results: [{run, ok, error}]` — a refusal (a run still in flight, an unknown id) does not hold up the rest |
 | restore | `-X POST /api/runs/<id>/unarchive` | back into the overview; the session does not come back |
 | rename | `-X POST /api/runs/<id>/title title="…"` | empty title falls back to the agent's name |
 | mute | `-X POST /api/runs/<id>/notify on=0` | no message about this run on any channel; `on=1` re-enables. `/telegram` is an alias |

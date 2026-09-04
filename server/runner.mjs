@@ -284,6 +284,15 @@ export function harnessOwnedPaths(harness) {
 export const TASK_DIR = '.freilauf'
 export const TASK_FILE = `${TASK_DIR}/task.md`
 
+/**
+ * How much shorter the launch prompt has to get before the indirection is worth
+ * it. Offloading is not free — it costs the agent a tool call, puts a file in
+ * somebody's worktree and adds a step that can be misread — so it has to buy a
+ * real saving, not a byte. 1 KB, because that is the order of the pointer
+ * itself: below it the two texts are the same size and the trade is pointless.
+ */
+const MIN_OFFLOAD_SAVING = 1024
+
 export const TASK_POINTER = `# Your actual task
 
 Your actual task is written in the file \`{task_file}\` (relative to your working directory, and the absolute path is \`{task_abs}\`).
@@ -310,6 +319,19 @@ export function offloadPrompt(harness, workdir, task, platform) {
     return { prompt: ganz, taskFile: null }
   }
   const abs = join(workdir, TASK_FILE)
+  const zeigerText = TASK_POINTER.replaceAll('{task_file}', TASK_FILE).replaceAll('{task_abs}', abs)
+  // Only the TASK can be offloaded — the platform framing has to stay inline,
+  // because it is what the run is steered by. So the size that decides is not
+  // the whole prompt but what is actually SAVED, and measuring the candidate is
+  // the only honest way to know it. Measured 2026-09-04, run 88a012cf: a 4127 B
+  // prompt whose task was a single question sat just past the threshold, and
+  // offloading it produced a 4215 B launch prompt — BIGGER than the original,
+  // for a file in the worktree and a tool call the agent did not need. A rule
+  // that can make its own subject worse is not a rule, it is a coin flip.
+  const kandidat = [zeigerText, platform].filter(Boolean).join('\n\n')
+  if (Buffer.byteLength(kandidat, 'utf8') + MIN_OFFLOAD_SAVING > Buffer.byteLength(ganz, 'utf8')) {
+    return { prompt: ganz, taskFile: null }
+  }
   mkdirSync(join(workdir, TASK_DIR), { recursive: true })
   // A `.gitignore` of `*` inside the directory ignores everything in it —
   // itself included, so nothing here is ever tracked. It has to be git's own
@@ -320,8 +342,7 @@ export function offloadPrompt(harness, workdir, task, platform) {
   // COMMON directory of a linked worktree and would reach into every other one.
   writeFileSync(join(workdir, TASK_DIR, '.gitignore'), '*\n', { mode: 0o600 })
   writeFileSync(abs, task, { mode: 0o600 })
-  const zeiger = TASK_POINTER.replaceAll('{task_file}', TASK_FILE).replaceAll('{task_abs}', abs)
-  return { prompt: [zeiger, platform].filter(Boolean).join('\n\n'), taskFile: abs }
+  return { prompt: kandidat, taskFile: abs }
 }
 
 /**

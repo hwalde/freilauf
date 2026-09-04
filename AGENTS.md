@@ -471,6 +471,34 @@ newest-archived first with pagination (50 per page,
 `archived_at` — the watcher, the flows and the incidents keep their view of a
 run whether it is archived or not.
 
+**And a list is put away in one gesture, not row by row.** Forty finished runs
+of which four are worth keeping were forty clicks; the overview therefore
+carries a checkbox per archivable row, a bulk bar above the table
+("select all", "Archive selected (n)") and `POST /api/runs/archive` with one
+`run=<id>` field per run — the same shape the sessions page's bulk end already
+had, because it is the same gesture. Four rules, each of them a way it would
+otherwise go wrong:
+
+- **Only an archivable run gets a checkbox at all.** A row still in flight has
+  an empty cell, so "select all" can never promise something `archiveRecord()`
+  would refuse.
+- **Both routes archive through `archiveRecord()`** (web.mjs), which writes the
+  record and returns the session that should go with it; the caller closes the
+  sessions — one `killSessions()` call for forty runs instead of forty. Two
+  copies of the "only finished runs" rule is how one of them would eventually
+  archive a running run.
+- **A refusal does not hold up the rest.** The answer is `results: [{run, ok,
+  error}]` per run: what went is struck from the table, what did not is handed
+  back to the operator with its reason. An unknown id is a refused row, not a
+  500.
+- **The selection lives in a Set in hub.js, not in the checkboxes.** The live
+  channel replaces a row whenever its run changes and the whole tbody whenever
+  a run appears — a tick that lived only in the DOM would be thrown away by
+  somebody else's run starting. `syncRunPicks()` writes the selection back onto
+  whatever boxes are on the page now and is called after every swap; a run that
+  has left the table leaves the selection with it, because a count promising
+  rows nobody can see is a lie. Same family as the rename guard next to it.
+
 **Archiving also closes the run's tmux session** — the gesture is "put this
 finished work away", and the screen it left standing goes with it. Default:
 right away (Settings → Sessions → `archive_session_keep_hours`, `0` = at the
@@ -1592,8 +1620,10 @@ application comes out of it.
 
 Eleven columns became seven without losing a fact: traffic light + status word
 + last anomaly are **one** statement (`td.status-cell`), and harness/model and
-branch/PR are one technical pair each (`td.two-line`). `OVERVIEW_COLS` is what
-the empty state spans. The incident cell is a badge with its action on hover —
+branch/PR are one technical pair each (`td.two-line`). The eighth is nameless
+and carries no fact — it is the multi-select box (`th.pick-col`/`td.pick-cell`,
+see "Runs can be archived"), which is why the header count is seven titles and
+eight columns. `OVERVIEW_COLS` is what the empty state spans. The incident cell is a badge with its action on hover —
 the rule the pencil and the archive button already followed, keyboard included
 (`:focus-within`, because focus lands *inside* the form). A run's `status` goes
 through `t()` (`status.*`), an anomaly kind through `anomaly.*`, a harness

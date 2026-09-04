@@ -2317,6 +2317,58 @@ try {
     // Clean up: the run must not linger for the watcher's sake.
     db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
   })
+  await pruefe('several runs go into the archive in one request', async () => {
+    // The overview's multi-select: forty finished runs of which four are kept
+    // used to be forty clicks. One request, one result per run.
+    const ids = []
+    for (const titel of ['E2E-Bulk-1', 'E2E-Bulk-2']) {
+      const j = await laufStarten({ repo_id: repoId, prompt: titel, title: titel })
+      await sessionMerken(j.runId)
+      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+      ids.push(j.runId)
+    }
+    const r = await formular('/api/runs/archive', { run: ids, back: `/?repo=${repoId}` })
+    gleich(r.status, 200, 'accepted')
+    const j = await r.json()
+    wahr(j.ok, 'all of them archived')
+    gleich(j.results.length, 2, 'one result per run')
+    for (const id of ids) wahr(!!lauf(id).archived_at, `${id} archived`)
+    const uebersicht = await (await hol(`/?repo=${repoId}`)).text()
+    for (const id of ids) falsch(uebersicht.includes(id), 'gone from the overview')
+    for (const id of ids) db.prepare('DELETE FROM runs WHERE id=?').run(id)   // keep the pagination count stable
+  })
+  await pruefe('one run that may not be archived does not hold up the rest', async () => {
+    const fertig = await laufStarten({ repo_id: repoId, prompt: 'E2E-Bulk-fertig' })
+    await sessionMerken(fertig.runId)
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(fertig.runId)
+    const laeuft = await laufStarten({ repo_id: repoId, prompt: 'E2E-Bulk-laeuft' })
+    await sessionMerken(laeuft.runId)
+    gleich(lauf(laeuft.runId).status, 'running', 'sanity: still working')
+
+    const r = await formular('/api/runs/archive', { run: [fertig.runId, laeuft.runId, 'not-a-run'] })
+    gleich(r.status, 200, 'answered per run, not refused as a whole')
+    const j = await r.json()
+    falsch(j.ok, 'not everything went')
+    const nach = Object.fromEntries(j.results.map(x => [x.run, x.ok]))
+    gleich(nach[fertig.runId], true, 'the finished one is archived')
+    gleich(nach[laeuft.runId], false, 'the running one is refused')
+    gleich(nach['not-a-run'], false, 'an unknown id is refused, not a 500')
+    wahr(!!lauf(fertig.runId).archived_at, 'archived')
+    gleich(lauf(laeuft.runId).archived_at, null, 'the running run stays in the overview')
+
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(laeuft.runId)
+    for (const id of [fertig.runId, laeuft.runId]) db.prepare('DELETE FROM runs WHERE id=?').run(id)
+  })
+  await pruefe('a bulk archive without a single run is refused', async () => {
+    const r = await formular('/api/runs/archive', { back: `/?repo=${repoId}` })
+    gleich(r.status, 400, 'refused')
+  })
+  await pruefe('the overview offers the multi-select', async () => {
+    const html = await (await hol(`/?repo=${repoId}`)).text()
+    enthaelt(html, 'id="runs-all"', 'select-all box')
+    enthaelt(html, 'id="runs-archive-selected"', 'the bulk button')
+    enthaelt(html, 'class="run-pick"', 'a checkbox per archivable run')
+  })
   await pruefe('archiving closes the tmux session right away by default', async () => {
     // The rule exists to make archiving mean what the operator's gesture says:
     // "this finished work is put away". Its session goes with it — keep 0.
@@ -2975,10 +3027,12 @@ try {
     gleich(alles.status, 200, 'an invented status is simply no filter')
     wahr([...(await alles.text()).matchAll(/id="run-([0-9a-f-]{36})"/g)].length > erwartet, 'and the whole list comes back')
   })
-  await pruefe('the overview is seven columns wide and its empty state spans all of them', async () => {
+  await pruefe('the overview is seven fact columns plus the pick box, and its empty state spans all of them', async () => {
     const html = await (await hol(`/?repo=${repoId}`)).text()
     const kopf = html.slice(html.indexOf('<thead'), html.indexOf('</thead>'))
-    gleich((kopf.match(/<th>/g) || []).length, 7, 'seven column headers, not eleven')
+    gleich((kopf.match(/<th[ >]/g) || []).length, 8, 'eight columns: the multi-select box plus seven facts')
+    gleich((kopf.match(/<th>/g) || []).length, 7, 'seven titled columns, not eleven')
+    enthaelt(kopf, '<th class="pick-col">', 'and the nameless first one is the multi-select column')
     // Eleven columns became seven without losing a single fact: traffic light,
     // status word and last anomaly are one statement, and so are harness/model
     // and branch/PR.
@@ -2986,11 +3040,11 @@ try {
       enthaelt(kopf, `>${titel}<`, `header ${titel}`)
     }
     const zeile = html.split('<tr ').find(z => z.includes(RH))
-    gleich((zeile.match(/<td/g) || []).length, 7, 'and a row has exactly as many cells as the head has columns')
+    gleich((zeile.match(/<td/g) || []).length, 8, 'and a row has exactly as many cells as the head has columns')
     // A repo without runs: the sentence has to span the whole table, otherwise
-    // it sits in the first column with six empty cells beside it.
+    // it sits in the first column with seven empty cells beside it.
     const leer = await (await hol('/api/fragments/runs-body?repo=999999')).text()
-    enthaelt(leer, 'colspan="7"', 'the empty state spans all seven')
+    enthaelt(leer, 'colspan="8"', 'the empty state spans all eight')
     enthaelt(leer, 'no runs yet', 'and says so')
   })
   await pruefe('the sidebar says what every tmux session on this machine costs', async () => {
