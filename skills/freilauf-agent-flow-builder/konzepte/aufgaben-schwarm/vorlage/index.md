@@ -146,8 +146,10 @@ das ist der gewollte Normalfall bei leerem Register, nicht ein Fehlschlag.
 Was deckelt:
 
 - `budgets` — die Guthaben-Schwellen je Anbieter, absichtlich über Freilaufs eigenem Budget-Gate;
-- `tages_budget_usd` — die Tagessumme über alle Schwarm-Läufe. Gelb heißt: starke Bahn aus. Rot
-  heißt: gar keine Starts;
+- `tages_budget_usd` — die Tagessumme über alle Schwarm-Läufe, Worker wie Dispatcher. Gelb
+  heißt: starke Bahn aus. Rot heißt: gar keine Starts. Die Zahl zählt nur Läufe der
+  Schwarm-Agenten; alles andere am selben Schlüssel sieht sie nicht. Setze sie weit: Sie ist
+  ein Netz gegen das Verrennen, keine Abrechnung;
 - `fable_7d_max` — der Deckel für den Abo-Verbrauch, der in keiner USD-Zahl auftaucht;
 - `max_worker` für die gewöhnliche Bahn, `stark_max_parallel` für die starke.
 
