@@ -4337,6 +4337,36 @@ try {
       'LICENSE is the CC BY 4.0 legal code')
   })
 
+  // The changelog has no version numbers — its sections are DAYS, so the dates
+  // are the whole ordering and a chronology out of order is one that quietly
+  // stopped being a chronology. Several agents write into this file, sometimes
+  // in parallel, which is exactly how a day ends up in the wrong place.
+  await pruefe('CHANGELOG.md is dated per day, newest first, with known categories', async () => {
+    const { readFileSync, existsSync } = await import('node:fs')
+    const { join: j } = await import('node:path')
+    const root = new URL('..', import.meta.url).pathname
+    wahr(existsSync(j(root, 'CHANGELOG.md')), 'CHANGELOG.md exists')
+    const lines = readFileSync(j(root, 'CHANGELOG.md'), 'utf8').split('\n')
+    const days = []
+    const known = new Set(['Added', 'Changed', 'Deprecated', 'Removed', 'Fixed', 'Security'])
+    for (const line of lines) {
+      if (line.startsWith('## ')) {
+        const d = line.slice(3).trim()
+        wahr(/^\d{4}-\d{2}-\d{2}$/.test(d), `day heading "${d}" is an ISO 8601 date`)
+        wahr(!Number.isNaN(Date.parse(d)), `day heading "${d}" is a real date`)
+        days.push(d)
+      }
+      if (line.startsWith('### ')) {
+        const c = line.slice(4).trim()
+        wahr(known.has(c), `category "${c}" is one of Keep a Changelog's`)
+      }
+    }
+    wahr(days.length >= 1, 'at least one day is written down')
+    for (let i = 1; i < days.length; i++) {
+      wahr(days[i] < days[i - 1], `${days[i]} comes after ${days[i - 1]} (newest first, no duplicates)`)
+    }
+  })
+
   // ------------------------------------------------------------------
   // Every shell file in this repo is installed and run on a machine — freilauf-deploy
   // even runs setup/02 on every single deploy. A typo in one of them is not a

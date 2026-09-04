@@ -368,6 +368,10 @@ eine lange Liste von Fallstricken, die schon jemanden einen Nachmittag
 gekostet haben — steht in [AGENTS.md](AGENTS.md), geschrieben für Menschen
 **und** Coding-Agenten.
 
+Was sich wann geändert hat, steht in [CHANGELOG.md](CHANGELOG.md). Es gibt
+keine Releases — der Hub wird aus `main` deployt —, deshalb ist er nach Tagen
+gruppiert statt nach Versionsnummern.
+
 ## Lizenz
 
 [CC BY 4.0](LICENSE) — nutzen, ändern, kommerziell ausliefern. Nur die

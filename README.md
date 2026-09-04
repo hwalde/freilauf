@@ -348,6 +348,10 @@ Developer knowledge — architecture decisions, harness quirks, and a long list 
 pitfalls that already cost somebody an afternoon — lives in
 [AGENTS.md](AGENTS.md), written for humans **and** coding agents.
 
+What changed, and when, is in [CHANGELOG.md](CHANGELOG.md). There are no
+releases — the hub is deployed from `main` — so it is grouped by day rather than
+by version number.
+
 ## License
 
 [CC BY 4.0](LICENSE) — use it, change it, ship it commercially. Just give
