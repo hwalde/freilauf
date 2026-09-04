@@ -700,8 +700,28 @@ export async function launchRun(runId) {
   return { ok: true, session }
 }
 
+/**
+ * A run that never got off the ground: no worktree, no session, nothing to
+ * report from.
+ *
+ * It says so on the channel too, and that is not decoration. Nobody is
+ * necessarily watching: a scheduled agent start has no caller at all, and since
+ * Quick Run answers before the launch (scheduler.mjs, `detached`) a failure
+ * there can land after the operator has closed the page. A start that silently
+ * did not happen is the most expensive shape a fault can take — everything
+ * above it reads as "the run is in the list".
+ *
+ * `notifyRun` is imported lazily and never awaited: this function is
+ * synchronous and sits on the launch path, reports.mjs is the far end of the
+ * hub's dependency graph, and a channel that is slow or misconfigured must not
+ * be able to hold up (or throw out of) the write that records the failure.
+ * Muting the run (`telegram_on`) still silences it — notifyRun's own rule.
+ */
 export function failRun(runId, text) {
   db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), report_md=? WHERE id=?`)
     .run(text, runId)
   addEvent(runId, 'failed', {})
+  import('./reports.mjs')
+    .then(({ notifyRun }) => notifyRun(runId, 'start_failed', `❌ Start failed\n\n${text}`))
+    .catch(err => console.error('[runner] start failure not announced:', err.message))
 }

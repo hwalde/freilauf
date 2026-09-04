@@ -603,6 +603,56 @@ is. It does **not** navigate: `POST
 whether the run started, was planned or was deferred, with a link to it. Being
 torn to a detail page is what would make a quick start not quick.
 
+**And it does not wait for the launch either.** The dialog used to stand still
+until the run was really running, which is two to seven seconds of somebody
+else's work: `git fetch` (~0.7 s), the worktree checkout (measured on this
+machine — 0.5 s for a repository of 154 files, **4.1 s** for one of 16 000),
+`fl-start` with its own second, and the tmux session. A quick start that holds
+a modal open for that is not quick, and none of it is a question the operator
+can answer. So `startRun()` takes **`detached`** (scheduler.mjs): everything
+that DECIDES — the favorite, the definition's validation, the budget gate —
+stays in the request, because it is milliseconds and it says whether the run
+runs at all; `launchRun()` is handed back to the hub, the answer carries
+`pending: true`, and the dialog closes at once. A launch that fails there ends
+in `failRun()` exactly as it does when somebody waits — the caller has already
+answered, so a thrown error must become the same visible `failed` row.
+
+Three consequences, each of them the point rather than a side effect:
+
+- **The toast follows the start to its end.** `freilaufToast()` grew a
+  `pending` kind (a spinner, and it does *not* disappear by itself — a toast
+  that said "starting…" and then vanished would leave the reader believing a
+  start they were never told the end of) and a `replace` option, so the outcome
+  lands in the line that is already there instead of stacking a second one
+  under it. `verfolgeStart()` asks the run's own record (`GET /api/runs/<id>`)
+  every 900 ms: `tmux_session` set means the session stands, `deferred` /
+  `failed` / `aborted` say what happened instead, and the failure carries the
+  first line of what `failRun()` wrote. Deliberately **polled and not driven
+  off the live channel** — `/api/events` is filtered by the repo of the PAGE,
+  and the dialog's own repo select may well have started the run somewhere
+  else; a toast that then never resolved would be the worse failure. It costs
+  two or three requests, and only while a start is in flight.
+- **The page does not have to stay open.** The start runs in the hub, not in
+  the browser. Closing the tab loses the toast and nothing else — and
+  **`failRun()` now says so on the channel** (`notifyRun(…, 'start_failed')`,
+  imported lazily and not awaited, because that function is synchronous and
+  sits on the launch path). That was missing long before this change: a
+  scheduled agent start has no caller at all, so a run that never got off the
+  ground was a red row nobody was told about — the most expensive shape a fault
+  can take, because everything above it reads as "the run is in the list".
+- **The row appears immediately.** `startRun()` calls `announceRun(runId,
+  'created')` right after `createRun()`. Before, the overview's first news of a
+  run was its `started` event — which lands after the checkout, so a run
+  started from a dialog that closes at once would have been invisible for those
+  seconds. One of the few announcements not carried by an event (like the
+  generated title and archiving): "the row is there" is not a transition worth
+  recording.
+
+What deliberately did **not** become detached: every other caller of
+`startRun()`. The flow step that waits for a run's result, the single-run form
+and the tests all have a next line that depends on the session standing, and
+`detached` defaults to false so none of them noticed.
+
 The one exit that does lead away is **More settings**: the moment one wants more
 than the dialog asks, the run stops being quick. It opens the FULL single-run
 form in a new window (`/runs/new?repo=…&favorite=…`): the favorite becomes the

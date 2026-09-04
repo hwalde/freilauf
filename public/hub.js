@@ -445,12 +445,28 @@
   // A Quick Run starts from wherever one is standing; being torn to a detail page
   // is exactly what would make it not quick. So the answer arrives here — with a
   // link for whoever does want to look.
+  //
+  // Two things beyond "show a line of text", and both exist for the same
+  // caller: a start that is still running.
+  //   - kind 'pending' spins and does NOT disappear on its own. A toast that
+  //     said "starting…" and then vanished would leave the reader believing a
+  //     start they were never told the end of.
+  //   - `opts.replace` puts the new toast where the old one stood instead of
+  //     appending it below. The outcome belongs in the place the reader is
+  //     already looking, and two stacked toasts about one run read as two runs.
+  // Returns the element, which is what a caller passes back as `replace`.
   window.freilaufToast = function (text, opts) {
     opts = opts || {}
     const box = document.getElementById('freilauf-toasts')
-    if (!box) return
+    if (!box) return null
     const el = document.createElement('div')
     el.className = 'toast ' + (opts.kind || 'ok')
+    if (opts.kind === 'pending') {
+      const spin = document.createElement('span')
+      spin.className = 'spin'
+      spin.setAttribute('aria-hidden', 'true')
+      el.append(spin)
+    }
     const span = document.createElement('span')
     span.textContent = text
     el.append(span)
@@ -467,9 +483,16 @@
     close.setAttribute('aria-label', T('js.toast_close', 'close'))
     close.addEventListener('click', function () { el.remove() })
     el.append(close)
-    box.append(el)
-    // An error stays until it is read; a success says its piece and goes.
-    if (opts.kind !== 'err') setTimeout(function () { el.remove() }, opts.ms || 9000)
+    // `replace` only wins while that toast is still standing: one closed by
+    // hand in the meantime is gone, and its outcome joins the stack normally.
+    if (opts.replace && opts.replace.parentNode === box) box.replaceChild(el, opts.replace)
+    else box.append(el)
+    // An error stays until it is read, a start that is still running stays
+    // until it is over; a success says its piece and goes.
+    if (opts.kind !== 'err' && opts.kind !== 'pending') {
+      setTimeout(function () { el.remove() }, opts.ms || 9000)
+    }
+    return el
   }
 
   // ---- Quick Run dialog (in the layout of every page) ----
@@ -537,6 +560,59 @@
       b.addEventListener('click', function () { qrDialog.close() })
     })
 
+    // A start the hub is still carrying out, followed to its end in the toast.
+    //
+    // The request itself only decided things (favorite, definition, quota) and
+    // came back in milliseconds; the worktree, fl-start and the tmux session
+    // are the seconds that follow, and the run's own record is what says when
+    // they are over. So the toast asks that record — `tmux_session` set is a
+    // session that stands, and there is nothing else the hub could be waiting
+    // for at this point.
+    //
+    // Deliberately polled rather than driven off the live channel: /api/events
+    // is filtered by the repo of the PAGE, and the dialog may well have started
+    // the run in another one — a toast that then never resolved would be the
+    // worse failure. Two or three requests, and only while a start is in
+    // flight. Closing the page does not stop the start; it only stops the
+    // report, which is what the run's row in the overview is for.
+    const START_TICK_MS = Math.max(200, Number(window.FREILAUF_QR_POLL_MS) || 900)
+    const START_MAX_MS = Math.max(START_TICK_MS, Number(window.FREILAUF_QR_TIMEOUT_MS) || 180000)
+    function followStart(runId, toast, name) {
+      const href = '/runs/' + runId
+      const deadline = Date.now() + START_MAX_MS
+      const settle = function (text, kind) {
+        toast = window.freilaufToast(text, { kind: kind, href: href, replace: toast })
+      }
+      const ask = function () {
+        fetch('/api/runs/' + encodeURIComponent(runId), { headers: { accept: 'application/json' } })
+          .then(function (r) { return r.json() })
+          .then(function (j) {
+            const run = j && j.run
+            if (!run) throw new Error('gone')
+            if (run.tmux_session) {
+              settle(T('js.qr_started', 'Run started: {name}', { name: run.title || name }), 'ok')
+            } else if (run.status === 'deferred') {
+              settle(T('js.qr_deferred', 'Run deferred (quota/credit): {name}', { name: run.title || name }), 'warn')
+            } else if (run.status === 'failed' || run.status === 'aborted') {
+              // The reason stands in the run's report line, whose first line is
+              // the sentence failRun() wrote. Better than "start failed".
+              const reason = String(run.report_md || '').split('\n').filter(function (z) { return z.trim() })[1]
+              settle(T('js.qr_start_failed', 'Start failed: {name}', { name: run.title || name })
+                + (reason ? ' — ' + reason : ''), 'err')
+            } else if (Date.now() >= deadline) {
+              settle(T('js.qr_still_starting', 'Still starting: {name}', { name: run.title || name }), 'warn')
+            } else {
+              setTimeout(ask, START_TICK_MS)
+            }
+          })
+          .catch(function () {
+            if (Date.now() >= deadline) settle(T('js.qr_start_unknown', 'Start not confirmed: {name}', { name: name }), 'warn')
+            else setTimeout(ask, START_TICK_MS)
+          })
+      }
+      setTimeout(ask, START_TICK_MS)
+    }
+
     if (qrForm) qrForm.addEventListener('submit', function (ev) {
       ev.preventDefault()
       const btn = qrForm.querySelector('button[type=submit]')
@@ -554,12 +630,19 @@
           const ta = qrForm.querySelector('textarea[name=prompt]')
           if (ta) ta.value = ''
           const name = j.title || j.favorite || ''
-          const text = j.scheduled
-            ? T('js.qr_scheduled', 'Run planned: {name}', { name: name })
-            : j.deferred
-              ? T('js.qr_deferred', 'Run deferred (quota/credit): {name}', { name: name })
-              : T('js.qr_started', 'Run started: {name}', { name: name })
-          window.freilaufToast(text, { kind: j.deferred ? 'warn' : 'ok', href: '/runs/' + j.runId })
+          // Planned and deferred are already decided — the hub is not doing
+          // anything else about this run, so those toasts are final at once.
+          if (j.scheduled) {
+            window.freilaufToast(T('js.qr_scheduled', 'Run planned: {name}', { name: name }),
+              { kind: 'ok', href: '/runs/' + j.runId })
+          } else if (j.deferred) {
+            window.freilaufToast(T('js.qr_deferred', 'Run deferred (quota/credit): {name}', { name: name }),
+              { kind: 'warn', href: '/runs/' + j.runId })
+          } else {
+            const toast = window.freilaufToast(T('js.qr_starting', 'Starting: {name}', { name: name }),
+              { kind: 'pending', href: '/runs/' + j.runId })
+            followStart(j.runId, toast, name)
+          }
         })
         .catch(function (err) {
           if (fehler) { fehler.hidden = false; fehler.textContent = err.message }
