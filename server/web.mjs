@@ -476,6 +476,15 @@ async function api(req, res, url) {
   // runStartFromForm() like the run form. That is the whole point of a favorite
   // storing only the setup half — everything the definition needs beyond it is
   // in this request, and the validation is the one that already exists.
+  //
+  // `detached: true` is what makes it quick. What this request has to DECIDE —
+  // is the favorite real, does the definition validate, is there quota — is
+  // milliseconds; what it used to WAIT for is the launch, and that is seconds
+  // of git and tmux (measured on this machine: 0.5 s in a 154-file repository,
+  // 5 s in one of 16 000 files, plus fl-start's own second). The dialog held
+  // still for all of it, which is the one thing a quick start must not do. So
+  // the answer says `pending` and the browser follows the run's own record;
+  // the start finishes in the hub whether that page stays open or not.
   if (req.method === 'POST' && path === '/api/runs/quick') {
     const b = await form(req)
     const fav = getFavorite(b.favorite_id)
@@ -485,12 +494,12 @@ async function api(req, res, url) {
     const start = runStartFromForm(b, problems)
     if (problems.length) return json(res, 400, { ok: false, error: problems.join(' · ') })
     rememberRunChoice(def)
-    const r = await startRun(def, { repoId: +b.repo_id, ...start })
+    const r = await startRun(def, { repoId: +b.repo_id, ...start, detached: true })
     if (!r.ok) return json(res, 500, { ok: false, error: r.error ?? t('run.start_failed') })
     const run = getRun(r.runId)
     return json(res, 200, {
       ok: true, runId: r.runId, deferred: !!r.deferred, scheduled: !!r.scheduled,
-      title: run?.title ?? null, favorite: fav.name,
+      pending: !!r.pending, title: run?.title ?? null, favorite: fav.name,
     })
   }
   // tmux cleanup: start the memory-freeing agent by hand. The sidebar's small
@@ -637,14 +646,18 @@ async function api(req, res, url) {
     const run = getRun(m[1])
     const { sh } = await import('./util.mjs')
     if (run?.tmux_session) await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
-    // A run that is ALREADY over only loses the session it left standing. Writing
-    // 'aborted' over it would turn a run that came through cleanly into a failed
-    // one — and since the coding agents keep their session after the work is
-    // done, that is not a corner case but the ordinary state of a finished run.
-    // Same rule, and same event, as reconcileClosedSession(). Only the three
-    // terminal statuses count: a 'scheduled' or 'deferred' run is cancelled
-    // through this very endpoint, and cancelling it IS setting it to 'aborted'.
-    if (['done', 'failed', 'aborted'].includes(run?.status ?? '')) {
+    // 'done' and 'aborted' are final answers, so a click can only close the
+    // session they left standing: 'done' came through cleanly and must not be
+    // rewritten (the coding agents keep their session after the work is done —
+    // that is the ordinary state of a finished run, not a corner case), and
+    // 'aborted' already IS what the button means. Same rule, and same event,
+    // as reconcileClosedSession().
+    // 'failed' is deliberately NOT in this list. The button was rendered while
+    // the run was still going, so a click that lands after the watcher has
+    // written 'failed' (pane died in between — measured: two seconds) is still
+    // a cancel, and the final status has to say what the CLICK said, not what
+    // the race decided. Cancelling a failed run IS setting it to 'aborted'.
+    if (['done', 'aborted'].includes(run?.status ?? '')) {
       // With the session goes the way a follow-up could report: an open
       // follow-up commission (web.mjs /send) is given up with it.
       db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')), followup_since=NULL WHERE id=?`).run(m[1])
@@ -653,8 +666,11 @@ async function api(req, res, url) {
     }
     // Set tmux_closed_at right away: otherwise the detail page tries to attach
     // a terminal to the dead session until the next watcher tick (410 in the browser).
+    // followup_since=NULL: a FAILED run can carry an open follow-up commission —
+    // with the cancel it is given up, like with any other end of the session.
     db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
-                tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')), finish_state=NULL WHERE id=?`).run(m[1])
+                tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')), finish_state=NULL,
+                followup_since=NULL WHERE id=?`).run(m[1])
     // Same event kind reconcileClosedSession() writes, so "why did this run
     // stop?" has one answer to look for rather than two.
     addEvent(m[1], 'aborted', { by: 'user' })

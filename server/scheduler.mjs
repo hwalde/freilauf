@@ -1,8 +1,8 @@
 // Freilauf — scheduler (planning 4.2/4.8): the agents' cron expressions, global
 // pipeline AND gate, budget gate with deferral instead of discarding.
-import db, { addEvent } from './db.mjs'
+import db, { addEvent, announceRun } from './db.mjs'
 import { scheduleDue, parseDbUtc } from './util.mjs'
-import { createRun, launchRun } from './runner.mjs'
+import { createRun, launchRun, failRun } from './runner.mjs'
 import { getPlugin } from './plugins/registry.mjs'
 import { pluginCtx } from './plugins/context.mjs'
 import { pluginFields, pluginSettingKey } from './plugins/settings.mjs'
@@ -254,11 +254,23 @@ export async function budgetGate(harness, model = null, provider = null) {
  * (runStartFromForm); everything else starts immediately and unnamed, exactly
  * as before.
  *
- * Returns {ok, runId?, deferred?, scheduled?, error?}.
+ * `detached` decides who waits for `launchRun()`. Everything up to and
+ * including the budget gate stays in the caller's hand either way — it is
+ * decided in milliseconds and it is what says whether the run runs at all —
+ * but the launch itself is seconds of real work: `git fetch`, a worktree
+ * checkout (measured: 4.1 s for a repository of 16 000 files), fl-start and
+ * the tmux session. A caller that only has to REPORT the start (Quick Run
+ * answers a dialog that then closes) hands that stretch back to the hub and
+ * returns `pending`; the run row already exists, the live channel announces
+ * every step of it, and a failed launch lands in `failRun()` exactly as it
+ * does when somebody waits. A caller whose next line depends on the session
+ * standing (the flow step that waits for a result, the tests) does not pass it.
+ *
+ * Returns {ok, runId?, deferred?, scheduled?, pending?, error?}.
  */
 export async function startRun(def, {
   repoId, agentId = null, promptExtra = null,
-  title = null, startMode = 'now', startAt = null,
+  title = null, startMode = 'now', startAt = null, detached = false,
 } = {}) {
   // What the run is called: the operator's input first, then the agent's name —
   // an agent run needs no title of its own, one knows the agent. Only a single
@@ -289,6 +301,14 @@ export async function startRun(def, {
     return { ok: false, error: e.message }
   }
 
+  // The row exists — say so, before the launch takes its seconds. Without this
+  // the overview's first news of a run was its `started` event, which lands
+  // after `git fetch` and the worktree checkout; a run started from a dialog
+  // that closes at once would be invisible for that whole stretch. One of the
+  // few announcements not carried by an event (like the generated title and
+  // archiving): "the row is there" is not a transition worth recording.
+  announceRun(runId, 'created')
+
   // The generated title never holds a start up: the run carries the fallback
   // from the first moment, and the model's answer replaces it when it arrives.
   if (!chosen) applyGeneratedTitle(runId, def.prompt).catch(() => {})
@@ -309,6 +329,14 @@ export async function startRun(def, {
     addEvent(runId, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null })
     notifyRun(runId, 'deferred', `🟡 Start deferred — ${gate.reason}${gate.resets_at ? ` (reset: ${gate.resets_at})` : ''}`)
     return { ok: true, runId, deferred: true }
+  }
+  if (detached) {
+    // Not awaited, and therefore never unhandled: launchRun() writes its own
+    // failures through failRun(), and anything it throws before getting there
+    // (a run that vanished, a broken plugin) has to become the same visible
+    // `failed` — a caller that has already answered cannot be told any more.
+    launchRun(runId).catch(err => { try { failRun(runId, `Start failed:\n\n${err.message}`) } catch { /* gone */ } })
+    return { ok: true, runId, pending: true }
   }
   const r = await launchRun(runId)
   return r.ok ? { ok: true, runId } : { ok: false, runId, error: r.error }

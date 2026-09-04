@@ -653,7 +653,11 @@ try {
     await p.selectOption('#qr-fav', String(FAV1))
     await p.fill('#qr-form textarea[name=prompt]', 'Browser-Quickrun: tu etwas')
     await p.click('#qr-form button[type=submit]')
-    await p.waitForSelector('#freilauf-toasts .toast', { timeout: 15_000 })
+    // The dialog closes on the ANSWER, and the answer comes back while the hub
+    // is still building the worktree — so the first toast is the pending one.
+    await p.waitForSelector('#freilauf-toasts .toast.pending', { timeout: 15_000 })
+    enthaelt(await p.textContent('#freilauf-toasts .toast.pending span:not(.spin)'), 'Starting',
+      'and it says the start is under way')
 
     gleich(await p.$eval('#qr-dialog', d => d.open), false, 'the dialog closed itself')
     gleich(await p.$eval('#qr-form textarea[name=prompt]', el => el.value), '', 'the task is cleared')
@@ -663,7 +667,12 @@ try {
     gleich(await p.$eval('#qr-form select[data-start-switch]', s => s.value), 'now', 'the start time stands')
     gleich(new URL(p.url()).pathname, '/', 'and the page one started from is still the page one is on')
 
-    enthaelt(await p.textContent('#freilauf-toasts .toast span'), 'Run started', 'the toast says what happened')
+    // The same toast then turns into the outcome, in place: one run, one line.
+    await p.waitForSelector('#freilauf-toasts .toast.ok', { timeout: 30_000 })
+    gleich(await p.$$eval('#freilauf-toasts .toast', els => els.length), 1,
+      'the outcome replaced the pending toast instead of stacking below it')
+    enthaelt(await p.textContent('#freilauf-toasts .toast span:not(.spin)'), 'Run started',
+      'the toast says what happened')
     const href = await p.$eval('#freilauf-toasts .toast a', a => a.getAttribute('href'))
     wahr(/^\/runs\/[0-9a-f-]{36}$/.test(href), `with a link to the run (${href})`)
     gleich(db.prepare('SELECT count(*) c FROM runs').get().c, vorher + 1, 'exactly one run was created')

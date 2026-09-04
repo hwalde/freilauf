@@ -83,8 +83,18 @@ async function laufStarten(daten) {
   return j
 }
 
-async function sessionMerken(runId) {
-  const s = lauf(runId)?.tmux_session
+/**
+ * Note a run's tmux session for the cleanup — waiting for it if it is not
+ * there yet. A Quick Run answers BEFORE the launch (`detached`, see
+ * scheduler.mjs), so reading the column in the same breath as the response is
+ * a race; every other caller finds it already set and pays one query.
+ */
+async function sessionMerken(runId, { wait = true } = {}) {
+  let s = lauf(runId)?.tmux_session
+  if (!s && wait) {
+    try { s = await warteAuf(() => lauf(runId)?.tmux_session, { was: `tmux session of ${runId}`, timeoutMs: 20_000 }) }
+    catch { s = null }
+  }
   if (s) sessions.add(s)
   return s
 }
@@ -1838,6 +1848,25 @@ try {
     const l2 = lauf(R2)
     sessions.delete(l2.tmux_session)
   })
+  await pruefe('cancel on a FAILED run aborts it — the click decides, not the race', async () => {
+    // The button is rendered while the run is going, so a click can land after
+    // the watcher has already written 'failed' (pane died in between — the
+    // production case was two seconds). The final status must say what the
+    // CLICK said: aborted, with the session closed and the follow-up commission
+    // given up. A 'done' run stays protected (see the follow-up group).
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Abbruch-nach-Fehlschlag' })
+    await warteAuf(() => !!lauf(j.runId)?.tmux_session, { was: 'tmux session' })
+    await sessionMerken(j.runId)
+    db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+    const r = await formular(`/api/runs/${j.runId}/kill`, {})
+    gleich(r.status, 200, 'accepted')
+    const l = lauf(j.runId)
+    gleich(l.status, 'aborted', 'the final status is aborted')
+    wahr(l.tmux_closed_at !== null, 'session closed with it')
+    enthaelt(ereignisse(j.runId).join(','), 'aborted', 'and the run says why it ended')
+    falsch((await sh('tmux', ['has-session', '-t', `=${l.tmux_session}`])).ok, 'session terminated')
+    sessions.delete(l.tmux_session)
+  })
 
   // ------------------------------------------------------------------
   gruppe('Branch expectation "fixed": occupied, free, only on origin')
@@ -2511,7 +2540,12 @@ try {
     })
     const j = await r.json()
     wahr(j.ok && !!j.runId, `started (${JSON.stringify(j)})`)
-    await sessionMerken(j.runId)
+    // The answer comes back while the launch is still going: what a Quick Run
+    // has to decide is decided, the worktree and the session are the hub's
+    // business from here (scheduler.mjs, `detached`).
+    wahr(j.pending, 'the answer says the start is still running')
+    const wt = await sessionMerken(j.runId)
+    wahr(!!wt, 'and the session really does come up afterwards')
     const l = lauf(j.runId)
     gleich(l.harness, 'claude', 'coding agent from the favorite')
     gleich(l.model, 'claude-opus-5', 'model from the favorite')
