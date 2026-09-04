@@ -7,7 +7,7 @@
 // computes or decides — schedules, cron, form parsing, quota gate, text processing.
 //
 // Usage:  node test/unit.mjs
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, chmodSync, utimesSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, chmodSync, utimesSync, symlinkSync, realpathSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -1286,6 +1286,104 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('The directories outside the worktree a run was pointed at')
+
+  const { runExternalDirs } = await import('../server/runner.mjs')
+
+  await pruefe('opencode is told about them as external_directory permissions', () => {
+    const { args } = harnessModelArgs({ harness: 'opencode', model: 'a/b', provider: 'openrouter' },
+      { externalDirs: ['/runs/xy', '/opt/fl/zusaetze'] })
+    const erlaubt = cfgAus(args)?.permission?.external_directory
+    gleich(erlaubt?.['/runs/xy/*'], 'allow', 'the run directory, as a glob')
+    gleich(erlaubt?.['/opt/fl/zusaetze/*'], 'allow', 'the extra-skills directory')
+    // NOT a blanket allow: what the hub laid out is reachable, the rest still asks.
+    gleich(erlaubt?.['*'], undefined, 'no blanket permission')
+  })
+
+  await pruefe('a run that carries no model still gets the permission block', () => {
+    // The one that used to fall off: modelArgs returned early for these two,
+    // and a run that cannot write ~/agents/runs/<id>/report.md cannot finish.
+    for (const run of [{ harness: 'opencode' }, { harness: 'opencode', model: 'hand/typed' }]) {
+      const { args } = harnessModelArgs(run, { externalDirs: ['/runs/xy'] })
+      const erlaubt = cfgAus(args)?.permission?.external_directory
+      gleich(erlaubt?.['/runs/xy/*'], 'allow', `model=${run.model ?? 'none'}`)
+    }
+    gleich(cfgAus(harnessModelArgs({ harness: 'opencode', model: 'a/b', provider: 'openrouter' }).args),
+      null, 'without the list nothing is written — an old caller changes nothing')
+  })
+
+  await pruefe('runExternalDirs names the run directory, the skills and every LINKED extra', () => {
+    const wurzel = mkdtempSync(join(tmpdir(), 'fl-extern-'))
+    const repoPfad = join(wurzel, 'repo')
+    mkdirSync(join(repoPfad, '.venv'), { recursive: true })
+    writeFileSync(join(repoPfad, '.env'), 'X=1')
+    const repo = {
+      path: repoPfad,
+      extras: [
+        { path: '.venv/', mode: 'link' },     // a directory — admitted as itself
+        { path: '.env', mode: 'link' },       // a file — only its directory
+        { path: 'node_modules', mode: 'copy' },  // in the worktree already
+        { path: 'weg/', mode: 'link' },       // never applied, cannot be resolved
+      ],
+    }
+    const dirs = runExternalDirs({}, repo, '/runs/xy')
+    wahr(dirs.includes('/runs/xy'), 'the run directory')
+    wahr(dirs.some(d => d.endsWith('/.venv')), 'a linked directory, resolved')
+    wahr(dirs.includes(realpathSync(repoPfad)), 'a linked FILE admits its directory, not the file')
+    wahr(!dirs.some(d => d.includes('node_modules')), 'a copied extra needs nothing — it IS in the worktree')
+    wahr(!dirs.some(d => d.includes('weg')), 'an extra that is not there was not applied either')
+    gleich(dirs.length, new Set(dirs).size, 'deduplicated')
+    wahr(dirs.every(d => d.startsWith('/')), 'absolute only')
+    rmSync(wurzel, { recursive: true, force: true })
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('A prompt too long to hand over as an argument (offloadPrompt)')
+
+  const { offloadPrompt, TASK_FILE, TASK_DIR, harnessOwnedPaths: eigenePfade } =
+    await import('../server/runner.mjs')
+  const langeAufgabe = 'AUFGABE '.repeat(700)   // ~5.6 KB, past opencode's 4000
+
+  await pruefe('a short prompt is passed through completely unchanged', () => {
+    const r = offloadPrompt('opencode', '/nowhere', 'do X', 'PLATFORM')
+    gleich(r.taskFile, null, 'nothing written')
+    gleich(r.prompt, 'do X\n\nPLATFORM', 'task and platform, exactly as before')
+  })
+
+  await pruefe('a long one leaves the task in the worktree and points at it', () => {
+    const wt = mkdtempSync(join(tmpdir(), 'fl-offload-'))
+    const r = offloadPrompt('opencode', wt, langeAufgabe, 'PLATFORM RULES')
+    gleich(r.taskFile, join(wt, TASK_FILE), 'written inside the WORKTREE — no permission question')
+    gleich(readFileSync(r.taskFile, 'utf8'), langeAufgabe, 'the task, byte for byte')
+    wahr(r.prompt.includes(TASK_FILE), 'the launch prompt names the file')
+    wahr(r.prompt.trimEnd().endsWith('PLATFORM RULES'), 'the platform framing stays inline')
+    wahr(!r.prompt.includes('AUFGABE AUFGABE'), 'the task itself does NOT travel as an argument')
+    wahr(Buffer.byteLength(r.prompt) < 1500, `the launch prompt is short (${Buffer.byteLength(r.prompt)} B)`)
+    // Self-ignoring, so `git add -A` in the agent's own final commit cannot
+    // sweep the platform's task file into the operator's repository.
+    gleich(readFileSync(join(wt, TASK_DIR, '.gitignore'), 'utf8'), '*\n', 'the directory ignores itself')
+    rmSync(wt, { recursive: true, force: true })
+  })
+
+  await pruefe('a harness that declares no limit never offloads', () => {
+    // claude and cursor take the prompt as an argument without complaint; only
+    // a harness that says it cannot gets the indirection.
+    for (const h of ['claude', 'cursor', 'hermes']) {
+      const r = offloadPrompt(h, '/nowhere', langeAufgabe, 'P')
+      gleich(r.taskFile, null, `${h}: nothing written`)
+      wahr(r.prompt.includes('AUFGABE'), `${h}: the task travels as before`)
+    }
+  })
+
+  await pruefe('the finish gate does not read the task file as the agent\'s work', () => {
+    // Every harness, unconditionally: the directory is the hub's, and a run
+    // that offloaded would otherwise sit at "commit your changes first".
+    for (const h of ['opencode', 'claude', 'cursor']) {
+      wahr(eigenePfade(h).includes(TASK_DIR), `${h}: ${TASK_DIR} is hub-owned`)
+    }
+  })
+
+  // ------------------------------------------------------------------
   gruppe('cursor: when is a run over? (hooks + transcript)')
 
   const { stateFromJsonl, projectDirs } = await import('../server/cursor-transcript.mjs')
@@ -1321,8 +1419,10 @@ try {
   await pruefe('the hub knows the hook file is its own, not the agent\'s work', () => {
     // Otherwise every cursor worktree counts as dirty forever and is never
     // removed — the same trap the worktree extras once fell into.
-    gleich(harnessOwnedPaths('cursor').join(','), '.cursor', 'cursor')
-    gleich(harnessOwnedPaths('claude').length, 0, 'claude brings nothing into the worktree')
+    // '.freilauf' stands in front of every harness's own entries: it is where an
+    // offloaded task goes (offloadPrompt), and it belongs to the hub the same way.
+    gleich(harnessOwnedPaths('cursor').join(','), '.freilauf,.cursor', 'cursor: the task dir and its hook file')
+    gleich(harnessOwnedPaths('claude').join(','), '.freilauf', 'claude brings no hook file of its own')
   })
 
   await pruefe('an existing hooks.json is never overwritten', () => {
