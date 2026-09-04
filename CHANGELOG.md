@@ -20,6 +20,20 @@ a day on which nothing was released.
 
 ### Added
 
+- **Panels: your project's own numbers in the status sidebar.** The sidebar
+  could say how the machine is doing — quota, work in flight, incidents,
+  memory — and nothing at all about how the *work* is doing. A project can now
+  push its own figures into the sidebar of its repo: open findings split by
+  type, failing tests, unassigned tickets, whatever it counts. One command,
+  `fl-panel set findings --total 33 --item "bug=17:red"`, or a tool of yours
+  piping JSON into it; inside a run it needs no arguments at all. Freilauf never
+  learns what your numbers mean — the counting rule stays in your repository and
+  reaches the hub as a number, with the time it was measured. A reading that is
+  past its declared lifetime, or whose producer reported a failed measurement,
+  keeps its numbers on screen but says plainly that nobody is confirming them.
+  `POST /api/panels` and `GET /api/panels?repo=` are the seam,
+  [docs/panels.md](docs/panels.md) is the whole contract.
+
 - **A roadmap** — [ROADMAP.md](ROADMAP.md), linked from all three READMEs. It
   says what is planned that is big enough to plan around (today: running agents
   in a sandbox, with the design study next to it), it says in its own first

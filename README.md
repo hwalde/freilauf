@@ -65,7 +65,11 @@ Freilauf does, and it only goes forward.
   and notifications with a link straight to the run. The sidebar shows your
   subscription windows, provider balances and what every tmux session on the
   machine costs in memory; a configurable cleanup agent ends the oldest idle
-  sessions when it grows too large.
+  sessions when it grows too large. **And your project's own numbers stand
+  there too** — open findings by type, failing tests, whatever it counts:
+  the project pushes them (`fl-panel`, one HTTP call), Freilauf renders them
+  with the time they were measured and never learns what they mean
+  ([docs/panels.md](docs/panels.md)).
 - **Everything vendor-specific is a plugin.** Coding agents, model providers
   and notification services are plugins with a documented contract
   ([docs/plugins.md](docs/plugins.md)); a third party can drop a package on

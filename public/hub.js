@@ -1873,6 +1873,16 @@
       // requests, each of which may talk to a provider API.
       bald('status', () => { statusAktualisieren().catch(() => {}) }, 2000)
     })
+    // A project pushed a number into the sidebar (server/panels.mjs). It is its
+    // own event type and not a `run` one, because it belongs to no run: a value
+    // arrives from a flow step, a cron job or a hand-typed `fl-panel`. The
+    // answer is the same as everywhere — re-fetch the sidebar fragment, which
+    // the server renders through the very function the page used. The whole
+    // point of pushing rather than polling is that the number appears WHEN it
+    // changes; waiting for the 30-second timer would give that away again.
+    quelle.addEventListener('panel', () => {
+      bald('status', () => { statusAktualisieren().catch(() => {}) }, 500)
+    })
     // Whether the channel is actually up is a fact about the page, so the page
     // says so. It matters for real: a fresh load has no Last-Event-ID, so an
     // event fired in the gap between rendering and connecting is simply missed

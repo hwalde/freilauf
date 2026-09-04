@@ -261,6 +261,20 @@ ul.side-counts a:hover .dim { color: inherit; }
 ul.side-counts .n { font-size: var(--fs-title); font-weight: 600; min-width: 1.2em; text-align: right; font-variant-numeric: tabular-nums; }
 ul.side-counts .dim { font-size: inherit; }
 ul.side-counts .overall { flex: 0 0 auto; }
+/* A project's own panel (server/panels.mjs): a headline number, the split
+   below it in the same `ul.side-counts` the work block uses, and the moment it
+   was measured. That last line is not decoration — the value is pushed by the
+   project and stands until the next push, so a reading without its time is the
+   quiet staleness this hub has been caught by before. `panel-cold` is the state
+   in which the numbers are still shown but no longer confirmed (past their TTL,
+   or a producer that reported a failed measurement): dimmed as a whole, so it
+   cannot be mistaken for a current reading at a glance. */
+.side-panel .panel-total { font-size: var(--fs-title); font-weight: 600; font-variant-numeric: tabular-nums; padding: var(--sp-2) 0; }
+.side-panel .panel-total a { text-decoration: none; color: inherit; }
+.side-panel .panel-total a:hover { color: var(--accent-act-hover); }
+.side-panel .panel-note, .side-panel .panel-stand { font-size: 12px; margin-top: var(--sp-4); }
+.side-panel .panel-note code { font-size: 11px; }
+.side-panel.panel-cold ul.side-counts, .side-panel.panel-cold .panel-total { opacity: .6; }
 /* The incident block's counts are links into the filtered overview, and take
    the text colour like every other count in this column: inside the sidebar
    the blue would read as the loudest thing in it. */

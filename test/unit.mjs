@@ -4417,6 +4417,105 @@ try {
     falsch(fr.log.some(l => l.msg === 'never'), 'and nothing after it ran')
   })
 
+  // ------------------------------------------------------------------
+  // A panel is a number a PROJECT pushes into the sidebar, so everything that
+  // decides here decides about somebody else's data: what is repaired, what is
+  // refused, and above all what an empty field means. `Number('')` is 0 and
+  // finite — in a panel that is not merely wrong, it reads as "nothing left to
+  // do", which is the most expensive shape a wrong number can take here.
+  gruppe('Panels: what a project pushes into the sidebar (panels.mjs)')
+
+  const { normalizePanel, panelState, setPanelValue, panelValue, panelValues, deletePanelValue, PANEL_MAX_ITEMS } =
+    await import('../server/panels.mjs')
+
+  await pruefe('a panel needs a total or an item — nothing else counts as one', () => {
+    falsch(normalizePanel(null).ok, 'null')
+    falsch(normalizePanel('not json').ok, 'not JSON')
+    falsch(normalizePanel([1, 2]).ok, 'an array is not an object')
+    falsch(normalizePanel({ title: 'Findings' }).ok, 'a title alone is not a value')
+    wahr(normalizePanel({ total: 0 }).ok, 'a total of zero IS a value')
+    wahr(normalizePanel({ items: [{ label: 'bug', count: 3 }] }).ok, 'items alone are enough')
+  })
+
+  await pruefe('an empty count is null, never 0 — the Number("") trap', () => {
+    const r = normalizePanel({ total: '', items: [{ label: 'bug', count: '' }, { label: 'task', count: '7' }] })
+    wahr(r.ok, 'accepted')
+    gleich(r.value.total, null, 'the total says "not measured", not "none left"')
+    gleich(r.value.items[0].count, null, 'and so does the row')
+    gleich(r.value.items[1].count, 7, 'a numeric string is still a number')
+  })
+
+  await pruefe('what cannot be rendered is dropped, not passed through', () => {
+    const r = normalizePanel({
+      total: 5, tone: 'chartreuse',
+      href: 'javascript:alert(1)',
+      items: [{ label: 'a', count: 1, tone: 'RED' }, { count: 2 }, { label: 'b', count: 3, href: '../bugs' }],
+    })
+    gleich(r.value.tone, null, 'an unknown tone')
+    gleich(r.value.href, null, 'a href that is not a link')
+    gleich(r.value.items.length, 2, 'a row without a label is not a row')
+    gleich(r.value.items[0].tone, 'red', 'a tone is read case-insensitively')
+    gleich(r.value.items[1].href, null, 'a filesystem path is dead in a browser')
+    gleich(normalizePanel({ total: 1, href: 'https://example.test/x' }).value.href, 'https://example.test/x', 'http(s) travels')
+    gleich(normalizePanel({ total: 1, href: '/runs/abc' }).value.href, '/runs/abc', 'a path on this hub travels')
+    gleich(normalizePanel({ total: 1, href: '//evil.test' }).value.href, null, 'a protocol-relative one does not')
+  })
+
+  await pruefe('the caps hold: a sidebar column is not a table', () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({ label: `row ${i}`, count: i }))
+    const r = normalizePanel({ total: 1, items: many })
+    gleich(r.value.items.length, PANEL_MAX_ITEMS, 'cut to the cap')
+    wahr(r.problems.some(p => /more than/.test(p)), 'and it says so instead of silently dropping')
+    gleich(normalizePanel({ total: 1, items: [{ label: 'x'.repeat(200), count: 1 }] }).value.items[0].label.length, 40, 'a label is cut')
+  })
+
+  await pruefe('state: fresh, stale, error — and no ttl means never stale', () => {
+    const now = Date.parse('2026-09-04T12:00:00Z')
+    const old = { atMs: now - 3 * 60 * 60 * 1000, ttlMin: null, error: null }
+    gleich(panelState(old, now), 'fresh', 'a value without a ttl promises no interval')
+    gleich(panelState({ ...old, ttlMin: 60 }, now), 'stale', 'past its own ttl')
+    gleich(panelState({ ...old, ttlMin: 600 }, now), 'fresh', 'inside it')
+    gleich(panelState({ ...old, error: 'tool missing' }, now), 'error', 'a failed measurement outranks the clock')
+  })
+
+  await pruefe('storing: round trip, refusals, and a failure that keeps the numbers', async () => {
+    const { db: udb } = await import('../server/db.mjs')
+    udb.prepare(`INSERT INTO repos(name, path) VALUES('panel-test','/tmp/panel-test')`).run()
+    const repoId = udb.prepare(`SELECT id FROM repos WHERE name='panel-test'`).get().id
+
+    falsch(setPanelValue({ repoId, key: 'Not A Key', value: { total: 1 } }).ok, 'an invalid key is refused')
+    falsch(setPanelValue({ repoId: 999999, key: 'x', value: { total: 1 } }).ok === true, 'an unknown repo is refused')
+
+    wahr(setPanelValue({ repoId, key: 'findings', value: { title: 'Findings', total: 33, items: [{ label: 'bug', count: 17 }] } }).ok, 'stored')
+    const p = panelValue(repoId, 'findings')
+    gleich(p.total, 33, 'the total came back')
+    gleich(p.items[0].label, 'bug', 'and the row')
+    gleich(panelState(p), 'fresh', 'a fresh push is fresh')
+
+    // The producer failed. The point of this path: the LAST numbers stay
+    // visible — an operator who is told "measurement failed" and shown nothing
+    // has lost the information that was already there.
+    wahr(setPanelValue({ repoId, key: 'findings', error: 'the register tool is not on this branch' }).ok, 'a failure is a push too')
+    const nachFehler = panelValue(repoId, 'findings')
+    gleich(nachFehler.total, 33, 'the numbers survived')
+    gleich(panelState(nachFehler), 'error', 'and the state says they are not confirmed')
+
+    wahr(setPanelValue({ repoId, key: 'findings', value: { total: 30 } }).ok, 'a new value')
+    gleich(panelValue(repoId, 'findings').error, null, 'clears the failure')
+
+    gleich(panelValues(repoId).length, 1, 'one panel on this repo')
+    deletePanelValue(repoId, 'findings')
+    gleich(panelValues(repoId).length, 0, 'and gone')
+    gleich(panelValues(null).length, 0, 'no repo, no panels — never a throw')
+  })
+
+  await pruefe('bin/fl-panel parses', async () => {
+    const { execFileSync: run } = await import('node:child_process')
+    const root = new URL('..', import.meta.url).pathname
+    run('node', ['--check', join(root, 'bin', 'fl-panel')], { stdio: ['ignore', 'ignore', 'pipe'] })
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Docs: AGENTS.md / CLAUDE.md pairing')
 
   await pruefe('every AGENTS.md has a CLAUDE.md next to it that only includes it', async () => {

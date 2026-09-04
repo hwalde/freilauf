@@ -3117,6 +3117,111 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // A panel is the one thing in the sidebar the hub does not measure itself: a
+  // project pushes it (POST /api/panels, bin/fl-panel) and the hub renders it.
+  // So what is tested here is the seam — that a pushed number really reaches
+  // every page, that a failed measurement keeps the last numbers instead of
+  // blanking them, and that nothing a producer sends can leave the shape the
+  // renderer knows.
+  gruppe('Panels: a project pushes its own numbers into the sidebar')
+
+  const leisteVon = (html) => html.slice(html.indexOf('id="status-sidebar"'), html.indexOf('</aside>'))
+
+  await pruefe('a pushed value stands in the sidebar of every page of that repo', async () => {
+    const r = await formular('/api/panels', {
+      repo: String(repoId),
+      key: 'findings',
+      value: JSON.stringify({
+        title: 'Findings', total: 33, tone: 'yellow',
+        items: [{ label: 'bug', count: 17, tone: 'red' }, { label: 'task', count: 16 }],
+        note: 'from `befund.py zaehl`',
+      }),
+    })
+    gleich(r.status, 200, 'accepted')
+    const antwort = await r.json()
+    wahr(antwort.ok, 'ok')
+
+    for (const pfad of [`/?repo=${repoId}`, `/agents?repo=${repoId}`, `/settings?repo=${repoId}`]) {
+      const leiste = leisteVon(await (await hol(pfad)).text())
+      enthaelt(leiste, 'Findings', `${pfad}: the title the project chose`)
+      enthaelt(leiste, '>33<', `${pfad}: the headline number`)
+      enthaelt(leiste, 'bug', `${pfad}: the split`)
+      enthaelt(leiste, 'as of', `${pfad}: and WHEN it was measured — a reading without its time is the staleness this exists against`)
+    }
+    // The note's Markdown subset is rendered by the HUB, so a backtick becomes
+    // a <code> and nothing else can be smuggled through it.
+    enthaelt(leisteVon(await (await hol(`/?repo=${repoId}`)).text()), '<code>befund.py zaehl</code>', 'the note is rendered, not pasted')
+  })
+
+  await pruefe('the sidebar fragment carries it too — the live channel updates it', async () => {
+    const frag = await (await hol(`/api/fragments/sidebar?repo=${repoId}`)).text()
+    enthaelt(frag, 'data-panel="findings"', 'the block is in the fragment')
+    enthaelt(frag, '>33<', 'with its number')
+  })
+
+  await pruefe('GET /api/panels answers with the value and its state', async () => {
+    const data = await (await hol(`/api/panels?repo=${repoId}`, { headers: { accept: 'application/json' } })).json()
+    wahr(data.ok, 'ok')
+    gleich(data.panels.length, 1, 'one panel')
+    gleich(data.panels[0].total, 33, 'the number')
+    gleich(data.panels[0].state, 'fresh', 'freshly pushed')
+    wahr(typeof data.panels[0].age_s === 'number', 'and how old the reading is')
+  })
+
+  await pruefe('a failed measurement keeps the last numbers and says they are not confirmed', async () => {
+    const r = await formular('/api/panels', { repo: String(repoId), key: 'findings', error: 'register tool missing on this branch' })
+    gleich(r.status, 200, 'a failure is a push too')
+    const leiste = leisteVon(await (await hol(`/?repo=${repoId}`)).text())
+    enthaelt(leiste, '>33<', 'the numbers are still there')
+    enthaelt(leiste, 'panel-cold', 'greyed as a whole')
+    enthaelt(leiste, 'register tool missing', 'and the reason is named')
+    // …and the next good push clears it, or a fixed producer would look broken forever.
+    await formular('/api/panels', { repo: String(repoId), key: 'findings', value: JSON.stringify({ title: 'Findings', total: 30 }) })
+    const leiste2 = leisteVon(await (await hol(`/?repo=${repoId}`)).text())
+    falsch(leiste2.includes('panel-cold'), 'the failure is over')
+    enthaelt(leiste2, '>30<', 'with the new number')
+  })
+
+  await pruefe('what a producer must not be able to do', async () => {
+    const nein = await formular('/api/panels', { repo: String(repoId), key: 'findings', value: JSON.stringify({ title: 'x' }) })
+    gleich(nein.status, 400, 'a value with neither total nor items is refused')
+    const schluessel = await formular('/api/panels', { repo: String(repoId), key: 'Not A Key', value: JSON.stringify({ total: 1 }) })
+    gleich(schluessel.status, 400, 'and so is an invalid key')
+    const kaputt = await formular('/api/panels', { repo: '999999', key: 'x', value: JSON.stringify({ total: 1 }) })
+    gleich(kaputt.status, 400, 'an unknown repo is an answer, never a 500')
+
+    // Markup in a label is data, and the hub escapes it — the producer never
+    // gets to decide how this column is built.
+    await formular('/api/panels', {
+      repo: String(repoId), key: 'shapes',
+      value: JSON.stringify({ total: 1, items: [{ label: '<b>bold</b>', count: 1 }], note: '<script>x</script>' }),
+    })
+    const leiste = leisteVon(await (await hol(`/?repo=${repoId}`)).text())
+    falsch(leiste.includes('<b>bold</b>'), 'a label cannot bring its own markup')
+    falsch(leiste.includes('<script>'), 'and neither can the note')
+    enthaelt(leiste, '&lt;b&gt;bold&lt;/b&gt;', 'it is shown as the text it is')
+    await formular('/api/panels', { repo: String(repoId), key: 'shapes', remove: '1' })
+    falsch(leisteVon(await (await hol(`/?repo=${repoId}`)).text()).includes('data-panel="shapes"'), 'and it can be removed again')
+  })
+
+  await pruefe('bin/fl-panel pushes from outside the hub, and finds the hub itself', async () => {
+    // The way a flow step or a cron line would call it: FL_HUB_URL out of the
+    // environment, everything else on the command line.
+    const r = await new Promise((res) => execFile(process.execPath,
+      [join(PROJEKT, 'bin', 'fl-panel'), 'set', 'tests',
+        '--repo', String(repoId), '--title', 'Tests', '--total', '12', '--item', 'failing=3:red', '--ttl', '60'],
+      { env: { ...process.env, FL_HUB_URL: BASIS }, timeout: 30_000 },
+      (err, stdout, stderr) => res({ code: err?.code ?? 0, stdout, stderr })))
+    gleich(r.code, 0, `fl-panel exited 0 (${r.stderr})`)
+    enthaelt(r.stdout, 'tests = 12', 'and says what it pushed')
+    const leiste = leisteVon(await (await hol(`/?repo=${repoId}`)).text())
+    enthaelt(leiste, 'Tests', 'the panel it created')
+    enthaelt(leiste, 'failing', 'with the row from --item')
+    await formular('/api/panels', { repo: String(repoId), key: 'tests', remove: '1' })
+    await formular('/api/panels', { repo: String(repoId), key: 'findings', remove: '1' })
+  })
+
+  // ------------------------------------------------------------------
   // The repo chosen in the header travels as the freilauf_repo cookie, so a page
   // that carries no ?repo= of its own (a menu click, a context-less page) keeps
   // the choice instead of falling back to the first repo. The cookie is written

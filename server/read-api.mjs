@@ -32,6 +32,7 @@ import { RUNS_DIR, WORKTREES_DIR, kurzid } from './util.mjs'
 import { alleVorfaelle } from './incidents.mjs'
 import { listFavorites, FAVORITES_MAX, favoriteSummary } from './favorites.mjs'
 import { listSessions, sessionMemory, paneAlive } from './sessions.mjs'
+import { panelValues, panelState } from './panels.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import {
   availableSkills, harnessSkillRoots, skillTargets, installedOverview,
@@ -226,6 +227,23 @@ export async function readApi(req, res, url) {
     let memory = null
     try { memory = await sessionMemory() } catch { memory = null }
     json(res, 200, { ok: true, memory, sessions })
+    return true
+  }
+
+  // ---- what a project says about its own work ----------------------------
+  // The counterpart of `POST /api/panels`: whatever the repo pushed, plus the
+  // one thing the stored row cannot say by itself — whether the reading is
+  // still inside its own TTL. A consumer that only prints the number would
+  // otherwise repeat a value nobody is confirming any more.
+  if (path === '/api/panels') {
+    const repo = url.searchParams.get('repo')
+    if (!repo) { json(res, 400, { ok: false, error: t('api.unknown_repo') }); return true }
+    const now = Date.now()
+    json(res, 200, {
+      ok: true,
+      repo: Number(repo),
+      panels: panelValues(Number(repo)).map(p => ({ ...p, state: panelState(p, now), age_s: p.atMs ? Math.round((now - p.atMs) / 1000) : null })),
+    })
     return true
   }
 

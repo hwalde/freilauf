@@ -57,6 +57,7 @@ authorization.
 | 1 | `headerStatus()` | pipeline on/off, and the **running commit sha** (`hubVersion()`: `git rev-parse --short HEAD` at the module's own directory, cached for the process, empty without git) | `git -C ~/agents/deploy/freilauf rev-parse --short HEAD` |
 | 2 | `workBlock(repoId)` | work in flight per status | `fl-api /api/runs repo=<id> status=<s>` |
 | 3 | `incidentBlock(repoId)` | open incidents, "Needs you" / "Noticed" | SQL, see below |
+| 3b | `panelsBlock(repoId)` | what the PROJECT counts — see below | `fl-api /api/panels repo=<id>` |
 | 4 | `usagePanel()` | subscription windows + provider balances | `fl-api /api/usage` |
 | 5 | `memoryBlock()` | RSS of every tmux session on the machine | `fl-api /api/sessions` |
 
@@ -109,6 +110,29 @@ The split is `brauchtMensch(v, runStatus)` in `server/incidents.mjs`:
 suffix after a colon (`provider_down:openrouter`); the split looks only at the
 head. Incident columns: `erst_gesehen`, `zuletzt_gesehen`, `anzahl`, `beleg`
 (the evidence line), `geloest_am` (NULL = open), `wieder_geoeffnet`.
+
+## Panels: the numbers the hub did NOT measure
+
+Everything else in the sidebar is the hub's own reading. A **panel** is a number
+a project pushed in — open findings by type, failing tests, whatever that
+repository counts. Freilauf stores and renders it and knows nothing about what
+it means, so never explain a panel's numbers: report them with their state.
+
+```bash
+fl-api /api/panels repo=3      # {panels:[{key,title,total,items,state,at,age_s,error}]}
+```
+
+`state` is the only part the row cannot say by itself:
+
+| state | what to say |
+|---|---|
+| `fresh` | the number, and when it was measured (`at`) |
+| `stale` | the number **plus** that it is past its own TTL — nobody has confirmed it since `at` |
+| `error` | the numbers are the LAST good ones; `error` says why the latest measurement failed |
+
+Pushing one is `bin/fl-panel` (`fl-panel set <key> --total n --item "label=count:tone"`,
+or JSON on stdin). Inside a run it needs no repo — `FL_RUN_ID` says which.
+The contract is `docs/panels.md` in the Freilauf checkout.
 
 ## Getting the numbers without a browser
 

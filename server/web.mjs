@@ -49,6 +49,7 @@ import { startCleanupRun } from './cleanup.mjs'
 import { suggestExtras } from './extras-suggest.mjs'
 import { editRun } from './run-edit.mjs'
 import { readApi } from './read-api.mjs'
+import { setPanelValue, deletePanelValue } from './panels.mjs'
 import { mergeByHand, skipMerge, resetIntegration } from './integrate.mjs'
 import { redirect, body as readBody, parseForm, rememberRepo, requestRepo } from './web-helpers.mjs'
 import { vorfallLoesen, vorfaelleLoesen, vorfall } from './incidents.mjs'
@@ -837,6 +838,32 @@ async function api(req, res, url) {
   if (req.method === 'POST' && path === '/api/settings/pipeline') {
     setSetting('pipeline_on', (await form(req)).value === '1' ? '1' : '0')
     return json(res, 200, { ok: true })
+  }
+  // A project pushes a number into the status sidebar (see server/panels.mjs).
+  //
+  // This is the ONE write that does not belong to a run, an agent or a setting,
+  // and it is deliberately not in the read-only API next to `GET /api/panels`.
+  // The repo is named directly, or derived from the run that is pushing:
+  // `bin/fl-panel` inside a run carries `FL_RUN_ID` and nothing else, and a run
+  // knows its repository — so a flow step needs no repo id in its command line,
+  // which is exactly the id nobody has at hand when writing one.
+  if (req.method === 'POST' && path === '/api/panels') {
+    const b = await form(req)
+    const run = b.run ? getRun(String(b.run)) : null
+    const repoId = b.repo ? Number(b.repo) : run?.repo_id ?? null
+    if (repoId == null || !getRepo(repoId)) {
+      return json(res, 400, { ok: false, error: t('api.unknown_repo') })
+    }
+    if (b.remove === '1') return json(res, 200, deletePanelValue(repoId, b.key ?? ''))
+    const r = setPanelValue({
+      repoId,
+      key: b.key ?? '',
+      value: b.value ?? null,
+      error: b.error ?? null,
+      ttlMin: b.ttl ?? null,
+      source: b.source ?? (run ? `run:${run.id}` : null),
+    })
+    return json(res, r.ok ? 200 : 400, r)
   }
   // The repo form's "find worktree extras": algorithmic checks first (path
   // exists, is a git project), then a single OpenRouter call. Errors are already

@@ -70,6 +70,11 @@ das tut Freilauf, und es geht nur vorwärts.
   Die Seitenleiste zeigt deine Abo-Fenster, Provider-Guthaben und was jede
   tmux-Session auf der Maschine an Speicher kostet; ein konfigurierbarer
   Aufräum-Agent beendet die ältesten untätigen Sessions, wenn es zu viel wird.
+  **Und die eigenen Zahlen deines Projekts stehen dort ebenfalls** — offene
+  Befunde nach Art, rote Tests, was immer es zählt: das Projekt schickt sie
+  (`fl-panel`, ein HTTP-Aufruf), Freilauf zeigt sie mit dem Zeitpunkt der
+  Messung und erfährt nie, was sie bedeuten
+  ([docs/panels.md](docs/panels.md)).
 - **Alles Herstellerspezifische ist ein Plugin.** Coding-Agenten,
   Modell-Provider und Benachrichtigungsdienste sind Plugins mit dokumentiertem
   Vertrag ([docs/plugins.md](docs/plugins.md)); ein Dritter kann ein Paket auf
