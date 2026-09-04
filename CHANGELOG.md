@@ -54,6 +54,8 @@ a day on which nothing was released.
 
 ### Fixed
 
+- Retrying a run offers its terminal again: the retry now clears the
+  closed-session mark the old attempt left behind.
 - Cancelling a run that has just failed (its pane died a second before the
   click) now records it as aborted, instead of leaving the status the watcher
   wrote and only closing the session.
