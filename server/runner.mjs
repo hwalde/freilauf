@@ -432,7 +432,7 @@ export function applyExtras(repo, target) {
  * approved but REFUSED. So the agent was blocked precisely where the platform
  * prompt sends it: `~/agents/runs/<id>/report.md` is the file every run must
  * write, and it lies outside the worktree on purpose (a report inside it would
- * leave it dirty for the finish gate). Measured 2026-09-04 on video-production:
+ * leave it dirty for the finish gate). Measured 2026-09-04 on one repository of this machine:
  * fifteen opencode workers stood in their TUI for an hour, `0 tokens`, having
  * never got past their first tool call.
  *

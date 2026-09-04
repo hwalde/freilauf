@@ -2983,7 +2983,7 @@ errors (`post_api_request` only fires after success).
   `report.md`, deliberately outside the worktree so the finish gate stays clean —
   is exactly such a path, and so is every worktree extra that was linked rather
   than copied (`.venv/`, `node_modules/`, a reference checkout). So the agent was
-  blocked precisely where it reports. Measured 2026-09-04 on video-production:
+  blocked precisely where it reports. Measured 2026-09-04 on one repository of this machine:
   fifteen opencode workers sat in their TUI, `Build` spinning, `0 tokens` and
   `$0.00 spent`, one of them for 55 minutes — the assistant message row in
   opencode's own database was created and never updated again. It looks exactly
