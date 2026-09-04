@@ -291,6 +291,10 @@ Freilauf 是一位运维者的工作流写成的代码，公开出来是因为�
 什么时候改了什么，都记在 [CHANGELOG.md](CHANGELOG.md) 里。本项目没有发布版本——
 hub 直接从 `main` 部署——所以它按天分组，而不是按版本号。
 
+接下来要做什么，写在 [ROADMAP.md](ROADMAP.md)（英文）里——它有意不是一份完整清单，
+只列出少数大到值得提前公布的变化。**欢迎提功能需求：** 开一个
+[issue](https://github.com/hwalde/freilauf/issues)，告诉我你缺什么。
+
 ## 许可证
 
 [CC BY 4.0](LICENSE)——使用、修改、商业发布都可以。只需署名：注明 **Herbert

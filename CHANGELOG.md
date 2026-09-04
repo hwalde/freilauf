@@ -20,6 +20,13 @@ a day on which nothing was released.
 
 ### Added
 
+- **A roadmap** — [ROADMAP.md](ROADMAP.md), linked from all three READMEs. It
+  says what is planned that is big enough to plan around (today: running agents
+  in a sandbox, with the design study next to it), it says in its own first
+  paragraph that it is deliberately incomplete, and it is where feature
+  requests are invited: the GitHub issues URL is now in the roadmap, in the
+  three READMEs and in `CONTRIBUTING.md`. English only, on purpose — a roadmap
+  maintained in three languages goes stale in two of them.
 - The overview lets several runs be selected and archived in one gesture: a
   checkbox on every archivable row, a bulk bar under the table, and a per-run
   answer so one refusal does not hold up the rest.

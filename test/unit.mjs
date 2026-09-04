@@ -4322,19 +4322,38 @@ try {
     const { join: j } = await import('node:path')
     const root = new URL('..', import.meta.url).pathname
     const readmes = ['README.md', 'README.zh-CN.md', 'README.de.md']
-    for (const f of ['SETUP_WITH_AGENT.md', 'CONTRIBUTING.md', 'LICENSE', ...readmes]) {
+    for (const f of ['SETUP_WITH_AGENT.md', 'CONTRIBUTING.md', 'ROADMAP.md', 'LICENSE', ...readmes]) {
       wahr(existsSync(j(root, f)), `${f} exists`)
     }
     for (const f of readmes) {
       const text = readFileSync(j(root, f), 'utf8')
       wahr(text.includes('SETUP_WITH_AGENT.md'), `${f} links SETUP_WITH_AGENT.md`)
       wahr(text.includes('CONTRIBUTING.md'), `${f} links CONTRIBUTING.md`)
+      // The roadmap is English only, so a Chinese or German reader reaches it
+      // exactly one way: through their own README.
+      wahr(text.includes('(ROADMAP.md)'), `${f} links ROADMAP.md`)
       for (const other of readmes.filter((o) => o !== f)) {
         wahr(text.includes(`(${other})`), `${f} links ${other} (language switcher)`)
       }
     }
     wahr(readFileSync(j(root, 'LICENSE'), 'utf8').includes('Attribution 4.0 International'),
       'LICENSE is the CC BY 4.0 legal code')
+  })
+
+  // A roadmap that names a design document which is no longer there sends the
+  // one interested reader after a 404, and a roadmap without the issues URL is
+  // an invitation with no address on it.
+  await pruefe('ROADMAP.md links its design study and the issue tracker', async () => {
+    const { readFileSync, existsSync } = await import('node:fs')
+    const { join: j } = await import('node:path')
+    const root = new URL('..', import.meta.url).pathname
+    const text = readFileSync(j(root, 'ROADMAP.md'), 'utf8')
+    for (const link of [...text.matchAll(/\]\((?!https?:|#)([^)]+)\)/g)].map((m) => m[1])) {
+      wahr(existsSync(j(root, link)), `ROADMAP.md links ${link}, which exists`)
+    }
+    wahr(text.includes('SANDBOX_RESEARCH.md'), 'ROADMAP.md links the sandbox design study')
+    wahr(text.includes('https://github.com/hwalde/freilauf/issues'),
+      'ROADMAP.md names the issue tracker')
   })
 
   // The changelog has no version numbers — its sections are DAYS, so the dates
