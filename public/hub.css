@@ -783,6 +783,16 @@ form.form-grid label:not(.chk):not(.weekday) > .fav-tip { grid-column: 3; }
   border-left: 4px solid var(--ok); }
 .toast.warn { border-left-color: var(--warn); }
 .toast.err { border-left-color: var(--err); }
+/* A start the hub is still carrying out. The spinner is the whole message the
+   reader needs while it lasts: something is running, nobody has to wait here.
+   `prefers-reduced-motion` gets a steady mark instead of a turning one — the
+   information is "in progress", and that does not need to move to be read. */
+.toast.pending { border-left-color: var(--accent-on-bar); }
+.toast .spin { width: 0.9em; height: 0.9em; flex: none; border-radius: 50%;
+  border: 2px solid var(--text-on-bar-dim); border-top-color: var(--accent-on-bar);
+  animation: toast-spin 0.9s linear infinite; }
+@keyframes toast-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .toast .spin { animation: none; } }
 .toast a { color: var(--accent-on-bar); margin-left: auto; white-space: nowrap; }
 .toast button.mini { background: none; border: 0; color: var(--text-on-bar-dim); cursor: pointer;
   padding: 0 var(--sp-2); opacity: 1; font-size: 1em; }

@@ -83,8 +83,18 @@ async function laufStarten(daten) {
   return j
 }
 
-async function sessionMerken(runId) {
-  const s = lauf(runId)?.tmux_session
+/**
+ * Note a run's tmux session for the cleanup — waiting for it if it is not
+ * there yet. A Quick Run answers BEFORE the launch (`detached`, see
+ * scheduler.mjs), so reading the column in the same breath as the response is
+ * a race; every other caller finds it already set and pays one query.
+ */
+async function sessionMerken(runId, { warten = true } = {}) {
+  let s = lauf(runId)?.tmux_session
+  if (!s && warten) {
+    try { s = await warteAuf(() => lauf(runId)?.tmux_session, { was: `tmux session of ${runId}`, timeoutMs: 20_000 }) }
+    catch { s = null }
+  }
   if (s) sessions.add(s)
   return s
 }
@@ -2441,7 +2451,12 @@ try {
     })
     const j = await r.json()
     wahr(j.ok && !!j.runId, `started (${JSON.stringify(j)})`)
-    await sessionMerken(j.runId)
+    // The answer comes back while the launch is still going: what a Quick Run
+    // has to decide is decided, the worktree and the session are the hub's
+    // business from here (scheduler.mjs, `detached`).
+    wahr(j.pending, 'the answer says the start is still running')
+    const wt = await sessionMerken(j.runId)
+    wahr(!!wt, 'and the session really does come up afterwards')
     const l = lauf(j.runId)
     gleich(l.harness, 'claude', 'coding agent from the favorite')
     gleich(l.model, 'claude-opus-5', 'model from the favorite')
