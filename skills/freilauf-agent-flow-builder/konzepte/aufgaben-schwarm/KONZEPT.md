@@ -134,7 +134,11 @@ Register fängt den Rest ab.
   einen Abo-Start baut, kauft sich ein `deferred`. Ohne belastbare Zahl fährt die Ausweich-Route.
 - Geld: `budgets` sind die Guthaben-Schwellen je Anbieter, absichtlich über Freilaufs eigenem
   Budget-Gate. `tages_budget_usd` summiert die echten Lauf-Kosten eines Kalendertages; gelb heißt
-  „starke Bahn aus", rot heißt „gar keine Starts". Ein Abo-Lauf meldet keine Kosten — sein Preis
+  „starke Bahn aus", rot heißt „gar keine Starts". Die Summe umfasst nur Läufe der
+  Schwarm-Agenten — Eval-Suiten, andere Läufe und Handarbeit hängen am selben Schlüssel, tauchen
+  hier aber nicht auf. Der Deckel ist deshalb ein weites Netz gegen das Verrennen, keine
+  Abrechnung; die harte Grenze zieht der Anbieter-Schlüssel. Der Zweck ist nicht, zu sparen,
+  sondern anzulaufen, wenn es Arbeit gibt, und sie dann abzuarbeiten. Ein Abo-Lauf meldet keine Kosten — sein Preis
   ist der Anteil an der Wochenquote, und deren Deckel ist `fable_7d_max`. Abo-Verbrauch ist ein
   Preis, kein Nullwert.
 - Leerlauf kostet nichts: Kein Agent hat einen Cron, der einzige Takt ist der Wächter-Flow, und
