@@ -2385,8 +2385,13 @@ never for the status; the status only decides the BUTTON underneath — a run
 still in flight is ended (`/api/runs/<id>/kill`, sets `aborted`), a finished one
 only loses the session it left standing (`/api/sessions/kill` with a `back`,
 which leaves the record alone). `/api/runs/<id>/kill` enforces the same rule
-from its own side: on `done`/`failed`/`aborted` it closes the session and writes
-`tmux_closed` instead of rewriting a clean run into a failed one. What is sent
+from its own side — with one deliberate exception: on `done`/`aborted` it closes
+the session and writes `tmux_closed` instead of rewriting a clean run, but a
+**`failed` run it sets to `aborted`**. The cancel button was rendered while the
+run was still going, so a click landing after the watcher has written `failed`
+(measured: two seconds after a pane death) is still a cancel — the final status
+says what the CLICK said, not what the race decided. An open follow-up
+commission goes with it either way. What is sent
 into a finished session is real work that this run no longer records, and the
 retention clock keeps counting from the run's end — the page says so.
 
