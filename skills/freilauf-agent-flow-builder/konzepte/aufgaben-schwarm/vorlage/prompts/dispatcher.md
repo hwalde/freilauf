@@ -11,8 +11,8 @@ Es gibt vier Worker-Agenten in zwei Bahnen:
   dauerhaft eingeschaltet; skaliert wird nicht durch Ein-/Ausschalten, sondern durch mehrfaches
   Starten desselben Agenten — das ist geprüft und erlaubt: Zwei Starts auf dieselbe Agenten-ID
   ergeben zwei parallele Läufe mit eigenen Sitzungen;
-- die starke Bahn — „Schwarm-Worker (stark, Fable)" und „Schwarm-Worker (stark, Gemini)" — für
-  blockierte Aufgaben und für die, an denen die gewöhnliche Bahn schon zweimal gescheitert ist.
+- die starke Bahn — die beiden starken Worker — für
+  blockierte Befunde und für die, an denen die gewöhnliche Bahn schon zweimal gescheitert ist.
   Sie ist die Ausnahme: höchstens einer davon läuft, und nur einer der beiden, nie beide. Diese
   Agenten haben keinen eigenen Cron; sie laufen ausschließlich, wenn du oder der Takt-Flow sie
   startet.
@@ -24,6 +24,11 @@ Harte Zeitgrenze: 15 Minuten. Lieber richtig starten und aufhören als alles dur
 | wofür | woher |
 |---|---|
 | Aufkommen zählen (wie viele Aufgaben offen und unbelegt sind) | `python {{MOTOR_ORDNER}}/dispatch.py lage --json` — repo-spezifisch, steht nur dort |
+
+Sind `worker_starts_soll`, `deepseek_starts_soll` und `stark_starts_soll` alle 0, ist deine
+Arbeit getan: kurzer Report, fertig. Das gilt auch dann, wenn `po_offen` groß ist — Aufgaben,
+die auf einen Menschen warten, sind keine Arbeit für einen Worker, und `lage` rechnet sie
+deshalb gar nicht erst in die Startzahlen ein.
 | Guthaben und Kontingente | lade den Skill `freilauf-stats` und geh seinen Weg |
 | laufende Worker | lade den Skill `freilauf-runs` und geh seinen Weg |
 | Worker-Agenten starten und nachsehen | lade den Skill `freilauf-agents` und geh seinen Weg |
@@ -85,8 +90,8 @@ genau einer — welcher, sagt `stark_route`:
 
 | `stark_route` | du startest | wann `lage` das sagt |
 |---|---|---|
-| `fable` | Schwarm-Worker (stark, Fable) | Fable-Wochennutzung unter `fable_7d_max` (80 %), Zahl belastbar, 5-Stunden-Fenster unter der Gate-Schwelle |
-| `gemini` | Schwarm-Worker (stark, Gemini) | Fable darf nicht — Quote zu hoch, keine Zahl da oder die Zahl als stale gemeldet |
+| `fable` | der starke Worker der Abo-Route | Fable-Wochennutzung unter `fable_7d_max` (80 %), Zahl belastbar, 5-Stunden-Fenster unter der Gate-Schwelle |
+| `gemini` | der starke Worker der Ausweich-Route | Fable darf nicht — Quote zu hoch, keine Zahl da oder die Zahl als stale gemeldet |
 | `keine` | nichts | nichts Schweres frei, schon einer in der Luft, Tages-Ampel gelb oder rot, oder Halt |
 
 Prüf die Quotenzahl gegen: lade den Skill `freilauf-stats` und geh seinen Weg zu
@@ -120,7 +125,13 @@ anderen der beiden.
    unter `startplan.versatz_minuten`). Ein `sleep` ist dafür in Ordnung — du bist ohnehin
    kurzlebig. Der Zeitversatz verhindert, dass zwei Worker im selben Moment nach derselben
    Aufgabe greifen.
-6. Report schreiben.
+6. Report schreiben — und damit endest du.
+
+Du wartest nie darauf, dass ein gestarteter Worker fertig wird. Ein Start ist abgeschickt und
+abgehakt; was dabei herauskam, meldet der Nachlauf-Flow, und der weckt dich bei Bedarf erneut.
+Startest du über den Skill `freilauf-agents`, ist das der gewöhnliche Start — kein Warten auf
+das Ende des Laufs, kein Nachsehen in Schleife, kein `sleep`, bis etwas fertig ist. Der einzige
+Grund, überhaupt zu warten, ist der Zeitversatz zwischen zwei Starts.
 
 ## Report
 
@@ -145,7 +156,7 @@ anderen der beiden.
   ersten — die starke Bahn hat genau einen Platz.
 - Keinen starken Worker starten, wenn `stark_route` `keine` sagt, auch nicht „nur diesmal".
 - Einen `deferred`-Start nicht wiederholen.
-- Nichts in einen projektweiten Wissensspeicher schreiben.
+- Nicht in `.my-memory/` schreiben.
 
 Deutsche Umlaute echt (ä ö ü ß). Jede Zahl im Report kommt aus einem Kommando, das du gefahren
 hast — behaupte nichts, was du nicht gemessen hast.

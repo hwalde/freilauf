@@ -10,6 +10,7 @@ WAS DAS ANLEGT
     Schwarm-Worker (stark, Fable)        gestartet vom Dispatcher, höchstens einer der beiden
     Schwarm-Worker (stark, Gemini)       gestartet vom Dispatcher, höchstens einer der beiden
     Schwarm-Dispatcher                   geweckt vom Wächter-Takt und vom Nachlauf
+    Schwarm-Aufräumer                    geweckt vom Wächter-Takt, wenn eine Zuweisung hängt
 
   Dazu der PO-Agent aus `konfig.po_agent` — nur AKTUALISIERT, nie neu angelegt.
 
@@ -158,6 +159,12 @@ def worker_prompt(repo: Path, konf: dict, w: dict) -> str:
         "{{AUFGABE_ABSCHLIESSEN}}": r.get("aufgabe_abschliessen", ""),
         "{{AUFGABE_ZURUECKGEBEN}}": r.get("aufgabe_zurueckgeben", ""),
         "{{AUFGABE_NOTIZ}}": r.get("aufgabe_notiz", ""),
+        "{{AUFGABE_FREIGEBEN}}": r.get("aufgabe_freigeben", ""),
+        # Freigabe ohne Karenzzeit. Fehlt sie in der Konfig, ist die gewöhnliche Freigabe die
+        # richtige Fassung: Eine Aufgabenquelle ohne Karenz kennt den Unterschied nicht, und
+        # ein leerer Platzhalter ergäbe im Prompt ein Kommando ohne Kommando.
+        "{{AUFGABE_FREIGEBEN_SOFORT}}": (r.get("aufgabe_freigeben_sofort")
+                                         or r.get("aufgabe_freigeben", "")),
         "{{AUFGABE_NEU}}": r.get("aufgabe_neu", ""),
         "{{GATE}}": r.get("gate", ""),
         "{{ZUSATZ_GATES}}": zusatz,
@@ -225,6 +232,40 @@ def po_prompt(repo: Path, konf: dict, po: dict) -> str:
     return vorlage
 
 
+def aufraeumer_prompt(repo: Path, konf: dict) -> str:
+    """Der Prompt des Aufräum-Agenten — gerendert wie der Worker-Prompt.
+
+    Seine fünf Kommandos stehen im Block `repo` der Konfig, nicht im Prompt: In einem anderen
+    Repo führen andere Wege zu derselben Auskunft, und ein Prompt mit Pfaden dieses Projekts
+    wäre beim Kopieren still falsch.
+    """
+    r = konf.get("repo") or {}
+    stunden = float(konf.get("zuweisung_alt_stunden", 3) or 3)
+    vorlage = (repo / MOTOR / "prompts" / "aufraeumer.md").read_text(encoding="utf-8")
+    ersetzungen = {
+        "{{AUFRAEUMER_NAME}}": konf.get("aufraeumer_name", "Schwarm-Aufräumer"),
+        "{{AUFRAEUMER_MINUTEN}}": str(int(konf.get("aufraeumer_minuten", 30))),
+        "{{ROUTE}}": konf.get("aufraeumer_route", "glm"),
+        "{{REGISTER_BESCHREIBUNG}}": r.get("register_beschreibung", "dem Aufgaben-Register"),
+        "{{AUFGABEN_WORT}}": r.get("aufgaben_wort", "Eintrag"),
+        "{{REGELN_DATEI}}": r.get("regeln_datei", "CLAUDE.md"),
+        "{{ZUWEISUNGEN_ALT_JSON}}": (r.get("zuweisungen_alt_json", "")
+                                     .replace("<stunden>", f"{stunden:g}")),
+        "{{LAUF_ZUSTAND}}": r.get("lauf_zustand", ""),
+        "{{LAUF_BERICHT}}": r.get("lauf_bericht", ""),
+        "{{AUFGABE_ANSEHEN}}": r.get("aufgabe_ansehen", ""),
+        "{{AUFGABE_NOTIZ}}": r.get("aufgabe_notiz", ""),
+        "{{ZUWEISUNG_LOESEN}}": r.get("zuweisung_loesen", ""),
+    }
+    for marke, wert in ersetzungen.items():
+        vorlage = vorlage.replace(marke, str(wert))
+    offen = re.findall(r"\{\{[A-Z_]+\}\}", vorlage)
+    if offen:
+        raise SystemExit("FEHLER: Platzhalter ohne Wert in aufraeumer.md: "
+                         + ", ".join(sorted(set(offen))))
+    return vorlage
+
+
 def worker_minuten(konf: dict, w: dict) -> int:
     """Das Zeitbudget dieses Workers: eigener Wert, sonst der Bahn-Wert, sonst der Standard."""
     if w.get("minuten"):
@@ -236,39 +277,6 @@ def worker_minuten(konf: dict, w: dict) -> int:
 
 # ── Agenten ──────────────────────────────────────────────────────────────────
 
-_ANBIETER_REGEL: dict = {}
-
-
-def anbieter_regel(harness: str) -> dict:
-    """Braucht dieser Coding Agent einen `provider` — und welche darf er?
-
-    Gefragt, nie angenommen: `/api/providers` antwortet aus dem Plugin-Register
-    (`subscription`) und aus dem, was der Betreiber freigeschaltet hat und wofür
-    ein Zugang da ist. Ein Coding Agent, der morgen als Plugin dazukommt, ist
-    damit von derselben Zeile abgedeckt — hier steht kein Anbietername.
-
-    Pflicht ab EINEM Anbieter, nicht erst ab zweien: Ein leeres Feld heißt für
-    den Hub nicht „nimm den einzigen", sondern ist sein Altweg für eine von Hand
-    getippte, vollständige Modell-Kennung. Der Harness startet dann mit nacktem
-    `--model`, ohne Zugangsdaten in der tmux-Sitzung, hermes zusätzlich ohne
-    `--effort`. Der Agent legt sich an, plant, startet — und stirbt am ersten
-    API-Aufruf, bei opencode als `UnknownError: Unexpected server error`, was
-    von einem echten Anbieter-Ausfall nicht zu unterscheiden ist.
-    """
-    if harness not in _ANBIETER_REGEL:
-        try:
-            a = hub_get("/api/providers", harness=harness)
-        except Exception:
-            # Eine Frage, die nicht beantwortet werden konnte, blockiert nichts:
-            # Das Skript legt Agenten an, es urteilt nicht über einen Hub, den es
-            # nicht erreicht hat.
-            return {"ids": [], "pflicht": False}
-        ids = [p["id"] for p in a.get("provider") or []]
-        _ANBIETER_REGEL[harness] = {
-            "ids": ids, "pflicht": not a.get("subscription") and bool(ids)}
-    return _ANBIETER_REGEL[harness]
-
-
 def route_felder(konf: dict, route: str) -> dict:
     r = (konf.get("routen") or {}).get(route)
     if not r:
@@ -279,20 +287,7 @@ def route_felder(konf: dict, route: str) -> dict:
     regler = r.get("modell_regler")
     if regler and konf.get(regler):
         modell = konf[regler]
-    harness = r.get("harness")
-    # Fünf Agenten auf einmal: Eine Route ohne Anbieter legt den Fehler fünffach
-    # an, und zwar als lauffähig aussehende Agenten. Deshalb hier ein Abbruch und
-    # keine Warnung — siehe anbieter_regel().
-    regel = anbieter_regel(harness) if harness else {"ids": [], "pflicht": False}
-    if regel["pflicht"] and not r.get("provider"):
-        raise SystemExit(
-            f"FEHLER: Route {route!r} nennt keinen `provider`, `{harness}` braucht aber einen.\n"
-            f"  Gültig auf dieser Installation: {', '.join(regel['ids'])}\n"
-            f"  Nächster Schritt: `provider` in konfig.routen.{route} eintragen und die"
-            f" Modell-ID dazu prüfen:\n"
-            f"      fl-api /api/models provider=<anbieter> harness={harness}\n"
-            f"  Welcher Anbieter wozu passt, entscheidet der Skill `freilauf-models`.")
-    felder = {"harness": harness, "provider": r.get("provider"),
+    felder = {"harness": r.get("harness"), "provider": r.get("provider"),
               "model": modell, "effort": r.get("effort")}
     for k in ("or_mode", "or_provider", "or_quant"):
         if r.get(k):
@@ -441,6 +436,8 @@ def zeige(konf: dict) -> int:
     vorhanden = agenten_im_hub(konf)
     namen = [w["name"] for w in konf.get("worker_agenten") or []]
     namen.append(konf.get("dispatcher_name", "Schwarm-Dispatcher"))
+    if konf.get("aufraeumer_name"):
+        namen.append(konf["aufraeumer_name"])
     for n in namen:
         a = vorhanden.get(n)
         if a:
@@ -553,6 +550,12 @@ def main(argv=None) -> int:
         print(f"  Dispatcher {'#' + str(disp_alt['id']) if disp_alt else 'neu':<6} "
               f"aktiv={int(disp_aktiv)} cron={konf.get('dispatcher_cron')!r} "
               f"prompt={len(dispatcher_prompt(repo, konf))} Zeichen")
+        if konf.get("aufraeumer_name"):
+            a_alt = vorhanden.get(konf["aufraeumer_name"])
+            print(f"  Aufräumer  {'#' + str(a_alt['id']) if a_alt else 'neu':<6} "
+                  f"aktiv=1 cron='manuell' route={konf.get('aufraeumer_route', 'glm')} "
+                  f"minuten={konf.get('aufraeumer_minuten', 30)} "
+                  f"prompt={len(aufraeumer_prompt(repo, konf))} Zeichen")
         po = konf.get("po_agent") or {}
         if po.get("id"):
             da = any(a["id"] == int(po["id"]) for a in vorhanden.values())
@@ -565,6 +568,12 @@ def main(argv=None) -> int:
                                          "@WORKER_GLM_ID@": 0, "@WORKER_DS_ID@": 0,
                                          "@WORKER_FABLE_ID@": 0, "@WORKER_GEMINI_ID@": 0,
                                          "@PO_AGENT_ID@": 0,
+                                         "@AUFRAEUMER_AGENT_ID@": 0,
+                                         "@AUFRAEUMER_MAX@": konf.get("aufraeumer_max_parallel", 1),
+                                         "@ZUWEISUNG_ALT_STUNDEN@": konf.get(
+                                             "zuweisung_alt_stunden", 3),
+                                         "@ZUWEISUNG_MELDE_STUNDEN@": konf.get(
+                                             "zuweisung_melde_stunden", 3),
                                          "@FLOW_CWD@": str(flow_checkout_pfad(konf, repo_pfad)),
                                          "@BASIS_BRANCH@": basis,
                                          "@MOTOR_ORDNER@": MOTOR,
@@ -607,12 +616,29 @@ def main(argv=None) -> int:
             schluss("einrichten", False)
             return 1
 
+    # 2a) Der Aufräumer — kein Worker: kein Nachlauf-Flow (er startet niemanden), kein Cron
+    #     (der Wächter weckt ihn), und `dispatch.py stopp` fasst ihn nicht an, weil der
+    #     HALT-Marker sein Wecken-Flag schon in `lage` auf 0 zieht.
+    auf_name = konf.get("aufraeumer_name")
+    if auf_name:
+        name, probleme = agent_speichern(konf, vorhanden, auf_name, agent_body(
+            konf, name=auf_name, prompt=aufraeumer_prompt(repo, konf),
+            route=konf.get("aufraeumer_route", "glm"), cron="",
+            minuten=int(konf.get("aufraeumer_minuten", 30)), aktiv=True))
+        if probleme:
+            print(f"FEHLER: Hub lehnte {auf_name!r} ab:", file=sys.stderr)
+            for p in probleme:
+                print(f"  - {p}", file=sys.stderr)
+            schluss("einrichten", False)
+            return 1
+
     # 2b) Der PO-Agent — vorhanden, wird nur aktualisiert. Nie neu angelegt: Seine ID steht in
     #     der Konfig, weil er älter ist als der Schwarm und seine Lauf-Historie behalten soll.
     po_id = po_agent_speichern(repo, konf, vorhanden)
 
     jetzt = agenten_im_hub(konf)
     disp_id = jetzt[disp_name]["id"]
+    auf_id = jetzt[auf_name]["id"] if auf_name and auf_name in jetzt else 0
     worker_ids = {w["schluessel"]: jetzt[w["name"]]["id"] for w in konf.get("worker_agenten") or []}
 
     # 3) Flows — der Nachlauf hängt an beiden Worker-Agenten (Attachment IST der Filter)
@@ -630,6 +656,10 @@ def main(argv=None) -> int:
               "@WORKER_FABLE_ID@": worker_ids.get("fable", 0),
               "@WORKER_GEMINI_ID@": worker_ids.get("gemini", 0)}
     marken["@PO_AGENT_ID@"] = po_id or 0
+    marken["@AUFRAEUMER_AGENT_ID@"] = auf_id
+    marken["@AUFRAEUMER_MAX@"] = int(konf.get("aufraeumer_max_parallel", 1) or 1)
+    marken["@ZUWEISUNG_ALT_STUNDEN@"] = f"{float(konf.get('zuweisung_alt_stunden', 3)):g}"
+    marken["@ZUWEISUNG_MELDE_STUNDEN@"] = f"{float(konf.get('zuweisung_melde_stunden', 3)):g}"
     ko_pfad, ko_ok, ko_meldung = flow_checkout_sicherstellen(konf, repo_pfad, basis)
     marken["@FLOW_CWD@"] = str(ko_pfad)
     marken["@BASIS_BRANCH@"] = basis
@@ -689,6 +719,7 @@ def main(argv=None) -> int:
         {"repo_id": repo_id(konf), "dispatcher_agent_id": disp_id,
          "dispatcher_name": disp_name,
          "po_agent_id": po_id,
+         "aufraeumer_agent_id": auf_id, "aufraeumer_name": auf_name or "",
          "worker": [{"schluessel": w["schluessel"], "name": w["name"],
                      "id": worker_ids[w["schluessel"]], "route": w["route"],
                      "cron": w.get("cron") or "", "stark": bool(w.get("stark")),
@@ -721,11 +752,16 @@ def main(argv=None) -> int:
               f"cron={w.get('cron') or 'manuell (nur der Dispatcher startet ihn)'}")
     print(f"  #{disp_id:<4} {'AN ' if disp_aktiv else 'aus'} {disp_name:<36} "
           f"cron={konf.get('dispatcher_cron')}")
+    if auf_id:
+        print(f"  #{auf_id:<4} AN  {auf_name:<36} "
+              f"cron=manuell (der Wächter weckt ihn, höchstens "
+              f"{konf.get('aufraeumer_max_parallel', 1)} gleichzeitig)")
     print(f"Flows: Nachlauf #{flow_ids['nachlauf_flow_id']} (aktiv, an alle Worker attached) "
           f"· Wächter-Takt #{flow_ids['takt_flow_id']} (aktiv, cron 0 */2 — der einzige Antrieb) "
           f"· PO-Takt #{flow_ids['po_takt_flow_id']} (aktiv, cron 0 4)")
     print(f"IDs geschrieben nach {ids_datei}")
-    schluss("einrichten", True, agenten=len(plan) + 1, dispatcher=disp_id,
+    schluss("einrichten", True, agenten=len(plan) + 1 + (1 if auf_id else 0),
+            aufraeumer=auf_id, dispatcher=disp_id,
             nachlauf=flow_ids["nachlauf_flow_id"], takt=flow_ids["takt_flow_id"],
             po_takt=flow_ids["po_takt_flow_id"])
     return 0

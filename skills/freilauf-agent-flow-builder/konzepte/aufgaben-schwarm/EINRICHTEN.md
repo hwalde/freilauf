@@ -90,7 +90,9 @@ Ist ein Platzhalter stehen geblieben, brechen beide Skripte ab und nennen jeden 
 Schlüssel mit seinem Pfad. Das ist kein Fehler des Skripts, sondern seine Prüfung.
 
 `--dry-run` zeigt außerdem, wie lang die gerenderten Prompts werden und welche Agenten neu
-angelegt würden. Lies mindestens einen gerenderten Worker-Prompt gegen, bevor du scharf fährst:
+angelegt würden. Angelegt werden: die Worker, der Dispatcher und — sofern `aufraeumer_name`
+gesetzt ist — der Aufräum-Agent für hängende Zuweisungen. Der PO-Agent wird nur aktualisiert.
+Lies mindestens einen gerenderten Worker-Prompt gegen, bevor du scharf fährst:
 
 ```
 python - <<'PY'
@@ -121,12 +123,27 @@ Prüfe hier außerdem: Liegt `hub_ids.json` unter `~/agents/schwarm/<projekt-slu
 die Datei eines etwaigen anderen Projekts unverändert daneben? Wurde sie überschrieben, teilen
 sich zwei Schwärme einen Namensraum, und beide Dispatcher lesen fremde Agenten-IDs.
 
+Zwei Werte, die man beim Ausfüllen leicht zu knapp setzt und die teuer sind:
+
+- `worker_minuten`/`stark_minuten` großzügig (Vorgabe 300). Ein zu enges Budget erzeugt
+  Fehlversuche, die nur „hat nicht in den Slice gepasst" bedeuten — und nach drei davon liegt
+  die Aufgabe bei einem Menschen. Zeit ist nie ein Grund für einen Fehlversuch; das steht so
+  auch im Worker-Prompt und braucht das Kommando `aufgabe_freigeben` in der Konfig.
+- Kein Kommando in `repo` darf nur den lokalen Worktree lesen. Die Worker laufen parallel in
+  eigenen Worktrees; wer nur den eigenen sieht, greift nach Arbeit, die ein anderer längst
+  erledigt oder an einen Menschen abgegeben hat.
+- `zuweisungen_alt_json`, `lauf_zustand`, `lauf_bericht` und `zuweisung_loesen` — entweder
+  alle vier oder keines. Fehlen sie, meldet `lage` `zuweisungen_messbar=0`, und eine
+  Zuweisung, deren Lauf verschwunden ist, hält ihre Aufgabe für immer unsichtbar fest.
+
 ## 6. Sichtprüfung im Hub
 
 Im Hub unter „Agenten" beim Repository und unter „Flows":
 
 - Alle Worker stehen auf `schedule_kind = manuell` und tragen den Nachlauf-Flow als Attachment.
 - Der Dispatcher steht auf manuell.
+- Der Aufräumer steht auf manuell, ohne Nachlauf-Attachment (er startet niemanden) —
+  oder du hast `aufraeumer_name` bewusst leer gelassen und es gibt ihn nicht.
 - Der Wächter-Takt ist aktiv und hat den Cron `0 */2 * * *`.
 - Der PO-Takt ist aktiv (oder es gibt ihn bewusst nicht).
 - Modell, Anbieter und Effort jedes Agenten sind die, die du in `routen` eingetragen hast.
@@ -174,6 +191,14 @@ Kommando und seiner Ausgabe, nicht mit einer Vermutung.
 - [ ] Der Motor liegt auf dem Basis-Branch (`git ls-tree <basis> --name-only` findet ihn).
 - [ ] Kein Pfad in einem Flow, Prompt oder Cron zeigt in den Skill-Ordner.
 - [ ] Der Wächter-Flow ist einmal über den `ok`-Zweig gelaufen.
+- [ ] `dispatch.py lage` meldet `zuweisungen_messbar=1` — sonst ist die Aufräum-Leiter
+      still, und eine hängende Zuweisung fällt niemandem auf. Meldet es 0, sagt die
+      Ausgabe von `lage` warum (meist fehlt `zuweisungen_alt_json` in der Konfig).
+- [ ] `dispatch.py aufraeumer` läuft und listet die hängenden Zuweisungen (bei einem
+      gesunden Schwarm: keine). `--vormerken` einmal gefahren und danach in
+      `aufraeum_laeufe.json` nachgesehen, dass der Eintrag steht — das Verzeichnis ist
+      die Regel „je Aufgabe genau ein Aufräum-Lauf", und ohne sie schickt jeder Takt
+      einen weiteren Agenten auf denselben Fall.
 - [ ] Ein Worker hat eine echte Aufgabe bearbeitet und seine Schlusszeile richtig geformt.
 - [ ] Der Nachlauf-Flow ist auf diesem Lauf gelaufen (`fl-api /api/flow-runs/<uuid>`).
 - [ ] Der Not-Halt wirkt: `dispatch.py stopp` ⇒ `lage` meldet 0 Starts und `arbeit_da=0`,

@@ -56,6 +56,18 @@ Melde in diesem Fall niemals `fl-report done` und niemals `erledigt=0` als Erfol
 1. Lesen: `{{AUFGABE_ANSEHEN}}` — der Langtext trägt die Messungen, die Kommandos und die
    Vorgeschichte. Lies ihn ganz.
 
+   Prüfe dabei zuerst die Kopfzeile auf `wartet_auf`. Steht dort ein Wert — `po`, `mensch`,
+   `material`, `ressource`, `korpus` —, dann hat ein anderer Lauf diese Aufgabe bereits an
+   einen Menschen abgegeben, während du sie geholt hast. Dann sofort und ohne Ausnahme:
+   `{{AUFGABE_FREIGEBEN_SOFORT}}`, kein `versuch`, keine Zeile Code, im Report als „bereits im
+   PO-Kanal" nennen, nächste Aufgabe holen. Das ist die Rückgabe ohne Nachwirkung, und nur hier
+   ist sie richtig: Du hast an diesem Eintrag nichts geändert, also wartet auch kein Stand von
+   dir auf einen Merge — eine bleibende Zuweisung hielte hier eine Aufgabe fest, an der niemand
+   gearbeitet hat. Das Hol-Kommando filtert solche Einträge zwar,
+   aber zwischen Holen und Lesen liegt ein Moment — und in genau diesem Moment wurden in der
+   Nacht zum 2026-09-04 dieselben zwei Befunde von drei Läufen nacheinander gezogen und
+   dreimal in den PO-Kanal eskaliert.
+
 2. Population nachmessen, vor jeder Codeänderung. Im Eintrag steht unter „Population" das
    Kommando, mit dem gezählt wurde. Fahre genau dieses Kommando noch einmal und schreib
    Kommando und Ergebnis wörtlich auf.
@@ -82,10 +94,37 @@ Melde in diesem Fall niemals `fl-report done` und niemals `erledigt=0` als Erfol
    `git rm`. Fix und Löschung gehören in denselben Commit. Ein Commit je Aufgabe, die
    Aufgaben-ID steht in der Commit-Nachricht.
 
-7. Wenn der Fix scheitert oder die Richtung unklar bleibt — das ist eingeplant:
+7. Große Aufgaben werden zerlegt, nicht zurückgegeben. Eine Aufgabe, die viel Arbeit macht,
+   Messläufe braucht oder länger rechnet als dein Zeitbudget, ist deswegen kein Fehlversuch.
+   Zerleg sie in Teilschritte, committe jeden fertigen Teilschritt einzeln und halte den
+   Zwischenstand mit `{{AUFGABE_NOTIZ}}` fest, damit der Nächste dort weitermacht, wo du
+   aufgehört hast.
+
+   Läuft dein Zeitbudget wirklich aus: Zwischenstand committen, `{{AUFGABE_NOTIZ}}` schreiben,
+   `{{AUFGABE_FREIGEBEN}}` — und im Report nennen, was noch fehlt. Kein `versuch`.
+
+8. Wenn der Fix scheitert oder die Richtung unklar bleibt — das ist eingeplant:
    `{{AUFGABE_ZURUECKGEBEN}}`, davor eine Notiz mit dem, was du gelernt hast
    (`{{AUFGABE_NOTIZ}}`), damit der Nächste nicht von vorn anfängt. Dann weiter zur nächsten
    Aufgabe. Lass keine halbfertige Änderung im Baum stehen — zurücknehmen oder abschließen.
+
+   Nach der Rückgabe bleibt die Aufgabe dir zugewiesen, und das ist Absicht: Dein
+   Versuchszähler und deine Notiz stehen bis zum Lauf-Ende nur in deinem Worktree und erreichen
+   `origin/main` erst, wenn Freilauf deinen Lauf mergt. Bis dahin bekommt sie kein anderer Lauf
+   angeboten; sobald dein Beleg auf `main` sichtbar ist, ist sie stillschweigend wieder frei.
+   Ohne diese Zuweisung zöge der nächste Worker die Aufgabe im unveränderten Zustand und maße
+   dieselbe Sache noch einmal nach — das ist in der Nacht zum 2026-09-04 mehrfach geschehen.
+   Umgeh die Zuweisung nie: `--trotz-zuweisung` benutzt du nicht. Meldet dir ein Hol- oder
+   Belege-Kommando `result=BESETZT grund=zugewiesen`, ist der Eintrag für dich dasselbe wie ein
+   belegter — du nimmst den nächsten.
+
+   `versuch` protokollierst du ausschließlich, wenn ein inhaltlicher Reparaturweg nachweislich
+   gescheitert ist: Du hast etwas Bestimmtes versucht, kannst sagen was, und es hat messbar
+   nicht funktioniert. Niemals wegen Zeit, niemals wegen fehlender Rechenzeit, niemals weil die
+   Aufgabe groß aussieht — und niemals auf einem Eintrag, der schon ein `wartet_auf` trägt.
+   Der Grund: Beim dritten `versuch` schiebt das Register den Eintrag selbst zu einem Menschen.
+   Ein Fehlversuch, der nur „hat nicht in mein Zeitfenster gepasst" bedeutet, legt einem
+   Menschen eine Frage vor, die keine ist — dreimal in der Nacht zum 2026-09-04 geschehen.
 
    Ein Rückgeben ist kein Verlust, sondern der nächste Schritt einer Leiter: Nach dem zweiten
    Fehlversuch holt ein starker Worker den Eintrag, nach dem dritten stellt ihn das Register
@@ -98,11 +137,14 @@ Melde in diesem Fall niemals `fl-report done` und niemals `erledigt=0` als Erfol
   lassen, zurückgeben und begründen.
 - Niemals „beide Seiten behalten" beim Auflösen eines Merge-Konflikts. Entscheide, welche Seite
   gilt, und begründe es im Commit.
-- Niemals in einen projektweiten Wissensspeicher schreiben. Lesen ist frei.
+- Niemals in `.my-memory/` schreiben. Lesen ist frei.
 - Aufgaben mit gesetztem `wartet_auf` niemals anfassen — sie warten auf einen Menschen, eine
   PO-Entscheidung, Material oder eine Ressource, nicht auf Code. Das Hol-Kommando filtert sie
   bereits heraus; hol dir keine an ihm vorbei.
 - Keinen Schweregrad umlabeln, um eine Aufgabe für dich passend zu machen.
+- Niemals einen `versuch` protokollieren, weil die Zeit knapp war, weil ein Messlauf lange
+  rechnet oder weil die Aufgabe groß wirkt. Und niemals einen `versuch` auf einem Eintrag mit
+  gesetztem `wartet_auf`.
 - Keine fremde Reservierung freigeben, die du nicht selbst genommen hast.
 - `fl-report help` nicht benutzen: Es wartet niemand auf eine Antwort. Bei einem Blocker in
   einer einzelnen Aufgabe: zurückgeben, notieren, im Report nennen, weitermachen. Bei einem
