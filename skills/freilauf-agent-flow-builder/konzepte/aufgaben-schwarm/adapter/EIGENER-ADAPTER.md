@@ -51,7 +51,11 @@ Jedes läuft über bash im Wurzelverzeichnis des Repos und bekommt seine Platzha
 | `aufgabe_holen` | genau eine freie Aufgabe der genannten Schwere holen und atomar reservieren | ja |
 | `aufgabe_ansehen` | eine Aufgabe vollständig zeigen, mit Vorgeschichte und Notizen | ja |
 | `aufgabe_abschliessen` | eine Aufgabe schließen und den Beleg entgegennehmen | ja |
-| `aufgabe_zurueckgeben` | Fehlversuch mit Grund protokollieren und die Reservierung lösen | ja |
+| `aufgabe_zurueckgeben` | Fehlversuch mit Grund protokollieren und die Aufgabe zurückgeben; die Zuweisung bleibt bestehen | ja |
+| `aufgabe_freigeben` | die Reservierung lösen, ohne einen Fehlversuch zu protokollieren | ja |
+| `aufgabe_freigeben_sofort` | zurückgeben OHNE bleibende Zuweisung — für eine Aufgabe, die dieser Lauf gar nicht angefasst hat | nein |
+| `belegungen_aufraeumen` | Reservierungen lösen, deren Lauf es nachweislich nicht mehr gibt | nein |
+| `zuweisungen_alt_json`, `lauf_zustand`, `lauf_bericht`, `zuweisung_loesen` | der Aufräum-Zweig | nein, aber alle vier oder keines |
 | `aufgabe_notiz` | einen Zwischenstand anhängen | ja |
 | `aufgabe_neu` | eine neue Aufgabe anlegen | ja |
 | `belegungen_zeigen` | zeigen, wer was reserviert hält | ja |
@@ -98,6 +102,55 @@ Beispiel für diesen Fall, nicht die Ausnahme von der Regel.
 - Eine hängende Reservierung braucht einen Weg zurück: ein Kommando, das löst, wessen Lauf es
   nicht mehr gibt.
 
+## 4b. Die Zuweisung — die Stelle, die erst nach Wochen wehtut
+
+Atomar reservieren reicht nicht. Die zweite Hälfte des Problems ist zeitversetzt und deshalb
+schwer zu sehen: Ein Worker gibt eine Aufgabe mit Fehlversuch und Notiz zurück, aber wenn deine
+Aufgaben im Repository liegen, steht beides bis zum Lauf-Ende nur in seinem Worktree und
+erreicht den Basis-Branch erst beim Merge — Minuten bis Stunden später. Ist die Aufgabe sofort
+wieder frei, zieht der nächste Worker sie im unveränderten Zustand und misst dieselbe Sache noch
+einmal. Im Ursprungsprojekt traf das 23 Aufgaben in 15 überlappenden Lauf-Paaren; eine davon
+durchlief binnen einer Stunde fünf Läufe und landete beim Menschen, obwohl nur ein
+Richtungs-Entscheid fehlte.
+
+Der Vertrag verlangt deshalb dreierlei — oder das ausdrückliche Eingeständnis, dass es fehlt:
+
+1. **Eine Zuweisung, die die Rückgabe überlebt.** Sie wird bei der Rückgabe nicht gelöscht,
+   sondern wechselt den Zustand: Solange der zuweisende Lauf lebt oder sein Ergebnis noch nicht
+   sichtbar ist, wird die Aufgabe niemandem angeboten.
+2. **Auflösung am nachweisbaren Ergebnis, nicht an einer Uhr.** Ist das Ergebnis des Laufs auf
+   dem Basis-Branch (oder im Ticket-System) sichtbar, ist die Aufgabe sofort und stillschweigend
+   wieder frei. Eine Zuweisung, die nur nach Ablauf einer Frist fällt, gibt die Aufgabe entweder
+   zu früh frei oder hält sie zu lange fest — beides nach Zufall.
+3. **Alte Zuweisungen müssen auffindbar sein** (`zuweisungen_alt_json`), sonst gibt es keinen
+   Weg zurück, wenn ein Lauf mit seiner Zuweisung verschwindet. Dazu die drei Kommandos, mit
+   denen der Aufräum-Agent den Fall klärt: Zustand des Laufs, sein Bericht, und das Lösen einer
+   fremden Zuweisung mit Beleg.
+
+Kannst du das nicht bieten, ist das kein Ausschlusskriterium, aber eine Bringschuld: Schreib in
+die Grenzen deines Adapters, dass zwei Läufe dieselbe Aufgabe NACHEINANDER bearbeiten können,
+und nenne das Zeitfenster als Grund. Prüfe dabei zuerst, ob dein Fenster überhaupt existiert:
+Schreibt dein Werkzeug Fehlversuch und Notiz sofort dorthin, wo alle Läufe sie sehen — ein
+Ticket-System etwa —, gibt es keinen Verzug zwischen Schreiben und Sichtbarwerden, und der ganze
+Abschnitt betrifft dich nicht. Das Fenster entsteht durch den Merge, nicht durch die Rückgabe.
+
+## 4c. „Lebt der Lauf noch?“ hat drei Antworten, nicht zwei
+
+Eine Zuweisung darf sich auflösen, wenn der Lauf, der sie hält, beendet ist. Wer das prüft,
+fragt meist ein anderes System — den Hub, ein Ticketsystem, die Prozessliste. Dieses System
+kann aber auch schweigen: Es ist gerade nicht erreichbar, die Kennung ist ihm unbekannt, die
+Anfrage läuft in eine Zeitüberschreitung.
+
+Behandle dieses Schweigen niemals als „beendet“. Sonst löst eine einzige Störung des
+befragten Systems auf einen Schlag jede Zuweisung, alle Aufgaben werden gleichzeitig wieder
+vergeben, und genau die Doppelarbeit ist zurück, gegen die die Zuweisung gebaut wurde. Der
+Vertrag lautet deshalb: lebt, beendet, unbekannt. Bei unbekannt bleibt die Zuweisung stehen,
+und es entscheidet die Stunden-Decke, nicht eine Vermutung.
+
+Dieser Fehler ist im Ursprungsprojekt am 2026-09-04 gebaut und noch vor dem ersten Schaden
+gefunden worden: Das Prüf-Skript meldete korrekt einen dritten Code für „nicht beantwortet“,
+und die aufrufende Seite warf ihn mit „beendet“ in einen Topf.
+
 ## 5. Prüfen, bevor der erste Agent startet
 
 ```
@@ -111,7 +164,14 @@ Dann diese fünf Gegenproben, jede mit ihrer echten Ausgabe im Test-Log:
 - [ ] Leeres Register: `liste --json` liefert `[]` und `n=0`, Exit 0.
 - [ ] Holen bei leerem Register: Exit 0, `n=0`, keine Reservierung.
 - [ ] Holen zweimal hintereinander: beim zweiten Mal eine andere Aufgabe oder `n=0`, nie dieselbe.
-- [ ] Zurückgeben: Zähler steigt, Reservierung ist gelöst, die Aufgabe taucht wieder in der Liste auf.
+- [ ] Zurückgeben: Zähler steigt, und die Aufgabe wird NICHT sofort wieder angeboten,
+      solange das Ergebnis des Laufs nicht sichtbar ist (führt dein Werkzeug keine
+      nachwirkende Zuweisung, notiere hier stattdessen, dass sie sofort wieder in der
+      Liste steht — und trag die Folge in die Grenzen ein).
+- [ ] Zurückgeben ohne Nachwirkung (`aufgabe_freigeben_sofort`): die Aufgabe steht
+      sofort wieder in der Liste.
+- [ ] Alte Zuweisungen finden: `zuweisungen_alt_json` liefert gültiges JSON mit Aufgaben-
+      und Lauf-Kennung, und `dispatch.py lage` meldet `zuweisungen_messbar=1`.
 - [ ] Abschließen: die Aufgabe verschwindet aus der Liste, der Beleg ist am Eintrag lesbar.
 
 Was du nicht prüfen konntest, schreib als offenen Punkt auf. Ein ungeprüfter Zweig, der als

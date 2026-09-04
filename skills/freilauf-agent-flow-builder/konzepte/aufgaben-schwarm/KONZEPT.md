@@ -29,8 +29,9 @@ viele Aufgaben in diesem Repository offen sind.
 | Worker (stark, Abo-Route) | Agent | manuell | blockiert oder zweimal gescheitert; genau ein Fall |
 | Worker (stark, Ausweich-Route) | Agent | manuell | dasselbe, wenn die Abo-Quote nicht reicht |
 | Dispatcher | Agent | manuell | zählt, prüft Guthaben und Quote, startet die Worker mit Zeitversatz |
+| Aufräumer | Agent | manuell | klärt hängende Zuweisungen verschwundener Läufe; repariert nichts |
 | PO-Agent (optional) | Agent | manuell | trägt die offenen Fragen einem Menschen vor und arbeitet die Antwort ein |
-| Wächter-Takt | Flow, cron `0 */2` | alle zwei Stunden | zählt per Shell, weckt den Dispatcher nur bei Arbeit; ohne LLM |
+| Wächter-Takt | Flow, cron `0 */2` | alle zwei Stunden | zählt per Shell, weckt den Dispatcher nur bei Arbeit, den Aufräumer nur bei einer hängenden Zuweisung, und meldet einen Menschen, wenn auch der nichts half; ohne LLM |
 | PO-Takt | Flow, cron `0 4` | täglich | weckt den PO-Agenten nur, wenn eine Frage offen ist |
 | Nachlauf | Flow, `run_finished` | nach jedem Worker | liest den Report per `extract`, weckt den Dispatcher bei Fortschritt |
 | `dispatch.py lage` | Skript | vom Flow und vom Dispatcher gerufen | die einzige Rechenstelle: zählen, staffeln, deckeln |
@@ -55,6 +56,63 @@ Jede Zeile endet in „geschlossen" oder in der nächsten Zeile. Es gibt keinen 
 heraus nichts mehr geschieht — außer „Mensch", und der trägt seinen Grund mit sich. Ohne diese
 Eigenschaft wäre der Schwarm eine Maschine, die sich die leichten Fälle heraussucht und den Rest
 still liegen lässt.
+
+## Die Zuweisung — warum eine Rückgabe nicht sofort frei ist
+
+Die Reservierung beim Holen ist die eine Hälfte; sie verhindert, dass zwei Läufe im selben
+Augenblick nach derselben Aufgabe greifen. Die andere Hälfte ist schwerer zu sehen, weil sie
+zeitversetzt zuschlägt: Ein Worker gibt eine Aufgabe mit Fehlversuch und Notiz zurück, aber
+beides steht bis zum Lauf-Ende nur in seinem Worktree und erreicht den Basis-Branch erst beim
+Merge — Minuten bis Stunden später. Wäre die Aufgabe sofort wieder frei, zöge sie der nächste
+Worker im unveränderten Zustand und maße dieselbe Sache noch einmal nach. Im Ursprungsprojekt
+wurden so 23 Aufgaben von mindestens zwei Läufen angefasst, in 15 überlappenden Lauf-Paaren,
+davon 7 mit weniger als vier Minuten Startabstand; eine davon durchlief binnen einer Stunde fünf
+Läufe und landete beim Menschen, obwohl nur ein Richtungs-Entscheid fehlte.
+
+Deshalb ist eine Zuweisung kein Schloss, das man auf- und zumacht, sondern ein Zustand:
+
+- Sie entsteht beim Holen und wird bei der Rückgabe nicht gelöscht.
+- Solange der zuweisende Lauf lebt oder sein Ergebnis noch nicht auf dem Basis-Branch sichtbar
+  ist, wird die Aufgabe niemandem angeboten.
+- Ist das Ergebnis sichtbar, ist sie sofort und stillschweigend wieder frei. Niemand muss etwas
+  aufräumen, wenn alles gutgeht.
+- Was ein Lauf gar nicht angefasst hat — geholt, dann einen gesetzten Wartestatus gesehen —,
+  geht ohne Nachwirkung zurück. Eine Zuweisung hielte hier eine Aufgabe fest, an der niemand
+  gearbeitet hat.
+
+## Wenn ein Lauf mit seiner Zuweisung verschwindet
+
+Der Preis dieser Bauform ist ein neuer Fehlerfall: Stürzt der Lauf ab oder kommt sein Ergebnis
+nie an, überlebt die Zuweisung ihn. Die Aufgabe ist dann nicht erledigt, sondern unsichtbar —
+sie wird niemandem mehr angeboten, und niemand merkt es. Dagegen eine Leiter mit genau zwei
+Sprossen und einem Verzeichnis:
+
+1. Ab `zuweisung_alt_stunden` gilt die Zuweisung als hängend, und der Wächter-Flow weckt GENAU
+   EINMAL den Aufräum-Agenten dafür. Er prüft je Eintrag, was aus dem Lauf wurde: Lebt er noch,
+   bleibt die Zuweisung unangetastet. Ist sein Ergebnis angekommen, ist ohnehin nichts zu tun.
+   Ist es verloren, hält er in einer Notiz an der Aufgabe fest, was der Vorgänger gemessen
+   hatte — damit es nicht doppelt gemessen wird — und löst die Zuweisung mit Beleg.
+2. Hängt sie `zuweisung_melde_stunden` später immer noch, wird kein zweiter Agent geschickt,
+   sondern per `notify` ein Mensch benachrichtigt: Aufgaben-Kennung, Lauf-Kennung, Alter und der
+   Hinweis, dass der Aufräum-Lauf bereits erfolglos war. Einmal, danach ist Ruhe.
+
+Das Verzeichnis `aufraeum_laeufe.json` im Zustandsordner hält fest, wofür schon ein Aufräum-Lauf
+startete und was gemeldet wurde. Es ist nicht Buchhaltung, sondern die Regel selbst: Ohne es
+schickt jeder Takt einen weiteren Agenten auf dieselbe Zuweisung, und aus einem Ausfall wird
+eine Dauerbestellung.
+
+### Die Entwurfsregel dahinter
+
+Eine Sorge, die selten auftritt, eigene Werkzeuge braucht und eigenes Urteil verlangt, bekommt
+einen eigenen Agenten, statt in den Prompt aller anderen eingebaut zu werden. Der Aufräum-Fall
+trifft einen Worker in fast keinem Lauf; eine Regel dafür in seinem Prompt konkurriert trotzdem
+in jedem Lauf mit seiner eigentlichen Arbeit, und im seltenen Ernstfall hätte er sie nach einer
+halben Stunde an der eigenen Aufgabe halb vergessen. Der Aufräumer dagegen hat nur diese eine
+Frage und die passenden Kommandos griffbereit, läuft selten und darf gründlich sein. Die
+Größenordnung, gegen die jede Sonderregel anschreibt: Der Worker-Prompt dieser Vorlage misst
+10 490 Zeichen (`wc -m vorlage/prompts/worker.md`) und kommt gerendert im Ursprungsprojekt auf
+12 757 (`freilauf_einrichten.py --dry-run`, Spalte `prompt=`) — jede Zeile darin fällt allen
+Läufen zur Last, nicht nur dem einen, für den sie gedacht ist.
 
 ## Skalierung, Quote, Budget
 
@@ -97,6 +155,25 @@ grün meldet und nichts tut, ist der teuerste Fehler dieses Systems.
 - Modelle und Routen, die es auf dieser Installation wirklich gibt: `fl-api /api/models provider=<anbieter>` und
   `fl-api /api/favorites`. Eine erfundene Modell-ID meldet opencode als „Unexpected server
   error" — von einem Anbieter-Ausfall nicht zu unterscheiden.
+
+## Vier Regeln, die aus dem ersten Dauerbetrieb stammen
+
+- **Zeit ist kein Fehlversuch.** Der Versuchszähler ist die Leiter zum Menschen; er darf nur
+  steigen, wenn ein inhaltlicher Reparaturweg nachweislich gescheitert ist. Sonst füllt sich
+  der Kanal zum Menschen mit Aufgaben, die niemand entscheiden muss — sie waren nur zu groß
+  für ein Zeitfenster. Große Arbeit wird zerlegt und in Teilschritten committet.
+- **Jeder Worker muss den Stand aller anderen sehen.** Die Aufgaben-Kommandos lesen den
+  Basis-Branch mit, nicht nur den eigenen Worktree. Keine Option, die allein den eigenen
+  Arbeitsbereich liest, gehört in die Hol-Kommandos. Sonst zieht ein Lauf, was ein anderer
+  gerade abgeschlossen oder an einen Menschen abgegeben hat — gemessen: dieselbe Aufgabe
+  dreimal hintereinander eskaliert.
+- **Ein Eintrag mit gesetztem Wartestatus wird sofort zurückgegeben**, ohne Fehlversuch
+  und ohne bleibende Zuweisung. Zwischen Holen und Lesen liegt ein Moment, und in genau
+  diesem Moment kann ein anderer Lauf die Aufgabe an einen Menschen abgegeben haben.
+- **Der Zustand liegt je Projekt getrennt** (`~/agents/schwarm/<projekt-slug>/`). Ein
+  globaler Ordner trägt genau so lange, wie auf einer Maschine nur ein Schwarm läuft:
+  Der zweite überschreibt die Agenten-IDs des ersten, und dessen Dispatcher startet
+  danach fremde Agenten.
 
 ## Grenzen
 

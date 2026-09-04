@@ -2,7 +2,7 @@
   "_lies_mich": "Vorlage der Schwarm-Konfig. Kopiere sie im Zielrepo nach <motor-ordner>/konfig.json und ersetze jeden Wert, der mit '<AUSFÜLLEN' beginnt. Solange einer davon steht, brechen dispatch.py und freilauf_einrichten.py mit einer Liste der offenen Schlüssel ab, statt mit Platzhaltern zu arbeiten. Schlüssel, die mit '_' beginnen, sind Erklärungen und werden nie geprüft und nie gelesen. Der Block 'repo' ist der Adapter auf das Aufgaben-Register des Zielrepos — alles Repo-Spezifische steht dort und nirgendwo sonst. Fertige Kommandozeilen liefern die Adapter-Beschreibungen im Konzept-Ordner (adapter/befund-register.md, adapter/github-issues/ADAPTER.md, adapter/EIGENER-ADAPTER.md).",
 
   "_motor_version_hinweis": "Fassung des Motors (dispatch.py, freilauf_einrichten.py, prompts/, flows/), aus der diese Kopie stammt. Nicht ändern beim Einrichten — die Zahl sagt später, gegen welche Vorlagen-Fassung zu diffen ist (siehe AKTUALISIEREN.md).",
-  "motor_version": "1.1.0",
+  "motor_version": "1.3.0",
 
   "_repo_hinweis": "Der Adapter-Block. Jedes Kommando läuft über bash im Wurzelverzeichnis des Repos. Die Platzhalter <id>, <schwere>, <n> und $FL_RUN_ID bleiben in den Kommandos stehen; der Motor bzw. der Worker füllt sie.",
   "repo": {
@@ -46,17 +46,30 @@
     "_aufgabe_abschliessen": "Schließt eine erledigte Aufgabe und nimmt den Beleg entgegen (das gefahrene Kommando samt Ergebnis).",
     "aufgabe_abschliessen": "<AUSFÜLLEN: Kommando zum Abschließen, mit <id> und einem Beleg-Text>",
 
-    "_aufgabe_zurueckgeben": "Protokolliert einen Fehlversuch mit Grund und gibt die Reservierung wieder frei. Zwei Kommandos dürfen mit && verkettet werden.",
-    "aufgabe_zurueckgeben": "<AUSFÜLLEN: Kommando(s) für Fehlversuch protokollieren und freigeben, mit <id>>",
+    "_aufgabe_zurueckgeben": "Protokolliert einen Fehlversuch mit Grund und gibt die Aufgabe zurück. Zwei Kommandos dürfen mit && verkettet werden. Die Zuweisung überlebt das: Versuchszähler und Notiz dieses Laufs erreichen den Basis-Branch erst am Lauf-Ende, und bis dahin würde ein zweiter Lauf dieselbe Sache noch einmal messen.",
+    "aufgabe_zurueckgeben": "<AUSFÜLLEN: Kommando(s) für Fehlversuch protokollieren und zurückgeben, mit <id>>",
 
     "_aufgabe_notiz": "Hängt einen Zwischenstand an eine Aufgabe an.",
     "aufgabe_notiz": "<AUSFÜLLEN: Kommando für eine Notiz, mit <id> und Text>",
+    "aufgabe_freigeben": "<AUSFÜLLEN: Kommando, das die Reservierung von <id> löst, ohne einen Fehlversuch zu protokollieren>",
+
+    "_aufgabe_freigeben_sofort": "Rückgabe OHNE bleibende Zuweisung — nur für den Fall, dass dieser Lauf die Aufgabe gar nicht angefasst hat: Er hat sie geholt und danach einen gesetzten Wartestatus gesehen. Eine bleibende Zuweisung hielte hier eine Aufgabe fest, an der niemand gearbeitet hat. Leer lassen, wenn deine Aufgabenquelle keine nachwirkende Zuweisung führt — dann rendert der Prompt aufgabe_freigeben.",
+    "aufgabe_freigeben_sofort": "",
 
     "_aufgabe_neu": "Legt eine neue Aufgabe an — der Worker braucht es, wenn ihm außerhalb seines Auftrags etwas auffällt.",
     "aufgabe_neu": "<AUSFÜLLEN: Kommando, das eine neue Aufgabe anlegt>",
 
     "_belegungen_zeigen": "Zeigt, wer welche Aufgabe reserviert hält. Steht in den Meldetexten des Nachlauf-Flows.",
     "belegungen_zeigen": "<AUSFÜLLEN: Kommando, das die Reservierungen zeigt>",
+
+    "_belegungen_aufraeumen": "Best-effort-Aufräumen VOR dem Zählen, gefahren von dispatch.py lage. Eine hängende Reservierung eines toten Laufs blendet ihre Aufgabe aus der Zählung aus; arbeit_da liest dann 0, und der Wächter meldet einen ruhigen Tag statt eines Ausfalls. Der Dispatcher könnte das nicht heilen — er wird bei arbeit_da=0 gar nicht erst geweckt. Ein Fehlschlag ist folgenlos: lage zählt trotzdem und nennt ihn als Hinweis. Leer lassen, wenn deine Aufgabenquelle keinen solchen Befehl hat. Kann dein Werkzeug einen Haken „lebt dieser Lauf noch?\" annehmen (Exit 0 = ja), setz ihn hier als Umgebungsvariable vor das Kommando und zeig auf lauf_lebt.py daneben — sonst muss das Werkzeug am gröberen Worktree-Test raten. NUR hier, nicht an jedem Register-Aufruf: Bei einem Hub-Ausfall meldet der Haken einen Fehler, und ein Werkzeug wertet das womöglich als „beendet\".",
+    "belegungen_aufraeumen": "",
+
+    "_aufraeumer_kommandos": "Die vier Kommandos des Aufräum-Agenten — für den Fall, dass ein Lauf mit seiner Zuweisung verschwindet (abgestürzt, oder sein Ergebnis kam nie auf den Basis-Branch). <stunden> füllt zuweisung_alt_stunden, <lauf> die Lauf-Kennung aus der Zuweisung, <id> die Aufgaben-Kennung. Fehlt zuweisungen_alt_json, meldet lage zuweisungen_messbar=0, und die Aufräum-Leiter bleibt still; der Rest des Schwarms läuft unverändert. Entweder alle vier oder keines.",
+    "zuweisungen_alt_json": "",
+    "lauf_zustand": "fl-api /api/runs/<lauf>",
+    "lauf_bericht": "cat ~/agents/runs/<lauf>/report.md",
+    "zuweisung_loesen": "",
 
     "_po_hinweis": "Die fünf Kommandos des PO-Agenten. Fehlt po_liste_json, meldet lage po_offen=-1 und po_da=0 — der PO-Takt schweigt dann, statt täglich ins Leere zu starten. Ohne PO-Agenten alle fünf leer lassen und po_agent.id auf null.",
     "po_liste_json": "",
@@ -84,6 +97,16 @@
     "doku_pflicht_subagent": ""
   },
 
+  "_aufraeumer_hinweis": "Der Aufräum-Agent — für den einen Fall, den kein Worker sieht: Ein Lauf hat sich eine Aufgabe zuweisen lassen und ist dann abgestürzt oder konnte nicht mergen. Seine Zuweisung überlebt ihn, und niemand bekommt die Aufgabe mehr angeboten. Er läuft manuell, geweckt vom Wächter-Flow, und höchstens einer gleichzeitig; er repariert nichts und ändert keine Gates. Namen leer lassen, wenn du ihn nicht willst — dann wird er nicht angelegt und die Aufräum-Leiter bleibt still. Warum ein eigener Agent und keine Regel im Worker-Prompt: die Entwurfsregel in KONZEPT.md.",
+  "aufraeumer_name": "Schwarm-Aufräumer",
+  "aufraeumer_route": "glm",
+  "aufraeumer_minuten": 30,
+  "aufraeumer_max_parallel": 1,
+
+  "_zuweisung_stunden_hinweis": "Die zwei Schwellen der Aufräum-Leiter, in Stunden. zuweisung_alt_stunden: Ab diesem Alter gilt eine Zuweisung als hängend und der Aufräumer wird GENAU EINMAL dafür losgeschickt (vorgemerkt in aufraeum_laeufe.json im Zustandsordner). zuweisung_melde_stunden: So lange danach darf sie noch stehen; hängt sie dann immer noch, wird kein zweiter Agent geschickt, sondern ein Mensch benachrichtigt — einmal, danach ist Ruhe. Beide Zahlen sind Schätzungen, keine Messungen: Sie sollen länger sein als ein gewöhnlicher Worker-Lauf plus Merge und kürzer als ein Arbeitstag.",
+  "zuweisung_alt_stunden": 3,
+  "zuweisung_melde_stunden": 3,
+
   "_po_agent_hinweis": "Der Agent, der die Fragen mit der Marke 'wartet auf PO' einem Menschen vorträgt. Er wird nur AKTUALISIERT, nie neu angelegt: Trag die Hub-ID eines bestehenden Agenten ein (fl-api /api/agents), oder lass id auf null — dann bleibt der PO-Zweig aus, und der PO-Takt-Flow läuft ins Leere, ohne etwas zu starten. Sein Cron bleibt leer: geweckt wird er vom Flow 'Schwarm-PO-Takt', und nur wenn po_offen > 0.",
   "po_agent": {
     "id": null,
@@ -94,7 +117,7 @@
     "prompt_datei": "po-praesentation.md"
   },
 
-  "_worker_hinweis": "Vier Worker-Agenten in zwei Bahnen. Keiner hat einen eigenen Cron (leeres cron ⇒ schedule_kind manuell): Der einzige Takt ist der Wächter-Flow, und er weckt nur den Dispatcher; die Worker startet allein der Dispatcher. So kostet ein Tag ohne offene Aufgaben null Agenten-Läufe. Bahn 1 (schluessel glm/ds) ist die gewöhnliche Arbeit, skaliert über die Zahl der Starts desselben Agenten. Bahn 2 (stark: true) sind die zwei starken Worker für blockierte und schon gescheiterte Aufgaben; höchstens einer davon läuft gleichzeitig. Die Schlüssel glm, ds, fable und gemini sind Namen von Steckplätzen, keine Modellnamen — die Flow-Vorlagen adressieren die Worker darüber. Braucht dein Projekt nur eine Bahn, lösche die beiden starken Einträge und setz stark_max_parallel auf 0.",
+  "_worker_hinweis": "Vier Worker-Agenten in zwei Bahnen. Keiner hat einen eigenen Cron (leeres cron ⇒ schedule_kind manuell): Der einzige Takt ist der Wächter-Flow, und er weckt nur den Dispatcher; die Worker startet allein der Dispatcher. So kostet ein Tag ohne offene Aufgaben null Agenten-Läufe. Bahn 1 (Feld `schluessel`: glm/ds) ist die gewöhnliche Arbeit, skaliert über die Zahl der Starts desselben Agenten. Bahn 2 (stark: true) sind die zwei starken Worker für blockierte und schon gescheiterte Aufgaben; höchstens einer davon läuft gleichzeitig. Die Schlüssel glm, ds, fable und gemini sind Namen von Steckplätzen, keine Modellnamen — die Flow-Vorlagen adressieren die Worker darüber. Braucht dein Projekt nur eine Bahn, lösche die beiden starken Einträge und setz stark_max_parallel auf 0.",
   "worker_agenten": [
     { "schluessel": "glm", "name": "Schwarm-Worker (GLM)", "route": "glm",
       "cron": "", "schweregrade": ["trivial", "normal"], "start_aktiv": true },
@@ -102,10 +125,10 @@
       "cron": "", "schweregrade": ["trivial"], "start_aktiv": true },
     { "schluessel": "fable", "name": "Schwarm-Worker (stark, Fable)", "route": "fable",
       "cron": "", "schweregrade": ["blockiert", "normal"], "start_aktiv": true,
-      "stark": true, "minuten": 60 },
+      "stark": true, "minuten": 300 },
     { "schluessel": "gemini", "name": "Schwarm-Worker (stark, Gemini)", "route": "gemini",
       "cron": "", "schweregrade": ["blockiert", "normal"], "start_aktiv": true,
-      "stark": true, "minuten": 60 }
+      "stark": true, "minuten": 300 }
   ],
 
   "_abgeloeste_hinweis": "Namen von Agenten und Flows, die eine frühere Fassung dieses Schwarms angelegt hat. freilauf_einrichten.py löscht die Flows und meldet die Agenten (--aufraeumen löscht sie). Beim Einrichten in einem neuen Repo bleiben beide Listen leer.",
@@ -123,7 +146,8 @@
 
   "_paket_hinweis": "Wie viele Aufgaben ein Worker sich je Schweregrad selbst nimmt. Die starke Bahn nimmt immer genau eine, egal was hier steht.",
   "paketgroesse": { "trivial": 4, "normal": 2, "blockiert": 1 },
-  "worker_minuten": 45,
+  "_zeitbudget_hinweis": "Großzügig ansetzen. Gemessen im Ursprungsprojekt: Mit 45 Minuten gaben Worker Aufgaben zurück, WEIL sie nicht in den Slice passten — ein Fehlversuch, der nur „zu kurz\" bedeutet, und beim dritten davon schiebt das Register den Eintrag zu einem Menschen. Die Zahl allein reicht nicht; die Regel steht im Worker-Prompt: Zeit ist nie ein Grund für einen Fehlversuch.",
+  "worker_minuten": 300,
   "dispatcher_minuten": 15,
 
   "_tages_budget_hinweis": "Was der Schwarm an einem Kalendertag (UTC) an echtem API-Geld ausgeben darf, summiert aus cost_usd seiner Läufe. Ab der Grenze steht die Tages-Ampel auf gelb: die gewöhnliche Bahn läuft weiter, die starke fällt aus. Ab dem Doppelten steht sie auf rot: gar keine Starts. Ein Abo-Lauf meldet kein cost_usd — sein Preis ist der Anteil an der Wochenquote, und deren Deckel ist fable_7d_max. budgets sind die Guthaben-Schwellen je Anbieter; setz sie über Freilaufs eigenes Budget-Gate, damit die Ampel vorher rot wird.",
@@ -137,7 +161,7 @@
   "fable_7d_max": 80,
   "claude_5h_max": 90,
   "stark_max_parallel": 1,
-  "stark_minuten": 60,
+  "stark_minuten": 300,
   "stark_min_versuche": 2,
   "_versuchs_deckel_hinweis": "Ab wie vielen Fehlversuchen eine Aufgabe an einen Menschen geht. Der Wert MUSS zu dem passen, was das Aufgaben-Werkzeug selbst tut — es setzt beim Erreichen dieser Zahl die Marke für den Menschen. Die starke Bahn zählt EINSCHLIESSLICH dieses Werts: Eine wieder freigegebene Aufgabe behält ihren Zähler, und wer sie herauszählt, lässt sie für immer liegen.",
   "versuchs_deckel": 3,

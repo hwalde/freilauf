@@ -17,6 +17,12 @@ WAS DAS IST — UND WAS NICHT
   Not-Halt (`stopp`/`weiter`): Der HALT-Marker setzt in `lage` alle Startzahlen auf 0 und
   wirkt damit auf jeden Weg — Wächter, Nachlauf und Dispatcher gleichermaßen.
 
+  `lage` räumt vor dem Zählen hängende Reservierungen toter Läufe auf, sofern
+  `konfig.repo.belegungen_aufraeumen` gesetzt ist. Das ist die einzige Stelle, die in jedem
+  Takt läuft: Eine hängende Reservierung blendet ihre Aufgabe aus der Zählung aus, `arbeit_da`
+  liest 0, und der Dispatcher, der es heilen könnte, wird gar nicht erst geweckt. Scheitert
+  das Aufräumen, wird trotzdem gezählt und der Grund als Hinweis mitgeführt.
+
   Wie gezählt und wie eine Aufgabe geholt/geschlossen wird, steht NICHT in diesem Skript,
   sondern im Block `repo` der Konfig — dem Adapter auf das Aufgaben-Register des Repos.
   Deshalb lässt sich dieser Ordner in jedes Repository kopieren (siehe die index.md daneben).
@@ -25,13 +31,17 @@ WAS DAS IST — UND WAS NICHT
 AUFRUF
   python schwarm/dispatch.py <befehl> [--help]
 
-  lage      Was offen ist, wer läuft, wie das Guthaben steht, wie viele Starts jetzt fällig sind
-  stopp     Not-Halt: Worker-Agenten aus · weiter  Halt aufheben und wieder einschalten
-  journal   Was der Schwarm bisher getan hat
+  lage       Was offen ist, wer läuft, wie das Guthaben steht, wie viele Starts jetzt fällig sind
+  aufraeumer Hängende Zuweisungen: wer einen Aufräum-Lauf bekommt   # umlaut-lint: ok (Bezeichner)
+             und wer einen Menschen
+  stopp      Not-Halt: Worker-Agenten aus · weiter  Halt aufheben und wieder einschalten
+  journal    Was der Schwarm bisher getan hat
 
 BEISPIELE
   python schwarm/dispatch.py lage
   python schwarm/dispatch.py lage --json
+  python schwarm/dispatch.py aufraeumer            # umlaut-lint: ok (ASCII-Unterbefehl)
+  python schwarm/dispatch.py aufraeumer --vormerken   # umlaut-lint: ok (ASCII-Unterbefehl)
   python schwarm/dispatch.py stopp
   python schwarm/dispatch.py weiter
   python schwarm/dispatch.py journal --letzte 20
@@ -49,12 +59,25 @@ SCHLUSSZEILE (byte-stabil, für Flows und Skripte)
                fable_7d_prozent=…|unbekannt fable_7d_alter_s=…|unbekannt
                kosten_heute_usd=… tages_ampel=gruen|gelb|rot
                budget_ampel=gruen|gelb|rot|unbekannt laufend=… laufend_stark=…
-               laufend_dispatcher=… halt=0|1
+               laufend_dispatcher=… laufend_aufraeumer=…
+               zuweisungen_alt=… zuweisungen_ohne_lauf=… zuweisungen_meldereif=…
+               zuweisungen_messbar=0|1 aufraeumer_da=0|1 melden_da=0|1 halt=0|1
+
+  SCHWARM_AUFRAEUMER result=OK alt=… offen=… wartend=… meldereif=… vorgemerkt=…
+                     gemeldet=… ids=<a,b>|- melde_ids=<c>|-
 
   `arbeit_da` und `po_da` sind die zwei Flags, auf die die Cron-Flows ihre Bedingung legen.
   Sie sagen „wecken lohnt sich", nicht „es gibt Aufgaben": HALT zieht beide auf 0, eine rote
   Tages-Ampel zusätzlich `arbeit_da`, und `po_da` bleibt 0, solange `po_offen` -1 ist (die
   Zählung war nicht möglich — das ist kein Grund für einen Vortrag).
+
+  `aufraeumer_da` und `melden_da` sind die zwei Flags der Aufräum-Leiter. Eine Zuweisung
+  überlebt die Rückgabe des Laufs und löst sich erst, wenn dessen Beleg auf origin/main
+  sichtbar ist. Stirbt der Lauf davor, hängt sie: Ab `zuweisung_alt_stunden` bekommt sie
+  GENAU EINEN Aufräum-Lauf (vorgemerkt in `aufraeum_laeufe.json`), und hängt sie
+  `zuweisung_melde_stunden` später immer noch, EINE Meldung an einen Menschen. Danach ist
+  Ruhe. Ist die Zählung nicht möglich (`zuweisungen_messbar=0`), sind beide Flags 0: Eine
+  Messung, die nicht gelang, weckt niemanden.
 
   `worker_starts_soll` ist bereits gedeckelt: Staffel minus der schon laufenden gewöhnlichen
   Schwarm-Läufe, begrenzt durch `max_worker`. Wer diese Zahl startet, kann den Schwarm nicht
@@ -76,6 +99,9 @@ ZUSTAND AUSSERHALB VON GIT
   ~/agents/schwarm/ (überschreibbar per SCHWARM_STATE_DIR):
     journal.jsonl   eine Zeile je Halt-Schaltung · hub_ids.json  Agent- und Flow-IDs
     HALT            solange die Datei existiert, meldet `lage` 0 Starts
+    aufraeum_laeufe.json  je Aufgaben-Kennung: wann ein Aufräum-Lauf startete und wann
+                    gemeldet wurde. Ohne dieses Verzeichnis schickt jeder Takt einen
+                    weiteren Agenten auf dieselbe hängende Zuweisung.
 """
 
 from __future__ import annotations
@@ -354,6 +380,143 @@ def aufgaben(repo: Path, konf: dict) -> list:
                                 naechster_schritt=f"Von Hand fahren: {kommando}", code=3))
 
 
+def reservierungen_aufraeumen(repo: Path, konf: dict) -> dict:
+    """Hängende Reservierungen toter Läufe lösen, BEVOR gezählt wird — best effort.
+
+    Warum vor dem Zählen und warum hier: Eine Reservierung, deren Lauf es nicht mehr gibt,
+    blendet ihre Aufgabe aus `aufgaben_liste_json` aus. `arbeit_da` liest dann 0, der
+    Wächter schreibt seine Leerlauf-Notiz, und der Schwarm sieht aus wie an einem ruhigen
+    Tag. Der Dispatcher könnte das nicht heilen — er wird bei `arbeit_da=0` gar nicht erst
+    geweckt. Die einzige Stelle, die in JEDEM Takt läuft, ist diese.
+
+    Ein Fehlschlag ist folgenlos: `lage` zählt danach trotzdem und trägt den Grund als
+    Hinweis mit. Ein Aufräumen, das den Wächter blind machen kann, wäre schlimmer als das
+    Problem, gegen das es hilft.
+    """
+    kommando = (konf.get("repo") or {}).get("belegungen_aufraeumen")
+    if not kommando:
+        return {"gelaufen": False, "grund": "kein Aufräum-Kommando konfiguriert"}
+    try:
+        p = subprocess.run([bash_exe(), "-lc", kommando], cwd=str(repo), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"gelaufen": False, "grund": f"Aufräum-Kommando nicht ausführbar ({e})"}
+    if p.returncode != 0:
+        return {"gelaufen": False,
+                "grund": f"Aufräum-Kommando endete mit Exit {p.returncode}: "
+                         f"{(p.stderr or p.stdout).strip()[:200]}"}
+    # Die Schlusszeile des Werkzeugs ist die aussagekräftigste Zeile seiner Ausgabe.
+    letzte = ((p.stdout or "").strip().splitlines() or ["ohne Ausgabe"])[-1]
+    return {"gelaufen": True, "grund": letzte}
+
+
+# ── Hängende Zuweisungen: die Aufräum-Leiter ─────────────────────────────────
+# Eine Zuweisung überlebt die Rückgabe und verschwindet erst, wenn der Beleg des zugewiesenen
+# Laufs auf origin/main sichtbar ist. Stirbt der Lauf davor, bleibt sie stehen und die Aufgabe
+# wird niemandem mehr angeboten. Dagegen die Leiter: EINMAL ein Aufräum-Agent, danach ein
+# Mensch. Wofür schon ein Aufräum-Lauf startete, steht im Verzeichnis unten — ohne das schickt
+# jeder Takt einen weiteren Agenten auf dieselbe Zuweisung, und das ist die teuerste Form von
+# Beharrlichkeit.
+
+def aufraeum_ledger_pfad() -> Path:
+    return state_dir() / "aufraeum_laeufe.json"
+
+
+def aufraeum_ledger_lesen() -> dict:
+    p = aufraeum_ledger_pfad()
+    if not p.is_file():
+        return {}
+    try:
+        daten = json.loads(p.read_text(encoding="utf-8"))
+        return daten if isinstance(daten, dict) else {}
+    except (ValueError, OSError):
+        return {}
+
+
+def aufraeum_ledger_schreiben(daten: dict) -> None:
+    ziel = aufraeum_ledger_pfad()
+    tmp = ziel.with_suffix(".tmp")
+    tmp.write_text(json.dumps(daten, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, ziel)
+
+
+def zuweisungen_alt(repo: Path, konf: dict) -> dict:
+    """Die Zuweisungen, die älter sind als `zuweisung_alt_stunden`.
+
+    Kein Fehlschlag, wenn das Kommando fehlt oder scheitert — `ok: False` und eine leere
+    Liste. Eine Messung, die nicht gelang, darf keinen Agenten wecken und keinen Menschen
+    anpiepen: Beides wäre ein Vortrag über eine Zahl, die es nicht gibt.
+    """
+    kommando = (konf.get("repo") or {}).get("zuweisungen_alt_json")
+    stunden = float(konf.get("zuweisung_alt_stunden", 3) or 3)
+    erg = {"ok": False, "liste": [], "grund": "", "stunden": stunden}
+    if not kommando:
+        erg["grund"] = "kein Kommando für alte Zuweisungen konfiguriert"
+        return erg
+    kommando = kommando.replace("<stunden>", f"{stunden:g}")
+    try:
+        p = subprocess.run([bash_exe(), "-lc", kommando], cwd=str(repo), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        erg["grund"] = f"Kommando nicht ausführbar ({e})"
+        return erg
+    if p.returncode != 0:
+        erg["grund"] = (f"Kommando endete mit Exit {p.returncode}: "
+                        f"{(p.stderr or p.stdout).strip()[:200]}")
+        return erg
+    roh = (p.stdout or "").lstrip()
+    try:
+        daten = json.JSONDecoder().raw_decode(roh)[0] if roh else []
+    except ValueError:
+        erg["grund"] = "Kommando lieferte kein JSON"
+        return erg
+    if not isinstance(daten, list):
+        erg["grund"] = "Kommando lieferte keine Liste"
+        return erg
+    erg["ok"] = True
+    erg["liste"] = [{"id": str(x.get("id")), "lauf": str(x.get("lauf") or ""),
+                     "seit": str(x.get("seit") or "")}
+                    for x in daten if isinstance(x, dict) and x.get("id")]
+    return erg
+
+
+def aufraeum_plan(konf: dict, alt: dict) -> dict:
+    """Wer als Nächstes dran ist — ein Aufräum-Agent, ein Mensch, oder niemand.
+
+    Drei Mengen, und jede Zuweisung liegt in genau einer davon:
+      offen       noch kein Aufräum-Lauf gestartet  ⇒ EINEN starten
+      wartend     Aufräum-Lauf lief, Frist läuft noch ⇒ abwarten
+      meldereif   Aufräum-Lauf lief, Frist abgelaufen, noch nicht gemeldet ⇒ Mensch
+    Was schon gemeldet wurde, taucht in keiner auf: dieselbe Sache meldet sich nicht zweimal.
+    """
+    ledger = aufraeum_ledger_lesen()
+    frist = float(konf.get("zuweisung_melde_stunden", 3) or 3)
+    jetzt = datetime.now(timezone.utc)
+    offen, wartend, meldereif = [], [], []
+    for z in alt["liste"]:
+        eintrag = ledger.get(z["id"])
+        if not eintrag:
+            offen.append(z)
+            continue
+        if eintrag.get("gemeldet_am"):
+            continue
+        gestartet = _zeitpunkt(eintrag.get("gestartet_am"))
+        if gestartet is None or (jetzt - gestartet).total_seconds() >= frist * 3600:
+            meldereif.append(z)
+        else:
+            wartend.append(z)
+    return {"offen": offen, "wartend": wartend, "meldereif": meldereif,
+            "frist_stunden": frist, "ledger": ledger}
+
+
+def _zeitpunkt(wert) -> datetime | None:
+    try:
+        d = datetime.fromisoformat(str(wert))
+    except (TypeError, ValueError):
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
 VERSUCHS_DECKEL_VORGABE = 3  # Vorgabe: ab so vielen Versuchen geht eine Aufgabe an den Menschen.
 
 
@@ -456,6 +619,8 @@ def agenten_im_hub(konf: dict) -> dict:
     """Name → Agenten-Zeile, für die fünf Agenten dieses Schwarms."""
     namen = {w["name"] for w in konf.get("worker_agenten") or []}
     namen.add(konf.get("dispatcher_name", "Schwarm-Dispatcher"))
+    if konf.get("aufraeumer_name"):
+        namen.add(konf["aufraeumer_name"])
     gefunden = {}
     for a in hub_get("/api/agents", repo=repo_id(konf)).get("agents") or []:
         if a.get("name") in namen:
@@ -478,6 +643,8 @@ def laufende(konf: dict) -> list:
                  if w.get("stark") and w["name"] in im_hub}
     disp = im_hub.get(konf.get("dispatcher_name", "Schwarm-Dispatcher"))
     disp_ids = {disp["id"]} if disp else set()
+    auf = im_hub.get(konf.get("aufraeumer_name") or "")
+    auf_ids = {auf["id"]} if auf else set()
     ids = {a["id"] for a in im_hub.values()}
     treffer = []
     for status in ("running", "waiting_help", "scheduled", "deferred"):
@@ -488,7 +655,8 @@ def laufende(konf: dict) -> list:
                                 "agent": r.get("agent_name"), "status": r.get("status"),
                                 "started_at": r.get("started_at"),
                                 "stark": r.get("agent_id") in stark_ids,
-                                "dispatcher": r.get("agent_id") in disp_ids})
+                                "dispatcher": r.get("agent_id") in disp_ids,
+                                "aufraeumer": r.get("agent_id") in auf_ids})
     return treffer
 
 
@@ -732,6 +900,7 @@ def startplan(konf: dict, anzahl: int, trivial: int, bud: dict, halt: bool,
 
 
 def lage_erheben(repo: Path, konf: dict) -> dict:
+    aufraeumen = reservierungen_aufraeumen(repo, konf)
     liste = aufgaben(repo, konf)
     f = (konf.get("repo") or {}).get("listen_felder") or {}
     k_schwere = f.get("schwere", "schwere")
@@ -752,8 +921,13 @@ def lage_erheben(repo: Path, konf: dict) -> dict:
     po_zahl = po_offen(repo, konf)
     laufend_stark = [r for r in in_arbeit if r.get("stark")]
     laufend_dispatcher = [r for r in in_arbeit if r.get("dispatcher")]
+    laufend_aufraeumer = [r for r in in_arbeit if r.get("aufraeumer")]
     laufend_normal = [r for r in in_arbeit
-                      if not r.get("stark") and not r.get("dispatcher")]
+                      if not r.get("stark") and not r.get("dispatcher")
+                      and not r.get("aufraeumer")]
+    alt = zuweisungen_alt(repo, konf)
+    plan_auf = aufraeum_plan(konf, alt)
+    auf_deckel = int(konf.get("aufraeumer_max_parallel", 1) or 1)
     plan = startplan(konf, len(kand), nach_schwere["trivial"], bud, halt,
                      len(laufend_normal), tag)
     plan_stark = stark_plan(konf, len(schwer), quota, bud, halt, len(laufend_stark), tag)
@@ -763,6 +937,7 @@ def lage_erheben(repo: Path, konf: dict) -> dict:
     return {
         "stand": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "repo_id": repo_id(konf), "repo_pfad": str(repo), "hub": hub_url(), "halt": halt,
+        "reservierungen_aufgeraeumt": aufraeumen,
         "aufgaben": {"kandidaten": len(kand), "nach_schwere": nach_schwere,
                      "roh_offen": len(liste), "schwer": len(schwer),
                      "erlaubte_schweregrade": list(erlaubte_schweren(konf))},
@@ -807,6 +982,22 @@ def lage_erheben(repo: Path, konf: dict) -> dict:
         # `po_da` ist aus demselben Grund ein Flag und keine Zahl: `po_offen` ist -1, wenn die
         # Zählung nicht möglich war, und „nicht ermittelbar" darf keinen Vortrag auslösen.
         "po_da": 1 if (po_zahl > 0 and not halt) else 0,
+        # Die Aufräum-Leiter, als zwei Flags derselben Bauart. Beide gehen unter HALT auf 0:
+        # Ein Halt heißt „es geschieht nichts" — auch keine Meldung, die dann wieder verfällt.
+        # `aufraeumer_da` ist zusätzlich 0, solange schon ein Aufräumer in der Luft ist.
+        "zuweisungen_alt": len(alt["liste"]),
+        "zuweisungen_ohne_lauf": len(plan_auf["offen"]),
+        "zuweisungen_meldereif": len(plan_auf["meldereif"]),
+        "zuweisungen_messbar": 1 if alt["ok"] else 0,
+        "aufraeumer_da": 1 if (alt["ok"] and plan_auf["offen"] and not halt
+                               and len(laufend_aufraeumer) < auf_deckel) else 0,
+        "melden_da": 1 if (alt["ok"] and plan_auf["meldereif"] and not halt) else 0,
+        "laufend_aufraeumer": len(laufend_aufraeumer),
+        "aufraeumen": {"ok": alt["ok"], "grund": alt["grund"],
+                       "alt_stunden": alt["stunden"],
+                       "melde_stunden": plan_auf["frist_stunden"],
+                       "offen": plan_auf["offen"], "wartend": plan_auf["wartend"],
+                       "meldereif": plan_auf["meldereif"]},
         "worker_starts_soll": plan["glm_starts"],
         "deepseek_starts_soll": plan["deepseek_starts"],
         "stark_route": plan_stark["route"],
@@ -821,6 +1012,9 @@ def lage_drucken(l: dict) -> None:
     print(f"Schwarm-Lage · {l['stand']} · Repo {l['repo_id']} · Hub {l['hub']}")
     if l["halt"]:
         print("  HALT gesetzt — alle Worker gehen aus. Aufheben: dispatch.py weiter")
+    r = l["reservierungen_aufgeraeumt"]
+    if not r["gelaufen"]:
+        print(f"  Reservierungen nicht aufgeräumt: {r['grund']}")
     a = l["aufgaben"]
     print(f"  Offen und unbelegt (erlaubt: {', '.join(a['erlaubte_schweregrade'])}): "
           f"{a['kandidaten']} von {a['roh_offen']}")
@@ -842,8 +1036,21 @@ def lage_drucken(l: dict) -> None:
             starts = f"  → {l['worker_starts_soll']}× starten"
         print(f"      #{ag['id']:<4} {'AN ' if ag['aktiv'] else 'aus'}  {ag['name']:<36} "
               f"cron={ag['cron'] or 'manuell':<14}{starts}")
+    z = l["aufraeumen"]
+    if not z["ok"]:
+        print(f"  Hängende Zuweisungen: nicht messbar — {z['grund']}")
+    else:
+        print(f"  Hängende Zuweisungen (älter als {z['alt_stunden']:g} h): "
+              f"{len(z['offen']) + len(z['wartend']) + len(z['meldereif'])}")
+        print(f"      noch kein Aufräum-Lauf: {len(z['offen'])}"
+              f"{'  → ' + ', '.join(x['id'] for x in z['offen']) if z['offen'] else ''}")
+        print(f"      Aufräum-Lauf lief, Frist läuft ({z['melde_stunden']:g} h): "
+              f"{len(z['wartend'])}")
+        print(f"      reif für einen Menschen: {len(z['meldereif'])}"
+              f"{'  → ' + ', '.join(x['id'] for x in z['meldereif']) if z['meldereif'] else ''}")
     print(f"  In der Luft: {len(l['laufende'])} (davon stark: {l['laufend_stark']}, "
-          f"Dispatcher: {l['laufend_dispatcher']} — der zählt nicht gegen max_worker)")
+          f"Aufräumer: {l['laufend_aufraeumer']}, "
+          f"Dispatcher: {l['laufend_dispatcher']} — die zählen nicht gegen max_worker)")
     for r in l["laufende"]:
         print(f"      {r['short_id']}  {r['status']:<10}  {r['agent']}")
     b = l["budget"]
@@ -921,6 +1128,16 @@ def baue_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("lage", help="Was offen ist, wer läuft, wie viele Starts fällig sind")
     p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("aufraeumer",
+                       help="Hängende Zuweisungen: wer bekommt einen Aufräum-Lauf, wer einen "
+                            "Menschen")
+    p.add_argument("--vormerken", action="store_true",
+                   help="die offenen als „Aufräum-Lauf gestartet\" eintragen — danach löst "
+                        "keiner von ihnen einen zweiten Start aus")
+    p.add_argument("--gemeldet", action="store_true",
+                   help="die meldereifen als „an einen Menschen gemeldet\" eintragen — danach "
+                        "meldet sich dieselbe Sache nicht wieder")
 
     sub.add_parser("stopp", help="Not-Halt: Worker-Agenten aus, `lage` meldet 0 Starts")
     sub.add_parser("weiter", help="Not-Halt aufheben und die Worker-Agenten wieder einschalten")
@@ -1017,7 +1234,63 @@ def main(argv=None) -> int:
                 tages_ampel=lage["tages_ampel"],
                 budget_ampel=lage["budget_ampel"], laufend=len(lage["laufende"]),
                 laufend_stark=lage["laufend_stark"],
-                laufend_dispatcher=lage["laufend_dispatcher"], halt=lage["halt"])
+                laufend_dispatcher=lage["laufend_dispatcher"],
+                laufend_aufraeumer=lage["laufend_aufraeumer"],
+                zuweisungen_alt=lage["zuweisungen_alt"],
+                zuweisungen_ohne_lauf=lage["zuweisungen_ohne_lauf"],
+                zuweisungen_meldereif=lage["zuweisungen_meldereif"],
+                zuweisungen_messbar=lage["zuweisungen_messbar"],
+                aufraeumer_da=lage["aufraeumer_da"], melden_da=lage["melden_da"],
+                halt=lage["halt"])
+        return 0
+
+    if args.befehl == "aufraeumer":
+        lage = lage_erheben(repo, konf)
+        z = lage["aufraeumen"]
+        if not z["ok"]:
+            return fehler("aufraeumer", f"Alte Zuweisungen nicht messbar: {z['grund']}",
+                          naechster_schritt="konfig.repo.zuweisungen_alt_json prüfen und das "
+                                            "Kommando von Hand fahren.", code=3)
+        vorher = aufraeum_ledger_lesen()
+        jetzt = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        # Was nicht mehr hängt, fliegt aus dem Verzeichnis: Die Zuweisung hat sich gelöst, und
+        # käme sie je wieder, wäre es ein neuer Fall mit neuem Anspruch auf einen Aufräum-Lauf.
+        # Ein bereits gemeldeter Eintrag bleibt: Er ist die Zusage „dieselbe Sache meldet sich
+        # nicht zweimal", und wer ihn beim ersten stillen Takt wegwirft, hebt sie auf.
+        haengend = {x["id"] for x in z["offen"] + z["wartend"] + z["meldereif"]}
+        # dict(v) statt v: Sonst zeigen `ledger` und `vorher` auf DIESELBEN Eintrags-Objekte,
+        # jede Änderung landet auch im Vorher-Bild, und der Vergleich unten sagt „nichts zu
+        # schreiben". Gemessen 2026-09-04: `--gemeldet` setzte die Marke, schrieb sie nie, und
+        # der Wächter meldete dieselbe Zuweisung bei jedem Takt erneut an einen Menschen.
+        ledger = {k: dict(v) for k, v in vorher.items()
+                  if k in haengend or v.get("gemeldet_am")}
+        vorgemerkt, gemeldet = [], []
+        if args.vormerken:
+            for x in z["offen"]:
+                ledger[x["id"]] = {"gestartet_am": jetzt, "lauf": x["lauf"], "seit": x["seit"]}
+                vorgemerkt.append(x["id"])
+        if args.gemeldet:
+            for x in z["meldereif"]:
+                eintrag = ledger.setdefault(x["id"], {"gestartet_am": jetzt, "lauf": x["lauf"]})
+                eintrag["gemeldet_am"] = jetzt
+                gemeldet.append(x["id"])
+        if ledger != vorher:
+            aufraeum_ledger_schreiben(ledger)
+        for x in z["offen"]:
+            print(f"  offen       {x['id']}  Lauf {x['lauf'] or '?'}  seit {x['seit'] or '?'}")
+        for x in z["wartend"]:
+            print(f"  wartend     {x['id']}  Lauf {x['lauf'] or '?'}  seit {x['seit'] or '?'}")
+        for x in z["meldereif"]:
+            print(f"  meldereif   {x['id']}  Lauf {x['lauf'] or '?'}  seit {x['seit'] or '?'} — "
+                  f"der Aufräum-Lauf war schon da und hat es nicht gelöst")
+        if not (z["offen"] or z["wartend"] or z["meldereif"]):
+            print(f"Keine Zuweisung ist älter als {z['alt_stunden']:g} Stunden.")
+        schluss("aufraeumer", True, alt=lage["zuweisungen_alt"],
+                offen=len(z["offen"]), wartend=len(z["wartend"]),
+                meldereif=len(z["meldereif"]),
+                vorgemerkt=len(vorgemerkt), gemeldet=len(gemeldet),
+                ids=",".join(x["id"] for x in z["offen"]) or "-",
+                melde_ids=",".join(x["id"] for x in z["meldereif"]) or "-")
         return 0
 
     return fehler(args.befehl or "unbekannt", f"Unbekannter Befehl {args.befehl!r}.",

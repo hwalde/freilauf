@@ -92,6 +92,19 @@ nutzbar. Mit `--dry-run` zeigen schreibende Befehle ihren `gh`-Aufruf, ohne ihn 
 
 ## Grenzen
 
+- Keine nachwirkende Zuweisung. `freigebe` nimmt das Label `in-arbeit` und die Assignees weg,
+  und das Issue ist im selben Augenblick wieder frei — der Adapter kennt weder
+  `aufgabe_freigeben_sofort` noch `zuweisungen_alt_json` noch `zuweisung_loesen`, und der
+  Aufräum-Agent bleibt hier ohne Arbeit (`lage` meldet `zuweisungen_messbar=0`). Das ist zum
+  großen Teil unschädlich, und der Grund ist wichtiger als die Lücke: Das Zeitfenster, gegen
+  das eine Zuweisung schützt, entsteht durch den MERGE, nicht durch die Rückgabe. `versuch`
+  setzt hier das Label `versuch:n` und schreibt den Kommentar sofort auf GitHub, sichtbar für
+  jeden Lauf im selben Moment; es gibt keinen Verzug zwischen Schreiben und Sichtbarwerden.
+  Ein zweiter Lauf, der das Issue direkt danach zieht, sieht den erhöhten Zähler und die Notiz
+  des Vorgängers — genau das, was ein dateibasiertes Register erst nach dem Merge kann.
+  Was bleibt: Stirbt ein Lauf, nachdem er `in-arbeit` gesetzt hat, aber bevor er etwas
+  schreibt, hält das Label das Issue fest, und niemand räumt es weg. Der Adapter weiß nicht, ob
+  der haltende Lauf noch lebt; das muss ein Mensch mit `freigebe <id>` lösen.
 - Keine atomare Reservierung. Ein Label ist keine Dateisperre: Zwei Läufe können dieselbe
   Aufgabe im selben Augenblick greifen, und beide arbeiten dann daran. Der Adapter liest
   jeden Kandidaten unmittelbar vor dem Setzen noch einmal und prüft danach nach, ob

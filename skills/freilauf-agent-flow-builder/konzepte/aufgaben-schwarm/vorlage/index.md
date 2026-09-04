@@ -21,6 +21,7 @@ sind.
 | Worker (stark, Abo-Route) | manuell — der Dispatcher startet ihn | blockiert oder zweimal gescheitert |
 | Worker (stark, Ausweich-Route) | manuell — der Dispatcher startet ihn | dasselbe, wenn die Abo-Route nicht darf |
 | Dispatcher | manuell — der Wächter-Takt und der Nachlauf wecken ihn | rechnet und startet |
+| Aufräumer | manuell — der Wächter-Takt weckt ihn, wenn eine Zuweisung hängt | klärt, was aus einem verschwundenen Lauf wurde; repariert nichts |
 | PO-Agent (optional) | manuell — der PO-Takt weckt ihn | trägt die offenen Fragen einem Menschen vor |
 
 Namen, Routen, Modelle und Zeitbudgets stehen in `konfig.json`. Kein Agent hat einen eigenen
@@ -28,7 +29,7 @@ Cron. Den Takt geben zwei Flows:
 
 | Flow | Cron | tut |
 |---|---|---|
-| Schwarm-Takt (ohne LLM, count_runs) — der Wächter | `0 */2 * * *` | zählt die Lage per Shell; weckt den Dispatcher nur, wenn Arbeit da ist |
+| Schwarm-Takt (ohne LLM, count_runs) — der Wächter | `0 */2 * * *` | zählt die Lage per Shell; weckt den Dispatcher nur, wenn Arbeit da ist; weckt den Aufräumer bei `aufraeumer_da=1` und meldet einen Menschen bei `melden_da=1` |
 | Schwarm-PO-Takt | `0 4 * * *` | weckt den PO-Agenten nur, wenn eine Frage offen ist |
 | Schwarm-Nachlauf | `run_finished` | an allen Workern; weckt den Dispatcher nach einem Worker mit Fortschritt |
 
@@ -85,6 +86,44 @@ nach einem Reset kann der erinnerte Wert noch der alte sein, und wer darauf eine
 baut, kauft sich ein `deferred`. Widersprechen sich `lage` und der Skill `freilauf-stats`, gilt
 die konservativere Sicht.
 
+## Zuweisung: das Zeitfenster zwischen Rückgabe und Merge
+
+Die Reservierung ist atomar; das Problem sitzt woanders. Ein Worker gibt eine Aufgabe mit
+Fehlversuch und Notiz zurück, aber beides erreicht den Basis-Branch erst, wenn sein Lauf endet
+und Freilauf mergt — Minuten bis Stunden später. Bis dahin sähe jeder andere Worker eine freie,
+unveränderte Aufgabe, maße dieselbe Sache noch einmal nach und zählte den Zähler ein zweites
+Mal hoch. Im Ursprungsprojekt wurden so 23 Aufgaben von mindestens zwei Läufen angefasst, in 15
+überlappenden Lauf-Paaren, davon 7 mit weniger als vier Minuten Startabstand; eine davon lief
+binnen einer Stunde durch fünf Läufe und landete beim Menschen, obwohl nur ein Richtungs-Entscheid
+fehlte.
+
+Die Antwort ist eine Zuweisung, die die Rückgabe überlebt. Sie wird nicht gelöscht, sondern
+wechselt den Zustand: Solange der zuweisende Lauf lebt oder sein Ergebnis noch nicht auf dem
+Basis-Branch sichtbar ist, wird die Aufgabe niemandem angeboten; ist es sichtbar, ist sie sofort
+und stillschweigend wieder frei. Eine Ausnahme bleibt gewollt: Was ein Lauf gar nicht angefasst
+hat (geholt, dann einen gesetzten Wartestatus gesehen), geht ohne Nachwirkung zurück
+(`aufgabe_freigeben_sofort`) — sonst hielte eine Zuweisung eine Aufgabe fest, an der niemand
+gearbeitet hat.
+
+### Wenn ein Lauf mit seiner Zuweisung verschwindet
+
+Der teure Restfall: Der Lauf stürzt ab, oder sein Ergebnis kommt nie an. Dann überlebt die
+Zuweisung ihn, und die Aufgabe ist nicht erledigt, sondern unsichtbar — und niemand merkt es.
+Dagegen die Aufräum-Leiter mit genau zwei Sprossen: Ab `zuweisung_alt_stunden` weckt der
+Wächter-Flow EINMAL den Aufräum-Agenten für diese Aufgabe; hängt sie `zuweisung_melde_stunden`
+später immer noch, wird kein zweiter Agent geschickt, sondern per `notify` ein Mensch
+benachrichtigt — einmal, danach ist Ruhe. Wofür schon ein Aufräum-Lauf startete und was
+gemeldet wurde, steht in `aufraeum_laeufe.json` im Zustandsordner. Ohne dieses Verzeichnis
+schickt jeder Takt einen weiteren Agenten auf dieselbe Zuweisung; das Verzeichnis IST die Regel
+„je Aufgabe genau ein Aufräum-Lauf".
+
+Was die Leiter nicht löst: Beide Schwellen sind Schätzungen. Dauert ein Merge länger als
+`zuweisung_alt_stunden`, läuft ein Aufräumer auf eine völlig intakte Zuweisung — er erkennt das
+(der Lauf lebt noch) und lässt sie in Ruhe; es kostet einen Lauf, nicht die Aufgabe. Und ist die
+Zählung nicht möglich, meldet `lage` `zuweisungen_messbar=0` und beide Flags bleiben 0: Eine
+Messung, die nicht gelang, weckt keinen Agenten und piept keinen Menschen an — ein hängender
+Eintrag bliebe dann hängen, sichtbar nur in der Ausgabe von `lage`.
+
 ## Skalierung, Deckel, Budget
 
 Skaliert wird über die Zahl der Starts, nicht über Ein- und Ausschalten. Der Dispatcher startet
@@ -117,24 +156,28 @@ Was deckelt:
 | Datei | wofür |
 |---|---|
 | `konfig.json` | alle Regler. Der Block `repo` trägt alles Repo-Spezifische — die Kommandos auf das Aufgaben-Register plus die Gates |
-| `dispatch.py` | `lage` (zählen und die Staffel rechnen) · `stopp`/`weiter` (Not-Halt) · `journal` |
+| `dispatch.py` | `lage` (zählen und die Staffel rechnen) · `aufraeumer` (hängende Zuweisungen, Vormerk-Verzeichnis) · `stopp`/`weiter` (Not-Halt) · `journal` |
 | `prompts/worker.md` | die Vorlage aller Worker-Prompts; `freilauf_einrichten.py` rendert die Kommandos aus `konfig.repo` hinein und den Hol-Ablauf je Bahn |
 | `prompts/dispatcher.md` | der Prompt des Dispatchers |
+| `prompts/aufraeumer.md` | der Prompt des Aufräumers; seine vier Kommandos kommen aus `konfig.repo` |
 | `prompts/po-praesentation.md` | der Prompt des PO-Agenten, ebenfalls gerendert |
 | `flows/nachlauf.json` | `run_finished`-Flow, an alle Worker angehängt; deckelt per `count_runs` |
 | `flows/takt-soll.json` | der Wächter: der einzige Takt, LLM-frei |
 | `flows/po-takt.json` | weckt den PO-Agenten, wenn eine Frage offen ist |
 | `freilauf_einrichten.py` | legt Agenten und Flows an bzw. schreibt sie zurück; idempotent |
+| `lauf_lebt.py` | Haken für die Aufgabenquelle: lebt dieser Lauf noch? Exit 0 = ja. Gesetzt im Aufräum-Kommando der Konfig |
 
-Zustand außerhalb von git — `~/agents/schwarm/` (überschreibbar per `SCHWARM_STATE_DIR`), genau
-drei Dateien: `hub_ids.json` (Agent- und Flow-IDs; der Dispatcher liest sie), `journal.jsonl`
-(eine Zeile je Halt-Schaltung) und `HALT`.
+Zustand außerhalb von git — `~/agents/schwarm/<projekt-slug>/` (überschreibbar per `SCHWARM_STATE_DIR`), vier
+Dateien: `hub_ids.json` (Agent- und Flow-IDs; der Dispatcher liest sie), `journal.jsonl`
+(eine Zeile je Halt-Schaltung), `aufraeum_laeufe.json` (je Aufgaben-Kennung: wann ein Aufräum-Lauf
+startete und wann gemeldet wurde) und `HALT`.
 
 ## Bedienung
 
 ```
 python <motor>/dispatch.py lage                 # was offen ist, wer läuft, was zu starten ist
 python <motor>/dispatch.py lage --json
+python <motor>/dispatch.py aufraeumer            # hängende Zuweisungen, ohne etwas zu ändern
 python <motor>/dispatch.py journal --letzte 20
 
 python <motor>/freilauf_einrichten.py --zeige   # Ist-Zustand im Hub

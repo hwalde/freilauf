@@ -101,7 +101,7 @@ jede andere unsichtbar.
 
 ## Bekannte Abweichungen der Vorlage vom ersten Bau
 
-Die Vorlage stammt aus dem Motor-Ordner des Ursprungsprojekts (Fassung 1.1.0, 2026-09-04).
+Die Vorlage stammt aus dem Motor-Ordner des Ursprungsprojekts (Fassung 1.3.0, 2026-09-04).
 Gegenüber dem Original ist sie an fünf Stellen verallgemeinert. Wer die beiden diffed, findet
 diese fünf — und sonst nur Projektanpassungen. Steht in einem Diff etwas anderes, ist eine der
 beiden Seiten hinter der anderen zurück, und der Rückstand gehört behoben statt erklärt:
@@ -115,6 +115,90 @@ beiden Seiten hinter der anderen zurück, und der Rückstand gehört behoben sta
   dem Block `repo`, statt im Prompt zu stehen.
 - Der Zustandsordner heißt im Ursprungsprojekt nach dessen Repo-Slug; in der Vorlage ergibt ihn
   `repo.name` aus der Konfig. Beide bilden dieselbe Regel ab — ein Ordner je Projekt.
+
+Was 1.3.0 gegenüber 1.2.0 geändert hat — die zweite Ursache derselben Doppelarbeit, und sie
+hat mit der Reservierung nichts zu tun:
+
+Gemessen im Ursprungsprojekt wurden 23 Aufgaben von mindestens zwei Läufen angefasst, in 15
+überlappenden Lauf-Paaren, davon 7 mit weniger als vier Minuten Startabstand; zwei
+Merge-Commits mussten parallele Notizen derselben Datei zusammenführen, und eine Aufgabe
+durchlief binnen einer Stunde fünf Läufe und landete beim Menschen, obwohl nur ein
+Richtungs-Entscheid fehlte. Die Reservierung war daran unschuldig — sie ist atomar. Schuld war
+ein Zeitfenster: Fehlversuch und Notiz eines Laufs erreichen den Basis-Branch erst beim Merge,
+und bis dahin sah jeder andere Worker eine freie, unveränderte Aufgabe. Das ist unabhängig von
+der `--lokal`-Krücke aus 1.2.0; beide belegten Fälle traten nach deren Entfernung auf.
+
+- **Die Zuweisung überlebt die Rückgabe.** Sie wird nicht gelöscht, sondern wechselt den
+  Zustand: Solange der zuweisende Lauf lebt oder sein Ergebnis noch nicht auf dem Basis-Branch
+  sichtbar ist, wird die Aufgabe niemandem angeboten; ist es sichtbar, ist sie sofort und
+  stillschweigend wieder frei. Der Worker-Prompt erklärt das im Rückgabe-Abschnitt und verbietet
+  ausdrücklich, die Sperre mit einem Erzwingen-Schalter zu umgehen.
+- **Neuer Konfig-Schlüssel `aufgabe_freigeben_sofort`** — Rückgabe ohne bleibende Zuweisung, für
+  den einen Fall, in dem ein Lauf die Aufgabe gar nicht angefasst hat (geholt, dann einen
+  gesetzten Wartestatus gesehen). Der Riegel im Worker-Prompt benutzt jetzt diesen Schlüssel.
+  Fehlt er, rendert der Prompt `aufgabe_freigeben` — für eine Aufgabenquelle ohne nachwirkende
+  Zuweisung ist das die richtige Fassung.
+- **Neuer Agent „Schwarm-Aufräumer"** samt `prompts/aufraeumer.md`, für den Fall, dass ein Lauf
+  mit seiner Zuweisung verschwindet. Er repariert nichts: Er stellt je hängender Zuweisung fest,
+  was aus dem Lauf wurde, hält verlorene Messungen als Notiz an der Aufgabe fest und löst die
+  Zuweisung mit Beleg. Konfig: `aufraeumer_name`/`_route`/`_minuten`/`_max_parallel`, dazu die
+  vier Kommandos `zuweisungen_alt_json`, `lauf_zustand`, `lauf_bericht`, `zuweisung_loesen`.
+  Warum ein eigener Agent statt einer Regel im Worker-Prompt: die Entwurfsregel in `KONZEPT.md`.
+- **Die Aufräum-Leiter hat genau zwei Sprossen, und ein Verzeichnis erzwingt das.** Ab
+  `zuweisung_alt_stunden` genau EIN Aufräum-Lauf je Aufgabe, danach — nach
+  `zuweisung_melde_stunden` — EINE Meldung an einen Menschen, dann Ruhe. Vorgemerkt wird in
+  `aufraeum_laeufe.json` im Zustandsordner; ohne dieses Verzeichnis schickt jeder Takt einen
+  weiteren Agenten auf denselben Fall.
+- **`dispatch.py`**: neuer Unterbefehl `aufraeumer` (mit `--vormerken` und `--gemeldet`), neue
+  Felder in der Schlusszeile von `lage` (`zuweisungen_alt`, `zuweisungen_ohne_lauf`,
+  `zuweisungen_meldereif`, `zuweisungen_messbar`, `aufraeumer_da`, `melden_da`,
+  `laufend_aufraeumer`). Ist die Zählung nicht möglich, stehen beide Flags auf 0: Eine Messung,
+  die nicht gelang, weckt keinen Agenten und piept keinen Menschen an.
+- **`lage` räumt vor dem Zählen hängende Reservierungen auf** (`belegungen_aufraeumen`, leer
+  lassen erlaubt). Das ist die einzige Stelle, die in jedem Takt läuft: Eine hängende
+  Reservierung blendet ihre Aufgabe aus der Zählung aus, `arbeit_da` liest 0, und der
+  Dispatcher, der es heilen könnte, wird gar nicht erst geweckt. Ein Fehlschlag ist folgenlos.
+- **Der Wächter-Flow hat zwei neue Zweige**, beide auf Flags derselben Schlusszeile:
+  `aufraeumer_da=1` merkt vor und weckt den Aufräumer (mit `count_runs`-Deckel), `melden_da=1`
+  setzt den Melde-Vermerk und schickt ein `notify` an einen Menschen.
+
+So zieht ein bestehendes Projekt nach:
+
+1. `vorlage/dispatch.py`, `vorlage/freilauf_einrichten.py`, `vorlage/flows/takt-soll.json` und
+   `vorlage/prompts/aufraeumer.md` übernehmen; in `prompts/worker.md` nur die zwei geänderten
+   Stellen zusammenführen (der Riegel bei gesetztem Wartestatus benutzt jetzt
+   `{{AUFGABE_FREIGEBEN_SOFORT}}`, und der Rückgabe-Abschnitt erklärt die Zuweisung).
+2. In die eigene `konfig.json` einsetzen: `aufgabe_freigeben_sofort`, `belegungen_aufraeumen`,
+   die vier Aufräum-Kommandos, den Agenten-Block `aufraeumer_*` und die zwei Schwellen
+   `zuweisung_alt_stunden` / `zuweisung_melde_stunden`.
+3. Prüfen, ob das eigene Aufgaben-Werkzeug die nötigen Optionen hat (Rückgabe ohne Nachwirkung,
+   alte Zuweisungen auflisten, fremde Zuweisung mit Beleg lösen). Fehlt eines, lass den
+   zugehörigen Konfig-Schlüssel leer — der Motor bleibt an dieser Stelle still, statt laut zu
+   scheitern — und trag die Folge in die Grenzen des Projekts ein.
+4. `dispatch.py lage` fahren und `zuweisungen_messbar` ansehen, dann
+   `freilauf_einrichten.py --dry-run`, dann scharf, dann ein zweites Mal auf Idempotenz.
+5. `motor_version` auf `1.3.0` setzen — erst danach.
+
+Was 1.2.0 gegenüber 1.1.0 geändert hat — drei Lehren aus der ersten durchgelaufenen Nacht
+(49 Läufe, und die Zahl der Fragen an den Menschen stieg von 14 auf 28):
+
+- **Zeit ist kein Fehlversuch.** Worker gaben Aufgaben zurück, weil sie nicht in 45 Minuten
+  passten. Beim dritten solchen Rückgeben schiebt das Register den Eintrag zu einem Menschen —
+  der bekommt dann eine Frage vorgelegt, die keine ist. `worker_minuten` und `stark_minuten`
+  stehen jetzt auf 300, und der Worker-Prompt trägt die eigentliche Regel: Große Aufgaben
+  werden zerlegt und in Teilschritten committet, ein Fehlversuch wird nur protokolliert, wenn
+  ein inhaltlicher Reparaturweg nachweislich gescheitert ist. Läuft die Zeit aus: Zwischenstand
+  committen, notieren, freigeben — ohne Fehlversuch. Dafür gibt es den neuen Konfig-Schlüssel
+  `aufgabe_freigeben`.
+- **Kein `--lokal` mehr in den Register-Kommandos.** Die Krücke stammte aus einem längst
+  reparierten Fehler und ließ jeden Worker nur seinen eigenen Worktree sehen. Folge: Drei Läufe
+  zogen nacheinander dieselben zwei Aufgaben und eskalierten sie dreimal an den Menschen. Der
+  `aufgaben_hinweis` sagt jetzt das Gegenteil (`git fetch origin` vor dem Holen), und der
+  Worker-Prompt hat einen harten Riegel: Trägt der Eintrag nach dem Belegen ein `wartet_auf`,
+  wird er sofort freigegeben — kein Fehlversuch, keine Zeile Code.
+- **Der Dispatcher wartet nie auf seine Worker.** Er startet, protokolliert, endet; die
+  Rückmeldung liefert der Nachlauf-Flow. Stand in den Flows schon so (`wait: false`), fehlte
+  aber als Satz im Prompt.
 
 Was 1.1.0 gegenüber 1.0.0 geändert hat, und warum es beim Nachziehen nicht fehlen darf:
 

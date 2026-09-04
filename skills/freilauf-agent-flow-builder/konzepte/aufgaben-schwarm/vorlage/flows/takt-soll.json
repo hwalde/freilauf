@@ -1,5 +1,5 @@
 {
-  "_hinweis": "Der Wächter — seit 2026-09-03 der EINZIGE Cron des Schwarms und der einzige Grund, warum überhaupt etwas anläuft. Alle Agenten (Dispatcher, Worker, PO) stehen auf schedule_kind=manuell; dieser Flow weckt den Dispatcher, und der Dispatcher startet die Worker. Der Flow startet selbst KEINEN Worker: Welcher Worker, wie viele und auf welcher Route — das ist Triage- und Quoten-Arbeit und gehört in den Dispatcher, nicht in eine Bedingungs-Leiter. Kernaussage: Ist nichts zu tun, kostet der Takt einen Shell-Aufruf und eine Notiz — kein Agenten-Lauf, kein Token. Marken (vom Skript ersetzt, KEINE Flow-Templates): @REPO_PFAD@, @REPO_ID@, @DISPATCHER_AGENT_ID@.",
+  "_hinweis": "Der Wächter — seit 2026-09-03 der EINZIGE Cron des Schwarms und der einzige Grund, warum überhaupt etwas anläuft. Alle Agenten (Dispatcher, Worker, PO) stehen auf schedule_kind=manuell; dieser Flow weckt den Dispatcher, und der Dispatcher startet die Worker. Der Flow startet selbst KEINEN Worker: Welcher Worker, wie viele und auf welcher Route — das ist Triage- und Quoten-Arbeit und gehört in den Dispatcher, nicht in eine Bedingungs-Leiter. Kernaussage: Ist nichts zu tun, kostet der Takt einen Shell-Aufruf und eine Notiz — kein Agenten-Lauf, kein Token. Seit Motor 1.3.0 hat er zwei weitere Zweige, beide auf Flags aus derselben Schlusszeile: `aufraeumer_da=1` weckt den Aufräumer für eine hängende Zuweisung (vorher `dispatch.py aufraeumer --vormerken`, damit derselbe Befund nie zwei Aufräum-Läufe bekommt), `melden_da=1` meldet einen Menschen an, wenn der Aufräum-Lauf schon da war und nichts half. Marken (vom Skript ersetzt, KEINE Flow-Templates): @REPO_PFAD@, @REPO_ID@, @DISPATCHER_AGENT_ID@, @AUFRAEUMER_AGENT_ID@, @ZUWEISUNG_ALT_STUNDEN@, @ZUWEISUNG_MELDE_STUNDEN@.",
   "_warum_ein_flag": "Die Bedingung lautet 'kandidaten_gesamt=0 UND kandidaten_schwer=0'. Ein Flow kennt kein UND — zwei geschachtelte Bedingungen hießen denselben Start-Teilbaum zweimal im JSON, und die zweite Fassung veraltet still. Deshalb rechnet dispatch.py die Verknüpfung und legt sie als `arbeit_da=0|1` in die Schlusszeile. Verglichen wird mit `contains` samt Leerzeichen am Ende, damit `arbeit_da=0` nicht auf einen längeren Wert passt.",
   "id": null,
   "name": "Schwarm-Takt (ohne LLM, count_runs)",
@@ -107,7 +107,149 @@
                     "type": "note",
                     "name": "Leerlauf — nichts zu tun, nichts gestartet",
                     "properties": {
-                      "text": "Keine freie Aufgabe und nichts für die starke Bahn. Es wird kein Agent gestartet: Dieser Takt kostet einen Shell-Aufruf und diese Zeile, kein Token.\n{{vars.lage.stdout}}"
+                      "text": "Kein freier Befund und nichts für die starke Bahn. Es wird kein Agent gestartet: Dieser Takt kostet einen Shell-Aufruf und diese Zeile, kein Token.\n{{vars.lage.stdout}}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "a1",
+              "componentType": "switch",
+              "type": "condition",
+              "name": "Hängt eine Zuweisung ohne Aufräum-Lauf?",
+              "properties": {
+                "left": "{{vars.lage.stdout}}",
+                "op": "contains",
+                "right": "aufraeumer_da=1 "
+              },
+              "branches": {
+                "true": [
+                  {
+                    "id": "a2",
+                    "componentType": "task",
+                    "type": "count_runs",
+                    "name": "Läuft schon ein Aufräumer?",
+                    "properties": {
+                      "repoId": "@REPO_ID@",
+                      "statuses": "running,scheduled,deferred",
+                      "titlePrefix": "",
+                      "agentId": "@AUFRAEUMER_AGENT_ID@",
+                      "outputVar": "aufvoll"
+                    }
+                  },
+                  {
+                    "id": "a3",
+                    "componentType": "switch",
+                    "type": "condition",
+                    "name": "Kein Aufräumer unterwegs?",
+                    "properties": {
+                      "left": "{{vars.aufvoll.count}}",
+                      "op": "eq",
+                      "right": "0"
+                    },
+                    "branches": {
+                      "true": [
+                        {
+                          "id": "a4",
+                          "componentType": "task",
+                          "type": "shell_command",
+                          "name": "Vormerken — je Befund genau ein Aufräum-Lauf",
+                          "properties": {
+                            "_umlaut_lint_ok": ["command"],
+                            "command": "git fetch -q origin && git checkout -q --detach origin/@BASIS_BRANCH@ && python @MOTOR_ORDNER@/dispatch.py aufraeumer --vormerken",
+                            "cwd": "@FLOW_CWD@",
+                            "timeoutMinutes": "5",
+                            "detach": false,
+                            "outputVar": "vormerk"
+                          }
+                        },
+                        {
+                          "id": "a5",
+                          "componentType": "task",
+                          "type": "start_agent",
+                          "name": "Aufräumer wecken",
+                          "properties": {
+                            "agentId": "@AUFRAEUMER_AGENT_ID@",
+                            "promptExtra": "Ausgelöst vom Wächter-Takt: mindestens eine Zuweisung hängt länger als @ZUWEISUNG_ALT_STUNDEN@ Stunden. Klär je Eintrag, was aus dem zugewiesenen Lauf geworden ist. Du bekommst für dieselbe Zuweisung kein zweites Mal einen Lauf — was du offen lässt, geht danach an einen Menschen.\n{{vars.vormerk.stdout}}",
+                            "wait": false,
+                            "outputVar": "aufraeumer"
+                          }
+                        }
+                      ],
+                      "false": [
+                        {
+                          "id": "a6",
+                          "componentType": "task",
+                          "type": "note",
+                          "name": "Aufräumer läuft schon",
+                          "properties": {
+                            "text": "{{vars.aufvoll.count}} Aufräum-Läufe sind unterwegs — kein zweiter. Zwei Aufräumer beurteilen dieselben Zuweisungen und lösen sie doppelt.\n{{vars.aufvoll.titles}}"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "false": [
+                  {
+                    "id": "a7",
+                    "componentType": "task",
+                    "type": "note",
+                    "name": "Keine hängende Zuweisung ohne Aufräum-Lauf",
+                    "properties": {
+                      "text": "Entweder hängt nichts, oder für alles Hängende lief der Aufräum-Lauf schon. Es wird kein Aufräumer gestartet — je Aufgabe genau einer, danach entscheidet ein Mensch."
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "m1",
+              "componentType": "switch",
+              "type": "condition",
+              "name": "Hängt eine Zuweisung, für die der Aufräum-Lauf schon da war?",
+              "properties": {
+                "left": "{{vars.lage.stdout}}",
+                "op": "contains",
+                "right": "melden_da=1 "
+              },
+              "branches": {
+                "true": [
+                  {
+                    "id": "m2",
+                    "componentType": "task",
+                    "type": "shell_command",
+                    "name": "Melde-Vermerk setzen — dieselbe Sache meldet sich nicht zweimal",
+                    "properties": {
+                      "_umlaut_lint_ok": ["command"],
+                      "command": "git fetch -q origin && git checkout -q --detach origin/@BASIS_BRANCH@ && python @MOTOR_ORDNER@/dispatch.py aufraeumer --gemeldet",
+                      "cwd": "@FLOW_CWD@",
+                      "timeoutMinutes": "5",
+                      "detach": false,
+                      "outputVar": "meldung"
+                    }
+                  },
+                  {
+                    "id": "m3",
+                    "componentType": "task",
+                    "type": "notify",
+                    "name": "Ein Mensch muss ran",
+                    "properties": {
+                      "text": "Eine Zuweisung hängt seit über @ZUWEISUNG_ALT_STUNDEN@ Stunden fest, und der Aufräum-Lauf war bereits erfolglos da (weitere @ZUWEISUNG_MELDE_STUNDEN@ Stunden ohne Änderung). Es wird KEIN zweiter Agent geschickt — hier entscheidet ein Mensch.\n\nBefund-Kennung, Lauf-Kennung und Alter stehen in den Zeilen mit `meldereif`:\n{{vars.meldung.stdout}}\n\nDanach ist Ruhe: Dieselbe Zuweisung meldet sich nicht wiederholt.",
+                      "attachment": "",
+                      "outputVar": "notify_mensch"
+                    }
+                  }
+                ],
+                "false": [
+                  {
+                    "id": "m4",
+                    "componentType": "task",
+                    "type": "note",
+                    "name": "Nichts für einen Menschen",
+                    "properties": {
+                      "text": "Keine Zuweisung hat den Aufräum-Lauf überlebt und die zweite Frist gerissen. Es wird niemand benachrichtigt."
                     }
                   }
                 ]
