@@ -463,25 +463,51 @@ function workBlock(repoId) {
  * Open incidents of this repo, split the way incidents.mjs splits them: what is
  * waiting for hands, and what the hub merely wrote down. Zero of a group means
  * the group is absent — a "0" is not information, it is furniture.
+ *
+ * An ARCHIVED run's incidents are not counted. Everywhere else in the hub an
+ * archived run keeps its incidents — the watcher, the flows and the detail page
+ * all go on seeing them, and that is deliberate. Here it is not, for one
+ * reason: this count is a LINK, and it links into the overview, which no
+ * archived run is ever in. Measured on this installation — two open incidents,
+ * both on runs the operator had archived, so both repos said "1 needs you" and
+ * both clicks landed on "no runs yet". A number that promises rows nobody can
+ * see is the same lie the run multi-select has a rule about; archiving is the
+ * operator saying "put this away", and the record stays readable in the archive
+ * and on the run's own page.
+ *
+ * Global incidents (run_id IS NULL — the provider pulse, a lost tmux server) do
+ * stay counted: they need hands and belong to no run. They are also the one
+ * group the filtered overview cannot show, which is why `linkable` exists —
+ * see incidentBlock().
  */
 function openIncidents(repoId) {
   const offen = db.prepare(`SELECT i.*, r.status AS run_status FROM incidents i
     LEFT JOIN runs r ON r.id = i.run_id
-    WHERE i.geloest_am IS NULL AND (i.run_id IS NULL OR r.repo_id = ?)`).all(repoId ?? -1)
+    WHERE i.geloest_am IS NULL AND (i.run_id IS NULL OR (r.repo_id = ? AND r.archived_at IS NULL))`).all(repoId ?? -1)
   const handeln = offen.filter(v => brauchtMensch(v, v.run_status)).length
-  return { offen: offen.length, handeln, noticed: offen.length - handeln }
+  return {
+    offen: offen.length, handeln, noticed: offen.length - handeln,
+    linkable: offen.filter(v => v.run_id !== null).length,
+  }
 }
 
 function incidentBlock(repoId) {
-  const { offen, handeln, noticed } = openIncidents(repoId)
+  const { offen, handeln, noticed, linkable } = openIncidents(repoId)
   if (!offen) return ''
   // The counts link into the overview filtered to the runs that carry an open
   // incident — the same gesture as the work-in-flight block above: a click on
-  // a number shows the rows behind it, not a hunt through every run.
+  // a number shows the rows behind it, not a hunt through every run. With
+  // nothing but global incidents open there are no rows to show, and then the
+  // number is a number: a link to an empty list reads as a page that lost the
+  // thing it just counted. The global ones carry their own banner on every
+  // page, with the button that clears them.
   const ziel = `/?repo=${repoId}&amp;incidents=1`
+  const zahl = (klasse, n, text) => linkable
+    ? `<div><a href="${ziel}"><b class="${klasse}">${n}</b> ${text}</a></div>`
+    : `<div><b class="${klasse}">${n}</b> ${text}</div>`
   return `<div class="side-block side-incidents"><span class="side-label">${e(t('incidents.title'))}</span>
-    ${handeln ? `<div><a href="${ziel}"><b class="err">${handeln}</b> ${e(t('incidents.needs_you_short'))}</a></div>` : ''}
-    ${noticed ? `<div><a href="${ziel}"><b class="warn">${noticed}</b> ${e(t('incidents.noticed_short'))}</a></div>` : ''}</div>`
+    ${handeln ? zahl('err', handeln, e(t('incidents.needs_you_short'))) : ''}
+    ${noticed ? zahl('warn', noticed, e(t('incidents.noticed_short'))) : ''}</div>`
 }
 
 /**
@@ -1122,11 +1148,17 @@ export async function pageArchive(req, res, url) {
     const agentName = r.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(r.agent_id)?.name ?? null : null
     const titel = runTitle(r, agentName, t('overview.single_run'))
     const herkunft = agentName ? t('overview.from_agent', { agent: agentName }) : t('overview.single_run')
+    // The status cell carries integrationLine() — the SAME line the overview
+    // puts under the status word, and for the same reason: a finished run whose
+    // work never reached the base branch has to say so. Without it an archived
+    // run blocked on a merge looked exactly like one that merged cleanly, and
+    // the archive is the last place that could still say it — the sidebar's
+    // incident count deliberately stops following a run into the archive.
     return `<tr onclick="location='/runs/${r.id}'">
       <td><a href="/runs/${r.id}">${e(titel)}</a>
         <div class="dim">${e(herkunft)}</div></td>
       <td class="two-line">${e(harnessLabel(r.harness))}${r.model ? `<span class="dim">${r.provider ? e(r.provider) + ':' : ''}${e(r.model)}</span>` : ''}</td>
-      <td>${e(statusText(r.status))}</td>
+      <td>${e(statusText(r.status))}${integrationLine(r)}</td>
       <td>${e(r.archived_at)}</td>
       <td>${e(r.branch_reported || r.branch_expected || '–')}</td>
       <td>${r.pr_url ? `<a href="${e(r.pr_url)}">PR</a>` : '–'}</td>

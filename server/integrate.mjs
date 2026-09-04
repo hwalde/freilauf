@@ -282,6 +282,10 @@ const lastMessage = new Map()    // runId → { key, ms } — the cursor loop gu
 const chains = new Map()         // repoId → Promise (the serial integration queue)
 const queued = new Set()         // runIds currently in a chain
 const pushFails = new Map()      // runId → consecutive non-conflict push failures
+const pushRetry = new Map()      // runId → { at: ms, opts } — a failed push waits before the next try
+
+/** How long a run waits after a push that failed for a reason that is not a conflict. */
+const PUSH_RETRY_MS = 60_000
 
 /** `git fetch origin`, at most once per repo every 10 s. */
 async function fetchThrottled(repo, nowMs = Date.now()) {
@@ -745,10 +749,24 @@ export async function integrateTick(nowMs = Date.now()) {
     }))
   }
 
+  // A push that failed for a reason that is not a conflict waits before the
+  // next try, and THIS loop is the clock it waits on — see integrateOne(). It
+  // carries the original `opts` so a manual "Merge now" stays manual across the
+  // wait; `enqueueIntegration` marks the run queued synchronously, so the sweep
+  // below cannot pick it up a second time in the same pass.
+  for (const [id, r] of [...pushRetry]) {
+    if (r.at > nowMs || queued.has(id)) continue
+    pushRetry.delete(id)
+    enqueueIntegration(id, r.opts)
+  }
+
   // Runs that were merging when the hub went down: the queue is in memory, the
-  // state is in the database — so put them back.
+  // state is in the database — so put them back. A run inside its retry window
+  // is skipped, which is what keeps five attempts four minutes apart instead of
+  // five passes of this loop.
   for (const run of db.prepare(`SELECT id FROM runs WHERE finish_state='merging'`).all()) {
-    if (!queued.has(run.id)) enqueueIntegration(run.id)
+    if (queued.has(run.id) || pushRetry.has(run.id)) continue
+    enqueueIntegration(run.id)
   }
 
   // Conflict runs that ended without delivering — done without commits, failed,
@@ -926,11 +944,26 @@ async function integrateOne(runId, opts = {}) {
     // A merge that cannot be pushed is not a merge. Throw it away rather than
     // leave a "merged, but only locally" state behind — origin is the truth.
     await sh('git', ['-C', dir, 'reset', '--hard', `origin/${repo.base_branch}`])
-    if (n >= 5) { pushFails.delete(runId); return escalate(runId, 'merge_error') }
-    setTimeout(() => enqueueIntegration(runId, opts), 60_000).unref?.()
+    if (n >= 5) { pushFails.delete(runId); pushRetry.delete(runId); return escalate(runId, 'merge_error') }
+    // The wait is a DUE TIME that integrateTick() honours, never a timer of its
+    // own. A `setTimeout(…, 60_000)` outlives the decision it was scheduled
+    // under: the fifth failure escalates the run to a human, and the four
+    // timers from the failures before it then walk the whole merge again —
+    // measured on run 0c1fc610, where one broken pre-push hook produced 28 push
+    // attempts, five `merge_blocked` escalations, five force-pushed backup
+    // branches and five notifications about the same problem inside ten
+    // minutes. The escalation above clears this entry, so nothing is left that
+    // could resurrect a run a human has been called about.
+    //
+    // It is also what makes the wait a wait at all: the tick re-enqueues every
+    // run still in `finish_state='merging'` on every 5-second pass, so before
+    // this the five attempts collapsed into twenty seconds instead of the four
+    // minutes the interval promises.
+    pushRetry.set(runId, { at: Date.now() + PUSH_RETRY_MS, opts })
     return
   }
   pushFails.delete(runId)
+  pushRetry.delete(runId)
 
   const mergedSha = (await sh('git', ['-C', dir, 'rev-parse', 'HEAD'])).stdout.trim()
   await finishMerged(runId, tip, repo, { mergedSha, beforeSha, dir })
@@ -1551,4 +1584,6 @@ export function resetIntegration(runId) {
   nextCheckAt.delete(runId)
   lastTip.delete(runId)
   lastMessage.delete(runId)
+  pushFails.delete(runId)
+  pushRetry.delete(runId)
 }

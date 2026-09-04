@@ -1629,7 +1629,8 @@ try {
   // ------------------------------------------------------------------
   gruppe('Detection: rate limit / provider errors (detect.mjs)')
   const { typVonClaudeFehler, typVonText, terminalText, scanneZeilen, scanneNeueBytes,
-    transkriptFehler, bewerteLogTreffer, fremdeClaudeSession, vorfallWeggrund } = await import('../server/detect.mjs')
+    transkriptFehler, bewerteLogTreffer, fremdeClaudeSession, vorfallWeggrund,
+    isSessionStopped } = await import('../server/detect.mjs')
 
   await pruefe('Claude\'s StopFailure enum is mapped completely', () => {
     gleich(typVonClaudeFehler('rate_limit'), 'rate_limit', 'rate_limit')
@@ -1655,6 +1656,28 @@ try {
     gleich(typVonText('402 insufficient credits'), 'billing_error', '402 before the rate-limit check')
     gleich(typVonText('model_not_found: no such model'), 'model_error', 'model')
     gleich(typVonText('alles gut'), 'unbekannt', 'no match')
+  })
+
+  // An error hook fires while the process dies, and the hub is very often the
+  // one killing it — retention, the kill route, a flow, archiving. Filing that
+  // as a provider incident is the hub alarming about its own cleanup, and on an
+  // aborted run such an incident never resolves by itself. Measured on run
+  // c532df45: `session.error: "Aborted"` at 02:14:32, the retention pass's own
+  // `aborted` event ten seconds later, and a red "needs you" still standing two
+  // days on.
+  await pruefe('a stopped session is not a provider fault', () => {
+    for (const t of ['Aborted', 'aborted', '  Aborted.  ', 'AbortError',
+      'The operation was aborted', 'SIGTERM', 'killed', 'cancelled']) {
+      wahr(isSessionStopped(t), `"${t}" is the session ending`)
+    }
+    // Narrow on purpose: a real error that merely mentions one of those words
+    // must still be an incident, or the guard becomes the next false green.
+    for (const t of ['API Error: 429 — request aborted after 3 retries',
+      'AI_APICallError: stream aborted', 'aborted: 503 upstream unavailable', '', 'alles gut']) {
+      falsch(isSessionStopped(t), `"${t}" is not merely a stopped session`)
+    }
+    gleich(typVonText('AI_APICallError: stream aborted'), 'provider_error',
+      'and such a line is still classified as what it is')
   })
 
   await pruefe('terminalText removes ANSI, OSC titles, and turns \\r into lines', () => {
@@ -3612,6 +3635,31 @@ try {
   await pruefe('no catalog entry is empty', () => {
     for (const [code, cat] of Object.entries(_catalogs())) {
       for (const [k, v] of Object.entries(cat)) wahr(String(v).trim().length > 0, `${code}:${k}`)
+    }
+  })
+  // A follow-up anomaly is the SAME statement about a follow-up: both halves of
+  // `anomaly.X` / `anomaly.followup_X` describe one threshold in watcher.mjs
+  // (80 % soft, 100 % hard), once for the run and once for the commission after
+  // it. So the two must say the same thing, and the follow-up one says it with
+  // its prefix — otherwise one threshold ends up with two names and only one of
+  // them is true. Measured on this installation: `anomaly.soft_overrun` read
+  // "over the expected duration" while firing at 80 %, so a run that finished
+  // in 44 of its 45 expected minutes carried a badge saying it had gone over —
+  // next to a cell reading "44 min / 45 min". Its follow-up twin had said
+  // "nearing" all along.
+  await pruefe('a follow-up anomaly says the same as the anomaly it mirrors', () => {
+    const PREFIX = { en: 'follow-up ', de: 'Nachfolgeauftrag ', zh: '后续任务' }
+    const cats = _catalogs()
+    for (const [code, cat] of Object.entries(cats)) {
+      const prefix = PREFIX[code]
+      wahr(typeof prefix === 'string', `${code}: the follow-up prefix is known — a new language needs one here`)
+      for (const key of Object.keys(cat)) {
+        const m = /^anomaly\.followup_(.+)$/.exec(key)
+        if (!m) continue
+        const zwilling = `anomaly.${m[1]}`
+        wahr(Object.hasOwn(cat, zwilling), `${code}: ${key} has no twin ${zwilling}`)
+        gleich(cat[key], prefix + cat[zwilling], `${code}: ${key} must be "${zwilling}" with the follow-up prefix`)
+      }
     }
   })
   await pruefe('t() translates, interpolates and falls back safely', () => {

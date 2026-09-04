@@ -1107,7 +1107,7 @@
   "ampel.yellow": "worth a look",
   "ampel.green": "nothing conspicuous",
   "anomaly.no_activity": "no activity",
-  "anomaly.soft_overrun": "over the expected duration",
+  "anomaly.soft_overrun": "nearing the expected duration",
   "anomaly.overrun": "far over the expected duration",
   "anomaly.unpushed": "branch not pushed",
   "anomaly.worktree_dirty": "worktree still dirty",

@@ -7,7 +7,7 @@ import db, { addEvent } from './db.mjs'
 import { notify as notifyChannels, notifyOnFor, detailUrl } from './notify.mjs'
 import { sh } from './util.mjs'
 import { vorfallMelden, detektorLog } from './incidents.mjs'
-import { typVonClaudeFehler, typVonText, TYP_TEXT, fremdeClaudeSession } from './detect.mjs'
+import { typVonClaudeFehler, typVonText, TYP_TEXT, fremdeClaudeSession, isSessionStopped } from './detect.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { transcriptState } from './cursor-transcript.mjs'
 
@@ -162,6 +162,11 @@ export async function handleReport(runId, body, via = 'http') {
       // 'session.error' (free text). The hook is the most reliable source —
       // immediately red.
       const roh = String(body.error ?? (kind === '_rate_limit' ? 'rate_limit' : 'unknown'))
+      // The session being stopped is not a provider fault, and it is very often
+      // the HUB doing the stopping (retention, the kill route, a flow, an
+      // archive). The end is recorded by whoever ended it; an incident on top
+      // of that is an alarm about our own cleanup — see isSessionStopped().
+      if (isSessionStopped(text) || isSessionStopped(roh)) break
       let typ = typVonClaudeFehler(roh)
       if (typ === null) break                       // e.g. max_output_tokens: not a provider problem
       if (typ === 'unbekannt') typ = typVonText(`${roh} ${text}`)

@@ -48,6 +48,31 @@ export function typVonClaudeFehler(enumWert) {
 }
 
 /**
+ * Is this error report just the agent's process being stopped?
+ *
+ * An error hook fires while the process dies, and the hub is very often the one
+ * killing it — the retention pass closing an idle session, the kill route, a
+ * flow's `kill_run`, archiving. opencode's `session.error` then reports the
+ * bare word "Aborted", and until this existed that opened a RED incident: the
+ * hub called a human about its own cleanup. Measured on run c532df45 — the
+ * retention pass closed the session at 02:14:32, the incident was opened in the
+ * same second, the `aborted {"source":"retention"}` event followed ten seconds
+ * later, and because a red incident on an aborted run never resolves by itself
+ * ("that is WHY the run did not come through") it was still asking for hands
+ * two days later.
+ *
+ * The end of the run is recorded anyway — `aborted`, `tmux_closed`,
+ * `pane_died` — so nothing is lost by not also filing it as a provider fault.
+ * Narrow on purpose, like every pattern in this module: only the shapes that
+ * say "stopped", never a message that merely CONTAINS one of those words next
+ * to a real error.
+ */
+export function isSessionStopped(text) {
+  return /^\s*(the (operation|request) was )?abort(ed|error)?\.?\s*$/i.test(String(text ?? ''))
+    || /^\s*(sigterm|sigkill|sigint|canceled|cancelled|killed)\.?\s*$/i.test(String(text ?? ''))
+}
+
+/**
  * Free text (opencode plugin, log line) → type. The order is deliberate: auth
  * and billing before rate limit, otherwise "402 … rate" would be misfiled.
  */
