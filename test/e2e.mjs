@@ -2358,6 +2358,10 @@ try {
     enthaelt(html, 'id="runs-all"', 'select-all box')
     enthaelt(html, 'id="runs-archive-selected"', 'the bulk button')
     enthaelt(html, 'class="run-pick"', 'a checkbox per archivable run')
+    // Under the table, not above it: one goes down the list deciding, and the
+    // button belongs where the deciding stopped.
+    wahr(html.indexOf('id="runs-archive-selected"') > html.indexOf('</table>'),
+      'the bulk bar stands under the table')
   })
   await pruefe('archiving closes the tmux session right away by default', async () => {
     // The rule exists to make archiving mean what the operator's gesture says:

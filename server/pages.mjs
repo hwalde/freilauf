@@ -973,21 +973,23 @@ export function runsBody(runs, ctx) {
 /**
  * The overview table around the rows; the tbody is the anchor for new rows.
  *
- * Above it stands the bulk bar — the answer to a list of forty finished runs of
+ * UNDER it stands the bulk bar — the answer to a list of forty finished runs of
  * which four are worth keeping: tick "select all", untick those four, archive
- * the rest in one gesture. The bar sits OUTSIDE the tbody on purpose, because
- * the live channel replaces the tbody whenever a run appears; a control inside
- * it would be rebuilt (and reset) by somebody else's run starting. The button
- * is disabled until something is selected, and hub.js keeps its label counting.
+ * the rest in one gesture. Under and not above, because that is where the hand
+ * ends up: one goes down the list deciding, and the button is then where the
+ * deciding stopped. The bar sits OUTSIDE the tbody on purpose, because the live
+ * channel replaces the tbody whenever a run appears; a control inside it would
+ * be rebuilt (and reset) by somebody else's run starting. The button is disabled
+ * until something is selected, and hub.js keeps its label counting.
  */
 export function overviewTable(runs, ctx) {
-  return `<div class="bulk-bar">
+  return `<div class="table-wrap"><table class="list runs"><thead><tr><th class="pick-col"></th><th>${e(t('overview.status'))}</th><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.started'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch_pr'))}</th><th>${e(t('incidents.title'))}</th></tr></thead>
+  ${runsBody(runs, ctx)}</table></div>
+  <div class="bulk-bar">
     <label class="chk"><input type="checkbox" id="runs-all"> ${e(t('overview.select_all'))}</label>
     <button type="button" id="runs-archive-selected" disabled>${e(t('overview.archive_selected', { n: 0 }))}</button>
     <span class="dim">${e(t('overview.select_hint'))}</span>
-  </div>
-  <div class="table-wrap"><table class="list runs"><thead><tr><th class="pick-col"></th><th>${e(t('overview.status'))}</th><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.started'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch_pr'))}</th><th>${e(t('incidents.title'))}</th></tr></thead>
-  ${runsBody(runs, ctx)}</table></div>`
+  </div>`
 }
 
 /**
