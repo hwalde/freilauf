@@ -45,6 +45,16 @@ effort level.** Every one of them is a dropdown in the web UI, and
 one that counts. It also finds the hub by itself; if nothing answers,
 `fl-options.py where` says what it tried and what to do.
 
+**And run `check` before every save.** It is the one place that catches the
+mistake this skill's agents are most often created with: a coding agent that
+needs a model `provider` and an agent that names none. That agent saves,
+schedules and starts — and dies at its first API call, because no credential
+reaches its session. `check` refuses it (exit 1), `fl-options.py agents` names
+the existing ones that carry the hole, and `agent-edit.py` will not save one.
+Which coding agent needs one is asked, never remembered: `fl-options.py
+coding-agents` has a `provider` column, and `../freilauf-models/SKILL.md` step 3
+is the whole rule.
+
 ## The tool
 
 `fl-api <path> [name=value …]` (GET) and `fl-api -X POST <path> [name=value …]`
@@ -116,7 +126,7 @@ an empty one. The write is `POST /agents/edit` for a new agent and
 | `repo_id` | yes | the repo. On an **edit** the agent stays in its repo whatever you send — moving is `/agents/move` — but the field is still read for the duplicate-name and fixed-branch checks |
 | `active` | — | `1` (or `on`/`true`) = on. Anything else, **including an absent field**, is off — the form's checkbox simply does not submit when it is unticked. `/agents/toggle` flips it without a full save |
 | `harness` | yes | a configured coding agent id (`claude`, `opencode`, `hermes`, `cursor`, or a plugin) |
-| `provider` | — | model provider id; empty for a subscription harness (claude, cursor), which refuse one |
+| `provider` | **unless subscription** | one of the ids `fl-api /api/providers harness=<id>` lists — required whenever that list is non-empty, **including when it holds exactly one**. Empty *only* for a coding agent that answers `subscription: true` (claude, cursor today), which refuse one. See the warning under this table |
 | `model` | — | the identifier exactly as the provider spells it |
 | `effort` | — | only a level that really exists for this harness+provider+model |
 | `or_mode` | — | `offen` (default) / `auto` / `pin`. Only meaningful with `provider=openrouter` |
@@ -142,6 +152,17 @@ an empty one. The write is `POST /agents/edit` for a new agent and
 | `schedule_anchor` | when `schedule_weeks` > 1 | `YYYY-MM-DD` |
 | `run_at` | with `einmalig` | `YYYY-MM-DDTHH:MM`, local time |
 | `schedule` | with `cron` | a 5-field cron expression |
+
+**The hub does not refuse a missing `provider`, and that is exactly why you must
+not leave one out.** The empty field is its legacy path for a hand-typed
+complete model slug, so the save succeeds, the schedule fires, the run starts —
+and the harness launches with a bare model id and no credential, which fails at
+the first API call and looks like a provider outage. Ask
+`fl-api /api/providers harness=<id>` (or the `provider` column of
+`fl-options.py coding-agents`) and send one of the ids it lists; `fl-options.py
+check` and `agent-edit.py` both refuse a definition without it. Nothing about
+this is per-vendor: a coding agent installed as a plugin answers the same
+endpoint and follows the same rule.
 
 Only the fields of the **chosen** `schedule_kind` are taken over; the others are
 nulled, so switching to `manuell` really does stop the agent.
@@ -311,9 +332,16 @@ is `../freilauf-flows/SKILL.md`.
 - **A branch belongs to exactly one worktree.** `branch_mode=fest` with the base
   branch (which the main checkout holds) can never work; the form refuses it
   before the agent is saved.
+- **An agent with no `provider` is the silent one.** Every other mistake in this
+  section is refused at save time; this one is accepted, and the run fails at
+  its first API call instead. `fl-options.py agents` lists the agents on this
+  hub that carry the hole, with the `agent-edit.py` line that closes each of
+  them.
 - **Do not invent a model id.** opencode reports an unknown model as
   `UnknownError: Unexpected server error` — indistinguishable from a real
   provider outage. Copy ids from `/api/models` (see `../freilauf-models/SKILL.md`).
+  A model id also only means something next to its provider: send the two
+  together or neither.
 - **An inactive repo starts nothing.** A repo can be deactivated
   (`repos.active = 0`): it vanishes from every repo dropdown, its agents are
   skipped by the scheduler, and a manual start is refused with a problem naming

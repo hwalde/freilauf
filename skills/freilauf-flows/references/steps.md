@@ -132,7 +132,7 @@ finished run's `RUN_SHAPE` **replaces** the output.
 |---|---|---|
 | `repoId` | `''` | **required**, number |
 | `harness` | `''` | **required** — `claude` \| `opencode` \| `hermes` \| `cursor` \| plugin id |
-| `provider` | `''` | model provider; leave empty for subscription harnesses |
+| `provider` | `''` | model provider — **required** unless `fl-api /api/providers harness=<id>` answers `subscription: true`, one available provider included. Empty on a harness that has providers starts a run with a bare model id and no credential |
 | `model` | `''` | templated |
 | `effort` | `''` | not templated |
 | `orMode` | `offen` | `offen` (German wire value: OpenRouter routes freely) \| `auto` \| `pin` |

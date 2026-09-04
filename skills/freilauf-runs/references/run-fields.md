@@ -25,9 +25,22 @@ Decide these with `../freilauf-models/SKILL.md`, after checking
 | field | rule |
 |---|---|
 | `harness` | must be registered **and enabled**. An unknown id is `run.unknown_harness`; a known but unconfigured one is `run.harness_not_configured` |
-| `provider` | must be in the set this harness may use (`fl-api /api/providers harness=<id>`). A subscription harness (claude, cursor) refuses any provider at all |
+| `provider` | must be in the set this harness may use (`fl-api /api/providers harness=<id>`) — and **must be given whenever that set is non-empty, one entry included**. A harness answering `subscription: true` (claude, cursor today) refuses any provider at all. See the warning below |
 | `model` | free text, trimmed; empty = the harness picks its own default |
 | `effort` | checked against `fl-api /api/effort harness=… provider=… model=…` for **exactly that combination**. An unaccepted level is a validation error, not a silent drop — because opencode discards an unknown variant silently and hermes ignores it |
+
+**A missing `provider` is the one setup mistake the hub does not refuse.** An
+empty field is its legacy path for a hand-typed complete model slug: the run is
+created, it starts, and the harness launches with a bare `--model`, no
+credential in the session — and for hermes no `--effort` either, since that is
+passed on the provider branch only. What comes back is a run that fails at its
+first API call, or opencode's `UnknownError: Unexpected server error`, which is
+byte for byte a real provider outage. So the fence is in the tooling:
+`fl-options.py check` exits 1 and names the valid ids, `fl-options.py agents`
+lists the stored agents that carry the hole, and `agent-edit.py` will not save
+one. None of that is per-vendor — the question goes to `/api/providers`, which
+answers out of the plugin registry, so a coding agent installed tomorrow is
+covered by the same rule.
 
 ## OpenRouter serving provider
 

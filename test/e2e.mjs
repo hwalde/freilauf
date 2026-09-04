@@ -5124,6 +5124,26 @@ export default {
     enthaelt(schlecht.stdout, 'effort', 'naming it')
     enthaelt(schlecht.stdout, 'MISSING', 'plus what is missing entirely')
 
+    // A coding agent that is NOT on a subscription needs a model provider, and
+    // the hub itself accepts the hole: an empty provider is its legacy path for
+    // a hand-typed complete slug, so such an agent saves, schedules, starts —
+    // and then launches with a bare model id and no credential. Agents really
+    // were created that way through these skills, so the refusal lives here.
+    const ohne = await lauf(['check', 'harness=opencode', 'model=whatever',
+      'repo_id=' + repoId, 'prompt=do a thing', 'branch_mode=keiner'])
+    gleich(ohne.code, 1, `a missing provider is refused, not noted (${ohne.stdout})`)
+    enthaelt(ohne.stdout, 'MISSING  provider', 'naming the field')
+    // opencode-zen and not openrouter: the list is what the operator enabled
+    // INTERSECTED with what holds a credential, and the sandbox deliberately
+    // carries no key — a key-free provider is the one entry always in it.
+    enthaelt(ohne.stdout, 'opencode-zen', 'and the values this installation would accept')
+    // ...and the model is then NOT measured against some other catalogue: the
+    // provider decides which one, so "your model is fine" would be a lie.
+    enthaelt(ohne.stdout, 'NOT checked', 'the model is left unjudged without one')
+
+    // claude, by contrast, IS on its subscription — so the same emptiness is
+    // correct there, and that is the only reading of a check that passes
+    // without a provider.
     const gut = await lauf(['check', 'harness=claude', 'repo_id=' + repoId, 'prompt=do a thing',
       'branch_mode=keiner'])
     gleich(gut.code, 0, `a sound definition exits 0 (${gut.stdout})`)

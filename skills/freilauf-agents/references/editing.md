@@ -15,7 +15,7 @@ the submitted body. A field you leave out is written as its parsed default:
 |---|---|
 | `active` | **0** — the agent is switched off. Only `1`, `on` or `true` switch it on; every other value, and an absent field, mean off |
 | `prompt` | empty → refused (`Prompt is empty.`) |
-| `model`, `provider`, `effort`, `goal`, `branch_pattern` | NULL |
+| `model`, `provider`, `effort`, `goal`, `branch_pattern` | NULL — and a NULL `provider` is a working agent that fails at its first API call, see the end of this file |
 | `keep_on_branch` | 0 |
 | `expected_minutes` | 45 |
 | `skills`, `flows` | NULL (all selections dropped) |
@@ -170,3 +170,14 @@ These are not errors and produce nothing in the problem list. If a setting
 
 A `provider` the harness cannot use here is **not** a silent drop: it is
 `form.provider_unavailable` above.
+
+An **absent** `provider`, on the other hand, is neither refused nor dropped: it
+is stored as NULL, and NULL is the hub's legacy path for a hand-typed complete
+model slug. The agent saves and schedules, and its runs launch with a bare
+`--model` and no credential — hermes losing its `--effort` on the way, since
+that is passed on the provider branch only. Every coding agent whose
+`/api/providers` answer lists at least one provider needs one of those ids,
+even when the list holds exactly one; only `subscription: true` means "send
+none". `scripts/agent-edit.py` refuses such a save for you (`--force` for the
+deliberate hand-typed-slug case), and `scripts/fl-options.py agents` lists the
+agents on this hub that already have the hole.
