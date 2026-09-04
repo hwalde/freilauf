@@ -690,8 +690,12 @@ async function api(req, res, url) {
     // with it: a retry is a NEW session, and a `/goal` typed into the old one is
     // gone with it (server/goal.mjs).
     // …and the follow-up reports of the old attempt go with the old report.
+    // tmux_closed_at goes with it too: the old SESSION is closed, not this run —
+    // the new attempt gets a fresh one, and a stale timestamp would make
+    // pageRun() render "no tmux session" for a session that is standing.
     db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL, archived_at=NULL,
-                goal_sent_at=NULL, followups=0, followup_md=NULL, followup_open=0, followup_since=NULL WHERE id=?`).run(m[1])
+                goal_sent_at=NULL, followups=0, followup_md=NULL, followup_open=0, followup_since=NULL,
+                tmux_closed_at=NULL, exit_code=NULL WHERE id=?`).run(m[1])
     // …and so does the integration: everything the finish gate and the
     // integrator wrote about the previous attempt is gone.
     resetIntegration(m[1])
