@@ -88,7 +88,10 @@ export async function extractStructured({ text, instructions = '', fields, model
   // not extract anything has failed, and the flow run must say so in its log
   // rather than carry an empty object into the steps below it. The `extract: `
   // prefix is what makes that log line readable, so it stays on every message.
-  if (!r.ok) throw new Error(`extract: ${r.error}`)
+  // A parse/validate failure carries the model's raw answer (`r.answer`, see
+  // llm/index.mjs) — the log line that says "did not match" without quoting
+  // what the model actually said is a diagnosis half missing.
+  if (!r.ok) throw new Error(`extract: ${r.error}${r.answer ? `\nThe model answered:\n${r.answer}` : ''}`)
   const out = r.data
   if (!out || typeof out !== 'object') throw new Error('extract: model answer is not an object')
   // Fill missing fields so templates downstream never see undefined.

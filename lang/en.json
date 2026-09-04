@@ -630,6 +630,7 @@
   "llm.alert_where": "Asked: {source}, model {model}",
   "llm.alert_kind": "What went wrong: {kind}",
   "llm.alert_detail": "Detail: {text}",
+  "llm.alert_answer": "The model's answer (excerpt):\n{text}",
   "llm.alert_more": "{count} further failures of this kind since {since} are not reported separately.",
   "llm.alert_ceiling": "{count} messages were held back by the hourly limit.",
   "llm.kind_parse": "the answer was not valid JSON",

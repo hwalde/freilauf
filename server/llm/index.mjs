@@ -64,6 +64,14 @@ import { t } from '../i18n.mjs'
 const DEFAULT_RETRIES = 1
 
 /**
+ * How much of the model's RAW answer a parse/validate failure carries. The
+ * answer itself is the diagnosis — "the schema failed" is not actionable, what
+ * the model actually said is. Long enough to show the shape of a wrapped or
+ * truncated document, short enough not to flood a notification channel.
+ */
+const ANSWER_MAX = 1200
+
+/**
  * The hard cap on transport attempts of one `llmJson` call — across the whole
  * chain and every backoff round. The operator can lower it
  * (`llm_retry_attempts`), never raise it past ten: a purpose that is waiting
@@ -307,7 +315,18 @@ async function askOne(entry, req) {
     }
   }
 
-  return { ...fail(stage, error, kind), entry: { ...entry, label: src.label, id: src.id } }
+  const out = { ...fail(stage, error, kind), entry: { ...entry, label: src.label, id: src.id } }
+  // A parse/validate failure carries what the model actually said: the raw
+  // answer, trimmed and capped. Without it a schema failure says only THAT it
+  // failed — with it, the operator reads the fence, the prose or the wrong
+  // shape and knows what to do. A transport failure carries none: `text` there
+  // may hold an answer from an EARLIER round that has nothing to do with why
+  // the call failed.
+  if ((stage === 'parse' || stage === 'validate') && text) {
+    const raw = String(text).trim()
+    if (raw) out.answer = raw.length > ANSWER_MAX ? `${raw.slice(0, ANSWER_MAX)}\n…` : raw
+  }
+  return out
 }
 
 /**
@@ -337,7 +356,10 @@ async function askOne(entry, req) {
  * @param {number} [req.temperature]
  * @param {number} [req.timeoutMs]
  * @returns {Promise<{ok:true, data, usage, source, model, repaired?: string[]}
- *                 | {ok:false, error:string, stage:'config'|'transport'|'parse'|'validate'}>}
+ *                 | {ok:false, error:string, stage:'config'|'transport'|'parse'|'validate',
+ *                    answer?: string}>}
+ *   On a `parse`/`validate` failure `answer` carries the model's raw reply,
+ *   trimmed and capped — the diagnosis a bare error sentence cannot give.
  *
  * **It never throws.** The four callers have four different error styles and
  * every one of them expects a value — a rejection here would have to be caught
@@ -401,9 +423,11 @@ export async function llmJson({
       // parse/validate terminal: the source answered, the repair budget and
       // the OpenRouter recovery round are spent. This is an answer problem,
       // not an outage — no fallback, no backoff. One throttled alert, as
-      // before, naming the source that failed.
-      await llmAlert({ purpose, source: r.entry?.id ?? entry.source, model: r.entry?.model ?? '', errorClass: r.kind ?? r.stage, text: r.error })
-      return fail(r.stage, r.error, r.kind)
+      // before, naming the source that failed — and quoting the model's raw
+      // answer, because that is the diagnosis the operator cannot get from a
+      // bare "did not match".
+      await llmAlert({ purpose, source: r.entry?.id ?? entry.source, model: r.entry?.model ?? '', errorClass: r.kind ?? r.stage, text: r.error, answer: r.answer })
+      return { ...fail(r.stage, r.error, r.kind), ...(r.answer ? { answer: r.answer } : {}) }
     }
 
     // The whole chain answered config — nothing was ever asked. The primary's

@@ -630,6 +630,7 @@
   "llm.alert_where": "Gefragt: {source}, Modell {model}",
   "llm.alert_kind": "Was schiefging: {kind}",
   "llm.alert_detail": "Detail: {text}",
+  "llm.alert_answer": "Antwort des Modells (Auszug):\n{text}",
   "llm.alert_more": "{count} weitere Fehlschläge dieser Art seit {since} werden nicht einzeln gemeldet.",
   "llm.alert_ceiling": "{count} Nachrichten hat die Stundengrenze zurückgehalten.",
   "llm.kind_parse": "die Antwort war kein gültiges JSON",

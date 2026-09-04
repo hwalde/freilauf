@@ -75,10 +75,13 @@ export function alertSignature({ purpose, source, model, errorClass }) {
  * @param {string} a.model       the model identifier
  * @param {string} a.errorClass  a short code: http_401, no_json, schema, transport…
  * @param {string} [a.text]      one line of detail, verbatim from the failure
+ * @param {string} [a.answer]    the model's raw answer on a parse/validate
+ *                               failure — the diagnosis a bare error sentence
+ *                               cannot give. Its own line, capped separately.
  * @param {number} [a.nowMs]     injectable clock (tests advance it, like integrateTick)
  * @returns {Promise<{sent: boolean, reason: string, suppressed?: number}>}
  */
-export async function llmAlert({ purpose, source, model, errorClass, text, nowMs = Date.now() } = {}) {
+export async function llmAlert({ purpose, source, model, errorClass, text, answer, nowMs = Date.now() } = {}) {
   try {
     if ((getSetting('llm_alert_on') ?? '1') !== '1') return { sent: false, reason: 'off' }
 
@@ -118,6 +121,10 @@ export async function llmAlert({ purpose, source, model, errorClass, text, nowMs
     const kindLabel = t(kindKey)
     lines.push(t('llm.alert_kind', { kind: kindLabel === kindKey ? String(errorClass ?? '?') : kindLabel }))
     if (text) lines.push(t('llm.alert_detail', { text: String(text).slice(0, 600) }))
+    // A schema failure says only THAT it failed; the model's answer says WHAT
+    // it answered. Capped again here because the parameter is free-form — the
+    // cap on the caller's side is an optimization, not a fence.
+    if (answer) lines.push(t('llm.alert_answer', { text: String(answer).slice(0, 1200) }))
     if (st.suppressed > 0) {
       lines.push(t('llm.alert_more', { count: st.suppressed, since: clock(st.suppressedSince || nowMs) }))
     }
