@@ -630,6 +630,7 @@
   "llm.alert_where": "请求对象：{source}，模型 {model}",
   "llm.alert_kind": "故障类型：{kind}",
   "llm.alert_detail": "详情：{text}",
+  "llm.alert_answer": "模型回答（节选）：\n{text}",
   "llm.alert_more": "自 {since} 起同类故障另有 {count} 次，不再单独通报。",
   "llm.alert_ceiling": "另有 {count} 条消息因每小时上限而被抑制。",
   "llm.kind_parse": "应答不是有效的 JSON",
