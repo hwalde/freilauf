@@ -632,9 +632,13 @@ Three consequences, each of them the point rather than a side effect:
   else; a toast that then never resolved would be the worse failure. It costs
   two or three requests, and only while a start is in flight.
 - **The page does not have to stay open.** The start runs in the hub, not in
-  the browser. Closing the tab loses the toast and nothing else — the run is in
-  the overview, and a failed launch is a red row and a notification like any
-  other.
+  the browser. Closing the tab loses the toast and nothing else — and
+  **`failRun()` now says so on the channel** (`notifyRun(…, 'start_failed')`,
+  imported lazily and not awaited, because that function is synchronous and
+  sits on the launch path). That was missing long before this change: a
+  scheduled agent start has no caller at all, so a run that never got off the
+  ground was a red row nobody was told about — the most expensive shape a fault
+  can take, because everything above it reads as "the run is in the list".
 - **The row appears immediately.** `startRun()` calls `announceRun(runId,
   'created')` right after `createRun()`. Before, the overview's first news of a
   run was its `started` event — which lands after the checkout, so a run

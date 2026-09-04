@@ -89,9 +89,9 @@ async function laufStarten(daten) {
  * scheduler.mjs), so reading the column in the same breath as the response is
  * a race; every other caller finds it already set and pays one query.
  */
-async function sessionMerken(runId, { warten = true } = {}) {
+async function sessionMerken(runId, { wait = true } = {}) {
   let s = lauf(runId)?.tmux_session
-  if (!s && warten) {
+  if (!s && wait) {
     try { s = await warteAuf(() => lauf(runId)?.tmux_session, { was: `tmux session of ${runId}`, timeoutMs: 20_000 }) }
     catch { s = null }
   }

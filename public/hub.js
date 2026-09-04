@@ -577,40 +577,40 @@
     // report, which is what the run's row in the overview is for.
     const START_TICK_MS = Math.max(200, Number(window.FREILAUF_QR_POLL_MS) || 900)
     const START_MAX_MS = Math.max(START_TICK_MS, Number(window.FREILAUF_QR_TIMEOUT_MS) || 180000)
-    function verfolgeStart(runId, toast, name) {
+    function followStart(runId, toast, name) {
       const href = '/runs/' + runId
-      const ende = Date.now() + START_MAX_MS
-      const fertig = function (text, kind) {
+      const deadline = Date.now() + START_MAX_MS
+      const settle = function (text, kind) {
         toast = window.freilaufToast(text, { kind: kind, href: href, replace: toast })
       }
-      const frage = function () {
+      const ask = function () {
         fetch('/api/runs/' + encodeURIComponent(runId), { headers: { accept: 'application/json' } })
           .then(function (r) { return r.json() })
           .then(function (j) {
             const run = j && j.run
             if (!run) throw new Error('gone')
             if (run.tmux_session) {
-              fertig(T('js.qr_started', 'Run started: {name}', { name: run.title || name }), 'ok')
+              settle(T('js.qr_started', 'Run started: {name}', { name: run.title || name }), 'ok')
             } else if (run.status === 'deferred') {
-              fertig(T('js.qr_deferred', 'Run deferred (quota/credit): {name}', { name: run.title || name }), 'warn')
+              settle(T('js.qr_deferred', 'Run deferred (quota/credit): {name}', { name: run.title || name }), 'warn')
             } else if (run.status === 'failed' || run.status === 'aborted') {
               // The reason stands in the run's report line, whose first line is
               // the sentence failRun() wrote. Better than "start failed".
-              const grund = String(run.report_md || '').split('\n').filter(function (z) { return z.trim() })[1]
-              fertig(T('js.qr_start_failed', 'Start failed: {name}', { name: run.title || name })
-                + (grund ? ' — ' + grund : ''), 'err')
-            } else if (Date.now() >= ende) {
-              fertig(T('js.qr_still_starting', 'Still starting: {name}', { name: run.title || name }), 'warn')
+              const reason = String(run.report_md || '').split('\n').filter(function (z) { return z.trim() })[1]
+              settle(T('js.qr_start_failed', 'Start failed: {name}', { name: run.title || name })
+                + (reason ? ' — ' + reason : ''), 'err')
+            } else if (Date.now() >= deadline) {
+              settle(T('js.qr_still_starting', 'Still starting: {name}', { name: run.title || name }), 'warn')
             } else {
-              setTimeout(frage, START_TICK_MS)
+              setTimeout(ask, START_TICK_MS)
             }
           })
           .catch(function () {
-            if (Date.now() >= ende) fertig(T('js.qr_start_unknown', 'Start not confirmed: {name}', { name: name }), 'warn')
-            else setTimeout(frage, START_TICK_MS)
+            if (Date.now() >= deadline) settle(T('js.qr_start_unknown', 'Start not confirmed: {name}', { name: name }), 'warn')
+            else setTimeout(ask, START_TICK_MS)
           })
       }
-      setTimeout(frage, START_TICK_MS)
+      setTimeout(ask, START_TICK_MS)
     }
 
     if (qrForm) qrForm.addEventListener('submit', function (ev) {
@@ -641,7 +641,7 @@
           } else {
             const toast = window.freilaufToast(T('js.qr_starting', 'Starting: {name}', { name: name }),
               { kind: 'pending', href: '/runs/' + j.runId })
-            verfolgeStart(j.runId, toast, name)
+            followStart(j.runId, toast, name)
           }
         })
         .catch(function (err) {
