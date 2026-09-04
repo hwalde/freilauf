@@ -1834,6 +1834,25 @@ try {
     gleich(e.art, 'http', 'HTTP response')
     gleich(e.status, 410, 'status')
   })
+  await pruefe('cancel on a FAILED run aborts it — the click decides, not the race', async () => {
+    // The button is rendered while the run is going, so a click can land after
+    // the watcher has already written 'failed' (pane died in between — the
+    // production case was two seconds). The final status must say what the
+    // CLICK said: aborted, with the session closed and the follow-up commission
+    // given up. A 'done' run stays protected (see the follow-up group).
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Abbruch-nach-Fehlschlag' })
+    await warteAuf(() => !!lauf(j.runId)?.tmux_session, { was: 'tmux session' })
+    await sessionMerken(j.runId)
+    db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+    const r = await formular(`/api/runs/${j.runId}/kill`, {})
+    gleich(r.status, 200, 'accepted')
+    const l = lauf(j.runId)
+    gleich(l.status, 'aborted', 'the final status is aborted')
+    wahr(l.tmux_closed_at !== null, 'session closed with it')
+    enthaelt(ereignisse(j.runId).join(','), 'aborted', 'and the run says why it ended')
+    falsch((await sh('tmux', ['has-session', '-t', `=${l.tmux_session}`])).ok, 'session terminated')
+    sessions.delete(l.tmux_session)
+  })
 
   // ------------------------------------------------------------------
   gruppe('Branch expectation "fixed": occupied, free, only on origin')
