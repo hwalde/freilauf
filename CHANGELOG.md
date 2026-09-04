@@ -54,6 +54,9 @@ a day on which nothing was released.
 
 ### Fixed
 
+- Cancelling a run that has just failed (its pane died a second before the
+  click) now records it as aborted, instead of leaving the status the watcher
+  wrote and only closing the session.
 - A refused push during integration records both output streams (and up to
   1200 characters), so the reason a merge was blocked is actually in the
   reason.
