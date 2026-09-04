@@ -2971,6 +2971,38 @@ try {
       else delete process.env.OPENROUTER_API_KEY
     }
   })
+  await pruefe('a validate failure carries the model\'s raw answer — the diagnosis the error sentence cannot give', async () => {
+    const keyAlt = process.env.OPENROUTER_API_KEY
+    process.env.OPENROUTER_API_KEY = 'unit-key'
+    const echt = globalThis.fetch
+    globalThis.fetch = async (url) => {
+      if (String(url).endsWith('/endpoints')) {
+        return { ok: true, json: async () => ({ data: { endpoints: [
+          { tag: 'p/fp8', provider_name: 'P', quantization: 'fp8', status: 0, uptime_last_30m: 100,
+            supported_parameters: ['tools'], pricing: { prompt: '0.0000001', completion: '0.0000002' } },
+        ] } }) }
+      }
+      // Valid JSON — but a string where an object was asked for: exactly the
+      // shape the alert reported as "expected an object, got a string" while
+      // hiding the one thing that would have explained it.
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '"only a string, no object"' } }] }) }
+    }
+    try {
+      const r = await llmJson({
+        source: 'provider:openrouter', model: 'deepseek/deepseek-v4-flash', prompt: 'Name this task',
+        schema: { type: 'object', required: ['title'], properties: { title: { type: 'string' } } },
+        schemaName: 'run_title', purpose: 'title', maxTokens: 200,
+      })
+      falsch(r.ok, 'a string is not an object')
+      gleich(r.stage, 'validate', 'it parsed, so the failure is a validate failure')
+      enthaelt(r.answer, 'only a string, no object', 'the raw answer travels with the failure')
+      enthaelt(r.error, 'expected an object, got a string', 'and the complaint names the shape')
+    } finally {
+      globalThis.fetch = echt
+      if (keyAlt !== undefined) process.env.OPENROUTER_API_KEY = keyAlt
+      else delete process.env.OPENROUTER_API_KEY
+    }
+  })
   await pruefe('llmAlert names a classified failure in the operator\'s language', async () => {
     const { llmAlert, _alertReset } = await import('../server/llm/alerts.mjs')
     const tokenVorher = lese('telegram_token')
@@ -2989,6 +3021,11 @@ try {
       // An unknown class falls back to the code, never to a made-up sentence.
       await llmAlert({ purpose: 'title', source: 'provider:openrouter', model: 'm', errorClass: 'http_408', text: 'x' })
       enthaelt(gesendet.at(-1), 'What went wrong: http_408', 'unknown classes stay honest')
+      // A schema failure quotes what the model actually said — a bare "did not
+      // match" is a diagnosis half missing.
+      await llmAlert({ purpose: 'title', source: 'provider:openrouter', model: 'm', errorClass: 'validate', text: 'The model answered with JSON, but it did not match the required structure.', answer: '{"title": 7}' })
+      enthaelt(gesendet.at(-1), 'answer (excerpt)', 'the answer travels in its own translated line')
+      enthaelt(gesendet.at(-1), '{"title": 7}', 'with what the model actually said')
     } finally {
       globalThis.fetch = echt
       _alertReset()
