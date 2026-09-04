@@ -5,7 +5,9 @@ Every dropdown in the Freilauf web UI is a list this tool can print: the
 repositories, the agents, the coding agents and their providers, models and
 effort levels, the operator's saved favorites, the flows you can attach. It also
 CHECKS a run definition before you post it and tells you what is wrong and what
-the valid values are.
+the valid values are — and it REFUSES a definition whose coding agent needs a
+model provider and does not name one, because that is the mistake that produces
+a run which starts, looks healthy and dies at its first API call.
 
 Run it with no arguments for the overview.
 
@@ -18,6 +20,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 TIMEOUT = 15
@@ -152,6 +155,71 @@ def nxt(*lines):
         print("  " + l)
 
 
+# --------------------------------------------------------------- the provider rule
+_RULES = {}
+
+
+def provider_rule(harness):
+    """Does this coding agent need a `provider` — and which ones may it use?
+
+    Asked, never assumed, and asked in exactly ONE place. `/api/providers`
+    derives both halves from the harness PLUGIN (`subscription`) and from what
+    the operator enabled and holds a credential for, so a coding agent that
+    arrives as a plugin tomorrow is covered by the same lines as the four
+    built-in ones: nothing in this file names claude, opencode, hermes or
+    cursor.
+
+      subscription  the account IS the provider. Sending one is refused.
+      ids           the only values that may be sent.
+      required      there is something to choose, so choosing is mandatory.
+
+    **Required from ONE provider upwards, not from two.** An empty field does
+    not mean "the obvious one" to the hub: it is the legacy path for a
+    hand-typed complete model slug. The harness then launches with a bare
+    `--model`, NO credential travels into the tmux session, and hermes drops
+    the effort level along the way. What that produces is a run that dies at
+    its first API call — or, on opencode, `UnknownError: Unexpected server
+    error`, which is byte for byte what a real provider outage looks like. That
+    is why this is a refusal here and not a hint: the failure is silent and
+    reads as somebody else's fault.
+    """
+    if harness not in _RULES:
+        a = api("/api/providers?harness=%s" % urllib.parse.quote(harness))
+        ids = [p["id"] for p in a.get("provider") or []]
+        sub = bool(a.get("subscription"))
+        _RULES[harness] = {"subscription": sub, "ids": ids,
+                           "required": (not sub) and bool(ids)}
+    return _RULES[harness]
+
+
+def provider_sentence(rule, short=False):
+    if rule["subscription"]:
+        return "subscription — send none" if short else \
+            "this coding agent runs on its own subscription — send **no** `provider`"
+    if rule["ids"]:
+        return ("REQUIRED: " if short else "**required** — send exactly one of: ") + \
+            ", ".join(rule["ids"])
+    return "none available" if short else \
+        "no model provider is available for it here (none enabled, or no credential)"
+
+
+def provider_gaps(rows, harness_of, provider_of):
+    """The rows whose coding agent needs a provider and that carry none."""
+    out = []
+    for r in rows:
+        h = harness_of(r)
+        if not h or provider_of(r):
+            continue
+        try:
+            if provider_rule(h)["required"]:
+                out.append(r)
+        except SystemExit:
+            raise
+        except Exception:
+            pass          # an unknown harness is somebody else's problem to report
+    return out
+
+
 # ------------------------------------------------------------------- commands
 def cmd_overview():
     api("/api/usage")                # finds the hub, or explains why it did not
@@ -167,7 +235,7 @@ def cmd_overview():
         [["`repos`", "%d repositories (%d you can start runs in)" % (len(repos), len(active))],
          ["`agents`", "the stored agents, with their schedule"],
          ["`coding-agents`", "which coding agents are configured here"],
-         ["`agent <id>`", "one coding agent: its providers, models, effort levels"],
+         ["`agent <id>`", "one coding agent: whether it needs a provider, models, effort"],
          ["`favorites`", "%d saved setup(s) — the operator's own preference" % len(favs)],
          ["`flows`", "the flows you can attach to an agent or a run"],
          ["`check k=v ...`", "validate a run definition BEFORE you post it"],
@@ -230,22 +298,46 @@ def cmd_agents(argv):
     print(table(["id", "name", "repo", "coding agent", "model", "schedule", "state"], rows))
     if not agents:
         print("No agent yet. One is a stored run definition plus a name and a schedule.")
+    # An agent whose coding agent needs a provider and carries none is broken in
+    # the quiet way: it saves, it schedules, it starts — and it dies at its first
+    # API call. Name it here rather than waiting for the run to go red.
+    gaps = provider_gaps(agents, lambda a: a.get("harness"), lambda a: a.get("provider"))
+    if gaps:
+        print("\n**%d agent(s) carry NO provider although their coding agent needs one.**"
+              % len(gaps))
+        print("Such an agent starts and then fails at its first API call: no credential")
+        print("reaches its session. Fix each one (it is a full-replace route — use the")
+        print("round-trip script, never a bare POST):\n")
+        for a in gaps:
+            ids = provider_rule(a["harness"])["ids"]
+            print("    agent-edit.py --id %s provider=%s   # %s (%s), valid: %s"
+                  % (a["id"], ids[0], a["name"], a["harness"], ", ".join(ids)))
+        print("\nPick the provider deliberately — see ../freilauf-models/SKILL.md.")
     nxt("fl-options.py agent <coding agent>", "fl-api /api/runs agent=<id> limit=10")
 
 
 def cmd_coding_agents():
     d = api("/api/coding-agents/detect")["agents"]
-    rows = [[a["id"], a.get("label") or a["id"],
-             "yes" if a.get("configured") else "no",
-             "yes" if a.get("installed") else "NOT INSTALLED"] for a in d]
+    rows = []
+    for a in d:
+        # Only a configured one is worth asking about: for the rest the answer
+        # would be "nothing is enabled", which says something about the
+        # configuration and nothing about the coding agent.
+        prov = provider_sentence(provider_rule(a["id"]), short=True) if a.get("configured") else "-"
+        rows.append([a["id"], a.get("label") or a["id"],
+                     "yes" if a.get("configured") else "no",
+                     "yes" if a.get("installed") else "NOT INSTALLED", prov])
     print("# Coding agents\n")
-    print(table(["id", "name", "configured", "CLI on this machine"], rows))
+    print(table(["id", "name", "configured", "CLI on this machine", "provider"], rows))
     usable = [a["id"] for a in d if a.get("configured")]
     if not usable:
         print("None is configured — no run can start. Settings -> Plugins switches one on.")
-    else:
-        print("Only a CONFIGURED one can run. Details for one of them:")
-        print("  fl-options.py agent %s" % usable[0])
+        return
+    print("The `provider` column is the rule, not a suggestion: where it says")
+    print("REQUIRED, a run definition without a `provider` is refused by `check`")
+    print("below — it would launch with a bare model id and no credential.\n")
+    print("Only a CONFIGURED one can run. Details for one of them:")
+    print("  fl-options.py agent %s" % usable[0])
 
 
 def cmd_agent(argv):
@@ -253,21 +345,23 @@ def cmd_agent(argv):
         print("Which coding agent? Try:  fl-options.py coding-agents")
         sys.exit(2)
     h = argv[0]
-    prov = api("/api/providers?harness=%s" % h)
+    rule = provider_rule(h)
     print("# %s\n" % h)
-    if prov.get("subscription"):
-        print("Runs on its own subscription. Do **not** send `provider` — it is refused.\n")
+    print("Provider: %s\n" % provider_sentence(rule))
+    if rule["subscription"]:
         models = api("/api/models?provider=%s&harness=%s" % (h, h))
     else:
-        ids = [p["id"] for p in prov.get("provider") or []]
+        ids = rule["ids"]
         if not ids:
-            print("No model provider is available for it (none configured, or no credential).")
-            print("Settings -> Plugins is where that is fixed.")
+            print("Settings -> Plugins is where that is fixed. Until it is, the only thing")
+            print("that can run here is a complete, hand-typed model slug — say so rather")
+            print("than filling a `provider` in that this installation would refuse.")
             return
-        print("Providers: %s\n" % ", ".join("`%s`" % i for i in ids))
         chosen = argv[1] if len(argv) > 1 else ids[0]
         print("Models below are for `%s` — pass another as: fl-options.py agent %s <provider>\n"
               % (chosen, h))
+        print("A model id travels WITH its provider. `model=` on its own is not a run:\n")
+        print("    harness=%s provider=%s model=<id from the list>\n" % (h, chosen))
         models = api("/api/models?provider=%s&harness=%s" % (chosen, h))
     if models.get("ok"):
         names = [m["id"] for m in models["models"]]
@@ -285,7 +379,8 @@ def cmd_agent(argv):
     else:
         print("The model list is not reachable: %s" % models.get("error"))
     print("\nNEVER invent a model id — copy one from this list.")
-    nxt("fl-options.py check harness=%s model=<id> prompt='...'" % h)
+    nxt("fl-options.py check harness=%s %smodel=<id> prompt='...'"
+        % (h, "" if rule["subscription"] else "provider=<id> "))
 
 
 def cmd_favorites():
@@ -297,6 +392,15 @@ def cmd_favorites():
     print("A favorite is the setup half of a run, saved by the operator. It carries no")
     print("prompt, branch rule or duration — those still belong to the task.")
     print("\nPrefer a fitting favorite over any recommendation, and say which one you used.")
+    # A favorite is used verbatim, so one with a hole in it hands the hole on to
+    # every run started from it. Better found here than three runs later.
+    gaps = provider_gaps(favs["favorites"], lambda f: f.get("harness"), lambda f: f.get("provider"))
+    if gaps:
+        print("\n**Incomplete favorite(s): %s** — the coding agent needs a provider and the"
+              % ", ".join("'%s'" % f["name"] for f in gaps))
+        print("favorite carries none. Do not start a run from one of those as it stands:")
+        print("add the provider to the run yourself, and tell the operator their favorite")
+        print("is missing one (Settings -> Favorites).")
     if rows:
         nxt("fl-options.py new --favorite %s --repo <id>" % rows[0][0])
 
@@ -328,7 +432,10 @@ def cmd_check(argv):
         print("    fl-options.py check harness=claude model=opus effort=high \\")
         print("        repo_id=1 prompt='Fix the flaky test' branch_mode=keiner\n")
         print("It checks them against THIS installation — configured coding agents, the")
-        print("models that coding agent really offers, the effort levels it accepts.")
+        print("models that coding agent really offers, the effort levels it accepts.\n")
+        print("`provider` is required for every coding agent that is not on its own")
+        print("subscription, and leaving it out is a refusal here (exit 1), not a hint.")
+        print("Which coding agent is which: fl-options.py coding-agents")
         return
     print("# Checking a run definition\n")
     problems, notes = [], []
@@ -354,22 +461,47 @@ def cmd_check(argv):
         bad("harness", "not configured here — Settings -> Plugins switches it on")
     else:
         ok("harness", "configured")
-        prov = api("/api/providers?harness=%s" % h)
-        sub = prov.get("subscription")
-        ids = [p["id"] for p in prov.get("provider") or []]
-        if fields.get("provider"):
-            if sub:
+        rule = provider_rule(h)
+        given = fields.get("provider", "")
+        # The whole point of this block: a missing provider is a REFUSAL, not a
+        # note. See provider_rule() for what an empty one really launches.
+        if rule["subscription"]:
+            if given:
                 bad("provider", "%s runs on a subscription and takes no provider" % h)
-            elif fields["provider"] not in ids:
-                bad("provider", "not available for %s. Valid: %s" % (h, ", ".join(ids) or "(none)"))
             else:
-                ok("provider", "available for %s" % h)
-        elif not sub and ids:
-            notes.append("provider is empty — %s needs one of: %s" % (h, ", ".join(ids)))
-        # A provider that was just rejected must not decide which model list we
-        # check against, or the answer is about the wrong catalogue entirely.
-        p = h if (sub or "provider" in problems) else (fields.get("provider") or h)
-        if fields.get("model"):
+                notes.append("%s is on its subscription — no provider, which is correct here" % h)
+        elif not rule["ids"]:
+            if given:
+                bad("provider", "nothing is available for %s here — Settings -> Plugins" % h)
+            else:
+                notes.append("no provider is available for %s here (none enabled, or no "
+                             "credential). `model` then has to be a complete, hand-typed "
+                             "slug — check with the operator that this is what they want."
+                             % h)
+        elif not given:
+            problems.append("provider")
+            print("MISSING  %-*s required for %s. Choose one: %s"
+                  % (w, "provider", h, ", ".join(rule["ids"])))
+            print("         %-*s   an empty provider is not 'the obvious one': the run "
+                  "launches" % (w, ""))
+            print("         %-*s   with a bare model id and no credential and dies at its "
+                  "first" % (w, ""))
+            print("         %-*s   API call. See ../freilauf-models/SKILL.md for which to "
+                  "pick." % (w, ""))
+        elif given not in rule["ids"]:
+            bad("provider", "not available for %s. Valid: %s" % (h, ", ".join(rule["ids"])))
+        else:
+            ok("provider", "available for %s" % h)
+        # A provider that is missing or was just rejected must not decide which
+        # model list we check against, or the answer is about the wrong
+        # catalogue entirely — and "your model is fine" would be a lie.
+        p = h if rule["subscription"] else (given if given in rule["ids"] else None)
+        if not fields.get("model"):
+            notes.append("model is empty — the coding agent picks its own default")
+        elif p is None:
+            notes.append("`model` was NOT checked: the provider decides which catalogue it "
+                         "is measured against, and this one is missing or invalid")
+        else:
             models = api("/api/models?provider=%s&harness=%s" % (p, h))
             names = [m["id"] for m in models.get("models") or []]
             if models.get("ok") and names and fields["model"] not in names:
@@ -381,8 +513,6 @@ def cmd_check(argv):
                 ok("model", "offered by %s" % p)
             else:
                 notes.append("the model list is unreachable, so `model` was not checked")
-        else:
-            notes.append("model is empty — the coding agent picks its own default")
         if fields.get("effort"):
             eff = api("/api/effort?harness=%s&provider=%s&model=%s"
                       % (h, fields.get("provider", ""), fields.get("model", "")))
@@ -460,10 +590,23 @@ def cmd_new(argv):
             if fav.get(key):
                 parts.append("%s=%s" % (name, fav[key]))
         print("Setup taken from the favorite **%s** — the operator's own preference.\n" % fav["name"])
+        rule = provider_rule(fav["harness"])
+        if rule["required"] and not fav.get("provider"):
+            # A concrete id rather than `<a|b|c>`: this line is meant to be
+            # pasted into a shell, where a pipe is not a placeholder.
+            parts.append("provider=%s" % rule["ids"][0])
+            print("The favorite carries NO provider although `%s` needs one, so `%s`"
+                  % (fav["harness"], rule["ids"][0]))
+            print("stands in below — CHECK it: the others are %s." % ", ".join(rule["ids"][1:] or ["none"]))
+            print("Pick deliberately (../freilauf-models/SKILL.md), and tell the operator")
+            print("their favorite is incomplete.\n")
     else:
-        parts += ["harness=<coding agent>", "model=<model>"]
+        parts += ["harness=<coding agent>", "provider=<provider>", "model=<model>"]
         print("No favorite is saved, so fill the setup in yourself:")
-        print("  fl-options.py coding-agents\n")
+        print("  fl-options.py coding-agents        # and which of them needs a provider")
+        print("  fl-options.py agent <coding agent> # its providers, models, effort levels\n")
+        print("Drop `provider=` only for a coding agent the list marks as a subscription;")
+        print("everywhere else it is required and `check` below refuses without it.\n")
     parts += ["prompt='<the task>'", "branch_mode=keiner", "expected_minutes=45"]
     print("    fl-api -X POST /api/runs \\\n        " + " \\\n        ".join(parts))
     print("\nReplace the prompt. `branch_mode=keiner` means no branch; `neu` or `fest`")

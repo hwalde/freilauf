@@ -8,6 +8,10 @@ skill, no `schedule_kind` makes the schedule manual). This script reads the
 agent back from GET /api/agents, rebuilds the complete form body from the row,
 applies the overrides you give and posts the whole thing.
 
+It also refuses to save an agent whose coding agent needs a model provider and
+does not name one — see needs_provider() below for why that is a refusal here
+and not a warning.
+
 Usage:
   agent-edit.py --id 7 [--dry-run] [--clear NAME ...] [name=value ...]
 
@@ -16,6 +20,8 @@ Usage:
   name=@path        take the value from a file (for a prompt)
   --clear NAME      send the field not at all (skills, flows, active, goal, ...)
   --dry-run         print the body that would be sent, post nothing
+  --force           save even though the provider is missing (a hand-typed
+                    complete model slug is the one case where that is right)
 
 Exit codes: 0 saved, 1 refused (the problems are printed), 2 usage,
             3 the hub could not be reached.
@@ -149,6 +155,58 @@ def body_from_row(a):
     return out
 
 
+def needs_provider(base, harness):
+    """(required, valid ids) for this coding agent — asked, never assumed.
+
+    `/api/providers` answers out of the harness PLUGIN (`subscription`) and out
+    of what the operator enabled and holds a credential for, so a coding agent
+    that arrives as a plugin tomorrow is covered by the same call as the four
+    built-in ones. Nothing here names claude, opencode, hermes or cursor.
+
+    Required from ONE provider upwards: an empty field is not "the obvious
+    one", it is the legacy path for a hand-typed complete model slug. The
+    harness then launches with a bare `--model`, no credential travels into the
+    session, and hermes drops the effort level with it — a run that starts,
+    looks healthy in the overview and dies at its first API call. Hence the
+    refusal, and hence `--force` for the one case where it is deliberate.
+
+    A question that cannot be answered (an old hub, an unknown harness) blocks
+    nothing: this script's job is the round trip, not a verdict on a hub it
+    could not reach.
+    """
+    try:
+        a = get_json(base, "/api/providers?harness=" + urllib.parse.quote(harness))
+    except SystemExit:
+        raise
+    except Exception:
+        return False, []
+    if a.get("subscription"):
+        return False, []
+    ids = [p["id"] for p in a.get("provider") or []]
+    return bool(ids), ids
+
+
+def provider_problem(base, pairs, force):
+    """The one sentence to print when the body would save an agent with a hole."""
+    got = dict(pairs)
+    harness = (got.get("harness") or "").strip()
+    if not harness or (got.get("provider") or "").strip():
+        return None
+    required, ids = needs_provider(base, harness)
+    if not required:
+        return None
+    lead = "WARNING (--force)" if force else "refused"
+    return (
+        f"{lead}: `{harness}` needs a model provider and this body carries none.\n"
+        f"  Valid here: {', '.join(ids)}\n"
+        f"  Such an agent saves, schedules and starts — and then fails at its first\n"
+        f"  API call, because no credential reaches its session.\n"
+        f"  Add one:   agent-edit.py --id <id> provider={ids[0]}\n"
+        f"  Which one: see ../freilauf-models/SKILL.md, and check the model belongs\n"
+        f"             to it:  fl-options.py agent {harness} <provider>\n"
+        f"  Deliberate (a hand-typed complete model slug)? Repeat with --force.")
+
+
 def apply_overrides(pairs, overrides, clears):
     """Overrides replace a name completely; --clear removes it completely."""
     touched = {k for k, _ in overrides}
@@ -177,6 +235,8 @@ def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--id", required=True, type=int, help="the agent id")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="save even without a provider the coding agent needs")
     ap.add_argument("--clear", action="append", default=[], metavar="NAME")
     ap.add_argument("assignments", nargs="*", metavar="name=value")
     args = ap.parse_args()
@@ -208,11 +268,23 @@ def main():
 
     pairs = apply_overrides(body_from_row(row), overrides, set(args.clear))
 
+    # Checked on the BODY, not on the row: an edit that removes the provider is
+    # the same hole as one that never had it, and --dry-run has to show the same
+    # verdict the real save would give, or the dry run is worth nothing.
+    hole = provider_problem(base, pairs, args.force)
+
     if args.dry_run:
         for key, value in pairs:
             shown = value if len(value) <= 200 else value[:200] + f"… ({len(value)} chars)"
             print(f"{key}={shown!r}")
+        if hole:
+            print("\n" + hole, file=sys.stderr)
+            return 0 if args.force else 1
         return 0
+    if hole:
+        print(hole, file=sys.stderr)
+        if not args.force:
+            return 1
 
     data = urllib.parse.urlencode(pairs).encode("utf-8")
     req = urllib.request.Request(

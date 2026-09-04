@@ -34,7 +34,11 @@ Repeat a name to send a list (`skills=unlazy skills=other`). Exit code 0 = HTTP
 
 **Before deciding a harness / provider / model / effort, read
 `../freilauf-models/SKILL.md`** — and the operator's saved setups
-(`fl-api /api/favorites`) outrank every recommendation in it.
+(`fl-api /api/favorites`) outrank every recommendation in it. Its step 3 is the
+one rule worth carrying here as well: **a coding agent that is not on a
+subscription needs a `provider`, every time, even when only one is available.**
+Without it the run starts with a bare model id and no credential and fails at
+its first API call, looking exactly like a provider outage.
 
 
 ## Start here
@@ -49,6 +53,11 @@ effort level.** Every one of them is a dropdown in the web UI, and
 `fl-options.py` prints the same lists — for THIS installation, which is the only
 one that counts. It also finds the hub by itself; if nothing answers,
 `fl-options.py where` says what it tried and what to do.
+
+`check` is not optional politeness: it **refuses** (exit 1) a definition whose
+coding agent needs a model `provider` and does not name one — the one mistake
+the hub itself accepts and the run then dies of. `fl-options.py coding-agents`
+says which coding agents need one, this installation's plugins included.
 
 ### Where is the hub, on this machine?
 
@@ -301,7 +310,7 @@ first line, which a cheap LLM then improves in the background). The rest:
 | field | values | note |
 |---|---|---|
 | `harness` | `claude` `opencode` `hermes` `cursor` … | must be a **configured** plugin |
-| `provider` | provider id, or omitted | claude and cursor are subscription — sending one is an error |
+| `provider` | one id out of `fl-api /api/providers harness=<id>` | **required whenever that list is non-empty — one entry included.** Omit it only for a coding agent answering `subscription: true` (claude, cursor today), where sending one is an error. A missing one is *not* refused by the hub: the run starts with a bare model id and no credential and dies at its first API call, so `fl-options.py check` refuses it for you |
 | `model`, `effort` | see `../freilauf-models/SKILL.md` | validated against what that exact combination offers |
 | `goal` | completion condition | only for a harness that declares one (claude); otherwise dropped |
 | `branch_mode` | **`keiner`** \| **`neu`** \| **`fest`** | German wire values: no branch / new branch / existing branch |

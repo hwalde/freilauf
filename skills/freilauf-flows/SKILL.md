@@ -283,7 +283,12 @@ The four you reach for constantly:
 - **`start_single_run`** — its properties *are* the run definition. Read
   `../freilauf-models/SKILL.md` before filling `harness`/`provider`/`model`/
   `effort`, and check `fl-api /api/favorites` first: a favorite is the
-  operator's own considered answer and outranks any recommendation.
+  operator's own considered answer and outranks any recommendation. A
+  `provider` is **required** for every coding agent that is not on a
+  subscription (one available provider included) — a step that omits it starts
+  a run with a bare model id and no credential, which dies at its first API
+  call; `scripts/fl-options.py check harness=… provider=… model=…` says so
+  before you save the flow.
   Branch modes are German wire values: `keiner` (detached), `neu` (new branch),
   `fest` (existing branch). OpenRouter's open mode is `offen`.
 - **`extract`** — see below.

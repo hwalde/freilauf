@@ -54,6 +54,17 @@ a day on which nothing was released.
 
 ### Fixed
 
+- The agent skills refuse to build a run or an agent without a model provider.
+  A coding agent that is not on a subscription needs one — even where only one
+  is available — and the hub itself accepts an empty field, because that is its
+  path for a hand-typed complete model slug. Agents were being created that
+  way: they saved, scheduled, started, and then died at their first API call
+  with no credential in the session, which on opencode looks exactly like a
+  provider outage. `fl-options.py check` now exits 1 and names the valid ids,
+  `fl-options.py agents`/`favorites` name the stored rows that already carry
+  the hole, `agent-edit.py` will not save one, and the swarm template refuses a
+  route without one. Which coding agent needs a provider is asked of the plugin
+  registry, so an installed plugin is covered by the same rule.
 - Retrying a run offers its terminal again: the retry now clears the
   closed-session mark the old attempt left behind.
 - Cancelling a run that has just failed (its pane died a second before the
