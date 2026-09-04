@@ -26,7 +26,7 @@ import {
   pageCleanupSettings, cleanupSettingsSave,
   pageSkillSettings, skillSettingsSave, skillSettingsSync,
   repoToggle, repoDelete,
-  headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents, sessionRow,
+  headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents,
   integrationSection, problemPage, runEditCard,
 } from './pages.mjs'
 import {
@@ -476,6 +476,15 @@ async function api(req, res, url) {
   // runStartFromForm() like the run form. That is the whole point of a favorite
   // storing only the setup half — everything the definition needs beyond it is
   // in this request, and the validation is the one that already exists.
+  //
+  // `detached: true` is what makes it quick. What this request has to DECIDE —
+  // is the favorite real, does the definition validate, is there quota — is
+  // milliseconds; what it used to WAIT for is the launch, and that is seconds
+  // of git and tmux (measured on this machine: 0.5 s in a 154-file repository,
+  // 5 s in one of 16 000 files, plus fl-start's own second). The dialog held
+  // still for all of it, which is the one thing a quick start must not do. So
+  // the answer says `pending` and the browser follows the run's own record;
+  // the start finishes in the hub whether that page stays open or not.
   if (req.method === 'POST' && path === '/api/runs/quick') {
     const b = await form(req)
     const fav = getFavorite(b.favorite_id)
@@ -485,12 +494,12 @@ async function api(req, res, url) {
     const start = runStartFromForm(b, problems)
     if (problems.length) return json(res, 400, { ok: false, error: problems.join(' · ') })
     rememberRunChoice(def)
-    const r = await startRun(def, { repoId: +b.repo_id, ...start })
+    const r = await startRun(def, { repoId: +b.repo_id, ...start, detached: true })
     if (!r.ok) return json(res, 500, { ok: false, error: r.error ?? t('run.start_failed') })
     const run = getRun(r.runId)
     return json(res, 200, {
       ok: true, runId: r.runId, deferred: !!r.deferred, scheduled: !!r.scheduled,
-      title: run?.title ?? null, favorite: fav.name,
+      pending: !!r.pending, title: run?.title ?? null, favorite: fav.name,
     })
   }
   // tmux cleanup: start the memory-freeing agent by hand. The sidebar's small
@@ -908,14 +917,11 @@ async function fragmentApi(req, res, url) {
       + runEditCard(run) + integrationSection(run, getRepo(run.repo_id)) + runMetrics(run) + runEvents(run.id))
   }
 
-  // A session row. listSessions() asks tmux, so this is the one fragment that
-  // costs a process — and the reason the sessions page does not poll it in bulk.
-  if (path === '/api/fragments/session-row') {
-    const name = url.searchParams.get('name') ?? ''
-    const { listSessions } = await import('./sessions.mjs')
-    const s = name ? (await listSessions()).find(x => x.name === name) : null
-    return fragment(res, s ? sessionRow(s, {}) : '')
-  }
+  // There is deliberately no per-session fragment. The sessions page ends a
+  // session optimistically in the browser (hub.js marks the row "ending …" in
+  // the same tick and strikes it through when the server confirms), so a row
+  // never has to be re-rendered from here — and asking would cost a
+  // `tmux list-sessions` plus a `ps` over every process for one row.
 
   return json(res, 404, { ok: false, error: `unknown API path: ${req.method} ${path}` })
 }

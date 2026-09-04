@@ -281,8 +281,16 @@ The endpoint takes an **allowlist of exactly five form fields** — `repo_id`,
 `favorite_id` and the start-time fields. Everything else (harness, provider,
 model, effort, skills, flows) comes from the favorite and **cannot** be
 overridden here; that is deliberate, so the button cannot start something other
-than its name promises. Answers JSON: `{ ok, runId, deferred, scheduled, title,
-favorite }`.
+than its name promises. Answers JSON: `{ ok, runId, pending, deferred,
+scheduled, title, favorite }`.
+
+**It answers before the run is running.** `pending: true` means the row exists
+and the launch — `git fetch`, the worktree checkout, the tmux session, seconds
+of it in a large repository — is still going in the hub. So do not read
+`tmux_session` or expect `verdict: "working"` in the same breath; poll
+`GET /api/runs/<id>` until `tmux_session` is set, or until the status says
+`deferred`/`failed`. `POST /api/runs` below does wait, and answers with the
+session already standing.
 
 ### The full endpoint
 
