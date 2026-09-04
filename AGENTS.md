@@ -35,7 +35,7 @@ the pairing and that the CLAUDE.md contains nothing but the include.
 
 ## The public-facing documents, and who keeps them current
 
-Four files exist for people who are not us — they are the whole first
+Five files exist for people who are not us — they are the whole first
 impression, and a stale one costs more than a missing feature. They are part of
 a change, not a follow-up to it:
 
@@ -45,6 +45,19 @@ a change, not a follow-up to it:
 | `README.zh-CN.md` / `README.de.md` | Chinese and German readers | **maintained together with the English one.** The primary audience is Chinese and American, then German — so English is the reference and the two translations follow in the same commit, not "later" |
 | `SETUP_WITH_AGENT.md` | **coding agents**, English only | how the system works and how to set it up, written to be handed to an agent. Linked from the top of all three READMEs |
 | `CONTRIBUTING.md` | contributors | PRs are welcome; the ground rules and the pre-submit checklist |
+| `CHANGELOG.md` | anyone asking what changed | **every change that a user or operator would notice is written down there, in the same commit** |
+
+**The changelog format**, in one sentence: it follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — the categories
+Added / Changed / Deprecated / Removed / Fixed / Security — but since Freilauf
+has no releases (it is deployed from `main` whenever something lands), a section
+is not a version but a **day**, headed by its ISO 8601 date (`YYYY-MM-DD`),
+newest at the top. So a change goes into today's section, and today's section is
+created when the day's first change lands. An entry says what changed for
+somebody who uses or operates the hub, not which function was renamed; a unit
+test (`test/unit.mjs`, group "Docs") checks that the dates are real ISO dates in
+strictly descending order, because entries written out of order is the one way
+a chronology quietly stops being one.
 
 **Keep `SETUP_WITH_AGENT.md` current.** It is the one document a stranger's
 agent acts on, so it goes stale in the most expensive way — the reader is a
