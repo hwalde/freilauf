@@ -245,8 +245,83 @@ export function writeHarnessHooks(harness, workdir) {
  * same trap the worktree extras once fell into).
  */
 export function harnessOwnedPaths(harness) {
-  return (getHarness(harness)?.hookFiles?.({ flReport: 'x' }) ?? [])
-    .map(d => String(d.path).split('/')[0])
+  // TASK_DIR is unconditional: it is written before the CLI starts and belongs
+  // to the hub, exactly like a hook file. A run that never needed it simply
+  // has no such directory, and naming a path that is not there costs nothing —
+  // whereas a task file the finish gate counted as the agent's own work would
+  // hold every offloaded run at "commit your changes first".
+  return [TASK_DIR, ...(getHarness(harness)?.hookFiles?.({ flReport: 'x' }) ?? [])
+    .map(d => String(d.path).split('/')[0])]
+}
+
+/**
+ * Where the task goes when it is too long to be handed to the CLI as an
+ * argument, and the sentence that points the agent at it.
+ *
+ * `opencode --prompt` puts the text into the editor and only sends it off by
+ * itself up to a certain length — measured with 1.18.23: ~2 KB goes, ~20 KB
+ * stays put. `fl-start` presses Enter once after the TUI has drawn, and that
+ * nudge usually saves it; usually is the problem. Measured 2026-09-04, run
+ * 1c0076ec: opencode initialised at 23:32:42 and then never created a session
+ * at all — no `created`, no `loop`, no `stream`. The tmux session stood, the
+ * pane was alive, the hub said `running`, and nothing whatsoever had been
+ * asked of the model. That is the most expensive shape a failure can take,
+ * because every layer above it reads as healthy.
+ *
+ * So above a harness-declared size the TASK is written to a file and the CLI
+ * gets a SHORT prompt instead: Freilauf's own framing — the platform rules,
+ * which are what the run is steered by — plus one sentence naming the file.
+ *
+ * The file lives INSIDE the worktree, in a hidden directory, and that is the
+ * whole point: a coding agent may sandbox itself to its working directory and
+ * ask before leaving it (opencode's `external_directory`, see docs/plugins.md),
+ * so anything outside is a permission question waiting to happen. Inside the
+ * working directory there is no question to answer. `harnessOwnedPaths()`
+ * keeps the finish gate from reading it as uncommitted work, and the agent is
+ * asked to delete it once it has read it — so the ordinary case leaves nothing
+ * behind at all.
+ */
+export const TASK_DIR = '.freilauf'
+export const TASK_FILE = `${TASK_DIR}/task.md`
+
+export const TASK_POINTER = `# Your actual task
+
+Your actual task is written in the file \`{task_file}\` (relative to your working directory, and the absolute path is \`{task_abs}\`).
+
+Read that file NOW, in full, and follow what it says. It is the task — everything below this line is only the platform's own rules for how the run is reported.
+
+It is a file the platform wrote for you, not part of the repository: delete it as soon as you have read it (\`rm {task_file}\`), and never commit it.`
+
+/**
+ * Splits a composed prompt into "what the agent is asked to do" and "how this
+ * platform runs it", and offloads the first half to a file when the harness
+ * says the whole thing is too long to hand over as an argument.
+ *
+ * Returns `{ prompt, taskFile }` — `prompt` is what the CLI is launched with,
+ * `taskFile` the absolute path of the file that was written, or null when
+ * nothing was offloaded. The caller writes the FULL text to the run directory
+ * either way: that file is the record of what this run was asked, and it must
+ * not start depending on whether an offload happened.
+ */
+export function offloadPrompt(harness, workdir, task, platform) {
+  const ganz = [task, platform].filter(Boolean).join('\n\n')
+  const grenze = getHarness(harness)?.launch?.promptFile?.maxBytes
+  if (!grenze || Buffer.byteLength(ganz, 'utf8') <= grenze || !task?.trim()) {
+    return { prompt: ganz, taskFile: null }
+  }
+  const abs = join(workdir, TASK_FILE)
+  mkdirSync(join(workdir, TASK_DIR), { recursive: true })
+  // A `.gitignore` of `*` inside the directory ignores everything in it —
+  // itself included, so nothing here is ever tracked. It has to be git's own
+  // answer and not just ours: `harnessOwnedPaths()` keeps the FINISH GATE from
+  // counting the file, but the agent is told to run `git add -A && git commit`,
+  // and that would commit the platform's task file into the operator's
+  // repository. Self-contained on purpose — `.git/info/exclude` lives in the
+  // COMMON directory of a linked worktree and would reach into every other one.
+  writeFileSync(join(workdir, TASK_DIR, '.gitignore'), '*\n', { mode: 0o600 })
+  writeFileSync(abs, task, { mode: 0o600 })
+  const zeiger = TASK_POINTER.replaceAll('{task_file}', TASK_FILE).replaceAll('{task_abs}', abs)
+  return { prompt: [zeiger, platform].filter(Boolean).join('\n\n'), taskFile: abs }
 }
 
 /**
@@ -499,11 +574,29 @@ export async function launchRun(runId) {
     branch: branchExpected, base: repo.base_branch || 'main',
     hubMerges: repo.merge_mode === 'hub', keepOnBranch: !!run.keep_on_branch,
   })
-  const fullPrompt = [run.prompt, repoPromptZusatz(repo.prompt), run.prompt_extra?.trim(),
-    skillPromptZusatz(run.skills),
-    platformSuffix({ ...run, id: runId, workdir_effective: workdir }, branchRule, settings, repo).trim()]
-    .filter(Boolean).join('\n\n')
+  // The task and the platform's own framing are composed separately, because
+  // they are what `offloadPrompt()` splits on: a CLI that cannot be handed a
+  // long argument gets the framing plus a pointer, and the task goes to a file.
+  const taskPrompt = [run.prompt, repoPromptZusatz(repo.prompt), run.prompt_extra?.trim(),
+    skillPromptZusatz(run.skills)].filter(Boolean).join('\n\n')
+  const platformPrompt = platformSuffix({ ...run, id: runId, workdir_effective: workdir },
+    branchRule, settings, repo).trim()
+  const fullPrompt = [taskPrompt, platformPrompt].filter(Boolean).join('\n\n')
+  // prompt.md is the RECORD — always the whole thing, offload or not. What the
+  // CLI is actually launched with is a separate file, so "what was this run
+  // asked?" keeps one answer.
   writeFileSync(join(runDir, 'prompt.md'), fullPrompt, { mode: 0o600 })
+  const offload = offloadPrompt(run.harness, workdir, taskPrompt, platformPrompt)
+  let promptFile = join(runDir, 'prompt.md')
+  if (offload.taskFile) {
+    promptFile = join(runDir, 'launch-prompt.md')
+    writeFileSync(promptFile, offload.prompt, { mode: 0o600 })
+    addEvent(runId, 'prompt_offloaded', {
+      bytes: Buffer.byteLength(fullPrompt, 'utf8'),
+      launch_bytes: Buffer.byteLength(offload.prompt, 'utf8'),
+      file: offload.taskFile,
+    })
+  }
 
   // Hook files into the workspace (cursor: the 'stop' hook that reports the end
   // of a turn). Fail-soft: a run without hooks still works, it just falls back
@@ -548,7 +641,7 @@ export async function launchRun(runId) {
     '--env', `CC_RUN_ID=${runId}`,
     '--env', `CC_HUB_URL=http://127.0.0.1:${env('LOCAL_PORT') ?? '8791'}`,
     '--log', join(runDir, 'log.txt'), '--keep',
-    '-f', join(runDir, 'prompt.md'), workdir]
+    '-f', promptFile, workdir]
   const modelArgs = harnessModelArgs(run, { externalDirs: runExternalDirs(run, repo, runDir) })
   args.unshift(...modelArgs.args)
   if (modelArgs.fehlt.length) {

@@ -1338,6 +1338,52 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('A prompt too long to hand over as an argument (offloadPrompt)')
+
+  const { offloadPrompt, TASK_FILE, TASK_DIR, harnessOwnedPaths: eigenePfade } =
+    await import('../server/runner.mjs')
+  const langeAufgabe = 'AUFGABE '.repeat(700)   // ~5.6 KB, past opencode's 4000
+
+  await pruefe('a short prompt is passed through completely unchanged', () => {
+    const r = offloadPrompt('opencode', '/nowhere', 'do X', 'PLATFORM')
+    gleich(r.taskFile, null, 'nothing written')
+    gleich(r.prompt, 'do X\n\nPLATFORM', 'task and platform, exactly as before')
+  })
+
+  await pruefe('a long one leaves the task in the worktree and points at it', () => {
+    const wt = mkdtempSync(join(tmpdir(), 'fl-offload-'))
+    const r = offloadPrompt('opencode', wt, langeAufgabe, 'PLATFORM RULES')
+    gleich(r.taskFile, join(wt, TASK_FILE), 'written inside the WORKTREE — no permission question')
+    gleich(readFileSync(r.taskFile, 'utf8'), langeAufgabe, 'the task, byte for byte')
+    wahr(r.prompt.includes(TASK_FILE), 'the launch prompt names the file')
+    wahr(r.prompt.trimEnd().endsWith('PLATFORM RULES'), 'the platform framing stays inline')
+    wahr(!r.prompt.includes('AUFGABE AUFGABE'), 'the task itself does NOT travel as an argument')
+    wahr(Buffer.byteLength(r.prompt) < 1500, `the launch prompt is short (${Buffer.byteLength(r.prompt)} B)`)
+    // Self-ignoring, so `git add -A` in the agent's own final commit cannot
+    // sweep the platform's task file into the operator's repository.
+    gleich(readFileSync(join(wt, TASK_DIR, '.gitignore'), 'utf8'), '*\n', 'the directory ignores itself')
+    rmSync(wt, { recursive: true, force: true })
+  })
+
+  await pruefe('a harness that declares no limit never offloads', () => {
+    // claude and cursor take the prompt as an argument without complaint; only
+    // a harness that says it cannot gets the indirection.
+    for (const h of ['claude', 'cursor', 'hermes']) {
+      const r = offloadPrompt(h, '/nowhere', langeAufgabe, 'P')
+      gleich(r.taskFile, null, `${h}: nothing written`)
+      wahr(r.prompt.includes('AUFGABE'), `${h}: the task travels as before`)
+    }
+  })
+
+  await pruefe('the finish gate does not read the task file as the agent\'s work', () => {
+    // Every harness, unconditionally: the directory is the hub's, and a run
+    // that offloaded would otherwise sit at "commit your changes first".
+    for (const h of ['opencode', 'claude', 'cursor']) {
+      wahr(eigenePfade(h).includes(TASK_DIR), `${h}: ${TASK_DIR} is hub-owned`)
+    }
+  })
+
+  // ------------------------------------------------------------------
   gruppe('cursor: when is a run over? (hooks + transcript)')
 
   const { stateFromJsonl, projectDirs } = await import('../server/cursor-transcript.mjs')
@@ -1373,8 +1419,10 @@ try {
   await pruefe('the hub knows the hook file is its own, not the agent\'s work', () => {
     // Otherwise every cursor worktree counts as dirty forever and is never
     // removed — the same trap the worktree extras once fell into.
-    gleich(harnessOwnedPaths('cursor').join(','), '.cursor', 'cursor')
-    gleich(harnessOwnedPaths('claude').length, 0, 'claude brings nothing into the worktree')
+    // '.freilauf' stands in front of every harness's own entries: it is where an
+    // offloaded task goes (offloadPrompt), and it belongs to the hub the same way.
+    gleich(harnessOwnedPaths('cursor').join(','), '.freilauf,.cursor', 'cursor: the task dir and its hook file')
+    gleich(harnessOwnedPaths('claude').join(','), '.freilauf', 'claude brings no hook file of its own')
   })
 
   await pruefe('an existing hooks.json is never overwritten', () => {

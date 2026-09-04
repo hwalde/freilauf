@@ -2949,6 +2949,30 @@ errors (`post_api_request` only fires after success).
   from the launcher after the TUI has drawn (it waits for the status bar, not
   for a fixed number of seconds). Enter on an empty editor is a no-op in
   opencode — measured — so the case that submitted by itself is not harmed.
+  **And the nudge is not enough on its own.** Measured 2026-09-04, run
+  1c0076ec: opencode initialised at 23:32:42 and then never created a session
+  at all — no `created`, no `loop`, no `stream` in its log. The tmux session
+  stood, the pane was alive, the hub said `running`, and nothing whatsoever had
+  been asked of the model; the run would have sat there until a human closed
+  it. That is the most expensive shape a failure can take, because every layer
+  above it reads as healthy. So above a harness-declared size the TASK is
+  written to a file and the CLI is launched with the platform's own framing
+  plus one sentence naming that file — `offloadPrompt()` in `runner.mjs`,
+  `launch.promptFile.maxBytes` in the plugin (opencode: 4000; the platform
+  framing alone is ~3 KB, and across the 297 prompts on this machine the median
+  is 4.2 KB and the 90th percentile 13.6 KB, so the long tail IS the
+  population). Three things make that safe, and each is a way it would
+  otherwise go wrong: the file lives INSIDE the worktree
+  (`.freilauf/task.md`) because anything outside is an
+  `external_directory` question waiting to happen — see the next entry;
+  `harnessOwnedPaths()` names `.freilauf` for **every** harness so the finish
+  gate does not read it as uncommitted work; and the directory carries a
+  `.gitignore` of `*` that ignores itself, because the agent is told to run
+  `git add -A && git commit` and would otherwise commit the platform's task
+  file into the operator's repository. The agent is asked to delete the file
+  once it has read it, so the ordinary case leaves nothing behind — measured
+  end to end: `Read .freilauf/task.md` → work done → `rm`, and `git status`
+  showed only the agent's own file.
 - **`opencode --auto` REFUSES the `external_directory` permission, it does not
   approve it.** Since opencode 1.18.27 every path outside the working directory
   goes through a permission called `external_directory`, and `--auto` is the one

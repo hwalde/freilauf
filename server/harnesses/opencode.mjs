@@ -64,6 +64,20 @@ const plugin = {
     interactiveArgs: ['--auto'],
     stderrLog: '{home}/.local/share/opencode/log/{session}-stderr.log',
     submitNudge: { waitFor: 'ctrl+p', timeoutSec: 90 },
+    // Above this the TASK is written into the worktree and the CLI is launched
+    // with the platform's framing plus a pointer at that file
+    // (`offloadPrompt()` in runner.mjs). The nudge above is the same problem's
+    // first answer and it is not enough on its own: measured 2026-09-04, a
+    // 13.5 KB prompt left opencode without a session at all — initialised,
+    // never asked anything, tmux session standing, hub saying `running`.
+    //
+    // 4000 bytes, and the number is a measurement rather than a taste. The
+    // platform framing alone is ~3 KB, so this offloads exactly the runs whose
+    // TASK is big enough to be worth a file, and leaves the small ones — the
+    // ones opencode submits by itself (~2 KB measured) — untouched. Across the
+    // 297 prompts on this machine the median is 4.2 KB and the 90th percentile
+    // 13.6 KB: the long tail is the real population here, not an outlier.
+    promptFile: { maxBytes: 4000 },
   },
 
   subscription: false,
