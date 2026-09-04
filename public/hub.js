@@ -1274,6 +1274,116 @@
     syncFilter()
   }
 
+  // ---- overview: pick several runs, archive them in one gesture ----
+  //
+  // Forty finished runs of which four are worth keeping used to be forty
+  // clicks. "Select all", untick the four, one button.
+  //
+  // The selection lives in a Set and NOT only in the checkboxes: the live
+  // channel replaces a row whenever its run changes and the whole tbody
+  // whenever a run appears, so a tick that lived only in the DOM would be
+  // thrown away by somebody else's run starting. syncRunPicks() writes the Set
+  // back onto whatever boxes are on the page now, and the live channel calls it
+  // after every swap.
+  var syncRunPicks = function () {}
+  var runsTable = document.querySelector('table.list.runs')
+  if (runsTable && document.getElementById('runs-archive-selected')) {
+    var picked = {}                                   // id → true, the selection itself
+    var allBox = document.getElementById('runs-all')
+    var archiveBtn = document.getElementById('runs-archive-selected')
+
+    function pickBoxes() {
+      return Array.from(document.querySelectorAll('#runs-body .run-pick'))
+    }
+    function pickedIds() { return Object.keys(picked) }
+
+    syncRunPicks = function () {
+      var boxes = pickBoxes()
+      var present = {}
+      boxes.forEach(function (box) { present[box.value] = true })
+      // A run that has left the table (archived, filtered away) leaves the
+      // selection with it — a count promising rows nobody can see is a lie.
+      pickedIds().forEach(function (id) { if (!present[id]) delete picked[id] })
+      boxes.forEach(function (box) { if (!box.disabled) box.checked = !!picked[box.value] })
+      var n = pickedIds().length
+      archiveBtn.disabled = n === 0
+      archiveBtn.textContent = T('js.runs_archive_selected', 'Archive selected ({n})', { n: n })
+      allBox.checked = boxes.length > 0 && n === boxes.length
+      allBox.indeterminate = n > 0 && n < boxes.length
+    }
+
+    function archiveRuns(ids) {
+      if (!ids.length) return
+      // Optimistic, like the sessions page: the rows dim in the same tick and
+      // the request goes off behind them. Only what the server confirms leaves
+      // the table; a refusal hands its row back.
+      ids.forEach(function (id) {
+        var tr = document.getElementById('run-' + id)
+        if (!tr) return
+        tr.classList.add('archiving')
+        var box = tr.querySelector('.run-pick'); if (box) { box.checked = false; box.disabled = true }
+      })
+      ids.forEach(function (id) { delete picked[id] })
+      syncRunPicks()
+
+      function hergeben(id) {                          // give the row back to the operator
+        var tr = document.getElementById('run-' + id)
+        if (!tr) return
+        tr.classList.remove('archiving')
+        var box = tr.querySelector('.run-pick'); if (box) box.disabled = false
+      }
+
+      var body = new URLSearchParams()
+      ids.forEach(function (id) { body.append('run', id) })
+      fetch('/api/runs/archive', { method: 'POST', body: body, headers: { accept: 'application/json' } })
+        .then(function (r) { return r.json() })
+        .then(function (j) {
+          var fehler = []
+          ;(j.results || []).forEach(function (x) {
+            if (x.ok) {
+              // The live channel would remove the row too (the fragment answers
+              // 204 for an archived run); doing it here just makes it immediate.
+              var tr = document.getElementById('run-' + x.run)
+              if (tr) tr.remove()
+            } else {
+              hergeben(x.run)
+              if (x.error) fehler.push(x.error)
+            }
+          })
+          syncRunPicks()
+          if (fehler.length) {
+            alert(T('js.runs_archive_failed', 'Not every run could be archived: ') + fehler[0])
+          }
+        })
+        .catch(function (err) {
+          ids.forEach(hergeben)
+          syncRunPicks()
+          alert(T('js.runs_archive_failed', 'Not every run could be archived: ') + err.message)
+        })
+    }
+
+    // Delegated: the tbody is replaced by the live channel, so a listener bound
+    // to today's checkboxes would be gone after the first update.
+    runsTable.addEventListener('change', function (ev) {
+      var box = ev.target
+      if (!box.classList || !box.classList.contains('run-pick')) return
+      if (box.checked) picked[box.value] = true
+      else delete picked[box.value]
+      syncRunPicks()
+    })
+    allBox.addEventListener('change', function () {
+      var an = allBox.checked
+      pickBoxes().forEach(function (box) {
+        if (box.disabled) return
+        if (an) picked[box.value] = true
+        else delete picked[box.value]
+      })
+      syncRunPicks()
+    })
+    archiveBtn.addEventListener('click', function () { archiveRuns(pickedIds()) })
+    syncRunPicks()
+  }
+
   // ---- tmux memory cleanup: sidebar button + Sessions page box ----
   // Both triggers (the small button in the sidebar's tmux block and the button
   // on the Sessions page) open the SAME modal and ask the same question — free
@@ -1560,9 +1670,13 @@
       if (zeile.querySelector('.title-inline input')) return
       const html = await holeFragment('/api/fragments/run-row?id=' + encodeURIComponent(runId)
         + (repo ? '&repo=' + encodeURIComponent(repo) : ''))
-      if (html === null) { zeile.remove(); return }
+      if (html === null) { zeile.remove(); syncRunPicks(); return }
       const neu = zuElementen(html)[0]
       if (neu) zeile.replaceWith(neu)
+      // The fresh row comes from the server unticked; the selection lives in the
+      // Set above, so it is written back on. Also the moment a run BECOMES
+      // archivable (it finished) and gets a checkbox at all.
+      syncRunPicks()
     }
 
     // A run this page does not show yet: the row cannot be created in place,
@@ -1584,6 +1698,7 @@
       if (html === null) return
       if (document.querySelector('#runs-body .title-inline input')) return
       tauscheNachId(html)
+      syncRunPicks()    // every box in the new tbody starts unticked (see there)
     }
 
     async function detailAktualisieren(runId) {

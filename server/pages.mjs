@@ -853,11 +853,20 @@ export function runRow(r, ctx) {
   // One click moves a finished run into the archive — the record stays, it just
   // leaves the overview. Only finished runs may go: a running or waiting one
   // still has work to do and must not hide (the server enforces this too).
-  const archivBtn = ['done', 'failed', 'aborted'].includes(r.status)
+  const archivierbar = ['done', 'failed', 'aborted'].includes(r.status)
+  const archivBtn = archivierbar
     ? `<form method="post" action="/api/runs/${r.id}/archive" class="inline" onclick="event.stopPropagation()">
           <input type="hidden" name="back" value="/?repo=${repoId}">
           <button type="submit" class="act" title="${e(t('overview.archive'))}" aria-label="${e(t('overview.archive'))}">${e(t('overview.archive_short'))}</button></form>`
     : ''
+  // The checkbox for the bulk archive, and only where archiving is allowed at
+  // all: a run still in flight cannot be selected, so "select all" can never
+  // promise something the server would refuse. The cell swallows the row click
+  // like the title cell does — ticking a box must not navigate away.
+  const pickCell = archivierbar
+    ? `<td class="pick-cell" onclick="event.stopPropagation()">
+        <input type="checkbox" class="run-pick" value="${e(r.id)}" aria-label="${e(t('overview.pick', { title: titel }))}"></td>`
+    : '<td class="pick-cell"></td>'
   // The budget gate held a run back and the operator disagrees — one click in
   // the row starts it anyway (POST /start, no gate). Same pattern as the
   // archive button: a small action button, hover for the full word, and the
@@ -877,6 +886,7 @@ export function runRow(r, ctx) {
   // ~500px between them, and two more were a technical pair each
   // (harness/model, branch/PR) that reads as one line.
   return `<tr id="run-${e(r.id)}" onclick="location='/runs/${r.id}'">
+      ${pickCell}
       <td class="status-cell">
         <span class="status-line">${AMPEL_DOT[ampel(r)]()} ${e(statusText(displayStatus(r)))}</span>
         ${wartend ? `<div class="dim">${wartetAuf(r)}</div>` : ''}
@@ -916,7 +926,7 @@ function resolvedTitle(runId) {
 }
 
 /** How many columns the overview has — the empty state has to span all of them. */
-const OVERVIEW_COLS = 7
+const OVERVIEW_COLS = 8
 
 /** The rows of the overview — including the one row that says there are none. */
 export function runRows(runs, ctx) {
@@ -960,9 +970,23 @@ export function runsBody(runs, ctx) {
   return `<tbody id="runs-body"${ctx.status ? ` data-status="${e(ctx.status)}"` : ''}${ctx.incidents ? ' data-incidents="1"' : ''}>${runRows(runs, ctx)}</tbody>`
 }
 
-/** The overview table around the rows; the tbody is the anchor for new rows. */
+/**
+ * The overview table around the rows; the tbody is the anchor for new rows.
+ *
+ * Above it stands the bulk bar — the answer to a list of forty finished runs of
+ * which four are worth keeping: tick "select all", untick those four, archive
+ * the rest in one gesture. The bar sits OUTSIDE the tbody on purpose, because
+ * the live channel replaces the tbody whenever a run appears; a control inside
+ * it would be rebuilt (and reset) by somebody else's run starting. The button
+ * is disabled until something is selected, and hub.js keeps its label counting.
+ */
 export function overviewTable(runs, ctx) {
-  return `<div class="table-wrap"><table class="list"><thead><tr><th>${e(t('overview.status'))}</th><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.started'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch_pr'))}</th><th>${e(t('incidents.title'))}</th></tr></thead>
+  return `<div class="bulk-bar">
+    <label class="chk"><input type="checkbox" id="runs-all"> ${e(t('overview.select_all'))}</label>
+    <button type="button" id="runs-archive-selected" disabled>${e(t('overview.archive_selected', { n: 0 }))}</button>
+    <span class="dim">${e(t('overview.select_hint'))}</span>
+  </div>
+  <div class="table-wrap"><table class="list runs"><thead><tr><th class="pick-col"></th><th>${e(t('overview.status'))}</th><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.started'))}</th><th>${e(t('overview.duration_expected'))}</th><th>${e(t('overview.branch_pr'))}</th><th>${e(t('incidents.title'))}</th></tr></thead>
   ${runsBody(runs, ctx)}</table></div>`
 }
 

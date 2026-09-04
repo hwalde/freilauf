@@ -102,6 +102,44 @@ function answer(req, res, code, obj, backTo) {
   return json(res, code, obj)
 }
 
+/**
+ * Move ONE run into the archive — the record (report, log, incidents) stays
+ * intact and reachable, it only leaves the overview. ONLY finished runs: a
+ * running one is still being watched, and a deferred/scheduled one would simply
+ * start later anyway — the archive must not hide a run that still has work to do.
+ *
+ * One function because two routes archive: the single button in a row and the
+ * overview's multi-select. Two copies of this rule is how one of them would
+ * eventually archive a running run.
+ *
+ * It only writes the RECORD and returns the session that should go with it —
+ * closing that session is the caller's step, so a bulk archive can end forty
+ * sessions in one call instead of one at a time.
+ */
+function archiveRecord(run) {
+  if (['running', 'waiting_help', 'scheduled', 'deferred'].includes(run.status)) {
+    return { error: t('api.archive_only_finished'), session: null }
+  }
+  db.prepare(`UPDATE runs SET archived_at=COALESCE(archived_at, datetime('now')) WHERE id=?`).run(run.id)
+  announceRun(run.id, 'archived')
+  return { error: null, session: run.tmux_session || null }
+}
+
+/**
+ * Archiving is the operator's "put this finished work away" — the sessions those
+ * runs left standing go with it, by default right away (keep 0). A configured
+ * delay or a switched-off rule leaves them to the watcher
+ * (closeArchivedSessions there). killSessions reconciles the records exactly
+ * like the sessions page does, and never throws the archive itself off course.
+ */
+async function closeArchivedSessions(sessions) {
+  if (!sessions.length) return
+  const { archiveSessionKeepMs, killSessions } = await import('./sessions.mjs')
+  if (archiveSessionKeepMs(allSettings()) !== 0) return
+  try { await killSessions(sessions, 'archive') }
+  catch (err) { console.error('[archive]', err.message) }
+}
+
 // ---------------- router ----------------
 export async function route(req, res) {
   const url = new URL(req.url, 'http://x')
@@ -498,24 +536,33 @@ async function api(req, res, url) {
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/archive$/))) {
     const run = getRun(m[1])
     if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
-    if (['running', 'waiting_help', 'scheduled', 'deferred'].includes(run.status)) {
-      return answer(req, res, 400, { ok: false, error: t('api.archive_only_finished') }, `/runs/${run.id}`)
-    }
-    db.prepare(`UPDATE runs SET archived_at=COALESCE(archived_at, datetime('now')) WHERE id=?`).run(run.id)
-    announceRun(run.id, 'archived')
-    // Archiving is the operator's "put this finished work away" — the session
-    // it left standing goes with it, by default right away (keep 0). A configured
-    // delay or a switched-off rule leaves it to the watcher (closeArchivedSessions).
-    // killSessions reconciles the record exactly like the sessions page does.
-    if (run.tmux_session) {
-      const { archiveSessionKeepMs, killSessions } = await import('./sessions.mjs')
-      if (archiveSessionKeepMs(allSettings()) === 0) {
-        try { await killSessions([run.tmux_session], 'archive') }
-        catch (err) { console.error('[archive]', err.message) }
-      }
-    }
+    const { error, session } = archiveRecord(run)
+    if (error) return answer(req, res, 400, { ok: false, error }, `/runs/${run.id}`)
+    await closeArchivedSessions(session ? [session] : [])
     const b = await form(req)
     return answer(req, res, 200, { ok: true, archived: true }, b.back || `/runs/${run.id}`)
+  }
+  // Several runs in one gesture — the overview's multi-select. A list of forty
+  // finished runs of which four are worth keeping was forty clicks before this.
+  // Every run goes through the SAME archiveRecord() the single route uses, so
+  // one path cannot come to mean something else than the other; a refusal
+  // (a run still in flight) does not hold up the rest, it is reported per run,
+  // and the sessions are closed in ONE call afterwards instead of one at a time.
+  if (req.method === 'POST' && path === '/api/runs/archive') {
+    const b = await form(req)
+    const ids = b.run_list ?? (b.run ? [b.run] : [])
+    if (!ids.length) return answer(req, res, 400, { ok: false, error: t('api.no_run_given') }, b.back || '/')
+    const results = []
+    const sessions = []
+    for (const id of ids) {
+      const run = getRun(String(id))
+      if (!run) { results.push({ run: String(id), ok: false, error: t('api.unknown_run') }); continue }
+      const { error, session } = archiveRecord(run)
+      if (session) sessions.push(session)
+      results.push({ run: run.id, ok: !error, error: error ?? null })
+    }
+    await closeArchivedSessions(sessions)
+    return answer(req, res, 200, { ok: results.every(r => r.ok), results }, b.back || '/')
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/unarchive$/))) {
     const run = getRun(m[1])
