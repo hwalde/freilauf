@@ -61,6 +61,12 @@ a day on which nothing was released.
 
 ### Fixed
 
+- The OpenRouter serving-provider choice (open / auto / pin) is visible again
+  on a form that OPENS with OpenRouter already selected — a favorite as
+  template, an agent's stored setup, or the last run's choice. The block was
+  only shown when the provider was (re-)picked by hand, so the auto/pin
+  decision silently stayed at "open" for everyone who did not re-select the
+  model they had already selected.
 - The agent skills refuse to build a run or an agent without a model provider.
   A coding agent that is not on a subscription needs one — even where only one
   is available — and the hub itself accepts an empty field, because that is its

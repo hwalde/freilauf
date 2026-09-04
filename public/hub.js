@@ -963,6 +963,17 @@
         // programmatic value assignment above fires no 'change' event, so the
         // field would stay hidden: refresh it now that the combination stands.
         ladeEffort()
+        // The same holds for the routing block, and it is the more expensive
+        // half: a form that OPENS with OpenRouter already selected (a favorite
+        // template, an agent's stored setup) kept the block hidden until the
+        // operator touched the provider select — the auto/pin choice existed
+        // only for whoever re-picked a model they had already picked. The init
+        // call below could not cover this: it runs before this fetch has
+        // filled the select, and the two init-time endpoint/preview loads with
+        // it. All three run here, where the pre-selected provider is real.
+        syncRouting()
+        if (provSel.value === 'openrouter' && orMode() === 'pin') ladeEndpunkte()
+        if (provSel.value === 'openrouter' && orMode() === 'auto') ladeAutoVorschau()
       } catch {
         provHint.textContent = T('js.provider_list_unreachable', 'provider list unreachable — type the model freely')
       }
@@ -1187,8 +1198,6 @@
     syncRouting()
     ladeProvider()
     ladeEffort()
-    if (provSel.value === 'openrouter' && orMode() === 'pin') ladeEndpunkte()
-    if (provSel.value === 'openrouter' && orMode() === 'auto') ladeAutoVorschau()
   }
 
   // ---- send text into a session / end run (detail page) ----

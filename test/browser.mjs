@@ -999,6 +999,47 @@ try {
     await p.close()
   })
 
+  await pruefe('a form that OPENS with OpenRouter already selected shows the routing block at once', async () => {
+    // The regression this pins: ladeProvider() restores the pre-selected
+    // provider programmatically — and a programmatic assignment fires no
+    // 'change' event, so syncRouting() never ran. A favorite template or an
+    // agent's stored setup opened the form with the block hidden until the
+    // operator re-picked the model they had already picked. Both halves of the
+    // page are intercepted: the server-rendered preselection is set the way
+    // the server really renders it for a template (data-gewaehlt, harness
+    // selected), and /api/providers is patched because this sandbox has no
+    // OpenRouter key — what is under test is hub.js's init path, not the key.
+    const p = await neueSeite(null)
+    await p.route('**/api/providers?*', async (route) => {
+      const j = await (await route.fetch()).json()
+      if (!j.subscription && !j.provider.some(x => x.id === 'openrouter')) {
+        j.provider = [{ id: 'openrouter', label: 'OpenRouter' }, ...j.provider]
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(j) })
+    })
+    await p.route('**/api/models*', route => route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ ok: true, models: [{ id: 'z-ai/glm-5.3-flash', name: 'GLM', tools: true }] }),
+    }))
+    await p.route('**/runs/new*', async (route) => {
+      const antwort = await route.fetch()
+      const html = (await antwort.text())
+        .replace(/id="prov" data-gewaehlt="[^"]*"/, 'id="prov" data-gewaehlt="openrouter"')
+        .replace(/(<select name="harness">)([\s\S]*?)(<\/select>)/, (_m, auf, innen, zu) =>
+          auf + innen
+            .replace(/ selected/g, '')
+            .replace(/<option value="opencode"/, '<option value="opencode" selected') + zu)
+      await route.fulfill({ response: antwort, body: html, contentType: 'text/html; charset=utf-8' })
+    })
+    await p.goto(sk.basis + `/runs/new?repo=${repoId}`, { waitUntil: 'load' })
+    wahr(await p.$eval('select[name=harness]', s => s.value === 'opencode'), 'the page opens on opencode, preselected by the template')
+    await wartePage(p, () => document.getElementById('or-routing').hidden === false, null,
+      'the routing block to be visible without a single interaction')
+    wahr(await p.$eval('#prov', s => s.value === 'openrouter'), 'and the provider really is the pre-selected OpenRouter')
+    sauber(p)
+    await p.close()
+  })
+
   await pruefe('the goal belongs to the coding agent that knows one — hidden means not submitted', async () => {
     // A hidden field that still submits is a text the operator cannot see and
     // cannot correct: switching the coding agent would silently send along a
