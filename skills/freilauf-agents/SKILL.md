@@ -146,7 +146,7 @@ an empty one. The write is `POST /agents/edit` for a new agent and
 | `flow_when_<flowId>` | — | `always` (default) / `done` / `failed` / `not_done` / `aborted` |
 | `schedule_kind` | — | see §4; absent means `manuell` |
 | `schedule_days` | with `woechentlich` | **repeated**, `0`=Sunday … `6`=Saturday |
-| `schedule_time` | with `woechentlich` | `HH:MM`, the hub machine's local time. **Several are allowed**, comma-separated (`08:00,11:00`) or as a repeated field — they then apply to every selected day |
+| `schedule_time` | with `woechentlich` | `HH:MM`, the hub machine's local time. **Several are allowed**, but only as a **repeated** field (`schedule_time=08:00 schedule_time=11:00`), never comma-joined — one comma-joined value is refused as an invalid time — and they then apply to every selected day |
 | `schedule_slots` | instead of the two above | different times per weekday, as JSON: `{"2":["08:00","11:00"],"3":["14:17"]}`. It **outranks** `schedule_days`/`schedule_time`, so send either this or those two, never both |
 | `schedule_weeks` | with `woechentlich` | `1`–`4` |
 | `schedule_anchor` | when `schedule_weeks` > 1 | `YYYY-MM-DD` |
@@ -353,9 +353,10 @@ is `../freilauf-flows/SKILL.md`.
 - **`einmalig` rewrites itself.** After it fires, `schedule_kind` is `manuell`
   and `run_at` is NULL. An agent that "did not fire twice" fired once by design.
 - **Repeated fields need the value repeated on the command line**
-  (`skills=unlazy skills=other`), not comma-joined. `schedule_days` too —
-  `schedule_time` accepts both (`schedule_time=08:00 schedule_time=11:00` or
-  `schedule_time=08:00,11:00`).
+  (`skills=unlazy skills=other`), not comma-joined. `schedule_days` too, and so
+  is `schedule_time` — the server reads times through its `_list` field, which
+  does not split commas inside one element, so `schedule_time=08:00,11:00` is
+  refused as an invalid time. Repeat it: `schedule_time=08:00 schedule_time=11:00`.
 - **Weekday numbering is `0`=Sunday**, matching JavaScript's `getDay()`, in both
   `schedule_days` and the cron weekday field.
 - Creating an agent *and* starting a run in one JSON round trip:
