@@ -35,7 +35,7 @@ the pairing and that the CLAUDE.md contains nothing but the include.
 
 ## The public-facing documents, and who keeps them current
 
-Five files exist for people who are not us — they are the whole first
+Six files exist for people who are not us — they are the whole first
 impression, and a stale one costs more than a missing feature. They are part of
 a change, not a follow-up to it:
 
@@ -46,6 +46,23 @@ a change, not a follow-up to it:
 | `SETUP_WITH_AGENT.md` | **coding agents**, English only | how the system works and how to set it up, written to be handed to an agent. Linked from the top of all three READMEs |
 | `CONTRIBUTING.md` | contributors | PRs are welcome; the ground rules and the pre-submit checklist |
 | `CHANGELOG.md` | anyone asking what changed | **every change that a user or operator would notice is written down there, in the same commit** |
+| `ROADMAP.md` | anyone asking what is coming, English only | see below |
+
+**The roadmap is the changelog's mirror image, and it is deliberately
+incomplete.** `CHANGELOG.md` records everything a user would notice, in the
+commit that changed it; `ROADMAP.md` announces only the few changes big enough
+that somebody might plan around them — today that is exactly one, running
+agents in a sandbox ([SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md)). It says so
+about itself in its own first paragraph, because a roadmap read as a promise of
+completeness turns every unlisted feature into a surprise and every unshipped
+item into a broken promise. So: no dates, no version milestones (there are no
+releases to hang them on), and an item that lands moves OUT of the roadmap and
+into the changelog rather than being ticked off in place. It is **English
+only** — the one public-facing document besides the README that a reader might
+expect translated, and deliberately not, because a roadmap maintained in three
+languages goes stale in two of them; all three READMEs link it and name the
+language. It is also where feature requests are invited, so the GitHub issues
+URL lives there and in the three READMEs.
 
 **The changelog format**, in one sentence: it follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — the categories

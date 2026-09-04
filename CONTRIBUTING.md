@@ -5,6 +5,12 @@ agents or model providers, translations, documentation fixes — all of it. You 
 not need to ask first; a draft PR with a question in it is a perfectly good way
 to start a conversation.
 
+**Not writing code?** Wishes count too. [ROADMAP.md](ROADMAP.md) says what is
+already planned — it is a short list on purpose — and an
+[issue](https://github.com/hwalde/freilauf/issues) is the right place for
+anything that is not on it. "I tried to do X and Freilauf made it hard" is a
+useful report even without a proposed solution.
+
 If a coding agent is doing the work: point it at
 [SETUP_WITH_AGENT.md](SETUP_WITH_AGENT.md) and [AGENTS.md](AGENTS.md) first.
 Both are written to be read by agents.
@@ -21,7 +27,8 @@ Both are written to be read by agents.
   rather than leaving it out.
 - **The three READMEs are maintained together**: `README.md` (English, the
   reference), `README.zh-CN.md`, `README.de.md`. A change to one that belongs in
-  all three belongs in all three.
+  all three belongs in all three. `ROADMAP.md` is the deliberate exception among
+  the public-facing documents: English only, linked from all three.
 - **Keep `SETUP_WITH_AGENT.md` current.** If your change touches installation,
   the prompt an agent receives, the plugin contracts or the flow building
   blocks, update it in the same PR.

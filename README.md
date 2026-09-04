@@ -352,6 +352,12 @@ What changed, and when, is in [CHANGELOG.md](CHANGELOG.md). There are no
 releases — the hub is deployed from `main` — so it is grouped by day rather than
 by version number.
 
+What is coming is in [ROADMAP.md](ROADMAP.md) — deliberately not a complete
+list, but the few changes big enough to announce before they exist. **Feature
+requests are welcome**: open an
+[issue](https://github.com/hwalde/freilauf/issues) and tell me what you are
+missing.
+
 ## License
 
 [CC BY 4.0](LICENSE) — use it, change it, ship it commercially. Just give

@@ -372,6 +372,12 @@ Was sich wann geändert hat, steht in [CHANGELOG.md](CHANGELOG.md). Es gibt
 keine Releases — der Hub wird aus `main` deployt —, deshalb ist er nach Tagen
 gruppiert statt nach Versionsnummern.
 
+Was kommt, steht in [ROADMAP.md](ROADMAP.md) (auf Englisch) — bewusst keine
+vollständige Liste, sondern die wenigen Änderungen, die groß genug sind, um sie
+vorher anzukündigen. **Funktionswünsche sind willkommen:** mach ein
+[Issue](https://github.com/hwalde/freilauf/issues) auf und schreib, was dir
+fehlt.
+
 ## Lizenz
 
 [CC BY 4.0](LICENSE) — nutzen, ändern, kommerziell ausliefern. Nur die
