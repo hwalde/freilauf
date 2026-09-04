@@ -144,7 +144,13 @@ def body_from_row(a):
             for day in str(a.get("schedule_days") or "").split(","):
                 if day.strip() != "":
                     add("schedule_days", day.strip())
-            add("schedule_time", a.get("schedule_time"))
+            # schedule_time is stored comma-separated ('08:00,11:00'), but the
+            # server reads times through the _list path, which does NOT split
+            # commas inside one element. Send one repeated field per time, like
+            # the weekdays: `schedule_time=08:00 schedule_time=11:00`.
+            for time in str(a.get("schedule_time") or "").split(","):
+                if time.strip() != "":
+                    add("schedule_time", time.strip())
         add("schedule_weeks", a.get("schedule_weeks") or 1)
         if a.get("schedule_anchor"):
             add("schedule_anchor", a.get("schedule_anchor"))

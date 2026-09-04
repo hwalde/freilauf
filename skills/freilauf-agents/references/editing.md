@@ -40,7 +40,7 @@ converting. (This mirrors `setupToFormBody()` / `scheduleFields()` in the hub.)
 | `skills` (list of `"name"` or `"name:dial"`) | one `skills=<name>` per entry, plus `skill_regler_<name>=<dial>` where there is one |
 | `flows` (list of `{flowId, when}`) | one `flows=<flowId>` per entry, plus `flow_when_<flowId>=<when>` |
 | `schedule_days` (`"1,2,5"`) | one `schedule_days=<n>` per number |
-| `schedule_time` (`"08:00,11:00"`) | as it stands, or one `schedule_time=<HH:MM>` per time |
+| `schedule_time` (stored `"08:00,11:00"`) | one `schedule_time=<HH:MM>` per time — repeat the name. The comma-separated single form does **not** work here (see below) |
 | `schedule_slots` non-empty | send it as the JSON string it is, and send **neither** `schedule_days` nor `schedule_time`: the slots outrank both, and two statements about one schedule is one too many |
 | everything else | the same name, the value as a string; NULL becomes `''` |
 
@@ -89,8 +89,12 @@ fl-api --status --raw -X POST "/agents/edit?id=7" \
   schedule_time=06:00 schedule_weeks=1
 ```
 
-Several times on the same days: `schedule_time=08:00 schedule_time=11:00` (or
-`schedule_time=08:00,11:00`). Different times per weekday — Tuesday at 08:00 and
+Several times on the same days: `schedule_time=08:00 schedule_time=11:00`. The
+comma-separated spelling (`schedule_time=08:00,11:00`) is a stored-value form
+and is **not** accepted by `/agents/edit`: the server reads times through its
+`<name>_list` field, which treats one comma-joined element as a single (invalid)
+time and refuses with `Time is missing or invalid`. Repeat the name instead.
+Different times per weekday — Tuesday at 08:00 and
 11:00, Wednesday at 14:17 — is one field instead of those two:
 
 ```bash
