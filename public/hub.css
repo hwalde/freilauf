@@ -691,7 +691,7 @@ table.sessions tr.gone { opacity: .4; text-decoration: line-through; }
 table.sessions tr.failed { background: var(--err-soft); }
 .dot.gray { background: var(--dot-idle); }
 
-/* Overview: the bulk bar above the table, and the column its checkboxes sit in.
+/* Overview: the bulk bar under the table, and the column its checkboxes sit in.
    Same shape as the sessions bar — it is the same gesture (pick several rows,
    act on them at once), and two different-looking bars for one gesture would be
    two things to learn. A row on its way into the archive dims like a session on

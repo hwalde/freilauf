@@ -473,7 +473,8 @@ run whether it is archived or not.
 
 **And a list is put away in one gesture, not row by row.** Forty finished runs
 of which four are worth keeping were forty clicks; the overview therefore
-carries a checkbox per archivable row, a bulk bar above the table
+carries a checkbox per archivable row, a bulk bar UNDER the table (where the
+hand ends up after going down the list and deciding)
 ("select all", "Archive selected (n)") and `POST /api/runs/archive` with one
 `run=<id>` field per run — the same shape the sessions page's bulk end already
 had, because it is the same gesture. Four rules, each of them a way it would
