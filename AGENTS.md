@@ -499,7 +499,13 @@ newest-archived first with pagination (50 per page,
 `FREILAUF_ARCHIVE_PAGE_SIZE`) and a restore button
 (`POST /api/runs/<id>/unarchive`). Nothing else in the code filters on
 `archived_at` — the watcher, the flows and the incidents keep their view of a
-run whether it is archived or not.
+run whether it is archived or not. **One display does**, and for a reason that
+is about the display and not about incidents: the sidebar's incident count is a
+LINK into the overview, and no archived run is in an overview
+(`openIncidents()` in pages.mjs). Measured on this installation — two open
+incidents, both on runs the operator had archived, so two repos said "1 needs
+you" and both clicks landed on "no runs yet". A number that promises rows nobody
+can see is the same lie the run multi-select has a rule about.
 
 **And a list is put away in one gesture, not row by row.** Forty finished runs
 of which four are worth keeping were forty clicks; the overview therefore
@@ -1543,7 +1549,11 @@ incidents split the way `incidents.mjs` splits them (both counts link to
 `/?repo=…&incidents=1`, the overview filtered to the runs that carry an open
 incident — the same gesture as the work-in-flight counts: a click on a number
 shows the rows behind it; the filter travels as `data-incidents` on the tbody so
-live updates keep it), subscription usage and
+live updates keep it. **The number and that list are one set**: an archived
+run's incidents are not counted here, and where only hub-wide incidents
+(`run_id IS NULL` — the provider pulse, a lost tmux server) are open the count
+is rendered without a link, because the overview cannot show a row for them and
+they carry their own banner on every page), subscription usage and
 provider balances (`usagePanel()`, `id="usage-panel"`), and what every tmux
 session on the machine holds together (`memoryBlock()`, `id="side-mem"`).
 
@@ -1837,6 +1847,20 @@ the optional `repos.merge_check` **on the merged result**, and
 the push does the run become `done`, does the operator hear about it, do the other
 agents learn that `main` moved, and do the flows fire — a flow then sees a run
 whose work really is on `main`.
+
+**A push that fails for any OTHER reason waits, and the wait is a due time the
+loop honours — never a timer of its own** (`pushRetry`, `PUSH_RETRY_MS`). Five
+failures escalate; escalating clears `finish_state`, so nothing can pick the run
+back up. It used to be a `setTimeout`, and a timer outlives the decision it was
+scheduled under: the fifth failure called a human, and the four timers still
+pending from the failures before it walked the whole merge again — merging,
+force-pushing the backup branch, escalating and notifying afresh, each wave
+arming four more. Measured on run 0c1fc610: 28 push attempts, five
+`merge_blocked` escalations, five `branch_backed_up` pushes and **five
+notifications** about one broken pre-push hook, inside ten minutes. The due time
+is also what makes the interval an interval: `integrateTick()` re-enqueues every
+run still in `finish_state='merging'` on every 5-second pass, so before this the
+five attempts collapsed into twenty seconds.
 
 ### The escalation ladder
 
@@ -2962,6 +2986,21 @@ not the run's provider problems. Measured 2026-08-30: an agent testing a fake
 model id (`nosuch/model-xyz`) opened a red "Model unavailable" on its own healthy
 run. The guard (`fremdeClaudeSession()` in detect.mjs, applied in `handleReport`)
 only ever narrows: no session id (an older fl-report) means the run's own.
+
+**A session the hub itself stopped is not a provider fault.** An error hook
+fires while the agent's process dies, and the hub is very often the one killing
+it — the retention pass closing an idle session, `/api/runs/<id>/kill`, a flow's
+`kill_run`, archiving. opencode's `session.error` then reports the bare word
+`Aborted`, and until `isSessionStopped()` existed that opened a RED incident: the hub
+alarming about its own cleanup. Measured on run c532df45 — retention closed the
+session at 02:14:32, the incident was opened in the same second, the
+`aborted {"source":"retention"}` event followed ten seconds later, and because a
+red incident on an aborted run never resolves by itself ("that is WHY the run
+did not come through") it was still asking for hands two days on. The end of the
+run is recorded by whoever ended it, so nothing is lost by not also filing it as
+an outage. Narrow like every pattern in that module: only a message that says
+*nothing but* "stopped" — a real error mentioning an abort (`AI_APICallError:
+stream aborted`) is still an incident.
 
 **Silence is only an argument where activity is measured.** `measureActivity()`
 has a source for claude (transcript mtime), opencode (session store) and cursor

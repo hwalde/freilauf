@@ -1394,6 +1394,29 @@ try {
     wahr(!!v, 'the run\'s own session still opens the incident')
     enthaelt(v.beleg, 'really/missing-model', 'with the evidence')
   })
+  await pruefe('an error hook that only says the session was stopped opens no incident', async () => {
+    // opencode's `session.error` fires while its process dies — and the hub is
+    // very often the one killing it: the retention pass, the kill route, a
+    // flow, archiving. Measured on run c532df45: retention closed the session,
+    // the plugin reported the bare word "Aborted", and the hub opened a RED
+    // incident about its own cleanup. On an aborted run such an incident never
+    // resolves by itself, so it was still asking for hands two days later.
+    const j = await laufStarten({ repo_id: repoId, harness: 'opencode', prompt: 'E2E-Abbruch', expected_minutes: '45' })
+    const RA = j.runId
+    await sessionMerken(RA)
+    const melde = (text) => hol(`/api/runs/${RA}/report`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: '_api_error', error: 'unknown', text }),
+    })
+    gleich((await melde('Aborted')).status, 200, 'the report is accepted')
+    gleich(vorfaelle(RA).length, 0, 'and nothing is filed as a provider fault')
+    // Narrow, not blunt: a real error is still a real error.
+    gleich((await melde('AI_APICallError: 503 upstream unavailable')).status, 200, 'a real error is accepted too')
+    const v = vorfaelle(RA)
+    gleich(v.length, 1, `now there is one incident (has: ${JSON.stringify(v.map(x => [x.typ, x.beleg]))})`)
+    gleich(v[0].typ, 'provider_error', 'classified as what it is')
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(RA)
+  })
   await pruefe('hook and transcript see the same event → not counted twice', async () => {
     const r = lauf(RC)
     const dir = join(SB, 'claude-projects', r.workdir_effective.replaceAll('/', '-'))
@@ -2315,10 +2338,60 @@ try {
     enthaelt(archiv, 'Archived by hand', 'with its title')
     enthaelt(archiv, 'Restore', 'restore button')
   })
+  // A run whose work never reached the base branch must say so wherever it is
+  // listed. The overview does it under the status word; the archive did not, so
+  // an archived run blocked on a merge was indistinguishable from one that
+  // merged cleanly — and the archive is the last place that can still say it.
+  await pruefe('the archive says when an archived run\'s work is not on the base branch', async () => {
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Archiv-blockiert', title: 'Archived while blocked' })
+    await sessionMerken(j.runId)
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now'), merge_status='blocked_error' WHERE id=?`).run(j.runId)
+    await formular(`/api/runs/${j.runId}/archive`, {})
+    const zeile = (await (await hol(`/archive?repo=${repoId}`)).text()).split('<tr ').find(z => z.includes(j.runId))
+    wahr(!!zeile, 'the run is in the archive')
+    enthaelt(zeile, 'blocked: integration error', 'and the row says its work is not on the base branch')
+    // A cleanly merged run stays quiet — the line is a warning, not furniture.
+    db.prepare(`UPDATE runs SET merge_status='merged' WHERE id=?`).run(j.runId)
+    const sauber = (await (await hol(`/archive?repo=${repoId}`)).text()).split('<tr ').find(z => z.includes(j.runId))
+    falsch(sauber.includes('blocked: integration error'), 'a merged run says nothing')
+    db.prepare('DELETE FROM runs WHERE id=?').run(j.runId)   // keep the pagination count below stable
+  })
   await pruefe('the detail page offers to restore an archived run', async () => {
     const html = await (await hol(`/runs/${ARV}`)).text()
     enthaelt(html, 'Restore to overview', 'button on the detail page')
     enthaelt(html, 'archived', 'mentions the archive')
+  })
+  // The sidebar's incident count is a LINK into the overview filtered to the
+  // runs that carry an open incident — and no archived run is ever in the
+  // overview. Measured on this installation: two open incidents, both on runs
+  // the operator had archived, so two repos said "1 needs you" and both clicks
+  // landed on "no runs yet". The number and the list behind it are one set.
+  await pruefe('an archived run\'s incident leaves the sidebar count with it', async () => {
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Archiv-Vorfall', title: 'Archived with an incident' })
+    await sessionMerken(j.runId)
+    db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+    const inc = await import('../server/incidents.mjs')
+    await inc.vorfallMelden(j.runId, { typ: 'auth_error', quelle: 'e2e', schwere: 'rot', beleg: 'E2E' })
+
+    const zaehlt = async () => {
+      const seite = await (await hol(`/?repo=${repoId}`)).text()
+      const block = seite.split('side-incidents')[1]?.split('</div>')[0] ?? ''
+      return { block, gefiltert: await (await hol(`/?repo=${repoId}&incidents=1`)).text() }
+    }
+    const vorher = await zaehlt()
+    enthaelt(vorher.block, 'need you', 'while the run is visible the sidebar asks for hands')
+    enthaelt(vorher.block, `incidents=1`, 'and the number is a link into the filtered overview')
+    wahr(vorher.gefiltert.includes(j.runId), 'which shows the run behind the number')
+
+    await formular(`/api/runs/${j.runId}/archive`, {})
+    wahr(!!lauf(j.runId).archived_at, 'archived')
+    const nachher = await zaehlt()
+    falsch(nachher.block.includes('need you'), 'archived: the sidebar no longer promises a row')
+    falsch(nachher.gefiltert.includes(j.runId), 'and the filtered overview has none to give')
+    // The record itself is untouched — the archive and the run's own page keep it.
+    wahr(inc.offeneVorfaelle(j.runId).length === 1, 'the incident is still open, it is only not counted here')
+    enthaelt(await (await hol(`/runs/${j.runId}`)).text(), 'Incidents', 'and still shown on the run\'s page')
+    db.prepare('DELETE FROM runs WHERE id=?').run(j.runId)   // keep the pagination count below stable
   })
   await pruefe('restore puts the run back into the overview', async () => {
     const r = await formular(`/api/runs/${ARV}/unarchive`, { back: `/archive?repo=${repoId}` }, { alsBrowser: true })
@@ -4026,6 +4099,66 @@ try {
     await integrate.integrateTick()
     await warteAuf(() => lauf(l.id).merge_status === 'merged', { was: 'merged after the fix', timeoutMs: 30_000 })
     await repoMerge({ merge_check: '' })
+  })
+
+  // ---- 11b. a push that keeps failing: it waits, and it alarms ONCE ----
+  // Measured on production run 0c1fc610: a broken pre-push hook in the
+  // operator's checkout produced 28 push attempts, five `merge_blocked`
+  // escalations, five force-pushed backup branches and five notifications about
+  // the same problem inside ten minutes. Two causes, both fixed together — the
+  // loop re-enqueues every run that is still 'merging' on EVERY 5-second pass,
+  // so the five attempts collapsed into twenty seconds; and the retry was a
+  // `setTimeout` that outlived the escalation it was scheduled under, so four
+  // pending timers walked the whole merge again after a human had already been
+  // called. `origin` is pointed at a path that does not exist because that is a
+  // push failure which is NOT a conflict: anything saying "rejected" goes down
+  // the conflict ladder instead.
+  await pruefe('a failing push waits between attempts and raises exactly one alarm', async () => {
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'pushfail.txt', 'x\n', 'E2E: the push will fail')
+    const echteUrl = (await g(REPO, 'remote', 'get-url', 'origin')).stdout.trim()
+    await g(REPO, 'remote', 'set-url', 'origin', join(SB, 'kein-origin.git'))
+    try {
+      const fehler = () => ereignisse(l.id).filter(k => k === 'merge_error').length
+      await sendReport(l.id, { kind: 'done', text: 'push failure' })
+      await warteAuf(() => fehler() >= 1, { was: 'the first push attempt failed', timeoutMs: 30_000 })
+      gleich(lauf(l.id).finish_state, 'merging', 'the run is still the integrator\'s job')
+
+      // Two passes of the loop inside the retry window must change nothing.
+      await integrate.integrateTick()
+      await integrate.integrateTick()
+      await new Promise(r => setTimeout(r, 700))
+      gleich(fehler(), 1, 'no second attempt inside the retry window')
+
+      // One pass per elapsed window. The fifth failure escalates — and the
+      // clock stays well under finish_timeout_min, so this is the push giving
+      // up and not the deadline.
+      for (let i = 1; i <= 12 && !ereignisse(l.id).includes('merge_blocked'); i++) {
+        const vor = fehler()
+        await integrate.integrateTick(Date.now() + i * 70_000)
+        await warteAuf(() => fehler() > vor || ereignisse(l.id).includes('merge_blocked'),
+          { was: `another push attempt after tick ${i}`, timeoutMs: 30_000 })
+      }
+      const kinds = ereignisse(l.id)
+      wahr(kinds.includes('merge_blocked'), `the failures escalate (events: ${kinds.join(',')})`)
+      gleich(kinds.filter(k => k === 'merge_blocked').length, 1, 'blocked exactly once')
+      gleich(kinds.filter(k => k === 'notified:merge_blocked').length, 1,
+        'and the operator is told once, not once per wave')
+      gleich(kinds.filter(k => k === 'finish_escalated').length, 1, 'escalated once')
+      gleich(lauf(l.id).merge_status, 'blocked_error', 'and it says why')
+      gleich(lauf(l.id).finish_state, null, 'the run has left the loop')
+
+      // Nothing may pick it back up: a human has been called, and no leftover
+      // retry may merge, push or alarm behind their back.
+      const vorher = kinds.length
+      const fehlerVorher = fehler()
+      await integrate.integrateTick(Date.now() + 15 * 70_000)
+      await new Promise(r => setTimeout(r, 1000))
+      gleich(fehler(), fehlerVorher, 'no further push attempt after the escalation')
+      gleich(ereignisse(l.id).length, vorher, 'and nothing else happened either')
+    } finally {
+      await g(REPO, 'remote', 'set-url', 'origin', echteUrl)
+    }
   })
 
   // ---- 12. an end somebody asked for stays an abort ----

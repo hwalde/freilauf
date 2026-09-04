@@ -767,7 +767,13 @@ try {
       stift, 'the pencil to appear on hover')
     await p.mouse.move(0, 0)
     await p.$eval(stift, b => b.focus())
-    gleich(await p.$eval(stift, b => getComputedStyle(b).opacity), '1', 'and it appears on focus alone')
+    // WAIT for it, do not sample it: the pencil carries `transition: opacity .1s`,
+    // so moving the mouse away starts a fade-out that focusing immediately turns
+    // back around — and reading getComputedStyle in that moment returns whatever
+    // the animation happens to be at (measured: 0.424233, and red maybe one run
+    // in four). The assertion is unchanged; only the moment it is read is.
+    await wartePage(p, (sel) => getComputedStyle(document.querySelector(sel)).opacity === '1',
+      stift, 'the pencil to appear on focus alone')
     sauber(p)
     await p.close()
   })

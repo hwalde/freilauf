@@ -75,6 +75,44 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A merge that cannot be pushed now alarms once instead of five times.** When
+  a push kept failing for a reason that is not a conflict, the retry was a timer
+  that outlived the decision it was scheduled under: the fifth failure escalated
+  the run to a human, and the four timers already pending from the failures
+  before it then walked the whole merge again — merging, force-pushing the
+  backup branch, escalating and notifying afresh, wave after wave. Measured on
+  one production run: 28 push attempts, five blocked-merge notifications and
+  five backup pushes inside ten minutes, all about a single broken pre-push
+  hook. The wait is now a due time the integrator's own loop honours, so a run
+  a human has been called about is left alone. The same change makes the wait a
+  wait at all — the loop re-checked every merging run every five seconds, so
+  the five attempts used to collapse into twenty of them.
+
+- **The sidebar's incident count no longer points at rows nobody can see.** The
+  number links into the overview filtered to the runs carrying an open
+  incident, and an archived run is in no overview — so archiving a run with an
+  open incident left a "needs you" whose click landed on "no runs yet".
+  Archived runs are no longer counted there (their incidents stay on the run's
+  own page and in the archive), and where only hub-wide incidents are open the
+  number is no longer a link at all — those carry their own banner, with the
+  button that clears them.
+
+- **A session the hub itself stopped is not reported as a provider fault.** An
+  agent's error hook fires while its process dies, and the hub is very often
+  the one killing it — the retention pass closing an idle session, the kill
+  button, a flow, archiving. opencode then reports the bare word "Aborted", and
+  that opened a red incident about the hub's own cleanup; on an aborted run
+  such an incident never clears itself, so it asked for hands indefinitely. The
+  end of a run is recorded anyway. A real error that merely mentions an abort
+  is still an incident.
+
+- **"Nearing the expected duration" now says so.** The yellow badge a run gets
+  at 80 % of its expected duration was labelled "over the expected duration" —
+  so a run that finished in 44 of its 45 expected minutes carried a badge
+  saying it had run over, next to a cell reading "44 min / 45 min". The
+  follow-up twin of the same threshold had said "nearing" all along; the two
+  now agree, in all three languages.
+
 - **An opencode run that is working no longer reports "no activity".** Every
   subagent opencode starts gets a session of its own in the same directory, and
   the hub read a run's activity off whichever session had been created last —
