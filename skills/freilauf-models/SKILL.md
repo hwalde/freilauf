@@ -29,7 +29,7 @@ four fields, and this skill decides them:
 | field | what it is | who has one |
 |---|---|---|
 | `harness` | the **coding agent** CLI: `claude`, `opencode`, `hermes`, `cursor`, or an installed plugin | everything |
-| `provider` | the **model provider** the coding agent buys tokens from | only a coding agent that is not on a subscription |
+| `provider` | the **model provider** the coding agent buys tokens from | **required** for every coding agent that is not on a subscription — see step 3 |
 | `model` | the model identifier, exactly as the provider spells it | everything |
 | `effort` | the reasoning level | only where the CLI accepts one |
 
@@ -89,14 +89,62 @@ fl-api /api/models provider=deepseek harness=opencode
 fl-api /api/effort harness=claude provider= model=opus
 ```
 
-`/api/providers` answers `subscription: true` for `claude` and `cursor` — those
-two run on the account that is logged in and take **no** `provider` at all.
-Their model list comes from the harness itself, so ask for it with the harness
-id in the `provider` parameter (`/api/models provider=cursor`).
+`/api/providers` answers `subscription: true` for a coding agent that runs on
+the account it is logged in to (`claude` and `cursor` today) — those take **no**
+`provider` at all. Their model list comes from the harness itself, so ask for it
+with the harness id in the `provider` parameter (`/api/models provider=cursor`).
 `/api/effort` answers `{ok: false, error: …}` when the field does not apply —
 `stufen` is only present in the `ok: true` answer.
 
-## Step 3 — the recommendations
+## Step 3 — the provider is not optional
+
+`harness` + `model` is not a run. Ask which of the two shapes the chosen coding
+agent has, and fill the field accordingly — **ask, never remember**: which
+coding agents exist here, and which of them are on a subscription, is what the
+plugin registry answers, and it grows an entry the day somebody installs a
+plugin.
+
+```bash
+fl-api /api/providers harness=<coding agent>       # one of them
+<skill-dir>/scripts/fl-options.py coding-agents    # all of them, in one table
+```
+
+| the answer | what to send |
+|---|---|
+| `subscription: true` | **no** `provider` at all — the account *is* the provider, and both the form and the API refuse one |
+| a `provider` list | **one of those ids, every time** — including when the list holds exactly one |
+
+**One entry is not "obvious", it is still mandatory.** An empty field does not
+mean "take the only one you have": it is the hub's legacy path for a
+hand-typed, complete model slug. What it actually launches:
+
+- **opencode** gets `--model <bare id>` instead of `--model <provider>/<id>`,
+  and **no credential is exported into the tmux session** — the run answers
+  `UnknownError: Unexpected server error`, which is byte for byte what a real
+  provider outage looks like;
+- **hermes** gets `--model <id>` with no `--provider`, no key — and **no
+  `--effort`**, which is dropped on that same path, so a reasoning level that
+  validated fine never arrives.
+
+Those two are not a list to memorize; they are what a non-subscription plugin's
+`modelArgs()` does with an empty provider, so the same holds for a coding agent
+that arrives as a plugin tomorrow. Every one of these failures is silent and
+every one of them reads as somebody else's fault — which is why the tooling
+treats a missing provider as a refusal and not as a hint:
+
+- `fl-options.py check …` exits **1** and names the valid ids;
+- `agent-edit.py` refuses to save an agent with that hole (`--force` for the
+  hand-typed-slug case).
+
+If a check ever passes with no `provider`, the coding agent is on a
+subscription. That is the only reading.
+
+**An empty provider list** means the operator has enabled none for that coding
+agent, or none has a credential (Settings → Plugins). Nothing but a complete
+hand-typed slug can run then: say so and ask, rather than inventing an id this
+installation would refuse.
+
+## Step 4 — the recommendations
 
 Ordered by what they are for, not by price. Every one of them is a *default*,
 not a menu: pick the first row that matches the task and move on.
@@ -174,8 +222,12 @@ bracket syntax (`model[effort=high]`) is model-dependent and unreliable.
 
 ## The mistakes that cost the most
 
-- **Sending a `provider` to claude or cursor.** They are subscription harnesses;
-  the form refuses it and so does the API.
+- **Leaving `provider` empty on a coding agent that has one.** The most
+  expensive of the lot, because it saves, schedules and starts before it fails
+  (step 3). One provider to choose from is still a choice you have to make.
+- **Sending a `provider` to a subscription coding agent** (claude, cursor
+  today). The form refuses it and so does the API — ask `/api/providers` rather
+  than going by the name.
 - **Inventing a model id.** opencode reports an unknown model as
   `UnknownError: Unexpected server error` — byte for byte what a real provider
   outage looks like. Always copy the id from `/api/models`.
