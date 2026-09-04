@@ -2747,6 +2747,26 @@ come next.
   that, because three copies is three chances to drift and a skill directory is
   installed standalone, so an import of a sibling skill would break the moment
   somebody copied one and not the other.
+
+  **`check` REFUSES a definition whose coding agent needs a model provider and
+  names none**, and that refusal is the tool's one opinion about a field the
+  hub itself accepts. An empty `provider` is the hub's legacy path for a
+  hand-typed complete model slug (`modelArgs()` in both provider-based
+  plugins), so an agent created without one saves, schedules and starts — and
+  then launches with a bare `--model`, no credential in the tmux session, and
+  on hermes no `--effort` either, since that is passed on the provider branch
+  only. Runs made that way through these skills died at their first API call
+  looking exactly like a provider outage. The rule is asked, not remembered:
+  `provider_rule()` reads `/api/providers`, which answers out of the plugin
+  registry — `subscription: true` means send none, a non-empty list means send
+  one of those ids, **one entry included**, because "the only one available" is
+  still a choice the hub does not make for you. No vendor is named anywhere in
+  the three copies, so a coding agent installed as a plugin tomorrow is covered
+  by the same call. `coding-agents` prints the rule as a column, `agents` and
+  `favorites` name the stored rows that already carry the hole with the
+  `agent-edit.py` line that closes each of them, and `agent-edit.py` refuses
+  such a save itself (on the BODY, so removing a provider is caught like never
+  having had one; `--force` for the deliberate slug case).
 - **`run-alive.py`** — the status/verdict gap for one run, a repo or a status.
 - **`agent-edit.py`** — the read-modify-write round trip `POST /agents/edit`
   needs, because that route is a full replace and not a patch.

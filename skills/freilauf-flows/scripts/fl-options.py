@@ -592,11 +592,14 @@ def cmd_new(argv):
         print("Setup taken from the favorite **%s** — the operator's own preference.\n" % fav["name"])
         rule = provider_rule(fav["harness"])
         if rule["required"] and not fav.get("provider"):
-            parts.append("provider=<%s>" % "|".join(rule["ids"]))
-            print("The favorite carries NO provider although `%s` needs one — filled in as a"
-                  % fav["harness"])
-            print("placeholder above. Pick one deliberately (../freilauf-models/SKILL.md) and")
-            print("tell the operator their favorite is incomplete.\n")
+            # A concrete id rather than `<a|b|c>`: this line is meant to be
+            # pasted into a shell, where a pipe is not a placeholder.
+            parts.append("provider=%s" % rule["ids"][0])
+            print("The favorite carries NO provider although `%s` needs one, so `%s`"
+                  % (fav["harness"], rule["ids"][0]))
+            print("stands in below — CHECK it: the others are %s." % ", ".join(rule["ids"][1:] or ["none"]))
+            print("Pick deliberately (../freilauf-models/SKILL.md), and tell the operator")
+            print("their favorite is incomplete.\n")
     else:
         parts += ["harness=<coding agent>", "provider=<provider>", "model=<model>"]
         print("No favorite is saved, so fill the setup in yourself:")
