@@ -691,6 +691,17 @@ table.sessions tr.gone { opacity: .4; text-decoration: line-through; }
 table.sessions tr.failed { background: var(--err-soft); }
 .dot.gray { background: var(--dot-idle); }
 
+/* Overview: the bulk bar above the table, and the column its checkboxes sit in.
+   Same shape as the sessions bar — it is the same gesture (pick several rows,
+   act on them at once), and two different-looking bars for one gesture would be
+   two things to learn. A row on its way into the archive dims like a session on
+   its way out. */
+.bulk-bar { display: flex; align-items: center; gap: var(--sp-14); flex-wrap: wrap; margin: var(--sp-10) 0; }
+.bulk-bar label.chk { margin: 0; }
+table.runs th.pick-col, table.runs td.pick-cell { width: 1px; padding-right: 0; }
+table.runs td.pick-cell { cursor: default; }
+table.runs tr.archiving { opacity: .5; }
+
 /* Buttons next to each other. Deliberately not a <p>: an HTML parser closes an
    open paragraph at a <form>, so a link and a form-button inside one paragraph
    land on two lines no matter what the CSS says. */
