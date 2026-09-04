@@ -10,7 +10,17 @@
 #      Deliberately OUTSIDE the repo: the patterns describe exactly the values that
 #      do not belong in the repo, and therefore must not appear in it themselves.
 set -uo pipefail
-cd "$(dirname "$0")"
+# Where this script really lives — NOT `dirname "$0"`. setup/02 installs it as a
+# SYMLINK at .git/hooks/pre-push, and for a symlinked hook `$0` is the link, so
+# `dirname` answered `.git/hooks`: the `. bin/fl-paths.sh` below failed, the
+# private pattern file was never loaded, and `git grep -- .` scanned a pathspec
+# outside the work tree. The hook then printed "OK: no forbidden patterns" and
+# exited 0 while checking essentially nothing — a false green on the one guard
+# that keeps this repository's private values out of a public push (measured
+# 2026-09-04). `readlink -f` resolves the link, so the hook and a manual run
+# both land in the checkout.
+WURZEL="$(dirname "$(readlink -f "$0")")"
+cd "$WURZEL"
 
 MUSTER=(
     '10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'            # private IPv4 (incl. VPN)
@@ -27,7 +37,7 @@ MUSTER=(
     '@(gmail|googlemail|gmx|web)\.'                      # private email addresses
 )
 # shellcheck source=bin/fl-paths.sh
-. "$(dirname "$0")/bin/fl-paths.sh"
+. "$WURZEL/bin/fl-paths.sh"
 MUSTERDATEI="$(fl_config_dir)/verbotene-muster"
 if [[ -f "$MUSTERDATEI" ]]; then
     while IFS= read -r zeile; do
