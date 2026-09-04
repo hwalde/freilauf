@@ -1651,6 +1651,52 @@ application comes out of it.
 - Under ~1000 px it drops **below** the content. A table narrowed by the
   sidebar is the one thing it must never cause.
 
+### Panels: the one block the hub does not measure itself
+
+Everything above says how the MACHINE is doing. What the sidebar could not say
+is how the WORK is doing — how many findings are still open, how many tickets
+are unassigned, how many tests fail. That question belongs to the project, its
+answer is different in every repository, and its counting rule is nontrivial
+often enough that a hub which learned one would be wrong in the next repo.
+
+So the project pushes and the hub renders: `server/panels.mjs`, table
+`panel_values` (repo + key), `POST /api/panels`, `GET /api/panels?repo=`,
+`bin/fl-panel`, rendered by `panelsBlock()` next to the blocks above. The whole
+contract is **[docs/panels.md](docs/panels.md)** — what the rest of the hub has
+to know is this:
+
+- **Push, not pull, and that was measured.** The obvious design — a command in
+  the repo that the hub runs every couple of minutes — would have run in the
+  operator's checkout, and on this machine that checkout was **627 commits
+  behind `origin/main`** and did not contain the project's counting tool at
+  all. The hub merges into `origin/{base}`; a working checkout learns of it when
+  a human runs `git pull`. A producer, on the other hand, is in the right place
+  by construction: a run that has just merged `origin/{base}` into its branch,
+  or a `run_merged` flow. It also costs a handful of pushes a day instead of 720
+  polls, each of which would run somebody's script on the hub machine.
+- **Data, never markup**, and deliberately not for security — whoever can push
+  here can reach every other POST route on this hub anyway. The reasons are
+  duller and outlive any threat model: the folded sidebar's RAIL draws dots out
+  of values and can do nothing with HTML; `GET /api/panels` is what a skill or a
+  flow condition reads, and a number can be compared and alerted on where markup
+  can only be pasted; and markup would freeze this hub's CSS class names into a
+  contract with code nobody here can see. The freedom that costs nothing is
+  given back instead: a `href` on the headline and every row, and a `note` in a
+  Markdown subset (`**bold**`, `` `code` ``, `[text](url)`) the hub renders
+  itself — escaped first, marked up after.
+- **Three states, and the last two are not the same.** `fresh`, `stale` (past
+  the TTL the producer declared) and `error` (the last push said the
+  measurement failed). The last two keep the previous numbers on screen, dimmed:
+  an operator shown nothing has lost what was already there. Every reading
+  carries the time it was made, because a panel that quietly keeps showing an
+  old number is the staleness the claude quota panel was already caught by.
+- **A refusal is an answer, never a 500.** `setPanelValue()` checks the repo
+  itself rather than leaving it to the foreign key, caps the shape (8 rows, 40
+  characters a label, 6 panels a repo) and repairs what it can — a count as a
+  string, an unknown tone, a ninth row — because a producer is a 40-line script
+  in somebody else's repository. `''` becomes `null` and never `0`: in a panel
+  that trap does not merely read wrong, it reads as "nothing left to do".
+
 ### The overview: seven columns, and forms on a grid
 
 Eleven columns became seven without losing a fact: traffic light + status word

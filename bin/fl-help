@@ -82,6 +82,12 @@ ${B}COMMANDS${R}
       /api/agents, /api/favorites, /api/sessions, /api/usage. Writing goes
       through the same POST routes the web UI uses.
 
+  ${C}fl-panel${R} set <key> [--total n] [--item "label=count[:tone]"] …   ·   error   ·   clear
+      Push your project's own numbers into the status sidebar of its repo —
+      open findings, failing tests, whatever it counts. JSON on stdin works
+      too: your-tool --json | fl-panel set findings --title Findings. Inside a
+      run it needs no repo; outside one, --repo <id>. See docs/panels.md.
+
 ${B}SESSION NAMES${R}
   fl-<name>      = claude      (sessions without a tag count as claude)
   fl-oc-<name>   = opencode

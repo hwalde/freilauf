@@ -1,0 +1,205 @@
+#!/usr/bin/env node
+// fl-panel — a project pushes its own numbers into Freilauf's status sidebar.
+//
+//   register/befund.py zaehl --json | fl-panel set findings --title Findings
+//   fl-panel set tests --total 12 --item "failing=3:red" --item "skipped=9"
+//   fl-panel error findings "the register tool is not on this branch"
+//   fl-panel show                       what this repo currently shows
+//   fl-panel clear findings
+//
+// Why this exists: the sidebar can say how the MACHINE is doing (quota, work in
+// flight, memory) and nothing at all about how the WORK is doing — how many
+// findings are still open, how many tests fail. That question belongs to the
+// project, and its counting rule has no business inside Freilauf. So the project
+// counts and pushes; the hub stores and renders. See docs/panels.md.
+//
+// Inside a run nothing has to be configured: `FL_RUN_ID` and `FL_HUB_URL` are
+// already in the session, and the run knows its repository. Outside one, name
+// the repo with `--repo <id|name>`.
+//
+// Node rather than bash on purpose: the payload IS JSON, and quoting a label an
+// agent wrote through a shell is how a panel would silently lose its numbers.
+//
+// Exit codes: 0 = accepted, 1 = refused or unreachable, 2 = usage error.
+import { readFileSync, existsSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+
+const USAGE = `Usage:
+  fl-panel set <key> [options]        push a value (JSON on stdin, or --item/--total)
+  fl-panel error <key> <message>      say the measurement failed; the old numbers stay, greyed
+  fl-panel clear <key>                remove the panel
+  fl-panel show                       print this repo's panels
+
+Options for "set":
+  --repo <id|name>   which repository (default: the repo of $FL_RUN_ID)
+  --title <text>     the block's heading (default: the key)
+  --total <n>        the headline number
+  --tone <t>         red | yellow | green — colours the headline
+  --href <url>       what the headline links to (http(s):// or a path on the hub)
+  --note <text>      one line under the numbers; **bold**, \`code\` and [text](url) are rendered
+  --item <spec>      a row: "label=count", "label=count:tone", repeatable (max 8)
+  --ttl <minutes>    after this the reading is shown as outdated (default: never)
+  --json <file|->    read the whole value as JSON instead (stdin is the default when piped)
+
+The JSON shape (every field optional except one of total/items):
+  {"title":"Findings","total":33,"tone":"yellow","href":"https://…","note":"…",
+   "items":[{"label":"bug","count":17,"tone":"red"},{"label":"task","count":16}]}
+`
+
+const args = process.argv.slice(2)
+if (!args.length || args[0] === '-h' || args[0] === '--help') {
+  process.stdout.write(USAGE)
+  process.exit(args.length ? 0 : 2)
+}
+
+function die(msg, code = 2) {
+  process.stderr.write(`fl-panel: ${msg}\n`)
+  process.exit(code)
+}
+
+/**
+ * Where the hub is.
+ *
+ * The order is the same one the installed skills use, and for the same reason:
+ * inside a run `FL_HUB_URL` is authoritative, because it is the hub that
+ * started this very run. Only then the operator's own env file, and only then
+ * the code default.
+ */
+function hubBase() {
+  const named = process.env.FL_HUB_URL || process.env.CC_HUB_URL || process.env.FREILAUF_HUB_URL
+  if (named) return named.replace(/\/+$/, '')
+  let port = process.env.FREILAUF_LOCAL_PORT || process.env.CCHUB_LOCAL_PORT
+  if (!port) {
+    for (const name of ['freilauf', 'cc-hub']) {
+      const file = join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), name, 'env')
+      if (!existsSync(file)) continue
+      const m = readFileSync(file, 'utf8').match(/^\s*(?:export\s+)?(?:FREILAUF|CCHUB)_LOCAL_PORT\s*=\s*"?(\d+)"?/m)
+      if (m) { port = m[1]; break }
+    }
+  }
+  return `http://127.0.0.1:${port || 8791}`
+}
+
+async function post(fields) {
+  const body = new URLSearchParams()
+  for (const [k, v] of Object.entries(fields)) if (v !== null && v !== undefined) body.set(k, String(v))
+  const url = `${hubBase()}/api/panels`
+  let res
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      body,
+      signal: AbortSignal.timeout(15_000),
+    })
+  } catch (err) {
+    die(`the hub at ${url} did not answer (${err.message}). Is it running? \`freilauf status\` says.`, 1)
+  }
+  let data = null
+  try { data = await res.json() } catch { data = null }
+  if (!res.ok || !data?.ok) die(data?.error ?? `HTTP ${res.status}`, 1)
+  return data
+}
+
+async function readStdin() {
+  const chunks = []
+  for await (const c of process.stdin) chunks.push(c)
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+/** "label=count" or "label=count:tone" — the shorthand for a row. */
+function parseItem(spec) {
+  const m = String(spec).match(/^([^=]+)=([^:]*)(?::(\w+))?$/)
+  if (!m) die(`--item "${spec}" is not "label=count" or "label=count:tone"`)
+  const count = m[2].trim()
+  return { label: m[1].trim(), count: count === '' ? null : Number(count), tone: m[3] ?? null }
+}
+
+const cmd = args[0]
+const rest = args.slice(1)
+const opt = { repo: null, title: null, total: null, tone: null, href: null, note: null, ttl: null, json: null }
+const items = []
+const words = []
+for (let i = 0; i < rest.length; i++) {
+  const a = rest[i]
+  if (a === '--item') items.push(parseItem(rest[++i]))
+  else if (a.startsWith('--') && Object.hasOwn(opt, a.slice(2))) opt[a.slice(2)] = rest[++i]
+  else if (a.startsWith('--')) die(`unknown option ${a}`)
+  else words.push(a)
+}
+
+if (cmd === 'show') {
+  const repo = opt.repo
+  if (!repo) die('show needs --repo <id>')
+  const url = `${hubBase()}/api/panels?repo=${encodeURIComponent(repo)}`
+  const res = await fetch(url, { headers: { accept: 'application/json' } }).catch(() => null)
+  if (!res) die(`the hub at ${url} did not answer`, 1)
+  const data = await res.json().catch(() => null)
+  if (!data?.ok) die(data?.error ?? `HTTP ${res.status}`, 1)
+  if (!data.panels.length) { process.stdout.write('no panels for this repo\n'); process.exit(0) }
+  for (const p of data.panels) {
+    process.stdout.write(`${p.key} — ${p.title} · ${p.total ?? '–'} · ${p.state} · ${p.at}\n`)
+    for (const it of p.items) process.stdout.write(`    ${String(it.count ?? '–').padStart(6)}  ${it.label}${it.tone ? ` (${it.tone})` : ''}\n`)
+    if (p.error) process.stdout.write(`    ! ${p.error}\n`)
+  }
+  process.exit(0)
+}
+
+const key = words[0]
+if (!key) die(`"${cmd}" needs a panel key`)
+
+if (cmd === 'clear') {
+  await post({ key, repo: opt.repo, run: process.env.FL_RUN_ID || process.env.CC_RUN_ID, remove: '1' })
+  process.stdout.write(`fl-panel: ${key} removed\n`)
+  process.exit(0)
+}
+
+if (cmd === 'error') {
+  const message = words.slice(1).join(' ')
+  if (!message) die('error needs a message')
+  await post({ key, repo: opt.repo, run: process.env.FL_RUN_ID || process.env.CC_RUN_ID, error: message })
+  process.stdout.write(`fl-panel: ${key} marked as failed\n`)
+  process.exit(0)
+}
+
+if (cmd !== 'set') die(`unknown command "${cmd}"`)
+
+// The value: explicit JSON wins, then a pipe, then the --total/--item shorthand.
+// A pipe is the ordinary case (`… --json | fl-panel set findings`), so it is
+// read whenever stdin is not a terminal and no shorthand was given.
+let value = null
+const wantsStdin = opt.json === '-' || (!opt.json && !items.length && opt.total === null && !process.stdin.isTTY)
+if (opt.json && opt.json !== '-') {
+  try { value = JSON.parse(readFileSync(opt.json, 'utf8')) } catch (err) { die(`${opt.json}: ${err.message}`) }
+} else if (wantsStdin) {
+  const raw = (await readStdin()).trim()
+  if (!raw) die('nothing on stdin — pipe JSON in, or use --total/--item')
+  try { value = JSON.parse(raw) } catch (err) { die(`stdin is not valid JSON: ${err.message}`) }
+} else {
+  value = {}
+}
+if (typeof value !== 'object' || Array.isArray(value)) die('the value must be a JSON object')
+
+// The flags are an OVERLAY on whatever came in as JSON, never a replacement:
+// a producer prints the numbers, the caller names the block. That is what lets
+// one counting script feed several panels without knowing about any of them.
+if (opt.title) value.title = opt.title
+if (opt.total !== null) value.total = Number(opt.total)
+if (opt.tone) value.tone = opt.tone
+if (opt.href) value.href = opt.href
+if (opt.note) value.note = opt.note
+if (items.length) value.items = [...(Array.isArray(value.items) ? value.items : []), ...items]
+if (!value.title) value.title = key
+
+const r = await post({
+  key,
+  repo: opt.repo,
+  run: process.env.FL_RUN_ID || process.env.CC_RUN_ID,
+  value: JSON.stringify(value),
+  ttl: opt.ttl,
+})
+const n = r.panel?.items?.length ?? 0
+process.stdout.write(`fl-panel: ${key} = ${r.panel?.total ?? '–'} (${n} row${n === 1 ? '' : 's'})\n`)
+for (const p of r.problems ?? []) process.stderr.write(`fl-panel: ${p}\n`)
+process.exit(0)

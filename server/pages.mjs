@@ -28,6 +28,7 @@ import { getProvider, providerLabel } from './providers/index.mjs'
 // cached there, `null` when it cannot be established. See providerChoiceBlock().
 import { harnessOwnCredentials } from './models.mjs'
 import { subscriptionUsage } from './usage.mjs'
+import { panelValues, panelState } from './panels.mjs'
 import { ampelAusVorfaellen, offeneVorfaelle, alleVorfaelle, brauchtMensch } from './incidents.mjs'
 import { TYP_TEXT } from './detect.mjs'
 import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
@@ -524,6 +525,82 @@ async function memoryBlock() {
 }
 
 /**
+ * The note under a panel's numbers, in a Markdown subset.
+ *
+ * Escaped FIRST and marked up afterwards, in that order — the string comes from
+ * a producer in somebody else's repository and usually carries text an agent
+ * wrote. Three constructs and no more: `**bold**`, `` `code` `` and
+ * `[text](url)`, the last one only for a link the browser can follow
+ * (`hrefOk()`, the same rule the value's own href goes through). Everything
+ * else stays the characters it was.
+ *
+ * This is the escape hatch the "data, never markup" rule needs to be liveable:
+ * it buys most of "I want to say it differently" without letting a `<div>` into
+ * a 240px column, and the escaping stays in the hub where it is written once.
+ */
+function noteHtml(note) {
+  let out = e(String(note))
+  out = out.replace(/`([^`]{1,80})`/g, (_, code) => `<code>${code}</code>`)
+  out = out.replace(/\*\*([^*]{1,80})\*\*/g, (_, bold) => `<b>${bold}</b>`)
+  out = out.replace(/\[([^\]]{1,80})\]\(([^)\s]{1,300})\)/g, (whole, label, url) => {
+    // The URL sits inside an already-escaped string, so `&amp;` has to travel
+    // back into the attribute as it stands; only the shape is checked here.
+    const clean = url.replaceAll('&amp;', '&')
+    if (!/^https?:\/\//i.test(clean) && !(clean.startsWith('/') && !clean.startsWith('//'))) return whole
+    return `<a href="${url}">${label}</a>`
+  })
+  return out
+}
+
+/**
+ * What a project says about its own work — open findings, tickets, whatever it
+ * counts. Pushed through `POST /api/panels`, stored per repo, rendered here.
+ *
+ * The hub owns the rendering and the producer owns the numbers, which is why
+ * this function is the only place that knows what a panel LOOKS like: the same
+ * `ul.side-counts` the work block uses, so a panel cannot come to look like a
+ * foreign element in this column.
+ *
+ * Three states, and the difference between the last two is the point: a value,
+ * a value that is past its own TTL (greyed, with its age), and a producer that
+ * said its measurement failed (the last numbers, greyed, with the reason). A
+ * panel that quietly keeps showing an old number is the staleness this hub has
+ * been caught by before — so the reading always carries the time it was made.
+ */
+function panelsBlock(repoId) {
+  if (repoId == null) return ''
+  const now = Date.now()
+  const bloecke = panelValues(repoId).map((p) => {
+    const state = panelState(p, now)
+    const when = p.atMs ? fmtClock(p.atMs) : null
+    const stand = state === 'error'
+      ? `<span class="err">${e(t('panel.failed', { error: p.error }))}</span>`
+      : state === 'stale'
+        ? `<span class="warn">${e(t('panel.stale', { when: when ?? '?' }))}</span>`
+        : `<span class="dim">${e(t('panel.as_of', { when: when ?? '?' }))}</span>`
+    const kopf = p.total === null ? '' : (() => {
+      const zahl = `<span class="n${p.tone ? ` ${p.tone === 'red' ? 'err' : p.tone === 'yellow' ? 'warn' : 'ok'}` : ''}">${e(fmtNum(p.total))}</span>`
+      return `<div class="panel-total">${p.href ? `<a href="${e(p.href)}">${zahl}</a>` : zahl}</div>`
+    })()
+    const zeilen = p.items.length
+      ? `<ul class="side-counts">${p.items.map(it => {
+        const zahl = it.count === null ? '–' : e(fmtNum(it.count))
+        const klasse = it.tone === 'red' ? ' err' : it.tone === 'yellow' ? ' warn' : it.tone === 'green' ? ' ok' : ''
+        const inner = `<span class="n${klasse}">${zahl}</span> <span>${e(it.label)}</span>`
+        return `<li>${it.href ? `<a href="${e(it.href)}">${inner}</a>` : inner}</li>`
+      }).join('')}</ul>`
+      : ''
+    return `<div class="side-block side-panel${state === 'fresh' ? '' : ' panel-cold'}" data-panel="${e(p.key)}">
+      <span class="side-label">${e(p.title)}</span>
+      ${kopf}${zeilen}
+      ${p.note ? `<div class="panel-note dim">${noteHtml(p.note)}</div>` : ''}
+      <div class="panel-stand"${p.atMs ? ` title="${e(fmtDateTime(p.atMs))}"` : ''}>${stand}</div>
+    </div>`
+  })
+  return bloecke.join('')
+}
+
+/**
  * The status sidebar — on every page, right of the content.
  *
  * Before this, status stood in three places and only ever fully on the
@@ -612,6 +689,7 @@ export async function statusSidebar(repoId = null) {
     <div class="side-block">${headerStatus()}</div>
     ${workBlock(repoId)}
     ${incidentBlock(repoId)}
+    ${panelsBlock(repoId)}
     ${await usagePanel()}
     ${await memoryBlock()}
   </div>
