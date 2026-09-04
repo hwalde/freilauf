@@ -229,14 +229,41 @@ const plugin = {
     return run?.workdir_effective ? `cd ${run.workdir_effective} && opencode --continue` : null
   },
 
-  modelArgs(run, ctx = null) {
+  modelArgs(run, ctx = null, opts = null) {
     const args = []
     const fehlt = []
-    if (!run.model) return { args, fehlt }
+    const cfg = {}
+
+    // The directories outside the worktree that Freilauf pointed this agent at
+    // (runner.mjs, runExternalDirs). opencode 1.18.27 asks `external_directory`
+    // for every path it has to leave the working directory for — and `--auto`
+    // REFUSES that question rather than approving it, which is the one place
+    // where "approves everything not explicitly denied" stops being true. The
+    // run directory is where the platform prompt sends every agent to write its
+    // report, so without this block an opencode run cannot finish at all: it
+    // stands in its TUI at `0 tokens` until a human closes it.
+    //
+    // Written as `<dir>/*` because that is the shape opencode itself asks with,
+    // and merged by opencode into its own defaults rather than replacing them.
+    // It is deliberately NOT `"*": "allow"`: what this hub laid out for the run
+    // is exactly what the run may reach, and everything else still asks.
+    const extern = {}
+    for (const dir of opts?.externalDirs ?? []) extern[join(dir, '*')] = 'allow'
+    if (Object.keys(extern).length) cfg.permission = { external_directory: extern }
+
+    // One exit, because the permission block belongs to EVERY opencode run —
+    // also the two that leave early below. A run without a model, or a legacy
+    // row carrying a hand-typed one, needs to write its report just as much.
+    const fertig = () => {
+      if (Object.keys(cfg).length) args.push('--env', 'OPENCODE_CONFIG_CONTENT=' + JSON.stringify(cfg))
+      return { args, fehlt }
+    }
+
+    if (!run.model) return fertig()
     if (!run.provider) {
       // Legacy rows: 'model' is the complete, hand-typed string.
       args.push('--model', run.model)
-      return { args, fehlt }
+      return fertig()
     }
     // This one is SYNCHRONOUS, so the lazy import the async paths use is not
     // available: without a context there is no provider descriptor at all, and
@@ -268,7 +295,6 @@ const plugin = {
     const needsKey = !plugin.keyFreeProviders.includes(run.provider)
     if (needsKey && !key) fehlt.push(run.provider)
 
-    const cfg = {}
     // Pin the serving provider (OpenRouter routing). Two shapes:
     //   or_routing.mode 'auto' — the hub resolved the best-provider order at
     //     start (scheduler.mjs); the run carries the order and, when a minimum
@@ -293,8 +319,7 @@ const plugin = {
     if (run.effort) {
       cfg.agent = { [OC_AGENT]: { model: `${prov?.ocPrefix ?? run.provider}/${run.model}`, variant: run.effort } }
     }
-    if (Object.keys(cfg).length) args.push('--env', 'OPENCODE_CONFIG_CONTENT=' + JSON.stringify(cfg))
-    return { args, fehlt }
+    return fertig()
   },
 
   // No subscription — usage is tracked per provider (e.g. OpenRouter credits).

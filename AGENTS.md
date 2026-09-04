@@ -2949,6 +2949,28 @@ errors (`post_api_request` only fires after success).
   from the launcher after the TUI has drawn (it waits for the status bar, not
   for a fixed number of seconds). Enter on an empty editor is a no-op in
   opencode — measured — so the case that submitted by itself is not harmed.
+- **`opencode --auto` REFUSES the `external_directory` permission, it does not
+  approve it.** Since opencode 1.18.27 every path outside the working directory
+  goes through a permission called `external_directory`, and `--auto` is the one
+  case where "approves everything not explicitly denied" stops being true: the
+  question is auto-rejected (`permission requested: external_directory (…);
+  auto-rejecting`), and in the TUI it simply blocks. Freilauf's run directory —
+  `~/agents/runs/<id>/`, where the platform prompt sends EVERY agent to write
+  `report.md`, deliberately outside the worktree so the finish gate stays clean —
+  is exactly such a path, and so is every worktree extra that was linked rather
+  than copied (`.venv/`, `node_modules/`, a reference checkout). So the agent was
+  blocked precisely where it reports. Measured 2026-09-04 on video-production:
+  fifteen opencode workers sat in their TUI, `Build` spinning, `0 tokens` and
+  `$0.00 spent`, one of them for 55 minutes — the assistant message row in
+  opencode's own database was created and never updated again. It looks exactly
+  like a hung provider and is not one: the same prompt through the OpenRouter API
+  answered in 7.3 s, and a SHORT prompt in the same worktree, same model, same
+  session ran through in 14 s. `runExternalDirs()` (runner.mjs) now names those
+  directories and `modelArgs()` writes them into `OPENCODE_CONFIG_CONTENT` as
+  `external_directory` allows. Two things this cost, both worth keeping: the
+  workers never failed — they piled up as live sessions, which is how the machine
+  came to hold 44 GB in tmux; and a run that cannot report is invisible as a
+  fault, because "running" is exactly what it still says.
 - **opencode reports an unknown model as a server fault.** A model id it does not
   know answers `{"type":"error","name":"UnknownError","data":{"message":
   "Unexpected server error"}}` — byte for byte what a genuine upstream outage

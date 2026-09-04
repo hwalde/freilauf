@@ -328,7 +328,7 @@ and does without.
 | `fetchModels()` | async fn | model list for subscription harnesses (cached by `models.mjs`) |
 | `effortLevels()` | async fn (optional) | levels the CLI itself accepts (probed; cached 24 h) |
 | `effortOptions({provider, model, helpers})` | async fn | levels for a concrete combination; returns `{stufen, standard?, pflicht?, quelle?, hinweisKey}` — `stufen: null` hides the form field. `helpers` = `{ownLevels, registryEffort, openrouterEffort}` |
-| `modelArgs(run, ctx)` | fn | CLI arguments for `fl-start`; returns `{args, fehlt}` (`fehlt` = provider ids whose credential is missing). **Two arguments now** — see below |
+| `modelArgs(run, ctx, opts)` | fn | CLI arguments for `fl-start`; returns `{args, fehlt}` (`fehlt` = provider ids whose credential is missing). **Three arguments now** — see below |
 | `resumeCommand(run)` | fn (optional) | the shell command a HUMAN continues this run's session with, `cd <workdir> && …` included; `null` when the CLI has no reliable way (hermes). Called by `server/integrate.mjs` for every escalation message, the run's detail page and the failed/aborted Telegram texts. Only the plugin knows how its CLI names a session — claude gets `--session-id <run id>` from the hub and can name it back, cursor's id is its transcript's directory, opencode continues the last session of the worktree |
 | `usage(ctx)` | async fn | subscription usage for the overview panel, or `null`. Shapes in `usage.mjs`: `{kind:'claude', five, seven, seven_general, seven_fable, weekly_scoped, live, resets_at, plan}` / `{kind:'cursor', plan, spent_usd, included_usd, included_estimated?, remaining_usd, pct, cycle_end}` |
 
@@ -348,6 +348,42 @@ unit suite is one). `claude.mjs` and `cursor.mjs` accept the parameter and
 ignore it: they run on a subscription and have no provider credential, and the
 signature stays the same across the four so a caller never has to ask which kind
 it is holding.
+
+### …and a third parameter: what lies outside the worktree
+
+`opts.externalDirs` is the list of directories OUTSIDE the run's worktree that
+Freilauf itself pointed this agent at — the run directory (`prompt.md`,
+`report.md`, `report-detail.md`, `launch.json`), the extra-skills directory, and
+the resolved target of every worktree extra that was linked rather than copied.
+`runExternalDirs()` in `runner.mjs` builds it; `harnessModelArgs(run, opts)`
+passes it on.
+
+It is a statement of **fact, not a permission grant**: these are the paths this
+hub put in front of this agent. A coding agent that sandboxes itself to its
+working directory needs them, one that does not simply ignores the parameter —
+as claude, cursor and hermes do today.
+
+opencode is the one that needs it, and the reason is worth having in writing.
+Since 1.18.27 it asks the `external_directory` permission before touching
+anything outside its working directory, and `--auto` **refuses** that question
+rather than approving it — the one place where "approves everything not
+explicitly denied" stops being true. The run directory is exactly where the
+platform prompt sends every agent to write its report, and it lies outside the
+worktree on purpose (a report inside it would leave the worktree dirty for the
+finish gate). So without this the agent is blocked precisely where it reports:
+measured 2026-09-04, fifteen opencode workers stood in their TUI for an hour at
+`0 tokens`, having never got past their first tool call. The plugin writes them
+as `{"permission":{"external_directory":{"<dir>/*":"allow"}}}` into the same
+merged `OPENCODE_CONFIG_CONTENT` the model and the variant travel in — opencode
+merges that into its own defaults, so everything NOT on the list still asks.
+
+Two rules the opencode plugin keeps here, each a way this could go quietly
+wrong: the block is deliberately not `{"*":"allow"}` (what the hub laid out is
+what the run may reach, and no more), and it is emitted through **one exit** so
+that it also reaches the two runs `modelArgs()` used to return early for — a run
+with no model at all, and a legacy row carrying a hand-typed one. Those need to
+write their report just as much, and an early return was how the fix would have
+missed them.
 
 Under **which name** the key travels is decided by what the environment already
 holds: the names the provider declares that are *set* are passed through as

@@ -7,7 +7,7 @@
 // computes or decides — schedules, cron, form parsing, quota gate, text processing.
 //
 // Usage:  node test/unit.mjs
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, chmodSync, utimesSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, chmodSync, utimesSync, symlinkSync, realpathSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -1283,6 +1283,58 @@ try {
     const { args } = harnessModelArgs({ harness: 'opencode', model: 'openrouter/a/b' })
     gleich(args.join(' '), '--model openrouter/a/b', 'passed through unchanged')
     gleich(harnessModelArgs({ harness: 'claude' }).args.length, 0, 'no model, no argument at all')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe('The directories outside the worktree a run was pointed at')
+
+  const { runExternalDirs } = await import('../server/runner.mjs')
+
+  await pruefe('opencode is told about them as external_directory permissions', () => {
+    const { args } = harnessModelArgs({ harness: 'opencode', model: 'a/b', provider: 'openrouter' },
+      { externalDirs: ['/runs/xy', '/home/u/agents/zusaetze'] })
+    const erlaubt = cfgAus(args)?.permission?.external_directory
+    gleich(erlaubt?.['/runs/xy/*'], 'allow', 'the run directory, as a glob')
+    gleich(erlaubt?.['/home/u/agents/zusaetze/*'], 'allow', 'the extra-skills directory')
+    // NOT a blanket allow: what the hub laid out is reachable, the rest still asks.
+    gleich(erlaubt?.['*'], undefined, 'no blanket permission')
+  })
+
+  await pruefe('a run that carries no model still gets the permission block', () => {
+    // The one that used to fall off: modelArgs returned early for these two,
+    // and a run that cannot write ~/agents/runs/<id>/report.md cannot finish.
+    for (const run of [{ harness: 'opencode' }, { harness: 'opencode', model: 'hand/typed' }]) {
+      const { args } = harnessModelArgs(run, { externalDirs: ['/runs/xy'] })
+      const erlaubt = cfgAus(args)?.permission?.external_directory
+      gleich(erlaubt?.['/runs/xy/*'], 'allow', `model=${run.model ?? 'none'}`)
+    }
+    gleich(cfgAus(harnessModelArgs({ harness: 'opencode', model: 'a/b', provider: 'openrouter' }).args),
+      null, 'without the list nothing is written — an old caller changes nothing')
+  })
+
+  await pruefe('runExternalDirs names the run directory, the skills and every LINKED extra', () => {
+    const wurzel = mkdtempSync(join(tmpdir(), 'fl-extern-'))
+    const repoPfad = join(wurzel, 'repo')
+    mkdirSync(join(repoPfad, '.venv'), { recursive: true })
+    writeFileSync(join(repoPfad, '.env'), 'X=1')
+    const repo = {
+      path: repoPfad,
+      extras: [
+        { path: '.venv/', mode: 'link' },     // a directory — admitted as itself
+        { path: '.env', mode: 'link' },       // a file — only its directory
+        { path: 'node_modules', mode: 'copy' },  // in the worktree already
+        { path: 'weg/', mode: 'link' },       // never applied, cannot be resolved
+      ],
+    }
+    const dirs = runExternalDirs({}, repo, '/runs/xy')
+    wahr(dirs.includes('/runs/xy'), 'the run directory')
+    wahr(dirs.some(d => d.endsWith('/.venv')), 'a linked directory, resolved')
+    wahr(dirs.includes(realpathSync(repoPfad)), 'a linked FILE admits its directory, not the file')
+    wahr(!dirs.some(d => d.includes('node_modules')), 'a copied extra needs nothing — it IS in the worktree')
+    wahr(!dirs.some(d => d.includes('weg')), 'an extra that is not there was not applied either')
+    gleich(dirs.length, new Set(dirs).size, 'deduplicated')
+    wahr(dirs.every(d => d.startsWith('/')), 'absolute only')
+    rmSync(wurzel, { recursive: true, force: true })
   })
 
   // ------------------------------------------------------------------

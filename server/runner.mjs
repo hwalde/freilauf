@@ -2,13 +2,13 @@
 // fl-start (the single start path, so CLI and UI produce identical runs —
 // planning §5).
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, writeFileSync, cpSync, symlinkSync, existsSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { mkdirSync, writeFileSync, cpSync, symlinkSync, existsSync, realpathSync, statSync } from 'node:fs'
+import { join, resolve, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import db, { getRepo, addEvent } from './db.mjs'
 import { RUNS_DIR, WORKTREES_DIR, kurzid, sh } from './util.mjs'
 import { claudeQuota, sevenForRun } from './quota.mjs'
-import { skillPromptZusatz } from './zusaetze.mjs'
+import { skillPromptZusatz, zusaetzeDir } from './zusaetze.mjs'
 import { deliverGoal } from './goal.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { pluginCtx } from './plugins/context.mjs'
@@ -350,6 +350,50 @@ export function applyExtras(repo, target) {
 }
 
 /**
+ * Every directory OUTSIDE the worktree that Freilauf itself pointed this run's
+ * agent at. A coding agent may sandbox itself to its working directory and ask
+ * before touching anything else — opencode 1.18.27 does exactly that, with the
+ * `external_directory` permission — and under `--auto` that question is not
+ * approved but REFUSED. So the agent was blocked precisely where the platform
+ * prompt sends it: `~/agents/runs/<id>/report.md` is the file every run must
+ * write, and it lies outside the worktree on purpose (a report inside it would
+ * leave it dirty for the finish gate). Measured 2026-09-04 on video-production:
+ * fifteen opencode workers stood in their TUI for an hour, `0 tokens`, having
+ * never got past their first tool call.
+ *
+ * The list is a statement of FACT, not a permission grant: these are the paths
+ * this hub put in front of this agent. What a harness does with it is the
+ * harness's business — `modelArgs()` receives it, and a plugin that sandboxes
+ * nothing ignores it.
+ *
+ * Three sources, and each one is a place the prompt or the worktree really
+ * sends the agent:
+ *   - the run directory — prompt.md, report.md, report-detail.md, launch.json;
+ *   - the extra-skills directory, whose SKILL.md the prompt names by full path;
+ *   - every worktree extra linked in, resolved to the target the symlink points
+ *     at. `.venv/`, `node_modules/` and a reference checkout are the whole
+ *     reason an extra exists, and a link that cannot be followed is an extra
+ *     that was never applied.
+ * A `copy` extra needs nothing: it IS in the worktree.
+ */
+export function runExternalDirs(run, repo, runDir) {
+  const dirs = [runDir, zusaetzeDir()]
+  for (const extra of repo?.extras ?? []) {
+    if (extra.mode !== 'link') continue
+    const src = resolve(repo.path, extra.path)
+    // The link target, not the link: the agent resolves it before it asks.
+    // A file (a linked `.env`) admits the directory holding it, nothing wider.
+    try {
+      const real = realpathSync(src)
+      dirs.push(statSync(real).isDirectory() ? real : dirname(real))
+    } catch { /* an extra that is not there was not applied either */ }
+  }
+  // Deduplicated and absolute; an empty or relative entry would widen a
+  // pattern to something nobody asked for.
+  return [...new Set(dirs.filter(d => typeof d === 'string' && d.startsWith('/')))]
+}
+
+/**
  * Claude Code hook format: EVERY event is a list of
  * { matcher?, hooks: [{ type, command }] } — a bare command list is rejected.
  * And not just partially: a faulty settings file is discarded COMPLETELY
@@ -405,10 +449,10 @@ export function createRun({ repoId, agentId = null, harness, model = null, provi
  * where the run names one, because that is whose key travels into the session;
  * a subscription harness (claude, cursor) has no provider and ignores it.
  */
-export function harnessModelArgs(run) {
+export function harnessModelArgs(run, opts = null) {
   const plugin = getHarness(run.harness)
   if (!plugin) return { args: [], fehlt: [] }
-  return plugin.modelArgs(run, pluginCtx(run.provider || run.harness))
+  return plugin.modelArgs(run, pluginCtx(run.provider || run.harness), opts)
 }
 
 /**
@@ -505,7 +549,7 @@ export async function launchRun(runId) {
     '--env', `CC_HUB_URL=http://127.0.0.1:${env('LOCAL_PORT') ?? '8791'}`,
     '--log', join(runDir, 'log.txt'), '--keep',
     '-f', join(runDir, 'prompt.md'), workdir]
-  const modelArgs = harnessModelArgs(run)
+  const modelArgs = harnessModelArgs(run, { externalDirs: runExternalDirs(run, repo, runDir) })
   args.unshift(...modelArgs.args)
   if (modelArgs.fehlt.length) {
     // Better to start and record it visibly than to walk into the knife
