@@ -236,6 +236,39 @@ def worker_minuten(konf: dict, w: dict) -> int:
 
 # ── Agenten ──────────────────────────────────────────────────────────────────
 
+_ANBIETER_REGEL: dict = {}
+
+
+def anbieter_regel(harness: str) -> dict:
+    """Braucht dieser Coding Agent einen `provider` — und welche darf er?
+
+    Gefragt, nie angenommen: `/api/providers` antwortet aus dem Plugin-Register
+    (`subscription`) und aus dem, was der Betreiber freigeschaltet hat und wofür
+    ein Zugang da ist. Ein Coding Agent, der morgen als Plugin dazukommt, ist
+    damit von derselben Zeile abgedeckt — hier steht kein Anbietername.
+
+    Pflicht ab EINEM Anbieter, nicht erst ab zweien: Ein leeres Feld heißt für
+    den Hub nicht „nimm den einzigen", sondern ist sein Altweg für eine von Hand
+    getippte, vollständige Modell-Kennung. Der Harness startet dann mit nacktem
+    `--model`, ohne Zugangsdaten in der tmux-Sitzung, hermes zusätzlich ohne
+    `--effort`. Der Agent legt sich an, plant, startet — und stirbt am ersten
+    API-Aufruf, bei opencode als `UnknownError: Unexpected server error`, was
+    von einem echten Anbieter-Ausfall nicht zu unterscheiden ist.
+    """
+    if harness not in _ANBIETER_REGEL:
+        try:
+            a = hub_get("/api/providers", harness=harness)
+        except Exception:
+            # Eine Frage, die nicht beantwortet werden konnte, blockiert nichts:
+            # Das Skript legt Agenten an, es urteilt nicht über einen Hub, den es
+            # nicht erreicht hat.
+            return {"ids": [], "pflicht": False}
+        ids = [p["id"] for p in a.get("provider") or []]
+        _ANBIETER_REGEL[harness] = {
+            "ids": ids, "pflicht": not a.get("subscription") and bool(ids)}
+    return _ANBIETER_REGEL[harness]
+
+
 def route_felder(konf: dict, route: str) -> dict:
     r = (konf.get("routen") or {}).get(route)
     if not r:
@@ -246,7 +279,20 @@ def route_felder(konf: dict, route: str) -> dict:
     regler = r.get("modell_regler")
     if regler and konf.get(regler):
         modell = konf[regler]
-    felder = {"harness": r.get("harness"), "provider": r.get("provider"),
+    harness = r.get("harness")
+    # Fünf Agenten auf einmal: Eine Route ohne Anbieter legt den Fehler fünffach
+    # an, und zwar als lauffähig aussehende Agenten. Deshalb hier ein Abbruch und
+    # keine Warnung — siehe anbieter_regel().
+    regel = anbieter_regel(harness) if harness else {"ids": [], "pflicht": False}
+    if regel["pflicht"] and not r.get("provider"):
+        raise SystemExit(
+            f"FEHLER: Route {route!r} nennt keinen `provider`, `{harness}` braucht aber einen.\n"
+            f"  Gültig auf dieser Installation: {', '.join(regel['ids'])}\n"
+            f"  Nächster Schritt: `provider` in konfig.routen.{route} eintragen und die"
+            f" Modell-ID dazu prüfen:\n"
+            f"      fl-api /api/models provider=<anbieter> harness={harness}\n"
+            f"  Welcher Anbieter wozu passt, entscheidet der Skill `freilauf-models`.")
+    felder = {"harness": harness, "provider": r.get("provider"),
               "model": modell, "effort": r.get("effort")}
     for k in ("or_mode", "or_provider", "or_quant"):
         if r.get(k):
