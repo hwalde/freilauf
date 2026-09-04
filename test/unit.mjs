@@ -1499,6 +1499,134 @@ try {
   })
 
   // ------------------------------------------------------------------
+  gruppe('opencode: what a run is really doing (opencode-store.mjs)')
+
+  const { sessionTree, readRun, storeActivity } = await import('../server/opencode-store.mjs')
+  const { DatabaseSync: OcDb } = await import('node:sqlite')
+  const OC_WT = '/wt/run-a'
+  const OC_T0 = Date.parse('2026-09-04T15:11:00Z')      // the run starts here
+  const ocMin = (n) => OC_T0 + n * 60_000
+
+  // A store in the shape opencode 1.18 writes: sessions carry parent_id and
+  // their own totals, messages and parts carry their own time_updated.
+  const ocStore = (rows, { withParent = true } = {}) => {
+    const f = join(sandkasten, `oc-${Math.random().toString(36).slice(2)}.db`)
+    const d = new OcDb(f)
+    d.exec(`CREATE TABLE session (id TEXT PRIMARY KEY, ${withParent ? 'parent_id TEXT,' : ''} directory TEXT,
+              cost REAL, tokens_input INTEGER, tokens_output INTEGER, time_created INTEGER, time_updated INTEGER);
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER);
+            CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER);`)
+    let n = 0
+    for (const s of rows.sessions ?? []) {
+      const cols = ['id', ...(withParent ? ['parent_id'] : []), 'directory', 'cost', 'tokens_input', 'tokens_output', 'time_created', 'time_updated']
+      d.prepare(`INSERT INTO session(${cols.join(',')}) VALUES(${cols.map(() => '?').join(',')})`)
+        .run(...cols.map(c => s[c] ?? (c === 'directory' ? OC_WT : null)))
+    }
+    for (const p of rows.parts ?? []) {
+      d.prepare(`INSERT INTO part(id, message_id, session_id, time_created, time_updated) VALUES(?,?,?,?,?)`)
+        .run(`p${++n}`, `m${n}`, p.session_id, p.time_updated, p.time_updated)
+    }
+    for (const m of rows.messages ?? []) {
+      d.prepare(`INSERT INTO message(id, session_id, time_created, time_updated) VALUES(?,?,?,?)`)
+        .run(`m${++n}`, m.session_id, m.time_updated, m.time_updated)
+    }
+    return { file: f, db: d }
+  }
+
+  await pruefe('a finished subagent is not the run — the whole session tree is', () => {
+    // The regression this module was written for (run f2d4af1d, 2026-09-04):
+    // the task tool opens a CHILD session in the same directory, so "the newest
+    // session of this worktree" was a subagent that had already stopped, and
+    // the hub read the run's activity and tokens off it. Here the newest
+    // CREATED session (sub2) died at minute 3 while the run's own session kept
+    // going until minute 25.
+    const { db: d } = ocStore({ sessions: [
+      { id: 'root', parent_id: null, cost: 0.05, tokens_input: 100, tokens_output: 10, time_created: ocMin(0), time_updated: ocMin(25) },
+      { id: 'sub1', parent_id: 'root', cost: 0.01, tokens_input: 40, tokens_output: 4, time_created: ocMin(1), time_updated: ocMin(2) },
+      { id: 'sub2', parent_id: 'root', cost: 0.02, tokens_input: 60, tokens_output: 6, time_created: ocMin(2), time_updated: ocMin(3) },
+    ] })
+    gleich(sessionTree(d, OC_WT, OC_T0 - 5000).sort().join(','), 'root,sub1,sub2', 'root plus its children')
+    const r = readRun(d, OC_WT, OC_T0 - 5000)
+    gleich(r.lastActivityMs, ocMin(25), 'the newest timestamp anywhere in the tree')
+    gleich(r.tokensIn, 200, 'the subagents\' tokens are the operator\'s tokens')
+    gleich(r.tokensOut, 20, 'output likewise summed')
+    gleich(Math.round(r.costUsd * 100) / 100, 0.08, 'and the cost')
+  })
+
+  await pruefe('a subagent that works somewhere else still belongs to the run', () => {
+    // The descendants come off parent_id, not off the directory — an agent that
+    // sends a subagent into another checkout must not fall out of its own run.
+    const { db: d } = ocStore({ sessions: [
+      { id: 'root', parent_id: null, time_created: ocMin(0), time_updated: ocMin(1) },
+      { id: 'sub', parent_id: 'root', directory: '/somewhere/else', tokens_input: 7, time_created: ocMin(2), time_updated: ocMin(9) },
+      { id: 'deep', parent_id: 'sub', directory: '/somewhere/else', tokens_input: 3, time_created: ocMin(3), time_updated: ocMin(4) },
+    ] })
+    const r = readRun(d, OC_WT, OC_T0 - 5000)
+    gleich(r.sessions, 3, 'the tree is walked to its depth')
+    gleich(r.tokensIn, 10, 'their tokens count')
+    gleich(r.lastActivityMs, ocMin(9), 'and so does their activity')
+  })
+
+  await pruefe('a running turn shows up in the parts, not yet in the session row', () => {
+    // session.time_updated moves once per COMPLETED message. Measured in the
+    // same run: one message ran 15:32:31 → 15:36:38, four minutes in which the
+    // session row said nothing. The parts move while the turn is still going.
+    const { db: d } = ocStore({
+      sessions: [{ id: 'root', parent_id: null, time_created: ocMin(0), time_updated: ocMin(5) }],
+      messages: [{ session_id: 'root', time_updated: ocMin(5) }],
+      parts: [{ session_id: 'root', time_updated: ocMin(19) }],
+    })
+    gleich(readRun(d, OC_WT, OC_T0 - 5000).lastActivityMs, ocMin(19), 'the finest signal the store has wins')
+  })
+
+  await pruefe('a session older than the run is not the run\'s', () => {
+    // A worktree can hold several sessions over time (a retry, an operator
+    // attaching by hand). Nothing matching means "no answer" — never "idle".
+    const { db: d } = ocStore({ sessions: [
+      { id: 'old', parent_id: null, tokens_input: 999, time_created: OC_T0 - 3600_000, time_updated: OC_T0 - 3500_000 },
+    ] })
+    const r = readRun(d, OC_WT, OC_T0 - 5000)
+    gleich(r.sessions, 0, 'not picked up')
+    gleich(r.lastActivityMs, null, 'and no timestamp invented for it')
+    gleich(r.tokensIn, 0, 'no foreign tokens')
+  })
+
+  await pruefe('a store without parent_id falls back to the newest session', () => {
+    // An older (or newer) opencode whose schema does not carry the column must
+    // degrade to what the hub did before — never throw, never answer nothing.
+    const { db: d } = ocStore({ sessions: [
+      { id: 'a', tokens_input: 5, time_created: ocMin(0), time_updated: ocMin(1) },
+      { id: 'b', tokens_input: 9, time_created: ocMin(2), time_updated: ocMin(3) },
+    ] }, { withParent: false })
+    gleich(sessionTree(d, OC_WT, OC_T0 - 5000).join(','), 'b', 'the newest one, as before')
+    gleich(readRun(d, OC_WT, OC_T0 - 5000).tokensIn, 9, 'and its numbers')
+  })
+
+  await pruefe('no store, no answer — and never a thrown watcher pass', async () => {
+    process.env.FREILAUF_OPENCODE_DB = join(sandkasten, 'does-not-exist.db')
+    try {
+      const run = { harness: 'opencode', workdir_effective: OC_WT, started_at: '2026-09-04 15:11:00' }
+      gleich(await storeActivity(run), null, 'null, not an exception')
+      gleich(await storeActivity({ harness: 'opencode' }), null, 'a run without a worktree either')
+    } finally { delete process.env.FREILAUF_OPENCODE_DB }
+  })
+
+  await pruefe('the store path is overridable — a test never reads the operator\'s', async () => {
+    // Same fence as FREILAUF_CURSOR_AUTH and FREILAUF_CLAUDE_CREDENTIALS.
+    const { file, db: d } = ocStore({ sessions: [
+      { id: 'root', parent_id: null, tokens_input: 42, time_created: ocMin(0), time_updated: ocMin(1) },
+    ] })
+    d.close()
+    process.env.FREILAUF_OPENCODE_DB = file
+    try {
+      const run = { harness: 'opencode', workdir_effective: OC_WT, started_at: '2026-09-04 15:11:00' }
+      const r = await storeActivity(run)
+      gleich(r.tokensIn, 42, 'read out of the store the variable names')
+      gleich(r.lastActivityMs, ocMin(1), 'with its activity')
+    } finally { delete process.env.FREILAUF_OPENCODE_DB }
+  })
+
+  // ------------------------------------------------------------------
   gruppe('Detection: rate limit / provider errors (detect.mjs)')
   const { typVonClaudeFehler, typVonText, terminalText, scanneZeilen, scanneNeueBytes,
     transkriptFehler, bewerteLogTreffer, fremdeClaudeSession, vorfallWeggrund } = await import('../server/detect.mjs')
