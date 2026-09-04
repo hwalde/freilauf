@@ -61,6 +61,25 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **An opencode run that is working no longer reports "no activity".** Every
+  subagent opencode starts gets a session of its own in the same directory, and
+  the hub read a run's activity off whichever session had been created last —
+  usually a subagent that had already finished. So a run whose agent was
+  demonstrably working showed the yellow "no activity" note in the overview,
+  and its tokens and cost were that one subagent's numbers (measured on a live
+  run: 49 133 tokens shown against 303 513 really spent, $0.015 against $0.14).
+  The hub now reads the run's whole session tree — the run's own session plus
+  every subagent under it — and takes the newest sign of life anywhere in it,
+  down to a tool call inside a turn that is still running.
+- **"No activity" is taken back when the agent comes back.** It used to be
+  cleared only by a progress report, so a run that had been quiet once carried
+  the note for the rest of its life — which reads as "this agent is not
+  running" long after it is.
+- **hermes runs are no longer flagged as idle.** There is no activity source
+  for hermes, and "nothing measured" was being spent as "nothing happening":
+  every hermes run longer than a quarter of an hour got the note automatically.
+  The traffic light now only says "no activity" where activity is actually
+  measured — the rule the incident detector already followed.
 - The OpenRouter serving-provider choice (open / auto / pin) is visible again
   on a form that OPENS with OpenRouter already selected — a favorite as
   template, an agent's stored setup, or the last run's choice. The block was

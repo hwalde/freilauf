@@ -207,6 +207,10 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       FREILAUF_PULS_AUS: '1',          // no provider pulse against real endpoints from the suite
       FREILAUF_CURSOR_AUTH: join(SB, 'missing-cursor-auth.json'),   // cursor usage stays silent in the sandbox
       FREILAUF_CURSOR_DIR: join(SB, 'cursor'),      // fake cursor transcripts; the real ~/.cursor is never touched
+      // The same fence for opencode's session store: a suite that read
+      // ~/.local/share/opencode/opencode.db would measure the operator's own
+      // sessions, and on this machine that file is 14 GB.
+      FREILAUF_OPENCODE_DB: join(SB, 'missing-opencode.db'),
       // "Fresh installation" tests must not pick up the operator's seed file
       // (~/.config/freilauf/coding-agents.json) — point at a file that does not exist.
       FREILAUF_AGENTS_SEED: join(SB, 'no-seed.json'),
@@ -309,6 +313,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     process.env.FREILAUF_PULS_AUS = '1'
     process.env.FREILAUF_CURSOR_AUTH = join(SB, 'missing-cursor-auth.json')
     process.env.FREILAUF_CURSOR_DIR = join(SB, 'cursor')
+    process.env.FREILAUF_OPENCODE_DB = join(SB, 'missing-opencode.db')
     process.env.FREILAUF_GOAL_DELAY_MS = '100'
     process.env.FREILAUF_GOAL_WAIT_MS = '10000'
     process.env.FREILAUF_CLEANUP_AUTO_OFF = '1'

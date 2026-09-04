@@ -4,10 +4,11 @@
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import db, { getRepo, addEvent, allSettings } from './db.mjs'
+import db, { getRepo, addEvent, announceRun, allSettings } from './db.mjs'
 import { RUNS_DIR, sh, parseDbUtc } from './util.mjs'
-import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd, followUpHeader } from './reports.mjs'
+import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd, followUpHeader, clearAnomalies } from './reports.mjs'
 import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
+import { storeActivity } from './opencode-store.mjs'
 import { deliverPendingGoals } from './goal.mjs'
 import { claudeQuota, sevenForRun, quotaFullWindow } from './quota.mjs'
 import { refreshClaudeLimits } from './claude-usage.mjs'
@@ -202,7 +203,11 @@ async function watchRun(run) {
   const now = Date.now()
   const startedMs = Date.parse(run.started_at.replace(' ', 'T') + 'Z')
   const expectedMs = run.expected_minutes * 60_000
-  const lastAct = run.last_activity_at ? Date.parse(run.last_activity_at.replace(' ', 'T') + 'Z') : startedMs
+  // The reading of THIS pass, not the row's — the UPDATE above already knows
+  // better than the row that was loaded before it, and a decision one pass
+  // behind is a decision made on a timestamp the hub has itself corrected.
+  const lastActAt = act.lastActivity ?? run.last_activity_at
+  const lastAct = lastActAt ? Date.parse(lastActAt.replace(' ', 'T') + 'Z') : startedMs
 
   // A run in the finish gate has reported and is deliberately waiting for the
   // hub (or for its own last commit) — none of the three "it is late" anomalies
@@ -210,10 +215,23 @@ async function watchRun(run) {
   const inFinishGate = !!run.finish_state
 
   if (run.status === 'running' || run.status === 'waiting_help') {
-    // yellow: no activity for 15 min
-    if (!inFinishGate && now - lastAct > 15 * 60_000 && st.pane_dead !== '1') {
+    // yellow: no activity for 15 min — and only where activity is MEASURED.
+    // measureActivity() has a source for claude, opencode and cursor and none
+    // for hermes, and without one `lastAct` falls back to the run's start: every
+    // hermes run longer than a quarter of an hour was therefore flagged as idle
+    // while it worked. That is the same rule bewerteLogTreffer() already
+    // follows — an unmeasured harness is UNKNOWN, never silent (AGENTS.md,
+    // "Silence is only an argument where activity is measured").
+    const idle = now - lastAct > 15 * 60_000
+    if (!inFinishGate && act.measured && idle && st.pane_dead !== '1') {
       addEventOnce(run.id, 'anomaly:no_activity')
     }
+    // …and the statement is RETRACTED when the agent is demonstrably back.
+    // 'no_activity' used to be cleared by a progress report alone, so a run that
+    // had been quiet once carried "no activity" in the overview for the rest of
+    // its life — which reads as "this agent is not running" long after it is.
+    // Same mechanism as a raised expected duration retracting its overrun.
+    if (act.measured && !idle) retractNoActivity(run.id)
     // yellow: 80 % of the expected duration reached, no report
     if (!inFinishGate && now - startedMs > 0.8 * expectedMs && !run.report_md) {
       addEventOnce(run.id, 'anomaly:soft_overrun')
@@ -510,10 +528,35 @@ async function pulsPruefen(name) {
   } catch { return false }
 }
 
-/** Evaluate the Claude transcript (path known in advance thanks to --session-id, planning 7.1). */
+/**
+ * Take back 'anomaly:no_activity' — the agent is measurably working again.
+ *
+ * The event stays in the run's history as 'cleared:anomaly:no_activity' (that
+ * is what clearAnomalies does), so the traffic light falls back and
+ * addEventOnce fires again on the next genuine silence. The announcement is
+ * explicit because nothing was ADDED here: the live channel hangs on
+ * addEvent(), and a retraction that no page hears about would sit in the
+ * overview until the next unrelated event.
+ */
+function retractNoActivity(runId) {
+  const had = db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind='anomaly:no_activity' LIMIT 1`).get(runId)
+  if (!had) return
+  clearAnomalies(runId, ['anomaly:no_activity'])
+  announceRun(runId, 'activity')
+}
+
+/**
+ * Evaluate the Claude transcript (path known in advance thanks to --session-id, planning 7.1).
+ *
+ * `measured` is the answer to "does this harness have an activity source at
+ * all" — set by the branches that have one, false in the fallthrough. It is
+ * kept HERE, next to the code that implements it, rather than as a second list
+ * somewhere: a harness that gains a source gains the flag in the same edit.
+ */
 async function measureActivity(run) {
-  const out = { lastActivity: null, tokensIn: 0, tokensOut: 0, costUsd: null }
+  const out = { lastActivity: null, tokensIn: 0, tokensOut: 0, costUsd: null, measured: false }
   if (run.harness === 'claude' && run.workdir_effective) {
+    out.measured = true
     const f = claudeTranskriptPfad(run)
     if (existsSync(f)) {
       try {
@@ -535,22 +578,21 @@ async function measureActivity(run) {
     }
     return out
   }
-  // opencode: session store SQLite (matched via directory + time, planning 7.1)
+  // opencode: the session store — the run's whole session TREE, not the newest
+  // session of its directory. A subagent gets a child session in the same
+  // directory, so the old pick read a run's activity off a subagent that had
+  // usually already finished (server/opencode-store.mjs has the measurement).
   if (run.harness === 'opencode' && run.workdir_effective) {
-    try {
-      const { DatabaseSync } = await import('node:sqlite')
-      const d = new DatabaseSync(`${homedir()}/.local/share/opencode/opencode.db`, { readOnly: true })
-      const row = d.prepare(`SELECT cost, tokens_input, tokens_output, time_updated FROM session
-                             WHERE directory = ? AND time_created >= ? ORDER BY time_created DESC LIMIT 1`)
-        .get(run.workdir_effective, Date.parse(run.started_at.replace(' ', 'T') + 'Z') - 5000)
-      if (row) {
-        out.tokensIn = row.tokens_input ?? 0
-        out.tokensOut = row.tokens_output ?? 0
-        out.costUsd = row.cost ?? null
-        if (row.time_updated) out.lastActivity = new Date(row.time_updated).toISOString().replace('T', ' ').slice(0, 19)
+    out.measured = true
+    const store = await storeActivity(run)
+    if (store) {
+      out.tokensIn = store.tokensIn
+      out.tokensOut = store.tokensOut
+      out.costUsd = store.costUsd
+      if (store.lastActivityMs) {
+        out.lastActivity = new Date(store.lastActivityMs).toISOString().replace('T', ' ').slice(0, 19)
       }
-      d.close()
-    } catch {}
+    }
     return out
   }
   // cursor: the transcript's mtime. cursor appends to it while it works
@@ -561,6 +603,7 @@ async function measureActivity(run) {
   // detector's work-after-the-hit veto blind on this harness. Tokens are not in
   // there; for cursor the subscription usage panel is the honest source.
   if (run.harness === 'cursor') {
+    out.measured = true
     const state = cursorTranscriptState(run)
     if (state) out.lastActivity = new Date(state.mtimeMs).toISOString().replace('T', ' ').slice(0, 19)
     return out
