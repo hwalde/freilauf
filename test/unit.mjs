@@ -1292,10 +1292,10 @@ try {
 
   await pruefe('opencode is told about them as external_directory permissions', () => {
     const { args } = harnessModelArgs({ harness: 'opencode', model: 'a/b', provider: 'openrouter' },
-      { externalDirs: ['/runs/xy', '/home/u/agents/zusaetze'] })
+      { externalDirs: ['/runs/xy', '/opt/fl/zusaetze'] })
     const erlaubt = cfgAus(args)?.permission?.external_directory
     gleich(erlaubt?.['/runs/xy/*'], 'allow', 'the run directory, as a glob')
-    gleich(erlaubt?.['/home/u/agents/zusaetze/*'], 'allow', 'the extra-skills directory')
+    gleich(erlaubt?.['/opt/fl/zusaetze/*'], 'allow', 'the extra-skills directory')
     // NOT a blanket allow: what the hub laid out is reachable, the rest still asks.
     gleich(erlaubt?.['*'], undefined, 'no blanket permission')
   })

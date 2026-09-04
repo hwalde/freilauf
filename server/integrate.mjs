@@ -899,7 +899,15 @@ async function integrateOne(runId, opts = {}) {
 
   const push = await sh('git', ['-C', dir, 'push', 'origin', `HEAD:${repo.base_branch}`], { timeout: 180_000 })
   if (!push.ok) {
-    const err = (push.stderr || push.stdout).trim()
+    // BOTH streams, not `stderr || stdout`. A pre-push hook that refuses a push
+    // usually says WHY on stdout and leaves stderr to its own noise — measured
+    // 2026-09-04: the operator's private-value guard rejected a push over one
+    // line in a test file, and the recorded reason held nothing but three
+    // unrelated shell warnings from the same hook. `merge_status` said
+    // `blocked_error` with a reason that named no error, and finding the real
+    // one took an hour of reading git by hand. The one place a blocked merge
+    // gets explained must not drop half of the explanation.
+    const err = [push.stderr, push.stdout].filter(Boolean).join('\n').trim()
     // Somebody was faster: fetch and try once more from the top. A second
     // rejection is treated as a conflict — the branch really does need work.
     if (/non-fast-forward|fetch first|rejected/i.test(err)) {
@@ -911,7 +919,10 @@ async function integrateOne(runId, opts = {}) {
     }
     const n = (pushFails.get(runId) ?? 0) + 1
     pushFails.set(runId, n)
-    addEvent(runId, 'merge_error', { reason: err.slice(0, 300), attempt: n })
+    // 1200 and not 300: with both streams joined, the noise comes first (it is
+    // stderr) and the sentence that names the cause comes after it. A cap that
+    // ends inside the noise is the same failure as dropping stdout entirely.
+    addEvent(runId, 'merge_error', { reason: err.slice(0, 1200), attempt: n })
     // A merge that cannot be pushed is not a merge. Throw it away rather than
     // leave a "merged, but only locally" state behind — origin is the truth.
     await sh('git', ['-C', dir, 'reset', '--hard', `origin/${repo.base_branch}`])
