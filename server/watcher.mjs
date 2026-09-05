@@ -45,6 +45,27 @@ export function startWatcher() {
 export function stopWatcher() { clearInterval(timer); timer = null }
 
 /**
+ * Is the hub's own sandbox pass switched off, so that somebody else owns it?
+ *
+ * The same seam and the same argument as `integratorTimerOff()`: two processes
+ * driving one integration worktree is a race nobody wants to debug, and two
+ * reapers driving one container daemon is the identical problem one layer out.
+ * A test group that reaps by hand — `reconcileContainers(hubId)` directly, which
+ * is how every sandbox group in test/e2e.mjs is written — was meanwhile being
+ * reaped four or five times by the hub's own 30-second timer against the SAME
+ * shim state, so the call log carried each `stop`/`rm`/`network-rm` twice and
+ * the set of failing checks moved from run to run. That is a suite that has
+ * stopped saying anything about the code.
+ *
+ * It gates the three passes that TALK TO THE DAEMON, not the ones that only read
+ * the database: `enforceMaxRuntime()` stops containers, `reconcileContainers()`
+ * stops and removes them and their networks, `restoreSandboxProxies()` starts
+ * proxies. Everything else in `tick()` is unaffected, exactly as the integrator
+ * fence leaves the rest of the pass alone.
+ */
+export function sandboxPassesOff() { return env('SANDBOX_REAPER_OFF') === '1' }
+
+/**
  * Runs that never got a session. Happens when the hub is terminated in the middle
  * of the start-up sequence (service restart, reboot, crash): the record is then
  * stuck on 'running' but has neither a session nor a worktree — the overview
@@ -128,14 +149,18 @@ export async function tick() {
   // follows its session's, so reconciling in the other order would look at
   // sessions the pass above is about to close. Both are a complete no-op on an
   // installation without a container runtime.
-  try { await enforceMaxRuntime() } catch (e) { console.error('[sandbox]', e.message) }
-  let containerPass = null
-  try { containerPass = await reconcileContainers() } catch (e) { console.error('[sandbox]', e.message) }
-  // …and the third: the built-in egress proxy a hub restart took with it. It
-  // reads the pass above's VERDICT rather than asking the daemon again, which
-  // is what keeps "the daemon did not answer" from being spent as an answer
-  // here too (restoreSandboxProxies below says why it hangs on this call).
-  try { await restoreSandboxProxies(containerPass?.verdict ?? null) } catch (e) { console.error('[sandbox]', e.message) }
+  // …and switched off in one place when somebody else owns the daemon
+  // (`sandboxPassesOff()` above — a test group that reaps by hand).
+  if (!sandboxPassesOff()) {
+    try { await enforceMaxRuntime() } catch (e) { console.error('[sandbox]', e.message) }
+    let containerPass = null
+    try { containerPass = await reconcileContainers() } catch (e) { console.error('[sandbox]', e.message) }
+    // …and the third: the built-in egress proxy a hub restart took with it. It
+    // reads the pass above's VERDICT rather than asking the daemon again, which
+    // is what keeps "the daemon did not answer" from being spent as an answer
+    // here too (restoreSandboxProxies below says why it hangs on this call).
+    try { await restoreSandboxProxies(containerPass?.verdict ?? null) } catch (e) { console.error('[sandbox]', e.message) }
+  }
   await cleanupWorktrees()
   // No-code flows: run_finished backstop, delays, cron (server/flows/triggers.mjs).
   try { await flowsTick() } catch (e) { console.error('[flows]', e.message) }
@@ -1555,13 +1580,34 @@ async function cleanupWorktrees() {
       // Through the seam: on a sandboxed run this reads the working copy inside
       // the container while it stands, and on the host with a hardened git when
       // it does not (§7.4.4). The `-C` is the seam's, hence only the arguments.
-      const dirty = await runGit(run, ['status', '--porcelain'], { cwd: run.worktree })
+      //
+      // `hostFallback: 'masked'` because BY THIS POINT THE CONTAINER IS ALWAYS
+      // GONE. Retention runs after the run ended, and ending the run releases
+      // the container (`sandbox:released` is written before `tmux_closed`) — so
+      // the seam takes its third branch every time, where an agent-owned `.git`
+      // read on the host is refused by default. Measured 2026-09-05 on the first
+      // real sandboxed run: `anomaly:worktree_dirty` with `offen: []` — an empty
+      // list of uncommitted files under an event that says there are some. The
+      // cost is not the wrong word: `removable` stays false, so a sandboxed
+      // run's CLONE is never removed, and clones are full checkouts. Every
+      // sandboxed run would leave one behind for ever.
+      //
+      // Masking is what `mergeManual()`'s rescue path already does for `add -A`,
+      // `commit`, `checkout --` and `clean -fd` on the same directory; a
+      // read-only `status` is strictly weaker than those, and it is the whole
+      // reason the escape hatch exists.
+      const dirty = await runGit(run, ['status', '--porcelain'],
+        { cwd: run.worktree, hostFallback: 'masked' })
       // Uncommitted work beats any 'removable' — the worktree extras and the
       // harness hook files do not, because the hub put those there itself
       // (foreignChanges() in integrate.mjs, shared with the finish gate).
       const fremd = foreignChanges(dirty.stdout, ownWorktreePaths(repo, run.harness))
       if (!dirty.ok || fremd.length) {
-        addEventOnce(run.id, 'anomaly:worktree_dirty', { worktree: run.worktree, offen: fremd.slice(0, 20) })
+        // `unreadable` keeps the two apart in the record: "git looked and found
+        // uncommitted work" and "nobody could look" both keep the worktree, and
+        // only one of them is a statement about the worktree's contents.
+        addEventOnce(run.id, 'anomaly:worktree_dirty',
+          { worktree: run.worktree, offen: fremd.slice(0, 20), ...(dirty.ok ? {} : { unreadable: true }) })
         removable = false
       }
     }

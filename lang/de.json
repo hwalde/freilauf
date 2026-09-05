@@ -1454,6 +1454,7 @@
   "sandbox.settings.engine_builtin": "eingebaut (braucht nichts weiter)",
   "sandbox.settings.engine_iron": "iron-proxy",
   "sandbox.settings.engine_caps": "Diese Engine: TLS-Terminierung {tls}, Secret-Injektion {inject}, Regeln je Methode {methods}.",
+  "sandbox.settings.engine_unusable": "Diese Proxy-Maschinerie kann mit der Container-Laufzeit dieser Maschine nicht arbeiten.",
   "sandbox.settings.ca_dir": "CA-Verzeichnis",
   "sandbox.settings.ca_dir_hint": "Wo das Zertifikat liegt, das der Proxy dem Container vorlegt.",
   "sandbox.settings.ca_dir_unsupported": "Die Engine „{engine}“ terminiert kein TLS und kann mit einem CA-Verzeichnis nichts anfangen. Der gespeicherte Wert bleibt erhalten.",

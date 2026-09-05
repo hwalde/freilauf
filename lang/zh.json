@@ -1454,6 +1454,7 @@
   "sandbox.settings.engine_builtin": "内置（无需其他东西）",
   "sandbox.settings.engine_iron": "iron-proxy",
   "sandbox.settings.engine_caps": "该引擎：TLS 终止 {tls}，密钥注入 {inject}，按方法的规则 {methods}。",
+  "sandbox.settings.engine_unusable": "此代理引擎无法在本机的容器运行时上工作。",
   "sandbox.settings.ca_dir": "CA 目录",
   "sandbox.settings.ca_dir_hint": "代理向容器出示的证书存放位置。",
   "sandbox.settings.ca_dir_unsupported": "引擎“{engine}”不终止 TLS，因此用不到 CA 目录。已保存的值保持不变。",

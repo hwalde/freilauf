@@ -7279,9 +7279,21 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
           `and it was really asked for (${JSON.stringify(shim.order())})`)
         // Order, not tidiness: `network rm` is refused while an endpoint is
         // still attached, and the proxy container is reaped in the same pass.
-        const reihe = shim.order()
-        wahr(reihe.lastIndexOf('rm') < reihe.indexOf('network-rm'),
-          `the containers went first (${JSON.stringify(reihe)})`)
+        //
+        // Asked PER RUN, because that is the invariant. One pass reaps every
+        // terminal sandboxed run this hub left behind — the groups before this
+        // one leave several — so a global `lastIndexOf('rm') < indexOf(
+        // 'network-rm')` compares the LAST run's containers against the FIRST
+        // run's network and fails on a pass that did everything right. It read
+        // as a flake because the number of leftovers moves with the suite.
+        const calls = shim.calls()
+        const stelle = (verb, name) => calls.findIndex(c => c.verb === verb && c.argv.includes(name))
+        const netzWeg = stelle('network-rm', `fl-net-${id}`)
+        for (const c of [`fl-${id}`, `fl-proxy-${id}`]) {
+          const weg = stelle('rm', c)
+          wahr(weg >= 0 && weg < netzWeg,
+            `${c} was removed before its network (${weg} < ${netzWeg}, ${JSON.stringify(shim.order())})`)
+        }
       })
 
       await pruefe('…and a second pass asks for nothing more', async () => {
@@ -7695,6 +7707,23 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       db.prepare('UPDATE repos SET sandbox_image=? WHERE id=?')
         .run(Object.keys(bilder)[0] ?? 'freilauf/base:1', repoId)
 
+      // THE SANDBOX HALF OF A WATCHER PASS, driven by hand.
+      //
+      // `tick()` runs `reconcileContainers()` and `restoreSandboxProxies()` only
+      // while the hub owns them, and the suite has taken them
+      // (FREILAUF_SANDBOX_REAPER_OFF, see test/sandkasten.mjs): one shim state
+      // with two drivers made every `stop`/`rm`/`network-rm` appear twice and
+      // moved the failing checks from run to run. This group is the one that
+      // asked `watcherTick()` for the restore, so it says so instead. Same shape
+      // as the reaper group next door, which already calls
+      // `reconcileContainers(hubId)` itself, and the same argument
+      // FREILAUF_INTEGRATOR_OFF rests on.
+      const sandboxPass = async () => {
+        let pass = null
+        try { pass = await watcherMod.reconcileContainers() } catch { /* the verdict is the point, not the throw */ }
+        await watcherMod.restoreSandboxProxies(pass?.verdict ?? null)
+      }
+
       await pruefe('a sandboxed run’s proxy is a listener in the hub process', async () => {
         const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-ProxyRestore', sandbox: 'on' })
         wahr(!!j.runId, `run started (${JSON.stringify(j).slice(0, 200)})`)
@@ -7738,7 +7767,7 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
         // somebody's live agent.
         shim.mode('unreachable')
         watcherMod._resetProxyRestore()
-        try { await watcherTick() } finally { shim.mode('ok') }
+        try { await watcherTick(); await sandboxPass() } finally { shim.mode('ok') }
         falsch(await lauscht(LEBT_PORT), 'no listener was bound on a question nobody answered')
         gleich(anzahl(LEBT, 'sandbox:proxy_restarted'), 0, 'and nothing claims one was')
         gleich(zeile(LEBT).status, 'running', 'the run was not ended over it either')
@@ -7746,7 +7775,7 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
 
       await pruefe('the next pass brings the listener back, on the recorded port', async () => {
         watcherMod._resetProxyRestore()
-        await watcherTick()
+        await watcherTick(); await sandboxPass()
         wahr(await lauscht(LEBT_PORT),
           `the port the container dials answers again (${LEBT_PORT})`)
         gleich(anzahl(LEBT, 'sandbox:proxy_restarted'), 1, 'and the run says so, once')
@@ -7777,7 +7806,7 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
 
       await pruefe('a second pass costs nothing — a proxy this process holds is left alone', async () => {
         watcherMod._resetProxyRestore()
-        await watcherTick()
+        await watcherTick(); await sandboxPass()
         gleich(anzahl(LEBT, 'sandbox:proxy_restarted'), 1,
           'the restart is written down once, not once per pass')
         wahr(await lauscht(LEBT_PORT), 'and the listener is still the same one')

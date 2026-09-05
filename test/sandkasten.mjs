@@ -327,6 +327,8 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     'FREILAUF_SANDBOX_INFO_CACHE_MS', 'FREILAUF_SANDBOX_PROXY_BIND',
     // The two endpoint seams. See `sandboxSeams()` below for what each says.
     'FREILAUF_SANDBOX_DOCKER_HOST', 'FREILAUF_SANDBOX_RUNTIME_FORCE',
+    // Who drives the container passes. See `sandboxSeams()`.
+    'FREILAUF_SANDBOX_REAPER_OFF',
   ]
 
   /** The PATH without the shim directory — what "no runtime at all" has to mean. */
@@ -372,6 +374,16 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // The built-in proxy already defaults to 127.0.0.1:0; naming it is the
       // fence against a later default that binds somewhere a live hub can see.
       FREILAUF_SANDBOX_PROXY_BIND: '127.0.0.1',
+      // THE SUITE OWNS THE CONTAINER PASSES, exactly as FREILAUF_INTEGRATOR_OFF
+      // above hands it the integrator's clock, and for the same reason one layer
+      // out: the sandbox groups reap by hand (`reconcileContainers(hubId)`) while
+      // the hub's own 30-second timer was reaping the SAME shim state four or
+      // five times through a two-minute group. Every `stop`/`rm`/`network-rm`
+      // then appeared twice in the call log, "the reaper takes the run's network
+      // with its containers" saw two `ps` entries for one call, and the set of
+      // failing checks moved from run to run — the signature of a second driver,
+      // not of a broken assertion.
+      FREILAUF_SANDBOX_REAPER_OFF: '1',
       PATH: `${SHIM_DIR}:${pathOhneShim()}`,
     }
   }

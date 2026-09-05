@@ -1454,6 +1454,7 @@
   "sandbox.settings.engine_builtin": "built-in (needs nothing else)",
   "sandbox.settings.engine_iron": "iron-proxy",
   "sandbox.settings.engine_caps": "This engine: TLS termination {tls}, secret injection {inject}, per-method rules {methods}.",
+  "sandbox.settings.engine_unusable": "This proxy engine cannot work on this machine's container runtime.",
   "sandbox.settings.ca_dir": "CA directory",
   "sandbox.settings.ca_dir_hint": "Where the certificate the proxy presents to the container is kept.",
   "sandbox.settings.ca_dir_unsupported": "The engine “{engine}” does not terminate TLS, so it has no use for a CA directory. Its stored value is kept.",

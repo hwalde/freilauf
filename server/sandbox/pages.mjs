@@ -766,6 +766,11 @@ export async function pageSandboxSettings(req, res, url) {
   const p = await hubPolicy(s)
   const state = await runtimeState()
   const caps = engineCapabilities(p.proxyEngine)
+  // Whether this engine can work on THIS daemon is the facade's question, asked
+  // with the very predicate the launch asks — so the form cannot offer an engine
+  // `prepareSandbox()` would refuse. Through `mod()` like everything else here,
+  // and a hub without the module simply says nothing rather than failing.
+  const engineFit = pick(await mod('index'), ['engineUsable'])?.(p.proxyEngine, state) ?? { ok: true }
   const profiles = await listProfiles()
 
   // The gate §7.13 names: `sandbox_mode` cannot be set above `off` while nothing
@@ -813,6 +818,11 @@ export async function pageSandboxSettings(req, res, url) {
       <p class="dim">${e(t('sandbox.settings.proxy_hint'))}</p>
       <label>${e(t('sandbox.settings.proxy_engine'))} ${select('sandbox_proxy_engine', p.proxyEngine,
         [['builtin', t('sandbox.settings.engine_builtin')], ['iron-proxy', t('sandbox.settings.engine_iron')]])}</label>
+      ${
+        // Not theoretical: under a rootless daemon the built-in proxy has no
+        // address a container can reach, and three of the four shipped profiles
+        // name it. Without this line the operator learns that from a failed run.
+        engineFit.ok ? '' : `<p class="err">${e(engineFit.error ?? t('sandbox.settings.engine_unusable'))}</p>`}
       <p class="dim">${e(t('sandbox.settings.engine_caps', {
         tls: t(caps.tlsTerminate ? 'layout.on' : 'layout.off'),
         inject: t(caps.inject ? 'layout.on' : 'layout.off'),
