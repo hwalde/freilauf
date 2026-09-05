@@ -22,7 +22,8 @@ import {
 import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } from './title.mjs'
 import { extrasModelsMru, rememberExtrasModel, DEFAULT_EXTRAS_MODEL } from './extras-suggest.mjs'
 import { runEditAllowed } from './run-edit.mjs'
-import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES } from './run-state.mjs'
+import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
+  IN_FLIGHT_ANOMALIES, anomaliesSettled } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
@@ -89,10 +90,40 @@ const SEVERITY_CLASS = { rot: 'red', gelb: 'yellow' }
 /** …and the same value as a word on the incident line — it used to print raw. */
 const SEVERITY_TEXT = { rot: 'incidents.severity_red', gelb: 'incidents.severity_yellow' }
 
+/** The yellow anomaly kinds — every other `anomaly:*` is a red one. */
+const YELLOW_ANOMALIES = ['anomaly:no_activity', 'anomaly:soft_overrun', 'anomaly:followup_soft_overrun', 'anomaly:unpushed']
+
+const sqlList = kinds => kinds.map(k => `'${k}'`).join(',')
+
+/**
+ * The anomaly kinds this run may still be coloured by — as a WHERE fragment.
+ *
+ * `cleared:*` kinds fall out by themselves: `clearAnomalies()` renames the
+ * event, so neither `LIKE 'anomaly:%'` nor an IN-list matches a retracted one.
+ * What did NOT fall out until now is an anomaly on a run that has come
+ * through — `anomaliesSettled()` is that rule and `IN_FLIGHT_ANOMALIES` the
+ * list of statements a run's own end answers (server/run-state.mjs).
+ */
+function stillSpeaking(run) {
+  return anomaliesSettled(run) ? ` AND kind NOT IN (${sqlList(IN_FLIGHT_ANOMALIES)})` : ''
+}
+
+/** Does the run carry one of these anomalies, still asking for attention? */
+function hasAnomaly(run, kinds) {
+  return !!db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind IN (${sqlList(kinds)})${stillSpeaking(run)} LIMIT 1`)
+    .get(run.id)
+}
+
+/** …and the counterpart: any anomaly that is NOT one of the yellow ones. */
+function hasOtherAnomaly(run, kinds) {
+  return !!db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind LIKE 'anomaly:%'
+    AND kind NOT IN (${sqlList(kinds)})${stillSpeaking(run)} LIMIT 1`).get(run.id)
+}
+
 function ampel(run) {
   const vf = ampelAusVorfaellen(run.id)
   const red = vf === 'rot' || ['waiting_help', 'failed'].includes(run.status)
-    || db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind LIKE 'anomaly:%' AND kind NOT IN ('anomaly:no_activity','anomaly:soft_overrun','anomaly:followup_soft_overrun','anomaly:unpushed') LIMIT 1`).get(run.id)
+    || hasOtherAnomaly(run, YELLOW_ANOMALIES)
   // A run in the finish gate is at least yellow: it has reported, and something
   // is still keeping its work off the base branch. A blocked_* one is red
   // through its incident anyway.
@@ -103,9 +134,10 @@ function ampel(run) {
   const yellow = !red && (
     vf === 'gelb' || run.status === 'deferred' || !!run.finish_state
     || (run.status === 'running' && run.agent_state === 'waiting')
-    || db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind IN ('anomaly:no_activity','anomaly:soft_overrun','anomaly:followup_soft_overrun','anomaly:unpushed') LIMIT 1`).get(run.id))
+    || hasAnomaly(run, YELLOW_ANOMALIES))
   return red ? 'red' : yellow ? 'yellow' : 'green'
 }
+export { ampel }
 
 /**
  * The traffic light as a dot. All three carry the same kind of label, and it is

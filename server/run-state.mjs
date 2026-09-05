@@ -53,6 +53,49 @@ export function displayStatus(run) {
   return run.status
 }
 
+/**
+ * The anomalies that are statements about a run IN FLIGHT — "nothing is
+ * happening", "this is taking longer than planned", "its session vanished".
+ *
+ * Every one of them is already retracted (`clearAnomalies()` renames the event
+ * to `cleared:*`) somewhere in the hub the moment it is overtaken: by a
+ * progress report, by a raised expected duration, by a resume, by activity
+ * coming back. Which is the whole point — a statement about a run that has
+ * been overtaken must not go on colouring the run's traffic light.
+ *
+ * The run REACHING ITS END is the last and most complete of those overtaking
+ * events, and it was the one nobody had wired up. Measured on this
+ * installation: run 9b6bfee6 ran 52 minutes against an expectation of 45,
+ * reported done and had its work merged into `main` — and sat in the overview
+ * with a RED dot titled "needs attention", next to a run that had genuinely
+ * called for help and was green. `12c30c75`, `f2d4af1d` and `01c8a3b9` wore
+ * the same yellow for the same reason, all three done and merged.
+ *
+ * `settledAnomalies()` is therefore the anomaly half of what
+ * `vorfallWeggrund()` does for incidents ("Gone is gone": a run that reached
+ * `done` has answered them). The record stays — the anomaly event is not
+ * touched, and the status cell still prints it as the dim history line next to
+ * a duration column that says 52/45. What ends is the CALL FOR ATTENTION.
+ */
+export const IN_FLIGHT_ANOMALIES = [
+  'anomaly:no_activity', 'anomaly:soft_overrun', 'anomaly:overrun', 'anomaly:session_gone',
+]
+
+/**
+ * Has this run come through, so that the statements above are history?
+ *
+ * `done` only. A `failed` or `aborted` run KEEPS its anomalies and their
+ * colour, because there the anomaly is the explanation of why it did not come
+ * through. A `done` run whose work is stuck off the base branch is red through
+ * its `merge_blocked` incident, which is the integrator's ladder and not
+ * this. And a run with an open follow-up commission is working right now — its
+ * `followup_*` anomalies are not in the list above anyway, but its status says
+ * `done` while a human waits on it, so it is not settled either.
+ */
+export function anomaliesSettled(run) {
+  return !!run && run.status === 'done' && !followUpActive(run)
+}
+
 /** The statuses the overview can be filtered by and the sidebar counts, in reading order. */
 export const WORK_STATUSES = ['running', 'waiting_input', 'waiting_help', 'scheduled', 'deferred']
 
