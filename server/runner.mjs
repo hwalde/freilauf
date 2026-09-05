@@ -644,7 +644,7 @@ export function claudeSettingsJson() {
  *    for the watcher to replay, and it resolves that directory the way every
  *    `fl-*` script does: the seam, then `$HOME/agents/runs`. Inside the box
  *    `$HOME` is the run's seeded home, so with the variable unset the fallback
- *    wrote to `<runDir>/home/agents/runs/<id>/inbox.jsonl` — a path the hub does
+ *    wrote to `<run home>/agents/runs/<id>/inbox.jsonl` — a path the hub does
  *    not look at. Measured 2026-09-05 on the first real sandboxed run: the agent
  *    did the work, committed it, ran `fl-report done`, was told "hub not
  *    reachable — the report is in inbox.jsonl, the watcher will pick it up", and
