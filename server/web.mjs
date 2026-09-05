@@ -731,7 +731,26 @@ async function api(req, res, url) {
     // tmux_closed_at goes with it too: the old SESSION is closed, not this run —
     // the new attempt gets a fresh one, and a stale timestamp would make
     // pageRun() render "no tmux session" for a session that is standing.
-    db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL, archived_at=NULL,
+    //
+    // `started_at` becomes the REAL start, exactly as in pickUpScheduled(),
+    // startDeferredRun() and startScheduledNow() — and here it is not cosmetic.
+    // `verwaisteLaeufeAbschliessen()` measures its grace period against
+    // `started_at`, so a retry that kept the first attempt's timestamp had NO
+    // grace at all: the watcher pass that fell into the seconds between
+    // `launchRun()`'s `started` event and its `tmux_session` wrote
+    // `failed / start interrupted, no session` over a run that was starting
+    // perfectly well. Measured on run b9b1a876 — retry 13:38:35, `started`
+    // 13:38:43, orphan sweep 13:38:45, session 13:38:45; the agent then worked,
+    // reported, and its report arrived as a FOLLOW-UP because the row said
+    // `failed` — which by design keeps the old status, so the run stayed red
+    // while it ran. The overrun clock hung on the same value: a retried run was
+    // over its expected duration from its first second.
+    // `last_activity_at` goes with it for the same reason one step further on:
+    // it is what the watcher falls back to where a harness reports no activity,
+    // and the first attempt's value reads as silence from the new attempt's
+    // first second.
+    db.prepare(`UPDATE runs SET status='running', started_at=datetime('now'),
+                last_activity_at=datetime('now'), ended_at=NULL, report_md=NULL, archived_at=NULL,
                 goal_sent_at=NULL, followups=0, followup_md=NULL, followup_open=0, followup_since=NULL,
                 agent_state=NULL, agent_state_at=NULL,
                 tmux_closed_at=NULL, exit_code=NULL, resume_pending=0, resume_attempts=0 WHERE id=?`).run(m[1])

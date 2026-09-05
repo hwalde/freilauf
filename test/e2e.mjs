@@ -2155,11 +2155,27 @@ try {
     const vorher = lauf(R2).workdir_effective
     wahr(existsSync(vorher), 'worktree from the failed attempt is still there')
     rmSync(FEHLSTART)
+    // The failed attempt's started_at must not survive into the new one, and
+    // that is not cosmetics: `verwaisteLaeufeAbschliessen()` measures its grace
+    // period against this column, so a retry that kept the old timestamp had
+    // none — the watcher pass falling into the seconds between launchRun()'s
+    // `started` event and its `tmux_session` wrote `failed / start interrupted,
+    // no session` over a run that was starting perfectly well. Measured on run
+    // b9b1a876: retry 13:38:35, started 13:38:43, orphan sweep 13:38:45,
+    // session 13:38:45 — the agent then worked and its `done` arrived as a
+    // FOLLOW-UP, which by design keeps the status, so the run stayed red while
+    // it ran. The overrun clock reads the same column and was over from the
+    // first second.
+    db.prepare(`UPDATE runs SET started_at=datetime('now','-2 hours') WHERE id=?`).run(R2)
+    const startVorher = lauf(R2).started_at
     const r = await formular(`/api/runs/${R2}/retry`, {}, { alsBrowser: true })
     gleich(r.status, 303, 'redirect instead of JSON')
     await sessionMerken(R2)
     gleich(lauf(R2).status, 'running', 'status')
     gleich(lauf(R2).workdir_effective, vorher, 'same worktree')
+    wahr(lauf(R2).started_at > startVorher, 'started_at is the retry, not the attempt before it')
+    wahr(lauf(R2).started_at >= db.prepare(`SELECT datetime('now','-60 seconds') AS t`).get().t,
+      'and it is fresh, so the orphan sweep grants the new launch its grace period')
   })
   await pruefe('abort sets aborted and closes the session immediately', async () => {
     const r = await formular(`/api/runs/${R2}/kill`, {})

@@ -3955,6 +3955,22 @@ errors (`post_api_request` only fires after success).
   nothing", which is what `mergeScoped()` had always done by applying the live
   windows last. Do not compare a clock against a file's mtime and expect a
   total order.
+- **A relaunch of an existing run row has to move `started_at`, and that is not
+  cosmetics.** Three timers read that column as "when did this attempt begin":
+  the overrun thresholds, the watcher's fallback for a harness that reports no
+  activity, and — the expensive one —
+  `verwaisteLaeufeAbschliessen()`'s grace period, which is what keeps the sweep
+  for interrupted starts off a run whose `fl-start` is still working.
+  `pickUpScheduled()`, `startDeferredRun()` and `startScheduledNow()` all set it;
+  the **retry route did not**, so a retried run had a grace period of zero. The
+  watcher pass that fell into the two seconds between `launchRun()`'s `started`
+  event and its `tmux_session` wrote `failed / start interrupted, no session`
+  over a start that was going perfectly well — measured on run b9b1a876: retry
+  13:38:35, `started` 13:38:43, sweep 13:38:45, session 13:38:45. And the second
+  half is what made it expensive: the agent worked, reported `done` two minutes
+  later, and because the row said `failed` the report arrived as a **follow-up**
+  report — which by design leaves the status alone. So the run was red for its
+  whole life while doing its job, and every layer above it agreed.
 - **The string `'0'` is truthy, and a checkbox read with `b.x ? 1 : 0` believes
   it.** The agent form's `active` box carries no hidden `0` companion — absent
   IS off there, which is right for a form. But `agentSave` coerced instead of
