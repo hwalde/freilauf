@@ -5,7 +5,10 @@
 #     --build-arg CLAUDE_VERSION=2.1.261 \
 #     -t freilauf/agent-claude:2.1.261 sandbox/images
 #
-# UNBUILT AND UNTESTED — see README.md.
+# BUILT AND MEASURED on 2026-09-05 (rootless Docker 29.8.0): the layer on top
+# of the base takes ~50 s and 1.26 GB in total, and `claude --version` inside
+# answers `2.1.261 (Claude Code)`. The installer needed no correction — see
+# README.md for the per-image table.
 ARG BASE=freilauf/agent-base:24.04
 FROM ${BASE}
 

@@ -5,7 +5,10 @@
 #     --build-arg OPENCODE_VERSION=1.18.29 \
 #     -t freilauf/agent-opencode:1.18.29 sandbox/images
 #
-# UNBUILT AND UNTESTED — see README.md.
+# BUILT AND MEASURED on 2026-09-05 (rootless Docker 29.8.0): ~30 s on top of
+# the base, 1.44 GB in total, `opencode --version` answers 1.18.29. One
+# correction the build forced — the npm prefix — is explained at the install
+# step below.
 ARG BASE=freilauf/agent-base:24.04
 FROM ${BASE}
 

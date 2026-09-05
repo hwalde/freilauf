@@ -14,7 +14,12 @@
 #     --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
 #     -t freilauf/agent-claude-myrepo:2.1.261 sandbox/images
 #
-# UNBUILT AND UNTESTED — see README.md.
+# BUILT AND MEASURED on 2026-09-05 against a pretend operator toolchain image
+# (ubuntu:24.04 + bash/git/curl/ca-certificates, ending in a `USER` of its own):
+# it refuses a base carrying XDG_DATA_HOME and NAMES the variable and its value,
+# it refuses an alpine base for the packages it lacks, and the built overlay
+# runs as root with the copied CLI on its PATH. The copy rule found a real
+# defect in the opencode layer on that first build — see README.md.
 
 ARG BASE
 ARG AGENT_IMAGE

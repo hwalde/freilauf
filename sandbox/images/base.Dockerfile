@@ -32,9 +32,10 @@ FROM ubuntu:24.04
 #                    `--user` at all.
 #
 # `--user` being ABSENT under rootless is exactly why a `USER` line here is not
-# a harmless default: it is what wins. Measured on this host (herbe:100000:65536,
-# a real worktree owned by the operator), with the image as it was first
-# written, ending in `USER agent`:
+# a harmless default: it is what wins. Measured against a rootless daemon whose
+# `/etc/subuid` gives the hub user the usual 65536 subordinate ids
+# (`<operator>:100000:65536`), on a real worktree owned by that user, with the
+# image as it was first written, ending in `USER agent`:
 #
 #   $ docker run --rm -v <wt>:<wt> -w <wt> freilauf/agent-base:24.04 \
 #       bash -c 'id -u; touch probe.txt; git status'
@@ -44,7 +45,7 @@ FROM ubuntu:24.04
 #
 # Both failures are the same fact seen twice: uid 1000 inside mapped to 100999
 # on the host, so every operator-owned file was somebody else's. With no `USER`
-# the same command runs as container root, writes files owned by `herbe:herbe`
+# the same command runs as container root, writes files owned by the hub user
 # on the host, and git raises nothing — the uids MATCH, which is why the answer
 # is the uid and never `safe.directory` (that would only silence the symptom
 # while the writes still landed under a subordinate uid).

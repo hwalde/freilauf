@@ -65,6 +65,33 @@ ARG HERMES_COMMIT=f58fcc8118d9db092ad60d363d4a28520e08ac5a
 #     for this one command and why `ENV HERMES_HOME` must never appear: it
 #     would send every run's state back to one shared directory in the image
 #     and silently break the seeding for all of them (see base.Dockerfile).
+#
+# TWO THINGS ABOUT THE BROWSER, both learned on the first successful build.
+# hermes' installer fetches a **Playwright Chromium with its apt dependencies**
+# — that is the bulk of this image and the bulk of the build's ten minutes, and
+# `--skip-browser` is the installer's own way out for anyone who does not want
+# hermes' browser tool inside the sandbox.
+#
+# Where it lands matters more than that it is fetched. Playwright's default is
+# `$HOME/.cache/ms-playwright`, and $HOME at BUILD time is not $HOME at RUN time
+# — a sandboxed run's home is the per-run directory the hub mounts, so a browser
+# under the build-time home is one no run can ever find, and hermes' browser
+# tool would fail as if it had never been installed. `PLAYWRIGHT_BROWSERS_PATH`
+# therefore points at an image path for both the install and the run. It is NOT
+# a member of the forbidden family in base.Dockerfile and does not contradict
+# it: those variables redirect a coding agent's STATE away from the per-run home,
+# while this one names a read-only program directory, the same way Playwright's
+# own images use `/ms-playwright`. /opt is also what `overlay.Dockerfile` copies,
+# so the browser survives into an overlay.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+
+# The caches are deleted IN THIS RUN and not in one of their own — a later
+# layer cannot shrink an earlier one, it only stacks a whitening on top. They
+# are worth the line: measured on the first successful build, the installer
+# left 1.1 GB under the build-time $HOME/.cache, 157 MB of npm cache and 49 MB
+# of a tool download, none of which a run reads.
+# $HOME/.hermes stays — it is 52 MB, it is data rather than cache, and it is
+# where the bundled skills the installer fetched sit.
 USER root
 RUN set -eux; \
     mkdir -p /opt/hermes; \
@@ -77,8 +104,10 @@ RUN set -eux; \
     fi; \
     rm -f /tmp/hermes-install.sh; \
     test -x /usr/local/bin/hermes; \
-    chmod -R a+rX /opt/hermes /usr/local/lib/hermes-agent; \
-    HOME=/opt/hermes hermes --version | head -1 | grep -F "v${HERMES_VERSION}"
+    HOME=/opt/hermes hermes --version | head -1 | grep -F "v${HERMES_VERSION}"; \
+    rm -rf /opt/hermes/.cache /opt/hermes/.npm /opt/hermes/.cua-driver /root/.cache; \
+    rm -rf /var/lib/apt/lists/*; \
+    chmod -R a+rX /opt/hermes /usr/local/lib/hermes-agent /opt/ms-playwright
 
 # hermes updates itself by pulling its own checkout, which inside a container
 # is both pointless and a way to make two runs of one image behave differently.
