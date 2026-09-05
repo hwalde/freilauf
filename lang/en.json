@@ -1387,6 +1387,7 @@
   "sandbox.problem.profile_unknown": "There is no sandbox profile {id}.",
   "sandbox.problem.profile_builtin": "“{name}” is one of the hub’s own profiles and cannot be deleted. Point the repo at another profile instead.",
   "sandbox.problem.profile_delete": "The sandbox profile could not be deleted: {error}",
+  "sandbox.problem.profile_inject_engine": "This profile keeps the credentials out of the container (secrets: inject), and names the proxy engine “{engine}”, which cannot do it — it tunnels HTTPS instead of terminating it, so there is no header to swap. Choose an engine that terminates TLS, or secrets: env.",
   "sandbox.profile.balanced": "Balanced",
   "sandbox.profile.balanced_desc": "An allowlist built from the four presets, 8 GB and 4 CPUs. The everyday profile.",
   "sandbox.profile.locked_down": "Locked down",

@@ -1387,6 +1387,7 @@
   "sandbox.problem.profile_unknown": "Es gibt kein Sandbox-Profil {id}.",
   "sandbox.problem.profile_builtin": "„{name}“ ist eines der mitgelieferten Profile und lässt sich nicht löschen. Stell das Repo stattdessen auf ein anderes Profil um.",
   "sandbox.problem.profile_delete": "Das Sandbox-Profil ließ sich nicht löschen: {error}",
+  "sandbox.problem.profile_inject_engine": "Dieses Profil hält die Zugangsdaten aus dem Container heraus (secrets: inject) und nennt zugleich die Proxy-Engine „{engine}“, die das nicht kann: Sie tunnelt HTTPS, statt es zu terminieren, also gibt es keinen Header zum Austauschen. Wähle eine Engine, die TLS terminiert, oder secrets: env.",
   "sandbox.profile.balanced": "Ausgewogen",
   "sandbox.profile.balanced_desc": "Eine Erlaubnisliste aus den vier Vorlagen, 8 GB und 4 CPUs. Das Profil für den Alltag.",
   "sandbox.profile.locked_down": "Streng",

@@ -100,9 +100,16 @@ export class SandboxArgvError extends Error {
  * command line nobody runs.
  */
 export function runtimeBin(runtimeId) {
+  // The id is validated FIRST, and then the seam replaces the binary. The other
+  // order looks equivalent and is not: it made the shim disable the CHECK as
+  // well as the binary, so with a seam set `runtimeInfo('nosuch')` probed the
+  // shim and came back *available* — an operator's typo in `sandbox_runtime`
+  // would then have been caught only on a machine with no seam, which is every
+  // machine except the one running the suite. A test fence may replace what the
+  // hub CALLS; it may not quietly replace what the hub ACCEPTS.
+  const def = runtimeDef(runtimeId)
   const shim = env('SANDBOX_RUNTIME_BIN')
-  if (shim) return shim
-  return runtimeDef(runtimeId).bin
+  return shim || def.bin
 }
 
 function runtimeDef(runtimeId) {
@@ -654,14 +661,27 @@ export async function runtimeInfo(runtimeId = null, { force = false } = {}) {
   const key = `${id}|${bin}`
   const hit = infoCache.get(key)
   if (!force && hit && Date.now() - hit.at < INFO_CACHE_MS) return hit.value
-  const running = infoFlight.get(key)
-  if (running) {
-    if (!force && hit) return hit.value      // stale-while-revalidate
-    return running
+  if (!force) {
+    // Somebody is already asking the same question: join them rather than ask
+    // the daemon twice. A cached answer is handed back at once and the refresh
+    // finishes behind it (stale-while-revalidate, as on every page render).
+    const running = infoFlight.get(key)
+    if (running) return hit ? hit.value : running
   }
+  // `force` starts a probe OF ITS OWN and never joins one in flight. Sharing
+  // was the bug: a caller that explicitly asked for a fresh answer got the
+  // answer to a question asked before it — which under load is a probe several
+  // seconds old, and is the "fails once in four" shape a suite learns to
+  // ignore. Waiting for the in-flight one and then probing would keep the
+  // ordering too, but it makes a forced caller wait for a result it just said
+  // it did not want; starting one costs a `docker info` instead.
+  const startedAt = Date.now()
   const task = (async () => {
     const value = await probeRuntime(id, bin)
-    infoCache.set(key, { at: Date.now(), value })
+    // Two probes may now be in flight, so the SLOWER one must not overwrite a
+    // newer answer that already landed — a cache is only ever moved forward.
+    const current = infoCache.get(key)
+    if (!current || current.at <= startedAt) infoCache.set(key, { at: Date.now(), value })
     return value
   })()
   infoFlight.set(key, task)
@@ -670,6 +690,8 @@ export async function runtimeInfo(runtimeId = null, { force = false } = {}) {
   // the assignment would run BEFORE it — and every later caller would be handed
   // one stale promise for the life of the process. AGENTS.md has the entry;
   // this is the same handful of lines.
+  // Identity, not existence: with a forced probe running alongside an ordinary
+  // one, whoever finishes first must clear only ITS OWN entry.
   const release = () => { if (infoFlight.get(key) === task) infoFlight.delete(key) }
   task.then(release, release)
   if (!force && hit) return hit.value

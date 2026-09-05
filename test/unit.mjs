@@ -8067,6 +8067,67 @@ process.stdout.write(JSON.stringify(out))
     }
   })
 
+  await pruefe('the shim replaces the binary and NOT the check on the runtime id', async () => {
+    // A test fence may replace what the hub CALLS, never what it ACCEPTS. With
+    // the two in the wrong order the shim answered for `nosuch` and an
+    // operator's typo in sandbox_runtime came back "available".
+    const before = process.env.FREILAUF_SANDBOX_RUNTIME_BIN
+    process.env.FREILAUF_SANDBOX_RUNTIME_BIN = '/bin/true'
+    try {
+      rt._runtimeInfoCacheReset()
+      gleich((await rt.runtimeInfo('nosuch')).reason, 'sandbox.reason.unknown_runtime', 'a typo is still a typo')
+      gleich((await rt.runtimeInfo('srt')).reason, 'sandbox.reason.unsupported_runtime', 'and a deferred runtime still deferred')
+      let err = null
+      try { rt.buildRunArgv({ runtime: 'nosuch' }, rtCtx()) } catch (e) { err = e }
+      gleich(err?.key, 'sandbox.runtime.reason_unknown', 'the builder refuses under a shim too')
+      gleich(rt.buildRunArgv({}, rtCtx()).bin, '/bin/true', 'while a VALID id still goes through the shim')
+    } finally {
+      if (before === undefined) delete process.env.FREILAUF_SANDBOX_RUNTIME_BIN
+      else process.env.FREILAUF_SANDBOX_RUNTIME_BIN = before
+      rt._runtimeInfoCacheReset()
+    }
+  })
+
+  await pruefe('force probes again; an ordinary caller joins the one in flight', async () => {
+    // Counted by asking the fake binary how often it RAN, not by comparing
+    // promises: runtimeInfo is `async`, so every call hands back a fresh
+    // wrapper and identity can never hold — an assertion on it passes whatever
+    // the sharing does. How often the daemon was asked is the thing that
+    // matters and the thing that was wrong.
+    const dir = mkdtempSync(join(tmpdir(), 'freilauf-rt-'))
+    const log = join(dir, 'calls')
+    const fake = join(dir, 'fake-docker')
+    writeFileSync(fake, `#!/bin/sh\necho ran >> ${log}\nsleep 0.2\necho '{}'\n`)
+    chmodSync(fake, 0o755)
+    const calls = () => { try { return readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).length } catch { return 0 } }
+    const before = process.env.FREILAUF_SANDBOX_RUNTIME_BIN
+    process.env.FREILAUF_SANDBOX_RUNTIME_BIN = fake
+    try {
+      rt._runtimeInfoCacheReset()
+      await Promise.all([rt.runtimeInfo('docker'), rt.runtimeInfo('docker')])
+      gleich(calls(), 1, 'two ordinary callers ask the daemon once between them')
+      await rt.runtimeInfo('docker')
+      gleich(calls(), 1, 'and the cache answers the next one')
+
+      // The bug: a caller that explicitly asked for a fresh answer was handed
+      // the answer to a question asked before it — under load a probe several
+      // seconds old, which is the "fails once in four" shape a suite learns to
+      // ignore rather than to fix.
+      rt._runtimeInfoCacheReset()
+      const ordinary = rt.runtimeInfo('docker')
+      const forced = rt.runtimeInfo('docker', { force: true })
+      await Promise.all([ordinary, forced])
+      gleich(calls(), 3, 'force never joins a probe somebody else started')
+      await rt.runtimeInfo('docker', { force: true })
+      gleich(calls(), 4, 'and it does not read the cache it just filled either')
+    } finally {
+      if (before === undefined) delete process.env.FREILAUF_SANDBOX_RUNTIME_BIN
+      else process.env.FREILAUF_SANDBOX_RUNTIME_BIN = before
+      rt._runtimeInfoCacheReset()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   await pruefe('the proxy container exists only where there is a policy to enforce', () => {
     gleich(rt.buildProxyArgv({}, { runId: 'r1' }), null, 'the builtin engine lives in the hub process')
     gleich(rt.buildProxyArgv({ network: { mode: 'open', engine: 'iron-proxy' } }, { runId: 'r1' }), null,
@@ -9577,6 +9638,20 @@ process.stdout.write(JSON.stringify(out))
         if (s.network?.tlsTerminate === true) wahr(caps.tlsTerminate, `${p.name}: asks for TLS termination on an engine that can`)
         wahr(!!enSb[p.descKey], `${p.name}: its description is in the catalog`)
       }
+    })
+
+    await pruefe('…and a profile that contradicts itself is refused at the form, not at the launch', async () => {
+      const { saveProfile } = await import('../server/sandbox/profiles.mjs')
+      const bad = saveProfile({ name: 'sb-defect-inject', spec: { network: { engine: 'builtin' }, secrets: { mode: 'inject' } } })
+      gleich(bad.id, null, 'nothing is stored')
+      gleich(bad.problems[0]?.key, 'sandbox.problem.profile_inject_engine', 'and the reason is the contradiction')
+      wahr(!!enSb['sandbox.problem.profile_inject_engine'], 'whose text is in the catalog')
+      // Narrow on purpose: a profile that asks for inject and names NO engine
+      // may still resolve against a hub configured for one.
+      const ok = saveProfile({ name: 'sb-defect-inject-open', spec: { secrets: { mode: 'inject' } } })
+      wahr(ok.id > 0, 'a profile that names no engine is left alone')
+      const { deleteProfile } = await import('../server/sandbox/profiles.mjs')
+      deleteProfile(ok.id)
     })
 
     await pruefe('one reader for the break glass, and it knows every word for yes', () => {

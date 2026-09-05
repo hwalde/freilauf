@@ -17,6 +17,7 @@
 // overwritten, in either direction.
 import db from '../db.mjs'
 import { normalizeSpec } from './spec.mjs'
+import { engineCapabilities } from './proxy.mjs'
 
 /**
  * The four of §7.13 — the Docker Sandboxes trio plus the rollout mode.
@@ -206,6 +207,18 @@ export function saveProfile({ id = null, name, spec = {} } = {}) {
   if (doc !== null && (typeof doc !== 'object' || Array.isArray(doc))) {
     problems.push({ key: 'sandbox.problem.not_object', params: {} })
     doc = null
+  }
+  // A profile that names BOTH `secrets.mode: inject` and an engine that cannot
+  // inject contradicts itself, and the contradiction is only noticed at launch
+  // otherwise — where it fails a run rather than a form. Deliberately narrow:
+  // only when ONE document says both. A profile asking for `inject` without
+  // naming an engine is not refused, because the engine may come from the hub
+  // setting or from the layer above, and refusing it here would forbid a
+  // combination that resolves perfectly well.
+  const wantsInject = doc?.secrets?.mode === 'inject'
+  const namedEngine = typeof doc?.network?.engine === 'string' ? doc.network.engine : null
+  if (wantsInject && namedEngine && engineCapabilities(namedEngine).inject !== true) {
+    problems.push({ key: 'sandbox.problem.profile_inject_engine', params: { engine: namedEngine } })
   }
   if (problems.length) return { id: null, name: wanted, copied: false, problems }
 

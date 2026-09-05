@@ -1387,6 +1387,7 @@
   "sandbox.problem.profile_unknown": "不存在编号为 {id} 的沙箱配置方案。",
   "sandbox.problem.profile_builtin": "“{name}”是 Hub 自带的配置方案，无法删除。请改为让该仓库指向别的方案。",
   "sandbox.problem.profile_delete": "无法删除该沙箱配置方案：{error}",
+  "sandbox.problem.profile_inject_engine": "该方案不让凭据进入容器（secrets: inject），却指定了做不到这一点的代理引擎“{engine}”：它只转发 HTTPS 而不终止 TLS，因此没有可替换的请求头。请改用能终止 TLS 的引擎，或改为 secrets: env。",
   "sandbox.profile.balanced": "均衡",
   "sandbox.profile.balanced_desc": "由四组预设生成的允许名单，8 GB 内存、4 个 CPU。日常使用的方案。",
   "sandbox.profile.locked_down": "严格",
