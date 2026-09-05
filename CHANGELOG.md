@@ -309,6 +309,19 @@ a day on which nothing was released.
   reports no activity, silent from its first second. A retry now starts both
   clocks afresh, like every other path that starts a waiting run.
 
+- **A killed test suite no longer leaves its tmux sessions on the machine.**
+  `node test/e2e.mjs` and `node test/browser.mjs` kill exactly the sessions
+  they created — but only when they get to run their cleanup, and a suite
+  started inside an agent's tmux session dies of SIGHUP when that session is
+  closed, which node answers by exiting without any handler at all. Measured
+  on 2026-09-05: 294 live stub sessions from six killed suites, about a
+  gigabyte of memory, and the Sessions page — the one page that exists to find
+  a real session by its age — buried under 300 rows of test leftovers. Both
+  suites answer SIGHUP now, and a starting sandbox first sweeps what a dead one
+  left behind: it reads that sandbox's own list of session names and kills
+  exactly those, then removes its directory. A sandbox whose owning process is
+  still alive is never touched, nor is one kept with `--keep`.
+
 - **A run start no longer dies in the middle of the worktree checkout.** On a
   busy machine the `git worktree add` of a large repository takes longer than
   the hub's 30-second subprocess default; two swarm-worker starts on a

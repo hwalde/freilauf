@@ -106,6 +106,11 @@ async function aufraeumen() {
 }
 process.on('SIGINT', async () => { await aufraeumen(); process.exit(130) })
 process.on('SIGTERM', async () => { await aufraeumen(); process.exit(143) })
+// SIGHUP is what this suite really dies of: it is run from inside a tmux session
+// (an agent's own run), and when that session is closed tmux hangs up the whole
+// process group. Node's default for SIGHUP is to exit without running any of the
+// above — which is how six killed suites left 294 tmux sessions standing.
+process.on('SIGHUP', async () => { await aufraeumen(); process.exit(129) })
 
 // ================================================================== Test run
 try {
@@ -6620,13 +6625,25 @@ export default {
       try { return JSON.parse(row?.payload || '{}') } catch { return {} }
     }
 
+    // ONE run for both checks below, and deliberately so: each of them leaves a
+    // sandboxed container behind for the reaper group further down, whose
+    // ordering assertion reads one global call log — a second leftover makes two
+    // runs reaped concurrently and their `rm`/`network rm` interleave.
+    let politikLauf = null
+    const politikLaufHolen = async () => {
+      if (politikLauf) return politikLauf
+      const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-Policy' })
+      await sessionMerken(j.runId)
+      db.prepare('UPDATE runs SET sandbox=1, sandbox_container=? WHERE id=?').run(`fl-${j.runId}`, j.runId)
+      shim.container(`fl-${j.runId}`, { state: 'running' })
+      politikLauf = j
+      return j
+    }
+
     if (fehlt) uebersprungen('a limits-only change needs no proxy, a network-only one refuses without it', fehlt)
     else {
       await pruefe('a limits-only change needs no proxy, a network-only one refuses without it', async () => {
-        const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-Policy-Halves' })
-        await sessionMerken(j.runId)
-        db.prepare('UPDATE runs SET sandbox=1, sandbox_container=? WHERE id=?').run(`fl-${j.runId}`, j.runId)
-        shim.container(`fl-${j.runId}`, { state: 'running' })
+        const j = await politikLaufHolen()
 
         // A patch that never involves the proxy. It must land — the run has no
         // proxy handle, and `docker update` does not care.
@@ -6656,30 +6673,28 @@ export default {
         // The spec row is written all the same: a resume has to come back with
         // the policy the operator asked for, not the one they replaced.
         enthaelt(String(lauf(j.runId).sandbox_spec), 'files.example.org', 'while the row carries the new list for the next resume')
-        await hol(`/api/runs/${j.runId}/kill`, { method: 'POST' })
       })
     }
 
     if (fehlt) uebersprungen('a mixed change applies the limits and names the half that did not land', fehlt)
     else {
       await pruefe('a mixed change applies the limits and names the half that did not land', async () => {
-        const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-Policy-Mixed' })
-        await sessionMerken(j.runId)
-        db.prepare('UPDATE runs SET sandbox=1, sandbox_container=? WHERE id=?').run(`fl-${j.runId}`, j.runId)
-        shim.container(`fl-${j.runId}`, { state: 'running' })
+        const j = await politikLaufHolen()
         shim.reset()
         // Both halves in one patch, and only one of them deliverable. Refusing
         // the whole call would throw away a limits change that needs no proxy;
         // answering ok would report a network rule that is not in force. So:
         // partly applied, and the answer says which half is which.
+        // A different memory value from the check above, so "the limits half
+        // landed" cannot be satisfied by the state that check left behind.
         const r = await facade.changePolicy(lauf(j.runId),
-          { network: { allow: ['files.example.org'] }, resources: { memory: '16g' } }, 'e2e')
+          { network: { allow: ['files.example.org', 'mirror.example.org'] }, resources: { memory: '24g' } }, 'e2e')
         falsch(r?.ok, `not a success — half of it did not land (${JSON.stringify(r)})`)
         gleich(r.partial, true, 'it is reported as partly applied')
         gleich(r.applied.limits, true, 'the limits half really went')
         gleich(r.applied.proxy, false, 'the network half did not')
         wahr(shim.argvFor('update').length > 0, 'docker update carried the new limit')
-        gleich(wert(shim.lastArgv('update'), '--memory'), '16g', 'with the value that was patched')
+        gleich(wert(shim.lastArgv('update'), '--memory'), '24g', 'with the value that was patched')
         gleich(shim.argvFor('run').length, 0, 'and nothing was restarted for it')
         enthaelt(String(r.error), 'proxy', 'the reason names the half that did not land')
         const ev = politikEreignis(j.runId)

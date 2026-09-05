@@ -97,17 +97,61 @@ if (!doc.ctx || typeof doc.ctx !== 'object') die(`the sandbox spec has no "ctx" 
 // The hub's own module, imported from the checkout this file lives in. It is
 // loaded LATE and by name so that a missing or broken module is a sentence a
 // human can act on rather than a stack trace in a dying tmux pane.
-let buildRunArgv
+let buildRunArgv, runtimeEndpoint
 try {
-  ;({ buildRunArgv } = await import(join(HERE, '..', 'server', 'sandbox', 'runtime.mjs')))
+  ;({ buildRunArgv, runtimeEndpoint } = await import(join(HERE, '..', 'server', 'sandbox', 'runtime.mjs')))
 } catch (e) {
   die(`cannot load server/sandbox/runtime.mjs next to ${HERE}: ${e.message}`)
 }
 if (typeof buildRunArgv !== 'function') die('server/sandbox/runtime.mjs exports no buildRunArgv()')
 
+// ---- the runtime environment (--print-env) ------------------------------
+//
+// The same rule `runtimeEnv()` applies inside the hub: hand the CLI the
+// endpoint this module resolved, but ONLY where we resolved it ourselves (the
+// operator's seam, or the rootless socket found under $XDG_RUNTIME_DIR). The
+// `legacy` answer — `/var/run/docker.sock` — is deliberately NOT exported: it
+// is the CLI's own last resort anyway, and writing it would override a working
+// `docker context` with the dead socket.
+//
+// This mirrors a private function of runtime.mjs rather than calling it, because
+// that function is not exported. Exporting it there and deleting this copy is
+// the right end state — two readers of one rule is exactly the drift this
+// project has a name for.
+function runtimeEnvPairs (runtimeId) {
+  const out = []
+  if (typeof runtimeEndpoint !== 'function') return out
+  let answer
+  try { answer = runtimeEndpoint(runtimeId) } catch { return out }
+  const { endpoint, source } = answer ?? {}
+  if (!endpoint || (source !== 'seam' && source !== 'xdg')) return out
+  out.push(`${String(runtimeId) === 'podman' ? 'CONTAINER_HOST' : 'DOCKER_HOST'}=${endpoint}`)
+  return out
+}
+
+const runtimeId = String(doc.spec.runtime ?? 'docker')
+const envPairs = runtimeEnvPairs(runtimeId)
+
+if (printEnv) {
+  process.stdout.write(envPairs.length ? envPairs.join('\0') + '\0' : '')
+  process.exit(0)
+}
+
 const ctx = {
   ...doc.ctx,
   cmd,
+  // THE DOCUMENT AND `buildRunArgv()` DISAGREE ABOUT TWO NAMES, and the cost of
+  // that is invisible: `prepareSandbox()` writes the run and hub ids as `run`
+  // and `hub` (server/sandbox/index.mjs), `buildRunArgv()` reads `runId` and
+  // `hubId`. Without this bridge every sandboxed container is called `fl-` —
+  // measured 2026-09-05 on the first real run: `--name fl- --label
+  // freilauf.run= --label freilauf.hub=`. So two runs collide on one container
+  // name, `stopContainer(sandbox_container)` addresses a container that does
+  // not exist, and the orphan reaper's label filter matches nothing. The proper
+  // fix is one name on both sides; until then this is the one place both are in
+  // scope. `ctx.runId` from a caller that already speaks the right name wins.
+  runId: doc.ctx.runId ?? doc.ctx.run,
+  hubId: doc.ctx.hubId ?? doc.ctx.hub,
   // The pane's own terminal type, because the container's TTY is the pane's
   // (§8.17). `--term` wins so a caller with no TERM of its own can still say.
   term: term || process.env.TERM || doc.ctx.term || 'xterm-256color',

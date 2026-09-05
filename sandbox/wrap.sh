@@ -69,13 +69,32 @@ fi
 # pipeline above hides its exit code, so the empty result is the signal.
 (( ${#CMD[@]} )) || { err "the sandbox command line came out empty."; exit 1; }
 
+# The environment the runtime CLI needs to reach the daemon the HUB means.
+# Not cosmetic: this script runs in a tmux pane, and a `docker` with no
+# DOCKER_HOST falls back to /var/run/docker.sock — the rootful socket, which on
+# a rootless installation is absent or unreadable. Measured 2026-09-05: the pane
+# died with "permission denied while trying to connect to the docker API at
+# unix:///var/run/docker.sock" and the run's entire log was that one line.
+# Empty output is the ordinary answer (a machine whose CLI finds its own daemon
+# through a context), so it is not an error.
+RTENV=()
+if ! mapfile -d '' -t RTENV < <("$NODE" "$CLI" --print-env "${ARGS[@]}"); then
+    err "could not resolve the container runtime's environment."
+    exit 1
+fi
+
 if [[ -n "$PRINT" ]]; then
     # Shell-quoted on one line: what a human copies into a terminal to reproduce
-    # the start by hand, and what a dry run shows.
+    # the start by hand, and what a dry run shows. The environment is printed as
+    # an `env` prefix so that the line really is reproducible — a copy that
+    # talked to a different daemon than the run would be worse than no copy.
+    (( ${#RTENV[@]} )) && { printf 'env'; for a in "${RTENV[@]}"; do printf ' %q' "$a"; done; printf ' '; }
     printf '%q' "${CMD[0]}"
     for a in "${CMD[@]:1}"; do printf ' %q' "$a"; done
     printf '\n'
     exit 0
 fi
+
+for kv in "${RTENV[@]:-}"; do [[ -n "$kv" ]] && export "${kv?}"; done
 
 exec "${CMD[@]}"
