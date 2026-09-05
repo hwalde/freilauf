@@ -7,6 +7,7 @@ import db, { addEvent } from './db.mjs'
 // import is the kind of trap that only shows up the day somebody moves a line.
 import { notify as notifyChannels, notifyOnFor, detailUrl } from './notify.mjs'
 import { sh, parseDbUtc } from './util.mjs'
+import { env } from './env.mjs'
 import { vorfallMelden, detektorLog, offeneVorfaelle } from './incidents.mjs'
 import { typVonClaudeFehler, typVonText, TYP_TEXT, fremdeClaudeSession, isSessionStopped } from './detect.mjs'
 import { getHarness } from './harnesses/index.mjs'
@@ -139,6 +140,160 @@ export function noteOperatorInput(runId, via = 'terminal') {
 export function clearAgentState(runId) {
   db.prepare(`UPDATE runs SET agent_state=NULL, agent_state_at=NULL WHERE id=? AND agent_state IS NOT NULL`).run(runId)
 }
+
+// ------------------------------------------------ a dead pane, and who killed it
+//
+// For an ordinary run the pane IS the agent: `remain-on-exit` keeps the screen,
+// `pane_dead` means the CLI's own process ended, and a run still `running` at
+// that moment ended without reporting. Red, and rightly so.
+//
+// For a SANDBOXED run the pane is the `docker` CLIENT that started the container
+// and is watching it; the agent is a process inside. So a dead pane has two
+// entirely different causes, and until this branch existed both were spent as
+// the first one: a restarted daemon, a `permission denied` on the socket or a
+// `docker run` that never got past `runc create` set the run `failed` and paged
+// the operator about an agent that was either still working or had never started
+// at all. That is the acceptance criterion "infrastructure trouble never makes
+// runs count as ended", and it is answered the way `tmuxVerdict()` and
+// `runtimeVerdict()` answer theirs — three answers, of which only two may act.
+//
+// **The exit status is a hint and never the verdict on its own.** Measured on
+// this machine [2026-09-05, rootless docker 29.8.0]:
+//
+//   1     a client that could not reach the daemon — and equally an agent that
+//         exited 1. The code cannot tell those apart; the daemon can.
+//   125   docker's own reserved code, and the one case the daemon cannot settle
+//         afterwards: the client never started the container (a failed `runc
+//         create`, an image that is not on the machine, a name conflict — all
+//         three are classified by name in sandbox/runtime.mjs). The agent never
+//         ran, so the container's absence says nothing about the work.
+//   42    an inner command's own status, handed through by `docker run`.
+//
+// So the CONTAINER is asked, and the codes decide only where asking cannot help.
+
+/**
+ * Pure: what a dead pane means, given the run's sandbox flag, the pane's exit
+ * status and what the daemon said about the container.
+ *
+ *   `container === null`   there is nothing to ask (an unsandboxed run, or a
+ *                          launch that never got a container)
+ *   `container.verdict`    'ok' | 'no_daemon' | 'unreachable', straight from
+ *                          `containerState()`; anything but 'ok' means the hub
+ *                          learned NOTHING
+ *
+ * Returns `{ verdict, reason }`:
+ *
+ *   'agent'    the agent's process ended — the ordinary case, byte for byte the
+ *              behaviour every unsandboxed run has always had
+ *   'infra'    the pane died on the CLIENT side; the run must not be ended by it
+ *   'unknown'  nobody answered. Do nothing, ask again next pass.
+ */
+export function panePostMortem({ sandboxed = false, exit = null, container = null } = {}) {
+  if (!sandboxed) return { verdict: 'agent', reason: 'not sandboxed' }
+  const raw = exit === null || exit === undefined ? '' : String(exit).trim()
+  const code = raw !== '' && Number.isFinite(Number(raw)) ? Number(raw) : null
+  // Asked BEFORE the daemon, because the daemon cannot answer it: a container
+  // that was never created looks exactly like one `--rm` has taken away.
+  if (code === 125) {
+    return { verdict: 'infra', reason: 'the runtime client could not start the container (exit 125)' }
+  }
+  if (!container) return { verdict: 'agent', reason: 'no container to ask about' }
+  if (container.verdict !== 'ok') {
+    return { verdict: 'unknown', reason: `the container runtime did not answer (${container.verdict})` }
+  }
+  if (container.running === true) {
+    return { verdict: 'infra', reason: 'the container is still running — the client died, not the agent' }
+  }
+  // The daemon answered and the container is not running: either `--rm` took it
+  // away with the agent's own exit, or it exited and is still there with its
+  // status. Both are the ordinary end.
+  return {
+    verdict: 'agent',
+    reason: container.exists === false ? 'the container is gone' : 'the container has exited',
+  }
+}
+
+/** How often a client that died may be resumed before the run is ended anyway. */
+const CLIENT_RESUME_MAX = (() => {
+  // `Number('')` is 0 AND finite — the trap AGENTS.md has its own entry for.
+  const raw = env('SANDBOX_CLIENT_RESUME_MAX')
+  if (raw === undefined || String(raw).trim() === '') return 3
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : 3
+})()
+
+/**
+ * Ask the daemon about this run's container. Everything sandbox is imported
+ * LAZILY (AGENTS.md: an installation without a container runtime never loads a
+ * line of it), and the two failure shapes are kept apart on purpose:
+ *
+ *   no container NAME    → `null`, which `panePostMortem()` reads as "nothing to
+ *                          ask", i.e. the ordinary agent case
+ *   a name and no answer → `{ verdict: 'unreachable' }`, i.e. "I learned
+ *                          nothing" — never "it is gone"
+ */
+async function paneCause(run, exit) {
+  if (!run?.sandbox) return panePostMortem({ sandboxed: false })
+  const name = run.sandbox_container ? String(run.sandbox_container) : null
+  if (!name) return panePostMortem({ sandboxed: true, exit, container: null })
+  let state = { verdict: 'unreachable' }
+  try {
+    const [{ sandboxRuntime }, { specOf }] = await Promise.all([
+      import('./sessions.mjs'), import('./sandbox/exec.mjs'),
+    ])
+    const rt = await sandboxRuntime()
+    if (typeof rt?.containerState === 'function') {
+      const runtime = env('SANDBOX_RUNTIME') ?? specOf(run)?.runtime ?? undefined
+      state = await rt.containerState(name, { runtime }) ?? { verdict: 'unreachable' }
+    }
+  } catch (err) {
+    detektorLog(run.id, { art: 'sandbox', grund: `containerState failed: ${err.message}` })
+  }
+  return panePostMortem({ sandboxed: true, exit, container: state })
+}
+
+/**
+ * The pane died and the AGENT did not. Never ends the run over it — that is the
+ * whole point — but it does not leave it hanging either:
+ *
+ *  - a run in the finish gate is the integrator's: it has reported, and its own
+ *    deadline (`finish_started_at` + `repos.finish_timeout_min`) escalates by
+ *    itself. Escalating here would blame the agent for a client that died.
+ *  - a live run is handed to `resumeRun()` — the recovery path that already
+ *    exists, and the one §7.11's start order walks through again (a leftover
+ *    container of the same name is what `stopOrphan()` is for).
+ *  - and that is CAPPED. A client that dies at every start must not be restarted
+ *    every pass for ever — the same rule `RESUME_MAX` carries, counted here
+ *    because a deliberate caller's reason is deliberately not counted there.
+ *    Past the cap the run ends after all, and the message names the
+ *    infrastructure rather than the agent.
+ */
+async function paneClientGone(runId, run, cause, exit) {
+  const raw = exit === null || exit === undefined ? '' : String(exit).trim()
+  const code = raw !== '' && Number.isFinite(Number(raw)) ? Number(raw) : null
+  addEvent(runId, 'sandbox:client_gone',
+    { exit: code, reason: cause.reason, container: run?.sandbox_container ?? null })
+  if (run?.finish_state) return
+  if (!['running', 'waiting_help'].includes(run?.status)) return
+  const tries = db.prepare(`SELECT COUNT(*) AS n FROM events WHERE run_id=? AND kind='sandbox:client_gone'`)
+    .get(runId)?.n ?? 1
+  let why = `resumed ${tries - 1} time(s) already (cap ${CLIENT_RESUME_MAX})`
+  if (tries <= CLIENT_RESUME_MAX) {
+    const r = await import('./runner.mjs')
+      .then(m => m.resumeRun(runId, { reason: 'sandbox_client_gone' }))
+      .catch(err => ({ ok: false, error: err.message }))
+    if (r?.ok) return
+    why = r?.error ?? 'the resume was refused'
+    addEvent(runId, 'sandbox:client_gone_unrecovered', { error: why })
+  }
+  db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), exit_code=? WHERE id=?`)
+    .run(code, runId)
+  clearAgentState(runId)
+  const assessment = await assessAfterEnd(runId)
+  await notifyRun(runId, 'pane_died',
+    `🔴 The sandbox runtime client died and the run could not be resumed — ${cause.reason} (${why}).${assessment}`)
+}
+
 
 /**
  * A help call is answered — by the send route with the operator's text, or by
@@ -392,9 +547,22 @@ export async function handleReport(runId, body, via = 'http') {
       db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(runId)
       break
     case '_pane_died': {
+      // Who killed the pane — the agent, or the runtime client watching it?
+      // For every unsandboxed run this is 'agent' without a subprocess, and
+      // everything below it is byte for byte what it always was.
+      const fresh = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
+      const cause = await paneCause(fresh, body.exit)
+      if (cause.verdict === 'unknown') {
+        // The daemon did not answer, so the hub knows nothing about the agent.
+        // Not knowing is a reason to ask again next pass, never to end somebody's
+        // work — and `addEventOnce` is what keeps the watcher's 30-second retry
+        // from writing one event per pass for as long as the daemon is out.
+        addEventOnce(runId, 'sandbox:pane_unclear', { exit: body.exit ?? null, reason: cause.reason })
+        break
+      }
+      if (cause.verdict === 'infra') { await paneClientGone(runId, fresh, cause, body.exit); break }
       addEvent(runId, 'pane_died', { exit: body.exit ?? null })
       clearAgentState(runId)
-      const fresh = db.prepare('SELECT status, finish_state FROM runs WHERE id = ?').get(runId)
       if (fresh?.finish_state) { await escalateGone(runId); break }
       if (fresh?.status === 'running') {
         db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), exit_code=? WHERE id=?`)

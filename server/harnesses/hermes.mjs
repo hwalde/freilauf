@@ -35,13 +35,64 @@ async function providerLate(ctx, id) {
 
 const execFileAsync = promisify(execFile)
 
-/** hermes' own session store; `FREILAUF_HERMES_STATE_DB` is the test fence. */
-function hermesStateDb() {
-  return process.env.FREILAUF_HERMES_STATE_DB || `${process.env.HOME}/.hermes/state.db`
+// The sandbox facade's one answer this plugin needs: WHICH home the agent had.
+// Imported dynamically rather than statically, because a plugin file must not
+// put a static edge into the hub's module graph (docs/plugins.md, and the
+// registry cycle AGENTS.md names it for) — but started at load and remembered,
+// because `resumeCommand()` is SYNCHRONOUS: it is rendered into the run's detail
+// page and into every escalation message, and it cannot await anything. The
+// module itself costs nothing extra — `watcher.mjs` imports it statically, so
+// every running hub has it long before a report is processed.
+let execMod = null
+const execModReady = import('../sandbox/exec.mjs').then(m => (execMod = m)).catch(() => null)
+
+/**
+ * The home the AGENT worked in. For every ordinary run that is the host home,
+ * byte for byte as before; for a sandboxed run it is the per-run home (§7.7),
+ * and reading the host's instead was the whole defect: the watcher took its
+ * tokens and `resumeId()` took its session id out of the OPERATOR's own hermes
+ * store. The rule lives in `agentHome()` and is never restated here.
+ */
+async function runHome(run) {
+  const m = execMod ?? await execModReady
+  return m ? m.agentHome(run) : (process.env.HOME || homedir())
 }
-/** hermes' own home, the way `setup/02-install-scripts.sh` resolves it. */
+function runHomeSync(run) {
+  return execMod ? execMod.agentHome(run) : (process.env.HOME || homedir())
+}
+
+/** hermes' own session store under a given home; `FREILAUF_HERMES_STATE_DB` is the test fence. */
+function hermesStateDb(home) {
+  return process.env.FREILAUF_HERMES_STATE_DB || join(home || process.env.HOME || homedir(), '.hermes', 'state.db')
+}
+/**
+ * The OPERATOR's hermes home, the way `setup/02-install-scripts.sh` resolves it
+ * — deliberately the host's and not `agentHome()`'s: this is only ever read by
+ * `seedHome()` below, whose whole job is to copy the operator's config and
+ * `.env` INTO the per-run home. A sandboxed run's own home is empty at that
+ * moment, so asking it would seed nothing.
+ */
 function hermesHome() {
   return process.env.HERMES_HOME || join(homedir(), '.hermes')
+}
+
+/**
+ * The run's own hermes session out of a store, or null. Pure apart from the
+ * read, so both `resumeId()` (which resolves the home properly) and the
+ * synchronous `resumeCommand()` ask exactly one question in exactly one place.
+ */
+function sessionInStore(run, dbPath) {
+  try {
+    const { DatabaseSync } = process.getBuiltinModule('node:sqlite')
+    const d = new DatabaseSync(dbPath, { readOnly: true })
+    try {
+      const since = run.started_at ? Date.parse(String(run.started_at).replace(' ', 'T') + 'Z') / 1000 - 5 : 0
+      const row = d.prepare(`SELECT id FROM sessions WHERE cwd = ? AND started_at >= ? AND parent_session_id IS NULL
+                             ORDER BY started_at DESC LIMIT 1`).get(run.workdir_effective, Number.isFinite(since) ? since : 0)
+      if (row?.id) return String(row.id)
+    } finally { d.close() }
+  } catch { /* no store, no answer — 'latest' is still right */ }
+  return null
 }
 
 /**
@@ -342,26 +393,26 @@ const plugin = {
    * code word from the first turn. Without a row: `'latest'`, which hermes
    * scopes to the workspace `--in` names — the same answer, looked up by
    * hermes instead of by us. `null` never: hermes always has a workspace.
+   *
+   * And the store it is looked up in is the one the AGENT wrote: `agentHome(run)`
+   * (§7.7), never the host `$HOME`. `runner.mjs` awaits this method, which is
+   * what lets it resolve the home the same way every other activity source does.
    */
-  resumeId(run) {
+  async resumeId(run) {
     if (!run?.workdir_effective) return null
-    try {
-      const { DatabaseSync } = process.getBuiltinModule('node:sqlite')
-      const d = new DatabaseSync(hermesStateDb(), { readOnly: true })
-      try {
-        const since = run.started_at ? Date.parse(String(run.started_at).replace(' ', 'T') + 'Z') / 1000 - 5 : 0
-        const row = d.prepare(`SELECT id FROM sessions WHERE cwd = ? AND started_at >= ? AND parent_session_id IS NULL
-                               ORDER BY started_at DESC LIMIT 1`).get(run.workdir_effective, Number.isFinite(since) ? since : 0)
-        if (row?.id) return String(row.id)
-      } finally { d.close() }
-    } catch { /* no store, no answer — 'latest' is still right */ }
-    return 'latest'
+    return sessionInStore(run, hermesStateDb(await runHome(run))) ?? 'latest'
   },
 
-  /** What a human types to continue this run's session — the same lookup, as a command. */
+  /**
+   * What a human types to continue this run's session — the same lookup, as a
+   * command. Synchronous by contract (it is rendered into a page and into every
+   * escalation message), so it asks the home through `runHomeSync()`; where the
+   * facade has not been loaded at all the answer degrades to `latest`, which
+   * hermes resolves itself against the workspace `--in` names.
+   */
   resumeCommand(run) {
     if (!run?.workdir_effective) return null
-    const id = this.resumeId(run) ?? 'latest'
+    const id = sessionInStore(run, hermesStateDb(runHomeSync(run))) ?? 'latest'
     return `cd ${run.workdir_effective} && hermes chat --in ${run.workdir_effective} --resume ${id}`
   },
 
