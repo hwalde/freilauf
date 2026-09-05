@@ -3496,15 +3496,33 @@ errors (`post_api_request` only fires after success).
   clipboard" worked in one harness and silently did nothing in the other, and
   no amount of clipboard code could have fixed the second — the events never
   got near a selection. Shift is every terminal's way out of that
-  (`shouldForceSelection` → `event.shiftKey` off a Mac), and the 🖱 button in
-  the terminal's toggle line makes it the default for this browser: every mouse
-  event over the terminal is **re-dispatched carrying `shiftKey`**, so xterm
-  selects locally and emits no report at all. A toggle and not a default,
-  because those reports are also what lets one click inside a TUI; remembered
-  globally (`freilauf.term.mouse`) because it is a habit, not a property of one
-  run. And because a drag that does nothing is invisible as a fault, hub.js
+  (`shouldForceSelection` → `event.shiftKey` off a Mac), so **hub.js makes it
+  the default**: while mouse reporting is on, every mouse event over the
+  terminal is re-dispatched carrying `shiftKey`, xterm selects locally and
+  emits no report at all. It was a toggle first, defaulting to the old
+  behaviour — and the operator's answer to that was "I do not understand what
+  the icon does, and it makes no difference", which is the correct verdict on a
+  control that asks somebody watching an agent to know what that agent's TUI
+  does with mouse reports. Dragging marks and copies now, in every harness,
+  with nothing pressed; the 🖱 button is the way OUT, for a session one wants to
+  click around in, and it is remembered globally (`freilauf.term.mouse`, stored
+  only for the exception) because it is a habit rather than a property of one
+  run. Two rules keep that honest, and both were failures first:
+  - **Force only while mouse reporting is really on.** With no mouse mode, a
+    shift-mousedown is xterm's *extend the selection* click, which starts
+    nothing when there is no selection yet — forcing unconditionally made a
+    plain drag mark nothing in a terminal where marking already worked. The
+    modes are read off the stream (`CSI ? 1000|1002|1003 h/l`) with a
+    `registerCsiHandler` that returns **false**, so xterm still applies them and
+    the hub only listens in.
+  - **A click is not a marking gesture.** As a shift-click it EXTENDS whatever
+    selection still stands, so copying on it would fill the clipboard every
+    time somebody clicks in to type. A copy needs a real drag (≥ 8 px) or a
+    multi-click (`detail >= 2`, so a double click still marks its word).
+
+  And because a drag that does nothing is invisible as a fault, hub.js still
   says so once per page when a real drag ends with neither a selection nor a
-  copy.
+  copy — which now only happens when the operator has handed the mouse back.
 - **xterm stops propagation on its own element, so a listener that is not in
   the CAPTURE phase never sees a real drag.** The copy-on-release above hung on
   a `mouseup` listener on `document` and worked in the browser suite for weeks

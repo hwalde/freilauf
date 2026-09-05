@@ -87,24 +87,22 @@ a day on which nothing was released.
   the tmux server start at boot and not at the first login; `SETUP_WITH_AGENT.md`
   says what to do about OS updates and reboots.
 - **Marking text in the browser terminal copies it to the clipboard.** Drag
-  across a live session and the selection is in your system clipboard the
-  moment you let go, and the marking is cleared — the same gesture a terminal
-  on your own machine has. It works for a selection made with the keyboard in
-  tmux's copy-mode too, and in a read-only terminal (where tmux ignores the
-  mouse) by holding Shift while dragging; the page says so under such a
-  terminal. A short toast names every copy, because a clipboard written from a
-  remote session must not be written silently, and it says so as well when the
-  browser refused the clipboard. A request from inside the session to *read*
-  the clipboard is never answered.
-- **…and where the coding agent takes the mouse for itself, a button hands it
-  back to selecting.** Whether a plain drag can mark anything depends on the
-  agent in the session: claude leaves the mouse to tmux, which marks and copies
-  for you; opencode takes it and does nothing with a drag, so marking used to
-  produce nothing at all there. Hold Shift while dragging — that works
-  everywhere and always did — or press the new 🖱 button above the terminal,
-  and the mouse marks text instead of going to the agent (the setting is
-  remembered for every terminal, and the agent then no longer receives clicks).
-  When a drag comes up empty, the page now says why and names both ways out,
+  across the terminal and the selection is in your system clipboard the moment
+  you let go, and the marking is cleared — the same gesture a terminal on your
+  own machine has, and it works the same whichever coding agent is in the
+  session. (It used to depend on that: claude leaves the mouse to tmux, which
+  marks and copies for you, while opencode takes the mouse and does nothing
+  with a drag — so marking produced nothing at all there.) A selection made
+  with the keyboard in tmux's copy-mode lands in the clipboard too. A short
+  toast names every copy, because a clipboard written from a remote session
+  must not be written silently, and it says so as well when the browser refused
+  the clipboard. A request from inside the session to *read* the clipboard is
+  never answered.
+- **The 🖱 button above the terminal gives the mouse back to the agent**, for
+  the rare session you want to click around in rather than read: the agent then
+  receives clicks and drags again, and marking there needs Shift held down like
+  in any terminal. The choice is remembered for every terminal. When a drag
+  comes up empty in that mode, the page says why and names both ways back,
   once per page instead of leaving you guessing.
 
 ### Changed
