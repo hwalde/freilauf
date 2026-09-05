@@ -26,9 +26,8 @@ viele Aufgaben in diesem Repository offen sind.
 |---|---|---|---|
 | Worker (gewöhnlich) | Agent | manuell | trivial und normal; nimmt sich ein kleines Paket |
 | Worker (billiger Spezialist) | Agent | manuell | nur trivial; bekommt seinen Platz vor den gewöhnlichen |
-| Worker (stark, Abo-Route) | Agent | manuell | blockiert oder zweimal gescheitert; genau ein Fall |
-| Worker (stark, Ausweich-Route) | Agent | manuell | dasselbe, wenn die Abo-Quote nicht reicht |
-| Dispatcher | Agent | manuell | zählt, prüft Guthaben und Quote, startet die Worker mit Zeitversatz |
+| Worker (stark) | Agent | manuell | blockiert oder zweimal gescheitert; genau ein Fall, dasselbe Modell wie die gewöhnliche Bahn |
+| Dispatcher | Agent | manuell | zählt, prüft das Guthaben, startet die Worker mit Zeitversatz |
 | Aufräumer | Agent | manuell | klärt hängende Zuweisungen verschwundener Läufe; repariert nichts |
 | PO-Agent (optional) | Agent | manuell | trägt die offenen Fragen einem Menschen vor und arbeitet die Antwort ein |
 | Wächter-Takt | Flow, cron `0 */2` | alle zwei Stunden | zählt per Shell, weckt den Dispatcher nur bei Arbeit, den Aufräumer nur bei einer hängenden Zuweisung, und meldet einen Menschen, wenn auch der nichts half; ohne LLM |
@@ -36,9 +35,8 @@ viele Aufgaben in diesem Repository offen sind.
 | Nachlauf | Flow, `run_finished` | nach jedem Worker | liest den Report per `extract`, weckt den Dispatcher bei Fortschritt |
 | `dispatch.py lage` | Skript | vom Flow und vom Dispatcher gerufen | die einzige Rechenstelle: zählen, staffeln, deckeln |
 
-Der Wächter startet nie selbst einen Worker. Welcher Worker, wie viele und auf welcher Route ist
-Triage- und Quoten-Arbeit; sie gehört an eine Stelle, nicht in zwei Bedingungs-Leitern, die mit
-der Zeit auseinanderlaufen.
+Der Wächter startet nie selbst einen Worker. Welcher Worker und wie viele ist Triage-Arbeit; sie
+gehört an eine Stelle, nicht in zwei Bedingungs-Leitern, die mit der Zeit auseinanderlaufen.
 
 ## Der Lebenszyklus — keine Aufgabe bleibt liegen
 
@@ -126,21 +124,21 @@ Register fängt den Rest ab.
   die Zahl bereits gedeckelt, wer sie startet, kann den Schwarm nicht aufschaukeln.
 - Der billige Spezialist bekommt seinen Platz vor der Staffel, sonst schöpft sie den Deckel
   allein aus und er käme nie zum Zug.
-- Starke Bahn: höchstens `stark_max_parallel` (Vorgabe 1) gleichzeitig, nie beide Routen.
-- Abo-Quote: Gemessen wird das Wochenfenster mit dem Abo-Label aus `fl-api /api/usage`
-  (`weekly_scoped`), nicht `seven` — `seven` ist das Maximum aller Fenster und beantwortet eine
-  andere Frage. Jede Zahl kommt mit ihrem Alter; eine als stale gemeldete Zahl gilt als nicht
-  belastbar, denn direkt nach einem Reset kann der erinnerte Wert der alte sein, und wer darauf
-  einen Abo-Start baut, kauft sich ein `deferred`. Ohne belastbare Zahl fährt die Ausweich-Route.
+- Starke Bahn: höchstens `stark_max_parallel` (Vorgabe 1) gleichzeitig, nie zwei.
+- Ein Modell für beide Bahnen: Die starke Bahn bekommt KEIN teureres Modell. Der Motor hatte
+  das einmal — mit Abo-Route, Quoten-Prüfung und teurem Ausweich-Modell — und es kostete im
+  Ursprungsprojekt 8,66 USD je Lauf gegen 0,14 USD in der gewöhnlichen Bahn, für zwei Punkte
+  Abstand im Artificial Analysis Index. Der Gewinn der starken Bahn kommt aus Zeit und Fokus
+  (eine Aufgabe, das ganze Zeitbudget), nicht aus Intelligenz. Erst wenn sie erkennbar nicht
+  vorankommt, wechselt `stark_modell` eine Stufe höher — und der Preis wird danach gemessen.
 - Geld: `budgets` sind die Guthaben-Schwellen je Anbieter, absichtlich über Freilaufs eigenem
   Budget-Gate. `tages_budget_usd` summiert die echten Lauf-Kosten eines Kalendertages; gelb heißt
   „starke Bahn aus", rot heißt „gar keine Starts". Die Summe umfasst nur Läufe der
   Schwarm-Agenten — Eval-Suiten, andere Läufe und Handarbeit hängen am selben Schlüssel, tauchen
   hier aber nicht auf. Der Deckel ist deshalb ein weites Netz gegen das Verrennen, keine
   Abrechnung; die harte Grenze zieht der Anbieter-Schlüssel. Der Zweck ist nicht, zu sparen,
-  sondern anzulaufen, wenn es Arbeit gibt, und sie dann abzuarbeiten. Ein Abo-Lauf meldet keine Kosten — sein Preis
-  ist der Anteil an der Wochenquote, und deren Deckel ist `fable_7d_max`. Abo-Verbrauch ist ein
-  Preis, kein Nullwert.
+  sondern anzulaufen, wenn es Arbeit gibt, und sie dann abzuarbeiten. Ein Lauf über ein Abo meldet keine Kosten und
+  fließt in diese Summe nicht ein — eine Null in dieser Spalte ist kein Nullpreis.
 - Leerlauf kostet nichts: Kein Agent hat einen Cron, der einzige Takt ist der Wächter-Flow, und
   der ist ein Shell-Aufruf plus eine Bedingung. Ein Tag ohne offene Aufgaben ergibt null
   Agenten-Läufe und null Token.
@@ -185,10 +183,10 @@ grün meldet und nichts tut, ist der teuerste Fehler dieses Systems.
   Home-Verzeichnis) sieht ein Schwarm auf einer zweiten Maschine nicht; Folge ist Doppelarbeit,
   nie Datenverlust. Ein Adapter auf ein zentrales Ticket-System hat das Problem nicht, dafür
   aber Rennen zwischen zwei gleichzeitigen Zugriffen.
-- Die Abo-Route hängt an einer fremden Zahl. Ist die Quote hoch, fährt der Schwarm dauerhaft auf
-  der Ausweich-Route — und die ist meist nur ein frischer Kopf mit ganzem Zeitbudget, nicht viel
-  mehr Verstand. Wer den Abstand zwischen gewöhnlicher und starker Bahn nicht kennt, überschätzt,
-  was die Eskalation bringt.
+- Die starke Bahn ist ein frischer Kopf mit ganzem Zeitbudget, nicht mehr Verstand — sie fährt
+  dasselbe Modell wie die gewöhnliche. Wer sich von der Eskalation einen Sprung an Können
+  verspricht, überschätzt sie. Ein teureres Modell dort hat der Motor gemessen und wieder
+  ausgebaut; die Rechnung steht in `AKTUALISIEREN.md` unter 1.4.0.
 - Der Motor muss auf dem Basis-Branch liegen. Jeder Lauf bekommt einen frischen Worktree, und
   der Wächter-Flow arbeitet in einem eigenen, detached Checkout von `origin/<basis>`: Ein nur
   lokal vorhandener Ordner ist für beide unsichtbar, und der Schwarm scheitert bei jedem Takt.

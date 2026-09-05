@@ -7,8 +7,7 @@ WAS DAS ANLEGT
 
     Schwarm-Worker (GLM)                 gestartet vom Dispatcher
     Schwarm-Worker (DeepSeek, trivial)   gestartet vom Dispatcher
-    Schwarm-Worker (stark, Fable)        gestartet vom Dispatcher, höchstens einer der beiden
-    Schwarm-Worker (stark, Gemini)       gestartet vom Dispatcher, höchstens einer der beiden
+    Schwarm-Worker (stark)               gestartet vom Dispatcher, höchstens einer
     Schwarm-Dispatcher                   geweckt vom Wächter-Takt und vom Nachlauf
     Schwarm-Aufräumer                    geweckt vom Wächter-Takt, wenn eine Zuweisung hängt
 
@@ -566,7 +565,7 @@ def main(argv=None) -> int:
             f = flow_laden(repo, datei, {"@REPO_PFAD@": repo_pfad, "@DISPATCHER_AGENT_ID@": 0,
                                          "@EXTRACT_QUELLE@": "x", "@EXTRACT_MODELL@": "x",
                                          "@WORKER_GLM_ID@": 0, "@WORKER_DS_ID@": 0,
-                                         "@WORKER_FABLE_ID@": 0, "@WORKER_GEMINI_ID@": 0,
+                                         "@WORKER_STARK_ID@": 0,
                                          "@PO_AGENT_ID@": 0,
                                          "@AUFRAEUMER_AGENT_ID@": 0,
                                          "@AUFRAEUMER_MAX@": konf.get("aufraeumer_max_parallel", 1),
@@ -653,8 +652,7 @@ def main(argv=None) -> int:
                   "belegungen_zeigen", "(kein Belegungs-Kommando konfiguriert)"),
               "@WORKER_GLM_ID@": worker_ids.get("glm", 0),
               "@WORKER_DS_ID@": worker_ids.get("ds", 0),
-              "@WORKER_FABLE_ID@": worker_ids.get("fable", 0),
-              "@WORKER_GEMINI_ID@": worker_ids.get("gemini", 0)}
+              "@WORKER_STARK_ID@": worker_ids.get("stark", 0)}
     marken["@PO_AGENT_ID@"] = po_id or 0
     marken["@AUFRAEUMER_AGENT_ID@"] = auf_id
     marken["@AUFRAEUMER_MAX@"] = int(konf.get("aufraeumer_max_parallel", 1) or 1)
