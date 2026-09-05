@@ -96,6 +96,32 @@ export function anomaliesSettled(run) {
   return !!run && run.status === 'done' && !followUpActive(run)
 }
 
+/**
+ * Is what the browser terminal just sent into the session a HUMAN doing
+ * something — a key, a pasted line, Ctrl-C — as opposed to the terminal
+ * talking to the application by itself?
+ *
+ * "Waiting for input" is a call for the operator's attention, and the moment
+ * the operator types into the terminal that call is answered, whatever the
+ * coding agent's own hooks say and however long before they say it (claude's
+ * UserPromptSubmit fires on Enter, opencode's busy on the first token — a
+ * half-typed line, a menu, a permission dialog answered with one key fire
+ * nothing at all). The WebSocket in server/terminal.mjs is the one place
+ * every keystroke passes through, for every harness alike, so it says so —
+ * but only for bytes a person produced. xterm.js also sends what the
+ * application asked it for: mouse reports (SGR `CSI < b;x;y M/m`, X10
+ * `CSI M` + three bytes) while a TUI has mouse reporting on, focus reports
+ * (`CSI I` / `CSI O`) when mode 1004 is set. A click to focus the tab, the
+ * wheel over the pane or the window coming to the front are not "the
+ * operator is talking to the agent". Pure, so the rule can be stated in a test.
+ */
+const TERMINAL_REPORTS = /\x1b\[<\d+;\d+;\d+[mM]|\x1b\[M[\s\S]{3}|\x1b\[[IO]/g
+
+export function isOperatorInput(s) {
+  if (typeof s !== 'string' || !s) return false
+  return s.replace(TERMINAL_REPORTS, '').length > 0
+}
+
 /** The statuses the overview can be filtered by and the sidebar counts, in reading order. */
 export const WORK_STATUSES = ['running', 'waiting_input', 'waiting_help', 'scheduled', 'deferred']
 

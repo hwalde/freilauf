@@ -6620,6 +6620,29 @@ try {
     falsch(followUpActive({ status: 'running', followup_since: 'x' }), 'never on a running run')
   })
 
+  await pruefe('isOperatorInput: a key is the operator, a mouse report is the terminal', async () => {
+    // The browser terminal answers "waiting for input" with the first byte a
+    // PERSON sends (terminal.mjs → reports.mjs noteOperatorInput). What
+    // xterm.js sends on the application's behalf must not count: a click to
+    // focus the tab, the wheel over the pane, the window coming to the front.
+    const { isOperatorInput } = await import('../server/run-state.mjs')
+    wahr(isOperatorInput('y'), 'one key')
+    wahr(isOperatorInput('\r'), 'Enter')
+    wahr(isOperatorInput('\x03'), 'Ctrl-C')
+    wahr(isOperatorInput('\x1b'), 'a bare Escape')
+    wahr(isOperatorInput('\x1b[A'), 'an arrow key')
+    wahr(isOperatorInput('\x1b[200~fix the test\x1b[201~'), 'a bracketed paste')
+    falsch(isOperatorInput(''), 'nothing')
+    falsch(isOperatorInput(null), 'not a string')
+    falsch(isOperatorInput('\x1b[<0;12;5M'), 'an SGR mouse press')
+    falsch(isOperatorInput('\x1b[<0;12;5m'), 'an SGR mouse release')
+    falsch(isOperatorInput('\x1b[<64;12;5M\x1b[<65;12;5M'), 'two wheel reports')
+    falsch(isOperatorInput('\x1b[M !!'), 'an X10 mouse report')
+    falsch(isOperatorInput('\x1b[I'), 'focus in')
+    falsch(isOperatorInput('\x1b[O'), 'focus out')
+    wahr(isOperatorInput('\x1b[<0;12;5Mq'), 'a key after a click still counts')
+  })
+
   await pruefe('anomaliesSettled: a run that came through has answered them', async () => {
     // The traffic light in pages.mjs asks this before it lets an in-flight
     // anomaly colour a row. The rule is here, next to displayStatus, because it

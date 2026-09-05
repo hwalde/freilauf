@@ -2653,6 +2653,34 @@ session's status only. claude's `SubagentStop` fires with the MAIN session's id
   the flow's message step — with no text: the status goes back to `running`,
   `help_answered` is written with `via: 'session'`, `help_answer` stays empty
   because the hub never saw it.
+- **The first key the operator types answers the wait — before any hook
+  does.** The hooks above say `working` on Enter (claude, cursor, hermes) or
+  on the first token (opencode), and never at all for a half-typed line, a
+  menu, a scroll through the TUI or a dialog answered with one key — so a run
+  read "waiting for input" while the operator was sitting in its terminal
+  typing. `noteOperatorInput(runId, via)` (reports.mjs) is the hub's own
+  answer, and it is harness-independent by construction: every keystroke of
+  the browser terminal passes through ONE WebSocket (`terminal.mjs`, the
+  writing client only — the read-only one's input never reaches the agent),
+  and the send route is the other way into a session, so both call it. It is
+  deliberately narrow: `waiting` → `working` and nothing else. No follow-up
+  commission (that would start the follow-up clock and its overrun alarm over
+  a click into a finished run's terminal) and no answered help call (a key is
+  not yet an answer) — both stay with the `_working prompt` hook and the send
+  route, which know that a LINE went in. A run whose harness reports no
+  attention (NULL) is left alone. Only bytes a **person** produced count:
+  `isOperatorInput()` (run-state.mjs, pure) drops what xterm.js sends on the
+  application's behalf — SGR and X10 mouse reports while a TUI has mouse
+  reporting on, focus reports under mode 1004 — because a click to focus the
+  tab or the wheel over the pane is not the operator talking to the agent.
+  One database question per writing client per second, and the event carries
+  `source: 'terminal'` / `'send'`, so a run's history finally records that
+  somebody typed into its terminal. **Not from the agent's output**, and that
+  was considered: the pty output flows through the same socket, but only while
+  a browser is attached, and a TUI redraws for reasons that are not work —
+  claude's spinner, opencode's animation, a status-bar clock, the operator
+  scrolling. Input is deterministic; output would guess in the expensive
+  direction, and real work is what the hooks already report.
 - **The watcher believes it.** `anomaly:no_activity` is not written while the
   agent says it waits (the status word already says so, and an alarm about the
   operator's own pause is the wolf the incident module warns about);
