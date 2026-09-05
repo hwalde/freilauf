@@ -466,8 +466,19 @@ when the answer was typed into the terminal.
 
 | What the CLI does | What the hook calls | Hub side |
 |---|---|---|
-| starts processing input — a prompt was submitted, a tool call begins | `fl-report _working` | `runs.agent_state='working'`; on a finished run with no open follow-up commission it OPENS one (`startFollowUpCommission`); on a `waiting_help` run it ends the help call (`answerHelpCall`) |
+| starts processing input — a prompt was submitted, a tool call begins | `fl-report _working prompt` when a human submitted a line, `fl-report _working tool` (or any other word) for a tool call or a status the CLI reports by itself | `runs.agent_state='working'`; on a `waiting_help` run it ends the help call (`answerHelpCall`); on a finished run with no open follow-up commission it OPENS one (`startFollowUpCommission`) — at once for `prompt`, and for everything else only once the **grace window** since the last report has passed (`commissionOnWorking`, two minutes, `FREILAUF_ATTENTION_GRACE_MS`) |
 | its turn is over and it waits for a human | `fl-report _turn_end` (the same kind cursor's run end uses; it implies waiting) or `fl-report _waiting` (for a second channel such as an idle notification) | `runs.agent_state='waiting'`; the run displays as "waiting for input"; the watcher writes no `no_activity` and pauses the follow-up overrun clock |
+
+**Say whether it was a prompt.** `fl-report done` is a tool call INSIDE the
+turn, and an agent usually makes two or three more calls after it — prints a
+summary, runs `git status` — before it stops. Every one of those arrives as
+`_working` on a run that is already `done`; read as a follow-up commission
+they turned every finished run into "waiting for input" the moment the agent
+went quiet. So a hook that fires on a submitted line says `prompt` (claude
+UserPromptSubmit, cursor beforeSubmitPrompt, hermes pre_llm_call), and one
+that cannot tell (a tool call, opencode's `session.status busy`) says anything
+else: the hub then waits out the grace window after the report before it reads
+the work as somebody's follow-up.
 
 Three rules, and each of them was measured to go wrong otherwise:
 
@@ -492,13 +503,14 @@ Three rules, and each of them was measured to go wrong otherwise:
    `bin/fl-hermes-hook` is the shape.
 
 How the four built-ins wire it, measured 2026-09-05 (versions in AGENTS.md,
-"The agent's attention"): claude `UserPromptSubmit` + `PreToolUse` →
-`_working`, `Stop` → `_turn_end`, `Notification` with matcher
-`idle_prompt|permission_prompt` → `_waiting` (`claudeSettingsJson()` in
-runner.mjs); cursor `beforeSubmitPrompt` → `_working`, `stop` → `_turn_end`
-(`hookFiles`); opencode `session.status` of the root session, busy →
-`_working`, idle → `_waiting` (the plugin `setup/02-install-scripts.sh`
-installs); hermes `pre_llm_call` → `_working`, `on_session_end` → `_turn_end`
+"The agent's attention"): claude `UserPromptSubmit` → `_working prompt`,
+`PreToolUse` → `_working tool`, `Stop` → `_turn_end`, `Notification` with
+matcher `idle_prompt|permission_prompt` → `_waiting` (`claudeSettingsJson()`
+in runner.mjs); cursor `beforeSubmitPrompt` → `_working prompt`, `stop` →
+`_turn_end` (`hookFiles`); opencode `session.status` of the root session,
+busy → `_working busy`, idle → `_waiting` (the plugin
+`setup/02-install-scripts.sh` installs); hermes `pre_llm_call` → `_working
+prompt`, `on_session_end` → `_turn_end`
 (`hooks:` in `~/.hermes/config.yaml`, `fl-hermes-hook`, and `--accept-hooks`
 on the launch line because hermes asks for consent per hook at the TTY).
 

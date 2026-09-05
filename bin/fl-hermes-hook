@@ -8,7 +8,7 @@
 #     on_session_end: [{ command: "fl-hermes-hook on_session_end" }]
 #
 # It translates the event into what the hub understands (docs/plugins.md,
-# "Attention"): pre_llm_call = the agent starts processing input → `_working`,
+# "Attention"): pre_llm_call = a turn starts on a submitted line → `_working prompt`,
 # on_session_end = its turn is over and it sits at its prompt → `_turn_end`.
 # hermes passes the event's JSON on stdin; fl-report reads it (bounded) and
 # forwards the session id.
@@ -23,7 +23,7 @@
 set -u
 [[ -n "${FL_RUN_ID:-${CC_RUN_ID:-}}" ]] || { timeout 2 cat >/dev/null 2>&1 || true; exit 0; }
 case "${1:-}" in
-    pre_llm_call)   exec fl-report _working ;;
+    pre_llm_call)   exec fl-report _working prompt ;;
     on_session_end) exec fl-report _turn_end ;;
     *) timeout 2 cat >/dev/null 2>&1 || true; exit 0 ;;
 esac

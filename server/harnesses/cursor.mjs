@@ -97,7 +97,7 @@ const plugin = {
       content: JSON.stringify({
         version: 1,
         hooks: {
-          beforeSubmitPrompt: [{ command: cmd('_working') }],
+          beforeSubmitPrompt: [{ command: cmd('_working', 'prompt') }],
           stop: [{ command: cmd('_turn_end') }],
           sessionEnd: [{ command: `setsid -f ${cmd('_exit')} >/dev/null 2>&1` }],
         },
@@ -106,7 +106,7 @@ const plugin = {
   },
 
   /** How the hub learns whether this agent works or waits — see `hookFiles`. */
-  attention: { source: 'hookFiles', note: 'beforeSubmitPrompt → _working, stop → _turn_end' },
+  attention: { source: 'hookFiles', note: 'beforeSubmitPrompt → _working prompt, stop → _turn_end' },
 
   /**
    * Extra prompt lines for this harness (runner.mjs appends them to the platform
