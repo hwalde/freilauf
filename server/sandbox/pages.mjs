@@ -120,21 +120,35 @@ export function parseList(raw) {
 /**
  * The hub layer of §7.3, read live.
  *
- * `sandbox_allow_bypass` defaults to ON: an installation that never configured
- * it must not discover that its operator cannot start a run any more. Note the
- * comparison rather than a coercion — the string '0' is truthy, and AGENTS.md
- * has that entry twice over.
+ * Four of the fields come from `run-def.mjs`, which is the ONE reader of the
+ * hub's sandbox settings — mode, bypass, lock and mount roots. It compares
+ * rather than coerces (the string '0' is truthy, and AGENTS.md has that entry
+ * twice over) and falls back to the documented default for the empty string as
+ * well as for junk. The four here that stay are ids and paths this page is the
+ * only consumer of.
  */
-export function hubPolicy(s = settings()) {
-  const mode = HUB_MODES.includes(s.sandbox_mode) ? s.sandbox_mode : 'off'
+export async function hubPolicy(s = settings()) {
+  // THE FOUR HUB SANDBOX SETTINGS ARE READ IN run-def.mjs AND NOWHERE ELSE.
+  // This file used to read `sandbox_allow_bypass` with a rule of its own, and
+  // there were three such rules in the tree: a stored 'on' meant "bypass
+  // allowed" to two readers and "forbidden" to the third — so the form offered
+  // a break-glass the endpoint refused, or the reverse. Same family as the
+  // "'0' is truthy" entry in AGENTS.md's Pitfalls, one setting further out.
+  //
+  // Imported INSIDE the function, and that is what makes this function async:
+  // `run-def.mjs` reaches the runner, which reaches the sandbox facade, which
+  // reaches back here — a static import closed that ring and the watcher's
+  // `sandboxHubMode()` became a ReferenceError in a file nobody had edited.
+  // The plugin rule of AGENTS.md, one directory over.
+  const rd = await import('../run-def.mjs')
   return {
-    mode,
-    lock: parseList(s.sandbox_lock),
-    allowBypass: s.sandbox_allow_bypass === undefined || s.sandbox_allow_bypass === ''
-      ? true
-      : ['1', 'on', 'true'].includes(String(s.sandbox_allow_bypass)),
+    mode: rd.sandboxHubMode(),
+    lock: rd.sandboxLock(),
+    allowBypass: rd.sandboxAllowBypass(),
+    allowedMountRoots: rd.sandboxAllowedMountRoots(),
+    // The four below are this page's own and have no second reader: a runtime
+    // id, an engine id and two paths, each read where it is used.
     runtime: String(s.sandbox_runtime ?? '').trim(),
-    allowedMountRoots: parseList(s.sandbox_allowed_mount_roots),
     proxyEngine: proxyEngine(String(s.sandbox_proxy_engine ?? '').trim() || 'builtin'),
     caDir: String(s.sandbox_ca_dir ?? '').trim(),
     imageRegistry: String(s.sandbox_image_registry ?? '').trim(),
@@ -142,14 +156,13 @@ export function hubPolicy(s = settings()) {
 }
 
 /** Is the sandbox switched on at all? The one question every block asks first. */
-export function sandboxOn(s = settings()) {
-  return hubPolicy(s).mode !== 'off'
+export async function sandboxOn(s = settings()) {
+  return (await hubPolicy(s)).mode !== 'off'
 }
 
 /** The one-line summary next to the link on the settings index. */
-export function sandboxSettingsSummary() {
-  const p = hubPolicy()
-  return t(`sandbox.settings.mode_${p.mode}`)
+export async function sandboxSettingsSummary() {
+  return t(`sandbox.settings.mode_${(await hubPolicy()).mode}`)
 }
 
 // --------------------------------------------------------- small builders ----
@@ -186,7 +199,7 @@ function chk(name, on, label, { disabled = false, hint = '' } = {}) {
  * it reads as a promise.
  */
 export async function sandboxRepoFields(r = {}) {
-  const p = hubPolicy()
+  const p = await hubPolicy()
   if (p.mode === 'off') {
     return `<fieldset class="schedule"><legend>${e(t('sandbox.page.repo_legend'))}</legend>
       <p class="dim">${e(t('sandbox.page.hub_off'))} <a href="/settings/sandbox">${e(t('sandbox.settings.title'))}</a></p>
@@ -241,12 +254,12 @@ export async function sandboxRepoFields(r = {}) {
  * configuration disappears the first time somebody saves a page that could not
  * show it.
  */
-export function sandboxRepoFromForm(b, problems) {
+export async function sandboxRepoFromForm(b, problems) {
   const has = ['sandbox_default', 'sandbox_profile_id', 'sandbox_overrides', 'sandbox_image', 'sandbox_audit_only']
     .some(k => Object.hasOwn(b, k))
   if (!has) return null
 
-  const p = hubPolicy()
+  const p = await hubPolicy()
   const raw = String(b.sandbox_overrides ?? '').trim()
   const { overrides, problems: specProblems } = validateSandboxOverrides(raw, {
     lock: p.lock, allowedMountRoots: p.allowedMountRoots,
@@ -284,8 +297,8 @@ export function sandboxRepoFromForm(b, problems) {
  * second Save. It stands under the form instead, where it also reads better:
  * one tests what is saved, not what is typed.
  */
-export function sandboxDryRunButton(repo) {
-  if (!repo?.id || !sandboxOn()) return ''
+export async function sandboxDryRunButton(repo) {
+  if (!repo?.id || !(await sandboxOn())) return ''
   return `<div class="btn-row" id="sandbox-dryrun">
     <form method="post" action="/repos/sandbox/dry-run" class="inline">
       <input type="hidden" name="id" value="${e(String(repo.id))}">
@@ -325,8 +338,8 @@ export function adoptCandidates(repoId, { limit = 40 } = {}) {
 }
 
 /** The block under the repo form: what audit-only saw, and the one button. */
-export function sandboxAdoptBlock(repo) {
-  if (!repo?.id || !sandboxOn()) return ''
+export async function sandboxAdoptBlock(repo) {
+  if (!repo?.id || !(await sandboxOn())) return ''
   const hosts = adoptCandidates(repo.id)
   if (!hosts.length) return ''
   return `<div class="card" id="sandbox-adopt">
@@ -397,7 +410,7 @@ export function hasSandboxStory(run) {
  */
 export async function sandboxCard(run, repo) {
   if (!hasSandboxStory(run)) return ''
-  const p = hubPolicy()
+  const p = await hubPolicy()
   const spec = runSpec(run)
   const bypassed = !run.sandbox
   const net = spec.network ?? DEFAULT_SPEC.network
@@ -639,14 +652,23 @@ export async function sandboxProfileSave(req, res, url, formBody) {
   const problems = []
   const name = String(b.name ?? '').trim()
   if (!name) problems.push(t('form.name_missing'))
-  const p = hubPolicy()
+  const p = await hubPolicy()
   const { overrides, problems: specProblems } = validateSandboxOverrides(String(b.spec ?? ''), {
     lock: p.lock, allowedMountRoots: p.allowedMountRoots,
   })
   for (const pr of specProblems) problems.push(t(pr.key, pr.params))
   if (problems.length) return problemPage(req, res, t('sandbox.page.profile'), problems, back)
+  // `saveProfile()` REFUSES rather than throwing — a profile naming
+  // `secrets.mode: inject` with an engine that cannot inject, a name already
+  // taken, an id that is gone. Its `problems` are i18n keys with params, the
+  // same shape `validateSandboxOverrides()` answers in, so a contradiction the
+  // module noticed reaches the operator as a readable page and never as a 500.
   try {
-    await saveProfileRow({ id: b.id ? +b.id : null, name, spec: JSON.stringify(overrides) })
+    const r = await saveProfileRow({ id: b.id ? +b.id : null, name, spec: JSON.stringify(overrides) })
+    if (r?.problems?.length) {
+      return problemPage(req, res, t('sandbox.page.profile'),
+        r.problems.map(pr => t(pr.key, pr.params)), back)
+    }
   } catch (err) {
     return problemPage(req, res, t('sandbox.page.profile'), [String(err?.message ?? err)], back)
   }
@@ -655,8 +677,15 @@ export async function sandboxProfileSave(req, res, url, formBody) {
 
 export async function sandboxProfileDelete(req, res, url, formBody) {
   const b = await formBody()
-  try { await deleteProfileRow(b.id) }
-  catch (err) { return problemPage(req, res, t('sandbox.page.profile'), [String(err?.message ?? err)], '/settings/sandbox') }
+  try {
+    const r = await deleteProfileRow(b.id)
+    if (r?.ok === false) {
+      return problemPage(req, res, t('sandbox.page.profile'),
+        (r.problems ?? []).map(pr => t(pr.key, pr.params)), '/settings/sandbox')
+    }
+  } catch (err) {
+    return problemPage(req, res, t('sandbox.page.profile'), [String(err?.message ?? err)], '/settings/sandbox')
+  }
   redirect(res, '/settings/sandbox')
 }
 
@@ -671,7 +700,7 @@ const IMAGE_KINDS = ['base', 'claude', 'opencode', 'cursor', 'hermes']
  */
 export async function pageSandboxSettings(req, res, url) {
   const s = settings()
-  const p = hubPolicy(s)
+  const p = await hubPolicy(s)
   const state = await runtimeState()
   const caps = engineCapabilities(p.proxyEngine)
   const profiles = await listProfiles()
@@ -818,7 +847,7 @@ export async function sandboxBuild(req, res, url, formBody) {
   if (!build) {
     return problemPage(req, res, t('sandbox.settings.images_title'), [t('sandbox.settings.err_build_unavailable')], '/settings/sandbox')
   }
-  const p = hubPolicy()
+  const p = await hubPolicy()
   try {
     // The runtime travels with the request: an operator who configured podman
     // must not have their images built by docker. (`buildImage()` defaults to
@@ -920,7 +949,7 @@ function rememberAllow(scope, run, host) {
 
 /** "Allow for this run" / "Allow for this repo". */
 export async function sandboxAllow(run, host, scope) {
-  const p = hubPolicy()
+  const p = await hubPolicy()
   if (pathLocked('network.allow', p.lock)) return { ok: false, error: t('sandbox.page.locked_by_hub') }
   const clean = String(host ?? '').trim()
   if (!clean) return { ok: false, error: t('sandbox.page.err_host_missing') }
@@ -952,7 +981,7 @@ export async function sandboxDeny(run, host) {
 }
 
 export async function sandboxReconfigure(run, overridesText) {
-  const p = hubPolicy()
+  const p = await hubPolicy()
   const { overrides, problems } = validateSandboxOverrides(overridesText, {
     lock: p.lock, allowedMountRoots: p.allowedMountRoots,
   })
@@ -968,7 +997,7 @@ export async function sandboxReconfigure(run, overridesText) {
  * afterwards.
  */
 export async function sandboxBypass(run, reason = '') {
-  const p = hubPolicy()
+  const p = await hubPolicy()
   if (!p.allowBypass) return { ok: false, error: t('sandbox.page.bypass_forbidden') }
   if (p.mode === 'required') return { ok: false, error: t('sandbox.problem.required', { layer: 'hub' }) }
   const m = await mod('index')

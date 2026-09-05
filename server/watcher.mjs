@@ -26,6 +26,12 @@ import { maybeAutoCleanup } from './cleanup.mjs'
 // The two seams of SANDBOX_RESEARCH.md §7.4.4 / §7.7. Both answer for an
 // unsandboxed run exactly what this file did before they existed, which is why
 // every call site below could be rewired mechanically.
+// The hub's own sandbox policy, from its one reader (run-def.mjs, "THE FOUR HUB
+// SANDBOX SETTINGS ARE READ HERE AND NOWHERE ELSE"). Statically, like
+// sandbox/index.mjs and run-edit.mjs import it: `sandboxInUse()` sits in the
+// reconciliation pass and has to answer synchronously, and there is no cycle to
+// dodge — run-def.mjs reaches watcher.mjs through no static edge.
+import { sandboxHubMode } from './run-def.mjs'
 import { runGit, agentHome, specOf } from './sandbox/exec.mjs'
 import { isClone, removeClone } from './sandbox/clone.mjs'
 import { env } from './env.mjs'
@@ -1154,8 +1160,13 @@ function sessionOpenFor(run) {
  * it left behind.
  */
 export function sandboxInUse() {
-  const mode = String(getSetting('sandbox_mode') ?? '').trim()
-  if (mode && mode !== 'off') return true
+  // Through the canonical reader, never through a settings read of its own.
+  // The four hub sandbox settings are read in run-def.mjs and nowhere else
+  // (the banner there says why: three readers of `sandbox_allow_bypass` with
+  // three rules meant a stored `'on'` let the form offer a break-glass the
+  // endpoint refused). This one agreed with the canon by accident, which is
+  // exactly how the other three started.
+  if (sandboxHubMode() !== 'off') return true
   return !!db.prepare(`SELECT 1 FROM runs WHERE sandbox=1 LIMIT 1`).get()
 }
 

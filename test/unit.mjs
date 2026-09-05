@@ -9665,11 +9665,20 @@ process.stdout.write(JSON.stringify(out))
         wahr(lies(''), 'unset means yes — a restriction is added, never inherited')
         wahr(lies('vielleicht'), 'and a value nobody can read lands on the documented default')
       } finally { setS('sandbox_allow_bypass', '') }
-      // The sandbox facade must not have a second opinion about any of them.
-      const facade = readFileSync(new URL('../server/sandbox/index.mjs', import.meta.url), 'utf8')
-      for (const key of ['sandbox_allow_bypass', 'sandbox_lock']) {
-        falsch(facade.includes(`getSetting('${key}')`), `${key} is not read a second time in the facade`)
+      // The sandbox facade must not have a second opinion about any of them —
+      // and neither may the watcher, which held the last stray reader of
+      // `sandbox_mode` (`sandboxInUse()`). It AGREED with the canon, which is
+      // how the other three started; it asks `sandboxHubMode()` now.
+      const dateien = {
+        'the facade': readFileSync(new URL('../server/sandbox/index.mjs', import.meta.url), 'utf8'),
+        'the watcher': readFileSync(new URL('../server/watcher.mjs', import.meta.url), 'utf8'),
       }
+      for (const [wo, quelle] of Object.entries(dateien)) {
+        for (const key of ['sandbox_mode', 'sandbox_allow_bypass', 'sandbox_lock', 'sandbox_allowed_mount_roots']) {
+          falsch(quelle.includes(`getSetting('${key}')`), `${key} is not read a second time in ${wo}`)
+        }
+      }
+      enthaelt(dateien['the watcher'], 'sandboxHubMode()', 'the watcher asks the canonical reader instead')
     })
 
     await pruefe('the launcher takes --setting-sources from the declaration, not from its own head', () => {

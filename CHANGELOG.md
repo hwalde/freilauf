@@ -28,11 +28,13 @@ a day on which nothing was released.
   layers may contribute to (hub → repo → agent → run), and **a lower layer may
   only ever narrow what a higher one locked**; an attempt to loosen a locked
   field is refused and written down, never silently applied. Four profiles are
-  shipped: **Balanced**, **Locked down**, **Open network** and **Audit** —
-  three of which ask for credential injection, which is **not finished**, so
-  they refuse to start a run rather than putting the real key inside a
-  container that promised to hold a placeholder. Start with **Open network**,
-  or a copy of Balanced whose secrets are passed as environment variables. A
+  shipped: **Balanced**, **Locked down**, **Open network** and **Audit**, all
+  four of which run on the built-in proxy and pass credentials in as
+  environment variables, so they start a run on any machine that has a
+  container runtime and nothing else. Keeping the keys out of the container
+  entirely (`secrets: inject` through iron-proxy) is an explicit upgrade of
+  three fields in a copy of a profile — built, and never yet run against the
+  real iron-proxy binary. A
   sandboxed run gets a clone of its own instead of a linked worktree, its own
   `HOME`, and a network whose only way out is an egress proxy that answers a
   readable **403** for a host that is not on its allowlist. Everything the hub
@@ -51,6 +53,23 @@ a day on which nothing was released.
   with the same clone and the same conversation. **Continue without the
   sandbox** is there for the moment none of that is enough — it asks first and
   is recorded on the run for ever.
+- **An agent that the sandbox is standing in the way of can say so, and you
+  hear about it.** `fl-report access "<what you need and why>"` — which the
+  run's own prompt and the proxy's 403 both tell it to use — opens a red
+  **Agent needs access** incident in the **Needs you** group and notifies at
+  once, with the agent's own words and the three answers spelled out: allow it
+  for this run, allow it for the repo, or tell it to do without. The run
+  **keeps running** while you decide, because the agent was told to carry on
+  with what it can do; asking the same thing twice stays quiet.
+- **And you are told even when the agent says nothing.** Hosts the proxy turned
+  away become a **Sandbox turned a host away** incident — yellow, because a
+  wall doing its job is not a fault, and red once it demonstrably is in the way
+  (two or more distinct hosts, or no work since the denial). An agent that kept
+  working is never escalated. A refusal in the agent's own log shows as a
+  **sandbox denied** flag on the run's traffic light, taken back the moment the
+  agent is measurably working again. A container daemon that stops answering
+  (**`docker_unreachable`**) lands in "Needs you" too: it does not come back by
+  itself, and every sandboxed run on the machine is behind it.
 - **Audit-only mode, and one button to grow an allowlist out of it.** Nothing
   is blocked; everything that would have been is written down. The repo form
   then lists the hosts this repository's own runs reached, with counts, and
@@ -82,11 +101,13 @@ a day on which nothing was released.
   for an agent that needs something the sandbox blocks. **`fl-kill` stops the
   container before it kills the session**, so ending a sandboxed run no longer
   leaves the agent running.
-- **A new global incident, `docker_unreachable`**, for a container daemon that
-  stops answering — raised only after three consecutive silences and resolved
-  the moment it answers again. "The daemon did not answer" is never read as
-  "there are no containers": nothing is stopped or reaped on the strength of a
-  question nobody answered.
+- **"The daemon did not answer" is never read as "there are no containers".**
+  A runtime that times out, cannot be forked or is still coming up after a
+  reboot means the hub learned nothing, so it does nothing and asks again next
+  pass; only a positive answer ever ends a run, and three silences in a row
+  raise the incident above rather than a verdict about anybody's work. A launch
+  that failed because the runtime could not be *asked* does not count against a
+  run's resume attempts either.
 - **A hard runtime ceiling per profile.** `resources.maxRuntimeMinutes` stops
   the container, ends the session and aborts the run, once, with one
   notification.

@@ -26,23 +26,27 @@ changelog.
 
 ### Credentials that never enter the container
 
-**Status: designed and built, not finished.** A sandbox profile can say
-`secrets: inject` — the container holds a placeholder, and the egress proxy
+**Status: built, and never run against the real thing.** A sandbox profile can
+say `secrets: inject` — the container holds a placeholder, and the egress proxy
 swaps the real credential into the request on its way out, so a compromised
-agent never has the key at all. Three of the four shipped profiles ask for it.
+agent never has the key at all. The code for it is there and refuses loudly
+where it cannot deliver.
 
-It does not work yet: the proxy layer cannot be handed the substitution table,
-and the reference engine it needs (`iron-proxy`) has never been run against its
-own binary here, so its configuration is written from documentation rather than
-from experience. A profile that asks for injection therefore **refuses to start
-a run** rather than quietly passing the real key in — which is the right
-failure, and still a failure. Until it lands, a sandboxed run's credentials go
-in as environment variables, exactly as an unsandboxed run's do.
+What is missing is experience. It needs `iron-proxy`, which is installed on no
+machine here, so its configuration file, its reload endpoint and its log format
+were written from documentation and have never been parsed by the binary that is
+supposed to read them. Until somebody has run it in anger, the shipped profiles
+pass credentials in as environment variables — exactly as an unsandboxed run
+does — and injection is an explicit upgrade you make with your eyes open.
+If you have iron-proxy running somewhere, telling us what actually happened
+would be the single most useful thing.
 
-Worth knowing before you plan around it: injection can only ever cover a
-credential carried verbatim in a header. A request the client *signs* with the
-secret — AWS SigV4 and every HMAC scheme — cannot be injected by anything
-sitting in front of it, and never will be.
+Two things worth knowing before you plan around it. Injection can only ever
+cover a credential carried verbatim in a header: a request the client *signs*
+with the secret — AWS SigV4 and every HMAC scheme — cannot be injected by
+anything sitting in front of it, and never will be. And a coding agent whose
+plugin cannot say which header carries its key (cursor today) needs the
+environment-variable mode, and says so instead of guessing.
 
 ### A sandbox for machines that cannot have Docker
 

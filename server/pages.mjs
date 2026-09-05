@@ -2350,7 +2350,7 @@ export async function pageSettings(req, res, url) {
   <p><a class="btn" href="/settings/skills">${e(t('flskills.title'))}</a>
      <span class="dim">${e(t('settings.skills_hint', { state: t(skillsInstallOn() ? 'layout.on' : 'layout.off') }))}</span></p>
   <p><a class="btn" href="/settings/sandbox">${e(t('sandbox.settings.title'))}</a>
-     <span class="dim">${e(t('sandbox.settings.link_hint', { state: sandboxSettingsSummary() }))}</span></p>
+     <span class="dim">${e(t('sandbox.settings.link_hint', { state: await sandboxSettingsSummary() }))}</span></p>
   <form method="post" action="/settings/save" class="settings form-grid">
     <label>${e(t('settings.language'))} <select name="ui_language">${Object.entries(LANGUAGES).map(([code, label]) =>
       `<option value="${code}" ${(s.ui_language ?? 'en') === code ? 'selected' : ''}>${e(label)}</option>`).join('')}</select></label>
@@ -3437,8 +3437,8 @@ export async function repoEdit(req, res, url) {
     // submits the OUTER one — a "Dry run" placed in the fieldset would silently
     // have been a second Save. They also read better here: one tests and adopts
     // what is SAVED, not what is currently typed.
-    sandboxDryRunButton(r)}
-  ${sandboxAdoptBlock(r)}
+    await sandboxDryRunButton(r)}
+  ${await sandboxAdoptBlock(r)}
   ${extrasDialog()}`
   // This form belongs to ONE repo, like a run's detail page: switching the
   // header repo cannot make it show another one, so it hands its own repo over
@@ -3472,7 +3472,7 @@ export async function repoSave(req, res, url, formBody) {
   // then left exactly as they are: reading "absent" as "empty" is how a
   // configuration disappears the first time somebody saves a page that could
   // not show it (the same rule the skills page's `skills_pick` marker has).
-  const sandbox = sandboxRepoFromForm(b, problems)
+  const sandbox = await sandboxRepoFromForm(b, problems)
   if (problems.length) return problemPage(req, res, t('repos.edit_title'), problems, back)
   const prompt = (b.prompt ?? '').trim() || null
   const i = [integ.merge_mode, integ.merge_check, integ.finish_timeout_min, integ.merge_max_attempts,

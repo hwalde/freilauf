@@ -214,10 +214,10 @@ and they are kept apart rather than one of them winning.
 
 | Profile | Network | Secrets | Limits | For |
 |---|---|---|---|---|
-| **Balanced** | allowlist through iron-proxy, TLS terminated; presets `harness`, `provider`, `git-host`, `package-registries` | `inject` | 8 GB / 4 CPU | the ordinary case |
-| **Locked down** | allowlist, iron-proxy, TLS terminated; presets `harness`, `provider` only — **no package registry** | `inject` | 4 GB / 2 CPU | a run that must be given every dependency rather than fetching one |
-| **Open network** | `open`, built-in engine, no TLS termination | `env` | 8 GB / 4 CPU | the repository whose build reaches half the internet and where an allowlist would be a week of whack-a-mole. The container is still a container |
-| **Audit** | Balanced, but `auditOnly` — nothing is blocked, everything that *would* have been is written down | `inject` | 8 GB / 4 CPU | the mode you roll out in |
+| **Balanced** | allowlist through the built-in engine; presets `harness`, `provider`, `git-host`, `package-registries` | `env` | 8 GB / 4 CPU | the ordinary case |
+| **Locked down** | allowlist, built-in engine; presets `harness`, `provider` only — **no package registry** | `env` | 4 GB / 2 CPU | a run that must be given every dependency rather than fetching one |
+| **Open network** | `open`, built-in engine | `env` | 8 GB / 4 CPU | the repository whose build reaches half the internet and where an allowlist would be a week of whack-a-mole. The container is still a container |
+| **Audit** | Balanced, but `auditOnly` — nothing is blocked, everything that *would* have been is written down | `env` | 8 GB / 4 CPU | the mode you roll out in |
 
 The defaults underneath them, for a profile that says nothing: `network.mode
 allowlist`, `network.engine builtin`, `secrets.mode env`, worktree `rw`, the
@@ -225,14 +225,25 @@ operator's `.git` `ro`, extras `ro`, read-only root filesystem with tmpfs at
 `/tmp` (2 GB) and `$HOME/.cache` (2 GB), memory 8 GB, 4 CPUs, `pidsLimit` 4096,
 `shmSize` 1 GB, `innerSandbox off`, `retention run`, audit on.
 
-**Three of the four built-ins ask for `iron-proxy` and `secrets.mode: inject`,
-and that combination does not start a run today.** The proxy layer has no way
-of being handed the substitution table, so `inject` fails at launch with a
-readable refusal rather than putting the real key inside a container the
-profile promised held only a placeholder. Until that is finished, the profile
-to use is **Open network**, or a copy of Balanced with `secrets.mode` set to
-`env` and `network.engine` to `builtin`. See
-[What this sandbox does not do](#credential-injection-is-not-finished).
+**All four ship with `secrets.mode: env`** — the credentials are passed into the
+container as environment variables, exactly as they are for an unsandboxed run.
+Three of them once asked for `inject` and the iron-proxy engine, which meant
+they could not start a run on any machine that had not installed and configured
+a second binary; a default that cannot start is not a default.
+
+**Keeping the keys out of the container is an explicit upgrade**, and it is
+three fields in a copy of the profile:
+
+```json
+"network": { "engine": "iron-proxy", "tlsTerminate": true },
+"secrets": { "mode": "inject" }
+```
+
+Read [Credential injection](#credential-injection-is-implemented-and-unverified)
+before you do that: it is built, and it has never been run against the real
+iron-proxy binary. The profile editor refuses `inject` next to an engine that
+cannot inject, and `setSecrets()` on the built-in engine refuses it again at
+launch, so the failure is loud at both ends rather than a quiet downgrade.
 
 ---
 
@@ -367,9 +378,11 @@ demonstrably no daemon, so there are no containers — the empty truth), and
 binary, a socket in a broken state, a daemon still coming up after a reboot).
 Only a positive answer may end a run. On `unreachable` the hub does nothing and
 asks again next pass, and after three consecutive silences it raises the global
-incident **`docker_unreachable`**, which resolves itself the moment the daemon
-answers. Nothing is stopped or reaped on the strength of a question that was
-never answered.
+incident **`docker_unreachable`** — in the **Needs you** group, for the same
+reason `tmux_unreachable` is: a daemon that is gone does not come back by
+itself, and every sandboxed run on the machine is behind it. It resolves itself
+the moment the daemon answers. Nothing is stopped or reaped on the strength of a
+question that was never answered.
 
 The same instinct covers a resume: a launch that failed because the *runtime
 could not be asked* is "could not try", not "tried and died" — it leaves the
@@ -391,22 +404,42 @@ memory and CPU, whether the root filesystem is read-only, and this:
 > sandbox: run `fl-report access "<what you need and why>"` and carry on with
 > what you CAN do.
 
-`fl-report access` is a report kind `fl-report` accepts and forwards. Working
-*around* the boundary is precisely what the sandbox exists to prevent, so the
-prompt names the way through it instead.
+Working *around* the boundary is precisely what the sandbox exists to prevent,
+so the prompt names the way through it instead.
 
-> **Today the hub does not act on it yet.** `handleReport()` has no `access`
-> case, so the report is refused, filed in `inbox.jsonl`, replayed once and
-> dropped. The agent is told to ask and its asking currently reaches nobody.
-> Until that lands, the channel that actually works is the `sandbox:blocked`
-> event and the buttons below — watch the run's page, not your notifications.
+**An access request reaches you like a help call, and the run keeps working.**
+It opens a red **`sandbox_access`** incident in the **Needs you** group — a
+host, a path or a memory limit is a decision, and waiting does not make it —
+and notifies at once, carrying the agent's own words, with no grace period
+(that delay exists so an alarm which answers itself never pages, and this one
+cannot answer itself: the agent asked). The same request twice counts on the
+open incident and stays quiet. The one difference from `help` is the one that
+matters: **the run stays `running`.** A help call means the agent has stopped
+and waits; an access request means it hit a wall and was told to carry on with
+what it can do. `waiting_help` would stop the finish gate's clock, tell the
+watcher the silence is deliberate, and expect your answer to be typed into the
+session — and none of that is true, because the answer is a policy change that
+reaches the agent through the proxy without anybody typing anything.
 
 **The proxy's 403 body says the same thing** — it names the host and points at
 `fl-report access`, in the operator's language.
 
-**You get three buttons.** Every denial becomes a `sandbox:blocked` event, and
-the run's detail page lists the hosts that were turned away with a count. Next
-to each:
+**And you are told even when the agent says nothing.** Every denial is a
+`sandbox:blocked` event; a watcher pass turns those into one **`sandbox_blocked`**
+incident per run — **yellow** to begin with, because a wall doing its job is not
+a fault, and **red** once it is demonstrably in the way: two or more distinct
+hosts turned away, or no measurable work since the denial. The same veto the log
+scanner uses applies first, so an agent that kept working is never escalated.
+The incident is grown from the *events*, not from a callback, deliberately: the
+built-in proxy runs inside the hub and iron-proxy does not, and a fact that only
+exists while one engine happens to be loaded goes missing the day somebody
+switches engines or the hub restarts mid-run. Separately, a refusal the agent
+prints into its own log raises `anomaly:sandbox_denied` on the run's traffic
+light, and that statement is **taken back** when the agent is measurably working
+again.
+
+**You get three buttons.** The run's detail page lists the hosts that were
+turned away, with a count. Next to each:
 
 | Button | What it does |
 |---|---|
@@ -627,41 +660,54 @@ code runs unsandboxed the moment it is merged.** The same is true of anything
 you wire behind a `run_merged` flow's `shell_command` step, which is a command
 on the hub machine by definition.
 
-### Credential injection is not finished
+### Credential injection is implemented, and unverified
 
-`secrets.mode: inject` is designed to swap a placeholder for the real credential
-in the request's own header, at a TLS-terminating proxy, so the container never
-holds a key. **It does not work yet.** The proxy layer exports nothing that can
-be handed the substitution table, so a profile asking for it **fails at launch**
-with a readable reason. That is the right failure — falling back to `env` would
-put the operator's real key inside the very container the profile promised held
-nothing but a placeholder, and it would be told to somebody who picked the
-strict profile in order to be safe — but it does mean that **three of the four
-built-in profiles (Balanced, Locked down, Audit) cannot start a run as
-shipped.** Copy one and set `secrets.mode` to `env` (and `network.engine` to
-`builtin`), or use **Open network**, until this lands.
+`secrets.mode: inject` swaps a placeholder for the real credential in the
+request's own header, at a TLS-terminating proxy, so the container never holds a
+key. It is **built**: `setSecrets()` is on the engine interface, iron-proxy
+writes the `secrets` transform and relaunches the proxy from its own launch
+context — a running container's environment cannot be changed, and this happens
+while the sandbox is being prepared, before the agent's container exists, so
+nothing in flight is dropped. The built-in CONNECT engine answers the same call
+with a **refusal naming the engine**, and the caller fails the launch on it.
+Every engine answers, which is why the capability question is never asked in two
+places and can never come back as "no such function" instead of "this engine
+cannot".
 
-The **iron-proxy integration itself is UNVERIFIED against the binary**: it is
-not installed on the machine this was written on, so the config's YAML key
-names, the deny half of the allowlist (`deny_domains` is written *in the hope
-that it exists*), the hot-reload endpoint's request shape and the audit log's
-field names were all transcribed from documentation and have never been parsed
-by iron-proxy. The hub warns about the deny half at runtime. A live policy
-reload of iron-proxy additionally refuses today, because nothing sets the
-management URL the reload posts to. `network.engine: iron-proxy` should be
-treated as unexercised.
+**It has never been run against the real iron-proxy binary.** iron-proxy is
+installed on no machine here, and the module's own header lists what that means:
+the YAML key names, the deny half of the allowlist (`deny_domains` is written
+*in the hope that it exists*), the hot-reload endpoint's request shape and the
+audit log's field names were all transcribed from documentation and have never
+been parsed by the thing that is supposed to read them. The hub warns about the
+deny half at runtime. So `network.engine: iron-proxy` — and with it `inject` —
+is **built but unexercised**, which is a different sentence from "works" and
+should be read as one. Try it on a repository you can afford to have fail before
+you put it in front of one you cannot.
 
-And even when it does work, injection covers exactly **one** class: a
-credential carried verbatim in a request header (a bearer token, an API-key
-header). It **cannot** cover a scheme where the client signs the request with
-the secret — **AWS SigV4** is the obvious one, and so is any HMAC-signed
-request. The signature is computed over the method, path, headers and body hash
-*before* the request reaches the proxy, from a key the client must already hold.
-Such a credential either enters the container (`secrets.mode: env`) or the run
-cannot use that service. There is no third answer, and there is no
-signing hook anywhere in the code. The same goes for OAuth flows that mint or
-refresh a token, credentials carried in a query string or a body, and mTLS
-client certificates.
+Two limits stay whatever the binary turns out to do.
+
+**Injection covers exactly one class of credential**: one carried verbatim in a
+request header — a bearer token, an API-key header. It **cannot** cover a scheme
+where the client signs the request with the secret. **AWS SigV4** is the obvious
+one, and so is any HMAC-signed request: the signature is computed over the
+method, path, headers and body hash *before* the request reaches the proxy, from
+a key the client must already hold. Such a credential either enters the
+container (`secrets.mode: env`) or the run cannot use that service. There is no
+third answer, and there is no signing hook anywhere in the code. The same goes
+for OAuth flows that mint or refresh a token, credentials carried in a query
+string or a body, and mTLS client certificates.
+
+**And a credential whose plugin declares no `injection` block refuses the
+launch, by name.** Under `env` such a variable is simply passed in, which is a
+working configuration and not a defect. Under `inject` there is no third answer
+for it: passing the real value would be exactly the lie the profile promised not
+to tell, and passing a placeholder nobody swaps would 401 every API call on a
+run that still looks healthy. So the run does not start, and the message names
+the variable. **cursor's `CURSOR_API_KEY` is deliberately that case** — which
+header carries it was never established — so a cursor run needs
+`secrets.mode: env` today. A refusal that names a variable is a sentence an
+operator can act on; a fallback would have been a bug they found in a log.
 
 ### Runtimes that are named but not implemented
 
@@ -684,12 +730,14 @@ On a host with `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu
 24.04's default) the question does not arise anyway: `unshare -rn true` and a
 `bwrap` smoke test both fail with a uid-map permission error [measured].
 
-### Two smaller gaps worth knowing
+### Two things about the audit
 
-- **`docker-events.jsonl` is declared and never written.** `audit.dockerEvents`
-  defaults to `true`, the export folds the file in, and nothing in the hub
-  produces it. The audit's real content today is the spec, the proxy config and
-  the egress log.
+- **The container's lifecycle is recorded, and its shape has never been seen
+  from a real daemon.** `docker events --filter container=fl-<id>` is started
+  *before* the container is created, so `create` and `start` are captured, and
+  it is stopped on every teardown path. What each line contains is the daemon's
+  business and nothing here has read one: the field names are documented, not
+  observed.
 - **The audit chain is not a signature.** It proves that the copy you were
   handed was not edited after export; it does not prove the hub recorded the
   truth, and there is no key, so somebody who re-runs the chaining gets a valid

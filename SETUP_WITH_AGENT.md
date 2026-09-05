@@ -211,11 +211,12 @@ sandbox/wrap.sh --print ~/agents/runs/<run id>/sandbox.json -- bash
 and the **Dry run** button under a repo's form resolves that repo's policy and
 shows what it would do, without starting an agent.
 
-Two things to tell the human rather than discover for them: three of the four
-shipped profiles ask for credential injection, which is **not finished**, so they
-refuse to start a run — begin with **Open network**, or a copy of Balanced whose
-secrets are passed as environment variables. And the sandbox decides on
-hostnames and inspects no content, so an allowed host is a way out. Both, and
+Two things to tell the human rather than let them find out: all four shipped
+profiles pass credentials into the container as environment variables, and the
+mode that keeps the keys out of it (`secrets: inject`, through `iron-proxy`) is
+**built but has never been run against the real binary** — do not switch a
+profile to it on their behalf. And the sandbox decides on hostnames and inspects
+no content, so an allowed host is a way out. Both, and
 everything else it does not do, are in **[docs/sandbox.md](docs/sandbox.md)**;
 what a coding-agent plugin has to declare to be sandboxable is in
 **[docs/plugins.md](docs/plugins.md)**.
