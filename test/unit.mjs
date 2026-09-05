@@ -9464,7 +9464,7 @@ process.stdout.write(JSON.stringify(out))
     // matrix plus §8.1's availability rule, and a matrix that could only be
     // tested on a machine with a container daemon would not be tested at all.
     const { decideSandbox } = await import('../server/sandbox/spec.mjs')
-    const { sandboxOutcome, classifyPolicyPatch, LIVE_POLICY_PATHS, containerEnv } =
+    const { sandboxOutcome, classifyPolicyPatch, LIVE_POLICY_PATHS, containerEnv, engineUsable } =
       await import('../server/sandbox/index.mjs')
     const { platformSuffix, sandboxPromptSection, splitEnvArgs, createRun } = await import('../server/runner.mjs')
 
@@ -9719,6 +9719,42 @@ process.stdout.write(JSON.stringify(out))
       gleich(classifyPolicyPatch({ resources: { memory: '4g' } }).limits, true, 'docker update hears the limits')
       gleich(classifyPolicyPatch({ resources: { memory: '4g' } }).proxy, false, '…and the proxy is not reloaded')
       wahr(LIVE_POLICY_PATHS.includes('network.allow'), 'the table is the source of both answers')
+    })
+
+    await pruefe('the built-in proxy is refused under a rootless daemon, by name', () => {
+      // §11b, measured three ways: the hub cannot bind the run network's gateway
+      // (rootless keeps its bridges in rootlesskit's own netns), a container on
+      // an --internal network reaches neither the host's loopback nor its public
+      // address, and host-gateway points at the stopped rootful daemon's bridge.
+      // The code already refused — on a bind error nobody could read as "this
+      // engine cannot work on this daemon". The predicate is what says it, and
+      // the launch and the forms ask the same one so they cannot disagree.
+      const vorher = process.env.FREILAUF_SANDBOX_PROXY_BIND
+      delete process.env.FREILAUF_SANDBOX_PROXY_BIND
+      try {
+        const rootless = engineUsable('builtin', { available: true, rootless: true })
+        falsch(rootless.ok, 'builtin + rootless is refused')
+        gleich(rootless.reason, 'rootless_builtin', 'with a reason a caller can branch on')
+        enthaelt(String(rootless.error), 'rootless', 'and a sentence that names the cause')
+        enthaelt(String(rootless.error), 'iron-proxy', 'and what to do instead')
+        wahr(engineUsable('iron-proxy', { available: true, rootless: true }).ok,
+          'the container engine is unaffected — its proxy is a container on the run\'s own network')
+        wahr(engineUsable('builtin', { available: true, rootless: false }).ok,
+          'and a rootful daemon still gets the built-in engine')
+        // Unknown is not a verdict. A daemon that did not say, and a machine
+        // with no runtime info at all, must not lose a run over a question
+        // nobody answered — the launch then fails on the bind as before.
+        wahr(engineUsable('builtin', { available: true, rootless: null }).ok, 'a daemon that did not say is not a refusal')
+        wahr(engineUsable('builtin', null).ok, 'and neither is having no answer at all')
+        // The operator's own way out: a listener published where the container
+        // can reach it. Refusing that would be refusing a working setup.
+        process.env.FREILAUF_SANDBOX_PROXY_BIND = '10.0.0.1'
+        wahr(engineUsable('builtin', { available: true, rootless: true }).ok,
+          'an operator who published the listener themselves has answered the question')
+      } finally {
+        if (vorher === undefined) delete process.env.FREILAUF_SANDBOX_PROXY_BIND
+        else process.env.FREILAUF_SANDBOX_PROXY_BIND = vorher
+      }
     })
   }
 

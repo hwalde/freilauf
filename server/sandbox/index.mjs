@@ -873,6 +873,50 @@ async function seedHarnessHome(run, spec, ctx) {
 const proxies = new Map()
 
 /**
+ * CAN THIS ENGINE CARRY A RUN'S EGRESS ON THIS DAEMON? One predicate, asked by
+ * the launch and by the forms, so the two cannot come to disagree — the same
+ * discipline the settings readers were already put under.
+ *
+ * There is exactly one answer in it today, and it is measured (§11b): the
+ * **built-in engine cannot work under a rootless daemon**. The built-in proxy is
+ * an HTTP CONNECT listener in the hub PROCESS, on the host, and a container on
+ * an `--internal` network can reach the host only through that network's own
+ * gateway. A rootless daemon keeps its bridges inside rootlesskit's own network
+ * namespace, so:
+ *
+ *   - the hub cannot bind that gateway at all (`EADDRNOTAVAIL`),
+ *   - a container on the internal network reaches neither the host's loopback
+ *     nor its public or VPN address,
+ *   - and `host-gateway` resolves to the leftover bridge of the ROOTFUL daemon,
+ *     which is not running.
+ *
+ * The code was already right about this — `builtinBind()` refuses rather than
+ * falling back to loopback, which inside the container is the container — but
+ * nothing anywhere JOINED "rootless" to "builtin". The operator got a bind error
+ * out of a failed launch and no way to learn that the profile they picked cannot
+ * work on their daemon, and three of the four shipped profiles are exactly that
+ * combination. A fault whose cause is unnameable is the shape this project has
+ * the most rules about.
+ *
+ * `FREILAUF_SANDBOX_PROXY_BIND` is the way out and therefore part of the
+ * predicate: an operator who publishes the listener at an address the container
+ * can reach has answered the question themselves, and refusing them would be
+ * refusing a configuration that works.
+ *
+ * Unknown is not a verdict: no runtime info, or a daemon that did not say
+ * whether it is rootless (`rootless: null`), answers `ok` — the launch then
+ * fails on the bind as it did before, which is worse than a diagnosis and better
+ * than refusing a run over a question nobody answered.
+ */
+export function engineUsable(engine, info = null) {
+  const e = String(engine || 'builtin')
+  if (e === 'builtin' && info?.rootless === true && !env('SANDBOX_PROXY_BIND')) {
+    return { ok: false, reason: 'rootless_builtin', error: t('sandbox.launch.builtin_rootless') }
+  }
+  return { ok: true, reason: null, error: null }
+}
+
+/**
  * The run's proxy — started only if this process is not already holding one for
  * it, which is what lets a resume walk this step again without a second listener.
  *
@@ -920,6 +964,15 @@ async function ensureProxy(run, spec, { runDir, network, allow, port = 0, allowF
     throw new Error(t('sandbox.launch.inject_needs_engine', { engine }))
   }
 
+  // WHAT THE DAEMON MAKES OF THIS ENGINE, asked before anything is started. The
+  // answer is the same predicate the forms ask, so an operator who was told the
+  // combination is impossible is not then told something else by the launch.
+  // Cached (60 s TTL) and forced by `prepareSandbox()` moments earlier, so this
+  // is not a second discovery.
+  const info = await refreshSandboxAvailability().catch(() => null)
+  const usable = engineUsable(engine, info)
+  if (!usable.ok) throw new Error(usable.error)
+
   // THE list, resolved once by the caller and handed here. Started from the raw
   // spec, every shipped profile enforced an empty allow list — see
   // `specForProxy()`.
@@ -963,6 +1016,17 @@ async function ensureProxy(run, spec, { runDir, network, allow, port = 0, allowF
     const reason = handle?.reason ?? t('sandbox.launch.proxy_unavailable', { mode })
     if (wantsInject) throw new Error(t('sandbox.launch.proxy_failed', { reason }))
     if (engine === 'builtin' || !allowFallback) throw new Error(t('sandbox.launch.proxy_failed', { reason }))
+    // AND THE FALLBACK IS ASKED THE SAME QUESTION. "Fall back to the built-in
+    // engine" is only an answer where the built-in engine works: under a
+    // rootless daemon it is a listener no container can dial, so falling back
+    // would turn a named engine's failure into a run with no egress at all —
+    // and the run would look perfectly healthy while every request in it timed
+    // out. Both reasons travel: why the chosen engine did not start, and why
+    // the fallback is not available either.
+    const fallbackUsable = engineUsable('builtin', info)
+    if (!fallbackUsable.ok) {
+      throw new Error(`${t('sandbox.launch.proxy_failed', { reason })} · ${fallbackUsable.error}`)
+    }
     // The fallback engine needs a network the HOST has an address on, and the
     // one that was created for iron-proxy deliberately does not have one. No
     // container is on it yet at this point, so it is remade rather than the

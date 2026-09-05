@@ -1603,6 +1603,7 @@
   "sandbox.launch.network_failed": "The run's private network {network} could not be created: {reason}",
   "sandbox.launch.no_ca": "This profile terminates TLS, but no CA certificate is configured. Set the certificate directory under Settings → Sandbox and put ca.crt in it.",
   "sandbox.launch.proxy_gone": "This run's egress proxy is no longer running, so the new policy could not be put in force. Restart the run to apply it.",
+  "sandbox.launch.builtin_rootless": "The built-in egress proxy cannot be reached from inside a container under a rootless daemon: it listens on the host, and a rootless daemon keeps the run's network in a namespace of its own — the hub cannot even bind that network's gateway. Use the iron-proxy engine (it needs an image in FREILAUF_SANDBOX_PROXY_IMAGE), or network mode “open”, or publish the listener yourself at an address the container can reach with FREILAUF_SANDBOX_PROXY_BIND.",
   "sandbox.launch.proxy_reload_refused": "The run's egress proxy refused the new network rules, so they are not in force: {reason}",
   "sandbox.launch.limits_failed": "The new resource limits could not be applied to this run's container, so they are not in force: {reason}",
   "sandbox.launch.limits_no_container": "This run has no container the new resource limits could be applied to, so they are recorded but not in force. Restart the run to apply them.",
