@@ -91,6 +91,16 @@ a day on which nothing was released.
   remote session must not be written silently, and it says so as well when the
   browser refused the clipboard. A request from inside the session to *read*
   the clipboard is never answered.
+- **…and where the coding agent takes the mouse for itself, a button hands it
+  back to selecting.** Whether a plain drag can mark anything depends on the
+  agent in the session: claude leaves the mouse to tmux, which marks and copies
+  for you; opencode takes it and does nothing with a drag, so marking used to
+  produce nothing at all there. Hold Shift while dragging — that works
+  everywhere and always did — or press the new 🖱 button above the terminal,
+  and the mouse marks text instead of going to the agent (the setting is
+  remembered for every terminal, and the agent then no longer receives clicks).
+  When a drag comes up empty, the page now says why and names both ways out,
+  once per page instead of leaving you guessing.
 
 ### Changed
 

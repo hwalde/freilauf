@@ -1336,6 +1336,29 @@ try {
   // mouse drag, and a selection that is xterm's own. The clipboard itself is
   // stubbed in the page — what is under test is that the sequence is decoded
   // and handed over at all, not that a headless Chromium can write a clipboard.
+  /** The screen row that carries this run's own text, in page coordinates. */
+  const textZeile = async (p, runId) => {
+    const box = await p.evaluate((id) => {
+      const rows = [...document.querySelectorAll('#term .xterm-rows > div')]
+      const row = rows.find((d) => d.textContent.includes(id)) || rows.find((d) => d.textContent.trim())
+      if (!row) return null
+      const r = row.getBoundingClientRect()
+      return { x: r.left, y: r.top + r.height / 2 }
+    }, runId)
+    wahr(!!box, 'a row with text to drag across')
+    return box
+  }
+  /** A real mouse drag across that row, optionally with Shift held. */
+  const ziehe = async (p, zeile, mitShift) => {
+    if (mitShift) await p.keyboard.down('Shift')
+    await p.mouse.move(zeile.x + 4, zeile.y)
+    await p.mouse.down()
+    await p.mouse.move(zeile.x + 180, zeile.y, { steps: 8 })
+    await p.mouse.up()
+    if (mitShift) await p.keyboard.up('Shift')
+    await p.waitForTimeout(400)
+  }
+
   const clipboardStub = () => {
     window.__copied = []
     const stub = (text) => { window.__copied.push(String(text)); return Promise.resolve() }
@@ -1374,19 +1397,14 @@ try {
     await p.waitForSelector('#term .xterm-screen', { timeout: 15_000 })
     await wartePage(p, (id) => (document.querySelector('#term .xterm-rows')?.textContent || '').includes(id),
       R_LIVE, 'the session\'s content to be there to select')
-    // A drag that begins in the terminal and ends anywhere — which is why the
-    // mouseup goes to the document and not to the box.
-    const selected = await p.evaluate(() => {
-      const t = window.FREILAUF_TERM
-      document.getElementById('term').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
-      t.selectAll()
-      const sel = t.getSelection()
-      document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
-      return sel
-    })
-    wahr(selected.length > 0, 'something was selected at all')
+    // A REAL drag with the browser's own mouse, not a synthetic event: xterm
+    // stops propagation while it handles one, so a listener that is not in the
+    // capture phase never sees it — a synthetic mouseup dispatched at #term
+    // bubbles happily and proves nothing about the path a hand takes.
+    const zeile = await textZeile(p, R_LIVE)
+    await ziehe(p, zeile)
     await wartePage(p, () => window.__copied.length > 0, null, 'the selection to reach the clipboard')
-    gleich(await p.evaluate(() => window.__copied[0]), selected, 'exactly what was marked')
+    wahr(String(await p.evaluate(() => window.__copied[0])).trim().length > 0, 'and it carried real text')
     await wartePage(p, () => !window.FREILAUF_TERM.hasSelection(), null,
       'and the selection to be gone afterwards, the way tmux\'s own drag-end leaves it')
 
@@ -1398,6 +1416,56 @@ try {
     })
     await p.waitForTimeout(200)
     gleich(await p.evaluate(() => window.__copied.length), 1, 'a mouseup that began nowhere copies nothing')
+    sauber(p)
+    await p.close()
+  })
+
+  // The case the first release did not cover, and the reason there is a button
+  // for it: an application in the pane may take mouse reporting for itself.
+  // Measured on this machine with `#{mouse_any_flag}` — claude leaves the mouse
+  // to tmux, which marks and copies; opencode takes it (any-motion, SGR,
+  // alternate screen) and does nothing with a drag. Here the terminal is put
+  // into exactly that mode by writing the sequence an application would send,
+  // and then a REAL mouse drag is made over it.
+  await pruefe('an application that takes the mouse: the drag comes up empty, the button fixes it', async () => {
+    const p = await neueSeite(`/runs/${R_LIVE}`, clipboardStub)
+    await p.bringToFront()
+    await p.waitForSelector('#term .xterm-screen', { timeout: 15_000 })
+    await wartePage(p, (id) => (document.querySelector('#term .xterm-rows')?.textContent || '').includes(id),
+      R_LIVE, 'the session\'s content to be there to drag over')
+    // 1003 = report any motion, 1006 = SGR encoding: opencode's own two.
+    await p.evaluate(() => window.FREILAUF_TERM.write('\x1b[?1003h\x1b[?1006h'))
+    await p.waitForTimeout(300)
+    const zeile = await textZeile(p, R_LIVE)
+
+    await ziehe(p, zeile)
+    falsch(await p.evaluate(() => window.FREILAUF_TERM.hasSelection()),
+      'nothing is selected — the drag went to the application, which did nothing with it')
+    gleich(await p.evaluate(() => window.__copied.length), 0, 'and nothing reached the clipboard')
+    // The one thing the operator cannot see for themselves: WHY it did nothing.
+    await wartePage(p, () => (document.getElementById('freilauf-toasts')?.textContent || '').includes('Shift'),
+      null, 'the hint naming Shift and the button')
+
+    // Shift is the way out every terminal has, and it works here without
+    // changing anything.
+    await ziehe(p, zeile, true)
+    wahr(await p.evaluate(() => window.__copied.length) > 0, 'Shift+drag selects and copies')
+    falsch(await p.evaluate(() => window.FREILAUF_TERM.hasSelection()), 'and clears afterwards')
+
+    // …and the button is the same thing without having to hold a key.
+    await p.evaluate(() => { window.__copied.length = 0 })
+    await p.click('#term-mouse')
+    gleich(await p.getAttribute('#term-mouse', 'aria-pressed'), 'true', 'the button says the mouse is selecting now')
+    wahr(await p.$eval('details.run-term', el => el.open), 'and the details stayed open, not toggled shut')
+    await ziehe(p, zeile)
+    wahr(await p.evaluate(() => window.__copied.length) > 0, 'now the plain drag copies too')
+    wahr(String(await p.evaluate(() => window.__copied[0])).trim().length > 0, 'and it copied real text')
+    falsch(await p.evaluate(() => window.FREILAUF_TERM.hasSelection()), 'the selection is cleared afterwards')
+
+    // The choice is global, so it has to go back — every later page in this
+    // context would otherwise render in it.
+    await p.click('#term-mouse')
+    gleich(await p.getAttribute('#term-mouse', 'aria-pressed'), 'false', 'and the agent gets the mouse back')
     sauber(p)
     await p.close()
   })
@@ -1415,14 +1483,19 @@ try {
     : pruefe
   await tmuxTest('a tmux copy really arrives through the WebSocket', async () => {
     const session = laufRow(R_LIVE).tmux_session
+    const clients = () => tmux('list-clients', '-t', `=${session}`, '-F', '#{client_name}').split('\n').filter(Boolean)
+    // Whichever clients an earlier test's page still holds are NOT this one:
+    // a page that has just been closed can keep its tmux client for a moment,
+    // and writing the clipboard of that one would prove nothing.
+    const vorher = new Set(clients())
     const p = await neueSeite(`/runs/${R_LIVE}`, clipboardStub)
     await p.bringToFront()
     await p.waitForSelector('#term .xterm-screen', { timeout: 15_000 })
     // The page's own tmux client, by name — it appears when the WebSocket has
     // attached, which is a beat after the first frame arrives.
     let client = ''
-    for (let i = 0; i < 60 && !client; i++) {
-      client = tmux('list-clients', '-t', `=${session}`, '-F', '#{client_name}').split('\n')[0] || ''
+    for (let i = 0; i < 100 && !client; i++) {
+      client = clients().find((c) => !vorher.has(c)) || ''
       if (!client) await p.waitForTimeout(100)
     }
     wahr(!!client, `the page is attached as a tmux client (${client})`)
