@@ -228,6 +228,18 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A run start no longer dies in the middle of the worktree checkout.** On a
+  busy machine the `git worktree add` of a large repository takes longer than
+  the hub's 30-second subprocess default; two swarm-worker starts on a
+  17 000-file repository were killed at 78 % of the checkout after ~30 s and
+  failed with a run that had never really begun. Worktree fetch and checkout
+  now get the same generous timeouts the integrator already uses for its git
+  calls (2 minutes). Two smaller wounds in the same spot are dressed too: a
+  checkout killed half-way left a partial directory that a retry would have
+  silently reused as the run's working tree (it is removed now), and the
+  stored failure message was megabytes of git progress spam with the actual
+  error cut off — the progress lines are stripped, so the stored message
+  names the cause.
 - **A long goal is really set now.** A goal of more than about 800 characters
   was typed into the session, looked right on the screen and did nothing:
   claude turns a paste that long into a "[Pasted text #n]" placeholder, and a

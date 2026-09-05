@@ -42,7 +42,7 @@ const d = (s) => new Date(s)
 try {
   const { cronMatches, validCron, scheduleDue, scheduleText, weeklySlots, slotsUniform, splitTimes,
     lastMissedSlot, catchupHours,
-    stripAnsi, escapeHtml,
+    stripAnsi, escapeHtml, stripGitProgress,
     fmtDuration, parseDbUtc, toDbUtc, fmtRelativeTime, fmtDateTime, kurzid,
     fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent,
     timezoneForLanguage, setTimezone, validTz, tzAbbrev, TIMEZONE_OPTIONS, setPublicHost, publicBase } = await import('../server/util.mjs')
@@ -387,6 +387,22 @@ try {
   await pruefe('stripAnsi discards carriage returns, keeps newlines', () => {
     gleich(stripAnsi('a\r\nb'), 'a\nb', 'CRLF')
     gleich(stripAnsi('a\rb'), 'ab', 'lone CR')
+  })
+  await pruefe('stripGitProgress removes git checkout and transfer progress, keeps the diagnosis', () => {
+    const err = [
+      'Preparing worktree (detached HEAD e4c5cf5f)',
+      'Updating files:   5% (908/16971)\rUpdating files:  78% (13238/16971)',
+      'Receiving objects:  50% (10/20), 1.20 MiB | 2.00 MiB/s',
+      'fatal: cannot create directory "x": No space left on device',
+    ].join('\n')
+    gleich(stripGitProgress(err), 'Preparing worktree (detached HEAD e4c5cf5f)\nfatal: cannot create directory "x": No space left on device', 'progress gone, cause kept')
+  })
+  await pruefe('stripGitProgress collapses the blank lines progress leaves behind', () => {
+    gleich(stripGitProgress('fatal: something broke\n\nUpdating files: 100% (2/2), done.\n\n'), 'fatal: something broke', 'no trailing blank lines')
+  })
+  await pruefe('stripGitProgress keeps non-progress text byte for byte', () => {
+    gleich(stripGitProgress("fatal: 'main' is already used by worktree at '/x'"), "fatal: 'main' is already used by worktree at '/x'", 'ordinary error')
+    gleich(stripGitProgress(null), '', 'null is an empty string')
   })
   await pruefe('escapeHtml defuses exactly the five dangerous characters', () => {
     gleich(escapeHtml('<b>'), '&lt;b&gt;', 'angle brackets')
