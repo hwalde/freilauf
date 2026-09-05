@@ -1380,23 +1380,16 @@ export async function pageRun(req, res, url, id) {
     // Who gets the mouse. A coding agent's TUI may take mouse reporting for
     // itself — measured: claude leaves it to tmux (which then marks, copies
     // and sends the selection on), opencode takes it and does nothing with a
-    // drag, so marking produced nothing at all there. This switches the mouse
-    // over to selecting in the browser, which no application in the pane can
-    // take away. A toggle and not a default, because it costs the TUI its
-    // clicks; hub.js says so in a toast the first time a drag comes up empty.
-    sessionOpen ? `<button type="button" id="term-mouse" class="icon-btn term-mouse-btn" aria-pressed="false" title="${e(t('run.terminal_mouse_select'))}" aria-label="${e(t('run.terminal_mouse_select'))}" data-title-agent="${e(t('run.terminal_mouse_agent'))}">🖱</button>` : ''}</summary>
+    // drag, so marking produced nothing at all there. Which of the two one is
+    // looking at is not something a person watching an agent can know, so
+    // selecting is the DEFAULT (hub.js) and this button is the way out of it,
+    // for a session one wants to click around in. Hence pressed to begin with,
+    // and the title says what the click would do, not what the state is.
+    sessionOpen ? `<button type="button" id="term-mouse" class="icon-btn term-mouse-btn" aria-pressed="true" title="${e(t('run.terminal_mouse_agent'))}" aria-label="${e(t('run.terminal_mouse_agent'))}" data-title-select="${e(t('run.terminal_mouse_select'))}">🖱</button>` : ''}</summary>
     <div id="term-wrap">
       ${sessionOpen ? `<button type="button" id="term-full-exit" class="icon-btn term-exit" title="${e(t('run.terminal_fullscreen_exit'))}" aria-label="${e(t('run.terminal_fullscreen_exit'))}">✕</button>` : ''}
       <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
     </div>
-    ${
-    // Selecting copies to the clipboard by itself (hub.js), but only a live
-    // client can do it with a plain drag: tmux runs with `mouse on`, so the
-    // drag is a mouse report — and a read-only client's input is dropped, by
-    // tmux and by terminal.mjs alike. There Shift is what makes the selection
-    // xterm's own, and a terminal in which marking silently does nothing is
-    // exactly the shape this whole feature was missing.
-    sessionOpen && !live ? `<p class="dim">${e(t('run.terminal_copy_hint'))}</p>` : ''}
     ${notifySwitch(run)}
     ${live && !arbeitet ? `<p class="dim">${e(t('run.session_after_hint'))}</p>` : ''}
     ${live ? `<form onsubmit="return freilaufSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>` : ''}

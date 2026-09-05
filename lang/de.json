@@ -168,7 +168,6 @@
   "run.terminal_fullscreen_exit": "Vollbild verlassen (Esc)",
   "run.terminal_cinema": "Kinomodus",
   "run.terminal_cinema_exit": "Kinomodus verlassen",
-  "run.terminal_copy_hint": "Nur lesend: beim Markieren Shift halten — der markierte Text landet von selbst in der Zwischenablage.",
   "run.terminal_mouse_agent": "Die Maus wieder dem Agenten in der Session geben",
   "run.terminal_mouse_select": "Mit der Maus hier Text markieren (der Agent in der Session bekommt sie dann nicht mehr)",
   "run.session_after_hint": "Dieser Lauf ist abgeschlossen, sein Report ist geschrieben. Was du hier schickst, ist Nacharbeit in derselben Session: meldet der Agent erneut done, kommt das als Nacharbeits-Report dieses Laufs an — geprüft, gemergt und gemeldet wie der erste, als Nacharbeit gekennzeichnet. Die Session schließt sich von selbst, sobald die Haltezeit um ist (Einstellungen → tmux-Session).",

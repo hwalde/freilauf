@@ -1427,45 +1427,53 @@ try {
   // alternate screen) and does nothing with a drag. Here the terminal is put
   // into exactly that mode by writing the sequence an application would send,
   // and then a REAL mouse drag is made over it.
-  await pruefe('an application that takes the mouse: the drag comes up empty, the button fixes it', async () => {
+  await pruefe('an application that takes the mouse changes nothing — and the button hands it over', async () => {
     const p = await neueSeite(`/runs/${R_LIVE}`, clipboardStub)
     await p.bringToFront()
     await p.waitForSelector('#term .xterm-screen', { timeout: 15_000 })
     await wartePage(p, (id) => (document.querySelector('#term .xterm-rows')?.textContent || '').includes(id),
       R_LIVE, 'the session\'s content to be there to drag over')
-    // 1003 = report any motion, 1006 = SGR encoding: opencode's own two.
+    // 1003 = report any motion, 1006 = SGR encoding: opencode's own two. What
+    // the terminal writes here is what opencode's TUI writes for real.
     await p.evaluate(() => window.FREILAUF_TERM.write('\x1b[?1003h\x1b[?1006h'))
     await p.waitForTimeout(300)
     const zeile = await textZeile(p, R_LIVE)
+    gleich(await p.getAttribute('#term-mouse', 'aria-pressed'), 'true',
+      'the mouse selects to begin with — nobody has to know what the TUI does with it')
 
+    // Nothing pressed, nothing held: the drag simply copies.
     await ziehe(p, zeile)
-    falsch(await p.evaluate(() => window.FREILAUF_TERM.hasSelection()),
-      'nothing is selected — the drag went to the application, which did nothing with it')
-    gleich(await p.evaluate(() => window.__copied.length), 0, 'and nothing reached the clipboard')
-    // The one thing the operator cannot see for themselves: WHY it did nothing.
-    await wartePage(p, () => (document.getElementById('freilauf-toasts')?.textContent || '').includes('Shift'),
-      null, 'the hint naming Shift and the button')
-
-    // Shift is the way out every terminal has, and it works here without
-    // changing anything.
-    await ziehe(p, zeile, true)
-    wahr(await p.evaluate(() => window.__copied.length) > 0, 'Shift+drag selects and copies')
-    falsch(await p.evaluate(() => window.FREILAUF_TERM.hasSelection()), 'and clears afterwards')
-
-    // …and the button is the same thing without having to hold a key.
-    await p.evaluate(() => { window.__copied.length = 0 })
-    await p.click('#term-mouse')
-    gleich(await p.getAttribute('#term-mouse', 'aria-pressed'), 'true', 'the button says the mouse is selecting now')
-    wahr(await p.$eval('details.run-term', el => el.open), 'and the details stayed open, not toggled shut')
-    await ziehe(p, zeile)
-    wahr(await p.evaluate(() => window.__copied.length) > 0, 'now the plain drag copies too')
+    wahr(await p.evaluate(() => window.__copied.length) > 0, 'the plain drag copies')
     wahr(String(await p.evaluate(() => window.__copied[0])).trim().length > 0, 'and it copied real text')
     falsch(await p.evaluate(() => window.FREILAUF_TERM.hasSelection()), 'the selection is cleared afterwards')
+
+    // A click is not a marking gesture. While the mouse selects it reaches
+    // xterm as a shift-click, which EXTENDS a standing selection — copying on
+    // that would fill the clipboard every time one clicks in to type.
+    await p.evaluate(() => { window.__copied.length = 0 })
+    await p.mouse.click(zeile.x + 40, zeile.y)
+    await p.waitForTimeout(300)
+    gleich(await p.evaluate(() => window.__copied.length), 0, 'a click copies nothing')
+
+    // The button is the way out, for a session one wants to click around in.
+    await p.click('#term-mouse')
+    gleich(await p.getAttribute('#term-mouse', 'aria-pressed'), 'false', 'the agent has the mouse now')
+    wahr(await p.$eval('details.run-term', el => el.open), 'and the details stayed open, not toggled shut')
+    await ziehe(p, zeile)
+    falsch(await p.evaluate(() => window.FREILAUF_TERM.hasSelection()),
+      'the drag went to the application, which does nothing with it')
+    gleich(await p.evaluate(() => window.__copied.length), 0, 'so nothing reaches the clipboard')
+    // …and the one thing the operator cannot see for themselves: WHY.
+    await wartePage(p, () => (document.getElementById('freilauf-toasts')?.textContent || '').includes('Shift'),
+      null, 'the hint naming Shift and the button')
+    // Shift is every terminal's way out, and it works there too.
+    await ziehe(p, zeile, true)
+    wahr(await p.evaluate(() => window.__copied.length) > 0, 'Shift+drag selects and copies even then')
 
     // The choice is global, so it has to go back — every later page in this
     // context would otherwise render in it.
     await p.click('#term-mouse')
-    gleich(await p.getAttribute('#term-mouse', 'aria-pressed'), 'false', 'and the agent gets the mouse back')
+    gleich(await p.getAttribute('#term-mouse', 'aria-pressed'), 'true', 'and selecting is the default again')
     sauber(p)
     await p.close()
   })
@@ -1483,19 +1491,20 @@ try {
     : pruefe
   await tmuxTest('a tmux copy really arrives through the WebSocket', async () => {
     const session = laufRow(R_LIVE).tmux_session
-    const clients = () => tmux('list-clients', '-t', `=${session}`, '-F', '#{client_name}').split('\n').filter(Boolean)
-    // Whichever clients an earlier test's page still holds are NOT this one:
-    // a page that has just been closed can keep its tmux client for a moment,
-    // and writing the clipboard of that one would prove nothing.
-    const vorher = new Set(clients())
+    // The page's own tmux client, picked by the time it attached and NOT by
+    // its name: a client is named after its tty, and pts numbers are reused —
+    // the client of a page that has just been closed can come back under the
+    // very same name, and writing that one's clipboard would prove nothing.
+    const clients = () => tmux('list-clients', '-t', `=${session}`, '-F', '#{client_created}\t#{client_name}')
+      .split('\n').filter(Boolean).map((l) => l.split('\t'))
+    const seit = Math.floor(Date.now() / 1000)
     const p = await neueSeite(`/runs/${R_LIVE}`, clipboardStub)
     await p.bringToFront()
     await p.waitForSelector('#term .xterm-screen', { timeout: 15_000 })
-    // The page's own tmux client, by name — it appears when the WebSocket has
-    // attached, which is a beat after the first frame arrives.
+    // It appears when the WebSocket has attached, a beat after the first frame.
     let client = ''
-    for (let i = 0; i < 100 && !client; i++) {
-      client = clients().find((c) => !vorher.has(c)) || ''
+    for (let i = 0; i < 200 && !client; i++) {
+      client = (clients().find(([created]) => Number(created) >= seit) || [])[1] || ''
       if (!client) await p.waitForTimeout(100)
     }
     wahr(!!client, `the page is attached as a tmux client (${client})`)

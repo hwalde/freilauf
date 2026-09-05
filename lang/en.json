@@ -168,7 +168,6 @@
   "run.terminal_fullscreen_exit": "Leave full screen (Esc)",
   "run.terminal_cinema": "Cinema mode",
   "run.terminal_cinema_exit": "Leave cinema mode",
-  "run.terminal_copy_hint": "Read-only: hold Shift while selecting — the marked text lands in the clipboard by itself.",
   "run.terminal_mouse_agent": "Give the mouse back to the agent in the session",
   "run.terminal_mouse_select": "Let the mouse select text here (the agent in the session stops receiving it)",
   "run.session_after_hint": "This run is finished and its report is written. Whatever you send here is follow-up work in the same session: when the agent reports done again, it arrives as a follow-up report of this run — checked, merged and announced like the first one, labelled as a follow-up. The session closes by itself once the keep time is up (Settings → tmux session).",

@@ -2178,12 +2178,19 @@
     // reports are also what lets one click inside a TUI — and it is remembered
     // GLOBALLY rather than per run, because it is a habit ("I use this
     // terminal to read and copy"), not a property of one agent's work.
+    // Selecting is the DEFAULT, and that is the answer to the question this
+    // started as: which of the two is right depends on knowing what the TUI in
+    // the pane does with mouse reports, and nobody watching an agent work
+    // should have to know that. Dragging marks and copies, in every harness,
+    // without pressing anything first; the button is the way OUT, for the rare
+    // session one wants to click around in. Stored only when it is the
+    // exception ('agent'), so the default can still move later.
     const MOUSE_KEY = 'freilauf.term.mouse'
-    let mouseSelects = false
-    try { mouseSelects = localStorage.getItem(MOUSE_KEY) === 'select' } catch {}
+    let mouseSelects = true
+    try { mouseSelects = localStorage.getItem(MOUSE_KEY) !== 'agent' } catch {}
     const mouseBtn = document.getElementById('term-mouse')
-    const titleSelect = mouseBtn ? (mouseBtn.getAttribute('title') || '') : ''
-    const titleAgent = mouseBtn ? (mouseBtn.dataset.titleAgent || titleSelect) : ''
+    const titleAgent = mouseBtn ? (mouseBtn.getAttribute('title') || '') : ''
+    const titleSelect = mouseBtn ? (mouseBtn.dataset.titleSelect || titleAgent) : ''
     const paintMouse = () => {
       if (!mouseBtn) return
       const label = mouseSelects ? titleAgent : titleSelect
@@ -2203,6 +2210,27 @@
         try { localStorage.setItem(MOUSE_KEY, mouseSelects ? 'select' : 'agent') } catch {}
       })
     }
+    // …but only while something really is reporting the mouse, and that has to
+    // be known rather than assumed: with NO mouse mode on, a shift-mousedown is
+    // xterm's "extend the selection" click, which starts nothing when there is
+    // no selection yet — forcing it unconditionally made a plain drag mark
+    // nothing at all in a terminal where marking already worked. The modes
+    // arrive in the stream as `CSI ? 1000|1002|1003 h/l`, so they are read off
+    // it with a CSI handler that returns false: xterm still processes them, we
+    // only listen in. (`mouse on` in tmux turns them on for tmux's own sake, so
+    // this is true in a claude session too — and there xterm's own selection is
+    // as good as tmux's copy-mode, only local.)
+    const MOUSE_MODES = new Set([9, 1000, 1001, 1002, 1003])
+    let mouseActive = false
+    const modeSwitch = (an) => (params) => {
+      if (params.flat().some((p) => MOUSE_MODES.has(p))) mouseActive = an
+      return false        // false = not handled: xterm applies it as it always did
+    }
+    try {
+      term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, modeSwitch(true))
+      term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, modeSwitch(false))
+    } catch {}
+
     // The original event is stopped in the CAPTURE phase, before xterm's own
     // listeners on the screen element see it, and a copy of it carrying
     // `shiftKey` is dispatched on the same target — which then bubbles to
@@ -2211,7 +2239,7 @@
     // would stop selecting its word. The copy passes this listener again, so
     // it carries a mark; without it this is an endless loop.
     const forceSelect = (ev) => {
-      if (!mouseSelects || ev.shiftKey || ev.freilaufForced) return
+      if (!mouseSelects || !mouseActive || ev.shiftKey || ev.freilaufForced) return
       ev.preventDefault()
       ev.stopPropagation()
       const copy = new MouseEvent(ev.type, {
@@ -2251,10 +2279,17 @@
       // A drag may end anywhere on the page, so how far it went is measured
       // against the event that ends it, not against the terminal's own.
       const lastUp = { x: ev.clientX, y: ev.clientY }
+      const moved = Math.abs(lastUp.x - from.x) + Math.abs(lastUp.y - from.y)
+      // A CLICK is not a marking gesture, and while the mouse is selecting it
+      // reaches xterm as a shift-click — which EXTENDS whatever selection is
+      // still standing instead of clearing it. Copying on that would put text
+      // in the clipboard every time somebody clicks into the terminal to type.
+      // A double click moves nothing and is a marking gesture all the same.
+      const gesture = moved >= 8 || ev.detail >= 2
       // A double click settles its word selection a tick after the event.
       setTimeout(() => {
         if (term.hasSelection()) {
-          const text = term.getSelection()
+          const text = gesture ? term.getSelection() : ''
           if (!text) return
           copyOut(text).then((ok) => { if (ok) { try { term.clearSelection() } catch {} } })
           return
@@ -2263,9 +2298,7 @@
         // clipboard either, the mouse went to an application that did nothing
         // with it — the failure this whole section is about, and the one shape
         // of it the operator cannot see. Say it once, and say what to do.
-        if (hinted || mouseSelects) return
-        const moved = Math.abs(lastUp.x - from.x) + Math.abs(lastUp.y - from.y)
-        if (moved < 8) return
+        if (hinted || mouseSelects || !gesture) return
         setTimeout(() => {
           if (hinted || Date.now() - lastCopyAt < 1500) return
           hinted = true

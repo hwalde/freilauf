@@ -168,7 +168,6 @@
   "run.terminal_fullscreen_exit": "退出全屏（Esc）",
   "run.terminal_cinema": "影院模式",
   "run.terminal_cinema_exit": "退出影院模式",
-  "run.terminal_copy_hint": "只读：选中时按住 Shift —— 选中的文本会自动进入剪贴板。",
   "run.terminal_mouse_agent": "把鼠标交还给会话里的智能体",
   "run.terminal_mouse_select": "让鼠标在这里选中文本（会话里的智能体将不再收到鼠标事件）",
   "run.session_after_hint": "本次运行已完成，报告已写好。你在这里发送的内容属于同一会话中的后续工作：当智能体再次报告 done 时，它会作为本次运行的后续报告到达 —— 像第一份一样被检查、合并和通知，并标记为后续报告。保留时间一到，会话会自行关闭（设置 → tmux 会话）。",
