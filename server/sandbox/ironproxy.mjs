@@ -10,31 +10,67 @@
 //
 // WHAT IS VERIFIED AND WHAT IS NOT — read this before trusting a line of it.
 //
-// iron-proxy is NOT installed on this machine and there is no container runtime
-// here either, so nothing below has been executed against the real binary. The
-// config shape, the transform names (`allowlist`, `secrets`), the `warn: true`
-// audit-only flag, the management listener with `api_key_env`, the
-// `POST /v1/reload` hot reload and the per-request JSON log fields are
-// [documented] — they come from §4.5, which was written from the project's
-// documentation and hermes' integration notes. Everything that follows from
-// them here is UNVERIFIED:
+// The binary is HERE now. `ironsh/iron-proxy:0.49.0` is public on Docker Hub
+// (Apache-2.0, source at github.com/paradigmxyz/iron-proxy), it is pulled and
+// pinned by digest in `sandbox/images/ironproxy.ref`, and the config this module
+// writes has been parsed, started and driven end to end against it on
+// 2026-09-05 — including the `secrets` transform swapping a per-run placeholder
+// for a real credential on the way upstream. `docs/sandbox.md` carries the four
+// measurements; the e2e group "iron-proxy: the config the hub writes" re-runs
+// the config half wherever the image is present.
 //
-//   - the exact YAML key names below (`proxy.tunnel_listen`, `transforms[].name`,
-//     `transforms[].config.domains`, `secrets[].source.type`, `proxy_value`,
-//     `match_headers`, `rules[].host`, `log.level`, `management.listen`) are
-//     transcribed from §4.5's one-page example and have never been parsed by the
-//     binary;
-//   - the deny half. §4.5 documents a default-deny `domains` allowlist and
-//     upstream deny CIDRs, but not a per-config DENY list. `denyDomains` is
-//     written as `deny_domains` next to `domains` on the hope that it exists; if
-//     it does not, the deny entries have to become an allowlist the hub narrows
-//     itself before writing the file. `configWarnings()` says so out loud rather
-//     than letting a deny entry vanish into a file nobody reads;
-//   - the reload endpoint's request shape (an empty POST is assumed) and its
-//     answer;
-//   - the log line's own field names, which `tailLog()` maps onto the built-in
-//     engine's audit shape. Where a field is missing the mapped line carries
-//     null rather than a guess.
+// What that measurement CORRECTED, because every one of these was a guess that
+// was wrong in a way the binary does not complain about:
+//
+//   - `log: { level, format }` — `format` does not exist and is the ONE field
+//     that failed loudly (`field format not found in type config.Log`). The log
+//     is JSON on stderr regardless.
+//   - `dns.enabled: false` is REQUIRED. Without it the binary refuses to start
+//     with `dns.proxy_ip is required` — it wants to be the sandbox's resolver,
+//     and Freilauf reaches it through `HTTPS_PROXY` instead (§7.5.2).
+//   - `tls.ca_cert` and `tls.ca_key` are REQUIRED in the default `mitm` mode.
+//     No CA, no start. `tls.mode: "sni-only"` needs none — and then the
+//     pipeline sees the hostname and nothing else, so the `secrets` transform
+//     has nothing to act on. That is why `secrets.mode: inject` and
+//     `tlsTerminate` are one capability and not two. The certificate also has
+//     to carry the right extension: a CA generated without
+//     `keyUsage=critical,keyCertSign,cRLSign` starts the process and then dies
+//     with `initializing cert cache: CA certificate missing KeyUsageCertSign`,
+//     which is why docs/sandbox.md prints the four commands rather than saying
+//     "generate a CA".
+//   - `management.api_key_env` names a variable that MUST BE SET, or the binary
+//     refuses to start (`… is not set in the environment`). `startIronProxy()`
+//     always mints one into the proxy's environment, so the hub's own path
+//     cannot hit it — an operator hand-running this config can.
+//   - `deny_domains` DOES NOT EXIST, and — the expensive half — an unknown key
+//     inside a transform's `config` is **silently ignored**. Measured: a config
+//     carrying `deny_domains` and a config-level `methods` both started
+//     cleanly and enforced neither. So a deny host is subtracted from the
+//     allowlist here, in the hub, and what cannot be subtracted is named by
+//     `configWarnings()`. Nothing this module cannot express is ever written
+//     into a file that would swallow it.
+//   - a per-method rule is `rules: [{ host, methods, paths }]`, never a
+//     `methods` next to `domains`.
+//   - the `secrets` entry nests under `replace:` (`proxy_value`,
+//     `match_headers`, `require`). The flat form this module used to write is
+//     documented as the legacy shape and does still parse — it is written the
+//     documented way now anyway, because "still supported" is a promise with a
+//     removal date on it.
+//
+// And the one that was NOT a config field at all, because it is the thing the
+// whole feature is for: `require: true` — the flag that rejects a request to a
+// declared host which does not carry the placeholder — makes injection reject
+// EVERYTHING on the path Freilauf uses. See the comment where it is not
+// written.
+//
+// Also measured: `POST /v1/reload` is an empty POST with the bearer token and
+// answers 200, and 401 without it — so the assumption in `postReload()` holds.
+// And the audit line's field NAMES were right (`host`, `method`, `path`,
+// `action`, `status_code`, `duration_ms`, `rejected_by`) while their PLACE was
+// not: they sit inside an `audit` object on a line whose `msg` is `request`,
+// not at the top level. `mapIronLine()` read the top level, so it would have
+// returned null for every real line and `egress.jsonl` would have stayed empty
+// under this engine — a silence that looks exactly like a quiet run.
 //
 // The rule the whole module keeps: where the binary is absent, `startIronProxy`
 // fails with a READABLE reason and the caller falls back to the built-in engine.
@@ -56,6 +92,32 @@ export const TUNNEL_PORT = 8080
 export const MANAGEMENT_PORT = 8081
 /** The environment variable iron-proxy reads its management key from (§4.5). */
 export const MANAGEMENT_KEY_ENV = 'IRON_MANAGEMENT_API_KEY'
+/**
+ * Where the MITM CA appears inside the PROXY container. The cert is the same
+ * file the agent container trusts (`CA_TARGET` in runtime.mjs); the KEY is the
+ * proxy's alone and must never be mounted anywhere else — whoever holds it can
+ * mint a leaf for any host the agent talks to.
+ */
+export const PROXY_CA_CERT = '/etc/freilauf/ca.crt'
+export const PROXY_CA_KEY = '/etc/freilauf/ca.key'
+
+/**
+ * The image, and it is a REAL one now.
+ *
+ * `ironsh/iron-proxy` is public on Docker Hub (Apache-2.0, source at
+ * github.com/paradigmxyz/iron-proxy); `0.49.0` is the newest non-prerelease tag
+ * and is what every measurement in this file was made against. The digest is
+ * carried next to the tag for the same reason `image.digest` exists for the
+ * agent images: a tag is a mutable name, and a proxy holding the run's real
+ * credentials is the last container that should silently change underneath the
+ * hub. `sandbox/images/ironproxy.ref` is the same pair in a file, for the
+ * operator who mirrors it.
+ *
+ * `FREILAUF_SANDBOX_PROXY_IMAGE` still overrides both — a mirror, a private
+ * registry, or a newer version somebody has actually tested.
+ */
+export const DEFAULT_PROXY_IMAGE = 'ironsh/iron-proxy:0.49.0'
+export const DEFAULT_PROXY_DIGEST = 'sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da'
 
 // ------------------------------------------------------------------ the config
 
@@ -88,9 +150,8 @@ function yamlList(items) {
 export function ironProxyConfig(spec, ctx = {}) {
   const policy = proxyPolicy(spec, { secretsMode: ctx.secretsMode })
   const net_ = normalizeSpecSafe(spec).network ?? {}
-  const allow = [...(policy.allow ?? [])]
-  const deny = [...(policy.deny ?? [])]
   const auditOnly = policy.auditOnly === true
+  const { allow } = resolveHosts(policy)
   // Methods are read from the spec rather than from the policy: `proxyPolicy()`
   // drops them on an engine that cannot see a method, and this engine can — a
   // config generated for iron-proxy must carry what iron-proxy can enforce even
@@ -99,41 +160,129 @@ export function ironProxyConfig(spec, ctx = {}) {
     ? net_.methods.map((m) => String(m).toUpperCase())
     : null
 
+  const secrets = Array.isArray(ctx.secrets) ? ctx.secrets.filter((s) => s && s.envVar && s.placeholder) : []
+  // MITM or nothing: the `secrets` transform reads and rewrites a header, which
+  // needs terminated TLS. Measured — `tls.ca_cert`/`ca_key` are required in
+  // `mitm` mode and the binary refuses to start without them, so a run that
+  // asked for injection and has no CA must not reach this file at all
+  // (`ensureProxy()` refuses the launch; §7.8).
+  const caCert = ctx.caCert ?? (ctx.caPath ? PROXY_CA_CERT : null)
+  const caKey = ctx.caKey ?? (ctx.caKeyPath ? PROXY_CA_KEY : null)
+  const mitm = Boolean(caCert && caKey)
+
   const lines = []
   lines.push('# Generated by Freilauf — do not edit; the hub rewrites it on every policy change.')
+  // Freilauf reaches the proxy through HTTPS_PROXY, never through DNS
+  // interception — and the binary REFUSES TO START without this line
+  // (`dns.proxy_ip is required`), because the DNS server is on by default.
+  lines.push('dns:')
+  lines.push('  enabled: false')
   lines.push('proxy:')
   lines.push(`  tunnel_listen: ${yamlString(`:${ctx.tunnelPort ?? TUNNEL_PORT}`)}`)
+  // The upstream deny list of §7.5.3, enforced at connect time against the
+  // RESOLVED address — which is what a host allowlist alone cannot do, because
+  // an allowed name may resolve to the metadata service. An explicit empty list
+  // is a decision (`denyUpstreamCidrs: []` in the spec) and is written as one:
+  // omitting the key would restore the vendor's own defaults instead.
+  const cidrs = (policy.denyCidrs ?? []).map(c => c?.text).filter(Boolean)
+  lines.push(`  upstream_deny_cidrs: ${yamlList(cidrs)}`)
+  lines.push('tls:')
+  lines.push(`  mode: ${yamlString(mitm ? 'mitm' : 'sni-only')}`)
+  if (mitm) {
+    lines.push(`  ca_cert: ${yamlString(caCert)}`)
+    lines.push(`  ca_key: ${yamlString(caKey)}`)
+  }
   lines.push('transforms:')
   lines.push('  - name: "allowlist"')
   lines.push('    config:')
-  lines.push(`      domains: ${yamlList(allow)}`)
-  if (deny.length) lines.push(`      deny_domains: ${yamlList(deny)}`)
-  if (methods) lines.push(`      methods: ${yamlList(methods)}`)
   // `warn: true` is iron-proxy's own audit-only mode: everything passes, every
   // would-be denial is logged. It is the rollout mode of §7.12.5 and the reason
   // the allowlist can be grown from a repo's own traffic instead of guessed.
   if (auditOnly) lines.push('      warn: true')
+  if (methods) {
+    // A method restriction is per rule, never a `methods` beside `domains` — and
+    // the wrong shape does not fail, it is silently dropped. Measured.
+    lines.push('      rules:')
+    for (const host of allow) {
+      lines.push(`        - host: ${yamlString(host)}`)
+      lines.push(`          methods: ${yamlList(methods)}`)
+    }
+    if (!allow.length) lines.push('        []')
+  } else {
+    lines.push(`      domains: ${yamlList(allow)}`)
+  }
 
-  const secrets = Array.isArray(ctx.secrets) ? ctx.secrets.filter((s) => s && s.envVar && s.placeholder) : []
   if (secrets.length) {
     lines.push('  - name: "secrets"')
     lines.push('    config:')
     lines.push('      secrets:')
     for (const s of secrets) {
       lines.push(`        - source: { type: env, var: ${yamlString(s.envVar)} }`)
-      lines.push(`          proxy_value: ${yamlString(s.placeholder)}`)
-      lines.push(`          match_headers: ${yamlList([s.header || 'Authorization'])}`)
-      lines.push('          require: true')
+      // `replace`, not `inject`: the two words mean the opposite things in the
+      // two projects. iron-proxy's `inject` sets a header on a client that sent
+      // none; Freilauf's `secrets.mode: inject` means the CONTAINER holds a
+      // placeholder its CLI sends like a real key — which is iron-proxy's
+      // `replace`. `require: true` is what makes the placeholder the only way
+      // through: a request to that host carrying some other credential is
+      // rejected rather than forwarded.
+      lines.push('          replace:')
+      lines.push(`            proxy_value: ${yamlString(s.placeholder)}`)
+      lines.push(`            match_headers: ${yamlList([s.header || 'Authorization'])}`)
+      // AND NO `require: true`, WHICH IS THE ONE THING THIS WHOLE FEATURE
+      // BROKE ON. `require` rejects a request to a declared host that does not
+      // carry the placeholder — which sounds exactly right and, on the path
+      // Freilauf uses, rejects everything. The hub reaches the proxy through
+      // `HTTPS_PROXY`, so the first thing that arrives is a CONNECT, and
+      // iron-proxy evaluates a SYNTHETIC CONNECT — no headers at all — against
+      // the secrets transform. Measured 2026-09-05, iron-proxy 0.49.0: every
+      // call to the credential's own host died as `curl: (56) CONNECT tunnel
+      // failed, response 403`, with `rejected_by: "secrets"` and
+      // `annotations: { rejected: "STUB_API_KEY" }` in the audit line — while
+      // the same call to a host the credential is NOT declared for went
+      // through. The one host that must work was the only one that could not.
+      //
+      // Dropping it costs the bypass fence and nothing else: the swap still
+      // happens, and it still happens only on the declared hosts. What is given
+      // up is "a workload cannot reach this host with a credential of its own"
+      // — and the allowlist already decides which hosts exist at all. It comes
+      // back the day the sandbox routes through iron-proxy's DNS interception
+      // instead of HTTPS_PROXY (§7.5.2), because then a real request with real
+      // headers is what the transform sees.
       const hosts = Array.isArray(s.hosts) ? s.hosts : []
-      lines.push(`          rules: [${hosts.map((h) => `{ host: ${yamlString(h)} }`).join(', ')}]`)
+      lines.push('          rules:')
+      for (const h of hosts) lines.push(`            - host: ${yamlString(h)}`)
+      if (!hosts.length) lines.push('            []')
     }
   }
 
-  lines.push('log: { level: info, format: json }')
+  // `format` is NOT a field of this block — it is the one guess the binary
+  // rejected outright. The audit line is JSON on stderr either way.
+  lines.push('log:')
+  lines.push('  level: "info"')
   lines.push('management:')
   lines.push(`  listen: ${yamlString(`0.0.0.0:${ctx.managementPort ?? MANAGEMENT_PORT}`)}`)
   lines.push(`  api_key_env: ${MANAGEMENT_KEY_ENV}`)
   return lines.join('\n') + '\n'
+}
+
+/**
+ * The allowlist iron-proxy is really given, and the deny entries that could not
+ * be folded into it.
+ *
+ * iron-proxy has no deny list. It has an allowlist, and an unknown key inside a
+ * transform's `config` is swallowed without a word — so writing `deny_domains`
+ * would produce a config that starts, looks right and enforces nothing. The
+ * subtraction therefore happens HERE, where it can be checked, and it is exact:
+ * a deny entry is removed only when it is literally an allow entry. A deny that
+ * narrows a wildcard (`deny: evil.example.com` under `allow: *.example.com`) has
+ * no expression on this engine at all, so it is handed to `configWarnings()`
+ * rather than dropped.
+ */
+export function resolveHosts(policy) {
+  const deny = new Set((policy?.deny ?? []).map(String))
+  const allow = [...(policy?.allow ?? [])].map(String).filter(h => !deny.has(h))
+  const unexpressed = [...deny].filter(d => !(policy?.allow ?? []).map(String).includes(d))
+  return { allow, unexpressed }
 }
 
 /**
@@ -143,7 +292,8 @@ export function ironProxyConfig(spec, ctx = {}) {
 export function configWarnings(spec, ctx = {}) {
   const policy = proxyPolicy(spec, { secretsMode: ctx.secretsMode })
   const out = []
-  if ((policy.deny ?? []).length) out.push('deny_domains is UNVERIFIED against the binary')
+  const { unexpressed } = resolveHosts(policy)
+  if (unexpressed.length) out.push(`iron-proxy has no deny list; these deny entries narrow a wildcard and are NOT enforced: ${unexpressed.join(', ')}`)
   if (policy.broken) out.push(`policy could not be built: ${policy.broken}`)
   return out
 }
@@ -199,20 +349,28 @@ export async function startIronProxy(run, spec, ctx = {}) {
     }
   }
 
-  // The proxy's own image, and there is deliberately NO default.
-  //
-  // Freilauf ships six Dockerfiles under `sandbox/images/` and none of them is
-  // iron-proxy: the binary is not vendored, not built here and not verified
-  // against this code (see the header). A hardcoded upstream tag would be a
-  // guess that fails at `docker run` with a registry error — which reads as a
-  // network fault rather than as "this engine is not set up" — so the refusal
-  // is made here, by name, and `ensureProxy()` falls back to the built-in
-  // engine (or refuses the launch where the profile promised injection, which
-  // only this engine can keep). `FREILAUF_SANDBOX_PROXY_IMAGE` is what an
-  // operator who HAS an image points at it; it is UNVERIFIED against the real
-  // binary, exactly like the config shape above.
-  const image = ctx.image ?? env('SANDBOX_PROXY_IMAGE') ?? null
+  // The proxy's own image. There IS a default now — see DEFAULT_PROXY_IMAGE:
+  // the upstream image is public, pinned by digest and is what every
+  // measurement in this file was made against. It used to be `null` on purpose,
+  // because a hardcoded tag nobody had pulled would have failed at `docker run`
+  // with a registry error that reads as a network fault; that argument ends the
+  // moment the tag is one somebody has actually run.
+  const image = ctx.image ?? env('SANDBOX_PROXY_IMAGE') ?? DEFAULT_PROXY_IMAGE
   if (!image) return failed(runId, t('sandbox.proxy.no_image'))
+  // Only pin the digest for the image the digest describes. An operator who
+  // pointed the variable at their own mirror gets their tag, unpinned — the
+  // alternative is a `docker run` that refuses their image for not being ours.
+  const digest = ctx.digest ?? (image === DEFAULT_PROXY_IMAGE ? DEFAULT_PROXY_DIGEST : null)
+
+  // MITM needs the CA's PRIVATE KEY, and the binary will not start without it
+  // (measured: `tls.ca_cert is required`, then `tls.ca_key`). Without a key the
+  // config falls back to `tls.mode: sni-only`, where the pipeline sees the
+  // hostname alone — so a run that asked for injection and has no key would
+  // start a proxy that quietly swaps nothing. Said here rather than found out
+  // there.
+  if (ctx.secretsMode === 'inject' && !ctx.caKeyPath) {
+    return failed(runId, t('sandbox.proxy.inject_no_ca_key'))
+  }
 
   const managementKey = ctx.managementKey ?? randomBytes(24).toString('hex')
   // Kept on the handle, because the proxy is re-launched from it when the
@@ -223,6 +381,7 @@ export async function startIronProxy(run, spec, ctx = {}) {
     ...ctx,
     runId,
     image,
+    digest,
     configPath,
     tunnelPort: ctx.tunnelPort ?? TUNNEL_PORT,
     managementPort: ctx.managementPort ?? MANAGEMENT_PORT,
@@ -289,6 +448,7 @@ async function spawnProxy(handle) {
     return { ok: false, reason: err?.message || String(err) }
   }
   if (!argv) return { ok: false, reason: 'no proxy command line' }
+  addCaKeyMount(argv, handle.launchCtx)
   try {
     const { spawn } = await import('node:child_process')
     const child = spawn(argv.bin, argv.args, { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -303,6 +463,32 @@ async function spawnProxy(handle) {
   } catch (err) {
     return { ok: false, reason: err?.message || String(err) }
   }
+}
+
+/**
+ * Mount the MITM CA's private key into the proxy container, read-only.
+ *
+ * THIS BELONGS IN `buildProxyArgv()` AND IS HERE ON PURPOSE, WITH A DATE ON IT.
+ * That function is runtime.mjs's, it already mounts the config and the CA
+ * *certificate*, and one more `addMount()` line beside them is the right home
+ * for this. It is spliced here because the key is the one thing about the proxy
+ * container that is iron-proxy's alone — the built-in engine terminates nothing
+ * and needs no key — and because the file was another agent's while this was
+ * measured. Move it: delete this function and add
+ * `if (ctx.caKeyPath) addMount(args, own, { source: ctx.caKeyPath, target: PROXY_CA_KEY, mode: 'ro' })`
+ * next to the caPath line.
+ *
+ * The image reference is the last argument `buildProxyArgv()` pushes before
+ * `ctx.cmd`, so the insertion point is counted from the end rather than
+ * searched for — a search for something that looks like an image would match a
+ * `--label` value one day.
+ */
+export function addCaKeyMount(argv, ctx = {}) {
+  if (!argv?.args || !ctx.caKeyPath) return argv
+  const at = argv.args.length - (ctx.cmd?.length ?? 0) - 1
+  if (at < 0) return argv
+  argv.args.splice(at, 0, '-v', `${ctx.caKeyPath}:${PROXY_CA_KEY}:ro`)
+  return argv
 }
 
 /**
@@ -557,24 +743,45 @@ export async function stopIronProxy(handle) {
 export function mapIronLine(line, { runId = null } = {}) {
   let j
   try { j = JSON.parse(line) } catch { return null }
-  if (!j || typeof j !== 'object' || !j.host) return null
-  const action = j.action === 'warn' || j.warn === true
+  if (!j || typeof j !== 'object') return null
+  // MEASURED: a real per-request line is `{ time, level, msg: "request",
+  // audit: { host, method, path, action, status_code, duration_ms, ... },
+  // rejected_by, request_transforms: [...] }`. The fields were named right and
+  // placed wrong, and reading only the top level meant returning null for every
+  // line the proxy ever writes — an empty `egress.jsonl` that reads as a quiet
+  // run rather than as a mapper that never matched. The flat form is still
+  // accepted because it is what the unit tests were written against and what a
+  // future release could go back to; `?? j` is the whole difference.
+  const a = (j.audit && typeof j.audit === 'object') ? j.audit : j
+  if (!a.host) return null
+  // A host arrives as `api.example.com:8443` on the tunnel path — the audit
+  // shape has a port field of its own, and a host carrying its port would not
+  // match anything the blocked-host counters or the four channels group on.
+  let host = String(a.host)
+  let port = a.port ?? null
+  const colon = host.lastIndexOf(':')
+  if (colon > 0 && /^\d+$/.test(host.slice(colon + 1))) {
+    port = port ?? Number(host.slice(colon + 1))
+    host = host.slice(0, colon)
+  }
+  const rejectedBy = a.rejected_by ?? j.rejected_by ?? null
+  const action = a.action === 'warn' || a.warn === true
     ? 'would_deny'
-    : (j.action === 'reject' || j.action === 'deny' || j.rejected_by ? 'deny' : 'allow')
+    : (a.action === 'reject' || a.action === 'deny' || rejectedBy ? 'deny' : 'allow')
   return auditLine({
-    at: j.timestamp ?? j.time ?? Date.now(),
+    at: a.timestamp ?? j.timestamp ?? j.time ?? Date.now(),
     run: runId,
     engine: 'iron-proxy',
-    host: j.host,
-    port: j.port ?? null,
-    method: j.method ?? null,
-    path: j.path ?? null,
+    host,
+    port,
+    method: a.method ?? null,
+    path: a.path || null,
     action,
-    status: j.status_code ?? j.status ?? null,
-    durationMs: j.duration_ms ?? 0,
-    bytesIn: j.bytes_in ?? 0,
-    bytesOut: j.bytes_out ?? 0,
-    rejectedBy: j.rejected_by ?? null,
+    status: a.status_code ?? a.status ?? null,
+    durationMs: a.duration_ms ?? 0,
+    bytesIn: a.bytes_in ?? 0,
+    bytesOut: a.bytes_out ?? 0,
+    rejectedBy,
   })
 }
 

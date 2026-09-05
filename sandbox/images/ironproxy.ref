@@ -1,0 +1,49 @@
+# iron-proxy — the egress engine Freilauf uses for `secrets.mode: inject`
+#
+# THIS IS NOT A DOCKERFILE, AND THAT IS THE POINT. The other six files in this
+# directory build images out of `freilauf/agent-base:24.04`, because they hold
+# a coding agent that Freilauf has opinions about. iron-proxy is somebody else's
+# single Go binary, published as an image by the people who wrote it. Building
+# it here would mean vendoring a Go toolchain and a source tree to produce
+# something they already publish — and it would make the thing the hub runs
+# differ from the thing whose behaviour is documented.
+#
+# WHERE IT CAME FROM, exactly:
+#   registry  Docker Hub, `docker.io/ironsh/iron-proxy` — public, no login
+#   source    https://github.com/paradigmxyz/iron-proxy (Apache-2.0)
+#             (`github.com/ironsh/iron-proxy` redirects there)
+#   pulled    2026-09-05 on this machine, rootless Docker 29.8.0
+#   tag       0.49.0 — the newest tag that is not a release candidate on that
+#             day. `latest` pointed at the same digest; the version is written
+#             out because `latest` is a moving name and a proxy holding a run's
+#             real credentials is the last container that should move by itself.
+#
+# The digest is what the hub actually starts (`DEFAULT_PROXY_IMAGE` /
+# `DEFAULT_PROXY_DIGEST` in server/sandbox/ironproxy.mjs, pinned by a unit
+# test against this file). A tag can be repointed; a digest cannot.
+
+image=ironsh/iron-proxy:0.49.0
+digest=sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da
+
+# Get it:
+#
+#     docker pull ironsh/iron-proxy@sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da
+#     docker tag  ironsh/iron-proxy@sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da \
+#                 ironsh/iron-proxy:0.49.0
+#
+# Mirror it into a registry of your own and point
+# `FREILAUF_SANDBOX_PROXY_IMAGE` at your copy; the hub then uses your tag
+# UNPINNED, because the digest above describes the upstream image and refusing
+# somebody's mirror for not being it would be the wrong kind of strict.
+#
+# WHAT ELSE THE OPERATOR HAS TO PROVIDE, and it is not optional: a CA.
+# iron-proxy terminates TLS by minting leaf certificates, so `tls.ca_cert` and
+# `tls.ca_key` are required and it will not start without them. Freilauf reads
+# both out of the `sandbox_ca_dir` setting (`ca.crt`, `ca.key`); the certificate
+# is also mounted into the agent's container, which is what makes those leaves
+# trusted there. The key never leaves the proxy. See docs/sandbox.md,
+# "Secret injection", for the four commands that generate one.
+#
+# WHAT THIS IMAGE IS NOT USED FOR: the built-in engine. `engine: 'builtin'`
+# is a CONNECT listener the hub runs itself out of the run's own image, needs
+# no CA, and is what all four shipped default profiles use.

@@ -301,8 +301,11 @@ and they are kept apart rather than one of them winning.
 | **Locked down** | allowlist, built-in engine; presets `harness`, `provider` only — **no package registry** | `env` | 4 GB / 2 CPU | a run that must be given every dependency rather than fetching one |
 | **Open network** | `open`, built-in engine | `env` | 8 GB / 4 CPU | the repository whose build reaches half the internet and where an allowlist would be a week of whack-a-mole. The container is still a container |
 | **Audit** | Balanced, but `auditOnly` — nothing is blocked, everything that *would* have been is written down | `env` | 8 GB / 4 CPU | the mode you roll out in |
+| **No secrets in the box** | Balanced's allowlist, through **iron-proxy** with TLS termination | **`inject`** — the container holds a placeholder; the proxy swaps in the real credential on that credential's own hosts | 8 GB / 4 CPU | the run you would not want holding a key. Needs the iron-proxy image and a sandbox CA — the only profile with a setup step |
 
-**All four start under a rootless daemon.** Balanced, Locked down and Audit ask
+**The four `builtin` profiles start under a rootless daemon with nothing but
+Docker.** (The fifth, `No secrets in the box`, wants an image and a CA first —
+see below.) Balanced, Locked down and Audit ask
 for `network.mode: allowlist` with `network.engine: builtin`, and until
 2026-09-05 that combination could not start a run at all where the hub and the
 container bridges are in different network namespaces — which is what rootless
@@ -329,25 +332,34 @@ container may swap that much again and a thrashing run is not a stopped one
 [measured]. All four profiles set `memorySwap` equal to `memory`, which is what
 sets the swap ceiling to zero. Do not "simplify" one of the two away in a copy.
 
-**All four ship with `secrets.mode: env`** — the credentials are passed into the
-container as environment variables, exactly as they are for an unsandboxed run.
-Three of them once asked for `inject` and the iron-proxy engine, which meant
-they could not start a run on any machine that had not installed and configured
-a second binary; a default that cannot start is not a default.
+**Those four ship with `secrets.mode: env`** — the credentials are passed into
+the container as environment variables, exactly as they are for an unsandboxed
+run. Three of them once asked for `inject` and the iron-proxy engine, which
+meant they could not start a run on any machine that had not installed and
+configured a second binary; a default that cannot start is not a default.
 
-**Keeping the keys out of the container is an explicit upgrade**, and it is
-three fields in a copy of the profile:
+**The fifth is `No secrets in the box`, and it is the one that does not.** Its
+container holds `fl-token-<random>` where the others hold the operator's real
+key; the proxy swaps in the real one on that credential's own hosts and nowhere
+else. It is shipped rather than described because it now works — see
+[Credential injection](#credential-injection-measured-on-2026-09-05) for the
+measurement — and it is deliberately not the default, because it needs three
+things a plain Docker installation does not have: the iron-proxy image, a CA on
+the machine, and an `injection` declaration on every credential the run uses.
+
+Every one of those three missing is a **refusal at launch that names what is
+missing**, never a quiet fall back to `env` — which is what makes shipping it
+honest. The profile editor refuses `inject` next to an engine that cannot
+inject, and `setSecrets()` on the built-in engine refuses it again at launch, so
+the failure is loud at both ends.
+
+The three fields are one decision, and they are what to copy into a profile of
+your own:
 
 ```json
 "network": { "engine": "iron-proxy", "tlsTerminate": true },
 "secrets": { "mode": "inject" }
 ```
-
-Read [Credential injection](#credential-injection-is-implemented-and-unverified)
-before you do that: it is built, and it has never been run against the real
-iron-proxy binary. The profile editor refuses `inject` next to an engine that
-cannot inject, and `setSecrets()` on the built-in engine refuses it again at
-launch, so the failure is loud at both ends rather than a quiet downgrade.
 
 ---
 
@@ -411,7 +423,7 @@ container the cloud metadata service.
 | | `builtin` | `iron-proxy` |
 |---|---|---|
 | where it runs | inside the hub process, or as a container on the run's network — see below | as a container of its own |
-| works under a **rootless** daemon | **yes**, in its container placement (measured 2026-09-05) | by construction, but unexercised |
+| works under a **rootless** daemon | **yes**, in its container placement (measured 2026-09-05) | **yes** — measured 2026-09-05, same daemon |
 | CONNECT allowlist, 403 with a readable body, audit log | yes | yes |
 | terminate TLS | **no** | yes |
 | inject a credential so the key never enters the container | **no** | yes |
@@ -419,9 +431,11 @@ container the cloud metadata service.
 
 The second row used to read **no**, and it was the awkward part of this whole
 document: the engine that was implemented and exercised was the one that could
-not run on the recommended posture. That is fixed. What is left of the awkward
-part is the bottom three rows — the three things the built-in engine cannot do
-at all still need an engine that has never been run against its real binary.
+not run on the recommended posture. That is fixed. The *other* half of the
+awkward part — "and the engine that can do the bottom three rows has never been
+run" — is fixed too, as of 2026-09-05: the bottom three rows are measured, on a
+public image pinned by digest. What they cost is set-up, not credibility: an
+image to pull and a CA to generate.
 
 `tlsTerminate` is the root of the other two: without it the proxy sees a CONNECT
 line and encrypted bytes, so there is no method to judge and no header to swap a
@@ -906,7 +920,7 @@ lives:
 |---|---|
 | `network.mode: open` / `none` | work — measured |
 | `network.mode: allowlist`, `engine: builtin` | works — the listener is a container on the run's own network, and that network keeps its gateway isolated |
-| `network.mode: allowlist`, `engine: iron-proxy` | the right shape, and unexercised (see below) |
+| `network.mode: allowlist`, `engine: iron-proxy` | works — measured 2026-09-05 on this daemon, allowlist and credential injection both (see below) |
 | any mode, **rootful** daemon | the hub and the bridges share one network namespace, so the in-process listener should work — *inferred, not measured*: there is no rootful daemon here to ask. It costs you the `docker` group in your threat model |
 
 **One refusal is left in the predicate**, and it is the operator's own doing: a
@@ -919,15 +933,16 @@ did not say whether it is rootless is **not** a refusal: the launch then fails
 on the bind, which is worse than a diagnosis and better than refusing a run over
 a question nobody answered.
 
-**`iron-proxy` is still an engine with no binary and no image here.** It names
-an image only through `FREILAUF_SANDBOX_PROXY_IMAGE`, and without that setting it
-refuses to start with *"no proxy image"*. What that costs is much smaller than
-it was — an allowlist no longer needs it — but the three things only it can do
-(terminate TLS, restrict methods, keep the credential out of the container)
-still do. See [Credential
-injection](#credential-injection-is-implemented-and-unverified), whose "never
-run against the real iron-proxy binary" applies to the *whole* engine and not
-only to injection.
+**`iron-proxy` has a binary and a default image now.** It is
+`ironsh/iron-proxy`, public on Docker Hub, pinned by digest in
+[`sandbox/images/ironproxy.ref`](../sandbox/images/ironproxy.ref), and
+`FREILAUF_SANDBOX_PROXY_IMAGE` remains the override for a mirror. What it still
+needs from the operator is a **CA** — it mints leaf certificates and will not
+start without one — which is why an allowlist run should keep using the built-in
+engine and only the three things that need TLS termination (restrict methods,
+keep the credential out of the container, judge a path) should reach for this
+one. See [Credential
+injection](#credential-injection-measured-on-2026-09-05).
 
 **The one fallback there is stays narrow.** A `secrets.mode: env` profile whose
 named engine will not start falls back to the built-in engine with a `warn`, and
@@ -1054,7 +1069,7 @@ unlike the run container's, so a merge check that unpacks and executes a helper
 out of `/tmp` will fail there with exit 126 where the same command succeeds
 inside the run.
 
-### Credential injection is implemented, and unverified
+### Credential injection: measured, on 2026-09-05
 
 `secrets.mode: inject` swaps a placeholder for the real credential in the
 request's own header, at a TLS-terminating proxy, so the container never holds a
@@ -1068,16 +1083,105 @@ Every engine answers, which is why the capability question is never asked in two
 places and can never come back as "no such function" instead of "this engine
 cannot".
 
-**It has never been run against the real iron-proxy binary.** iron-proxy is
-installed on no machine here, and the module's own header lists what that means:
-the YAML key names, the deny half of the allowlist (`deny_domains` is written
-*in the hope that it exists*), the hot-reload endpoint's request shape and the
-audit log's field names were all transcribed from documentation and have never
-been parsed by the thing that is supposed to read them. The hub warns about the
-deny half at runtime. So `network.engine: iron-proxy` — and with it `inject` —
-is **built but unexercised**, which is a different sentence from "works" and
-should be read as one. Try it on a repository you can afford to have fail before
-you put it in front of one you cannot.
+**It has now been run against the real iron-proxy binary, and it works.** This
+paragraph used to say the opposite, at length, and the sentence it replaces —
+"built but unexercised" — was the honest one for as long as there was no binary
+here. There is one now: `ironsh/iron-proxy` is a public image on Docker Hub
+(Apache-2.0, source at `github.com/paradigmxyz/iron-proxy`), pinned by digest in
+[`sandbox/images/ironproxy.ref`](../sandbox/images/ironproxy.ref).
+
+The measurement, against `ironsh/iron-proxy:0.49.0` on rootless Docker 29.8.0:
+an agent container holding a placeholder, a proxy container holding the real
+key, a stub upstream that echoes back the headers it received, and one
+credential declared for one host.
+
+| what was asked | what happened |
+|---|---|
+| `docker exec <agent> printenv STUB_API_KEY` | `fl-token-PLACEHOLDER-9f3c11` — the placeholder, not the key |
+| the agent calls **the credential's declared host** with that value | the stub received `X-Api-Key: sk-REALKEY-…` — the real one |
+| the agent sends the same value to **another allowed host** | the stub received `fl-token-PLACEHOLDER-9f3c11` — untouched |
+| the agent calls a host that is **not on the allowlist** | `curl: (56) CONNECT tunnel failed, response 403` |
+| the real key in `proxy.yaml` / the audit log / `docker inspect <agent>` | 0 occurrences, 0 occurrences, 0 occurrences |
+
+`proxy.yaml` is mounted into the proxy and carries only the *name* of the
+environment variable; the value lives in the proxy container's environment and
+nowhere else. `docker inspect` of the **proxy** does show it — that container is
+the trusted half, and moving the secret off it is what the `file` and
+`vault_kv`/`aws_sm` sources upstream offers are for, none of which the hub uses
+yet.
+
+**Four guesses the binary corrected, and three of them failed silently.** Only
+one was a loud error; the rest were accepted and ignored, which is the shape a
+security control must never fail in:
+
+- `log.format` **does not exist** — the one loud failure (`field format not
+  found in type config.Log`). It is the reason not to trust the others' silence.
+- `dns.enabled: false` is **required**. iron-proxy wants to be the sandbox's
+  resolver; Freilauf reaches it through `HTTPS_PROXY` instead, and without this
+  line the binary refuses to start (`dns.proxy_ip is required`).
+- `deny_domains` **does not exist**, and an unknown key inside a transform's
+  `config` is **swallowed without a word**. A config carrying it started
+  cleanly and enforced nothing. Deny hosts are therefore subtracted from the
+  allowlist in the hub, and a deny that only narrows a wildcard — which cannot
+  be expressed on this engine at all — is reported to the operator instead of
+  written into a key that would eat it. The same is true of a `methods` list
+  beside `domains`: a method restriction is `rules: [{ host, methods }]`, and
+  the wrong shape is silently no restriction.
+- **`require: true` breaks injection completely on this path.** That flag
+  rejects a request to a declared host that does not carry the placeholder,
+  which sounds exactly right and, over `HTTPS_PROXY`, rejects everything: the
+  first thing the proxy sees is a CONNECT, and it evaluates a *synthetic*
+  CONNECT — no headers at all — against the secrets transform. Every call to
+  the one host the credential was for died as a 403 (`rejected_by: "secrets"`,
+  `annotations: { rejected: "STUB_API_KEY" }`), while calls to hosts the
+  credential was *not* for went through. Freilauf does not write it. What that
+  costs is the bypass fence — a workload can still reach a declared host with
+  a credential of its own — and it comes back the day the sandbox routes
+  through iron-proxy's DNS interception instead of a proxy variable.
+
+Also measured: `POST /v1/reload` is an empty POST with the bearer token,
+answering 200, and 401 without it. And the audit line's field names were right
+while their *place* was wrong — they sit inside an `audit` object, not at the
+top level, so the mapper that reads `egress.jsonl` into one shape had been
+returning nothing for every line a real proxy writes. Both are fixed and pinned
+by unit tests against log lines copied verbatim out of `docker logs`.
+
+**What it needs before it will start.** Three things, and each missing one is a
+refusal at launch that names itself rather than a fallback to `env`:
+
+1. the image — `docker pull` the pinned digest in `ironproxy.ref`, or point
+   `FREILAUF_SANDBOX_PROXY_IMAGE` at your own mirror;
+2. **a CA**, because iron-proxy terminates TLS by minting leaf certificates and
+   will not start without one. Put both halves in the directory
+   `sandbox_ca_dir` names — the hub reads `ca.crt` and `ca.key` from it, mounts
+   the certificate into the agent's container (so the minted leaves are trusted
+   there) and the **key into the proxy alone** (whoever holds it can forge any
+   host the agent talks to):
+
+   ```bash
+   mkdir -p ~/.local/share/freilauf/sandbox-ca && cd $_
+   openssl genrsa -out ca.key 4096
+   openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 \
+       -subj "/CN=Freilauf sandbox CA" \
+       -addext "basicConstraints=critical,CA:TRUE" \
+       -addext "keyUsage=critical,keyCertSign,cRLSign" -out ca.crt
+   chmod 600 ca.key
+   ```
+
+   The `keyUsage` line is not decoration: a CA without it starts the proxy and
+   then kills it with `initializing cert cache: CA certificate missing
+   KeyUsageCertSign` — measured. The same shipped config also refuses to start
+   if `IRON_MANAGEMENT_API_KEY` is unset, which the hub always mints, so only a
+   hand-run config meets that one;
+
+3. an `injection` block on every credential the run uses (see
+   [docs/plugins.md](plugins.md)). A credential whose plugin declares none —
+   cursor's `CURSOR_API_KEY` is the shipped example — **refuses the launch**,
+   because passing the real value would be a lie about what the container holds
+   and passing a placeholder would be a 401 at the first call.
+
+The shipped profile **No secrets in the box** is exactly this posture, and it is
+the only one of the five whose container does not hold the operator's real key.
 
 Two limits stay whatever the binary turns out to do.
 
@@ -1287,17 +1391,18 @@ and, once, with a real agent working in one:**
   `secrets.mode: env` with an OAuth token variable, the seeded home carries no
   credentials file, and **nothing may copy `~/.claude/.credentials.json` into a
   run home "for now"**.
-- **iron-proxy, in every respect** — under load, with server-sent events, and
-  simply at all. No binary exists on any machine here, so its configuration
-  file, its reload endpoint and its log format have never been read by the thing
-  that is supposed to read them. TLS termination and header injection are opt-in
-  per profile and not the default; a profile that cannot reach its proxy fails
-  the start with a readable problem rather than starting unproxied. This entry
-  used to end by saying that on a rootless daemon this was nonetheless the only
-  engine that could carry an allowlist — an uncomfortable place for the
-  documentation to be. It is not true any more: the built-in engine carries one
-  there, in a container. What is left is the three capabilities only iron-proxy
-  has, and they are as unexercised as ever.
+- **iron-proxy under load, and with server-sent events.** The engine itself is
+  no longer on this list: on 2026-09-05 its configuration file, its reload
+  endpoint and its log format were all read by the thing that is supposed to
+  read them, and a placeholder in the container really did become the real
+  credential on the way to that credential's own host — see [Credential
+  injection](#credential-injection-measured-on-2026-09-05), including the four
+  guesses the binary corrected. What was *not* exercised is everything about
+  scale and shape: a long-lived SSE stream through the MITM path (a coding
+  agent's whole conversation is one), a large request body against
+  `max_request_body_bytes`, several runs' proxies at once, and what a leaf
+  certificate cache does over a run of hours. A single stub upstream and a
+  handful of curls is a proof of the mechanism, not of the mileage.
 - **gVisor.** `runsc` is on no `PATH` here and the daemon lists only
   `io.containerd.runc.v2` and `runc`. The one thing that was measured is the
   refusal — `unknown or invalid runtime name: runsc` — which confirms that a

@@ -20,6 +20,24 @@ a day on which nothing was released.
 
 ### Added
 
+- **The container no longer has to hold your API key.** `secrets.mode: inject`
+  had been implemented for a while and had never once run, because the engine it
+  needs — iron-proxy — was on no machine here. It is now: `ironsh/iron-proxy` is
+  a public image, pinned by digest in `sandbox/images/ironproxy.ref`, and the
+  whole path is measured. The agent's container holds `fl-token-<random>`; the
+  proxy swaps in the real credential on that credential's own declared hosts and
+  on nothing else. Verified four ways: the container's environment shows the
+  placeholder, the declared host received the real key, another allowed host
+  received the placeholder untouched, and the key appears in neither the proxy's
+  config file, nor the audit log, nor `docker inspect` of the agent's container.
+- **A fifth shipped sandbox profile, `No secrets in the box`** — Balanced's
+  allowlist through iron-proxy with TLS termination, and the only one of the five
+  whose container does not hold your real credential. It is deliberately not the
+  default: it needs the iron-proxy image pulled, a CA on the machine
+  (four `openssl` commands, in `docs/sandbox.md`) and an `injection` declaration
+  on every credential the run uses. Each of those missing is a refusal at launch
+  that names what is missing — never a quiet fall back to putting the key in the
+  box.
 - **A coding agent has now worked behind an enforced allowlist.** opencode in a
   container on a rootless daemon: a host outside the list was refused with a 403,
   the refusal became a `sandbox_blocked` incident with the three buttons, allowing
@@ -326,6 +344,25 @@ a day on which nothing was released.
   a new one is refused in the overrides form as an unknown key.
 
 ### Fixed
+
+- **The egress audit log was empty under iron-proxy, and would have stayed
+  empty.** The mapper that folds that engine's log into `egress.jsonl` read the
+  request fields at the top level of each line; the real binary puts them inside
+  an `audit` object. Every line a real proxy writes would have been dropped — a
+  silence that reads exactly like a quiet run.
+- **Several iron-proxy policy settings were being written into keys the binary
+  ignores.** A deny host (`deny_domains`) and an HTTP-method restriction were
+  written in shapes iron-proxy accepts without a word and does not enforce, so a
+  policy could look applied and do nothing. Deny hosts are now removed from the
+  allowlist itself, a method restriction is written as the per-host rule iron-proxy
+  actually reads, and a deny that can only narrow a wildcard — which that engine
+  cannot express at all — is reported to the operator instead of silently
+  dropped.
+- **Credential injection rejected every request it was supposed to permit.** The
+  config asked iron-proxy to refuse requests to a declared host that do not carry
+  the placeholder, which on Freilauf's proxy path refuses the connection before
+  any header exists — so the one host a credential was meant for was the only one
+  that failed. It is no longer set.
 
 - **opencode's own model catalog was blocked on every sandboxed opencode run.**
   The harness declared `opencode.ai`, and a bare domain deliberately does not

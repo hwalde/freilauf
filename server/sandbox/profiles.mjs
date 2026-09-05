@@ -38,20 +38,42 @@ import { engineCapabilities } from './proxy.mjs'
 // the profile promised held nothing but a placeholder). What was wrong was
 // promising it in the default.
 //
-// So the shipped defaults are what a plain Docker installation can really run:
+// So the shipped DEFAULTS are what a plain Docker installation can really run:
 // the built-in CONNECT proxy, `secrets.mode: 'env'`. That is not a retreat from
 // the design — the allowlist, the read-only root, the resource fence and the
-// per-run home are the wall, and every one of them works today. `inject` is an
-// EXPLICIT UPGRADE: install and configure iron-proxy, copy a profile (editing a
-// built-in writes a copy — see above) and set
+// per-run home are the wall, and every one of them works today.
 //
-//     "network": { "engine": "iron-proxy", "tlsTerminate": true },
-//     "secrets": { "mode": "inject" }
+// ## …and one shipped profile that is the upgrade, because it now works
 //
-// The three settings are one decision and stand together; the profile editor
-// refuses `inject` where the chosen engine cannot do it, and `setSecrets()` on
-// the built-in engine refuses it again at launch. A default that cannot start a
-// run is the one thing worse than a default that is not the strictest possible.
+// The paragraph above used to end "`inject` is an EXPLICIT UPGRADE: copy a
+// profile and hand-edit three fields", and it had to, because the engine that
+// can keep that promise had never been run. It has now: iron-proxy is a public
+// image (`sandbox/images/ironproxy.ref`), the config Freilauf writes for it has
+// been parsed and driven end to end, and a placeholder in the container really
+// does become the real credential on the way to that credential's own host and
+// to nothing else — measured 2026-09-05, four ways, in docs/sandbox.md.
+//
+// `No secrets in the box` is therefore a fifth built-in profile rather than a
+// paragraph telling somebody to type JSON. It is deliberately NOT the default
+// and deliberately not one of the four above:
+//
+//   - it needs a CA on the machine (`sandbox_ca_dir` holding `ca.crt` AND
+//     `ca.key`), because iron-proxy mints leaf certificates and will not start
+//     without one. Four commands, in docs/sandbox.md — but four commands is
+//     four more than "install Docker", and a default that cannot start a run is
+//     the one thing worse than a default that is not the strictest possible.
+//   - it needs the iron-proxy image pulled.
+//   - it needs every credential the run uses to declare an `injection` block in
+//     its plugin. One that does not (cursor's `CURSOR_API_KEY`) REFUSES the
+//     launch by name — the real value would be a lie about what the container
+//     holds, and a placeholder would be a 401.
+//
+// All three failures are refusals at launch that name what is missing, which is
+// what makes shipping it honest: it never falls back to `env` and never starts
+// a proxy that quietly swaps nothing. The three settings below are one decision
+// and stand together; the profile editor refuses `inject` where the chosen
+// engine cannot do it, and `setSecrets()` on the built-in engine refuses it
+// again at launch.
 export const BUILTIN_PROFILES = [
   {
     key: 'balanced',
@@ -124,6 +146,38 @@ export const BUILTIN_PROFILES = [
         tlsTerminate: false,
       },
       secrets: { mode: 'env', gitFetch: 'mirror' },
+      resources: { memory: '8g', memorySwap: '8g', cpus: 4 },
+      innerSandbox: 'off',
+    },
+  },
+  {
+    key: 'no_secrets',
+    name: 'No secrets in the box',
+    titleKey: 'sandbox.profile.no_secrets',
+    descKey: 'sandbox.profile.no_secrets_desc',
+    spec: {
+      // The acceptance criterion of this whole feature, and the only profile
+      // that meets it: as little as possible worth stealing inside the
+      // container. Everything else on this list ships the run's real API key in
+      // the container's environment, where `env`, `/proc/1/environ` and
+      // `docker inspect` all read it back.
+      //
+      // Here the container holds `fl-token-<random>` and the proxy swaps it for
+      // the real credential on that credential's declared hosts alone. An agent
+      // that pastes the token into a commit, a log or somebody else's endpoint
+      // has leaked something worthless.
+      //
+      // The three lines are one decision: `inject` needs a proxy that
+      // terminates TLS, because a header cannot be rewritten inside a tunnel it
+      // cannot read. Requires a CA and the iron-proxy image — see the long
+      // comment above and docs/sandbox.md.
+      network: {
+        mode: 'allowlist',
+        engine: 'iron-proxy',
+        presets: ['harness', 'provider', 'git-host', 'package-registries'],
+        tlsTerminate: true,
+      },
+      secrets: { mode: 'inject', gitFetch: 'mirror' },
       resources: { memory: '8g', memorySwap: '8g', cpus: 4 },
       innerSandbox: 'off',
     },

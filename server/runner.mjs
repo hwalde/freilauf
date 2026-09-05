@@ -1310,9 +1310,15 @@ export async function launchRun(runId) {
     // that is NOT an environment variable (`--model`, `--effort`, a config blob)
     // passes through untouched.
     const { rest, pairs } = splitEnvArgs(modelArgs.args)
-    const { applySecrets } = await import('./sandbox/index.mjs')
+    const { applySecrets, sandboxCredentialPairs } = await import('./sandbox/index.mjs')
     let applied
     try {
+      // …and what no plugin emitted but the run cannot authenticate without:
+      // a subscription CLI's own credential, which outside the box comes from a
+      // file in the operator's $HOME that a per-run home does not have. Added
+      // BEFORE applySecrets, so `inject` and `none` govern it exactly as they
+      // govern a provider key — see sandboxCredentialPairs().
+      pairs.push(...await sandboxCredentialPairs(run, pairs))
       applied = await applySecrets(run, sandbox.spec, pairs)
     } catch (err) {
       failRun(runId, `Start failed:\n\n${err.message}`)

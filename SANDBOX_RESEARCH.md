@@ -2701,15 +2701,17 @@ The last row is also the only measurement gVisor allowed here (§11b.8).
 Honest list. Nothing below is a judgement about the technology; each is a thing
 this machine cannot be asked.
 
-- **iron-proxy** (§4.5, §7.5.2). Not installed — not on the `PATH`, not shipped by
-  hermes' package here. Everything §7.5.2 says about its reload endpoint, its
-  per-request JSON log and its credential transform is still [documented] only,
-  and §11.6 (SSE and HTTP/2 through it, under load) is untouched. What *is*
-  measured is the topology it would sit in (§11b.5), which is the half that had a
-  rootless question mark over it.
-- **`secrets.mode: inject`** (§7.8). It requires iron-proxy and TLS termination,
-  so it inherits the line above wholesale. `env` and `none` need nothing that is
-  missing.
+- **iron-proxy** (§4.5, §7.5.2). **This entry is answered — see §11b.9.** It read
+  "not installed, not on the `PATH`, not shipped by hermes' package here", and
+  that was true of the *binary* and never of the *image*: `ironsh/iron-proxy` is
+  public on Docker Hub under Apache-2.0, and pulling it took one command. The
+  reload endpoint, the per-request JSON log and the credential transform have all
+  now been driven. What stays open is §11.6 — SSE and HTTP/2 through it, under
+  load — which is about mileage rather than about mechanism.
+- **`secrets.mode: inject`** (§7.8). **Also answered — §11b.9.** It used to
+  inherit the line above wholesale; it now inherits its answer, with one
+  correction of its own that no amount of reading would have produced
+  (`require: true`). `env` and `none` still need nothing that is missing.
 - **gVisor** (§4.1). `runsc` is not on the `PATH` and the daemon lists only
   `io.containerd.runc.v2` and `runc`. The only measurement possible was the
   refusal — `unknown or invalid runtime name: runsc` — which at least confirms
@@ -2768,6 +2770,102 @@ this machine cannot be asked.
   cannot answer whether an account exists inside an image or whether a mount
   point came out a socket** — so for this layer a green suite is evidence about
   the hub's own logic and about nothing else.
+
+
+### 11b.9 iron-proxy, and `secrets.mode: inject`, actually run (2026-09-05, evening)
+
+The engine that three sections of this document depended on and no section had
+ever executed. §11b.8 said it was "not installed — not on the `PATH`, not
+shipped by hermes' package here", and every word of that was true about the
+**binary** and irrelevant: iron-proxy publishes a **Docker image**, and this hub
+starts its proxy as a container anyway (§11b.5a).
+
+| | |
+|---|---|
+| registry | `docker.io/ironsh/iron-proxy` — public, Apache-2.0, no login, 28 661 pulls |
+| source | https://github.com/paradigmxyz/iron-proxy (`ironsh/iron-proxy` redirects there) |
+| version | `0.49.0`, the newest tag that is not a release candidate on this day; `latest` pointed at the same digest |
+| digest | `sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da` |
+| size | 84 MB, entrypoint `iron-proxy`, flags `-config` and `-token` and nothing else |
+| pinned in | `sandbox/images/ironproxy.ref`, checked by a unit test against the code's own constants |
+
+#### The setup
+
+`fl-ip-agent` (an agent container holding **only a placeholder**), `fl-ip-proxy`
+(iron-proxy, holding the real credential in its environment), and a stub
+upstream that echoes back the headers it received, on network aliases
+`api.stub.test` and `other.stub.test`. Two CAs: one the proxy mints leaves from
+and the agent trusts, one the stub's own certificate is signed by and the proxy
+trusts (`SSL_CERT_FILE`, which Go honours). No provider was called and no quota
+was spent — the point was never the vendor, it was the swap.
+
+The config was not hand-written for the occasion: it is the string
+`ironProxyConfig()` produces, so what was measured is what the hub writes.
+
+#### What was proven
+
+| asked | answer |
+|---|---|
+| `docker exec fl-ip-agent printenv STUB_API_KEY` | `fl-token-PLACEHOLDER-9f3c11` |
+| agent → **the credential's declared host** | upstream saw `X-Api-Key: sk-REALKEY-…` |
+| agent → **another allowed host**, same value | upstream saw `fl-token-PLACEHOLDER-9f3c11` |
+| agent → a host **not on the allowlist** | `curl: (56) CONNECT tunnel failed, response 403` |
+| the real key in `proxy.yaml` \| audit log \| `docker inspect` of the agent | 0 \| 0 \| 0 |
+| `POST /v1/reload` with the bearer token \| without it | 200 \| 401 |
+
+#### What the binary corrected, and why only one of them was loud
+
+This is the part worth carrying forward, because **four of the five guesses
+failed silently** — an unknown key inside a transform's `config` is accepted and
+ignored. A config full of policy that does nothing starts as cleanly as a
+correct one.
+
+| guess | reality |
+|---|---|
+| `log: { level, format }` | `format` does not exist — **the one loud failure** (`field format not found in type config.Log`), and therefore the only reason to distrust the others' silence |
+| DNS not mentioned | `dns.enabled: false` is **required**; the DNS server is on by default and the binary refuses to start with `dns.proxy_ip is required` |
+| `tls` not mentioned | `tls.ca_cert` **and** `ca_key` are required in the default `mitm` mode. `sni-only` needs neither and sees only a hostname — which is why `inject` and `tlsTerminate` are one capability |
+| any CA will do | it must carry `keyUsage=critical,keyCertSign,cRLSign`. Without it the process starts and then dies: `initializing cert cache: CA certificate missing KeyUsageCertSign` |
+| `management.api_key_env` just names a variable | that variable **must be set**, or the binary refuses to start. The hub always mints one; a hand-run config does not |
+| `deny_domains` beside `domains` | **does not exist**, and is swallowed. Deny hosts are subtracted from the allowlist in the hub; a deny that only narrows a wildcard cannot be expressed here at all and is reported |
+| `methods` beside `domains` | **swallowed**. A method restriction is `rules: [{ host, methods, paths }]` |
+| the audit line's fields at the top level | the *names* were right (`host`, `method`, `path`, `action`, `status_code`, `duration_ms`, `rejected_by`); they sit inside an `audit` object. The mapper read the top level, so it would have returned null for every real line and left `egress.jsonl` empty — a silence indistinguishable from a quiet run |
+
+#### And the one that was not a config field: `require: true`
+
+The `secrets` transform's `require` rejects a request to a declared host that
+does not carry the placeholder. It is exactly the fence one wants — a workload
+must not be able to reach that host with a credential of its own — and on the
+path Freilauf uses it **rejects everything**.
+
+Freilauf reaches the proxy through `HTTPS_PROXY`, so the first thing that
+arrives is a CONNECT, and iron-proxy evaluates a **synthetic CONNECT — carrying
+no headers at all** — against the transform pipeline. Measured: every call to
+the one host the credential existed for died as a 403, `rejected_by: "secrets"`,
+`annotations: { rejected: "STUB_API_KEY" }` — while calls to hosts the
+credential was *not* declared for went through untouched. The one request that
+had to work was the only one that could not.
+
+Freilauf does not write it. What that costs is the bypass fence and nothing
+about the swap itself; it comes back the day the sandbox routes through
+iron-proxy's DNS interception (§7.5.2's other option) instead of a proxy
+variable, because a real request with real headers is what the transform would
+then see. It is the clearest argument in this whole document for measuring a
+security control rather than reading about one: `require: true` is *documented*
+to do the right thing, it *does* the right thing, and in this topology the right
+thing is a wall across the only door.
+
+#### What this does NOT establish
+
+Mileage, not mechanism. A handful of curls against one stub says nothing about a
+long-lived server-sent-event stream through the MITM path (a coding agent's
+whole conversation is one), about `max_request_body_bytes` under a large
+request, about several runs' proxies at once, or about a leaf-certificate cache
+over hours. §11.6 stays open, and no coding agent has yet run behind this
+engine. The e2e suite still does not exercise it: the image is not something a
+test may assume, and the suite's `docker` shim cannot answer what a real proxy
+does — so the measured facts are pinned as unit tests over the string the hub
+writes and over log lines copied verbatim out of `docker logs`.
 
 ---
 

@@ -315,7 +315,17 @@ const plugin = {
      *    would stop at it with nobody to answer. The trust flag is not
      *    cosmetic: hooks are skipped entirely in a workspace whose trust was
      *    never accepted [measured, §11a.3], so without it a sandboxed run
-     *    reports nothing;
+     *    reports nothing. It also carries `bypassPermissionsModeAccepted`,
+     *    and that one was measured the hard way: `IS_SANDBOX=1` is what lets
+     *    `bypassPermissions` be ACCEPTED as container root, and it is not what
+     *    makes the mode's own disclaimer go away. A sandboxed claude run
+     *    started, drew its TUI and stood at "WARNING: Claude Code running in
+     *    Bypass Permissions mode … ❯ No, exit / Yes, I accept" with nobody to
+     *    answer it [measured 2026-09-05, 2.1.261] — a run that looks alive and
+     *    is waiting for a keystroke. The flag is a top-level key of
+     *    `.claude.json` in the shipped build and suppresses that dialog; the
+     *    operator's own file has never needed it, because on the host
+     *    `fl-start` launches with `dontAsk` when it has a prompt;
      *  - `.claude/settings.json` carries the inner-sandbox decision. The hooks
      *    are NOT here: they travel as `--settings <json>` on the command line
      *    (`claudeSettingsJson()` in runner.mjs), which outranks every settings
@@ -332,7 +342,7 @@ const plugin = {
      */
     seedHome({ run = {}, spec = {} } = {}) {
       const workdir = run.workdir_effective || run.workdir || null
-      const claudeJson = { hasCompletedOnboarding: true }
+      const claudeJson = { hasCompletedOnboarding: true, bypassPermissionsModeAccepted: true }
       if (workdir) claudeJson.projects = { [workdir]: { hasTrustDialogAccepted: true } }
 
       const level = spec.innerSandbox ?? 'off'

@@ -809,7 +809,7 @@ export async function prepareSandbox(run, repo, opts = {}) {
       // `subuid + n − 1`, which the hub's own `git status` would then read as
       // somebody else's.
       ...(await runtimeIdentity(av)),
-      env: containerEnv({ home, binPaths }),
+      env: containerEnv({ home, binPaths, harnessEnv: await harnessSandboxEnv(run) }),
       // What the coding agent's plugin wants changed about its own command line
       // inside the box (§7.9). It travels in the DOCUMENT and not only in the
       // return value, because `fl-start` is the other reader of that command
@@ -1025,6 +1025,22 @@ function hubCaPath() {
 }
 
 /**
+ * The MITM CA's private key, next to the certificate `hubCaPath()` finds.
+ *
+ * Only iron-proxy ever asks for it, and only in `mitm` mode — which is the only
+ * mode in which `secrets.mode: inject` means anything, because a proxy that
+ * does not terminate TLS sees a hostname and no headers. Absent is the ordinary
+ * state: an installation that never generated a CA has neither file, and the
+ * built-in engine wants neither.
+ */
+function hubCaKeyPath() {
+  const dir = String(getSetting('sandbox_ca_dir') ?? '').trim()
+  if (!dir) return null
+  const file = join(dir, 'ca.key')
+  return existsSync(file) ? file : null
+}
+
+/**
  * The port the run's proxy was last recorded at, or 0 for "pick one".
  *
  * A container's `HTTPS_PROXY` is fixed the moment it is created, so a built-in
@@ -1060,14 +1076,48 @@ const IMAGE_ACCOUNT = 'agent'
  * itself — the class of thing that surfaces as an unexplained failure inside a
  * container nobody can attach to. `FREILAUF_SANDBOX_IMAGE_ACCOUNT` is the seam
  * for an operator image built with a different account name.
+ *
+ * `harnessEnv` is what the coding agent's plugin declares in its own
+ * `sandbox.env` (§7.5.4) — the telemetry and auto-update switches, and for
+ * claude the one variable a sandboxed run cannot start without. The hub's own
+ * three win over it: a plugin that set `HOME` would move the run's home out
+ * from under `seedHome()`, and `PATH` is what puts `fl-report` in the box.
  */
-export function containerEnv({ home, binPaths = [] }) {
+export function containerEnv({ home, binPaths = [], harnessEnv = {} } = {}) {
   const base = ['/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin']
+  const declared = {}
+  for (const [k, v] of Object.entries(harnessEnv ?? {})) {
+    if (typeof k === 'string' && k && v != null) declared[k] = String(v)
+  }
   return {
+    ...declared,
     HOME: home,
     USER: env('SANDBOX_IMAGE_ACCOUNT') || IMAGE_ACCOUNT,
     PATH: [...binPaths, `${home}/.local/bin`, ...base].filter(Boolean).join(':'),
   }
+}
+
+/**
+ * The coding agent's own `sandbox.env`, and it took a dead claude run to notice
+ * that NOTHING read it. Every shipped plugin declares one — opencode and cursor
+ * their telemetry switches, claude four variables of which `IS_SANDBOX=1` is the
+ * predicate its `bypassPermissions` mode consults before agreeing to run as
+ * container root (§11.1) — and `containerEnv()` returned three keys of its own
+ * and nothing else. Measured 2026-09-05: every sandboxed claude run died 2.4
+ * seconds after `docker start` with `--dangerously-skip-permissions cannot be
+ * used with root/sudo privileges for security reasons`, which under a rootless
+ * daemon is EVERY claude run, and the declaration two files describe as the
+ * thing that prevents exactly that was never on the command line.
+ *
+ * Fail-soft like `harnessLaunchOverrides()` next to it: a plugin with no
+ * declaration, or one that throws, gets the environment the hub composes.
+ */
+async function harnessSandboxEnv(run) {
+  try {
+    const { sandboxDecl } = await import('../plugins/registry.mjs')
+    const declared = sandboxDecl(run?.harness)?.env
+    return declared && typeof declared === 'object' ? declared : {}
+  } catch { return {} }
 }
 
 /**
@@ -1346,8 +1396,27 @@ async function ensureProxy(run, spec, { runDir, network, allow, port = 0, allowF
     // building them, and its absence would surface as a proxy that will not
     // start rather than as a missing image. `FREILAUF_SANDBOX_PROXY_IMAGE` is
     // the seam for an operator image with no node in it.
-    image: env('SANDBOX_PROXY_IMAGE') || spec.image?.ref || null,
-    digest: env('SANDBOX_PROXY_IMAGE') ? null : (spec.image?.digest ?? null),
+    // ...which is true of the BUILT-IN engine and of nothing else. iron-proxy is
+    // a Go binary in an image of its own (`DEFAULT_PROXY_IMAGE`), so handing it
+    // the run's harness image would start a coding agent where a proxy was
+    // meant. `null` lets `startIronProxy()` reach its own default and its own
+    // digest — the one place that knows which image the config was measured
+    // against.
+    image: engine === 'iron-proxy'
+      ? (env('SANDBOX_PROXY_IMAGE') || null)
+      : (env('SANDBOX_PROXY_IMAGE') || spec.image?.ref || null),
+    digest: engine === 'iron-proxy' ? null : (env('SANDBOX_PROXY_IMAGE') ? null : (spec.image?.digest ?? null)),
+    // THE CA, BOTH HALVES, AND THEY ARE NOT THE SAME SECRET. The certificate is
+    // mounted into the AGENT's container too, because that is what makes the
+    // proxy's minted leaves trusted there. The KEY goes only into the proxy: it
+    // is what mints them, and a copy of it inside the agent's box would let the
+    // agent forge any host it likes. Both come from `sandbox_ca_dir`, generated
+    // once by the operator (iron-proxy's own README step 1, quoted in
+    // docs/sandbox.md), and the key is absent for every installation that never
+    // set one up — which `startIronProxy()` turns into a named refusal rather
+    // than a proxy that silently swaps nothing.
+    caPath: hubCaPath(),
+    caKeyPath: hubCaKeyPath(),
     // §7.7's uid table again: rootful gets `--user <uid>:<gid>` so the audit
     // stream stays owned by the hub user, rootless gets nothing because
     // container root already IS that user.
@@ -1693,6 +1762,47 @@ async function secretDeclarations(run) {
       }
     }
   } catch { /* an unanswerable question masks nothing, which is `env` mode */ }
+  return out
+}
+
+/**
+ * The credentials a sandboxed run needs and that NOTHING else puts in its
+ * environment (§7.8).
+ *
+ * Outside a container a subscription CLI authenticates from a file in the
+ * operator's `$HOME` — claude reads `~/.claude/.credentials.json`. Inside one
+ * `$HOME` is the run's own seeded home (§7.7) and that file is deliberately not
+ * copied there, so the ONLY way in is the declared credential. The provider
+ * plugins emit theirs as `--env` pairs out of `modelArgs()`, which is why
+ * opencode and hermes worked; claude's `modelArgs()` emits `--model` and
+ * nothing else, and `sandbox.credentials` was read by `applySecrets()` alone —
+ * a function that transforms pairs and never produces one. Measured
+ * 2026-09-05: a sandboxed claude run with `CLAUDE_CODE_OAUTH_TOKEN` set on the
+ * hub started, drew its TUI and answered `Not logged in · Please run /login`;
+ * `docker inspect` showed the variable was not in the container at all.
+ *
+ * Only what is MISSING is added — a plugin that already emitted the variable
+ * keeps its own value — and only what `credentialValue()` can resolve, so a
+ * run whose operator configured nothing is exactly the run it was before. The
+ * pairs go back to the caller, which hands them to `applySecrets()` like every
+ * other pair: under `inject` they become placeholders, under `none` they are
+ * dropped. A credential that reached the container BESIDE that path would have
+ * been a hole in both modes.
+ */
+export async function sandboxCredentialPairs(run, have = []) {
+  const known = new Set(have.map(p => p?.name).filter(Boolean))
+  const out = []
+  try {
+    const { credentialValue } = await import('../plugins/store.mjs')
+    const decls = await secretDeclarations(run)
+    for (const [name, decl] of decls) {
+      if (known.has(name)) continue
+      const value = credentialValue(decl.plugin, decl.key)
+      if (!value) continue
+      out.push({ name, value })
+      known.add(name)          // two plugins declaring one variable is one variable
+    }
+  } catch { /* unanswerable: the run starts as it did before this existed */ }
   return out
 }
 

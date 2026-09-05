@@ -7184,7 +7184,15 @@ try {
       contains(plain, 'name: "allowlist"', 'the allowlist transform')
       contains(plain, '"api.anthropic.com"', 'and the resolved hosts, quoted')
       contains(plain, '"*.npmjs.org"', 'a glob is quoted — bare `*` is a YAML alias')
-      contains(plain, 'deny_domains', 'the deny half')
+      // `deny_domains` was a guess, and iron-proxy 0.49.0 does not have it — it
+      // SWALLOWS it, along with any other unknown key inside a transform's
+      // config, and starts happily enforcing nothing. So the deny half is
+      // subtracted from the allowlist in the hub, and what cannot be subtracted
+      // (a deny that narrows a wildcard) is named by `configWarnings()` instead
+      // of being written into a file that would eat it.
+      isFalse(plain.includes('deny_domains'), 'never a key the binary silently ignores')
+      contains(plain, 'dns:', 'the DNS server is switched off — without this the binary refuses to start')
+      contains(plain, 'mode: "sni-only"', 'and with no CA it cannot terminate TLS, so it says so')
       contains(plain, 'api_key_env: IRON_MANAGEMENT_API_KEY', 'the management listener for POST /v1/reload')
       isFalse(plain.includes('name: "secrets"'), 'and no secrets transform when nothing is injected')
       isFalse(plain.includes('warn: true'), 'nor audit-only when it was not asked for')
@@ -7202,10 +7210,13 @@ try {
       contains(injected, 'name: "secrets"', 'the secrets transform')
       contains(injected, 'type: env, var: "OPENROUTER_API_KEY"', 'the source is the variable, never the value')
       contains(injected, platzhalter, 'the container sees the placeholder')
-      contains(injected, '{ host: "openrouter.ai" }', 'and the swap happens only for that host')
+      contains(injected, 'replace:', 'the documented shape, not the legacy flat one')
+      contains(injected, '- host: "openrouter.ai"', 'and the swap happens only for that host')
+      isFalse(injected.includes('require: true'), 'and never `require`, which 403s the synthetic CONNECT')
 
       const methoden = ironProxyConfig({ network: { ...spec.network, engine: 'iron-proxy', methods: ['GET'] } }, {})
       contains(methoden, 'methods: ["GET"]', 'the engine that CAN judge a method gets the list')
+      contains(methoden, 'rules:', 'as a per-host rule — a `methods` beside `domains` is swallowed')
     })
 
     await check('an iron-proxy log line becomes the same audit line the built-in writes', () => {
@@ -7222,6 +7233,105 @@ try {
       equal(rejected.action, 'deny', 'a rejection')
       equal(rejected.rejected_by, 'allowlist', 'and what rejected it')
       equal(mapIronLine('not json'), null, 'garbage is dropped, never thrown over')
+    })
+
+    // ── What the real binary said, on 2026-09-05, against ironsh/iron-proxy:0.49.0
+    //
+    // Every assertion below is a guess this file used to make that the binary
+    // corrected. They are pinned here rather than in the e2e suite because they
+    // are properties of a STRING the hub writes — no daemon required — and
+    // because the way each of them failed was silent. Four of the five are keys
+    // iron-proxy accepts without a word and then ignores; a test that only
+    // checked "does it start" would be green on all of them.
+    await check('the iron-proxy config keeps what the binary actually corrected', async () => {
+      const { ironProxyConfig, configWarnings, resolveHosts, addCaKeyMount, PROXY_CA_KEY, DEFAULT_PROXY_IMAGE, DEFAULT_PROXY_DIGEST } =
+        await import('../server/sandbox/ironproxy.mjs')
+      const spec = { network: { mode: 'allowlist', engine: 'iron-proxy', allow: ['api.stub.test'] } }
+
+      // 1. `log.format` is the ONE field that failed loudly:
+      //    `field format not found in type config.Log`. It is the reason to
+      //    trust none of the others by their silence.
+      const cfg = ironProxyConfig(spec, {})
+      isFalse(cfg.includes('format'), 'no log.format — the binary rejects it outright')
+
+      // 2. `dns.enabled: false` or the binary will not start (`dns.proxy_ip is
+      //    required`): its DNS server is on by default and Freilauf reaches it
+      //    through HTTPS_PROXY instead.
+      contains(cfg, 'enabled: false', 'the DNS server is switched off, explicitly')
+
+      // 3. MITM needs BOTH halves of the CA. With neither the config says
+      //    sni-only rather than naming files that are not there; with both it
+      //    names them.
+      contains(cfg, 'mode: "sni-only"', 'no CA, no TLS termination — and it says so')
+      const mitm = ironProxyConfig(spec, { caPath: '/host/ca.crt', caKeyPath: '/host/ca.key' })
+      contains(mitm, 'mode: "mitm"', 'with a CA it terminates')
+      contains(mitm, 'ca_key:', 'and the key is named, because the binary requires it')
+
+      // 4. No deny list exists. A deny that IS an allow entry is subtracted; a
+      //    deny that narrows a wildcard cannot be expressed at all and is
+      //    reported rather than written into a key that would swallow it.
+      const withDeny = { network: { ...spec.network, allow: ['a.test', '*.b.test'], deny: ['a.test', 'evil.b.test'] } }
+      const resolved = resolveHosts({ allow: ['a.test', '*.b.test'], deny: ['a.test', 'evil.b.test'] })
+      equal(JSON.stringify(resolved.allow), JSON.stringify(['*.b.test']), 'an exact deny is subtracted from the allowlist')
+      equal(JSON.stringify(resolved.unexpressed), JSON.stringify(['evil.b.test']), 'a deny narrowing a wildcard cannot be expressed')
+      const warnings = configWarnings(withDeny, {})
+      isTrue(warnings.some(w => w.includes('evil.b.test')), 'and it is named to the operator instead of vanishing')
+      isFalse(ironProxyConfig(withDeny, {}).includes('a.test"'), 'the denied host is off the list, not beside it')
+
+      // 5. `require: true` 403s the SYNTHETIC CONNECT iron-proxy evaluates for a
+      //    tunnelled request — measured `rejected_by: "secrets"` on the one host
+      //    the credential was declared for, while every other host went through.
+      //    It is the reason injection appeared not to work at all.
+      const inj = ironProxyConfig(spec, {
+        caPath: '/host/ca.crt', caKeyPath: '/host/ca.key', secretsMode: 'inject',
+        secrets: [{ key: 'k', envVar: 'STUB_API_KEY', placeholder: 'fl-token-x', header: 'X-Api-Key', hosts: ['api.stub.test'] }],
+      })
+      isFalse(inj.includes('require: true'), 'no `require` on the CONNECT path')
+      contains(inj, 'replace:', 'the swap is a `replace`, not iron-proxy\'s own `inject`')
+      isFalse(inj.includes('sk-'), 'and the file never holds a credential — only the variable name')
+      contains(inj, 'var: "STUB_API_KEY"', 'which is what it does hold')
+
+      // The image is real and pinned, and the pin travels with the tag it
+      // describes — never onto an operator's mirror.
+      contains(DEFAULT_PROXY_IMAGE, 'ironsh/iron-proxy:', 'the upstream image')
+      isTrue(DEFAULT_PROXY_DIGEST.startsWith('sha256:'), 'pinned by digest')
+      const ref = readFileSync(new URL('../sandbox/images/ironproxy.ref', import.meta.url), 'utf8')
+      contains(ref, DEFAULT_PROXY_IMAGE, 'and the file an operator mirrors from says the same tag')
+      contains(ref, DEFAULT_PROXY_DIGEST, 'and the same digest')
+
+      // The CA key reaches the proxy container and goes in front of the image,
+      // never after it — an argument after the image ref is the container's
+      // command line, not the daemon's.
+      const argv = addCaKeyMount({ bin: 'docker', args: ['run', '-d', 'ironsh/iron-proxy:0.49.0'] }, { caKeyPath: '/host/ca.key' })
+      equal(argv.args[argv.args.length - 1], 'ironsh/iron-proxy:0.49.0', 'the image stays last')
+      contains(argv.args.join(' '), `/host/ca.key:${PROXY_CA_KEY}:ro`, 'and the key is mounted read-only')
+      const untouched = addCaKeyMount({ bin: 'docker', args: ['run', 'x'] }, {})
+      equal(untouched.args.length, 2, 'no key, no mount')
+    })
+
+    await check('a REAL iron-proxy log line becomes an audit line, verbatim as the proxy wrote it', async () => {
+      const { mapIronLine } = await import('../server/sandbox/ironproxy.mjs')
+      // Both lines are copied byte for byte out of `docker logs` on 2026-09-05.
+      // The field NAMES were guessed right and their PLACE was not: they are
+      // inside `audit`, on a line whose `msg` is `request`. Reading the top
+      // level returned null for every line a real proxy writes — an empty
+      // `egress.jsonl` that reads like a quiet run rather than like a mapper
+      // that never matched once. Hence a fixture and not a hand-built object.
+      const allowed = JSON.parse(mapIronLine('{"time":"2026-09-05T19:27:59.090Z","level":"INFO","msg":"request","audit":{"host":"api.stub.test:8443","method":"GET","path":"/v1/m","remote_addr":"172.19.0.4:38380","sni":"api.stub.test","mode":"mitm","action":"allow","status_code":200,"duration_ms":65.4},"request_transforms":[{"name":"allowlist","action":"allow"},{"name":"secrets","action":"allow"}]}', { runId: 'r1' }))
+      equal(allowed.host, 'api.stub.test', 'the host, without the port it arrived glued to')
+      equal(allowed.port, 8443, 'which becomes the port, because the counters group on a host')
+      equal(allowed.action, 'allow', 'an allowed request')
+      equal(allowed.path, '/v1/m', 'and a terminated request really does have a path')
+
+      const rejected = JSON.parse(mapIronLine('{"time":"2026-09-05T19:28:51.764120857Z","level":"WARN","msg":"request","audit":{"host":"nope.stub.test:8443","method":"CONNECT","path":"","remote_addr":"172.19.0.4:38396","sni":"nope.stub.test","mode":"mitm","action":"reject","status_code":403,"duration_ms":0.059},"rejected_by":"allowlist","request_transforms":[{"name":"allowlist","action":"reject","duration_ms":0.02}]}'))
+      equal(rejected.action, 'deny', 'a rejection')
+      equal(rejected.rejected_by, 'allowlist', 'and what rejected it — which sits at the TOP level, not in `audit`')
+      equal(rejected.path, null, 'an empty path on a CONNECT is nothing, never an empty string')
+
+      // A startup line is not a request. It has no host, so it is dropped —
+      // otherwise every restart would write rows into the run's egress record.
+      equal(mapIronLine('{"time":"2026-09-05T19:27:56Z","level":"INFO","msg":"iron-proxy starting","tunnel_listen":":8080"}'), null,
+        'and the chatter around them is not an audit line')
     })
 
     await check('every sandbox.proxy string exists in all three languages', () => {
@@ -7605,12 +7715,16 @@ try {
     })
 
     // ---- profiles -----------------------------------------------------
-    await check('the four built-in profiles are seeded, and editing one writes a copy', async () => {
+    await check('the five built-in profiles are seeded, and editing one writes a copy', async () => {
       const { listProfiles, getProfile, saveProfile, deleteProfile, seedBuiltinProfiles, BUILTIN_PROFILES } =
         await import('../server/sandbox/profiles.mjs')
       seedBuiltinProfiles()   // idempotent: the import already ran it once
       const names = listProfiles().filter(p => p.builtin).map(p => p.name).sort().join()
-      equal(names, 'Audit,Balanced,Locked down,Open network', 'the four of §7.13')
+      // Four of §7.13 plus the one that is the acceptance criterion itself:
+      // `No secrets in the box` is the only shipped profile whose container
+      // holds a placeholder rather than the operator's real key, and it exists
+      // because the engine that can keep that promise has now been run.
+      equal(names, 'Audit,Balanced,Locked down,No secrets in the box,Open network', 'the four of §7.13, and the one that keeps nothing worth stealing')
       equal(listProfiles().filter(p => p.builtin).length, BUILTIN_PROFILES.length, 'seeding twice adds nothing')
 
       const balanced = listProfiles().find(p => p.name === 'Balanced')
@@ -9895,6 +10009,35 @@ process.stdout.write(JSON.stringify(out))
       // be confused, or a CLI resolving $USER against /etc/passwd disagrees with
       // itself inside a container nobody can attach to.
       isFalse(e.USER === 'hub', 'USER is not the policy word')
+    })
+
+    await check('the coding agent’s own sandbox.env reaches the container', () => {
+      // It did not, and the cost was the whole harness: every sandboxed claude
+      // run died 2.4 s after `docker start` with "--dangerously-skip-permissions
+      // cannot be used with root/sudo privileges", because `IS_SANDBOX=1` — the
+      // predicate the plugin declares for exactly that, and which two files
+      // describe as the thing that prevents it — was read by nobody. Measured
+      // 2026-09-05 under the rootless daemon, i.e. on every claude run there is.
+      const e = containerEnv({
+        home: '/runs/x/home',
+        binPaths: ['/home/hub/.local/bin'],
+        harnessEnv: { IS_SANDBOX: '1', DISABLE_TELEMETRY: '1' },
+      })
+      equal(e.IS_SANDBOX, '1', 'what the plugin declared is on the command line')
+      equal(e.DISABLE_TELEMETRY, '1', '…all of it, not the first one')
+      // …and the hub's own three still win: a plugin that set HOME would move
+      // the run out of the home `seedHome()` just wrote, and PATH is what puts
+      // `fl-report` in the box.
+      const w = containerEnv({
+        home: '/runs/x/home',
+        binPaths: ['/home/hub/.local/bin'],
+        harnessEnv: { HOME: '/somewhere/else', PATH: '/nothing' },
+      })
+      equal(w.HOME, '/runs/x/home', 'HOME stays the run’s own')
+      contains(w.PATH, '/home/hub/.local/bin', 'and PATH still names the mounted bin directory')
+      // A plugin with no declaration is the run it always was.
+      const bare = containerEnv({ home: '/runs/x/home', binPaths: [] })
+      equal(Object.keys(bare).sort().join(','), 'HOME,PATH,USER', 'no declaration, no extra variables')
     })
 
     // ---------------- live vs. restart (§7.12.3) ----------------
