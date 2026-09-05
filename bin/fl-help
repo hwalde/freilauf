@@ -139,7 +139,11 @@ ${B}HARNESS NOTES${R}
     MCP (incl. cua-computer-use): ~/.hermes/config.yaml → mcp_servers.
 
 ${B}NOTE${R}
-  Sessions survive logout and dropped connections, but ${B}not a server reboot${R}.
+  Sessions survive logout, dropped connections and hub restarts (the server has
+  its own unit, freilauf-tmux.service). A reboot ends them — Freilauf then
+  ${B}resumes${R} every run that was still working in a new session (claude/cursor/
+  opencode continue their conversation, hermes starts afresh with its task).
+  Before a planned reboot: ${B}freilauf drain${R}.
   Autonomous mode relies on each harness's no-ask configuration
   (claude: dontAsk + permissions.allow, opencode: --auto, hermes: --yolo).
 EOF

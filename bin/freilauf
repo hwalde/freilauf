@@ -3,6 +3,7 @@
 #   freilauf on|off|status|url|logs|restart|stop|start
 #   freilauf deploy [ref]
 #   freilauf pipeline on|off|status
+#   freilauf drain [minutes] | undrain
 set -euo pipefail
 
 # Where things live, and which systemd unit really runs this hub — an
@@ -40,6 +41,12 @@ Usage: freilauf <command>
 
   pipeline on|off|status   global AND gate for scheduled agent starts
 
+  drain [minutes]   before a planned reboot or update: pipeline off, every
+                    running agent is told to commit and report within the
+                    window, and the command waits until nothing is working
+                    any more (exit 1 with the list of what is still open)
+  undrain           pipeline back on
+
 Switch model: access (VPN proxy) · pipeline (scheduler gate) · agent (active flag
 in the UI). Hub, scheduler, watcher, notifications and running agents keep running
 independently of the access switch.
@@ -61,6 +68,67 @@ const db=new DatabaseSync(process.argv[1]);
 db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run("pipeline_on", process.argv[2]);' "$(fl_db_file)" "$1"
 }
 
+# Who owns the tmux server the agent sessions live in. "the unit" is the
+# answer this installation wants: then no hub restart can reach the sessions.
+# "foreign" means the server was spawned by something else (an earlier hub, a
+# human's `tmux`) and the unit is waiting to adopt the socket when it exits —
+# the hub keeps `KillMode=process` as the fence for exactly that stretch.
+tmux_server_status() {
+    local unit_state server_pid unit_pid out
+    unit_state="$(systemctl --user is-active freilauf-tmux.service 2>/dev/null || true)"
+    if ! out="$(tmux list-sessions 2>&1 >/dev/null)" && grep -qiE 'no server running|error connecting to' <<<"$out"; then
+        echo "none running   (freilauf-tmux.service: ${unit_state:-unknown})"
+        return 0
+    fi
+    server_pid="$(tmux display -p '#{pid}' 2>/dev/null || true)"
+    unit_pid="$(systemctl --user show freilauf-tmux.service -p MainPID --value 2>/dev/null || true)"
+    if [[ -n "$server_pid" && -n "$unit_pid" && "$server_pid" == "$unit_pid" ]]; then
+        echo "owned by freilauf-tmux.service (pid $server_pid) — hub restarts cannot reach the sessions"
+    elif [[ "$unit_state" == active ]]; then
+        echo "foreign (pid ${server_pid:-?}) — freilauf-tmux.service waits to adopt the socket when it exits"
+    else
+        echo "foreign (pid ${server_pid:-?}) — freilauf-tmux.service is ${unit_state:-not installed}; run setup/03-install-services.sh"
+    fi
+}
+
+# The hub's JSON API on the local port — the same routes the web UI uses.
+api() {
+    local method="$1" path="$2"; shift 2
+    curl -sS -m 20 -X "$method" "http://127.0.0.1:${LOCAL_PORT}${path}" "$@"
+}
+
+# `freilauf drain [minutes]`: the operator's way to a planned reboot or update
+# that costs no work. Pipeline off (nothing new starts), every running agent is
+# told in its own session to commit and report within the window, and the
+# command waits until the runs are through — or the minutes are up, in which
+# case it names what is still open. Nothing is killed: a run that does not make
+# it is still a run, and a reboot now finds its work committed at worst on its
+# branch. `freilauf undrain` switches the pipeline back on afterwards.
+drain() {
+    local minutes="${1:-10}" ids id n i left title
+    [[ "$minutes" =~ ^[0-9]+$ ]] || { echo "usage: freilauf drain [minutes]" >&2; exit 2; }
+    set_pipeline 0
+    echo "Pipeline off — no scheduled agent starts until 'freilauf undrain'."
+    ids="$(api GET '/api/runs?status=running&limit=200' | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const rows=j.runs??j;
+for(const r of rows) if(["running","waiting_help"].includes(r.status)&&r.tmux_session) console.log(r.id)}catch{}})' 2>/dev/null || true)"
+    n=0
+    for id in $ids; do
+        api POST "/api/runs/$id/send" --data-urlencode "text=Freilauf: the server goes down for maintenance in ${minutes} minutes. Bring your work to a safe point NOW: commit everything (git add -A && git commit), then write your report and run fl-report done exactly as your instructions say. If the task cannot be finished in time, report what is done with fl-report progress and commit anyway." >/dev/null 2>&1 && n=$((n + 1))
+    done
+    echo "Told $n running agent(s) to commit and report within ${minutes} min."
+    for ((i = 0; i < minutes * 6; i++)); do
+        left="$(api GET '/api/runs?status=running&limit=200' | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const rows=j.runs??j;
+for(const r of rows) if(["running","waiting_help"].includes(r.status)&&!r.finish_state) console.log(r.id+"  "+(r.title??""))}catch{}})' 2>/dev/null || true)"
+        [[ -z "$left" ]] && { echo "Drained: no run is working any more. Safe to reboot or update."; return 0; }
+        sleep 10
+    done
+    echo "Time is up. Still working (their work is on disk; a reboot resumes them, see AGENTS.md 'Surviving restarts'):"
+    while IFS= read -r title; do [[ -n "$title" ]] && echo "  $title"; done <<<"$left"
+    return 1
+}
+
 case "${1:-}" in
     on)
         systemctl --user start "$(fl_vpn_unit)"
@@ -77,6 +145,7 @@ case "${1:-}" in
         echo "Access (VPN): $vpn   (https://${VPN_BIND}:${VPN_PORT})"
         echo "Pipeline:     $(db_pipeline)"
         echo "Running agent sessions: $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -cE '^(fl|cc)-' || true)"
+        echo "tmux server:  $(tmux_server_status)"
         # Which commit is actually running, and whether origin has moved on. The
         # deploy script is the only thing that knows its checkout, so it answers.
         if command -v freilauf-deploy >/dev/null 2>&1; then
@@ -113,6 +182,10 @@ case "${1:-}" in
         systemctl --user stop "$(fl_unit)" ;;
     restart)
         systemctl --user restart "$(fl_unit)" ;;
+    drain)
+        drain "${2:-10}" ;;
+    undrain)
+        set_pipeline 1; echo "Pipeline on." ;;
     pipeline)
         case "${2:-status}" in
             on)  set_pipeline 1; echo "Pipeline on." ;;

@@ -128,7 +128,7 @@ Freilauf。」* 它知道下面的步骤，只会问你它猜不出的事（你�
 ```bash
 ./setup/01-npm-install.sh       # node-pty、ws、xterm.js —— 用于当前检出（测试、编辑）
 ./setup/02-install-scripts.sh   # fl-start/-attach/-kill/-help/-report/-notify + freilauf + freilauf-deploy → ~/.local/bin
-./setup/03-install-services.sh  # ~/.config/freilauf/env（来自 env.example）+ systemd 单元
+./setup/03-install-services.sh  # ~/.config/freilauf/env（来自 env.example）+ systemd 单元（中枢、tmux 服务器）+ enable-linger
 sudo ./setup/04-firewall.sh     # ufw：VPN 端口仅在 wg0 上放行（一次性）
 ```
 

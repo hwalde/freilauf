@@ -16,6 +16,58 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-05
+
+### Added
+
+- **A lost tmux session is resumed, not aborted.** When a run's session
+  vanishes without the hub ending it — a server reboot, an update that took
+  the tmux server, a dead server — the run is resumed in a new session:
+  claude, cursor and opencode continue their conversation (with a short
+  continuation prompt naming what was already committed), hermes and plugins
+  without a resume form are started afresh with their original task behind a
+  header saying the same. Capped at 3 automatic resumes per run
+  (`FREILAUF_RESUME_MAX`), after which the run ends the way it used to. One
+  message per watcher pass names every run that was resumed, instead of one
+  "aborted, work not merged" message per run. Deliberate ends — the kill
+  button, the sessions page, retention, archiving, a flow — are still aborts.
+  Events on the run: `session_lost`, `resumed`, `resume_failed`,
+  `resume_refused`.
+- **The tmux server has a unit of its own** (`freilauf-tmux.service`), started
+  before the hub, so no hub restart or deploy can reach the agent sessions —
+  whatever the hub's unit is called. On a machine whose server was spawned by
+  an earlier hub the unit waits and adopts the socket when that server exits;
+  `freilauf status` says who owns the server. `setup/03-install-services.sh`
+  and every deploy enable it.
+- **Missed schedule slots are caught up.** After a restart the hub looks back
+  (Settings → "Catch up missed schedule slots", default 6 hours, 0 = off) for
+  cron and weekly slots that fell into the downtime and starts each affected
+  agent once, at its newest missed slot (`schedule_catchup` on the run).
+- **`freilauf drain [minutes]`** for a planned reboot or update: pipeline off,
+  every running agent is told in its own session to commit and report within
+  the window, and the command waits until nothing is working any more.
+  `freilauf undrain` switches the pipeline back on.
+- **`fl-start --resume <id>`**: the resume form per coding agent; a plugin
+  declares its own as `launch.resume` with `{resume_id}` and may answer the id
+  with `resumeId(run)` (`docs/plugins.md`).
+- `setup/03-install-services.sh` runs `loginctl enable-linger`, so the hub and
+  the tmux server start at boot and not at the first login; `SETUP_WITH_AGENT.md`
+  says what to do about OS updates and reboots.
+
+### Changed
+
+- Watcher and scheduler run their first pass two seconds after a start instead
+  of 30 seconds later, so a deferred run, a planned start, a pending goal or a
+  lost session is looked at at once.
+- A run whose session was lost shows "session lost — resuming in a new one"
+  under its status word until the new session stands.
+- The `tmux_gone` incident says that the runs are being resumed.
+
+### Fixed
+
+- A flow run waiting on a run that had ended more than an hour before a hub
+  restart was never resumed and never pruned; it is resumed now.
+
 ## 2026-09-04
 
 ### Added

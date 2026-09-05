@@ -2,11 +2,11 @@
 // fl-start (the single start path, so CLI and UI produce identical runs —
 // planning §5).
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, writeFileSync, cpSync, symlinkSync, existsSync, realpathSync, statSync } from 'node:fs'
+import { mkdirSync, writeFileSync, readFileSync, rmSync, cpSync, symlinkSync, existsSync, realpathSync, statSync } from 'node:fs'
 import { join, resolve, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import db, { getRepo, addEvent } from './db.mjs'
-import { RUNS_DIR, WORKTREES_DIR, kurzid, sh } from './util.mjs'
+import { RUNS_DIR, WORKTREES_DIR, kurzid, sh, parseDbUtc } from './util.mjs'
 import { claudeQuota, sevenForRun } from './quota.mjs'
 import { skillPromptZusatz, zusaetzeDir } from './zusaetze.mjs'
 import { deliverGoal } from './goal.mjs'
@@ -198,6 +198,9 @@ export function launchSpec(harness) {
     args: launch.args,
   }
   if (Array.isArray(launch.interactiveArgs)) spec.interactiveArgs = launch.interactiveArgs
+  // The resume form: the argv that continues an interrupted conversation
+  // (`{resume_id}` + `{prompt}`), used by fl-start `--resume` instead of `args`.
+  if (Array.isArray(launch.resume) && launch.resume.length) spec.resume = launch.resume
   if (typeof launch.stderrLog === 'string' && launch.stderrLog) spec.stderrLog = launch.stderrLog
   // Only the object form: fl-start asks jq for `.submitNudge.waitFor`, and a
   // bare `true` would be an error there rather than a default.
@@ -551,9 +554,222 @@ export function harnessModelArgs(run, opts = null) {
   return plugin.modelArgs(run, pluginCtx(run.provider || run.harness), opts)
 }
 
+// ---------------------------------------------------------------- resume
+//
+// A run whose tmux session vanished without the hub ending it — a reboot, an
+// update that took the tmux server, a server that died — used to be ABORTED:
+// "tmux session ended", one notification per run, and everything the agent
+// had in its head was gone. Yet everything a continuation needs was still on
+// disk: the worktree, prompt.md, the log, and for claude the conversation
+// itself (the hub launches with `--session-id <run id>`, so `--resume <run
+// id>` finds it). What was missing was the code. `resumeRun()` is it: the
+// seventh caller of launchRun(), and launchRun() knows a RESUME from a fresh
+// start by `runs.resume_pending`.
+//
+// The one rule: only a session the hub did NOT end is resumed. Every
+// deliberate end — the kill route, the sessions page, retention, archiving, a
+// flow's kill_run — goes through reconcileClosedSession() and aborts exactly
+// as before. The watcher's discovery path is the caller that decides a
+// session was LOST; anything else that wants a resume (a future sandbox
+// reconfiguration, SANDBOX_RESEARCH.md) calls resumeRun() with a reason of its
+// own, which does not count against the cap.
+
+/**
+ * How often a run is resumed automatically before the hub gives up and ends
+ * it the way it always did (aborted, its work named). A cap against a crash
+ * loop — a CLI that dies at every start would otherwise be restarted every
+ * watcher pass for ever. `FREILAUF_RESUME_MAX`, default 3.
+ */
+export const RESUME_MAX = (() => {
+  const raw = env('RESUME_MAX')
+  if (raw == null || String(raw).trim() === '') return 3
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : 3
+})()
+
+/** What resumeRun() writes down for launchRun() to read: why, and with which text. */
+const RESUME_FILE = 'resume.json'
+/**
+ * How long a resume launch may be in flight before a pending run without a
+ * session counts as "the last attempt failed" rather than "somebody is
+ * launching it right now". fl-start's own timeout is 120 s; this is longer.
+ */
+export const RESUME_LAUNCH_GRACE_MS = 150_000
+
+/**
+ * Is a launch of this pending run still in flight? `retryPendingResumes()`
+ * (watcher.mjs) asks before launching again: a run marked pending with no
+ * session looks exactly the same during the seconds fl-start needs and after
+ * a launch that failed — and two hub processes on one database (the e2e
+ * suite drives the watcher in-process next to a running hub) turned that
+ * into two sessions for one run. The marker carries when the launch began.
+ */
+export function resumeLaunchInFlight(runId, nowMs = Date.now()) {
+  try {
+    const info = JSON.parse(readFileSync(join(RUNS_DIR, runId, RESUME_FILE), 'utf8'))
+    const since = Date.parse(info?.launching_at ?? '')
+    return Number.isFinite(since) && nowMs - since < RESUME_LAUNCH_GRACE_MS
+  } catch { return false }
+}
+/** The prompt the resumed CLI is launched with — never prompt.md, which is the record of the task. */
+const RESUME_PROMPT_FILE = 'resume-prompt.md'
+
+/**
+ * The continuation, for a coding agent that gets its old conversation back.
+ * Short on purpose: the task and the platform rules are in that conversation
+ * already, and repeating them would be a second copy of what the run was
+ * asked. `{context}` is what the worktree says happened before the cut.
+ */
+export const RESUME_PROMPT = `Your session was interrupted: the tmux session it lived in is gone (a server restart, an update, a lost tmux server), and Freilauf has resumed it in a new one. Your conversation up to the interruption is what you see above; the worktree is exactly as you left it.
+
+{context}
+
+Continue the task from where you were. Check \`git status\` and \`git log\` first so you do not redo work that is already committed, then carry on and finish. Everything the platform rules said still applies: commit your work, write the two report files and run \`fl-report done\` exactly as instructed. If you were waiting for a human's answer when the cut came, ask the question again with \`fl-report help\`. If the interruption cost you something you cannot recover, say so in the report.`
+
+/**
+ * The header for a coding agent that has NO resume form (hermes runs a single
+ * non-interactive query; a plugin without `launch.resume`): it is started
+ * afresh with the ORIGINAL prompt, and this stands in front of it so it does
+ * not redo the committed half of its own work.
+ */
+export const RESUME_FRESH_HEADER = `# This run was interrupted and is being restarted
+
+The session this run worked in is gone (a server restart, an update, a lost tmux server). This coding agent cannot resume a conversation, so Freilauf starts you afresh with the original task below. The worktree is exactly as the previous session left it: look at \`git status\` and \`git log\` before you begin, and do NOT redo what is already committed.
+
+{context}
+
+The original task follows.`
+
+/**
+ * What the worktree and the run's own reports say happened before the cut —
+ * the commits since the run's base, uncommitted files, the last progress
+ * reports. Prepended to both continuation prompts, because an agent that is
+ * told "continue" without being told where it stood redoes work.
+ */
+export async function resumeContext(run) {
+  const lines = []
+  if (run.workdir_effective && existsSync(run.workdir_effective)) {
+    const range = run.base_sha ? `${run.base_sha}..HEAD` : '-10'
+    const log = await sh('git', ['-C', run.workdir_effective, 'log', '--oneline', '--no-decorate', range])
+    const commits = log.ok ? log.stdout.trim().split('\n').filter(Boolean) : []
+    lines.push(commits.length
+      ? `Commits you made before the interruption (newest first):\n${commits.slice(0, 20).map(c => `- ${c}`).join('\n')}`
+      : 'You had not committed anything before the interruption.')
+    const st = await sh('git', ['-C', run.workdir_effective, '--no-optional-locks', 'status', '--porcelain'])
+    if (st.ok && st.stdout.trim()) {
+      lines.push(`Uncommitted changes in the worktree (\`git status --porcelain\`):\n${st.stdout.trim().split('\n').slice(0, 30).join('\n')}`)
+    }
+  }
+  const progress = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='progress' ORDER BY id DESC LIMIT 3`).all(run.id)
+    .map(r => { try { const p = JSON.parse(r.payload); return String(p?.text ?? p?.message ?? '').trim() } catch { return '' } })
+    .filter(Boolean)
+  if (progress.length) lines.push(`Your last progress reports (newest first):\n${progress.map(p => `- ${p}`).join('\n')}`)
+  return lines.join('\n\n')
+}
+
+/** The three fl-start knows a resume form for; a plugin says so with `launch.resume`. */
+const RESUMABLE_BUILTIN = new Set(['claude', 'cursor', 'opencode'])
+
+/** Can this coding agent continue an interrupted conversation at all? */
+export function resumable(harness) {
+  if (RESUMABLE_BUILTIN.has(harness)) return true
+  const launch = getHarness(harness)?.launch
+  return Array.isArray(launch?.resume) && launch.resume.length > 0
+}
+
+/**
+ * The id the CLI continues with. The plugin answers when it knows better
+ * (`resumeId(run)`: cursor reads it out of its transcript, opencode out of its
+ * store); otherwise it is the run id, because that is what the hub handed the
+ * CLI as its session id at launch. `null` from a plugin means "nothing to
+ * resume" — a fresh launch with the original prompt, marked as such.
+ */
+export async function resumeIdFor(run) {
+  const plugin = getHarness(run.harness)
+  if (typeof plugin?.resumeId !== 'function') return run.id
+  try {
+    const id = await plugin.resumeId(run)
+    return id ? String(id) : null
+  } catch (e) {
+    addEvent(run.id, 'warn', { resume_id: e.message })
+    return null
+  }
+}
+
+/**
+ * Resume a run whose session is gone: mark it, retract what the silence
+ * produced, and launch. Returns launchRun()'s answer, or `{ok:false, error}`
+ * when the run cannot be resumed — the caller then ends it the old way.
+ *
+ * `reason` 'session_lost' is the watcher's; it counts against RESUME_MAX. Any
+ * other reason is a deliberate caller's and does not — the cap exists for
+ * crash loops, and three operator-driven reconfigurations must not use up a
+ * run's crash budget. `text` replaces the fixed continuation prompt.
+ *
+ * `started_at` is moved forward by the length of the gap (measured from the
+ * run's last activity): the expected duration is about the agent's work, and
+ * a night the server spent switched off is not work — without the shift every
+ * resumed run would be flagged as overrun the moment it came back. The
+ * original start is kept in the `session_lost` event.
+ */
+export async function resumeRun(runId, { reason = 'session_lost', text = null } = {}) {
+  const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
+  if (!run) return { ok: false, error: 'run not found' }
+  if (!['running', 'waiting_help'].includes(run.status)) return { ok: false, error: `status is ${run.status}` }
+  if (run.resume_pending) return { ok: true, pending: true }
+  // Reported already: the finish gate's `agent_gone` escalation owns this case.
+  if (run.finish_state) return { ok: false, error: 'in the finish gate — the integrator escalates' }
+  if (!run.workdir_effective || !existsSync(run.workdir_effective)) return { ok: false, error: 'the worktree is gone' }
+  if (!launchable(run.harness)) return { ok: false, error: `no launch spec for ${run.harness}` }
+  const counted = reason === 'session_lost'
+  if (counted && run.resume_attempts >= RESUME_MAX) {
+    return { ok: false, error: `resumed ${run.resume_attempts} times already (cap ${RESUME_MAX})` }
+  }
+  const lastSeen = Math.max(parseDbUtc(run.last_activity_at) || 0, parseDbUtc(run.started_at) || 0)
+  const gapSec = lastSeen ? Math.max(0, Math.round((Date.now() - lastSeen) / 1000)) : 0
+  const runDir = join(RUNS_DIR, runId)
+  mkdirSync(runDir, { recursive: true })
+  writeFileSync(join(runDir, RESUME_FILE),
+    JSON.stringify({ reason, text: text || null, counted, at: new Date().toISOString(), session: run.tmux_session }),
+    { mode: 0o600 })
+  // The goal starts over with the session: a `/goal` typed into the old one
+  // went with it, and the watcher's pending-goal pass delivers it again.
+  db.prepare(`UPDATE runs SET tmux_session=NULL, tmux_closed_at=NULL, resume_pending=1, goal_sent_at=NULL,
+              started_at=datetime(started_at, '+' || ? || ' seconds'), last_activity_at=datetime('now') WHERE id=?`)
+    .run(gapSec, runId)
+  const { clearAnomalies } = await import('./reports.mjs')
+  clearAnomalies(runId, ['anomaly:no_activity', 'anomaly:soft_overrun', 'anomaly:overrun', 'anomaly:session_gone'])
+  addEvent(runId, 'session_lost', {
+    reason, attempt: run.resume_attempts + 1, gap_s: gapSec,
+    started_at_before: run.started_at, session: run.tmux_session,
+  })
+  // The same gate as at any other start: a resume into an exhausted quota
+  // dies at the first API call like a fresh start would. A blocked one waits
+  // as `deferred` — with `resume_pending` kept, so the watcher's retry resumes
+  // rather than starting afresh.
+  const { budgetGate } = await import('./scheduler.mjs')
+  const gate = await budgetGate(run.harness, run.model ?? null, run.provider ?? null)
+  if (gate) {
+    db.prepare(`UPDATE runs SET status='deferred' WHERE id=?`).run(runId)
+    addEvent(runId, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null, resume: true })
+    return { ok: true, deferred: true }
+  }
+  return launchRun(runId)
+}
+
 /**
  * Starts a prepared run: worktree, prompt, fl-start.
  * Returns { ok, session?, error? }.
+ *
+ * With `runs.resume_pending` set this is a RESUME (see resumeRun above): the
+ * worktree is reused as it stands, prompt.md is left alone and the CLI is
+ * launched in its resume form with a continuation prompt — or, for a coding
+ * agent without one, afresh with the original prompt behind a header that
+ * says what already happened. `base_sha` and the quota marks are kept: the
+ * run's own commits are still what it wants merged. A launch that fails on a
+ * resume leaves the run pending for the next watcher pass instead of failing
+ * it, until the cap is reached: right after a reboot the tmux server itself
+ * may be a beat behind, and "could not try" is not "tried and died".
  */
 export async function launchRun(runId) {
   const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
@@ -563,6 +779,17 @@ export async function launchRun(runId) {
   const kurz = kurzid(runId)
   const runDir = join(RUNS_DIR, runId)
   mkdirSync(runDir, { recursive: true })
+  const resuming = !!run.resume_pending
+  let resumeInfo = null
+  if (resuming) {
+    try { resumeInfo = JSON.parse(readFileSync(join(runDir, RESUME_FILE), 'utf8')) } catch { resumeInfo = {} }
+    if (!resumeInfo || typeof resumeInfo !== 'object') resumeInfo = {}
+    if (resumeInfo.counted == null) resumeInfo.counted = true
+    // Say that a launch is in flight, so a second pass (or a second process on
+    // the same database) does not launch this run a second time meanwhile.
+    resumeInfo.launching_at = new Date().toISOString()
+    try { writeFileSync(join(runDir, RESUME_FILE), JSON.stringify(resumeInfo), { mode: 0o600 }) } catch { /* best effort */ }
+  }
 
   // Asked BEFORE the worktree: a coding agent nothing can launch produces a
   // clean failure here instead of a worktree, a session and a puzzled operator.
@@ -603,20 +830,39 @@ export async function launchRun(runId) {
   const platformPrompt = platformSuffix({ ...run, id: runId, workdir_effective: workdir },
     branchRule, settings, repo).trim()
   const fullPrompt = [taskPrompt, platformPrompt].filter(Boolean).join('\n\n')
-  // prompt.md is the RECORD — always the whole thing, offload or not. What the
-  // CLI is actually launched with is a separate file, so "what was this run
-  // asked?" keeps one answer.
-  writeFileSync(join(runDir, 'prompt.md'), fullPrompt, { mode: 0o600 })
-  const offload = offloadPrompt(run.harness, workdir, taskPrompt, platformPrompt)
   let promptFile = join(runDir, 'prompt.md')
-  if (offload.taskFile) {
-    promptFile = join(runDir, 'launch-prompt.md')
-    writeFileSync(promptFile, offload.prompt, { mode: 0o600 })
-    addEvent(runId, 'prompt_offloaded', {
-      bytes: Buffer.byteLength(fullPrompt, 'utf8'),
-      launch_bytes: Buffer.byteLength(offload.prompt, 'utf8'),
-      file: offload.taskFile,
-    })
+  // The resume form's argv, when this launch continues a conversation.
+  let resumeArgs = []
+  if (resuming) {
+    // prompt.md stays what it is — the record of the task. The CLI gets a
+    // continuation: its old conversation plus what happened since, or, where
+    // nothing can be continued, the whole original task behind a header.
+    const rid = resumable(run.harness) ? await resumeIdFor(run) : null
+    const context = await resumeContext(run)
+    let text
+    if (rid) {
+      resumeArgs = ['--resume', rid]
+      text = String(resumeInfo.text || RESUME_PROMPT).replaceAll('{context}', context)
+    } else {
+      text = `${RESUME_FRESH_HEADER.replaceAll('{context}', context)}\n\n${fullPrompt}`
+    }
+    promptFile = join(runDir, RESUME_PROMPT_FILE)
+    writeFileSync(promptFile, text, { mode: 0o600 })
+  } else {
+    // prompt.md is the RECORD — always the whole thing, offload or not. What the
+    // CLI is actually launched with is a separate file, so "what was this run
+    // asked?" keeps one answer.
+    writeFileSync(join(runDir, 'prompt.md'), fullPrompt, { mode: 0o600 })
+    const offload = offloadPrompt(run.harness, workdir, taskPrompt, platformPrompt)
+    if (offload.taskFile) {
+      promptFile = join(runDir, 'launch-prompt.md')
+      writeFileSync(promptFile, offload.prompt, { mode: 0o600 })
+      addEvent(runId, 'prompt_offloaded', {
+        bytes: Buffer.byteLength(fullPrompt, 'utf8'),
+        launch_bytes: Buffer.byteLength(offload.prompt, 'utf8'),
+        file: offload.taskFile,
+      })
+    }
   }
 
   // Hook files into the workspace (cursor: the 'stop' hook that reports the end
@@ -636,18 +882,28 @@ export async function launchRun(runId) {
   // Everything the run adds sits between this and its tip — which is what makes
   // "did it commit anything?" and "what does it want merged?" answerable without
   // guessing at a branch. Read again on a retry, because the worktree is reused.
-  const baseSha = await sh('git', ['-C', workdir, 'rev-parse', 'HEAD'])
-  const q = claudeQuota()
-  // The 7-day window recorded is the one this run draws from — its own model's,
-  // plus the general one (quota.mjs). The cost delta at the end reads the same
-  // window, so the two ends of that subtraction are about one thing.
-  db.prepare(`UPDATE runs SET status='running', workdir_effective=?, worktree=?, branch_expected=?,
-              main_sha_start=?, base_sha=?, quota5_start=?, quota7_start=? WHERE id=?`)
-    .run(workdir, workdir !== repo.path ? workdir : null, branchExpected,
-      mainSha.ok ? mainSha.stdout.trim() : null, baseSha.ok ? baseSha.stdout.trim() : null,
-      q.five, sevenForRun(run, q), runId)
-  addEvent(runId, 'started', { workdir, harness: run.harness, model: run.model,
-    provider: run.provider ?? null, effort: run.effort ?? null })
+  if (resuming) {
+    // A resume keeps where the run started FROM: base_sha is what its own
+    // commits are measured against, and the quota marks are the cost's start.
+    // Re-reading either here would make the interrupted half of the work
+    // disappear from "what does this run want merged" and from its bill.
+    db.prepare(`UPDATE runs SET status='running', workdir_effective=?, worktree=?,
+                branch_expected=COALESCE(branch_expected, ?), resume_attempts=resume_attempts+? WHERE id=?`)
+      .run(workdir, workdir !== repo.path ? workdir : null, branchExpected, resumeInfo.counted ? 1 : 0, runId)
+  } else {
+    const baseSha = await sh('git', ['-C', workdir, 'rev-parse', 'HEAD'])
+    const q = claudeQuota()
+    // The 7-day window recorded is the one this run draws from — its own model's,
+    // plus the general one (quota.mjs). The cost delta at the end reads the same
+    // window, so the two ends of that subtraction are about one thing.
+    db.prepare(`UPDATE runs SET status='running', workdir_effective=?, worktree=?, branch_expected=?,
+                main_sha_start=?, base_sha=?, quota5_start=?, quota7_start=? WHERE id=?`)
+      .run(workdir, workdir !== repo.path ? workdir : null, branchExpected,
+        mainSha.ok ? mainSha.stdout.trim() : null, baseSha.ok ? baseSha.stdout.trim() : null,
+        q.five, sevenForRun(run, q), runId)
+    addEvent(runId, 'started', { workdir, harness: run.harness, model: run.model,
+      provider: run.provider ?? null, effort: run.effort ?? null })
+  }
 
   const args = ['--harness', run.harness,
     '--name', (agent?.name ?? 'einzel').toLowerCase().replaceAll(/[^a-z0-9_-]/g, '-'),
@@ -670,7 +926,12 @@ export async function launchRun(runId) {
     // silently: without a key the run only dies at the agent's first API call.
     addEvent(runId, 'warn', { fehlender_key: modelArgs.fehlt.join(', ') })
   }
-  if (run.harness === 'claude') args.unshift('--session-id', runId, '--settings', claudeSettingsJson())
+  // A resume continues the old conversation (`--resume <id>`, fl-start knows
+  // the form per coding agent); a fresh claude start names the session id so
+  // that a later resume can find it. The hooks travel either way.
+  if (resumeArgs.length) args.unshift(...resumeArgs)
+  else if (run.harness === 'claude') args.unshift('--session-id', runId)
+  if (run.harness === 'claude') args.unshift('--settings', claudeSettingsJson())
   // A coding agent fl-start has no case for is launched from its own
   // declaration. The file lives next to prompt.md in the run directory — NOT in
   // the worktree, which has to stay clean for the finish gate.
@@ -687,11 +948,29 @@ export async function launchRun(runId) {
   const m = r.stdout.match(/Session '([^']+)' (?:started|gestartet)/)
   const session = m ? m[1] : null
   if (!r.ok || !session) {
-    failRun(runId, `Start failed (fl-start):\n\n${r.stderr || r.stdout}`)
-    return { ok: false, error: r.stderr || r.stdout }
+    const error = r.stderr || r.stdout
+    if (resuming) {
+      // "Could not try" is not "tried and died": right after a reboot the tmux
+      // server may still be coming up. The run stays pending and the next
+      // watcher pass launches again — until the cap says it is a crash loop.
+      const attempts = db.prepare('SELECT resume_attempts FROM runs WHERE id=?').get(runId)?.resume_attempts ?? 0
+      addEvent(runId, 'resume_failed', { attempt: attempts, error: String(error).slice(0, 500) })
+      if (!resumeInfo.counted || attempts < RESUME_MAX) return { ok: false, retry: true, error }
+      failRun(runId, `Resume failed ${attempts} times (fl-start):\n\n${error}`)
+      return { ok: false, error }
+    }
+    failRun(runId, `Start failed (fl-start):\n\n${error}`)
+    return { ok: false, error }
   }
-  db.prepare('UPDATE runs SET tmux_session=? WHERE id=?').run(session, runId)
+  db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0 WHERE id=?').run(session, runId)
   addEvent(runId, 'tmux_started', { session })
+  if (resuming) {
+    try { rmSync(join(runDir, RESUME_FILE), { force: true }) } catch { /* the marker is a courtesy */ }
+    addEvent(runId, 'resumed', {
+      session, reason: resumeInfo.reason ?? 'session_lost', resume_form: resumeArgs.length ? resumeArgs[1] : 'fresh',
+      attempt: db.prepare('SELECT resume_attempts FROM runs WHERE id=?').get(runId)?.resume_attempts ?? null,
+    })
+  }
   // The goal is the SECOND prompt and exists only inside the session (claude:
   // `/goal <condition>`), so it goes in now that there IS one. Deliberately not
   // awaited: it waits for the TUI to draw, and a start must not hang on that.

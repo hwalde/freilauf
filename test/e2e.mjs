@@ -1746,6 +1746,63 @@ try {
     })
   }
 
+  gruppe('Surviving a lost tmux server: a run is resumed, not aborted')
+
+  {
+    // The session is killed BEHIND the hub's back — `tmux kill-session` by
+    // hand, the way a reboot or a dead tmux server looks to the watcher. Not
+    // through any hub route: those are deliberate ends and stay aborts.
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Resume: work, then lose the session' })
+    await warteAuf(() => !!lauf(j.runId)?.tmux_session, { was: 'tmux session' })
+    const alt = lauf(j.runId).tmux_session
+    sessions.add(alt)
+    await sh('tmux', ['kill-session', '-t', `=${alt}`])
+    await watcherTick()
+    await pruefe('the watcher resumes the run in a new session instead of aborting it', async () => {
+      const r = lauf(j.runId)
+      gleich(r.status, 'running', 'still running')
+      // The stub reuses a free name, so the new session may be CALLED like
+      // the old one — what counts is that a session stands again.
+      wahr(!!r.tmux_session, 'a session is recorded')
+      const alive = await sh('tmux', ['has-session', '-t', `=${r.tmux_session}`])
+      wahr(alive.ok, `and it stands (${r.tmux_session})`)
+      if (r.tmux_session) sessions.add(r.tmux_session)
+      gleich(ereignisse(j.runId).filter(k => k === 'tmux_started').length, 2, 'two sessions were started for this run')
+      gleich(r.resume_pending, 0, 'the mark is cleared once the session stands')
+      gleich(r.resume_attempts, 1, 'one automatic resume counted')
+      const ev = ereignisse(j.runId)
+      enthaelt(ev.join(','), 'session_lost', 'session_lost written')
+      enthaelt(ev.join(','), 'resumed', 'resumed written')
+      falsch(ev.includes('aborted'), 'never aborted')
+      falsch(ev.includes('anomaly:session_gone'), 'no session_gone anomaly — the session is back')
+      wahr(existsSync(join(SB, 'runs', j.runId, 'resume-prompt.md')), 'the CLI was launched with a continuation prompt')
+      const text = readFileSync(join(SB, 'runs', j.runId, 'resume-prompt.md'), 'utf8')
+      enthaelt(text, 'interrupted', 'which says what happened')
+      const rec = readFileSync(join(SB, 'runs', j.runId, 'prompt.md'), 'utf8')
+      enthaelt(rec, 'E2E-Resume', 'prompt.md is still the record of the task')
+      falsch(rec.includes('interrupted'), 'and was not overwritten by the continuation')
+    })
+    await pruefe('the cap: past RESUME_MAX a lost session ends the run the old way', async () => {
+      db.prepare('UPDATE runs SET resume_attempts=3 WHERE id=?').run(j.runId)
+      const s = lauf(j.runId).tmux_session
+      await sh('tmux', ['kill-session', '-t', `=${s}`])
+      sessions.delete(s)
+      await watcherTick()
+      gleich(lauf(j.runId).status, 'aborted', 'aborted, as before the resume existed')
+      const ev = ereignisse(j.runId)
+      enthaelt(ev.join(','), 'resume_refused', 'and the refusal is written on the run')
+    })
+    await pruefe('a session the hub ends itself is an abort, never a resume', async () => {
+      const k = await laufStarten({ repo_id: repoId, prompt: 'E2E-Resume: killed on purpose' })
+      await warteAuf(() => !!lauf(k.runId)?.tmux_session, { was: 'tmux session' })
+      sessions.add(lauf(k.runId).tmux_session)
+      await formular(`/api/runs/${k.runId}/kill`, {})
+      await watcherTick()
+      gleich(lauf(k.runId).status, 'aborted', 'aborted')
+      falsch(ereignisse(k.runId).includes('session_lost'), 'no session_lost — the hub knew who ended it')
+    })
+  }
+
   gruppe('Worktree cleanup: no data loss (regression test)')
 
   {

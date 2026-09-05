@@ -78,6 +78,11 @@ const plugin = {
     // 297 prompts on this machine the median is 4.2 KB and the 90th percentile
     // 13.6 KB: the long tail is the real population here, not an outlier.
     promptFile: { maxBytes: 4000 },
+    // The resume form (fl-start --resume): `--session <id>` continues the
+    // run's ROOT session (resumeId below reads it out of the store), and the
+    // prompt goes in as the next turn exactly as at a fresh start. fl-start
+    // maps the id 'last' to `--continue` — the last session of the worktree.
+    resume: ['--auto', { when: 'model', args: ['--model', '{model}'] }, '--session', '{resume_id}', '--prompt', '{prompt}'],
   },
 
   subscription: false,
@@ -241,6 +246,20 @@ const plugin = {
    */
   resumeCommand(run) {
     return run?.workdir_effective ? `cd ${run.workdir_effective} && opencode --continue` : null
+  },
+
+  /**
+   * The session id the hub resumes with (runner.mjs, resumeRun): the run's
+   * ROOT session out of opencode's store — a run is a session tree, and "the
+   * last session of the directory" is usually a finished subagent (see
+   * server/opencode-store.mjs). 'last' when the store cannot say: fl-start
+   * turns that into `--continue`, which is what resumeCommand() offers a human.
+   * Lazy import — the plugin rule (docs/plugins.md): hub modules are reached
+   * inside the function that needs them.
+   */
+  async resumeId(run) {
+    const { rootSessionId } = await import('../opencode-store.mjs')
+    return (await rootSessionId(run)) ?? 'last'
   },
 
   modelArgs(run, ctx = null, opts = null) {

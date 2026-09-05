@@ -426,6 +426,43 @@ export function scheduleDue(agent, now = new Date()) {
   }
 }
 
+/**
+ * The newest minute in (fromMs, toMs) at which this agent's schedule would
+ * have fired — the slot a hub that was down for that stretch missed.
+ *
+ * Whole minutes on both ends: the tick debounces on the minute, so a slot IS
+ * a minute. The minute of `fromMs` belongs to the last tick that ran, the
+ * minute of `toMs` to the tick that is running now — both are excluded, or a
+ * slot would fire twice. Newest first, because one catch-up is enough: an
+ * agent that missed three nightly slots is started once, not three times.
+ * It asks scheduleDue() itself, so a catch-up can never disagree with the
+ * tick about what "due" means. `null` for the kinds that need none:
+ * 'einmalig' is due from its moment on anyway, 'manuell' has no moment.
+ */
+/**
+ * How far back a hub that was down looks for schedule slots it missed
+ * (Settings → `schedule_catchup_hours`, default 6, `0` = never). The empty
+ * string has to mean "not set" and never `0`: the settings page writes every
+ * input as a string, and `Number('')` is a configured zero.
+ */
+export function catchupHours(settings = {}) {
+  const raw = settings.schedule_catchup_hours
+  if (raw == null || String(raw).trim() === '') return 6
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : 6
+}
+
+export function lastMissedSlot(agent, fromMs, toMs) {
+  if (!['cron', 'woechentlich'].includes(agent?.schedule_kind)) return null
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) return null
+  const start = Math.floor(fromMs / 60000) * 60000 + 60000
+  const end = Math.floor(toMs / 60000) * 60000 - 60000
+  for (let ms = end; ms >= start; ms -= 60000) {
+    if (scheduleDue(agent, new Date(ms))) return new Date(ms)
+  }
+  return null
+}
+
 /** One-liner for the agent list. */
 export function scheduleText(agent) {
   switch (agent.schedule_kind) {

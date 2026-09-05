@@ -39,6 +39,10 @@ const plugin = {
     promptMode: 'argv',
     args: ['--force', '--trust', { when: 'model', args: ['--model', '{model}'] }, '--', '{prompt}'],
     interactiveArgs: ['--force', '--trust', { when: 'model', args: ['--model', '{model}'] }],
+    // The resume form (fl-start --resume): `--resume <chat id>` with the
+    // prompt as the next turn; the chat id is read out of the transcript
+    // (resumeId below). Not measured end to end yet — the flag is documented.
+    resume: ['--force', '--trust', { when: 'model', args: ['--model', '{model}'] }, '--resume', '{resume_id}', '--', '{prompt}'],
   },
 
   subscription: true,
@@ -258,10 +262,19 @@ const plugin = {
    * Without a transcript there is no id, and then there is no command either.
    */
   resumeCommand(run) {
-    const path = transcriptPath(run)
-    if (!path || !run?.workdir_effective) return null
-    const id = path.split('/').pop().replace(/\.jsonl$/, '')
+    const id = this.resumeId(run)
+    if (!id || !run?.workdir_effective) return null
     return `cd ${run.workdir_effective} && cursor-agent --resume ${id}`
+  },
+
+  /**
+   * The chat id the hub resumes with (runner.mjs, resumeRun): the transcript
+   * file's basename. `null` when there is no transcript — then there is
+   * nothing to continue, and the run is started afresh with its task.
+   */
+  resumeId(run) {
+    const path = transcriptPath(run)
+    return path ? path.split('/').pop().replace(/\.jsonl$/, '') : null
   },
 
   modelArgs(run, _ctx = null) {

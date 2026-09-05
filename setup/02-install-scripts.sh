@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$HOME/.local/bin"
 echo "==> fl-* scripts into ~/.local/bin"
 mkdir -p "$BIN"
-for s in fl-start fl-attach fl-kill fl-help fl-report fl-api fl-notify fl-panel fl-oc-sync-agents fl-session-cleanup freilauf freilauf-deploy; do
+for s in fl-start fl-attach fl-kill fl-help fl-report fl-api fl-notify fl-panel fl-oc-sync-agents fl-session-cleanup fl-tmux-server freilauf freilauf-deploy; do
     install -m 755 "$ROOT/bin/$s" "$BIN/$s"
     echo "    $s"
 done

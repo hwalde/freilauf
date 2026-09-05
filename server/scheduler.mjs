@@ -1,7 +1,7 @@
 // Freilauf — scheduler (planning 4.2/4.8): the agents' cron expressions, global
 // pipeline AND gate, budget gate with deferral instead of discarding.
-import db, { addEvent, announceRun } from './db.mjs'
-import { scheduleDue, parseDbUtc } from './util.mjs'
+import db, { addEvent, announceRun, getSetting, setSetting, allSettings } from './db.mjs'
+import { scheduleDue, parseDbUtc, lastMissedSlot, catchupHours } from './util.mjs'
 import { createRun, launchRun, failRun } from './runner.mjs'
 import { getPlugin } from './plugins/registry.mjs'
 import { pluginCtx } from './plugins/context.mjs'
@@ -51,11 +51,80 @@ export function startScheduler() {
 }
 export function stopScheduler() { clearInterval(timer); timer = null }
 
-async function tick() {
-  const pipelineOn = db.prepare(`SELECT value FROM settings WHERE key='pipeline_on'`).get()?.value === '1'
-  if (!pipelineOn) return
-  const agents = db.prepare(`SELECT * FROM agents WHERE active = 1 AND schedule_kind <> 'manuell'`).all()
+/**
+ * The slots a downtime swallowed. `scheduleDue()` matches the exact minute,
+ * so a hub that was off at 03:00 never started the 03:00 agent — the next tick
+ * is a different minute, and the appointment was simply gone. Measured on this
+ * installation: 164 hub starts in 30 days, every deploy a 20-second hole, and
+ * a reboot an hour-long one.
+ *
+ * Once per process, on the first tick with the pipeline on: the last tick's
+ * time is a settings row (`last_tick_at`, written by every tick), and every
+ * agent whose schedule had a minute between then and now is started ONCE —
+ * the newest missed slot, not every one of them, because three missed nightly
+ * runs are one night's work. Bounded by `schedule_catchup_hours`: a hub that
+ * was off for a week must not start a week of agents at once. The same
+ * `busy` / inactive-repo / capacity rules as an ordinary tick, and the same
+ * `fired` debounce, so the tick that runs right after cannot start it again.
+ */
+let caughtUp = false
+async function catchUpMissed(now) {
+  if (caughtUp) return
+  caughtUp = true
+  const hours = catchupHours(allSettings())
+  const last = parseDbUtc(getSetting('last_tick_at'))
+  if (!(hours > 0) || !Number.isFinite(last)) return
+  const from = Math.max(last, now.getTime() - hours * 3_600_000)
+  const agents = db.prepare(`SELECT * FROM agents WHERE active = 1 AND schedule_kind IN ('cron','woechentlich')`).all()
+  for (const agent of agents) {
+    const missed = lastMissedSlot(agent, from, now.getTime())
+    if (!missed) continue
+    const slot = missed.toISOString().slice(0, 16)
+    fired.set(`${agent.id}@${slot}`, true)
+    const why = startBlocked(agent)
+    if (why) {
+      if (why.runId) addEvent(why.runId, 'schedule_skipped', { agent: agent.name, slot, reason: why.reason, catch_up: true })
+      continue
+    }
+    const r = await startForAgent(agent)
+    if (r?.runId) {
+      addEvent(r.runId, 'schedule_catchup', { agent: agent.name, missed_at: missed.toISOString(), last_tick_at: new Date(last).toISOString() })
+    }
+  }
+}
+
+/**
+ * Why this agent must not start right now — the three rules a scheduled start
+ * is measured against, shared by the tick and the catch-up. `null` = may go.
+ * `runId` is the run the skipped appointment is recorded on: the agent's own
+ * run when it is busy, otherwise any run of the repo.
+ */
+function startBlocked(agent) {
+  const busy = db.prepare(`SELECT id FROM runs WHERE agent_id=?
+    AND status IN ('running','waiting_help','deferred') LIMIT 1`).get(agent.id)
+  if (busy) return { reason: 'busy', runId: busy.id }
+  if (repoInactive(agent.repo_id)) {
+    const any = db.prepare(`SELECT id FROM runs WHERE repo_id=? ORDER BY started_at DESC LIMIT 1`).get(agent.repo_id)
+    return { reason: 'repo_inactive', runId: any?.id ?? null }
+  }
+  if (repoAtCapacity(agent.repo_id)) {
+    const any = db.prepare(`SELECT id FROM runs WHERE repo_id=? AND status IN ('running','waiting_help')
+      ORDER BY started_at DESC LIMIT 1`).get(agent.repo_id)
+    return { reason: 'max_parallel', runId: any?.id ?? null }
+  }
+  return null
+}
+
+export async function tick() {
   const now = new Date()
+  const pipelineOn = db.prepare(`SELECT value FROM settings WHERE key='pipeline_on'`).get()?.value === '1'
+  // Written whether or not the pipeline is on: the row says "the hub was
+  // alive", not "the pipeline was on" — a downtime is measured from the last
+  // heartbeat. The catch-up reads it BEFORE this tick overwrites it.
+  if (!pipelineOn) { setSetting('last_tick_at', now.toISOString()); return }
+  await catchUpMissed(now)
+  setSetting('last_tick_at', now.toISOString())
+  const agents = db.prepare(`SELECT * FROM agents WHERE active = 1 AND schedule_kind <> 'manuell'`).all()
   const slot = now.toISOString().slice(0, 16)
   for (const agent of agents) {
     if (!scheduleDue(agent, now)) continue

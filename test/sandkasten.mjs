@@ -122,7 +122,7 @@ NAME=e2e; ID=""; ENVS=(); LOG=""; KEEP=""; PROMPTFILE=""; POS=()
 ALLE=("$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --harness|--model|--session-id|--settings|--spec) shift 2 ;;
+    --harness|--model|--session-id|--settings|--spec|--resume) shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
     --id)   ID="$2";   shift 2 ;;
     --env)  ENVS+=("-e" "$2"); shift 2 ;;

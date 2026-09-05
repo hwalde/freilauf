@@ -112,8 +112,16 @@ Then, in order — each step prints what to do next:
 ```bash
 ./setup/01-npm-install.sh       # deps for THIS checkout (tests, editing, running by hand)
 ./setup/02-install-scripts.sh   # fl-* + freilauf + freilauf-deploy → ~/.local/bin, opencode plugin, extra skills
-./setup/03-install-services.sh  # ~/.config/freilauf/env (from env.example) + systemd user units
+./setup/03-install-services.sh  # ~/.config/freilauf/env (from env.example) + systemd user units + enable-linger
 ```
+
+The third script installs **three** user units — the hub, the VPN proxy and
+`freilauf-tmux.service`, the tmux server every agent session lives in — and
+runs `loginctl enable-linger` for the user. Both matter for a machine nobody
+logs into: without lingering a user's units start at the first *login*, not at
+boot, and without the tmux unit the first run after a reboot would spawn the
+tmux server inside the hub's own cgroup. If `enable-linger` fails (it needs no
+root, but some systems restrict it), print the command and let the human run it.
 
 Now **the human edits `~/.config/freilauf/env`** with the answers from section 2
 (at minimum `FREILAUF_VPN_BIND` and `FREILAUF_ALLOWED_HOSTS`) and places the
@@ -148,6 +156,28 @@ firewall. This is a real trap and it is in `AGENTS.md` under "Pitfalls".
 Troubleshooting, in the order that pays off: `freilauf status` → `freilauf logs` →
 `systemctl --user status freilauf.service`. A hub that will not start is almost
 always a missing value in `~/.config/freilauf/env` or a missing certificate.
+
+### Restarts, reboots and OS updates
+
+The hub survives its own restarts (every deploy is one): agent sessions live
+in the tmux unit, not in the hub's, and everything the hub was waiting on —
+deferred and planned runs, the finish gate, pending goals, waiting flows — is
+in the database and is picked up within seconds of a start. A **server
+reboot** ends every tmux session; the hub then **resumes** every run that was
+still working, in a new session (claude, cursor and opencode continue their
+conversation, hermes is started afresh with its task and told what it had
+already committed), and catches up the cron and weekly slots the downtime
+swallowed (Settings → "Catch up missed schedule slots", default 6 hours).
+Details: `AGENTS.md`, "Surviving restarts".
+
+So the rules for the machine are short. Unattended package upgrades are fine
+and need nothing from you — they do not kill user processes. Leave
+`Unattended-Upgrade::Automatic-Reboot` **off**. When a reboot is due (a kernel
+update), run **`freilauf drain [minutes]`** first: it switches the pipeline
+off, tells every running agent in its own session to commit and report within
+the window, and waits until nothing is working any more; then reboot, and
+`freilauf undrain` afterwards. Never stop `freilauf-tmux.service` by hand — that
+IS the reboot for the agents.
 
 ### Upgrading an installation that still says cc-hub
 

@@ -5,7 +5,8 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, openSyn
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import db, { getRepo, addEvent, announceRun, allSettings } from './db.mjs'
-import { RUNS_DIR, sh, parseDbUtc } from './util.mjs'
+import { RUNS_DIR, sh, parseDbUtc, kurzid } from './util.mjs'
+import { notify, notifyOnFor } from './notify.mjs'
 import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd, followUpHeader, clearAnomalies } from './reports.mjs'
 import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
 import { storeActivity } from './opencode-store.mjs'
@@ -42,9 +43,11 @@ export function stopWatcher() { clearInterval(timer); timer = null }
  * the grace period is 0: whatever is there must come from an earlier process.
  */
 export function verwaisteLaeufeAbschliessen(gnadenfristSek = 300) {
+  // A run without a session that is on its way BACK (resume_pending, see
+  // resumeRun in runner.mjs) is not an orphan: its launch is the next pass's.
   const rows = db.prepare(`
     SELECT id, started_at FROM runs
-    WHERE status IN ('running','waiting_help') AND tmux_session IS NULL
+    WHERE status IN ('running','waiting_help') AND tmux_session IS NULL AND resume_pending = 0
       AND started_at <= datetime('now', ?)
   `).all(`-${Math.max(0, gnadenfristSek)} seconds`)
   for (const run of rows) {
@@ -60,10 +63,16 @@ export function verwaisteLaeufeAbschliessen(gnadenfristSek = 300) {
 export async function tick() {
   verwaisteLaeufeAbschliessen()
   await collectInboxes()
+  // Runs whose resume did not get a session last time (the tmux server was a
+  // beat behind, fl-start failed): launched again before anything else looks
+  // at them, so the loop below finds them with a session or still pending.
+  await retryPendingResumes()
   const active = db.prepare(`SELECT * FROM runs WHERE status IN ('running','waiting_help')`).all()
   for (const run of active) {
     try { await watchRun(run) } catch (e) { console.error(`[watcher] ${run.id}:`, e.message) }
   }
+  // One message about every session this pass found lost — not one per run.
+  try { await announceResumes() } catch (e) { console.error('[watcher] resume summary:', e.message) }
   // The second prompt, for every run that still owes its session one: a hub
   // restarted between the start and the delivery, a session that had not drawn
   // yet, a run that was answering a help call (server/goal.mjs).
@@ -170,12 +179,25 @@ async function watchRun(run) {
       return
     }
     if (!lebt) {
-      // Session gone entirely (reboot, manual fl-kill, the sessions page). Mark
-      // it closed right away, otherwise the worktree cleanup waits forever for
-      // tmux_closed_at — AND end the run: nothing can report for it any more, so
-      // leaving it on 'running' means the overview shows a run that does not
-      // exist, forever. reconcileClosedSession() does both, and is the same
-      // function the sessions page uses.
+      // Session gone, and NOT by the hub's hand: a reboot, an update that took
+      // the tmux server, a `tmux kill-server`. (Everything the hub ends itself
+      // — the kill route, the sessions page, retention, archiving, a flow —
+      // goes through reconcileClosedSession() directly and never gets here
+      // with a run still on 'running'.) The run is RESUMED in a new session
+      // (runner.mjs, resumeRun): its worktree, its prompt, its log and — for
+      // claude — its whole conversation are still on disk, and abandoning
+      // them was the most expensive thing a restart used to cost.
+      // A run in the FINISH GATE is not resumed: it has reported, and its
+      // agent disappearing there is the integrator's own case — `agent_gone`
+      // escalation, the leftovers named for the operator (integrate.mjs).
+      if (run.resume_pending) return       // already on its way (retryPendingResumes)
+      if (!run.finish_state && await tryResume(run)) return
+      // Cannot be resumed (cap reached, worktree gone, nothing to launch):
+      // mark it closed right away, otherwise the worktree cleanup waits
+      // forever for tmux_closed_at — AND end the run: nothing can report for
+      // it any more, so leaving it on 'running' means the overview shows a run
+      // that does not exist, forever. reconcileClosedSession() does both, and
+      // is the same function the sessions page uses.
       addEventOnce(run.id, 'anomaly:session_gone')
       reconcileClosedSession(run.id, 'watcher')
     } else {
@@ -660,6 +682,78 @@ function finishCosts(run) {
     .run(q.five, seven, costEur, run.id)
 }
 
+// ---------- a lost session is resumed, not aborted ----------
+// The outcomes of one pass, for the one message that names them all.
+let resumeLog = []
+
+/**
+ * Hand a run whose session vanished to resumeRun(). true = the run is being
+ * resumed (a new session stands, it is deferred on the budget gate, or the
+ * launch is retried next pass); false = it cannot be, and the caller ends it
+ * the way it always did. A refusal is written on the run, so "why was this
+ * one aborted after all?" has an answer on its own page.
+ */
+async function tryResume(run) {
+  const { resumeRun } = await import('./runner.mjs')
+  let r
+  try { r = await resumeRun(run.id, { reason: 'session_lost' }) } catch (e) { r = { ok: false, error: e.message } }
+  if (r.ok || r.retry) { resumeLog.push({ runId: run.id, ...r }); return true }
+  addEvent(run.id, 'resume_refused', { error: r.error })
+  return false
+}
+
+/**
+ * Runs marked for a resume whose launch has not produced a session yet — the
+ * previous attempt could not try (no tmux server yet), or the hub restarted
+ * between the mark and the launch. launchRun() reads the mark and resumes;
+ * it also keeps the cap.
+ */
+async function retryPendingResumes() {
+  const rows = db.prepare(`SELECT id FROM runs WHERE status IN ('running','waiting_help')
+                           AND resume_pending = 1 AND tmux_session IS NULL`).all()
+  if (!rows.length) return
+  const { launchRun, resumeLaunchInFlight } = await import('./runner.mjs')
+  for (const row of rows) {
+    // A launch that began seconds ago is not a failed one — leave it alone.
+    if (resumeLaunchInFlight(row.id)) continue
+    try {
+      const r = await launchRun(row.id)
+      resumeLog.push({ runId: row.id, ...r })
+    } catch (e) { console.error(`[watcher] resume ${row.id}:`, e.message) }
+  }
+}
+
+/**
+ * The lost sessions of one pass as ONE message. A reboot takes every session
+ * at once, and a message per run was the shape the old abort path had — six
+ * "aborted, work not merged" texts on the phone for one event. Muted runs
+ * (the checkbox under the terminal) are left out; with nothing to say, nothing
+ * is sent. A retry is named once as "still trying"; its success is a later
+ * pass's message, and a final failure is failRun()'s own.
+ */
+async function announceResumes() {
+  const log = resumeLog
+  resumeLog = []
+  if (!log.length) return
+  const seen = new Set()
+  const ok = [], deferred = [], retry = []
+  for (const r of log) {
+    if (seen.has(r.runId)) continue
+    seen.add(r.runId)
+    if (!notifyOnFor(r.runId)) continue
+    if (r.ok && r.deferred) deferred.push(r)
+    else if (r.ok) ok.push(r)
+    else if (r.retry) retry.push(r)
+  }
+  if (!ok.length && !deferred.length && !retry.length) return
+  const name = (id) => db.prepare('SELECT title FROM runs WHERE id=?').get(id)?.title || kurzid(id)
+  const lines = ['🔁 tmux sessions were lost (a restart or a dead tmux server) — Freilauf resumed the runs:']
+  if (ok.length) lines.push(`Resumed in a new session: ${ok.map(r => name(r.runId)).join(', ')}`)
+  if (deferred.length) lines.push(`Waiting on the budget gate, resume pending: ${deferred.map(r => name(r.runId)).join(', ')}`)
+  if (retry.length) lines.push(`Could not launch yet, trying again next pass: ${retry.map(r => name(r.runId)).join(', ')}`)
+  await notify({ kind: 'system', text: lines.join('\n') })
+}
+
 // ---------- retry deferred runs ----------
 async function retryDeferred() {
   const deferred = db.prepare(`SELECT * FROM runs WHERE status='deferred'`).all()
@@ -807,7 +901,9 @@ async function tmuxServerGone(rows, live) {
   await vorfallMelden(null, {
     typ: 'tmux_gone', quelle: 'watcher', schwere: 'rot',
     beleg: `tmux reports no running server, ${rows.length} sessions of this hub were open. `
-         + `Everything that was working in them is gone; nothing of this was done by Freilauf.`,
+         + `Nothing of this was done by Freilauf. Every run that was still working is being resumed `
+         + `in a new session (see the runs' own events: session_lost / resumed); `
+         + `finished runs only lost the screen they left standing.`,
   })
 }
 

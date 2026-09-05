@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# fl-tmux-server — the tmux server every agent session lives in, run as the main
+# process of the user unit `freilauf-tmux.service`.
+#
+# WHY A UNIT OF ITS OWN. A tmux server is spawned by whoever creates the first
+# session, and it inherits that process's cgroup. On a hub machine that is the
+# hub: the first run after a reboot starts the server INSIDE freilauf.service,
+# and from then on the lifetime of every agent session hangs on the lifetime of
+# the hub process. Before the hub unit carried `KillMode=process`, every deploy
+# took the server — and with it every working agent — down with it. That line
+# is a fence; this unit is the fix: the server has a home of its own, and no
+# restart of the hub, whatever its unit is called, can reach it.
+#
+# HOW. `tmux -D` runs the server in the foreground (measured on tmux 3.4: the
+# calling process IS the server, no daemonising) and turns `exit-empty` off, so
+# a server with no sessions stays up instead of exiting and being re-spawned by
+# the next fl-start — inside the hub's cgroup again. Default socket on purpose:
+# `tmux attach`, `fl-attach`, the terminal page and the e2e suite keep working
+# exactly as they do today.
+#
+# ADOPTION. On a machine that already has a server (spawned by an earlier hub
+# or by hand), `tmux -D` cannot take it over — two servers cannot share one
+# socket. So the script waits, polling, until that server goes away by itself
+# (its last session closes, the machine reboots) and then starts one that
+# belongs here. `Restart=always` in the unit covers the reverse case: a server
+# that dies is replaced within seconds. Nothing is ever killed by this script.
+set -euo pipefail
+
+POLL="${FREILAUF_TMUX_ADOPT_POLL_SEC:-30}"
+
+# Is a tmux server answering on the default socket? "No server" is the only
+# answer that means we may start one; an unreachable tmux is treated as a
+# server that exists — starting a second one over a busy socket would be
+# worse than waiting one more poll.
+server_up() {
+    local out
+    if out="$(tmux list-sessions 2>&1 >/dev/null)"; then return 0; fi
+    if grep -qiE 'no server running|error connecting to' <<<"$out"; then return 1; fi
+    return 0
+}
+
+waited=0
+while server_up; do
+    if [[ $waited -eq 0 ]]; then
+        echo "a tmux server is already running (not ours) — waiting to adopt the socket when it exits" >&2
+    fi
+    waited=1
+    sleep "$POLL"
+done
+[[ $waited -eq 1 ]] && echo "the foreign tmux server is gone — starting the unit's own" >&2
+
+exec tmux -D

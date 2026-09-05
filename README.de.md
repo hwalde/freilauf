@@ -175,7 +175,7 @@ WireGuard-Interface und mindestens ein Agenten-CLI (`claude`, `opencode`,
 ```bash
 ./setup/01-npm-install.sh       # node-pty, ws, xterm.js — für DIESEN Checkout (Tests, Bearbeiten)
 ./setup/02-install-scripts.sh   # fl-start/-attach/-kill/-help/-report/-notify + freilauf + freilauf-deploy → ~/.local/bin
-./setup/03-install-services.sh  # ~/.config/freilauf/env (aus env.example) + systemd-Units
+./setup/03-install-services.sh  # ~/.config/freilauf/env (aus env.example) + systemd-Units (Hub, tmux-Server) + enable-linger
 sudo ./setup/04-firewall.sh     # ufw: VPN-Port nur auf wg0 (einmalig)
 ```
 

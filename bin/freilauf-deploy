@@ -210,7 +210,25 @@ sync_units() {
         fi
     done
     if [[ $changed == 1 ]]; then systemctl --user daemon-reload; fi
+    ensure_tmux_unit
     return 0
+}
+
+# The tmux server's own unit (deploy/freilauf-tmux.service, bin/fl-tmux-server):
+# enabled and started the first time a deploy brings it along, and never
+# restarted by a deploy — a restart of THAT unit ends every agent session on the
+# machine. On a machine whose server was spawned by an earlier hub the script
+# waits and adopts the socket when that server exits; the hub keeps working
+# either way, so this is best effort in every direction.
+ensure_tmux_unit() {
+    [[ -f "$SYSTEMD_DIR/freilauf-tmux.service" ]] || return 0
+    if [[ "$(systemctl --user is-enabled freilauf-tmux.service 2>/dev/null || true)" != enabled ]]; then
+        log "enabling freilauf-tmux.service (the tmux server's own unit)"
+        systemctl --user enable --now freilauf-tmux.service >/dev/null 2>&1 \
+            || log "WARNING: freilauf-tmux.service could not be enabled — agent sessions keep living wherever tmux was spawned"
+    elif [[ "$(systemctl --user is-active freilauf-tmux.service 2>/dev/null || true)" != active ]]; then
+        systemctl --user start freilauf-tmux.service >/dev/null 2>&1 || true
+    fi
 }
 
 # ------------------------------------------------------------------ restart + health

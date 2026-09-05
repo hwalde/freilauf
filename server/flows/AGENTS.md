@@ -331,7 +331,14 @@ attachments in the first place. Chaining is done with `wait` on the start step.
 
 Runs that were already finished more than an hour before the module first ran
 are marked dispatched at startup, and so is every merge that was already there
-— history is never replayed.
+— history is never replayed. **One thing is not history: a flow run still
+`waiting` on such a run.** The dispatcher resumes waiters inside its loop over
+undispatched runs, so a flow run waiting on a run that ended more than an hour
+before a restart was never resumed — and, being `waiting`, never pruned
+either. `endedRunsWithWaiters()` (db.mjs) is the net under that loop: every
+ended run that still has a waiter is handed to `resumeWaitingOnRun()` on every
+pass, whatever its dispatch flag says. A waiter the loop already resumed is no
+longer `waiting`, so nothing is resumed twice.
 
 ### Flow runs are deleted after a while
 
