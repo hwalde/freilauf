@@ -40,6 +40,8 @@
 //   info.json        what `docker info --format {{json .}}` answers
 //   containers.json  the fake daemon's table: name → { state, labels, … }
 //   networks.json    the same for networks
+//   images.json      tag → { id, repoDigest } — `build` writes an id and NO
+//                    repo digest, which is what a local build really produces
 //   created.txt      every container/network name this shim created, for cleanup
 //   hooks/<verb>     an executable run BEFORE the answer, with the whole argv —
 //                    the witness, for ordering questions that span two processes
@@ -117,11 +119,16 @@ function record(name) {
 }
 
 // ---------------------------------------------------------------- the argv log
+// `network` and `image` are namespaces, not verbs: `network create` and
+// `network rm` are two entirely different questions, and so are `image inspect`
+// and `image rm`. A test dictates them as `network-create` / `image-inspect`.
+const NAMESPACES = new Set(['network', 'image', 'volume', 'system'])
+
 function verbOf(a) {
   const first = a.find(x => !x.startsWith('-')) ?? ''
-  if (first === 'network') {
-    const rest = a.slice(a.indexOf('network') + 1).find(x => !x.startsWith('-'))
-    return rest ? `network-${rest}` : 'network'
+  if (NAMESPACES.has(first)) {
+    const rest = a.slice(a.indexOf(first) + 1).find(x => !x.startsWith('-'))
+    return rest ? `${first}-${rest}` : first
   }
   return first || '(none)'
 }
@@ -225,6 +232,22 @@ const BOOL_FLAGS = new Set([
 ])
 
 /**
+ * …and where one letter means two things, the VERB decides. `-f` is `--force`
+ * on `rm` and `--file` on `build`; `-t` is `--tty` on `run` and `--tag` on
+ * `build` and `--time` on `stop`. A single global table gets one of each pair
+ * wrong, and the way it goes wrong is silent: the image shifts by one position
+ * and the test asserts a command line nobody would have run.
+ */
+const VERB_VALUE_FLAGS = {
+  build: new Set(['-f', '--file', '-t', '--tag', '--build-arg', '--target', '--cache-from', '--platform', '--label']),
+  stop: new Set(['-t', '--time']),
+  exec: new Set(['-u', '--user', '-w', '--workdir', '-e', '--env']),
+}
+const VERB_BOOL_FLAGS = {
+  build: new Set(['--pull', '--no-cache', '--rm', '--quiet', '-q', '--load', '--push']),
+}
+
+/**
  * Split a docker command line into its flags and the positional tail.
  *
  * `--flag=value` counts as one token; a value flag eats the next token; an
@@ -237,7 +260,15 @@ const BOOL_FLAGS = new Set([
  * every token belongs to the command being run, and a `sh -c "…"` whose `-c`
  * was read as a flag of the shim is a command the wrapped process never sees.
  */
-function split(a) {
+function split(a, verb = '') {
+  const base = verb.split('-')[0]
+  const takesValue = VERB_VALUE_FLAGS[base] ?? null
+  const isBool = VERB_BOOL_FLAGS[base] ?? null
+  const wantsValue = (tok) => {
+    if (isBool?.has(tok)) return false
+    if (takesValue?.has(tok)) return true
+    return VALUE_FLAGS.has(tok) && !BOOL_FLAGS.has(tok)
+  }
   const flags = new Map()      // name → [values] (a boolean gets [true])
   const pos = []
   let i = 0
@@ -252,7 +283,7 @@ function split(a) {
         i++
         continue
       }
-      if (VALUE_FLAGS.has(tok) && !BOOL_FLAGS.has(tok)) { push(flags, tok, a[i + 1]); i += 2; continue }
+      if (wantsValue(tok)) { push(flags, tok, a[i + 1]); i += 2; continue }
       push(flags, tok, true)
       i++
       continue
@@ -291,9 +322,9 @@ function cwdOf(flags) {
 }
 
 // ---------------------------------------------------------------- the verbs
-// `network create …` is two words before the flags start, so the tokens to
-// parse begin one further along than for every other verb.
-const A = split(VERB.startsWith('network-') ? argv.slice(2) : argv.slice(1))
+// A namespaced verb (`network create …`, `image inspect …`) is two words before
+// the flags start, so the tokens to parse begin one further along.
+const A = split(VERB.includes('-') && NAMESPACES.has(VERB.split('-')[0]) ? argv.slice(2) : argv.slice(1), VERB)
 const flags = A.flags
 const pos = A.pos
 
@@ -520,9 +551,51 @@ switch (VERB) {
     out('')
     break
 
-  case 'build':
+  case 'build': {
+    // A build the test can assert on, and — the point — an image of the shape a
+    // LOCAL build really produces: an `Id` and NO `RepoDigests`. That list is
+    // only filled for an image that came from or went to a registry, so
+    // `imageDigest()` answers `{ id, digest: null }` here, which is exactly the
+    // case `buildRunArgv()` may not put after an `@`. A shim that always handed
+    // back a digest would hide the one thing worth testing about a build.
+    const tag = first(flags, '-t', '--tag')
+    if (tag && typeof tag === 'string') {
+      withJson('images.json', (t) => {
+        t[tag] = { id: `sha256:${fakeId(tag)}`, repoDigest: t[tag]?.repoDigest ?? null }
+        return t
+      })
+    }
+    // Deliberately NOT written into created.txt: an image is shared and long
+    // lived, and removing one another suite (or the operator) is using would
+    // invert the very rule that list exists for.
+    out(`Successfully tagged ${tag ?? '<none>'}`)
+    break
+  }
+
+  case 'image-inspect': {
+    const ref = pos[pos.length - 1]
+    const img = readJson('images.json', {})[ref]
+    if (!img) fail(1, `Error: No such object: ${ref}`)
+    const fmt = String(first(flags, '--format') ?? '')
+    // The one format server/sandbox/runtime.mjs asks for: the id, a tab, and the
+    // repo digest only if there is one.
+    if (fmt.includes('.Id')) out(`${img.id ?? ''}\t${img.repoDigest ?? ''}`)
+    out(JSON.stringify([{ Id: img.id ?? null, RepoDigests: img.repoDigest ? [img.repoDigest] : [] }]))
+    break
+  }
+
+  case 'image-rm': {
+    const ref = pos[pos.length - 1]
+    let known = false
+    withJson('images.json', (t) => { known = !!t[ref]; delete t[ref]; return t })
+    if (!known) fail(1, `Error: No such image: ${ref}`)
+    out(ref)
+    break
+  }
+
   case 'pull':
   case 'image':
+  case 'image-ls':
     out('')
     break
 

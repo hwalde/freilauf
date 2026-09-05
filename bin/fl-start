@@ -276,6 +276,7 @@ fi
 SB_WRAP=""       # sandbox/wrap.sh — the one author of the container command line
 SB_HOME=""       # the run's home INSIDE the container (same string outside)
 SB_RUNDIR=""     # the run directory, mounted rw at the identical path
+SB_SETTING_SOURCES=""  # claude --setting-sources, from the plugin's own declaration
 if [[ -n "$SANDBOX" ]]; then
     [[ -r "$SANDBOX" ]] || { err "Error: sandbox document not readable: $SANDBOX"; exit 2; }
     # Same reasoning as --spec: this is JSON, and reading it with sed would be a
@@ -288,6 +289,21 @@ if [[ -n "$SANDBOX" ]]; then
     SB_RUNDIR="$(jq -r '.ctx.runDir // empty' <"$SANDBOX" 2>/dev/null || true)"
     [[ -n "$SB_HOME" ]]   || { err "Error: sandbox document has no .ctx.homeDir: $SANDBOX"; exit 2; }
     [[ -n "$SB_RUNDIR" ]] || { err "Error: sandbox document has no .ctx.runDir: $SANDBOX"; exit 2; }
+    # What the coding agent's plugin wants changed about its own command line
+    # inside the box (`sandbox.launchOverrides`, §7.9). The hub writes the
+    # plugin's answer into the document; this script only passes it on. See
+    # claude_setting_sources_flag() for the whole of why.
+    SB_SETTING_SOURCES="$(jq -r '.ctx.launchOverrides.settingSources // empty' <"$SANDBOX" 2>/dev/null || true)"
+    if [[ -z "$SB_SETTING_SOURCES" ]] \
+       && ! jq -e 'has("ctx") and (.ctx | has("launchOverrides"))' >/dev/null 2>&1 <"$SANDBOX"; then
+        # A document written by a hub older than the declaration says nothing at
+        # all — not "no setting sources", which is a different statement. Keep
+        # the value that hub applied, because the failure this flag prevents is
+        # a run that silently never reports (§11a.3). A document that DOES carry
+        # `launchOverrides` and no `settingSources` is the plugin speaking, and
+        # its silence is honoured.
+        SB_SETTING_SOURCES="user"
+    fi
     # Where the wrapper is. It lives next to the node module that builds the
     # command line and can therefore never be installed into ~/.local/bin, so
     # the document says where the hub's checkout is; a checkout that runs this
@@ -669,21 +685,26 @@ spec_submit_nudge() {
 # silently would be a behaviour change far outside the sandbox. Whoever decides
 # to close it anyway should read §11a.3 first and know what it costs.
 #
-# ONE FACT, TWO PLACES — read this before touching either. The claude plugin
-# declares the same thing (`launchOverrides: () => ({ …, settingSources:
-# 'user' })` in server/harnesses/claude.mjs). Today nothing consumes that
-# declaration, so this function is what actually puts the flag on the command
-# line. The moment `launchOverrides` is wired into runner.mjs, delete this
-# function and let the declaration speak — or claude is handed the flag twice.
-claude_setting_sources() {
-    [[ -n "$SANDBOX" ]] || return 0
-    printf ' --setting-sources user'
+# ONE FACT, ONE AUTHOR. The value is the claude plugin's
+# (`launchOverrides: () => ({ …, settingSources: 'user' })` in
+# server/harnesses/claude.mjs); the hub writes that answer into the sandbox
+# document as `.ctx.launchOverrides.settingSources`, and this function only puts
+# it on the command line. It used to be hardcoded here while the plugin declared
+# it and nothing read the declaration — two authors of one fact, and the way
+# they eventually disagree is that one of them stops passing the flag while the
+# other still promises it.
+#
+# Unsandboxed there is no document and therefore no declaration to read, so
+# nothing is passed — see the paragraph above for why that hole stays open.
+claude_setting_sources_flag() {
+    [[ -n "$SANDBOX" && -n "$SB_SETTING_SOURCES" ]] || return 0
+    printf ' --setting-sources %s' "$(q "$SB_SETTING_SOURCES")"
 }
 
 cmd_interactive() {
     [[ -n "$SPEC_MODE" ]] && { spec_cmd "$SPEC_ARGS_KEY"; return 0; }
     case "$HARNESS" in
-        claude)  printf '%s --permission-mode %s%s' "$(q "$BIN")" "$(q "$MODE")" "$(claude_setting_sources)"
+        claude)  printf '%s --permission-mode %s%s' "$(q "$BIN")" "$(q "$MODE")" "$(claude_setting_sources_flag)"
                  [[ -n "$MODEL" ]]  && printf ' --model %s' "$(q "$MODEL")"
                  [[ -n "$EFFORT" ]] && printf ' --effort %s' "$(q "$EFFORT")"
                  : ;;
@@ -713,8 +734,8 @@ cmd_autonomous() {
     fi
     local claude_args=""
     [[ "$HARNESS" == "claude" ]] && {
-        # Sandboxed only; the reason is at claude_setting_sources().
-        claude_args+="$(claude_setting_sources)"
+        # Sandboxed only; the reason is at claude_setting_sources_flag().
+        claude_args+="$(claude_setting_sources_flag)"
         [[ -n "$MODEL" ]]             && claude_args+=" --model $(q "$MODEL")"
         [[ -n "$EFFORT" ]]            && claude_args+=" --effort $(q "$EFFORT")"
         # `--resume <id>` continues the conversation the hub started under

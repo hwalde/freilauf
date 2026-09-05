@@ -421,6 +421,32 @@ export async function stopProxy(handle) {
   return stopBuiltin(handle)
 }
 
+/**
+ * Hand the engine §7.8's substitution table: `[{ name, placeholder, value,
+ * header, prefix, hosts }]`, one entry per credential the container is to hold
+ * a placeholder for.
+ *
+ * EVERY engine answers this, including the one that cannot do it — that is the
+ * whole point of the function existing here rather than only on iron-proxy. The
+ * built-in CONNECT proxy sees a CONNECT line and encrypted bytes: there is no
+ * header to swap, and no amount of trying makes one appear. So it REFUSES, with
+ * a reason naming the engine, and the caller fails the launch on it. The
+ * alternative — a caller that has to know which engine it holds — is how the
+ * capability question ends up answered in two places, and how one of them
+ * eventually answers "no such function" instead of "this engine cannot".
+ *
+ * `{ ok: false, reason }` is a refusal, never a throw, and `{ ok: true }` means
+ * the table is really in force.
+ */
+export async function setSecrets(handle, table) {
+  if (!handle) return { ok: false, reason: 'no handle' }
+  if (handle.engine === 'iron-proxy') {
+    const mod = await import('./ironproxy.mjs')
+    return mod.setSecretsIronProxy(handle, table)
+  }
+  return { ok: false, reason: t('sandbox.proxy.inject_engine_cannot', { engine: handle.engine ?? 'builtin' }) }
+}
+
 function normalizeSafe(spec) {
   try { return normalizeSpec(spec ?? {}) } catch { return { network: {} } }
 }

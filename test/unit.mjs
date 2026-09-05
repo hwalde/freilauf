@@ -9325,6 +9325,316 @@ process.stdout.write(JSON.stringify(out))
     })
   }
 
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: the blocked need')
+
+  {
+    const { agentCopedAfter, sandboxDenialSummary, sandboxBlockedSchwere, scanSandboxLines,
+      scanneNeueBytes, vorfallWeggrund: weggrund, TYPEN: TYPEN_SB, TYP_TEXT: TEXT_SB } =
+      await import('../server/detect.mjs')
+    const { brauchtMensch, MENSCH_TYPEN } = await import('../server/incidents.mjs')
+    const t0 = Date.parse('2026-09-05T10:00:00Z')
+
+    await pruefe('the veto is one function, and it answers in both directions', () => {
+      // This is the line the whole package hangs on: work AFTER the denial says
+      // the agent coped with it, and nothing may then promote it.
+      wahr(agentCopedAfter(t0 + 60_000, t0), 'work one minute after the denial: coped')
+      falsch(agentCopedAfter(t0 - 60_000, t0), 'work BEFORE it says nothing')
+      falsch(agentCopedAfter(t0, t0), 'the same instant is not "after"')
+      // null is UNKNOWN (hermes has no activity source), never "at the epoch" —
+      // the Number(null) === 0 trap, which would read as "worked in 1970".
+      falsch(agentCopedAfter(null, t0), 'no activity source: unknown, never coped')
+    })
+
+    await pruefe('work after the denial keeps a blocked run yellow — in both directions', () => {
+      const zwei = sandboxDenialSummary([
+        { host: 'pypi.org', atMs: t0 }, { host: 'registry.npmjs.org', atMs: t0 + 30_000 }])
+      // Two distinct hosts would be red…
+      gleich(sandboxBlockedSchwere(zwei, { letzteAktivitaetMs: t0 - 60_000, jetztMs: t0 + 60_000 }), 'rot',
+        'two hosts turned away and no work since: red')
+      // …and are not, once the agent demonstrably carried on.
+      gleich(sandboxBlockedSchwere(zwei, { letzteAktivitaetMs: t0 + 45_000, jetztMs: t0 + 60_000 }), 'gelb',
+        'the same two hosts, but the agent kept working: stays yellow')
+      // The silence path is vetoed by the same evidence.
+      const eins = sandboxDenialSummary([{ host: 'pypi.org', atMs: t0 }])
+      gleich(sandboxBlockedSchwere(eins, { letzteAktivitaetMs: t0 - 1000, jetztMs: t0 + 6 * 60_000 }), 'rot',
+        'one host and six minutes of silence: red')
+      gleich(sandboxBlockedSchwere(eins, { letzteAktivitaetMs: t0 + 1000, jetztMs: t0 + 6 * 60_000 }), 'gelb',
+        'one host, and the agent worked on: yellow')
+      gleich(sandboxBlockedSchwere(eins, { letzteAktivitaetMs: null, jetztMs: t0 + 6 * 60_000 }), 'gelb',
+        'an unmeasured harness is never escalated by silence')
+    })
+
+    await pruefe('a single denial is yellow, a second DISTINCT host promotes it', () => {
+      const eins = sandboxDenialSummary([{ host: 'pypi.org', atMs: t0 }])
+      gleich(eins.hosts.length, 1, 'one host')
+      gleich(sandboxBlockedSchwere(eins, { letzteAktivitaetMs: null, jetztMs: t0 + 60_000 }), 'gelb',
+        'one denial may be exactly what the policy intended')
+      // Twenty denials of ONE host are still one host: an npm install behind a
+      // wall must not read as "this run is very blocked".
+      const viele = sandboxDenialSummary(
+        Array.from({ length: 20 }, (_, i) => ({ host: 'pypi.org', atMs: t0 + i * 1000 })))
+      gleich(viele.hosts.length, 1, 'twenty requests, one host')
+      gleich(sandboxBlockedSchwere(viele, { letzteAktivitaetMs: null, jetztMs: t0 + 60_000 }), 'gelb',
+        'and still yellow')
+      const zwei = sandboxDenialSummary([...Array.from({ length: 20 }, (_, i) => ({ host: 'pypi.org', atMs: t0 + i * 1000 })),
+        { host: 'files.pythonhosted.org', atMs: t0 + 25_000 }])
+      gleich(zwei.hosts.length, 2, 'a second host')
+      gleich(sandboxBlockedSchwere(zwei, { letzteAktivitaetMs: null, jetztMs: t0 + 60_000 }), 'rot',
+        'and the policy is demonstrably written for another job: red')
+    })
+
+    await pruefe('denials are collapsed per host per ten minutes', () => {
+      const s = sandboxDenialSummary([
+        { host: 'pypi.org', atMs: t0 },
+        { host: 'pypi.org', atMs: t0 + 60_000 },          // inside the window: not counted again
+        { host: 'pypi.org', atMs: t0 + 11 * 60_000 },     // a fresh window
+      ])
+      gleich(s.count, 2, 'two occurrences, not three')
+      gleich(s.hosts.length, 1, 'one host throughout')
+      gleich(s.erstMs, t0, 'the first denial')
+      gleich(s.zuletztMs, t0 + 11 * 60_000, 'and the last one')
+      // Junk in, nothing out — a proxy that reported no host is not a denial.
+      const leer = sandboxDenialSummary([{ host: '', atMs: t0 }, { host: 'x', atMs: NaN }, null])
+      gleich(leer.hosts.length, 0, 'no host, no denial')
+      gleich(leer.zuletztMs, null, 'and no timeline to judge')
+      gleich(sandboxBlockedSchwere(leer, { jetztMs: t0 }), 'gelb', 'nothing to judge is never red')
+    })
+
+    await pruefe('the sandbox patterns catch a real wall', () => {
+      const echt = [
+        "Error: EACCES: permission denied, open '/etc/hosts'",
+        'npm ERR! code EACCES',
+        "Error: EROFS: read-only file system, mkdir '/usr/lib/node_modules/x'",
+        "mkdir: cannot create directory '/opt/tools': Read-only file system",
+        'Error: ENOSPC: no space left on device, write',
+        'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?',
+        'curl: (6) Could not resolve host: registry.npmjs.org',
+        'Error: connect ENETUNREACH 140.82.121.4:443',
+        'ssh: connect to host github.com port 22: Network is unreachable',
+        'Freilauf sandbox: pypi.org is not reachable from this run (not on this run’s allowlist). '
+          + 'If you need it, run: fl-report access "pypi.org: why you need it" and continue with what you can do meanwhile.',
+      ]
+      for (const zeile of echt) {
+        gleich(scanSandboxLines([zeile]).length, 1, `caught: ${zeile.slice(0, 60)}`)
+      }
+    })
+
+    await pruefe('…and not what an agent working on THIS repository prints', () => {
+      // Every one of these is a line that really occurs in this checkout, on the
+      // screen of a run that is editing the sandbox feature. The exception list
+      // exists because this class of false alarm has already cost this project
+      // two production incidents ("Upgrade to Max", `555 tokens`).
+      const harmlos = [
+        // SANDBOX_RESEARCH.md §7.12.1, the whole family in one prose line.
+        '| **The log scanner** | `EACCES`, `EROFS` / `Read-only file system`, `ENOSPC` on a tmpfs, '
+          + '`Cannot connect to the Docker daemon`, `Could not resolve host`, `ENETUNREACH` |',
+        // The pattern file itself, read out loud.
+        "  { typ: 'sandbox_denied', re: /\\bcannot connect to the docker daemon\\b/i },",
+        "  { typ: 'sandbox_denied', re: /\\bEROFS\\b\\s*[:,]|:\\s*read-only file system\\b/i },",
+        // The translation catalogue — which literally contains the 403 body.
+        '"sandbox.proxy.denied": "Freilauf sandbox: {host} is not reachable from this run ({reason}). '
+          + 'If you need it, run: fl-report access \\"{host}: why you need it\\" and continue with what you can do meanwhile.",',
+        // This very test, and the e2e one next to it.
+        "      gleich(scanSandboxLines(['Error: EROFS: read-only file system, open x']).length, 1, 'caught')",
+        "        logAnhaengen(id, 'Error: ENOSPC: no space left on device, write\\n')",
+        // A grep for the vocabulary.
+        "$ rg 'Could not resolve host' server/",
+        // A doc sentence about the feature, naming the file it lives in.
+        'The new `sandbox` pattern family in server/harnesses/patterns.mjs covers ENETUNREACH and friends.',
+        // The suite reporting that the detection works.
+        '✓ the sandbox patterns catch a real wall: Cannot connect to the Docker daemon is detected',
+      ]
+      for (const zeile of harmlos) {
+        gleich(scanSandboxLines([zeile]).length, 0, `left alone: ${zeile.slice(0, 60)}`)
+      }
+    })
+
+    await pruefe('the sandbox family is only asked where there is a sandbox', () => {
+      const text = "Error: EROFS: read-only file system, open '/usr/lib/x'\n"
+      const ohne = scanneNeueBytes('claude', text, 0)
+      gleich(ohne.sandboxTreffer.length, 0, 'an unsandboxed run has an ordinary permission problem')
+      const mit = scanneNeueBytes('claude', text, 0, { sandbox: true })
+      gleich(mit.sandboxTreffer.length, 1, 'a sandboxed one has a wall')
+      gleich(mit.neuerOffset, ohne.neuerOffset, 'and the offset is the same either way — the log is read once')
+      gleich(mit.sandboxTreffer[0].typ, 'sandbox_denied', 'under its own name')
+    })
+
+    await pruefe('docker_unreachable needs a human, and never clears itself by time', () => {
+      wahr(MENSCH_TYPEN.has('docker_unreachable'), 'in the "Needs you" set')
+      wahr(brauchtMensch({ typ: 'docker_unreachable', schwere: 'rot' }, 'running'),
+        'a daemon that stopped answering does not get better by waiting')
+      wahr(TYPEN_SB.includes('docker_unreachable'), 'a known type, not "unbekannt"')
+      gleich(TEXT_SB.docker_unreachable, 'Container runtime not answering', 'and it has a name')
+      // The watcher owns its recovery (dockerAnswered()); time must not, or the
+      // incident would clear while every sandboxed run is still behind it.
+      gleich(weggrund({ typ: 'docker_unreachable', schwere: 'rot', runStatus: 'done',
+        letzteAktivitaetMs: t0, zuletztGesehenMs: t0, jetztMs: t0 + 24 * 3600_000 }), null,
+        'not even a finished run resolves it')
+    })
+
+    await pruefe('an access request is a question, and only a decision or the run answers it', () => {
+      wahr(MENSCH_TYPEN.has('sandbox_access'), 'in the "Needs you" set')
+      wahr(brauchtMensch({ typ: 'sandbox_access', schwere: 'rot' }, 'running'), 'while the run goes on')
+      // The agent was told to carry on with what it can — so the ordinary rule's
+      // evidence ("the agent kept working after it") is present by construction
+      // and must NOT close the request.
+      gleich(weggrund({ typ: 'sandbox_access', schwere: 'rot', runStatus: 'running',
+        letzteAktivitaetMs: t0 + 60 * 60_000, zuletztGesehenMs: t0, jetztMs: t0 + 61 * 60_000 }), null,
+        'an hour of work afterwards is exactly what was asked of it')
+      enthaelt(String(weggrund({ typ: 'sandbox_access', schwere: 'rot', runStatus: 'done',
+        letzteAktivitaetMs: t0, zuletztGesehenMs: t0, jetztMs: t0 + 60_000 })), 'finished',
+        'the run coming through anyway makes it moot')
+    })
+  }
+
+  gruppe('Sandbox: defect fixes')
+  //
+  // Five things the design promised and the code did not do. Each test here is
+  // the shape of the failure rather than the shape of the fix, so a later
+  // rewrite that keeps the promise keeps the test.
+  {
+    const proxy = await import('../server/sandbox/proxy.mjs')
+    const iron = await import('../server/sandbox/ironproxy.mjs')
+    const { BUILTIN_PROFILES } = await import('../server/sandbox/profiles.mjs')
+    const { normalizeSpec } = await import('../server/sandbox/spec.mjs')
+    const rd = await import('../server/run-def.mjs')
+    const { setSetting: setS } = await import('../server/db.mjs')
+    const enSb = JSON.parse(readFileSync(new URL('../lang/en.json', import.meta.url), 'utf8'))
+
+    // A handle as `startIronProxy()` builds one, minus everything that needs a
+    // daemon: these tests are about the decisions, and the decisions are the
+    // half that is testable on a machine with no container runtime at all.
+    const ironHandle = (extra = {}) => ({
+      engine: 'iron-proxy', runId: 'r-defect', spec: { network: { mode: 'allowlist', allow: ['a.example'] } },
+      secretsMode: 'inject', policy: null, secrets: [], launchCtx: { env: {} },
+      managementKey: 'k', managementPort: 8081, container: 'fl-proxy-r-defect',
+      configPath: null, blocked: new Map(), wouldBlock: new Map(), ...extra,
+    })
+
+    await pruefe('every engine answers setSecrets — and the one that cannot says so', async () => {
+      // The defect: `applySecrets()` called `proxy.setSecrets`, which no engine
+      // exported, so `secrets.mode: inject` threw "unsupported" at every launch
+      // whatever engine was configured. The capability question has to have an
+      // ANSWER, not a missing function.
+      gleich(typeof proxy.setSecrets, 'function', 'the interface carries it')
+      const nein = await proxy.setSecrets({ engine: 'builtin' }, [{ name: 'K', placeholder: 'p', value: 'v', hosts: ['a.example'] }])
+      falsch(nein.ok, 'the built-in CONNECT proxy refuses')
+      enthaelt(String(nein.reason), 'builtin', 'and names the engine that cannot')
+      gleich((await proxy.setSecrets(null, [])).ok, false, 'no handle is a refusal, never a throw')
+    })
+
+    await pruefe('an injection without hosts is refused, never guessed at', async () => {
+      const r = await iron.setSecretsIronProxy(ironHandle(), [{ name: 'OPENROUTER_API_KEY', placeholder: 'fl-token-x', value: 'real' }])
+      falsch(r.ok, 'no hosts, no injection')
+      enthaelt(String(r.reason), 'OPENROUTER_API_KEY', 'and the variable is named')
+      gleich((await iron.setSecretsIronProxy(ironHandle(), [])).ok, true, 'an empty table is a no-op, not a failure')
+    })
+
+    await pruefe('the secrets transform survives an ordinary policy reload', async () => {
+      // The trap: `proxy.yaml` is regenerated from the SPEC, and the secrets are
+      // not in the spec. A reload that forgot them would leave the container
+      // holding placeholders nobody swaps — every call a 401, on a run that
+      // looks healthy.
+      const file = join(sandkasten, 'iron-reload.yaml')
+      const handle = ironHandle({ configPath: file })
+      handle.secrets = [{ key: 'or', envVar: 'OPENROUTER_API_KEY', placeholder: 'fl-token-abc', header: 'Authorization', hosts: ['openrouter.ai'] }]
+      const r = await iron.reloadIronProxy(handle, handle.spec)
+      falsch(r.ok, 'with no reachable management listener the reload refuses')
+      const yaml = readFileSync(file, 'utf8')
+      enthaelt(yaml, 'name: "secrets"', 'and the rewritten file still carries the transform')
+      enthaelt(yaml, 'fl-token-abc', 'with the placeholder that is in the container')
+    })
+
+    await pruefe('a management listener that cannot be reached says what to do about it', async () => {
+      // The defect: `managementUrl` was `ctx.managementUrl ?? null` and nothing
+      // ever set it, so every live policy change answered "management listener
+      // unknown" — a sentence nobody can act on.
+      const bare = ironHandle({ container: null })
+      const none = await iron.resolveManagementUrl(bare)
+      gleich(none.url, null, 'without a container there is nothing to resolve')
+      const told = ironHandle({ managementUrl: 'http://proxy.example:8081/' })
+      gleich((await iron.resolveManagementUrl(told)).url, 'http://proxy.example:8081/', 'what the caller knows wins')
+      const r = await iron.reloadIronProxy(bare, bare.spec)
+      falsch(r.ok, 'and the reload does not claim success')
+      const text = String(r.reason)
+      enthaelt(text, 'FREILAUF_SANDBOX_MANAGEMENT_URL', 'the reason names the seam')
+      enthaelt(text, 'restart', 'and the other way out')
+      wahr(!!enSb['sandbox.proxy.management_unreachable'], 'the key is really in the catalog')
+    })
+
+    await pruefe('a shipped profile can start a run', () => {
+      // Three of the four asked for `secrets.mode: inject` on an engine nobody
+      // has installed, so Balanced, Locked down and Audit failed at launch as
+      // shipped. The rule is the invariant, not the value: whatever a built-in
+      // asks for, the engine it names must be able to do.
+      for (const p of BUILTIN_PROFILES) {
+        const s = normalizeSpec(p.spec)
+        const caps = proxy.engineCapabilities(s.network?.engine)
+        if ((s.secrets?.mode ?? 'env') === 'inject') {
+          wahr(caps.inject, `${p.name}: asks for inject on an engine that can`)
+        }
+        if (s.network?.tlsTerminate === true) wahr(caps.tlsTerminate, `${p.name}: asks for TLS termination on an engine that can`)
+        wahr(!!enSb[p.descKey], `${p.name}: its description is in the catalog`)
+      }
+    })
+
+    await pruefe('one reader for the break glass, and it knows every word for yes', () => {
+      // `'1'` to one reader, `'on'` to another, `'true'` to a third: the form
+      // offered the escape hatch and the endpoint refused it. Same family as
+      // `'0'` being truthy — a stored value is COMPARED, in one place.
+      const lies = (v) => { setS('sandbox_allow_bypass', v); return rd.sandboxAllowBypass() }
+      try {
+        for (const yes of ['1', 'on', 'true', 'yes', 'ON', ' true ']) wahr(lies(yes), `“${yes}” means the bypass is allowed`)
+        for (const no of ['0', 'off', 'false', 'no', 'OFF']) falsch(lies(no), `“${no}” means it is not`)
+        wahr(lies(''), 'unset means yes — a restriction is added, never inherited')
+        wahr(lies('vielleicht'), 'and a value nobody can read lands on the documented default')
+      } finally { setS('sandbox_allow_bypass', '') }
+      // The sandbox facade must not have a second opinion about any of them.
+      const facade = readFileSync(new URL('../server/sandbox/index.mjs', import.meta.url), 'utf8')
+      for (const key of ['sandbox_allow_bypass', 'sandbox_lock']) {
+        falsch(facade.includes(`getSetting('${key}')`), `${key} is not read a second time in the facade`)
+      }
+    })
+
+    await pruefe('the launcher takes --setting-sources from the declaration, not from its own head', () => {
+      const flStart = readFileSync(new URL('../bin/fl-start', import.meta.url), 'utf8')
+      // The comment above the function still names the flag and its value; what
+      // must be gone is the line that PRINTS them.
+      falsch(/printf[^\n]*--setting-sources user/.test(flStart), 'the value is not printed from a literal any more')
+      enthaelt(flStart, '.ctx.launchOverrides.settingSources', 'it comes out of the sandbox document')
+      // …and the document really carries it: the facade writes the plugin's
+      // answer into `ctx`, which is the only place fl-start can read it from.
+      const facade = readFileSync(new URL('../server/sandbox/index.mjs', import.meta.url), 'utf8')
+      enthaelt(facade, 'launchOverrides: await harnessLaunchOverrides(run, spec)', 'the ctx carries the declaration')
+      // The measured failure this flag prevents (§11a.3) is a run that never
+      // reports, so a document from an older hub keeps the old behaviour.
+      enthaelt(flStart, 'SB_SETTING_SOURCES="user"', 'and a document that says nothing at all still gets it')
+    })
+
+    await pruefe('the sandbox document names the home the way both its readers do', () => {
+      // `fl-start` refuses a document without `.ctx.homeDir` and
+      // `buildRunArgv()` mounts `ctx.homeDir`; the facade wrote only `home`, so
+      // every sandboxed run died at the launcher.
+      const facade = readFileSync(new URL('../server/sandbox/index.mjs', import.meta.url), 'utf8')
+      enthaelt(facade, 'homeDir: home', 'the writer uses the readers’ name')
+      const flStart = readFileSync(new URL('../bin/fl-start', import.meta.url), 'utf8')
+      enthaelt(flStart, '.ctx.homeDir', 'which is what the launcher asks for')
+    })
+
+    await pruefe('docker-events.jsonl has a producer, and it is stopped with the run', () => {
+      // It was declared in AUDIT_FILES, folded into the export, and written by
+      // nobody. Wiring it is only half: a `docker events` tail is a process, and
+      // a process that outlives its run is the other half.
+      const facade = readFileSync(new URL('../server/sandbox/index.mjs', import.meta.url), 'utf8')
+      enthaelt(facade, "'docker-events.jsonl'", 'the file is written')
+      enthaelt(facade, "'events', '--filter'", 'from the daemon’s own event stream')
+      enthaelt(facade, 'stopDockerEvents(runId)', 'and the tail is torn down')
+      wahr(/export async function teardownSandbox[\s\S]{0,600}stopDockerEvents/.test(facade),
+        'by the teardown, which runs on every path a run can end')
+    })
+  }
+
 } finally {
   rmSync(sandkasten, { recursive: true, force: true })
 }

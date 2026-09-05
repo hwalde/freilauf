@@ -79,6 +79,14 @@ export function displayStatus(run) {
  */
 export const IN_FLIGHT_ANOMALIES = [
   'anomaly:no_activity', 'anomaly:soft_overrun', 'anomaly:overrun', 'anomaly:session_gone',
+  // A sandbox denial belongs here for the same reason the four above do: it is a
+  // statement about a run IN FLIGHT ("the boundary refused something"), and a run
+  // that reached `done` has answered it — whatever was blocked, the work came
+  // through. The watcher already retracts it while the run lives (work after the
+  // hit, then a settle window); without this entry a run that never had to cope
+  // would carry a yellow dot for ever, which is exactly the "it spends the
+  // colour" failure the section above this list exists to prevent.
+  'anomaly:sandbox_denied',
 ]
 
 /**

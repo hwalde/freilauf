@@ -12,7 +12,8 @@ import { storeActivity } from './opencode-store.mjs'
 import { deliverPendingGoals } from './goal.mjs'
 import { claudeQuota, sevenForRun, quotaFullWindow } from './quota.mjs'
 import { refreshClaudeLimits } from './claude-usage.mjs'
-import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText, vorfallWeggrund } from './detect.mjs'
+import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText, vorfallWeggrund,
+  sandboxDenialSummary, sandboxBlockedSchwere, agentCopedAfter } from './detect.mjs'
 import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, vorfaelleMeldenFaellig, offeneVorfaelle, vorfallLoesen, detektorLog, msVon } from './incidents.mjs'
 import { pruefeTreffer, pruefLlmAktiv } from './pruefer.mjs'
 import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
@@ -92,6 +93,10 @@ export async function tick() {
   // held to its expected duration from the moment of the commission, like any
   // first attempt (see below).
   try { await watchFollowUps() } catch (e) { console.error('[watcher]', e.message) }
+  // The sandbox's denials become the one record a human sees — before the
+  // assessment below, so a promotion made this pass is judged in this pass.
+  // A complete no-op for every run that is not sandboxed.
+  try { await watchSandboxBlocks() } catch (e) { console.error('[sandbox]', e.message) }
   await vorfaelleBewerten()
   await vorfaelleMeldenFaellig()
   await providerPuls()
@@ -270,6 +275,9 @@ async function watchRun(run) {
     // its life — which reads as "this agent is not running" long after it is.
     // Same mechanism as a raised expected duration retracting its overrun.
     if (act.measured && !idle) retractNoActivity(run.id)
+    // The same retraction for the sandbox's own yellow: a wall the agent got
+    // past is history, not a call for attention (the veto, see below).
+    if (act.measured) retractSandboxDenied(run.id, lastAct, now)
     // yellow: 80 % of the expected duration reached, no report
     if (!inFinishGate && now - startedMs > 0.8 * expectedMs && !run.report_md) {
       addEventOnce(run.id, 'anomaly:soft_overrun')
@@ -454,8 +462,21 @@ async function logScannen(run) {
   try { chunk = neueBytes(logf, run.log_offset ?? 0) } catch { return }
   if (chunk.uebersprungen) detektorLog(run.id, { art: 'log', hinweis: 'backlog skipped', bytes: chunk.uebersprungen })
   if (!chunk.text) return
-  const { treffer, neuerOffset } = scanneNeueBytes(run.harness, chunk.text, chunk.von ?? run.log_offset ?? 0)
+  // The sandbox family is asked of the same bytes, in the same pass, and only
+  // where there IS a sandbox: an unsandboxed run hitting EACCES has an ordinary
+  // permission problem, and filing that as a sandbox denial would be a lie in
+  // the data (SANDBOX_RESEARCH.md §7.12.1).
+  const { treffer, sandboxTreffer, neuerOffset } =
+    scanneNeueBytes(run.harness, chunk.text, chunk.von ?? run.log_offset ?? 0, { sandbox: run.sandbox === 1 })
   db.prepare('UPDATE runs SET log_offset = ? WHERE id = ?').run(neuerOffset, run.id)
+  if (sandboxTreffer.length) {
+    detektorLog(run.id, { art: 'sandbox', treffer: sandboxTreffer.map(t => t.zeile) })
+    // Yellow and nothing more: a wall the agent ran into is worth SEEING, and a
+    // policy that turns something away is very often doing its job. It never
+    // escalates by itself — the escalation path for the sandbox is the proxy's
+    // own denials (watchSandboxBlocks) and the agent's `fl-report access`.
+    addEventOnce(run.id, 'anomaly:sandbox_denied', { line: sandboxTreffer[0].zeile })
+  }
   if (!treffer.length) return
   detektorLog(run.id, { art: 'log', treffer: treffer.map(t => ({ typ: t.typ, zeile: t.zeile })) })
 
@@ -615,6 +636,98 @@ function retractNoActivity(runId) {
   if (!had) return
   clearAnomalies(runId, ['anomaly:no_activity'])
   announceRun(runId, 'activity')
+}
+
+/** How long a sandbox denial keeps colouring a run that has since carried on. */
+const SANDBOX_DENIED_SETTLE_MS = Number(env('SANDBOX_DENIED_SETTLE_MS') ?? 10 * 60_000) || 10 * 60_000
+
+/**
+ * Take back 'anomaly:sandbox_denied' — the veto, applied to the log family.
+ *
+ * The same evidence that stops a log hit escalating stops a wall colouring a
+ * run for ever: measurable work AFTER the hit says the agent coped with it, and
+ * a hit it coped with is history rather than a call for attention. The ten
+ * minutes are `vorfallWeggrund()`'s own `arbeitMs` — retracting in the same
+ * second as the hit would make the anomaly invisible, since an agent writes to
+ * its transcript within a heartbeat of reading an error off its screen.
+ *
+ * `agentCopedAfter()` is that veto, imported and not copied: it is the first
+ * line of bewerteLogTreffer() and the first line of sandboxBlockedSchwere().
+ * A run that ends without ever coping keeps the anomaly, which is exactly what
+ * one wants to read next to a run that did not come through.
+ */
+function retractSandboxDenied(runId, aktivMs, jetztMs = Date.now()) {
+  const ev = db.prepare(`SELECT ts FROM events WHERE run_id=? AND kind='anomaly:sandbox_denied'
+                         ORDER BY id DESC LIMIT 1`).get(runId)
+  if (!ev) return
+  const seit = msVon(ev.ts)
+  if (!agentCopedAfter(aktivMs, seit)) return
+  if (jetztMs - seit < SANDBOX_DENIED_SETTLE_MS) return
+  clearAnomalies(runId, ['anomaly:sandbox_denied'])
+  announceRun(runId, 'activity')
+}
+
+/** How many DISTINCT hosts turned away make a `sandbox_blocked` incident red (§7.12.1). */
+const SANDBOX_BLOCK_HOSTS = Number(env('SANDBOX_BLOCKED_HOSTS') ?? 2) || 2
+
+/**
+ * The proxy's denials, as something a human notices (§7.12.1).
+ *
+ * `server/sandbox/index.mjs` writes one `sandbox:blocked` event per host per ten
+ * minutes; this pass is what turns those events into the one record that reaches
+ * the sidebar, the notification channel and the run's own page. Reading the
+ * EVENTS rather than being called by the proxy is deliberate: the built-in proxy
+ * runs in the hub process and iron-proxy does not, and a fact that only exists
+ * while one particular engine is loaded is a fact that goes missing the day the
+ * operator switches engines — or the hub restarts mid-run.
+ *
+ * Yellow to begin with, red when the wall is demonstrably in the way, and the
+ * veto before either (sandboxBlockedSchwere). The high-water mark is the
+ * incident's own `zuletzt_gesehen`, so a hub restarted between two passes picks
+ * up where it left off and a resolved incident reopens on the next denial —
+ * the auto-alarm principle, unchanged.
+ */
+export async function watchSandboxBlocks(jetztMs = Date.now()) {
+  const rows = db.prepare(`SELECT id, last_activity_at FROM runs
+                           WHERE sandbox=1 AND status IN ('running','waiting_help')`).all()
+  for (const run of rows) {
+    const evs = db.prepare(`SELECT ts, payload FROM events WHERE run_id=? AND kind='sandbox:blocked'
+                            ORDER BY id`).all(run.id)
+    if (!evs.length) continue
+    const denials = evs.map(e => {
+      let p = {}
+      try { p = e.payload ? JSON.parse(e.payload) : {} } catch { p = {} }
+      // The proxy's own timestamp where it gave one; the event's otherwise.
+      const at = p.at ? Date.parse(p.at) : NaN
+      return { host: p.host ?? '', atMs: Number.isFinite(at) ? at : msVon(e.ts) }
+    })
+    const summary = sandboxDenialSummary(denials)
+    if (!summary.hosts.length || summary.zuletztMs == null) continue
+
+    const aktivMs = run.last_activity_at ? msVon(run.last_activity_at) : null
+    const beleg = (`${summary.hosts.length} host(s) turned away by the sandbox proxy: `
+      + `${summary.hosts.slice(0, 6).join(', ')}${summary.hosts.length > 6 ? ', …' : ''}`
+      + ` (${summary.count}× after the per-host throttle)`).slice(0, 300)
+
+    // The LAST record of this type, resolved or not: it carries the high-water
+    // mark. Asking only for OPEN ones would count the same denials up again on
+    // every pass once somebody had clicked the incident away.
+    const letzter = db.prepare(`SELECT * FROM incidents WHERE run_id=? AND typ='sandbox_blocked'
+                                ORDER BY id DESC LIMIT 1`).get(run.id)
+    if (!letzter || summary.zuletztMs > msVon(letzter.zuletzt_gesehen)) {
+      await vorfallMelden(run.id, { typ: 'sandbox_blocked', quelle: 'proxy', schwere: 'gelb',
+        beleg, tsMs: summary.zuletztMs })
+    }
+
+    const offen = offeneVorfaelle(run.id).find(v => v.typ === 'sandbox_blocked')
+    if (!offen || offen.schwere !== 'gelb') continue
+    const schwere = sandboxBlockedSchwere(summary, { letzteAktivitaetMs: aktivMs, jetztMs,
+      hostSchwelle: SANDBOX_BLOCK_HOSTS })
+    if (schwere !== 'rot') continue
+    await vorfallEskalieren(offen.id, summary.hosts.length >= SANDBOX_BLOCK_HOSTS
+      ? `${summary.hosts.length} distinct hosts turned away`
+      : 'no activity since the denial')
+  }
 }
 
 /**

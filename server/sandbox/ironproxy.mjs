@@ -44,6 +44,8 @@ import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { t } from '../i18n.mjs'
+import { env } from '../env.mjs'
+import { sh } from '../util.mjs'
 import { normalizeSpec } from './spec.mjs'
 import { proxyPolicy, auditLine } from './proxy.mjs'
 
@@ -189,15 +191,18 @@ export async function startIronProxy(run, spec, ctx = {}) {
   }
 
   const managementKey = ctx.managementKey ?? randomBytes(24).toString('hex')
-  const argv = runtime.buildProxyArgv(spec, {
+  // Kept on the handle, because the proxy is re-launched from it when the
+  // secrets table arrives (setSecretsIronProxy below): a container's
+  // environment is fixed at creation, and iron-proxy reads the real credentials
+  // out of its own environment (§4.5).
+  const launchCtx = {
     ...ctx,
     runId,
     configPath,
     tunnelPort: ctx.tunnelPort ?? TUNNEL_PORT,
     managementPort: ctx.managementPort ?? MANAGEMENT_PORT,
     env: { ...(ctx.env ?? {}), [MANAGEMENT_KEY_ENV]: managementKey },
-  })
-  if (!argv) return failed(runId, t('sandbox.proxy.engine_missing', { reason: 'no proxy command line' }))
+  }
 
   const handle = {
     engine: 'iron-proxy',
@@ -209,8 +214,18 @@ export async function startIronProxy(run, spec, ctx = {}) {
     wouldBlock: new Map(),
     requests: 0,
     configPath,
+    launchCtx,
     managementKey,
+    managementPort: launchCtx.managementPort,
+    // Resolved lazily, never here: right after the spawn the container has no
+    // address yet, and the one thing worse than an unknown management listener
+    // is a remembered wrong one. See resolveManagementUrl().
     managementUrl: ctx.managementUrl ?? null,
+    // The `secrets` transform, once `setSecrets()` has been handed one. Kept so
+    // an ordinary policy reload rewrites the file WITH it — regenerating the
+    // config from the spec alone would silently drop every injection rule and
+    // turn every API call in the container into a 401.
+    secrets: [],
     container: ctx.containerName ?? (runId ? `fl-proxy-${runId}` : null),
     runtimeId: info.id,
     audit: ctx.runDir ? openAudit(ctx.runDir) : null,
@@ -218,21 +233,82 @@ export async function startIronProxy(run, spec, ctx = {}) {
     tail: null,
   }
 
-  // The command line comes from runtime.mjs — the container runtime's argv is
-  // that module's subject, and a second place that knows how to say
-  // `docker run` is a second place that would drift. Spawning it is this
-  // module's, because the proxy's stdout IS its audit stream (tailLog below).
+  const started = await spawnProxy(handle)
+  if (!started.ok) return failed(runId, t('sandbox.proxy.engine_missing', { reason: started.reason }))
+  return handle
+}
+
+/**
+ * Launch (or re-launch) the proxy container from the handle's own `launchCtx`.
+ *
+ * The command line comes from runtime.mjs — the container runtime's argv is that
+ * module's subject, and a second place that knows how to say `docker run` is a
+ * second place that would drift. Spawning it is this module's, because the
+ * proxy's stdout IS its audit stream (tailLog below).
+ */
+async function spawnProxy(handle) {
+  let runtime
+  try { runtime = await import('./runtime.mjs') }
+  catch (err) { return { ok: false, reason: err?.message || String(err) } }
+  const argv = runtime.buildProxyArgv(handle.spec, handle.launchCtx)
+  if (!argv) return { ok: false, reason: 'no proxy command line' }
   try {
     const { spawn } = await import('node:child_process')
     const child = spawn(argv.bin, argv.args, { stdio: ['ignore', 'pipe', 'pipe'] })
     child.on('error', () => {})
     child.stderr?.resume()
     handle.child = child
+    // A fresh container is a fresh address, so whatever was remembered about
+    // the management listener describes a container that no longer exists.
+    handle.managementUrl = handle.launchCtx.managementUrl ?? null
     tailLog(handle, child.stdout)
+    return { ok: true }
   } catch (err) {
-    return failed(runId, t('sandbox.proxy.engine_missing', { reason: err?.message || String(err) }))
+    return { ok: false, reason: err?.message || String(err) }
   }
-  return handle
+}
+
+/**
+ * Where the hub can reach this proxy's management listener, or `null` with a
+ * reason it can print.
+ *
+ * The listener is inside the proxy container on `0.0.0.0:<managementPort>`, and
+ * the hub is on the host — so the address is the container's own, asked of the
+ * daemon once and remembered. Two seams come first: `ctx.managementUrl` (what a
+ * caller already knows, and what the tests hand over) and
+ * `FREILAUF_SANDBOX_MANAGEMENT_URL` (an operator who published the port, or who
+ * runs the proxy somewhere this hub can name).
+ *
+ * A failure is NOT remembered: right after the spawn the container may be a beat
+ * behind the question, and "could not ask" is not "there is no listener" — the
+ * same distinction `tmuxVerdict()` exists for.
+ */
+export async function resolveManagementUrl(handle) {
+  if (!handle) return { url: null, reason: 'no handle' }
+  if (handle.managementUrl) return { url: handle.managementUrl, reason: null }
+  const fromEnv = env('SANDBOX_MANAGEMENT_URL')
+  if (fromEnv) { handle.managementUrl = String(fromEnv).replace(/\/$/, ''); return { url: handle.managementUrl, reason: null } }
+  if (!handle.container) return { url: null, reason: 'no proxy container' }
+
+  let bin = 'docker'
+  try { bin = (await import('./runtime.mjs')).runtimeBin(handle.runtimeId) } catch { /* the default is right for docker and podman alike */ }
+  // Every network the container is on, by NAME, because a proxy has two legs
+  // (§7.5.2) and one of them is the run's own `internal` network — which is
+  // precisely the one the host cannot route to. So that name is asked for and
+  // dropped rather than hoped to sort last. Anything left is a best effort; an
+  // installation where none of it is reachable sets
+  // FREILAUF_SANDBOX_MANAGEMENT_URL, and the refusal below names it.
+  const r = await sh(bin, ['inspect', '--format',
+    '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}={{$v.IPAddress}} {{end}}', handle.container], { timeout: 15_000 })
+  if (!r.ok) return { url: null, reason: (r.stderr || '').trim() || `${bin} inspect failed` }
+  const legs = String(r.stdout ?? '').trim().split(/\s+/)
+    .map(pair => { const i = pair.indexOf('='); return i < 0 ? null : { net: pair.slice(0, i), ip: pair.slice(i + 1) } })
+    .filter(l => l && l.ip && l.ip !== '<no value>')
+  const internal = handle.launchCtx?.network ?? null
+  const address = (legs.find(l => l.net !== internal) ?? legs[0])?.ip
+  if (!address) return { url: null, reason: 'the proxy container has no address yet' }
+  handle.managementUrl = `http://${address}:${handle.managementPort ?? MANAGEMENT_PORT}`
+  return { url: handle.managementUrl, reason: null }
 }
 
 function failed(runId, reason) {
@@ -259,31 +335,153 @@ function openAudit(runDir) {
 export async function reloadIronProxy(handle, spec) {
   if (!handle || handle.ok === false) return { ok: false, reason: handle?.reason ?? 'no handle' }
   const next = proxyPolicy(spec, { secretsMode: handle.secretsMode })
-  if (handle.configPath) {
-    try {
-      writeFileSync(handle.configPath, ironProxyConfig(spec, { secretsMode: handle.secretsMode }), { mode: 0o600 })
-    } catch (err) {
-      return { ok: false, reason: err?.message || String(err) }
-    }
-  }
-  if (!handle.managementUrl) {
-    // No management listener reachable: the file is right and the running
-    // pipeline is not. Say so — a silent "ok" here would make the UI claim a
-    // policy change that never reached the proxy.
-    return { ok: false, reason: 'management listener unknown', policy: handle.policy }
-  }
-  try {
-    const res = await fetch(`${handle.managementUrl.replace(/\/$/, '')}/v1/reload`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${handle.managementKey}` },
-    })
-    if (!res.ok) return { ok: false, reason: `HTTP ${res.status}`, policy: handle.policy }
-  } catch (err) {
-    return { ok: false, reason: err?.message || String(err), policy: handle.policy }
-  }
+  const written = writeConfig(handle, spec)
+  if (!written.ok) return { ok: false, reason: written.reason, policy: handle.policy }
+  const posted = await postReload(handle)
+  if (!posted.ok) return { ok: false, reason: posted.reason, policy: handle.policy }
   handle.policy = next
   handle.spec = spec
   return { ok: true, policy: next }
+}
+
+/**
+ * Rewrite `proxy.yaml` from the spec AND the handle's own secrets table.
+ *
+ * Both, always: the secrets are not in the spec (they are minted per launch and
+ * carry values that must never be written into a run's stored definition), so a
+ * config regenerated from the spec alone drops every injection rule — and the
+ * container would go on holding placeholders nobody swaps, which is a run whose
+ * every API call 401s while it looks perfectly healthy.
+ */
+function writeConfig(handle, spec) {
+  if (!handle.configPath) return { ok: true }
+  try {
+    writeFileSync(handle.configPath,
+      ironProxyConfig(spec, { ...(handle.launchCtx ?? {}), secretsMode: handle.secretsMode, secrets: handle.secrets ?? [] }),
+      { mode: 0o600 })
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, reason: err?.message || String(err) }
+  }
+}
+
+/**
+ * `POST /v1/reload` on the management listener.
+ *
+ * The reason of a failure is written for somebody who has to DO something about
+ * it: the file on disk is already the new policy and the running proxy is still
+ * the old one, so it names the container, the port, what went wrong and the two
+ * ways out (restart the run, or point `FREILAUF_SANDBOX_MANAGEMENT_URL` at an
+ * address the hub can reach). A silent "ok" here would make the page claim a
+ * policy change that never left the hub.
+ */
+async function postReload(handle) {
+  const { url, reason } = await resolveManagementUrl(handle)
+  if (!url) {
+    return { ok: false, reason: t('sandbox.proxy.management_unreachable', {
+      container: handle.container ?? '?', port: String(handle.managementPort ?? MANAGEMENT_PORT), reason: reason ?? '',
+    }) }
+  }
+  try {
+    const res = await fetch(`${url.replace(/\/$/, '')}/v1/reload`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${handle.managementKey}` },
+    })
+    if (!res.ok) {
+      return { ok: false, reason: t('sandbox.proxy.management_unreachable', {
+        container: handle.container ?? '?', port: String(handle.managementPort ?? MANAGEMENT_PORT), reason: `HTTP ${res.status}`,
+      }) }
+    }
+  } catch (err) {
+    // The address was resolved and did not answer — the container may have been
+    // replaced since. Forget it, so the next attempt asks the daemon again.
+    handle.managementUrl = handle.launchCtx?.managementUrl ?? null
+    return { ok: false, reason: t('sandbox.proxy.management_unreachable', {
+      container: handle.container ?? '?', port: String(handle.managementPort ?? MANAGEMENT_PORT),
+      reason: err?.message || String(err),
+    }) }
+  }
+  return { ok: true }
+}
+
+/**
+ * §7.8's `inject`, on the engine that can actually do it: the container holds a
+ * placeholder, and this table tells the proxy what to swap it for, on that
+ * credential's own hosts and nowhere else.
+ *
+ * `table` is `[{ name, placeholder, value, header, prefix, hosts }]` — `name` is
+ * the environment variable the agent's CLI reads, `value` the real credential.
+ *
+ * TWO THINGS HAPPEN HERE, AND THE SECOND ONE IS WHY THIS IS NOT A RELOAD.
+ *
+ *  1. The `secrets` transform is written into `proxy.yaml` — the rule half:
+ *     which placeholder, in which header, to which hosts.
+ *  2. The real values are put into the PROXY CONTAINER'S ENVIRONMENT, because
+ *     that is the only source §4.5 documents (`source: { type: env, var }`) and
+ *     the hub must not invent a config field that ships a secret inline. A
+ *     running container's environment cannot be changed, so the proxy is
+ *     stopped and started again from the same `launchCtx` with those variables
+ *     added. That is affordable exactly here and nowhere else: this runs while
+ *     the sandbox is being prepared, BEFORE the agent's container exists, so
+ *     there is no traffic to drop — which is also why a live `secrets.mode`
+ *     change is classified as needing a restart (§7.12.3) rather than as a
+ *     live policy change.
+ *
+ * A refusal is `{ ok: false, reason }` and never a silent success: the caller
+ * fails the launch on it, because a placeholder nobody swaps and a real key in
+ * the container are both worse than a run that does not start.
+ */
+export async function setSecretsIronProxy(handle, table) {
+  if (!handle || handle.ok === false) return { ok: false, reason: handle?.reason ?? 'no handle' }
+  const entries = Array.isArray(table) ? table : []
+  if (!entries.length) return { ok: true, injected: [] }
+
+  // An injection without hosts would hand the real credential to whatever the
+  // agent happened to call — the one shape docs/plugins.md refuses outright.
+  const homeless = entries.filter(s => !s?.name || !s?.placeholder || !Array.isArray(s.hosts) || !s.hosts.length)
+  if (homeless.length) {
+    return { ok: false, reason: t('sandbox.proxy.inject_no_hosts', { vars: homeless.map(s => s?.name ?? '?').join(', ') }) }
+  }
+
+  handle.secrets = entries.map(s => ({
+    key: s.key ?? s.name,
+    envVar: s.name,
+    placeholder: s.placeholder,
+    header: s.header || 'Authorization',
+    hosts: s.hosts,
+  }))
+  const written = writeConfig(handle, handle.spec)
+  if (!written.ok) return { ok: false, reason: written.reason }
+
+  // The prefix belongs to the VALUE, not to the rule: iron-proxy substitutes
+  // what the variable holds, so `Bearer ` has to be part of it wherever the
+  // plugin declared one — otherwise the swapped header carries a bare token.
+  const secretEnv = {}
+  for (const s of entries) secretEnv[s.name] = `${s.prefix ?? ''}${s.value ?? ''}`
+
+  await stopProxyContainer(handle)
+  handle.launchCtx = { ...(handle.launchCtx ?? {}), env: { ...(handle.launchCtx?.env ?? {}), ...secretEnv } }
+  const started = await spawnProxy(handle)
+  if (!started.ok) return { ok: false, reason: t('sandbox.proxy.inject_restart_failed', { reason: started.reason }) }
+  return { ok: true, injected: entries.map(s => s.name) }
+}
+
+/** Stop and remove the proxy container, so the name is free for the next `run`. */
+async function stopProxyContainer(handle) {
+  try { handle.tail?.destroy?.() } catch {}
+  handle.tail = null
+  try { handle.child?.kill?.('SIGTERM') } catch {}
+  handle.child = null
+  if (!handle.container) return
+  try {
+    const runtime = await import('./runtime.mjs')
+    await runtime.stopContainer(handle.container, { runtime: handle.runtimeId, timeoutSec: 10 })
+    await runtime.removeContainer(handle.container, { runtime: handle.runtimeId, force: true })
+  } catch {
+    // Fail-soft like every teardown here: a container that will not go is
+    // `docker run --name`'s problem a moment from now, and it reports it
+    // readably.
+  }
 }
 
 export async function stopIronProxy(handle) {

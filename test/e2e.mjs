@@ -6158,14 +6158,65 @@ export default {
       gleich(runtime.runtimeBin('docker'), shim.BIN, 'the seam really points at the shim')
     })
 
+    /**
+     * Every mode change is restored in a `finally`, and that is not tidiness.
+     * The shim's mode lives in a FILE that outlives the check that set it, so a
+     * failing assertion inside one of these used to leave the whole group's
+     * runtime answering `command not found` — five red checks, none of them
+     * about what they said they were about. A fixture that survives its own
+     * test's failure hides the one failure that was real.
+     */
+    async function imModus(mode, fn) {
+      shim.mode(mode)
+      runtime._runtimeInfoCacheReset()
+      try { return await fn() } finally {
+        shim.mode('ok')
+        runtime._runtimeInfoCacheReset()
+      }
+    }
+
     await pruefe('an absent binary is "not available", not a crash', async () => {
-      runtime._runtimeInfoCacheReset()
-      shim.mode('absent')
-      const info = await runtime.runtimeInfo('docker', { force: true })
-      falsch(info.available, 'not available')
-      wahr(['no_binary', 'unreachable'].includes(info.reason), `reason is a machine token (${info.reason})`)
-      shim.mode('ok')
-      runtime._runtimeInfoCacheReset()
+      await imModus('absent', async () => {
+        const info = await runtime.runtimeInfo('docker', { force: true })
+        falsch(info.available, 'not available')
+        // A DOTTED i18n key, never a bare word: the settings page prints this
+        // reason, and `no_binary` reached the operator as those nine characters
+        // on the one line they read while working out what to install. Asserted
+        // as the KEY and not as the sentence, so improving the English does not
+        // turn this red.
+        wahr(String(info.reason).startsWith('sandbox.reason.'),
+          `a dotted reason key, got ${info.reason}`)
+        wahr(['sandbox.reason.no_binary', 'sandbox.reason.unreachable'].includes(info.reason),
+          `and one this case can produce (${info.reason})`)
+      })
+    })
+
+    // Deliberately NOT tested here: that an unknown runtime id is refused by
+    // name. `runtimeBin()` returns the seam's binary BEFORE it consults the
+    // runtime table, so with the shim named `runtimeInfo('nosuch')` probes the
+    // shim and comes back available — the seam replaces the binary wholesale,
+    // which is what makes it a seam. That refusal belongs where there is no
+    // seam, and test/unit.mjs asserts it there.
+    let gebautesImage = null
+    await pruefe('a build goes through the shim, and a local image has an id but no digest', async () => {
+      shim.reset()
+      const r = await runtime.buildImage('base', { runtime: 'docker' })
+      wahr(r.ok, `the build succeeded (${JSON.stringify(r).slice(0, 200)})`)
+      const a = shim.lastArgv('build')
+      wahr(!!a, 'and it really went through the runtime binary')
+      wahr(a.includes('-f') && a.some(x => x.endsWith('base.Dockerfile')), `-f names the Dockerfile (${a.join(' ')})`)
+      wahr(a.includes('--build-arg') && a.some(x => x.startsWith('UID=')), 'the uid travels as a build arg (§7.7)')
+      wahr(a.includes('-t'), '-t names the tag')
+      // The trap the runtime's own comment names: `RepoDigests` is filled only
+      // for an image that came from or went to a registry, so a LOCAL build has
+      // an Id and no pinnable digest — and `buildRunArgv()` may put only the
+      // latter after an `@`. A shim that always answered a digest would hide it.
+      gleich(r.digest, null, 'a locally built image has no repo digest')
+      wahr(!!r.imageId, `but it has an id, which is what provenance is recorded from (${r.imageId})`)
+      const d = await runtime.imageDigest(r.image)
+      gleich(d.digest, null, 'and asking again says the same')
+      gleich(d.id, r.imageId, 'about the same image')
+      gebautesImage = r.image
     })
 
     // ---- the command line of §7.11, read out of the shim's own log ----------
@@ -6347,25 +6398,22 @@ export default {
 
     // ---- the verdict: "the daemon did not answer" is not "there is nothing" --
     await pruefe('an unreachable daemon is a third answer, not an empty one', async () => {
-      shim.mode('unreachable')
-      const antwort = await runtime.listOwned('e2e-hub')
-      gleich(antwort.verdict, 'unreachable', 'the verdict travels with the empty list')
-      gleich(antwort.containers.length, 0, 'and the list IS empty — which is why the verdict has to be read')
-      const zustand = await runtime.containerState('fl-e2e-exec')
-      gleich(zustand.verdict, 'unreachable', 'containerState says the same')
-      gleich(zustand.exists, null, 'exists is null, not false — nobody answered')
-      shim.mode('ok')
+      await imModus('unreachable', async () => {
+        const antwort = await runtime.listOwned('e2e-hub')
+        gleich(antwort.verdict, 'unreachable', 'the verdict travels with the empty list')
+        gleich(antwort.containers.length, 0, 'and the list IS empty — which is why the verdict has to be read')
+        const zustand = await runtime.containerState('fl-e2e-exec')
+        gleich(zustand.verdict, 'unreachable', 'containerState says the same')
+        gleich(zustand.exists, null, 'exists is null, not false — nobody answered')
+      })
     })
 
     await pruefe('a watcher pass with an unreachable daemon reaps nothing and ends no run', async () => {
       const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-Unreachable' })
       await sessionMerken(j.runId)
       db.prepare('UPDATE runs SET sandbox=1, sandbox_container=? WHERE id=?').run(`fl-${j.runId}`, j.runId)
-      shim.mode('unreachable')
-      shim.reset()
-      shim.mode('unreachable')
-      await watcherTick()
-      shim.mode('ok')
+      shim.reset()          // reset() clears the mode too, so it is set AFTER it
+      await imModus('unreachable', () => watcherTick())
       gleich(lauf(j.runId).status, 'running', 'the run is untouched — a daemon restart must not end it')
       falsch(ereignisse(j.runId).includes('sandbox:container_gone'),
         'and nothing claimed its container was gone')
@@ -6611,6 +6659,13 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       // Only from here on does the hub sandbox anything: `sandbox_mode` is `off`
       // by default and that is what every group above ran under.
       sk.setzeEinstellung('sandbox_mode', 'available')
+      let sandboxDoc = null            // the sandbox.json the hub really wrote
+      // The image the run is launched from. Without one `buildRunArgv()`
+      // refuses — "there is nothing to start" — and rightly so; the repo column
+      // is the operator's own way of naming it, and the tag is the one the
+      // build above produced, so the two halves of this group describe one
+      // image rather than two.
+      db.prepare('UPDATE repos SET sandbox_image=? WHERE id=?').run(gebautesImage ?? 'freilauf/base:1', repoId)
       await pruefe('a run started with the sandbox on is prepared as one', async () => {
         shim.reset()
         const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-Launch', sandbox: 'on' })
@@ -6626,7 +6681,32 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
         wahr(shim.order().includes('network-create'),
           `the per-run network was created (${JSON.stringify(shim.order())})`)
         wahr(!!shim.networks()[`fl-net-${j.runId}`], 'and it is called fl-net-<run id>')
+        sandboxDoc = join(SB, 'runs', j.runId, 'sandbox.json')
         await hol(`/api/runs/${j.runId}/kill`, { method: 'POST' })
+      })
+
+      await pruefe('the pane command the launcher prints resolves to the shim too', async () => {
+        // The fence has to reach the LAST hop, or the suite asserts a command
+        // line nobody runs: `sandbox/runtime-cli.mjs` is what `wrap.sh` execs
+        // into the tmux pane, it calls the same `buildRunArgv()`, and it
+        // resolves the binary through `runtimeBin()` in ITS OWN process. That
+        // process inherits `FREILAUF_SANDBOX_RUNTIME_BIN` from whoever launched
+        // it — the hub in production, this suite here — and the binary is an
+        // ABSOLUTE path, so no PATH lookup stands between the two.
+        wahr(!!sandboxDoc && existsSync(sandboxDoc), `the hub wrote a sandbox document (${sandboxDoc})`)
+        const r = await sh(process.execPath,
+          [join(PROJEKT, 'sandbox', 'runtime-cli.mjs'), sandboxDoc, '--term', 'xterm-256color',
+            '--', 'sh', '-c', 'echo pane'])
+        wahr(r.ok, `the launcher printed a command line (${r.stderr.trim()})`)
+        const argv = r.stdout.split('\0').filter(Boolean)
+        gleich(argv[0], shim.BIN, 'the binary the pane would exec is the shim, not a bare docker')
+        gleich(argv[1], 'run', 'and it is a `run`')
+        gleich(argv.slice(-3).join(' '), 'sh -c echo pane', 'with the harness command as its tail')
+        // …and the printed line really is runnable: the shim's launcher carries
+        // its own state directory, so a pane that inherits nothing still lands
+        // in this sandbox and nowhere near a real daemon.
+        const lauf2 = await sh(argv[0], argv.slice(1))
+        enthaelt(lauf2.stdout, 'pane', 'and running it does what the pane would do')
       })
 
       await pruefe('the form refuses a loosening override outright', async () => {
@@ -6662,6 +6742,7 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
         sk.setzeEinstellung('sandbox_lock', '[]')
         await hol(`/api/runs/${j.runId}/kill`, { method: 'POST' })
       })
+      db.prepare('UPDATE repos SET sandbox_image=NULL WHERE id=?').run(repoId)
       sk.setzeEinstellung('sandbox_mode', 'off')
     }
 
@@ -6673,6 +6754,19 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       wahr(erzeugt.includes(`fl-${RUN_ID}`), `the argv-log container is on the list (${erzeugt.length} entries)`)
       wahr(erzeugt.every(n => n.startsWith('fl-') || n.startsWith('network:') || n.startsWith('shim-')),
         `and nothing foreign is (${JSON.stringify(erzeugt)})`)
+    })
+
+    // The seam goes back the way this group found it: FREILAUF_SANDBOX_RUNTIME_BIN
+    // and the shim on the PATH live in THIS process's environment, and every
+    // child it starts from here on would inherit them — a later group, a --echt
+    // run, anything. A fixture that outlives the test that set it is the same
+    // failure the shim's mode file had a moment ago, and it is the one way a
+    // "no container runtime" check somewhere else could quietly find one.
+    watcherTick = await sk.watcherVorbereiten({ sandbox: false })
+    await pruefe('the group leaves no runtime behind in the environment', () => {
+      gleich(process.env.FREILAUF_SANDBOX_RUNTIME_BIN, undefined, 'no runtime binary is named any more')
+      gleich(process.env.FREILAUF_SANDBOX_OFF, '1', 'and the hard off is back on')
+      falsch(String(process.env.PATH ?? '').split(':').includes(sk.SHIM_DIR), 'the shim is off the PATH')
     })
   }
 
@@ -6868,6 +6962,122 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       gleich((await formular('/settings/sandbox', { sandbox_mode: 'available' }, { alsBrowser: true })).status, 303,
         'and with a runtime found the mode may be raised')
     })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: the blocked need')
+
+  {
+    // The two channels that turn "the sandbox is in the agent's way" into
+    // something a person sees (SANDBOX_RESEARCH.md §7.12.1): the agent asking,
+    // and the proxy turning a host away. Both are exercised on rows written
+    // straight into the database — what is under test is the hub's REACTION,
+    // and a real container would only add a runtime to the list of things that
+    // can make this test flaky.
+    //
+    // No tmux session on purpose: `verwaisteLaeufeAbschliessen()` leaves a
+    // session-less run alone for five minutes, and giving it a fake session
+    // name would send the watcher off to RESUME it.
+    const legeSandboxLauf = () => {
+      const id = randomUUID()
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                   sandbox,sandbox_container,started_at)
+                  VALUES(?,?,'claude','sandbox need','keiner',45,'running',1,?,datetime('now'))`)
+        .run(id, repoId, `fl-${id.slice(0, 8)}`)
+      mkdirSync(join(SB, 'runs', id), { recursive: true })
+      return id
+    }
+    const vorfaelleVon = (id) => db.prepare('SELECT * FROM incidents WHERE run_id=? ORDER BY id').all(id)
+    const blockEreignis = (id, host, atMs) =>
+      db.prepare(`INSERT INTO events(run_id,kind,payload) VALUES(?,'sandbox:blocked',?)`)
+        .run(id, JSON.stringify({ host, method: 'CONNECT', count: 1, at: new Date(atMs).toISOString() }))
+    const melde = (id, body) => hol(`/api/runs/${id}/report`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    // A `sandbox=1` row makes `sandboxInUse()` true, and this suite process has
+    // no runtime shim by the time this group runs (the container-path group
+    // clears it deliberately and asserts that it did). Three silent passes then
+    // open a global `docker_unreachable` — which is the fixture talking, not the
+    // feature, so the counter is put back before every tick below.
+    const { _resetDockerSilence } = await import('../server/watcher.mjs')
+    const tick = async () => { _resetDockerSilence(); await watcherTick() }
+
+    const SB_ASK = legeSandboxLauf()
+
+    await pruefe('fl-report access reaches a human and leaves the run RUNNING', async () => {
+      const j = await (await melde(SB_ASK, { kind: 'access',
+        text: 'pypi.org: the test dependencies are installed from there' })).json()
+      wahr(j.ok, `the hub accepts the kind (${JSON.stringify(j).slice(0, 160)})`)
+      // The answer travels back as the agent's own tool output — the one moment
+      // it is guaranteed to read something.
+      enthaelt(String(j.message ?? ''), 'keep working', 'and it tells the agent to carry on meanwhile')
+      // THE difference from a help call: the agent did not stop, so the run
+      // must not read as waiting for a human.
+      gleich(lauf(SB_ASK).status, 'running', 'the run stays running')
+      const v = vorfaelleVon(SB_ASK).find(x => x.typ === 'sandbox_access')
+      wahr(!!v, 'an incident was opened')
+      gleich(v.schwere, 'rot', 'red: a wall does not clear itself by waiting')
+      enthaelt(v.beleg ?? '', 'pypi.org', "carrying the agent's own words")
+      const ev = ereignisse(SB_ASK)
+      wahr(ev.includes('access_request'), "the run's own history says so")
+      wahr(ev.includes('notified:access'), 'and the configured channels were told')
+      // …and it is where a human already looks. Asserted through the incident's
+      // own resolve route and its evidence rather than through the rendered
+      // name, which is translated and therefore says more about the UI language
+      // an earlier group left behind than about this feature.
+      const html = await (await hol(`/runs/${SB_ASK}`)).text()
+      enthaelt(html, `/api/incidents/${v.id}/resolve`, 'the run page offers the one button')
+      enthaelt(html, 'pypi.org', 'and shows what the agent asked for')
+    })
+
+    await pruefe('a muted run gets no message and keeps the incident', async () => {
+      db.prepare('UPDATE runs SET telegram_on=0 WHERE id=?').run(SB_ASK)
+      const j = await (await melde(SB_ASK, { kind: 'access',
+        text: 'files.pythonhosted.org: the wheels live there' })).json()
+      wahr(j.ok, 'the request is processed exactly as before')
+      enthaelt(ereignisse(SB_ASK).join(','), 'notify_muted', 'the silence is written down')
+      const v = vorfaelleVon(SB_ASK).find(x => x.typ === 'sandbox_access')
+      wahr(v.anzahl >= 2, `the incident counted the second need (${v.anzahl}×)`)
+      gleich(lauf(SB_ASK).status, 'running', 'and the run is still running')
+      db.prepare('UPDATE runs SET telegram_on=1 WHERE id=?').run(SB_ASK)
+    })
+
+    const SB_DENY = legeSandboxLauf()
+
+    await pruefe('a proxy denial becomes a yellow incident', async () => {
+      blockEreignis(SB_DENY, 'pypi.org', Date.now() - 20_000)
+      await tick()
+      const v = vorfaelleVon(SB_DENY).find(x => x.typ === 'sandbox_blocked')
+      wahr(!!v, 'the watcher turned the event into a record')
+      gleich(v.schwere, 'gelb', 'yellow — one denial may be exactly what the policy intended')
+      gleich(v.quelle, 'proxy', 'and it says where it came from')
+      enthaelt(v.beleg ?? '', 'pypi.org', 'naming the host that was turned away')
+      // Twenty more requests to the SAME host are still one host.
+      for (let i = 0; i < 5; i++) blockEreignis(SB_DENY, 'pypi.org', Date.now() - 15_000 + i)
+      await tick()
+      gleich(vorfaelleVon(SB_DENY).find(x => x.typ === 'sandbox_blocked').schwere, 'gelb',
+        'the same host again does not promote it')
+    })
+
+    await pruefe('a second distinct host promotes it to red', async () => {
+      blockEreignis(SB_DENY, 'files.pythonhosted.org', Date.now() - 5_000)
+      await tick()
+      const v = vorfaelleVon(SB_DENY).find(x => x.typ === 'sandbox_blocked')
+      gleich(v.schwere, 'rot', 'two hosts: the policy is written for another job')
+      enthaelt(v.beleg ?? '', 'files.pythonhosted.org', 'the second host is in the evidence')
+      wahr(ereignisse(SB_DENY).includes('incident:eskaliert'), 'the run records the promotion')
+    })
+
+    await pruefe('a sandboxed run\'s log turns a wall into a yellow anomaly', async () => {
+      logAnhaengen(SB_DENY, "Error: EROFS: read-only file system, mkdir '/usr/lib/node_modules/x'\n")
+      await tick()
+      wahr(ereignisse(SB_DENY).includes('anomaly:sandbox_denied'),
+        'the log scanner saw it')
+    })
+
+    // Leave nothing standing: these rows never had a session, and a `running`
+    // row outlives the suite in the overview of anybody debugging with --keep.
+    db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now') WHERE id IN (?,?)`)
+      .run(SB_ASK, SB_DENY)
   }
 
 } catch (err) {

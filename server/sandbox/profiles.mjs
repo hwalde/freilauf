@@ -26,6 +26,31 @@ import { normalizeSpec } from './spec.mjs'
  * what a page prints. A profile the operator renames simply becomes their own
  * row, which is exactly the copy-on-write rule above.
  */
+// ## A shipped profile must be able to start a run
+//
+// Three of these four asked for `secrets.mode: 'inject'` and
+// `network.engine: 'iron-proxy'`, and shipped that way for a while — with the
+// consequence that Balanced, Locked down and Audit **could not start a run on
+// any machine**, because `inject` needs an engine that terminates TLS and
+// iron-proxy is not installed anywhere yet. The refusal at launch was right
+// (§7.8: falling back to `env` would put the real key inside the very container
+// the profile promised held nothing but a placeholder). What was wrong was
+// promising it in the default.
+//
+// So the shipped defaults are what a plain Docker installation can really run:
+// the built-in CONNECT proxy, `secrets.mode: 'env'`. That is not a retreat from
+// the design — the allowlist, the read-only root, the resource fence and the
+// per-run home are the wall, and every one of them works today. `inject` is an
+// EXPLICIT UPGRADE: install and configure iron-proxy, copy a profile (editing a
+// built-in writes a copy — see above) and set
+//
+//     "network": { "engine": "iron-proxy", "tlsTerminate": true },
+//     "secrets": { "mode": "inject" }
+//
+// The three settings are one decision and stand together; the profile editor
+// refuses `inject` where the chosen engine cannot do it, and `setSecrets()` on
+// the built-in engine refuses it again at launch. A default that cannot start a
+// run is the one thing worse than a default that is not the strictest possible.
 export const BUILTIN_PROFILES = [
   {
     key: 'balanced',
@@ -35,14 +60,11 @@ export const BUILTIN_PROFILES = [
     spec: {
       network: {
         mode: 'allowlist',
-        engine: 'iron-proxy',
+        engine: 'builtin',
         presets: ['harness', 'provider', 'git-host', 'package-registries'],
-        // `secrets.mode: inject` needs a proxy that terminates TLS — it swaps a
-        // placeholder for the real key in the request's own header (§7.8). The
-        // three settings are one decision, so they stand together.
-        tlsTerminate: true,
+        tlsTerminate: false,
       },
-      secrets: { mode: 'inject', gitFetch: 'mirror' },
+      secrets: { mode: 'env', gitFetch: 'mirror' },
       resources: { memory: '8g', memorySwap: '8g', cpus: 4 },
       innerSandbox: 'off',
     },
@@ -55,14 +77,14 @@ export const BUILTIN_PROFILES = [
     spec: {
       network: {
         mode: 'allowlist',
-        engine: 'iron-proxy',
+        engine: 'builtin',
         // The model and nothing else. No package registry, so a run that wants
         // to install something has to be given it — which is the point.
         presets: ['harness', 'provider'],
-        tlsTerminate: true,
+        tlsTerminate: false,
       },
       filesystem: { readOnlyRoot: true, extras: 'ro' },
-      secrets: { mode: 'inject', gitFetch: 'mirror' },
+      secrets: { mode: 'env', gitFetch: 'mirror' },
       resources: { memory: '4g', memorySwap: '4g', cpus: 2 },
       innerSandbox: 'off',
     },
@@ -95,12 +117,12 @@ export const BUILTIN_PROFILES = [
       // would have cost.
       network: {
         mode: 'allowlist',
-        engine: 'iron-proxy',
+        engine: 'builtin',
         presets: ['harness', 'provider', 'git-host', 'package-registries'],
         auditOnly: true,
-        tlsTerminate: true,
+        tlsTerminate: false,
       },
-      secrets: { mode: 'inject', gitFetch: 'mirror' },
+      secrets: { mode: 'env', gitFetch: 'mirror' },
       resources: { memory: '8g', memorySwap: '8g', cpus: 4 },
       innerSandbox: 'off',
     },

@@ -40,6 +40,9 @@ import db, { addEvent, getSetting, setSetting } from '../db.mjs'
 import { RUNS_DIR, kurzid, sh } from '../util.mjs'
 import { env } from '../env.mjs'
 import { t } from '../i18n.mjs'
+// The one reader of the four hub sandbox settings — see "the hub layer" below.
+import { sandboxHubMode, sandboxAllowBypass, sandboxLock } from '../run-def.mjs'
+import { appendAuditFile } from './audit.mjs'
 
 // --------------------------------------------------------------- lazy siblings
 
@@ -119,31 +122,29 @@ export function hubId() {
 
 // ------------------------------------------------------------- the hub layer
 
-/** `sandbox_mode`, defaulting to `off` — an empty string is "not set", never a mode. */
-export function hubSandboxMode() {
-  const v = String(getSetting('sandbox_mode') ?? '').trim()
-  return ['off', 'available', 'default_on', 'required'].includes(v) ? v : 'off'
-}
+// The four hub settings — `sandbox_mode`, `sandbox_allow_bypass`,
+// `sandbox_lock`, `sandbox_allowed_mount_roots` — used to be read here a second
+// time, with rules that did not match the ones in run-def.mjs: `String(v) ===
+// '1'` against a comparison with the words that mean no. A stored `'on'`
+// therefore meant "the operator may leave the sandbox" to the form and
+// "forbidden" to this file, on the one switch where disagreeing readers put the
+// break glass behind a button that refuses. There is ONE reader now
+// (run-def.mjs, "THE FOUR HUB SANDBOX SETTINGS ARE READ HERE AND NOWHERE
+// ELSE"), and this file borrows it — the import is at the top, and it is
+// deliberately static even though run-def.mjs is the heavier module: the four
+// are `function` declarations on both sides, so the existing cycle through
+// scheduler.mjs is walked past hoisted bindings and never touches a value in
+// its temporal dead zone. That is the difference between this and the
+// `claude.mjs → quota.mjs` ring AGENTS.md has an entry about.
 
-/**
- * May a lower layer opt out at all (`sandbox_allow_bypass`)? Unset means yes:
- * an operator who wants opting out to be impossible has `required`, and a
- * default of "no" would turn `default_on` into a second, undocumented `required`
- * for every installation that never saved the field.
- */
-function allowBypass() {
-  const v = getSetting('sandbox_allow_bypass')
-  if (v === undefined || v === null || String(v).trim() === '') return true
-  return String(v) === '1'
-}
+/** `sandbox_mode`, defaulting to `off` — an empty string is "not set", never a mode. */
+export function hubSandboxMode() { return sandboxHubMode() }
+
+/** May a lower layer opt out at all (`sandbox_allow_bypass`)? Unset means yes. */
+function allowBypass() { return sandboxAllowBypass() }
 
 /** The hub's locked paths — junk means "nothing locked", never a crash. */
-function hubLock() {
-  try {
-    const v = JSON.parse(String(getSetting('sandbox_lock') ?? '[]'))
-    return Array.isArray(v) ? v.filter(x => typeof x === 'string') : []
-  } catch { return [] }
-}
+function hubLock() { return sandboxLock() }
 
 /**
  * The two hub settings that are spec fields rather than policy: which runtime
@@ -468,7 +469,14 @@ export async function prepareSandbox(run, repo, opts = {}) {
     const ctx = {
       version: 1, run: runId, hub: hubId(),
       container, network: spec.network?.mode === 'none' ? 'none' : network,
-      workdir: wc.dir, home, runDir, repoGitDir,
+      // `homeDir` is the name BOTH readers of this document use — `fl-start`
+      // refuses a spec without `.ctx.homeDir`, and `buildRunArgv()` mounts
+      // `ctx.homeDir` — so writing only `home` here made every sandboxed run
+      // die at the launcher with "sandbox document has no .ctx.homeDir". `home`
+      // travels alongside for the same reason `emptyFile` does below: a name
+      // this file already handed out is not taken away in the commit that fixes
+      // the other one.
+      workdir: wc.dir, homeDir: home, home, runDir, repoGitDir,
       hubSocket: CONTAINER_HUB_SOCKET,
       binPaths,
       // Two names for one path, deliberately and temporarily: `gitConfigMask`
@@ -489,6 +497,13 @@ export async function prepareSandbox(run, repo, opts = {}) {
       gid: av.rootless ? null : process.getgid?.() ?? null,
       rootless: !!av.rootless,
       env: containerEnv({ home, binPaths }),
+      // What the coding agent's plugin wants changed about its own command line
+      // inside the box (§7.9). It travels in the DOCUMENT and not only in the
+      // return value, because `fl-start` is the other reader of that command
+      // line: `--setting-sources` used to be fl-start's own idea, which made
+      // the plugin's declaration and the launcher two authors of one fact. See
+      // harnessLaunchOverrides() below.
+      launchOverrides: await harnessLaunchOverrides(run, spec),
       proxyUrl: null,
     }
     writeSpecFile(runId, spec, ctx)
@@ -515,6 +530,13 @@ export async function prepareSandbox(run, repo, opts = {}) {
     //    and starting into an unanswered daemon would collide a moment later.
     await stopOrphan(container, spec.runtime)
 
+    // 8. The container's own lifecycle, into `docker-events.jsonl` (§7.14).
+    //    Started here because it has to be listening BEFORE the container is
+    //    created: `create` and `start` are the two events nobody can
+    //    reconstruct afterwards, and they happen in `fl-start`, seconds from
+    //    now.
+    startDockerEvents(runId, container, spec)
+
     writeSpecFile(runId, spec, ctx)
     db.prepare('UPDATE runs SET sandbox_container=?, sandbox_home=? WHERE id=?').run(container, home, runId)
     if (seeded?.refused?.length) addEvent(runId, 'warn', { seed_home_refused: seeded.refused })
@@ -529,7 +551,7 @@ export async function prepareSandbox(run, repo, opts = {}) {
       spec, specPath: specPath(runId), workdir: wc.dir, branch: wc.branch ?? null,
       home, container, network: ctx.network, proxyUrl: ctx.proxyUrl,
       hubSocket: CONTAINER_HUB_SOCKET, resolvedAllow: ctx.resolvedAllow,
-      launchOverrides: await harnessLaunchOverrides(run, spec),
+      launchOverrides: ctx.launchOverrides,
     }
   } catch (err) {
     // A retryable failure means the runtime could not be ASKED, so there is
@@ -553,13 +575,16 @@ export async function prepareSandbox(run, repo, opts = {}) {
  *    to ask about, and `IS_SANDBOX` — which the plugin sets in its own
  *    `sandbox.env`, and which this file deliberately does not set — is what lets
  *    that mode be accepted as container root under a rootless daemon (§7.7).
- *  - `settingSources` is NOT passed on from here, and that is deliberate rather
- *    than an omission: `fl-start` applies `--setting-sources user` by itself for
- *    every sandboxed claude run, because it is a property of being sandboxed at
- *    all. Measured (§11a.3): six committed lines of `"disableAllHooks": true` in
- *    a repository's own `.claude/settings.json` drop every hook the hub hands
- *    over with `--settings`, and the symptom is a run that simply never reports.
- *    Two places passing the same flag is how one of them ends up not passing it.
+ *  - `settingSources` reaches `fl-start` through the sandbox DOCUMENT
+ *    (`ctx.launchOverrides`), which is why this answer is computed while the
+ *    document is being written rather than only at the end. `fl-start` used to
+ *    apply `--setting-sources user` out of its own head while the plugin
+ *    declared the same thing and nothing read the declaration — two authors of
+ *    one fact, and the disagreement they were heading for is expensive:
+ *    measured (§11a.3), six committed lines of `"disableAllHooks": true` in a
+ *    repository's own `.claude/settings.json` drop every hook the hub hands
+ *    over with `--settings`, and the symptom is a run that simply never
+ *    reports.
  *
  * Fail-soft: no declaration, or one that throws, means the ordinary command line.
  */
@@ -763,6 +788,92 @@ function onBlocked(runId, info) {
   } catch { /* a denial that could not be recorded must not break the proxy */ }
 }
 
+// ------------------------------------------------------ the container's log
+
+/**
+ * `docker events --filter container=fl-<id>` for the life of the run, one JSON
+ * line each into `docker-events.jsonl` (§7.14).
+ *
+ * WHY THE HUB CANNOT ANSWER THIS ITSELF, which is the whole reason the file
+ * exists: `create`, `start`, `die` with its exit code, `oom` and `exec_create`
+ * are facts about a container that is gone by the time anybody asks. The hub
+ * learns the exit code, and only if it happens to look; it never learns that
+ * the kernel's OOM killer was the reason, or that something ran an `exec` in
+ * there. An auditor asks exactly those.
+ *
+ * FAIL-SOFT IN EVERY DIRECTION, and the direction that matters most is the
+ * process: the child is `unref`ed and detached from the run's fate is not
+ * assumed — `stopDockerEvents()` kills it from `teardownSandbox()`, which runs
+ * on every path a run can end, including twice and including on a machine with
+ * no runtime at all. A daemon that answers nothing, a `docker` that is not
+ * there, a line that is not JSON: all of them cost the line and never the run.
+ *
+ * The filter is set BEFORE the container exists on purpose. `docker events`
+ * matches the filter against each event's own actor, so a name that appears
+ * later is matched from its first event — which is the only way `create` and
+ * `start` are ever seen.
+ */
+const eventTails = new Map()
+
+function startDockerEvents(runId, container, spec) {
+  if (spec?.audit?.dockerEvents === false) return
+  if (eventTails.has(runId)) return
+  // Claimed before the first await: two prepare passes racing must not each
+  // spawn a tail, and the placeholder is what makes the check above true for
+  // the second one.
+  eventTails.set(runId, null)
+  ;(async () => {
+    try {
+      const rt = await sibling('runtime')
+      if (!rt?.runtimeBin) { eventTails.delete(runId); return }
+      const { spawn } = await import('node:child_process')
+      const child = spawn(rt.runtimeBin(spec?.runtime), [
+        'events', '--filter', `container=${container}`, '--format', '{{json .}}',
+      ], { stdio: ['ignore', 'pipe', 'ignore'], detached: false })
+      child.on('error', () => {})
+      child.unref?.()
+      // A tail that was torn down while this was starting must not outlive it.
+      if (!eventTails.has(runId)) { try { child.kill('SIGTERM') } catch {} ; return }
+      eventTails.set(runId, child)
+      let rest = ''
+      child.stdout.setEncoding('utf8')
+      child.stdout.on('data', (chunk) => {
+        rest += chunk
+        const lines = rest.split('\n')
+        rest = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.trim()) continue
+          let j
+          try { j = JSON.parse(line) } catch { continue }
+          // `at` is what the audit export sorts the whole stream by, so it is
+          // ISO 8601 here like every other record — the daemon's own
+          // `timeNano` is nanoseconds since the epoch and would sort as a
+          // number among timestamps.
+          const at = Number.isFinite(Number(j.timeNano)) && Number(j.timeNano) > 0
+            ? new Date(Number(j.timeNano) / 1e6).toISOString()
+            : new Date().toISOString()
+          appendAuditFile(runId, 'docker-events.jsonl', {
+            at, run: String(runId), status: j.status ?? j.Action ?? null,
+            id: j.id ?? j.Actor?.ID ?? null, from: j.from ?? j.Actor?.Attributes?.image ?? null,
+            exit_code: j.Actor?.Attributes?.exitCode ?? null,
+            attributes: j.Actor?.Attributes ?? null,
+          })
+        }
+      })
+      child.stdout.on('error', () => {})
+      child.on('exit', () => { if (eventTails.get(runId) === child) eventTails.delete(runId) })
+    } catch { eventTails.delete(runId) }
+  })()
+}
+
+/** Stop the tail. Idempotent, and safe for a run that never had one. */
+function stopDockerEvents(runId) {
+  if (!eventTails.has(runId)) return
+  const child = eventTails.get(runId)
+  eventTails.delete(runId)
+  try { child?.kill?.('SIGTERM') } catch {}
+}
+
 // ---------------------------------------------------------------- secrets
 
 /**
@@ -771,9 +882,16 @@ function onBlocked(runId, info) {
  * ordinary `credentials`/`envKeys` declaration). Asked of the run's provider and
  * of its coding agent, because a subscription CLI has no provider and a
  * provider-based one has both.
+ *
+ * The answer is a map rather than a set, because `inject` needs to know how that
+ * credential may be swapped in (`injection: { header, prefix, hosts }`, see
+ * docs/plugins.md). `injection` is `null` where the plugin declared none, and
+ * that is a statement rather than a gap — cursor deliberately declares its
+ * `CURSOR_API_KEY` without one, because which header cursor sends it in is
+ * nowhere established.
  */
-async function secretEnvNames(run) {
-  const names = new Set()
+async function secretDeclarations(run) {
+  const out = new Map()
   try {
     const { getPlugin } = await import('../plugins/registry.mjs')
     const { credentialSpec } = await import('../plugins/store.mjs')
@@ -781,10 +899,15 @@ async function secretEnvNames(run) {
       const plugin = getPlugin(id)?.plugin ?? getPlugin(id)
       if (!plugin) continue
       const declared = Array.isArray(plugin.sandbox?.credentials) ? plugin.sandbox.credentials : credentialSpec(plugin)
-      for (const c of declared ?? []) for (const k of c?.envKeys ?? []) names.add(String(k))
+      for (const c of declared ?? []) {
+        const inj = c?.injection && Array.isArray(c.injection.hosts) && c.injection.hosts.length
+          ? { header: c.injection.header || 'Authorization', prefix: c.injection.prefix ?? '', hosts: c.injection.hosts.map(String) }
+          : null
+        for (const k of c?.envKeys ?? []) out.set(String(k), { plugin: id, key: c?.key ?? String(k), injection: inj })
+      }
     }
   } catch { /* an unanswerable question masks nothing, which is `env` mode */ }
-  return names
+  return out
 }
 
 /**
@@ -801,30 +924,50 @@ async function secretEnvNames(run) {
  * proceeding. Two ways to be wrong here and both are worse than a refusal: put
  * the real key in, and the profile's promise was a lie; put the placeholder in
  * with nobody swapping it, and every API call 401s on a run that looks healthy.
+ *
+ * The same rule answers the credential the PLUGIN cannot inject. A variable
+ * whose plugin declares no `injection` is documented as "not available for
+ * injection, which is a working configuration and not a defect" — under `env`.
+ * Under `inject` there is no third answer for it: passing the real value would
+ * be the lie, and a placeholder would be the 401. So the launch refuses and
+ * names the variable, which is a sentence an operator can act on ("this coding
+ * agent needs `secrets.mode: env`").
  */
 export async function applySecrets(run, spec, pairs) {
   const mode = spec?.secrets?.mode ?? 'env'
   if (mode === 'env') return { pairs, injected: [] }
-  const names = await secretEnvNames(run)
-  if (!names.size) return { pairs, injected: [] }
+  const decls = await secretDeclarations(run)
+  if (!decls.size) return { pairs, injected: [] }
 
   if (mode === 'none') {
-    return { pairs: pairs.filter(p => !names.has(p.name)), injected: [] }
+    return { pairs: pairs.filter(p => !decls.has(p.name)), injected: [] }
   }
 
   const table = []
+  const undeclared = []
   const out = pairs.map(p => {
-    if (!names.has(p.name) || !p.value) return p
+    const decl = decls.get(p.name)
+    if (!decl || !p.value) return p
+    if (!decl.injection) { undeclared.push(p.name); return p }
     const placeholder = `fl-token-${randomUUID().replaceAll('-', '')}`
-    table.push({ name: p.name, placeholder, value: p.value })
+    table.push({ name: p.name, key: decl.key, placeholder, value: p.value, ...decl.injection })
     return { name: p.name, value: placeholder }
   })
+  if (undeclared.length) {
+    throw new Error(t('sandbox.launch.inject_no_declaration', { vars: undeclared.join(', ') }))
+  }
   if (!table.length) return { pairs: out, injected: [] }
 
   const proxy = await sibling('proxy')
   const handle = proxies.get(run.id)
   if (!proxy?.setSecrets || !handle) throw new Error(t('sandbox.launch.inject_unsupported'))
-  await proxy.setSecrets(handle, table)
+  const applied = await proxy.setSecrets(handle, table)
+  // The answer is CHECKED, and this is the whole point of the refusal being a
+  // value rather than an exception: an engine that cannot inject says so, and
+  // the caller turns that into a failed run with the reason on it. An
+  // unchecked call here would put placeholders in the container and let the
+  // run start against a proxy that swaps nothing.
+  if (!applied?.ok) throw new Error(t('sandbox.launch.inject_failed', { reason: applied?.reason ?? '' }))
   return { pairs: out, injected: table.map(e => e.name) }
 }
 
@@ -840,6 +983,11 @@ export async function teardownSandbox(run, opts = {}) {
   const runId = run?.id ?? null
   const container = run?.sandbox_container || (runId ? containerName(runId) : null)
   const out = { container: null, proxy: false, network: false }
+  // Before the early return, and deliberately: a `docker events` tail is a
+  // process, and a process that outlives the run it was watching is exactly
+  // what "must not keep a process alive past the run" means. Idempotent and
+  // free for a run that never had one.
+  if (runId) stopDockerEvents(runId)
   if (!run?.sandbox && !opts.force) return out
 
   // The proxy first: it is ours, it is cheap to stop, and stopping it before the
@@ -1050,7 +1198,17 @@ export async function changePolicy(run, patch, by = 'user') {
   if (kind.proxy) {
     const handle = proxies.get(row.id)
     const proxy = await sibling('proxy')
-    if (handle && proxy?.reloadProxy) { await proxy.reloadProxy(handle, after); applied.proxy = true }
+    if (handle && proxy?.reloadProxy) {
+      // The answer is READ. `applied.proxy = true` used to be written whatever
+      // came back, so a reload the engine refused — an iron-proxy whose
+      // management listener the hub cannot reach is the case that really
+      // happens — still told the page and the event log that the new policy was
+      // in force. A policy that quietly did not apply is worse than one that
+      // did not change: the operator stops watching.
+      const r = await proxy.reloadProxy(handle, after)
+      applied.proxy = r?.ok === true
+      if (!applied.proxy) addEvent(row.id, 'warn', { proxy_reload_failed: r?.reason ?? 'unknown' })
+    }
   }
   if (kind.limits) {
     const rt = await sibling('runtime')

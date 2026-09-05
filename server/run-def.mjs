@@ -388,22 +388,50 @@ export function goalFields(a = {}) {
 // promise the whole sandbox rests on, and it is kept HERE, at the form, as
 // well as at the launch.
 
+// THE FOUR HUB SANDBOX SETTINGS ARE READ HERE AND NOWHERE ELSE.
+//
+// They were read in three places with three different rules, and one of the
+// three governed the BREAK GLASS: `index.mjs` compared `String(v) === '1'`,
+// this file compared against the values that mean no, and the settings page
+// accepted `['1','on','true']`. So a stored `'on'` meant "bypass allowed" to
+// two readers and "forbidden" to the third — the form would offer the escape
+// hatch and the endpoint refuse it, or, in the other direction, the endpoint
+// would let a run out of a sandbox the form said it could not leave. Same
+// family as `'0'` being truthy and `Number('')` being a finite zero: a value
+// that arrives as a string is COMPARED, never coerced, and it is compared in
+// one place.
+
+/** The words a settings row may use for yes and for no. Compared, never coerced. */
+const SETTING_YES = new Set(['1', 'on', 'true', 'yes'])
+const SETTING_NO = new Set(['0', 'off', 'false', 'no'])
+
+/**
+ * A settings row that holds a switch. `fallback` is what an unset row means —
+ * and it is also what an UNREADABLE row means: a policy switch whose stored
+ * value nobody can parse must land on the documented default rather than on
+ * whichever half of the comparison happened to be written first.
+ */
+function settingFlag(key, fallback) {
+  const raw = String(getSetting(key) ?? '').trim().toLowerCase()
+  if (raw === '') return fallback
+  if (SETTING_YES.has(raw)) return true
+  if (SETTING_NO.has(raw)) return false
+  return fallback
+}
+
 /** The hub's own policy. Anything unknown (and the empty default) means `off`. */
 export function sandboxHubMode() {
-  const v = getSetting('sandbox_mode') ?? ''
+  const v = String(getSetting('sandbox_mode') ?? '').trim()
   return HUB_MODES.includes(v) ? v : 'off'
 }
 
 /**
  * May a lower layer opt out of a sandbox a higher one wanted? Unset means yes —
- * the setting is a restriction an operator adds, not one they inherit. Compared
- * against the values that mean no, never coerced: `Boolean('0')` is true, and
- * that trap has cost this project a switched-on agent already.
+ * the setting is a restriction an operator adds, not one they inherit, and a
+ * default of "no" would turn `default_on` into a second, undocumented
+ * `required` for every installation that never saved the field.
  */
-export function sandboxAllowBypass() {
-  const v = getSetting('sandbox_allow_bypass')
-  return !(v === '0' || v === 'false' || v === 'off')
-}
+export function sandboxAllowBypass() { return settingFlag('sandbox_allow_bypass', true) }
 
 /** A settings row that holds a list: JSON array, or comma/whitespace separated. */
 function settingList(key) {

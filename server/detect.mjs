@@ -150,7 +150,7 @@ const MUSTER = Object.fromEntries(
  * whole escalation path hangs on. The sandbox variant therefore names files and
  * documents instead of the product.
  */
-const EIGENER_CODE = /freilauf|cc-hub|detect\.mjs|incidents?\b|test\/(unit|e2e)/i
+const OUR_OWN_CODE = /freilauf|cc-hub|detect\.mjs|incidents?\b|test\/(unit|e2e)/i
 
 const AUSNAHMEN = [
   /upgrade to max/i,                       // Claude command menu: "/upgrade … higher rate limits"
@@ -160,7 +160,7 @@ const AUSNAHMEN = [
   // Work on exactly this code. Case-insensitive since a capital "Incidents:"
   // (the hub's own section heading, scrolling through the agent's terminal)
   // slipped past the lowercase version and landed in the DB as a rate limit.
-  EIGENER_CODE,
+  OUR_OWN_CODE,
   /\b(describe|it|test|expect)\(/,          // test code
   /retry_after|retryAfter|rateLimit[A-Z]|rate_limit_hits|RATE_LIMIT/, // identifiers in source
   // A call with a quoted/bracketed argument list is source code, not output —
@@ -182,7 +182,7 @@ const AUSNAHMEN = [
 
 /**
  * The exception list for the SANDBOX family (§7.12.1). Everything the ordinary
- * one carries except the product name — see EIGENER_CODE — plus the three
+ * one carries except the product name — see OUR_OWN_CODE — plus the three
  * shapes in which this repository writes its own errno vocabulary down. All
  * three were adversarial cases before they were exceptions:
  *
@@ -194,8 +194,8 @@ const AUSNAHMEN = [
  *   `re: /…/` and `\bX\b`  patterns.mjs and this file, read out loud by an agent
  *                          working on exactly this feature.
  */
-const SANDBOX_AUSNAHMEN = [
-  ...AUSNAHMEN.filter(a => a !== EIGENER_CODE),
+const SANDBOX_EXCEPTIONS = [
+  ...AUSNAHMEN.filter(a => a !== OUR_OWN_CODE),
   /cc-hub|detect\.mjs|patterns\.mjs|watcher\.mjs|SANDBOX_RESEARCH|AGENTS\.md|lang\/\w+\.json|test\/(unit|e2e)/i,
   // The vocabulary quoted as code — documentation, a changelog entry, a comment.
   /`[^`\n]{0,80}(EACCES|EROFS|ENOSPC|ENETUNREACH|read-only file system|no space left on device|could not resolve host|cannot connect to the docker daemon|fl-report access)[^`\n]{0,80}`/i,
@@ -203,10 +203,16 @@ const SANDBOX_AUSNAHMEN = [
   /^"[\w.$-]+"\s*:\s*["[{]/,
   // A regular expression written down, in any of the shapes this repo uses.
   /\bre:\s*\/|\/\^|\\b[A-Z]{4,}\\b|\[\^\\n\]/,
+  // A call whose LATER argument is the quoted error text — `helper(id, 'EROFS…')`.
+  // The shared list only knows `helper('EROFS…')`, and this suite's own
+  // `logAnhaengen(id, 'Error: ENOSPC…')` walked straight through it.
+  /\w+\([^\n)]{0,160},\s*['"`]/,
+  // An escaped newline inside a string literal: no terminal ever prints one.
+  /\\n['"`]/,
 ]
 
 /** Shared body of the two scanners — one loop, two pattern sets, two exception lists. */
-function scanneMitMuster(muster, ausnahmen, zeilen) {
+function scanLines(muster, ausnahmen, zeilen) {
   const treffer = []
   zeilen.forEach((roh, index) => {
     const zeile = roh.trim()
@@ -224,7 +230,7 @@ function scanneMitMuster(muster, ausnahmen, zeilen) {
  * Returns [{ typ, zeile, index }] — each line at most once (first pattern wins).
  */
 export function scanneZeilen(harness, zeilen) {
-  return scanneMitMuster(MUSTER[harness] ?? [], AUSNAHMEN, zeilen)
+  return scanLines(MUSTER[harness] ?? [], AUSNAHMEN, zeilen)
 }
 
 /**
@@ -232,8 +238,8 @@ export function scanneZeilen(harness, zeilen) {
  * words (§7.12.1). Harness-independent on purpose: a read-only mount answers
  * every CLI the same way. The caller applies it only to a SANDBOXED run.
  */
-export function scanneSandboxZeilen(zeilen) {
-  return scanneMitMuster(SANDBOX_PATTERNS, SANDBOX_AUSNAHMEN, zeilen)
+export function scanSandboxLines(zeilen) {
+  return scanLines(SANDBOX_PATTERNS, SANDBOX_EXCEPTIONS, zeilen)
 }
 
 /**
@@ -256,7 +262,7 @@ export function scanneNeueBytes(harness, text, altOffset, { sandbox = false } = 
   // sandbox family only asked where there is a sandbox to be blocked by.
   return {
     treffer: scanneZeilen(harness, zeilen),
-    sandboxTreffer: sandbox ? scanneSandboxZeilen(zeilen) : [],
+    sandboxTreffer: sandbox ? scanSandboxLines(zeilen) : [],
     neuerOffset,
   }
 }
