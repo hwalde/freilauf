@@ -135,6 +135,85 @@ export function specPath(runId) { return join(RUNS_DIR, String(runId), 'sandbox.
 export const CONTAINER_HUB_SOCKET = '/run/freilauf/hub.sock'
 
 /**
+ * The socket ON THE HOST — the file `startHubSocket()` really listens on, which
+ * is what has to be bind-mounted at the constant above.
+ *
+ * It is a function of its own, and imported LAZILY, for the reason every plugin
+ * file in this project imports the hub's modules lazily: `hub-socket.mjs` pulls
+ * in `reports.mjs`, and a static import here would tie the sandbox facade to the
+ * report path on machines that have no container runtime at all.
+ *
+ * `null` when the hub has no socket listening: §7.6's channel is then simply not
+ * there, and saying so is the whole point — mounting a path that does not exist
+ * makes Docker create a DIRECTORY inside the container, which looks like a
+ * socket to nobody and fails like nothing at all.
+ */
+/**
+ * THE IMAGE, NAMED AND ON THE MACHINE — the diagnosis §7.10 asks for, on the
+ * path that actually launches.
+ *
+ * Two halves, and both were missing here. `missingImage()` was wired only into
+ * the DRY RUN, so a real launch whose image is absent died inside the tmux pane
+ * with the daemon's own wording and nothing in the run's record; and `image.ref`
+ * had no harness → image mapping at all, so a repo that names no image reached
+ * `imageRef()` with an empty string. `image.pull` was inert in both.
+ *
+ * So: the ref comes from the spec, else from the harness's own declaration
+ * (`harnessImage()`, the same rule the build uses); a missing image is PULLED
+ * where the profile allows it; and what is still not there is a refusal with the
+ * image named — before the clone, the home and the network are created, which is
+ * the promise the start order makes.
+ */
+async function ensureImage(spec, run) {
+  const rt = await need('runtime')
+  const registry = String(getSetting('sandbox_image_registry') ?? '').trim() || null
+  let ref = String(spec.image?.ref ?? '').trim()
+  if (!ref) {
+    ref = (await rt.harnessImage(run.harness, { registry })) ?? ''
+    if (!ref) throw new Error(t('sandbox.launch.no_image', { harness: String(run.harness ?? '?') }))
+    addEvent(run.id, 'sandbox:image_default', { image: ref, harness: run.harness })
+  }
+  const resolved = { ...spec, image: { ...(spec.image ?? {}), ref } }
+
+  const pull = String(spec.image?.pull ?? 'if-missing')
+  let seen = await rt.imageDigest(ref, { runtime: spec.runtime })
+  // A daemon that could not answer is NOT "the image is missing": the whole
+  // start is retryable then, and refusing here would turn a hiccup into a failed
+  // run. `prepareSandbox()` already asked whether the daemon is there at all.
+  if (!seen.ok && seen.reason !== 'no_such_image') return resolved
+
+  if (!seen.ok && pull !== 'never') {
+    addEvent(run.id, 'sandbox:image_pull', { image: ref })
+    const pulled = await rt.pullImage(ref, { runtime: spec.runtime })
+    if (pulled.ok) seen = await rt.imageDigest(ref, { runtime: spec.runtime })
+  }
+  if (!seen.ok && seen.reason === 'no_such_image') {
+    throw new Error(t('sandbox.launch.image_missing', { image: ref }))
+  }
+  return resolved
+}
+
+/**
+ * `{ uid, gid, rootless }` for this daemon — §7.7's table, resolved by
+ * `runtime.mjs` so the run's frozen answer and the one `execIn()` asks live can
+ * never be two different rules. Frozen into the sandbox document because
+ * `mergeCheckArgv()` and the break-glass read it back from there.
+ */
+async function runtimeIdentity(info) {
+  const rt = await need('runtime')
+  return rt.hubIdentity(info)
+}
+
+async function hostHubSocket() {
+  try {
+    const { hubSocketPath } = await import('../hub-socket.mjs')
+    const path = hubSocketPath()
+    if (!path) return null
+    return existsSync(path) ? path : null
+  } catch { return null }
+}
+
+/**
  * This installation's identity, for the `freilauf.hub=` label that
  * `reconcileContainers()` filters on. Minted once and stored, because the
  * question it answers is "is this container mine, or the e2e suite's?" — two
@@ -458,8 +537,9 @@ export async function prepareSandbox(run, repo, opts = {}) {
   mkdirSync(runDir, { recursive: true })
 
   try {
-    // 1. The spec, as the row holds it.
-    const spec = await runSpec(run)
+    // 1. The spec, as the row holds it — and the image it starts from, which is
+    //    the one step of the order that used to have no answer at all here.
+    const spec = await ensureImage(await runSpec(run), run)
 
     // 2. The working copy. `makeSandboxClone()` reuses an existing directory —
     //    a retry and a resume both find their own half-finished work there, and
@@ -501,8 +581,25 @@ export async function prepareSandbox(run, repo, opts = {}) {
     await clone.writeMaskedGitConfig(join(repoGitDir, 'config'), maskPath)
 
     const binPaths = hubBinPaths()
+    // §7.6's channel, and whether it is there at all. A missing host socket is
+    // NOT a refusal — a run whose only clean report channel is gone still has
+    // `inbox.jsonl`, and refusing to start would turn a degraded channel into a
+    // dead run — but it is written down, because "the report went to the inbox
+    // and nobody noticed" is exactly how this was found in the first place.
+    const hostSocket = await hostHubSocket()
+    if (!hostSocket) addEvent(runId, 'warn', { hub_socket_missing: true })
     const ctx = {
-      version: 1, run: runId, hub: hubId(),
+      version: 1,
+      // ONE NAME ON BOTH SIDES. This document used to say `run`/`hub` while
+      // `buildRunArgv()` read `runId`/`hubId`, and the cost of that disagreement
+      // was invisible: every sandboxed container was started as `--name fl-
+      // --label freilauf.run= --label freilauf.hub=` (measured 2026-09-05). Two
+      // runs then collide on one container name, `stopContainer()` addresses
+      // something that does not exist, the orphan reaper's label filter matches
+      // nothing, and `docker stats` answers `unknown` on the sessions page.
+      // `sandbox/runtime-cli.mjs` carried a bridge between the two names; it is
+      // gone with this.
+      runId, hubId: hubId(),
       container, network: spec.network?.mode === 'none' ? 'none' : network,
       // `homeDir` is the name BOTH readers of this document use — `fl-start`
       // refuses a spec without `.ctx.homeDir`, and `buildRunArgv()` mounts
@@ -512,7 +609,12 @@ export async function prepareSandbox(run, repo, opts = {}) {
       // this file already handed out is not taken away in the commit that fixes
       // the other one.
       workdir: wc.dir, homeDir: home, home, runDir, repoGitDir,
-      hubSocket: CONTAINER_HUB_SOCKET,
+      // The MOUNT SOURCE, i.e. the socket on the host. Where it appears inside
+      // the container is `HUB_SOCKET_TARGET` and is not this module's to say —
+      // the two used to share the name `hubSocket` and this field held the
+      // CONTAINER path, so the mount pointed at a host path that does not exist
+      // and Docker made a directory of it. See the mount in `buildRunArgv()`.
+      hubSocketSource: hostSocket,
       binPaths,
       // Two names for one path, deliberately and temporarily: `gitConfigMask`
       // says what it is, `emptyFile` is what `runtime.mjs` reads today and is a
@@ -527,17 +629,16 @@ export async function prepareSandbox(run, repo, opts = {}) {
       // used to be consumed there and produced by nobody, so a TLS-terminating
       // proxy handed the container certificates it had no way to trust.
       caPath: hubCaPath(),
-      // §7.7's uid table, decided HERE because `buildRunArgv()` cannot know the
-      // daemon's posture and deliberately does not guess. Rootful: run as the
-      // hub user, so bind-mounted files stay owned by it — and because claude's
-      // `bypassPermissions` refuses to run as root. Rootless: `null`, i.e. no
-      // `--user` at all, because container root IS the hub user on the host
-      // there; a non-root container user would write host files as
+      // §7.7's uid table, from `hubIdentity()` — the one function that turns the
+      // daemon's posture into an identity, asked here for the run and asked
+      // again by `execIn()` for every git call the hub makes inside the box.
+      // Rootful: the hub user, so bind-mounted files stay owned by it — and
+      // because claude's `bypassPermissions` refuses to run as root. Rootless:
+      // `null`, i.e. no `--user` at all, because container root IS the hub user
+      // on the host there; a non-root container user would write host files as
       // `subuid + n − 1`, which the hub's own `git status` would then read as
       // somebody else's.
-      uid: av.rootless ? null : process.getuid?.() ?? null,
-      gid: av.rootless ? null : process.getgid?.() ?? null,
-      rootless: !!av.rootless,
+      ...(await runtimeIdentity(av)),
       env: containerEnv({ home, binPaths }),
       // What the coding agent's plugin wants changed about its own command line
       // inside the box (§7.9). It travels in the DOCUMENT and not only in the

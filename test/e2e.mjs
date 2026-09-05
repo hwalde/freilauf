@@ -6260,7 +6260,7 @@ export default {
         runId: RUN_ID, hubId: 'e2e-hub',
         workdir: REPO, homeDir: HOME_DIR, runDir: RUN_DIR,
         repoGitDir: join(REPO, '.git'), emptyFile: EMPTY,
-        hubSocket: SOCKET, uid: 1000, gid: 1000,
+        hubSocketSource: SOCKET, uid: 1000, gid: 1000,
         env: { FL_RUN_ID: RUN_ID, FL_RUN_TOKEN: 'tok' },
         image: 'freilauf/agent', digest: 'sha256:' + 'a'.repeat(64),
         caPath: CA, term: 'xterm-256color',
@@ -7819,6 +7819,170 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       dbMod.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now') WHERE id IN (?,?)`)
         .run(LEBT, VORBEI)
       setzeSchalter('sandbox_mode', 'off')
+    }
+  }
+
+  // =========================================================================
+  gruppe('Sandbox: a REAL container, because both of these passed every stub')
+  //
+  // Every other sandbox check in this file goes through the docker SHIM, which
+  // is right for what those check — the argv is the control, and a stub can
+  // count what it was handed. These two cannot be asked that way, and the proof
+  // is that they were not: both were completely broken while every existing
+  // test was green, and both cost a real run to find.
+  //
+  //   1. `docker exec -u hub` — `spec.user` is a POLICY word, not a login name,
+  //      and no image this hub starts has such an account. Measured against the
+  //      real daemon: `unable to find user hub: no matching entries in passwd
+  //      file`. So every hub-side git call inside the box failed, `dirtyFiles()`
+  //      answered `unknown`, and the finish gate wrote `finish_error` every few
+  //      seconds FOR EVER on a run whose status said `running` and whose session
+  //      was alive.
+  //   2. The hub socket was mounted from the CONTAINER path, so docker was told
+  //      `-v /run/freilauf/hub.sock:/run/freilauf/hub.sock` for a host path that
+  //      does not exist — and made a DIRECTORY of it inside the box. §7.6's
+  //      bearer-token channel had therefore never been exercised once.
+  //
+  // A shim cannot answer either question: only a daemon knows whether an account
+  // exists, and only a kernel knows whether a mount point is a socket. So this
+  // group needs a real one, and SKIPS ITSELF GREEN without it — the same rule
+  // the browser and proxy suites follow. Nothing here touches the hub: it starts
+  // one container of its own, from an image this repository builds, and removes
+  // it in a `finally`.
+  {
+    const netMod = await import('node:net')
+    const fsMod = await import('node:fs')
+    const osMod = await import('node:os')
+    const runtime = await import('../server/sandbox/runtime.mjs')
+    const facadeReal = await import('../server/sandbox/index.mjs').catch(() => null)
+
+    // The seams the sandbox group set point at the SHIM. Cleared for this group
+    // and restored afterwards — a fixture that outlives its own test is the trap
+    // the group above already has a comment about.
+    const gemerkt = {}
+    for (const k of ['FREILAUF_SANDBOX_RUNTIME_BIN', 'FREILAUF_SANDBOX_DOCKER_HOST', 'FREILAUF_SANDBOX_RUNTIME_FORCE']) {
+      gemerkt[k] = process.env[k]; delete process.env[k]
+    }
+    // …and the shim's DIRECTORY comes off the PATH with it, because the sandbox
+    // puts it first so that a bare `docker` finds the stub. A group about the
+    // real daemon that resolved the stub would be the same "green while broken"
+    // this whole group exists about, so the binary is named absolutely rather
+    // than looked up: whatever `docker` is on the PATH once the shim's own
+    // directory is out of it.
+    const shimDir = gemerkt.FREILAUF_SANDBOX_RUNTIME_BIN
+      ? gemerkt.FREILAUF_SANDBOX_RUNTIME_BIN.replace(/\/[^/]+$/, '')
+      : null
+    const echtesDocker = String(process.env.PATH ?? '').split(':')
+      .filter(d => d && d !== shimDir)
+      .map(d => join(d, 'docker'))
+      .find(p => { try { return fsMod.statSync(p).isFile() } catch { return false } }) ?? null
+    if (echtesDocker) process.env.FREILAUF_SANDBOX_RUNTIME_BIN = echtesDocker
+    runtime._runtimeInfoCacheReset()
+
+    let echterDaemon = null
+    if (echtesDocker) {
+      try { echterDaemon = await runtime.runtimeInfo('docker', { force: true }) } catch { echterDaemon = null }
+    }
+    // An image this repository builds, whichever of them the machine has. Named
+    // through the plugin's own rule (`harnessImage()`), never as a literal — the
+    // version is the plugin's build arg, and a literal here would go stale the
+    // day one is bumped.
+    let bild = null
+    if (echterDaemon?.available) {
+      for (const h of ['claude', 'opencode', 'cursor', 'hermes']) {
+        const ref = await runtime.harnessImage(h).catch(() => null)
+        if (ref && (await runtime.imageDigest(ref, { runtime: 'docker' })).ok) { bild = ref; break }
+      }
+    }
+
+    if (!bild) {
+      await pruefe('skipped: no container daemon with a Freilauf agent image on this machine', () => {
+        wahr(true, 'a machine without one must not sit in front of a red test')
+      })
+    } else {
+      const SB2 = fsMod.mkdtempSync(join(osMod.tmpdir(), 'fl-real-'))
+      const RID = `e2e${Date.now().toString(36)}`
+      const W = join(SB2, 'work'); fsMod.mkdirSync(W)
+      const H = join(SB2, 'home'); fsMod.mkdirSync(H)
+      const RD = join(SB2, 'run'); fsMod.mkdirSync(RD)
+      const GD = join(SB2, 'repo.git'); fsMod.mkdirSync(GD); fsMod.writeFileSync(join(GD, 'config'), '')
+      const MK = join(SB2, 'mask'); fsMod.writeFileSync(MK, '')
+      const SD = join(SB2, 'sock'); fsMod.mkdirSync(SD)
+      const HS = join(SD, 'hub.sock')
+      sh('git', ['init', '-q', W])
+      fsMod.writeFileSync(join(W, 'dirty.txt'), 'uncommitted\n')
+
+      // A REAL unix socket, which is the only thing that makes the second check
+      // a check: a regular file would be bind-mounted as a file and prove
+      // nothing about the failure being fixed.
+      const lauscher = netMod.createServer(() => {})
+      await new Promise(r => lauscher.listen(HS, r))
+
+      const name = runtime.containerName(RID)
+      const ident = runtime.hubIdentity(echterDaemon)
+      const { bin, args } = runtime.buildRunArgv(
+        { runtime: 'docker', image: { ref: bild }, network: { mode: 'none' }, retention: 'run' },
+        {
+          runId: RID, hubId: 'e2e-real', tty: false,
+          workdir: W, homeDir: H, runDir: RD, repoGitDir: GD, emptyFile: MK,
+          hubSocketSource: HS, ...ident,
+          env: { FL_RUN_ID: RID }, cmd: ['sleep', '300'],
+        })
+
+      let lief = false
+      try {
+        // `-d` instead of the pane's `-it`: this suite has no tmux pane, and
+        // what is under test is the container, not how it is attached to.
+        const r = await sh(bin, ['run', '-d', ...args.slice(1)], { timeout: 120_000, env: runtime.runtimeEnv('docker') })
+        lief = r.ok
+        await pruefe('the container really starts from the argv the hub builds', () => {
+          wahr(r.ok, `docker run (${String(r.stderr || '').trim().split('\n').pop() || 'ok'})`)
+        })
+
+        if (lief) {
+          await pruefe('the hub can run git inside the box — the finish gate’s own call', async () => {
+            // The exact shape `dirtyFiles()` uses. It answered `unknown` for
+            // every sandboxed run, which is what made `runFinishCheck()` return
+            // `error` and the gate loop.
+            const st = await runtime.execIn(name, ['git', '-C', W, '--no-optional-locks', 'status', '--porcelain'],
+              { runtime: 'docker' })
+            wahr(st.ok, `git status ran (code ${st.code}: ${st.stderr.trim().slice(0, 120)})`)
+            enthaelt(st.stdout, 'dirty.txt', 'and answered about the working copy, not about a user that does not exist')
+          })
+
+          await pruefe('…because nobody hands `docker exec` a LOGIN NAME any more', async () => {
+            gleich(await runtime.execIdentity('docker'),
+              runtime.containerIdentity('docker', ident).execUser,
+              'the exec asks the same function the launch asks')
+            // The regression, reproduced deliberately: this is what the finish
+            // gate did on every pass, and the daemon's answer is the whole bug.
+            const alt = await runtime.execIn(name, ['true'], { runtime: 'docker', user: 'hub' })
+            falsch(alt.ok, 'a login name that no image declares is still refused by the daemon')
+            enthaelt(String(alt.stderr).toLowerCase(), 'unable to find user',
+              'with exactly the wording that cost a run its whole life')
+          })
+
+          await pruefe('/run/freilauf/hub.sock inside the container is a SOCKET, not a directory', async () => {
+            const t = await runtime.execIn(name, ['sh', '-c',
+              '[ -S /run/freilauf/hub.sock ] && echo socket || { [ -d /run/freilauf/hub.sock ] && echo directory || echo missing; }'],
+              { runtime: 'docker' })
+            gleich(t.stdout.trim(), 'socket',
+              'the HOST socket is mounted at the container path §7.6 names')
+            // And the run's own env names the same path, or the mount is right
+            // and nothing looks at it.
+            gleich(facadeReal?.CONTAINER_HUB_SOCKET ?? null, '/run/freilauf/hub.sock',
+              'which is the path FL_HUB_SOCKET carries')
+          })
+        }
+      } finally {
+        await sh(echtesDocker ?? 'docker', ['rm', '-f', name], { timeout: 60_000 })
+        try { lauscher.close() } catch {}
+        try { fsMod.rmSync(SB2, { recursive: true, force: true }) } catch {}
+        for (const [k, v] of Object.entries(gemerkt)) {
+          if (v === undefined) delete process.env[k]; else process.env[k] = v
+        }
+        runtime._runtimeInfoCacheReset()
+      }
     }
   }
 

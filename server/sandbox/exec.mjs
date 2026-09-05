@@ -423,8 +423,23 @@ async function execInContainer(run, argv, opts = {}) {
     // answer" is not "the container is alive" — and the host fallback is
     // hardened precisely so that taking it whenever we do not know is safe.
     if (!state || state.verdict !== 'ok' || !state.running) return null
+    // WHO the command runs as is NOT read from the run's spec, and that was a
+    // measured fault rather than a tidy-up. `specOf(run).user` is `'hub'` — a
+    // POLICY word, the answer §7.7's table gives per daemon type — and it was
+    // handed straight into `docker exec -u`. Nothing ever creates an account of
+    // that name; the images' account is `agent`, and under a rootless daemon
+    // `buildRunArgv()` deliberately writes no `--user` at all. Measured
+    // 2026-09-05: `docker exec -u hub fl-<id> true` → `unable to find user hub:
+    // no matching entries in passwd file`, so every hub-side git call in the box
+    // failed, `dirtyFiles()` answered `unknown`, and the finish gate wrote
+    // `finish_error` every few seconds for ever while the run looked healthy.
+    //
+    // `execIn()` answers it now, through the same `containerIdentity()` the
+    // launch asks. Passing nothing is therefore the RIGHT call, not an omission;
+    // `opts.user` stays for a caller that really means a specific `<uid>:<gid>`.
     const r = await rt.execIn(name, argv, {
-      runtime, user: opts.user ?? specOf(run)?.user, cwd: opts.cwd, timeout: opts.timeout,
+      runtime, cwd: opts.cwd, timeout: opts.timeout,
+      ...(opts.user === undefined ? {} : { user: opts.user }),
     })
     // `gone` (the container vanished between the state and the exec) and
     // `no_daemon` mean the command DID NOT RUN — those are the third branch's

@@ -1615,5 +1615,9 @@
   "sandbox.notify.bypassed_no_reason": "ohne Begründung",
   "sandbox.proxy.config_symlink": "unter {path} liegt ein symbolischer Link, wo die Proxy-Konfiguration dieses Laufs hingehört, und Freilauf schreibt nicht durch einen hindurch",
   "sandbox.proxy.no_image": "es ist kein iron-proxy-Image konfiguriert (FREILAUF_SANDBOX_PROXY_IMAGE)",
-  "sandbox.runtime.err_mount_mode": "Der Mount {target} verlangt den Modus „{mode}“, den diese Container-Laufzeit nicht kennt (ro oder rw)"
+  "sandbox.runtime.err_mount_mode": "Der Mount {target} verlangt den Modus „{mode}“, den diese Container-Laufzeit nicht kennt (ro oder rw)",
+  "sandbox.runtime.err_no_run_id": "Das Sandbox-Dokument nennt keinen Lauf, der Container hätte also weder Namen noch Labels",
+  "sandbox.runtime.err_hub_socket_name": "Das Sandbox-Dokument nennt den Hub-Socket als „hubSocket“, und darin stand früher der Pfad im Container. Die Mount-Quelle ist der Socket auf dem Host und heißt „hubSocketSource“; starte den Lauf neu, damit das Dokument neu geschrieben wird.",
+  "sandbox.launch.no_image": "Der Coding-Agent „{harness}“ deklariert kein Sandbox-Image, und weder das Repository noch das Profil nennt eines. Trage in den Sandbox-Einstellungen des Repositories ein Image ein.",
+  "sandbox.launch.image_missing": "Das Sandbox-Image {image} liegt nicht auf dieser Maschine und konnte nicht geholt werden. Baue es unter Einstellungen → Sandbox, oder nenne eines, das existiert."
 }

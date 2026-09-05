@@ -49,7 +49,23 @@
 export const DEFAULT_SPEC = {
   runtime: 'docker',                    // docker | podman | runsc | srt
   image: { ref: null, digest: null, pull: 'if-missing' },
-  user: 'hub',
+  // `user: 'hub'` USED TO SIT HERE, and it is gone rather than corrected.
+  //
+  // It was a POLICY word — "run as the hub's identity" — and never a login name,
+  // which is why `buildRunArgv()` deliberately ignored it and resolved the
+  // identity from the daemon's posture instead (§7.7). But a field on the
+  // document is a field somebody reads, and one did: `execInContainer()` handed
+  // it into `docker exec -u`, where `hub` is an account that exists on no image
+  // this hub starts. The result was a finish gate that could not read the
+  // working copy and looped for ever on a run that looked perfectly healthy
+  // (the entry in exec.mjs has the measured output).
+  //
+  // The rule the removal states: the identity is not a profile field at all. It
+  // is `containerIdentity()` in runtime.mjs, asked by the run and by every exec,
+  // and there is nothing here for an operator to set that could make the two
+  // disagree again. A profile stored before this simply loses the key —
+  // `normalizeSpec()` drops what DEFAULT_SPEC does not name — and the overrides
+  // form refuses a new one as an unknown key, which is the loud half.
   network: {
     mode: 'allowlist',                  // open | none | allowlist
     engine: 'builtin',                  // builtin | iron-proxy

@@ -7358,7 +7358,6 @@ try {
 
     await pruefe('a path whose strictness this module cannot order does not change at all', () => {
       gleich(narrow('runtime', 'docker', 'podman').refused, true, 'the runtime is not a lower layer’s decision')
-      gleich(narrow('user', 'hub', 'root').refused, true, 'and neither is the user')
       gleich(narrow('image.ref', 'a:1', 'b:2').refused, true, 'nor the image')
       gleich(narrow('network.mode', 'none', 'none').refused, false, 'the same value is never a refusal')
     })
@@ -8095,7 +8094,7 @@ process.stdout.write(JSON.stringify(out))
   const rtCtx = (extra = {}) => ({
     runId: 'r1', hubId: 'hub1',
     workdir: '/w/run', homeDir: '/runs/r1/home', runDir: '/runs/r1',
-    repoGitDir: '/repo/.git', emptyFile: '/runs/r1/empty', hubSocket: '/runs/r1/hub.sock',
+    repoGitDir: '/repo/.git', emptyFile: '/runs/r1/empty', hubSocketSource: '/runs/r1/hub.sock',
     uid: 1000, gid: 1000, env: { FL_RUN_ID: 'r1' },
     image: 'freilauf/agent-claude', digest: 'sha256:abc',
     cmd: ['claude', 'hi'], caPath: '/ca/ca.crt', binPaths: ['/bin/fl-report'],
@@ -8220,6 +8219,88 @@ process.stdout.write(JSON.stringify(out))
   await pruefe('rootless hands no uid, so no --user is written', () => {
     const { args } = rt.buildRunArgv({}, rtCtx({ uid: null, gid: null }))
     falsch(rtHas(args, '--user'), 'container root IS the hub user under rootless Docker')
+  })
+
+  // ---- the identity: ONE answer for `run` and for `exec` -------------------
+  //
+  // These exist because the two sides had their own answer and disagreed, and
+  // the disagreement was invisible in every existing test: the LAUNCH wrote no
+  // `--user` under rootless (right), while the EXEC passed `spec.user` — the
+  // word `hub` — into `docker exec -u`, where no image has such an account.
+  // Measured 2026-09-05: `unable to find user hub: no matching entries in
+  // passwd file`, so every hub-side git call in the box failed and the finish
+  // gate wrote `finish_error` every few seconds for ever on a run that read as
+  // healthy. A test per side would not have caught it — that is what the table
+  // below is for: it asks BOTH answers of one function, at once.
+  await pruefe('the uid question has ONE answer, and the run and the exec read the same one', () => {
+    const table = [
+      ['docker', { uid: 1000, gid: 1000 }, ['--user', '1000:1000'], '1000:1000', 'rootful: the hub user on both sides'],
+      ['docker', { uid: 1000 }, ['--user', '1000:1000'], '1000:1000', 'a gid nobody gave is the uid'],
+      ['docker', { uid: null, gid: null }, [], null, 'rootless: nothing on either side'],
+      ['runsc', { uid: 1000, gid: 1000 }, ['--user', '1000:1000'], '1000:1000', 'gVisor is docker for this question'],
+      ['podman', { uid: 1000, gid: 1000 }, ['--userns=keep-id'], null, 'podman maps it with keep-id, and execs bare'],
+      ['podman', { uid: null, gid: null }, ['--userns=keep-id'], null, '…rootless or not'],
+    ]
+    for (const [id, identity, runFlags, execUser, why] of table) {
+      const answer = rt.containerIdentity(id, identity)
+      gleich(JSON.stringify(answer.runFlags), JSON.stringify(runFlags), `run: ${why}`)
+      gleich(answer.execUser, execUser, `exec: ${why}`)
+    }
+    // And the value is NUMERIC wherever one is written. A numeric id needs no
+    // passwd entry, which is the second half of the fix: this can never produce
+    // the refusal above even against an image whose accounts nobody knows.
+    for (const [id, identity] of table) {
+      const u = rt.containerIdentity(id, identity).execUser
+      wahr(u === null || /^\d+:\d+$/.test(u), `never a login name (${id} → ${u})`)
+    }
+  })
+
+  await pruefe('hubIdentity turns the daemon’s posture into that identity, and nothing else does', () => {
+    const rootful = rt.hubIdentity({ rootless: false })
+    gleich(rootful.uid, process.getuid(), 'rootful: the hub’s own uid, so bind-mounted files stay its own')
+    gleich(rootful.gid, process.getgid(), '…and its gid')
+    const rootless = rt.hubIdentity({ rootless: true })
+    gleich(rootless.uid, null, 'rootless: none, because container root IS the hub user there')
+    gleich(rootless.gid, null, '…and no gid either')
+    // "Could not ask" is not "rootless": guessing rootless on a rootful daemon
+    // would hand the agent root, while a numeric -u is inert under a rootless
+    // one. So the unknown answer is the conservative one.
+    gleich(rt.hubIdentity(null).uid, process.getuid(), 'an unknown posture answers as rootful')
+    gleich(rt.hubIdentity(undefined).rootless, false, '…and says so')
+  })
+
+  // ---- the hub socket: a host path and a container path are two things -----
+  await pruefe('the hub socket is mounted FROM the host path, not from the container one', () => {
+    const { args } = rt.buildRunArgv({}, rtCtx({ hubSocketSource: '/run/user/1000/freilauf/hub.sock' }))
+    const mounts = args.filter((_, i) => args[i - 1] === '-v')
+    wahr(mounts.includes('/run/user/1000/freilauf/hub.sock:/run/freilauf/hub.sock'),
+      `the host socket at the container's own path (${mounts})`)
+    // The failure this replaces: the source WAS the container path, so docker
+    // was told `-v /run/freilauf/hub.sock:/run/freilauf/hub.sock` for a host
+    // path that does not exist — and made a DIRECTORY of it inside the box.
+    falsch(mounts.includes('/run/freilauf/hub.sock:/run/freilauf/hub.sock'),
+      'and never the container path on both sides')
+  })
+
+  await pruefe('the OLD name for it is refused, so the mistake cannot come back', () => {
+    let err = null
+    try { rt.buildRunArgv({}, rtCtx({ hubSocket: '/run/freilauf/hub.sock' })) } catch (e) { err = e }
+    gleich(err?.key, 'sandbox.runtime.err_hub_socket_name', 'a document that still says hubSocket is refused')
+    const bare = rt.buildRunArgv({}, rtCtx({ hubSocketSource: null }))
+    const mounts = bare.args.filter((_, i) => bare.args[i - 1] === '-v')
+    falsch(mounts.some(m => m.includes('hub.sock')), 'and no socket at all is a mount that is simply not there')
+  })
+
+  await pruefe('a container with no run id is refused rather than named `fl-`', () => {
+    let err = null
+    try { rt.buildRunArgv({}, { ...rtCtx(), runId: undefined }) } catch (e) { err = e }
+    gleich(err?.key, 'sandbox.runtime.err_no_run_id', 'the one place that writes the name insists there is one')
+    // What it prevents, spelled out: `--name fl-`, `freilauf.run=`,
+    // `freilauf.hub=` — two runs on one name, a reaper filter that matches
+    // nothing, and `docker stats` answering `unknown` on the sessions page.
+    let empty = null
+    try { rt.buildRunArgv({}, { ...rtCtx(), runId: '' }) } catch (e) { empty = e }
+    gleich(empty?.key, 'sandbox.runtime.err_no_run_id', 'an empty string is not a run id either')
   })
 
   await pruefe('an unknown runtime is a readable refusal, never a wrong command line', () => {
@@ -8385,6 +8466,44 @@ process.stdout.write(JSON.stringify(out))
     gleich(v(''), 'unreachable', 'and a failure that said nothing says nothing')
     gleich(v('something no vendor has written yet'), 'unreachable',
       'the default is the safe answer: unknown means do nothing and ask again')
+  })
+
+  await pruefe('a bare path in the endpoint seam becomes a URL the CLI accepts', async () => {
+    // `FREILAUF_SANDBOX_DOCKER_HOST=/run/user/1000/docker.sock` is the obvious
+    // thing to type, and `runtimeEnv()` exports the value verbatim as
+    // `DOCKER_HOST` — where the CLI answers `unable to parse docker host`. So
+    // the one scheme this hub ever means is written on.
+    const before = process.env.FREILAUF_SANDBOX_DOCKER_HOST
+    try {
+      process.env.FREILAUF_SANDBOX_DOCKER_HOST = '/run/user/1000/docker.sock'
+      gleich(rt.runtimeEndpoint('docker').endpoint, 'unix:///run/user/1000/docker.sock',
+        'a bare path gets the scheme it meant')
+      gleich(rt.runtimeEndpoint('docker').source, 'seam', 'and is still the operator’s own answer')
+      gleich(rt.runtimeEnv('docker').DOCKER_HOST, 'unix:///run/user/1000/docker.sock',
+        'so what reaches the CLI is parseable')
+      // Anything that already names a scheme is left exactly as it stands:
+      // refusing one this module has not heard of would be this module deciding
+      // what the CLI supports.
+      for (const v of ['unix:///x.sock', 'tcp://10.0.0.1:2375', 'ssh://host']) {
+        process.env.FREILAUF_SANDBOX_DOCKER_HOST = v
+        gleich(rt.runtimeEndpoint('docker').endpoint, v, `${v} is passed through`)
+      }
+    } finally {
+      if (before === undefined) delete process.env.FREILAUF_SANDBOX_DOCKER_HOST
+      else process.env.FREILAUF_SANDBOX_DOCKER_HOST = before
+    }
+  })
+
+  await pruefe('runtimeEnv() is exported, so the pane and the hub read ONE rule', () => {
+    // `sandbox/runtime-cli.mjs` — the process that starts the container that
+    // ends up in the tmux pane — carried a second copy of this rule because it
+    // could not reach the first. That copy decides WHICH DAEMON a run starts on,
+    // so a stale half would start containers on a socket the hub cannot find
+    // them on.
+    gleich(typeof rt.runtimeEnv, 'function', 'the hub exports it')
+    const cli = readFileSync(new URL('../sandbox/runtime-cli.mjs', import.meta.url), 'utf8')
+    enthaelt(cli, 'runtimeEnv', 'and the CLI asks it')
+    falsch(/source !== 'seam'/.test(cli), 'instead of restating the seam/xdg rule of its own')
   })
 
   await pruefe('"no such container" is an ANSWER, not a failure to answer', () => {
@@ -9750,7 +9869,6 @@ process.stdout.write(JSON.stringify(out))
         [{ filesystem: { tmpfsSizes: { '/tmp': '8g' } } }, false, 'a wider tmpfs is a new container'],
         [{ filesystem: { readOnlyRoot: false } }, false, 'so is a writable root'],
         [{ image: { ref: 'other:1' } }, false, 'a different image'],
-        [{ user: 'root' }, false, 'a different user'],
         [{ innerSandbox: 'full' }, false, 'the inner sandbox'],
         [{ secrets: { mode: 'inject' } }, false, 'the environment is set at creation'],
         [{ runtime: 'podman' }, false, 'and so is the runtime'],

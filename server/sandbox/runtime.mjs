@@ -52,6 +52,81 @@ export const HUB_SOCKET_TARGET = '/run/freilauf/hub.sock'
 export const CA_TARGET = '/etc/freilauf/ca.crt'
 
 /**
+ * THE UID QUESTION OF §7.7, ASKED ONCE FOR BOTH SIDES.
+ *
+ * There are two moments a container's identity is decided — `docker run` when
+ * the agent's box is created, and `docker exec` whenever the hub runs git in it
+ * (the finish gate, the dirty check, a health probe). They were decided
+ * separately, and they disagreed:
+ *
+ *   `buildRunArgv()` wrote no `--user` at all under a rootless daemon (right:
+ *   container root IS the hub user there), while `execInContainer()` passed
+ *   `spec.user` — the word `hub` — straight into `docker exec -u`. Nothing ever
+ *   creates an account of that name; the images' account is `agent`. Measured
+ *   2026-09-05 against the real daemon:
+ *
+ *     $ docker exec -u hub fl-<id> true
+ *     Error response from daemon: unable to find user hub: no matching entries
+ *     in passwd file
+ *
+ *   So every hub-side git call inside the box failed, `dirtyFiles()` answered
+ *   `unknown`, `runFinishCheck()` answered `error`, and the run wrote
+ *   `finish_error {"error":"the working copy could not be read"}` every few
+ *   seconds FOR EVER — status `running`, session alive, agent idle in its TUI.
+ *   The most expensive shape a fault can take, and it passed every test that
+ *   existed, because both sides were tested apart.
+ *
+ * Hence one function, which both sides call. It answers per daemon posture:
+ *
+ *   rootful docker  → `--user <uid>:<gid>` on the run AND `-u <uid>:<gid>` on
+ *                     the exec, so bind-mounted files stay owned by the hub user
+ *                     and git does not refuse the repository;
+ *   rootless docker → NOTHING on either side: container root is the hub user on
+ *                     the host, and a non-root container user would write host
+ *                     files as `subuid + n − 1`;
+ *   podman rootless → `--userns=keep-id` on the run (podman's own answer), and
+ *                     nothing on the exec — keep-id already maps it, and both
+ *                     would fight.
+ *
+ * `uid`/`gid` are NUMBERS, never names, and that is the second half of the fix:
+ * a numeric id needs no `passwd` entry, so this can never produce the refusal
+ * above even where the identity was resolved from a stale answer.
+ *
+ * `runtimeId` is the runtime's id; `identity` is `{ uid, gid }` as
+ * `hubIdentity()` resolved it. Pure — unit-tested without a daemon.
+ */
+export function containerIdentity(runtimeId, identity = {}) {
+  const def = runtimeDef(runtimeId)
+  if (def.id === 'podman') return { runFlags: ['--userns=keep-id'], execUser: null }
+  if (unset(identity.uid)) return { runFlags: [], execUser: null }
+  const uid = String(identity.uid)
+  const gid = unset(identity.gid) ? uid : String(identity.gid)
+  const pair = `${uid}:${gid}`
+  return { runFlags: ['--user', pair], execUser: pair }
+}
+
+/**
+ * What identity the HUB has to hand a container, given what discovery said
+ * about the daemon. The `rootless` half of `containerIdentity()`'s table, in
+ * the one place that reads `runtimeInfo()` for it — `prepareSandbox()` froze
+ * this into the sandbox document and `execIn()` asks it live, and two readers of
+ * one rule is the drift the function above exists to end.
+ *
+ * An info that could not be obtained answers as ROOTFUL — a numeric `-u` is
+ * inert under a rootless daemon anyway (uid 1000 in the container is the image's
+ * own account either way), whereas guessing "rootless" on a rootful daemon would
+ * hand the agent root.
+ */
+export function hubIdentity(info = null) {
+  const rootless = !!info?.rootless
+  return {
+    rootless,
+    uid: rootless ? null : (process.getuid?.() ?? null),
+    gid: rootless ? null : (process.getgid?.() ?? null),
+  }
+}
+
+/**
  * SIGTERM, then this many seconds, then SIGKILL. Baked into the container at
  * creation (`--stop-timeout`) AND used by stopContainer(), so a run stopped by
  * the hub and a run stopped by `docker stop` from a shell get the same grace.
@@ -286,6 +361,15 @@ export function buildRunArgv(spec, ctx = {}) {
   const def = runtimeDef(s.runtime)
   const bin = runtimeBin(s.runtime)
   const runId = String(ctx.runId ?? '')
+  // A NAMELESS CONTAINER IS REFUSED, and the refusal is the fence rather than a
+  // formality. `prepareSandbox()` used to write the run's id as `ctx.run` while
+  // this function read `ctx.runId`, and the result was `docker run --name fl-
+  // --label freilauf.run= --label freilauf.hub=` — a line that starts perfectly
+  // well and then makes two runs collide on one name, `stopContainer()` address
+  // nothing, and the orphan reaper's label filter match nothing. It threw no
+  // error anywhere, which is why the check has to live here: the ONE place that
+  // writes the name is the one place that can insist there is one.
+  if (!runId) throw new SandboxArgvError('sandbox.runtime.err_no_run_id', {})
   const workdir = cleanTarget(ctx.workdir ?? '')
   if (!absolute(workdir)) throw new SandboxArgvError('sandbox.runtime.err_no_workdir', {})
 
@@ -317,18 +401,10 @@ export function buildRunArgv(spec, ctx = {}) {
   args.push('--detach-keys', DETACH_KEYS)
   args.push('--stop-timeout', String(STOP_TIMEOUT_SEC))
 
-  // The uid question, one line per daemon type (§7.7):
-  //   rootful docker  → --user <hub uid>:<hub gid>, so bind-mounted files stay
-  //                     owned by the hub user and git does not refuse the repo;
-  //   rootless docker → container root IS the hub user on the host, so the
-  //                     caller hands NO uid and no flag is written;
-  //   podman rootless → --userns=keep-id, podman's own answer to exactly this,
-  //                     and --user is dropped because keep-id already maps it.
-  if (def.id === 'podman') {
-    args.push('--userns=keep-id')
-  } else if (!unset(ctx.uid)) {
-    args.push('--user', `${ctx.uid}:${unset(ctx.gid) ? ctx.uid : ctx.gid}`)
-  }
+  // The uid question of §7.7 — asked through `containerIdentity()`, which is the
+  // SAME function `execIn()` asks. The table is over there, and so is the hour
+  // the two sides having their own answer cost.
+  args.push(...containerIdentity(def.id, ctx).runFlags)
 
   const homeDir = ctx.homeDir ? cleanTarget(ctx.homeDir) : null
   addEnv(args, 'HOME', homeDir)
@@ -453,7 +529,28 @@ export function buildRunArgv(spec, ctx = {}) {
   }
   if (ctx.runDir) addMount(args, own, { source: ctx.runDir, target: ctx.runDir, mode: 'rw' })
   if (homeDir) addMount(args, own, { source: ctx.homeDir, target: homeDir, mode: 'rw' })
-  if (ctx.hubSocket) addMount(args, own, { source: ctx.hubSocket, target: HUB_SOCKET_TARGET, mode: 'rw' })
+  // THE HUB SOCKET IS TWO DIFFERENT PATHS, AND THEY MUST NOT SHARE A NAME.
+  //
+  // `ctx.hubSocketSource` is the socket ON THE HOST — wherever `hubSocketPath()`
+  // put it (`$XDG_RUNTIME_DIR/freilauf/hub.sock` on this machine).
+  // `HUB_SOCKET_TARGET` is where it appears INSIDE the box, and that one is a
+  // constant because `FL_HUB_SOCKET` is set from it.
+  //
+  // They used to share the name `hubSocket`, and `prepareSandbox()` filled it
+  // with the CONTAINER path — so the mount read `-v /run/freilauf/hub.sock:
+  // /run/freilauf/hub.sock` for a host path that does not exist, and Docker
+  // created a DIRECTORY there inside the container (measured 2026-09-05:
+  // `drwxr-xr-x 2 root root 40 … /run/freilauf/hub.sock`). Every report then
+  // degraded to the inbox fallback and the per-run bearer token of §7.6 had
+  // never been exercised once. The old name is therefore REFUSED rather than
+  // read: a document that still carries it was written by a hub that meant the
+  // other path, and mounting it would silently rebuild the same directory.
+  if (ctx.hubSocket !== undefined) {
+    throw new SandboxArgvError('sandbox.runtime.err_hub_socket_name', {})
+  }
+  if (ctx.hubSocketSource) {
+    addMount(args, own, { source: ctx.hubSocketSource, target: HUB_SOCKET_TARGET, mode: 'rw' })
+  }
   // fl-report and its shared path helper, read-only at the identical path:
   // that is the whole hub↔agent channel from the agent's side.
   for (const p of ctx.binPaths ?? []) addMount(args, own, { source: p, target: p, mode: 'ro' })
@@ -732,10 +829,10 @@ export function runtimeEndpoint(runtimeId = 'docker') {
   const podman = id === 'podman'
   const seam = env(ENDPOINT_SEAM)
   if (seam !== undefined && String(seam).trim() !== '') {
-    return { endpoint: String(seam).trim(), source: 'seam' }
+    return { endpoint: asEndpoint(seam), source: 'seam' }
   }
   const fromEnv = podman ? process.env.CONTAINER_HOST : process.env.DOCKER_HOST
-  if (fromEnv && String(fromEnv).trim()) return { endpoint: String(fromEnv).trim(), source: 'env' }
+  if (fromEnv && String(fromEnv).trim()) return { endpoint: asEndpoint(fromEnv), source: 'env' }
   const xdg = String(process.env.XDG_RUNTIME_DIR ?? '').trim()
   if (xdg) {
     const path = join(xdg, podman ? 'podman/podman.sock' : 'docker.sock')
@@ -744,6 +841,23 @@ export function runtimeEndpoint(runtimeId = 'docker') {
   return podman
     ? { endpoint: null, source: 'none' }
     : { endpoint: 'unix:///var/run/docker.sock', source: 'legacy' }
+}
+
+/**
+ * An endpoint as the CLI will accept it. A bare filesystem path is the obvious
+ * thing to type into `FREILAUF_SANDBOX_DOCKER_HOST` — and `runtimeEnv()` exports
+ * that value verbatim as `DOCKER_HOST`, where the CLI refuses it:
+ * `unable to parse docker host`. So the one scheme this hub ever means is
+ * written on: `/run/user/1000/docker.sock` becomes
+ * `unix:///run/user/1000/docker.sock`, and anything that already names a scheme
+ * (`unix://`, `tcp://`, `ssh://`, `npipe://`) is left exactly as it stands —
+ * refusing a scheme this module has not heard of would be this module deciding
+ * what the CLI supports.
+ */
+function asEndpoint(value) {
+  const s = String(value ?? '').trim()
+  if (!s) return s
+  return s.startsWith('/') ? `unix://${s}` : s
 }
 
 /** The filesystem path of a `unix://` endpoint, or null for anything else. */
@@ -810,8 +924,15 @@ function socketPrechecked(def) {
  * reads its contexts out of it, and the resolved `DOCKER_HOST` where we found
  * one ourselves — see the section comment above for why the legacy socket is
  * excluded from that.
+ *
+ * EXPORTED, and that is the point rather than a convenience: the container
+ * client that ends up in the tmux pane is started by `sandbox/runtime-cli.mjs`,
+ * which carried a second copy of this rule because it could not reach the first.
+ * Two readers of one rule is how one of them goes stale — and this one decides
+ * WHICH DAEMON a run is started on, so the stale half would start containers on
+ * a socket the hub then cannot find them on.
  */
-function runtimeEnv(runtimeId) {
+export function runtimeEnv(runtimeId) {
   const out = { ...process.env }
   if (!out.HOME) {
     try { out.HOME = homedir() } catch { /* a machine that cannot say has none */ }
@@ -1408,14 +1529,34 @@ export async function containerStats(name, { runtime = 'docker' } = {}) {
  * TUI: that is the pane, and there is no API to signal an exec'd process
  * (§7.1(b)).
  */
-export async function execIn(name, argv, { runtime = 'docker', user = null, cwd = null, timeout = 60_000 } = {}) {
+export async function execIn(name, argv, { runtime = 'docker', user, cwd = null, timeout = 60_000 } = {}) {
   const args = ['exec']
-  if (user) args.push('-u', String(user))
+  // WHO the command runs as is NOT the caller's business by default, and that is
+  // the fix rather than a convenience: the caller used to hand `spec.user` —
+  // a policy word — into `-u`, and `docker exec -u hub` fails on every image
+  // there is. `containerIdentity()` answers it, from the same daemon posture
+  // `buildRunArgv()` asked. A caller may still override with a numeric
+  // `<uid>:<gid>`; `null` means "run as the container's own user", which is what
+  // a rootless run wants.
+  const u = user === undefined ? await execIdentity(runtime) : user
+  if (u) args.push('-u', String(u))
   if (cwd) args.push('-w', String(cwd))
   args.push(String(name), ...(argv ?? []).map(String))
   const r = await call(runtime, args, { timeout })
   if (notFound(r)) return { ...r, verdict: 'ok', gone: true }
   return { ...r, gone: false }
+}
+
+/**
+ * The `-u` value for an exec into a container this hub started, or null when
+ * none is to be written. Asks discovery (cached, 60 s) rather than the run's
+ * frozen spec, because the daemon's posture is a property of the MACHINE and a
+ * spec written before a rootless migration must not decide it.
+ */
+export async function execIdentity(runtimeId = 'docker') {
+  let info = null
+  try { info = await runtimeInfo(runtimeId) } catch { info = null }
+  return containerIdentity(runtimeId, hubIdentity(info)).execUser
 }
 
 /**
@@ -1530,6 +1671,37 @@ async function imageRecipe(name, { registry } = {}) {
   const versionKey = Object.keys(args).find(k => k.endsWith('_VERSION'))
   const version = versionKey ? String(args[versionKey]) : 'latest'
   return { ok: true, dockerfile: decl.dockerfile, args, tag: taggedImage(id, version, registry) }
+}
+
+/**
+ * THE IMAGE A HARNESS RUNS IN, when nothing named one.
+ *
+ * `image.ref` had no harness → image mapping on the launch path at all, so an
+ * image had to come from `repos.sandbox_image` or an override — and a run whose
+ * repo names none reached `imageRef()` with an empty string. The five images
+ * this repository builds are named by one rule (`freilauf/agent-<harness>:<the
+ * version out of the plugin's own build arg>`), and `imageRecipe()` already
+ * derives exactly that for the build. So the launch asks the same function
+ * instead of a second table: the image a run starts from and the image the
+ * settings page builds cannot be two different names.
+ *
+ * `null` when the harness declares no image (a coding agent that arrived as a
+ * plugin and ships no Dockerfile) — which is a refusal for the caller to word,
+ * not a default for this function to invent.
+ */
+export async function harnessImage(harnessId, { registry = null } = {}) {
+  const r = await imageRecipe(harnessId, { registry })
+  return r?.ok ? r.tag : null
+}
+
+/**
+ * Fetch an image the machine does not have. `image.pull` used to be inert
+ * everywhere but the build, so a missing image was a `docker run` that failed
+ * inside the tmux pane with the daemon's own wording and no diagnosis anywhere.
+ */
+export async function pullImage(ref, { runtime = 'docker', timeout = 10 * 60_000 } = {}) {
+  const r = await call(runtime, ['pull', String(ref)], { timeout })
+  return { ok: !!r.ok, verdict: r.verdict, error: r.ok ? null : (String(r.stderr || r.stdout || '').trim().split('\n').pop() || null) }
 }
 
 /**
@@ -1820,8 +1992,7 @@ export async function dryRunChecks(spec, { allow = [], repo = null, workdir = nu
         // pass the hub's uid unconditionally, so the dry run probed the ROOTFUL
         // rule against a rootless daemon and answered about a container nobody
         // would ever start.
-        uid: info.rootless ? null : process.getuid?.() ?? null,
-        gid: info.rootless ? null : process.getgid?.() ?? null,
+        ...hubIdentity(info),
         cmd: ['sh', '-lc', script],
       })
     } catch (err) { add('container', false, err?.message || String(err)) }

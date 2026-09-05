@@ -1615,5 +1615,9 @@
   "sandbox.notify.bypassed_no_reason": "no reason given",
   "sandbox.proxy.config_symlink": "there is a symbolic link at {path} where the run's proxy configuration belongs, and Freilauf does not write through one",
   "sandbox.proxy.no_image": "no iron-proxy image is configured (FREILAUF_SANDBOX_PROXY_IMAGE)",
-  "sandbox.runtime.err_mount_mode": "The mount {target} asks for the mode “{mode}”, which is not one this container runtime knows (ro or rw)"
+  "sandbox.runtime.err_mount_mode": "The mount {target} asks for the mode “{mode}”, which is not one this container runtime knows (ro or rw)",
+  "sandbox.runtime.err_no_run_id": "The sandbox document names no run, so the container would have no name and no labels",
+  "sandbox.runtime.err_hub_socket_name": "The sandbox document names the hub socket as “hubSocket”, which used to hold the path inside the container. The mount source is the socket on the host and is called “hubSocketSource”; start the run again so the document is rewritten.",
+  "sandbox.launch.no_image": "The coding agent “{harness}” declares no sandbox image, and neither the repository nor the profile names one. Set an image under the repository’s sandbox settings.",
+  "sandbox.launch.image_missing": "The sandbox image {image} is not on this machine and could not be fetched. Build it under Settings → Sandbox, or name one that exists."
 }
