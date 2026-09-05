@@ -1506,8 +1506,9 @@ terminal reattaches by run, not by name. So:
    container. The continuation text names what changed — "The sandbox was
    reconfigured: `<diff>`. Continue." — in place of the recovery design's
    "interrupted by a server restart" sentence.
-4. For a coding agent with no resume form (hermes, an external plugin without
-   `launch.resume`), `resumeRun()` relaunches it fresh with the original prompt
+4. For a coding agent with no resume form (an external plugin without
+   `launch.resume`; hermes has one since 0.21 — `--in <workdir> --resume <id>`,
+   the id out of its `state.db`), `resumeRun()` relaunches it fresh with the original prompt
    in the same clone — its commits and its working state are there — and the
    event says so; the operator is told that the conversation is lost. Prepending
    the run's `progress` reports and the log tail as a "what you had done" section
@@ -1649,9 +1650,10 @@ want command-level detail from the agent's side as well.
    `resolve/<short id>`; the finish gate is the same; `isResolverRun()` rules
    unchanged.
 5. **Follow-up commission.** Works as long as the container stands, which is as
-   long as the agent's TUI does (claude, opencode, cursor); hermes exits and its
-   container with it — the same "cannot follow up" hermes already has. The
-   commission's clock and the `telegram_on` box are unaffected.
+   long as the agent's TUI does — all four since hermes 0.21 (`-q` seeds an
+   interactive session on a TTY and stays; an older hermes exited, and its
+   container went with it). The commission's clock and the `telegram_on` box
+   are unaffected.
 6. **`waiting_help` inside a sandbox.** Unchanged: the answer is typed through the
    pane; the goal-delivery guard and the "main has moved" exclusion apply as before.
 7. **`merge_check` runs the agent's code on the host.** With `merge_mode: hub` and a
