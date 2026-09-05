@@ -25,6 +25,16 @@ const flat = (t) => String(t ?? '').replace(/\s+/g, ' ')
 const levelsFrom = (t) => t.split(/,|\bor\b/).map(x => x.trim().toLowerCase())
   .filter(x => /^[a-z]+$/.test(x))
 
+/**
+ * The variable Claude Code reads a long-lived token from (`claude
+ * setup-token`). Named once and read twice — by the top-level `credentials`
+ * declaration, which is what makes the token STORABLE, and by the `sandbox`
+ * block, which says how it TRAVELS. Two literals would be two authors of one
+ * fact, and a run whose key is masked under a name nothing resolves is a run
+ * that 401s while looking perfectly healthy.
+ */
+const OAUTH_ENV = ['CLAUDE_CODE_OAUTH_TOKEN']
+
 const plugin = {
   id: 'claude',
   label: 'Claude Code',
@@ -86,6 +96,35 @@ const plugin = {
   subscription: true,
   providers: [],
   keyFreeProviders: [],
+
+  /**
+   * The one credential claude has, and it is **optional** — which is the whole
+   * statement, not a hedge. An ordinary run authenticates through the CLI's own
+   * login, exactly as it always did; nothing here changes that, and `required`
+   * is deliberately absent so no page ever reports a working installation as
+   * unconfigured (the same explicit "no key needed" the Zen provider makes).
+   *
+   * It exists because of the sandbox. §7.8's recommended way to authenticate a
+   * sandboxed claude run is a long-lived token from `claude setup-token`,
+   * because it is what lets the run work with **no credentials file in the
+   * container at all** — the alternative being a copy of `.credentials.json`,
+   * whose refresh may invalidate the host session's token.
+   *
+   * It is declared HERE rather than only inside the `sandbox` block because
+   * this is the one list the storage reads: `credentialSpec()` and
+   * `setCredential()` key off the top-level declaration, and
+   * `credentialValue('claude', 'oauth_token')` is then the ordinary three-step
+   * answer — a value the operator stored, a variable they named, then
+   * `envKeys`. The sandbox block refers to the same key and adds only how the
+   * value travels (which header, to which hosts); a second storable list would
+   * be a second place to look for one credential.
+   */
+  credentials: [{
+    key: 'oauth_token',
+    envKeys: OAUTH_ENV,
+    labelKey: 'sandbox.plugin.cred_claude_oauth',
+    helpKey: 'sandbox.plugin.cred_claude_oauth_help',
+  }],
 
   // Health pulse: watcher pings this while claude runs are active. The status
   // codes 401/403 still prove the API answers — only network-level failure or
@@ -202,19 +241,17 @@ const plugin = {
     },
 
     /**
-     * The documented alternative to copying `.credentials.json` into the
-     * container (§7.8): a long-lived token from `claude setup-token`, which the
-     * CLI never rotates — so no copy of the operator's OAuth pair can invalidate
-     * the host session's refresh token. Under `secrets.mode: 'inject'` the
-     * container holds a placeholder and the proxy substitutes the real value on
-     * requests to `api.anthropic.com` alone; under `env` it is passed as the
-     * variable. The value is resolved where every credential is resolved —
-     * `credentialValue('claude', 'oauth_token')`, stored value first, then a
-     * variable the operator named, then the declared one below.
+     * How the token above TRAVELS — the same `oauth_token` key, never a second
+     * credential. Under `secrets.mode: 'inject'` the container holds a
+     * placeholder and the proxy substitutes the real value on requests to
+     * `api.anthropic.com` alone; under `env` it is passed as the variable;
+     * under `none` it does not enter the container at all. The value itself is
+     * resolved where every credential is resolved —
+     * `credentialValue('claude', 'oauth_token')`.
      */
     credentials: [{
       key: 'oauth_token',
-      envKeys: ['CLAUDE_CODE_OAUTH_TOKEN'],
+      envKeys: OAUTH_ENV,
       injection: { header: 'Authorization', prefix: 'Bearer ', hosts: ['api.anthropic.com'] },
     }],
 

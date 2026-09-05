@@ -71,6 +71,16 @@ Freilauf does, and it only goes forward.
   the project pushes them (`fl-panel`, one HTTP call), Freilauf renders them
   with the time they were measured and never learns what they mean
   ([docs/panels.md](docs/panels.md)).
+- **A boundary around the agent, if you want one.** A run can work inside a
+  container: its own clone instead of your checkout, its own home, and a
+  network whose only way out is a proxy that answers a readable 403 for a host
+  that is not on its allowlist. The boundary is configured before the run
+  starts — at the hub, per repository, per agent, per run — and a lower level
+  may only ever narrow what a higher one locked. When it blocks something the
+  agent needed, you get the host, one click to allow it for this run or this
+  repo, and no restart. Optional and **off by default**; Docker is a
+  prerequisite only if you want it ([docs/sandbox.md](docs/sandbox.md), which
+  is as long about what it does *not* do as about what it does).
 - **Everything vendor-specific is a plugin.** Coding agents, model providers
   and notification services are plugins with a documented contract
   ([docs/plugins.md](docs/plugins.md)); a third party can drop a package on
@@ -226,6 +236,14 @@ The hub can control tmux. **That is shell access.** So:
 - Every run works in its own worktree; agents never merge or push to the base
   branch — Freilauf does; and everything a run does is a report, an event or an
   incident you can read afterwards.
+- **Optionally, the agent itself is in a container** — its own clone, its own
+  home, a default-deny egress allowlist, no capabilities, a read-only root, and
+  cgroup limits. Off by default. It is a wall between the *agent* and the host,
+  built by the hub, which stands on the host side of it: it does not reduce
+  what a compromised hub can do, and it inspects no traffic content, so an
+  allowed host is a way out. Read
+  [docs/sandbox.md](docs/sandbox.md) — its "What this sandbox does not do"
+  section is the part that matters.
 
 **Never run the hub in a reachable network without these layers.**
 

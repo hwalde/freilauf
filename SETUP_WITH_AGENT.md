@@ -166,6 +166,60 @@ Troubleshooting, in the order that pays off: `freilauf status` → `freilauf log
 `systemctl --user status freilauf.service`. A hub that will not start is almost
 always a missing value in `~/.config/freilauf/env` or a missing certificate.
 
+### Optional: the sandbox
+
+**Skip this section unless the human asked for it.** Freilauf can run a run's
+agent inside a container. It is **off by default**, a container runtime is a
+prerequisite **only if you want it**, and an installation that never switches it
+on behaves exactly as described above. Do not install Docker "to be safe".
+
+If the human does want it, on Ubuntu 24.04 — **the hub never runs `sudo`, so the
+first line is one you print and hand over, and the rest run as the hub's own
+user:**
+
+```bash
+sudo apt-get install -y docker.io uidmap dbus-user-session   # give this to the human
+dockerd-rootless-setuptool.sh install
+systemctl --user enable --now docker.service
+loginctl enable-linger "$USER"      # already done by setup/03, harmless twice
+docker info | grep -i rootless
+```
+
+**Recommend rootless, and say why.** With rootful Docker, membership of the
+`docker` group is equivalent to root on the host — anything that can talk to that
+socket can mount `/` into a privileged container, and the hub talks to that
+socket. Rootless keeps the daemon in the hub user's own namespace, so a container
+escape lands in the uid the agent was already running as without a sandbox.
+Rootful works; it just puts the `docker` group in the threat model.
+
+Then, in the UI: **Settings → Sandbox**. The page prints what it found and
+**refuses to be switched on above `off` while it has found nothing** — that
+refusal is enforced in the save, so do not try to work around it. Build the
+shipped images from that page, or by hand as `sandbox/images/README.md`
+describes. **Those images have never been built** — the machine they were written
+on has no container runtime — so expect the first build to be the one that finds
+the mistakes; that file names, per image, how confident each install command is
+and which one to build first.
+
+**Verify a policy before a real run depends on it.** The whole container command
+line is produced by one pure function and can be printed without a runtime:
+
+```bash
+sandbox/wrap.sh --print ~/agents/runs/<run id>/sandbox.json -- bash
+```
+
+and the **Dry run** button under a repo's form resolves that repo's policy and
+shows what it would do, without starting an agent.
+
+Two things to tell the human rather than discover for them: three of the four
+shipped profiles ask for credential injection, which is **not finished**, so they
+refuse to start a run — begin with **Open network**, or a copy of Balanced whose
+secrets are passed as environment variables. And the sandbox decides on
+hostnames and inspects no content, so an allowed host is a way out. Both, and
+everything else it does not do, are in **[docs/sandbox.md](docs/sandbox.md)**;
+what a coding-agent plugin has to declare to be sandboxable is in
+**[docs/plugins.md](docs/plugins.md)**.
+
 ### Restarts, reboots and OS updates
 
 The hub survives its own restarts (every deploy is one): agent sessions live

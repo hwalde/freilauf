@@ -217,7 +217,12 @@ export async function readApi(req, res, url) {
     const repo = run.repo_id ? getRepo(run.repo_id) : null
     json(res, 200, {
       ok: true,
-      run: { ...run, short_id: kurzid(run.id), harness_label: harnessLabel(run.harness) },
+      // `report_token` is the run's bearer for the report socket (§7.6). It is a
+      // secret, and a read answer is the one place a secret has no business
+      // being: this route is what the agent skills and `fl-api` print. Stripped
+      // by name rather than by an allowlist, so a new column keeps appearing
+      // here as before — the token is the exception, not the rule.
+      run: { ...run, report_token: undefined, short_id: kurzid(run.id), harness_label: harnessLabel(run.harness) },
       agent: agent ?? null,
       repo: repo ? { id: repo.id, name: repo.name, path: repo.path, base_branch: repo.base_branch, merge_mode: repo.merge_mode } : null,
       liveness: await livenessOf(run),

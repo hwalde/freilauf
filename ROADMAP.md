@@ -18,45 +18,52 @@ changelog.
 
 ## Planned
 
-### Running agents in a sandbox
+> **Running agents in a sandbox has landed.** It is optional and off by
+> default; the reference is **[docs/sandbox.md](docs/sandbox.md)**, the design
+> study behind it is **[SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md)**, and what
+> arrived is written down in [CHANGELOG.md](CHANGELOG.md). Two pieces of it are
+> deliberately unfinished and are big enough to stand here.
 
-**Status: designed, nothing implemented.** The design study is in this
-repository: **[SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md)**.
+### Credentials that never enter the container
 
-Today a Freilauf run starts its coding agent unattended — `--permission-mode
-dontAsk`, `--auto`, `--yolo`, `--force` — as the operator's own user, on the
-operator's own machine. That is the whole point of the hub, and it is also the
-reason a company will not switch it on: nobody wants to approve every shell
-command by hand, and nobody wants an agent that need not ask for anything to be
-standing in their home directory either.
+**Status: designed and built, not finished.** A sandbox profile can say
+`secrets: inject` — the container holds a placeholder, and the egress proxy
+swaps the real credential into the request on its way out, so a compromised
+agent never has the key at all. Three of the four shipped profiles ask for it.
 
-The plan is to let a run's agent work inside a boundary that was configured
-*before* it started — optionally, per repository as the default, and per agent
-or single run as an override in either direction. What the design study
-recommends, in short:
+It does not work yet: the proxy layer cannot be handed the substitution table,
+and the reference engine it needs (`iron-proxy`) has never been run against its
+own binary here, so its configuration is written from documentation rather than
+from experience. A profile that asks for injection therefore **refuses to start
+a run** rather than quietly passing the real key in — which is the right
+failure, and still a failure. Until it lands, a sandboxed run's credentials go
+in as environment variables, exactly as an unsandboxed run's do.
 
-- **A container around the agent, tmux on the host.** The pane command becomes a
-  `docker run …` around the agent's own command line, so everything the hub
-  already does with tmux — the log pipe, the pane-died hook, typed messages,
-  the browser terminal, `fl-attach`, `fl-kill` — keeps working unchanged, and
-  it works for *every* coding agent, including ones that arrive as a plugin.
-- **A working copy the agent may have.** A sandboxed run gets a clone of its
-  own instead of a linked worktree, because a linked worktree would mean handing
-  the container the operator's `.git` read-write. The integrator collects the
-  result with a `git fetch` and merges it the way it merges everything else.
-- **A network policy that lives outside the container** — open, none, or an
-  allowlist — enforced by an egress proxy, so a blocked host is a readable
-  refusal rather than a hang, and the policy can be widened **while the agent is
-  running** instead of costing you the run.
-- **Filesystem, resources and secrets configurable at the same two levels**, with
-  provider keys that never have to enter the container at all.
-- **A way to notice when the sandbox blocked something the agent needed**, and
-  three buttons to do something about it.
+Worth knowing before you plan around it: injection can only ever cover a
+credential carried verbatim in a header. A request the client *signs* with the
+secret — AWS SigV4 and every HMAC scheme — cannot be injected by anything
+sitting in front of it, and never will be.
 
-It is planned as phases that ship on their own and are off by default, so an
-installation that wants none of this keeps behaving exactly as it does today.
-The design study's §10 has the phasing, and its §11 lists the questions still to
-be measured before the first line is written.
+### A sandbox for machines that cannot have Docker
+
+**Status: named, not built.** Today the sandbox is a container, and Docker (or
+Podman) is a prerequisite for it. gVisor works if your daemon has it registered;
+Podman works with its own user-namespace mapping. What does not exist is the
+"light" mode the design study names — a process-level sandbox with no container
+runtime at all, for a laptop or a locked-down host where installing a daemon is
+not an option. The spec already accepts the value and the hub refuses it with a
+sentence saying so.
+
+### Not planned: looking at what the agent sends
+
+Stated here because it is the thing people most often assume a sandbox does.
+Freilauf's network policy decides on the **hostname** and inspects no content —
+no request bodies, no paths, no responses. So an allowed host is a way out for
+anything the agent wants to put there, and content inspection or data-loss
+prevention is **out of scope**, now and as a direction. It is a different
+product, and a boundary that pretended to do it badly would be worse than one
+that says it does not. [docs/sandbox.md](docs/sandbox.md) has the rest of that
+list, in more detail than most people will want.
 
 ## Not on this page
 

@@ -8122,12 +8122,17 @@ process.stdout.write(JSON.stringify(out))
     rt._runtimeInfoCacheReset()
     const info = await rt.runtimeInfo('docker', { force: true })
     gleich(info.available, false, 'not available')
-    wahr(['no_binary', 'no_daemon', 'unreachable'].includes(info.reason), `a machine reason, got ${info.reason}`)
+    // A DOTTED key, never a bare word: the settings page prints an undotted
+    // reason verbatim, so `no_binary` reached the operator as those nine
+    // characters — on the one line they read while working out what to install.
+    wahr(info.reason.startsWith('sandbox.reason.'), `a dotted reason key, got ${info.reason}`)
+    wahr(['sandbox.reason.no_binary', 'sandbox.reason.no_daemon', 'sandbox.reason.unreachable']
+      .includes(info.reason), `a machine reason, got ${info.reason}`)
     gleich(info.id, 'docker', 'it still says what it was asked about')
     wahr(Array.isArray(info.runtimes), 'and answers with the shape a caller expects')
     const unknown = await rt.runtimeInfo('nosuch')
     gleich(unknown.available, false, 'an unknown runtime is not available either')
-    gleich(unknown.reason, 'unknown', 'and it says why, without throwing')
+    gleich(unknown.reason, 'sandbox.reason.unknown_runtime', 'and it says why, without throwing')
   })
 
   await pruefe('a lifecycle call without a daemon answers, and answers "I do not know"', async () => {
@@ -8139,14 +8144,94 @@ process.stdout.write(JSON.stringify(out))
     wahr(typeof owned.verdict === 'string', '… which only means something together with the verdict')
   })
 
-  await pruefe('every runtime string this module names exists in all three catalogs', () => {
+  // The i18n group above compares the three catalogs to EACH OTHER and never to
+  // the code, so a key this module emits and nobody ever added passes a green
+  // suite and fails only in front of an operator, as a raw dotted key on the
+  // page. That is the one class of bug the suite structurally cannot catch, and
+  // it happened twice in this module in one day — so the check is here, against
+  // the source, and it also refuses a translation that is the English copied.
+  await pruefe('every string this module emits exists in all three catalogs, really translated', () => {
     const source = readFileSync(new URL('../server/sandbox/runtime.mjs', import.meta.url), 'utf8')
-    const keys = [...new Set([...source.matchAll(/'(sandbox\.runtime\.[a-z_]+)'/g)].map(m => m[1]))]
-    wahr(keys.length >= 6, 'the module names its own sentences')
-    for (const lang of ['en', 'de', 'zh']) {
-      const cat = JSON.parse(readFileSync(new URL(`../lang/${lang}.json`, import.meta.url), 'utf8'))
-      for (const k of keys) wahr(!!cat[k], `${lang}: ${k}`)
+    const keys = [...new Set([...source.matchAll(/'(sandbox\.[a-z_]+\.[a-z_]+)'/g)].map(m => m[1]))]
+    wahr(keys.length >= 15, `the module names its own sentences (found ${keys.length})`)
+    const cats = Object.fromEntries(['en', 'de', 'zh'].map(l =>
+      [l, JSON.parse(readFileSync(new URL(`../lang/${l}.json`, import.meta.url), 'utf8'))]))
+    for (const k of keys) {
+      for (const lang of ['en', 'de', 'zh']) wahr(!!cats[lang][k], `${lang}: ${k} is missing`)
+      falsch(cats.de[k] === cats.en[k], `de:${k} is the English copied`)
+      falsch(cats.zh[k] === cats.en[k], `zh:${k} is the English copied`)
     }
+  })
+
+  // -- images (§7.10). Never built on this machine; what is checked is the argv
+  //    and the refusals, and that the argv is the one the README hands a human.
+  await pruefe('the build argv is the README\'s command, with absolute paths', () => {
+    const recipe = { dockerfile: 'sandbox/images/claude.Dockerfile',
+      args: { CLAUDE_VERSION: '2.1.261' }, tag: 'freilauf/agent-claude:2.1.261' }
+    const { bin, args } = rt.buildImageArgv(recipe, { root: '/co' })
+    gleich(bin, 'docker', 'the runtime binary')
+    gleich(args.join(' '),
+      'build -f /co/sandbox/images/claude.Dockerfile --build-arg CLAUDE_VERSION=2.1.261 '
+      + '-t freilauf/agent-claude:2.1.261 /co/sandbox/images',
+      'flag for flag the README\'s line — the hub must not build something else')
+  })
+
+  await pruefe('--pull is written for "always" only, and an empty build arg is dropped', () => {
+    const recipe = { dockerfile: 'sandbox/images/base.Dockerfile', args: { UID: '1000', GID: '' }, tag: 'x:1' }
+    wahr(rt.buildImageArgv(recipe, { root: '/co', pull: 'always' }).args.includes('--pull'), 'always pulls')
+    falsch(rt.buildImageArgv(recipe, { root: '/co', pull: 'if-missing' }).args.includes('--pull'),
+      'if-missing IS docker\'s default')
+    falsch(rt.buildImageArgv(recipe, { root: '/co', pull: 'never' }).args.includes('--pull'),
+      'and never cannot be enforced at build time anyway')
+    const args = rt.buildImageArgv(recipe, { root: '/co' }).args
+    wahr(args.includes('UID=1000'), 'a real build arg travels')
+    falsch(args.some(a => a.startsWith('GID=')), 'an empty one would override the Dockerfile\'s own default with \'\'')
+  })
+
+  await pruefe('the image tag carries the operator\'s registry when there is one', () => {
+    gleich(rt.taggedImage('claude', '2.1.261'), 'freilauf/agent-claude:2.1.261', 'the plain name')
+    gleich(rt.taggedImage('claude', '2.1.261', 'reg.example.com/'), 'reg.example.com/freilauf/agent-claude:2.1.261',
+      'and a trailing slash is not doubled')
+  })
+
+  await pruefe('the versions the images README names are the ones the plugins pin', async () => {
+    // Two places state one version, so they are held equal here: an operator
+    // building the README's command and a hub building its own must produce the
+    // same image, or somebody debugs the wrong one.
+    const readme = readFileSync(new URL('../sandbox/images/README.md', import.meta.url), 'utf8')
+    const { getHarness } = await import('../server/harnesses/index.mjs')
+    for (const id of ['claude', 'opencode', 'cursor', 'hermes']) {
+      const decl = getHarness(id)?.sandbox?.image
+      wahr(!!decl?.dockerfile, `${id}: the plugin declares a Dockerfile`)
+      for (const [k, v] of Object.entries(decl.args ?? {})) {
+        enthaelt(readme, `--build-arg ${k}=${v}`, `${id}: the README builds with ${k}=${v}`)
+      }
+    }
+  })
+
+  await pruefe('an image nobody ships is a readable refusal, not a throw', async () => {
+    const r = await rt.buildImage('nope')
+    gleich(r.ok, false, 'it refuses')
+    gleich(r.reason, 'unknown_image', 'with a reason a caller can branch on')
+    falsch(r.error.startsWith('sandbox.'), 'and a sentence, not a raw key')
+    enthaelt(r.error, 'nope', 'that names the image')
+  })
+
+  await pruefe('a build without a runtime says so, and blames no Dockerfile for it', async () => {
+    const r = await rt.buildImage('claude')
+    gleich(r.ok, false, 'nothing was built')
+    wahr(['no_daemon', 'unreachable'].includes(r.reason), `a runtime reason, got ${r.reason}`)
+    falsch(r.reason === 'build_failed', 'a missing daemon is not a broken Dockerfile')
+    falsch(r.error.startsWith('sandbox.'), 'the operator gets a sentence')
+    enthaelt(r.error, 'freilauf/agent-claude', 'naming the image it was about')
+  })
+
+  await pruefe('the digest answers with both halves, and null where it cannot', async () => {
+    const d = await rt.imageDigest('freilauf/agent-claude:2.1.261')
+    gleich(d.ok, false, 'no runtime, no digest')
+    gleich(d.digest, null, 'and null rather than a guess')
+    falsch(String(d.error ?? '').startsWith('sandbox.'), 'the refusal is a sentence')
+    falsch(String(d.error ?? '').includes('could not be built'), 'reading a digest is not building')
   })
 
 
@@ -8331,6 +8416,35 @@ process.stdout.write(JSON.stringify(out))
         } finally {
           if (alt === undefined) delete process.env.FREILAUF_CURSOR_AUTH
           else process.env.FREILAUF_CURSOR_AUTH = alt
+        }
+      })
+
+      await pruefe('claude\'s OAuth token is storable, and the sandbox block only says how it travels', async () => {
+        const { credentialSpec, credentialValue } = await import('../server/plugins/store.mjs')
+        // The storage keys off the TOP-LEVEL declaration; a credential declared
+        // only inside `sandbox` would render a field that looks saved and is
+        // not — which is why it is declared in both places by one constant.
+        const spec = credentialSpec(getHarness('claude'))
+        const oauth = spec.find(c => c.key === 'oauth_token')
+        wahr(!!oauth, 'the Plugins page can offer it')
+        gleich(oauth.envKeys.join(','), 'CLAUDE_CODE_OAUTH_TOKEN', 'and it names the variable')
+        // Optional on purpose: an ordinary run authenticates through the CLI's
+        // own login, and a working installation must never read as unconfigured.
+        falsch(oauth.required, 'it is optional')
+        const inj = sandboxDecl('claude').credentials.find(c => c.key === 'oauth_token')
+        gleich(inj.key, oauth.key, 'the sandbox block refers to the same key')
+        gleich(inj.envKeys.join(','), oauth.envKeys.join(','), 'from the same single author')
+        gleich(inj.injection.hosts.join(','), 'api.anthropic.com', 'and only Anthropic gets the real value')
+        // Resolution is the ordinary path: no stored value and no variable set
+        // is null, never a throw and never a guess.
+        const alt = process.env.CLAUDE_CODE_OAUTH_TOKEN
+        delete process.env.CLAUDE_CODE_OAUTH_TOKEN
+        try {
+          gleich(credentialValue('claude', 'oauth_token', {}), null, 'nothing configured is null')
+          gleich(credentialValue('claude', 'oauth_token', { CLAUDE_CODE_OAUTH_TOKEN: 'tok' }), 'tok',
+            'and the declared variable answers when it is set')
+        } finally {
+          if (alt !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = alt
         }
       })
 

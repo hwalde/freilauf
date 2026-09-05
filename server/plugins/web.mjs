@@ -345,17 +345,20 @@ function sandboxBlock(id, plugin) {
   if (Array.isArray(decl?.stateDirs) && decl.stateDirs.length) {
     zeilen.push(`${e(t('sandbox.plugin.state_dirs'))}: ${decl.stateDirs.map(d => `<code>${e(d)}</code>`).join(' ')}`)
   }
-  // The credential a SANDBOXED run of this agent authenticates with. Named and
-  // never shown, like every other credential on this page — and named at all
-  // because it is declared inside the sandbox block rather than at the top
-  // level, so it has no field of its own: an operator who does not know the
-  // variable's name has no way to find it out.
+  // How the credential TRAVELS inside a sandbox, which is the one thing the
+  // ordinary credential field below cannot say. Whether it is stored and where
+  // it comes from is that field's business (`credentialsBlock`, the same
+  // machinery every other plugin uses); this line says that under
+  // `secrets.mode: inject` the token never enters the container at all — the
+  // proxy holds it and puts it on the named header, for the named hosts only.
+  // The two are not a duplicate: one is "can I set it", the other "where does
+  // it go".
   for (const c of decl?.credentials ?? []) {
-    const names = (c.envKeys ?? []).map(k => `<code>${e(k)}</code>`).join(', ')
-    if (!names) continue
-    const gesetzt = (c.envKeys ?? []).some(k => !!process.env[k])
-    zeilen.push(`${e(t('sandbox.plugin.credential'))}: ${names} — ${
-      e(t(gesetzt ? 'sandbox.plugin.credential_found' : 'sandbox.plugin.credential_missing'))}`)
+    const inj = c.injection
+    if (!inj?.header) continue
+    zeilen.push(e(t('sandbox.plugin.credential_travels', {
+      header: inj.header, hosts: (inj.hosts ?? []).join(', ') || '—',
+    })))
   }
   return `<p class="dim">${e(t('sandbox.plugin.declared'))}</p>
     ${zeilen.length ? `<ul class="dim sandbox-decl">${zeilen.map(z => `<li>${z}</li>`).join('')}</ul>` : ''}`

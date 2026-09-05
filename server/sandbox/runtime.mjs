@@ -21,11 +21,14 @@
 // out of the pure builders, and they mean "this spec cannot become a command
 // line", which is a readable refusal at launch (failRun) rather than a hang.
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { env } from '../env.mjs'
 import { sh } from '../util.mjs'
 import { t } from '../i18n.mjs'
 import { normalizeSpec } from './spec.mjs'
+import { dataDir } from '../paths.mjs'
 
 // ---------------------------------------------------------------------------
 // Names, targets and constants that more than one module needs
@@ -595,6 +598,34 @@ let infoFlight = new Map()     // key → promise
 export function _runtimeInfoCacheReset() { infoCache = new Map(); infoFlight = new Map() }
 
 /**
+ * Why the answer is what it is — as **dotted i18n keys**, never bare words.
+ *
+ * `reasonText()` on the settings page prints an undotted string VERBATIM, so a
+ * reason of `no_binary` reached the operator as the literal word `no_binary` —
+ * on the one line they read at exactly the moment they are trying to work out
+ * what to install. The sentences behind these keys therefore say what to DO,
+ * not only what is wrong.
+ *
+ * They carry **no placeholders**, and that is a constraint rather than a style:
+ * `reasonText()` calls `t(key)` with no params, so a `{bin}` in one of them
+ * would be rendered as the four characters `{bin}`. Where a parameterised
+ * sentence is wanted — the build's own refusal — this module builds it itself
+ * out of the `sandbox.runtime.*` family instead.
+ *
+ * The `sandbox.reason.*` family is shared with the launch path, which owns
+ * `not_scanned`, `switched_off`, `no_runtime_module`, `hub_off` and
+ * `harness_unsupported`. These five are this module's own.
+ */
+const REASON = {
+  ok: 'sandbox.reason.ok',
+  no_binary: 'sandbox.reason.no_binary',
+  no_daemon: 'sandbox.reason.no_daemon',
+  unreachable: 'sandbox.reason.unreachable',
+  unknown_runtime: 'sandbox.reason.unknown_runtime',
+  unsupported_runtime: 'sandbox.reason.unsupported_runtime',
+}
+
+/**
  * What this machine can actually drive. Never throws; on a machine without a
  * container runtime the answer is `{ available: false, reason: 'no_binary' }`
  * and every caller behaves as it does today.
@@ -612,7 +643,8 @@ export async function runtimeInfo(runtimeId = null, { force = false } = {}) {
     return {
       available: false, id, bin: null, version: null, rootless: null,
       runtimes: [], cgroup: {}, userns: {},
-      reason: err.key === 'sandbox.runtime.reason_unsupported' ? 'unsupported' : 'unknown',
+      reason: err.key === 'sandbox.runtime.reason_unsupported'
+        ? REASON.unsupported_runtime : REASON.unknown_runtime,
       message: err.message,
     }
   }
@@ -647,28 +679,28 @@ export async function runtimeInfo(runtimeId = null, { force = false } = {}) {
 async function probeRuntime(id, bin) {
   const base = {
     available: false, id, bin, version: null, rootless: null,
-    runtimes: [], cgroup: cgroupFacts(), userns: usernsFacts(), reason: 'unreachable', message: null,
+    runtimes: [], cgroup: cgroupFacts(), userns: usernsFacts(), reason: REASON.unreachable, message: null,
   }
   // `info --format {{json .}}` is one call for everything the settings page
   // wants, and it is the call that fails when the daemon is down — which is
   // exactly the question. Parsing defensively: a field a future release renames
   // must cost that one field, never the answer.
   const r = await call(id, ['info', '--format', '{{json .}}'], { timeout: 15_000 })
-  if (r.verdict === 'no_daemon') return { ...base, reason: 'no_daemon', message: (r.stderr || '').trim() || null }
+  if (r.verdict === 'no_daemon') return { ...base, reason: REASON.no_daemon, message: (r.stderr || '').trim() || null }
   if (!r.ok) {
     const missing = r.code === 'ENOENT' || /ENOENT|not found/i.test(String(r.stderr ?? ''))
-    return { ...base, reason: missing ? 'no_binary' : 'unreachable', message: (r.stderr || '').trim() || null }
+    return { ...base, reason: missing ? REASON.no_binary : REASON.unreachable, message: (r.stderr || '').trim() || null }
   }
   let info = null
   try { info = JSON.parse(r.stdout) } catch { info = null }
   if (!info || typeof info !== 'object') {
     // The daemon answered and we could not read it. That is not "no daemon".
-    return { ...base, reason: 'unreachable', message: 'could not parse info output' }
+    return { ...base, reason: REASON.unreachable, message: 'could not parse info output' }
   }
   return {
     ...base,
     available: true,
-    reason: 'ok',
+    reason: REASON.ok,
     version: versionFrom(info),
     rootless: rootlessFrom(info),
     runtimes: runtimesFrom(info),
@@ -953,6 +985,213 @@ export async function listOwned(hubId, { runtime = 'docker' } = {}) {
     return { verdict: r.verdict, containers: [], reason: (r.stderr || '').trim() || null }
   }
   return { verdict: 'ok', containers: parseOwned(r.stdout), reason: null }
+}
+
+// ---------------------------------------------------------------------------
+// Images (§7.10)
+// ---------------------------------------------------------------------------
+//
+// The image is what pins the CLI — a sandboxed run never updates itself, and
+// the digest it ran with is written into `runs.sandbox_spec.image.digest` and
+// into the `started` event. That is the whole provenance story, so the build
+// has to be reachable from the settings page rather than being a command in a
+// README that somebody may or may not have run.
+//
+// NOTE, and it is not a formality: **these images have never been built.** This
+// machine has no container runtime. What is written here is the argv and its
+// refusals; whether the four installers inside the Dockerfiles work is what the
+// first operator's build finds out. `sandbox/images/README.md` carries the same
+// commands for a human, and the two are kept byte-comparable on purpose — a
+// hub that builds something other than what the README tells an operator to
+// build is how somebody ends up debugging the wrong image.
+
+/** The base everything else is `FROM`. Its tag is the distribution it pins. */
+const BASE_IMAGE = { name: 'base', dockerfile: 'sandbox/images/base.Dockerfile', version: '24.04' }
+
+/** The checkout this module lives in — never the process's cwd (AGENTS.md). */
+function appDir() {
+  return join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+}
+
+/**
+ * What to build for one image name, out of the plugin that owns it.
+ *
+ * The **plugin is the authority** for a harness image: `sandbox.image` carries
+ * the Dockerfile and the build args, and the Dockerfile's own `ARG` defaults
+ * are kept equal to them so an image and its declaration cannot say different
+ * things. The version in the tag is therefore not a second constant — it is
+ * read out of the `*_VERSION` build arg the plugin declares (the naming rule
+ * the README states, which is what lets the hub build these files without a
+ * translation table). `HERMES_COMMIT` and friends are pins, not versions.
+ */
+async function imageRecipe(name, { registry } = {}) {
+  const id = String(name ?? '').trim()
+  if (id === BASE_IMAGE.name) {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 1000
+    const gid = typeof process.getgid === 'function' ? process.getgid() : 1000
+    // The base is the ONLY one built with the uid: the harness layers are FROM
+    // it and inherit the user, which is also why the README's harness commands
+    // pass no UID/GID either (§7.7, and the README's "The uid question").
+    return {
+      ok: true,
+      dockerfile: BASE_IMAGE.dockerfile,
+      args: { UID: String(uid), GID: String(gid) },
+      tag: taggedImage('base', BASE_IMAGE.version, registry),
+    }
+  }
+  // Lazily, and by name: a static import of the registry here would close the
+  // ring the AGENTS.md entry about claude.mjs → quota.mjs describes, and this
+  // function is async anyway.
+  let plugin = null
+  try {
+    const { getHarness } = await import('../harnesses/index.mjs')
+    plugin = getHarness(id)
+  } catch { plugin = null }
+  const decl = plugin?.sandbox?.image
+  if (!decl?.dockerfile) return { ok: false, reason: 'unknown_image' }
+  const args = { ...(decl.args ?? {}) }
+  const versionKey = Object.keys(args).find(k => k.endsWith('_VERSION'))
+  const version = versionKey ? String(args[versionKey]) : 'latest'
+  return { ok: true, dockerfile: decl.dockerfile, args, tag: taggedImage(id, version, registry) }
+}
+
+/**
+ * `freilauf/agent-<name>:<version>`, with the operator's registry in front when
+ * they configured one (`sandbox_image_registry`). Exported because the settings
+ * page and the launch path both need to name the same image.
+ */
+export function taggedImage(name, version, registry = null) {
+  const repo = `freilauf/agent-${name}`
+  const prefix = registry ? String(registry).replace(/\/+$/, '') + '/' : ''
+  return `${prefix}${repo}:${version}`
+}
+
+/**
+ * The build argv, pure and unit-tested — the same shape the pure builders above
+ * have, and for the same reason: it is the half that can be checked without a
+ * daemon. Paths are absolute because the hub's working directory is a courtesy
+ * and not a promise; the command is otherwise the README's, flag for flag.
+ */
+export function buildImageArgv(recipe, { runtime = 'docker', pull = 'if-missing', root = null } = {}) {
+  const base = root ?? appDir()
+  const args = ['build', '-f', join(base, recipe.dockerfile)]
+  // `--pull` only for `always`. `if-missing` IS docker's default, and `never`
+  // cannot be enforced at build time — a `FROM` whose image is absent is pulled
+  // whatever anybody wanted. Saying so here beats a flag that does nothing.
+  if (pull === 'always') args.push('--pull')
+  for (const [k, v] of Object.entries(recipe.args ?? {})) {
+    if (unset(v)) continue          // an empty build arg would override the Dockerfile's own default with ''
+    args.push('--build-arg', `${k}=${v}`)
+  }
+  args.push('-t', recipe.tag)
+  // The build CONTEXT is the images directory, not the checkout: everything
+  // these Dockerfiles copy lives there, and a repository-wide context would
+  // ship the whole hub to the daemon on every build.
+  args.push(join(base, 'sandbox', 'images'))
+  return { bin: runtimeBin(runtime), args }
+}
+
+/**
+ * Build one of the shipped images. Never throws.
+ *
+ * On failure the **whole build log is kept**, not swallowed: which of the four
+ * installers broke is only visible in it (the README's confidence table says
+ * hermes is the one to build first, and why). It is written to a file under the
+ * data directory and the returned sentence names that path — a page renders one
+ * line, and a 400-line build log is not one line.
+ *
+ * `reason` here is a DISCRIMINATOR a caller branches on, never something shown
+ * to anybody — `error` is the sentence, already translated. That is the other
+ * half of the rule REASON above states: whatever a page might print is a key.
+ */
+export async function buildImage(name, { runtime = 'docker', registry = null, pull = 'if-missing', timeout = 30 * 60_000 } = {}) {
+  const recipe = await imageRecipe(name, { registry })
+  if (!recipe.ok) {
+    return { ok: false, reason: 'unknown_image', image: String(name ?? ''), verdict: 'ok',
+      error: t('sandbox.runtime.build_unknown_image', { image: String(name ?? '') }) }
+  }
+  const dockerfile = join(appDir(), recipe.dockerfile)
+  if (!existsSync(dockerfile)) {
+    return { ok: false, reason: 'no_dockerfile', image: recipe.tag, verdict: 'ok',
+      error: t('sandbox.runtime.build_no_dockerfile', { image: String(name), path: dockerfile }) }
+  }
+  const { bin, args } = buildImageArgv(recipe, { runtime, pull })
+  const r = await sh(bin, args, { timeout, maxBuffer: 16 * 1024 * 1024 })
+  const verdict = runtimeVerdict(r)
+  if (r.ok) {
+    // The digest is asked for right away: it is what a spec is pinned with and
+    // what the `started` event records, and asking later means asking about an
+    // image that may have been rebuilt in between.
+    const d = await imageDigest(recipe.tag, { runtime })
+    return { ok: true, image: recipe.tag, verdict: 'ok', digest: d.digest, imageId: d.id, log: r.stdout }
+  }
+  if (verdict !== 'ok') {
+    // No daemon, or none that answered. That is not a broken Dockerfile, and
+    // saying "the build failed" about it would send the operator to the wrong
+    // file entirely.
+    return { ok: false, reason: verdict === 'no_daemon' ? 'no_daemon' : 'unreachable', image: recipe.tag, verdict,
+      error: t('sandbox.runtime.build_unavailable', {
+        image: recipe.tag,
+        reason: t(verdict === 'no_daemon' ? 'sandbox.runtime.reason_no_daemon' : 'sandbox.runtime.reason_unreachable', { bin }),
+      }) }
+  }
+  const log = String(r.stdout ?? '') + String(r.stderr ?? '')
+  const path = writeBuildLog(name, [`$ ${bin} ${args.join(' ')}`, '', log].join('\n'))
+  return {
+    ok: false, reason: 'build_failed', image: recipe.tag, verdict: 'ok', log,
+    error: t('sandbox.runtime.build_failed', { image: recipe.tag, detail: lastMeaningfulLine(log), log: path ?? '—' }),
+  }
+}
+
+/** The last line that says something — a build log ends in blank lines and progress noise. */
+function lastMeaningfulLine(log) {
+  const lines = String(log ?? '').split('\n').map(l => l.trim()).filter(Boolean)
+  return lines.length ? lines[lines.length - 1].slice(0, 300) : ''
+}
+
+/** Best effort in every direction: a log nobody could write is not a reason to lose the refusal. */
+function writeBuildLog(name, text) {
+  try {
+    const path = join(dataDir(), `sandbox-build-${String(name).replace(/[^\w.-]/g, '_')}.log`)
+    writeFileSync(path, text, { mode: 0o600 })
+    return path
+  } catch { return null }
+}
+
+/**
+ * The digest of an image, so a spec can be pinned after a build.
+ *
+ * Two answers, and the difference matters more than it looks. `RepoDigests`
+ * exists only for an image that came from (or went to) a registry, and it is
+ * the ONLY one `buildRunArgv()` may put after the `@`: a locally built image
+ * has an `Id` but no repo digest, and `docker run repo@sha256:<Id>` does not
+ * resolve. So `digest` is the pinnable one and is null for a local build, while
+ * `id` is always there and is what the `started` event can record as provenance
+ * even when nothing was pushed.
+ *
+ * `{{index .RepoDigests 0}}` on its own is an error on an empty list — hence
+ * the `{{if}}`, which is also what the README's own command silently assumes.
+ */
+export async function imageDigest(ref, { runtime = 'docker' } = {}) {
+  const r = await call(runtime, ['image', 'inspect', '--format',
+    '{{.Id}}\t{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}', String(ref)])
+  if (notFound(r)) return { ok: false, reason: 'no_such_image', verdict: 'ok', digest: null, id: null, repoDigest: null }
+  if (r.verdict !== 'ok') {
+    return { ok: false, reason: r.verdict, verdict: r.verdict, digest: null, id: null, repoDigest: null,
+      error: t('sandbox.runtime.digest_unavailable', {
+        image: String(ref),
+        reason: t(r.verdict === 'no_daemon' ? 'sandbox.runtime.reason_no_daemon' : 'sandbox.runtime.reason_unreachable',
+          { bin: r.bin ?? 'docker' }),
+      }) }
+  }
+  const [id = '', repoDigest = ''] = String(r.stdout ?? '').trim().split('\t')
+  const at = repoDigest.lastIndexOf('@')
+  return {
+    ok: true, verdict: 'ok',
+    id: id || null,
+    repoDigest: repoDigest || null,
+    digest: at > 0 ? repoDigest.slice(at + 1) : null,
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -76,6 +76,18 @@ das tut Freilauf, und es geht nur vorwärts.
   (`fl-panel`, ein HTTP-Aufruf), Freilauf zeigt sie mit dem Zeitpunkt der
   Messung und erfährt nie, was sie bedeuten
   ([docs/panels.md](docs/panels.md)).
+- **Eine Grenze um den Agenten, wenn du eine willst.** Ein Lauf kann in einem
+  Container arbeiten: mit einem eigenen Klon statt deines Checkouts, einem
+  eigenen Home und einem Netz, dessen einziger Weg nach draußen ein Proxy ist,
+  der für einen Host außerhalb der Allowlist ein lesbares 403 zurückgibt. Die
+  Grenze wird konfiguriert, *bevor* der Lauf startet — im Hub, pro Repository,
+  pro Agent, pro Lauf — und eine tiefere Ebene darf nur verengen, was eine
+  höhere festgezurrt hat. Blockiert sie etwas, das der Agent brauchte, bekommst
+  du den Host genannt und einen Klick, um ihn für diesen Lauf oder dieses Repo
+  freizugeben — ohne Neustart. Optional und **standardmäßig aus**; Docker ist
+  nur dann Voraussetzung, wenn du es willst
+  ([docs/sandbox.md](docs/sandbox.md) — dort steht ebenso ausführlich, was die
+  Sandbox *nicht* tut, wie das, was sie tut).
 - **Alles Herstellerspezifische ist ein Plugin.** Coding-Agenten,
   Modell-Provider und Benachrichtigungsdienste sind Plugins mit dokumentiertem
   Vertrag ([docs/plugins.md](docs/plugins.md)); ein Dritter kann ein Paket auf
@@ -241,6 +253,14 @@ Der Hub kann tmux steuern. **Das ist Shell-Zugriff.** Deshalb:
 - Jeder Lauf arbeitet in seinem eigenen Worktree; Agenten mergen und pushen nie
   auf den Basis-Branch — das tut Freilauf; und alles, was ein Lauf tut, ist
   hinterher ein Report, ein Ereignis oder ein Vorfall, den man lesen kann.
+- **Optional steckt der Agent selbst in einem Container** — eigener Klon,
+  eigenes Home, eine Egress-Allowlist mit Default-Deny, keine Capabilities, ein
+  read-only Root und cgroup-Limits. Standardmäßig aus. Es ist eine Wand
+  zwischen dem *Agenten* und dem Host, gebaut vom Hub, der auf der Host-Seite
+  davon steht: sie verkleinert nicht, was ein kompromittierter Hub kann, und
+  sie schaut in keinen Inhalt hinein — ein erlaubter Host ist damit ein Weg
+  nach draußen. Lies [docs/sandbox.md](docs/sandbox.md); der Abschnitt „What
+  this sandbox does not do" ist der wichtige.
 
 **Betreibe den Hub nie in einem erreichbaren Netz ohne diese Schichten.**
 

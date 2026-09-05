@@ -20,6 +20,77 @@ a day on which nothing was released.
 
 ### Added
 
+- **A run's agent can work inside a container.** Optional, **off by default**,
+  and an installation that never switches it on behaves exactly as it did.
+  Turn it on under **Settings → Sandbox**, where the hub says what container
+  runtime it found and refuses to be switched on without one. The boundary —
+  network, filesystem, resources, secrets — is one profile document that four
+  layers may contribute to (hub → repo → agent → run), and **a lower layer may
+  only ever narrow what a higher one locked**; an attempt to loosen a locked
+  field is refused and written down, never silently applied. Four profiles are
+  shipped: **Balanced**, **Locked down**, **Open network** and **Audit** —
+  three of which ask for credential injection, which is **not finished**, so
+  they refuse to start a run rather than putting the real key inside a
+  container that promised to hold a placeholder. Start with **Open network**,
+  or a copy of Balanced whose secrets are passed as environment variables. A
+  sandboxed run gets a clone of its own instead of a linked worktree, its own
+  `HOME`, and a network whose only way out is an egress proxy that answers a
+  readable **403** for a host that is not on its allowlist. Everything the hub
+  does with tmux is unchanged — the terminal, `fl-attach`, `fl-kill`, the log,
+  typed messages — because the pane's process is the container's client.
+  **The full reference, including a long section on what the sandbox does
+  *not* do, is [docs/sandbox.md](docs/sandbox.md).**
+- **When the sandbox blocks something, you get three buttons and the agent
+  gets a sentence.** Every refusal is a `sandbox:blocked` event and a row on
+  the run's page: *Allow for this run* (live, no restart), *Allow for this
+  repo*, *Deny and tell the agent* (which types the decision into the
+  session). The proxy's 403 names the host and tells the agent to run
+  `fl-report access "<what and why>"` and carry on with what it can do, and
+  the run's prompt says the same. Network and resource changes apply to a
+  running container; a filesystem change resumes the run in a new container
+  with the same clone and the same conversation. **Continue without the
+  sandbox** is there for the moment none of that is enough — it asks first and
+  is recorded on the run for ever.
+- **Audit-only mode, and one button to grow an allowlist out of it.** Nothing
+  is blocked; everything that would have been is written down. The repo form
+  then lists the hosts this repository's own runs reached, with counts, and
+  adopts the ticked ones into its allowlist. That is the rollout an
+  organisation actually does: observe first, enforce second.
+- **An audit you can hand to somebody.** *Download the audit* on a run page
+  (`GET /api/runs/<id>/audit.jsonl`) folds the run's policy, its proxy
+  configuration, every request the proxy saw and the run's own events into one
+  hash-chained JSONL file, headed by the run and the hub's running sha and
+  footed by the line count — so a truncated copy is detectable. It says on its
+  own first line what it proves and what it does not.
+- **Per-repo, per-agent and per-run sandbox fields**, a **Sandbox** block in
+  the repo form (default, profile, image, audit-only, run the merge check in
+  the sandbox too) with a **Dry run** button that resolves the policy without
+  starting anything, the tri-state on agents, single runs, favorites and the
+  flow designer's "start single run" step, and a **profile editor** under
+  Settings → Sandbox. The Plugins page says per coding agent whether it can be
+  sandboxed at all, with its image, the hosts it needs and whether its
+  credential was found; the Welcome wizard prints the same one-line runtime
+  answer without asking a question about it.
+- **The sessions page and the sidebar say "unknown" instead of guessing.** A
+  sandboxed session's memory is asked of the runtime, because the pane's
+  process tree lives in another namespace and under-reports a container by
+  about twentyfold (measured). Where it cannot be measured it says so, and the
+  machine total says it is incomplete.
+- **`fl-start --sandbox <file>`**, with `--dry-run` to print the whole
+  container command line without a runtime present; `sandbox/wrap.sh --print`
+  does the same from the shell. **`fl-report access "…"`** is a new report kind
+  for an agent that needs something the sandbox blocks. **`fl-kill` stops the
+  container before it kills the session**, so ending a sandboxed run no longer
+  leaves the agent running.
+- **A new global incident, `docker_unreachable`**, for a container daemon that
+  stops answering — raised only after three consecutive silences and resolved
+  the moment it answers again. "The daemon did not answer" is never read as
+  "there are no containers": nothing is stopped or reaped on the strength of a
+  question nobody answered.
+- **A hard runtime ceiling per profile.** `resources.maxRuntimeMinutes` stops
+  the container, ends the session and aborts the run, once, with one
+  notification.
+
 - **A run says whether its agent is working or waiting for input.** The
   coding agents' own hooks tell the hub when they start processing input and
   when their turn is over (claude: UserPromptSubmit / PreToolUse and Stop /
@@ -185,6 +256,27 @@ a day on which nothing was released.
   the operator instead of being reported as none. A run's uncommitted state is
   either something somebody looked at or something nobody knows — never
   silently the first because the second was cheaper to write.
+
+### Security
+
+- **The hub and an agent now have a channel that is only the report API.**
+  Until today an agent was handed `FL_HUB_URL`, which is the hub's **whole**
+  API — kill any run, type into any session, read the settings that hold the
+  notification token and the provider credentials — and `FL_RUN_ID` was the
+  only thing standing in front of it. There is now a **unix socket** serving an
+  allowlist of exactly two routes (post a report, read this run's own sandbox
+  policy), authenticated with a **per-run token** that every run gets. A
+  sandboxed run is given the socket and the token and no hub URL at all.
+- **The `127.0.0.1` report route still accepts a report with no token**, on
+  purpose, for **one transition release**: an agent that is running right now
+  was started by a hub that knew no token and its `fl-report` sends none, so
+  requiring one would silence every run in flight the moment this is deployed.
+  Runs from before the token column keep reporting that way too. A later commit
+  removes the exemption.
+- The report fallback file (`inbox.jsonl`) is written to the configured runs
+  directory rather than to `$HOME/agents/runs`. Inside a container that path
+  does not exist, so the last channel a report had would have written into
+  nowhere without saying so.
 
 ## 2026-09-04
 
