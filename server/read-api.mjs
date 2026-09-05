@@ -34,6 +34,7 @@ import { listFavorites, FAVORITES_MAX, favoriteSummary } from './favorites.mjs'
 import { listSessions, sessionMemory, paneAlive } from './sessions.mjs'
 import { panelValues, panelState } from './panels.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
+import { displayStatus, followUpActive } from './run-state.mjs'
 import {
   availableSkills, harnessSkillRoots, skillTargets, installedOverview,
   skillsInstallOn, skillsAutoUpdate,
@@ -98,9 +99,19 @@ async function livenessOf(run) {
     followup_open: run.followup_open ? 1 : 0,
     followup_since: run.followup_since ?? null,
     last_activity_at: run.last_activity_at ?? null,
+    // What the coding agent's own hooks last said: 'working', 'waiting' (its
+    // turn is over, it sits at its prompt), or null — nothing said yet, or a
+    // harness that reports no attention (docs/plugins.md, "Attention").
+    agent_state: run.agent_state ?? null,
+    agent_state_at: run.agent_state_at ?? null,
     // The sentence a caller should act on rather than deriving it themselves.
+    // `waiting_input` outranks `working`: a live pane says the process is
+    // there, the hook says it is waiting for a human — and that is the fact
+    // that decides what to do next.
     verdict: alive === null && session ? 'unknown'
-      : alive ? (['running', 'waiting_help'].includes(run.status) ? 'working' : 'idle_in_tui')
+      : alive
+        ? (displayStatus(run) === 'waiting_input' ? 'waiting_input'
+          : ['running', 'waiting_help'].includes(run.status) || followUpActive(run) ? 'working' : 'idle_in_tui')
         : session ? 'process_gone' : 'no_session',
   }
 }

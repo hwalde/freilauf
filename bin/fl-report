@@ -17,6 +17,9 @@
 #   fl-report _api_error [error] ["text"]         Rate-limit/provider error (from hooks);
 #                                                  without arguments: Claude hook JSON on stdin
 #   fl-report _turn_end|_exit|_rate_limit|_idle|_pane_died [exit]   internal hooks
+#   fl-report _working|_waiting                    the agent's attention (from hooks):
+#                                                  it started processing input / its
+#                                                  turn is over and it waits for a human
 #
 # Source: FL_RUN_ID + FL_HUB_URL from the environment (CC_RUN_ID/CC_HUB_URL are
 # still accepted, for sessions started before the rename). Fallback when the hub is not
@@ -24,7 +27,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 [[ $# -ge 1 ]] || { usage >&2; exit 2; }
@@ -32,7 +35,7 @@ KIND="$1"; shift
 
 case "$KIND" in
     done|failed|help|progress|branch|pr) ;;
-    _turn_end|_exit|_rate_limit|_idle|_pane_died|_api_error) ;;
+    _turn_end|_exit|_rate_limit|_idle|_pane_died|_api_error|_working|_waiting) ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'unknown kind: %s\n' "$KIND" >&2; exit 2 ;;
 esac
@@ -55,7 +58,8 @@ TEXT="" ; FILE_ARG="" ; DETAIL_ARG="" ; ERR="" ; SESSION_ID=""
 # session_id is forwarded so the hub can tell the run's OWN session from a claude
 # process the agent spawned (which inherits hooks and FL_RUN_ID but carries its own
 # session id) — its failures must not land on the run as incidents.
-if [[ "$KIND" == "_api_error" || "$KIND" == "_turn_end" || "$KIND" == "_exit" || "$KIND" == "_idle" ]]; then
+if [[ "$KIND" == "_api_error" || "$KIND" == "_turn_end" || "$KIND" == "_exit" || "$KIND" == "_idle" \
+      || "$KIND" == "_working" || "$KIND" == "_waiting" ]]; then
     HOOK_JSON=""
     if [[ "$KIND" == "_api_error" ]]; then
         if [[ -n "${1:-}" ]]; then

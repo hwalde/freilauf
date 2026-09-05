@@ -22,6 +22,7 @@ import {
 import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } from './title.mjs'
 import { extrasModelsMru, rememberExtrasModel, DEFAULT_EXTRAS_MODEL } from './extras-suggest.mjs'
 import { runEditAllowed } from './run-edit.mjs'
+import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
@@ -95,8 +96,13 @@ function ampel(run) {
   // A run in the finish gate is at least yellow: it has reported, and something
   // is still keeping its work off the base branch. A blocked_* one is red
   // through its incident anyway.
+  // …and so is a running run whose agent has stopped and sits at its prompt:
+  // it reported nothing, and nobody is going to answer it unless somebody
+  // looks. A finished run's agent waiting between follow-up instructions is
+  // not that — the operator is the one typing.
   const yellow = !red && (
     vf === 'gelb' || run.status === 'deferred' || !!run.finish_state
+    || (run.status === 'running' && run.agent_state === 'waiting')
     || db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind IN ('anomaly:no_activity','anomaly:soft_overrun','anomaly:followup_soft_overrun','anomaly:unpushed') LIMIT 1`).get(run.id))
   return red ? 'red' : yellow ? 'yellow' : 'green'
 }
@@ -397,8 +403,12 @@ export function headerStatus() {
     ${version ? `<span class="dim">${e(t('status.version'))} <code>${e(version)}</code></span>` : ''}</div>`
 }
 
-/** The four statuses that mean "there is work in flight", in reading order. */
-const WORK_STATUSES = ['running', 'waiting_help', 'scheduled', 'deferred']
+// What a run DISPLAYS as — "running", "waiting for input", the record itself —
+// is one rule in server/run-state.mjs, in JavaScript for the rows and in SQL for
+// the filter and the counts, so the sidebar's number and the overview's list
+// behind it cannot come apart. Re-exported here because every page used to
+// import it from this module.
+export { followUpActive, displayStatus }
 
 /** A run status as a word one can read, in the operator's language. */
 export function statusText(status) {
@@ -407,48 +417,22 @@ export function statusText(status) {
   return txt === key ? String(status) : txt
 }
 
-/**
- * Is a FINISHED run working again? True while a follow-up commission is open:
- * the operator typed new work into the session (`followup_since`, cleared when
- * the follow-up reports or its session ends), or a follow-up is in the gate /
- * being merged (`followup_open`). The run's `status` keeps telling the truth
- * about the first attempt — what changed is displayed: "running" again, with a
- * line saying it is follow-up work.
- */
-export function followUpActive(run) {
-  return !!run && ['done', 'failed', 'aborted'].includes(run.status)
-    && !!(run.followup_since || run.followup_open)
-}
-
-/** The status word a run displays under — "running" while a follow-up is open. */
-export function displayStatus(run) {
-  return followUpActive(run) ? 'running' : run.status
-}
-
 /** How much work is in flight in this repo, per status, linked into the overview. */
 function workBlock(repoId) {
   if (repoId == null) return ''
   const zeilen = WORK_STATUSES.map(s => {
-    const n = db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND status=?`).get(repoId, s).c
-    // A finished run with an open follow-up commission is work in flight and is
-    // counted where the operator looks for it: under "running". The same rows
-    // the status filter (overviewRuns) puts behind that link.
-    const nachfolge = s === 'running'
-      ? db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL
-          AND status IN ('done','failed','aborted') AND followup_since IS NOT NULL`).get(repoId).c
-      : 0
-    const gesamtN = db.prepare(`SELECT count(*) c FROM runs WHERE archived_at IS NULL AND status=?`).get(s).c
-    const gesamtNachfolge = s === 'running'
-      ? db.prepare(`SELECT count(*) c FROM runs WHERE archived_at IS NULL
-          AND status IN ('done','failed','aborted') AND followup_since IS NOT NULL`).get().c
-      : 0
-    if (!(n + nachfolge)) return null
+    // The same selection the status filter (overviewRuns) puts behind the link:
+    // a finished run with an open follow-up commission counts under "running"
+    // — or under "waiting for input", when its agent has stopped and waits.
+    const where = displayStatusSql(s)
+    const n = db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND ${where}`).get(repoId).c
+    if (!n) return null
     return {
       status: s,
-      n: n + nachfolge,
+      n,
       // The sum of ALL repos for that status — the reading "1 running" that does
       // not add up only makes sense against the other repos' loads.
-      gesamt: gesamtN + gesamtNachfolge,
+      gesamt: db.prepare(`SELECT count(*) c FROM runs WHERE archived_at IS NULL AND ${where}`).get().c,
     }
   }).filter(Boolean)
   if (!zeilen.length) return `<div class="side-block"><span class="side-label">${e(t('side.work'))}</span>
@@ -1057,16 +1041,19 @@ export function runRows(runs, ctx) {
 export function overviewRuns(repoId, status = null, incidentsOnly = false) {
   const s = WORK_STATUSES.includes(status) ? status : null
   return db.prepare(`SELECT * FROM runs WHERE repo_id=? AND archived_at IS NULL
-    AND (? IS NULL OR status = ?
-        OR (? = 'running' AND status IN ('done','failed','aborted') AND followup_since IS NOT NULL))
+    ${s ? `AND ${displayStatusSql(s)}` : ''}
     ${incidentsOnly ? `AND id IN (SELECT run_id FROM incidents WHERE geloest_am IS NULL AND run_id IS NOT NULL)` : ''}
     ORDER BY
     -- A finished run with an open follow-up commission IS work in flight: it
-    -- sorts with the running ones, not below the finished ones.
-    CASE WHEN followup_since IS NOT NULL AND status IN ('done','failed','aborted') THEN 2
-         WHEN status = 'waiting_help' THEN 0 WHEN status = 'failed' THEN 1 WHEN status = 'running' THEN 2
-         WHEN status = 'deferred' THEN 3 WHEN status = 'scheduled' THEN 4 ELSE 5 END,
-    started_at DESC LIMIT 200`).all(repoId, s, s, s)
+    -- sorts with the running ones, not below the finished ones. An agent that
+    -- has stopped and waits for a human sorts right under the help calls — it
+    -- is the row the operator is being waited for on.
+    CASE WHEN status = 'waiting_help' THEN 0
+         WHEN ${displayStatusSql('waiting_input')} THEN 1
+         WHEN status = 'failed' THEN 2
+         WHEN ${displayStatusSql('running')} THEN 3
+         WHEN status = 'deferred' THEN 4 WHEN status = 'scheduled' THEN 5 ELSE 6 END,
+    started_at DESC LIMIT 200`).all(repoId)
 }
 
 /**
@@ -1473,6 +1460,13 @@ export function runDetailHead(run, ctx) {
   const id = run.id
   const titel = ctx.title
   return `<h2 id="run-head">${AMPEL_DOT[ampel(run)]()} ${titleInline(id, titel)} <span class="status-chip">${e(statusText(displayStatus(run)))}</span></h2>
+  ${
+    // Always rendered, hidden when it does not apply: the live channel swaps
+    // by id (hub.js tauscheNachId), and an element that is absent from the DOM
+    // cannot be swapped in — nor out — by its own id. Same reason the card
+    // below needs its own removal step.
+    `<p class="dim" id="run-attention"${displayStatus(run) === 'waiting_input' && run.agent_state_at ? '' : ' hidden'}>${
+      run.agent_state_at ? e(t('run.agent_waiting', { ts: fmtDbUtc(run.agent_state_at) })) : ''}</p>`}
   ${followUpActive(run)
     ? `<div class="banner waiting" id="run-banner">${e(t('run.followup_banner'))}
        ${run.followup_since ? `<span class="dim">${e(t('run.followup_active', { ts: fmtDbUtc(run.followup_since) }))}</span>` : ''}</div>`

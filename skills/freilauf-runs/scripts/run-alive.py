@@ -79,7 +79,8 @@ def hub():
 
 # --- the report -------------------------------------------------------------
 VERDICTS = {
-    "working": "pane alive, and the record says it is running",
+    "working": "pane alive, the run is in flight, and the agent has not said it waits",
+    "waiting_input": "pane alive, the agent's own hook says its turn is over — it waits for a human at its prompt",
     "idle_in_tui": "pane alive, run over — the NORMAL state of a finished claude/opencode/cursor run",
     "process_gone": "the session exists, every pane in it is dead",
     "no_session": "no session name was ever recorded",
@@ -159,11 +160,14 @@ def main():
           if gesamt > len(rows) else "# Liveness — %s (%d)\n" % (what, len(rows)))
     print(table(["short", "status", "verdict", "session", "last activity", "title"], rows))
     seen = {r[2] for r in rows}
-    for v in ("idle_in_tui", "unknown", "working"):
+    for v in ("idle_in_tui", "unknown", "working", "waiting_input"):
         if v in seen:
             print("`%s`: %s" % (v, VERDICTS[v]))
     if "idle_in_tui" in seen:
         print("\nSuch a run can be given more work: fl-api -X POST /api/runs/<id>/send text='...'")
+    if "waiting_input" in seen:
+        print("\nA `waiting_input` agent needs the next instruction: fl-api -X POST /api/runs/<id>/send text='...' "
+              "(a running run in this state has stopped WITHOUT reporting — tell it to report, or end it)")
     if "unknown" in seen:
         print("\nConfirm an `unknown` before concluding anything:  tmux has-session -t '=<session>'")
     if gesamt > len(rows):
