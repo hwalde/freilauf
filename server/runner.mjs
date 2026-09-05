@@ -626,7 +626,7 @@ export function claudeSettingsJson() {
 }
 
 /**
- * The three variables a SANDBOXED session gets on top of the ordinary ones, and
+ * The four variables a SANDBOXED session gets on top of the ordinary ones, and
  * each of them is a boundary crossing rather than a convenience:
  *
  *  - `HOME` is the run's OWN home (§7.7), not the operator's. Everything the CLI
@@ -639,10 +639,28 @@ export function claudeSettingsJson() {
  *    token is minted by the INSERT itself, so a run created before that existed
  *    simply has none and reports over loopback as it always did — which is why
  *    the variable is only set when there is one to set.
+ *  - `FREILAUF_RUNS_DIR` is what makes the LAST channel work, and it was missing.
+ *    `fl-report` files an unreachable report in `<runs dir>/<run id>/inbox.jsonl`
+ *    for the watcher to replay, and it resolves that directory the way every
+ *    `fl-*` script does: the seam, then `$HOME/agents/runs`. Inside the box
+ *    `$HOME` is the run's seeded home, so with the variable unset the fallback
+ *    wrote to `<runDir>/home/agents/runs/<id>/inbox.jsonl` — a path the hub does
+ *    not look at. Measured 2026-09-05 on the first real sandboxed run: the agent
+ *    did the work, committed it, ran `fl-report done`, was told "hub not
+ *    reachable — the report is in inbox.jsonl, the watcher will pick it up", and
+ *    the run then sat in `running` with nobody ever picking it up. Both channels
+ *    dead at once, and the run looked healthy throughout.
+ *
+ *    The value is the HOST path, and that is right rather than lucky: the run
+ *    directory is bind-mounted at its own path (`-v <runDir>:<runDir>` in
+ *    `buildRunArgv()`), so `<runs dir>/<run id>` names the same directory on both
+ *    sides. Only that one child of the runs directory is mounted, which is all
+ *    `fl-report` ever writes into.
  */
 function sandboxEnvArgs(run, sandbox) {
   const out = ['--env', `HOME=${sandbox.home}`,
-    '--env', `FL_HUB_SOCKET=${sandbox.hubSocket}`]
+    '--env', `FL_HUB_SOCKET=${sandbox.hubSocket}`,
+    '--env', `FREILAUF_RUNS_DIR=${RUNS_DIR}`]
   if (run.report_token) out.push('--env', `FL_RUN_TOKEN=${run.report_token}`)
   return out
 }

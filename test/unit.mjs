@@ -9802,7 +9802,7 @@ process.stdout.write(JSON.stringify(out))
         wahr(engineUsable('builtin', null).ok, 'and neither is having no answer at all')
         // The operator's own way out: a listener published where the container
         // can reach it. Refusing that would be refusing a working setup.
-        process.env.FREILAUF_SANDBOX_PROXY_BIND = '10.0.0.1'
+        process.env.FREILAUF_SANDBOX_PROXY_BIND = '192.0.2.10'
         wahr(engineUsable('builtin', { available: true, rootless: true }).ok,
           'an operator who published the listener themselves has answered the question')
       } finally {

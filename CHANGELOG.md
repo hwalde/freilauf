@@ -245,6 +245,35 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A live policy change says which half of it is in force.** Changing a
+  sandboxed run's policy without restarting it has two halves — the network
+  rules go to the egress proxy, memory/CPU/process limits go to the container
+  runtime — and the answer now reports them separately. A change that only
+  raises a limit is applied even when the hub holds no proxy for that run; a
+  change to the network rules with no proxy to carry them is **refused**, with
+  the reason, instead of being reported as done; and a change that carries both
+  is reported as **partly applied**, naming the half that did not land. The new
+  policy is recorded on the run either way, so a restart comes back with what
+  was asked for. Before this, such a change was first reported as a success it
+  had not delivered, and then — after that was fixed — refused as a whole,
+  which threw away the limits half of a patch that never needed a proxy.
+- **A sandbox profile that cannot work on this daemon says so, by name.** The
+  built-in egress proxy cannot be reached from inside a container under a
+  **rootless** container daemon: it listens on the host, and a rootless daemon
+  keeps the run's network in a namespace of its own. The launch already
+  refused — with a bind error nobody could read as "this engine cannot work
+  here", and three of the four shipped profiles are exactly that combination.
+  The refusal now names the cause and what to do instead (the iron-proxy
+  engine, network mode `open`, or publishing the listener yourself with
+  `FREILAUF_SANDBOX_PROXY_BIND`). Falling back to the built-in engine when a
+  named one will not start is refused for the same reason on such a daemon,
+  rather than producing a run with no egress at all.
+- **A sandboxed run's `sandbox.json` and `proxy.yaml` are never written through
+  a symbolic link.** Both live in the run's own directory, which is mounted
+  read-write into the container at the agent's uid, and both are rewritten on
+  every resume and every policy change — so a link left at one of those names
+  made the hub write through it as the hub user. The write is refused now, and
+  the refusal is the launch failure it is.
 - **A sandboxed run's allowlist really reaches its proxy.** The built-in
   engine's listener bound to `127.0.0.1`, which inside a container is the
   container itself — so every request through it failed with a connection error
