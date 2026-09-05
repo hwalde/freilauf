@@ -28,6 +28,63 @@ const TARGET_PLACEMENT = { needsRun: { whenField: 'target', is: 'trigger_run' } 
 // or a constraint error out of SQLite.
 const RUN_STATUSES = ['scheduled', 'deferred', 'running', 'waiting_help', 'done', 'failed', 'aborted']
 
+// ------------------------------------------- text the AGENT wrote, in a host shell
+//
+// A `shell_command` is host execution by design: `bash -lc`, as the hub's user,
+// on the hub machine. That is the operator's tool and it stays one. What is NOT
+// the operator's is the TEXT some of the flow variables carry: `run.report`,
+// `run.last_report` and `run.help_text` are whatever the agent handed
+// `fl-report`, `run.branch` and `run.pr_url` are whatever it reported as its
+// branch and PR, and `merge.files` are the paths it chose to create. `render()`
+// is raw substitution — it quotes nothing, because a template is text and not a
+// command line — so
+//
+//     echo "{{trigger.run.report}}" >> log.txt
+//
+// hands the agent a shell. Inside the sandbox that is a way straight through the
+// boundary: the box exists so an agent's *code* cannot reach the host, and a
+// report is something an agent writes for free.
+//
+// The answer is an opt-in rather than a refusal or an escape, and each of the
+// three was weighed:
+//
+//   escaping   would have to know where in the command the value lands (inside
+//              quotes, in a heredoc, as part of a path). A wrapper that guesses
+//              breaks working flows and still misses the cases it guessed wrong.
+//   refusing   outright would break the legitimate use — an operator who wants
+//              the branch name in a deploy command is not doing anything odd.
+//   opt-in     says the thing out loud at the one moment somebody can judge it,
+//              and leaves the step exactly as capable as it was.
+//
+// What this does NOT catch, and `docs/sandbox.md` says so in the same words: a
+// value that reached `vars.*` through an `extract` step (an LLM reading the
+// agent's report), through another `shell_command`'s `stdout`, or through an
+// HTTP response. Those are agent text one hop further out, and no static check
+// on a template can see it.
+const AGENT_WRITTEN_LEAVES = new Set(['report', 'last_report', 'help_text', 'branch', 'pr_url', 'files'])
+
+/**
+ * Pure: the `{{…}}` paths in a template whose value the coding agent writes.
+ * Matched on the LAST segment, so `trigger.run.report`, `vars.review.report`
+ * and a future `run.report` are all one rule.
+ */
+export function agentWrittenVars(template) {
+  const out = []
+  for (const m of String(template ?? '').matchAll(/\{\{\s*([^}|]+?)\s*(?:\|[^}]*)?\}\}/g)) {
+    const path = m[1].trim()
+    if (AGENT_WRITTEN_LEAVES.has(path.split('.').pop()) && !out.includes(path)) out.push(path)
+  }
+  return out
+}
+
+/**
+ * A checkbox's value, the way AGENTS.md says one has to be read: the string
+ * `'0'` is truthy, so a ticked box is COMPARED against the values that mean yes
+ * and never coerced.
+ */
+const ticked = (v) => v === true || v === 1
+  || ['1', 'on', 'true', 'yes'].includes(String(v ?? '').trim().toLowerCase())
+
 const TARGET_FIELDS = [
   { key: 'target', kind: 'select', options: ['trigger_run', 'agent', 'repo', 'all_running', 'run_id'], default: 'agent' },
   { key: 'agentId', kind: 'agent', showIf: { target: 'agent' } },
@@ -266,9 +323,20 @@ export const STEPS = [
       { key: 'cwd', kind: 'text', default: '{{trigger.run.repo_path}}' },
       { key: 'timeoutMinutes', kind: 'number', default: 10 },
       { key: 'detach', kind: 'checkbox', default: false },
+      { key: 'allowAgentText', kind: 'checkbox', default: false },
       { key: 'outputVar', kind: 'text', default: 'shell' },
     ],
     async run(props, ctx, api) {
+      // Text the agent wrote, in a shell that runs on the host as the operator
+      // — refused unless the operator said so on this step. See
+      // AGENT_WRITTEN_LEAVES above for why it is an opt-in and not an escape.
+      const written = [...agentWrittenVars(props.command), ...agentWrittenVars(props.cwd)]
+      if (written.length && !ticked(props.allowAgentText)) {
+        throw new Error(`shell_command: ${written.join(', ')} is written by the coding agent, `
+          + 'and this command runs on the hub machine as the hub\'s user — interpolating it would '
+          + 'let a run execute code outside its sandbox. Tick "allow text the agent wrote" on this '
+          + 'step if that is really what you mean.')
+      }
       const command = render(props.command, ctx).trim()
       if (!command) throw new Error('shell_command: no command')
       const minutes = Math.max(1, Number(resolve(props.timeoutMinutes, ctx)) || 10)

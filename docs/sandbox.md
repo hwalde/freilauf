@@ -909,6 +909,33 @@ code runs unsandboxed the moment it is merged.** The same is true of anything
 you wire behind a `run_merged` flow's `shell_command` step, which is a command
 on the hub machine by definition.
 
+And the argument of such a step can be written by the agent inside the box.
+`{{trigger.run.report}}`, `{{trigger.run.last_report}}`,
+`{{trigger.run.help_text}}`, `{{trigger.run.branch}}`, `{{trigger.run.pr_url}}`
+and `{{trigger.merge.files}}` all carry text the run itself produced — a report
+is something an agent writes for free — and a flow template is substituted
+**raw**: it quotes nothing, because a template is text and not a command line.
+So `echo "{{trigger.run.report}}" >> log.txt` in a `shell_command` is a shell
+the agent can reach straight through the sandbox boundary.
+
+The step therefore **refuses such a template by name** unless *"allow text the
+agent wrote"* is ticked on that step. Ticked, it behaves exactly as it always
+did — `shell_command` is the operator's tool and stays one, and an operator who
+wants the branch name in a deploy command is not doing anything odd. The check
+is deliberately an opt-in and not an escape: escaping would have to know where
+in the command the value lands (inside quotes, in a heredoc, as part of a path),
+and a wrapper that guesses breaks working flows while still missing what it
+guessed wrong.
+
+**What the check cannot see, and what you therefore still have to look at
+yourself:** the same text one hop further out. A value that reached `vars.*`
+through an `extract` step is an LLM's reading of the agent's report; a value
+that came out of another `shell_command`'s `stdout`, or out of an
+`http_request` body, may be anything. Those are not marked, because no static
+check on a template can tell them from an operator's own constant. The rule to
+carry is the plain one: **a host shell step's command line should be written by
+you, and the values in it should be values you chose.**
+
 **With the box ticked, the check is an ephemeral container of the run's own
 image** — the integration worktree bind-mounted, `--cap-drop ALL`,
 `no-new-privileges`, the run's own network and proxy variables under `allowlist`

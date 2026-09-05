@@ -10816,6 +10816,387 @@ process.stdout.write(JSON.stringify(out))
     })
   }
 
+  gruppe('Sandbox: the image is written down, and a weakening is said out loud')
+  //
+  // Two defects of the final review, both of which every earlier suite passed
+  // because both are about what is RECORDED rather than about what is built.
+  //
+  //   1. `ensureImage()` resolved the harness's default image and only RETURNED
+  //      it, so `runs.sandbox_spec.image.ref` stayed null on every run that did
+  //      not name one — and `checkableSandbox()` reads exactly that column.
+  //      A repo that ticked `merge_check_sandboxed` therefore got
+  //      `merge_check_host {reason:'run_not_boxed'}` and the merged code of a
+  //      SANDBOXED run executing on the host: the control degrading into the
+  //      thing it prevents, with a reason word that was not true.
+  //   2. Only a REFUSED loosening was ever an event, so the acceptance criterion
+  //      ("every weakening is a visible, named event — never a silent setting")
+  //      held exactly when the weakening did not happen.
+  //
+  // The pure halves are here; the e2e groups of the same names drive the real
+  // route, and one of them does it against a real daemon, because a stub cannot
+  // answer what an image really is.
+  {
+    const ig2 = await import('../server/integrate.mjs')
+    const sbx = await import('../server/sandbox/index.mjs')
+    const sspec = await import('../server/sandbox/spec.mjs')
+
+    await pruefe('a boxed run and an unboxed one are two different answers, not one null', () => {
+      const boxed = { sandbox: 1, sandbox_spec: JSON.stringify({ runtime: 'docker', image: { ref: 'freilauf/agent-claude:1' } }) }
+      gleich(ig2.checkableSandbox(boxed).spec.image.ref, 'freilauf/agent-claude:1', 'a described container is described')
+      gleich(ig2.checkableSandbox(boxed).reason, null, 'and carries no reason')
+
+      gleich(ig2.checkableSandbox({ sandbox: 0 }).reason, 'run_unsandboxed',
+        'a run that was never boxed says so — the host is right for it')
+      gleich(ig2.checkableSandbox({ sandbox: 1, sandbox_spec: null }).reason, 'no_spec',
+        'a boxed run with no record is NOT "run_unsandboxed"')
+      gleich(ig2.checkableSandbox({ sandbox: 1, sandbox_spec: '{"image":{}}' }).reason, 'no_image',
+        'and neither is one whose frozen spec names no image — that is the defect, named')
+    })
+
+    await pruefe('narrowing is silent, loosening is not — and the ordering is asked, never restated', () => {
+      const base = sspec.normalizeSpec({})
+      const looser = sspec.normalizeSpec({ network: { mode: 'open' }, filesystem: { readOnlyRoot: false } })
+      const w = sbx.specWeakenings(sspec, base, looser, 'repo')
+      const paths = w.map(x => x.path).sort()
+      wahr(paths.includes('network.mode'), 'Balanced → Open network is a weakening')
+      wahr(paths.includes('filesystem.readOnlyRoot'), 'and so is a writable root filesystem')
+      const mode = w.find(x => x.path === 'network.mode')
+      gleich(mode.from, 'allowlist', 'the event names what it was')
+      gleich(mode.to, 'open', '…and what it became — a path name alone is not an audit')
+      gleich(mode.by, 'repo', 'and which layer did it')
+
+      gleich(sbx.specWeakenings(sspec, looser, base, 'run').length, 0,
+        'the way back is a tightening and says nothing')
+      gleich(sbx.specWeakenings(sspec, base, base, 'run').length, 0, 'an unchanged path is not an event')
+    })
+
+    await pruefe('adding a host to the allow list is a weakening; removing one is not', () => {
+      const before = sspec.normalizeSpec({ network: { allow: ['a.example'] } })
+      const after = sspec.normalizeSpec({ network: { allow: ['a.example', 'evil.example'] } })
+      const w = sbx.specWeakenings(sspec, before, after, 'user')
+      gleich(w.length, 1, 'one path')
+      gleich(w[0].path, 'network.allow', 'the allow list')
+      enthaelt(JSON.stringify(w[0].to), 'evil.example',
+        'and the HOST is in the event — its deny sibling always named one')
+      gleich(sbx.specWeakenings(sspec, after, before, 'user').length, 0, 'dropping a host is a tightening')
+    })
+
+    await pruefe('identity is not policy: a resolved image ref is not a weakening', () => {
+      const before = sspec.normalizeSpec({})
+      const after = sspec.normalizeSpec({ image: { ref: 'freilauf/agent-claude:1', digest: 'sha256:abc', id: 'sha256:def' } })
+      gleich(sbx.specWeakenings(sspec, before, after, 'hub').length, 0,
+        'the freeze of defect 1 must not fill the audit with "the policy got weaker"')
+      const rt = sspec.normalizeSpec({ runtime: 'podman', network: { engine: 'iron-proxy' } })
+      gleich(sbx.specWeakenings(sspec, before, rt, 'hub').length, 0, 'nor which runtime or proxy engine')
+    })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: the lock governs out of the box')
+  //
+  // The narrowing machinery was right and it governed NOTHING: `sandbox_lock`
+  // shipped as an absent settings row, an absent row is an empty list, and
+  // `resolveSandboxSpec()` narrows only `if (i > 0 && pathLocked(path, lock))`.
+  // So on a fresh installation every path was an unconditional overwrite — a
+  // repo or a run could hand its container the operator's own object store
+  // read-write, or turn the allowlist back into "open", and the code that
+  // refuses exactly that was never asked.
+  //
+  // These tests therefore pin the DEFAULT, not the machinery: what a fresh
+  // installation locks, that it really refuses, that an operator's own answer
+  // is never overwritten, and that the layers still have room to move.
+  {
+    const rdef = await import('../server/run-def.mjs')
+    const spec = await import('../server/sandbox/spec.mjs')
+    const { default: dbh, setSetting } = await import('../server/db.mjs')
+
+    const vergiss = () => dbh.prepare('DELETE FROM settings WHERE key IN (?, ?)')
+      .run('sandbox_lock', 'sandbox_lock_seeded')
+
+    await pruefe('a fresh installation seeds the lock on the first read, and remembers doing it', () => {
+      vergiss()
+      const lock = rdef.sandboxLock()
+      gleich(lock.join(), spec.DEFAULT_SANDBOX_LOCK.join(), 'the documented default is what stands')
+      // …and it is WRITTEN, not merely returned: the launch, the forms and the
+      // operator have to see one answer, and `hubId()` is the precedent.
+      gleich(JSON.parse(dbh.prepare('SELECT value FROM settings WHERE key = ?').get('sandbox_lock').value).join(),
+        spec.DEFAULT_SANDBOX_LOCK.join(), 'the row carries it')
+      const seed = rdef.sandboxLockSeed()
+      wahr(!!seed?.at, 'and the moment is written down')
+      gleich(seed.mode, rdef.sandboxHubMode(), 'together with the mode the hub was in')
+    })
+
+    await pruefe('an operator’s own lock — including an empty one — is never overwritten', () => {
+      vergiss()
+      setSetting('sandbox_lock', '[]')
+      gleich(rdef.sandboxLock().length, 0, 'cleared means cleared')
+      gleich(dbh.prepare('SELECT value FROM settings WHERE key = ?').get('sandbox_lock').value, '[]',
+        'and nothing seeded over it — `== null`, never falsiness (the `Number("")` family)')
+      setSetting('sandbox_lock', JSON.stringify(['resources.cpus']))
+      gleich(rdef.sandboxLock().join(), 'resources.cpus', 'a list of their own stands too')
+      vergiss()
+    })
+
+    // Every entry of the default, with the loosening it exists to refuse. The
+    // hub half is what makes some of them expressible at all: nothing can
+    // loosen a deny list that is empty, or a secrets mode that is already the
+    // loosest value.
+    const LOOSENINGS = [
+      ['runtime', {}, { runtime: 'podman' }],
+      ['network.mode', {}, { network: { mode: 'open' } }],
+      ['network.deny', { network: { deny: ['evil.example'] } }, { network: { deny: [] } }],
+      ['network.denyUpstreamCidrs', {}, { network: { denyUpstreamCidrs: [] } }],
+      ['filesystem.repoGit', {}, { filesystem: { repoGit: 'rw' } }],
+      ['filesystem.extras', {}, { filesystem: { extras: 'rw' } }],
+      ['filesystem.extraMounts', {}, { filesystem: { extraMounts: [{ source: '~/projects', target: '/x', mode: 'rw' }] } }],
+      ['filesystem.readOnlyRoot', {}, { filesystem: { readOnlyRoot: false } }],
+      ['secrets.mode', { secrets: { mode: 'inject' } }, { secrets: { mode: 'env' } }],
+      ['innerSandbox', {}, { innerSandbox: 'weak' }],
+    ]
+
+    await pruefe('and on a fresh installation each of those loosenings is really refused', () => {
+      vergiss()
+      const lock = rdef.sandboxLock()              // the DEFAULT, read the way the launch reads it
+      for (const [path, hubSpec, wanted] of LOOSENINGS) {
+        wahr(spec.pathLocked(path, lock), `${path} is locked out of the box`)
+        for (const layer of ['repo', 'run']) {
+          const r = spec.resolveSandboxSpec({ hub: { spec: hubSpec, lock }, [layer]: { overrides: wanted } })
+          const refused = r.refused.find(x => x.path === path)
+          wahr(!!refused, `a ${layer} loosening ${path} is refused`)
+          gleich(refused.by, layer, 'and the refusal names who tried')
+        }
+      }
+      vergiss()
+    })
+
+    await pruefe('the default is a list and not an inversion — the layers still have room', () => {
+      // Inverting the rule ("locked unless the hub says otherwise") was the
+      // other candidate and it cannot work: `shapeOf()` answers `fixed` for
+      // every path this module cannot order, so an inverted default would
+      // freeze `image.ref` too and a repo could not name its own image. A layer
+      // that may change nothing is not a layer.
+      vergiss()
+      const lock = rdef.sandboxLock()
+      const r = spec.resolveSandboxSpec({
+        hub: { spec: {}, lock },
+        repo: { overrides: { image: { ref: 'freilauf/agent-claude:1' } } },
+        run: { overrides: { resources: { cpus: 2 }, network: { allow: ['api.example'] } } },
+      })
+      gleich(r.refused.length, 0, 'nothing was refused')
+      gleich(r.spec.image.ref, 'freilauf/agent-claude:1', 'the repo named its image')
+      gleich(r.spec.resources.cpus, 2, 'the run its cpus')
+      gleich(r.spec.network.allow.join(), 'api.example', 'and the host it needs to reach')
+      // The rollout knob stays reachable from below on purpose: the repo form
+      // and the run form ship a checkbox for it, and a default that makes a
+      // shipped control refuse every time it is ticked is worse than the hole.
+      falsch(spec.pathLocked('network.auditOnly', lock), 'audit-only is deliberately not locked')
+      const audit = spec.resolveSandboxSpec({ hub: { spec: {}, lock }, repo: { overrides: { network: { auditOnly: true } } } })
+      gleich(audit.refused.length, 0, 'so the adoption path still works')
+      gleich(audit.spec.network.auditOnly, true, 'and it really applies')
+      // A narrowing of a LOCKED path still goes through — that is the whole
+      // point of a lock rather than a freeze.
+      const eng = spec.resolveSandboxSpec({ hub: { spec: {}, lock }, run: { overrides: { network: { mode: 'none' } } } })
+      gleich(eng.refused.length, 0, 'allowlist → none is a narrowing')
+      gleich(eng.spec.network.mode, 'none', 'and it stands')
+      vergiss()
+    })
+
+    await pruefe('the agent and the run are two layers, so a run does not replace its agent', () => {
+      // `overrides: parseOverrides(def.sandboxOverrides ?? agent.sandbox_overrides)`
+      // meant a run that named one field threw the agent's whole document away.
+      const r = spec.resolveSandboxSpec({
+        hub: { spec: {}, lock: ['resources.memory'] },
+        repo: null,
+        agent: { overrides: { resources: { memory: '2g', cpus: 2 } } },
+        run: { overrides: { resources: { pidsLimit: 512 } } },
+      })
+      gleich(r.spec.resources.memory, '2g', 'the agent’s narrowing survived the run’s document')
+      gleich(r.spec.resources.cpus, 2, 'and so did the rest of it')
+      gleich(r.spec.resources.pidsLimit, 512, 'while the run’s own field applied')
+      // …and under a lock the run narrows the AGENT, not the hub.
+      const back = spec.resolveSandboxSpec({
+        hub: { spec: {}, lock: ['resources.memory'] },
+        agent: { overrides: { resources: { memory: '2g' } } },
+        run: { overrides: { resources: { memory: '4g' } } },
+      })
+      gleich(back.refused.length, 1, 'raising it again is refused')
+      gleich(back.refused[0].by, 'run', 'by the run, which is now nameable on its own')
+      gleich(back.spec.resources.memory, '2g', 'and the agent’s value stands')
+    })
+
+    await pruefe('`agentOrRun` still means exactly one layer below the repo', () => {
+      // The old shape has to keep answering byte for byte, or every caller of
+      // this function would have had to change on the same day.
+      const r = spec.resolveSandboxSpec({
+        hub: { spec: { resources: { cpus: 4 } }, lock: ['resources.cpus'] },
+        agentOrRun: { spec: { resources: { cpus: 8 } } },
+      })
+      gleich(r.refused.length, 1, 'refused')
+      gleich(r.refused[0].by, 'run', 'and still named "run"')
+    })
+
+    await pruefe('the profile editor asks the launch’s own predicate', () => {
+      // Third reader of "can this daemon run this engine": the launch asks
+      // `engineUsable()`, Settings → Sandbox asks it, and the profile editor
+      // asked nothing — so `allowlist` + `builtin` saved on a rootless daemon
+      // and failed at the first run that picked the profile.
+      const quelle = readFileSync(new URL('../server/sandbox/pages.mjs', import.meta.url), 'utf8')
+      enthaelt(quelle, "pick(await mod('index'), ['engineUsable'])", 'through the facade, like everything else here')
+      enthaelt(quelle, 'await engineProblems(overrides, p)', 'and the profile save asks it')
+      const en = JSON.parse(readFileSync(new URL('../lang/en.json', import.meta.url), 'utf8'))
+      for (const key of ['sandbox.settings.lock_current', 'sandbox.settings.lock_none', 'sandbox.settings.lock_seeded']) {
+        wahr(!!en[key], `${key} is a real string`)
+      }
+    })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: a dead pane is not a dead agent')
+  {
+    // `_pane_died` had no sandbox branch, and for a sandboxed run the pane IS
+    // the docker client: a restarted daemon, a `permission denied` on the socket
+    // or a `docker run` that never got past `runc create` set the run `failed`.
+    // What matters here is the DISTINCTION — an ordinary agent exit must still
+    // behave exactly as it did, and infrastructure trouble must never end a run.
+    const { panePostMortem } = await import('../server/reports.mjs')
+    const ok = (over) => ({ verdict: 'ok', exists: true, running: false, exitCode: 42, oom: false, status: 'exited', ...over })
+
+    await pruefe('an unsandboxed run answers "agent" without asking anything', () => {
+      gleich(panePostMortem({ sandboxed: false, exit: 1 }).verdict, 'agent', 'exit 1')
+      gleich(panePostMortem({ sandboxed: false, exit: 125 }).verdict, 'agent', 'even 125 — no docker is involved')
+      gleich(panePostMortem().verdict, 'agent', 'and with nothing said at all')
+    })
+
+    await pruefe('the ordinary sandboxed end: the agent exited and the container is over', () => {
+      gleich(panePostMortem({ sandboxed: true, exit: 42, container: ok() }).verdict, 'agent',
+        'an inner command’s own status')
+      gleich(panePostMortem({ sandboxed: true, exit: 0, container: ok({ exists: false, exitCode: null }) }).verdict,
+        'agent', '`--rm` took the container with the agent')
+      gleich(panePostMortem({ sandboxed: true, exit: 1, container: ok({ exitCode: 1 }) }).verdict, 'agent',
+        'exit 1 with a daemon that answers is an agent that exited 1')
+    })
+
+    await pruefe('infrastructure trouble never ends a run', () => {
+      // 125 is docker’s own reserved code and the one case the daemon cannot
+      // settle afterwards: the container was never created, so its absence says
+      // nothing about the agent. Asked BEFORE the daemon for exactly that reason.
+      gleich(panePostMortem({ sandboxed: true, exit: 125, container: ok({ exists: false }) }).verdict, 'infra',
+        'a failed `runc create` / a missing image / a name conflict')
+      gleich(panePostMortem({ sandboxed: true, exit: 125, container: null }).verdict, 'infra',
+        'and with no container recorded at all')
+      // The client died while the agent kept working — §8.18’s case, seen from
+      // the pane instead of from the session.
+      gleich(panePostMortem({ sandboxed: true, exit: 1, container: ok({ running: true }) }).verdict, 'infra',
+        'the container is still running')
+    })
+
+    await pruefe('"I could not answer you" is not "it is gone"', () => {
+      for (const verdict of ['unreachable', 'no_daemon']) {
+        const r = panePostMortem({ sandboxed: true, exit: 1, container: { verdict, exists: null, running: null } })
+        gleich(r.verdict, 'unknown', `${verdict}: nothing is decided`)
+        enthaelt(r.reason, verdict, 'and the reason names what happened')
+      }
+      // …but a client that demonstrably never started the container is still
+      // infra, whatever the daemon says afterwards.
+      gleich(panePostMortem({ sandboxed: true, exit: 125, container: { verdict: 'unreachable' } }).verdict, 'infra',
+        'exit 125 outranks a silent daemon')
+    })
+
+    await pruefe('the exit status is read, not coerced', () => {
+      // `Number('')` is 0 AND finite — the trap AGENTS.md has its own entry for.
+      gleich(panePostMortem({ sandboxed: true, exit: '125', container: null }).verdict, 'infra', 'tmux hands it over as text')
+      gleich(panePostMortem({ sandboxed: true, exit: '', container: ok() }).verdict, 'agent', 'an empty status is not a 0')
+      gleich(panePostMortem({ sandboxed: true, exit: null, container: ok({ running: true }) }).verdict, 'infra',
+        'and without a status the container still decides')
+    })
+
+    await pruefe('the handler asks that question and nothing else decides it', () => {
+      const quelle = readFileSync(new URL('../server/reports.mjs', import.meta.url), 'utf8')
+      const fall = quelle.slice(quelle.indexOf("case '_pane_died': {"))
+      enthaelt(fall, 'await paneCause(fresh, body.exit)', 'the cause is asked first')
+      wahr(fall.indexOf("cause.verdict === 'unknown'") < fall.indexOf("status='failed'"),
+        'and both non-agent branches stand BEFORE the line that ends the run')
+      wahr(fall.indexOf("cause.verdict === 'infra'") < fall.indexOf("status='failed'"), 'the infra branch too')
+      enthaelt(quelle, "import('./sandbox/exec.mjs')", 'the sandbox facade is imported lazily')
+    })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Flows: text the agent wrote, in a host shell step')
+  {
+    // `run.report`, `run.help_text`, `run.branch`, `run.pr_url` and
+    // `merge.files` are written by the coding agent; `render()` substitutes raw;
+    // and `shell_command` is `bash -lc` on the host as the operator. So an
+    // operator flow that interpolates run output into a shell step is
+    // agent-authored host code, straight through the sandbox boundary.
+    const stepsMod = await import('../server/flows/steps.mjs')
+    const shell = stepsMod.STEP_MAP.shell_command
+    const ctx = { trigger: { run: { id: 'r1', repo_path: '/tmp/repo', report: 'x; rm -rf /' }, merge: { files: ['a.txt'] } }, vars: {} }
+    const laufen = async (props) => {
+      const seen = []
+      const api = { shell: async (a) => { seen.push(a); return { ok: true, exit_code: 0, stdout: '', stderr: '' } } }
+      let error = null
+      try { await shell.run({ cwd: '/tmp/repo', timeoutMinutes: 1, outputVar: 'shell', ...props }, ctx, api) }
+      catch (e) { error = e.message }
+      return { seen, error }
+    }
+
+    await pruefe('agentWrittenVars names the paths, whatever they are reached through', () => {
+      const f = stepsMod.agentWrittenVars
+      gleich(f('echo {{trigger.run.report}}')[0], 'trigger.run.report', 'the trigger run')
+      gleich(f('echo {{ vars.review.help_text }}')[0], 'vars.review.help_text', 'a step output, spaces and all')
+      gleich(f('git push origin {{trigger.run.branch | default: main}}')[0], 'trigger.run.branch',
+        'a default filter does not hide it')
+      gleich(f('tar czf x {{trigger.merge.files}}')[0], 'trigger.merge.files', 'the file names a merge carried')
+      gleich(f('deploy {{trigger.run.id}} {{trigger.merge.sha}} {{trigger.run.repo_path}}').length, 0,
+        'an id, a sha and a repo path are the hub’s own words')
+      gleich(f('echo {{trigger.run.report}} {{trigger.run.report}}').length, 1, 'named once, however often it appears')
+      gleich(f(null).length, 0, 'and nothing is not a template')
+    })
+
+    await pruefe('the step refuses such a command, by name, and runs nothing', async () => {
+      const { seen, error } = await laufen({ command: 'echo "{{trigger.run.report}}" >> log.txt' })
+      gleich(seen.length, 0, 'api.shell was never reached')
+      enthaelt(error, 'trigger.run.report', 'the refusal names the variable')
+      enthaelt(error, 'allow text the agent wrote', 'and the way to say you meant it')
+      const cwdOnly = await laufen({ command: 'true', cwd: '{{trigger.run.branch}}' })
+      gleich(cwdOnly.seen.length, 0, 'the working directory is checked too')
+    })
+
+    await pruefe('the opt-in leaves the step exactly as capable as it was', async () => {
+      const { seen, error } = await laufen({ command: 'git push origin {{trigger.run.branch}}', allowAgentText: '1' })
+      gleich(error, null, 'no refusal')
+      gleich(seen[0].command, 'git push origin', 'and the template really was rendered (an empty branch, then trimmed)')
+      for (const yes of [true, 'on', 'true', 'yes']) {
+        gleich((await laufen({ command: 'echo {{trigger.run.report}}', allowAgentText: yes })).error, null, `${yes} means yes`)
+      }
+      // AGENTS.md: the string '0' is truthy, and a checkbox read with `?:` believes it.
+      for (const no of ['0', '', false, undefined, 'off']) {
+        wahr(!!(await laufen({ command: 'echo {{trigger.run.report}}', allowAgentText: no })).error, `${no} means no`)
+      }
+    })
+
+    await pruefe('an operator’s own command is untouched, and the field is offered in three languages', async () => {
+      const { seen, error } = await laufen({ command: 'sleep 3; freilauf-deploy' })
+      gleich(error, null, 'the restart-after-merge flow still works')
+      gleich(seen[0].command, 'sleep 3; freilauf-deploy', 'byte for byte')
+      wahr(shell.fields.some(f => f.key === 'allowAgentText' && f.kind === 'checkbox' && f.default === false),
+        'the opt-in is a checkbox and off by default')
+      for (const lang of ['en', 'de', 'zh']) {
+        const cat = JSON.parse(readFileSync(new URL(`../lang/${lang}.json`, import.meta.url), 'utf8'))
+        for (const key of ['flows.field.allowAgentText', 'flows.field.allowAgentText.hint']) {
+          wahr(!!cat[key], `${lang}: ${key} is a real string`)
+        }
+      }
+    })
+
+    await pruefe('what the check cannot see is written down rather than pretended away', () => {
+      const doku = readFileSync(new URL('../docs/sandbox.md', import.meta.url), 'utf8')
+      enthaelt(doku, 'refuses such a template by name', 'the docs name the refusal')
+      enthaelt(doku, 'one hop further out', 'and the residual risk the static check misses')
+    })
+  }
+
 } finally {
   rmSync(sandkasten, { recursive: true, force: true })
 }
