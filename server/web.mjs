@@ -3,7 +3,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import db, { getRepo, getRun, setSetting, addEvent, announceRun, allSettings } from './db.mjs'
-import { handleReport, answerHelpCall, startFollowUpCommission } from './reports.mjs'
+import { handleReport, answerHelpCall, startFollowUpCommission, noteOperatorInput } from './reports.mjs'
 import { modelList, orEndpoints, standVon, effortOptionen } from './models.mjs'
 import { providersForHarness, listCodingAgents } from './coding-agents.mjs'
 import { detectInstalled } from './harnesses/index.mjs'
@@ -591,6 +591,12 @@ async function api(req, res, url) {
     const { sendToSession } = await import('./util.mjs')
     await sendToSession(run.tmux_session, text)
     db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(run.id)
+    // A run that read "waiting for input" reads "running" from this moment —
+    // the same rule a keystroke in the browser terminal follows
+    // (reports.mjs, noteOperatorInput), so the two ways into a session agree.
+    // The agent's own `_working prompt` hook follows a beat later and finds
+    // nothing left to change.
+    noteOperatorInput(run.id, 'send')
     // The run's event list is meant to be its history, and a message from a
     // human was missing from it — the flow path has recorded its equivalent
     // ('flow_message') all along.
