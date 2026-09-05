@@ -299,6 +299,81 @@ addColumn('runs', 'resume_attempts', 'INTEGER NOT NULL DEFAULT 0')
 // decides whether an auto-resolve also announces the recovery (server/incidents.mjs).
 addColumn('incidents', 'notify_at', 'TEXT')
 addColumn('incidents', 'gemeldet_am', 'TEXT')
+// ---- running an agent in a sandbox (SANDBOX_RESEARCH.md §7.13) ----
+// A sandbox profile is one JSON document (the spec of §7.2) under a name. The
+// hub seeds four of them (`builtin = 1`); editing one writes a copy of its own,
+// so an update of the hub can keep its own defaults current without silently
+// rewriting what an operator configured.
+db.exec(`
+CREATE TABLE IF NOT EXISTS sandbox_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  spec TEXT NOT NULL DEFAULT '{}',
+  builtin INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`)
+// The three layers below the hub's own policy (§7.3). Each says the same three
+// things — whether to sandbox, which profile, and what it narrows — and each may
+// only ever NARROW what the layer above locked; `resolveSandboxSpec()` in
+// server/sandbox/spec.mjs is the one place that applies them.
+// 'inherit' | 'on' | 'off' — deliberately no CHECK, for the same reason
+// `agents.harness` carries none: the value set is a list in the code, not in the
+// schema, and a CHECK is a table rebuild the day it grows.
+addColumn('repos', 'sandbox_default', `TEXT NOT NULL DEFAULT 'inherit'`)
+addColumn('repos', 'sandbox_profile_id', 'INTEGER')
+addColumn('repos', 'sandbox_overrides', `TEXT NOT NULL DEFAULT '{}'`)
+addColumn('repos', 'sandbox_image', 'TEXT')                 // an operator image the harness layer is built on top of
+addColumn('repos', 'merge_check_sandboxed', 'INTEGER NOT NULL DEFAULT 0')  // §8.7: run the merge check in the sandbox image
+addColumn('agents', 'sandbox', `TEXT NOT NULL DEFAULT 'inherit'`)
+addColumn('agents', 'sandbox_profile_id', 'INTEGER')
+addColumn('agents', 'sandbox_overrides', `TEXT NOT NULL DEFAULT '{}'`)
+// On a run the tri-state is already resolved: 0/1, decided by startRun() before
+// createRun(), so the row says from its first moment what it will run as.
+// A favorite carries the tri-state too: whether a run is fenced off from the
+// machine is part of the SETUP one saves under a name, not part of the task —
+// the same argument that puts the coding agent and the effort level in there
+// and leaves the prompt out.
+addColumn('favorites', 'sandbox', `TEXT NOT NULL DEFAULT 'inherit'`)
+addColumn('runs', 'sandbox', 'INTEGER NOT NULL DEFAULT 0')
+addColumn('runs', 'sandbox_profile_id', 'INTEGER')
+addColumn('runs', 'sandbox_overrides', `TEXT NOT NULL DEFAULT '{}'`)
+addColumn('runs', 'sandbox_spec', 'TEXT')                   // the resolved spec, FROZEN at launch like every definition field
+addColumn('runs', 'sandbox_container', 'TEXT')              // the container name actually created
+addColumn('runs', 'sandbox_home', 'TEXT')                   // the run's own HOME (§7.7); NULL = the host home
+// 'worktree' (a linked worktree, as always) | 'clone' (§7.4). The integrator asks
+// this to know whether a run's tip still has to be collected.
+addColumn('runs', 'worktree_kind', `TEXT NOT NULL DEFAULT 'worktree'`)
+// The per-run bearer for the report socket (§7.6). Written at creation for EVERY
+// run, sandboxed or not — the socket and the token are worth having either way.
+addColumn('runs', 'report_token', 'TEXT')
+// …and it is issued by the INSERT itself, not by a caller.
+//
+// WHY a trigger rather than a line in `createRun()`: the INSERT is the one place
+// every run passes, and `createRun()` is not. A run is also inserted by the test
+// suites directly, and `createRun()` itself lives in runner.mjs, where the launch
+// path is under active change — a token that hangs on somebody remembering to
+// add it to an argument list is a token that goes missing on the seventh caller,
+// and a missing token here is not a visible fault: the loopback route still
+// answers, so the run works and only the socket is quietly unusable.
+//
+// `randomblob(32)` is SQLite's own CSPRNG stream (seeded from the OS through the
+// VFS), and `lower(hex(...))` of it is 64 hex characters — the same 32 bytes a
+// `crypto.randomBytes(32).toString('hex')` would produce, from the one layer
+// that no caller can bypass.
+//
+// A row from before this column stays NULL on purpose: its session was started
+// without `FL_RUN_TOKEN` in the environment, so a token invented for it now
+// would be one nobody holds. Those runs keep reporting over 127.0.0.1, which is
+// exactly what the transition rule in server/hub-socket.mjs is for.
+db.exec(`
+CREATE TRIGGER IF NOT EXISTS runs_report_token AFTER INSERT ON runs
+WHEN NEW.report_token IS NULL
+BEGIN
+  UPDATE runs SET report_token = lower(hex(randomblob(32))) WHERE id = NEW.id;
+END;
+`)
 /**
  * Drop the CHECK rule on `agents.harness` — once, idempotently.
  *

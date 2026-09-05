@@ -33,6 +33,22 @@ import { env } from './env.mjs'
  */
 export const FAVORITES_MAX = Number(env('FAVORITES_MAX') ?? 3) || 3
 
+/**
+ * Whether a run happens in a sandbox is setup, not task (SANDBOX_RESEARCH.md
+ * §7.3), so a favorite carries the tri-state — but only the tri-state: the
+ * profile and the overrides describe one repository's rules, and a favorite is
+ * used across repositories.
+ *
+ * Asked of the database rather than assumed, once per process. A hub started
+ * against a database from before this column (a rollback, a copy taken off an
+ * older installation) must still be able to save a favorite; it then simply
+ * cannot store the tri-state, and every favorite inherits — which is the value
+ * that changes nothing.
+ */
+const HAS_SANDBOX = (() => {
+  try { return db.prepare('PRAGMA table_info(favorites)').all().some(c => c.name === 'sandbox') } catch { return false }
+})()
+
 export function listFavorites() {
   return db.prepare('SELECT * FROM favorites ORDER BY id').all()
 }
@@ -62,6 +78,7 @@ export async function favoriteFromForm(b, problems = []) {
     or_provider: setup.orProvider,
     or_routing: setup.orRouting ? JSON.stringify(setup.orRouting) : null,
     effort: setup.effort,
+    sandbox: setup.sandbox ?? 'inherit',
     skills: skillsAusFormular(b),
     flows: attachmentsFromForm(b),
   }
@@ -80,16 +97,20 @@ export function saveFavorite({ id = null, fav }) {
   const taken = db.prepare('SELECT id FROM favorites WHERE name=?').get(fav.name)
   if (taken && taken.id !== Number(id)) problems.push(t('fav.err_name_taken', { name: fav.name }))
   if (problems.length) return { ok: false, problems }
+  // The sandbox column is appended rather than woven in, so the statement an
+  // older database gets is byte for byte the one it has always been given.
+  const sb = HAS_SANDBOX ? [fav.sandbox ?? 'inherit'] : []
   if (id) {
     db.prepare(`UPDATE favorites SET name=?, harness=?, model=?, provider=?, or_provider=?, or_routing=?, effort=?,
-                skills=?, flows=?, updated_at=datetime('now') WHERE id=?`)
+                skills=?, flows=?${HAS_SANDBOX ? ', sandbox=?' : ''}, updated_at=datetime('now') WHERE id=?`)
       .run(fav.name, fav.harness, fav.model, fav.provider, fav.or_provider, fav.or_routing ?? null, fav.effort,
-        fav.skills, fav.flows, Number(id))
+        fav.skills, fav.flows, ...sb, Number(id))
     return { ok: true, id: Number(id) }
   }
-  const r = db.prepare(`INSERT INTO favorites(name,harness,model,provider,or_provider,or_routing,effort,skills,flows)
-                        VALUES(?,?,?,?,?,?,?,?,?)`)
-    .run(fav.name, fav.harness, fav.model, fav.provider, fav.or_provider, fav.or_routing ?? null, fav.effort, fav.skills, fav.flows)
+  const r = db.prepare(`INSERT INTO favorites(name,harness,model,provider,or_provider,or_routing,effort,skills,flows${HAS_SANDBOX ? ',sandbox' : ''})
+                        VALUES(?,?,?,?,?,?,?,?,?${HAS_SANDBOX ? ',?' : ''})`)
+    .run(fav.name, fav.harness, fav.model, fav.provider, fav.or_provider, fav.or_routing ?? null, fav.effort,
+      fav.skills, fav.flows, ...sb)
   return { ok: true, id: Number(r.lastInsertRowid) }
 }
 
@@ -124,6 +145,10 @@ export function favoriteTemplate(fav) {
     or_provider: fav.or_provider ?? '',
     or_routing: fav.or_routing ?? '',
     effort: fav.effort ?? '',
+    // The run form's sandbox block reads this key, so "more settings" out of
+    // the Quick-Run dialog opens on the favorite's own answer rather than on
+    // `inherit` — the same reason every other field of the setup is here.
+    sandbox: fav.sandbox ?? 'inherit',
     skills: fav.skills ?? null,
     flows: fav.flows ?? null,
   }
@@ -142,6 +167,10 @@ export function favoriteSummary(fav) {
     } catch { /* broken blob: say nothing rather than crash a list */ }
   }
   if (fav.effort) teile.push(`${t('model.effort')} ${fav.effort}`)
+  // Only where the favorite has an OPINION: 'inherit' is what every favorite
+  // written before this field carries, and a line saying "inherit" on every
+  // row is a line nobody reads.
+  if (fav.sandbox === 'on' || fav.sandbox === 'off') teile.push(t(`sandbox.field.summary_${fav.sandbox}`))
   const skills = skillAnzeige(fav.skills)
   if (skills.length) teile.push(`${t('skills.title')}: ${skills.join(', ')}`)
   const flows = attachmentSummary(fav.flows)

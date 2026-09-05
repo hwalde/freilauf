@@ -8,6 +8,9 @@ import { HTTP_5XX } from './patterns.mjs'
 import { runCli, cliFailure } from './cli-llm.mjs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 // A model provider's descriptor — never through a static import.
 // `../providers/index.mjs` re-exports the plugin registry, and the registry's
@@ -36,6 +39,49 @@ const execFileAsync = promisify(execFile)
 function hermesStateDb() {
   return process.env.FREILAUF_HERMES_STATE_DB || `${process.env.HOME}/.hermes/state.db`
 }
+/** hermes' own home, the way `setup/02-install-scripts.sh` resolves it. */
+function hermesHome() {
+  return process.env.HERMES_HOME || join(homedir(), '.hermes')
+}
+
+/**
+ * Force `terminal.backend: local` in a COPY of the operator's hermes config
+ * (SANDBOX_RESEARCH.md §3.3): inside the Freilauf sandbox the container IS the
+ * boundary, and hermes' own docker backend would put a second container around
+ * every terminal tool call — a nested runtime the agent must not be able to
+ * reach in the first place.
+ *
+ * Line-based on purpose, exactly as `setup/02-install-scripts.sh` appends the
+ * hooks block: `config.yaml` is the operator's file, full of comments, and a
+ * YAML round-trip would flatten them. Any existing top-level `terminal:` key is
+ * dropped and ours appended — this is a copy in the per-run home, so the
+ * operator's own file is never touched and the worst case is a lost comment in
+ * a file nobody reads.
+ */
+function forceLocalTerminal(yaml) {
+  const kept = []
+  let inTerminalBlock = false
+  for (const line of String(yaml ?? '').split('\n')) {
+    if (inTerminalBlock) {
+      // A line starting at column 0 ends the block; an indented one is part of it.
+      if (/^\S/.test(line)) inTerminalBlock = false
+      else continue
+    }
+    const m = /^terminal\s*:(.*)$/.exec(line)
+    if (m) {
+      // `terminal:` with nothing but a comment after it opens a block.
+      inTerminalBlock = /^\s*(#.*)?$/.test(m[1])
+      continue
+    }
+    kept.push(line)
+  }
+  const body = kept.join('\n').replace(/\n*$/, '\n')
+  return body
+    + '\n# Freilauf sandbox: the container is the security boundary, so hermes runs its\n'
+    + '# terminal tool calls in it rather than opening one of its own.\n'
+    + 'terminal:\n  backend: local\n'
+}
+
 const flat = (t) => String(t ?? '').replace(/\s+/g, ' ')
 const levelsFrom = (t) => t.split(/,|\bor\b/).map(x => x.trim().toLowerCase())
   .filter(x => /^[a-z]+$/.test(x))
@@ -126,6 +172,68 @@ const plugin = {
   skills: {
     user: ['~/.hermes/skills'],
     project: ['.hermes/skills', '.agents/skills'],
+  },
+
+  /**
+   * Running hermes inside the Freilauf sandbox (docs/plugins.md, "The sandbox
+   * declaration"; SANDBOX_RESEARCH.md §3.3 and §7.9).
+   *
+   * hermes brings the most prior art of the four — a docker backend with a
+   * measured hardening flag set and an iron-proxy egress firewall — but all of
+   * it is for its TOOL CALLS, not for itself: the hermes process stays on the
+   * host and holds the credentials. So for the generic layer hermes is a
+   * process like any other, and the one thing that has to change is that it
+   * stops opening containers of its own (see `seedHome` below).
+   */
+  sandbox: {
+    supported: true,
+
+    // Version pin: measured on this machine (AGENTS.md, hermes 0.21.0).
+    image: { dockerfile: 'sandbox/images/hermes.Dockerfile', args: { HERMES_VERSION: '0.21.0' } },
+
+    // hermes has no API of its own the way claude and cursor do — its model
+    // traffic goes to whichever provider the run picked, which is the
+    // `provider` preset's job. What is left is its own inference host.
+    domains: ['inference.nousresearch.com'],
+
+    env: { DO_NOT_TRACK: '1' },
+
+    // What the hub reads back: `state.db` is where the watcher reads this run's
+    // tokens and where `resumeId()` finds the session `--resume` continues.
+    stateDirs: ['.hermes'],
+
+    /**
+     * The per-run home: hermes' config and its `.env`, both copied from the
+     * operator's `~/.hermes`.
+     *
+     * The config is copied rather than written, because it is what carries the
+     * `hooks:` block `setup/02-install-scripts.sh` appended — without it a
+     * sandboxed hermes run never says whether it is working or waiting for a
+     * human. `terminal.backend` is the one statement in it the sandbox
+     * overrules.
+     *
+     * `SOUL.md` / `AGENTS.md` are named in §7.7 as things an operator may want
+     * along; there is no setting that says so today, and copying a personality
+     * file into every run because it happens to lie in the home is exactly the
+     * opt-in the `~/agents/zusaetze/` idea exists to avoid.
+     */
+    seedHome({ spec = {} } = {}) {
+      const files = []
+      const home = hermesHome()
+      try {
+        files.push({ path: '.hermes/config.yaml', content: forceLocalTerminal(readFileSync(join(home, 'config.yaml'), 'utf8')) })
+      } catch {
+        // No config on the host: still say which backend this run uses, because
+        // that is a statement about the sandbox and not about the operator.
+        files.push({ path: '.hermes/config.yaml', content: forceLocalTerminal('') })
+      }
+      if (spec.secrets?.mode !== 'inject') {
+        try {
+          files.push({ path: '.hermes/.env', content: readFileSync(join(home, '.env'), 'utf8'), mode: 0o600 })
+        } catch { /* no .env — the provider key reaches the run as a variable */ }
+      }
+      return files
+    },
   },
 
   pulseId: (run) => run.provider ?? null,

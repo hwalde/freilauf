@@ -4,7 +4,9 @@
 // operator already has three coding agent CLIs installed and two API keys in
 // the environment. The scan answers that once: for every registered coding
 // agent whether its binary is on the PATH, for every model provider whether
-// any of its declared credential variables is set.
+// any of its declared credential variables is set — and whether this machine
+// has a container runtime at all, because without one the sandbox is a feature
+// the operator can only be told about, never switched on.
 //
 // Two rules the whole module hangs on:
 //
@@ -55,8 +57,66 @@ export async function scanSystem(env = process.env) {
       }
     } catch { /* one plugin's probe must not end the scan */ }
   }
+  const runtime = await scanSandboxRuntime()
+  if (runtime) found.push(runtime)
   setSetting('discovery_last_scan', new Date().toISOString())
   return found
+}
+
+/**
+ * Is there a container runtime on this machine, and what can it do?
+ *
+ * Recorded as an ordinary discovery row (`sandbox:runtime`) so the Plugins page
+ * and the Welcome wizard can say "Sandbox: available / not available (install
+ * Docker)" from the same place they say everything else. It is a FACT, not a
+ * suggestion: `openDiscoveries()` only offers rows whose `plugin_id` is a
+ * registered plugin, and `runtime` is not one, so this never becomes a banner
+ * asking the operator to add something.
+ *
+ * The same rule as the credential scan above applies to every field here: what
+ * is recorded is a name, a version and a yes/no — never a socket path's
+ * contents, never a token, never the output of `docker info` as it stands. A
+ * discovery row is rendered into a page and travels with a database copy.
+ *
+ * `runtimeInfo()` is imported LAZILY, and that is the plugin rule of AGENTS.md
+ * rather than a style choice: `server/sandbox/runtime.mjs` reaches the settings
+ * and through them the database, and this module is imported from `hub.mjs`
+ * while that ring is still being built. A machine without the module — an
+ * installation from before the sandbox existed — answers "not available"
+ * instead of failing the whole scan.
+ */
+async function scanSandboxRuntime() {
+  let info = null
+  try {
+    const { runtimeInfo } = await import('../sandbox/runtime.mjs')
+    info = await runtimeInfo()
+  } catch (err) {
+    info = { available: false, reason: `runtime discovery unavailable: ${err?.message ?? err}` }
+  }
+  try {
+    const detail = {
+      available: info?.available === true,
+      runtime: info?.id ?? null,          // 'docker' | 'podman' | …
+      bin: info?.bin ?? null,
+      version: info?.version ?? null,
+      // Rootless changes who the agent runs as inside the container (§7.7's uid
+      // table), so it is part of the answer and not a detail.
+      rootless: info?.rootless ?? null,
+      // gVisor: registered as a runtime means a repo may ask for `runsc`.
+      runsc: Array.isArray(info?.runtimes) ? info.runtimes.includes('runsc') : null,
+      // Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor,
+      // which is what kills every bubblewrap-based inner sandbox on this host
+      // (SANDBOX_RESEARCH.md §2.4). The hub does not need them — its boundary
+      // is the container — but the value explains why an `innerSandbox` above
+      // `off` is refused, so it is worth writing down once. Taken from
+      // `runtimeInfo()` rather than read here a second time: two readers of one
+      // sysctl is how the two eventually disagree.
+      userns: info?.userns ?? null,
+      reason: info?.reason ?? null,
+    }
+    upsert({ kind: 'sandbox', pluginId: 'runtime', detail })
+    return { kind: 'sandbox', pluginId: 'runtime', ...detail }
+  } catch { return null }
 }
 
 function shape(row) {

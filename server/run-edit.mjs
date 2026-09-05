@@ -1,6 +1,6 @@
 // Freilauf — editing a stored run: what may change while it still has a future.
 //
-// Five operator wishes, one answer each, and all of them read the database at
+// Six operator wishes, one answer each, and all of them read the database at
 // the moment they are used, so an edit needs no migration of anything already
 // running:
 //
@@ -27,6 +27,14 @@
 //     `runStartFromForm`). Three of the four choices are a plain UPDATE; the
 //     fourth — "now" — starts the run immediately (the budget gate still gets
 //     to defer it), which is what "now" means when one plans a run.
+//   - a not-yet-started run's SANDBOX can be changed — whether it happens in a
+//     container at all, and the overrides that narrow its profile. Read at
+//     launch like the branch rule (`prepareSandbox()` resolves the spec, makes
+//     the clone and starts the container there), hence the same rule: editable
+//     until the run starts, and never after. A RUNNING run's network policy is
+//     loosened through the buttons next to a blocked host instead
+//     (SANDBOX_RESEARCH.md §7.12) — that reloads a proxy, it does not edit a
+//     plan, and it is a different question with a different answer.
 //
 // "Not started" means `scheduled` or `deferred`: both have no session and no
 // worktree, and both reach launchRun() eventually. A started run is
@@ -36,7 +44,11 @@
 // gate opens regardless of `start_at` — a start-time edit there would be a lie.
 import db, { getRepo, getRun, addEvent } from './db.mjs'
 import { fallbackTitle, applyGeneratedTitle } from './title.mjs'
-import { runStartFromForm, BRANCH_MODES } from './run-def.mjs'
+import {
+  runStartFromForm, BRANCH_MODES,
+  sandboxHubMode, sandboxAllowBypass, sandboxLock, sandboxAllowedMountRoots,
+} from './run-def.mjs'
+import { validateSandboxOverrides } from './sandbox/spec.mjs'
 import { branchWorktree } from './runner.mjs'
 import { clearAnomalies, notifiedFlags } from './reports.mjs'
 import { t } from './i18n.mjs'
@@ -47,7 +59,8 @@ import { t } from './i18n.mjs'
  * refuse (or the other way round).
  */
 export function runEditAllowed(run) {
-  if (!run) return { duration: false, prompt: false, repo: false, startTime: false, branch: false }
+  const nothing = { duration: false, prompt: false, repo: false, startTime: false, branch: false, sandbox: false }
+  if (!run) return nothing
   // Not started yet: everything that is read at launch can still be changed.
   if (['scheduled', 'deferred'].includes(run.status)) {
     return {
@@ -56,20 +69,44 @@ export function runEditAllowed(run) {
       // starts the moment the gate opens, whatever start_at says.
       startTime: run.status === 'scheduled',
       branch: true,
+      // The sandbox is read at launch like the branch rule: `prepareSandbox()`
+      // resolves the spec, makes the clone and starts the container when the
+      // run starts, so until then both the yes/no and the overrides move the
+      // run's future rather than its past. Not afterwards — the container is
+      // standing, its network policy is in force, and the agent's whole home
+      // lives inside it. The overrides' LIVE subset is changed on a running run
+      // through the buttons next to a blocked host (§7.12), which is a
+      // different act with a different answer: it reloads a proxy, it does not
+      // edit a plan.
+      sandbox: true,
     }
   }
   // Started: the session is what it is — only the live-read duration stays open.
   if (['running', 'waiting_help'].includes(run.status)) {
-    return { duration: true, prompt: false, repo: false, startTime: false, branch: false }
+    return { ...nothing, duration: true }
   }
   // A finished run with an open follow-up commission is working again — the
   // watcher's overrun thresholds read `expected_minutes` live for it exactly as
   // for a running run, so the same argument as above applies: raising it takes
   // effect at once and retracts the "longer than expected" statement (editRun).
   if (['done', 'failed', 'aborted'].includes(run.status) && (run.followup_since || run.followup_open)) {
-    return { duration: true, prompt: false, repo: false, startTime: false, branch: false }
+    return { ...nothing, duration: true }
   }
-  return { duration: false, prompt: false, repo: false, startTime: false, branch: false }
+  return nothing
+}
+
+/**
+ * A yes/no that arrives as text. `1` and `0` are what the select sends; the
+ * words are what a script writes. Anything else is `null` — "I do not know what
+ * you meant" — because the one reading that must never happen here is
+ * `Boolean('0')`, which is true and would put a run into a container its
+ * operator had just switched off.
+ */
+function sandboxYesNo(v) {
+  const s = String(v).trim().toLowerCase()
+  if (['1', 'on', 'true', 'yes'].includes(s)) return 1
+  if (['0', 'off', 'false', 'no'].includes(s)) return 0
+  return null
 }
 
 /**
@@ -96,6 +133,7 @@ export async function editRun(runId, {
   expectedMinutes = null, prompt = null, repoId = null,
   startMode = null, startAt = null, startInMinutes = null,
   branchMode = null, branchPattern = null, keepOnBranch = null,
+  sandbox = null, sandboxOverrides = null,
 } = {}, problems = []) {
   const run = getRun(runId)
   if (!run) { problems.push(t('api.unknown_run')); return { ok: false } }
@@ -200,6 +238,47 @@ export async function editRun(runId, {
         sets.push('branch_pattern=?'); vals.push(pattern)
         sets.push('keep_on_branch=?'); vals.push(keep)
         geaendert.push('branch')
+      }
+    }
+  }
+
+  // The sandbox. A run's tri-state has already been RESOLVED (runs.sandbox is
+  // 0/1 — decideSandbox() answered when the run was created), so the edit is a
+  // yes/no, and it is read by comparing rather than by coercing: the string
+  // '0' is truthy, and `sandbox ? 1 : 0` would switch a run INTO a container
+  // for a caller that spelled the off state out. The overrides go through the
+  // form's own validator, so an edit cannot store a document the form would
+  // have refused.
+  if (sandbox !== null && sandbox !== undefined && sandbox !== '') {
+    if (!erlaubt.sandbox) problems.push(t('sandbox.problem.form.only_planned'))
+    else {
+      const on = sandboxYesNo(sandbox)
+      if (on === null) problems.push(t('sandbox.problem.form.tristate_unknown', { value: String(sandbox), allowed: '1, 0' }))
+      else {
+        const hubMode = sandboxHubMode()
+        if (hubMode === 'off' && on) problems.push(t('sandbox.problem.form.hub_off'))
+        else if (!on && (hubMode === 'required' || !sandboxAllowBypass())) {
+          problems.push(t(hubMode === 'required'
+            ? 'sandbox.problem.form.required' : 'sandbox.problem.form.bypass_not_allowed', {}))
+        } else if (on !== (run.sandbox ? 1 : 0)) {
+          sets.push('sandbox=?'); vals.push(on)
+          geaendert.push('sandbox')
+        }
+      }
+    }
+  }
+
+  if (sandboxOverrides !== null && sandboxOverrides !== undefined) {
+    if (!erlaubt.sandbox) problems.push(t('sandbox.problem.form.only_planned'))
+    else {
+      const { overrides, problems: op } = validateSandboxOverrides(sandboxOverrides, {
+        lock: sandboxLock(), allowedMountRoots: sandboxAllowedMountRoots(),
+      })
+      for (const p of op) problems.push(t(p.key, p.params))
+      const json = JSON.stringify(overrides ?? {})
+      if (!op.length && json !== (run.sandbox_overrides ?? '{}')) {
+        sets.push('sandbox_overrides=?'); vals.push(json)
+        if (!geaendert.includes('sandbox')) geaendert.push('sandbox')
       }
     }
   }

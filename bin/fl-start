@@ -82,6 +82,14 @@ Options:
                         ships no case for. Required for any -H other than
                         claude/opencode/hermes/cursor, ignored for those four.
                         Needs jq. Format: see "Launch spec" below.
+      --sandbox FILE    Run the coding agent inside a container instead of on this
+                        machine. FILE is the run's resolved sandbox document
+                        (sandbox.json, written by the hub next to prompt.md); the
+                        command line comes out of sandbox/wrap.sh, which is the one
+                        place that builds it. Without this flag NOTHING about this
+                        script changes — the sandbox is optional, always.
+                        Needs jq and node. Inspect a policy without starting
+                        anything:  fl-start --sandbox <file> --dry-run …
       --name NAME       Session base name without prefix (overrides the positional argument).
       --id SHORT        Suffix for the session name (collision safety,
                         e.g. a short run ID).
@@ -179,6 +187,7 @@ RESUME_ID=""
 NAME_ARG=""
 ID_SUFFIX=""
 SPEC=""
+SANDBOX=""
 POS=()
 
 while [[ $# -gt 0 ]]; do
@@ -214,6 +223,8 @@ while [[ $# -gt 0 ]]; do
                           RESUME_ID="$2"; shift 2 ;;
         --spec)           [[ $# -ge 2 ]] || { err "Error: $1 requires a file path."; exit 2; }
                           SPEC="$2"; shift 2 ;;
+        --sandbox)        [[ $# -ge 2 ]] || { err "Error: $1 requires a file path."; exit 2; }
+                          SANDBOX="$2"; shift 2 ;;
         --name)           [[ $# -ge 2 ]] || { err "Error: $1 requires a name."; exit 2; }
                           NAME_ARG="$2"; shift 2 ;;
         --id)             [[ $# -ge 2 ]] || { err "Error: $1 requires a short ID."; exit 2; }
@@ -249,6 +260,42 @@ if [[ -n "$SPEC" ]]; then
     SPEC_JSON="$(cat "$SPEC")"
     jq -e 'type == "object"' >/dev/null 2>&1 <<<"$SPEC_JSON" || {
         err "Error: launch spec is not a JSON object: $SPEC"; exit 2; }
+fi
+
+# --- Sandbox (--sandbox) ---------------------------------------------------
+# The whole difference a sandbox makes to THIS script is that the harness
+# command line is not the pane's command any more: the pane runs the container
+# client, and the harness command line becomes that client's trailing argument.
+# Everything else — the session name, the log, the pane-died hook, the mouse
+# options, the opencode nudge — is host-side tmux and stays exactly as it is.
+#
+# Read up front, because three later decisions hang on it: which binary is
+# looked up (the one in the image, not the one on this machine), where a stderr
+# log may be written (a path that exists INSIDE the container), and whether the
+# host's ~/.claude.json may be touched (it may not).
+SB_WRAP=""       # sandbox/wrap.sh — the one author of the container command line
+SB_HOME=""       # the run's home INSIDE the container (same string outside)
+SB_RUNDIR=""     # the run directory, mounted rw at the identical path
+if [[ -n "$SANDBOX" ]]; then
+    [[ -r "$SANDBOX" ]] || { err "Error: sandbox document not readable: $SANDBOX"; exit 2; }
+    # Same reasoning as --spec: this is JSON, and reading it with sed would be a
+    # quoting bug waiting to start the wrong container.
+    command -v jq >/dev/null 2>&1 || {
+        err "Error: --sandbox needs jq (apt install jq / brew install jq)."; exit 2; }
+    jq -e 'type == "object"' >/dev/null 2>&1 <"$SANDBOX" || {
+        err "Error: sandbox document is not a JSON object: $SANDBOX"; exit 2; }
+    SB_HOME="$(jq -r '.ctx.homeDir // empty' <"$SANDBOX" 2>/dev/null || true)"
+    SB_RUNDIR="$(jq -r '.ctx.runDir // empty' <"$SANDBOX" 2>/dev/null || true)"
+    [[ -n "$SB_HOME" ]]   || { err "Error: sandbox document has no .ctx.homeDir: $SANDBOX"; exit 2; }
+    [[ -n "$SB_RUNDIR" ]] || { err "Error: sandbox document has no .ctx.runDir: $SANDBOX"; exit 2; }
+    # Where the wrapper is. It lives next to the node module that builds the
+    # command line and can therefore never be installed into ~/.local/bin, so
+    # the document says where the hub's checkout is; a checkout that runs this
+    # script directly finds it next to itself.
+    SB_WRAP="${FREILAUF_SANDBOX_WRAP:-$(jq -r '.wrap // (if .appDir then .appDir + "/sandbox/wrap.sh" else empty end) // empty' <"$SANDBOX" 2>/dev/null || true)}"
+    [[ -n "$SB_WRAP" ]] || SB_WRAP="$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")/sandbox/wrap.sh"
+    [[ -x "$SB_WRAP" ]] || { err "Error: sandbox wrapper not executable: $SB_WRAP"
+                             err "Name it as \"wrap\" or \"appDir\" in $SANDBOX, or set FREILAUF_SANDBOX_WRAP."; exit 2; }
 fi
 
 case "$HARNESS" in
@@ -403,6 +450,23 @@ esac
 if [[ -z "$BIN" && -n "$SPEC_MODE" ]]; then
     BIN="$(command -v "$SPEC_BIN" || true)"
 fi
+if [[ -n "$SANDBOX" ]]; then
+    # In a sandbox the CLI lives in the IMAGE, so this machine is the wrong
+    # place to ask — and the wrong place to answer from, too: a host install at
+    # ~/.local/bin/claude and an image install at /usr/local/bin/claude are the
+    # same coding agent at two paths, and baking the host's path into the
+    # container's command line would fail with "no such file". The bare NAME is
+    # resolved by the image's own PATH, which is the only PATH that matters
+    # here. A missing binary is then the image's problem and shows up as a
+    # readable failure in the pane, not as a refusal to start on this machine.
+    case "$HARNESS" in
+        claude)   BIN="claude" ;;
+        opencode) BIN="opencode" ;;
+        hermes)   BIN="hermes" ;;
+        cursor)   BIN="cursor-agent" ;;
+        *)        BIN="$SPEC_BIN" ;;
+    esac
+fi
 if [[ -z "$BIN" ]]; then
     err "Error: '$HARNESS' not found in PATH."
     case "$HARNESS" in
@@ -471,10 +535,17 @@ done
 # for itself in cmd_interactive()/cmd_autonomous() below — a shared argument
 # array would not fit, because the flag sits in a different place per harness.
 
+# Every path that ends up INSIDE the harness command line has to exist on the
+# side that runs it. Unsandboxed that is this machine and $HOME is the answer;
+# sandboxed it is the container, whose home is the run's seeded home — mounted
+# at the identical string, so the value differs but the shape does not.
+HOME_FOR_CMD="$HOME"
+[[ -n "$SANDBOX" ]] && HOME_FOR_CMD="$SB_HOME"
+
 # opencode writes schema warnings from the MCP servers ("unknown format ... ignored")
 # to stderr — right into the TUI, which wrecks the display. stderr therefore goes to
 # a log file; real errors end up there and the TUI stays clean.
-OC_ERRLOG="$HOME/.local/share/opencode/log/$SESSION-stderr.log"
+OC_ERRLOG="$HOME_FOR_CMD/.local/share/opencode/log/$SESSION-stderr.log"
 mkdir -p "$(dirname "$OC_ERRLOG")" 2>/dev/null || true
 
 # Where the prompt and the mini launcher are dropped for an autonomous start.
@@ -484,6 +555,11 @@ mkdir -p "$(dirname "$OC_ERRLOG")" 2>/dev/null || true
 TDIR="${TMPDIR:-/tmp}"
 PF="$TDIR/fl-prompt-$SESSION-$$.txt"
 LF="$TDIR/fl-launch-$SESSION-$$.sh"
+# The launcher runs in the pane, on this machine, so it stays in $TMPDIR. The
+# PROMPT file may be read by the CLI itself (promptMode "file", {prompt_file}),
+# and $TMPDIR is not mounted into the container — the run directory is, at the
+# identical path, and it is where the prompt belongs anyway.
+[[ -n "$SANDBOX" ]] && PF="$SB_RUNDIR/fl-prompt-$SESSION-$$.txt"
 
 # --- The --spec command line ------------------------------------------------
 # The same job the four cmd_interactive()/cmd_autonomous() cases do, only read
@@ -493,7 +569,7 @@ LF="$TDIR/fl-launch-$SESSION-$$.sh"
 # two arguments.
 if [[ -n "$SPEC_MODE" ]]; then
     SPEC_ERRLOG="$(spec_str '.stderrLog' \
-        | sed -e "s|{home}|$HOME|g" -e "s|{session}|$SESSION|g")"
+        | sed -e "s|{home}|$HOME_FOR_CMD|g" -e "s|{session}|$SESSION|g")"
     [[ -n "$SPEC_ERRLOG" ]] && mkdir -p "$(dirname "$SPEC_ERRLOG")" 2>/dev/null || true
 fi
 
@@ -508,7 +584,7 @@ spec_argv() {
           --arg session_id "$CLAUDE_SESSION_ID" --arg settings "$CLAUDE_SETTINGS" \
           --arg resume_id "$RESUME_ID" \
           --arg workdir "$WORKDIR" --arg session "$SESSION" --arg prompt_file "$PF" \
-          --arg stderr_log "$SPEC_ERRLOG" --arg home "$HOME" '
+          --arg stderr_log "$SPEC_ERRLOG" --arg home "$HOME_FOR_CMD" '
         { model: $model, provider: $provider, effort: $effort, prompt: $prompt,
           session_id: $session_id, settings: $settings, resume_id: $resume_id } as $set
         | def keep:
@@ -571,10 +647,36 @@ spec_submit_nudge() {
     printf '  tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null\n) >/dev/null 2>&1 &\n'
 }
 
+# claude only, sandbox only: which settings files may speak at all.
+#
+# Measured on the shipped claude 2.1.261 (SANDBOX_RESEARCH.md §11a.3): a
+# `.claude/settings.json` or `.claude/settings.local.json` IN THE WORKSPACE
+# carrying `"disableAllHooks": true` drops every hook handed over with
+# `--settings` — six lines committed into a repository silence `fl-report
+# _api_error`, `_working`, `_waiting` and `Stop` for that run. The hub's only
+# symptom is a run that reports nothing, which reads as an idle agent: the most
+# expensive shape a failure can take, because every layer above it still looks
+# healthy. `--setting-sources user` loads the user settings and nothing else,
+# and a source that is not loaded cannot switch anything off; it is the lever
+# claude's own plugin-eval runner uses on itself. It composes with the sandbox
+# rather than fighting it — "user" is `$HOME/.claude/settings.json`, and in a
+# sandboxed run $HOME IS the per-run seeded home, so the hub's own settings
+# still load and only the files the AGENT can write drop out.
+#
+# Unsandboxed this is deliberately NOT passed, and the hole is therefore still
+# open there: an operator today may legitimately keep permissions, hooks or MCP
+# servers in a repository's own `.claude/settings.json`, and dropping those
+# silently would be a behaviour change far outside the sandbox. Whoever decides
+# to close it anyway should read §11a.3 first and know what it costs.
+claude_setting_sources() {
+    [[ -n "$SANDBOX" ]] || return 0
+    printf ' --setting-sources user'
+}
+
 cmd_interactive() {
     [[ -n "$SPEC_MODE" ]] && { spec_cmd "$SPEC_ARGS_KEY"; return 0; }
     case "$HARNESS" in
-        claude)  printf '%s --permission-mode %s' "$(q "$BIN")" "$(q "$MODE")"
+        claude)  printf '%s --permission-mode %s%s' "$(q "$BIN")" "$(q "$MODE")" "$(claude_setting_sources)"
                  [[ -n "$MODEL" ]]  && printf ' --model %s' "$(q "$MODEL")"
                  [[ -n "$EFFORT" ]] && printf ' --effort %s' "$(q "$EFFORT")"
                  : ;;
@@ -604,6 +706,8 @@ cmd_autonomous() {
     fi
     local claude_args=""
     [[ "$HARNESS" == "claude" ]] && {
+        # Sandboxed only; the reason is at claude_setting_sources().
+        claude_args+="$(claude_setting_sources)"
         [[ -n "$MODEL" ]]             && claude_args+=" --model $(q "$MODEL")"
         [[ -n "$EFFORT" ]]            && claude_args+=" --effort $(q "$EFFORT")"
         # `--resume <id>` continues the conversation the hub started under
@@ -651,6 +755,73 @@ cmd_autonomous() {
                  printf ' -- "$FL_PROMPT"'
                  : ;;
     esac
+}
+
+# --- The sandbox wrapper ---------------------------------------------------
+# Everything above builds the same harness command line it has always built.
+# The three functions here are the only thing a sandbox changes about it: the
+# command becomes the trailing argument of the container runtime's own command
+# line, and that line is built by sandbox/wrap.sh — never here. Assembling
+# `docker run …` in this script would make two authors out of one, and the
+# second one would be a shell script that cannot be unit-tested.
+#
+# It is a shell, `bash -c`, and not the CLI directly, because a harness command
+# line is a shell command: opencode redirects its stderr, a launch spec may too,
+# and the prompt travels as "$FL_PROMPT" so that no quoting trap can split it.
+# That shell now runs INSIDE the container, which is also why the paths in it
+# (the opencode stderr log, a spec's {home}) are resolved against the run's home
+# rather than this machine's.
+SB_CALL=()
+sb_argv() {
+    local inner="$1" kv
+    SB_CALL=("$SB_WRAP" "$SANDBOX")
+    # The --env pairs go to BOTH sides, and that is not redundancy. tmux keeps
+    # them because the pane is still a host process: the launcher, the opencode
+    # nudge and anything a human runs after attaching read them there, and that
+    # is exactly the environment the script has always produced. The container
+    # gets them because that is where the agent runs — a FL_RUN_ID that reached
+    # only tmux would leave `fl-report` inside the container with no run to
+    # report to, which is the failure mode that is invisible from the outside.
+    for kv in "${ENVS[@]:-}"; do
+        [[ -n "$kv" ]] || continue
+        SB_CALL+=("--env" "$kv")
+    done
+    # The prompt is NOT passed as a value: it would then stand in this script's
+    # own argv and in the wrapper's, readable by every process on the machine.
+    # The launcher exports it and the wrapper takes it from its environment;
+    # an unset name is skipped, so this is also harmless for an interactive
+    # start and for the check below. CC_PROMPT travels for the same one
+    # transition release the launcher sets it for.
+    SB_CALL+=("--env-inherit" "FL_PROMPT" "--env-inherit" "CC_PROMPT")
+    SB_CALL+=("--" "bash" "-c" "$inner")
+}
+
+# The wrapper invocation as a shell string, for the launcher and for tmux.
+sb_wrap() {
+    local out="" a
+    sb_argv "$1"
+    for a in "${SB_CALL[@]}"; do out+=" $(q "$a")"; done
+    printf '%s' "${out# }"
+}
+
+# What the pane really runs: the harness command, or the container around it.
+pane_cmd() {
+    if [[ -n "$SANDBOX" ]]; then sb_wrap "$1"; else printf '%s' "$1"; fi
+}
+
+# Ask for the command line before creating a session. A spec the runtime module
+# refuses would otherwise show up as a pane that dies half a second after the
+# start — with the reason on a screen nobody is watching. The start order the
+# design asks for is "any failure before the tmux session exists fails the run
+# with its reason", and this is that check at the launcher's end.
+sb_check() {
+    local out
+    sb_argv "$1"
+    if ! out="$("${SB_CALL[0]}" --print "${SB_CALL[@]:1}" 2>&1)"; then
+        err "Error: the sandbox command line could not be built."
+        err "$out"
+        exit 1
+    fi
 }
 
 # opencode only: press Enter once, after the TUI has drawn.
@@ -726,6 +897,17 @@ quota_hinweis() {
 # Pre-confirm the trust dialog (claude only).
 trust_workdir() {
     [[ "$HARNESS" == "claude" ]] || return 0
+    # In a sandbox this file is the wrong one, and writing it would be wrong
+    # twice over: the claude that starts reads the run's OWN home (the hub seeds
+    # it, trust flag included), so the edit would have no effect on the dialog it
+    # is meant to answer — and it would still modify the operator's personal
+    # ~/.claude.json, adding a project entry for a directory the sandbox exists
+    # to keep off this machine. Stated here rather than left to fall out of the
+    # paths: "the sandbox does not touch the host home" is a rule, not a detail.
+    if [[ -n "$SANDBOX" ]]; then
+        echo "Trust dialog: left to the run's seeded home (sandbox; ~/.claude.json untouched)."
+        return 0
+    fi
     local dir="$1" cfg="$HOME/.claude.json" cur tmp
     [[ -f "$cfg" ]] || return 0
     command -v jq >/dev/null 2>&1 || {
@@ -752,6 +934,12 @@ trust_workdir() {
 
 # Auth/setup preflight checks (non-blocking, warning only).
 preflight() {
+    # All three of these ask THIS machine's installation how it is set up — two
+    # of them by running the host binary. In a sandbox neither the binary nor
+    # the credentials are the ones that will be used: the CLI comes from the
+    # image and its state from the run's seeded home. The answer would be about
+    # the wrong installation, so the question is not asked.
+    [[ -n "$SANDBOX" ]] && return 0
     case "$HARNESS" in
         opencode)
             if ! "$BIN" auth list 2>/dev/null | grep -qE "[1-9][0-9]* credentials"; then
@@ -794,7 +982,9 @@ if [[ -n "$DRY_RUN" ]]; then
     fi
     if [[ "$HARNESS" == "claude" ]]; then
         echo "Mode:           $MODE"
-        if [[ -n "$AUTONOM" && -z "$NO_TRUST" ]]; then
+        if [[ -n "$SANDBOX" ]]; then
+            echo "Trust flag:     seeded home (the hub writes it; ~/.claude.json untouched)"
+        elif [[ -n "$AUTONOM" && -z "$NO_TRUST" ]]; then
             echo "Trust flag:     $(jq -r --arg d "$WORKDIR" \
                 'if (.projects[$d].hasTrustDialogAccepted // false) then "already set" else "would be set" end' \
                 "$HOME/.claude.json" 2>/dev/null || echo "unknown")"
@@ -810,6 +1000,24 @@ if [[ -n "$DRY_RUN" ]]; then
         echo "Mode:           auto-approve (--auto or --yolo)"
     fi
     echo "Command:        $(if [[ -n "$AUTONOM" ]]; then cmd_autonomous | sed 's/\$FL_PROMPT/<prompt>/'; else cmd_interactive; fi)"
+    if [[ -n "$SANDBOX" ]]; then
+        # The whole point of a dry run with a sandbox: see the runtime's command
+        # line — every mount, every limit, every allowed variable — without a
+        # container runtime being anywhere near this machine. wrap.sh --print
+        # builds it through the same one author the real start uses, so what is
+        # shown here cannot differ from what would run.
+        echo "--- Sandbox ---"
+        echo "Document:       $SANDBOX"
+        echo "Wrapper:        $SB_WRAP"
+        echo "Home (in):      $SB_HOME"
+        echo "Run directory:  $SB_RUNDIR"
+        sb_argv "$(if [[ -n "$AUTONOM" ]]; then cmd_autonomous; else cmd_interactive; fi)"
+        echo "Runtime command line:"
+        "${SB_CALL[0]}" --print "${SB_CALL[@]:1}" || {
+            err "The sandbox command line could not be built (see above)."
+            exit 1
+        }
+    fi
     [[ -n "$AUTONOM" ]] && { echo "--- Prompt ---"; printf '%s\n' "$PROMPT"; }
     echo "--- Quota (claude only) ---"
     quota_hinweis
@@ -821,6 +1029,11 @@ if [[ -n "$AUTONOM" ]]; then
     [[ -z "$NO_TRUST" ]] && trust_workdir "$WORKDIR"
 fi
 preflight
+
+# Refuse before anything exists, not after: a spec the runtime module cannot
+# turn into a command line must not first cost a tmux session and a pane that
+# dies a second later.
+[[ -n "$SANDBOX" ]] && sb_check "$(if [[ -n "$AUTONOM" ]]; then cmd_autonomous; else cmd_interactive; fi)"
 
 # Where the server the session goes into should live. The first `new-session`
 # on a machine SPAWNS the tmux server, and the server then belongs to the
@@ -865,10 +1078,11 @@ done
 
 if [[ -z "$AUTONOM" ]]; then
     # Interactive: start directly, no launcher needed.
+    PANE_CMD="$(pane_cmd "$(cmd_interactive)")"
     if (( ${#ENV_ARGS[@]} )); then
-        tmux new-session -d -x "$TMUX_W" -y "$TMUX_H" "${ENV_ARGS[@]}" -s "$SESSION" -c "$WORKDIR" "$(cmd_interactive)"
+        tmux new-session -d -x "$TMUX_W" -y "$TMUX_H" "${ENV_ARGS[@]}" -s "$SESSION" -c "$WORKDIR" "$PANE_CMD"
     else
-        tmux new-session -d -x "$TMUX_W" -y "$TMUX_H" -s "$SESSION" -c "$WORKDIR" "$(cmd_interactive)"
+        tmux new-session -d -x "$TMUX_W" -y "$TMUX_H" -s "$SESSION" -c "$WORKDIR" "$PANE_CMD"
     fi
 else
     # Autonomous: drop the prompt and a mini launcher as files. This sidesteps every
@@ -891,6 +1105,13 @@ else
         # The old name, for one transition release: a launch spec or a wrapper
         # written before the rename may still reach for $CC_PROMPT.
         printf 'CC_PROMPT="$FL_PROMPT"\n'
+        # Only in a sandbox, and only because the expansion moved: unsandboxed
+        # THIS shell expands "$FL_PROMPT" into the harness's argv, so a shell
+        # variable is enough. Sandboxed the expanding shell is the container's,
+        # so the value has to travel through the environment — and it travels by
+        # NAME (--env-inherit), never as an argument, so a 20 KB prompt does not
+        # end up in every `ps` on the machine.
+        [[ -n "$SANDBOX" ]] && printf 'export FL_PROMPT CC_PROMPT\n'
         if [[ -n "$SPEC_MODE" && "$SPEC_PROMPT_MODE" == "file" ]]; then
             # promptMode 'file': the CLI reads the prompt from that very path, so
             # only the launcher may delete itself. The sweep above collects the
@@ -903,14 +1124,21 @@ else
             if [[ -n "$RESUME_ID" ]]; then oc_resume_paste; else oc_submit_nudge; fi
         fi
         [[ -n "$SPEC_MODE" ]] && spec_submit_nudge
+        AUTO_CMD="$(cmd_autonomous)"
         if [[ -n "$SPEC_MODE" && "$SPEC_PROMPT_MODE" == "stdin" ]]; then
             # A here-string, not a pipe: the redirection is set up before exec, so
             # the CLI still becomes the pane's own process and pane-died keeps
-            # meaning what it means everywhere else.
-            printf 'exec %s <<< "$FL_PROMPT"\n' "$(cmd_autonomous)"
-        else
-            printf 'exec %s\n' "$(cmd_autonomous)"
+            # meaning what it means everywhere else. In a sandbox the same is
+            # true one level in — the shell that sets it up is the container's,
+            # and the CLI is still PID-1's only child.
+            AUTO_CMD="$AUTO_CMD <<< \"\$FL_PROMPT\""
         fi
+        # Sandboxed, the harness command becomes the container's command and the
+        # pane runs the runtime client. Everything the launcher does BEFORE this
+        # line stays on the host, which is where it belongs: the opencode nudge
+        # and the resume paste talk to the tmux pane, and tmux relays them into
+        # the container's TTY exactly as it relays them into a local process.
+        printf 'exec %s\n' "$(pane_cmd "$AUTO_CMD")"
     } > "$LF"
     chmod 700 "$LF"
 
@@ -958,6 +1186,10 @@ sleep 1
 if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     err "Error: session ended immediately — the start command is dying."
     err "Test directly: $(if [[ -n "$AUTONOM" ]]; then cmd_autonomous | sed 's/\$FL_PROMPT/<prompt>/'; else cmd_interactive; fi)"
+    # That command runs in the container, not here — so name the way to see the
+    # line that really ran instead of sending the reader after a binary this
+    # machine may not even have.
+    [[ -n "$SANDBOX" ]] && err "In the sandbox: $(q "$SB_WRAP") --print $(q "$SANDBOX") -- bash -c '<the above>'"
     [[ -n "$AUTONOM" ]] && rm -f "$PF" "$LF" 2>/dev/null
     exit 1
 fi

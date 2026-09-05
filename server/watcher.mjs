@@ -3,8 +3,7 @@
 // cost estimation, auto-close of finished sessions (server/sessions.mjs), worktree cleanup.
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
-import db, { getRepo, addEvent, announceRun, allSettings } from './db.mjs'
+import db, { getRepo, getRun, addEvent, announceRun, allSettings } from './db.mjs'
 import { RUNS_DIR, sh, parseDbUtc, kurzid } from './util.mjs'
 import { notify, notifyOnFor } from './notify.mjs'
 import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd, followUpHeader, clearAnomalies } from './reports.mjs'
@@ -19,9 +18,15 @@ import { pruefeTreffer, pruefLlmAktiv } from './pruefer.mjs'
 import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
 import { flowsTick } from './flows/triggers.mjs'
-import { reconcileClosedSession, tmuxSnapshot, sessionGone, shouldAutoClose, currentKeepMs, shouldCloseArchived, archiveSessionKeepMs } from './sessions.mjs'
+import { reconcileClosedSession, tmuxSnapshot, sessionGone, shouldAutoClose, currentKeepMs, shouldCloseArchived, archiveSessionKeepMs,
+  sandboxRuntime, sandboxHubId, containerName, stopRunContainer, finishedAtMs } from './sessions.mjs'
 import { integrateTick, pushOperatorBase, integratorTimerOff, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 import { maybeAutoCleanup } from './cleanup.mjs'
+// The two seams of SANDBOX_RESEARCH.md §7.4.4 / §7.7. Both answer for an
+// unsandboxed run exactly what this file did before they existed, which is why
+// every call site below could be rewired mechanically.
+import { runGit, agentHome, specOf } from './sandbox/exec.mjs'
+import { isClone, removeClone } from './sandbox/clone.mjs'
 import { env } from './env.mjs'
 
 let timer = null
@@ -108,6 +113,12 @@ export async function tick() {
   }
   await closeOldSessions()
   await closeArchivedSessions()
+  // The sandbox's own two passes, AFTER the session passes: a container's fate
+  // follows its session's, so reconciling in the other order would look at
+  // sessions the pass above is about to close. Both are a complete no-op on an
+  // installation without a container runtime.
+  try { await enforceMaxRuntime() } catch (e) { console.error('[sandbox]', e.message) }
+  try { await reconcileContainers() } catch (e) { console.error('[sandbox]', e.message) }
   await cleanupWorktrees()
   // No-code flows: run_finished backstop, delays, cron (server/flows/triggers.mjs).
   try { await flowsTick() } catch (e) { console.error('[flows]', e.message) }
@@ -352,10 +363,38 @@ async function watchFollowUps() {
   }
 }
 
-/** Path of the Claude transcript: known in advance thanks to --session-id (planning 7.1). */
+/**
+ * claude's own slug rule for a project directory: EVERY character that is not a
+ * letter or a digit becomes '-', with no collapsing — `/home/x` is `-home-x`
+ * (measured, claude 2.1.261, SANDBOX_RESEARCH.md §11a.4).
+ *
+ * This used to be `replaceAll('/', '-')`, and that was a latent bug rather than a
+ * simplification: a worktree path holding a dot, an underscore or a space
+ * produced a directory the hub would never find, and both things that read this
+ * path — the activity measurement and the claude incident channel — would have
+ * gone silently blind. The run then looks idle while it works, which is the most
+ * expensive shape a fault can take. No path on this machine triggered it, which
+ * is exactly why it survived; a sandboxed run's newly generated paths raise the
+ * odds, so it is fixed here rather than waited for.
+ */
+export function claudeProjectSlug(workdir) {
+  return String(workdir ?? '').replace(/[^a-zA-Z0-9]/g, '-')
+}
+
+/**
+ * Path of the Claude transcript: known in advance thanks to --session-id
+ * (planning 7.1).
+ *
+ * The slug is derived from the WORKDIR, and a sandboxed run's workdir is the
+ * same string inside and outside the container — so nothing about the slug rule
+ * changes there. What moves is the home the projects directory hangs under
+ * (§7.7), and `agentHome(run)` is the host home for every run that is not
+ * sandboxed. `FREILAUF_CLAUDE_PROJECTS` stays the outermost answer: it is the
+ * suite's fence, and a test must never read the operator's transcripts.
+ */
 export function claudeTranskriptPfad(run) {
-  const dirName = run.workdir_effective.replaceAll('/', '-')
-  return `${env('CLAUDE_PROJECTS') ?? `${homedir()}/.claude/projects`}/${dirName}/${run.id}.jsonl`
+  const dirName = claudeProjectSlug(run.workdir_effective)
+  return `${env('CLAUDE_PROJECTS') ?? join(agentHome(run), '.claude/projects')}/${dirName}/${run.id}.jsonl`
 }
 
 /** Read a file starting at offset; returns { text, size }. If too far behind, only the tail. */
@@ -645,7 +684,10 @@ async function measureActivity(run) {
   if (run.harness === 'hermes' && run.workdir_effective) {
     try {
       const { DatabaseSync } = await import('node:sqlite')
-      const d = new DatabaseSync(`${homedir()}/.hermes/state.db`, { readOnly: true })
+      // Same indirection as the three harnesses above: the state store sits in
+      // the home the agent ran with, which is the host home unless the run was
+      // sandboxed (§7.7).
+      const d = new DatabaseSync(join(agentHome(run), '.hermes/state.db'), { readOnly: true })
       const rows = d.prepare(`SELECT estimated_cost_usd, input_tokens, output_tokens FROM sessions
                               WHERE cwd = ? ORDER BY started_at DESC LIMIT 1`).all()
       // Column names can differ between versions — resolve defensively via PRAGMA.
@@ -935,6 +977,199 @@ async function tmuxAnswered() {
   }
 }
 
+// --------------------------------------------- containers: the same lesson again
+//
+// A sandboxed run works in a container while its tmux session holds the client
+// (SANDBOX_RESEARCH.md §7.1). So the machine now holds two things per run that
+// can disappear independently, and the reconciliation between them is this pass.
+//
+// tmuxVerdict()'s lesson applies here with full force, and it is the most
+// important rule in this section: "docker did not answer" is `unreachable`, NOT
+// "there are no containers". A daemon restart, a busy socket, a rootless
+// docker.service that is still coming up after a reboot — every one of them
+// answers like an empty machine, and a pass that spent that as "gone" would end
+// every sandboxed run on the box at once. Nothing here acts on anything but
+// `ok`.
+
+/** The statuses that mean a run is still on its way — never reaped, whatever the container does. */
+export const IN_FLIGHT_STATUSES = ['running', 'waiting_help', 'scheduled', 'deferred']
+
+/**
+ * What to do with ONE container of this hub. Pure, so the table below is a test
+ * and not an argument:
+ *
+ *   'leave'          nothing to do — the ordinary case for a working run.
+ *   'stop_orphan'    the container runs on with no session left to watch it:
+ *                    the client died or the operator hit the detach chord
+ *                    (§8.18). Stop it and say so.
+ *   'container_gone' the run is in flight and its container is not there any
+ *                    more: the agent died. `pane_dead` says the same thing, and
+ *                    the ordinary paths (watchRun, closeOldSessions) decide what
+ *                    that MEANS for the run — this only records the fact.
+ *   'reap'           nothing is waiting on it any more: stop and remove.
+ *
+ * `status` is null for a container whose run is not in the database at all (a
+ * deleted repo, a run wiped by hand): nothing can be waiting on that.
+ *
+ * `retention: 'keep'` is the operator asking to keep the container for `docker
+ * exec` debugging after the run is over (§7.11). It buys exactly the retention
+ * clock, no more: `overKeep` is what says the clock has run out, and a 'keep'
+ * that never expired would be a container nothing on this machine ever removes.
+ */
+export function containerVerdict({ status, sessionOpen, running, exists = true, retention = 'run', overKeep = false }) {
+  if (!status) return 'reap'
+  if (IN_FLIGHT_STATUSES.includes(status)) {
+    if (!running) return 'container_gone'          // an exited leftover is removed with the event
+    return sessionOpen ? 'leave' : 'stop_orphan'
+  }
+  // Terminal. As long as the session stands, the container is what a follow-up
+  // commission types into (§8.5) — retention closes both together, in that order.
+  if (sessionOpen) return 'leave'
+  if (retention === 'keep' && !overKeep) return 'leave'
+  return exists || running ? 'reap' : 'leave'
+}
+
+/** Is the run's own session still open, as the hub's own bookkeeping has it? */
+function sessionOpenFor(run) {
+  return !!(run?.tmux_session && !run.tmux_closed_at)
+}
+
+/**
+ * The reconciliation pass: every container this hub owns, against the runs
+ * table. Two directions, because a mismatch has two shapes — a container with
+ * no live run behind it, and a run that says sandboxed with no container in
+ * front of it.
+ */
+export async function reconcileContainers(nowMs = Date.now()) {
+  const rt = await sandboxRuntime()
+  if (typeof rt?.listOwned !== 'function') return { verdict: 'no_runtime', acted: [] }
+
+  const owned = await rt.listOwned(sandboxHubId())
+  if (owned.verdict !== 'ok') {
+    // 'no_daemon' is the ordinary state of a machine without Docker and says
+    // nothing worth an alarm; only an answer the hub could not get at all is
+    // worth counting, and only a repeated one is worth waking anybody for.
+    if (owned.verdict === 'unreachable') await dockerUnreachable(owned.reason)
+    return { verdict: owned.verdict, acted: [] }
+  }
+  await dockerAnswered()
+
+  const keepMs = currentKeepMs()
+  const acted = []
+  const seen = new Set()
+  for (const c of owned.containers) {
+    seen.add(c.name)
+    const run = c.runId ? getRun(c.runId) : null
+    const spec = run ? specOf(run) : null
+    const finished = finishedAtMs(null, run)
+    const verdict = containerVerdict({
+      status: run?.status ?? null,
+      sessionOpen: sessionOpenFor(run),
+      running: c.running,
+      exists: true,
+      retention: spec?.retention ?? 'run',
+      overKeep: finished != null && nowMs - finished >= keepMs,
+    })
+    // A proxy container is a tool of the run, not the run: it is reaped with it
+    // and never carries an event of its own. Bringing a dead one back while its
+    // run is still going is the sandbox facade's job (§8.19), not the reaper's.
+    if (c.kind === 'proxy' && verdict !== 'reap') continue
+    acted.push({ name: c.name, runId: c.runId, kind: c.kind, verdict })
+    try {
+      if (verdict === 'reap') {
+        if (c.running) await rt.stopContainer(c.name, {})
+        await rt.removeContainer(c.name, {})
+      } else if (verdict === 'stop_orphan') {
+        await rt.stopContainer(c.name, {})
+        if (run) addEventOnce(run.id, 'sandbox:container_gone', { reason: 'no session left for this container', container: c.name })
+      } else if (verdict === 'container_gone') {
+        if (run) addEventOnce(run.id, 'sandbox:container_gone', { reason: 'container ended while the run was still going', container: c.name })
+        await rt.removeContainer(c.name, {})
+      }
+    } catch (err) { console.error('[sandbox]', c.name, err.message) }
+  }
+
+  // The other direction: a run that says it is sandboxed and whose container the
+  // daemon did not list at all. `--rm` takes a finished container away, so this
+  // only says something for a run that is still supposed to be working.
+  const flight = db.prepare(`SELECT * FROM runs WHERE sandbox=1 AND sandbox_container IS NOT NULL
+                             AND status IN ('running','waiting_help')`).all()
+  for (const run of flight) {
+    const name = containerName(run)
+    if (!name || seen.has(name)) continue
+    acted.push({ name, runId: run.id, kind: 'agent', verdict: 'container_gone' })
+    addEventOnce(run.id, 'sandbox:container_gone', { reason: 'container is no longer known to the runtime', container: name })
+  }
+  return { verdict: 'ok', acted }
+}
+
+/**
+ * The daemon cannot be asked at all — the `tmux_unreachable` twin, and it takes
+ * its shape from that one on purpose. Raised only after REPEATED silence: a
+ * single busy moment is not worth a page, and the pass has already done the
+ * right thing about it, which is nothing.
+ */
+const dockerSilence = { count: 0 }
+const DOCKER_UNREACHABLE_AFTER = Number(env('SANDBOX_UNREACHABLE_AFTER') ?? 3) || 3
+
+async function dockerUnreachable(reason) {
+  dockerSilence.count += 1
+  if (dockerSilence.count < DOCKER_UNREACHABLE_AFTER) return
+  console.error('[sandbox] container runtime unreachable:', reason)
+  await vorfallMelden(null, {
+    typ: 'docker_unreachable', quelle: 'watcher', schwere: 'rot',
+    beleg: `The container runtime gave no answer ${dockerSilence.count} times in a row: `
+         + `${String(reason ?? '').slice(0, 400)}. Sandboxed runs are left exactly as they are — `
+         + `nothing is stopped, reaped or ended on a guess. Their tmux sessions and their work are untouched.`,
+  })
+}
+
+/** The daemon answers again: the transient outage above closes itself. */
+async function dockerAnswered() {
+  if (!dockerSilence.count) return
+  dockerSilence.count = 0
+  for (const v of offeneVorfaelle(null)) {
+    if (v.typ === 'docker_unreachable') vorfallLoesen(v.id, 'watcher')
+  }
+}
+
+/** Test hook: forget how often the runtime has been silent. */
+export function _resetDockerSilence() { dockerSilence.count = 0 }
+
+/**
+ * `resources.maxRuntimeMinutes` from the run's frozen spec is a HARD stop
+ * (§8.16): the container goes, the session goes, and the run ends as `aborted`
+ * with the limit named. Everything softer — the expected duration, the overrun
+ * ladder — stays exactly as it is; this is the one that does not merely say
+ * something.
+ *
+ * Measured from the run's start, like every other clock on this row.
+ */
+async function enforceMaxRuntime(nowMs = Date.now()) {
+  const rows = db.prepare(`SELECT * FROM runs WHERE sandbox=1 AND sandbox_spec IS NOT NULL
+                           AND status IN ('running','waiting_help')`).all()
+  for (const run of rows) {
+    const raw = specOf(run)?.resources?.maxRuntimeMinutes
+    // '' is not 0: an empty field means "no limit", and Number('') would make it
+    // a limit of zero minutes — every sandboxed run killed at its first pass.
+    if (raw == null || String(raw).trim() === '') continue
+    const minutes = Number(raw)
+    if (!Number.isFinite(minutes) || minutes <= 0) continue
+    const startedMs = parseDbUtc(run.started_at)
+    if (!Number.isFinite(startedMs) || nowMs - startedMs < minutes * 60_000) continue
+    addEvent(run.id, 'sandbox:max_runtime', { minutes, container: run.sandbox_container ?? null })
+    try {
+      await stopRunContainer(run)
+      if (run.tmux_session) await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
+    } catch (err) { console.error('[sandbox]', err.message) }
+    // The hub ended this deliberately, so it is reconciled as an end and never
+    // resumed — reconcileClosedSession() writes the abort and the assessment.
+    reconcileClosedSession(run.id, 'max_runtime')
+    await notifyRun(run.id, 'max_runtime',
+      `🔴 Run stopped: the sandbox's maximum runtime of ${minutes} min was reached.`)
+  }
+}
+
 /**
  * Close sessions of ARCHIVED runs. Archiving is the operator's "put this
  * finished work away", so the session it left standing goes with it — by
@@ -993,7 +1228,10 @@ async function cleanupWorktrees() {
     // Last safeguard before 'worktree remove --force': uncommitted work in the worktree
     // beats any 'removable'. Otherwise the cleanup deletes real work.
     if (removable) {
-      const dirty = await sh('git', ['-C', run.worktree, 'status', '--porcelain'])
+      // Through the seam: on a sandboxed run this reads the working copy inside
+      // the container while it stands, and on the host with a hardened git when
+      // it does not (§7.4.4). The `-C` is the seam's, hence only the arguments.
+      const dirty = await runGit(run, ['status', '--porcelain'], { cwd: run.worktree })
       // Uncommitted work beats any 'removable' — the worktree extras and the
       // harness hook files do not, because the hub put those there itself
       // (foreignChanges() in integrate.mjs, shared with the finish gate).
@@ -1004,7 +1242,16 @@ async function cleanupWorktrees() {
       }
     }
     if (removable) {
-      await sh('git', ['-C', repo.path, 'worktree', 'remove', '--force', run.worktree])
+      // A sandboxed run's working copy is a private CLONE, not a linked
+      // worktree: `git worktree remove` knows nothing about it and `worktree
+      // prune` never sees it (§8.9). removeClone() deletes the directory and
+      // the ref the collected tip was parked under; for a linked worktree it
+      // does nothing and the old command below is what runs.
+      if (isClone(run)) {
+        await removeClone(run)
+      } else {
+        await sh('git', ['-C', repo.path, 'worktree', 'remove', '--force', run.worktree])
+      }
       addEvent(run.id, 'worktree_removed')
       // A local branch whose work is on the base branch has nothing left to
       // hold. Remote branches stay in v1: visible history is cheaper than an

@@ -19,6 +19,8 @@
 // tmuxVerdict, sessionGoneFrom) so they can be tested without a tmux server.
 import db, { getRun, addEvent, allSettings } from './db.mjs'
 import { sh, parseDbUtc } from './util.mjs'
+import { dataDir } from './paths.mjs'
+import { specOf } from './sandbox/exec.mjs'
 import { t } from './i18n.mjs'
 import { env } from './env.mjs'
 
@@ -346,6 +348,134 @@ export async function paneAlive(name) {
   return flags.length ? flags.some(v => v === '0') : null
 }
 
+// ------------------------------------------------------- the run's container
+//
+// A sandboxed run works inside a container while its tmux session holds the
+// container CLIENT (SANDBOX_RESEARCH.md §7.1). Everything below is what the
+// session side of the hub has to know about that, and all of it is fail-soft in
+// the same direction: an installation without a container runtime, or a daemon
+// that does not answer, must behave exactly as this file behaved before any of
+// it existed.
+
+/**
+ * The runtime module, or null. Imported LAZILY and cached — a static import
+ * would tie the sessions page, the sidebar's memory block and the watcher to a
+ * module that talks to a container daemon, on machines that have none. The same
+ * rule server/sandbox/exec.mjs states for its own runtime import.
+ */
+let runtimeMod = null
+export async function sandboxRuntime() {
+  if (runtimeMod !== null) return runtimeMod || null
+  try { runtimeMod = await import('./sandbox/runtime.mjs') } catch { runtimeMod = false }
+  return runtimeMod || null
+}
+const runtimeModule = sandboxRuntime
+
+/**
+ * Which hub a container belongs to — the value of the `freilauf.hub` label the
+ * launcher stamps on and the reconciliation pass filters by. It is the DATA
+ * DIRECTORY, which is exactly what `skills.mjs` already calls this
+ * installation's id: two hubs on one machine differ in their database, not in
+ * their port, and reaping the other one's containers is the same mistake as
+ * killing its tmux sessions. One definition, imported by both sides.
+ */
+export function sandboxHubId() { return dataDir() }
+
+/** Test hook: forget the cached runtime module (a suite may install a stub). */
+export function _resetRuntimeModule() { runtimeMod = null }
+
+/**
+ * The container this run really got, or null. `runs.sandbox_container` is
+ * written when one was created, so a NULL there means "nothing to stop" — never
+ * a name to guess at: stopping `fl-<id>` on a hunch could hit a container of
+ * another hub that reused the id.
+ */
+export function containerName(run) {
+  return (run?.sandbox && run?.sandbox_container) ? String(run.sandbox_container) : null
+}
+
+/** Which runtime this run was started with (its frozen spec knows). */
+function runtimeOf(run) {
+  return env('SANDBOX_RUNTIME') ?? specOf(run)?.runtime ?? undefined
+}
+
+/**
+ * Is this run's container demonstrably gone? true / false / null — the same
+ * tri-state `sessionGone()` has, and for the same reason: "the daemon did not
+ * answer" is not "the container is gone", and a caller that spends the one as
+ * the other ends somebody's work over a restarted daemon.
+ */
+export async function containerGone(run) {
+  const name = containerName(run)
+  if (!name) return null
+  const rt = await runtimeModule()
+  if (typeof rt?.containerState !== 'function') return null
+  try {
+    const state = await rt.containerState(name, { runtime: runtimeOf(run) })
+    if (!state || state.verdict !== 'ok') return null
+    return !state.running
+  } catch { return null }
+}
+
+/**
+ * Stop a run's container — SIGTERM, then SIGKILL after the grace period (§7.11).
+ * `--rm` removes the container with it and the proxy goes with the network.
+ *
+ * Returns `{ stopped, name }`: `stopped` is true only when a container that was
+ * demonstrably RUNNING was stopped by this call, so a caller can tell "I ended
+ * it" from "it was over anyway" without asking twice.
+ */
+export async function stopRunContainer(run, { timeoutSec = 30 } = {}) {
+  const name = containerName(run)
+  if (!name) return { stopped: false, name: null }
+  const rt = await runtimeModule()
+  if (typeof rt?.stopContainer !== 'function') return { stopped: false, name }
+  const runtime = runtimeOf(run)
+  let running = true
+  try {
+    if (typeof rt.containerState === 'function') {
+      const state = await rt.containerState(name, { runtime })
+      // Not answering is not "gone": stop it anyway, the command is idempotent.
+      if (state && state.verdict === 'ok') running = !!state.running
+    }
+    await rt.stopContainer(name, { runtime, timeoutSec })
+    // The network outlives `--rm` (the daemon persists it), so it goes here too.
+    if (typeof rt.removeNetwork === 'function') {
+      await rt.removeNetwork(`fl-net-${run.id}`, { runtime }).catch?.(() => {})
+    }
+  } catch { return { stopped: false, name } }
+  return { stopped: running, name }
+}
+
+/**
+ * What a sandboxed session really costs — and the reason this is a correctness
+ * fix rather than a refinement.
+ *
+ * The pane's process tree is the container CLIENT. The agent's processes are
+ * children of the daemon's shim, not of anything under the pane, so summing the
+ * tree measures the transport and calls it the workload: measured against a PTY
+ * relay of the container's shape, the pane tree came to **10.4 MB while the
+ * workload held 210.3 MB** (SANDBOX_RESEARCH.md §11a.5) — a twenty-fold
+ * under-report in the one number the status sidebar exists to print and the
+ * memory-cleanup agent acts on.
+ *
+ * Which is why a null here must NOT fall back to the tree walk: 10 MB that looks
+ * like a measurement is worse than no measurement, and this repo has a rule
+ * about a number that presents itself as current and is not. The caller marks
+ * such a session unknown instead.
+ */
+async function containerResources(run) {
+  const name = containerName(run)
+  if (!name) return null
+  const rt = await runtimeModule()
+  if (typeof rt?.containerStats !== 'function') return null
+  try {
+    const stats = await rt.containerStats(name, { runtime: runtimeOf(run) })
+    if (!stats || !Number.isFinite(Number(stats.memBytes))) return null
+    return { rssKb: Math.round(Number(stats.memBytes) / 1024), cpu: Number(stats.cpuPct) || 0, count: 1 }
+  } catch { return null }
+}
+
 /**
  * Every session with everything known about it: the run behind it, the agent,
  * the repo and what the process tree costs. Oldest first — that is the order
@@ -366,17 +496,32 @@ export async function listSessions() {
                                 ORDER BY r.started_at`).all()) {
     runs.set(run.tmux_session, run)   // a name is reused at most after a kill: the newest wins
   }
-  const out = sessions.map(session => {
+  const out = await Promise.all(sessions.map(async (session) => {
     const run = runs.get(session.name) ?? null
     const pid = session.panes.find(p => !p.dead)?.pid ?? session.panes[0]?.pid ?? null
+    const hostTree = processTree(tree, pid)
+    // Whether this is a sandboxed session is asked of the RUN, never of
+    // `pane_current_command`: that field names the transport (`docker`, or a
+    // relay's `python3`), so matching on the string would misread an operator's
+    // own container session and would stop being true the day the runtime is
+    // podman. The tmux name prefix and the run row are the answers this hub
+    // already trusts for "what is in this session".
+    const container = containerName(run)
+    const inContainer = container ? await containerResources(run) : null
+    // UNKNOWN, not the pane tree. See containerResources(): the tree is the
+    // client, and 10 MB in place of 210 MB is the quiet kind of wrong.
+    const unknown = { rssKb: null, cpu: null, count: null, unknown: true }
     return {
       ...session,
       run,
       state: sessionState(session, run),
-      resources: processTree(tree, pid),
+      resources: container ? (inContainer ?? unknown) : hostTree,
+      // What the page renders as the "sandboxed" badge. `measured: false` is the
+      // instruction to print "unknown" rather than a number.
+      sandbox: container ? { container, image: specOf(run)?.image?.ref ?? null, measured: !!inContainer } : null,
       finishedAtMs: finishedAtMs(session, run),
     }
-  })
+  }))
   out.sort((a, b) => (a.createdMs ?? 0) - (b.createdMs ?? 0))
   return out
 }
@@ -417,6 +562,16 @@ export async function sessionMemory({ force = false } = {}) {
     const value = {
       sessions: sessions.length,
       running: sessions.filter(s => s.state === 'agent_running').length,
+      // listSessions() already substitutes the container's memory for a
+      // sandboxed session's pane tree, so this sum includes the containers by
+      // construction — the same "one reading, rendered in two places" rule the
+      // sidebar and the sessions page have always shared.
+      sandboxed: sessions.filter(s => s.sandbox).length,
+      // How many sessions could not be measured at all — a sandboxed one whose
+      // runtime did not answer. The total below is then INCOMPLETE, and the
+      // panel has to say so: a machine total that quietly leaves out a 200 MB
+      // container is the same lie as a quota bar that is two days old.
+      unmeasured: sessions.filter(s => s.resources?.unknown).length,
       rssKb: sessions.reduce((sum, s) => sum + (s.resources?.rssKb ?? 0), 0),
       measuredAtMs: Date.now(),
       // The panel says how often this is taken, so a reading up to eight
@@ -494,6 +649,14 @@ export function reconcileClosedSession(runId, source = 'session') {
   if (!run) return null
   db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')),
               agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(runId)
+  // The second question a sandboxed run brings (§7.11, §8.18): a session that is
+  // gone while the container still stands is the client-died case — the operator
+  // hit the detach chord, or the `docker` client was killed — and the agent in
+  // there would otherwise go on working with nobody watching. Fire and forget,
+  // like the escalations below: WHICH of the two ends the run is decided by the
+  // rules of this function and is not the sandbox's to change; all this does is
+  // make sure no container outlives the session that held it.
+  orphanedContainer(runId, source)
   // A session is gone — whatever ended it. If its run was a cleanup run, the
   // memory it freed must reach the sidebar now, not on the next cache expiry.
   refreshSessionMemoryAfterRun(runId)
@@ -530,6 +693,26 @@ export function reconcileClosedSession(runId, source = 'session') {
 }
 
 /**
+ * A session ended; if its container is still running, stop it and say so
+ * (`sandbox:container_gone`). Never throws, never blocks the caller, and writes
+ * NOTHING when the container was already over — which is the ordinary case,
+ * because `killSessions()` and the kill route stop it before they touch tmux and
+ * `--rm` takes it with the agent's own exit. A daemon that does not answer is
+ * left to `reconcileContainers()` on the next watcher pass: not knowing is a
+ * reason to ask again, never to write an event that says something happened.
+ */
+function orphanedContainer(runId, source) {
+  const run = getRun(runId)
+  if (!containerName(run)) return
+  stopRunContainer(run)
+    .then(({ stopped, name }) => {
+      if (!stopped) return
+      addEvent(runId, 'sandbox:container_gone', { reason: 'session ended, container still running', source, container: name })
+    })
+    .catch(err => console.error('[sandbox]', err.message))
+}
+
+/**
  * An aborted run leaves work behind too. The assessment always happens (the
  * detail page shows it); only the run the WATCHER aborted — a session that
  * vanished on its own, which nobody was watching for — also says so to the operator.
@@ -559,19 +742,22 @@ export function assessLater(runId, announce = false) {
 export async function killSessions(names, source = 'web') {
   const unique = [...new Set((names ?? []).map(n => String(n ?? '').trim()).filter(Boolean))]
   const results = await Promise.all(unique.map(async (name) => {
+    // The run is looked up BEFORE the kill, not after, because a sandboxed run's
+    // container has to be stopped first (§7.11): killing the session kills the
+    // client, and a container whose client is gone goes on working. SIGTERM,
+    // 30 s, then SIGKILL — the agent gets the chance to write out what it has.
+    const row = db.prepare(`SELECT * FROM runs WHERE tmux_session=? ORDER BY started_at DESC LIMIT 1`).get(name)
+    if (containerName(row)) await stopRunContainer(row)
     const r = await sh('tmux', ['kill-session', '-t', `=${name}`])
     // kill-session on a session that no longer exists is an error to tmux, but
     // not to us: the wish "this must be gone" is fulfilled.
     const gone = r.ok || !(await sessionAlive(name))
-    return { session: name, ok: gone, error: gone ? null : (r.stderr || r.stdout).trim() || 'kill-session failed' }
+    return { session: name, ok: gone, runId: row?.id ?? null, error: gone ? null : (r.stderr || r.stdout).trim() || 'kill-session failed' }
   }))
   let aborted = 0
   for (const result of results) {
-    if (!result.ok) continue
-    const run = db.prepare(`SELECT id FROM runs WHERE tmux_session=? ORDER BY started_at DESC LIMIT 1`).get(result.session)
-    if (!run) continue
-    result.runId = run.id
-    result.run = reconcileClosedSession(run.id, source)
+    if (!result.ok || !result.runId) continue
+    result.run = reconcileClosedSession(result.runId, source)
     if (result.run === 'aborted') aborted++
   }
   if (aborted) {

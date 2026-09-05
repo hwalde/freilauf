@@ -969,3 +969,27 @@ form.form-grid p.warn[data-llm-overhead] {
 @media (max-width: 700px) {
   form.form-grid p.warn[data-llm-overhead] { margin-left: 0; }
 }
+
+/* ---- the sandbox (SANDBOX_RESEARCH.md §7.12/§7.13) ----------------------
+   Nothing here invents a look: the card is the same `.banner waiting` the
+   integration line uses, the facts are the run page's own chips, and the three
+   decision buttons are an ordinary .btn-row. What IS needed is the row shape
+   for a blocked host — the host, how often, and its three answers on one line
+   that wraps rather than pushing the page sideways. */
+.sandbox-blocked { margin-top: var(--sp-8); }
+.sandbox-blocked ul.chips { margin: var(--sp-4) 0 0; }
+.sandbox-blocked ul.chips > li { display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--sp-4) var(--sp-8); }
+.sandbox-blocked .btn-row { margin: 0; }
+
+/* A folded overrides editor inside the two-column form grid — the same
+   exception details.goal already needs: a <details> is not a label, so it
+   spans both columns and its textarea gets the full width. */
+form.form-grid details.sandbox-overrides { margin: var(--sp-12) 0; grid-column: 1 / -1; }
+form.form-grid details.sandbox-overrides textarea { width: 100%; }
+details.sandbox-reconfigure { margin: var(--sp-12) 0; }
+details.sandbox-reconfigure textarea { width: 100%; }
+
+/* The two suffixes. Both are deliberately quiet: in the overview cell four
+   voices already speak, and on the sessions page the row is a measurement. */
+.sandbox-suffix, .sandbox-badge { font-size: var(--fs-small); }

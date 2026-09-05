@@ -1,0 +1,532 @@
+#!/usr/bin/env node
+// Freilauf — the container-runtime shim the test suites drive the sandbox with.
+//
+// WHY this file exists at all: the machine this project is developed on has no
+// Docker, and the requirement is that the sandbox is covered by automated tests
+// there too. Everything a sandboxed run does that is worth testing — the exact
+// command line a profile produces, the order in which a kill stops the
+// container and the tmux session, what a watcher pass does when the daemon does
+// not answer, whether an orphan is reaped and a live container is not — is a
+// question about what the hub SAYS to the runtime, not about what a kernel does
+// with it. A shim that writes down every word and answers what the test
+// dictates therefore covers all of it, and covers it on any machine.
+//
+// It is the pattern test/deploy.mjs already proves: a script on the PATH that
+// logs its argv and reads its answers out of files the test writes, one answer
+// per line, each consumed once, the last one repeating — which is what makes
+// "the daemon is unreachable now and fine on the next pass" expressible at all.
+//
+// Two things it is deliberately NOT:
+//
+//   * not a container. `run` STRIPS the container flags and executes the
+//     wrapped command on the host, in the directory `-w` names, with the `-e`
+//     variables in its environment. So a stubbed agent really starts, a real
+//     tmux session really stands, and every assertion the e2e suite already
+//     makes about a run downstream of the launch keeps holding for a sandboxed
+//     one. `exec` does the same, which is how `runGit()`'s container path is
+//     exercised for real.
+//   * not a fixture the hub writes. Everything it answers comes from files the
+//     TEST writes; the shim only ever appends to its own log and keeps a small
+//     table of the containers it was told to create, so a test can ask what
+//     exists without dictating it twice.
+//
+// State lives in one directory, named by FL_DOCKER_STATE (the sandbox writes a
+// one-line launcher that sets it, so the repo file stays generic and a shim
+// invoked as a tmux pane command finds its state without inheriting anything):
+//
+//   calls.jsonl      one JSON object per invocation: { at, verb, argv, cwd }
+//   mode             ok | absent | no_daemon | unreachable — a global override
+//   answers/<verb>   dictated answers for that verb, one per line, last repeats
+//   info.json        what `docker info --format {{json .}}` answers
+//   containers.json  the fake daemon's table: name → { state, labels, … }
+//   networks.json    the same for networks
+//   created.txt      every container/network name this shim created, for cleanup
+//
+// An answer line is one of:
+//   ok                     exit 0, no output
+//   out <text>             exit 0, <text> on stdout (\n is a newline)
+//   default                fall through to the built-in behaviour
+//   no_daemon              the daemon-is-down wording runtimeVerdict() classifies
+//   unreachable            an answer the hub cannot classify — "I learned nothing"
+//   notfound               "No such container: <name>", which is an ANSWER
+//   absent                 exit 127, as if the binary were not on the PATH
+//   fail <code> <text>     anything else, verbatim
+//
+// The verb is argv[0], except `network <sub>`, which is `network-<sub>` — the
+// hub asks two very different questions through that one word.
+'use strict'
+
+const { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync, statSync,
+  openSync, closeSync, unlinkSync } = require('node:fs')
+const { spawnSync } = require('node:child_process')
+const { join, dirname } = require('node:path')
+
+const STATE = process.env.FL_DOCKER_STATE
+if (!STATE) {
+  // Loud, and on purpose. A shim that quietly did nothing when its state
+  // directory is missing would let a suite believe it had asserted a command
+  // line nobody recorded — and outside a suite it would be a `docker` on the
+  // PATH that swallows commands. Refusing is the only honest answer.
+  process.stderr.write('freilauf docker shim: FL_DOCKER_STATE is not set\n')
+  process.exit(2)
+}
+
+const argv = process.argv.slice(2)
+const CALLS = join(STATE, 'calls.jsonl')
+
+// ---------------------------------------------------------------- state files
+function readJson(name, fallback) {
+  try { return JSON.parse(readFileSync(join(STATE, name), 'utf8')) } catch { return fallback }
+}
+function readText(name) {
+  try { return readFileSync(join(STATE, name), 'utf8') } catch { return null }
+}
+
+/**
+ * Read-modify-write of one state file under a lock.
+ *
+ * Two `docker run`s of one suite can overlap (a scheduler start and a manual
+ * one), and a lost update would be a container the cleanup never hears about —
+ * the leak this project already has an entry in AGENTS.md for, one layer out.
+ * An exclusive create is the whole lock; a stale one older than ten seconds is
+ * broken, because a shim that died mid-write must not wedge the suite.
+ */
+function withJson(name, fn) {
+  const lock = join(STATE, `.${name}.lock`)
+  const nap = new Int32Array(new SharedArrayBuffer(4))
+  let fd = null
+  for (let i = 0; i < 400; i++) {
+    try { fd = openSync(lock, 'wx'); break } catch {
+      try { if (Date.now() - statSync(lock).mtimeMs > 10_000) unlinkSync(lock) } catch {}
+      Atomics.wait(nap, 0, 0, 5)          // the only sleep there is in a synchronous process
+    }
+  }
+  try {
+    const value = readJson(name, {})
+    const next = fn(value)
+    if (next !== undefined) writeFileSync(join(STATE, name), JSON.stringify(next, null, 2))
+  } finally {
+    if (fd !== null) { try { closeSync(fd) } catch {} ; try { unlinkSync(lock) } catch {} }
+  }
+}
+
+function record(name) {
+  try { appendFileSync(join(STATE, 'created.txt'), name + '\n') } catch {}
+}
+
+// ---------------------------------------------------------------- the argv log
+function verbOf(a) {
+  const first = a.find(x => !x.startsWith('-')) ?? ''
+  if (first === 'network') {
+    const rest = a.slice(a.indexOf('network') + 1).find(x => !x.startsWith('-'))
+    return rest ? `network-${rest}` : 'network'
+  }
+  return first || '(none)'
+}
+
+const VERB = verbOf(argv)
+try {
+  mkdirSync(STATE, { recursive: true })
+  appendFileSync(CALLS, JSON.stringify({ at: Date.now(), verb: VERB, argv, cwd: process.cwd() }) + '\n')
+} catch { /* a log that cannot be written must not break the command under test */ }
+
+// ---------------------------------------------------------------- the answers
+const DAEMON_DOWN = 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?'
+const UNREACHABLE = 'error during connect: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.47/info": context deadline exceeded'
+
+function fail(code, text) {
+  process.stderr.write(String(text).replace(/\\n/g, '\n') + '\n')
+  process.exit(code)
+}
+function out(text) {
+  if (text) process.stdout.write(String(text).replace(/\\n/g, '\n') + '\n')
+  process.exit(0)
+}
+
+/** The canned answers, by name. Returns false when the word is not one. */
+function canned(word, rest) {
+  switch (word) {
+    case 'ok': out('')
+    case 'out': out(rest)
+    case 'no_daemon': fail(1, DAEMON_DOWN)
+    case 'unreachable': fail(1, UNREACHABLE)
+    case 'notfound': fail(1, `Error response from daemon: No such container: ${argv[argv.length - 1] ?? ''}`)
+    case 'absent': fail(127, 'docker: command not found')
+    case 'fail': {
+      const m = String(rest ?? '').match(/^(\d+)\s*([\s\S]*)$/)
+      fail(m ? Number(m[1]) : 1, m ? m[2] : (rest ?? 'shim failure'))
+    }
+    default: return false
+  }
+}
+
+// ---------------------------------------------------------------- the witness
+// An executable at hooks/<verb> is run BEFORE the answer, with the whole argv.
+// It is how a test asks an ordering question that no log of two separate
+// processes can answer: "was the tmux session still standing when the container
+// was stopped?", "did the row already say resume_pending?". Its output and its
+// exit code are ignored on purpose — a witness that could change the answer
+// would stop being one.
+try {
+  const hook = join(STATE, 'hooks', VERB)
+  if (existsSync(hook)) spawnSync(hook, argv, { stdio: 'ignore', env: process.env })
+} catch { /* a witness that cannot run is a missing observation, not a failure */ }
+
+// A global mode outranks everything: it is how a test says "the binary is gone"
+// or "the daemon stopped answering" for a whole watcher pass, without having to
+// dictate an answer per verb it cannot predict.
+const mode = (readText('mode') ?? 'ok').trim()
+if (mode && mode !== 'ok') canned(mode, '')
+
+// One dictated answer, consumed. The LAST line stays — a test that says
+// "unreachable" once means one call, and one that means "from now on" writes it
+// once and lets it repeat, exactly as test/deploy.mjs's curl reads its statuses.
+function dictated() {
+  const file = join(STATE, 'answers', VERB)
+  let lines
+  try { lines = readFileSync(file, 'utf8').split('\n').filter(l => l.trim() !== '') } catch { return }
+  if (!lines.length) return
+  const line = lines[0]
+  if (lines.length > 1) writeFileSync(file, lines.slice(1).join('\n') + '\n')
+  const m = line.trim().match(/^(\S+)\s*([\s\S]*)$/)
+  if (!m) return
+  if (m[1] === 'default') return
+  canned(m[1], m[2])
+}
+dictated()
+
+// ---------------------------------------------------------------- flag parsing
+// Which flags of `docker run` / `exec` take a value. Everything the hub's own
+// buildRunArgv()/buildProxyArgv() can emit is in here; the rest is the common
+// set, so a profile that grows a flag does not silently shift the image.
+const VALUE_FLAGS = new Set([
+  '--name', '--label', '-l', '--detach-keys', '--stop-timeout', '--stop-signal',
+  '--user', '-u', '-e', '--env', '--env-file', '--cap-drop', '--cap-add',
+  '--security-opt', '--tmpfs', '--pids-limit', '--memory', '-m', '--memory-swap',
+  '--memory-reservation', '--cpus', '--cpu-shares', '--shm-size', '--network', '--net',
+  '-v', '--volume', '--mount', '-w', '--workdir', '--runtime', '--pull', '--userns',
+  '--platform', '--entrypoint', '--add-host', '--dns', '--device', '--ulimit',
+  '--log-driver', '--log-opt', '--restart', '--hostname', '-h', '--group-add',
+  '--cgroupns', '--ipc', '--pid', '--sysctl', '--health-cmd', '--format', '--filter',
+  '--volumes-from', '--link', '-p', '--publish', '--expose', '-o', '--opt', '--driver',
+])
+// `-f` is deliberately NOT a value flag: it is `--force` on `rm` and only a
+// shorthand for `--filter` on `ps`, which the hub always writes out in full. A
+// `-f` that ate the next token would swallow the name of the container being
+// removed. `-t` is the same shape the other way round — `--tty` on `run`,
+// `--time` on `stop` — which is why every verb that names a container reads it
+// off the END of the positional list rather than off position 0.
+const BOOL_FLAGS = new Set([
+  '-it', '-ti', '-i', '-t', '-d', '--rm', '--init', '--read-only', '--privileged',
+  '--detach', '--tty', '--interactive', '--no-healthcheck', '--no-stream', '-a',
+  '--publish-all', '-P', '--quiet', '-q', '--force', '-f', '--all',
+])
+
+/**
+ * Split a docker command line into its flags and the positional tail.
+ *
+ * `--flag=value` counts as one token; a value flag eats the next token; an
+ * unknown `-x` is read as a boolean, which is the answer that fails LOUDLY (the
+ * image shifts by one and the exec dies with the flag's value as its command)
+ * rather than quietly dropping the real command.
+ *
+ * Flag parsing STOPS at the first positional, which is docker's own rule and
+ * not a simplification: after the image (`run`) or the container name (`exec`)
+ * every token belongs to the command being run, and a `sh -c "…"` whose `-c`
+ * was read as a flag of the shim is a command the wrapped process never sees.
+ */
+function split(a) {
+  const flags = new Map()      // name → [values] (a boolean gets [true])
+  const pos = []
+  let i = 0
+  while (i < a.length) {
+    const tok = a[i]
+    if (tok === '--') { pos.push(...a.slice(i + 1)); break }
+    if (pos.length) { pos.push(tok); i++; continue }
+    if (tok.startsWith('-') && tok.length > 1) {
+      const eq = tok.indexOf('=')
+      if (eq > 0) {
+        push(flags, tok.slice(0, eq), tok.slice(eq + 1))
+        i++
+        continue
+      }
+      if (VALUE_FLAGS.has(tok) && !BOOL_FLAGS.has(tok)) { push(flags, tok, a[i + 1]); i += 2; continue }
+      push(flags, tok, true)
+      i++
+      continue
+    }
+    pos.push(tok)
+    i++
+  }
+  return { flags, pos }
+}
+function push(map, key, value) {
+  if (!map.has(key)) map.set(key, [])
+  map.get(key).push(value)
+}
+const first = (flags, ...names) => {
+  for (const n of names) { const v = flags.get(n); if (v && v.length) return v[0] }
+  return null
+}
+
+/** The environment the wrapped command runs in: the shim's, plus every `-e`. */
+function envOf(flags) {
+  const env = { ...process.env }
+  for (const entry of [...(flags.get('-e') ?? []), ...(flags.get('--env') ?? [])]) {
+    if (entry === true) continue
+    const eq = String(entry).indexOf('=')
+    if (eq < 0) continue                                   // `-e NAME` passes through as it stands
+    env[String(entry).slice(0, eq)] = String(entry).slice(eq + 1)
+  }
+  return env
+}
+
+/** `-w` if it really exists on the host; otherwise where the shim was called. */
+function cwdOf(flags) {
+  const w = first(flags, '-w', '--workdir')
+  if (w && typeof w === 'string' && existsSync(w)) return w
+  return process.cwd()
+}
+
+// ---------------------------------------------------------------- the verbs
+// `network create …` is two words before the flags start, so the tokens to
+// parse begin one further along than for every other verb.
+const A = split(VERB.startsWith('network-') ? argv.slice(2) : argv.slice(1))
+const flags = A.flags
+const pos = A.pos
+
+function labels(flagMap) {
+  const out = {}
+  for (const l of [...(flagMap.get('--label') ?? []), ...(flagMap.get('-l') ?? [])]) {
+    if (l === true) continue
+    const eq = String(l).indexOf('=')
+    if (eq < 0) out[String(l)] = ''
+    else out[String(l).slice(0, eq)] = String(l).slice(eq + 1)
+  }
+  return out
+}
+
+function limitsOf(flagMap) {
+  const o = {}
+  for (const [flag, key] of [['--memory', 'memory'], ['--memory-swap', 'memorySwap'],
+    ['--cpus', 'cpus'], ['--pids-limit', 'pidsLimit']]) {
+    const v = first(flagMap, flag)
+    if (v && v !== true) o[key] = v
+  }
+  return o
+}
+
+function fakeId(name) {
+  // A 64-hex id, derived from the name so a test can recognise it. Docker
+  // prints one on `run -d`, and a caller that parses it must get something of
+  // the right shape.
+  let h = ''
+  for (let i = 0; i < name.length && h.length < 64; i++) h += name.charCodeAt(i).toString(16).padStart(2, '0')
+  return (h + '0'.repeat(64)).slice(0, 64)
+}
+
+switch (VERB) {
+  case 'info': {
+    const info = readJson('info.json', {
+      ServerVersion: '27.5.1',
+      SecurityOptions: ['name=seccomp,profile=builtin', 'name=rootless'],
+      Runtimes: { runc: {}, 'io.containerd.runc.v2': {} },
+    })
+    out(JSON.stringify(info))
+    break
+  }
+
+  case 'version':
+    out('Docker version 27.5.1, build freilauf-shim')
+    break
+
+  case 'run': {
+    const name = first(flags, '--name') || `shim-${Date.now()}`
+    const detached = flags.has('-d') || flags.has('--detach')
+    const autoRemove = flags.has('--rm')
+    const image = pos[0] ?? null
+    const cmd = pos.slice(1)
+    const cwd = cwdOf(flags)
+    withJson('containers.json', (t) => {
+      t[name] = {
+        state: 'running', status: 'Up 1 second', image,
+        labels: labels(flags), limits: limitsOf(flags),
+        workdir: first(flags, '-w', '--workdir') || cwd,
+        network: first(flags, '--network', '--net') || 'bridge',
+        autoRemove, detached, createdAt: Date.now(),
+      }
+      return t
+    })
+    record(name)
+    if (detached || !cmd.length) {
+      // Nothing to run on the host: a detached container (the iron-proxy one)
+      // or an image with its own entrypoint. Docker prints the id and returns.
+      out(fakeId(name))
+    }
+    // The whole point of the `run` branch: the wrapped command really runs, in
+    // the directory the container would have used, with the container's
+    // environment. Everything the suite already asserts about a launched run —
+    // the tmux session, the agent's output, the report — therefore holds for a
+    // sandboxed one without a single container existing.
+    const r = spawnSync(cmd[0], cmd.slice(1), { cwd, env: envOf(flags), stdio: 'inherit' })
+    const code = r.status === null ? 1 : r.status
+    withJson('containers.json', (t) => {
+      if (!t[name]) return t
+      if (autoRemove) delete t[name]
+      else { t[name].state = 'exited'; t[name].status = `Exited (${code}) 1 second ago`; t[name].exitCode = code }
+      return t
+    })
+    process.exit(code)
+    break
+  }
+
+  case 'exec': {
+    const name = pos[0]
+    const cmd = pos.slice(1)
+    const table = readJson('containers.json', {})
+    if (!table[name]) fail(1, `Error response from daemon: No such container: ${name}`)
+    if (table[name].state !== 'running') fail(1, `Error response from daemon: Container ${name} is not running`)
+    if (!cmd.length) fail(1, 'exec: no command')
+    const w = first(flags, '-w', '--workdir')
+    const cwd = (w && typeof w === 'string' && existsSync(w)) ? w : (existsSync(table[name].workdir ?? '') ? table[name].workdir : process.cwd())
+    const r = spawnSync(cmd[0], cmd.slice(1), { cwd, env: process.env, encoding: 'utf8' })
+    if (r.stdout) process.stdout.write(r.stdout)
+    if (r.stderr) process.stderr.write(r.stderr)
+    process.exit(r.status === null ? 1 : r.status)
+    break
+  }
+
+  case 'stop': {
+    const name = pos[pos.length - 1]
+    let known = false
+    withJson('containers.json', (t) => {
+      known = !!t[name]
+      if (!known) return t
+      if (t[name].autoRemove) delete t[name]
+      else { t[name].state = 'exited'; t[name].status = 'Exited (137) 1 second ago' }
+      return t
+    })
+    if (!known) fail(1, `Error response from daemon: No such container: ${name}`)
+    out(name)
+    break
+  }
+
+  case 'rm': {
+    const name = pos[pos.length - 1]
+    let known = false
+    withJson('containers.json', (t) => { known = !!t[name]; delete t[name]; return t })
+    if (!known) fail(1, `Error response from daemon: No such container: ${name}`)
+    out(name)
+    break
+  }
+
+  case 'ps': {
+    // Only the two filters the hub uses: the ownership label and a name. An
+    // unknown filter matches everything, which is the loud direction — a test
+    // that meant to narrow sees too many rows rather than none.
+    const wanted = [...(flags.get('--filter') ?? []), ...(flags.get('-f') ?? [])].filter(f => f !== true)
+    const table = readJson('containers.json', {})
+    const all = flags.has('-a') || flags.has('--all')
+    const rows = []
+    for (const [name, c] of Object.entries(table)) {
+      if (!all && c.state !== 'running') continue
+      let keep = true
+      for (const f of wanted) {
+        const s = String(f)
+        if (s.startsWith('label=')) {
+          const [k, v] = s.slice(6).split('=')
+          if ((c.labels ?? {})[k] !== v) keep = false
+        } else if (s.startsWith('name=')) {
+          if (!name.includes(s.slice(5))) keep = false
+        } else if (s.startsWith('status=')) {
+          if (c.state !== s.slice(7)) keep = false
+        }
+      }
+      if (keep) rows.push(`${name}\t${c.state}\t${c.status ?? ''}`)
+    }
+    out(rows.join('\n'))
+    break
+  }
+
+  case 'inspect': {
+    const name = pos[pos.length - 1]
+    const c = readJson('containers.json', {})[name]
+    if (!c) fail(1, `Error: No such object: ${name}`)
+    const fmt = String(first(flags, '--format') ?? '')
+    if (fmt.includes('.State.Running')) {
+      // The one format server/sandbox/runtime.mjs asks for, answered field for
+      // field in its order.
+      out([c.state === 'running', c.exitCode ?? 0, !!c.oom, c.state].join('\t'))
+    }
+    out(JSON.stringify([{ Name: `/${name}`, State: { Running: c.state === 'running', ExitCode: c.exitCode ?? 0, OOMKilled: !!c.oom, Status: c.state }, Config: { Labels: c.labels ?? {}, Image: c.image } }]))
+    break
+  }
+
+  case 'update': {
+    const name = pos[pos.length - 1]
+    let known = false
+    withJson('containers.json', (t) => {
+      known = !!t[name]
+      if (known) t[name].limits = { ...(t[name].limits ?? {}), ...limitsOf(flags) }
+      return t
+    })
+    if (!known) fail(1, `Error response from daemon: No such container: ${name}`)
+    out(name)
+    break
+  }
+
+  case 'stats': {
+    const name = pos[pos.length - 1]
+    const c = readJson('containers.json', {})[name]
+    if (!c) fail(1, `Error response from daemon: No such container: ${name}`)
+    out(c.stats ?? '128MiB / 8GiB 3.50%')
+    break
+  }
+
+  case 'network-create': {
+    const name = pos[pos.length - 1]
+    let existed = false
+    withJson('networks.json', (t) => {
+      existed = !!t[name]
+      if (!existed) t[name] = { internal: flags.has('--internal'), createdAt: Date.now() }
+      return t
+    })
+    if (existed) fail(1, `Error response from daemon: network with name ${name} already exists`)
+    record(`network:${name}`)
+    out(fakeId(name).slice(0, 12))
+    break
+  }
+
+  case 'network-rm': {
+    const name = pos[pos.length - 1]
+    let known = false
+    withJson('networks.json', (t) => { known = !!t[name]; delete t[name]; return t })
+    if (!known) fail(1, `Error response from daemon: network ${name} not found`)
+    out(name)
+    break
+  }
+
+  case 'network-connect':
+  case 'network-disconnect':
+    out('')
+    break
+
+  case 'events':
+    // `docker events` is a stream the audit tails. Ending at once is what a
+    // test wants: the tailer sees a clean EOF instead of a process that has to
+    // be killed, and the invocation is in the log either way.
+    out('')
+    break
+
+  case 'build':
+  case 'pull':
+  case 'image':
+    out('')
+    break
+
+  default:
+    // Recorded above, and answered as a success. A verb nobody has taught the
+    // shim is a gap in the test, not a reason to fail the hub under test — the
+    // argv log is where it becomes visible.
+    out('')
+}

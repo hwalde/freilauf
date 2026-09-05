@@ -1,6 +1,7 @@
 // Freilauf — scheduler (planning 4.2/4.8): the agents' cron expressions, global
 // pipeline AND gate, budget gate with deferral instead of discarding.
-import db, { addEvent, announceRun, getSetting, setSetting, allSettings } from './db.mjs'
+import db, { addEvent, announceRun, getSetting, setSetting, allSettings, getRepo } from './db.mjs'
+import { planSandbox } from './sandbox/index.mjs'
 import { scheduleDue, parseDbUtc, lastMissedSlot, catchupHours } from './util.mjs'
 import { createRun, launchRun, failRun } from './runner.mjs'
 import { getPlugin } from './plugins/registry.mjs'
@@ -363,12 +364,42 @@ export async function startRun(def, {
   // the run must record what it actually launched with.
   const resolved = await resolveRouting(def)
 
+  // …and so does the sandbox, for exactly the same reason and in the same slot
+  // (SANDBOX_RESEARCH.md §7.13). `planSandbox()` reads the repo's default,
+  // profile and overrides LIVE — repo config is not snapshotted into a run, the
+  // rule `repos.prompt` already follows — and freezes the RESOLVED SPEC into the
+  // row, which `launchRun()` then reads and never resolves again. A profile
+  // edited while a run is in flight therefore cannot change the container that
+  // run is already living in.
+  //
+  // It sits before `createRun()` because a refusal must not leave a row behind,
+  // and it stays in the CALLER's hand even when `detached` is set: the decision
+  // is milliseconds and it says whether the run runs at all, which is the same
+  // line the budget gate is on.
+  const repo = getRepo(repoId)
+  const agentRow = agentId ? db.prepare('SELECT * FROM agents WHERE id=?').get(agentId) : null
+  const sandboxPlan = await planSandbox({ repo, agent: agentRow, def: resolved })
+  // A refusal is never a silent downgrade and never a started run: the hub said
+  // `required` and something below said `off`, or the coding agent cannot be
+  // sandboxed at all. The caller renders it like any other start problem.
+  if (sandboxPlan.problems.length) return { ok: false, error: sandboxPlan.problems.join('\n') }
+
   let runId
   try {
-    runId = createRun({ ...resolved, repoId, agentId, promptExtra, title: startTitle || null })
+    runId = createRun({
+      ...resolved, repoId, agentId, promptExtra, title: startTitle || null,
+      sandbox: sandboxPlan.sandbox, sandboxProfileId: sandboxPlan.profileId,
+      sandboxOverrides: sandboxPlan.overrides, sandboxSpec: sandboxPlan.spec,
+    })
   } catch (e) {
     return { ok: false, error: e.message }
   }
+
+  // Everything the plan has to SAY — a bypass, a refused override — is written
+  // now that there is a run to hang it on. A weakening is always named: a run
+  // that was going to be contained and is not carries `sandbox:bypassed {by,
+  // reason}`, and the overview and the notification read it from there.
+  for (const [kind, payload] of sandboxPlan.events) addEvent(runId, kind, payload)
 
   // The row exists — say so, before the launch takes its seconds. Without this
   // the overview's first news of a run was its `started` event, which lands

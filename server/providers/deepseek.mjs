@@ -26,6 +26,20 @@ const plugin = {
   pulse: { url: 'https://api.deepseek.com/models', okStatus: [200, 401] },
 
   /**
+   * What a sandboxed run on this provider needs (docs/plugins.md, "The sandbox
+   * declaration"). One host, one bearer header — the same shape as OpenRouter,
+   * and read off the three calls above rather than assumed.
+   */
+  sandbox: {
+    domains: ['api.deepseek.com'],
+    credentials: [{
+      key: 'api_key',
+      envKeys: ['DEEPSEEK_API_KEY'],
+      injection: { header: 'Authorization', prefix: 'Bearer ', hosts: ['api.deepseek.com'] },
+    }],
+  },
+
+  /**
    * The budget gate for a run that draws on the DeepSeek balance.
    *
    * Two things block, and the first is the reason `balance()` carries a verdict

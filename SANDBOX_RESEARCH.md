@@ -1790,6 +1790,11 @@ composition, per-run named volumes for `rw` extras.
 
 ## 11. Open questions to measure before building (in the order they block)
 
+**Six of these were measured on 2026-09-05 — §11a below carries the commands, the
+raw verdicts and what each one changes in the design; three of the ten (1, 3, 10)
+are answered there in part, and five (2, 3, 6, 9, 10) remain open for want of a
+container runtime on this machine.**
+
 1. **Claude as container root under rootless Docker**: does `bypassPermissions`
    accept root "inside a recognized sandbox", and what makes a sandbox recognised?
    Decides whether rootless Docker can be the recommended daemon for claude runs
@@ -1828,6 +1833,445 @@ composition, per-run named volumes for `rw` extras.
    container (the hub does not listen there, but other host services might).
 10. **Resource-limit delegation** on the operator's systemd user session for
     rootless Docker (`cgroup.controllers` shows `memory pids` only by default).
+
+---
+
+## 11a. Measured before building (2026-09-05)
+
+Everything below was run on the development machine on 2026-09-05, in a throwaway
+directory, against real git, real tmux and the real installed CLIs. Nothing in the
+hub's own checkout was touched. Where a question could not be answered here, it
+says so and states what the design does so that it is safe under **both** answers —
+because a design that is only correct under the answer one hopes for is not a
+design, it is a bet.
+
+**What cannot be measured on this machine, and why.** There is no container
+runtime: `command -v docker` and `command -v podman` both fail, no binary exists
+under `/usr/bin` or `/usr/local/bin`, and `systemctl list-unit-files` shows no
+docker or podman unit at either scope [measured]. Unprivileged user namespaces are
+closed: `unshare -rn true` → `write failed /proc/self/uid_map: Operation not
+permitted`, `bwrap --ro-bind / / --dev /dev true` → `bwrap: setting up uid map:
+Permission denied`, with `kernel.apparmor_restrict_unprivileged_userns = 1` and
+only `unprivileged_userns`, `lxc-unshare` and `lxc-usernsexec` profiles present
+[measured]. So questions **§11.1** (only partly — see below), **§11.2**, **§11.3**,
+**§11.6**, **§11.9** and **§11.10** (only partly) cannot be answered here. To answer
+them one needs a machine with rootless Docker ≥ 28 installed and a systemd user
+session with delegation, plus — for §11.2 — a throwaway Anthropic account, because
+the experiment is "does a second `.credentials.json` refreshing its token
+invalidate the first" and running it on the operator's own account is how one
+loses a live session.
+
+---
+
+### 11a.1 (§11.7) `git fetch` from a hostile clone executes nothing — but the *fallback* path does
+
+**The question.** §7.4.3 keeps exactly one host-side git operation on
+agent-controlled data: `git -C <repo.path> fetch <clone> HEAD:refs/freilauf/runs/<id>`.
+Does `git-upload-pack`, running inside a repository whose `.git` the agent owns,
+execute anything the agent put there?
+
+**What was run.** A clone was built exactly as §7.4.2 prescribes (`git init`,
+`remote add origin <source>`, the two fetch refspecs, `objects/info/alternates`
+pointing at the source's `objects`, `fetch origin`, `checkout`), a commit was made
+in it, and then it was made hostile: `.git/config` given `core.fsmonitor`,
+`core.sshCommand`, `core.alternateRefsCommand`, `core.pager`, `core.editor`,
+`uploadpack.packObjectsHook`, `diff.external` — every one of them `touch
+/tmp/PWNED_<name>` — plus twelve executable hooks in `.git/hooks` (`pre-commit`,
+`post-checkout`, `pre-receive`, `post-receive`, `update`, `post-update`,
+`pre-push`, `proc-receive`, `reference-transaction`, `push-to-checkout`,
+`post-index-change`, `fsmonitor-watchman`), each `touch`ing its own marker. Then,
+from the source repository:
+
+```bash
+git -C <source> fetch <clone> HEAD:refs/freilauf/runs/test
+GIT_CONFIG_NOSYSTEM=1 git -C <source> -c uploadpack.allowAnySHA1InWant=false \
+    fetch --force <clone> HEAD:refs/freilauf/runs/test2
+git ls-remote <clone>
+git -C <source> fetch --force <clone> refs/heads/hostile:refs/freilauf/runs/test3
+git -C <source> fetch --force file://<clone> refs/heads/hostile:refs/freilauf/runs/test4
+git -C <source> fetch --dry-run <clone> HEAD
+```
+
+**Verdict [measured, git 2.43.0]: not one marker appeared, on any of the six.**
+All six exited 0, the ref resolved (`git -C <source> rev-parse
+refs/freilauf/runs/test`), and a blob only the clone had came back
+(`git cat-file -p refs/freilauf/runs/test:loot.txt` → `payload`). The
+`GIT_CONFIG_NOSYSTEM=1` and `-c uploadpack.allowAnySHA1InWant=false` belt-and-braces
+changed nothing, which is the expected result rather than a disappointment:
+`uploadpack.packObjectsHook` is only respected in **protected configuration**
+(system, global, command scope), and git's own manual says why — "an attacker who
+controls these scopes can do substantial harm without using Git" [documented,
+`man git-config`, section "Protected configuration"]. The integrator's own
+follow-on operations are clean too: `git -C <source> merge-tree --write-tree
+--name-only origin/main refs/freilauf/runs/<id>` returned a tree sha on a
+mergeable pair and exit 1 with the conflicting path on a conflicting one, and
+`git status` in the source stayed empty afterwards [measured].
+
+**The positive control is the finding.** The same payload, with the same clone,
+fires immediately when git is run **inside** the clone — which is exactly what
+§7.4.4 forbids and exactly what the fallback path still does:
+
+| host-side command in the clone | what fired [measured] |
+|---|---|
+| `git -C <clone> --no-optional-locks status --porcelain` | `core.fsmonitor` |
+| `git -C <clone> diff` | `core.fsmonitor`, `diff.external` |
+| `git -C <clone> add -A && git commit` | `core.fsmonitor`, hooks `pre-commit`, `post-index-change`, `reference-transaction` |
+| `git -C <clone> checkout -- .` | `core.fsmonitor`, hooks `post-checkout`, `post-index-change` |
+| `git -C <clone> rev-parse HEAD` | nothing |
+| `git -C <clone> rev-list --count HEAD` | nothing |
+
+**And the hardening §7.4.4 proposes is not enough** [measured]. With
+`-c core.hooksPath=/dev/null -c core.fsmonitor=false -c diff.external=` and
+`GIT_CONFIG_NOSYSTEM=1`, a **filter driver** still runs: `filter.evil.clean` in the
+clone's `.git/config`, selected by a `.gitattributes` of `* filter=evil` — a
+**tracked file the agent commits**, which is the point — executed on `status`, on
+`add -A` and on `diff HEAD`, all three. `diff.<name>.textconv` and
+`merge.<name>.driver` are the same family. The denylist named three keys; git 2.43
+has at least seven repo-local ways to name a command, and there is no
+`GIT_CONFIG_NOLOCAL` — a repository's own config cannot be switched off from the
+command line.
+
+**Therefore the implementation does three things.** (1) The collecting fetch stays
+exactly as §7.4.3 writes it, in the source repository, with `GIT_CONFIG_NOSYSTEM=1`
+kept as documentation of intent; the bundle variant is not needed. (2) The
+host-side fallback for a run whose container is gone is restricted to the two
+commands measured inert — `rev-parse` and `rev-list --count` — plus the fetch;
+anything that reads the worktree (`status`, `diff`, and the whole rescue path)
+either runs in the sandbox or does not run at all, and the dirt of a dead
+sandboxed run is reported as **unknown**, never as measured. (3) Where the rescue
+path must run on the host anyway, the clone's `.git/config` is **replaced by a
+minimal file** for the duration of the call (`[core] repositoryformatversion = 0 /
+bare = false`) **and** `-c core.hooksPath=/dev/null` is passed — the substitution
+alone leaves `.git/hooks` as the default hooks directory, and `post-index-change`
+fires. That combination was verified against all eight commands above: nothing
+fired [measured]. A denylist of config keys is not a boundary and must not be
+described as one.
+
+Also measured, because it looks like a config problem and is not: git's
+merge driver for the integrator's `merge-tree` is resolved out of the **source**
+repository's config, which is the hub's. A `.gitattributes` naming `merge=evil`
+that the agent gets merged into the base branch therefore selects a driver the
+source does not define, and merge-tree falls back to the built-in [measured].
+
+---
+
+### 11a.2 (§7.4.2) The per-run clone: every step works, including under a read-only source
+
+**The question.** Does the layout §7.4.2 prescribes actually behave — with the
+source `.git` mounted read-only and its `config` masked, which is the mount mode
+the design uses?
+
+**What was run.** A source repository was built with a bare `origin`, 302 files, a
+`main` and a `feature` branch, both pushed; then the §7.4.2 sequence verbatim.
+
+| # | Question | Verdict |
+|---|---|---|
+| (a) | `git fetch origin` in the clone | works; brings `refs/remotes/origin/*` and, through the second refspec, the source's local branches as `refs/remotes/local/*` [measured] |
+| (b) | `git checkout --detach origin/main` | works [measured] |
+| (c) | does the alternate avoid copying objects | source `.git/objects` **3.1 MB**, clone `.git/objects` **16 KB** before any work, **40 KB** after a commit [measured] |
+| (d) | source `.git` **read-only** (`chmod -R a-w`) | `fetch origin`, `checkout`, `log`, `status`, a commit in the clone, a second incremental `fetch` and `cat-file` on a blob that exists only in the alternate — all work, all exit 0 [measured] |
+| (e) | source `.git/config` **replaced by an empty file** | `fetch origin`, `checkout` and alternate resolution all still work; `ls-remote` against the masked source answers normally [measured] |
+| (f) | the branch modes of `makeWorktree()` | see below [measured] |
+| (g) | collect + integrate | `git -C <source> fetch <clone> HEAD:refs/freilauf/runs/<id>` then `merge-tree --write-tree --name-only` — covered in §11a.1 [measured] |
+
+**(f) The three branch modes as clone commands**, each verified to land on the same
+commit `makeWorktree()` would have landed on:
+
+| `branch_mode` | clone command | lands on |
+|---|---|---|
+| `keiner` | `git -C <clone> checkout --detach origin/<base>` | the base tip [measured] |
+| `neu`, branch nowhere | `git -C <clone> checkout -b <name> origin/<base>` | the base tip [measured] |
+| `neu`/`fest`, the operator has it **locally** | `git -C <clone> checkout -b <name> refs/remotes/local/<name>` | byte-identical to the source's `refs/heads/<name>` [measured] |
+| `neu`/`fest`, it exists only on origin | `git -C <clone> checkout -b <name> origin/<name>` | the remote tip [measured] |
+
+The third row is what the second fetch refspec exists for, and it is the row a
+naive clone gets wrong: `makeWorktree()` prefers the operator's **local** branch
+over `origin/<name>`, and without `+refs/heads/*:refs/remotes/local/*` the clone
+cannot see it at all.
+
+**One correction to §7.4.2, and it is not cosmetic.** "The operator's `.git/config`
+itself is masked with an empty file" is wrong for a repository that carries
+`extensions.*`. Measured on a `--object-format=sha256` repository whose config was
+emptied: `git log` → `fatal: your current branch appears to be broken`, and
+`git ls-remote` answered **exit 0 with an all-zero sha** — a silent wrong answer,
+which is worse than the error. `core.repositoryformatversion = 1` plus the
+`[extensions]` block is what tells git how to read the repository at all, and the
+same applies to a partial clone (`extensions.partialClone`,
+`remote.origin.promisor`). **Therefore the implementation masks the config by
+writing a minimal replacement, not an empty file**: `core.repositoryformatversion`
+and the whole `[extensions]` section copied over from the source, everything else —
+`remote.*` (which may carry a token in a URL), `user.*`, `core.fsmonitor` and the
+rest — dropped. An empty file is a mask that can silently change what a repository
+*is*.
+
+---
+
+### 11a.3 (§11.5, §8.21) `--settings` outranks project settings — and a repo file can switch every hook off anyway
+
+**The question.** Do the hooks the hub installs through `claude --settings <json>`
+survive a project `.claude/settings.json` in the agent's own worktree that also
+declares hooks?
+
+**Why it could not be answered by running it.** Every path that would resolve
+settings and then *act* on them starts a session, and a session that reports
+anything costs API quota. `claude doctor` prints installation health and no
+settings; there is no `claude config list`-style settings dump among the
+subcommands (`agents attach auth auto-mode doctor gateway import install logs mcp
+plugin project respawn rm setup-token stop ultrareview update`) [measured]. So the
+answer was read out of the shipped binary — `~/.local/share/claude/versions/2.1.261`,
+a 215 MB bun single-file executable whose JavaScript chunks are readable with
+`strings`.
+
+**Verdict, in three parts.**
+
+1. **Precedence is documented inside the binary itself** [measured, read from the
+   shipped binary 2.1.261]. Its own settings-report schema carries the source enum
+   `["userSettings","projectSettings","localSettings","flagSettings","policySettings"]`
+   with the description *"Ordered low-to-high priority — later entries ov[erride]"*,
+   and the same order appears as a literal array. `flagSettings` is `--settings`.
+   So **`--settings` outranks both `.claude/settings.json` and
+   `.claude/settings.local.json`**, and only managed policy outranks it.
+
+2. **But a repo settings file can disable every hook, the hub's included.** The
+   hook resolver reads the *merged* settings and returns `{}` when
+   `disableAllHooks` is true anywhere in the merge, and project settings are in the
+   merge. The binary states the consequence in its own words, twice: a log line
+   reading *"launcher_hooks materialized, but a repo `.claude/settings.json` or
+   `settings.local.json` carries `disableAllHooks:true` — the child will drop every
+   flagSettings hook"*, and a user-facing message reading *"A settings file in this
+   checkout switches all hooks off (`disableAllHooks`); that holds for this
+   terminal"* [measured, read from the shipped binary]. **This contradicts §8.21's
+   assumption.** An agent — or a repository somebody cloned — that writes six lines
+   into `.claude/settings.json` silences `fl-report _api_error`, `_working`,
+   `_waiting` and `Stop` for that run, and the hub's only symptom is a run that
+   reports nothing, which reads as an idle agent.
+
+3. **There is a clean lever, and claude uses it on itself.** `--setting-sources
+   <sources>` takes a comma-separated list of `user, project, local`; claude's own
+   plugin-eval runner builds its child command with `--setting-sources user`
+   [measured, read from the shipped binary]. A source that is not loaded cannot
+   contribute a `disableAllHooks` either. `--bare` is **not** the lever: it is
+   documented as "skip hooks" and the resolver returns `kind:"none", reason:"bare"`.
+
+**Therefore the implementation launches claude with `--setting-sources user`**
+(alongside `--settings`), in the sandbox and outside it, and the harness plugin
+declares that as part of its launch spec rather than leaving it to `fl-start`. Two
+further facts from the same read, both load-bearing for a seeded home: hooks are
+skipped entirely in an untrusted workspace (`"Skipping … hook execution -
+workspace trust not accepted"`), so the trust flag `fl-start`'s `trust_workdir()`
+writes must exist in the **run's** home; and `.claude/settings.local.json` hooks
+are additionally dropped when that file is git-tracked (`reason:
+"repo_provenance"`) — a fence the hub gets for free and must not rely on.
+
+---
+
+### 11a.4 (§11.4, §11.8) All four CLIs relocate with `HOME` — and three offer a narrower lever
+
+**The question.** Does each CLI find its conversation when the home differs from
+the host layout, and — §11.8 — is cursor's transcript slug derived only from the
+workdir?
+
+| CLI | where the conversation lives | derived from | verdict |
+|---|---|---|---|
+| claude 2.1.261 | `<config>/projects/<slug(workdir)>/<session id>.jsonl`, `<config>` = `$CLAUDE_CONFIG_DIR` else `$HOME/.claude` | `$HOME`, overridable | relocates cleanly [measured] |
+| opencode 1.18.29 | `<data>/opencode/opencode.db`, table `session`, keyed by the **absolute** `directory` + `parent_id`; `<data>` = `$XDG_DATA_HOME` else `$HOME/.local/share` | XDG first, `$HOME` as its fallback | relocates cleanly; **`XDG_DATA_HOME` outranks `HOME`** [measured] |
+| cursor-agent 2026.09.02 | `<data>/projects/<slug(workdir)>/agent-transcripts/<chat>/<chat>.jsonl` **and** `<data>/chats/<md5(absolute workdir)>/`; `<data>` = `$CURSOR_DATA_DIR` else `homedir()/.cursor` | `$HOME`, overridable | relocates cleanly; auth lives under a **second root** [measured] |
+| hermes 0.21.0 | `$HERMES_HOME/state.db`, table `sessions`, keyed by the absolute `cwd`; `$HERMES_HOME` = `$HOME/.hermes` | `$HOME`, overridable | relocates cleanly [measured] |
+
+Each was run once with `HOME=<throwaway>` for a non-API command (`--version`,
+`config list`): every one created its full state tree under the throwaway home and
+**nothing** appeared under the real one (`find <real> -newer <ref>` empty)
+[measured]. `CLAUDE_CONFIG_DIR` was verified to move the whole tree while leaving
+the throwaway `HOME` completely empty [measured]; so was `XDG_DATA_HOME` /
+`XDG_CONFIG_HOME` for opencode [measured].
+
+**§11.8, answered: yes — cursor's slug is the workdir and nothing else.** The rule
+in the shipped bundle is `e.replace(/[^a-zA-Z0-9]/g,"-").replace(/-+/g,"-")
+.replace(/^-+|-+$/g,"")`, taking one argument, the workspace path — byte for byte
+what `cursor-transcript.mjs` already implements [measured, read from
+`~/.local/share/cursor-agent/versions/2026.09.02-c22c1a3/index.js`]. The home
+enters only as the containing directory, and once more in the **truncated**
+variant for paths over 92 characters, whose sha256 is taken over the full path
+*including* the home. Two such truncated directories exist under the real
+`~/.cursor/projects`; both are **empty**, and reproducing the rule matches them
+exactly only when the home is part of the hash input [measured]. The hub already
+returns both forms, in the right order.
+
+**Three consequences for the implementation**, each of them a way a per-run home
+goes wrong quietly rather than loudly:
+
+- **The hub reads these stores from the *hub's* home, not the run's.** Four call
+  sites hardcode it: `watcher.mjs` (`${homedir()}/.claude/projects`,
+  `${homedir()}/.hermes/state.db`), `opencode-store.mjs`
+  (`${homedir()}/.local/share/opencode/opencode.db`) and `harnesses/hermes.mjs`
+  (`${process.env.HOME}/.hermes/state.db`) [measured]. Every one fails **soft**: no
+  activity becomes `anomaly:no_activity` on a working run, no tokens becomes a cost
+  of zero, no resume id becomes a fallback. They all take the `agentHome(run)`
+  indirection §7.7 names, and `cursor-transcript.mjs` is the shape the other four
+  follow.
+- **Two of the four resume fallbacks are silent lies.** With the wrong store,
+  opencode's `resumeId()` degrades to `'last'` (→ `--continue`) and hermes' to
+  `'latest'` — both look like answers and both continue the wrong conversation or
+  none. cursor's returns `null`, which the hub already reads honestly as "start
+  afresh". Therefore the sandboxed resume path treats a `resumeId()` that came from
+  a store the run did not write as **no id at all**, rather than passing the
+  fallback through.
+- **Prefer the narrow lever over `HOME` where one exists.** `CLAUDE_CONFIG_DIR`,
+  `XDG_DATA_HOME`, `CURSOR_DATA_DIR` and `HERMES_HOME` each move the state without
+  moving the home, and each has a matching seam on the hub side
+  (`FREILAUF_CLAUDE_PROJECTS`, `FREILAUF_OPENCODE_DB`, `FREILAUF_CURSOR_DIR`,
+  `FREILAUF_HERMES_STATE_DB`) — so the CLI and the hub can be pointed at one
+  directory from one decision. Credentials still have to be seeded per home, and
+  cursor's auth (`$XDG_CONFIG_HOME`/`$HOME/.config/cursor/auth.json`) sits under a
+  different root from its data.
+
+**One latent bug found on the way** [measured]: claude's real slug rule replaces
+**every** non-alphanumeric character, not just `/`. A worktree path containing a
+dot, an underscore or a space produces a directory the hub's
+`replaceAll('/', '-')` will not find — no worktree on this machine triggers it
+today, and `measureActivity()` and the claude incident channel would go blind if
+one did.
+
+---
+
+### 11a.5 (§7.1) The transport survives a PTY relay — and RSS accounting does not
+
+**The question.** §7.1 chooses "tmux on the host, the pane command is `docker run
+-it`". Without Docker, the claim can still be tested against the shape: a pane
+whose command is a program that allocates a PTY for a child and relays raw bytes
+in both directions, propagating `SIGWINCH` and exiting with the child's status.
+A 40-line Python relay was written for exactly that, with a fake TUI as its child
+(bracketed paste enabled on its output, `exit 7` on a keyword), driven on a
+private tmux socket (`tmux -L fl-measure`) so no production session was involved.
+
+| claim | verdict [measured, tmux 3.4] |
+|---|---|
+| `pipe-pane -o 'cat >> log'` sees the inner program's output | yes — the log holds the relayed lines |
+| `capture-pane -p` reads the inner screen | yes |
+| `send-keys -l` with the hub's bracketed paste (`ESC[200~ … ESC[201~`, `util.mjs:95`) | yes — the escape bytes traverse the relay unchanged and reach the child byte for byte |
+| `pane-died` fires, with the inner exit status | yes — `pane_dead=1`, `pane_dead_status=7`, the hook ran |
+| `remain-on-exit` keeps the last screen | yes — `capture-pane` still reads it, `has-session` still true |
+| `--detach-keys` intercepts `Ctrl-P Ctrl-Q` on the input side | [documented] — no Docker here; the Docker CLI's detach sequence is a client-side feature and the relay has none |
+
+**But `pane_current_command` reports the transport, not the agent** [measured]: the
+pane's command was `python3` (the relay) with the inner program invisible to tmux.
+Under Docker it is `docker`. And the RSS accounting follows from the same fact.
+`sessions.mjs` sums the process tree under `pane_pid`; with the workload
+re-parented away from the relay — which is the container's shape, its processes
+being children of the shim in the daemon's cgroup rather than of the client — the
+pane tree summed **10.4 MB** while the workload held **210.3 MB** [measured]. A
+twenty-fold under-report, in the number the status sidebar prints on every page
+and the memory-cleanup agent acts on.
+
+**Therefore the implementation** keeps the transport as §7.1 chose it — nothing in
+the tmux half needs to change — and makes `sessionMemory()` and the sessions page
+ask the runtime for a sandboxed run's memory instead of the process tree, marking
+what it cannot measure as unknown rather than as 10 MB. The harness a session
+belongs to must likewise not be inferred from `pane_current_command`; the tmux
+name prefix (`bin/fl-harness-tags.sh`) already answers that and stays the answer.
+
+---
+
+### 11a.6 (§2.4, §11.10) This host today, and what §2.4 got wrong
+
+Re-measured 2026-09-05 with the commands §11.10 names:
+
+| Thing | 2026-09-05 [measured] |
+|---|---|
+| Docker / Podman | still absent, at both scopes |
+| kernel | 6.8.0-138-generic, Ubuntu 24.04 |
+| root `cgroup.controllers` | `cpuset cpu io memory hugetlb pids rdma misc` |
+| **user slice `cgroup.controllers`** | **`cpu memory pids`** — at `user.slice/user-1000.slice` and at `user@1000.service` alike |
+| `/etc/systemd/system/user@.service.d/delegate.conf` | **does not exist** — the delegation is systemd 255's own default, `Delegate=pids memory cpu` in the stock `user@.service` |
+| `kernel.apparmor_restrict_unprivileged_userns` | `1`; `kernel.unprivileged_userns_clone = 1` (the AppArmor switch is the one that binds) |
+| `/sys/kernel/security/lsm` | `lockdown,capability,landlock,yama,apparmor` |
+| `unshare -rn true` | fails: `write failed /proc/self/uid_map: Operation not permitted` |
+| `bwrap` | 0.9.0 installed; smoke test fails: `setting up uid map: Permission denied` |
+| git / tmux / node / systemd | 2.43.0 / 3.4 / v22.23.2 / 255 |
+
+**§11.10 is corrected**: the user session shows `cpu memory pids`, not "`memory
+pids` only". So on this host a rootless daemon could honour `--memory`,
+`--pids-limit` and `--cpus` out of the box, and could **not** honour `--cpuset-cpus`
+or any io limit (`--blkio-weight`, `--device-read-bps`) — `cpuset` and `io` are not
+delegated, and enabling them is the `delegate.conf` drop-in that does not exist
+here. The design's discovery step therefore reads the user slice's
+`cgroup.controllers` and offers exactly the limits it lists, rather than offering a
+`cpuset` field that would fail at `docker run`.
+
+**§2.4's version rows are stale** [measured]: claude is **2.1.261** (not 2.1.258),
+opencode **1.18.29** (not 1.18.26), hermes **0.21.0** (not 0.20.5 — the release in
+which `-q` began seeding an interactive session), cursor-agent
+**2026.09.02-c22c1a3** (not 2026.08.25). Everything else in §2.4 still holds.
+
+---
+
+### 11a.7 What the unmeasurable questions do to the design
+
+**§11.1 — claude as container root — is answered in part, from the binary rather
+than from a container** [measured, read from the shipped binary 2.1.261]. The
+refusal is one predicate:
+
+```js
+isRootOutsideDeliberateSandbox() {
+  return platform !== "win32" && getuid() === 0
+      && !isSandboxEnvSet()        // process.env.IS_SANDBOX === "1"
+      && !isBubblewrapEnvSet()     // env CLAUDE_CODE_BUBBLEWRAP
+}
+```
+
+and `bypassPermissions` exits 1 with *"--dangerously-skip-permissions cannot be
+used with root/sudo privileges for security reasons"* when it holds. So **"a
+recognized sandbox" means `IS_SANDBOX=1` or `CLAUDE_CODE_BUBBLEWRAP`, and nothing
+else** — being in a container is explicitly *not* enough: the binary has a separate
+`isDocker()` (it tests for `/.dockerenv`) and this predicate does not consult it.
+`IS_SANDBOX` is a documented-nowhere environment variable that also steers other
+behaviour (the 529-overload retry path, the "contained, no internet" probe), which
+is why this stays a **partial** answer: what is measured is that the flag lifts the
+refusal, not that Anthropic will keep it meaning that. **Therefore the
+implementation** sets `IS_SANDBOX=1` through the existing `fl-start --env` channel
+for a sandboxed claude run and does **not** depend on it: the profile's default
+daemon is rootful Docker with `--user <hub uid>:<hub gid>`, where the question does
+not arise, and rootless Docker is offered with the flag and a note that it rests on
+an undocumented variable.
+
+**§11.3 — a resume before the daemon answers — has its hub half already true**
+[measured, read from `runner.mjs` and `watcher.mjs` on this checkout]. A launch
+that fails during a resume writes `resume_failed`, **keeps `resume_pending`** and
+returns `{ retry: true }`; `retryPendingResumes()` launches again on the next
+watcher pass; `verwaisteLaeufeAbschliessen()` skips a pending run. A `docker run`
+that cannot reach a daemon still coming up is exactly that branch, so nothing fails
+the run. **But `resume_attempts` is incremented on every counted attempt, before
+`fl-start` is called**, and `RESUME_MAX` is 3 — so a daemon that takes longer than
+about ninety seconds after a reboot burns the cap and the run ends `resume_refused`.
+**Therefore the implementation** does two things rather than one: `freilauf.service`
+gains `After=` the daemon's user unit on a rootless installation, and a launch that
+failed because the *runtime* was unreachable is classified like `resumeInfo.counted
+=== false` — a reason the hub could not try, not an attempt that died. Safe under
+either answer to §11.3, because neither depends on how fast the daemon starts.
+
+**§11.2, §11.6, §11.9 and the rest of §11.10 are untouched.** What the design does
+in the meantime, and why it is safe whichever way each falls:
+
+- **§11.2 (OAuth token copies).** The profile's default for a subscription CLI is
+  `secrets.mode: env` with `CLAUDE_CODE_OAUTH_TOKEN`, never a copy of
+  `.credentials.json`, and the seeded home carries no credentials file at all.
+  If the answer turns out to be "a second copy refreshing is harmless", nothing
+  changes; if it turns out to be "it invalidates the host session", the design was
+  never exposed to it. The one thing the implementation must not do is copy
+  `~/.claude/.credentials.json` into a run home "for now".
+- **§11.6 (iron-proxy under load and with SSE).** `network.mode: allowlist` with
+  TLS termination is not the phase-1 default; the default is a CONNECT tunnel,
+  which carries HTTP/2 and streaming responses without understanding them. TLS
+  termination and header injection are opt-in per profile, and a profile that
+  cannot reach its proxy fails the start with a readable problem rather than
+  starting unproxied.
+- **§11.9 (`gateway_mode_ipv4=isolated`).** Discovery reads the daemon version; a
+  daemon that cannot isolate the gateway gets the internal network **plus** an
+  explicit note on the profile page that the host bridge address is reachable, and
+  the hub's own socket is a unix socket in the run directory (§7.6) rather than a
+  TCP port, so the hub is not on the other side of that gateway either way.
+- **§11.10 (delegation).** As above: the limits offered are the controllers the
+  user slice actually delegates, read at discovery time.
 
 ---
 

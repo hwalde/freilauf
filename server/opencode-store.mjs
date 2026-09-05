@@ -37,12 +37,19 @@
 // the turn is still running (a tool call changing state, streamed text), and
 // they are the finest signal this store has.
 import { existsSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { agentHome } from './sandbox/exec.mjs'
 import { env } from './env.mjs'
 
-/** The store's path — overridable, because a test must never read the operator's. */
-export function storePath() {
-  return env('OPENCODE_DB') ?? `${homedir()}/.local/share/opencode/opencode.db`
+/**
+ * The store's path — overridable, because a test must never read the operator's.
+ * `FREILAUF_OPENCODE_DB` stays the outermost answer for exactly that reason; a
+ * sandboxed run's store lives under its own home (§7.7), and `agentHome()`
+ * returns the host home for every run that is not sandboxed, so this is byte for
+ * byte the old path wherever no sandbox is involved.
+ */
+export function storePath(run = null) {
+  return env('OPENCODE_DB') ?? join(agentHome(run), '.local/share/opencode/opencode.db')
 }
 
 /** Does this table carry that column? opencode's schema moves between versions. */
@@ -138,7 +145,7 @@ export function readRun(d, directory, sinceMs) {
  */
 export async function rootSessionId(run) {
   if (!run?.workdir_effective || !run.started_at) return null
-  const path = storePath()
+  const path = storePath(run)
   if (!existsSync(path)) return null
   const since = Date.parse(run.started_at.replace(' ', 'T') + 'Z') - 5000
   if (!Number.isFinite(since)) return null
@@ -165,7 +172,7 @@ export async function rootSessionId(run) {
  */
 export async function storeActivity(run) {
   if (!run?.workdir_effective || !run.started_at) return null
-  const path = storePath()
+  const path = storePath(run)
   if (!existsSync(path)) return null
   const since = Date.parse(run.started_at.replace(' ', 'T') + 'Z') - 5000
   if (!Number.isFinite(since)) return null

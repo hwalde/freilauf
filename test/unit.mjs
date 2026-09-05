@@ -5586,26 +5586,26 @@ try {
 
   await pruefe('the permission matrix: a scheduled run is fully editable, a deferred one has no start time, a running one only its duration', () => {
     const erlaubt = (s) => JSON.stringify(runEditAllowed({ status: s }))
-    gleich(erlaubt('scheduled'), '{"duration":true,"prompt":true,"repo":true,"startTime":true,"branch":true}', 'scheduled')
-    gleich(erlaubt('deferred'), '{"duration":true,"prompt":true,"repo":true,"startTime":false,"branch":true}', 'deferred: no start time — it waits on quota, not on a time')
-    gleich(erlaubt('running'), '{"duration":true,"prompt":false,"repo":false,"startTime":false,"branch":false}', 'running')
-    gleich(erlaubt('waiting_help'), '{"duration":true,"prompt":false,"repo":false,"startTime":false,"branch":false}', 'waiting for a human is still running')
+    gleich(erlaubt('scheduled'), '{"duration":true,"prompt":true,"repo":true,"startTime":true,"branch":true,"sandbox":true}', 'scheduled')
+    gleich(erlaubt('deferred'), '{"duration":true,"prompt":true,"repo":true,"startTime":false,"branch":true,"sandbox":true}', 'deferred: no start time — it waits on quota, not on a time')
+    gleich(erlaubt('running'), '{"duration":true,"prompt":false,"repo":false,"startTime":false,"branch":false,"sandbox":false}', 'running')
+    gleich(erlaubt('waiting_help'), '{"duration":true,"prompt":false,"repo":false,"startTime":false,"branch":false,"sandbox":false}', 'waiting for a human is still running')
     for (const s of ['done', 'failed', 'aborted']) {
-      gleich(erlaubt(s), '{"duration":false,"prompt":false,"repo":false,"startTime":false,"branch":false}', `${s}: nothing left to edit`)
+      gleich(erlaubt(s), '{"duration":false,"prompt":false,"repo":false,"startTime":false,"branch":false,"sandbox":false}', `${s}: nothing left to edit`)
     }
     // A finished run with an open follow-up commission is working again — its
     // duration is read live by the watcher's overrun thresholds, exactly as for
     // a running run.
     const followup = (extra) => JSON.stringify(runEditAllowed({ status: 'done', ...extra }))
     gleich(followup({ followup_since: '2026-01-01 00:00:00' }),
-      '{"duration":true,"prompt":false,"repo":false,"startTime":false,"branch":false}',
+      '{"duration":true,"prompt":false,"repo":false,"startTime":false,"branch":false,"sandbox":false}',
       'a follow-up commission reopens the duration for editing')
     gleich(followup({ followup_open: 1 }),
-      '{"duration":true,"prompt":false,"repo":false,"startTime":false,"branch":false}',
+      '{"duration":true,"prompt":false,"repo":false,"startTime":false,"branch":false,"sandbox":false}',
       'a follow-up in the gate too')
-    gleich(followup({}), '{"duration":false,"prompt":false,"repo":false,"startTime":false,"branch":false}',
+    gleich(followup({}), '{"duration":false,"prompt":false,"repo":false,"startTime":false,"branch":false,"sandbox":false}',
       'a plain finished run stays closed')
-    gleich(JSON.stringify(runEditAllowed(null)), '{"duration":false,"prompt":false,"repo":false,"startTime":false,"branch":false}', 'no run')
+    gleich(JSON.stringify(runEditAllowed(null)), '{"duration":false,"prompt":false,"repo":false,"startTime":false,"branch":false,"sandbox":false}', 'no run')
   })
 
   await pruefe('editing a scheduled run: prompt, duration, repo, branch and start time are applied and recorded', async () => {
@@ -6782,6 +6782,2312 @@ try {
     falsch(SESSION_RE.test('xx-nacht'), 'and nothing else')
     falsch(SESSION_RE.test('fl-nacht; rm -rf /'), 'still nothing shell-shaped')
   })
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: egress policy')
+  {
+    const { proxyPolicy, hostAllowed, hostVerdict, methodAllowed, deniedBody,
+      deniedCidr, addressDenied, engineCapabilities, proxyEngine, splitHostPort,
+      auditLine, DEFAULT_DENY_CIDRS } = await import('../server/sandbox/proxy.mjs')
+    const { ironProxyConfig, proxyPlaceholder, mapIronLine } = await import('../server/sandbox/ironproxy.mjs')
+
+    const pol = (network) => proxyPolicy({ network })
+
+    await pruefe('hostAllowed: exact host, glob, deny beating allow, empty allow', () => {
+      const p = pol({ mode: 'allowlist', allow: ['api.anthropic.com', '*.npmjs.org'], deny: ['evil.npmjs.org'] })
+      const table = [
+        ['api.anthropic.com', true, 'the exact host'],
+        ['API.Anthropic.COM', true, 'and case does not decide it'],
+        ['api.anthropic.com.evil.test', false, 'a suffix attack is not the host'],
+        ['registry.npmjs.org', true, 'a glob covers the subdomain'],
+        ['npmjs.org', false, '*.x deliberately does not cover the apex'],
+        ['evil.npmjs.org', false, 'deny wins over the allow glob'],
+        ['example.com', false, 'anything unnamed is denied — default deny'],
+        ['', false, 'and so is nothing at all'],
+      ]
+      for (const [host, want, was] of table) gleich(hostAllowed(p, host), want, `${host || '<empty>'}: ${was}`)
+
+      // An allowlist with nothing on it denies everything. That is not a fault,
+      // it is what default-deny means — but the policy says so, so the 403 can.
+      const leer = pol({ mode: 'allowlist', allow: [] })
+      falsch(hostAllowed(leer, 'api.anthropic.com'), 'an empty allow list denies every host')
+      wahr(leer.emptyAllow, 'and the policy carries the reason')
+    })
+
+    await pruefe('the three modes, and audit-only records the denial it lets through', () => {
+      const offen = pol({ mode: 'open', allow: [] })
+      wahr(hostAllowed(offen, 'anything.example'), 'open lets everything out')
+      falsch(hostAllowed(pol({ mode: 'none', allow: ['*'] }), 'anything.example'), 'none lets nothing out')
+
+      const audit = pol({ mode: 'allowlist', allow: ['api.anthropic.com'], auditOnly: true })
+      const v = hostVerdict(audit, 'pypi.org')
+      wahr(v.allowed, 'audit-only lets the request through')
+      gleich(v.action, 'would_deny', 'and records what it WOULD have blocked')
+      gleich(hostVerdict(audit, 'api.anthropic.com').action, 'allow', 'an allowed host stays a plain allow')
+      // Deny is the operator carving a hole out of a preset; audit-only counts
+      // it too, or the adopted allowlist would silently re-open it.
+      gleich(hostVerdict(pol({ mode: 'allowlist', allow: ['*.npmjs.org'], deny: ['evil.npmjs.org'], auditOnly: true }),
+        'evil.npmjs.org').action, 'would_deny', 'an audit-only deny is a near-miss, not an allow')
+    })
+
+    await pruefe('a policy that cannot be built refuses everything', () => {
+      const kaputt = proxyPolicy({ network: { mode: 'allowlist', allow: ['*'], denyUpstreamCidrs: ['not-a-cidr'] } })
+      wahr(!!kaputt.broken, 'the reason is kept')
+      falsch(hostAllowed(kaputt, 'api.anthropic.com'), 'and the gate stays shut')
+      enthaelt(deniedBody('api.anthropic.com', hostVerdict(kaputt, 'api.anthropic.com')), 'api.anthropic.com',
+        'the refusal still names the host')
+    })
+
+    await pruefe('the upstream CIDR fence: an allowlisted name that resolves inward is refused', () => {
+      const p = pol({ mode: 'allowlist', allow: ['*'] })
+      const table = [
+        ['169.254.169.254', true, 'the cloud metadata address (AWS, GCP, Azure)'],
+        ['100.100.100.200', true, 'Alibaba metadata, inside the CGNAT block'],
+        ['127.0.0.1', true, 'loopback — the hub itself'],
+        ['10.1.2.3', true, 'RFC 1918'],
+        ['172.16.0.1', true, 'RFC 1918, the middle block'],
+        ['172.32.0.1', false, 'and 172.32 is NOT in it'],
+        ['192.168.7.7', true, 'RFC 1918'],
+        ['0.0.0.0', true, '"this host on this network"'],
+        ['8.8.8.8', false, 'a public address goes through'],
+        ['::1', true, 'IPv6 loopback'],
+        ['fd00::1', true, 'IPv6 unique local'],
+        ['fe80::1', true, 'IPv6 link-local'],
+        ['2606:4700::1111', false, 'a public IPv6 address goes through'],
+        ['::ffff:10.1.2.3', true, 'an IPv4-mapped address is unwrapped, not waved past'],
+        ['nonsense', true, 'and what cannot be parsed counts as blocked'],
+      ]
+      for (const [ip, want, was] of table) gleich(addressDenied(p, ip), want, `${ip}: ${was}`)
+      gleich(deniedCidr(p, '169.254.169.254'), '169.254.0.0/16', 'the refusal names the range')
+      wahr(DEFAULT_DENY_CIDRS.includes('169.254.0.0/16'), 'the metadata range is in the default list')
+
+      // Switching the fence off is possible and explicit — a test hub whose
+      // stub upstream really is on loopback needs it.
+      falsch(addressDenied(pol({ mode: 'allowlist', allow: ['*'], denyUpstreamCidrs: [] }), '127.0.0.1'),
+        'an empty list is no fence')
+    })
+
+    await pruefe('the 403 body names the host AND the way out', () => {
+      const p = pol({ mode: 'allowlist', allow: ['api.anthropic.com'] })
+      const body = deniedBody('pypi.org', hostVerdict(p, 'pypi.org'))
+      enthaelt(body, 'pypi.org', 'the host')
+      enthaelt(body, 'fl-report access', 'the escalation path the agent reads in its tool output')
+      enthaelt(body, 'Freilauf', 'and who is speaking')
+      // The address case has to say WHICH range, or the operator cannot tell an
+      // SSRF fence from a missing allowlist entry.
+      const addr = deniedBody('internal.example', { action: 'deny', allowed: false, reason: 'address', rule: '10.0.0.0/8' },
+        { ip: '10.1.2.3', cidr: '10.0.0.0/8' })
+      enthaelt(addr, '10.1.2.3', 'the address it resolved to')
+      enthaelt(addr, '10.0.0.0/8', 'and the range that refused it')
+    })
+
+    await pruefe('the engine says what it cannot do, so the form can grey it out', () => {
+      gleich(proxyEngine('nonsense'), 'builtin', 'an unknown engine is the built-in, which always works')
+      const b = engineCapabilities('builtin')
+      falsch(b.tlsTerminate, 'the built-in tunnels, it does not terminate TLS')
+      falsch(b.inject, 'so no credential can be injected')
+      falsch(b.methods, 'and no method can be judged')
+      const i = engineCapabilities('iron-proxy')
+      wahr(i.tlsTerminate && i.inject && i.methods, 'iron-proxy can do all three')
+
+      // A method list on the built-in is dropped and SAID so — a policy that
+      // stored a rule nobody enforces is the "field that looks saved" failure.
+      const p = pol({ mode: 'allowlist', allow: ['*'], methods: ['GET', 'HEAD'] })
+      gleich(p.methods, null, 'the built-in keeps no method list')
+      wahr(p.unsupported.includes('methods'), 'and names what it had to drop')
+      wahr(methodAllowed(p, 'POST'), 'so every method passes there')
+      const iron = pol({ mode: 'allowlist', engine: 'iron-proxy', allow: ['*'], methods: ['get', 'head'] })
+      wahr(methodAllowed(iron, 'GET'), 'iron-proxy honours the list')
+      falsch(methodAllowed(iron, 'POST'), 'and refuses what is not on it')
+
+      // Credential injection needs TLS termination, so the built-in cannot do
+      // it — and no credential enters that module at all. The combination is
+      // named rather than quietly downgraded to the weaker mode.
+      const geheim = proxyPolicy({ network: { mode: 'allowlist', allow: ['*'] } }, { secretsMode: 'inject' })
+      wahr(geheim.unsupported.includes('secrets.inject'), 'the built-in says it cannot inject')
+      falsch(proxyPolicy({ network: { mode: 'allowlist', engine: 'iron-proxy', allow: ['*'] } },
+        { secretsMode: 'inject' }).unsupported.includes('secrets.inject'), 'iron-proxy can')
+    })
+
+    await pruefe('CONNECT targets and the audit line', () => {
+      gleich(splitHostPort('api.anthropic.com:443').port, 443, 'host:port')
+      gleich(splitHostPort('api.anthropic.com:443').host, 'api.anthropic.com', 'and the host without it')
+      gleich(splitHostPort('[::1]:8443').host, '::1', 'an IPv6 literal keeps its colons')
+      gleich(splitHostPort('[::1]:8443').port, 8443, 'and its port')
+      gleich(splitHostPort('example.com', 80).port, 80, 'a missing port is the caller\'s default')
+
+      const line = JSON.parse(auditLine({ host: 'api.anthropic.com', port: 443, method: 'CONNECT',
+        action: 'allow', status: 200, durationMs: 12.6, run: 'r1' }))
+      gleich(line.path, null, 'a CONNECT has no path — null, never an empty string')
+      gleich(line.status_code, 200, 'the status')
+      gleich(line.duration_ms, 13, 'the duration, rounded')
+      gleich(line.run, 'r1', 'and the run it belongs to')
+      falsch(JSON.stringify(line).toLowerCase().includes('authorization'),
+        'no header ever enters the audit — a proxy log that carries one is a credential store')
+    })
+
+    await pruefe('the iron-proxy config, with and without secrets', () => {
+      const spec = { network: { mode: 'allowlist', allow: ['api.anthropic.com', '*.npmjs.org'], deny: ['evil.npmjs.org'] } }
+      const plain = ironProxyConfig(spec, {})
+      enthaelt(plain, 'tunnel_listen', 'the tunnel listener the container points at')
+      enthaelt(plain, 'name: "allowlist"', 'the allowlist transform')
+      enthaelt(plain, '"api.anthropic.com"', 'and the resolved hosts, quoted')
+      enthaelt(plain, '"*.npmjs.org"', 'a glob is quoted — bare `*` is a YAML alias')
+      enthaelt(plain, 'deny_domains', 'the deny half')
+      enthaelt(plain, 'api_key_env: IRON_MANAGEMENT_API_KEY', 'the management listener for POST /v1/reload')
+      falsch(plain.includes('name: "secrets"'), 'and no secrets transform when nothing is injected')
+      falsch(plain.includes('warn: true'), 'nor audit-only when it was not asked for')
+
+      const audit = ironProxyConfig({ network: { ...spec.network, auditOnly: true } }, {})
+      enthaelt(audit, 'warn: true', 'audit-only is iron-proxy\'s own warn mode')
+
+      const platzhalter = proxyPlaceholder('OPENROUTER_API_KEY')
+      wahr(platzhalter.startsWith('fl-token-'), 'a placeholder is recognisable as one')
+      wahr(platzhalter.length > 20, 'and unguessable — it is worthless outside the proxy, which is the point')
+      const injected = ironProxyConfig(spec, {
+        secrets: [{ key: 'OPENROUTER_API_KEY', envVar: 'OPENROUTER_API_KEY', placeholder: platzhalter,
+          header: 'Authorization', hosts: ['openrouter.ai'] }],
+      })
+      enthaelt(injected, 'name: "secrets"', 'the secrets transform')
+      enthaelt(injected, 'type: env, var: "OPENROUTER_API_KEY"', 'the source is the variable, never the value')
+      enthaelt(injected, platzhalter, 'the container sees the placeholder')
+      enthaelt(injected, '{ host: "openrouter.ai" }', 'and the swap happens only for that host')
+
+      const methoden = ironProxyConfig({ network: { ...spec.network, engine: 'iron-proxy', methods: ['GET'] } }, {})
+      enthaelt(methoden, 'methods: ["GET"]', 'the engine that CAN judge a method gets the list')
+    })
+
+    await pruefe('an iron-proxy log line becomes the same audit line the built-in writes', () => {
+      const allowed = JSON.parse(mapIronLine(JSON.stringify({
+        host: 'api.anthropic.com', method: 'POST', path: '/v1/messages',
+        action: 'allow', status_code: 200, duration_ms: 42,
+      }), { runId: 'r1' }))
+      gleich(allowed.engine, 'iron-proxy', 'the engine is named')
+      gleich(allowed.action, 'allow', 'an allowed request')
+      gleich(allowed.path, '/v1/messages', 'a terminated request HAS a path')
+      const rejected = JSON.parse(mapIronLine(JSON.stringify({
+        host: 'pypi.org', method: 'CONNECT', action: 'reject', status_code: 403, rejected_by: 'allowlist',
+      })))
+      gleich(rejected.action, 'deny', 'a rejection')
+      gleich(rejected.rejected_by, 'allowlist', 'and what rejected it')
+      gleich(mapIronLine('not json'), null, 'garbage is dropped, never thrown over')
+    })
+
+    await pruefe('every sandbox.proxy string exists in all three languages', () => {
+      const keys = ['sandbox.proxy.denied', 'sandbox.proxy.reason_not_allowed', 'sandbox.proxy.reason_denied',
+        'sandbox.proxy.reason_method', 'sandbox.proxy.reason_address', 'sandbox.proxy.reason_no_network',
+        'sandbox.proxy.reason_policy_broken', 'sandbox.proxy.reason_dns', 'sandbox.proxy.engine_missing']
+      for (const lang of ['en', 'de', 'zh']) {
+        const cat = JSON.parse(readFileSync(new URL(`../lang/${lang}.json`, import.meta.url), 'utf8'))
+        for (const k of keys) wahr(!!cat[k], `${lang}: ${k}`)
+      }
+      // The escalation instruction is not a nicety of the English text: it is
+      // the only way an agent learns what to do about a wall it just hit.
+      for (const lang of ['en', 'de', 'zh']) {
+        const cat = JSON.parse(readFileSync(new URL(`../lang/${lang}.json`, import.meta.url), 'utf8'))
+        enthaelt(cat['sandbox.proxy.denied'], 'fl-report access', `${lang}: the way out survives translation`)
+        enthaelt(cat['sandbox.proxy.denied'], '{host}', `${lang}: and the host is named`)
+      }
+    })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Run report token')
+  {
+    // The per-run bearer of the report socket (SANDBOX_RESEARCH.md §7.6). Three
+    // things are worth pinning: it exists for EVERY run without anybody asking
+    // for it, the comparison cannot be tricked, and the socket's route list is a
+    // list of two.
+    const { default: rdb } = await import('../server/db.mjs')
+    const { tokensMatch } = await import('../server/reports.mjs')
+    const { socketRoute, bearerToken } = await import('../server/hub-socket.mjs')
+
+    rdb.exec(`INSERT INTO repos(name, path, base_branch) VALUES('token-repo', '/tmp/token-repo', 'main')`)
+    const tokenRepo = rdb.prepare('SELECT id FROM repos WHERE name=?').get('token-repo').id
+    const neuerLauf = (id) => {
+      rdb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes)
+                   VALUES(?,?,'running','claude','p','keiner',5)`).run(id, tokenRepo)
+      return rdb.prepare('SELECT report_token FROM runs WHERE id=?').get(id).report_token
+    }
+
+    await pruefe('every run is issued a token by the INSERT itself', () => {
+      const a = neuerLauf('token-run-1')
+      const b = neuerLauf('token-run-2')
+      wahr(/^[0-9a-f]{64}$/.test(a), `64 hex characters — 32 bytes (${a})`)
+      wahr(/^[0-9a-f]{64}$/.test(b), 'and so is the next run')
+      falsch(a === b, 'and no two runs share one')
+      // Nothing asked for it: the row went in with the columns any caller
+      // writes, and the token was there afterwards. That is the whole point of
+      // hanging it on the INSERT rather than on `createRun()`.
+    })
+
+    await pruefe('a token that was written by hand is left alone', () => {
+      rdb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, report_token)
+                   VALUES('token-run-3',?,'running','claude','p','keiner',5,'deadbeef')`).run(tokenRepo)
+      gleich(rdb.prepare('SELECT report_token FROM runs WHERE id=?').get('token-run-3').report_token, 'deadbeef',
+        'the trigger only fills a NULL')
+    })
+
+    await pruefe('the comparison refuses everything that is not the token', () => {
+      const good = 'a'.repeat(64)
+      wahr(tokensMatch(good, good), 'the token itself')
+      falsch(tokensMatch(good, 'b'.repeat(64)), 'a wrong token of the right length')
+      // timingSafeEqual THROWS on differing lengths, so the guard in front of it
+      // is what keeps a shorter guess from being an exception instead of a "no".
+      falsch(tokensMatch(good, 'a'.repeat(63)), 'a token of the wrong length')
+      falsch(tokensMatch(good, ''), 'the empty string')
+      falsch(tokensMatch('', ''), 'and empty against empty is not a match either')
+      falsch(tokensMatch(good, null), 'nor is a missing one')
+      falsch(tokensMatch(null, good), 'nor a run that carries none')
+    })
+
+    await pruefe('the socket serves two routes and nothing else', () => {
+      const id = '11111111-2222-3333-4444-555555555555'
+      gleich(socketRoute('POST', `/api/runs/${id}/report`)?.name, 'report', 'the report route')
+      gleich(socketRoute('POST', `/api/runs/${id}/report`)?.runId, id, 'and it names the run')
+      gleich(socketRoute('GET', `/api/runs/${id}/sandbox`)?.name, 'sandbox', 'the sandbox route')
+      // A third path is the failure this allowlist exists for: it would hand the
+      // hub's own API back to the agent the socket was built to fence off.
+      gleich(socketRoute('POST', `/api/runs/${id}/kill`), null, 'killing a run is not on this socket')
+      gleich(socketRoute('POST', `/api/runs/${id}/send`), null, 'nor is typing into a session')
+      gleich(socketRoute('POST', '/settings/save'), null, 'nor are the settings')
+      gleich(socketRoute('GET', '/api/runs'), null, 'nor the run list')
+      gleich(socketRoute('GET', `/api/runs/${id}/report`), null, 'and the method is part of the rule')
+      gleich(socketRoute('POST', `/api/runs/${id}/report?x=1`)?.name, 'report', 'a query string is not part of the path')
+      gleich(socketRoute('POST', '/api/runs/not-a-uuid/report'), null, 'and the id has to look like one')
+    })
+
+    await pruefe('the bearer is read from the Authorization header', () => {
+      gleich(bearerToken({ headers: { authorization: 'Bearer abc' } }), 'abc', 'Bearer <token>')
+      gleich(bearerToken({ headers: { authorization: 'bearer abc' } }), 'abc', 'and the case of the scheme does not decide it')
+      gleich(bearerToken({ headers: { authorization: '  abc  ' } }), 'abc', 'a bare token is accepted too')
+      gleich(bearerToken({ headers: {} }), '', 'no header, no token')
+      gleich(bearerToken({}), '', 'and a request without headers is not an exception')
+    })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: spec resolution')
+  {
+    const { DEFAULT_SPEC, SANDBOX_TRISTATE, HUB_MODES, normalizeSpec, narrow, resolveSandboxSpec,
+      decideSandbox, validateSandboxOverrides, specPaths, pathLocked, parseSize } = await import('../server/sandbox/spec.mjs')
+    const { hostGlobMatch, gitHostDomains, expandPresets, PACKAGE_REGISTRIES } = await import('../server/sandbox/presets.mjs')
+
+    await pruefe('{} normalises to a complete spec, and nothing is mutated', () => {
+      const s = normalizeSpec({})
+      gleich(s.runtime, 'docker', 'runtime')
+      gleich(s.network.mode, 'allowlist', 'network mode')
+      gleich(s.network.methods, null, 'methods stay null, which means "every method"')
+      gleich(s.resources.cpus, 4, 'cpus')
+      gleich(s.secrets.mode, 'env', 'secrets mode')
+      gleich(s.filesystem.tmpfsSizes['/tmp'], '2g', 'a tmpfs size')
+      // Every consumer may read every field without asking whether it is there.
+      for (const path of specPaths(DEFAULT_SPEC)) wahr(path.length > 0, path)
+      const input = { network: { allow: ['a.example.com'] } }
+      const out = normalizeSpec(input)
+      gleich(out.network.allow.join(), 'a.example.com', 'the partial wins')
+      gleich(DEFAULT_SPEC.network.allow.length, 0, 'DEFAULT_SPEC is untouched')
+      gleich(JSON.stringify(input), '{"network":{"allow":["a.example.com"]}}', 'and so is the input')
+      gleich(normalizeSpec({ network: { allow: ['x'] } }).network.deny.length, 0, 'the siblings are filled from the defaults')
+    })
+
+    await pruefe('the tri-state and the hub modes are the documented sets', () => {
+      gleich(SANDBOX_TRISTATE.join(), 'inherit,on,off', 'tri-state')
+      gleich(HUB_MODES.join(), 'off,available,default_on,required', 'hub modes')
+    })
+
+    // ---- the narrowing rule, shape by shape --------------------------
+    await pruefe('a deny-shaped list may be appended to, never shortened', () => {
+      gleich(narrow('network.deny', ['a'], ['a', 'b']).refused, false, 'append')
+      gleich(narrow('network.deny', ['a'], ['a', 'b']).value.join(), 'a,b', 'and the appended list stands')
+      gleich(narrow('network.deny', ['a', 'b'], ['a']).refused, true, 'dropping an entry is refused')
+      gleich(narrow('network.deny', ['a', 'b'], ['a']).value.join(), 'a,b', 'and the higher value is kept')
+      gleich(narrow('filesystem.protected', ['.git/config'], ['.git/config', '.git/hooks']).refused, false,
+        'the protected paths are deny-shaped too')
+    })
+
+    await pruefe('an allow-shaped list may be shortened, never extended', () => {
+      gleich(narrow('network.allow', ['a', 'b'], ['a']).refused, false, 'removal')
+      gleich(narrow('network.allow', ['a'], ['a', 'b']).refused, true, 'adding a host is refused')
+      gleich(narrow('network.allow', ['a'], ['a', 'b']).value.join(), 'a', 'the higher value is kept')
+      gleich(narrow('network.presets', ['harness', 'provider'], ['harness']).refused, false, 'presets are allow-shaped')
+      gleich(narrow('network.methods', null, ['GET']).refused, false, 'null means every method, so a list narrows it')
+      gleich(narrow('network.methods', ['GET', 'HEAD'], null).refused, true, 'and back to null is a loosening')
+    })
+
+    await pruefe('a numeric limit may be lowered, never raised', () => {
+      gleich(narrow('resources.memory', '8g', '4g').refused, false, 'memory down')
+      gleich(narrow('resources.memory', '8g', '16g').refused, true, 'memory up is refused')
+      gleich(narrow('resources.memory', '8g', '16g').value, '8g', 'and 8g stands')
+      gleich(narrow('resources.cpus', 4, 2).refused, false, 'cpus down')
+      gleich(narrow('resources.cpus', 4, 8).refused, true, 'cpus up is refused')
+      gleich(narrow('resources.maxRuntimeMinutes', null, 60).refused, false, 'no limit → a limit narrows')
+      gleich(narrow('resources.maxRuntimeMinutes', 60, null).refused, true, 'a limit → no limit does not')
+      // '' is 0 and finite; a size that cannot be read must never become one.
+      gleich(narrow('resources.memory', '8g', '').refused, true, 'an unreadable size is refused, not read as 0')
+      gleich(parseSize('512m'), 512 * 1024 * 1024, 'parseSize')
+      gleich(parseSize(''), null, 'and the empty string is not a size')
+    })
+
+    await pruefe('a mode may be tightened, never loosened', () => {
+      gleich(narrow('network.mode', 'allowlist', 'none').refused, false, 'allowlist → none')
+      gleich(narrow('network.mode', 'allowlist', 'open').refused, true, 'allowlist → open is refused')
+      gleich(narrow('filesystem.extras', 'rw', 'ro').refused, false, 'rw → ro')
+      gleich(narrow('filesystem.extras', 'ro', 'rw').refused, true, 'ro → rw is refused')
+      gleich(narrow('secrets.mode', 'env', 'inject').refused, false, 'env → inject')
+      gleich(narrow('secrets.mode', 'inject', 'env').refused, true, 'and never back')
+      // §4.3: the harness's own sandbox needs the container opened up, so `off`
+      // is the value that keeps the OUTER wall — the one the hub bets on.
+      gleich(narrow('innerSandbox', 'weak', 'off').refused, false, 'weak → off narrows')
+      gleich(narrow('innerSandbox', 'off', 'weak').refused, true, 'off → weak is refused')
+      gleich(narrow('innerSandbox', 'weak', 'full').refused, true, 'and so is weak → full')
+      gleich(narrow('network.mode', 'allowlist', 'nonsense').refused, true, 'an unknown value is not a narrowing')
+    })
+
+    await pruefe('auditOnly goes one way, and so do the flags next to it', () => {
+      gleich(narrow('network.auditOnly', true, false).refused, false, 'audit-only may be switched off')
+      gleich(narrow('network.auditOnly', false, true).refused, true, 'but never on')
+      gleich(narrow('filesystem.readOnlyRoot', false, true).refused, false, 'a read-only root may be switched on')
+      gleich(narrow('filesystem.readOnlyRoot', true, false).refused, true, 'and never off')
+      gleich(narrow('audit.proxyLog', false, true).refused, false, 'more logging is stricter')
+    })
+
+    await pruefe('a path whose strictness this module cannot order does not change at all', () => {
+      gleich(narrow('runtime', 'docker', 'podman').refused, true, 'the runtime is not a lower layer’s decision')
+      gleich(narrow('user', 'hub', 'root').refused, true, 'and neither is the user')
+      gleich(narrow('image.ref', 'a:1', 'b:2').refused, true, 'nor the image')
+      gleich(narrow('network.mode', 'none', 'none').refused, false, 'the same value is never a refusal')
+    })
+
+    // ---- the layering ------------------------------------------------
+    await pruefe('a lock reaches into a subtree, and an unlocked path is simply overwritten', () => {
+      wahr(pathLocked('network.allow', ['network']), 'one word locks the subtree')
+      falsch(pathLocked('networkfoo', ['network']), 'and not a path that merely starts with the letters')
+      const r = resolveSandboxSpec({
+        hub: { spec: { network: { mode: 'allowlist', deny: ['evil.example'] } }, lock: ['network'] },
+        repo: { spec: { network: { deny: ['evil.example', 'worse.example'] }, mode: undefined }, },
+        agentOrRun: { spec: { resources: { cpus: 2 } } },
+      })
+      gleich(r.refused.length, 0, 'nothing was refused')
+      gleich(r.spec.network.deny.join(), 'evil.example,worse.example', 'the deny list grew')
+      gleich(r.spec.resources.cpus, 2, 'and the unlocked cpus were simply overwritten')
+    })
+
+    await pruefe('a refusal names the path, the layer, what it wanted and what stands', () => {
+      const r = resolveSandboxSpec({
+        hub: { spec: { network: { mode: 'allowlist' }, resources: { memory: '8g' } }, lock: ['network.mode', 'resources.memory'] },
+        repo: { spec: { network: { mode: 'open' }, resources: { memory: '4g' } } },
+        agentOrRun: { spec: { resources: { memory: '16g' } } },
+      })
+      gleich(r.refused.length, 2, 'two attempts were refused')
+      const mode = r.refused.find(x => x.path === 'network.mode')
+      gleich(mode.by, 'repo', 'by')
+      gleich(mode.wanted, 'open', 'wanted')
+      gleich(mode.kept, 'allowlist', 'kept')
+      gleich(r.spec.network.mode, 'allowlist', 'and the hub’s value really stands')
+      const mem = r.refused.find(x => x.path === 'resources.memory')
+      gleich(mem.by, 'run', 'the run wanted more memory')
+      gleich(mem.kept, '4g', 'and what stands is what the repo had narrowed it to')
+      gleich(r.spec.resources.memory, '4g', 'the narrowing of the layer above survived the refusal')
+    })
+
+    await pruefe('a repo may lock further for its agents', () => {
+      const r = resolveSandboxSpec({
+        hub: { spec: {}, lock: [] },
+        repo: { spec: { resources: { cpus: 4 } }, lock: ['resources.cpus'] },
+        agentOrRun: { spec: { resources: { cpus: 8 } } },
+      })
+      gleich(r.refused.length, 1, 'the agent’s raise was refused')
+      gleich(r.refused[0].by, 'run', 'by the lock the repo added')
+      gleich(r.spec.resources.cpus, 4, 'and four stand')
+    })
+
+    // ---- the tri-state resolution ------------------------------------
+    await pruefe('hub mode "off" hides the feature, whatever a layer asks for', () => {
+      for (const layer of [{}, { repo: 'on' }, { agent: 'on' }, { run: 'on' }]) {
+        const d = decideSandbox({ hubMode: 'off', ...layer })
+        gleich(d.sandbox, 0, 'nothing is sandboxed')
+        gleich(d.reason, 'sandbox.problem.hub_off', 'and the reason says why')
+      }
+      gleich(decideSandbox({ hubMode: '' }).sandbox, 0, 'an unset mode is "off", not a surprise')
+    })
+
+    await pruefe('"available" sandboxes only what asks for it, and the nearest layer decides', () => {
+      gleich(decideSandbox({ hubMode: 'available' }).sandbox, 0, 'nobody asked')
+      gleich(decideSandbox({ hubMode: 'available', repo: 'on' }).sandbox, 1, 'the repo asked')
+      gleich(decideSandbox({ hubMode: 'available', repo: 'on', agent: 'off' }).sandbox, 0, 'the agent is nearer')
+      gleich(decideSandbox({ hubMode: 'available', repo: 'off', agent: 'off', run: 'on' }).sandbox, 1, 'and the run is nearest')
+      gleich(decideSandbox({ hubMode: 'available', repo: 'on', agent: 'inherit' }).by, 'repo', 'inherit says nothing')
+    })
+
+    await pruefe('"default_on" plus an "off" is a bypass, and it is written down', () => {
+      const d = decideSandbox({ hubMode: 'default_on' })
+      gleich(d.sandbox, 1, 'by default it is on')
+      const b = decideSandbox({ hubMode: 'default_on', agent: 'off' })
+      gleich(b.sandbox, 0, 'the agent opted out')
+      gleich(b.bypass.by, 'agent', 'and the bypass names it, so the run carries sandbox:bypassed')
+      const r = decideSandbox({ hubMode: 'default_on', repo: 'on', run: 'off' })
+      gleich(r.bypass.by, 'run', 'opting out of a repo that said "on" is a bypass too')
+      const n = decideSandbox({ hubMode: 'available', run: 'off' })
+      gleich(n.sandbox, 0, 'under "available" an "off" changes nothing')
+      gleich(n.bypass, null, 'so it is not break-glass either')
+    })
+
+    await pruefe('"required" refuses an opt-out instead of quietly downgrading', () => {
+      const d = decideSandbox({ hubMode: 'required', run: 'off' })
+      gleich(d.sandbox, 1, 'the run is sandboxed anyway')
+      gleich(d.refused.reason, 'sandbox.problem.required', 'and the form gets a problem')
+      gleich(d.refused.layer, 'run', 'naming the layer that tried')
+      gleich(decideSandbox({ hubMode: 'required' }).sandbox, 1, 'without an opt-out there is nothing to say')
+    })
+
+    await pruefe('an "off" is refused where bypassing is not allowed at all', () => {
+      const d = decideSandbox({ hubMode: 'default_on', allowBypass: false, run: 'off' })
+      gleich(d.sandbox, 1, 'the run stays sandboxed')
+      gleich(d.refused.reason, 'sandbox.problem.bypass_not_allowed', 'and says so')
+      const n = decideSandbox({ hubMode: 'available', allowBypass: false, run: 'off' })
+      gleich(n.sandbox, 0, 'where nothing would have been sandboxed there is nothing to refuse')
+      gleich(n.refused, null, 'and no noise about it')
+    })
+
+    await pruefe('a coding agent whose plugin declares no sandbox is a reason, or a refusal', () => {
+      const d = decideSandbox({ hubMode: 'default_on', sandboxable: false })
+      gleich(d.sandbox, 0, 'it simply runs as it always did')
+      gleich(d.reason, 'sandbox.problem.harness_unsupported', 'with a reason a form can print')
+      const r = decideSandbox({ hubMode: 'required', sandboxable: false })
+      gleich(r.refused.reason, 'sandbox.problem.harness_unsupported', 'under "required" it is a refusal')
+      gleich(r.refused.layer, 'harness', 'and the layer is the harness itself')
+    })
+
+    // ---- the overrides a human types ---------------------------------
+    await pruefe('the overrides editor refuses what it does not understand', () => {
+      gleich(validateSandboxOverrides('').problems.length, 0, 'an empty field is not a problem')
+      gleich(validateSandboxOverrides('{}').problems.length, 0, 'and neither is an empty document')
+      gleich(validateSandboxOverrides('{oops').problems[0].key, 'sandbox.problem.json', 'broken JSON')
+      gleich(validateSandboxOverrides('[1,2]').problems[0].key, 'sandbox.problem.not_object', 'a list is not a profile')
+      const unknown = validateSandboxOverrides('{"netwrok": {}}').problems
+      gleich(unknown[0].key, 'sandbox.problem.unknown_key', 'a typo at the top level is named')
+      gleich(unknown[0].params.key, 'netwrok', 'with the word that was typed')
+      const nested = validateSandboxOverrides('{"network": {"allowed": ["x"]}}').problems
+      gleich(nested[0].key, 'sandbox.problem.unknown_field', 'and one inside it too')
+      gleich(nested[0].params.path, 'network.allowed', 'by its path')
+      gleich(validateSandboxOverrides('{"network": {"allow": "github.com"}}').problems[0].key,
+        'sandbox.problem.bad_type', 'a string where a list belongs')
+      gleich(validateSandboxOverrides('{"network": {"mode": "offen"}}').problems[0].key,
+        'sandbox.problem.bad_value', 'a mode that does not exist')
+      gleich(validateSandboxOverrides('{"resources": {"memory": "lots"}}').problems[0].key,
+        'sandbox.problem.bad_size', 'and a size that is not one')
+    })
+
+    await pruefe('a mount is judged against the roots the operator allowed', () => {
+      const ok = validateSandboxOverrides('{"filesystem":{"extraMounts":[{"source":"/srv/data/fixtures","target":"/data","mode":"ro"}]}}',
+        { allowedMountRoots: ['/srv/data'] })
+      gleich(ok.problems.length, 0, 'inside a root it passes')
+      const outside = validateSandboxOverrides('{"filesystem":{"extraMounts":[{"source":"/etc","target":"/etc-in"}]}}',
+        { allowedMountRoots: ['/srv/data'] })
+      gleich(outside.problems[0].key, 'sandbox.problem.mount_root', 'outside it does not')
+      gleich(outside.problems[0].params.source, '/etc', 'and the source is named')
+      const none = validateSandboxOverrides('{"filesystem":{"extraMounts":[{"source":"/srv/data","target":"/d"}]}}', {})
+      gleich(none.problems[0].key, 'sandbox.problem.mount_none', 'with no roots configured nothing may be mounted')
+      const up = validateSandboxOverrides('{"filesystem":{"extraMounts":[{"source":"/srv/data/../../etc","target":"/d"}]}}',
+        { allowedMountRoots: ['/srv/data'] })
+      gleich(up.problems[0].key, 'sandbox.problem.mount_traversal', '".." never travels')
+      const shape = validateSandboxOverrides('{"filesystem":{"extraMounts":["/srv/data"]}}', { allowedMountRoots: ['/srv/data'] })
+      gleich(shape.problems[0].key, 'sandbox.problem.mount_shape', 'and a mount needs both sides')
+    })
+
+    await pruefe('a locked path is judged with the same rule the resolver applies', () => {
+      const against = normalizeSpec({ network: { mode: 'allowlist', allow: ['a', 'b'] } })
+      const loosen = validateSandboxOverrides('{"network":{"mode":"open"}}', { lock: ['network'], against })
+      gleich(loosen.problems[0].key, 'sandbox.problem.locked', 'the form warns before the launch refuses')
+      gleich(loosen.problems[0].params.path, 'network.mode', 'naming the path')
+      const narrower = validateSandboxOverrides('{"network":{"allow":["a"]}}', { lock: ['network'], against })
+      gleich(narrower.problems.length, 0, 'a narrowing is not a problem')
+      const blind = validateSandboxOverrides('{"network":{"mode":"open"}}', { lock: ['network'] })
+      gleich(blind.problems.length, 0, 'and without the layer above there is nothing to narrow from')
+    })
+
+    // ---- presets ------------------------------------------------------
+    await pruefe('a host pattern matches exactly what it says', () => {
+      wahr(hostGlobMatch('*.npmjs.org', 'registry.npmjs.org'), 'a subdomain')
+      wahr(hostGlobMatch('*.npmjs.org', 'a.b.npmjs.org'), 'at any depth')
+      falsch(hostGlobMatch('*.npmjs.org', 'npmjs.org'), 'but not the bare domain')
+      falsch(hostGlobMatch('*.npmjs.org', 'evilnpmjs.org'), 'and not a host that merely ends in it')
+      wahr(hostGlobMatch('.npmjs.org', 'npmjs.org'), 'the leading dot includes the domain itself')
+      wahr(hostGlobMatch('.npmjs.org', 'registry.npmjs.org'), 'and its subdomains')
+      wahr(hostGlobMatch('github.com', 'github.com'), 'a bare domain matches itself')
+      falsch(hostGlobMatch('github.com', 'evil.github.com'), 'and nothing under it — an allowlist is not looser than it reads')
+      wahr(hostGlobMatch('github.com', 'GitHub.com:443'), 'the port and the case are not part of the name')
+      wahr(hostGlobMatch('*', 'anything.example'), 'the one pattern that means open')
+      falsch(hostGlobMatch('api.*.com', 'api.x.com'), 'a glob in the middle matches nothing')
+      falsch(hostGlobMatch('', 'x.example'), 'and an empty pattern matches nothing at all')
+    })
+
+    await pruefe('the git host comes out of the remote, or not at all', () => {
+      gleich(gitHostDomains('git@github.com:owner/repo.git')[0], 'github.com', 'the ssh short form')
+      enthaelt(gitHostDomains('git@github.com:owner/repo.git').join(), 'codeload.github.com',
+        'and the hosts a fetch really uses come with it')
+      gleich(gitHostDomains('https://gitlab.com/owner/repo.git').join(), 'gitlab.com', 'the https form')
+      gleich(gitHostDomains('ssh://git@git.example.org:2222/o/r.git').join(), 'git.example.org', 'a URL with a port')
+      gleich(gitHostDomains('/srv/mirrors/repo.git').length, 0, 'a path is not a host')
+      gleich(gitHostDomains('').length, 0, 'and neither is nothing')
+      gleich(gitHostDomains('not a url at all').length, 0, 'a URL that cannot be read contributes nothing, never a guess')
+    })
+
+    await pruefe('presets expand from the plugins, and silence is an answer', () => {
+      const withDomains = expandPresets(['harness', 'provider'], {
+        harnessDomains: ['api.anthropic.com'], providerDomains: ['openrouter.ai'],
+      })
+      gleich(withDomains.join(), 'api.anthropic.com,openrouter.ai', 'both plugins contribute')
+      // A plugin that declares no `sandbox.domains` contributes nothing, and
+      // must never throw — the four built-ins gain the block one at a time.
+      gleich(expandPresets(['harness'], { harness: 'no-such-harness' }).length, 0, 'an unknown harness is silence')
+      gleich(expandPresets(['harness'], {}).length, 0, 'and so is no harness at all')
+      gleich(expandPresets(['git-host'], { originUrl: 'not a url' }).length, 0, 'an unreadable origin is silence too')
+      gleich(expandPresets(['nonsense'], {}).length, 0, 'an unknown preset contributes nothing')
+      const reg = expandPresets(['package-registries'], {})
+      gleich(reg.length, PACKAGE_REGISTRIES.length, 'the static list is the static list')
+      enthaelt(reg.join(), 'registry.npmjs.org', 'npm')
+      enthaelt(reg.join(), 'files.pythonhosted.org', 'python')
+      enthaelt(reg.join(), 'proxy.golang.org', 'go')
+      const twice = expandPresets(['package-registries', 'package-registries'], {})
+      gleich(twice.length, reg.length, 'and a host is never listed twice')
+    })
+
+    // ---- profiles -----------------------------------------------------
+    await pruefe('the four built-in profiles are seeded, and editing one writes a copy', async () => {
+      const { listProfiles, getProfile, saveProfile, deleteProfile, seedBuiltinProfiles, BUILTIN_PROFILES } =
+        await import('../server/sandbox/profiles.mjs')
+      seedBuiltinProfiles()   // idempotent: the import already ran it once
+      const names = listProfiles().filter(p => p.builtin).map(p => p.name).sort().join()
+      gleich(names, 'Audit,Balanced,Locked down,Open network', 'the four of §7.13')
+      gleich(listProfiles().filter(p => p.builtin).length, BUILTIN_PROFILES.length, 'seeding twice adds nothing')
+
+      const balanced = listProfiles().find(p => p.name === 'Balanced')
+      const saved = saveProfile({ id: balanced.id, name: 'Balanced', spec: { resources: { cpus: 2 } } })
+      wahr(saved.copied, 'editing a built-in writes a copy')
+      wahr(saved.id !== balanced.id, 'under an id of its own')
+      gleich(getProfile(balanced.id).spec, JSON.stringify(BUILTIN_PROFILES[0].spec), 'the built-in is unchanged')
+      gleich(getProfile(saved.id).builtin, 0, 'and the copy belongs to the operator')
+
+      gleich(deleteProfile(balanced.id).ok, false, 'a built-in is not deleted — the next start would put it back')
+      gleich(deleteProfile(balanced.id).problems[0].key, 'sandbox.problem.profile_builtin', 'and it says why')
+      gleich(deleteProfile(saved.id).ok, true, 'the copy goes')
+      gleich(getProfile(saved.id), null, 'and is gone')
+
+      gleich(saveProfile({ name: '' }).problems[0].key, 'sandbox.problem.profile_name_missing', 'a profile needs a name')
+      gleich(saveProfile({ name: 'x', spec: '{nope' }).problems[0].key, 'sandbox.problem.json', 'and a readable document')
+      gleich(saveProfile({ id: 99999, name: 'x' }).problems[0].key, 'sandbox.problem.profile_unknown', 'an unknown id is an answer')
+    })
+
+    await pruefe('every problem and profile string exists in all three languages', async () => {
+      const { BUILTIN_PROFILES } = await import('../server/sandbox/profiles.mjs')
+      const source = [
+        readFileSync(new URL('../server/sandbox/spec.mjs', import.meta.url), 'utf8'),
+        readFileSync(new URL('../server/sandbox/profiles.mjs', import.meta.url), 'utf8'),
+      ].join('\n')
+      const used = [...new Set([...source.matchAll(/'(sandbox\.problem\.[a-z_]+)'/g)].map(m => m[1]))]
+      wahr(used.length >= 15, `the module really names its keys (${used.length})`)
+      for (const p of BUILTIN_PROFILES) used.push(p.titleKey, p.descKey)
+      for (const lang of ['en', 'de', 'zh']) {
+        const cat = JSON.parse(readFileSync(new URL(`../lang/${lang}.json`, import.meta.url), 'utf8'))
+        for (const key of used) wahr(!!cat[key], `${lang}: ${key}`)
+      }
+    })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: clone and exec seams')
+
+  // WHY a child process: `WORKTREES_DIR` and `RUNS_DIR` are module-level
+  // constants of util.mjs, read at ITS import — which happened at the top of
+  // this file. A test that creates real clones therefore cannot point them into
+  // the sandbox from here; a process of its own can, and it is the only way this
+  // group is guaranteed not to write into the operator's `~/agents/worktrees`.
+  // (test/echt.mjs imports plugin files in their own process for the same kind
+  // of reason.)
+  const sandboxProbe = (() => {
+    const work = join(sandkasten, 'sandbox-probe')
+    mkdirSync(work, { recursive: true })
+    const script = join(work, 'probe.mjs')
+    writeFileSync(script, `
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, writeFileSync, existsSync, readFileSync, statSync, symlinkSync, rmSync, cpSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { pathToFileURL } from 'node:url'
+
+const serverDir = process.argv[2]
+const work = process.argv[3]
+const mod = (rel) => import(pathToFileURL(join(serverDir, rel)).href)
+const clone = await mod('sandbox/clone.mjs')
+const exec = await mod('sandbox/exec.mjs')
+const dbmod = await mod('db.mjs')
+const db = dbmod.default
+const { WORKTREES_DIR } = await mod('util.mjs')
+
+const out = {}
+const git = (dir, args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+const has = (dir, sha) => { try { git(dir, ['cat-file', '-e', sha]); return true } catch { return false } }
+const revparse = (dir, ref) => { try { return git(dir, ['rev-parse', ref]) } catch { return null } }
+
+// A real repository with a real bare origin — the clone's whole point is the
+// refspecs and the alternate, and a stub would test neither.
+const src = join(work, 'src'), origin = join(work, 'origin.git')
+mkdirSync(src, { recursive: true })
+execFileSync('git', ['init', '-q', '-b', 'main', src], { stdio: 'ignore' })
+git(src, ['config', 'user.email', 'u@t']); git(src, ['config', 'user.name', 'U'])
+writeFileSync(join(src, 'README.md'), 'hi\\n')
+git(src, ['add', '-A']); git(src, ['commit', '-qm', 'init'])
+execFileSync('git', ['init', '-q', '--bare', origin], { stdio: 'ignore' })
+git(src, ['remote', 'add', 'origin', origin]); git(src, ['push', '-q', '-u', 'origin', 'main'])
+out.srcHead = git(src, ['rev-parse', 'HEAD'])
+
+const repoId = db.prepare('INSERT INTO repos (name, path, base_branch) VALUES (?,?,?)').run('probe', src, 'main').lastInsertRowid
+const repo = dbmod.getRepo(repoId)
+const mkRun = (id) => {
+  db.prepare('INSERT INTO runs (id, repo_id, harness, prompt, branch_mode, expected_minutes) VALUES (?,?,?,?,?,?)')
+    .run(id, repoId, 'claude', 'x', 'keiner', 30)
+  return dbmod.getRun(id)
+}
+
+// ---- the clone itself
+const id1 = 'aaaaaaaa-0000-0000-0000-000000000001'
+const made = await clone.makeSandboxClone(repo, mkRun(id1), {})
+out.dir = made.dir
+out.underRoot = made.dir.startsWith(WORKTREES_DIR)
+out.baseSha = made.baseSha
+out.alternates = readFileSync(join(made.dir, '.git/objects/info/alternates'), 'utf8').trim()
+out.altTarget = join(src, '.git/objects')
+out.countObjects = git(made.dir, ['count-objects', '-v'])
+try { git(made.dir, ['fetch', 'origin']); out.fetchOrigin = true } catch (e) { out.fetchOrigin = String(e.message) }
+out.originMain = revparse(made.dir, 'origin/main')
+out.localMain = revparse(made.dir, 'refs/remotes/local/main')
+out.kind = db.prepare('SELECT worktree_kind FROM runs WHERE id=?').get(id1).worktree_kind
+out.isClone = clone.isClone(dbmod.getRun(id1))
+
+// ---- collectRunTip is a no-op for a linked worktree
+const wt = join(work, 'wt')
+git(src, ['worktree', 'add', '--detach', wt, 'HEAD'])
+const id2 = 'bbbbbbbb-0000-0000-0000-000000000002'
+mkRun(id2)
+db.prepare('UPDATE runs SET workdir_effective=? WHERE id=?').run(wt, id2)
+out.worktreeKind = dbmod.getRun(id2).worktree_kind
+out.worktreeTip = await clone.collectRunTip(dbmod.getRun(id2))
+out.worktreeRevParse = git(wt, ['rev-parse', 'HEAD'])
+out.worktreeRefMade = revparse(src, 'refs/freilauf/runs/' + id2)
+
+// ---- collectRunTip on a clone makes a clone-only object reachable from the source
+out.cloneIdentity = git(made.dir, ['config', '--get', 'user.email'])
+writeFileSync(join(made.dir, 'agent.txt'), 'work\\n')
+git(made.dir, ['add', '-A']); git(made.dir, ['commit', '-qm', 'agent commit'])
+out.newSha = git(made.dir, ['rev-parse', 'HEAD'])
+out.srcHadBefore = has(src, out.newSha)
+db.prepare('UPDATE runs SET workdir_effective=? WHERE id=?').run(made.dir, id1)
+out.cloneTip = await clone.collectRunTip(dbmod.getRun(id1))
+out.srcHasAfter = has(src, out.newSha)
+out.tipRef = revparse(src, 'refs/freilauf/runs/' + id1)
+
+// ---- removeClone refuses a path outside the worktrees root
+const outside = join(work, 'outside')
+mkdirSync(outside, { recursive: true })
+writeFileSync(join(outside, 'keep.txt'), 'x')
+const refusal = await clone.removeClone({ id: 'cccccccc-0000-0000-0000-000000000003', repo_id: repoId, workdir_effective: outside })
+out.refusal = { ok: refusal.ok, removed: refusal.removed, error: String(refusal.error ?? '') }
+out.outsideKept = existsSync(join(outside, 'keep.txt'))
+out.rootItself = clone.insideWorktreesRoot(WORKTREES_DIR)
+
+// ---- …and removes a real one, twice
+const gone = await clone.removeClone(dbmod.getRun(id1))
+out.gone = { ok: gone.ok, removed: gone.removed }
+out.dirGone = !existsSync(made.dir)
+out.refAfter = revparse(src, 'refs/freilauf/runs/' + id1)
+const again = await clone.removeClone(dbmod.getRun(id1))
+out.twice = { ok: again.ok, removed: again.removed }
+
+// ---- the two exec seams
+out.hostHome = homedir()
+out.homePlain = exec.agentHome(dbmod.getRun(id2))
+out.homeSandboxed = exec.agentHome({ sandbox: 1, sandbox_home: '/x/run-home' })
+out.homeSandboxedNoColumn = exec.agentHome({ sandbox: 1, sandbox_home: null })
+out.homeNoRun = exec.agentHome(null)
+out.sandboxHomeDir = exec.sandboxHomeDir('abc')
+
+const g = await exec.runGit({ workdir_effective: src }, ['rev-parse', 'HEAD'])
+out.runGit = { keys: Object.keys(g).sort().join(','), ok: g.ok, code: g.code, stdout: g.stdout.trim(), stderr: g.stderr }
+const bad = await exec.runGit({ workdir_effective: src }, ['rev-parse', 'refs/heads/nope'])
+out.runGitBad = { ok: bad.ok, code: bad.code, hasStderr: bad.stderr.length > 0 }
+const sc = await exec.runShell({ workdir_effective: src }, ['git', 'rev-parse', 'HEAD'])
+out.runShell = { ok: sc.ok, stdout: sc.stdout.trim() }
+
+// Branch 3: a run that says it is sandboxed but whose container is not there —
+// no runtime installed, no daemon, or simply a container that has ended. All
+// three end in the hardened host call, and it answers the same thing.
+const dead = { sandbox: 1, sandbox_container: 'fl-does-not-exist', workdir_effective: src }
+const gone3 = await exec.runGit(dead, ['rev-parse', 'HEAD'])
+out.runGitContainerGone = { ok: gone3.ok, stdout: gone3.stdout.trim() }
+const refused3 = await exec.runGit(dead, ['rev-parse', 'HEAD'], { hostFallback: false })
+out.runGitRefused = { ok: refused3.ok, hasStderr: refused3.stderr.length > 0, stdout: refused3.stdout }
+// …and the hard off switch takes branch 1 whatever the row says.
+process.env.FREILAUF_SANDBOX_OFF = '1'
+const off = await exec.runGit(dead, ['rev-parse', 'HEAD'])
+delete process.env.FREILAUF_SANDBOX_OFF
+out.runGitSandboxOff = { ok: off.ok, stdout: off.stdout.trim() }
+
+// ---- 11a.1: a config-key denylist is not a boundary, and the fallback must not pretend it is.
+// The driver is named in .git/config but SELECTED by a tracked .gitattributes the
+// agent commits, so no list of forbidden config keys can ever see it coming.
+const hostile = join(work, 'hostile')
+mkdirSync(hostile, { recursive: true })
+execFileSync('git', ['init', '-q', '-b', 'main', hostile], { stdio: 'ignore' })
+git(hostile, ['config', 'user.email', 'a@t']); git(hostile, ['config', 'user.name', 'A'])
+writeFileSync(join(hostile, '.gitattributes'), '* filter=evil\\n')
+writeFileSync(join(hostile, 'f.txt'), 'content\\n')
+git(hostile, ['add', '-A']); git(hostile, ['commit', '-qm', 'init'])
+const marker = join(work, 'PWNED_clean')
+git(hostile, ['config', 'filter.evil.clean', 'touch ' + marker + '; cat'])
+git(hostile, ['config', 'filter.evil.smudge', 'cat'])
+writeFileSync(join(hostile, 'f.txt'), 'more\\n')
+const fired = () => { const f = existsSync(marker); rmSync(marker, { force: true }); return f }
+
+// The positive control: without this the rest of the test proves nothing.
+try { git(hostile, ['--no-optional-locks', 'status', '--porcelain']) } catch { /* the filter is the subject, not the exit code */ }
+out.filterFiresPlain = fired()
+
+const deadClone = { sandbox: 1, sandbox_container: 'fl-does-not-exist', worktree_kind: 'clone', workdir_effective: hostile }
+const refusedStatus = await exec.runGit(deadClone, ['--no-optional-locks', 'status', '--porcelain'])
+out.statusRefused = { ok: refusedStatus.ok, unknown: refusedStatus.unknown === true, stdout: refusedStatus.stdout }
+out.filterAfterRefusal = fired()
+
+const inert = await exec.runGit(deadClone, ['rev-parse', 'HEAD'])
+out.inert = { ok: inert.ok, len: inert.stdout.trim().length }
+out.filterAfterInert = fired()
+
+const cfgBefore = readFileSync(join(hostile, '.git/config'), 'utf8')
+const masked = await exec.runGit(deadClone, ['add', '-A'], { hostFallback: 'masked' })
+out.maskedAdd = { ok: masked.ok, stderr: masked.stderr }
+out.filterAfterMasked = fired()
+out.cfgRestored = readFileSync(join(hostile, '.git/config'), 'utf8') === cfgBefore
+out.noBackupLeft = !existsSync(join(hostile, '.git/config.freilauf-unmasked'))
+const maskedStatus = await exec.runGit(deadClone, ['--no-optional-locks', 'status', '--porcelain'], { hostFallback: 'masked' })
+out.maskedStatus = { ok: maskedStatus.ok }
+out.filterAfterMaskedStatus = fired()
+// A shell command is refused outright on an agent-owned working copy.
+const sh1 = await exec.runShell(deadClone, ['true'])
+out.shellRefused = { ok: sh1.ok, unknown: sh1.unknown === true }
+
+// ---- 11a.2: an EMPTY mask silently changes what a repository IS
+const s256 = join(work, 's256')
+execFileSync('git', ['init', '-q', '-b', 'main', '--object-format=sha256', s256], { stdio: 'ignore' })
+git(s256, ['config', 'user.email', 'u@t']); git(s256, ['config', 'user.name', 'U'])
+git(s256, ['remote', 'add', 'origin', 'https://user:t0ken@example.invalid/x.git'])
+writeFileSync(join(s256, 'a.txt'), 'x\\n')
+git(s256, ['add', '-A']); git(s256, ['commit', '-qm', 'init'])
+out.realSha256 = git(s256, ['rev-parse', 'HEAD'])
+const cfg256 = join(s256, '.git/config')
+const orig256 = join(work, 's256-config-original')
+cpSync(cfg256, orig256)
+const lsRemote = (dir) => { try { return execFileSync('git', ['ls-remote', dir], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim().split('\\t')[0] } catch { return 'error' } }
+const logs = (dir) => { try { git(dir, ['log', '--oneline', '-1']); return 'ok' } catch { return 'broken' } }
+
+writeFileSync(cfg256, '')
+out.emptyMaskLog = logs(s256)
+out.emptyMaskLsRemote = lsRemote(s256)
+
+out.maskEntries = (await clone.maskedGitConfigEntries(orig256)).map(([k, v]) => k + '=' + v).join(',')
+out.maskEntriesIdentity = (await clone.maskedGitConfigEntries(orig256, { keepIdentity: true })).map(([k]) => k).join(',')
+await clone.writeMaskedGitConfig(orig256, cfg256)
+out.maskedText = readFileSync(cfg256, 'utf8')
+out.maskedLog = logs(s256)
+out.maskedLsRemote = lsRemote(s256)
+const s256clone = join(work, 's256-clone')
+try { execFileSync('git', ['clone', '-q', s256, s256clone], { stdio: 'ignore' }); out.maskedFetch = git(s256clone, ['rev-parse', 'HEAD']) } catch (e) { out.maskedFetch = 'error' }
+writeFileSync(cfg256, readFileSync(orig256, 'utf8'))
+
+// ---- seedHomeFiles
+const seedHome = join(work, 'seedhome')
+mkdirSync(join(seedHome, '.cursor'), { recursive: true })
+symlinkSync(join(outside, 'stolen.json'), join(seedHome, '.cursor', 'auth.json'))
+const seeded = exec.seedHomeFiles({ sandbox: 1, sandbox_home: seedHome }, [
+  { path: '.claude/settings.json', content: '{}' },
+  { path: '.credentials.json', content: 'secret' },
+  { path: '.cursor/auth.json', content: 'secret' },
+  { path: '../escape.txt', content: 'no' },
+  { path: '/etc/passwd', content: 'no' },
+])
+out.seedWritten = seeded.written.join(',')
+out.seedRefused = seeded.refused.map(r => r.path + ':' + r.reason).join(',')
+out.seedModeSettings = statSync(join(seedHome, '.claude/settings.json')).mode & 0o777
+out.seedModeCredentials = statSync(join(seedHome, '.credentials.json')).mode & 0o777
+out.stolen = existsSync(join(outside, 'stolen.json'))
+out.escaped = existsSync(join(work, 'escape.txt'))
+
+process.stdout.write(JSON.stringify(out))
+`)
+    const sub = join(work, 'sub')
+    try {
+      const r = execFileSync(process.execPath, [script, new URL('../server/', import.meta.url).pathname, work], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          FREILAUF_DATA_DIR: join(sub, 'data'),
+          FREILAUF_WORKTREES_DIR: join(sub, 'worktrees'),
+          FREILAUF_RUNS_DIR: join(sub, 'runs'),
+          FREILAUF_PLUGIN_DIR: join(sub, 'plugins'),
+          FREILAUF_SKILLS_HOME: join(sub, 'skillhome'),
+          FREILAUF_SKILLS_STATE: join(sub, 'skills-installed.json'),
+          // Hermetic git: neither the operator's global config nor a system one
+          // may reach these repositories — a `core.hooksPath` in either would
+          // make this group depend on the machine it runs on.
+          GIT_CONFIG_NOSYSTEM: '1',
+          GIT_CONFIG_GLOBAL: '/dev/null',
+          GIT_TERMINAL_PROMPT: '0',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      return JSON.parse(r)
+    } catch (err) {
+      return { __error: String(err.stderr ?? err.message ?? err).trim() || String(err) }
+    }
+  })()
+
+  await pruefe('the probe process ran', () => {
+    gleich(sandboxProbe.__error ?? '', '', 'the child that builds real repositories came back')
+  })
+
+  await pruefe('the clone stands where a worktree would, with the operator objects borrowed', () => {
+    wahr(sandboxProbe.underRoot, `inside the worktrees root (${sandboxProbe.dir})`)
+    gleich(sandboxProbe.baseSha, sandboxProbe.srcHead, 'checked out at origin/main')
+    gleich(sandboxProbe.alternates, sandboxProbe.altTarget, 'alternates names the source object store')
+    gleich(sandboxProbe.kind, 'clone', 'the run row says which kind of working copy it got')
+    wahr(sandboxProbe.isClone, 'isClone() agrees')
+    // A linked worktree inherits the committer identity from the shared config;
+    // a clone does not, and an agent that cannot commit cannot deliver.
+    gleich(sandboxProbe.cloneIdentity, 'u@t', "the committer identity travels, and nothing else of the operator's config")
+  })
+
+  await pruefe('the alternate really avoids copying objects, and origin still means origin', () => {
+    // count-objects counts the LOCAL store only; the base commit is reachable
+    // and yet nothing of it was copied — which is the entire economics of §7.4.2.
+    enthaelt(sandboxProbe.countObjects, 'count: 0', 'no loose objects of its own')
+    enthaelt(sandboxProbe.countObjects, 'in-pack: 0', 'and no pack of its own')
+    enthaelt(sandboxProbe.countObjects, 'alternate: ', 'git itself reports the borrowed store')
+    gleich(sandboxProbe.fetchOrigin, true, '`git fetch origin` works in the clone')
+    gleich(sandboxProbe.originMain, sandboxProbe.srcHead, 'origin/main is what it is everywhere else')
+    gleich(sandboxProbe.localMain, sandboxProbe.srcHead, "and the operator's local branches arrive under local/*")
+  })
+
+  await pruefe('collectRunTip is a no-op for a linked worktree', () => {
+    gleich(sandboxProbe.worktreeKind, 'worktree', 'an ordinary run is unchanged')
+    gleich(sandboxProbe.worktreeTip, sandboxProbe.worktreeRevParse, 'the same sha a plain rev-parse gives')
+    gleich(sandboxProbe.worktreeRefMade, null, 'and nothing was fetched or parked anywhere')
+  })
+
+  await pruefe('collectRunTip makes a clone-only commit reachable from the source repo', () => {
+    falsch(sandboxProbe.srcHadBefore, "the source cannot see the agent's commit while it is only in the clone")
+    gleich(sandboxProbe.cloneTip, sandboxProbe.newSha, 'the collected tip is the clone HEAD')
+    wahr(sandboxProbe.srcHasAfter, 'and the object is reachable from the source afterwards')
+    gleich(sandboxProbe.tipRef, sandboxProbe.newSha, 'parked under refs/freilauf/runs/<id>')
+  })
+
+  await pruefe('removeClone refuses a path outside the worktrees root and is idempotent', () => {
+    falsch(sandboxProbe.refusal.ok, 'a directory outside the root is refused')
+    falsch(sandboxProbe.refusal.removed, 'and nothing was removed')
+    wahr(sandboxProbe.refusal.error.length > 0, 'with a sentence saying so')
+    wahr(sandboxProbe.outsideKept, 'the foreign directory is untouched')
+    falsch(sandboxProbe.rootItself, 'the root itself is never a clone')
+    wahr(sandboxProbe.gone.ok && sandboxProbe.gone.removed, 'a real clone goes')
+    wahr(sandboxProbe.dirGone, 'the directory is gone')
+    gleich(sandboxProbe.refAfter, null, 'and so is the ref in the operator repo')
+    wahr(sandboxProbe.twice.ok, 'a second call is not an error')
+  })
+
+  await pruefe('agentHome answers the host home unless the run has one of its own', () => {
+    gleich(sandboxProbe.homePlain, sandboxProbe.hostHome, 'an unsandboxed run: byte for byte what the hub does today')
+    gleich(sandboxProbe.homeNoRun, sandboxProbe.hostHome, 'and so does no run at all')
+    gleich(sandboxProbe.homeSandboxed, '/x/run-home', 'a sandboxed run: its own home')
+    // runs.sandbox_home is documented as "NULL = the host home" — a sandboxed run
+    // whose home was never recorded must read exactly as it did before.
+    gleich(sandboxProbe.homeSandboxedNoColumn, sandboxProbe.hostHome, 'NULL means the host home')
+    enthaelt(sandboxProbe.sandboxHomeDir, '/abc/home', 'the per-run home is <runs dir>/<id>/home')
+  })
+
+  await pruefe('runGit on an unsandboxed run is the plain git call, in sh() shape', () => {
+    gleich(sandboxProbe.runGit.keys, 'code,ok,stderr,stdout', "sh()'s shape, so a caller can be rewired mechanically")
+    wahr(sandboxProbe.runGit.ok, 'ok')
+    gleich(sandboxProbe.runGit.code, 0, 'exit code')
+    gleich(sandboxProbe.runGit.stdout, sandboxProbe.srcHead, 'the same answer as git -C')
+    falsch(sandboxProbe.runGitBad.ok, 'a failure is a failure')
+    wahr(sandboxProbe.runGitBad.hasStderr, 'and git got to say why')
+    gleich(sandboxProbe.runShell.stdout, sandboxProbe.srcHead, 'runShell takes the same three branches')
+  })
+
+  await pruefe('a sandboxed run whose container is gone falls back to the hardened host call', () => {
+    // The dirt of a dead run is a display fact, not a merge decision — so the
+    // answer still comes, from the host, with the agent's hooks and fsmonitor
+    // switched off. A caller for which host execution would be wrong says so.
+    wahr(sandboxProbe.runGitContainerGone.ok, 'the fallback answers')
+    gleich(sandboxProbe.runGitContainerGone.stdout, sandboxProbe.srcHead, 'and answers the same thing')
+    falsch(sandboxProbe.runGitRefused.ok, 'hostFallback:false refuses instead')
+    gleich(sandboxProbe.runGitRefused.stdout, '', 'and runs nothing')
+    wahr(sandboxProbe.runGitRefused.hasStderr, 'with a reason')
+    gleich(sandboxProbe.runGitSandboxOff.stdout, sandboxProbe.srcHead, 'FREILAUF_SANDBOX_OFF takes the plain path')
+  })
+
+  // §11a.1. The driver lives in .git/config and is SELECTED by a tracked
+  // .gitattributes the agent commits — so no denylist of config keys can reach
+  // it, and the fallback that claimed to be hardened by one was not.
+  await pruefe('a tracked .gitattributes filter does not execute through the fallback', () => {
+    wahr(sandboxProbe.filterFiresPlain, 'the positive control: a plain host git DOES run the filter')
+    falsch(sandboxProbe.statusRefused.ok, 'status on a dead clone is refused, not run')
+    wahr(sandboxProbe.statusRefused.unknown, "and says so with `unknown` — a failed status is not a CLEAN worktree")
+    gleich(sandboxProbe.statusRefused.stdout, '', 'nothing was produced')
+    falsch(sandboxProbe.filterAfterRefusal, 'and the filter never ran')
+    wahr(sandboxProbe.inert.ok, 'rev-parse, measured inert, still answers')
+    gleich(sandboxProbe.inert.len, 40, 'with a sha')
+    falsch(sandboxProbe.filterAfterInert, 'and runs nothing')
+    falsch(sandboxProbe.shellRefused.ok, 'an arbitrary command is refused outright')
+  })
+
+  await pruefe('the masked fallback runs the rescue path with nothing of the agent in force', () => {
+    wahr(sandboxProbe.maskedAdd.ok, `add -A through the mask (${sandboxProbe.maskedAdd.stderr})`)
+    falsch(sandboxProbe.filterAfterMasked, 'the filter did not run')
+    wahr(sandboxProbe.maskedStatus.ok, 'and neither did status')
+    falsch(sandboxProbe.filterAfterMaskedStatus, 'still nothing')
+    wahr(sandboxProbe.cfgRestored, "the agent's own config is put back, byte for byte")
+    wahr(sandboxProbe.noBackupLeft, 'and no backup is left lying next to it')
+  })
+
+  // §11a.2. An empty mask does not hide a repository's config, it changes what
+  // the repository IS — and the ls-remote answer is the bad kind of wrong: exit
+  // 0 with an all-zero sha, the same family as `--no-optional-locks` returning
+  // an empty status.
+  await pruefe('masking a config with an EMPTY file breaks a repository that carries extensions', () => {
+    gleich(sandboxProbe.emptyMaskLog, 'broken', 'git log cannot read a sha256 repo through an empty mask')
+    gleich(sandboxProbe.emptyMaskLsRemote, '0'.repeat(40), 'and ls-remote answers a zero sha, successfully')
+  })
+
+  await pruefe('the generated mask keeps the format and drops everything that can name a command', () => {
+    enthaelt(sandboxProbe.maskEntries, 'core.repositoryformatversion=1', 'the format version travels')
+    enthaelt(sandboxProbe.maskEntries, 'extensions.objectformat=sha256', 'and the whole extensions block')
+    falsch(sandboxProbe.maskEntries.includes('remote.'), 'the remote URL, which may carry a token, does not')
+    falsch(sandboxProbe.maskEntries.includes('user.'), 'nor the identity, unless it is asked for')
+    enthaelt(sandboxProbe.maskEntriesIdentity, 'user.email', '…and it is, for the rescue commit')
+    gleich(sandboxProbe.maskedLog, 'ok', 'the repository reads normally through the generated mask')
+    gleich(sandboxProbe.maskedLsRemote, sandboxProbe.realSha256, 'and ls-remote answers the real sha')
+    gleich(sandboxProbe.maskedFetch, sandboxProbe.realSha256, 'a clone through the mask lands on the same commit')
+  })
+
+  await pruefe('seedHomeFiles writes inside the home only, and never through a symlink', () => {
+    gleich(sandboxProbe.seedWritten, '.claude/settings.json,.credentials.json', 'the two legitimate files')
+    enthaelt(sandboxProbe.seedRefused, '.cursor/auth.json:symlink', 'a symlink where a credential goes is refused, not followed')
+    enthaelt(sandboxProbe.seedRefused, '../escape.txt:outside_home', 'and so is a climb out')
+    enthaelt(sandboxProbe.seedRefused, '/etc/passwd:absolute', 'and an absolute path')
+    falsch(sandboxProbe.stolen, 'the symlink target was never created')
+    falsch(sandboxProbe.escaped, 'nothing landed outside the home')
+    gleich(sandboxProbe.seedModeCredentials, 0o600, 'anything that looks like a credential is 0600')
+    gleich(sandboxProbe.seedModeSettings, 0o644, 'the rest is ordinary')
+  })
+
+  // ------------------------------------------------------------------
+  // The command line of SANDBOX_RESEARCH.md §7.11 is the one place the whole
+  // sandbox feature is verifiable on a machine with no container runtime:
+  // buildRunArgv() is pure, so every flag that is there for a reason can be
+  // held to that reason here. The verdict classifier is the second half — it
+  // is tmuxVerdict()'s rule wearing Docker's error messages, and the tmux one
+  // has an AGENTS.md entry about what it cost when "no answer" was read as
+  // "gone".
+  gruppe('Sandbox: runtime argv')
+
+  const rt = await import('../server/sandbox/runtime.mjs')
+
+  // argv, not a shell line: a flag and its value are two entries, and reading
+  // them back that way is what asserts it — a joined string would pass either.
+  const rtVal = (args, flag) => { const i = args.indexOf(flag); return i < 0 ? null : args[i + 1] }
+  const rtHas = (args, flag) => args.includes(flag)
+  const rtCtx = (extra = {}) => ({
+    runId: 'r1', hubId: 'hub1',
+    workdir: '/w/run', homeDir: '/runs/r1/home', runDir: '/runs/r1',
+    repoGitDir: '/repo/.git', emptyFile: '/runs/r1/empty', hubSocket: '/runs/r1/hub.sock',
+    uid: 1000, gid: 1000, env: { FL_RUN_ID: 'r1' },
+    image: 'freilauf/agent-claude', digest: 'sha256:abc',
+    cmd: ['claude', 'hi'], caPath: '/ca/ca.crt', binPaths: ['/bin/fl-report'],
+    term: 'screen-256color', ...extra,
+  })
+
+  await pruefe('the default line carries every flag §7.11 states a reason for', () => {
+    const { bin, args } = rt.buildRunArgv({}, rtCtx())
+    gleich(bin, 'docker', 'the docker CLI is the pane command')
+    wahr(rtHas(args, '-it'), '-it: a TTY, so tmux sees the container’s own stream')
+    wahr(rtHas(args, '--rm'), '--rm')
+    wahr(rtHas(args, '--init'), '--init: a PID 1 that forwards SIGHUP, or the agent survives its pane')
+    gleich(rtVal(args, '--name'), 'fl-r1', 'the name fl-kill and the reaper look for')
+    wahr(args.includes('freilauf.run=r1'), 'the run label')
+    wahr(args.includes('freilauf.hub=hub1'), 'the hub label the orphan reaper filters on')
+    gleich(rtVal(args, '--detach-keys'), 'ctrl-^,ctrl-^', 'the one byte the CLI intercepts is moved off Ctrl-P')
+    gleich(rtVal(args, '--stop-timeout'), '30', 'SIGTERM, 30 s, SIGKILL')
+    gleich(rtVal(args, '--user'), '1000:1000', 'files stay owned by the hub user')
+    wahr(args.includes('HOME=/runs/r1/home'), 'HOME is the per-run home')
+    gleich(rtVal(args, '--cap-drop'), 'ALL', 'no capability an agent does not need')
+    gleich(rtVal(args, '--security-opt'), 'no-new-privileges', 'no way back up through a setuid binary')
+    wahr(rtHas(args, '--read-only'), 'a read-only root')
+    gleich(rtVal(args, '--pids-limit'), '4096', 'the pid ceiling')
+    gleich(rtVal(args, '--memory'), '8g', 'memory')
+    gleich(rtVal(args, '--memory-swap'), '8g', 'and swap, or the limit is only a suggestion')
+    gleich(rtVal(args, '--cpus'), '4', 'cpus')
+    gleich(rtVal(args, '--shm-size'), '1g', 'shm, which is what Chromium runs out of')
+    gleich(rtVal(args, '-w'), '/w/run', 'the working directory')
+    gleich(args[args.length - 3], 'freilauf/agent-claude@sha256:abc', 'the image by digest')
+    gleich(args.slice(-2).join(' '), 'claude hi', 'and the command last')
+  })
+
+  await pruefe('a known digest pins the image, an unknown one leaves the tag, no image refuses', () => {
+    const bare = rt.buildRunArgv({}, rtCtx({ digest: null }))
+    wahr(bare.args.includes('freilauf/agent-claude'), 'without a digest the tag stands alone')
+    const short = rt.buildRunArgv({}, rtCtx({ digest: 'abc' }))
+    wahr(short.args.includes('freilauf/agent-claude@sha256:abc'), 'a bare digest gets its algorithm')
+    let err = null
+    try { rt.buildRunArgv({}, rtCtx({ image: null })) } catch (e) { err = e }
+    wahr(err, 'no image is a refusal')
+    gleich(err.key, 'sandbox.runtime.err_no_image', 'and a readable one')
+  })
+
+  await pruefe('readOnlyRoot:false drops --read-only and keeps the tmpfs the profile asked for', () => {
+    const { args } = rt.buildRunArgv({ filesystem: { readOnlyRoot: false } }, rtCtx())
+    falsch(rtHas(args, '--read-only'), 'no read-only root')
+    const tmpfs = args.filter((a, i) => args[i - 1] === '--tmpfs')
+    wahr(tmpfs.some(x => x.startsWith('/tmp:')), '/tmp is still a tmpfs — the spec asked for it')
+    wahr(tmpfs.some(x => x.startsWith('/runs/r1/home/.cache:')), '$HOME expands to the run’s home')
+    falsch(tmpfs.some(x => x.startsWith('/run:')), '/run is what a read-only root needs, and there is none')
+  })
+
+  await pruefe('the tmpfs sizes come from the profile, and /tmp keeps exec', () => {
+    const { args } = rt.buildRunArgv({ filesystem: { tmpfsSizes: { '/tmp': '512m' } } }, rtCtx())
+    gleich(args.find(a => a.startsWith('/tmp:')), '/tmp:rw,nosuid,size=512m',
+      'nosuid but not noexec — npm and pip build out of /tmp')
+    wahr(args.includes('/run:rw,noexec,nosuid,size=64m'), '/run comes with the read-only root')
+  })
+
+  await pruefe('network open: the default bridge, and nothing about a proxy', () => {
+    const { args } = rt.buildRunArgv({ network: { mode: 'open' } }, rtCtx())
+    falsch(rtHas(args, '--network'), 'no --network: the default bridge IS open')
+    falsch(args.some(a => a.startsWith('HTTPS_PROXY=')), 'no proxy variable')
+    falsch(args.some(a => a.startsWith('SSL_CERT_FILE=')), 'and no CA to trust')
+  })
+
+  await pruefe('network none: no route at all, and still no proxy variable', () => {
+    const { args } = rt.buildRunArgv({ network: { mode: 'none' } }, rtCtx())
+    gleich(rtVal(args, '--network'), 'none', 'loopback only')
+    falsch(args.some(a => a.startsWith('HTTP_PROXY=')),
+      'a proxy that is not there would turn "no network" into a connection error')
+  })
+
+  await pruefe('network allowlist: the internal network, the proxy and the CA', () => {
+    const { args } = rt.buildRunArgv({}, rtCtx())
+    gleich(rtVal(args, '--network'), 'fl-net-r1', 'the per-run internal network')
+    wahr(args.includes('HTTPS_PROXY=http://fl-proxy-r1:8080'), 'the proxy')
+    wahr(args.includes('http_proxy=http://fl-proxy-r1:8080'), 'and its lowercase spelling, which half a toolchain reads')
+    wahr(args.includes('NO_PROXY='), 'nothing is exempted, written out so an image cannot bake a hole')
+    wahr(args.includes('NODE_EXTRA_CA_CERTS=/etc/freilauf/ca.crt'), 'the CA under every name a runtime looks for')
+    wahr(args.includes('/ca/ca.crt:/etc/freilauf/ca.crt:ro'), 'and the CA is mounted read-only')
+  })
+
+  await pruefe('an empty resource produces no flag at all — Number(\'\') is a finite 0', () => {
+    const { args } = rt.buildRunArgv({
+      // `undefined` is deliberately NOT in here: that means "the profile did
+      // not say", and normalizeSpec fills it with the default. An emptied form
+      // field is the case this test is about.
+      resources: { memory: '', memorySwap: null, cpus: '', pidsLimit: '', shmSize: '  ' },
+    }, rtCtx())
+    for (const flag of ['--memory', '--memory-swap', '--cpus', '--pids-limit', '--shm-size']) {
+      falsch(rtHas(args, flag), `${flag} is absent, not empty and not zero`)
+    }
+    const filled = rt.buildRunArgv({ resources: { cpus: undefined } }, rtCtx())
+    gleich(rtVal(filled.args, '--cpus'), '4', 'an omitted field is the default, not an absent flag')
+  })
+
+  await pruefe('a zero or negative numeric resource is dropped rather than passed on', () => {
+    const { args } = rt.buildRunArgv({ resources: { cpus: 0, pidsLimit: -1 } }, rtCtx())
+    falsch(rtHas(args, '--cpus'), '--cpus 0 is a container that cannot run')
+    falsch(rtHas(args, '--pids-limit'), 'and a negative ceiling is not a ceiling')
+  })
+
+  await pruefe('podman swaps the binary, keeps the uid with --userns and drops --user', () => {
+    const { bin, args } = rt.buildRunArgv({ runtime: 'podman' }, rtCtx())
+    gleich(bin, 'podman', 'the podman CLI')
+    wahr(rtHas(args, '--userns=keep-id'), 'podman’s own answer to the uid question')
+    falsch(rtHas(args, '--user'), 'keep-id already maps it; both would fight')
+  })
+
+  await pruefe('runsc is docker plus one flag, because gVisor is a registered runtime', () => {
+    const { bin, args } = rt.buildRunArgv({ runtime: 'runsc' }, rtCtx())
+    gleich(bin, 'docker', 'still the docker CLI')
+    gleich(args[1], '--runtime=runsc', 'and the runtime named right after run')
+  })
+
+  await pruefe('rootless hands no uid, so no --user is written', () => {
+    const { args } = rt.buildRunArgv({}, rtCtx({ uid: null, gid: null }))
+    falsch(rtHas(args, '--user'), 'container root IS the hub user under rootless Docker')
+  })
+
+  await pruefe('an unknown runtime is a readable refusal, never a wrong command line', () => {
+    let err = null
+    try { rt.buildRunArgv({ runtime: 'nosuch' }, rtCtx()) } catch (e) { err = e }
+    wahr(err, 'it refuses')
+    gleich(err.key, 'sandbox.runtime.reason_unknown', 'and says which id it did not know')
+    let err2 = null
+    try { rt.buildRunArgv({ runtime: 'srt' }, rtCtx()) } catch (e) { err2 = e }
+    gleich(err2?.key, 'sandbox.runtime.reason_unsupported', 'a deferred runtime is told apart from a typo')
+  })
+
+  await pruefe('extra mounts are appended verbatim, with their mode', () => {
+    const { args } = rt.buildRunArgv({
+      filesystem: { extraMounts: [{ source: '/data/models', target: '/models', mode: 'ro' },
+        { source: '/data/cache', target: '/cache', mode: 'rw' }] },
+    }, rtCtx())
+    wahr(args.includes('/data/models:/models:ro'), 'read-only stays read-only')
+    wahr(args.includes('/data/cache:/cache'), 'and rw carries no suffix')
+    wahr(args.indexOf('/data/cache:/cache') < args.indexOf('-w'), 'mounts come before the working directory')
+  })
+
+  await pruefe('a mount over one of the hub’s own is refused, one inside it is not', () => {
+    const collide = (target) => {
+      try { rt.buildRunArgv({ filesystem: { extraMounts: [{ source: '/x', target }] } }, rtCtx()); return null }
+      catch (e) { return e.key }
+    }
+    gleich(collide('/runs/r1'), 'sandbox.runtime.err_mount_duplicate', 'the run directory is not up for grabs')
+    gleich(collide('/runs'), 'sandbox.runtime.err_mount_collision', 'and neither is a mount sitting above it')
+    gleich(collide('/w/run/node_modules'), null, 'a worktree extra INSIDE the workdir is the ordinary case')
+  })
+
+  await pruefe('the ctx mounts go through the same collision check', () => {
+    let err = null
+    try { rt.buildRunArgv({}, rtCtx({ mounts: [{ source: '/x', target: '/runs/r1/home' }] })) } catch (e) { err = e }
+    gleich(err?.key, 'sandbox.runtime.err_mount_duplicate', 'losing the per-run home would be silent otherwise')
+  })
+
+  await pruefe('a relative path is refused on either side of a mount', () => {
+    let err = null
+    try { rt.buildRunArgv({ filesystem: { extraMounts: [{ source: 'data', target: '/data' }] } }, rtCtx()) } catch (e) { err = e }
+    gleich(err?.key, 'sandbox.runtime.err_mount_path', 'docker would read it as a named volume instead')
+  })
+
+  await pruefe('environment values are two argv entries and are never shell-quoted', () => {
+    const { args } = rt.buildRunArgv({}, rtCtx({ env: { A: 'one two', B: 'say "hi"', C: null } }))
+    const i = args.indexOf('A=one two')
+    wahr(i > 0, 'the value keeps its space')
+    gleich(args[i - 1], '-e', 'and the flag is its own entry')
+    wahr(args.includes('B=say "hi"'), 'quotes are data, not markup — nothing goes through a shell')
+    falsch(args.some(a => a.startsWith('C=')), 'a null value is skipped')
+    falsch(args.some((a, k) => a === '-e' && args[k + 1] === 'C'),
+      'and never passed as a bare -e, which would take the HUB’s value')
+  })
+
+  await pruefe('an unusable variable name is refused rather than written', () => {
+    let err = null
+    try { rt.buildRunArgv({}, rtCtx({ env: { 'A=B': 'x' } })) } catch (e) { err = e }
+    gleich(err?.key, 'sandbox.runtime.err_env_key', 'a name with an = in it would silently set something else')
+  })
+
+  await pruefe('retention:keep leaves the container standing for a post-mortem', () => {
+    const { args } = rt.buildRunArgv({ retention: 'keep' }, rtCtx())
+    falsch(rtHas(args, '--rm'), 'nothing to exec into if --rm took it away')
+    wahr(rtHas(args, '--init'), 'the rest is unchanged')
+  })
+
+  await pruefe('the runtime binary can be swapped for the e2e shim', () => {
+    const before = process.env.FREILAUF_SANDBOX_RUNTIME_BIN
+    process.env.FREILAUF_SANDBOX_RUNTIME_BIN = '/tmp/fake-docker'
+    try {
+      gleich(rt.buildRunArgv({}, rtCtx()).bin, '/tmp/fake-docker', 'the pane command uses the shim too')
+      gleich(rt.buildRunArgv({ runtime: 'podman' }, rtCtx()).bin, '/tmp/fake-docker', 'whatever the runtime says')
+    } finally {
+      if (before === undefined) delete process.env.FREILAUF_SANDBOX_RUNTIME_BIN
+      else process.env.FREILAUF_SANDBOX_RUNTIME_BIN = before
+      rt._runtimeInfoCacheReset()
+    }
+  })
+
+  await pruefe('the proxy container exists only where there is a policy to enforce', () => {
+    gleich(rt.buildProxyArgv({}, { runId: 'r1' }), null, 'the builtin engine lives in the hub process')
+    gleich(rt.buildProxyArgv({ network: { mode: 'open', engine: 'iron-proxy' } }, { runId: 'r1' }), null,
+      'and open egress has nothing to proxy')
+    const p = rt.buildProxyArgv({ network: { engine: 'iron-proxy' } },
+      { runId: 'r1', hubId: 'h', image: 'iron-proxy', digest: 'sha256:1', configPath: '/runs/r1/proxy.yaml' })
+    gleich(rtVal(p.args, '--name'), 'fl-proxy-r1', 'the name the agent reaches it under')
+    wahr(p.args.includes('--read-only'), 'the proxy is hardened like the agent')
+    wahr(p.args.includes('/runs/r1/proxy.yaml:/etc/freilauf/proxy.yaml:ro'), 'and holds only its generated config')
+  })
+
+  // -- the verdict: "the daemon did not answer" is not "there are no containers"
+  await pruefe('the verdict classifies stderr, never the exit code alone', () => {
+    const v = (stderr, ok = false) => rt.runtimeVerdict({ ok, stderr, stdout: '' })
+    gleich(v('', true), 'ok', 'a command that answered')
+    gleich(v('Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?'),
+      'no_daemon', 'the documented docker CLI sentence')
+    gleich(v('Error: unable to connect to Podman socket'), 'no_daemon', 'podman’s wording')
+    gleich(v('Error response from daemon: context deadline exceeded'), 'unreachable',
+      'a busy daemon is not an absent one')
+    gleich(v('request returned 500 Internal Server Error'), 'unreachable', 'nor is a broken one')
+    gleich(v(''), 'unreachable', 'and a failure that said nothing says nothing')
+    gleich(v('something no vendor has written yet'), 'unreachable',
+      'the default is the safe answer: unknown means do nothing and ask again')
+  })
+
+  await pruefe('"no such container" is an ANSWER, not a failure to answer', () => {
+    wahr(rt.notFound({ ok: false, stderr: 'Error: No such object: fl-r1' }), 'docker inspect')
+    wahr(rt.notFound({ ok: false, stderr: 'Error response from daemon: No such container: fl-r1' }), 'docker stop')
+    wahr(rt.notFound({ ok: false, stderr: 'Error response from daemon: network fl-net-r1 not found' }), 'network rm')
+    falsch(rt.notFound({ ok: false, stderr: 'Cannot connect to the Docker daemon' }), 'a down daemon is not an empty one')
+    falsch(rt.notFound({ ok: true, stdout: 'true' }), 'and a success is not a miss')
+  })
+
+  await pruefe('docker stats is parsed into bytes and a percentage', () => {
+    gleich(rt.parseStats('1.5GiB / 8GiB 12.34%').memBytes, Math.round(1.5 * 1024 ** 3), 'GiB')
+    gleich(rt.parseStats('1.5GiB / 8GiB 12.34%').cpuPct, 12.34, 'the percentage')
+    gleich(rt.parseStats('512MiB / 8GiB 0.00%').memBytes, 512 * 1024 ** 2, 'MiB')
+    gleich(rt.parseStats(''), null, 'nothing said is null, not zero')
+  })
+
+  await pruefe('docker ps rows carry the run id in their name, not in a label template', () => {
+    const rows = rt.parseOwned('fl-r1\trunning\tUp 3 minutes\nfl-proxy-r1\trunning\tUp 3 minutes\nfl-r2\texited\tExited (0) 1 hour ago\n')
+    gleich(rows.length, 3, 'three rows')
+    gleich(rows[0].runId, 'r1', 'the agent container')
+    gleich(rows[0].kind, 'agent', 'and what it is')
+    gleich(rows[1].kind, 'proxy', 'the proxy is told apart')
+    gleich(rows[1].runId, 'r1', 'and belongs to the same run')
+    falsch(rows[2].running, 'an exited container is not running')
+  })
+
+  await pruefe('runtimeInfo answers cleanly on a machine with no container runtime', async () => {
+    rt._runtimeInfoCacheReset()
+    const info = await rt.runtimeInfo('docker', { force: true })
+    gleich(info.available, false, 'not available')
+    wahr(['no_binary', 'no_daemon', 'unreachable'].includes(info.reason), `a machine reason, got ${info.reason}`)
+    gleich(info.id, 'docker', 'it still says what it was asked about')
+    wahr(Array.isArray(info.runtimes), 'and answers with the shape a caller expects')
+    const unknown = await rt.runtimeInfo('nosuch')
+    gleich(unknown.available, false, 'an unknown runtime is not available either')
+    gleich(unknown.reason, 'unknown', 'and it says why, without throwing')
+  })
+
+  await pruefe('a lifecycle call without a daemon answers, and answers "I do not know"', async () => {
+    const state = await rt.containerState('fl-nosuch', { runtime: 'docker' })
+    wahr(['ok', 'no_daemon', 'unreachable'].includes(state.verdict), 'a verdict comes back')
+    if (state.verdict !== 'ok') gleich(state.exists, null, 'and "no answer" is null, never false')
+    const owned = await rt.listOwned('hub1', { runtime: 'docker' })
+    gleich(owned.containers.length, 0, 'an empty list …')
+    wahr(typeof owned.verdict === 'string', '… which only means something together with the verdict')
+  })
+
+  await pruefe('every runtime string this module names exists in all three catalogs', () => {
+    const source = readFileSync(new URL('../server/sandbox/runtime.mjs', import.meta.url), 'utf8')
+    const keys = [...new Set([...source.matchAll(/'(sandbox\.runtime\.[a-z_]+)'/g)].map(m => m[1]))]
+    wahr(keys.length >= 6, 'the module names its own sentences')
+    for (const lang of ['en', 'de', 'zh']) {
+      const cat = JSON.parse(readFileSync(new URL(`../lang/${lang}.json`, import.meta.url), 'utf8'))
+      for (const k of keys) wahr(!!cat[k], `${lang}: ${k}`)
+    }
+  })
+
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: plugin declarations')
+
+  {
+    const { validateDescriptor } = await import('../server/plugins/manifest.mjs')
+    const {
+      registerPlugin: sbRegister, unregisterPlugin: sbUnregister,
+      sandboxable, sandboxDecl, harnessesWithSandbox, getHarness, getProvider,
+    } = await import('../server/plugins/registry.mjs')
+
+    const BUILTINS = ['claude', 'opencode', 'hermes', 'cursor']
+    const sbHarness = (over = {}) => ({
+      kind: 'harness', label: 'Sandbox test agent', bin: 'sbbin', subscription: false, providers: [],
+      logPatterns: [{ typ: 'rate_limit', re: /x/ }],
+      modelArgs: () => [], effortOptions: () => [], usage: async () => null, pulseId: () => null, ...over,
+    })
+    const sbEingetragen = []
+    const sbEintragen = (desc) => {
+      const r = sbRegister(desc, { source: 'external' })
+      if (r.ok) sbEingetragen.push(desc.id)
+      return r
+    }
+
+    try {
+      await pruefe('every built-in coding agent declares a sandbox block that validates', () => {
+        for (const id of BUILTINS) {
+          const plugin = getHarness(id)
+          const sb = sandboxDecl(id)
+          wahr(!!sb, `${id}: a declaration`)
+          gleich(sb.supported, true, `${id}: supported`)
+          wahr(Array.isArray(sb.domains) && sb.domains.length > 0, `${id}: names its own hosts`)
+          // A host and nothing else: the proxy matches on the CONNECT host, so
+          // a URL here would never match anything and would fail silently.
+          for (const d of sb.domains) falsch(/:\/\/|\/|\s/.test(d), `${id}: ${d} is a bare host`)
+          wahr(Array.isArray(sb.stateDirs) && sb.stateDirs.length > 0, `${id}: says what the hub reads back`)
+          gleich(validateDescriptor(plugin, 'harness').ok, true, `${id}: the whole descriptor validates`)
+        }
+      })
+
+      await pruefe('every model provider with an API declares its hosts and how its key is injected', () => {
+        for (const id of ['openrouter', 'deepseek', 'opencode-zen']) {
+          const plugin = getProvider(id)
+          const sb = plugin.sandbox
+          wahr(!!sb, `${id}: a declaration`)
+          wahr(Array.isArray(sb.domains) && sb.domains.length > 0, `${id}: hosts`)
+          const cred = (sb.credentials ?? [])[0]
+          wahr(!!cred?.injection?.hosts?.length, `${id}: an injection with hosts`)
+          // The hosts a key may be handed to must be hosts the run may reach —
+          // otherwise the proxy would substitute a secret on a connection it
+          // then refuses, which is a secret spent for nothing.
+          for (const h of cred.injection.hosts) wahr(sb.domains.includes(h), `${id}: ${h} is in the allowlist`)
+          gleich(validateDescriptor(plugin, 'provider').ok, true, `${id}: the whole descriptor validates`)
+        }
+      })
+
+      await pruefe('sandboxable() is the declaration and nothing else', () => {
+        for (const id of BUILTINS) wahr(sandboxable(id), `${id}: sandboxable`)
+        gleich(harnessesWithSandbox().length >= BUILTINS.length, true, 'and they are the list the form asks for')
+        wahr(sbEintragen(sbHarness({ id: 'unit-sb-none' })).ok, 'a plugin without the block registers')
+        falsch(sandboxable('unit-sb-none'), 'and is simply not offered the sandbox')
+        gleich(sandboxDecl('unit-sb-none'), null, 'it declares nothing')
+        // Half a declaration is not a capability: `supported` must say so.
+        wahr(sbEintragen(sbHarness({ id: 'unit-sb-half', sandbox: { domains: ['example.com'] } })).ok, 'registered')
+        falsch(sandboxable('unit-sb-half'), 'a block without supported:true is not offered either')
+        falsch(sandboxable('never-registered'), 'an unknown coding agent')
+      })
+
+      await pruefe('a malformed sandbox block is REFUSED, with a reason', () => {
+        // Refused rather than ignored: a declaration nobody applies produces a
+        // run that reaches a network it should not have, and says nothing.
+        const refuse = (sandbox, wort) => {
+          const r = validateDescriptor(sbHarness({ id: 'unit-sb-bad', sandbox }), 'harness')
+          falsch(r.ok, `refused: ${wort}`)
+          enthaelt(r.problems.join('; '), wort, `and names it: ${wort}`)
+        }
+        refuse('yes', 'must be an object')
+        refuse({ supported: 'true' }, '"supported" must be a boolean')
+        refuse({ supported: true, domains: 'example.com' }, '"domains" must be an array')
+        refuse({ supported: true, domains: ['https://example.com/v1'] }, 'must be a bare host')
+        refuse({ supported: true, env: { 'not a name': '1' } }, 'is not an environment variable name')
+        refuse({ supported: true, env: { OK: 1 } }, 'must be a string')
+        refuse({ supported: true, image: {} }, 'needs "ref" or "dockerfile"')
+        refuse({ supported: true, stateDirs: ['/etc'] }, 'must be relative to the sandbox home')
+        refuse({ supported: true, stateDirs: ['../../.claude'] }, 'must not contain ".."')
+        refuse({ supported: true, seedHome: 'files' }, '"seedHome" must be a function')
+        refuse({ supported: true, innerSandbox: { none: {} } }, 'innerSandbox level')
+        // An injection with no hosts hands the real key to whatever the agent
+        // connects to — the opposite of what the mode exists for.
+        refuse({ supported: true, credentials: [{ key: 'k', injection: { header: 'Authorization' } }] },
+          '"injection.hosts" must be a non-empty array')
+        refuse({ supported: true, credentials: [{ key: 'k', injection: { header: '', hosts: ['a.example'] } }] },
+          '"injection.header" must be a header name')
+        // Whether a run can be picked back up is launch.resume's answer. Two
+        // statements about one fact eventually disagree.
+        refuse({ supported: true, resume: ['--resume', '{resume_id}'] }, '"resume" is not a sandbox field')
+        // And the refusal really reaches the registry, not just the validator.
+        falsch(sbRegister(sbHarness({ id: 'unit-sb-refused', sandbox: { supported: true, stateDirs: ['/etc'] } }),
+          { source: 'external' }).ok, 'the registry refuses it too')
+        gleich(sandboxDecl('unit-sb-refused'), null, 'and it is nowhere in the registry')
+      })
+
+      await pruefe('seedHome returns relative paths inside the home, for every built-in', async () => {
+        const run = { id: 'aaaabbbb', workdir_effective: '/home/hub/agents/worktrees/demo/aaaabbbb' }
+        // `inject` on purpose: it is the mode in which no credential file is
+        // copied, so the suite never reads the operator's real tokens.
+        const spec = { secrets: { mode: 'inject' }, innerSandbox: 'off' }
+        for (const id of BUILTINS) {
+          const seed = sandboxDecl(id).seedHome
+          gleich(typeof seed, 'function', `${id}: declares one`)
+          let files
+          try {
+            files = await seed({ home: '/home/hub/agents/runs/aaaabbbb/home', run, ctx: null, spec })
+          } catch (err) {
+            // The one documented throw: opencode refuses to seed a home without
+            // the bridge, because such a run reports no API error at all. On a
+            // machine that has never run setup/02 that is the right answer.
+            gleich(id, 'opencode', `${id}: only opencode may refuse`)
+            enthaelt(String(err.message), 'setup/02-install-scripts.sh', 'and it says how to fix it')
+            continue
+          }
+          // An empty list is a legitimate answer: under `inject` no credential
+          // file is copied at all, and cursor seeds nothing else.
+          wahr(Array.isArray(files), `${id}: a list of files`)
+          for (const f of files) {
+            wahr(typeof f.path === 'string' && !!f.path, `${id}: every entry has a path`)
+            falsch(f.path.startsWith('/'), `${id}: ${f.path} is not absolute`)
+            falsch(f.path.startsWith('~'), `${id}: ${f.path} is not a home shorthand`)
+            falsch(f.path.split('/').includes('..'), `${id}: ${f.path} does not climb out`)
+            gleich(typeof f.content, 'string', `${id}: ${f.path} has string content`)
+          }
+        }
+      })
+
+      await pruefe('claude seeds the trust flag and the inner-sandbox decision', async () => {
+        const seed = sandboxDecl('claude').seedHome
+        const run = { id: 'x', workdir_effective: '/w/demo/x' }
+        const aus = await seed({ run, spec: { innerSandbox: 'off' } })
+        const claudeJson = JSON.parse(aus.find(f => f.path === '.claude.json').content)
+        gleich(claudeJson.hasCompletedOnboarding, true, 'the onboarding is answered')
+        gleich(claudeJson.projects['/w/demo/x'].hasTrustDialogAccepted, true,
+          'and the trust dialog, for the directory this run works in')
+        const off = JSON.parse(aus.find(f => f.path === '.claude/settings.json').content)
+        gleich(off.sandbox.enabled, false, 'the inner sandbox is off by default')
+        const weak = JSON.parse((await seed({ run, spec: { innerSandbox: 'weak' } }))
+          .find(f => f.path === '.claude/settings.json').content)
+        gleich(weak.sandbox.enabled, true, 'weak turns it on')
+        gleich(weak.sandbox.enableWeakerNestedSandbox, true, 'with the vendor\'s own name for what it costs')
+        falsch('full' in sandboxDecl('claude').innerSandbox,
+          'and `full` is not declared — bwrap cannot do it inside an unprivileged container')
+      })
+
+      await pruefe('hermes forces terminal.backend: local over whatever the operator configured', async () => {
+        // The container IS the boundary; hermes' docker backend would open a
+        // second one per tool call. The operator's own file is never touched —
+        // this is a copy in the per-run home.
+        const seed = sandboxDecl('hermes').seedHome
+        const aus = await seed({ spec: { secrets: { mode: 'inject' } } })
+        const cfg = aus.find(f => f.path === '.hermes/config.yaml').content
+        enthaelt(cfg, 'terminal:\n  backend: local', 'the backend is named')
+        gleich((cfg.match(/^terminal\s*:/gm) ?? []).length, 1, 'exactly once — never twice, which would be two answers')
+        falsch(/backend:\s*docker/.test(cfg), 'and the docker backend is gone')
+      })
+
+      await pruefe('cursor seeds its token under `env` and nothing at all under `inject`', async () => {
+        // FREILAUF_CURSOR_AUTH is the same fence the e2e sandbox uses: without
+        // it this check would read the operator's real Cursor token.
+        const fake = join(sandkasten, 'cursor-auth.json')
+        writeFileSync(fake, '{"accessToken":"unit-test-not-a-token"}\n')
+        const alt = process.env.FREILAUF_CURSOR_AUTH
+        process.env.FREILAUF_CURSOR_AUTH = fake
+        try {
+          const seed = sandboxDecl('cursor').seedHome
+          const mit = await seed({ spec: { secrets: { mode: 'env' } } })
+          gleich(mit.length, 1, 'the token file, and nothing else')
+          gleich(mit[0].path, '.config/cursor/auth.json', 'where cursor looks for it')
+          gleich(mit[0].mode, 0o600, 'and it is a credential')
+          gleich((await seed({ spec: { secrets: { mode: 'inject' } } })).length, 0,
+            'under injection no credential enters the container at all')
+        } finally {
+          if (alt === undefined) delete process.env.FREILAUF_CURSOR_AUTH
+          else process.env.FREILAUF_CURSOR_AUTH = alt
+        }
+      })
+
+      await pruefe('cursor switches its own sandbox off, and claude bypasses its permission prompts', () => {
+        gleich(sandboxDecl('cursor').launchOverrides({ spec: {} }).sandbox, 'disabled',
+          'nested bubblewrap fails; two boundaries are not stronger than one')
+        const claude = sandboxDecl('claude').launchOverrides({ spec: {} })
+        gleich(claude.mode, 'bypassPermissions',
+          'the mode Anthropic itself prescribes for a container — and it refuses to run as root')
+        // A repo's own .claude/settings.json can carry disableAllHooks:true and
+        // silence every report the hub depends on; the source it lives in is
+        // simply not loaded. Measured 2026-09-05 out of the shipped binary.
+        gleich(claude.settingSources, 'user', 'and the project settings sources are not loaded')
+        // `bypassPermissions` refuses to run as root unless claude recognises a
+        // sandbox, and this variable is the whole predicate — single-authored
+        // here so nothing sets it a second time in the shell.
+        gleich(sandboxDecl('claude').env.IS_SANDBOX, '1', 'claude is told it is in a sandbox')
+      })
+    } finally {
+      for (const id of sbEingetragen) sbUnregister(id)
+    }
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: run definition')
+  //
+  // Whether a run happens in a container is a field of the run definition like
+  // every other, so it has to be in every one of the places AGENTS.md's
+  // `keep_on_branch` checklist names — and the two it must NOT be in. What this
+  // group pins is that list, structurally rather than by example: the drift
+  // run-def.mjs exists to prevent is a field that reaches three of the four
+  // copies, and a test that only round-tripped one form would never see it.
+  {
+    const rdef = await import('../server/run-def.mjs')
+    const { db: sdb, setSetting } = await import('../server/db.mjs')
+    const { runEditAllowed: sbEditAllowed, editRun: sbEditRun } = await import('../server/run-edit.mjs')
+    const quelle = readFileSync(new URL('../server/run-def.mjs', import.meta.url), 'utf8')
+
+    const mitModus = async (modus, fn) => {
+      setSetting('sandbox_mode', modus)
+      try { return await fn() } finally { setSetting('sandbox_mode', '') }
+    }
+    const formular = (extra = {}) => ({
+      harness: 'claude', prompt: 'do something', branch_mode: 'keiner', ...extra,
+    })
+
+    await pruefe('the tri-state survives form → definition → agent row → definition', async () => {
+      sdb.exec(`DELETE FROM agents WHERE name LIKE 'sb-agent-%'`)
+      sdb.exec(`DELETE FROM repos WHERE name='sb-repo'`)
+      sdb.prepare(`INSERT INTO repos(name, path, base_branch) VALUES('sb-repo','/tmp/sb-repo','main')`).run()
+      const repoId = sdb.prepare(`SELECT id FROM repos WHERE name='sb-repo'`).get().id
+      await mitModus('available', async () => {
+        for (const wert of ['inherit', 'on', 'off']) {
+          const problems = []
+          const def = await rdef.runDefFromForm(formular({ sandbox: wert, repo_id: repoId }), problems)
+          gleich(problems.length, 0, `${wert}: no problems (${problems.join(', ')})`)
+          gleich(def.sandbox, wert, `${wert}: read out of the form`)
+          const id = rdef.saveAgent({ repoId, name: `sb-agent-${wert}`, def })
+          const row = sdb.prepare('SELECT * FROM agents WHERE id=?').get(id)
+          gleich(row.sandbox, wert, `${wert}: written to the agent row`)
+          gleich(rdef.defFromAgent(row).sandbox, wert, `${wert}: and read back out of it`)
+          // The UPDATE half, which is where a field is most often forgotten:
+          // saving the same agent again must not lose what the INSERT stored.
+          rdef.saveAgent({ id, repoId, name: `sb-agent-${wert}`, def: { ...def, sandbox: 'on' } })
+          gleich(sdb.prepare('SELECT sandbox FROM agents WHERE id=?').get(id).sandbox, 'on', `${wert}: the UPDATE writes it too`)
+        }
+      })
+    })
+
+    await pruefe("'0', 'off' and absence each mean what they say, and none of them flips the value", async () => {
+      await mitModus('available', async () => {
+        // Absent: the block disables its inputs where the coding agent cannot be
+        // sandboxed, and a disabled field sends nothing at all.
+        const p1 = []
+        gleich((await rdef.runDefFromForm(formular(), p1)).sandbox, 'inherit', 'absent means inherit')
+        gleich(p1.length, 0, `and says nothing about it (${p1.join(', ')})`)
+        // The word: the only reading that switches a sandbox off.
+        const p2 = []
+        gleich((await rdef.runDefFromForm(formular({ sandbox: 'off' }), p2)).sandbox, 'off', "'off' is off")
+        gleich(p2.length, 0, `no problem (${p2.join(', ')})`)
+        // The string '0' is truthy, and `b.x ? 1 : 0` would read it as ON. It is
+        // not a tri-state at all, so it is a refusal — never a silent guess in
+        // either direction.
+        const p3 = []
+        const d3 = await rdef.runDefFromForm(formular({ sandbox: '0' }), p3)
+        gleich(p3.length, 1, `'0' is refused (${p3.join(', ')})`)
+        gleich(d3.sandbox, 'inherit', "'0' becomes neither 'on' nor 'off'")
+        const p4 = []
+        gleich((await rdef.runDefFromForm(formular({ sandbox: '1' }), p4)).sandbox, 'inherit', "'1' is not 'on' either")
+        gleich(p4.length, 1, `and says so (${p4.join(', ')})`)
+        // The empty string is what a disabled <select> and an untouched field
+        // both look like; it must be silence, not a complaint.
+        const p5 = []
+        gleich((await rdef.runDefFromForm(formular({ sandbox: '' }), p5)).sandbox, 'inherit', "'' means inherit")
+        gleich(p5.length, 0, 'and is not a problem')
+      })
+    })
+
+    await pruefe('a broken overrides document is a problem, never a 500', async () => {
+      await mitModus('available', async () => {
+        const p1 = []
+        const d1 = await rdef.runDefFromForm(formular({ sandbox_overrides: '{network: none' }), p1)
+        wahr(p1.length >= 1, `unparseable JSON is refused (${p1.join(', ')})`)
+        gleich(d1.sandboxOverrides, '{}', 'and nothing is stored')
+        const p2 = []
+        await rdef.runDefFromForm(formular({ sandbox_overrides: '{"netwrok": {"mode": "none"}}' }), p2)
+        wahr(p2.length >= 1, `a typo is refused rather than ignored (${p2.join(', ')})`)
+        const p3 = []
+        await rdef.runDefFromForm(formular({ sandbox_overrides: '{"network": {"mode": "nowhere"}}' }), p3)
+        wahr(p3.length >= 1, `a value outside the set is refused (${p3.join(', ')})`)
+        // And the ordinary case goes through, normalised to one JSON string.
+        const p4 = []
+        const d4 = await rdef.runDefFromForm(formular({ sandbox_overrides: '{"network": {"mode": "none"}}' }), p4)
+        gleich(p4.length, 0, `a valid document (${p4.join(', ')})`)
+        gleich(JSON.parse(d4.sandboxOverrides).network.mode, 'none', 'stored as it was meant')
+        // An empty field is "nothing to say", not a document.
+        gleich((await rdef.runDefFromForm(formular({ sandbox_overrides: '   ' }), [])).sandboxOverrides, '{}', 'blank is {}')
+      })
+    })
+
+    await pruefe('the hub mode is the frame: `off` stores nothing, `required` refuses an opt-out', async () => {
+      // `off` is what every installation without a container runtime has, and
+      // there it must be exactly as if none of this existed.
+      await mitModus('off', async () => {
+        const p = []
+        const def = await rdef.runDefFromForm(formular({ sandbox: 'on', sandbox_overrides: '{"network": {"mode": "none"}}' }), p)
+        gleich(p.length, 0, `nothing is refused (${p.join(', ')})`)
+        gleich(def.sandbox, 'inherit', 'and nothing is stored')
+        gleich(def.sandboxOverrides, '{}', 'not even the overrides')
+        gleich(rdef.sandboxFields({ harness: 'claude' }), '', 'the form block is not rendered at all')
+      })
+      await mitModus('required', async () => {
+        const p = []
+        await rdef.runDefFromForm(formular({ sandbox: 'off' }), p)
+        gleich(p.length, 1, `opting out is refused (${p.join(', ')})`)
+        // And the form does not offer what the endpoint would send back.
+        const html = rdef.sandboxFields({ harness: 'claude' })
+        falsch(html.includes('value="off"'), 'the select offers no `off` under `required`')
+      })
+    })
+
+    await pruefe('the block names the harnesses that can be sandboxed, and DISABLES what it hides', async () => {
+      await mitModus('available', async () => {
+        const kann = rdef.sandboxFields({ harness: 'claude' }, { sandboxHarnesses: ['claude'] })
+        enthaelt(kann, 'data-sandbox-harnesses="claude"', 'the plugins\' answer travels as an attribute')
+        falsch(/<select name="sandbox"[^>]*disabled/.test(kann), 'a supported coding agent gets a live field')
+        enthaelt(kann, 'name="sandbox_profile_id"', 'the profile select')
+        enthaelt(kann, 'name="sandbox_overrides"', 'and the folded overrides editor')
+        const kann_nicht = rdef.sandboxFields({ harness: 'claude' }, { sandboxHarnesses: [] })
+        // Hidden is not enough: a field one cannot see must not still submit.
+        wahr(/<select name="sandbox"[^>]*disabled/.test(kann_nicht), 'the tri-state is disabled, not merely hidden')
+        wahr(/<textarea name="sandbox_overrides"[^>]*disabled/.test(kann_nicht), 'and so is the overrides editor')
+        enthaelt(kann_nicht, 'data-sandbox-unsupported', 'and the block SAYS why rather than vanishing')
+        falsch(kann_nicht.includes('data-sandbox-unsupported hidden'), 'the sentence is visible there')
+      })
+    })
+
+    await pruefe('the field is in every list the checklist names — and in neither of the two it must not be', () => {
+      // Structural, not by example: a future field added to three of the four
+      // places is exactly the drift this module exists to prevent, and the only
+      // way to catch it is to ask each place by name.
+      const flowKeys = rdef.RUN_DEF_FLOW_FIELDS.map(f => f.key)
+      wahr(flowKeys.includes('sandbox'), 'RUN_DEF_FLOW_FIELDS carries the tri-state')
+      wahr(flowKeys.includes('sandboxOverrides'), 'and the overrides')
+      const tri = rdef.RUN_DEF_FLOW_FIELDS.find(f => f.key === 'sandbox')
+      gleich(JSON.stringify(tri.options), '["inherit","on","off"]', 'as the three words, not a checkbox')
+      gleich(tri.default, 'inherit', 'defaulting to the value that changes nothing')
+      // defFromFlowProps: the same reading, minus the ability to complain.
+      const fromFlow = rdef.defFromFlowProps({ harness: 'claude', prompt: 'x', sandbox: 'on' })
+      gleich(fromFlow.sandbox, 'on', 'a flow step reaches the definition')
+      gleich(rdef.defFromFlowProps({ harness: 'claude', prompt: 'x', sandbox: 'ja' }).sandbox, 'inherit',
+        'and junk becomes the value that changes nothing, never a guess')
+      gleich(rdef.defFromFlowProps({ harness: 'claude', prompt: 'x', sandboxOverrides: '{oops' }).sandboxOverrides, '{}',
+        'a broken document there is dropped, because a flow has nobody to tell')
+      // defFromAgent and both halves of saveAgent, read off the source: an
+      // UPDATE that forgot a column is the classic way a field half-lands.
+      const insert = quelle.slice(quelle.indexOf('INSERT INTO agents('), quelle.indexOf('INSERT INTO agents(') + 900)
+      const update = quelle.slice(quelle.indexOf('UPDATE agents SET'), quelle.indexOf('UPDATE agents SET') + 900)
+      for (const spalte of ['sandbox', 'sandbox_profile_id', 'sandbox_overrides']) {
+        wahr(insert.includes(spalte), `saveAgent INSERT names ${spalte}`)
+        wahr(update.includes(spalte), `saveAgent UPDATE names ${spalte}`)
+      }
+      // The setup half, so a favorite carries it — and setupToFormBody, so a
+      // Quick Run through that favorite arrives with it.
+      gleich(rdef.setupToFormBody({ harness: 'claude', sandbox: 'on' }).sandbox, 'on', 'setupToFormBody carries the tri-state')
+      gleich(rdef.setupToFormBody({ harness: 'claude' }).sandbox, 'inherit', 'and an older favorite inherits')
+      // The two it is deliberately NOT in. `pickQuickFields` lives in web.mjs
+      // (the Quick-Run dialog takes the repo default and the favorite's word),
+      // and `rememberRunChoice` remembers a setup, not a safety decision.
+      const setup = quelle.slice(quelle.indexOf('function setupOf('), quelle.indexOf('function setupOf(') + 400)
+      falsch(setup.includes('sandbox'), 'rememberRunChoice does not remember it')
+    })
+
+    await pruefe('runEditAllowed: the sandbox is editable exactly while the run has not started', async () => {
+      for (const s of ['scheduled', 'deferred']) {
+        wahr(sbEditAllowed({ status: s }).sandbox, `${s}: no session and no worktree yet`)
+      }
+      for (const s of ['running', 'waiting_help', 'done', 'failed', 'aborted']) {
+        falsch(sbEditAllowed({ status: s }).sandbox, `${s}: the container is what it is`)
+      }
+      falsch(sbEditAllowed({ status: 'done', followup_since: '2026-01-01 00:00:00' }).sandbox,
+        'a follow-up commission reopens the duration, never the sandbox')
+      falsch(sbEditAllowed(null).sandbox, 'no run')
+
+      // And the endpoint keeps the same rule: a running run refuses, a planned
+      // one applies — including the '0' reading, which must mean OFF here.
+      sdb.exec(`DELETE FROM runs WHERE id LIKE 'sb-run-%'`)
+      const repoId = sdb.prepare(`SELECT id FROM repos WHERE name='sb-repo'`).get().id
+      const anlegen = (id, status) => sdb.prepare(
+        `INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title, sandbox)
+         VALUES(?,?,?,'claude','x','keiner',45,'x',1)`).run(id, repoId, status)
+      anlegen('sb-run-plan', 'scheduled')
+      anlegen('sb-run-live', 'running')
+      await mitModus('available', async () => {
+        const p1 = []
+        const r1 = await sbEditRun('sb-run-plan', { sandbox: '0' }, p1)
+        gleich(p1.length, 0, `a planned run may leave the sandbox (${p1.join(', ')})`)
+        gleich(r1.ok, true, 'applied')
+        gleich(sdb.prepare('SELECT sandbox FROM runs WHERE id=?').get('sb-run-plan').sandbox, 0,
+          "'0' means OFF — the one reading `sandbox ? 1 : 0` would get wrong")
+        const p2 = []
+        await sbEditRun('sb-run-live', { sandbox: '0' }, p2)
+        gleich(p2.length, 1, `a running run refuses (${p2.join(', ')})`)
+        const p3 = []
+        await sbEditRun('sb-run-plan', { sandbox: 'vielleicht' }, p3)
+        gleich(p3.length, 1, `and a word that is not a yes/no is refused (${p3.join(', ')})`)
+      })
+      await mitModus('required', async () => {
+        const p = []
+        await sbEditRun('sb-run-plan', { sandbox: '0' }, p)
+        gleich(p.length, 1, `under "required" even a planned run may not leave (${p.join(', ')})`)
+      })
+    })
+
+    await pruefe('every i18n key this block renders exists in all three catalogs', async () => {
+      const { _catalogs } = await import('../server/i18n.mjs')
+      const cats = _catalogs()
+      // The literal ones out of the source, plus the two families that are
+      // built by concatenation — a key assembled at runtime is exactly the kind
+      // a catalog forgets, so it is spelled out here rather than scanned for.
+      const keys = [
+        ...new Set([...quelle.matchAll(/t\('(sandbox\.[a-z_.]+)'/g)].map(m => m[1]).filter(k => !k.endsWith('_'))),
+        ...['inherit', 'on', 'off'].map(s => `sandbox.field.tristate_${s}`),
+        ...['on', 'off'].map(s => `sandbox.field.summary_${s}`),
+      ]
+      wahr(keys.length > 10, `the block really names its strings (${keys.length})`)
+      for (const k of keys) {
+        for (const code of ['en', 'de', 'zh']) wahr(!!cats[code][k], `${code}: ${k}`)
+      }
+    })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: lifecycle and verdicts')
+  //
+  // What this group pins is the half of the sandbox that decides whether
+  // somebody's agent goes on living: the verdict rule, the orphan table, and the
+  // two path seams every activity measurement now goes through.
+  {
+    const { containerVerdict, reconcileContainers, claudeProjectSlug, claudeTranskriptPfad,
+      _resetDockerSilence } = await import('../server/watcher.mjs')
+    const { agentHome } = await import('../server/sandbox/exec.mjs')
+    const { collectRunTip, isClone } = await import('../server/sandbox/clone.mjs')
+    const { homedir } = await import('node:os')
+
+    const mitRuntime = async (script, fn) => {
+      const shim = join(sandkasten, `runtime-${Math.random().toString(36).slice(2)}.sh`)
+      writeFileSync(shim, script)
+      chmodSync(shim, 0o755)
+      const alt = process.env.FREILAUF_SANDBOX_RUNTIME_BIN
+      process.env.FREILAUF_SANDBOX_RUNTIME_BIN = shim
+      _resetDockerSilence()
+      try { return await fn() } finally {
+        _resetDockerSilence()
+        if (alt === undefined) delete process.env.FREILAUF_SANDBOX_RUNTIME_BIN
+        else process.env.FREILAUF_SANDBOX_RUNTIME_BIN = alt
+      }
+    }
+
+    // ---- the rule that protects live agents -------------------------------
+    //
+    // "docker did not answer" is not "there are no containers". This is
+    // tmuxVerdict()'s lesson a second time, and the failure it prevents is the
+    // expensive one: a daemon restart must not reap a single container or end a
+    // single run.
+    await pruefe('an unreachable runtime reaps NOTHING and ends NOTHING', async () => {
+      await mitRuntime('#!/bin/sh\necho "error during connect: broken pipe" >&2\nexit 1\n', async () => {
+        const r = await reconcileContainers()
+        gleich(r.verdict, 'unreachable', 'the pass says it learned nothing')
+        gleich(r.acted.length, 0, 'and did nothing at all — no stop, no remove, no event')
+      })
+    })
+
+    await pruefe('a runtime that is demonstrably not there is silent, not an alarm', async () => {
+      await mitRuntime('#!/bin/sh\necho "Cannot connect to the Docker daemon at unix:///var/run/docker.sock." >&2\nexit 1\n', async () => {
+        const r = await reconcileContainers()
+        gleich(r.verdict, 'no_daemon', 'a machine without Docker is the ordinary case')
+        gleich(r.acted.length, 0, 'and nothing is reaped on the strength of it either')
+      })
+    })
+
+    // ---- the orphan table -------------------------------------------------
+    await pruefe('the orphan classification, over run status × session × container', () => {
+      const v = (o) => containerVerdict(o)
+      gleich(v({ status: 'running', sessionOpen: true, running: true }), 'leave',
+        'a working run in a live container is nobody’s business')
+      gleich(v({ status: 'waiting_help', sessionOpen: true, running: true }), 'leave',
+        'a run waiting for a human is still in flight')
+      // §8.18, first case: the container went, the session stands — the agent died.
+      gleich(v({ status: 'running', sessionOpen: true, running: false }), 'container_gone',
+        'container gone under a live session = the agent died; pane_dead says so too')
+      // §8.18, second case: the session went, the container stands — the client
+      // died, or somebody hit the detach chord. The agent must not work on alone.
+      gleich(v({ status: 'running', sessionOpen: false, running: true }), 'stop_orphan',
+        'a container with no session left is stopped and the fact recorded')
+      // A running container is NEVER reaped while its run is in flight — hermes'
+      // orphan-reaper rule, and the one that keeps a working agent alive.
+      for (const status of ['running', 'waiting_help', 'scheduled', 'deferred']) {
+        gleich(v({ status, sessionOpen: true, running: true }), 'leave', `${status}: never reaped`)
+      }
+      gleich(v({ status: 'done', sessionOpen: true, running: true }), 'leave',
+        'a finished run keeps its container while its session stands — a follow-up types into it')
+      gleich(v({ status: 'done', sessionOpen: false, running: true }), 'reap',
+        'session closed and the run over: stop and remove')
+      gleich(v({ status: 'aborted', sessionOpen: false, running: false }), 'reap',
+        'an exited container of a finished run is removed too')
+      // retention: keep buys the retention clock, and only that.
+      gleich(v({ status: 'done', sessionOpen: false, running: true, retention: 'keep' }), 'leave',
+        'kept for a post-mortem through docker exec')
+      gleich(v({ status: 'done', sessionOpen: false, running: true, retention: 'keep', overKeep: true }), 'reap',
+        'a keep that never expired would be a container nothing on this machine ever removes')
+      gleich(v({ status: null, sessionOpen: false, running: true }), 'reap',
+        'nothing can be waiting on a run that is not in the database')
+    })
+
+    // ---- agentHome: today's paths, for all four harnesses ------------------
+    await pruefe('agentHome() reproduces today’s paths exactly for an unsandboxed run', async () => {
+      const { projectDirs } = await import('../server/cursor-transcript.mjs')
+      const { storePath } = await import('../server/opencode-store.mjs')
+      const home = homedir()
+      const run = { id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', harness: 'claude',
+        workdir_effective: '/srv/agents/worktrees/repo/ab12-detached' }
+      gleich(agentHome(run), home, 'no sandbox, no move')
+      gleich(agentHome({ ...run, sandbox: 0, sandbox_home: '/somewhere' }), home,
+        'a home recorded on a run that is NOT sandboxed changes nothing')
+      gleich(agentHome({ ...run, sandbox: 1, sandbox_home: '/srv/agents/runs/x/home' }),
+        '/srv/agents/runs/x/home', 'and a sandboxed run reads its own')
+
+      // Each of the four compared against the literal string the code built
+      // before the seam existed.
+      gleich(claudeTranskriptPfad(run),
+        `${home}/.claude/projects/-srv-agents-worktrees-repo-ab12-detached/${run.id}.jsonl`,
+        'claude: <home>/.claude/projects/<slug>/<run id>.jsonl')
+      gleich(projectDirs(run.workdir_effective)[0],
+        `${home}/.cursor/projects/srv-agents-worktrees-repo-ab12-detached`,
+        'cursor: <home>/.cursor/projects/<slug>')
+      gleich(projectDirs(run.workdir_effective, '/srv/agents/runs/x/home')[0],
+        '/srv/agents/runs/x/home/.cursor/projects/srv-agents-worktrees-repo-ab12-detached',
+        'the same slug — it comes from the workdir, which does not move — under a per-run home')
+      gleich(storePath(), `${home}/.local/share/opencode/opencode.db`,
+        'opencode: <home>/.local/share/opencode/opencode.db')
+      gleich(storePath({ sandbox: 1, sandbox_home: '/srv/agents/runs/x/home' }),
+        '/srv/agents/runs/x/home/.local/share/opencode/opencode.db', 'and under a per-run home')
+      gleich(join(agentHome(run), '.hermes/state.db'), `${home}/.hermes/state.db`,
+        'hermes: <home>/.hermes/state.db — the literal measureActivity() opens')
+    })
+
+    await pruefe('the test fences still outrank the home', async () => {
+      const { storePath } = await import('../server/opencode-store.mjs')
+      const alt = process.env.FREILAUF_OPENCODE_DB
+      process.env.FREILAUF_OPENCODE_DB = '/tmp/fixture.db'
+      try {
+        gleich(storePath({ sandbox: 1, sandbox_home: '/srv/agents/runs/x/home' }), '/tmp/fixture.db',
+          'a suite that pointed the store at its own fixture must keep reading the fixture')
+      } finally {
+        if (alt === undefined) delete process.env.FREILAUF_OPENCODE_DB
+        else process.env.FREILAUF_OPENCODE_DB = alt
+      }
+    })
+
+    // ---- the slug bug -----------------------------------------------------
+    //
+    // claude replaces EVERY non-alphanumeric character, not just '/'. The old
+    // rule found nothing for a path holding a dot, an underscore or a space, and
+    // the run then read as idle while it worked (SANDBOX_RESEARCH.md §11a.4).
+    await pruefe('the claude slug replaces every non-alphanumeric character, not only the slashes', () => {
+      gleich(claudeProjectSlug('/home/x/agents/worktrees/my.repo/ab12-feat_x'),
+        '-home-x-agents-worktrees-my-repo-ab12-feat-x',
+        'dot, underscore and hyphen all become a hyphen — and nothing collapses')
+      gleich(claudeProjectSlug('/srv/a b/c'), '-srv-a-b-c', 'a space too')
+      gleich(claudeProjectSlug('/plain/path'), '-plain-path', 'the ordinary case is unchanged')
+      const dotted = { id: 'ffffffff-1111-2222-3333-444444444444',
+        workdir_effective: '/srv/worktrees/my.repo/ab12-detached' }
+      wahr(claudeTranskriptPfad(dotted).includes('-srv-worktrees-my-repo-ab12-detached'),
+        'and the transcript path is built from it')
+    })
+
+    // ---- collectRunTip is a no-op for a linked worktree --------------------
+    await pruefe('collectRunTip() is a plain rev-parse for a linked worktree', async () => {
+      const repo = join(sandkasten, 'tip-repo')
+      mkdirSync(repo, { recursive: true })
+      const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim()
+      execFileSync('git', ['init', '-q', '-b', 'main', repo])
+      git('config', 'user.email', 'unit@localhost')
+      git('config', 'user.name', 'Unit')
+      writeFileSync(join(repo, 'a.txt'), 'one\n')
+      git('add', '-A')
+      git('commit', '-q', '-m', 'one')
+      const head = git('rev-parse', 'HEAD')
+      const run = { id: 'cccccccc-dddd-eeee-ffff-000000000000', repo_id: null,
+        workdir_effective: repo, worktree_kind: 'worktree' }
+      falsch(isClone(run), 'a linked worktree is not a clone')
+      gleich(await collectRunTip(run), head,
+        'the same sha rev-parse HEAD gave — one function, and for a shared object store no difference')
+      gleich(git('for-each-ref', '--format=%(refname)', 'refs/freilauf/'), '',
+        'and nothing was fetched or parked: there is nothing to collect')
+    })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: audit export')
+
+  // A child process for the same reason the clone group above needs one:
+  // `RUNS_DIR` is a module-level constant of util.mjs, read when THIS file
+  // imported it, so the audit files can only be pointed into the sandbox from a
+  // process of its own. Without that, a suite run would write into — and read
+  // out of — the operator's real ~/agents/runs.
+  const auditProbe = (() => {
+    const work = join(sandkasten, 'audit-probe')
+    mkdirSync(work, { recursive: true })
+    const script = join(work, 'probe.mjs')
+    writeFileSync(script, `
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+
+const serverDir = process.argv[2]
+const mod = (rel) => import(pathToFileURL(join(serverDir, rel)).href)
+const audit = await mod('sandbox/audit.mjs')
+const dbmod = await mod('db.mjs')
+const db = dbmod.default
+
+const RID = 'aaaaaaaa-1111-2222-3333-444444444444'
+const LEER = 'bbbbbbbb-1111-2222-3333-444444444444'
+const out = { RID }
+
+// runs.repo_id is NOT NULL and foreign_keys is really ON, so the run needs a
+// repository to hang on — the path never gets touched.
+const repoId = db.prepare(\`INSERT INTO repos(name,path,base_branch) VALUES('audit-probe','/nowhere','main') RETURNING id\`).get().id
+db.prepare(\`INSERT OR REPLACE INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,sandbox,sandbox_container)
+  VALUES(?,?,'claude','x','keiner',10,'done',1,'fl-aaaaaaaa')\`).run(RID, repoId)
+dbmod.addEvent(RID, 'started', {})
+dbmod.addEvent(RID, 'sandbox:blocked', { host: 'pypi.example', count: 2 })
+
+mkdirSync(audit.auditPaths(RID).dir, { recursive: true })
+writeFileSync(audit.auditPaths(RID).spec, JSON.stringify({ image: { ref: 'freilauf/agent-claude' } }))
+audit.appendAuditFile(RID, 'egress.jsonl', { at: '2026-09-05T10:00:00.000Z', host: 'api.anthropic.com', action: 'allow' })
+audit.appendAuditFile(RID, 'egress.jsonl', { at: '2026-09-05T10:00:01.000Z', host: 'pypi.example', action: 'deny', rejected_by: 'not_allowed' })
+audit.appendAuditFile(RID, 'docker-events.jsonl', { at: '2026-09-05T10:00:02.000Z', status: 'start' })
+audit.appendAuditFile(RID, 'egress.jsonl', { at: '2026-09-05T10:00:03.000Z', host: 'registry.npmjs.org', action: 'would_deny' })
+audit.appendAuditFile(RID, 'egress.jsonl', { at: '2026-09-05T10:00:04.000Z', host: 'registry.npmjs.org', action: 'would_deny' })
+
+out.lines = audit.buildAuditChain(RID)
+out.denied = audit.blockedHosts(RID)
+out.would = audit.blockedHosts(RID, { action: 'would_deny' })
+
+db.prepare(\`INSERT OR REPLACE INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,sandbox)
+  VALUES(?,?,'claude','x','keiner',10,'done',0)\`).run(LEER, repoId)
+out.empty = audit.buildAuditChain(LEER)
+out.emptyBlocked = audit.blockedHosts(LEER)
+
+process.stdout.write(JSON.stringify(out))
+`)
+    const sub = join(work, 'sub')
+    try {
+      const r = execFileSync(process.execPath, [script, new URL('../server/', import.meta.url).pathname], {
+        encoding: 'utf8',
+        maxBuffer: 8 * 1024 * 1024,
+        env: {
+          ...process.env,
+          FREILAUF_DATA_DIR: join(sub, 'data'),
+          FREILAUF_RUNS_DIR: join(sub, 'runs'),
+          FREILAUF_WORKTREES_DIR: join(sub, 'worktrees'),
+          FREILAUF_PLUGIN_DIR: join(sub, 'plugins'),
+          FREILAUF_SKILLS_HOME: join(sub, 'skillhome'),
+          FREILAUF_SKILLS_STATE: join(sub, 'skills-installed.json'),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      return JSON.parse(r)
+    } catch (err) {
+      return { __error: String(err.stderr ?? err.message ?? err).trim() || String(err) }
+    }
+  })()
+
+  {
+    const { verifyAuditChain } = await import('../server/sandbox/audit.mjs')
+
+    await pruefe('the probe process ran', () => {
+      gleich(auditProbe.__error ?? '', '', 'the child that wrote real audit files came back')
+    })
+
+    await pruefe('the chain links, and every line carries the one before it', () => {
+      const lines = auditProbe.lines ?? []
+      wahr(lines.length >= 6, `header, spec, three file lines, two events and a footer (${lines.length})`)
+      const objs = lines.map(l => JSON.parse(l))
+      gleich(objs[0].kind, 'audit_header', 'the first line is the header')
+      gleich(objs[0].run, auditProbe.RID, 'and it names the run')
+      gleich(objs[0].prev_hash, null, 'the first line has nothing before it')
+      gleich(objs.at(-1).kind, 'audit_footer', 'the last line is the footer')
+      gleich(objs.at(-1).lines, lines.length, 'which names how many lines there are')
+      for (let i = 1; i < objs.length; i++) {
+        gleich(objs[i].prev_hash, objs[i - 1].hash, `line ${i + 1} carries the hash of the line before it`)
+      }
+      wahr(verifyAuditChain(lines).ok, `and the whole thing verifies (${JSON.stringify(verifyAuditChain(lines).problems)})`)
+      // The spec has no time of its own and stands first; everything that does
+      // is in time order, so one sort field is enough for whoever reads it.
+      const timed = objs.filter(o => o.at && !['audit_header', 'audit_footer'].includes(o.kind)).map(o => o.at)
+      gleich(JSON.stringify(timed), JSON.stringify([...timed].sort()), 'the timed records are in time order')
+    })
+
+    await pruefe('an edited, an added and a removed line each break the chain', () => {
+      const lines = auditProbe.lines ?? []
+      const mid = Math.floor(lines.length / 2)
+
+      const edited = [...lines]
+      const obj = JSON.parse(edited[mid])
+      obj.data = { ...(obj.data ?? {}), host: 'somewhere-else.example' }
+      edited[mid] = JSON.stringify(obj)
+      const e1 = verifyAuditChain(edited)
+      falsch(e1.ok, 'an edited line does not verify')
+      wahr(e1.problems.some(p => p.includes('edited')), `and it says the line was edited (${e1.problems[0]})`)
+
+      const added = [...lines]
+      added.splice(mid, 0, lines[mid])
+      falsch(verifyAuditChain(added).ok, 'an added line does not verify')
+
+      const removed = lines.filter((_, i) => i !== mid)
+      falsch(verifyAuditChain(removed).ok, 'a removed line does not verify')
+
+      // Truncation is the one a bare chain would miss: cut the tail and
+      // everything left is internally consistent. The footer's line count is
+      // what catches it.
+      const tr = verifyAuditChain(lines.slice(0, -1))
+      falsch(tr.ok, 'a truncated file does not verify')
+      wahr(tr.problems.some(p => p.includes('footer')), `and it says the end is missing (${tr.problems[0]})`)
+
+      const swapped = [...lines]
+      const tmp = swapped[1]; swapped[1] = swapped[2]; swapped[2] = tmp
+      falsch(verifyAuditChain(swapped).ok, 'two swapped lines do not verify')
+
+      wahr(verifyAuditChain(lines.join('\n')).ok, 'and the verifier reads the file as one string too')
+    })
+
+    await pruefe('a run with no sandbox files still exports a valid chain', () => {
+      const lines = auditProbe.empty ?? []
+      gleich(lines.length, 2, 'header and footer, and nothing in between')
+      wahr(verifyAuditChain(lines).ok, 'and it verifies')
+      falsch(verifyAuditChain([]).ok, 'while an empty file is not an export at all')
+    })
+
+    await pruefe('the proxy log answers both questions: what was blocked, and what would have been', () => {
+      // Audit-only writes `would_deny` for exactly the request a policy in force
+      // writes `deny` for — one file, two readings, which is what makes
+      // "observe, then enforce" a rollout path rather than a transcription.
+      gleich((auditProbe.denied ?? []).length, 1, 'one host was really blocked')
+      gleich(auditProbe.denied?.[0]?.host, 'pypi.example', 'and it is named')
+      gleich((auditProbe.would ?? []).length, 1, 'one host would have been')
+      gleich(auditProbe.would?.[0]?.count, 2, 'counted, not listed twice')
+      gleich((auditProbe.emptyBlocked ?? []).length, 0, 'a run with no proxy log blocked nothing')
+    })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: launch decisions')
+  {
+    // Everything here is about the two decisions the LAUNCH path makes — is this
+    // run sandboxed, and can a policy change be applied to the container that is
+    // already running. Both are pure functions on purpose: the first is §7.3's
+    // matrix plus §8.1's availability rule, and a matrix that could only be
+    // tested on a machine with a container daemon would not be tested at all.
+    const { decideSandbox } = await import('../server/sandbox/spec.mjs')
+    const { sandboxOutcome, classifyPolicyPatch, LIVE_POLICY_PATHS, containerEnv } =
+      await import('../server/sandbox/index.mjs')
+    const { platformSuffix, sandboxPromptSection, splitEnvArgs, createRun } = await import('../server/runner.mjs')
+
+    /** The whole way from four tri-states to what the run row says and the hub writes. */
+    const plan = ({ hub, repo = 'inherit', agent = 'inherit', run = 'inherit',
+      sandboxable = true, allowBypass = true, available = true }) => {
+      const decision = decideSandbox({ hubMode: hub, allowBypass, repo, agent, run, sandboxable })
+      const out = sandboxOutcome({ decision, hubMode: hub, available, unavailableReason: 'no docker' })
+      return { ...out, kinds: out.events.map(e => e[0]), by: out.events.map(e => e[1]?.by ?? null) }
+    }
+
+    await pruefe('hub mode "off": nothing is sandboxed, whatever anybody below asks for', () => {
+      for (const said of ['inherit', 'on', 'off']) {
+        for (const layer of ['repo', 'agent', 'run']) {
+          const p = plan({ hub: 'off', [layer]: said })
+          gleich(p.sandbox, 0, `${layer}=${said}`)
+          gleich(p.problems.length, 0, 'and it is not a refusal — the feature simply is not here')
+          gleich(p.kinds.length, 0, 'and nothing is written down')
+        }
+      }
+    })
+
+    await pruefe('hub mode "available": only an explicit "on" sandboxes', () => {
+      gleich(plan({ hub: 'available' }).sandbox, 0, 'nobody asked')
+      for (const layer of ['repo', 'agent', 'run']) {
+        gleich(plan({ hub: 'available', [layer]: 'on' }).sandbox, 1, `${layer} asked`)
+        // Opting out of something that was not going to happen is a no-op, and
+        // a no-op must not produce a break-glass event on the run.
+        const off = plan({ hub: 'available', [layer]: 'off' })
+        gleich(off.sandbox, 0, `${layer} opted out of nothing`)
+        gleich(off.kinds.length, 0, 'and said nothing about it')
+      }
+    })
+
+    await pruefe('hub mode "default_on": everything is, and opting out is a NAMED bypass', () => {
+      gleich(plan({ hub: 'default_on' }).sandbox, 1, 'nobody said anything')
+      for (const layer of ['repo', 'agent', 'run']) {
+        const p = plan({ hub: 'default_on', [layer]: 'off' })
+        gleich(p.sandbox, 0, `${layer} opted out`)
+        gleich(p.kinds[0], 'sandbox:bypassed', 'and the weakening is written down')
+        gleich(p.by[0], layer, 'naming who did it')
+        gleich(p.problems.length, 0, 'a bypass is not a refusal')
+      }
+    })
+
+    await pruefe('the INNERMOST layer with an opinion decides', () => {
+      gleich(plan({ hub: 'default_on', repo: 'off', agent: 'on' }).sandbox, 1, 'the agent overrules the repo')
+      gleich(plan({ hub: 'default_on', repo: 'off', agent: 'on', run: 'off' }).sandbox, 0, 'and the run overrules the agent')
+      // …and a bypass is judged against what would have happened WITHOUT that
+      // layer: an agent that had already switched it on is what makes the run's
+      // `off` break-glass rather than a no-op.
+      gleich(plan({ hub: 'available', agent: 'on', run: 'off' }).kinds[0], 'sandbox:bypassed', 'a real opt-out')
+      gleich(plan({ hub: 'available', agent: 'off', run: 'off' }).kinds.length, 0, 'nothing to opt out of')
+    })
+
+    await pruefe('bypass not allowed turns an opt-out into a refusal, never into a quiet start', () => {
+      const p = plan({ hub: 'default_on', run: 'off', allowBypass: false })
+      gleich(p.sandbox, 0, 'nothing is started')
+      gleich(p.problems.length, 1, 'and the caller is told why')
+      gleich(p.kinds.length, 0, 'a refusal is not a bypass event')
+      gleich(plan({ hub: 'default_on', run: 'off', allowBypass: true }).kinds[0], 'sandbox:bypassed', 'the other half')
+    })
+
+    await pruefe('hub mode "required": an opt-out is REFUSED at every layer', () => {
+      gleich(plan({ hub: 'required' }).sandbox, 1, 'the ordinary case')
+      for (const layer of ['repo', 'agent', 'run']) {
+        const p = plan({ hub: 'required', [layer]: 'off' })
+        gleich(p.sandbox, 0, `${layer}: nothing is started`)
+        gleich(p.problems.length, 1, 'and it is a problem the form renders')
+        gleich(p.kinds.length, 0, 'never a silent downgrade')
+      }
+      // `sandbox_allow_bypass` cannot loosen `required`: the two say different
+      // things, and the stricter one is the whole point of the mode.
+      gleich(plan({ hub: 'required', run: 'off', allowBypass: true }).problems.length, 1, 'bypass does not open it')
+    })
+
+    await pruefe('a coding agent that cannot be sandboxed: refused under "required", plain otherwise', () => {
+      gleich(plan({ hub: 'required', sandboxable: false }).problems.length, 1, 'required refuses it')
+      gleich(plan({ hub: 'required', sandboxable: false }).sandbox, 0, 'and starts nothing')
+      for (const hub of ['available', 'default_on']) {
+        const p = plan({ hub, sandboxable: false })
+        gleich(p.sandbox, 0, `${hub}: it simply runs on the host`)
+        gleich(p.problems.length, 0, `${hub}: and that is not an error`)
+      }
+    })
+
+    await pruefe('no container runtime: §8.1 — bypassed and SAID, or refused, never silent', () => {
+      const soft = plan({ hub: 'default_on', available: false })
+      gleich(soft.sandbox, 0, 'default_on starts the run')
+      gleich(soft.kinds[0], 'sandbox:bypassed', 'and writes the bypass')
+      gleich(soft.by[0], 'unavailable', 'naming the runtime, not a layer')
+      const asked = plan({ hub: 'available', run: 'on', available: false })
+      gleich(asked.kinds[0], 'sandbox:bypassed', 'an explicit "on" with no runtime is a bypass too')
+      const hard = plan({ hub: 'required', available: false })
+      gleich(hard.sandbox, 0, 'required starts nothing')
+      gleich(hard.problems.length, 1, 'and says why')
+      gleich(hard.kinds.length, 0, 'a refusal is not a bypass')
+      // The one case that must stay quiet: nobody wanted a sandbox anyway.
+      gleich(plan({ hub: 'available', available: false }).kinds.length, 0, 'nothing promised, nothing said')
+    })
+
+    await pruefe('a refused override becomes an event, and does not stop the run', () => {
+      const out = sandboxOutcome({
+        decision: decideSandbox({ hubMode: 'required', repo: 'inherit', agent: 'inherit', run: 'inherit' }),
+        hubMode: 'required', available: true,
+        refused: [{ path: 'network.allow', by: 'repo', wanted: ['evil.example'], kept: [] }],
+      })
+      gleich(out.sandbox, 1, 'the run starts on the higher layer’s value')
+      gleich(out.events[0][0], 'sandbox:override_refused', 'and the refusal is on the record')
+      gleich(out.events[0][1].path, 'network.allow', 'naming the field')
+    })
+
+    // -------------- an unsandboxed run is byte for byte what it was --------------
+
+    await pruefe('an unsandboxed run’s prompt is unchanged, to the byte', () => {
+      const run = { id: 'r1', harness: 'claude', expected_minutes: 30, workdir_effective: '/w' }
+      gleich(sandboxPromptSection(null), '', 'no facts, no section')
+      gleich(platformSuffix(run, 'No branch.', {}, null, null), platformSuffix(run, 'No branch.', {}),
+        'and the new parameter changes nothing when it is not used')
+      falsch(platformSuffix(run, 'No branch.', {}).includes('SANDBOX'), 'no sandbox block anywhere in it')
+    })
+
+    await pruefe('a sandboxed run is told the facts and the one thing it can DO about them', () => {
+      const text = sandboxPromptSection({
+        workdir: '/w/clone', mode: 'allowlist', allow: ['api.anthropic.com', 'github.com'],
+        memory: '8g', cpus: 4, readOnlyRoot: true,
+      })
+      enthaelt(text, '/w/clone', 'the working copy')
+      enthaelt(text, 'api.anthropic.com, github.com', 'the resolved allow list, as the proxy has it')
+      enthaelt(text, '8g', 'the memory')
+      enthaelt(text, 'fl-report access', 'and the sentence the whole escalation path hangs on')
+      enthaelt(text, 'carry on with what you CAN do', 'plus what to do meanwhile')
+      // audit-only must not tell the agent hosts are blocked when they are not:
+      // it would report access it already has, which is noise on somebody's phone.
+      const audit = sandboxPromptSection({ workdir: '/w', mode: 'allowlist', allow: ['a.example'], auditOnly: true })
+      enthaelt(audit, 'not enforced', 'audit-only says so')
+      const none = sandboxPromptSection({ workdir: '/w', mode: 'none', allow: [] })
+      enthaelt(none, 'no network at all', 'and "none" says that instead of listing nothing')
+    })
+
+    await pruefe('createRun writes the frozen decision, and defaults to the old world', async () => {
+      const { default: sdb } = await import('../server/db.mjs')
+      sdb.exec(`INSERT OR IGNORE INTO repos(name, path, base_branch) VALUES('sb-launch-repo', '/tmp/sb-launch-repo', 'main')`)
+      const repoId = sdb.prepare('SELECT id FROM repos WHERE name=?').get('sb-launch-repo').id
+      const common = { repoId, harness: 'claude', prompt: 'p', branchMode: 'keiner', expectedMinutes: 5 }
+
+      const plain = createRun(common)
+      const a = sdb.prepare('SELECT sandbox, sandbox_spec, worktree_kind FROM runs WHERE id=?').get(plain)
+      gleich(a.sandbox, 0, 'a run nobody sandboxed')
+      gleich(a.worktree_kind, 'worktree', 'gets a linked worktree, exactly as before')
+      gleich(a.sandbox_spec, null, 'and no frozen spec at all')
+
+      const boxed = createRun({ ...common, sandbox: 1, sandboxProfileId: 7, sandboxSpec: { runtime: 'docker' } })
+      const b = sdb.prepare('SELECT sandbox, sandbox_profile_id, sandbox_spec, worktree_kind FROM runs WHERE id=?').get(boxed)
+      gleich(b.sandbox, 1, 'a sandboxed run says so from its first moment')
+      gleich(b.sandbox_profile_id, 7, 'with the profile that applied')
+      gleich(b.worktree_kind, 'clone', 'and a clone, because a worktree hangs on the operator’s .git')
+      gleich(JSON.parse(b.sandbox_spec).runtime, 'docker', 'the spec is FROZEN into the row, like or_routing')
+    })
+
+    await pruefe('a runtime that cannot be ASKED is a retry, never an attempt (§11.3)', async () => {
+      // The fuse this defuses: `resume_attempts` is raised before fl-start runs
+      // and RESUME_MAX is 3, so three watcher passes against a daemon that is
+      // merely still starting after a reboot would end the run with
+      // `resume_refused` — for an infrastructure hiccup, not for a CLI that
+      // cannot start. AGENTS.md: "could not try" is not "tried and died".
+      const { prepareSandbox } = await import('../server/sandbox/index.mjs')
+      let err = null
+      try { await prepareSandbox({ id: 'sb-no-daemon', sandbox: 1 }, { name: 'x', path: '/tmp/x' }) }
+      catch (e) { err = e }
+      wahr(!!err, 'with no container runtime the preparation cannot go ahead')
+      wahr(err.sandboxRetry === true, 'and it says so as a RETRY, not as a failure')
+      wahr(String(err.message).length > 0, 'with a sentence a human can read')
+    })
+
+    await pruefe('the container PATH names the directories fl-report is mounted from', () => {
+      // Without this, `fl-report` is not on PATH inside the box and every claude
+      // and cursor hook that calls it by bare name fails — silently, on a run
+      // whose session stands, whose pane is alive and which says `running`.
+      const e = containerEnv({ home: '/runs/x/home', binPaths: ['/home/hub/.local/bin'] })
+      enthaelt(e.PATH, '/home/hub/.local/bin', 'the mounted directory comes first')
+      enthaelt(e.PATH, '/usr/bin', 'and the image’s own directories are still there')
+      gleich(e.HOME, '/runs/x/home', 'HOME is the run’s own (§7.7)')
+      // USER is a LOGIN NAME and `spec.user` is a POLICY word — the two must not
+      // be confused, or a CLI resolving $USER against /etc/passwd disagrees with
+      // itself inside a container nobody can attach to.
+      falsch(e.USER === 'hub', 'USER is not the policy word')
+    })
+
+    // ---------------- live vs. restart (§7.12.3) ----------------
+
+    await pruefe('a policy patch is classified field by field, and the default is RESTART', () => {
+      const table = [
+        [{ network: { allow: ['a.example'] } }, true, 'the allow list: the proxy reloads'],
+        [{ network: { deny: ['b.example'] } }, true, 'the deny list'],
+        [{ network: { auditOnly: false } }, true, 'audit-only → enforce'],
+        [{ network: { methods: ['GET'] } }, true, 'the methods'],
+        [{ network: { presets: ['harness'] } }, true, 'a preset, which is only an allow list'],
+        [{ resources: { memory: '4g' } }, true, 'docker update documents memory'],
+        [{ resources: { cpus: 2 } }, true, '…and cpus'],
+        [{ resources: { pidsLimit: 512 } }, true, '…and the pids limit'],
+        [{ retention: 'keep' }, true, 'retention is bookkeeping, not a container'],
+        [{ network: { mode: 'open' } }, false, 'the network is chosen at creation'],
+        [{ network: { engine: 'iron-proxy' } }, false, 'and so is which proxy there is'],
+        [{ filesystem: { extraMounts: [{ source: '/a', target: '/a' }] } }, false, 'Docker cannot add a mount'],
+        [{ filesystem: { tmpfsSizes: { '/tmp': '8g' } } }, false, 'a wider tmpfs is a new container'],
+        [{ filesystem: { readOnlyRoot: false } }, false, 'so is a writable root'],
+        [{ image: { ref: 'other:1' } }, false, 'a different image'],
+        [{ user: 'root' }, false, 'a different user'],
+        [{ innerSandbox: 'full' }, false, 'the inner sandbox'],
+        [{ secrets: { mode: 'inject' } }, false, 'the environment is set at creation'],
+        [{ runtime: 'podman' }, false, 'and so is the runtime'],
+        [{ resources: { shmSize: '2g' } }, false, 'shm is a creation-time size'],
+        [{ somethingNobodyClassified: true }, false, 'and anything unknown needs a restart, deliberately'],
+      ]
+      for (const [patch, live, why] of table) {
+        gleich(!classifyPolicyPatch(patch).needsRestart, live, `${why}: ${JSON.stringify(patch)}`)
+      }
+      // A patch that touches both goes the restart way as a whole: half a policy
+      // applied live and half of it pending is a state nobody can reason about.
+      const both = classifyPolicyPatch({ network: { allow: ['a'], mode: 'open' } })
+      wahr(both.needsRestart, 'a mixed patch needs the restart')
+      gleich(both.live.length, 1, 'and still knows which half could have been live')
+    })
+
+    await pruefe('the live paths say WHO applies them — the proxy or docker update', () => {
+      gleich(classifyPolicyPatch({ network: { allow: ['a'] } }).proxy, true, 'the proxy hears the network rules')
+      gleich(classifyPolicyPatch({ network: { allow: ['a'] } }).limits, false, '…and docker is not bothered')
+      gleich(classifyPolicyPatch({ resources: { memory: '4g' } }).limits, true, 'docker update hears the limits')
+      gleich(classifyPolicyPatch({ resources: { memory: '4g' } }).proxy, false, '…and the proxy is not reloaded')
+      wahr(LIVE_POLICY_PATHS.includes('network.allow'), 'the table is the source of both answers')
+    })
+  }
 
 } finally {
   rmSync(sandkasten, { recursive: true, force: true })

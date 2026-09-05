@@ -142,6 +142,152 @@ const plugin = {
   },
 
   /**
+   * Running claude inside the Freilauf sandbox (docs/plugins.md, "The sandbox
+   * declaration"; SANDBOX_RESEARCH.md §3.1 and §7.9).
+   *
+   * The inner sandbox is OFF by default and that is the whole argument of §4.3:
+   * claude's own boundary is bubblewrap, bubblewrap inside an unprivileged
+   * container cannot mount a fresh `/proc`, and keeping it would mean weakening
+   * the OUTER boundary (a container AppArmor profile with `userns,` and a
+   * seccomp profile allowing `clone(CLONE_NEWUSER)`) to hold up an inner one
+   * that only ever covered Bash commands anyway. Two boundaries are not
+   * stronger than one; they are two things that break.
+   */
+  sandbox: {
+    supported: true,
+
+    // The image pins the CLI, so a sandboxed run never updates itself (§7.10).
+    // The version is the one MEASURED on this machine on 2026-09-05
+    // (SANDBOX_RESEARCH.md §11a) — a pin, meant to be raised deliberately.
+    image: { dockerfile: 'sandbox/images/claude.Dockerfile', args: { CLAUDE_VERSION: '2.1.261' } },
+
+    // Claude Code's own required hosts, as its network documentation lists them
+    // (https://code.claude.com/docs/en/network-config). `registry.npmjs.org` is
+    // the sixth one there and is deliberately NOT here: it belongs to the
+    // `package-registries` preset, and the CLI itself is pinned in the image
+    // rather than installed at run time.
+    domains: [
+      'api.anthropic.com',
+      'claude.ai',
+      'claude.com',
+      'platform.claude.com',
+      'downloads.claude.ai',
+    ],
+
+    // §7.5.4: a sandboxed run does not update its own CLI and does not send
+    // what the vendor calls non-essential traffic. The first three are
+    // documented Claude Code switches.
+    //
+    // IS_SANDBOX is the fourth, and it is the answer to the open question of
+    // §11.1: claude's "am I inside a recognized sandbox" predicate — the one
+    // that lets `bypassPermissions` run as root — is exactly `IS_SANDBOX=1` or
+    // `CLAUDE_CODE_BUBBLEWRAP`, and it consults no Docker detection at all
+    // [measured 2026-09-05, read out of the shipped 2.1.261 binary]. This
+    // declaration is its SINGLE author: nothing sets it in the shell as well,
+    // because two authors of one fact is how the two come to disagree.
+    env: {
+      DISABLE_AUTOUPDATER: '1',
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      DISABLE_TELEMETRY: '1',
+      IS_SANDBOX: '1',
+    },
+
+    /**
+     * The documented alternative to copying `.credentials.json` into the
+     * container (§7.8): a long-lived token from `claude setup-token`, which the
+     * CLI never rotates — so no copy of the operator's OAuth pair can invalidate
+     * the host session's refresh token. Under `secrets.mode: 'inject'` the
+     * container holds a placeholder and the proxy substitutes the real value on
+     * requests to `api.anthropic.com` alone; under `env` it is passed as the
+     * variable. The value is resolved where every credential is resolved —
+     * `credentialValue('claude', 'oauth_token')`, stored value first, then a
+     * variable the operator named, then the declared one below.
+     */
+    credentials: [{
+      key: 'oauth_token',
+      envKeys: ['CLAUDE_CODE_OAUTH_TOKEN'],
+      injection: { header: 'Authorization', prefix: 'Bearer ', hosts: ['api.anthropic.com'] },
+    }],
+
+    // What the hub reads back out of the per-run home: the transcript is the
+    // activity source, the incident channel and the thing `--resume` continues.
+    stateDirs: ['.claude/projects'],
+
+    /**
+     * Anthropic's own recipe for an unattended run in a container
+     * (https://code.claude.com/docs/en/devcontainer): `bypassPermissions`,
+     * non-root. The mode REFUSES to run as root, which is exactly why the uid
+     * table of §7.7 exists — under a rootful daemon the agent runs as the hub
+     * user, and rootless Docker's container root is reached through
+     * `IS_SANDBOX=1` above.
+     *
+     * `settingSources: 'user'` is the second half, and it is a fence rather
+     * than a preference: a `.claude/settings.json` or `settings.local.json` in
+     * the agent's OWN worktree can carry `disableAllHooks: true`, and the hook
+     * resolver reads the merged settings — so six committed lines silence
+     * `_working`, `_waiting`, `Stop` and `_api_error` for that run, and the
+     * hub's only symptom is a run that reports nothing at all [measured
+     * 2026-09-05, read out of the shipped binary; §11a.3]. Claude's own
+     * plugin-eval runner uses the same lever on itself. It is declared as a
+     * SANDBOX override and not in `launch` on purpose: outside a sandbox the
+     * operator's project settings are theirs to use, and inside one `$HOME` is
+     * the seeded per-run home, so dropping the project sources costs the run
+     * nothing the hub put there (see `seedHome` below — both files it writes
+     * are USER-level).
+     */
+    launchOverrides: () => ({ mode: 'bypassPermissions', settingSources: 'user' }),
+
+    /**
+     * The inner layer, per level. `full` is deliberately absent: claude's
+     * sandbox cannot run unweakened inside an unprivileged container, so
+     * declaring the level would promise something the container cannot give.
+     * `enableWeakerNestedSandbox` is Claude Code's own name for what it costs.
+     */
+    innerSandbox: {
+      off: { settings: { sandbox: { enabled: false } } },
+      weak: { settings: { sandbox: { enabled: true, enableWeakerNestedSandbox: true } } },
+    },
+
+    /**
+     * The per-run home. Two files, and both replace something the hub does on
+     * the HOST today:
+     *
+     *  - `.claude.json` carries the trust flag `fl-start`'s `trust_workdir()`
+     *    writes into the operator's own file, plus `hasCompletedOnboarding`,
+     *    because a container home has never seen the onboarding and claude
+     *    would stop at it with nobody to answer. The trust flag is not
+     *    cosmetic: hooks are skipped entirely in a workspace whose trust was
+     *    never accepted [measured, §11a.3], so without it a sandboxed run
+     *    reports nothing;
+     *  - `.claude/settings.json` carries the inner-sandbox decision. The hooks
+     *    are NOT here: they travel as `--settings <json>` on the command line
+     *    (`claudeSettingsJson()` in runner.mjs), which outranks every settings
+     *    file but managed policy [measured, §11a.3] — inside the sandbox
+     *    exactly as outside it.
+     *
+     * Both paths are at USER level in the run's own home (`$HOME/.claude.json`
+     * and `$HOME/.claude/settings.json`), which is what makes the
+     * `settingSources: 'user'` override above free: nothing the hub seeds is
+     * dropped with the project and local sources.
+     *
+     * The operator's whole `~/.claude` is never copied (§7.7): skills, plugins,
+     * `settings.local.json` and the conversation history stay outside.
+     */
+    seedHome({ run = {}, spec = {} } = {}) {
+      const workdir = run.workdir_effective || run.workdir || null
+      const claudeJson = { hasCompletedOnboarding: true }
+      if (workdir) claudeJson.projects = { [workdir]: { hasTrustDialogAccepted: true } }
+
+      const level = spec.innerSandbox ?? 'off'
+      const inner = plugin.sandbox.innerSandbox[level] ?? plugin.sandbox.innerSandbox.off
+      return [
+        { path: '.claude.json', content: JSON.stringify(claudeJson, null, 2) + '\n', mode: 0o600 },
+        { path: '.claude/settings.json', content: JSON.stringify(inner.settings ?? {}, null, 2) + '\n' },
+      ]
+    },
+  },
+
+  /**
    * The budget gate for a claude run.
    *
    * Three windows, three thresholds, and each window is measured against ITS

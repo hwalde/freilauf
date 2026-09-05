@@ -2118,6 +2118,100 @@ try {
     sauber(p)
     await p.close()
   })
+  // ------------------------------------------------------------------
+  gruppe('A21 — the sandbox block: only where the coding agent has one')
+  //
+  // The same mechanism as the goal block, and the same non-negotiable half of
+  // it: hidden means DISABLED. A hidden field that still submits is a network
+  // policy the operator can neither see nor correct — and here the belief it
+  // would leave behind ("this run is fenced off") is the one a sandbox feature
+  // must never create. The difference is that this block does not vanish: it
+  // stays and says why, because "the field is gone" reads as "there is no
+  // question here" when the truth is "this run goes to the host".
+  {
+    const setzeModus = (v) => db.prepare(
+      `INSERT INTO settings(key,value) VALUES('sandbox_mode',?)
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(v)
+
+    await pruefe('switching to a coding agent that cannot be sandboxed hides AND disables the fields', async () => {
+      setzeModus('available')
+      try {
+        const p = await neueSeite(`/runs/new?repo=${repoId}`)
+        // Every built-in coding agent declares a sandbox block today, so the
+        // list is narrowed here the way the OpenRouter test puts an option in:
+        // what is under test is the rule in hub.js, not who is on the list.
+        await p.evaluate(() => {
+          document.querySelector('[data-sandbox-block]').dataset.sandboxHarnesses = 'claude'
+        })
+        await p.selectOption('select[name=harness]', 'claude')
+        await wartePage(p, () => document.querySelector('[data-sandbox-controls]').hidden === false,
+          null, 'the sandbox fields to be there for a coding agent that has one')
+        gleich(await p.$eval('select[name=sandbox]', el => el.disabled), false, 'and to be live')
+        gleich(await p.$eval('[data-sandbox-unsupported]', el => el.hidden), true, 'no note while it is supported')
+
+        // What the operator typed, so the next assertion can show it survives.
+        // The editor is folded away by default, so it is opened the way a hand
+        // opens it.
+        await p.click('details.sandbox-overrides summary')
+        await p.fill('textarea[name=sandbox_overrides]', '{"network": {"mode": "none"}}')
+        await p.selectOption('select[name=sandbox]', 'on')
+
+        await p.selectOption('select[name=harness]', 'opencode')
+        await wartePage(p, () => document.querySelector('[data-sandbox-controls]').hidden === true,
+          null, 'the fields to go away for a coding agent that has none')
+        gleich(await p.$eval('select[name=sandbox]', el => el.disabled), true,
+          'the tri-state is DISABLED, not merely hidden — a hidden field must not still submit')
+        gleich(await p.$eval('textarea[name=sandbox_overrides]', el => el.disabled), true,
+          'and neither may the overrides travel')
+        gleich(await p.$eval('select[name=sandbox_profile_id]', el => el.disabled), true, 'nor the profile')
+        gleich(await p.$eval('[data-sandbox-unsupported]', el => el.hidden), false,
+          'and the block SAYS why instead of vanishing')
+
+        // Back again: nothing was thrown away. Switching a coding agent back
+        // and forth must not cost what was typed, exactly as with the goal.
+        await p.selectOption('select[name=harness]', 'claude')
+        await wartePage(p, () => document.querySelector('[data-sandbox-controls]').hidden === false,
+          null, 'the fields to come back')
+        gleich(await p.$eval('textarea[name=sandbox_overrides]', el => el.value), '{"network": {"mode": "none"}}',
+          'the overrides survived the round trip')
+        gleich(await p.$eval('select[name=sandbox]', el => el.value), 'on', 'and so did the tri-state')
+        gleich(await p.$eval('select[name=sandbox]', el => el.disabled), false, 'enabled again')
+        sauber(p)
+        await p.close()
+      } finally { setzeModus('') }
+    })
+
+    await pruefe('the overrides editor is folded away, and opens on the summary', async () => {
+      // Folded because it is the exception, not the rule: an always-open wall
+      // of JSON is how people learn to stop reading a form.
+      setzeModus('available')
+      try {
+        const p = await neueSeite(`/runs/new?repo=${repoId}`)
+        gleich(await p.$eval('details.sandbox-overrides', el => el.open), false, 'closed with nothing in it')
+        await p.click('details.sandbox-overrides summary')
+        await wartePage(p, () => document.querySelector('details.sandbox-overrides').open === true,
+          null, 'the editor to open')
+        wahr(await p.isVisible('textarea[name=sandbox_overrides]'), 'and the field to be reachable')
+        sauber(p)
+        await p.close()
+      } finally { setzeModus('') }
+    })
+
+    await pruefe('with the hub mode off there is no block at all', async () => {
+      // The state every installation without a container runtime is in: the
+      // form must be byte for byte the one it has always been.
+      const p = await neueSeite(`/runs/new?repo=${repoId}`)
+      gleich(await p.$$eval('[data-sandbox-block]', els => els.length), 0, 'nothing rendered')
+      // And the driver does not fall over the absence — it is the same change
+      // listener that drives the provider cascade next to it.
+      await p.selectOption('select[name=harness]', 'opencode')
+      await wartePage(p, () => document.getElementById('prov-label').hidden === false, null,
+        'the rest of the form to keep working')
+      sauber(p)
+      await p.close()
+    })
+  }
+
 } catch (err) {
   console.log(`\nAborted: ${err.stack}`)
   zaehler.fehler.push({ name: 'Test run', grund: err.message })

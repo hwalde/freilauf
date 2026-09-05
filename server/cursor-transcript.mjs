@@ -16,11 +16,19 @@
 //              installing one, and then this is the only one left.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
 import { createHash } from 'node:crypto'
+import { HOME } from './util.mjs'
+import { agentHome } from './sandbox/exec.mjs'
 import { env } from './env.mjs'
 
-const DATA_DIR = () => env('CURSOR_DIR') ?? process.env.CURSOR_DATA_DIR ?? `${homedir()}/.cursor`
+/**
+ * Where cursor keeps its data for a given home. `FREILAUF_CURSOR_DIR` outranks
+ * everything, because it is the suite's fence: a test that reads the operator's
+ * real transcripts is not a test. Otherwise the home decides — the host home for
+ * an ordinary run, the run's own home for a sandboxed one (§7.7), and
+ * `agentHome()` answers with the host home for both when no sandbox is involved.
+ */
+const DATA_DIR = (home = HOME) => env('CURSOR_DIR') ?? process.env.CURSOR_DATA_DIR ?? join(home, '.cursor')
 
 /**
  * cursor's own slug rule, read from the binary (2026.08.11-e8db854): every
@@ -30,11 +38,15 @@ const DATA_DIR = () => env('CURSOR_DIR') ?? process.env.CURSOR_DATA_DIR ?? `${ho
  * characters of its own sha256 — that one writes elsewhere, but the variant is
  * returned as a fallback so a rename inside cursor does not blind the hub
  * silently.
+ *
+ * The slug is derived from the WORKDIR, and a sandboxed run's workdir is the
+ * same string inside and outside the container — only the home it hangs under
+ * moves, which is what the second parameter is.
  */
-export function projectDirs(workdir) {
+export function projectDirs(workdir, home = HOME) {
   const slug = String(workdir ?? '').replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '')
   if (!slug) return []
-  const full = join(DATA_DIR(), 'projects', slug)
+  const full = join(DATA_DIR(home), 'projects', slug)
   if (full.length <= 92) return [full]
   return [full, `${full.slice(0, 84)}-${createHash('sha256').update(full).digest('hex').slice(0, 7)}`]
 }
@@ -50,7 +62,7 @@ export function transcriptPath(run) {
   if (!run?.workdir_effective || run.harness !== 'cursor') return null
   const startMs = run.started_at ? Date.parse(run.started_at.replace(' ', 'T') + 'Z') - 60_000 : 0
   let best = null
-  for (const dir of projectDirs(run.workdir_effective)) {
+  for (const dir of projectDirs(run.workdir_effective, agentHome(run))) {
     const base = join(dir, 'agent-transcripts')
     if (!existsSync(base)) continue
     let ids = []

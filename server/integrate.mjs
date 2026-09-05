@@ -38,6 +38,15 @@ import { notifyRun, doneText, completeFollowUp } from './reports.mjs'
 import { vorfallMelden, offeneVorfaelle, vorfallVerwerfen } from './incidents.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { fallbackTitle, TITLE_MAX } from './title.mjs'
+// The seam of SANDBOX_RESEARCH.md §7.4.4. Every git command this module runs
+// against a RUN's working copy goes through it, because on a sandboxed run that
+// directory is a clone whose `.git/config` and `.git/hooks` belong to the agent
+// — and `core.fsmonitor`, `core.sshCommand` and `diff.external` are commands
+// git executes. What stays on the host, deliberately, is every `git -C
+// repo.path` and every command in the integration worktree: those are the hub's
+// own repository and the hub's own worktree, and no agent ever writes in them.
+import { runGit } from './sandbox/exec.mjs'
+import { collectRunTip, isClone } from './sandbox/clone.mjs'
 import { t } from './i18n.mjs'
 import { env } from './env.mjs'
 
@@ -299,11 +308,21 @@ async function hasOrigin(repo) {
   return (await sh('git', ['-C', repo.path, 'remote', 'get-url', 'origin'])).ok
 }
 
-/** The commit a run delivers. */
+/**
+ * The commit a run delivers — and, for a sandboxed run, the step that makes it
+ * reachable from the operator's repository at all (§7.4.3).
+ *
+ * `collectRunTip()` is called UNCONDITIONALLY and is exactly the old `rev-parse
+ * HEAD` for a linked worktree; only a clone's tip needs the extra fetch. It sits
+ * here, in `tipOf()`, rather than at the head of the finish gate, because every
+ * question that follows a tip — the merge-base, the merge-tree dry run, the
+ * merge itself, the backup branch, a conflict run's start point — is asked in
+ * `repo.path` about a sha this function returned. One call site, so a new
+ * consumer of a tip cannot forget the collection and quietly merge nothing.
+ */
 async function tipOf(run) {
   if (!run.workdir_effective || !existsSync(run.workdir_effective)) return null
-  const r = await sh('git', ['-C', run.workdir_effective, 'rev-parse', 'HEAD'])
-  return r.ok ? r.stdout.trim() : null
+  return collectRunTip(run)
 }
 /** The same, for reports.mjs: "has the worktree moved past what was merged?" */
 export const tipOfRun = tipOf
@@ -320,17 +339,35 @@ async function baseShaOf(run, repo, tip) {
   return r.ok ? r.stdout.trim() : null
 }
 
-/** Uncommitted work that is the AGENT's, as a list of paths. */
+/**
+ * Uncommitted work that is the AGENT's — `{ files, unknown }`.
+ *
+ * The second field is the whole point, and it was a latent trap before the
+ * sandbox made it fire: this used to answer `[]` when the git call FAILED, and
+ * at every call site `[]` means "clean", which means "merge it". Through
+ * `runGit()` a sandboxed run whose container is gone gets a REFUSAL rather than
+ * an answer (running `status` on an agent-owned clone would execute a
+ * `filter.<n>.clean` driver a tracked `.gitattributes` selects — measured), and
+ * a refusal read as "clean" would let the finish gate merge a run whose
+ * uncommitted state nobody ever looked at. That is precisely the failure this
+ * check exists to prevent.
+ *
+ * So `unknown: true` means "nobody could tell", and every caller holds on it —
+ * the same instinct `cleanupWorktrees()` already had with `!dirty.ok`, and the
+ * same family as `--no-optional-locks` returning an empty status.
+ */
 async function dirtyFiles(run, repo) {
-  if (!run.workdir_effective || !existsSync(run.workdir_effective)) return []
+  if (!run.workdir_effective || !existsSync(run.workdir_effective)) return { files: [], unknown: false }
   // --no-optional-locks so the hub does not fight the agent's own git commands
   // over the index lock: a status that refreshes the index can block one.
   // --no-optional-locks is a GIT-level option and has to stand before the
   // subcommand; after it, git rejects it as unknown and the status comes back
   // empty — which reads as "clean" and would let every dirty worktree through.
-  const r = await sh('git', ['-C', run.workdir_effective, '--no-optional-locks', 'status', '--porcelain'])
-  if (!r.ok) return []
-  return foreignChanges(r.stdout, ownWorktreePaths(repo, run.harness))
+  // The seam puts `-C <workdir>` in front of it, on the host or in the
+  // container; the option order that matters is preserved either way.
+  const r = await runGit(run, ['--no-optional-locks', 'status', '--porcelain'])
+  if (!r.ok) return { files: [], unknown: true }
+  return { files: foreignChanges(r.stdout, ownWorktreePaths(repo, run.harness)), unknown: false }
 }
 
 /**
@@ -429,8 +466,16 @@ export async function backupBranch(runId) {
   if (!tip || !run.base_sha || tip === run.base_sha) return null
   const branch = run.branch_reported || run.branch_expected
   const ref = branch || `run/${kurzid(runId)}`
-  const r = branch
-    ? await sh('git', ['-C', run.workdir_effective, 'push', '-u', 'origin', branch], { timeout: 180_000 })
+  // The push from the run's own working copy is the readable one — it sets the
+  // upstream the agent's branch then carries. It is only available where that
+  // working copy's `origin` IS the remote, which a linked worktree's is and a
+  // sandboxed run's CLONE is not: there `origin` is the operator's repository
+  // (§7.4.2), so pushing "to origin" from inside would write into the checkout
+  // instead of the backup. `tipOf()` has just made the tip reachable in
+  // repo.path, so the second form is exactly as good and is what a clone takes.
+  const fromWorkdir = branch && !isClone(run)
+  const r = fromWorkdir
+    ? await runGit(run, ['push', '-u', 'origin', branch], { timeout: 180_000 })
     : await sh('git', ['-C', repo.path, 'push', 'origin', `${tip}:refs/heads/${ref}`], { timeout: 180_000 })
   if (!r.ok) return null
   addEvent(runId, 'branch_backed_up', { ref })
@@ -448,8 +493,13 @@ export async function backupBranch(runId) {
 export async function runFinishCheck(run, { force = false } = {}) {
   const repo = getRepo(run.repo_id)
   if (!repo) return { state: 'error', files: [], error: 'repo gone' }
-  const dirty = await dirtyFiles(run, repo)
-  if (dirty.length) return { state: 'awaiting_commit', files: dirty }
+  const dirt = await dirtyFiles(run, repo)
+  // Nobody could read the worktree. That is NOT "clean": holding costs a check
+  // every few seconds, merging a run whose uncommitted state was never looked at
+  // costs the work. 'error' is exactly the hold this needs — applyCheckResult()
+  // keeps the run in the gate and schedules the next check.
+  if (dirt.unknown) return { state: 'error', files: [], error: 'the working copy could not be read' }
+  if (dirt.files.length) return { state: 'awaiting_commit', files: dirt.files }
 
   const tip = await tipOf(run)
   if (!tip) return { state: 'error', files: [], error: 'worktree gone' }
@@ -586,7 +636,16 @@ export async function finishGate(runId, text, via = 'http') {
  * work that nobody merges is exactly the work that must not live on one disk.
  */
 async function finishKept(run, repo, via) {
-  const dirty = await dirtyFiles(run, repo)
+  const dirt = await dirtyFiles(run, repo)
+  // Same rule as the gate's: not knowing whether there is uncommitted work is a
+  // reason to wait, never to push the branch and call the run over.
+  if (dirt.unknown) {
+    if (run.finish_state !== 'checking') addEvent(run.id, 'finish_error', { error: 'the working copy could not be read' })
+    setFinishState(run.id, 'checking')
+    scheduleNext(run)
+    return { hold: true, message: null }
+  }
+  const dirty = dirt.files
   if (dirty.length) {
     setFinishState(run.id, 'awaiting_commit')
     if (run.finish_state !== 'awaiting_commit' || via === 'http') {
@@ -1113,10 +1172,13 @@ async function filesOfRun(run, repo) {
   const out = new Set()
   if (!run.workdir_effective || !existsSync(run.workdir_effective)) return out
   if (run.base_sha) {
-    const r = await sh('git', ['-C', run.workdir_effective, 'diff', '--name-only', run.base_sha])
+    const r = await runGit(run, ['diff', '--name-only', run.base_sha])
     if (r.ok) for (const f of r.stdout.split('\n').map(s => s.trim()).filter(Boolean)) out.add(f)
   }
-  for (const f of await dirtyFiles(run, repo)) out.add(f)
+  // A refused read adds nothing here: this list only decides how URGENTLY the
+  // other running agents are told that the base branch moved, and an empty
+  // answer degrades that to the ordinary note (§"main has moved").
+  for (const f of (await dirtyFiles(run, repo)).files) out.add(f)
   return out
 }
 
@@ -1153,7 +1215,14 @@ export async function escalate(runId, reason) {
     return escalate(run.resolves_run_id, 'resolver_failed')
   }
   const wasWaiting = !!run.finish_state
-  const dirty = await dirtyFiles(run, repo)
+  const dirt = await dirtyFiles(run, repo)
+  // The escalation is the end of the ladder — there is nothing left to hold for,
+  // so "could not tell" is treated as "there may be leftovers": the operator is
+  // shown the block rather than being told the branch was clean. Naming nothing
+  // and merging would be the one irreversible reading of an unread worktree.
+  // A plain English literal, like every other text in this block: it travels
+  // into a notification and into the agent's session, never into the UI.
+  const dirty = dirt.unknown ? ['(the working copy could not be read — check it by hand)'] : dirt.files
 
   if (wasWaiting) {
     // A follow-up keeps the status the run already had: a 'failed' run whose
@@ -1478,15 +1547,20 @@ export async function assessUnmerged(runId) {
   // delivered or the original needs another answer.
   if (isResolverRun(run)) { await resolverEnded(run); return null }
   if (!run.base_sha) return null
-  const dirty = await dirtyFiles(run, repo)
-  const r = await sh('git', ['-C', run.workdir_effective, 'rev-list', '--count', `${run.base_sha}..HEAD`])
+  const dirt = await dirtyFiles(run, repo)
+  const r = await runGit(run, ['rev-list', '--count', `${run.base_sha}..HEAD`])
   const commits = r.ok ? Number(r.stdout.trim()) || 0 : 0
-  const status = classifyUnmerged({ commits, dirty: dirty.length })
+  // "Could not tell" counts as leftovers here. This assessment decides whether
+  // the operator is shown a run's remains at all, and 'nothing' is the one
+  // answer that makes them invisible — never the right reading of a worktree
+  // nobody managed to look at. The event says which of the two it was.
+  const dirtyCount = dirt.unknown ? 1 : dirt.files.length
+  const status = classifyUnmerged({ commits, dirty: dirtyCount })
   db.prepare('UPDATE runs SET merge_status=? WHERE id=?').run(status, runId)
-  addEvent(runId, 'merge_assessed', { status, commits, dirty: dirty.length })
+  addEvent(runId, 'merge_assessed', { status, commits, dirty: dirtyCount, dirty_unknown: dirt.unknown || undefined })
   // Commits nobody merged are commits that must not live on one disk alone.
   if (['unmerged_commits', 'unmerged_both'].includes(status)) await backupBranch(runId)
-  return { status, commits, dirty: dirty.length }
+  return { status, commits, dirty: dirtyCount, dirtyUnknown: dirt.unknown }
 }
 
 /** The paragraph that belongs under a failed/aborted notification. */
@@ -1525,20 +1599,38 @@ export async function mergeByHand(runId, leftovers = null) {
   if (!repo) return { ok: false, error: t('api.unknown_repo') }
   addEvent(runId, 'merge_manual', { action: leftovers ? `${leftovers}+merge` : 'merge' })
 
+  // The rescue path, all four of it through the seam: this WRITES in the run's
+  // working copy, which is the one place where running host git against an
+  // agent-written `.git` would be command execution rather than a display fact.
+  // `hostFallback: 'masked'` on all four: these WRITE in the run's working copy,
+  // and on a sandboxed clone whose container is gone the plain host fallback is
+  // refused by design — a tracked `.gitattributes` naming a `filter.<n>.clean`
+  // driver still fires on `status`, `add -A` and `diff HEAD` under the ordinary
+  // hardened flags (measured). Masking renames the clone's `.git/config` aside
+  // for the duration of the call, which was measured inert against exactly these
+  // commands. It is the operator's explicit click, and it has to happen
+  // somewhere.
+  const rescue = { hostFallback: 'masked' }
   if (leftovers === 'commit') {
-    await sh('git', ['-C', run.workdir_effective, 'add', '-A'])
+    await runGit(run, ['add', '-A'], rescue)
     // This is the AGENT's worktree, not the operator's checkout — committing
     // here is the hub tidying up after its own run, which is why it is allowed.
-    await sh('git', ['-C', run.workdir_effective,
-      '-c', 'user.name=Freilauf', '-c', 'user.email=Freilauf@localhost',
-      'commit', '-m', `Leftover changes from run ${kurzid(runId)}, committed by Freilauf on the operator's request`])
+    await runGit(run, ['-c', 'user.name=Freilauf', '-c', 'user.email=Freilauf@localhost',
+      'commit', '-m', `Leftover changes from run ${kurzid(runId)}, committed by Freilauf on the operator's request`], rescue)
   } else if (leftovers === 'discard') {
-    await sh('git', ['-C', run.workdir_effective, 'checkout', '--', '.'])
-    await sh('git', ['-C', run.workdir_effective, 'clean', '-fd'])
+    await runGit(run, ['checkout', '--', '.'], rescue)
+    await runGit(run, ['clean', '-fd'], rescue)
   }
 
-  const dirty = await dirtyFiles(run, repo)
-  if (dirty.length) {
+  const dirt = await dirtyFiles(run, repo)
+  // Not knowing is not permission. "Merge now" is deliberate, but it is a
+  // decision about work the operator was shown — and here nobody was shown
+  // anything, so the answer is a readable refusal rather than a merge.
+  if (dirt.unknown) {
+    db.prepare(`UPDATE runs SET merge_status='blocked_dirty' WHERE id=?`).run(runId)
+    return { ok: false, error: t('sandbox.lifecycle.dirt_unknown') }
+  }
+  if (dirt.files.length) {
     db.prepare(`UPDATE runs SET merge_status='blocked_dirty' WHERE id=?`).run(runId)
     return { ok: false, error: t('merge.err_still_dirty') }
   }

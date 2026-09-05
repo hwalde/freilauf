@@ -177,6 +177,94 @@ const plugin = {
     project: ['.opencode/skill', '.claude/skills', '.agents/skills'],
   },
 
+  /**
+   * Running opencode inside the Freilauf sandbox (docs/plugins.md, "The sandbox
+   * declaration"; SANDBOX_RESEARCH.md §3.2 and §7.9).
+   *
+   * opencode has no sandbox of its own — permissions and nothing else — so
+   * there is nothing to switch off and no `innerSandbox` mapping. What it does
+   * have is a bridge the hub installed into the operator's home, and a
+   * container home that does not carry it is a run that never reports an API
+   * error: the silent failure this hub has a rule about.
+   */
+  sandbox: {
+    supported: true,
+
+    // Version pin: MEASURED on this machine on 2026-09-05 (SANDBOX_RESEARCH.md
+    // §11a.4).
+    image: { dockerfile: 'sandbox/images/opencode.Dockerfile', args: { OPENCODE_VERSION: '1.18.29' } },
+
+    // opencode's own two hosts (§3.2): the model catalog and Zen. The model
+    // traffic goes to whichever provider the run picked, and that is the
+    // `provider` preset's job — a harness must not have to list every vendor a
+    // run might use.
+    domains: ['opencode.ai', 'models.dev'],
+
+    env: { OPENCODE_DISABLE_AUTOUPDATE: '1', DO_NOT_TRACK: '1' },
+
+    /**
+     * Defence in depth, on top of the container rather than instead of it:
+     * `--auto` approves everything that would otherwise ask, but an explicit
+     * `deny` still holds (§3.2). Docker is the documented example, and it is the
+     * right one — a container runtime reached from inside the sandbox is a way
+     * back out of it. This block is data; `modelArgs()` below merges it into
+     * `OPENCODE_CONFIG_CONTENT` for a run that carries `sandbox`.
+     */
+    permission: { bash: { 'docker *': 'deny', 'podman *': 'deny' } },
+
+    // What the hub reads back: `opencode.db` is the activity source, the token
+    // and cost figures, and the root session id `--session` resumes with.
+    //
+    // These paths — and the seeded ones below — are the `$HOME` fallbacks.
+    // opencode resolves its data directory as `$XDG_DATA_HOME` first and only
+    // then `$HOME/.local/share`, and its config the same way through
+    // `$XDG_CONFIG_HOME` [measured 2026-09-05, §11a.4]: **XDG outranks HOME**.
+    // So the image must not set either variable, or the state would be written
+    // somewhere the hub does not read and the seeded bridge somewhere opencode
+    // does not look — silently, in both directions.
+    stateDirs: ['.local/share/opencode'],
+
+    /**
+     * The per-run home.
+     *
+     * The bridge is read from the copy `setup/02-install-scripts.sh` installed,
+     * rather than embedded here: a second copy of that file is a second copy to
+     * keep current, and the one that went stale would be the one running in the
+     * sandbox. Its absence is a hard failure on purpose — a sandboxed opencode
+     * run without it starts, works and reports no API error at all, and a fault
+     * nobody is told about is the most expensive shape there is.
+     *
+     * `auth.json` is opencode's own credential store and is copied verbatim
+     * when it exists. Under `secrets.mode: 'inject'` it is left out entirely:
+     * the placeholder shape of that file is not established anywhere, and a
+     * guessed one would be a run that fails at its first call while looking
+     * like a provider outage.
+     */
+    seedHome({ spec = {} } = {}) {
+      const files = []
+      const bridge = join(homedir(), '.config', 'opencode', 'plugins', 'freilauf.js')
+      let content
+      try {
+        content = readFileSync(bridge, 'utf8')
+      } catch {
+        throw new Error(`opencode: ${bridge} is missing — run setup/02-install-scripts.sh. `
+          + 'Without the bridge a sandboxed opencode run reports neither its attention nor its API errors.')
+      }
+      files.push({ path: '.config/opencode/plugins/freilauf.js', content })
+
+      if (spec.secrets?.mode !== 'inject') {
+        try {
+          files.push({
+            path: '.local/share/opencode/auth.json',
+            content: readFileSync(join(homedir(), '.local', 'share', 'opencode', 'auth.json'), 'utf8'),
+            mode: 0o600,
+          })
+        } catch { /* no store on the host — the key reaches the run as a variable */ }
+      }
+      return files
+    },
+  },
+
   pulseId: (run) => run.provider ?? null,
   pulseTargets: {},
 
@@ -299,6 +387,17 @@ const plugin = {
     const extern = {}
     for (const dir of opts?.externalDirs ?? []) extern[join(dir, '*')] = 'allow'
     if (Object.keys(extern).length) cfg.permission = { external_directory: extern }
+
+    // Inside the sandbox the declared permission block rides along (see
+    // `sandbox.permission` above). It is merged per tool rather than assigned,
+    // so it can never take the `external_directory` allowances away from a run
+    // that still has to write its report. `run.sandbox` is 0/undefined for
+    // every run outside a sandbox, which is exactly the old code path.
+    if (run?.sandbox) {
+      for (const [tool, rules] of Object.entries(plugin.sandbox.permission ?? {})) {
+        cfg.permission = { ...(cfg.permission ?? {}), [tool]: { ...(cfg.permission?.[tool] ?? {}), ...rules } }
+      }
+    }
 
     // One exit, because the permission block belongs to EVERY opencode run —
     // also the two that leave early below. A run without a model, or a legacy

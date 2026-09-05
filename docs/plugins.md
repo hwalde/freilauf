@@ -317,6 +317,7 @@ and does without.
 | `gate` | `{label?, switchKey?, fields[], check(ctx, values, run)}` (optional) | the budget gate for runs on this coding agent — claude and cursor declare one |
 | `llm` | `{schema, overhead?, models(ctx), complete(ctx, req)}` (optional) | this coding agent can answer the hub's own questions; see below |
 | `launch` | `{promptMode, args[], interactiveArgs?, resume?, bin?, sessionTag?, installHint?, stderrLog?, submitNudge?, promptFile?}` (optional) | how `bin/fl-start` calls this CLI. **Without it an external coding agent cannot start a run at all**; see "The launch declaration" |
+| `sandbox` | `{supported, image?, domains?, env?, credentials?, seedHome?, stateDirs?, launchOverrides?, innerSandbox?}` (optional) | how this coding agent runs inside a container. **Without it the sandbox is not offered for this coding agent at all** — the same shape as an absent `launch` meaning "cannot start a run"; `sandboxable(id)` is the question the forms ask. Validated by `validateDescriptor()`, and a malformed block is refused rather than dropped; see "The sandbox declaration" |
 | `pulseId(run)` | fn → string\|null | which pulse target to check while this run is active; `null` = explicitly *not monitored*, which is not the same as healthy |
 | `pulseTargets` | object | extra pulse targets `{id: {url, okStatus[]}}` beyond the provider plugins (claude contributes `anthropic`) |
 | `logPatterns` | `[{typ, re}]` | narrow regexes for the pipe-pane log scan; `typ` ∈ `TYPEN` from `detect.mjs` |
@@ -692,6 +693,165 @@ command line, and both produce the same argv). It is not read for them —
 third party's coding agent is read from, written down where the rest of that
 plugin lives. **Keep the two in step if a command line ever changes.**
 
+### The sandbox declaration
+
+Freilauf can run an agent inside a container: the process, its home and its
+network, with the tmux session still on the host so everything else about a run
+— the terminal, the watcher, the kill button, the integrator — stays what it
+was. What that container has to hold is different for every CLI, and only the
+plugin knows it. So a coding agent declares it:
+
+```js
+sandbox: {
+  supported: true,
+  image: { dockerfile: 'sandbox/images/claude.Dockerfile', args: { CLAUDE_VERSION: '2.1.258' } },
+  domains: ['api.anthropic.com', 'claude.ai', 'platform.claude.com'],
+  env: { DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', IS_SANDBOX: '1' },
+  credentials: [{
+    key: 'oauth_token',
+    envKeys: ['CLAUDE_CODE_OAUTH_TOKEN'],
+    injection: { header: 'Authorization', prefix: 'Bearer ', hosts: ['api.anthropic.com'] },
+  }],
+  stateDirs: ['.claude/projects'],
+  launchOverrides: () => ({ mode: 'bypassPermissions', settingSources: 'user' }),
+  innerSandbox: {
+    off:  { settings: { sandbox: { enabled: false } } },
+    weak: { settings: { sandbox: { enabled: true, enableWeakerNestedSandbox: true } } },
+  },
+  seedHome({ home, run, ctx, spec }) {
+    return [{ path: '.claude.json', content: '…', mode: 0o600 }]
+  },
+}
+```
+
+**A plugin that declares nothing loses nothing.** Its runs start, work, report
+and merge exactly as they do today; the sandbox is simply not offered for that
+coding agent, and a repo whose default is "sandbox on" meeting such an agent
+produces a readable form problem rather than a run that dies at launch. That is
+the same rule as `launch`: the capability is the declaration, and its absence is
+an answer.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `supported` | boolean | must be an explicit `true` to be offered. `sandboxable(id)` in `server/plugins/registry.mjs` is this field and nothing else — a package that carries half a declaration is not handed the boundary on the strength of the half |
+| `image` | `{ref}` or `{dockerfile, args?}` (optional) | the image a run on this coding agent gets. `ref` names a built image (pin it by digest); `dockerfile` is a path **inside this repository**, and `args` are its build arguments — by convention the **pinned CLI version**, because a sandboxed run never updates its own CLI |
+| `domains` | string[] (optional) | the hosts this CLI itself must reach. Bare host names or a `*.` glob of one — no scheme, no path, no port; the proxy matches on the CONNECT host. This is the `harness` network preset. Do **not** list model-provider hosts here: those come from the provider plugin's own declaration through the `provider` preset, and a package registry belongs to `package-registries` |
+| `env` | `{NAME: 'value'}` (optional) | environment set for every sandboxed run of this coding agent. In practice the vendor's own auto-update and telemetry switches — a sandboxed run does not update itself (the image pins it) and does not send what the vendor calls non-essential traffic — plus any variable that tells the CLI it is inside a sandbox (claude's `IS_SANDBOX=1`). **This block is the single author of those variables**: nothing sets them in the shell as well, because two authors of one fact is how the two come to disagree |
+| `credentials` | `[{key, envKeys?, injection?}]` (optional) | which credentials this CLI needs and how they may reach it. `key` is resolved by `credentialValue(pluginId, key)` — the same three-step answer as everywhere else: a value the operator stored, a variable they named, then `envKeys`. See "Injection" below |
+| `stateDirs` | string[] (optional) | directories, relative to the per-run home, the HUB reads back afterwards — transcripts, a session store, a token database. They are mounted read-write and survive the container, because the activity measurement, the incident channels, the token figures and `resumeId()` all read them. Declaring one is how you say "this path is not scratch" |
+| `launchOverrides` | fn(`{spec, run}`) → object, or an object (optional) | what changes on the command line inside a sandbox, as a flat map of `fl-start` option name → value, applied over the run's own values. claude answers `{mode: 'bypassPermissions', settingSources: 'user'}`, cursor `{sandbox: 'disabled'}`. It is the right home for a flag that must change **only** in a sandbox: `launch.args` describes one command line for both worlds, and a change made there would reach unsandboxed runs too |
+| `innerSandbox` | `{off?, weak?, full?}` (optional) | what this CLI's OWN sandbox is set to per level. A level the plugin does not declare is a level this coding agent cannot do, and the form does not offer it |
+| `seedHome` | fn(`{home, run, ctx, spec}`) → `[{path, content, mode?}]` (optional, may be async) | the files the per-run home starts with. See below |
+
+There is deliberately **no `resume` field**, and `validateDescriptor()` refuses
+a block that carries one. Whether a run can be picked back up is
+`launch.resume`'s answer — the one `resumeRun()` reads — and it is the same
+answer whether the session was lost to a reboot or replaced by a
+reconfiguration of the sandbox. A second flag next to it would be a second
+statement about one fact, and the two would eventually disagree.
+
+**A malformed block is refused, not ignored.** `validateDescriptor()` checks
+every field above before the plugin is registered, and the package is rejected
+with the reason on the Plugins page. A declaration that were silently dropped
+would produce a run that starts, reaches a network it should not have reached
+(or fails to reach the one it needs) and says nothing about either — the worst
+shape a fault can take in a security boundary.
+
+#### `seedHome`: the container's home, and why it is not the operator's
+
+A sandboxed run's `HOME` is `~/agents/runs/<id>/home` — its own, empty, and
+bind-mounted at the same path inside and outside. It is deliberately **not** the
+operator's home: `~/.claude` alone holds skills, plugins, `settings.local.json`
+and every conversation the operator ever had, and the opt-in idea behind
+`~/agents/zusaetze/` applies with full force where the agent is meant to be
+fenced in. The extra skills a run was actually given are mounted read-only, as
+they are outside a sandbox.
+
+An empty home, though, is a CLI that stops at its own onboarding, has no
+credential, and has lost whatever bridge the hub installed into the host home to
+hear from it at all. `seedHome` is where the plugin puts that back:
+
+- it returns a list of `{ path, content, mode? }`; `path` is **relative to the
+  home**, and an absolute path or one containing `..` is refused by the writer
+  (`seedHomeFiles()` in `server/sandbox/exec.mjs`, which also refuses to follow
+  a symlink out of the home). `mode` defaults to `0o644`, or `0o600` for a path
+  that looks like a credential;
+- it receives `{ home, run, ctx, spec }` — the absolute home, the run row (its
+  `workdir_effective` is the path the agent will work in, the same string inside
+  and outside), the plugin context, and the resolved sandbox spec. `spec.secrets.mode`
+  (`env` | `inject` | `none`) and `spec.innerSandbox` are the two fields a seed
+  usually branches on;
+- it may be async, and it may **throw**. A throw fails the launch, which is the
+  right outcome where the missing file is one the run cannot be watched without:
+  better a red run with a reason than a green one nobody hears from.
+
+What the four built-ins seed, and each of them replaces something the hub does
+on the host today: claude writes `.claude.json` with the trust flag
+`fl-start`'s `trust_workdir()` writes into the operator's own file (plus
+`hasCompletedOnboarding`, since a fresh home has never seen the onboarding) and
+`.claude/settings.json` with the inner-sandbox decision; opencode copies the
+`plugins/freilauf.js` bridge that `setup/02-install-scripts.sh` installed — read
+from that installed copy rather than embedded, because a second copy is a second
+thing to keep current and the stale one would be the one running in the sandbox
+— and refuses to start without it, since an opencode run that cannot report an
+API error is a run that fails silently; cursor copies its token file; hermes
+copies `config.yaml` (which carries the `hooks:` block its attention reports
+travel through) with `terminal.backend` forced to `local`.
+
+Two rules a seed has to keep, both learned by measuring the CLIs rather than by
+reading them:
+
+- **Seed at USER level.** Everything the hub needs — the trust flag, the hooks,
+  the settings — goes in the home, never into the workspace. claude's project
+  settings can carry `disableAllHooks: true`, and the hook resolver reads the
+  merged settings, so a repository somebody cloned can silence the hub's whole
+  reporting with six committed lines; the answer is `--setting-sources user`
+  (declared in `launchOverrides`), and it costs nothing precisely because
+  nothing the hub seeds lives at project level.
+- **`$HOME` is the fallback, not always the answer.** Three of the four CLIs
+  offer a narrower lever that OUTRANKS the home — `CLAUDE_CONFIG_DIR`,
+  `XDG_DATA_HOME` / `XDG_CONFIG_HOME` for opencode, `CURSOR_DATA_DIR`,
+  `HERMES_HOME` — so a `path` relative to the home is only right while the
+  image sets none of them. If yours does, say so in `env` and use it
+  consistently in `seedHome` and `stateDirs`, or the state lands where the hub
+  does not read and the seed where the CLI does not look.
+
+#### `innerSandbox`, and why the default is `off`
+
+claude and cursor bring sandboxes of their own, and inside the Freilauf
+container they are switched **off** by default. Two boundaries are not stronger
+than one; they are two things that break — claude's is bubblewrap, bubblewrap
+inside an unprivileged container cannot mount a fresh `/proc`, and keeping it
+means weakening the OUTER boundary (a container AppArmor profile with `userns,`,
+a seccomp profile allowing `clone(CLONE_NEWUSER)`) to hold up an inner one that
+only ever covered Bash commands anyway. A repo that wants defence in depth can
+ask for `weak`, which is the vendor's own name for what it costs; a level the
+plugin does not declare is one it cannot do.
+
+#### Injection: the key that never enters the container
+
+Under `secrets.mode: 'inject'` the container holds a placeholder
+(`fl-token-<random>`) and the egress proxy swaps it for the real value **on the
+declared hosts only**. `injection` is what makes that possible:
+
+```js
+injection: { header: 'Authorization', prefix: 'Bearer ', hosts: ['api.anthropic.com'] }
+```
+
+`hosts` is required and must not be empty — an injection without it would hand
+the real value to whatever the agent connects to, which is the opposite of what
+the mode is for. Declare `injection` only where the header is **established**:
+an injection aimed at the wrong header strips the key from every request while
+the run looks exactly like a provider outage. A credential with no `injection`
+is passed as an environment variable under `secrets.mode: 'env'` and is simply
+not available for injection, which is a working configuration and not a defect —
+that is why cursor declares its `CURSOR_API_KEY` without one.
+
+A **model provider** declares the same two fields and nothing else: its hosts,
+and how its key is injected. Every provider that carries an API a sandboxed run
+talks to should have them, because the `provider` preset is what keeps a
+harness's `domains` from having to name every vendor a run might use.
+
 ## Model provider plugin contract (`server/providers/<id>.mjs`)
 
 The minimum: `id`, `label`, a `fetchModels` function, and either `envKeys` or
@@ -712,6 +872,7 @@ The minimum: `id`, `label`, a `fetchModels` function, and either `envKeys` or
 | `llm` | `{schema, overhead?, models(ctx), complete(ctx, req)}` (optional) | this provider can answer the hub's own questions |
 | `fetchModels(ctx)` | async fn | model catalog |
 | `balance(ctx)` | async fn (optional) | account balance in the normalized shape below; `null` = no key, no answer, nothing to report |
+| `sandbox` | `{domains?, credentials?}` (optional) | which hosts a sandboxed run on this provider has to reach, and how its key can be injected by the egress proxy instead of entering the container. Only these two fields are meaningful on a provider — everything else in the block is about a process, and a provider is not one; see "The sandbox declaration" |
 
 ### `balance()` — the normalized shape
 

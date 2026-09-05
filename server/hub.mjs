@@ -31,6 +31,7 @@ const { setLanguage } = await import('./i18n.mjs')
 const { setTimezone, setPublicHost } = await import('./util.mjs')
 const { scanSystem } = await import('./plugins/discovery.mjs')
 const { syncSkillsQuiet } = await import('./skills.mjs')
+const { startHubSocket, stopHubSocket } = await import('./hub-socket.mjs')
 
 // UI language (default English) and, on a fresh installation, the optional
 // coding agent seed file (installed e.g. by a private setup repo).
@@ -98,11 +99,17 @@ server.listen(PORT, HOST, () => {
   // after `loadExternalPlugins()` at the top of this file. Off by default, so on
   // an installation that never said yes this is one settings read and nothing else.
   syncSkillsQuiet('startup')
+  // The narrow channel next to the full API (server/hub-socket.mjs): two routes,
+  // a per-run token, a unix socket a container can be handed. Deliberately
+  // fail-soft and not awaited — a hub that did not come up because a socket file
+  // could not be created would be a worse hub than one without the socket, and
+  // every run still reports over 127.0.0.1 meanwhile.
+  startHubSocket().catch(e => console.log(`[freilauf] report socket: ${e.message}`))
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
-    stopScheduler(); stopWatcher(); stopIntegrator()
+    stopScheduler(); stopWatcher(); stopIntegrator(); stopHubSocket()
     server.close(() => process.exit(0))
     server.closeAllConnections()
     setTimeout(() => process.exit(0), 2000).unref()

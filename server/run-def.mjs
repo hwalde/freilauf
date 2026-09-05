@@ -26,6 +26,19 @@ import { escapeHtml as e, toDbUtc } from './util.mjs'
 import { TITLE_MAX } from './title.mjs'
 import { providersForHarness, enabledCodingAgents } from './coding-agents.mjs'
 import { getHarness, goalSpec, harnessesWithGoal } from './harnesses/index.mjs'
+// Straight from the registry: `harnesses/index.mjs` is its front door and
+// re-exports the same objects, but it does not carry these two — and the
+// answer to "can this coding agent be sandboxed" must come from the one place
+// that reads the descriptor, never from a second copy of the question.
+import { sandboxable, harnessesWithSandbox } from './plugins/registry.mjs'
+import {
+  SANDBOX_TRISTATE, HUB_MODES, decideSandbox, validateSandboxOverrides, resolveSandboxSpec,
+} from './sandbox/spec.mjs'
+// The one reader of the `sandbox_profiles` table — importing it is also what
+// seeds the four built-ins, so a form on a fresh installation offers a list
+// rather than nothing. Two readers of one table is how the two come to
+// disagree, which is the drift this whole module exists to prevent.
+import { listProfiles, profileSpec } from './sandbox/profiles.mjs'
 import { effortOptionen } from './models.mjs'
 import { branchWorktree } from './runner.mjs'
 import { skillFelder, skillsAusFormular, skillListe, eintragName, eintragWert } from './zusaetze.mjs'
@@ -243,11 +256,20 @@ function modelFields(a = {}) {
  * wrapping <fieldset> so a place can present the identical logic differently
  * (a settings page vs. the run form). Without it the markup is exactly what it
  * always was, so no existing caller changes.
+ *
+ * `opts.sandbox` is the second, and it is opt-in for a reason: whether a run is
+ * sandboxed is setup (§7.3), so a FAVORITE carries it — but the two settings
+ * pages that also embed this block (the conflict resolver, the tmux cleanup
+ * agent) store their setup as individual `settings` rows and have nowhere to
+ * put it. A field that looks like it saved and did not is the worst shape a
+ * form can take, so those two get no sandbox block at all. `'full'` is the two
+ * run forms (tri-state + profile + overrides), `'tristate'` a favorite.
  */
 export function runSetupFields(a = {}, opts = {}) {
   const block = `
   <label>${e(t('agents.harness'))} <select name="harness">${harnessOptions(a.harness)}</select></label>
-  ${modelFields(a)}`
+  ${modelFields(a)}
+  ${opts.sandbox ? sandboxFields(a, opts.sandboxCtx ?? {}, opts.sandbox) : ''}`
   if (opts.wrapClass) return `<fieldset class="${e(opts.wrapClass)}">${block}</fieldset>`
   return block
 }
@@ -346,13 +368,291 @@ export function goalFields(a = {}) {
   </details>`
 }
 
+// ------------------------------------------------------------------ sandbox
+//
+// Whether a run happens inside a container is a field of the run definition
+// like every other (SANDBOX_RESEARCH.md §7.3, §7.13) — which is why it lives
+// here and not in a page: the agent form, the single-run form, the flow step,
+// the favorite and the edit card all read the SAME block and the SAME parser.
+//
+// Three things are stored, at every layer: the tri-state (`inherit` / `on` /
+// `off`), the profile and a JSON document that narrows that profile. The rule
+// that binds them is server/sandbox/spec.mjs's and nothing here repeats it:
+// `decideSandbox()` says which tri-state wins, `validateSandboxOverrides()`
+// says whether the document is one this hub accepts.
+//
+// The hub's own mode is the frame all of it sits in. `off` — which is what
+// every installation without a container runtime has — means the feature does
+// not exist: `sandboxFields()` renders nothing, `sandboxFromForm()` stores
+// nothing, and a run takes byte for byte the path it takes today. That is the
+// promise the whole sandbox rests on, and it is kept HERE, at the form, as
+// well as at the launch.
+
+/** The hub's own policy. Anything unknown (and the empty default) means `off`. */
+export function sandboxHubMode() {
+  const v = getSetting('sandbox_mode') ?? ''
+  return HUB_MODES.includes(v) ? v : 'off'
+}
+
+/**
+ * May a lower layer opt out of a sandbox a higher one wanted? Unset means yes —
+ * the setting is a restriction an operator adds, not one they inherit. Compared
+ * against the values that mean no, never coerced: `Boolean('0')` is true, and
+ * that trap has cost this project a switched-on agent already.
+ */
+export function sandboxAllowBypass() {
+  const v = getSetting('sandbox_allow_bypass')
+  return !(v === '0' || v === 'false' || v === 'off')
+}
+
+/** A settings row that holds a list: JSON array, or comma/whitespace separated. */
+function settingList(key) {
+  const raw = String(getSetting(key) ?? '').trim()
+  if (!raw) return []
+  if (raw.startsWith('[')) {
+    try {
+      const v = JSON.parse(raw)
+      return Array.isArray(v) ? v.filter(x => typeof x === 'string' && x.trim()).map(s => s.trim()) : []
+    } catch { return [] }             // junk means "nothing", never a half-read policy
+  }
+  return raw.split(/[,\s]+/).filter(Boolean)
+}
+
+/** The dotted spec paths a lower layer may only NARROW. */
+export function sandboxLock() { return settingList('sandbox_lock') }
+
+/** The directories an extra mount may come out of. Empty = no extra mount at all. */
+export function sandboxAllowedMountRoots() { return settingList('sandbox_allowed_mount_roots') }
+
+/** A stored JSON column as a plain object — tolerant of NULL, '' and junk. */
+function parseJsonObject(s) {
+  try {
+    const v = JSON.parse(String(s ?? '').trim() || '{}')
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {}
+  } catch { return {} }
+}
+
+/**
+ * The spec the layers ABOVE this one resolve to — what a locked path is
+ * narrowed FROM. Without a lock there is nothing to narrow, so nothing is
+ * computed: `validateSandboxOverrides()` only judges the lock when it is
+ * handed an `against`, and reporting every touch of a locked path would flag a
+ * perfectly legitimate narrowing as an error.
+ */
+function sandboxAgainst(repoId, lock) {
+  if (!lock.length) return null
+  try {
+    const repo = repoId ? getRepo(Number(repoId)) : null
+    const repoLayer = repo
+      ? { profile: profileSpec(repo.sandbox_profile_id), spec: parseJsonObject(repo.sandbox_overrides) }
+      : null
+    return resolveSandboxSpec({ hub: { spec: {}, lock }, repo: repoLayer }).spec
+  } catch { return null }
+}
+
+/** decideSandbox()'s refusal reasons, in the words a FORM says them in. */
+const SANDBOX_FORM_REFUSAL = {
+  'sandbox.problem.required': 'sandbox.problem.form.required',
+  'sandbox.problem.bypass_not_allowed': 'sandbox.problem.form.bypass_not_allowed',
+  'sandbox.problem.harness_unsupported': 'sandbox.problem.form.harness_unsupported',
+}
+
+/**
+ * The sandbox block. `mode` is `'full'` (tri-state + profile + folded
+ * overrides — the two run forms) or `'tristate'` (the tri-state alone — a
+ * favorite, which is setup and carries no profile of its own).
+ *
+ * `data-sandbox-harnesses` is the `goalFields()` mechanism, for the same reason
+ * and with the same detail: hiding the controls DISABLES them, because a hidden
+ * field that still submits is a value the operator can neither see nor correct.
+ * Where it differs is that the fieldset itself stays visible and SAYS why — a
+ * block that simply vanished when the coding agent changed would leave the
+ * reader believing the run is sandboxed when it is not, and that belief is the
+ * one this whole feature must never create.
+ */
+export function sandboxFields(a = {}, ctx = {}, mode = 'full') {
+  const hubMode = ctx.sandboxHubMode ?? sandboxHubMode()
+  if (hubMode === 'off') return ''                    // the feature does not exist here
+  const kann = ctx.sandboxHarnesses ?? harnessesWithSandbox()
+  // The form shows the first configured coding agent when nothing is
+  // preselected — that is what the browser picks out of a <select>.
+  const harness = a.harness || enabledCodingAgents()[0]?.harness || ''
+  const on = kann.includes(harness)
+  const value = SANDBOX_TRISTATE.includes(a.sandbox) ? a.sandbox : 'inherit'
+  // `off` is only offered where it could ever take effect. Under `required` it
+  // is refused, and without the bypass right it is refused the moment anything
+  // above asked for a sandbox — a select that offers what the endpoint would
+  // send back is the drift runEditAllowed() exists to prevent, one form out.
+  // A row that already HOLDS `off` keeps its option regardless: silently
+  // changing what a stored value means is worse than offering a refused one.
+  const offOk = (hubMode !== 'required' && sandboxAllowBypass()) || value === 'off'
+  const states = SANDBOX_TRISTATE.filter(s => s !== 'off' || offOk)
+  const dis = on ? '' : 'disabled'
+
+  const tri = `
+    <label>${e(t('sandbox.field.tristate'))}
+      <select name="sandbox" ${dis}>
+        ${states.map(s => `<option value="${s}" ${value === s ? 'selected' : ''}>${e(t('sandbox.field.tristate_' + s))}</option>`).join('')}
+      </select>
+      <span class="dim">${e(t('sandbox.field.tristate_hint'))}</span>
+    </label>`
+
+  const profiles = ctx.sandboxProfiles ?? listProfiles()
+  const profileId = a.sandbox_profile_id ?? a.sandboxProfileId ?? null
+  const overrides = overridesText(a.sandbox_overrides ?? a.sandboxOverrides)
+  const rest = mode !== 'full' ? '' : `
+    <label>${e(t('sandbox.field.profile'))}
+      <select name="sandbox_profile_id" ${dis}>
+        <option value="">${e(t('sandbox.field.profile_inherit'))}</option>
+        ${profiles.map(p => `<option value="${p.id}" ${Number(profileId) === p.id ? 'selected' : ''}>${e(p.name)}</option>`).join('')}
+      </select>
+      <span class="dim">${e(profiles.length ? t('sandbox.field.profile_hint') : t('sandbox.field.profile_none'))}</span>
+    </label>
+    <details class="sandbox-overrides" ${overrides ? 'open' : ''}>
+      <summary>${e(t('sandbox.field.overrides'))}</summary>
+      <label>${e(t('sandbox.field.overrides_field'))}
+        <textarea name="sandbox_overrides" rows="6" spellcheck="false"
+                  placeholder="${e(t('sandbox.field.overrides_ph'))}" ${dis}>${e(overrides)}</textarea>
+        <span class="dim">${e(t('sandbox.field.overrides_hint'))}</span>
+      </label>
+    </details>`
+
+  const hubNote = hubMode === 'required' ? t('sandbox.field.hub_required')
+    : hubMode === 'default_on' ? t('sandbox.field.hub_default_on') : ''
+  return `
+  <fieldset class="sandbox" data-sandbox-block data-sandbox-harnesses="${e(kann.join(' '))}">
+    <legend>${e(t('sandbox.field.legend'))}</legend>
+    ${hubNote ? `<p class="dim">${e(hubNote)}</p>` : ''}
+    <p class="warn" data-sandbox-unsupported ${on ? 'hidden' : ''}>${e(t('sandbox.field.unsupported'))}</p>
+    <div data-sandbox-controls ${on ? '' : 'hidden'}>${tri}${rest}</div>
+  </fieldset>`
+}
+
+/** A stored overrides column as the text a textarea shows. '{}' is nothing to show. */
+function overridesText(v) {
+  const raw = String(v ?? '').trim()
+  return raw === '{}' ? '' : raw
+}
+
+/**
+ * The two run forms' half of the sandbox: an ALREADY-STARTED run cannot have
+ * this, so the block is rendered here rather than inside `runDefFields()` —
+ * `runEditCard()` (pages.mjs) embeds the same function for a planned run, with
+ * the run's own resolved 0/1 instead of a tri-state (`sandboxRunFields`).
+ */
+export function sandboxRunFields(run = {}, ctx = {}) {
+  const hubMode = ctx.sandboxHubMode ?? sandboxHubMode()
+  if (hubMode === 'off') return ''
+  const on = run.sandbox ? 1 : 0
+  // A run's tri-state is already resolved (runs.sandbox is 0/1 — decideSandbox
+  // answered at creation), so the edit is a yes/no and says so. `off` is not
+  // offered where the hub refuses it, exactly as in the definition block.
+  const offOk = hubMode !== 'required' && sandboxAllowBypass()
+  const overrides = overridesText(run.sandbox_overrides)
+  return `
+  <fieldset class="sandbox" data-sandbox-block>
+    <legend>${e(t('sandbox.field.legend'))}</legend>
+    <label>${e(t('sandbox.field.tristate'))}
+      <select name="sandbox">
+        <option value="1" ${on ? 'selected' : ''}>${e(t('sandbox.field.run_on'))}</option>
+        ${offOk || !on ? `<option value="0" ${on ? '' : 'selected'}>${e(t('sandbox.field.run_off'))}</option>` : ''}
+      </select>
+    </label>
+    <details class="sandbox-overrides" ${overrides ? 'open' : ''}>
+      <summary>${e(t('sandbox.field.overrides'))}</summary>
+      <label>${e(t('sandbox.field.overrides_field'))}
+        <textarea name="sandbox_overrides" rows="6" spellcheck="false"
+                  placeholder="${e(t('sandbox.field.overrides_ph'))}">${e(overrides)}</textarea>
+        <span class="dim">${e(t('sandbox.field.overrides_hint'))}</span>
+      </label>
+    </details>
+  </fieldset>`
+}
+
+/**
+ * The sandbox out of a form body — the SAME reading for the agent form, the
+ * single-run form, the JSON API and a favorite.
+ *
+ * Three rules, each of them a way this goes wrong quietly:
+ *
+ *  - **Absence is `inherit`.** The block disables its inputs where the coding
+ *    agent cannot be sandboxed, and a disabled field sends nothing at all.
+ *  - **A value that is present and unknown is a PROBLEM, never a guess.** `'0'`
+ *    is not `off` and `'1'` is not `on`: a tri-state read with `b.x ? 1 : 0`
+ *    believes the string `'0'`, and this project has an entry about the day
+ *    that switched an agent on. So the value is compared against the three
+ *    words and refused otherwise.
+ *  - **A refusal is the hub's own rule, not a second copy of it.**
+ *    `decideSandbox()` decides; this only translates its reason into the words
+ *    a form says it in.
+ */
+export function sandboxFromForm(b, problems = []) {
+  const empty = { sandbox: 'inherit', sandboxProfileId: null, sandboxOverrides: '{}' }
+  const hubMode = sandboxHubMode()
+
+  let sandbox = 'inherit'
+  const raw = b.sandbox
+  if (raw !== undefined && raw !== null && String(raw) !== '') {
+    const v = String(raw)
+    if (SANDBOX_TRISTATE.includes(v)) sandbox = v
+    else problems.push(t('sandbox.problem.form.tristate_unknown', { value: v, allowed: SANDBOX_TRISTATE.join(', ') }))
+  }
+  // The feature does not exist on this installation. A body that carries the
+  // fields anyway is not refused — it is simply not stored, so nothing about a
+  // run changes when the operator switches the hub mode back off.
+  if (hubMode === 'off') return empty
+
+  const harness = String(b.harness ?? '')
+  const kann = sandboxable(harness)
+  const d = decideSandbox({ hubMode, allowBypass: sandboxAllowBypass(), run: sandbox, sandboxable: kann })
+  if (d.refused) {
+    problems.push(t(SANDBOX_FORM_REFUSAL[d.refused.reason] ?? 'sandbox.problem.form.refused',
+      { harness, layer: d.refused.layer }))
+  }
+  // Asking for a sandbox from a coding agent whose plugin declares none is not
+  // a silent 0: `decideSandbox()` answers 0 with a reason, and a reason nobody
+  // is told is the failure this whole module is written against.
+  if (sandbox === 'on' && !kann) problems.push(t('sandbox.problem.form.harness_unsupported', { harness }))
+
+  let sandboxProfileId = null
+  const pid = String(b.sandbox_profile_id ?? '').trim()
+  if (pid) {
+    const n = Number(pid)
+    if (!Number.isInteger(n) || n <= 0 || !listProfiles().some(p => p.id === n)) {
+      problems.push(t('sandbox.problem.form.profile_unknown', { id: pid }))
+    } else sandboxProfileId = n
+  }
+
+  const lock = sandboxLock()
+  const { overrides, problems: op } = validateSandboxOverrides(b.sandbox_overrides, {
+    lock,
+    allowedMountRoots: sandboxAllowedMountRoots(),
+    against: sandboxAgainst(b.repo_id, lock),
+  })
+  // The spec module answers in i18n keys with params, never in sentences — the
+  // form renders them in the reader's language like every other problem.
+  for (const p of op) problems.push(t(p.key, p.params))
+
+  return { sandbox, sandboxProfileId, sandboxOverrides: JSON.stringify(overrides ?? {}) }
+}
+
+/**
+ * The tri-state a definition carries, in the shape the column holds it.
+ * `agents.sandbox` is NOT NULL, and a definition built somewhere that predates
+ * this field (a flow step, a test, an older JSON body) simply says `inherit` —
+ * which is the value that changes nothing.
+ */
+export function sandboxOf(def = {}) {
+  return SANDBOX_TRISTATE.includes(def.sandbox) ? def.sandbox : 'inherit'
+}
+
 /**
  * The definition as form fields — embedded IDENTICALLY by the agent form and
  * the single-run form. `a` is an agent row, a remembered choice or {}.
  */
 export function runDefFields(a = {}, ctx = {}) {
   return `
-  ${runSetupFields(a)}
+  ${runSetupFields(a, { sandbox: 'full', sandboxCtx: ctx })}
   <label>${e(t('runform.prompt'))} <textarea name="prompt" rows="10" required>${e(a.prompt ?? '')}</textarea></label>
   ${goalFields(a)}
   ${branchFields(a, ctx)}
@@ -493,6 +793,13 @@ export async function runSetupFromForm(b, problems = []) {
     orProvider: pv.or_provider,
     orRouting: pv.orRouting ?? null,
     effort,
+    // Whether the run happens in a container is setup, not task (§7.3) — so a
+    // favorite carries it and Quick Run inherits it without asking. The whole
+    // block is read and validated ONCE, here, because `runDefFromForm()` is
+    // this function plus the task; the favorite then stores the tri-state
+    // alone, which is the only part of it that means the same thing in every
+    // repository.
+    ...sandboxFromForm(b, problems),
   }
 }
 
@@ -558,6 +865,11 @@ export function setupToFormBody(setup = {}) {
     or_region: routing?.location ?? 'all',
     or_max_in: routing?.max_in ?? '',
     or_max_out: routing?.max_out ?? '',
+    // The tri-state travels back as the word it was stored as, so a Quick Run
+    // through this body reaches `sandboxFromForm()` the way the form would have
+    // sent it. Deliberately NOT in `pickQuickFields`'s allowlist over in
+    // web.mjs: the dialog does not ask, so the favorite's answer must survive.
+    sandbox: SANDBOX_TRISTATE.includes(setup.sandbox) ? setup.sandbox : 'inherit',
     skills_list: [],
     flows_list: [],
   }
@@ -600,6 +912,12 @@ export function defFromAgent(agent) {
     branchMode: agent.branch_mode,
     branchPattern: agent.branch_pattern ?? null,
     keepOnBranch: agent.keep_on_branch ? 1 : 0,
+    // The stored word, not a coercion: `agent.sandbox` is a tri-state, and the
+    // one value that must never be read as a boolean is the one that says
+    // "ask the layer above me".
+    sandbox: SANDBOX_TRISTATE.includes(agent.sandbox) ? agent.sandbox : 'inherit',
+    sandboxProfileId: agent.sandbox_profile_id ?? null,
+    sandboxOverrides: agent.sandbox_overrides ?? '{}',
     expectedMinutes: agent.expected_minutes,
     skills: agent.skills ?? null,
     flows: agent.flows ?? null,
@@ -628,21 +946,25 @@ export function saveAgent({ id = null, repoId, name, def, schedule = null, activ
     db.prepare(`UPDATE agents SET name=?, harness=?, model=?, prompt=?, goal=?, branch_mode=?, branch_pattern=?,
                 keep_on_branch=?, expected_minutes=?, schedule=?, schedule_kind=?, schedule_days=?, schedule_time=?,
                 schedule_slots=?, schedule_weeks=?, schedule_anchor=?, run_at=?, provider=?, or_provider=?, or_routing=?, effort=?,
-                skills=?, flows=?, active=?, updated_at=datetime('now') WHERE id=?`).run(
+                skills=?, flows=?, sandbox=?, sandbox_profile_id=?, sandbox_overrides=?,
+                active=?, updated_at=datetime('now') WHERE id=?`).run(
       name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode, def.branchPattern,
       def.keepOnBranch ? 1 : 0,
       def.expectedMinutes, zp.schedule, zp.kind, zp.days, zp.time, zp.slots, zp.weeks, zp.anchor, zp.run_at,
-      def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null, active, id)
+      def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null,
+      sandboxOf(def), def.sandboxProfileId ?? null, def.sandboxOverrides ?? '{}',
+      active, id)
     return id
   }
   const r = db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,goal,branch_mode,branch_pattern,keep_on_branch,expected_minutes,
               schedule,schedule_kind,schedule_days,schedule_time,schedule_slots,schedule_weeks,schedule_anchor,run_at,
-              provider,or_provider,or_routing,effort,skills,flows,active)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+              provider,or_provider,or_routing,effort,skills,flows,sandbox,sandbox_profile_id,sandbox_overrides,active)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     repoId, name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode,
     def.branchPattern, def.keepOnBranch ? 1 : 0, def.expectedMinutes,
     zp.schedule, zp.kind, zp.days, zp.time, zp.slots, zp.weeks, zp.anchor, zp.run_at,
-    def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null, active)
+    def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null,
+    sandboxOf(def), def.sandboxProfileId ?? null, def.sandboxOverrides ?? '{}', active)
   return Number(r.lastInsertRowid)
 }
 
@@ -827,6 +1149,14 @@ function setupOf(v = {}) {
  *
  * Deliberately only these four fields: prompt, branch rule and duration belong
  * to the task, not to the setup.
+ *
+ * And deliberately NOT the sandbox, although it travels through
+ * `runSetupFromForm()` with them. This function is a convenience — it fills a
+ * form in with what was there last time — and whether a run is fenced off from
+ * the machine is a safety decision about THIS task. A safety setting that
+ * carries itself over from a run one no longer remembers is a setting one stops
+ * reading. A favorite is the opposite case: somebody named that combination and
+ * chose it, so `setupToFormBody()` does carry it.
  */
 export function rememberRunChoice(def) {
   if (!def?.harness) return
@@ -893,8 +1223,33 @@ export const RUN_DEF_FLOW_FIELDS = [
   { key: 'branchMode', kind: 'select', options: BRANCH_MODES, default: 'keiner' },
   { key: 'branchPattern', kind: 'text', placeholder: 'flow/{date}-{kurz}' },
   { key: 'keepOnBranch', kind: 'checkbox', default: false },
+  // Whether the run happens in a container (SANDBOX_RESEARCH.md §7.13). Flat,
+  // like the routing fields above — the designer has no folding. Only the
+  // "start single run" step needs them: "start agent" runs a stored definition
+  // and inherits whatever that agent carries. `inherit` means the repo and the
+  // hub decide, which is what every flow written before this field did.
+  { key: 'sandbox', kind: 'select', options: SANDBOX_TRISTATE, default: 'inherit' },
+  { key: 'sandboxOverrides', kind: 'textarea', placeholder: '{"network": {"mode": "none"}}' },
   { key: 'expectedMinutes', kind: 'number', default: DEFAULT_EXPECTED_MINUTES },
 ]
+
+/**
+ * The sandbox half of `defFromFlowProps()`. Separate because a flow has no way
+ * to report a problem — the step designer validated when it was saved, and by
+ * the time the flow runs the only honest answer to junk is the value that
+ * changes nothing.
+ */
+function sandboxFromFlowProps(props = {}) {
+  const sandbox = SANDBOX_TRISTATE.includes(props.sandbox) ? props.sandbox : 'inherit'
+  const { overrides, problems } = validateSandboxOverrides(props.sandboxOverrides, {
+    lock: sandboxLock(), allowedMountRoots: sandboxAllowedMountRoots(),
+  })
+  return {
+    sandbox,
+    sandboxProfileId: null,
+    sandboxOverrides: problems.length ? '{}' : JSON.stringify(overrides ?? {}),
+  }
+}
 
 /** Flow step properties (already rendered templates) → definition. */
 export function defFromFlowProps(props) {
@@ -930,6 +1285,12 @@ export function defFromFlowProps(props) {
     // Only where there is a branch to keep the work on — the same rule the form
     // enforces, so a flow cannot store a combination the form would refuse.
     keepOnBranch: props.keepOnBranch && props.branchMode !== 'keiner' ? 1 : 0,
+    // The sandbox, through the same reading the form applies — and the same
+    // "drop rather than store nonsense" the routing above uses, because a flow
+    // step has no `problems` array to answer into: an unknown tri-state means
+    // `inherit`, an overrides document this hub would refuse means none. Both
+    // are the value that changes nothing, never a value nobody typed.
+    ...sandboxFromFlowProps(props),
     expectedMinutes: Number(props.expectedMinutes) || DEFAULT_EXPECTED_MINUTES,
     skills: null,
     // Deliberately no attached flows: a run a flow starts must not start flows

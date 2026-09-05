@@ -1,5 +1,6 @@
 // Freilauf — processing of agent reports (fl-report → POST /api/runs/<id>/report
 // or fallback inbox.jsonl collected by the watcher). Planning 6 + 11.
+import { timingSafeEqual } from 'node:crypto'
 import db, { addEvent } from './db.mjs'
 // `notifyChannels` and not `notify`: `completeFollowUp()` below takes an option
 // literally called `notify`, and a parameter that silently shadows a module
@@ -20,6 +21,47 @@ const MAX_REPORT = 200 * 1024   // planning 11: report ≤ 200 kB
  * session id. Without the guard its failures land on this run as red incidents.
  */
 const HOOK_KINDS = ['_turn_end', '_exit', '_api_error', '_rate_limit', '_idle', '_working', '_waiting']
+
+// ------------------------------------------------------------ the run's own token
+//
+// `runs.report_token` (SANDBOX_RESEARCH.md §7.6) is the per-run bearer of the
+// report socket. It is issued for EVERY run at creation, sandboxed or not,
+// because the socket is worth having either way: it is the only channel that
+// carries the report route WITHOUT carrying the rest of the hub's API with it.
+//
+// What the token is NOT: a replacement for `fremdeClaudeSession()`. A claude
+// process the agent spawns inherits the environment of the session it was
+// spawned from — `FL_RUN_TOKEN` exactly as it inherits `FL_RUN_ID` — so it
+// authenticates perfectly and is still not this run's own session. The token
+// answers "which run is this"; that guard answers "which SESSION of it", and
+// the two questions stay two questions.
+
+/**
+ * Constant-time equality of two tokens. Pure, and exported because this is the
+ * comparison worth a test: `timingSafeEqual` THROWS on differing lengths, so a
+ * naive call is an exception on exactly the input an attacker controls — hence
+ * the length guard before it, and hence the empty string never matching.
+ */
+export function tokensMatch(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  if (!a || !b || a.length !== b.length) return false
+  const bufA = Buffer.from(a, 'utf8')
+  const bufB = Buffer.from(b, 'utf8')
+  if (bufA.length !== bufB.length) return false
+  return timingSafeEqual(bufA, bufB)
+}
+
+/**
+ * Does this bearer belong to this run? A run without a stored token (a row from
+ * before the column existed) can never be authenticated — which is right for the
+ * socket, whose whole point is that it is not reachable without one; those runs
+ * still report over 127.0.0.1 exactly as they did.
+ */
+export function reportTokenOk(runId, token) {
+  if (!token) return false
+  const row = db.prepare('SELECT report_token FROM runs WHERE id = ?').get(runId)
+  return tokensMatch(row?.report_token ?? '', token)
+}
 
 // ------------------------------------------------------------ the agent's attention
 //

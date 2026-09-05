@@ -12,6 +12,10 @@
 #   fl-report failed "reason"                      Run failed
 #   fl-report help "question/problem"              Call for help (run stays open, waits)
 #   fl-report progress "status"                    Progress / taking longer
+#   fl-report access "what you need and why"       Ask for something the sandbox blocks
+#                                                  (a host, a directory, more memory).
+#                                                  A human decides; keep working on
+#                                                  whatever you CAN do meanwhile.
 #   fl-report branch <name>                        Branch reported
 #   fl-report pr <url>                             Pull request reported
 #   fl-report _api_error [error] ["text"]         Rate-limit/provider error (from hooks);
@@ -24,20 +28,23 @@
 #                                                  anything else is a tool call or a
 #                                                  status the CLI reports by itself
 #
-# Source: FL_RUN_ID + FL_HUB_URL from the environment (CC_RUN_ID/CC_HUB_URL are
-# still accepted, for sessions started before the rename). Fallback when the hub is not
-# reachable: JSON line to ~/agents/runs/<id>/inbox.jsonl — the watcher collects it.
+# Source: FL_RUN_ID from the environment, and ONE of two channels to the hub —
+# FL_HUB_SOCKET (a unix socket carrying only the report route, SANDBOX_RESEARCH.md
+# §7.6) or FL_HUB_URL (the full API on 127.0.0.1). CC_RUN_ID/CC_HUB_URL are still
+# accepted, for sessions started before the rename. FL_RUN_TOKEN, when set, is the
+# run's own bearer and travels with both. Fallback when neither channel answers:
+# a JSON line into <runs dir>/<id>/inbox.jsonl — the watcher collects it.
 set -euo pipefail
 
 usage() {
-    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 [[ $# -ge 1 ]] || { usage >&2; exit 2; }
 KIND="$1"; shift
 
 case "$KIND" in
-    done|failed|help|progress|branch|pr) ;;
+    done|failed|help|progress|branch|pr|access) ;;
     _turn_end|_exit|_rate_limit|_idle|_pane_died|_api_error|_working|_waiting) ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'unknown kind: %s\n' "$KIND" >&2; exit 2 ;;
@@ -49,6 +56,12 @@ esac
 # all written then, and none of them can be rewritten from here.
 RUN_ID="${FL_RUN_ID:-${CC_RUN_ID:-}}"
 HUB="${FL_HUB_URL:-${CC_HUB_URL:-http://127.0.0.1:8791}}"
+# The narrow channel (SANDBOX_RESEARCH.md §7.6) and the run's own bearer. Both
+# are OPTIONAL and both may be absent: a run on an older hub, an unsandboxed run
+# started before this release, a human trying the command by hand. Absent means
+# "the way it always worked", and nothing below may depend on either being set.
+SOCKET="${FL_HUB_SOCKET:-}"
+TOKEN="${FL_RUN_TOKEN:-}"
 if [[ -z "$RUN_ID" ]]; then
     echo "fl-report: FL_RUN_ID is not set — pointless outside a Freilauf run." >&2
     exit 3
@@ -155,15 +168,55 @@ print(json.dumps(body))
 PY
 )"
 
-send() {
+# The bearer, as an argument list so an unset token adds no header at all. The
+# `${AUTH[@]+…}` form is what keeps `set -u` happy on an empty array.
+AUTH=()
+[[ -n "$TOKEN" ]] && AUTH=(-H "authorization: Bearer $TOKEN")
+
+# The socket carries ONLY the report route, so it is the channel a sandboxed run
+# gets — the container cannot reach the host's loopback anyway, and an agent that
+# could would have the hub's whole API in its hands. Tried first wherever it
+# exists, because a hub that offers it is a hub that prefers it.
+send_socket() {
+    [[ -n "$SOCKET" && -S "$SOCKET" ]] || return 1
+    curl -fsS --max-time 10 -X POST --unix-socket "$SOCKET" \
+         -H 'content-type: application/json' ${AUTH[@]+"${AUTH[@]}"} \
+         --data-binary "$PAYLOAD" \
+         "http://hub/api/runs/$RUN_ID/report"
+}
+
+send_http() {
     curl -fsS --max-time 10 -X POST \
-         -H 'content-type: application/json' \
+         -H 'content-type: application/json' ${AUTH[@]+"${AUTH[@]}"} \
          --data-binary "$PAYLOAD" \
          "$HUB/api/runs/$RUN_ID/report"
 }
 
-FALLBACK_DIR="$HOME/agents/runs/$RUN_ID"
-if OUT="$(send 2>/dev/null)"; then
+# Where the inbox lives. Deliberately NOT `$HOME/agents/runs` spelled out, which
+# is what it was, and which was wrong in both directions that matter now: the
+# runs directory is a seam (`FREILAUF_RUNS_DIR` — the test suite points it into
+# its own sandbox, so the one channel a report has left was also the one channel
+# the suite could never observe), and inside a container `$HOME` is the run's own
+# seeded home (§7.7), where `agents/runs` does not exist at all — the last
+# fallback a report has would have written into nowhere, silently.
+#
+# Same rule as every other `fl-*` script: `fl-paths.sh` answers it, and the old
+# `CCHUB_` name is part of the answer. A copy of this script that lost its
+# library still has to be able to report, hence the two names read directly.
+FL_PATHS="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/fl-paths.sh"
+# shellcheck source=fl-paths.sh
+[[ -r "$FL_PATHS" ]] && . "$FL_PATHS"
+if declare -F fl_env >/dev/null 2>&1; then
+    RUNS_DIR="$(fl_env RUNS_DIR "$HOME/agents/runs")"
+else
+    RUNS_DIR="${FREILAUF_RUNS_DIR:-${CCHUB_RUNS_DIR:-$HOME/agents/runs}}"
+fi
+FALLBACK_DIR="$RUNS_DIR/$RUN_ID"
+# Socket, then loopback, then the inbox. A hub that does not know a kind answers
+# 400, which reads here as "not reachable" and files the line in the inbox — the
+# watcher replays it once, gets the same refusal and drops it (watcher.mjs,
+# collectInboxes). Harmless by design: a refused report never loops.
+if OUT="$(send_socket 2>/dev/null)" || OUT="$(send_http 2>/dev/null)"; then
     # Freilauf may ANSWER a report instead of just accepting it: with the repo's
     # integration switched on, `done` is checked (worktree clean? branch still
     # mergeable?) and the answer says what is still missing. Printing it puts the
