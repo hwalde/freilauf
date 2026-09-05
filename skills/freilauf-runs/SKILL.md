@@ -124,12 +124,14 @@ fl-api /api/runs/<uuid> | python3 -c 'import json,sys; print(json.load(sys.stdin
 { "tmux_session": "fl-oc-nightly-1a2b3c4d", "pane_alive": true,
   "status": "done", "finish_state": null, "followup_open": 0,
   "followup_since": null, "last_activity_at": "2026-09-03 12:41:07",
+  "agent_state": null, "agent_state_at": null,
   "verdict": "idle_in_tui" }
 ```
 
 | `verdict` | means |
 |---|---|
-| `working` | pane alive **and** the record says `running`/`waiting_help` |
+| `working` | pane alive **and** the run is in flight (`running`/`waiting_help`, or a finished run with an open follow-up) and the agent has not said it waits |
+| `waiting_input` | pane alive and the coding agent's own hook said its turn is over — it sits at its prompt waiting for a human (`agent_state: "waiting"`). Typing into the terminal is what it needs; a `running` run in this state has stopped without reporting |
 | `idle_in_tui` | pane alive, run already finished — the normal state of a done run |
 | `process_gone` | the session exists, but every pane in it is dead |
 | `no_session` | the run never had a session name recorded |

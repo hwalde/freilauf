@@ -20,6 +20,28 @@ a day on which nothing was released.
 
 ### Added
 
+- **A run says whether its agent is working or waiting for input.** The
+  coding agents' own hooks tell the hub when they start processing input and
+  when their turn is over (claude: UserPromptSubmit / PreToolUse and Stop /
+  idle notification; cursor: beforeSubmitPrompt and stop; opencode: the
+  installed plugin forwards the root session's busy/idle; hermes: two shell
+  hooks `setup/02-install-scripts.sh` appends to `~/.hermes/config.yaml`,
+  answered by the new `fl-hermes-hook`). The overview, the detail page and the
+  sidebar show a new status word, **Waiting for input**, when an agent has
+  ended its turn and sits at its prompt — and go back to **Running** the
+  moment it works again. A subagent finishing never counts as waiting.
+  `GET /api/runs/<id>` carries `liveness.agent_state` and a `waiting_input`
+  verdict; the events are `agent_working` / `agent_waiting`; the Plugins page
+  states for every coding agent how (or that it does not) report this.
+- **Typing into a finished run's terminal counts as follow-up work.** The
+  terminal on the run page writes straight into tmux, so a conversation there
+  used to leave a `done` run reading "done" while the agent worked. The agent's
+  own "working" hook now opens the follow-up commission — the run displays as
+  running again, exactly as if the send form had been used. An answer typed
+  into the terminal likewise ends a help call (`Waiting for help` → `Running`).
+- **The watcher believes the agent.** No "no activity" flag and no follow-up
+  overrun while the agent says it waits for input; a running run whose agent
+  stopped without reporting turns yellow instead.
 - **A lost tmux session is resumed, not aborted.** When a run's session
   vanishes without the hub ending it — a server reboot, an update that took
   the tmux server, a dead server — the run is resumed in a new session:
@@ -73,6 +95,14 @@ a day on which nothing was released.
 ### Changed
 
 - Toasts stay visible while the terminal is in full screen.
+- The opencode plugin in `~/.config/opencode/plugins/freilauf.js` (rewritten
+  by `setup/02-install-scripts.sh`, which every deploy runs) no longer reports
+  `session.idle` of every session; it reports the root session's busy/idle. A
+  plugin instance loaded before the deploy keeps sending the old `_idle`, which
+  the hub still accepts as a note and nothing more.
+- hermes runs are launched with `--accept-hooks`, so the shell hooks in
+  `~/.hermes/config.yaml` run without the consent prompt hermes would show at
+  a TTY nobody sits at.
 - Watcher and scheduler run their first pass two seconds after a start instead
   of 30 seconds later, so a deferred run, a planned start, a pending goal or a
   lost session is looked at at once.

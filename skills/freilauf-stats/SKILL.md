@@ -157,8 +157,10 @@ ask it when you need it, never in a loop.
 
 `/api/runs/<uuid>` adds `events[]` (payload parsed), `incidents[]` (**all** of
 the run's incidents, open and resolved — filter on `geloest_am IS NULL`),
-`liveness` (`verdict`: `working` | `idle_in_tui` | `process_gone` |
-`no_session` | `unknown`), `worktree`, `files` (each with an `exists` flag).
+`liveness` (`verdict`: `working` | `waiting_input` | `idle_in_tui` |
+`process_gone` | `no_session` | `unknown`; `agent_state` is what the coding
+agent's own hooks last said — `working`, `waiting`, or `null`), `worktree`,
+`files` (each with an `exists` flag).
 
 `GET /api/fragments/sidebar?repo=<id>` returns the **rendered HTML** of the
 sidebar, through the same function the page uses. Ask for it only when the

@@ -500,12 +500,30 @@ export function runExternalDirs(run, repo, runDir) {
  * interactive dialog. That would take down the whole reporting chain.
  */
 export function claudeSettingsJson() {
-  const hook = (cmd) => [{ hooks: [{ type: 'command', command: cmd }] }]
+  const hook = (cmd, matcher = null) => [{ ...(matcher ? { matcher } : {}), hooks: [{ type: 'command', command: cmd }] }]
   return JSON.stringify({
     hooks: {
+      // The agent's attention (reports.mjs, "the agent's attention"), measured
+      // with Claude Code 2.1.261 in a tmux session: UserPromptSubmit fires for
+      // the launch prompt and for every line typed into the TUI afterwards —
+      // including what the hub's send route pastes in — Stop 1–2 s after the
+      // last answer, `idle_prompt` 60 s after Stop, PreToolUse before every tool
+      // call. SubagentStop fires too (with the MAIN session's id, and even for a
+      // background helper nobody asked for) and is deliberately NOT hooked: a
+      // subagent's end says nothing about whether the run waits for a human.
+      UserPromptSubmit: hook('fl-report _working'),
+      // Detached, because claude blocks the tool call until the hook returns:
+      // one fork per tool call, and the hub writes nothing unless the state
+      // changed. It is the net under the one continuation UserPromptSubmit
+      // cannot see — a `/goal` that makes claude take another turn by itself.
+      PreToolUse: hook('setsid -f fl-report _working >/dev/null 2>&1'),
       Stop: hook('fl-report _turn_end'),
       SessionEnd: hook('fl-report _exit'),
-      Notification: hook('fl-report _idle'),
+      // A prompt the agent cannot pass on its own. `permission_prompt` cannot
+      // happen under dontAsk, but a settings file is copied into places where
+      // the mode differs. The other notification types (auth_success, the
+      // elicitation family, agent_completed …) say nothing about waiting.
+      Notification: hook('fl-report _waiting', 'idle_prompt|permission_prompt'),
       // Rate limit, overloaded, auth, billing …: Claude names the reason as a
       // fixed enum on stdin. Verified with Claude Code 2.1.241 (simulated 429
       // with anthropic-ratelimit-unified-status: rejected → error: "rate_limit").
@@ -735,7 +753,9 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null } 
     { mode: 0o600 })
   // The goal starts over with the session: a `/goal` typed into the old one
   // went with it, and the watcher's pending-goal pass delivers it again.
+  // …and so does the agent's attention: 'waiting' described a process that is gone.
   db.prepare(`UPDATE runs SET tmux_session=NULL, tmux_closed_at=NULL, resume_pending=1, goal_sent_at=NULL,
+              agent_state=NULL, agent_state_at=NULL,
               started_at=datetime(started_at, '+' || ? || ' seconds'), last_activity_at=datetime('now') WHERE id=?`)
     .run(gapSec, runId)
   const { clearAnomalies } = await import('./reports.mjs')

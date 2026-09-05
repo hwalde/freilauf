@@ -1590,6 +1590,11 @@ try {
           (err, stdout, stderr) => resolve({ err, stdout: String(stdout), stderr: String(stderr) })))
         enthaelt(r.stdout + r.stderr, 'limit', `Claude reports the limit (${(r.stdout + r.stderr).slice(-200)})`)
         await warteAuf(() => vorfaelle(j.runId).some(v => v.typ === 'rate_limit'), { was: 'incident via the hook', timeoutMs: 15_000 })
+        // The same settings file carries the attention hooks: UserPromptSubmit
+        // fires before the (failing) API call, so the real claude has told the
+        // hub it started working — the one measurement of that wiring the
+        // suite makes without spending quota.
+        wahr(ereignisse(j.runId).includes('agent_working'), 'the real UserPromptSubmit hook reported _working')
         const v = vorfaelle(j.runId).find(v => v.typ === 'rate_limit')
         gleich(v.quelle, 'hook:claude', 'source is the hook')
         gleich(v.schwere, 'rot', 'red')
@@ -1743,6 +1748,150 @@ try {
       gleich(r.headers.get('location'), `/runs/${j.runId}`, 'back to the run, not to the session list')
       sessions.delete(name)
       gleich(lauf(j.runId).status, 'done', 'the finished run is left alone')
+    })
+  }
+
+  gruppe("The agent's attention: running, waiting for input, and back")
+
+  {
+    // What the coding agents' hooks say (docs/plugins.md, "Attention") is
+    // played in through fl-report exactly as the hooks would send it. The stub
+    // agent's pane stays alive, so the liveness verdict can be read too.
+    const report = (runId, body) => fetch(`${BASIS}/api/runs/${runId}/report`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })
+    let RA = null
+    await pruefe('a running run whose agent ends its turn displays as waiting for input', async () => {
+      const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-attention', expected_minutes: '45' })
+      RA = j.runId
+      await sessionMerken(RA)
+      wahr((await flReport(RA, ['_turn_end'])).ok, '_turn_end accepted')
+      const l = lauf(RA)
+      gleich(l.status, 'running', 'the record is untouched')
+      gleich(l.agent_state, 'waiting', 'the agent is noted as waiting')
+      wahr(!!l.agent_state_at, 'with the moment')
+      wahr(ereignisse(RA).includes('agent_waiting'), 'and an event for the live channel')
+      const html = await (await hol(`/runs/${RA}`)).text()
+      enthaelt(html, 'Waiting for input', 'the detail page says so')
+      enthaelt(html, 'id="run-attention">', 'with the since-line shown')
+      const rows = await (await hol(`/?repo=${repoId}&status=waiting_input`)).text()
+      enthaelt(rows, `id="run-${RA}"`, 'the overview filter finds it under waiting for input')
+      falsch((await (await hol(`/?repo=${repoId}&status=running`)).text()).includes(`id="run-${RA}"`), 'and not under running')
+      const side = await (await hol(`/api/fragments/sidebar?repo=${repoId}`)).text()
+      enthaelt(side, `status=waiting_input`, 'the sidebar counts it there')
+      const api = await (await hol(`/api/runs/${RA}`)).json()
+      gleich(api.liveness.agent_state, 'waiting', 'the read API carries the state')
+      gleich(api.liveness.verdict, 'waiting_input', 'and its verdict says what to do')
+    })
+
+    await pruefe('input makes it running again — and a repeat writes no second event', async () => {
+      wahr((await flReport(RA, ['_working'])).ok, '_working accepted')
+      gleich(lauf(RA).agent_state, 'working', 'working')
+      // The chip, not the whole page: the sidebar next to it counts OTHER runs
+      // of the repo that wait for input (an earlier group's claude run).
+      const html = await (await hol(`/runs/${RA}`)).text()
+      enthaelt(html, '"status-chip">Running<', 'the page reads running again')
+      enthaelt(html, 'id="run-attention" hidden', 'and the since-line is hidden')
+      await flReport(RA, ['_working'])
+      await flReport(RA, ['_working'])
+      gleich(ereignisse(RA).filter(k => k === 'agent_working').length, 1, 'three hooks, one event')
+      wahr((await flReport(RA, ['_waiting'])).ok, '_waiting (the idle notification) accepted')
+      gleich(lauf(RA).agent_state, 'waiting', 'waiting again')
+    })
+
+    await pruefe("a subagent's or a foreign claude session's hook is ignored", async () => {
+      // The run's own claude carries the run id as its session id; a claude the
+      // AGENT spawned inherits FL_RUN_ID and the hooks but not that id.
+      const r = await report(RA, { kind: '_working', session_id: 'some-other-session' })
+      gleich(r.status, 200, 'accepted without complaint')
+      gleich(lauf(RA).agent_state, 'waiting', 'but nothing changed')
+    })
+
+    await pruefe('the watcher does not call a waiting agent idle', async () => {
+      db.prepare(`UPDATE runs SET last_activity_at=datetime('now','-20 minutes') WHERE id=?`).run(RA)
+      await watcherTick()
+      falsch(ereignisse(RA).includes('anomaly:no_activity'), 'no "no activity" while it waits on purpose')
+      await flReport(RA, ['_working'])
+      db.prepare(`UPDATE runs SET last_activity_at=datetime('now','-20 minutes') WHERE id=?`).run(RA)
+      await watcherTick()
+      wahr(ereignisse(RA).includes('anomaly:no_activity'), 'a working agent that is silent for 20 min is')
+    })
+
+    await pruefe('an answer typed straight into the terminal ends a help call', async () => {
+      wahr((await flReport(RA, ['help', 'Which branch?'])).ok, 'help')
+      gleich(lauf(RA).status, 'waiting_help', 'waiting for help')
+      await flReport(RA, ['_turn_end'])
+      gleich(lauf(RA).status, 'waiting_help', 'the turn end does not change that')
+      const html = await (await hol(`/runs/${RA}`)).text()
+      enthaelt(html, 'Waiting for help', 'and the question outranks the idle on the page')
+      // The operator types the answer into the terminal: the hub never sees the
+      // text, the agent's UserPromptSubmit hook is what says the question is answered.
+      wahr((await flReport(RA, ['_working'])).ok, '_working')
+      gleich(lauf(RA).status, 'running', 'running again')
+      gleich(lauf(RA).help_answer, null, 'the answer text is unknown')
+      wahr(ereignisse(RA).includes('help_answered'), 'help_answered recorded')
+    })
+
+    await pruefe('closing the session forgets what the agent said', async () => {
+      await flReport(RA, ['_turn_end'])
+      gleich(lauf(RA).agent_state, 'waiting', 'waiting')
+      const r = await formular(`/api/runs/${RA}/kill`, {})
+      gleich(r.status, 200, 'ended')
+      gleich(lauf(RA).agent_state, null, 'no state without a session')
+      sessions.delete(lauf(RA).tmux_session)
+    })
+
+    let RF = null
+    await pruefe('typing into a finished run\'s terminal is the follow-up commission', async () => {
+      const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-attention-followup', expected_minutes: '45' })
+      RF = j.runId
+      await sessionMerken(RF)
+      await flReport(RF, ['_working'])
+      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(RF)
+      // The terminal writes into tmux directly; the send route is never called.
+      // The agent's own hook is the first the hub hears of it.
+      wahr((await flReport(RF, ['_turn_end'])).ok, 'the agent stops after its report')
+      gleich(lauf(RF).followup_since, null, 'a turn end on a finished run commissions nothing')
+      wahr((await flReport(RF, ['_working'])).ok, 'the operator typed, the agent works')
+      const l = lauf(RF)
+      gleich(l.status, 'done', 'the record stays done')
+      wahr(!!l.followup_since, 'but a commission is open')
+      gleich(l.agent_state, 'working', 'and the agent works')
+      wahr(ereignisse(RF).includes('followup_started'), 'recorded as a follow-up start')
+      const html = await (await hol(`/runs/${RF}`)).text()
+      enthaelt(html, '"status-chip">Running<', 'displayed as running')
+    })
+
+    await pruefe('…then waiting for input, then running again — one commission', async () => {
+      await flReport(RF, ['_turn_end'])
+      gleich(lauf(RF).agent_state, 'waiting', 'waiting')
+      const html = await (await hol(`/runs/${RF}`)).text()
+      enthaelt(html, '"status-chip">Waiting for input<', 'displayed as waiting for input')
+      enthaelt((await (await hol(`/?repo=${repoId}&status=waiting_input`)).text()), `id="run-${RF}"`, 'filtered under waiting for input')
+      await flReport(RF, ['_working'])
+      gleich(lauf(RF).agent_state, 'working', 'working again')
+      gleich(ereignisse(RF).filter(k => k === 'followup_started').length, 1, 'still the same commission')
+      gleich((await (await hol(`/api/runs/${RF}`)).json()).liveness.verdict, 'working', 'the read API agrees')
+    })
+
+    await pruefe('the follow-up clock pauses while the agent waits for input', async () => {
+      await flReport(RF, ['_turn_end'])
+      db.prepare(`UPDATE runs SET followup_since=datetime('now','-2 hours') WHERE id=?`).run(RF)
+      await watcherTick()
+      falsch(ereignisse(RF).includes('anomaly:followup_overrun'), 'no overrun for a conversation the operator is in')
+      await flReport(RF, ['_working'])
+      await watcherTick()
+      wahr(ereignisse(RF).includes('anomaly:followup_overrun'), 'a follow-up that works past the duration is one')
+    })
+
+    await pruefe('a follow-up report closes the commission, the agent may keep waiting', async () => {
+      wahr((await flReport(RF, ['done', 'follow-up done'])).ok, 'reported')
+      await flReport(RF, ['_turn_end'])
+      const l = lauf(RF)
+      gleich(l.followup_since, null, 'commission closed')
+      gleich(l.status, 'done', 'done')
+      const html = await (await hol(`/runs/${RF}`)).text()
+      enthaelt(html, '"status-chip">Done<', 'displayed as done — a waiting agent on a finished run is just finished')
     })
   }
 
@@ -5642,6 +5791,17 @@ export default {
         wahr(existsSync(join(r.workdir_effective, marke)),
           `${marke} was really created in the worktree`)
         wahr((r.report_md ?? '').length > 0, 'report present')
+        // The agent's attention through the REAL hooks (docs/plugins.md,
+        // "Attention"): the CLI said it started working, and — since
+        // `fl-report done` is a tool call INSIDE the turn — said its turn was
+        // over afterwards, which is what leaves a finished run's agent sitting
+        // at its prompt. hermes and opencode need what setup/02 installs on
+        // this machine (the plugin, the hooks block); a machine without that
+        // fails here, and rightly so — it is what the suite is for.
+        wahr(ereignisse(j.runId).includes('agent_working'), `${h.name} reported _working through its hook`)
+        await warteAuf(() => lauf(j.runId).agent_state === 'waiting',
+          { was: `${h.name} reporting its turn end`, timeoutMs: 90_000, taktMs: 1000 })
+        wahr(ereignisse(j.runId).includes('agent_waiting'), `${h.name} reported its turn end`)
       })
     }
   }
