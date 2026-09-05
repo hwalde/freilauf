@@ -57,6 +57,39 @@ export function noteAgentState(run, state, source) {
 }
 
 /**
+ * The OPERATOR did something in the session: typed into the browser terminal
+ * (`via: 'terminal'`, server/terminal.mjs) or used the send form (`'send'`,
+ * web.mjs). "Waiting for input" is a call for exactly that, so the moment it
+ * happens the call is answered and the run displays as running again —
+ * without waiting for the coding agent's own hook, which comes on Enter
+ * (claude, cursor, hermes) or on the first token (opencode), and never at all
+ * for a half-typed line, a menu, a scroll through the TUI or a dialog answered
+ * with one key. Harness-independent by construction: every one of the four
+ * routes its keystrokes through the same WebSocket.
+ *
+ * Deliberately narrow — `waiting` → `working` and nothing else. A keystroke
+ * opens no follow-up commission (that would start the follow-up clock, and
+ * its overrun alarm, over a click into the terminal of a finished run) and
+ * answers no help call (a key is not yet an answer): both stay with the
+ * agent's `_working prompt` hook and the send route, which know that a LINE
+ * went in. A run whose harness reports no attention (`agent_state` NULL) is
+ * left alone, so nothing new appears in its history. Returns true when the
+ * state changed.
+ *
+ * Why not read the agent's OUTPUT for it instead: the pty output flows through
+ * the same WebSocket, but only while a browser is attached, and a TUI redraws
+ * for reasons that are not work — claude's spinner, opencode's animation, a
+ * clock in a status bar, the operator scrolling. Input is deterministic; output
+ * would be a guess in exactly the expensive direction (a run reading "running"
+ * while nobody works on it), and the hooks already report real work.
+ */
+export function noteOperatorInput(runId, via = 'terminal') {
+  const run = db.prepare('SELECT id, agent_state FROM runs WHERE id = ?').get(runId)
+  if (!run || run.agent_state !== 'waiting') return false
+  return noteAgentState(run, 'working', via)
+}
+
+/**
  * The session is over (or a new one starts): whatever the old agent said about
  * its attention describes a process that is gone. No event — the end itself is
  * recorded by whoever ended it.

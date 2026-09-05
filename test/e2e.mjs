@@ -1856,6 +1856,39 @@ try {
       gleich(lauf(RA).agent_state, 'waiting', 'waiting again')
     })
 
+    await pruefe('a key typed into the browser terminal answers the wait — before any hook does', async () => {
+      // The agent's hooks say "working" on Enter (claude, cursor, hermes) or on
+      // the first token (opencode) and never for a half-typed line, a menu or a
+      // dialog answered with one key. The WebSocket every keystroke passes
+      // through says it at the first byte, for all four alike.
+      const quelle = () => JSON.parse(db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='agent_working' ORDER BY id DESC LIMIT 1`).get(RA)?.payload ?? 'null')?.source
+      gleich(lauf(RA).agent_state, 'waiting', 'waiting')
+      // What the terminal sends on the application's behalf is not the operator.
+      await wsSchreiben(`/term?run=${RA}&ro=0`, '\x1b[<0;12;5M\x1b[<0;12;5m')
+      gleich(lauf(RA).agent_state, 'waiting', 'a mouse click changes nothing')
+      // Nor does the read-only client: tmux drops its input.
+      await wsSchreiben(`/term?run=${RA}`, 'x')
+      gleich(lauf(RA).agent_state, 'waiting', 'a read-only terminal changes nothing')
+      const vorher = ereignisse(RA).filter(k => k === 'agent_working').length
+      await wsSchreiben(`/term?run=${RA}&ro=0`, 'y')
+      gleich(lauf(RA).agent_state, 'working', 'one key: working')
+      gleich(ereignisse(RA).filter(k => k === 'agent_working').length, vorher + 1, 'with one event for the live channel')
+      gleich(quelle(), 'terminal', 'whose source names the terminal')
+      const html = await (await hol(`/runs/${RA}`)).text()
+      enthaelt(html, '"status-chip">Running<', 'the page reads running')
+      // The send form is the other way into the session, and agrees.
+      await flReport(RA, ['_turn_end'])
+      gleich(lauf(RA).agent_state, 'waiting', 'waiting again')
+      const r = await formular(`/api/runs/${RA}/send`, { text: 'carry on' })
+      gleich(r.status, 200, 'sent')
+      gleich(lauf(RA).agent_state, 'working', 'working from the send route')
+      gleich(quelle(), 'send', 'with its own source')
+      gleich(lauf(RA).status, 'running', 'and the record untouched')
+      // Back to waiting for the tests that follow.
+      await flReport(RA, ['_waiting'])
+      gleich(lauf(RA).agent_state, 'waiting', 'waiting')
+    })
+
     await pruefe("a subagent's or a foreign claude session's hook is ignored", async () => {
       // The run's own claude carries the run id as its session id; a claude the
       // AGENT spawned inherits FL_RUN_ID and the hooks but not that id.

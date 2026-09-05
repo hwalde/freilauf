@@ -47,6 +47,17 @@ a day on which nothing was released.
 - **The watcher believes the agent.** No "no activity" flag and no follow-up
   overrun while the agent says it waits for input; a running run whose agent
   stopped without reporting turns yellow instead.
+- **Typing into the terminal clears "Waiting for input" at the first key.**
+  The coding agents' hooks only say "working" once a line is submitted (or,
+  for opencode, once it starts) — so while you were typing, scrolling, in a
+  menu or answering a one-key dialog the run still read "Waiting for input".
+  The browser terminal and the send form now flip it to **Running** the
+  moment you do something, for every coding agent alike; mouse clicks, the
+  wheel and the window gaining focus do not count, and the read-only terminal
+  never does. Nothing else changes on that key: a follow-up commission still
+  starts with a submitted line, and a help call still ends with an answer.
+  The run's history records it (`agent_working` with source `terminal` or
+  `send`).
 - **A lost tmux session is resumed, not aborted.** When a run's session
   vanishes without the hub ending it — a server reboot, an update that took
   the tmux server, a dead server — the run is resumed in a new session:

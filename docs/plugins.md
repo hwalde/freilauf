@@ -469,6 +469,15 @@ when the answer was typed into the terminal.
 | starts processing input — a prompt was submitted, a tool call begins | `fl-report _working prompt` when a human submitted a line, `fl-report _working tool` (or any other word) for a tool call or a status the CLI reports by itself | `runs.agent_state='working'`; on a `waiting_help` run it ends the help call (`answerHelpCall`); on a finished run with no open follow-up commission it OPENS one (`startFollowUpCommission`) — at once for `prompt`, and for everything else only once the **grace window** since the last report has passed (`commissionOnWorking`, two minutes, `FREILAUF_ATTENTION_GRACE_MS`) |
 | its turn is over and it waits for a human | `fl-report _turn_end` (the same kind cursor's run end uses; it implies waiting) or `fl-report _waiting` (for a second channel such as an idle notification) | `runs.agent_state='waiting'`; the run displays as "waiting for input"; the watcher writes no `no_activity` and pauses the follow-up overrun clock |
 
+One thing the hub does WITHOUT the plugin: the first key the operator types
+into the run's browser terminal (or a line through the send form) takes a
+waiting run back to `working` at once, with `source: 'terminal'` / `'send'`
+on the event (`noteOperatorInput()` in reports.mjs). Your hook says
+`_working` on Enter or on the first token; a half-typed line, a menu or a
+dialog answered with one key is caught by the terminal before that. It does
+only that — no follow-up commission, no answered help call: those still need
+your `_working prompt`, which knows a LINE went in.
+
 **Say whether it was a prompt.** `fl-report done` is a tool call INSIDE the
 turn, and an agent usually makes two or three more calls after it — prints a
 summary, runs `git status` — before it stops. Every one of those arrives as
