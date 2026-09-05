@@ -8669,6 +8669,40 @@ process.stdout.write(JSON.stringify(out))
         'and the transcript path is built from it')
     })
 
+    // ---- a refused dirt read must never read as "clean" --------------------
+    //
+    // This is the assertion that matters. `dirtyFiles()` used to answer `[]` on
+    // a failed git call, and `[]` at that call site means "clean", which means
+    // "merge it". Through runGit() a sandboxed run on a clone whose container is
+    // gone gets a REFUSAL — running `status` there would execute a
+    // `filter.<n>.clean` driver a tracked `.gitattributes` selects — and a
+    // refusal read as "clean" would merge a run whose uncommitted state nobody
+    // looked at. The gate must HOLD instead.
+    await pruefe('a dirt read nobody could answer holds the finish gate, it does not open it', async () => {
+      const { runFinishCheck } = await import('../server/integrate.mjs')
+      const { db: gdb } = await import('../server/db.mjs')
+      const work = join(sandkasten, 'gate-clone')
+      mkdirSync(work, { recursive: true })
+      execFileSync('git', ['init', '-q', '-b', 'main', work])
+      gdb.exec(`DELETE FROM repos WHERE name='gate-repo'`)
+      gdb.prepare(`INSERT INTO repos (name, path, base_branch, merge_mode) VALUES ('gate-repo', ?, 'main', 'hub')`)
+        .run(work)
+      const repoId = gdb.prepare(`SELECT id FROM repos WHERE name='gate-repo'`).get().id
+      // A sandboxed run on a clone, with a container name no daemon will
+      // confirm: runGit() then reaches its third branch and refuses `status`.
+      const run = { id: '11111111-2222-3333-4444-555555555555', repo_id: repoId,
+        harness: 'claude', workdir_effective: work, worktree: work,
+        sandbox: 1, sandbox_container: 'fl-does-not-exist', worktree_kind: 'clone',
+        finish_state: 'checking', base_sha: null, merged_sha: null }
+      await mitRuntime('#!/bin/sh\necho "error during connect: broken pipe" >&2\nexit 1\n', async () => {
+        const r = await runFinishCheck(run, { force: true })
+        gleich(r.state, 'error', 'the gate says it could not tell — never "nothing" and never "merging"')
+        falsch(['nothing', 'merging', 'awaiting_merge'].includes(r.state),
+          'and above all it does not let the run through')
+      })
+      gdb.exec(`DELETE FROM repos WHERE name='gate-repo'`)
+    })
+
     // ---- collectRunTip is a no-op for a linked worktree --------------------
     await pruefe('collectRunTip() is a plain rev-parse for a linked worktree', async () => {
       const repo = join(sandkasten, 'tip-repo')
