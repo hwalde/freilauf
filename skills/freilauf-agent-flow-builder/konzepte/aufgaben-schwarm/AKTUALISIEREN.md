@@ -101,7 +101,7 @@ jede andere unsichtbar.
 
 ## Bekannte Abweichungen der Vorlage vom ersten Bau
 
-Die Vorlage stammt aus dem Motor-Ordner des Ursprungsprojekts (Fassung 1.3.0, 2026-09-04).
+Die Vorlage stammt aus dem Motor-Ordner des Ursprungsprojekts (Fassung 1.4.0, 2026-09-05).
 Gegenüber dem Original ist sie an fünf Stellen verallgemeinert. Wer die beiden diffed, findet
 diese fünf — und sonst nur Projektanpassungen. Steht in einem Diff etwas anderes, ist eine der
 beiden Seiten hinter der anderen zurück, und der Rückstand gehört behoben statt erklärt:
@@ -115,6 +115,52 @@ beiden Seiten hinter der anderen zurück, und der Rückstand gehört behoben sta
   dem Block `repo`, statt im Prompt zu stehen.
 - Der Zustandsordner heißt im Ursprungsprojekt nach dessen Repo-Slug; in der Vorlage ergibt ihn
   `repo.name` aus der Konfig. Beide bilden dieselbe Regel ab — ein Ordner je Projekt.
+
+Was 1.4.0 gegenüber 1.3.0 geändert hat — eine Rechnung, die niemand aufgemacht hatte:
+
+Die starke Bahn hatte zwei eigene Agenten und eine Quoten-Frage davor: eine Abo-Route
+(Claude Code), solange deren Wochennutzung unter der Schwelle lag, sonst ein teureres
+Ausweich-Modell über OpenRouter. Beides ist entfallen. Der Grund steht in den Lauf-Kosten des
+Hubs (`fl-api /api/runs?repo=<n>&archived=1`, Feld `cost_usd`, gemessen 2026-09-05): Zehn Läufe
+der starken Bahn kosteten 86,61 USD, also 8,66 USD je Lauf, gegen 0,14 USD in der gewöhnlichen
+Bahn — das 62-Fache für zwei Punkte Abstand im Artificial Analysis Intelligence Index (59 gegen
+57). Ein einzelner entgleister Lauf verbrannte davon 72,66 USD, endete `aborted` und mergte
+nichts; auch ohne ihn bleibt das Elffache. Die Abo-Route kam nie zum Zug, weil ihre Wochenquote
+durchgehend belegt war — sie war ein Jahr lang Theorie und hat nie eine Aufgabe angefasst.
+
+- **Ein Modell für beide Bahnen.** Die starke Bahn behält ihre Berechtigung, aber nicht ihr
+  Modell: Ihr Wert steckt in der Arbeitsweise — genau eine Aufgabe je Lauf, das ganze
+  Zeitbudget, und als einzige Bahn Zugriff auf Blockiertes. Aus zwei starken Agenten wird einer,
+  `Schwarm-Worker (stark)`, auf der neuen Route `stark`. Er nennt bewusst kein Modell im Namen,
+  damit ein späterer Wechsel den Namen nicht zur Lüge macht.
+- **Neuer Regler `stark_modell`** (Route `stark` zieht ihn über `modell_regler`) — die eine
+  Stelle für einen Modellwechsel. Vorgabe ist dasselbe Modell wie in der gewöhnlichen Bahn. Wer
+  wechselt, prüft `routen.stark.or_provider` mit: Dort steht ein fester Anbieter, der zum neuen
+  Modell passen muss.
+- **Entfallene Regler:** `fable_7d_max`, `claude_5h_max`, `stark_ausweich_modell` und die Routen
+  der beiden alten starken Agenten. `dispatch.py` liest damit gar keine Nutzungszahlen mehr
+  (`claude_quota()` ist ersatzlos weg), und aus der Schlusszeile von `lage` fallen
+  `stark_route`, `fable_7d_prozent` und `fable_7d_alter_s`. `stark_starts_soll` bleibt und ist
+  weiterhin 0 oder 1.
+- **`lage` unterscheidet die Bahnen jetzt an der Marke `stark` aus der Konfig**, nicht mehr am
+  Routennamen. Das war vorher am Modell ablesbar und ist es nicht mehr, seit beide Bahnen
+  dasselbe fahren.
+- **Die gelbe Tages-Ampel schaltet weiterhin die starke Bahn ab** — aber aus einem anderen
+  Grund, und der steht jetzt dabei: nicht weil sie die teure wäre, sondern weil sie je Lauf am
+  wenigsten schließt (eine Aufgabe, höchstens einer gleichzeitig). Wird das Geld knapp, läuft
+  zuerst weiter, was mehr Aufgaben je Dollar erledigt.
+
+So zieht ein bestehendes Projekt nach:
+
+1. `vorlage/dispatch.py`, `vorlage/freilauf_einrichten.py`, `vorlage/prompts/dispatcher.md` und
+   `vorlage/flows/takt-soll.json` übernehmen.
+2. In der eigenen `konfig.json`: die beiden starken Worker-Einträge durch einen ersetzen
+   (`schluessel` und `route` je `stark`), die Route `stark` anlegen, `stark_modell` setzen,
+   `fable_7d_max`, `claude_5h_max` und `stark_ausweich_modell` löschen und die alten Agenten-
+   Namen in `_abgeloeste_agenten` eintragen.
+3. `freilauf_einrichten.py --dry` fahren und prüfen, dass genau ein starker Worker angelegt und
+   die zwei alten als abgelöst gemeldet werden; dann scharf mit `--aufraeumen`.
+4. `motor_version` auf `1.4.0` setzen — erst danach.
 
 Was 1.3.0 gegenüber 1.2.0 geändert hat — die zweite Ursache derselben Doppelarbeit, und sie
 hat mit der Reservierung nichts zu tun:

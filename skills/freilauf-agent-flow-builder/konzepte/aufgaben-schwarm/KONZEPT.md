@@ -127,20 +127,20 @@ Register fängt den Rest ab.
 - Der billige Spezialist bekommt seinen Platz vor der Staffel, sonst schöpft sie den Deckel
   allein aus und er käme nie zum Zug.
 - Starke Bahn: höchstens `stark_max_parallel` (Vorgabe 1) gleichzeitig, nie beide Routen.
-- Abo-Quote: Gemessen wird das Wochenfenster mit dem Abo-Label aus `fl-api /api/usage`
-  (`weekly_scoped`), nicht `seven` — `seven` ist das Maximum aller Fenster und beantwortet eine
-  andere Frage. Jede Zahl kommt mit ihrem Alter; eine als stale gemeldete Zahl gilt als nicht
-  belastbar, denn direkt nach einem Reset kann der erinnerte Wert der alte sein, und wer darauf
-  einen Abo-Start baut, kauft sich ein `deferred`. Ohne belastbare Zahl fährt die Ausweich-Route.
+- Ein Modell für beide Bahnen: Die starke Bahn bekommt KEIN teureres Modell. Der Motor hatte
+  das einmal — mit Abo-Route, Quoten-Prüfung und teurem Ausweich-Modell — und es kostete im
+  Ursprungsprojekt 8,66 USD je Lauf gegen 0,14 USD in der gewöhnlichen Bahn, für zwei Punkte
+  Abstand im Artificial Analysis Index. Der Gewinn der starken Bahn kommt aus Zeit und Fokus
+  (eine Aufgabe, das ganze Zeitbudget), nicht aus Intelligenz. Erst wenn sie erkennbar nicht
+  vorankommt, wechselt `stark_modell` eine Stufe höher — und der Preis wird danach gemessen.
 - Geld: `budgets` sind die Guthaben-Schwellen je Anbieter, absichtlich über Freilaufs eigenem
   Budget-Gate. `tages_budget_usd` summiert die echten Lauf-Kosten eines Kalendertages; gelb heißt
   „starke Bahn aus", rot heißt „gar keine Starts". Die Summe umfasst nur Läufe der
   Schwarm-Agenten — Eval-Suiten, andere Läufe und Handarbeit hängen am selben Schlüssel, tauchen
   hier aber nicht auf. Der Deckel ist deshalb ein weites Netz gegen das Verrennen, keine
   Abrechnung; die harte Grenze zieht der Anbieter-Schlüssel. Der Zweck ist nicht, zu sparen,
-  sondern anzulaufen, wenn es Arbeit gibt, und sie dann abzuarbeiten. Ein Abo-Lauf meldet keine Kosten — sein Preis
-  ist der Anteil an der Wochenquote, und deren Deckel ist `fable_7d_max`. Abo-Verbrauch ist ein
-  Preis, kein Nullwert.
+  sondern anzulaufen, wenn es Arbeit gibt, und sie dann abzuarbeiten. Ein Lauf über ein Abo meldet keine Kosten und
+  fließt in diese Summe nicht ein — eine Null in dieser Spalte ist kein Nullpreis.
 - Leerlauf kostet nichts: Kein Agent hat einen Cron, der einzige Takt ist der Wächter-Flow, und
   der ist ein Shell-Aufruf plus eine Bedingung. Ein Tag ohne offene Aufgaben ergibt null
   Agenten-Läufe und null Token.

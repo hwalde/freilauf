@@ -2,7 +2,7 @@
   "_lies_mich": "Vorlage der Schwarm-Konfig. Kopiere sie im Zielrepo nach <motor-ordner>/konfig.json und ersetze jeden Wert, der mit '<AUSFÜLLEN' beginnt. Solange einer davon steht, brechen dispatch.py und freilauf_einrichten.py mit einer Liste der offenen Schlüssel ab, statt mit Platzhaltern zu arbeiten. Schlüssel, die mit '_' beginnen, sind Erklärungen und werden nie geprüft und nie gelesen. Der Block 'repo' ist der Adapter auf das Aufgaben-Register des Zielrepos — alles Repo-Spezifische steht dort und nirgendwo sonst. Fertige Kommandozeilen liefern die Adapter-Beschreibungen im Konzept-Ordner (adapter/befund-register.md, adapter/github-issues/ADAPTER.md, adapter/EIGENER-ADAPTER.md).",
 
   "_motor_version_hinweis": "Fassung des Motors (dispatch.py, freilauf_einrichten.py, prompts/, flows/), aus der diese Kopie stammt. Nicht ändern beim Einrichten — die Zahl sagt später, gegen welche Vorlagen-Fassung zu diffen ist (siehe AKTUALISIEREN.md).",
-  "motor_version": "1.3.0",
+  "motor_version": "1.4.0",
 
   "_repo_hinweis": "Der Adapter-Block. Jedes Kommando läuft über bash im Wurzelverzeichnis des Repos. Die Platzhalter <id>, <schwere>, <n> und $FL_RUN_ID bleiben in den Kommandos stehen; der Motor bzw. der Worker füllt sie.",
   "repo": {
@@ -117,16 +117,13 @@
     "prompt_datei": "po-praesentation.md"
   },
 
-  "_worker_hinweis": "Vier Worker-Agenten in zwei Bahnen. Keiner hat einen eigenen Cron (leeres cron ⇒ schedule_kind manuell): Der einzige Takt ist der Wächter-Flow, und er weckt nur den Dispatcher; die Worker startet allein der Dispatcher. So kostet ein Tag ohne offene Aufgaben null Agenten-Läufe. Bahn 1 (Feld `schluessel`: glm/ds) ist die gewöhnliche Arbeit, skaliert über die Zahl der Starts desselben Agenten. Bahn 2 (stark: true) sind die zwei starken Worker für blockierte und schon gescheiterte Aufgaben; höchstens einer davon läuft gleichzeitig. Die Schlüssel glm, ds, fable und gemini sind Namen von Steckplätzen, keine Modellnamen — die Flow-Vorlagen adressieren die Worker darüber. Braucht dein Projekt nur eine Bahn, lösche die beiden starken Einträge und setz stark_max_parallel auf 0.",
+  "_worker_hinweis": "Drei Worker-Agenten in zwei Bahnen. Keiner hat einen eigenen Cron (leeres cron ⇒ schedule_kind manuell): Der einzige Takt ist der Wächter-Flow, und er weckt nur den Dispatcher; die Worker startet allein der Dispatcher. So kostet ein Tag ohne offene Aufgaben null Agenten-Läufe. Bahn 1 (Feld `schluessel`: glm/ds) ist die gewöhnliche Arbeit, skaliert über die Zahl der Starts desselben Agenten. Bahn 2 (stark: true) ist EIN starker Worker für blockierte und schon gescheiterte Aufgaben; höchstens einer läuft gleichzeitig. Er unterscheidet sich nicht im Modell, sondern in der Arbeitsweise: genau eine Aufgabe je Lauf, das ganze Zeitbudget für sie. Die Schlüssel glm, ds und stark sind Namen von Steckplätzen, keine Modellnamen — die Flow-Vorlagen adressieren die Worker darüber. Braucht dein Projekt nur eine Bahn, lösche den starken Eintrag und setz stark_max_parallel auf 0.",
   "worker_agenten": [
     { "schluessel": "glm", "name": "Schwarm-Worker (GLM)", "route": "glm",
       "cron": "", "schweregrade": ["trivial", "normal"], "start_aktiv": true },
     { "schluessel": "ds",  "name": "Schwarm-Worker (DeepSeek, trivial)", "route": "deepseek",
       "cron": "", "schweregrade": ["trivial"], "start_aktiv": true },
-    { "schluessel": "fable", "name": "Schwarm-Worker (stark, Fable)", "route": "fable",
-      "cron": "", "schweregrade": ["blockiert", "normal"], "start_aktiv": true,
-      "stark": true, "minuten": 300 },
-    { "schluessel": "gemini", "name": "Schwarm-Worker (stark, Gemini)", "route": "gemini",
+    { "schluessel": "stark", "name": "Schwarm-Worker (stark)", "route": "stark",
       "cron": "", "schweregrade": ["blockiert", "normal"], "start_aktiv": true,
       "stark": true, "minuten": 300 }
   ],
@@ -150,24 +147,22 @@
   "worker_minuten": 300,
   "dispatcher_minuten": 15,
 
-  "_tages_budget_hinweis": "Was der Schwarm an einem Kalendertag (UTC) an echtem API-Geld ausgeben darf, summiert aus cost_usd seiner Läufe. Ab der Grenze steht die Tages-Ampel auf gelb: die gewöhnliche Bahn läuft weiter, die starke fällt aus. Ab dem Doppelten steht sie auf rot: gar keine Starts. Ein Abo-Lauf meldet kein cost_usd — sein Preis ist der Anteil an der Wochenquote, und deren Deckel ist fable_7d_max. budgets sind die Guthaben-Schwellen je Anbieter; setz sie über Freilaufs eigenes Budget-Gate, damit die Ampel vorher rot wird.",
+  "_tages_budget_hinweis": "Was der Schwarm an einem Kalendertag (UTC) an echtem API-Geld ausgeben darf, summiert aus cost_usd seiner Läufe. Ab der Grenze steht die Tages-Ampel auf gelb: die gewöhnliche Bahn läuft weiter, die starke fällt aus — nicht weil sie teurer wäre, sondern weil sie je Lauf am wenigsten schließt (eine Aufgabe, einer gleichzeitig). Ab dem Doppelten steht sie auf rot: gar keine Starts. Ein Lauf über ein Abo meldet kein cost_usd und fließt hier nicht ein; eine Null in dieser Spalte ist kein Nullpreis. budgets sind die Guthaben-Schwellen je Anbieter; setz sie über Freilaufs eigenes Budget-Gate, damit die Ampel vorher rot wird.",
   "_flow_checkout_hinweis": "Der Arbeitsordner der beiden Cron-Flows. Er MUSS ein eigener, detached Checkout sein und darf nicht der Checkout sein, in dem gearbeitet wird: Freilauf mergt nach origin/<basis>, zieht den Arbeits-Checkout des Menschen aber nie nach — er kann auf einem alten Commit stehen, der den Motor-Ordner noch gar nicht enthält, und die Flows laufen dann ins Leere. Ein `git worktree` des Arbeits-Checkouts wäre der falsche Weg: Er teilt sich dessen .git und damit Stash, Index und Worktree-Liste. Leerer Wert ⇒ <zustandsordner>/checkout. Voraussetzung: git-Lesezugriff auf origin von dieser Maschine.",
   "flow_checkout": "",
 
   "budgets": { "openrouter_min_usd": 8, "deepseek_min_usd": 3 },
   "tages_budget_usd": 40,
 
-  "_stark_hinweis": "Die Regler der starken Bahn. fable_7d_max ist die Schwelle für die Abo-Wochennutzung: darunter fährt die Abo-Route, darüber das Ausweich-Modell. claude_5h_max spiegelt Freilaufs eigenes Claude-Gate — liegt das 5-Stunden-Fenster darüber, würde ein Abo-Start ohnehin nur deferred. Ist die Zahl unbekannt oder als stale gemeldet, gilt die konservative Sicht: Ausweich-Modell. stark_min_versuche ist die Zahl der Fehlversuche, ab der die starke Bahn eine Aufgabe übernimmt.",
-  "fable_7d_max": 80,
-  "claude_5h_max": 90,
+  "_stark_hinweis": "Die Regler der starken Bahn. Ihr Wert steckt in der Arbeitsweise, nicht im Modell: genau eine Aufgabe je Lauf, das ganze Zeitbudget für sie, blockierte Aufgaben erlaubt, höchstens einer gleichzeitig (stark_max_parallel). stark_min_versuche ist die Zahl der Fehlversuche, ab der die starke Bahn eine Aufgabe übernimmt. Setz hier NICHT reflexhaft ein teureres Modell ein: Im Ursprungsprojekt lief die Bahn zunächst auf einer Abo-Route mit Quoten-Prüfung und einem teuren Ausweich-Modell; gemessen kostete ein Lauf 8,66 USD gegen 0,14 USD eines gewöhnlichen — das 62-Fache für zwei Punkte im Artificial Analysis Index. Beides ist am 2026-09-05 herausgeflogen.",
   "stark_max_parallel": 1,
   "stark_minuten": 300,
   "stark_min_versuche": 2,
   "_versuchs_deckel_hinweis": "Ab wie vielen Fehlversuchen eine Aufgabe an einen Menschen geht. Der Wert MUSS zu dem passen, was das Aufgaben-Werkzeug selbst tut — es setzt beim Erreichen dieser Zahl die Marke für den Menschen. Die starke Bahn zählt EINSCHLIESSLICH dieses Werts: Eine wieder freigegebene Aufgabe behält ihren Zähler, und wer sie herauszählt, lässt sie für immer liegen.",
   "versuchs_deckel": 3,
 
-  "_stark_ausweich_hinweis": "Das Modell der Ausweich-Route, wenn die Abo-Route nicht darf. Wechseln heißt: diesen Wert ändern und freilauf_einrichten.py fahren. Der Agent behält dabei seinen Namen — er passt dann nicht mehr auf das Modell.",
-  "stark_ausweich_modell": "google/gemini-3.8-flash",
+  "_stark_modell_hinweis": "Das Modell der starken Bahn — die EINE Stelle, an der es gewechselt wird (die Route stark zieht es über ihren modell_regler). Vorgabe ist dasselbe Modell wie in der gewöhnlichen Bahn. Kommt die Bahn an blockierten Aufgaben erkennbar nicht voran, ist ein stärkeres Modell derselben Familie der nächste Schritt — mit Blick auf routen.stark.or_provider, wo ein fester Anbieter steht, der zum neuen Modell passen muss. Der Agent heißt bewusst nur „Schwarm-Worker (stark)\" und nennt kein Modell: So kann sein Name beim Wechsel nicht lügen.",
+  "stark_modell": "z-ai/glm-5.3-flash",
 
   "_routen_hinweis": "Die Modell-Routen. Jede Route ist ein Satz Felder für die Agenten-Anlage im Hub. Vor dem ersten Lauf gegen die eigene Installation prüfen: fl-api /api/models und fl-api /api/favorites — eine erfundene Modell-ID meldet opencode als 'Unexpected server error' und ist von einem Anbieter-Ausfall nicht zu unterscheiden. Ein Abo-Harness (claude, cursor) bekommt keinen provider. modell_regler zeigt auf einen Schlüssel weiter oben, aus dem die Modell-ID kommt.",
   "routen": {
@@ -179,13 +174,10 @@
       "harness": "opencode", "provider": "deepseek", "model": "deepseek-v4-flash",
       "effort": "high"
     },
-    "fable": {
-      "harness": "claude", "model": "fable", "effort": "high"
-    },
-    "gemini": {
-      "harness": "opencode", "provider": "openrouter", "model": "google/gemini-3.8-flash",
-      "modell_regler": "stark_ausweich_modell",
-      "effort": "high", "or_mode": "auto", "or_quant": "fp8"
+    "stark": {
+      "harness": "opencode", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
+      "modell_regler": "stark_modell",
+      "effort": "high", "or_mode": "pin", "or_provider": "z-ai/fp8"
     }
   },
   "dispatcher_route": "glm",

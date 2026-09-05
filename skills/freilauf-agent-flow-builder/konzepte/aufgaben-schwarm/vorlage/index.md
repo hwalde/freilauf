@@ -70,21 +70,35 @@ Die starke Bahn greift nur, wo das nachweislich nicht reicht: bei einer als bloc
 eingetragenen Aufgabe, und bei einer, an der die gewöhnliche Bahn schon zweimal gescheitert ist.
 Höchstens ein starker Worker läuft gleichzeitig.
 
-Welche der beiden starken Routen fährt, entscheidet die Abo-Wochennutzung, und `dispatch.py
-lage` rechnet es aus (`stark_route`):
+Sie fährt dasselbe Modell wie die gewöhnliche Bahn. Ihr Unterschied liegt ganz in der
+Arbeitsweise: **genau eine Aufgabe je Lauf, mit dem ganzen Zeitbudget** — ein frischer Kopf, der
+sich in einen einzigen Fall gräbt, statt ein Paket abzuarbeiten. Dazu kommt, dass nur sie
+überhaupt an blockierte Aufgaben darf. `stark_starts_soll` aus `dispatch.py lage` ist 0 oder 1
+und schon verrechnet: nichts Schweres frei, schon einer in der Luft, Guthaben unter der
+Schwelle, Tages-Ampel nicht grün oder Halt ergeben 0.
 
-| `stark_route` | wann |
-|---|---|
-| `fable` | Abo-Woche unter `fable_7d_max`, Zahl belastbar, 5-Stunden-Fenster unter `claude_5h_max` |
-| `gemini` | Abo-Woche darüber, keine Zahl da, oder die Zahl als stale gemeldet |
-| `keine` | nichts Schweres frei, schon einer in der Luft, Tages-Ampel nicht grün, oder Halt |
+### Warum hier kein teureres Modell steht
 
-Gemessen wird das Wochenfenster mit dem Abo-Label aus `fl-api /api/usage` (`weekly_scoped`),
-nicht `seven` — `seven` ist das Maximum aller Wochenfenster und beantwortet eine andere Frage.
-Jede Zahl kommt mit ihrem Alter. Eine als stale gemeldete Zahl gilt als nicht belastbar: Direkt
-nach einem Reset kann der erinnerte Wert noch der alte sein, und wer darauf einen Abo-Start
-baut, kauft sich ein `deferred`. Widersprechen sich `lage` und der Skill `freilauf-stats`, gilt
-die konservativere Sicht.
+Die Versuchung ist groß, der starken Bahn ein stärkeres Modell zu geben. Der Motor hatte das
+einmal: zwei starke Agenten, davor eine Quoten-Frage, die zwischen einer Abo-Route und einem
+teureren Ausweich-Modell entschied. Die Rechnung aus dem Ursprungsprojekt (Lauf-Kosten des Hubs,
+Feld `cost_usd`, gemessen 2026-09-05):
+
+| Bahn | Läufe | Summe | je Lauf |
+|---|---|---|---|
+| stark (Ausweich-Modell) | 10 | 86,61 USD | 8,66 USD |
+| gewöhnlich | 68 | 9,55 USD | 0,14 USD |
+
+Das 62-Fache je Lauf — für zwei Punkte Abstand im Artificial Analysis Intelligence Index (59
+gegen 57). Ein einzelner entgleister Lauf verbrannte davon 72,66 USD, endete `aborted` und
+mergte nichts; aber auch ohne ihn bleibt das Elffache. Die Abo-Route kam nie zum Zug, weil ihre
+Wochenquote durchgehend belegt war.
+
+Daraus die Vorgabe für ein neues Projekt: **Fang mit einem Modell an.** Der Gewinn der starken
+Bahn kommt aus Zeit und Fokus, nicht aus Intelligenz. Kommt sie an blockierten Aufgaben
+erkennbar nicht voran, wechsle `stark_modell` auf die nächststärkere Stufe derselben Familie —
+eine Zeile, plus ein Blick auf `routen.stark.or_provider`, wo ein fester Anbieter steht, der
+zum neuen Modell passen muss. Miss den Preis danach.
 
 ## Zuweisung: das Zeitfenster zwischen Rückgabe und Merge
 
@@ -149,8 +163,8 @@ Was deckelt:
 - `tages_budget_usd` — die Tagessumme über alle Schwarm-Läufe, Worker wie Dispatcher. Gelb
   heißt: starke Bahn aus. Rot heißt: gar keine Starts. Die Zahl zählt nur Läufe der
   Schwarm-Agenten; alles andere am selben Schlüssel sieht sie nicht. Setze sie weit: Sie ist
-  ein Netz gegen das Verrennen, keine Abrechnung;
-- `fable_7d_max` — der Deckel für den Abo-Verbrauch, der in keiner USD-Zahl auftaucht;
+  ein Netz gegen das Verrennen, keine Abrechnung. Gelb trifft die starke Bahn nicht, weil sie
+  teurer wäre, sondern weil sie je Lauf am wenigsten schließt;
 - `max_worker` für die gewöhnliche Bahn, `stark_max_parallel` für die starke.
 
 ## Was wo liegt

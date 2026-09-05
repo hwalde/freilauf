@@ -55,8 +55,7 @@ SCHLUSSZEILE (byte-stabil, für Flows und Skripte)
   SCHWARM_LAGE result=OK arbeit_da=0|1 po_da=0|1 kandidaten_gesamt=… kandidaten_trivial=…
                kandidaten_schwer=…
                po_offen=… worker_starts_soll=… deepseek_starts_soll=…
-               stark_route=fable|gemini|keine stark_starts_soll=0|1
-               fable_7d_prozent=…|unbekannt fable_7d_alter_s=…|unbekannt
+               stark_starts_soll=0|1
                kosten_heute_usd=… tages_ampel=gruen|gelb|rot
                budget_ampel=gruen|gelb|rot|unbekannt laufend=… laufend_stark=…
                laufend_dispatcher=… laufend_aufraeumer=…
@@ -85,11 +84,11 @@ SCHLUSSZEILE (byte-stabil, für Flows und Skripte)
 
 DIE ZWEI BAHNEN
   Gewöhnlich (GLM, DeepSeek): trivial und normal, mehrere parallel, Deckel `max_worker`.
-  Stark (Fable oder das Ausweich-Modell): blockierte und schon gescheiterte Befunde, höchstens
-  einer gleichzeitig. Welcher der beiden fährt, sagt `stark_route` — Fable, solange die
-  Fable-Wochennutzung unter `fable_7d_max` liegt und die Zahl belastbar ist, sonst das
-  Ausweich-Modell. Ist keine Zahl da oder ist sie als stale gemeldet, gilt die konservative
-  Sicht (Ausweich-Modell), denn ein Claude-Start liefe sonst nur in ein `deferred`.
+  Stark: blockierte und schon gescheiterte Aufgaben, genau eine je Lauf, höchstens einer
+  gleichzeitig. Die Bahn braucht dafür KEIN anderes Modell — ihr Wert steckt in der
+  Arbeitsweise: ein Fall, das ganze Zeitbudget, und als einzige Bahn Zugriff auf Blockiertes.
+  Ein teureres Modell hier war in diesem Motor einmal vorgesehen und ist am 2026-09-05
+  gemessen herausgeflogen; die Rechnung steht in der index.md daneben.
 
 EXIT-CODES
   0 OK · 1 fachlicher Fehlschlag (Hub lehnte ab) · 2 Eingabefehler
@@ -573,7 +572,7 @@ def kandidaten_schwer(liste: list, konf: dict) -> list:
     deckel = versuchs_deckel(konf)
     # Genau die Schweregrade, die der starke Worker im zweiten Hol-Versuch anfragt — sonst
     # zählt `lage` mehr, als der Worker holen kann, und der Dispatcher startet ihn auf eine
-    # Aufgabe, die es für ihn nicht gibt. Ein Fable-Lauf für n=0 kostet Wochenquote.
+    # Aufgabe, die es für ihn nicht gibt — ein Lauf, der nichts findet, kostet trotzdem.
     gescheitert_schweren = {s for w in konf.get("worker_agenten") or [] if w.get("stark")
                             for s in (w.get("schweregrade") or []) if s != "blockiert"}
     treffer = []
@@ -631,7 +630,7 @@ def agenten_im_hub(konf: dict) -> dict:
 def laufende(konf: dict) -> list:
     """Läufe der Schwarm-Agenten, die gerade in der Luft sind.
 
-    Jeder Treffer trägt zwei Marken: `stark` für die starke Bahn (Fable/Gemini) und
+    Jeder Treffer trägt zwei Marken: `stark` für die starke Bahn und
     `dispatcher` für den Dispatcher selbst. Drei Kategorien, nicht zwei — denn der Dispatcher
     rechnet die Staffel, WÄHREND er läuft. Zählte er als gewöhnlicher Worker mit, bliebe von
     `max_worker` immer ein Platz weniger übrig, und die oberste Stufe der Staffel wäre nie
@@ -711,8 +710,9 @@ def budget(konf: dict) -> dict:
 def kosten_heute(konf: dict) -> dict:
     """Was die Schwarm-Läufe dieses Kalendertages (UTC) an echtem API-Geld gekostet haben.
 
-    Nur `cost_usd` — die Zahl, die der Harness wirklich berichtet. Ein Claude-Abo-Lauf hat
-    keine: Sein Preis ist der Anteil an der Wochenquote, und den deckelt `fable_7d_max`.
+    Nur `cost_usd` — die Zahl, die der Harness wirklich berichtet. Ein Lauf über ein Abo hat
+    keine; sein Preis steckt in einer Wochenquote und taucht hier nicht auf. Das ist der Grund,
+    warum `ohne_zahl` mitgezählt wird: Eine Null in dieser Spalte ist kein Nullpreis.
     """
     grenze = float(konf.get("tages_budget_usd", 0) or 0)
     erg = {"usd": 0.0, "laeufe": 0, "grenze_usd": grenze, "ampel": "gruen",
@@ -746,74 +746,6 @@ def kosten_heute(konf: dict) -> dict:
     return erg
 
 
-# ── Claude-Kontingent (die starke Bahn) ──────────────────────────────────────
-
-def claude_quota(konf: dict) -> dict:
-    """Die Fable-Wochennutzung und das 5-Stunden-Fenster aus `/api/usage`.
-
-    `seven` wäre die falsche Zahl: Sie ist das MAXIMUM aller Wochenfenster, nicht das
-    Fenster, das einen Fable-Lauf bindet. Gebunden wird ein Fable-Lauf vom Fenster mit dem
-    Label „Fable" (`weekly_scoped`), ersatzweise vom Feld `seven_fable`.
-
-    Jede Zahl kommt mit ihrem Alter. Eine als `stale` gemeldete Zahl gilt hier als NICHT
-    nutzbar: Direkt nach einem Reset kann der erinnerte Wert noch der alte sein, und wer
-    darauf einen Claude-Start baut, kauft sich ein `deferred`. Ohne belastbare Zahl fährt
-    die starke Bahn auf Gemini — die konservative Sicht.
-    """
-    erg = {"fable_7d_prozent": None, "fable_7d_stale": None, "fable_7d_alter_s": None,
-           "fable_7d_resets_at": None, "claude_5h_prozent": None, "claude_5h_stale": None,
-           "claude_konfiguriert": False, "fable_nutzbar": False, "gruende": [],
-           "hinweis": "Zahlen aus dem Hub-Cache (TTL 60 s) — bis zu eine Minute alt."}
-    try:
-        daten = hub_get("/api/usage")
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        erg["gruende"].append(f"Hub antwortet nicht auf /api/usage ({e})")
-        return erg
-    eintrag = next((u for u in daten.get("usage") or [] if u.get("harness") == "claude"), None)
-    if eintrag is None:
-        erg["gruende"].append("Claude Code ist auf diesem Hub nicht eingerichtet")
-        return erg
-    erg["claude_konfiguriert"] = True
-    if not eintrag.get("ok"):
-        erg["gruende"].append("Claude Code ist eingerichtet, antwortet aber nicht")
-        return erg
-    d = eintrag.get("data") or {}
-    jetzt_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-
-    fenster = next((w for w in d.get("weekly_scoped") or []
-                    if "fable" in str(w.get("label") or "").lower()), None)
-    if fenster:
-        erg["fable_7d_prozent"] = fenster.get("pct")
-        erg["fable_7d_stale"] = bool(fenster.get("stale"))
-        erg["fable_7d_resets_at"] = fenster.get("resets_at")
-        if fenster.get("at"):
-            erg["fable_7d_alter_s"] = max(0, (jetzt_ms - int(fenster["at"])) // 1000)
-    elif d.get("seven_fable") is not None:
-        erg["fable_7d_prozent"] = d.get("seven_fable")
-        erg["fable_7d_stale"] = False
-        erg["fable_7d_resets_at"] = d.get("seven_fable_resets_at")
-
-    erg["claude_5h_prozent"] = d.get("five")
-    erg["claude_5h_stale"] = d.get("five_at") is not None
-
-    grenze = float(konf.get("fable_7d_max", 80) or 80)
-    grenze_5h = float(konf.get("claude_5h_max", 90) or 90)
-    if erg["fable_7d_prozent"] is None:
-        erg["gruende"].append("Fable-Wochenfenster meldet keine Zahl")
-    elif erg["fable_7d_stale"]:
-        erg["gruende"].append(
-            f"Fable-Wochenfenster {erg['fable_7d_prozent']} % ist als stale gemeldet "
-            f"(gelesen vor {erg['fable_7d_alter_s']} s) — nicht belastbar")
-    elif float(erg["fable_7d_prozent"]) >= grenze:
-        erg["gruende"].append(f"Fable-Woche {erg['fable_7d_prozent']} % ≥ {grenze} %")
-    elif erg["claude_5h_prozent"] is not None and float(erg["claude_5h_prozent"]) >= grenze_5h:
-        erg["gruende"].append(f"Claude-5-Stunden-Fenster {erg['claude_5h_prozent']} % "
-                              f"≥ {grenze_5h} % — ein Start würde deferred")
-    else:
-        erg["fable_nutzbar"] = True
-    return erg
-
-
 # ── Der Schaltplan ───────────────────────────────────────────────────────────
 
 def start_stufe(anzahl: int, konf: dict) -> int:
@@ -825,41 +757,32 @@ def start_stufe(anzahl: int, konf: dict) -> int:
     return stufe
 
 
-def stark_plan(konf: dict, schwer: int, quota: dict, bud: dict, halt: bool,
+def stark_plan(konf: dict, schwer: int, bud: dict, halt: bool,
                laufend_stark: int, tag: dict) -> dict:
-    """Welcher starke Worker jetzt laufen soll — höchstens einer, nie zwei.
+    """Ob der starke Worker jetzt laufen soll — höchstens einer, nie zwei.
 
     Rangfolge: Gibt es nichts Schweres, läuft nichts. Läuft schon ein starker Worker, kommt
-    kein zweiter dazu. Sonst entscheidet die Fable-Wochennutzung: unter `fable_7d_max`
-    Prozent Claude Code mit Modell `fable`, darüber (oder ohne belastbare Zahl) OpenCode mit
-    Gemini. Reicht auch das Gemini-Guthaben nicht, läuft gar nichts — ein Start liefe sonst
-    nur in ein `deferred`.
+    kein zweiter dazu. Sonst startet einer, sofern das Guthaben reicht.
+
+    Die Bahn hatte in diesem Motor einmal zwei Agenten und eine Quoten-Frage davor, die
+    zwischen einer Abo-Route und einem Ausweich-Modell entschied. Beides ist herausgeflogen:
+    zu teuer für den Zugewinn. Was bleibt, ist die Arbeitsweise — eine Aufgabe, das ganze
+    Zeitbudget, blockierte Aufgaben erlaubt.
     """
-    gruende = []
     deckel = int(konf.get("stark_max_parallel", 1) or 1)
     if halt:
-        return {"route": "keine", "starts": 0,
-                "grund": "Halt-Marker gesetzt — es wird nichts gestartet"}
+        return {"starts": 0, "grund": "Halt-Marker gesetzt — es wird nichts gestartet"}
     if tag.get("ampel") in ("gelb", "rot"):
-        return {"route": "keine", "starts": 0,
-                "grund": f"Tages-Ampel {tag['ampel']}: {tag['grund']}"}
+        return {"starts": 0, "grund": f"Tages-Ampel {tag['ampel']}: {tag['grund']}"}
     if schwer < 1:
-        return {"route": "keine", "starts": 0,
-                "grund": "kein blockierter und kein gescheiterter Befund frei"}
+        return {"starts": 0, "grund": "kein blockierter und kein gescheiterter Befund frei"}
     if laufend_stark >= deckel:
-        return {"route": "keine", "starts": 0,
+        return {"starts": 0,
                 "grund": f"{laufend_stark} starker Worker in der Luft, "
                          f"stark_max_parallel={deckel} — kein zweiter"}
-    if quota.get("fable_nutzbar"):
-        gruende.append(f"Fable-Woche {quota.get('fable_7d_prozent')} % < "
-                       f"{konf.get('fable_7d_max', 80)} % ⇒ Claude Code mit Modell fable")
-        return {"route": "fable", "starts": 1, "grund": "; ".join(gruende)}
-    gruende.extend(quota.get("gruende") or ["Fable-Kontingent nicht nutzbar"])
     if not bud.get("openrouter_ok", True):
-        gruende.append("OpenRouter unter der Schwelle — auch Gemini fällt aus")
-        return {"route": "keine", "starts": 0, "grund": "; ".join(gruende)}
-    gruende.append("⇒ OpenCode mit google/gemini-3.8-flash")
-    return {"route": "gemini", "starts": 1, "grund": "; ".join(gruende)}
+        return {"starts": 0, "grund": "OpenRouter unter der Schwelle — die starke Bahn fällt aus"}
+    return {"starts": 1, "grund": f"{schwer} für die starke Bahn frei ⇒ ein Lauf"}
 
 
 def startplan(konf: dict, anzahl: int, trivial: int, bud: dict, halt: bool,
@@ -915,7 +838,6 @@ def lage_erheben(repo: Path, konf: dict) -> dict:
                                 naechster_schritt="fl-api --url · Hub starten, dann erneut.",
                                 code=3))
     bud = budget(konf)
-    quota = claude_quota(konf)
     tag = kosten_heute(konf)
     halt = halt_marker().exists()
     po_zahl = po_offen(repo, konf)
@@ -930,7 +852,7 @@ def lage_erheben(repo: Path, konf: dict) -> dict:
     auf_deckel = int(konf.get("aufraeumer_max_parallel", 1) or 1)
     plan = startplan(konf, len(kand), nach_schwere["trivial"], bud, halt,
                      len(laufend_normal), tag)
-    plan_stark = stark_plan(konf, len(schwer), quota, bud, halt, len(laufend_stark), tag)
+    plan_stark = stark_plan(konf, len(schwer), bud, halt, len(laufend_stark), tag)
 
     k_id, k_art, k_titel = f.get("id", "id"), f.get("art", "art"), f.get("titel", "titel")
     k_fundort = f.get("fundort", "fundort")
@@ -947,14 +869,18 @@ def lage_erheben(repo: Path, konf: dict) -> dict:
         "schwere_kandidaten": [{"id": b.get(k_id), "schwere": b.get(k_schwere),
                                 "versuche": int(b.get(f.get("versuche", "versuche")) or 0),
                                 "titel": (b.get(k_titel) or "")[:160]} for b in schwer[:25]],
+        # `route` und `stark` kommen aus der Konfig, nicht aus dem Hub: Nur sie sagen, welche
+        # Bahn ein Agent bedient. Am Modell ist das nicht abzulesen, sobald beide Bahnen
+        # dasselbe fahren — und wer sie am Modell unterschiede, läge dann falsch.
         "agenten": [{"name": n, "id": a["id"], "aktiv": bool(a["active"]),
                      "cron": a.get("schedule"), "model": a.get("model"),
                      "route": next((w["route"] for w in konf.get("worker_agenten") or []
-                                    if w["name"] == n), None)}
+                                    if w["name"] == n), None),
+                     "stark": next((bool(w.get("stark")) for w in konf.get("worker_agenten") or []
+                                    if w["name"] == n), False)}
                     for n, a in sorted(agenten.items())],
         "laufende": in_arbeit,
         "budget": bud,
-        "claude_quota": quota,
         "tageskosten": tag,
         "startplan": plan,
         "startplan_stark": plan_stark,
@@ -964,9 +890,6 @@ def lage_erheben(repo: Path, konf: dict) -> dict:
         "kandidaten_trivial": nach_schwere["trivial"],
         "kandidaten_schwer": len(schwer),
         "po_offen": po_zahl,
-        "fable_7d_prozent": quota["fable_7d_prozent"],
-        "fable_7d_alter_s": quota["fable_7d_alter_s"],
-        "fable_7d_stale": quota["fable_7d_stale"],
         "kosten_heute_usd": tag["usd"],
         "tages_ampel": tag["ampel"],
         # Zwei Flags für die beiden Cron-Flows. Ein Flow kann kein UND: Jede Verknüpfung
@@ -1000,7 +923,6 @@ def lage_erheben(repo: Path, konf: dict) -> dict:
                        "meldereif": plan_auf["meldereif"]},
         "worker_starts_soll": plan["glm_starts"],
         "deepseek_starts_soll": plan["deepseek_starts"],
-        "stark_route": plan_stark["route"],
         "stark_starts_soll": plan_stark["starts"],
         "laufend_stark": len(laufend_stark),
         "laufend_dispatcher": len(laufend_dispatcher),
@@ -1023,15 +945,13 @@ def lage_drucken(l: dict) -> None:
     print(f"    wartet auf einen Menschen (wartet_auf: po): "
           f"{l['po_offen'] if l['po_offen'] >= 0 else 'nicht ermittelbar'}")
     print("  Agenten im Hub:")
-    stark_route = l["stark_route"]
     for ag in l["agenten"]:
         if ag["route"] is None:
             starts = ""
+        elif ag.get("stark"):
+            starts = f"  → {l['stark_starts_soll']}× starten"
         elif ag["route"] == "deepseek":
             starts = f"  → {l['deepseek_starts_soll']}× starten"
-        elif ag["route"] in ("fable", "gemini"):
-            starts = (f"  → {l['stark_starts_soll']}× starten"
-                      if ag["route"] == stark_route else "  → 0× starten")
         else:
             starts = f"  → {l['worker_starts_soll']}× starten"
         print(f"      #{ag['id']:<4} {'AN ' if ag['aktiv'] else 'aus'}  {ag['name']:<36} "
@@ -1064,18 +984,10 @@ def lage_drucken(l: dict) -> None:
     if t["ohne_zahl"]:
         print(f"    {t['ohne_zahl']} Läufe ohne cost_usd (Abo-Läufe berichten keins) — "
               f"ihr Preis steht in der Wochenquote, nicht hier")
-    q = l["claude_quota"]
-    alter = ("unbekannt alt" if q["fable_7d_alter_s"] is None
-             else f"gelesen vor {q['fable_7d_alter_s']} s")
-    print(f"  Fable-Woche: {q['fable_7d_prozent']} % ({alter}"
-          f"{', als stale gemeldet' if q['fable_7d_stale'] else ''}) · "
-          f"Claude 5 h: {q['claude_5h_prozent']} %")
-    for g in q["gruende"]:
-        print(f"    ! {g}")
     print(f"  Startplan: {l['startplan']['grund']}")
     print(f"    Zeitversatz zwischen zwei Starts: "
           f"{l['startplan']['versatz_minuten']} Minuten")
-    print(f"  Starke Bahn: Route {l['stark_route']}, {l['stark_starts_soll']} Start · "
+    print(f"  Starke Bahn: {l['stark_starts_soll']} Start · "
           f"{l['startplan_stark']['grund']}")
 
 
@@ -1224,12 +1136,7 @@ def main(argv=None) -> int:
                 po_offen=lage["po_offen"],
                 worker_starts_soll=lage["worker_starts_soll"],
                 deepseek_starts_soll=lage["deepseek_starts_soll"],
-                stark_route=lage["stark_route"],
                 stark_starts_soll=lage["stark_starts_soll"],
-                fable_7d_prozent=("unbekannt" if lage["fable_7d_prozent"] is None
-                                  else lage["fable_7d_prozent"]),
-                fable_7d_alter_s=("unbekannt" if lage["fable_7d_alter_s"] is None
-                                  else lage["fable_7d_alter_s"]),
                 kosten_heute_usd=lage["kosten_heute_usd"],
                 tages_ampel=lage["tages_ampel"],
                 budget_ampel=lage["budget_ampel"], laufend=len(lage["laufende"]),
