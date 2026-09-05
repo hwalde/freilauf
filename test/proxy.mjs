@@ -33,10 +33,10 @@ import { connect as tlsConnect } from 'node:tls'
 import { group, check, skipped, equal, isTrue, waitFor, summary, counter } from './mini.mjs'
 
 const start = Date.now()
-const PROJEKT = new URL('..', import.meta.url).pathname
+const PROJECT = new URL('..', import.meta.url).pathname
 const BIND = '127.0.0.1'
 
-function freierPort() {
+function freePort() {
   return new Promise((r) => {
     const s = http.createServer()
     s.listen(0, BIND, () => { const p = s.address().port; s.close(() => r(p)) })
@@ -92,11 +92,11 @@ async function main() {
   { stdio: 'ignore' })
 
   const { server: hub, offen } = stubHub()
-  const hubPort = await freierPort()
-  const proxyPort = await freierPort()
+  const hubPort = await freePort()
+  const proxyPort = await freePort()
   await new Promise((r) => hub.listen(hubPort, BIND, r))
 
-  const proxy = spawn(process.execPath, [join(PROJEKT, 'vpn-proxy.mjs')], {
+  const proxy = spawn(process.execPath, [join(PROJECT, 'vpn-proxy.mjs')], {
     env: {
       ...process.env,
       FREILAUF_VPN_BIND: BIND,
@@ -113,7 +113,7 @@ async function main() {
   /** One h2 session, since that is the whole point: a browser only opens one. */
   const h2 = () => http2.connect(`https://${authority}`, { rejectUnauthorized: false })
 
-  const aufraeumen = () => {
+  const cleanUp = () => {
     proxy.kill('SIGKILL')
     hub.close()
     rmSync(certDir, { recursive: true, force: true })
@@ -206,7 +206,7 @@ async function main() {
       equal(offen.size, grund, 'not one socket is left behind')
     })
   } finally {
-    aufraeumen()
+    cleanUp()
   }
 
   summary('Proxy tests', start)

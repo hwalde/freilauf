@@ -32,8 +32,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { group, check, skipped, equal, isTrue, isFalse, contains, summary, counter } from './mini.mjs'
 
 const start = Date.now()
-const PROJEKT = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
-const SKRIPT = join(PROJEKT, 'bin', 'freilauf-deploy')
+const PROJECT = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
+const SKRIPT = join(PROJECT, 'bin', 'freilauf-deploy')
 
 const SB = mkdtempSync(join(tmpdir(), 'freilauf-deploy-'))
 const HOME = join(SB, 'home')
@@ -87,7 +87,7 @@ function deploy(...args) {
 
 /** setup/migrate-from-cc-hub.sh, with the same sandbox fences. */
 function migrate(...args) {
-  return sh('bash', [join(PROJEKT, 'setup', 'migrate-from-cc-hub.sh'), ...args], {
+  return sh('bash', [join(PROJECT, 'setup', 'migrate-from-cc-hub.sh'), ...args], {
     cwd: SB,
     env: {
       ...process.env,
@@ -161,7 +161,7 @@ exit 0`)
   // Only what a deploy really touches: the scripts it installs, the units it
   // syncs, and the two files the dependency check reads.
   for (const p of ['bin', 'setup', 'deploy', 'package.json', 'package-lock.json']) {
-    cpSync(join(PROJEKT, p), join(WORK, p), { recursive: true })
+    cpSync(join(PROJECT, p), join(WORK, p), { recursive: true })
   }
   writeFileSync(join(WORK, 'marker.txt'), 'one\n')
   git(WORK, 'add', '-A')
@@ -377,7 +377,7 @@ try {
       // would report every idle and every API error twice.
       mkdirSync(dir, { recursive: true })
       writeFileSync(join(dir, 'cc-hub.js'), '// the old one\n')
-      sh('bash', [join(PROJEKT, 'setup', '02-install-scripts.sh')], {
+      sh('bash', [join(PROJECT, 'setup', '02-install-scripts.sh')], {
         env: { ...process.env, HOME, PATH: `${SHIM}:${process.env.PATH}`, FREILAUF_SKIP_EXTRAS: '1' },
       })
       isFalse(existsSync(join(dir, 'cc-hub.js')), 'the old plugin file is gone')

@@ -9,7 +9,7 @@
 // is precisely what a rebuild of this file (live updates, htmx) walks into
 // blind, so what it does today is written down here as tests first.
 //
-// It runs a hub in the sandbox from test/sandkasten.mjs — the same one the e2e
+// It runs a hub in the sandbox from test/sandbox-env.mjs — the same one the e2e
 // suite uses, on its own port with its own database, so both may run at the
 // same time and next to a live hub.
 //
@@ -23,12 +23,12 @@
 //   node test/browser.mjs --sichtbar with a visible window (debugging)
 //   node test/browser.mjs --keep     keep the sandbox
 import { group, check, skipped, equal, isTrue, isFalse, contains, waitFor, summary, counter } from './mini.mjs'
-import { neuerSandkasten } from './sandkasten.mjs'
+import { newSandbox } from './sandbox-env.mjs'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 
-const BEHALTEN = process.argv.includes('--keep')
+const KEEP = process.argv.includes('--keep')
 const SICHTBAR = process.argv.includes('--sichtbar')
 const start = Date.now()
 
@@ -55,21 +55,21 @@ if (!browser) {
 }
 
 // ---------------------------------------------------------------- sandbox
-const sk = neuerSandkasten({ praefix: 'Freilauf-browser-', behalten: BEHALTEN })
-const { hol, formular } = sk
+const sk = newSandbox({ prefix: 'Freilauf-browser-', keep: KEEP })
+const { fetchPath, postForm } = sk
 let db = null
 let kontext = null
 
-async function aufraeumen() {
+async function cleanUp() {
   try { await kontext?.close() } catch {}
   try { await browser?.close() } catch {}
-  await sk.aufraeumen()
+  await sk.cleanUp()
 }
-process.on('SIGINT', async () => { await aufraeumen(); process.exit(130) })
-process.on('SIGTERM', async () => { await aufraeumen(); process.exit(143) })
+process.on('SIGINT', async () => { await cleanUp(); process.exit(130) })
+process.on('SIGTERM', async () => { await cleanUp(); process.exit(143) })
 // See test/e2e.mjs: a suite run from inside a tmux session dies of SIGHUP, and
 // node's default for it skips every handler above.
-process.on('SIGHUP', async () => { await aufraeumen(); process.exit(129) })
+process.on('SIGHUP', async () => { await cleanUp(); process.exit(129) })
 
 // ---------------------------------------------------------------- page helper
 /**
@@ -97,7 +97,7 @@ async function neueSeite(pfad, init) {
   // alert()/confirm() block a real browser just as they block a real user —
   // record what was said and answer yes, so no test hangs on a modal.
   p.on('dialog', (d) => { p.dialoge.push(d.message()); d.accept().catch(() => {}) })
-  if (pfad) await p.goto(sk.basis + pfad, { waitUntil: 'load' })
+  if (pfad) await p.goto(sk.base + pfad, { waitUntil: 'load' })
   return p
 }
 const sauber = (p) => isTrue(p.fehler.length === 0, `the browser console stays quiet (${p.fehler.join(' | ')})`)
@@ -108,13 +108,13 @@ const wartePage = (p, fn, arg, was) =>
     .catch(() => { throw new Error(`timeout while waiting for: ${was}`) })
 
 // ---------------------------------------------------------------- test data
-const jsonPost = (pfad, obj) => hol(pfad, {
+const jsonPost = (pfad, obj) => fetchPath(pfad, {
   method: 'POST', body: JSON.stringify(obj),
   headers: { 'content-type': 'application/json', accept: 'application/json' },
 })
 
-async function laufStarten(daten) {
-  const r = await formular('/api/runs', { harness: 'claude', branch_mode: 'keiner', expected_minutes: '45', ...daten })
+async function laufStarten(data) {
+  const r = await postForm('/api/runs', { harness: 'claude', branch_mode: 'keiner', expected_minutes: '45', ...data })
   const j = await r.json()
   if (!j.runId) throw new Error(`run not started: ${JSON.stringify(j)}`)
   const s = db.prepare('SELECT tmux_session FROM runs WHERE id=?').get(j.runId)?.tmux_session
@@ -130,27 +130,27 @@ let R_ALT = '', R_TICK = '', R_GEPLANT = '', R_LIVE = '', R_ENDE = '', R_OHNE_SE
 
 async function datenAnlegen() {
   for (const [harness, providers] of [['claude', []], ['opencode', ['opencode-zen', 'openrouter', 'deepseek']]]) {
-    await formular('/settings/coding-agents/save',
-      { harness, enabled: '1', ...(providers.length ? { providers } : {}) }, { alsBrowser: true })
+    await postForm('/settings/coding-agents/save',
+      { harness, enabled: '1', ...(providers.length ? { providers } : {}) }, { asBrowser: true })
   }
   for (const name of ['browser', 'browser-zwei']) {
-    await formular('/repos/edit', { name, path: sk.REPO, base_branch: 'main', worktree_extras: '[]' }, { alsBrowser: true })
+    await postForm('/repos/edit', { name, path: sk.REPO, base_branch: 'main', worktree_extras: '[]' }, { asBrowser: true })
   }
   repoId = db.prepare('SELECT id FROM repos WHERE name=?').get('browser').id
   repoId2 = db.prepare('SELECT id FROM repos WHERE name=?').get('browser-zwei').id
   // The second repo INTEGRATES. The branch rule means something different there
   // — that is the whole point of the explanations, and it cannot be seen with
   // one repo alone.
-  await formular('/repos/edit?id=' + repoId2, {
+  await postForm('/repos/edit?id=' + repoId2, {
     name: 'browser-zwei', path: sk.REPO, base_branch: 'main', worktree_extras: '[]',
     merge_mode: 'hub', finish_timeout_min: '15', merge_max_attempts: '2',
     conflict_parallel: '1', notify_running: '1', max_parallel: '0',
-  }, { alsBrowser: true })
+  }, { asBrowser: true })
 
   // Two favorites: one is enough for the dialog to stand, two are needed to see
   // that the chosen one is remembered.
   for (const [name, model] of [['Fav-eins', 'claude-opus-5'], ['Fav-zwei', 'claude-sonnet-4-5']]) {
-    await formular('/settings/favorites/edit', { name, harness: 'claude', model }, { alsBrowser: true })
+    await postForm('/settings/favorites/edit', { name, harness: 'claude', model }, { asBrowser: true })
   }
   FAV1 = db.prepare('SELECT id FROM favorites WHERE name=?').get('Fav-eins').id
   FAV2 = db.prepare('SELECT id FROM favorites WHERE name=?').get('Fav-zwei').id
@@ -163,10 +163,10 @@ async function datenAnlegen() {
   })
   FLOWID = (await fr.json()).id
 
-  await formular('/agents/edit', {
+  await postForm('/agents/edit', {
     repo_id: String(repoId), name: 'browser-agent', harness: 'claude', prompt: 'Browser-Testauftrag',
     branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'manuell', active: '1',
-  }, { alsBrowser: true })
+  }, { asBrowser: true })
 
   R_ALT = await laufStarten({ repo_id: String(repoId), prompt: 'Browser-Lauf alt' })
   R_TICK = await laufStarten({ repo_id: String(repoId), prompt: 'Browser-Lauf tickt' })
@@ -176,7 +176,7 @@ async function datenAnlegen() {
   for (const id of [R_ALT, R_TICK, R_ENDE, R_OHNE_SESSION]) await melden(id, 'done', 'fertig')
 
   // A planned run: the overview cell then looks FORWARD ("in 20 minutes").
-  const g = await formular('/api/runs', {
+  const g = await postForm('/api/runs', {
     repo_id: String(repoId), harness: 'claude', prompt: 'Browser-Lauf geplant',
     branch_mode: 'keiner', expected_minutes: '45', start_mode: 'in', start_in_minutes: '20',
   })
@@ -196,12 +196,12 @@ async function datenAnlegen() {
 // ================================================================== Test run
 try {
   console.log(`Sandbox: ${sk.SB}`)
-  await sk.bauen()
-  await sk.hubStarten({ env: { FREILAUF_USAGE_CACHE_MS: '300', FREILAUF_BALANCE_CACHE_MS: '300' } })
+  await sk.build()
+  await sk.startHub({ env: { FREILAUF_USAGE_CACHE_MS: '300', FREILAUF_BALANCE_CACHE_MS: '300' } })
   db = sk.db
   kontext = await browser.newContext({ viewport: { width: 1400, height: 900 } })
   await datenAnlegen()
-  console.log(`Hub: ${sk.basis}   Chromium ${browser.version()}`)
+  console.log(`Hub: ${sk.base}   Chromium ${browser.version()}`)
 
   // ------------------------------------------------------------------ A1
   group('A1 — relative timestamps: hydrated, ticking, exact on hover')
@@ -246,7 +246,7 @@ try {
     // clock, not the browser machine's.
     const ur = db.prepare('SELECT started_at FROM runs WHERE id=?').get(R_ALT).started_at
     db.prepare("UPDATE runs SET started_at='2026-08-25 12:00:00' WHERE id=?").run(R_ALT)
-    await formular('/settings/save', { ui_timezone: 'America/New_York' })
+    await postForm('/settings/save', { ui_timezone: 'America/New_York' })
     try {
       const p = await neueSeite(`/?repo=${repoId}`)
       const titel = await p.getAttribute(`tr[onclick*="${R_ALT}"] time.reltime`, 'title')
@@ -255,7 +255,7 @@ try {
       await p.close()
     } finally {
       db.prepare('UPDATE runs SET started_at=? WHERE id=?').run(ur, R_ALT)
-      await formular('/settings/save', { ui_timezone: '' })
+      await postForm('/settings/save', { ui_timezone: '' })
     }
   })
 
@@ -278,7 +278,7 @@ try {
     await p.selectOption('#repo-switch', String(repoId2))
     await p.waitForURL(new RegExp(`[?&]repo=${repoId2}$`), { timeout: 10_000 })
     // A context-less page: settings renders the switcher too and must keep the choice.
-    await p.goto(sk.basis + '/settings', { waitUntil: 'load' })
+    await p.goto(sk.base + '/settings', { waitUntil: 'load' })
     equal(await p.$eval('#repo-switch', s => s.value), String(repoId2), 'settings keeps the chosen repo in the header')
     // A context page reached through the menu: agents must BE that repo now.
     await p.click('header nav a[href="/agents"]')
@@ -337,7 +337,7 @@ try {
     equal(await p.$eval('#side-toggle', b => b.getAttribute('aria-expanded')), 'false', 'and says that too')
     equal(await p.evaluate(() => localStorage.getItem('freilauf.sidebar.open')), '0', 'the choice is written down')
     // Another page, same choice — that is the whole point of writing it down.
-    await p.goto(sk.basis + '/agents', { waitUntil: 'load' })
+    await p.goto(sk.base + '/agents', { waitUntil: 'load' })
     isFalse(await p.isVisible('#side-body'), 'still folded on the next page')
     isTrue(await p.isVisible('#side-toggle'), 'but the way back is still reachable')
     await p.click('#side-toggle')
@@ -864,7 +864,7 @@ try {
     await p.waitForURL(/\/flows\/edit/, { timeout: 10_000 })
     // The editor's Back button goes exactly there — a fresh load, which is what
     // restoreForm() is for.
-    await p.goto(sk.basis + zurueck, { waitUntil: 'load' })
+    await p.goto(sk.base + zurueck, { waitUntil: 'load' })
 
     equal(await p.$eval('input[name=name]', el => el.value), 'geparkter-agent', 'name')
     equal(await p.$eval('textarea[name=prompt]', el => el.value), 'Dieser Text darf den Ausflug nicht kosten.', 'task')
@@ -1041,7 +1041,7 @@ try {
             .replace(/<option value="opencode"/, '<option value="opencode" selected') + zu)
       await route.fulfill({ response: antwort, body: html, contentType: 'text/html; charset=utf-8' })
     })
-    await p.goto(sk.basis + `/runs/new?repo=${repoId}`, { waitUntil: 'load' })
+    await p.goto(sk.base + `/runs/new?repo=${repoId}`, { waitUntil: 'load' })
     isTrue(await p.$eval('select[name=harness]', s => s.value === 'opencode'), 'the page opens on opencode, preselected by the template')
     await wartePage(p, () => document.getElementById('or-routing').hidden === false, null,
       'the routing block to be visible without a single interaction')
@@ -1183,7 +1183,7 @@ try {
     // Change the run from OUTSIDE while the operator is typing: the fragment
     // arrives, but must not swap the card under the focused textarea — the
     // half-written prompt lives only in the DOM.
-    await formular(`/api/runs/${R_GEPLANT}/edit`, { expected_minutes: '33' })
+    await postForm(`/api/runs/${R_GEPLANT}/edit`, { expected_minutes: '33' })
     await p.waitForTimeout(700)
     const noch = await p.evaluate(() => {
       const a = document.activeElement
@@ -1193,7 +1193,7 @@ try {
     equal(await p.$eval('#run-edit input[name=expected_minutes]', el => el.value), '45', 'the card was NOT swapped')
     // Blur and change again: now the swap is allowed and lands.
     await p.evaluate(() => document.activeElement.blur())
-    await formular(`/api/runs/${R_GEPLANT}/edit`, { expected_minutes: '44' })
+    await postForm(`/api/runs/${R_GEPLANT}/edit`, { expected_minutes: '44' })
     await wartePage(p, () => (document.querySelector('#run-edit input[name=expected_minutes]')?.value) === '44',
       null, 'the card to carry the new duration after the swap')
     sauber(p)
@@ -1536,7 +1536,7 @@ try {
   await check('a title generated after the fact arrives on the open overview', async () => {
     const p = await neueSeite(`/?repo=${repoId}`)
     const vorher = await p.textContent(`#run-${R_ALT} [data-title-text]`)
-    await formular(`/api/runs/${R_ALT}/title`, { title: 'Arrived by itself' })
+    await postForm(`/api/runs/${R_ALT}/title`, { title: 'Arrived by itself' })
     await wartePage(p, (id) => document.querySelector(`#run-${id} [data-title-text]`)?.textContent === 'Arrived by itself',
       R_ALT, 'the row to carry the new title')
     isFalse(vorher === 'Arrived by itself', 'and it really was something else before')
@@ -1558,7 +1558,7 @@ try {
   await check('a run leaving the overview takes its row with it', async () => {
     const p = await neueSeite(`/?repo=${repoId}`)
     isTrue(await p.$(`#run-${R_ENDE}`) !== null, 'the finished run is listed to begin with')
-    await formular(`/api/runs/${R_ENDE}/archive`, {})
+    await postForm(`/api/runs/${R_ENDE}/archive`, {})
     // The fragment answers 204 for an archived run, and 204 means gone, not broken.
     await wartePage(p, (id) => !document.getElementById(`run-${id}`), R_ENDE, 'the archived row to disappear')
     sauber(p)
@@ -1572,7 +1572,7 @@ try {
     await p.hover(`#run-${R_TICK}`)
     await p.click(`#run-${R_TICK} [data-title-edit]`)
     await p.fill(`#run-${R_TICK} .title-inline input`, 'half typed')
-    await formular(`/api/runs/${R_TICK}/title`, { title: 'pushed from outside' })
+    await postForm(`/api/runs/${R_TICK}/title`, { title: 'pushed from outside' })
     await new Promise(r => setTimeout(r, 900))   // long enough for the swap to have happened
     // Check the input still EXISTS before asking for its value: if the row was
     // swapped, the element is gone and inputValue() would sit in a 30 s timeout
@@ -1592,7 +1592,7 @@ try {
     // — and with it the WebSocket, which would leak a tmux client that keeps
     // resizing the running agent's window.
     await p.evaluate(() => { document.querySelector('#term').dataset.marke = 'unberuehrt' })
-    await formular(`/api/runs/${R_LIVE}/title`, { title: 'Detail follows along' })
+    await postForm(`/api/runs/${R_LIVE}/title`, { title: 'Detail follows along' })
     await wartePage(p, () => document.querySelector('#run-head [data-title-text]')?.textContent === 'Detail follows along',
       null, 'the heading to carry the new title')
     equal(await p.getAttribute('#term', 'data-marke'), 'unberuehrt', 'the terminal was never replaced')
@@ -1611,7 +1611,7 @@ try {
     equal(await p.$eval('#notify-on', el => el.checked), false, 'and the box shows it')
     // The box sits outside the fragment, like the terminal it sits under: a live
     // update of the page must not flip a box the operator just clicked.
-    await formular(`/api/runs/${R_LIVE}/title`, { title: 'Muted, and updated' })
+    await postForm(`/api/runs/${R_LIVE}/title`, { title: 'Muted, and updated' })
     await wartePage(p, () => document.querySelector('#run-head [data-title-text]')?.textContent === 'Muted, and updated',
       null, 'the heading to carry the new title')
     equal(await p.$eval('#notify-on', el => el.checked), false, 'the box is untouched by the swap')
@@ -1638,7 +1638,7 @@ try {
     // is missed — which made this test a race the moment the page grew a
     // sidebar and took longer to settle.
     await wartePage(p, () => document.body.dataset.live === '1', null, 'the live channel to be connected')
-    await formular(`/api/runs/${R_ALT}/title`, { title: 'After a reconnect' })
+    await postForm(`/api/runs/${R_ALT}/title`, { title: 'After a reconnect' })
     await wartePage(p, (id) => document.querySelector(`#run-${id} [data-title-text]`)?.textContent === 'After a reconnect',
       R_ALT, 'the row to update after the page came back')
     sauber(p)
@@ -1670,9 +1670,9 @@ try {
     equal(await p.$$eval(`#run-${R_LIVE} .run-pick`, els => els.length), 0, 'a running run cannot be selected')
 
     // Untick the keepers: everything except the three that were just made.
-    const behalten = await p.$$eval('#runs-body .run-pick', (els, meine) =>
+    const keep = await p.$$eval('#runs-body .run-pick', (els, meine) =>
       els.map(el => el.value).filter(v => !meine.includes(v)), ids)
-    for (const id of behalten) await p.uncheck(`#run-${id} .run-pick`)
+    for (const id of keep) await p.uncheck(`#run-${id} .run-pick`)
     contains(await p.textContent('#runs-archive-selected'), '(3)', 'three left over')
     equal(await p.$eval('#runs-all', el => el.checked), false, 'and "select all" says so')
 
@@ -1681,7 +1681,7 @@ try {
       await wartePage(p, (x) => !document.getElementById(`run-${x}`), id, 'the archived row to disappear')
       isTrue(!!laufRow(id).archived_at, 'archived in the database')
     }
-    for (const id of behalten) equal(laufRow(id).archived_at, null, 'an unticked run stays in the overview')
+    for (const id of keep) equal(laufRow(id).archived_at, null, 'an unticked run stays in the overview')
     equal(await p.$eval('#runs-archive-selected', el => el.disabled), true, 'the selection is spent')
     sauber(p)
     await p.close()
@@ -1707,7 +1707,7 @@ try {
     contains(await p.textContent('#runs-archive-selected'), '(1)', 'and the count did not move')
 
     // The same for a single ROW being replaced — its own run reporting.
-    await formular(`/api/runs/${meiner}/title`, { title: 'Renamed under the tick' })
+    await postForm(`/api/runs/${meiner}/title`, { title: 'Renamed under the tick' })
     await wartePage(p, (id) => document.querySelector(`#run-${id} [data-title-text]`)?.textContent === 'Renamed under the tick',
       meiner, 'the row to carry the new title')
     equal(await p.$eval(`#run-${meiner} .run-pick`, el => el.checked), true, 'the row swap kept it too')
@@ -1824,7 +1824,7 @@ try {
     // Switch it on through the ordinary form first, so the page really renders
     // with `data-was-on="1"` — that attribute is what makes the question
     // askable at all, and a test that set it by hand would test nothing.
-    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { alsBrowser: true })
+    await postForm('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { asBrowser: true })
     const p = await neueSeite('/settings/skills')
     equal(await p.$eval('#skills-form', f => f.dataset.wasOn), '1', 'the form knows it was on')
     equal(await p.$eval('#skills-remove-dialog', d => d.open), false, 'the dialog is closed to begin with')
@@ -1884,10 +1884,10 @@ try {
     const { execFile } = await import('node:child_process')
     await new Promise((r) => execFile('tmux', ['new-session', '-d', '-s', 'fl-browser-mem', 'sleep 300'], () => r()))
     sk.sessions.add('fl-browser-mem')
-    await formular('/settings/cleanup', {
+    await postForm('/settings/cleanup', {
       harness: 'claude', cleanup_on: '1', cleanup_threshold_gb: '1', cleanup_target_gb: '0.5',
       cleanup_cooldown_min: '5',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     const p = await neueSeite('/')
     await wartePage(p, () => !!document.querySelector('.mem-free-open'), null, 'the small sidebar free-memory button')
     const p2 = await neueSeite('/sessions')
@@ -1989,7 +1989,7 @@ try {
         }),
       })
     })
-    await p.goto(sk.basis + '/settings', { waitUntil: 'load' })
+    await p.goto(sk.base + '/settings', { waitUntil: 'load' })
     return p
   }
   const listenWerte = (p, id) => p.$$eval(`#${id} option`, os => os.map(o => o.value))
@@ -2111,7 +2111,7 @@ try {
       status: 200, contentType: 'application/json',
       body: JSON.stringify({ ok: false, error: 'nobody is answering' }),
     }))
-    await p.goto(sk.basis + '/settings', { waitUntil: 'load' })
+    await p.goto(sk.base + '/settings', { waitUntil: 'load' })
     const vorgabe = await p.$eval('input[name=llm_title_model]', i => i.value)
     const werte = await listenWerte(p, 'title-mru')
     isTrue(werte.includes(vorgabe), 'the server-rendered suggestions are still there')
@@ -2125,7 +2125,7 @@ try {
   console.log(`\nAborted: ${err.stack}`)
   counter.failures.push({ name: 'Test run', reason: err.message })
 } finally {
-  await aufraeumen()
+  await cleanUp()
 }
 
 process.exit(summary('Browser tests', start))

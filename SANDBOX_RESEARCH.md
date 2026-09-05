@@ -194,7 +194,7 @@ which anything (provider keys, `OPENCODE_CONFIG_CONTENT`, `FL_RUN_ID`, `FL_HUB_U
 reaches the agent, because a tmux session inherits nothing (`opencode.mjs:240-244`).
 
 **The seam already exists and is already stubbed:** `FREILAUF_START_SCRIPT`
-(`env.mjs:29`) is what the e2e sandbox replaces with `test/sandkasten.mjs`'s stub,
+(`env.mjs:29`) is what the e2e sandbox replaces with `test/sandbox-env.mjs`'s stub,
 which parses the same options, creates a real tmux session and prints the one line
 `runner.mjs:529` parses. A sandbox mode is, at this seam, one more branch inside
 `fl-start` that wraps `<cmd>` in a container command — or one more argument
@@ -1599,7 +1599,7 @@ wizard show "Sandbox: available / not available (install Docker)"; `sandbox_mode
 cannot be set above `off` while nothing is found — the same shape as an
 unconfigured coding agent.
 
-**Tests**: `test/sandkasten.mjs` gets a `docker` shim on the PATH (the
+**Tests**: `test/sandbox-env.mjs` gets a `docker` shim on the PATH (the
 `test/deploy.mjs` pattern: a script that logs its argv to a file and answers what
 the test dictates — `run` executes the command on the host in the same directory,
 `stop`/`ps`/`network`/`update`/`stats`/`exec` are recorded and faked), so the e2e

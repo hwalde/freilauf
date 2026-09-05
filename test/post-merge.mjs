@@ -29,8 +29,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { group, check, equal, isTrue, isFalse, contains, waitFor, summary, counter } from './mini.mjs'
 
 const start = Date.now()
-const PROJEKT = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
-const SKRIPT = join(PROJEKT, 'deploy-after-merge.sh')
+const PROJECT = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
+const SKRIPT = join(PROJECT, 'deploy-after-merge.sh')
 
 const SB = mkdtempSync(join(tmpdir(), 'freilauf-post-merge-'))
 const HOME = join(SB, 'home')
@@ -389,7 +389,7 @@ try {
     // itself, so the mutant needs a root that looks like the repository's.
     const wurzel = join(SB, `backout-${was}`)
     mkdirSync(join(wurzel, 'bin'), { recursive: true })
-    cpSync(join(PROJEKT, 'bin', 'fl-paths.sh'), join(wurzel, 'bin', 'fl-paths.sh'))
+    cpSync(join(PROJECT, 'bin', 'fl-paths.sh'), join(wurzel, 'bin', 'fl-paths.sh'))
     const p = join(wurzel, 'deploy-after-merge.sh')
     writeFileSync(p, kaputt)
     return p

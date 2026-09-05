@@ -22,7 +22,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { WebSocket } from 'ws'
 import { group, check, skipped, equal, isTrue, isFalse, contains, waitFor, summary, counter } from './mini.mjs'
-import { neuerSandkasten, sh, vorhanden, PROJEKT } from './sandkasten.mjs'
+import { newSandbox, sh, hasBinary, PROJECT } from './sandbox-env.mjs'
 
 const ECHT = process.argv.includes('--echt')
 // User-specified test model for opencode/hermes (cheap, tool-capable).
@@ -32,35 +32,35 @@ const ECHT_KEYS = { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY }
 const ECHT_MODELL = process.env.FREILAUF_TEST_MODELL ?? 'deepseek/deepseek-v4-flash-0731'
 // Zen: one of the free models — runs without a key.
 const ZEN_MODELL = process.env.FREILAUF_TEST_ZEN_MODELL ?? 'nemotron-3.5-lightning-free'
-const BEHALTEN = process.argv.includes('--keep')
+const KEEP = process.argv.includes('--keep')
 const start = Date.now()
 
 // ------------------------------------------------- sandbox and hub process
-// Both come from test/sandkasten.mjs: the browser suite runs against exactly the
+// Both come from test/sandbox-env.mjs: the browser suite runs against exactly the
 // same sandbox, and one copy of that construction is enough. The names below stay
 // what the tests in this file have always used.
-const sk = neuerSandkasten({ praefix: 'Freilauf-e2e-', behalten: BEHALTEN })
-const { SB, REPO, ORIGIN, FEHLSTART, sessions, hol, formular } = sk
+const sk = newSandbox({ prefix: 'Freilauf-e2e-', keep: KEEP })
+const { SB, REPO, ORIGIN, FAILED_START, sessions, fetchPath, postForm } = sk
 let db = null
 let PORT = 0
-let BASIS = ''
+let BASE = ''
 
 /** Start the hub and carry port, base URL and database into this file. */
-async function hubStarten(opts = {}) {
-  await sk.hubStarten({ keys: ECHT_KEYS, ...opts })
+async function startHub(opts = {}) {
+  await sk.startHub({ keys: ECHT_KEYS, ...opts })
   db = sk.db
   PORT = sk.port
-  BASIS = sk.basis
+  BASE = sk.base
 }
-async function hubStoppen() {
-  await sk.hubStoppen()
+async function stopHub() {
+  await sk.stopHub()
   db = null
 }
 
 // The watcher ticks inside the hub every 30 s; watcherTick() triggers the same
 // pass right away.
 let watcherTick = null
-async function watcherVorbereiten() { watcherTick = await sk.watcherVorbereiten() }
+async function prepareWatcher() { watcherTick = await sk.prepareWatcher() }
 
 // ---------------------------------------------------------------- Database
 // The fl-report of THIS checkout — the one this suite is testing. The copy in
@@ -73,8 +73,8 @@ const ereignisse = (id) => db.prepare('SELECT kind FROM events WHERE run_id=? OR
 const agent = (name) => db.prepare('SELECT * FROM agents WHERE name=?').get(name)
 
 /** Start a run via the JSON API and record the created tmux session. */
-async function laufStarten(daten) {
-  const r = await formular('/api/runs', { harness: 'claude', branch_mode: 'keiner', expected_minutes: '45', ...daten })
+async function laufStarten(data) {
+  const r = await postForm('/api/runs', { harness: 'claude', branch_mode: 'keiner', expected_minutes: '45', ...data })
   const j = await r.json()
   if (j.runId) {
     const s = lauf(j.runId)?.tmux_session
@@ -100,41 +100,41 @@ async function sessionMerken(runId, { wait = true } = {}) {
 }
 
 // ---------------------------------------------------------------- Cleanup
-async function aufraeumen() {
-  await sk.aufraeumen()
+async function cleanUp() {
+  await sk.cleanUp()
   db = null
 }
-process.on('SIGINT', async () => { await aufraeumen(); process.exit(130) })
-process.on('SIGTERM', async () => { await aufraeumen(); process.exit(143) })
+process.on('SIGINT', async () => { await cleanUp(); process.exit(130) })
+process.on('SIGTERM', async () => { await cleanUp(); process.exit(143) })
 // SIGHUP is what this suite really dies of: it is run from inside a tmux session
 // (an agent's own run), and when that session is closed tmux hangs up the whole
 // process group. Node's default for SIGHUP is to exit without running any of the
 // above — which is how six killed suites left 294 tmux sessions standing.
-process.on('SIGHUP', async () => { await aufraeumen(); process.exit(129) })
+process.on('SIGHUP', async () => { await cleanUp(); process.exit(129) })
 
 // ================================================================== Test run
 try {
   console.log(`Sandbox: ${SB}`)
-  await sk.bauen()
-  await hubStarten()
-  await watcherVorbereiten()
-  console.log(`Hub: ${BASIS}${ECHT ? '   [--echt: real runs per harness — consumes quota and credits]' : ''}`)
+  await sk.build()
+  await startHub()
+  await prepareWatcher()
+  console.log(`Hub: ${BASE}${ECHT ? '   [--echt: real runs per harness — consumes quota and credits]' : ''}`)
 
   // ------------------------------------------------------------------
   group('Coding agents: initial state, detection, configuration')
 
   await check('fresh installation: every page shows the setup banner', async () => {
-    const html = await (await hol('/')).text()
+    const html = await (await fetchPath('/')).text()
     contains(html, 'banner setup', 'banner container')
     contains(html, '/settings/coding-agents', 'link to the settings')
   })
   await check('run creation without a configured coding agent is rejected', async () => {
-    const r = await formular('/api/runs', { repo_id: '1', harness: 'claude', prompt: 'x', branch_mode: 'keiner', expected_minutes: '5' })
+    const r = await postForm('/api/runs', { repo_id: '1', harness: 'claude', prompt: 'x', branch_mode: 'keiner', expected_minutes: '5' })
     equal(r.status, 400, 'rejected')
     contains((await r.json()).error, 'not configured', 'reason names the configuration')
   })
   await check('detect API lists the known coding agents with install state', async () => {
-    const j = await (await hol('/api/coding-agents/detect')).json()
+    const j = await (await fetchPath('/api/coding-agents/detect')).json()
     isTrue(j.ok, 'ok')
     equal(j.agents.map(a => a.id).sort().join(','), 'claude,cursor,hermes,opencode', 'all four plugins')
     isTrue(j.agents.every(a => typeof a.installed === 'boolean' && a.configured === false), 'installed flag, none configured yet')
@@ -147,8 +147,8 @@ try {
       ['cursor', []],
     ]
     for (const [harness, providers] of faelle) {
-      const r = await formular('/settings/coding-agents/save',
-        { harness, enabled: '1', ...(providers.length ? { providers } : {}) }, { alsBrowser: true })
+      const r = await postForm('/settings/coding-agents/save',
+        { harness, enabled: '1', ...(providers.length ? { providers } : {}) }, { asBrowser: true })
       equal(r.status, 303, harness)
     }
     // The rows live in `plugin_config` now (kind='harness'), with the allowed
@@ -161,14 +161,14 @@ try {
     equal(opencodeConfig.providers.length, 3, 'providers stored')
   })
   await check('unknown coding agent is rejected by the settings form', async () => {
-    const r = await formular('/settings/coding-agents/save', { harness: 'gpt', enabled: '1' }, { alsBrowser: true })
+    const r = await postForm('/settings/coding-agents/save', { harness: 'gpt', enabled: '1' }, { asBrowser: true })
     equal(r.status, 400, 'rejected')
   })
   await check('the banner disappears once a coding agent is configured', async () => {
-    isFalse((await (await hol('/')).text()).includes('banner setup'), 'no banner')
+    isFalse((await (await fetchPath('/')).text()).includes('banner setup'), 'no banner')
   })
   await check('settings page lists the configured coding agents', async () => {
-    const html = await (await hol('/settings/plugins')).text()
+    const html = await (await fetchPath('/settings/plugins')).text()
     contains(html, 'Claude Code', 'label')
     contains(html, 'cursor-agent', 'binary name')
   })
@@ -176,12 +176,12 @@ try {
     // A 303 and not a 404: the address is in bookmarks, in the setup banner
     // and in the docs, and an operator who follows one of those must land on
     // the page the section moved to.
-    const r = await hol('/settings/coding-agents')
+    const r = await fetchPath('/settings/coding-agents')
     equal(r.status, 303, 'redirect')
     equal(r.headers.get('location'), '/settings/plugins', 'to the plugins page')
   })
   await check('usage API answers with the Claude quota from the fixture', async () => {
-    const j = await (await hol('/api/usage')).json()
+    const j = await (await fetchPath('/api/usage')).json()
     isTrue(j.ok, 'ok')
     const claude = j.usage.find(u => u.harness === 'claude')
     isTrue(!!claude && claude.ok, `claude row (${JSON.stringify(j.usage).slice(0, 200)})`)
@@ -194,7 +194,7 @@ try {
   group('Basic scaffolding: pages, static files, API fallback')
 
   await check('empty state leads to creating a repo', async () => {
-    const r = await hol('/')
+    const r = await fetchPath('/')
     equal(r.status, 200, 'status')
     contains(await r.text(), 'Create repo', 'hint text')
   })
@@ -206,7 +206,7 @@ try {
     '/static/flows.js', '/static/flows.css', '/static/flows/template.mjs', '/static/flows/varschema.mjs',
     '/static/swd.js', '/static/swd.css', '/static/swd-light.css']) {
     await check(`${datei} is served`, async () => {
-      const r = await hol(datei)
+      const r = await fetchPath(datei)
       equal(r.status, 200, 'status')
       isTrue((await r.text()).length > 100, 'content present')
     })
@@ -217,27 +217,27 @@ try {
   // event loop that also holds every SSE stream, the terminal WebSocket, the
   // scheduler and the watcher. That is what "the hub hangs" was made of.
   await check('a static file carries an ETag and answers a revalidation with 304', async () => {
-    const r = await hol('/static/hub.js')
+    const r = await fetchPath('/static/hub.js')
     const etag = r.headers.get('etag')
     isTrue(!!etag, 'the answer carries a validator')
     equal(r.headers.get('cache-control'), 'no-cache',
       'and asks to be revalidated rather than blindly reused — these URLs carry no content hash')
     isTrue((await r.text()).length > 100, 'the cold answer is the file')
 
-    const zweite = await hol('/static/hub.js', { headers: { 'if-none-match': etag } })
+    const zweite = await fetchPath('/static/hub.js', { headers: { 'if-none-match': etag } })
     equal(zweite.status, 304, 'the unchanged file is not sent a second time')
     equal((await zweite.text()).length, 0, 'and carries no body at all')
   })
 
   await check('unknown API path answers 404 instead of hanging', async () => {
-    const r = await hol('/api/gibtsnicht', { timeoutMs: 5000 })
+    const r = await fetchPath('/api/gibtsnicht', { timeoutMs: 5000 })
     equal(r.status, 404, 'status')
   })
   await check('a notifier wizard\'s own JSON route answers without a credential', async () => {
     // `/api/telegram/chats` became `/settings/notifications/telegram/json/chats`:
     // reading the bot's chats is knowledge about Telegram, and it travels with
     // the plugin rather than with the hub's API surface.
-    const j = await (await hol('/settings/notifications/telegram/json/chats', { timeoutMs: 5000 })).json()
+    const j = await (await fetchPath('/settings/notifications/telegram/json/chats', { timeoutMs: 5000 })).json()
     isFalse(j.ok, 'ok')
     isTrue(typeof j.error === 'string' && j.error.length > 0, 'error message')
   })
@@ -246,44 +246,44 @@ try {
   group('Repos: create and validate')
 
   await check('valid repo is created', async () => {
-    const r = await formular('/repos/edit', {
+    const r = await postForm('/repos/edit', {
       name: 'e2e', path: REPO, base_branch: 'main',
       worktree_extras: JSON.stringify([{ path: '.env', mode: 'copy' }, { path: 'referenz/', mode: 'link' }]),
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'redirect')
     const repo = db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
     isTrue(!!repo, 'repo in the database')
     equal(repo.path, REPO, 'path')
   })
   await check('broken JSON is rejected (400 instead of 500)', async () => {
-    const r = await formular('/repos/edit', { name: 'x', path: REPO, worktree_extras: '[{kaputt' }, { alsBrowser: true })
+    const r = await postForm('/repos/edit', { name: 'x', path: REPO, worktree_extras: '[{kaputt' }, { asBrowser: true })
     equal(r.status, 400, 'status')
   })
   await check('path without .git is rejected', async () => {
-    const r = await formular('/repos/edit', { name: 'x', path: '/tmp', worktree_extras: '[]' }, { alsBrowser: true })
+    const r = await postForm('/repos/edit', { name: 'x', path: '/tmp', worktree_extras: '[]' }, { asBrowser: true })
     equal(r.status, 400, 'status')
     contains(await r.text(), 'git', 'reason mentions git')
   })
   await check('unknown mode in the extras is rejected', async () => {
-    const r = await formular('/repos/edit', {
+    const r = await postForm('/repos/edit', {
       name: 'x', path: REPO, worktree_extras: JSON.stringify([{ path: '.env', mode: 'kopieren' }]),
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 400, 'status')
   })
   await check('a repo prompt is saved and survives an update', async () => {
     const row = db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
-    const r = await formular(`/repos/edit?id=${row.id}`, {
+    const r = await postForm(`/repos/edit?id=${row.id}`, {
       name: 'e2e', path: REPO, base_branch: 'main',
       worktree_extras: row.worktree_extras,
       prompt: 'This repo is only for e2e tests.',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'redirect')
     equal(db.prepare('SELECT prompt FROM repos WHERE name=?').get('e2e').prompt, 'This repo is only for e2e tests.', 'prompt in the database')
     // Emptying it sets the row back to NULL — no empty string stays behind.
-    const r2 = await formular(`/repos/edit?id=${row.id}`, {
+    const r2 = await postForm(`/repos/edit?id=${row.id}`, {
       name: 'e2e', path: REPO, base_branch: 'main',
       worktree_extras: row.worktree_extras, prompt: '   ',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r2.status, 303, 'redirect of the clearing update')
     equal(db.prepare('SELECT prompt FROM repos WHERE name=?').get('e2e').prompt, null, 'whitespace-only prompt is NULL')
   })
@@ -297,47 +297,47 @@ try {
     // The form's box carries no hidden `0` companion, so ABSENT is what off
     // means there. A caller scripting this route writes `active=0` instead —
     // and the string '0' is truthy, so it used to switch the agent ON.
-    const basis = { repo_id: repoId, harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'manuell' }
+    const base = { repo_id: repoId, harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'manuell' }
     const aktiv = (name) => db.prepare('SELECT active FROM agents WHERE repo_id=? AND name=?').get(repoId, name)?.active
-    await formular('/agents/edit', { ...basis, name: 'schalter-an', active: '1' }, { alsBrowser: true })
+    await postForm('/agents/edit', { ...base, name: 'schalter-an', active: '1' }, { asBrowser: true })
     equal(aktiv('schalter-an'), 1, "'1' switches it on")
-    await formular('/agents/edit', { ...basis, name: 'schalter-null', active: '0' }, { alsBrowser: true })
+    await postForm('/agents/edit', { ...base, name: 'schalter-null', active: '0' }, { asBrowser: true })
     equal(aktiv('schalter-null'), 0, "'0' switches it off — it is compared, not coerced")
-    await formular('/agents/edit', { ...basis, name: 'schalter-fehlt' }, { alsBrowser: true })
+    await postForm('/agents/edit', { ...base, name: 'schalter-fehlt' }, { asBrowser: true })
     equal(aktiv('schalter-fehlt'), 0, 'and an absent field is off, the way an unticked box arrives')
     db.prepare("DELETE FROM agents WHERE name LIKE 'schalter-%'").run()
   })
 
   await check('unknown harness is rejected', async () => {
-    const r = await formular('/agents/edit', { repo_id: repoId, name: 'a1', harness: 'gpt', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'manuell' }, { alsBrowser: true })
+    const r = await postForm('/agents/edit', { repo_id: repoId, name: 'a1', harness: 'gpt', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'manuell' }, { asBrowser: true })
     equal(r.status, 400, 'status')
   })
   await check('empty prompt is rejected', async () => {
-    const r = await formular('/agents/edit', { repo_id: repoId, name: 'a2', harness: 'claude', prompt: '   ', branch_mode: 'keiner', schedule_kind: 'manuell' }, { alsBrowser: true })
+    const r = await postForm('/agents/edit', { repo_id: repoId, name: 'a2', harness: 'claude', prompt: '   ', branch_mode: 'keiner', schedule_kind: 'manuell' }, { asBrowser: true })
     equal(r.status, 400, 'status')
   })
   await check('invalid cron expression is rejected', async () => {
-    const r = await formular('/agents/edit', { repo_id: repoId, name: 'a3', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'cron', schedule: 'jeden tag' }, { alsBrowser: true })
+    const r = await postForm('/agents/edit', { repo_id: repoId, name: 'a3', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'cron', schedule: 'jeden tag' }, { asBrowser: true })
     equal(r.status, 400, 'status')
   })
   await check('weekly without a weekday is rejected', async () => {
-    const r = await formular('/agents/edit', { repo_id: repoId, name: 'a4', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'woechentlich', schedule_time: '06:00', schedule_weeks: '1' }, { alsBrowser: true })
+    const r = await postForm('/agents/edit', { repo_id: repoId, name: 'a4', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'woechentlich', schedule_time: '06:00', schedule_weeks: '1' }, { asBrowser: true })
     equal(r.status, 400, 'status')
   })
   await check('one-off without a date is rejected', async () => {
-    const r = await formular('/agents/edit', { repo_id: repoId, name: 'a5', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'einmalig', run_at: '' }, { alsBrowser: true })
+    const r = await postForm('/agents/edit', { repo_id: repoId, name: 'a5', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'einmalig', run_at: '' }, { asBrowser: true })
     equal(r.status, 400, 'status')
   })
   await check('multi-week cadence without an anchor week is rejected', async () => {
-    const r = await formular('/agents/edit', { repo_id: repoId, name: 'a6', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'woechentlich', schedule_days: ['1'], schedule_time: '06:00', schedule_weeks: '2', schedule_anchor: '' }, { alsBrowser: true })
+    const r = await postForm('/agents/edit', { repo_id: repoId, name: 'a6', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'woechentlich', schedule_days: ['1'], schedule_time: '06:00', schedule_weeks: '2', schedule_anchor: '' }, { asBrowser: true })
     equal(r.status, 400, 'status')
   })
   await check('weekly agent is saved with all fields', async () => {
-    const r = await formular('/agents/edit', {
+    const r = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-woechentlich', harness: 'claude', prompt: 'Testauftrag', branch_mode: 'keiner',
       expected_minutes: '30', schedule_kind: 'woechentlich', schedule_days: ['1', '3', '5'],
       schedule_time: '07:30', schedule_weeks: '2', schedule_anchor: '2026-08-24', active: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'redirect')
     const a = agent('e2e-woechentlich')
     equal(a.schedule_kind, 'woechentlich', 'kind')
@@ -347,23 +347,23 @@ try {
     equal(a.schedule_anchor, '2026-08-24', 'anchor week')
   })
   await check('several times on the same days land in one column', async () => {
-    const r = await formular('/agents/edit', {
+    const r = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-mehrzeit', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
       expected_minutes: '30', schedule_kind: 'woechentlich', schedule_mode: 'same',
       schedule_days: ['2'], schedule_time: ['11:00', '08:00', ''], schedule_weeks: '1', active: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'redirect')
     const a = agent('e2e-mehrzeit')
     equal(a.schedule_time, '08:00,11:00', 'sorted, the emptied chip dropped')
     equal(a.schedule_slots, null, 'the same times everywhere need no per-day list')
   })
   await check('times per weekday are stored as slots, and the days follow from them', async () => {
-    const r = await formular('/agents/edit', {
+    const r = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-protag', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
       expected_minutes: '30', schedule_kind: 'woechentlich', schedule_mode: 'per_day',
       schedule_day_time_2: ['08:00', '11:00'], schedule_day_time_3: ['14:17'],
       schedule_days: ['1'], schedule_time: '06:00', schedule_weeks: '1', active: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'redirect')
     const a = agent('e2e-protag')
     equal(a.schedule_slots, '{"2":["08:00","11:00"],"3":["14:17"]}', 'the per-day list')
@@ -371,40 +371,40 @@ try {
     equal(a.schedule_time, null, "the other mode's time does not survive alongside")
   })
   await check('a schedule_slots JSON is the same thing said in one field', async () => {
-    const r = await formular('/agents/edit', {
+    const r = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-slots-json', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
       expected_minutes: '30', schedule_kind: 'woechentlich',
       schedule_slots: '{"2":["08:00","11:00"],"3":["14:17"]}', schedule_weeks: '1', active: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'redirect')
     const a = agent('e2e-slots-json')
     equal(a.schedule_slots, '{"2":["08:00","11:00"],"3":["14:17"]}', 'stored as given')
     equal(a.schedule_days, '2,3', 'days derived')
   })
   await check('per-day without a single time, and unreadable times, are rejected', async () => {
-    const leer = await formular('/agents/edit', {
+    const leer = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-protag-leer', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
       schedule_kind: 'woechentlich', schedule_mode: 'per_day', schedule_weeks: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(leer.status, 400, 'no day has a time')
-    const kaputt = await formular('/agents/edit', {
+    const kaputt = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-protag-kaputt', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
       schedule_kind: 'woechentlich', schedule_mode: 'per_day', schedule_day_time_2: 'bald', schedule_weeks: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(kaputt.status, 400, 'a half-typed time is not silently dropped')
-    const json = await formular('/agents/edit', {
+    const json = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-slots-kaputt', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
       schedule_kind: 'woechentlich', schedule_slots: 'kein json', schedule_weeks: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(json.status, 400, 'unreadable JSON')
   })
   await check('switching from per-day back to the same times drops the slots', async () => {
     const id = agent('e2e-protag').id
-    const r = await formular(`/agents/edit?id=${id}`, {
+    const r = await postForm(`/agents/edit?id=${id}`, {
       repo_id: repoId, name: 'e2e-protag', harness: 'claude', prompt: 'x', branch_mode: 'keiner',
       expected_minutes: '30', schedule_kind: 'woechentlich', schedule_mode: 'same',
       schedule_days: ['1'], schedule_time: '06:00', schedule_weeks: '1', active: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'redirect')
     const a = agent('e2e-protag')
     equal(a.schedule_slots, null, 'the per-day list is gone, not left to outrank the columns')
@@ -412,7 +412,7 @@ try {
   })
   await check('the form comes back in the mode the agent was saved in', async () => {
     const id = agent('e2e-slots-json').id
-    const html = await (await hol(`/agents/edit?id=${id}`)).text()
+    const html = await (await fetchPath(`/agents/edit?id=${id}`)).text()
     isTrue(/value="per_day"[^>]*\n?[^>]*checked/.test(html), 'per-day mode preselected')
     isTrue(/name="schedule_day_time_2" value="08:00"/.test(html), "Tuesday's first time")
     isTrue(/name="schedule_day_time_2" value="11:00"/.test(html), "Tuesday's second time")
@@ -420,10 +420,10 @@ try {
   })
   await check('switching to manual clears the schedule fields', async () => {
     const id = agent('e2e-woechentlich').id
-    const r = await formular(`/agents/edit?id=${id}`, {
+    const r = await postForm(`/agents/edit?id=${id}`, {
       repo_id: repoId, name: 'e2e-woechentlich', harness: 'claude', prompt: 'Testauftrag',
       branch_mode: 'keiner', expected_minutes: '30', schedule_kind: 'manuell', active: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'redirect')
     const a = agent('e2e-woechentlich')
     equal(a.schedule_kind, 'manuell', 'kind')
@@ -435,17 +435,17 @@ try {
   group('Agents: delete and move (per-repo names)')
 
   await check('a second repo exists for the move tests', async () => {
-    const r = await formular('/repos/edit', {
+    const r = await postForm('/repos/edit', {
       name: 'e2e2', path: REPO, base_branch: 'main', worktree_extras: '[]',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'repo created')
   })
   const repo2Id = db.prepare('SELECT id FROM repos WHERE name=?').get('e2e2').id
 
   await check('same name is allowed in two repos, rejected inside one', async () => {
-    const anlegen = (rid) => formular('/agents/edit', {
+    const anlegen = (rid) => postForm('/agents/edit', {
       repo_id: rid, name: 'e2e-dup', harness: 'claude', prompt: 'x', branch_mode: 'keiner', schedule_kind: 'manuell',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal((await anlegen(repoId)).status, 303, 'first agent in repo1')
     equal((await anlegen(repo2Id)).status, 303, 'same name allowed in repo2')
     const dup = await anlegen(repoId)
@@ -455,14 +455,14 @@ try {
   })
 
   await check('a deleted agent leaves its runs untouched', async () => {
-    const r = await formular('/agents/edit', {
+    const r = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-weg', harness: 'claude', prompt: 'Mach was',
       branch_mode: 'keiner', schedule_kind: 'manuell', expected_minutes: '30',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'agent created')
     const a = db.prepare('SELECT * FROM agents WHERE repo_id=? AND name=?').get(repoId, 'e2e-weg')
     isTrue(!!a, 'agent in the database')
-    const st = await formular('/agents/start', { id: String(a.id), repo: String(repoId) })
+    const st = await postForm('/agents/start', { id: String(a.id), repo: String(repoId) })
     equal(st.status, 303, 'start redirects')
     const run = db.prepare('SELECT * FROM runs WHERE agent_id=? ORDER BY started_at DESC LIMIT 1').get(a.id)
     isTrue(!!run, 'a run was started for the agent')
@@ -470,7 +470,7 @@ try {
     equal(run.title, 'e2e-weg', 'run carries the agent name as its title snapshot')
     sessionMerken(run.id)
 
-    const del = await formular('/agents/delete', { id: String(a.id), repo: String(repoId) }, { alsBrowser: true })
+    const del = await postForm('/agents/delete', { id: String(a.id), repo: String(repoId) }, { asBrowser: true })
     equal(del.status, 303, 'delete redirects')
     equal(db.prepare('SELECT count(*) c FROM agents WHERE id=?').get(a.id).c, 0, 'agent row gone')
     const surviving = db.prepare('SELECT * FROM runs WHERE id=?').get(run.id)
@@ -481,13 +481,13 @@ try {
   })
 
   await check('move to another repo keeps the name when it is free', async () => {
-    const r = await formular('/agents/edit', {
+    const r = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-frei', harness: 'claude', prompt: 'x',
       branch_mode: 'keiner', schedule_kind: 'manuell',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'created')
     const a = db.prepare('SELECT * FROM agents WHERE repo_id=? AND name=?').get(repoId, 'e2e-frei')
-    const mv = await formular('/agents/move', { id: String(a.id), repo: String(repo2Id) }, { alsBrowser: true })
+    const mv = await postForm('/agents/move', { id: String(a.id), repo: String(repo2Id) }, { asBrowser: true })
     equal(mv.status, 303, 'moved')
     const row = db.prepare('SELECT * FROM agents WHERE id=?').get(a.id)
     equal(row.repo_id, repo2Id, 'now lives in repo2')
@@ -496,13 +496,13 @@ try {
 
   await check('move into a name collision appends a datetime suffix', async () => {
     // 'e2e-frei' is already in repo2 — a second one from repo1 must not overwrite it.
-    const r = await formular('/agents/edit', {
+    const r = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-frei', harness: 'claude', prompt: 'x',
       branch_mode: 'keiner', schedule_kind: 'manuell',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'same name in repo1 allowed')
     const a = db.prepare('SELECT * FROM agents WHERE repo_id=? AND name=?').get(repoId, 'e2e-frei')
-    const mv = await formular('/agents/move', { id: String(a.id), repo: String(repo2Id) }, { alsBrowser: true })
+    const mv = await postForm('/agents/move', { id: String(a.id), repo: String(repo2Id) }, { asBrowser: true })
     equal(mv.status, 303, 'moved')
     const row = db.prepare('SELECT * FROM agents WHERE id=?').get(a.id)
     equal(row.repo_id, repo2Id, 'now lives in repo2')
@@ -511,17 +511,17 @@ try {
 
   await check('move page and the agent detail page expose the actions', async () => {
     const a = db.prepare('SELECT * FROM agents WHERE repo_id=? AND name=?').get(repo2Id, 'e2e-frei')
-    const html = await (await hol(`/agents/move?id=${a.id}`)).text()
+    const html = await (await fetchPath(`/agents/move?id=${a.id}`)).text()
     contains(html, 'Move agent', 'move page title')
     contains(html, 'e2e-frei', 'names the agent')
     contains(html, 'e2e', 'lists a target repo')
     // The destructive actions live on the agent's detail (edit) page, not in
     // the overview table — a cleanup action must not sit next to the on/off
     // switch, and delete asks for the confirm dialog where it appears.
-    const detail = await (await hol(`/agents/edit?id=${a.id}&repo=${repo2Id}`)).text()
+    const detail = await (await fetchPath(`/agents/edit?id=${a.id}&repo=${repo2Id}`)).text()
     contains(detail, '/agents/move', 'move link on the agent detail page')
     contains(detail, '/agents/delete', 'delete form on the agent detail page')
-    const page = await (await hol(`/agents?repo=${repoId}`)).text()
+    const page = await (await fetchPath(`/agents?repo=${repoId}`)).text()
     isFalse(page.includes('/agents/move'), 'no move link in the agents table')
     isFalse(page.includes('/agents/delete'), 'no delete form in the agents table')
   })
@@ -530,41 +530,41 @@ try {
   group('Provider and effort selection (harness-dependent)')
 
   await check('each harness only gets providers it can actually use here', async () => {
-    const p = async (h) => (await (await hol(`/api/providers?harness=${h}`)).json()).provider.map(x => x.id)
+    const p = async (h) => (await (await fetchPath(`/api/providers?harness=${h}`)).json()).provider.map(x => x.id)
     equal((await p('claude')).length, 0, 'claude runs on the subscription, no provider')
     isTrue((await p('opencode')).includes('opencode-zen'), 'opencode knows Zen')
     isFalse((await p('hermes')).includes('opencode-zen'), 'hermes cannot use Zen here (no key)')
   })
 
   await check('reasoning effort only where it actually arrives', async () => {
-    const eff = async (q) => (await (await hol('/api/effort?' + q)).json())
+    const eff = async (q) => (await (await fetchPath('/api/effort?' + q)).json())
     const c = await eff('harness=claude')
     isTrue(c.ok && c.stufen.includes('high'), `claude names levels (${JSON.stringify(c).slice(0, 90)})`)
     const quatsch = await eff('harness=opencode&provider=openrouter&model=gibtsnicht/quatsch')
     isFalse(quatsch.ok, 'unknown model: no field instead of guessed levels')
-    equal((await hol('/api/effort?harness=quatsch')).status, 200, 'always answers with 200')
+    equal((await fetchPath('/api/effort?harness=quatsch')).status, 200, 'always answers with 200')
   })
 
   await check('an impossible level is rejected instead of silently dropped', async () => {
     // opencode discards an unknown variant without comment — the hub must catch that
     // beforehand, otherwise the DB would hold a promise that does nothing.
-    const r = await formular('/agents/edit', {
+    const r = await postForm('/agents/edit', {
       repo_id: String(repoId), name: 'effort-quatsch', harness: 'opencode', provider: 'opencode-zen',
       model: 'hy3-free', effort: 'ultraturbo', prompt: 'x', branch_mode: 'keiner',
       expected_minutes: '5', schedule_kind: 'manuell',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 400, 'rejected')
     contains(await r.text(), 'Reasoning effort', 'with a reason')
     isFalse(!!db.prepare(`SELECT 1 FROM agents WHERE name='effort-quatsch'`).get(), 'nothing saved')
   })
 
   await check('a disabled coding agent is rejected at run creation and can be re-enabled', async () => {
-    await formular('/settings/coding-agents/save', { harness: 'hermes', enabled: '0' }, { alsBrowser: true })
-    const r = await formular('/api/runs', { repo_id: String(repoId), harness: 'hermes', prompt: 'x', branch_mode: 'keiner', expected_minutes: '5' })
+    await postForm('/settings/coding-agents/save', { harness: 'hermes', enabled: '0' }, { asBrowser: true })
+    const r = await postForm('/api/runs', { repo_id: String(repoId), harness: 'hermes', prompt: 'x', branch_mode: 'keiner', expected_minutes: '5' })
     equal(r.status, 400, 'rejected')
     contains((await r.json()).error, 'not configured', 'reason')
-    const wieder = await formular('/settings/coding-agents/save',
-      { harness: 'hermes', enabled: '1', providers: ['openrouter', 'opencode-zen', 'deepseek'] }, { alsBrowser: true })
+    const wieder = await postForm('/settings/coding-agents/save',
+      { harness: 'hermes', enabled: '1', providers: ['openrouter', 'opencode-zen', 'deepseek'] }, { asBrowser: true })
     equal(wieder.status, 303, 're-enabled')
   })
 
@@ -573,22 +573,22 @@ try {
   await check('the start form shows the ACTUAL pipeline state', async () => {
     // Used to be hard-wired: the form always claimed "pipeline is off",
     // even when the top-right corner said "on".
-    const text = async () => (await hol(`/runs/new?repo=${repoId}`)).text()
-    await formular('/api/settings/pipeline', { value: '0' })
+    const text = async () => (await fetchPath(`/runs/new?repo=${repoId}`)).text()
+    await postForm('/api/settings/pipeline', { value: '0' })
     contains(await text(), 'Pipeline is off', 'hint with the pipeline switched off')
-    await formular('/api/settings/pipeline', { value: '1' })
+    await postForm('/api/settings/pipeline', { value: '1' })
     const an = await text()
     contains(an, 'Pipeline is on', 'hint with the pipeline switched on')
     isFalse(an.includes('Pipeline is off'), 'no contradictory hint next to it')
-    await formular('/api/settings/pipeline', { value: '0' })
+    await postForm('/api/settings/pipeline', { value: '0' })
   })
 
   let R1 = null
   await check('run starts via the form and redirects to the run page', async () => {
-    const r = await formular('/runs/new', {
+    const r = await postForm('/runs/new', {
       repo_id: repoId, harness: 'claude', prompt: 'E2E-Auftrag: nichts tun.',
       branch_mode: 'neu', branch_pattern: 'agent/e2e/{kurz}', expected_minutes: '45',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'redirect')
     const ort = r.headers.get('location')
     isTrue(/^\/runs\/[0-9a-f-]{36}$/.test(ort), `target is a run page (${ort})`)
@@ -646,14 +646,14 @@ try {
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}${pfad}`)
     const fertig = (e) => { try { ws.close() } catch {} ; resolve(e) }
     const t = setTimeout(() => fertig({ art: 'timeout' }), 8000)
-    ws.on('message', (d) => { clearTimeout(t); fertig({ art: 'daten', text: String(d) }) })
+    ws.on('message', (d) => { clearTimeout(t); fertig({ art: 'data', text: String(d) }) })
     ws.on('unexpected-response', (_req, res) => { clearTimeout(t); fertig({ art: 'http', status: res.statusCode }) })
     ws.on('error', (err) => { clearTimeout(t); fertig({ art: 'fehler', text: err.message }) })
   })
 
   await check('terminal connects and delivers the session content', async () => {
     const e = await wsVersuch(`/term?run=${R1}&ro=1`)
-    equal(e.art, 'daten', `event (${JSON.stringify(e)})`)
+    equal(e.art, 'data', `event (${JSON.stringify(e)})`)
     isTrue(e.text.length > 0, 'output received')
   })
   await check('unknown run yields 404 instead of hanging', async () => {
@@ -679,7 +679,7 @@ try {
   await check('with ro=0, typed text really lands in the session', async () => {
     await wsSchreiben(`/term?run=${R1}&ro=0`, 'direkt getippt\r')
     await waitFor(async () => (await sh('tmux', ['capture-pane', '-p', '-t', `=${lauf(R1).tmux_session}:`]))
-      .stdout.includes('[agent sah] direkt getippt'), { what: 'typed text in the pane', timeoutMs: 8000 })
+      .stdout.includes('[agent saw] direkt getippt'), { what: 'typed text in the pane', timeoutMs: 8000 })
   })
   await check('without the ro parameter the terminal stays mute (fail-closed)', async () => {
     await wsSchreiben(`/term?run=${R1}`, 'darf nicht ankommen\r')
@@ -696,15 +696,15 @@ try {
   // that asks the machine what it has installed is a suite that is green or red
   // depending on the machine.
   const flReport = (runId, args) => sh(FL_REPORT_REPO, args, {
-    env: { ...process.env, FL_RUN_ID: runId, FL_HUB_URL: BASIS },
+    env: { ...process.env, FL_RUN_ID: runId, FL_HUB_URL: BASE },
   })
 
   await check('sending via the API lands in the tmux session', async () => {
-    const r = await formular(`/api/runs/${R1}/send`, { text: 'hallo aus dem test' })
+    const r = await postForm(`/api/runs/${R1}/send`, { text: 'hallo aus dem test' })
     equal(r.status, 200, 'status')
     equal((await r.json()).ok, true, 'ok')
     await waitFor(async () => (await sh('tmux', ['capture-pane', '-p', '-t', `=${lauf(R1).tmux_session}:`]))
-      .stdout.includes('[agent sah] hallo aus dem test'), { what: 'text in the pane', timeoutMs: 8000 })
+      .stdout.includes('[agent saw] hallo aus dem test'), { what: 'text in the pane', timeoutMs: 8000 })
   })
   await check('the log records the transcript', async () => {
     const datei = join(SB, 'runs', R1, 'log.txt')
@@ -712,7 +712,7 @@ try {
       { what: 'sent text in the log', timeoutMs: 8000 })
   })
   await check('form POST redirects back to the run page (no bare JSON)', async () => {
-    const r = await formular(`/api/runs/${R1}/send`, { text: 'zweiter text' }, { alsBrowser: true })
+    const r = await postForm(`/api/runs/${R1}/send`, { text: 'zweiter text' }, { asBrowser: true })
     equal(r.status, 303, 'status')
     equal(r.headers.get('location'), `/runs/${R1}`, 'target')
   })
@@ -732,7 +732,7 @@ try {
     contains(l.help_text, 'Variante A', 'question stored')
   })
   await check('an answer sets the run back to running', async () => {
-    await formular(`/api/runs/${R1}/send`, { text: 'Nimm B.' })
+    await postForm(`/api/runs/${R1}/send`, { text: 'Nimm B.' })
     const l = lauf(R1)
     equal(l.status, 'running', 'status')
     contains(l.help_answer, 'Nimm B.', 'answer stored')
@@ -744,11 +744,11 @@ try {
     const l = lauf(R1)
     equal(l.status, 'done', 'status')
     contains(l.report_md, 'alles erledigt', 'report stored')
-    contains(await (await hol(`/runs/${R1}`)).text(), 'alles erledigt', 'report on the page')
+    contains(await (await fetchPath(`/runs/${R1}`)).text(), 'alles erledigt', 'report on the page')
   })
 
   await check('the detail page shows the prompt in a collapsible block near the top', async () => {
-    const html = await (await hol(`/runs/${R1}`)).text()
+    const html = await (await fetchPath(`/runs/${R1}`)).text()
     contains(html, 'id="run-prompt"', 'the prompt block exists')
     contains(html, 'E2E-Auftrag: nichts tun.', 'the run\'s prompt text is on the page')
     const reihe = ['id="run-head"', 'id="run-prompt"', 'class="chips"'].map(s => html.indexOf(s))
@@ -900,7 +900,7 @@ try {
     db.prepare(`UPDATE runs SET started_at=datetime('now','-5 minutes') WHERE id=?`).run(j.runId)
     await watcherTick()
     isTrue(ereignisse(j.runId).includes('anomaly:overrun'), 'it overran')
-    const zeile = async () => (await (await hol(`/api/fragments/run-row?id=${j.runId}&repo=${repoId}`)).text())
+    const zeile = async () => (await (await fetchPath(`/api/fragments/run-row?id=${j.runId}&repo=${repoId}`)).text())
     contains(await zeile(), 'class="dot red"', 'while it runs, an overrun is red — that is the point of it')
 
     isTrue((await flReport(j.runId, ['done', 'fertig'])).ok, 'reports done')
@@ -941,11 +941,11 @@ try {
   group('Extra skills: opt-in per run and agent')
 
   await check('forms offer the skill as a checkbox, nothing preselected', async () => {
-    const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/runs/new?repo=${repoId}`)).text()
     contains(html, 'e2e-fleiss', 'single-run form')
     contains(html, 'Testskill gegen faule Modelle', 'description')
     isFalse(/name="skills"[^>]*checked/.test(html), 'opt-in: not preselected')
-    contains(await (await hol(`/agents/edit?repo=${repoId}`)).text(), 'e2e-fleiss', 'agent form')
+    contains(await (await fetchPath(`/agents/edit?repo=${repoId}`)).text(), 'e2e-fleiss', 'agent form')
   })
   await check('a selected skill lands as a SKILL.md reference in the run prompt', async () => {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Skilltest', skills: 'e2e-fleiss' })
@@ -955,7 +955,7 @@ try {
     const prompt = readFileSync(join(SB, 'runs', j.runId, 'prompt.md'), 'utf8')
     contains(prompt, join(SB, 'zusaetze', 'e2e-fleiss', 'SKILL.md'), 'full path in the prompt')
     contains(prompt, 'ENTIRE task', 'instruction to apply')
-    contains(await (await hol(`/runs/${j.runId}`)).text(), 'e2e-fleiss', 'detail page shows the selection')
+    contains(await (await fetchPath(`/runs/${j.runId}`)).text(), 'e2e-fleiss', 'detail page shows the selection')
   })
   await check('without the checkbox the prompt stays free of skill references', async () => {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-ohne-Skill' })
@@ -964,14 +964,14 @@ try {
     isFalse(readFileSync(join(SB, 'runs', j.runId, 'prompt.md'), 'utf8').includes('SKILL.md'), 'no reference')
   })
   await check('agent with skill: the run inherits the selection (also via the scheduler path)', async () => {
-    const r = await formular('/agents/edit', {
+    const r = await postForm('/agents/edit', {
       repo_id: repoId, name: 'skill-traeger', harness: 'claude', prompt: 'E2E-Agent-Skill',
       branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'manuell', active: '1',
       skills: 'e2e-fleiss',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'saved')
     equal(agent('skill-traeger').skills, '["e2e-fleiss"]', 'on the agent')
-    const r2 = await formular('/agents/start', { id: String(agent('skill-traeger').id), repo: String(repoId) }, { alsBrowser: true })
+    const r2 = await postForm('/agents/start', { id: String(agent('skill-traeger').id), repo: String(repoId) }, { asBrowser: true })
     equal(r2.status, 303, 'started')
     const runId = r2.headers.get('location').split('/')[2]
     await sessionMerken(runId)
@@ -994,8 +994,8 @@ try {
   group('One definition for agent and single run')
 
   await check('both forms are built from the same block', async () => {
-    const runForm = await (await hol(`/runs/new?repo=${repoId}`)).text()
-    const agentForm = await (await hol(`/agents/edit?repo=${repoId}`)).text()
+    const runForm = await (await fetchPath(`/runs/new?repo=${repoId}`)).text()
+    const agentForm = await (await fetchPath(`/agents/edit?repo=${repoId}`)).text()
     for (const feld of ['name="harness"', 'id="prov"', 'name="model"', 'id="effort"', 'name="prompt"',
       'name="branch_mode"', 'name="branch_pattern"', 'name="expected_minutes"', 'name="or_mode"']) {
       isTrue(runForm.includes(feld) && agentForm.includes(feld), `${feld} in both forms`)
@@ -1010,19 +1010,19 @@ try {
     isTrue(!!j.runId, `run started (${JSON.stringify(j)})`)
     await sessionMerken(j.runId)
     for (const [pfad, was] of [[`/runs/new?repo=${repoId}`, 'run form'], [`/agents/edit?repo=${repoId}`, 'agent form']]) {
-      const html = await (await hol(pfad)).text()
+      const html = await (await fetchPath(pfad)).text()
       contains(html, 'value="gpt-5.2-high"', `model preselected in the ${was}`)
       isTrue(/<option value="cursor" selected>/.test(html), `coding agent preselected in the ${was}`)
     }
   })
 
   await check('an existing agent keeps its own setup in the form', async () => {
-    const r = await formular('/agents/edit', {
+    const r = await postForm('/agents/edit', {
       repo_id: repoId, name: 'merk-test', harness: 'claude', model: 'claude-opus-5',
       prompt: 'x', branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'manuell', active: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'saved')
-    const html = await (await hol(`/agents/edit?id=${agent('merk-test').id}&repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/agents/edit?id=${agent('merk-test').id}&repo=${repoId}`)).text()
     contains(html, 'value="claude-opus-5"', 'its own model, not the remembered one')
   })
 
@@ -1064,7 +1064,7 @@ try {
     const ev = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='deferred'`).get(j.runId)
     contains(ev?.payload ?? '', 'Fable', 'the reason names the window that blocks')
     // Away before the watcher's next pass picks it back up with a fresh fixture.
-    await formular(`/api/runs/${j.runId}/kill`, {})
+    await postForm(`/api/runs/${j.runId}/kill`, {})
   })
 
   await check('…and the same week lets every other model through', async () => {
@@ -1098,7 +1098,7 @@ try {
     quotaSchreiben(85, 30)   // fable 85 %: below 95, above the new 80
     const j = await laufStarten({ repo_id: repoId, model: 'claude-fable-5', prompt: 'E2E-Fable-Schwelle' })
     isTrue(!!j.runId && j.deferred, `fable 85 % defers against its own threshold of 80 (${JSON.stringify(j)})`)
-    await formular(`/api/runs/${j.runId}/kill`, {})
+    await postForm(`/api/runs/${j.runId}/kill`, {})
     const s = await laufStarten({ repo_id: repoId, model: 'claude-sonnet-5', prompt: 'E2E-Fable-Schwelle-2' })
     isTrue(!!s.runId && !s.deferred, `a sonnet run ignores the fable threshold (${JSON.stringify(s)})`)
     await sessionMerken(s.runId)
@@ -1110,7 +1110,7 @@ try {
     quotaSchreiben(99)
     const j = await laufStarten({ repo_id: repoId, model: 'claude-fable-5', prompt: 'E2E-Force' })
     isTrue(!!j.runId && j.deferred, 'deferred as before')
-    const r = await formular(`/api/runs/${j.runId}/start`, {})
+    const r = await postForm(`/api/runs/${j.runId}/start`, {})
     equal(r.status, 200, 'the endpoint answers 200')
     equal(lauf(j.runId).status, 'running', 'the run is running')
     contains(ereignisse(j.runId).join(','), 'forced_start', 'the forced start is recorded')
@@ -1122,12 +1122,12 @@ try {
     quotaSchreiben(99)
     const j = await laufStarten({ repo_id: repoId, model: 'claude-fable-5', prompt: 'E2E-Force-UI' })
     isTrue(!!j.runId && j.deferred, 'deferred')
-    const seite = await hol(`/runs/${j.runId}`).then(r => r.text())
+    const seite = await fetchPath(`/runs/${j.runId}`).then(r => r.text())
     contains(seite, `action="/api/runs/${j.runId}/start"`, 'the detail banner offers the button')
     contains(seite, 'Start anyway', 'and it is the operator-facing word')
-    const uebersicht = await hol(`/?repo=${repoId}`).then(r => r.text())
+    const uebersicht = await fetchPath(`/?repo=${repoId}`).then(r => r.text())
     contains(uebersicht, `action="/api/runs/${j.runId}/start"`, 'the overview row carries it too')
-    await formular(`/api/runs/${j.runId}/start`, {})
+    await postForm(`/api/runs/${j.runId}/start`, {})
     await sessionMerken(j.runId)
     quotaSchreiben(0, 0)
   })
@@ -1135,7 +1135,7 @@ try {
   await check('only a deferred run may be started this way', async () => {
     const laufend = await laufStarten({ repo_id: repoId, model: 'claude-sonnet-5', prompt: 'E2E-Force-Nein' })
     isTrue(!!laufend.runId && !laufend.deferred, 'a run that is not deferred')
-    const r = await formular(`/api/runs/${laufend.runId}/start`, {})
+    const r = await postForm(`/api/runs/${laufend.runId}/start`, {})
     equal(r.status, 400, 'the endpoint refuses')
     equal(lauf(laufend.runId).status, 'running', 'and leaves the run alone')
     await sessionMerken(laufend.runId)
@@ -1178,7 +1178,7 @@ try {
 
     // The overview says WHICH window is exhausted — not a bare word with no way
     // to tell whose quota ran out.
-    const zeile = (await (await hol(`/?repo=${repoId}`)).text()).split('<tr').find(z => z.includes(c.runId))
+    const zeile = (await (await fetchPath(`/?repo=${repoId}`)).text()).split('<tr').find(z => z.includes(c.runId))
     contains(zeile, 'quota exhausted', 'the row says the word')
     contains(zeile, '(5h', 'and names the window')
 
@@ -1199,7 +1199,7 @@ try {
 
   await check('both forms carry the goal, and it names who knows one', async () => {
     for (const [pfad, was] of [[`/runs/new?repo=${repoId}`, 'run form'], [`/agents/edit?repo=${repoId}`, 'agent form']]) {
-      const html = await (await hol(pfad)).text()
+      const html = await (await fetchPath(pfad)).text()
       contains(html, 'name="goal"', `the field is in the ${was}`)
       contains(html, 'data-goal-harnesses="claude"', `and says who has one (${was})`)
     }
@@ -1211,13 +1211,13 @@ try {
     isTrue(!!j.runId, `run started (${JSON.stringify(j)})`)
     await sessionMerken(j.runId)
     equal(lauf(j.runId).goal, 'all tests are green', 'the run carries the definition copy')
-    await waitFor(async () => (await paneText(j.runId)).includes('[agent sah] /goal all tests are green'),
+    await waitFor(async () => (await paneText(j.runId)).includes('[agent saw] /goal all tests are green'),
       { what: 'the goal command in the pane', timeoutMs: 15_000 })
     await waitFor(() => !!lauf(j.runId).goal_sent_at, { what: 'delivery recorded', timeoutMs: 5000 })
     contains(ereignisse(j.runId).join(','), 'goal_sent', 'and the run says so in its own event list')
-    const html = await (await hol(`/runs/${j.runId}`)).text()
+    const html = await (await fetchPath(`/runs/${j.runId}`)).text()
     contains(html, 'all tests are green', 'the detail page shows the goal')
-    await formular(`/api/runs/${j.runId}/kill`, {})
+    await postForm(`/api/runs/${j.runId}/kill`, {})
   })
 
   // The long condition is the case that was broken in production: pasted in
@@ -1233,11 +1233,11 @@ try {
       goal: bedingung })
     isTrue(!!j.runId, `run started (${JSON.stringify(j)})`)
     await sessionMerken(j.runId)
-    await waitFor(async () => (await paneText(j.runId)).includes('[agent sah] /goal alle Pruefungen'),
+    await waitFor(async () => (await paneText(j.runId)).includes('[agent saw] /goal alle Pruefungen'),
       { what: 'the typed command word in front of the pasted condition', timeoutMs: 15_000 })
     const pane = (await paneText(j.runId)).replace(/\s+/g, ' ')
     contains(pane, 'die Datei ZIEL.md liegt vor', 'and the END of the condition arrived too — nothing truncated')
-    await formular(`/api/runs/${j.runId}/kill`, {})
+    await postForm(`/api/runs/${j.runId}/kill`, {})
   })
 
   await check('a coding agent that knows no goal simply has none', async () => {
@@ -1246,7 +1246,7 @@ try {
     isTrue(!!j.runId, `run started (${JSON.stringify(j)})`)
     await sessionMerken(j.runId)
     equal(lauf(j.runId).goal, null, 'nothing stored — cursor has no /goal')
-    await formular(`/api/runs/${j.runId}/kill`, {})
+    await postForm(`/api/runs/${j.runId}/kill`, {})
   })
 
   await check('what did not get through is delivered by the watcher, and only once', async () => {
@@ -1262,7 +1262,7 @@ try {
     db.prepare('UPDATE runs SET goal_sent_at=NULL WHERE id=?').run(j.runId)
     await watcherTick()
     await waitFor(() => !!lauf(j.runId).goal_sent_at, { what: 'the watcher delivers what is missing', timeoutMs: 8000 })
-    await formular(`/api/runs/${j.runId}/kill`, {})
+    await postForm(`/api/runs/${j.runId}/kill`, {})
   })
 
   // ------------------------------------------------------------------
@@ -1319,7 +1319,7 @@ try {
     // and the action that clears it is still in that cell — it is only hidden
     // until the row is hovered (the same rule the pencil and the archive button
     // follow). Checked against the route it posts to, which outlives markup.
-    const zeile = (await (await hol(`/?repo=${repoId}`)).text()).split('<tr ').find(z => z.includes(RH))
+    const zeile = (await (await fetchPath(`/?repo=${repoId}`)).text()).split('<tr ').find(z => z.includes(RH))
     isTrue(!!zeile, 'the run has a row')
     contains(zeile, 'Rate limit 1×', 'overview shows the incident')
     contains(zeile, 'incident yellow', 'in the severity it was given')
@@ -1327,11 +1327,11 @@ try {
     contains(zeile, 'Dismiss', 'named for the group it belongs to — noticed, not to-do')
   })
   await check('the sidebar\'s incident counts link into the overview filtered to incident runs', async () => {
-    const seite = await (await hol(`/?repo=${repoId}`)).text()
+    const seite = await (await fetchPath(`/?repo=${repoId}`)).text()
     contains(seite, 'incidents=1', 'the sidebar links the counts into the filtered overview')
-    const gefiltert = await (await hol(`/?repo=${repoId}&incidents=1`)).text()
+    const gefiltert = await (await fetchPath(`/?repo=${repoId}&incidents=1`)).text()
     isTrue(gefiltert.split('<tr ').some(z => z.includes(RH)), 'the run with the incident is in the filtered list')
-    const fragment = await (await hol(`/api/fragments/runs-body?repo=${repoId}&incidents=1`)).text()
+    const fragment = await (await fetchPath(`/api/fragments/runs-body?repo=${repoId}&incidents=1`)).text()
     contains(fragment, 'data-incidents="1"', 'the filter travels with the tbody, so live updates keep it')
     contains(fragment, RH, 'and the fragment shows the same selection the page did')
   })
@@ -1348,17 +1348,17 @@ try {
     isTrue(ereignisse(RH).includes('incident:eskaliert'), `escalated (has: ${ereignisse(RH).join(', ')})`)
     const tg = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='notified' ORDER BY id DESC LIMIT 1`).get(RH)
     isTrue(!!tg && JSON.parse(tg.payload).type === 'incident:rate_limit', 'the incident was announced (with no channel configured: delivered=false, but attempted)')
-    contains(await (await hol(`/runs/${RH}`)).text(), 'Incidents', 'detail page shows the section')
+    contains(await (await fetchPath(`/runs/${RH}`)).text(), 'Incidents', 'detail page shows the section')
   })
   await check('resolving via the UI withdraws the alarm', async () => {
     const v = vorfaelle(RH)[0]
-    const r = await formular(`/api/incidents/${v.id}/resolve`, { back: `/runs/${RH}` }, { alsBrowser: true })
+    const r = await postForm(`/api/incidents/${v.id}/resolve`, { back: `/runs/${RH}` }, { asBrowser: true })
     equal(r.status, 303, 'redirect')
     equal(r.headers.get('location'), `/runs/${RH}`, 'back to the run page')
     const nach = vorfaelle(RH)[0]
     isTrue(!!nach.geloest_am, 'geloest_am set')
     equal(nach.geloest_von, 'web', 'by web')
-    isFalse((await (await hol(`/?repo=${repoId}`)).text()).includes('Rate limit 2×'), 'overview without an open incident')
+    isFalse((await (await fetchPath(`/?repo=${repoId}`)).text()).includes('Rate limit 2×'), 'overview without an open incident')
   })
   await check('if it recurs AFTER resolving, the alarm goes on again (auto-alarm)', async () => {
     // The resolution happened within the same second — the new match must come after it.
@@ -1414,7 +1414,7 @@ try {
     const hookJson = JSON.stringify({ hook_event_name: 'StopFailure', error: 'rate_limit', last_assistant_message: "You've hit your session limit · resets 8:36pm" })
     const r = await new Promise((resolve) => {
       const p = execFile(FL_REPORT_REPO, ['_api_error'],
-        { env: { ...process.env, FL_RUN_ID: RC, FL_HUB_URL: BASIS } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
+        { env: { ...process.env, FL_RUN_ID: RC, FL_HUB_URL: BASE } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
       p.stdin.end(hookJson)
     })
     isTrue(r.ok, `fl-report ok (${r.stderr})`)
@@ -1434,7 +1434,7 @@ try {
       last_assistant_message: 'Model not found: nosuch/model-xyz.' })
     const r = await new Promise((resolve) => {
       const p = execFile(FL_REPORT_REPO, ['_api_error'],
-        { env: { ...process.env, FL_RUN_ID: RC, FL_HUB_URL: BASIS } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
+        { env: { ...process.env, FL_RUN_ID: RC, FL_HUB_URL: BASE } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
       p.stdin.end(hookJson)
     })
     isTrue(r.ok, `fl-report ok (${r.stderr})`)
@@ -1448,7 +1448,7 @@ try {
       last_assistant_message: 'Model not found: really/missing-model.' })
     const r2 = await new Promise((resolve) => {
       const p = execFile(FL_REPORT_REPO, ['_api_error'],
-        { env: { ...process.env, FL_RUN_ID: RC, FL_HUB_URL: BASIS } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
+        { env: { ...process.env, FL_RUN_ID: RC, FL_HUB_URL: BASE } }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr }))
       p.stdin.end(eigen)
     })
     isTrue(r2.ok, `fl-report ok (${r2.stderr})`)
@@ -1466,7 +1466,7 @@ try {
     const j = await laufStarten({ repo_id: repoId, harness: 'opencode', prompt: 'E2E-Abbruch', expected_minutes: '45' })
     const RA = j.runId
     await sessionMerken(RA)
-    const melde = (text) => hol(`/api/runs/${RA}/report`, {
+    const melde = (text) => fetchPath(`/api/runs/${RA}/report`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ kind: '_api_error', error: 'unknown', text }),
     })
@@ -1551,7 +1551,7 @@ try {
     isTrue(ereignisse(j.runId).includes('anomaly:overrun'), 'overrun anomaly')
     isTrue(ereignisse(j.runId).includes('notified:overrun'), 'and the operator heard about it')
     // The operator raises the duration — the statement the old value produced is withdrawn:
-    const r = await formular(`/api/runs/${j.runId}/edit`, { expected_minutes: '240' })
+    const r = await postForm(`/api/runs/${j.runId}/edit`, { expected_minutes: '240' })
     equal(r.status, 200, `edit ok (${JSON.stringify(await r.json().catch(() => r.text()))})`)
     equal(lauf(j.runId).expected_minutes, 240, 'new duration stored')
     isTrue(ereignisse(j.runId).includes('cleared:anomaly:overrun'), 'the anomaly event is history, renamed')
@@ -1577,7 +1577,7 @@ try {
       const g = db.prepare(`SELECT * FROM incidents WHERE run_id IS NULL AND geloest_am IS NULL`).all()
       isTrue(g.length >= 1, `global incident (has ${g.length})`)
       isTrue(g.every(x => x.typ.startsWith('provider_down:')), 'type provider_down:<name>')
-      contains(await (await hol(`/?repo=${repoId}`)).text(), 'Provider unreachable', 'banner in the overview')
+      contains(await (await fetchPath(`/?repo=${repoId}`)).text(), 'Provider unreachable', 'banner in the overview')
       antwort = 200
       await watcherTick()
       equal(db.prepare(`SELECT count(*) c FROM incidents WHERE run_id IS NULL AND geloest_am IS NULL`).get().c, 0, 'recovered → closed')
@@ -1593,7 +1593,7 @@ try {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Dauer' })
     await sessionMerken(j.runId)
     db.prepare(`UPDATE runs SET status='done', started_at=datetime('now','-3 days'), ended_at=datetime('now','-3 days','+2 minutes') WHERE id=?`).run(j.runId)
-    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/?repo=${repoId}`)).text()
     const zeile = html.split('<tr').find(z => z.includes(j.runId))
     contains(zeile, '>2 min<', '2 min instead of 4320')
   })
@@ -1601,7 +1601,7 @@ try {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-started' })
     await sessionMerken(j.runId)
     db.prepare(`UPDATE runs SET started_at=datetime('now','-4 minutes') WHERE id=?`).run(j.runId)
-    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/?repo=${repoId}`)).text()
     const zeile = html.split('<tr').find(z => z.includes(j.runId))
     isTrue(!!zeile, 'row for the run')
     contains(zeile, 'class="reltime"', 'relative-time element')
@@ -1614,7 +1614,7 @@ try {
   // Simulation with REAL Claude Code: a mini server answers 429 with the
   // subscription-limit headers, Claude aborts, the StopFailure hook reports via
   // fl-report to this sandbox hub. No quota consumed, no network — but the full path.
-  if (vorhanden('claude')) {
+  if (hasBinary('claude')) {
     await check('REAL: Claude Code + simulated 429 → StopFailure hook → incident rate_limit', async () => {
       const http = await import('node:http')
       const reset = Math.floor(Date.now() / 1000) + 3600
@@ -1644,11 +1644,11 @@ try {
         const r = await new Promise((resolve) => execFile('claude',
           ['-p', 'sag hallo', '--model', 'sonnet', '--settings', settingsDatei, '--session-id', j.runId],
           { cwd: arbeitsdir, timeout: 120_000, env: { ...process.env, ANTHROPIC_BASE_URL: `http://127.0.0.1:${mock.address().port}`,
-            FL_RUN_ID: j.runId, FL_HUB_URL: BASIS,
+            FL_RUN_ID: j.runId, FL_HUB_URL: BASE,
             // The hooks call `fl-report` by name and find it on PATH. In production
             // that is ~/.local/bin, filled by the deploy before it restarts the hub;
             // here it is this checkout, because that is what the suite tests.
-            PATH: `${join(PROJEKT, 'bin')}:${join(homedir(), '.local', 'bin')}:${process.env.PATH}` } },
+            PATH: `${join(PROJECT, 'bin')}:${join(homedir(), '.local', 'bin')}:${process.env.PATH}` } },
           (err, stdout, stderr) => resolve({ err, stdout: String(stdout), stderr: String(stderr) })))
         contains(r.stdout + r.stderr, 'limit', `Claude reports the limit (${(r.stdout + r.stderr).slice(-200)})`)
         await waitFor(() => vorfaelle(j.runId).some(v => v.typ === 'rate_limit'), { what: 'incident via the hook', timeoutMs: 15_000 })
@@ -1679,7 +1679,7 @@ try {
       await waitFor(() => !!lauf(SESS)?.tmux_session, { what: 'tmux session' })
       SESSNAME = lauf(SESS).tmux_session
       sessions.add(SESSNAME)
-      const html = await (await hol('/sessions')).text()
+      const html = await (await fetchPath('/sessions')).text()
       contains(html, SESSNAME, 'the session name is on the page')
       // Its row must carry the marker the default filter hides it by — that is
       // the whole safety of "running agents are not shown".
@@ -1687,7 +1687,7 @@ try {
     })
 
     await check('ending a session ends the run that hung on it', async () => {
-      const r = await formular('/api/sessions/kill', { session: SESSNAME })
+      const r = await postForm('/api/sessions/kill', { session: SESSNAME })
       const j = await r.json()
       isTrue(j.ok, `kill answered ok (${JSON.stringify(j.results ?? j)})`)
       sessions.delete(SESSNAME)
@@ -1700,7 +1700,7 @@ try {
     })
 
     await check('ending a session that is already gone is not an error', async () => {
-      const j = await (await formular('/api/sessions/kill', { session: SESSNAME })).json()
+      const j = await (await postForm('/api/sessions/kill', { session: SESSNAME })).json()
       isTrue(j.ok, 'idempotent')
     })
 
@@ -1711,7 +1711,7 @@ try {
         { what: 'both tmux sessions' })
       const namen = [lauf(a.runId).tmux_session, lauf(b.runId).tmux_session]
       namen.forEach(n => sessions.add(n))
-      const j = await (await formular('/api/sessions/kill', { session: namen })).json()
+      const j = await (await postForm('/api/sessions/kill', { session: namen })).json()
       isTrue(j.ok, `both ended (${JSON.stringify(j.results ?? j)})`)
       equal(j.results.length, 2, 'one result per session')
       for (const n of namen) sessions.delete(n)
@@ -1725,20 +1725,20 @@ try {
       // its own group).
       db.prepare(`INSERT INTO settings(key,value) VALUES('session_keep_hours','0.5')
                   ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run()
-      const html = await (await hol('/settings')).text()
+      const html = await (await fetchPath('/settings')).text()
       contains(html, 'name="session_keep_hours"', 'the field is on the settings page')
       contains(html, 'value="0.5"', 'and shows what is stored')
       const { sessionKeepMs } = await import('../server/sessions.mjs')
       equal(sessionKeepMs({ session_keep_hours: '0.5' }), 1800_000, 'half an hour')
     })
     await check('the archive-session rule is configurable on the settings page', async () => {
-      const html = await (await hol('/settings')).text()
+      const html = await (await fetchPath('/settings')).text()
       for (const feld of ['name="archive_session_on"', 'name="archive_session_keep_hours"']) {
         contains(html, feld, `field ${feld}`)
       }
     })
     await check('the worktree-extras LLM is configured on the settings page', async () => {
-      const html = await (await hol('/settings')).text()
+      const html = await (await fetchPath('/settings')).text()
       for (const feld of ['name="llm_extras_on"', 'name="llm_extras_model"', 'name="llm_extras_or_provider"']) {
         contains(html, feld, `field ${feld}`)
       }
@@ -1761,7 +1761,7 @@ try {
       RNSESS = lauf(RN).tmux_session
       sessions.add(RNSESS)
       db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(RN)
-      const html = await (await hol(`/runs/${RN}`)).text()
+      const html = await (await fetchPath(`/runs/${RN}`)).text()
       contains(html, 'data-live="1"', 'the terminal is offered with write access')
       contains(html, `freilaufSend(this,'/api/runs/${RN}/send')`, 'and the send form is there')
       isFalse(html.includes(`freilaufKill('${RN}')`), 'but no "end run" — that run is over')
@@ -1769,7 +1769,7 @@ try {
     })
 
     await check('a message reaches the session of a finished run', async () => {
-      const r = await formular(`/api/runs/${RN}/send`, { text: 'weiter geht es' })
+      const r = await postForm(`/api/runs/${RN}/send`, { text: 'weiter geht es' })
       equal(r.status, 200, 'accepted')
       // A message into a finished run is a follow-up COMMISSION now: recorded
       // under its own name, and the run is clocked from this moment
@@ -1785,7 +1785,7 @@ try {
       // run that came through cleanly must not become a failed one because
       // somebody closed its leftover session. The open follow-up commission
       // goes with the session: nothing can report for it any more.
-      const r = await formular(`/api/runs/${RN}/kill`, {})
+      const r = await postForm(`/api/runs/${RN}/kill`, {})
       equal(r.status, 200, 'accepted')
       equal(lauf(RN).status, 'done', 'still done')
       isTrue(lauf(RN).tmux_closed_at !== null, 'only the session is marked closed')
@@ -1793,7 +1793,7 @@ try {
     })
 
     await check('without a session there is no write access left', async () => {
-      const html = await (await hol(`/runs/${RN}`)).text()
+      const html = await (await fetchPath(`/runs/${RN}`)).text()
       isFalse(html.includes('data-live="1"'), 'read-only')
       contains(html, 'data-session="0"', 'and the box says there is no session')
       sessions.delete(RNSESS)
@@ -1805,7 +1805,7 @@ try {
       const name = lauf(j.runId).tmux_session
       sessions.add(name)
       db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
-      const r = await formular('/api/sessions/kill', { session: name, back: `/runs/${j.runId}` }, { alsBrowser: true })
+      const r = await postForm('/api/sessions/kill', { session: name, back: `/runs/${j.runId}` }, { asBrowser: true })
       equal(r.status, 303, 'redirect instead of JSON')
       equal(r.headers.get('location'), `/runs/${j.runId}`, 'back to the run, not to the session list')
       sessions.delete(name)
@@ -1819,7 +1819,7 @@ try {
     // What the coding agents' hooks say (docs/plugins.md, "Attention") is
     // played in through fl-report exactly as the hooks would send it. The stub
     // agent's pane stays alive, so the liveness verdict can be read too.
-    const report = (runId, body) => fetch(`${BASIS}/api/runs/${runId}/report`, {
+    const report = (runId, body) => fetch(`${BASE}/api/runs/${runId}/report`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     })
     let RA = null
@@ -1833,15 +1833,15 @@ try {
       equal(l.agent_state, 'waiting', 'the agent is noted as waiting')
       isTrue(!!l.agent_state_at, 'with the moment')
       isTrue(ereignisse(RA).includes('agent_waiting'), 'and an event for the live channel')
-      const html = await (await hol(`/runs/${RA}`)).text()
+      const html = await (await fetchPath(`/runs/${RA}`)).text()
       contains(html, 'Waiting for input', 'the detail page says so')
       contains(html, 'id="run-attention">', 'with the since-line shown')
-      const rows = await (await hol(`/?repo=${repoId}&status=waiting_input`)).text()
+      const rows = await (await fetchPath(`/?repo=${repoId}&status=waiting_input`)).text()
       contains(rows, `id="run-${RA}"`, 'the overview filter finds it under waiting for input')
-      isFalse((await (await hol(`/?repo=${repoId}&status=running`)).text()).includes(`id="run-${RA}"`), 'and not under running')
-      const side = await (await hol(`/api/fragments/sidebar?repo=${repoId}`)).text()
+      isFalse((await (await fetchPath(`/?repo=${repoId}&status=running`)).text()).includes(`id="run-${RA}"`), 'and not under running')
+      const side = await (await fetchPath(`/api/fragments/sidebar?repo=${repoId}`)).text()
       contains(side, `status=waiting_input`, 'the sidebar counts it there')
-      const api = await (await hol(`/api/runs/${RA}`)).json()
+      const api = await (await fetchPath(`/api/runs/${RA}`)).json()
       equal(api.liveness.agent_state, 'waiting', 'the read API carries the state')
       equal(api.liveness.verdict, 'waiting_input', 'and its verdict says what to do')
     })
@@ -1851,7 +1851,7 @@ try {
       equal(lauf(RA).agent_state, 'working', 'working')
       // The chip, not the whole page: the sidebar next to it counts OTHER runs
       // of the repo that wait for input (an earlier group's claude run).
-      const html = await (await hol(`/runs/${RA}`)).text()
+      const html = await (await fetchPath(`/runs/${RA}`)).text()
       contains(html, '"status-chip">Running<', 'the page reads running again')
       contains(html, 'id="run-attention" hidden', 'and the since-line is hidden')
       await flReport(RA, ['_working'])
@@ -1879,12 +1879,12 @@ try {
       equal(lauf(RA).agent_state, 'working', 'one key: working')
       equal(ereignisse(RA).filter(k => k === 'agent_working').length, vorher + 1, 'with one event for the live channel')
       equal(quelle(), 'terminal', 'whose source names the terminal')
-      const html = await (await hol(`/runs/${RA}`)).text()
+      const html = await (await fetchPath(`/runs/${RA}`)).text()
       contains(html, '"status-chip">Running<', 'the page reads running')
       // The send form is the other way into the session, and agrees.
       await flReport(RA, ['_turn_end'])
       equal(lauf(RA).agent_state, 'waiting', 'waiting again')
-      const r = await formular(`/api/runs/${RA}/send`, { text: 'carry on' })
+      const r = await postForm(`/api/runs/${RA}/send`, { text: 'carry on' })
       equal(r.status, 200, 'sent')
       equal(lauf(RA).agent_state, 'working', 'working from the send route')
       equal(quelle(), 'send', 'with its own source')
@@ -1917,7 +1917,7 @@ try {
       equal(lauf(RA).status, 'waiting_help', 'waiting for help')
       await flReport(RA, ['_turn_end'])
       equal(lauf(RA).status, 'waiting_help', 'the turn end does not change that')
-      const html = await (await hol(`/runs/${RA}`)).text()
+      const html = await (await fetchPath(`/runs/${RA}`)).text()
       contains(html, 'Waiting for help', 'and the question outranks the idle on the page')
       // The operator types the answer into the terminal: the hub never sees the
       // text, the agent's UserPromptSubmit hook is what says the question is answered.
@@ -1930,7 +1930,7 @@ try {
     await check('closing the session forgets what the agent said', async () => {
       await flReport(RA, ['_turn_end'])
       equal(lauf(RA).agent_state, 'waiting', 'waiting')
-      const r = await formular(`/api/runs/${RA}/kill`, {})
+      const r = await postForm(`/api/runs/${RA}/kill`, {})
       equal(r.status, 200, 'ended')
       equal(lauf(RA).agent_state, null, 'no state without a session')
       sessions.delete(lauf(RA).tmux_session)
@@ -1952,7 +1952,7 @@ try {
       equal(lauf(RF).agent_state, 'working', 'but the state is noted')
       isTrue((await flReport(RF, ['_turn_end'])).ok, 'the agent stops after its report')
       equal(lauf(RF).followup_since, null, 'a turn end on a finished run commissions nothing')
-      contains(await (await hol(`/runs/${RF}`)).text(), '"status-chip">Done<', 'and the run reads done, not waiting for input')
+      contains(await (await fetchPath(`/runs/${RF}`)).text(), '"status-chip">Done<', 'and the run reads done, not waiting for input')
       // The terminal writes into tmux directly; the send route is never called.
       // The agent's own prompt hook is the first the hub hears of it — and a
       // human's line is a commission whenever it comes.
@@ -1962,20 +1962,20 @@ try {
       isTrue(!!l.followup_since, 'but a commission is open')
       equal(l.agent_state, 'working', 'and the agent works')
       isTrue(ereignisse(RF).includes('followup_started'), 'recorded as a follow-up start')
-      const html = await (await hol(`/runs/${RF}`)).text()
+      const html = await (await fetchPath(`/runs/${RF}`)).text()
       contains(html, '"status-chip">Running<', 'displayed as running')
     })
 
     await check('…then waiting for input, then running again — one commission', async () => {
       await flReport(RF, ['_turn_end'])
       equal(lauf(RF).agent_state, 'waiting', 'waiting')
-      const html = await (await hol(`/runs/${RF}`)).text()
+      const html = await (await fetchPath(`/runs/${RF}`)).text()
       contains(html, '"status-chip">Waiting for input<', 'displayed as waiting for input')
-      contains((await (await hol(`/?repo=${repoId}&status=waiting_input`)).text()), `id="run-${RF}"`, 'filtered under waiting for input')
+      contains((await (await fetchPath(`/?repo=${repoId}&status=waiting_input`)).text()), `id="run-${RF}"`, 'filtered under waiting for input')
       await flReport(RF, ['_working'])
       equal(lauf(RF).agent_state, 'working', 'working again')
       equal(ereignisse(RF).filter(k => k === 'followup_started').length, 1, 'still the same commission')
-      equal((await (await hol(`/api/runs/${RF}`)).json()).liveness.verdict, 'working', 'the read API agrees')
+      equal((await (await fetchPath(`/api/runs/${RF}`)).json()).liveness.verdict, 'working', 'the read API agrees')
     })
 
     await check('the follow-up clock pauses while the agent waits for input', async () => {
@@ -2007,7 +2007,7 @@ try {
       const l = lauf(RF)
       equal(l.followup_since, null, 'commission closed')
       equal(l.status, 'done', 'done')
-      const html = await (await hol(`/runs/${RF}`)).text()
+      const html = await (await fetchPath(`/runs/${RF}`)).text()
       contains(html, '"status-chip">Done<', 'displayed as done — a waiting agent on a finished run is just finished')
     })
   }
@@ -2062,7 +2062,7 @@ try {
       const k = await laufStarten({ repo_id: repoId, prompt: 'E2E-Resume: killed on purpose' })
       await waitFor(() => !!lauf(k.runId)?.tmux_session, { what: 'tmux session' })
       sessions.add(lauf(k.runId).tmux_session)
-      await formular(`/api/runs/${k.runId}/kill`, {})
+      await postForm(`/api/runs/${k.runId}/kill`, {})
       await watcherTick()
       equal(lauf(k.runId).status, 'aborted', 'aborted')
       isFalse(ereignisse(k.runId).includes('session_lost'), 'no session_lost — the hub knew who ended it')
@@ -2131,7 +2131,7 @@ try {
     const r = lauf(id)
     equal(r.status, 'failed', 'completed as failed')
     contains(r.report_md ?? '', 'interrupted', 'reason in the report')
-    const seite = await (await hol(`/runs/${id}`)).text()
+    const seite = await (await fetchPath(`/runs/${id}`)).text()
     isFalse(seite.includes('data-live=\"1\"'), 'the page no longer promises a terminal')
     contains(seite, 'Retry run', 'retry is offered')
   })
@@ -2150,7 +2150,7 @@ try {
 
   let R2 = null
   await check('failed start is recorded as failed', async () => {
-    writeFileSync(FEHLSTART, 'an')
+    writeFileSync(FAILED_START, 'an')
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Fehlstart', branch_mode: 'neu', branch_pattern: 'agent/e2e-fehl/{kurz}' })
     R2 = j.runId
     equal(lauf(R2).status, 'failed', 'status')
@@ -2159,7 +2159,7 @@ try {
   await check('retry uses the same worktree and starts up', async () => {
     const vorher = lauf(R2).workdir_effective
     isTrue(existsSync(vorher), 'worktree from the failed attempt is still there')
-    rmSync(FEHLSTART)
+    rmSync(FAILED_START)
     // The failed attempt's started_at must not survive into the new one, and
     // that is not cosmetics: `verwaisteLaeufeAbschliessen()` measures its grace
     // period against this column, so a retry that kept the old timestamp had
@@ -2173,7 +2173,7 @@ try {
     // first second.
     db.prepare(`UPDATE runs SET started_at=datetime('now','-2 hours') WHERE id=?`).run(R2)
     const startVorher = lauf(R2).started_at
-    const r = await formular(`/api/runs/${R2}/retry`, {}, { alsBrowser: true })
+    const r = await postForm(`/api/runs/${R2}/retry`, {}, { asBrowser: true })
     equal(r.status, 303, 'redirect instead of JSON')
     await sessionMerken(R2)
     equal(lauf(R2).status, 'running', 'status')
@@ -2183,7 +2183,7 @@ try {
       'and it is fresh, so the orphan sweep grants the new launch its grace period')
   })
   await check('abort sets aborted and closes the session immediately', async () => {
-    const r = await formular(`/api/runs/${R2}/kill`, {})
+    const r = await postForm(`/api/runs/${R2}/kill`, {})
     equal(r.status, 200, 'status')
     const l = lauf(R2)
     equal(l.status, 'aborted', 'status')
@@ -2197,16 +2197,16 @@ try {
     equal(e.status, 410, 'status')
   })
   await check('retry after an abort clears the old session close — the terminal is offered again', async () => {
-    const r = await formular(`/api/runs/${R2}/retry`, {}, { alsBrowser: true })
+    const r = await postForm(`/api/runs/${R2}/retry`, {}, { asBrowser: true })
     equal(r.status, 303, 'redirect instead of JSON')
     await sessionMerken(R2)
     const l = lauf(R2)
     equal(l.status, 'running', 'running again')
     equal(l.tmux_closed_at, null, 'tmux_closed_at of the aborted attempt is gone — else pageRun() shows "no session"')
-    const seite = await (await hol(`/runs/${R2}`)).text()
+    const seite = await (await fetchPath(`/runs/${R2}`)).text()
     isTrue(seite.includes('data-session="1"'), 'detail page renders a terminal for the new session')
     // Leave the run somewhere the rest of the suite can ignore it.
-    await formular(`/api/runs/${R2}/kill`, {})
+    await postForm(`/api/runs/${R2}/kill`, {})
     const l2 = lauf(R2)
     sessions.delete(l2.tmux_session)
   })
@@ -2220,7 +2220,7 @@ try {
     await waitFor(() => !!lauf(j.runId)?.tmux_session, { what: 'tmux session' })
     await sessionMerken(j.runId)
     db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now') WHERE id=?`).run(j.runId)
-    const r = await formular(`/api/runs/${j.runId}/kill`, {})
+    const r = await postForm(`/api/runs/${j.runId}/kill`, {})
     equal(r.status, 200, 'accepted')
     const l = lauf(j.runId)
     equal(l.status, 'aborted', 'the final status is aborted')
@@ -2243,26 +2243,26 @@ try {
     contains(j.error, 'main', 'branch named')
     contains(j.error, REPO, 'the occupying worktree named')
     equal(db.prepare('SELECT COUNT(*) n FROM runs').get().n, vorher, 'no run created')
-    const r = await formular('/runs/new', {
+    const r = await postForm('/runs/new', {
       repo_id: repoId, harness: 'claude', prompt: 'E2E-Festbranch-Formular',
       branch_mode: 'fest', branch_pattern: 'main', expected_minutes: '45',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 400, 'the HTML form as well')
     contains(await r.text(), 'main', 'branch named')
   })
   await check('an agent whose branch got occupied later fails at start, also readably', async () => {
     // The form check cannot help here: the branch was still free when the agent
     // was saved. That is what the check in the runner is for — second line.
-    const r = await formular('/agents/edit', {
+    const r = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-festbranch', harness: 'claude', prompt: 'E2E-Agent-Festbranch',
       branch_mode: 'fest', branch_pattern: 'feature/e2e-belegt', expected_minutes: '45',
       schedule_kind: 'manuell', active: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'agent saved (branch still free)')
     const fremd = join(SB, 'fremdes-worktree')
     await sh('git', ['-C', REPO, 'branch', 'feature/e2e-belegt'])
     await sh('git', ['-C', REPO, 'worktree', 'add', fremd, 'feature/e2e-belegt'])
-    const s = await formular('/agents/start', { id: String(agent('e2e-festbranch').id), repo: String(repoId) }, { alsBrowser: true })
+    const s = await postForm('/agents/start', { id: String(agent('e2e-festbranch').id), repo: String(repoId) }, { asBrowser: true })
     equal(s.status, 303, 'redirect')
     const l = db.prepare('SELECT * FROM runs WHERE agent_id=?').get(agent('e2e-festbranch').id)
     equal(l.status, 'failed', 'status')
@@ -2303,10 +2303,10 @@ try {
 
   await check('create schedule agents and switch on the pipeline', async () => {
     // A: runs every minute, but already has a running run -> must be skipped.
-    const a = await formular('/agents/edit', {
+    const a = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-jede-minute', harness: 'claude', prompt: 'E2E-Dauerlaeufer',
       branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'cron', schedule: '* * * * *', active: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(a.status, 303, 'agent A created')
     const idA = agent('e2e-jede-minute').id
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-belegt' })
@@ -2314,12 +2314,12 @@ try {
 
     // B: one-off date in the past -> must fire exactly once.
     const gestern = new Date(Date.now() - 3600_000).toISOString().slice(0, 16)
-    const b = await formular('/agents/edit', {
+    const b = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-einmalig', harness: 'claude', prompt: 'E2E-Einmalig',
       branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'einmalig', run_at: gestern, active: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(b.status, 303, 'agent B created')
-    equal((await (await formular('/api/settings/pipeline', { value: '1' })).json()).ok, true, 'pipeline on')
+    equal((await (await postForm('/api/settings/pipeline', { value: '1' })).json()).ok, true, 'pipeline on')
   })
   await check('one-off date fires exactly once and switches itself to manual', async () => {
     const idB = agent('e2e-einmalig').id
@@ -2338,7 +2338,7 @@ try {
     equal(db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(idA).c, 1, 'only one run')
   })
   await check('pipeline can be switched off again', async () => {
-    equal((await (await formular('/api/settings/pipeline', { value: '0' })).json()).ok, true, 'ok')
+    equal((await (await postForm('/api/settings/pipeline', { value: '0' })).json()).ok, true, 'ok')
     equal(db.prepare(`SELECT value FROM settings WHERE key='pipeline_on'`).get().value, '0', 'saved')
   })
 
@@ -2346,7 +2346,7 @@ try {
   group('Run title and planned start')
 
   await check('the single-run form asks for a title and a start time', async () => {
-    const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/runs/new?repo=${repoId}`)).text()
     contains(html, 'name="title"', 'title field')
     contains(html, 'generated from the prompt', 'says what an empty field means')
     contains(html, 'name="start_mode"', 'start kind')
@@ -2359,7 +2359,7 @@ try {
     const j = await laufStarten({ repo_id: repoId, prompt: '# Rewrite the login form\n\nand much more text' })
     await sessionMerken(j.runId)
     equal(lauf(j.runId).title, 'Rewrite the login form', 'title from the prompt')
-    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/?repo=${repoId}`)).text()
     contains(html, 'Rewrite the login form', 'shown in the overview')
   })
   await check('a typed title is taken over verbatim', async () => {
@@ -2369,25 +2369,25 @@ try {
   })
   let TITELLAUF = null
   await check('a run of an agent is called by its agent', async () => {
-    const r = await formular('/agents/edit', {
+    const r = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-titel-agent', harness: 'claude', prompt: 'E2E-Agentenlauf',
       branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'manuell', active: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'agent created')
-    const s = await formular('/agents/start', { id: agent('e2e-titel-agent').id, repo: repoId }, { alsBrowser: true })
+    const s = await postForm('/agents/start', { id: agent('e2e-titel-agent').id, repo: repoId }, { asBrowser: true })
     TITELLAUF = s.headers.get('location').split('/')[2]
     await sessionMerken(TITELLAUF)
     equal(lauf(TITELLAUF).title, 'e2e-titel-agent', 'the agent name, not a generated title')
   })
   await check('renaming changes the run — the agent keeps its name', async () => {
-    const r = await formular(`/api/runs/${TITELLAUF}/title`, { title: 'Renamed by hand' })
+    const r = await postForm(`/api/runs/${TITELLAUF}/title`, { title: 'Renamed by hand' })
     equal((await r.json()).title, 'Renamed by hand', 'the new title comes back')
     equal(lauf(TITELLAUF).title, 'Renamed by hand', 'stored on the run')
     equal(agent('e2e-titel-agent').name, 'e2e-titel-agent', 'the agent is untouched')
-    contains(await (await hol(`/runs/${TITELLAUF}`)).text(), 'Renamed by hand', 'detail page shows it')
+    contains(await (await fetchPath(`/runs/${TITELLAUF}`)).text(), 'Renamed by hand', 'detail page shows it')
   })
   await check('an emptied title falls back to the agent instead of leaving a nameless row', async () => {
-    const r = await formular(`/api/runs/${TITELLAUF}/title`, { title: '   ' })
+    const r = await postForm(`/api/runs/${TITELLAUF}/title`, { title: '   ' })
     equal((await r.json()).title, 'e2e-titel-agent', 'the agent name comes back')
     equal(lauf(TITELLAUF).title, null, 'nothing stored')
   })
@@ -2410,7 +2410,7 @@ try {
     // the raw 'scheduled' is a database value and no longer reaches the screen)
     // and, underneath it, WHAT the run is waiting for. That second line is the
     // whole point of showing a waiting run at the top of the list.
-    const zeile = (await (await hol(`/?repo=${repoId}`)).text()).split('<tr').find(z => z.includes(GEPLANT))
+    const zeile = (await (await fetchPath(`/?repo=${repoId}`)).text()).split('<tr').find(z => z.includes(GEPLANT))
     contains(zeile, 'Scheduled', 'the waiting run is visible in the overview')
     contains(zeile, 'starts at', 'and says what it is waiting for')
     contains(zeile, 'Planned run', 'with its title')
@@ -2420,7 +2420,7 @@ try {
     // for a planned run. started_at still holds the PLANNING moment (the real
     // start is written when the run launches), so counting from it — or calling
     // the run "running" — would present waiting as runtime.
-    const html = await (await hol(`/runs/${GEPLANT}`)).text()
+    const html = await (await fetchPath(`/runs/${GEPLANT}`)).text()
     const i = html.indexOf('id="run-metrics"')
     const metrik = i < 0 ? '' : html.slice(i, i + 600)
     contains(metrik, '>– <span class="dim">/ Expectation', 'runtime is a dash, not elapsed minutes')
@@ -2439,7 +2439,7 @@ try {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-StartNow', title: 'Start now run', start_mode: 'in', start_in_minutes: '60' })
     const id = j.runId
     equal(lauf(id).status, 'scheduled', 'waiting first')
-    const r = await formular(`/api/runs/${id}/start-now`, {})
+    const r = await postForm(`/api/runs/${id}/start-now`, {})
     equal(r.status, 200, 'the endpoint answers 200')
     equal(lauf(id).status, 'running', 'the run is running ahead of its time')
     contains(ereignisse(id).join(','), 'scheduled_start', 'recorded as a planned start')
@@ -2448,18 +2448,18 @@ try {
   await check('only a planned run may be started this way', async () => {
     const laufend = await laufStarten({ repo_id: repoId, prompt: 'E2E-StartNow-Nein' })
     isTrue(!!laufend.runId && !laufend.scheduled, 'a run that is not planned')
-    const r = await formular(`/api/runs/${laufend.runId}/start-now`, {})
+    const r = await postForm(`/api/runs/${laufend.runId}/start-now`, {})
     equal(r.status, 400, 'the endpoint refuses')
     equal(lauf(laufend.runId).status, 'running', 'and leaves the run alone')
     await sessionMerken(laufend.runId)
   })
   await check('the start-now button sits on the detail banner next to the cancel', async () => {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-StartNow-UI', title: 'Start now UI', start_mode: 'in', start_in_minutes: '60' })
-    const seite = await hol(`/runs/${j.runId}`).then(r => r.text())
+    const seite = await fetchPath(`/runs/${j.runId}`).then(r => r.text())
     contains(seite, `action="/api/runs/${j.runId}/start-now"`, 'the banner offers the start-now button')
     contains(seite, 'button class="success"', 'and it is the green one')
     contains(seite, `action="/api/runs/${j.runId}/kill"`, 'the cancel stays beside it')
-    await formular(`/api/runs/${j.runId}/start-now`, {})
+    await postForm(`/api/runs/${j.runId}/start-now`, {})
     await sessionMerken(j.runId)
   })
   await check('"when the repo is free" waits for exactly that', async () => {
@@ -2486,7 +2486,7 @@ try {
   /** The "Edit this run" card of a detail page, scoped — the layout carries a
    *  Quick-Run dialog with the same field names, so assertions must not match it. */
   const editKarte = async (runId) => {
-    const html = await (await hol(`/runs/${runId}`)).text()
+    const html = await (await fetchPath(`/runs/${runId}`)).text()
     const i = html.indexOf('id="run-edit"')
     return i < 0 ? '' : html.slice(i, i + 4000)
   }
@@ -2503,16 +2503,16 @@ try {
     await sessionMerken(j.runId)
     equal(lauf(j.runId).status, 'running', 'sanity: running')
 
-    const p1 = await formular(`/api/runs/${j.runId}/edit`, { prompt: 'anders' })
+    const p1 = await postForm(`/api/runs/${j.runId}/edit`, { prompt: 'anders' })
     equal(p1.status, 400, 'a prompt edit is refused for a started run')
     contains((await p1.json()).error, 'not started yet', 'the reason names the rule')
     equal(lauf(j.runId).prompt, 'E2E-Edit-laeuft', 'prompt untouched')
 
-    const p2 = await formular(`/api/runs/${j.runId}/edit`, { repo_id: String(repo2Id) })
+    const p2 = await postForm(`/api/runs/${j.runId}/edit`, { repo_id: String(repo2Id) })
     equal(p2.status, 400, 'a move is refused for a started run')
     equal(lauf(j.runId).repo_id, repoId, 'repo untouched')
 
-    const p3 = await formular(`/api/runs/${j.runId}/edit`, { expected_minutes: '90' })
+    const p3 = await postForm(`/api/runs/${j.runId}/edit`, { expected_minutes: '90' })
     equal(p3.status, 200, 'the duration edit is accepted')
     equal(lauf(j.runId).expected_minutes, 90, 'new duration')
     contains(ereignisse(j.runId).join(','), 'edited', 'the edit is an event')
@@ -2532,7 +2532,7 @@ try {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Edit-fertig' })
     await sessionMerken(j.runId)
     db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
-    const r = await formular(`/api/runs/${j.runId}/edit`, { expected_minutes: '1' })
+    const r = await postForm(`/api/runs/${j.runId}/edit`, { expected_minutes: '1' })
     equal(r.status, 400, 'refused')
     contains((await r.json()).error, 'already over', 'the reason says the run is over')
     equal(await editKarte(j.runId), '', 'no card at all on the detail page')
@@ -2550,10 +2550,10 @@ try {
 
     const neu = datenLocal(Date.now() + 30 * 60_000)
     // A classic form post lands back on the run page.
-    const r = await formular(`/api/runs/${EDITLAUF}/edit`, {
+    const r = await postForm(`/api/runs/${EDITLAUF}/edit`, {
       expected_minutes: '120', prompt: 'E2E-Edit-neu', repo_id: String(repo2Id),
       start_mode: 'at', start_at: neu,
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'form post redirects back')
     equal(r.headers.get('location'), `/runs/${EDITLAUF}`, 'to the run page')
     const l = lauf(EDITLAUF)
@@ -2582,7 +2582,7 @@ try {
     contains(karte, 'name="branch_mode"', 'and the branch rule, prefilled for a planned run')
 
     // The live channel renders the same card.
-    const frag = await (await hol(`/api/fragments/run-detail?id=${EDITLAUF}`)).text()
+    const frag = await (await fetchPath(`/api/fragments/run-detail?id=${EDITLAUF}`)).text()
     contains(frag, 'id="run-edit"', 'card is part of the fragment')
     contains(frag, 'E2E-Edit-neu', 'and carries the new prompt')
     contains(frag, 'name="start_mode"', 'and the start-time block')
@@ -2593,7 +2593,7 @@ try {
       repo_id: repoId, prompt: 'E2E-Edit-branch', title: 'Branch planned',
       start_mode: 'in', start_in_minutes: '60',
     })
-    const r = await formular(`/api/runs/${j.runId}/edit`, {
+    const r = await postForm(`/api/runs/${j.runId}/edit`, {
       branch_mode: 'neu', branch_pattern: 'agent/e2e-edit', keep_on_branch: '1',
     })
     equal(r.status, 200, 'the branch edit is accepted')
@@ -2603,7 +2603,7 @@ try {
     equal(l.keep_on_branch, 1, 'keep-on-branch set')
 
     // An invalid combination is a problem, not a partial write.
-    const schlecht = await formular(`/api/runs/${j.runId}/edit`, {
+    const schlecht = await postForm(`/api/runs/${j.runId}/edit`, {
       branch_mode: 'keiner', keep_on_branch: '1',
     })
     equal(schlecht.status, 400, 'keep without a branch is refused')
@@ -2614,7 +2614,7 @@ try {
     contains(karte, 'value="agent/e2e-edit"', 'the edited pattern is prefilled')
 
     // Clean up: a planned run must not linger.
-    await formular(`/api/runs/${j.runId}/kill`, {})
+    await postForm(`/api/runs/${j.runId}/kill`, {})
   })
 
   await check('the edited run starts with its new prompt in its new repo', async () => {
@@ -2640,7 +2640,7 @@ try {
       start_mode: 'in', start_in_minutes: '60',
     })
     equal(lauf(j.runId).status, 'scheduled', 'sanity: planned')
-    const r = await formular(`/api/runs/${j.runId}/edit`, { start_mode: 'now' })
+    const r = await postForm(`/api/runs/${j.runId}/edit`, { start_mode: 'now' })
     equal(r.status, 200, 'the edit is accepted')
     const gestartet = await r.json()
     equal(gestartet.ok, true, 'and reports the start')
@@ -2663,16 +2663,16 @@ try {
     await sessionMerken(j.runId)
     db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
     ARV = j.runId
-    contains(await (await hol(`/runs/${ARV}`)).text(), 'Move to archive', 'detail page offers archiving once the run is over')
+    contains(await (await fetchPath(`/runs/${ARV}`)).text(), 'Move to archive', 'detail page offers archiving once the run is over')
     // A classic form post (Accept: text/html) lands back on the overview.
-    const r = await formular(`/api/runs/${ARV}/archive`, { back: `/?repo=${repoId}` }, { alsBrowser: true })
+    const r = await postForm(`/api/runs/${ARV}/archive`, { back: `/?repo=${repoId}` }, { asBrowser: true })
     equal(r.status, 303, 'redirects back')
     equal(r.headers.get('location'), `/?repo=${repoId}`, 'back to the overview')
     const auf = lauf(ARV)
     isTrue(!!auf.archived_at, 'archived_at is set')
     // The overview row is gone; the archive page shows it.
-    isFalse((await (await hol(`/?repo=${repoId}`)).text()).includes(ARV), 'not in the overview any more')
-    const archiv = await (await hol(`/archive?repo=${repoId}`)).text()
+    isFalse((await (await fetchPath(`/?repo=${repoId}`)).text()).includes(ARV), 'not in the overview any more')
+    const archiv = await (await fetchPath(`/archive?repo=${repoId}`)).text()
     contains(archiv, ARV, 'listed in the archive')
     contains(archiv, 'Archived by hand', 'with its title')
     contains(archiv, 'Restore', 'restore button')
@@ -2685,18 +2685,18 @@ try {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Archiv-blockiert', title: 'Archived while blocked' })
     await sessionMerken(j.runId)
     db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now'), merge_status='blocked_error' WHERE id=?`).run(j.runId)
-    await formular(`/api/runs/${j.runId}/archive`, {})
-    const zeile = (await (await hol(`/archive?repo=${repoId}`)).text()).split('<tr ').find(z => z.includes(j.runId))
+    await postForm(`/api/runs/${j.runId}/archive`, {})
+    const zeile = (await (await fetchPath(`/archive?repo=${repoId}`)).text()).split('<tr ').find(z => z.includes(j.runId))
     isTrue(!!zeile, 'the run is in the archive')
     contains(zeile, 'blocked: integration error', 'and the row says its work is not on the base branch')
     // A cleanly merged run stays quiet — the line is a warning, not furniture.
     db.prepare(`UPDATE runs SET merge_status='merged' WHERE id=?`).run(j.runId)
-    const sauber = (await (await hol(`/archive?repo=${repoId}`)).text()).split('<tr ').find(z => z.includes(j.runId))
+    const sauber = (await (await fetchPath(`/archive?repo=${repoId}`)).text()).split('<tr ').find(z => z.includes(j.runId))
     isFalse(sauber.includes('blocked: integration error'), 'a merged run says nothing')
     db.prepare('DELETE FROM runs WHERE id=?').run(j.runId)   // keep the pagination count below stable
   })
   await check('the detail page offers to restore an archived run', async () => {
-    const html = await (await hol(`/runs/${ARV}`)).text()
+    const html = await (await fetchPath(`/runs/${ARV}`)).text()
     contains(html, 'Restore to overview', 'button on the detail page')
     contains(html, 'archived', 'mentions the archive')
   })
@@ -2713,50 +2713,50 @@ try {
     await inc.vorfallMelden(j.runId, { typ: 'auth_error', quelle: 'e2e', schwere: 'rot', beleg: 'E2E' })
 
     const zaehlt = async () => {
-      const seite = await (await hol(`/?repo=${repoId}`)).text()
+      const seite = await (await fetchPath(`/?repo=${repoId}`)).text()
       const block = seite.split('side-incidents')[1]?.split('</div>')[0] ?? ''
-      return { block, gefiltert: await (await hol(`/?repo=${repoId}&incidents=1`)).text() }
+      return { block, gefiltert: await (await fetchPath(`/?repo=${repoId}&incidents=1`)).text() }
     }
     const vorher = await zaehlt()
     contains(vorher.block, 'need you', 'while the run is visible the sidebar asks for hands')
     contains(vorher.block, `incidents=1`, 'and the number is a link into the filtered overview')
     isTrue(vorher.gefiltert.includes(j.runId), 'which shows the run behind the number')
 
-    await formular(`/api/runs/${j.runId}/archive`, {})
+    await postForm(`/api/runs/${j.runId}/archive`, {})
     isTrue(!!lauf(j.runId).archived_at, 'archived')
     const nachher = await zaehlt()
     isFalse(nachher.block.includes('need you'), 'archived: the sidebar no longer promises a row')
     isFalse(nachher.gefiltert.includes(j.runId), 'and the filtered overview has none to give')
     // The record itself is untouched — the archive and the run's own page keep it.
     isTrue(inc.offeneVorfaelle(j.runId).length === 1, 'the incident is still open, it is only not counted here')
-    contains(await (await hol(`/runs/${j.runId}`)).text(), 'Incidents', 'and still shown on the run\'s page')
+    contains(await (await fetchPath(`/runs/${j.runId}`)).text(), 'Incidents', 'and still shown on the run\'s page')
     db.prepare('DELETE FROM runs WHERE id=?').run(j.runId)   // keep the pagination count below stable
   })
   await check('restore puts the run back into the overview', async () => {
-    const r = await formular(`/api/runs/${ARV}/unarchive`, { back: `/archive?repo=${repoId}` }, { alsBrowser: true })
+    const r = await postForm(`/api/runs/${ARV}/unarchive`, { back: `/archive?repo=${repoId}` }, { asBrowser: true })
     equal(r.status, 303, 'redirects back')
     equal(lauf(ARV).archived_at, null, 'archived_at cleared')
-    contains(await (await hol(`/?repo=${repoId}`)).text(), ARV, 'visible in the overview again')
-    isFalse((await (await hol(`/archive?repo=${repoId}`)).text()).includes(ARV), 'gone from the archive')
+    contains(await (await fetchPath(`/?repo=${repoId}`)).text(), ARV, 'visible in the overview again')
+    isFalse((await (await fetchPath(`/archive?repo=${repoId}`)).text()).includes(ARV), 'gone from the archive')
   })
   await check('retrying an archived run brings it back to the overview', async () => {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Archiv-retry' })
     await sessionMerken(j.runId)
     db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now') WHERE id=?`).run(j.runId)
-    await formular(`/api/runs/${j.runId}/archive`, {})
+    await postForm(`/api/runs/${j.runId}/archive`, {})
     isTrue(!!lauf(j.runId).archived_at, 'archived')
-    const r = await formular(`/api/runs/${j.runId}/retry`, {})
+    const r = await postForm(`/api/runs/${j.runId}/retry`, {})
     equal(r.status, 200, 'retried')
     const auf = lauf(j.runId)
     equal(auf.status, 'running', 'running again')
     equal(auf.archived_at, null, 'left the archive — an active run must not be hidden')
-    isFalse((await (await hol(`/archive?repo=${repoId}`)).text()).includes(j.runId), 'not in the archive any more')
+    isFalse((await (await fetchPath(`/archive?repo=${repoId}`)).text()).includes(j.runId), 'not in the archive any more')
   })
   await check('a run that is still working cannot be archived', async () => {
     const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Archiv-laeuft' })
     await sessionMerken(j.runId)
     equal(lauf(j.runId).status, 'running', 'sanity: it is running')
-    const r = await formular(`/api/runs/${j.runId}/archive`, {})
+    const r = await postForm(`/api/runs/${j.runId}/archive`, {})
     equal(r.status, 400, 'rejected')
     equal(lauf(j.runId).archived_at, null, 'nothing archived')
     // Clean up: the run must not linger for the watcher's sake.
@@ -2772,13 +2772,13 @@ try {
       db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
       ids.push(j.runId)
     }
-    const r = await formular('/api/runs/archive', { run: ids, back: `/?repo=${repoId}` })
+    const r = await postForm('/api/runs/archive', { run: ids, back: `/?repo=${repoId}` })
     equal(r.status, 200, 'accepted')
     const j = await r.json()
     isTrue(j.ok, 'all of them archived')
     equal(j.results.length, 2, 'one result per run')
     for (const id of ids) isTrue(!!lauf(id).archived_at, `${id} archived`)
-    const uebersicht = await (await hol(`/?repo=${repoId}`)).text()
+    const uebersicht = await (await fetchPath(`/?repo=${repoId}`)).text()
     for (const id of ids) isFalse(uebersicht.includes(id), 'gone from the overview')
     for (const id of ids) db.prepare('DELETE FROM runs WHERE id=?').run(id)   // keep the pagination count stable
   })
@@ -2790,7 +2790,7 @@ try {
     await sessionMerken(laeuft.runId)
     equal(lauf(laeuft.runId).status, 'running', 'sanity: still working')
 
-    const r = await formular('/api/runs/archive', { run: [fertig.runId, laeuft.runId, 'not-a-run'] })
+    const r = await postForm('/api/runs/archive', { run: [fertig.runId, laeuft.runId, 'not-a-run'] })
     equal(r.status, 200, 'answered per run, not refused as a whole')
     const j = await r.json()
     isFalse(j.ok, 'not everything went')
@@ -2805,11 +2805,11 @@ try {
     for (const id of [fertig.runId, laeuft.runId]) db.prepare('DELETE FROM runs WHERE id=?').run(id)
   })
   await check('a bulk archive without a single run is refused', async () => {
-    const r = await formular('/api/runs/archive', { back: `/?repo=${repoId}` })
+    const r = await postForm('/api/runs/archive', { back: `/?repo=${repoId}` })
     equal(r.status, 400, 'refused')
   })
   await check('the overview offers the multi-select', async () => {
-    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/?repo=${repoId}`)).text()
     contains(html, 'id="runs-all"', 'select-all box')
     contains(html, 'id="runs-archive-selected"', 'the bulk button')
     contains(html, 'class="run-pick"', 'a checkbox per archivable run')
@@ -2825,7 +2825,7 @@ try {
     const sess = await sessionMerken(j.runId)
     isTrue(sess, 'a session stands')
     db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
-    const r = await formular(`/api/runs/${j.runId}/archive`, {})
+    const r = await postForm(`/api/runs/${j.runId}/archive`, {})
     equal(r.status, 200, 'archived')
     equal(lauf(j.runId).archived_at !== null, true, 'archived')
     equal((await sh('tmux', ['has-session', '-t', `=${sess}`])).ok, false, 'the session is gone')
@@ -2842,7 +2842,7 @@ try {
       const sess = await sessionMerken(j.runId)
       isTrue(sess, 'a session stands')
       db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
-      await formular(`/api/runs/${j.runId}/archive`, {})
+      await postForm(`/api/runs/${j.runId}/archive`, {})
       equal(lauf(j.runId).archived_at !== null, true, 'archived')
       equal((await sh('tmux', ['has-session', '-t', `=${sess}`])).ok, true, 'the session survives — the rule is off')
       equal(lauf(j.runId).tmux_closed_at, null, 'and the record still expects it open')
@@ -2860,7 +2860,7 @@ try {
       const sess = await sessionMerken(j.runId)
       isTrue(sess, 'a session stands')
       db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
-      await formular(`/api/runs/${j.runId}/archive`, {})
+      await postForm(`/api/runs/${j.runId}/archive`, {})
       equal(lauf(j.runId).archived_at !== null, true, 'archived')
       equal((await sh('tmux', ['has-session', '-t', `=${sess}`])).ok, true, 'inside the keep window: still there')
       // Two hours pass, and the watcher closes what the archive left standing.
@@ -2887,19 +2887,19 @@ try {
                    datetime('now', ?), datetime('now'), datetime('now', ?))`)
         .run(id, repoId, `-${i} days`, `-${i} days`)
     }
-    const seite1 = await (await hol(`/archive?repo=${repoId}`)).text()
+    const seite1 = await (await fetchPath(`/archive?repo=${repoId}`)).text()
     contains(seite1, 'Page 1 of 2', 'pagination line')
     contains(seite1, 'next ›', 'a next link')
     contains(seite1, ids[0], 'newest archived first')
     isFalse(seite1.includes(ids[ids.length - 1]), 'the oldest is on page 2')
-    const seite2 = await (await hol(`/archive?repo=${repoId}&page=2`)).text()
+    const seite2 = await (await fetchPath(`/archive?repo=${repoId}&page=2`)).text()
     contains(seite2, 'Page 2 of 2', 'second page')
     contains(seite2, ids[ids.length - 1], 'the oldest sits here')
     isFalse(/<a [^>]*>next ›<\/a>/.test(seite2), 'no next link on the last page')
     const alle = db.prepare(`SELECT id FROM runs WHERE repo_id=? AND archived_at IS NOT NULL`).all(repoId)
     equal(alle.length, 55, 'all inserted runs are archived')
     // Page 3 beyond the range clamps to the last page instead of an empty one.
-    const seite3 = await (await hol(`/archive?repo=${repoId}&page=99`)).text()
+    const seite3 = await (await fetchPath(`/archive?repo=${repoId}&page=99`)).text()
     contains(seite3, 'Page 2 of 2', 'clamped to the last page')
   })
 
@@ -2914,9 +2914,9 @@ try {
   let FAVID = null
 
   await check('a favorite is saved with its setup, and the settings page lists it', async () => {
-    const r = await formular('/settings/favorites/edit', {
+    const r = await postForm('/settings/favorites/edit', {
       name: 'E2E-Favorit', harness: 'claude', model: 'claude-opus-5', skills: 'e2e-fleiss',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'saved and redirected')
     const row = db.prepare('SELECT * FROM favorites WHERE name=?').get('E2E-Favorit')
     isTrue(!!row, 'stored')
@@ -2924,20 +2924,20 @@ try {
     equal(row.model, 'claude-opus-5', 'model')
     equal(row.skills, '["e2e-fleiss"]', 'extra skill')
     FAVID = row.id
-    const html = await (await hol('/settings/favorites')).text()
+    const html = await (await fetchPath('/settings/favorites')).text()
     contains(html, 'E2E-Favorit', 'listed by name')
     contains(html, 'claude-opus-5', 'with its setup')
   })
   await check('the Quick-Run dialog stands on every page, not only on the run form', async () => {
     for (const pfad of ['/', '/agents', '/sessions', '/settings', `/archive?repo=${repoId}`]) {
-      const html = await (await hol(pfad)).text()
+      const html = await (await fetchPath(pfad)).text()
       contains(html, 'id="qr-dialog"', `${pfad}: dialog`)
       contains(html, 'id="qr-open"', `${pfad}: button in the header`)
       contains(html, 'E2E-Favorit', `${pfad}: the favorite is selectable`)
     }
   })
   await check('the start time stands open under the task, only the branch rule is folded away', async () => {
-    const html = await (await hol('/')).text()
+    const html = await (await fetchPath('/')).text()
     const dialog = html.slice(html.indexOf('id="qr-dialog"'))
     const aufgabe = dialog.indexOf('name="prompt"')
     const start = dialog.indexOf('name="start_mode"')
@@ -2946,7 +2946,7 @@ try {
     isTrue(aufgabe < start && start < details, 'the start time sits under the task and before the folded block')
   })
   await check('a quick run starts with the favorite\'s setup and only the task from the dialog', async () => {
-    const r = await formular('/api/runs/quick', {
+    const r = await postForm('/api/runs/quick', {
       repo_id: String(repoId), favorite_id: String(FAVID),
       prompt: 'E2E-Quickrun: tu etwas', branch_mode: 'keiner', start_mode: 'now',
     })
@@ -2967,7 +2967,7 @@ try {
     equal(l.status, 'running', 'really started')
   })
   await check('the request cannot override what the favorite decided', async () => {
-    const r = await formular('/api/runs/quick', {
+    const r = await postForm('/api/runs/quick', {
       repo_id: String(repoId), favorite_id: String(FAVID),
       prompt: 'E2E-Quickrun: untergeschoben', branch_mode: 'keiner',
       // Everything a favorite owns — smuggled in alongside it.
@@ -2982,7 +2982,7 @@ try {
     equal(l.skills, '["e2e-fleiss"]', 'skills stayed the favorite\'s')
   })
   await check('a quick run can be planned instead of started', async () => {
-    const r = await formular('/api/runs/quick', {
+    const r = await postForm('/api/runs/quick', {
       repo_id: String(repoId), favorite_id: String(FAVID),
       prompt: 'E2E-Quickrun: spaeter', branch_mode: 'keiner',
       start_mode: 'in', start_in_minutes: '30',
@@ -2995,16 +2995,16 @@ try {
     isTrue(!!l.start_at, 'point in time noted')
   })
   await check('a broken quick run is a readable answer, not a run', async () => {
-    const ohneFavorit = await formular('/api/runs/quick', {
+    const ohneFavorit = await postForm('/api/runs/quick', {
       repo_id: String(repoId), favorite_id: '99999', prompt: 'x', branch_mode: 'keiner',
     })
     equal(ohneFavorit.status, 400, 'unknown favorite rejected')
-    const ohnePrompt = await formular('/api/runs/quick', {
+    const ohnePrompt = await postForm('/api/runs/quick', {
       repo_id: String(repoId), favorite_id: String(FAVID), prompt: '   ', branch_mode: 'keiner',
     })
     equal(ohnePrompt.status, 400, 'empty task rejected')
     contains((await ohnePrompt.json()).error, 'Prompt', 'names what is missing')
-    const branchOhneMuster = await formular('/api/runs/quick', {
+    const branchOhneMuster = await postForm('/api/runs/quick', {
       repo_id: String(repoId), favorite_id: String(FAVID), prompt: 'x', branch_mode: 'neu',
     })
     equal(branchOhneMuster.status, 400, 'branch rule without a pattern rejected — same check as the run form')
@@ -3012,10 +3012,10 @@ try {
   await check('more favorites than there is room for are refused', async () => {
     const max = db.prepare('SELECT count(*) c FROM favorites').get().c
     for (let i = max; i < 3; i++) {
-      await formular('/settings/favorites/edit', { name: `E2E-Fill-${i}`, harness: 'claude' }, { alsBrowser: true })
+      await postForm('/settings/favorites/edit', { name: `E2E-Fill-${i}`, harness: 'claude' }, { asBrowser: true })
     }
     equal(db.prepare('SELECT count(*) c FROM favorites').get().c, 3, 'three slots in use')
-    const r = await formular('/settings/favorites/edit', { name: 'E2E-zuviel', harness: 'claude' }, { alsBrowser: true })
+    const r = await postForm('/settings/favorites/edit', { name: 'E2E-zuviel', harness: 'claude' }, { asBrowser: true })
     equal(r.status, 400, 'the fourth is refused')
     isFalse(!!db.prepare('SELECT id FROM favorites WHERE name=?').get('E2E-zuviel'), 'and not stored')
   })
@@ -3029,7 +3029,7 @@ try {
   group('Flows: pages, meta and the round trip through the API')
 
   /** POST a JSON body — /api/flows/save reads JSON, not a form. */
-  const jsonPost = (pfad, obj) => hol(pfad, {
+  const jsonPost = (pfad, obj) => fetchPath(pfad, {
     method: 'POST', body: JSON.stringify(obj),
     headers: { 'content-type': 'application/json', accept: 'application/json' },
   })
@@ -3046,16 +3046,16 @@ try {
       '/flows/runs': 'Flow runs',     // flows.runs.title
     }
     for (const [pfad, text] of Object.entries(kennzeichen)) {
-      const r = await hol(pfad)
+      const r = await fetchPath(pfad)
       equal(r.status, 200, `${pfad}: status`)
       const html = await r.text()
       isTrue(html.length > 500, `${pfad}: not an empty page (${html.length} bytes)`)
       contains(html, text, `${pfad}: its own heading`)
     }
-    contains(await (await hol('/flows')).text(), 'no flows yet', 'the empty list says so instead of showing a broken table')
+    contains(await (await fetchPath('/flows')).text(), 'no flows yet', 'the empty list says so instead of showing a broken table')
   })
   await check('the flow designer\'s own scripts and its data reach the page', async () => {
-    const html = await (await hol('/flows/edit')).text()
+    const html = await (await fetchPath('/flows/edit')).text()
     // Markup, unavoidably: the designer is a client application and these two are
     // the seam it hangs on — the catalog it boots from and the module that boots
     // it. Everything else about the page is checked through the API below.
@@ -3064,7 +3064,7 @@ try {
     contains(html, 'Save', 'and the button that saves what was drawn')
   })
   await check('the step registry reaches the editor through /api/flows/meta', async () => {
-    const j = await (await hol('/api/flows/meta')).json()
+    const j = await (await fetchPath('/api/flows/meta')).json()
     isTrue(j.ok, 'ok')
     for (const feld of ['steps', 'groups', 'triggerKinds', 'ops', 'fieldTypes']) {
       isTrue(Array.isArray(j[feld]) && j[feld].length > 0, `${feld} is present and not empty`)
@@ -3087,13 +3087,13 @@ try {
     const j = await r.json()
     isTrue(j.ok && !!j.id, `saved (${JSON.stringify(j).slice(0, 200)})`)
     FLOWID = j.id
-    const gelesen = await (await hol(`/api/flows/${FLOWID}`)).json()
+    const gelesen = await (await fetchPath(`/api/flows/${FLOWID}`)).json()
     isTrue(gelesen.ok, 'read back')
     equal(gelesen.flow.name, 'E2E-Flow', 'name')
     equal(gelesen.flow.active, 1, 'active')
     equal(gelesen.flow.trigger.kind, 'run_finished', 'trigger')
     equal(gelesen.flow.definition.sequence[0].properties.text, 'E2E flow ran', 'the definition survived the round trip')
-    contains(await (await hol('/flows')).text(), 'E2E-Flow', 'and the list shows it')
+    contains(await (await fetchPath('/flows')).text(), 'E2E-Flow', 'and the list shows it')
   })
   await check('a definition the registry does not know is refused instead of stored', async () => {
     const r = await jsonPost('/api/flows/save', {
@@ -3115,7 +3115,7 @@ try {
     // built from — the field NAMES — plus the class the block is styled and found
     // by; there is no text of its own that would prove the checkbox is a checkbox.
     for (const pfad of [`/runs/new?repo=${repoId}`, `/agents/edit?repo=${repoId}`, '/settings/favorites/edit']) {
-      const html = await (await hol(pfad)).text()
+      const html = await (await fetchPath(pfad)).text()
       contains(html, 'Flows after this run', `${pfad}: the block's legend`)
       contains(html, 'flows-attach', `${pfad}: the block's own container`)
       contains(html, 'name="flows"', `${pfad}: the checkbox the definition is built from`)
@@ -3125,33 +3125,33 @@ try {
     }
   })
   await check('ticking the box really attaches the flow, and the editor sees the same row', async () => {
-    const r = await formular('/agents/edit', {
+    const r = await postForm('/agents/edit', {
       repo_id: String(repoId), name: 'e2e-flow-agent', harness: 'claude', prompt: 'x',
       branch_mode: 'keiner', expected_minutes: '5', schedule_kind: 'manuell',
       flows: String(FLOWID), [`flow_when_${FLOWID}`]: 'failed',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'agent saved')
     equal(agent('e2e-flow-agent').flows, `[{"flowId":${FLOWID},"when":"failed"}]`, 'the attachment landed on the agent')
     // One storage, two editors: the flow editor reads the very same row back.
-    const html = await (await hol(`/flows/edit?id=${FLOWID}`)).text()
+    const html = await (await fetchPath(`/flows/edit?id=${FLOWID}`)).text()
     contains(html, '"when":"failed"', 'the flow editor knows the condition the agent form wrote')
     contains(html, 'e2e-flow-agent', 'and which agent it hangs on')
   })
   await check('a flow can be switched off and on again through the API', async () => {
-    const aus = await formular(`/api/flows/${FLOWID}/toggle`, {})
+    const aus = await postForm(`/api/flows/${FLOWID}/toggle`, {})
     equal(aus.status, 200, 'toggled')
     equal(db.prepare('SELECT active FROM flows WHERE id=?').get(FLOWID).active, 0, 'off')
-    await formular(`/api/flows/${FLOWID}/toggle`, {})
+    await postForm(`/api/flows/${FLOWID}/toggle`, {})
     equal(db.prepare('SELECT active FROM flows WHERE id=?').get(FLOWID).active, 1, 'on again')
   })
   await check('deleting the flow also removes it from the agent it hung on', async () => {
-    const r = await formular(`/api/flows/${FLOWID}/delete`, {})
+    const r = await postForm(`/api/flows/${FLOWID}/delete`, {})
     equal(r.status, 200, 'deleted')
-    equal((await hol(`/api/flows/${FLOWID}`)).status, 404, 'gone')
+    equal((await fetchPath(`/api/flows/${FLOWID}`)).status, 404, 'gone')
     equal(agent('e2e-flow-agent').flows, null, 'no dead id left behind on the agent')
     // Without an attachable flow the block falls back to its "nothing here" form —
     // legend and hint, but no checkbox.
-    const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/runs/new?repo=${repoId}`)).text()
     contains(html, 'Flows after this run', 'the block still stands')
     isFalse(html.includes('name="flows"'), 'but offers nothing to attach any more')
   })
@@ -3204,22 +3204,22 @@ try {
   await check('the repo form names the flows that run after a merge, and offers a new one', async () => {
     // A run_merged flow hangs on the repo, not on an agent — so the repo form is
     // its way in. The attachment block of the run forms cannot show it.
-    const html = await (await hol(`/repos/edit?id=${repoId}`)).text()
+    const html = await (await fetchPath(`/repos/edit?id=${repoId}`)).text()
     contains(html, 'Flows after merge', 'the block from lang/en.json')
     contains(html, 'E2E-Merge-Flow', 'the flow of this repo by name')
     contains(html, '/flows/edit?trigger=run_merged&amp;repo=' + repoId, 'and the way to a new one, pre-aimed')
-    const neu = await (await hol('/repos/edit')).text()
+    const neu = await (await fetchPath('/repos/edit')).text()
     isFalse(neu.includes('Flows after merge'), 'a repo that does not exist yet has nothing to hang a flow on')
   })
   await check('the editor really arrives with that trigger and repo already set', async () => {
-    const html = await (await hol(`/flows/edit?trigger=run_merged&repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/flows/edit?trigger=run_merged&repo=${repoId}`)).text()
     const m = html.match(/window\.FREILAUF_FLOWS=(\{.*?\})<\/script>/s)
     isTrue(!!m, 'the editor state is injected')
     const flow = JSON.parse(m[1]).flow
     equal(flow.trigger.kind, 'run_merged', 'the trigger the button asked for')
     equal(flow.trigger.repoId, repoId, 'aimed at this repo')
     contains(flow.name, 'After merge', 'and named after what it does')
-    const ohne = await (await hol('/flows/edit?trigger=run_merged&repo=999999')).text()
+    const ohne = await (await fetchPath('/flows/edit?trigger=run_merged&repo=999999')).text()
     contains(ohne, '"repoId":null', 'a repo that does not exist becomes "all repos", not a broken filter')
   })
 
@@ -3260,7 +3260,7 @@ try {
   group('Pages that had no test at all')
 
   await check('the repo list shows the repo with path, base branch and prompt column', async () => {
-    const r = await hol('/repos')
+    const r = await fetchPath('/repos')
     equal(r.status, 200, 'status')
     const html = await r.text()
     contains(html, 'Create repo', 'the way into the form')
@@ -3271,7 +3271,7 @@ try {
   })
   await check('the repo form carries every field the save route reads back', async () => {
     const row = db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
-    const html = await (await hol(`/repos/edit?id=${row.id}`)).text()
+    const html = await (await fetchPath(`/repos/edit?id=${row.id}`)).text()
     contains(html, 'Path (main checkout)', 'the label from lang/en.json')
     for (const feld of ['name="name"', 'name="path"', 'name="base_branch"', 'name="prompt"', 'name="worktree_extras"']) {
       contains(html, feld, `field ${feld}`)
@@ -3280,7 +3280,7 @@ try {
     contains(html, 'main', 'and the base branch')
   })
   await check('the repo form carries the extras finder: button and dialog, with the warning', async () => {
-    const html = await (await hol('/repos/edit')).text()
+    const html = await (await fetchPath('/repos/edit')).text()
     contains(html, 'id="extras-find"', 'the button')
     contains(html, 'id="extras-dialog"', 'the modal')
     contains(html, 'id="extras-start"', 'its start button')
@@ -3288,12 +3288,12 @@ try {
     contains(html, 'completely replaces', 'the warning that existing entries are not kept')
   })
   await check('the extras suggestion checks algorithmically before any model is asked', async () => {
-    const leer = await (await formular('/api/repos/extras-suggest', { path: '' })).json()
+    const leer = await (await postForm('/api/repos/extras-suggest', { path: '' })).json()
     isFalse(leer.ok, 'empty path is refused')
-    const weg = await (await formular('/api/repos/extras-suggest', { path: join(SB, 'gibt-es-nicht') })).json()
+    const weg = await (await postForm('/api/repos/extras-suggest', { path: join(SB, 'gibt-es-nicht') })).json()
     isFalse(weg.ok, 'missing directory is refused')
     contains(weg.error, 'gibt-es-nicht', 'and names the path')
-    const keinGit = await (await formular('/api/repos/extras-suggest', { path: SB })).json()
+    const keinGit = await (await postForm('/api/repos/extras-suggest', { path: SB })).json()
     isFalse(keinGit.ok, 'a directory without .git is refused')
     contains(keinGit.error, 'git', 'and says so')
   })
@@ -3302,7 +3302,7 @@ try {
     // calls became source-driven: the source may be any model provider, or a
     // coding agent, so the sentence names the SETTING that switches it on and
     // where to put a credential. What it must still do is refuse and say why.
-    const j = await (await formular('/api/repos/extras-suggest', { path: REPO })).json()
+    const j = await (await postForm('/api/repos/extras-suggest', { path: REPO })).json()
     isFalse(j.ok, 'not ok without a key')
     contains(j.error, 'no key', 'names the missing credential as the reason')
     contains(j.error, 'Worktree extras', 'and where to change it')
@@ -3310,13 +3310,13 @@ try {
   await check('the agents page shows the schedule and all three actions of a row', async () => {
     // An agent with a real schedule, deliberately left switched OFF: the scheduler
     // only ever picks up active ones, so this row cannot start anything by itself.
-    const gespeichert = await formular('/agents/edit', {
+    const gespeichert = await postForm('/agents/edit', {
       repo_id: String(repoId), name: 'e2e-anzeige', harness: 'claude', prompt: 'x',
       branch_mode: 'keiner', expected_minutes: '20',
       schedule_kind: 'woechentlich', schedule_days: ['1', '3'], schedule_time: '07:30', schedule_weeks: '1',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(gespeichert.status, 303, 'agent saved')
-    const r = await hol(`/agents?repo=${repoId}`)
+    const r = await fetchPath(`/agents?repo=${repoId}`)
     equal(r.status, 200, 'status')
     const html = await r.text()
     contains(html, 'Create agent', 'the way to a new agent')
@@ -3336,16 +3336,16 @@ try {
   await check('the toggle in the row switches the agent on and off again', async () => {
     const a = agent('e2e-anzeige')
     equal(a.active, 0, 'starts switched off')
-    const r = await formular('/agents/toggle', { id: String(a.id), repo: String(repoId) }, { alsBrowser: true })
+    const r = await postForm('/agents/toggle', { id: String(a.id), repo: String(repoId) }, { asBrowser: true })
     equal(r.status, 303, 'redirects back to the list')
     equal(agent('e2e-anzeige').active, 1, 'now on')
-    await formular('/agents/toggle', { id: String(a.id), repo: String(repoId) }, { alsBrowser: true })
+    await postForm('/agents/toggle', { id: String(a.id), repo: String(repoId) }, { asBrowser: true })
     // Off again on purpose: an ACTIVE weekly agent left behind would be picked up
     // by the scheduler tick and start a run nobody asked for.
     equal(agent('e2e-anzeige').active, 0, 'and off again')
   })
   await check('the favorite form is the run setup under a name', async () => {
-    const r = await hol(`/settings/favorites/edit?id=${FAVID}`)
+    const r = await fetchPath(`/settings/favorites/edit?id=${FAVID}`)
     equal(r.status, 200, 'status')
     const html = await r.text()
     contains(html, 'Edit favorite', 'the title from lang/en.json')
@@ -3353,15 +3353,15 @@ try {
     contains(html, 'name="harness"', 'the coding agent')
     contains(html, 'name="model"', 'the model')
     contains(html, 'e2e-fleiss', 'the extra-skills block is part of it')
-    const neu = await hol('/settings/favorites/edit')
+    const neu = await fetchPath('/settings/favorites/edit')
     equal(neu.status, 200, 'a fresh favorite form answers as well')
     contains(await neu.text(), 'New favorite', 'with its own title')
   })
   await check('the Telegram plugin brings its own setup wizard, and the old address still finds it', async () => {
-    const alt = await hol('/telegram-setup', { redirect: 'manual' })
+    const alt = await fetchPath('/telegram-setup', { redirect: 'manual' })
     equal(alt.status, 303, 'the historic address redirects')
     equal(alt.headers.get('location'), '/settings/notifications/telegram', 'to the plugin\'s own wizard')
-    const r = await hol('/settings/notifications/telegram')
+    const r = await fetchPath('/settings/notifications/telegram')
     equal(r.status, 200, 'status')
     const html = await r.text()
     for (const schritt of ['Step 1 — bot token', 'Step 2 — find the chat ID', 'Step 3 — test']) {
@@ -3373,7 +3373,7 @@ try {
     contains(html, '/settings/notifications/telegram/json/chats', 'step 2 asks the plugin\'s own JSON route')
     // A plugin that brings no wizard has no page, and an id nobody registered
     // certainly not — a 200 there would be a page rendering nothing.
-    equal((await hol('/settings/notifications/no-such-notifier')).status, 400, 'an unknown notifier has no wizard')
+    equal((await fetchPath('/settings/notifications/no-such-notifier')).status, 400, 'an unknown notifier has no wizard')
   })
 
   // ------------------------------------------------------------------
@@ -3386,7 +3386,7 @@ try {
 
   await check('the sidebar stands on every page, and the header kept only context and action', async () => {
     for (const pfad of ['/', '/agents', '/sessions', '/settings', '/repos', `/archive?repo=${repoId}`, '/flows', '/runs/new']) {
-      const html = await (await hol(pfad)).text()
+      const html = await (await fetchPath(pfad)).text()
       contains(html, 'id="status-sidebar"', `${pfad}: the sidebar`)
       contains(html, 'id="header-status"', `${pfad}: the pipeline reading, inside it`)
       contains(html, 'Pipeline', `${pfad}: by its name from lang/en.json`)
@@ -3401,7 +3401,7 @@ try {
     }
   })
   await check('the sidebar counts the work in flight of THIS repo and links each count into the overview', async () => {
-    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/?repo=${repoId}`)).text()
     const leiste = html.slice(html.indexOf('id="status-sidebar"'), html.indexOf('</aside>'))
     isTrue(leiste.length > 50, 'the sidebar has content')
     contains(leiste, 'Work in flight', 'the block by its name from lang/en.json')
@@ -3443,7 +3443,7 @@ try {
       const jetzt = db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND status=?`).get(repoId, s2).c
       const gesamt = db.prepare(`SELECT count(*) c FROM runs WHERE archived_at IS NULL AND status=?`).get(s2).c
       isTrue(gesamt > jetzt, `the fixture makes the overall exceed this repo (${gesamt} > ${jetzt})`)
-      const html2 = await (await hol(`/?repo=${repoId}`)).text()
+      const html2 = await (await fetchPath(`/?repo=${repoId}`)).text()
       const leiste2 = html2.slice(html2.indexOf('id="status-sidebar"'), html2.indexOf('</aside>'))
       contains(leiste2, `<span class="n">${jetzt}</span> <span>Scheduled <span class="dim">in this repo</span></span>`,
         'the repo count links with the status and the "in this repo" scope')
@@ -3462,7 +3462,7 @@ try {
       start_mode: 'in', start_in_minutes: '600',
     })
     isTrue(j.scheduled, `planned (${JSON.stringify(j)})`)
-    const gefiltert = await (await hol(`/?repo=${repoId}&status=scheduled`)).text()
+    const gefiltert = await (await fetchPath(`/?repo=${repoId}&status=scheduled`)).text()
     const koerper = gefiltert.slice(gefiltert.indexOf('id="runs-body"'), gefiltert.indexOf('</table>'))
     contains(koerper, j.runId, 'the filtered list holds the planned run')
     const ids = [...koerper.matchAll(/id="run-([0-9a-f-]{36})"/g)].map(m => m[1])
@@ -3473,16 +3473,16 @@ try {
     // The live channel has to ask for the SAME selection, or the first update
     // would silently replace the filtered list with the unfiltered one.
     contains(koerper, 'data-status="scheduled"', 'the tbody carries the filter for the live channel')
-    const frag = await hol(`/api/fragments/runs-body?repo=${repoId}&status=scheduled`)
+    const frag = await fetchPath(`/api/fragments/runs-body?repo=${repoId}&status=scheduled`)
     equal(frag.status, 200, 'the fragment answers')
     equal([...(await frag.text()).matchAll(/id="run-([0-9a-f-]{36})"/g)].length, erwartet, 'with the same selection')
     // A status the CHECK constraint does not know is no filter, not an error.
-    const alles = await hol(`/?repo=${repoId}&status=erfunden`)
+    const alles = await fetchPath(`/?repo=${repoId}&status=erfunden`)
     equal(alles.status, 200, 'an invented status is simply no filter')
     isTrue([...(await alles.text()).matchAll(/id="run-([0-9a-f-]{36})"/g)].length > erwartet, 'and the whole list comes back')
   })
   await check('the overview is seven fact columns plus the pick box, and its empty state spans all of them', async () => {
-    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/?repo=${repoId}`)).text()
     const kopf = html.slice(html.indexOf('<thead'), html.indexOf('</thead>'))
     equal((kopf.match(/<th[ >]/g) || []).length, 8, 'eight columns: the multi-select box plus seven facts')
     equal((kopf.match(/<th>/g) || []).length, 7, 'seven titled columns, not eleven')
@@ -3497,12 +3497,12 @@ try {
     equal((zeile.match(/<td/g) || []).length, 8, 'and a row has exactly as many cells as the head has columns')
     // A repo without runs: the sentence has to span the whole table, otherwise
     // it sits in the first column with seven empty cells beside it.
-    const leer = await (await hol('/api/fragments/runs-body?repo=999999')).text()
+    const leer = await (await fetchPath('/api/fragments/runs-body?repo=999999')).text()
     contains(leer, 'colspan="8"', 'the empty state spans all eight')
     contains(leer, 'no runs yet', 'and says so')
   })
   await check('the sidebar says what every tmux session on this machine costs', async () => {
-    const html = await (await hol(`/?repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/?repo=${repoId}`)).text()
     const leiste = html.slice(html.indexOf('id="status-sidebar"'), html.indexOf('</aside>'))
     contains(leiste, 'id="side-mem"', 'the block is there')
     contains(leiste, 'tmux memory', 'by its name from lang/en.json')
@@ -3516,11 +3516,11 @@ try {
     // It is on EVERY page, like the rest of the sidebar: a bill that runs
     // quietly must not need a navigation to be seen.
     for (const pfad of ['/agents', '/settings', '/sessions']) {
-      contains(await (await hol(pfad)).text(), 'id="side-mem"', `${pfad}: there too`)
+      contains(await (await fetchPath(pfad)).text(), 'id="side-mem"', `${pfad}: there too`)
     }
   })
   await check('the sidebar fragment renders the same aside the page does', async () => {
-    const r = await hol(`/api/fragments/sidebar?repo=${repoId}`)
+    const r = await fetchPath(`/api/fragments/sidebar?repo=${repoId}`)
     equal(r.status, 200, 'status')
     const frag = await r.text()
     contains(frag, 'id="status-sidebar"', 'the swap target')
@@ -3528,7 +3528,7 @@ try {
     contains(frag, 'Work in flight', 'and the work counts of the repo it was asked for')
     // Same renderer as the page — a fragment that builds its own markup is the
     // mistake server/run-def.mjs was written from.
-    const seite = await (await hol(`/?repo=${repoId}`)).text()
+    const seite = await (await fetchPath(`/?repo=${repoId}`)).text()
     equal(frag.trim(), seite.slice(seite.indexOf('<aside id="status-sidebar"'), seite.indexOf('</aside>') + '</aside>'.length).trim(),
       'byte for byte what the page carries')
   })
@@ -3545,7 +3545,7 @@ try {
   const leisteVon = (html) => html.slice(html.indexOf('id="status-sidebar"'), html.indexOf('</aside>'))
 
   await check('a pushed value stands in the sidebar of every page of that repo', async () => {
-    const r = await formular('/api/panels', {
+    const r = await postForm('/api/panels', {
       repo: String(repoId),
       key: 'findings',
       value: JSON.stringify({
@@ -3559,7 +3559,7 @@ try {
     isTrue(antwort.ok, 'ok')
 
     for (const pfad of [`/?repo=${repoId}`, `/agents?repo=${repoId}`, `/settings?repo=${repoId}`]) {
-      const leiste = leisteVon(await (await hol(pfad)).text())
+      const leiste = leisteVon(await (await fetchPath(pfad)).text())
       contains(leiste, 'Findings', `${pfad}: the title the project chose`)
       contains(leiste, '>33<', `${pfad}: the headline number`)
       contains(leiste, 'bug', `${pfad}: the split`)
@@ -3567,17 +3567,17 @@ try {
     }
     // The note's Markdown subset is rendered by the HUB, so a backtick becomes
     // a <code> and nothing else can be smuggled through it.
-    contains(leisteVon(await (await hol(`/?repo=${repoId}`)).text()), '<code>befund.py zaehl</code>', 'the note is rendered, not pasted')
+    contains(leisteVon(await (await fetchPath(`/?repo=${repoId}`)).text()), '<code>befund.py zaehl</code>', 'the note is rendered, not pasted')
   })
 
   await check('the sidebar fragment carries it too — the live channel updates it', async () => {
-    const frag = await (await hol(`/api/fragments/sidebar?repo=${repoId}`)).text()
+    const frag = await (await fetchPath(`/api/fragments/sidebar?repo=${repoId}`)).text()
     contains(frag, 'data-panel="findings"', 'the block is in the fragment')
     contains(frag, '>33<', 'with its number')
   })
 
   await check('GET /api/panels answers with the value and its state', async () => {
-    const data = await (await hol(`/api/panels?repo=${repoId}`, { headers: { accept: 'application/json' } })).json()
+    const data = await (await fetchPath(`/api/panels?repo=${repoId}`, { headers: { accept: 'application/json' } })).json()
     isTrue(data.ok, 'ok')
     equal(data.panels.length, 1, 'one panel')
     equal(data.panels[0].total, 33, 'the number')
@@ -3586,56 +3586,56 @@ try {
   })
 
   await check('a failed measurement keeps the last numbers and says they are not confirmed', async () => {
-    const r = await formular('/api/panels', { repo: String(repoId), key: 'findings', error: 'register tool missing on this branch' })
+    const r = await postForm('/api/panels', { repo: String(repoId), key: 'findings', error: 'register tool missing on this branch' })
     equal(r.status, 200, 'a failure is a push too')
-    const leiste = leisteVon(await (await hol(`/?repo=${repoId}`)).text())
+    const leiste = leisteVon(await (await fetchPath(`/?repo=${repoId}`)).text())
     contains(leiste, '>33<', 'the numbers are still there')
     contains(leiste, 'panel-cold', 'greyed as a whole')
     contains(leiste, 'register tool missing', 'and the reason is named')
     // …and the next good push clears it, or a fixed producer would look broken forever.
-    await formular('/api/panels', { repo: String(repoId), key: 'findings', value: JSON.stringify({ title: 'Findings', total: 30 }) })
-    const leiste2 = leisteVon(await (await hol(`/?repo=${repoId}`)).text())
+    await postForm('/api/panels', { repo: String(repoId), key: 'findings', value: JSON.stringify({ title: 'Findings', total: 30 }) })
+    const leiste2 = leisteVon(await (await fetchPath(`/?repo=${repoId}`)).text())
     isFalse(leiste2.includes('panel-cold'), 'the failure is over')
     contains(leiste2, '>30<', 'with the new number')
   })
 
   await check('what a producer must not be able to do', async () => {
-    const nein = await formular('/api/panels', { repo: String(repoId), key: 'findings', value: JSON.stringify({ title: 'x' }) })
+    const nein = await postForm('/api/panels', { repo: String(repoId), key: 'findings', value: JSON.stringify({ title: 'x' }) })
     equal(nein.status, 400, 'a value with neither total nor items is refused')
-    const schluessel = await formular('/api/panels', { repo: String(repoId), key: 'Not A Key', value: JSON.stringify({ total: 1 }) })
+    const schluessel = await postForm('/api/panels', { repo: String(repoId), key: 'Not A Key', value: JSON.stringify({ total: 1 }) })
     equal(schluessel.status, 400, 'and so is an invalid key')
-    const kaputt = await formular('/api/panels', { repo: '999999', key: 'x', value: JSON.stringify({ total: 1 }) })
+    const kaputt = await postForm('/api/panels', { repo: '999999', key: 'x', value: JSON.stringify({ total: 1 }) })
     equal(kaputt.status, 400, 'an unknown repo is an answer, never a 500')
 
     // Markup in a label is data, and the hub escapes it — the producer never
     // gets to decide how this column is built.
-    await formular('/api/panels', {
+    await postForm('/api/panels', {
       repo: String(repoId), key: 'shapes',
       value: JSON.stringify({ total: 1, items: [{ label: '<b>bold</b>', count: 1 }], note: '<script>x</script>' }),
     })
-    const leiste = leisteVon(await (await hol(`/?repo=${repoId}`)).text())
+    const leiste = leisteVon(await (await fetchPath(`/?repo=${repoId}`)).text())
     isFalse(leiste.includes('<b>bold</b>'), 'a label cannot bring its own markup')
     isFalse(leiste.includes('<script>'), 'and neither can the note')
     contains(leiste, '&lt;b&gt;bold&lt;/b&gt;', 'it is shown as the text it is')
-    await formular('/api/panels', { repo: String(repoId), key: 'shapes', remove: '1' })
-    isFalse(leisteVon(await (await hol(`/?repo=${repoId}`)).text()).includes('data-panel="shapes"'), 'and it can be removed again')
+    await postForm('/api/panels', { repo: String(repoId), key: 'shapes', remove: '1' })
+    isFalse(leisteVon(await (await fetchPath(`/?repo=${repoId}`)).text()).includes('data-panel="shapes"'), 'and it can be removed again')
   })
 
   await check('bin/fl-panel pushes from outside the hub, and finds the hub itself', async () => {
     // The way a flow step or a cron line would call it: FL_HUB_URL out of the
     // environment, everything else on the command line.
     const r = await new Promise((res) => execFile(process.execPath,
-      [join(PROJEKT, 'bin', 'fl-panel'), 'set', 'tests',
+      [join(PROJECT, 'bin', 'fl-panel'), 'set', 'tests',
         '--repo', String(repoId), '--title', 'Tests', '--total', '12', '--item', 'failing=3:red', '--ttl', '60'],
-      { env: { ...process.env, FL_HUB_URL: BASIS }, timeout: 30_000 },
+      { env: { ...process.env, FL_HUB_URL: BASE }, timeout: 30_000 },
       (err, stdout, stderr) => res({ code: err?.code ?? 0, stdout, stderr })))
     equal(r.code, 0, `fl-panel exited 0 (${r.stderr})`)
     contains(r.stdout, 'tests = 12', 'and says what it pushed')
-    const leiste = leisteVon(await (await hol(`/?repo=${repoId}`)).text())
+    const leiste = leisteVon(await (await fetchPath(`/?repo=${repoId}`)).text())
     contains(leiste, 'Tests', 'the panel it created')
     contains(leiste, 'failing', 'with the row from --item')
-    await formular('/api/panels', { repo: String(repoId), key: 'tests', remove: '1' })
-    await formular('/api/panels', { repo: String(repoId), key: 'findings', remove: '1' })
+    await postForm('/api/panels', { repo: String(repoId), key: 'tests', remove: '1' })
+    await postForm('/api/panels', { repo: String(repoId), key: 'findings', remove: '1' })
   })
 
   // ------------------------------------------------------------------
@@ -3648,37 +3648,37 @@ try {
   group('The repo choice sticks (freilauf_repo cookie)')
 
   await check('a page request that names a repo answers with the freilauf_repo cookie', async () => {
-    const r = await hol(`/?repo=${repoId}`)
+    const r = await fetchPath(`/?repo=${repoId}`)
     equal(r.status, 200, 'status')
     contains(r.headers.get('set-cookie') ?? '', `freilauf_repo=${repoId}`, 'the cookie is set')
     // A page that names no repo stays silent — the switcher itself is the only
     // place that may remember a choice, not every stray link.
-    const ohne = await hol('/settings')
+    const ohne = await fetchPath('/settings')
     isFalse((ohne.headers.get('set-cookie') ?? '').includes('freilauf_repo='), 'no repo named, no cookie written')
   })
   await check('without ?repo= the persisted choice wins over the first repo', async () => {
-    const zwei = await formular('/repos/edit', {
+    const zwei = await postForm('/repos/edit', {
       name: 'e2e-zwei', path: REPO, base_branch: 'main', worktree_extras: '[]',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(zwei.status, 303, 'second repo created')
     const zweiId = db.prepare(`SELECT id FROM repos WHERE name='e2e-zwei'`).get().id
     // The first repo by name is 'e2e' — without the cookie the overview would
     // show it. With the cookie it must show the persisted one instead.
-    const overview = await (await hol('/', { headers: { cookie: `freilauf_repo=${zweiId}` } })).text()
+    const overview = await (await fetchPath('/', { headers: { cookie: `freilauf_repo=${zweiId}` } })).text()
     contains(overview, `id="repo-switch"`, 'header has the switcher')
     const kopf = overview.slice(overview.indexOf('<header'), overview.indexOf('</header>'))
     contains(kopf, `option value="${zweiId}" selected`, 'the persisted repo is selected in the header')
     contains(overview, `<body data-repo="${zweiId}"`, 'and the page context is that repo')
     // A context page (agents) honors it too — its "create" button belongs to it.
-    const agents = await (await hol('/agents', { headers: { cookie: `freilauf_repo=${zweiId}` } })).text()
+    const agents = await (await fetchPath('/agents', { headers: { cookie: `freilauf_repo=${zweiId}` } })).text()
     contains(agents, `/agents/edit?repo=${zweiId}`, 'the agents page belongs to the persisted repo')
     // And a context-less page (settings) keeps it in the header.
-    const settings = await (await hol('/settings', { headers: { cookie: `freilauf_repo=${zweiId}` } })).text()
+    const settings = await (await fetchPath('/settings', { headers: { cookie: `freilauf_repo=${zweiId}` } })).text()
     const kopf2 = settings.slice(settings.indexOf('<header'), settings.indexOf('</header>'))
     contains(kopf2, `option value="${zweiId}" selected`, 'settings keeps the persisted repo in the header')
   })
   await check('an invalid cookie (deleted repo) falls back instead of an empty page', async () => {
-    const html = await (await hol('/', { headers: { cookie: 'freilauf_repo=999999' } })).text()
+    const html = await (await fetchPath('/', { headers: { cookie: 'freilauf_repo=999999' } })).text()
     contains(html, 'id="repo-switch"', 'page renders')
     isFalse(html.includes('data-repo="999999"'), 'not the deleted id')
   })
@@ -3690,7 +3690,7 @@ try {
     const zweiId = db.prepare(`SELECT id FROM repos WHERE name='e2e-zwei'`).get().id
     const run = db.prepare(`SELECT id, repo_id FROM runs WHERE repo_id=? ORDER BY started_at LIMIT 1`).get(repoId)
     isTrue(!!run && run.repo_id !== zweiId, 'a run of the FIRST repo exists')
-    const r = await hol(`/runs/${run.id}?repo=${zweiId}`)
+    const r = await fetchPath(`/runs/${run.id}?repo=${zweiId}`)
     const html = await r.text()
     const kopf = html.slice(html.indexOf('<header'), html.indexOf('</header>'))
     contains(kopf, `option value="${zweiId}" selected`, 'the header shows what was picked, not the run\'s repo')
@@ -3701,7 +3701,7 @@ try {
     contains(html, `data-repo="${zweiId}"`, 'the sidebar counts the chosen repo')
     contains(r.headers.get('set-cookie') ?? '', `freilauf_repo=${zweiId}`, 'and the choice is persisted')
     // Without the parameter nothing changes: the page's own repo answers.
-    const ohne = await (await hol(`/runs/${run.id}`)).text()
+    const ohne = await (await fetchPath(`/runs/${run.id}`)).text()
     const kopfOhne = ohne.slice(ohne.indexOf('<header'), ohne.indexOf('</header>'))
     contains(kopfOhne, `option value="${repoId}" selected`, 'no ?repo= — the page\'s own repo stands in the header')
   })
@@ -3714,25 +3714,25 @@ try {
     const zweiId = db.prepare(`SELECT id FROM repos WHERE name='e2e-zwei'`).get().id
     const repoName = db.prepare('SELECT name FROM repos WHERE id=?').get(repoId).name
     const run = db.prepare(`SELECT id FROM runs WHERE repo_id=? ORDER BY started_at LIMIT 1`).get(repoId)
-    const html = await (await hol(`/runs/${run.id}?repo=${zweiId}`)).text()
+    const html = await (await fetchPath(`/runs/${run.id}?repo=${zweiId}`)).text()
     contains(html, 'class="banner other-repo"', 'the note is there')
     contains(html, repoName, 'and names the repo the run belongs to')
     contains(html, 'e2e-zwei', 'and the one that was picked')
     contains(html, `href="/?repo=${zweiId}"`, 'with the way to the picked repo')
     // Same run, no switch: nothing to say.
-    const gleich_ = await (await hol(`/runs/${run.id}?repo=${repoId}`)).text()
+    const gleich_ = await (await fetchPath(`/runs/${run.id}?repo=${repoId}`)).text()
     isFalse(gleich_.includes('banner other-repo'), 'no note when the header agrees')
     // A repo form belongs to ONE repo just as much as a run does.
-    const form = await (await hol(`/repos/edit?id=${repoId}&repo=${zweiId}`)).text()
+    const form = await (await fetchPath(`/repos/edit?id=${repoId}&repo=${zweiId}`)).text()
     contains(form, 'class="banner other-repo"', 'the repo form says it too')
     // The overview FOLLOWS the switcher — it renders the chosen repo, so there
     // is no mismatch it could report, whatever the parameter says.
-    const uebersicht = await (await hol(`/?repo=${zweiId}`)).text()
+    const uebersicht = await (await fetchPath(`/?repo=${zweiId}`)).text()
     isFalse(uebersicht.includes('banner other-repo'), 'a page that follows the switcher never shows it')
-    const archiv = await (await hol(`/archive?repo=${zweiId}`)).text()
+    const archiv = await (await fetchPath(`/archive?repo=${zweiId}`)).text()
     isFalse(archiv.includes('banner other-repo'), 'the archive neither')
     // And a page without any repo context (settings) cannot be on the wrong one.
-    const einst = await (await hol('/settings', { headers: { cookie: `freilauf_repo=${zweiId}` } })).text()
+    const einst = await (await fetchPath('/settings', { headers: { cookie: `freilauf_repo=${zweiId}` } })).text()
     isFalse(einst.includes('banner other-repo'), 'nor a page without a repo context')
   })
 
@@ -3758,7 +3758,7 @@ try {
       setzen('telegram_token', 'geheim:123')
       setzen('abo_price', '200')
       try {
-        const r = await formular('/settings/save', { ui_language: 'en' }, { alsBrowser: true })
+        const r = await postForm('/settings/save', { ui_language: 'en' }, { asBrowser: true })
         equal(r.status, 303, 'saved')
         equal(einstellung('telegram_token'), 'geheim:123', 'the token survived a post that never mentioned it')
         equal(einstellung('abo_price'), '200', 'and so did the subscription price')
@@ -3771,14 +3771,14 @@ try {
 
     await check('an empty text field still clears its setting', async () => {
       setzen('prompt_suffix', 'never send this to the agent')
-      const r = await formular('/settings/save', { prompt_suffix: '' }, { alsBrowser: true })
+      const r = await postForm('/settings/save', { prompt_suffix: '' }, { asBrowser: true })
       equal(r.status, 303, 'saved')
       equal(einstellung('prompt_suffix'), '', 'present-but-empty means delete, not "not mentioned"')
     })
 
     await check('a key that is not in SETTINGS_KEYS never reaches the table', async () => {
-      const r = await formular('/settings/save',
-        { ui_language: 'en', erfundener_schluessel: 'ha' }, { alsBrowser: true })
+      const r = await postForm('/settings/save',
+        { ui_language: 'en', erfundener_schluessel: 'ha' }, { asBrowser: true })
       equal(r.status, 303, 'saved')
       equal(einstellung('erfundener_schluessel'), undefined, 'the invented key was dropped')
     })
@@ -3796,10 +3796,10 @@ try {
     // Only the language goes over the wire — the route writes what the request
     // brought and leaves the rest standing (see the group above).
     const spracheSetzen = (lang) =>
-      formular('/settings/save', { ui_language: lang }, { alsBrowser: true })
+      postForm('/settings/save', { ui_language: lang }, { asBrowser: true })
     try {
       equal((await spracheSetzen('de')).status, 303, 'language saved')
-      const html = await (await hol('/repos')).text()
+      const html = await (await fetchPath('/repos')).text()
       contains(html, 'Repo anlegen', 'repos.create in German')
       contains(html, 'Übersicht', 'and the navigation with it (nav.overview)')
       contains(html, 'Worktree-Ergänzungen', 'a column header too (repos.extras)')
@@ -3808,18 +3808,18 @@ try {
       // is no proof for them: "min" and "in {x}, out {y}" read exactly like the
       // literals they replaced, so only a second language shows that they go
       // through t() at all.
-      const uebersicht = await (await hol(`/?repo=${repoId}`)).text()
+      const uebersicht = await (await fetchPath(`/?repo=${repoId}`)).text()
       contains(uebersicht, ' Min.', 'the duration unit is translated (unit.minutes)')
-      const detail = await (await hol(`/runs/${RH}`)).text()
+      const detail = await (await fetchPath(`/runs/${RH}`)).text()
       contains(detail, 'rein ', 'the token metric is translated (run.tokens_value)')
     } finally {
       equal((await spracheSetzen('en')).status, 303, 'back to English')
     }
-    contains(await (await hol('/repos')).text(), 'Create repo', 'English again for everything that follows')
+    contains(await (await fetchPath('/repos')).text(), 'Create repo', 'English again for everything that follows')
     // The other way round for the incident severity: 'rot' is the value the
     // CHECK on the table stores, so only the English page can show that the
     // line renders a word instead of the raw column.
-    contains(await (await hol(`/runs/${RH}`)).text(), ', red)',
+    contains(await (await fetchPath(`/runs/${RH}`)).text(), ', red)',
       'the incident severity is a translated word, not the stored value')
   })
 
@@ -3831,31 +3831,31 @@ try {
   group('The display timezone is a central setting')
 
   await check('the settings page offers the timezone and saves it', async () => {
-    const html = await (await hol('/settings')).text()
+    const html = await (await fetchPath('/settings')).text()
     contains(html, 'name="ui_timezone"', 'the select is on the settings page')
-    const r = await formular('/settings/save', { ui_timezone: 'America/New_York' }, { alsBrowser: true })
+    const r = await postForm('/settings/save', { ui_timezone: 'America/New_York' }, { asBrowser: true })
     equal(r.status, 303, 'saved')
     equal(db.prepare(`SELECT value FROM settings WHERE key='ui_timezone'`).get()?.value,
       'America/New_York', 'stored like any other setting')
     try {
-      contains(await (await hol('/settings')).text(),
+      contains(await (await fetchPath('/settings')).text(),
         'option value="America/New_York" selected', 'the saved zone is the selected option')
     } finally {
-      await formular('/settings/save', { ui_timezone: '' }, { alsBrowser: true })
+      await postForm('/settings/save', { ui_timezone: '' }, { asBrowser: true })
     }
   })
 
   await check('times on a page render in the configured timezone', async () => {
     db.prepare(`UPDATE runs SET started_at='2026-08-25 12:00:00' WHERE id=?`).run(RH)
-    await formular('/settings/save', { ui_timezone: 'America/New_York', ui_language: 'en' }, { alsBrowser: true })
+    await postForm('/settings/save', { ui_timezone: 'America/New_York', ui_language: 'en' }, { asBrowser: true })
     try {
-      const detail = await (await hol(`/runs/${RH}`)).text()
+      const detail = await (await fetchPath(`/runs/${RH}`)).text()
       // 12:00 UTC on 2026-08-25 is 08:00 in New York (EDT, UTC-4) — the chip
       // must read the configured clock, not UTC and not the server's.
       contains(detail, '08:00', 'the run start chip reads the New York clock')
       contains(detail, 'window.FREILAUF_TZ="America/New_York"', 'the browser is told the same zone')
     } finally {
-      await formular('/settings/save', { ui_timezone: '' }, { alsBrowser: true })
+      await postForm('/settings/save', { ui_timezone: '' }, { asBrowser: true })
     }
   })
 
@@ -3869,7 +3869,7 @@ try {
    */
   async function lauscher(pfad, { msKopf = 1500 } = {}) {
     const ctrl = new AbortController()
-    const res = await fetch(BASIS + pfad, { signal: ctrl.signal, headers: { accept: 'text/event-stream' } })
+    const res = await fetch(BASE + pfad, { signal: ctrl.signal, headers: { accept: 'text/event-stream' } })
     const leser = res.body.getReader()
     const dec = new TextDecoder()
     let text = ''
@@ -3914,7 +3914,7 @@ try {
     const l = await lauscher(`/api/events?repo=${repoId}`)
     try {
       await l.warteAufText(': connected')
-      const r = await formular(`/api/runs/${R1}/title`, { title: 'Live channel proof' })
+      const r = await postForm(`/api/runs/${R1}/title`, { title: 'Live channel proof' })
       equal(r.status, 200, 'rename accepted')
       isTrue(await l.warteAufText('event: run'), `an event arrives (got: ${JSON.stringify(l.text())})`)
       contains(l.text(), R1, 'and it names the run')
@@ -3926,15 +3926,15 @@ try {
   await check('a listener on another repo is not told about this one', async () => {
     // The filter is the whole reason the event carries a repoId: an operator
     // watching one repo must not see another repo's runs appear.
-    const fremd = await formular('/repos/edit', {
+    const fremd = await postForm('/repos/edit', {
       name: 'e2e-fremd', path: join(SB, 'repo'), base_branch: 'main', worktree_extras: '[]',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(fremd.status, 303, 'second repo created')
     const fremdId = db.prepare(`SELECT id FROM repos WHERE name='e2e-fremd'`).get().id
     const l = await lauscher(`/api/events?repo=${fremdId}`)
     try {
       await l.warteAufText(': connected')
-      await formular(`/api/runs/${R1}/title`, { title: 'Still not yours' })
+      await postForm(`/api/runs/${R1}/title`, { title: 'Still not yours' })
       isTrue(!(await l.warteAufText('event: run', 600)), `nothing arrived (got: ${JSON.stringify(l.text())})`)
     } finally { await l.schliessen() }
   })
@@ -3946,21 +3946,21 @@ try {
     // point, which only works if every transition really passes through it.
     const j = await laufStarten({ repo_id: repoId, prompt: 'event coverage', branch_mode: 'keiner' })
     await sessionMerken(j.runId)
-    await formular(`/api/runs/${j.runId}/send`, { text: 'hello' })
+    await postForm(`/api/runs/${j.runId}/send`, { text: 'hello' })
     contains(ereignisse(j.runId).join(','), 'message_sent', 'a message from a human is recorded')
-    await formular(`/api/runs/${j.runId}/kill`, {})
+    await postForm(`/api/runs/${j.runId}/kill`, {})
     contains(ereignisse(j.runId).join(','), 'aborted', 'ending it by hand is recorded')
-    await formular(`/api/runs/${j.runId}/retry`, {})
+    await postForm(`/api/runs/${j.runId}/retry`, {})
     contains(ereignisse(j.runId).join(','), 'retry', 'and so is retrying it')
     await sessionMerken(j.runId)
-    await formular(`/api/runs/${j.runId}/kill`, {})   // leave nothing running
+    await postForm(`/api/runs/${j.runId}/kill`, {})   // leave nothing running
   })
 
   // ------------------------------------------------------------------
   group('tmux cleanup: the memory-freeing agent')
 
   await check('the cleanup settings page renders the reusable setup block', async () => {
-    const html = await (await hol('/settings/cleanup')).text()
+    const html = await (await fetchPath('/settings/cleanup')).text()
     equal(html.includes('<fieldset class="cleanup-setup">'), true, 'the agent+provider+model block, wrapped for a settings page')
     contains(html, 'name="harness"', 'with the harness select')
     contains(html, 'name="cleanup_on"', 'the on/off switch')
@@ -3969,10 +3969,10 @@ try {
     contains(html, 'name="cleanup_prompt"', 'the prompt textarea')
   })
   await check('the cleanup settings save stores agent + switch + numbers', async () => {
-    const r = await formular('/settings/cleanup', {
+    const r = await postForm('/settings/cleanup', {
       harness: 'claude', cleanup_on: '1', cleanup_threshold_gb: '3', cleanup_target_gb: '1',
       cleanup_cooldown_min: '10', cleanup_repo_id: String(repoId), cleanup_prompt: '',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, 'redirect back')
     equal(db.prepare(`SELECT value FROM settings WHERE key='cleanup_harness'`).get().value, 'claude', 'agent stored')
     equal(db.prepare(`SELECT value FROM settings WHERE key='cleanup_on'`).get().value, '1', 'switch on')
@@ -3983,7 +3983,7 @@ try {
     equal(db.prepare(`SELECT value FROM settings WHERE key='cleanup_prompt'`).get().value, '', 'prompt empty = the built-in template')
   })
   await check('the settings page summary names the configured cleanup agent', async () => {
-    const html = await (await hol('/settings')).text()
+    const html = await (await fetchPath('/settings')).text()
     contains(html, 'cleanup', 'the settings index links to the cleanup page')
     contains(html, 'Claude Code', 'and names the configured agent in its summary')
   })
@@ -3992,18 +3992,18 @@ try {
   await check('the sidebar and the sessions page show the free-memory controls', async () => {
     const sitzung = (await sh('tmux', ['list-sessions', '-F', '#{session_name}'])).stdout.trim()
     if (!sitzung) return skipped('side memory block', 'no tmux server in this environment')
-    const sidebar = await (await hol('/api/fragments/sidebar')).text()
+    const sidebar = await (await fetchPath('/api/fragments/sidebar')).text()
     contains(sidebar, 'class="mem-free"', 'the small button in the sidebar tmux block')
-    const page = await (await hol('/sessions')).text()
+    const page = await (await fetchPath('/sessions')).text()
     contains(page, 'cleanup-free-open', 'the button in the Sessions-page box')
     contains(page, 'id="cleanup-dialog"', 'one shared modal for the action')
     contains(page, 'name="keep"', 'with the keep-runs field on the Sessions page')
-    const overview = await (await hol('/')).text()
+    const overview = await (await fetchPath('/')).text()
     contains(overview, 'id="cleanup-dialog"', 'the modal is on every page')
     isFalse(overview.includes('name="keep"'), 'but the keep field only on the Sessions page')
   })
   await check('the cleanup agent starts through the ordinary run path', async () => {
-    const r = await formular('/api/cleanup/start', { target_gb: '2', keep: '', source: 'sessions' })
+    const r = await postForm('/api/cleanup/start', { target_gb: '2', keep: '', source: 'sessions' })
     const j = await r.json()
     equal(r.status, 200, `started (${JSON.stringify(j)})`)
     isTrue(!!j.runId, 'run id')
@@ -4017,35 +4017,35 @@ try {
     contains(ereignisse(CL).join(','), 'cleanup_run', 'marked as a cleanup run')
   })
   await check('a second start is refused while one is in flight', async () => {
-    const j = await (await formular('/api/cleanup/start', { target_gb: '2' })).json()
+    const j = await (await postForm('/api/cleanup/start', { target_gb: '2' })).json()
     equal(j.ok, false, 'refused')
     contains(j.error, 'already in progress', 'and names the reason')
   })
   await check('a manual keep list turns run ids into protected session names', async () => {
-    const r = await formular('/api/cleanup/start', { target_gb: '1', keep: lauf(CL).id })
+    const r = await postForm('/api/cleanup/start', { target_gb: '1', keep: lauf(CL).id })
     // The first run is still in flight — the keep resolution happens before the
     // in-flight check? No: in-flight is checked first, so this must stay refused.
     const j = await r.json()
     equal(j.ok, false, 'still refused while the first run is going')
   })
   await check('the cleanup run ends like any other and frees the gate', async () => {
-    const r = await hol(`/api/runs/${CL}/report`, {
+    const r = await fetchPath(`/api/runs/${CL}/report`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ kind: 'done', text: 'CL1 GB freed.' }),
     })
     equal(r.status, 200, 'report accepted')
     equal(lauf(CL).status, 'done', 'done')
-    const wieder = await (await formular('/api/cleanup/start', { target_gb: '1', keep: lauf(CL).id })).json()
+    const wieder = await (await postForm('/api/cleanup/start', { target_gb: '1', keep: lauf(CL).id })).json()
     equal(wieder.ok, true, 'a new start is possible after the run ended')
     isTrue(!!wieder.runId, 'and it starts')
     await sessionMerken(wieder.runId)
     const keepLauf = lauf(wieder.runId)
     contains(keepLauf.prompt, 'Diese Sessions bleiben auf jeden Fall erhalten', 'the keep line is present')
     contains(keepLauf.prompt, lauf(CL).tmux_session, 'naming the kept run\'s session')
-    await formular(`/api/runs/${wieder.runId}/kill`, {})
+    await postForm(`/api/runs/${wieder.runId}/kill`, {})
   })
   await check('the agent helper script protects and kills nothing in plan mode', async () => {
-    const skript = join(PROJEKT, 'bin', 'fl-session-cleanup')
+    const skript = join(PROJECT, 'bin', 'fl-session-cleanup')
     const s1 = 'fl-aufraum-test-1', s2 = 'fl-aufraum-test-2'
     await sh('tmux', ['new-session', '-d', '-s', s1, 'sleep 300'])
     await sh('tmux', ['new-session', '-d', '-s', s2, 'sleep 300'])
@@ -4071,20 +4071,20 @@ try {
 
   async function repoMerge(fields = {}) {
     const row = db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
-    const r = await formular(`/repos/edit?id=${row.id}`, {
+    const r = await postForm(`/repos/edit?id=${row.id}`, {
       name: 'e2e', path: REPO, base_branch: 'main',
       worktree_extras: row.worktree_extras ?? '[]', prompt: row.prompt ?? '',
       merge_mode: 'hub', merge_check: '', finish_timeout_min: '15',
       merge_max_attempts: '2', conflict_parallel: '1', notify_running: '1', max_parallel: '0',
       ...fields,
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 303, `repo saved (${JSON.stringify(fields)})`)
     return db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
   }
 
   /** A report exactly as fl-report sends it — and the hub's answer to it. */
   async function sendReport(runId, body) {
-    const r = await hol(`/api/runs/${runId}/report`, {
+    const r = await fetchPath(`/api/runs/${runId}/report`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
@@ -4127,7 +4127,7 @@ try {
     equal(row.merge_mode, 'hub', 'merge mode stored')
     equal(row.finish_timeout_min, 15, 'timeout stored')
     equal(row.notify_running, 1, 'the checkbox is on')
-    const html = await (await hol(`/repos/edit?id=${row.id}`)).text()
+    const html = await (await fetchPath(`/repos/edit?id=${row.id}`)).text()
     for (const feld of ['name="merge_mode"', 'name="merge_check"', 'name="finish_timeout_min"',
       'name="merge_max_attempts"', 'name="conflict_parallel"', 'name="notify_running"', 'name="max_parallel"']) {
       contains(html, feld, `field ${feld}`)
@@ -4136,11 +4136,11 @@ try {
 
   await check('a wrong number is a readable problem, not a stored zero', async () => {
     const row = db.prepare('SELECT * FROM repos WHERE name=?').get('e2e')
-    const r = await formular(`/repos/edit?id=${row.id}`, {
+    const r = await postForm(`/repos/edit?id=${row.id}`, {
       name: 'e2e', path: REPO, base_branch: 'main', worktree_extras: row.worktree_extras ?? '[]',
       merge_mode: 'hub', finish_timeout_min: '0', merge_max_attempts: '2',
       conflict_parallel: '1', notify_running: '1', max_parallel: '0',
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     equal(r.status, 400, 'refused')
     equal(db.prepare('SELECT finish_timeout_min FROM repos WHERE name=?').get('e2e').finish_timeout_min, 15, 'unchanged')
   })
@@ -4212,31 +4212,31 @@ try {
   })
 
   // ---- 3. conflict → conflict run ----
-  const resolverSetup = async () => formular('/settings/merge', {
+  const resolverSetup = async () => postForm('/settings/merge', {
     harness: 'claude', model: '', provider: '', effort: '',
     merge_resolver_prompt: 'Keep the tests green.',
-  }, { alsBrowser: true })
+  }, { asBrowser: true })
 
   let conflicted = null, resolver = null
   await check('the Merge settings page stores the conflict resolver through the run form\'s own validation', async () => {
     const r = await resolverSetup()
     equal(r.status, 303, 'saved')
     equal(db.prepare(`SELECT value FROM settings WHERE key='merge_resolver_harness'`).get().value, 'claude', 'harness')
-    const html = await (await hol('/settings/merge')).text()
+    const html = await (await fetchPath('/settings/merge')).text()
     contains(html, 'name="harness"', 'the run form\'s own setup block')
     contains(html, 'Keep the tests green.', 'and the operator\'s own instructions')
-    contains(await (await hol('/settings')).text(), '/settings/merge', 'the settings page links to it')
+    contains(await (await fetchPath('/settings')).text(), '/settings/merge', 'the settings page links to it')
   })
 
   await check('a branch that no longer merges holds the run and names the conflict', async () => {
     conflicted = await mergeRun()
-    await writeAndCommit(conflicted.wt, 'README.md', '# Testrepo\nfrom the run\n', 'E2E: run changes the readme')
+    await writeAndCommit(conflicted.wt, 'README.md', '# Test repo\nfrom the run\n', 'E2E: run changes the readme')
     // Meanwhile somebody else lands a change on the same line. The main
     // checkout has to be level with origin first — the hub has been merging
     // into it all along, so a commit on a stale main could not be pushed.
     await g(REPO, 'fetch', 'origin')
     await g(REPO, 'reset', '--hard', 'origin/main')
-    writeFileSync(join(REPO, 'README.md'), '# Testrepo\nfrom outside\n')
+    writeFileSync(join(REPO, 'README.md'), '# Test repo\nfrom outside\n')
     await g(REPO, 'add', '-A')
     await g(REPO, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: outside change')
     await g(REPO, 'push', '-q', 'origin', 'main')
@@ -4273,7 +4273,7 @@ try {
     const wt = lauf(resolver.id).workdir_effective
     await g(wt, 'fetch', 'origin')
     await g(wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'merge', 'origin/main')
-    writeFileSync(join(wt, 'README.md'), '# Testrepo\nfrom the run\nfrom outside\n')
+    writeFileSync(join(wt, 'README.md'), '# Test repo\nfrom the run\nfrom outside\n')
     await g(wt, 'add', '-A')
     await g(wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: both intentions')
     await sendReport(resolver.id, { kind: 'done', text: 'Resolved.' })
@@ -4316,10 +4316,10 @@ try {
   await check('after the last attempt the hub asks a human instead of trying again', async () => {
     await repoMerge({ finish_timeout_min: '1', merge_max_attempts: '1' })
     const l = await mergeRun()
-    await writeAndCommit(l.wt, 'README.md', '# Testrepo\nsecond run\n', 'E2E: second conflict')
+    await writeAndCommit(l.wt, 'README.md', '# Test repo\nsecond run\n', 'E2E: second conflict')
     await g(REPO, 'fetch', 'origin')
     await g(REPO, 'reset', '--hard', 'origin/main')
-    writeFileSync(join(REPO, 'README.md'), '# Testrepo\nsecond outside\n')
+    writeFileSync(join(REPO, 'README.md'), '# Test repo\nsecond outside\n')
     await g(REPO, 'add', '-A')
     await g(REPO, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: second outside')
     await g(REPO, 'push', '-q', 'origin', 'main')
@@ -4330,7 +4330,7 @@ try {
     isTrue(!!r1, 'one conflict run — the limit')
     await sessionMerken(r1.id)
     // It ends without delivering.
-    await formular(`/api/runs/${r1.id}/kill`, {})
+    await postForm(`/api/runs/${r1.id}/kill`, {})
     await integrate.integrateTick(Date.now() + 10 * 60_000)
     const orig = lauf(l.id)
     equal(orig.merge_status, 'blocked_conflict', 'no second attempt — a human decides')
@@ -4338,7 +4338,7 @@ try {
     isTrue(!!openIncident, 'an open incident, so it shows up in the sidebar')
     contains(ereignisse(l.id).join(','), 'notified:merge_blocked', 'and the operator was told')
     // And the operator can act on it without leaving the run's page.
-    const html = await (await hol(`/runs/${l.id}`)).text()
+    const html = await (await fetchPath(`/runs/${l.id}`)).text()
     contains(html, 'id="run-integration"', 'the detail page has an Integration line')
     contains(html, 'blocked: conflict unresolved', 'saying where the work stands')
     contains(html, `/api/runs/${l.id}/merge"`, 'with "Merge now"')
@@ -4355,7 +4355,7 @@ try {
       'and no incident: what went wrong there is the original run\'s problem')
     equal(ereignisse(r1.id).filter(k => k.startsWith('notified')).length, 0,
       'and it never rang the phone')
-    isFalse((await (await hol(`/runs/${r1.id}`)).text()).includes(`/api/runs/${r1.id}/retry`),
+    isFalse((await (await fetchPath(`/runs/${r1.id}`)).text()).includes(`/api/runs/${r1.id}/retry`),
       'a conflict run has no retry button — "Merge now" on the original starts a fresh one')
   })
 
@@ -4380,7 +4380,7 @@ try {
     isTrue((await g(ORIGIN, 'rev-parse', `refs/heads/${ref}`)).ok, `the tip is backed up as origin/${ref}`)
     contains(ereignisse(l.id).join(','), 'branch_backed_up', 'and that is recorded')
     // …and the operator can still merge it, with one click.
-    const antwort = await (await formular(`/api/runs/${l.id}/merge`, {})).json()
+    const antwort = await (await postForm(`/api/runs/${l.id}/merge`, {})).json()
     isTrue(antwort.ok, `merge by hand accepted (${JSON.stringify(antwort)})`)
     await waitFor(() => lauf(l.id).merge_status === 'merged', { what: 'merged by hand', timeoutMs: 30_000 })
     contains(ereignisse(l.id).join(','), 'merge_manual', 'the manual action is in the run\'s history')
@@ -4404,7 +4404,7 @@ try {
       { what: 'the notice is recorded on the watching run', timeoutMs: 10_000 })
     await waitFor(() => ereignisse(l.id).includes('main_moved_notified'),
       { what: 'and on the run that moved main', timeoutMs: 10_000 })
-    await formular(`/api/runs/${onlooker.id}/kill`, {})
+    await postForm(`/api/runs/${onlooker.id}/kill`, {})
   })
 
   // ---- 8. the agent vanishes while the gate waits ----
@@ -4511,7 +4511,7 @@ try {
     writeFileSync(join(l.wt, 'open.txt', ), 'open\n')
     await sendReport(l.id, { kind: 'done', text: 'x' })
     equal(lauf(l.id).finish_state, 'awaiting_commit', 'waiting')
-    await formular(`/api/runs/${l.id}/kill`, {})
+    await postForm(`/api/runs/${l.id}/kill`, {})
     await waitFor(() => !!lauf(l.id).merge_status, { what: 'the assessment', timeoutMs: 15_000 })
     const r = lauf(l.id)
     equal(r.status, 'aborted', 'aborted, not done')
@@ -4524,14 +4524,14 @@ try {
   await check('the real bin/fl-report prints the hub\'s answer and files nothing', async () => {
     const l = await mergeRun()
     writeFileSync(join(l.wt, 'unsaid.txt'), 'x\n')
-    const r = await sh(join(PROJEKT, 'bin', 'fl-report'), ['done', 'from the real script'], {
-      env: { ...process.env, FL_RUN_ID: l.id, FL_HUB_URL: BASIS, HOME: SB },
+    const r = await sh(join(PROJECT, 'bin', 'fl-report'), ['done', 'from the real script'], {
+      env: { ...process.env, FL_RUN_ID: l.id, FL_HUB_URL: BASE, HOME: SB },
     })
     isTrue(r.ok, `exit 0 (${r.stderr})`)
     contains(r.stdout, 'NOT finished yet', 'the answer reaches the agent as this tool\'s output')
     contains(r.stdout, 'unsaid.txt', 'and names the file')
     isFalse(existsSync(join(SB, 'agents', 'runs', l.id, 'inbox.jsonl')), 'nothing was filed as unreachable')
-    await formular(`/api/runs/${l.id}/kill`, {})
+    await postForm(`/api/runs/${l.id}/kill`, {})
   })
 
   // ---- 13. origin is the backup: the operator's own commits are pushed ----
@@ -4580,7 +4580,7 @@ try {
     equal(flowRunsFor(l.id).length, 0, 'no run_merged flow fires — there was no merge')
 
     // The operator may still change his mind: one click runs the ordinary path.
-    const merged = await (await formular(`/api/runs/${l.id}/merge`, {})).json()
+    const merged = await (await postForm(`/api/runs/${l.id}/merge`, {})).json()
     isTrue(merged.ok, `merge by hand accepted (${JSON.stringify(merged)})`)
     await waitFor(() => lauf(l.id).merge_status === 'merged', { what: 'merged after all', timeoutMs: 30_000 })
     equal(lauf(l.id).keep_on_branch, 0, 'and the run no longer keeps anything back')
@@ -4611,11 +4611,11 @@ try {
     const prompt = readFileSync(join(SB, 'runs', l.id, 'prompt.md'), 'utf8')
     contains(prompt, 'Freilauf merges your commits into main', 'it says what really happens')
     isFalse(prompt.includes('throwaway'), 'and not the opposite, in the same prompt as the merge rule')
-    await formular(`/api/runs/${l.id}/kill`, {})
+    await postForm(`/api/runs/${l.id}/kill`, {})
   })
 
   await check('the form says which rule means what, and Quick Run carries the keep box', async () => {
-    const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/runs/new?repo=${repoId}`)).text()
     contains(html, 'data-merge-mode="hub"', 'the form knows this repo integrates')
     contains(html, 'data-explain="off"', 'both explanations are rendered')
     contains(html, 'data-explain="hub"', 'so CSS can pick without a round trip')
@@ -4624,7 +4624,7 @@ try {
     // Quick Run goes through the same branchFields(), so the box has to survive
     // pickQuickFields' allowlist — that is where a field falls off silently.
     const fav = db.prepare('SELECT id FROM favorites ORDER BY id LIMIT 1').get()
-    const j = await (await formular('/api/runs/quick', {
+    const j = await (await postForm('/api/runs/quick', {
       repo_id: String(repoId), favorite_id: String(fav.id), prompt: 'E2E-Quick-Keep',
       branch_mode: 'neu', branch_pattern: `keep/quick-${Date.now().toString(36)}`, keep_on_branch: '1',
       start_mode: 'now',
@@ -4632,7 +4632,7 @@ try {
     isTrue(j.ok, `quick run started (${JSON.stringify(j)})`)
     await sessionMerken(j.runId)
     equal(lauf(j.runId).keep_on_branch, 1, 'the ticked box arrived at the run')
-    await formular(`/api/runs/${j.runId}/kill`, {})
+    await postForm(`/api/runs/${j.runId}/kill`, {})
   })
 
   // ---- 8b. follow-up reports: a finished run reports again ----
@@ -4707,16 +4707,16 @@ try {
   })
 
   await check('the checkbox under the terminal silences the notifications for the run and nothing else', async () => {
-    const html = await (await hol(`/runs/${followed.id}`)).text()
+    const html = await (await fetchPath(`/runs/${followed.id}`)).text()
     contains(html, 'id="notify-on"', 'the box is on the detail page')
     contains(html, `data-run="${followed.id}"`, 'and knows its run')
     isTrue(/id="notify-on"[^>]*checked/.test(html), 'ticked by default')
-    const off = await (await formular(`/api/runs/${followed.id}/notify`, { on: '0' })).json()
+    const off = await (await postForm(`/api/runs/${followed.id}/notify`, { on: '0' })).json()
     equal(off.notify_on, 0, 'switched off')
     equal(off.telegram_on, 0, 'and the old field name still answers, for whoever reads it')
     equal(lauf(followed.id).telegram_on, 0, 'stored (the column keeps its historic name)')
     contains(ereignisse(followed.id).join(','), 'notify_off', 'and recorded')
-    isFalse(/id="notify-on"[^>]*checked/.test(await (await hol(`/runs/${followed.id}`)).text()), 'the page shows it unticked')
+    isFalse(/id="notify-on"[^>]*checked/.test(await (await fetchPath(`/runs/${followed.id}`)).text()), 'the page shows it unticked')
     const before = ereignisse(followed.id).filter(k => k === 'notified:followup').length
     await writeAndCommit(followed.wt, 'quiet.txt', 'quiet\n', 'E2E: a quiet follow-up')
     await sendReport(followed.id, { kind: 'done', text: 'quietly done' })
@@ -4728,7 +4728,7 @@ try {
     contains(ereignisse(followed.id).join(','), 'notify_muted', 'but it is written down that there was none')
     // The old address is an alias, not a redirect: whatever still posts to it
     // has to keep working.
-    const on = await (await formular(`/api/runs/${followed.id}/telegram`, { on: '1' })).json()
+    const on = await (await postForm(`/api/runs/${followed.id}/telegram`, { on: '1' })).json()
     equal(on.notify_on, 1, 'and back on, through the old route')
     equal(lauf(followed.id).telegram_on, 1, 'stored')
     // A help call from a finished run reaches the operator too, and changes nothing about the run.
@@ -4741,7 +4741,7 @@ try {
 
   // ---- 8c. follow-up commissions: the operator types more work into a finished run ----
   await check('a message into a finished run is a follow-up commission: the run displays as running again and is clocked', async () => {
-    const vor = await formular(`/api/runs/${followed.id}/send`, { text: 'Please also document the new file.' })
+    const vor = await postForm(`/api/runs/${followed.id}/send`, { text: 'Please also document the new file.' })
     isTrue(vor.ok, 'the send is accepted')
     const r = lauf(followed.id)
     isTrue(!!r.followup_since, 'the commission is clocked from now')
@@ -4750,10 +4750,10 @@ try {
     contains(ev.join(','), 'followup_started', 'recorded as a commission')
     isFalse(ev.includes('message_sent'), 'and not as a plain message — that kind is for live runs')
     // The pages agree: the status word is "running" again, with the follow-up line.
-    const detail = await (await hol(`/runs/${followed.id}`)).text()
+    const detail = await (await fetchPath(`/runs/${followed.id}`)).text()
     contains(detail, 'status-chip">Running<', 'the detail page displays it as running')
     contains(detail, 'Follow-up work since', 'and says since when')
-    const laufend = await (await hol(`/?repo=${repoId}&status=running`)).text()
+    const laufend = await (await fetchPath(`/?repo=${repoId}&status=running`)).text()
     contains(laufend, `/runs/${followed.id}`, 'the overview’s running filter shows the commissioned run')
     contains(laufend, 'Follow-up work since', 'with the follow-up line in the status cell')
 
@@ -4773,7 +4773,7 @@ try {
     // New instructions restart the clock — and retract the old overrun statement
     // the same way a raised duration retracts one, so a genuine overrun of the
     // new commission can page again.
-    await formular(`/api/runs/${followed.id}/send`, { text: 'And add tests, too.' })
+    await postForm(`/api/runs/${followed.id}/send`, { text: 'And add tests, too.' })
     isFalse(ereignisse(followed.id).includes('anomaly:followup_overrun'), 'the new commission clears the old statement')
     isFalse(ereignisse(followed.id).includes('notified:followup_overrun'), 'and its notification flag with it')
     isTrue(!!lauf(followed.id).followup_since, 'and is clocked from now')
@@ -4830,7 +4830,7 @@ try {
     contains(prompt, 'No branch — the worktree is detached; changes are throwaway changes.',
       'the old sentence, byte for byte')
     isFalse(prompt.includes('Freilauf merges'), 'and nothing about merging at all')
-    const html = await (await hol(`/runs/new?repo=${repoId}`)).text()
+    const html = await (await fetchPath(`/runs/new?repo=${repoId}`)).text()
     contains(html, 'data-merge-mode="off"', 'the form says so too')
     contains(html, 'data-hub-only hidden', 'and the keep box is not even offered')
 
@@ -4903,7 +4903,7 @@ try {
 `
 
   await check('the Plugins page lists the coding agents, the model providers and the packages', async () => {
-    const r = await hol('/settings/plugins')
+    const r = await fetchPath('/settings/plugins')
     equal(r.status, 200, 'status')
     const html = await r.text()
     // The two sections that replaced the old Coding-agents page…
@@ -4924,8 +4924,8 @@ try {
       db.prepare(`SELECT config FROM plugin_config WHERE plugin_id='hermes'`).get().config).providers
     try {
       // 1. the provider selection of a coding agent
-      const r1 = await formular('/settings/plugins/save',
-        { id: 'hermes', enabled: '1', providers: ['deepseek'] }, { alsBrowser: true })
+      const r1 = await postForm('/settings/plugins/save',
+        { id: 'hermes', enabled: '1', providers: ['deepseek'] }, { asBrowser: true })
       equal(r1.status, 303, 'saved')
       const hermes = db.prepare(`SELECT * FROM plugin_config WHERE plugin_id='hermes'`).get()
       equal(hermes.enabled, 1, 'enabled')
@@ -4934,7 +4934,7 @@ try {
       // 2. the enabled flag really switches off — the hidden `0` companion is
       //    what makes that possible at all (a form sends nothing for an
       //    unticked box).
-      const r2 = await formular('/settings/plugins/save', { id: 'hermes', enabled: '0' }, { alsBrowser: true })
+      const r2 = await postForm('/settings/plugins/save', { id: 'hermes', enabled: '0' }, { asBrowser: true })
       equal(r2.status, 303, 'saved')
       equal(db.prepare(`SELECT enabled FROM plugin_config WHERE plugin_id='hermes'`).get().enabled, 0, 'switched off')
 
@@ -4943,47 +4943,47 @@ try {
       // committed state for exactly that, and a canary that trips the secret scanner
       // would block every push over a string invented to be harmless.
       const geheim = 'e2e-canary-do-not-render-me'
-      equal((await formular('/settings/plugins/save', {
+      equal((await postForm('/settings/plugins/save', {
         id: 'deepseek', enabled: '1', cred_api_key_mode: 'value', cred_api_key_value: geheim,
-      }, { alsBrowser: true })).status, 303, 'credential saved')
+      }, { asBrowser: true })).status, 303, 'credential saved')
       const cfg = JSON.parse(db.prepare(`SELECT config FROM plugin_config WHERE plugin_id='deepseek'`).get().config)
       equal(cfg.credentials.api_key.mode, 'value', 'stored as a value')
       equal(cfg.credentials.api_key.value, geheim, 'and it is the value that was typed')
 
       // THE assertion of this test: a page renders, and a page is shared,
       // logged and screenshotted. The value must never come back out of it.
-      const html = await (await hol('/settings/plugins')).text()
+      const html = await (await fetchPath('/settings/plugins')).text()
       isFalse(html.includes(geheim), 'the credential value is nowhere in the HTML')
       contains(html, 'value=""', 'the password field is rendered empty')
 
       // 4. an empty password field means "keep what is stored" — walking
       //    through the form again must not wipe a key.
-      equal((await formular('/settings/plugins/save',
+      equal((await postForm('/settings/plugins/save',
         { id: 'deepseek', enabled: '1', cred_api_key_mode: 'value', cred_api_key_value: '' },
-        { alsBrowser: true })).status, 303, 'saved again')
+        { asBrowser: true })).status, 303, 'saved again')
       equal(JSON.parse(db.prepare(`SELECT config FROM plugin_config WHERE plugin_id='deepseek'`).get().config)
         .credentials.api_key.value, geheim, 'the stored value survived an empty submit')
 
       // 5. an environment variable NAME instead — the better answer where a
       //    machine can be given one, and the only half that may be shown.
-      equal((await formular('/settings/plugins/save', {
+      equal((await postForm('/settings/plugins/save', {
         id: 'deepseek', enabled: '1', cred_api_key_mode: 'env', cred_api_key_env: 'MY_OWN_DEEPSEEK_KEY',
-      }, { alsBrowser: true })).status, 303, 'saved')
+      }, { asBrowser: true })).status, 303, 'saved')
       const cfg2 = JSON.parse(db.prepare(`SELECT config FROM plugin_config WHERE plugin_id='deepseek'`).get().config)
       equal(cfg2.credentials.api_key.mode, 'env', 'reads the environment now')
       equal(cfg2.credentials.api_key.envVar, 'MY_OWN_DEEPSEEK_KEY', 'under the name the operator gave')
       isFalse('value' in cfg2.credentials.api_key, 'and the stored value is gone, not shadowed')
-      const html2 = await (await hol('/settings/plugins')).text()
+      const html2 = await (await fetchPath('/settings/plugins')).text()
       contains(html2, 'MY_OWN_DEEPSEEK_KEY', 'the NAME is shown')
       isFalse(html2.includes(geheim), 'the value still is not')
     } finally {
-      await formular('/settings/plugins/save',
-        { id: 'hermes', enabled: '1', providers: providerVorher }, { alsBrowser: true })
+      await postForm('/settings/plugins/save',
+        { id: 'hermes', enabled: '1', providers: providerVorher }, { asBrowser: true })
     }
   })
 
   await check('an unknown plugin id is a readable problem, not a 500', async () => {
-    const r = await formular('/settings/plugins/save', { id: 'no-such-plugin', enabled: '1' }, { alsBrowser: true })
+    const r = await postForm('/settings/plugins/save', { id: 'no-such-plugin', enabled: '1' }, { asBrowser: true })
     equal(r.status, 400, 'refused')
     contains(await r.text(), 'no-such-plugin', 'and the page names it')
   })
@@ -4994,19 +4994,19 @@ try {
       description: 'A model provider built by the e2e suite.',
     }, EXT_PROVIDER)
 
-    const r = await formular('/settings/plugins/install', { path: dir }, { alsBrowser: true })
+    const r = await postForm('/settings/plugins/install', { path: dir }, { asBrowser: true })
     equal(r.status, 303, `installed (${r.status === 400 ? await r.text() : ''})`.slice(0, 400))
     // It is COPIED into the plugin directory, not linked: the operator's own
     // directory may move, and a service must not die because it did.
     isTrue(existsSync(join(sk.PLUGINS, 'e2e-provider', 'plugin.json')), 'the package landed in the plugin directory')
 
-    const html = await (await hol('/settings/plugins')).text()
+    const html = await (await fetchPath('/settings/plugins')).text()
     contains(html, 'E2E Model Provider', 'the plugin has a card')
     contains(html, '0.4.2', 'the packages table names its version')
     contains(html, 'e2e-provider', 'and its id')
     // A registered provider is choosable wherever a provider is chosen — the
     // whole point of the registry being mutable.
-    contains(await (await hol('/api/coding-agents/detect')).text(), 'ok', 'the detect API still answers')
+    contains(await (await fetchPath('/api/coding-agents/detect')).text(), 'ok', 'the detect API still answers')
   })
 
   await check('a package whose id is already taken is refused, and nothing is written', async () => {
@@ -5015,23 +5015,23 @@ try {
     const dopplung = paketBauen('e2e-provider-again', {
       api: 1, id: 'e2e-provider', kind: 'provider', name: 'A second one', version: '9.9.9',
     }, EXT_PROVIDER)
-    const r = await formular('/settings/plugins/install', { path: dopplung }, { alsBrowser: true })
+    const r = await postForm('/settings/plugins/install', { path: dopplung }, { asBrowser: true })
     equal(r.status, 400, 'refused')
     contains(await r.text(), 'already taken', 'and it says why')
     isFalse(existsSync(join(sk.PLUGINS, 'e2e-provider-again')), 'nothing new on disk')
     // The original is untouched, version and all.
-    contains(await (await hol('/settings/plugins')).text(), '0.4.2', 'the installed one still stands')
+    contains(await (await fetchPath('/settings/plugins')).text(), '0.4.2', 'the installed one still stands')
 
     const kaputt = paketBauen('e2e-broken', {
       api: 2, id: 'e2e-broken', kind: 'provider', name: 'From the future', version: '1.0.0',
     }, EXT_PROVIDER)
-    const r2 = await formular('/settings/plugins/install', { path: kaputt }, { alsBrowser: true })
+    const r2 = await postForm('/settings/plugins/install', { path: kaputt }, { asBrowser: true })
     equal(r2.status, 400, 'a manifest for another api version is refused too')
     contains(await r2.text(), 'api', 'naming the field')
 
-    const r3 = await formular('/settings/plugins/install', { path: join(SB, 'does-not-exist') }, { alsBrowser: true })
+    const r3 = await postForm('/settings/plugins/install', { path: join(SB, 'does-not-exist') }, { asBrowser: true })
     equal(r3.status, 400, 'a path that is not a directory is refused')
-    equal((await formular('/settings/plugins/install', { path: '' }, { alsBrowser: true })).status, 400, 'and an empty one')
+    equal((await postForm('/settings/plugins/install', { path: '' }, { asBrowser: true })).status, 400, 'and an empty one')
   })
 
   await check('the scan finds a coding agent on this machine and the banner asks about it once', async () => {
@@ -5041,9 +5041,9 @@ try {
       api: 1, id: 'e2e-agent', kind: 'harness', name: 'E2E Coding Agent', version: '1.2.3',
       description: 'A coding agent built by the e2e suite.',
     }, EXT_AGENT)
-    equal((await formular('/settings/plugins/install', { path: dir }, { alsBrowser: true })).status, 303, 'installed')
+    equal((await postForm('/settings/plugins/install', { path: dir }, { asBrowser: true })).status, 303, 'installed')
 
-    equal((await formular('/settings/plugins/scan', {}, { alsBrowser: true })).status, 303, 'scanned')
+    equal((await postForm('/settings/plugins/scan', {}, { asBrowser: true })).status, 303, 'scanned')
     const row = db.prepare(`SELECT * FROM discovery WHERE id='harness:e2e-agent'`).get()
     isTrue(!!row, 'the scan wrote a row for it')
     equal(JSON.parse(row.detail).bin, 'sh', 'and recorded WHICH binary it found')
@@ -5053,20 +5053,20 @@ try {
     // database dump.
     isFalse(JSON.stringify(row.detail).includes('sk-'), 'no secret in a discovery row')
 
-    contains(await (await hol('/')).text(), 'banner discovery', 'the banner appears on an ordinary page')
-    contains(await (await hol('/settings/plugins')).text(), 'E2E Coding Agent', 'and the finding has a card')
+    contains(await (await fetchPath('/')).text(), 'banner discovery', 'the banner appears on an ordinary page')
+    contains(await (await fetchPath('/settings/plugins')).text(), 'E2E Coding Agent', 'and the finding has a card')
 
     // Answering is what "asked once" means: a page that only SHOWS something
     // has not asked anybody anything.
-    equal((await formular('/settings/plugins/discovery',
-      { id: 'harness:e2e-agent', answer: 'dismissed' }, { alsBrowser: true })).status, 303, 'answered')
+    equal((await postForm('/settings/plugins/discovery',
+      { id: 'harness:e2e-agent', answer: 'dismissed' }, { asBrowser: true })).status, 303, 'answered')
     const nachher = db.prepare(`SELECT * FROM discovery WHERE id='harness:e2e-agent'`).get()
     equal(nachher.answer, 'dismissed', 'the answer is recorded')
     isTrue(!!nachher.asked_at, 'together with the moment it was asked')
-    isFalse((await (await hol('/')).text()).includes('banner discovery'), 'and it stops asking')
+    isFalse((await (await fetchPath('/')).text()).includes('banner discovery'), 'and it stops asking')
 
     // …and a second scan does not un-answer it.
-    equal((await formular('/settings/plugins/scan', {}, { alsBrowser: true })).status, 303, 'scanned again')
+    equal((await postForm('/settings/plugins/scan', {}, { asBrowser: true })).status, 303, 'scanned again')
     equal(db.prepare(`SELECT answer FROM discovery WHERE id='harness:e2e-agent'`).get().answer, 'dismissed',
       'a rescan never overwrites an answer')
   })
@@ -5074,7 +5074,7 @@ try {
   await check('"Add" from a finding switches the plugin on and answers the suggestion', async () => {
     // Put the finding back the way a fresh machine would have it.
     db.prepare(`UPDATE discovery SET answer=NULL, asked_at=NULL WHERE id='harness:e2e-agent'`).run()
-    equal((await formular('/settings/plugins/add', { id: 'e2e-agent' }, { alsBrowser: true })).status, 303, 'added')
+    equal((await postForm('/settings/plugins/add', { id: 'e2e-agent' }, { asBrowser: true })).status, 303, 'added')
     const cfg = db.prepare(`SELECT * FROM plugin_config WHERE plugin_id='e2e-agent'`).get()
     isTrue(!!cfg, 'the plugin is configured now')
     equal(cfg.enabled, 1, 'and switched on')
@@ -5084,23 +5084,23 @@ try {
 
   await check('an external package is uninstalled again — directory, registry and configuration', async () => {
     for (const id of ['e2e-agent', 'e2e-provider']) {
-      const r = await formular('/settings/plugins/uninstall', { id }, { alsBrowser: true })
+      const r = await postForm('/settings/plugins/uninstall', { id }, { asBrowser: true })
       equal(r.status, 303, `${id} removed`)
       isFalse(existsSync(join(sk.PLUGINS, id)), `${id}: the directory is gone`)
       isTrue(!db.prepare('SELECT 1 FROM plugin_config WHERE plugin_id=?').get(id), `${id}: its configuration too`)
       isTrue(!db.prepare('SELECT 1 FROM discovery WHERE plugin_id=?').get(id), `${id}: and its findings`)
     }
-    const html = await (await hol('/settings/plugins')).text()
+    const html = await (await fetchPath('/settings/plugins')).text()
     isFalse(html.includes('E2E Model Provider'), 'the page no longer offers it')
     isFalse(html.includes('E2E Coding Agent'), 'nor the coding agent')
     // A built-in is never removable: it is part of the running code, and a
     // registry disagreeing with the imports would be a lie.
-    const r = await formular('/settings/plugins/uninstall', { id: 'claude' }, { alsBrowser: true })
+    const r = await postForm('/settings/plugins/uninstall', { id: 'claude' }, { asBrowser: true })
     equal(r.status, 400, 'a built-in is refused')
     contains(await r.text(), 'built-in', 'and it says so')
     // And the hub still works with everything the suite installed gone.
-    equal((await hol('/settings/plugins')).status, 200, 'the page still renders')
-    equal((await hol('/')).status, 200, 'and so does the overview')
+    equal((await fetchPath('/settings/plugins')).status, 200, 'the page still renders')
+    equal((await fetchPath('/')).status, 200, 'and so does the overview')
   })
 
   // ------------------------------------------------------------------
@@ -5142,7 +5142,7 @@ export default {
     : [])
 
   await check('with no channel configured the page says so, and every notifying path is a silent no-op', async () => {
-    const r = await hol('/settings/notifications')
+    const r = await fetchPath('/settings/notifications')
     equal(r.status, 200, 'the page renders')
     const html = await r.text()
     contains(html, 'No channel is configured', 'and states the quiet installation as a state, not a problem')
@@ -5151,10 +5151,10 @@ export default {
     contains(html, '/settings/notifications/save', 'which posts to the save route')
     // Nothing anywhere nags about it: the banner slot on an ordinary page is
     // for coding agents and discoveries, never for a missing notifier.
-    isFalse((await (await hol('/')).text()).includes('banner notify'), 'no banner on the overview')
+    isFalse((await (await fetchPath('/')).text()).includes('banner notify'), 'no banner on the overview')
 
     // The test button refuses rather than reporting a success nobody had.
-    const t1 = await formular('/settings/notifications/test', { id: 'telegram' }, { alsBrowser: true })
+    const t1 = await postForm('/settings/notifications/test', { id: 'telegram' }, { asBrowser: true })
     equal(t1.status, 303, 'the button answers')
     // The reason is TRANSLATED before it travels: it is rendered to the
     // operator, and the Telegram wizard's own step 3 reaches this same path.
@@ -5179,10 +5179,10 @@ export default {
       api: 1, id: 'e2e-notifier', kind: 'notifier', name: 'E2E Notifier', version: '2.0.0',
       description: 'A notification channel built by the e2e suite.',
     }, EXT_NOTIFIER)
-    const r = await formular('/settings/plugins/install', { path: dir }, { alsBrowser: true })
+    const r = await postForm('/settings/plugins/install', { path: dir }, { asBrowser: true })
     equal(r.status, 303, `installed (${r.status === 400 ? await r.text() : ''})`.slice(0, 400))
 
-    const html = await (await hol('/settings/notifications')).text()
+    const html = await (await fetchPath('/settings/notifications')).text()
     contains(html, 'E2E Notifier', 'the package has a card on the notifications page')
     contains(html, 'Telegram', 'next to the built-in one')
     equal((html.match(/action="\/settings\/notifications\/save"/g) ?? []).length, 2, 'one card per registered notifier')
@@ -5194,19 +5194,19 @@ export default {
     const wieder = paketBauen('e2e-notifier-again', {
       api: 1, id: 'e2e-notifier', kind: 'notifier', name: 'A second one', version: '9.9.9',
     }, EXT_NOTIFIER)
-    const r2 = await formular('/settings/plugins/install', { path: wieder }, { alsBrowser: true })
+    const r2 = await postForm('/settings/plugins/install', { path: wieder }, { asBrowser: true })
     equal(r2.status, 400, 'the duplicate is refused')
     contains(await r2.text(), 'already taken', 'and it says why')
   })
 
   await check('configuring it makes the hub speak — and the message carries what a channel needs', async () => {
-    const r = await formular('/settings/notifications/save',
-      { id: 'e2e-notifier', enabled: '1', set_outfile: NOTIFY_LOG }, { alsBrowser: true })
+    const r = await postForm('/settings/notifications/save',
+      { id: 'e2e-notifier', enabled: '1', set_outfile: NOTIFY_LOG }, { asBrowser: true })
     equal(r.status, 303, 'saved')
-    contains(await (await hol('/settings/notifications')).text(), 'At least one channel is configured',
+    contains(await (await fetchPath('/settings/notifications')).text(), 'At least one channel is configured',
       'and the page changes its mind about the installation')
 
-    const t = await formular('/settings/notifications/test', { id: 'e2e-notifier' }, { alsBrowser: true })
+    const t = await postForm('/settings/notifications/test', { id: 'e2e-notifier' }, { asBrowser: true })
     equal(t.headers.get('location'), '/settings/notifications?test=ok', 'the test message went out')
     const [erste] = gemeldet()
     isTrue(!!erste, 'the plugin really received it')
@@ -5304,7 +5304,7 @@ export default {
       isTrue(j.ok && !!j.id, `${typ}: flow saved (${JSON.stringify(j).slice(0, 200)})`)
       // Through the route, not the function: "run now" is a button, and the
       // route is what an operator's click reaches.
-      equal((await formular(`/api/flows/${j.id}/run`, {}, { alsBrowser: true })).status, 303, `${typ}: run now`)
+      equal((await postForm(`/api/flows/${j.id}/run`, {}, { asBrowser: true })).status, 303, `${typ}: run now`)
       await waitFor(() => gemeldet().length > vorher, { what: `${typ}: the message went out`, timeoutMs: 15_000 })
       const m = gemeldet().at(-1)
       equal(m.kind, 'flow', `${typ}: the message says it comes from a flow`)
@@ -5314,21 +5314,21 @@ export default {
       equal(JSON.parse(fr.context).vars.out.delivered, true, `${typ}: and recorded the delivery`)
     }
     // The designer only ever offers the new name.
-    const meta = await (await hol('/api/flows/meta')).json()
+    const meta = await (await fetchPath('/api/flows/meta')).json()
     isFalse(meta.steps.some(x => x.type === 'telegram'), 'the toolbox offers one notify block, not two')
   })
 
   await check('switching the channel off silences it again, and uninstalling removes it', async () => {
     const vorher = gemeldet().length
-    equal((await formular('/settings/notifications/save',
-      { id: 'e2e-notifier', enabled: '0', set_outfile: NOTIFY_LOG }, { alsBrowser: true })).status, 303, 'switched off')
-    const t = await formular('/settings/notifications/test', { id: 'e2e-notifier' }, { alsBrowser: true })
+    equal((await postForm('/settings/notifications/save',
+      { id: 'e2e-notifier', enabled: '0', set_outfile: NOTIFY_LOG }, { asBrowser: true })).status, 303, 'switched off')
+    const t = await postForm('/settings/notifications/test', { id: 'e2e-notifier' }, { asBrowser: true })
     contains(decodeURIComponent(t.headers.get('location')), 'switched off', 'the test button says which of the two it is')
     equal(gemeldet().length, vorher, 'and nothing was written')
 
-    equal((await formular('/settings/plugins/uninstall', { id: 'e2e-notifier' }, { alsBrowser: true })).status, 303, 'uninstalled')
+    equal((await postForm('/settings/plugins/uninstall', { id: 'e2e-notifier' }, { asBrowser: true })).status, 303, 'uninstalled')
     isFalse(existsSync(join(sk.PLUGINS, 'e2e-notifier')), 'the directory is gone')
-    const html = await (await hol('/settings/notifications')).text()
+    const html = await (await fetchPath('/settings/notifications')).text()
     isFalse(html.includes('E2E Notifier'), 'the page no longer offers it')
     contains(html, 'No channel is configured', 'and the hub is quiet again — which is a complete installation')
   })
@@ -5340,13 +5340,13 @@ export default {
     const id = db.prepare(`INSERT INTO repos(name,path,base_branch) VALUES('e2e-off','${REPO}','main') RETURNING id`).get().id
     const aktiv = () => db.prepare('SELECT active FROM repos WHERE id=?').get(id).active
     equal(aktiv(), 1, 'a new repo is active')
-    equal((await formular('/repos/toggle', { id: String(id), active: '0' }, { alsBrowser: true })).status, 303, 'switching off redirects')
+    equal((await postForm('/repos/toggle', { id: String(id), active: '0' }, { asBrowser: true })).status, 303, 'switching off redirects')
     equal(aktiv(), 0, "and '0' really means off — the string is truthy, so it has to be compared")
-    await formular('/repos/toggle', { id: String(id) }, { alsBrowser: true })
+    await postForm('/repos/toggle', { id: String(id) }, { asBrowser: true })
     equal(aktiv(), 1, 'no `active` flips it')
-    await formular('/repos/toggle', { id: String(id) }, { alsBrowser: true })
+    await postForm('/repos/toggle', { id: String(id) }, { asBrowser: true })
     equal(aktiv(), 0, 'and flips it back')
-    equal((await formular('/repos/toggle', { id: '999999' }, { alsBrowser: true })).status, 400, 'an unknown repo is a readable refusal')
+    equal((await postForm('/repos/toggle', { id: '999999' }, { asBrowser: true })).status, 400, 'an unknown repo is a readable refusal')
   })
 
   await check('an inactive repo is gone from every repo dropdown but still on the Repos page', async () => {
@@ -5356,31 +5356,31 @@ export default {
 
     // The header switcher and the Quick-Run dialog share one query, so both are
     // covered by the overview's HTML.
-    const start = await (await hol(`/?repo=${repoId}`)).text()
+    const start = await (await fetchPath(`/?repo=${repoId}`)).text()
     isFalse(start.includes('>e2e-off<'), 'not in the header switcher or the Quick-Run dialog')
     // Every other place a repo can be picked.
-    isFalse((await (await hol('/agents/move?id=1')).text()).includes('>e2e-off<'), 'not a move target')
-    isFalse((await (await hol('/settings/cleanup')).text()).includes('>e2e-off<'), 'not in the cleanup settings')
-    const meta = await (await hol('/api/flows/meta')).json()
+    isFalse((await (await fetchPath('/agents/move?id=1')).text()).includes('>e2e-off<'), 'not a move target')
+    isFalse((await (await fetchPath('/settings/cleanup')).text()).includes('>e2e-off<'), 'not in the cleanup settings')
+    const meta = await (await fetchPath('/api/flows/meta')).json()
     isFalse(meta.repos.some(r => r.name === 'e2e-off'), "not in the flow designer's repo list")
     // ...but the Repos page shows it, marked, or deactivating would be a way of
     // losing a repository rather than of putting one away.
-    const seite = await (await hol('/repos')).text()
+    const seite = await (await fetchPath('/repos')).text()
     contains(seite, 'e2e-off', 'the Repos page lists it')
     contains(seite, 'repo-off', 'and marks it as deactivated')
     contains(seite, '/repos/toggle', 'with the button to bring it back')
 
     // /api/repos shows it with its flag, and filters on request.
-    const alle = await (await hol('/api/repos')).json()
+    const alle = await (await fetchPath('/api/repos')).json()
     isTrue(alle.repos.some(r => r.name === 'e2e-off' && r.active === 0), 'the API lists it with active:0')
-    isFalse((await (await hol('/api/repos?active=1')).json()).repos.some(r => r.name === 'e2e-off'), 'active=1 filters it out')
-    isTrue((await (await hol('/api/repos?active=0')).json()).repos.some(r => r.name === 'e2e-off'), 'active=0 finds only it')
+    isFalse((await (await fetchPath('/api/repos?active=1')).json()).repos.some(r => r.name === 'e2e-off'), 'active=1 filters it out')
+    isTrue((await (await fetchPath('/api/repos?active=0')).json()).repos.some(r => r.name === 'e2e-off'), 'active=0 finds only it')
   })
 
   await check('an inactive repo starts nothing, and its history stays reachable', async () => {
     const row = db.prepare(`SELECT * FROM repos WHERE name='e2e-off'`).get()
     // A manual start is refused — by name, so the operator knows why.
-    const j = await (await hol('/api/runs', {
+    const j = await (await fetchPath('/api/runs', {
       method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
       body: new URLSearchParams({
         repo_id: String(row.id), harness: 'claude', prompt: 'should not start',
@@ -5393,24 +5393,24 @@ export default {
 
     // Its own pages still render when they are asked for by id — that is what
     // makes deactivating better than deleting.
-    equal((await hol(`/?repo=${row.id}`)).status, 200, 'the overview')
-    equal((await hol(`/archive?repo=${row.id}`)).status, 200, 'the archive')
-    equal((await hol(`/api/fragments/sidebar?repo=${row.id}`)).status, 200, 'and the sidebar fragment')
+    equal((await fetchPath(`/?repo=${row.id}`)).status, 200, 'the overview')
+    equal((await fetchPath(`/archive?repo=${row.id}`)).status, 200, 'the archive')
+    equal((await fetchPath(`/api/fragments/sidebar?repo=${row.id}`)).status, 200, 'and the sidebar fragment')
   })
 
   await check('deleting refuses without the exact name, and while work is in flight', async () => {
     const id = db.prepare(`INSERT INTO repos(name,path,base_branch) VALUES('e2e-del','${REPO}','main') RETURNING id`).get().id
     const da = () => db.prepare('SELECT count(*) c FROM repos WHERE id=?').get(id).c
 
-    equal((await formular('/repos/delete', { id: String(id) }, { alsBrowser: true })).status, 400, 'no confirm at all')
-    equal((await formular('/repos/delete', { id: String(id), confirm: 'e2e-de' }, { alsBrowser: true })).status, 400, 'a near miss')
+    equal((await postForm('/repos/delete', { id: String(id) }, { asBrowser: true })).status, 400, 'no confirm at all')
+    equal((await postForm('/repos/delete', { id: String(id), confirm: 'e2e-de' }, { asBrowser: true })).status, 400, 'a near miss')
     equal(da(), 1, 'and the repo is still there after both')
 
     // A run in flight is the second fence: deleting would pull the ground out
     // from under a live tmux session.
     db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status)
       VALUES('e2e-del-run',?,'claude','x','keiner',10,'running')`).run(id)
-    const r = await formular('/repos/delete', { id: String(id), confirm: 'e2e-del' }, { alsBrowser: true })
+    const r = await postForm('/repos/delete', { id: String(id), confirm: 'e2e-del' }, { asBrowser: true })
     equal(r.status, 400, 'the right name is not enough while a run is going')
     equal(da(), 1, 'still there')
     db.prepare(`UPDATE runs SET status='done' WHERE id='e2e-del-run'`).run()
@@ -5425,11 +5425,11 @@ export default {
     db.prepare(`INSERT INTO incidents(run_id,typ,quelle) VALUES('e2e-del-run','rate_limit','log')`).run()
 
     // The dialog states the facts, and they are the real counts.
-    const seite = await (await hol('/repos')).text()
+    const seite = await (await fetchPath('/repos')).text()
     contains(seite, 'repo-del-' + id, 'the confirmation dialog is on the page')
     contains(seite, REPO, 'and names the checkout it will not touch')
 
-    const r = await formular('/repos/delete', { id: String(id), confirm: 'e2e-del' }, { alsBrowser: true })
+    const r = await postForm('/repos/delete', { id: String(id), confirm: 'e2e-del' }, { asBrowser: true })
     equal(r.status, 303, 'the right name on a quiet repo goes through')
     equal(db.prepare('SELECT count(*) c FROM repos WHERE id=?').get(id).c, 0, 'the repo')
     equal(db.prepare('SELECT count(*) c FROM agents WHERE repo_id=?').get(id).c, 0, 'its agents')
@@ -5444,7 +5444,7 @@ export default {
   group("Freilauf skills: the page, the installation, and the read-only API")
 
   await check('the settings page names what is shipped and where it would go', async () => {
-    const html = await (await hol('/settings/skills')).text()
+    const html = await (await fetchPath('/settings/skills')).text()
     contains(html, 'freilauf-runs', 'the shipped skills are listed by name')
     // The shared reference is installed but NOT offered: nobody picks it, the
     // other skills load it themselves. A footnote says one more is coming
@@ -5467,7 +5467,7 @@ export default {
     // is disabled", and a literal turns shipping one more skill into a failure
     // of this check instead of a change in what it is about. `shared` skills
     // are not rendered as boxes at all, which is the assertion two lines up.
-    const pickbar = (await (await hol('/api/skills')).json()).skills.filter(s => s.role !== 'shared').length
+    const pickbar = (await (await fetchPath('/api/skills')).json()).skills.filter(s => s.role !== 'shared').length
     isTrue(pickbar >= 6, `the picker has boxes to disable (${pickbar})`)
     equal((html.match(/name="skills_selected"[^>]*disabled/g) ?? []).length, pickbar,
       'with every one of its boxes disabled, so a save cannot rewrite the selection unseen')
@@ -5487,7 +5487,7 @@ export default {
   // change to the plugin set into a failure of this test instead of a change in
   // its subject. Every path lies inside the sandbox home
   // (FREILAUF_SKILLS_HOME), never in the operator's real one.
-  const skillZiele = async () => (await (await hol('/api/skills')).json()).targets.map(t => t.dir)
+  const skillZiele = async () => (await (await fetchPath('/api/skills')).json()).targets.map(t => t.dir)
 
   await check('switching the installation on writes into the covering directories, off takes it back', async () => {
     const vorher = await skillZiele()
@@ -5495,8 +5495,8 @@ export default {
     isTrue(vorher.every(d => d.startsWith(join(SB, 'skillhome'))),
       'and every one of them is inside the sandbox home, not the operator\'s')
 
-    const eingeschaltet = await formular('/settings/skills',
-      { skills_install: '1', skills_auto_update: '1' }, { alsBrowser: true })
+    const eingeschaltet = await postForm('/settings/skills',
+      { skills_install: '1', skills_auto_update: '1' }, { asBrowser: true })
     equal(eingeschaltet.status, 303, 'saving redirects')
     equal(db.prepare("SELECT value FROM settings WHERE key='skills_install'").get().value, '1', 'the switch is stored')
     for (const wurzel of vorher) {
@@ -5505,44 +5505,44 @@ export default {
       isTrue(existsSync(join(ziel, '.freilauf-skill.json')), `${wurzel}: with the marker that makes it removable`)
     }
 
-    const seite = await (await hol('/settings/skills')).text()
+    const seite = await (await fetchPath('/settings/skills')).text()
     contains(seite, vorher[0], 'the page now shows where it went')
 
-    const aus = await formular('/settings/skills', { skills_install: '0', skills_auto_update: '1' }, { alsBrowser: true })
+    const aus = await postForm('/settings/skills', { skills_install: '0', skills_auto_update: '1' }, { asBrowser: true })
     equal(aus.status, 303, 'switching off redirects too')
     for (const wurzel of vorher) isFalse(existsSync(join(wurzel, 'freilauf-models')), `${wurzel}: the copy is gone`)
   })
 
   await check('saving with the update row absent leaves the stored preference alone', async () => {
     const wert = () => db.prepare("SELECT value FROM settings WHERE key='skills_auto_update'").get()?.value
-    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { alsBrowser: true })
+    await postForm('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { asBrowser: true })
     equal(wert(), '1', 'it is on to begin with')
     // The browser hides AND disables the row when the installation goes off, so
     // a real save from that page carries no `skills_auto_update` at all. The
     // stored preference has to survive that, or switching the installation back
     // on would silently find updates off.
-    await formular('/settings/skills', { skills_install: '0' }, { alsBrowser: true })
+    await postForm('/settings/skills', { skills_install: '0' }, { asBrowser: true })
     equal(wert(), '1', 'and a save without the field does not turn it off')
     equal(db.prepare("SELECT value FROM settings WHERE key='skills_install'").get().value, '0', 'while the installation really went off')
   })
 
   await check('only the selected skills are installed, and deselecting removes just that one', async () => {
     const HOME = join(SB, 'skillhome')
-    const wurzel = async () => (await (await hol('/api/skills')).json()).targets[0].dir
+    const wurzel = async () => (await (await fetchPath('/api/skills')).json()).targets[0].dir
     const da = async (name) => existsSync(join(await wurzel(), name, 'SKILL.md'))
 
     // Everything, which is what an installation that said yes before this
     // setting existed already has on disk.
-    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { alsBrowser: true })
+    await postForm('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { asBrowser: true })
     isTrue(await da('freilauf-runs'), 'runs is there')
     isTrue(await da('freilauf-agents'), 'agents too')
     isTrue(await da('freilauf-models'), 'and the shared one, which nobody picks')
 
     // Now pick two. The third goes; the shared one rides along.
-    await formular('/settings/skills', {
+    await postForm('/settings/skills', {
       skills_install: '1', skills_auto_update: '1', skills_pick: '1',
       skills_selected: ['freilauf-runs', 'freilauf-repos'],
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
     isTrue(await da('freilauf-runs'), 'a selected skill stays')
     isTrue(await da('freilauf-repos'), 'and the other one')
     isFalse(await da('freilauf-agents'), 'the deselected one is removed')
@@ -5553,52 +5553,52 @@ export default {
     // A save WITHOUT the picker block must not rewrite the selection — with the
     // installation off the boxes are disabled, so nothing would travel and an
     // unguarded read would wipe a choice nobody could see.
-    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '0' }, { alsBrowser: true })
+    await postForm('/settings/skills', { skills_install: '1', skills_auto_update: '0' }, { asBrowser: true })
     equal(db.prepare("SELECT value FROM settings WHERE key='skills_selected'").get().value,
       JSON.stringify(['freilauf-runs', 'freilauf-repos']), 'the selection survives a save that did not carry it')
     isTrue(await da('freilauf-runs'), 'and nothing was reinstalled behind it')
 
     // Selecting nothing takes even the shared one: it exists for the others.
-    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '1', skills_pick: '1' },
-      { alsBrowser: true })
+    await postForm('/settings/skills', { skills_install: '1', skills_auto_update: '1', skills_pick: '1' },
+      { asBrowser: true })
     isFalse(await da('freilauf-runs'), 'nothing selected, nothing installed')
     isFalse(await da('freilauf-models'), 'the shared one goes with them')
 
     // Back to all of them for the checks after this one.
     db.prepare("DELETE FROM settings WHERE key='skills_selected'").run()
-    await formular('/settings/skills/sync', {}, { alsBrowser: true })
+    await postForm('/settings/skills/sync', {}, { asBrowser: true })
     isTrue(await da('freilauf-runs'), 'an absent selection means all of them again')
-    await formular('/settings/skills', { skills_install: '0', skills_auto_update: '1' }, { alsBrowser: true })
+    await postForm('/settings/skills', { skills_install: '0', skills_auto_update: '1' }, { asBrowser: true })
   })
 
   await check('a "sync now" post re-establishes the state without changing the settings', async () => {
-    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { alsBrowser: true })
+    await postForm('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { asBrowser: true })
     const ziel = join((await skillZiele())[0], 'freilauf-models')
     rmSync(ziel, { recursive: true, force: true })
-    const r = await formular('/settings/skills/sync', {}, { alsBrowser: true })
+    const r = await postForm('/settings/skills/sync', {}, { asBrowser: true })
     equal(r.status, 303, 'the button redirects')
     isTrue(existsSync(join(ziel, 'SKILL.md')), 'and the missing copy is back')
-    await formular('/settings/skills', { skills_install: '0', skills_auto_update: '1' }, { alsBrowser: true })
+    await postForm('/settings/skills', { skills_install: '0', skills_auto_update: '1' }, { asBrowser: true })
   })
 
   await check('a directory the hub did not write is named on the page instead of overwritten', async () => {
-    const wurzel = (await (await hol('/api/skills')).json()).targets[0]?.dir
+    const wurzel = (await (await fetchPath('/api/skills')).json()).targets[0]?.dir
       ?? join(SB, 'skillhome', '.claude', 'skills')
     const fremd = join(wurzel, 'freilauf-models')
     mkdirSync(fremd, { recursive: true })
     writeFileSync(join(fremd, 'SKILL.md'), '---\nname: freilauf-models\n---\nnot ours\n')
-    await formular('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { alsBrowser: true })
+    await postForm('/settings/skills', { skills_install: '1', skills_auto_update: '1' }, { asBrowser: true })
     contains(readFileSync(join(fremd, 'SKILL.md'), 'utf8'), 'not ours', 'the foreign file is untouched')
-    const html = await (await hol('/settings/skills')).text()
+    const html = await (await fetchPath('/settings/skills')).text()
     contains(html, fremd, 'and the page names the directory it could not write')
     // Switching off must not take it either.
-    await formular('/settings/skills', { skills_install: '0', skills_auto_update: '1' }, { alsBrowser: true })
+    await postForm('/settings/skills', { skills_install: '0', skills_auto_update: '1' }, { asBrowser: true })
     isTrue(existsSync(join(fremd, 'SKILL.md')), 'switching off leaves a foreign skill alone')
     rmSync(fremd, { recursive: true, force: true })
   })
 
   await check('GET /api/skills answers what is shipped, where it goes and what is installed', async () => {
-    const j = await (await hol('/api/skills')).json()
+    const j = await (await fetchPath('/api/skills')).json()
     isTrue(j.ok, 'ok')
     isTrue(Array.isArray(j.skills) && j.skills.length >= 1, 'the shipped skills')
     isTrue(j.skills.every(s => s.name && s.description), 'each with a name and a description')
@@ -5609,28 +5609,28 @@ export default {
   })
 
   await check('the read-only API answers for repos, agents, runs, favorites and sessions', async () => {
-    const repos = await (await hol('/api/repos')).json()
+    const repos = await (await fetchPath('/api/repos')).json()
     isTrue(repos.ok && repos.repos.some(r => r.id === repoId), 'the repo is listed')
     isTrue(Array.isArray(repos.repos[0].extras), 'with its worktree extras parsed')
 
-    const agents = await (await hol(`/api/agents?repo=${repoId}`)).json()
+    const agents = await (await fetchPath(`/api/agents?repo=${repoId}`)).json()
     isTrue(agents.ok && Array.isArray(agents.agents), 'agents answer')
 
-    const runs = await (await hol(`/api/runs?repo=${repoId}&limit=5`)).json()
+    const runs = await (await fetchPath(`/api/runs?repo=${repoId}&limit=5`)).json()
     isTrue(runs.ok && Array.isArray(runs.runs), 'runs answer')
     isTrue(runs.runs.length <= 5, 'and the limit is honoured')
     isTrue(runs.runs.every(r => r.short_id && r.id), 'every row carries its short id')
 
-    const favs = await (await hol('/api/favorites')).json()
+    const favs = await (await fetchPath('/api/favorites')).json()
     isTrue(favs.ok && Array.isArray(favs.favorites) && Number.isFinite(favs.max), 'favorites answer')
 
     // An unknown run is a 404 with a reason, not a 500 and not an empty 200.
-    const fehlt = await hol('/api/runs/00000000-0000-0000-0000-000000000000')
+    const fehlt = await fetchPath('/api/runs/00000000-0000-0000-0000-000000000000')
     equal(fehlt.status, 404, 'an unknown run is a 404')
   })
 
   await check('GET /api/runs/<id> carries the files, the events and a liveness verdict', async () => {
-    const j = await (await hol(`/api/runs/${R1}`)).json()
+    const j = await (await fetchPath(`/api/runs/${R1}`)).json()
     isTrue(j.ok, 'ok')
     equal(j.run.id, R1, 'the run')
     isTrue(Array.isArray(j.events) && j.events.length > 0, 'its events')
@@ -5649,9 +5649,9 @@ export default {
     // A script shipped inside a skill is a promise like any other line in it.
     // Run it the way an agent would: fl-api on PATH, FL_HUB_URL from the
     // session — which is exactly what a run's environment carries.
-    const skript = join(PROJEKT, 'skills', 'freilauf-runs', 'scripts', 'run-alive.py')
+    const skript = join(PROJECT, 'skills', 'freilauf-runs', 'scripts', 'run-alive.py')
     const lauf = (args) => new Promise((res) => execFile('python3', [skript, ...args], {
-      env: { ...process.env, PATH: `${join(PROJEKT, 'bin')}:${process.env.PATH}`, FL_HUB_URL: sk.basis },
+      env: { ...process.env, PATH: `${join(PROJECT, 'bin')}:${process.env.PATH}`, FL_HUB_URL: sk.base },
       timeout: 30_000,
     }, (err, stdout, stderr) => res({ code: err?.code ?? 0, stdout, stderr })))
 
@@ -5680,9 +5680,9 @@ export default {
     // Every dropdown in the UI is a list this must be able to print, and the
     // check must catch a wrong value with the valid ones next to it — that is
     // the whole point of shipping it.
-    const skript = join(PROJEKT, 'skills', 'freilauf-runs', 'scripts', 'fl-options.py')
+    const skript = join(PROJECT, 'skills', 'freilauf-runs', 'scripts', 'fl-options.py')
     const lauf = (args) => new Promise((res) => execFile('python3', [skript, ...args], {
-      env: { ...process.env, FL_HUB_URL: BASIS },
+      env: { ...process.env, FL_HUB_URL: BASE },
       timeout: 40_000,
     }, (err, stdout, stderr) => res({ code: err?.code ?? 0, stdout, stderr })))
 
@@ -5697,7 +5697,7 @@ export default {
 
     const wo = await lauf(['where'])
     equal(wo.code, 0, 'where answers')
-    contains(wo.stdout, BASIS, 'naming the hub it found')
+    contains(wo.stdout, BASE, 'naming the hub it found')
 
     // The fill-in help: a wrong value must come back with the valid ones.
     const schlecht = await lauf(['check', 'harness=claude', 'effort=maximum', 'repo_id=' + repoId])
@@ -5740,9 +5740,9 @@ export default {
     // — so if it cannot FIND that file it is worth nothing. The resolution is
     // therefore the first assertion, and the section index the second: an
     // agent that has to read 1450 lines to find one contract reads none of it.
-    const skript = join(PROJEKT, 'skills', 'freilauf-plugins', 'scripts', 'fl-plugins.py')
+    const skript = join(PROJECT, 'skills', 'freilauf-plugins', 'scripts', 'fl-plugins.py')
     const lauf = (args) => new Promise((res) => execFile('python3', [skript, ...args], {
-      env: { ...process.env, FL_HUB_URL: BASIS },
+      env: { ...process.env, FL_HUB_URL: BASE },
       timeout: 40_000,
     }, (err, stdout, stderr) => res({ code: err?.code ?? 0, stdout, stderr })))
 
@@ -5753,7 +5753,7 @@ export default {
 
     const docs = await lauf(['docs'])
     equal(docs.code, 0, `docs answers (${docs.stderr})`)
-    contains(docs.stdout, join(PROJEKT, 'docs', 'plugins.md'), 'resolving the real file')
+    contains(docs.stdout, join(PROJECT, 'docs', 'plugins.md'), 'resolving the real file')
     contains(docs.stdout, 'Coding agent plugin contract', 'and printing its sections')
     contains(docs.stdout, 'Notifier plugin contract', 'all three kinds among them')
 
@@ -5770,13 +5770,13 @@ export default {
   })
 
   await check('the search finds a run by its title, its prompt and its id', async () => {
-    const nachTitel = await (await hol(`/api/runs?repo=${repoId}&q=${encodeURIComponent(R1.slice(0, 8))}&archived=all`)).json()
+    const nachTitel = await (await fetchPath(`/api/runs?repo=${repoId}&q=${encodeURIComponent(R1.slice(0, 8))}&archived=all`)).json()
     isTrue(nachTitel.runs.some(r => r.id === R1), 'by the beginning of its id')
   })
 
   await check('the welcome wizard answers on every step and each POST moves one step on', async () => {
     for (let step = 1; step <= 6; step++) {
-      const r = await hol(`/welcome?step=${step}`)
+      const r = await fetchPath(`/welcome?step=${step}`)
       equal(r.status, 200, `step ${step} renders`)
       const html = await r.text()
       contains(html, `${step} of 6`, `step ${step} says where it is`)
@@ -5795,8 +5795,8 @@ export default {
     }
     // An out-of-range step is step 1, not a 404: the address is typed by hand
     // and by a bookmark, and neither deserves an error page.
-    equal((await hol('/welcome?step=99')).status, 200, 'a nonsense step still renders')
-    equal((await hol('/welcome?step=abc')).status, 200, 'and so does a non-number')
+    equal((await fetchPath('/welcome?step=99')).status, 200, 'a nonsense step still renders')
+    equal((await fetchPath('/welcome?step=abc')).status, 200, 'and so does a non-number')
 
     const schritte = [
       ['/welcome/hello', {}, '/welcome?step=2'],
@@ -5810,8 +5810,8 @@ export default {
       ['/welcome/skills', { skills_install: '0', skills_auto_update: '1' }, '/welcome?step=6'],
       ['/welcome/done', {}, '/'],
     ]
-    for (const [pfad, daten, ziel] of schritte) {
-      const r = await formular(pfad, daten, { alsBrowser: true })
+    for (const [pfad, data, ziel] of schritte) {
+      const r = await postForm(pfad, data, { asBrowser: true })
       equal(r.status, 303, `${pfad} redirects`)
       equal(r.headers.get('location'), ziel, `${pfad} → ${ziel}`)
     }
@@ -5819,60 +5819,60 @@ export default {
     equal(db.prepare(`SELECT enabled FROM plugin_config WHERE plugin_id='openrouter'`).get().enabled, 1,
       'the chosen model provider is switched on')
     // A provider the hub does not know is a readable problem, not a stored row.
-    const schlecht = await formular('/welcome/provider', { id: 'not-a-provider' }, { alsBrowser: true })
+    const schlecht = await postForm('/welcome/provider', { id: 'not-a-provider' }, { asBrowser: true })
     equal(schlecht.status, 400, 'an unknown provider is refused')
   })
 
   await check('ticking "do not show again" is what stops GET / from redirecting', async () => {
-    const alsBrowser = { headers: { accept: 'text/html,application/xhtml+xml' } }
+    const asBrowser = { headers: { accept: 'text/html,application/xhtml+xml' } }
     try {
       // A fresh installation: the wizard is what `GET /` shows, but only for a
       // BROWSER navigation — an API caller asking for `/` must never be
       // answered with a redirect to HTML.
-      sk.setzeEinstellung('welcome_hide', '0')
-      const alsMensch = await hol('/', alsBrowser)
+      sk.setSetting('welcome_hide', '0')
+      const alsMensch = await fetchPath('/', asBrowser)
       equal(alsMensch.status, 303, 'a browser navigation goes to the wizard')
       equal(alsMensch.headers.get('location'), '/welcome', 'to /welcome')
-      equal((await hol('/')).status, 200, 'a fetch without an Accept header gets the overview')
-      equal((await hol('/api/usage')).status, 200, 'and the API is untouched')
+      equal((await fetchPath('/')).status, 200, 'a fetch without an Accept header gets the overview')
+      equal((await fetchPath('/api/usage')).status, 200, 'and the API is untouched')
       // "Skip for now" is a session answer and must not bounce into a loop.
-      const skip = await hol('/?welcome=skip', alsBrowser)
+      const skip = await fetchPath('/?welcome=skip', asBrowser)
       equal(skip.status, 200, 'skipping lands on the overview')
       isTrue(String(skip.headers.get('set-cookie') ?? '').includes('freilauf_welcome'),
         'and marks the browser so the link does not bounce back')
 
       // The box is honoured from any step, not only the last one.
-      equal((await formular('/welcome/hello', { welcome_hide: '1' }, { alsBrowser: true })).status, 303, 'ticked on step 1')
+      equal((await postForm('/welcome/hello', { welcome_hide: '1' }, { asBrowser: true })).status, 303, 'ticked on step 1')
       equal(db.prepare(`SELECT value FROM settings WHERE key='welcome_hide'`).get().value, '1', 'the setting is written')
-      const danach = await hol('/', alsBrowser)
+      const danach = await fetchPath('/', asBrowser)
       equal(danach.status, 200, 'and the overview is the overview again')
       contains(await danach.text(), 'Quick Run', 'really the hub, not the wizard')
       // …and it can be switched back on, which is what the hidden `0`
       // companion exists for: an unticked box sends NOTHING, so without a
       // field carrying `0` the wizard could only ever be switched off.
-      contains(await (await hol('/welcome')).text(),
+      contains(await (await fetchPath('/welcome')).text(),
         '<input type="hidden" name="welcome_hide" value="0">', 'the form ships that companion')
-      equal((await formular('/welcome/hello', { welcome_hide: '0' }, { alsBrowser: true })).status, 303, 'unticked')
+      equal((await postForm('/welcome/hello', { welcome_hide: '0' }, { asBrowser: true })).status, 303, 'unticked')
       equal(db.prepare(`SELECT value FROM settings WHERE key='welcome_hide'`).get().value, '0', 'switched back on')
-      equal((await hol('/', alsBrowser)).status, 303, 'and the wizard is back')
+      equal((await fetchPath('/', asBrowser)).status, 303, 'and the wizard is back')
 
       // The way out of an unlocked wizard saves the box on its way. This is the
       // gesture a returning operator actually makes — tick it, then leave — and
       // it used to be a link outside the form, so the tick never arrived.
-      const raus = await formular('/welcome/hello', { welcome_hide: '1', exit: '1' }, { alsBrowser: true })
+      const raus = await postForm('/welcome/hello', { welcome_hide: '1', exit: '1' }, { asBrowser: true })
       equal(raus.status, 303, 'leaving redirects')
       equal(raus.headers.get('location'), '/', 'into the hub, not on to step 2')
       equal(db.prepare(`SELECT value FROM settings WHERE key='welcome_hide'`).get().value, '1',
         'and the ticked box was saved on the way out')
       // Untouched box, same exit: the session mark is what keeps `GET /` from
       // sending the operator straight back to the page they just left.
-      sk.setzeEinstellung('welcome_hide', '0')
-      const rausOhne = await formular('/welcome/hello', { welcome_hide: '0', exit: '1' }, { alsBrowser: true })
+      sk.setSetting('welcome_hide', '0')
+      const rausOhne = await postForm('/welcome/hello', { welcome_hide: '0', exit: '1' }, { asBrowser: true })
       equal(rausOhne.headers.get('location'), '/', 'leaving without ticking still leaves')
       isTrue(String(rausOhne.headers.get('set-cookie') ?? '').includes('freilauf_welcome'),
         'and marks the session, so the redirect cannot bounce it back')
     } finally {
-      sk.setzeEinstellung('welcome_hide', '1')
+      sk.setSetting('welcome_hide', '1')
     }
   })
 
@@ -5880,19 +5880,19 @@ export default {
   if (ECHT) {
     // From here on with the REAL fl-start and real harnesses. Deliberately a second
     // hub start: the stub part above must stay deterministic and free of charge.
-    await hubStoppen()
-    await hubStarten({ echteAgenten: true })
+    await stopHub()
+    await startHub({ realAgents: true })
 
     const harnesses = [
-      { name: 'claude', bedingung: () => vorhanden('claude'), fehlt: 'claude not in PATH' },
+      { name: 'claude', bedingung: () => hasBinary('claude'), fehlt: 'claude not in PATH' },
       {
         name: 'opencode', provider: 'openrouter', model: ECHT_MODELL,
-        bedingung: () => vorhanden('opencode') && !!ECHT_KEYS.OPENROUTER_API_KEY,
+        bedingung: () => hasBinary('opencode') && !!ECHT_KEYS.OPENROUTER_API_KEY,
         fehlt: 'opencode missing or OPENROUTER_API_KEY is not set',
       },
       {
         name: 'hermes', provider: 'openrouter', model: ECHT_MODELL,
-        bedingung: () => vorhanden('hermes') && !!ECHT_KEYS.OPENROUTER_API_KEY,
+        bedingung: () => hasBinary('hermes') && !!ECHT_KEYS.OPENROUTER_API_KEY,
         fehlt: 'hermes missing or OPENROUTER_API_KEY is not set',
       },
       {
@@ -5900,7 +5900,7 @@ export default {
         // prefix is right (opencode/… and NOT opencode-zen/…).
         name: 'opencode', titel: 'opencode via OpenCode Zen (free model)',
         provider: 'opencode-zen', model: ZEN_MODELL, marke: 'zen-echt.md',
-        bedingung: () => vorhanden('opencode'),
+        bedingung: () => hasBinary('opencode'),
         fehlt: 'opencode not in PATH',
       },
     ]
@@ -5944,7 +5944,7 @@ export default {
         // three, a summary or a `git status` — did not turn the finished run
         // into a follow-up. It reads "done", not "waiting for input".
         equal(lauf(j.runId).followup_since, null, `${h.name}'s tail calls after the report opened no commission`)
-        contains(await (await hol(`/runs/${j.runId}`)).text(), '"status-chip">Done<', `${h.name}'s run reads done`)
+        contains(await (await fetchPath(`/runs/${j.runId}`)).text(), '"status-chip">Done<', `${h.name}'s run reads done`)
       })
     }
   }
@@ -5952,7 +5952,7 @@ export default {
   console.log(`\nAborted: ${err.stack}`)
   counter.failures.push({ name: 'Test run', reason: err.message })
 } finally {
-  await aufraeumen()
+  await cleanUp()
 }
 
 process.exit(summary(`E2E tests${ECHT ? ' (with real runs)' : ''}`, start))

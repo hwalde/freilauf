@@ -17,17 +17,17 @@ const start = Date.now()
 
 // Own data directory: importing runner.mjs pulls in db.mjs, which would otherwise
 // touch the real hub database.
-const sandkasten = mkdtempSync(join(tmpdir(), 'freilauf-unit-'))
-process.env.FREILAUF_DATA_DIR = join(sandkasten, 'data')
+const sandbox = mkdtempSync(join(tmpdir(), 'freilauf-unit-'))
+process.env.FREILAUF_DATA_DIR = join(sandbox, 'data')
 // The OpenRouter best-provider cache is a file next to the hub's real data —
 // the suite points it into its own sandbox or a suite run would read (and
 // overwrite) the operator's live selections.
-process.env.FREILAUF_OR_ROUTING_JSON = join(sandkasten, 'openrouter-routing.json')
+process.env.FREILAUF_OR_ROUTING_JSON = join(sandbox, 'openrouter-routing.json')
 // The hub's own agent skills resolve their target directories against $HOME
 // (~/.claude/skills and friends). Without this fence a suite run would install
 // into — and later DELETE from — the operator's real skill directories.
-process.env.FREILAUF_SKILLS_HOME = join(sandkasten, 'skillhome')
-process.env.FREILAUF_SKILLS_STATE = join(sandkasten, 'skills-installed.json')
+process.env.FREILAUF_SKILLS_HOME = join(sandbox, 'skillhome')
+process.env.FREILAUF_SKILLS_STATE = join(sandbox, 'skills-installed.json')
 
 const d = (s) => new Date(s)
 
@@ -505,7 +505,7 @@ try {
   // QUOTA_PATH is read when the module loads — import freshly for each fixture
   // (the query suffix bypasses the module cache).
   const quotaMit = async (inhalt, nr) => {
-    const pfad = join(sandkasten, `quota${nr}.json`)
+    const pfad = join(sandbox, `quota${nr}.json`)
     if (inhalt !== null) writeFileSync(pfad, inhalt)
     process.env.FREILAUF_QUOTA_JSON = pfad
     return import(`../server/quota.mjs?fixture=${nr}`)
@@ -729,7 +729,7 @@ try {
   await check('budgetGate routes by provider and honours the on/off switches', async () => {
     // The scheduler loads quota.mjs on ITS import, so the fixture path and the
     // settings must stand before that import happens.
-    const quotaPfad = join(sandkasten, 'quota-budgetgate.json')
+    const quotaPfad = join(sandbox, 'quota-budgetgate.json')
     writeFileSync(quotaPfad, JSON.stringify({
       five_hour: { used_percentage: 97, resets_at: 1800000000 },
       seven_day: { used_percentage: 98 },
@@ -748,7 +748,7 @@ try {
       OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
       FREILAUF_CURSOR_AUTH: process.env.FREILAUF_CURSOR_AUTH,
     }
-    const cursorAuth = join(sandkasten, 'cursor-auth.json')
+    const cursorAuth = join(sandbox, 'cursor-auth.json')
     writeFileSync(cursorAuth, JSON.stringify({ accessToken: 't' }))
     process.env.DEEPSEEK_API_KEY = 'ds-test'
     process.env.OPENROUTER_API_KEY = 'or-test'
@@ -861,7 +861,7 @@ try {
 
   await check('cursor gate measures the included usage against its own threshold', async () => {
     const echt = global.fetch
-    const auth = join(sandkasten, 'cursor-gate-auth.json')
+    const auth = join(sandbox, 'cursor-gate-auth.json')
     writeFileSync(auth, JSON.stringify({ accessToken: 't' }))
     const alt = process.env.FREILAUF_CURSOR_AUTH
     process.env.FREILAUF_CURSOR_AUTH = auth
@@ -881,7 +881,7 @@ try {
       const { cursorGateBlocked: g2 } = await cu(2)
       isFalse((await g2(99.9, 20)).blocked, '99.5 % passes against a threshold of 99.9')
 
-      process.env.FREILAUF_CURSOR_AUTH = join(sandkasten, 'missing-cursor-gate-auth.json')
+      process.env.FREILAUF_CURSOR_AUTH = join(sandbox, 'missing-cursor-gate-auth.json')
       const { cursorGateBlocked: g3 } = await cu(3)
       isFalse((await g3(95, 20)).blocked, 'no token → no signal → the gate stays open')
     } finally {
@@ -1071,7 +1071,7 @@ try {
 
   await check('without a credentials file nothing is fetched and nothing throws', async () => {
     const before = process.env.FREILAUF_CLAUDE_CREDENTIALS
-    process.env.FREILAUF_CLAUDE_CREDENTIALS = join(sandkasten, 'no-such-credentials.json')
+    process.env.FREILAUF_CLAUDE_CREDENTIALS = join(sandbox, 'no-such-credentials.json')
     // No URL is set either: were a request made anyway, this would hang or throw
     // rather than quietly pass.
     equal(await cu.refreshClaudeLimits({ force: true }), null, 'no token, no answer')
@@ -1081,7 +1081,7 @@ try {
   })
 
   await check('an expired token is not used and is not refreshed', async () => {
-    const credPath = join(sandkasten, 'expired-credentials.json')
+    const credPath = join(sandbox, 'expired-credentials.json')
     writeFileSync(credPath, JSON.stringify({
       claudeAiOauth: { accessToken: 'x', refreshToken: 'y', expiresAt: Date.now() - 1000 },
     }))
@@ -1100,7 +1100,7 @@ try {
   // when the vendor asks for a pause.
   await check('a 429 backs off — the endpoint is not asked again right away', async () => {
     cu._claudeLimitsReset()
-    const credPath = join(sandkasten, 'backoff-credentials.json')
+    const credPath = join(sandbox, 'backoff-credentials.json')
     writeFileSync(credPath, JSON.stringify({
       claudeAiOauth: { accessToken: 'x', refreshToken: 'y', expiresAt: Date.now() + 3600_000 },
     }))
@@ -1127,7 +1127,7 @@ try {
 
   await check('Retry-After is honoured and a success clears the backoff', async () => {
     cu._claudeLimitsReset()
-    const credPath = join(sandkasten, 'backoff-credentials.json')
+    const credPath = join(sandbox, 'backoff-credentials.json')
     writeFileSync(credPath, JSON.stringify({
       claudeAiOauth: { accessToken: 'x', refreshToken: 'y', expiresAt: Date.now() + 3600_000 },
     }))
@@ -1160,7 +1160,7 @@ try {
   // rate-limited stretch dropped the 5-hour bar to whatever quota.json last
   // held and back, on every gap in the live answer.
   await check('a rate-limited stretch keeps the last live answer standing', async () => {
-    const pfad = join(sandkasten, 'quota21.json')
+    const pfad = join(sandbox, 'quota21.json')
     writeFileSync(pfad, JSON.stringify({ five_hour: { used_percentage: 3 }, seven_day: { used_percentage: 77 } }))
     const alt = new Date(Date.now() - 3600_000)
     utimesSync(pfad, alt, alt)   // a file nobody has rewritten for an hour
@@ -1179,7 +1179,7 @@ try {
   })
 
   await check('a file rewritten after the last live answer wins — the status line keeps it moving', async () => {
-    const pfad = join(sandkasten, 'quota22.json')
+    const pfad = join(sandbox, 'quota22.json')
     writeFileSync(pfad, JSON.stringify({ five_hour: { used_percentage: 42 }, seven_day: { used_percentage: 11 } }))
     process.env.FREILAUF_QUOTA_JSON = pfad
     const { claudeQuota } = await import('../server/quota.mjs?fixture=22')
@@ -1506,7 +1506,7 @@ try {
   })
 
   await check('an existing hooks.json is never overwritten', () => {
-    const wt = join(sandkasten, 'wt-hooks')
+    const wt = join(sandbox, 'wt-hooks')
     mkdirSync(wt, { recursive: true })
     equal(writeHarnessHooks('cursor', wt).join(','), '.cursor/hooks.json', 'the folder is created along with it')
     writeFileSync(join(wt, '.cursor', 'hooks.json'), '{"mine":true}')
@@ -1566,7 +1566,7 @@ try {
   // A store in the shape opencode 1.18 writes: sessions carry parent_id and
   // their own totals, messages and parts carry their own time_updated.
   const ocStore = (rows, { withParent = true } = {}) => {
-    const f = join(sandkasten, `oc-${Math.random().toString(36).slice(2)}.db`)
+    const f = join(sandbox, `oc-${Math.random().toString(36).slice(2)}.db`)
     const d = new OcDb(f)
     d.exec(`CREATE TABLE session (id TEXT PRIMARY KEY, ${withParent ? 'parent_id TEXT,' : ''} directory TEXT,
               cost REAL, tokens_input INTEGER, tokens_output INTEGER, time_created INTEGER, time_updated INTEGER);
@@ -1659,7 +1659,7 @@ try {
   })
 
   await check('no store, no answer — and never a thrown watcher pass', async () => {
-    process.env.FREILAUF_OPENCODE_DB = join(sandkasten, 'does-not-exist.db')
+    process.env.FREILAUF_OPENCODE_DB = join(sandbox, 'does-not-exist.db')
     try {
       const run = { harness: 'opencode', workdir_effective: OC_WT, started_at: '2026-09-04 15:11:00' }
       equal(await storeActivity(run), null, 'null, not an exception')
@@ -1972,7 +1972,7 @@ try {
 
   // ------------------------------------------------------------------
   group('Extra skills (zusaetze.mjs)')
-  const zdir = join(sandkasten, 'zusaetze')
+  const zdir = join(sandbox, 'zusaetze')
   process.env.FREILAUF_ZUSAETZE_DIR = zdir
   mkdirSync(join(zdir, 'unlazy'), { recursive: true })
   writeFileSync(join(zdir, 'unlazy', 'SKILL.md'),
@@ -2027,7 +2027,7 @@ try {
 
   const skillsMod = await import('../server/skills.mjs')
   const { setPluginConfig: skillsPluginConfig } = await import('../server/plugins/store.mjs')
-  const { setSetting: setzeEinstellung } = await import('../server/db.mjs')
+  const { setSetting: setSetting } = await import('../server/db.mjs')
 
   await check('a user path is resolved against the skills home, an absolute one is left alone', () => {
     equal(skillsMod.expandHome('~/.claude/skills', '/h'), '/h/.claude/skills', 'tilde')
@@ -2190,8 +2190,8 @@ try {
     const { join: j } = await import('node:path')
     const HOME = process.env.FREILAUF_SKILLS_HOME
     for (const id of ['claude', 'opencode', 'hermes']) skillsPluginConfig(id, { kind: 'harness', source: 'builtin', enabled: 1 })
-    setzeEinstellung('skills_install', '1')
-    setzeEinstellung('skills_auto_update', '1')
+    setSetting('skills_install', '1')
+    setSetting('skills_auto_update', '1')
 
     const erst = skillsMod.syncSkills()
     const anzahl = skillsMod.availableSkills().length
@@ -2212,10 +2212,10 @@ try {
 
     // ...unless automatic updating is off, which is the whole meaning of that switch.
     wf(j(ziel, 'SKILL.md'), 'tampered again')
-    setzeEinstellung('skills_auto_update', '0')
+    setSetting('skills_auto_update', '0')
     equal(skillsMod.syncSkills().updated.length, 0, 'with updates off nothing is touched')
     equal(rf(j(ziel, 'SKILL.md'), 'utf8'), 'tampered again', 'the copy stays as it is')
-    setzeEinstellung('skills_auto_update', '1')
+    setSetting('skills_auto_update', '1')
     skillsMod.syncSkills()
 
     // A skill of the operator's own, in the same directory, under a name the hub
@@ -2234,7 +2234,7 @@ try {
     isTrue(ex(j(ziel, 'SKILL.md')), 'and the shared directory is untouched')
 
     // Switching the whole thing off removes what the hub wrote, and nothing else.
-    setzeEinstellung('skills_install', '0')
+    setSetting('skills_install', '0')
     const aus = skillsMod.syncSkills()
     equal(aus.removed.length, anzahl, 'every remaining copy')
     equal(rd(j(HOME, '.claude', 'skills')).join(), 'meins', "the operator's own skill is all that is left")
@@ -2275,12 +2275,12 @@ try {
     const kollision = j(HOME, '.claude', 'skills', name)
     md(kollision, { recursive: true })
     wf(j(kollision, 'SKILL.md'), '---\nname: ' + name + '\n---\nnot ours\n')
-    setzeEinstellung('skills_install', '1')
+    setSetting('skills_install', '1')
     const r = skillsMod.syncSkills()
     isTrue(r.conflicts.some(c => c.dir === kollision), 'the collision is reported')
     equal((await import('node:fs')).readFileSync(j(kollision, 'SKILL.md'), 'utf8').includes('not ours'), true,
       'and the file is left exactly as it was')
-    setzeEinstellung('skills_install', '0')
+    setSetting('skills_install', '0')
     skillsMod.syncSkills()
     isTrue(ex(j(kollision, 'SKILL.md')), 'switching off does not delete it either')
   })
@@ -2545,7 +2545,7 @@ try {
   // endpoint (cents), so no plan has to be guessed. Fetch is stubbed — the test
   // must never talk to api2.cursor.sh.
   await check('cursor usage() takes spend, included amount and cycle from GetCurrentPeriodUsage', async () => {
-    const auth = join(sandkasten, 'cursor-auth.json')
+    const auth = join(sandbox, 'cursor-auth.json')
     writeFileSync(auth, JSON.stringify({ accessToken: 'tok' }))
     const altAuth = process.env.FREILAUF_CURSOR_AUTH
     process.env.FREILAUF_CURSOR_AUTH = auth
@@ -2572,7 +2572,7 @@ try {
     }
   })
   await check('cursor model list puts "auto" first and marks it', async () => {
-    const bin = join(sandkasten, 'bin-cursor')
+    const bin = join(sandbox, 'bin-cursor')
     mkdirSync(bin, { recursive: true })
     writeFileSync(join(bin, 'cursor-agent'),
       '#!/bin/sh\necho "Available models"\necho ""\necho "zeta-1 - Zeta"\necho "auto - Auto (default)"\necho "alpha-1-fast - Alpha Fast"\n')
@@ -4796,7 +4796,7 @@ try {
     isFalse(ca.isHarnessEnabled('claude'), 'not configured = not enabled')
   })
   await check('seedIfEmpty only fills an empty table and skips invalid entries', async () => {
-    const seed = join(sandkasten, 'seed.json')
+    const seed = join(sandbox, 'seed.json')
     writeFileSync(seed, JSON.stringify({ coding_agents: [{ harness: 'claude' }, { harness: 'quatsch' }] }))
     process.env.FREILAUF_AGENTS_SEED = seed
     equal(ca.seedIfEmpty(), 0, 'table not empty: nothing seeded')
@@ -5464,7 +5464,7 @@ try {
       const weg = await ex.suggestExtras('/does/not/exist')
       isFalse(weg.ok, 'missing directory is refused')
       contains(weg.error, 'does/not/exist', 'and names the path')
-      const keinGit = await ex.suggestExtras(sandkasten)
+      const keinGit = await ex.suggestExtras(sandbox)
       isFalse(keinGit.ok, 'a directory without .git is refused')
       contains(keinGit.error, 'git', 'and says so')
     } finally {
@@ -5504,7 +5504,7 @@ try {
   })
   await check('a real repo is turned into a prompt and the answer normalized', async () => {
     // A tiny real git repo: README tracked, .env and referenz/ untracked+ignored.
-    const repo = join(sandkasten, 'extras-repo')
+    const repo = join(sandbox, 'extras-repo')
     mkdirSync(repo, { recursive: true })
     writeFileSync(join(repo, 'README.md'), '# x\n')
     writeFileSync(join(repo, '.gitignore'), '.env\nreferenz/\n')
@@ -5520,7 +5520,7 @@ try {
 
     const echt = globalThis.fetch
     const key = process.env.OPENROUTER_API_KEY
-    const basis = process.env.FREILAUF_OPENROUTER_BASE
+    const base = process.env.FREILAUF_OPENROUTER_BASE
     let koerper = null
     globalThis.fetch = async (url, opts) => {
       koerper = JSON.parse(opts.body)
@@ -5546,7 +5546,7 @@ try {
     } finally {
       globalThis.fetch = echt
       if (key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = key
-      if (basis === undefined) delete process.env.FREILAUF_OPENROUTER_BASE; else process.env.FREILAUF_OPENROUTER_BASE = basis
+      if (base === undefined) delete process.env.FREILAUF_OPENROUTER_BASE; else process.env.FREILAUF_OPENROUTER_BASE = base
       rmSync(repo, { recursive: true, force: true })
     }
   })
@@ -5554,7 +5554,7 @@ try {
     // The repo above is gone; a fresh one. The model answers with an empty list —
     // which is a valid result: the form gets `[]` like any other answer, and the
     // dialog closes. "The model suggested nothing usable" is not an error state.
-    const repo = join(sandkasten, 'extras-leer-repo')
+    const repo = join(sandbox, 'extras-leer-repo')
     mkdirSync(repo, { recursive: true })
     writeFileSync(join(repo, 'README.md'), '# x\n')
     const git = (a) => execFileSync('git', ['-C', repo, ...a], { stdio: ['ignore', 'pipe', 'ignore'] })
@@ -5566,7 +5566,7 @@ try {
 
     const echt = globalThis.fetch
     const key = process.env.OPENROUTER_API_KEY
-    const basis = process.env.FREILAUF_OPENROUTER_BASE
+    const base = process.env.FREILAUF_OPENROUTER_BASE
     globalThis.fetch = async () => ({
       ok: true,
       json: async () => ({ choices: [{ message: { content: JSON.stringify({ extras: [] }) } }] }),
@@ -5580,7 +5580,7 @@ try {
     } finally {
       globalThis.fetch = echt
       if (key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = key
-      if (basis === undefined) delete process.env.FREILAUF_OPENROUTER_BASE; else process.env.FREILAUF_OPENROUTER_BASE = basis
+      if (base === undefined) delete process.env.FREILAUF_OPENROUTER_BASE; else process.env.FREILAUF_OPENROUTER_BASE = base
       rmSync(repo, { recursive: true, force: true })
     }
   })
@@ -6573,7 +6573,7 @@ try {
   })
 
   await check('pick(): the new path, unless only the old one is there', () => {
-    const neu = join(sandkasten, 'pick-neu'), alt = join(sandkasten, 'pick-alt')
+    const neu = join(sandbox, 'pick-neu'), alt = join(sandbox, 'pick-alt')
     equal(pick(neu, alt), neu, 'neither exists → the new one (a fresh install never creates the old layout)')
     mkdirSync(alt, { recursive: true })
     equal(pick(neu, alt), alt, 'only the old one exists → keep using it')
@@ -6582,7 +6582,7 @@ try {
   })
 
   await check('the directories follow that rule, and an explicit variable overrules it', () => {
-    const heim = join(sandkasten, 'heim')
+    const heim = join(sandbox, 'heim')
     const cfg = join(heim, '.config'), dat = join(heim, '.local', 'share')
     mkdirSync(join(cfg, 'cc-hub'), { recursive: true })
     mkdirSync(join(dat, 'cc-hub'), { recursive: true })
@@ -6611,7 +6611,7 @@ try {
   })
 
   await check('bin/fl-paths.sh answers the same questions in bash', () => {
-    const heim = join(sandkasten, 'bash-heim')
+    const heim = join(sandbox, 'bash-heim')
     mkdirSync(join(heim, '.config', 'cc-hub'), { recursive: true })
     mkdirSync(join(heim, '.local', 'share', 'freilauf'), { recursive: true })
     writeFileSync(join(heim, '.local', 'share', 'freilauf', 'freilauf.db'), '')
@@ -6642,7 +6642,7 @@ try {
   await check('the tmux prefix: fl- is what is created, cc- is still recognised', () => {
     const lib = new URL('../bin/fl-harness-tags.sh', import.meta.url).pathname
     const frage = (ausdruck) => execFileSync('bash', ['-c', `. ${JSON.stringify(lib)}; ${ausdruck}`],
-      { encoding: 'utf8', env: { ...process.env, FREILAUF_HARNESS_TAGS: join(sandkasten, 'no-tags') } }).trim()
+      { encoding: 'utf8', env: { ...process.env, FREILAUF_HARNESS_TAGS: join(sandbox, 'no-tags') } }).trim()
     equal(frage('printf %s "$FL_PREFIX"'), 'fl-', 'new sessions are fl-')
     equal(frage('fl_session_re'), '^(fl-|cc-)', 'both prefixes are listed')
     equal(frage('fl_harness_of fl-oc-nacht'), 'opencode', 'a new opencode session')
@@ -6806,7 +6806,7 @@ try {
     contains(start, 'chat -q "$FL_PROMPT" --yolo --accept-hooks', 'and so does the built-in case')
     // The wrapper: silent outside a run, a translation inside one. A fake
     // fl-report on the PATH records what it was called with.
-    const dir = join(sandkasten, 'hermes-hook'); mkdirSync(dir, { recursive: true })
+    const dir = join(sandbox, 'hermes-hook'); mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, 'fl-report'), '#!/usr/bin/env bash\ncat >/dev/null; echo "$1" >> "$HOOK_LOG"\n')
     chmodSync(join(dir, 'fl-report'), 0o755)
     const wrapper = new URL('../bin/fl-hermes-hook', import.meta.url).pathname
@@ -6851,45 +6851,45 @@ try {
   group('The test sandbox takes back what a killed suite left standing')
 
   await check('a sandbox whose owner is dead is swept, a live one never is', async () => {
-    const { sandkastenVerwaist } = await import('./sandkasten.mjs')
+    const { sandboxOrphaned } = await import('./sandbox-env.mjs')
     const jetzt = Date.parse('2026-09-05T12:00:00Z')
-    const lebt = (pid) => pid === 4711
+    const alive = (pid) => pid === 4711
     // The one answer that must never be wrong: a running suite keeps its sessions.
-    isFalse(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-running', pid: 4711, mtimeMs: jetzt }, { nowMs: jetzt, lebt }),
+    isFalse(sandboxOrphaned({ path: '/tmp/Freilauf-e2e-running', pid: 4711, mtimeMs: jetzt }, { nowMs: jetzt, alive }),
       'a suite that is still running')
-    isTrue(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-dead', pid: 4712, mtimeMs: jetzt }, { nowMs: jetzt, lebt }),
+    isTrue(sandboxOrphaned({ path: '/tmp/Freilauf-e2e-dead', pid: 4712, mtimeMs: jetzt }, { nowMs: jetzt, alive }),
       'its owner is gone, so the sessions are garbage')
     // Freshness does not save a dead owner: SIGKILL is instant, and the directory's
     // mtime is then seconds old while every session in it is already orphaned.
-    isTrue(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-dead', pid: 4712, mtimeMs: jetzt - 1000 }, { nowMs: jetzt, lebt }),
+    isTrue(sandboxOrphaned({ path: '/tmp/Freilauf-e2e-dead', pid: 4712, mtimeMs: jetzt - 1000 }, { nowMs: jetzt, alive }),
       'a freshly killed suite too')
-    isFalse(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-self', pid: 4712, mtimeMs: jetzt }, { nowMs: jetzt, eigenerPfad: '/tmp/Freilauf-e2e-self', lebt }),
+    isFalse(sandboxOrphaned({ path: '/tmp/Freilauf-e2e-self', pid: 4712, mtimeMs: jetzt }, { nowMs: jetzt, ownPath: '/tmp/Freilauf-e2e-self', alive }),
       'and never our own directory')
   })
 
   await check('a sandbox kept with --keep is never swept', async () => {
-    const { sandkastenVerwaist, VERWAIST_ALTER_MS } = await import('./sandkasten.mjs')
+    const { sandboxOrphaned, ORPHAN_AGE_MS } = await import('./sandbox-env.mjs')
     const jetzt = Date.parse('2026-09-05T12:00:00Z')
     // Its owner IS dead — the suite finished — and it is old on purpose. Without
     // the marker both rules above would delete the state somebody kept to read.
-    isFalse(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-keep', pid: 4712, mtimeMs: jetzt, behalten: true },
-      { nowMs: jetzt, lebt: () => false }), 'dead owner, but kept on purpose')
-    isFalse(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-keep', pid: null, mtimeMs: jetzt - VERWAIST_ALTER_MS * 10, behalten: true },
+    isFalse(sandboxOrphaned({ path: '/tmp/Freilauf-e2e-keep', pid: 4712, mtimeMs: jetzt, keep: true },
+      { nowMs: jetzt, alive: () => false }), 'dead owner, but kept on purpose')
+    isFalse(sandboxOrphaned({ path: '/tmp/Freilauf-e2e-keep', pid: null, mtimeMs: jetzt - ORPHAN_AGE_MS * 10, keep: true },
       { nowMs: jetzt }), 'old, but kept on purpose')
   })
 
   await check('without an owner marker only age decides', async () => {
-    const { sandkastenVerwaist, VERWAIST_ALTER_MS } = await import('./sandkasten.mjs')
+    const { sandboxOrphaned, ORPHAN_AGE_MS } = await import('./sandbox-env.mjs')
     const jetzt = Date.parse('2026-09-05T12:00:00Z')
     // A sandbox from before the marker existed: a live suite touches its directory
     // constantly, so recent mtime is the only thing standing between it and a sweep.
-    isFalse(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-nomarker', pid: null, mtimeMs: jetzt - 60_000 }, { nowMs: jetzt }),
+    isFalse(sandboxOrphaned({ path: '/tmp/Freilauf-e2e-nomarker', pid: null, mtimeMs: jetzt - 60_000 }, { nowMs: jetzt }),
       'busy a minute ago — could be running')
-    isTrue(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-nomarker', pid: null, mtimeMs: jetzt - VERWAIST_ALTER_MS - 1 }, { nowMs: jetzt }),
+    isTrue(sandboxOrphaned({ path: '/tmp/Freilauf-e2e-nomarker', pid: null, mtimeMs: jetzt - ORPHAN_AGE_MS - 1 }, { nowMs: jetzt }),
       'untouched for hours — over')
     // A directory we could not stat says nothing, and "says nothing" must not
     // become "delete it" — the Number('') family of traps.
-    isFalse(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-nomarker', pid: null, mtimeMs: NaN }, { nowMs: jetzt }),
+    isFalse(sandboxOrphaned({ path: '/tmp/Freilauf-e2e-nomarker', pid: null, mtimeMs: NaN }, { nowMs: jetzt }),
       'no readable age is no evidence')
   })
 
@@ -6913,7 +6913,7 @@ try {
   })
 
 } finally {
-  rmSync(sandkasten, { recursive: true, force: true })
+  rmSync(sandbox, { recursive: true, force: true })
 }
 
 process.exit(summary('Unit tests', start) || (counter.failures.length ? 1 : 0))

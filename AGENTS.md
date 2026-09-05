@@ -2328,7 +2328,7 @@ alongside production: the production database, `~/agents` and foreign tmux
 sessions are never touched, and only sessions the suite created itself are
 killed (also on Ctrl-C). Watcher passes are triggered directly instead of
 waiting for the 30-second interval. That sandbox lives in
-**`test/sandkasten.mjs`** — one construction, two suites, because a second copy
+**`test/sandbox-env.mjs`** — one construction, two suites, because a second copy
 of it would drift the way the run definition once did.
 
 **The sandbox kills what its own stub created, and the stub writes the list.**
@@ -2341,10 +2341,10 @@ gigabytes of RSS while it sat in swap. The leftovers are recognizable by their
 `-2` suffix — the stub's own collision loop, firing because a retry reuses the
 run id while the first session is still standing. The stub knows the name it
 created and cannot forget to write it down, so `$SB/sessions.txt` is the list and
-`aufraeumen()` reads it. Still no pattern across all `fl-*`: that file holds
+`cleanUp()` reads it. Still no pattern across all `fl-*`: that file holds
 exactly the sessions THIS sandbox produced.
 
-**And a cleanup that has to RUN is not a cleanup.** `aufraeumen()` was wired to
+**And a cleanup that has to RUN is not a cleanup.** `cleanUp()` was wired to
 SIGINT and SIGTERM, and the signal this suite actually dies of is neither: it is
 started inside an agent's own tmux session, and closing that session hangs up
 the whole process group — node's default for **SIGHUP** is to exit without
@@ -2354,7 +2354,7 @@ RSS, and the Sessions page — the page whose whole ordering rule is "oldest
 first, because that is the order one cleans up in" — unusable, because 300 of
 its rows were dead test sessions. So both suites answer SIGHUP as well, and,
 because a SIGKILL answers nothing, **a starting sandbox sweeps what a dead one
-left**: `verwaisteAufraeumen()` reads the OTHER sandbox's own `sessions.txt` and
+left**: `sweepOrphans()` reads the OTHER sandbox's own `sessions.txt` and
 kills exactly those names. The list is the proof of ownership on the way in
 exactly as it is on the way out — still no pattern across all `fl-*`. Those
 kills go out **in parallel**, and that is not tidiness: serially it is one
@@ -2364,11 +2364,11 @@ start and its first tmux call — enough to make the timing-sensitive incident
 tests in `e2e.mjs` fail (measured: 4 of 347, reproducible by seeding 25
 leftovers, green again once the sweep was parallel). A sweep must cost the
 suite that performs it as close to nothing as possible.
-`sandkastenVerwaist()` is the decision, pure and unit-tested, and it says no
+`sandboxOrphaned()` is the decision, pure and unit-tested, and it says no
 three times: never our own directory, never one whose `owner.pid` is still
 alive (sweeping a RUNNING suite would kill the sessions it is asserting on,
 from another process, with nothing to trace it back to), and never one carrying
-the `behalten` marker — `--keep` means a human is reading that sandbox, and its
+the `keep` marker — `--keep` means a human is reading that sandbox, and its
 owner is dead by definition. A directory from before the marker existed is
 judged by age alone (6 h; a live suite touches its own constantly), and an
 unreadable mtime is no evidence and therefore no sweep — the `Number('')`
@@ -3242,7 +3242,7 @@ Every other sandbox variable points into the suite's own directory, but a
 coding agent's skill directory is derived from `$HOME`. Without this variable a
 suite run would install into — and later **delete from** — the operator's real
 `~/.claude/skills`. A suite that does not set it is not merely unreproducible,
-it is destructive. `test/sandkasten.mjs` and `test/unit.mjs` both set it.
+it is destructive. `test/sandbox-env.mjs` and `test/unit.mjs` both set it.
 
 ### The read-only JSON API the skills talk to
 

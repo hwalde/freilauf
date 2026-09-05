@@ -10,10 +10,10 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 const MODUS = process.argv[2] ?? '--migration'
-const sandkasten = mkdtempSync(join(tmpdir(), 'Freilauf-agentver-'))
+const sandbox = mkdtempSync(join(tmpdir(), 'Freilauf-agentver-'))
 
 async function migration() {
-  const dataDir = join(sandkasten, 'migration')
+  const dataDir = join(sandbox, 'migration')
   mkdirSync(dataDir, { recursive: true })
   const dbPath = join(dataDir, 'freilauf.db')
 
@@ -76,7 +76,7 @@ async function migration() {
 }
 
 async function lifecycle() {
-  const dataDir = join(sandkasten, 'lifecycle')
+  const dataDir = join(sandbox, 'lifecycle')
   mkdirSync(dataDir, { recursive: true })
   process.env.FREILAUF_DATA_DIR = dataDir
   const { default: db } = await import('../server/db.mjs')
@@ -130,5 +130,5 @@ try {
   else if (MODUS === '--lifecycle') await lifecycle()
   else { console.error('unknown mode', MODUS); process.exit(2) }
 } finally {
-  rmSync(sandkasten, { recursive: true, force: true })
+  rmSync(sandbox, { recursive: true, force: true })
 }

@@ -38,7 +38,7 @@
 //                    into a worktree.
 //
 // Safety, the same fence e2e.mjs stands on: every hub-driven test runs in a
-// sandbox from test/sandkasten.mjs — own database, own runs/worktrees, own
+// sandbox from test/sandbox-env.mjs — own database, own runs/worktrees, own
 // plugin directory, own port. The production database, ~/agents and foreign
 // tmux sessions are never touched, and only sessions this suite created are
 // killed, on the way out and on Ctrl-C. The library-level tests use a
@@ -50,10 +50,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync } 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { group, check, skipped, equal, isTrue, isFalse, contains, waitFor, summary, counter } from './mini.mjs'
-import { neuerSandkasten, sh, vorhanden } from './sandkasten.mjs'
+import { newSandbox, sh, hasBinary } from './sandbox-env.mjs'
 
 const MIT_RUNS = process.argv.includes('--runs')
-const BEHALTEN = process.argv.includes('--keep')
+const KEEP = process.argv.includes('--keep')
 const start = Date.now()
 
 // The library half runs in this process, so its database must be pointed away
@@ -80,10 +80,10 @@ for (const h of registry.harnessIds()) store.setPluginEnabled(h, true)
 const HAS = {
   openrouter: !!process.env.OPENROUTER_API_KEY,
   deepseek: !!process.env.DEEPSEEK_API_KEY,
-  claude: vorhanden('claude'),
-  opencode: vorhanden('opencode'),
-  hermes: vorhanden('hermes'),
-  cursor: vorhanden('cursor-agent'),
+  claude: hasBinary('claude'),
+  opencode: hasBinary('opencode'),
+  hermes: hasBinary('hermes'),
+  cursor: hasBinary('cursor-agent'),
 }
 
 /**
@@ -183,17 +183,17 @@ const ANSWER_SCHEMA = {
 }
 
 // ===========================================================================
-const sk = neuerSandkasten({ praefix: 'freilauf-echt-', behalten: BEHALTEN })
+const sk = newSandbox({ prefix: 'freilauf-echt-', keep: KEEP })
 let aufgeraeumt = false
-async function aufraeumen() {
+async function cleanUp() {
   if (aufgeraeumt) return
   aufgeraeumt = true
-  try { await sk.aufraeumen() } catch { /* best effort */ }
+  try { await sk.cleanUp() } catch { /* best effort */ }
   try { dbmod.default.close() } catch { /* the library database may already be shut */ }
-  if (!BEHALTEN) { try { rmSync(LIBSB, { recursive: true, force: true }) } catch { /* best effort */ } }
+  if (!KEEP) { try { rmSync(LIBSB, { recursive: true, force: true }) } catch { /* best effort */ } }
 }
-process.on('SIGINT', async () => { await aufraeumen(); process.exit(130) })
-process.on('SIGTERM', async () => { await aufraeumen(); process.exit(143) })
+process.on('SIGINT', async () => { await cleanUp(); process.exit(130) })
+process.on('SIGTERM', async () => { await cleanUp(); process.exit(143) })
 
 try {
   console.log(`Library sandbox: ${LIBSB}`)
@@ -669,18 +669,18 @@ try {
 
   // ------------------------------------------------------- the hub itself
   console.log(`\nSandbox: ${sk.SB}`)
-  await sk.bauen()
+  await sk.build()
   // The real credentials go in on purpose — this is what the suite is for.
   // The stub fl-start stays: an LLM caller is not an agent run, and section F
   // is where real runs happen.
-  await sk.hubStarten({
+  await sk.startHub({
     env: { DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY ?? '' },
   })
-  const { hol, formular, setzeEinstellung } = sk
+  const { fetchPath, postForm, setSetting } = sk
   // The database handle is replaced whenever the hub restarts (the launch-spec
   // test below does exactly that), so nothing here may hold on to one.
   const db = () => sk.db
-  console.log(`Hub: ${sk.basis}`)
+  console.log(`Hub: ${sk.base}`)
 
   // Every coding agent and every provider on, so the sources really exist there.
   for (const [id, providers] of [
@@ -688,28 +688,28 @@ try {
     ['opencode', ['opencode-zen', 'deepseek', 'openrouter']],
     ['hermes', ['openrouter', 'opencode-zen', 'deepseek']],
   ]) {
-    await formular('/settings/plugins/save',
-      { id, enabled: '1', ...(providers.length ? { providers: providers } : {}) }, { alsBrowser: true })
+    await postForm('/settings/plugins/save',
+      { id, enabled: '1', ...(providers.length ? { providers: providers } : {}) }, { asBrowser: true })
   }
-  await formular('/repos/edit', { name: 'echt', path: sk.REPO, base_branch: 'main', worktree_extras: '[]' }, { alsBrowser: true })
+  await postForm('/repos/edit', { name: 'echt', path: sk.REPO, base_branch: 'main', worktree_extras: '[]' }, { asBrowser: true })
   const repoId = db().prepare('SELECT id FROM repos WHERE name=?').get('echt').id
 
   // The sandbox deliberately scrubs OPENROUTER_API_KEY out of the hub's
-  // environment (test/sandkasten.mjs, so the stub half can never spend money).
+  // environment (test/sandbox-env.mjs, so the stub half can never spend money).
   // Handing the key to the hub the way an OPERATOR would — a stored value on
   // the provider's own Plugins card — is therefore not a workaround but the
   // second half of the credential contract, exercised against a real API.
   if (HAS.openrouter) {
-    await formular('/settings/plugins/save', {
+    await postForm('/settings/plugins/save', {
       id: 'openrouter', enabled: '1',
       cred_api_key_mode: 'value', cred_api_key_value: process.env.OPENROUTER_API_KEY,
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
   }
 
   const lauf = (id) => db().prepare('SELECT * FROM runs WHERE id=?').get(id)
-  async function laufStarten(daten) {
-    const r = await formular('/api/runs', {
-      repo_id: String(repoId), harness: 'claude', branch_mode: 'keiner', expected_minutes: '10', ...daten,
+  async function laufStarten(data) {
+    const r = await postForm('/api/runs', {
+      repo_id: String(repoId), harness: 'claude', branch_mode: 'keiner', expected_minutes: '10', ...data,
     })
     const j = await r.json()
     if (j.runId) { const s = lauf(j.runId)?.tmux_session; if (s) sk.sessions.add(s) }
@@ -721,9 +721,9 @@ try {
     const grund = fehlt(quelle)
     if (grund) { skipped(`run title via ${quelle}`, grund); continue }
     await check(`a real run title is generated via ${quelle}`, async () => {
-      setzeEinstellung('llm_title_on', '1')
-      setzeEinstellung('llm_title_source', quelle)
-      setzeEinstellung('llm_title_model', MODELS[quelle])
+      setSetting('llm_title_on', '1')
+      setSetting('llm_title_source', quelle)
+      setSetting('llm_title_model', MODELS[quelle])
       const prompt = 'Rename the configuration loader so it reads the port from the environment instead of the hard-coded default.'
       const a = jetzt()
       const j = await laufStarten({ prompt })
@@ -738,18 +738,18 @@ try {
       isTrue(titel !== fallback, 'and it replaced the prompt-derived fallback')
     })
   }
-  setzeEinstellung('llm_title_on', '0')
+  setSetting('llm_title_on', '0')
 
   // --- 2. worktree extras, through POST /api/repos/extras-suggest ----------
   for (const quelle of ['provider:openrouter', 'agent:claude']) {
     const grund = fehlt(quelle)
     if (grund) { skipped(`extras suggestion via ${quelle}`, grund); continue }
     await check(`the extras suggestion endpoint answers from a real model via ${quelle}`, async () => {
-      setzeEinstellung('llm_extras_on', '1')
-      setzeEinstellung('llm_extras_source', quelle)
-      setzeEinstellung('llm_extras_model', MODELS[quelle])
+      setSetting('llm_extras_on', '1')
+      setSetting('llm_extras_source', quelle)
+      setSetting('llm_extras_model', MODELS[quelle])
       const a = jetzt()
-      const r = await formular('/api/repos/extras-suggest', { path: sk.REPO }, {})
+      const r = await postForm('/api/repos/extras-suggest', { path: sk.REPO }, {})
       const j = await r.json()
       misst(`extras ${quelle}`, seit(a))
       equal(r.status, 200, `status (${JSON.stringify(j).slice(0, 300)})`)
@@ -764,14 +764,14 @@ try {
       isTrue(j.extras.length > 0, `the model found something to carry over (${JSON.stringify(j.extras)})`)
     })
   }
-  setzeEinstellung('llm_extras_on', '0')
+  setSetting('llm_extras_on', '0')
 
   // --- 3. the flow `extract` step, through a real flow run ----------------
   for (const quelle of ['provider:deepseek', 'agent:opencode']) {
     const grund = fehlt(quelle)
     if (grund) { skipped(`flow extract via ${quelle}`, grund); continue }
     await check(`a real flow's extract step calls ${quelle} and stores its fields`, async () => {
-      const jsonPost = (pfad, obj) => hol(pfad, {
+      const jsonPost = (pfad, obj) => fetchPath(pfad, {
         method: 'POST', body: JSON.stringify(obj),
         headers: { 'content-type': 'application/json', accept: 'application/json' },
       })
@@ -798,7 +798,7 @@ try {
       })).json()
       isTrue(gespeichert.ok && gespeichert.id, `flow saved (${JSON.stringify(gespeichert).slice(0, 200)})`)
       const a = jetzt()
-      const gestartet = await formular(`/api/flows/${gespeichert.id}/run`, {})
+      const gestartet = await postForm(`/api/flows/${gespeichert.id}/run`, {})
       isTrue(gestartet.status < 400, `run now accepted (${gestartet.status})`)
       const fr = await waitFor(() => {
         const row = db().prepare('SELECT * FROM flow_runs WHERE flow_id=? ORDER BY rowid DESC LIMIT 1').get(gespeichert.id)
@@ -895,8 +895,8 @@ try {
     const b = await registry.getPlugin('deepseek').balance(pluginCtx('deepseek'))
     const usd = b?.amounts?.find(a => a.currency === 'USD')?.remaining
     if (!Number.isFinite(usd)) throw new Error('no USD balance to raise a threshold above')
-    setzeEinstellung('deepseek_gate_on', '1')
-    setzeEinstellung('deepseek_min_usd', String(usd + 100))
+    setSetting('deepseek_gate_on', '1')
+    setSetting('deepseek_min_usd', String(usd + 100))
     const j = await laufStarten({
       harness: 'opencode', provider: 'deepseek', model: MODELS['provider:deepseek'],
       prompt: 'echt: this run must never start, the gate is above the real balance',
@@ -907,8 +907,8 @@ try {
     const ev = db().prepare("SELECT payload FROM events WHERE run_id=? AND kind='deferred'").get(j.runId)
     isTrue(ev && String(ev.payload).length > 0, `the deferral names its reason (${ev?.payload})`)
     // …and lowering it again lets the same run through.
-    setzeEinstellung('deepseek_min_usd', '0')
-    const start2 = await formular(`/api/runs/${j.runId}/start`, {})
+    setSetting('deepseek_min_usd', '0')
+    const start2 = await postForm(`/api/runs/${j.runId}/start`, {})
     isTrue(start2.status < 400, `"start anyway" accepted (${start2.status})`)
     await waitFor(() => lauf(j.runId).status !== 'deferred',
       { what: 'the deferred run to be picked up once the gate opens', timeoutMs: 30_000 })
@@ -999,22 +999,22 @@ export default plugin
 `)
 
   await check('an external model provider is installed through the route and joins the registry', async () => {
-    const r = await formular('/settings/plugins/install', { path: PROV_DIR }, { alsBrowser: true })
+    const r = await postForm('/settings/plugins/install', { path: PROV_DIR }, { asBrowser: true })
     equal(r.status, 303, `installed (${r.status}: ${(await r.text()).slice(0, 300)})`)
-    const html = await (await hol('/settings/plugins')).text()
+    const html = await (await fetchPath('/settings/plugins')).text()
     contains(html, 'echt-provider', 'the Plugins page lists it')
     contains(html, '1.0.0', 'with its version')
   })
 
   await check('an external coding agent is installed the same way', async () => {
-    const r = await formular('/settings/plugins/install', { path: AGENT_DIR }, { alsBrowser: true })
+    const r = await postForm('/settings/plugins/install', { path: AGENT_DIR }, { asBrowser: true })
     equal(r.status, 303, `installed (${r.status}: ${(await r.text()).slice(0, 300)})`)
-    const j = await (await hol('/api/coding-agents/detect')).json()
+    const j = await (await fetchPath('/api/coding-agents/detect')).json()
     isTrue(j.agents.some(a => a.id === 'echt-agent'), `it is a coding agent the hub knows (${j.agents.map(a => a.id).join(',')})`)
   })
 
   await check('installing the same package twice is refused, not silently accepted', async () => {
-    const r = await formular('/settings/plugins/install', { path: PROV_DIR }, { alsBrowser: true })
+    const r = await postForm('/settings/plugins/install', { path: PROV_DIR }, { asBrowser: true })
     equal(r.status, 400, 'refused')
     contains(await r.text(), 'echt-provider', 'and the message names the package')
   })
@@ -1022,12 +1022,12 @@ export default plugin
   if (!HAS.deepseek) skipped('the external provider\'s credential is really used', 'DEEPSEEK_API_KEY is not set (the external provider borrows that account)')
   else {
     await check('a credential stored as a VALUE is really used by a real API call', async () => {
-      const r = await formular('/settings/plugins/save', {
+      const r = await postForm('/settings/plugins/save', {
         id: 'echt-provider', enabled: '1',
         cred_api_key_mode: 'value', cred_api_key_value: process.env.DEEPSEEK_API_KEY,
-      }, { alsBrowser: true })
+      }, { asBrowser: true })
       equal(r.status, 303, 'saved')
-      const j = await (await hol('/api/llm-models?source=provider:echt-provider')).json()
+      const j = await (await fetchPath('/api/llm-models?source=provider:echt-provider')).json()
       isTrue(j.ok, `the model list came back (${JSON.stringify(j).slice(0, 200)})`)
       isTrue(Array.isArray(j.models) && j.models.length > 0,
         `and it is not empty — which it could only be if the stored credential really reached the vendor (${j.models?.length})`)
@@ -1037,25 +1037,25 @@ export default plugin
       // The hub was started with DEEPSEEK_API_KEY in its environment but the
       // plugin declares FREILAUF_ECHT_PROVIDER_KEY — so a working answer here can
       // only come from the operator's own naming.
-      const r = await formular('/settings/plugins/save', {
+      const r = await postForm('/settings/plugins/save', {
         id: 'echt-provider', enabled: '1',
         cred_api_key_mode: 'env', cred_api_key_env: 'DEEPSEEK_API_KEY',
-      }, { alsBrowser: true })
+      }, { asBrowser: true })
       equal(r.status, 303, 'saved')
-      const j = await (await hol('/api/llm-models?source=provider:echt-provider')).json()
+      const j = await (await fetchPath('/api/llm-models?source=provider:echt-provider')).json()
       isTrue(j.ok && Array.isArray(j.models) && j.models.length > 0,
         `the plugin read a variable it never declared, because the operator named it (${JSON.stringify(j).slice(0, 200)})`)
     })
 
     await check('the external provider appears as an LLM source and really answers', async () => {
-      const list = await (await hol('/api/llm-sources')).json()
+      const list = await (await fetchPath('/api/llm-sources')).json()
       isTrue(list.ok && list.sources.some(s => s.id === 'provider:echt-provider'),
         `it is offered as a source (${list.sources?.map(s => s.id).join(', ')})`)
       // …and one of the hub's own four callers really asks it. The flow
       // `extract` step is the one that answers synchronously and reports its
       // own failure, so a broken external plugin says why instead of timing out.
       const a = jetzt()
-      const gespeichert = await (await hol('/api/flows/save', {
+      const gespeichert = await (await fetchPath('/api/flows/save', {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json' },
         body: JSON.stringify({
@@ -1076,7 +1076,7 @@ export default plugin
         }),
       })).json()
       isTrue(gespeichert.ok, `flow saved (${JSON.stringify(gespeichert).slice(0, 200)})`)
-      await formular(`/api/flows/${gespeichert.id}/run`, {})
+      await postForm(`/api/flows/${gespeichert.id}/run`, {})
       const fr = await waitFor(() => {
         const row = db().prepare('SELECT * FROM flow_runs WHERE flow_id=? ORDER BY rowid DESC LIMIT 1').get(gespeichert.id)
         return row && ['done', 'failed'].includes(row.status) ? row : null
@@ -1090,17 +1090,17 @@ export default plugin
   await check('fl-start --spec really starts the external coding agent in a tmux session', async () => {
     // The hub is restarted with the REAL fl-start and with the agent's binary on
     // PATH: this is the one place the launch spec is exercised end to end.
-    await sk.hubStoppen()
-    await sk.hubStarten({
-      echteAgenten: true,
+    await sk.stopHub()
+    await sk.startHub({
+      realAgents: true,
       env: { PATH: `${EXT_BIN}:${process.env.PATH}` },
     })
     const lauf2 = (id) => db().prepare('SELECT * FROM runs WHERE id=?').get(id)
     // A coding agent must be configured before the hub starts runs with it —
     // an external package is no exception, and that is the point.
-    const konf = await formular('/settings/plugins/save', { id: 'echt-agent', enabled: '1' }, { alsBrowser: true })
+    const konf = await postForm('/settings/plugins/save', { id: 'echt-agent', enabled: '1' }, { asBrowser: true })
     equal(konf.status, 303, 'the external coding agent is switched on')
-    const r = await formular('/api/runs', {
+    const r = await postForm('/api/runs', {
       repo_id: String(repoId), harness: 'echt-agent', branch_mode: 'keiner',
       expected_minutes: '5', prompt: 'echt-agent smoke test',
     })
@@ -1120,19 +1120,19 @@ export default plugin
 
   await check('an external package is uninstalled again — registry, directory and configuration', async () => {
     for (const id of ['echt-provider', 'echt-agent']) {
-      const r = await formular('/settings/plugins/uninstall', { id }, { alsBrowser: true })
+      const r = await postForm('/settings/plugins/uninstall', { id }, { asBrowser: true })
       equal(r.status, 303, `${id} removed`)
     }
-    const html = await (await hol('/settings/plugins')).text()
+    const html = await (await fetchPath('/settings/plugins')).text()
     isFalse(html.includes('echt-provider'), 'the provider is gone from the page')
-    const j = await (await hol('/api/coding-agents/detect')).json()
+    const j = await (await fetchPath('/api/coding-agents/detect')).json()
     isFalse(j.agents.some(a => a.id === 'echt-agent'), 'and the coding agent is gone from the registry')
     isFalse(existsSync(join(sk.PLUGINS, 'echt-provider')), 'the package directory is gone')
     isFalse(existsSync(join(sk.PLUGINS, 'echt-agent')), 'the other one too')
   })
 
   await check('a built-in plugin cannot be uninstalled', async () => {
-    const r = await formular('/settings/plugins/uninstall', { id: 'claude' }, { alsBrowser: true })
+    const r = await postForm('/settings/plugins/uninstall', { id: 'claude' }, { asBrowser: true })
     equal(r.status, 400, 'refused')
     contains(await r.text(), 'built-in', 'and it says why')
   })
@@ -1160,7 +1160,7 @@ export default plugin
   })
 
   await check('the scan route fills the discovery table in the running hub', async () => {
-    const r = await formular('/settings/plugins/scan', {}, { alsBrowser: true })
+    const r = await postForm('/settings/plugins/scan', {}, { asBrowser: true })
     equal(r.status, 303, 'scan accepted')
     const rows = db().prepare('SELECT * FROM discovery').all()
     isTrue(rows.length > 0, `something was written down (${rows.length} rows)`)
@@ -1171,7 +1171,7 @@ export default plugin
   })
 
   await check('the Plugins page renders from the real registry', async () => {
-    const r = await hol('/settings/plugins')
+    const r = await fetchPath('/settings/plugins')
     equal(r.status, 200, 'status')
     const html = await r.text()
     for (const id of [...HARNESSES, ...PROVIDERS]) contains(html, id, `${id} is on the page`)
@@ -1180,14 +1180,14 @@ export default plugin
 
   await check('the Welcome wizard renders every step against the real registry', async () => {
     for (const step of [1, 2, 3, 4, 5]) {
-      const r = await hol(`/welcome?step=${step}`)
+      const r = await fetchPath(`/welcome?step=${step}`)
       equal(r.status, 200, `step ${step}: status`)
       const html = await r.text()
       isTrue(html.length > 800, `step ${step}: real content (${html.length} bytes)`)
     }
-    const html3 = await (await hol('/welcome?step=3')).text()
+    const html3 = await (await fetchPath('/welcome?step=3')).text()
     for (const id of PROVIDERS) contains(html3, id, `the provider step offers ${id}`)
-    const html4 = await (await hol('/welcome?step=4')).text()
+    const html4 = await (await fetchPath('/welcome?step=4')).text()
     contains(html4, 'provider:openrouter', 'the LLM step offers the real sources')
   })
 
@@ -1213,7 +1213,7 @@ export default plugin
       await check(`real run: ${f.harness} writes the file, reports done and passes the finish gate`, async () => {
         const marke = `${f.harness}-echt.md`
         const a = jetzt()
-        const r = await formular('/api/runs', {
+        const r = await postForm('/api/runs', {
           repo_id: String(repoId), harness: f.harness, branch_mode: 'keiner', expected_minutes: '10',
           ...(f.provider ? { provider: f.provider } : {}), ...(f.model ? { model: f.model } : {}),
           prompt: `Create the file ${marke} in the current directory with exactly one line: ${f.harness} ran. `
@@ -1237,7 +1237,7 @@ export default plugin
   console.log(`\nAborted: ${err.stack}`)
   counter.failures.push({ name: 'Real suite', reason: err.message })
 } finally {
-  await aufraeumen()
+  await cleanUp()
 }
 
 if (LATENZ.length) {
