@@ -2297,6 +2297,7 @@ node test/e2e.mjs --echt    # additionally ONE real run per harness (consumes qu
 node test/e2e.mjs --keep    # keep the sandbox (debugging)
 node test/browser.mjs       # public/hub.js in a real Chromium — ~10 s
 node test/proxy.mjs         # vpn-proxy.mjs against a stub upstream — <1 s
+node test/proxy-egress.mjs  # the sandbox's own egress proxy against a stub upstream — <1 s
 node test/deploy.mjs        # bin/freilauf-deploy against a bare origin — ~3 s
 ```
 
@@ -2564,6 +2565,113 @@ with the reason instead of silently not sticking.
 
 Architecture, step registry contract and the integration seams:
 **[server/flows/AGENTS.md](server/flows/AGENTS.md)**.
+
+## The sandbox: a container around the agent, and one rule about who may loosen it
+
+> **The depth is one document: [docs/sandbox.md](docs/sandbox.md)**, and the
+> measurements the whole thing rests on are
+> [SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md) **§11a** — which also says, per
+> claim, whether it was measured, read out of a binary, or not answered at all.
+> What follows is what the rest of the hub must not violate.
+
+A sandboxed run's agent runs inside a container; **tmux stays on the host** and
+the pane's process is the runtime's client, which is why `pipe-pane`,
+`capture-pane`, bracketed paste, `pane-died` with the inner exit status and
+`remain-on-exit` all keep working untouched (measured through a PTY relay,
+tmux 3.4). It is **off by default** (`sandbox_mode`), and an unsandboxed run
+never touches `server/sandbox/` at all — not even an import. That is a property
+of the code, not a promise about it, and it is what "optional" means here.
+
+**The narrowing rule is the whole point.** Four layers contribute to one spec
+document — hub → repo → agent/run — and for a path the hub **locked**, a lower
+layer may only append to a deny-shaped list, remove from an allow-shaped one,
+lower a number, turn `auditOnly` off, or tighten a mode. Anything else is
+**refused**, all-or-nothing per path, with the higher layer's value standing:
+a half-honoured list would be a fourth value that no layer wrote and neither the
+form nor the event could name. The default shape for a locked path with no rule
+of its own is `fixed` — locked means locked — because a new field that silently
+inherited "may be loosened" is how a lock stops meaning anything. A path that is
+**not** locked is simply overwritten; narrowing is enforced only under a lock.
+`spec.mjs` imports nothing of the hub's, is pure, and answers the same on a
+machine that has never heard of Docker.
+
+**A weakening is always a named event, never a setting.**
+`sandbox:bypassed {by, reason}` for every way a run that was going to be
+sandboxed is not — an opt-out at a layer, an unavailable runtime, or the
+operator's "Continue without the sandbox" — and `sandbox:override_refused` for
+every attempt to loosen a locked path. `decideSandbox()` also asks whether the
+opt-out actually took something away: opting out of something that was never
+going to be sandboxed is not a bypass and writes nothing. A quiet weakening is
+the one failure this whole design cannot survive, because every page above it
+still reads as "sandboxed".
+
+**Two seams, and a special case belongs behind them, never in a caller.**
+`agentHome(run)` answers where this run's CLI keeps its state, and `runGit(run,
+args)` answers `git -C <workdir>` — both of them byte for byte today's answer
+for an unsandboxed run. Every place that reads a transcript, a session store or
+a worktree goes through them; four call sites used to hardcode `homedir()` and
+each failed **soft**, which is the expensive direction (no activity became
+`anomaly:no_activity` on a working run, no tokens became a cost of zero, and two
+of the four `resumeId()` fallbacks were silent lies that would have continued
+the wrong conversation). If a harness needs something special, it goes behind
+the seam.
+
+**"The daemon did not answer" is not "there are no containers"** —
+`runtimeVerdict()` is `tmuxVerdict()`'s twin and for the same reason.
+`ok` / `no_daemon` (demonstrably nothing, the empty truth) / `unreachable` (the
+hub learned nothing). Only a positive answer may end a run; `unreachable` means
+do nothing and ask next pass, and three in a row raise the global
+`docker_unreachable` incident. The same instinct is why a launch that failed
+because the runtime *could not be asked* carries `sandboxRetry`: it leaves
+`resume_pending` standing and does **not** count against `RESUME_MAX`, so a
+rootless daemon still coming up after a reboot cannot burn the cap.
+
+**An `inject` profile fails loudly rather than degrading to `env`.**
+`secrets.mode: 'inject'` promises the container holds a placeholder; falling back
+to environment variables would put the operator's real key inside the very
+container the profile said held nothing — and it would do so to somebody who
+picked the strict profile *in order to be safe*. So the launch fails with a
+readable reason. The question is asked of `engineCapabilities()`, never of an
+engine's name, so a third engine that can inject works without touching that
+file. The one fallback that *is* allowed is a `secrets.mode: 'env'` profile whose
+named engine will not start: nothing was promised there beyond "these hosts and
+no others", the built-in CONNECT proxy keeps that promise, and the fallback is
+still written down as a `warn`. Likewise a `network.methods` list on an engine
+that cannot see a method is **dropped and reported**, never stored and ignored.
+
+**A clone, not a linked worktree, and the reason is two sentences.** A linked
+worktree's `.git` is a pointer into the operator's checkout, so even `git add`
+needs that checkout's `.git` writable — and with it the operator's hooks and
+config, which are *commands the host runs later*, plus the refs
+`pushOperatorBase()` pushes. A private clone with the objects borrowed read-only
+through `objects/info/alternates` costs 16 KB and hands the agent nothing of the
+operator's. Two consequences that are rules, not details: the operator's
+`.git/config` is masked with a **minimal replacement** and never an empty file
+(measured — an emptied config on a sha256 repository makes `git ls-remote`
+answer exit 0 with an all-zero sha, a silent wrong answer), and **host git is
+never run inside an agent-owned clone**: `rev-parse` and `rev-list --count` were
+measured inert and are the only exceptions, everything else runs in the container
+or is refused. A denylist of git config keys is **not** a boundary — measured:
+with `core.hooksPath`, `core.fsmonitor` and `diff.external` all disarmed, a
+`filter.<n>.clean` driver selected by a tracked `.gitattributes` still ran.
+
+**No image may set `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
+`CLAUDE_CONFIG_DIR`, `CURSOR_DATA_DIR` or `HERMES_HOME`** — not in the base, not
+in a harness layer, not in a toolchain image an overlay is built on. Measured
+(§11a.4): **XDG outranks `HOME` for opencode**. An image carrying one sends the
+CLI's state somewhere the hub does not read, and every consequence is silent —
+the seeded credentials are never read, the reporting plugin never loads, and the
+activity measurement looks into an empty directory and concludes the agent is
+idle. `overlay.Dockerfile` fails the build and names the variable, because Docker
+cannot unset an inherited `ENV`.
+
+Three more rules that are easy to undo by accident: the container command line
+has exactly **one author** (`buildRunArgv()`, pure, no daemon asked), which is
+what makes `sandbox/wrap.sh --print` a real dry run on a machine with no Docker;
+an empty limit must produce **no flag at all**, because `--memory 0` is a refusal
+and `--cpus 0` is a container that cannot run; and a sandboxed session's memory
+is asked of the **runtime**, never summed from the pane's process tree, which
+under-reported a workload twentyfold (measured, 10.4 MB for 210.3 MB).
 
 ## tmux sessions: the machine, not the bookkeeping
 

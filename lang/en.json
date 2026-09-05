@@ -1583,5 +1583,6 @@
   "sandbox.runtime.build_unavailable": "{image} could not be built: {reason}",
   "sandbox.runtime.build_failed": "Building {image} failed: {detail} — the whole build log is in {log}",
   "sandbox.runtime.digest_unavailable": "The digest of {image} could not be read: {reason}",
-  "sandbox.plugin.credential_travels": "Inside the sandbox the token never enters the container: the proxy puts it on the {header} header, for {hosts} alone."
+  "sandbox.plugin.credential_travels": "Inside the sandbox the token never enters the container: the proxy puts it on the {header} header, for {hosts} alone.",
+  "sandbox.page.image_id": "built here, id"
 }

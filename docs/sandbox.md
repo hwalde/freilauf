@@ -745,7 +745,9 @@ short version, because it is what the boundary's edges are made of:
   included, and the hub's only symptom would be a run that reports nothing. The
   answer is `--setting-sources user` on the launch line, which is a lever
   claude's own tooling uses; it is a mitigation read from a binary, not a
-  guarantee from a vendor.
+  guarantee from a vendor. Note the scope: `fl-start` passes it for a
+  **sandboxed** claude run only — an unsandboxed run is still exposed to a
+  repository that switches every hook off, which is the state it was always in.
 - **Claude refuses to run as root outside a "recognized sandbox", and being in a
   container is explicitly not enough** — the predicate tests `IS_SANDBOX=1` or
   `CLAUDE_CODE_BUBBLEWRAP` and consults its own Docker detection nowhere. The

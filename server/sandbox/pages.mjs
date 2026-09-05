@@ -417,8 +417,16 @@ export async function sandboxCard(run, repo) {
   facts.push(`<li><span class="k">${e(t('sandbox.page.state'))}</span> ${
     bypassed ? e(t('sandbox.event.bypassed')) : e(t('sandbox.event.sandboxed'))}</li>`)
   if (spec.image?.ref) {
+    // A digest is a PIN — `repo@sha256:…` resolves. An image id is not: a
+    // locally built image has an `Id` and no repo digest, and printing that id
+    // where a digest belongs would pass provenance off as something one could
+    // pull. So the two are labelled apart, and only the first is called a
+    // digest.
+    const pin = spec.image.digest ? String(spec.image.digest) : null
+    const id = !pin && spec.image.id ? String(spec.image.id) : null
     facts.push(`<li><span class="k">${e(t('sandbox.page.image'))}</span> <code>${e(spec.image.ref)}</code>${
-      spec.image.digest ? ` <span class="dim"><code>${e(String(spec.image.digest).slice(0, 19))}</code></span>` : ''}</li>`)
+      pin ? ` <span class="dim"><code>${e(pin.slice(0, 19))}</code></span>` : ''}${
+      id ? ` <span class="dim">${e(t('sandbox.page.image_id'))} <code>${e(id.slice(0, 19))}</code></span>` : ''}</li>`)
   }
   facts.push(`<li><span class="k">${e(t('sandbox.page.network'))}</span> ${e(t(`sandbox.page.net_${net.mode}`))}${
     net.auditOnly ? ` <span class="dim">${e(t('sandbox.page.audit_only'))}</span>` : ''} <span class="dim">${e(net.engine)}</span></li>`)
@@ -810,10 +818,19 @@ export async function sandboxBuild(req, res, url, formBody) {
   if (!build) {
     return problemPage(req, res, t('sandbox.settings.images_title'), [t('sandbox.settings.err_build_unavailable')], '/settings/sandbox')
   }
+  const p = hubPolicy()
   try {
-    const r = await build(name, { registry: hubPolicy().imageRegistry || undefined })
+    // The runtime travels with the request: an operator who configured podman
+    // must not have their images built by docker. (`buildImage()` defaults to
+    // docker, so leaving it out was a silent wrong answer rather than an error.)
+    const r = await build(name, { runtime: p.runtime || undefined, registry: p.imageRegistry || undefined })
     if (r && r.ok === false) {
-      return problemPage(req, res, t('sandbox.settings.images_title'), [String(r.error ?? '')], '/settings/sandbox')
+      // The sentence, never the log. It is already translated and it NAMES the
+      // file the whole build output was written to — which is the only way to
+      // find out which of the CLI installers broke, so it has to reach the
+      // operator intact rather than being summarised away.
+      return problemPage(req, res, t('sandbox.settings.images_title'),
+        [String(r.error || r.reason || '')], '/settings/sandbox')
     }
   } catch (err) {
     return problemPage(req, res, t('sandbox.settings.images_title'), [String(err?.message ?? err)], '/settings/sandbox')

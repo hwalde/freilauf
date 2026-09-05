@@ -1583,5 +1583,6 @@
   "sandbox.runtime.build_unavailable": "无法构建 {image}：{reason}",
   "sandbox.runtime.build_failed": "构建 {image} 失败：{detail} — 完整的构建日志在 {log} 中",
   "sandbox.runtime.digest_unavailable": "无法读取 {image} 的摘要：{reason}",
-  "sandbox.plugin.credential_travels": "在沙箱中，令牌绝不会进入容器：由代理将其放入 {header} 头，且仅用于 {hosts}。"
+  "sandbox.plugin.credential_travels": "在沙箱中，令牌绝不会进入容器：由代理将其放入 {header} 头，且仅用于 {hosts}。",
+  "sandbox.page.image_id": "本地构建，id"
 }

@@ -1,0 +1,32 @@
+# Exceptions for pruefe-vor-push.sh — reviewed like code, and deliberately short.
+#
+# Format, TAB-separated:   <path glob>	<exact string>	<why>
+#
+# An entry excuses ONE string in ONE file. It does not switch a pattern off, so
+# `10.0.0.0/8` can be excused in the proxy while this installation's own
+# `10.0.0.1` is still caught in the very same line. Every excused hit is printed
+# when the script runs — nothing here is silent.
+#
+# Only values that are safe to PUBLISH belong here. An installation's real
+# addresses, hostnames and paths stay in the pattern file outside the repo, and
+# no entry may ever be added to make one of those pass.
+
+# The egress proxy's SSRF fence has to name the ranges it refuses. These are the
+# RFC 1918 network literals from the standard, not any machine's address — an
+# allowlisted hostname that resolves into one of them is exactly the DNS
+# rebinding attack the fence exists for, so the constant belongs in plain sight.
+server/sandbox/proxy.mjs	10.0.0.0/8	RFC 1918 network literal in the SSRF deny list
+server/sandbox/proxy.mjs	172.16.0.0/12	RFC 1918 network literal in the SSRF deny list
+server/sandbox/proxy.mjs	192.168.0.0/16	RFC 1918 network literal in the SSRF deny list
+
+# The unit tests for that fence must use addresses inside those ranges, or they
+# would prove nothing. They are fixtures, invented for the table.
+test/unit.mjs	10.1.2.3	CIDR fence test fixture
+test/unit.mjs	10.0.0.0/8	CIDR fence test fixture
+test/unit.mjs	172.16.0.1	CIDR fence test fixture
+test/unit.mjs	192.168.7.7	CIDR fence test fixture
+
+# `/home/agent` is a path INSIDE a container image — the account the sandbox
+# images create for the agent to run as. It is not anybody's home directory on
+# any host, and the images have to name it.
+sandbox/images/*.Dockerfile	/home/agent	container image path, not a host home

@@ -16,14 +16,22 @@
 //               per-harness patterns (defined in the harness plugins) and an
 //               assessment whether the hit is really a problem.
 import { HARNESS_PLUGINS } from './harnesses/index.mjs'
-import { HTTP_5XX } from './harnesses/patterns.mjs'
+import { HTTP_5XX, SANDBOX_PATTERNS } from './harnesses/patterns.mjs'
 
 /** Incident types. Anything else would be guesswork — better 'unbekannt' than wrong. */
 export const TYPEN = ['rate_limit', 'provider_error', 'auth_error', 'billing_error', 'model_error',
   // Not a provider problem at all: the hub could not get a finished run's work
   // onto the base branch (server/integrate.mjs). It sits in the same table
   // because it answers the same question — is anything waiting for me?
-  'merge_blocked', 'unbekannt']
+  'merge_blocked',
+  // The sandbox (SANDBOX_RESEARCH.md §7.12). Two of them, and they are two
+  // because they ask two different things of the reader: the proxy turned a
+  // host away (maybe exactly as the policy intended — `sandbox_blocked`), and
+  // the AGENT said it needs something it cannot reach (`sandbox_access`, which
+  // nobody but a human can answer). The container runtime going silent is the
+  // `tmux_unreachable` twin and belongs in the same table for the same reason.
+  'sandbox_blocked', 'sandbox_access', 'docker_unreachable',
+  'unbekannt']
 
 /**
  * Claude's StopFailure enum (as of 2.1.241, read from the binary) → our
@@ -132,6 +140,18 @@ const MUSTER = Object.fromEntries(
  * Lines that contain hits but are NOT errors. This collects what has already
  * misfired in practice — plus the obvious relatives.
  */
+
+/**
+ * "This line is about the hub's own code, not about the hub's own trouble."
+ *
+ * Pulled out under its own name because the SANDBOX family below cannot use it
+ * as it stands: the built-in proxy's 403 body begins with the word Freilauf, so
+ * an exception matching that word would silently swallow the one message the
+ * whole escalation path hangs on. The sandbox variant therefore names files and
+ * documents instead of the product.
+ */
+const EIGENER_CODE = /freilauf|cc-hub|detect\.mjs|incidents?\b|test\/(unit|e2e)/i
+
 const AUSNAHMEN = [
   /upgrade to max/i,                       // Claude command menu: "/upgrade … higher rate limits"
   /\/(upgrade|usage|usage-credits|status|help)\b/,  // menu lines with slash command
@@ -140,7 +160,7 @@ const AUSNAHMEN = [
   // Work on exactly this code. Case-insensitive since a capital "Incidents:"
   // (the hub's own section heading, scrolling through the agent's terminal)
   // slipped past the lowercase version and landed in the DB as a rate limit.
-  /freilauf|cc-hub|detect\.mjs|incidents?\b|test\/(unit|e2e)/i,
+  EIGENER_CODE,
   /\b(describe|it|test|expect)\(/,          // test code
   /retry_after|retryAfter|rateLimit[A-Z]|rate_limit_hits|RATE_LIMIT/, // identifiers in source
   // A call with a quoted/bracketed argument list is source code, not output —
@@ -161,16 +181,37 @@ const AUSNAHMEN = [
 ]
 
 /**
- * Scans cleaned lines with the patterns of one harness.
- * Returns [{ typ, zeile, index }] — each line at most once (first pattern wins).
+ * The exception list for the SANDBOX family (§7.12.1). Everything the ordinary
+ * one carries except the product name — see EIGENER_CODE — plus the three
+ * shapes in which this repository writes its own errno vocabulary down. All
+ * three were adversarial cases before they were exceptions:
+ *
+ *   `EROFS` in backticks   SANDBOX_RESEARCH.md §7.12.1 lists the whole family in
+ *                          one prose line, and AGENTS.md quotes it again.
+ *   a JSON key line        lang/*.json carries `sandbox.proxy.denied`, which IS
+ *                          the 403 body — an agent editing the translations
+ *                          prints the very sentence the pattern hunts for.
+ *   `re: /…/` and `\bX\b`  patterns.mjs and this file, read out loud by an agent
+ *                          working on exactly this feature.
  */
-export function scanneZeilen(harness, zeilen) {
-  const muster = MUSTER[harness] ?? []
+const SANDBOX_AUSNAHMEN = [
+  ...AUSNAHMEN.filter(a => a !== EIGENER_CODE),
+  /cc-hub|detect\.mjs|patterns\.mjs|watcher\.mjs|SANDBOX_RESEARCH|AGENTS\.md|lang\/\w+\.json|test\/(unit|e2e)/i,
+  // The vocabulary quoted as code — documentation, a changelog entry, a comment.
+  /`[^`\n]{0,80}(EACCES|EROFS|ENOSPC|ENETUNREACH|read-only file system|no space left on device|could not resolve host|cannot connect to the docker daemon|fl-report access)[^`\n]{0,80}`/i,
+  // A JSON object member: `"key": "value"` — a translation file, a fixture.
+  /^"[\w.$-]+"\s*:\s*["[{]/,
+  // A regular expression written down, in any of the shapes this repo uses.
+  /\bre:\s*\/|\/\^|\\b[A-Z]{4,}\\b|\[\^\\n\]/,
+]
+
+/** Shared body of the two scanners — one loop, two pattern sets, two exception lists. */
+function scanneMitMuster(muster, ausnahmen, zeilen) {
   const treffer = []
   zeilen.forEach((roh, index) => {
     const zeile = roh.trim()
     if (!zeile || zeile.length > 2000) return
-    if (AUSNAHMEN.some(a => a.test(zeile))) return
+    if (ausnahmen.some(a => a.test(zeile))) return
     for (const m of muster) {
       if (m.re.test(zeile)) { treffer.push({ typ: m.typ, zeile: zeile.slice(0, 300), index }); break }
     }
@@ -179,21 +220,45 @@ export function scanneZeilen(harness, zeilen) {
 }
 
 /**
+ * Scans cleaned lines with the patterns of one harness.
+ * Returns [{ typ, zeile, index }] — each line at most once (first pattern wins).
+ */
+export function scanneZeilen(harness, zeilen) {
+  return scanneMitMuster(MUSTER[harness] ?? [], AUSNAHMEN, zeilen)
+}
+
+/**
+ * The same, with the sandbox family — the wall an agent runs into, in its own
+ * words (§7.12.1). Harness-independent on purpose: a read-only mount answers
+ * every CLI the same way. The caller applies it only to a SANDBOXED run.
+ */
+export function scanneSandboxZeilen(zeilen) {
+  return scanneMitMuster(SANDBOX_PATTERNS, SANDBOX_AUSNAHMEN, zeilen)
+}
+
+/**
  * Scan new bytes of a log. 'text' is the chunk starting at the old offset.
  * The last, possibly incomplete line is NOT evaluated and also not "consumed":
  * the new offset points at its start, so it arrives complete on the next pass.
  * Otherwise a line break in the middle of a word would tear the hit apart.
  */
-export function scanneNeueBytes(harness, text, altOffset) {
+export function scanneNeueBytes(harness, text, altOffset, { sandbox = false } = {}) {
   const sauber = terminalText(text)
   const letzterUmbruch = sauber.lastIndexOf('\n')
-  if (letzterUmbruch < 0) return { treffer: [], neuerOffset: altOffset }
+  if (letzterUmbruch < 0) return { treffer: [], sandboxTreffer: [], neuerOffset: altOffset }
   const komplett = sauber.slice(0, letzterUmbruch)
   // The offset counts RAW bytes; the cleanup changes lengths. So the remainder
   // is computed from the raw length of the incomplete trailing line.
   const rohRest = Buffer.byteLength(text.slice(text.lastIndexOf('\n') + 1), 'utf8')
   const neuerOffset = altOffset + Buffer.byteLength(text, 'utf8') - rohRest
-  return { treffer: scanneZeilen(harness, komplett.split('\n')), neuerOffset }
+  const zeilen = komplett.split('\n')
+  // One cleaning, one offset, two questions: the log is read once and the
+  // sandbox family only asked where there is a sandbox to be blocked by.
+  return {
+    treffer: scanneZeilen(harness, zeilen),
+    sandboxTreffer: sandbox ? scanneSandboxZeilen(zeilen) : [],
+    neuerOffset,
+  }
 }
 
 /**
