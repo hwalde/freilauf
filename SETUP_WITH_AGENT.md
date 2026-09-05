@@ -111,9 +111,18 @@ Then, in order — each step prints what to do next:
 
 ```bash
 ./setup/01-npm-install.sh       # deps for THIS checkout (tests, editing, running by hand)
-./setup/02-install-scripts.sh   # fl-* + freilauf + freilauf-deploy → ~/.local/bin, opencode plugin, extra skills
+./setup/02-install-scripts.sh   # fl-* + freilauf + freilauf-deploy → ~/.local/bin, opencode plugin, hermes hooks, extra skills
 ./setup/03-install-services.sh  # ~/.config/freilauf/env (from env.example) + systemd user units + enable-linger
 ```
+
+The second script also installs what the coding agents need to tell the hub
+whether they are working or waiting for input (`docs/plugins.md`, "Attention"):
+the opencode plugin under `~/.config/opencode/plugins/`, and two shell hooks it
+**appends** to `~/.hermes/config.yaml` when that file has no `hooks:` block yet.
+If it already has one, the script prints the two entries to merge by hand and
+changes nothing — a config full of the operator's comments is not a file a
+script rewrites. Claude and cursor need nothing installed: their hooks travel
+with every run.
 
 The third script installs **three** user units — the hub, the VPN proxy and
 `freilauf-tmux.service`, the tmux server every agent session lives in — and
@@ -178,6 +187,13 @@ off, tells every running agent in its own session to commit and report within
 the window, and waits until nothing is working any more; then reboot, and
 `freilauf undrain` afterwards. Never stop `freilauf-tmux.service` by hand — that
 IS the reboot for the agents.
+
+One more tmux setting is worth leaving alone: `set-clipboard` (default
+`external`). It is what makes tmux hand a copied selection to its client, and
+that is how marking text in the browser terminal ends up in the operator's
+clipboard. With `set-clipboard off` in somebody's `~/.tmux.conf` that path is
+gone and only Shift+drag still copies. The hub does not touch the option — it
+is a tmux **server** option and therefore the operator's, not ours.
 
 ### Upgrading an installation that still says cc-hub
 

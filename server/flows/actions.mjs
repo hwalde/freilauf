@@ -186,12 +186,11 @@ export const actions = {
     if (r.ok) {
       db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(run.id)
       if (run.status === 'waiting_help') {
-        // Same rule as the send route: the finish gate's deadline is paused
-        // while a run waits for an answer and starts again when it gets one.
-        db.prepare(`UPDATE runs SET status='running', help_answer=?,
-                    finish_started_at=CASE WHEN finish_state IS NULL THEN finish_started_at
-                                           ELSE datetime('now') END WHERE id=?`).run(text, run.id)
-        addEvent(run.id, 'help_answered', { by: 'flow' })
+        // Same rule as the send route (and as the agent's own `_working`
+        // hook): the finish gate's deadline is paused while a run waits for an
+        // answer and starts again when it gets one — reports.mjs, answerHelpCall.
+        const { answerHelpCall } = await import('../reports.mjs')
+        answerHelpCall(run.id, text, 'flow')
       }
       // Through addEvent() like everywhere else — a hand-rolled INSERT here
       // bypasses the one place that knows a run has changed.
@@ -203,7 +202,8 @@ export const actions = {
   async killRun(run) {
     if (run.tmux_session) await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
     const r = db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
-                tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=? AND status IN ('running','waiting_help','deferred')`).run(run.id)
+                tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')), agent_state=NULL, agent_state_at=NULL
+                WHERE id=? AND status IN ('running','waiting_help','deferred')`).run(run.id)
     // Only when a row really changed: the status guard above means a run that
     // was already over is left alone, and an 'aborted' event for it would lie.
     if (r.changes) addEvent(run.id, 'aborted', { by: 'flow' })

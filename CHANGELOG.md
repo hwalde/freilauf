@@ -20,6 +20,28 @@ a day on which nothing was released.
 
 ### Added
 
+- **A run says whether its agent is working or waiting for input.** The
+  coding agents' own hooks tell the hub when they start processing input and
+  when their turn is over (claude: UserPromptSubmit / PreToolUse and Stop /
+  idle notification; cursor: beforeSubmitPrompt and stop; opencode: the
+  installed plugin forwards the root session's busy/idle; hermes: two shell
+  hooks `setup/02-install-scripts.sh` appends to `~/.hermes/config.yaml`,
+  answered by the new `fl-hermes-hook`). The overview, the detail page and the
+  sidebar show a new status word, **Waiting for input**, when an agent has
+  ended its turn and sits at its prompt — and go back to **Running** the
+  moment it works again. A subagent finishing never counts as waiting.
+  `GET /api/runs/<id>` carries `liveness.agent_state` and a `waiting_input`
+  verdict; the events are `agent_working` / `agent_waiting`; the Plugins page
+  states for every coding agent how (or that it does not) report this.
+- **Typing into a finished run's terminal counts as follow-up work.** The
+  terminal on the run page writes straight into tmux, so a conversation there
+  used to leave a `done` run reading "done" while the agent worked. The agent's
+  own "working" hook now opens the follow-up commission — the run displays as
+  running again, exactly as if the send form had been used. An answer typed
+  into the terminal likewise ends a help call (`Waiting for help` → `Running`).
+- **The watcher believes the agent.** No "no activity" flag and no follow-up
+  overrun while the agent says it waits for input; a running run whose agent
+  stopped without reporting turns yellow instead.
 - **A lost tmux session is resumed, not aborted.** When a run's session
   vanishes without the hub ending it — a server reboot, an update that took
   the tmux server, a dead server — the run is resumed in a new session:
@@ -59,9 +81,28 @@ a day on which nothing was released.
 - `setup/03-install-services.sh` runs `loginctl enable-linger`, so the hub and
   the tmux server start at boot and not at the first login; `SETUP_WITH_AGENT.md`
   says what to do about OS updates and reboots.
+- **Marking text in the browser terminal copies it to the clipboard.** Drag
+  across a live session and the selection is in your system clipboard the
+  moment you let go, and the marking is cleared — the same gesture a terminal
+  on your own machine has. It works for a selection made with the keyboard in
+  tmux's copy-mode too, and in a read-only terminal (where tmux ignores the
+  mouse) by holding Shift while dragging; the page says so under such a
+  terminal. A short toast names every copy, because a clipboard written from a
+  remote session must not be written silently, and it says so as well when the
+  browser refused the clipboard. A request from inside the session to *read*
+  the clipboard is never answered.
 
 ### Changed
 
+- Toasts stay visible while the terminal is in full screen.
+- The opencode plugin in `~/.config/opencode/plugins/freilauf.js` (rewritten
+  by `setup/02-install-scripts.sh`, which every deploy runs) no longer reports
+  `session.idle` of every session; it reports the root session's busy/idle. A
+  plugin instance loaded before the deploy keeps sending the old `_idle`, which
+  the hub still accepts as a note and nothing more.
+- hermes runs are launched with `--accept-hooks`, so the shell hooks in
+  `~/.hermes/config.yaml` run without the consent prompt hermes would show at
+  a TTY nobody sits at.
 - Watcher and scheduler run their first pass two seconds after a start instead
   of 30 seconds later, so a deferred run, a planned start, a pending goal or a
   lost session is looked at at once.
@@ -71,6 +112,25 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A run that came through no longer keeps calling for attention.** A run that
+  took longer than expected, or was quiet for a while, collected an anomaly and
+  wore its traffic light for ever — so a run that had reported done and had its
+  work merged into `main` sat in the overview with a red dot titled "needs
+  attention", beside a run that had genuinely called for help and was green.
+  An anomaly is a statement about a run *in flight*, and reaching the end
+  answers it, the same way a `done` run's incidents already close themselves.
+  The colour ends; the record does not — the row still names the anomaly as
+  history, next to a duration column saying the same thing. A `failed` or
+  `aborted` run keeps its colour: there the anomaly is the explanation of why
+  it did not come through.
+- **"Out of credit" is no longer reported as "API error, nothing to do".** The
+  two wordings OpenRouter refuses a spent key with — *"requires more credits …
+  can only afford"* and *"adjust the key's daily limit"* — name neither 402 nor
+  "insufficient credits", so they fell through to the unknown type. That type
+  is not one that asks for hands, so four runs that had stopped dead at an
+  exhausted daily credit cap were each announced as "Noticed, nothing to do:
+  the hub carried on by itself". It had not. They are `Credits/billing` now and
+  land in "Needs you", where the hint has named credits all along.
 - A flow run waiting on a run that had ended more than an hour before a hub
   restart was never resumed and never pruned; it is resumed now.
 

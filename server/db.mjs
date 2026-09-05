@@ -261,6 +261,14 @@ addColumn('runs', 'followup_open', 'INTEGER NOT NULL DEFAULT 0')  // 1 while a f
 // and the watcher holds the run to its expected duration from this moment
 // (watcher.mjs watchFollowUps) — a follow-up that never reports is captured.
 addColumn('runs', 'followup_since', 'TEXT')
+// What the coding agent's own hooks last said about its attention: 'working'
+// (processing input) or 'waiting' (its turn ended, it sits at its prompt
+// waiting for a human). NULL until the first hook of the session fires, and
+// always NULL for a harness that reports none. The display derives "running" /
+// "waiting for input" from it (server/run-state.mjs); the record in `status`
+// is not touched. Cleared when the session ends or a new one starts.
+addColumn('runs', 'agent_state', 'TEXT')
+addColumn('runs', 'agent_state_at', 'TEXT')
 // ---- two-part reports: the short version is the message, the detail is the document ----
 // The agent writes a SHORT report (what it was about + the result, compact and in
 // simple language — that is what the notification text carries) and a DETAILED

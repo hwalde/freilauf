@@ -86,6 +86,12 @@ const plugin = {
    * the case where the process really exits; it detaches with setsid because a
    * hook a dying process takes down with it reports nothing (the lesson from
    * claude's StopFailure).
+   *
+   * 'beforeSubmitPrompt' is the agent's attention (docs/plugins.md,
+   * "Attention"): measured with 2026.08.25, it fires for the launch prompt and
+   * for every follow-up typed into the TUI at "→ Add a follow-up", with the
+   * prompt in its payload, and the stop hook then fires again at the end of
+   * that turn. A hook that prints nothing lets the prompt through.
    */
   hookFiles({ flReport }) {
     const cmd = (...args) => `${flReport} ${args.join(' ')}`
@@ -94,12 +100,16 @@ const plugin = {
       content: JSON.stringify({
         version: 1,
         hooks: {
+          beforeSubmitPrompt: [{ command: cmd('_working') }],
           stop: [{ command: cmd('_turn_end') }],
           sessionEnd: [{ command: `setsid -f ${cmd('_exit')} >/dev/null 2>&1` }],
         },
       }, null, 2) + '\n',
     }]
   },
+
+  /** How the hub learns whether this agent works or waits — see `hookFiles`. */
+  attention: { source: 'hookFiles', note: 'beforeSubmitPrompt → _working, stop → _turn_end' },
 
   /**
    * Extra prompt lines for this harness (runner.mjs appends them to the platform

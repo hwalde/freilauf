@@ -75,11 +75,34 @@ export function isSessionStopped(text) {
 /**
  * Free text (opencode plugin, log line) → type. The order is deliberate: auth
  * and billing before rate limit, otherwise "402 … rate" would be misfiled.
+ *
+ * The billing branch also carries the wordings a spend cap is refused with,
+ * and they are here because they were MEASURED costing an operator a night.
+ * On 2026-09-04 four opencode runs hit the OpenRouter key's daily credit cap
+ * within 22 minutes and got back
+ *
+ *     "This request requires more credits, or fewer max_tokens. You requested
+ *      up to 32000 tokens, but can only afford 20932 … adjust the key's daily
+ *      limit"
+ *     "Prompt tokens limit exceeded: 365512 > 344659 … adjust the key's daily
+ *      limit"
+ *
+ * Neither says "402", "billing", "insufficient credits" or "credit balance",
+ * so both fell through to `unbekannt` — which renders as "API error" and,
+ * because `unbekannt` is not in MENSCH_TYPEN, files under "Noticed, nothing to
+ * do: the hub carried on by itself (deferred, retried, or the agent simply
+ * kept working)". The hub had carried on with none of those: run 98d81463 had
+ * burned $72.66, stopped dead at the first refusal and stood in `running` for
+ * eight hours. `incidents.needs_you_hint` names credits in its first three
+ * words for exactly this case.
  */
 export function typVonText(text) {
   const t = String(text ?? '')
   if (/\b(401|403)\b|authentication|unauthori[sz]ed|invalid (api )?key|api key (is )?(invalid|missing)|please run \/login|oauth/i.test(t)) return 'auth_error'
   if (/\b402\b|billing|insufficient (credits|funds|balance)|credit balance|account (is )?on hold|payment/i.test(t)) return 'billing_error'
+  // Narrow like every pattern in this module: each alternative names money or
+  // the key's own spend cap, never a bare "limit".
+  if (/(requires|needs|add) more credits|can only afford|out of credits|adjust the key'?s? (daily |weekly |monthly )?limit/i.test(t)) return 'billing_error'
   if (/\b429\b|rate.?limit|too many requests|usage limit|hit your (session|usage|weekly|daily)? ?limit|quota exceeded|resource.?exhausted/i.test(t)) return 'rate_limit'
   if (/model (not found|does not exist)|unknown model|no such model|not a valid model/i.test(t)) return 'model_error'
   if (HTTP_5XX.test(t) || /overload|unavailable|no endpoints|stream error|AI_APICallError|ECONNRE|ENOTFOUND|ETIMEDOUT|socket (hang up|connection was closed)|fetch failed|upstream|provider error|temporarily/i.test(t)) return 'provider_error'

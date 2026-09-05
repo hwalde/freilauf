@@ -91,6 +91,16 @@ const plugin = {
     resume: ['--auto', { when: 'model', args: ['--model', '{model}'] }, '--session', '{resume_id}'],
   },
 
+  /**
+   * How the hub learns whether this agent works or waits (docs/plugins.md,
+   * "Attention"): the opencode plugin `setup/02-install-scripts.sh` installs
+   * into `~/.config/opencode/plugins/freilauf.js` forwards `session.status`
+   * of the run's ROOT session — busy → `_working`, idle → `_waiting`. Root
+   * only, and that was measured: a subagent is a child session in the same
+   * worktree, and its idle arrives while the parent is still working.
+   */
+  attention: { source: 'plugin', note: 'session.status of the root session: busy → _working, idle → _waiting' },
+
   subscription: false,
   providers: ['opencode-zen', 'deepseek', 'openrouter'],
   // Providers that work WITHOUT an own key: opencode brings its own access for

@@ -1696,6 +1696,20 @@ try {
     gleich(typVonText('402 insufficient credits'), 'billing_error', '402 before the rate-limit check')
     gleich(typVonText('model_not_found: no such model'), 'model_error', 'model')
     gleich(typVonText('alles gut'), 'unbekannt', 'no match')
+
+    // The two wordings OpenRouter refuses a spent key with. Measured 2026-09-04
+    // on this installation: four runs, four red incidents, all of them filed as
+    // 'unbekannt' → "API error … the hub carried on by itself". It had not.
+    gleich(typVonText('This request requires more credits, or fewer max_tokens. You requested up to '
+      + "32000 tokens, but can only afford 20932. To increase, visit https://openrouter.ai/… and adjust the key's daily limit"),
+      'billing_error', 'OpenRouter: "requires more credits … can only afford"')
+    gleich(typVonText('Prompt tokens limit exceeded: 365512 > 344659. To increase, visit '
+      + "https://openrouter.ai/… and adjust the key's daily limit"),
+      'billing_error', "OpenRouter: a spent key's daily limit")
+    // …and the neighbours it must not swallow: a plain rate limit stays one,
+    // and a bare "limit" with no money next to it is still no verdict.
+    gleich(typVonText('Rate limit exceeded: free-models-per-day'), 'rate_limit', 'a daily RATE limit is not billing')
+    gleich(typVonText('context limit exceeded: 200000 > 180000'), 'unbekannt', 'a bare limit is not billing')
   })
 
   // An error hook fires while the process dies, and the hub is very often the
@@ -6584,6 +6598,158 @@ try {
     gleich(frage('fl_harness_of cc-nacht'), 'claude', 'an untagged old session is claude, as it always was')
     gleich(frage('fl_harness_bare fl-cu-nacht'), 'nacht', 'the bare name, new prefix')
     gleich(frage('fl_harness_bare cc-cu-nacht'), 'nacht', 'the bare name, old prefix')
+  })
+
+  // ------------------------------------------------------------------
+  gruppe("The agent's attention: working or waiting for input")
+
+  await pruefe('displayStatus: the record stays, the word follows the agent', async () => {
+    const { displayStatus, followUpActive } = await import('../server/run-state.mjs')
+    const r = (row) => displayStatus(row)
+    gleich(r({ status: 'running', agent_state: null }), 'running', 'nothing said yet: running')
+    gleich(r({ status: 'running', agent_state: 'working' }), 'running', 'working: running')
+    gleich(r({ status: 'running', agent_state: 'waiting' }), 'waiting_input', 'turn over: waiting for input')
+    // waiting_help is a QUESTION, and the question outranks the idle it causes.
+    gleich(r({ status: 'waiting_help', agent_state: 'waiting' }), 'waiting_help', 'a help call stays a help call')
+    gleich(r({ status: 'done', agent_state: 'waiting' }), 'done', 'a finished run with no commission is finished')
+    gleich(r({ status: 'done', agent_state: 'working', followup_since: 'x' }), 'running', 'commission + working: running')
+    gleich(r({ status: 'done', agent_state: 'waiting', followup_since: 'x' }), 'waiting_input', 'commission + waiting: waiting for input')
+    gleich(r({ status: 'failed', agent_state: null, followup_open: 1 }), 'running', 'a follow-up in the gate: running')
+    gleich(r({ status: 'scheduled', agent_state: 'waiting' }), 'scheduled', 'a run without a session is what it is')
+    wahr(followUpActive({ status: 'aborted', followup_since: 'x' }), 'followUpActive on followup_since')
+    falsch(followUpActive({ status: 'running', followup_since: 'x' }), 'never on a running run')
+  })
+
+  await pruefe('anomaliesSettled: a run that came through has answered them', async () => {
+    // The traffic light in pages.mjs asks this before it lets an in-flight
+    // anomaly colour a row. The rule is here, next to displayStatus, because it
+    // is the same kind of question: what does this run's state MEAN now.
+    const { anomaliesSettled, IN_FLIGHT_ANOMALIES } = await import('../server/run-state.mjs')
+    wahr(anomaliesSettled({ status: 'done' }), 'done: settled')
+    falsch(anomaliesSettled({ status: 'running' }), 'a run in flight is not')
+    falsch(anomaliesSettled({ status: 'waiting_help' }), 'nor one asking a question')
+    // failed/aborted keep theirs — there the anomaly is the explanation of why
+    // the run did not come through, which is exactly what one wants to read.
+    falsch(anomaliesSettled({ status: 'failed' }), 'failed keeps its explanation')
+    falsch(anomaliesSettled({ status: 'aborted' }), 'aborted too')
+    // A finished run with an open follow-up commission is working right now.
+    falsch(anomaliesSettled({ status: 'done', followup_since: 'x' }), 'not while a follow-up is open')
+    falsch(anomaliesSettled({ status: 'done', followup_open: 1 }), 'nor while one is in the gate')
+    falsch(anomaliesSettled(null), 'no run, no verdict')
+    // The list is the statements a run's own end answers. `unpushed` is NOT one
+    // of them: it is written AFTER the run ended and stays true afterwards —
+    // work that lives only on this machine is still work that lives only on
+    // this machine. Neither are the follow-up overruns, which describe a
+    // commission that is open right now.
+    for (const k of ['anomaly:unpushed', 'anomaly:followup_overrun', 'anomaly:followup_soft_overrun']) {
+      falsch(IN_FLIGHT_ANOMALIES.includes(k), `${k} is not settled by the run ending`)
+    }
+    wahr(IN_FLIGHT_ANOMALIES.every(k => k.startsWith('anomaly:')), 'and every entry is an anomaly kind')
+  })
+
+  await pruefe('displayStatusSql selects exactly the rows displayStatus would', async () => {
+    // The sidebar counts and the overview filter are SQL, the row is JavaScript:
+    // one rule in two languages, held together here over every combination.
+    const { displayStatus, displayStatusSql, WORK_STATUSES } = await import('../server/run-state.mjs')
+    const { DatabaseSync } = await import('node:sqlite')
+    const d = new DatabaseSync(':memory:')
+    d.exec(`CREATE TABLE runs(id INTEGER PRIMARY KEY, status TEXT, agent_state TEXT, followup_since TEXT, followup_open INTEGER DEFAULT 0)`)
+    const ins = d.prepare('INSERT INTO runs(status, agent_state, followup_since) VALUES(?,?,?)')
+    const rows = []
+    for (const status of ['scheduled', 'deferred', 'running', 'waiting_help', 'done', 'failed', 'aborted']) {
+      for (const agent_state of [null, 'working', 'waiting']) {
+        for (const followup_since of [null, '2026-09-05 10:00:00']) {
+          ins.run(status, agent_state, followup_since)
+          rows.push({ status, agent_state, followup_since, followup_open: 0 })
+        }
+      }
+    }
+    for (const s of WORK_STATUSES) {
+      const viaSql = d.prepare(`SELECT id FROM runs WHERE ${displayStatusSql(s)} ORDER BY id`).all().map(r => r.id)
+      const viaJs = rows.map((r, i) => displayStatus(r) === s ? i + 1 : null).filter(Boolean)
+      gleich(viaSql.join(','), viaJs.join(','), `${s}: SQL and JavaScript agree`)
+      wahr(viaJs.length > 0, `${s} selects something at all`)
+    }
+    d.close()
+  })
+
+  await pruefe('every built-in coding agent declares how its attention reaches the hub', async () => {
+    const { HARNESS_PLUGINS: HP } = await import('../server/harnesses/index.mjs')
+    for (const id of ['claude', 'opencode', 'hermes', 'cursor']) {
+      wahr(HP[id].attention && typeof HP[id].attention.source === 'string', `${id} declares attention.source`)
+    }
+  })
+
+  await pruefe("claude: the hooks say working, waiting, and never a subagent's end", async () => {
+    const { claudeSettingsJson } = await import('../server/runner.mjs')
+    const j = JSON.parse(claudeSettingsJson())
+    const cmd = (ev) => j.hooks[ev][0].hooks[0].command
+    gleich(cmd('UserPromptSubmit'), 'fl-report _working', 'a prompt starts a turn')
+    enthaelt(cmd('PreToolUse'), 'fl-report _working', 'a tool call is work')
+    enthaelt(cmd('PreToolUse'), 'setsid -f', 'and it must not hold the tool call up')
+    gleich(cmd('Stop'), 'fl-report _turn_end', 'the turn end is the waiting')
+    gleich(cmd('Notification'), 'fl-report _waiting', 'the idle prompt is the net under it')
+    gleich(j.hooks.Notification[0].matcher, 'idle_prompt|permission_prompt', 'and only the notifications that mean waiting')
+    falsch('SubagentStop' in j.hooks, 'a subagent finishing is not the run waiting')
+    for (const ev of Object.keys(j.hooks)) {
+      wahr(Array.isArray(j.hooks[ev]) && Array.isArray(j.hooks[ev][0].hooks), `${ev} keeps claude's nested shape`)
+    }
+  })
+
+  await pruefe('cursor: beforeSubmitPrompt reports work, stop reports the wait', async () => {
+    const { HARNESS_PLUGINS: HP } = await import('../server/harnesses/index.mjs')
+    const j = JSON.parse(HP.cursor.hookFiles({ flReport: '/bin/fl-report' })[0].content)
+    gleich(j.hooks.beforeSubmitPrompt[0].command, '/bin/fl-report _working', 'a typed follow-up starts a turn')
+    gleich(j.hooks.stop[0].command, '/bin/fl-report _turn_end', 'and the stop hook stays the turn end')
+  })
+
+  await pruefe('hermes: the launch line consents to the hooks, the wrapper maps the events', async () => {
+    const { HARNESS_PLUGINS: HP } = await import('../server/harnesses/index.mjs')
+    wahr(HP.hermes.launch.args.includes('--accept-hooks'), 'the spec passes --accept-hooks')
+    const start = readFileSync(new URL('../bin/fl-start', import.meta.url), 'utf8')
+    enthaelt(start, 'chat -q "$FL_PROMPT" --yolo --accept-hooks', 'and so does the built-in case')
+    // The wrapper: silent outside a run, a translation inside one. A fake
+    // fl-report on the PATH records what it was called with.
+    const dir = join(sandkasten, 'hermes-hook'); mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'fl-report'), '#!/usr/bin/env bash\ncat >/dev/null; echo "$1" >> "$HOOK_LOG"\n')
+    chmodSync(join(dir, 'fl-report'), 0o755)
+    const wrapper = new URL('../bin/fl-hermes-hook', import.meta.url).pathname
+    const log = join(dir, 'log')
+    const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, HOOK_LOG: log }
+    delete env.FL_RUN_ID; delete env.CC_RUN_ID
+    const run = (ev, extra = {}) => execFileSync(wrapper, [ev], { input: '{"hook_event_name":"x"}', env: { ...env, ...extra }, encoding: 'utf8' })
+    gleich(run('pre_llm_call'), '', 'outside a run: nothing is said')
+    const { existsSync: ex } = await import('node:fs')
+    wahr(!ex(log), 'and fl-report is not called')
+    run('pre_llm_call', { FL_RUN_ID: 'r1' })
+    run('on_session_end', { FL_RUN_ID: 'r1' })
+    run('post_llm_call', { FL_RUN_ID: 'r1' })
+    gleich(readFileSync(log, 'utf8').trim().split('\n').join(','), '_working,_turn_end', 'pre_llm_call → _working, on_session_end → _turn_end, the rest ignored')
+  })
+
+  await pruefe('opencode: the installed plugin reads the ROOT session, not the subagents', () => {
+    const setup = readFileSync(new URL('../setup/02-install-scripts.sh', import.meta.url), 'utf8')
+    const plugin = setup.slice(setup.indexOf("cat > \"$HOME/.config/opencode/plugins/freilauf.js\""), setup.indexOf('# ---------------------------------------------------------------- hermes hooks'))
+    enthaelt(plugin, "event?.type === 'session.status'", 'session.status is the source')
+    enthaelt(plugin, 'client.session.get', 'the parent is asked of opencode')
+    enthaelt(plugin, "parentID ?? null", 'and only a session without a parent counts')
+    enthaelt(plugin, "'_working' : '_waiting'", 'busy → working, idle → waiting')
+    falsch(plugin.includes("melden('_idle')"), 'the old per-session idle report is gone')
+    enthaelt(plugin, "'session.error'", 'the error path stays')
+    enthaelt(setup, 'fl-hermes-hook pre_llm_call', 'and hermes gets its hooks block')
+  })
+
+  await pruefe('fl-report accepts the two attention kinds', () => {
+    const report = readFileSync(new URL('../bin/fl-report', import.meta.url), 'utf8')
+    enthaelt(report, '_working|_waiting) ;;', 'in the kind list')
+  })
+
+  await pruefe('the status word exists in every language', async () => {
+    for (const lang of ['en', 'de', 'zh']) {
+      const cat = JSON.parse(readFileSync(new URL(`../lang/${lang}.json`, import.meta.url), 'utf8'))
+      wahr(!!cat['status.waiting_input'], `${lang}: status.waiting_input`)
+      wahr(!!cat['run.agent_waiting'], `${lang}: run.agent_waiting`)
+    }
   })
 
   await pruefe('a session name from before the rename still opens its terminal', async () => {

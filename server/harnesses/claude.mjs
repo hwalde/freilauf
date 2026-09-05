@@ -73,6 +73,15 @@ const plugin = {
     ],
   },
 
+  /**
+   * How the hub learns whether this agent works or waits for a human
+   * (docs/plugins.md, "Attention"). claude's hooks travel as a settings JSON
+   * on the command line (`claudeSettingsJson()` in runner.mjs), not as a file
+   * in the worktree, so there is no `hookFiles` here — the declaration says
+   * where to look.
+   */
+  attention: { source: 'settings', note: 'UserPromptSubmit/PreToolUse → _working, Stop → _turn_end, Notification idle_prompt → _waiting' },
+
   // Subscription-based: model list belongs to the account, no provider dropdown.
   subscription: true,
   providers: [],

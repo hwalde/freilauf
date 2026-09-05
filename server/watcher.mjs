@@ -245,7 +245,12 @@ async function watchRun(run) {
     // follows — an unmeasured harness is UNKNOWN, never silent (AGENTS.md,
     // "Silence is only an argument where activity is measured").
     const idle = now - lastAct > 15 * 60_000
-    if (!inFinishGate && act.measured && idle && st.pane_dead !== '1') {
+    // An agent that has SAID it waits for a human (its own hook, reports.mjs
+    // "the agent's attention") is silent on purpose: the status word already
+    // reads "waiting for input", and "no activity" under it would be the same
+    // fact twice — the second time as an alarm about the operator's own pause.
+    const waiting = run.agent_state === 'waiting'
+    if (!inFinishGate && act.measured && idle && !waiting && st.pane_dead !== '1') {
       addEventOnce(run.id, 'anomaly:no_activity')
     }
     // …and the statement is RETRACTED when the agent is demonstrably back.
@@ -330,6 +335,12 @@ async function watchFollowUps() {
     // A follow-up that HAS reported is in the gate or being merged — its
     // deadline is the finish gate's (`finish_started_at`), not this clock.
     if (run.finish_state || run.followup_open) continue
+    // The agent answered and sits at its prompt (its own hook said so): the
+    // commission is open because nobody reported, but nothing is being worked
+    // on, and "follow-up exceeds the expected duration" would alarm about a
+    // conversation the operator is in the middle of. The clock resumes the
+    // moment the agent works again — every `_working` is a new instruction.
+    if (run.agent_state === 'waiting') continue
     const expectedMs = run.expected_minutes * 60_000
     const elapsed = Date.now() - parseDbUtc(run.followup_since)
     if (elapsed > 0.8 * expectedMs) addEventOnce(run.id, 'anomaly:followup_soft_overrun')

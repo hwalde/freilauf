@@ -2575,6 +2575,98 @@ bill ran for days (thirty sessions, 15 GB, measured).
   the one number that says how big it has grown must not need a navigation to be
   seen.
 
+### The agent's attention: running, waiting for input, and back
+
+`runs.status` records the ATTEMPT — scheduled, running, done — and it was the
+only word the pages had. Three things it could not say, all reported on the
+same day: a run whose claude had long finished its turn still read "running";
+a `done` run whose operator was typing into its terminal stayed "done" (the
+terminal on the run page writes straight into tmux, so the send route and its
+follow-up commission never saw the conversation); and nothing ever flipped
+back. The one party that knows whether an agent is processing input or sitting
+at its prompt is the agent's own CLI — so its hooks say it, and the hub only
+listens.
+
+**`runs.agent_state`** holds the last word — `working` or `waiting`, NULL until
+the first hook of a session fires and always NULL for a harness that reports
+none — with `agent_state_at`. Two report kinds carry it (`fl-report _working`,
+`fl-report _waiting`), and `_turn_end` implies `waiting` for every CLI that
+stays up after its turn. `noteAgentState()` in reports.mjs writes an event
+(`agent_working` / `agent_waiting`) **only on a change**, which is what lets a
+hook fire on every tool call without filling the events table. What each
+built-in wires, all four measured on 2026-09-05 in a tmux session:
+
+| Coding agent | working | waiting | where the hook lives |
+|---|---|---|---|
+| claude 2.1.261 | `UserPromptSubmit` (the launch prompt, every line typed or pasted into the TUI), `PreToolUse` detached with `setsid -f` | `Stop` (1–2 s after the answer), `Notification` with matcher `idle_prompt\|permission_prompt` (`idle_prompt` comes 60 s after Stop) | `claudeSettingsJson()` in runner.mjs, `--settings` on the command line |
+| cursor 2026.08.25 | `beforeSubmitPrompt` (launch prompt and every follow-up at "→ Add a follow-up") | `stop` | `.cursor/hooks.json`, `hookFiles` in the plugin |
+| opencode 1.18.29 | `session.status busy` | `session.status idle` | `~/.config/opencode/plugins/freilauf.js`, written by `setup/02` |
+| hermes 0.21.0 | `pre_llm_call` | `on_session_end` (fires per turn) | `hooks:` in `~/.hermes/config.yaml`, appended by `setup/02`; `bin/fl-hermes-hook` maps the event, `--accept-hooks` on the launch line gives the consent hermes would otherwise ask for at the TTY |
+
+**A subagent's end is never "waiting", and that was the trap.** opencode opens
+a child session per subagent in the same worktree and every one of them emits
+`session.status`/`session.idle`; measured, the child's idle arrived 2.6 s
+before the root's while the root was still working on the result. The plugin
+therefore asks opencode for the session's `parentID` and forwards the ROOT
+session's status only. claude's `SubagentStop` fires with the MAIN session's id
+— even for a background helper nobody asked for, 3.8 s after a one-word answer
+— and is deliberately not hooked. hermes' `subagent_stop` likewise.
+
+**What the state changes, and where:**
+
+- **The word on the pages.** `displayStatus()` in `server/run-state.mjs` is
+  the one rule — a running run with a waiting agent reads "waiting for input",
+  a finished run with an open follow-up commission reads "running" while the
+  agent works and "waiting for input" while it waits, and `waiting_help` stays
+  "waiting for help" because the question outranks the idle it causes.
+  `displayStatusSql()` is the same rule for the overview's status filter and the
+  sidebar's counts (`waiting_input` is a WORK_STATUSES entry of its own); a unit
+  test holds the JavaScript and the SQL to the same selection over every
+  combination. The detail page prints the moment the agent stopped, the read
+  API's liveness carries `agent_state` and a `waiting_input` verdict, and a
+  running run whose agent has stopped without reporting is yellow.
+- **Typing into the terminal is the follow-up commission.** `_working` on a
+  finished run with no open commission calls `startFollowUpCommission()` — the
+  same function the send route calls, with `via: 'session'` and no text. The
+  run displays as running again from that moment, exactly as if the send form
+  had been used; the commission stays open across the agent's waits (it ends
+  with the follow-up report or the session, as before), so "waiting for input"
+  on a finished run means "you were talking to it and it has answered".
+- **An answer typed into the terminal ends a help call.** `_working` on a
+  `waiting_help` run calls `answerHelpCall()` — shared with the send route and
+  the flow's message step — with no text: the status goes back to `running`,
+  `help_answered` is written with `via: 'session'`, `help_answer` stays empty
+  because the hub never saw it.
+- **The watcher believes it.** `anomaly:no_activity` is not written while the
+  agent says it waits (the status word already says so, and an alarm about the
+  operator's own pause is the wolf the incident module warns about);
+  `watchFollowUps()` skips the overrun clock while the agent waits, and resumes
+  it with the next `_working`. Everything else is unchanged: the expected
+  duration of a first attempt still counts, a running run whose agent stopped
+  without reporting still overruns — that IS the failure, and the yellow row
+  now says why.
+- **Cleared with the session.** `_exit`, `_pane_died`, the kill route, the
+  sessions page, a flow's `kill_run`, `reconcileClosedSession()`, a retry and a
+  resume all NULL the two columns: what the old agent said describes a process
+  that is gone.
+
+**The plugin side is a declaration and a contract** (docs/plugins.md,
+"Attention"). `attention: { source, note }` on the descriptor says HOW the
+state reaches the hub, and the Plugins page prints it — or prints that this
+coding agent reports none, because the absence is otherwise invisible: its
+runs simply never read "waiting for input". A third party's coding agent gets
+the capability by wiring whatever its CLI offers to the two kinds, and the
+rules it has to keep are the three above: root session only, change only, and
+`_turn_end` or `_waiting` for the moment a human is being waited for. A
+harness with no such hook loses nothing it had: NULL displays as it always did.
+
+Two things measured on the way that are worth keeping: claude writes its
+transcript ~20 ms AFTER the Stop hook has run, so "activity newer than the
+waiting mark" is not a usable working signal without a margin — which is why
+the state comes from hooks and not from `measureActivity()`; and hermes splits
+a hook command itself and runs no shell, so `VAR=x cmd` in `config.yaml` is
+"command not found" and the wrapper takes its log path as an argument instead.
+
 ### The work is done — who is still there, and who only left a screen
 
 Three of the four coding agents keep running after the task is finished, and
@@ -3160,6 +3252,44 @@ duration uses to retract its overrun). It announces explicitly, because nothing
 was ADDED: the live channel hangs on `addEvent()`, and a retraction no page
 hears about sits in the overview until the next unrelated event.
 
+**And the run's own END is the last retraction, which nobody had wired up.**
+Four things already take an anomaly back the moment it is overtaken — a
+progress report, a raised expected duration, a resume, activity coming back —
+and all four go through `clearAnomalies()`, which renames the event to
+`cleared:*` so no query for `anomaly:%` finds it again. The one event that
+overtakes every one of them was missing: the run coming through. Measured on
+this installation — run 9b6bfee6 ran 52 minutes against an expectation of 45,
+reported done and had its work merged into `main`, and stood in the overview
+with a **red** dot titled "needs attention"; `12c30c75`, `f2d4af1d` and
+`01c8a3b9` wore the same yellow, all three done and merged. Beside them
+`ff5af7ad`, which had genuinely called for help, was green. That is worse than
+noise: it spends the colour, and the reader cannot use the dot any more.
+
+`anomaliesSettled(run)` (run-state.mjs, next to `displayStatus()` because it is
+the same kind of question — what does this run's state MEAN now) is the anomaly
+half of what `vorfallWeggrund()` does for incidents, and for the same stated
+reason: a run that reached `done` has answered them. Three fences, each a way
+it would otherwise go wrong:
+
+- **`done` only.** A `failed` or `aborted` run KEEPS its anomalies and their
+  colour — there the anomaly is the explanation of why it did not come through,
+  which is exactly what one wants to read.
+- **Not while a follow-up commission is open**, because such a run says `done`
+  while a human is waiting on it; its `followup_*` anomalies describe work
+  happening right now.
+- **`IN_FLIGHT_ANOMALIES` is a list and not "everything".** `unpushed` is
+  written AFTER a run ended and stays true afterwards — work that lives only on
+  this machine still does — so it is not in it, and neither are the follow-up
+  overruns. The four that are (`no_activity`, `soft_overrun`, `overrun`,
+  `session_gone`) are exactly the ones the existing `clearAnomalies()` callers
+  already treat as retractable; the list is evidence, not taste.
+
+Only the **colour** ends. The event is not rewritten (`clearAnomalies()` is
+deliberately NOT called here — a run's end is not a claim that the overrun did
+not happen), the status cell still prints the anomaly as its dim history line,
+and the duration column next to it says 52/45 anyway. `ampel()` is exported for
+the test that holds this.
+
 ### opencode's activity: a run is a session TREE
 
 `server/opencode-store.mjs` — split off from watcher.mjs the way
@@ -3241,6 +3371,28 @@ already answered what a model or auth hiccup during it meant. The notification
 states the group in its second line, so the reader can tell a "get up" from a
 "noted" without opening the hub.
 
+**Which means `typVonText()` decides who gets woken up, and a type it cannot
+name is filed as "nothing to do".** `unbekannt` is not in `MENSCH_TYPEN`, so a
+red incident the classifier missed lands under "Noticed — the hub carried on by
+itself (deferred, retried, or the agent simply kept working)". Measured
+2026-09-04: four opencode runs hit the OpenRouter key's daily credit cap within
+22 minutes and were refused with
+
+    This request requires more credits, or fewer max_tokens. You requested up
+    to 32000 tokens, but can only afford 20932 … adjust the key's daily limit
+    Prompt tokens limit exceeded: 365512 > 344659 … adjust the key's daily limit
+
+Neither says `402`, `billing`, `insufficient credits` or `credit balance` — the
+only money words the branch knew — so all four went out as "🔴 API error … for
+information, nothing to do". The hub had carried on with none of it: run
+98d81463 had burned $72.66, stopped at the first refusal and stood in `running`
+for eight hours until a human closed its session. `incidents.needs_you_hint`
+names credits in its first three words for exactly this case. So: **when a
+vendor invents a new way to say "no money", it belongs in the billing branch
+the same day** — narrow, each alternative naming money or the key's own spend
+cap, never a bare "limit" (a daily RATE limit is still `rate_limit`, and
+`rate_limit` is checked after billing precisely so the two do not swap).
+
 cursor, like hermes, has **no** hook for API errors (its hook enum knows
 `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `afterFileEdit`,
 `beforeSubmitPrompt`, `afterAgentResponse`, `stop`, `sessionStart`, `sessionEnd`,
@@ -3287,6 +3439,43 @@ errors (`post_api_request` only fires after success).
   browser rewraps the agent's window to its size while watching — with and
   without write access alike. The remedy would be `window-size manual` on the
   session.
+- **Marking in the browser terminal copied nothing, and xterm was not the one
+  failing to copy.** `bin/fl-start` sets `mouse on`, so a plain drag never
+  reaches xterm at all: it is a mouse report, tmux selects in copy-mode, and
+  its default `MouseDragEnd1Pane` binding copies the selection and cancels it.
+  Mark, copy, deselect — the gesture was complete; what was missing was the
+  last hop out of tmux. tmux does send it: with `set-clipboard` (default
+  `external`) and the `clipboard` terminal feature, which tmux 3.4 hands every
+  `xterm*` client by itself, the copied text goes to the client as OSC 52.
+  Measured against a real tmux client: `ESC ] 52 ; ; <base64> BEL` — note the
+  **empty** target field, so a handler matching on `c` sees nothing. xterm.js
+  registers no handler for the sequence and dropped it on the floor;
+  `hub.js` registers one (`term.parser.registerOscHandler(52, …)`) and writes
+  the browser's clipboard. Four things around it, each of them a way it goes
+  wrong: a payload of **`?` is a READ request** and is never answered — the
+  answer would hand the operator's clipboard to whatever runs in that session;
+  **`atob` gives bytes, not characters**, so without a `TextDecoder` every
+  umlaut in a copied line arrives broken; both clipboard ways need the document
+  focused, which is why an unfocused tab drops the sequence silently instead of
+  leaving a failure toast nobody asked for; and an operator whose tmux has
+  `set-clipboard off` (a server option — the hub does not touch it) loses this
+  path entirely and is left with the second one.
+  That second path is xterm's **own** selection, copied on mouse release and
+  then cleared, so both feel like one behaviour: it is what covers a read-only
+  client (tmux drops its input, so only Shift+drag selects — the page says so
+  under such a terminal), an application inside the pane that grabbed mouse
+  reporting, and a browser reached over plain http, where `navigator.clipboard`
+  does not exist at all and the old `execCommand` textarea is the fallback.
+  The drag is tracked from its **mousedown in the terminal**, because it may
+  end anywhere on the page and a bare document-wide mouseup would re-copy a
+  standing selection on every click.
+- **Under the native Fullscreen API only the fullscreen element's subtree is
+  rendered.** The toast box sits at the end of `<body>`, so every toast — the
+  copy confirmation above first of all — was invisible for as long as somebody
+  was in full screen, and nothing said so. It moves into `#term-wrap` with the
+  terminal and back out afterwards (`paint()` in hub.js); `position: fixed`
+  keeps working there, since a fixed element's containing block is only taken
+  away by `transform`/`filter`/`contain`, none of which that wrapper has.
 - **Esc belongs to the agent's TUI, so the full-screen terminal asks the
   browser for it.** The icon on the terminal's toggle line puts `#term-wrap`
   into `.term-full` (fixed, inset 0) **and** calls `requestFullscreen()` on it.
