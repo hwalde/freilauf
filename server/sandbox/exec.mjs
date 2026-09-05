@@ -54,7 +54,7 @@ const HOOKS_OFF = ['-c', 'core.hooksPath=/dev/null']
  * finds the conversation it had been having (index.mjs says exactly that:
  * "`runs.sandbox_home` is therefore kept — `agentHome()` reads it"). With the
  * flag in the condition it did not: probed,
- * `agentHome({ sandbox: 0, sandbox_home: '/run/home/keepme' })` answered the
+ * `agentHome({ sandbox: 0, sandbox_home: '<run dir>/keepme' })` answered the
  * operator's own home, and the resumed session would have started a fresh
  * conversation in it. Proven by that probe and by reading the two call paths,
  * not by resuming a real CLI.
