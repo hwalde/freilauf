@@ -313,10 +313,93 @@ export function transkriptFehler(jsonlText) {
  */
 export function bewerteLogTreffer({ anzahl, erstGesehenMs, zuletztGesehenMs, letzteAktivitaetMs, jetztMs,
   fensterMs = 10 * 60_000, stilleMs = 5 * 60_000, schwelle = 2 }) {
-  if (letzteAktivitaetMs != null && letzteAktivitaetMs > zuletztGesehenMs) return 'gelb'
+  if (agentCopedAfter(letzteAktivitaetMs, zuletztGesehenMs)) return 'gelb'
   if (anzahl >= schwelle && (zuletztGesehenMs - erstGesehenMs) <= fensterMs) return 'rot'
   if (letzteAktivitaetMs != null && (jetztMs - zuletztGesehenMs) >= stilleMs) return 'rot'
   return 'gelb'
+}
+
+/**
+ * THE veto, on its own: did the agent demonstrably keep working after the thing
+ * we are about to alarm about?
+ *
+ * It stood as the first line of bewerteLogTreffer() and is a named function now
+ * because a second caller arrived — the sandbox's proxy denials (§7.12.1 asks
+ * for "the bewerteLogTreffer() veto" by name). A second COPY of it is the one
+ * thing that must not happen: this rule is what keeps an agent that merely read
+ * an error message off its own screen from turning its run red, and two copies
+ * is two chances for one of them to be forgotten.
+ *
+ * `null` is UNKNOWN, never "silent": measureActivity() has no source for hermes,
+ * and Number(null) being 0 and finite is the trap this repo has an entry for.
+ */
+export function agentCopedAfter(letzteAktivitaetMs, seitMs) {
+  return letzteAktivitaetMs != null && Number.isFinite(Number(letzteAktivitaetMs))
+    && Number(letzteAktivitaetMs) > Number(seitMs)
+}
+
+/**
+ * The proxy's denials, collapsed the way the incident module throttles: ONE
+ * denial per host per window (§7.12.1, ten minutes). An `npm install` behind a
+ * wall produces a hundred 403s about one host, and a hundred occurrences would
+ * say "this run is very blocked" where the truth is "one registry is missing".
+ *
+ * Pure. `denials` is [{ host, atMs }] in any order; the answer carries the
+ * DISTINCT hosts (which is what the escalation counts), the collapsed number of
+ * occurrences and the timeline.
+ */
+export function sandboxDenialSummary(denials, { fensterMs = 10 * 60_000 } = {}) {
+  const proHost = new Map()
+  for (const d of denials ?? []) {
+    const host = String(d?.host ?? '').trim()
+    const at = Number(d?.atMs)
+    if (!host || !Number.isFinite(at)) continue
+    if (!proHost.has(host)) proHost.set(host, [])
+    proHost.get(host).push(at)
+  }
+  let count = 0
+  let erstMs = Infinity
+  let zuletztMs = -Infinity
+  for (const stamps of proHost.values()) {
+    stamps.sort((a, b) => a - b)
+    let letzteGezaehlt = -Infinity
+    for (const at of stamps) {
+      if (at - letzteGezaehlt >= fensterMs) { count += 1; letzteGezaehlt = at }
+      if (at < erstMs) erstMs = at
+      if (at > zuletztMs) zuletztMs = at
+    }
+  }
+  return {
+    hosts: [...proHost.keys()],
+    count,
+    erstMs: Number.isFinite(erstMs) ? erstMs : null,
+    zuletztMs: Number.isFinite(zuletztMs) ? zuletztMs : null,
+  }
+}
+
+/**
+ * Yellow or red for a `sandbox_blocked` incident (§7.12.1).
+ *
+ * Yellow to begin with, because a single denial may be exactly what the policy
+ * intended — that is the whole reason the sandbox exists. Red when the wall is
+ * demonstrably in the agent's way: several DISTINCT hosts turned away (one
+ * missing entry is a policy that is nearly right; two is a policy written for a
+ * different job), or silence since the denial.
+ *
+ * And before either of those, the veto: work after the denial says the agent
+ * coped, and then neither repetition nor silence may promote it. That is
+ * bewerteLogTreffer()'s own judgment, so this is bewerteLogTreffer() with the
+ * distinct host count in place of the occurrence count — a wrapper and not a
+ * copy, so the veto can never drift between the two callers.
+ */
+export function sandboxBlockedSchwere(summary, { letzteAktivitaetMs = null, jetztMs = Date.now(),
+  hostSchwelle = 2, fensterMs = 10 * 60_000, stilleMs = 5 * 60_000 } = {}) {
+  if (!summary || !summary.hosts?.length || summary.zuletztMs == null) return 'gelb'
+  return bewerteLogTreffer({
+    anzahl: summary.hosts.length,
+    erstGesehenMs: summary.erstMs, zuletztGesehenMs: summary.zuletztMs,
+    letzteAktivitaetMs, jetztMs, fensterMs, stilleMs, schwelle: hostSchwelle,
+  })
 }
 
 /**

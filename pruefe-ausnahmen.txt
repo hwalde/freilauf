@@ -30,3 +30,10 @@ test/unit.mjs	192.168.7.7	CIDR fence test fixture
 # images create for the agent to run as. It is not anybody's home directory on
 # any host, and the images have to name it.
 sandbox/images/*.Dockerfile	/home/agent	container image path, not a host home
+
+# Invented placeholder homes in tests and comments. The operator's real home
+# appears nowhere in this repository — verified with `git grep` over the whole
+# committed tree, which is the check that makes these safe to excuse.
+server/watcher.mjs	/home/x	placeholder in a comment about the slug rule
+test/unit.mjs	/home/hub	invented home in a test fixture
+test/unit.mjs	/home/x	invented home in a test fixture
