@@ -9637,7 +9637,7 @@ process.stdout.write(JSON.stringify(out))
     // matrix plus §8.1's availability rule, and a matrix that could only be
     // tested on a machine with a container daemon would not be tested at all.
     const { decideSandbox } = await import('../server/sandbox/spec.mjs')
-    const { sandboxOutcome, classifyPolicyPatch, LIVE_POLICY_PATHS, containerEnv, engineUsable } =
+    const { sandboxOutcome, classifyPolicyPatch, LIVE_POLICY_PATHS, containerEnv, engineUsable, proxyPlacement } =
       await import('../server/sandbox/index.mjs')
     const { platformSuffix, sandboxPromptSection, splitEnvArgs, createRun } = await import('../server/runner.mjs')
 
@@ -9893,39 +9893,64 @@ process.stdout.write(JSON.stringify(out))
       wahr(LIVE_POLICY_PATHS.includes('network.allow'), 'the table is the source of both answers')
     })
 
-    await pruefe('the built-in proxy is refused under a rootless daemon, by name', () => {
-      // §11b, measured three ways: the hub cannot bind the run network's gateway
-      // (rootless keeps its bridges in rootlesskit's own netns), a container on
-      // an --internal network reaches neither the host's loopback nor its public
-      // address, and host-gateway points at the stopped rootful daemon's bridge.
-      // The code already refused — on a bind error nobody could read as "this
-      // engine cannot work on this daemon". The predicate is what says it, and
-      // the launch and the forms ask the same one so they cannot disagree.
-      const vorher = process.env.FREILAUF_SANDBOX_PROXY_BIND
+    await pruefe('a rootless daemon moves the built-in listener instead of refusing it', () => {
+      // §11b was measured three ways — the hub cannot bind the run network's
+      // gateway (rootless keeps its bridges in rootlesskit's own netns), a
+      // container on an --internal network reaches neither the host's loopback
+      // nor its public address, and host-gateway points at the stopped rootful
+      // daemon's bridge — and the answer used to be a refusal by name, which
+      // left three of the four shipped profiles unable to start at all.
+      //
+      // All three facts are still true of a listener ON THE HOST. What changed
+      // is that the listener does not have to be there: it runs as a container
+      // on the run's own network, with the same policy code. So the predicate
+      // answers `ok`, and the placement is what carries the difference.
+      const bindVorher = process.env.FREILAUF_SANDBOX_PROXY_BIND
+      const placeVorher = process.env.FREILAUF_SANDBOX_PROXY_PLACEMENT
       delete process.env.FREILAUF_SANDBOX_PROXY_BIND
+      delete process.env.FREILAUF_SANDBOX_PROXY_PLACEMENT
       try {
-        const rootless = engineUsable('builtin', { available: true, rootless: true })
-        falsch(rootless.ok, 'builtin + rootless is refused')
-        gleich(rootless.reason, 'rootless_builtin', 'with a reason a caller can branch on')
-        enthaelt(String(rootless.error), 'rootless', 'and a sentence that names the cause')
-        enthaelt(String(rootless.error), 'iron-proxy', 'and what to do instead')
-        wahr(engineUsable('iron-proxy', { available: true, rootless: true }).ok,
-          'the container engine is unaffected — its proxy is a container on the run\'s own network')
-        wahr(engineUsable('builtin', { available: true, rootless: false }).ok,
-          'and a rootful daemon still gets the built-in engine')
-        // Unknown is not a verdict. A daemon that did not say, and a machine
-        // with no runtime info at all, must not lose a run over a question
-        // nobody answered — the launch then fails on the bind as before.
-        wahr(engineUsable('builtin', { available: true, rootless: null }).ok, 'a daemon that did not say is not a refusal')
-        wahr(engineUsable('builtin', null).ok, 'and neither is having no answer at all')
-        // The operator's own way out: a listener published where the container
-        // can reach it. Refusing that would be refusing a working setup.
+        const rootless = { available: true, rootless: true }
+        wahr(engineUsable('builtin', rootless).ok, 'builtin under a rootless daemon is no longer a refusal')
+        gleich(proxyPlacement('builtin', rootless), 'container',
+          'because the listener goes where the container can reach it')
+        gleich(proxyPlacement('builtin', { available: true, rootless: false }), 'process',
+          'and a machine that can run it for free does not pay for a container')
+        gleich(proxyPlacement('iron-proxy', rootless), 'container',
+          'every other engine is a container by construction')
+
+        // Unknown is not a verdict, and it is now the CHEAP answer as well: a
+        // daemon that did not say keeps the in-process listener, and the launch
+        // fails on the bind as before rather than starting a container nobody
+        // asked for over a question nobody answered.
+        gleich(proxyPlacement('builtin', { available: true, rootless: null }), 'process',
+          'a daemon that did not say is not a rootless one')
+        wahr(engineUsable('builtin', { available: true, rootless: null }).ok, 'and it is not a refusal either')
+        wahr(engineUsable('builtin', null).ok, 'nor is having no answer at all')
+
+        // The operator's own two answers, in the order the predicate reads them.
         process.env.FREILAUF_SANDBOX_PROXY_BIND = '192.0.2.10'
-        wahr(engineUsable('builtin', { available: true, rootless: true }).ok,
+        gleich(proxyPlacement('builtin', rootless), 'process',
           'an operator who published the listener themselves has answered the question')
+        wahr(engineUsable('builtin', rootless).ok, 'and is not refused for it')
+        delete process.env.FREILAUF_SANDBOX_PROXY_BIND
+
+        // …and the refusal is KEPT for the one state it is still true of: a
+        // placement forced onto the host under a daemon that cannot carry it.
+        // The sentence has to name the cause and a way out, because it is what
+        // the profile editor shows.
+        process.env.FREILAUF_SANDBOX_PROXY_PLACEMENT = 'process'
+        const forced = engineUsable('builtin', rootless)
+        falsch(forced.ok, 'a listener forced onto the host under rootless is still impossible')
+        gleich(forced.reason, 'rootless_builtin', 'with a reason a caller can branch on')
+        enthaelt(String(forced.error), 'rootless', 'and a sentence that names the cause')
+        process.env.FREILAUF_SANDBOX_PROXY_PLACEMENT = 'container'
+        wahr(engineUsable('builtin', rootless).ok, 'and forcing the container placement is always usable')
       } finally {
-        if (vorher === undefined) delete process.env.FREILAUF_SANDBOX_PROXY_BIND
-        else process.env.FREILAUF_SANDBOX_PROXY_BIND = vorher
+        if (bindVorher === undefined) delete process.env.FREILAUF_SANDBOX_PROXY_BIND
+        else process.env.FREILAUF_SANDBOX_PROXY_BIND = bindVorher
+        if (placeVorher === undefined) delete process.env.FREILAUF_SANDBOX_PROXY_PLACEMENT
+        else process.env.FREILAUF_SANDBOX_PROXY_PLACEMENT = placeVorher
       }
     })
   }
@@ -11200,6 +11225,170 @@ process.stdout.write(JSON.stringify(out))
       const doku = readFileSync(new URL('../docs/sandbox.md', import.meta.url), 'utf8')
       enthaelt(doku, 'refuses such a template by name', 'the docs name the refusal')
       enthaelt(doku, 'one hop further out', 'and the residual risk the static check misses')
+    })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: the built-in egress proxy, as a container')
+
+  {
+    const rt = await import('../server/sandbox/runtime.mjs')
+    const px = await import('../server/sandbox/proxy.mjs')
+
+    const spec = (network = {}) => ({
+      runtime: 'docker',
+      image: { ref: 'freilauf/agent-base:24.04' },
+      network: { engine: 'builtin', mode: 'allowlist', presets: [], allow: ['example.com'], ...network },
+    })
+
+    await pruefe('the command line puts the listener on the run’s own network, with nothing writable but its audit', () => {
+      const { bin, args } = rt.buildEgressProxyArgv(spec(), {
+        runId: 'r1', hubId: 'h1', network: 'fl-net-r1', image: 'freilauf/agent-base:24.04',
+        controlDir: '/data/sandbox/proxy/r1/control', outDir: '/data/sandbox/proxy/r1/out',
+        appDir: '/opt/app',
+      })
+      gleich(bin, 'docker', 'the runtime’s own binary')
+      const line = args.join(' ')
+      enthaelt(line, '--network fl-net-r1', 'it is created ON the run’s internal network')
+      enthaelt(line, '--name fl-proxy-r1', 'under the name the agent’s HTTPS_PROXY already dials')
+      enthaelt(line, 'freilauf.role=proxy', 'labelled, so the reaper finds it')
+      enthaelt(line, 'freilauf.run=r1', 'and says which run it belongs to')
+      enthaelt(line, '--cap-drop ALL', 'no capabilities')
+      enthaelt(line, 'no-new-privileges', 'and no way to gain any')
+      enthaelt(line, '--read-only', 'its own filesystem is read-only')
+      enthaelt(line, 'node /opt/freilauf/sandbox/proxy-entry.mjs', 'and it runs the hub’s own entry point')
+
+      // THE MOUNT MODES ARE THE SECURITY SHAPE. The policy must not be writable
+      // from inside the egress boundary, and the hub's source must not be
+      // writable at all; exactly one directory is rw and it holds the audit.
+      enthaelt(line, '/opt/app/server:/opt/freilauf/server:ro', 'the policy engine is mounted read-only')
+      enthaelt(line, '/opt/app/lang:/opt/freilauf/lang:ro', 'and so is the catalog the 403 is written from')
+      enthaelt(line, '/opt/app/sandbox:/opt/freilauf/sandbox:ro', 'and the entry point')
+      enthaelt(line, '/data/sandbox/proxy/r1/control:/etc/freilauf/proxy:ro',
+        'the policy is read-only INSIDE the proxy — a policy the boundary can rewrite is not one')
+      enthaelt(line, '/data/sandbox/proxy/r1/out:/var/freilauf/out', 'and the audit directory is the one writable mount')
+      const rw = args.filter((a, i) => args[i - 1] === '-v' && !a.endsWith(':ro'))
+      gleich(rw.length, 1, 'exactly one writable mount, and it is the audit directory')
+    })
+
+    await pruefe('the proxy never sees the run’s own directory, because the AGENT can write there', () => {
+      const { args } = rt.buildEgressProxyArgv(spec(), {
+        runId: 'r1', network: 'fl-net-r1', image: 'x:1',
+        controlDir: '/data/c', outDir: '/data/o', appDir: '/opt/app',
+      })
+      // ~/agents/runs/<id> is bind-mounted read-write into the agent's container.
+      // A policy file in there would be a policy the agent rewrites, and an audit
+      // stream in there would be one it can forge lines into.
+      falsch(args.some(a => a.includes('agents/runs')), 'no mount of the run directory')
+      falsch(args.some(a => a.includes('.config')), 'and none of the operator’s configuration')
+    })
+
+    await pruefe('a run with nothing to proxy gets no proxy container at all', () => {
+      gleich(rt.buildEgressProxyArgv(spec({ mode: 'open' }), { runId: 'r1' }), null, 'open needs no proxy')
+      gleich(rt.buildEgressProxyArgv(spec({ mode: 'none' }), { runId: 'r1' }), null, 'and neither does none')
+    })
+
+    await pruefe('the policy document carries the SPEC, so there is one policy builder and not two', () => {
+      const doc = px.policyDocument(spec({ allow: ['a.example', 'b.example'] }), { runId: 'r7', secretsMode: 'env' })
+      const back = px.readPolicyDocument(doc)
+      gleich(back.runId, 'r7', 'the run travels with it')
+      gleich(back.secretsMode, 'env', 'and the secrets mode')
+      // The RESOLVED policy is deliberately not in it: the container computes
+      // `proxyPolicy()` itself, so a hub and a proxy cannot come to disagree
+      // about what an allow list means.
+      gleich(px.proxyPolicy(back.spec).allow.join(','), 'a.example,b.example', 'and the spec is the spec')
+      // A document that cannot be read returns null, and the caller KEEPS the
+      // policy it has: in allowlist mode an empty policy denies everything, so
+      // falling back to one would turn a typo into a run whose egress stopped.
+      gleich(px.readPolicyDocument('{"broken'), null, 'half a document is not a document')
+      gleich(px.readPolicyDocument('{"version":1}'), null, 'and neither is one without a spec')
+      gleich(px.readPolicyDocument(''), null, 'nor an empty file')
+    })
+
+    await pruefe('the file IS the control channel: a rewrite takes effect on the next connection', async () => {
+      // The whole placement hangs on this and it needs no daemon to prove: the
+      // proxy process reads its policy from a file and re-reads it when the file
+      // changes, which is what `reloadProxy()` writes and what §7.12.3 promises.
+      const dir = mkdtempSync(join(tmpdir(), 'freilauf-proxyfile-'))
+      const control = join(dir, 'control')
+      const out = join(dir, 'out')
+      mkdirSync(control, { recursive: true })
+      const policyPath = join(control, px.POLICY_FILE)
+      const write = (s) => {
+        writeFileSync(join(control, '.tmp'), px.policyDocument(s, { runId: 'rf' }))
+        execFileSync('mv', [join(control, '.tmp'), policyPath])
+      }
+      write(spec({ allow: ['first.test'] }))
+
+      const { handle, stop } = await px.runProxyProcess({ policyPath, outDir: out, bind: '127.0.0.1', port: 0 })
+      try {
+        gleich(px.hostAllowed(handle.policy, 'first.test'), true, 'it came up with the policy in the file')
+        gleich(px.hostAllowed(handle.policy, 'second.test'), false, '…and only that one')
+        wahr(existsSync(join(out, px.READY_FILE)),
+          'and it wrote the readiness marker the hub waits for instead of believing docker run')
+
+        write(spec({ allow: ['second.test'] }))
+        let swapped = false
+        for (let i = 0; i < 60 && !swapped; i++) {
+          await new Promise((r) => setTimeout(r, 50))
+          swapped = px.hostAllowed(handle.policy, 'second.test')
+        }
+        wahr(swapped, 'the rewritten policy is in force')
+        gleich(px.hostAllowed(handle.policy, 'first.test'), false, 'and the old one is not')
+
+        // A file that cannot be parsed leaves the running policy alone. Anything
+        // else would mean a hub with a slipped finger switches a run's egress off.
+        writeFileSync(policyPath, '{ not json')
+        await new Promise((r) => setTimeout(r, 200))
+        gleich(px.hostAllowed(handle.policy, 'second.test'), true, 'an unreadable rewrite keeps the policy in force')
+      } finally {
+        await stop()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    await pruefe('a denied CONNECT does not take the process down with it', async () => {
+      // MEASURED 2026-09-05 against the real daemon, and it is the reason this
+      // check exists at all: curl RESETS a tunnel it was refused, the client
+      // socket had no `error` listener at the point the 403 is written, and node
+      // turns an unhandled socket error into an uncaught exception. In the
+      // container placement that killed the run's egress at its first blocked
+      // host; in-process it would have taken the whole hub — scheduler, watcher
+      // and every SSE client — down with it.
+      const dir = mkdtempSync(join(tmpdir(), 'freilauf-proxyreset-'))
+      const control = join(dir, 'control')
+      mkdirSync(control, { recursive: true })
+      const policyPath = join(control, px.POLICY_FILE)
+      writeFileSync(policyPath, px.policyDocument(spec({ allow: ['nothing.test'] }), { runId: 'rr' }))
+      const { handle, stop } = await px.runProxyProcess({ policyPath, outDir: join(dir, 'out'), bind: '127.0.0.1', port: 0 })
+      const net = await import('node:net')
+      try {
+        for (let i = 0; i < 3; i++) {
+          await new Promise((resolve) => {
+            const sock = net.connect({ host: '127.0.0.1', port: handle.port }, () => {
+              sock.write('CONNECT denied.test:443 HTTP/1.1\r\nHost: denied.test:443\r\n\r\n')
+            })
+            sock.on('data', () => { sock.resetAndDestroy(); resolve() })   // ← what curl does
+            sock.on('error', () => resolve())
+            setTimeout(resolve, 2000).unref()
+          })
+        }
+        // Still serving: the refusals cost their own connections and nothing else.
+        const alive = await new Promise((resolve) => {
+          const sock = net.connect({ host: '127.0.0.1', port: handle.port }, () => {
+            sock.write('CONNECT denied.test:443 HTTP/1.1\r\nHost: denied.test:443\r\n\r\n')
+          })
+          let text = ''
+          sock.on('data', (c) => { text += c; if (text.includes('\r\n\r\n')) { sock.destroy(); resolve(text) } })
+          sock.on('error', () => resolve(''))
+          setTimeout(() => resolve(text), 2000).unref()
+        })
+        enthaelt(alive, '403', 'the listener is still there after three resets')
+        enthaelt(alive, 'fl-report access', 'and still tells the agent how to ask for the host')
+      } finally {
+        await stop()
+        rmSync(dir, { recursive: true, force: true })
+      }
     })
   }
 

@@ -1620,6 +1620,7 @@
   "sandbox.notify.bypassed_no_reason": "未说明原因",
   "sandbox.proxy.config_symlink": "本次运行的代理配置应位于 {path}，但那里是一个符号链接，Freilauf 不会通过符号链接写入",
   "sandbox.proxy.no_image": "未配置 iron-proxy 镜像（FREILAUF_SANDBOX_PROXY_IMAGE）",
+  "sandbox.proxy.container_not_ready": "出口代理容器 {container} 未在规定时间内报告就绪",
   "sandbox.runtime.err_mount_mode": "挂载 {target} 请求的模式“{mode}”不是该容器运行时认识的模式（ro 或 rw）",
   "sandbox.runtime.err_no_run_id": "沙箱文档没有指明运行，容器将既无名称也无标签",
   "sandbox.runtime.err_hub_socket_name": "沙箱文档把 hub 套接字写作“hubSocket”，而该字段过去存放的是容器内的路径。挂载源是宿主机上的套接字，名为“hubSocketSource”；请重新启动该运行以重写文档。",

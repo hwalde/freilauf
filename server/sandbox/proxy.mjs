@@ -26,11 +26,21 @@
 import http from 'node:http'
 import net from 'node:net'
 import dns from 'node:dns/promises'
-import { createWriteStream, mkdirSync } from 'node:fs'
+import {
+  createWriteStream, mkdirSync, existsSync, statSync, openSync, readSync, closeSync,
+  writeFileSync, renameSync, rmSync, watch as watchPath,
+} from 'node:fs'
 import { dirname, join } from 'node:path'
 import { t } from '../i18n.mjs'
 import { normalizeSpec } from './spec.mjs'
 import { hostGlobMatch } from './presets.mjs'
+
+// EVERYTHING THIS FILE NEEDS FROM THE HUB IS IMPORTED LAZILY, and that is a
+// contract rather than a habit: `sandbox/proxy-entry.mjs` imports this module
+// INSIDE the proxy container, where the only things mounted are `server/`,
+// `lang/` and `sandbox/` — no database, no `~/.config`, no credential. A static
+// import of `util.mjs` or `exec.mjs` here would decide, from a file nobody was
+// editing, what the container has to be able to reach.
 
 // ---------------------------------------------------------------- the engines
 
@@ -378,7 +388,15 @@ function auditStream(runDir) {
  * Start the run's proxy. Returns a handle; the caller keeps it and hands it back
  * to `reloadProxy`/`stopProxy`.
  *
- * ctx: { runId, runDir, bind, port, onBlocked, secretsMode, hubId }
+ * ctx: { runId, runDir, bind, port, onBlocked, secretsMode, hubId, placement,
+ *        controlDir, outDir, network, image, digest, uid, gid, lang }
+ *
+ * `placement` is where the BUILT-IN engine's listener runs — `'process'` (the
+ * hub itself) or `'container'`. It is not a second engine: the policy, the 403
+ * body and the audit format are the same code either way, and only the address
+ * the agent dials differs. The caller decides, because the decision is about the
+ * daemon's posture and this module does not read one (see `proxyPlacement()` in
+ * index.mjs).
  */
 export async function startProxy(run, spec, ctx = {}) {
   const engine = proxyEngine(normalizeSafe(spec).network?.engine)
@@ -389,6 +407,7 @@ export async function startProxy(run, spec, ctx = {}) {
     const mod = await import('./ironproxy.mjs')
     return mod.startIronProxy(run, spec, ctx)
   }
+  if (ctx.placement === 'container') return startBuiltinContainer(run, spec, ctx)
   return startBuiltin(run, spec, ctx)
 }
 
@@ -407,6 +426,35 @@ export async function reloadProxy(handle, spec) {
     return mod.reloadIronProxy(handle, spec)
   }
   const next = proxyPolicy(spec, { secretsMode: handle.secretsMode })
+  // THE CONTAINER PLACEMENT'S CONTROL CHANNEL, and the reason it is a FILE.
+  //
+  // The hub cannot reach the proxy over the network — that is the whole problem
+  // this placement exists to solve — so a management port would have to be
+  // published back to the host, which is the bind that does not work under a
+  // rootless daemon in the first place. The two candidates left were a file the
+  // proxy watches and a `docker exec` that signals it. The file wins on four
+  // counts, and each of them is a way exec would go wrong:
+  //
+  //   - `exec` would still need the file (a signal carries no policy), so it is
+  //     strictly the file PLUS a daemon round trip;
+  //   - it is durable. A proxy container that restarts, and a hub that restarts,
+  //     both read the CURRENT policy on the way up. A signal sent to a proxy
+  //     that was not listening is simply lost, and a run would go on enforcing
+  //     the policy it was launched with while every page said otherwise;
+  //   - `docker exec` into the egress boundary means the boundary accepts new
+  //     processes. This container is `--read-only`, `--cap-drop ALL`,
+  //     `--security-opt no-new-privileges` precisely so that it does not;
+  //   - and it is the same shape iron-proxy already uses for its own config, so
+  //     there is one answer to "where does a proxy's policy live".
+  //
+  // Written to a temporary name and RENAMED, so the proxy can never read half a
+  // document; the container watches the DIRECTORY, which is what makes a rename
+  // visible to it at all (a bind-mounted FILE would keep pointing at the old
+  // inode — the trap that would have made this look like a silent no-op).
+  if (handle.placement === 'container') {
+    const written = writePolicyFile(handle, spec)
+    if (!written.ok) return { ok: false, reason: written.reason, policy: handle.policy }
+  }
   handle.policy = next            // ← the atomic swap
   handle.spec = spec
   return { ok: true, policy: next }
@@ -418,6 +466,7 @@ export async function stopProxy(handle) {
     const mod = await import('./ironproxy.mjs')
     return mod.stopIronProxy(handle)
   }
+  if (handle.placement === 'container') return stopBuiltinContainer(handle)
   return stopBuiltin(handle)
 }
 
@@ -462,6 +511,7 @@ async function startBuiltin(run, spec, ctx = {}) {
   const runId = ctx.runId ?? run?.id ?? null
   const handle = {
     engine: 'builtin',
+    placement: 'process',
     runId,
     run,
     spec,
@@ -605,6 +655,23 @@ async function decide(handle, { host, port, method, path }) {
 
 async function onConnect(handle, req, clientSocket, head) {
   const at = Date.now()
+  // THE FIRST LINE, AND IT IS NOT DEFENSIVE PROGRAMMING — IT IS THE PROCESS.
+  //
+  // A socket with no `error` listener emits node's unhandled `'error'` event,
+  // and that is an uncaught exception: the whole process dies. The denial path
+  // below writes a 403 and ends the socket, and curl answers a refused tunnel by
+  // RESETTING it — measured 2026-09-05 against the real daemon, `read
+  // ECONNRESET` out of `TCP.onStreamRead`, the proxy gone one second after its
+  // first denial and every later request failing with "could not resolve proxy".
+  //
+  // In the container placement that is a run whose egress dies at its first
+  // blocked host. In the IN-PROCESS placement it is the same fault one layer up:
+  // the listener lives in the hub, so an agent hitting its own allowlist would
+  // have taken the scheduler, the watcher and every SSE client with it. The
+  // handler further down (`shut`) is registered only after `net.connect()`
+  // returns, which is far too late — the whole refusal happens before it, and so
+  // does the DNS lookup in `decide()`.
+  clientSocket.on('error', () => { try { clientSocket.destroy() } catch {} })
   const { host, port } = splitHostPort(req.url, 443)
   const d = await decide(handle, { host, port, method: 'CONNECT', path: null })
 
@@ -669,6 +736,11 @@ async function onConnect(handle, req, clientSocket, head) {
 
 async function onRequest(handle, req, res) {
   const at = Date.now()
+  // The same rule as the tunnel above, for the plain-HTTP entry: a client that
+  // aborts while the hub is resolving a name, or that resets after reading the
+  // 403, must cost this request and never the process.
+  req.on('error', () => {})
+  res.on('error', () => {})
   let target
   try {
     target = new URL(req.url.startsWith('http') ? req.url : `http://${req.headers.host ?? ''}${req.url}`)
@@ -734,4 +806,460 @@ async function onRequest(handle, req, res) {
   // request it started, or the socket to the upstream is never released.
   res.on('close', () => { try { upstream.destroy() } catch {} })
   req.pipe(upstream)
+}
+
+// ---------------------------------------- the built-in engine, as a container
+//
+// Under a rootless daemon the built-in listener cannot live on the host (§11b,
+// measured): the run's bridge is inside rootlesskit's own network namespace, the
+// hub gets EADDRNOTAVAIL binding its gateway, and a container on an `--internal`
+// network can reach no host address at all. The listener therefore moves ONTO
+// that network — a container of its own, with a second leg to `bridge` for its
+// own egress — and the agent's HTTPS_PROXY names it by container name.
+//
+// The policy engine does not move with it. `sandbox/proxy-entry.mjs` runs
+// `runProxyProcess()` below, which is `startBuiltin()` reading its spec from a
+// file: same `hostVerdict`, same `deniedBody`, same `auditLine`. That is the
+// property the whole placement hangs on — a second matcher would be two
+// allowlists that agree until the day they do not.
+
+/** The policy document's name inside the control directory. */
+export const POLICY_FILE = 'policy.json'
+/** What the container writes into its one writable mount, and the hub tails. */
+export const CONTAINER_AUDIT_FILE = 'egress.jsonl'
+/** Written by the proxy once it is really listening — the readiness evidence. */
+export const READY_FILE = 'ready.json'
+
+/**
+ * The document the hub writes and the container reads. It carries the SPEC and
+ * not the resolved policy, so the container computes `proxyPolicy()` itself —
+ * one policy builder, and a hub and a proxy that cannot come to disagree about
+ * what an allow list means.
+ */
+export function policyDocument(spec, ctx = {}) {
+  return JSON.stringify({
+    version: 1,
+    runId: ctx.runId ?? null,
+    at: new Date(ctx.at ?? Date.now()).toISOString(),
+    secretsMode: ctx.secretsMode ?? null,
+    spec: spec ?? {},
+  }) + '\n'
+}
+
+/**
+ * The other half. A document that cannot be read returns `null` and the caller
+ * KEEPS THE POLICY IT HAS — never falls back to an empty one, which in
+ * allowlist mode is "deny everything" and would turn a typo in a rewrite into a
+ * run whose egress silently stopped.
+ */
+export function readPolicyDocument(text) {
+  let j
+  try { j = JSON.parse(String(text ?? '')) } catch { return null }
+  if (!j || typeof j !== 'object' || !j.spec || typeof j.spec !== 'object') return null
+  return { spec: j.spec, secretsMode: j.secretsMode ?? null, runId: j.runId ?? null, at: j.at ?? null }
+}
+
+function writePolicyFile(handle, spec) {
+  const dir = handle.controlDir
+  if (!dir) return { ok: false, reason: 'no control directory' }
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const tmp = join(dir, `.${POLICY_FILE}.tmp`)
+    writeFileSync(tmp, policyDocument(spec, { runId: handle.runId, secretsMode: handle.secretsMode }), { mode: 0o600 })
+    renameSync(tmp, join(dir, POLICY_FILE))
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, reason: err?.message || String(err) }
+  }
+}
+
+function failedContainer(runId, reason) {
+  return { engine: 'builtin', placement: 'container', runId, ok: false, reason, policy: null, blocked: new Map(), wouldBlock: new Map() }
+}
+
+/**
+ * Start `fl-proxy-<run id>` on the run's own internal network. Returns a handle,
+ * or `{ ok: false, reason }` — never a throw, so `ensureProxy()` can turn it
+ * into one readable sentence.
+ *
+ * READINESS IS POSITIVE EVIDENCE, not `docker run` exiting 0. A detached run
+ * returns a container id the instant the daemon has accepted it, and a proxy
+ * whose entry point dies a second later would leave the agent dialling a name
+ * that resolves and refuses — which reads as a network fault for the rest of the
+ * run. So the entry point writes `ready.json` after its listener is up, and this
+ * function waits for that file; where it never appears, the container's own log
+ * is read and put into the refusal, because that is where the reason is.
+ */
+async function startBuiltinContainer(run, spec, ctx = {}) {
+  const runId = ctx.runId ?? run?.id ?? null
+  if (!runId) return failedContainer(runId, 'no run id')
+  if (!ctx.controlDir || !ctx.outDir) return failedContainer(runId, 'no control directory')
+
+  let runtime
+  try { runtime = await import('./runtime.mjs') }
+  catch (err) { return failedContainer(runId, t('sandbox.proxy.engine_missing', { reason: err?.message || String(err) })) }
+
+  const handle = {
+    engine: 'builtin',
+    placement: 'container',
+    runId, run, spec,
+    secretsMode: ctx.secretsMode ?? null,
+    policy: proxyPolicy(spec, { secretsMode: ctx.secretsMode }),
+    onBlocked: typeof ctx.onBlocked === 'function' ? ctx.onBlocked : null,
+    blocked: new Map(),
+    wouldBlock: new Map(),
+    requests: 0,
+    controlDir: ctx.controlDir,
+    outDir: ctx.outDir,
+    container: ctx.containerName ?? runtime.proxyName(runId),
+    port: Number(ctx.port) > 0 ? Number(ctx.port) : runtime.EGRESS_PROXY_PORT,
+    runtimeId: normalizeSafe(spec).runtime,
+    // The run's OWN `egress.jsonl`, exactly where the in-process placement puts
+    // it and where audit.mjs looks: the container writes into its private out
+    // directory, the hub copies each line here. One audit file per run, one
+    // format, whichever placement produced it.
+    audit: auditStream(ctx.runDir),
+    auditOffset: 0,
+    watcher: null,
+    tailTimer: null,
+  }
+  handle.url = `http://${handle.container}:${handle.port}`
+
+  // A leftover from a previous attempt holds the name and would make `docker
+  // run` fail with a collision rather than with the reason.
+  try {
+    await runtime.stopContainer(handle.container, { runtime: handle.runtimeId, timeoutSec: 5 })
+    await runtime.removeContainer(handle.container, { runtime: handle.runtimeId, force: true })
+  } catch { /* a name that is already free is the ordinary case */ }
+
+  try {
+    mkdirSync(handle.controlDir, { recursive: true, mode: 0o700 })
+    mkdirSync(handle.outDir, { recursive: true, mode: 0o700 })
+    // A stale readiness marker would make the wait below answer instantly for a
+    // container that never came up.
+    rmSync(join(handle.outDir, READY_FILE), { force: true })
+  } catch (err) {
+    return failedContainer(runId, err?.message || String(err))
+  }
+  const written = writePolicyFile(handle, spec)
+  if (!written.ok) return failedContainer(runId, written.reason)
+
+  let argv
+  try {
+    argv = runtime.buildEgressProxyArgv(spec, {
+      runId, hubId: ctx.hubId, network: ctx.network, image: ctx.image, digest: ctx.digest,
+      controlDir: handle.controlDir, outDir: handle.outDir, containerName: handle.container,
+      port: handle.port, uid: ctx.uid, gid: ctx.gid, lang: ctx.lang, env: ctx.env,
+    })
+  } catch (err) {
+    return failedContainer(runId, err?.message || String(err))
+  }
+  if (!argv) return failedContainer(runId, 'no proxy command line')
+
+  const { sh } = await import('../util.mjs')
+  const started = await sh(argv.bin, argv.args, { timeout: 120_000 })
+  if (!started.ok) {
+    return failedContainer(runId, (started.stderr || started.stdout || '').trim() || 'docker run failed')
+  }
+
+  const ready = await waitForReady(handle, Number(ctx.readyTimeoutMs ?? 20_000))
+  if (!ready.ok) {
+    const why = await containerLogTail(handle, runtime)
+    try { await stopBuiltinContainer(handle) } catch {}
+    return failedContainer(runId, `${ready.reason}${why ? ` · ${why}` : ''}`)
+  }
+
+  startAuditTail(handle)
+  return handle
+}
+
+/**
+ * TAKE A RUNNING PROXY CONTAINER BACK OVER, after a hub restart. This hub
+ * restarts 164 times in 30 days, so it is the ordinary case and not an edge one.
+ *
+ * The container itself survives a restart untouched — the daemon keeps it and
+ * the agent goes on dialling it by name — but the HANDLE dies with the process,
+ * and two things hang on the handle: the audit tail that turns a denial into a
+ * `sandbox:blocked` event, and the policy channel `changePolicy()` writes
+ * through. Without them a restarted hub would go on enforcing correctly and stop
+ * saying anything about it, and a policy change would be accepted and never
+ * arrive.
+ *
+ * THIS IS WHERE THE FILE CONTROL CHANNEL PAYS FOR ITSELF. iron-proxy deliberately
+ * refuses to be re-attached: its management key is minted per launch and lives
+ * only in the old container's environment, so a fabricated handle would let
+ * `changePolicy()` believe it had delivered a policy it did not. Here there is no
+ * such secret — the channel is a file in a directory the hub owns — so a full,
+ * honest handle can be rebuilt for a container the hub never started.
+ *
+ * The policy is REWRITTEN from the row's own spec on the way in. The row is the
+ * truth about what this run's policy is; a control file that drifted from it (a
+ * data directory restored from a backup, a half-written rewrite the old process
+ * did not finish) is repaired rather than trusted.
+ *
+ * `{ ok: false, reason }` when the container is not demonstrably running —
+ * "the daemon did not answer" is not "it is gone", and the caller then does
+ * nothing rather than starting a second proxy on a name that is taken.
+ */
+export async function attachProxy(run, spec, ctx = {}) {
+  const runId = ctx.runId ?? run?.id ?? null
+  if (ctx.placement !== 'container') return { ok: false, reason: 'not a container placement' }
+  if (proxyEngine(normalizeSafe(spec).network?.engine) !== 'builtin') {
+    return { ok: false, reason: 'only the built-in engine can be re-attached' }
+  }
+  if (!runId || !ctx.controlDir || !ctx.outDir) return { ok: false, reason: 'no control directory' }
+
+  let runtime
+  try { runtime = await import('./runtime.mjs') }
+  catch (err) { return { ok: false, reason: err?.message || String(err) } }
+
+  const container = ctx.containerName ?? runtime.proxyName(runId)
+  const runtimeId = normalizeSafe(spec).runtime
+  const state = await runtime.containerState(container, { runtime: runtimeId })
+  const verdict = state?.verdict ?? 'ok'
+  if (verdict !== 'ok') return { ok: false, reason: 'the daemon did not answer' }
+  if (!state?.running) return { ok: false, reason: 'the proxy container is not running' }
+
+  const handle = {
+    engine: 'builtin',
+    placement: 'container',
+    runId, run, spec,
+    secretsMode: ctx.secretsMode ?? null,
+    policy: proxyPolicy(spec, { secretsMode: ctx.secretsMode }),
+    onBlocked: typeof ctx.onBlocked === 'function' ? ctx.onBlocked : null,
+    blocked: new Map(),
+    wouldBlock: new Map(),
+    requests: 0,
+    controlDir: ctx.controlDir,
+    outDir: ctx.outDir,
+    container,
+    port: Number(ctx.port) > 0 ? Number(ctx.port) : runtime.EGRESS_PROXY_PORT,
+    runtimeId,
+    audit: auditStream(ctx.runDir),
+    auditOffset: 0,
+    watcher: null,
+    tailTimer: null,
+    reattached: true,
+  }
+  handle.url = `http://${handle.container}:${handle.port}`
+  const written = writePolicyFile(handle, spec)
+  if (!written.ok) return { ok: false, reason: written.reason }
+  // The offset starts at the file's END: everything before it was copied into
+  // the run's `egress.jsonl` and announced by the hub that started this proxy,
+  // and announcing it again would raise events for denials the operator has
+  // already seen. What that costs is written down rather than hidden — a denial
+  // that happened while the hub was down stays in the proxy's own out file for
+  // the audit export, and is not re-announced.
+  startAuditTail(handle)
+  return handle
+}
+
+async function waitForReady(handle, timeoutMs) {
+  const file = join(handle.outDir, READY_FILE)
+  const until = Date.now() + Math.max(1000, timeoutMs)
+  while (Date.now() < until) {
+    try { if (existsSync(file)) return { ok: true } } catch {}
+    await new Promise((r) => setTimeout(r, 150))
+  }
+  return { ok: false, reason: t('sandbox.proxy.container_not_ready', { container: handle.container ?? '?' }) }
+}
+
+/** The last few lines of the proxy container's own log — where the reason is. */
+async function containerLogTail(handle, runtime) {
+  try {
+    const { sh } = await import('../util.mjs')
+    const bin = runtime.runtimeBin(handle.runtimeId)
+    const r = await sh(bin, ['logs', '--tail', '20', handle.container], { timeout: 15_000 })
+    return `${String(r.stdout ?? '')}${String(r.stderr ?? '')}`.trim().split('\n').slice(-4).join(' / ')
+  } catch { return '' }
+}
+
+/**
+ * THE DENIAL CHANNEL. `onBlocked` was an in-process callback; from a container
+ * it has to be something the hub READS, and the audit line is already exactly
+ * that — one JSON object per request, in a directory only the hub and the proxy
+ * have a mount of.
+ *
+ * `fs.watch` on the DIRECTORY is the primary signal, and it really fires for a
+ * container's write: a bind mount shares the underlying inode, so the host's
+ * inotify sees it. The one-second timer next to it is a net and not a poll of
+ * the file — it compares a `statSync` size and returns, because inotify does not
+ * propagate on every filesystem an operator might have `~/.local/share` on, and
+ * a denial that never reaches the hub is a `sandbox:blocked` event that never
+ * happens.
+ *
+ * The offset starts at the file's CURRENT size, which is what makes this
+ * idempotent across a hub restart: the lines already there were already copied
+ * into the run's `egress.jsonl` and already announced, and re-announcing them
+ * would re-raise events for denials the operator has seen.
+ */
+function startAuditTail(handle) {
+  const file = join(handle.outDir, CONTAINER_AUDIT_FILE)
+  try { handle.auditOffset = existsSync(file) ? statSync(file).size : 0 } catch { handle.auditOffset = 0 }
+  let rest = ''
+  const drain = () => {
+    let size
+    try { size = existsSync(file) ? statSync(file).size : 0 } catch { return }
+    // A file that SHRANK was replaced or truncated; reading from a stale offset
+    // would splice two documents together. Start over from its beginning.
+    if (size < handle.auditOffset) { handle.auditOffset = 0; rest = '' }
+    if (size === handle.auditOffset) return
+    let text = ''
+    try {
+      const fd = openSync(file, 'r')
+      try {
+        const buf = Buffer.alloc(size - handle.auditOffset)
+        const read = readSync(fd, buf, 0, buf.length, handle.auditOffset)
+        handle.auditOffset += read
+        text = buf.slice(0, read).toString('utf8')
+      } finally { closeSync(fd) }
+    } catch { return }
+    rest += text
+    const lines = rest.split('\n')
+    rest = lines.pop() ?? ''
+    for (const raw of lines) {
+      const line = raw.trim()
+      if (!line) continue
+      handle.requests++
+      try { handle.audit?.write(line + '\n') } catch {}
+      let parsed
+      try { parsed = JSON.parse(line) } catch { continue }
+      if (!parsed || parsed.action === 'allow') continue
+      const count = countBlocked(parsed.action === 'would_deny' ? handle.wouldBlock : handle.blocked, parsed.host)
+      if (handle.onBlocked) {
+        try {
+          handle.onBlocked({
+            host: parsed.host, method: parsed.method, path: parsed.path,
+            at: Date.parse(parsed.at) || Date.now(), count, action: parsed.action,
+          })
+        } catch {}
+      }
+    }
+  }
+  try {
+    handle.watcher = watchPath(handle.outDir, () => { try { drain() } catch {} })
+    handle.watcher.on?.('error', () => {})
+    // A watcher holds the event loop open. The hub has a listening server so it
+    // would not notice — until a teardown is missed and the process will not
+    // exit, which is the shape of leak this file already has one entry about.
+    handle.watcher.unref?.()
+  } catch { handle.watcher = null }
+  handle.tailTimer = setInterval(() => { try { drain() } catch {} }, 1000)
+  handle.tailTimer.unref?.()
+  drain()
+}
+
+async function stopBuiltinContainer(handle) {
+  try { handle.watcher?.close?.() } catch {}
+  handle.watcher = null
+  if (handle.tailTimer) { try { clearInterval(handle.tailTimer) } catch {} }
+  handle.tailTimer = null
+  if (handle.container) {
+    try {
+      const runtime = await import('./runtime.mjs')
+      await runtime.stopContainer(handle.container, { runtime: handle.runtimeId, timeoutSec: 10 })
+      await runtime.removeContainer(handle.container, { runtime: handle.runtimeId, force: true })
+    } catch { /* teardown is fail-soft everywhere in this hub */ }
+  }
+  try { handle.audit?.end() } catch {}
+  handle.audit = null
+  return { ok: true }
+}
+
+// ------------------------------------------------- what runs IN the container
+
+/**
+ * The proxy process itself (`sandbox/proxy-entry.mjs`). It is `startBuiltin()`
+ * with the policy read from a file instead of handed in, and the same live swap:
+ * `handle.policy = proxyPolicy(next)` is one assignment of a frozen object, so a
+ * rewrite takes effect on the NEXT connection and drops no tunnel that is open.
+ *
+ * Returns `{ handle, stop }`. Never binds anything until the policy has been
+ * read once: a proxy that came up with an empty policy would deny everything for
+ * as long as its first read took, and an agent's first request is usually its
+ * `git fetch`.
+ */
+export async function runProxyProcess(opts = {}) {
+  const policyPath = String(opts.policyPath ?? '')
+  const outDir = String(opts.outDir ?? '')
+  if (!policyPath) throw new Error('no policy file')
+
+  const readSpec = () => {
+    try {
+      const doc = readPolicyDocument(readFileTextSync(policyPath))
+      return doc
+    } catch { return null }
+  }
+  const first = readSpec()
+  if (!first) throw new Error(`policy file unreadable: ${policyPath}`)
+
+  const handle = await startBuiltin({ id: first.runId ?? opts.runId ?? null }, first.spec, {
+    runId: first.runId ?? opts.runId ?? null,
+    runDir: outDir || null,
+    bind: opts.bind ?? '0.0.0.0',
+    port: Number(opts.port) > 0 ? Number(opts.port) : 8080,
+    secretsMode: first.secretsMode,
+  })
+
+  // WATCH THE DIRECTORY, NOT THE FILE. The hub replaces the policy by rename, so
+  // the file's inode changes on every change — a watch on the path would fire
+  // once and then be watching something nobody writes to any more. The
+  // one-second timer beside it is the same net the hub's audit tail carries, for
+  // the same reason: inotify does not cross every filesystem a bind mount may
+  // sit on, and a policy change that silently did not arrive is the failure this
+  // whole placement exists to make impossible.
+  let lastStamp = stampOf(policyPath)
+  const reread = () => {
+    const stamp = stampOf(policyPath)
+    if (stamp === lastStamp) return
+    lastStamp = stamp
+    const next = readSpec()
+    if (!next) return               // keep the policy in force; never fall to empty
+    handle.spec = next.spec
+    handle.secretsMode = next.secretsMode
+    handle.policy = proxyPolicy(next.spec, { secretsMode: next.secretsMode })
+  }
+  let watcher = null
+  try {
+    watcher = watchPath(dirname(policyPath), () => { try { reread() } catch {} })
+    watcher.on?.('error', () => {})
+  } catch { watcher = null }
+  const timer = setInterval(() => { try { reread() } catch {} }, 1000)
+
+  // The readiness marker, LAST: it means "the listener is up and the policy is
+  // the one in the file", which is what the hub waits for before it lets the
+  // agent's container be created.
+  if (outDir) {
+    try {
+      mkdirSync(outDir, { recursive: true })
+      writeFileSync(join(outDir, READY_FILE),
+        JSON.stringify({ at: new Date().toISOString(), port: handle.port, run: handle.runId }) + '\n')
+    } catch { /* a marker that cannot be written is a start the hub will time out on, with the log to say why */ }
+  }
+
+  const stop = async () => {
+    try { watcher?.close?.() } catch {}
+    try { clearInterval(timer) } catch {}
+    try { rmSync(join(outDir, READY_FILE), { force: true }) } catch {}
+    await stopBuiltin(handle)
+  }
+  return { handle, stop }
+}
+
+function readFileTextSync(path) {
+  const fd = openSync(path, 'r')
+  try {
+    const size = statSync(path).size
+    const buf = Buffer.alloc(size)
+    const read = readSync(fd, buf, 0, size, 0)
+    return buf.slice(0, read).toString('utf8')
+  } finally { closeSync(fd) }
+}
+
+/** mtime+size+inode — cheap, and it changes on a rename as well as on a rewrite. */
+function stampOf(path) {
+  try {
+    const s = statSync(path)
+    return `${s.ino}:${s.size}:${s.mtimeMs}`
+  } catch { return 'gone' }
 }

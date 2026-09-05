@@ -325,6 +325,11 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     'FREILAUF_SANDBOX_OFF', 'FREILAUF_SANDBOX_RUNTIME_BIN', 'FL_DOCKER_STATE',
     'FREILAUF_SANDBOX_DIR', 'FREILAUF_SANDBOX_CA_DIR', 'FREILAUF_SANDBOX_SOCKET_DIR',
     'FREILAUF_SANDBOX_INFO_CACHE_MS', 'FREILAUF_SANDBOX_PROXY_BIND',
+    // WHERE the built-in listener runs, and out of which image. The placement
+    // seam OUTRANKS the bind below, so an operator who has `…_PLACEMENT=container`
+    // in their shell would make this suite start a container per sandboxed run —
+    // the same class of leak FREILAUF_SKILLS_HOME is the precedent for.
+    'FREILAUF_SANDBOX_PROXY_PLACEMENT', 'FREILAUF_SANDBOX_PROXY_IMAGE',
     // The two endpoint seams. See `sandboxSeams()` below for what each says.
     'FREILAUF_SANDBOX_DOCKER_HOST', 'FREILAUF_SANDBOX_RUNTIME_FORCE',
     // Who drives the container passes. See `sandboxSeams()`.

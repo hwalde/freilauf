@@ -613,6 +613,105 @@ function tmpfsArgs(spec, homeDir) {
   return out
 }
 
+/** The port the egress proxy listens on inside its own container. */
+export const EGRESS_PROXY_PORT = 8080
+/** Where the app's three read-only directories appear inside the proxy container. */
+export const PROXY_APP_TARGET = '/opt/freilauf'
+/** Where the hub's policy file appears inside the proxy container (read-only). */
+export const PROXY_CONTROL_TARGET = '/etc/freilauf/proxy'
+/** The one writable directory the proxy container has: its audit stream. */
+export const PROXY_OUT_TARGET = '/var/freilauf/out'
+
+/**
+ * THE BUILT-IN ENGINE, AS A CONTAINER (§7.5.1, §11b).
+ *
+ * The built-in CONNECT proxy is a listener; where that listener RUNS is a
+ * deployment question, not a policy one. Under a rootful daemon it runs in the
+ * hub process and costs nothing. Under a **rootless** daemon it cannot: the run's
+ * bridge lives inside rootlesskit's own network namespace, so the hub gets
+ * `EADDRNOTAVAIL` binding that network's gateway, a container on an `--internal`
+ * network reaches neither the host's loopback nor its public address, and
+ * `host-gateway` resolves to the stopped rootful daemon's leftover bridge. That
+ * is measured, and it is why three of the four shipped profiles could not start
+ * on this machine at all.
+ *
+ * So the same listener is put where the container can reach it — ON the run's
+ * internal network, with a second leg to `bridge` for its own egress (the caller
+ * makes that leg with `buildNetworkConnectArgv()`, exactly as for iron-proxy).
+ * The agent's `HTTPS_PROXY` then names `fl-proxy-<id>:8080`, which is the default
+ * `buildRunArgv()` has always written when no host address was known.
+ *
+ * **It is not a second implementation of the policy**, which is the one thing
+ * that would make this worse than the bind it replaces: the container runs
+ * `sandbox/proxy-entry.mjs` on the SAME `server/sandbox/proxy.mjs` engine, out of
+ * three read-only bind mounts of the hub's own source. There is one matcher, one
+ * 403 body and one audit format whichever placement is in force.
+ *
+ * Three mounts and their modes are the security shape of the whole thing:
+ *
+ *   - `server/`, `lang/`, `sandbox/` — **ro**, and they are the hub's source, not
+ *     its configuration: no database, no `~/.config`, no credential.
+ *   - the control directory — **ro**, holding `policy.json`. It lives under the
+ *     hub's data directory and NOT in the run directory, because the run
+ *     directory is mounted read-write into the AGENT's container: a policy the
+ *     agent could rewrite is not a policy.
+ *   - the out directory — the only **rw** mount, and it holds nothing but
+ *     `egress.jsonl`. The hub tails it; the agent has no mount of it.
+ *
+ * `ctx`: { runId, hubId, network, image, digest, controlDir, outDir, appDir,
+ * port, uid, gid, lang, env }. Pure — unit-tested with no daemon anywhere.
+ */
+export function buildEgressProxyArgv(spec, ctx = {}) {
+  const s = normalizeSpec(spec ?? {})
+  const mode = s.network?.mode ?? 'allowlist'
+  if (mode === 'open' || mode === 'none') return null
+  const def = runtimeDef(s.runtime)
+  const bin = runtimeBin(s.runtime)
+  const runId = String(ctx.runId ?? '')
+  const app = String(ctx.appDir ?? appDir())
+  const port = Number(ctx.port) > 0 ? Number(ctx.port) : EGRESS_PROXY_PORT
+
+  const args = ['run', ...def.runFlags, '-d', '--init']
+  args.push('--name', ctx.containerName || proxyName(runId))
+  args.push('--label', `freilauf.run=${runId}`)
+  args.push('--label', `freilauf.hub=${String(ctx.hubId ?? '')}`)
+  args.push('--label', 'freilauf.role=proxy')
+  args.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--read-only')
+  // node writes nothing to disk here, but it does want a writable `/tmp` for a
+  // v8 scratch file on some builds — a `--read-only` container without one dies
+  // at startup with a message nobody would connect to this.
+  args.push('--tmpfs', '/tmp:rw,size=16m,mode=1777')
+  args.push('--network', ctx.network || networkName(runId))
+  args.push(...containerIdentity(def.id, ctx).runFlags)
+  // The same fence the agent gets: a proxy that can be starved is a run that
+  // stalls, and this one is on the path of every request the agent makes.
+  args.push(...numArg('--pids-limit', 256))
+  args.push(...sizeArg('--memory', ctx.memory ?? '512m'))
+
+  addEnv(args, 'FL_RUN_ID', runId)
+  addEnv(args, 'FL_PROXY_POLICY', `${PROXY_CONTROL_TARGET}/policy.json`)
+  addEnv(args, 'FL_PROXY_OUT', PROXY_OUT_TARGET)
+  addEnv(args, 'FL_PROXY_PORT', String(port))
+  addEnv(args, 'FL_PROXY_BIND', '0.0.0.0')
+  // The 403 body is read by the AGENT, and the operator picked the hub's
+  // language for exactly such sentences. i18n.mjs resolves its catalog from its
+  // own directory, so the mount below is enough to find it; this only says which
+  // of the three to speak.
+  addEnv(args, 'FL_PROXY_LANG', String(ctx.lang ?? 'en'))
+  for (const [key, value] of Object.entries(ctx.env ?? {})) addEnv(args, key, value)
+
+  const own = []
+  addMount(args, own, { source: join(app, 'server'), target: `${PROXY_APP_TARGET}/server`, mode: 'ro' })
+  addMount(args, own, { source: join(app, 'lang'), target: `${PROXY_APP_TARGET}/lang`, mode: 'ro' })
+  addMount(args, own, { source: join(app, 'sandbox'), target: `${PROXY_APP_TARGET}/sandbox`, mode: 'ro' })
+  if (ctx.controlDir) addMount(args, own, { source: ctx.controlDir, target: PROXY_CONTROL_TARGET, mode: 'ro' })
+  if (ctx.outDir) addMount(args, own, { source: ctx.outDir, target: PROXY_OUT_TARGET, mode: 'rw' })
+
+  args.push(imageRef(ctx.image, ctx.digest))
+  args.push('node', `${PROXY_APP_TARGET}/sandbox/proxy-entry.mjs`)
+  return { bin, args }
+}
+
 /**
  * The run's egress proxy as a container (§7.5.2), or null when this run has
  * none: `open`/`none` have nothing to proxy, and the `builtin` engine is a

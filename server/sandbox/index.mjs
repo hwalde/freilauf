@@ -32,14 +32,15 @@
 // graph down with it. The same rule the harness plugins follow (AGENTS.md,
 // "Pitfalls": a plugin file that needs something from the hub's own modules
 // imports it inside the function that uses it).
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import db, { addEvent, getSetting, setSetting } from '../db.mjs'
 import { RUNS_DIR, kurzid, sh } from '../util.mjs'
 import { env } from '../env.mjs'
-import { t } from '../i18n.mjs'
+import { t, currentLanguage } from '../i18n.mjs'
+import { dataDir } from '../paths.mjs'
 // The one reader of the four hub sandbox settings — see "the hub layer" below.
 import { sandboxHubMode, sandboxAllowBypass, sandboxLock, sandboxHubSpec, sandboxAgainst } from '../run-def.mjs'
 import { appendAuditFile } from './audit.mjs'
@@ -841,10 +842,17 @@ export async function prepareSandbox(run, repo, opts = {}) {
     //    written down in `ensureProxy()` and in SANDBOX_RESEARCH.md.
     if (spec.network?.mode !== 'none' && spec.network?.mode !== 'open') {
       const rt = await sibling('runtime')
-      const builtin = (spec.network?.engine ?? 'builtin') === 'builtin'
+      //
+      //    And it is the PLACEMENT that decides, not the engine's name. A
+      //    built-in proxy that runs as a container sits on this network like
+      //    iron-proxy does, so the gateway can stay isolated and the host stays
+      //    unreachable from the box — the strong posture, on the daemon that
+      //    could not have it before. Only the in-process placement needs the
+      //    gateway, and only there is the cost above paid.
+      const inProcess = proxyPlacement(spec.network?.engine ?? 'builtin', av) === 'process'
       if (rt?.createNetwork) {
         const created = await rt.createNetwork(network, {
-          runtime: spec.runtime, internal: true, isolated: !builtin,
+          runtime: spec.runtime, internal: true, isolated: !inProcess,
         })
         // A network that could not be created is a run with no network at all —
         // and under `allowlist` that is a container that reaches nothing while
@@ -1177,13 +1185,81 @@ const proxies = new Map()
  * whether it is rootless (`rootless: null`), answers `ok` — the launch then
  * fails on the bind as it did before, which is worse than a diagnosis and better
  * than refusing a run over a question nobody answered.
+ *
+ * AND THAT REFUSAL IS GONE, because the thing it refused now works. Everything
+ * above is still true of the built-in listener ON THE HOST; what changed is that
+ * the listener no longer has to be there. `proxyPlacement()` below moves it into
+ * a container ON the run's own network under a rootless daemon — same policy
+ * code, same 403, same audit — so `allowlist` binds and the three shipped
+ * profiles that ask for it (Balanced, Locked down, Audit) start. The predicate
+ * is kept rather than deleted: it is where the next impossible combination gets
+ * named, and both callers (the launch and the two forms) still ask it.
  */
 export function engineUsable(engine, info = null) {
   const e = String(engine || 'builtin')
-  if (e === 'builtin' && info?.rootless === true && !env('SANDBOX_PROXY_BIND')) {
+  // A rootless daemon that cannot be ASKED anything is not a reason to refuse
+  // the engine — `prepareSandbox()` already refuses an unreachable runtime, with
+  // a better sentence than this function could give.
+  if (e === 'builtin' && info?.rootless === true && !env('SANDBOX_PROXY_BIND')
+      && proxyPlacement(e, info) !== 'container') {
     return { ok: false, reason: 'rootless_builtin', error: t('sandbox.launch.builtin_rootless') }
   }
   return { ok: true, reason: null, error: null }
+}
+
+/**
+ * WHERE THE BUILT-IN LISTENER RUNS: `'process'` (inside the hub) or
+ * `'container'` (on the run's own internal network). Not a second engine — the
+ * policy, the refusal body and the audit format are one piece of code either
+ * way — and therefore not a field in the profile: it is a fact about the DAEMON,
+ * and an operator should no more have to configure it than they configure which
+ * uid a container gets.
+ *
+ * The order answers the two things an operator can have said themselves first:
+ *
+ *  1. `FREILAUF_SANDBOX_PROXY_PLACEMENT` — `process` or `container`, the seam the
+ *     unit tests and an operator with an unusual daemon use.
+ *  2. `FREILAUF_SANDBOX_PROXY_BIND` — an address the operator published the
+ *     listener at. They have answered the reachability question themselves, and
+ *     starting a container to ignore that would be refusing a working setup.
+ *  3. a **rootless** daemon → `container`, because the host placement provably
+ *     cannot work there (§11b).
+ *  4. anything else → `process`. A machine that can run the listener for free
+ *     should not pay for a container: it is 512 MB of fence, a second image
+ *     start on every launch and a name in `docker ps` — all of it for a listener
+ *     the hub was already running.
+ */
+export function proxyPlacement(engine, info = null) {
+  // Every other engine IS a container by construction (iron-proxy is a binary
+  // nobody runs on the host), so the question only ever concerns the built-in
+  // one. Answering `'container'` for the rest is what lets the network step ask
+  // this one predicate instead of naming engines.
+  if (String(engine || 'builtin') !== 'builtin') return 'container'
+  const forced = String(env('SANDBOX_PROXY_PLACEMENT') ?? '').trim()
+  if (forced === 'container' || forced === 'process') return forced
+  if (env('SANDBOX_PROXY_BIND')) return 'process'
+  return info?.rootless === true ? 'container' : 'process'
+}
+
+/**
+ * The proxy's own two directories, under the hub's DATA directory and
+ * deliberately not under the run's.
+ *
+ * `~/agents/runs/<id>/` is bind-mounted read-write into the AGENT's container —
+ * that is where it writes its report. A policy file in there would be a policy
+ * the agent can rewrite, which is not a policy at all; and the audit stream the
+ * hub tails would be a stream the agent can forge lines into. So the control
+ * directory (`policy.json`, mounted read-only into the proxy) and the out
+ * directory (`egress.jsonl` and `ready.json`, the proxy's one writable mount)
+ * live where only the hub and the proxy have a mount.
+ *
+ * The run's own `egress.jsonl` is still written, in the run directory where
+ * audit.mjs looks for it: the hub copies each tailed line into it, so there is
+ * one audit file per run whichever placement produced the lines.
+ */
+function proxyDirs(runId) {
+  const root = join(dataDir(), 'sandbox', 'proxy', String(runId))
+  return { controlDir: join(root, 'control'), outDir: join(root, 'out'), root }
 }
 
 /**
@@ -1248,11 +1324,43 @@ async function ensureProxy(run, spec, { runDir, network, allow, port = 0, allowF
   // `specForProxy()`.
   const effective = specForProxy(spec, allow)
 
+  // WHERE THE BUILT-IN LISTENER GOES, asked once and used three times below: for
+  // the bind (a container placement needs none), for the mounts, and for the
+  // second leg. `info` is the same cached runtime answer `engineUsable()` just
+  // read, so the two cannot come to different conclusions about one daemon.
+  const placement = proxyPlacement(engine, info)
+  const dirs = proxyDirs(run.id)
   const ctx = {
     runId: run.id, runDir, hubId: hubId(),
     network: network ?? networkName(run.id),
     secretsMode: spec.secrets?.mode ?? 'env',
+    placement,
+    controlDir: dirs.controlDir,
+    outDir: dirs.outDir,
+    // The proxy runs `node` out of the RUN's own image, and deliberately not out
+    // of a proxy image of its own. Every shipped image is built from
+    // `freilauf/agent-base:24.04`, which carries Node 22 — so the interpreter is
+    // demonstrably there, on the one image this launch has already resolved,
+    // pulled and digested. A separate base image would be a second thing that
+    // has to exist on a machine that PULLED its harness images rather than
+    // building them, and its absence would surface as a proxy that will not
+    // start rather than as a missing image. `FREILAUF_SANDBOX_PROXY_IMAGE` is
+    // the seam for an operator image with no node in it.
+    image: env('SANDBOX_PROXY_IMAGE') || spec.image?.ref || null,
+    digest: env('SANDBOX_PROXY_IMAGE') ? null : (spec.image?.digest ?? null),
+    // §7.7's uid table again: rootful gets `--user <uid>:<gid>` so the audit
+    // stream stays owned by the hub user, rootless gets nothing because
+    // container root already IS that user.
+    ...(await runtimeIdentity(info)),
+    // The 403 body is read by the agent and written by the hub's own catalog.
+    lang: currentLanguage(),
     // WHERE THE BUILT-IN LISTENER BINDS, and why it is not a matter of taste.
+    //
+    // In the CONTAINER placement the question does not arise: the listener is on
+    // the run's own network and binds `0.0.0.0` inside a container nothing else
+    // can address. Everything below is about the IN-PROCESS placement, which is
+    // still what a rootful daemon gets — and is still the only thing this whole
+    // paragraph was ever true of.
     //
     // The built-in engine is an HTTP CONNECT listener inside the hub PROCESS, on
     // the host. The agent's container is on a `--internal` network, so the only
@@ -1277,7 +1385,9 @@ async function ensureProxy(run, spec, { runDir, network, allow, port = 0, allowF
     // `FREILAUF_SANDBOX_PROXY_BIND` stays as the operator's override and now
     // OUTRANKS the gateway, for an installation that publishes the proxy
     // somewhere of its own.
-    bind: await builtinBind(engine, network ?? networkName(run.id), spec.runtime, mode),
+    bind: placement === 'container'
+      ? '0.0.0.0'
+      : await builtinBind(engine, network ?? networkName(run.id), spec.runtime, mode),
     port,
     onBlocked: (info) => onBlocked(run.id, info),
   }
@@ -1302,14 +1412,26 @@ async function ensureProxy(run, spec, { runDir, network, allow, port = 0, allowF
     // container is on it yet at this point, so it is remade rather than the
     // fallback being turned into a refusal — otherwise the documented
     // "fall back to the built-in engine" would only ever be a launch failure.
+    //
+    // Only for the PROCESS placement. A built-in proxy that is itself a
+    // container sits ON that network and needs no host address on it, so
+    // remaking the network to give the host one would hand the agent a route to
+    // the machine's own services for nothing.
+    const fallbackPlacement = proxyPlacement('builtin', info)
     const rtNet = await sibling('runtime')
-    if (rtNet?.createNetwork) {
+    if (rtNet?.createNetwork && fallbackPlacement === 'process') {
       try {
         await rtNet.removeNetwork?.(ctx.network, { runtime: spec.runtime })
         await rtNet.createNetwork(ctx.network, { runtime: spec.runtime, internal: true, isolated: false })
       } catch { /* builtinBind() below refuses in a sentence if this did not help */ }
     }
-    const fallbackCtx = { ...ctx, bind: await builtinBind('builtin', ctx.network, spec.runtime, mode) }
+    const fallbackCtx = {
+      ...ctx,
+      placement: fallbackPlacement,
+      bind: fallbackPlacement === 'container'
+        ? '0.0.0.0'
+        : await builtinBind('builtin', ctx.network, spec.runtime, mode),
+    }
     handle = await proxy.startProxy(run, specForProxy({ ...spec, network: { ...spec.network, engine: 'builtin' } }, allow), fallbackCtx)
     if (!handle || handle.ok === false) throw new Error(t('sandbox.launch.proxy_failed', { reason }))
     addEvent(run.id, 'warn', { proxy_engine_fallback: engine, reason })
@@ -1320,7 +1442,12 @@ async function ensureProxy(run, spec, { runDir, network, allow, port = 0, allowF
   // out to the internet it was supposed to be the only way to. Idempotent, so a
   // resume walks it again; a failure is fatal, because a proxy that cannot
   // reach anything is a run with no egress and nothing above it would say so.
-  if (handle.engine === 'iron-proxy' && handle.container) {
+  // Asked of `handle.container` and not of the engine's NAME: the built-in
+  // engine's container placement is on the run's internal network for exactly
+  // the same reason iron-proxy is, and a condition naming one engine would have
+  // left it there with no way out — the failure that had never been noticed for
+  // iron-proxy, repeated in the placement that actually runs.
+  if (handle.container) {
     const rt = await sibling('runtime')
     const bridge = env('SANDBOX_PROXY_UPSTREAM_NETWORK') || 'bridge'
     const r = await rt?.connectNetwork?.(bridge, handle.container, { runtime: spec.runtime })
@@ -1661,6 +1788,21 @@ export async function teardownSandbox(run, opts = {}) {
 
   const rt = await sibling('runtime')
   const runtime = await runtimeOf(run)
+  // A PROXY CONTAINER WITH NO HANDLE, which is every run this hub restarted
+  // under. The handle lives in this process and a restart takes it; the
+  // container does not care and goes on running, holding 512 MB and a name that
+  // the next attempt at this run would collide with. It used to be left to the
+  // orphan reaper's label sweep, which is the right net and the wrong moment —
+  // the run is over HERE. Idempotent and fail-soft: a name that is already free
+  // is the ordinary case, and a daemon that will not answer is the reaper's
+  // problem after all.
+  if (runId && !out.proxy && rt?.stopContainer && rt?.proxyName) {
+    try {
+      const proxyContainer = rt.proxyName(runId)
+      await rt.stopContainer(proxyContainer, { runtime, timeoutSec: 10 })
+      await rt.removeContainer?.(proxyContainer, { runtime, force: true })
+    } catch { /* fail-soft, like every other step of a teardown */ }
+  }
   if (container && rt?.stopContainer) {
     try {
       await rt.stopContainer(container, { runtime, timeoutSec: opts.timeoutSec ?? 30 })
@@ -1674,6 +1816,14 @@ export async function teardownSandbox(run, opts = {}) {
   // on the same network.
   if (runId && opts.removeNetwork !== false && rt?.removeNetwork) {
     try { await rt.removeNetwork(networkName(runId), { runtime }); out.network = true } catch { /* fail-soft */ }
+    // …and the container placement's two directories with it, under the same
+    // condition and for the same reason: a reconfiguration keeps them (it starts
+    // another proxy on the same policy), a run that is over does not. Nothing is
+    // lost — the audit lines were copied into the run's own `egress.jsonl` as
+    // they arrived, which is where audit.mjs exports them from; what is left
+    // here is the policy document and a readiness marker, and both describe a
+    // run that has ended.
+    try { rmSync(proxyDirs(runId).root, { recursive: true, force: true }) } catch { /* fail-soft */ }
   }
   // The dedupe keys carry the host (and now the kind), so deleting the bare
   // `<id>|` deleted nothing at all and every finished run's hosts stayed in this
@@ -1757,11 +1907,41 @@ export async function restoreProxies() {
       const engine = spec.network?.engine ?? 'builtin'
       const repo = db.prepare('SELECT * FROM repos WHERE id=?').get(row.repo_id) ?? null
       let port = 0
-      if (engine === 'builtin') {
+      // WHICH OF THE TWO QUESTIONS TO ASK IS THE PLACEMENT'S, not the engine's.
+      // A built-in listener in the hub PROCESS died with the hub and has to come
+      // back on the port the agent is already dialling; a built-in listener in a
+      // CONTAINER is very probably still running, and starting a second one
+      // would collide on the name and take the working proxy with it. So the
+      // container placement takes the same "positive evidence only" route
+      // iron-proxy takes, and that route is where `portOfRecordedProxy()` has
+      // nothing to say — the port is fixed at 8080 and the agent dials a name.
+      const info = await refreshSandboxAvailability().catch(() => null)
+      const inProcess = proxyPlacement(engine, info) === 'process'
+      if (inProcess) {
         // The port the container is already dialling. A fresh ephemeral one
         // would be a listener nothing talks to.
         port = portOfRecordedProxy(row.id)
         if (!port) { out.skipped.push(row.id); continue }
+      } else if (engine === 'builtin'
+                 && (await reattachContainerProxy(row, specForProxy(spec, await resolveAllowList(spec, repo, row))))) {
+        // A RUNNING built-in proxy container is taken back over rather than
+        // left alone, and it is the file control channel that makes that
+        // honest: the handle carries the policy channel and the audit tail, and
+        // both are things the hub can rebuild for a container it did not start.
+        // Without it a restarted hub would go on enforcing correctly and stop
+        // SAYING anything — no `sandbox:blocked` for the rest of the run, and a
+        // policy change accepted into a file nobody was watching from here.
+        // iron-proxy deliberately keeps the old rule one line down: its
+        // management key died with the process that minted it.
+        //
+        // THE RESOLVED LIST, and not the row's raw spec — the same rule the
+        // reload below it follows and for the same reason: the stored spec
+        // carries the profile's PRESETS, and its `network.allow` is the
+        // unexpanded (usually empty) list. Re-asserting that into the policy
+        // file would replace a working allow list with "deny everything", on
+        // a run that is going, at the moment the hub comes back.
+        out.restored.push(row.id)
+        continue
       } else if (!(await containerProxyGone(row, spec))) {
         // Running, or the daemon said nothing. Both mean "do not touch it".
         out.skipped.push(row.id); continue
@@ -1786,6 +1966,37 @@ export async function restoreProxies() {
     }
   }
   return out
+}
+
+/**
+ * Take a running built-in proxy container back over after a hub restart — the
+ * handle, its audit tail and its policy channel, for a container this process
+ * never started. `false` when it is not demonstrably running or could not be
+ * attached, and the caller then falls through to the ordinary "is it gone?"
+ * question rather than assuming either answer.
+ *
+ * Fail-soft: a proxy that cannot be re-attached is a proxy that goes on working
+ * exactly as it is. Nothing here is a reason to end somebody's run.
+ */
+async function reattachContainerProxy(row, spec) {
+  try {
+    const proxy = await sibling('proxy')
+    if (!proxy?.attachProxy) return false
+    const dirs = proxyDirs(row.id)
+    const handle = await proxy.attachProxy(row, spec, {
+      runId: row.id, runDir: join(RUNS_DIR, String(row.id)),
+      placement: 'container', controlDir: dirs.controlDir, outDir: dirs.outDir,
+      secretsMode: spec.secrets?.mode ?? 'env',
+      onBlocked: (info) => onBlocked(row.id, info),
+    })
+    if (!handle || handle.ok === false) return false
+    proxies.set(row.id, handle)
+    addEvent(row.id, 'sandbox:proxy_restarted', {
+      engine: 'builtin', placement: 'container', url: handle.url ?? null,
+      container: handle.container ?? null, reattached: true,
+    })
+    return true
+  } catch { return false }
 }
 
 /**
