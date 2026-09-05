@@ -1428,6 +1428,7 @@
   "sandbox.problem.form.harness_unsupported": "{harness} cannot be run in a sandbox: its plugin declares no sandbox support.",
   "sandbox.problem.form.refused": "This hub's sandbox policy refuses that setting.",
   "sandbox.problem.form.profile_unknown": "There is no sandbox profile with the id {id}.",
+  "sandbox.problem.flow_overrides": "This step's sandbox overrides are not a document this hub accepts, so the run was not started: {problems}",
   "sandbox.problem.form.only_planned": "The sandbox can only be changed while the run has not started.",
   "sandbox.problem.form.hub_off": "This hub has the sandbox switched off, so a run cannot be put into one.",
   "sandbox.settings.title": "Sandbox",
@@ -1595,5 +1596,15 @@
   "incident.sandbox_blocked": "Sandbox turned a host away",
   "incident.sandbox_access": "Agent needs access",
   "incident.docker_unreachable": "Container runtime not answering",
-  "anomaly.sandbox_denied": "the sandbox got in the way"
+  "anomaly.sandbox_denied": "the sandbox got in the way",
+  "sandbox.launch.proxy_unreachable": "The run's egress proxy would not be reachable from inside the container: the network {network} has no gateway address the hub can listen on ({reason}). Use the iron-proxy engine, or set FREILAUF_SANDBOX_PROXY_BIND to an address the container can reach.",
+  "sandbox.launch.proxy_no_egress": "The run's egress proxy could not be connected to the network {network}, so it would have no way out itself: {reason}",
+  "sandbox.launch.network_failed": "The run's private network {network} could not be created: {reason}",
+  "sandbox.launch.no_ca": "This profile terminates TLS, but no CA certificate is configured. Set the certificate directory under Settings → Sandbox and put ca.crt in it.",
+  "sandbox.launch.proxy_gone": "This run's egress proxy is no longer running, so the new policy could not be put in force. Restart the run to apply it.",
+  "sandbox.launch.bypass_resume_failed": "The sandbox is off for this run and its container is gone, but the agent could not be relaunched. Retry the run.",
+  "sandbox.notify.bypassed": "{title}: the sandbox was switched off for this run by {by} — {reason}",
+  "sandbox.notify.bypassed_no_reason": "no reason given",
+  "sandbox.proxy.no_image": "no iron-proxy image is configured (FREILAUF_SANDBOX_PROXY_IMAGE)",
+  "sandbox.runtime.err_mount_mode": "The mount {target} asks for the mode “{mode}”, which is not one this container runtime knows (ro or rw)"
 }

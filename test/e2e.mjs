@@ -7080,6 +7080,373 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       .run(SB_ASK, SB_DENY)
   }
 
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: nothing is left running')
+  //
+  // Three leaks, measured against a running hub rather than argued from the
+  // code, and every check below asserts the OBSERVABLE — a network that is gone,
+  // a `network rm` that was really issued, an event that says the run was let
+  // go — never the shape of the fix.
+  //
+  //   1. the orphan reaper removed a terminal run's containers and left its
+  //      NETWORK. Docker's default address pool subnets out after roughly 31
+  //      of them, and past that no sandboxed run starts at all — a failure that
+  //      arrives days after the runs that caused it.
+  //   2. `teardownSandbox()` was on no ordinary end path at all (its callers
+  //      were a failed launch and the facade itself), so a normally finished run
+  //      left its built-in proxy listener standing inside the hub process, with
+  //      that finished run's allow policy, plus the `docker events` tail child.
+  //   3. and `--rm` takes a finished container away by itself, so the reaper
+  //      never even SEES the ordinary case — which is how every ordinary run
+  //      leaked, not just the orphans.
+  {
+    const shim = sk.docker
+    watcherTick = await sk.watcherVorbereiten({ sandbox: true })
+    const runtime = await import('../server/sandbox/runtime.mjs')
+    const watcherMod = await import('../server/watcher.mjs')
+    const sessMod = await import('../server/sessions.mjs')
+    let facade = null
+    try { facade = await import('../server/sandbox/index.mjs') } catch { facade = null }
+    const fehlt = facade ? null : 'server/sandbox/index.mjs is not written yet'
+    const hubId = facade?.hubId?.() ?? 'e2e-hub'
+
+    /**
+     * A sandboxed run in the state the hub really leaves behind: terminal, its
+     * session recorded as closed (`tmux_session` KEEPS its name — nothing in
+     * this hub ever NULLs that column), a container name on the row, and a
+     * network the daemon is holding.
+     */
+    async function sandboxLauf({ status = 'aborted', container = true } = {}) {
+      const id = randomUUID()
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                   sandbox,sandbox_container,tmux_session,tmux_closed_at,started_at,ended_at)
+                  VALUES(?,?,'claude','leak','keiner',45,?,1,?,?,datetime('now'),datetime('now'),datetime('now'))`)
+        .run(id, repoId, status, `fl-${id}`, `fl-leak-${id.slice(0, 8)}`)
+      mkdirSync(join(SB, 'runs', id), { recursive: true })
+      await runtime.createNetwork(`fl-net-${id}`, { runtime: 'docker' })
+      if (container) {
+        shim.container(`fl-${id}`, { state: 'exited', labels: { 'freilauf.hub': hubId } })
+        shim.container(`fl-proxy-${id}`, { state: 'exited', labels: { 'freilauf.hub': hubId } })
+      }
+      return id
+    }
+    const netze = () => Object.keys(shim.networks())
+    const netzDa = (id) => netze().includes(`fl-net-${id}`)
+
+    if (fehlt) uebersprungen('the reaper takes the run\'s network with its containers', fehlt)
+    else {
+      await pruefe('the reaper takes the run\'s network with its containers', async () => {
+        const id = await sandboxLauf()
+        wahr(netzDa(id), 'the daemon is holding the run\'s network to begin with')
+        shim.reset()
+        const out = await watcherMod.reconcileContainers(hubId)
+        gleich(out.verdict, 'ok', 'the pass ran')
+        falsch(netzDa(id), `the network is gone (${JSON.stringify(netze())})`)
+        wahr(shim.argvFor('network-rm').flat().includes(`fl-net-${id}`),
+          `and it was really asked for (${JSON.stringify(shim.order())})`)
+        // Order, not tidiness: `network rm` is refused while an endpoint is
+        // still attached, and the proxy container is reaped in the same pass.
+        const reihe = shim.order()
+        wahr(reihe.lastIndexOf('rm') < reihe.indexOf('network-rm'),
+          `the containers went first (${JSON.stringify(reihe)})`)
+      })
+
+      await pruefe('…and a second pass asks for nothing more', async () => {
+        shim.reset()
+        await watcherMod.reconcileContainers(hubId)
+        gleich(shim.argvFor('network-rm').length, 0,
+          'the release is written down once and never repeated')
+      })
+
+      await pruefe('a run whose containers `--rm` already took is released too', async () => {
+        // The case the reaper never sees, and the one every ordinary run is:
+        // nothing is listed, so the loop over the daemon's containers has
+        // nothing to act on — and the network sat there for ever.
+        const id = await sandboxLauf({ status: 'done', container: false })
+        shim.reset()
+        await watcherMod.reconcileContainers(hubId)
+        falsch(netzDa(id), 'the network of a finished run is gone as well')
+        wahr(ereignisse(id).includes('sandbox:released'),
+          `and the run says it was let go (${JSON.stringify(ereignisse(id))})`)
+      })
+
+      await pruefe('a run still in flight keeps everything it needs', async () => {
+        // The reaper's own rule, one layer out: a network taken from under a
+        // working agent is the same mistake as reaping its container.
+        const id = randomUUID()
+        db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                     sandbox,sandbox_container,tmux_session,started_at)
+                    VALUES(?,?,'claude','leak','keiner',45,'running',1,?,?,datetime('now'))`)
+          .run(id, repoId, `fl-${id}`, `fl-leak-${id.slice(0, 8)}`)
+        mkdirSync(join(SB, 'runs', id), { recursive: true })
+        await runtime.createNetwork(`fl-net-${id}`, { runtime: 'docker' })
+        shim.container(`fl-${id}`, { state: 'running', labels: { 'freilauf.hub': hubId } })
+        shim.reset()
+        await watcherMod.reconcileContainers(hubId)
+        wahr(netzDa(id), 'the live run\'s network is untouched')
+        falsch(ereignisse(id).includes('sandbox:released'), 'and nothing was released')
+        db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now'),
+                    tmux_closed_at=datetime('now') WHERE id=?`).run(id)
+      })
+
+      await pruefe('an unreachable daemon releases nothing — "no answer" is not "gone"', async () => {
+        const id = await sandboxLauf()
+        shim.reset()
+        shim.mode('unreachable')
+        try {
+          await watcherMod.reconcileContainers(hubId)
+        } finally { shim.mode('ok') }
+        wahr(netzDa(id), 'the network is left exactly where it was')
+        falsch(ereignisse(id).includes('sandbox:released'),
+          'and nothing claims the run was released')
+        falsch(shim.order().includes('network-rm'), 'no removal was even attempted')
+        // …and the next pass, with an answer, does the work.
+        shim.reset()
+        await watcherMod.reconcileContainers(hubId)
+        falsch(netzDa(id), 'the pass that got an answer released it')
+      })
+
+      await pruefe('an ended SESSION releases the sandbox, not only the reaper', async () => {
+        // teardownSandbox() on the ordinary end path — the kill route, the
+        // sessions page, retention and the archive pass all meet in
+        // reconcileClosedSession(), so one wiring covers all four. Observable
+        // through the shim: the container is stopped and the network removed by
+        // the session's end, before any reconciliation pass runs.
+        const id = randomUUID()
+        db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                     sandbox,sandbox_container,tmux_session,started_at)
+                    VALUES(?,?,'claude','leak','keiner',45,'running',1,?,?,datetime('now'))`)
+          .run(id, repoId, `fl-${id}`, `fl-leak-${id.slice(0, 8)}`)
+        mkdirSync(join(SB, 'runs', id), { recursive: true })
+        await runtime.createNetwork(`fl-net-${id}`, { runtime: 'docker' })
+        shim.container(`fl-${id}`, { state: 'running', labels: { 'freilauf.hub': hubId } })
+        shim.reset()
+        gleich(sessMod.reconcileClosedSession(id, 'web'), 'aborted', 'the session\'s end ends the run')
+        // The release is fire-and-forget, exactly as the container stop always
+        // was — so it is waited for, not raced.
+        await warteAuf(() => !netzDa(id), { was: 'the run\'s network being released' })
+        wahr(ereignisse(id).includes('sandbox:container_gone'),
+          'the client-died case is on the record: the container was still running')
+      })
+
+      await pruefe('a session closed IN ORDER TO resume releases nothing and ends nothing', async () => {
+        // §7.12.4's reconfigure and the break-glass both close the session
+        // through killSessions() to bring the run BACK. Measured twice on two
+        // sandboxes: the run became `aborted`, after which resumeRun() refused
+        // it with "status is aborted" and the agent's conversation was gone.
+        const id = randomUUID()
+        db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                     sandbox,sandbox_container,tmux_session,resume_pending,started_at)
+                    VALUES(?,?,'claude','leak','keiner',45,'running',1,?,?,1,datetime('now'))`)
+          .run(id, repoId, `fl-${id}`, `fl-leak-${id.slice(0, 8)}`)
+        mkdirSync(join(SB, 'runs', id), { recursive: true })
+        await runtime.createNetwork(`fl-net-${id}`, { runtime: 'docker' })
+        shim.reset()
+        gleich(sessMod.reconcileClosedSession(id, 'web'), 'resuming', 'the third case is named')
+        gleich(lauf(id).status, 'running', 'the run is still one resumeRun() may pick up')
+        gleich(shim.order().length, 0, `and nothing was said to the daemon (${JSON.stringify(shim.order())})`)
+        wahr(netzDa(id), 'the network the resume walks back through is still there')
+        db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now'), resume_pending=0 WHERE id=?`).run(id)
+      })
+
+      await pruefe('nothing of this group is left holding a network', async () => {
+        // The whole point, said once at the end: after the runs are terminal and
+        // a pass has run, the daemon holds no `fl-net-` of a run that is over.
+        shim.reset()
+        await watcherMod.reconcileContainers(hubId)
+        const offen = netze().filter(n => n.startsWith('fl-net-'))
+          .filter(n => {
+            const row = db.prepare('SELECT status FROM runs WHERE id=?').get(n.slice('fl-net-'.length))
+            return !row || ['done', 'failed', 'aborted'].includes(row.status)
+          })
+        gleich(offen.length, 0, `networks of finished runs left behind: ${JSON.stringify(offen)}`)
+      })
+    }
+
+    // The seam goes back the way this group found it — a fixture that outlives
+    // its own test is how a "no container runtime" check elsewhere quietly finds
+    // one (the same rule the container-path group states about its mode file).
+    watcherTick = await sk.watcherVorbereiten({ sandbox: false })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: the floor holds')
+
+  {
+    // The experiment an independent evaluator ran on a live hub, driven through
+    // the real routes rather than the functions behind them — because that is
+    // where the hole was. `validateSandboxOverrides()` judges §7.3's narrowing
+    // rule only when it is handed the baseline the patch narrows FROM
+    // (`spec.mjs`: `if (against && lock.length)`), and `sandboxReconfigure()`
+    // passed the lock alone. The check never ran; `changePolicy()` merges a
+    // patch field by field and narrows nothing of its own; and the result was
+    // frozen into `runs.sandbox_spec` for the rest of the run, later resumes
+    // included. The assertion that was missing is the second one below: not
+    // only that the answer is a refusal, but that NOTHING was written.
+    const DICHT = {
+      runtime: 'docker',
+      image: { ref: 'freilauf/agent-claude', digest: null, pull: 'if-missing' },
+      network: { mode: 'allowlist', engine: 'builtin', allow: [], deny: [], presets: [], auditOnly: false },
+      filesystem: { worktree: 'rw', repoGit: 'ro', extras: 'ro', readOnlyRoot: true },
+      resources: { memory: '8g', memorySwap: '8g', cpus: 4, pidsLimit: 4096 },
+      secrets: { mode: 'env', gitFetch: 'mirror' },
+    }
+    const legeLauf = (status = 'running') => {
+      const id = randomUUID()
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                   sandbox,sandbox_spec,sandbox_container,sandbox_overrides,started_at)
+                  VALUES(?,?,'claude','floor','keiner',30,?,1,?,?,'{}',datetime('now'))`)
+        .run(id, repoId, status, JSON.stringify(DICHT), `fl-${id.slice(0, 8)}`)
+      mkdirSync(join(SB, 'runs', id), { recursive: true })
+      return id
+    }
+    const specVon = (id) => db.prepare('SELECT sandbox_spec AS s FROM runs WHERE id=?').get(id).s
+    const overridesVon = (id) => db.prepare('SELECT sandbox_overrides AS o FROM runs WHERE id=?').get(id).o
+    const LOCK = ['network', 'resources', 'filesystem', 'secrets']
+
+    const FL_RUN = legeLauf()
+
+    await pruefe('reconfigure cannot loosen what the hub locked, and a refusal writes nothing', async () => {
+      sk.setzeEinstellung('sandbox_lock', JSON.stringify(LOCK))
+      const vorherSpec = specVon(FL_RUN)
+      const vorherOverrides = overridesVon(FL_RUN)
+      // Byte for byte the patch that walked through the live hub.
+      const r = await formular(`/api/runs/${FL_RUN}/sandbox/reconfigure`, {
+        overrides: JSON.stringify({
+          network: { mode: 'open', auditOnly: true, allow: ['evil.example.com'] },
+          resources: { memory: '64g', cpus: 64 },
+          filesystem: { readOnlyRoot: false },
+        }),
+      })
+      gleich(r.status, 400, 'the route refuses')
+      const j = await r.json()
+      falsch(j.ok, `and says so (${JSON.stringify(j).slice(0, 200)})`)
+      for (const pfad of ['network.mode', 'network.allow', 'network.auditOnly',
+        'resources.memory', 'resources.cpus', 'filesystem.readOnlyRoot']) {
+        enthaelt(String(j.error), pfad, `the reason names ${pfad} rather than one blanket sentence`)
+      }
+      // THE assertion that was missing. The evaluator's run answered 400 with
+      // the weakened spec already on disk — the operator told the weakening had
+      // failed when it had succeeded, which is worse than either alone.
+      gleich(specVon(FL_RUN), vorherSpec, 'runs.sandbox_spec is untouched')
+      gleich(overridesVon(FL_RUN), vorherOverrides, 'and so are the run’s own overrides')
+      const spec = JSON.parse(specVon(FL_RUN))
+      gleich(spec.network.mode, 'allowlist', 'the network is still an allowlist')
+      gleich(spec.network.auditOnly, false, 'still enforcing rather than only watching')
+      gleich(spec.resources.memory, '8g', 'still 8g')
+      gleich(spec.resources.cpus, 4, 'still 4 cpus')
+      gleich(spec.filesystem.readOnlyRoot, true, 'and the root is still read-only')
+    })
+
+    await pruefe('…and the same route still NARROWS under the same lock', async () => {
+      // A lock that refused a tightening would be a lock nobody could work
+      // under — and it would push the operator to the break-glass instead.
+      const r = await formular(`/api/runs/${FL_RUN}/sandbox/reconfigure`, {
+        overrides: JSON.stringify({ network: { mode: 'none' }, resources: { cpus: 1 } }),
+      })
+      const j = await r.json()
+      if (!j.ok) {
+        // The facade may be absent, or may want a container this suite has none
+        // of; what is under test here is that the LOCK did not refuse it.
+        falsch(String(j.error).includes('locked'), `refused by the facade, not by the lock (${j.error})`)
+        uebersprungen('the narrowing reconfigure', 'the sandbox facade did not apply it in this sandbox')
+      } else {
+        gleich(JSON.parse(specVon(FL_RUN)).network.mode, 'none', 'the tightening is in force')
+      }
+      sk.setzeEinstellung('sandbox_lock', '')
+    })
+
+    await pruefe('taking a planned run out of its sandbox is a named event, not a quiet setting', async () => {
+      // §7.3 is absolute about this: every weakening is written down. Without
+      // it the run carried nothing at all — `sandboxStatusSuffix()` and
+      // `hasSandboxStory()` both key on `sandbox:bypassed`, so a run that was
+      // going to be contained and now is not showed neither "sandboxed" nor
+      // "bypassed" in the overview, and nobody was told.
+      const geplant = legeLauf('scheduled')
+      db.prepare(`UPDATE runs SET started_at=NULL WHERE id=?`).run(geplant)
+      sk.setzeEinstellung('sandbox_allow_bypass', '1')
+      const r = await formular(`/api/runs/${geplant}/edit`, { sandbox: '0' })
+      gleich(r.status, 200, 'the edit goes through')
+      gleich(db.prepare('SELECT sandbox FROM runs WHERE id=?').get(geplant).sandbox, 0, 'the run is out of its sandbox')
+      wahr(ereignisse(geplant).includes('sandbox:bypassed'), 'and the run says so in its own history')
+      // The refusal keeps its own rule: with the break glass forbidden, nothing
+      // happens and nothing is written down.
+      const zweiter = legeLauf('scheduled')
+      db.prepare(`UPDATE runs SET started_at=NULL WHERE id=?`).run(zweiter)
+      sk.setzeEinstellung('sandbox_allow_bypass', '0')
+      gleich((await formular(`/api/runs/${zweiter}/edit`, { sandbox: '0' })).status, 400, 'refused')
+      gleich(db.prepare('SELECT sandbox FROM runs WHERE id=?').get(zweiter).sandbox, 1, 'the run stays contained')
+      falsch(ereignisse(zweiter).includes('sandbox:bypassed'), 'and a refusal writes no event either')
+      sk.setzeEinstellung('sandbox_allow_bypass', '1')
+      db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now') WHERE id IN (?,?)`).run(geplant, zweiter)
+    })
+
+    await pruefe('Adopt takes every host that was ticked, not the last one', async () => {
+      // `parseForm()` collapses a repeated field to its LAST value and exposes
+      // the list under `<name>_list` — the convention `b.run_list` and
+      // `b.session_list` already follow. Reading `b.host` could never see more
+      // than one: measured live, three ticked boxes adopted one host, a 303,
+      // and no warning. That is the audit-only rollout path — observe, then
+      // enforce — quietly throwing away most of what was observed.
+      const lauf = legeLauf()
+      const hosts = ['registry.npmjs.org', 'files.pythonhosted.org', 'deb.debian.org']
+      writeFileSync(join(SB, 'runs', lauf, 'egress.jsonl'),
+        hosts.map(h => JSON.stringify({ at: '2026-09-05T10:00:00.000Z', host: h, action: 'would_deny' })).join('\n') + '\n')
+      const seite = await (await hol(`/repos/edit?id=${repoId}`)).text()
+      enthaelt(seite, 'id="sandbox-adopt"', 'the block is offered')
+      for (const h of hosts) enthaelt(seite, h, `${h} is on the page as a ticked candidate`)
+
+      db.prepare('UPDATE repos SET sandbox_overrides=? WHERE id=?').run('{}', repoId)
+      const r = await formular('/repos/sandbox/adopt', { id: String(repoId), host: hosts }, { alsBrowser: true })
+      gleich(r.status, 303, 'it saves')
+      const allow = JSON.parse(db.prepare('SELECT sandbox_overrides AS o FROM repos WHERE id=?').get(repoId).o)
+        .network?.allow ?? []
+      gleich([...allow].sort().join(','), [...hosts].sort().join(','),
+        'all three landed, in the repo’s own overrides')
+
+      // And it is not a second writer of that column: the lock the repo form
+      // obeys refuses an adopted host the same way it refuses a typed one.
+      db.prepare('UPDATE repos SET sandbox_overrides=? WHERE id=?').run('{}', repoId)
+      sk.setzeEinstellung('sandbox_lock', JSON.stringify(['network.allow']))
+      const gesperrt = await formular('/repos/sandbox/adopt', { id: String(repoId), host: ['evil.example.com'] },
+        { alsBrowser: true })
+      gleich(gesperrt.status, 400, 'a locked allow list refuses the adoption')
+      enthaelt(await gesperrt.text(), 'network.allow', 'and names the path that is locked')
+      gleich(db.prepare('SELECT sandbox_overrides AS o FROM repos WHERE id=?').get(repoId).o, '{}',
+        'nothing was written')
+      sk.setzeEinstellung('sandbox_lock', '')
+      db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now') WHERE id=?`).run(lauf)
+      db.prepare('UPDATE repos SET sandbox_overrides=? WHERE id=?').run('{}', repoId)
+    })
+
+    await pruefe('the repo form warns about a loosening while it is typed, not at the launch', async () => {
+      // The floor already held at launch (`resolveSandboxSpec()` refuses and
+      // writes `sandbox:override_refused`), so this is about WHEN the operator
+      // finds out. The form passed `lock` and no baseline, so its check was
+      // dead code and it accepted what the run would then not honour.
+      sk.setzeEinstellung('sandbox_lock', JSON.stringify(['resources']))
+      const row = db.prepare('SELECT * FROM repos WHERE id=?').get(repoId)
+      const felder = {
+        name: row.name, path: row.path, base_branch: row.base_branch,
+        worktree_extras: row.worktree_extras ?? '', prompt: row.prompt ?? '',
+        sandbox_default: 'inherit', sandbox_profile_id: '', sandbox_image: '',
+      }
+      const r = await formular('/repos/edit?id=' + repoId,
+        { ...felder, sandbox_overrides: '{"resources":{"memory":"64g"}}' }, { alsBrowser: true })
+      gleich(r.status, 400, 'raising a locked limit is refused at the form')
+      enthaelt(await r.text(), 'resources.memory', 'and the sentence names the path')
+      const runter = await formular('/repos/edit?id=' + repoId,
+        { ...felder, sandbox_overrides: '{"resources":{"memory":"1g"}}' }, { alsBrowser: true })
+      gleich(runter.status, 303, 'lowering it goes through')
+      sk.setzeEinstellung('sandbox_lock', '')
+      await formular('/repos/edit?id=' + repoId, { ...felder, sandbox_overrides: '' }, { alsBrowser: true })
+    })
+
+    db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now') WHERE id=?`).run(FL_RUN)
+  }
+
+
 } catch (err) {
   console.log(`\nAborted: ${err.stack}`)
   zaehler.fehler.push({ name: 'Test run', grund: err.message })

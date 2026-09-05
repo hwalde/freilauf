@@ -44,14 +44,24 @@ const HOOKS_OFF = ['-c', 'core.hooksPath=/dev/null']
  * while the agent works, and therefore where every activity source, transcript
  * and session store of the harness plugins lives.
  *
- * Unsandboxed → the host home, which is what `homedir()` said before this
- * function existed. Sandboxed → `runs.sandbox_home`; that column is documented
- * as "NULL = the host home", so a sandboxed run whose home was never recorded
- * reads exactly as it did before too.
+ * The column is what decides, NOT the `sandbox` flag: `runs.sandbox_home` is
+ * documented as "NULL = the host home", so a run that never had one — every
+ * ordinary run there has ever been — reads exactly as it did before, and a run
+ * that HAS one keeps it whatever the flag now says.
+ *
+ * That difference is the break-glass path. `continueWithoutSandbox()` sets
+ * `sandbox = 0` and deliberately KEEPS `sandbox_home`, so the resumed CLI still
+ * finds the conversation it had been having (index.mjs says exactly that:
+ * "`runs.sandbox_home` is therefore kept — `agentHome()` reads it"). With the
+ * flag in the condition it did not: probed,
+ * `agentHome({ sandbox: 0, sandbox_home: '/run/home/keepme' })` answered the
+ * operator's own home, and the resumed session would have started a fresh
+ * conversation in it. Proven by that probe and by reading the two call paths,
+ * not by resuming a real CLI.
  */
 export function agentHome(run) {
   if (!run) return HOME
-  return (run.sandbox && run.sandbox_home) ? run.sandbox_home : HOME
+  return run.sandbox_home ? run.sandbox_home : HOME
 }
 
 /** The per-run home a sandboxed run gets: `~/agents/runs/<id>/home` (§7.7). */
@@ -117,6 +127,25 @@ export function seedHomeFiles(run, files) {
 
 function realOrResolve(p) { try { return realpathSync(p) } catch { return resolve(p) } }
 function isSymlink(p) { try { return lstatSync(p).isSymbolicLink() } catch { return false } }
+
+/**
+ * `writeFileSync` that refuses a symlink at the target instead of following it —
+ * the guard `seedHomeFiles()` above keeps, as a two-line call for the other
+ * writers that need it.
+ *
+ * They all write into `~/agents/runs/<id>/`, which `buildRunArgv()` mounts
+ * READ-WRITE into the container at the agent's own uid: `sandbox.json`
+ * (`writeSpecFile()` in index.mjs), `proxy.yaml` (ironproxy.mjs, rewritten on
+ * every policy reload) and the egress logs. `'w'` and `'a'` both follow a link,
+ * so a link left at one of those names makes the hub write through it as the hub
+ * user on the next reconfigure or resume. Returns false rather than throwing:
+ * these callers are on a launch path, and a refusal they can report is better
+ * than an exception they have to catch.
+ */
+export function writeFileNoSymlink(path, content, opts = {}) {
+  if (isSymlink(path)) return false
+  try { writeFileSync(path, content, opts); return true } catch { return false }
+}
 function inside(root, target) {
   if (target === root) return true
   return target.startsWith(root.endsWith(sep) ? root : root + sep)
@@ -227,37 +256,86 @@ function agentOwnedGit(run) {
 }
 
 /**
- * Run one git command against a clone whose `.git/config` has been replaced by a
- * minimal one for exactly the length of that call. This is the ONLY shape
- * measured inert for the commands that touch the working tree, and it is still
- * host execution of somebody else's repository — which is why it is opt-in and
- * why the config comes back in a `finally`.
+ * Run one git command against a clone whose repository configuration has been
+ * replaced by a minimal one for exactly the length of that call. This is the
+ * ONLY shape measured inert for the commands that touch the working tree, and it
+ * is still host execution of somebody else's repository — which is why it is
+ * opt-in and why the originals come back in a `finally`.
+ *
+ * **"The config" is two files, not one**, and that was a hole: `.git/config` is
+ * what the mask replaces, and `extensions.worktreeConfig = true` — which the
+ * mask used to keep, because it kept every `extensions.*` verbatim — makes git
+ * ALSO read `.git/config.worktree`, a file nothing here touched and the agent
+ * owns. Measured, git 2.43.0: `core.fsmonitor`, a `filter.<n>.clean` and a
+ * `diff.<n>.command` in `config.worktree`, selected by a tracked
+ * `.gitattributes`, all fired through the masked `status`, `add -A`,
+ * `diff HEAD` and `checkout -- .`. `maskedGitConfigEntries()` now drops
+ * `worktreeConfig`, which is the fix; moving the file aside here as well is the
+ * second wall, because it holds whatever a future git decides to read
+ * `config.worktree` for. Both files are named in ONE place —
+ * `REPO_CONFIG_FILES` in clone.mjs — so the two halves cannot drift.
  *
  * A leftover backup from a crashed earlier call is restored first rather than
- * clobbered: the backup is the agent's real config, and the file standing in its
- * place is our mask.
+ * clobbered: the backup is the agent's real file, and whatever stands in its
+ * place is ours.
  */
 async function maskedHostGit(dir, args, shOpts) {
-  const cfg = join(dir, '.git', 'config')
-  const bak = `${cfg}.freilauf-unmasked`
-  if (existsSync(bak)) { try { renameSync(bak, cfg) } catch { /* the mask stands; the guard below refuses */ } }
-  if (!existsSync(cfg)) {
+  const { writeMaskedGitConfig, REPO_CONFIG_FILES } = await import('./clone.mjs')
+  const gitDir = join(dir, '.git')
+  // [{ path, backup, existed }] — every repository-config file, in one list, so
+  // the restore in the `finally` cannot be one file behind the neutralisation.
+  const files = REPO_CONFIG_FILES.map(name => {
+    const path = join(gitDir, name)
+    return { name, path, backup: `${path}.freilauf-unmasked` }
+  })
+  for (const f of files) {
+    if (existsSync(f.backup)) { try { rmSync(f.path, { force: true }); renameSync(f.backup, f.path) } catch { /* the guard below refuses */ } }
+  }
+  // By NAME, not by position: `config` is the file that gets a replacement, and
+  // a reordering of REPO_CONFIG_FILES must not silently make that the other one.
+  const cfg = files.find(f => f.name === 'config')
+  if (!cfg || !existsSync(cfg.path)) {
     return refusal('runGit: no .git/config to mask — refusing to run git in an agent-owned repository unmasked')
   }
-  const { writeMaskedGitConfig } = await import('./clone.mjs')
+
+  const moved = []
   try {
-    renameSync(cfg, bak)
+    for (const f of files) {
+      if (!existsSync(f.path)) continue
+      // `renameSync` does not follow a symlink, so a link left at either path
+      // travels to the backup and comes back — it is never written through.
+      renameSync(f.path, f.backup)
+      moved.push(f)
+    }
   } catch (err) {
+    restore(moved)
     return refusal(`runGit: could not mask the clone's config (${String(err.message ?? err)})`)
   }
+
   try {
     // keepIdentity: the rescue path commits, and a commit without a committer
     // dies with "please tell me who you are". A name and a mail address are not
     // commands; everything that could be one is gone.
-    await writeMaskedGitConfig(bak, cfg, { keepIdentity: true })
+    //
+    // Only `config` is REPLACED. `config.worktree` is simply not there for the
+    // duration: writing a masked one would be writing a file git reads only when
+    // an extension we deliberately drop says so.
+    await writeMaskedGitConfig(cfg.backup, cfg.path, { keepIdentity: true })
     return await sh('git', args, shOpts)
+  } catch (err) {
+    // `writeMaskedGitConfig()` throws when the target is a symlink. A mask that
+    // could not be written is a call that must not run — the same "unknown, not
+    // clean" rule the refusals above keep.
+    return refusal(`runGit: could not mask the clone's config (${String(err.message ?? err)})`)
   } finally {
-    try { rmSync(cfg, { force: true }); renameSync(bak, cfg) } catch { /* the backup stays next to it, and is picked up above */ }
+    restore(moved)
+  }
+}
+
+/** Put the agent's own files back. Each on its own, so one failure keeps the rest. */
+function restore(moved) {
+  for (const f of moved) {
+    try { rmSync(f.path, { force: true }); renameSync(f.backup, f.path) } catch { /* the backup stays next to it, and is picked up above */ }
   }
 }
 

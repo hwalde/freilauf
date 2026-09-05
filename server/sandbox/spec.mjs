@@ -60,18 +60,45 @@ export const DEFAULT_SPEC = {
     denyUpstreamCidrs: 'default',
     tlsTerminate: false,
   },
+  // `filesystem.protected` used to sit here — `['.git/hooks', '.git/config']`,
+  // "always read-only inside the clone, like Claude Code / Cursor" (§7.2). It is
+  // GONE, and the reason is the clone design rather than an oversight: those two
+  // paths are only worth protecting where the agent shares a `.git` with
+  // somebody, and a sandboxed run does not. Its working copy is a private clone
+  // whose hooks and config are its own by construction (§7.4.1), the operator's
+  // `.git` is mounted read-only with a generated mask over its `config`, and the
+  // one place the agent's own hooks and config could ever reach the HOST — the
+  // rescue path when the container is gone — neutralises them by replacing the
+  // config and sending `core.hooksPath` to `/dev/null` (exec.mjs), not by a list
+  // in a profile. So the field named a rule that was already kept elsewhere and
+  // was itself read by NOBODY: validated, narrowed, stored, inert. A field that
+  // looks like it saved and does nothing is the failure this file exists against.
+  // A stored profile from before this may still carry it; the layering keeps its
+  // deny-shape (see SHAPES) so such a profile resolves as it always did, and
+  // `validateSandboxOverrides()` now refuses it as an unknown field so nobody
+  // writes a new one.
   filesystem: {
     worktree: 'rw', repoGit: 'ro', extras: 'ro',
     readOnlyRoot: true,
     tmpfsSizes: { '/tmp': '2g', '$HOME/.cache': '2g' },
     extraMounts: [],
-    protected: ['.git/hooks', '.git/config'],
   },
   resources: {
     memory: '8g', memorySwap: '8g', cpus: 4, pidsLimit: 4096,
     shmSize: '1g', diskTmpfs: '2g', maxRuntimeMinutes: null,
   },
-  secrets: { mode: 'env', gitFetch: 'mirror' },   // env | inject | none
+  // `secrets.gitFetch` used to sit here too — `mirror` ("fetch from the mounted
+  // read-only .git; no credential at all") vs `none` ("no fetch at all"). Also
+  // read by nobody, and `none` could not have been delivered from this document
+  // even if somebody had wired it: what makes the fetch possible is the mount of
+  // the operator's `.git` (runtime.mjs), and a spec value cannot take a mount
+  // away. A field promising "no fetch at all" while the mount stands is the lie,
+  // not the missing code. If it comes back, it comes back together with the
+  // runtime dropping `ctx.repoGitDir` — and then it will be one statement rather
+  // than two. `MODE_ORDERS` keeps its ordering for the same reason
+  // `filesystem.protected` keeps its shape: an older stored profile still names
+  // it, and a leftover must layer the way it used to rather than freeze.
+  secrets: { mode: 'env' },                       // env | inject | none
   innerSandbox: 'off',                            // off | weak | full
   harness: {},                                    // { claude: {...}, cursor: {...} } — plugin knobs
   retention: 'run',                               // run | keep
@@ -94,11 +121,18 @@ export const SPEC_VALUES = {
   'image.pull': ['if-missing', 'always', 'never'],
   'network.mode': ['open', 'allowlist', 'none'],
   'network.engine': ['builtin', 'iron-proxy'],
-  'filesystem.worktree': ['rw', 'copy', 'ro'],
-  'filesystem.repoGit': ['rw', 'copy', 'ro'],
-  'filesystem.extras': ['rw', 'copy', 'ro'],
+  // `copy` is gone from all three, and that was a security defect rather than
+  // tidying: NOTHING in the tree implements it. `addMount()` treats every mode
+  // that is not exactly `'ro'` as a writable bind mount, so a repo owner who
+  // narrowed a hub profile from `rw` to `copy` — believing the comment on
+  // MODE_ORDERS, which described "the agent writes, the host's original does not
+  // change" — passed the lock check and got the operator's `.git` mounted
+  // READ-WRITE. An enum value that validates, ranks as a tightening and then
+  // loosens is worse than no value at all.
+  'filesystem.worktree': ['rw', 'ro'],
+  'filesystem.repoGit': ['rw', 'ro'],
+  'filesystem.extras': ['rw', 'ro'],
   'secrets.mode': ['env', 'inject', 'none'],
-  'secrets.gitFetch': ['mirror', 'none'],
   innerSandbox: ['off', 'weak', 'full'],
   retention: ['run', 'keep'],
   'audit.export': ['jsonl', 'none'],
@@ -192,14 +226,16 @@ export function pathLocked(path, lock) {
  *
  *  - `network.mode`: open (everything) → allowlist (what the policy names) →
  *    none (no network at all).
- *  - the three filesystem modes: rw (the host's file is writable) → copy (the
- *    agent writes, the host's original does not change) → ro (nothing is
- *    written at all).
+ *  - the three filesystem modes: rw (the host's file is writable) → ro (nothing
+ *    is written at all). There is no third value: a `copy` mode was offered
+ *    here and ranked BETWEEN the two, and no code anywhere implemented it — the
+ *    runtime binds anything that is not `'ro'` writable, so narrowing `rw` to
+ *    `copy` was a loosening dressed as a tightening. It is gone from
+ *    `SPEC_VALUES` too; if a real copy-on-write mode is ever built, it is added
+ *    back in both places on the same day.
  *  - `secrets.mode`: env (the real key sits in the container) → inject (only a
  *    placeholder does; the proxy holds the real one) → none (no credential
  *    reaches the container at all).
- *  - `secrets.gitFetch`: mirror (fetch from the mounted read-only .git) → none
- *    (no fetch at all).
  *  - `innerSandbox`: full → weak → off, and that direction is the one that
  *    surprises people. §4.3: the harness's own sandbox wants
  *    `clone(CLONE_NEWUSER)` and `mount` INSIDE the container, which Docker's
@@ -213,10 +249,13 @@ export function pathLocked(path, lock) {
  */
 const MODE_ORDERS = {
   'network.mode': ['open', 'allowlist', 'none'],
-  'filesystem.worktree': ['rw', 'copy', 'ro'],
-  'filesystem.repoGit': ['rw', 'copy', 'ro'],
-  'filesystem.extras': ['rw', 'copy', 'ro'],
+  'filesystem.worktree': ['rw', 'ro'],
+  'filesystem.repoGit': ['rw', 'ro'],
+  'filesystem.extras': ['rw', 'ro'],
   'secrets.mode': ['env', 'inject', 'none'],
+  // Removed from DEFAULT_SPEC (see there). The ordering stays so a profile
+  // stored before the removal still layers as it did instead of freezing as
+  // 'fixed'; nothing reads the value, and the form refuses a new one.
   'secrets.gitFetch': ['mirror', 'none'],
   innerSandbox: ['full', 'weak', 'off'],
   retention: ['keep', 'run'],
@@ -235,6 +274,9 @@ const SHAPES = {
   'network.methods': 'methods',
   'network.deny': 'denyList',
   'network.denyUpstreamCidrs': 'denyList',
+  // Removed from DEFAULT_SPEC (see there). Kept for the same reason
+  // `secrets.gitFetch` keeps its ordering: a profile stored before the removal
+  // still carries the path, and it must layer as it always did.
   'filesystem.protected': 'denyList',
   'filesystem.extraMounts': 'allowList',
   'filesystem.tmpfsSizes': 'sizeMap',
@@ -501,7 +543,6 @@ const FIELD_TYPES = {
   'network.allow': 'strings', 'network.deny': 'strings', 'network.presets': 'strings',
   'network.methods': 'stringsOrNull',
   'network.denyUpstreamCidrs': 'stringOrStrings',
-  'filesystem.protected': 'strings',
   'filesystem.extraMounts': 'mounts',
   'filesystem.tmpfsSizes': 'sizeMap',
   'resources.memory': 'size', 'resources.memorySwap': 'size',

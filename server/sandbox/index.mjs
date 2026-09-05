@@ -89,6 +89,33 @@ function retryable(message) {
   return err
 }
 
+/**
+ * The runtime is not there AT LAUNCH — a different question from "could not be
+ * asked", and the caller has to be able to tell them apart, because §8.1 and
+ * `sandboxOutcome()` already answer it one way at PLAN time and the launch path
+ * answered it another way entirely.
+ *
+ * Under `sandbox_mode: 'required'` an unreachable daemon is a refusal: the run
+ * must not start unsandboxed. Under `available` (and `optional`) it is a
+ * **bypass** — the run starts on the host and the weakening is written down,
+ * exactly as it is when the plan sees the same thing a second earlier. A fresh
+ * start into a daemon that had just gone away therefore used to end `failed`
+ * where the identical situation one function earlier ended in a named bypass.
+ *
+ * Both marks travel: `sandboxRetry` for a resume (do not spend an attempt), and
+ * `sandboxBypassable` plus `sandboxReason` for a caller that may take the plain
+ * path instead. Which one the caller acts on is the recovery design's decision,
+ * not this module's — this function's job is to hand over an answer it CAN act
+ * on rather than one word for two different situations.
+ */
+function unavailable(message, reason) {
+  const err = retryable(message)
+  err.sandboxUnavailable = true
+  err.sandboxReason = reason ?? 'unknown'
+  err.sandboxBypassable = hubSandboxMode() !== 'required'
+  return err
+}
+
 // ------------------------------------------------------------- names and ids
 
 /** The container this run gets. One name, derived, so nothing has to remember it. */
@@ -418,8 +445,15 @@ export async function prepareSandbox(run, repo, opts = {}) {
   //    (§11.3). A daemon that is still starting is not a run that cannot start.
   //    Asked BEFORE anything is created, so a launch that cannot go ahead leaves
   //    the disk exactly as it found it.
-  const av = await refreshSandboxAvailability()
-  if (!av.available) throw retryable(t('sandbox.launch.runtime_unreachable', { container }))
+  //
+  //    `force` on purpose, and the comment on `sandboxAvailable()` already said
+  //    why without this call honouring it: the cached answer stands for 60 s,
+  //    and a resume right after a reboot is exactly the case where the daemon
+  //    came up in that minute. Measured: a resume waited 31 s after the daemon
+  //    was back, for nothing. Starting a run against a minute-old "the daemon is
+  //    down" is the wrong direction to be wrong in.
+  const av = await refreshSandboxAvailability({ force: true })
+  if (!av.available) throw unavailable(t('sandbox.launch.runtime_unreachable', { container }), av.reason)
   mkdirSync(runDir, { recursive: true })
 
   try {
@@ -484,7 +518,14 @@ export async function prepareSandbox(run, repo, opts = {}) {
       // name that now says something false. The rename crosses files, so the
       // alias travels until that module has moved over.
       gitConfigMask: maskPath, emptyFile: maskPath,
-      resolvedAllow: await resolveAllowList(spec, repo),
+      // Resolved ONCE, from the run's own harness and provider, and handed on
+      // to the proxy below as well as recorded here — see `resolveAllowList()`.
+      resolvedAllow: await resolveAllowList(spec, repo, run),
+      // The hub's CA, where the operator configured one (`sandbox_ca_dir`).
+      // `runtime.mjs` mounts it and names it in five environment variables; it
+      // used to be consumed there and produced by nobody, so a TLS-terminating
+      // proxy handed the container certificates it had no way to trust.
+      caPath: hubCaPath(),
       // §7.7's uid table, decided HERE because `buildRunArgv()` cannot know the
       // daemon's posture and deliberately does not guess. Rootful: run as the
       // hub user, so bind-mounted files stay owned by it — and because claude's
@@ -508,18 +549,54 @@ export async function prepareSandbox(run, repo, opts = {}) {
     }
     writeSpecFile(runId, spec, ctx)
 
-    // 5. The network — created only if missing. `internal: true` is what makes
-    //    the proxy the only way out: a container on it has no default route.
-    if (spec.network?.mode !== 'none' && spec.network?.mode !== 'open') {
-      const rt = await sibling('runtime')
-      if (rt?.createNetwork) await rt.createNetwork(network, { runtime: spec.runtime, internal: true })
+    // A TLS-terminating proxy without a CA in the container is a run whose every
+    // HTTPS call fails with a certificate error — so it is a refusal at launch
+    // with the setting named, never a start that looks healthy.
+    if (spec.network?.tlsTerminate === true && !ctx.caPath) {
+      throw new Error(t('sandbox.launch.no_ca'))
     }
 
-    // 6. The proxy — started only if one is already running for this run. The
-    //    handle lives in this process, so "already running" is a question about
-    //    this process's memory; a hub that was restarted starts a new one, which
-    //    is what makes a resume walk this step again without a second listener.
-    const proxy = await ensureProxy(run, spec, { runDir })
+    // 5. The network — created only if missing. `internal: true` is what makes
+    //    the proxy the only way out: a container on it has no default route.
+    //
+    //    `isolated` is where the two engines part company, and it is the whole
+    //    of §7.5.1's "the proxy is on the internal network *and* on the bridge"
+    //    made real. iron-proxy IS a container on this network, so the network
+    //    can keep `gateway_mode_ipv4=isolated` and the host stays unreachable
+    //    from the box — the strong posture. The built-in engine is a listener in
+    //    the HUB PROCESS on the host, so the gateway address is the only way the
+    //    container can reach it at all; isolating the gateway away would leave
+    //    that run with no egress whatsoever, which is what it had. The cost is
+    //    written down in `ensureProxy()` and in SANDBOX_RESEARCH.md.
+    if (spec.network?.mode !== 'none' && spec.network?.mode !== 'open') {
+      const rt = await sibling('runtime')
+      const builtin = (spec.network?.engine ?? 'builtin') === 'builtin'
+      if (rt?.createNetwork) {
+        const created = await rt.createNetwork(network, {
+          runtime: spec.runtime, internal: true, isolated: !builtin,
+        })
+        // A network that could not be created is a run with no network at all —
+        // and under `allowlist` that is a container that reaches nothing while
+        // every layer above it reads as healthy. Refuse instead.
+        if (created && created.ok === false) {
+          throw new Error(t('sandbox.launch.network_failed', { network, reason: created.reason ?? '' }))
+        }
+      }
+    }
+
+    // 6. The proxy — started only if this process is NOT already holding one for
+    //    this run. The handle lives in this process, so "already running" is a
+    //    question about this process's memory; a hub that was restarted holds
+    //    none and starts a new one, which is what makes a resume walk this step
+    //    again without leaving a second listener behind.
+    //
+    //    The port is REMEMBERED across a restart (`portOfRecordedProxy`): the
+    //    container's `HTTPS_PROXY` was frozen at creation, so a resumed
+    //    built-in listener that took a fresh ephemeral port would be a proxy at
+    //    an address nothing points at.
+    const proxy = await ensureProxy(run, spec, {
+      runDir, network, allow: ctx.resolvedAllow, port: portOfRecordedProxy(runId),
+    })
     ctx.proxyUrl = proxy?.url ?? null
     ctx.env = { ...ctx.env, ...(opts.env ?? {}) }
 
@@ -636,6 +713,43 @@ function hubBinPaths() {
   return [...dirs].filter(Boolean)
 }
 
+/**
+ * The CA certificate the container is to trust, or null. `sandbox_ca_dir` is the
+ * operator's setting; `ca.crt` inside it is the file (the same name
+ * `runtime.mjs` mounts it under, `CA_TARGET`).
+ *
+ * It had no producer at all: `ctx.caPath` was read in three places in
+ * `runtime.mjs` and written nowhere, so the documented CA mount and the setting
+ * behind it were dead code — and under `tlsTerminate` that is a container whose
+ * every HTTPS call fails on an unknown issuer. Null is fine where nothing
+ * terminates TLS; where something does, `prepareSandbox()` refuses.
+ */
+function hubCaPath() {
+  const dir = String(getSetting('sandbox_ca_dir') ?? '').trim()
+  if (!dir) return null
+  const file = join(dir, 'ca.crt')
+  return existsSync(file) ? file : null
+}
+
+/**
+ * The port the run's proxy was last recorded at, or 0 for "pick one".
+ *
+ * A container's `HTTPS_PROXY` is fixed the moment it is created, so a built-in
+ * listener that comes back on a fresh ephemeral port after a hub restart is a
+ * proxy at an address nothing points at — the agent would keep dialling the old
+ * one. The address is in `sandbox.json`, which is written before the launch and
+ * is the audit record anyway, so it is also the answer to "which port do I have
+ * to be on".
+ */
+function portOfRecordedProxy(runId) {
+  try {
+    const url = readSpecFile(runId)?.ctx?.proxyUrl
+    if (!url) return 0
+    const port = Number(new URL(String(url)).port)
+    return Number.isInteger(port) && port > 0 ? port : 0
+  } catch { return 0 }
+}
+
 /** The image's own login account. Cosmetic — see `containerEnv()`. */
 const IMAGE_ACCOUNT = 'agent'
 
@@ -663,14 +777,54 @@ export function containerEnv({ home, binPaths = [] }) {
   }
 }
 
-/** The allow list the run really got, for the record and for the prompt (§7.12.1). */
-async function resolveAllowList(spec, repo) {
+/**
+ * The allow list the run really got — for the record, for the prompt (§7.12.1),
+ * for the API, for the page AND, since this was the whole defect, for the
+ * PROXY.
+ *
+ * Two things used to go wrong here at once, and they compounded:
+ *
+ *  - the run's coding agent and model provider were not passed, so the
+ *    `harness` and `provider` presets expanded to nothing. `pages.mjs` passed
+ *    both, so the page said 23 hosts where the event said 17 — two renderings
+ *    of one list, disagreeing about whether the run could reach its own model
+ *    API;
+ *  - and nothing handed the answer to the proxy at all. `ensureProxy()` started
+ *    it from the RAW spec, whose `network.allow` is empty in every shipped
+ *    profile (they carry `presets` instead) — so `balanced`, `locked_down`,
+ *    `audit` and `open_net` all enforced an EMPTY allow list, which under
+ *    default-deny means the container reached nothing whatsoever.
+ *
+ * One resolution, one list, three readers. `run` is optional because the dry
+ * run has no run; there the two plugin presets contribute what the profile's
+ * own `network.allow` does and nothing more, which is the honest answer for a
+ * check that is not about any particular coding agent.
+ */
+async function resolveAllowList(spec, repo, run = null) {
   const presets = await sibling('presets')
   if (!presets?.resolvedAllow) return spec?.network?.allow ?? []
   try {
     const originUrl = presets.repoOriginUrl ? await presets.repoOriginUrl(repo?.path) : null
-    return presets.resolvedAllow(spec, { originUrl, repo })
+    return presets.resolvedAllow(spec, {
+      originUrl, repo,
+      harness: run?.harness ?? null,
+      provider: run?.provider ?? null,
+    })
   } catch { return spec?.network?.allow ?? [] }
+}
+
+/**
+ * The spec a PROXY is configured from: the same document, with the presets
+ * already expanded into `network.allow` and `network.presets` emptied so
+ * nothing downstream expands them a second time (or, as it did, not at all).
+ *
+ * This is the one seam that makes "the list recorded in the event", "the list
+ * the agent is told about" and "the list that is enforced" the same three
+ * words. Every caller that starts or reloads a proxy goes through it.
+ */
+export function specForProxy(spec, allow) {
+  const list = Array.isArray(allow) ? allow : []
+  return { ...(spec ?? {}), network: { ...(spec?.network ?? {}), allow: list, presets: [] } }
 }
 
 /**
@@ -728,7 +882,7 @@ const proxies = new Map()
  * there beyond "these hosts and no others", and the built-in engine keeps that
  * promise. The fallback is written down as a warning all the same.
  */
-async function ensureProxy(run, spec, { runDir }) {
+async function ensureProxy(run, spec, { runDir, network, allow, port = 0 }) {
   const mode = spec.network?.mode ?? 'allowlist'
   if (mode === 'open' || mode === 'none') return null
   const existing = proxies.get(run.id)
@@ -744,28 +898,101 @@ async function ensureProxy(run, spec, { runDir }) {
     throw new Error(t('sandbox.launch.inject_needs_engine', { engine }))
   }
 
+  // THE list, resolved once by the caller and handed here. Started from the raw
+  // spec, every shipped profile enforced an empty allow list — see
+  // `specForProxy()`.
+  const effective = specForProxy(spec, allow)
+
   const ctx = {
     runId: run.id, runDir, hubId: hubId(),
+    network: network ?? networkName(run.id),
     secretsMode: spec.secrets?.mode ?? 'env',
-    // The bind is a seam: the built-in proxy runs in the hub process, so a
-    // container on an INTERNAL network reaches it only through the daemon's own
-    // gateway address. Loopback is the safe default (nothing outside the machine
-    // can reach it) and `FREILAUF_SANDBOX_PROXY_BIND` is how an operator running
-    // the built-in engine points it at the bridge instead.
-    bind: env('SANDBOX_PROXY_BIND') ?? '127.0.0.1',
+    // WHERE THE BUILT-IN LISTENER BINDS, and why it is not a matter of taste.
+    //
+    // The built-in engine is an HTTP CONNECT listener inside the hub PROCESS, on
+    // the host. The agent's container is on a `--internal` network, so the only
+    // host address it can reach is that network's own gateway — and on Docker
+    // ≥ 28 `gateway_mode_ipv4=isolated` removes even that. The default used to
+    // be `127.0.0.1`, which the container resolves to ITSELF: `HTTPS_PROXY`
+    // pointed at a port inside the container, every request failed with a
+    // connection error, and the hub read `running` throughout. `allowlist` had
+    // therefore never worked end to end with this engine.
+    //
+    // So: the network for a built-in run is created WITHOUT gateway isolation
+    // (see the network step in `prepareSandbox()`), and the listener binds to
+    // that network's gateway address. What that costs is stated rather than
+    // hidden: the container can then also reach host services listening on that
+    // bridge — which is why the proxy's own `denyUpstreamCidrs` (loopback,
+    // RFC 1918, link-local, CGNAT) is not optional, and why the strong posture
+    // is `engine: 'iron-proxy'`, whose proxy is a container and lets the run's
+    // network stay isolated. The listener is reachable from this run's network
+    // and from the host itself, and from nothing else: a per-run docker bridge
+    // is not routed off the machine and Docker isolates it from other networks.
+    //
+    // `FREILAUF_SANDBOX_PROXY_BIND` stays as the operator's override and now
+    // OUTRANKS the gateway, for an installation that publishes the proxy
+    // somewhere of its own.
+    bind: await builtinBind(engine, network ?? networkName(run.id), spec.runtime, mode),
+    port,
     onBlocked: (info) => onBlocked(run.id, info),
   }
-  let handle = await proxy.startProxy(run, spec, ctx)
+  let handle = await proxy.startProxy(run, effective, ctx)
   if (!handle || handle.ok === false) {
     const reason = handle?.reason ?? t('sandbox.launch.proxy_unavailable', { mode })
     if (wantsInject) throw new Error(t('sandbox.launch.proxy_failed', { reason }))
     if (engine === 'builtin') throw new Error(t('sandbox.launch.proxy_failed', { reason }))
-    handle = await proxy.startProxy(run, { ...spec, network: { ...spec.network, engine: 'builtin' } }, ctx)
+    // The fallback engine needs a network the HOST has an address on, and the
+    // one that was created for iron-proxy deliberately does not have one. No
+    // container is on it yet at this point, so it is remade rather than the
+    // fallback being turned into a refusal — otherwise the documented
+    // "fall back to the built-in engine" would only ever be a launch failure.
+    const rtNet = await sibling('runtime')
+    if (rtNet?.createNetwork) {
+      try {
+        await rtNet.removeNetwork?.(ctx.network, { runtime: spec.runtime })
+        await rtNet.createNetwork(ctx.network, { runtime: spec.runtime, internal: true, isolated: false })
+      } catch { /* builtinBind() below refuses in a sentence if this did not help */ }
+    }
+    const fallbackCtx = { ...ctx, bind: await builtinBind('builtin', ctx.network, spec.runtime, mode) }
+    handle = await proxy.startProxy(run, specForProxy({ ...spec, network: { ...spec.network, engine: 'builtin' } }, allow), fallbackCtx)
     if (!handle || handle.ok === false) throw new Error(t('sandbox.launch.proxy_failed', { reason }))
     addEvent(run.id, 'warn', { proxy_engine_fallback: engine, reason })
   }
+  // The proxy's SECOND LEG (§7.5.1: "the proxy is on the internal network *and*
+  // on the bridge"). `buildNetworkConnectArgv()` was exported and never called,
+  // so an iron-proxy container sat on the internal network alone — with no way
+  // out to the internet it was supposed to be the only way to. Idempotent, so a
+  // resume walks it again; a failure is fatal, because a proxy that cannot
+  // reach anything is a run with no egress and nothing above it would say so.
+  if (handle.engine === 'iron-proxy' && handle.container) {
+    const rt = await sibling('runtime')
+    const bridge = env('SANDBOX_PROXY_UPSTREAM_NETWORK') || 'bridge'
+    const r = await rt?.connectNetwork?.(bridge, handle.container, { runtime: spec.runtime })
+    if (r && !r.ok) {
+      try { await proxy.stopProxy?.(handle) } catch {}
+      throw new Error(t('sandbox.launch.proxy_no_egress', { network: bridge, reason: r.reason ?? '' }))
+    }
+  }
   proxies.set(run.id, handle)
   return handle
+}
+
+/**
+ * The address the built-in listener binds to for one run — the operator's
+ * override, else the run network's own gateway. A `null` gateway is a REFUSAL
+ * and not a fall back to loopback: loopback inside the container is the
+ * container, and a proxy variable pointing there is exactly the silent
+ * no-egress run this whole change exists to end.
+ */
+async function builtinBind(engine, network, runtime, mode) {
+  const override = env('SANDBOX_PROXY_BIND')
+  if (override) return String(override)
+  if (engine !== 'builtin') return '0.0.0.0'
+  const rt = await sibling('runtime')
+  if (!rt?.networkGateway) throw new Error(t('sandbox.launch.proxy_unavailable', { mode }))
+  const g = await rt.networkGateway(network, { runtime })
+  if (!g?.address) throw new Error(t('sandbox.launch.proxy_unreachable', { network, reason: g?.reason ?? '' }))
+  return g.address
 }
 
 /**
@@ -777,13 +1004,26 @@ const blockedSeen = new Map()
 const BLOCK_DEDUPE_MS = 10 * 60_000
 function onBlocked(runId, info) {
   try {
-    const key = `${runId}|${info?.host ?? ''}`
+    // `action` decides WHICH event this is, and dropping it was the whole
+    // defect: an audit-only run's `would_deny` — a request that WENT THROUGH
+    // and was merely counted — was written as `sandbox:blocked`, byte for byte
+    // like a real 403. The incident rule reads that kind, so the rollout mode
+    // that exists to be silent raised a RED incident saying two hosts had been
+    // turned away, on a run where nothing was. Same family as every other
+    // "an alarm that fires for a working agent" entry in AGENTS.md.
+    //
+    // `sandbox:would_block` is the learning record §7.12.5 wants — it is what
+    // the repo page grows an allow list out of — and nothing escalates on it.
+    const audit = info?.action === 'would_deny'
+    const kind = audit ? 'sandbox:would_block' : 'sandbox:blocked'
+    const key = `${runId}|${kind}|${info?.host ?? ''}`
     const last = blockedSeen.get(key) ?? 0
     if (Date.now() - last < BLOCK_DEDUPE_MS) return
     blockedSeen.set(key, Date.now())
-    addEvent(runId, 'sandbox:blocked', {
+    addEvent(runId, kind, {
       host: info?.host ?? null, method: info?.method ?? null,
       count: info?.count ?? 1, at: info?.at ?? new Date().toISOString(),
+      action: info?.action ?? 'deny', audit_only: audit,
     })
   } catch { /* a denial that could not be recorded must not break the proxy */ }
 }
@@ -1016,7 +1256,73 @@ export async function teardownSandbox(run, opts = {}) {
   if (runId && opts.removeNetwork !== false && rt?.removeNetwork) {
     try { await rt.removeNetwork(networkName(runId), { runtime }); out.network = true } catch { /* fail-soft */ }
   }
-  if (runId) blockedSeen.delete(`${runId}|`)
+  // The dedupe keys carry the host (and now the kind), so deleting the bare
+  // `<id>|` deleted nothing at all and every finished run's hosts stayed in this
+  // map for the life of the process.
+  if (runId) for (const k of [...blockedSeen.keys()]) if (k.startsWith(`${runId}|`)) blockedSeen.delete(k)
+  return out
+}
+
+/**
+ * Bring back the proxies of runs that are still going after a HUB RESTART
+ * (§8.19's `sandbox:proxy_restarted`, which was promised and never written).
+ *
+ * The built-in engine is a listener inside the hub process and the `proxies`
+ * Map is in-process only, so a restart takes it with it — while the container
+ * keeps running with `HTTPS_PROXY` pointing at the port that has just died.
+ * From that moment every request the agent makes fails with a connection error
+ * and the hub reads `running` throughout. This hub restarts 164 times in 30
+ * days, so that is the ordinary case rather than the edge one.
+ *
+ * Three properties, each of them the reason it works at all:
+ *
+ *  - **the same port**. `portOfRecordedProxy()` reads it out of the run's own
+ *    `sandbox.json`; a fresh ephemeral port would be a listener nothing dials.
+ *  - **the same list**. The spec is read from the ROW, and the allow list is
+ *    resolved from it exactly as at launch — a restart must not quietly widen
+ *    or narrow what the run was started with.
+ *  - **idempotent and fail-soft**. A run this process already holds a handle for
+ *    is skipped; a run whose proxy cannot be brought back gets a `warn` event
+ *    and is left alone, never failed — the agent may well be between requests,
+ *    and ending somebody's work over a listener is worse than the listener.
+ *
+ * An iron-proxy run needs nothing restarted (its proxy is a container the daemon
+ * kept running); it only needs a handle again so a policy change can still reach
+ * it, and that is what `startProxy` is NOT asked for here.
+ */
+export async function restoreProxies() {
+  if (hubSandboxMode() === 'off') return { restored: [], skipped: [] }
+  const out = { restored: [], skipped: [] }
+  let rows = []
+  try {
+    rows = db.prepare(
+      `SELECT * FROM runs WHERE sandbox=1 AND status IN ('running','waiting_help') AND tmux_closed_at IS NULL`).all()
+  } catch { return out }
+  for (const row of rows) {
+    if (proxies.has(row.id)) { out.skipped.push(row.id); continue }
+    try {
+      const spec = await runSpec(row)
+      const mode = spec.network?.mode ?? 'allowlist'
+      if (mode === 'open' || mode === 'none') { out.skipped.push(row.id); continue }
+      if ((spec.network?.engine ?? 'builtin') !== 'builtin') { out.skipped.push(row.id); continue }
+      const port = portOfRecordedProxy(row.id)
+      if (!port) { out.skipped.push(row.id); continue }
+      const repo = db.prepare('SELECT * FROM repos WHERE id=?').get(row.repo_id) ?? null
+      const allow = await resolveAllowList(spec, repo, row)
+      const handle = await ensureProxy(row, spec, {
+        runDir: join(RUNS_DIR, String(row.id)), network: networkName(row.id), allow, port,
+      })
+      if (handle) {
+        addEvent(row.id, 'sandbox:proxy_restarted', {
+          engine: handle.engine ?? 'builtin', url: handle.url ?? null, allow, mode,
+        })
+        out.restored.push(row.id)
+      }
+    } catch (err) {
+      addEvent(row.id, 'warn', { proxy_restart_failed: err?.message || String(err) })
+      out.skipped.push(row.id)
+    }
+  }
   return out
 }
 
@@ -1196,8 +1502,24 @@ export async function changePolicy(run, patch, by = 'user') {
   db.prepare('UPDATE runs SET sandbox_spec=? WHERE id=?').run(JSON.stringify(after), row.id)
   const applied = { proxy: false, limits: false }
   if (kind.proxy) {
-    const handle = proxies.get(row.id)
+    let handle = proxies.get(row.id)
     const proxy = await sibling('proxy')
+    // NO HANDLE is the state this hub is in after every restart, and it used to
+    // be reported as a success: `applied.proxy` stayed false, no warning was
+    // written, and the operator was told "Allow for this run" had worked while
+    // the agent kept hitting the same wall. So the missing handle is answered
+    // by trying to bring the proxy back first (a restart is exactly what
+    // `restoreProxies()` exists for) and, where that cannot be done, by a
+    // refusal the caller can render — never by a quiet `ok: true`.
+    if (!handle) {
+      try { await restoreProxies() } catch { /* fail-soft */ }
+      handle = proxies.get(row.id)
+    }
+    if (!handle) {
+      addEvent(row.id, 'warn', { proxy_reload_failed: 'no_proxy' })
+      addEvent(row.id, 'sandbox:policy_changed', { by, diff, applied: { proxy: false, limits: false }, live: true, enforced: false })
+      return { ok: false, live: true, applied, spec: after, error: t('sandbox.launch.proxy_gone') }
+    }
     if (handle && proxy?.reloadProxy) {
       // The answer is READ. `applied.proxy = true` used to be written whatever
       // came back, so a reload the engine refused — an iron-proxy whose
@@ -1205,7 +1527,13 @@ export async function changePolicy(run, patch, by = 'user') {
       // happens — still told the page and the event log that the new policy was
       // in force. A policy that quietly did not apply is worse than one that
       // did not change: the operator stops watching.
-      const r = await proxy.reloadProxy(handle, after)
+      // The RESOLVED list again, for the same reason it is resolved at launch:
+      // a reload handed the raw spec would replace a working allow list with
+      // the profile's unexpanded (and therefore empty) one — a policy change
+      // that switched the run's egress off.
+      const repo = db.prepare('SELECT * FROM repos WHERE id=?').get(row.repo_id) ?? null
+      const allow = await resolveAllowList(after, repo, row)
+      const r = await proxy.reloadProxy(handle, specForProxy(after, allow))
       applied.proxy = r?.ok === true
       if (!applied.proxy) addEvent(row.id, 'warn', { proxy_reload_failed: r?.reason ?? 'unknown' })
     }
@@ -1292,9 +1620,26 @@ export const RECONFIGURE_PROMPT = `Your session was restarted because the sandbo
 
 Continue the task from where you were. If you were blocked by the sandbox before the restart, try that step again — the change was made for it. Everything the platform rules said still applies: commit your work, write the two report files and run \`fl-report done\` exactly as instructed.`
 
-/** Close the run's tmux session, the way every deliberate end does. Fail-soft. */
+/**
+ * Close the run's tmux session, the way every deliberate end does — but for a
+ * run that is about to be RESUMED, not ended.
+ *
+ * `killSessions()` reaches `reconcileClosedSession()`, and that function's whole
+ * job is to decide that a run whose session went away is over: it writes
+ * `aborted`, and `resumeRun()` a moment later refuses a run that is not running.
+ * Measured twice live — a reconfigure produced `[sandbox:restarting, aborted]`
+ * and `resumed {ok:false}`, and the break-glass answered "the change could not
+ * be applied" after `sandbox=0` and the container were already gone.
+ *
+ * `resume_pending` is what tells that reconciler this closure is a step in a
+ * resume rather than an end, so it is set HERE, before the session is touched,
+ * for every caller — `reconfigureAndResume()` sets it in the same statement as
+ * the new spec, and the break-glass had nothing at all. Setting it twice costs
+ * nothing; not setting it costs the run.
+ */
 async function closeSession(row) {
   if (!row.tmux_session) return
+  try { db.prepare('UPDATE runs SET resume_pending=1 WHERE id=?').run(row.id) } catch { /* fail-soft */ }
   try {
     const { killSessions } = await import('../sessions.mjs')
     await killSessions([row.tmux_session])
@@ -1340,14 +1685,46 @@ export async function continueWithoutSandbox(runId, { by = 'user', reason = '' }
     .run(JSON.stringify({ ...(spec ?? {}), secrets: { ...(spec?.secrets ?? {}), mode: 'env' } }), runId)
   addEvent(runId, 'sandbox:bypassed', { by, reason: String(reason ?? '').slice(0, 500) })
 
+  // §7.12.4 calls this "an explicit, named, NOTIFIED act", and it was the first
+  // two only. Channel-neutral through `server/notify.mjs` (the hub names no
+  // channel anywhere), muted for a run whose operator unticked the box — the
+  // same rule every other message about a run keeps — and fail-soft in every
+  // direction: an installation with nothing configured is a complete
+  // installation, and a break-glass must not fail because nobody is listening.
+  try {
+    if (row.telegram_on !== 0) {
+      const { notify } = await import('../notify.mjs')
+      await notify({
+        kind: 'sandbox_bypassed', runId,
+        text: t('sandbox.notify.bypassed', {
+          title: row.title ?? runId, by,
+          reason: String(reason ?? '').trim() || t('sandbox.notify.bypassed_no_reason'),
+        }),
+      })
+    } else {
+      addEvent(runId, 'notify_muted', { type: 'sandbox_bypassed' })
+    }
+  } catch { /* a message that could not be sent must not stop the break-glass */ }
+
   await teardownSandbox({ ...row, sandbox: 1 }, { reason: 'bypass', removeNetwork: true })
+  // The mark BEFORE the session goes — `closeSession()` sets it, and it is what
+  // stops the reconciler from aborting a run this function is in the middle of
+  // resuming (see there).
   await closeSession(row)
   const { resumeRun } = await import('../runner.mjs')
   const r = await resumeRun(runId, {
-    reason: 'sandbox_bypass',
+    reason: 'sandbox_bypass', adoptPending: true,
     text: BYPASS_PROMPT.replace('{reason}', String(reason ?? '').trim() || 'a human decided the sandbox was in the way'),
   })
-  return { ok: !!r?.ok, resumed: r }
+  // A resume that did not take leaves a real state behind — `sandbox = 0`, the
+  // container gone, the work intact — so the answer says so instead of a bare
+  // "the change could not be applied". The sandbox IS off; what failed is the
+  // relaunch, and that is what the operator has to act on.
+  if (!r?.ok) {
+    addEvent(runId, 'warn', { bypass_resume_failed: r?.error ?? r?.reason ?? 'unknown' })
+    return { ok: false, bypassed: true, resumed: r, error: t('sandbox.launch.bypass_resume_failed') }
+  }
+  return { ok: true, bypassed: true, resumed: r }
 }
 
 export const BYPASS_PROMPT = `Your session was restarted WITHOUT the sandbox: {reason}. You are now running directly on the host, with the same working copy and the same task. Your conversation up to the restart is what you see above.

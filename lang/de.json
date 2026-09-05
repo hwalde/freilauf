@@ -1428,6 +1428,7 @@
   "sandbox.problem.form.harness_unsupported": "{harness} lässt sich nicht in einer Sandbox betreiben: Das Plugin meldet keine Sandbox-Unterstützung.",
   "sandbox.problem.form.refused": "Die Sandbox-Richtlinie dieses Hubs lehnt diese Einstellung ab.",
   "sandbox.problem.form.profile_unknown": "Es gibt kein Sandbox-Profil mit der ID {id}.",
+  "sandbox.problem.flow_overrides": "Die Sandbox-Overrides dieses Schritts sind kein Dokument, das dieser Hub annimmt — der Lauf wurde nicht gestartet: {problems}",
   "sandbox.problem.form.only_planned": "Die Sandbox lässt sich nur ändern, solange der Lauf noch nicht gestartet ist.",
   "sandbox.problem.form.hub_off": "In diesem Hub ist die Sandbox abgeschaltet; ein Lauf lässt sich daher in keine sperren.",
   "sandbox.settings.title": "Sandbox",
@@ -1595,5 +1596,15 @@
   "incident.sandbox_blocked": "Sandbox hat einen Host abgewiesen",
   "incident.sandbox_access": "Agent braucht Zugriff",
   "incident.docker_unreachable": "Container-Laufzeit antwortet nicht",
-  "anomaly.sandbox_denied": "die Sandbox stand im Weg"
+  "anomaly.sandbox_denied": "die Sandbox stand im Weg",
+  "sandbox.launch.proxy_unreachable": "Der Egress-Proxy des Laufs wäre aus dem Container heraus nicht erreichbar: Das Netz {network} hat keine Gateway-Adresse, auf der der Hub lauschen könnte ({reason}). Nimm die iron-proxy-Engine oder setze FREILAUF_SANDBOX_PROXY_BIND auf eine Adresse, die der Container erreicht.",
+  "sandbox.launch.proxy_no_egress": "Der Egress-Proxy des Laufs konnte nicht mit dem Netz {network} verbunden werden und hätte damit selbst keinen Weg nach draußen: {reason}",
+  "sandbox.launch.network_failed": "Das private Netz {network} des Laufs konnte nicht angelegt werden: {reason}",
+  "sandbox.launch.no_ca": "Dieses Profil terminiert TLS, aber es ist kein CA-Zertifikat konfiguriert. Setze das Zertifikatsverzeichnis unter Einstellungen → Sandbox und lege ca.crt hinein.",
+  "sandbox.launch.proxy_gone": "Der Egress-Proxy dieses Laufs läuft nicht mehr, die neue Regel konnte deshalb nicht in Kraft gesetzt werden. Starte den Lauf neu, damit sie greift.",
+  "sandbox.launch.bypass_resume_failed": "Die Sandbox ist für diesen Lauf aus und sein Container ist weg, aber der Agent konnte nicht neu gestartet werden. Versuche den Lauf erneut.",
+  "sandbox.notify.bypassed": "{title}: Die Sandbox wurde für diesen Lauf von {by} abgeschaltet — {reason}",
+  "sandbox.notify.bypassed_no_reason": "ohne Begründung",
+  "sandbox.proxy.no_image": "es ist kein iron-proxy-Image konfiguriert (FREILAUF_SANDBOX_PROXY_IMAGE)",
+  "sandbox.runtime.err_mount_mode": "Der Mount {target} verlangt den Modus „{mode}“, den diese Container-Laufzeit nicht kennt (ro oder rw)"
 }

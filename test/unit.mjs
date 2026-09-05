@@ -6127,6 +6127,66 @@ try {
     gleich(ig.conflictFilesFromMergeTree('abc123\n').length, 0, 'a clean merge names no file')
   })
 
+  // ---- the merge check's own box (§8.7) -----------------------------------
+  // `repos.merge_check_sandboxed` existed as a column, a checkbox and a
+  // sentence in docs/sandbox.md, and NOTHING read it: the check ran
+  // `bash -lc` on the host either way. These pin the shape of the container it
+  // runs in now, because that argv is the whole control.
+
+  const CHECK_SPEC = {
+    runtime: 'docker',
+    image: { ref: 'freilauf/claude:1' },
+    network: { mode: 'allowlist' },
+    resources: { memory: '8g', cpus: 4, pidsLimit: 512, shmSize: '' },
+  }
+
+  await pruefe('the sandboxed merge check runs in the run’s image, on the merged result', () => {
+    const args = ig.mergeCheckArgv(CHECK_SPEC, {
+      name: 'fl-check-r1', runId: 'r1', dir: '/i/repo', check: 'node test/unit.mjs',
+      uid: 1000, gid: 1000, network: 'fl-net-r1', proxyUrl: 'http://fl-proxy-r1:8080',
+      mounts: [{ source: '/p/.git', target: '/p/.git', mode: 'ro' }],
+    })
+    gleich(args[0], 'run', 'a container of its own, not an exec into the agent’s')
+    wahr(args.includes('--rm'), 'and it does not outlive the check')
+    gleich(args[args.length - 3], 'bash', 'the operator’s command, through a login shell as before')
+    gleich(args[args.length - 2], '-lc', 'with the same flags the host call used')
+    gleich(args[args.length - 1], 'node test/unit.mjs', 'and the check verbatim')
+    gleich(args[args.length - 4], 'freilauf/claude:1', 'the image is the run’s own')
+    wahr(args.includes('/i/repo:/i/repo:rw'), 'the integration worktree is mounted at its own path')
+    wahr(args.includes('/p/.git:/p/.git:ro'), 'and so is the repository git dir the linked worktree needs')
+    gleich(args[args.indexOf('-w') + 1], '/i/repo', 'the check runs in the merged result')
+    gleich(args[args.indexOf('--user') + 1], '1000:1000', 'as the hub user, like the run')
+    wahr(args.includes('--cap-drop') && args.includes('no-new-privileges'), 'the run’s hardening comes along')
+    gleich(args[args.indexOf('--network') + 1], 'fl-net-r1', 'and the run’s own network')
+    wahr(args.includes('HTTPS_PROXY=http://fl-proxy-r1:8080'), 'with the run’s proxy, so the policy is the same one')
+    gleich(args[args.indexOf('--memory') + 1], '8g', 'the memory ceiling travels')
+    falsch(args.includes('--shm-size'), 'an empty resource is not a configured 0')
+    falsch(args.includes('freilauf.run=r1'), 'never labelled as a RUN — the orphan reaper filters on that')
+  })
+
+  await pruefe('a merge check under a policy the hub cannot rebuild gets no network at all', () => {
+    const args = ig.mergeCheckArgv(CHECK_SPEC, { dir: '/i/repo', check: 'true' })
+    gleich(args[args.indexOf('--network') + 1], 'none',
+      'allowlist without a network to join means deny — never the open bridge')
+    falsch(args.some(a => String(a).startsWith('HTTPS_PROXY=')), 'and no proxy is promised that is not there')
+    const none = ig.mergeCheckArgv({ ...CHECK_SPEC, network: { mode: 'none' } }, { dir: '/i/repo', check: 'true' })
+    gleich(none[none.indexOf('--network') + 1], 'none', 'mode none stays none')
+    const open = ig.mergeCheckArgv({ ...CHECK_SPEC, network: { mode: 'open' } }, { dir: '/i/repo', check: 'true' })
+    falsch(open.includes('--network'), 'and open writes no flag, which IS the default bridge')
+  })
+
+  await pruefe('a check container that cannot be described refuses instead of guessing', () => {
+    let fehler = null
+    try { ig.mergeCheckArgv({ ...CHECK_SPEC, image: {} }, { dir: '/i/repo', check: 'true' }) } catch (e) { fehler = e }
+    wahr(fehler && /image/.test(fehler.message), 'no image, no container — and the caller turns that into a refusal')
+    fehler = null
+    try { ig.mergeCheckArgv(CHECK_SPEC, { dir: 'relative', check: 'true' }) } catch (e) { fehler = e }
+    wahr(fehler && /directory/.test(fehler.message), 'and a relative working directory is not a mount')
+    const pinned = ig.mergeCheckArgv({ ...CHECK_SPEC, image: { ref: 'img', digest: 'abc' } },
+      { dir: '/i/repo', check: 'true' })
+    wahr(pinned.includes('img@sha256:abc'), 'a digest-pinned run checks against the same bytes it ran on')
+  })
+
   await pruefe('a file list is indented and capped', () => {
     gleich(ig.formatFiles([]), '  (none)', 'nothing to list')
     gleich(ig.formatFiles(['a.txt', 'b/c.txt']), '  a.txt\n  b/c.txt', 'indented')
@@ -8205,12 +8265,21 @@ process.stdout.write(JSON.stringify(out))
   })
 
   await pruefe('a lifecycle call without a daemon answers, and answers "I do not know"', async () => {
+    // The group's premise is the check above: `runtimeInfo` said this machine
+    // has no usable runtime. So neither call below can legitimately come back
+    // with 'ok' — and the old assertions accepted every value the two functions
+    // can return (`['ok','no_daemon','unreachable']` IS the whole domain of
+    // `runtimeVerdict`, and `typeof verdict === 'string'` is true for `''`), so
+    // an implementation that invented an answer passed them both.
     const state = await rt.containerState('fl-nosuch', { runtime: 'docker' })
-    wahr(['ok', 'no_daemon', 'unreachable'].includes(state.verdict), 'a verdict comes back')
-    if (state.verdict !== 'ok') gleich(state.exists, null, 'and "no answer" is null, never false')
+    wahr(['no_daemon', 'unreachable'].includes(state.verdict),
+      `nobody answered, so the verdict says so (got ${JSON.stringify(state.verdict)})`)
+    gleich(state.exists, null, 'and "no answer" is null, never false')
+    gleich(state.running, null, 'and so is "running" — nothing is claimed either way')
     const owned = await rt.listOwned('hub1', { runtime: 'docker' })
     gleich(owned.containers.length, 0, 'an empty list …')
-    wahr(typeof owned.verdict === 'string', '… which only means something together with the verdict')
+    wahr(['no_daemon', 'unreachable'].includes(owned.verdict),
+      `… which only means something together with the verdict, and here it says nobody answered (got ${JSON.stringify(owned.verdict)})`)
   })
 
   // The i18n group above compares the three catalogs to EACH OTHER and never to
@@ -8686,8 +8755,13 @@ process.stdout.write(JSON.stringify(out))
       gleich(fromFlow.sandbox, 'on', 'a flow step reaches the definition')
       gleich(rdef.defFromFlowProps({ harness: 'claude', prompt: 'x', sandbox: 'ja' }).sandbox, 'inherit',
         'and junk becomes the value that changes nothing, never a guess')
-      gleich(rdef.defFromFlowProps({ harness: 'claude', prompt: 'x', sandboxOverrides: '{oops' }).sandboxOverrides, '{}',
-        'a broken document there is dropped, because a flow has nobody to tell')
+      // It used to be dropped to '{}' "because a flow has nobody to tell", and
+      // that was a silent step toward LESS protection — the one direction §7.3
+      // forbids. It refuses instead, and the throw is what fails the step.
+      let brachAb = false
+      try { rdef.defFromFlowProps({ harness: 'claude', prompt: 'x', sandboxOverrides: '{oops' }) }
+      catch { brachAb = true }
+      wahr(brachAb, 'a broken document there fails the step rather than quietly running unprotected')
       // defFromAgent and both halves of saveAgent, read off the source: an
       // UPDATE that forgot a column is the classic way a field half-lands.
       const insert = quelle.slice(quelle.indexOf('INSERT INTO agents('), quelle.indexOf('INSERT INTO agents(') + 900)
@@ -8886,8 +8960,14 @@ process.stdout.write(JSON.stringify(out))
       const run = { id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', harness: 'claude',
         workdir_effective: '/srv/agents/worktrees/repo/ab12-detached' }
       gleich(agentHome(run), home, 'no sandbox, no move')
-      gleich(agentHome({ ...run, sandbox: 0, sandbox_home: '/somewhere' }), home,
-        'a home recorded on a run that is NOT sandboxed changes nothing')
+      // Corrected with the break-glass defect: the COLUMN decides, not the flag.
+      // `continueWithoutSandbox()` clears `sandbox` and deliberately keeps
+      // `sandbox_home` so the resumed CLI finds its conversation, and this
+      // assertion used to encode exactly the behaviour that threw it away.
+      gleich(agentHome({ ...run, sandbox: 0, sandbox_home: '/somewhere' }), '/somewhere',
+        'a home recorded on a run keeps being its home after a break-glass restart')
+      gleich(agentHome({ ...run, sandbox: 1, sandbox_home: null }), home,
+        'and a run that never had one is the host home, exactly as before')
       gleich(agentHome({ ...run, sandbox: 1, sandbox_home: '/srv/agents/runs/x/home' }),
         '/srv/agents/runs/x/home', 'and a sandboxed run reads its own')
 
@@ -9277,9 +9357,19 @@ process.stdout.write(JSON.stringify(out))
     await pruefe('an unsandboxed run’s prompt is unchanged, to the byte', () => {
       const run = { id: 'r1', harness: 'claude', expected_minutes: 30, workdir_effective: '/w' }
       gleich(sandboxPromptSection(null), '', 'no facts, no section')
-      gleich(platformSuffix(run, 'No branch.', {}, null, null), platformSuffix(run, 'No branch.', {}),
-        'and the new parameter changes nothing when it is not used')
-      falsch(platformSuffix(run, 'No branch.', {}).includes('SANDBOX'), 'no sandbox block anywhere in it')
+      const plain = platformSuffix(run, 'No branch.', {})
+      falsch(plain.includes('SANDBOX'), 'no sandbox block anywhere in it')
+      // `platformSuffix(…, null, null)` against `platformSuffix(…)` asserted
+      // NOTHING: those two arguments ARE the defaults, so both sides were the
+      // same deterministic call and no implementation could have made it fail.
+      // What the check is for is that the two new parameters ADD a block and
+      // change nothing else — so it is measured against a run that has facts.
+      const facts = { workdir: '/w/clone', mode: 'none', memory: '8g', cpus: 4, readOnlyRoot: true }
+      const section = sandboxPromptSection(facts)
+      wahr(section.includes('SANDBOX'), 'a run with facts really gets a section')
+      const boxed = platformSuffix(run, 'No branch.', {}, null, facts)
+      gleich(boxed.replace(`\n\n${section}`, ''), plain,
+        'and the unsandboxed prompt is that same prompt with the section taken out — nothing else moved')
     })
 
     await pruefe('a sandboxed run is told the facts and the one thing it can DO about them', () => {
@@ -9724,6 +9814,559 @@ process.stdout.write(JSON.stringify(out))
       enthaelt(facade, 'stopDockerEvents(runId)', 'and the tail is torn down')
       wahr(/export async function teardownSandbox[\s\S]{0,600}stopDockerEvents/.test(facade),
         'by the teardown, which runs on every path a run can end')
+    })
+  }
+
+  gruppe('Sandbox: nothing is left running')
+  //
+  // Three leaks and one killing, all measured against the running hub rather
+  // than argued from the code:
+  //
+  //   * the orphan reaper removed a run's containers and left its NETWORK — and
+  //     Docker's default address pool subnets out after ~31 of them, after which
+  //     no sandboxed run starts at all;
+  //   * `teardownSandbox()` was on no ordinary end path, so a finished run's
+  //     built-in proxy listener and its `docker events` tail outlived it inside
+  //     the hub process;
+  //   * a fresh start into a daemon that did not answer ended `failed` where
+  //     §8.1 prescribes a bypass, so a 03:00 agent lost its night to a hiccup;
+  //   * and the two paths that exist to SAVE a run — the reconfigure and the
+  //     break-glass — aborted it, because the session they closed in order to
+  //     resume it was reconciled as an end.
+  //
+  // The observables (a network that is gone, a listener that is gone) need a
+  // daemon and belong to the e2e group of the same name. What is asserted here
+  // is what can be decided without one.
+  {
+    const dbu = (await import('../server/db.mjs')).default
+    const sess = await import('../server/sessions.mjs')
+    const uuid = (await import('node:crypto')).randomUUID
+    const facadeSrc = readFileSync(new URL('../server/sandbox/index.mjs', import.meta.url), 'utf8')
+    const runnerSrc = readFileSync(new URL('../server/runner.mjs', import.meta.url), 'utf8')
+
+    dbu.prepare(`INSERT OR IGNORE INTO repos(id, name, path, base_branch)
+                 VALUES(9701,'leak-test','/tmp/leak-test','main')`).run()
+    const neuerLauf = (patch = {}) => {
+      const id = uuid()
+      dbu.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes,
+                                    tmux_session, started_at, sandbox, resume_pending)
+                   VALUES(?, 9701, ?, 'claude', 'p', 'keiner', 30, ?, datetime('now'), ?, ?)`)
+        .run(id, patch.status ?? 'running', patch.tmux_session ?? `fl-leak-${id.slice(0, 8)}`,
+          patch.sandbox ?? 0, patch.resume_pending ?? 0)
+      return id
+    }
+    const lauf = (id) => dbu.prepare('SELECT * FROM runs WHERE id=?').get(id)
+
+    await pruefe('a session closed IN ORDER TO resume is not an end', () => {
+      // The measured failure, twice on two sandboxes: §7.12.4 marks the row,
+      // stops the container and closes the session — and killSessions() landed
+      // here, wrote 'aborted', after which resumeRun() refused the run it had
+      // just been asked to bring back ("status is aborted") and the agent's
+      // conversation was gone.
+      const id = neuerLauf({ status: 'running', resume_pending: 1 })
+      gleich(sess.reconcileClosedSession(id, 'web'), 'resuming',
+        'the third case: neither an end nor a session that went away by itself')
+      gleich(lauf(id).status, 'running', 'and the run is still the run resumeRun() may pick up')
+      wahr(!!lauf(id).tmux_closed_at, 'the session is recorded as closed all the same')
+    })
+
+    await pruefe('…and the guard cannot swallow a genuine abort', () => {
+      // Keyed on `resume_pending`, not on the source: nothing that ends a run on
+      // purpose — the kill route, the sessions page, retention, archiving, a
+      // flow's kill_run, enforceMaxRuntime — ever sets that mark.
+      for (const quelle of ['web', 'retention', 'watcher', 'archive', 'max_runtime']) {
+        const id = neuerLauf({ status: 'running' })
+        gleich(sess.reconcileClosedSession(id, quelle), 'aborted', `${quelle} still ends the run`)
+        gleich(lauf(id).status, 'aborted', `${quelle}: and the record says so`)
+      }
+      // A mark on a run that is already over is not a resume either.
+      const fertig = neuerLauf({ status: 'done', resume_pending: 1 })
+      gleich(sess.reconcileClosedSession(fertig, 'web'), 'closed', 'a finished run is closed, mark or no mark')
+    })
+
+    await pruefe('the per-run network has ONE author, and the reaper is one of its readers', () => {
+      // `fl-net-${run.id}` was typed out a second time in stopRunContainer(),
+      // and the disagreement such a copy heads for would be silent: a
+      // `network rm` of a name nobody created answers "not found", which reads
+      // exactly like a network that was already gone.
+      const sessSrc = readFileSync(new URL('../server/sessions.mjs', import.meta.url), 'utf8')
+      const watchSrc = readFileSync(new URL('../server/watcher.mjs', import.meta.url), 'utf8')
+      falsch(/`fl-net-\$\{/.test(sessSrc), 'sessions.mjs no longer spells the name out')
+      falsch(/`fl-net-\$\{/.test(watchSrc), 'and neither does the watcher')
+      enthaelt(sessSrc, 'rt.networkName(run.id)', 'it asks the module that owns the name')
+      wahr(/export function networkName/.test(facadeSrc), 'which exports it')
+    })
+
+    await pruefe('the teardown is on the ordinary end paths, not only on a failed launch', () => {
+      const sessSrc = readFileSync(new URL('../server/sessions.mjs', import.meta.url), 'utf8')
+      const watchSrc = readFileSync(new URL('../server/watcher.mjs', import.meta.url), 'utf8')
+      // reconcileClosedSession() is where the kill route, the sessions page,
+      // retention and the archive pass all meet, so one wiring covers all four.
+      wahr(/function releaseSandbox[\s\S]{0,1600}teardownSandbox/.test(sessSrc),
+        'a closed session releases what the sandbox was holding')
+      wahr(/reconcileClosedSession[\s\S]{0,2600}releaseSandbox\(runId, source\)/.test(sessSrc),
+        'and reconcileClosedSession() is what calls it')
+      wahr(/async function releaseReaped[\s\S]{0,900}teardownSandbox/.test(watchSrc),
+        'and so does the reaper, once the run’s containers are gone')
+    })
+
+    await pruefe('containerGone() is wired where §7.11 says, instead of documenting a rule nothing applies', () => {
+      // It had no callers at all: §7.11 names it as reconcileClosedSession()'s
+      // second question and orphanedContainer() asked a different one. A
+      // function that states a rule nobody applies is worse than no function.
+      const sessSrc = readFileSync(new URL('../server/sessions.mjs', import.meta.url), 'utf8')
+      const aufrufe = sessSrc.match(/[^.\w]containerGone\(/g) ?? []
+      wahr(aufrufe.length >= 2, `declared and called (${aufrufe.length} occurrences)`)
+      wahr(/function releaseSandbox[\s\S]{0,600}await containerGone\(run\)/.test(sessSrc),
+        'by the session-end path, exactly as the section describes')
+      wahr(/gone === false/.test(sessSrc),
+        'and the tri-state is read as a tri-state — null writes nothing')
+    })
+
+    await pruefe('the launch applies §8.1’s availability rule, not just the plan', () => {
+      // Between the plan and the launch lie a cached discovery answer and, for a
+      // scheduled run, hours. The rule is the same PURE function in both places,
+      // so the two cannot come to mean different things about one fact.
+      wahr(/async function sandboxUnavailable[\s\S]{0,900}sandboxOutcome/.test(runnerSrc),
+        'launchRun() decides through sandboxOutcome()')
+      wahr(/async function sandboxUnavailable[\s\S]{0,900}UPDATE runs SET sandbox=0/.test(runnerSrc),
+        'a bypass takes the run’s own flag with it')
+      wahr(/refreshSandboxAvailability\(\)/.test(runnerSrc),
+        'and it asks before it builds anything')
+    })
+
+    await pruefe('a bypass is never silent, and `required` refuses instead', async () => {
+      // The pure rule itself, over the matrix that matters at launch: the same
+      // function the plan uses, so this is the guarantee and not a copy of it.
+      const { sandboxOutcome } = await import('../server/sandbox/index.mjs')
+      const weg = sandboxOutcome({ decision: { sandbox: true }, hubMode: 'available',
+        available: false, unavailableReason: 'sandbox.reason.no_binary' })
+      gleich(weg.sandbox, 0, 'available + no runtime = the run still starts')
+      gleich(weg.problems.length, 0, 'and nothing refuses it')
+      gleich(weg.events.length, 1, 'but it is written down — exactly once')
+      gleich(weg.events[0][0], 'sandbox:bypassed', 'as sandbox:bypassed')
+      gleich(weg.events[0][1].by, 'unavailable', 'naming the runtime as the reason')
+      const nein = sandboxOutcome({ decision: { sandbox: true }, hubMode: 'required',
+        available: false, unavailableReason: 'sandbox.reason.no_binary' })
+      gleich(nein.sandbox, 0, 'required + no runtime = nothing starts')
+      wahr(nein.problems.length === 1 && nein.problems[0].length > 0, 'with a readable sentence')
+      gleich(nein.events.length, 0, 'and no bypass event, because nothing was bypassed')
+    })
+
+    await pruefe('a run continued on the host keeps the home it wrote its conversation into', () => {
+      // continueWithoutSandbox() keeps `runs.sandbox_home` for exactly this, and
+      // HOME was emitted only on the sandboxed branch — so the break-glass
+      // resumed the CLI into a home it had never written a byte to, which turns
+      // a resume back into the fresh start it exists to avoid.
+      wahr(/function hostHomeArgs[\s\S]{0,400}sandbox_home/.test(runnerSrc),
+        'the unsandboxed branch has an answer for a formerly sandboxed run')
+      wahr(/sandbox \? sandboxEnvArgs\(run, sandbox\) : hostHomeArgs\(run\)/.test(runnerSrc),
+        'and it is on the launch line')
+      wahr(/function hostHomeArgs[\s\S]{0,400}existsSync\(home\)/.test(runnerSrc),
+        'a home that is not on disk is not passed on — that is worse than the host’s')
+    })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: the mask holds')
+
+  // The masked host git is the one place the hub deliberately runs git INSIDE a
+  // repository the agent owns — the rescue path an operator reaches by clicking
+  // "Commit leftovers & merge" on a run whose container is gone. Everything here
+  // is measured against a real repository with a real hostile configuration,
+  // and every negative assertion is paired with the POSITIVE CONTROL that shows
+  // the payload really does fire when nothing masks it. Without that control the
+  // whole group could pass over a payload that was simply never armed.
+  {
+    const { maskedGitConfigEntries, writeMaskedGitConfig, REPO_CONFIG_FILES } =
+      await import('../server/sandbox/clone.mjs')
+    const { runGit } = await import('../server/sandbox/exec.mjs')
+    const { DEFAULT_SPEC, SPEC_VALUES, narrow, validateSandboxOverrides, normalizeSpec } =
+      await import('../server/sandbox/spec.mjs')
+    const { existsSync } = await import('node:fs')
+
+    const maskWork = join(sandkasten, 'mask-holds')
+    const markers = join(maskWork, 'markers')
+    mkdirSync(markers, { recursive: true })
+    const g = (dir, ...args) => execFileSync('git', ['-C', dir, ...args],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+    const gq = (dir, ...args) => { try { return g(dir, ...args) } catch { return null } }
+    // Which markers fired since the last time this was asked, and reset.
+    const fired = () => {
+      const names = ['FSMONITOR', 'FILTER', 'DIFFEXT'].filter(n => existsSync(join(markers, n)))
+      for (const n of names) rmSync(join(markers, n), { force: true })
+      return names.sort().join(',')
+    }
+
+    // The evaluator's repository, verbatim: the payload lives in
+    // `.git/config.worktree`, which git reads ONLY because
+    // `extensions.worktreeConfig` says so — and the filter and the diff driver
+    // are selected by a `.gitattributes` the agent COMMITS, so no denylist of
+    // config keys could ever see them coming.
+    const hostile = join(maskWork, 'clone')
+    mkdirSync(hostile, { recursive: true })
+    execFileSync('git', ['init', '-q', '-b', 'main', hostile], { stdio: 'ignore' })
+    g(hostile, 'config', 'user.email', 'a@t'); g(hostile, 'config', 'user.name', 'A')
+    writeFileSync(join(hostile, '.gitattributes'), '* filter=wt diff=wtd\n')
+    writeFileSync(join(hostile, 'f.txt'), 'content\n')
+    g(hostile, 'add', '-A'); g(hostile, 'commit', '-qm', 'init')
+    g(hostile, 'config', 'core.repositoryformatversion', '1')
+    g(hostile, 'config', 'extensions.worktreeConfig', 'true')
+    const worktreeCfg = join(hostile, '.git', 'config.worktree')
+    writeFileSync(worktreeCfg,
+      `[core]\n\tfsmonitor = touch ${join(markers, 'FSMONITOR')}\n`
+      + `[filter "wt"]\n\tclean = touch ${join(markers, 'FILTER')}; cat\n\tsmudge = cat\n`
+      + `[diff "wtd"]\n\tcommand = touch ${join(markers, 'DIFFEXT')}\n`)
+    writeFileSync(join(hostile, 'f.txt'), 'more\n')          // something for `add -A` to do
+
+    const deadClone = { sandbox: 1, sandbox_container: 'fl-no-such-container',
+      worktree_kind: 'clone', workdir_effective: hostile }
+    const RESCUE = [['--no-optional-locks', 'status', '--porcelain'], ['add', '-A'],
+      ['diff', 'HEAD'], ['checkout', '--', '.']]
+
+    // ---- the positive control, first and on its own -----------------------
+    const control = {}
+    for (const args of RESCUE) { gq(hostile, ...args); control[args.join(' ')] = fired() }
+    const cfgBefore = readFileSync(join(hostile, '.git', 'config'), 'utf8')
+    const wtCfgBefore = readFileSync(worktreeCfg, 'utf8')
+
+    await pruefe('POSITIVE CONTROL: the payload really fires when nothing masks it', () => {
+      wahr(control['--no-optional-locks status --porcelain'].includes('FSMONITOR'),
+        `status runs core.fsmonitor out of config.worktree (${control['--no-optional-locks status --porcelain']})`)
+      wahr(control['add -A'].includes('FILTER'), `add -A runs the filter driver (${control['add -A']})`)
+      wahr(control['diff HEAD'].includes('DIFFEXT'), `diff runs the external diff (${control['diff HEAD']})`)
+      // Which is the whole point: none of those three keys is in `.git/config`.
+      falsch(cfgBefore.includes('fsmonitor'), 'and none of it is in .git/config — the mask never saw it')
+    })
+
+    // ---- the same four commands through the mask --------------------------
+    const masked = {}
+    for (const args of RESCUE) {
+      const r = await runGit(deadClone, args, { hostFallback: 'masked' })
+      masked[args.join(' ')] = { ok: r.ok, fired: fired(), stderr: r.stderr }
+    }
+
+    await pruefe('extensions.worktreeConfig does not walk past the mask any more', () => {
+      for (const args of RESCUE) {
+        const key = args.join(' ')
+        gleich(masked[key].fired, '', `${key}: nothing of the agent ran (${masked[key].fired})`)
+        wahr(masked[key].ok, `${key}: and the command itself still worked (${masked[key].stderr})`)
+      }
+    })
+
+    await pruefe('and the agent’s own configuration comes back, both files, byte for byte', () => {
+      gleich(readFileSync(join(hostile, '.git', 'config'), 'utf8'), cfgBefore, '.git/config')
+      gleich(readFileSync(worktreeCfg, 'utf8'), wtCfgBefore, '.git/config.worktree')
+      for (const name of REPO_CONFIG_FILES) {
+        falsch(existsSync(join(hostile, '.git', `${name}.freilauf-unmasked`)),
+          `no backup of ${name} is left lying next to it`)
+      }
+    })
+
+    await pruefe('the extensions keep list is an allowlist of FORMAT keys, not "everything"', async () => {
+      const src = join(maskWork, 'src.config')
+      writeFileSync(src, '[core]\n\trepositoryformatversion = 1\n'
+        + '[extensions]\n\tobjectFormat = sha256\n\tworktreeConfig = true\n\trefStorage = reftable\n'
+        + '\tsomethingGitInventsNextYear = true\n')
+      const keys = (await maskedGitConfigEntries(src)).map(([k]) => k)
+      wahr(keys.includes('extensions.objectformat'), 'the hash algorithm travels — dropping it changes what the repo IS')
+      wahr(keys.includes('extensions.refstorage'), 'and the ref backend, for the same reason')
+      falsch(keys.includes('extensions.worktreeconfig'), 'worktreeConfig does NOT — it names a second config file')
+      falsch(keys.some(k => k.includes('somethinggit')), 'and neither does an extension nobody has checked yet')
+    })
+
+    await pruefe('an include.path in the source config is dropped, not carried into the mask', async () => {
+      // Measured, git 2.43.0: `git config --file <f> --list` does NOT expand an
+      // include — so the included file's keys never appear here and only the
+      // pointer does. Carrying the pointer would point the masked git straight
+      // back at a file the agent wrote, which is `worktreeConfig` again in
+      // another spelling.
+      const inc = join(maskWork, 'included.config')
+      writeFileSync(inc, '[filter "wt"]\n\tclean = touch /tmp/never; cat\n')
+      const src = join(maskWork, 'including.config')
+      writeFileSync(src, `[core]\n\trepositoryformatversion = 0\n[include]\n\tpath = ${inc}\n`
+        + `[includeIf "gitdir:/"]\n\tpath = ${inc}\n`)
+      const listed = execFileSync('git', ['config', '--file', src, '--list'], { encoding: 'utf8' })
+      wahr(listed.includes('include.path'), 'git lists the pointer itself…')
+      falsch(listed.includes('filter.wt.clean'), '…and does not expand it under --file')
+      const keys = (await maskedGitConfigEntries(src)).map(([k]) => k)
+      falsch(keys.some(k => k.startsWith('include')), 'and the mask keeps neither include.path nor includeIf')
+      gleich(keys.join(','), 'core.repositoryformatversion', 'nothing but the format survives')
+    })
+
+    await pruefe('a symlink where the mask goes is refused, never written through', async () => {
+      const linkWork = join(maskWork, 'symlink')
+      mkdirSync(join(linkWork, '.git'), { recursive: true })
+      const stolen = join(maskWork, 'stolen.txt')
+      const src = join(maskWork, 'plain.config')
+      writeFileSync(src, '[core]\n\trepositoryformatversion = 0\n')
+      symlinkSync(stolen, join(linkWork, '.git', 'config'))
+      let threw = ''
+      try { await writeMaskedGitConfig(src, join(linkWork, '.git', 'config')) }
+      catch (err) { threw = String(err.message ?? err) }
+      enthaelt(threw, 'symlink', 'writeMaskedGitConfig says what it refused')
+      falsch(existsSync(stolen), 'and the file the link pointed at was never created')
+      // …and the caller turns that into a refusal rather than an exception: an
+      // unmasked call must not happen, and neither must a throw out of runGit().
+      const r = await runGit({ ...deadClone, workdir_effective: linkWork },
+        ['status', '--porcelain'], { hostFallback: 'masked' })
+      falsch(r.ok, 'the masked call refuses')
+      wahr(r.unknown === true, 'and says "nobody looked", never "clean"')
+      falsch(existsSync(stolen), 'still nothing written through the link')
+    })
+
+    // ---- the spec values that promised something nobody implemented -------
+    await pruefe('filesystem modes are rw or ro — "copy" is gone from both lists', () => {
+      for (const path of ['filesystem.worktree', 'filesystem.repoGit', 'filesystem.extras']) {
+        gleich(SPEC_VALUES[path].join(), 'rw,ro', `${path} offers only what the runtime implements`)
+        // The defect in one line: `rw` → `copy` passed the lock check as a
+        // tightening, and the runtime then bound the path WRITABLE, because
+        // addMount() treats everything that is not 'ro' as read-write.
+        wahr(narrow(path, 'rw', 'copy').refused, `${path}: narrowing to copy is refused`)
+        gleich(narrow(path, 'rw', 'copy').value, 'rw', 'and the higher layer’s value stands')
+        falsch(narrow(path, 'rw', 'ro').refused, `${path}: the real tightening still works`)
+      }
+      const { problems } = validateSandboxOverrides(JSON.stringify({ filesystem: { repoGit: 'copy' } }))
+      wahr(problems.some(p => p.key === 'sandbox.problem.bad_value'), 'and the form refuses it by name')
+    })
+
+    await pruefe('the two inert spec fields are gone from the document, and refused at the form', () => {
+      falsch('protected' in DEFAULT_SPEC.filesystem, 'filesystem.protected: nothing read it, and the clone makes it moot')
+      falsch('gitFetch' in DEFAULT_SPEC.secrets, 'secrets.gitFetch: nothing read it, and "none" needs the mount gone')
+      gleich(DEFAULT_SPEC.secrets.mode, 'env', 'the field next to it is untouched')
+      for (const doc of [{ filesystem: { protected: ['.git/hooks'] } }, { secrets: { gitFetch: 'none' } }]) {
+        const { problems } = validateSandboxOverrides(JSON.stringify(doc))
+        wahr(problems.some(p => p.key === 'sandbox.problem.unknown_field'),
+          `${JSON.stringify(doc)} is refused rather than stored and ignored`)
+      }
+      // A profile stored before the removal still layers the way it did: the
+      // value survives normalisation and its narrowing shape is unchanged, so
+      // an old row does not suddenly freeze or resolve differently.
+      gleich(normalizeSpec({ secrets: { gitFetch: 'mirror' } }).secrets.gitFetch, 'mirror', 'an old profile keeps its value')
+      falsch(narrow('filesystem.protected', ['.git/config'], ['.git/config', '.git/hooks']).refused,
+        'and an old deny-shaped list still appends')
+    })
+
+    // ---- the audit: what the chain CANNOT say ------------------------------
+    //
+    // A child process, for the reason the two sandbox probes above already
+    // state: RUNS_DIR is a module constant read when this file imported
+    // util.mjs, so audit files can only be pointed into the sandbox from a
+    // process of its own.
+    const auditHonest = (() => {
+      const work = join(sandkasten, 'audit-honest')
+      mkdirSync(work, { recursive: true })
+      const script = join(work, 'probe.mjs')
+      writeFileSync(script, `
+import { mkdirSync, writeFileSync, symlinkSync, existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+const serverDir = process.argv[2]
+const work = process.argv[3]
+const mod = (rel) => import(pathToFileURL(join(serverDir, rel)).href)
+const audit = await mod('sandbox/audit.mjs')
+const dbmod = await mod('db.mjs')
+const db = dbmod.default
+const out = {}
+const RID = 'dddddddd-1111-2222-3333-444444444444'
+const repoId = db.prepare(\`INSERT INTO repos(name,path,base_branch) VALUES('mask-holds','/nowhere','main') RETURNING id\`).get().id
+db.prepare(\`INSERT OR REPLACE INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,sandbox,sandbox_container)
+  VALUES(?,?,'claude','x','keiner',10,'done',1,'fl-dddddddd')\`).run(RID, repoId)
+dbmod.addEvent(RID, 'sandbox:policy_changed', { what: 'network.allow' })
+dbmod.addEvent(RID, 'sandbox:blocked', { host: 'pypi.example' })
+mkdirSync(audit.auditPaths(RID).dir, { recursive: true })
+audit.appendAuditFile(RID, 'egress.jsonl', { at: '2026-09-05T10:00:00.000Z', host: 'a', action: 'allow' })
+out.kinds = audit.auditKinds(RID)
+out.header = JSON.parse(audit.buildAuditChain(RID)[0])
+out.eventKinds = audit.buildAuditChain(RID).map(l => JSON.parse(l)).filter(o => o.kind === 'event').map(o => o.data.kind)
+// A symlink where an audit line goes: refused, and the target never created.
+const stolen = join(work, 'stolen.jsonl')
+symlinkSync(stolen, join(audit.auditPaths(RID).dir, 'docker-events.jsonl'))
+out.appendThroughLink = audit.appendAuditFile(RID, 'docker-events.jsonl', { at: 'x' })
+out.stolen = existsSync(stolen)
+process.stdout.write(JSON.stringify(out))
+`)
+      const sub = join(work, 'sub')
+      try {
+        return JSON.parse(execFileSync(process.execPath,
+          [script, new URL('../server/', import.meta.url).pathname, work], {
+            encoding: 'utf8',
+            maxBuffer: 8 * 1024 * 1024,
+            env: {
+              ...process.env,
+              FREILAUF_DATA_DIR: join(sub, 'data'),
+              FREILAUF_RUNS_DIR: join(sub, 'runs'),
+              FREILAUF_WORKTREES_DIR: join(sub, 'worktrees'),
+              FREILAUF_PLUGIN_DIR: join(sub, 'plugins'),
+              FREILAUF_SKILLS_HOME: join(sub, 'skillhome'),
+              FREILAUF_SKILLS_STATE: join(sub, 'skills-installed.json'),
+            },
+            stdio: ['ignore', 'pipe', 'pipe'],
+          }))
+      } catch (err) {
+        return { __error: String(err.stderr ?? err.message ?? err).trim() || String(err) }
+      }
+    })()
+
+    await pruefe('the export carries the events table — the chain cannot say that it does', () => {
+      gleich(auditHonest.__error ?? '', '', 'the child process came back')
+      // The defect: the query named `created_at`, the column is `ts`, the throw
+      // was swallowed and every export silently lost every event — while
+      // verifying perfectly, because a chain of header + footer is a valid
+      // chain. So the assertion is about the KINDS, not about the hash.
+      wahr((auditHonest.kinds ?? []).includes('event'), `an export of a run with events contains them (${JSON.stringify(auditHonest.kinds)})`)
+      gleich((auditHonest.eventKinds ?? []).join(','), 'sandbox:policy_changed,sandbox:blocked',
+        'both of them, in the order the table has them')
+      wahr((auditHonest.kinds ?? []).includes('egress'), 'next to the proxy’s own lines')
+    })
+
+    await pruefe('the export says, in its own header, what the chain does not cover', () => {
+      const inputs = auditHonest.header?.inputs
+      wahr(!!inputs, 'the header carries an `inputs` block')
+      gleich(inputs.agent_writable, true, 'and admits the audited run could write these files')
+      enthaelt(String(inputs.note), 'not the collection', 'in a sentence a reader who only has the file can act on')
+    })
+
+    await pruefe('an audit line is never appended through a symlink', () => {
+      gleich(auditHonest.appendThroughLink, false, 'the write is refused and says so')
+      falsch(auditHonest.stolen, 'and the file the link pointed at was never created')
+    })
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: the floor holds')
+  //
+  // §7.3's one rule — a lower layer may only NARROW what a higher one locked —
+  // is enforced by `validateSandboxOverrides()`, and that function only judges
+  // the lock when it is ALSO handed the baseline the patch narrows FROM
+  // (`spec.mjs`: `if (against && lock.length)`). So a caller that passes `lock`
+  // and no `against` passes a check that never runs, and five callers did.
+  // One of them — the run's own "Reconfigure…" card — reached
+  // `changePolicy()`, which merges a patch field by field and narrows nothing
+  // of its own, and froze the result into `runs.sandbox_spec` for the rest of
+  // the run. This group pins the baseline itself and every caller that has to
+  // ask for it; the e2e group of the same name drives the real route.
+  {
+    const rdef = await import('../server/run-def.mjs')
+    const { setSetting } = await import('../server/db.mjs')
+    const spec = await import('../server/sandbox/spec.mjs')
+
+    const mitLock = async (lock, fn, extra = {}) => {
+      const vorher = {}
+      const alle = { sandbox_lock: JSON.stringify(lock), ...extra }
+      for (const k of Object.keys(alle)) vorher[k] = ''
+      for (const [k, v] of Object.entries(alle)) setSetting(k, v)
+      try { return await fn() } finally { for (const k of Object.keys(alle)) setSetting(k, vorher[k]) }
+    }
+
+    await pruefe('the baseline is the hub layer the LAUNCH resolves, not an empty document', async () => {
+      // The drift: `planSandbox()` builds the hub layer with `sandbox_runtime`
+      // and `sandbox_proxy_engine` in it, `sandboxAgainst()` built it with
+      // `{}`. Against an empty document the baseline reads as DEFAULT_SPEC —
+      // whose runtime is 'docker' — so on a podman hub with `runtime` locked
+      // the form accepted `runtime: "docker"` (it changes nothing, it said)
+      // and the launch refused it. A form that promises what the endpoint
+      // refuses is the drift run-def.mjs exists to prevent.
+      await mitLock(['runtime'], async () => {
+        gleich(rdef.sandboxHubSpec()?.runtime, 'podman', 'the hub layer carries the configured runtime')
+        const against = rdef.sandboxAgainst(null, ['runtime'])
+        gleich(against?.runtime, 'podman', 'and so does the baseline the form judges against')
+        const { problems } = spec.validateSandboxOverrides('{"runtime": "docker"}', {
+          lock: ['runtime'], against,
+        })
+        wahr(problems.length >= 1, `switching the runtime under a lock is refused at the form (${problems.map(p => p.key).join(', ')})`)
+        // And the same document against the OLD, empty baseline was accepted —
+        // which is the whole point of naming this test after the baseline.
+        const alt = spec.validateSandboxOverrides('{"runtime": "docker"}', {
+          lock: ['runtime'], against: spec.resolveSandboxSpec({ hub: { spec: {}, lock: ['runtime'] } }).spec,
+        })
+        gleich(alt.problems.length, 0, 'the empty baseline saw nothing to refuse — that was the defect')
+      }, { sandbox_runtime: 'podman' })
+    })
+
+    await pruefe('without a lock nothing is computed, and nothing is refused', () => {
+      gleich(rdef.sandboxAgainst(null, []), null, 'no lock, no baseline')
+      gleich(rdef.sandboxAgainst(null, undefined) === null || typeof rdef.sandboxAgainst(null, undefined) === 'object',
+        true, 'and an absent lock never throws')
+    })
+
+    await pruefe('every loosening the evaluator drove is refused against the resolved baseline', async () => {
+      // The exact patch, path for path, that walked through the live hub.
+      const lock = ['network', 'resources', 'filesystem', 'secrets']
+      await mitLock(lock, () => {
+        const against = rdef.sandboxAgainst(null, lock)
+        wahr(!!against, 'there is a baseline to narrow from')
+        const patch = JSON.stringify({
+          network: { mode: 'open', auditOnly: true, allow: ['evil.example.com'] },
+          resources: { memory: '64g', cpus: 64 },
+          filesystem: { readOnlyRoot: false },
+        })
+        const { problems } = spec.validateSandboxOverrides(patch, { lock, against })
+        const wege = problems.filter(p => p.key === 'sandbox.problem.locked').map(p => p.params.path).sort()
+        gleich(wege.join(','),
+          'filesystem.readOnlyRoot,network.allow,network.auditOnly,network.mode,resources.cpus,resources.memory',
+          'each of the six is named on its own, with the value that stands')
+      })
+    })
+
+    await pruefe('a narrowing under the same lock still goes through', async () => {
+      const lock = ['network', 'resources']
+      await mitLock(lock, () => {
+        const against = rdef.sandboxAgainst(null, lock)
+        // none < allowlist, less memory, fewer cpus, audit-only OFF: all of
+        // them move toward the strict end. A lock that refused these would be
+        // a lock nobody could work under.
+        const { problems } = spec.validateSandboxOverrides(
+          '{"network": {"mode": "none", "auditOnly": false}, "resources": {"memory": "1g", "cpus": 1}}',
+          { lock, against })
+        gleich(problems.length, 0, `a tightening is not a loosening (${problems.map(p => p.key).join(', ')})`)
+      })
+    })
+
+    await pruefe('every caller that passes a lock also passes a baseline', () => {
+      // Structural, like the run-definition checklist above: the failure mode
+      // is a SIXTH caller written next year that passes `lock` alone, and the
+      // only way to catch that is to read the calls rather than the results.
+      for (const datei of ['../server/run-def.mjs', '../server/run-edit.mjs', '../server/sandbox/pages.mjs']) {
+        const quelle = readFileSync(new URL(datei, import.meta.url), 'utf8')
+        let von = 0
+        let n = 0
+        for (;;) {
+          const i = quelle.indexOf('validateSandboxOverrides(', von)
+          if (i < 0) break
+          von = i + 1
+          // Comments and the import line are not calls.
+          const zeile = quelle.slice(quelle.lastIndexOf('\n', i) + 1, i)
+          if (zeile.includes('*') || zeile.includes('//') || zeile.includes('import')) continue
+          n += 1
+          const aufruf = quelle.slice(i, i + 600)
+          const ende = aufruf.indexOf('})')
+          wahr(aufruf.slice(0, ende < 0 ? 600 : ende).includes('against'),
+            `${datei}: call ${n} hands over the baseline, or its lock is dead code`)
+        }
+        wahr(n >= 1, `${datei} really contains a call (guard against a moved function)`)
+      }
+    })
+
+    await pruefe('a flow step never quietly runs with less protection than it asked for', async () => {
+      // It used to answer any problem with '{}' — no tightening at all — and a
+      // flow that meant `network.mode: "none"` then started an ordinary run.
+      // Every other failure in this feature falls toward MORE protection.
+      const lock = ['network']
+      await mitLock(lock, () => {
+        let msg = ''
+        try {
+          rdef.defFromFlowProps({ harness: 'claude', prompt: 'x', sandboxOverrides: '{"network": {"mode": "open"}}' })
+        } catch (err) { msg = String(err.message) }
+        wahr(msg !== '', 'a loosening in a step is refused rather than dropped')
+        wahr(msg.includes('network.mode'), `and the reason names the path (${msg})`)
+      })
+      // The ordinary cases are untouched: nothing said, nothing refused.
+      gleich(rdef.defFromFlowProps({ harness: 'claude', prompt: 'x' }).sandboxOverrides, '{}',
+        'a step that says nothing about the sandbox goes on saying nothing')
+      gleich(JSON.parse(rdef.defFromFlowProps({
+        harness: 'claude', prompt: 'x', sandboxOverrides: '{"network": {"mode": "none"}}',
+      }).sandboxOverrides).network.mode, 'none', 'and a valid tightening arrives as it was meant')
     })
   }
 

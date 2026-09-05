@@ -28,8 +28,8 @@
 //                     as the last step a human, with an incident and a notification.
 //
 // All of it is off unless the repo says `merge_mode='hub'`.
-import { existsSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import db, { getRepo, getRun, addEvent, getSetting } from './db.mjs'
 import { RUNS_DIR, kurzid, sh, sendToSession, parseDbUtc } from './util.mjs'
@@ -45,7 +45,7 @@ import { fallbackTitle, TITLE_MAX } from './title.mjs'
 // git executes. What stays on the host, deliberately, is every `git -C
 // repo.path` and every command in the integration worktree: those are the hub's
 // own repository and the hub's own worktree, and no agent ever writes in them.
-import { runGit } from './sandbox/exec.mjs'
+import { runGit, specOf } from './sandbox/exec.mjs'
 import { collectRunTip, isClone } from './sandbox/clone.mjs'
 import { t } from './i18n.mjs'
 import { env } from './env.mjs'
@@ -902,6 +902,269 @@ async function integrationWorktree(repo) {
   return { dir }
 }
 
+// ---------------------------------------------------------------------------
+// The merge check, and the one box that decides where it runs (§8.7)
+// ---------------------------------------------------------------------------
+//
+// `repos.merge_check` is an operator-written shell string executed against the
+// MERGED RESULT of an untrusted agent's work. Without the box below that is
+// host execution of merged code as the hub user, which is exactly the implicit
+// execution path the sandbox exists for: `package.json` scripts, Makefiles, a
+// CI config an agent can change and something later runs.
+//
+// `repos.merge_check_sandboxed` moves it into a container. What the box can and
+// cannot promise, in three lines, because the difference is the whole feature:
+//
+//  * the run was sandboxed → the check runs in an EPHEMERAL container of the
+//    run's own image, under the run's network policy, with the integration
+//    worktree bind-mounted. Not a `docker exec` into the run's own container:
+//    that container has the run's CLONE mounted and knows nothing of the
+//    integration worktree, so the check would either not find the merged result
+//    at all or fail on a working directory that does not exist inside.
+//  * the box is ticked, the run was sandboxed, and the container cannot be
+//    started (no runtime, no daemon, no image) → **refusal**. Nothing merges,
+//    the operator gets `blocked_error` with the reason and the "Merge now"
+//    button. A security control that quietly degrades to the thing it prevents
+//    is worse than no control.
+//  * the box is ticked and the run was NOT sandboxed → the host, with a
+//    `merge_check_host` event naming why. That run's agent already worked on
+//    this host unconfined, so its merged code executing here is not a new
+//    exposure — and refusing would block every merge on a repo that ticked the
+//    box while the hub's sandbox is off. It is never silent: the event is what
+//    makes "the box is on and this check ran on the host" readable afterwards.
+
+/** The check container's timeout and output cap — unchanged from the host call. */
+const MERGE_CHECK_TIMEOUT_MS = 10 * 60_000
+const MERGE_CHECK_MAXBUFFER = 8 * 1024 * 1024
+
+/**
+ * Does this run carry enough of a sandbox for a check container to be built out
+ * of it? `runs.sandbox` says it was WANTED; the frozen spec's image is what a
+ * container is actually made from. A run that wanted a sandbox and was bypassed
+ * carries no image, and is therefore an unsandboxed run for this purpose — the
+ * same reading `sandbox:bypassed` puts on its record.
+ */
+function checkableSandbox(run) {
+  if (env('SANDBOX_OFF') === '1') return null
+  if (!run?.sandbox) return null
+  const spec = specOf(run)
+  return spec?.image?.ref ? spec : null
+}
+
+/**
+ * The image reference a spec names, digest-pinned when it has one. Repeated
+ * rather than imported: `imageRef()` in runtime.mjs is that module's private
+ * helper, and this is three lines of string handling, not a policy.
+ */
+function specImageRef(spec) {
+  const ref = String(spec?.image?.ref ?? '').trim()
+  if (!ref) return null
+  const digest = String(spec?.image?.digest ?? '').trim()
+  if (!digest || ref.includes('@')) return ref
+  return `${ref}@${digest.includes(':') ? digest : `sha256:${digest}`}`
+}
+
+/** A value the operator really set — `''` is "not set" and never a configured 0. */
+function setValue(v) { return v !== null && v !== undefined && String(v).trim() !== '' }
+
+/**
+ * `docker run` for the merge check, as an argv. Pure — no daemon is asked and
+ * nothing is written — so the whole shape is unit-testable without a runtime,
+ * which is the only way the network policy above is ever going to be checked.
+ *
+ * `ctx`: { name, runId, dir, check, uid, gid, network, proxyUrl, mounts: [{source,target,mode}] }
+ *
+ * Deliberately NOT `--read-only`: a merge check builds, installs and writes
+ * temporary files, and the box's promise is about the agent's code meeting the
+ * run's image and the run's network — not about a filesystem policy written for
+ * an interactive agent. `HOME` is a tmpfs for the same reason: a check whose
+ * toolchain writes a cache must not write it into the integration worktree,
+ * where the next job's `git clean -fd` would be the only thing that noticed.
+ */
+export function mergeCheckArgv(spec, ctx = {}) {
+  const dir = String(ctx.dir ?? '')
+  const image = specImageRef(spec)
+  if (!dir.startsWith('/')) throw new Error('mergeCheckArgv: no absolute working directory')
+  if (!image) throw new Error('mergeCheckArgv: the run\'s sandbox spec names no image')
+
+  const args = ['run', '--rm', '--init']
+  if (ctx.name) args.push('--name', String(ctx.name))
+  // Labelled as a CHECK and never as a run: the orphan reaper filters on
+  // `freilauf.run`, and a container wearing that label would be reconciled as
+  // if it were the run's own agent.
+  args.push('--label', `freilauf.merge_check=${String(ctx.runId ?? '')}`)
+  if (setValue(ctx.uid)) args.push('--user', `${ctx.uid}:${setValue(ctx.gid) ? ctx.gid : ctx.uid}`)
+  args.push('--cap-drop', 'ALL')
+  args.push('--security-opt', 'no-new-privileges')
+
+  // The same three network modes the run itself had (§7.5.1). `open` writes no
+  // flag — that IS the default bridge. Under `allowlist` the check joins the
+  // run's internal network and gets the run's proxy; where that network is not
+  // known any more the answer is `none`, because deny is the safe direction and
+  // a check that needs the network then fails readably instead of reaching the
+  // internet from a policy that said it must not.
+  const mode = spec?.network?.mode ?? 'allowlist'
+  if (mode === 'none') {
+    args.push('--network', 'none')
+  } else if (mode === 'allowlist') {
+    args.push('--network', ctx.network ? String(ctx.network) : 'none')
+    if (ctx.network && ctx.proxyUrl) {
+      for (const key of ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY',
+        'https_proxy', 'http_proxy', 'all_proxy']) args.push('-e', `${key}=${ctx.proxyUrl}`)
+      for (const key of ['NO_PROXY', 'no_proxy']) args.push('-e', `${key}=`)
+    }
+  }
+
+  const r = spec?.resources ?? {}
+  if (setValue(r.pidsLimit)) args.push('--pids-limit', String(r.pidsLimit))
+  if (setValue(r.memory)) args.push('--memory', String(r.memory))
+  if (setValue(r.memorySwap)) args.push('--memory-swap', String(r.memorySwap))
+  if (setValue(r.cpus)) args.push('--cpus', String(r.cpus))
+  if (setValue(r.shmSize)) args.push('--shm-size', String(r.shmSize))
+
+  args.push('--tmpfs', '/tmp:rw,nosuid')
+  args.push('-e', 'HOME=/tmp')
+  args.push('-e', 'LANG=C.UTF-8')
+  args.push('-v', `${dir}:${dir}:rw`)
+  for (const m of ctx.mounts ?? []) {
+    if (!m?.source) continue
+    args.push('-v', `${m.source}:${m.target ?? m.source}:${m.mode === 'rw' ? 'rw' : 'ro'}`)
+  }
+  args.push('-w', dir)
+  args.push(image)
+  args.push('bash', '-lc', String(ctx.check ?? ''))
+  return args
+}
+
+/**
+ * Everything outside the integration worktree that the check still has to see,
+ * at its identical path. Two families, and each is a way the check would
+ * otherwise fail for a reason that has nothing to do with the code under test:
+ *
+ *  * the repository's git directory. `~/agents/integrate/<repo>` is a LINKED
+ *    worktree, so its `.git` is a file pointing at `<repo>/.git/worktrees/<n>`;
+ *    without those two paths `git` inside the container answers "not a git
+ *    repository". The common directory goes in read-only — it is the operator's
+ *    repository and holds their hooks and remotes — and only this worktree's own
+ *    administrative directory is writable, because that is where `git status`
+ *    refreshes its index.
+ *  * every `link`-mode worktree extra, read-only at the path its symlink points
+ *    at. `applyExtras()` links `node_modules` into the integration worktree for
+ *    exactly this check; a symlink whose target is not mounted is a dangling
+ *    link inside the container.
+ */
+async function checkMounts(repo, dir) {
+  const mounts = []
+  const common = (await sh('git', ['-C', dir, 'rev-parse', '--git-common-dir'])).stdout.trim()
+  const own = (await sh('git', ['-C', dir, 'rev-parse', '--absolute-git-dir'])).stdout.trim()
+  if (common.startsWith('/')) mounts.push({ source: common, target: common, mode: 'ro' })
+  if (own.startsWith('/') && own !== common) mounts.push({ source: own, target: own, mode: 'rw' })
+  for (const extra of repo?.extras ?? []) {
+    if (extra?.mode !== 'link') continue
+    try {
+      const src = realpathSync(resolvePath(repo.path, extra.path))
+      mounts.push({ source: src, target: src, mode: 'ro' })
+    } catch { /* an extra that is not there was never applied either */ }
+  }
+  return mounts
+}
+
+/**
+ * What `prepareSandbox()` resolved for this run, out of the document it wrote
+ * next to the run — the uid posture, the network name and the proxy URL. Three
+ * facts nobody can reconstruct from the spec alone (they depend on whether the
+ * daemon is rootless and on which proxy engine answered), and all three are
+ * optional: a run from before that document existed simply gets no `--user` and
+ * a `none` network, which is the conservative reading of every one of them.
+ */
+function sandboxDoc(runId) {
+  try {
+    return JSON.parse(readFileSync(join(RUNS_DIR, String(runId), 'sandbox.json'), 'utf8'))?.ctx ?? {}
+  } catch { return {} }
+}
+
+/**
+ * Did `docker run` refuse to START the container, as opposed to the check
+ * inside it answering non-zero? The two must never be confused: the first is a
+ * refusal (nothing was tested), the second is a red check the agent has to fix.
+ *
+ * `125` is the runtime's own "I could not run this" exit code; `notFound()`
+ * covers a missing image or a network that is gone; the daemon-down text is the
+ * runtime module's own reading. Everything else — 126, 127, a failing test
+ * suite — happened INSIDE the container and is the check's answer.
+ */
+function containerRefused(r, rt) {
+  if (r?.ok) return null
+  // `sh()` passes `err.code` through, and for a binary that could not be
+  // executed at all that is a STRING (`ENOENT`, `EACCES`) rather than an exit
+  // status. A timeout is not one of these — it comes back as `ok:false` with a
+  // numeric 0, and a check that ran and hung is a red check, not a refusal.
+  if (typeof r?.code === 'string') return `the runtime binary could not be run (${r.code})`
+  if (r?.code === 125) return 'the runtime refused to start the check container'
+  if (rt?.notFound?.(r)) return 'the run\'s image or network is gone'
+  if (rt?.runtimeVerdict?.(r) === 'no_daemon') return 'the container runtime is not running'
+  return null
+}
+
+/**
+ * Run `repo.merge_check` against the merged result in `dir`, in the place the
+ * repo asked for. Returns `{ r }` with `sh()`'s shape, or `{ refused }` with a
+ * sentence for the operator — never a host execution the operator did not get
+ * to read about.
+ */
+async function runMergeCheck(run, repo, check, dir) {
+  const shOpts = { cwd: dir, timeout: MERGE_CHECK_TIMEOUT_MS, maxBuffer: MERGE_CHECK_MAXBUFFER }
+  if ((repo?.merge_check_sandboxed ?? 0) !== 1) return { r: await sh('bash', ['-lc', check], shOpts) }
+
+  const spec = checkableSandbox(run)
+  if (!spec) {
+    addEvent(run.id, 'merge_check_host', { reason: run?.sandbox ? 'run_not_boxed' : 'run_unsandboxed' })
+    return { r: await sh('bash', ['-lc', check], shOpts) }
+  }
+
+  let rt
+  try { rt = await import('./sandbox/runtime.mjs') } catch { rt = null }
+  if (!rt?.runtimeBin) {
+    return { refused: 'merge_check_sandboxed is on and this hub has no container runtime module — nothing was merged' }
+  }
+
+  let bin
+  try { bin = rt.runtimeBin(spec.runtime) } catch (err) {
+    return { refused: `merge_check_sandboxed is on and the runtime "${spec.runtime}" is not usable: ${err.message}` }
+  }
+
+  const name = `fl-check-${run.id}`
+  // A leftover from an attempt whose client was killed by the timeout holds the
+  // name, and `--name` refuses a name that is taken. Best effort, exactly like
+  // `stopOrphan()` on the launch path.
+  try { await rt.removeContainer?.(name, { runtime: spec.runtime, force: true }) } catch { /* best effort */ }
+
+  const doc = sandboxDoc(run.id)
+  let args
+  try {
+    args = mergeCheckArgv(spec, {
+      name, runId: run.id, dir, check,
+      uid: doc.uid, gid: doc.gid,
+      network: doc.network && doc.network !== 'none' ? doc.network : null,
+      proxyUrl: doc.proxyUrl,
+      mounts: await checkMounts(repo, dir),
+    })
+  } catch (err) {
+    return { refused: `merge_check_sandboxed is on and the check container could not be described: ${err.message}` }
+  }
+
+  addEvent(run.id, 'merge_check_sandboxed', {
+    image: specImageRef(spec), network: spec?.network?.mode ?? null, runtime: spec.runtime ?? null,
+  })
+  const r = await sh(bin, args, { timeout: MERGE_CHECK_TIMEOUT_MS, maxBuffer: MERGE_CHECK_MAXBUFFER })
+  const refused = containerRefused(r, rt)
+  if (refused) {
+    return { refused: `merge_check_sandboxed is on and the check could not be run in the sandbox `
+      + `(${refused}) — nothing was merged, and it was NOT run on the host` }
+  }
+  return { r }
+}
+
 async function integrateOne(runId, opts = {}) {
   const run = getRun(runId)
   if (!run) return
@@ -957,7 +1220,15 @@ async function integrateOne(runId, opts = {}) {
   // land, and the only one worth testing.
   const check = String(repo.merge_check ?? '').trim()
   if (check) {
-    const r = await sh('bash', ['-lc', check], { cwd: dir, timeout: 10 * 60_000, maxBuffer: 8 * 1024 * 1024 })
+    const outcome = await runMergeCheck(run, repo, check, dir)
+    // The box was ticked and the check could not be put in a box: nothing is
+    // merged and nobody is told a check passed. See runMergeCheck().
+    if (outcome.refused) {
+      await sh('git', ['-C', dir, 'reset', '--hard', `origin/${repo.base_branch}`])
+      addEvent(runId, 'merge_error', { reason: outcome.refused })
+      return escalate(runId, 'merge_error')
+    }
+    const r = outcome.r
     if (!r.ok) {
       const tail = [r.stdout, r.stderr].filter(Boolean).join('\n').split('\n').slice(-60).join('\n')
       await sh('git', ['-C', dir, 'reset', '--hard', `origin/${repo.base_branch}`])

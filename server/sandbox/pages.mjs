@@ -155,6 +155,33 @@ export async function hubPolicy(s = settings()) {
   }
 }
 
+/**
+ * The resolved spec of the layers ABOVE the document being judged — what a
+ * locked path is narrowed FROM.
+ *
+ * `validateSandboxOverrides()` only judges the lock when it is handed this
+ * (`spec.mjs`: `if (against && lock.length)`), so a caller that passes `lock`
+ * and no baseline passes a check that never runs. Three of this file's four
+ * were exactly that, and the fourth — `sandboxReconfigure()` — was how a run
+ * could take back everything the operator had locked.
+ *
+ * It comes out of `run-def.mjs` rather than being computed here, for the reason
+ * the note above `hubPolicy()` gives: a second reading of "what does the hub
+ * layer resolve to" is how the form and the launch come to disagree. Imported
+ * inside the function like the rest of that module, because a static import
+ * would close the ring documented there.
+ *
+ * `repoId` is the repo whose layer sits between the hub and the document;
+ * `null` where there is none (the repo form itself, a profile).
+ */
+async function baselineAbove(repoId, lock) {
+  if (!lock?.length) return null
+  try {
+    const rd = await import('../run-def.mjs')
+    return rd.sandboxAgainst(repoId ?? null, lock)
+  } catch { return null }
+}
+
 /** Is the sandbox switched on at all? The one question every block asks first. */
 export async function sandboxOn(s = settings()) {
   return (await hubPolicy(s)).mode !== 'off'
@@ -261,8 +288,10 @@ export async function sandboxRepoFromForm(b, problems) {
 
   const p = await hubPolicy()
   const raw = String(b.sandbox_overrides ?? '').trim()
+  // A repo's overrides narrow the HUB, so the hub layer alone is the baseline.
   const { overrides, problems: specProblems } = validateSandboxOverrides(raw, {
     lock: p.lock, allowedMountRoots: p.allowedMountRoots,
+    against: await baselineAbove(null, p.lock),
   })
   for (const pr of specProblems) problems.push(t(pr.key, pr.params))
 
@@ -362,22 +391,54 @@ export async function sandboxAdoptBlock(repo) {
   </div>`
 }
 
-/** Write the ticked hosts into the repo's own overrides. */
+/**
+ * Write the ticked hosts into the repo's own overrides.
+ *
+ * Two things this used to get wrong, and both made a button look like it had
+ * worked when it had not:
+ *
+ *  - **it adopted exactly one host.** `parseForm()` collapses a repeated field
+ *    to its LAST value and exposes the whole list under `<name>_list` — the
+ *    convention the run multi-select (`b.run_list`) and the sessions page
+ *    (`b.session_list`) already follow. Reading `b.host` with an
+ *    `Array.isArray()` branch could therefore never see more than one: measured
+ *    live, three ticked boxes produced one adopted host, a 303, and no warning.
+ *    That is the payload of the whole audit-only rollout — observe, then
+ *    enforce — quietly throwing away most of what the operator observed.
+ *  - **it was a second writer of `repos.sandbox_overrides`**, skipping the
+ *    validation and the lock check the repo form applies to the same column. A
+ *    host the hub locked out was written into the repo and refused later, at
+ *    launch, as an `override_refused` nobody was watching for. It goes through
+ *    `validateSandboxOverrides()` against the same baseline the repo form uses
+ *    now, so a locked allow list refuses an adopted host exactly the way it
+ *    refuses a typed one — and the whole document is judged, because that is
+ *    what the repo form would judge if the operator opened it.
+ */
 export async function sandboxAdopt(req, res, url, formBody) {
   const b = await formBody()
   const repo = getRepo(+b.id)
   if (!repo) return problemPage(req, res, t('sandbox.page.adopt_title'), [t('api.unknown_repo')], '/repos')
-  const hosts = (Array.isArray(b.host) ? b.host : b.host ? [b.host] : []).map(h => String(h).trim()).filter(Boolean)
+  const back = `/repos/edit?id=${repo.id}`
+  const hosts = (b.host_list ?? (b.host ? [b.host] : [])).map(h => String(h).trim()).filter(Boolean)
   if (!hosts.length) {
-    return problemPage(req, res, t('sandbox.page.adopt_title'), [t('sandbox.page.err_adopt_empty')], `/repos/edit?id=${repo.id}`)
+    return problemPage(req, res, t('sandbox.page.adopt_title'), [t('sandbox.page.err_adopt_empty')], back)
   }
   let doc = {}
   try { doc = JSON.parse(repo.sandbox_overrides || '{}') } catch { doc = {} }
   const allow = Array.isArray(doc?.network?.allow) ? [...doc.network.allow] : []
   for (const h of hosts) if (!allow.includes(h)) allow.push(h)
   doc.network = { ...(doc.network ?? {}), allow }
+
+  const p = await hubPolicy()
+  const { problems } = validateSandboxOverrides(JSON.stringify(doc), {
+    lock: p.lock, allowedMountRoots: p.allowedMountRoots,
+    against: await baselineAbove(null, p.lock),
+  })
+  if (problems.length) {
+    return problemPage(req, res, t('sandbox.page.adopt_title'), problems.map(pr => t(pr.key, pr.params)), back)
+  }
   db.prepare('UPDATE repos SET sandbox_overrides=? WHERE id=?').run(JSON.stringify(doc), repo.id)
-  redirect(res, `/repos/edit?id=${repo.id}`)
+  redirect(res, back)
 }
 
 // ============================================================ the run card
@@ -653,8 +714,10 @@ export async function sandboxProfileSave(req, res, url, formBody) {
   const name = String(b.name ?? '').trim()
   if (!name) problems.push(t('form.name_missing'))
   const p = await hubPolicy()
+  // A profile is chosen at repo or run level, so the layer above it is the hub.
   const { overrides, problems: specProblems } = validateSandboxOverrides(String(b.spec ?? ''), {
     lock: p.lock, allowedMountRoots: p.allowedMountRoots,
+    against: await baselineAbove(null, p.lock),
   })
   for (const pr of specProblems) problems.push(t(pr.key, pr.params))
   if (problems.length) return problemPage(req, res, t('sandbox.page.profile'), problems, back)
@@ -980,10 +1043,41 @@ export async function sandboxDeny(run, host) {
   return { ok: true, text }
 }
 
+/**
+ * "Reconfigure…" — the free-text half of §7.12.4.
+ *
+ * THE FLOOR HOLDS HERE, and it did not. This route passed `lock` and no
+ * `against`, so the lock check inside `validateSandboxOverrides()` never ran;
+ * `changePolicy()` below merges a patch into the run's spec field by field and
+ * narrows nothing of its own; and the result was frozen into
+ * `runs.sandbox_spec` for the rest of the run, resumes included. Measured on a
+ * live hub with `sandbox_lock = network,resources,filesystem,secrets`: one POST
+ * turned `network.mode` from `allowlist` into `open`, added a host to a locked
+ * allow list, switched `auditOnly` on, raised memory from 8g to 64g and cpus
+ * from 4 to 64, and took `readOnlyRoot` off — every one of them a path the
+ * operator had locked. Its sibling on the same card, `sandboxAllow()`, refuses
+ * a locked `network.allow` readably, so the operator saw one path enforced and
+ * reasonably assumed the other was.
+ *
+ * Two rules, and the second one is what a 400 has to mean:
+ *
+ *  - the patch is judged against the SAME baseline the launch resolves — hub
+ *    plus this run's repo — with the same `narrow()` the layering applies, so a
+ *    loosening comes back as the ordinary `sandbox.problem.locked` sentence
+ *    naming the path and the value that stands;
+ *  - **nothing is written on a refusal.** Both writes — this function's own
+ *    `sandbox_overrides` and `changePolicy()`'s `sandbox_spec` — happen only
+ *    after the check has passed. The evaluator's run answered 400 "the change
+ *    could not be applied" with the weakened spec already on disk, which is
+ *    worse than either outcome alone: the operator is told the weakening failed
+ *    when it succeeded.
+ */
 export async function sandboxReconfigure(run, overridesText) {
   const p = await hubPolicy()
   const { overrides, problems } = validateSandboxOverrides(overridesText, {
-    lock: p.lock, allowedMountRoots: p.allowedMountRoots,
+    lock: p.lock,
+    allowedMountRoots: p.allowedMountRoots,
+    against: await baselineAbove(run?.repo_id, p.lock),
   })
   if (problems.length) return { ok: false, error: problems.map(pr => t(pr.key, pr.params)).join(' · ') }
   db.prepare('UPDATE runs SET sandbox_overrides=? WHERE id=?').run(JSON.stringify(overrides), run.id)

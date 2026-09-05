@@ -247,6 +247,12 @@ async function main() {
       gleich(res.status, 200, 'in audit-only the request is not stopped')
       enthaelt(res.body, 'upstream:/x', 'it really reached the upstream')
 
+      // `handle.audit` is a createWriteStream: buffered, asynchronous, never
+      // fsynced. Reading it with a synchronous readFileSync in the tick the
+      // response resolved passes when the machine is idle and fails under load
+      // — the two checks above wait for their line and this one did not.
+      await warteAuf(() => auditLines(runDir).some((l) => l.host === 'learnme.test'),
+        { was: 'the would-be denial is written to egress.jsonl' })
       const line = auditLines(runDir).find((l) => l.host === 'learnme.test')
       wahr(!!line, 'and it is written down')
       gleich(line.action, 'would_deny', 'as the denial it WOULD have been — the allowlist grows from this')
@@ -305,6 +311,14 @@ async function main() {
         enthaelt(res.body, '127.0.0.0/8', 'and the range that blocked it')
         wahr(gemeldet.some((b) => b.host === 'localhost'), 'the caller hears about it like any other denial')
         gleich(upOffen.size, vorher, 'and no new connection was made to the upstream')
+        // The wait is the whole check here. Without it this was the same race
+        // as the audit-only line above, only failing SAFE: an audit file that
+        // had not flushed yet contains no line that is not a deny, so the
+        // assertion passed on an empty file and never verified anything. The
+        // deny has to be there FIRST, and only then does "and nothing else" mean
+        // something.
+        await warteAuf(() => auditLines(runDir).some((l) => l.run === 'r-cidr' && l.action === 'deny'),
+          { was: 'the CIDR refusal is written to egress.jsonl' })
         falsch(auditLines(runDir).some((l) => l.run === 'r-cidr' && l.action !== 'deny'),
           'nothing but the refusal is recorded for it')
       } finally {

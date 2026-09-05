@@ -1203,6 +1203,9 @@ export async function reconcileContainers(hubId = null, nowMs = Date.now()) {
   const keepMs = currentKeepMs()
   const acted = []
   const seen = new Set()
+  // Runs whose containers this pass took away. What is left of such a run is
+  // released AFTER the loop, never inside it — see releaseReaped() below.
+  const reaped = new Map()
   for (const c of owned.containers) {
     seen.add(c.name)
     const run = c.runId ? getRun(c.runId) : null
@@ -1225,6 +1228,10 @@ export async function reconcileContainers(hubId = null, nowMs = Date.now()) {
       if (verdict === 'reap') {
         if (c.running) await rt.stopContainer(c.name, {})
         await rt.removeContainer(c.name, {})
+        // A run whose row is GONE (a deleted repo, a run wiped by hand) still
+        // owns a network named after the id on the container's label — that is
+        // the whole reason the stand-in exists rather than a `if (run)`.
+        if (c.runId) reaped.set(c.runId, run ?? { id: c.runId, sandbox: 1, sandbox_container: null })
       } else if (verdict === 'stop_orphan') {
         await rt.stopContainer(c.name, {})
         if (run) addEventOnce(run.id, 'sandbox:container_gone', { reason: 'no session left for this container', container: c.name })
@@ -1246,7 +1253,82 @@ export async function reconcileContainers(hubId = null, nowMs = Date.now()) {
     acted.push({ name, runId: run.id, kind: 'agent', verdict: 'container_gone' })
     addEventOnce(run.id, 'sandbox:container_gone', { reason: 'container is no longer known to the runtime', container: name })
   }
+
+  // What a reaped run still holds when its containers are gone, and what nothing
+  // used to take back.
+  for (const [runId, row] of reaped) {
+    if (await releaseReaped(row)) acted.push({ name: runId, runId, kind: 'sandbox', verdict: 'released' })
+  }
+  // …and the same for a run whose containers the daemon does not list any more.
+  // `--rm` takes a finished container away by itself, so the loop above never
+  // sees the ordinary case at all — which is exactly how every ordinary run
+  // leaked its network. The event is the marker, so this costs one pass per run
+  // and then nothing.
+  for (const row of releasable(nowMs, keepMs)) {
+    if (reaped.has(row.id)) continue
+    if (await releaseReaped(row)) acted.push({ name: row.id, runId: row.id, kind: 'sandbox', verdict: 'released' })
+  }
   return { verdict: 'ok', acted }
+}
+
+/**
+ * Everything a finished sandboxed run still holds outside its containers, given
+ * back — and the reason this is a leak and not an untidiness.
+ *
+ * The per-run network is **persisted by the daemon**: `--rm` never takes it,
+ * `docker stop` never takes it, and the reaper did not either. Docker's default
+ * address pool subnets out after roughly 31 networks, and past that **no
+ * sandboxed run starts at all** — a failure that arrives days after the runs
+ * that caused it and looks like the runtime being broken. `teardownSandbox()`
+ * also stops the built-in proxy listener inside THIS process (it was still
+ * holding the finished run's allow policy) and the `docker events` tail child
+ * watching a container that no longer exists.
+ *
+ * Called only from a pass that got an `ok` verdict out of the daemon — the rule
+ * this whole section is written around. It is idempotent in both directions:
+ * removing a network the daemon has already forgotten is a success, and
+ * `sandbox:released` is written once, which is what keeps the sweep below from
+ * shelling out for the same run every thirty seconds for ever.
+ */
+async function releaseReaped(row) {
+  if (!row?.id) return false
+  try {
+    const { teardownSandbox } = await import('./sandbox/index.mjs')
+    const out = await teardownSandbox(row, { reason: 'reaped', removeNetwork: true, force: true })
+    addEventOnce(row.id, 'sandbox:released',
+      { network: !!out?.network, proxy: !!out?.proxy, container: out?.container ?? null })
+    return true
+  } catch (err) { console.error('[sandbox]', err.message); return false }
+}
+
+/**
+ * Sandboxed runs that are over, whose session is closed, and which have not been
+ * released yet. Three exclusions, each of them a way it would otherwise be
+ * wrong:
+ *
+ *  - a run still in flight, or one on its way back (`resume_pending`): §7.11's
+ *    start order walks the clone, the home and the network again, and taking
+ *    the network away under a resume that is already running would be the
+ *    reaper undoing a recovery.
+ *  - `retention: 'keep'` before its clock has run out — the operator asked to
+ *    keep the container for `docker exec` debugging, and a network removed out
+ *    from under it would make that container unreachable.
+ *  - anything already carrying `sandbox:released`. The marker is read from the
+ *    database and not from a Set in this process, because a hub that deploys as
+ *    often as this one restarts oftener than a leak accumulates.
+ */
+function releasable(nowMs, keepMs) {
+  const rows = db.prepare(`SELECT r.* FROM runs r
+                           WHERE r.sandbox=1 AND r.tmux_closed_at IS NOT NULL
+                             AND r.status NOT IN ('running','waiting_help','scheduled','deferred')
+                             AND r.resume_pending IS NOT 1
+                             AND NOT EXISTS (SELECT 1 FROM events e
+                                             WHERE e.run_id=r.id AND e.kind='sandbox:released')`).all()
+  return rows.filter((run) => {
+    if ((specOf(run)?.retention ?? 'run') !== 'keep') return true
+    const finished = finishedAtMs(null, run)
+    return finished != null && nowMs - finished >= keepMs
+  })
 }
 
 /**

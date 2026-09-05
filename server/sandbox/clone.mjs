@@ -20,7 +20,7 @@
 // be able to tell is where a run's commits are, and that is what
 // `collectRunTip()` answers.
 
-import { existsSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync, rmSync, realpathSync, lstatSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import db, { getRepo } from '../db.mjs'
 import { WORKTREES_DIR, kurzid, sh } from '../util.mjs'
@@ -118,7 +118,11 @@ export async function makeSandboxClone(repo, run, opts = {}) {
     // Borrow the operator's objects read-only. `git init` already made
     // objects/info; the mkdir is for a git that did not.
     mkdirSync(join(target, '.git', 'objects', 'info'), { recursive: true })
-    writeFileSync(join(target, '.git', 'objects', 'info', 'alternates'), `${objects}\n`)
+    const altFile = join(target, '.git', 'objects', 'info', 'alternates')
+    // `git init` just made this directory, so nothing should be there — which is
+    // exactly why a link that IS there is worth refusing rather than following.
+    refuseSymlink(altFile, 'makeSandboxClone')
+    writeFileSync(altFile, `${objects}\n`)
 
     // Cheap: everything the source already has is in the alternate, so this
     // transfers refs and almost no objects.
@@ -291,7 +295,8 @@ export async function removeClone(run) {
  * (exec.mjs) must not have two ideas of what "masked" means.
  *
  * What it keeps, and nothing else:
- *   - `core.repositoryformatversion` and every `extensions.*` — the format;
+ *   - `core.repositoryformatversion` and the `extensions.*` keys on the
+ *     ALLOWLIST below — the format;
  *   - the handful of `core.*` flags that describe the FILESYSTEM rather than a
  *     command (`bare`, `filemode`, `symlinks`, `ignorecase`, `logallrefupdates`,
  *     `precomposeunicode`);
@@ -302,7 +307,37 @@ export async function removeClone(run) {
  * Everything else goes: `remote.*` (the token), `core.fsmonitor`,
  * `core.sshCommand`, `core.pager`, `core.editor`, `core.alternateRefsCommand`,
  * `diff.*`, `filter.*`, `merge.*`, `uploadpack.*` — every one of which can name
- * a command.
+ * a command — and `include.path` / `includeIf.*.path`, which name a FILE whose
+ * contents become config. That last one is why the keep list is an allowlist and
+ * not a denylist: `git config --file <f> --list` does NOT expand an include
+ * [measured, git 2.43.0], so the included file's keys never appear here at all
+ * and only the `include.path` line itself does; dropping it is what stops the
+ * mask from pointing git back at a file the agent wrote.
+ *
+ * ## Why `extensions.*` is an allowlist, and not "keep them all"
+ *
+ * It used to keep every `extensions.*` key verbatim, and that was a hole rather
+ * than a nuance: `extensions.worktreeConfig = true` makes git ALSO read
+ * `.git/config.worktree` — a second config file the mask never touched and the
+ * agent owns outright. Measured against the code as it stood, git 2.43.0: with
+ * `worktreeConfig` kept and `core.fsmonitor`, `filter.wt.clean` and
+ * `diff.wtd.command` in `config.worktree` (selected by a tracked
+ * `.gitattributes` the agent commits), the masked rescue calls `status`,
+ * `add -A`, `diff HEAD` and `checkout -- .` ALL fired the markers — i.e. host
+ * command execution as the hub user, reachable from the operator clicking
+ * "Commit leftovers & merge" on a dead sandboxed run. git's own manual says the
+ * quiet part: "For historical reasons, extensions.worktreeConfig is respected
+ * regardless of the core.repositoryFormatVersion setting" — so format 0 is no
+ * protection either.
+ *
+ * So only the extensions that describe the repository's on-disk FORMAT survive,
+ * and each of them is a name or a flag that cannot name a file or a command.
+ * Dropping one of THESE would be the `--no-optional-locks` trap again: git would
+ * read the repository as something it is not (an emptied config on a sha256 repo
+ * answers `ls-remote` with an all-zero sha and exit 0, §11a.2). Everything else
+ * — `worktreeConfig` first of all, and anything a later git invents — is
+ * dropped, because an extension this list has never heard of is an extension
+ * nobody has checked for a second file.
  *
  * Known limit, stated rather than hidden: a **partial clone** declares
  * `extensions.partialClone = origin` and needs `remote.origin.*` to fill a blob
@@ -313,6 +348,27 @@ export async function removeClone(run) {
 const MASK_CORE_KEYS = new Set([
   'core.repositoryformatversion', 'core.bare', 'core.filemode', 'core.symlinks',
   'core.ignorecase', 'core.logallrefupdates', 'core.precomposeunicode',
+])
+
+/**
+ * The `extensions.*` keys that describe the repository FORMAT, lowercased the
+ * way `git config --list` prints them. git 2.43 documents two of them in
+ * `git-config(1)` (`objectFormat`, `worktreeConfig`) and knows the rest in
+ * `setup.c`; the ones later versions added are listed too, because a mask that
+ * silently dropped `refStorage` on a reftable repository would break it exactly
+ * the way an empty file does.
+ *
+ * `worktreeConfig` is deliberately, loudly NOT here — it is the whole reason
+ * this set exists.
+ */
+const MASK_EXTENSION_KEYS = new Set([
+  'extensions.objectformat',        // sha1 | sha256 — the hash algorithm
+  'extensions.compatobjectformat',  // 2.42+, the compatibility hash
+  'extensions.refstorage',          // 2.45+, files | reftable
+  'extensions.partialclone',        // the promisor remote's NAME (see the known limit above)
+  'extensions.preciousobjects',     // a boolean: never delete objects
+  'extensions.relativeworktrees',   // 2.48+, a boolean: worktree gitdirs are relative
+  'extensions.noop', 'extensions.noop-v1',  // git's own test extensions; inert by definition
 ])
 
 export async function maskedGitConfigEntries(configPath, { keepIdentity = false } = {}) {
@@ -328,7 +384,7 @@ export async function maskedGitConfigEntries(configPath, { keepIdentity = false 
     const key = (nl < 0 ? entry : entry.slice(0, nl)).toLowerCase()
     const value = nl < 0 ? 'true' : entry.slice(nl + 1)     // a valueless key is `true`
     const keep = MASK_CORE_KEYS.has(key)
-      || key.startsWith('extensions.')
+      || MASK_EXTENSION_KEYS.has(key)
       || (keepIdentity && (key === 'user.name' || key === 'user.email'))
     if (keep) out.push([key, value])
   }
@@ -341,14 +397,41 @@ export async function maskedGitConfigEntries(configPath, { keepIdentity = false 
 }
 
 /**
+ * The files git reads as "this repository's own configuration". `config` is the
+ * one the mask replaces; `config.worktree` is the one `extensions.worktreeConfig`
+ * pulls in, and the reason the extension is not on the allowlist above. Both are
+ * named here so the host rescue path (exec.mjs) neutralises the same set this
+ * generator reasons about — two ideas of what "the repository's config" means is
+ * how the hole above came to exist in the first place.
+ */
+export const REPO_CONFIG_FILES = ['config', 'config.worktree']
+
+/**
+ * Refuse to write through a symlink. `writeFileSync`'s `'w'` FOLLOWS one, so a
+ * link the agent left at the target redirects the hub's write anywhere the hub
+ * user can reach — the same trap `seedHomeFiles()` in exec.mjs has a guard for,
+ * and these files sit in directories the agent can write just as much.
+ */
+function refuseSymlink(path, what) {
+  let st
+  try { st = lstatSync(path) } catch { return }        // not there is fine: we create it
+  if (st.isSymbolicLink()) throw new Error(`${what}: refusing to write through a symlink at ${path}`)
+}
+
+/**
  * Write that minimal config to `targetPath`. The entries are written **by git
  * itself** (`git config --file`), never by string concatenation: quoting a
  * config value correctly is git's job, and a hand-rolled writer is one escaped
  * backslash away from turning a value into a section header.
+ *
+ * Throws when the target is a symlink rather than following it. Both callers are
+ * a security boundary — the container's masked mount and the host rescue path —
+ * and a mask written into somebody else's file is worse than no mask.
  */
 export async function writeMaskedGitConfig(sourceConfigPath, targetPath, opts = {}) {
   const entries = await maskedGitConfigEntries(sourceConfigPath, opts)
   mkdirSync(join(targetPath, '..'), { recursive: true })
+  refuseSymlink(targetPath, 'writeMaskedGitConfig')
   writeFileSync(targetPath, '', { mode: 0o644 })
   for (const [key, value] of entries) {
     const r = await sh('git', ['config', '--file', targetPath, key, value])

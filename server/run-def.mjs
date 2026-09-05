@@ -466,16 +466,55 @@ function parseJsonObject(s) {
  * computed: `validateSandboxOverrides()` only judges the lock when it is
  * handed an `against`, and reporting every touch of a locked path would flag a
  * perfectly legitimate narrowing as an error.
+ *
+ * Exported because every form that lets somebody type an overrides document has
+ * to judge it against the SAME baseline the launch resolves — the repo form,
+ * the profile editor, the run edit, the flow step and the run's own
+ * "Reconfigure…" card all pass `lock` and, without an `against`, the lock check
+ * is dead code in all of them.
+ *
+ * `repoId` names the repo whose layer sits between the hub and the document
+ * being judged; `null` means there is none (the repo form itself, a profile),
+ * and the baseline is then the hub alone.
  */
-function sandboxAgainst(repoId, lock) {
-  if (!lock.length) return null
+export function sandboxAgainst(repoId, lock = sandboxLock()) {
+  if (!lock?.length) return null
   try {
     const repo = repoId ? getRepo(Number(repoId)) : null
     const repoLayer = repo
       ? { profile: profileSpec(repo.sandbox_profile_id), spec: parseJsonObject(repo.sandbox_overrides) }
       : null
-    return resolveSandboxSpec({ hub: { spec: {}, lock }, repo: repoLayer }).spec
+    return resolveSandboxSpec({ hub: { spec: sandboxHubSpec(), lock }, repo: repoLayer }).spec
   } catch { return null }
+}
+
+/**
+ * The two hub settings that are SPEC fields rather than policy: which runtime
+ * the containers are started with, and which proxy engine sits in front of
+ * them. They belong to the hub LAYER, not to the hub's policy — a repo may
+ * still narrow them where the hub locked the path — so they belong in the
+ * baseline every lock check is measured against.
+ *
+ * They used to be missing from that baseline, and the drift was the one this
+ * module exists to prevent: `planSandbox()` resolves the hub layer WITH them,
+ * `sandboxAgainst()` resolved it with `{}`, so on a hub configured for podman
+ * with `runtime` locked the FORM accepted an override of `runtime: "docker"`
+ * (against an empty baseline that reads as the DEFAULT, which is `docker`, it
+ * narrows nothing and changes nothing) and the LAUNCH then refused it. The
+ * floor held; the form promised what the endpoint would not honour.
+ *
+ * `server/sandbox/index.mjs` carries a private copy of this under the name
+ * `hubSpec()`. That copy should become an import of this function: two readers
+ * of one setting is how the two come to disagree, and this file is the one
+ * AGENTS.md nominates as the reader of the hub's sandbox settings.
+ */
+export function sandboxHubSpec() {
+  const spec = {}
+  const runtime = String(getSetting('sandbox_runtime') ?? '').trim()
+  if (runtime) spec.runtime = runtime
+  const engine = String(getSetting('sandbox_proxy_engine') ?? '').trim()
+  if (engine) spec.network = { ...(spec.network ?? {}), engine }
+  return Object.keys(spec).length ? spec : null
 }
 
 /** decideSandbox()'s refusal reasons, in the words a FORM says them in. */
@@ -1262,20 +1301,47 @@ export const RUN_DEF_FLOW_FIELDS = [
 ]
 
 /**
- * The sandbox half of `defFromFlowProps()`. Separate because a flow has no way
- * to report a problem — the step designer validated when it was saved, and by
- * the time the flow runs the only honest answer to junk is the value that
- * changes nothing.
+ * The sandbox half of `defFromFlowProps()`.
+ *
+ * It used to answer junk with `'{}'` — "the value that changes nothing" — and
+ * that reading was right for the routing fields next to it and wrong here, for
+ * one reason: the routing document is a CONVENIENCE and the sandbox document is
+ * a WALL. A tightening with one typo somewhere else in it became no tightening
+ * at all, silently, and a step written to run something in `network.mode:
+ * "none"` started it with the repo's ordinary policy instead. Every other
+ * failure in this feature falls toward more protection; this one fell toward
+ * less, which is the one direction §7.3 forbids ("never silently — fall back to
+ * a compatible value and SAY so").
+ *
+ * So it REFUSES, loudly: the throw lands inside the flow step's own `run()`,
+ * which is the flow engine's way of failing a step with a reason, so the flow
+ * run says which document it would not honour and the step does not start a run
+ * at all. A step is not a form and has no `problems` array — but a failed step
+ * with a named reason is somewhere to complain, and an unprotected run is not.
+ *
+ * An ABSENT or empty document is not a problem and never was: a flow that says
+ * nothing about the sandbox goes on saying nothing.
  */
 function sandboxFromFlowProps(props = {}) {
   const sandbox = SANDBOX_TRISTATE.includes(props.sandbox) ? props.sandbox : 'inherit'
+  const lock = sandboxLock()
   const { overrides, problems } = validateSandboxOverrides(props.sandboxOverrides, {
-    lock: sandboxLock(), allowedMountRoots: sandboxAllowedMountRoots(),
+    lock,
+    allowedMountRoots: sandboxAllowedMountRoots(),
+    // The same baseline the launch resolves against, so the step cannot be
+    // saved with a loosening the launch would refuse and then run as though it
+    // had asked for nothing.
+    against: sandboxAgainst(props.repoId, lock),
   })
+  if (problems.length) {
+    throw new Error(t('sandbox.problem.flow_overrides', {
+      problems: problems.map(p => t(p.key, p.params)).join(' · '),
+    }))
+  }
   return {
     sandbox,
     sandboxProfileId: null,
-    sandboxOverrides: problems.length ? '{}' : JSON.stringify(overrides ?? {}),
+    sandboxOverrides: JSON.stringify(overrides ?? {}),
   }
 }
 
@@ -1313,11 +1379,11 @@ export function defFromFlowProps(props) {
     // Only where there is a branch to keep the work on — the same rule the form
     // enforces, so a flow cannot store a combination the form would refuse.
     keepOnBranch: props.keepOnBranch && props.branchMode !== 'keiner' ? 1 : 0,
-    // The sandbox, through the same reading the form applies — and the same
-    // "drop rather than store nonsense" the routing above uses, because a flow
-    // step has no `problems` array to answer into: an unknown tri-state means
-    // `inherit`, an overrides document this hub would refuse means none. Both
-    // are the value that changes nothing, never a value nobody typed.
+    // The sandbox, through the same reading and the same baseline the form
+    // applies. An unknown tri-state means `inherit` — the value that changes
+    // nothing, like the routing above. An overrides document this hub would
+    // refuse does NOT: it fails the step, because dropping it would be a
+    // silent step toward less protection (see sandboxFromFlowProps).
     ...sandboxFromFlowProps(props),
     expectedMinutes: Number(props.expectedMinutes) || DEFAULT_EXPECTED_MINUTES,
     skills: null,

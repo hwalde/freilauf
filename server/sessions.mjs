@@ -442,9 +442,14 @@ export async function stopRunContainer(run, { timeoutSec = 30 } = {}) {
       if (state && state.verdict === 'ok') running = !!state.running
     }
     await rt.stopContainer(name, { runtime, timeoutSec })
-    // The network outlives `--rm` (the daemon persists it), so it goes here too.
-    if (typeof rt.removeNetwork === 'function') {
-      await rt.removeNetwork(`fl-net-${run.id}`, { runtime }).catch?.(() => {})
+    // The network outlives `--rm` (the daemon persists it), so it goes here too
+    // — and its NAME comes from the module that owns it, never from a template
+    // typed out a second time here. Two authors of `fl-net-<id>` is the drift
+    // run-def.mjs exists to prevent, with the twist that the disagreement would
+    // be silent: a `network rm` of a name nobody created answers "not found",
+    // which reads exactly like a network that was already gone.
+    if (typeof rt.removeNetwork === 'function' && typeof rt.networkName === 'function') {
+      await rt.removeNetwork(rt.networkName(run.id), { runtime }).catch?.(() => {})
     }
   } catch { return { stopped: false, name } }
   return { stopped: running, name }
@@ -644,22 +649,49 @@ export function refreshSessionMemoryAfterRun(runId) {
  * run.
  *
  * Returns 'aborted' when the run was still open, 'escalated' when the finish
- * gate took it over, 'closed' when it had already finished, null when there is
- * no run.
+ * gate took it over, 'resuming' when the session was closed in order to bring
+ * the run back, 'closed' when it had already finished, null when there is no
+ * run.
  */
 export function reconcileClosedSession(runId, source = 'session') {
   const run = getRun(runId)
   if (!run) return null
   db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')),
               agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(runId)
+  // THE THIRD CASE, and it is neither of the two the rule above names. "A
+  // session the hub closed on purpose is an end; a session that went away by
+  // itself is resumed" — but a caller that closed this session IN ORDER TO
+  // bring the run back is the opposite of an end. `runs.resume_pending` is
+  // exactly the mark that says so, and §7.12.4 sets it BEFORE the container is
+  // stopped precisely so that whoever sees the session go — a watcher pass, or
+  // this function — finds a run already on its way.
+  //
+  // Without this guard the two paths that exist to SAVE a run were the two that
+  // killed it: the sandbox's reconfigure-and-resume and the break-glass both
+  // close the session through killSessions(), which lands here, and a `running`
+  // run became `aborted` — after which resumeRun() refuses it with `status is
+  // aborted` and the agent's conversation is lost. Measured on two sandboxes,
+  // both times, and it is the whole point of §7.12.4.
+  //
+  // It cannot swallow a genuine abort, and that is why the mark is the key
+  // rather than the source: nothing that ends a run on purpose — the kill
+  // route, the sessions page, retention, archiving, a flow's `kill_run`,
+  // enforceMaxRuntime — sets `resume_pending`, and `runs.retry` clears it.
+  // Nothing is stopped or released here either: the resume walks §7.11's
+  // idempotent start order again and wants the clone, the home, the network and
+  // (through `stopOrphan`) the container name back.
+  if (run.resume_pending && ['running', 'waiting_help'].includes(run.status)) {
+    addEvent(runId, 'tmux_closed', { source, resuming: true })
+    return 'resuming'
+  }
   // The second question a sandboxed run brings (§7.11, §8.18): a session that is
   // gone while the container still stands is the client-died case — the operator
   // hit the detach chord, or the `docker` client was killed — and the agent in
   // there would otherwise go on working with nobody watching. Fire and forget,
   // like the escalations below: WHICH of the two ends the run is decided by the
   // rules of this function and is not the sandbox's to change; all this does is
-  // make sure no container outlives the session that held it.
-  orphanedContainer(runId, source)
+  // make sure nothing of the sandbox outlives the session that held it.
+  releaseSandbox(runId, source)
   // A session is gone — whatever ended it. If its run was a cleanup run, the
   // memory it freed must reach the sidebar now, not on the next cache expiry.
   refreshSessionMemoryAfterRun(runId)
@@ -696,23 +728,50 @@ export function reconcileClosedSession(runId, source = 'session') {
 }
 
 /**
- * A session ended; if its container is still running, stop it and say so
- * (`sandbox:container_gone`). Never throws, never blocks the caller, and writes
- * NOTHING when the container was already over — which is the ordinary case,
- * because `killSessions()` and the kill route stop it before they touch tmux and
- * `--rm` takes it with the agent's own exit. A daemon that does not answer is
- * left to `reconcileContainers()` on the next watcher pass: not knowing is a
- * reason to ask again, never to write an event that says something happened.
+ * A session ended, so everything the sandbox was holding for it goes — this is
+ * `teardownSandbox()` on the ORDINARY end paths, which it was on none of before:
+ * its only callers were a failed launch and the facade itself, so a normally
+ * finished run left its built-in proxy listener standing inside the hub process
+ * (with that finished run's allow policy) and its `docker events` tail child
+ * running, for the life of the hub. Measured with `ss -ltnp` against the hub
+ * pid: the listener was still there after the run had been aborted and a watcher
+ * pass had run.
+ *
+ * Two steps, and the order is §7.11's:
+ *
+ *  1. `containerGone(run)` — the second question a sandboxed run brings. A
+ *     container that is still RUNNING while its session is gone is the
+ *     client-died case (§8.18: the detach chord, a killed `docker` client), and
+ *     the agent in there would otherwise work on with nobody watching, so it is
+ *     recorded as `sandbox:container_gone`. `null` is the daemon giving no
+ *     answer and writes NOTHING — not knowing is a reason to ask again next
+ *     pass, never to state that something happened.
+ *  2. the teardown itself: the container down, the in-process proxy stopped, the
+ *     events tail killed, the per-run network removed. Idempotent by design and
+ *     safe on a run that was never sandboxed, which is why the ordinary case —
+ *     `killSessions()` and the kill route stop the container BEFORE they touch
+ *     tmux, `--rm` takes it with the agent's own exit — costs nothing here.
+ *
+ * The `sandbox` guard is what keeps the promise that an installation without a
+ * container runtime never loads a line of the sandbox: an unsandboxed run does
+ * not even import the module. Never throws, never blocks the caller.
  */
-function orphanedContainer(runId, source) {
+function releaseSandbox(runId, source) {
   const run = getRun(runId)
-  if (!containerName(run)) return
-  stopRunContainer(run)
-    .then(({ stopped, name }) => {
-      if (!stopped) return
-      addEvent(runId, 'sandbox:container_gone', { reason: 'session ended, container still running', source, container: name })
-    })
-    .catch(err => console.error('[sandbox]', err.message))
+  if (!run?.sandbox) return
+  ;(async () => {
+    const gone = await containerGone(run)
+    if (gone === false) {
+      addEvent(runId, 'sandbox:container_gone',
+        { reason: 'session ended, container still running', source, container: containerName(run) })
+    }
+    // Read again: the guard in reconcileClosedSession() is one thing, a mark set
+    // while this promise was in flight is another. A run on its way back keeps
+    // what §7.11's start order walks through again.
+    if (getRun(runId)?.resume_pending) return
+    const { teardownSandbox } = await import('./sandbox/index.mjs')
+    await teardownSandbox(run, { reason: `session_${source}`, removeNetwork: true })
+  })().catch(err => console.error('[sandbox]', err.message))
 }
 
 /**

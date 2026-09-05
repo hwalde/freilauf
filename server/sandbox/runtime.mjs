@@ -208,10 +208,24 @@ function addMount(args, own, { source, target, mode }, { allowInsideOwn = true }
       throw new SandboxArgvError('sandbox.runtime.err_mount_collision', { target: tgt, own: existing.target })
     }
   }
-  const ro = String(mode ?? 'rw') === 'ro'
-  args.push('-v', ro ? `${src}:${tgt}:ro` : `${src}:${tgt}`)
+  // The mode is CHECKED, never coerced. `String(mode ?? 'rw') === 'ro'` read
+  // everything that was not exactly the two letters `ro` as **writable**, so
+  // `'copy'`, `'RO'` and `' ro'` all bind-mounted the operator's `.git`
+  // read-write — a fail-open default on the one field that decides whether a
+  // sandboxed run can rewrite the repository it was fenced off from. Same
+  // family as `Number('')` reading as a configured `0`: a value that arrives as
+  // a string is compared against the values that mean something, and anything
+  // else is a refusal at launch rather than the loosest reading.
+  const modeText = mode === null || mode === undefined ? 'rw' : String(mode)
+  if (!MOUNT_MODES.has(modeText)) {
+    throw new SandboxArgvError('sandbox.runtime.err_mount_mode', { target: tgt, mode: modeText })
+  }
+  args.push('-v', modeText === 'ro' ? `${src}:${tgt}:ro` : `${src}:${tgt}`)
   own.push({ target: tgt })
 }
+
+/** The only two bind-mount modes a container runtime knows. Everything else is a refusal. */
+const MOUNT_MODES = new Set(['ro', 'rw'])
 
 /**
  * `-e KEY=VALUE` as two argv entries, never as one shell-quoted string. This is
@@ -271,7 +285,11 @@ export function buildRunArgv(spec, ctx = {}) {
   // -it: a TTY in the container, and the pane's stdin relayed into it. This is
   // what makes tmux's send-keys, capture-pane and pipe-pane work unchanged —
   // the pane's process is the CLI, and the byte stream is the container's.
-  args.push('-it')
+  // `ctx.tty === false` is the dry run's seam and nothing else's: `docker run
+  // -it` from a process whose stdin is not a terminal answers "the input device
+  // is not a TTY" and exits, so a probe container started from the hub (no pane,
+  // no tmux) has to ask for the same argv without it.
+  if (ctx.tty !== false) args.push('-it')
   // --rm removes the container when its client exits. `retention: keep` is the
   // one profile that does not want that: the container is left standing for a
   // `docker exec` post-mortem until the retention clock runs out (§7.11).
@@ -305,7 +323,17 @@ export function buildRunArgv(spec, ctx = {}) {
 
   const homeDir = ctx.homeDir ? cleanTarget(ctx.homeDir) : null
   addEnv(args, 'HOME', homeDir)
-  addEnv(args, 'USER', s.user)
+  // `USER` is deliberately NOT written here, and `spec.user` is deliberately not
+  // its source. There used to be two authors of that one variable — this line
+  // wrote `USER=<spec.user>` (`hub`) and the `ctx.env` loop below wrote
+  // `USER=agent` a moment later, with Docker's last-one-wins settling it in
+  // silence. `containerEnv()` in index.mjs is the surviving author and its
+  // comment says why: `spec.user` is a POLICY word (the answer §7.7's table
+  // gives per daemon type, and what actually binds is `--user <uid>:<gid>` from
+  // `ctx.uid`), while `USER` is a LOGIN NAME and the only one that exists inside
+  // the box is the image's own passwd entry. A caller that hands no `USER` in
+  // `ctx.env` now gets none at all — which is what an unconfigured container
+  // has anyway, and is not the disagreement the two authors were heading for.
 
   // The hardening set. --cap-drop ALL because an agent needs no capability the
   // kernel hands a container by default, and no-new-privileges because a setuid
@@ -884,6 +912,48 @@ export async function createNetwork(name, { runtime = 'docker', internal = true,
   return { verdict: r.verdict, ok: r.ok, existed: false, reason: r.ok ? null : (r.stderr || '').trim() || null }
 }
 
+/**
+ * The gateway address of a network — the address the HOST holds on that
+ * network's bridge, and therefore the only address a container on an internal
+ * network can reach a host listener at (§7.5.2, the `builtin` engine).
+ *
+ * `null` with a reason where the daemon did not say: a network created with
+ * `gateway_mode_ipv4=isolated` has no host address at all, and that is a
+ * refusal for the built-in engine rather than something to guess around.
+ */
+export async function networkGateway(name, { runtime = 'docker' } = {}) {
+  const r = await call(runtime, ['network', 'inspect', '--format',
+    '{{range .IPAM.Config}}{{.Gateway}} {{end}}', String(name)])
+  if (!r.ok) {
+    return { verdict: r.verdict, ok: false, address: null, reason: (r.stderr || '').trim() || 'network inspect failed' }
+  }
+  const address = String(r.stdout ?? '').trim().split(/\s+/)
+    .find(a => a && a !== '<no value>') ?? null
+  return { verdict: 'ok', ok: !!address, address, reason: address ? null : 'the network has no gateway address' }
+}
+
+/**
+ * The proxy's second leg (§7.5.1: "the proxy is on the internal network *and* on
+ * the bridge"). A container is created on ONE network; every further one is a
+ * call of its own, and this is that call — `buildNetworkConnectArgv()` used to
+ * be exported and never invoked, which is exactly why an iron-proxy container
+ * had no way out to the internet and the whole `allowlist` mode was a run with
+ * no egress.
+ *
+ * Idempotent, because a resume walks the same start order again: a container
+ * already on the network is a success, not an error.
+ */
+export async function connectNetwork(network, container, { runtime = 'docker' } = {}) {
+  const { args } = buildNetworkConnectArgv(network, container, { runtime })
+  const r = await call(runtime, args)
+  if (r.ok) return { verdict: 'ok', ok: true, existed: false }
+  const text = String(r.stderr ?? '') + String(r.stdout ?? '')
+  if (/already exists in network|is already connected to network|endpoint with name .* already exists/i.test(text)) {
+    return { verdict: 'ok', ok: true, existed: true }
+  }
+  return { verdict: r.verdict, ok: false, existed: false, reason: text.trim() || null }
+}
+
 /** Idempotent: a network the daemon has already forgotten is a success. */
 export async function removeNetwork(name, { runtime = 'docker' } = {}) {
   const r = await call(runtime, ['network', 'rm', String(name)])
@@ -1232,3 +1302,123 @@ export async function imageDigest(ref, { runtime = 'docker' } = {}) {
 // split it in two. This module therefore stays a module and grows no entry
 // point of its own — two printers with two on-disk formats is the drift again,
 // one file further out.
+
+// ---------------------------------------------------------------------------
+// The dry run (§7.12.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * The checks the "test this configuration" button runs, and the one rule the
+ * whole function is written around: **a check that could not run is reported as
+ * NOT RUN, never as passed.**
+ *
+ * That rule exists because the previous state of this feature was the worst
+ * shape a check can take. `dryRun()` in index.mjs called `rt?.dryRunChecks` —
+ * a function that did not exist — so `checks` stayed empty and
+ * `[].every(c => c.ok !== false)` made the answer `ok: true` every single time.
+ * A production twin of a test that cannot fail: it told an operator their
+ * profile was fine without having looked at anything.
+ *
+ * `ok` is therefore a THREE-valued answer, and the page's own "no checks" line
+ * can no longer be reached:
+ *   `true`   the check ran and passed
+ *   `false`  the check ran and failed — this is the only value that makes the
+ *            dry run as a whole fail
+ *   `null`   the check did not run, and `detail` says why
+ *
+ * What it really does, in the order §7.12.5 lists: the resolved policy (pure,
+ * always runnable — and the check that would have caught an allow list that
+ * never reached the proxy), the image, and then a container started from the
+ * spec with **no agent in it**, which answers whether the working copy is
+ * reachable, whether the home is writable and whether the tmpfs sizes are what
+ * they were asked to be. The egress probes need a proxy, and a dry run starts
+ * none, so they are reported as not run with that as the reason rather than
+ * quietly left out.
+ */
+export async function dryRunChecks(spec, { allow = [], repo = null, workdir = null } = {}) {
+  const checks = []
+  const add = (name, ok, detail = null) => { checks.push({ name, ok, detail }); return ok }
+  let s
+  try { s = normalizeSpec(spec ?? {}) } catch (err) {
+    add('spec', false, err?.message || String(err))
+    return checks
+  }
+
+  // 1. The policy, from the same function the proxy is configured with — so a
+  //    resolved allow list that does not reach the proxy shows up HERE instead
+  //    of as a run with no egress.
+  const mode = s.network?.mode ?? 'allowlist'
+  try {
+    const { proxyPolicy } = await import('./proxy.mjs')
+    const policy = proxyPolicy({ ...s, network: { ...(s.network ?? {}), allow, presets: [] } })
+    if (policy.broken) add('policy', false, policy.broken)
+    else if (mode === 'allowlist' && policy.allow.length === 0) {
+      add('policy', false, 'the allow list is empty — every host would be refused')
+    } else {
+      add('policy', true, mode === 'allowlist' ? `${policy.allow.length} host patterns` : `network mode ${mode}`)
+    }
+  } catch (err) { add('policy', null, err?.message || String(err)) }
+
+  const info = await runtimeInfo(s.runtime, { force: true })
+  if (!info?.available) {
+    add('runtime', false, info?.reason ?? 'no container runtime')
+    add('image', null, 'no container runtime')
+    add('container', null, 'no container runtime')
+    add('egress', null, 'no container runtime')
+    return checks
+  }
+  add('runtime', true, `${info.id}${info.version ? ` ${info.version}` : ''}${info.rootless ? ' (rootless)' : ''}`)
+
+  // 2. The image. A missing one is the failure §7.10 calls the worst there is,
+  //    and it is the cheapest thing to find out before a run pays for it.
+  const ref = s.image?.ref ?? null
+  if (!ref) add('image', false, 'the profile names no image')
+  else {
+    const d = await imageDigest(ref, { runtime: s.runtime })
+    if (d?.ok) add('image', true, d.digest ? `${ref} @ ${d.digest}` : ref)
+    else add('image', false, d?.reason ?? `image not available: ${ref}`)
+  }
+
+  // 3. The container itself, with no agent in it. `--network none` on purpose:
+  //    a dry run must not create the per-run network or leave one behind, and
+  //    what this container answers is about the FILESYSTEM.
+  const probeDir = workdir || repo?.path || null
+  if (!probeDir) {
+    add('container', null, 'no working copy to probe with')
+  } else {
+    const tmpfs = Object.keys(s.filesystem?.tmpfsSizes ?? {})
+    const script = [
+      `test -d ${shq(probeDir)} && echo "workdir ok" || echo "workdir FAIL"`,
+      ...tmpfs.map(p => `df -k ${shq(p)} >/dev/null 2>&1 && echo "tmpfs ${p} ok" || echo "tmpfs ${p} FAIL"`),
+      'echo done',
+    ].join('; ')
+    let argv = null
+    try {
+      argv = buildRunArgv({ ...s, network: { ...(s.network ?? {}), mode: 'none' }, retention: 'run' }, {
+        runId: `dryrun-${Date.now().toString(36)}`, hubId: '', tty: false,
+        workdir: probeDir, uid: process.getuid?.() ?? null, gid: process.getgid?.() ?? null,
+        cmd: ['sh', '-lc', script],
+      })
+    } catch (err) { add('container', false, err?.message || String(err)) }
+    if (argv) {
+      const r = await sh(argv.bin, argv.args, { timeout: 120_000 })
+      const out = String(r.stdout ?? '')
+      if (!r.ok && !out.includes('done')) {
+        add('container', false, (String(r.stderr ?? '').trim().split('\n').pop() || 'the probe container did not run'))
+      } else {
+        add('container', !out.includes('FAIL'), out.trim().split('\n').filter(Boolean).join('; ') || null)
+      }
+    }
+  }
+
+  // 4. The egress probes of §7.12.5 need a live proxy, and a dry run starts
+  //    none. Named and reported as not run — the one thing that must never
+  //    happen here is a check that is missing looking like a check that passed.
+  add('egress', null, mode === 'allowlist'
+    ? 'a dry run starts no proxy; the allow list is checked by the policy row above'
+    : `network mode ${mode} has no proxy to probe`)
+  return checks
+}
+
+/** Single-quote a path for the `sh -lc` the probe container runs. */
+function shq(s) { return `'${String(s).replaceAll("'", `'\\''`)}'` }

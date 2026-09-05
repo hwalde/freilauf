@@ -630,6 +630,27 @@ function sandboxEnvArgs(run, sandbox) {
 }
 
 /**
+ * The other half of the sentence above, and it was missing: a run that WAS
+ * sandboxed and now runs on the HOST keeps its own home too.
+ *
+ * That is the break-glass (`continueWithoutSandbox()`, §7.12.4), which
+ * deliberately keeps `runs.sandbox_home` for exactly this reason — the harness's
+ * conversation lives in there (`~/agents/runs/<id>/home/.claude/projects/…`),
+ * and a resumed CLI pointed at the operator's `$HOME` finds nothing to continue.
+ * `HOME` was emitted only on the sandboxed branch, so the escape hatch resumed a
+ * run into a home it had never written a byte to, which turns a resume back into
+ * a fresh start — the one thing the break-glass exists to avoid.
+ *
+ * A home that is not on disk is not passed on: pointing a CLI at a directory
+ * that does not exist is worse than leaving it the host's, and this is a
+ * fail-soft convenience, not a boundary.
+ */
+function hostHomeArgs(run) {
+  const home = run?.sandbox_home
+  return home && existsSync(home) ? ['--env', `HOME=${home}`] : []
+}
+
+/**
  * Split a plugin's launch arguments into its `--env NAME=VALUE` pairs and
  * everything else, so the pairs can be handed to §7.8's secret handling and put
  * back afterwards. Only ever used on the sandboxed path: an unsandboxed run's
@@ -930,6 +951,44 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
  * it, until the cap is reached: right after a reboot the tmux server itself
  * may be a beat behind, and "could not try" is not "tried and died".
  */
+/**
+ * §8.1's availability rule, applied where the run is actually LAUNCHED — which
+ * is not where it was planned, and that gap is the whole defect.
+ *
+ * `planSandbox()` folds "is a runtime there?" into the decision through
+ * `sandboxOutcome()` at CREATE time. Between then and here lie a cached
+ * discovery answer and, for a `scheduled` or `deferred` run, hours: a 03:00
+ * agent start whose daemon hiccups is the case, and it ended `failed` with "The
+ * container runtime did not answer, so fl-… could not be prepared" — an entire
+ * night lost to a rule that says the opposite. §8.1: an `available` hub starts
+ * unsandboxed and writes it down, a `required` hub refuses readably.
+ *
+ * The same PURE function decides both times, so plan and launch cannot come to
+ * mean different things about one fact — and the answer, whichever way it goes,
+ * is never silent: a bypass is `sandbox:bypassed {by: 'unavailable', reason}` on
+ * the run's own record, and an operator who believes their runs are contained
+ * and learns later that Docker was down is the worst outcome this feature has.
+ *
+ * `runs.sandbox` goes to 0 with it, because it is the column everything else
+ * reads: the reconciliation pass, the sessions page's badge, the finish gate's
+ * seams. A row that says 1 while the agent works on the host would make every
+ * one of them describe a container that is not there.
+ *
+ * Returns `{ problem }` (start nothing) or `{ bypass: true }`.
+ */
+async function sandboxUnavailable(runId, reason) {
+  const { sandboxOutcome } = await import('./sandbox/index.mjs')
+  const { sandboxHubMode } = await import('./run-def.mjs')
+  const outcome = sandboxOutcome({
+    decision: { sandbox: true }, hubMode: sandboxHubMode(),
+    available: false, unavailableReason: String(reason ?? 'unknown'),
+  })
+  if (outcome.problems.length) return { problem: outcome.problems.join('\n\n') }
+  for (const [kind, payload] of outcome.events) addEvent(runId, kind, payload)
+  db.prepare('UPDATE runs SET sandbox=0 WHERE id=?').run(runId)
+  return { bypass: true }
+}
+
 export async function launchRun(runId) {
   const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
   if (!run) throw new Error(`run ${runId} not found`)
@@ -964,6 +1023,10 @@ export async function launchRun(runId) {
   // the sandbox module at all — not even an import — which is what makes "the
   // sandbox is optional" a property of the code rather than a promise about it.
   let sandbox = null
+  // Did §8.1's availability rule weaken this start into an unsandboxed one? The
+  // catch below then must not undo the worktree it just made, nor fail a run
+  // that is about to start perfectly well.
+  let bypassed = false
   try {
     if (run.branch_mode === 'neu' || run.branch_mode === 'fest') {
       branchExpected = expandPattern(run.branch_pattern, { ...run, agent_name: agent?.name, id: runId })
@@ -974,9 +1037,24 @@ export async function launchRun(runId) {
       // orphan holding the name. The clone REPLACES the linked worktree (§7.4):
       // a worktree hangs on the operator's `.git`, and a container that could
       // write there could write the operator's hooks.
-      const { prepareSandbox } = await import('./sandbox/index.mjs')
-      sandbox = await prepareSandbox(run, repo, { branch: branchExpected })
-      workdir = sandbox.workdir
+      //
+      // …unless the runtime cannot be reached at all, and THAT is asked here
+      // rather than left to prepareSandbox()'s throw, because the two callers
+      // want opposite things out of the same fact (see sandboxUnavailable()).
+      const { prepareSandbox, refreshSandboxAvailability } = await import('./sandbox/index.mjs')
+      const av = resuming ? { available: true } : await refreshSandboxAvailability()
+      const weakened = av.available ? null : await sandboxUnavailable(runId, av.reason)
+      if (weakened?.problem) {
+        failRun(runId, weakened.problem)
+        return { ok: false, error: weakened.problem }
+      }
+      if (weakened?.bypass) {
+        run.sandbox = 0
+        workdir = await makeWorktree(repo, run, branchExpected)
+      } else {
+        sandbox = await prepareSandbox(run, repo, { branch: branchExpected })
+        workdir = sandbox.workdir
+      }
     } else {
       // Every run works in its own worktree — even with expectation "none"
       // (then detached HEAD; throwaway changes; planning 4.0).
@@ -1002,18 +1080,45 @@ export async function launchRun(runId) {
       addEvent(runId, 'resume_failed', { attempt: run.resume_attempts, error: String(err.message).slice(0, 500), waiting: 'sandbox_runtime' })
       return { ok: false, retry: true, error: err.message }
     }
+    // The same fact on a FRESH start means the opposite thing (§8.1), so it gets
+    // the opposite answer: there is no conversation to preserve and nothing to
+    // wait for — the run has never run. `prepareSandbox()` asks the daemon in
+    // more places than the availability probe above (an orphan still holding the
+    // container name, §7.11 step 7), so this is the belt under that check.
+    if (!resuming && err?.sandboxRetry && run.sandbox) {
+      const weakened = await sandboxUnavailable(runId, err.message)
+      if (weakened?.problem) {
+        failRun(runId, weakened.problem)
+        return { ok: false, error: weakened.problem }
+      }
+      try {
+        const { teardownSandbox } = await import('./sandbox/index.mjs')
+        await teardownSandbox({ ...run, sandbox: 1 }, { reason: 'bypassed', removeNetwork: true, force: true })
+      } catch { /* fail-soft: the reaper is the net under this */ }
+      run.sandbox = 0
+      sandbox = null
+      try {
+        workdir = await makeWorktree(repo, run, branchExpected)
+        bypassed = true
+      } catch (e2) {
+        failRun(runId, `Start failed:\n\n${e2.message}`)
+        return { ok: false, error: e2.message }
+      }
+    }
     // Whatever the sandbox built before it failed goes again — `prepareSandbox()`
     // tears down its own half-built work, and this is the belt for a failure
     // that happened after it returned. §7.10: a run that hangs because an image
     // is missing is the worst outcome there is, so this ends visibly instead.
-    if (run.sandbox) {
-      try {
-        const { teardownSandbox } = await import('./sandbox/index.mjs')
-        await teardownSandbox(run, { reason: 'launch_failed', removeNetwork: true })
-      } catch { /* a teardown that fails must not hide the reason the start did */ }
+    if (!bypassed) {
+      if (run.sandbox) {
+        try {
+          const { teardownSandbox } = await import('./sandbox/index.mjs')
+          await teardownSandbox(run, { reason: 'launch_failed', removeNetwork: true })
+        } catch { /* a teardown that fails must not hide the reason the start did */ }
+      }
+      failRun(runId, `Start failed:\n\n${err.message}`)
+      return { ok: false, error: err.message }
     }
-    failRun(runId, `Start failed:\n\n${err.message}`)
-    return { ok: false, error: err.message }
   }
 
   const mainSha = await sh('git', ['-C', repo.path, 'rev-parse', 'HEAD'])
@@ -1158,7 +1263,7 @@ export async function launchRun(runId) {
     // insurance; the next release drops these two lines.
     '--env', `CC_RUN_ID=${runId}`,
     ...(sandbox ? [] : ['--env', `CC_HUB_URL=${hubUrl}`]),
-    ...(sandbox ? sandboxEnvArgs(run, sandbox) : []),
+    ...(sandbox ? sandboxEnvArgs(run, sandbox) : hostHomeArgs(run)),
     '--log', join(runDir, 'log.txt'), '--keep',
     '-f', promptFile, workdir]
   const modelArgs = harnessModelArgs(run, { externalDirs: runExternalDirs(run, repo, runDir) })

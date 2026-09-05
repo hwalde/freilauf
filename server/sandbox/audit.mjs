@@ -26,12 +26,23 @@
 // silent, which is the property an auditor asks for when a report is handed
 // around by mail.
 //
+// **And it does not prove the INPUTS were not edited before the export.** Three
+// of the four files below live in `~/agents/runs/<id>/`, which a sandboxed run
+// has bind-mounted read-write at its own uid (§7.11) — so the agent under audit
+// can truncate `egress.jsonl` before it reports, and the chain will hash-chain
+// what is left into a file that verifies perfectly. The chain is evidence about
+// the COPY, not about the collection. That is a real gap and it is named here,
+// in the header record of every export (`inputs`) and on the run's page, rather
+// than left for a reader to discover: the fix is to write these files somewhere
+// the container cannot reach, which is a change to the mount list and to the
+// three writers (see the note on AUDIT_AGENT_WRITABLE).
+//
 // Saying that plainly is worth more than a claim: a tamper-evidence promise the
 // reader over-reads is worse than none, because they stop asking the question it
 // does not answer.
 // ---------------------------------------------------------------------------
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, appendFileSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, appendFileSync, mkdirSync, lstatSync } from 'node:fs'
 import { join } from 'node:path'
 import db from '../db.mjs'
 import { RUNS_DIR, hubVersion } from '../util.mjs'
@@ -47,6 +58,32 @@ export const AUDIT_FILES = [
   { name: 'egress.jsonl', kind: 'egress', format: 'jsonl' },
   { name: 'docker-events.jsonl', kind: 'docker_event', format: 'jsonl' },
 ]
+
+/**
+ * Every one of them resolves under `<RUNS_DIR>/<runId>/`, and `buildRunArgv()`
+ * mounts exactly that directory read-write into the container at the agent's own
+ * uid — so **the run under audit can write its own audit files**. Truncating
+ * `egress.jsonl` before reporting leaves a shorter file that exports and
+ * verifies without a complaint.
+ *
+ * The constant exists so the claim travels with the export rather than living in
+ * a comment: `buildAuditChain()` puts it in the header record, and a reader who
+ * only ever sees the `.jsonl` is told.
+ *
+ * **What would close it** (all of it outside this module, hence a note and not a
+ * fix): give the audit its own directory — `<RUNS_DIR>/<runId>/audit/`, created
+ * 0700 and NOT covered by the run-directory mount, or a path under the hub's
+ * data directory entirely — and point the four writers at it. Three of them are
+ * elsewhere: `writeSpecFile()` and the docker-events tail in `sandbox/index.mjs`,
+ * the egress writers in `sandbox/proxy.mjs` and `sandbox/ironproxy.mjs` (the
+ * latter also hands `proxy.yaml` to the proxy container, so that file has to stay
+ * readable by it — a read-only mount of the one file, which is what it already
+ * gets). `auditPaths()` is the single place this module would follow them.
+ * Mounting a sub-path of a mounted directory needs the runtime's own mount list
+ * to name it (`addMount` refuses a collision), which is why this is one change
+ * across two owners and not four independent ones.
+ */
+export const AUDIT_AGENT_WRITABLE = true
 
 /** Where a run's audit files live. A pure path answer — the directory need not exist. */
 export function auditPaths(runId) {
@@ -68,6 +105,13 @@ export function appendAuditFile(runId, name, record) {
   const file = join(RUNS_DIR, String(runId), name)
   try {
     mkdirSync(join(RUNS_DIR, String(runId)), { recursive: true })
+    // `'a'` FOLLOWS a symlink, and this directory is bind-mounted rw into the
+    // container at the agent's own uid (see AUDIT_AGENT_WRITABLE): a link left
+    // at `egress.jsonl` would have the hub append to whatever it points at, as
+    // the hub user. Refusing is right in both directions — the audit line is
+    // lost, which is a fact `appendAuditFile()` already returns, and nothing is
+    // written somewhere it does not belong. Same guard as `seedHomeFiles()`.
+    try { if (lstatSync(file).isSymbolicLink()) return false } catch { /* not there yet: create it */ }
     appendFileSync(file, `${JSON.stringify(record)}\n`)
     return true
   } catch {
@@ -159,20 +203,44 @@ function readAuditFile(path, spec) {
   return out
 }
 
-/** The run's own event rows — the hub's side of the story, next to the proxy's. */
+/**
+ * The run's own event rows — the hub's side of the story, next to the proxy's.
+ *
+ * The timestamp column is **`ts`** (db.mjs), and getting that wrong was not a
+ * typo with a small blast radius: the query threw `no such column: created_at`,
+ * the `catch` below swallowed it, and every export silently carried no events at
+ * all — kinds `["audit_header", "egress", "audit_footer"]` for a run whose whole
+ * story was in the table. The chain over that file verified perfectly, which is
+ * the worst shape this can take: integrity green, content gone. `auditKinds()`
+ * exists so a test can assert what is IN the export and not only that it hashes.
+ *
+ * The `catch` stays — an audit must not fail a page over a database hiccup — but
+ * it is now the only thing between a schema change and an empty export, so the
+ * suite asserts the events are there.
+ */
 function eventRecords(runId) {
   let rows = []
   try {
-    rows = db.prepare('SELECT id, kind, payload, created_at FROM events WHERE run_id=? ORDER BY id').all(String(runId))
+    rows = db.prepare('SELECT id, kind, payload, ts FROM events WHERE run_id=? ORDER BY id').all(String(runId))
   } catch { return [] }
   return rows.map(r => {
     let payload = null
     if (r.payload) { try { payload = JSON.parse(r.payload) } catch { payload = { raw: r.payload } } }
     // The events table stores 'YYYY-MM-DD HH:MM:SS' in UTC; the export speaks
     // ISO 8601 throughout, so a reader can sort the whole file by one field.
-    const at = r.created_at ? `${String(r.created_at).replace(' ', 'T')}Z` : null
+    const at = r.ts ? `${String(r.ts).replace(' ', 'T')}Z` : null
     return { kind: 'event', at, data: { id: r.id, kind: r.kind, payload } }
   })
+}
+
+/**
+ * Which record kinds an export actually carries, in order. The one question the
+ * hash chain cannot answer — a two-line file of nothing but a header and a
+ * footer verifies exactly as well as a complete one — and therefore the question
+ * the suite has to ask separately.
+ */
+export function auditKinds(runId) {
+  return buildAuditChain(runId).map(line => { try { return JSON.parse(line).kind } catch { return 'unparsable' } })
 }
 
 /**
@@ -235,6 +303,15 @@ export function buildAuditChain(runId, opts = {}) {
     // Said in the file itself, so a copy that travels without this repository
     // still carries the limit of what it proves.
     note: 'Hash-chained export. Proves this copy was not edited after export; does not prove the hub recorded the truth.',
+    // …and the limit that is about the COLLECTION rather than the copy. A
+    // reader who is handed only this file has no other way to learn it.
+    inputs: {
+      dir: auditPaths(runId).dir,
+      agent_writable: AUDIT_AGENT_WRITABLE && (run ? !!run.sandbox : null),
+      note: AUDIT_AGENT_WRITABLE
+        ? 'The audit files live in the run directory, which a sandboxed run has mounted read-write: the run under audit could have shortened them before this export. The chain covers the copy, not the collection.'
+        : null,
+    },
   })
   for (const r of records) push({ kind: r.kind, at: r.at, data: r.data })
   // +1 for the footer itself: `lines` is the number of lines in the finished file.
@@ -249,6 +326,16 @@ export function buildAuditChain(runId, opts = {}) {
  * i18n keys, because this answers a machine (the test, an auditor's script)
  * rather than a page. The four ways a copy can be wrong each get their own
  * message, so "it does not verify" is never the whole answer.
+ *
+ * **`ok: true` means exactly one thing: the bytes of this file are the bytes
+ * that were exported.** It is not a statement about completeness. A file that
+ * never contained a record cannot be told from one that always should have — an
+ * export whose events query silently returned nothing verified perfectly for as
+ * long as that bug existed, and an export of files the audited run had truncated
+ * first (AUDIT_AGENT_WRITABLE) verifies too. Whoever reads `ok` has to read the
+ * header record's `inputs` block next to it; whoever tests this module has to
+ * assert on `auditKinds()` as well, because a two-line chain of header + footer
+ * is a perfectly valid chain.
  */
 export function verifyAuditChain(input) {
   const lines = Array.isArray(input)

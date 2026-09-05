@@ -190,6 +190,21 @@ export async function startIronProxy(run, spec, ctx = {}) {
     }
   }
 
+  // The proxy's own image, and there is deliberately NO default.
+  //
+  // Freilauf ships six Dockerfiles under `sandbox/images/` and none of them is
+  // iron-proxy: the binary is not vendored, not built here and not verified
+  // against this code (see the header). A hardcoded upstream tag would be a
+  // guess that fails at `docker run` with a registry error — which reads as a
+  // network fault rather than as "this engine is not set up" — so the refusal
+  // is made here, by name, and `ensureProxy()` falls back to the built-in
+  // engine (or refuses the launch where the profile promised injection, which
+  // only this engine can keep). `FREILAUF_SANDBOX_PROXY_IMAGE` is what an
+  // operator who HAS an image points at it; it is UNVERIFIED against the real
+  // binary, exactly like the config shape above.
+  const image = ctx.image ?? env('SANDBOX_PROXY_IMAGE') ?? null
+  if (!image) return failed(runId, t('sandbox.proxy.no_image'))
+
   const managementKey = ctx.managementKey ?? randomBytes(24).toString('hex')
   // Kept on the handle, because the proxy is re-launched from it when the
   // secrets table arrives (setSecretsIronProxy below): a container's
@@ -198,6 +213,7 @@ export async function startIronProxy(run, spec, ctx = {}) {
   const launchCtx = {
     ...ctx,
     runId,
+    image,
     configPath,
     tunnelPort: ctx.tunnelPort ?? TUNNEL_PORT,
     managementPort: ctx.managementPort ?? MANAGEMENT_PORT,
@@ -250,7 +266,19 @@ async function spawnProxy(handle) {
   let runtime
   try { runtime = await import('./runtime.mjs') }
   catch (err) { return { ok: false, reason: err?.message || String(err) } }
-  const argv = runtime.buildProxyArgv(handle.spec, handle.launchCtx)
+  // INSIDE the try, and that is not tidiness. `buildProxyArgv()` throws a
+  // `SandboxArgvError` for a spec it cannot turn into a command line — and the
+  // one it could not turn into a command line was every spec, because
+  // `ensureProxy()` names no image for the proxy: `No sandbox image for this
+  // run` came out of this line and straight through the caller, so the
+  // "fails with a readable reason and the caller falls back to the built-in
+  // engine" promise at the top of this file had never once executed.
+  let argv
+  try {
+    argv = runtime.buildProxyArgv(handle.spec, handle.launchCtx)
+  } catch (err) {
+    return { ok: false, reason: err?.message || String(err) }
+  }
   if (!argv) return { ok: false, reason: 'no proxy command line' }
   try {
     const { spawn } = await import('node:child_process')

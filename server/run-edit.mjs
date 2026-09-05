@@ -47,6 +47,7 @@ import { fallbackTitle, applyGeneratedTitle } from './title.mjs'
 import {
   runStartFromForm, BRANCH_MODES,
   sandboxHubMode, sandboxAllowBypass, sandboxLock, sandboxAllowedMountRoots,
+  sandboxAgainst,
 } from './run-def.mjs'
 import { validateSandboxOverrides } from './sandbox/spec.mjs'
 import { branchWorktree } from './runner.mjs'
@@ -143,6 +144,9 @@ export async function editRun(runId, {
   const vals = []
   const geaendert = []
   let startNow = false
+  // Set where the edit takes a planned run OUT of its sandbox; written as an
+  // event after the UPDATE, so a refused edit (problems below) leaves no trace.
+  let sandboxBypassed = false
 
   if (expectedMinutes !== null && expectedMinutes !== undefined && expectedMinutes !== '') {
     if (!erlaubt.duration) problems.push(t('run.edit.duration_only_planned'))
@@ -263,6 +267,23 @@ export async function editRun(runId, {
         } else if (on !== (run.sandbox ? 1 : 0)) {
           sets.push('sandbox=?'); vals.push(on)
           geaendert.push('sandbox')
+          // Taking the walls down is a NAMED event, never a changed setting
+          // (§7.3: "opting out is a break-glass event"). Without it this run
+          // carried nothing at all: `sandboxStatusSuffix()` and
+          // `hasSandboxStory()` both key on `sandbox:bypassed`, so a run that
+          // was going to be contained and now is not showed neither
+          // "sandboxed" nor "bypassed" in the overview and told nobody. Every
+          // other way out of a sandbox — `decideSandbox()`'s opt-out, an
+          // unavailable runtime, the break-glass button — writes it; this one
+          // was the hole.
+          //
+          // The INVERSE deliberately gets no event of its own. Switching a
+          // planned run's sandbox ON is a tightening, and the run then carries
+          // `runs.sandbox = 1`, which is what the overview, the detail card and
+          // `hasSandboxStory()` already read: a new event kind would need an
+          // i18n string and a rendering rule to say what the column says. The
+          // `edited {fields:['sandbox']}` line below records the act either way.
+          if (!on) sandboxBypassed = true
         }
       }
     }
@@ -271,8 +292,18 @@ export async function editRun(runId, {
   if (sandboxOverrides !== null && sandboxOverrides !== undefined) {
     if (!erlaubt.sandbox) problems.push(t('sandbox.problem.form.only_planned'))
     else {
+      const lock = sandboxLock()
+      // The baseline the LAUNCH will narrow from — hub plus the repo this run
+      // will start in, which is the new one when the same edit moves it. Passed
+      // because `validateSandboxOverrides()` only judges the lock when it has
+      // something to narrow from: without it the `lock` above travelled and was
+      // never read, and the operator learned at launch what the form could have
+      // told them while they were typing.
       const { overrides, problems: op } = validateSandboxOverrides(sandboxOverrides, {
-        lock: sandboxLock(), allowedMountRoots: sandboxAllowedMountRoots(),
+        lock,
+        allowedMountRoots: sandboxAllowedMountRoots(),
+        against: sandboxAgainst(
+          (repoId !== null && repoId !== undefined && repoId !== '') ? Number(repoId) : run.repo_id, lock),
       })
       for (const p of op) problems.push(t(p.key, p.params))
       const json = JSON.stringify(overrides ?? {})
@@ -324,6 +355,10 @@ export async function editRun(runId, {
       'anomaly:followup_soft_overrun', 'anomaly:followup_overrun',
       ...notifiedFlags('overrun'), ...notifiedFlags('followup_overrun')])
   }
+
+  // Before `edited`, because it is the more specific statement about the same
+  // moment and a reader walking the events downwards should meet it first.
+  if (sandboxBypassed) addEvent(runId, 'sandbox:bypassed', { by: 'edit', reason: 'opt_out' })
 
   addEvent(runId, 'edited', { fields: geaendert, ...(geaendert.includes('repo') ? { repo_id: Number(repoId) } : {}) })
   return { ok: true, ...(startNow ? { startNow: true } : {}) }
