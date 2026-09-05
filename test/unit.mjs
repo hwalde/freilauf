@@ -6855,15 +6855,15 @@ try {
     const jetzt = Date.parse('2026-09-05T12:00:00Z')
     const lebt = (pid) => pid === 4711
     // The one answer that must never be wrong: a running suite keeps its sessions.
-    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-live', pid: 4711, mtimeMs: jetzt }, { nowMs: jetzt, lebt }),
+    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-running', pid: 4711, mtimeMs: jetzt }, { nowMs: jetzt, lebt }),
       'a suite that is still running')
-    wahr(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-tot', pid: 4712, mtimeMs: jetzt }, { nowMs: jetzt, lebt }),
+    wahr(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-dead', pid: 4712, mtimeMs: jetzt }, { nowMs: jetzt, lebt }),
       'its owner is gone, so the sessions are garbage')
     // Freshness does not save a dead owner: SIGKILL is instant, and the directory's
     // mtime is then seconds old while every session in it is already orphaned.
-    wahr(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-tot', pid: 4712, mtimeMs: jetzt - 1000 }, { nowMs: jetzt, lebt }),
+    wahr(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-dead', pid: 4712, mtimeMs: jetzt - 1000 }, { nowMs: jetzt, lebt }),
       'a freshly killed suite too')
-    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-ich', pid: 4712, mtimeMs: jetzt }, { nowMs: jetzt, eigenerPfad: '/tmp/Freilauf-e2e-ich', lebt }),
+    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-self', pid: 4712, mtimeMs: jetzt }, { nowMs: jetzt, eigenerPfad: '/tmp/Freilauf-e2e-self', lebt }),
       'and never our own directory')
   })
 
@@ -6883,13 +6883,13 @@ try {
     const jetzt = Date.parse('2026-09-05T12:00:00Z')
     // A sandbox from before the marker existed: a live suite touches its directory
     // constantly, so recent mtime is the only thing standing between it and a sweep.
-    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-alt', pid: null, mtimeMs: jetzt - 60_000 }, { nowMs: jetzt }),
+    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-nomarker', pid: null, mtimeMs: jetzt - 60_000 }, { nowMs: jetzt }),
       'busy a minute ago — could be running')
-    wahr(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-alt', pid: null, mtimeMs: jetzt - VERWAIST_ALTER_MS - 1 }, { nowMs: jetzt }),
+    wahr(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-nomarker', pid: null, mtimeMs: jetzt - VERWAIST_ALTER_MS - 1 }, { nowMs: jetzt }),
       'untouched for hours — over')
     // A directory we could not stat says nothing, and "says nothing" must not
     // become "delete it" — the Number('') family of traps.
-    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-alt', pid: null, mtimeMs: NaN }, { nowMs: jetzt }),
+    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-nomarker', pid: null, mtimeMs: NaN }, { nowMs: jetzt }),
       'no readable age is no evidence')
   })
 
