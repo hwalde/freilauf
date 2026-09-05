@@ -382,7 +382,8 @@ fails with exit 126. That flag is the runtime's, not this directory's.
 |---|---|
 | cursor | the download URL `https://downloads.cursor.com/lab/<version>/linux/<arch>/agent-cli-package.tar.gz` is undocumented and is Cursor's to change; it worked on 2026-09-05. If it 404s, run `https://cursor.com/install` once by hand and read the `DOWNLOAD_URL` it prints. |
 | all four | the *pinned versions* age. The plugin is the authority (`sandbox.image.args`), the Dockerfile default is kept equal to it, and a unit test holds the README's build commands to both. |
-| all four | only the `--version` handshake was exercised inside the container. No image has yet run a real agent turn against a provider. |
+| claude, cursor, hermes | only the `--version` handshake was exercised inside the container. No agent turn against a provider has ever run on these three. |
+| opencode | **this one has run for real** — 2026-09-05, `freilauf/agent-opencode:1.18.29`, rootless Docker 29.8.0, `network.mode: open`: the agent did the work, committed it in its clone, reported, and the hub merged it onto `origin/main`. That says the image is sound for a run; it says nothing about the other three, whose CLIs install differently. |
 
 The auto-updater switches are in the same shape:
 
