@@ -30,7 +30,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { connect as tlsConnect } from 'node:tls'
-import { gruppe, pruefe, uebersprungen, gleich, wahr, warteAuf, bericht, zaehler } from './mini.mjs'
+import { group, check, skipped, equal, isTrue, waitFor, summary, counter } from './mini.mjs'
 
 const start = Date.now()
 const PROJEKT = new URL('..', import.meta.url).pathname
@@ -77,11 +77,11 @@ function stubHub() {
 }
 
 async function main() {
-  gruppe('The TLS proxy: HTTP/2, and a connection that really closes')
+  group('The TLS proxy: HTTP/2, and a connection that really closes')
 
   if (!opensslDa()) {
-    uebersprungen('the whole proxy suite', 'openssl is not installed — no certificate can be made')
-    bericht('Proxy tests', start)
+    skipped('the whole proxy suite', 'openssl is not installed — no certificate can be made')
+    summary('Proxy tests', start)
     return
   }
 
@@ -120,7 +120,7 @@ async function main() {
   }
 
   try {
-    await warteAuf(async () => {
+    await waitFor(async () => {
       try {
         await new Promise((res, rej) => {
           const s = tlsConnect({ host: BIND, port: proxyPort, rejectUnauthorized: false }, () => { s.destroy(); res() })
@@ -128,25 +128,25 @@ async function main() {
         })
         return true
       } catch { return false }
-    }, { was: 'the proxy accepts TLS', timeoutMs: 10_000 })
+    }, { what: 'the proxy accepts TLS', timeoutMs: 10_000 })
 
     // A browser that speaks h2 multiplexes EVERYTHING over one connection —
     // pages, fragments, static files and the SSE stream — so the 6-connection
     // ceiling that the live channel used to eat into stops existing.
-    await pruefe('the proxy offers h2 over ALPN and still answers HTTP/1.1', async () => {
+    await check('the proxy offers h2 over ALPN and still answers HTTP/1.1', async () => {
       const alpn = await new Promise((res) => {
         const s = tlsConnect({ host: BIND, port: proxyPort, rejectUnauthorized: false,
           ALPNProtocols: ['h2', 'http/1.1'] }, () => { const p = s.alpnProtocol; s.destroy(); res(p) })
       })
-      gleich(alpn, 'h2', 'a browser that can, gets HTTP/2')
+      equal(alpn, 'h2', 'a browser that can, gets HTTP/2')
       const alt = await new Promise((res) => {
         const s = tlsConnect({ host: BIND, port: proxyPort, rejectUnauthorized: false,
           ALPNProtocols: ['http/1.1'] }, () => { const p = s.alpnProtocol; s.destroy(); res(p) })
       })
-      gleich(alt, 'http/1.1', 'and the terminal\'s WebSocket keeps the protocol it needs')
+      equal(alt, 'http/1.1', 'and the terminal\'s WebSocket keeps the protocol it needs')
     })
 
-    await pruefe('a page comes through over h2', async () => {
+    await check('a page comes through over h2', async () => {
       const sess = h2()
       try {
         const text = await new Promise((res, rej) => {
@@ -157,7 +157,7 @@ async function main() {
           req.on('error', rej)
           req.end()
         })
-        gleich(text, 'hello\n', 'the upstream body arrives unchanged')
+        equal(text, 'hello\n', 'the upstream body arrives unchanged')
       } finally { sess.close() }
     })
 
@@ -165,7 +165,7 @@ async function main() {
     // hop-by-hop header; node rejects it on an h2 stream. Passing the upstream
     // headers straight through would therefore have killed the live channel for
     // every h2 client — silently, since the throw happens inside the proxy.
-    await pruefe('an SSE stream survives the hop-by-hop headers HTTP/2 forbids', async () => {
+    await check('an SSE stream survives the hop-by-hop headers HTTP/2 forbids', async () => {
       const sess = h2()
       try {
         const erstes = await new Promise((res, rej) => {
@@ -175,7 +175,7 @@ async function main() {
           setTimeout(() => rej(new Error('nothing arrived within 5 s')), 5000).unref()
           req.end()
         })
-        gleich(erstes, ': connected\n\n', 'the stream opens and the first bytes come through')
+        equal(erstes, ': connected\n\n', 'the stream opens and the first bytes come through')
       } finally { sess.close() }
     })
 
@@ -184,7 +184,7 @@ async function main() {
     // source. Every abandoned SSE stream therefore left a socket to the hub —
     // and inside the hub a client record that receives every published event
     // plus a 25 s heartbeat — standing for the life of the process.
-    await pruefe('an abandoned SSE stream takes its upstream connection with it', async () => {
+    await check('an abandoned SSE stream takes its upstream connection with it', async () => {
       const grund = offen.size
       const sitzungen = []
       for (let i = 0; i < 8; i++) {
@@ -198,19 +198,19 @@ async function main() {
           req.end()
         })
       }
-      wahr(offen.size >= grund + 8, `all eight streams really reached the upstream (${offen.size} open)`)
+      isTrue(offen.size >= grund + 8, `all eight streams really reached the upstream (${offen.size} open)`)
 
       for (const sess of sitzungen) sess.destroy()
-      await warteAuf(() => offen.size <= grund,
-        { was: 'every upstream connection is closed again', timeoutMs: 10_000 })
-      gleich(offen.size, grund, 'not one socket is left behind')
+      await waitFor(() => offen.size <= grund,
+        { what: 'every upstream connection is closed again', timeoutMs: 10_000 })
+      equal(offen.size, grund, 'not one socket is left behind')
     })
   } finally {
     aufraeumen()
   }
 
-  bericht('Proxy tests', start)
+  summary('Proxy tests', start)
 }
 
-main().then(() => process.exit(zaehler.fehler.length ? 1 : 0),
+main().then(() => process.exit(counter.failures.length ? 1 : 0),
   (err) => { console.error(err); process.exit(1) })

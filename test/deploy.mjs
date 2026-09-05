@@ -29,7 +29,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, cpSync, ex
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { gruppe, pruefe, uebersprungen, gleich, wahr, falsch, enthaelt, bericht, zaehler } from './mini.mjs'
+import { group, check, skipped, equal, isTrue, isFalse, contains, summary, counter } from './mini.mjs'
 
 const start = Date.now()
 const PROJEKT = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
@@ -181,181 +181,181 @@ function newCommit(message, file = 'marker.txt', content = String(Date.now())) {
 // ------------------------------------------------------------------ run
 try {
   if (sh('git', ['--version']).code !== 0) {
-    gruppe('freilauf-deploy')
-    uebersprungen('the whole suite', 'git is missing')
+    group('freilauf-deploy')
+    skipped('the whole suite', 'git is missing')
   } else {
     buildSandbox()
 
     // ------------------------------------------------------------------
-    gruppe('freilauf-deploy --init: the deploy checkout comes into being')
+    group('freilauf-deploy --init: the deploy checkout comes into being')
 
     const c1 = git(WORK, 'rev-parse', 'HEAD').out.trim()
 
-    await pruefe('--init clones, checks out detached on origin/main and installs the deps once', () => {
+    await check('--init clones, checks out detached on origin/main and installs the deps once', () => {
       const r = deploy('--init', '--url', ORIGIN)
-      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
-      wahr(existsSync(join(DEPLOY, '.git')), 'the checkout exists')
-      gleich(head(), c1, 'it stands on the first commit')
-      falsch(git(DEPLOY, 'symbolic-ref', '-q', 'HEAD').code === 0,
+      equal(r.code, 0, `exit code (${r.out}${r.err})`)
+      isTrue(existsSync(join(DEPLOY, '.git')), 'the checkout exists')
+      equal(head(), c1, 'it stands on the first commit')
+      isFalse(git(DEPLOY, 'symbolic-ref', '-q', 'HEAD').code === 0,
         'and DETACHED — nobody commits here, and git status stays empty')
-      gleich(callCount('npm ci'), 1, 'npm ci ran exactly once')
-      wahr(existsSync(join(DEPLOY, '.deploy-lock-hash')), 'the lockfile hash is written down')
-      wahr(existsSync(join(HOME, '.local/bin/fl-report')), 'the fl-* scripts went into ~/.local/bin')
-      wahr(existsSync(join(HOME, '.local/bin/freilauf-deploy')), 'including the deploy script itself')
-      wahr(existsSync(join(HOME, '.config/systemd/user/freilauf.service')), 'and the units are in place')
-      gleich(callCount('restart freilauf.service'), 1, 'the hub was restarted once')
+      equal(callCount('npm ci'), 1, 'npm ci ran exactly once')
+      isTrue(existsSync(join(DEPLOY, '.deploy-lock-hash')), 'the lockfile hash is written down')
+      isTrue(existsSync(join(HOME, '.local/bin/fl-report')), 'the fl-* scripts went into ~/.local/bin')
+      isTrue(existsSync(join(HOME, '.local/bin/freilauf-deploy')), 'including the deploy script itself')
+      isTrue(existsSync(join(HOME, '.config/systemd/user/freilauf.service')), 'and the units are in place')
+      equal(callCount('restart freilauf.service'), 1, 'the hub was restarted once')
     })
 
     // ------------------------------------------------------------------
-    gruppe('Nothing new: nothing happens')
+    group('Nothing new: nothing happens')
 
-    await pruefe('a second deploy without a new commit restarts nothing', () => {
+    await check('a second deploy without a new commit restarts nothing', () => {
       resetCalls()
       const r = deploy()
-      gleich(r.code, 0, 'exit code')
-      enthaelt(r.out, 'already deployed', 'it says so')
-      gleich(callCount('systemctl'), 0, 'and did not touch systemd — a restart is not free')
-      gleich(callCount('npm ci'), 0, 'nor npm')
+      equal(r.code, 0, 'exit code')
+      contains(r.out, 'already deployed', 'it says so')
+      equal(callCount('systemctl'), 0, 'and did not touch systemd — a restart is not free')
+      equal(callCount('npm ci'), 0, 'nor npm')
     })
 
     // ------------------------------------------------------------------
-    gruppe('A new commit: the checkout moves, the hub restarts')
+    group('A new commit: the checkout moves, the hub restarts')
 
     const c2 = newCommit('second commit')
 
-    await pruefe('deploy follows origin/main and records what it replaced', () => {
+    await check('deploy follows origin/main and records what it replaced', () => {
       resetCalls()
       const r = deploy()
-      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
-      gleich(head(), c2, 'the checkout stands on the new commit')
-      gleich(callCount('restart freilauf.service'), 1, 'restarted once')
-      gleich(readFileSync(join(SB, 'deploy', 'previous-sha'), 'utf8').trim(), c1,
+      equal(r.code, 0, `exit code (${r.out}${r.err})`)
+      equal(head(), c2, 'the checkout stands on the new commit')
+      equal(callCount('restart freilauf.service'), 1, 'restarted once')
+      equal(readFileSync(join(SB, 'deploy', 'previous-sha'), 'utf8').trim(), c1,
         'previous-sha is what was running before — that IS the rollback')
-      enthaelt(r.out, 'deployed', 'and it says what it deployed')
+      contains(r.out, 'deployed', 'and it says what it deployed')
     })
 
-    await pruefe('the dependencies are not reinstalled for an unchanged lockfile', () => {
-      gleich(callCount('npm ci'), 0, 'node-pty compiles for minutes — not on every deploy')
+    await check('the dependencies are not reinstalled for an unchanged lockfile', () => {
+      equal(callCount('npm ci'), 0, 'node-pty compiles for minutes — not on every deploy')
     })
 
     // ------------------------------------------------------------------
-    gruppe('The hub does not come up: rollback')
+    group('The hub does not come up: rollback')
 
     const c3 = newCommit('third commit, and the hub will not answer')
 
-    await pruefe('an unhealthy hub sends the checkout back and exits 1', () => {
+    await check('an unhealthy hub sends the checkout back and exits 1', () => {
       resetCalls()
       // Two 000 for the health check of the new commit (FREILAUF_DEPLOY_HEALTH_SECONDS=2),
       // then 200: the rollback has to come up, otherwise this is the exit-2 case.
       setStatus('000', '000', '200')
       const r = deploy()
-      gleich(r.code, 1, `exit code (${r.out}${r.err})`)
-      gleich(head(), c2, 'the checkout is back on the commit that was running')
-      wahr(callCount('restart freilauf.service') >= 2, 'restarted a second time, for the rollback')
-      enthaelt(r.out, 'rolled back', 'the reason is in the output')
-      enthaelt(deployLog(), 'rolled back', 'and in the deploy log')
-      enthaelt(deployLog(), c3.slice(0, 7), 'naming the commit that failed')
+      equal(r.code, 1, `exit code (${r.out}${r.err})`)
+      equal(head(), c2, 'the checkout is back on the commit that was running')
+      isTrue(callCount('restart freilauf.service') >= 2, 'restarted a second time, for the rollback')
+      contains(r.out, 'rolled back', 'the reason is in the output')
+      contains(deployLog(), 'rolled back', 'and in the deploy log')
+      contains(deployLog(), c3.slice(0, 7), 'naming the commit that failed')
       // A FAILURE always notifies — through fl-notify, so it reaches whatever
       // channel the operator configured, and nothing at all when they
       // configured none. It used to be a second Telegram implementation in
       // bash, reading the bot token out of the database with a curl behind it.
-      wahr(callCount('fl-notify') >= 1, 'and the operator was told, through the notification CLI')
-      enthaelt(calls(), '--kind deploy', 'the message says what it is about')
+      isTrue(callCount('fl-notify') >= 1, 'and the operator was told, through the notification CLI')
+      contains(calls(), '--kind deploy', 'the message says what it is about')
     })
 
     // ------------------------------------------------------------------
-    gruppe('The lockfile decides whether npm runs')
+    group('The lockfile decides whether npm runs')
 
-    await pruefe('a changed package-lock.json means npm ci, an unchanged one does not', () => {
+    await check('a changed package-lock.json means npm ci, an unchanged one does not', () => {
       setStatus('200')
       const lock = JSON.parse(readFileSync(join(WORK, 'package-lock.json'), 'utf8'))
       lock.freilaufTestMarker = 'changed'
       newCommit('fourth commit: lockfile changed', 'package-lock.json', JSON.stringify(lock, null, 2))
       resetCalls()
       let r = deploy()
-      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
-      gleich(callCount('npm ci'), 1, 'the lockfile changed → npm ci')
+      equal(r.code, 0, `exit code (${r.out}${r.err})`)
+      equal(callCount('npm ci'), 1, 'the lockfile changed → npm ci')
 
       newCommit('fifth commit: only the marker')
       resetCalls()
       r = deploy()
-      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
-      gleich(callCount('npm ci'), 0, 'the lockfile did not → no npm ci')
+      equal(r.code, 0, `exit code (${r.out}${r.err})`)
+      equal(callCount('npm ci'), 0, 'the lockfile did not → no npm ci')
     })
 
     // ------------------------------------------------------------------
-    gruppe('--status and --rollback')
+    group('--status and --rollback')
 
-    await pruefe('--status names the deployed commit and the one on origin', () => {
+    await check('--status names the deployed commit and the one on origin', () => {
       const c6 = newCommit('sixth commit, deliberately not deployed')
       resetCalls()
       const r = deploy('--status')
-      gleich(r.code, 0, 'exit code')
-      enthaelt(r.out, head().slice(0, 7), 'the deployed sha')
-      enthaelt(r.out, c6.slice(0, 7), 'the sha on origin/main')
-      enthaelt(r.out, 'Ahead:', 'and how far behind the deployment is')
-      gleich(callCount('systemctl'), 0, 'a status question restarts nothing')
+      equal(r.code, 0, 'exit code')
+      contains(r.out, head().slice(0, 7), 'the deployed sha')
+      contains(r.out, c6.slice(0, 7), 'the sha on origin/main')
+      contains(r.out, 'Ahead:', 'and how far behind the deployment is')
+      equal(callCount('systemctl'), 0, 'a status question restarts nothing')
     })
 
-    await pruefe('--rollback puts the previously deployed commit back', () => {
+    await check('--rollback puts the previously deployed commit back', () => {
       const before = readFileSync(join(SB, 'deploy', 'previous-sha'), 'utf8').trim()
       resetCalls()
       const r = deploy('--rollback')
-      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
-      gleich(head(), before, 'the checkout stands on the previous commit again')
-      gleich(callCount('restart freilauf.service'), 1, 'and the hub was restarted for it')
+      equal(r.code, 0, `exit code (${r.out}${r.err})`)
+      equal(head(), before, 'the checkout stands on the previous commit again')
+      equal(callCount('restart freilauf.service'), 1, 'and the hub was restarted for it')
     })
 
     // ------------------------------------------------------------------
-    gruppe('Notifying is best effort, and optional')
+    group('Notifying is best effort, and optional')
 
-    await pruefe('a successful deploy stays quiet unless --notify says otherwise', () => {
+    await check('a successful deploy stays quiet unless --notify says otherwise', () => {
       const c = newCommit('a commit worth announcing')
       resetCalls()
       let r = deploy()
-      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
-      gleich(head(), c, 'deployed')
-      gleich(callCount('fl-notify'), 0, 'an ordinary success says nothing')
+      equal(r.code, 0, `exit code (${r.out}${r.err})`)
+      equal(head(), c, 'deployed')
+      equal(callCount('fl-notify'), 0, 'an ordinary success says nothing')
 
       const c2b = newCommit('and this one is announced')
       resetCalls()
       r = deploy('--notify')
-      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
-      gleich(head(), c2b, 'deployed')
-      gleich(callCount('fl-notify'), 1, 'with --notify it announces itself once')
-      enthaelt(calls(), '--kind deploy', 'and says what the message is about')
+      equal(r.code, 0, `exit code (${r.out}${r.err})`)
+      equal(head(), c2b, 'deployed')
+      equal(callCount('fl-notify'), 1, 'with --notify it announces itself once')
+      contains(calls(), '--kind deploy', 'and says what the message is about')
     })
 
     // ------------------------------------------------------------------
-    gruppe('The old names keep working (transition shims)')
+    group('The old names keep working (transition shims)')
 
-    await pruefe('every old script name is installed as a shim next to the new one', () => {
+    await check('every old script name is installed as a shim next to the new one', () => {
       const bin = join(HOME, '.local', 'bin')
       for (const [alt, neu] of [['cc-start', 'fl-start'], ['cc-attach', 'fl-attach'], ['cc-kill', 'fl-kill'],
         ['cc-help', 'fl-help'], ['cc-report', 'fl-report'], ['cc-notify', 'fl-notify'],
         ['cc-oc-sync-agents', 'fl-oc-sync-agents'], ['cc-session-cleanup', 'fl-session-cleanup'],
         ['cchub', 'freilauf'], ['cchub-deploy', 'freilauf-deploy']]) {
-        wahr(existsSync(join(bin, alt)), `${alt} exists`)
-        enthaelt(readFileSync(join(bin, alt), 'utf8'), `/${neu}" "$@"`, `${alt} execs ${neu}`)
+        isTrue(existsSync(join(bin, alt)), `${alt} exists`)
+        contains(readFileSync(join(bin, alt), 'utf8'), `/${neu}" "$@"`, `${alt} execs ${neu}`)
       }
       // The two sourced libraries have to land there as well: fl-attach, fl-kill,
       // fl-help, freilauf and freilauf-deploy all look for them next to themselves.
-      wahr(existsSync(join(bin, 'fl-harness-tags.sh')), 'fl-harness-tags.sh')
-      wahr(existsSync(join(bin, 'fl-paths.sh')), 'fl-paths.sh')
+      isTrue(existsSync(join(bin, 'fl-harness-tags.sh')), 'fl-harness-tags.sh')
+      isTrue(existsSync(join(bin, 'fl-paths.sh')), 'fl-paths.sh')
     })
 
-    await pruefe('a shim really reaches the new script — this is what an in-flight run calls', () => {
+    await check('a shim really reaches the new script — this is what an in-flight run calls', () => {
       // The prompt of a run that started before the rename says `cc-report`, and
       // its claude hooks and .cursor/hooks.json say it too. None of those can be
       // rewritten from here, so the name has to keep working.
       const r = sh('bash', [join(HOME, '.local', 'bin', 'cc-report'), 'progress', 'hallo'], {
         env: { ...process.env, FL_RUN_ID: '', CC_RUN_ID: '' },
       })
-      enthaelt(r.err, 'fl-report:', 'the shim landed in fl-report (which then says it has no run id)')
-      gleich(r.code, 3, 'and exits with fl-report\'s own code, not the shell\'s')
+      contains(r.err, 'fl-report:', 'the shim landed in fl-report (which then says it has no run id)')
+      equal(r.code, 3, 'and exits with fl-report\'s own code, not the shell\'s')
     })
 
-    await pruefe('and fl-report still answers to the OLD environment variable', () => {
+    await check('and fl-report still answers to the OLD environment variable', () => {
       // A tmux session that is running right now carries CC_RUN_ID, set at a
       // start that happened before this release existed.
       // Fenced against the CALLER's own run environment: a suite started by an
@@ -368,10 +368,10 @@ try {
       })
       // No hub on that port, so it files the report in the inbox instead — which
       // is exactly the proof that it got as far as having a run id.
-      enthaelt(r.err, 'hub not reachable', 'it got a run id from CC_RUN_ID and tried')
+      contains(r.err, 'hub not reachable', 'it got a run id from CC_RUN_ID and tried')
     })
 
-    await pruefe('the opencode plugin is renamed, and the old file is REMOVED', () => {
+    await check('the opencode plugin is renamed, and the old file is REMOVED', () => {
       const dir = join(HOME, '.config', 'opencode', 'plugins')
       // opencode loads every file in that directory: leaving the old one there
       // would report every idle and every API error twice.
@@ -380,17 +380,17 @@ try {
       sh('bash', [join(PROJEKT, 'setup', '02-install-scripts.sh')], {
         env: { ...process.env, HOME, PATH: `${SHIM}:${process.env.PATH}`, FREILAUF_SKIP_EXTRAS: '1' },
       })
-      falsch(existsSync(join(dir, 'cc-hub.js')), 'the old plugin file is gone')
-      wahr(existsSync(join(dir, 'freilauf.js')), 'and the new one is there')
+      isFalse(existsSync(join(dir, 'cc-hub.js')), 'the old plugin file is gone')
+      isTrue(existsSync(join(dir, 'freilauf.js')), 'and the new one is there')
       const js = readFileSync(join(dir, 'freilauf.js'), 'utf8')
-      enthaelt(js, 'export const Freilauf', 'exported under the new name')
-      enthaelt(js, 'process.env.CC_RUN_ID', 'and it still reads the old run-id variable')
+      contains(js, 'export const Freilauf', 'exported under the new name')
+      contains(js, 'process.env.CC_RUN_ID', 'and it still reads the old run-id variable')
     })
 
     // ------------------------------------------------------------------
-    gruppe('Which unit runs this hub')
+    group('Which unit runs this hub')
 
-    await pruefe('an installation still run by cchub.service is restarted as cchub.service', () => {
+    await check('an installation still run by cchub.service is restarted as cchub.service', () => {
       // This is the case the whole transition hangs on: the first deploy of the
       // renamed code lands on a machine whose hub is still the old unit. A
       // resolver that went by "is the new unit file installed?" would restart a
@@ -399,25 +399,25 @@ try {
       const c = newCommit('a commit deployed onto an un-migrated installation')
       resetCalls()
       const r = deploy()
-      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
-      gleich(head(), c, 'deployed')
-      gleich(callCount('restart cchub.service'), 1, 'the OLD unit was restarted')
-      gleich(callCount('restart freilauf.service'), 0, 'and the new one was left alone')
+      equal(r.code, 0, `exit code (${r.out}${r.err})`)
+      equal(head(), c, 'deployed')
+      equal(callCount('restart cchub.service'), 1, 'the OLD unit was restarted')
+      equal(callCount('restart freilauf.service'), 0, 'and the new one was left alone')
     })
 
-    await pruefe('once freilauf.service is the one running, that is the one restarted', () => {
+    await check('once freilauf.service is the one running, that is the one restarted', () => {
       setActiveUnit('freilauf.service')
       const c = newCommit('a commit deployed onto a migrated installation')
       resetCalls()
       const r = deploy()
-      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
-      gleich(head(), c, 'deployed')
-      gleich(callCount('restart freilauf.service'), 1, 'the new unit')
-      gleich(callCount('restart cchub.service'), 0, 'and never the old one again')
+      equal(r.code, 0, `exit code (${r.out}${r.err})`)
+      equal(head(), c, 'deployed')
+      equal(callCount('restart freilauf.service'), 1, 'the new unit')
+      equal(callCount('restart cchub.service'), 0, 'and never the old one again')
     })
 
     // ------------------------------------------------------------------
-    gruppe('setup/migrate-from-cc-hub.sh: the one explicit step')
+    group('setup/migrate-from-cc-hub.sh: the one explicit step')
 
     // A whole installation as it looks before the migration: old config
     // directory, old data directory with the old database name, old deploy
@@ -451,118 +451,118 @@ try {
       setActiveUnit('cchub.service')
     }
 
-    await pruefe('--dry-run prints every step and changes nothing', () => {
+    await check('--dry-run prints every step and changes nothing', () => {
       alteInstallation()
       resetCalls()
       const r = migrate('--dry-run')
-      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
-      enthaelt(r.out, 'DRY RUN', 'it says so')
-      enthaelt(r.out, ALT_CFG, 'and names the configuration directory it would move')
-      enthaelt(r.out, 'would:', 'every action is only printed')
-      wahr(existsSync(join(ALT_CFG, 'env')), 'the old config is untouched')
-      wahr(existsSync(join(ALT_DAT, 'cc-hub.db')), 'the old database is untouched')
-      wahr(existsSync(ALT_DEP), 'the old deploy checkout is untouched')
-      falsch(existsSync(NEU_CFG), 'and nothing new was created')
+      equal(r.code, 0, `exit code (${r.out}${r.err})`)
+      contains(r.out, 'DRY RUN', 'it says so')
+      contains(r.out, ALT_CFG, 'and names the configuration directory it would move')
+      contains(r.out, 'would:', 'every action is only printed')
+      isTrue(existsSync(join(ALT_CFG, 'env')), 'the old config is untouched')
+      isTrue(existsSync(join(ALT_DAT, 'cc-hub.db')), 'the old database is untouched')
+      isTrue(existsSync(ALT_DEP), 'the old deploy checkout is untouched')
+      isFalse(existsSync(NEU_CFG), 'and nothing new was created')
       // Asking is not changing: the dry run still wants to know whether the VPN
       // was on, so `is-active` is fair game. Nothing that MOVES systemd is.
       for (const verb of ['stop', 'start', 'enable', 'disable', 'daemon-reload']) {
-        gleich(callCount(`systemctl ${verb}`) + callCount(`systemctl --user ${verb}`), 0,
+        equal(callCount(`systemctl ${verb}`) + callCount(`systemctl --user ${verb}`), 0,
           `no systemctl ${verb}`)
       }
     })
 
-    await pruefe('the migration moves configuration, data, deploy checkout and units', () => {
+    await check('the migration moves configuration, data, deploy checkout and units', () => {
       resetCalls()
       const r = migrate()
-      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
+      equal(r.code, 0, `exit code (${r.out}${r.err})`)
 
-      falsch(existsSync(ALT_CFG), 'the old configuration directory is gone')
-      wahr(existsSync(join(NEU_CFG, 'env')), 'the env file moved')
+      isFalse(existsSync(ALT_CFG), 'the old configuration directory is gone')
+      isTrue(existsSync(join(NEU_CFG, 'env')), 'the env file moved')
       const env = readFileSync(join(NEU_CFG, 'env'), 'utf8')
-      enthaelt(env, 'FREILAUF_LOCAL_PORT=9999', 'CCHUB_ became FREILAUF_')
-      enthaelt(env, 'FREILAUF_START_SCRIPT=/x/cc-start', 'and the one variable that changed its whole name')
-      enthaelt(env, 'OPENROUTER_API_KEY=geheim', 'everything else is byte for byte what it was')
-      enthaelt(env, '# comment stays', 'comments included')
-      wahr(existsSync(join(NEU_CFG, 'env.bak-cc-hub')), 'with a backup of the original')
-      wahr(existsSync(join(NEU_CFG, 'verbotene-muster')), 'the private pattern file came along')
+      contains(env, 'FREILAUF_LOCAL_PORT=9999', 'CCHUB_ became FREILAUF_')
+      contains(env, 'FREILAUF_START_SCRIPT=/x/cc-start', 'and the one variable that changed its whole name')
+      contains(env, 'OPENROUTER_API_KEY=geheim', 'everything else is byte for byte what it was')
+      contains(env, '# comment stays', 'comments included')
+      isTrue(existsSync(join(NEU_CFG, 'env.bak-cc-hub')), 'with a backup of the original')
+      isTrue(existsSync(join(NEU_CFG, 'verbotene-muster')), 'the private pattern file came along')
 
-      falsch(existsSync(ALT_DAT), 'the old data directory is gone')
-      wahr(existsSync(join(NEU_DAT, 'freilauf.db')), 'the database is renamed')
-      falsch(existsSync(join(NEU_DAT, 'cc-hub.db')), 'and not left behind under the old name')
+      isFalse(existsSync(ALT_DAT), 'the old data directory is gone')
+      isTrue(existsSync(join(NEU_DAT, 'freilauf.db')), 'the database is renamed')
+      isFalse(existsSync(join(NEU_DAT, 'cc-hub.db')), 'and not left behind under the old name')
 
-      falsch(existsSync(ALT_DEP), 'the old deploy checkout is gone')
-      wahr(existsSync(join(NEU_DEP, '.git')), 'and it is a checkout at the new path')
-      enthaelt(git(NEU_DEP, 'remote', 'get-url', 'origin').out, 'hwalde/freilauf',
+      isFalse(existsSync(ALT_DEP), 'the old deploy checkout is gone')
+      isTrue(existsSync(join(NEU_DEP, '.git')), 'and it is a checkout at the new path')
+      contains(git(NEU_DEP, 'remote', 'get-url', 'origin').out, 'hwalde/freilauf',
         'its remote follows the renamed GitHub repository')
-      wahr(existsSync(join(HOME, 'agents', 'deploy', 'freilauf-deploy.log')), 'the deploy log is renamed')
-      enthaelt(readFileSync(join(HOME, 'agents', 'deploy', 'freilauf-deploy.log'), 'utf8'), 'abc1234',
+      isTrue(existsSync(join(HOME, 'agents', 'deploy', 'freilauf-deploy.log')), 'the deploy log is renamed')
+      contains(readFileSync(join(HOME, 'agents', 'deploy', 'freilauf-deploy.log'), 'utf8'), 'abc1234',
         'and it still holds what it held')
 
-      falsch(existsSync(join(SYSD, 'cchub.service')), 'the old unit file is removed')
-      falsch(existsSync(join(SYSD, 'cchub-vpn.service')), 'the old VPN unit too')
-      wahr(existsSync(join(SYSD, 'freilauf.service')), 'the new unit is installed')
-      enthaelt(calls(), 'disable cchub.service', 'the old unit was disabled')
-      enthaelt(calls(), 'enable freilauf.service', 'the new one enabled')
-      enthaelt(calls(), 'start freilauf.service', 'and started')
-      falsch(existsSync(join(HOME, '.config', 'opencode', 'plugins', 'cc-hub.js')),
+      isFalse(existsSync(join(SYSD, 'cchub.service')), 'the old unit file is removed')
+      isFalse(existsSync(join(SYSD, 'cchub-vpn.service')), 'the old VPN unit too')
+      isTrue(existsSync(join(SYSD, 'freilauf.service')), 'the new unit is installed')
+      contains(calls(), 'disable cchub.service', 'the old unit was disabled')
+      contains(calls(), 'enable freilauf.service', 'the new one enabled')
+      contains(calls(), 'start freilauf.service', 'and started')
+      isFalse(existsSync(join(HOME, '.config', 'opencode', 'plugins', 'cc-hub.js')),
         'the old opencode plugin is removed — two of them would report everything twice')
     })
 
-    await pruefe('a stored flow stops calling a command that no longer exists', () => {
+    await check('a stored flow stops calling a command that no longer exists', () => {
       const db = new DatabaseSync(join(NEU_DAT, 'freilauf.db'))
       const row = db.prepare('SELECT name, definition FROM flows WHERE id=1').get()
       db.close()
-      enthaelt(row.definition, 'freilauf-deploy', 'the command was rewritten')
-      falsch(row.definition.includes('cchub-deploy'), 'and the old one is gone')
-      gleich(row.name, 'Restart Freilauf after merge', 'the flow is called what it does')
+      contains(row.definition, 'freilauf-deploy', 'the command was rewritten')
+      isFalse(row.definition.includes('cchub-deploy'), 'and the old one is gone')
+      equal(row.name, 'Restart Freilauf after merge', 'the flow is called what it does')
     })
 
-    await pruefe('the VPN stays as it was — off is off (fail-closed)', () => {
+    await check('the VPN stays as it was — off is off (fail-closed)', () => {
       // cchub-vpn.service was inactive before the migration, so nothing may
       // switch access on behind the operator's back.
-      falsch(calls().includes('start freilauf-vpn.service'), 'access was not switched on')
+      isFalse(calls().includes('start freilauf-vpn.service'), 'access was not switched on')
     })
 
-    await pruefe('running it a second time is a no-op, not a mess', () => {
+    await check('running it a second time is a no-op, not a mess', () => {
       resetCalls()
       const r = migrate()
-      gleich(r.code, 0, `exit code (${r.out}${r.err})`)
-      enthaelt(r.out, 'already at', 'it says the directories are already where they belong')
-      wahr(existsSync(join(NEU_CFG, 'env')), 'the configuration is still there')
-      wahr(existsSync(join(NEU_DAT, 'freilauf.db')), 'the database is still there')
-      wahr(existsSync(join(NEU_DEP, '.git')), 'the deploy checkout is still there')
+      equal(r.code, 0, `exit code (${r.out}${r.err})`)
+      contains(r.out, 'already at', 'it says the directories are already where they belong')
+      isTrue(existsSync(join(NEU_CFG, 'env')), 'the configuration is still there')
+      isTrue(existsSync(join(NEU_DAT, 'freilauf.db')), 'the database is still there')
+      isTrue(existsSync(join(NEU_DEP, '.git')), 'the deploy checkout is still there')
       const env = readFileSync(join(NEU_CFG, 'env'), 'utf8')
-      falsch(env.includes('CCHUB_'), 'and the env file was not rewritten into nonsense')
-      enthaelt(env, 'FREILAUF_LOCAL_PORT=9999', 'it still says what it said')
+      isFalse(env.includes('CCHUB_'), 'and the env file was not rewritten into nonsense')
+      contains(env, 'FREILAUF_LOCAL_PORT=9999', 'it still says what it said')
     })
 
-    await pruefe('two config directories are refused, never merged', () => {
+    await check('two config directories are refused, never merged', () => {
       // The one state a script must not resolve on the operator's behalf.
       mkdirSync(ALT_CFG, { recursive: true })
       writeFileSync(join(ALT_CFG, 'env'), 'CCHUB_LOCAL_PORT=1\n')
       const r = migrate()
-      gleich(r.code, 0, 'it does not fail — it says what it found')
-      enthaelt(r.out, 'BOTH', 'and names the problem')
-      wahr(existsSync(join(ALT_CFG, 'env')), 'the old one is untouched')
-      wahr(existsSync(join(NEU_CFG, 'env')), 'and so is the new one')
+      equal(r.code, 0, 'it does not fail — it says what it found')
+      contains(r.out, 'BOTH', 'and names the problem')
+      isTrue(existsSync(join(ALT_CFG, 'env')), 'the old one is untouched')
+      isTrue(existsSync(join(NEU_CFG, 'env')), 'and so is the new one')
       rmSync(ALT_CFG, { recursive: true, force: true })
     })
 
     // ------------------------------------------------------------------
-    gruppe('The operator\'s own checkout is none of its business')
+    group('The operator\'s own checkout is none of its business')
 
-    await pruefe('nothing outside the sandbox was written', () => {
+    await check('nothing outside the sandbox was written', () => {
       const real = join(process.env.HOME ?? '', '.local/bin')
-      wahr(!DEPLOY.startsWith(real), 'the deploy dir is the sandbox one')
-      enthaelt(calls() + deployLog(), DEPLOY, 'every path in the log is a sandbox path')
-      falsch(deployLog().includes('/projects/'), 'and no working copy is mentioned anywhere')
+      isTrue(!DEPLOY.startsWith(real), 'the deploy dir is the sandbox one')
+      contains(calls() + deployLog(), DEPLOY, 'every path in the log is a sandbox path')
+      isFalse(deployLog().includes('/projects/'), 'and no working copy is mentioned anywhere')
     })
   }
 } catch (err) {
-  zaehler.fehler.push({ name: 'suite', grund: err.stack ?? String(err) })
+  counter.failures.push({ name: 'suite', reason: err.stack ?? String(err) })
   console.error(err)
 } finally {
   rmSync(SB, { recursive: true, force: true })
 }
 
-process.exit(bericht('deploy', start))
+process.exit(summary('deploy', start))

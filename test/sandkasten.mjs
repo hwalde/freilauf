@@ -18,7 +18,7 @@ import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
 import { DatabaseSync } from 'node:sqlite'
-import { warteAuf } from './mini.mjs'
+import { waitFor } from './mini.mjs'
 
 export const PROJEKT = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
 
@@ -364,8 +364,8 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     hub.stderr.on('data', (d) => logs.push(String(d)))
     hub.on('exit', (code) => { if (code !== 0 && code !== null) console.log(`  (hub exited, code ${code})\n${logs.join('')}`) })
 
-    await warteAuf(async () => (await hol('/')).status === 200,
-      { was: `hub at ${zustand.basis} responds`, timeoutMs: 15_000 })
+    await waitFor(async () => (await hol('/')).status === 200,
+      { what: `hub at ${zustand.basis} responds`, timeoutMs: 15_000 })
 
     zustand.db = new DatabaseSync(join(SB, 'data', 'freilauf.db'))
     // The hub holds its own connection and writes in the background (scheduler,
