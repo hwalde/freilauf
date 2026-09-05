@@ -2421,6 +2421,28 @@ code. The seam gates exactly the three passes that TALK TO THE DAEMON —
 `enforceMaxRuntime()`, `reconcileContainers()`, `restoreSandboxProxies()` — and
 leaves the rest of `tick()` alone, the same shape the integrator fence has.
 
+**And then the rest of `tick()` needed the same fence after all**
+(`FREILAUF_WATCHER_OFF=1`, set in the hub's environment by
+`test/sandbox-env.mjs` next to `FREILAUF_INTEGRATOR_OFF`). `prepareWatcher()`
+imports `tick` into the TEST process and calls it there, while `hub.mjs` ran
+`setInterval(tick, 30_000)` in the hub process against the same database — two
+processes, one SQLite file, no fence, which is the third time this project has
+written down that exact sentence. It was not theoretical: three consecutive e2e
+runs on one commit failed 2, 3 and 1 checks, in different tests and in different
+assertions *within* one test, and every one of them asserted "exactly once" or
+an escalation level. The mechanism is `runs.log_offset` — a plain read, scan,
+`UPDATE ... WHERE id=?`, so two passes read the same starting offset, scanned
+the same bytes and both reported the same log line: one line reached `anzahl`
+2, and `rateLogHit()`'s repetition path turns that red, with a notification, for
+a hit the design says must stay yellow. Three answers, and each is worth having
+on its own: the seam (the suite owns the clock), a re-entrancy guard inside
+`tick()` so a production pass slower than 30 s cannot overlap itself
+(`skippedTicks()` counts what it skipped — a guard that drops work silently is
+the next entry in this file), and `claimOffset()`, which names the offset it
+expects to replace so a second reader gets `changes === 0` and honestly reports
+nothing. Guarded INSIDE `tick()`, so the hub's own first pass is covered too,
+and a hand-driven pass from another process can never be turned into a no-op.
+
 **But the shim is where the suite's evidence runs out, and that has now been
 paid for.** The first real sandboxed run (opencode in a container, 2026-09-05 —
 [docs/sandbox.md](docs/sandbox.md) has the account) found five faults, and every
@@ -3769,6 +3791,37 @@ errors (`post_api_request` only fires after success).
   `-t "=name:"`. And `tmux display -p -t "=name"` returns exit code 0 for a
   **non-existing** session — whoever checks "session gone?" with it checks
   nothing. That is what `tmux has-session` is for.
+
+  **The colon has now cost this project three times, and the third one is the
+  one to remember: a bare `=name` where a PANE is meant does not fail, it
+  SUCCEEDS EMPTY.** Measured on tmux 3.4 against a session with a genuinely dead
+  pane: `display -p -t '=name' '#{pane_dead} …'` exits 0 and expands every field
+  to nothing (four spaces for a five-field format), while `-t '=name:'` answers
+  `1  1788638393 2170172 sleep`. `server/watcher.mjs` had the bare form, its
+  guard read `r.ok && r.stdout.trim()` as "tmux said nothing", `pane_dead` kept
+  its `'?'` default — and so **the watcher had never once reported
+  `_pane_died`, for any run, since the line was written.** With it went
+  everything hanging off that report: the `exit_without_report` assessment, and
+  the whole sandbox recovery ladder (`panePostMortem()` maps a container's exit
+  125 to `'infra'` → `sandbox:client_gone` → `resumeRun()`), which was
+  unreachable from the watcher. Nobody noticed because
+  `watchFollowUps()` twenty lines further down had the colon all along, and
+  because every test of that path called `handleReport()` directly: the consumer
+  was covered and the producer had no test at all. `paneTarget(name)` in
+  sessions.mjs is the one place that writes it now, and a unit test greps
+  `server/` for a bare `=name` pane target. Same family as
+  `--no-optional-locks` after the subcommand making a dirty worktree read clean:
+  the dangerous tmux and git mistakes do not error, they answer emptily, and an
+  empty answer reads as good news.
+
+  Two more faults were sitting on those same three lines, both of them this
+  file's own recurring traps. A pane killed by a **signal** has an empty
+  `#{pane_dead_status}` (it carries `pane_dead_signal` instead), so splitting the
+  format on whitespace shifted every field left and wrote the pane's *death
+  time* into the exit status — `exit_code = 1788639504`. The fields are
+  `'|'`-separated now. And where the status was simply empty, `Number('')` being
+  `0` **and finite** recorded an agent the kernel shot as having exited cleanly.
+  Compare before converting; `exitStatus()` does.
 - **The terminal is fail-closed, twice.** `/term` only enables write access on an
   explicit `?ro=0` (`terminal.mjs`); without the parameter tmux attaches with
   `-r` AND every input is discarded. The client sets `ro=0` from `data-live` in
