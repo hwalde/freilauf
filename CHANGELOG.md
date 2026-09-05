@@ -23,10 +23,13 @@ a day on which nothing was released.
 - **A lost tmux session is resumed, not aborted.** When a run's session
   vanishes without the hub ending it — a server reboot, an update that took
   the tmux server, a dead server — the run is resumed in a new session:
-  claude, cursor and opencode continue their conversation (with a short
-  continuation prompt naming what was already committed), hermes and plugins
-  without a resume form are started afresh with their original task behind a
-  header saying the same. Capped at 3 automatic resumes per run
+  all four coding agents continue their conversation (with a short
+  continuation prompt naming what was already committed; measured for claude,
+  opencode and hermes), a plugin without a resume form is started afresh with
+  its original task behind a header saying the same. hermes 0.21 keeps its
+  session in `~/.hermes/state.db` and, on a TTY, stays interactive after
+  `-q` like the other three — the old "hermes exits when done" no longer
+  holds. Capped at 3 automatic resumes per run
   (`FREILAUF_RESUME_MAX`), after which the run ends the way it used to. One
   message per watcher pass names every run that was resumed, instead of one
   "aborted, work not merged" message per run. Deliberate ends — the kill
@@ -49,7 +52,10 @@ a day on which nothing was released.
   `freilauf undrain` switches the pipeline back on.
 - **`fl-start --resume <id>`**: the resume form per coding agent; a plugin
   declares its own as `launch.resume` with `{resume_id}` and may answer the id
-  with `resumeId(run)` (`docs/plugins.md`).
+  with `resumeId(run)` (`docs/plugins.md`). For opencode the continuation is
+  pasted into the editor after the TUI has drawn, because `--session <id>
+  --prompt` drops the text (measured with 1.18.29); for hermes it is
+  `chat --in <worktree> --resume <id> -q`.
 - `setup/03-install-services.sh` runs `loginctl enable-linger`, so the hub and
   the tmux server start at boot and not at the first login; `SETUP_WITH_AGENT.md`
   says what to do about OS updates and reboots.

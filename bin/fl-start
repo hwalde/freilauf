@@ -90,9 +90,10 @@ Options:
       --settings JSON   claude only: pass --settings JSON through (e.g. run hooks).
       --resume ID       continue an interrupted conversation instead of starting one:
                         claude --resume ID, cursor-agent --resume ID, opencode --session ID
-                        ('last' = opencode --continue); a --spec harness needs a
-                        'resume' argv in its declaration. The prompt (-p/-f) is then
-                        the continuation text. hermes has no resume form (ignored).
+                        ('last' = opencode --continue), hermes chat --in DIR --resume ID
+                        ('latest' = the workspace's newest session); a --spec harness
+                        needs a 'resume' argv in its declaration. The prompt (-p/-f)
+                        is then the continuation text.
   -h, --help            This help.
 
 Examples:
@@ -348,10 +349,6 @@ if [[ -n "$SPEC_MODE" ]]; then
     fi
 fi
 
-if [[ -n "$RESUME_ID" && -z "$SPEC_MODE" && "$HARNESS" == "hermes" ]]; then
-    err "Note: hermes has no resume form — starting afresh."
-    RESUME_ID=""
-fi
 
 if [[ -n "$EFFORT" && "$HARNESS" == "cursor" ]]; then
     # Passing it through with no effect would be worse than an error: cursor-agent has
@@ -618,8 +615,26 @@ cmd_autonomous() {
     }
     case "$HARNESS" in
         claude)  printf '%s --permission-mode %s%s "$FL_PROMPT"' "$(q "$BIN")" "$(q "$MODE")" "$claude_args" ;;
-        opencode) printf '%s --auto%s --prompt "$FL_PROMPT" 2>>%s' "$(q "$BIN")" "$model_args" "$(q "$OC_ERRLOG")" ;;
-        hermes)  printf '%s chat -q "$FL_PROMPT" --yolo%s' "$(q "$BIN")" "$model_args" ;;
+        # A RESUME takes no --prompt: measured with 1.18.29, `--session <id>
+        # --prompt "…"` (and `--continue --prompt`) opens the session and drops
+        # the text — nothing is submitted, the editor stays empty, even with the
+        # Enter nudge. The launcher pastes the continuation in instead
+        # (oc_resume_paste), the way the hub types a message into a session.
+        opencode) if [[ -n "$RESUME_ID" ]]; then
+                      printf '%s --auto%s 2>>%s' "$(q "$BIN")" "$model_args" "$(q "$OC_ERRLOG")"
+                  else
+                      printf '%s --auto%s --prompt "$FL_PROMPT" 2>>%s' "$(q "$BIN")" "$model_args" "$(q "$OC_ERRLOG")"
+                  fi ;;
+        # hermes' resume form (measured with 0.21): `--resume <id>` continues that
+        # session, `--resume latest` the newest one of the workspace `--in` names,
+        # and `-q` is the next turn. Model and provider go along on purpose: a
+        # resumed session "restores" its model but a call without them still went
+        # to the configured default (measured).
+        hermes)  if [[ -n "$RESUME_ID" ]]; then
+                     printf '%s chat --in %s --resume %s -q "$FL_PROMPT" --yolo%s' "$(q "$BIN")" "$(q "$WORKDIR")" "$(q "$RESUME_ID")" "$model_args"
+                 else
+                     printf '%s chat -q "$FL_PROMPT" --yolo%s' "$(q "$BIN")" "$model_args"
+                 fi ;;
         # cursor: the prompt is a POSITIONAL argument, not -p. '-p/--print' would be
         # wrong here -- it prints and exits, the session would be gone immediately.
         # This way the TUI works through the task and then stays open (like opencode),
@@ -662,6 +677,29 @@ oc_submit_nudge() {
   tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null
 ) >/dev/null 2>&1 &
 NUDGE
+}
+
+# opencode only, on a RESUME: type the continuation into the editor once the
+# TUI has drawn — a bracketed paste (multi-line without an accidental submit,
+# the same shape util.sendToSession() uses for a message to a running session)
+# and one Enter. Needed because `--session <id> --prompt` drops the text
+# (measured, see cmd_autonomous). The launcher holds the text in $FL_PROMPT;
+# the file it came from is already deleted by then, which is fine.
+oc_resume_paste() {
+    cat <<'PASTE'
+(
+  i=0
+  while [[ $i -lt 90 ]]; do
+      sleep 1
+      tmux capture-pane -p -t "$TMUX_PANE" 2>/dev/null | grep -q 'ctrl+p' && break
+      i=$((i + 1))
+  done
+  sleep 2
+  tmux send-keys -t "$TMUX_PANE" -l -- $'\e[200~'"$FL_PROMPT"$'\e[201~' 2>/dev/null
+  sleep 1
+  tmux send-keys -t "$TMUX_PANE" Enter 2>/dev/null
+) >/dev/null 2>&1 &
+PASTE
 }
 
 # Quota notice (claude only: usage.sh is Claude-specific).
@@ -857,7 +895,9 @@ else
         else
             printf 'rm -f %s %s\n' "$(q "$PF")" "$(q "$LF")"
         fi
-        [[ "$HARNESS" == "opencode" ]] && oc_submit_nudge
+        if [[ "$HARNESS" == "opencode" ]]; then
+            if [[ -n "$RESUME_ID" ]]; then oc_resume_paste; else oc_submit_nudge; fi
+        fi
         [[ -n "$SPEC_MODE" ]] && spec_submit_nudge
         if [[ -n "$SPEC_MODE" && "$SPEC_PROMPT_MODE" == "stdin" ]]; then
             # A here-string, not a pipe: the redirection is set up before exec, so

@@ -330,7 +330,7 @@ and does without.
 | `effortOptions({provider, model, helpers})` | async fn | levels for a concrete combination; returns `{stufen, standard?, pflicht?, quelle?, hinweisKey}` — `stufen: null` hides the form field. `helpers` = `{ownLevels, registryEffort, openrouterEffort}` |
 | `modelArgs(run, ctx, opts)` | fn | CLI arguments for `fl-start`; returns `{args, fehlt}` (`fehlt` = provider ids whose credential is missing). **Three arguments now** — see below |
 | `resumeCommand(run)` | fn (optional) | the shell command a HUMAN continues this run's session with, `cd <workdir> && …` included; `null` when the CLI has no reliable way (hermes). Called by `server/integrate.mjs` for every escalation message, the run's detail page and the failed/aborted Telegram texts. Only the plugin knows how its CLI names a session — claude gets `--session-id <run id>` from the hub and can name it back, cursor's id is its transcript's directory, opencode continues the last session of the worktree |
-| `resumeId(run)` | fn or async fn (optional) | the id the HUB continues this run's conversation with when its tmux session was lost (`server/runner.mjs`, `resumeRun` → `fl-start --resume <id>`). Without it the run id is used — right for a CLI that accepted `{session_id}` at launch. `null` means "nothing to continue": the run is then started afresh with its original task behind a header saying what already happened. claude answers the run id, cursor its transcript's basename, opencode the run's ROOT session out of its store (`'last'` = `--continue`) |
+| `resumeId(run)` | fn or async fn (optional) | the id the HUB continues this run's conversation with when its tmux session was lost (`server/runner.mjs`, `resumeRun` → `fl-start --resume <id>`). Without it the run id is used — right for a CLI that accepted `{session_id}` at launch. `null` means "nothing to continue": the run is then started afresh with its original task behind a header saying what already happened. claude answers the run id, cursor its transcript's basename, opencode the run's ROOT session out of its store (`'last'` = `--continue`), hermes the newest parentless session of the worktree out of `~/.hermes/state.db` (`'latest'` when the store does not say — hermes scopes that to the workspace `--in` names) |
 | `usage(ctx)` | async fn | subscription usage for the overview panel, or `null`. Shapes in `usage.mjs`: `{kind:'claude', five, seven, seven_general, seven_fable, weekly_scoped, live, resets_at, plan}` / `{kind:'cursor', plan, spent_usd, included_usd, included_estimated?, remaining_usd, pct, cycle_end}` |
 
 ### `modelArgs(run, ctx)` takes a context now
@@ -582,10 +582,19 @@ launch: {
   started afresh from `args` with its original task behind a header that names
   what it had already committed. The built-ins declare it (claude `--resume
   {resume_id}`, cursor `--resume {resume_id}`, opencode `--session
-  {resume_id}`), as documentation of what fl-start's own cases do. Measured for
-  claude: `claude --resume <id> "<text>"` continues the conversation with the
-  text as the next turn; without a prompt it waits for input, whatever the
-  permission mode — which is why the continuation text is not optional.
+  {resume_id}`, hermes `chat --in {workdir} --resume {resume_id} -q {prompt}`),
+  as documentation of what fl-start's own cases do. Measured for claude:
+  `claude --resume <id> "<text>"` continues the conversation with the text as
+  the next turn; without a prompt it waits for input, whatever the permission
+  mode — which is why the continuation text is not optional. Measured for
+  hermes 0.21 the same way (the code word from the first turn came back
+  through the resume form, and `-q` stays interactive on a TTY). opencode
+  1.18.29 is the odd one: `--session <id> --prompt "…"` opens the session and
+  DROPS the prompt (nothing submitted, editor empty), so its declared resume
+  form carries no `{prompt}` and fl-start pastes the continuation into the
+  editor once the status bar has drawn — measured end to end, same session,
+  the code word came back. A plugin whose CLI behaves like that has no
+  declaration for a paste yet; say so in its plugin and ask for one.
 - **`promptFile: { maxBytes }`** says this CLI cannot be trusted with a prompt
   past that size, and is the second half of the same problem. The nudge above
   fixes the usual case and not the tail: measured 2026-09-04, a 13.5 KB prompt
