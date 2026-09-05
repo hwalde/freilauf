@@ -79,6 +79,22 @@ export function stripAnsi(s) {
   return s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r/g, '')
 }
 
+/**
+ * Progress noise git writes to stderr while it checks out or transfers: a
+ * large repository under load produces megabytes of it, and it buries the one
+ * line that says WHY a command failed — a stored error that ends mid-progress
+ * carries no reason at all. Strips the progress families and collapses the
+ * blank lines they leave behind. Also used on the pipe-pane's CR-only line
+ * ends, so carriage returns become newlines first.
+ */
+export function stripGitProgress(stderr) {
+  return String(stderr ?? '')
+    .replace(/\r/g, '\n')
+    .replace(/^\s*(Updating files|Enumerating objects|Counting objects|Compressing objects|Receiving objects|Resolving deltas|Checking out files|Checking objects):.*$/gm, '')
+    .replace(/\n{2,}/g, '\n')
+    .trim()
+}
+
 export function sh(cmd, args, opts = {}) {
   return new Promise((resolve) => {
     execFile(cmd, args, { timeout: opts.timeout ?? 30_000, encoding: 'utf8', ...opts },

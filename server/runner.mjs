@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, cpSync, symlinkSync, ex
 import { join, resolve, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import db, { getRepo, addEvent } from './db.mjs'
-import { RUNS_DIR, WORKTREES_DIR, kurzid, sh, parseDbUtc } from './util.mjs'
+import { RUNS_DIR, WORKTREES_DIR, kurzid, sh, parseDbUtc, stripGitProgress } from './util.mjs'
 import { claudeQuota, sevenForRun } from './quota.mjs'
 import { skillPromptZusatz, zusaetzeDir } from './zusaetze.mjs'
 import { deliverGoal } from './goal.mjs'
@@ -391,11 +391,22 @@ export async function branchWorktree(repoPath, branch) {
   return null
 }
 
+// Progress noise git writes to stderr while it checks out: 'Updating files:
+//  5% (908/16971)' and friends. A large repository under load produces
+// megabytes of it, and it buries the one line that says WHY the command
+// failed — a stored error cut off mid-progress carries no reason at all
+// (stripGitProgress, used on the failure path below).
+
 async function makeWorktree(repo, run, branchName) {
   const wtRoot = join(WORKTREES_DIR, repo.name)
   mkdirSync(wtRoot, { recursive: true })
   await sh('git', ['-C', repo.path, 'worktree', 'prune'])
-  await sh('git', ['-C', repo.path, 'fetch', 'origin'])
+  // Same timeouts the integrator uses for its git calls. The 30 s default of
+  // sh() killed a real checkout of this hub's largest repository mid-way: a
+  // worktree add of 16 971 files measured 16.9 s on an idle machine and
+  // crossed 30 s under load, the child was SIGTERMed at 78 % of the checkout
+  // and the run failed with a progress dump instead of a reason.
+  await sh('git', ['-C', repo.path, 'fetch', 'origin'], { timeout: 120_000 })
   const base = repo.base_branch
   const target = join(wtRoot, `${kurzid(run.id)}-${(branchName || 'detached').replace(/\//g, '-')}`)
   // Retry of a failed run: the worktree from before is still there.
@@ -407,23 +418,30 @@ async function makeWorktree(repo, run, branchName) {
   if (occupied) throw new Error(t('run.branch_in_use', { branch: branchName, worktree: occupied }))
   let r
   if (run.branch_mode === 'keiner') {
-    r = await sh('git', ['-C', repo.path, 'worktree', 'add', '--detach', target, `origin/${base}`])
+    r = await sh('git', ['-C', repo.path, 'worktree', 'add', '--detach', target, `origin/${base}`], { timeout: 120_000 })
   } else {
     // Use an existing local branch — for "fixed" that is the point, for "new"
     // it makes the retry of a run whose worktree was already cleaned up work.
     const have = await sh('git', ['-C', repo.path, 'show-ref', '--verify', '--quiet', `refs/heads/${branchName}`])
     if (have.ok) {
-      r = await sh('git', ['-C', repo.path, 'worktree', 'add', target, branchName])
+      r = await sh('git', ['-C', repo.path, 'worktree', 'add', target, branchName], { timeout: 120_000 })
     } else {
       // A branch that so far only exists on origin starts from THERE, not from
       // the base branch — otherwise the run would build on a foreign history
       // and the first push would bounce off as non-fast-forward.
       const remote = await sh('git', ['-C', repo.path, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branchName}`])
       const start = remote.ok ? `origin/${branchName}` : `origin/${base}`
-      r = await sh('git', ['-C', repo.path, 'worktree', 'add', '-b', branchName, target, start])
+      r = await sh('git', ['-C', repo.path, 'worktree', 'add', '-b', branchName, target, start], { timeout: 120_000 })
     }
   }
-  if (!r.ok) throw new Error(t('run.worktree_failed', { err: r.stderr.trim() }))
+  if (!r.ok) {
+    // A killed or failed checkout leaves a HALF-FINISHED directory behind, and
+    // the retry path above would then blindly reuse it — the agent would work
+    // in a tree missing a fifth of its files. Take the partial directory with
+    // us; 'git worktree prune' at the next start clears the registration.
+    rmSync(target, { recursive: true, force: true })
+    throw new Error(t('run.worktree_failed', { err: stripGitProgress(r.stderr) }))
+  }
   applyExtras(repo, target)
   return target
 }
