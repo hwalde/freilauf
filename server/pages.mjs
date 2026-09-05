@@ -1362,6 +1362,14 @@ export async function pageRun(req, res, url, id) {
       ${sessionOpen ? `<button type="button" id="term-full-exit" class="icon-btn term-exit" title="${e(t('run.terminal_fullscreen_exit'))}" aria-label="${e(t('run.terminal_fullscreen_exit'))}">✕</button>` : ''}
       <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
     </div>
+    ${
+    // Selecting copies to the clipboard by itself (hub.js), but only a live
+    // client can do it with a plain drag: tmux runs with `mouse on`, so the
+    // drag is a mouse report — and a read-only client's input is dropped, by
+    // tmux and by terminal.mjs alike. There Shift is what makes the selection
+    // xterm's own, and a terminal in which marking silently does nothing is
+    // exactly the shape this whole feature was missing.
+    sessionOpen && !live ? `<p class="dim">${e(t('run.terminal_copy_hint'))}</p>` : ''}
     ${notifySwitch(run)}
     ${live && !arbeitet ? `<p class="dim">${e(t('run.session_after_hint'))}</p>` : ''}
     ${live ? `<form onsubmit="return freilaufSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>` : ''}

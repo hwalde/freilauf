@@ -54,8 +54,20 @@ a day on which nothing was released.
   the tmux server start at boot and not at the first login; `SETUP_WITH_AGENT.md`
   says what to do about OS updates and reboots.
 
+- **Marking text in the browser terminal copies it to the clipboard.** Drag
+  across a live session and the selection is in your system clipboard the
+  moment you let go, and the marking is cleared — the same gesture a terminal
+  on your own machine has. It works for a selection made with the keyboard in
+  tmux's copy-mode too, and in a read-only terminal (where tmux ignores the
+  mouse) by holding Shift while dragging; the page says so under such a
+  terminal. A short toast names every copy, because a clipboard written from a
+  remote session must not be written silently, and it says so as well when the
+  browser refused the clipboard. A request from inside the session to *read*
+  the clipboard is never answered.
+
 ### Changed
 
+- Toasts stay visible while the terminal is in full screen.
 - Watcher and scheduler run their first pass two seconds after a start instead
   of 30 seconds later, so a deferred run, a planned start, a pending goal or a
   lost session is looked at at once.

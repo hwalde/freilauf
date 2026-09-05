@@ -26,6 +26,7 @@ import { gruppe, pruefe, uebersprungen, gleich, wahr, falsch, enthaelt, warteAuf
 import { neuerSandkasten } from './sandkasten.mjs'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 
 const BEHALTEN = process.argv.includes('--keep')
 const SICHTBAR = process.argv.includes('--sichtbar')
@@ -1326,6 +1327,109 @@ try {
     falsch(await q.$eval('body', el => el.classList.contains('term-cinema-on')), 'a fresh page is an ordinary one again')
     sauber(q)
     await q.close()
+    sauber(p)
+    await p.close()
+  })
+
+  // Copying out of the terminal. Both paths are things neither the server nor a
+  // click can produce: an OSC 52 frame the way tmux sends one at the end of a
+  // mouse drag, and a selection that is xterm's own. The clipboard itself is
+  // stubbed in the page — what is under test is that the sequence is decoded
+  // and handed over at all, not that a headless Chromium can write a clipboard.
+  const clipboardStub = () => {
+    window.__copied = []
+    const stub = (text) => { window.__copied.push(String(text)); return Promise.resolve() }
+    try {
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: stub } })
+    } catch { /* then the fallback path runs, and the test says so by failing */ }
+  }
+
+  await pruefe('an OSC 52 out of the session lands in the clipboard — a read request is never answered', async () => {
+    const p = await neueSeite(`/runs/${R_LIVE}`, clipboardStub)
+    // Both clipboard ways need the document to be focused, and so does the code
+    // under test: an unfocused page drops the sequence on purpose.
+    await p.bringToFront()
+    await p.waitForSelector('#term .xterm-screen', { timeout: 15_000 })
+    // Exactly what tmux writes to its client: an EMPTY target field, base64, BEL.
+    await p.evaluate((b64) => window.FREILAUF_TERM.write('\x1b]52;;' + b64 + '\x07'),
+      Buffer.from('Kopf über — 42', 'utf8').toString('base64'))
+    await wartePage(p, () => window.__copied.length > 0, null, 'the clipboard to be written')
+    gleich(await p.evaluate(() => window.__copied[0]), 'Kopf über — 42',
+      'decoded as UTF-8, so umlauts survive the base64')
+    enthaelt(await p.textContent('#freilauf-toasts'), 'clipboard',
+      'and it says so — a clipboard written from a remote session must not be written silently')
+
+    // `?` asks for the clipboard's CONTENT. Answering it would hand whatever the
+    // operator has copied to whatever runs in that session.
+    await p.evaluate(() => window.FREILAUF_TERM.write('\x1b]52;;?\x07'))
+    await p.waitForTimeout(200)
+    gleich(await p.evaluate(() => window.__copied.length), 1, 'nothing was copied, and nothing was sent back')
+    sauber(p)
+    await p.close()
+  })
+
+  await pruefe('marking with the mouse copies and then clears the selection', async () => {
+    const p = await neueSeite(`/runs/${R_LIVE}`, clipboardStub)
+    await p.bringToFront()
+    await p.waitForSelector('#term .xterm-screen', { timeout: 15_000 })
+    await wartePage(p, (id) => (document.querySelector('#term .xterm-rows')?.textContent || '').includes(id),
+      R_LIVE, 'the session\'s content to be there to select')
+    // A drag that begins in the terminal and ends anywhere — which is why the
+    // mouseup goes to the document and not to the box.
+    const selected = await p.evaluate(() => {
+      const t = window.FREILAUF_TERM
+      document.getElementById('term').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      t.selectAll()
+      const sel = t.getSelection()
+      document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+      return sel
+    })
+    wahr(selected.length > 0, 'something was selected at all')
+    await wartePage(p, () => window.__copied.length > 0, null, 'the selection to reach the clipboard')
+    gleich(await p.evaluate(() => window.__copied[0]), selected, 'exactly what was marked')
+    await wartePage(p, () => !window.FREILAUF_TERM.hasSelection(), null,
+      'and the selection to be gone afterwards, the way tmux\'s own drag-end leaves it')
+
+    // A click somewhere else must not copy again: the drag is tracked from its
+    // mousedown precisely so a standing selection is not re-sent on every click.
+    await p.evaluate(() => {
+      window.FREILAUF_TERM.selectAll()
+      document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+    })
+    await p.waitForTimeout(200)
+    gleich(await p.evaluate(() => window.__copied.length), 1, 'a mouseup that began nowhere copies nothing')
+    sauber(p)
+    await p.close()
+  })
+
+  // …and the same thing once through the whole chain, because the test above
+  // writes the sequence into xterm itself and therefore proves nothing about
+  // the hop it actually comes over: tmux → the pty in terminal.mjs → the
+  // WebSocket → xterm's parser. The copy is aimed at THIS page's client by
+  // name (`-t`), so no other tmux client on the machine is written to, and the
+  // whole check reports itself skipped where the operator's tmux has
+  // `set-clipboard off` — that is their setting, not a broken hub.
+  const tmux = (...a) => { try { return String(execFileSync('tmux', a, { encoding: 'utf8' })).trim() } catch { return '' } }
+  const tmuxTest = tmux('show', '-sv', 'set-clipboard') === 'off'
+    ? (name) => uebersprungen(name, 'this machine\'s tmux has set-clipboard off — it sends no OSC 52 at all')
+    : pruefe
+  await tmuxTest('a tmux copy really arrives through the WebSocket', async () => {
+    const session = laufRow(R_LIVE).tmux_session
+    const p = await neueSeite(`/runs/${R_LIVE}`, clipboardStub)
+    await p.bringToFront()
+    await p.waitForSelector('#term .xterm-screen', { timeout: 15_000 })
+    // The page's own tmux client, by name — it appears when the WebSocket has
+    // attached, which is a beat after the first frame arrives.
+    let client = ''
+    for (let i = 0; i < 60 && !client; i++) {
+      client = tmux('list-clients', '-t', `=${session}`, '-F', '#{client_name}').split('\n')[0] || ''
+      if (!client) await p.waitForTimeout(100)
+    }
+    wahr(!!client, `the page is attached as a tmux client (${client})`)
+    tmux('set-buffer', '-w', '-t', client, '-b', 'fl-browser-test', 'TMUX-SAYS-HELLO')
+    await wartePage(p, () => window.__copied.includes('TMUX-SAYS-HELLO'), null,
+      'tmux\'s own clipboard sequence to come out at the other end')
+    tmux('delete-buffer', '-b', 'fl-browser-test')
     sauber(p)
     await p.close()
   })

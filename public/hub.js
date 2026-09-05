@@ -1914,11 +1914,20 @@
     const exit = document.getElementById('term-full-exit')
     if (!wrap || !enter || !exit) return
     const full = () => wrap.classList.contains('term-full')
+    // Under the native Fullscreen API only the subtree of the fullscreen element
+    // is rendered, so the toast box — which sits at the end of the body — would
+    // be invisible for as long as one is in there. It moves in with the terminal
+    // and comes back out afterwards. That matters most for the copy
+    // confirmation (a clipboard written from a remote session must not be
+    // written silently), and every other toast of the page is carried along by
+    // the same two lines.
+    const toasts = document.getElementById('freilauf-toasts')
     // xterm refits itself: the ResizeObserver in the block below watches #term,
     // and #term changes size the moment this class lands.
     const paint = (v) => {
       wrap.classList.toggle('term-full', v)
       document.body.classList.toggle('term-full-on', v)
+      if (toasts) { try { (v ? wrap : document.body).append(toasts) } catch {} }
     }
     const auf = () => {
       paint(true)
@@ -2052,6 +2061,120 @@
   term.loadAddon(fitAddon)
   term.open(termBox)
   fitAddon.fit()
+  // The browser suite's only way at the terminal: what follows below hangs on
+  // events a test cannot produce from outside the page — a WebSocket frame that
+  // is not a keystroke, an xterm selection nobody dragged. It exposes nothing a
+  // script on this page could not already read off the DOM.
+  window.FREILAUF_TERM = term
+
+  // ---- copying out of the terminal: mark it, and it is in the clipboard ----
+  // Two paths, because there are two kinds of selection here and only one of
+  // them is xterm's own:
+  //
+  //   - tmux runs with `mouse on` (bin/fl-start), so a plain drag never reaches
+  //     xterm at all: it is a mouse report, tmux selects in copy-mode, and its
+  //     default MouseDragEnd1Pane binding copies the selection and cancels it.
+  //     Mark, copy, deselect — the gesture was already complete; what was
+  //     missing was the last hop out of tmux. With `set-clipboard` (default
+  //     `external`) and the `clipboard` terminal feature, which tmux 3.4 hands
+  //     every `xterm*` client by itself, tmux sends the copied text to its
+  //     client as OSC 52. Measured against a real tmux client:
+  //     `ESC ] 52 ; ; <base64> BEL` — note the EMPTY target field. xterm.js has
+  //     no handler for that sequence and dropped it on the floor, which is the
+  //     whole of why nothing ever arrived in the browser's clipboard.
+  //   - where tmux does not see the mouse, the selection is xterm's own and
+  //     nobody else is going to copy it: a read-only client (tmux ignores its
+  //     input), an application inside the pane that grabbed mouse reporting,
+  //     and Shift+drag, which is how one selects locally while an application
+  //     owns the mouse.
+  //
+  // Both end in `copyOut()`, and it says so with a toast. That is not
+  // decoration: this writes the operator's system clipboard from a remote
+  // session, so it must never happen silently — and a copy that fails has to
+  // say so too, or one pastes yesterday's text into somebody's shell.
+  ;(function () {
+    let lastToast = null
+    const tell = (text, kind) => {
+      if (!window.freilaufToast) return
+      const standing = lastToast && lastToast.parentNode ? lastToast : null
+      lastToast = window.freilaufToast(text, { kind: kind, ms: 2500, replace: standing })
+    }
+    // The old textarea trick, for a browser that refuses the async API — or does
+    // not have it at all: `navigator.clipboard` is undefined outside a secure
+    // context, which is exactly what a hub reached over plain http is. It takes
+    // the focus for a moment, so whatever had it gets it back: an OSC 52
+    // arriving while the operator is typing a follow-up must not eat the next
+    // keystroke.
+    const legacyCopy = (text) => {
+      const before = document.activeElement
+      let ok = false
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.setAttribute('readonly', '')
+        ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0'
+        document.body.append(ta)
+        ta.select()
+        ok = document.execCommand('copy')
+        ta.remove()
+      } catch {}
+      try { if (before && before.focus) before.focus() } catch {}
+      return ok
+    }
+    const copyOut = async (text) => {
+      // Both ways need the document to be focused, and a background tab is not
+      // a failure worth a toast: something copying in a session nobody is
+      // looking at is dropped without a word.
+      if (!text || !document.hasFocus()) return false
+      let ok = false
+      try { await navigator.clipboard.writeText(text); ok = true } catch {}
+      if (!ok) ok = legacyCopy(text)
+      tell(ok ? T('js.term_copied', 'Copied to the clipboard')
+        : T('js.term_copy_failed', 'The browser did not allow the clipboard — copy the selection by hand.'),
+      ok ? 'ok' : 'err')
+      return ok
+    }
+
+    // OSC 52 = "set the clipboard". The payload is `<targets>;<base64>`, and a
+    // payload of `?` is a READ request: answering it would hand whatever the
+    // operator has in their clipboard to whatever runs in that session, so it
+    // is dropped on purpose and without an answer. Returning true means handled
+    // — nothing else in xterm gets to see it.
+    term.parser.registerOscHandler(52, (data) => {
+      const semi = String(data).indexOf(';')
+      if (semi < 0) return true
+      const payload = String(data).slice(semi + 1).replace(/\s+/g, '')
+      if (!payload || payload === '?') return true
+      let text = ''
+      try {
+        // atob answers bytes, not characters. Without the decoder every umlaut
+        // in a copied line arrives broken.
+        text = new TextDecoder().decode(Uint8Array.from(atob(payload), (c) => c.charCodeAt(0)))
+      } catch { return true }
+      copyOut(text)
+      return true
+    })
+
+    // xterm's own selection: copy when the mouse is let go, then clear it — the
+    // same shape tmux's drag-end has, so both paths feel like one behaviour.
+    // A failed copy KEEPS the selection: it is the only thing left to take by
+    // hand. The drag is tracked from its mousedown because it may well end
+    // outside the terminal, and a bare document-wide mouseup would re-copy a
+    // standing selection every time the operator clicks anything on the page.
+    let dragging = false
+    termBox.addEventListener('mousedown', () => { dragging = true })
+    document.addEventListener('mouseup', () => {
+      if (!dragging) return
+      dragging = false
+      // A double click settles its word selection a tick after the event.
+      setTimeout(() => {
+        if (!term.hasSelection()) return
+        const text = term.getSelection()
+        if (!text) return
+        copyOut(text).then((ok) => { if (ok) { try { term.clearSelection() } catch {} } })
+      }, 0)
+    })
+  }())
 
   const sendSize = () => {
     if (ws.readyState === WebSocket.OPEN) ws.send('\0' + term.cols + ',' + term.rows)
