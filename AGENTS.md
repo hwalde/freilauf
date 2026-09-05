@@ -3902,6 +3902,29 @@ errors (`post_api_request` only fires after success).
   And because a drag that does nothing is invisible as a fault, hub.js still
   says so once per page when a real drag ends with neither a selection nor a
   copy — which now only happens when the operator has handed the mouse back.
+- **A terminal mode written into xterm FROM THE CLIENT is undone by tmux's next
+  redraw**, and that made a browser test fail about half the time for reasons
+  that looked like a race and were not. The check that asserts "an application
+  that takes the mouse changes nothing" simulated the application by doing
+  `FREILAUF_TERM.write('\x1b[?1003h\x1b[?1006h')` — which sets the mode in the
+  browser's xterm and tells the tmux server nothing. The terminal is attached to
+  a LIVE session, and tmux re-asserts the pane's real mouse state on every
+  redraw: measured with a `CSI ?h/?l` recorder in the page, a fit or resize
+  landing in that window sent `l:1006 l:1000 l:1002 l:1003` ten to twenty-five
+  milliseconds after the write, three times over. tmux was right — nothing in
+  that pane wanted the mouse — so xterm's tracking died, the next drag selected
+  locally and copied, and only the clipboard assertion failed (`copyOut()`
+  clears the selection on success, so the `hasSelection()` check above it still
+  passed and named nothing). Two rules out of it: a mode belongs in the PANE,
+  set where tmux can see it (`tmux send-keys -H`, echoed by the pane's own
+  program) and then asserted from both ends — `#{mouse_any_flag}` is 1 AND the
+  sequence really arrived over the WebSocket — and a test whose premise can
+  quietly give way must assert that premise again AFTER the gesture it is about.
+  Neither of the two obvious explanations was right, incidentally: no OSC 52 was
+  ever involved (`tmux show -g mouse` is off on this machine and the suite's
+  `fl-start` stub does not set it, so tmux never copies and never sends one),
+  and no late copy from an earlier drag existed either — both were refuted by
+  recording what actually landed in the clipboard and where it came from.
 - **xterm stops propagation on its own element, so a listener that is not in
   the CAPTURE phase never sees a real drag.** The copy-on-release above hung on
   a `mouseup` listener on `document` and worked in the browser suite for weeks

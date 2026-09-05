@@ -79,8 +79,21 @@ process.on('SIGHUP', async () => { await cleanUp(); process.exit(129) })
  * `init` runs in the page before ANY script, so a test can e.g. shorten the
  * sidebar poll interval the page would otherwise use.
  */
+// `newPage()` takes no timeout of its own, so a Chromium that does not answer
+// hangs the whole suite FOREVER rather than failing one check — measured under
+// load (~60, 30 GB of swap, live agents on the machine): the run stalled here
+// and only an external `timeout` ended it, 600 s later, with ten bogus "browser
+// has been closed" failures in its wake. A hang is the worse failure of the two,
+// because it says nothing at all and a red check says where to look.
+const NEW_PAGE_MS = Number(process.env.FREILAUF_BROWSER_NEWPAGE_MS || 60_000)
+
 async function neueSeite(pfad, init) {
-  const p = await kontext.newPage()
+  const p = await Promise.race([
+    kontext.newPage(),
+    new Promise((_, ab) => setTimeout(
+      () => ab(new Error(`newPage() did not answer within ${NEW_PAGE_MS} ms — Chromium is stuck, not the hub`)),
+      NEW_PAGE_MS).unref()),
+  ])
   if (init) await p.addInitScript(init)
   p.fehler = []
   p.dialoge = []
