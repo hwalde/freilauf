@@ -122,6 +122,10 @@ const SANDBOX_RULES = [
   '  reaches you while you keep working — where it cannot, your session is resumed with',
   '  your conversation intact. Guessing at a way around the boundary costs the run;',
   '  one sentence of explanation does not.',
+  '- If nobody answers and you genuinely cannot finish without it, do NOT wait indefinitely:',
+  '  commit what you have and report — `done` with what you achieved and what is missing, or',
+  '  `failed` naming the host. Retrying for ever tells nobody anything, and a run that never',
+  '  reports is the one shape of failure this platform cannot see.',
 ].join('\n')
 
 /** How the network half of that block reads, per mode. */
