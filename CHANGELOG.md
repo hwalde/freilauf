@@ -125,6 +125,15 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A long goal is really set now.** A goal of more than about 800 characters
+  was typed into the session, looked right on the screen and did nothing:
+  claude turns a paste that long into a "[Pasted text #n]" placeholder, and a
+  placeholder is not read as a slash command — so the condition was submitted
+  as an ordinary message and the run ran without a goal, while the run's own
+  page said the goal had been delivered. The hub now does what a person does:
+  it *types* the `/goal` and pastes only the condition after it. Nothing about
+  a short goal changes, and a goal that was already delivered as a message is
+  not repeated — the fix takes effect for runs started after the deploy.
 - **A run that came through no longer keeps calling for attention.** A run that
   took longer than expected, or was quiet for a while, collected an anomaly and
   wore its traffic light for ever — so a run that had reported done and had its

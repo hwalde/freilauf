@@ -17,8 +17,14 @@
 //
 // `runs.goal_sent_at` is what keeps the two from typing it twice, and what makes
 // "was the goal ever delivered?" a question the detail page can answer.
+//
+// And it is TYPED, not pasted — the command word at least. A paste is not a
+// keystroke: claude turns one over 800 characters into a `[Pasted text #n]`
+// placeholder, which is never read as a slash command, so the whole line in one
+// paste went off as an ordinary message and the run had no goal while looking as
+// if it had one. See `goalKeys()` below.
 import db, { addEvent } from './db.mjs'
-import { sendToSession, sh } from './util.mjs'
+import { sendCommandToSession, sh } from './util.mjs'
 import { goalSpec } from './harnesses/index.mjs'
 import { env } from './env.mjs'
 
@@ -43,15 +49,39 @@ export function harnessSupportsGoal(harness) { return !!goalSpec(harness) }
 export function goalMax(harness) { return goalSpec(harness)?.max ?? null }
 
 /**
- * The condition as the line that goes into the session — or null when there is
- * nothing to send. Whitespace is folded: a slash command is one line, and a
- * pasted newline would submit the fragment in front of it as its own message.
+ * The line that goes into the session, split into the half that has to be
+ * TYPED and the half that may be pasted — or null when there is nothing to
+ * send. Whitespace is folded: a slash command is one line, and a pasted
+ * newline would submit the fragment in front of it as its own message.
+ *
+ * The split is what makes a long condition work at all. A TUI does not read a
+ * paste like keystrokes: claude collapses a bracketed paste over 800
+ * characters into a `[Pasted text #n]` placeholder, and a placeholder is never
+ * a slash command — so the whole line pasted in one piece arrived as an
+ * ordinary message and the run silently had no goal (measured 2.1.261, see
+ * util.sendCommandToSession). The plugin says which prefix must be typed; a
+ * plugin that declares none keeps the old single paste.
  */
-export function goalCommand(harness, condition) {
+export function goalKeys(harness, condition) {
   const spec = goalSpec(harness)
   const text = String(condition ?? '').replace(/\s+/g, ' ').trim()
   if (!spec || !text) return null
-  return spec.command(text.slice(0, spec.max))
+  const line = spec.command(text.slice(0, spec.max))
+  const typed = spec.typed ?? ''
+  // The declaration has to add up to the command the same plugin composes;
+  // where it does not, the whole line is pasted as before rather than sent in
+  // two halves that mean something else together.
+  if (!typed || !line.startsWith(typed)) return { typed: '', argument: line }
+  return { typed, argument: line.slice(typed.length) }
+}
+
+/**
+ * The same as one line — what the session ends up seeing, and what a test or a
+ * log line is about.
+ */
+export function goalCommand(harness, condition) {
+  const keys = goalKeys(harness, condition)
+  return keys ? keys.typed + keys.argument : null
 }
 
 /** Has the pane painted anything yet? The one signal every harness gives. */
@@ -90,8 +120,8 @@ export async function deliverGoal(runId, { warten = true } = {}) {
     // Only from 'running'. 'waiting_help' means the agent asked a question and
     // is waiting for an answer — a goal typed in there would BE that answer.
     if (run.status !== 'running') return false
-    const line = goalCommand(run.harness, run.goal)
-    if (!line) return false
+    const keys = goalKeys(run.harness, run.goal)
+    if (!keys) return false
 
     if (warten) {
       if (!await warteAufTui(run.tmux_session)) {
@@ -108,7 +138,7 @@ export async function deliverGoal(runId, { warten = true } = {}) {
     const jetzt = db.prepare('SELECT status, goal_sent_at FROM runs WHERE id=?').get(runId)
     if (!jetzt || jetzt.goal_sent_at || jetzt.status !== 'running') return false
 
-    const r = await sendToSession(run.tmux_session, line)
+    const r = await sendCommandToSession(run.tmux_session, keys.typed, keys.argument)
     if (!r.ok) {
       addEvent(runId, 'goal_failed', { error: (r.stderr || '').trim().slice(0, 200) })
       return false

@@ -92,10 +92,38 @@ export function sh(cmd, args, opts = {}) {
  * Shared by the run detail page and the flow step "send message".
  */
 export async function sendToSession(session, text) {
-  const r = await sh('tmux', ['send-keys', '-t', `=${session}:`, '-l', '--', '\x1b[200~' + String(text ?? '') + '\x1b[201~'])
+  return sendCommandToSession(session, '', text)
+}
+
+/**
+ * The same, but with a leading part that is TYPED rather than pasted.
+ *
+ * A TUI does not treat a paste like keystrokes. Claude Code collapses a
+ * bracketed paste of more than 800 characters into a `[Pasted text #n]`
+ * placeholder (measured on 2.1.261: 800 literal, 801 placeholder) — and a
+ * placeholder is never read as a slash command. So `/goal <long condition>`
+ * pasted in one piece was submitted as an ordinary message: the condition
+ * arrived at the agent as a wall of text and no goal was ever set. Typed by a
+ * human the very same text works, because the human types `/goal` and only
+ * pastes the argument.
+ *
+ * `typed` is therefore sent as literal KEYSTROKES first (no paste markers
+ * around it, so the TUI reads it as a command), and only `text` is pasted.
+ * Measured: the two never coalesce, not even with no pause between them — the
+ * 300 ms below is the same deliberate beat that already sits before Enter.
+ * An empty `typed` is the ordinary paste and does exactly what it always did.
+ */
+export async function sendCommandToSession(session, typed, text) {
+  const target = `=${session}:`
+  if (typed) {
+    const r = await sh('tmux', ['send-keys', '-t', target, '-l', '--', String(typed)])
+    if (!r.ok) return r
+    await new Promise(resolve => setTimeout(resolve, 300))
+  }
+  const r = await sh('tmux', ['send-keys', '-t', target, '-l', '--', '\x1b[200~' + String(text ?? '') + '\x1b[201~'])
   if (!r.ok) return r
   await new Promise(resolve => setTimeout(resolve, 300))
-  return sh('tmux', ['send-keys', '-t', `=${session}:`, 'Enter'])
+  return sh('tmux', ['send-keys', '-t', target, 'Enter'])
 }
 
 export function escapeHtml(s) {
