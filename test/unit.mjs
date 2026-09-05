@@ -7317,13 +7317,13 @@ try {
       // level returned null for every line a real proxy writes — an empty
       // `egress.jsonl` that reads like a quiet run rather than like a mapper
       // that never matched once. Hence a fixture and not a hand-built object.
-      const allowed = JSON.parse(mapIronLine('{"time":"2026-09-05T19:27:59.090Z","level":"INFO","msg":"request","audit":{"host":"api.stub.test:8443","method":"GET","path":"/v1/m","remote_addr":"172.19.0.4:38380","sni":"api.stub.test","mode":"mitm","action":"allow","status_code":200,"duration_ms":65.4},"request_transforms":[{"name":"allowlist","action":"allow"},{"name":"secrets","action":"allow"}]}', { runId: 'r1' }))
+      const allowed = JSON.parse(mapIronLine('{"time":"2026-09-05T19:27:59.090Z","level":"INFO","msg":"request","audit":{"host":"api.stub.test:8443","method":"GET","path":"/v1/m","remote_addr":"192.0.2.4:38380","sni":"api.stub.test","mode":"mitm","action":"allow","status_code":200,"duration_ms":65.4},"request_transforms":[{"name":"allowlist","action":"allow"},{"name":"secrets","action":"allow"}]}', { runId: 'r1' }))
       equal(allowed.host, 'api.stub.test', 'the host, without the port it arrived glued to')
       equal(allowed.port, 8443, 'which becomes the port, because the counters group on a host')
       equal(allowed.action, 'allow', 'an allowed request')
       equal(allowed.path, '/v1/m', 'and a terminated request really does have a path')
 
-      const rejected = JSON.parse(mapIronLine('{"time":"2026-09-05T19:28:51.764120857Z","level":"WARN","msg":"request","audit":{"host":"nope.stub.test:8443","method":"CONNECT","path":"","remote_addr":"172.19.0.4:38396","sni":"nope.stub.test","mode":"mitm","action":"reject","status_code":403,"duration_ms":0.059},"rejected_by":"allowlist","request_transforms":[{"name":"allowlist","action":"reject","duration_ms":0.02}]}'))
+      const rejected = JSON.parse(mapIronLine('{"time":"2026-09-05T19:28:51.764120857Z","level":"WARN","msg":"request","audit":{"host":"nope.stub.test:8443","method":"CONNECT","path":"","remote_addr":"192.0.2.4:38396","sni":"nope.stub.test","mode":"mitm","action":"reject","status_code":403,"duration_ms":0.059},"rejected_by":"allowlist","request_transforms":[{"name":"allowlist","action":"reject","duration_ms":0.02}]}'))
       equal(rejected.action, 'deny', 'a rejection')
       equal(rejected.rejected_by, 'allowlist', 'and what rejected it — which sits at the TOP level, not in `audit`')
       equal(rejected.path, null, 'an empty path on a CONNECT is nothing, never an empty string')

@@ -345,6 +345,36 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A sandboxed claude run could not start, and a sandboxed cursor or hermes run
+  started without the switches its plugin asked for.** Every coding-agent plugin
+  declares a `sandbox.env` — its telemetry and auto-update switches, and for
+  claude the `IS_SANDBOX=1` that lets `bypassPermissions` be accepted as
+  container root — and nothing read that declaration: the container got `HOME`,
+  `USER` and `PATH` and nothing else. Under a rootless daemon, which is every
+  claude run there is, the CLI refused 2.4 seconds after the container started
+  with *"--dangerously-skip-permissions cannot be used with root/sudo
+  privileges"*. Measured, and now covered by a unit test.
+- **…and it could not authenticate.** A subscription CLI logs in from a file in
+  the operator's `$HOME`; inside the box `$HOME` is the run's own seeded home and
+  that file is deliberately not copied there, so the declared credential is the
+  only way in — and `sandbox.credentials` was read only by the code that turns a
+  credential into a placeholder, never by anything that supplies one. A claude
+  run with the token configured on the hub started, drew its TUI and answered
+  *"Not logged in · Please run /login"*. The declared credentials now travel with
+  the run's other environment variables, which means `secrets.mode` governs them
+  exactly as it governs a model provider's key: real value under `env`,
+  placeholder under `inject`, absent under `none`.
+- **…and if it got past both, it stood at a dialog.** `IS_SANDBOX=1` is what
+  lets the bypass-permissions mode be accepted; it is not what makes that mode's
+  disclaimer go away. A sandboxed claude run drew *"WARNING: Claude Code running
+  in Bypass Permissions mode … ❯ No, exit / Yes, I accept"* and waited for a
+  keystroke nobody was there to press — a run that looks alive and is doing
+  nothing. The per-run home now carries the acceptance flag claude's own
+  `.claude.json` uses for it.
+
+  Together: claude, cursor and hermes have each now completed a real task inside
+  a container — file written, committed, reported over the hub socket, merged
+  into the base branch.
 - **The egress audit log was empty under iron-proxy, and would have stayed
   empty.** The mapper that folds that engine's log into `egress.jsonl` read the
   request fields at the top level of each line; the real binary puts them inside
