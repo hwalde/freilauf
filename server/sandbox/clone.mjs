@@ -23,7 +23,7 @@
 import { existsSync, mkdirSync, writeFileSync, rmSync, realpathSync, lstatSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import db, { getRepo } from '../db.mjs'
-import { WORKTREES_DIR, kurzid, sh } from '../util.mjs'
+import { WORKTREES_DIR, shortId, sh } from '../util.mjs'
 import { t } from '../i18n.mjs'
 
 /** A run whose working copy is a private clone rather than a linked worktree. */
@@ -43,7 +43,7 @@ export function runTipRef(runId) {
  */
 export function cloneDir(repo, run, branchName) {
   return join(WORKTREES_DIR, repo.name,
-    `${kurzid(run.id)}-${(branchName || 'detached').replace(/\//g, '-')}`)
+    `${shortId(run.id)}-${(branchName || 'detached').replace(/\//g, '-')}`)
 }
 
 /** `<repo.path>/.git`, resolved — a repo may itself be a worktree or use a `.git` file. */

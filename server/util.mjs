@@ -38,7 +38,7 @@ export function hubVersion() {
   return versionCache
 }
 
-export function kurzid(uuid) { return uuid.split('-')[0] }
+export function shortId(uuid) { return uuid.split('-')[0] }
 
 /**
  * Public base URL for the links the hub puts into a message: the hostname
@@ -426,7 +426,7 @@ export function slotsUniform(slots) {
 }
 
 /** Monday 00:00 of the week the date falls in (local time). */
-function wochenstart(d) {
+function weekStart(d) {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate())
   const versatz = (x.getDay() + 6) % 7          // Mon=0 … Sun=6
   x.setDate(x.getDate() - versatz)
@@ -454,7 +454,7 @@ export function scheduleDue(agent, now = new Date()) {
       if (!agent.schedule_anchor) return true
       const anker = new Date(`${agent.schedule_anchor}T00:00:00`)
       if (Number.isNaN(anker.getTime())) return true
-      const wochen = Math.round((wochenstart(now) - wochenstart(anker)) / (7 * 86400000))
+      const wochen = Math.round((weekStart(now) - weekStart(anker)) / (7 * 86400000))
       return wochen >= 0 && wochen % n === 0
     }
 

@@ -30,7 +30,7 @@ import net from 'node:net'
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { gruppe, pruefe, gleich, wahr, falsch, enthaelt, bericht, warteAuf, zaehler } from './mini.mjs'
+import { group, check, equal, isTrue, isFalse, contains, summary, waitFor, counter } from './mini.mjs'
 
 const start = Date.now()
 const BIND = '127.0.0.1'
@@ -136,7 +136,7 @@ function auditLines(runDir) {
 }
 
 async function main() {
-  gruppe('The sandbox egress proxy: default deny, a live swap, and no socket left behind')
+  group('The sandbox egress proxy: default deny, a live swap, and no socket left behind')
 
   const runDir = mkdtempSync(join(tmpdir(), 'freilauf-egress-'))
   const { server: up, offen: upOffen } = stubUpstream()
@@ -161,54 +161,54 @@ async function main() {
     onBlocked: (e) => blocked.push(e),
   })
 
-  const aufraeumen = async () => {
+  const cleanUp = async () => {
     await stopProxy(handle)
     up.close(); tun.close()
     rmSync(runDir, { recursive: true, force: true })
   }
 
   try {
-    await pruefe('an allowed host goes through, and the audit says so', async () => {
+    await check('an allowed host goes through, and the audit says so', async () => {
       const res = await proxyGet(handle.port, `http://localhost:${upPort}/hello`)
-      gleich(res.status, 200, 'the upstream answered')
-      enthaelt(res.body, 'upstream:/hello', 'and its body came through unchanged')
+      equal(res.status, 200, 'the upstream answered')
+      contains(res.body, 'upstream:/hello', 'and its body came through unchanged')
 
-      await warteAuf(() => auditLines(runDir).some((l) => l.action === 'allow'),
+      await waitFor(() => auditLines(runDir).some((l) => l.action === 'allow'),
         { was: 'the allow is written to egress.jsonl' })
       const line = auditLines(runDir).find((l) => l.action === 'allow')
-      gleich(line.host, 'localhost', 'the host')
-      gleich(line.method, 'GET', 'the method')
-      gleich(line.path, '/hello', 'the path — a plain HTTP request has one')
-      gleich(line.status_code, 200, 'the status')
-      gleich(line.run, 'r-egress', 'and the run it belongs to')
-      falsch(JSON.stringify(line).toLowerCase().includes('authorization'), 'and never a header value')
+      equal(line.host, 'localhost', 'the host')
+      equal(line.method, 'GET', 'the method')
+      equal(line.path, '/hello', 'the path — a plain HTTP request has one')
+      equal(line.status_code, 200, 'the status')
+      equal(line.run, 'r-egress', 'and the run it belongs to')
+      isFalse(JSON.stringify(line).toLowerCase().includes('authorization'), 'and never a header value')
     })
 
-    await pruefe('a denied host answers 403 with the sentence the agent acts on', async () => {
+    await check('a denied host answers 403 with the sentence the agent acts on', async () => {
       const res = await proxyGet(handle.port, `http://denied.test:${upPort}/x`)
-      gleich(res.status, 403, 'default deny: a host nobody allowed is refused')
-      enthaelt(res.body, 'denied.test', 'the body names the host')
-      enthaelt(res.body, 'fl-report access', 'and tells the agent what to do about it')
-      wahr(blocked.some((b) => b.host === 'denied.test'), 'the caller was told, so it can raise sandbox:blocked')
-      gleich(blocked.find((b) => b.host === 'denied.test').count, 1, 'with a running per-host count for its own throttle')
+      equal(res.status, 403, 'default deny: a host nobody allowed is refused')
+      contains(res.body, 'denied.test', 'the body names the host')
+      contains(res.body, 'fl-report access', 'and tells the agent what to do about it')
+      isTrue(blocked.some((b) => b.host === 'denied.test'), 'the caller was told, so it can raise sandbox:blocked')
+      equal(blocked.find((b) => b.host === 'denied.test').count, 1, 'with a running per-host count for its own throttle')
 
       const zweite = await proxyGet(handle.port, `http://denied.test:${upPort}/y`)
-      gleich(zweite.status, 403, 'still refused')
-      gleich(blocked.filter((b) => b.host === 'denied.test').at(-1).count, 2,
+      equal(zweite.status, 403, 'still refused')
+      equal(blocked.filter((b) => b.host === 'denied.test').at(-1).count, 2,
         'and the count is what lets a caller deduplicate — we report every one')
     })
 
-    await pruefe('a denied CONNECT answers 403 too, and the body reaches the client', async () => {
+    await check('a denied CONNECT answers 403 too, and the body reaches the client', async () => {
       const res = await proxyConnect(handle.port, `denied.test:${tunPort}`)
-      gleich(res.status, 403, 'the tunnel is refused')
-      enthaelt(res.body, 'denied.test', 'the host is in the body, not only in the status line')
-      enthaelt(res.body, 'fl-report access', 'and so is the way out')
+      equal(res.status, 403, 'the tunnel is refused')
+      contains(res.body, 'denied.test', 'the host is in the body, not only in the status line')
+      contains(res.body, 'fl-report access', 'and so is the way out')
     })
 
-    await pruefe('an allowed CONNECT really tunnels', async () => {
+    await check('an allowed CONNECT really tunnels', async () => {
       const res = await proxyConnect(handle.port, `localhost:${tunPort}`, { send: 'ping' })
-      gleich(res.status, 200, 'the tunnel is established')
-      enthaelt(res.body, 'echo:ping', 'and bytes cross it in both directions')
+      equal(res.status, 200, 'the tunnel is established')
+      contains(res.body, 'echo:ping', 'and bytes cross it in both directions')
       // A tunnel writes TWO lines: `phase: 'open'` the moment it is established,
       // and `phase: 'close'` with the byte counts when it ends. It used to write
       // only the second, and a keep-alive tunnel that lived for a whole run then
@@ -216,90 +216,90 @@ async function main() {
       // its egress log, and an auditor asking "did this run talk to its provider"
       // got silence. This wait takes whichever line arrives first, which is the
       // open one.
-      await warteAuf(() => auditLines(runDir).some((l) => l.method === 'CONNECT' && l.action === 'allow'),
+      await waitFor(() => auditLines(runDir).some((l) => l.method === 'CONNECT' && l.action === 'allow'),
         { was: 'the finished tunnel is audited' })
       const line = auditLines(runDir).find((l) => l.method === 'CONNECT' && l.action === 'allow')
-      gleich(line.path, null, 'a CONNECT has no path — null, never an empty string')
-      gleich(line.host, 'localhost', 'the host it tunnelled to')
+      equal(line.path, null, 'a CONNECT has no path — null, never an empty string')
+      equal(line.host, 'localhost', 'the host it tunnelled to')
     })
 
-    await pruefe('deny beats allow on the live listener, not only on paper', async () => {
+    await check('deny beats allow on the live listener, not only on paper', async () => {
       const res = await proxyGet(handle.port, `http://blocked.localhost:${upPort}/x`)
-      gleich(res.status, 403, 'a deny entry carves its hole out of the allow list')
+      equal(res.status, 403, 'a deny entry carves its hole out of the allow list')
     })
 
     // §7.12.3: this is the property the whole "loosen it without losing the
     // agent" flow depends on. The agent's retry must succeed, with no restart
     // and no dropped connection.
-    await pruefe('a live policy swap takes effect for the next request, without a restart', async () => {
+    await check('a live policy swap takes effect for the next request, without a restart', async () => {
       const vorher = handle.port
       const abgelehnt = await proxyGet(handle.port, `http://denied.test:${upPort}/z`)
-      gleich(abgelehnt.status, 403, 'refused before the change')
+      equal(abgelehnt.status, 403, 'refused before the change')
 
       const res = await reloadProxy(handle, specOf({ allow: ['localhost', 'denied.test'], deny: ['blocked.localhost'] }))
-      wahr(res.ok, 'the reload is accepted')
+      isTrue(res.ok, 'the reload is accepted')
 
       const nachher = await proxyGet(handle.port, `http://denied.test:${upPort}/z`)
-      gleich(nachher.status, 200, 'and the very next request goes through')
-      gleich(handle.port, vorher, 'on the same listener — nothing was restarted')
-      wahr(handle.server.listening, 'which is still up')
+      equal(nachher.status, 200, 'and the very next request goes through')
+      equal(handle.port, vorher, 'on the same listener — nothing was restarted')
+      isTrue(handle.server.listening, 'which is still up')
     })
 
-    await pruefe('audit-only lets it through AND records what it would have blocked', async () => {
+    await check('audit-only lets it through AND records what it would have blocked', async () => {
       const vorher = blocked.length
       await reloadProxy(handle, specOf({ allow: ['localhost'], auditOnly: true }))
       const res = await proxyGet(handle.port, `http://learnme.test:${upPort}/x`)
-      gleich(res.status, 200, 'in audit-only the request is not stopped')
-      enthaelt(res.body, 'upstream:/x', 'it really reached the upstream')
+      equal(res.status, 200, 'in audit-only the request is not stopped')
+      contains(res.body, 'upstream:/x', 'it really reached the upstream')
 
       // `handle.audit` is a createWriteStream: buffered, asynchronous, never
       // fsynced. Reading it with a synchronous readFileSync in the tick the
       // response resolved passes when the machine is idle and fails under load
       // — the two checks above wait for their line and this one did not.
-      await warteAuf(() => auditLines(runDir).some((l) => l.host === 'learnme.test'),
+      await waitFor(() => auditLines(runDir).some((l) => l.host === 'learnme.test'),
         { was: 'the would-be denial is written to egress.jsonl' })
       const line = auditLines(runDir).find((l) => l.host === 'learnme.test')
-      wahr(!!line, 'and it is written down')
-      gleich(line.action, 'would_deny', 'as the denial it WOULD have been — the allowlist grows from this')
-      wahr(blocked.length > vorher, 'the caller hears about it too')
-      gleich(handle.wouldBlock.get('learnme.test'), 1, 'counted per host, which is what an Adopt button reads')
-      gleich(handle.blocked.get('learnme.test'), undefined, 'and kept apart from a real denial')
+      isTrue(!!line, 'and it is written down')
+      equal(line.action, 'would_deny', 'as the denial it WOULD have been — the allowlist grows from this')
+      isTrue(blocked.length > vorher, 'the caller hears about it too')
+      equal(handle.wouldBlock.get('learnme.test'), 1, 'counted per host, which is what an Adopt button reads')
+      equal(handle.blocked.get('learnme.test'), undefined, 'and kept apart from a real denial')
     })
 
     // The lesson of test/proxy.mjs, one layer down: a tunnel is two sockets, and
     // a client that goes away has to take the upstream one with it.
-    await pruefe('an abandoned tunnel takes its upstream connection with it', async () => {
+    await check('an abandoned tunnel takes its upstream connection with it', async () => {
       await reloadProxy(handle, specOf({ allow: ['localhost'] }))
       const grund = tunOffen.size
       const offen = []
       for (let i = 0; i < 8; i++) {
         const res = await proxyConnect(handle.port, `localhost:${tunPort}`, { send: 'x', keepOpen: true })
-        gleich(res.status, 200, `tunnel ${i} is established`)
+        equal(res.status, 200, `tunnel ${i} is established`)
         offen.push(res.socket)
       }
-      await warteAuf(() => tunOffen.size >= grund + 8,
+      await waitFor(() => tunOffen.size >= grund + 8,
         { was: 'all eight tunnels really reached the upstream' })
 
       for (const s of offen) s.destroy()
-      await warteAuf(() => tunOffen.size <= grund,
+      await waitFor(() => tunOffen.size <= grund,
         { was: 'every upstream socket is closed again', timeoutMs: 10_000 })
-      gleich(tunOffen.size, grund, 'not one socket is left behind')
+      equal(tunOffen.size, grund, 'not one socket is left behind')
     })
 
-    await pruefe('stopping the proxy closes the listener and everything on it', async () => {
+    await check('stopping the proxy closes the listener and everything on it', async () => {
       const fence = await startProxy({ id: 'r-stop' }, specOf({ allow: ['localhost'] }), { runId: 'r-stop', bind: BIND })
       const port = fence.port
-      gleich((await proxyGet(port, `http://localhost:${upPort}/a`)).status, 200, 'it serves while it is up')
+      equal((await proxyGet(port, `http://localhost:${upPort}/a`)).status, 200, 'it serves while it is up')
       await stopProxy(fence)
       let refused = false
       try { await proxyGet(port, `http://localhost:${upPort}/a`) } catch { refused = true }
-      wahr(refused, 'and nothing answers on the port afterwards')
+      isTrue(refused, 'and nothing answers on the port afterwards')
     })
 
     // The fence has its own listener because it is the one case where loopback
     // MUST be refused: an allowlisted name resolving into RFC 1918 or onto
     // 169.254.169.254 is exactly the SSRF/rebinding attack it exists for.
-    await pruefe('the upstream CIDR fence refuses an allowlisted name that resolves inward', async () => {
+    await check('the upstream CIDR fence refuses an allowlisted name that resolves inward', async () => {
       const gemeldet = []
       const vorher = upOffen.size
       const fence = await startProxy({ id: 'r-cidr' },
@@ -311,44 +311,44 @@ async function main() {
         { runId: 'r-cidr', runDir, bind: BIND, onBlocked: (e) => gemeldet.push(e) })
       try {
         const res = await proxyGet(fence.port, `http://localhost:${upPort}/secret`)
-        gleich(res.status, 403, 'the name is on the allowlist and the ADDRESS still refuses it')
-        enthaelt(res.body, '127.0.0.1', 'the body names the address it resolved to')
-        enthaelt(res.body, '127.0.0.0/8', 'and the range that blocked it')
-        wahr(gemeldet.some((b) => b.host === 'localhost'), 'the caller hears about it like any other denial')
-        gleich(upOffen.size, vorher, 'and no new connection was made to the upstream')
+        equal(res.status, 403, 'the name is on the allowlist and the ADDRESS still refuses it')
+        contains(res.body, '127.0.0.1', 'the body names the address it resolved to')
+        contains(res.body, '127.0.0.0/8', 'and the range that blocked it')
+        isTrue(gemeldet.some((b) => b.host === 'localhost'), 'the caller hears about it like any other denial')
+        equal(upOffen.size, vorher, 'and no new connection was made to the upstream')
         // The wait is the whole check here. Without it this was the same race
         // as the audit-only line above, only failing SAFE: an audit file that
         // had not flushed yet contains no line that is not a deny, so the
         // assertion passed on an empty file and never verified anything. The
         // deny has to be there FIRST, and only then does "and nothing else" mean
         // something.
-        await warteAuf(() => auditLines(runDir).some((l) => l.run === 'r-cidr' && l.action === 'deny'),
+        await waitFor(() => auditLines(runDir).some((l) => l.run === 'r-cidr' && l.action === 'deny'),
           { was: 'the CIDR refusal is written to egress.jsonl' })
-        falsch(auditLines(runDir).some((l) => l.run === 'r-cidr' && l.action !== 'deny'),
+        isFalse(auditLines(runDir).some((l) => l.run === 'r-cidr' && l.action !== 'deny'),
           'nothing but the refusal is recorded for it')
       } finally {
         await stopProxy(fence)
       }
     })
 
-    await pruefe('mode "none" refuses everything, allowlist or not', async () => {
+    await check('mode "none" refuses everything, allowlist or not', async () => {
       const stumm = await startProxy({ id: 'r-none' },
         { network: { mode: 'none', allow: ['localhost'], denyUpstreamCidrs: [] } },
         { runId: 'r-none', bind: BIND })
       try {
         const res = await proxyGet(stumm.port, `http://localhost:${upPort}/x`)
-        gleich(res.status, 403, 'a run with no network gets none')
-        enthaelt(res.body, 'fl-report access', 'and is still told how to say so')
+        equal(res.status, 403, 'a run with no network gets none')
+        contains(res.body, 'fl-report access', 'and is still told how to say so')
       } finally {
         await stopProxy(stumm)
       }
     })
   } finally {
-    await aufraeumen()
+    await cleanUp()
   }
 
-  bericht('Sandbox egress proxy tests', start)
+  summary('Sandbox egress proxy tests', start)
 }
 
-main().then(() => process.exit(zaehler.fehler.length ? 1 : 0),
+main().then(() => process.exit(counter.failures.length ? 1 : 0),
   (err) => { console.error(err); process.exit(1) })

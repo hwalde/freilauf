@@ -317,7 +317,7 @@ be restarted every pass for ever; a deliberate caller (a reason other than
 not count against it. **"Could not try" is not "tried and died"**: a launch
 that fails on a resume — right after a reboot the tmux server itself may be a
 beat behind — leaves the mark standing and returns `retry`; the next pass's
-`retryPendingResumes()` launches again, and `verwaisteLaeufeAbschliessen()`
+`retryPendingResumes()` launches again, and `closeOrphanedRuns()`
 skips a pending run instead of failing it as an orphan. **One message per
 pass, not per run** (`announceResumes()`): a reboot takes every session at
 once, and six "aborted, work not merged" texts for one event was the shape the
@@ -641,7 +641,14 @@ overview next to the deferred ones and can be cancelled on their detail page.
 the record, report, log and incidents stay intact and the detail page keeps
 working. Only terminal statuses may go (`done`/`failed`/`aborted`): a running
 one is still being watched and a deferred/scheduled one would start later
-anyway, so archiving it would hide work that is not over. One click per row in
+anyway, so archiving it would hide work that is not over. **And not a finished
+run whose follow-up commission is open**, because archiving CLOSES the session
+(see below) and that is a session somebody is typing into — `displayStatus()`
+puts such a run back under "running" for exactly that reason, so the row said
+"running" and offered the archive button in the same breath. `archivable(run)`
+in `run-state.mjs` is the one rule, asked by the row's button, the row's bulk
+checkbox, the detail page and `archiveRecord()` alike; the refusal names the
+follow-up rather than claiming the run is not finished, which it is. One click per row in
 the overview (`POST /api/runs/<id>/archive`) or on the detail page; the
 **Archive** page (`/archive`, per repo like the overview) lists them
 newest-archived first with pagination (50 per page,
@@ -909,7 +916,7 @@ operator's runs start with.
 `db.mjs` imported the registry — and that import was the cycle: a coding agent
 known only at runtime cannot be named in a constraint written at schema time,
 plugin files were forbidden to import `db.mjs`, and the budget gate could not go
-through the aggregators. `harnessCheckAufloesen()` removes the clause once and
+through the aggregators. `dropHarnessCheck()` removes the clause once and
 idempotently. Nothing is lost, because the database never decided this:
 `runDefFromForm()`, `saveAgent()`, `createRun()` and `saveCodingAgent()` all
 validate against the registry and always did — which is also why `runs.harness`
@@ -2155,6 +2162,21 @@ The remote is the backup, and that is a rule beyond the integrator:
    Remote branches are **not** deleted after a merge in v1: visible history is
    cheaper than an accidental deletion.
 
+**Which is why `anomaly:unpushed` may only ever mean "this lives only on this
+machine".** The watcher's `checkFinishedBranches()` asked `%(upstream:track)`
+and read ANY divergence as unpushed — but the integrator merges the run's
+branch into `{base}` and pushes THAT, which leaves the branch exactly one
+commit **behind** its upstream with nothing of its own missing. Measured on run
+d4ee07d2: `merged` at 16:47:56, `anomaly:unpushed {"track":"[behind 1]"}` at
+16:47:58, a message on the operator's phone at 16:47:59 — about work that was
+on `origin/main`. Two fences now, and the second is the one that generalizes:
+`branchOnRemote(upstream, track)` (reports.mjs, pure) counts only **ahead** as
+outstanding — `[behind n]` is pushed, no upstream and `[gone]` are not, and
+`cleanupWorktrees()` beside it had said "no [ahead]" in its own comment all
+along; and a run whose work the hub itself put on origin (`merge_status` of
+`merged` or `kept_on_branch`) is not asked the question at all, which is the
+rule `cleanupWorktrees()` already carried and this pass did not.
+
 ### Follow-up reports: a finished run can report again
 
 Three of the four coding agents stay in their TUI after `fl-report done`, and
@@ -2329,7 +2351,7 @@ alongside production: the production database, `~/agents` and foreign tmux
 sessions are never touched, and only sessions the suite created itself are
 killed (also on Ctrl-C). Watcher passes are triggered directly instead of
 waiting for the 30-second interval. That sandbox lives in
-**`test/sandkasten.mjs`** — one construction, two suites, because a second copy
+**`test/sandbox-env.mjs`** — one construction, two suites, because a second copy
 of it would drift the way the run definition once did.
 
 **The sandbox kills what its own stub created, and the stub writes the list.**
@@ -2342,10 +2364,10 @@ gigabytes of RSS while it sat in swap. The leftovers are recognizable by their
 `-2` suffix — the stub's own collision loop, firing because a retry reuses the
 run id while the first session is still standing. The stub knows the name it
 created and cannot forget to write it down, so `$SB/sessions.txt` is the list and
-`aufraeumen()` reads it. Still no pattern across all `fl-*`: that file holds
+`cleanUp()` reads it. Still no pattern across all `fl-*`: that file holds
 exactly the sessions THIS sandbox produced.
 
-**And a cleanup that has to RUN is not a cleanup.** `aufraeumen()` was wired to
+**And a cleanup that has to RUN is not a cleanup.** `cleanUp()` was wired to
 SIGINT and SIGTERM, and the signal this suite actually dies of is neither: it is
 started inside an agent's own tmux session, and closing that session hangs up
 the whole process group — node's default for **SIGHUP** is to exit without
@@ -2355,7 +2377,7 @@ RSS, and the Sessions page — the page whose whole ordering rule is "oldest
 first, because that is the order one cleans up in" — unusable, because 300 of
 its rows were dead test sessions. So both suites answer SIGHUP as well, and,
 because a SIGKILL answers nothing, **a starting sandbox sweeps what a dead one
-left**: `verwaisteAufraeumen()` reads the OTHER sandbox's own `sessions.txt` and
+left**: `sweepOrphans()` reads the OTHER sandbox's own `sessions.txt` and
 kills exactly those names. The list is the proof of ownership on the way in
 exactly as it is on the way out — still no pattern across all `fl-*`. Those
 kills go out **in parallel**, and that is not tidiness: serially it is one
@@ -2365,11 +2387,11 @@ start and its first tmux call — enough to make the timing-sensitive incident
 tests in `e2e.mjs` fail (measured: 4 of 347, reproducible by seeding 25
 leftovers, green again once the sweep was parallel). A sweep must cost the
 suite that performs it as close to nothing as possible.
-`sandkastenVerwaist()` is the decision, pure and unit-tested, and it says no
+`sandboxOrphaned()` is the decision, pure and unit-tested, and it says no
 three times: never our own directory, never one whose `owner.pid` is still
 alive (sweeping a RUNNING suite would kill the sessions it is asserting on,
 from another process, with nothing to trace it back to), and never one carrying
-the `behalten` marker — `--keep` means a human is reading that sandbox, and its
+the `keep` marker — `--keep` means a human is reading that sandbox, and its
 owner is dead by definition. A directory from before the marker existed is
 judged by age alone (6 h; a live suite touches its own constantly), and an
 unreadable mtime is no evidence and therefore no sweep — the `Number('')`
@@ -3176,7 +3198,7 @@ name. It removes the row, its agents, its runs, and the `events` and
   `deferred` run would be deleted out from under a live tmux session. The
   refusal says how many.
 - **The order of the deletes is required, not tidy.** `foreign_keys` really is
-  ON here — `tabelleUmziehen()` switches it back on and leaves it there
+  ON here — `rebuildTable()` switches it back on and leaves it there
   (measured; an earlier version of this section's own skill documentation
   claimed the opposite) — so `DELETE FROM repos` is *refused* while a run still
   references the row. Doing it child-first in a transaction also makes the
@@ -3195,7 +3217,7 @@ name. It removes the row, its agents, its runs, and the `events` and
 
 `node:sqlite`'s `DatabaseSync` has **no `.transaction()`**; that is
 better-sqlite3's API, and reaching for it here cost a 500 and one e2e run to
-notice. `BEGIN`/`COMMIT`/`ROLLBACK` through `db.exec`, like `tabelleUmziehen()`.
+notice. `BEGIN`/`COMMIT`/`ROLLBACK` through `db.exec`, like `rebuildTable()`.
 
 ## Freilauf's own agent skills — shipped, installed, kept current
 
@@ -3469,7 +3491,7 @@ Every other sandbox variable points into the suite's own directory, but a
 coding agent's skill directory is derived from `$HOME`. Without this variable a
 suite run would install into — and later **delete from** — the operator's real
 `~/.claude/skills`. A suite that does not set it is not merely unreproducible,
-it is destructive. `test/sandkasten.mjs` and `test/unit.mjs` both set it.
+it is destructive. `test/sandbox-env.mjs` and `test/unit.mjs` both set it.
 
 ### The read-only JSON API the skills talk to
 
@@ -3507,7 +3529,7 @@ principle):
 | pipe-pane log, patterns per harness (plugin `logPatterns`, orchestrated in `detect.mjs`) | all; for hermes and cursor the **only** source | no: yellow; red on repetition within 10 min or 5 min of silence — or when the optional check LLM confirms it (Settings → Incident check: `llm_check_source` + `llm_check_model`, any plugin declaring `llm`) |
 | Provider pulse (plugin pulse targets, every 5 min) | global | after 2 failures, closes on recovery |
 
-**A working agent is never escalated.** `bewerteLogTreffer()` starts with a veto:
+**A working agent is never escalated.** `rateLogHit()` starts with a veto:
 measurable work *after* the last hit means the agent is demonstrably not blocked
 by an API error, so the hit was text on its screen — and neither repetition nor
 silence may promote it to red. Applying the module's own principle ("a real limit
@@ -3526,7 +3548,7 @@ probe, a test of error handling) inherits the worktree's hooks AND `FL_RUN_ID`
 but carries its own session id, and its API errors are the run's subject matter,
 not the run's provider problems. Measured 2026-08-30: an agent testing a fake
 model id (`nosuch/model-xyz`) opened a red "Model unavailable" on its own healthy
-run. The guard (`fremdeClaudeSession()` in detect.mjs, applied in `handleReport`)
+run. The guard (`foreignClaudeSession()` in detect.mjs, applied in `handleReport`)
 only ever narrows: no session id (an older fl-report) means the run's own.
 
 **A session the hub itself stopped is not a provider fault.** An error hook
@@ -3547,8 +3569,8 @@ stream aborted`) is still an incident.
 **Silence is only an argument where activity is measured.** `measureActivity()`
 has a source for claude (transcript mtime), opencode (session store) and cursor
 (transcript mtime, see "cursor: when a run is over"); for hermes it has none and
-returns nothing. `bewerteLogTreffer()` therefore reads
-`letzteAktivitaetMs === null` as *unknown*, never as *silent* — otherwise every
+returns nothing. `rateLogHit()` therefore reads
+`lastActivityMs === null` as *unknown*, never as *silent* — otherwise every
 yellow log hit on that harness turned red five minutes later while the agent was
 happily working. There, repetition and the check LLM are the escalation paths; a
 hit that has not recurred within 30 min expires by itself.
@@ -3587,7 +3609,7 @@ noise: it spends the colour, and the reader cannot use the dot any more.
 
 `anomaliesSettled(run)` (run-state.mjs, next to `displayStatus()` because it is
 the same kind of question — what does this run's state MEAN now) is the anomaly
-half of what `vorfallWeggrund()` does for incidents, and for the same stated
+half of what `incidentGoneReason()` does for incidents, and for the same stated
 reason: a run that reached `done` has answered them. Three fences, each a way
 it would otherwise go wrong:
 
@@ -3607,7 +3629,7 @@ it would otherwise go wrong:
 Only the **colour** ends. The event is not rewritten (`clearAnomalies()` is
 deliberately NOT called here — a run's end is not a claim that the overrun did
 not happen), the status cell still prints the anomaly as its dim history line,
-and the duration column next to it says 52/45 anyway. `ampel()` is exported for
+and the duration column next to it says 52/45 anyway. `trafficLight()` is exported for
 the test that holds this.
 
 ### opencode's activity: a run is a session TREE
@@ -3646,7 +3668,7 @@ what the old code returned, so the change can never answer less than before.
 ### Gone is gone: incidents resolve themselves
 
 An incident whose condition is demonstrably gone closes itself
-(`vorfallWeggrund()` in detect.mjs, applied in the watcher's `vorfaelleBewerten`
+(`incidentGoneReason()` in detect.mjs, applied in the watcher's `assessIncidents`
 pass). The record stays — history, counts, the detector's protocol — but the
 sidebar and the notifications stop counting it as open:
 
@@ -3662,7 +3684,7 @@ sidebar and the notifications stop counting it as open:
 
 A red incident does **not** page immediately: `notify_at` stores
 `occurrence + FREILAUF_INCIDENT_NOTIFY_DELAY_MS` (default 10 min,
-0 = immediately), and the watcher pass `vorfaelleMeldenFaellig()` sends only
+0 = immediately), and the watcher pass `notifyDueIncidents()` sends only
 what has come due and is STILL open. An incident that resolves itself within
 the grace period never pages. An incident that WAS announced also announces its
 recovery (`✅ Resolved: …`) when it auto-resolves — an alarm that rang is
@@ -3671,7 +3693,7 @@ message names the run first: title, agent or single run, repo, harness/model —
 "which work is this about" is the reader's first question, and a bare uuid does
 not answer it.
 
-### Does it need a human? (`brauchtMensch`)
+### Does it need a human? (`needsHuman`)
 
 Severity says how sure the detector is. It does **not** say whether anything is
 left to do — and that was the question the single "resolve" button could not
@@ -3691,8 +3713,8 @@ already answered what a model or auth hiccup during it meant. The notification
 states the group in its second line, so the reader can tell a "get up" from a
 "noted" without opening the hub.
 
-**Which means `typVonText()` decides who gets woken up, and a type it cannot
-name is filed as "nothing to do".** `unbekannt` is not in `MENSCH_TYPEN`, so a
+**Which means `typeFromText()` decides who gets woken up, and a type it cannot
+name is filed as "nothing to do".** `unbekannt` is not in `HUMAN_TYPES`, so a
 red incident the classifier missed lands under "Noticed — the hub carried on by
 itself (deferred, retried, or the agent simply kept working)". Measured
 2026-09-04: four opencode runs hit the OpenRouter key's daily credit cap within
@@ -3718,7 +3740,7 @@ cursor, like hermes, has **no** hook for API errors (its hook enum knows
 `beforeSubmitPrompt`, `afterAgentResponse`, `stop`, `sessionStart`, `sessionEnd`,
 `preToolUse`/`postToolUse`, … — nothing for a failed call), and there is no open
 pulse endpoint for `api2.cursor.sh`:
-`providerVonLauf()` deliberately returns `null` there ("not monitored", not
+`providerOfRun()` deliberately returns `null` there ("not monitored", not
 "healthy"). In return cursor rejects an unknown model **loudly and by name**
 (`Cannot use this model: …`) — unlike opencode and hermes. hermes swallows
 nonsense silently; opencode does complain, but as a generic `UnknownError` /
@@ -3983,7 +4005,7 @@ errors (`post_api_request` only fires after success).
   `⠠⠛ Globbing  555 tokens` opened a "Provider error" incident, because the
   pattern matches a token count just as happily as a 503. A status code counts
   only next to an error word (`HTTP_5XX` in `harnesses/patterns.mjs`, shared by
-  cursor/hermes/opencode and `typVonText`).
+  cursor/hermes/opencode and `typeFromText`).
 - **An agent working on Freilauf reads its own alarm texts into the log.** One
   cursor run produced three incidents in seven minutes, all from its own screen:
   the token count above, the hub's section heading `Incidents: rate limit and
@@ -3994,7 +4016,7 @@ errors (`post_api_request` only fires after success).
   test-runner tick lines and "… is detected"/"is reported" phrasings.
 - **And the exception list alone will never be enough.** The very next run — the
   claude run *fixing* the above — went red from two lines of the test file it had
-  just written (`scanneZeilen('cursor', ['API Error: 503', …])`), five hits in
+  just written (`scanLines('cursor', ['API Error: 503', …])`), five hits in
   two minutes via the repetition path. Two answers, and the second one is the
   load-bearing one: a call with a quoted argument list is source code, not
   output (no harness prints that shape); and above all, **work after the hit
@@ -4108,7 +4130,7 @@ errors (`post_api_request` only fires after success).
   cosmetics.** Three timers read that column as "when did this attempt begin":
   the overrun thresholds, the watcher's fallback for a harness that reports no
   activity, and — the expensive one —
-  `verwaisteLaeufeAbschliessen()`'s grace period, which is what keeps the sweep
+  `closeOrphanedRuns()`'s grace period, which is what keeps the sweep
   for interrupted starts off a run whose `fl-start` is still working.
   `pickUpScheduled()`, `startDeferredRun()` and `startScheduledNow()` all set it;
   the **retry route did not**, so a retried run had a grace period of zero. The

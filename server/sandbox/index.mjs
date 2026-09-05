@@ -37,7 +37,7 @@ import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import db, { addEvent, getSetting, setSetting } from '../db.mjs'
-import { RUNS_DIR, kurzid, sh } from '../util.mjs'
+import { RUNS_DIR, shortId, sh } from '../util.mjs'
 import { env } from '../env.mjs'
 import { t, currentLanguage } from '../i18n.mjs'
 import { dataDir } from '../paths.mjs'
@@ -287,7 +287,7 @@ async function hostHubSocket() {
  */
 export function hubId() {
   let id = getSetting('sandbox_hub_id')
-  if (!id) { id = kurzid(randomUUID()); setSetting('sandbox_hub_id', id) }
+  if (!id) { id = shortId(randomUUID()); setSetting('sandbox_hub_id', id) }
   return id
 }
 

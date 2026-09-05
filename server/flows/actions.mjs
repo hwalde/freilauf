@@ -5,7 +5,7 @@ import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import db, { addEvent } from '../db.mjs'
-import { RUNS_DIR, sh, sendToSession, kurzid } from '../util.mjs'
+import { RUNS_DIR, sh, sendToSession, shortId } from '../util.mjs'
 import { terminalText } from '../detect.mjs'
 // Imported under a different name: the api object below has a method called
 // `notify` too, and one of the two reading as the other is a trap worth a line.
@@ -44,7 +44,7 @@ export function runInfo(runId) {
   const finished = ['done', 'failed', 'aborted'].includes(run.status)
   return {
     id: run.id,
-    short_id: kurzid(run.id),
+    short_id: shortId(run.id),
     status: run.status,
     // 'done' | 'failed' | 'aborted' for finished runs, '' while still going
     outcome: finished ? run.status : '',
@@ -107,8 +107,8 @@ async function transcriptText(runId) {
   const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
   if (!run || run.harness !== 'claude' || !run.workdir_effective) return ''
   // Dynamic import: watcher.mjs imports the flow module — a static import would close the cycle.
-  const { claudeTranskriptPfad } = await import('../watcher.mjs')
-  const f = claudeTranskriptPfad(run)
+  const { claudeTranscriptPath } = await import('../watcher.mjs')
+  const f = claudeTranscriptPath(run)
   if (!existsSync(f)) return ''
   const { text, truncated } = tailBytes(f, TRANSCRIPT_TAIL_BYTES)
   const out = []

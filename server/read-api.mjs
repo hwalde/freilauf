@@ -28,8 +28,8 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRun, getRepo } from './db.mjs'
-import { RUNS_DIR, WORKTREES_DIR, kurzid } from './util.mjs'
-import { alleVorfaelle } from './incidents.mjs'
+import { RUNS_DIR, WORKTREES_DIR, shortId } from './util.mjs'
+import { allIncidentsOf } from './incidents.mjs'
 import { listFavorites, FAVORITES_MAX, favoriteSummary } from './favorites.mjs'
 import { listSessions, sessionMemory, paneAlive } from './sessions.mjs'
 import { panelValues, panelState } from './panels.mjs'
@@ -202,7 +202,7 @@ export async function readApi(req, res, url) {
       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY COALESCE(r.started_at, r.start_at) DESC LIMIT ?`
     const runs = db.prepare(sql).all(...args, limitOf(url))
-      .map(r => ({ ...r, short_id: kurzid(r.id) }))
+      .map(r => ({ ...r, short_id: shortId(r.id) }))
     json(res, 200, { ok: true, count: runs.length, limit: limitOf(url), runs })
     return true
   }
@@ -222,14 +222,14 @@ export async function readApi(req, res, url) {
       // being: this route is what the agent skills and `fl-api` print. Stripped
       // by name rather than by an allowlist, so a new column keeps appearing
       // here as before — the token is the exception, not the rule.
-      run: { ...run, report_token: undefined, short_id: kurzid(run.id), harness_label: harnessLabel(run.harness) },
+      run: { ...run, report_token: undefined, short_id: shortId(run.id), harness_label: harnessLabel(run.harness) },
       agent: agent ?? null,
       repo: repo ? { id: repo.id, name: repo.name, path: repo.path, base_branch: repo.base_branch, merge_mode: repo.merge_mode } : null,
       liveness: await livenessOf(run),
       worktree: worktreeOf(run),
       files: runFiles(run),
       events,
-      incidents: alleVorfaelle(run.id),
+      incidents: allIncidentsOf(run.id),
     })
     return true
   }

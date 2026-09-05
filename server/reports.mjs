@@ -8,8 +8,8 @@ import db, { addEvent } from './db.mjs'
 import { notify as notifyChannels, notifyOnFor, detailUrl } from './notify.mjs'
 import { sh, parseDbUtc } from './util.mjs'
 import { env } from './env.mjs'
-import { vorfallMelden, detektorLog, offeneVorfaelle } from './incidents.mjs'
-import { typVonClaudeFehler, typVonText, TYP_TEXT, fremdeClaudeSession, isSessionStopped } from './detect.mjs'
+import { reportIncident, detectorLog, openIncidentsOf } from './incidents.mjs'
+import { typeFromClaudeError, typeFromText, TYPE_TEXT, foreignClaudeSession, isSessionStopped } from './detect.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { transcriptState } from './cursor-transcript.mjs'
 
@@ -30,7 +30,7 @@ const HOOK_KINDS = ['_turn_end', '_exit', '_api_error', '_rate_limit', '_idle', 
 // because the socket is worth having either way: it is the only channel that
 // carries the report route WITHOUT carrying the rest of the hub's API with it.
 //
-// What the token is NOT: a replacement for `fremdeClaudeSession()`. A claude
+// What the token is NOT: a replacement for `foreignClaudeSession()`. A claude
 // process the agent spawns inherits the environment of the session it was
 // spawned from — `FL_RUN_TOKEN` exactly as it inherits `FL_RUN_ID` — so it
 // authenticates perfectly and is still not this run's own session. The token
@@ -247,7 +247,7 @@ async function paneCause(run, exit) {
       state = await rt.containerState(name, { runtime }) ?? { verdict: 'unreachable' }
     }
   } catch (err) {
-    detektorLog(run.id, { art: 'sandbox', grund: `containerState failed: ${err.message}` })
+    detectorLog(run.id, { art: 'sandbox', grund: `containerState failed: ${err.message}` })
   }
   return panePostMortem({ sandboxed: true, exit, container: state })
 }
@@ -401,8 +401,8 @@ export async function handleReport(runId, body, via = 'http') {
   // matter, not the run's provider problems — logged for the detector's
   // protocol, ignored otherwise. fl-report only sends session_id when the hook
   // JSON carried one, so an older fl-report changes nothing here.
-  if (HOOK_KINDS.includes(kind) && fremdeClaudeSession(runId, run.harness, body.session_id)) {
-    detektorLog(runId, { art: 'verworfen', grund: 'hook report from a foreign claude session (a process the agent spawned)',
+  if (HOOK_KINDS.includes(kind) && foreignClaudeSession(runId, run.harness, body.session_id)) {
+    detectorLog(runId, { art: 'verworfen', grund: 'hook report from a foreign claude session (a process the agent spawned)',
       kind, session: body.session_id })
     return { ok: true, message: null }
   }
@@ -539,12 +539,12 @@ export async function handleReport(runId, body, via = 'http') {
       // archive). The end is recorded by whoever ended it; an incident on top
       // of that is an alarm about our own cleanup — see isSessionStopped().
       if (isSessionStopped(text) || isSessionStopped(roh)) break
-      let typ = typVonClaudeFehler(roh)
+      let typ = typeFromClaudeError(roh)
       if (typ === null) break                       // e.g. max_output_tokens: not a provider problem
-      if (typ === 'unbekannt') typ = typVonText(`${roh} ${text}`)
+      if (typ === 'unbekannt') typ = typeFromText(`${roh} ${text}`)
       if (typ === 'rate_limit') db.prepare('UPDATE runs SET rate_limit_hits = rate_limit_hits + 1 WHERE id=?').run(runId)
       const beleg = [roh !== 'unknown' ? roh : null, text].filter(Boolean).join(' — ').slice(0, 300) || null
-      await vorfallMelden(runId, { typ, quelle: `hook:${run.harness}`, schwere: 'rot', beleg })
+      await reportIncident(runId, { typ, quelle: `hook:${run.harness}`, schwere: 'rot', beleg })
       break
     }
     case '_idle':
@@ -593,7 +593,7 @@ export async function handleReport(runId, body, via = 'http') {
  * the sandbox is keeping from it (SANDBOX_RESEARCH.md §7.12.1).
  *
  * It is `help`-like in everything that reaches a person: an incident in the
- * **Needs you** group (`sandbox_access` is in MENSCH_TYPEN, because a host, a
+ * **Needs you** group (`sandbox_access` is in HUMAN_TYPES, because a host, a
  * path or a memory limit is a decision and waiting does not make it), a
  * notification carrying the agent's own words, and never deduplicated — a
  * second, different need is a second question.
@@ -608,7 +608,7 @@ export async function handleReport(runId, body, via = 'http') {
  * policy change, and it reaches the agent through the proxy without anybody
  * typing anything.
  *
- * The incident is opened `stillMelden`, i.e. without the ten-minute grace
+ * The incident is opened `noNotify`, i.e. without the ten-minute grace
  * period: that delay exists so an alarm that answers itself never pages, and
  * this one cannot answer itself — the agent asked. The message goes out here
  * instead, at once, which is also what `help` does.
@@ -620,10 +620,10 @@ async function handleAccessRequest(run, text, { followup = false } = {}) {
   const runId = run.id
   const beleg = String(text ?? '').trim().slice(0, 300)
   addEvent(runId, 'access_request', { text: String(text ?? '').slice(0, 500), followup })
-  const offen = offeneVorfaelle(runId).find(v => v.typ === 'sandbox_access')
+  const offen = openIncidentsOf(runId).find(v => v.typ === 'sandbox_access')
   const wiederholung = !!offen && offen.beleg === beleg
-  await vorfallMelden(runId, { typ: 'sandbox_access', quelle: 'agent', schwere: 'rot',
-    beleg: beleg || null, stillMelden: true })
+  await reportIncident(runId, { typ: 'sandbox_access', quelle: 'agent', schwere: 'rot',
+    beleg: beleg || null, noNotify: true })
   if (!wiederholung) {
     const kopf = followup ? followUpHeader(run, 'FOLLOW-UP ACCESS REQUEST') : reportHeader(run, 'ACCESS REQUEST')
     await notifyRun(runId, 'access',
@@ -742,8 +742,8 @@ export function wantsTurnEndFollowUp(run, tip, harness) {
 async function handleFollowUp(run, body, via) {
   const runId = run.id
   const kind = String(body.kind || '')
-  if (HOOK_KINDS.includes(kind) && fremdeClaudeSession(runId, run.harness, body.session_id)) {
-    detektorLog(runId, { art: 'verworfen', grund: 'hook report from a foreign claude session (a process the agent spawned)', kind, session: body.session_id })
+  if (HOOK_KINDS.includes(kind) && foreignClaudeSession(runId, run.harness, body.session_id)) {
+    detectorLog(runId, { art: 'verworfen', grund: 'hook report from a foreign claude session (a process the agent spawned)', kind, session: body.session_id })
     return { ok: true, message: null }
   }
   // The agent of a follow-up in the gate is gone — the escalation, as for a
@@ -1090,7 +1090,7 @@ export function doneText(run, report, mergeLine = null) {
     ? `Duration: ${Math.round((Date.now() - Date.parse(run.started_at.replace(' ', 'T') + 'Z')) / 60000)} min`
     : ''
   const vorfaelle = db.prepare(`SELECT typ, anzahl FROM incidents WHERE run_id = ? ORDER BY id`).all(run.id)
-  const vf = vorfaelle.length ? ' · Incidents: ' + vorfaelle.map(v => `${TYP_TEXT[v.typ] ?? v.typ} ${v.anzahl}×`).join(', ') : ''
+  const vf = vorfaelle.length ? ' · Incidents: ' + vorfaelle.map(v => `${TYPE_TEXT[v.typ] ?? v.typ} ${v.anzahl}×`).join(', ') : ''
   const branch = run.branch_reported || run.branch_expected
   const zeile2 = [dur, branch ? `Branch: ${branch}` : null, run.pr_url ? `PR: ${run.pr_url}` : null,
     mergeLine].filter(Boolean).join(' · ')
@@ -1166,16 +1166,46 @@ export async function notifyRun(runId, type, text, lang = null) {
 }
 
 /**
+ * Is every commit of this branch already on the remote? Pure, so the rule can
+ * be stated in a test — the two callers in the watcher spend it as "there is
+ * nothing here that lives only on this machine".
+ *
+ * `%(upstream:track)` answers `[ahead n]`, `[behind n]`, `[ahead n, behind m]`,
+ * `[gone]`, or NOTHING when branch and upstream are identical. Two traps in
+ * that list, and this hub has now been caught by both:
+ *
+ *   - empty is also what a branch with NO upstream reports, so empty alone
+ *     never means "pushed" — hence the upstream is asked for as well;
+ *   - **behind-only means nothing is outstanding.** Reading any divergence as
+ *     "unpushed" is what turned the hub's own merge into a false alarm: the
+ *     integrator merges the run's branch into the base branch and pushes THAT,
+ *     which leaves the branch exactly one commit BEHIND its upstream with not a
+ *     single commit of its own missing from the remote. Measured on run
+ *     d4ee07d2 — `merged` at 16:47:56, `anomaly:unpushed {"track":"[behind 1]"}`
+ *     at 16:47:58, and a notification to the operator's phone at 16:47:59,
+ *     about work that was on `origin/main` by then. `cleanupWorktrees()` had
+ *     the right rule in its own comment ("no [ahead]") and asked this function,
+ *     which answered something stricter.
+ *
+ * `[gone]` is deliberately NOT synced: the upstream ref has been deleted, so
+ * the remote demonstrably no longer holds what it once did.
+ */
+export function branchOnRemote(upstream, track) {
+  if (!upstream) return false
+  const t = String(track ?? '')
+  if (t.includes('gone')) return false
+  return !/\bahead\b/.test(t)
+}
+
+/**
  * git helper check for the watcher: upstream AND tracking state.
- * The trap: '%(upstream:track)' is also empty when the branch has NO upstream
- * at all — empty alone does not mean "pushed". Hence the upstream comes back
- * too and 'synced' is only true when an upstream exists and nothing is pending.
- * Returns { upstream, track, synced }.
+ * Returns { upstream, track, synced } — see branchOnRemote() for what `synced`
+ * means and for the two ways of getting it wrong.
  */
 export async function branchSyncState(repoPath, branch) {
   const r = await sh('git', ['-C', repoPath, 'for-each-ref',
     '--format=%(upstream)%09%(upstream:track)', `refs/heads/${branch}`])
   if (!r.ok) return { upstream: '', track: '', synced: false }
   const [upstream = '', track = ''] = r.stdout.trim().split('\t')
-  return { upstream, track, synced: upstream !== '' && track === '' }
+  return { upstream, track, synced: branchOnRemote(upstream, track) }
 }

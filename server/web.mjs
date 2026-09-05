@@ -10,6 +10,7 @@ import { detectInstalled } from './harnesses/index.mjs'
 import { subscriptionUsage } from './usage.mjs'
 import { providerBalances } from './balances.mjs'
 import { sseHandler } from './events.mjs'
+import { archivable, followUpActive } from './run-state.mjs'
 import { launchRun } from './runner.mjs'
 import { startRun, startDeferredRun, startScheduledNow } from './scheduler.mjs'
 import { runDefFromForm, runStartFromForm, saveAgent, rememberRunChoice, lastRunChoiceFor } from './run-def.mjs'
@@ -58,7 +59,7 @@ import { readApi } from './read-api.mjs'
 import { setPanelValue, deletePanelValue } from './panels.mjs'
 import { mergeByHand, skipMerge, resetIntegration } from './integrate.mjs'
 import { redirect, body as readBody, parseForm, rememberRepo, requestRepo } from './web-helpers.mjs'
-import { vorfallLoesen, vorfaelleLoesen, vorfall } from './incidents.mjs'
+import { resolveIncident, resolveIncidentsOf, incidentById } from './incidents.mjs'
 import { t } from './i18n.mjs'
 import { flowRoute, flowApi } from './flows/web.mjs'
 import { flowsTick } from './flows/triggers.mjs'
@@ -114,6 +115,9 @@ function answer(req, res, code, obj, backTo) {
  * intact and reachable, it only leaves the overview. ONLY finished runs: a
  * running one is still being watched, and a deferred/scheduled one would simply
  * start later anyway — the archive must not hide a run that still has work to do.
+ * `archivable()` (run-state.mjs) is that rule, and it also covers the finished
+ * run that is working AGAIN because a follow-up commission is open: archiving
+ * closes the session, and there somebody is in it.
  *
  * One function because two routes archive: the single button in a row and the
  * overview's multi-select. Two copies of this rule is how one of them would
@@ -124,8 +128,13 @@ function answer(req, res, code, obj, backTo) {
  * sessions in one call instead of one at a time.
  */
 function archiveRecord(run) {
-  if (['running', 'waiting_help', 'scheduled', 'deferred'].includes(run.status)) {
-    return { error: t('api.archive_only_finished'), session: null }
+  if (!archivable(run)) {
+    // Two refusals, because they are two different facts about the run: one is
+    // not finished at all, the other is finished and back at work. A message
+    // saying "only finished runs" about a run whose record says `done` would
+    // send the reader looking for the wrong thing.
+    const key = followUpActive(run) ? 'api.archive_followup_open' : 'api.archive_only_finished'
+    return { error: t(key), session: null }
   }
   db.prepare(`UPDATE runs SET archived_at=COALESCE(archived_at, datetime('now')) WHERE id=?`).run(run.id)
   announceRun(run.id, 'archived')
@@ -734,7 +743,7 @@ async function api(req, res, url) {
     //
     // `started_at` becomes the REAL start, exactly as in pickUpScheduled(),
     // startDeferredRun() and startScheduledNow() — and here it is not cosmetic.
-    // `verwaisteLaeufeAbschliessen()` measures its grace period against
+    // `closeOrphanedRuns()` measures its grace period against
     // `started_at`, so a retry that kept the first attempt's timestamp had NO
     // grace at all: the watcher pass that fell into the seconds between
     // `launchRun()`'s `started` event and its `tmux_session` wrote
@@ -914,18 +923,18 @@ async function api(req, res, url) {
   // Resolve an incident (auto-alarm off) — single or all of one run.
   if (req.method === 'POST' && (m = path.match(/^\/api\/incidents\/(\d+)\/resolve$/))) {
     const b = await form(req)
-    const v = vorfall(+m[1])
+    const v = incidentById(+m[1])
     if (!v) return answer(req, res, 404, { ok: false, error: t('api.unknown_incident') }, b.back || '/')
-    vorfallLoesen(v.id, 'web')
+    resolveIncident(v.id, 'web')
     return answer(req, res, 200, { ok: true }, b.back || (v.run_id ? `/runs/${v.run_id}` : '/'))
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/incidents\/resolve-all$/))) {
-    vorfaelleLoesen(m[1], 'web')
+    resolveIncidentsOf(m[1], 'web')
     return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
   }
   if (req.method === 'GET' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/incidents$/))) {
-    const { alleVorfaelle } = await import('./incidents.mjs')
-    return json(res, 200, { ok: true, incidents: alleVorfaelle(m[1]) })
+    const { allIncidentsOf } = await import('./incidents.mjs')
+    return json(res, 200, { ok: true, incidents: allIncidentsOf(m[1]) })
   }
   if (req.method === 'POST' && path === '/api/settings/pipeline') {
     setSetting('pipeline_on', (await form(req)).value === '1' ? '1' : '0')
