@@ -52,7 +52,7 @@ import { readApi } from './read-api.mjs'
 import { setPanelValue, deletePanelValue } from './panels.mjs'
 import { mergeByHand, skipMerge, resetIntegration } from './integrate.mjs'
 import { redirect, body as readBody, parseForm, rememberRepo, requestRepo } from './web-helpers.mjs'
-import { vorfallLoesen, vorfaelleLoesen, vorfall } from './incidents.mjs'
+import { resolveIncident, resolveIncidentsOf, incidentById } from './incidents.mjs'
 import { t } from './i18n.mjs'
 import { flowRoute, flowApi } from './flows/web.mjs'
 import { flowsTick } from './flows/triggers.mjs'
@@ -703,7 +703,7 @@ async function api(req, res, url) {
     //
     // `started_at` becomes the REAL start, exactly as in pickUpScheduled(),
     // startDeferredRun() and startScheduledNow() — and here it is not cosmetic.
-    // `verwaisteLaeufeAbschliessen()` measures its grace period against
+    // `closeOrphanedRuns()` measures its grace period against
     // `started_at`, so a retry that kept the first attempt's timestamp had NO
     // grace at all: the watcher pass that fell into the seconds between
     // `launchRun()`'s `started` event and its `tmux_session` wrote
@@ -848,18 +848,18 @@ async function api(req, res, url) {
   // Resolve an incident (auto-alarm off) — single or all of one run.
   if (req.method === 'POST' && (m = path.match(/^\/api\/incidents\/(\d+)\/resolve$/))) {
     const b = await form(req)
-    const v = vorfall(+m[1])
+    const v = incidentById(+m[1])
     if (!v) return answer(req, res, 404, { ok: false, error: t('api.unknown_incident') }, b.back || '/')
-    vorfallLoesen(v.id, 'web')
+    resolveIncident(v.id, 'web')
     return answer(req, res, 200, { ok: true }, b.back || (v.run_id ? `/runs/${v.run_id}` : '/'))
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/incidents\/resolve-all$/))) {
-    vorfaelleLoesen(m[1], 'web')
+    resolveIncidentsOf(m[1], 'web')
     return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
   }
   if (req.method === 'GET' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/incidents$/))) {
-    const { alleVorfaelle } = await import('./incidents.mjs')
-    return json(res, 200, { ok: true, incidents: alleVorfaelle(m[1]) })
+    const { allIncidentsOf } = await import('./incidents.mjs')
+    return json(res, 200, { ok: true, incidents: allIncidentsOf(m[1]) })
   }
   if (req.method === 'POST' && path === '/api/settings/pipeline') {
     setSetting('pipeline_on', (await form(req)).value === '1' ? '1' : '0')

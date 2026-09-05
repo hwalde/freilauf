@@ -5,7 +5,7 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, openSyn
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import db, { getRepo, addEvent, announceRun, allSettings } from './db.mjs'
-import { RUNS_DIR, sh, parseDbUtc, kurzid } from './util.mjs'
+import { RUNS_DIR, sh, parseDbUtc, shortId } from './util.mjs'
 import { notify, notifyOnFor } from './notify.mjs'
 import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd, followUpHeader, clearAnomalies } from './reports.mjs'
 import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
@@ -13,9 +13,9 @@ import { storeActivity } from './opencode-store.mjs'
 import { deliverPendingGoals } from './goal.mjs'
 import { claudeQuota, sevenForRun, quotaFullWindow } from './quota.mjs'
 import { refreshClaudeLimits } from './claude-usage.mjs'
-import { scanneNeueBytes, transkriptFehler, bewerteLogTreffer, terminalText, vorfallWeggrund } from './detect.mjs'
-import { vorfallMelden, vorfallEskalieren, vorfallVerwerfen, vorfaelleMeldenFaellig, offeneVorfaelle, vorfallLoesen, detektorLog, msVon } from './incidents.mjs'
-import { pruefeTreffer, pruefLlmAktiv } from './pruefer.mjs'
+import { scanNewBytes, transcriptErrors, rateLogHit, terminalText, incidentGoneReason } from './detect.mjs'
+import { reportIncident, escalateIncident, dismissIncident, notifyDueIncidents, openIncidentsOf, resolveIncident, detectorLog, msFrom } from './incidents.mjs'
+import { checkHit, checkLlmActive } from './pruefer.mjs'
 import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
 import { flowsTick } from './flows/triggers.mjs'
@@ -42,7 +42,7 @@ export function stopWatcher() { clearInterval(timer); timer = null }
  * that was created just now and whose fl-start is still working. At hub start-up
  * the grace period is 0: whatever is there must come from an earlier process.
  */
-export function verwaisteLaeufeAbschliessen(gnadenfristSek = 300) {
+export function closeOrphanedRuns(gnadenfristSek = 300) {
   // A run without a session that is on its way BACK (resume_pending, see
   // resumeRun in runner.mjs) is not an orphan: its launch is the next pass's.
   const rows = db.prepare(`
@@ -61,7 +61,7 @@ export function verwaisteLaeufeAbschliessen(gnadenfristSek = 300) {
 }
 
 export async function tick() {
-  verwaisteLaeufeAbschliessen()
+  closeOrphanedRuns()
   await collectInboxes()
   // Runs whose resume did not get a session last time (the tmux server was a
   // beat behind, fl-start failed): launched again before anything else looks
@@ -87,9 +87,9 @@ export async function tick() {
   // held to its expected duration from the moment of the commission, like any
   // first attempt (see below).
   try { await watchFollowUps() } catch (e) { console.error('[watcher]', e.message) }
-  await vorfaelleBewerten()
-  await vorfaelleMeldenFaellig()
-  await providerPuls()
+  await assessIncidents()
+  await notifyDueIncidents()
+  await providerPulse()
   await finishCostsPass()
   await checkFinishedBranches()
   await retryDeferred()
@@ -241,7 +241,7 @@ async function watchRun(run) {
     // measureActivity() has a source for claude, opencode and cursor and none
     // for hermes, and without one `lastAct` falls back to the run's start: every
     // hermes run longer than a quarter of an hour was therefore flagged as idle
-    // while it worked. That is the same rule bewerteLogTreffer() already
+    // while it worked. That is the same rule rateLogHit() already
     // follows — an unmeasured harness is UNKNOWN, never silent (AGENTS.md,
     // "Silence is only an argument where activity is measured").
     const idle = now - lastAct > 15 * 60_000
@@ -274,8 +274,8 @@ async function watchRun(run) {
     }
     // Rate limit / provider errors: hooks report themselves (reports.mjs); here are
     // the two sources the hub reads from the outside — transcript and pipe-pane log.
-    await transkriptScannen(run)
-    await logScannen(run)
+    await scanTranscript(run)
+    await scanLog(run)
     // cursor's second end channel, independent of any hook (see below).
     if (await cursorTurnEndDetected(run)) return
     // red: a Claude window that concerns THIS run is at 100 %. Only a claude
@@ -353,7 +353,7 @@ async function watchFollowUps() {
 }
 
 /** Path of the Claude transcript: known in advance thanks to --session-id (planning 7.1). */
-export function claudeTranskriptPfad(run) {
+export function claudeTranscriptPath(run) {
   const dirName = run.workdir_effective.replaceAll('/', '-')
   return `${env('CLAUDE_PROJECTS') ?? `${homedir()}/.claude/projects`}/${dirName}/${run.id}.jsonl`
 }
@@ -380,9 +380,9 @@ function neueBytes(pfad, offset, maxBytes = 2_000_000) {
  * Catches the case where the StopFailure hook did not run, and yields every occurrence
  * with a timestamp (retry loops become visible as anzahl).
  */
-async function transkriptScannen(run) {
+async function scanTranscript(run) {
   if (run.harness !== 'claude' || !run.workdir_effective) return
-  const f = claudeTranskriptPfad(run)
+  const f = claudeTranscriptPath(run)
   if (!existsSync(f)) return
   let chunk
   try { chunk = neueBytes(f, run.transcript_offset ?? 0) } catch { return }
@@ -393,12 +393,12 @@ async function transkriptScannen(run) {
   const komplett = chunk.text.slice(0, schnitt + 1)
   const neuerOffset = (chunk.von ?? run.transcript_offset ?? 0) + Buffer.byteLength(komplett, 'utf8')
   db.prepare('UPDATE runs SET transcript_offset = ? WHERE id = ?').run(neuerOffset, run.id)
-  const fehler = transkriptFehler(komplett)
+  const fehler = transcriptErrors(komplett)
   if (!fehler.length) return
-  detektorLog(run.id, { art: 'transkript', treffer: fehler.length, bytes: komplett.length })
+  detectorLog(run.id, { art: 'transkript', treffer: fehler.length, bytes: komplett.length })
   for (const fe of fehler) {
     const tsMs = fe.ts ? Date.parse(fe.ts) : Date.now()
-    await vorfallMelden(run.id, { typ: fe.typ, quelle: 'transcript', schwere: 'rot',
+    await reportIncident(run.id, { typ: fe.typ, quelle: 'transcript', schwere: 'rot',
       beleg: [fe.enum, fe.text].filter(Boolean).join(' — ').slice(0, 300), tsMs: Number.isFinite(tsMs) ? tsMs : Date.now() })
   }
 }
@@ -406,19 +406,19 @@ async function transkriptScannen(run) {
 /**
  * pipe-pane log (all harnesses, for hermes the ONLY source): only the new bytes,
  * patterns per harness, hits start out YELLOW. They turn red through repetition or
- * silence (vorfaelleBewerten) — or immediately, if the check LLM confirms it.
+ * silence (assessIncidents) — or immediately, if the check LLM confirms it.
  */
-async function logScannen(run) {
+async function scanLog(run) {
   const logf = join(RUNS_DIR, run.id, 'log.txt')
   if (!existsSync(logf)) return
   let chunk
   try { chunk = neueBytes(logf, run.log_offset ?? 0) } catch { return }
-  if (chunk.uebersprungen) detektorLog(run.id, { art: 'log', hinweis: 'backlog skipped', bytes: chunk.uebersprungen })
+  if (chunk.uebersprungen) detectorLog(run.id, { art: 'log', hinweis: 'backlog skipped', bytes: chunk.uebersprungen })
   if (!chunk.text) return
-  const { treffer, neuerOffset } = scanneNeueBytes(run.harness, chunk.text, chunk.von ?? run.log_offset ?? 0)
+  const { treffer, neuerOffset } = scanNewBytes(run.harness, chunk.text, chunk.von ?? run.log_offset ?? 0)
   db.prepare('UPDATE runs SET log_offset = ? WHERE id = ?').run(neuerOffset, run.id)
   if (!treffer.length) return
-  detektorLog(run.id, { art: 'log', treffer: treffer.map(t => ({ typ: t.typ, zeile: t.zeile })) })
+  detectorLog(run.id, { art: 'log', treffer: treffer.map(t => ({ typ: t.typ, zeile: t.zeile })) })
 
   // One occurrence per type; the number of lines is carried in the evidence. Otherwise
   // a retry loop with 20 lines in a single pass goes red immediately — that decision
@@ -427,16 +427,16 @@ async function logScannen(run) {
   for (const t of treffer) if (!jeTyp.has(t.typ)) jeTyp.set(t.typ, t)
 
   let urteil = null
-  if (pruefLlmAktiv()) {
+  if (checkLlmActive()) {
     const zeilen = terminalText(chunk.text).split('\n').filter(z => z.trim()).slice(-80)
-    urteil = await pruefeTreffer({ runId: run.id, harness: run.harness, treffer: [...jeTyp.values()], zeilen })
-    detektorLog(run.id, { art: 'llm', urteil })
+    urteil = await checkHit({ runId: run.id, harness: run.harness, treffer: [...jeTyp.values()], zeilen })
+    detectorLog(run.id, { art: 'llm', urteil })
   }
 
   if (urteil && urteil.problem === false) return   // check LLM: harmless (menu, the agent's own code …)
   for (const [typ, t] of jeTyp) {
     const bestaetigt = urteil && urteil.problem === true && urteil.blockiert === true
-    await vorfallMelden(run.id, {
+    await reportIncident(run.id, {
       typ: bestaetigt && urteil.typ && urteil.typ !== 'kein' ? urteil.typ : typ,
       quelle: urteil?.problem === true ? 'log+llm' : 'log',
       schwere: bestaetigt ? 'rot' : 'gelb',
@@ -469,19 +469,19 @@ async function cursorTurnEndDetected(run) {
  * Assess open incidents by time and state, in two directions:
  *
  *   UP   yellow log incidents escalate (retry loop or silence after the hit) →
- *        red + a notification — bewerteLogTreffer's judgment, unchanged.
+ *        red + a notification — rateLogHit's judgment, unchanged.
  *   DOWN everything that demonstrably went away resolves ITSELF
- *        (vorfallWeggrund in detect.mjs): the run came through, the agent kept
+ *        (incidentGoneReason in detect.mjs): the run came through, the agent kept
  *        working after the occurrence, or a yellow hit was never repeated. The
  *        operator then has one thing fewer to click away — and an incident that
  *        that was announced also announces its recovery
- *        (vorfallVerwerfen), so an alarm that rang is un-rung.
+ *        (dismissIncident), so an alarm that rang is un-rung.
  *
  * What deliberately stays open: a red incident on a failed/aborted run (the
  * reason it did not come through — the operator decides), and merge_blocked
  * (the integrator's ladder, not time's).
  */
-async function vorfaelleBewerten() {
+async function assessIncidents() {
   const rows = db.prepare(`SELECT i.*, r.last_activity_at, r.status AS run_status FROM incidents i
     LEFT JOIN runs r ON r.id = i.run_id
     WHERE i.geloest_am IS NULL`).all()
@@ -491,24 +491,24 @@ async function vorfaelleBewerten() {
   for (const v of rows) {
     if (!(v.schwere === 'gelb' && v.quelle?.startsWith('log'))) continue
     if (!['running', 'waiting_help'].includes(v.run_status ?? '')) continue
-    const stufe = bewerteLogTreffer({ anzahl: v.anzahl, erstGesehenMs: msVon(v.erst_gesehen),
-      zuletztGesehenMs: msVon(v.zuletzt_gesehen), letzteAktivitaetMs: v.last_activity_at ? msVon(v.last_activity_at) : null,
+    const stufe = rateLogHit({ anzahl: v.anzahl, firstSeenMs: msFrom(v.erst_gesehen),
+      lastSeenMs: msFrom(v.zuletzt_gesehen), lastActivityMs: v.last_activity_at ? msFrom(v.last_activity_at) : null,
       jetztMs: jetzt })
     if (stufe === 'rot') {
       const grund = v.anzahl >= 2 ? `${v.anzahl}× within a short time` : 'no activity since the hit'
-      await vorfallEskalieren(v.id, grund)
+      await escalateIncident(v.id, grund)
     }
   }
 
   // DOWN: the condition is gone — resolve without asking.
   for (const v of rows) {
     if (v.geloest_am !== null) continue   // just escalated above stays red, just resolved stays resolved
-    const grund = vorfallWeggrund({
+    const grund = incidentGoneReason({
       typ: v.typ, schwere: v.schwere, runStatus: v.run_status ?? null,
-      letzteAktivitaetMs: v.last_activity_at ? msVon(v.last_activity_at) : null,
-      zuletztGesehenMs: msVon(v.zuletzt_gesehen), jetztMs: jetzt,
+      lastActivityMs: v.last_activity_at ? msFrom(v.last_activity_at) : null,
+      lastSeenMs: msFrom(v.zuletzt_gesehen), jetztMs: jetzt,
     })
-    if (grund) await vorfallVerwerfen(v.id, grund)
+    if (grund) await dismissIncident(v.id, grund)
   }
 }
 
@@ -527,32 +527,32 @@ const PULS = {
     .filter(([, p]) => p.pulse).map(([id, p]) => [id, p.pulse])),
   ...Object.assign({}, ...Object.values(HARNESS_PLUGINS).map(p => p.pulseTargets ?? {})),
 }
-const pulsZustand = { zuletztMs: 0, fehlschlaege: {} }
-export function providerVonLauf(run) {
+const pulseState = { zuletztMs: 0, fehlschlaege: {} }
+export function providerOfRun(run) {
   const plugin = getHarness(run.harness)
   const id = plugin?.pulseId ? plugin.pulseId(run) : (run.provider ?? null)
   return id && PULS[id] ? id : null
 }
-async function providerPuls(jetzt = Date.now()) {
+async function providerPulse(jetzt = Date.now()) {
   if (env('PULS_AUS') === '1') return
   const takt = Number(env('PULS_TAKT_MS') ?? 5 * 60_000)
-  if (jetzt - pulsZustand.zuletztMs < takt) return
-  pulsZustand.zuletztMs = jetzt
+  if (jetzt - pulseState.zuletztMs < takt) return
+  pulseState.zuletztMs = jetzt
   const aktiv = db.prepare(`SELECT harness, provider FROM runs WHERE status IN ('running','waiting_help')`).all()
-  const provider = new Set(aktiv.map(providerVonLauf).filter(Boolean))
+  const provider = new Set(aktiv.map(providerOfRun).filter(Boolean))
   for (const name of provider) {
-    const ok = await pulsPruefen(name)
-    const f = pulsZustand.fehlschlaege
+    const ok = await checkPulse(name)
+    const f = pulseState.fehlschlaege
     f[name] = ok ? 0 : (f[name] ?? 0) + 1
     const typ = `provider_down:${name}`
     if (!ok && f[name] >= 2) {
-      await vorfallMelden(null, { typ, quelle: 'puls', schwere: 'rot', beleg: `${name}: ${f[name]} consecutive checks without a response` })
+      await reportIncident(null, { typ, quelle: 'puls', schwere: 'rot', beleg: `${name}: ${f[name]} consecutive checks without a response` })
     } else if (ok) {
-      for (const v of offeneVorfaelle(null)) if (v.typ === typ) await vorfallVerwerfen(v.id, 'erholt')
+      for (const v of openIncidentsOf(null)) if (v.typ === typ) await dismissIncident(v.id, 'erholt')
     }
   }
 }
-async function pulsPruefen(name) {
+async function checkPulse(name) {
   const ziel = env('PULS_URL_TEST') ? { url: env('PULS_URL_TEST'), okStatus: [200] } : PULS[name]
   if (!ziel) return true
   try {
@@ -590,7 +590,7 @@ async function measureActivity(run) {
   const out = { lastActivity: null, tokensIn: 0, tokensOut: 0, costUsd: null, measured: false }
   if (run.harness === 'claude' && run.workdir_effective) {
     out.measured = true
-    const f = claudeTranskriptPfad(run)
+    const f = claudeTranscriptPath(run)
     if (existsSync(f)) {
       try {
         const stat = statSync(f)
@@ -757,7 +757,7 @@ async function announceResumes() {
     else if (r.retry) retry.push(r)
   }
   if (!ok.length && !deferred.length && !retry.length) return
-  const name = (id) => db.prepare('SELECT title FROM runs WHERE id=?').get(id)?.title || kurzid(id)
+  const name = (id) => db.prepare('SELECT title FROM runs WHERE id=?').get(id)?.title || shortId(id)
   const lines = ['🔁 tmux sessions were lost (a restart or a dead tmux server) — Freilauf resumed the runs:']
   if (ok.length) lines.push(`Resumed in a new session: ${ok.map(r => name(r.runId)).join(', ')}`)
   if (deferred.length) lines.push(`Waiting on the budget gate, resume pending: ${deferred.map(r => name(r.runId)).join(', ')}`)
@@ -909,7 +909,7 @@ async function confirmGone(run) {
  */
 async function tmuxServerGone(rows, live) {
   if (live.size || rows.length < 2) return
-  await vorfallMelden(null, {
+  await reportIncident(null, {
     typ: 'tmux_gone', quelle: 'watcher', schwere: 'rot',
     beleg: `tmux reports no running server, ${rows.length} sessions of this hub were open. `
          + `Nothing of this was done by Freilauf. Every run that was still working is being resumed `
@@ -921,7 +921,7 @@ async function tmuxServerGone(rows, live) {
 /** tmux cannot be asked at all. Runs then hang on 'running' with no explanation — say so. */
 async function tmuxUnreachable(reason) {
   console.error('[watcher] tmux unreachable:', reason)
-  await vorfallMelden(null, {
+  await reportIncident(null, {
     typ: 'tmux_unreachable', quelle: 'watcher', schwere: 'rot',
     beleg: `tmux gave no answer: ${String(reason).slice(0, 400)}. `
          + `Session cleanup is paused until it does — no run is ended on a guess.`,
@@ -930,8 +930,8 @@ async function tmuxUnreachable(reason) {
 
 /** tmux answers again: the transient outage above is over and closes itself. */
 async function tmuxAnswered() {
-  for (const v of offeneVorfaelle(null)) {
-    if (v.typ === 'tmux_unreachable') vorfallLoesen(v.id, 'watcher')
+  for (const v of openIncidentsOf(null)) {
+    if (v.typ === 'tmux_unreachable') resolveIncident(v.id, 'watcher')
   }
 }
 

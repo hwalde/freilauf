@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, cpSync, symlinkSync, ex
 import { join, resolve, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import db, { getRepo, addEvent } from './db.mjs'
-import { RUNS_DIR, WORKTREES_DIR, kurzid, sh, parseDbUtc, stripGitProgress } from './util.mjs'
+import { RUNS_DIR, WORKTREES_DIR, shortId, sh, parseDbUtc, stripGitProgress } from './util.mjs'
 import { claudeQuota, sevenForRun } from './quota.mjs'
 import { skillPromptZusatz, zusaetzeDir } from './zusaetze.mjs'
 import { deliverGoal } from './goal.mjs'
@@ -365,7 +365,7 @@ function expandPattern(pattern, run) {
   return String(pattern || '')
     .replaceAll('{date}', new Date().toISOString().slice(0, 10).replaceAll('-', ''))
     .replaceAll('{agent}', run.agent_name || 'single')
-    .replaceAll('{kurz}', kurzid(run.id))
+    .replaceAll('{kurz}', shortId(run.id))
 }
 
 /**
@@ -408,7 +408,7 @@ async function makeWorktree(repo, run, branchName) {
   // and the run failed with a progress dump instead of a reason.
   await sh('git', ['-C', repo.path, 'fetch', 'origin'], { timeout: 120_000 })
   const base = repo.base_branch
-  const target = join(wtRoot, `${kurzid(run.id)}-${(branchName || 'detached').replace(/\//g, '-')}`)
+  const target = join(wtRoot, `${shortId(run.id)}-${(branchName || 'detached').replace(/\//g, '-')}`)
   // Retry of a failed run: the worktree from before is still there.
   // 'git worktree add' would fail on it — so reuse what already stands.
   if (existsSync(target)) return target
@@ -818,7 +818,7 @@ export async function launchRun(runId) {
   if (!run) throw new Error(`run ${runId} not found`)
   const repo = getRepo(run.repo_id)
   const agent = run.agent_id ? db.prepare('SELECT * FROM agents WHERE id = ?').get(run.agent_id) : null
-  const kurz = kurzid(runId)
+  const kurz = shortId(runId)
   const runDir = join(RUNS_DIR, runId)
   mkdirSync(runDir, { recursive: true })
   const resuming = !!run.resume_pending

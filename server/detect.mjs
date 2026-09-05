@@ -19,7 +19,7 @@ import { HARNESS_PLUGINS } from './harnesses/index.mjs'
 import { HTTP_5XX } from './harnesses/patterns.mjs'
 
 /** Incident types. Anything else would be guesswork — better 'unbekannt' than wrong. */
-export const TYPEN = ['rate_limit', 'provider_error', 'auth_error', 'billing_error', 'model_error',
+export const INCIDENT_TYPES = ['rate_limit', 'provider_error', 'auth_error', 'billing_error', 'model_error',
   // Not a provider problem at all: the hub could not get a finished run's work
   // onto the base branch (server/integrate.mjs). It sits in the same table
   // because it answers the same question — is anything waiting for me?
@@ -42,8 +42,8 @@ const CLAUDE_ENUM = {
   max_output_tokens: null,   // not a provider problem, the agent keeps running
   unknown: 'unbekannt',
 }
-export function typVonClaudeFehler(enumWert) {
-  const v = CLAUDE_ENUM[String(enumWert ?? '')]
+export function typeFromClaudeError(enumValue) {
+  const v = CLAUDE_ENUM[String(enumValue ?? '')]
   return v === undefined ? 'unbekannt' : v
 }
 
@@ -89,14 +89,14 @@ export function isSessionStopped(text) {
  *
  * Neither says "402", "billing", "insufficient credits" or "credit balance",
  * so both fell through to `unbekannt` — which renders as "API error" and,
- * because `unbekannt` is not in MENSCH_TYPEN, files under "Noticed, nothing to
+ * because `unbekannt` is not in HUMAN_TYPES, files under "Noticed, nothing to
  * do: the hub carried on by itself (deferred, retried, or the agent simply
  * kept working)". The hub had carried on with none of those: run 98d81463 had
  * burned $72.66, stopped dead at the first refusal and stood in `running` for
  * eight hours. `incidents.needs_you_hint` names credits in its first three
  * words for exactly this case.
  */
-export function typVonText(text) {
+export function typeFromText(text) {
   const t = String(text ?? '')
   if (/\b(401|403)\b|authentication|unauthori[sz]ed|invalid (api )?key|api key (is )?(invalid|missing)|please run \/login|oauth/i.test(t)) return 'auth_error'
   if (/\b402\b|billing|insufficient (credits|funds|balance)|credit balance|account (is )?on hold|payment/i.test(t)) return 'billing_error'
@@ -132,7 +132,7 @@ const MUSTER = Object.fromEntries(
  * Lines that contain hits but are NOT errors. This collects what has already
  * misfired in practice — plus the obvious relatives.
  */
-const AUSNAHMEN = [
+const EXCEPTIONS = [
   /upgrade to max/i,                       // Claude command menu: "/upgrade … higher rate limits"
   /\/(upgrade|usage|usage-credits|status|help)\b/,  // menu lines with slash command
   /^\s*[│|]?\s*(rate|usage) limit(s)?\s*[│|]?\s*$/i, // bare heading (e.g. /usage table)
@@ -145,7 +145,7 @@ const AUSNAHMEN = [
   /retry_after|retryAfter|rateLimit[A-Z]|rate_limit_hits|RATE_LIMIT/, // identifiers in source
   // A call with a quoted/bracketed argument list is source code, not output —
   // the error text sits INSIDE a string literal. This repo's own test lines
-  // (`scanneZeilen('cursor', ['API Error: 503', …])`) scrolled through a
+  // (`scanLines('cursor', ['API Error: 503', …])`) scrolled through a
   // claude run's terminal and opened two red incidents on it. No real harness
   // error message has this shape: they print `API Error: 529 {…}`,
   // `upstream connection error (503)`, `Retrying in 12.0s (…)`.
@@ -164,13 +164,13 @@ const AUSNAHMEN = [
  * Scans cleaned lines with the patterns of one harness.
  * Returns [{ typ, zeile, index }] — each line at most once (first pattern wins).
  */
-export function scanneZeilen(harness, zeilen) {
+export function scanLines(harness, zeilen) {
   const muster = MUSTER[harness] ?? []
   const treffer = []
   zeilen.forEach((roh, index) => {
     const zeile = roh.trim()
     if (!zeile || zeile.length > 2000) return
-    if (AUSNAHMEN.some(a => a.test(zeile))) return
+    if (EXCEPTIONS.some(a => a.test(zeile))) return
     for (const m of muster) {
       if (m.re.test(zeile)) { treffer.push({ typ: m.typ, zeile: zeile.slice(0, 300), index }); break }
     }
@@ -184,30 +184,30 @@ export function scanneZeilen(harness, zeilen) {
  * the new offset points at its start, so it arrives complete on the next pass.
  * Otherwise a line break in the middle of a word would tear the hit apart.
  */
-export function scanneNeueBytes(harness, text, altOffset) {
+export function scanNewBytes(harness, text, oldOffset) {
   const sauber = terminalText(text)
   const letzterUmbruch = sauber.lastIndexOf('\n')
-  if (letzterUmbruch < 0) return { treffer: [], neuerOffset: altOffset }
+  if (letzterUmbruch < 0) return { treffer: [], neuerOffset: oldOffset }
   const komplett = sauber.slice(0, letzterUmbruch)
   // The offset counts RAW bytes; the cleanup changes lengths. So the remainder
   // is computed from the raw length of the incomplete trailing line.
   const rohRest = Buffer.byteLength(text.slice(text.lastIndexOf('\n') + 1), 'utf8')
-  const neuerOffset = altOffset + Buffer.byteLength(text, 'utf8') - rohRest
-  return { treffer: scanneZeilen(harness, komplett.split('\n')), neuerOffset }
+  const neuerOffset = oldOffset + Buffer.byteLength(text, 'utf8') - rohRest
+  return { treffer: scanLines(harness, komplett.split('\n')), neuerOffset }
 }
 
 /**
  * Claude transcript (JSONL): API errors appear as own lines with
  * isApiErrorMessage:true and error:<enum>. Returns [{ typ, ts, text }].
  */
-export function transkriptFehler(jsonlText) {
+export function transcriptErrors(jsonlText) {
   const out = []
   for (const line of String(jsonlText ?? '').split('\n')) {
     if (!line.includes('"isApiErrorMessage":true')) continue
     try {
       const j = JSON.parse(line)
       if (!j?.isApiErrorMessage) continue
-      const typ = typVonClaudeFehler(j.error)
+      const typ = typeFromClaudeError(j.error)
       if (typ === null) continue
       const c = j.message?.content
       const text = typeof c === 'string' ? c
@@ -240,17 +240,17 @@ export function transkriptFehler(jsonlText) {
  * have a hook and a transcript/plugin channel that reports a real API error
  * red immediately and independently of the log.
  *
- * 'letzteAktivitaetMs === null' means UNKNOWN, not silent — and unknown never
+ * 'lastActivityMs === null' means UNKNOWN, not silent — and unknown never
  * escalates by silence. measureActivity() returns nothing for cursor and hermes,
  * so treating null as silence turned EVERY yellow log hit on those two into a
  * red alarm exactly stilleMs after it — while the agent was working. Repetition
  * and the check LLM stay as escalation paths there.
  */
-export function bewerteLogTreffer({ anzahl, erstGesehenMs, zuletztGesehenMs, letzteAktivitaetMs, jetztMs,
+export function rateLogHit({ anzahl, firstSeenMs, lastSeenMs, lastActivityMs, jetztMs,
   fensterMs = 10 * 60_000, stilleMs = 5 * 60_000, schwelle = 2 }) {
-  if (letzteAktivitaetMs != null && letzteAktivitaetMs > zuletztGesehenMs) return 'gelb'
-  if (anzahl >= schwelle && (zuletztGesehenMs - erstGesehenMs) <= fensterMs) return 'rot'
-  if (letzteAktivitaetMs != null && (jetztMs - zuletztGesehenMs) >= stilleMs) return 'rot'
+  if (lastActivityMs != null && lastActivityMs > lastSeenMs) return 'gelb'
+  if (anzahl >= schwelle && (lastSeenMs - firstSeenMs) <= fensterMs) return 'rot'
+  if (lastActivityMs != null && (jetztMs - lastSeenMs) >= stilleMs) return 'rot'
   return 'gelb'
 }
 
@@ -267,7 +267,7 @@ export function bewerteLogTreffer({ anzahl, erstGesehenMs, zuletztGesehenMs, let
  * perfectly healthy run. Unknown (no session id, older fl-report) → the run's own —
  * the guard may only ever narrow, never swallow.
  */
-export function fremdeClaudeSession(runId, harness, sessionId) {
+export function foreignClaudeSession(runId, harness, sessionId) {
   if (harness !== 'claude') return false
   const s = String(sessionId ?? '').trim()
   return s !== '' && s !== String(runId ?? '')
@@ -285,7 +285,7 @@ export function fremdeClaudeSession(runId, harness, sessionId) {
  *                        WHY it did not come through, the operator decides.)
  *   running + red        measurable work AFTER the last occurrence and no
  *                        recurrence since: the error demonstrably did not block
- *                        the agent (the same veto bewerteLogTreffer applies).
+ *                        the agent (the same veto rateLogHit applies).
  *                        Silence proves nothing here — a genuinely blocked agent
  *                        also produces none — so red resolves only on positive
  *                        evidence.
@@ -293,18 +293,18 @@ export function fremdeClaudeSession(runId, harness, sessionId) {
  *                        was noise. Unknown activity counts as non-recurrence for
  *                        yellow only.
  */
-export function vorfallWeggrund({ typ, schwere, runStatus, letzteAktivitaetMs, zuletztGesehenMs, jetztMs,
+export function incidentGoneReason({ typ, schwere, runStatus, lastActivityMs, lastSeenMs, jetztMs,
   arbeitMs = 10 * 60_000, stilleMs = 30 * 60_000 }) {
   // tmux_gone/tmux_unreachable say something about the MACHINE, not about this
   // run: tmux answering again does not undo the sessions that died, and the
   // watcher closes the transient one itself the moment it gets an answer.
   if (typ === 'merge_blocked' || typ === 'tmux_gone' || typ === 'tmux_unreachable'
       || String(typ).startsWith('provider_down:')) return null
-  const zuletzt = Number(zuletztGesehenMs)
+  const zuletzt = Number(lastSeenMs)
   // Number(null) is 0 AND finite — the trap this repo has been bitten by before.
   // null means "no activity source", never "activity at the epoch".
-  const hatAktivitaet = letzteAktivitaetMs != null
-  const aktiv = Number(letzteAktivitaetMs)
+  const hatAktivitaet = lastActivityMs != null
+  const aktiv = Number(lastActivityMs)
   if (runStatus === 'done') return 'run finished successfully'
   if (runStatus === 'running' || runStatus === 'waiting_help') {
     if (schwere === 'rot') {
@@ -329,7 +329,7 @@ export function vorfallWeggrund({ typ, schwere, runStatus, letzteAktivitaetMs, z
  * web UI translates via i18n key `incident.<typ>` and only uses this map when
  * a key is missing.
  */
-export const TYP_TEXT = {
+export const TYPE_TEXT = {
   rate_limit: 'Rate limit',
   provider_error: 'Provider error',
   auth_error: 'Login/token',

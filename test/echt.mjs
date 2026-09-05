@@ -38,7 +38,7 @@
 //                    into a worktree.
 //
 // Safety, the same fence e2e.mjs stands on: every hub-driven test runs in a
-// sandbox from test/sandkasten.mjs — own database, own runs/worktrees, own
+// sandbox from test/sandbox-env.mjs — own database, own runs/worktrees, own
 // plugin directory, own port. The production database, ~/agents and foreign
 // tmux sessions are never touched, and only sessions this suite created are
 // killed, on the way out and on Ctrl-C. The library-level tests use a
@@ -49,11 +49,11 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { gruppe, pruefe, uebersprungen, gleich, wahr, falsch, enthaelt, warteAuf, bericht, zaehler } from './mini.mjs'
-import { neuerSandkasten, sh, vorhanden } from './sandkasten.mjs'
+import { group, check, skipped, equal, isTrue, isFalse, contains, waitFor, summary, counter } from './mini.mjs'
+import { newSandbox, sh, hasBinary } from './sandbox-env.mjs'
 
 const MIT_RUNS = process.argv.includes('--runs')
-const BEHALTEN = process.argv.includes('--keep')
+const KEEP = process.argv.includes('--keep')
 const start = Date.now()
 
 // The library half runs in this process, so its database must be pointed away
@@ -80,10 +80,10 @@ for (const h of registry.harnessIds()) store.setPluginEnabled(h, true)
 const HAS = {
   openrouter: !!process.env.OPENROUTER_API_KEY,
   deepseek: !!process.env.DEEPSEEK_API_KEY,
-  claude: vorhanden('claude'),
-  opencode: vorhanden('opencode'),
-  hermes: vorhanden('hermes'),
-  cursor: vorhanden('cursor-agent'),
+  claude: hasBinary('claude'),
+  opencode: hasBinary('opencode'),
+  hermes: hasBinary('hermes'),
+  cursor: hasBinary('cursor-agent'),
 }
 
 /**
@@ -170,11 +170,11 @@ function ueberspringe(grund) { const e = new Error(grund); e[NICHT_PRUEFBAR] = t
 async function pruefeOderVendorAusfall(name, fn) {
   let err = null
   try { await fn() } catch (e) { err = e }
-  if (err?.[NICHT_PRUEFBAR]) return uebersprungen(name, err.message)
+  if (err?.[NICHT_PRUEFBAR]) return skipped(name, err.message)
   if (err && VENDOR_AUSFALL.test(err.message)) {
-    return uebersprungen(name, `the vendor was down during this run: ${err.message.split('\n')[0].slice(0, 140)}`)
+    return skipped(name, `the vendor was down during this run: ${err.message.split('\n')[0].slice(0, 140)}`)
   }
-  return pruefe(name, () => { if (err) throw err })
+  return check(name, () => { if (err) throw err })
 }
 
 const ANSWER_SCHEMA = {
@@ -183,17 +183,17 @@ const ANSWER_SCHEMA = {
 }
 
 // ===========================================================================
-const sk = neuerSandkasten({ praefix: 'freilauf-echt-', behalten: BEHALTEN })
+const sk = newSandbox({ prefix: 'freilauf-echt-', keep: KEEP })
 let aufgeraeumt = false
-async function aufraeumen() {
+async function cleanUp() {
   if (aufgeraeumt) return
   aufgeraeumt = true
-  try { await sk.aufraeumen() } catch { /* best effort */ }
+  try { await sk.cleanUp() } catch { /* best effort */ }
   try { dbmod.default.close() } catch { /* the library database may already be shut */ }
-  if (!BEHALTEN) { try { rmSync(LIBSB, { recursive: true, force: true }) } catch { /* best effort */ } }
+  if (!KEEP) { try { rmSync(LIBSB, { recursive: true, force: true }) } catch { /* best effort */ } }
 }
-process.on('SIGINT', async () => { await aufraeumen(); process.exit(130) })
-process.on('SIGTERM', async () => { await aufraeumen(); process.exit(143) })
+process.on('SIGINT', async () => { await cleanUp(); process.exit(130) })
+process.on('SIGTERM', async () => { await cleanUp(); process.exit(143) })
 
 try {
   console.log(`Library sandbox: ${LIBSB}`)
@@ -201,48 +201,48 @@ try {
   console.log(MIT_RUNS ? '[--runs: one real agent run per coding agent — consumes quota]' : '(no --runs: the real agent runs are skipped)')
 
   // =========================================================================
-  gruppe('A. Model providers, against the real endpoints')
+  group('A. Model providers, against the real endpoints')
 
   for (const id of PROVIDERS) {
     const grund = fehlt(`provider:${id}`)
     const plugin = registry.getPlugin(id)
     const ctx = pluginCtx(id)
 
-    if (grund) { uebersprungen(`${id}: catalog, balance, llm`, grund); continue }
+    if (grund) { skipped(`${id}: catalog, balance, llm`, grund); continue }
 
-    await pruefe(`${id}: fetchModels() returns a real catalog`, async () => {
+    await check(`${id}: fetchModels() returns a real catalog`, async () => {
       const a = jetzt()
       const models = await plugin.fetchModels(ctx)
       misst(`${id}.fetchModels`, seit(a))
-      wahr(Array.isArray(models) && models.length > 0, `a non-empty catalog (got ${models?.length})`)
-      wahr(models.every(m => typeof m.id === 'string' && m.id), 'every entry carries an id')
+      isTrue(Array.isArray(models) && models.length > 0, `a non-empty catalog (got ${models?.length})`)
+      isTrue(models.every(m => typeof m.id === 'string' && m.id), 'every entry carries an id')
     })
 
-    await pruefe(`${id}: balance() answers in the normalized shape`, async () => {
+    await check(`${id}: balance() answers in the normalized shape`, async () => {
       if (typeof plugin.balance !== 'function') {
         // Zen keeps no pot and says so by not declaring the contract at all.
         // That is the answer the panel and the budget gate both read.
-        gleich(id, 'opencode-zen', 'only Zen may have no balance()')
-        gleich(plugin.gate, undefined, 'and a provider with no balance declares no gate either')
+        equal(id, 'opencode-zen', 'only Zen may have no balance()')
+        equal(plugin.gate, undefined, 'and a provider with no balance declares no gate either')
         return
       }
       const a = jetzt()
       const b = await plugin.balance(ctx)
       misst(`${id}.balance`, seit(a))
-      wahr(b && typeof b === 'object', `an answer (${JSON.stringify(b)})`)
-      wahr(b.available === null || typeof b.available === 'boolean', '`available` is null or a boolean')
-      wahr(Array.isArray(b.amounts) && b.amounts.length > 0, 'at least one amount')
+      isTrue(b && typeof b === 'object', `an answer (${JSON.stringify(b)})`)
+      isTrue(b.available === null || typeof b.available === 'boolean', '`available` is null or a boolean')
+      isTrue(Array.isArray(b.amounts) && b.amounts.length > 0, 'at least one amount')
       for (const amt of b.amounts) {
-        wahr(typeof amt.currency === 'string' && amt.currency.length === 3, `currency (${amt.currency})`)
-        wahr(Number.isFinite(amt.remaining), `remaining is a real number (${amt.remaining})`)
+        isTrue(typeof amt.currency === 'string' && amt.currency.length === 3, `currency (${amt.currency})`)
+        isTrue(Number.isFinite(amt.remaining), `remaining is a real number (${amt.remaining})`)
       }
     })
 
-    await pruefe(`${id}: llm.models() lists what the hub may ask`, async () => {
+    await check(`${id}: llm.models() lists what the hub may ask`, async () => {
       const a = jetzt()
       const models = await plugin.llm.models(ctx)
       misst(`${id}.llm.models`, seit(a))
-      wahr(Array.isArray(models) && models.length > 0, `non-empty (${models?.length})`)
+      isTrue(Array.isArray(models) && models.length > 0, `non-empty (${models?.length})`)
     })
 
     await pruefeOderVendorAusfall(`${id}: llm.complete() answers a real structured request`, async () => {
@@ -254,37 +254,37 @@ try {
         schemaName: 'echt_answer', purpose: 'echt', maxTokens: 2000, timeoutMs: 120_000,
       })
       misst(`${id}.llm.complete`, seit(a))
-      wahr(typeof res?.text === 'string' && res.text.length > 0, `text came back (${JSON.stringify(String(res?.text).slice(0, 120))})`)
-      enthaelt(res.text, '4', 'and it contains the answer')
+      isTrue(typeof res?.text === 'string' && res.text.length > 0, `text came back (${JSON.stringify(String(res?.text).slice(0, 120))})`)
+      contains(res.text, '4', 'and it contains the answer')
     })
   }
 
   // =========================================================================
-  gruppe('B. Coding agents as model sources, running their real CLIs')
+  group('B. Coding agents as model sources, running their real CLIs')
 
   for (const id of HARNESSES) {
     const grund = fehlt(`agent:${id}`)
     const plugin = registry.getPlugin(id)
     const ctx = pluginCtx(id)
-    if (grund) { uebersprungen(`${id}: llm.models / llm.complete`, grund); continue }
+    if (grund) { skipped(`${id}: llm.models / llm.complete`, grund); continue }
 
-    await pruefe(`${id}: declares the source contract`, async () => {
-      wahr(!!plugin.llm, 'llm block')
-      wahr(typeof plugin.llm.complete === 'function', 'complete()')
-      gleich(plugin.llm.overhead, true, 'and says a whole session is started for one question')
+    await check(`${id}: declares the source contract`, async () => {
+      isTrue(!!plugin.llm, 'llm block')
+      isTrue(typeof plugin.llm.complete === 'function', 'complete()')
+      equal(plugin.llm.overhead, true, 'and says a whole session is started for one question')
     })
 
-    await pruefe(`${id}: llm.models() names real model identifiers`, async () => {
+    await check(`${id}: llm.models() names real model identifiers`, async () => {
       const a = jetzt()
       const models = await plugin.llm.models(ctx)
       misst(`agent:${id}.llm.models`, seit(a))
-      wahr(Array.isArray(models) && models.length > 0, `non-empty (${models?.length})`)
+      isTrue(Array.isArray(models) && models.length > 0, `non-empty (${models?.length})`)
       const ids = models.map(m => String(m.id ?? m))
-      wahr(ids.includes(MODELS[`agent:${id}`]),
+      isTrue(ids.includes(MODELS[`agent:${id}`]),
         `the model this suite uses is in the CLI's own list (${MODELS[`agent:${id}`]}; e.g. ${ids.slice(0, 3).join(', ')})`)
     })
 
-    await pruefe(`${id}: llm.complete() runs the CLI and reads its own envelope`, async () => {
+    await check(`${id}: llm.complete() runs the CLI and reads its own envelope`, async () => {
       const a = jetzt()
       const res = await plugin.llm.complete(ctx, {
         model: MODELS[`agent:${id}`],
@@ -294,7 +294,7 @@ try {
       })
       misst(`agent:${id}.llm.complete`, seit(a))
       const text = String(res.text ?? '').trim()
-      wahr(text.length > 0, 'the answer was pulled out of the CLI\'s envelope, not left in it')
+      isTrue(text.length > 0, 'the answer was pulled out of the CLI\'s envelope, not left in it')
       // What the ADAPTER owes is the model's answer, unwrapped: the right field
       // out of claude's JSON envelope, the concatenated text parts of opencode's
       // NDJSON, hermes's bare stdout, cursor's `result`. A schema is a promise
@@ -305,14 +305,14 @@ try {
       // Measured: opencode answered a bare `4` to this same prompt on one run
       // in five, and that is the model, not the plugin.
       if (plugin.llm.schema === 'native') {
-        gleich(JSON.parse(text).answer, 4, 'a native source hands the schema over and gets it back kept')
+        equal(JSON.parse(text).answer, 4, 'a native source hands the schema over and gets it back kept')
       } else {
-        enthaelt(text, '4', 'and it is the answer to the question that was asked')
+        contains(text, '4', 'and it is the answer to the question that was asked')
       }
     })
   }
 
-  await pruefe('every plugin file is importable ON ITS OWN, as the contract says', async () => {
+  await check('every plugin file is importable ON ITS OWN, as the contract says', async () => {
     // "Nothing in this file imports the database or the registry: it is used
     // from plugin files, and a plugin file must stay importable on its own"
     // (server/harnesses/cli-llm.mjs) — and docs/plugins.md tells an author the
@@ -327,13 +327,13 @@ try {
         if (!r.ok) kaputt.push(`${ordner}/${id}.mjs: ${r.stderr.trim().split('\n')[0]}`)
       }
     }
-    gleich(kaputt.join(' | '), '', 'no plugin file needs another module to be loaded first')
+    equal(kaputt.join(' | '), '', 'no plugin file needs another module to be loaded first')
   })
 
   // --- the three claims docs/plugins.md calls MEASURED ---------------------
   const { runCli } = await import(R + 'harnesses/cli-llm.mjs')
 
-  await pruefe('a timeout really kills the whole process group, not just the child', async () => {
+  await check('a timeout really kills the whole process group, not just the child', async () => {
     // The claim (docs/plugins.md, "wall-clock timeout"): the child is spawned
     // detached and the SIGNAL goes to the group, so a helper it forked dies too.
     // A grandchild that would touch a file three seconds later is the proof.
@@ -342,13 +342,13 @@ try {
     const a = jetzt()
     const r = await runCli('sh', ['-c', `sh -c 'sleep 3; touch ${marke}' & wait`], { timeoutMs: 1200 })
     const dauer = misst('runCli.timeout', seit(a))
-    gleich(r.timedOut, true, 'reported as a timeout')
-    wahr(dauer < 5000, `and answered promptly (${dauer} ms), not after the grandchild's own three seconds`)
+    equal(r.timedOut, true, 'reported as a timeout')
+    isTrue(dauer < 5000, `and answered promptly (${dauer} ms), not after the grandchild's own three seconds`)
     await new Promise(x => setTimeout(x, 4000))
-    falsch(existsSync(marke), 'the grandchild did not outlive the timeout')
+    isFalse(existsSync(marke), 'the grandchild did not outlive the timeout')
   })
 
-  if (!HAS.claude) uebersprungen('claude: --json-schema and the lean flag set', 'claude is not in PATH')
+  if (!HAS.claude) skipped('claude: --json-schema and the lean flag set', 'claude is not in PATH')
   else {
     const SCHEMA_FLAGS = ['-p', '--output-format', 'json', '--model', MODELS['agent:claude'],
       '--safe-mode', '--setting-sources', '', '--strict-mcp-config',
@@ -358,27 +358,27 @@ try {
       properties: { verdict: { type: 'string', enum: ['yes', 'no'] }, score: { type: 'integer' } },
     }
 
-    await pruefe('claude --json-schema is what produces the structured answer, and it keeps the schema', async () => {
+    await check('claude --json-schema is what produces the structured answer, and it keeps the schema', async () => {
       const prompt = 'Is the sea salty? Give your verdict and a confidence score out of ten.'
       const a = jetzt()
       const mit = await runCli('claude', [...SCHEMA_FLAGS, '--json-schema', JSON.stringify(URTEIL_SCHEMA)],
         { stdin: prompt, timeoutMs: 240_000 })
       misst('claude --json-schema', seit(a))
-      gleich(mit.code, 0, `exit code (stderr: ${String(mit.stderr).slice(0, 200)})`)
+      equal(mit.code, 0, `exit code (stderr: ${String(mit.stderr).slice(0, 200)})`)
       const j = JSON.parse(mit.stdout)
-      wahr(j.structured_output && typeof j.structured_output === 'object',
+      isTrue(j.structured_output && typeof j.structured_output === 'object',
         `structured_output present (${JSON.stringify(j.structured_output)})`)
-      wahr(['yes', 'no'].includes(j.structured_output.verdict), 'verdict inside the enum the schema allows')
-      wahr(Number.isInteger(j.structured_output.score), 'score is an integer')
+      isTrue(['yes', 'no'].includes(j.structured_output.verdict), 'verdict inside the enum the schema allows')
+      isTrue(Number.isInteger(j.structured_output.score), 'score is an integer')
 
       const ohne = await runCli('claude', SCHEMA_FLAGS, { stdin: prompt, timeoutMs: 240_000 })
-      gleich(ohne.code, 0, 'the control run also succeeded')
+      equal(ohne.code, 0, 'the control run also succeeded')
       const j2 = JSON.parse(ohne.stdout)
-      gleich(j2.structured_output ?? null, null,
+      equal(j2.structured_output ?? null, null,
         'and WITHOUT the flag there is no structured output at all — so it is the flag doing the work')
     })
 
-    await pruefe('…but it is a TOOL, not a constraint — and the layer survives claude declining it', async () => {
+    await check('…but it is a TOOL, not a constraint — and the layer survives claude declining it', async () => {
       // MEASURED 2026-08-30, five runs of the same adversarial prompt on haiku:
       // four came back `stop_reason: tool_use` with a conforming
       // `structured_output`, and the fifth came back `stop_reason: end_turn`,
@@ -401,15 +401,15 @@ try {
       })
       misst('llmJson claude adversarial', seit(a))
       if (r.ok) {
-        wahr(['yes', 'no'].includes(r.data.verdict), `a validated value or nothing (${JSON.stringify(r.data)})`)
-        wahr(Number.isInteger(r.data.score), 'and every field really is the type the schema asked for')
+        isTrue(['yes', 'no'].includes(r.data.verdict), `a validated value or nothing (${JSON.stringify(r.data)})`)
+        isTrue(Number.isInteger(r.data.score), 'and every field really is the type the schema asked for')
       } else {
-        wahr(['parse', 'validate', 'transport'].includes(r.stage),
+        isTrue(['parse', 'validate', 'transport'].includes(r.stage),
           `claude declined the tool and the layer said so honestly, with a stage (${r.stage}: ${r.error})`)
       }
     })
 
-    await pruefe('the lean flag set is what the plugin sends, and it really is the cheaper one', async () => {
+    await check('the lean flag set is what the plugin sends, and it really is the cheaper one', async () => {
       // The claim is about MONEY, so it is measured in tokens and dollars, not
       // read off the source: the same question, once with the flag set the
       // adapter sends and once with claude's defaults.
@@ -423,13 +423,13 @@ try {
       const rd = await runCli('claude', ['-p', '--output-format', 'json', '--model', MODELS['agent:claude']],
         { stdin: 'Say hello.', timeoutMs: 240_000 })
       misst('claude default flags', seit(b))
-      gleich(rl.code, 0, 'lean run succeeded')
-      gleich(rd.code, 0, 'default run succeeded')
+      equal(rl.code, 0, 'lean run succeeded')
+      equal(rd.code, 0, 'default run succeeded')
       const jl = JSON.parse(rl.stdout)
       const jd = JSON.parse(rd.stdout)
       const einLean = (jl.usage?.input_tokens ?? 0) + (jl.usage?.cache_read_input_tokens ?? 0) + (jl.usage?.cache_creation_input_tokens ?? 0)
       const einDef = (jd.usage?.input_tokens ?? 0) + (jd.usage?.cache_read_input_tokens ?? 0) + (jd.usage?.cache_creation_input_tokens ?? 0)
-      wahr(einLean < einDef,
+      isTrue(einLean < einDef,
         `the lean flags really carry less into the model (${einLean} vs ${einDef} input tokens, $${jl.total_cost_usd} vs $${jd.total_cost_usd})`)
 
       // …and the ADAPTER is on the lean side. Its argv is built inside
@@ -443,11 +443,11 @@ try {
       })
       const einAdapter = (eigen.usage?.input_tokens ?? 0) + (eigen.usage?.cache_read_input_tokens ?? 0)
         + (eigen.usage?.cache_creation_input_tokens ?? 0)
-      wahr(einAdapter < einDef,
+      isTrue(einAdapter < einDef,
         `the plugin's own call is the lean one (${einAdapter} vs ${einDef} input tokens with claude's defaults)`)
     })
 
-    await pruefe('claude\'s subtype lies, is_error does not — the field the adapter reads', async () => {
+    await check('claude\'s subtype lies, is_error does not — the field the adapter reads', async () => {
       // docs/plugins.md: on a failed call `subtype` still says "success".
       // A model identifier that does not exist is the cheapest way to fail.
       const r = await runCli('claude', ['-p', '--output-format', 'json', '--model', 'no-such-model-xyz',
@@ -456,17 +456,17 @@ try {
       { stdin: 'hi', timeoutMs: 120_000 })
       let j = null
       try { j = JSON.parse(r.stdout) } catch { /* no envelope at all is also a failure */ }
-      wahr(r.code !== 0 || (j && j.is_error === true),
+      isTrue(r.code !== 0 || (j && j.is_error === true),
         `a bad model is a failure the adapter can see (exit ${r.code}, is_error ${j?.is_error}, subtype ${JSON.stringify(j?.subtype)})`)
     })
   }
 
   // =========================================================================
-  gruppe('C. llmJson(): the structured-output layer against every source')
+  group('C. llmJson(): the structured-output layer against every source')
 
   for (const source of ALL_SOURCES) {
     const grund = fehlt(source)
-    if (grund) { uebersprungen(`${source}: happy path`, grund); continue }
+    if (grund) { skipped(`${source}: happy path`, grund); continue }
     await pruefeOderVendorAusfall(`${source}: a real question comes back as a validated value`, async () => {
       const a = jetzt()
       const r = await llmJson({
@@ -475,9 +475,9 @@ try {
         maxTokens: 2000, timeoutMs: 240_000,
       })
       misst(`llmJson ${source}`, seit(a))
-      wahr(r.ok, `ok (stage ${r.stage}, error ${r.error})`)
-      gleich(r.data.answer, 4, 'the coerced value')
-      gleich(r.source, source, 'the answer names its source')
+      isTrue(r.ok, `ok (stage ${r.stage}, error ${r.error})`)
+      equal(r.data.answer, 4, 'the coerced value')
+      equal(r.source, source, 'the answer names its source')
     })
   }
 
@@ -522,17 +522,17 @@ try {
       // repair path — try the next source rather than judging on a 503.
       if (!r.ok && r.stage === 'transport') { gescheitert.push(`${source}: ${r.error}`); s.restore(); continue }
       try {
-        gleich(s.calls.length, 2, `${source}: exactly two REAL calls — the first one and one reprompt`)
-        wahr(!/^\s*[{[]/.test(s.calls[0].text ?? ''),
+        equal(s.calls.length, 2, `${source}: exactly two REAL calls — the first one and one reprompt`)
+        isTrue(!/^\s*[{[]/.test(s.calls[0].text ?? ''),
           `${source}: the first answer really was not JSON (${JSON.stringify(String(s.calls[0].text).slice(0, 60))})`)
-        enthaelt(s.calls[1].prompt, 'Your previous answer could not be used', 'the second prompt is the repair prompt')
-        enthaelt(s.calls[1].prompt, String(s.calls[0].text).trim().slice(0, 15), 'and it quotes what the model said')
-        wahr(r.ok, `and the second attempt recovered (stage ${r.stage}, ${r.error})`)
+        contains(s.calls[1].prompt, 'Your previous answer could not be used', 'the second prompt is the repair prompt')
+        contains(s.calls[1].prompt, String(s.calls[0].text).trim().slice(0, 15), 'and it quotes what the model said')
+        isTrue(r.ok, `and the second attempt recovered (stage ${r.stage}, ${r.error})`)
         // The repair round has to carry the QUESTION, not only the complaint.
         // Without it the model answers the complaint and invents a value — this
         // assertion is what caught `{"answer": 0}` coming back from a repair:
         // schema-valid, and about nothing at all (server/llm/index.mjs).
-        gleich(r.data.answer, 4, 'with the RIGHT answer — the repair round still knew what was asked')
+        equal(r.data.answer, 4, 'with the RIGHT answer — the repair round still knew what was asked')
         return
       } finally { s.restore() }
     }
@@ -548,9 +548,9 @@ try {
   }
   const UNMOEGLICH_QUELLE = HAS.openrouter ? 'provider:openrouter' : (HAS.deepseek ? 'provider:deepseek' : null)
 
-  if (!UNMOEGLICH_QUELLE) uebersprungen('an impossible schema gives up cleanly', 'neither OPENROUTER_API_KEY nor DEEPSEEK_API_KEY is set')
+  if (!UNMOEGLICH_QUELLE) skipped('an impossible schema gives up cleanly', 'neither OPENROUTER_API_KEY nor DEEPSEEK_API_KEY is set')
   else {
-    await pruefe('an impossible schema gives up at stage "validate" and fires exactly ONE alert', async () => {
+    await check('an impossible schema gives up at stage "validate" and fires exactly ONE alert', async () => {
       _alertReset()
       const s = zaehleAufrufe(UNMOEGLICH_QUELLE.split(':')[1])
       try {
@@ -561,22 +561,22 @@ try {
           maxTokens: 2000, timeoutMs: 120_000,
         })
         misst('llmJson impossible', seit(a))
-        falsch(r.ok, 'it did not pretend to succeed')
-        gleich(r.stage, 'validate', `it failed where the schema is judged (error: ${String(r.error).split('\n').join(' | ')})`)
-        gleich(s.calls.length, 2, 'the first attempt plus the one reprompt, and no more')
-        gleich(_alertState().attempts.length, 1, 'exactly one alert went on the wire')
+        isFalse(r.ok, 'it did not pretend to succeed')
+        equal(r.stage, 'validate', `it failed where the schema is judged (error: ${String(r.error).split('\n').join(' | ')})`)
+        equal(s.calls.length, 2, 'the first attempt plus the one reprompt, and no more')
+        equal(_alertState().attempts.length, 1, 'exactly one alert went on the wire')
         // The reprompt has to be a REPROMPT: the previous answer, the exact
         // complaint, the schema — and the question. The question was the one
         // thing missing, and because the result still validated nothing else in
         // the suite could have noticed (server/llm/index.mjs).
         const zweiter = s.calls[1].prompt
-        enthaelt(zweiter, 'Your previous answer could not be used', 'the second call is the repair prompt')
-        enthaelt(zweiter, String(s.calls[0].text).trim().slice(0, 15), 'it quotes what the model said')
-        enthaelt(zweiter, 'Give me a value for x.', 'and it repeats the QUESTION, so the answer is still about something')
+        contains(zweiter, 'Your previous answer could not be used', 'the second call is the repair prompt')
+        contains(zweiter, String(s.calls[0].text).trim().slice(0, 15), 'it quotes what the model said')
+        contains(zweiter, 'Give me a value for x.', 'and it repeats the QUESTION, so the answer is still about something')
       } finally { s.restore() }
     })
 
-    await pruefe('the second identical failure is throttled, not a second message', async () => {
+    await check('the second identical failure is throttled, not a second message', async () => {
       const s = zaehleAufrufe(UNMOEGLICH_QUELLE.split(':')[1])
       try {
         await llmJson({
@@ -585,13 +585,13 @@ try {
           maxTokens: 2000, timeoutMs: 120_000,
         })
         const st = _alertState()
-        gleich(st.attempts.length, 1, 'still one message')
-        wahr(Object.values(st.signatures).some(v => v.suppressed >= 1),
+        equal(st.attempts.length, 1, 'still one message')
+        isTrue(Object.values(st.signatures).some(v => v.suppressed >= 1),
           'and the suppressed one is counted, so the next message can name it')
       } finally { s.restore() }
     })
 
-    await pruefe('llm_retries=0 really switches the second attempt off', async () => {
+    await check('llm_retries=0 really switches the second attempt off', async () => {
       dbmod.setSetting('llm_retries', '0')
       const s = zaehleAufrufe(UNMOEGLICH_QUELLE.split(':')[1])
       try {
@@ -600,15 +600,15 @@ try {
           schemaName: 'echt_impossible', schema: UNMOEGLICH, prompt: 'Give me a value for x.',
           maxTokens: 2000, timeoutMs: 120_000,
         })
-        gleich(s.calls.length, 1, 'one call and no reprompt')
-        falsch(r.ok, 'and it still gives up honestly')
+        equal(s.calls.length, 1, 'one call and no reprompt')
+        isFalse(r.ok, 'and it still gives up honestly')
       } finally { s.restore(); dbmod.setSetting('llm_retries', '') }
     })
   }
 
-  if (!HAS.openrouter) uebersprungen('a wrong model id is a transport failure', 'OPENROUTER_API_KEY is not set')
+  if (!HAS.openrouter) skipped('a wrong model id is a transport failure', 'OPENROUTER_API_KEY is not set')
   else {
-    await pruefe('a wrong model id fails at stage "transport" and is NOT reprompted', async () => {
+    await check('a wrong model id fails at stage "transport" and is NOT reprompted', async () => {
       const s = zaehleAufrufe('openrouter')
       try {
         const a = jetzt()
@@ -618,69 +618,69 @@ try {
           prompt: 'hi', timeoutMs: 30_000,
         })
         misst('llmJson transport', seit(a))
-        falsch(r.ok, 'not ok')
-        gleich(r.stage, 'transport', `the class that says something is broken (${r.error})`)
-        gleich(s.calls.length, 1, 'a 4xx does not become right by asking again')
+        isFalse(r.ok, 'not ok')
+        equal(r.stage, 'transport', `the class that says something is broken (${r.error})`)
+        equal(s.calls.length, 1, 'a 4xx does not become right by asking again')
       } finally { s.restore() }
     })
   }
 
-  await pruefe('an unknown source is a CONFIG answer, and never reaches a vendor', async () => {
+  await check('an unknown source is a CONFIG answer, and never reaches a vendor', async () => {
     const r = await llmJson({
       source: 'agent:does-not-exist', model: 'x', purpose: 'echt',
       schema: ANSWER_SCHEMA, prompt: 'hi',
     })
-    falsch(r.ok, 'not ok')
-    gleich(r.stage, 'config', 'stage')
+    isFalse(r.ok, 'not ok')
+    equal(r.stage, 'config', 'stage')
   })
 
   // =========================================================================
-  gruppe('D. The hub\'s own four LLM callers, each against a provider and a coding agent')
+  group('D. The hub\'s own four LLM callers, each against a provider and a coding agent')
 
   // Two of the four have a route and are driven through the running hub below.
   // The incident check has none — it is called by the watcher — so it is
   // exercised as the watcher calls it, in this process, against the same
   // settings table.
-  const { pruefeTreffer } = await import(R + 'pruefer.mjs')
+  const { checkHit } = await import(R + 'pruefer.mjs')
   const paare = [
     ['provider:deepseek', HAS.deepseek ? null : 'DEEPSEEK_API_KEY is not set'],
     ['agent:claude', HAS.claude ? null : 'claude is not in PATH'],
   ]
   for (const [quelle, grund] of paare) {
-    if (grund) { uebersprungen(`incident check LLM via ${quelle}`, grund); continue }
-    await pruefe(`incident check LLM judges a real log hit via ${quelle}`, async () => {
+    if (grund) { skipped(`incident check LLM via ${quelle}`, grund); continue }
+    await check(`incident check LLM judges a real log hit via ${quelle}`, async () => {
       dbmod.setSetting('llm_check_on', '1')
       dbmod.setSetting('llm_check_source', quelle)
       dbmod.setSetting('llm_check_model', MODELS[quelle])
       const a = jetzt()
-      const urteil = await pruefeTreffer({
+      const urteil = await checkHit({
         runId: `echt-${quelle}-${Date.now()}`, harness: 'claude', erzwingen: true,
         treffer: [{ typ: 'rate_limit', zeile: 'API Error: 429 rate_limit_error — upstream rejected the request' }],
         zeilen: ['$ npm test', 'API Error: 429 rate_limit_error — upstream rejected the request', 'retrying in 60s'],
       })
       misst(`check LLM ${quelle}`, seit(a))
-      wahr(urteil && !urteil.fehler, `a verdict, not a failure (${JSON.stringify(urteil).slice(0, 200)})`)
-      gleich(typeof urteil.problem, 'boolean', 'problem is a boolean')
-      wahr(typeof urteil.begruendung === 'string' && urteil.begruendung.length > 0, 'with a reason in it')
-      gleich(urteil.model, MODELS[quelle], 'and it names the model it asked')
+      isTrue(urteil && !urteil.fehler, `a verdict, not a failure (${JSON.stringify(urteil).slice(0, 200)})`)
+      equal(typeof urteil.problem, 'boolean', 'problem is a boolean')
+      isTrue(typeof urteil.begruendung === 'string' && urteil.begruendung.length > 0, 'with a reason in it')
+      equal(urteil.model, MODELS[quelle], 'and it names the model it asked')
     })
   }
   dbmod.setSetting('llm_check_on', '0')
 
   // ------------------------------------------------------- the hub itself
   console.log(`\nSandbox: ${sk.SB}`)
-  await sk.bauen()
+  await sk.build()
   // The real credentials go in on purpose — this is what the suite is for.
   // The stub fl-start stays: an LLM caller is not an agent run, and section F
   // is where real runs happen.
-  await sk.hubStarten({
+  await sk.startHub({
     env: { DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY ?? '' },
   })
-  const { hol, formular, setzeEinstellung } = sk
+  const { fetchPath, postForm, setSetting } = sk
   // The database handle is replaced whenever the hub restarts (the launch-spec
   // test below does exactly that), so nothing here may hold on to one.
   const db = () => sk.db
-  console.log(`Hub: ${sk.basis}`)
+  console.log(`Hub: ${sk.base}`)
 
   // Every coding agent and every provider on, so the sources really exist there.
   for (const [id, providers] of [
@@ -688,28 +688,28 @@ try {
     ['opencode', ['opencode-zen', 'deepseek', 'openrouter']],
     ['hermes', ['openrouter', 'opencode-zen', 'deepseek']],
   ]) {
-    await formular('/settings/plugins/save',
-      { id, enabled: '1', ...(providers.length ? { providers: providers } : {}) }, { alsBrowser: true })
+    await postForm('/settings/plugins/save',
+      { id, enabled: '1', ...(providers.length ? { providers: providers } : {}) }, { asBrowser: true })
   }
-  await formular('/repos/edit', { name: 'echt', path: sk.REPO, base_branch: 'main', worktree_extras: '[]' }, { alsBrowser: true })
+  await postForm('/repos/edit', { name: 'echt', path: sk.REPO, base_branch: 'main', worktree_extras: '[]' }, { asBrowser: true })
   const repoId = db().prepare('SELECT id FROM repos WHERE name=?').get('echt').id
 
   // The sandbox deliberately scrubs OPENROUTER_API_KEY out of the hub's
-  // environment (test/sandkasten.mjs, so the stub half can never spend money).
+  // environment (test/sandbox-env.mjs, so the stub half can never spend money).
   // Handing the key to the hub the way an OPERATOR would — a stored value on
   // the provider's own Plugins card — is therefore not a workaround but the
   // second half of the credential contract, exercised against a real API.
   if (HAS.openrouter) {
-    await formular('/settings/plugins/save', {
+    await postForm('/settings/plugins/save', {
       id: 'openrouter', enabled: '1',
       cred_api_key_mode: 'value', cred_api_key_value: process.env.OPENROUTER_API_KEY,
-    }, { alsBrowser: true })
+    }, { asBrowser: true })
   }
 
   const lauf = (id) => db().prepare('SELECT * FROM runs WHERE id=?').get(id)
-  async function laufStarten(daten) {
-    const r = await formular('/api/runs', {
-      repo_id: String(repoId), harness: 'claude', branch_mode: 'keiner', expected_minutes: '10', ...daten,
+  async function laufStarten(data) {
+    const r = await postForm('/api/runs', {
+      repo_id: String(repoId), harness: 'claude', branch_mode: 'keiner', expected_minutes: '10', ...data,
     })
     const j = await r.json()
     if (j.runId) { const s = lauf(j.runId)?.tmux_session; if (s) sk.sessions.add(s) }
@@ -719,59 +719,59 @@ try {
   // --- 1. run titles, through the hub -------------------------------------
   for (const quelle of ['provider:openrouter', 'agent:claude']) {
     const grund = fehlt(quelle)
-    if (grund) { uebersprungen(`run title via ${quelle}`, grund); continue }
-    await pruefe(`a real run title is generated via ${quelle}`, async () => {
-      setzeEinstellung('llm_title_on', '1')
-      setzeEinstellung('llm_title_source', quelle)
-      setzeEinstellung('llm_title_model', MODELS[quelle])
+    if (grund) { skipped(`run title via ${quelle}`, grund); continue }
+    await check(`a real run title is generated via ${quelle}`, async () => {
+      setSetting('llm_title_on', '1')
+      setSetting('llm_title_source', quelle)
+      setSetting('llm_title_model', MODELS[quelle])
       const prompt = 'Rename the configuration loader so it reads the port from the environment instead of the hard-coded default.'
       const a = jetzt()
       const j = await laufStarten({ prompt })
-      wahr(!!j.runId, `run started (${JSON.stringify(j)})`)
+      isTrue(!!j.runId, `run started (${JSON.stringify(j)})`)
       const fallback = lauf(j.runId).title
-      const titel = await warteAuf(() => {
+      const titel = await waitFor(() => {
         const t = lauf(j.runId).title
         return t && t !== fallback ? t : null
-      }, { was: `a generated title from ${quelle}`, timeoutMs: 240_000, taktMs: 1000 })
+      }, { what: `a generated title from ${quelle}`, timeoutMs: 240_000, taktMs: 1000 })
       misst(`title ${quelle}`, seit(a))
-      wahr(titel.length > 0 && titel.length <= 80, `a real title within the limit (${JSON.stringify(titel)})`)
-      wahr(titel !== fallback, 'and it replaced the prompt-derived fallback')
+      isTrue(titel.length > 0 && titel.length <= 80, `a real title within the limit (${JSON.stringify(titel)})`)
+      isTrue(titel !== fallback, 'and it replaced the prompt-derived fallback')
     })
   }
-  setzeEinstellung('llm_title_on', '0')
+  setSetting('llm_title_on', '0')
 
   // --- 2. worktree extras, through POST /api/repos/extras-suggest ----------
   for (const quelle of ['provider:openrouter', 'agent:claude']) {
     const grund = fehlt(quelle)
-    if (grund) { uebersprungen(`extras suggestion via ${quelle}`, grund); continue }
-    await pruefe(`the extras suggestion endpoint answers from a real model via ${quelle}`, async () => {
-      setzeEinstellung('llm_extras_on', '1')
-      setzeEinstellung('llm_extras_source', quelle)
-      setzeEinstellung('llm_extras_model', MODELS[quelle])
+    if (grund) { skipped(`extras suggestion via ${quelle}`, grund); continue }
+    await check(`the extras suggestion endpoint answers from a real model via ${quelle}`, async () => {
+      setSetting('llm_extras_on', '1')
+      setSetting('llm_extras_source', quelle)
+      setSetting('llm_extras_model', MODELS[quelle])
       const a = jetzt()
-      const r = await formular('/api/repos/extras-suggest', { path: sk.REPO }, {})
+      const r = await postForm('/api/repos/extras-suggest', { path: sk.REPO }, {})
       const j = await r.json()
       misst(`extras ${quelle}`, seit(a))
-      gleich(r.status, 200, `status (${JSON.stringify(j).slice(0, 300)})`)
-      wahr(j.ok, `ok (${j.error})`)
-      wahr(Array.isArray(j.extras), 'a list of extras came back')
+      equal(r.status, 200, `status (${JSON.stringify(j).slice(0, 300)})`)
+      isTrue(j.ok, `ok (${j.error})`)
+      isTrue(Array.isArray(j.extras), 'a list of extras came back')
       for (const x of j.extras) {
-        wahr(typeof x.path === 'string' && x.path, 'every extra names a path')
-        wahr(['copy', 'link'].includes(x.mode), `and a mode the schema allows (${x.mode})`)
+        isTrue(typeof x.path === 'string' && x.path, 'every extra names a path')
+        isTrue(['copy', 'link'].includes(x.mode), `and a mode the schema allows (${x.mode})`)
       }
       // The sandbox repo really carries an unversioned .env and a referenz/
       // directory — exactly the shape this feature exists for.
-      wahr(j.extras.length > 0, `the model found something to carry over (${JSON.stringify(j.extras)})`)
+      isTrue(j.extras.length > 0, `the model found something to carry over (${JSON.stringify(j.extras)})`)
     })
   }
-  setzeEinstellung('llm_extras_on', '0')
+  setSetting('llm_extras_on', '0')
 
   // --- 3. the flow `extract` step, through a real flow run ----------------
   for (const quelle of ['provider:deepseek', 'agent:opencode']) {
     const grund = fehlt(quelle)
-    if (grund) { uebersprungen(`flow extract via ${quelle}`, grund); continue }
-    await pruefe(`a real flow's extract step calls ${quelle} and stores its fields`, async () => {
-      const jsonPost = (pfad, obj) => hol(pfad, {
+    if (grund) { skipped(`flow extract via ${quelle}`, grund); continue }
+    await check(`a real flow's extract step calls ${quelle} and stores its fields`, async () => {
+      const jsonPost = (pfad, obj) => fetchPath(pfad, {
         method: 'POST', body: JSON.stringify(obj),
         headers: { 'content-type': 'application/json', accept: 'application/json' },
       })
@@ -796,32 +796,32 @@ try {
           }],
         },
       })).json()
-      wahr(gespeichert.ok && gespeichert.id, `flow saved (${JSON.stringify(gespeichert).slice(0, 200)})`)
+      isTrue(gespeichert.ok && gespeichert.id, `flow saved (${JSON.stringify(gespeichert).slice(0, 200)})`)
       const a = jetzt()
-      const gestartet = await formular(`/api/flows/${gespeichert.id}/run`, {})
-      wahr(gestartet.status < 400, `run now accepted (${gestartet.status})`)
-      const fr = await warteAuf(() => {
+      const gestartet = await postForm(`/api/flows/${gespeichert.id}/run`, {})
+      isTrue(gestartet.status < 400, `run now accepted (${gestartet.status})`)
+      const fr = await waitFor(() => {
         const row = db().prepare('SELECT * FROM flow_runs WHERE flow_id=? ORDER BY rowid DESC LIMIT 1').get(gespeichert.id)
         return row && ['done', 'failed'].includes(row.status) ? row : null
-      }, { was: 'the flow run to finish', timeoutMs: 300_000, taktMs: 1000 })
+      }, { what: 'the flow run to finish', timeoutMs: 300_000, taktMs: 1000 })
       misst(`flow extract ${quelle}`, seit(a))
-      gleich(fr.status, 'done', `the flow came through (${String(fr.error ?? '').slice(0, 300)})`)
+      equal(fr.status, 'done', `the flow came through (${String(fr.error ?? '').slice(0, 300)})`)
       const ctxObj = JSON.parse(fr.context || '{}')
       const out = ctxObj?.vars?.extracted
-      wahr(out && typeof out === 'object', `the extracted fields are in the flow's variables (${JSON.stringify(ctxObj?.vars).slice(0, 200)})`)
-      gleich(out.failed, true, 'the boolean the model read out of the text')
-      gleich(Number(out.red_tests), 2, 'and the number')
+      isTrue(out && typeof out === 'object', `the extracted fields are in the flow's variables (${JSON.stringify(ctxObj?.vars).slice(0, 200)})`)
+      equal(out.failed, true, 'the boolean the model read out of the text')
+      equal(Number(out.red_tests), 2, 'and the number')
     })
   }
 
   // =========================================================================
-  gruppe('E. Budget gates, measured against the real accounts')
+  group('E. Budget gates, measured against the real accounts')
 
   const { budgetGate } = await import(R + 'scheduler.mjs')
   const quota = await import(R + 'quota.mjs')
   const claudeUsage = await import(R + 'claude-usage.mjs')
 
-  await pruefe('the claude gate reads the real account and blocks above the reading', async () => {
+  await check('the claude gate reads the real account and blocks above the reading', async () => {
     // The live account first (that is what the panel and the gate read), then
     // the merged answer — a machine offline falls back to the local file, which
     // is still a real reading and still a real number.
@@ -835,30 +835,30 @@ try {
     dbmod.setSetting('claude_gate_5h', String(Math.min(100, Math.ceil(fuenf) + 5)))
     dbmod.setSetting('claude_gate_7d', '100')
     dbmod.setSetting('claude_gate_fable', '100')
-    gleich(await budgetGate('claude', MODELS['agent:claude'], null), null, 'open below the threshold')
+    equal(await budgetGate('claude', MODELS['agent:claude'], null), null, 'open below the threshold')
     // Above it: blocked, with a reason naming the window.
     dbmod.setSetting('claude_gate_5h', String(Math.max(0, Math.floor(fuenf) - 1)))
     const g = await budgetGate('claude', MODELS['agent:claude'], null)
-    wahr(g && typeof g.reason === 'string' && g.reason, `blocked with a reason (${JSON.stringify(g)})`)
+    isTrue(g && typeof g.reason === 'string' && g.reason, `blocked with a reason (${JSON.stringify(g)})`)
     dbmod.setSetting('claude_gate_5h', '90')
   })
 
-  await pruefe('the OpenRouter gate reads the real balance and blocks above it', async () => {
+  await check('the OpenRouter gate reads the real balance and blocks above it', async () => {
     if (!HAS.openrouter) throw new Error('OPENROUTER_API_KEY is not set')
     const b = await registry.getPlugin('openrouter').balance(pluginCtx('openrouter'))
     const usd = b?.amounts?.[0]?.remaining
-    wahr(Number.isFinite(usd), `a real balance (${JSON.stringify(b)})`)
+    isTrue(Number.isFinite(usd), `a real balance (${JSON.stringify(b)})`)
     console.log(`     openrouter balance: ${usd} USD`)
     dbmod.setSetting('openrouter_gate_on', '1')
     dbmod.setSetting('openrouter_min_eur', String(Math.max(0, usd - 1)))
-    gleich(await budgetGate('opencode', 'x', 'openrouter'), null, 'open below the balance')
+    equal(await budgetGate('opencode', 'x', 'openrouter'), null, 'open below the balance')
     dbmod.setSetting('openrouter_min_eur', String(usd + 100))
     const g = await budgetGate('opencode', 'x', 'openrouter')
-    wahr(g && g.reason, `blocked above it (${JSON.stringify(g)})`)
+    isTrue(g && g.reason, `blocked above it (${JSON.stringify(g)})`)
     dbmod.setSetting('openrouter_min_eur', '5')
   })
 
-  await pruefe('the DeepSeek gate reads the real balance and blocks above it', async () => {
+  await check('the DeepSeek gate reads the real balance and blocks above it', async () => {
     if (!HAS.deepseek) throw new Error('DEEPSEEK_API_KEY is not set')
     const b = await registry.getPlugin('deepseek').balance(pluginCtx('deepseek'))
     const usd = b?.amounts?.find(a => a.currency === 'USD')?.remaining
@@ -866,14 +866,14 @@ try {
     console.log(`     deepseek balance: ${usd} USD, available=${b.available}`)
     dbmod.setSetting('deepseek_gate_on', '1')
     dbmod.setSetting('deepseek_min_usd', String(Math.max(0, usd - 1)))
-    gleich(await budgetGate('opencode', 'x', 'deepseek'), null, 'open below the balance')
+    equal(await budgetGate('opencode', 'x', 'deepseek'), null, 'open below the balance')
     dbmod.setSetting('deepseek_min_usd', String(usd + 100))
     const g = await budgetGate('opencode', 'x', 'deepseek')
-    wahr(g && g.reason, `blocked above it (${JSON.stringify(g)})`)
+    isTrue(g && g.reason, `blocked above it (${JSON.stringify(g)})`)
     dbmod.setSetting('deepseek_min_usd', '2')
   })
 
-  await pruefe('the cursor gate reads the real usage endpoint', async () => {
+  await check('the cursor gate reads the real usage endpoint', async () => {
     if (!HAS.cursor) throw new Error('cursor-agent is not in PATH')
     const u = await registry.getPlugin('cursor').usage(pluginCtx('cursor'))
     if (!u || !Number.isFinite(Number(u.pct))) {
@@ -883,40 +883,40 @@ try {
     console.log(`     cursor period usage: ${pct}%`)
     dbmod.setSetting('cursor_gate_on', '1')
     dbmod.setSetting('cursor_gate_pct', String(Math.min(100, Math.ceil(pct) + 5)))
-    gleich(await budgetGate('cursor', MODELS['agent:cursor'], null), null, 'open below the threshold')
+    equal(await budgetGate('cursor', MODELS['agent:cursor'], null), null, 'open below the threshold')
     dbmod.setSetting('cursor_gate_pct', String(Math.max(0, Math.floor(pct) - 1)))
     const g = await budgetGate('cursor', MODELS['agent:cursor'], null)
-    wahr(g && g.reason, `blocked above it (${JSON.stringify(g)})`)
+    isTrue(g && g.reason, `blocked above it (${JSON.stringify(g)})`)
     dbmod.setSetting('cursor_gate_pct', '95')
   })
 
-  await pruefe('a gate that really blocks really defers a run, end to end through the hub', async () => {
+  await check('a gate that really blocks really defers a run, end to end through the hub', async () => {
     if (!HAS.deepseek) throw new Error('DEEPSEEK_API_KEY is not set')
     const b = await registry.getPlugin('deepseek').balance(pluginCtx('deepseek'))
     const usd = b?.amounts?.find(a => a.currency === 'USD')?.remaining
     if (!Number.isFinite(usd)) throw new Error('no USD balance to raise a threshold above')
-    setzeEinstellung('deepseek_gate_on', '1')
-    setzeEinstellung('deepseek_min_usd', String(usd + 100))
+    setSetting('deepseek_gate_on', '1')
+    setSetting('deepseek_min_usd', String(usd + 100))
     const j = await laufStarten({
       harness: 'opencode', provider: 'deepseek', model: MODELS['provider:deepseek'],
       prompt: 'echt: this run must never start, the gate is above the real balance',
     })
-    wahr(!!j.runId, `the run was created (${JSON.stringify(j)})`)
+    isTrue(!!j.runId, `the run was created (${JSON.stringify(j)})`)
     const r = lauf(j.runId)
-    gleich(r.status, 'deferred', 'and deferred instead of started')
+    equal(r.status, 'deferred', 'and deferred instead of started')
     const ev = db().prepare("SELECT payload FROM events WHERE run_id=? AND kind='deferred'").get(j.runId)
-    wahr(ev && String(ev.payload).length > 0, `the deferral names its reason (${ev?.payload})`)
+    isTrue(ev && String(ev.payload).length > 0, `the deferral names its reason (${ev?.payload})`)
     // …and lowering it again lets the same run through.
-    setzeEinstellung('deepseek_min_usd', '0')
-    const start2 = await formular(`/api/runs/${j.runId}/start`, {})
-    wahr(start2.status < 400, `"start anyway" accepted (${start2.status})`)
-    await warteAuf(() => lauf(j.runId).status !== 'deferred',
-      { was: 'the deferred run to be picked up once the gate opens', timeoutMs: 30_000 })
+    setSetting('deepseek_min_usd', '0')
+    const start2 = await postForm(`/api/runs/${j.runId}/start`, {})
+    isTrue(start2.status < 400, `"start anyway" accepted (${start2.status})`)
+    await waitFor(() => lauf(j.runId).status !== 'deferred',
+      { what: 'the deferred run to be picked up once the gate opens', timeoutMs: 30_000 })
     await sk.sessions.add(lauf(j.runId)?.tmux_session)
   })
 
   // =========================================================================
-  gruppe('G. An external plugin package: install, configure, use, uninstall')
+  group('G. An external plugin package: install, configure, use, uninstall')
 
   // A real package on disk, written here so the test owns every byte of it.
   const PAKETE = join(sk.SB, 'pakete')
@@ -998,64 +998,64 @@ const plugin = {
 export default plugin
 `)
 
-  await pruefe('an external model provider is installed through the route and joins the registry', async () => {
-    const r = await formular('/settings/plugins/install', { path: PROV_DIR }, { alsBrowser: true })
-    gleich(r.status, 303, `installed (${r.status}: ${(await r.text()).slice(0, 300)})`)
-    const html = await (await hol('/settings/plugins')).text()
-    enthaelt(html, 'echt-provider', 'the Plugins page lists it')
-    enthaelt(html, '1.0.0', 'with its version')
+  await check('an external model provider is installed through the route and joins the registry', async () => {
+    const r = await postForm('/settings/plugins/install', { path: PROV_DIR }, { asBrowser: true })
+    equal(r.status, 303, `installed (${r.status}: ${(await r.text()).slice(0, 300)})`)
+    const html = await (await fetchPath('/settings/plugins')).text()
+    contains(html, 'echt-provider', 'the Plugins page lists it')
+    contains(html, '1.0.0', 'with its version')
   })
 
-  await pruefe('an external coding agent is installed the same way', async () => {
-    const r = await formular('/settings/plugins/install', { path: AGENT_DIR }, { alsBrowser: true })
-    gleich(r.status, 303, `installed (${r.status}: ${(await r.text()).slice(0, 300)})`)
-    const j = await (await hol('/api/coding-agents/detect')).json()
-    wahr(j.agents.some(a => a.id === 'echt-agent'), `it is a coding agent the hub knows (${j.agents.map(a => a.id).join(',')})`)
+  await check('an external coding agent is installed the same way', async () => {
+    const r = await postForm('/settings/plugins/install', { path: AGENT_DIR }, { asBrowser: true })
+    equal(r.status, 303, `installed (${r.status}: ${(await r.text()).slice(0, 300)})`)
+    const j = await (await fetchPath('/api/coding-agents/detect')).json()
+    isTrue(j.agents.some(a => a.id === 'echt-agent'), `it is a coding agent the hub knows (${j.agents.map(a => a.id).join(',')})`)
   })
 
-  await pruefe('installing the same package twice is refused, not silently accepted', async () => {
-    const r = await formular('/settings/plugins/install', { path: PROV_DIR }, { alsBrowser: true })
-    gleich(r.status, 400, 'refused')
-    enthaelt(await r.text(), 'echt-provider', 'and the message names the package')
+  await check('installing the same package twice is refused, not silently accepted', async () => {
+    const r = await postForm('/settings/plugins/install', { path: PROV_DIR }, { asBrowser: true })
+    equal(r.status, 400, 'refused')
+    contains(await r.text(), 'echt-provider', 'and the message names the package')
   })
 
-  if (!HAS.deepseek) uebersprungen('the external provider\'s credential is really used', 'DEEPSEEK_API_KEY is not set (the external provider borrows that account)')
+  if (!HAS.deepseek) skipped('the external provider\'s credential is really used', 'DEEPSEEK_API_KEY is not set (the external provider borrows that account)')
   else {
-    await pruefe('a credential stored as a VALUE is really used by a real API call', async () => {
-      const r = await formular('/settings/plugins/save', {
+    await check('a credential stored as a VALUE is really used by a real API call', async () => {
+      const r = await postForm('/settings/plugins/save', {
         id: 'echt-provider', enabled: '1',
         cred_api_key_mode: 'value', cred_api_key_value: process.env.DEEPSEEK_API_KEY,
-      }, { alsBrowser: true })
-      gleich(r.status, 303, 'saved')
-      const j = await (await hol('/api/llm-models?source=provider:echt-provider')).json()
-      wahr(j.ok, `the model list came back (${JSON.stringify(j).slice(0, 200)})`)
-      wahr(Array.isArray(j.models) && j.models.length > 0,
+      }, { asBrowser: true })
+      equal(r.status, 303, 'saved')
+      const j = await (await fetchPath('/api/llm-models?source=provider:echt-provider')).json()
+      isTrue(j.ok, `the model list came back (${JSON.stringify(j).slice(0, 200)})`)
+      isTrue(Array.isArray(j.models) && j.models.length > 0,
         `and it is not empty — which it could only be if the stored credential really reached the vendor (${j.models?.length})`)
     })
 
-    await pruefe('a RENAMED environment variable is honoured', async () => {
+    await check('a RENAMED environment variable is honoured', async () => {
       // The hub was started with DEEPSEEK_API_KEY in its environment but the
       // plugin declares FREILAUF_ECHT_PROVIDER_KEY — so a working answer here can
       // only come from the operator's own naming.
-      const r = await formular('/settings/plugins/save', {
+      const r = await postForm('/settings/plugins/save', {
         id: 'echt-provider', enabled: '1',
         cred_api_key_mode: 'env', cred_api_key_env: 'DEEPSEEK_API_KEY',
-      }, { alsBrowser: true })
-      gleich(r.status, 303, 'saved')
-      const j = await (await hol('/api/llm-models?source=provider:echt-provider')).json()
-      wahr(j.ok && Array.isArray(j.models) && j.models.length > 0,
+      }, { asBrowser: true })
+      equal(r.status, 303, 'saved')
+      const j = await (await fetchPath('/api/llm-models?source=provider:echt-provider')).json()
+      isTrue(j.ok && Array.isArray(j.models) && j.models.length > 0,
         `the plugin read a variable it never declared, because the operator named it (${JSON.stringify(j).slice(0, 200)})`)
     })
 
-    await pruefe('the external provider appears as an LLM source and really answers', async () => {
-      const list = await (await hol('/api/llm-sources')).json()
-      wahr(list.ok && list.sources.some(s => s.id === 'provider:echt-provider'),
+    await check('the external provider appears as an LLM source and really answers', async () => {
+      const list = await (await fetchPath('/api/llm-sources')).json()
+      isTrue(list.ok && list.sources.some(s => s.id === 'provider:echt-provider'),
         `it is offered as a source (${list.sources?.map(s => s.id).join(', ')})`)
       // …and one of the hub's own four callers really asks it. The flow
       // `extract` step is the one that answers synchronously and reports its
       // own failure, so a broken external plugin says why instead of timing out.
       const a = jetzt()
-      const gespeichert = await (await hol('/api/flows/save', {
+      const gespeichert = await (await fetchPath('/api/flows/save', {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json' },
         body: JSON.stringify({
@@ -1075,127 +1075,127 @@ export default plugin
           },
         }),
       })).json()
-      wahr(gespeichert.ok, `flow saved (${JSON.stringify(gespeichert).slice(0, 200)})`)
-      await formular(`/api/flows/${gespeichert.id}/run`, {})
-      const fr = await warteAuf(() => {
+      isTrue(gespeichert.ok, `flow saved (${JSON.stringify(gespeichert).slice(0, 200)})`)
+      await postForm(`/api/flows/${gespeichert.id}/run`, {})
+      const fr = await waitFor(() => {
         const row = db().prepare('SELECT * FROM flow_runs WHERE flow_id=? ORDER BY rowid DESC LIMIT 1').get(gespeichert.id)
         return row && ['done', 'failed'].includes(row.status) ? row : null
-      }, { was: 'the flow run against the external provider', timeoutMs: 180_000, taktMs: 1000 })
+      }, { what: 'the flow run against the external provider', timeoutMs: 180_000, taktMs: 1000 })
       misst('extract provider:echt-provider', seit(a))
-      gleich(fr.status, 'done', `the external plugin answered (${String(fr.error ?? '').slice(0, 300)})`)
-      gleich(Number(JSON.parse(fr.context).vars.extracted.attempts), 3, 'with the value it read out of the text')
+      equal(fr.status, 'done', `the external plugin answered (${String(fr.error ?? '').slice(0, 300)})`)
+      equal(Number(JSON.parse(fr.context).vars.extracted.attempts), 3, 'with the value it read out of the text')
     })
   }
 
-  await pruefe('fl-start --spec really starts the external coding agent in a tmux session', async () => {
+  await check('fl-start --spec really starts the external coding agent in a tmux session', async () => {
     // The hub is restarted with the REAL fl-start and with the agent's binary on
     // PATH: this is the one place the launch spec is exercised end to end.
-    await sk.hubStoppen()
-    await sk.hubStarten({
-      echteAgenten: true,
+    await sk.stopHub()
+    await sk.startHub({
+      realAgents: true,
       env: { PATH: `${EXT_BIN}:${process.env.PATH}` },
     })
     const lauf2 = (id) => db().prepare('SELECT * FROM runs WHERE id=?').get(id)
     // A coding agent must be configured before the hub starts runs with it —
     // an external package is no exception, and that is the point.
-    const konf = await formular('/settings/plugins/save', { id: 'echt-agent', enabled: '1' }, { alsBrowser: true })
-    gleich(konf.status, 303, 'the external coding agent is switched on')
-    const r = await formular('/api/runs', {
+    const konf = await postForm('/settings/plugins/save', { id: 'echt-agent', enabled: '1' }, { asBrowser: true })
+    equal(konf.status, 303, 'the external coding agent is switched on')
+    const r = await postForm('/api/runs', {
       repo_id: String(repoId), harness: 'echt-agent', branch_mode: 'keiner',
       expected_minutes: '5', prompt: 'echt-agent smoke test',
     })
     const j = await r.json()
-    wahr(!!j.runId, `the run was created (${r.status} ${JSON.stringify(j)})`)
-    const session = await warteAuf(() => lauf2(j.runId)?.tmux_session,
-      { was: 'the tmux session of the external coding agent', timeoutMs: 60_000 })
+    isTrue(!!j.runId, `the run was created (${r.status} ${JSON.stringify(j)})`)
+    const session = await waitFor(() => lauf2(j.runId)?.tmux_session,
+      { what: 'the tmux session of the external coding agent', timeoutMs: 60_000 })
     sk.sessions.add(session)
     const da = await sh('tmux', ['has-session', '-t', `=${session}`])
-    wahr(da.ok, `the session really exists on the machine (${session})`)
-    enthaelt(session, 'ex-', 'and it carries the plugin\'s own session tag')
+    isTrue(da.ok, `the session really exists on the machine (${session})`)
+    contains(session, 'ex-', 'and it carries the plugin\'s own session tag')
     // The prompt really reached the binary as its first argument.
     const wd = lauf2(j.runId).workdir_effective
-    await warteAuf(() => existsSync(join(wd, 'echt-agent-prompt.txt')),
-      { was: 'the file the external agent writes from its prompt argument', timeoutMs: 30_000 })
+    await waitFor(() => existsSync(join(wd, 'echt-agent-prompt.txt')),
+      { what: 'the file the external agent writes from its prompt argument', timeoutMs: 30_000 })
   })
 
-  await pruefe('an external package is uninstalled again — registry, directory and configuration', async () => {
+  await check('an external package is uninstalled again — registry, directory and configuration', async () => {
     for (const id of ['echt-provider', 'echt-agent']) {
-      const r = await formular('/settings/plugins/uninstall', { id }, { alsBrowser: true })
-      gleich(r.status, 303, `${id} removed`)
+      const r = await postForm('/settings/plugins/uninstall', { id }, { asBrowser: true })
+      equal(r.status, 303, `${id} removed`)
     }
-    const html = await (await hol('/settings/plugins')).text()
-    falsch(html.includes('echt-provider'), 'the provider is gone from the page')
-    const j = await (await hol('/api/coding-agents/detect')).json()
-    falsch(j.agents.some(a => a.id === 'echt-agent'), 'and the coding agent is gone from the registry')
-    falsch(existsSync(join(sk.PLUGINS, 'echt-provider')), 'the package directory is gone')
-    falsch(existsSync(join(sk.PLUGINS, 'echt-agent')), 'the other one too')
+    const html = await (await fetchPath('/settings/plugins')).text()
+    isFalse(html.includes('echt-provider'), 'the provider is gone from the page')
+    const j = await (await fetchPath('/api/coding-agents/detect')).json()
+    isFalse(j.agents.some(a => a.id === 'echt-agent'), 'and the coding agent is gone from the registry')
+    isFalse(existsSync(join(sk.PLUGINS, 'echt-provider')), 'the package directory is gone')
+    isFalse(existsSync(join(sk.PLUGINS, 'echt-agent')), 'the other one too')
   })
 
-  await pruefe('a built-in plugin cannot be uninstalled', async () => {
-    const r = await formular('/settings/plugins/uninstall', { id: 'claude' }, { alsBrowser: true })
-    gleich(r.status, 400, 'refused')
-    enthaelt(await r.text(), 'built-in', 'and it says why')
+  await check('a built-in plugin cannot be uninstalled', async () => {
+    const r = await postForm('/settings/plugins/uninstall', { id: 'claude' }, { asBrowser: true })
+    equal(r.status, 400, 'refused')
+    contains(await r.text(), 'built-in', 'and it says why')
   })
 
   // =========================================================================
-  gruppe('H. Discovery, credentials and the pages, against this real machine')
+  group('H. Discovery, credentials and the pages, against this real machine')
 
-  await pruefe('scanSystem() finds what is really installed here', async () => {
+  await check('scanSystem() finds what is really installed here', async () => {
     const { scanSystem } = await import(R + 'plugins/discovery.mjs')
     const gefunden = await scanSystem()
-    wahr(Array.isArray(gefunden), 'a list')
+    isTrue(Array.isArray(gefunden), 'a list')
     const harnesses = gefunden.filter(g => g.kind === 'harness').map(g => g.pluginId).sort()
     for (const id of HARNESSES) {
       if (HAS[id === 'cursor' ? 'cursor' : id]) {
-        wahr(harnesses.includes(id), `${id} is installed on this machine and the scan says so (${harnesses.join(',')})`)
+        isTrue(harnesses.includes(id), `${id} is installed on this machine and the scan says so (${harnesses.join(',')})`)
       }
     }
     const providers = gefunden.filter(g => g.kind === 'provider')
     if (HAS.openrouter) {
       const or = providers.find(p => p.pluginId === 'openrouter')
-      wahr(!!or, 'OpenRouter was found through its environment variable')
-      gleich(or.envVar, 'OPENROUTER_API_KEY', 'and the scan reports the NAME, never a value')
-      falsch(JSON.stringify(gefunden).includes(process.env.OPENROUTER_API_KEY), 'no credential value anywhere in the result')
+      isTrue(!!or, 'OpenRouter was found through its environment variable')
+      equal(or.envVar, 'OPENROUTER_API_KEY', 'and the scan reports the NAME, never a value')
+      isFalse(JSON.stringify(gefunden).includes(process.env.OPENROUTER_API_KEY), 'no credential value anywhere in the result')
     }
   })
 
-  await pruefe('the scan route fills the discovery table in the running hub', async () => {
-    const r = await formular('/settings/plugins/scan', {}, { alsBrowser: true })
-    gleich(r.status, 303, 'scan accepted')
+  await check('the scan route fills the discovery table in the running hub', async () => {
+    const r = await postForm('/settings/plugins/scan', {}, { asBrowser: true })
+    equal(r.status, 303, 'scan accepted')
     const rows = db().prepare('SELECT * FROM discovery').all()
-    wahr(rows.length > 0, `something was written down (${rows.length} rows)`)
+    isTrue(rows.length > 0, `something was written down (${rows.length} rows)`)
     for (const row of rows) {
-      falsch(/OPENROUTER_API_KEY=|sk-|Bearer /.test(String(row.detail)),
+      isFalse(/OPENROUTER_API_KEY=|sk-|Bearer /.test(String(row.detail)),
         `the detail column holds names, not secrets (${row.detail})`)
     }
   })
 
-  await pruefe('the Plugins page renders from the real registry', async () => {
-    const r = await hol('/settings/plugins')
-    gleich(r.status, 200, 'status')
+  await check('the Plugins page renders from the real registry', async () => {
+    const r = await fetchPath('/settings/plugins')
+    equal(r.status, 200, 'status')
     const html = await r.text()
-    for (const id of [...HARNESSES, ...PROVIDERS]) enthaelt(html, id, `${id} is on the page`)
-    wahr(html.length > 2000, `a real page, not a stub (${html.length} bytes)`)
+    for (const id of [...HARNESSES, ...PROVIDERS]) contains(html, id, `${id} is on the page`)
+    isTrue(html.length > 2000, `a real page, not a stub (${html.length} bytes)`)
   })
 
-  await pruefe('the Welcome wizard renders every step against the real registry', async () => {
+  await check('the Welcome wizard renders every step against the real registry', async () => {
     for (const step of [1, 2, 3, 4, 5]) {
-      const r = await hol(`/welcome?step=${step}`)
-      gleich(r.status, 200, `step ${step}: status`)
+      const r = await fetchPath(`/welcome?step=${step}`)
+      equal(r.status, 200, `step ${step}: status`)
       const html = await r.text()
-      wahr(html.length > 800, `step ${step}: real content (${html.length} bytes)`)
+      isTrue(html.length > 800, `step ${step}: real content (${html.length} bytes)`)
     }
-    const html3 = await (await hol('/welcome?step=3')).text()
-    for (const id of PROVIDERS) enthaelt(html3, id, `the provider step offers ${id}`)
-    const html4 = await (await hol('/welcome?step=4')).text()
-    enthaelt(html4, 'provider:openrouter', 'the LLM step offers the real sources')
+    const html3 = await (await fetchPath('/welcome?step=3')).text()
+    for (const id of PROVIDERS) contains(html3, id, `the provider step offers ${id}`)
+    const html4 = await (await fetchPath('/welcome?step=4')).text()
+    contains(html4, 'provider:openrouter', 'the LLM step offers the real sources')
   })
 
   // =========================================================================
-  gruppe('F. One real run per coding agent, through the hub')
+  group('F. One real run per coding agent, through the hub')
 
   if (!MIT_RUNS) {
-    uebersprungen('real runs for claude / opencode / hermes / cursor',
+    skipped('real runs for claude / opencode / hermes / cursor',
       'not asked for — pass --runs (slow, consumes quota and credits)')
   } else {
     // The external-plugin block above already restarted the hub with the real
@@ -1209,35 +1209,35 @@ export default plugin
       { harness: 'cursor', model: MODELS['agent:cursor'], grund: HAS.cursor ? null : 'cursor-agent is not in PATH' },
     ]
     for (const f of faelle) {
-      if (f.grund) { uebersprungen(`real run: ${f.harness}`, f.grund); continue }
-      await pruefe(`real run: ${f.harness} writes the file, reports done and passes the finish gate`, async () => {
+      if (f.grund) { skipped(`real run: ${f.harness}`, f.grund); continue }
+      await check(`real run: ${f.harness} writes the file, reports done and passes the finish gate`, async () => {
         const marke = `${f.harness}-echt.md`
         const a = jetzt()
-        const r = await formular('/api/runs', {
+        const r = await postForm('/api/runs', {
           repo_id: String(repoId), harness: f.harness, branch_mode: 'keiner', expected_minutes: '10',
           ...(f.provider ? { provider: f.provider } : {}), ...(f.model ? { model: f.model } : {}),
           prompt: `Create the file ${marke} in the current directory with exactly one line: ${f.harness} ran. `
             + `Then run exactly this command: fl-report done "${f.harness} smoke test finished"`,
         })
         const j = await r.json()
-        wahr(!!j.runId, `run started (${r.status} ${JSON.stringify(j)})`)
-        await warteAuf(() => lauf3(j.runId)?.tmux_session, { was: 'a session', timeoutMs: 60_000 })
+        isTrue(!!j.runId, `run started (${r.status} ${JSON.stringify(j)})`)
+        await waitFor(() => lauf3(j.runId)?.tmux_session, { what: 'a session', timeoutMs: 60_000 })
         sk.sessions.add(lauf3(j.runId).tmux_session)
-        await warteAuf(() => ['done', 'failed', 'aborted'].includes(lauf3(j.runId).status),
-          { was: `the end of the ${f.harness} run`, timeoutMs: 600_000, taktMs: 2000 })
+        await waitFor(() => ['done', 'failed', 'aborted'].includes(lauf3(j.runId).status),
+          { what: `the end of the ${f.harness} run`, timeoutMs: 600_000, taktMs: 2000 })
         misst(`real run ${f.harness}`, seit(a))
         const row = lauf3(j.runId)
-        gleich(row.status, 'done', `status (report: ${String(row.report_md ?? '').slice(0, 200)})`)
-        wahr(existsSync(join(row.workdir_effective, marke)), `${marke} really exists in the worktree`)
-        wahr(String(row.report_md ?? '').length > 0, 'and a report was written')
+        equal(row.status, 'done', `status (report: ${String(row.report_md ?? '').slice(0, 200)})`)
+        isTrue(existsSync(join(row.workdir_effective, marke)), `${marke} really exists in the worktree`)
+        isTrue(String(row.report_md ?? '').length > 0, 'and a report was written')
       })
     }
   }
 } catch (err) {
   console.log(`\nAborted: ${err.stack}`)
-  zaehler.fehler.push({ name: 'Real suite', grund: err.message })
+  counter.failures.push({ name: 'Real suite', reason: err.message })
 } finally {
-  await aufraeumen()
+  await cleanUp()
 }
 
 if (LATENZ.length) {
@@ -1245,4 +1245,4 @@ if (LATENZ.length) {
   for (const l of LATENZ.sort((a, b) => b.ms - a.ms)) console.log(`  ${String(l.ms).padStart(7)}  ${l.name}`)
 }
 
-process.exit(bericht('Real integration tests', start))
+process.exit(summary('Real integration tests', start))

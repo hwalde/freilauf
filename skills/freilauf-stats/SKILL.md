@@ -99,7 +99,7 @@ SELECT i.*, r.status AS run_status FROM incidents i
 not report a global incident as belonging to the repo you happen to be looking
 at.
 
-The split is `brauchtMensch(v, runStatus)` in `server/incidents.mjs`:
+The split is `needsHuman(v, runStatus)` in `server/incidents.mjs`:
 
 | group | rule |
 |---|---|
@@ -348,7 +348,7 @@ current anomalies must match `kind LIKE 'anomaly:%'` — which `cleared:anomaly:
 correctly no longer does. The `notified:*` flags are deliberately *not* cleared
 along with it (raising an expected duration is the one exception).
 
-The traffic light (`ampel()` in `pages.mjs`) is where the yellow/red split is
+The traffic light (`trafficLight()` in `pages.mjs`) is where the yellow/red split is
 decided:
 
 | | |

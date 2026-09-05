@@ -20,7 +20,7 @@ await loadExternalPlugins()
 const { route } = await import('./web.mjs')
 const { startTerminalServer } = await import('./terminal.mjs')
 const { startScheduler, stopScheduler, tick: schedulerTick } = await import('./scheduler.mjs')
-const { startWatcher, stopWatcher, verwaisteLaeufeAbschliessen, tick: watcherTick } = await import('./watcher.mjs')
+const { startWatcher, stopWatcher, closeOrphanedRuns, tick: watcherTick } = await import('./watcher.mjs')
 const { startIntegrator, stopIntegrator } = await import('./integrate.mjs')
 const { getSetting } = await import('./db.mjs')
 const { seedIfEmpty } = await import('./coding-agents.mjs')
@@ -49,7 +49,7 @@ server.listen(PORT, HOST, () => {
   console.log(`[freilauf] running on http://${HOST}:${PORT}`)
   // First clean up what an earlier process left behind mid-start:
   // no grace period, because these runs cannot be ours any more.
-  const verwaist = verwaisteLaeufeAbschliessen(0)
+  const verwaist = closeOrphanedRuns(0)
   if (verwaist) console.log(`[freilauf] closed ${verwaist} interrupted run(s) (no session)`)
   startScheduler()
   startWatcher()

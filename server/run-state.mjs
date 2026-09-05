@@ -72,7 +72,7 @@ export function displayStatus(run) {
  * the same yellow for the same reason, all three done and merged.
  *
  * `settledAnomalies()` is therefore the anomaly half of what
- * `vorfallWeggrund()` does for incidents ("Gone is gone": a run that reached
+ * `incidentGoneReason()` does for incidents ("Gone is gone": a run that reached
  * `done` has answered them). The record stays — the anomaly event is not
  * touched, and the status cell still prints it as the dim history line next to
  * a duration column that says 52/45. What ends is the CALL FOR ATTENTION.

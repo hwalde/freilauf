@@ -7,8 +7,8 @@
 // have been the same drift AGENTS.md describes for run-def.mjs — two sandboxes
 // that slowly stop being the same sandbox.
 //
-// Everything is per instance: every call to neuerSandkasten() makes its own
-// temporary directory and every hubStarten() takes a free port. Two suites can
+// Everything is per instance: every call to newSandbox() makes its own
+// temporary directory and every startHub() takes a free port. Two suites can
 // therefore run at the same time, and both stay safe next to a live hub: the
 // production database, ~/agents and foreign tmux sessions are never touched,
 // and only the sessions an instance created itself are killed on the way out.
@@ -18,9 +18,9 @@ import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
 import { DatabaseSync } from 'node:sqlite'
-import { warteAuf } from './mini.mjs'
+import { waitFor } from './mini.mjs'
 
-export const PROJEKT = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
+export const PROJECT = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
 
 /** execFile as a promise that never rejects — a failed command is a result, not an exception. */
 export function sh(cmd, args, opts = {}) {
@@ -31,12 +31,12 @@ export function sh(cmd, args, opts = {}) {
 }
 
 /** Is this binary in PATH? Used to skip what cannot be tested here. */
-export function vorhanden(bin) {
+export function hasBinary(bin) {
   try { execFileSync('sh', ['-c', `command -v ${bin}`], { stdio: 'ignore' }); return true } catch { return false }
 }
 
 /** A port nobody listens on — asked of the kernel, not guessed. */
-export async function freierPort() {
+export async function freePort() {
   return new Promise((resolve, reject) => {
     const s = createServer()
     s.once('error', reject)
@@ -48,7 +48,7 @@ export async function freierPort() {
 }
 
 // ---------- leftovers of a suite that was killed ----------
-// aufraeumen() below kills exactly the sessions this sandbox created, and it is
+// cleanUp() below kills exactly the sessions this sandbox created, and it is
 // wired to SIGINT/SIGTERM/SIGHUP. None of that runs when the process is SIGKILLed
 // — a tool timeout, an OOM kill, an agent's run being aborted. The suite then
 // leaves its whole tmux fleet standing, and nothing on the machine knows those
@@ -61,68 +61,68 @@ export async function freierPort() {
 // So a starting sandbox sweeps what a dead one left: it reads THAT sandbox's own
 // sessions.txt and kills exactly those names. Still no pattern across all `fl-*` —
 // the list is the proof of ownership, exactly as it is on the way out.
-const SANDKASTEN_PRAEFIXE = ['freilauf-test-', 'Freilauf-e2e-', 'Freilauf-browser-']
+const SANDBOX_PREFIXES = ['freilauf-test-', 'Freilauf-e2e-', 'Freilauf-browser-']
 /** A sandbox with no owner marker is from before this existed; only age says it is dead. */
-export const VERWAIST_ALTER_MS = 6 * 3_600_000
+export const ORPHAN_AGE_MS = 6 * 3_600_000
 
 /**
  * May this leftover sandbox directory be swept?
  *
  * Pure, so the decision is testable without killing anything. `pid` is what the
- * directory's own owner.pid says (null when it carries none), `lebt` answers
+ * directory's own owner.pid says (null when it carries none), `alive` answers
  * whether that process is still running.
  *
  * A LIVE owner is the one answer that must never be got wrong: sweeping a running
  * suite would kill the sessions it is asserting on, from another suite's process,
  * with no error anybody could trace back to here.
  */
-export function sandkastenVerwaist(eintrag, { nowMs = Date.now(), eigenerPfad = null, lebt = () => true, altersgrenzeMs = VERWAIST_ALTER_MS } = {}) {
-  if (!eintrag?.pfad) return false
-  if (eintrag.pfad === eigenerPfad) return false          // never our own
+export function sandboxOrphaned(entry, { nowMs = Date.now(), ownPath = null, alive = () => true, maxAgeMs = ORPHAN_AGE_MS } = {}) {
+  if (!entry?.path) return false
+  if (entry.path === ownPath) return false          // never our own
   // `--keep` says a human wants to read this sandbox. Its owner is dead by
   // definition (the suite finished), and its sessions were killed on the way out
   // anyway — so it is the one abandoned directory that is not garbage.
-  if (eintrag.behalten) return false
-  if (eintrag.pid != null) return !lebt(eintrag.pid)      // the marker answers outright
+  if (entry.keep) return false
+  if (entry.pid != null) return !alive(entry.pid)      // the marker answers outright
   // No marker: written by a version before this, or killed between mkdtemp and the
   // first write. Age is the only evidence left — a live suite touches its directory
   // constantly, so anything untouched for hours is over.
-  if (!Number.isFinite(eintrag.mtimeMs)) return false
-  return nowMs - eintrag.mtimeMs >= altersgrenzeMs
+  if (!Number.isFinite(entry.mtimeMs)) return false
+  return nowMs - entry.mtimeMs >= maxAgeMs
 }
 
 /** Is this pid still running? A pid we may not signal is still a pid that exists. */
-function pidLebt(pid) {
+function pidAlive(pid) {
   try { process.kill(pid, 0); return true } catch (err) { return err?.code === 'EPERM' }
 }
 
-/** Every sandbox directory in tmpdir, with the two facts sandkastenVerwaist() judges. */
-function sandkastenListe(wurzel = tmpdir()) {
-  let namen = []
-  try { namen = readdirSync(wurzel) } catch { return [] }
+/** Every sandbox directory in tmpdir, with the two facts sandboxOrphaned() judges. */
+function sandboxList(root = tmpdir()) {
+  let names = []
+  try { names = readdirSync(root) } catch { return [] }
   const out = []
-  for (const name of namen) {
-    if (!SANDKASTEN_PRAEFIXE.some(p => name.startsWith(p))) continue
-    const pfad = join(wurzel, name)
+  for (const name of names) {
+    if (!SANDBOX_PREFIXES.some(p => name.startsWith(p))) continue
+    const path = join(root, name)
     // A Freilauf sandbox and nothing else: one of the two files it writes itself.
     // Without this a directory that merely shares the prefix could be removed.
-    if (!existsSync(join(pfad, 'sessions.txt')) && !existsSync(join(pfad, 'owner.pid'))) continue
+    if (!existsSync(join(path, 'sessions.txt')) && !existsSync(join(path, 'owner.pid'))) continue
     let pid = null
-    try { pid = Number(readFileSync(join(pfad, 'owner.pid'), 'utf8').trim()) || null } catch { /* none */ }
+    try { pid = Number(readFileSync(join(path, 'owner.pid'), 'utf8').trim()) || null } catch { /* none */ }
     let mtimeMs = NaN
-    try { mtimeMs = statSync(pfad).mtimeMs } catch { /* gone while we looked */ }
-    out.push({ pfad, pid, mtimeMs, behalten: existsSync(join(pfad, 'behalten')) })
+    try { mtimeMs = statSync(path).mtimeMs } catch { /* gone while we looked */ }
+    out.push({ path, pid, mtimeMs, keep: existsSync(join(path, 'keep')) })
   }
   return out
 }
 
 /** Kill the sessions a dead sandbox left behind, then remove its directory. */
-async function verwaisteAufraeumen(eigenerPfad) {
-  let getoetet = 0
-  for (const eintrag of sandkastenListe()) {
-    if (!sandkastenVerwaist(eintrag, { eigenerPfad, lebt: pidLebt })) continue
-    let namen = []
-    try { namen = readFileSync(join(eintrag.pfad, 'sessions.txt'), 'utf8').split('\n').map(z => z.trim()).filter(Boolean) }
+async function sweepOrphans(ownPath) {
+  let killed = 0
+  for (const entry of sandboxList()) {
+    if (!sandboxOrphaned(entry, { ownPath, alive: pidAlive })) continue
+    let names = []
+    try { names = readFileSync(join(entry.path, 'sessions.txt'), 'utf8').split('\n').map(l => l.trim()).filter(Boolean) }
     catch { /* a sandbox that never started a run */ }
     // In PARALLEL, and that is not a micro-optimisation. Serially this is one
     // process per session against a tmux server that is busy with everybody
@@ -133,27 +133,27 @@ async function verwaisteAufraeumen(eigenerPfad) {
     //
     // Two suites may sweep the same leftover at once, and a session may be long
     // gone: a failed kill is the normal case here, never a reason to stop.
-    const ergebnisse = await Promise.all([...new Set(namen)].map(s =>
+    const results = await Promise.all([...new Set(names)].map(s =>
       sh('tmux', ['kill-session', '-t', `=${s}`]).catch(() => ({ ok: false }))))
-    getoetet += ergebnisse.filter(r => r.ok).length
-    try { rmSync(eintrag.pfad, { recursive: true, force: true }) } catch { /* next run gets it */ }
+    killed += results.filter(r => r.ok).length
+    try { rmSync(entry.path, { recursive: true, force: true }) } catch { /* next run gets it */ }
   }
-  if (getoetet) console.log(`  (${getoetet} tmux sessions of an earlier, killed suite cleaned up)`)
+  if (killed) console.log(`  (${killed} tmux sessions of an earlier, killed suite cleaned up)`)
 }
 
 /**
  * A sandbox plus the hub process that runs in it.
  *
- * @param praefix   name prefix of the temporary directory — one per suite, so a
- *                  kept sandbox says which run it belongs to
- * @param behalten  keep the directory instead of deleting it (debugging)
+ * @param prefix  name prefix of the temporary directory — one per suite, so a
+ *                kept sandbox says which run it belongs to
+ * @param keep    keep the directory instead of deleting it (debugging)
  */
-export function neuerSandkasten({ praefix = 'freilauf-test-', behalten = false } = {}) {
-  const SB = mkdtempSync(join(tmpdir(), praefix))
+export function newSandbox({ prefix = 'freilauf-test-', keep = false } = {}) {
+  const SB = mkdtempSync(join(tmpdir(), prefix))
   const REPO = join(SB, 'repo')
   const ORIGIN = join(SB, 'origin.git')
   const STUB = join(SB, 'bin', 'fl-start')
-  const FEHLSTART = join(SB, 'fehlstart-an')
+  const FAILED_START = join(SB, 'failed-start-on')
   // Every session the stub below created, written by the stub itself. The `sessions`
   // set next to it is what individual tests register by hand — and THAT is what used
   // to leak: only two helpers ever called `sessions.add`, so every run started along
@@ -165,21 +165,21 @@ export function neuerSandkasten({ praefix = 'freilauf-test-', behalten = false }
   // The stub knows the name it just created and cannot forget to write it down, so
   // the list belongs to it. Still no pattern across all `fl-*`: this file holds
   // exactly the sessions THIS sandbox produced, and nothing else is touched.
-  const SESSIONSLISTE = join(SB, 'sessions.txt')
+  const SESSION_LIST = join(SB, 'sessions.txt')
   const sessions = new Set()          // what a test registered by hand; killed as well
 
   // Who owns this directory. Written before anything else, so a sandbox is
-  // identifiable as abandoned from the moment it exists — see sandkastenVerwaist().
+  // identifiable as abandoned from the moment it exists — see sandboxOrphaned().
   try { writeFileSync(join(SB, 'owner.pid'), `${process.pid}\n`) } catch { /* the age rule still covers us */ }
   // A kept sandbox is somebody's debugging state, not a leftover — say so on disk,
   // because after the suite exits nothing else distinguishes the two.
-  if (behalten) { try { writeFileSync(join(SB, 'behalten'), 'kept for debugging\n') } catch { /* best effort */ } }
+  if (keep) { try { writeFileSync(join(SB, 'keep'), 'kept for debugging\n') } catch { /* best effort */ } }
 
-  const zustand = { hub: null, db: null, port: 0, basis: '', aufgeraeumt: false }
+  const state = { hub: null, db: null, port: 0, base: '', cleanedUp: false }
 
-  async function bauen() {
+  async function build() {
     // Before anything of our own: take back what a killed suite left standing.
-    await verwaisteAufraeumen(SB)
+    await sweepOrphans(SB)
     for (const d of ['data', 'runs', 'worktrees', 'integrate', 'bin', 'plugins', 'skillhome']) mkdirSync(join(SB, d), { recursive: true })
 
     // Extra-skill dummy (planning: opt-in skills outside the skill autoload folders)
@@ -201,7 +201,7 @@ export function neuerSandkasten({ praefix = 'freilauf-test-', behalten = false }
     const g = (...a) => sh('git', ['-C', REPO, ...a])
     await g('config', 'user.email', 'e2e@test.local')
     await g('config', 'user.name', 'E2E')
-    writeFileSync(join(REPO, 'README.md'), '# Testrepo\n')
+    writeFileSync(join(REPO, 'README.md'), '# Test repo\n')
     // .env and referenz/ stay UNVERSIONED — that is exactly what the worktree extras
     // are for. If they were in git, they would already be in the worktree and the
     // copy/link path would be skipped silently.
@@ -222,7 +222,7 @@ export function neuerSandkasten({ praefix = 'freilauf-test-', behalten = false }
     writeFileSync(STUB, `#!/usr/bin/env bash
 set -euo pipefail
 NAME=e2e; ID=""; ENVS=(); LOG=""; KEEP=""; PROMPTFILE=""; POS=()
-ALLE=("$@")
+ALL_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --harness|--model|--session-id|--settings|--spec|--resume) shift 2 ;;
@@ -242,15 +242,15 @@ WORKDIR="\${POS[0]:-$PWD}"
 # Not exec: the session it creates has to be written down too, or --echt would
 # leak exactly what the stub path no longer does.
 if [[ -n "$PROMPTFILE" && -r "$PROMPTFILE" ]] && grep -q 'E2E-ECHT' "$PROMPTFILE"; then
-  AUSGABE=$("${homedir()}/.local/bin/fl-start" "\${ALLE[@]}") || { echo "$AUSGABE"; exit 1; }
-  echo "$AUSGABE"
-  echo "$AUSGABE" | sed -n "s/^Session '\\([^']*\\)' .*/\\1/p" >> "${SESSIONSLISTE}"
+  OUTPUT=$("${homedir()}/.local/bin/fl-start" "\${ALL_ARGS[@]}") || { echo "$OUTPUT"; exit 1; }
+  echo "$OUTPUT"
+  echo "$OUTPUT" | sed -n "s/^Session '\\([^']*\\)' .*/\\1/p" >> "${SESSION_LIST}"
   exit 0
 fi
 
 # Deliberate failed start for the retry test.
-if [[ -f "${FEHLSTART}" ]]; then
-  echo "Fehlstart erzwungen (E2E)" >&2
+if [[ -f "${FAILED_START}" ]]; then
+  echo "forced failed start (E2E)" >&2
   exit 1
 fi
 
@@ -258,14 +258,14 @@ SESSION="fl-$NAME"; [[ -n "$ID" ]] && SESSION="$SESSION-$ID"
 n=2; while tmux has-session -t "=$SESSION" 2>/dev/null; do SESSION="fl-$NAME-$ID-$n"; n=$((n+1)); done
 RUNNER="${SB}/runner-$$.sh"
 cat > "$RUNNER" <<'INNER'
-echo "=== E2E-Agent gestartet ==="
+echo "=== E2E agent started ==="
 echo "workdir: $PWD"
-echo "FL_RUN_ID=\${FL_RUN_ID:-<leer>}"
+echo "FL_RUN_ID=\${FL_RUN_ID:-<empty>}"
 [[ -n "\${FL_PROMPTFILE:-}" && -r "\$FL_PROMPTFILE" ]] && { echo "--- Prompt ---"; cat "\$FL_PROMPTFILE"; }
-echo "bereit fuer Eingaben:"
-while IFS= read -r zeile; do echo "[agent sah] $zeile"; done
+echo "ready for input:"
+while IFS= read -r line; do echo "[agent saw] $line"; done
 INNER
-echo "$SESSION" >> "${SESSIONSLISTE}"
+echo "$SESSION" >> "${SESSION_LIST}"
 tmux new-session -d -x 200 -y 50 "\${ENVS[@]}" -e "FL_PROMPTFILE=$PROMPTFILE" -s "$SESSION" -c "$WORKDIR" bash "$RUNNER"
 if [[ -n "$LOG" ]]; then mkdir -p "$(dirname "$LOG")"; tmux pipe-pane -o -t "=$SESSION:" "cat >> '$LOG'"; fi
 [[ -n "$KEEP" ]] && tmux set-option -t "=$SESSION:" -q remain-on-exit on
@@ -276,15 +276,15 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
 
   /**
    * Start the hub on a free port.
-   * `echteAgenten` hands the runs to the real ~/.local/bin/fl-start (and needs the
+   * `realAgents` hands the runs to the real ~/.local/bin/fl-start (and needs the
    * provider keys back in the environment); everything else keeps the stub.
    */
-  async function hubStarten({ echteAgenten = false, keys = {}, env = {}, willkommen = false } = {}) {
-    zustand.port = await freierPort()
-    zustand.basis = `http://127.0.0.1:${zustand.port}`
-    const umgebung = {
+  async function startHub({ realAgents = false, keys = {}, env = {}, welcome = false } = {}) {
+    state.port = await freePort()
+    state.base = `http://127.0.0.1:${state.port}`
+    const environment = {
       ...process.env,
-      FREILAUF_LOCAL_PORT: String(zustand.port),
+      FREILAUF_LOCAL_PORT: String(state.port),
       FREILAUF_DATA_DIR: join(SB, 'data'),
       FREILAUF_RUNS_DIR: join(SB, 'runs'),
       FREILAUF_WORKTREES_DIR: join(SB, 'worktrees'),
@@ -298,7 +298,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // the hub points at ~/.local/bin/fl-report — whatever the last deploy
       // installed there, or nothing at all on a machine that has not deployed
       // this release yet. Same fence as FREILAUF_START_SCRIPT below.
-      FREILAUF_REPORT_SCRIPT: join(PROJEKT, 'bin', 'fl-report'),
+      FREILAUF_REPORT_SCRIPT: join(PROJECT, 'bin', 'fl-report'),
       // No credentials file means no token, and no token means the live usage
       // endpoint (server/claude-usage.mjs) is never asked — the quota fixture
       // above stays the only source, the way the fixture's comment promises.
@@ -346,32 +346,32 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     }
     // A suite may override or add to the hub's environment — e.g. shorten the
     // usage/balance caches so a browser test does not wait a full minute.
-    for (const [k, v] of Object.entries(env)) umgebung[k] = v
-    if (echteAgenten) {
+    for (const [k, v] of Object.entries(env)) environment[k] = v
+    if (realAgents) {
       // No FREILAUF_START_SCRIPT: the hub uses ~/.local/bin/fl-start and thereby the real
       // harnesses. The provider key must go back into the environment, otherwise
       // opencode/hermes starts and dies only at the first API call.
-      delete umgebung.FREILAUF_START_SCRIPT
-      for (const [k, v] of Object.entries(keys)) if (v) umgebung[k] = v
+      delete environment.FREILAUF_START_SCRIPT
+      for (const [k, v] of Object.entries(keys)) if (v) environment[k] = v
     } else {
-      umgebung.FREILAUF_START_SCRIPT = STUB
-      delete umgebung.OPENROUTER_API_KEY    // no real API calls from the stub part
+      environment.FREILAUF_START_SCRIPT = STUB
+      delete environment.OPENROUTER_API_KEY    // no real API calls from the stub part
     }
-    const hub = spawn(process.execPath, [join(PROJEKT, 'server', 'hub.mjs')], { env: umgebung, stdio: ['ignore', 'pipe', 'pipe'] })
-    zustand.hub = hub
+    const hub = spawn(process.execPath, [join(PROJECT, 'server', 'hub.mjs')], { env: environment, stdio: ['ignore', 'pipe', 'pipe'] })
+    state.hub = hub
     const logs = []
     hub.stdout.on('data', (d) => logs.push(String(d)))
     hub.stderr.on('data', (d) => logs.push(String(d)))
     hub.on('exit', (code) => { if (code !== 0 && code !== null) console.log(`  (hub exited, code ${code})\n${logs.join('')}`) })
 
-    await warteAuf(async () => (await hol('/')).status === 200,
-      { was: `hub at ${zustand.basis} responds`, timeoutMs: 15_000 })
+    await waitFor(async () => (await fetchPath('/')).status === 200,
+      { what: `hub at ${state.base} responds`, timeoutMs: 15_000 })
 
-    zustand.db = new DatabaseSync(join(SB, 'data', 'freilauf.db'))
+    state.db = new DatabaseSync(join(SB, 'data', 'freilauf.db'))
     // The hub holds its own connection and writes in the background (scheduler,
     // watcher); a direct write here must WAIT for it instead of failing instantly
     // with "database is locked" (the hub's own connection uses busy_timeout 5000).
-    zustand.db.exec('PRAGMA busy_timeout = 10000;')
+    state.db.exec('PRAGMA busy_timeout = 10000;')
     // The Welcome wizard is what a FRESH installation meets: `GET /` redirects
     // to /welcome for a browser navigation while `welcome_hide` is unset, and a
     // sandbox is a fresh installation every single time. Every suite here asks
@@ -382,13 +382,13 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     // The wizard itself is tested by clearing this key again (e2e), which is
     // the honest way round: opting IN to the redirect in the one place that is
     // about it, rather than every other suite opting out of it.
-    if (willkommen === false) setzeEinstellung('welcome_hide', '1')
-    return zustand.db
+    if (welcome === false) setSetting('welcome_hide', '1')
+    return state.db
   }
 
   /** Write one settings row into the sandbox database (the hub reads it live). */
-  function setzeEinstellung(key, value) {
-    zustand.db.prepare(`INSERT INTO settings(key, value) VALUES(?, ?)
+  function setSetting(key, value) {
+    state.db.prepare(`INSERT INTO settings(key, value) VALUES(?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(String(key), String(value))
   }
 
@@ -398,14 +398,14 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
    * This writes the FREILAUF_* variables into THIS process, so it belongs to the one
    * sandbox a suite works with.
    */
-  async function watcherVorbereiten() {
+  async function prepareWatcher() {
     process.env.FREILAUF_DATA_DIR = join(SB, 'data')
     process.env.FREILAUF_RUNS_DIR = join(SB, 'runs')
     process.env.FREILAUF_WORKTREES_DIR = join(SB, 'worktrees')
     process.env.FREILAUF_INTEGRATE_DIR = join(SB, 'integrate')
     process.env.FREILAUF_INTEGRATOR_OFF = '1'
     process.env.FREILAUF_QUOTA_JSON = join(SB, 'quota.json')
-    process.env.FREILAUF_REPORT_SCRIPT = join(PROJEKT, 'bin', 'fl-report')
+    process.env.FREILAUF_REPORT_SCRIPT = join(PROJECT, 'bin', 'fl-report')
     process.env.FREILAUF_CLAUDE_CREDENTIALS = join(SB, 'missing-claude-credentials.json')
     process.env.FREILAUF_START_SCRIPT = STUB
     process.env.FREILAUF_CLAUDE_PROJECTS = join(SB, 'claude-projects')
@@ -429,55 +429,55 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
   }
 
   // ---------------------------------------------------------------- HTTP
-  async function hol(pfad, opts = {}) {
-    return fetch(zustand.basis + pfad, { redirect: 'manual', signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000), ...opts })
+  async function fetchPath(path, opts = {}) {
+    return fetch(state.base + path, { redirect: 'manual', signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000), ...opts })
   }
-  async function formular(pfad, daten, { alsBrowser = false } = {}) {
+  async function postForm(path, data, { asBrowser = false } = {}) {
     const body = new URLSearchParams()
-    for (const [k, v] of Object.entries(daten)) Array.isArray(v) ? v.forEach(x => body.append(k, x)) : body.append(k, v)
-    return hol(pfad, {
+    for (const [k, v] of Object.entries(data)) Array.isArray(v) ? v.forEach(x => body.append(k, x)) : body.append(k, v)
+    return fetchPath(path, {
       method: 'POST', body,
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
-        accept: alsBrowser ? 'text/html,application/xhtml+xml' : 'application/json',
+        accept: asBrowser ? 'text/html,application/xhtml+xml' : 'application/json',
       },
     })
   }
 
   // ---------------------------------------------------------------- Cleanup
   /** Stop the hub process (also mid-suite, when the real-run mode restarts it). */
-  async function hubStoppen() {
-    try { zustand.db?.close() } catch {}
-    zustand.db = null
-    const hub = zustand.hub
+  async function stopHub() {
+    try { state.db?.close() } catch {}
+    state.db = null
+    const hub = state.hub
     if (hub && hub.exitCode === null) {
       hub.kill('SIGTERM')
       await new Promise(r => { const t = setTimeout(() => { try { hub.kill('SIGKILL') } catch {} ; r() }, 4000); hub.once('exit', () => { clearTimeout(t); r() }) })
     }
-    zustand.hub = null
+    state.hub = null
   }
 
-  async function aufraeumen() {
-    if (zustand.aufgeraeumt) return
-    zustand.aufgeraeumt = true
-    await hubStoppen()
+  async function cleanUp() {
+    if (state.cleanedUp) return
+    state.cleanedUp = true
+    await stopHub()
     // ONLY the sessions we created ourselves — never a pattern across all fl-*.
     // The stub's own list first (it cannot forget one), then whatever a test
     // registered by hand; a Set, so a name in both is killed once.
-    const alle = new Set(sessions)
+    const all = new Set(sessions)
     try {
-      for (const zeile of readFileSync(SESSIONSLISTE, 'utf8').split('\n')) {
-        const name = zeile.trim()
-        if (name) alle.add(name)
+      for (const line of readFileSync(SESSION_LIST, 'utf8').split('\n')) {
+        const name = line.trim()
+        if (name) all.add(name)
       }
     } catch { /* no run ever started: nothing to clean up */ }
-    for (const s of alle) await sh('tmux', ['kill-session', '-t', `=${s}`]).catch(() => {})
-    if (behalten) console.log(`\nSandbox kept: ${SB}`)
+    for (const s of all) await sh('tmux', ['kill-session', '-t', `=${s}`]).catch(() => {})
+    if (keep) console.log(`\nSandbox kept: ${SB}`)
     else {
       // A detached flow command (a `sleep 1; touch` in the run_merged tests) can
       // still land in the sandbox while rmSync sweeps it — retry briefly instead
       // of letting the whole suite die on a leftover it did not cause.
-      for (let versuch = 0; versuch < 8; versuch++) {
+      for (let attempt = 0; attempt < 8; attempt++) {
         try { rmSync(SB, { recursive: true, force: true }); break }
         catch { await new Promise(r => setTimeout(r, 200)) }
       }
@@ -485,12 +485,12 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
   }
 
   return {
-    SB, REPO, ORIGIN, FEHLSTART, sessions, SESSIONSLISTE,
+    SB, REPO, ORIGIN, FAILED_START, sessions, SESSION_LIST,
     PLUGINS: join(SB, 'plugins'),
-    bauen, hubStarten, hubStoppen, watcherVorbereiten, aufraeumen,
-    hol, formular, setzeEinstellung,
-    get db() { return zustand.db },
-    get port() { return zustand.port },
-    get basis() { return zustand.basis },
+    build, startHub, stopHub, prepareWatcher, cleanUp,
+    fetchPath, postForm, setSetting,
+    get db() { return state.db },
+    get port() { return state.port },
+    get base() { return state.base },
   }
 }

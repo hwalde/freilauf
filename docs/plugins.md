@@ -167,8 +167,8 @@ was the cycle** that made dynamic loading impossible:
 - `quota.mjs` needed a dynamic import to reach a harness;
 - the budget gate could not go through `balances.mjs` / `usage.mjs`.
 
-`harnessCheckAufloesen()` in db.mjs removes the clause once and idempotently,
-with the same `tabelleUmziehen()` technique the old `harnessCheckErweitern()`
+`dropHarnessCheck()` in db.mjs removes the clause once and idempotently,
+with the same `rebuildTable()` technique the old `harnessCheckErweitern()`
 used: the new table header is fetched from `sqlite_master` and edited at that
 one spot, so retrofitted columns, defaults and the UNIQUE survive; copying is
 column-wise by name. A fresh database never had the clause and is left alone; an
@@ -319,7 +319,7 @@ and does without.
 | `launch` | `{promptMode, args[], interactiveArgs?, resume?, bin?, sessionTag?, installHint?, stderrLog?, submitNudge?, promptFile?}` (optional) | how `bin/fl-start` calls this CLI. **Without it an external coding agent cannot start a run at all**; see "The launch declaration" |
 | `pulseId(run)` | fn → string\|null | which pulse target to check while this run is active; `null` = explicitly *not monitored*, which is not the same as healthy |
 | `pulseTargets` | object | extra pulse targets `{id: {url, okStatus[]}}` beyond the provider plugins (claude contributes `anthropic`) |
-| `logPatterns` | `[{typ, re}]` | narrow regexes for the pipe-pane log scan; `typ` ∈ `TYPEN` from `detect.mjs` |
+| `logPatterns` | `[{typ, re}]` | narrow regexes for the pipe-pane log scan; `typ` ∈ `INCIDENT_TYPES` from `detect.mjs` |
 | `turnEndsRun` | boolean (optional) | `true` = the end of a turn ends the RUN (`_turn_end` → `finishByTurnEnd()` in `reports.mjs`). Set it when the CLI keeps running after the work is done, so neither `_pane_died` nor `_exit` will ever come — cursor's TUI does exactly that |
 | `hookFiles({ccReport})` | fn (optional) | files the hub writes into the workspace before the start: `[{path, content}]`, `path` relative to the worktree. `ccReport` is the absolute path of `fl-report` — hook commands must not depend on `PATH`. An existing file is never overwritten, and `harnessOwnedPaths()` keeps these paths out of the worktree cleanup's dirty check |
 | `goal` | `{max, command(condition), typed?}` (optional) | this CLI takes a SECOND prompt, one that says when the run is done — claude's `/goal <condition>`. `max` is the longest condition it accepts, `command()` builds the line. Presence is the whole capability check: the form shows the goal field only for these harnesses (`harnessesWithGoal()`), and `server/goal.mjs` types the line into the session after the start, because a slash command has no CLI flag. `typed` is the prefix that must arrive as **keystrokes** rather than as a paste — declare it whenever the CLI reads a command differently from pasted text: claude collapses a bracketed paste over 800 characters into a `[Pasted text #n]` placeholder, and a placeholder is never parsed as a slash command, so a long condition sent in one paste was submitted as an ordinary message and no goal was set. The prefix must really begin `command()`'s output; where it does not, the whole line is pasted as before |
