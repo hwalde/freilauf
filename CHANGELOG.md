@@ -20,11 +20,45 @@ a day on which nothing was released.
 
 ### Added
 
+- **A sandboxed run can have an enforced allowlist on a rootless daemon.** This
+  was the sandbox's largest documented limit: the built-in egress proxy was a
+  listener inside the hub process, a rootless daemon keeps the run's network in
+  a namespace of its own, and so three of the four shipped profiles —
+  **Balanced**, **Locked down** and **Audit** — could not start a run at all,
+  while the fourth gave the container the whole internet. All four start now.
+  Where the listener cannot live on the host, the hub runs it as a **container
+  on the run's own network**, and the agent reaches it by name. It is the same
+  proxy either way — same allowlist matcher, same readable 403, same audit
+  format — and where the in-process listener works (a rootful daemon, or an
+  address you published yourself with `FREILAUF_SANDBOX_PROXY_BIND`) that is
+  still what runs, because it costs nothing. Nothing to configure: where the
+  proxy runs is a fact about your daemon, not a field in a profile.
+  `FREILAUF_SANDBOX_PROXY_PLACEMENT` forces one if you must.
+  The container placement is also the **stronger** posture, not a workaround —
+  the run's network keeps its gateway isolated, so the container cannot reach
+  services on the host at all, which the in-process listener has to leave open.
+  Measured against rootless Docker 29.8.0: an allowed host answers, a denied one
+  gets the 403, `git` and `npm` to denied hosts are refused, a policy change made
+  while the run is going takes effect on the next connection, audit-only lets the
+  request through and records it, and the denial arrives on the run as
+  `sandbox:blocked`. **What has still never happened is a coding agent working
+  behind one** — roll out with the **Audit** profile and adopt the hosts it
+  records, exactly as [docs/sandbox.md](docs/sandbox.md) says.
+- **A hub restart no longer costs a sandboxed run its blocked-host events.** A
+  proxy container survives a restart, and the hub now takes a running one back
+  over instead of leaving it alone: the run goes on reporting what it was refused,
+  and a live policy change reaches it again. Before, such a run kept enforcing
+  correctly and quietly stopped saying anything about it. (A proxy the daemon
+  says is *gone* is still replaced; one it will not answer about is still left
+  alone. An iron-proxy container is the exception and is still left as it is — its
+  management key died with the process that minted it, so a policy change there is
+  still refused rather than reported as delivered.)
 - **A coding agent has now done a whole run inside a container, and its work
   reached `main`.** One harness, one machine, and worth naming exactly:
   **opencode 1.18.29** in `freilauf/agent-opencode:1.18.29`, under **rootless
-  Docker 29.8.0**, with `network.mode: open` — because the enforced allowlist
-  needs an egress proxy a rootless daemon cannot reach (see the entry below).
+  Docker 29.8.0**, with `network.mode: open` — because at the time the enforced
+  allowlist needed an egress proxy a rootless daemon could not reach, which the
+  first entry above answers later the same day.
   The second attempt reported `done` and had its branch merged into
   `origin/main` about a minute after it started, with nobody helping it:
   `started → tmux_started → agent_working → finish_started → finish_clean →
@@ -35,8 +69,8 @@ a day on which nothing was released.
   ending the run leaves no container, network or proxy behind, and the sessions
   page reports the container's own memory (786 MB where the pane's process tree
   would have said about ten). **claude, cursor and hermes have still never been
-  started in a container**, and neither has any run under an enforced
-  allowlist; what a first run of each finds is what it finds.
+  started in a container**, and no run of any harness has yet worked behind an
+  enforced allowlist; what a first run of each finds is what it finds.
 - **A sandboxed run no longer has to be told which image to start from.** Where
   neither the repository nor the profile names one, the run uses the image the
   coding agent's own plugin declares — the same name the Settings page builds,
@@ -283,6 +317,16 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **The first host a sandboxed run was refused could have taken the whole hub
+  down.** The egress proxy answered a denied CONNECT with its 403 and closed the
+  connection — and a client that has been refused a tunnel resets it, which
+  arrived on a socket with no error handler and became an uncaught exception.
+  Measured against a real daemon: the proxy died one second after its first
+  denial. Where that listener runs inside the hub process — a rootful daemon, or
+  a published address — the process that died would have been **the hub**:
+  scheduler, watcher and every open page, at the moment an agent first hit its
+  own allowlist. Nobody had reached it, because until now no run had ever got as
+  far as being refused a host.
 - **The hub really could not read a sandboxed run's working copy, for ever, on
   a run that looked perfectly healthy.** Every git call the hub makes inside the
   box — the finish gate's dirt check first of all — ran as a user that exists on
@@ -356,7 +400,10 @@ a day on which nothing was released.
   engine, network mode `open`, or publishing the listener yourself with
   `FREILAUF_SANDBOX_PROXY_BIND`). Falling back to the built-in engine when a
   named one will not start is refused for the same reason on such a daemon,
-  rather than producing a run with no egress at all.
+  rather than producing a run with no egress at all. **Superseded later the same
+  day** by the first entry under *Added* above: the combination is not
+  impossible any more, and what survives of this refusal is the one case an
+  operator brings on themselves by forcing the listener into the hub process.
 - **A sandboxed run's `sandbox.json` and `proxy.yaml` are never written through
   a symbolic link.** Both live in the run's own directory, which is mounted
   read-write into the container at the agent's uid, and both are rewritten on
@@ -374,10 +421,11 @@ a day on which nothing was released.
   than hidden — the container can then also reach host services on that bridge,
   which is why the proxy's own refusal to connect into loopback, RFC 1918,
   CGNAT and link-local addresses is not optional. **On a rootless daemon this
-  engine cannot work at all** (the bridges are in another network namespace);
-  the launch fails without naming the cause, and
-  [docs/sandbox.md](docs/sandbox.md) now has the measurement and what to use
-  instead.
+  listener cannot exist on the host at all** (the bridges are in another network
+  namespace), which the first entry under *Added* above answers later the same
+  day by moving it into a container — where no gateway is needed and the run's
+  network keeps its own isolated. Everything in this entry is therefore about
+  the in-process placement, which is what a rootful daemon still gets.
 - **A hub restart no longer strips a running sandboxed run of its egress.** The
   built-in proxy lives in the hub process, so a deploy took it with it and left
   the container talking to a dead port for the rest of its life. A watcher pass
@@ -389,7 +437,10 @@ a day on which nothing was released.
   one the daemon will not answer about is left alone too. For a surviving
   container proxy the hub has no handle and does not invent one, so a live
   policy change on that run is now **refused with "the proxy is gone"** instead
-  of reporting a policy it never delivered.
+  of reporting a policy it never delivered. **Narrowed later the same day** by
+  the second entry under *Added* above: a surviving BUILT-IN proxy container is
+  taken back over, handle and all. iron-proxy is what the sentence still
+  describes.
 - **The hub's floor holds on every path that writes an override.** A path the
   hub locked could be loosened through the **Reconfigure…** button on a running
   run, through the repo form, through "Adopt these hosts", through the profile

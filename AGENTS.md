@@ -2687,51 +2687,76 @@ because the runtime *could not be asked* carries `sandboxRetry`: it leaves
 `resume_pending` standing and does **not** count against `RESUME_MAX`, so a
 rootless daemon still coming up after a reboot cannot burn the cap.
 
-**The built-in proxy binds the run network's GATEWAY, never loopback — and on a
-rootless daemon it cannot bind anything at all.** Loopback inside a container is
-the container, so a listener on `127.0.0.1` is a run that looks sandboxed and
-routes nothing; `allowlist` had never worked end to end with this engine until
-`builtinBind()` started asking `networkGateway()`, and a network whose gateway
-it cannot learn is a **refusal**, not a fall back. What that buys is stated
-rather than hidden: the run's network is then created WITHOUT gateway isolation
-and the container can also reach host services on that bridge, which is why
-`denyUpstreamCidrs` is not optional. And measured 2026-09-05 (§11b.5): **under a
-rootless daemon that gateway does not exist in the host's namespace**
-(rootlesskit runs `--detach-netns`), a container cannot reach the host on any
-network (`--disable-host-loopback`), and `host-gateway` resolves to a stopped
-rootful daemon's leftover bridge — three independent reasons the built-in engine
-cannot serve an allowlist there, which is the posture the project recommends and
-the one three of the four shipped profiles are written for. **One predicate says
-so, and both the launch and the form ask it** — `engineUsable(engine, info)`, so
-an operator who was told the combination is impossible cannot then be told
-something else by the launch: `ensureProxy()` refuses before starting anything,
-the fallback to the built-in engine is asked the same question (falling back
-there would be a run with no egress at all, which looks healthy until the first
-request times out), and Settings → Sandbox prints the refusal next to the engine
-picker. `rootless: null` — a daemon that did not say — is **not** a refusal; the
-launch then fails on the bind as before, which is worse than a diagnosis and
-better than refusing a run over a question nobody answered. What is still not
-covered is the **profile editor**, which does not warn while the combination is
-being written down. The containerised topology (proxy on the internal network
-with a second leg on `bridge`) was measured and works, and is what
-`engine: 'iron-proxy'` already does — an engine with no binary and no image
-here.
+**The built-in proxy is ONE engine with TWO placements, and the placement is a
+fact about the daemon rather than a field in a profile.** Measured 2026-09-05
+(§11b.5): under a rootless daemon the run network's gateway does not exist in the
+host's namespace (rootlesskit runs `--detach-netns`), a container cannot reach
+the host on any network (`--disable-host-loopback`), and `host-gateway` resolves
+to a stopped rootful daemon's leftover bridge — three independent reasons a
+listener in the HUB PROCESS cannot serve an allowlist there, which is the posture
+the project recommends and the one three of the four shipped profiles are written
+for. The answer was to move the listener, not to drop the engine
+(§11b.5a): `proxyPlacement(engine, info)` answers `'process'` (the hub, on the
+run network's GATEWAY — never loopback, because loopback inside a container is
+the container) or `'container'` (`fl-proxy-<id>` on the run's own internal
+network, dialled by name). Rootless → container; a forced
+`FREILAUF_SANDBOX_PROXY_PLACEMENT`, or a `FREILAUF_SANDBOX_PROXY_BIND` the
+operator published themselves, outranks it. **The container placement is the
+stronger one**: a proxy on that network needs no host address on it, so the
+network keeps `gateway_mode_ipv4=isolated`; only the in-process placement pays
+the documented cost of a reachable gateway, which is why `denyUpstreamCidrs` is
+not optional there. `engineUsable()` keeps exactly one refusal — a placement
+FORCED to `process` under a rootless daemon — and the launch, Settings → Sandbox
+and the profile editor all ask that one predicate, so an operator cannot be told
+two different things about one profile. `rootless: null` — a daemon that did not
+say — is **not** a refusal; the launch then fails on the bind, which is worse
+than a diagnosis and better than refusing a run over a question nobody answered.
 
-**The built-in proxy dies with the hub, so a restart must give it back.**
-`restoreProxies()` in the watcher pass rebinds a running sandboxed run's
-listener on the **same port** (from its own `sandbox.json`) with the **same
-resolved allow list**, writing `sandbox:proxy_restarted`; a run whose proxy
-cannot come back gets a `warn` and is never failed, and the walk backs off when
-it restores nothing. A **container** proxy is judged on positive evidence like
-everything else here: gone → started again (that is a run with no egress at
-all), running → left alone, daemon silent → left alone. The revive deliberately
-does **not** take `ensureProxy()`'s fallback to the built-in engine, because
-that fallback remakes the run's network and the agent's container is sitting on
-it. For a surviving container proxy the hub holds **no handle** and does not
-fabricate one — a handle that could not reach `/v1/reload` would let
-`changePolicy()` believe it had delivered a policy it did not — so a live policy
-change there answers `proxy_gone`. Anything that later gives the hub a real
-handle to a surviving container proxy has to fix that answer in the same edit.
+**It is not a second proxy, and nothing may make it one.** `sandbox/proxy-entry.mjs`
+runs the SAME `server/sandbox/proxy.mjs` engine out of three read-only bind
+mounts of the hub's own source (`server/`, `lang/`, `sandbox/`) — one matcher,
+one 403 body, one audit format. Two matchers would be two allowlists that agree
+until the day one of them lets something out. Consequences that are rules:
+**everything `proxy.mjs` needs from the hub is imported lazily**, because that
+module is loaded inside a container where no database and no config exist; the
+**control channel is a policy FILE**, written tmp+rename into a directory the
+proxy holds read-only, under the hub's DATA directory and never the run's (the
+run directory is mounted read-write into the AGENT's container, and a policy the
+agent can rewrite is not a policy); the proxy watches the **directory**, since a
+bind-mounted file keeps pointing at the old inode after a rename; and a document
+that cannot be read leaves the policy in force rather than falling back to an
+empty one, which under `allowlist` would mean "deny everything".
+
+**A denied CONNECT must attach its `error` listener before anything can fail.**
+A socket with no `'error'` listener turns curl's reset of a refused tunnel into
+an uncaught exception — measured: the proxy died one second after its first
+denial. In the in-process placement that is **the hub** dying (scheduler,
+watcher, every SSE client) at the moment an agent first hits its own allowlist.
+The listener goes on the first line of `onConnect`, before the DNS lookup, not
+next to the socket that is created later.
+
+**The built-in proxy dies with the hub where it lives IN the hub, so a restart
+must give it back.** `restoreProxies()` in the watcher pass rebinds an
+in-process listener on the **same port** (from its own `sandbox.json`) with the
+**same resolved allow list**, writing `sandbox:proxy_restarted`; a run whose
+proxy cannot come back gets a `warn` and is never failed, and the walk backs off
+when it restores nothing. A built-in proxy **container** survives the restart and
+is taken back over (`attachProxy`) — the file channel has no per-launch secret to
+lose, so the policy channel and the audit tail can be rebuilt honestly for a
+container this process never started, and the policy is rewritten from the
+RESOLVED allow list rather than the row's raw spec (whose `network.allow` is the
+unexpanded, usually empty, list — re-asserting it would mean "deny everything" on
+a live run). One that is demonstrably gone is started again (that is a run with
+no egress at all); a daemon that will not answer means leave it alone. The revive
+deliberately does **not** take `ensureProxy()`'s fallback to the built-in engine,
+because that fallback remakes the run's network and the agent's container is
+sitting on it. **iron-proxy keeps the old rule**: its management key was minted
+per launch and died with the process, so the hub holds no handle for a surviving
+iron-proxy container and does not fabricate one — a handle that could not reach
+`/v1/reload` would let `changePolicy()` believe it had delivered a policy it did
+not — and a live policy change there answers `proxy_gone`. Anything that later
+gives the hub a real handle to a surviving iron-proxy container has to fix that
+answer in the same edit.
 
 **An `inject` profile fails loudly rather than degrading to `env`.**
 `secrets.mode: 'inject'` promises the container holds a placeholder; falling back

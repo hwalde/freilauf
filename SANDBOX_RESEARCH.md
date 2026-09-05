@@ -1113,6 +1113,13 @@ binary. It cannot terminate TLS, so it offers `allow`/`deny`/`auditOnly` but not
 iron-proxy in phase 3 (§10) — the spec's `engine` field is what makes the order a
 choice rather than a rewrite.
 
+*(Departure, measured: "inside the hub process" is the one part of that a
+rootless daemon refuses — §11b.5. The implementation therefore keeps the engine
+and moves the listener: under such a daemon it runs as a container on the run's
+own network, same policy code, same 403, same audit format, controlled through a
+policy file rather than a management port — §11b.5a. The `engine` field is
+unchanged by it; where the listener runs is not a field at all.)*
+
 Why not the alternatives: `squid`/`tinyproxy` give an allowlist and a log but no
 injection and no per-request JSON; Coder Boundary brings its own jail and wants
 sudo for it; Anthropic's `srt` proxy is a Node library tied to unix-socket
@@ -1855,11 +1862,14 @@ records honestly that 2, 6 and 9 could not be asked at all on a machine with no
 daemon. §11b (2026-09-05, afternoon) is the same day against **rootless Docker
 29.8.0**, which the host now runs: it settles **9** and **10**, confirms §7.4's
 mount set and §7.7's uid rule against a live container, and refutes two things
-the design assumed — the built-in proxy engine (§7.5.2) cannot exist under a
-rootless daemon, and §7.11's `/tmp` is not executable. Still open after both: **2**
-(needs a throwaway account), **6** (iron-proxy is not installed anywhere), and the
-container halves of **1**, **3**, **4** and **8** — no harness CLI has yet been run
-inside a container at all.
+the design assumed — the built-in proxy engine (§7.5.2) cannot listen on the HOST
+of a rootless daemon, and §7.11's `/tmp` is not executable. The first of those
+was answered later the same day by moving the listener into a container rather
+than dropping the engine (§11b.5a), so it costs the design a placement and not a
+phase. Still open after both: **2** (needs a throwaway account), **6**
+(iron-proxy is not installed anywhere), and the container halves of **1**, **3**,
+**4** and **8** — of the four harness CLIs only opencode has been run inside a
+container, later the same day and on `network.mode: open` (§11b.8).
 
 1. **Claude as container root under rootless Docker**: does `bypassPermissions`
    accept root "inside a recognized sandbox", and what makes a sandbox recognised?
@@ -2489,7 +2499,7 @@ and *"Minimum memoryswap limit should be larger than memory limit, see usage"*.
 
 ---
 
-### 11b.5 (§11.9, §7.5) The network holds — and the built-in proxy engine cannot exist here
+### 11b.5 (§11.9, §7.5) The network holds — and the built-in proxy engine cannot exist on this host
 
 **What holds.** `--network none` leaves the container with no routes at all and no
 reachable address; a `--internal` network gives it a route to its own subnet, an
@@ -2550,6 +2560,74 @@ subnet and `eth1` on the bridge, has a default route only through the second, an
 resolves and reaches the public internet; a second container on the internal
 network alone resolves the first **by name** through the embedded resolver and
 reaches it. That is the proxy and the agent, with no host involvement anywhere.
+
+---
+
+#### 11b.5a What was done about it, later the same day
+
+The three measurements above stand, and nothing below withdraws one of them.
+What moved is the **conclusion**, and it moved because the refutation was
+narrower than it first read: §7.5.2 offers the built-in engine as *"a CONNECT
+proxy inside the hub process"*, and only the words after "inside" are what
+rootless Docker refuses. The policy engine — the matcher, the 403 body, the CIDR
+fence, the audit line — never depended on where the socket was.
+
+So the listener was **moved rather than abandoned**. `sandbox/proxy-entry.mjs`
+runs the same `server/sandbox/proxy.mjs` module as a container on the run's own
+internal network, out of three read-only bind mounts of the hub's source
+(`server/`, `lang/`, `sandbox/`), with a second leg to `bridge` — the topology
+this section had already measured — and the agent dials it by container name.
+Where the in-process listener works (a rootful daemon, or an operator who
+published one with `FREILAUF_SANDBOX_PROXY_BIND`) it is still used, because a
+machine that can run the listener for free should not pay for a container.
+Two things a placement is not: it is **not a second engine** (two matchers would
+be two allowlists that agree until the day one of them lets something out), and
+it is **not a field in a profile** (it is a fact about the daemon).
+
+The control channel could not be a management port — the hub cannot reach that
+container, which is this section's whole finding — and deliberately is not
+`docker exec` either: that container is `--read-only --cap-drop ALL
+--security-opt no-new-privileges` precisely so that it does not accept new
+processes. It is a **policy file**, written tmp+rename into a directory the proxy
+holds read-only, under the hub's data directory and not the run's (the run
+directory is mounted read-write into the *agent's* container, and a policy the
+agent can rewrite is not a policy). The proxy watches the directory rather than
+the file, because a bind-mounted file keeps pointing at the old inode after a
+rename. Denials come back the other way, by the proxy appending to its own
+`egress.jsonl` in its one writable mount and the hub tailing it.
+
+**Measured 2026-09-05, rootless Docker 29.8.0, `--internal` with
+`gateway_mode_ipv4=isolated`** — the strong posture this section said the
+built-in engine could not have:
+
+| probe | result |
+|---|---|
+| allowed host through the proxy | HTTP 200 |
+| denied host | `curl: (56) CONNECT tunnel failed, response 403` |
+| `git ls-remote` github.com (allowed) | the remote's `HEAD` |
+| `git ls-remote` gitlab.com (denied) | CONNECT tunnel failed, 403 |
+| `npm view left-pad` (denied registry) | `npm error 403` |
+| a live policy change | in force on the next connection, 0 retries |
+| audit-only | request passes, `would_deny` written to the audit, and the hub raises `sandbox:would_block` rather than `sandbox:blocked` |
+| the denial reaching the hub | `sandbox:blocked` |
+| teardown | container, network and proxy all reaped |
+
+So §7.5.2's phase-1 default did not have to become iron-proxy after all, which
+is worth stating plainly because this section is what would otherwise be read as
+the reason to reach for a binary nobody here has ever run.
+
+**And one defect the move made visible**, which the in-process placement had
+been carrying all along [measured]: a denied CONNECT ended its client socket with
+no `'error'` listener attached, and curl answers a refused tunnel by resetting
+it — so `read ECONNRESET` became an uncaught exception and the proxy process
+died one second after its first denial. In a container that is a run whose egress
+stops at its first blocked host. **In the in-process placement it is the hub** —
+scheduler, watcher and every SSE client — at the moment an agent first hits its
+own allowlist. The listener is registered before the DNS lookup now, on both
+entry points.
+
+**What is still not established** is in §11b.8: this is real clients through a
+real boundary, and it is not a coding agent doing a run behind one.
 
 ---
 
@@ -2666,7 +2744,12 @@ this machine cannot be asked.
   and so is the hub socket of §7.6: the run above reported through the
   `inbox.jsonl` fallback, because the socket was mounted as a **directory** until
   that run exposed it. And no run of any harness has yet gone through an enforced
-  allowlist, which on this daemon cannot be had at all (§11b.5).
+  allowlist. That last one narrowed the same day without being answered: the
+  boundary itself now enforces on this daemon, from a proxy container of its own,
+  measured against real clients (§11b.5a) — but the run above used
+  `network.mode: open`, so which hosts a real claude, opencode, cursor or hermes
+  session reaches that the presets do not name is exactly as unknown as it was.
+  `auditOnly` is the way to find that out without paying for it.
 
   **What the run cost, and the rule it leaves behind.** Five faults, all fatal,
   all of them green in the whole test suite beforehand: the exec identity

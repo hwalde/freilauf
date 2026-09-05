@@ -21,9 +21,10 @@ before a line was written, is [SANDBOX_RESEARCH.md](../SANDBOX_RESEARCH.md).
 Two of its sections say which of the claims below rest on a measurement and
 which on a reading: **§11a**, written before this machine had a container
 runtime, and **§11b**, written on 2026-09-05 against a live rootless daemon.
-§11b refutes two things §11a assumed, and the larger of them is in [what this
-sandbox does not
-do](#the-built-in-proxy-engine-does-not-work-under-a-rootless-daemon).
+§11b refutes two things §11a assumed, and the larger of them — the built-in
+proxy could not listen on the host of a rootless daemon — is why the listener
+now runs in a container of its own; that is [Where the built-in proxy
+runs](#where-the-built-in-proxy-runs-in-the-hub-or-in-a-container).
 
 **And read [What this sandbox does not do](#what-this-sandbox-does-not-do)
 before you rely on any of it.** A boundary whose limits are not written down is
@@ -130,10 +131,12 @@ the live daemon on 2026-09-05 (rootless Docker 29.8.0, Ubuntu 24.04,
   this with `aa-status`: as an ordinary user `aa-status --enabled` exits **0**
   with no output, which means "the module is loaded" and says nothing about
   containers. The hub reads the daemon's own `SecurityOptions` instead.
-- **The built-in proxy engine cannot work here.** This is the big one and it has
-  a section of its own: [The built-in proxy engine and a rootless
-  daemon](#the-built-in-proxy-engine-does-not-work-under-a-rootless-daemon).
-  Read it before you pick a profile.
+- **The built-in proxy engine cannot listen on the host here** — so on a
+  rootless daemon it does not: the hub starts the listener as a container on the
+  run's own network instead. That used to be the one thing that stopped three of
+  the four shipped profiles starting at all, and it has its own section: [Where
+  the built-in proxy
+  runs](#where-the-built-in-proxy-runs-in-the-hub-or-in-a-container).
 
 ### 2. Tell the hub
 
@@ -299,15 +302,20 @@ and they are kept apart rather than one of them winning.
 | **Open network** | `open`, built-in engine | `env` | 8 GB / 4 CPU | the repository whose build reaches half the internet and where an allowlist would be a week of whack-a-mole. The container is still a container |
 | **Audit** | Balanced, but `auditOnly` — nothing is blocked, everything that *would* have been is written down | `env` | 8 GB / 4 CPU | the mode you roll out in |
 
-**On a rootless daemon, three of these four cannot start a run today.**
-Balanced, Locked down and Audit all say `network.mode: allowlist` with
-`network.engine: builtin`, and that combination cannot work where the hub and
-the container bridges are in different network namespaces — which is what
-rootless Docker is. The launch fails rather than running unrouted, but it fails
-without naming the cause. **Open network** is the profile that works there
-today. The whole measurement, and what to do instead, is in [The built-in proxy
-engine does not work under a rootless
-daemon](#the-built-in-proxy-engine-does-not-work-under-a-rootless-daemon).
+**All four start under a rootless daemon.** Balanced, Locked down and Audit ask
+for `network.mode: allowlist` with `network.engine: builtin`, and until
+2026-09-05 that combination could not start a run at all where the hub and the
+container bridges are in different network namespaces — which is what rootless
+Docker is. The listener does not have to be on the host: under a rootless daemon
+the hub starts it as a container on the run's own network, with the same policy
+code, the same 403 and the same audit format. Measured against the live daemon:
+an allowed host answers, a denied one gets the 403, `git` and `npm` to denied
+hosts are refused, and a live policy change takes effect on the next connection.
+How that placement is decided, and what it costs, is [Where the built-in proxy
+runs](#where-the-built-in-proxy-runs-in-the-hub-or-in-a-container); what an
+enforced allowlist still has not been through is [No agent run has yet worked
+behind an enforced
+allowlist](#no-agent-run-has-yet-worked-behind-an-enforced-allowlist).
 
 The defaults underneath them, for a profile that says nothing: `network.mode
 allowlist`, `network.engine builtin`, `secrets.mode env`, worktree `rw`, the
@@ -402,17 +410,18 @@ container the cloud metadata service.
 
 | | `builtin` | `iron-proxy` |
 |---|---|---|
-| where it runs | inside the hub process, on the host | as a container of its own |
-| works under a **rootless** daemon | **no** (see below) | by construction, but unexercised |
+| where it runs | inside the hub process, or as a container on the run's network — see below | as a container of its own |
+| works under a **rootless** daemon | **yes**, in its container placement (measured 2026-09-05) | by construction, but unexercised |
 | CONNECT allowlist, 403 with a readable body, audit log | yes | yes |
 | terminate TLS | **no** | yes |
 | inject a credential so the key never enters the container | **no** | yes |
 | restrict HTTP methods | **no** | yes |
 
-The first two rows are the awkward part and are stated together on purpose: the
-engine that is implemented and exercised is the one that cannot run on the
-recommended posture, and the engine that suits that posture is the one that has
-never been run against its real binary.
+The second row used to read **no**, and it was the awkward part of this whole
+document: the engine that was implemented and exercised was the one that could
+not run on the recommended posture. That is fixed. What is left of the awkward
+part is the bottom three rows — the three things the built-in engine cannot do
+at all still need an engine that has never been run against its real binary.
 
 `tlsTerminate` is the root of the other two: without it the proxy sees a CONNECT
 line and encrypted bytes, so there is no method to judge and no header to swap a
@@ -423,6 +432,85 @@ The hub does not quietly run the weaker mode and let a profile that says
 "the key never enters the container" put the key in the container. The profile
 editor greys the fields the chosen engine cannot honour, and the policy
 builder refuses the combination outright.
+
+### Where the built-in proxy runs: in the hub, or in a container
+
+The built-in engine has **one** implementation and **two placements**, and the
+placement is not a field in a profile: it is a fact about the daemon, and an
+operator should no more have to configure it than they configure which uid a
+container gets. `proxyPlacement()` decides, and everything this document says
+about the allowlist, the 403 and the audit is true of both placements:
+
+| Placement | When | How the agent reaches it |
+|---|---|---|
+| `process` | the ordinary case — a rootful daemon, or `FREILAUF_SANDBOX_PROXY_BIND` set | the run network's **gateway** address, which the hub binds |
+| `container` | a **rootless** daemon (`docker info` says so) | the container name — `http://fl-proxy-<run id>:8080` |
+
+The order it asks in: `FREILAUF_SANDBOX_PROXY_PLACEMENT` (`process` or
+`container`) if the operator forced one, then `FREILAUF_SANDBOX_PROXY_BIND` —
+an operator who has published the listener at an address the container can reach
+has answered the question themselves — then rootless → `container`, then
+`process`. A machine that can run the listener for free should not pay for a
+container: it is 512 MB of fence, a second image start per launch and a name in
+`docker ps`, for something the hub was already doing.
+
+**It is not a second proxy**, and that is the property the whole thing hangs on.
+`sandbox/proxy-entry.mjs` runs the same `server/sandbox/proxy.mjs` engine out of
+three **read-only** bind mounts of the hub's own source (`server/`, `lang/`,
+`sandbox/`) — one matcher, one 403 body, one audit format. Two matchers would be
+two allowlists that agree until the day they do not, and that is the day one of
+them lets something out. Nothing of the hub's *configuration* is mounted: no
+database, no `~/.config`, no credential. It runs `node` out of the run's **own
+image** (every shipped image descends from `freilauf/agent-base:24.04`, which
+carries Node 22), so there is no second image to have on the machine;
+`FREILAUF_SANDBOX_PROXY_IMAGE` is the seam for an operator image with no node in
+it.
+
+**The container placement is the stronger posture, not a workaround.** A proxy
+that sits on the run's network needs no host address on it, so that network
+keeps `gateway_mode_ipv4=isolated` and the host stays unreachable from the box.
+The in-process placement cannot: the gateway is the only address the container
+can reach, so the network is created without gateway isolation and the container
+can then also reach host services on that bridge — which is why the proxy's own
+[upstream address fence](#the-upstream-address-fence) is not optional there. The
+proxy container itself is `--read-only`, `--cap-drop ALL`, `--security-opt
+no-new-privileges`, `--pids-limit 256`, `--memory 512m`, and gets its own way
+out with a second leg onto `bridge` (`docker network connect`) — a failure to
+make that leg is a **failed launch**, because a proxy that cannot reach anything
+is a run with no egress and nothing above it would say so.
+
+**The control channel is a file, not a port and not `docker exec`.** The hub
+cannot reach that container over the network — that is the whole problem the
+placement solves — so a live policy change is written as `policy.json` into a
+directory the proxy has **read-only**, by writing a temporary name and renaming
+it, and the proxy watches the **directory** (a bind-mounted *file* would keep
+pointing at the old inode after a rename, which would look like a silent no-op).
+It carries the spec, not a resolved policy, so the proxy computes the policy with
+the hub's own builder. Three consequences worth knowing:
+
+- **Those two directories are under the hub's data directory, not the run's.**
+  `~/agents/runs/<id>/` is mounted read-write into the *agent's* container, and a
+  policy the agent could rewrite is not a policy. Exactly one directory is
+  writable from inside the boundary and it holds nothing but the proxy's own
+  `egress.jsonl` and its readiness marker.
+- **Denials travel out the same way.** The proxy appends its audit line; the hub
+  tails that file (`fs.watch`, plus a one-second size check because inotify does
+  not propagate on every filesystem) into the run's own `egress.jsonl` and into
+  `sandbox:blocked`. One audit file per run, one format, whichever placement
+  produced the lines.
+- **A hub restart takes the proxy container back over** rather than leaving it
+  alone: the container survives untouched, and the file channel has no per-launch
+  secret to lose, so the policy channel and the audit tail can be rebuilt for a
+  container this process never started. What that costs is written down rather
+  than hidden — a denial that happened while the hub was down stays in the
+  proxy's own file for the audit export and is not announced a second time.
+  iron-proxy keeps the old rule, because its management key died with the process
+  that minted it.
+
+**The launch waits for evidence, not for an exit code.** `docker run -d` returns
+the moment the daemon accepts the container, so the entry point writes a
+readiness marker once its listener is really up and the hub waits for that; where
+it never appears, the container's own log is read and put into the refusal.
 
 ---
 
@@ -547,9 +635,10 @@ a fault, and **red** once it is demonstrably in the way: two or more distinct
 hosts turned away, or no measurable work since the denial. The same veto the log
 scanner uses applies first, so an agent that kept working is never escalated.
 The incident is grown from the *events*, not from a callback, deliberately: the
-built-in proxy runs inside the hub and iron-proxy does not, and a fact that only
-exists while one engine happens to be loaded goes missing the day somebody
-switches engines or the hub restarts mid-run. Separately, a refusal the agent
+built-in proxy may be a listener inside the hub or a container beside it and
+iron-proxy is always a container, and a fact that only exists while one of those
+happens to be in this process's memory goes missing the day somebody switches
+engines or the hub restarts mid-run. Separately, a refusal the agent
 prints into its own log raises `anomaly:sandbox_denied` on the run's traffic
 light, and that statement is **taken back** when the agent is measurably working
 again.
@@ -756,18 +845,48 @@ Everything above is what it *does*. This section is what it does not, and it is
 the section to read twice. Where a limit rests on something that was measured,
 it says so; where it rests on a reading or an inference, it says that instead.
 
-### The built-in proxy engine does not work under a rootless daemon
+### No agent run has yet worked behind an enforced allowlist
 
-**Measured on 2026-09-05 against rootless Docker 29.8.0**
-([SANDBOX_RESEARCH.md §11b.5](../SANDBOX_RESEARCH.md)), three independent ways,
-each of them fatal on its own:
+Until 2026-09-05 the entry here read *"the built-in proxy engine does not work
+under a rootless daemon"*, and it was the largest limit this document carried.
+It is gone, and what replaced it is smaller and more ordinary: the allowlist has
+been exercised **by hand** against the real daemon, and never yet by a coding
+agent doing a run.
 
-- **The hub cannot bind the run network's gateway.** The built-in engine is a
-  CONNECT listener inside the hub *process*, and it binds to the run network's
-  gateway address so the container can reach it. On this daemon that address
-  does not exist in the host's network namespace at all: rootlesskit runs with
-  `--detach-netns`, so every bridge the daemon creates lives in *its* namespace.
-  `listen()` on that address answers `EADDRNOTAVAIL`.
+**What was measured, on 2026-09-05 against rootless Docker 29.8.0**, with the
+proxy in its container placement, on an `--internal` network with
+`gateway_mode_ipv4=isolated`:
+
+| probe | result |
+|---|---|
+| an allowed host through the proxy | HTTP 200 |
+| a denied host | `curl: (56) CONNECT tunnel failed, response 403` |
+| `git ls-remote` to an allowed forge | the remote's `HEAD` |
+| `git ls-remote` to a denied one | refused, 403 |
+| `npm view` against a denied registry | `npm error 403` |
+| a live policy change | in force on the next connection, no retry needed |
+| audit-only | the request goes through and the hub records it as `sandbox:would_block`, not as a denial |
+| a denial reaching the hub | `sandbox:blocked` on the run |
+
+That is real clients, real DNS, real TLS tunnels, and the hub's own event at the
+other end. **What it is not is a run.** No coding agent has yet worked inside a
+container whose egress was an enforced allowlist, so nothing has yet found out
+which hosts a real claude, opencode, cursor or hermes session reaches that the
+presets do not name. The [one real sandboxed run so
+far](#one-coding-agent-has-run-in-a-container-three-have-not) used
+`network.mode: open`, because at the time the allowlist could not start at all.
+Expect the first enforced run to teach you something about your presets — that
+is what [audit-only](#audit-only-and-growing-an-allowlist-out-of-it) is for, and
+it is the mode to roll out in.
+
+**Why the placement had to change, and what stays true.** The in-process
+listener still cannot work under a rootless daemon. That measurement was not
+withdrawn, it was routed around ([SANDBOX_RESEARCH.md
+§11b.5](../SANDBOX_RESEARCH.md)) — three independent ways, each fatal on its own:
+
+- **The hub cannot bind the run network's gateway.** rootlesskit runs with
+  `--detach-netns`, so every bridge the daemon creates lives in *its* namespace
+  and `listen()` on that address answers `EADDRNOTAVAIL`.
 - **A container cannot reach the host, on any network.** From the default bridge
   and from an internal network alike, the hub's own listening port was
   unreachable at the host's loopback, at the bridge gateway and at the host's
@@ -778,87 +897,67 @@ each of them fatal on its own:
   namespace by a **stopped, disabled rootful daemon**. The name resolves, the
   packets never leave rootlesskit's namespace, and the hub is not there.
 
-**So `network.mode: allowlist` with `engine: builtin` cannot work on a rootless
-installation**, which is the posture this document recommends and the one three
-of the four shipped profiles are written for. What happens in practice is a
-**launch that fails**, not a run that silently has no egress — `builtinBind()`
-refuses to fall back to loopback, because loopback inside a container is the
-container, and `server.listen()` on an address the host does not have throws.
-
-**The failure names its cause now.** One predicate answers "can this engine
-carry a run's egress on this daemon", and both the launch and the Settings page
-ask it, so an operator cannot be told two different things: the launch refuses
-before it starts anything, with the reason and the three ways out (the
-iron-proxy engine, `network.mode: open`, or publishing the listener yourself at
-an address the container can reach with `FREILAUF_SANDBOX_PROXY_BIND` — an
-operator who has done that has answered the question, so the refusal does not
-apply to them); Settings → Sandbox says the same next to the engine picker. A
-daemon that did not say whether it is rootless is **not** a refusal: the launch
-then fails on the bind as it did before, which is worse than a diagnosis and
-better than refusing a run over a question nobody answered. What is still
-missing is the **profile editor**, which does not warn about the combination
-while you are writing it down.
-
-What works instead, today:
+The answer was to move the listener, not to abandon it: [Where the built-in
+proxy runs](#where-the-built-in-proxy-runs-in-the-hub-or-in-a-container). So the
+table that used to say what worked *instead* now says only where the listener
+lives:
 
 | | on a rootless daemon |
 |---|---|
-| `network.mode: open` | works — the **Open network** profile |
-| `network.mode: none` | works — no routes at all, measured |
-| `network.mode: allowlist`, `engine: builtin` | **cannot work** |
+| `network.mode: open` / `none` | work — measured |
+| `network.mode: allowlist`, `engine: builtin` | works — the listener is a container on the run's own network, and that network keeps its gateway isolated |
 | `network.mode: allowlist`, `engine: iron-proxy` | the right shape, and unexercised (see below) |
-| any mode, **rootful** daemon | the hub and the bridges share one network namespace, so `builtin` should work — *inferred, not measured*: there is no rootful daemon here to ask. It costs you the `docker` group in your threat model |
+| any mode, **rootful** daemon | the hub and the bridges share one network namespace, so the in-process listener should work — *inferred, not measured*: there is no rootful daemon here to ask. It costs you the `docker` group in your threat model |
 
-**The topology the containerised proxy needs was measured and it holds**: a
-container on the internal network given a second leg with `docker network
-connect bridge` has `eth0` on the internal subnet and `eth1` on the bridge, a
-default route only through the second, and reaches the internet; a second
-container on the internal network alone resolves the first **by name** through
-Docker's embedded resolver and reaches it. That is the proxy and the agent with
-no host involvement anywhere, and it is what `engine: iron-proxy` already does —
-it starts a container and connects it to `bridge`. The half that is missing is
-the binary: see [Credential
+**One refusal is left in the predicate**, and it is the operator's own doing: a
+placement **forced** to `process` (`FREILAUF_SANDBOX_PROXY_PLACEMENT=process`)
+under a rootless daemon is refused before anything is started, because that is
+exactly the combination the three measurements above rule out. The launch,
+Settings → Sandbox and the profile editor all ask that one predicate, so an
+operator cannot be told two different things about one profile. A daemon that
+did not say whether it is rootless is **not** a refusal: the launch then fails
+on the bind, which is worse than a diagnosis and better than refusing a run over
+a question nobody answered.
+
+**`iron-proxy` is still an engine with no binary and no image here.** It names
+an image only through `FREILAUF_SANDBOX_PROXY_IMAGE`, and without that setting it
+refuses to start with *"no proxy image"*. What that costs is much smaller than
+it was — an allowlist no longer needs it — but the three things only it can do
+(terminate TLS, restrict methods, keep the credential out of the container)
+still do. See [Credential
 injection](#credential-injection-is-implemented-and-unverified), whose "never
 run against the real iron-proxy binary" applies to the *whole* engine and not
 only to injection.
 
-There is **no containerised build of the built-in engine**, and `iron-proxy`
-ships **no image**: the engine names one only through
-`FREILAUF_SANDBOX_PROXY_IMAGE`, and without that setting it refuses to start
-with *"no proxy image"*. So if you need an enforced allowlist on a rootless
-daemon today, the honest options are a rootful daemon, an iron-proxy image and
-binary you are willing to be the first to exercise, or `open`/`none` plus the
-rest of the boundary.
+**The one fallback there is stays narrow.** A `secrets.mode: env` profile whose
+named engine will not start falls back to the built-in engine with a `warn`, and
+that fallback is asked the same placement question the first attempt was — so
+under a rootless daemon it falls back into a container placement, and never onto
+a listener no container could dial. (An `inject` profile never falls back at
+all: it fails outright, by design.)
 
-**And the one fallback there is does not rescue you here.** A `secrets.mode:
-env` profile whose named engine will not start falls back to the built-in engine
-with a `warn` — which on a rootless daemon is a fall back onto an engine no
-container can dial, so it is **refused by the same predicate**, carrying both
-reasons: why the named engine did not start, and why the fallback is not
-available either. Falling back would otherwise have produced a run with no
-egress at all, which looks perfectly healthy right up to the first request that
-times out. (An `inject` profile never falls back at all: it fails outright, by
-design.)
+**A hub restart is repair, not immunity.** An in-process listener dies with the
+hub while the container carries on with a frozen `HTTPS_PROXY`; a watcher pass
+rebinds it on the same port with the same resolved allow list and writes
+`sandbox:proxy_restarted`. There is a window between the restart and the next
+pass, and a proxy that cannot come back leaves a `warn` on the run rather than
+failing it.
 
-**This is why the one real run so far used `network.mode: open`**, and why an
-enforced allowlist is still the part of the sandbox nothing has exercised
-end to end.
-
-**One more consequence of the built-in engine living in the hub process**: a hub
-restart kills the listener while the container carries on with a frozen
-`HTTPS_PROXY`. That is [repaired since 2026-09-05](../CHANGELOG.md) — a watcher
-pass rebinds the listener on the same port with the same resolved allow list and
-writes `sandbox:proxy_restarted` — but it is repair, not immunity: there is a
-window between the restart and the next pass, and a proxy that cannot come back
-leaves a `warn` event on the run rather than failing it.
-
-A **container** proxy is treated on the same principle and comes out
-differently. One the daemon says is **gone** is started again, because that is a
-run with no egress at all; one that is **still running** is left alone, and one
-the daemon would not answer about is left alone too. For that surviving
-container the hub holds **no handle**, and it does not fabricate one — so a live
-policy change on such a run is **refused** with *"the proxy is gone"* rather
-than reporting a policy it never delivered. Reconfiguring it resumes the run.
+A **container** proxy survives the restart, and since 2026-09-05 the hub takes
+it back over rather than leaving it alone: a running built-in proxy container is
+re-attached, its policy channel and its audit tail rebuilt for a container this
+process never started — which the file control channel makes honest, because
+there is no per-launch secret to have lost. What that costs is written down
+rather than hidden: a denial that happened while the hub was down stays in the
+proxy's own file for the audit export and is not announced a second time. A
+proxy container the daemon says is **gone** is started again (that is a run with
+no egress at all); one the daemon will not answer about is left alone.
+**iron-proxy is the exception and keeps the old rule** — its management key was
+minted per launch and died with the process that minted it, so the hub holds no
+handle for a surviving iron-proxy container and does not fabricate one, and a
+live policy change on such a run is **refused** with *"the proxy is gone"*
+rather than reported as a policy it never delivered. Reconfiguring it resumes
+the run.
 
 ### It does not inspect what the agent sends
 
@@ -1061,10 +1160,10 @@ is the layer nothing before it could reach:
   pane's process tree would have said about ten).
 
 **claude, cursor and hermes have never been started in a container**, and
-neither has any run under an enforced allowlist — which on a rootless daemon
-cannot be had at all (see [the proxy
-section](#the-built-in-proxy-engine-does-not-work-under-a-rootless-daemon)). So
-these remain open, and the first run of each is what will find them:
+neither has any run under an enforced allowlist — which is a thing the hub can
+now do on every daemon, and which no agent has yet worked behind (see [its own
+section](#no-agent-run-has-yet-worked-behind-an-enforced-allowlist)). So these
+remain open, and the first run of each is what will find them:
 
 - each of the other three CLIs finding its seeded home at its container path,
   and the resume forms read out of that home;
@@ -1121,9 +1220,17 @@ and, once, with a real agent working in one:**
   directories at all.
 - **`--tmpfs` is `noexec` by default and naming other options does not undo it**
   — the `exec` above.
-- **The built-in proxy engine cannot exist on a rootless daemon**, three ways;
-  and the containerised topology it would have to be replaced by does work. That
-  is [its own section](#the-built-in-proxy-engine-does-not-work-under-a-rootless-daemon).
+- **The built-in proxy engine cannot listen on the HOST of a rootless daemon**,
+  three ways; and the containerised topology it had to be moved into does work —
+  a proxy container on the internal network with a second leg on `bridge`
+  reaches the internet, and a second container on the internal network alone
+  resolves it **by name** and reaches it, with no host involvement anywhere.
+- **The allowlist really enforces, through that container**, against real
+  clients: an allowed host answers, a denied one gets the 403, `git` and `npm`
+  are refused by name, a live policy change lands on the next connection, and
+  the denial arrives at the hub as `sandbox:blocked`. [Its own
+  section](#no-agent-run-has-yet-worked-behind-an-enforced-allowlist) says what
+  that does and does not establish.
 - **Docker 29 no longer says `Cannot connect to the Docker daemon`.** A
   classifier keyed on that string was already stale on the first machine that
   had a daemon to test it against, which is why the hub decides on the exit
@@ -1185,10 +1292,12 @@ and, once, with a real agent working in one:**
   file, its reload endpoint and its log format have never been read by the thing
   that is supposed to read them. TLS termination and header injection are opt-in
   per profile and not the default; a profile that cannot reach its proxy fails
-  the start with a readable problem rather than starting unproxied. On a
-  rootless daemon this is nonetheless the only engine that could carry an
-  allowlist, which is an uncomfortable place for the documentation to be and is
-  said here rather than smoothed over.
+  the start with a readable problem rather than starting unproxied. This entry
+  used to end by saying that on a rootless daemon this was nonetheless the only
+  engine that could carry an allowlist — an uncomfortable place for the
+  documentation to be. It is not true any more: the built-in engine carries one
+  there, in a container. What is left is the three capabilities only iron-proxy
+  has, and they are as unexercised as ever.
 - **gVisor.** `runsc` is on no `PATH` here and the daemon lists only
   `io.containerd.runc.v2` and `runc`. The one thing that was measured is the
   refusal — `unknown or invalid runtime name: runsc` — which confirms that a
@@ -1228,7 +1337,8 @@ it stops that from being something stupid on your machine.
 | The four built-in profiles and the copy-on-write rule | `server/sandbox/profiles.mjs` |
 | Presets, and how a host is matched | `server/sandbox/presets.mjs` |
 | The container runtime, discovery, the command line | `server/sandbox/runtime.mjs` |
-| The built-in egress proxy, engines, the CIDR fence | `server/sandbox/proxy.mjs` |
+| The built-in egress proxy, engines, the CIDR fence, both placements | `server/sandbox/proxy.mjs` |
+| The same engine, as it runs inside its own container | `sandbox/proxy-entry.mjs` |
 | iron-proxy: config, credential injection | `server/sandbox/ironproxy.mjs` |
 | The audit files, the hash chain, the export | `server/sandbox/audit.mjs` |
 | The clone, and collecting a run's tip | `server/sandbox/clone.mjs` |

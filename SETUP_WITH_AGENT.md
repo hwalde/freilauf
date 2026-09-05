@@ -246,28 +246,37 @@ socket. Rootless keeps the daemon in the hub user's own namespace, so a containe
 escape lands in the uid the agent was already running as without a sandbox.
 Rootful works; it just puts the `docker` group in the threat model.
 
-**Then tell the human the one thing that will otherwise bite them.** Under a
-rootless daemon, **`network.mode: allowlist` with the built-in proxy engine
-cannot work** — the hub's listener would have to bind the run network's gateway,
-and rootlesskit keeps every bridge in a network namespace of its own
-(`--detach-netns`), so that address does not exist on the host. Measured three
-ways on 2026-09-05; the account is in `docs/sandbox.md` under *"The built-in
-proxy engine does not work under a rootless daemon"*. The hub now **does**
-detect the combination — the launch refuses with the cause and the ways out, and
-Settings → Sandbox says the same next to the engine picker — but the profile
-editor does not warn while you are writing one, so pass the consequences on
-anyway:
+**Then tell the human where the egress proxy runs, because on a rootless daemon
+it is not where they will assume.** The built-in engine is one engine with two
+placements. On a rootful daemon (or where the operator published a listener with
+`FREILAUF_SANDBOX_PROXY_BIND`) it is a CONNECT listener inside the hub process,
+on the run network's gateway. On a **rootless** daemon it cannot be: rootlesskit
+keeps every bridge in a network namespace of its own (`--detach-netns`), so that
+address does not exist on the host — measured three ways on 2026-09-05. There the
+hub starts the listener as a **container** on the run's own network instead, with
+the same policy code, the same 403 and the same audit format, and the agent dials
+it by name. The account is in `docs/sandbox.md` under *"Where the built-in proxy
+runs"*. What to pass on:
 
-- three of the four shipped profiles — **Balanced**, **Locked down** and
-  **Audit** — ask for exactly that combination, so on a rootless daemon they
-  fail at launch, now with a message that names the cause;
-- the profile that works there today is **Open network** (`mode: open`), and
-  `mode: none` works too;
-- an enforced allowlist on a rootless daemon needs `engine: iron-proxy`, whose
-  proxy is a container — the right shape, and a binary that exists on no machine
-  here and has never been run. Do not switch a profile to it on somebody's
-  behalf;
-- a **rootful** daemon does not have this problem, at the cost above.
+- **all four shipped profiles start on a rootless daemon**, including the three
+  that ask for `network.mode: allowlist` (**Balanced**, **Locked down**,
+  **Audit**). That was not true before 2026-09-05, and any older note saying
+  three of the four cannot start is stale;
+- the container placement is the **stronger** posture, not a workaround: the
+  run's network keeps its gateway isolated, so the container cannot reach host
+  services at all. The in-process placement has to leave that gateway reachable;
+- **no coding agent has yet worked behind an enforced allowlist.** The boundary
+  was exercised by hand against the real daemon (`git`, `npm`, `curl`, a live
+  policy change, the denial arriving at the hub) and not by a run. So roll out
+  with the **Audit** profile, adopt the hosts it records, and enforce after
+  that;
+- `engine: iron-proxy` is still a binary and an image that exist on no machine
+  here. An allowlist no longer needs it; TLS termination, method restrictions
+  and `secrets.mode: inject` still do. Do not switch a profile to it on
+  somebody's behalf;
+- a **rootful** daemon works too, at the cost above — and there the listener is
+  in the hub process, which a hub restart takes with it (a watcher pass rebinds
+  it).
 
 ### What has to be true, and how to check each
 
@@ -537,7 +546,7 @@ tooling. The seams that were designed to be pulled on:
 | point the notification links at your own hostname | Settings → **Notification links**: a `Public hostname` (the name that matches your certificate), and the port follows the live VPN port automatically. Without one, `FREILAUF_PUBLIC_URL` (a full URL, in `~/.config/freilauf/env`) or the local address answers — `publicBase()` in `server/util.mjs` |
 | give agents an opt-in capability | drop a folder with a `SKILL.md` into `~/agents/zusaetze/` — it appears as a checkbox in the run forms. Deliberately *not* `.claude/skills`, so nothing loads automatically |
 | teach your coding agents how to drive Freilauf itself | Settings → **Freilauf skills** installs the agent skills under `skills/` into the directories your configured coding agents read. Where those are is a **plugin declaration** (`skills: { user, project }`), so a new coding agent brings its own — `server/skills.mjs`, [`docs/plugins.md`](docs/plugins.md) |
-| run an agent inside a boundary rather than as yourself | **Settings → Sandbox** — off by default, needs a container runtime, configured hub → repo → agent → run with a lower level only ever able to narrow what a higher one locked. Start with the **Audit** shape (watch what a run reaches), then enforce — but read the rootless caveat first: Audit is one of the three profiles whose allowlist the built-in engine cannot deliver under a rootless daemon. → [`docs/sandbox.md`](docs/sandbox.md) |
+| run an agent inside a boundary rather than as yourself | **Settings → Sandbox** — off by default, needs a container runtime, configured hub → repo → agent → run with a lower level only ever able to narrow what a higher one locked. Start with the **Audit** shape (watch what a run reaches), then enforce — and that order is not politeness: the allowlist is enforced by a proxy that has been exercised by hand and never yet by a run. → [`docs/sandbox.md`](docs/sandbox.md) |
 | put a project away without losing its history | **Repos → Deactivate**: gone from every dropdown, starts nothing new, everything it owns kept and reachable, reversible in one click. `POST /repos/toggle` (`id`, `active=1\|0`) is the same thing from a script — `server/pages.mjs`, and the "Putting a repository away" section in [`AGENTS.md`](AGENTS.md) |
 | script the hub from a shell or from inside a run | `fl-api` — `fl-api /api/runs repo=3 status=running`, `fl-api /api/runs/<id>`, `fl-api -X POST /api/runs/<id>/title title=…`. The read-only half is `server/read-api.mjs`; every write still goes through the ordinary POST routes, which validate |
 | show your project's own numbers in the sidebar | **panels** — the project pushes (`fl-panel set findings --total 33 --item "bug=17:red"`, or a tool of yours piping JSON in), Freilauf renders them with the time they were measured and never learns what they mean. Push it from a run before it reports, or from a `run_merged` flow → [`docs/panels.md`](docs/panels.md) |
@@ -632,8 +641,8 @@ If your task is to change Freilauf rather than just run it:
 [ ] sandbox: left off (the default), OR a runtime installed by the human,
     every row of "What has to be true" checked, Settings → Sandbox switched
     on, images built, a policy dry-run verified, and docs/sandbox.md's limits
-    passed on — including that on a rootless daemon three of the four shipped
-    profiles cannot start a run (built-in proxy engine), and that only the
+    passed on — including that no coding agent has yet worked behind an
+    enforced allowlist (so roll out with the Audit profile), and that only the
     opencode image has ever carried a real run
 [ ] at least one repo added
 [ ] one small single run started and watched end to end
