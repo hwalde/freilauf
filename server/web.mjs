@@ -672,6 +672,15 @@ async function api(req, res, url) {
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/kill$/))) {
     const run = getRun(m[1])
     const { sh } = await import('./util.mjs')
+    // The container goes FIRST, and the order is not tidiness (§7.11): the
+    // pane's process IS the container's client, so killing the session first
+    // leaves a container whose client has gone — the orphan case §8.18 is
+    // about, rather than a clean stop. An unsandboxed run answers `stopped:
+    // false` and nothing happens.
+    if (run) {
+      const { stopRunContainer } = await import('./sessions.mjs')
+      try { await stopRunContainer(run) } catch { /* fail-soft: the session still has to go */ }
+    }
     if (run?.tmux_session) await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
     // 'done' and 'aborted' are final answers, so a click can only close the
     // session they left standing: 'done' came through cleanly and must not be

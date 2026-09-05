@@ -859,12 +859,21 @@ export async function resumeIdFor(run) {
  * a night the server spent switched off is not work — without the shift every
  * resumed run would be flagged as overrun the moment it came back. The
  * original start is kept in the `session_lost` event.
+ *
+ * `adoptPending` is for the ONE caller that has already set the mark itself:
+ * the sandbox's reconfigure-and-resume (§7.12.4) marks the row BEFORE it stops
+ * the container, so that a watcher pass finding the session gone a second later
+ * sees a run already on its way instead of starting a second resume with the
+ * stale spec. Without this flag the guard below would answer that caller
+ * `{pending: true}` and nobody would ever launch. The guard itself stays exactly
+ * as strict for everyone else — it is what keeps two watcher passes from
+ * launching one run twice.
  */
-export async function resumeRun(runId, { reason = 'session_lost', text = null } = {}) {
+export async function resumeRun(runId, { reason = 'session_lost', text = null, adoptPending = false } = {}) {
   const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
   if (!run) return { ok: false, error: 'run not found' }
   if (!['running', 'waiting_help'].includes(run.status)) return { ok: false, error: `status is ${run.status}` }
-  if (run.resume_pending) return { ok: true, pending: true }
+  if (run.resume_pending && !adoptPending) return { ok: true, pending: true }
   // Reported already: the finish gate's `agent_gone` escalation owns this case.
   if (run.finish_state) return { ok: false, error: 'in the finish gate — the integrator escalates' }
   if (!run.workdir_effective || !existsSync(run.workdir_effective)) return { ok: false, error: 'the worktree is gone' }

@@ -917,51 +917,23 @@ async function stopOrphan(container, runtime) {
  * must not end every sandboxed run on the machine, which is exactly what a
  * reconciler reading "no containers" out of an unanswered question would do.
  */
-export async function reconcileContainers(id = hubId()) {
-  const out = { verdict: 'ok', stopped: [], gone: [] }
-  const rt = await sibling('runtime')
-  if (!rt?.listOwned) return { ...out, verdict: 'no_runtime' }
-  let listing
-  try { listing = await rt.listOwned(id, {}) } catch (err) { return { ...out, verdict: 'unreachable', reason: err.message } }
-  const verdict = listing?.verdict ?? 'ok'
-  out.verdict = verdict
-  if (verdict !== 'ok') return out
-
-  const seen = new Set()
-  for (const c of listing.containers ?? []) {
-    seen.add(c.runId ?? '')
-    const run = c.runId ? db.prepare('SELECT * FROM runs WHERE id=?').get(c.runId) : null
-    const terminal = run && ['done', 'failed', 'aborted'].includes(run.status)
-    // "Its session is closed" is `tmux_closed_at`, NOT an empty `tmux_session`:
-    // nothing in this hub ever NULLs that column — `reconcileClosedSession()`
-    // and the kill route both write the timestamp and leave the NAME standing,
-    // because the name is how a human finds the session in the log afterwards.
-    // A reaper that asked `!run.tmux_session` would therefore never fire on a
-    // real installation, and every orphan would sit there for ever.
-    const sessionClosed = !run?.tmux_session || !!run?.tmux_closed_at
-    // A container with no run at all is a leftover of a database that was
-    // replaced (a test sandbox, a restored backup): the label says it is ours.
-    if (!run || (terminal && sessionClosed)) {
-      try {
-        await rt.stopContainer(c.name, { runtime: c.runtime, timeoutSec: 30 })
-        await rt.removeContainer?.(c.name, { runtime: c.runtime, force: true })
-        out.stopped.push(c.name)
-        if (run) await teardownSandbox(run, { reason: 'reconcile' })
-      } catch { /* the next pass tries again */ }
-    }
-  }
-
-  // The other direction: a live sandboxed run whose container the listing did
-  // not name. Only from a verdict of `ok` — that is the whole point of asking.
-  const live = db.prepare(`SELECT * FROM runs WHERE sandbox=1 AND status IN ('running','waiting_help')`).all()
-  for (const run of live) {
-    if (seen.has(run.id)) continue
-    if (!run.sandbox_container) continue
-    addEvent(run.id, 'sandbox:container_gone', { container: run.sandbox_container })
-    out.gone.push(run.id)
-  }
-  return out
-}
+// The watcher owns the reaper, and this is the one place that says so.
+//
+// There were two implementations of this for a while, and two reapers over one
+// daemon is exactly the drift `run-def.mjs` exists to prevent — with the twist
+// that here the wrong answer does not merely disagree, it KILLS A WORKING
+// AGENT. The watcher's is the one that is right and tested: it reads
+// `tmux_closed_at` rather than an empty `tmux_session` (nothing in this hub ever
+// NULLs that column), it knows §8.18's `stop_orphan` case, it honours
+// `retention: 'keep'`, and it does nothing at all on a hub that has the sandbox
+// off and never sandboxed a run — without which a machine with no Docker binary
+// would read a `docker ps` ENOENT as silence every thirty seconds and eventually
+// raise `docker_unreachable` about a feature nobody switched on.
+//
+// It is re-exported here rather than moved, because the facade is what the rest
+// of the hub imports and a caller should not have to know which module happens
+// to hold the loop.
+export { reconcileContainers } from '../watcher.mjs'
 
 // ------------------------------------------------------ changing a policy
 
@@ -1098,7 +1070,7 @@ export async function changePolicy(run, patch, by = 'user') {
  * it is what stops a watcher pass one second later from starting a second resume
  * with the OLD spec:
  *
- *   1. the new spec into `runs.sandbox_spec`,
+ *   1. the new spec into `runs.sandbox_spec` AND `resume_pending = 1`,
  *   2. `sandbox:restarting {reason, diff}`,
  *   3. stop the container,
  *   4. close the tmux session,
@@ -1107,17 +1079,22 @@ export async function changePolicy(run, patch, by = 'user') {
  *      kill, and a caller that closed the session in order to resume it is the
  *      opposite case.
  *
- * One deviation from the section's literal wording, and it is worth stating:
- * §7.12.4 marks the row `resume_pending` in step 1. `resumeRun()` REFUSES a run
- * that is already marked pending — the mark is its own — so pre-marking here
- * would turn the direct call in step 5 into a no-op and the run would sit down
- * until a watcher pass picked it up. Writing the SPEC first buys the same thing
- * the mark was there to buy: whoever resumes this run, us or the watcher,
- * resumes it with the new spec. The watcher winning that race is a correct
- * outcome, not a bug, and step 5 then answers `{ pending: true }`.
+ * Step 1 is one statement and it comes first for one reason: between step 3 and
+ * step 5 this run has no session, and a watcher pass landing in that window
+ * would otherwise decide the session was LOST and start a resume of its own —
+ * with the spec it read before this function wrote the new one. The mark makes
+ * that pass find a run already on its way; the spec makes even a pass that wins
+ * the race resume with the right policy. `resumeRun()`'s own guard against a
+ * pending run is what would then refuse OUR call, so step 5 passes
+ * `adoptPending` — the guard exists to stop two watcher passes launching one
+ * run twice, and a caller that set the mark itself is not that.
  */
 async function reconfigureAndResume(row, spec, { by, reason, diff, resumeText = null }) {
-  db.prepare('UPDATE runs SET sandbox_spec=? WHERE id=?').run(JSON.stringify(spec), row.id)
+  // Step 1, both halves in one statement: the new spec AND the mark. Whoever
+  // resumes this run from here on — us, or a watcher pass that finds the session
+  // gone one second from now — resumes it with the spec the operator just asked
+  // for, and sees a run already on its way rather than starting a second one.
+  db.prepare('UPDATE runs SET sandbox_spec=?, resume_pending=1 WHERE id=?').run(JSON.stringify(spec), row.id)
   addEvent(row.id, 'sandbox:restarting', { reason, by, diff })
 
   const rt = await sibling('runtime')
@@ -1136,7 +1113,12 @@ async function reconfigureAndResume(row, spec, { by, reason, diff, resumeText = 
 
   const { resumeRun } = await import('../runner.mjs')
   const text = resumeText ?? RECONFIGURE_PROMPT.replace('{diff}', (diff?.paths ?? []).join(', ') || 'the sandbox policy')
-  const r = await resumeRun(row.id, { reason: reason === 'bypass' ? 'sandbox_bypass' : 'sandbox_reconfigure', text })
+  // `adoptPending` because step 1 set the mark: `resumeRun()`'s guard is there
+  // to stop two watcher passes launching one run twice, and a caller that set
+  // the mark itself in order to resume is the opposite case.
+  const r = await resumeRun(row.id, {
+    reason: reason === 'bypass' ? 'sandbox_bypass' : 'sandbox_reconfigure', text, adoptPending: true,
+  })
   return { ok: !!r?.ok, live: false, resumed: r, spec }
 }
 

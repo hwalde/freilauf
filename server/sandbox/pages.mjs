@@ -512,26 +512,41 @@ export function sandboxReconfigureCard(run) {
  */
 export function sandboxStatusSuffix(run) {
   if (!run) return ''
-  if (run.sandbox) return `<div class="dim sandbox-suffix">${e(t('sandbox.event.sandboxed'))}</div>`
-  let bypassed = false
+  const zeilen = []
+  if (run.sandbox) zeilen.push(t('sandbox.event.sandboxed'))
+  else {
+    let bypassed = false
+    try {
+      bypassed = !!db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind='sandbox:bypassed' LIMIT 1`).get(run.id)
+    } catch {}
+    if (bypassed) zeilen.push(t('sandbox.event.bypassed'))
+  }
+  // The two lifecycle facts that explain a run nobody else can explain: its
+  // container disappeared, or it hit the runtime ceiling its profile set. Both
+  // are the last word about the run, so where one exists it REPLACES the plain
+  // "sandboxed" rather than standing under it — one statement per cell.
   try {
-    bypassed = !!db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind='sandbox:bypassed' LIMIT 1`).get(run.id)
+    const ev = db.prepare(`SELECT kind FROM events WHERE run_id=?
+        AND kind IN ('sandbox:container_gone','sandbox:max_runtime') ORDER BY id DESC LIMIT 1`).get(run.id)
+    if (ev) {
+      zeilen.length = 0
+      zeilen.push(t(`sandbox.lifecycle.${String(ev.kind).slice('sandbox:'.length)}`))
+    }
   } catch {}
-  return bypassed ? `<div class="dim sandbox-suffix">${e(t('sandbox.event.bypassed'))}</div>` : ''
+  return zeilen.length ? `<div class="dim sandbox-suffix">${e(zeilen[0])}</div>` : ''
 }
 
-/**
- * The sessions page badge. The lifecycle side puts `sandbox`/`sandboxImage` on
- * the session object (sessions.mjs); until it does, a session simply has none
- * and this renders nothing — which is exactly what an unsandboxed session
- * should render.
- */
+/** The sessions page badge: "sandboxed", and the image it really runs. */
 export function sandboxSessionBadge(s) {
-  const run = s?.run
-  const on = s?.sandbox ?? run?.sandbox
-  if (!on) return ''
-  const image = s?.sandboxImage ?? s?.sandbox_image ?? null
-  return `<div class="dim sandbox-badge">${e(t('sandbox.event.sandboxed'))}${image ? ` <code>${e(String(image))}</code>` : ''}</div>`
+  // `listSessions()` answers `{ container, image, measured }` for a sandboxed
+  // session and nothing at all for an ordinary one — so the absence renders
+  // nothing, which is the right answer for a session that is not in a
+  // container.
+  const sb = s?.sandbox
+  if (!sb) return ''
+  const image = typeof sb === 'object' ? sb.image : null
+  return `<div class="dim sandbox-badge">${e(t('sandbox.lifecycle.badge'))}${
+    image ? ` <code>${e(String(image))}</code>` : ''}</div>`
 }
 
 // ============================================================ the profiles

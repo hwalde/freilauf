@@ -571,6 +571,11 @@ async function memoryBlock() {
   return `<div class="side-block" id="side-mem"><span class="side-label">${e(t('side.mem'))}</span>
     <div><a href="/sessions"><b>${e(mem.rssKb ? byteText(mem.rssKb) : '0 MB')}</b></a>
       <span class="dim">${e(t('side.mem_sessions', { n: mem.sessions }))}</span></div>
+    ${
+      // A sandboxed session whose runtime did not answer is not measured, and a
+      // sum that quietly leaves out a container is the same lie as a quota bar
+      // that is two days old. It says so instead of rounding the gap away.
+      mem.unmeasured ? `<div class="dim">${e(t('sandbox.lifecycle.total_incomplete', { n: mem.unmeasured }))}</div>` : ''}
     <div class="dim"${mem.measuredAtMs ? ` title="${e(fmtDateTime(mem.measuredAtMs))}"` : ''}>${
       e(t('side.mem_every', { min: Math.max(1, Math.round(mem.intervalMs / 60_000)) }))}</div>
     ${free}</div>`
@@ -2072,7 +2077,14 @@ export function sessionRow(s, ctx = {}) {
     <td>${age}</td>
     <td>${activity}</td>
     <td>${e(s.command || '–')}<div class="dim">${e(t('sessions.processes'))}: ${s.resources.count}</div></td>
-    <td>${e(byteText(s.resources.rssKb))}<div class="dim">${e(fmtNum(s.resources.cpu, { maximumFractionDigits: 1 }))} % CPU</div></td>
+    <td>${
+      // `unknown` is not zero. A sandboxed session's pane tree under-reports the
+      // container by about twenty times (measured), so where the runtime could
+      // not be asked the cell REFUSES to guess: "0 B" next to a 200 MB
+      // container is the shape of lie this whole page exists to prevent.
+      s.resources.unknown
+        ? `<span class="dim" title="${e(t('sandbox.lifecycle.mem_unknown_why'))}">${e(t('sandbox.lifecycle.mem_unknown'))}</span>`
+        : `${e(byteText(s.resources.rssKb))}<div class="dim">${e(fmtNum(s.resources.cpu, { maximumFractionDigits: 1 }))} % CPU</div>`}</td>
     <td>${s.windows}/${s.paneCount}${s.attached ? ` <b>${e(t('sessions.attached'))}</b>` : ''}</td>
     <td class="dim"><code>${e(s.path)}</code></td>
     <td><button type="button" class="danger sess-kill">${e(t('sessions.end'))}</button></td>
