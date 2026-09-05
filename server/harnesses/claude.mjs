@@ -120,10 +120,19 @@ const plugin = {
    * session, which is why the hub types it in after the start instead of
    * handing it to fl-start (server/goal.mjs). 4000 characters is the limit the
    * command itself documents.
+   *
+   * `typed` is the part that must arrive as KEYSTROKES for the TUI to read a
+   * command at all; everything after it is the argument and may be pasted.
+   * Claude Code turns a bracketed paste of more than 800 characters into a
+   * `[Pasted text #n]` placeholder, and a placeholder is never parsed as a
+   * slash command — so a long condition pasted in one piece with the command
+   * word in front of it was submitted as an ordinary message and no goal was
+   * set (measured 2.1.261; see util.sendCommandToSession).
    */
   goal: {
     max: 4000,
     command: (condition) => `/goal ${condition}`,
+    typed: '/goal ',
   },
 
   /**

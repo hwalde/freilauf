@@ -559,6 +559,25 @@ lets the detail page answer "did the goal ever arrive?". Only from status
 goal typed in there would **be** the answer. A retry clears the mark — a retry
 is a new session, and a `/goal` typed into the old one went with it.
 
+**And it is TYPED, not pasted — the command word at least.** A paste is not a
+keystroke, and a TUI is entitled to treat the two differently: claude collapses
+a bracketed paste of more than **800 characters** into a `[Pasted text #n]`
+placeholder (measured 2.1.261 — 800 literal, 801 placeholder), and a
+placeholder is never read as a slash command. So the whole line in one paste
+was **submitted as an ordinary message**: the condition arrived at the agent as
+a wall of text, no goal was set, `goal_sent_at` said it had been delivered and
+the detail page agreed — the most expensive shape a fault can take, because
+every layer above it reads as healthy. Measured on run 49a26807, whose 3038-
+character checklist went in as a message; the operator typed the very same text
+in by hand afterwards and it worked, because a human types `/goal` and pastes
+only the argument. `sendCommandToSession()` (util.mjs) does exactly that — the
+prefix as literal keystrokes, the condition as the paste, then Enter — and
+`goalKeys()` splits the line along the plugin's own `goal.typed` declaration.
+Measured: the two never coalesce, not even with no pause between them, and a
+condition pasted as a placeholder reaches the command in full (a code word at
+the very end of a 1516-character condition was acted on). A plugin that
+declares no prefix keeps the single paste it always had.
+
 **Who knows a goal is the plugin's answer, not the form's** (`goal` in the
 harness plugin, see [docs/plugins.md](docs/plugins.md)). The form block writes
 that list into `data-goal-harnesses`, hub.js shows or hides the block on it —
@@ -2653,6 +2672,34 @@ session's status only. claude's `SubagentStop` fires with the MAIN session's id
   the flow's message step — with no text: the status goes back to `running`,
   `help_answered` is written with `via: 'session'`, `help_answer` stays empty
   because the hub never saw it.
+- **The first key the operator types answers the wait — before any hook
+  does.** The hooks above say `working` on Enter (claude, cursor, hermes) or
+  on the first token (opencode), and never at all for a half-typed line, a
+  menu, a scroll through the TUI or a dialog answered with one key — so a run
+  read "waiting for input" while the operator was sitting in its terminal
+  typing. `noteOperatorInput(runId, via)` (reports.mjs) is the hub's own
+  answer, and it is harness-independent by construction: every keystroke of
+  the browser terminal passes through ONE WebSocket (`terminal.mjs`, the
+  writing client only — the read-only one's input never reaches the agent),
+  and the send route is the other way into a session, so both call it. It is
+  deliberately narrow: `waiting` → `working` and nothing else. No follow-up
+  commission (that would start the follow-up clock and its overrun alarm over
+  a click into a finished run's terminal) and no answered help call (a key is
+  not yet an answer) — both stay with the `_working prompt` hook and the send
+  route, which know that a LINE went in. A run whose harness reports no
+  attention (NULL) is left alone. Only bytes a **person** produced count:
+  `isOperatorInput()` (run-state.mjs, pure) drops what xterm.js sends on the
+  application's behalf — SGR and X10 mouse reports while a TUI has mouse
+  reporting on, focus reports under mode 1004 — because a click to focus the
+  tab or the wheel over the pane is not the operator talking to the agent.
+  One database question per writing client per second, and the event carries
+  `source: 'terminal'` / `'send'`, so a run's history finally records that
+  somebody typed into its terminal. **Not from the agent's output**, and that
+  was considered: the pty output flows through the same socket, but only while
+  a browser is attached, and a TUI redraws for reasons that are not work —
+  claude's spinner, opencode's animation, a status-bar clock, the operator
+  scrolling. Input is deterministic; output would guess in the expensive
+  direction, and real work is what the hooks already report.
 - **The watcher believes it.** `anomaly:no_activity` is not written while the
   agent says it waits (the status word already says so, and an alarm about the
   operator's own pause is the wolf the incident module warns about);
@@ -3742,6 +3789,18 @@ errors (`post_api_request` only fires after success).
   `sendToSession()` is a bracketed paste, a 300 ms pause and then Enter; the
   event is written after all three. A test that greps `capture-pane` and then
   reads the events in the same breath is racing itself.
+- **A pasted slash command is not a slash command.** Claude Code turns a
+  bracketed paste of more than 800 characters into a `[Pasted text #n]`
+  placeholder, and a placeholder is never parsed as a command — so
+  `/goal <3000 characters>` sent the way `sendToSession()` sends everything
+  went off as an ordinary user message, and the run had no goal while
+  `goal_sent_at`, the event log and the detail page all said it had one.
+  Measured on 2.1.261: 800 characters literal, 801 a placeholder; the same
+  text typed by a human works, because a human types the command and pastes
+  only the argument. Whenever the hub drives a TUI's own command, ask whether
+  that TUI distinguishes typing from pasting — `sendCommandToSession()` is the
+  answer here, and the plugin declares the prefix (`goal.typed`) rather than
+  the sender guessing where a command word ends.
 - **A green test only proves the path the test took.** `curl` against the VPN IP
   from the server itself runs over `lo` and says nothing about the firewall;
   check real reachability only from a VPN client.

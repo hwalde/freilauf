@@ -47,6 +47,17 @@ a day on which nothing was released.
 - **The watcher believes the agent.** No "no activity" flag and no follow-up
   overrun while the agent says it waits for input; a running run whose agent
   stopped without reporting turns yellow instead.
+- **Typing into the terminal clears "Waiting for input" at the first key.**
+  The coding agents' hooks only say "working" once a line is submitted (or,
+  for opencode, once it starts) — so while you were typing, scrolling, in a
+  menu or answering a one-key dialog the run still read "Waiting for input".
+  The browser terminal and the send form now flip it to **Running** the
+  moment you do something, for every coding agent alike; mouse clicks, the
+  wheel and the window gaining focus do not count, and the read-only terminal
+  never does. Nothing else changes on that key: a follow-up commission still
+  starts with a submitted line, and a help call still ends with an answer.
+  The run's history records it (`agent_working` with source `terminal` or
+  `send`).
 - **A lost tmux session is resumed, not aborted.** When a run's session
   vanishes without the hub ending it — a server reboot, an update that took
   the tmux server, a dead server — the run is resumed in a new session:
@@ -125,6 +136,15 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A long goal is really set now.** A goal of more than about 800 characters
+  was typed into the session, looked right on the screen and did nothing:
+  claude turns a paste that long into a "[Pasted text #n]" placeholder, and a
+  placeholder is not read as a slash command — so the condition was submitted
+  as an ordinary message and the run ran without a goal, while the run's own
+  page said the goal had been delivered. The hub now does what a person does:
+  it *types* the `/goal` and pastes only the condition after it. Nothing about
+  a short goal changes, and a goal that was already delivered as a message is
+  not repeated — the fix takes effect for runs started after the deploy.
 - **A run that came through no longer keeps calling for attention.** A run that
   took longer than expected, or was quiet for a while, collected an anomaly and
   wore its traffic light for ever — so a run that had reported done and had its

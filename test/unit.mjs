@@ -5151,6 +5151,42 @@ try {
     gleich(gl.goalCommand('opencode', 'all tests pass'), null, 'a coding agent without a spec gets no command')
     gleich(gl.goalCommand('claude', 'x'.repeat(5000)).length, '/goal '.length + 4000, 'capped at the limit')
   })
+  // A paste is not a keystroke: claude collapses a bracketed paste over 800
+  // characters into a `[Pasted text #n]` placeholder, and a placeholder is
+  // never read as a slash command — so the command word has to be TYPED and
+  // only the condition may be pasted (measured 2.1.261).
+  await pruefe('the command word is typed, the condition is pasted', () => {
+    const k = gl.goalKeys('claude', 'all tests pass')
+    gleich(k.typed, '/goal ', 'the part that has to arrive as keystrokes')
+    gleich(k.argument, 'all tests pass', 'the part that may be a paste')
+    gleich(k.typed + k.argument, gl.goalCommand('claude', 'all tests pass'),
+      'and the two halves are the command line, so nothing can drift apart')
+    const lang = gl.goalKeys('claude', 'y'.repeat(3000))
+    gleich(lang.typed, '/goal ', 'a long condition is exactly the case this exists for')
+    gleich(lang.argument.length, 3000, 'and all of it is still the argument')
+    gleich(gl.goalKeys('claude', '   '), null, 'nothing to send')
+    gleich(gl.goalKeys('opencode', 'all tests pass'), null, 'a coding agent without a spec gets no keys')
+  })
+  await pruefe('a plugin that declares no typed prefix keeps the single paste', async () => {
+    const { registerPlugin, unregisterPlugin } = await import('../server/plugins/registry.mjs')
+    const desc = {
+      id: 'unit-goal-plugin', kind: 'harness', label: 'Goal agent', bin: 'goalbin',
+      subscription: false, providers: [], logPatterns: [{ typ: 'rate_limit', re: /x/ }],
+      modelArgs: () => [], effortOptions: () => [], usage: async () => null, pulseId: () => null,
+      goal: { max: 100, command: (c) => `!ziel ${c}` },
+    }
+    wahr(registerPlugin(desc, { source: 'external' }).ok, 'the plugin registers')
+    try {
+      const k = gl.goalKeys('unit-goal-plugin', 'fertig')
+      gleich(k.typed, '', 'everything is pasted, as it always was')
+      gleich(k.argument, '!ziel fertig', 'and the whole line is the paste')
+      // A prefix that does not really start the command would send two halves
+      // meaning something else together — the whole line is pasted instead.
+      desc.goal.typed = '/anders '
+      gleich(gl.goalKeys('unit-goal-plugin', 'fertig').typed, '', 'a prefix that does not fit is not used')
+      gleich(gl.goalKeys('unit-goal-plugin', 'fertig').argument, '!ziel fertig', 'and nothing is lost by that')
+    } finally { unregisterPlugin('unit-goal-plugin') }
+  })
   await pruefe('the goal goes through the form like every other definition field', async () => {
     const base = { harness: 'claude', prompt: 'x', branch_mode: 'keiner' }
     gleich((await rd.runDefFromForm(base, [])).goal, null, 'empty field = no goal')
@@ -6618,6 +6654,29 @@ try {
     gleich(r({ status: 'scheduled', agent_state: 'waiting' }), 'scheduled', 'a run without a session is what it is')
     wahr(followUpActive({ status: 'aborted', followup_since: 'x' }), 'followUpActive on followup_since')
     falsch(followUpActive({ status: 'running', followup_since: 'x' }), 'never on a running run')
+  })
+
+  await pruefe('isOperatorInput: a key is the operator, a mouse report is the terminal', async () => {
+    // The browser terminal answers "waiting for input" with the first byte a
+    // PERSON sends (terminal.mjs → reports.mjs noteOperatorInput). What
+    // xterm.js sends on the application's behalf must not count: a click to
+    // focus the tab, the wheel over the pane, the window coming to the front.
+    const { isOperatorInput } = await import('../server/run-state.mjs')
+    wahr(isOperatorInput('y'), 'one key')
+    wahr(isOperatorInput('\r'), 'Enter')
+    wahr(isOperatorInput('\x03'), 'Ctrl-C')
+    wahr(isOperatorInput('\x1b'), 'a bare Escape')
+    wahr(isOperatorInput('\x1b[A'), 'an arrow key')
+    wahr(isOperatorInput('\x1b[200~fix the test\x1b[201~'), 'a bracketed paste')
+    falsch(isOperatorInput(''), 'nothing')
+    falsch(isOperatorInput(null), 'not a string')
+    falsch(isOperatorInput('\x1b[<0;12;5M'), 'an SGR mouse press')
+    falsch(isOperatorInput('\x1b[<0;12;5m'), 'an SGR mouse release')
+    falsch(isOperatorInput('\x1b[<64;12;5M\x1b[<65;12;5M'), 'two wheel reports')
+    falsch(isOperatorInput('\x1b[M !!'), 'an X10 mouse report')
+    falsch(isOperatorInput('\x1b[I'), 'focus in')
+    falsch(isOperatorInput('\x1b[O'), 'focus out')
+    wahr(isOperatorInput('\x1b[<0;12;5Mq'), 'a key after a click still counts')
   })
 
   await pruefe('anomaliesSettled: a run that came through has answered them', async () => {
