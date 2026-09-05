@@ -902,6 +902,13 @@ export async function prepareSandbox(run, repo, opts = {}) {
         allow: ctx.resolvedAllow, mode: spec.network?.mode ?? null,
         audit_only: !!spec.network?.auditOnly,
       })
+      // What the chosen engine could not express. Its own event, not a field of
+      // the one above: "the proxy started" is read as good news and a warning
+      // folded into its payload is a warning nobody meets. A deny rule this
+      // engine cannot enforce is exactly the case where the spec on file and
+      // the boundary in force disagree, so it belongs in the run's history and
+      // in the audit export next to the spec that promises it.
+      if (proxy.warnings?.length) addEvent(runId, 'warn', { sandbox_policy_unenforced: proxy.warnings })
     }
     return {
       spec, specPath: specPath(runId), workdir: wc.dir, branch: wc.branch ?? null,

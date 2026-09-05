@@ -39,7 +39,7 @@ import {
 // seeds the four built-ins, so a form on a fresh installation offers a list
 // rather than nothing. Two readers of one table is how the two come to
 // disagree, which is the drift this whole module exists to prevent.
-import { listProfiles, profileSpec } from './sandbox/profiles.mjs'
+import { listProfiles, profileLabel, profileSpec } from './sandbox/profiles.mjs'
 import { effortOptionen } from './models.mjs'
 import { branchWorktree } from './runner.mjs'
 import { skillFelder, skillsAusFormular, skillListe, eintragName, eintragWert } from './zusaetze.mjs'
@@ -638,7 +638,7 @@ export function sandboxFields(a = {}, ctx = {}, mode = 'full') {
     <label>${e(t('sandbox.field.profile'))}
       <select name="sandbox_profile_id" ${dis}>
         <option value="">${e(t('sandbox.field.profile_inherit'))}</option>
-        ${profiles.map(p => `<option value="${p.id}" ${Number(profileId) === p.id ? 'selected' : ''}>${e(p.name)}</option>`).join('')}
+        ${profiles.map(p => `<option value="${p.id}" ${Number(profileId) === p.id ? 'selected' : ''}>${e(p.label ?? profileLabel(p))}</option>`).join('')}
       </select>
       <span class="dim">${e(profiles.length ? t('sandbox.field.profile_hint') : t('sandbox.field.profile_none'))}</span>
     </label>

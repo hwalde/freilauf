@@ -7276,6 +7276,17 @@ try {
       equal(JSON.stringify(resolved.unexpressed), JSON.stringify(['evil.b.test']), 'a deny narrowing a wildcard cannot be expressed')
       const warnings = configWarnings(withDeny, {})
       isTrue(warnings.some(w => w.includes('evil.b.test')), 'and it is named to the operator instead of vanishing')
+      // It is a sentence, not a key: the two texts were hardcoded English for a
+      // while, in a UI that is trilingual by rule.
+      isFalse(warnings.some(w => w.startsWith('sandbox.warn.')), 'the warning is translated, not a bare key')
+      // And it is EMITTED. It was computed and read by nobody — the very shape
+      // this module documents as the dangerous one, a policy that does nothing
+      // starting as cleanly as one that binds. A source check and not a run:
+      // proving it end to end needs the iron-proxy image, so this pins the
+      // wiring and says so rather than pretending to be the stronger test.
+      const idxSrc = readFileSync(new URL('../server/sandbox/index.mjs', import.meta.url), 'utf8')
+      contains(idxSrc, 'sandbox_policy_unenforced', 'the caller writes the warnings as a run event')
+      isTrue(/proxy\.warnings\?\.length/.test(idxSrc), 'and it reads them off the handle')
       isFalse(ironProxyConfig(withDeny, {}).includes('a.test"'), 'the denied host is off the list, not beside it')
 
       // 5. `require: true` 403s the SYNTHETIC CONNECT iron-proxy evaluates for a
@@ -7310,6 +7321,13 @@ try {
     })
 
     await check('a REAL iron-proxy log line becomes an audit line, verbatim as the proxy wrote it', async () => {
+      // These two lines were written by the real binary and are otherwise
+      // byte for byte what it produced. The one edit is `remote_addr`, which
+      // carried the Docker bridge address of the machine it was measured on:
+      // `pruefe-vor-push.sh` refuses RFC 1918 literals in the committed tree,
+      // and that fence is not worth weakening for a field this module neither
+      // maps nor asserts. It is TEST-NET-1 (RFC 5737) now — do not "restore"
+      // it, the fidelity that matters is in the fields below it.
       const { mapIronLine } = await import('../server/sandbox/ironproxy.mjs')
       // Both lines are copied byte for byte out of `docker logs` on 2026-09-05.
       // The field NAMES were guessed right and their PLACE was not: they are
@@ -7756,6 +7774,32 @@ try {
       for (const lang of ['en', 'de', 'zh']) {
         const cat = JSON.parse(readFileSync(new URL(`../lang/${lang}.json`, import.meta.url), 'utf8'))
         for (const key of used) isTrue(!!cat[key], `${lang}: ${key}`)
+      }
+    })
+
+    // The keys existed and were translated in three languages from the first
+    // commit, and NOTHING rendered them — every page printed the stored English
+    // name at a German or Chinese reader. Existence is therefore not the test;
+    // the test is that a page prints the translation. It has to run in German,
+    // because in English 'Balanced' is both the stored name and the string.
+    await check('a built-in profile prints its translation, not its stored name', async () => {
+      const { profileLabel, profileDesc, listProfiles } = await import('../server/sandbox/profiles.mjs')
+      const { setLanguage, currentLanguage, t } = await import('../server/i18n.mjs')
+      const before = currentLanguage()
+      try {
+        setLanguage('de')
+        const row = listProfiles().find(p => p.builtin && p.name === 'Balanced')
+        isTrue(!!row, 'the built-in is seeded')
+        equal(profileLabel(row), t('sandbox.profile.balanced'), 'the label is the translated string')
+        isTrue(profileLabel(row) !== row.name, 'and it is NOT the stored English name')
+        isTrue(profileDesc(row).length > 20, 'the description comes with it')
+        // An operator's own row is theirs: never translated, never guessed at.
+        equal(profileLabel({ name: 'Meins', builtin: 0 }), 'Meins', 'an own profile keeps its name')
+        equal(profileDesc({ name: 'Meins', builtin: 0 }), '', 'and has no description of ours')
+        // A renamed built-in became a copy (builtin = 0) — same rule.
+        equal(profileLabel({ name: 'Balanced', builtin: 0 }), 'Balanced', 'a copy is not a built-in')
+      } finally {
+        setLanguage(before)
       }
     })
   }

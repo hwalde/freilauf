@@ -345,6 +345,34 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **The shipped sandbox profiles were shown in English to every reader.** Each
+  of them declares a translated name and a one-line explanation, in all three
+  languages, from the day they were written — and nothing ever printed them:
+  every page rendered the row's stored name, which is its identity and is
+  English by design. A German or Chinese operator picking a profile therefore
+  read "Balanced" and no explanation at all. The name a profile is stored under
+  is unchanged, so nothing that names one in a script or an API call moves; a
+  profile you renamed yourself is yours and is never translated.
+- **A deny rule the egress engine cannot enforce is now said out loud.** Under
+  `iron-proxy` there is no deny list — an allowlist entry can be subtracted, but
+  a deny that narrows a wildcard (`deny: evil.example.com` under
+  `allow: *.example.com`) has no expression at all. The hub worked that out
+  correctly, wrote a warning about it, and then nobody read the warning: it was
+  computed into a field no code ever looked at. It is now an event on the run,
+  so it stands in the run's own history and travels into the audit export next
+  to the spec that promises the rule — an auditor reading that spec would
+  otherwise believe the deny bound. That is the same failure this engine already
+  taught once: a policy that does nothing starts as cleanly as one that binds.
+- **Every hermes run in a sandbox raised an incident before it did any work.**
+  The plugin declared one host of its own, and the CLI reaches for four at
+  startup — its agent endpoint and the model catalogs it reads to know what it
+  can offer. All four were refused, which opened a yellow "blocked host"
+  incident on every single hermes run. The runs succeeded regardless, so this
+  was noise; noise on every run is how a signal stops being read. Deliberately
+  still refused: GitHub. hermes touches it at startup and works without it, and
+  a harness declaration widens *every* run of that harness — where a repository
+  really lives on GitHub, the `git-host` preset says so from that repo's own
+  origin.
 - **A sandboxed claude run could not start, and a sandboxed cursor or hermes run
   started without the switches its plugin asked for.** Every coding-agent plugin
   declares a `sandbox.env` — its telemetry and auto-update switches, and for

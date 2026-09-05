@@ -299,7 +299,9 @@ export async function sandboxRepoFields(r = {}) {
       ${dim(t('sandbox.page.default_hint'))}</label>
     <label>${e(t('sandbox.page.profile'))} ${select('sandbox_profile_id', r.sandbox_profile_id ?? '', [
       ['', t('sandbox.page.profile_none')],
-      ...profiles.map(pr => [String(pr.id), pr.builtin ? `${pr.name} (${t('sandbox.page.builtin')})` : pr.name]),
+      ...profiles.map(pr => [String(pr.id), pr.builtin
+        ? `${pr.label ?? pr.name} (${t('sandbox.page.builtin')})`
+        : (pr.label ?? pr.name)]),
     ])}
       ${dim(t('sandbox.page.profile_hint'))}</label>
     <label>${e(t('sandbox.page.image'))} <input name="sandbox_image" value="${e(r.sandbox_image ?? '')}" placeholder="registry.example.com/team/java21:2026-09">
@@ -703,14 +705,31 @@ export async function listProfiles() {
   const m = await mod('profiles')
   const fn = pick(m, ['listProfiles', 'allProfiles', 'profiles'])
   if (!fn) return []
-  try { return (await fn()) ?? [] } catch { return [] }
+  try { return withLabels(m, (await fn()) ?? []) } catch { return [] }
 }
 
 async function getProfileRow(id) {
   const m = await mod('profiles')
   const fn = pick(m, ['getProfile', 'profile'])
   if (!fn) return null
-  try { return (await fn(+id)) ?? null } catch { return null }
+  try { return withLabels(m, (await fn(+id)) ?? null) } catch { return null }
+}
+
+/**
+ * `label` and `desc` onto the row, once, where the rows are fetched — so no
+ * render site has to remember that a built-in's name is not what a reader sees
+ * (`profileLabel()` in profiles.mjs). A module that does not answer leaves the
+ * name standing, which is what every page printed before this existed.
+ */
+function withLabels(m, rows) {
+  const label = pick(m, ['profileLabel'])
+  const desc = pick(m, ['profileDesc'])
+  if (!label && !desc) return rows
+  const one = (r) => {
+    if (!r) return r
+    try { return { ...r, label: label ? label(r) : r.name, desc: desc ? desc(r) : '' } } catch { return r }
+  }
+  return Array.isArray(rows) ? rows.map(one) : one(rows)
 }
 
 async function saveProfileRow(row) {
@@ -732,7 +751,8 @@ function profileList(profiles) {
   return `<div class="table-wrap"><table class="list"><thead><tr>
     <th>${e(t('sandbox.page.profile'))}</th><th>${e(t('sandbox.page.profile_kind'))}</th><th></th></tr></thead><tbody>
     ${profiles.map(p => `<tr>
-      <td><a href="/settings/sandbox/profile?id=${e(String(p.id))}">${e(p.name)}</a></td>
+      <td class="two-line"><a href="/settings/sandbox/profile?id=${e(String(p.id))}">${e(p.label ?? p.name)}</a>
+        ${p.desc ? `<span class="dim">${e(p.desc)}</span>` : ''}</td>
       <td class="dim">${e(t(p.builtin ? 'sandbox.page.builtin' : 'sandbox.page.own'))}</td>
       <td><form method="post" action="/settings/sandbox/profile/delete" class="inline"
             onsubmit="return confirm(${e(JSON.stringify(t('sandbox.page.profile_delete_confirm')))})">
@@ -780,7 +800,7 @@ export async function sandboxProfilePage(req, res, url) {
   if (id && !row) return problemPage(req, res, t('sandbox.page.profile'), [t('sandbox.page.err_profile_unknown')], '/settings/sandbox')
   const spec = row?.spec ?? '{}'
   const text = typeof spec === 'string' ? spec : JSON.stringify(spec, null, 2)
-  const body = `<h2>${e(row ? t('sandbox.page.profile_edit', { name: row.name }) : t('sandbox.page.profile_new'))}</h2>
+  const body = `<h2>${e(row ? t('sandbox.page.profile_edit', { name: row.label ?? row.name }) : t('sandbox.page.profile_new'))}</h2>
   ${row?.builtin ? `<p class="dim">${e(t('sandbox.page.builtin_copy_hint'))}</p>` : ''}
   <form method="post" action="/settings/sandbox/profile" class="settings form-grid">
     ${row ? `<input type="hidden" name="id" value="${e(String(row.id))}">` : ''}

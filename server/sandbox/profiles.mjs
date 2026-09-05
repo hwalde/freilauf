@@ -16,6 +16,7 @@
 // rewrites rows that are still marked built-in. Nobody's work is silently
 // overwritten, in either direction.
 import db from '../db.mjs'
+import { t } from '../i18n.mjs'
 import { normalizeSpec } from './spec.mjs'
 import { engineCapabilities } from './proxy.mjs'
 
@@ -354,6 +355,32 @@ export function seedBuiltinProfiles() {
 /** The built-in this row came from, if any — for the label a page prints. */
 export function builtinFor(row) {
   return row?.builtin ? (BUILTIN_BY_NAME.get(row.name) ?? null) : null
+}
+
+/**
+ * What a page PRINTS for a profile, as opposed to what the row is called.
+ *
+ * The two are deliberately different things, and the split above says why:
+ * `name` is the row's identity — stored, unique, English and stable, because a
+ * database cannot follow the reader's language — while `titleKey`/`descKey` are
+ * what somebody reads. They were declared from the first commit and nothing
+ * rendered them, so every page printed the stored English at a German or
+ * Chinese reader; the keys were translated in all three languages the whole
+ * time.
+ *
+ * An operator's own row falls through to its name, and so does a renamed
+ * built-in — renaming one makes it their copy (`builtin = 0`), and a name they
+ * chose is not ours to translate.
+ */
+export function profileLabel(row) {
+  const b = builtinFor(row)
+  return b?.titleKey ? t(b.titleKey) : String(row?.name ?? '')
+}
+
+/** Its one-line explanation, empty for a profile that is not one of ours. */
+export function profileDesc(row) {
+  const b = builtinFor(row)
+  return b?.descKey ? t(b.descKey) : ''
 }
 
 try {

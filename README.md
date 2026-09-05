@@ -79,15 +79,14 @@ Freilauf does, and it only goes forward.
   may only ever narrow what a higher one locked. When it blocks something the
   agent needed, you get the host, one click to allow it for this run or this
   repo, and no restart. Optional and **off by default**; Docker is a
-  prerequisite only if you want it. Two facts about how far this has been
-  proven belong in the summary rather than only in the fine print. The enforced
-  allowlist now works on a **rootless** daemon — the posture we recommend —
-  because the proxy runs as a container on the run's own network there; that was
-  measured against real clients (`git`, `npm`, `curl`, a live policy change),
-  but **no coding agent has yet worked behind one**, so start in audit-only and
-  expect to learn something about your allowlist. And **one coding agent has
-  really done a run in a container** (opencode, work merged into `main`
-  unassisted) while the other three have never been started in one
+  prerequisite only if you want it. How far this has been proven belongs in the
+  summary rather than only in the fine print: **all four coding agents have now
+  done real work in a container** — written a file, committed it, reported back
+  and had it merged into the base branch — and **one of them (opencode) has
+  worked behind an enforced allowlist**, where a host outside the list was
+  refused, the refusal became an incident, and allowing it took effect on the
+  agent's very next attempt with no restart. Start in audit-only anyway and
+  expect to learn something about your own allowlist; that is what it is for
   ([docs/sandbox.md](docs/sandbox.md), which is as long about what it does *not*
   do as about what it does).
 - **Everything vendor-specific is a plugin.** Coding agents, model providers

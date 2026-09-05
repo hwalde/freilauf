@@ -21,48 +21,21 @@ changelog.
 > **Running agents in a sandbox has landed.** It is optional and off by
 > default; the reference is **[docs/sandbox.md](docs/sandbox.md)**, the design
 > study behind it is **[SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md)**, and what
-> arrived is written down in [CHANGELOG.md](CHANGELOG.md). Two pieces of it are
-> deliberately unfinished and are big enough to stand here.
-
-### Credentials that never enter the container
-
-**Status: built, and never run against the real thing.** A sandbox profile can
-say `secrets: inject` — the container holds a placeholder, and the egress proxy
-swaps the real credential into the request on its way out, so a compromised
-agent never has the key at all. The code for it is there and refuses loudly
-where it cannot deliver.
-
-What is missing is experience. It needs `iron-proxy`, which is installed on no
-machine here — the binary is on no `PATH` and no shipped image carries it — so
-its configuration file, its reload endpoint and its log format were written from
-documentation and have never been parsed by the binary that is supposed to read
-them. Until somebody has run it in anger, the shipped profiles pass credentials
-in as environment variables — exactly as an unsandboxed run does — and injection
-is an explicit upgrade you make with your eyes open.
-If you have iron-proxy running somewhere, telling us what actually happened
-would be the single most useful thing.
-
-**And it turns out to matter for more than credentials.** Measured on
-2026-09-05 against a real rootless Docker daemon: the *other* engine, the
-built-in one that lives inside the hub process, cannot work there at all —
-rootlesskit keeps the container bridges in a network namespace of its own, so
-the hub cannot bind the address the container would have to reach it at, and a
-container cannot reach the host on any network. An enforced allowlist on a
-rootless daemon therefore needs a proxy that is itself a **container**, which is
-what this engine already is; the topology was measured and works. So the engine
-nobody has exercised is the one the recommended posture needs, which is an
-uncomfortable thing to write down and is written down anyway — in
-[docs/sandbox.md](docs/sandbox.md) and in
-[SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md) §11b. Until that changes, an
-allowlist means a rootful daemon, and `open` or `none` are what a rootless
-installation has.
-
-Two things worth knowing before you plan around it. Injection can only ever
-cover a credential carried verbatim in a header: a request the client *signs*
-with the secret — AWS SigV4 and every HMAC scheme — cannot be injected by
-anything sitting in front of it, and never will be. And a coding agent whose
-plugin cannot say which header carries its key (cursor today) needs the
-environment-variable mode, and says so instead of guessing.
+> arrived is written down in [CHANGELOG.md](CHANGELOG.md). One piece of it is
+> deliberately unfinished and is big enough to stand here.
+>
+> **Credentials that never enter the container has landed too**, and it used to
+> stand on this page as "built, and never run against the real thing". It has
+> now met the binary: a profile saying `secrets: inject` holds a placeholder in
+> the container while the egress proxy swaps the real credential in on the way
+> out, and that was measured rather than reasoned about. So was the sentence
+> under it that said an enforced allowlist needs a rootful daemon — it does not
+> any more; the proxy is itself a container. Both are in the changelog. The two
+> limits that remain are permanent rather than pending, and live in
+> [docs/sandbox.md](docs/sandbox.md): a credential the client *signs* with
+> (AWS SigV4, any HMAC scheme) can never be injected by something sitting in
+> front of it, and a coding agent whose plugin cannot name the header carrying
+> its key needs the environment-variable mode and says so.
 
 ### A sandbox for machines that cannot have Docker
 

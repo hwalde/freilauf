@@ -85,18 +85,17 @@ das tut Freilauf, und es geht nur vorwärts.
   höhere festgezurrt hat. Blockiert sie etwas, das der Agent brauchte, bekommst
   du den Host genannt und einen Klick, um ihn für diesen Lauf oder dieses Repo
   freizugeben — ohne Neustart. Optional und **standardmäßig aus**; Docker ist
-  nur dann Voraussetzung, wenn du es willst. Zwei Angaben dazu, wie weit das
-  erprobt ist, gehören in die Zusammenfassung und nicht nur ins Kleingedruckte.
-  Die erzwungene Allowlist funktioniert inzwischen auch auf einem **rootless**
-  Daemon — der Aufstellung, die wir empfehlen —, weil der Proxy dort selbst ein
-  Container im Netz des Laufs ist; das wurde gegen echte Clients gemessen
-  (`git`, `npm`, `curl`, eine Änderung der Regeln im laufenden Betrieb), aber
-  **noch kein Coding-Agent hat dahinter gearbeitet**. Fang also im
-  Audit-Modus an und rechne damit, etwas über deine Allowlist zu lernen. Und:
-  **ein Coding-Agent hat wirklich einen Lauf in einem Container gemacht**
-  (opencode, die Arbeit landete ohne Hilfe in `main`), die anderen drei sind
-  noch nie in einem gestartet worden ([docs/sandbox.md](docs/sandbox.md) — dort
-  steht ebenso ausführlich, was die Sandbox *nicht* tut, wie das, was sie tut).
+  nur dann Voraussetzung, wenn du es willst. Wie weit das erprobt ist, gehört in
+  die Zusammenfassung und nicht nur ins Kleingedruckte: **alle vier
+  Coding-Agenten haben inzwischen echte Arbeit in einem Container erledigt** —
+  eine Datei geschrieben, committet, zurückgemeldet und in den Base-Branch
+  gemerged —, und **einer davon (opencode) hat hinter einer erzwungenen
+  Allowlist gearbeitet**: ein Host außerhalb der Liste wurde abgewiesen, aus der
+  Abweisung wurde ein Vorfall, und die Freigabe wirkte beim nächsten Versuch des
+  Agenten — ohne Neustart. Fang trotzdem im Audit-Modus an und rechne damit,
+  etwas über deine eigene Allowlist zu lernen; genau dafür ist er da
+  ([docs/sandbox.md](docs/sandbox.md) — dort steht ebenso ausführlich, was die
+  Sandbox *nicht* tut, wie das, was sie tut).
 - **Alles Herstellerspezifische ist ein Plugin.** Coding-Agenten,
   Modell-Provider und Benachrichtigungsdienste sind Plugins mit dokumentiertem
   Vertrag ([docs/plugins.md](docs/plugins.md)); ein Dritter kann ein Paket auf

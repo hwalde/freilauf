@@ -288,13 +288,20 @@ export function resolveHosts(policy) {
 /**
  * What this config could not express. Never a throw: a warning the operator can
  * read beats a start that fails on a field they did not know about.
+ *
+ * It was computed and dropped on the floor for a while — nothing read
+ * `handle.warnings` — which made it the very failure this module is a lesson
+ * about: a policy that does nothing starts as cleanly as one that binds. The
+ * caller writes it as a `warn` event on the run, so it stands in the run's own
+ * history and travels into the audit export, where an auditor reading the
+ * spec's deny list would otherwise believe it bound.
  */
 export function configWarnings(spec, ctx = {}) {
   const policy = proxyPolicy(spec, { secretsMode: ctx.secretsMode })
   const out = []
   const { unexpressed } = resolveHosts(policy)
-  if (unexpressed.length) out.push(`iron-proxy has no deny list; these deny entries narrow a wildcard and are NOT enforced: ${unexpressed.join(', ')}`)
-  if (policy.broken) out.push(`policy could not be built: ${policy.broken}`)
+  if (unexpressed.length) out.push(t('sandbox.warn.deny_unenforced', { hosts: unexpressed.join(', ') }))
+  if (policy.broken) out.push(t('sandbox.warn.policy_broken', { reason: policy.broken }))
   return out
 }
 

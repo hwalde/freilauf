@@ -254,8 +254,33 @@ const plugin = {
 
     // hermes has no API of its own the way claude and cursor do — its model
     // traffic goes to whichever provider the run picked, which is the
-    // `provider` preset's job. What is left is its own inference host.
-    domains: ['inference.nousresearch.com'],
+    // `provider` preset's job. What is left is what the CLI reaches for on its
+    // OWN account, and that list was measured rather than reasoned about
+    // (2026-09-05, a sandboxed hermes run with `harness` + `provider`): before
+    // it had done any work at all it was turned away from five hosts, opening a
+    // yellow `sandbox_blocked` incident on every single hermes run. The run
+    // still succeeded, so this is noise — and noise on every run is how a
+    // signal stops being read, which is the lesson the blocked-hosts escalation
+    // already carries.
+    //
+    // Written for the matcher that judges them: a bare domain deliberately does
+    // not imply its subdomains, so a host that has any is declared with its dot.
+    domains: [
+      'inference.nousresearch.com',
+      // Its own agent endpoint — the one the CLI itself talks to.
+      'hermes-agent.nousresearch.com',
+      // The model catalogs it reads at startup to know what it may offer.
+      'models.dev', 'opencode.ai', '.opencode.ai',
+    ],
+    // Two more were measured in that same startup burst and are deliberately
+    // NOT here: `github.com` and `raw.githubusercontent.com`. A harness
+    // declaration is added to the allowlist of every run of that harness, and
+    // putting GitHub in one would quietly hand all of GitHub to every hermes
+    // run — for a fetch the CLI does not need (the run worked without it). Where
+    // a run's repository really lives on GitHub the `git-host` preset says so,
+    // derived from that repo's own origin, which is the narrow way to the same
+    // place. If you find hermes genuinely broken without them, widen the RUN or
+    // the repo, not this list.
 
     env: { DO_NOT_TRACK: '1' },
 

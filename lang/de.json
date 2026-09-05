@@ -1629,5 +1629,7 @@
   "sandbox.runtime.err_no_run_id": "Das Sandbox-Dokument nennt keinen Lauf, der Container hätte also weder Namen noch Labels",
   "sandbox.runtime.err_hub_socket_name": "Das Sandbox-Dokument nennt den Hub-Socket als „hubSocket“, und darin stand früher der Pfad im Container. Die Mount-Quelle ist der Socket auf dem Host und heißt „hubSocketSource“; starte den Lauf neu, damit das Dokument neu geschrieben wird.",
   "sandbox.launch.no_image": "Der Coding-Agent „{harness}“ deklariert kein Sandbox-Image, und weder das Repository noch das Profil nennt eines. Trage in den Sandbox-Einstellungen des Repositories ein Image ein.",
-  "sandbox.launch.image_missing": "Das Sandbox-Image {image} liegt nicht auf dieser Maschine und konnte nicht geholt werden. Baue es unter Einstellungen → Sandbox, oder nenne eines, das existiert."
+  "sandbox.launch.image_missing": "Das Sandbox-Image {image} liegt nicht auf dieser Maschine und konnte nicht geholt werden. Baue es unter Einstellungen → Sandbox, oder nenne eines, das existiert.",
+  "sandbox.warn.deny_unenforced": "Diese Engine kennt keine Sperrliste. Diese Sperreinträge schränken einen Platzhalter ein und werden NICHT durchgesetzt: {hosts}",
+  "sandbox.warn.policy_broken": "Die Ausgangsregel konnte nicht gebaut werden: {reason}"
 }
