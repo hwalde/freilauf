@@ -13,7 +13,7 @@
 // production database, ~/agents and foreign tmux sessions are never touched,
 // and only the sessions an instance created itself are killed on the way out.
 import { spawn, execFile, execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
@@ -47,6 +47,94 @@ export async function freierPort() {
   })
 }
 
+// ---------- leftovers of a suite that was killed ----------
+// aufraeumen() below kills exactly the sessions this sandbox created, and it is
+// wired to SIGINT/SIGTERM/SIGHUP. None of that runs when the process is SIGKILLed
+// — a tool timeout, an OOM kill, an agent's run being aborted. The suite then
+// leaves its whole tmux fleet standing, and nothing on the machine knows those
+// sessions are garbage. Measured on the development machine on 2026-09-05: 294
+// live stub sessions from SIX dead sandboxes, ~1 GB of RSS, and — worse than the
+// memory — the hub's own Sessions page and its memory block buried under 300 rows
+// of test leftovers, so the one page that exists to find a real session by age
+// could not be used for that any more.
+//
+// So a starting sandbox sweeps what a dead one left: it reads THAT sandbox's own
+// sessions.txt and kills exactly those names. Still no pattern across all `fl-*` —
+// the list is the proof of ownership, exactly as it is on the way out.
+const SANDKASTEN_PRAEFIXE = ['freilauf-test-', 'Freilauf-e2e-', 'Freilauf-browser-']
+/** A sandbox with no owner marker is from before this existed; only age says it is dead. */
+export const VERWAIST_ALTER_MS = 6 * 3_600_000
+
+/**
+ * May this leftover sandbox directory be swept?
+ *
+ * Pure, so the decision is testable without killing anything. `pid` is what the
+ * directory's own owner.pid says (null when it carries none), `lebt` answers
+ * whether that process is still running.
+ *
+ * A LIVE owner is the one answer that must never be got wrong: sweeping a running
+ * suite would kill the sessions it is asserting on, from another suite's process,
+ * with no error anybody could trace back to here.
+ */
+export function sandkastenVerwaist(eintrag, { nowMs = Date.now(), eigenerPfad = null, lebt = () => true, altersgrenzeMs = VERWAIST_ALTER_MS } = {}) {
+  if (!eintrag?.pfad) return false
+  if (eintrag.pfad === eigenerPfad) return false          // never our own
+  // `--keep` says a human wants to read this sandbox. Its owner is dead by
+  // definition (the suite finished), and its sessions were killed on the way out
+  // anyway — so it is the one abandoned directory that is not garbage.
+  if (eintrag.behalten) return false
+  if (eintrag.pid != null) return !lebt(eintrag.pid)      // the marker answers outright
+  // No marker: written by a version before this, or killed between mkdtemp and the
+  // first write. Age is the only evidence left — a live suite touches its directory
+  // constantly, so anything untouched for hours is over.
+  if (!Number.isFinite(eintrag.mtimeMs)) return false
+  return nowMs - eintrag.mtimeMs >= altersgrenzeMs
+}
+
+/** Is this pid still running? A pid we may not signal is still a pid that exists. */
+function pidLebt(pid) {
+  try { process.kill(pid, 0); return true } catch (err) { return err?.code === 'EPERM' }
+}
+
+/** Every sandbox directory in tmpdir, with the two facts sandkastenVerwaist() judges. */
+function sandkastenListe(wurzel = tmpdir()) {
+  let namen = []
+  try { namen = readdirSync(wurzel) } catch { return [] }
+  const out = []
+  for (const name of namen) {
+    if (!SANDKASTEN_PRAEFIXE.some(p => name.startsWith(p))) continue
+    const pfad = join(wurzel, name)
+    // A Freilauf sandbox and nothing else: one of the two files it writes itself.
+    // Without this a directory that merely shares the prefix could be removed.
+    if (!existsSync(join(pfad, 'sessions.txt')) && !existsSync(join(pfad, 'owner.pid'))) continue
+    let pid = null
+    try { pid = Number(readFileSync(join(pfad, 'owner.pid'), 'utf8').trim()) || null } catch { /* none */ }
+    let mtimeMs = NaN
+    try { mtimeMs = statSync(pfad).mtimeMs } catch { /* gone while we looked */ }
+    out.push({ pfad, pid, mtimeMs, behalten: existsSync(join(pfad, 'behalten')) })
+  }
+  return out
+}
+
+/** Kill the sessions a dead sandbox left behind, then remove its directory. */
+async function verwaisteAufraeumen(eigenerPfad) {
+  let getoetet = 0
+  for (const eintrag of sandkastenListe()) {
+    if (!sandkastenVerwaist(eintrag, { eigenerPfad, lebt: pidLebt })) continue
+    let namen = []
+    try { namen = readFileSync(join(eintrag.pfad, 'sessions.txt'), 'utf8').split('\n').map(z => z.trim()).filter(Boolean) }
+    catch { /* a sandbox that never started a run */ }
+    for (const s of new Set(namen)) {
+      // Two suites may sweep the same leftover at once, and a session may be long
+      // gone: a failed kill is the normal case here, never a reason to stop.
+      const r = await sh('tmux', ['kill-session', '-t', `=${s}`]).catch(() => ({ ok: false }))
+      if (r.ok) getoetet += 1
+    }
+    try { rmSync(eintrag.pfad, { recursive: true, force: true }) } catch { /* next run gets it */ }
+  }
+  if (getoetet) console.log(`  (${getoetet} tmux sessions of an earlier, killed suite cleaned up)`)
+}
+
 /**
  * A sandbox plus the hub process that runs in it.
  *
@@ -74,9 +162,18 @@ export function neuerSandkasten({ praefix = 'freilauf-test-', behalten = false }
   const SESSIONSLISTE = join(SB, 'sessions.txt')
   const sessions = new Set()          // what a test registered by hand; killed as well
 
+  // Who owns this directory. Written before anything else, so a sandbox is
+  // identifiable as abandoned from the moment it exists — see sandkastenVerwaist().
+  try { writeFileSync(join(SB, 'owner.pid'), `${process.pid}\n`) } catch { /* the age rule still covers us */ }
+  // A kept sandbox is somebody's debugging state, not a leftover — say so on disk,
+  // because after the suite exits nothing else distinguishes the two.
+  if (behalten) { try { writeFileSync(join(SB, 'behalten'), 'kept for debugging\n') } catch { /* best effort */ } }
+
   const zustand = { hub: null, db: null, port: 0, basis: '', aufgeraeumt: false }
 
   async function bauen() {
+    // Before anything of our own: take back what a killed suite left standing.
+    await verwaisteAufraeumen(SB)
     for (const d of ['data', 'runs', 'worktrees', 'integrate', 'bin', 'plugins', 'skillhome']) mkdirSync(join(SB, d), { recursive: true })
 
     // Extra-skill dummy (planning: opt-in skills outside the skill autoload folders)

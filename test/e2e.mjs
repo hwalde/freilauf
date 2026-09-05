@@ -106,6 +106,11 @@ async function aufraeumen() {
 }
 process.on('SIGINT', async () => { await aufraeumen(); process.exit(130) })
 process.on('SIGTERM', async () => { await aufraeumen(); process.exit(143) })
+// SIGHUP is what this suite really dies of: it is run from inside a tmux session
+// (an agent's own run), and when that session is closed tmux hangs up the whole
+// process group. Node's default for SIGHUP is to exit without running any of the
+// above — which is how six killed suites left 294 tmux sessions standing.
+process.on('SIGHUP', async () => { await aufraeumen(); process.exit(129) })
 
 // ================================================================== Test run
 try {

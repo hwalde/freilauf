@@ -2344,6 +2344,29 @@ created and cannot forget to write it down, so `$SB/sessions.txt` is the list an
 `aufraeumen()` reads it. Still no pattern across all `fl-*`: that file holds
 exactly the sessions THIS sandbox produced.
 
+**And a cleanup that has to RUN is not a cleanup.** `aufraeumen()` was wired to
+SIGINT and SIGTERM, and the signal this suite actually dies of is neither: it is
+started inside an agent's own tmux session, and closing that session hangs up
+the whole process group — node's default for **SIGHUP** is to exit without
+running a handler. Measured 2026-09-05, after the list above had been working
+for weeks: **294** live stub sessions from **six** killed sandboxes, ~1 GB of
+RSS, and the Sessions page — the page whose whole ordering rule is "oldest
+first, because that is the order one cleans up in" — unusable, because 300 of
+its rows were dead test sessions. So both suites answer SIGHUP as well, and,
+because a SIGKILL answers nothing, **a starting sandbox sweeps what a dead one
+left**: `verwaisteAufraeumen()` reads the OTHER sandbox's own `sessions.txt` and
+kills exactly those names. The list is the proof of ownership on the way in
+exactly as it is on the way out — still no pattern across all `fl-*`.
+`sandkastenVerwaist()` is the decision, pure and unit-tested, and it says no
+three times: never our own directory, never one whose `owner.pid` is still
+alive (sweeping a RUNNING suite would kill the sessions it is asserting on,
+from another process, with nothing to trace it back to), and never one carrying
+the `behalten` marker — `--keep` means a human is reading that sandbox, and its
+owner is dead by definition. A directory from before the marker existed is
+judged by age alone (6 h; a live suite touches its own constantly), and an
+unreadable mtime is no evidence and therefore no sweep — the `Number('')`
+family of traps, one directory further out.
+
 The sandbox repo has a **bare `origin`** next to it, which is what lets the
 integration be tested for real: the group "Integration: a run is done when its
 work is on the base branch" walks a clean run through to a merge commit on
