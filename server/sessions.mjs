@@ -19,7 +19,6 @@
 // tmuxVerdict, sessionGoneFrom) so they can be tested without a tmux server.
 import db, { getRun, addEvent, allSettings } from './db.mjs'
 import { sh, parseDbUtc } from './util.mjs'
-import { dataDir } from './paths.mjs'
 import { specOf } from './sandbox/exec.mjs'
 import { t } from './i18n.mjs'
 import { env } from './env.mjs'
@@ -373,13 +372,17 @@ const runtimeModule = sandboxRuntime
 
 /**
  * Which hub a container belongs to — the value of the `freilauf.hub` label the
- * launcher stamps on and the reconciliation pass filters by. It is the DATA
- * DIRECTORY, which is exactly what `skills.mjs` already calls this
- * installation's id: two hubs on one machine differ in their database, not in
- * their port, and reaping the other one's containers is the same mistake as
- * killing its tmux sessions. One definition, imported by both sides.
+ * launcher stamps on and the reconciliation pass filters by. There is exactly
+ * ONE definition of it, `hubId()` in server/sandbox/index.mjs, and this is a
+ * lazy reader of it rather than a second answer: reaping another installation's
+ * containers is the same mistake as killing its tmux sessions, and two functions
+ * that both claim to know the id is how the two come to disagree. `null` where
+ * the sandbox modules are not loadable at all — the caller then does nothing,
+ * which is the right answer on a machine with no containers.
  */
-export function sandboxHubId() { return dataDir() }
+export async function sandboxHubId() {
+  try { return (await import('./sandbox/index.mjs')).hubId() } catch { return null }
+}
 
 /** Test hook: forget the cached runtime module (a suite may install a stub). */
 export function _resetRuntimeModule() { runtimeMod = null }

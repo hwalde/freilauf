@@ -1202,7 +1202,16 @@ export async function launchRun(runId) {
   // build (§7.11). One file, written by `prepareSandbox()`, read by the wrapper:
   // the hub never assembles a `docker run` command line itself, so a human can
   // reproduce the run from the same file.
-  if (sandbox) args.unshift('--sandbox', sandbox.specPath)
+  if (sandbox) {
+    args.unshift('--sandbox', sandbox.specPath)
+    // What the plugin wants changed about its own command line inside the box
+    // (§7.9). claude asks for `bypassPermissions`: there is nothing left to ask
+    // a human about in there, and its own `sandbox.env` carries the `IS_SANDBOX`
+    // hint that lets that mode be accepted. `--setting-sources user` is fl-start's
+    // own doing for every sandboxed claude run and is deliberately not repeated
+    // here — see harnessLaunchOverrides() in server/sandbox/index.mjs.
+    if (sandbox.launchOverrides?.mode) args.unshift('--mode', sandbox.launchOverrides.mode)
+  }
 
   const r = await sh(env('START_SCRIPT') ?? `${homedir()}/.local/bin/fl-start`, args, { timeout: 120_000 })
   // fl-start's success line ("Session '<name>' started …"); the German wording

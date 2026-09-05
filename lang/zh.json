@@ -1556,5 +1556,18 @@
   "sandbox.action.check_again": "再次查看",
   "sandbox.action.back": "返回",
   "sandbox.event.sandboxed": "已沙箱化",
-  "sandbox.event.bypassed": "已绕过沙箱"
+  "sandbox.event.bypassed": "已绕过沙箱",
+  "sandbox.plugin.none": "该编码代理未声明沙箱，因此它的运行始终发生在本机上。",
+  "sandbox.plugin.declared": "可以在沙箱中运行：",
+  "sandbox.plugin.image": "镜像",
+  "sandbox.plugin.domains": "所需主机",
+  "sandbox.plugin.state_dirs": "中枢从运行的 home 目录读回的内容",
+  "sandbox.plugin.credential": "认证方式",
+  "sandbox.plugin.credential_found": "已在环境中找到",
+  "sandbox.plugin.credential_missing": "未设置——该代理的沙箱运行将无法认证",
+  "sandbox.plugin.runtime_unscanned": "沙箱：尚未查找。",
+  "sandbox.plugin.runtime_missing": "沙箱：不可用——请安装 Docker（或 Podman）。",
+  "sandbox.plugin.runtime_found": "沙箱：可用——{runtime} {version}。",
+  "sandbox.plugin.runtime_rootless": "无 root 模式",
+  "sandbox.page.err_policy_failed": "该更改无法应用。"
 }

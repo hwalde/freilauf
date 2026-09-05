@@ -48,5 +48,10 @@ RUN set -eux; \
 # is a promise to a future reader that is not kept.
 LABEL freilauf.cursor.version="${CURSOR_VERSION}"
 
+# `CURSOR_DATA_DIR` is deliberately not set — cursor's token and transcripts
+# must land in the per-run home the hub seeds and reads back (the transcript is
+# cursor's only activity source and its only end-of-turn signal). Same rule and
+# same reasoning as the block in base.Dockerfile.
+
 USER agent
 WORKDIR /home/agent

@@ -376,10 +376,17 @@ export function buildRunArgv(spec, ctx = {}) {
     // it is not the run's to change.
     addMount(args, own, { source: ctx.repoGitDir, target: ctx.repoGitDir, mode: fs.repoGit ?? 'ro' })
     if (ctx.emptyFile) {
-      // An empty file over `<repo .git>/config`. The config carries the
-      // operator's remotes, hooksPath and credential helpers; masking it is
-      // cheaper and more honest than trying to sanitise it, and the run gets
-      // its remotes from its own clone.
+      // A MINIMAL replacement over `<repo .git>/config` — never an empty file.
+      // The config carries the operator's remotes, hooksPath and credential
+      // helpers, and the run gets its remotes from its own clone, so masking is
+      // cheaper and more honest than sanitising. But an EMPTY file does not mask
+      // the config, it changes what the repository IS: on a sha256 repo `git log`
+      // then reports "your current branch appears to be broken" and `ls-remote`
+      // answers an all-zero sha with exit 0 (measured, §11a.2) — a wrong answer
+      // that looks like a right one, the `--no-optional-locks` trap again.
+      // `writeMaskedGitConfig()` in clone.mjs generates this file: it keeps
+      // `core.repositoryformatversion` and `[extensions]` and drops everything
+      // that names a command or carries a token.
       addMount(args, own, {
         source: ctx.emptyFile,
         target: `${cleanTarget(ctx.repoGitDir)}/config`,

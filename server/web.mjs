@@ -787,6 +787,13 @@ async function api(req, res, url) {
       branchMode: branchFelt ? b.branch_mode : null,
       branchPattern: branchFelt ? b.branch_pattern : null,
       keepOnBranch: branchFelt ? (b.keep_on_branch === '1' || b.keep_on_branch === 'on' ? 1 : 0) : null,
+      // The two sandbox fields the card offers while a run has not started.
+      // Handed over RAW: `editRun()` compares them against the values that mean
+      // yes and runs the overrides through `validateSandboxOverrides()` — a
+      // coercion here would make the string '0' switch a run INTO a container,
+      // which is the entry AGENTS.md carries twice over.
+      sandbox: b.sandbox !== undefined ? b.sandbox : null,
+      sandboxOverrides: b.sandbox_overrides !== undefined ? b.sandbox_overrides : null,
     }, problems)
     if (problems.length) {
       if (wantsHtml(req)) return problemPage(req, res, t('run.edit'), problems, `/runs/${run.id}`)
@@ -823,7 +830,7 @@ async function api(req, res, url) {
     const r = what === 'allow' ? await sandboxAllow(run, b.host, b.scope)
       : what === 'deny' ? await sandboxDeny(run, b.host)
       : what === 'reconfigure' ? await sandboxReconfigure(run, b.overrides)
-      : await sandboxBypass(run)
+      : await sandboxBypass(run, b.reason)
     // A refusal has a reason, and a redirect back to the run would swallow it —
     // the page would look as if the click had done nothing at all. Same rule
     // the "Merge now" button follows one screen down.

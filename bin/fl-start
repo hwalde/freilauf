@@ -668,6 +668,13 @@ spec_submit_nudge() {
 # servers in a repository's own `.claude/settings.json`, and dropping those
 # silently would be a behaviour change far outside the sandbox. Whoever decides
 # to close it anyway should read §11a.3 first and know what it costs.
+#
+# ONE FACT, TWO PLACES — read this before touching either. The claude plugin
+# declares the same thing (`launchOverrides: () => ({ …, settingSources:
+# 'user' })` in server/harnesses/claude.mjs). Today nothing consumes that
+# declaration, so this function is what actually puts the flag on the command
+# line. The moment `launchOverrides` is wired into runner.mjs, delete this
+# function and let the declaration speak — or claude is handed the flag twice.
 claude_setting_sources() {
     [[ -n "$SANDBOX" ]] || return 0
     printf ' --setting-sources user'

@@ -30,5 +30,13 @@ RUN set -eux; \
 # and at worst a line of noise in the TUI on every start.
 ENV OPENCODE_DISABLE_AUTOUPDATE=1
 
+# opencode is the CLI the XDG rule was measured on (SANDBOX_RESEARCH.md
+# §11a.4): **XDG_DATA_HOME / XDG_CONFIG_HOME outrank HOME for it.** So neither
+# is set here, and neither may be set by an operator's base image underneath —
+# an opencode that writes its state anywhere but the per-run home never reads
+# the seeded `auth.json`, never loads `plugins/freilauf.js`, and leaves the
+# hub's activity and token measurement reading an empty session store. The full
+# reasoning is in base.Dockerfile; overlay.Dockerfile fails the build over it.
+
 USER agent
 WORKDIR /home/agent

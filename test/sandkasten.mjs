@@ -224,8 +224,17 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     'FREILAUF_SANDBOX_INFO_CACHE_MS', 'FREILAUF_SANDBOX_PROXY_BIND',
   ]
 
+  /** The PATH without the shim directory — what "no runtime at all" has to mean. */
+  function pathOhneShim() {
+    return String(process.env.PATH ?? '').split(':').filter(p => p !== SHIM_DIR).join(':')
+  }
+
   function sandboxSeams(sandbox) {
-    if (!sandbox) return { FREILAUF_SANDBOX_OFF: '1' }
+    // Off is a HARD off: the switch says so, no runtime binary is named, and the
+    // shim is taken off the PATH again — a leftover `docker` there would let a
+    // suite that asked for no sandbox find one anyway, which is precisely the
+    // premise the "with the sandbox off, nothing calls the runtime" check rests on.
+    if (!sandbox) return { FREILAUF_SANDBOX_OFF: '1', PATH: pathOhneShim() }
     return {
       FREILAUF_SANDBOX_RUNTIME_BIN: DOCKER_BIN,
       FL_DOCKER_STATE: DOCKER_STATE,        // for a bare `docker` off the PATH
@@ -239,7 +248,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // The built-in proxy already defaults to 127.0.0.1:0; naming it is the
       // fence against a later default that binds somewhere a live hub can see.
       FREILAUF_SANDBOX_PROXY_BIND: '127.0.0.1',
-      PATH: `${SHIM_DIR}:${process.env.PATH ?? ''}`,
+      PATH: `${SHIM_DIR}:${pathOhneShim()}`,
     }
   }
 
@@ -259,6 +268,13 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // the report path, which is where it matters.
       FREILAUF_INTEGRATOR_OFF: '1',
       FREILAUF_QUOTA_JSON: join(SB, 'quota.json'),
+      // The report socket of §7.6 resolves to $XDG_RUNTIME_DIR/freilauf/hub.sock
+      // when nothing names it — a path OUTSIDE the sandbox that a live hub and
+      // every parallel suite would bind in turn, each unlinking the last one's
+      // socket. Named here rather than in the one group that is about it, so a
+      // suite cannot forget: it is the same fence as FREILAUF_SKILLS_HOME, and
+      // it is on for every hub because the socket is not a sandbox feature.
+      FREILAUF_HUB_SOCKET: join(SB, 'hub.sock'),
       // The report CLI the prompt names and the claude hooks call. Without it
       // the hub points at ~/.local/bin/fl-report — whatever the last deploy
       // installed there, or nothing at all on a machine that has not deployed
@@ -390,6 +406,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     process.env.FREILAUF_INTEGRATE_DIR = join(SB, 'integrate')
     process.env.FREILAUF_INTEGRATOR_OFF = '1'
     process.env.FREILAUF_QUOTA_JSON = join(SB, 'quota.json')
+    process.env.FREILAUF_HUB_SOCKET = join(SB, 'hub.sock')
     process.env.FREILAUF_REPORT_SCRIPT = join(PROJEKT, 'bin', 'fl-report')
     process.env.FREILAUF_CLAUDE_CREDENTIALS = join(SB, 'missing-claude-credentials.json')
     process.env.FREILAUF_START_SCRIPT = STUB

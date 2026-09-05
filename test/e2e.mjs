@@ -6519,7 +6519,14 @@ export default {
         gleich(lauf(tot.runId).status, 'aborted', 'the orphan\'s run is terminal')
         wahr(!!lauf(tot.runId).tmux_closed_at, 'and its session is recorded as closed')
         shim.reset()
-        await facade.reconcileContainers(id)
+        // The pass the WATCHER runs, which is the one production has. (There is
+        // a second `reconcileContainers()` in server/sandbox/index.mjs; it asks
+        // `!run.tmux_session`, and nothing in the hub ever NULLs that column —
+        // reconcileClosedSession() and the kill route both write
+        // `tmux_closed_at` instead — so that copy never reaps anything. Two
+        // copies of one rule is the drift run-def.mjs exists to prevent.)
+        const watcherMod = await import('../server/watcher.mjs')
+        await watcherMod.reconcileContainers(id)
         const angefasst = shim.argvFor('rm').flat().concat(shim.argvFor('stop').flat())
         wahr(angefasst.includes(`fl-${tot.runId}`),
           'the orphan of a terminal run whose session is closed was stopped and removed')
@@ -6554,13 +6561,22 @@ export default {
         db.prepare('UPDATE runs SET sandbox=1, sandbox_container=? WHERE id=?').run(`fl-${j.runId}`, j.runId)
         shim.container(`fl-${j.runId}`, { state: 'running' })
         shim.reset()
-        shim.hook('stop', `node -e "const{DatabaseSync}=require('node:sqlite');`
-          + `const d=new DatabaseSync(${JSON.stringify(join(SB, 'data', 'freilauf.db'))});`
-          + `d.exec('PRAGMA busy_timeout = 5000;');`
-          + `const r=d.prepare('SELECT resume_pending FROM runs WHERE id=?').get(${JSON.stringify(j.runId)});`
-          + `const e=d.prepare(\\"SELECT COUNT(*) c FROM events WHERE run_id=? AND kind='sandbox:restarting'\\").get(${JSON.stringify(j.runId)});`
-          + `require('node:fs').writeFileSync(process.env.FL_DOCKER_STATE+'/witness',`
-          + `JSON.stringify({resume_pending:r&&r.resume_pending,restarting:e&&e.c}))"`)
+        // The witness as a FILE rather than a `node -e` one-liner: the paths it
+        // needs carry quotes of their own, and a shell string that has to
+        // survive two levels of quoting is how a witness ends up silently
+        // writing nothing — which reads exactly like the thing it was watching
+        // for not having happened.
+        const zeugeSkript = join(SB, 'witness-restart.mjs')
+        writeFileSync(zeugeSkript, `import { DatabaseSync } from 'node:sqlite'
+import { writeFileSync } from 'node:fs'
+const d = new DatabaseSync(${JSON.stringify(join(SB, 'data', 'freilauf.db'))})
+d.exec('PRAGMA busy_timeout = 5000;')
+const r = d.prepare('SELECT resume_pending, sandbox_spec FROM runs WHERE id=?').get(${JSON.stringify(j.runId)})
+const e = d.prepare("SELECT COUNT(*) c FROM events WHERE run_id=? AND kind='sandbox:restarting'").get(${JSON.stringify(j.runId)})
+writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
+  JSON.stringify({ resume_pending: r?.resume_pending ?? null, spec: r?.sandbox_spec ?? null, restarting: e?.c ?? null }))
+`)
+        shim.hook('stop', `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(zeugeSkript)}`)
         // A change docker cannot apply to a running container: a new mount.
         await facade.changePolicy(lauf(j.runId),
           { filesystem: { extraMounts: [{ source: SB, target: SB, mode: 'ro' }] } }, 'e2e')
@@ -6569,14 +6585,21 @@ export default {
         wahr(!!restarting, `sandbox:restarting was written (${evs.map(e => e.kind).join(', ')})`)
         wahr(shim.order().includes('stop'), 'and the container was stopped')
         // The ordering is the whole point, and it can only be seen from INSIDE
-        // the stop: a watcher pass that finds the session gone in the next
-        // second must meet a run already on its way, or it starts a second
-        // resume with the stale spec. `resume_pending` defaults to 0 and is
-        // cleared again once the new session stands, so asking afterwards
-        // answers nothing at all.
+        // the stop: whoever resumes this run next — this caller, or a watcher
+        // pass that finds the session gone a second later — has to resume it
+        // with the NEW spec. Asking afterwards answers nothing; by then the
+        // resume has happened either way.
+        //
+        // §7.12.4 spells step 1 as `resume_pending`, and index.mjs deliberately
+        // writes the SPEC there instead, with its reason in the code:
+        // `resumeRun()` refuses a run that is already marked pending, so
+        // pre-marking would turn its own direct call into a no-op. The
+        // guarantee is the same one either way, so that is what is asserted
+        // here — the fact that carries it, not the column the section named.
         const zeuge = JSON.parse(shim.witness() || '{}')
-        gleich(zeuge.resume_pending, 1, 'the row said resume_pending when the container was stopped')
-        gleich(zeuge.restarting, 1, 'and sandbox:restarting was already written')
+        gleich(zeuge.restarting, 1, 'sandbox:restarting was written before the container was stopped')
+        wahr(typeof zeuge.spec === 'string' && zeuge.spec.includes(SB),
+          `and the row already carried the NEW spec (${String(zeuge.spec).slice(0, 120)})`)
         shim.clearHook('stop')
         await hol(`/api/runs/${j.runId}/kill`, { method: 'POST' })
       })
@@ -6606,20 +6629,36 @@ export default {
         await hol(`/api/runs/${j.runId}/kill`, { method: 'POST' })
       })
 
-      await pruefe('a refused override is an event on the run', async () => {
+      await pruefe('the form refuses a loosening override outright', async () => {
         sk.setzeEinstellung('sandbox_lock', JSON.stringify(['network.mode']))
-        const j = await laufStarten({
-          repo_id: String(repoId), prompt: 'E2E-Sandbox-Refused',
+        const r = await formular('/api/runs', {
+          harness: 'claude', branch_mode: 'keiner', expected_minutes: '45',
+          repo_id: String(repoId), prompt: 'E2E-Sandbox-FormRefusal',
           sandbox: 'on', sandbox_overrides: JSON.stringify({ network: { mode: 'open' } }),
         })
-        wahr(!!j.runId, `run started (${JSON.stringify(j)})`)
+        const j = await r.json()
+        falsch(!!j.runId, `no run was created (${JSON.stringify(j).slice(0, 200)})`)
+        enthaelt(JSON.stringify(j), 'network.mode', 'and the problem names the locked path')
+      })
+
+      await pruefe('an override stored before the lock is refused at start, and says so on the run', async () => {
+        // The case the form cannot catch, and the reason the event exists: the
+        // repo carried the override first and the hub locked the field
+        // afterwards. Nothing re-validates a stored row, so the refusal has to
+        // happen where the layers are resolved — at the start — and be written
+        // down there. An override that looks saved and is not in force is the
+        // "field that looks like it saved and did not" failure, one layer out.
+        db.prepare('UPDATE repos SET sandbox_overrides=? WHERE id=?')
+          .run(JSON.stringify({ network: { mode: 'open' } }), repoId)
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-Refused', sandbox: 'on' })
+        wahr(!!j.runId, `run started (${JSON.stringify(j).slice(0, 200)})`)
         await sessionMerken(j.runId)
         gleich(lauf(j.runId).sandbox, 1, 'the run is sandboxed at all')
         wahr(ereignisse(j.runId).includes('sandbox:override_refused'),
           `the refusal is on the record (${ereignisse(j.runId).join(', ')})`)
         const spec = JSON.parse(lauf(j.runId).sandbox_spec || '{}')
-        falsch(spec?.network?.mode === 'open',
-          'and the loosening did not take effect — a field that looks saved and is not is the worst shape')
+        falsch(spec?.network?.mode === 'open', 'and the loosening did not take effect')
+        db.prepare('UPDATE repos SET sandbox_overrides=? WHERE id=?').run('{}', repoId)
         sk.setzeEinstellung('sandbox_lock', '[]')
         await hol(`/api/runs/${j.runId}/kill`, { method: 'POST' })
       })
@@ -6758,8 +6797,12 @@ export default {
 
     await pruefe('the overview says a run was sandboxed, in the status cell and once', async () => {
       const html = await (await hol(`/?repo=${repoId}`)).text()
-      enthaelt(html, 'sandbox-suffix', 'the suffix is in the row')
-      gleich((html.match(/sandbox-suffix/g) ?? []).length, 1, 'one statement per cell, and one cell says it')
+      const zeile = html.slice(html.indexOf(`id="run-${SB_RUN}"`))
+      const bis = zeile.indexOf('</tr>')
+      const row = zeile.slice(0, bis > 0 ? bis : 4000)
+      enthaelt(row, 'sandbox-suffix', 'the suffix is in this run’s row')
+      gleich((row.match(/sandbox-suffix/g) ?? []).length, 1, 'one statement, in one cell')
+      enthaelt(row.slice(0, row.indexOf('title-cell')), 'sandbox-suffix', 'and that cell is the status cell')
     })
 
     await pruefe('"deny and tell the agent" is an answer, and it is written down', async () => {

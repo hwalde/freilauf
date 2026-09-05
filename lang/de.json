@@ -1556,5 +1556,18 @@
   "sandbox.action.check_again": "Noch einmal suchen",
   "sandbox.action.back": "Zurück",
   "sandbox.event.sandboxed": "in der Sandbox",
-  "sandbox.event.bypassed": "Sandbox umgangen"
+  "sandbox.event.bypassed": "Sandbox umgangen",
+  "sandbox.plugin.none": "Dieser Coding-Agent erklärt keine Sandbox, seine Läufe finden also immer auf dieser Maschine statt.",
+  "sandbox.plugin.declared": "Kann in einer Sandbox laufen:",
+  "sandbox.plugin.image": "Image",
+  "sandbox.plugin.domains": "Hosts, die es braucht",
+  "sandbox.plugin.state_dirs": "Was der Hub aus dem Home des Laufs zurückliest",
+  "sandbox.plugin.credential": "Meldet sich an mit",
+  "sandbox.plugin.credential_found": "in der Umgebung gefunden",
+  "sandbox.plugin.credential_missing": "nicht gesetzt — ein Lauf dieses Agenten in der Sandbox kann sich nicht anmelden",
+  "sandbox.plugin.runtime_unscanned": "Sandbox: noch nicht gesucht.",
+  "sandbox.plugin.runtime_missing": "Sandbox: nicht verfügbar — Docker (oder Podman) installieren.",
+  "sandbox.plugin.runtime_found": "Sandbox: verfügbar — {runtime} {version}.",
+  "sandbox.plugin.runtime_rootless": "rootless",
+  "sandbox.page.err_policy_failed": "Die Änderung ließ sich nicht anwenden."
 }

@@ -37,14 +37,21 @@ docker build -f sandbox/images/cursor.Dockerfile \
   -t freilauf/agent-cursor:2026.09.02-c22c1a3 sandbox/images
 
 docker build -f sandbox/images/hermes.Dockerfile \
-  --build-arg HERMES_COMMIT=f58fcc81 \
-  -t freilauf/agent-hermes:f58fcc81 sandbox/images
+  --build-arg HERMES_VERSION=0.21.0 \
+  -t freilauf/agent-hermes:0.21.0 sandbox/images
 ```
 
-The versions above are the ones installed on the machine this was written for.
-The authority for what a hub actually builds is the harness plugin's
-`sandbox.image.args` (`server/harnesses/<id>.mjs`), not this file — a version
-written down twice is a version that will disagree with itself.
+The build arg is `CLAUDE_VERSION`, `OPENCODE_VERSION`, `HERMES_VERSION` or
+`CURSOR_VERSION` — the names the harness plugins' `sandbox.image.args` use, so
+the hub can build these files without a translation table. The defaults in the
+Dockerfiles are the versions those plugins pin, which are the ones measured on
+this machine; **the plugin is the authority**, and the two are kept equal so
+that an image and its declaration cannot say different things.
+
+`HERMES_VERSION` is the odd one and the Dockerfile says why: hermes is a git
+checkout, not a release, so the version is passed to its installer as the
+branch/tag and `HERMES_COMMIT` is there for the unambiguous pin (`f58fcc81` is
+what `hermes --version` calls "upstream" for 0.21.0 here).
 
 ### Verifying a build
 
@@ -98,6 +105,37 @@ prerequisites and a network, and it would produce a different build of the same
 bundle or `useradd`, and names the missing packages — Freilauf does not install
 packages into somebody else's base.
 
+## The one variable family no image may set
+
+**Never set `XDG_DATA_HOME`, `XDG_CONFIG_HOME` or `XDG_STATE_HOME` — nor
+`CLAUDE_CONFIG_DIR`, `CURSOR_DATA_DIR` or `HERMES_HOME` — in any image a run
+uses.** Not in the base, not in a harness layer, and not in the toolchain image
+an overlay is built on.
+
+A sandboxed run keeps all of its state in the per-run home the hub mounts at
+`$HOME`: the seeded `auth.json`, the `plugins/freilauf.js` that reports
+attention and API errors, claude's transcript, cursor's transcript, opencode's
+session store. The hub seeds that directory before the start and reads it back
+while the run goes — activity, tokens, the end of a turn.
+
+It was **measured** (SANDBOX_RESEARCH.md §11a.4) that **XDG outranks `HOME` for
+opencode**. So an image carrying one of these variables sends the CLI's state
+somewhere else, and every consequence is silent: the seeded credentials are
+never read, the reporting plugin never loads, and the hub's activity
+measurement looks into an empty directory and concludes the agent is idle.
+Nothing errors — the run simply stops reporting, which is the most expensive
+shape a fault takes here, because every layer above it still reads as healthy.
+
+Docker cannot unset an inherited `ENV` (`ENV VAR=` sets it *empty*, which for
+several of these means something else again), so `overlay.Dockerfile`
+**fails the build** and names the offending variable and its value. A toolchain
+image that genuinely needs one of them can set it per command inside its own
+`RUN` steps instead of as an image-wide `ENV`.
+
+Where a build needs a private HOME — the claude and hermes layers both install
+with `HOME=/opt/<name>` — it is a shell assignment in front of that one
+command, never an `ENV`.
+
 ## The uid question
 
 `ARG UID` / `ARG GID` default to 1000 and should be built with **the hub user's**
@@ -147,7 +185,19 @@ Everything below was read out of a real installer or a real installed CLI on
 | claude | `curl -fsSL https://claude.ai/install.sh \| bash -s <version>` | **High.** The script's own argument validation accepts `stable`, `latest` or `X.Y.Z`; it installs under `$HOME/.local`, refuses `sudo` from a user shell but runs as plain root. Read from the live script. |
 | opencode | `npm install -g opencode-ai@<version>` | **High.** The package name is the one the harness plugin's installHint gives, and the version installed on this machine matches `opencode-ai@1.18.29` exactly. The platform binary is an optional dependency, so an unpublished architecture fails at build time. |
 | cursor | `curl` of `https://downloads.cursor.com/lab/<version>/linux/<arch>/agent-cli-package.tar.gz`, `tar --strip-components=1` | **Medium.** Read verbatim out of `https://cursor.com/install`, which is generated per request with the current version baked in and takes no version argument at all — hence the direct URL. That URL is undocumented and is Cursor's to change. If it 404s: run the installer once by hand and read the `DOWNLOAD_URL` it prints. |
-| hermes | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash -s -- --skip-setup --commit <sha>` | **Low — the one to build first.** hermes is a git checkout plus a uv-managed Python 3.11, not a released binary, so the pin is a commit sha (what `hermes --version` calls "upstream"). `--skip-setup`, `--commit` and `--branch` are the installer's own documented flags, read from the script. Three things could not be checked without a build: where the wrapper lands when the installer runs as root, whether anything still wants a TTY despite `--skip-setup`, and whether it insists on installing its own Node next to the base image's. |
+| hermes | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash -s -- --skip-setup --branch <version> [--commit <sha>]` | **Low — the one to build first.** hermes is a git checkout plus a uv-managed Python 3.11, not a released binary, so the pin is a branch/tag or a commit sha (what `hermes --version` calls "upstream"). `--skip-setup`, `--commit` and `--branch` are the installer's own flags, read from the script; whether a `0.21.0` tag exists, and whether it is spelled with a `v`, is **not** known. Three more things could not be checked without a build: where the wrapper lands when the installer runs as root, whether anything still wants a TTY despite `--skip-setup`, and whether it insists on installing its own Node next to the base image's. |
+
+And one hermes-specific risk that is worth reading before the first build: the
+installer puts the **checkout** under `$HERMES_HOME`, which it derives as
+`$HOME/.hermes` — so in the image it lands under `/opt/hermes/.hermes`, while at
+run time `$HOME` is the per-run home and hermes will look for its **state**
+under `<run home>/.hermes`. That split is what we want (code from the image,
+state from the run), and the generated `hermes` launcher hardcodes the
+interpreter and entrypoint as absolute paths, so the code is found. What is not
+known is whether hermes also expects its own checkout beneath `$HERMES_HOME` at
+run time. If it does, the answer is a link written by the plugin's `seedHome`
+into the run's home — **not** an `ENV HERMES_HOME`, which would send every run's
+state to one shared directory and break the seeding for all of them.
 
 The auto-updater switches are in the same shape:
 

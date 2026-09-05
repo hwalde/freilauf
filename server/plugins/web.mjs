@@ -24,7 +24,7 @@
 //     listed with its message instead of costing the operator the page — that
 //     is the whole reason `registryErrors()` collects instead of throwing.
 import { escapeHtml as e, fmtDateTime } from '../util.mjs'
-import { setSetting } from '../db.mjs'
+import db, { setSetting } from '../db.mjs'
 import { redirect } from '../web-helpers.mjs'
 import { t } from '../i18n.mjs'
 // `providerChoiceBlock` lives in pages.mjs and is imported rather than copied:
@@ -33,7 +33,7 @@ import { t } from '../i18n.mjs'
 import { layout, problemPage, providerChoiceBlock } from '../pages.mjs'
 import {
   allPlugins, registryErrors, getPlugin, pluginKind, pluginSource,
-  pluginManifest, detectInstalled,
+  pluginManifest, detectInstalled, sandboxDecl, sandboxable,
 } from './registry.mjs'
 import {
   pluginConfig, setPluginConfig, isPluginEnabled, setPluginProviders,
@@ -284,7 +284,8 @@ function discoverySection() {
   const scanned = lastScanAt()
   const scanLine = `<div class="btn-row">
     <form method="post" action="/settings/plugins/scan" class="inline"><button>${e(t('plugins.scan_again'))}</button></form>
-    <span class="dim">${e(scanned ? t('plugins.last_scan', { at: fmtDateTime(Date.parse(scanned)) }) : t('plugins.never_scanned'))}</span></div>`
+    <span class="dim">${e(scanned ? t('plugins.last_scan', { at: fmtDateTime(Date.parse(scanned)) }) : t('plugins.never_scanned'))}</span></div>
+  ${sandboxRuntimeLine()}`
   if (!open.length) return { html: '', scanLine }
 
   const cards = open.map(row => {
@@ -318,6 +319,77 @@ function discoverySection() {
   }
 }
 
+/**
+ * What a coding agent declares about running in a sandbox (§7.9), on its card.
+ *
+ * The ABSENCE is printed too, and that is the point rather than completeness:
+ * a coding agent whose plugin declares no `sandbox` block is silently never
+ * offered one — its runs simply always happen on the host, and nothing else on
+ * any page says why. Same argument as the `attention` line above it.
+ */
+function sandboxBlock(id, plugin) {
+  const decl = (() => { try { return sandboxDecl(id) } catch { return plugin?.sandbox ?? null } })()
+  const kann = (() => { try { return sandboxable(id) } catch { return !!decl?.supported } })()
+  if (!kann) return `<p class="dim">${e(t('sandbox.plugin.none'))}</p>`
+
+  const zeilen = []
+  const img = decl?.image
+  if (img?.dockerfile) {
+    const args = img.args && typeof img.args === 'object'
+      ? Object.entries(img.args).map(([k, v]) => `${k}=${v}`).join(' ') : ''
+    zeilen.push(`${e(t('sandbox.plugin.image'))}: <code>${e(img.dockerfile)}</code>${args ? ` <span class="dim">${e(args)}</span>` : ''}`)
+  }
+  if (Array.isArray(decl?.domains) && decl.domains.length) {
+    zeilen.push(`${e(t('sandbox.plugin.domains'))}: ${decl.domains.map(d => `<code>${e(d)}</code>`).join(' ')}`)
+  }
+  if (Array.isArray(decl?.stateDirs) && decl.stateDirs.length) {
+    zeilen.push(`${e(t('sandbox.plugin.state_dirs'))}: ${decl.stateDirs.map(d => `<code>${e(d)}</code>`).join(' ')}`)
+  }
+  // The credential a SANDBOXED run of this agent authenticates with. Named and
+  // never shown, like every other credential on this page — and named at all
+  // because it is declared inside the sandbox block rather than at the top
+  // level, so it has no field of its own: an operator who does not know the
+  // variable's name has no way to find it out.
+  for (const c of decl?.credentials ?? []) {
+    const names = (c.envKeys ?? []).map(k => `<code>${e(k)}</code>`).join(', ')
+    if (!names) continue
+    const gesetzt = (c.envKeys ?? []).some(k => !!process.env[k])
+    zeilen.push(`${e(t('sandbox.plugin.credential'))}: ${names} — ${
+      e(t(gesetzt ? 'sandbox.plugin.credential_found' : 'sandbox.plugin.credential_missing'))}`)
+  }
+  return `<p class="dim">${e(t('sandbox.plugin.declared'))}</p>
+    ${zeilen.length ? `<ul class="dim sandbox-decl">${zeilen.map(z => `<li>${z}</li>`).join('')}</ul>` : ''}`
+}
+
+/**
+ * "Sandbox: available / not available (install Docker)" — the fact the system
+ * scan writes down as the discovery row `sandbox:runtime`.
+ *
+ * Deliberately a line and never a suggestion card: `openDiscoveries()` only
+ * offers rows whose plugin id is registered, and `runtime` is not one, so this
+ * cannot turn into a banner nagging somebody to install a container runtime
+ * they may not want.
+ */
+export function sandboxRuntimeLine() {
+  let detail = null
+  try {
+    const row = db.prepare(`SELECT detail FROM discovery WHERE kind='sandbox' AND plugin_id='runtime'`).get()
+    if (row) detail = JSON.parse(row.detail || '{}')
+  } catch { detail = null }
+  if (!detail) return `<p class="dim">${e(t('sandbox.plugin.runtime_unscanned'))}</p>`
+  if (!detail.available) {
+    return `<p class="dim">${e(t('sandbox.plugin.runtime_missing'))}
+      <a href="/settings/sandbox">${e(t('sandbox.settings.title'))}</a></p>`
+  }
+  const extras = []
+  if (detail.rootless) extras.push(t('sandbox.plugin.runtime_rootless'))
+  if (detail.runsc) extras.push('runsc')
+  return `<p class="dim">${e(t('sandbox.plugin.runtime_found', {
+    runtime: detail.runtime ?? '?', version: detail.version ?? '?',
+  }))}${extras.length ? ` (${e(extras.join(', '))})` : ''}
+    <a href="/settings/sandbox">${e(t('sandbox.settings.title'))}</a></p>`
+}
+
 // ---------------- section 2: coding agents ----------------
 
 async function harnessSection() {
@@ -347,6 +419,7 @@ async function harnessSection() {
       ${configured ? '' : `<p class="dim">${e(t('plugins.not_configured'))}</p>`}
       ${hint}
       ${attention}
+      ${sandboxBlock(id, plugin)}
       <form method="post" action="/settings/plugins/save" class="form-grid">
         <input type="hidden" name="id" value="${e(id)}">
         ${checkbox('enabled', !!configured && configured.enabled === 1, t('plugins.enabled'))}

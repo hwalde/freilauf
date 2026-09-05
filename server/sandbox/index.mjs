@@ -215,8 +215,12 @@ export async function refreshSandboxAvailability({ force = false } = {}) {
  */
 async function sandboxableHarness(harness) {
   try {
-    const { getHarness } = await import('../harnesses/index.mjs')
-    return !!getHarness(harness)?.sandbox
+    // From the REGISTRY, not from `harnesses/index.mjs`: `sandboxable()` is the
+    // validated answer (a malformed `sandbox` block is refused rather than
+    // dropped), and the registry is where an external plugin's declaration
+    // arrives too.
+    const { sandboxable } = await import('../plugins/registry.mjs')
+    return !!sandboxable(harness)
   } catch { return false }
 }
 
@@ -525,6 +529,7 @@ export async function prepareSandbox(run, repo, opts = {}) {
       spec, specPath: specPath(runId), workdir: wc.dir, branch: wc.branch ?? null,
       home, container, network: ctx.network, proxyUrl: ctx.proxyUrl,
       hubSocket: CONTAINER_HUB_SOCKET, resolvedAllow: ctx.resolvedAllow,
+      launchOverrides: await harnessLaunchOverrides(run, spec),
     }
   } catch (err) {
     // A retryable failure means the runtime could not be ASKED, so there is
@@ -537,6 +542,33 @@ export async function prepareSandbox(run, repo, opts = {}) {
       { reason: 'prepare_failed', removeNetwork: true }).catch(() => {})
     throw err
   }
+}
+
+/**
+ * What the coding agent's plugin wants changed about its own command line
+ * INSIDE a container (`sandbox.launchOverrides`, §7.9). claude answers
+ * `{ mode: 'bypassPermissions', settingSources: 'user' }`:
+ *
+ *  - `mode` reaches `fl-start` as `--mode`. Inside the box there is nothing left
+ *    to ask about, and `IS_SANDBOX` — which the plugin sets in its own
+ *    `sandbox.env`, and which this file deliberately does not set — is what lets
+ *    that mode be accepted as container root under a rootless daemon (§7.7).
+ *  - `settingSources` is NOT passed on from here, and that is deliberate rather
+ *    than an omission: `fl-start` applies `--setting-sources user` by itself for
+ *    every sandboxed claude run, because it is a property of being sandboxed at
+ *    all. Measured (§11a.3): six committed lines of `"disableAllHooks": true` in
+ *    a repository's own `.claude/settings.json` drop every hook the hub hands
+ *    over with `--settings`, and the symptom is a run that simply never reports.
+ *    Two places passing the same flag is how one of them ends up not passing it.
+ *
+ * Fail-soft: no declaration, or one that throws, means the ordinary command line.
+ */
+async function harnessLaunchOverrides(run, spec) {
+  try {
+    const { sandboxDecl } = await import('../plugins/registry.mjs')
+    const fn = sandboxDecl(run.harness)?.launchOverrides
+    return typeof fn === 'function' ? (fn({ spec, run }) ?? {}) : {}
+  } catch { return {} }
 }
 
 /**
@@ -900,7 +932,13 @@ export async function reconcileContainers(id = hubId()) {
     seen.add(c.runId ?? '')
     const run = c.runId ? db.prepare('SELECT * FROM runs WHERE id=?').get(c.runId) : null
     const terminal = run && ['done', 'failed', 'aborted'].includes(run.status)
-    const sessionClosed = !run?.tmux_session
+    // "Its session is closed" is `tmux_closed_at`, NOT an empty `tmux_session`:
+    // nothing in this hub ever NULLs that column — `reconcileClosedSession()`
+    // and the kill route both write the timestamp and leave the NAME standing,
+    // because the name is how a human finds the session in the log afterwards.
+    // A reaper that asked `!run.tmux_session` would therefore never fire on a
+    // real installation, and every orphan would sit there for ever.
+    const sessionClosed = !run?.tmux_session || !!run?.tmux_closed_at
     // A container with no run at all is a leftover of a database that was
     // replaced (a test sandbox, a restored backup): the label says it is ours.
     if (!run || (terminal && sessionClosed)) {

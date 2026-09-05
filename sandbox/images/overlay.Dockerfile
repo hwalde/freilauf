@@ -49,6 +49,34 @@ RUN set -eux; \
         exit 1; \
     fi
 
+# The one thing an operator's image can do that breaks a run SILENTLY, so it is
+# a build failure rather than a discovery at 3am. Measured (§11a.4): **XDG
+# outranks HOME for opencode.** A base image that carries XDG_DATA_HOME,
+# XDG_CONFIG_HOME, XDG_STATE_HOME, CLAUDE_CONFIG_DIR, CURSOR_DATA_DIR or
+# HERMES_HOME sends the CLI's state somewhere other than the per-run home the
+# hub seeds and reads back — and then the seeded credentials are never read,
+# the reporting plugin never loads, and the hub's activity measurement looks
+# into an empty directory and calls the agent idle. Nothing errors; the run
+# just stops reporting.
+#
+# Docker has no way to UNSET an inherited ENV (`ENV VAR=` sets it empty, which
+# for several of these means something else again), so the honest answer is to
+# refuse and say which variable and what it is set to.
+RUN set -eux; \
+    bad=""; \
+    for v in XDG_DATA_HOME XDG_CONFIG_HOME XDG_STATE_HOME CLAUDE_CONFIG_DIR CURSOR_DATA_DIR HERMES_HOME; do \
+        eval "val=\${$v:-}"; \
+        [ -z "$val" ] || bad="$bad\n  $v=$val"; \
+    done; \
+    if [ -n "$bad" ]; then \
+        printf 'This base image redirects a coding agent away from its HOME:%b\n' "$bad" >&2; \
+        echo "A sandboxed run keeps ALL of its state in the per-run home Freilauf" >&2; \
+        echo "mounts at \$HOME. XDG_* outranks HOME for opencode, so a run built on" >&2; \
+        echo "this base would silently stop reporting. Remove them from the" >&2; \
+        echo "toolchain image; a build that needs them can set them per command." >&2; \
+        exit 1; \
+    fi
+
 # The same uid rule as the base image, and for the same reason (§7.7): the
 # worktree, the run directory and the seeded home are bind mounts owned by the
 # hub user. `useradd`/`groupadd` are shadow-utils and are on every glibc base;

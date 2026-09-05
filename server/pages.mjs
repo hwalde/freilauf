@@ -13,6 +13,7 @@ import {
   runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
   runTitleField, runStartTimeFields, runStartFromForm,
   runSetupFields, runSetupFromForm, branchFields, branchContext,
+  sandboxRunFields,
   agentNameTaken, moveAgent, deleteAgent, EMPTY_SCHEDULE,
 } from './run-def.mjs'
 import {
@@ -1705,6 +1706,13 @@ export function runEditCard(run) {
     // Quick-Run dialog.
     zeilen.push(branchFields(run, branchContext(run.repo_id)))
   }
+  if (erlaubt.sandbox) {
+    // The run's tri-state is already RESOLVED (runs.sandbox is 0/1), so this is
+    // a yes/no about a run that has not started — the same table the endpoint
+    // applies, which is the rule this card exists for: it may never offer an
+    // edit `/api/runs/<id>/edit` would refuse.
+    zeilen.push(sandboxRunFields(run))
+  }
   if (erlaubt.startTime) {
     // Prefilled with what the run currently waits for: the DB holds UTC, the
     // <input type="datetime-local"> wants local time on this machine (the same
@@ -2454,7 +2462,15 @@ export async function favoriteEdit(req, res, url) {
   const body = `<h2>${e(id ? t('fav.edit_title') : t('fav.create_title'))}</h2>
   <form method="post" action="/settings/favorites/edit${id ? `?id=${id}` : ''}" class="settings form-grid">
     <label>${e(t('fav.name'))} <input name="name" value="${e(f?.name ?? '')}" placeholder="${e(t('fav.name_ph'))}" required></label>
-    ${runSetupFields(werte)}
+    ${
+      // The sandbox tri-state is OPT-IN on this block, and the favorite form is
+      // the one place that opts in. The merge-resolver setup and the tmux
+      // cleanup embed the same `runSetupFields()` and store their answer as
+      // individual `settings` rows — a sandbox field rendered there would look
+      // saved and would not be, which is the failure AGENTS.md has the rule
+      // about. Here it is a real column (`favorites.sandbox`), because the
+      // boundary a run works in is setup and not task.
+      ''}${runSetupFields(werte, { sandbox: 'tristate' })}
     ${skillFelder(werte.skills)}
     ${flowAttachFields(werte.flows)}
     <div class="btn-row"><button>${e(t('settings.save'))}</button>

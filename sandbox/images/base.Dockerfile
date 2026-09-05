@@ -83,6 +83,25 @@ ENV NPM_CONFIG_FUND=false
 # run's HOME is remounted to.
 ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
 
+# NOT SET HERE, AND NEVER TO BE SET IN ANY IMAGE OF THIS FAMILY:
+#   XDG_DATA_HOME  XDG_CONFIG_HOME  XDG_STATE_HOME
+#   CLAUDE_CONFIG_DIR  CURSOR_DATA_DIR  HERMES_HOME
+#
+# Measured (SANDBOX_RESEARCH.md §11a.4): **XDG outranks HOME for opencode.** A
+# run's whole state — the seeded `auth.json`, the `freilauf.js` reporting
+# plugin, the session store the hub reads activity and tokens out of — lives in
+# the per-run home the hub mounts at $HOME. An image that sets one of these
+# sends the CLI somewhere else, and every consequence is of the silent kind:
+# the seeded credentials are never read, the plugin never loads, and the hub's
+# activity measurement and API-error channel look into an empty directory and
+# conclude the agent is idle. Nothing fails; the run just stops reporting,
+# which is the most expensive shape a fault can take here.
+#
+# The rule is the same one that makes the whole per-run home work: HOME is the
+# single statement about where a run's state lives, and a second statement can
+# only disagree with it. `overlay.Dockerfile` refuses a base image that carries
+# any of them.
+
 # The hub mounts fl-report and fl-paths.sh from ~/.local/bin at the identical
 # path (§7.11), and the PATH of the RUN itself carries that directory because
 # the runtime puts it there (`binPaths` in the container's environment). This

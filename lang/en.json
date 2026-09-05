@@ -1556,5 +1556,18 @@
   "sandbox.action.check_again": "Look again",
   "sandbox.action.back": "Back",
   "sandbox.event.sandboxed": "sandboxed",
-  "sandbox.event.bypassed": "sandbox bypassed"
+  "sandbox.event.bypassed": "sandbox bypassed",
+  "sandbox.plugin.none": "This coding agent declares no sandbox, so its runs always happen on this machine.",
+  "sandbox.plugin.declared": "Can run in a sandbox:",
+  "sandbox.plugin.image": "Image",
+  "sandbox.plugin.domains": "Hosts it needs",
+  "sandbox.plugin.state_dirs": "What the hub reads back out of the run’s home",
+  "sandbox.plugin.credential": "Authenticates with",
+  "sandbox.plugin.credential_found": "found in the environment",
+  "sandbox.plugin.credential_missing": "not set — a sandboxed run of this agent cannot authenticate",
+  "sandbox.plugin.runtime_unscanned": "Sandbox: not looked for yet.",
+  "sandbox.plugin.runtime_missing": "Sandbox: not available — install Docker (or Podman).",
+  "sandbox.plugin.runtime_found": "Sandbox: available — {runtime} {version}.",
+  "sandbox.plugin.runtime_rootless": "rootless",
+  "sandbox.page.err_policy_failed": "The change could not be applied."
 }

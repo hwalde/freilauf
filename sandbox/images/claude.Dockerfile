@@ -11,10 +11,13 @@ FROM ${BASE}
 
 # The version is an ARG and never a default of "latest": the digest of this
 # image goes into the run's `started` event, and an image that quietly changes
-# under a fixed tag makes that record a lie. `stable` and `latest` are the
-# installer's own words and work here too — for a machine that deliberately
-# wants to follow the release train.
-ARG CLAUDE_VERSION=stable
+# under a fixed tag makes that record a lie. The default is the version pinned
+# in the harness plugin (`sandbox.image.args` in server/harnesses/claude.mjs)
+# and measured on this machine; the plugin is the authority, and the two are
+# kept equal so an image and its declaration cannot say different things.
+# `stable` and `latest` are the installer's own words and work here too, for a
+# machine that deliberately wants to follow the release train.
+ARG CLAUDE_VERSION=2.1.261
 
 # Measured against https://claude.ai/install.sh on 2026-09-05: the script takes
 # ONE positional argument, `stable | latest | X.Y.Z`, downloads from
@@ -27,6 +30,11 @@ ARG CLAUDE_VERSION=stable
 # /usr/local/bin — NOT into /root or /home/agent. The run's HOME is a per-run
 # directory bind-mounted at a path chosen by the hub (§7.7); a CLI installed
 # under the build-time home would disappear behind that mount.
+# `HOME=/opt/claude` is set for THIS command only — it is a shell assignment in
+# front of the installer, not an ENV. It must never become one: at run time
+# HOME is the per-run seeded home, and that is the whole point (§7.7). Nor is
+# CLAUDE_CONFIG_DIR set anywhere, for the same reason — see the block in
+# base.Dockerfile.
 USER root
 RUN set -eux; \
     mkdir -p /opt/claude; \

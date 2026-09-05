@@ -8596,15 +8596,23 @@ process.stdout.write(JSON.stringify(out))
     const { collectRunTip, isClone } = await import('../server/sandbox/clone.mjs')
     const { homedir } = await import('node:os')
 
+    const { setSetting: lcSetSetting } = await import('../server/db.mjs')
+    // The pass deliberately asks NOTHING on a hub that neither has the sandbox
+    // switched on nor ever ran a sandboxed run — a shell-out per watcher pass on
+    // a machine with no runtime would count as silence and eventually alarm
+    // about a feature nobody enabled. So a test of the pass has to say the
+    // sandbox is available, which is also the state it is about.
     const mitRuntime = async (script, fn) => {
       const shim = join(sandkasten, `runtime-${Math.random().toString(36).slice(2)}.sh`)
       writeFileSync(shim, script)
       chmodSync(shim, 0o755)
       const alt = process.env.FREILAUF_SANDBOX_RUNTIME_BIN
       process.env.FREILAUF_SANDBOX_RUNTIME_BIN = shim
+      lcSetSetting('sandbox_mode', 'available')
       _resetDockerSilence()
       try { return await fn() } finally {
         _resetDockerSilence()
+        lcSetSetting('sandbox_mode', '')
         if (alt === undefined) delete process.env.FREILAUF_SANDBOX_RUNTIME_BIN
         else process.env.FREILAUF_SANDBOX_RUNTIME_BIN = alt
       }
@@ -8630,6 +8638,27 @@ process.stdout.write(JSON.stringify(out))
         gleich(r.verdict, 'no_daemon', 'a machine without Docker is the ordinary case')
         gleich(r.acted.length, 0, 'and nothing is reaped on the strength of it either')
       })
+    })
+
+    await pruefe('a hub that never sandboxed anything does not ask the daemon at all', async () => {
+      const { existsSync: lcExists } = await import('node:fs')
+      const { db: lcDb } = await import('../server/db.mjs')
+      // The precondition IS the case under test: no mode, no sandboxed run.
+      lcDb.exec(`DELETE FROM runs WHERE sandbox=1`)
+      lcSetSetting('sandbox_mode', '')
+      const shim = join(sandkasten, 'runtime-never.sh')
+      writeFileSync(shim, '#!/bin/sh\necho "$@" >> "$0.log"\nexit 1\n')
+      chmodSync(shim, 0o755)
+      const alt = process.env.FREILAUF_SANDBOX_RUNTIME_BIN
+      process.env.FREILAUF_SANDBOX_RUNTIME_BIN = shim
+      try {
+        const r = await reconcileContainers()
+        gleich(r.verdict, 'not_in_use', 'the sandbox is off and no run ever used it')
+        falsch(lcExists(`${shim}.log`), 'and the runtime was never invoked — no subprocess per watcher pass')
+      } finally {
+        if (alt === undefined) delete process.env.FREILAUF_SANDBOX_RUNTIME_BIN
+        else process.env.FREILAUF_SANDBOX_RUNTIME_BIN = alt
+      }
     })
 
     // ---- the orphan table -------------------------------------------------

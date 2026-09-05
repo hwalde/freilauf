@@ -41,6 +41,8 @@
 //   containers.json  the fake daemon's table: name → { state, labels, … }
 //   networks.json    the same for networks
 //   created.txt      every container/network name this shim created, for cleanup
+//   hooks/<verb>     an executable run BEFORE the answer, with the whole argv —
+//                    the witness, for ordering questions that span two processes
 //
 // An answer line is one of:
 //   ok                     exit 0, no output

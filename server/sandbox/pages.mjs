@@ -57,15 +57,36 @@ function pick(m, names) {
  * daemon, because from a page's point of view they are the same fact.
  */
 export async function runtimeState() {
-  const rt = await mod('runtime')
-  const info = pick(rt, ['runtimeInfo'])
-  if (!info) return { available: false, reason: 'runtime module not installed', runtimes: [] }
+  // The facade's own discovery, not `runtimeInfo()` directly: it is the answer
+  // the START decision uses, and a page that asked a different question could
+  // offer a setting a run would then refuse to honour. It also honours
+  // `FREILAUF_SANDBOX_OFF`, which `runtimeInfo()` deliberately does not — that
+  // switch is about the HUB, not about what is installed on the machine.
+  const m = await mod('index')
+  const refresh = pick(m, ['refreshSandboxAvailability'])
+  if (!refresh) return { available: false, reason: 'sandbox.reason.no_runtime_module', runtimes: [] }
   try {
-    const s = setting('sandbox_runtime')
-    return { runtimes: [], ...(await info(s || null)) }
+    return { runtimes: [], ...(await refresh()) }
   } catch (err) {
     return { available: false, reason: String(err?.message ?? err), runtimes: [] }
   }
+}
+
+/**
+ * The discovery's `reason` as something a person can read.
+ *
+ * It is two kinds of thing: an i18n key from the hub's own answer
+ * ('sandbox.reason.switched_off') and a bare message from the runtime probe
+ * ('unsupported', a daemon's error text). `t()` hands back the key it does not
+ * know, and a key printed at somebody is worse than saying nothing — so a
+ * dotted string that has no translation prints as nothing at all.
+ */
+export function reasonText(reason) {
+  const raw = String(reason ?? '').trim()
+  if (raw === '') return ''
+  const text = t(raw)
+  if (text !== raw) return text
+  return raw.includes('.') && !raw.includes(' ') ? '' : raw
 }
 
 // ------------------------------------------------------- the hub's policy ----
@@ -650,7 +671,7 @@ export async function pageSandboxSettings(req, res, url) {
            ${state.runtimes?.length ? `<li><span class="k">${e(t('sandbox.settings.runtimes'))}</span> ${e(state.runtimes.join(', '))}</li>` : ''}
          </ul>`
       : `<p class="warn">${e(t('sandbox.page.unavailable'))}</p>
-         <p class="dim">${e(t('sandbox.page.install_hint'))}${state.reason ? ` (${e(state.reason)})` : ''}</p>`}
+         <p class="dim">${e(t('sandbox.page.install_hint'))}${reasonText(state.reason) ? ` (${e(reasonText(state.reason))})` : ''}</p>`}
     <p class="dim"><a href="/settings/sandbox">${e(t('sandbox.action.check_again'))}</a></p>
   </fieldset>`
 
@@ -734,7 +755,7 @@ export async function sandboxSettingsSave(req, res, url, formBody) {
     const wanted = HUB_MODES.includes(b.sandbox_mode) ? b.sandbox_mode : 'off'
     if (wanted !== 'off') {
       const state = await runtimeState()
-      if (!state.available) problems.push(t('sandbox.settings.err_no_runtime', { reason: state.reason ?? '' }))
+      if (!state.available) problems.push(t('sandbox.settings.err_no_runtime', { reason: reasonText(state.reason) }))
     }
   }
   for (const key of ['sandbox_lock', 'sandbox_allowed_mount_roots']) {
@@ -833,10 +854,36 @@ async function applyPolicy(run, patch, by) {
     // "undefined" is success, not silence, and a caller that read it as failure
     // would report a change that really happened as a refusal.
     if (r === undefined || r === null) return { ok: true }
-    return r.ok === false ? { ok: false, error: String(r.error ?? '') } : { ok: true, ...r }
+    if (r.ok === false) return { ok: false, error: String(r.error || t('sandbox.page.err_policy_failed')) }
+    return { ok: true, ...r }
   } catch (err) {
     return { ok: false, error: String(err?.message ?? err) }
   }
+}
+
+/**
+ * Add a host to the allow list stored at one layer — the run's own overrides or
+ * the repository's.
+ *
+ * The layer is the SCOPE of the button, and it is written here rather than
+ * inside `changePolicy()`: that function's job is the running container, and
+ * where a decision is remembered is a question about the form's layers. The two
+ * halves are deliberately both done — persisting without applying would leave
+ * the agent hitting the same wall until it is restarted, and applying without
+ * persisting would lose the decision at the next resume.
+ */
+function rememberAllow(scope, run, host) {
+  const table = scope === 'repo' ? 'repos' : 'runs'
+  const id = scope === 'repo' ? run.repo_id : run.id
+  if (id == null) return
+  let doc = {}
+  try {
+    doc = JSON.parse(db.prepare(`SELECT sandbox_overrides AS o FROM ${table} WHERE id=?`).get(id)?.o || '{}')
+  } catch { doc = {} }
+  const allow = Array.isArray(doc?.network?.allow) ? [...doc.network.allow] : []
+  if (!allow.includes(host)) allow.push(host)
+  doc.network = { ...(doc.network ?? {}), allow }
+  db.prepare(`UPDATE ${table} SET sandbox_overrides=? WHERE id=?`).run(JSON.stringify(doc), id)
 }
 
 /** "Allow for this run" / "Allow for this repo". */
@@ -845,7 +892,14 @@ export async function sandboxAllow(run, host, scope) {
   if (pathLocked('network.allow', p.lock)) return { ok: false, error: t('sandbox.page.locked_by_hub') }
   const clean = String(host ?? '').trim()
   if (!clean) return { ok: false, error: t('sandbox.page.err_host_missing') }
-  return applyPolicy(run, { scope: scope === 'repo' ? 'repo' : 'run', network: { allow: [clean] } }, 'user')
+  const where = scope === 'repo' ? 'repo' : 'run'
+  rememberAllow(where, run, clean)
+  // The patch replaces the list rather than appending to it — a spec patch is
+  // merged field by field and an array IS a field, so the whole new list has to
+  // travel or everything already on it would silently fall off.
+  const current = runSpec(run).network?.allow ?? []
+  const next = current.includes(clean) ? current : [...current, clean]
+  return applyPolicy(run, { network: { allow: next } }, 'user')
 }
 
 /**
@@ -871,7 +925,8 @@ export async function sandboxReconfigure(run, overridesText) {
     lock: p.lock, allowedMountRoots: p.allowedMountRoots,
   })
   if (problems.length) return { ok: false, error: problems.map(pr => t(pr.key, pr.params)).join(' · ') }
-  return applyPolicy(run, { scope: 'run', ...overrides }, 'user')
+  db.prepare('UPDATE runs SET sandbox_overrides=? WHERE id=?').run(JSON.stringify(overrides), run.id)
+  return applyPolicy(run, overrides, 'user')
 }
 
 /**
@@ -880,17 +935,17 @@ export async function sandboxReconfigure(run, overridesText) {
  * own history says a human took the walls down even if the resume path fails
  * afterwards.
  */
-export async function sandboxBypass(run) {
+export async function sandboxBypass(run, reason = '') {
   const p = hubPolicy()
   if (!p.allowBypass) return { ok: false, error: t('sandbox.page.bypass_forbidden') }
-  if (p.mode === 'required') return { ok: false, error: t('sandbox.problem.required') }
+  if (p.mode === 'required') return { ok: false, error: t('sandbox.problem.required', { layer: 'hub' }) }
   const m = await mod('index')
-  const fn = pick(m, ['changePolicy'])
+  const fn = pick(m, ['continueWithoutSandbox'])
   if (!fn) return { ok: false, error: t('sandbox.page.err_policy_unavailable') }
   try {
-    const r = await fn(run, { scope: 'run', bypass: true }, 'user')
-    if (r && r.ok === false) return { ok: false, error: String(r.error ?? '') }
-    return { ok: true }
+    const r = await fn(run.id, { by: 'user', reason })
+    if (r && r.ok === false) return { ok: false, error: String(r.error || t('sandbox.page.err_policy_failed')) }
+    return { ok: true, ...(r ?? {}) }
   } catch (err) {
     return { ok: false, error: String(err?.message ?? err) }
   }

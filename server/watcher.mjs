@@ -3,7 +3,7 @@
 // cost estimation, auto-close of finished sessions (server/sessions.mjs), worktree cleanup.
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
-import db, { getRepo, getRun, addEvent, announceRun, allSettings } from './db.mjs'
+import db, { getRepo, getRun, addEvent, announceRun, allSettings, getSetting } from './db.mjs'
 import { RUNS_DIR, sh, parseDbUtc, kurzid } from './util.mjs'
 import { notify, notifyOnFor } from './notify.mjs'
 import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd, followUpHeader, clearAnomalies } from './reports.mjs'
@@ -1035,16 +1035,38 @@ function sessionOpenFor(run) {
 }
 
 /**
+ * Could this hub own a container at all? Either the sandbox is switched on now,
+ * or a run in the database once ran in one — a run that was sandboxed keeps its
+ * flag, so a hub whose operator switched the feature off still reconciles what
+ * it left behind.
+ */
+export function sandboxInUse() {
+  const mode = String(getSetting('sandbox_mode') ?? '').trim()
+  if (mode && mode !== 'off') return true
+  return !!db.prepare(`SELECT 1 FROM runs WHERE sandbox=1 LIMIT 1`).get()
+}
+
+/**
  * The reconciliation pass: every container this hub owns, against the runs
  * table. Two directions, because a mismatch has two shapes — a container with
  * no live run behind it, and a run that says sandboxed with no container in
  * front of it.
  */
-export async function reconcileContainers(nowMs = Date.now()) {
+export async function reconcileContainers(hubId = null, nowMs = Date.now()) {
+  // Nothing to reconcile, and nothing to ask. A hub that has never launched a
+  // sandboxed run and has the sandbox switched off owns no containers by
+  // construction — shelling out to a daemon every 30 seconds to be told so
+  // costs a subprocess per pass, and on a machine with no runtime at all it
+  // would count as silence and eventually raise `docker_unreachable` about a
+  // feature nobody switched on. The verdict rule protects live agents; this
+  // guard protects the installations that will never have one.
+  if (!sandboxInUse()) return { verdict: 'not_in_use', acted: [] }
   const rt = await sandboxRuntime()
   if (typeof rt?.listOwned !== 'function') return { verdict: 'no_runtime', acted: [] }
+  const id = hubId ?? await sandboxHubId()
+  if (id == null) return { verdict: 'no_runtime', acted: [] }
 
-  const owned = await rt.listOwned(sandboxHubId())
+  const owned = await rt.listOwned(id)
   if (owned.verdict !== 'ok') {
     // 'no_daemon' is the ordinary state of a machine without Docker and says
     // nothing worth an alarm; only an answer the hub could not get at all is
