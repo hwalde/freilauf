@@ -59,7 +59,6 @@ a day on which nothing was released.
 - `setup/03-install-services.sh` runs `loginctl enable-linger`, so the hub and
   the tmux server start at boot and not at the first login; `SETUP_WITH_AGENT.md`
   says what to do about OS updates and reboots.
-
 - **Marking text in the browser terminal copies it to the clipboard.** Drag
   across a live session and the selection is in your system clipboard the
   moment you let go, and the marking is cleared — the same gesture a terminal
