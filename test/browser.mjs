@@ -67,6 +67,9 @@ async function aufraeumen() {
 }
 process.on('SIGINT', async () => { await aufraeumen(); process.exit(130) })
 process.on('SIGTERM', async () => { await aufraeumen(); process.exit(143) })
+// See test/e2e.mjs: a suite run from inside a tmux session dies of SIGHUP, and
+// node's default for it skips every handler above.
+process.on('SIGHUP', async () => { await aufraeumen(); process.exit(129) })
 
 // ---------------------------------------------------------------- page helper
 /**

@@ -6848,6 +6848,60 @@ try {
     }
   })
 
+  gruppe('The test sandbox takes back what a killed suite left standing')
+
+  await pruefe('a sandbox whose owner is dead is swept, a live one never is', async () => {
+    const { sandkastenVerwaist } = await import('./sandkasten.mjs')
+    const jetzt = Date.parse('2026-09-05T12:00:00Z')
+    const lebt = (pid) => pid === 4711
+    // The one answer that must never be wrong: a running suite keeps its sessions.
+    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-running', pid: 4711, mtimeMs: jetzt }, { nowMs: jetzt, lebt }),
+      'a suite that is still running')
+    wahr(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-dead', pid: 4712, mtimeMs: jetzt }, { nowMs: jetzt, lebt }),
+      'its owner is gone, so the sessions are garbage')
+    // Freshness does not save a dead owner: SIGKILL is instant, and the directory's
+    // mtime is then seconds old while every session in it is already orphaned.
+    wahr(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-dead', pid: 4712, mtimeMs: jetzt - 1000 }, { nowMs: jetzt, lebt }),
+      'a freshly killed suite too')
+    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-self', pid: 4712, mtimeMs: jetzt }, { nowMs: jetzt, eigenerPfad: '/tmp/Freilauf-e2e-self', lebt }),
+      'and never our own directory')
+  })
+
+  await pruefe('a sandbox kept with --keep is never swept', async () => {
+    const { sandkastenVerwaist, VERWAIST_ALTER_MS } = await import('./sandkasten.mjs')
+    const jetzt = Date.parse('2026-09-05T12:00:00Z')
+    // Its owner IS dead — the suite finished — and it is old on purpose. Without
+    // the marker both rules above would delete the state somebody kept to read.
+    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-keep', pid: 4712, mtimeMs: jetzt, behalten: true },
+      { nowMs: jetzt, lebt: () => false }), 'dead owner, but kept on purpose')
+    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-keep', pid: null, mtimeMs: jetzt - VERWAIST_ALTER_MS * 10, behalten: true },
+      { nowMs: jetzt }), 'old, but kept on purpose')
+  })
+
+  await pruefe('without an owner marker only age decides', async () => {
+    const { sandkastenVerwaist, VERWAIST_ALTER_MS } = await import('./sandkasten.mjs')
+    const jetzt = Date.parse('2026-09-05T12:00:00Z')
+    // A sandbox from before the marker existed: a live suite touches its directory
+    // constantly, so recent mtime is the only thing standing between it and a sweep.
+    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-nomarker', pid: null, mtimeMs: jetzt - 60_000 }, { nowMs: jetzt }),
+      'busy a minute ago — could be running')
+    wahr(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-nomarker', pid: null, mtimeMs: jetzt - VERWAIST_ALTER_MS - 1 }, { nowMs: jetzt }),
+      'untouched for hours — over')
+    // A directory we could not stat says nothing, and "says nothing" must not
+    // become "delete it" — the Number('') family of traps.
+    falsch(sandkastenVerwaist({ pfad: '/tmp/Freilauf-e2e-nomarker', pid: null, mtimeMs: NaN }, { nowMs: jetzt }),
+      'no readable age is no evidence')
+  })
+
+  await pruefe('both suites answer SIGHUP, which is what a closed tmux session sends', async () => {
+    for (const datei of ['e2e.mjs', 'browser.mjs']) {
+      const src = readFileSync(new URL(`./${datei}`, import.meta.url), 'utf8')
+      for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+        wahr(src.includes(`process.on('${sig}'`), `${datei}: ${sig}`)
+      }
+    }
+  })
+
   await pruefe('a session name from before the rename still opens its terminal', async () => {
     // runs.tmux_session stores the NAME, so an old run keeps pointing at cc-…;
     // the terminal route validates that name against a pattern before attaching.
