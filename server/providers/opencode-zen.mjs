@@ -45,6 +45,13 @@ const plugin = {
    * unauthenticated exactly as it does outside the sandbox.
    */
   sandbox: {
+    // Bare, and not the `.opencode.ai` the opencode HARNESS declares: Zen is
+    // served from the apex (`opencode.ai/zen/v1/…`, every call above), while the
+    // subdomain that made the harness dotted — `models.opencode.ai`, the CLI's
+    // model catalog — is the CLI's traffic and not this provider's. A run that
+    // makes both requests carries both declarations, because the presets are a
+    // set; a run on hermes plus Zen has no business reaching a catalog it never
+    // asks for.
     domains: ['opencode.ai'],
     credentials: [{
       key: 'api_key',

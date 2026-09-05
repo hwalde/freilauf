@@ -348,6 +348,35 @@ function reasonText(verdict, extra = {}) {
  * A header value NEVER enters it. A proxy log that carries an Authorization
  * header is a credential store with a different file name, and this one is
  * written into the run directory the operator hands around.
+ *
+ * `phase` IS THE FIELD THAT MAKES A TUNNEL VISIBLE WHILE IT IS OPEN, and it was
+ * added because the audit was silent about the traffic that matters most. An
+ * allowed CONNECT used to be recorded once, in `upstream.on('close')` — so the
+ * agent's keep-alive tunnel to its model provider, which lives for the whole
+ * run and closes at teardown, appeared NOWHERE in `egress.jsonl` until the run
+ * was over, and not at all if the hub was killed first. Measured on the first
+ * end-to-end fenced run (2026-09-05): four lines, three denials and one retry,
+ * and `openrouter.ai` — the one host the run actually talked to — in none of
+ * them. The denial path was always immediate, so the SECURITY record was
+ * intact; the TRAFFIC record was not, and "did this run reach its provider, and
+ * how much" is the first question an auditor asks.
+ *
+ * So a tunnel writes two lines and not one:
+ *
+ *   `open`   at the moment it is established, with the time it took to connect
+ *            and no byte counts — they do not exist yet, and a line per packet
+ *            is a log nobody can read.
+ *   `close`  when it ends, with `bytes_in`/`bytes_out` and the tunnel's whole
+ *            lifetime as `duration_ms`.
+ *
+ * Both, rather than carrying the bytes onto the open line: the counts are only
+ * known at the end, and a single line written at the end is exactly the silence
+ * this fixes. Two lines pair on `at` + `host` + `port` and read as a span; an
+ * unpaired `open` is a tunnel that was still standing when the record stopped,
+ * which is a fact worth having rather than a gap.
+ *
+ * `null` for everything else — a plain HTTP request and a denial are one event
+ * and have no phase — so every line iron-proxy ever wrote reads unchanged.
  */
 export function auditLine(fields) {
   return JSON.stringify({
@@ -359,6 +388,7 @@ export function auditLine(fields) {
     method: fields.method ?? null,
     path: fields.path ?? null,          // a CONNECT has none — null, never ''
     action: fields.action ?? 'deny',
+    phase: fields.phase ?? null,        // 'open' | 'close' for a tunnel, else null
     status_code: fields.status ?? null,
     duration_ms: Math.max(0, Math.round(fields.durationMs ?? 0)),
     bytes_in: fields.bytesIn ?? 0,
@@ -593,7 +623,10 @@ function countBlocked(map, host) {
 }
 
 function record(handle, fields) {
-  handle.requests++
+  // A tunnel writes two LINES and is one REQUEST: the `close` line is the same
+  // CONNECT reaching its end, and counting it again would make this number say
+  // twice as much traffic went through as did.
+  if (fields.phase !== 'close') handle.requests++
   if (handle.audit) { try { handle.audit.write(auditLine({ ...fields, run: handle.runId }) + '\n') } catch {} }
 }
 
@@ -699,6 +732,23 @@ async function onConnect(handle, req, clientSocket, head) {
     try {
       clientSocket.write('HTTP/1.1 200 Connection Established\r\nProxy-Agent: Freilauf\r\n\r\n')
     } catch {}
+    // THE TUNNEL IS RECORDED HERE, not only when it ends. A keep-alive
+    // connection to a model provider outlives the whole run, so a record
+    // written at `close` is a record written at teardown — see `auditLine()`
+    // for the measurement. `at` is the moment the CONNECT arrived, so the
+    // `open` line pairs with the `close` line below on `at`+`host`+`port`.
+    record(handle, {
+      at, host, port, method: 'CONNECT', path: null, phase: 'open',
+      action: d.verdict.action, status: 200, durationMs: Date.now() - at,
+    })
+    // An audit-only "would have been denied" is announced here too, for the
+    // same reason: the operator rolling an allowlist out wants to hear about
+    // the host while the run is still going, not when its tunnel is torn down.
+    // Announced ONCE per tunnel — the close path no longer repeats it, or one
+    // connection would count as two hosts turned away.
+    if (d.verdict.action === 'would_deny') {
+      announceBlocked(handle, { host, method: 'CONNECT', action: 'would_deny', at })
+    }
     if (head?.length) upstream.write(head)
     clientSocket.pipe(upstream)
     upstream.pipe(clientSocket)
@@ -715,21 +765,27 @@ async function onConnect(handle, req, clientSocket, head) {
   const shut = () => { try { upstream.destroy() } catch {}; try { clientSocket.destroy() } catch {} }
   clientSocket.on('close', shut)
   clientSocket.on('error', shut)
+  // A tunnel that never came up writes no `close` — `upstream.on('error')`
+  // below is its one line — so the flag keeps the pair honest in both
+  // directions: a `close` is only written where an `open` was.
+  let opened = false
+  upstream.on('connect', () => { opened = true })
   upstream.on('close', () => {
-    record(handle, {
-      at, host, port, method: 'CONNECT', path: null,
-      action: d.verdict.action, status: 200, durationMs: Date.now() - at, bytesIn, bytesOut,
-    })
-    if (d.verdict.action === 'would_deny') {
-      announceBlocked(handle, { host, method: 'CONNECT', action: 'would_deny', at })
+    if (opened) {
+      record(handle, {
+        at, host, port, method: 'CONNECT', path: null, phase: 'close',
+        action: d.verdict.action, status: 200, durationMs: Date.now() - at, bytesIn, bytesOut,
+      })
     }
     shut()
   })
   upstream.on('error', () => {
     record(handle, {
-      at, host, port, method: 'CONNECT', path: null, action: d.verdict.action,
+      at, host, port, method: 'CONNECT', path: null, phase: opened ? 'close' : null,
+      action: d.verdict.action,
       status: 502, durationMs: Date.now() - at, bytesIn, bytesOut, rejectedBy: 'upstream',
     })
+    opened = false      // the error line IS this tunnel's close line
     shut()
   })
 }

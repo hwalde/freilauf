@@ -624,7 +624,13 @@ Upstream deny CIDRs default to loopback, link-local, RFC 1918, IPv6 ULA and the
 cloud metadata addresses — the SSRF fence a company would otherwise have to write.
 Every request logs `host, method, path, action, status_code, duration_ms,
 request_transforms[…]` including which secret was swapped in which header; rejected
-requests carry `rejected_by`. Known limits (from hermes' integration notes):
+requests carry `rejected_by`. **The implementation adds `phase`** (`open` /
+`close` / `null`), because a tunnel writes twice: once when it is established and
+once when it ends with its byte counts. Only the second line existed at first,
+and a keep-alive tunnel that lives for a whole run closes at teardown — so a run's
+own model provider appeared nowhere in its egress log [measured]. The security
+record was intact (a denial is written at once); the traffic record was not.
+Known limits (from hermes' integration notes):
 signature-based auth (AWS SigV4, GCP OAuth) bypasses header substitution; a Node
 process can bypass the CA bundle with raw sockets (mitigated by `NODE_OPTIONS=--use-openssl-ca`);
 one bind per daemon. That last one is why §7.5 runs **one proxy container per

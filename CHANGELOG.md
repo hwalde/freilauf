@@ -20,6 +20,16 @@ a day on which nothing was released.
 
 ### Added
 
+- **A coding agent has now worked behind an enforced allowlist.** opencode in a
+  container on a rootless daemon: a host outside the list was refused with a 403,
+  the refusal became a `sandbox_blocked` incident with the three buttons, allowing
+  the host for that run took effect **on the agent's very next attempt — no
+  restart, same session, same container** — and the work was merged. Denied
+  17:55:54, allowed 17:56:00, through at 17:56:39.
+- **An allowed tunnel is recorded when it opens, not only when it closes.** A
+  keep-alive connection to a run's model provider lives as long as the run, so
+  the old close-only line meant a run's own provider appeared nowhere in its
+  egress log. Both lines carry a `phase` field and pair into a span.
 - **A sandboxed run can have an enforced allowlist on a rootless daemon.** This
   was the sandbox's largest documented limit: the built-in egress proxy was a
   listener inside the hub process, a rootless daemon keeps the run's network in
@@ -316,6 +326,19 @@ a day on which nothing was released.
   a new one is refused in the overrides form as an unknown key.
 
 ### Fixed
+
+- **opencode's own model catalog was blocked on every sandboxed opencode run.**
+  The harness declared `opencode.ai`, and a bare domain deliberately does not
+  imply its subdomains — so `models.opencode.ai` was refused within three seconds
+  of every launch. The declarations now say `.opencode.ai` where a vendor really
+  serves from subdomains; cursor's and the package-registry preset were corrected
+  the same way.
+- **The blocked-hosts alarm no longer goes red about the operator's own preset
+  gaps.** A host counts toward the "several distinct hosts" escalation only where
+  the agent was demonstrably at work when it was turned away — never before its
+  first turn, never for a host it went on working past. Silence since a denial is
+  still judged against every denial, so a provider missing from the allowlist is
+  still caught.
 
 - **The first host a sandboxed run was refused could have taken the whole hub
   down.** The egress proxy answered a denied CONNECT with its 403 and closed the

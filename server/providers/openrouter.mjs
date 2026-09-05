@@ -113,6 +113,11 @@ const plugin = {
    * a reading of the code rather than a guess.
    */
   sandbox: {
+    // Bare, deliberately: `hostGlobMatch()` reads that as the apex and nothing
+    // under it, and the apex is exactly where every call above goes
+    // (`openrouter.ai/api/v1/…`). The subdomains that exist belong to the
+    // website's sign-in, not to the API [measured 2026-09-05], so a dotted form
+    // would widen the allowlist for traffic a run never makes.
     domains: ['openrouter.ai'],
     credentials: [{
       key: 'api_key',

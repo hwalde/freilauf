@@ -157,19 +157,44 @@ const plugin = {
     image: { dockerfile: 'sandbox/images/cursor.Dockerfile', args: { CURSOR_VERSION: '2026.09.02-c22c1a3' } },
 
     // Cursor's own enterprise network list
-    // (https://cursor.com/docs/enterprise/network-configuration), verbatim.
+    // (https://cursor.com/docs/enterprise/network-configuration).
+    //
+    // READ AGAINST `hostGlobMatch()`, not transcribed. That page carries three
+    // lists — a recommended wildcard set (`*.cursor.sh`, `*.cursor-cdn.com`,
+    // `*.cursorapi.com`), an SSL-inspection exclusion set, and an enumerated
+    // fallback "if your firewall mandates granular subdomain allowlists without
+    // wildcards" — and this declaration is the granular one. In presets.mjs a
+    // bare domain means THAT host and nothing else, so wherever the vendor's own
+    // granular list names subdomains of an entry, the entry has to be dotted or
+    // the subdomains would be denied by a line that reads as if it allowed them
+    // (the failure measured on opencode's `models.opencode.ai`, 2026-09-05).
+    // Three entries earn the dot, and only those three:
+    //
+    //   `.api5.cursor.sh`         the vendor's NAL section names six more —
+    //                             agent, agentn, agent.us, agentn.us,
+    //                             agent.global, agentn.global — of which this
+    //                             list carried exactly one.
+    //   `.authentication.cursor.sh`  `prod.authentication.cursor.sh` is listed
+    //                             next to the apex.
+    //   `.cursor-cdn.com`         the wildcard list says `*.cursor-cdn.com`; a
+    //                             CDN that serves only its apex is not one.
+    //
+    // The rest stay bare because the vendor enumerates them as leaves and
+    // nothing under them is documented or resolves [measured 2026-09-05:
+    // no subdomain of `downloads.cursor.com` or `marketplace.cursorapi.com`].
+    // `*.gcpp.cursor.sh` stays a subdomain-only wildcard: `gcpp.cursor.sh`
+    // itself does not resolve.
     domains: [
       'api2.cursor.sh',
       'api3.cursor.sh',
       'api4.cursor.sh',
-      'api5.cursor.sh',
-      'agent.api5.cursor.sh',
+      '.api5.cursor.sh',
       'repo42.cursor.sh',
       '*.gcpp.cursor.sh',
-      'authentication.cursor.sh',
+      '.authentication.cursor.sh',
       'marketplace.cursorapi.com',
       'downloads.cursor.com',
-      'cursor-cdn.com',
+      '.cursor-cdn.com',
     ],
 
     // No cursor-specific auto-update or telemetry switch is documented; the

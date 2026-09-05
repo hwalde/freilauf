@@ -42,12 +42,14 @@ export const PACKAGE_REGISTRIES = [
   'pypi.org', 'files.pythonhosted.org',
   // Go
   'proxy.golang.org', 'sum.golang.org',
-  // Rust
-  'crates.io', 'static.crates.io',
+  // Rust — `index.crates.io` is cargo's sparse index and is a HOST of its own,
+  // not something `crates.io` reaches (see `hostGlobMatch` below: a bare domain
+  // never implies a subdomain).
+  'crates.io', 'static.crates.io', 'index.crates.io',
   // JVM
   'repo1.maven.org', 'plugins.gradle.org',
-  // Ruby
-  'rubygems.org',
+  // Ruby — same rule: bundler's compact index lives on `index.rubygems.org`.
+  'rubygems.org', 'index.rubygems.org',
   // the distribution's own packages
   'deb.debian.org', 'archive.ubuntu.com', 'security.ubuntu.com',
 ]

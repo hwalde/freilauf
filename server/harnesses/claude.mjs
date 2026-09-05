@@ -214,6 +214,17 @@ const plugin = {
     // the sixth one there and is deliberately NOT here: it belongs to the
     // `package-registries` preset, and the CLI itself is pinned in the image
     // rather than installed at run time.
+    //
+    // EVERY ENTRY STAYS BARE, and that is a reading of the vendor's page rather
+    // than an oversight. `hostGlobMatch()` gives a bare domain the exact host
+    // and nothing under it (presets.mjs), and this page is written the same way:
+    // it enumerates leaves — `downloads.claude.ai` and `platform.claude.com` sit
+    // in the table NEXT TO `claude.ai` and `claude.com` — and its only sentence
+    // about subdomains says the opposite of an implication, that allowing
+    // `claude.ai` does not reach the `*.claudeusercontent.com` origins. So a
+    // dotted form here would widen the allowlist past anything the vendor asks
+    // for; the sibling declarations that ARE dotted (opencode, cursor) are the
+    // ones whose vendors name subdomains under an entry they also list.
     domains: [
       'api.anthropic.com',
       'claude.ai',

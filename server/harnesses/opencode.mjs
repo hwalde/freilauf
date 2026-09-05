@@ -198,7 +198,20 @@ const plugin = {
     // traffic goes to whichever provider the run picked, and that is the
     // `provider` preset's job — a harness must not have to list every vendor a
     // run might use.
-    domains: ['opencode.ai', 'models.dev'],
+    //
+    // `.opencode.ai`, NOT `opencode.ai`, and the dot is the whole entry:
+    // `hostGlobMatch()` reads a bare domain as that host and nothing else
+    // (presets.mjs — a rule that is right and stays), and opencode's CLI asks
+    // `models.opencode.ai` for its catalog seconds after it starts. Measured
+    // 2026-09-05 on the first end-to-end fenced run: denied within three
+    // seconds of launch, by a declaration that reads as if it had allowed it.
+    // Zen (`opencode.ai/zen/v1`) is on the apex, which the dotted form covers
+    // as well.
+    //
+    // `models.dev` stays bare deliberately: it is a single host — no subdomain
+    // of it resolves at all [measured 2026-09-05] — and widening a declaration
+    // past what the vendor serves is how an allowlist stops meaning anything.
+    domains: ['.opencode.ai', 'models.dev'],
 
     env: { OPENCODE_DISABLE_AUTOUPDATE: '1', DO_NOT_TRACK: '1' },
 

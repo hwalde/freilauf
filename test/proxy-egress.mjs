@@ -209,8 +209,13 @@ async function main() {
       const res = await proxyConnect(handle.port, `localhost:${tunPort}`, { send: 'ping' })
       gleich(res.status, 200, 'the tunnel is established')
       enthaelt(res.body, 'echo:ping', 'and bytes cross it in both directions')
-      // A tunnel's audit line carries its byte counts, so it is written when the
-      // tunnel ENDS, not when it opens — the wait is the shape of the fact.
+      // A tunnel writes TWO lines: `phase: 'open'` the moment it is established,
+      // and `phase: 'close'` with the byte counts when it ends. It used to write
+      // only the second, and a keep-alive tunnel that lived for a whole run then
+      // closed at teardown — so a run's own model provider appeared nowhere in
+      // its egress log, and an auditor asking "did this run talk to its provider"
+      // got silence. This wait takes whichever line arrives first, which is the
+      // open one.
       await warteAuf(() => auditLines(runDir).some((l) => l.method === 'CONNECT' && l.action === 'allow'),
         { was: 'the finished tunnel is audited' })
       const line = auditLines(runDir).find((l) => l.method === 'CONNECT' && l.action === 'allow')

@@ -708,6 +708,120 @@ function retractSandboxDenied(runId, aktivMs, jetztMs = Date.now()) {
 const SANDBOX_BLOCK_HOSTS = Number(env('SANDBOX_BLOCKED_HOSTS') ?? 2) || 2
 
 /**
+ * The COARSE stand-in for "the agent has begun its own work", used only where
+ * the harness reports no attention state at all (`agent_working`, AGENTS.md
+ * "The agent's attention"): how long after a run's start a denial still belongs
+ * to the CLI's boot. All four built-in coding agents wire the hook, so this is
+ * the fallback and not the rule.
+ *
+ * 30 s is ten times the measured distance between a launch and opencode's own
+ * catalog and registry probes (3 s), and it is an order of magnitude short of
+ * the five-minute silence path that catches anything this window swallows —
+ * which is what makes a generous window cheap here and a stingy one pointless.
+ *
+ * `0` switches the fallback off; an unreadable value falls back to the default
+ * rather than to `Number('')`'s zero, which is the trap this repo has an entry
+ * for.
+ */
+const SANDBOX_STARTUP_MS = (() => {
+  const roh = env('SANDBOX_STARTUP_GRACE_MS')
+  if (roh == null || String(roh).trim() === '') return 30_000
+  const n = Number(roh)
+  return Number.isFinite(n) && n >= 0 ? n : 30_000
+})()
+
+/**
+ * WHICH DENIALS COUNT TOWARD THE DISTINCT-HOST ESCALATION.
+ *
+ * The rule in one sentence: **a host counts only where the agent was
+ * demonstrably at work when it was turned away — never before the agent began
+ * working at all, where a coding agent's CLI probes its own catalog, registry
+ * and update endpoint before it has read the task, and never for a host the
+ * agent went on working past.**
+ *
+ * It exists because the first end-to-end fenced run alarmed about the
+ * operator's own preset gaps. Three hosts were turned away; two of them —
+ * `models.opencode.ai` and `registry.npmjs.org` — were opencode's STARTUP,
+ * fired within three seconds of launch, needed by nothing the task asked for
+ * and shrugged off by the agent. The "2 distinct hosts" escalation went red at
+ * 17:55:44, **ten seconds before the only denial that mattered**, and it went
+ * red in the group that asks for hands. That is the cries-wolf failure this
+ * project has explicit rules about: an alarm that fires for a working agent
+ * spends the colour, and the next reader has no use for it.
+ *
+ * The threshold is NOT raised — two hosts really is a policy written for a
+ * different job. What changed is which denials are two hosts:
+ *
+ *   the coped veto, PER HOST   `agentCopedAfter()` is already the first line of
+ *                              bewerteLogTreffer() and of
+ *                              sandboxBlockedSchwere(), where it judges the
+ *                              LAST denial of all. Asked per host it says the
+ *                              same thing more precisely: a host the agent
+ *                              demonstrably worked past is history, and history
+ *                              must not be counted alongside a wall the agent
+ *                              is standing at right now.
+ *   before the agent began     a denial that lands before the agent has begun
+ *                              working is the CLI booting. The task has not
+ *                              been handed to a model yet; whatever the binary
+ *                              reaches for there is a statement about the
+ *                              operator's allowlist, not about this task. It is
+ *                              still recorded, still raises the (yellow)
+ *                              incident, still shows on the run's page with an
+ *                              Adopt button — it simply does not get to wake
+ *                              anybody.
+ *
+ *                              WHEN that was is not guessed: `agent_working` is
+ *                              the run's own record of the moment its CLI
+ *                              submitted the prompt (AGENTS.md, "The agent's
+ *                              attention" — claude's UserPromptSubmit, cursor's
+ *                              beforeSubmitPrompt, opencode's busy, hermes'
+ *                              pre_llm_call). `arbeitAbMs` is that event; the
+ *                              30-second window off the run's start is only the
+ *                              stand-in for a harness that reports no attention
+ *                              state at all.
+ *
+ * What this deliberately does NOT weaken is the OTHER red path. A genuinely
+ * fatal denial at second two — the model provider missing from the allowlist —
+ * leaves the agent unable to do anything at all, and the caller below judges
+ * silence against the FULL set of denials for exactly that reason: five minutes
+ * of nothing after a denial is red whenever it happened.
+ *
+ * Pure, so a test can hand it the timeline. `denials` is [{ host, atMs }].
+ */
+export function sandboxEscalationDenials(denials, { startMs = null, arbeitAbMs = null,
+  letzteAktivitaetMs = null, startGraceMs = SANDBOX_STARTUP_MS } = {}) {
+  const list = (denials ?? []).filter(d => String(d?.host ?? '').trim() && Number.isFinite(Number(d?.atMs)))
+  const letzteProHost = new Map()
+  for (const d of list) {
+    const at = Number(d.atMs)
+    if (!letzteProHost.has(d.host) || at > letzteProHost.get(d.host)) letzteProHost.set(d.host, at)
+  }
+  // `Number(null)` is 0 AND finite — the trap this repo has an entry for, and it
+  // bites twice here: a missing start would become the epoch and a missing
+  // `agent_working` would become "the agent began in 1970", either of which
+  // silently swallows every denial there is. Both are asked for null FIRST.
+  const zahl = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))
+  const start = zahl(startMs)
+  // The moment the agent began: its own word where the harness gives one, the
+  // coarse window off the run's start where it does not.
+  const arbeit = zahl(arbeitAbMs)
+  const grenze = arbeit != null ? arbeit
+    : (start != null && startGraceMs > 0 ? start + startGraceMs : null)
+  return list.filter((d) => {
+    const at = Number(d.atMs)
+    // The agent kept working after this host's last refusal: it coped.
+    if (agentCopedAfter(letzteAktivitaetMs, letzteProHost.get(d.host))) return false
+    // The CLI's own boot: an INTERVAL on the run's own timeline, from the start
+    // to the moment work began. A denial outside it is not classified by this
+    // rule — including one dated BEFORE the run started, which is data neither
+    // end of this can explain, and one on a run with no start time at all.
+    // Not knowing is never a licence to say less than the hub said before.
+    if (grenze != null && start != null && at >= start && at < grenze) return false
+    return true
+  })
+}
+
+/**
  * The proxy's denials, as something a human notices (§7.12.1).
  *
  * `server/sandbox/index.mjs` writes one `sandbox:blocked` event per host per ten
@@ -723,9 +837,15 @@ const SANDBOX_BLOCK_HOSTS = Number(env('SANDBOX_BLOCKED_HOSTS') ?? 2) || 2
  * incident's own `zuletzt_gesehen`, so a hub restarted between two passes picks
  * up where it left off and a resolved incident reopens on the next denial —
  * the auto-alarm principle, unchanged.
+ *
+ * WHAT MAY GO RED is narrower than what is RECORDED: see
+ * `sandboxEscalationDenials()` above and the two questions at the foot of this
+ * function. Every denial the proxy reports still lands in the incident, in the
+ * evidence and on the run's page; only the distinct-host escalation is asked of
+ * the denials the agent is demonstrably standing at.
  */
 export async function watchSandboxBlocks(jetztMs = Date.now()) {
-  const rows = db.prepare(`SELECT id, last_activity_at FROM runs
+  const rows = db.prepare(`SELECT id, started_at, last_activity_at FROM runs
                            WHERE sandbox=1 AND status IN ('running','waiting_help')`).all()
   for (const run of rows) {
     const evs = db.prepare(`SELECT ts, payload FROM events WHERE run_id=? AND kind='sandbox:blocked'
@@ -758,11 +878,41 @@ export async function watchSandboxBlocks(jetztMs = Date.now()) {
 
     const offen = offeneVorfaelle(run.id).find(v => v.typ === 'sandbox_blocked')
     if (!offen || offen.schwere !== 'gelb') continue
-    const schwere = sandboxBlockedSchwere(summary, { letzteAktivitaetMs: aktivMs, jetztMs,
-      hostSchwelle: SANDBOX_BLOCK_HOSTS })
-    if (schwere !== 'rot') continue
-    await vorfallEskalieren(offen.id, summary.hosts.length >= SANDBOX_BLOCK_HOSTS
-      ? `${summary.hosts.length} distinct hosts turned away`
+
+    // TWO QUESTIONS, DELIBERATELY ASKED OF DIFFERENT SETS (see
+    // sandboxEscalationDenials above).
+    //
+    // "Several distinct hosts" is a statement about the agent's work being
+    // walled in, so it is asked of the denials the agent is actually standing
+    // at: the CLI's boot-time probes and the hosts it already worked past are
+    // not this run's problem, and counting them turned a first fenced run red
+    // about the operator's own preset gaps.
+    //
+    // "Silence since the denial" is a statement about the run being dead, and
+    // that is true whenever the denial happened — a provider missing from the
+    // allowlist blocks a run at second two exactly as hard as at minute ten. So
+    // it is asked of EVERY denial, with the host path switched off (a threshold
+    // nothing can reach), and the two answers are ORed.
+    // The run's own record of the moment its CLI submitted the prompt — the
+    // FIRST one, because that is where the boot ends; later ones are follow-up
+    // turns. NULL for a harness that reports no attention state, and the pure
+    // function then falls back to its coarse window.
+    const arbeitEv = db.prepare(`SELECT ts FROM events WHERE run_id=? AND kind='agent_working'
+                                 ORDER BY id LIMIT 1`).get(run.id)
+    const zaehlend = sandboxDenialSummary(sandboxEscalationDenials(denials, {
+      startMs: run.started_at ? msVon(run.started_at) : null,
+      arbeitAbMs: arbeitEv ? msVon(arbeitEv.ts) : null,
+      letzteAktivitaetMs: aktivMs,
+    }))
+    const hostSchwere = zaehlend.hosts.length
+      ? sandboxBlockedSchwere(zaehlend, { letzteAktivitaetMs: aktivMs, jetztMs,
+        hostSchwelle: SANDBOX_BLOCK_HOSTS })
+      : 'gelb'
+    const stilleSchwere = sandboxBlockedSchwere(summary, { letzteAktivitaetMs: aktivMs, jetztMs,
+      hostSchwelle: Number.MAX_SAFE_INTEGER })
+    if (hostSchwere !== 'rot' && stilleSchwere !== 'rot') continue
+    await vorfallEskalieren(offen.id, hostSchwere === 'rot' && zaehlend.hosts.length >= SANDBOX_BLOCK_HOSTS
+      ? `${zaehlend.hosts.length} distinct hosts turned away`
       : 'no activity since the denial')
   }
 }

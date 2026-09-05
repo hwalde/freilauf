@@ -8552,6 +8552,132 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
     watcherTick = await sk.watcherVorbereiten({ sandbox: false })
   }
 
+  // =========================================================================
+  gruppe('Sandbox: the placement production uses, driven by the suite at last')
+  //
+  // THE GAP THIS CLOSES. `test/sandkasten.mjs` set `FREILAUF_SANDBOX_PROXY_BIND`
+  // and nothing else, and `proxyPlacement()` answers `'process'` for any bind at
+  // all — so every sandbox group above this one, on every machine, exercised the
+  // IN-PROCESS listener. Under a rootless daemon that is exactly the placement
+  // production does NOT take: the first end-to-end fenced run on this machine
+  // only came up after the bind was unset by hand. A suite that structurally
+  // cannot reach the production path is not covering it, and the two blockers
+  // that reached that run got past every green test for precisely that reason.
+  //
+  // The suite drives both now, and the placement is NAMED rather than implied
+  // (`sandbox: 'container'` vs `sandbox: true`, `placementOf()` in
+  // sandkasten.mjs). The resolution order itself — forced → bind → rootless →
+  // rootful — is pinned in test/unit.mjs, so a change that moved production onto
+  // the untested side would fail there rather than surface on a live run.
+  {
+    const shim = sk.docker
+    const wert = (argv, flag) => { const i = argv.indexOf(flag); return i < 0 ? null : argv[i + 1] }
+    const werte = (argv, flag) => argv.reduce((o, tok, i) => (tok === flag ? [...o, argv[i + 1]] : o), [])
+    const nutzlast = (id, kind) => {
+      const row = db.prepare('SELECT payload FROM events WHERE run_id=? AND kind=? ORDER BY id DESC LIMIT 1')
+        .get(id, kind)
+      try { return row?.payload ? JSON.parse(row.payload) : null } catch { return null }
+    }
+
+    let facade = null
+    try { facade = await import('../server/sandbox/index.mjs') } catch { facade = null }
+    const fehlt = facade ? null : 'server/sandbox/index.mjs is not written yet'
+
+    if (fehlt) uebersprungen('a sandboxed run puts its egress proxy in a container', fehlt)
+    else {
+      // ---- the production placement --------------------------------------
+      await hubStarten({ sandbox: 'container' })
+      watcherTick = await sk.watcherVorbereiten({ sandbox: 'container' })
+      sk.setzeEinstellung('sandbox_mode', 'available')
+      const runtimeMod = await import('../server/sandbox/runtime.mjs')
+      runtimeMod._runtimeInfoCacheReset()
+      shim.reset()
+      shim.mode('ok')
+      // The same image the container-path group taught the shim about, so the
+      // two halves of this suite describe one image rather than two.
+      const bilder = (() => {
+        try { return JSON.parse(readFileSync(join(shim.STATE, 'images.json'), 'utf8')) } catch { return {} }
+      })()
+      db.prepare('UPDATE repos SET sandbox_image=? WHERE id=?')
+        .run(Object.keys(bilder)[0] ?? 'freilauf/base:1', repoId)
+
+      let IM_CONTAINER = null
+      await pruefe('a sandboxed run puts its egress proxy in a container of its own', async () => {
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-Placement', sandbox: 'on' })
+        IM_CONTAINER = j.runId
+        await sessionMerken(IM_CONTAINER)
+        await warteAuf(() => !!nutzlast(IM_CONTAINER, 'sandbox:proxy_started'),
+          { was: 'the run reporting that its proxy came up' })
+
+        const proxyRun = shim.argvFor('run').find(a => a.includes('freilauf.role=proxy'))
+        wahr(!!proxyRun, `a proxy container was created (${shim.order().join(', ')})`)
+        gleich(wert(proxyRun, '--name'), `fl-proxy-${IM_CONTAINER}`,
+          'under the name the agent’s HTTPS_PROXY dials')
+        gleich(wert(proxyRun, '--network'), `fl-net-${IM_CONTAINER}`,
+          'on the run’s own internal network — not on the host')
+        // Its one leg out. Without this the proxy would be as walled in as the
+        // agent, and every request would fail as a DNS error.
+        wahr(shim.argvFor('network-connect').some(a => a.includes(`fl-proxy-${IM_CONTAINER}`)),
+          `and connected to a network that has a route out (${shim.order().join(', ')})`)
+      })
+
+      await pruefe('…and the agent is told to dial that container, never a host address', () => {
+        const start = nutzlast(IM_CONTAINER, 'sandbox:proxy_started')
+        gleich(start?.url, `http://fl-proxy-${IM_CONTAINER}:8080`,
+          'the recorded proxy URL is the container’s name')
+        falsch(String(start?.url ?? '').includes('127.0.0.1'),
+          'a loopback address here is the in-process placement, which a rootless daemon cannot reach')
+
+        // The AGENT's container is created by `fl-start` out of the spec, and
+        // this suite's fl-start is a stub — so the shim's log holds the proxy's
+        // `docker run` and not the agent's. What the hub really handed over is
+        // in the run's own `sandbox.json`, which is also what `restoreProxies()`
+        // reads back, and the argv builder is pure enough to be asked directly.
+        const gespeichert = JSON.parse(readFileSync(join(SB, 'runs', IM_CONTAINER, 'sandbox.json'), 'utf8'))
+        gleich(gespeichert?.ctx?.proxyUrl, `http://fl-proxy-${IM_CONTAINER}:8080`,
+          'and that is the URL frozen into the run’s spec file, where a restart reads it')
+        const { args } = runtimeMod.buildRunArgv(
+          { runtime: 'docker', image: { ref: 'x:1' }, network: { mode: 'allowlist' } },
+          { runId: IM_CONTAINER, network: `fl-net-${IM_CONTAINER}`, image: 'x:1',
+            workdir: '/w', home: '/h', proxyUrl: gespeichert.ctx.proxyUrl })
+        const umgebung = werte(args, '-e').filter(Boolean)
+        wahr(umgebung.some(e => e === `HTTPS_PROXY=http://fl-proxy-${IM_CONTAINER}:8080`),
+          `the agent’s HTTPS_PROXY names the proxy container (${umgebung.filter(e => /PROXY/i.test(e)).join(' ')})`)
+      })
+
+      try { await facade.teardownSandbox(db.prepare('SELECT * FROM runs WHERE id=?').get(IM_CONTAINER),
+        { reason: 'e2e', removeNetwork: true, force: true }) } catch {}
+      db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now') WHERE id=?`).run(IM_CONTAINER)
+
+      // ---- and the other one, from the same sandbox ------------------------
+      await hubStoppen()
+      await hubStarten({ sandbox: true })
+      watcherTick = await sk.watcherVorbereiten({ sandbox: true })
+      sk.setzeEinstellung('sandbox_mode', 'available')
+      runtimeMod._runtimeInfoCacheReset()
+      shim.reset()
+
+      await pruefe('the same suite still drives the in-process listener — both, not one', async () => {
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-Placement-Prozess', sandbox: 'on' })
+        await sessionMerken(j.runId)
+        await warteAuf(() => !!nutzlast(j.runId, 'sandbox:proxy_started'),
+          { was: 'the second run reporting its proxy' })
+        const start = nutzlast(j.runId, 'sandbox:proxy_started')
+        wahr(String(start?.url ?? '').includes('127.0.0.1'),
+          `this one is a listener in the hub process (${start?.url})`)
+        falsch(shim.argvFor('run').some(a => a.includes('freilauf.role=proxy')),
+          'and no proxy container was started for it')
+        try { await facade.teardownSandbox(db.prepare('SELECT * FROM runs WHERE id=?').get(j.runId),
+          { reason: 'e2e', removeNetwork: true, force: true }) } catch {}
+        db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+      })
+
+      sk.setzeEinstellung('sandbox_mode', 'off')
+      await hubStoppen()
+      watcherTick = await sk.watcherVorbereiten({ sandbox: false })
+    }
+  }
+
 } catch (err) {
   console.log(`\nAborted: ${err.stack}`)
   zaehler.fehler.push({ name: 'Test run', grund: err.message })

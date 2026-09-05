@@ -203,9 +203,37 @@ export function neuerSandkasten({ praefix = 'freilauf-test-', behalten = false }
     // own test/shims/docker stays generic on purpose — it is also the pane
     // command of a sandboxed run, started by tmux with an environment the hub
     // composed, and a shim that had to inherit its state path would find none.
+    //
+    // It also answers the ONE handshake a shimmed container cannot: the egress
+    // proxy in `placement: 'container'` is waited for by
+    // `startBuiltinContainer()` until `ready.json` appears in its out
+    // directory, and the shim starts no process that could write one — so
+    // without this, every container-placement launch would fail after twenty
+    // seconds with "the proxy container is not ready" and the placement the
+    // production path uses would stay untestable. The launcher recognises that
+    // container by the label the argv already carries (`freilauf.role=proxy`),
+    // finds the out directory in the `-v <host>:/var/freilauf/out` mount the
+    // hub itself wrote, and writes the marker the real proxy entry writes
+    // there. It is the shim standing in for the proxy process, exactly as
+    // `run` standing in for a container is what makes every other sandbox
+    // assertion hold — and it touches nothing when the label is absent.
     writeFileSync(DOCKER_BIN,
       `#!/usr/bin/env bash\nexport FL_DOCKER_STATE=${JSON.stringify(DOCKER_STATE)}\n`
-      + `exec ${JSON.stringify(join(PROJEKT, 'test', 'shims', 'docker'))} "$@"\n`)
+      + `${JSON.stringify(join(PROJEKT, 'test', 'shims', 'docker'))} "$@"\n`
+      + 'status=$?\n'
+      + 'if [ "$1" = "run" ]; then\n'
+      + '  proxy=0; out=""\n'
+      + '  for a in "$@"; do\n'
+      + '    case "$a" in\n'
+      + '      freilauf.role=proxy) proxy=1 ;;\n'
+      + '      *:/var/freilauf/out|*:/var/freilauf/out:*) out="${a%%:/var/freilauf/out*}" ;;\n'
+      + '    esac\n'
+      + '  done\n'
+      + '  if [ "$proxy" = 1 ] && [ -n "$out" ] && [ -d "$out" ]; then\n'
+      + '    printf \'{"ok":true,"shim":true}\\n\' > "$out/ready.json"\n'
+      + '  fi\n'
+      + 'fi\n'
+      + 'exit $status\n')
     chmodSync(DOCKER_BIN, 0o755)
     writeFileSync(join(DOCKER_STATE, 'calls.jsonl'), '')
     writeFileSync(join(DOCKER_STATE, 'created.txt'), '')
@@ -341,6 +369,29 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     return String(process.env.PATH ?? '').split(':').filter(p => p !== SHIM_DIR).join(':')
   }
 
+  /**
+   * WHICH PLACEMENT A SANDBOXED SUITE DRIVES — and why this is a parameter now.
+   *
+   * `sandbox: true` used to set `FREILAUF_SANDBOX_PROXY_BIND` and nothing else,
+   * and `proxyPlacement()` answers `'process'` for anything with a bind set. So
+   * whatever daemon the suite ran against, it exercised the IN-PROCESS
+   * placement — and under a rootless daemon that is exactly the one production
+   * does not use. The first end-to-end fenced run only came up after the bind
+   * was unset by hand, which is the signature of a fence a green suite could
+   * never have caught: a test that structurally cannot reach the production
+   * path is not covering it.
+   *
+   * So `sandbox` says which: `true` (or `'process'`) keeps the in-process
+   * listener every existing sandbox group was written against, `'container'`
+   * drives the placement a rootless daemon really takes. Either way the
+   * placement is NAMED rather than implied — the bind stays as the fence
+   * against a future default that binds somewhere a live hub can see, and it
+   * no longer decides anything, because the seam that outranks it is set.
+   */
+  function placementOf(sandbox) {
+    return sandbox === 'container' ? 'container' : 'process'
+  }
+
   function sandboxSeams(sandbox) {
     // Off is a HARD off: the switch says so, no runtime binary is named, the
     // shim is taken off the PATH again — a leftover `docker` there would let a
@@ -378,7 +429,10 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       FREILAUF_SANDBOX_INFO_CACHE_MS: '0',
       // The built-in proxy already defaults to 127.0.0.1:0; naming it is the
       // fence against a later default that binds somewhere a live hub can see.
+      // It is NOT what decides the placement any more (see `placementOf`): the
+      // seam below outranks it, so the suite can drive either side.
       FREILAUF_SANDBOX_PROXY_BIND: '127.0.0.1',
+      FREILAUF_SANDBOX_PROXY_PLACEMENT: placementOf(sandbox),
       // THE SUITE OWNS THE CONTAINER PASSES, exactly as FREILAUF_INTEGRATOR_OFF
       // above hands it the integrator's clock, and for the same reason one layer
       // out: the sandbox groups reap by hand (`reconcileContainers(hubId)`) while
@@ -394,7 +448,10 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
   }
 
   async function hubStarten({ echteAgenten = false, keys = {}, env = {}, willkommen = false, sandbox = false } = {}) {
-    zustand.sandbox = !!sandbox
+    // The VALUE, not a boolean: `'container'` has to survive as far as
+    // `watcherVorbereiten()`, or a suite driving the container placement would
+    // run its watcher passes against the in-process one.
+    zustand.sandbox = sandbox ? (sandbox === 'container' ? 'container' : true) : false
     zustand.port = await freierPort()
     zustand.basis = `http://127.0.0.1:${zustand.port}`
     const umgebung = {

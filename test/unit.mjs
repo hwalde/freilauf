@@ -11392,6 +11392,178 @@ process.stdout.write(JSON.stringify(out))
     })
   }
 
+  // ---------------------------------------------------------------------------
+  gruppe('Sandbox: where the listener runs, what a tunnel records, and who gets woken')
+
+  {
+    const sb = await import('../server/sandbox/index.mjs')
+    const px = await import('../server/sandbox/proxy.mjs')
+    const wa = await import('../server/watcher.mjs')
+
+    /**
+     * THE RESOLUTION ORDER, PINNED — because getting it wrong is invisible.
+     *
+     * `test/sandkasten.mjs` set `FREILAUF_SANDBOX_PROXY_BIND` and nothing else,
+     * and rule 2 below answers `'process'` for any bind at all: so under a
+     * rootless daemon the whole e2e suite exercised the placement production
+     * does NOT use, and the first end-to-end fenced run only came up after the
+     * bind was unset by hand. A green suite could not have said so. This check
+     * is what makes a later change to the order fail loudly instead.
+     */
+    await pruefe('proxyPlacement: forced beats the bind, the bind beats the daemon, rootless beats the default', () => {
+      const sicherung = {
+        p: process.env.FREILAUF_SANDBOX_PROXY_PLACEMENT,
+        b: process.env.FREILAUF_SANDBOX_PROXY_BIND,
+        cp: process.env.CCHUB_SANDBOX_PROXY_PLACEMENT,
+        cb: process.env.CCHUB_SANDBOX_PROXY_BIND,
+      }
+      const setze = (k, v) => { if (v == null) delete process.env[k]; else process.env[k] = v }
+      try {
+        for (const k of ['FREILAUF_SANDBOX_PROXY_PLACEMENT', 'FREILAUF_SANDBOX_PROXY_BIND',
+          'CCHUB_SANDBOX_PROXY_PLACEMENT', 'CCHUB_SANDBOX_PROXY_BIND']) delete process.env[k]
+
+        // 4. nothing said, rootful daemon → the free placement.
+        gleich(sb.proxyPlacement('builtin', { rootless: false }), 'process',
+          'a rootful daemon runs the listener in the hub — a container for it would be a fence for nothing')
+        gleich(sb.proxyPlacement('builtin', null), 'process', 'and so does a daemon nobody could ask')
+
+        // 3. rootless → container. THE PRODUCTION PATH on this machine.
+        gleich(sb.proxyPlacement('builtin', { rootless: true }), 'container',
+          'a rootless daemon cannot reach a host listener, so the listener moves')
+
+        // 2. a bind the operator published outranks the daemon's posture.
+        setze('FREILAUF_SANDBOX_PROXY_BIND', '192.0.2.7')   // TEST-NET-1, never a real address
+        gleich(sb.proxyPlacement('builtin', { rootless: true }), 'process',
+          'an operator who published an address has answered the reachability question themselves')
+
+        // 1. the forced seam outranks everything, in BOTH directions.
+        setze('FREILAUF_SANDBOX_PROXY_PLACEMENT', 'container')
+        gleich(sb.proxyPlacement('builtin', { rootless: true }), 'container',
+          'the forced seam wins over a bind…')
+        gleich(sb.proxyPlacement('builtin', { rootless: false }), 'container',
+          '…and over a rootful daemon')
+        setze('FREILAUF_SANDBOX_PROXY_PLACEMENT', 'process')
+        gleich(sb.proxyPlacement('builtin', { rootless: true }), 'process',
+          'and it can force the other way just as well — which is what lets the suite drive both')
+        setze('FREILAUF_SANDBOX_PROXY_PLACEMENT', 'nonsense')
+        setze('FREILAUF_SANDBOX_PROXY_BIND', null)
+        gleich(sb.proxyPlacement('builtin', { rootless: true }), 'container',
+          'a value that is neither falls through to the next rule rather than inventing a third placement')
+
+        // Every other engine IS a container, whatever any of this says.
+        gleich(sb.proxyPlacement('iron-proxy', { rootless: false }), 'container',
+          'iron-proxy is a binary nobody runs on the host')
+      } finally {
+        setze('FREILAUF_SANDBOX_PROXY_PLACEMENT', sicherung.p)
+        setze('FREILAUF_SANDBOX_PROXY_BIND', sicherung.b)
+        setze('CCHUB_SANDBOX_PROXY_PLACEMENT', sicherung.cp)
+        setze('CCHUB_SANDBOX_PROXY_BIND', sicherung.cb)
+      }
+    })
+
+    await pruefe('a harness declaration is written for the matcher it is judged by', async () => {
+      const { HARNESS_PLUGINS } = await import('../server/plugins/registry.mjs')
+      const { hostGlobMatch } = await import('../server/sandbox/presets.mjs')
+      const oc = HARNESS_PLUGINS.opencode.sandbox.domains
+      // The measured failure: opencode asks `models.opencode.ai` for its catalog
+      // seconds after it starts, and a bare `opencode.ai` denies it.
+      wahr(oc.some(d => hostGlobMatch(d, 'models.opencode.ai')),
+        'opencode’s own model catalog is inside its own declaration')
+      wahr(oc.some(d => hostGlobMatch(d, 'opencode.ai')), 'and so is the apex, where Zen lives')
+      const cu = HARNESS_PLUGINS.cursor.sandbox.domains
+      for (const h of ['agentn.api5.cursor.sh', 'agent.global.api5.cursor.sh', 'api5.cursor.sh',
+        'prod.authentication.cursor.sh', 'authentication.cursor.sh']) {
+        wahr(cu.some(d => hostGlobMatch(d, h)), `cursor’s vendor list reaches ${h}`)
+      }
+      // …and the rule that made all of this necessary still holds, so nothing
+      // here can be "fixed" by loosening the matcher instead.
+      falsch(hostGlobMatch('opencode.ai', 'models.opencode.ai'),
+        'a bare domain still means that host and nothing under it')
+    })
+
+    await pruefe('an allowed tunnel is recorded when it OPENS, not only when it is torn down', () => {
+      const auf = JSON.parse(px.auditLine({ host: 'openrouter.ai', port: 443, method: 'CONNECT',
+        action: 'allow', phase: 'open', status: 200, durationMs: 31, at: 1_000 }))
+      gleich(auf.phase, 'open', 'the open line says so')
+      gleich(auf.bytes_in, 0, 'and carries no byte counts — they do not exist yet')
+      const zu = JSON.parse(px.auditLine({ host: 'openrouter.ai', port: 443, method: 'CONNECT',
+        action: 'allow', phase: 'close', status: 200, durationMs: 900_000, bytesIn: 12, bytesOut: 34, at: 1_000 }))
+      gleich(zu.phase, 'close', 'the close line says so')
+      gleich(zu.bytes_in, 12, 'and it is where the counts are')
+      gleich(zu.at, auf.at, 'both carry the CONNECT’s own moment, so the two pair into one span')
+      // A denial and a plain request are one event and must read exactly as they
+      // always did — iron-proxy writes those too.
+      gleich(JSON.parse(px.auditLine({ host: 'x', method: 'GET', action: 'deny' })).phase, null,
+        'everything that is not a tunnel has no phase')
+    })
+
+    /**
+     * THE RULE, in one sentence: a host counts toward the distinct-host
+     * escalation only where the agent was demonstrably at work when it was
+     * turned away — never before the agent began working (where the CLI probes
+     * its own catalog and registry before the task has reached a model), and
+     * never for a host the agent went on working past.
+     */
+    await pruefe('a startup probe is not a wall: which denials may wake somebody', () => {
+      const t0 = 1_700_000_000_000
+      const start = t0
+      // The measured shape of the first fenced run: two of opencode's own
+      // startup hosts within three seconds, then the one that mattered — and
+      // the run's own `agent_working` between them, which is what says where
+      // the boot ended instead of a number somebody picked.
+      const denials = [
+        { host: 'models.opencode.ai', atMs: t0 + 2_000 },
+        { host: 'registry.npmjs.org', atMs: t0 + 3_000 },
+        { host: 'example.test', atMs: t0 + 20_000 },
+      ]
+      const arbeit = t0 + 6_000
+      const echt = wa.sandboxEscalationDenials(denials, { startMs: start, arbeitAbMs: arbeit })
+      gleich(echt.map(d => d.host).join(','), 'example.test',
+        'the CLI’s boot-time probes do not count; the denial after the agent began does')
+      gleich(wa.sandboxEscalationDenials(denials.slice(0, 2), { startMs: start, arbeitAbMs: arbeit }).length, 0,
+        'and a run whose ONLY denials are startup probes escalates about nothing')
+      // The agent's own word OUTRANKS the coarse window, in both directions: a
+      // CLI that got to work in a second does not get a 30-second free pass…
+      gleich(wa.sandboxEscalationDenials(denials, { startMs: start, arbeitAbMs: t0 + 1_000 }).length, 3,
+        'an agent that was already working at second one has no startup left to excuse')
+      // …and one that took longer than the window is still booting.
+      gleich(wa.sandboxEscalationDenials(denials, { startMs: start, arbeitAbMs: t0 + 60_000 }).length, 0,
+        'a slow start is still a start, whatever the fallback window would have said')
+      // Only where the harness reports no attention state does the window
+      // decide — and it is COARSER, which is precisely why the agent's own word
+      // outranks it: here the stand-in swallows the +20 s denial as well. That
+      // costs nothing the operator needs, because a denial that really walls the
+      // run in is then caught by the silence path five minutes later, with a
+      // reason that is true.
+      gleich(wa.sandboxEscalationDenials(denials, { startMs: start }).length, 0,
+        'no agent_working: the stand-in cannot see where the boot ended and is generous about it')
+      gleich(wa.sandboxEscalationDenials([...denials, { host: 'late.test', atMs: t0 + 45_000 }],
+        { startMs: start }).map(d => d.host).join(','), 'late.test',
+        '…and anything past the stand-in still counts')
+
+      // The coped veto, per host: a host the agent worked past is history.
+      const spaeter = [
+        { host: 'a.test', atMs: t0 + 120_000 },
+        { host: 'b.test', atMs: t0 + 300_000 },
+      ]
+      gleich(wa.sandboxEscalationDenials(spaeter, { startMs: start, arbeitAbMs: arbeit,
+        letzteAktivitaetMs: t0 + 200_000 }).map(d => d.host).join(','), 'b.test',
+        'work after a.test’s refusal says the agent coped with a.test — and says nothing about b.test')
+      gleich(wa.sandboxEscalationDenials(spaeter, { startMs: start, arbeitAbMs: arbeit,
+        letzteAktivitaetMs: null }).length, 2,
+        'unknown activity is not "coped": null never narrows what an operator is told')
+
+      // Not knowing when the run began is never a reason to say less.
+      gleich(wa.sandboxEscalationDenials(denials, { startMs: null, arbeitAbMs: arbeit }).length, 3,
+        'without a start time the boot interval has no beginning, so nothing is dropped')
+      gleich(wa.sandboxEscalationDenials(denials, { startMs: t0 + 3_600_000 }).length, 3,
+        'and a denial dated BEFORE the run began is outside the interval, not inside it')
+      gleich(wa.sandboxEscalationDenials(denials, { startMs: start, startGraceMs: 0 }).length, 3,
+        'and 0 switches the fallback off outright')
+      gleich(wa.sandboxEscalationDenials(null).length, 0, 'nothing in, nothing out')
+    })
+  }
+
 } finally {
   rmSync(sandkasten, { recursive: true, force: true })
 }
