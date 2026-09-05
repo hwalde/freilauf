@@ -579,6 +579,13 @@ export function buildNetworkConnectArgv(network, name, { runtime = 'docker' } = 
  * would end healthy runs the first time a vendor rewords a message. This is
  * tmuxVerdict()'s rule, and it is written down in AGENTS.md because it cost
  * this hub a working agent once already.
+ *
+ * ONLY THE TWO `[measured]` LINES HAVE EVER BEEN SEEN. The rest are `[documented]`
+ * from the vendors' own troubleshooting pages or `[inferred]` from the shape of
+ * them, and the day a vendor reworded one is exactly the day this regex went
+ * quiet — which is what happened to the two documented docker lines below when
+ * 29.x rewrote the message. Anything new that lands here belongs next to the
+ * output it was read from, with the version it was read on.
  */
 const NO_DAEMON_RE = new RegExp([
   'cannot connect to the docker daemon',            // [documented] docker CLI
@@ -590,12 +597,12 @@ const NO_DAEMON_RE = new RegExp([
   // against a stopped daemon came back `unreachable` instead of `no_daemon`.
   // Safe, because unreachable is the answer that does nothing, but it means the
   // reconciliation pass could never reach the empty truth it is written for.
-  'failed to connect to the docker api',
-  'if the daemon is running',
-  'docker daemon is not running',                   // [inferred] Docker Desktop wording
-  'cannot connect to podman',                       // [inferred] podman CLI
-  'unable to connect to podman',                    // [inferred] podman CLI
-  'the docker daemon may not be running',           // [inferred]
+  'failed to connect to the docker api',            // [measured 2026-09-05, docker 29.8.0]
+  'if the daemon is running',                       // [measured 2026-09-05, docker 29.8.0]
+  'docker daemon is not running',                   // [inferred, never seen] Docker Desktop wording
+  'cannot connect to podman',                       // [inferred, never seen] podman CLI
+  'unable to connect to podman',                    // [inferred, never seen] podman CLI
+  'the docker daemon may not be running',           // [inferred, never seen]
 ].join('|'), 'i')
 
 /**
@@ -612,6 +619,40 @@ const NOT_FOUND_RE = /no such (object|container|image|network)|network .* not fo
 export function notFound(result) {
   if (result?.ok) return false
   return NOT_FOUND_RE.test(String(result?.stderr ?? '') + String(result?.stdout ?? ''))
+}
+
+/**
+ * The image this command wanted is not on the machine. [measured 2026-09-05,
+ * docker 29.8.0] — `docker run` on an image that was never built exits **125**
+ * with `Unable to find image '…' locally` followed by `pull access denied for
+ * …, repository does not exist or may require 'docker login'`, and neither
+ * phrase contains the words `no such image`. So the one failure §7.10 calls the
+ * worst there is — a run that cannot start because nobody built the image —
+ * classified as `unreachable`, which reads as "the daemon is having a moment"
+ * and sends the operator to the wrong place entirely.
+ *
+ * The first phrase alone is NOT an error: `docker run` prints it before pulling
+ * successfully too. That costs nothing here, because every caller asks this only
+ * about a command that failed.
+ */
+const NO_IMAGE_RE = /unable to find image .* locally|pull access denied for .*(repository does not exist|docker login)|manifest .* not found|image .* not found/i
+export function missingImage(result) {
+  if (result?.ok) return false
+  return NO_IMAGE_RE.test(String(result?.stderr ?? '') + String(result?.stdout ?? ''))
+}
+
+/**
+ * The name is taken — a leftover container of the same run. [measured
+ * 2026-09-05] `Conflict. The container name "/fl-…" is already in use by
+ * container "f8da…"`, exit 125. A retry, a resume and a reconfiguration all
+ * reuse `fl-<id>`, so this is the answer `stopOrphan()` exists to prevent, and
+ * reading it as "the daemon did not answer" would have the caller wait for a
+ * daemon that is perfectly well and holding the leftover.
+ */
+const NAME_CONFLICT_RE = /conflict\.? the container name .* is already in use|already in use by container/i
+export function nameConflict(result) {
+  if (result?.ok) return false
+  return NAME_CONFLICT_RE.test(String(result?.stderr ?? '') + String(result?.stdout ?? ''))
 }
 
 /** [documented] `docker network create` on a name that is already there. */
@@ -1741,7 +1782,30 @@ export async function dryRunChecks(spec, { allow = [], repo = null, workdir = nu
   if (!probeDir) {
     add('container', null, 'no working copy to probe with')
   } else {
+    // THE PROBE NEEDS A HOME, and without one this check failed on every
+    // machine — the one button an operator presses to decide whether the
+    // feature works told them it does not. `filesystem.tmpfsSizes` names
+    // `$HOME/.cache` in every shipped profile; with no `homeDir` in the ctx
+    // `expandHome()` returns the literal string, `tmpfsArgs()` drops it as
+    // non-absolute, and the script below still tested it — the shell inside the
+    // container expanded `$HOME` to the image's own account home, `df` was asked
+    // about a path nothing had mounted, and the answer was `workdir ok; tmpfs
+    // /tmp ok; tmpfs …/.cache FAIL` [measured 2026-09-05]: a red check about a
+    // mount the argv had never asked for.
+    //
+    // A real directory, because that is what a real run has: the home is
+    // mounted at its own path and the tmpfs sits inside it. It is created under
+    // the data directory and reused; nothing is written into it.
+    let probeHome = null
+    try {
+      probeHome = join(dataDir(), 'sandbox-dryrun-home')
+      mkdirSync(probeHome, { recursive: true, mode: 0o700 })
+    } catch { probeHome = null }
+    // Expanded HERE with the same function the argv uses, so the script tests
+    // exactly the mounts that were asked for — never a path that was dropped.
     const tmpfs = Object.keys(s.filesystem?.tmpfsSizes ?? {})
+      .map(p => cleanTarget(expandHome(p, probeHome)))
+      .filter(p => absolute(p))
     const script = [
       `test -d ${shq(probeDir)} && echo "workdir ok" || echo "workdir FAIL"`,
       ...tmpfs.map(p => `df -k ${shq(p)} >/dev/null 2>&1 && echo "tmpfs ${p} ok" || echo "tmpfs ${p} FAIL"`),
@@ -1751,7 +1815,13 @@ export async function dryRunChecks(spec, { allow = [], repo = null, workdir = nu
     try {
       argv = buildRunArgv({ ...s, network: { ...(s.network ?? {}), mode: 'none' }, retention: 'run' }, {
         runId: `dryrun-${Date.now().toString(36)}`, hubId: '', tty: false,
-        workdir: probeDir, uid: process.getuid?.() ?? null, gid: process.getgid?.() ?? null,
+        workdir: probeDir, homeDir: probeHome,
+        // §7.7's uid table, the same branch a real launch takes — it used to
+        // pass the hub's uid unconditionally, so the dry run probed the ROOTFUL
+        // rule against a rootless daemon and answered about a container nobody
+        // would ever start.
+        uid: info.rootless ? null : process.getuid?.() ?? null,
+        gid: info.rootless ? null : process.getgid?.() ?? null,
         cmd: ['sh', '-lc', script],
       })
     } catch (err) { add('container', false, err?.message || String(err)) }
@@ -1759,7 +1829,15 @@ export async function dryRunChecks(spec, { allow = [], repo = null, workdir = nu
       const r = await sh(argv.bin, argv.args, { timeout: 120_000, env: runtimeEnv(s.runtime) })
       const out = String(r.stdout ?? '')
       if (!r.ok && !out.includes('done')) {
-        add('container', false, (String(r.stderr ?? '').trim().split('\n').pop() || 'the probe container did not run'))
+        // The two failures a probe really hits get their own sentence: both come
+        // back as exit 125 with a message the generic "last stderr line" would
+        // reduce to noise, and both have an obvious next step.
+        const detail = missingImage(r)
+          ? `the image is not on this machine — build it first (${s.image?.ref ?? '?'})`
+          : nameConflict(r)
+            ? 'a container of that name is still there — reap it first'
+            : (String(r.stderr ?? '').trim().split('\n').pop() || 'the probe container did not run')
+        add('container', false, detail)
       } else {
         add('container', !out.includes('FAIL'), out.trim().split('\n').filter(Boolean).join('; ') || null)
       }

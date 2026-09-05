@@ -7991,6 +7991,9 @@ process.stdout.write(JSON.stringify(out))
       `  info) printf '%s\\n' '${info}' ;;`,
       "  inspect|image) echo 'Error: No such object: fl-nosuch' >&2; exit 1 ;;",
       "  ps) printf 'fl-a\\trunning\\tUp 3 minutes\\nfl-proxy-a\\trunning\\tUp 3 minutes\\n' ;;",
+      // What `network inspect` really prints for a network created with
+      // `gateway_mode_ipv4=isolated`: Go stringifying a zero netip.Addr.
+      "  network) printf 'invalid IP\\n' ;;",
       // A build that FAILS, because the interesting half of buildImage() is how
       // it tells a broken Dockerfile from an absent daemon — and because a unit
       // suite must never run a real `docker build`.
@@ -8093,8 +8096,13 @@ process.stdout.write(JSON.stringify(out))
 
   await pruefe('the tmpfs sizes come from the profile, and /tmp keeps exec', () => {
     const { args } = rt.buildRunArgv({ filesystem: { tmpfsSizes: { '/tmp': '512m' } } }, rtCtx())
-    gleich(args.find(a => a.startsWith('/tmp:')), '/tmp:rw,nosuid,size=512m',
-      'nosuid but not noexec — npm and pip build out of /tmp')
+    // `exec` is NAMED, and this assertion used to pin the opposite. Docker's
+    // `--tmpfs` defaults to `noexec,nodev`, so leaving the word out was not the
+    // same as allowing it: measured in a container started from this argv,
+    // `chmod +x /tmp/x && /tmp/x` exited 126 and `/proc/mounts` said `noexec`.
+    // The comment promised npm and pip could build out of /tmp; they could not.
+    gleich(args.find(a => a.startsWith('/tmp:')), '/tmp:rw,exec,nosuid,size=512m',
+      'nosuid, and exec spelled out — npm and pip build out of /tmp')
     wahr(args.includes('/run:rw,noexec,nosuid,size=64m'), '/run comes with the read-only root')
   })
 
@@ -8331,6 +8339,54 @@ process.stdout.write(JSON.stringify(out))
     wahr(rt.notFound({ ok: false, stderr: 'Error response from daemon: network fl-net-r1 not found' }), 'network rm')
     falsch(rt.notFound({ ok: false, stderr: 'Cannot connect to the Docker daemon' }), 'a down daemon is not an empty one')
     falsch(rt.notFound({ ok: true, stdout: 'true' }), 'and a success is not a miss')
+  })
+
+  await pruefe('a runtime the daemon does not know is not available, however well it answered', async () => {
+    // `runsc` is the same binary and the same socket as `docker` plus one flag,
+    // so `docker info` succeeding said nothing about whether gVisor is
+    // registered — and the list that answers it was in the object already
+    // parsed. Without the check the settings page offers gVisor, the profile
+    // reads as validated, and every run so configured dies in the pane with
+    // `unknown or invalid runtime name: runsc` (exit 125) and no diagnosis.
+    await mitRuntime({ daemon: true }, async () => {
+      const ok = await rt.runtimeInfo('docker', { force: true })
+      gleich(ok.available, true, 'the daemon itself is fine …')
+      const gvisor = await rt.runtimeInfo('runsc', { force: true })
+      gleich(gvisor.available, false, '… and runsc is still not available on it')
+      gleich(gvisor.reason, 'sandbox.reason.runtime_not_registered', 'with the reason that says what to do')
+      enthaelt(String(gvisor.message ?? ''), 'runc', 'naming what the daemon DOES know')
+    })
+  })
+
+  await pruefe('a gateway that is not an address is no gateway', async () => {
+    // [measured 2026-09-05, docker 29.8.0] a network created with
+    // `gateway_mode_ipv4=isolated` has no Gateway key, and the template prints
+    // `invalid IP`. The old `!== '<no value>'` filter handed `"invalid"` back as
+    // an address, `builtinBind()`'s refusal never fired, and the built-in proxy
+    // called `listen(port, 'invalid')` — the operator saw a DNS error instead of
+    // the sentence this function exists to give them.
+    await mitRuntime({ daemon: true }, async () => {
+      const g = await rt.networkGateway('fl-net-x', { runtime: 'docker' })
+      gleich(g.address, null, 'never the literal word "invalid"')
+      gleich(g.ok, false, 'so the caller refuses instead of binding to it')
+      wahr(String(g.reason ?? '').length > 0, 'and says why')
+    })
+  })
+
+  await pruefe('a missing image and a taken name are ANSWERS, not "the daemon is having a moment"', () => {
+    // Both are exit 125 with a daemon that answered perfectly well, and both
+    // used to classify as `unreachable` — which reads as "wait and try again"
+    // for two situations that will never get better on their own.
+    const run = (stderr) => ({ ok: false, code: 125, stdout: '', stderr })
+    wahr(rt.missingImage(run("Unable to find image 'freilauf/agent-claude:2.1.261' locally\n"
+      + "docker: Error response from daemon: pull access denied for freilauf/agent-claude, "
+      + "repository does not exist or may require 'docker login'")), 'the image was never built')
+    falsch(rt.missingImage(run('Conflict. The container name "/fl-abc" is already in use by container "f8da"')),
+      'and a name conflict is not a missing image')
+    wahr(rt.nameConflict(run('docker: Error response from daemon: Conflict. The container name '
+      + '"/fl-abc123" is already in use by container "f8da4c".')), 'the leftover of the last attempt')
+    falsch(rt.missingImage({ ok: true, stderr: "Unable to find image 'x' locally" }),
+      'the pull notice on a SUCCESSFUL run says nothing — a success is never a refusal')
   })
 
   await pruefe('docker stats is parsed into bytes and a percentage', () => {

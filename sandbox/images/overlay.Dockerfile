@@ -115,5 +115,10 @@ ENV DISABLE_AUTOUPDATER=1 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
-USER agent
+# NO `USER` LINE, and here it also has to UNDO one: an operator's toolchain
+# image may well end in a `USER` of its own, and that would be what a rootless
+# run arrives as, since `buildRunArgv()` passes no `--user` there. `USER root`
+# above is therefore load-bearing in this file and not merely a build-step
+# convenience — it is the last word, and it hands the decision back to the
+# caller. See the block at the top of base.Dockerfile for the measurement.
 WORKDIR /home/agent

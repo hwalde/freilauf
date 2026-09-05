@@ -244,19 +244,27 @@ in `run-edit.mjs` decides what a status allows to be edited. The repo form is
 `integrationFromForm()` as the block a sandbox section would sit next to. §7.13 lists
 the columns.
 
-### 2.4 What this machine has [measured, 2026-09-02]
+### 2.4 What this machine has [measured 2026-09-02, corrected 2026-09-05]
+
+The rows below were first written on 2026-09-02 and re-measured on 2026-09-05
+(§11a.6, §11b.1); where the two dates disagree the second one is in the table and
+the first is named next to it, because a stale inventory is the one document that
+makes a design argue against a machine that no longer exists.
 
 | Thing | State | Why it matters |
 |---|---|---|
-| Docker / Podman | **not installed** | the feature must be discoverable and absent-safe; the e2e suite needs a shim |
+| Docker | **rootless Docker 29.8.0**, socket `unix:///run/user/<uid>/docker.sock`, user unit active; the rootful `docker.service` is stopped and disabled and the `docker` group is empty (on 2026-09-02: nothing installed at all) | the feature is no longer hypothetical on this host — §11b measures it. It stays discoverable and absent-safe all the same, and the e2e suite still needs its shim: a suite whose result depends on the hardware is a suite nobody can trust |
+| Podman | **not installed** | §7.7's `--userns=keep-id` row remains [documented] |
+| gVisor (`runsc`) | **not installed**; the daemon lists `io.containerd.runc.v2` and `runc` only | §4.1's option, unmeasurable here beyond the refusal (§11b.8) |
 | `bwrap` 0.9.0 | installed, **fails**: `bwrap: setting up uid map: Permission denied`; `unshare -rn` fails the same way | Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor (`kernel.apparmor_restrict_unprivileged_userns = 1`); only `unprivileged_userns` and `lxc-usernsexec` profiles are present, none for `bwrap` — so Claude Code's own sandbox, Anthropic's `srt`, Codex's sandbox and cursor's bubblewrap fallback are all dead on this host until an operator installs a profile (§4.6, §8.11) |
 | Landlock | in `/sys/kernel/security/lsm` (`lockdown,capability,landlock,yama,apparmor`) | cursor's Landlock sandbox and `landrun` would work; Landlock cannot name hosts, only ports |
-| cgroup v2 | `cgroup2fs` on `/sys/fs/cgroup` | rootless Docker resource limits are possible with systemd delegation |
-| tmux 3.4, git 2.43.0, node 22 | | git 2.43 has no `worktree.useRelativePaths` (2.48+) |
-| claude 2.1.258 | `--permission-mode` = `acceptEdits, auto, bypassPermissions, manual, dontAsk, plan`; the binary carries the whole `sandbox` settings vocabulary (`allowedDomains`, `denyWrite`, `enableWeakerNestedSandbox`, `autoAllowBashIfSandboxed`, …) | §3.1 |
-| cursor-agent 2026.08.25 | `--sandbox <enabled|disabled>`; ships a 4.6 MB `cursorsandbox` binary ("Sandboxing helper for Everysphere shell-exec", `--policy <json>`, `--preflight-only`; strings: landlock, seccomp, bubblewrap, proxy) | §3.4 |
-| hermes 0.20.5 | seven terminal backends (`tools/environments/`: local, docker, ssh, singularity, modal, daytona, vercel_sandbox); `hermes egress` manages an **iron-proxy** credential-injection firewall; `--yolo`, `--safe-mode` | §3.3, §4.5 |
-| opencode 1.18.26 | no sandbox; `permission` config only | §3.2 |
+| cgroup v2 | `cgroup2fs` on `/sys/fs/cgroup`; the user slice delegates `cpu memory pids` and **not** `cpuset` or `io` | rootless Docker's `--memory`, `--pids-limit` and `--cpus` all bind here, measured (§11b.4); `--cpuset-cpus` and every io limit have no controller to write |
+| AppArmor, for containers | **not applied** — the daemon reports `seccomp`, `rootless`, `cgroupns` and no `apparmor`; `/etc/apparmor.d/rootlesskit` is `flags=(unconfined)` | `--security-opt apparmor=…` is accepted and confines nothing (§11b.1); a profile page must not print it back as effective |
+| tmux 3.4, git 2.43.0, node 22, systemd 255 | | git 2.43 has no `worktree.useRelativePaths` (2.48+) |
+| claude **2.1.261** (2026-09-02: 2.1.258) | `--permission-mode` = `acceptEdits, auto, bypassPermissions, manual, dontAsk, plan`; the binary carries the whole `sandbox` settings vocabulary (`allowedDomains`, `denyWrite`, `enableWeakerNestedSandbox`, `autoAllowBashIfSandboxed`, …) | §3.1 |
+| cursor-agent **2026.09.02-c22c1a3** (2026-09-02: 2026.08.25) | `--sandbox <enabled\|disabled>`; ships a 4.6 MB `cursorsandbox` binary ("Sandboxing helper for Everysphere shell-exec", `--policy <json>`, `--preflight-only`; strings: landlock, seccomp, bubblewrap, proxy) | §3.4 |
+| hermes **0.21.0** (2026-09-02: 0.20.5) | seven terminal backends (`tools/environments/`: local, docker, ssh, singularity, modal, daytona, vercel_sandbox); `hermes egress` manages an **iron-proxy** credential-injection firewall — the proxy binary itself is **not installed** here; `--yolo`, `--safe-mode` | §3.3, §4.5 |
+| opencode **1.18.29** (2026-09-02: 1.18.26) | no sandbox; `permission` config only | §3.2 |
 
 ---
 
@@ -1790,10 +1798,18 @@ composition, per-run named volumes for `rw` extras.
 
 ## 11. Open questions to measure before building (in the order they block)
 
-**Six of these were measured on 2026-09-05 — §11a below carries the commands, the
-raw verdicts and what each one changes in the design; three of the ten (1, 3, 10)
-are answered there in part, and five (2, 3, 6, 9, 10) remain open for want of a
-container runtime on this machine.**
+**Two sections below carry the answers, both with the commands and the raw
+verdicts.** §11a (2026-09-05, morning) measured everything that could be measured
+**without** a container runtime: 4, 5, 7, 8 outright, 1, 3 and 10 in part, and it
+records honestly that 2, 6 and 9 could not be asked at all on a machine with no
+daemon. §11b (2026-09-05, afternoon) is the same day against **rootless Docker
+29.8.0**, which the host now runs: it settles **9** and **10**, confirms §7.4's
+mount set and §7.7's uid rule against a live container, and refutes two things
+the design assumed — the built-in proxy engine (§7.5.2) cannot exist under a
+rootless daemon, and §7.11's `/tmp` is not executable. Still open after both: **2**
+(needs a throwaway account), **6** (iron-proxy is not installed anywhere), and the
+container halves of **1**, **3**, **4** and **8** — no harness CLI has yet been run
+inside a container at all.
 
 1. **Claude as container root under rootless Docker**: does `bypassPermissions`
    accept root "inside a recognized sandbox", and what makes a sandbox recognised?
@@ -1860,6 +1876,11 @@ session with delegation, plus — for §11.2 — a throwaway Anthropic account, 
 the experiment is "does a second `.credentials.json` refreshing its token
 invalidate the first" and running it on the operator's own account is how one
 loses a live session.
+
+> **Later the same day, rootless Docker 29.8.0 was installed on this host and
+> §11.9 and §11.10 were measured against it — see §11b.** Everything below is
+> left as it was written: it is the record of what was known before there was a
+> daemon, and the design decisions it names were taken on that knowledge.
 
 ---
 
@@ -2178,7 +2199,7 @@ Re-measured 2026-09-05 with the commands §11.10 names:
 
 | Thing | 2026-09-05 [measured] |
 |---|---|
-| Docker / Podman | still absent, at both scopes |
+| Docker / Podman | still absent, at both scopes — Docker arrived hours later, §11b.1 |
 | kernel | 6.8.0-138-generic, Ubuntu 24.04 |
 | root `cgroup.controllers` | `cpuset cpu io memory hugetlb pids rdma misc` |
 | **user slice `cgroup.controllers`** | **`cpu memory pids`** — at `user.slice/user-1000.slice` and at `user@1000.service` alike |
@@ -2270,8 +2291,316 @@ in the meantime, and why it is safe whichever way each falls:
   explicit note on the profile page that the host bridge address is reachable, and
   the hub's own socket is a unix socket in the run directory (§7.6) rather than a
   TCP port, so the hub is not on the other side of that gateway either way.
+  *(Measured since: the option exists on 29.8.0 and is `--internal`-only — §11b.5.)*
 - **§11.10 (delegation).** As above: the limits offered are the controllers the
   user slice actually delegates, read at discovery time.
+  *(Measured since: all three delegated fences really bind — §11b.4.)*
+
+---
+
+## 11b. Measured against a real daemon (2026-09-05)
+
+The development machine now runs **rootless Docker 29.8.0**. Six of the ten
+questions in §11 were left open in §11a for want of a container runtime, and §11a
+said so in the same breath as it said what the design does so as to be safe under
+either answer. That excuse is gone: everything below was run against the live
+daemon on this host, in throwaway directories and throwaway networks, with the
+hub's own checkout, database, worktrees and tmux sessions untouched. It is
+observation rather than reading — where §11a inferred from a binary's strings or
+from a shape, this section has an exit code. Two of the answers refute something
+the design assumed, and those are the half worth reading first (§11b.5, §11b.6).
+
+---
+
+### 11b.1 The host, as measured
+
+| Thing | 2026-09-05 [measured] |
+|---|---|
+| client / server | Docker Engine Community **29.8.0**, API 1.56, containerd v2.3.4, runc 1.5.1, rootlesskit 3.1.0 |
+| context | `rootless`, endpoint `unix:///run/user/1000/docker.sock`; the user unit `docker.service` is **active** |
+| rootful daemon | `systemctl is-active docker.service` → `inactive`, `is-enabled` → `disabled`; the socket file at `/var/run/docker.sock` still exists (`root:docker`, mode 660) and answers nothing |
+| `docker` group | exists, gid 985, **empty** — nobody on this machine can reach a rootful daemon even if one were started |
+| storage / cgroup driver | `overlayfs` / `systemd`, cgroup v2 |
+| security options reported by the daemon | `seccomp` (profile `builtin`), `rootless`, `cgroupns` — **no `apparmor`** |
+| runtimes | `io.containerd.runc.v2`, `runc`; default `runc` |
+| delegated controllers, user slice | `cpu memory pids` at `user.slice/user-<uid>.slice` and at `user@<uid>.service` alike — **not `cpuset`, not `io`** |
+| `/etc/subuid`, `/etc/subgid` | `<hub user>:100000:65536` |
+| rootlesskit's own command line | `--net=gvisor-tap-vsock --disable-host-loopback --port-driver=builtin --detach-netns` |
+
+**AppArmor does not apply to containers here** [measured]. Ubuntu 24.04 ships
+`/etc/apparmor.d/rootlesskit` — 354 bytes, dated 2024-07-15, whose own comment says
+it "allows everything and only exists to give the application a name instead of
+having the label `unconfined`": `profile rootlesskit /usr/bin/rootlesskit
+flags=(unconfined) { userns, }`. So rootlesskit gets the `userns` capability the
+kernel's unprivileged-namespace restriction otherwise withholds (§11a's
+`unshare -rn` failure), and it gets it *unconfined*. The daemon reports no
+`apparmor` security option, and `--security-opt apparmor=docker-default` is
+**accepted without complaint and confines nothing**: inside such a container
+`/proc/self/attr/current` reads `rootlesskit (unconfined)` [measured]. A profile
+name that is silently ignored is worse than one that is refused, because a profile
+page could print it back as if it had taken effect.
+
+**And `aa-status` is not the way to find that out.** As a non-root user it prints
+*"You do not have enough privilege to read the profile set."* and exits **4**; but
+`aa-status --enabled` — the form a discovery step reaches for, because it is the
+cheap one — exits **0** with no output at all [measured]. That 0 means "the
+AppArmor module is loaded", which on this host is true and irrelevant: the
+containers are unconfined regardless. Same family as the `--no-optional-locks`
+entry in AGENTS.md, where an empty answer read as a clean worktree. **Therefore
+the implementation** takes the daemon's own `SecurityOptions` list as the answer
+to "is AppArmor applied to containers", and never `aa-status`.
+
+---
+
+### 11b.2 (§7.7) The uid map, confirmed — and one consequence git cares about
+
+§7.7's table says: under a rootless daemon, run the agent as container **root**,
+because a non-root container user would write host files as `subuid + n − 1`. Four
+`docker run`s against a bind-mounted directory, `ls -n` inside and outside
+[measured]:
+
+| container `--user` | uid inside | owner of a file it creates, seen from the host |
+|---|---|---|
+| *(none, root image)* | `0:0` | `1000:1000` — the hub user itself |
+| `0:0` (explicit) | `0:0` | `1000:1000` |
+| `1000:1000` | `1000:1000` | `100999:100999` |
+| `1001:1001` | `1001:1001` | `101000:101000` |
+
+The subuid base is 100000 and container uid 1 is the first mapped id, so container
+uid *n* is host `99999 + n`. §7.7's rule is right, and the failure mode it warns
+about is worse than "wrong owner": with `--user 1000:1000` into a directory the hub
+created, the container could not write **at all** (`touch: Permission denied`),
+because that directory is owned by host 1000, which the container sees as `root`.
+A run configured that way would fail at its first file, in a way that reads like a
+mount problem.
+
+**One thing this buys that §7.7 does not mention**: git's `safe.directory` check
+never fires. The clone is owned by host 1000, the container process is uid 0, and
+those are the same identity through the map — `git status` in the mounted clone
+works with no `safe.directory` configuration at all [measured]. §7.7 raises the
+question ("git refuses to work in a repository owned by another uid"); under a
+rootless daemon it does not arise, and under a rootful one with `--user <hub
+uid>:<hub gid>` it does not arise either. It arises only in the combination the
+table already rules out.
+
+---
+
+### 11b.3 (§7.4) The mount set works end to end, inside a real container
+
+§7.4.2's clone was measured on the host in §11a.2. What could not be measured was
+the *mount set* — whether the same repository still behaves when the operator's
+`.git` arrives read-only and its `config` is masked. Built as §7.4.2 writes it (a
+source repository with two commits and a remote URL carrying a token-shaped
+secret; a clone with `objects/info/alternates` pointing at the source), then run
+with exactly §7.11's three git-related mounts: the clone read-write, the source's
+`.git` read-only at the same path, and an empty file over that `.git/config`
+[measured, `freilauf/agent-base:24.04`, git 2.43 inside and out]:
+
+| claim | verdict |
+|---|---|
+| `git status --porcelain` in the clone | rc 0, clean |
+| `git log --oneline` reaches the source's history | rc 0, both commits |
+| alternates really resolve | yes — the clone holds 3 loose objects to the source's 6, and `rev-parse HEAD~1` still answers |
+| the operator's `.git` is genuinely read-only | `touch: cannot touch '…/.git/PROBE': Read-only file system` |
+| the masked config is readable and empty | `wc -c` → 0; `grep -c TOKEN` → 0 |
+| `git fetch origin` through the read-only mount | rc 0 |
+| `git add` / `git commit` in the clone | rc 0, new tip |
+| §7.4.3's collect step on the host afterwards | `git -C <source> fetch <clone> HEAD:refs/freilauf/runs/<id>` → rc 0, the tip's commit reachable in the source |
+
+So the design's central compromise — the agent owns a whole repository, the
+operator's owns nothing the agent can write, and the objects are borrowed rather
+than copied — is not a plan any more. It is a thing that ran.
+
+---
+
+### 11b.4 (§11.10, §7.11) Every resource fence binds — and one does not bind as far as it looks
+
+The three controllers this host delegates were each set and then pushed past
+[measured]:
+
+| fence | flag | inside the container | pushed |
+|---|---|---|---|
+| memory | `--memory 256m` | `memory.max` = `268435456` | a 512 MB anonymous allocation → `OOMKilled=true`, `ExitCode=137` |
+| pids | `--pids-limit 64` | `pids.max` = `64` | a loop asking for 200 background processes stopped at the ceiling with `sh: can't fork: Resource temporarily unavailable` |
+| cpu | `--cpus 0.5` | `cpu.max` = `50000 100000` | two busy loops over 5 s consumed **0.50** cores; `nr_throttled` 50 |
+
+`--cpuset-cpus` and every io limit remain unavailable, exactly as §11a.6 predicted
+from the delegated controller list — the daemon has no controller to write.
+
+**The memory fence is not a fence against swap unless it is told to be**
+[measured]. `--memory 256m` alone leaves `memory.swap.max` at `268435456`: the
+container may swap a further 256 MB, and a run that is thrashing is not a run that
+gets stopped. Only `--memory-swap` equal to `--memory` sets `memory.swap.max` to
+`0`. §7.11's command line already writes `--memory 8g --memory-swap 8g`, so the
+design is correct as it stands — this measurement is why that pairing must not be
+"simplified" later. Docker refuses the two ways of getting it wrong, verbatim:
+*"You should always set the Memory limit when using Memoryswap limit, see usage"*
+and *"Minimum memoryswap limit should be larger than memory limit, see usage"*.
+
+---
+
+### 11b.5 (§11.9, §7.5) The network holds — and the built-in proxy engine cannot exist here
+
+**What holds.** `--network none` leaves the container with no routes at all and no
+reachable address; a `--internal` network gives it a route to its own subnet, an
+embedded resolver that answers container names, and nothing else — `wget` against
+an external name fails with `bad address`, against an external literal with
+`Network unreachable` [measured].
+
+**`gateway_mode_ipv4=isolated` exists on 29.8.0**, and it is `--internal`-only:
+`docker network create --opt com.docker.network.bridge.gateway_mode_ipv4=isolated`
+on a normal network is refused with *"gateway mode 'isolated' can only be used for
+an internal network"* [measured] — which is how §7.5.1 already pairs them, so
+nothing changes. What does change is a reading trap: with the option set, Docker
+**omits the `Gateway` key from the IPAM config entirely**, so
+`docker network inspect --format '{{.Gateway}}'` prints the string **`invalid
+IP`**, not an empty value [measured — the same network without the option prints
+its gateway normally, and the JSON carries `{"Subnet":"…"}` with no `Gateway`
+member]. Anything that parses that template and compares against `''` will read a
+correctly isolated network as a misconfigured one. §11.9 is answered: the option
+is available here, and discovery should read the JSON, not a Go template.
+
+**What is refuted: §7.5.2's `builtin` engine.** The design offers a ~200-line
+CONNECT proxy inside the hub process, one listener per run on the run's own
+bridge, and calls it *"the natural first implementation for phase 1"*. On a
+rootless daemon it cannot be implemented at all. Three measurements, and each one
+alone is fatal:
+
+- **The hub cannot bind the run network's gateway.** `listen(47999,
+  '<the internal network's gateway>')` from a plain node process on this host →
+  `EADDRNOTAVAIL: address not available`, and `ip addr` in the host namespace
+  shows no bridge for that subnet at all. rootlesskit runs with `--detach-netns`,
+  so every bridge the daemon creates lives in *its* network namespace, not the
+  host's [measured; the flag from rootlesskit's own command line].
+- **A container cannot reach the host, on any network.** From a container on the
+  default bridge and from one on an internal network alike, the hub's real
+  listening port was unreachable at the host's loopback, at the bridge gateway
+  address and at the host's VPN address — five attempts, five failures [measured].
+  rootlesskit's `--disable-host-loopback` is exactly this, by design.
+- **`host-gateway` is a false friend.** `--add-host x:host-gateway` resolves to
+  the `docker0` address of Docker's default bridge — and on this machine that
+  same address is *also* carried by a `docker0` interface left behind in the host
+  namespace by the **stopped, disabled rootful daemon**. So the name resolves,
+  `ping` answers, and the packets never leave rootlesskit's namespace; the hub is
+  not there [measured resolution and unreachability; the two-bridges-one-address
+  reading is inferred from `--detach-netns` plus the host's own interface list].
+  A container that "can see the host gateway" here can see nothing of the host.
+
+**Therefore the implementation**: under a rootless daemon the egress proxy must be
+a **container**, or `network.mode: allowlist` cannot work at all. §7.5.2's phase-1
+default has to be the containerised proxy, with `builtin` available only where the
+hub and the bridges share a network namespace — a rootful daemon — and refused,
+with a readable problem, where they do not. A profile that offers `builtin` on
+this posture would produce runs that start, look sandboxed, and route nothing.
+
+**The containerised topology, on the other hand, works exactly as §7.5.1 draws
+it** [measured]: a container started on the internal network and then given a
+second leg with `docker network connect bridge` holds `eth0` on the internal
+subnet and `eth1` on the bridge, has a default route only through the second, and
+resolves and reaches the public internet; a second container on the internal
+network alone resolves the first **by name** through the embedded resolver and
+reaches it. That is the proxy and the agent, with no host involvement anywhere.
+
+---
+
+### 11b.6 (§7.11) `--tmpfs` is `noexec`, and omitting the flag does not undo it
+
+§7.11's pane command mounts `--tmpfs /tmp:rw,nosuid,size=2g`. Measured, that
+`/tmp` is **not executable** [measured]:
+
+| flag | resulting mount options | a binary copied into `/tmp` |
+|---|---|---|
+| `--tmpfs /tmp` | `rw,nosuid,nodev,noexec,relatime,…` | `Permission denied`, exit **126** |
+| `--tmpfs /tmp:rw,size=64m` | `rw,nosuid,nodev,noexec,relatime,size=65536k,…` | `Permission denied`, exit **126** |
+| `--tmpfs /tmp:exec` | `rw,nosuid,nodev,relatime,…` | runs, exit 0 |
+
+Docker's default for `--tmpfs` is `noexec,nodev`, and — this is the part that
+costs the time — **naming other options does not replace the defaults**: `rw` and
+`size` are added to them, `noexec` stays, and `exec` has to be written out to be
+removed. So the command line as §7.11 has it produces a `/tmp` that breaks
+`npm ci` with native modules (node-gyp execs out of a temporary directory), any
+installer that unpacks and runs a helper, and every tool that writes a script to
+`/tmp` and runs it — with `exit 126` and *"Permission denied"*, which reads as a
+file-mode problem rather than as a mount option. **Therefore the implementation**
+writes `--tmpfs /tmp:rw,exec,nosuid,size=2g`, keeps `noexec` on `/run` where it is
+deliberate, and states the choice in the profile rather than inheriting it.
+
+---
+
+### 11b.7 (§7.11) Docker 29's wordings, verbatim, because the classifier keys on them
+
+§7.11 asks for a verdict classifier in `tmuxVerdict()`'s shape — `ok` /
+`no_daemon` / `unreachable` — and §7.12's log-scanner family (line: *"the log
+scanner (filesystem, resources, docker-in-docker)"*) names the string
+**`Cannot connect to the Docker daemon`** as one of its patterns. Docker 29 does
+not say that any more [measured]:
+
+| situation | what Docker 29.8.0 says, verbatim |
+|---|---|
+| daemon socket absent | `failed to connect to the docker API at unix:///nonexistent/docker.sock; check if the path is correct and if the daemon is running: dial unix /nonexistent/docker.sock: connect: no such file or directory` |
+| socket present, no permission (the stopped rootful one) | `permission denied while trying to connect to the docker API at unix:///var/run/docker.sock` |
+| missing container | `docker inspect` writes `[]` to stdout, `error: no such object: <name>` to stderr, and exits **1** |
+| missing image | `Unable to find image '<ref>' locally` then `docker: Error response from daemon: pull access denied for <repo>, repository does not exist or may require 'docker login'` |
+| name conflict | `docker: Error response from daemon: Conflict. The container name "/<name>" is already in use by container "<id>". You have to remove (or rename) that container to be able to reuse that name.` |
+| unknown runtime | `docker: Error response from daemon: unknown or invalid runtime name: runsc` |
+
+Neither of the first two contains the string `Cannot connect to the Docker
+daemon`, and neither carries the `Is the docker daemon running?` question that
+used to follow it; the first says *"check if the path is correct and if the daemon
+is running"* instead — the same fact, phrased so that no substring of the old
+pattern survives — and the second does not mention the daemon's state at all.
+**A classifier that guesses at vendor strings ages**, and this is the evidence for
+it: the pattern was written against an earlier release's wording and was already
+stale on the first machine that had a daemon to test it against. **Therefore the implementation** classifies on what
+does not move — the exit status, and whether the socket path exists and is
+connectable — and treats the message as something to *print*, not to decide on;
+the string patterns stay only as a hint of last resort, in the same spirit as
+`tmuxVerdict()`, whose whole lesson is that "I could not answer you" must never be
+spent as "it is gone".
+
+The last row is also the only measurement gVisor allowed here (§11b.8).
+
+---
+
+### 11b.8 What is still open, and why
+
+Honest list. Nothing below is a judgement about the technology; each is a thing
+this machine cannot be asked.
+
+- **iron-proxy** (§4.5, §7.5.2). Not installed — not on the `PATH`, not shipped by
+  hermes' package here. Everything §7.5.2 says about its reload endpoint, its
+  per-request JSON log and its credential transform is still [documented] only,
+  and §11.6 (SSE and HTTP/2 through it, under load) is untouched. What *is*
+  measured is the topology it would sit in (§11b.5), which is the half that had a
+  rootless question mark over it.
+- **`secrets.mode: inject`** (§7.8). It requires iron-proxy and TLS termination,
+  so it inherits the line above wholesale. `env` and `none` need nothing that is
+  missing.
+- **gVisor** (§4.1). `runsc` is not on the `PATH` and the daemon lists only
+  `io.containerd.runc.v2` and `runc`. The only measurement possible was the
+  refusal — `unknown or invalid runtime name: runsc` — which at least confirms
+  that `runtime` is a per-container flag the design can set, and that a missing
+  runtime fails at `docker run` with a namable error rather than silently falling
+  back to `runc`.
+- **podman** (§7.7's third row). Still not installed, so `--userns=keep-id` and
+  `:idmap` remain [documented].
+- **AppArmor on containers** (§7.11's `--security-opt`). Confirmed only
+  *negatively*: on this host nothing is confined and the flag is ignored
+  (§11b.1). Whether a rootful daemon on a machine with `docker-default` loaded
+  applies it as documented was not measured, because there is no rootful daemon
+  here to ask.
+- **§11.2 (OAuth token copies).** Unchanged and deliberately so: the experiment
+  needs a throwaway Anthropic account, and the design is arranged never to be
+  exposed to the answer (§11a.7).
+- **And, above all, a real coding agent inside a container.** Not one harness CLI
+  has been run in one. So `docker run -it` as a tmux pane command under a live
+  TUI, the `--detach-keys` question §11a.5 could only mark [documented], the hub
+  socket mounted into the container and `fl-report` writing back through it, the
+  seeded home found by each CLI at its container path, the resume forms from that
+  home (§11.4), and cursor's transcript slug inside it (§11.8) are all exactly as
+  open as they were yesterday. Every measurement in this section is about the
+  *box*; none of them is about the agent in it, and the box being right is the
+  cheaper half.
 
 ---
 

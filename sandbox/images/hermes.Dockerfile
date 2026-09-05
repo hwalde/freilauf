@@ -10,27 +10,28 @@ ARG BASE=freilauf/agent-base:24.04
 FROM ${BASE}
 
 # `HERMES_VERSION` is the name the harness plugin's `sandbox.image.args` uses,
-# and the default is the version pinned there and measured on this machine
-# (`hermes --version` → 0.21.0). What that name MEANS here is the awkward part,
-# and it is worth stating rather than hiding:
+# and it is the version measured on this machine (`hermes --version` → 0.21.0).
+# What that name MEANS here is the awkward part, and the first real build
+# settled it:
 #
 # hermes is NOT a released binary and not a versioned package. It is a git
-# checkout plus a uv-managed virtualenv — measured on this machine, where
-# `hermes --version` reports "Install method: git", a checkout under
-# ~/.hermes/hermes-agent and its own Python 3.11. Its installer pins with
-# `--branch <name>` (a tag is a valid branch argument to `git clone`) and
-# `--commit <sha>`; there is no `--version`. So the version is passed as the
-# branch/tag, and `HERMES_COMMIT` is there for the exact pin — the sha is what
-# `hermes --version` calls "upstream" (f58fcc81 for 0.21.0 on this machine),
-# and it is the only form that is unambiguous.
+# checkout plus a uv-managed virtualenv. Its installer pins with `--branch
+# <name>` and `--commit <sha>`; there is no `--version`, and **`0.21.0` is not
+# a git ref of any kind** — measured, the build failed with `Remote branch
+# 0.21.0 not found in upstream origin` when the version was passed as the
+# branch. The repository's tags are dated (`v2026.8.31`, which is the date
+# `hermes --version` prints in brackets), and the running install is 5258
+# commits past the nearest one, so a tag is not the version either.
 #
-# UNVERIFIED: whether the repository carries a tag for 0.21.0 at all, and
-# whether it is spelled `0.21.0` or `v0.21.0`. If the clone fails on the tag,
-# build with `--build-arg HERMES_BRANCH=main --build-arg HERMES_COMMIT=<sha>`;
-# `HERMES_VERSION` then only names the image.
+# So the ONE pin that is unambiguous is the commit, and it is the default:
+# f58fcc8118… is what this machine's hermes 0.21.0 calls its "upstream" sha.
+# `HERMES_VERSION` names the image and is CHECKED against what the installed
+# CLI reports, so the tag and the contents cannot drift apart silently; moving
+# the pin means moving both. `HERMES_BRANCH` stays `main` because the installer
+# clones a branch and then checks the commit out of it.
 ARG HERMES_VERSION=0.21.0
-ARG HERMES_BRANCH=
-ARG HERMES_COMMIT=
+ARG HERMES_BRANCH=main
+ARG HERMES_COMMIT=f58fcc8118d9db092ad60d363d4a28520e08ac5a
 
 # Read from https://hermes-agent.nousresearch.com/install.sh on 2026-09-05:
 #   --skip-setup   does not run the interactive provider wizard (there is no
@@ -41,44 +42,43 @@ ARG HERMES_COMMIT=
 # The script clones https://github.com/NousResearch/hermes-agent.git, fetches
 # its own `uv`, installs a Python 3.11 under it and writes a `hermes` wrapper.
 #
-# FOUR THINGS TO VERIFY ON THE FIRST REAL BUILD, because none of them could be
-# measured without Docker:
-#  1. where the wrapper lands when the installer runs as root (on this machine
-#     it is $HOME/.local/bin/hermes, so HOME is pinned to /opt/hermes for the
-#     install command alone and the result is symlinked, as the claude layer
-#     does);
-#  2. whether it insists on a TTY anywhere despite --skip-setup;
-#  3. whether it wants to install Node for its browser tool — the base image
-#     already has Node 22, which should satisfy it;
-#  4. **the split.** The installer puts the CHECKOUT under `$HERMES_HOME`,
-#     which it derives as `$HOME/.hermes` — so here it lands in
-#     /opt/hermes/.hermes. At run time $HOME is the per-run seeded home, so
-#     hermes will look for its STATE (config.yaml with Freilauf's attention
-#     hooks, skills, the session store the watcher reads) under
-#     <run home>/.hermes, which is exactly right and is what the plugin seeds.
-#     The generated `hermes` launcher hardcodes the interpreter and entrypoint
-#     as absolute build-time paths (read from the installer), so the code is
-#     found regardless. What is NOT known is whether hermes also expects its
-#     own checkout beneath $HERMES_HOME at run time. If it does, the fix is a
-#     link written by the plugin's `seedHome` into the run's home — NOT an
-#     `ENV HERMES_HOME` here, which would send every run's state back to a
-#     single shared directory in the image and silently break the seeding for
-#     all of them (see the block in base.Dockerfile).
+# WHAT THE FIRST REAL BUILD MEASURED, replacing four guesses that were written
+# here before there was a container runtime on the machine:
+#  1. **The root layout is the installer's own, and it is exactly the split we
+#     wanted.** Read from the script and confirmed by the build: as root on
+#     Linux it puts the CODE at /usr/local/lib/hermes-agent, its uv-managed
+#     Python under /usr/local/share/uv, and writes three launchers — `hermes`,
+#     `hermes-agent`, `hermes-acp` — straight into /usr/local/bin. Nothing has
+#     to be symlinked afterwards, and everything the run needs sits in
+#     /usr/local, which is what `overlay.Dockerfile` copies. (The guess here was
+#     $HOME/.local/bin plus a symlink, which is the NON-root layout.)
+#  2. **No TTY is wanted** with --skip-setup; the build ran through unattended.
+#  3. **Node is not fetched**: the base image's Node 22 satisfies it.
+#  4. **`$HERMES_HOME` holds only DATA, never the code.** With HOME pinned to
+#     /opt/hermes for this command, the installer wrote config.yaml, .env and
+#     its data directories under /opt/hermes/.hermes and put no code there at
+#     all. At run time $HOME is the per-run seeded home, so hermes reads its
+#     STATE from <run home>/.hermes — the config.yaml with Freilauf's attention
+#     hooks, the skills, the session store the watcher reads — while the
+#     launchers hardcode the interpreter and entrypoint as absolute /usr/local
+#     paths, so the code is found whatever HOME is. That is why HOME is pinned
+#     for this one command and why `ENV HERMES_HOME` must never appear: it
+#     would send every run's state back to one shared directory in the image
+#     and silently break the seeding for all of them (see base.Dockerfile).
 USER root
 RUN set -eux; \
     mkdir -p /opt/hermes; \
-    branch="${HERMES_BRANCH:-${HERMES_VERSION:-main}}"; \
     curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh; \
     if [ -n "${HERMES_COMMIT}" ]; then \
-        HOME=/opt/hermes bash /tmp/hermes-install.sh --skip-setup --branch "$branch" --commit "${HERMES_COMMIT}"; \
+        HOME=/opt/hermes bash /tmp/hermes-install.sh --skip-setup \
+            --branch "${HERMES_BRANCH}" --commit "${HERMES_COMMIT}"; \
     else \
-        HOME=/opt/hermes bash /tmp/hermes-install.sh --skip-setup --branch "$branch"; \
+        HOME=/opt/hermes bash /tmp/hermes-install.sh --skip-setup --branch "${HERMES_BRANCH}"; \
     fi; \
     rm -f /tmp/hermes-install.sh; \
-    hermes_bin="$(command -v hermes || echo /opt/hermes/.local/bin/hermes)"; \
-    test -x "$hermes_bin"; \
-    ln -sf "$hermes_bin" /usr/local/bin/hermes; \
-    chmod -R a+rX /opt/hermes
+    test -x /usr/local/bin/hermes; \
+    chmod -R a+rX /opt/hermes /usr/local/lib/hermes-agent; \
+    HOME=/opt/hermes hermes --version | head -1 | grep -F "v${HERMES_VERSION}"
 
 # hermes updates itself by pulling its own checkout, which inside a container
 # is both pointless and a way to make two runs of one image behave differently.
@@ -94,5 +94,7 @@ ENV HERMES_SKIP_UPDATE_CHECK=1
 # home, which the harness plugin writes — nothing about it belongs in the image,
 # and `HERMES_HOME` is deliberately left unset so that `~` keeps meaning the
 # run's own home.
-USER agent
+# NO `USER` LINE — see the block at the top of base.Dockerfile. Under a
+# rootless daemon `--user` is absent, so a `USER` here would be what decides,
+# and uid 1000 inside maps to a subordinate uid that owns none of the mounts.
 WORKDIR /home/agent

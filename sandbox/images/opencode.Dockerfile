@@ -14,15 +14,27 @@ ARG OPENCODE_VERSION=1.18.29
 # npm rather than the `opencode.ai/install` shell script, and that is a
 # deliberate trade: the npm package takes a version, the installer takes
 # whatever is current. `opencode-ai` is the package name the harness plugin's
-# own installHint names (server/harnesses/opencode.mjs), and `npm i -g` puts
-# the launcher in /usr/local/bin, which survives the run's HOME being mounted
-# over. The package ships a platform-specific binary as an optional
-# dependency; on a machine whose architecture opencode does not publish for,
-# this step is where the build fails, loudly, which is the right place.
+# own installHint names (server/harnesses/opencode.mjs). The package ships a
+# platform-specific binary as an optional dependency; on a machine whose
+# architecture opencode does not publish for, this step is where the build
+# fails, loudly, which is the right place.
+#
+# `--prefix /usr/local` is NOT tidiness, and it was measured on the first real
+# build: NodeSource's node is installed into /usr, so `npm prefix -g` answers
+# **/usr** and a plain `npm install -g` puts the launcher in `/usr/bin` and the
+# package in `/usr/lib/node_modules`. The image itself worked — but
+# `overlay.Dockerfile` copies `/opt` and `/usr/local` and NOTHING else, so an
+# overlay built on an operator's toolchain image came out with no `opencode` on
+# its PATH at all [measured: `exec: "opencode": executable file not found`].
+# Copying `/usr/bin` instead is not the answer: that directory is the operator's
+# base image, and a merge over it would overwrite their binaries by name.
+# `opencode.exe` is a native ELF, so nothing in the copied tree needs node to
+# be present in the operator's base either.
 USER root
 RUN set -eux; \
-    npm install -g --no-fund --no-audit "opencode-ai@${OPENCODE_VERSION}"; \
+    npm install -g --prefix /usr/local --no-fund --no-audit "opencode-ai@${OPENCODE_VERSION}"; \
     npm cache clean --force; \
+    test -x /usr/local/bin/opencode; \
     opencode --version
 
 # opencode checks for a newer release on start and writes into its cache to do
