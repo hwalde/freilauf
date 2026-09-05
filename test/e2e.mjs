@@ -7363,8 +7363,9 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       // `hasSandboxStory()` both key on `sandbox:bypassed`, so a run that was
       // going to be contained and now is not showed neither "sandboxed" nor
       // "bypassed" in the overview, and nobody was told.
+      // `runs.started_at` is NOT NULL, so a planned row keeps the timestamp the
+      // fixture wrote; what `runEditAllowed()` reads is the STATUS.
       const geplant = legeLauf('scheduled')
-      db.prepare(`UPDATE runs SET started_at=NULL WHERE id=?`).run(geplant)
       sk.setzeEinstellung('sandbox_allow_bypass', '1')
       const r = await formular(`/api/runs/${geplant}/edit`, { sandbox: '0' })
       gleich(r.status, 200, 'the edit goes through')
@@ -7373,7 +7374,6 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       // The refusal keeps its own rule: with the break glass forbidden, nothing
       // happens and nothing is written down.
       const zweiter = legeLauf('scheduled')
-      db.prepare(`UPDATE runs SET started_at=NULL WHERE id=?`).run(zweiter)
       sk.setzeEinstellung('sandbox_allow_bypass', '0')
       gleich((await formular(`/api/runs/${zweiter}/edit`, { sandbox: '0' })).status, 400, 'refused')
       gleich(db.prepare('SELECT sandbox FROM runs WHERE id=?').get(zweiter).sandbox, 1, 'the run stays contained')
