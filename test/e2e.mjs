@@ -1215,6 +1215,26 @@ try {
     await formular(`/api/runs/${j.runId}/kill`, {})
   })
 
+  // The long condition is the case that was broken in production: pasted in
+  // ONE piece with the command word in front of it, claude collapsed it into a
+  // `[Pasted text #n]` placeholder and submitted it as an ordinary message —
+  // no goal, and nothing said so. The command word is typed now and only the
+  // condition is pasted. The stub is not claude, so what this pins is the
+  // half that IS the hub's: both parts arrive, in order, as one line.
+  await pruefe('a long goal arrives whole — command typed, condition pasted', async () => {
+    const bedingung = 'alle Pruefungen sind gruen und '.repeat(40) + 'die Datei ZIEL.md liegt vor'
+    wahr(bedingung.length > 800, `the condition is past claude's paste threshold (${bedingung.length})`)
+    const j = await laufStarten({ repo_id: repoId, harness: 'claude', prompt: 'E2E-Ziel-lang',
+      goal: bedingung })
+    wahr(!!j.runId, `run started (${JSON.stringify(j)})`)
+    await sessionMerken(j.runId)
+    await warteAuf(async () => (await paneText(j.runId)).includes('[agent sah] /goal alle Pruefungen'),
+      { was: 'the typed command word in front of the pasted condition', timeoutMs: 15_000 })
+    const pane = (await paneText(j.runId)).replace(/\s+/g, ' ')
+    enthaelt(pane, 'die Datei ZIEL.md liegt vor', 'and the END of the condition arrived too — nothing truncated')
+    await formular(`/api/runs/${j.runId}/kill`, {})
+  })
+
   await pruefe('a coding agent that knows no goal simply has none', async () => {
     const j = await laufStarten({ repo_id: repoId, harness: 'cursor', model: 'auto',
       prompt: 'E2E-Ziel-cursor', goal: 'all tests are green' })

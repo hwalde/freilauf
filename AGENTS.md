@@ -559,6 +559,25 @@ lets the detail page answer "did the goal ever arrive?". Only from status
 goal typed in there would **be** the answer. A retry clears the mark — a retry
 is a new session, and a `/goal` typed into the old one went with it.
 
+**And it is TYPED, not pasted — the command word at least.** A paste is not a
+keystroke, and a TUI is entitled to treat the two differently: claude collapses
+a bracketed paste of more than **800 characters** into a `[Pasted text #n]`
+placeholder (measured 2.1.261 — 800 literal, 801 placeholder), and a
+placeholder is never read as a slash command. So the whole line in one paste
+was **submitted as an ordinary message**: the condition arrived at the agent as
+a wall of text, no goal was set, `goal_sent_at` said it had been delivered and
+the detail page agreed — the most expensive shape a fault can take, because
+every layer above it reads as healthy. Measured on run 49a26807, whose 3038-
+character checklist went in as a message; the operator typed the very same text
+in by hand afterwards and it worked, because a human types `/goal` and pastes
+only the argument. `sendCommandToSession()` (util.mjs) does exactly that — the
+prefix as literal keystrokes, the condition as the paste, then Enter — and
+`goalKeys()` splits the line along the plugin's own `goal.typed` declaration.
+Measured: the two never coalesce, not even with no pause between them, and a
+condition pasted as a placeholder reaches the command in full (a code word at
+the very end of a 1516-character condition was acted on). A plugin that
+declares no prefix keeps the single paste it always had.
+
 **Who knows a goal is the plugin's answer, not the form's** (`goal` in the
 harness plugin, see [docs/plugins.md](docs/plugins.md)). The form block writes
 that list into `data-goal-harnesses`, hub.js shows or hides the block on it —
@@ -3770,6 +3789,18 @@ errors (`post_api_request` only fires after success).
   `sendToSession()` is a bracketed paste, a 300 ms pause and then Enter; the
   event is written after all three. A test that greps `capture-pane` and then
   reads the events in the same breath is racing itself.
+- **A pasted slash command is not a slash command.** Claude Code turns a
+  bracketed paste of more than 800 characters into a `[Pasted text #n]`
+  placeholder, and a placeholder is never parsed as a command — so
+  `/goal <3000 characters>` sent the way `sendToSession()` sends everything
+  went off as an ordinary user message, and the run had no goal while
+  `goal_sent_at`, the event log and the detail page all said it had one.
+  Measured on 2.1.261: 800 characters literal, 801 a placeholder; the same
+  text typed by a human works, because a human types the command and pastes
+  only the argument. Whenever the hub drives a TUI's own command, ask whether
+  that TUI distinguishes typing from pasting — `sendCommandToSession()` is the
+  answer here, and the plugin declares the prefix (`goal.typed`) rather than
+  the sender guessing where a command word ends.
 - **A green test only proves the path the test took.** `curl` against the VPN IP
   from the server itself runs over `lo` and says nothing about the firewall;
   check real reachability only from a VPN client.
