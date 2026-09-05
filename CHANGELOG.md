@@ -81,9 +81,20 @@ a day on which nothing was released.
 - `setup/03-install-services.sh` runs `loginctl enable-linger`, so the hub and
   the tmux server start at boot and not at the first login; `SETUP_WITH_AGENT.md`
   says what to do about OS updates and reboots.
+- **Marking text in the browser terminal copies it to the clipboard.** Drag
+  across a live session and the selection is in your system clipboard the
+  moment you let go, and the marking is cleared — the same gesture a terminal
+  on your own machine has. It works for a selection made with the keyboard in
+  tmux's copy-mode too, and in a read-only terminal (where tmux ignores the
+  mouse) by holding Shift while dragging; the page says so under such a
+  terminal. A short toast names every copy, because a clipboard written from a
+  remote session must not be written silently, and it says so as well when the
+  browser refused the clipboard. A request from inside the session to *read*
+  the clipboard is never answered.
 
 ### Changed
 
+- Toasts stay visible while the terminal is in full screen.
 - The opencode plugin in `~/.config/opencode/plugins/freilauf.js` (rewritten
   by `setup/02-install-scripts.sh`, which every deploy runs) no longer reports
   `session.idle` of every session; it reports the root session's busy/idle. A
