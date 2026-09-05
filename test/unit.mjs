@@ -28,6 +28,14 @@ process.env.FREILAUF_OR_ROUTING_JSON = join(sandkasten, 'openrouter-routing.json
 // into — and later DELETE from — the operator's real skill directories.
 process.env.FREILAUF_SKILLS_HOME = join(sandkasten, 'skillhome')
 process.env.FREILAUF_SKILLS_STATE = join(sandkasten, 'skills-installed.json')
+// The sandbox's runtime seam names the binary the hub calls for containers. It
+// is deliberately UNSET here: this suite tests the pure argv builders and the
+// "no runtime on this machine" answers, and a shell that exported the seam
+// while debugging the e2e shim would make those checks probe a real binary —
+// `gleich(bin, 'docker')` then fails for a reason that has nothing to do with
+// the code under test. The two checks that want a seam set it themselves and
+// restore it; a fence at the top is what protects the groups before them.
+delete process.env.FREILAUF_SANDBOX_RUNTIME_BIN
 
 const d = (s) => new Date(s)
 
