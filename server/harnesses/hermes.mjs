@@ -80,6 +80,16 @@ function hermesHome() {
  * The run's own hermes session out of a store, or null. Pure apart from the
  * read, so both `resumeId()` (which resolves the home properly) and the
  * synchronous `resumeCommand()` ask exactly one question in exactly one place.
+ *
+ * `run.workdir_effective` is the HOST path of the worktree, and inside a
+ * container hermes writes its own `cwd` — the path the worktree is MOUNTED at.
+ * So for a sandboxed run this lookup finds nothing and the caller falls back to
+ * `'latest'`, which hermes scopes to the workspace `--in` names and therefore
+ * resolves correctly from inside the box. Deliberately not "fixed" by guessing
+ * the container path here: no hermes CLI has ever been started in a container
+ * on this machine (SANDBOX_RESEARCH.md §11b.8), and a lookup written against an
+ * unmeasured path would be a confident wrong answer where `'latest'` is a
+ * correct one.
  */
 function sessionInStore(run, dbPath) {
   try {

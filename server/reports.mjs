@@ -282,7 +282,12 @@ async function paneClientGone(runId, run, cause, exit) {
     const r = await import('./runner.mjs')
       .then(m => m.resumeRun(runId, { reason: 'sandbox_client_gone' }))
       .catch(err => ({ ok: false, error: err.message }))
-    if (r?.ok) return
+    // `retry` is `launchRun()`'s "could not TRY" — right after a reboot the
+    // tmux server itself may be a beat behind — and the run stays
+    // `resume_pending` for `retryPendingResumes()`. "Could not try" is not
+    // "tried and died", exactly as runner.mjs says: it is a run on its way, so
+    // failing it here would undo the very rule this branch exists for.
+    if (r?.ok || r?.retry) return
     why = r?.error ?? 'the resume was refused'
     addEvent(runId, 'sandbox:client_gone_unrecovered', { error: why })
   }

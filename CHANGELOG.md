@@ -501,6 +501,23 @@ a day on which nothing was released.
   the operator instead of being reported as none. A run's uncommitted state is
   either something somebody looked at or something nobody knows — never
   silently the first because the second was cheaper to write.
+- **A sandboxed run is no longer failed because the container runtime had a
+  moment.** For a sandboxed run the tmux pane is the `docker` client, not the
+  agent — so a restarted daemon, a `permission denied` on the socket or a
+  `docker run` that never got past `runc create` killed the pane, and the run
+  was marked `failed` with a red message about an agent that was either still
+  working inside its container or had never started at all. The hub now asks
+  the **container** what happened, and gives the three answers the rest of the
+  sandbox already gives: the agent's own exit ends the run exactly as before, a
+  client that died hands the run to the ordinary resume path (capped, so a
+  runtime that fails at every start is not retried for ever), and a daemon that
+  does not answer decides nothing — it is recorded once and asked again on the
+  next pass.
+- **A sandboxed hermes run's activity and resume id came out of the operator's
+  own hermes store.** The one source that still read the host's `$HOME`, so the
+  hub looked for the run's session in the wrong file: wrong "last activity",
+  and a `--resume` pointing at somebody else's conversation. It reads the home
+  the agent actually worked in.
 
 ### Security
 
@@ -522,6 +539,19 @@ a day on which nothing was released.
   directory rather than to `$HOME/agents/runs`. Inside a container that path
   does not exist, so the last channel a report had would have written into
   nowhere without saying so.
+- **A flow's shell command no longer takes text the agent wrote without being
+  told to.** A `shell_command` step runs on the hub machine as the hub's user —
+  that is what it is for — but its command is a template, and
+  `{{trigger.run.report}}`, `{{trigger.run.help_text}}`,
+  `{{trigger.run.branch}}`, `{{trigger.run.pr_url}}` and
+  `{{trigger.merge.files}}` all carry text a coding agent wrote, substituted
+  raw. A flow built the obvious way was therefore a route from inside the
+  sandbox to a host shell. The step now names such a variable and refuses,
+  unless **"allow text the agent wrote"** is ticked on that step; ticked, it
+  works exactly as it always did. What the check cannot see — the same text one
+  hop further out, through an `extract` step, another command's output or an
+  HTTP response — is written down in `docs/sandbox.md` rather than pretended
+  away.
 
 ## 2026-09-04
 

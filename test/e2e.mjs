@@ -7986,6 +7986,555 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
     }
   }
 
+  // =========================================================================
+  gruppe('Sandbox: the image a run really used is written into its row')
+  //
+  // Defect 1 of the final review, and the reason five earlier reviews and every
+  // green test missed it: two features landed on the same day and nothing
+  // connected them.
+  //
+  //   * `ensureImage()` learned to resolve the harness's own image, so a repo no
+  //     longer has to name one — and it only RETURNED the answer. The container
+  //     got it; `runs.sandbox_spec` kept saying `image.ref: null`.
+  //   * `checkableSandbox()` (integrate.mjs) reads exactly that column to decide
+  //     whether `repos.merge_check_sandboxed` can be honoured.
+  //
+  // So a repo that ticked the box got `merge_check_host {reason:'run_not_boxed'}`
+  // and ran an untrusted agent's MERGED code on the host as the hub user — the
+  // one execution path the box exists to prevent, wearing a reason word that says
+  // the run was not boxed when it was.
+  //
+  // Defect 2 rides on the same line: the digest was computed here and discarded,
+  // so `image.digest` and the `started` event's `sandbox.digest` were always
+  // null and a resume after an image rebuild ran different bytes in silence.
+  //
+  // This group drives the whole thing through the hub with no image named
+  // anywhere — repo column empty, no override, no profile — because that is the
+  // configuration the defect lived in.
+  {
+    const runtimeMod = await import('../server/sandbox/runtime.mjs')
+    const igMod = await import('../server/integrate.mjs')
+    const shim = sk.docker
+    const g = (dir, ...args) => sh('git', ['-C', dir, ...args])
+    const nutzlastVon = (id, kind) => {
+      const row = db?.prepare('SELECT payload FROM events WHERE run_id=? AND kind=? ORDER BY id DESC LIMIT 1')
+        .get(id, kind)
+      try { return row?.payload ? JSON.parse(row.payload) : null } catch { return null }
+    }
+
+    // The proxy group deliberately leaves the hub down (it is what a deploy looks
+    // like), so this one starts its own.
+    try { await hubStoppen() } catch { /* already down */ }
+    await hubStarten({ sandbox: true })
+    watcherTick = await sk.watcherVorbereiten({ sandbox: true })
+    sk.setzeEinstellung('sandbox_mode', 'available')
+
+    const BILD = await runtimeMod.harnessImage('claude')
+    const ID = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
+    const DIGEST = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
+    // NOTHING names an image: the repo column is cleared, and the shim is simply
+    // told that the harness's own image exists on the machine.
+    db.prepare('UPDATE repos SET sandbox_image=NULL WHERE id=?').run(repoId)
+    {
+      const pfad = join(shim.STATE, 'images.json')
+      let bilder = {}
+      try { bilder = JSON.parse(readFileSync(pfad, 'utf8')) } catch { bilder = {} }
+      bilder[BILD] = { id: ID, repoDigest: `${String(BILD).split(':')[0]}@${DIGEST}` }
+      writeFileSync(pfad, JSON.stringify(bilder))
+    }
+
+    let BOX = null
+
+    await pruefe('a run that names no image is launched from its harness’s own — and the ROW says so', async () => {
+      const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-ImageFreeze', sandbox: 'on' })
+      wahr(!!j.runId, `run started (${JSON.stringify(j).slice(0, 200)})`)
+      BOX = j.runId
+      await sessionMerken(BOX)
+      gleich(lauf(BOX).sandbox, 1, 'the run really is sandboxed')
+      wahr(ereignisse(BOX).includes('sandbox:image_default'),
+        `the harness's own image was resolved (${ereignisse(BOX).join(', ')})`)
+      const spec = JSON.parse(lauf(BOX).sandbox_spec ?? '{}')
+      gleich(spec.image?.ref, BILD,
+        'runs.sandbox_spec names it — this column stayed null for every such run')
+    })
+
+    await pruefe('…and its provenance, which was computed and thrown away', () => {
+      const spec = JSON.parse(lauf(BOX).sandbox_spec ?? '{}')
+      gleich(spec.image?.digest, DIGEST, 'the pinnable digest is frozen with the ref')
+      gleich(spec.image?.id, ID, 'and the local image id, which a locally built image is all that has')
+      wahr(ereignisse(BOX).includes('sandbox:image_resolved'), 'the freeze is an event of its own')
+      const ev = nutzlastVon(BOX, 'started')
+      gleich(ev?.sandbox?.image, BILD, 'the started event names the image')
+      gleich(ev?.sandbox?.digest, DIGEST,
+        'and carries the digest — runtime.mjs’s “that is the whole provenance story”, implemented')
+    })
+
+    await pruefe('a boxed run and an unboxed one are no longer the same answer', () => {
+      const boxed = igMod.checkableSandbox(lauf(BOX))
+      gleich(boxed.reason, null, 'this run can be checked in a container')
+      gleich(boxed.spec.image.ref, BILD, 'out of the image its row now carries')
+      // The state the defect produced, reproduced deliberately.
+      gleich(igMod.checkableSandbox({ sandbox: 1, sandbox_spec: '{"image":{}}' }).reason, 'no_image',
+        'a boxed run with no image is named as that, never as “not boxed”')
+    })
+
+    await pruefe('a hub restart does not silently end a run’s container-event log', async () => {
+      // Defect 3. `startDockerEvents()` had ONE caller — `prepareSandbox()` — and
+      // the tail is a child process of the hub, so every deploy ended the
+      // container-event log of every run in flight for the rest of that run. On
+      // an installation that deploys 164 times in 30 days that is most of the
+      // audit trail, and the file gives no sign of it: it simply stops.
+      //
+      // THIS PROCESS IS THE RESTARTED HUB. Its `eventTails` map is empty, which
+      // is exactly the state a deploy leaves behind, and it shares the database
+      // and the runs directory with the hub that started the run.
+      const facade = await import('../server/sandbox/index.mjs')
+      wahr(typeof facade.restoreDockerEvents === 'function',
+        'server/sandbox/index.mjs exports restoreDockerEvents()')
+      const name = lauf(BOX).sandbox_container || `fl-${BOX}`
+      gleich(lauf(BOX).status, 'running', 'the run is still in flight — a finished one is owed nothing')
+
+      // The daemon says nothing: the hub learned nothing, and acting on nothing
+      // is the mistake `tmuxVerdict()` exists to prevent.
+      shim.container(name, { state: 'running', labels: { 'freilauf.hub': 'e2e-hub' } })
+      shim.reset()
+      let out = null
+      try { shim.mode('unreachable'); out = await facade.restoreDockerEvents() } finally { shim.mode('ok') }
+      gleich(out.restored.length, 0, 'an unreachable daemon restores nothing')
+      falsch(ereignisse(BOX).includes('sandbox:audit_restored'), 'and claims nothing was restored')
+
+      // A container that has exited has no events left to write.
+      shim.container(name, { state: 'exited' })
+      shim.reset()
+      out = await facade.restoreDockerEvents()
+      falsch(out.restored.includes(BOX), 'a container that is not running gets no tail either')
+      falsch(ereignisse(BOX).includes('sandbox:audit_restored'), 'still nothing claimed')
+
+      // Positive evidence: the container is running, so the tail comes back.
+      shim.container(name, { state: 'running' })
+      shim.reset()
+      out = await facade.restoreDockerEvents()
+      wahr(out.restored.includes(BOX), `the run in flight got its tail back (${JSON.stringify(out)})`)
+      wahr(ereignisse(BOX).includes('sandbox:audit_restored'), 'and the run says so')
+      const zeilen = readFileSync(join(SB, 'runs', BOX, 'docker-events.jsonl'), 'utf8')
+      enthaelt(zeilen, 'freilauf.tail_restarted',
+        'the GAP is written into the audit file — nothing can reconstruct those minutes, and saying so is the honest answer')
+      // The spawn happens a microtask later (the tail resolves the runtime module
+      // first), so this waits for it rather than racing it.
+      await warteAuf(() => shim.order().includes('events'),
+        { was: 'a real `docker events` tail being spawned', timeoutMs: 10_000 })
+      wahr(shim.order().includes('events'), `and a real tail was spawned (${JSON.stringify(shim.order())})`)
+    })
+
+    await pruefe('the merge check of such a run runs in a CONTAINER, not on the host', async () => {
+      // The box, and a check that says nothing about the code — what is under
+      // test is WHERE it ran.
+      db.prepare(`UPDATE repos SET merge_mode='hub', merge_check=?, merge_check_sandboxed=1,
+                  finish_timeout_min=15 WHERE id=?`).run('true', repoId)
+      const row = lauf(BOX)
+      const dir = row.workdir_effective
+      wahr(!!dir && existsSync(join(dir, '.git')), `the run has a working copy (${dir})`)
+      writeFileSync(join(dir, 'boxed-work.md'), 'work done in a box\n')
+      await g(dir, 'add', '-A')
+      await g(dir, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'Boxed run commit')
+
+      const sauber = await g(dir, 'status', '--porcelain')
+      gleich(sauber.stdout.trim(), '', 'the working copy is clean — a dirty one never reaches the check at all')
+
+      shim.reset()
+      await hol(`/api/runs/${BOX}/report`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'done', text: 'boxed run finished' }),
+      })
+      try {
+        await warteAuf(() => lauf(BOX).status === 'done', { was: 'the boxed run being merged', timeoutMs: 60_000 })
+      } catch {
+        const r = lauf(BOX)
+        wahr(false, `the run did not come through: status=${r.status} finish=${r.finish_state} `
+          + `merge=${r.merge_status} events=${ereignisse(BOX).join(',')}`)
+      }
+
+      const arten = ereignisse(BOX)
+      wahr(arten.includes('merge_check_sandboxed'),
+        `the check was containerised (${arten.filter(k => k.startsWith('merge_check')).join(', ') || 'nothing at all'})`)
+      falsch(arten.includes('merge_check_host'),
+        'and NOT run on the host — that event, with reason "run_not_boxed", was the defect')
+      const argv = shim.argvFor('run').find(a => String(a[a.indexOf('--name') + 1] ?? '').startsWith('fl-check-'))
+      wahr(!!argv, `a check container was really started (${JSON.stringify(shim.order())})`)
+      const bildArg = argv.find(a => String(a).startsWith(BILD))
+      wahr(!!bildArg, `out of the run’s own image (${JSON.stringify(argv?.slice(-4))})`)
+      enthaelt(bildArg, `@${DIGEST}`,
+        'digest-pinned — the check runs against the same bytes the agent ran on, which is only '
+        + 'possible because the launch froze the digest into the row')
+      gleich(nutzlastVon(BOX, 'merge_check_sandboxed')?.network, 'allowlist',
+        'under the run’s own network policy')
+    })
+
+    db.prepare(`UPDATE repos SET merge_mode='off', merge_check='', merge_check_sandboxed=0 WHERE id=?`).run(repoId)
+
+    await pruefe('an ACCEPTED loosening is an event too, and it names what got weaker', async () => {
+      // Defect 4. "Every weakening is a visible, named event — never a silent
+      // setting" was the acceptance criterion, and only a REFUSED loosening of a
+      // LOCKED path was ever written down — so a weakening was visible exactly
+      // when it did not happen. A repo swapping Balanced for Open network emitted
+      // nothing at all.
+      db.prepare('UPDATE repos SET sandbox_overrides=? WHERE id=?')
+        .run(JSON.stringify({ network: { mode: 'open' }, filesystem: { readOnlyRoot: false } }), repoId)
+      try {
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-Weakened', sandbox: 'on' })
+        wahr(!!j.runId, `run started (${JSON.stringify(j).slice(0, 200)})`)
+        await sessionMerken(j.runId)
+        const arten = ereignisse(j.runId)
+        wahr(arten.includes('sandbox:policy_weakened'),
+          `the loosening is on the record (${arten.join(', ')})`)
+        const roh = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='sandbox:policy_weakened'`)
+          .all(j.runId).map(r => { try { return JSON.parse(r.payload) } catch { return {} } })
+        const pfade = roh.map(p => p.path)
+        wahr(pfade.includes('network.mode'), `Balanced → Open network is named (${JSON.stringify(pfade)})`)
+        wahr(pfade.includes('filesystem.readOnlyRoot'), 'and so is the writable root filesystem')
+        const netz = roh.find(p => p.path === 'network.mode')
+        gleich(netz.from, 'allowlist', 'the event says what it was')
+        gleich(netz.to, 'open', '…and what it became')
+        gleich(netz.by, 'repo', 'and which layer did it')
+        db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+      } finally {
+        db.prepare('UPDATE repos SET sandbox_overrides=? WHERE id=?').run('{}', repoId)
+      }
+    })
+
+    // Back off again, so nothing after this group inherits the box or the mode.
+    sk.setzeEinstellung('sandbox_mode', 'off')
+  }
+
+  // =========================================================================
+  gruppe('Sandbox: a REAL image answers what a stub cannot')
+  //
+  // The group above proves the wiring against the shim, which is right for the
+  // wiring. It cannot prove the one thing defects 1 and 2 are really about: that
+  // the ref this hub resolves for a harness NAMES AN IMAGE THAT EXISTS, and that
+  // the daemon has a digest to freeze for it. A stub answers whatever its own
+  // fixture says — and the evaluator's own words about the last two blockers are
+  // that both "passed every stub".
+  //
+  // So this asks the real daemon, and SKIPS ITSELF GREEN without one.
+  {
+    const fsMod = await import('node:fs')
+    const runtime = await import('../server/sandbox/runtime.mjs')
+
+    const gemerkt = {}
+    for (const k of ['FREILAUF_SANDBOX_RUNTIME_BIN', 'FREILAUF_SANDBOX_DOCKER_HOST', 'FREILAUF_SANDBOX_RUNTIME_FORCE']) {
+      gemerkt[k] = process.env[k]; delete process.env[k]
+    }
+    const shimDir = gemerkt.FREILAUF_SANDBOX_RUNTIME_BIN
+      ? gemerkt.FREILAUF_SANDBOX_RUNTIME_BIN.replace(/\/[^/]+$/, '') : null
+    const echtesDocker = String(process.env.PATH ?? '').split(':')
+      .filter(d => d && d !== shimDir)
+      .map(d => join(d, 'docker'))
+      .find(p => { try { return fsMod.statSync(p).isFile() } catch { return false } }) ?? null
+    if (echtesDocker) process.env.FREILAUF_SANDBOX_RUNTIME_BIN = echtesDocker
+    runtime._runtimeInfoCacheReset()
+
+    let daemon = null
+    if (echtesDocker) { try { daemon = await runtime.runtimeInfo('docker', { force: true }) } catch { daemon = null } }
+
+    let harness = null, ref = null, seen = null
+    if (daemon?.available) {
+      for (const h of ['claude', 'opencode', 'cursor', 'hermes']) {
+        const r = await runtime.harnessImage(h).catch(() => null)
+        if (!r) continue
+        const d = await runtime.imageDigest(r, { runtime: 'docker' })
+        if (d.ok) { harness = h; ref = r; seen = d; break }
+      }
+    }
+
+    try {
+      if (!seen) {
+        uebersprungen('the harness’s own image exists, and the daemon has provenance for it',
+          'no container daemon with a Freilauf agent image on this machine')
+      } else {
+        await pruefe('the harness’s own image exists, and the daemon has provenance for it', () => {
+          // The half a stub cannot answer: `harnessImage()` is the rule the LAUNCH
+          // uses when a repo names no image, and this is a real `image inspect` of
+          // its answer.
+          wahr(ref.startsWith('freilauf/agent-'), `${harness} resolves to ${ref}`)
+          wahr(!!seen.id, 'the daemon knows an image id for it — the provenance a local build has')
+          wahr(seen.digest === null || String(seen.digest).startsWith('sha256:'),
+            `and a repo digest where there is one (${seen.digest})`)
+        })
+
+        await pruefe('a spec resolved that way really starts a container of that image', async () => {
+          // `ensureImage()`'s answer, taken to the daemon: the frozen spec has to
+          // be a document `buildRunArgv()` can build a real `docker run` out of,
+          // digest and all. That is what a resume reads back after a restart.
+          const SB3 = fsMod.mkdtempSync(join((await import('node:os')).tmpdir(), 'fl-img-'))
+          const RID = `e2eimg${Date.now().toString(36)}`
+          const W = join(SB3, 'work'); fsMod.mkdirSync(W)
+          const H = join(SB3, 'home'); fsMod.mkdirSync(H)
+          const RD = join(SB3, 'run'); fsMod.mkdirSync(RD)
+          const GD = join(SB3, 'repo.git'); fsMod.mkdirSync(GD); fsMod.writeFileSync(join(GD, 'config'), '')
+          const MK = join(SB3, 'mask'); fsMod.writeFileSync(MK, '')
+          const name = runtime.containerName(RID)
+          const ident = runtime.hubIdentity(daemon)
+          const frozen = { runtime: 'docker', image: { ref, digest: seen.digest, id: seen.id },
+            network: { mode: 'none' }, retention: 'run' }
+          const { bin, args } = runtime.buildRunArgv(frozen, {
+            runId: RID, hubId: 'e2e-img', tty: false,
+            workdir: W, homeDir: H, runDir: RD, repoGitDir: GD, emptyFile: MK,
+            ...ident, env: { FL_RUN_ID: RID }, cmd: ['sh', '-c', 'echo boxed'],
+          })
+          try {
+            const r = await sh(bin, ['run', '--rm', ...args.slice(1)],
+              { timeout: 120_000, env: runtime.runtimeEnv('docker') })
+            wahr(r.ok, `the frozen spec runs (${String(r.stderr || '').trim().split('\n').pop() || 'ok'})`)
+            enthaelt(r.stdout, 'boxed', 'and the container really executed')
+          } finally {
+            await sh(echtesDocker ?? 'docker', ['rm', '-f', name], { timeout: 60_000 })
+            try { fsMod.rmSync(SB3, { recursive: true, force: true }) } catch {}
+          }
+        })
+      }
+    } finally {
+      for (const [k, v] of Object.entries(gemerkt)) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v
+      }
+      runtime._runtimeInfoCacheReset()
+    }
+  }
+
+  // =========================================================================
+  gruppe('Sandbox: the default lock, on an installation that configured none')
+  //
+  // Every sandbox group above SETS `sandbox_lock` before it asks anything of
+  // the layering — which is exactly how the defect survived six reviews. The
+  // machinery was measured and the DEFAULT VALUE it operates on was not:
+  // `sandbox_lock` shipped as an absent settings row, `resolveSandboxSpec()`
+  // narrows only `if (i > 0 && pathLocked(path, lock))`, and so out of the box
+  // a repo could hand its container the operator's own `.git` read-write and
+  // nothing anywhere would refuse it.
+  //
+  // This group therefore configures NOTHING. It deletes the row, which is the
+  // one state a fresh installation is really in, and drives the real routes.
+  {
+    try { await hubStoppen() } catch { /* the group above may leave it down */ }
+    await hubStarten({ sandbox: true })
+    sk.setzeEinstellung('sandbox_mode', 'available')
+
+    /** A fresh installation: nobody has ever written the two rows. */
+    const frisch = () => sk.db.prepare('DELETE FROM settings WHERE key IN (?, ?)')
+      .run('sandbox_lock', 'sandbox_lock_seeded')
+    const wert = (key) => sk.db.prepare('SELECT value FROM settings WHERE key=?').get(key)?.value ?? null
+    const repoZeile = () => db.prepare('SELECT * FROM repos WHERE id=?').get(repoId)
+    const repoFelder = () => {
+      const row = repoZeile()
+      return {
+        name: row.name, path: row.path, base_branch: row.base_branch,
+        worktree_extras: row.worktree_extras ?? '', prompt: row.prompt ?? '',
+        sandbox_default: 'inherit', sandbox_profile_id: '', sandbox_image: '',
+      }
+    }
+
+    await pruefe('the settings page seeds the lock and PRINTS it, instead of an empty box', async () => {
+      frisch()
+      const html = await (await hol('/settings/sandbox')).text()
+      enthaelt(html, 'name="sandbox_lock"', 'the field is still there to edit')
+      for (const pfad of ['filesystem.repoGit', 'network.mode', 'secrets.mode', 'filesystem.extraMounts']) {
+        enthaelt(html, `<code>${pfad}</code>`, `and the page names ${pfad} as locked`)
+      }
+      const gespeichert = JSON.parse(wert('sandbox_lock') ?? '[]')
+      wahr(gespeichert.includes('filesystem.repoGit'), `the row was written (${gespeichert.length} paths)`)
+      // An installation that was ALREADY sandboxing just became stricter, and a
+      // policy that tightens silently is the failure the whole module is
+      // written against. The note carries the day it happened.
+      const seed = JSON.parse(wert('sandbox_lock_seeded') ?? 'null')
+      wahr(!!seed?.at, 'the moment is written down')
+      enthaelt(html, String(seed.at).slice(0, 10), 'and the page says so, with the date')
+    })
+
+    await pruefe('and a repo that configured nothing may no longer loosen the wall', async () => {
+      frisch()
+      const felder = repoFelder()
+      for (const [doc, pfad] of [
+        ['{"filesystem":{"repoGit":"rw"}}', 'filesystem.repoGit'],
+        ['{"network":{"mode":"open"}}', 'network.mode'],
+        ['{"filesystem":{"readOnlyRoot":false}}', 'filesystem.readOnlyRoot'],
+        ['{"innerSandbox":"weak"}', 'innerSandbox'],
+      ]) {
+        const r = await formular('/repos/edit?id=' + repoId, { ...felder, sandbox_overrides: doc }, { alsBrowser: true })
+        gleich(r.status, 400, `${pfad} is refused with no lock configured at all`)
+        enthaelt(await r.text(), pfad, 'and the sentence names the path')
+      }
+      gleich(repoZeile().sandbox_overrides ?? '{}', '{}', 'and nothing of it was stored')
+    })
+
+    await pruefe('…and the audit-only checkbox is refused with it, because it is the same egress', async () => {
+      // `auditOnly: true` lets everything through and only writes down what it
+      // WOULD have blocked, so as egress it IS `mode: 'open'`. Locking one and
+      // leaving the other would be a door with a window beside it — which is
+      // why this costs a shipped checkbox (and the "Audit" and "Open network"
+      // profiles) until the operator takes the path out of the lock.
+      frisch()
+      const felder = repoFelder()
+      const audit = await formular('/repos/edit?id=' + repoId,
+        { ...felder, sandbox_overrides: '', sandbox_audit_only: '1' }, { alsBrowser: true })
+      gleich(audit.status, 400, 'switching the wall to advisory is refused out of the box')
+      enthaelt(await audit.text(), 'network.auditOnly',
+        'the sentence names the path — and, since this refusal is the one an operator meets first, '
+        + 'the string itself names Settings → Sandbox as the place it is changed')
+      gleich(repoZeile().sandbox_overrides ?? '{}', '{}', 'nothing was stored')
+    })
+
+    await pruefe('…while narrowing, and everything outside the wall, still goes through', async () => {
+      frisch()
+      const felder = repoFelder()
+      const enger = await formular('/repos/edit?id=' + repoId,
+        { ...felder, sandbox_overrides: '{"network":{"mode":"none"}}' }, { alsBrowser: true })
+      gleich(enger.status, 303, 'tightening the network is not a refusal')
+      // The default is a LIST, not an inversion: an allowlist a repo may fill,
+      // resources it may spend, an image it may name. A layer that may change
+      // nothing is not a layer.
+      const frei = await formular('/repos/edit?id=' + repoId,
+        { ...felder, sandbox_overrides: '{"network":{"allow":["api.example"]},"resources":{"cpus":2}}' },
+        { alsBrowser: true })
+      gleich(frei.status, 303, 'and what is not the wall is still the repo’s own')
+      enthaelt(String(repoZeile().sandbox_overrides), 'api.example', 'it really stored it')
+      await formular('/repos/edit?id=' + repoId, { ...felder, sandbox_overrides: '' }, { alsBrowser: true })
+    })
+
+    await pruefe('saving the form makes the list the operator’s own — note gone, empty stays empty', async () => {
+      frisch()
+      await hol('/settings/sandbox')                       // seeds
+      wahr(!!wert('sandbox_lock_seeded'), 'the note is standing')
+      const r = await formular('/settings/sandbox', { sandbox_lock: 'network.mode' }, { alsBrowser: true })
+      gleich(r.status, 303, 'the form saves')
+      gleich(wert('sandbox_lock_seeded'), '', 'and the note is done — pressing Save is having seen it')
+      gleich(JSON.parse(wert('sandbox_lock')).join(), 'network.mode', 'the operator’s own list stands')
+
+      // An emptied list is a decision, and it is never seeded over again.
+      await formular('/settings/sandbox', { sandbox_lock: '' }, { alsBrowser: true })
+      const html = await (await hol('/settings/sandbox')).text()
+      gleich(JSON.parse(wert('sandbox_lock') ?? 'null').length, 0, 'cleared stays cleared across a page render')
+      falsch(html.includes('<code>filesystem.repoGit</code>'), 'and the page prints no lock')
+    })
+
+    sk.setzeEinstellung('sandbox_mode', 'off')
+    sk.setzeEinstellung('sandbox_lock', '')
+    await hubStoppen()
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: a dead pane is not a dead agent')
+  {
+    // `_pane_died` had no sandbox branch. For a sandboxed run the pane IS the
+    // `docker` client, so a restarted daemon, a `permission denied` on the
+    // socket or a `docker run` that never got past `runc create` killed the
+    // pane — and the run was set `failed` with a red notification, which is the
+    // acceptance criterion "infrastructure trouble never makes runs count as
+    // ended" broken in the one place the tri-state discipline was missing.
+    //
+    // What is under test is the DISTINCTION, so all four cases are driven
+    // through the same route with only the daemon's answer changed: an ordinary
+    // agent exit must behave exactly as it always did, and nothing that is the
+    // infrastructure's fault may end a run.
+    const shim = sk.docker
+    await hubStarten({ sandbox: true })
+    watcherTick = await sk.watcherVorbereiten({ sandbox: true })
+    const runtimeMod = await import('../server/sandbox/runtime.mjs')
+    const sessMod = await import('../server/sessions.mjs')
+    const { handleReport } = await import('../server/reports.mjs')
+    runtimeMod._runtimeInfoCacheReset()
+    sessMod._resetRuntimeModule()
+    shim.reset()
+    shim.mode('ok')
+
+    /** A run the watcher would find with a dead pane: sandboxed unless told otherwise. */
+    const legeLauf = ({ sandbox = 1 } = {}) => {
+      const id = randomUUID()
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                   sandbox,sandbox_container,workdir_effective,tmux_session,started_at)
+                  VALUES(?,?,'claude','pane death','keiner',45,'running',?,?,?,?,datetime('now'))`)
+        .run(id, repoId, sandbox, sandbox ? `fl-${id.slice(0, 8)}` : null, REPO, `fl-cc-pane-${id.slice(0, 8)}`)
+      mkdirSync(join(SB, 'runs', id), { recursive: true })
+      return id
+    }
+    const lauf = (id) => db.prepare('SELECT * FROM runs WHERE id=?').get(id)
+    const arten = (id) => db.prepare('SELECT kind FROM events WHERE run_id=? ORDER BY id').all(id).map(e => e.kind)
+    // `docker inspect --format` of a running / an exited container, in the four
+    // tab-separated fields containerState() asks for.
+    const laeuft = 'out true\t0\tfalse\trunning'
+
+    await pruefe('an ordinary agent exit still ends the run, exactly as before', async () => {
+      const id = legeLauf()
+      // `--rm` took the container with the agent's own exit: the daemon answers,
+      // and it answers that there is no such container.
+      shim.say('inspect', 'notfound')
+      await handleReport(id, { kind: '_pane_died', exit: '42' }, 'internal')
+      const r = lauf(id)
+      gleich(r.status, 'failed', 'the run is failed')
+      gleich(r.exit_code, 42, 'with the exit status the pane carried')
+      wahr(arten(id).includes('pane_died'), 'and the pane_died event is written')
+      shim.clearSay('inspect')
+    })
+
+    await pruefe('an unsandboxed run never asks a daemon at all', async () => {
+      const vorher = shim.calls().length
+      const id = legeLauf({ sandbox: 0 })
+      await handleReport(id, { kind: '_pane_died', exit: '1' }, 'internal')
+      gleich(lauf(id).status, 'failed', 'byte for byte the old behaviour')
+      gleich(shim.calls().length, vorher, 'and not one runtime invocation was spent on it')
+    })
+
+    await pruefe('a daemon that does not answer decides nothing, and says so once', async () => {
+      const id = legeLauf()
+      shim.say('inspect', 'unreachable')
+      await handleReport(id, { kind: '_pane_died', exit: '1' }, 'internal')
+      gleich(lauf(id).status, 'running', 'the run is NOT failed — not knowing is a reason to wait')
+      falsch(arten(id).includes('pane_died'), 'and nothing claims the pane death was the agent’s')
+      wahr(arten(id).includes('sandbox:pane_unclear'), 'the fact is recorded')
+      // The watcher fires `_pane_died` on every 30-second pass for as long as the
+      // pane stays dead; one event per pass would be a flood.
+      await handleReport(id, { kind: '_pane_died', exit: '1' }, 'internal')
+      await handleReport(id, { kind: '_pane_died', exit: '1' }, 'internal')
+      gleich(arten(id).filter(k => k === 'sandbox:pane_unclear').length, 1, 'and recorded once, not once a pass')
+      gleich(lauf(id).status, 'running', 'still running after three passes')
+      shim.clearSay('inspect')
+    })
+
+    await pruefe('the client died and the agent did not: the run is resumed, never failed', async () => {
+      const id = legeLauf()
+      shim.say('inspect', laeuft)
+      await handleReport(id, { kind: '_pane_died', exit: '1' }, 'internal')
+      const r = lauf(id)
+      falsch(r.status === 'failed', `the run is not failed (${r.status}; ${arten(id).join(', ')})`)
+      const k = arten(id)
+      wahr(k.includes('sandbox:client_gone'), 'the client’s death is recorded as the client’s')
+      falsch(k.includes('pane_died'), 'and not as the agent’s')
+      // The recovery path that already exists: resumeRun() writes `session_lost`
+      // and either launches or defers. Either is a run still on its way.
+      wahr(k.includes('session_lost') || r.resume_pending === 1 || r.status === 'deferred',
+        `and it was handed to the resume path (${k.join(', ')})`)
+      shim.clearSay('inspect')
+    })
+
+    await pruefe('exit 125 is infrastructure even where the container is demonstrably absent', async () => {
+      // docker's own reserved code: the client never started the container, so
+      // asking the daemon afterwards can only ever say "no such container" —
+      // which for every other exit code is the ordinary end.
+      const id = legeLauf()
+      shim.say('inspect', 'notfound')
+      await handleReport(id, { kind: '_pane_died', exit: '125' }, 'internal')
+      const k = arten(id)
+      falsch(lauf(id).status === 'failed', 'a failed `runc create` does not fail the run')
+      wahr(k.includes('sandbox:client_gone'), 'it is recorded as the client')
+      falsch(k.includes('pane_died'), 'and never as the agent')
+      shim.clearSay('inspect')
+    })
+
+    // The seam goes back the way this group found it — a fixture that outlives
+    // its own test is the trap the container-path group already has a comment
+    // about.
+    await hubStoppen()
+    watcherTick = await sk.watcherVorbereiten({ sandbox: false })
+  }
 
 } catch (err) {
   console.log(`\nAborted: ${err.stack}`)
