@@ -483,11 +483,32 @@ export function validateDefinition(def, trigger = null, translate = null) {
       if (!s) { problems.push(`${at}: unknown step type '${step?.type}'`); return }
       const props = step.properties ?? {}
       for (const f of s.fields) {
-        if (!f.required) continue
+        // The showIf skip gates BOTH rules below, so it comes first: a field the
+        // designer is not showing is a field nobody was asked about.
         if (f.showIf && Object.entries(f.showIf).some(([k, v]) => props[k] !== v)) continue
-        const v = props[f.key]
-        const empty = v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length)
-        if (empty) problems.push(`${step.name || step.type}: '${f.key}' is required`)
+        if (f.required) {
+          const v = props[f.key]
+          const empty = v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length)
+          if (empty) problems.push(`${step.name || step.type}: '${f.key}' is required`)
+        }
+        // A field may carry a rule of its own — today only the sandbox overrides
+        // document, and it is there because that document is a WALL rather than a
+        // convenience: a typo in it used to mean the step ran with less protection
+        // than it asked for, and the only thing that noticed was the run, at 03:00.
+        // So the designer that saves the flow refuses it, at the moment somebody
+        // is there to read the reason. It takes the whole props bag rather than
+        // the value, because the baseline it judges against depends on
+        // `props.repoId` — a field of the step, not of this descriptor.
+        //
+        // The try/catch is not decoration: a field rule is code a plugin may one
+        // day supply, and a throwing rule must not turn saving a flow into a 500.
+        if (typeof f.validate === 'function') {
+          try {
+            for (const m of f.validate(props) ?? []) problems.push(`${step.name || step.type}: ${m}`)
+          } catch (err) {
+            problems.push(`${step.name || step.type}: ${err?.message ?? err}`)
+          }
+        }
       }
       if (s.component === 'switch') {
         for (const b of s.branches) walk(step.branches?.[b] ?? [], `${at}.${b}`)
