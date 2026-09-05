@@ -939,17 +939,39 @@ const MERGE_CHECK_MAXBUFFER = 8 * 1024 * 1024
 
 /**
  * Does this run carry enough of a sandbox for a check container to be built out
- * of it? `runs.sandbox` says it was WANTED; the frozen spec's image is what a
- * container is actually made from. A run that wanted a sandbox and was bypassed
- * carries no image, and is therefore an unsandboxed run for this purpose — the
- * same reading `sandbox:bypassed` puts on its record.
+ * of it — and if not, WHY not? The reason is the whole point of the return shape:
+ * "the run was never boxed" and "the run was boxed and I cannot build a container
+ * out of its record" are opposite answers, and this function used to give both of
+ * them as a bare `null`.
+ *
+ * What that cost is defect 1 of the review. `ensureImage()` resolved the harness's
+ * default image at launch and nothing wrote it back, so a sandboxed run's row said
+ * `image.ref: null`; this function read that as "not boxed", the caller fell
+ * through to the host, and the event said `run_not_boxed` about a run that had
+ * spent its whole life in a container. A security control that degrades into the
+ * execution it prevents, wearing a reason that is not true.
+ *
+ * So: `{ spec }` when a container can be described, `{ reason }` when it cannot.
+ * Only two reasons mean the host — the run really did work unconfined, so its
+ * merged code executing here is not a new exposure. Every other reason is a
+ * REFUSAL at the call site, which is what the section banner above promises.
  */
-function checkableSandbox(run) {
-  if (env('SANDBOX_OFF') === '1') return null
-  if (!run?.sandbox) return null
+export function checkableSandbox(run) {
+  // The hub's own kill switch. The run's container did not exist under it either,
+  // so this is the "not boxed" family — but it is named as itself, never as a
+  // property of the run.
+  if (env('SANDBOX_OFF') === '1') return { spec: null, reason: 'sandbox_off' }
+  // Never wanted, or bypassed: the break-glass writes `runs.sandbox = 0` and
+  // `sandbox:bypassed`, which is the same reading this puts on it.
+  if (!run?.sandbox) return { spec: null, reason: 'run_unsandboxed' }
   const spec = specOf(run)
-  return spec?.image?.ref ? spec : null
+  if (!spec) return { spec: null, reason: 'no_spec' }
+  if (!spec.image?.ref) return { spec: null, reason: 'no_image' }
+  return { spec, reason: null }
 }
+
+/** The two reasons that really mean "this run's agent already worked on the host". */
+const HOST_CHECK_REASONS = new Set(['sandbox_off', 'run_unsandboxed'])
 
 /**
  * The image reference a spec names, digest-pinned when it has one. Repeated
@@ -1123,10 +1145,23 @@ async function runMergeCheck(run, repo, check, dir) {
   const shOpts = { cwd: dir, timeout: MERGE_CHECK_TIMEOUT_MS, maxBuffer: MERGE_CHECK_MAXBUFFER }
   if ((repo?.merge_check_sandboxed ?? 0) !== 1) return { r: await sh('bash', ['-lc', check], shOpts) }
 
-  const spec = checkableSandbox(run)
+  const { spec, reason } = checkableSandbox(run)
   if (!spec) {
-    addEvent(run.id, 'merge_check_host', { reason: run?.sandbox ? 'run_not_boxed' : 'run_unsandboxed' })
-    return { r: await sh('bash', ['-lc', check], shOpts) }
+    // A run that really was unconfined: the host, with the reason named — never
+    // the blanket `run_not_boxed` this used to write about boxed runs too.
+    if (HOST_CHECK_REASONS.has(reason)) {
+      addEvent(run.id, 'merge_check_host', { reason })
+      return { r: await sh('bash', ['-lc', check], shOpts) }
+    }
+    // A run that WAS boxed and whose record cannot describe a container. This is
+    // the refusal the section banner promises for "no runtime, no daemon, no
+    // image": nothing merges, and the operator gets the reason and the button.
+    addEvent(run.id, 'merge_check_refused', { reason })
+    return {
+      refused: `merge_check_sandboxed is on and this run WAS sandboxed, but its record cannot describe a check `
+        + `container (${reason === 'no_image' ? 'its frozen spec names no image' : 'it carries no sandbox spec'}) — `
+        + 'nothing was merged, and the check was NOT run on the host',
+    }
   }
 
   let rt

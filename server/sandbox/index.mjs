@@ -163,6 +163,25 @@ export const CONTAINER_HUB_SOCKET = '/run/freilauf/hub.sock'
  * where the profile allows it; and what is still not there is a refusal with the
  * image named — before the clone, the home and the network are created, which is
  * the promise the start order makes.
+ *
+ * AND THE ANSWER IS AN ANSWER, not a local variable. Two things hung on that,
+ * and both were broken for as long as this function only RETURNED its result:
+ *
+ *  - the resolved ref reached the container and nothing else. `runs.sandbox_spec`
+ *    still said `image.ref: null`, so every reader of the ROW — the merge check's
+ *    `checkableSandbox()` first of all — read a sandboxed run as one that carries
+ *    no image, and the one control built on that reading degraded into the host
+ *    execution it exists to prevent.
+ *  - the digest was computed here (`seen`) and thrown away, so
+ *    `runs.sandbox_spec.image.digest` and the `started` event's `sandbox.digest`
+ *    were **always null** and runtime.mjs's "that is the whole provenance story"
+ *    was not implemented anywhere. An image rebuilt between a run's start and its
+ *    resume then ran different bytes under one run id and nothing said so.
+ *
+ * Both are the same fix: resolve it, record it, and let `prepareSandbox()` freeze
+ * the answer into the row (`freezeSpec()`). `digest` is the pinnable repo digest
+ * and stays null for a locally built image; `id` is the local image id, which is
+ * always there and is the provenance a machine building its own agent images has.
  */
 async function ensureImage(spec, run) {
   const rt = await need('runtime')
@@ -190,7 +209,52 @@ async function ensureImage(spec, run) {
   if (!seen.ok && seen.reason === 'no_such_image') {
     throw new Error(t('sandbox.launch.image_missing', { image: ref }))
   }
+  // The provenance, from the only moment it can be read: the daemon has just
+  // been asked about this exact ref. A pin the operator wrote is kept where the
+  // daemon has nothing to say (a locally built image has no repo digest at all).
+  resolved.image.digest = seen.digest ?? (String(spec.image?.digest ?? '').trim() || null)
+  resolved.image.id = seen.id ?? null
   return resolved
+}
+
+/**
+ * Write the resolved spec back into `runs.sandbox_spec` — the row's own answer to
+ * "what did this run really run as".
+ *
+ * It is the ROW and not only the returned object because the row is what every
+ * later reader has: the merge check (`checkableSandbox()` in integrate.mjs), the
+ * reconfiguration, the break-glass, a resume after a restart, the sandbox page.
+ * Before this, the only writers of that column were `changePolicy()`,
+ * `reconfigureAndResume()` and the break-glass — so a run that was never
+ * reconfigured carried the spec as it stood BEFORE the launch resolved anything,
+ * `image.ref` included.
+ *
+ * Idempotent by comparison, so a resume that changed nothing writes nothing and
+ * says nothing; and the event fires exactly where there is something to say —
+ * including the case this whole record exists for, an image whose digest moved
+ * between a run's start and its resume.
+ */
+function freezeSpec(runId, spec) {
+  let before = null
+  try {
+    const row = db.prepare('SELECT sandbox_spec FROM runs WHERE id=?').get(runId)
+    const next = JSON.stringify(spec)
+    if (row?.sandbox_spec === next) return false
+    try { before = row?.sandbox_spec ? JSON.parse(row.sandbox_spec) : null } catch { before = null }
+    db.prepare('UPDATE runs SET sandbox_spec=? WHERE id=?').run(next, runId)
+  } catch { return false }
+  const was = before?.image ?? {}
+  const now = spec?.image ?? {}
+  // "The bytes moved" is a fact of its own and is named as one: a digest or an
+  // image id that was known and is now a different one is exactly the silent
+  // change a resume used to make.
+  const moved = (was.digest && now.digest && was.digest !== now.digest)
+    || (was.id && now.id && was.id !== now.id)
+  addEvent(runId, 'sandbox:image_resolved', {
+    image: now.ref ?? null, digest: now.digest ?? null, id: now.id ?? null,
+    ...(moved ? { changed_from: { digest: was.digest ?? null, id: was.id ?? null } } : {}),
+  })
+  return true
 }
 
 /**
@@ -391,18 +455,33 @@ export async function planSandbox({ repo, agent = null, def = {} } = {}) {
   const runProfileId = def.sandboxProfileId ?? agent?.sandbox_profile_id ?? null
   const effectiveProfileId = runProfileId ?? repo?.sandbox_profile_id ?? null
 
-  const resolved = spec.resolveSandboxSpec({
+  const layers = {
     hub: { spec: sandboxHubSpec(), lock: hubLock() },
     repo: {
       profile: profileOf(repo?.sandbox_profile_id),
       overrides: parseOverrides(repo?.sandbox_overrides),
       spec: repo?.sandbox_image ? { image: { ref: repo.sandbox_image } } : null,
     },
-    agentOrRun: {
-      profile: runProfileId && runProfileId !== repo?.sandbox_profile_id ? profileOf(runProfileId) : null,
-      overrides: parseOverrides(def.sandboxOverrides ?? agent?.sandbox_overrides),
+    // Agent and run are TWO layers, not one. They used to be collapsed with a
+    // `??`, which meant a run's overrides document REPLACED its agent's instead
+    // of narrowing under it — so a run could undo a tightening its agent had
+    // made, which is the opposite of what §7.3's table says and of what
+    // "override per agent AND per run" asks for. `resolveSandboxSpec()` takes
+    // both; `agentOrRun` survives as the alias for callers that really do have
+    // only one (the dry run, the tests).
+    agent: {
+      profile: agent?.sandbox_profile_id && agent.sandbox_profile_id !== repo?.sandbox_profile_id
+        ? profileOf(agent.sandbox_profile_id) : null,
+      overrides: parseOverrides(agent?.sandbox_overrides),
     },
-  })
+    run: {
+      profile: def.sandboxProfileId
+        && def.sandboxProfileId !== (agent?.sandbox_profile_id ?? repo?.sandbox_profile_id)
+        ? profileOf(def.sandboxProfileId) : null,
+      overrides: parseOverrides(def.sandboxOverrides),
+    },
+  }
+  const resolved = spec.resolveSandboxSpec(layers)
 
   plan.sandbox = 1
   plan.profileId = effectiveProfileId
@@ -413,7 +492,92 @@ export async function planSandbox({ repo, agent = null, def = {} } = {}) {
   // looks saved and is not in force is the "field that looks like it saved and
   // did not" failure, one layer out.
   for (const r of plan.refused) plan.events.push(['sandbox:override_refused', r])
+  // …and so does every loosening that was ACCEPTED. Only the refused ones were
+  // written down before, which meant a weakening was visible exactly when it did
+  // not happen: a repo swapping Balanced for Open network, or an agent writing
+  // `{"filesystem":{"readOnlyRoot":false}}` on a path nobody locked, went in
+  // silently. "Every weakening is a visible, named event — never a silent
+  // setting" is the acceptance criterion, and this is its other half.
+  for (const w of layerWeakenings(spec, layers)) plan.events.push(['sandbox:policy_weakened', w])
   return plan
+}
+
+/**
+ * Which spec paths carry no ORDER, so a change to them is not a weakening.
+ *
+ * The ordering itself lives in spec.mjs (`SHAPES`/`MODE_ORDERS`) and is asked
+ * through `narrow()` rather than restated here — two readings of "is this
+ * stricter" is the drift that module exists against. What this list says is the
+ * one thing `narrow()` cannot: for a path it cannot order, a *refusal* to narrow
+ * means "unorderable", not "looser". These five are identity and plumbing — which
+ * image, which runtime, which proxy engine, the plugin knobs, the export format —
+ * and an image ref moving from `null` to a name is not a policy getting weaker.
+ *
+ * A prefix match, so `image.ref` and `image.digest` come along with `image`.
+ */
+// Asked of spec.mjs, which owns the ordering, rather than restated here. This
+// used to be a hand-kept list of unordered paths — a second reader of a fact
+// one module already knows, and the kind that goes stale the day somebody adds
+// a field. `isOrdered()` answers from the same shape table `narrow()` uses, so
+// a new path classifies itself. Still a prefix walk, so `image.ref` and
+// `image.digest` inherit `image`'s answer.
+const unorderedPath = (specMod, path) => {
+  if (typeof specMod?.isOrdered !== 'function') return false   // cannot say → do not silence
+  const parts = String(path).split('.')
+  for (let i = parts.length; i > 0; i--) {
+    if (specMod.isOrdered(parts.slice(0, i).join('.'))) return false
+  }
+  return true
+}
+
+/**
+ * Every path one document loosens against another, as `{path, by, from, to}`.
+ * `narrow(path, from, to).refused` IS the verdict — the same call the resolver
+ * makes when a lock stands — so a tightening produces nothing and an unchanged
+ * path produces nothing.
+ */
+export function specWeakenings(specMod, before, after, by) {
+  const out = []
+  if (!specMod?.specPaths || !specMod?.narrow) return out
+  for (const path of specMod.specPaths(after ?? {})) {
+    if (unorderedPath(specMod, path)) continue
+    const from = specValueAt(before, path)
+    const to = specValueAt(after, path)
+    if (JSON.stringify(from ?? null) === JSON.stringify(to ?? null)) continue
+    if (!specMod.narrow(path, from, to).refused) continue
+    out.push({ path, by, from: from ?? null, to: to ?? null })
+  }
+  return out
+}
+
+/**
+ * The layering walked one layer at a time, so a weakening can be attributed to
+ * the layer that made it. The baseline is the shipped default — a hub whose
+ * operator configured a looser policy has weakened it, and "never a silent
+ * setting" names that case explicitly.
+ *
+ * Four pure resolutions of a document that is already in memory; nothing is
+ * asked of a daemon and nothing is stored.
+ */
+function layerWeakenings(specMod, layers) {
+  const out = []
+  if (!specMod?.resolveSandboxSpec) return out
+  try {
+    const acc = {}
+    let before = specMod.resolveSandboxSpec({}).spec
+    // One entry per LAYER, so a weakening is attributed to whoever made it —
+    // and `agentOrRun` walks alongside for the callers that still pass one
+    // combined layer. A layer the caller did not give is skipped, so naming all
+    // four here costs nothing and a future fifth is one entry.
+    for (const [key, name] of [['hub', 'hub'], ['repo', 'repo'], ['agent', 'agent'], ['run', 'run'], ['agentOrRun', 'run']]) {
+      if (!layers[key]) continue
+      acc[key] = layers[key]
+      const after = specMod.resolveSandboxSpec(acc).spec
+      out.push(...specWeakenings(specMod, before, after, name))
+      before = after
+    }
+  } catch { return out }
+  return out
 }
 
 /**
@@ -540,6 +704,11 @@ export async function prepareSandbox(run, repo, opts = {}) {
     // 1. The spec, as the row holds it — and the image it starts from, which is
     //    the one step of the order that used to have no answer at all here.
     const spec = await ensureImage(await runSpec(run), run)
+    // …and FROZEN INTO THE ROW right here, before anything else can fail. The
+    // row is what the merge check, a resume and the pages read; a resolution
+    // that lived only in this function's return value is defect 1 of the review
+    // (see `freezeSpec()` and `ensureImage()`).
+    freezeSpec(runId, spec)
 
     // 2. The working copy. `makeSandboxClone()` reuses an existing directory —
     //    a retry and a resume both find their own half-finished work there, and
@@ -1293,6 +1462,69 @@ function startDockerEvents(runId, container, spec) {
   })()
 }
 
+/**
+ * THE TAIL COMES BACK AFTER A RESTART, and until this existed it did not.
+ *
+ * `startDockerEvents()` had exactly one caller — `prepareSandbox()` — and the
+ * tail is a CHILD PROCESS of the hub. So every deploy ended the container-event
+ * log of every run in flight, silently, for the rest of that run: `create` and
+ * `start` were already written, and `die`, its exit code, `oom` and every `exec`
+ * afterwards were not. On an installation that deploys 164 times in 30 days that
+ * is most of the audit trail, and the file gives no sign of it — it simply stops.
+ *
+ * The repair is `restoreProxies()`'s, one file over: the watcher's own pass calls
+ * that function every 30 s, and it is the precedent for "repair what a restart
+ * took away". Three rules, the same three:
+ *
+ *  - **idempotent** — a run this process already holds a tail for is skipped, so
+ *    the steady state is one indexed query and nothing else.
+ *  - **verdict-aware** — a daemon that did not answer means the hub learned
+ *    nothing, and acting on nothing is the mistake `tmuxVerdict()` exists to
+ *    prevent. Only a container the daemon positively reports as RUNNING gets a
+ *    tail: one that is gone has no events left to write.
+ *  - **only for runs in flight**, and only where the profile asked for the log at
+ *    all (`audit.dockerEvents`).
+ *
+ * The gap itself is written into the file (`freilauf.tail_restarted`) rather than
+ * papered over. Nothing can reconstruct the events of the minutes the hub was
+ * down; an audit that says so is honest, and one that quietly resumes is not.
+ */
+export async function restoreDockerEvents() {
+  const out = { restored: [], skipped: [] }
+  if (hubSandboxMode() === 'off') return out
+  let rows = []
+  try {
+    rows = db.prepare(`SELECT id, sandbox_container, sandbox_spec FROM runs
+                       WHERE sandbox=1 AND status IN ('running','waiting_help') AND tmux_closed_at IS NULL`).all()
+  } catch { return out }
+  if (!rows.length) return out
+  const rt = await sibling('runtime')
+  for (const row of rows) {
+    if (eventTails.has(row.id)) { out.skipped.push(row.id); continue }
+    try {
+      const spec = await runSpec(row)
+      if (spec?.audit?.dockerEvents === false) { out.skipped.push(row.id); continue }
+      if (!rt?.containerState) { out.skipped.push(row.id); continue }
+      const container = row.sandbox_container || containerName(row.id)
+      const state = await rt.containerState(container, { runtime: spec.runtime })
+      const verdict = state?.verdict ?? (rt.runtimeVerdict ? rt.runtimeVerdict(state) : 'ok')
+      // Not knowing is a reason to wait a pass; a container that is not running
+      // has nothing left to say.
+      if (verdict !== 'ok' || !state?.running) { out.skipped.push(row.id); continue }
+      startDockerEvents(row.id, container, spec)
+      if (!eventTails.has(row.id)) { out.skipped.push(row.id); continue }
+      appendAuditFile(row.id, 'docker-events.jsonl', {
+        at: new Date().toISOString(), run: String(row.id),
+        status: 'freilauf.tail_restarted', id: null, from: null, exit_code: null,
+        attributes: { container, note: 'container events between the hub restart and this line were not recorded' },
+      })
+      addEvent(row.id, 'sandbox:audit_restored', { file: 'docker-events.jsonl', container })
+      out.restored.push(row.id)
+    } catch { out.skipped.push(row.id) }
+  }
+  return out
+}
+
 /** Stop the tail. Idempotent, and safe for a run that never had one. */
 function stopDockerEvents(runId) {
   if (!eventTails.has(runId)) return
@@ -1502,8 +1734,15 @@ export async function teardownSandbox(run, opts = {}) {
  * is right at launch is destructive here.
  */
 export async function restoreProxies() {
-  if (hubSandboxMode() === 'off') return { restored: [], skipped: [] }
-  const out = { restored: [], skipped: [] }
+  if (hubSandboxMode() === 'off') return { restored: [], skipped: [], tails: { restored: [], skipped: [] } }
+  const out = { restored: [], skipped: [], tails: { restored: [], skipped: [] } }
+  // The OTHER thing a hub restart takes away from a live run: its container-event
+  // tail (see `restoreDockerEvents()`). It rides on this function's caller rather
+  // than on a timer of its own for the reason that caller's own banner gives — a
+  // second timer over the same set of runs is the drift `reconcileContainers()`
+  // warns about — and it is fail-soft, because a missing audit line must never
+  // cost a run its proxy.
+  try { out.tails = await restoreDockerEvents() } catch { /* fail-soft */ }
   let rows = []
   try {
     rows = db.prepare(
@@ -1832,7 +2071,20 @@ export async function changePolicy(run, patch, by = 'user') {
 
   const kind = classifyPolicyPatch(patch)
   const after = spec.normalizeSpec(mergeDeep(before, patch ?? {}))
-  const diff = { paths: [...kind.live, ...kind.restart], live: kind.live, restart: kind.restart }
+  // THE VALUES, not only the path names. `diff` used to be three lists of dotted
+  // strings, so the event for "allow this host" said `network.allow` changed and
+  // never said to what — while the DENY button one function away named the host
+  // in its own event. An audit that cannot say what was allowed is not an audit.
+  const changes = [...kind.live, ...kind.restart].map(path => ({
+    path, from: specValueAt(before, path) ?? null, to: specValueAt(after, path) ?? null,
+  }))
+  const weakened = specWeakenings(spec, before, after, by)
+  const diff = { paths: [...kind.live, ...kind.restart], live: kind.live, restart: kind.restart, changes }
+  // A loosening of a running run's policy is the same fact as a loosening at
+  // launch and carries the same event, so one query answers "was this run ever
+  // weakened, and by whom" over both. A tightening writes nothing here — it is
+  // still recorded as `sandbox:policy_changed` like every other change.
+  if (weakened.length) addEvent(row.id, 'sandbox:policy_weakened', { by, paths: weakened })
 
   if (kind.needsRestart) return reconfigureAndResume(row, after, { by, reason: 'policy_change', diff })
 

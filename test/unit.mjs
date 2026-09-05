@@ -10944,6 +10944,10 @@ process.stdout.write(JSON.stringify(out))
     const LOOSENINGS = [
       ['runtime', {}, { runtime: 'podman' }],
       ['network.mode', {}, { network: { mode: 'open' } }],
+      // Egress-equivalent to `mode: 'open'` — everything goes through and the
+      // proxy only writes down what it would have blocked. Locking one and not
+      // the other would be a door with a window beside it.
+      ['network.auditOnly', {}, { network: { auditOnly: true } }],
       ['network.deny', { network: { deny: ['evil.example'] } }, { network: { deny: [] } }],
       ['network.denyUpstreamCidrs', {}, { network: { denyUpstreamCidrs: [] } }],
       ['filesystem.repoGit', {}, { filesystem: { repoGit: 'rw' } }],
@@ -10986,13 +10990,15 @@ process.stdout.write(JSON.stringify(out))
       gleich(r.spec.image.ref, 'freilauf/agent-claude:1', 'the repo named its image')
       gleich(r.spec.resources.cpus, 2, 'the run its cpus')
       gleich(r.spec.network.allow.join(), 'api.example', 'and the host it needs to reach')
-      // The rollout knob stays reachable from below on purpose: the repo form
-      // and the run form ship a checkbox for it, and a default that makes a
-      // shipped control refuse every time it is ticked is worse than the hole.
-      falsch(spec.pathLocked('network.auditOnly', lock), 'audit-only is deliberately not locked')
-      const audit = spec.resolveSandboxSpec({ hub: { spec: {}, lock }, repo: { overrides: { network: { auditOnly: true } } } })
-      gleich(audit.refused.length, 0, 'so the adoption path still works')
-      gleich(audit.spec.network.auditOnly, true, 'and it really applies')
+      // …and the OTHER direction of a locked flag is still free: what the lock
+      // forbids is loosening, not touching. `auditOnly` back to false, an
+      // allowlist down to none, a mount dropped.
+      const enger = spec.resolveSandboxSpec({
+        hub: { spec: { network: { auditOnly: true } }, lock },
+        repo: { overrides: { network: { auditOnly: false } } },
+      })
+      gleich(enger.refused.length, 0, 'switching audit-only OFF from below is a tightening')
+      gleich(enger.spec.network.auditOnly, false, 'and it applies')
       // A narrowing of a LOCKED path still goes through — that is the whole
       // point of a lock rather than a freeze.
       const eng = spec.resolveSandboxSpec({ hub: { spec: {}, lock }, run: { overrides: { network: { mode: 'none' } } } })

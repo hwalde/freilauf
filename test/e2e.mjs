@@ -6709,6 +6709,13 @@ export default {
     if (fehlt) uebersprungen('a reconfiguration marks resume_pending BEFORE the container is stopped', fehlt)
     else {
       await pruefe('a reconfiguration marks resume_pending BEFORE the container is stopped', async () => {
+        // This check reconfigures by ADDING an extra mount, and `filesystem.extraMounts`
+        // is in the hub's DEFAULT lock — every entry there is a host path crossing the
+        // wall, so a lower layer adding one is a loosening and is refused. That refusal
+        // is correct and stays; what was wrong is this check inheriting whatever lock
+        // the checks above left standing. It states its own precondition instead, the
+        // way the Adopt check next door had to learn to.
+        sk.setzeEinstellung('sandbox_lock', '')
         const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-Reconfigure' })
         await sessionMerken(j.runId)
         db.prepare('UPDATE runs SET sandbox=1, sandbox_container=? WHERE id=?').run(`fl-${j.runId}`, j.runId)
@@ -8178,6 +8185,13 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       // LOCKED path was ever written down — so a weakening was visible exactly
       // when it did not happen. A repo swapping Balanced for Open network emitted
       // nothing at all.
+      //
+      // The lock is cleared for this one check on purpose: a LOCKED loosening is
+      // refused and already has its own event and its own group ("the floor
+      // holds"). What had no event at all is the loosening nobody locked — the
+      // ordinary case on an installation whose operator cleared the list.
+      const lockVorher = db.prepare("SELECT value FROM settings WHERE key='sandbox_lock'").get()?.value ?? null
+      sk.setzeEinstellung('sandbox_lock', '[]')
       db.prepare('UPDATE repos SET sandbox_overrides=? WHERE id=?')
         .run(JSON.stringify({ network: { mode: 'open' }, filesystem: { readOnlyRoot: false } }), repoId)
       try {
@@ -8199,6 +8213,8 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
         db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now') WHERE id=?`).run(j.runId)
       } finally {
         db.prepare('UPDATE repos SET sandbox_overrides=? WHERE id=?').run('{}', repoId)
+        if (lockVorher === null) db.prepare("DELETE FROM settings WHERE key='sandbox_lock'").run()
+        else sk.setzeEinstellung('sandbox_lock', lockVorher)
       }
     })
 

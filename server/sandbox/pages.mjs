@@ -25,7 +25,7 @@ import { t } from '../i18n.mjs'
 import { layout, problemPage } from '../pages.mjs'
 import { redirect } from '../web-helpers.mjs'
 import {
-  DEFAULT_SPEC, HUB_MODES, SANDBOX_TRISTATE, normalizeSpec, pathLocked,
+  DEFAULT_SPEC, HUB_MODES, SANDBOX_TRISTATE, normalizeSpec, narrow, pathLocked,
   validateSandboxOverrides,
 } from './spec.mjs'
 import { engineCapabilities, proxyEngine } from './proxy.mjs'
@@ -182,6 +182,49 @@ async function baselineAbove(repoId, lock) {
   } catch { return null }
 }
 
+/** When the hub seeded its default lock, and under which mode. `null` = acknowledged. */
+async function lockSeed() {
+  try {
+    const rd = await import('../run-def.mjs')
+    return rd.sandboxLockSeed?.() ?? null
+  } catch { return null }
+}
+
+/**
+ * WHAT IS LOCKED, printed — because an empty textarea is not an answer to
+ * "which paths may a repo not loosen?", and the field shipped empty for long
+ * enough that reading it as "nothing, deliberately" was the wrong reading.
+ *
+ * Two states, and both are said out loud:
+ *  - a list, rendered as chips, so the operator sees the policy that is in
+ *    force rather than having to parse their own textarea;
+ *  - EMPTY, which is a legitimate choice and a loud one: with nothing locked
+ *    every field of a profile — the network mode, the secrets mode, the
+ *    operator's own `.git` — may be loosened by a repo, an agent or a run.
+ *
+ * And where the hub seeded the default onto an installation that was ALREADY
+ * running sandboxed runs, it says so with the date: that installation became
+ * stricter on an upgrade it did not ask for, and the one thing worse than the
+ * change is not being told about it. Seeded under `off` there was nothing to
+ * change and nothing is said. The note goes away when the form is saved (see
+ * `sandboxSettingsSave()`) — pressing Save is the operator having seen it.
+ *
+ * Everything it renders is PHRASING content — spans and `<code>`, no `<p>` and
+ * no `<ul>`: it sits inside the field's `<label>`, next to `dim()`'s own span,
+ * and a block element there is the same parser surprise as the `<form>` inside
+ * a `<p>` that AGENTS.md has an entry about.
+ */
+function lockState(lock, seed) {
+  const list = lock.length
+    ? `<span class="dim">${e(t('sandbox.settings.lock_current'))} ${lock.map(x => `<code>${e(x)}</code>`).join(' ')}</span>`
+    : `<span class="warn">${e(t('sandbox.settings.lock_none'))}</span>`
+  const at = String(seed?.at ?? '').slice(0, 10)
+  const note = seed && seed.mode && seed.mode !== 'off' && at
+    ? `<span class="warn">${e(t('sandbox.settings.lock_seeded', { date: at }))}</span>`
+    : ''
+  return `${note}${list}`
+}
+
 /** Is the sandbox switched on at all? The one question every block asks first. */
 export async function sandboxOn(s = settings()) {
   return (await hubPolicy(s)).mode !== 'off'
@@ -289,9 +332,9 @@ export async function sandboxRepoFromForm(b, problems) {
   const p = await hubPolicy()
   const raw = String(b.sandbox_overrides ?? '').trim()
   // A repo's overrides narrow the HUB, so the hub layer alone is the baseline.
+  const against = await baselineAbove(null, p.lock)
   const { overrides, problems: specProblems } = validateSandboxOverrides(raw, {
-    lock: p.lock, allowedMountRoots: p.allowedMountRoots,
-    against: await baselineAbove(null, p.lock),
+    lock: p.lock, allowedMountRoots: p.allowedMountRoots, against,
   })
   for (const pr of specProblems) problems.push(t(pr.key, pr.params))
 
@@ -305,6 +348,22 @@ export async function sandboxRepoFromForm(b, problems) {
   const auditOnly = b.sandbox_audit_only === '1' || b.sandbox_audit_only === 'on'
   const merged = { ...(overrides ?? {}) }
   if (auditOnly) merged.network = { ...(merged.network ?? {}), auditOnly: true }
+  // THE CHECKBOX IS A LAYER DOCUMENT TOO, and it is merged AFTER the validation
+  // above — so what the hub locked was judged for the typed JSON and not for
+  // the box beside it. `network.auditOnly` is in the shipped default lock (it
+  // allows everything and only writes down what it would have blocked, which as
+  // egress is `mode: 'open'` under another name), so without this the box sailed
+  // past the form and was refused at the LAUNCH instead: a control that looks
+  // like it saved and did not, which is the failure this whole file is written
+  // against. Asked with `narrow()`, the same function the resolver applies, so
+  // the form and the launch cannot come to different answers.
+  if (auditOnly && pathLocked('network.auditOnly', p.lock)) {
+    const steht = against?.network?.auditOnly ?? DEFAULT_SPEC.network.auditOnly
+    const r = narrow('network.auditOnly', steht, true)
+    if (r.refused) {
+      problems.push(t('sandbox.problem.locked', { path: 'network.auditOnly', kept: JSON.stringify(r.value) }))
+    }
+  }
 
   const profileRaw = String(b.sandbox_profile_id ?? '').trim()
   return {
@@ -683,6 +742,37 @@ function profileList(profiles) {
   </tbody></table></div>`
 }
 
+/**
+ * CAN THIS DAEMON RUN THE PROFILE BEING SAVED? Asked with `engineUsable()`, the
+ * one predicate the launch (`ensureProxy()`) and Settings → Sandbox already ask.
+ *
+ * The profile editor was the third place and asked nothing, so on a rootless
+ * daemon an operator could save `network.mode: 'allowlist'` with the built-in
+ * engine — a CONNECT listener on the host that no container on an internal
+ * network can dial — and find out at the launch of the first run that picked
+ * the profile. Three readers of "may this combination run", two of them
+ * agreeing, is the drift `run-def.mjs` exists to prevent.
+ *
+ * The question is asked exactly where the launch asks it and not one field
+ * wider: `open` and `none` start no proxy at all (`ensureProxy()` returns
+ * before the check), so a profile that names either is saved without an opinion.
+ * The engine is the profile's own where it names one, otherwise the hub's —
+ * which is what the run would resolve to, since `sandboxHubSpec()` puts that
+ * setting into the hub layer.
+ *
+ * A refusal, not a warning, and rendered through `problemPage()` like every
+ * other refusal here: `engineUsable()` answers `ok` for everything it does not
+ * know (no runtime info, a daemon that did not say whether it is rootless), so
+ * what reaches this list is a combination the launch would certainly refuse.
+ */
+async function engineProblems(overrides, p) {
+  const mode = overrides?.network?.mode ?? DEFAULT_SPEC.network.mode
+  if (mode === 'open' || mode === 'none') return []
+  const engine = overrides?.network?.engine ?? p.proxyEngine ?? DEFAULT_SPEC.network.engine
+  const fit = pick(await mod('index'), ['engineUsable'])?.(engine, await runtimeState()) ?? { ok: true }
+  return fit.ok ? [] : [fit.error ?? t('sandbox.settings.engine_unusable')]
+}
+
 /** The profile editor — one profile per page, like a favorite, and for the same reason. */
 export async function sandboxProfilePage(req, res, url) {
   const id = url.searchParams.get('id')
@@ -720,6 +810,7 @@ export async function sandboxProfileSave(req, res, url, formBody) {
     against: await baselineAbove(null, p.lock),
   })
   for (const pr of specProblems) problems.push(t(pr.key, pr.params))
+  for (const pr of await engineProblems(overrides, p)) problems.push(pr)
   if (problems.length) return problemPage(req, res, t('sandbox.page.profile'), problems, back)
   // `saveProfile()` REFUSES rather than throwing — a profile naming
   // `secrets.mode: inject` with an engine that cannot inject, a name already
@@ -810,7 +901,8 @@ export async function pageSandboxSettings(req, res, url) {
       ${dim(t('sandbox.settings.runtime_hint'))}</label>
     <label>${e(t('sandbox.settings.lock'))}
       <textarea name="sandbox_lock" rows="6" spellcheck="false" placeholder="network.allow&#10;secrets.mode">${e(p.lock.join('\n'))}</textarea>
-      ${dim(t('sandbox.settings.lock_hint'))}</label>
+      ${dim(t('sandbox.settings.lock_hint'))}
+      ${lockState(p.lock, await lockSeed())}</label>
     <label>${e(t('sandbox.settings.mount_roots'))}
       <textarea name="sandbox_allowed_mount_roots" rows="4" spellcheck="false" placeholder="~/projects">${e(p.allowedMountRoots.join('\n'))}</textarea>
       ${dim(t('sandbox.settings.mount_roots_hint'))}</label>
@@ -896,6 +988,12 @@ export async function sandboxSettingsSave(req, res, url, formBody) {
     // that reads them reads one shape.
     if (key === 'sandbox_lock' || key === 'sandbox_allowed_mount_roots') {
       setSetting(key, JSON.stringify(parseList(b[key])))
+      // The lock the operator has now looked at is theirs, whatever they left in
+      // the box — so the "this was seeded onto a running installation" note is
+      // done. Clearing rather than deleting, because `sandboxLockSeed()` reads
+      // an empty row as "nothing to say" and a deleted row is what the seed
+      // itself looks for one setting over.
+      if (key === 'sandbox_lock') setSetting('sandbox_lock_seeded', '')
       continue
     }
     if (key === 'sandbox_proxy_engine') { setSetting(key, proxyEngine(String(b[key] ?? ''))); continue }

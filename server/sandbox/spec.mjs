@@ -121,6 +121,110 @@ export const DEFAULT_SPEC = {
   audit: { proxyLog: true, dockerEvents: true, export: 'jsonl' },
 }
 
+/**
+ * WHAT A FRESH INSTALLATION LOCKS, and why a default was needed at all.
+ *
+ * The narrowing rule below is only worth as much as the list it is applied to,
+ * and that list — `sandbox_lock` — used to ship EMPTY. Every path was therefore
+ * an unconditional overwrite: out of the box a repo, an agent or a run could
+ * hand its container `filesystem.repoGit: 'rw'` (the operator's real object
+ * store, writable), turn `network.mode` back to `open`, or put the real API key
+ * back inside the container with `secrets.mode: 'env'`. "The operator locked the
+ * network" meant "until somebody's agent overrides it" — the exact sentence the
+ * header of this file says the rule exists against.
+ *
+ * The alternative considered and rejected was inverting the rule (locked unless
+ * the hub unlocks). It cannot be right here: `shapeOf()` answers `fixed` for
+ * every path this module cannot order by strictness, so an inverted default
+ * would freeze `image.ref`, `image.pull` and `audit.export` as well — a repo
+ * could no longer name its own image, which is the layering's most ordinary use.
+ * A layer that may change nothing is not a layer.
+ *
+ * So: a seeded list, which the operator sees and may change (`sandboxLock()` in
+ * run-def.mjs writes it once, Settings → Sandbox prints it). The line it draws
+ * is **the lock owns the WALL, the lower layers own what passes through it**:
+ *
+ *   runtime                      a lower layer must not swap `runsc` for
+ *                                `docker` — that is the kernel the whole
+ *                                posture rests on, and it is a hub setting.
+ *   network.mode                 `open` is not a narrower allowlist, it is no
+ *                                allowlist.
+ *   network.auditOnly            `true` allows everything and only writes down
+ *                                what it WOULD have blocked, so as egress it is
+ *                                `network.mode: 'open'` under another name.
+ *                                Locking one without the other would be a lock
+ *                                with a window beside the door.
+ *   network.deny                 the hosts the operator named as never; a lower
+ *                                layer may still APPEND (deny-shaped).
+ *   network.denyUpstreamCidrs    the proxy's SSRF fence — loopback, RFC 1918,
+ *                                link-local, the cloud metadata address. While
+ *                                the hub leaves it at the string `'default'` a
+ *                                lower layer may not touch it at all (a string
+ *                                and a list cannot be ordered, so `narrow()`
+ *                                refuses both directions); the hub writing an
+ *                                explicit list makes appending work normally.
+ *   filesystem.repoGit           `rw` hands the container the operator's own
+ *                                object store. The single worst path in the
+ *                                document, and the one the removed `copy` enum
+ *                                had already opened once.
+ *   filesystem.extras            `rw` lets the container write the HOST's linked
+ *                                extras — a shared `.venv`, a reference
+ *                                checkout — outside the run's own directory.
+ *   filesystem.extraMounts       every entry is a host path crossing the wall.
+ *                                Allow-shaped, so under the lock a lower layer
+ *                                may only drop what the hub granted.
+ *   filesystem.readOnlyRoot      `false` makes the container's whole root
+ *                                writable, which is where tampering and
+ *                                persistence live.
+ *   secrets.mode                 back to `env` puts the real credential inside
+ *                                the very container a profile promised held only
+ *                                a placeholder — "the worst lie this feature
+ *                                could tell" (index.mjs).
+ *   innerSandbox                 `weak`/`full` needs `CLONE_NEWUSER` and `mount`
+ *                                INSIDE the container, i.e. a custom seccomp
+ *                                profile and `apparmor=unconfined` — it opens
+ *                                the outer wall, which is the one this hub bets
+ *                                on (§4.3).
+ *
+ * WHAT THIS COSTS, said plainly rather than discovered: two of the four shipped
+ * profiles exist in order to loosen — "Open network" (`network.mode: 'open'`)
+ * and "Audit" (`network.auditOnly: true`) — and the repo and run forms ship an
+ * audit-only checkbox. Under this default all three are refused until the
+ * operator takes the path out of the lock. That is the decision and not an
+ * oversight: the hub ships ENFORCING and looseness is opted into by name. The
+ * refusal is loud in both places it can happen (a problem next to the field
+ * where a document is typed, `sandbox:override_refused` on the run where a
+ * stored profile is resolved), and Settings → Sandbox now PRINTS the list, so
+ * the sentence and the place it is changed are one click apart.
+ *
+ * Deliberately NOT locked, and each for a stated reason:
+ *
+ *   network.allow, .presets      allow-shaped, and they default to an EMPTY
+ *                                list plus the hub's four presets — locking
+ *                                them would mean no repo could ever name a host
+ *                                of its own, which is what an allowlist is for.
+ *   filesystem.worktree          the run's own private clone: writing it is the
+ *                                job, `rw` is already the loosest value, and
+ *                                nothing there is host state.
+ *   image.*, resources.*,        budget and convenience. `resources` narrows on
+ *   harness.*, retention,        its own numbers anyway, and `image.ref` is the
+ *   audit.*                      per-repo field the inversion above would have
+ *                                frozen.
+ */
+export const DEFAULT_SANDBOX_LOCK = [
+  'runtime',
+  'network.mode',
+  'network.auditOnly',
+  'network.deny',
+  'network.denyUpstreamCidrs',
+  'filesystem.repoGit',
+  'filesystem.extras',
+  'filesystem.extraMounts',
+  'filesystem.readOnlyRoot',
+  'secrets.mode',
+  'innerSandbox',
+]
+
 /** What a repo, an agent or a single run may say about being sandboxed. */
 export const SANDBOX_TRISTATE = ['inherit', 'on', 'off']
 
@@ -316,7 +420,24 @@ const SHAPES = {
   'resources.maxRuntimeMinutes': 'numberOrNull',
 }
 
-const shapeOf = (path) => SHAPES[path] ?? (MODE_ORDERS[path] ? 'mode' : 'fixed')
+export const shapeOf = (path) => SHAPES[path] ?? (MODE_ORDERS[path] ? 'mode' : 'fixed')
+
+/**
+ * Can this path be ordered from stricter to looser at all?
+ *
+ * Exported because the audit needs the same answer: `sandbox:policy_weakened`
+ * may only be written where "weaker" means something, and `narrow()` cannot
+ * distinguish "this did not get looser" from "there is no looser here" — a
+ * `fixed` path (the runtime, the image, the engine) answers `refused` for every
+ * change, so an audit that trusted it alone would report the image being
+ * resolved as the policy getting weaker.
+ *
+ * The alternative was a second list of unordered paths kept next to the first,
+ * which is how the two come to disagree the day somebody adds a field. This way
+ * a new path classifies itself: give it a shape and it is ordered, give it none
+ * and it is not.
+ */
+export const isOrdered = (path) => shapeOf(path) !== 'fixed'
 
 const SIZE_UNITS = { b: 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 }
 
@@ -432,23 +553,42 @@ function layerSpec(layer) {
 }
 
 /**
- * The layering of §7.3: hub → repo → agent/run, the first being the authority.
+ * The layering of §7.3: hub → repo → agent → run, the first being the authority.
  *
  * Each layer is `{ name, spec, lock }` — `spec` its own (partial) document,
  * `lock` the dotted paths that layers BELOW it may only narrow. Locks
  * accumulate downwards: what the hub locked stays locked for the run, and a
  * repo may lock more on top.
  *
+ * THE AGENT AND THE RUN ARE TWO LAYERS, not one. They used to be a single
+ * `agentOrRun`, which the caller filled with `def.sandboxOverrides ??
+ * agent.sandbox_overrides` — so a run's overrides document REPLACED its agent's
+ * rather than narrowing under it. An agent whose profile the operator had
+ * narrowed (say `resources.memory: '2g'`) handed a run that named one unrelated
+ * field the FULL hub document back, silently, because the `??` had thrown the
+ * agent's half away. §7.3's table lists them separately and each may narrow the
+ * one above; that is now what the code does.
+ *
+ * `agentOrRun` is still accepted, and means "there is one layer below the repo"
+ * — the shape every caller had before the split, and the shape a caller that
+ * genuinely has only one document (a dry run, a form judging a single
+ * override) still wants. It is used ONLY when neither `agent` nor `run` is
+ * given, so a caller that passes the two cannot also be surprised by a third.
+ *
  * Returns `{ spec, refused: [{ path, by, wanted, kept }] }`. A non-empty
  * `refused` is not an error — the run starts, on the higher layer's value — but
  * it is never silent: the caller writes `sandbox:override_refused` and the form
- * says so next to the field.
+ * says so next to the field. `by` is now `'agent'` or `'run'` where it used to
+ * be `'run'` for both, which is the point: the operator learns WHICH of the two
+ * documents asked for something it may not have.
  */
-export function resolveSandboxSpec({ hub, repo, agentOrRun } = {}) {
+export function resolveSandboxSpec({ hub, repo, agent, run, agentOrRun } = {}) {
+  const split = agent !== undefined || run !== undefined
   const layers = [
     { name: 'hub', ...(hub ?? {}) },
     { name: 'repo', ...(repo ?? {}) },
-    { name: 'run', ...(agentOrRun ?? {}) },
+    { name: 'agent', ...((split ? agent : null) ?? {}) },
+    { name: 'run', ...((split ? run : agentOrRun) ?? {}) },
   ]
   const refused = []
   let spec = clone(DEFAULT_SPEC)

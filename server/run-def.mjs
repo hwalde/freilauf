@@ -32,7 +32,8 @@ import { getHarness, goalSpec, harnessesWithGoal } from './harnesses/index.mjs'
 // that reads the descriptor, never from a second copy of the question.
 import { sandboxable, harnessesWithSandbox } from './plugins/registry.mjs'
 import {
-  SANDBOX_TRISTATE, HUB_MODES, decideSandbox, validateSandboxOverrides, resolveSandboxSpec,
+  SANDBOX_TRISTATE, HUB_MODES, DEFAULT_SANDBOX_LOCK, decideSandbox, validateSandboxOverrides,
+  resolveSandboxSpec,
 } from './sandbox/spec.mjs'
 // The one reader of the `sandbox_profiles` table — importing it is also what
 // seeds the four built-ins, so a form on a fresh installation offers a list
@@ -446,8 +447,74 @@ function settingList(key) {
   return raw.split(/[,\s]+/).filter(Boolean)
 }
 
-/** The dotted spec paths a lower layer may only NARROW. */
-export function sandboxLock() { return settingList('sandbox_lock') }
+/**
+ * The dotted spec paths a lower layer may only NARROW.
+ *
+ * SEEDED ON FIRST READ, the way `hubId()` mints the hub's own id: the row used
+ * to be absent on every installation and an absent row is an empty list, so the
+ * layering's one rule governed NOTHING out of the box — a repo, an agent or a
+ * run could loosen `filesystem.repoGit` to `rw`, `network.mode` to `open` or
+ * `secrets.mode` back to `env`, and the machinery that refuses exactly those
+ * was never asked. `DEFAULT_SANDBOX_LOCK` (spec.mjs, with the reason for each
+ * entry) is what a fresh installation locks.
+ *
+ * Seeding on the READ rather than at startup is deliberate: there is no module
+ * order to get right, the launch path and every form see the same answer, and
+ * the write happens once. `hubId()` in `sandbox/index.mjs` is the precedent, in
+ * this very feature.
+ *
+ * AN OPERATOR'S EMPTY LIST IS NOT AN ABSENT ONE. The test is `== null`, never
+ * falsiness: a stored `''` or `'[]'` means somebody cleared the field, and
+ * re-seeding over that would be the hub arguing with the operator every time it
+ * restarted. Same family as `Number('')` being a finite zero.
+ */
+export function sandboxLock() {
+  const raw = getSetting('sandbox_lock')
+  if (raw === null || raw === undefined) return seedSandboxLock()
+  return settingList('sandbox_lock')
+}
+
+/**
+ * Write the default lock, once, and REMEMBER THAT IT HAPPENED — because on an
+ * installation that was already running sandboxed runs this makes the hub
+ * stricter than it was yesterday, and a policy that tightens silently is the
+ * failure this module has the most rules about. `sandboxLockSeed()` is what
+ * Settings → Sandbox prints the note from; saving that form clears the note,
+ * because pressing Save is the operator having seen the list.
+ *
+ * A hub whose settings table cannot be written still gets the default IN FORCE
+ * for this process: returning `[]` there would be the empty lock all over again,
+ * on the one installation that is already having trouble.
+ */
+function seedSandboxLock() {
+  try {
+    setSetting('sandbox_lock', JSON.stringify(DEFAULT_SANDBOX_LOCK))
+    setSetting('sandbox_lock_seeded', JSON.stringify({
+      at: new Date().toISOString(),
+      mode: sandboxHubMode(),          // 'off' = a fresh install; nothing changed for it
+      paths: DEFAULT_SANDBOX_LOCK,
+    }))
+  } catch { /* not fatal: the list below is what this process uses either way */ }
+  return [...DEFAULT_SANDBOX_LOCK]
+}
+
+/**
+ * When the default lock was seeded and what the hub's mode was at that moment,
+ * or `null` once the operator has saved the sandbox settings form.
+ *
+ * The mode is the whole point of storing it: seeded under `off` the hub was not
+ * sandboxing anything, so nothing changed and there is nothing to announce.
+ * Seeded under anything else, an existing installation just became stricter and
+ * has to be told which paths and when.
+ */
+export function sandboxLockSeed() {
+  const raw = String(getSetting('sandbox_lock_seeded') ?? '').trim()
+  if (!raw) return null
+  try {
+    const v = JSON.parse(raw)
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : null
+  } catch { return null }
+}
 
 /** The directories an extra mount may come out of. Empty = no extra mount at all. */
 export function sandboxAllowedMountRoots() { return settingList('sandbox_allowed_mount_roots') }

@@ -1380,7 +1380,7 @@
   "sandbox.problem.mount_root": "The mount {source} lies outside the allowed directories ({roots}).",
   "sandbox.problem.mount_none": "No directory may be mounted into a sandbox on this hub, so {source} is refused. Settings → Sandbox names the allowed roots.",
   "sandbox.problem.mount_traversal": "The mount {source} walks out of its directory with “..”.",
-  "sandbox.problem.locked": "{path} is locked by a policy above and may only be narrowed — it stays {kept}.",
+  "sandbox.problem.locked": "{path} is locked by a policy above and may only be narrowed — it stays {kept}. The list of locked paths is under Settings → Sandbox.",
   "sandbox.problem.required": "This hub runs every agent in a sandbox, so {layer} may not switch it off.",
   "sandbox.problem.bypass_not_allowed": "Switching the sandbox off is not allowed here, so the “off” from {layer} was not applied.",
   "sandbox.problem.harness_unsupported": "This coding agent cannot be run in a sandbox — its plugin declares none.",

@@ -1380,7 +1380,7 @@
   "sandbox.problem.mount_root": "Die Einhängung {source} liegt außerhalb der erlaubten Verzeichnisse ({roots}).",
   "sandbox.problem.mount_none": "Auf diesem Hub darf kein Verzeichnis in eine Sandbox eingehängt werden, deshalb wird {source} abgelehnt. Unter Einstellungen → Sandbox stehen die erlaubten Wurzelverzeichnisse.",
   "sandbox.problem.mount_traversal": "Die Einhängung {source} führt mit „..“ aus ihrem Verzeichnis heraus.",
-  "sandbox.problem.locked": "{path} ist von einer übergeordneten Richtlinie gesperrt und darf nur enger werden — es bleibt bei {kept}.",
+  "sandbox.problem.locked": "{path} ist von einer übergeordneten Richtlinie gesperrt und darf nur enger werden — es bleibt bei {kept}. Die Liste der gesperrten Pfade steht unter Einstellungen → Sandbox.",
   "sandbox.problem.required": "Dieser Hub führt jeden Agenten in einer Sandbox aus, {layer} darf sie daher nicht abschalten.",
   "sandbox.problem.bypass_not_allowed": "Die Sandbox darf hier nicht abgeschaltet werden, das „aus“ von {layer} wurde deshalb nicht übernommen.",
   "sandbox.problem.harness_unsupported": "Dieser Coding-Agent lässt sich nicht in einer Sandbox betreiben — sein Plugin erklärt keine.",

@@ -1380,7 +1380,7 @@
   "sandbox.problem.mount_root": "挂载 {source} 位于允许的目录之外（{roots}）。",
   "sandbox.problem.mount_none": "本 Hub 尚不允许把任何目录挂载进沙箱，因此拒绝 {source}。允许的根目录见“设置 → 沙箱”。",
   "sandbox.problem.mount_traversal": "挂载 {source} 用“..”走出了自己的目录。",
-  "sandbox.problem.locked": "{path} 已被上层策略锁定，只能收紧——保持为 {kept}。",
+  "sandbox.problem.locked": "{path} 已被上层策略锁定，只能收紧——保持为 {kept}。已锁定路径的列表在“设置 → 沙箱”中。",
   "sandbox.problem.required": "本 Hub 要求每次运行都在沙箱中进行，{layer} 不能将其关闭。",
   "sandbox.problem.bypass_not_allowed": "此处不允许关闭沙箱，因此未采纳来自 {layer} 的“关闭”。",
   "sandbox.problem.harness_unsupported": "该编码代理无法在沙箱中运行——它的插件没有声明沙箱支持。",
