@@ -166,6 +166,25 @@ a day on which nothing was released.
   land in "Needs you", where the hint has named credits all along.
 - A flow run waiting on a run that had ended more than an hour before a hub
   restart was never resumed and never pruned; it is resumed now.
+- **A worktree path with a dot, an underscore or a space made a claude run go
+  blind.** Claude stores a session's transcript under a directory named after
+  the working directory, and its real rule replaces **every** character that is
+  not a letter or a digit — the hub only replaced `/`. So for a worktree whose
+  path carried anything else, the hub looked for a transcript that was not
+  there: no activity measurement (the run collected "no activity" while it
+  worked), no token or cost figures, and the second channel that detects a rate
+  limit or a provider outage from claude's own transcript never saw a line. No
+  path on the machine this was found on triggered it, which is why it had never
+  shown up; a repository or branch name with a dot in it is all it takes.
+- **"I could not read the working copy" is no longer read as "there is nothing
+  uncommitted".** The finish gate's dirt check answered "clean" whenever the
+  `git status` behind it failed for any reason, and "clean" at the finish gate
+  means "merge it". It now answers *unknown*, and every caller holds on that:
+  the gate keeps the run in the gate and checks again, a run kept on its branch
+  is not pushed and called finished, the leftovers of a failed run are shown to
+  the operator instead of being reported as none. A run's uncommitted state is
+  either something somebody looked at or something nobody knows — never
+  silently the first because the second was cheaper to write.
 
 ## 2026-09-04
 
