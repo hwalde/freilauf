@@ -7,7 +7,7 @@ import db, { addEvent } from './db.mjs'
 // import is the kind of trap that only shows up the day somebody moves a line.
 import { notify as notifyChannels, notifyOnFor, detailUrl } from './notify.mjs'
 import { sh, parseDbUtc } from './util.mjs'
-import { vorfallMelden, detektorLog } from './incidents.mjs'
+import { vorfallMelden, detektorLog, offeneVorfaelle } from './incidents.mjs'
 import { typVonClaudeFehler, typVonText, TYP_TEXT, fremdeClaudeSession, isSessionStopped } from './detect.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { transcriptState } from './cursor-transcript.mjs'
@@ -315,6 +315,8 @@ export async function handleReport(runId, body, via = 'http') {
       }
       break
     }
+    case 'access':
+      return handleAccessRequest(run, text)
     case 'progress': {
       addEvent(runId, 'progress', { text })
       db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(runId)
@@ -414,6 +416,56 @@ export async function handleReport(runId, body, via = 'http') {
 }
 
 /**
+ * `fl-report access "<what you need and why>"` — the agent asking for something
+ * the sandbox is keeping from it (SANDBOX_RESEARCH.md §7.12.1).
+ *
+ * It is `help`-like in everything that reaches a person: an incident in the
+ * **Needs you** group (`sandbox_access` is in MENSCH_TYPEN, because a host, a
+ * path or a memory limit is a decision and waiting does not make it), a
+ * notification carrying the agent's own words, and never deduplicated — a
+ * second, different need is a second question.
+ *
+ * And it differs from `help` in the one thing that matters: **the run stays
+ * `running`.** A help call means the agent has stopped and waits; an access
+ * request means the agent has run into a wall and was told, in its own prompt,
+ * to carry on with what it can do meanwhile. Putting it into `waiting_help`
+ * would say the opposite — the finish gate's deadline would stop, the watcher
+ * would treat the silence as deliberate, and the operator's answer would be
+ * expected to arrive in the session. None of that is true here: the answer is a
+ * policy change, and it reaches the agent through the proxy without anybody
+ * typing anything.
+ *
+ * The incident is opened `stillMelden`, i.e. without the ten-minute grace
+ * period: that delay exists so an alarm that answers itself never pages, and
+ * this one cannot answer itself — the agent asked. The message goes out here
+ * instead, at once, which is also what `help` does.
+ *
+ * A repeat of the SAME request (an agent that hits the same wall twice) counts
+ * on the open incident and stays quiet, the way a replayed help call does.
+ */
+async function handleAccessRequest(run, text, { followup = false } = {}) {
+  const runId = run.id
+  const beleg = String(text ?? '').trim().slice(0, 300)
+  addEvent(runId, 'access_request', { text: String(text ?? '').slice(0, 500), followup })
+  const offen = offeneVorfaelle(runId).find(v => v.typ === 'sandbox_access')
+  const wiederholung = !!offen && offen.beleg === beleg
+  await vorfallMelden(runId, { typ: 'sandbox_access', quelle: 'agent', schwere: 'rot',
+    beleg: beleg || null, stillMelden: true })
+  if (!wiederholung) {
+    const kopf = followup ? followUpHeader(run, 'FOLLOW-UP ACCESS REQUEST') : reportHeader(run, 'ACCESS REQUEST')
+    await notifyRun(runId, 'access',
+      `${kopf}\n\n${text || '(no text)'}\n\n🔒 The sandbox is in the agent's way · ${harnessLabel(run)}`
+      + `\n→ Needs you: allow it for this run, allow it for the repo, or tell the agent to do without.`,
+      { fileName: `access-${runId.slice(0, 8)}.md`, fileContent: text, dedupe: false })
+  }
+  // The answer travels back as the agent's own tool output (fl-report prints
+  // it), which is the cheapest moment there is to tell it what happens next.
+  return { ok: true, message: 'Freilauf: your access request reached the operator. Nothing has been unblocked yet — '
+    + 'keep working on what you can do without it. If the policy is widened you will simply get through on your next '
+    + 'attempt; if it is not, you will be told in this session. Do not work around the sandbox.' }
+}
+
+/**
  * The agent ended its turn without reporting — close the run anyway.
  *
  * This exists for one harness shape: cursor works through the task and then
@@ -484,8 +536,16 @@ export async function finishByTurnEnd(runId, source) {
 // one stays `failed` (its record is the truth about the first attempt; what
 // the follow-up delivered is in the merge line and the report).
 
-/** The kinds a finished run still answers to. Hooks are handled apart. */
-const FOLLOWUP_KINDS = ['done', 'failed', 'help', 'progress', 'branch', 'pr']
+/**
+ * The kinds a finished run still answers to. Hooks are handled apart.
+ *
+ * `access` is among them because a FOLLOW-UP hits the wall exactly as readily as
+ * a first attempt: the operator types "and now push it to the fork" into a
+ * finished run's session, and the host for that fork is not on the allowlist.
+ * Refusing the request there would leave the agent with a wall and no way to
+ * say so.
+ */
+const FOLLOWUP_KINDS = ['done', 'failed', 'help', 'progress', 'branch', 'pr', 'access']
 
 /**
  * Should a turn end on a FINISHED run count as its follow-up report?
@@ -581,6 +641,11 @@ async function handleFollowUp(run, body, via) {
         { fileName: `help-${runId.slice(0, 8)}.md`, fileContent: text, dedupe: false })
       return { ok: true }
     }
+    case 'access':
+      // Same rule as for a running run, and for the same reason: the status
+      // (`done`/`failed`) is the truth about the first attempt and an access
+      // request says nothing about it.
+      return handleAccessRequest(run, text, { followup: true })
     case 'progress':
       addEvent(runId, 'progress', { text, followup: true })
       db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(runId)

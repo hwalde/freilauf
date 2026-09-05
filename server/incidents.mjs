@@ -59,7 +59,16 @@ export const MENSCH_TYPEN = new Set(['auth_error', 'billing_error', 'model_error
   // The machine lost the tmux server, and with it every agent session at once.
   // Nothing the hub can retry, and a fact somebody has to see: the runs behind
   // those sessions stopped mid-work, whatever the reason was.
-  'tmux_gone', 'tmux_unreachable'])
+  'tmux_gone', 'tmux_unreachable',
+  // The agent said, in so many words, that the sandbox is in its way
+  // (`fl-report access`, SANDBOX_RESEARCH.md §7.12.1). It is a question, and a
+  // question only a human answers: allow the host for this run, allow it for
+  // the repo, or tell the agent to do without. Waiting changes nothing.
+  'sandbox_access',
+  // The container runtime stopped answering — the `tmux_unreachable` twin, and
+  // it needs hands for the same reason: a daemon that is gone does not come
+  // back by itself, and every sandboxed run on the machine is behind it.
+  'docker_unreachable'])
 
 /**
  * Does this incident need a human — or is it just an observation?

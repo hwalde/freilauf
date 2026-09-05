@@ -446,8 +446,20 @@ export function vorfallWeggrund({ typ, schwere, runStatus, letzteAktivitaetMs, z
   // tmux_gone/tmux_unreachable say something about the MACHINE, not about this
   // run: tmux answering again does not undo the sessions that died, and the
   // watcher closes the transient one itself the moment it gets an answer.
+  // docker_unreachable is the same kind of statement about the MACHINE, and the
+  // watcher owns its recovery: dockerAnswered() closes it the moment the daemon
+  // replies. Time must not, or the incident would clear itself while every
+  // sandboxed run on the box is still standing behind a runtime that is gone.
   if (typ === 'merge_blocked' || typ === 'tmux_gone' || typ === 'tmux_unreachable'
+      || typ === 'docker_unreachable'
       || String(typ).startsWith('provider_down:')) return null
+  // The agent ASKED for something (§7.12.1). It was told to continue with what
+  // it can do meanwhile, so it goes on working — and under the ordinary rule
+  // that very evidence ("the agent kept working after it") would close the
+  // request ten minutes later, with nobody having decided anything. A question
+  // to a human is answered by a decision, like merge_blocked; the one thing
+  // that makes it moot is the run coming through anyway.
+  if (typ === 'sandbox_access') return runStatus === 'done' ? 'run finished successfully' : null
   const zuletzt = Number(zuletztGesehenMs)
   // Number(null) is 0 AND finite — the trap this repo has been bitten by before.
   // null means "no activity source", never "activity at the epoch".
@@ -487,5 +499,8 @@ export const TYP_TEXT = {
   merge_blocked: 'Not merged',
   tmux_gone: 'All tmux sessions gone',
   tmux_unreachable: 'tmux not answering',
+  sandbox_blocked: 'Sandbox turned a host away',
+  sandbox_access: 'Agent needs access',
+  docker_unreachable: 'Container runtime not answering',
   unbekannt: 'API error',
 }
