@@ -222,6 +222,8 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     'FREILAUF_SANDBOX_OFF', 'FREILAUF_SANDBOX_RUNTIME_BIN', 'FL_DOCKER_STATE',
     'FREILAUF_SANDBOX_DIR', 'FREILAUF_SANDBOX_CA_DIR', 'FREILAUF_SANDBOX_SOCKET_DIR',
     'FREILAUF_SANDBOX_INFO_CACHE_MS', 'FREILAUF_SANDBOX_PROXY_BIND',
+    // The two endpoint seams. See `sandboxSeams()` below for what each says.
+    'FREILAUF_SANDBOX_DOCKER_HOST', 'FREILAUF_SANDBOX_RUNTIME_FORCE',
   ]
 
   /** The PATH without the shim directory — what "no runtime at all" has to mean. */
@@ -230,13 +232,32 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
   }
 
   function sandboxSeams(sandbox) {
-    // Off is a HARD off: the switch says so, no runtime binary is named, and the
+    // Off is a HARD off: the switch says so, no runtime binary is named, the
     // shim is taken off the PATH again — a leftover `docker` there would let a
     // suite that asked for no sandbox find one anyway, which is precisely the
-    // premise the "with the sandbox off, nothing calls the runtime" check rests on.
-    if (!sandbox) return { FREILAUF_SANDBOX_OFF: '1', PATH: pathOhneShim() }
+    // premise the "with the sandbox off, nothing calls the runtime" check rests
+    // on — and the endpoint seam points at a socket that does not exist, which
+    // is the same fence `FREILAUF_CURSOR_AUTH` and `FREILAUF_CLAUDE_CREDENTIALS`
+    // are: it makes "there is no runtime here" true on a machine that HAS one.
+    // Since rootless Docker was installed on the development host, the two are
+    // no longer the same thing, and a suite whose result depends on the hardware
+    // is a suite nobody can trust.
+    if (!sandbox) {
+      return {
+        FREILAUF_SANDBOX_OFF: '1',
+        FREILAUF_SANDBOX_DOCKER_HOST: join(SB, 'no-such-docker.sock'),
+        FREILAUF_SANDBOX_RUNTIME_FORCE: '',
+        PATH: pathOhneShim(),
+      }
+    }
     return {
       FREILAUF_SANDBOX_RUNTIME_BIN: DOCKER_BIN,
+      // The shim is a SCRIPT, not a daemon, so there is no socket to probe: the
+      // force seam says the reachability question has been answered elsewhere.
+      // (A named binary implies it too — this is the seam saying so out loud,
+      // so the suite does not depend on that implication.)
+      FREILAUF_SANDBOX_RUNTIME_FORCE: '1',
+      FREILAUF_SANDBOX_DOCKER_HOST: '',
       FL_DOCKER_STATE: DOCKER_STATE,        // for a bare `docker` off the PATH
       FREILAUF_SANDBOX_DIR: SANDBOX_DIR,
       FREILAUF_SANDBOX_CA_DIR: join(SANDBOX_DIR, 'ca'),

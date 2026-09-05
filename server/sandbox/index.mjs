@@ -41,7 +41,7 @@ import { RUNS_DIR, kurzid, sh } from '../util.mjs'
 import { env } from '../env.mjs'
 import { t } from '../i18n.mjs'
 // The one reader of the four hub sandbox settings — see "the hub layer" below.
-import { sandboxHubMode, sandboxAllowBypass, sandboxLock } from '../run-def.mjs'
+import { sandboxHubMode, sandboxAllowBypass, sandboxLock, sandboxHubSpec, sandboxAgainst } from '../run-def.mjs'
 import { appendAuditFile } from './audit.mjs'
 
 // --------------------------------------------------------------- lazy siblings
@@ -175,18 +175,17 @@ function hubLock() { return sandboxLock() }
 
 /**
  * The two hub settings that are spec fields rather than policy: which runtime
- * and which proxy engine. Read here rather than in the runtime module so the
- * layering sees them like any other statement about the spec — a repo may then
- * still narrow them where the hub locked the path.
+ * and which proxy engine.
+ *
+ * This used to be a COPY of `sandboxHubSpec()` in run-def.mjs, and the copy is
+ * the drift this whole file has a comment about one paragraph up: the launch
+ * resolved the hub layer WITH those two settings while `sandboxAgainst()` — the
+ * baseline every form judges a locked override against — resolved it without
+ * them, so on a podman hub with `runtime` locked the form accepted a switch back
+ * to docker (against an empty baseline it narrows nothing) and the launch then
+ * refused it. There is one reader now, and it is the one AGENTS.md nominates:
+ * every place below calls `sandboxHubSpec()` from run-def.mjs.
  */
-function hubSpec() {
-  const spec = {}
-  const runtime = String(getSetting('sandbox_runtime') ?? '').trim()
-  if (runtime) spec.runtime = runtime
-  const engine = String(getSetting('sandbox_proxy_engine') ?? '').trim()
-  if (engine) spec.network = { ...(spec.network ?? {}), engine }
-  return Object.keys(spec).length ? spec : null
-}
 
 // --------------------------------------------------------------- discovery
 
@@ -223,7 +222,9 @@ export async function refreshSandboxAvailability({ force = false } = {}) {
     const rt = await sibling('runtime')
     if (!rt?.runtimeInfo) return { available: false, reason: 'sandbox.reason.no_runtime_module', at: Date.now() }
     try {
-      const info = await rt.runtimeInfo(String(getSetting('sandbox_runtime') ?? '').trim() || null)
+      // The SAME reader as the layering above — `sandbox_runtime` was read
+      // here a third time, with a third spelling of "empty means unset".
+      const info = await rt.runtimeInfo(sandboxHubSpec()?.runtime ?? null)
       return { ...info, available: !!info?.available, at: Date.now() }
     } catch (err) {
       return { available: false, reason: err.message, at: Date.now() }
@@ -312,7 +313,7 @@ export async function planSandbox({ repo, agent = null, def = {} } = {}) {
   const effectiveProfileId = runProfileId ?? repo?.sandbox_profile_id ?? null
 
   const resolved = spec.resolveSandboxSpec({
-    hub: { spec: hubSpec(), lock: hubLock() },
+    hub: { spec: sandboxHubSpec(), lock: hubLock() },
     repo: {
       profile: profileOf(repo?.sandbox_profile_id),
       overrides: parseOverrides(repo?.sandbox_overrides),
@@ -1449,6 +1450,47 @@ export function classifyPolicyPatch(patch) {
   }
 }
 
+/**
+ * Every locked path a patch would LOOSEN, as `{path, kept}` — the params of
+ * `sandbox.problem.locked`, so the caller's sentence is the one the form
+ * already says.
+ *
+ * The baseline is `sandboxAgainst()`, the resolved layer above this run; where
+ * that cannot be computed but a lock IS set, the run's own current spec stands
+ * in — never "no baseline, no check", because that is exactly how the form's
+ * copy of this rule came to be dead code.
+ */
+function lockedLoosenings(spec, patch, current, repoId) {
+  const lock = hubLock()
+  if (!lock?.length || !patch || typeof patch !== 'object') return []
+  let baseline = null
+  try {
+    // The same function the form calls, from the same module the four hub
+    // settings already come from — and it is asked only where a lock is really
+    // set, because it reaches the profile store and the repo row.
+    baseline = sandboxAgainst(repoId ?? null, lock)
+  } catch { baseline = null }
+  if (!baseline) baseline = current
+  const out = []
+  for (const path of spec.specPaths(patch)) {
+    if (!spec.pathLocked(path, lock)) continue
+    const kept = specValueAt(baseline, path)
+    if (!spec.narrow(path, kept, specValueAt(patch, path)).refused) continue
+    out.push({ path, kept: JSON.stringify(kept) })
+  }
+  return out
+}
+
+/** One dotted path out of a spec document. `undefined` where the layer is silent. */
+function specValueAt(doc, path) {
+  let cur = doc
+  for (const part of String(path).split('.')) {
+    if (cur === null || typeof cur !== 'object') return undefined
+    cur = cur[part]
+  }
+  return cur
+}
+
 /** `network.allow.0` → `network.allow`; the classification is about the FIELD. */
 function topTwo(path) { return path.split('.').slice(0, 2).join('.') }
 
@@ -1490,6 +1532,31 @@ export async function changePolicy(run, patch, by = 'user') {
   if (!spec) return { ok: false, error: t('sandbox.launch.module_missing', { module: 'spec.mjs' }) }
 
   const before = await runSpec(row)
+
+  // THE FLOOR IS CHECKED HERE TOO, and that is the point of this block rather
+  // than a duplicated line. This function is a public export: the "Reconfigure…"
+  // card reaches it, a flow may, the read/write API may, and a future caller
+  // certainly will. It used to merge the patch field by field and narrow
+  // NOTHING of its own — so §7.3's one rule held only because `pages.mjs`
+  // happened to validate first, and the day it stopped (it had, once: the route
+  // passed `lock` and no `against`, so the check inside
+  // `validateSandboxOverrides()` never ran) one POST turned a locked
+  // `network.mode` from `allowlist` into `open` and froze it into
+  // `runs.sandbox_spec` for the rest of the run.
+  //
+  // Judged against the SAME baseline the form judges against — hub plus this
+  // run's repo — so a caller that already passed the form's check can never be
+  // refused here for a different reading of the same rule; and a lock that
+  // could not be resolved falls back to the run's own current spec rather than
+  // to no check at all.
+  const refusals = lockedLoosenings(spec, patch, before, row.repo_id)
+  if (refusals.length) {
+    return {
+      ok: false, refused: refusals,
+      error: refusals.map(r => t('sandbox.problem.locked', r)).join(' · '),
+    }
+  }
+
   const kind = classifyPolicyPatch(patch)
   const after = spec.normalizeSpec(mergeDeep(before, patch ?? {}))
   const diff = { paths: [...kind.live, ...kind.restart], live: kind.live, restart: kind.restart }
@@ -1755,7 +1822,7 @@ export async function dryRun(repoOrSpec) {
   const repo = repoOrSpec && typeof repoOrSpec === 'object' && 'path' in repoOrSpec ? repoOrSpec : null
   const resolved = repo
     ? specMod.resolveSandboxSpec({
-        hub: { spec: hubSpec(), lock: hubLock() },
+        hub: { spec: sandboxHubSpec(), lock: hubLock() },
         repo: {
           profile: (await sibling('profiles'))?.profileSpec?.(repo.sandbox_profile_id) ?? null,
           overrides: parseOverrides(repo.sandbox_overrides),

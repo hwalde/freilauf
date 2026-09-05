@@ -28,6 +28,13 @@ process.env.FREILAUF_OR_ROUTING_JSON = join(sandkasten, 'openrouter-routing.json
 // into — and later DELETE from — the operator's real skill directories.
 process.env.FREILAUF_SKILLS_HOME = join(sandkasten, 'skillhome')
 process.env.FREILAUF_SKILLS_STATE = join(sandkasten, 'skills-installed.json')
+// The same fence for the run directories. `prepareSandbox()` creates
+// `<RUNS_DIR>/<run id>/` before it can fail, and RUNS_DIR is a module-level
+// constant of util.mjs read at import time — so without this line the sandbox
+// checks below would write into the operator's real ~/agents/runs. Same family
+// as FREILAUF_SKILLS_HOME above: a suite that reaches outside its own directory
+// is not merely unreproducible.
+process.env.FREILAUF_RUNS_DIR = join(sandkasten, 'runs')
 // The sandbox's runtime seam names the binary the hub calls for containers. It
 // is deliberately UNSET here: this suite tests the pure argv builders and the
 // "no runtime on this machine" answers, and a shell that exported the seam
@@ -7944,6 +7951,86 @@ process.stdout.write(JSON.stringify(out))
 
   const rt = await import('../server/sandbox/runtime.mjs')
 
+  // ---- the two runtime seams: forbid a daemon, or force one ----------------
+  //
+  // Three checks in this file used to encode "this machine has no container
+  // runtime" as a fact about the WORLD, and the day rootless Docker was
+  // installed on the development host they went red — correctly, and for a
+  // reason that had nothing to do with the code under test. A suite whose result
+  // depends on the hardware is a suite nobody can trust.
+  //
+  // So the same pattern `FREILAUF_CLAUDE_CREDENTIALS` and `FREILAUF_CURSOR_AUTH`
+  // already use: `FREILAUF_SANDBOX_DOCKER_HOST` pointed at a socket that does
+  // not exist FORBIDS a runtime on a machine that has one, and
+  // `FREILAUF_SANDBOX_RUNTIME_FORCE=1` next to a fake binary FORCES one on a
+  // machine that has none. Both halves of every question below are therefore
+  // asked wherever the suite runs.
+  const rtSeamKeys = ['FREILAUF_SANDBOX_DOCKER_HOST', 'FREILAUF_SANDBOX_RUNTIME_FORCE',
+    'FREILAUF_SANDBOX_RUNTIME_BIN']
+
+  /**
+   * A `docker` that is not one: it answers `info`, `inspect` and `ps` and knows
+   * nothing else. The `info` document is this machine's real one, trimmed to the
+   * fields the module reads — rootless, and `CPUSet: false` next to `true` for
+   * memory/pids/cpu, which is what a delegated-but-not-fully-delegated host
+   * really reports [measured 2026-09-05, docker 29.8.0 rootless].
+   */
+  function fakeDaemonBin() {
+    const dir = mkdtempSync(join(tmpdir(), 'freilauf-daemon-'))
+    const bin = join(dir, 'docker')
+    const info = JSON.stringify({
+      ServerVersion: '29.8.0',
+      SecurityOptions: ['name=seccomp,profile=builtin', 'name=rootless', 'name=cgroupns'],
+      Runtimes: { 'io.containerd.runc.v2': {}, runc: {} },
+      CgroupVersion: '2',
+      MemoryLimit: true, SwapLimit: true, PidsLimit: true, CpuCfsQuota: true, CPUSet: false,
+    })
+    writeFileSync(bin, [
+      '#!/bin/sh',
+      'case "$1" in',
+      `  info) printf '%s\\n' '${info}' ;;`,
+      "  inspect|image) echo 'Error: No such object: fl-nosuch' >&2; exit 1 ;;",
+      "  ps) printf 'fl-a\\trunning\\tUp 3 minutes\\nfl-proxy-a\\trunning\\tUp 3 minutes\\n' ;;",
+      // A build that FAILS, because the interesting half of buildImage() is how
+      // it tells a broken Dockerfile from an absent daemon — and because a unit
+      // suite must never run a real `docker build`.
+      "  build) echo 'ERROR: failed to solve: process did not complete' >&2; exit 1 ;;",
+      '  *) exit 0 ;;',
+      'esac',
+    ].join('\n') + '\n')
+    chmodSync(bin, 0o755)
+    return { dir, bin }
+  }
+
+  /**
+   * Run `fn` with a runtime forbidden (`{ forbid: true }`) or forced
+   * (`{ daemon: true }`), and put the environment back afterwards — including
+   * the discovery cache, which is keyed on the endpoint as well as on the
+   * binary but must not carry an answer between the two halves of one check.
+   */
+  async function mitRuntime({ forbid = false, daemon = false }, fn) {
+    const vorher = Object.fromEntries(rtSeamKeys.map(k => [k, process.env[k]]))
+    let fake = null
+    try {
+      for (const k of rtSeamKeys) delete process.env[k]
+      if (forbid) process.env.FREILAUF_SANDBOX_DOCKER_HOST = join(sandkasten, 'no-such-docker.sock')
+      if (daemon) {
+        fake = fakeDaemonBin()
+        process.env.FREILAUF_SANDBOX_RUNTIME_BIN = fake.bin
+        process.env.FREILAUF_SANDBOX_RUNTIME_FORCE = '1'
+      }
+      rt._runtimeInfoCacheReset()
+      return await fn()
+    } finally {
+      for (const k of rtSeamKeys) {
+        if (vorher[k] === undefined) delete process.env[k]
+        else process.env[k] = vorher[k]
+      }
+      rt._runtimeInfoCacheReset()
+      if (fake) rmSync(fake.dir, { recursive: true, force: true })
+    }
+  }
+
   // argv, not a shell line: a flag and its value are two entries, and reading
   // them back that way is what asserts it — a joined string would pass either.
   const rtVal = (args, flag) => { const i = args.indexOf(flag); return i < 0 ? null : args[i + 1] }
@@ -8263,39 +8350,77 @@ process.stdout.write(JSON.stringify(out))
     falsch(rows[2].running, 'an exited container is not running')
   })
 
-  await pruefe('runtimeInfo answers cleanly on a machine with no container runtime', async () => {
-    rt._runtimeInfoCacheReset()
-    const info = await rt.runtimeInfo('docker', { force: true })
-    gleich(info.available, false, 'not available')
-    // A DOTTED key, never a bare word: the settings page prints an undotted
-    // reason verbatim, so `no_binary` reached the operator as those nine
-    // characters — on the one line they read while working out what to install.
-    wahr(info.reason.startsWith('sandbox.reason.'), `a dotted reason key, got ${info.reason}`)
-    wahr(['sandbox.reason.no_binary', 'sandbox.reason.no_daemon', 'sandbox.reason.unreachable']
-      .includes(info.reason), `a machine reason, got ${info.reason}`)
-    gleich(info.id, 'docker', 'it still says what it was asked about')
-    wahr(Array.isArray(info.runtimes), 'and answers with the shape a caller expects')
+  await pruefe('runtimeInfo asks the SOCKET, and answers whether or not one is there', async () => {
+    // A `docker` on the PATH is not a daemon. This installation sat for two
+    // hours in exactly that state — the CLI installed, rootful `docker.service`
+    // stopped and disabled, `/var/run/docker.sock` still there as a file that
+    // answers EACCES, and the real daemon at `$XDG_RUNTIME_DIR/docker.sock`.
+    await mitRuntime({ forbid: true }, async () => {
+      const info = await rt.runtimeInfo('docker', { force: true })
+      gleich(info.available, false, 'a socket that is not there is not a runtime')
+      // Deterministic now, where the old check accepted any of three: a socket
+      // the kernel refuses is an ANSWER, and `no_daemon` is the one that means
+      // "there are no containers" rather than "I could not find out".
+      gleich(info.reason, 'sandbox.reason.no_daemon', 'and it says WHICH answer it is')
+      // A DOTTED key, never a bare word: the settings page prints an undotted
+      // reason verbatim, so `no_binary` reached the operator as those nine
+      // characters — on the one line they read while working out what to install.
+      wahr(info.reason.startsWith('sandbox.reason.'), `a dotted reason key, got ${info.reason}`)
+      gleich(info.id, 'docker', 'it still says what it was asked about')
+      wahr(Array.isArray(info.runtimes), 'and answers with the shape a caller expects')
+      enthaelt(String(info.message ?? ''), 'no-such-docker.sock', 'the message names the endpoint it tried')
+    })
+    await mitRuntime({ daemon: true }, async () => {
+      const info = await rt.runtimeInfo('docker', { force: true })
+      gleich(info.available, true, 'and a daemon that answers IS available')
+      gleich(info.version, '29.8.0', 'with the version the settings page prints')
+      // §7.7's uid table branches on this, and until rootless Docker was
+      // installed here it had never once been `true` on a real answer: rootless
+      // means container root IS the hub user, so NO `--user` is written.
+      gleich(info.rootless, true, 'rootless, read off SecurityOptions')
+      // What the host can really fence. Everything that is not `true` here is a
+      // limit the settings page must not offer — `docker run` would refuse it.
+      gleich(rt.cgroupSupports(info, 'memory'), true, '--memory is enforceable')
+      gleich(rt.cgroupSupports(info, 'pids'), true, '…and --pids-limit')
+      gleich(rt.cgroupSupports(info, 'cpus'), true, '…and --cpus')
+      gleich(rt.cgroupSupports(info, 'cpuset'), false, 'but cpuset is not delegated on such a host')
+    })
     const unknown = await rt.runtimeInfo('nosuch')
     gleich(unknown.available, false, 'an unknown runtime is not available either')
     gleich(unknown.reason, 'sandbox.reason.unknown_runtime', 'and it says why, without throwing')
   })
 
-  await pruefe('a lifecycle call without a daemon answers, and answers "I do not know"', async () => {
-    // The group's premise is the check above: `runtimeInfo` said this machine
-    // has no usable runtime. So neither call below can legitimately come back
-    // with 'ok' — and the old assertions accepted every value the two functions
-    // can return (`['ok','no_daemon','unreachable']` IS the whole domain of
+  await pruefe('a lifecycle call says whether anybody answered — with a daemon and without', async () => {
+    // The old assertions accepted every value the two functions can return
+    // (`['ok','no_daemon','unreachable']` IS the whole domain of
     // `runtimeVerdict`, and `typeof verdict === 'string'` is true for `''`), so
-    // an implementation that invented an answer passed them both.
-    const state = await rt.containerState('fl-nosuch', { runtime: 'docker' })
-    wahr(['no_daemon', 'unreachable'].includes(state.verdict),
-      `nobody answered, so the verdict says so (got ${JSON.stringify(state.verdict)})`)
-    gleich(state.exists, null, 'and "no answer" is null, never false')
-    gleich(state.running, null, 'and so is "running" — nothing is claimed either way')
-    const owned = await rt.listOwned('hub1', { runtime: 'docker' })
-    gleich(owned.containers.length, 0, 'an empty list …')
-    wahr(['no_daemon', 'unreachable'].includes(owned.verdict),
-      `… which only means something together with the verdict, and here it says nobody answered (got ${JSON.stringify(owned.verdict)})`)
+    // an implementation that invented an answer passed them both. Now the seam
+    // decides which world the call is made in, and each world has its own
+    // answer.
+    await mitRuntime({ forbid: true }, async () => {
+      // Two verdicts are legitimate here and the difference is the machine, not
+      // the code: where a `docker` CLI exists it says so in words the classifier
+      // knows (`no_daemon`), and where none exists at all the failure is ENOENT,
+      // which is deliberately `unreachable` — a PATH that lost an entry is not
+      // proof that Docker is gone. Neither may be acted on, which is the point.
+      const state = await rt.containerState('fl-nosuch', { runtime: 'docker' })
+      wahr(['no_daemon', 'unreachable'].includes(state.verdict),
+        `nobody answered, so the verdict says so (got ${JSON.stringify(state.verdict)})`)
+      gleich(state.exists, null, 'and "no answer" is null, never false')
+      gleich(state.running, null, 'and so is "running" — nothing is claimed either way')
+      const owned = await rt.listOwned('hub1', { runtime: 'docker' })
+      gleich(owned.containers.length, 0, 'an empty list …')
+      wahr(['no_daemon', 'unreachable'].includes(owned.verdict),
+        `… which only means something together with the verdict, and here it says nobody answered (got ${JSON.stringify(owned.verdict)})`)
+    })
+    await mitRuntime({ daemon: true }, async () => {
+      const state = await rt.containerState('fl-nosuch', { runtime: 'docker' })
+      gleich(state.verdict, 'ok', 'a daemon that answered')
+      gleich(state.exists, false, 'and "no such container" is FALSE — the empty truth, not a silence')
+      const owned = await rt.listOwned('hub1', { runtime: 'docker' })
+      gleich(owned.verdict, 'ok', 'the listing answered too')
+      gleich(owned.containers.length, 2, 'and an empty list would now mean something')
+    })
   })
 
   // The i18n group above compares the three catalogs to EACH OTHER and never to
@@ -8372,20 +8497,48 @@ process.stdout.write(JSON.stringify(out))
   })
 
   await pruefe('a build without a runtime says so, and blames no Dockerfile for it', async () => {
-    const r = await rt.buildImage('claude')
-    gleich(r.ok, false, 'nothing was built')
-    wahr(['no_daemon', 'unreachable'].includes(r.reason), `a runtime reason, got ${r.reason}`)
-    falsch(r.reason === 'build_failed', 'a missing daemon is not a broken Dockerfile')
-    falsch(r.error.startsWith('sandbox.'), 'the operator gets a sentence')
-    enthaelt(r.error, 'freilauf/agent-claude', 'naming the image it was about')
+    // Behind the seam, and not only for reproducibility: unconditional, this
+    // line runs a REAL `docker build` on any machine that has a daemon — with
+    // buildImage()'s own 30-minute timeout, from a unit suite.
+    await mitRuntime({ forbid: true }, async () => {
+      const r = await rt.buildImage('claude')
+      gleich(r.ok, false, 'nothing was built')
+      wahr(['no_daemon', 'unreachable'].includes(r.reason), `a runtime reason, got ${r.reason}`)
+      falsch(r.reason === 'build_failed', 'a missing daemon is not a broken Dockerfile')
+      falsch(r.error.startsWith('sandbox.'), 'the operator gets a sentence')
+      enthaelt(r.error, 'freilauf/agent-claude', 'naming the image it was about')
+    })
+    // …and with a daemon that answered, the same failure IS about the build —
+    // which is the distinction the check is named after, and it could not be
+    // made at all on a machine with no runtime.
+    await mitRuntime({ daemon: true }, async () => {
+      const r = await rt.buildImage('claude')
+      gleich(r.ok, false, 'the build failed')
+      gleich(r.reason, 'build_failed', 'and this time the Dockerfile really is the suspect')
+      gleich(r.verdict, 'ok', 'the daemon answered, so nothing is retried against it')
+      enthaelt(r.error, 'freilauf/agent-claude', 'naming the image it was about')
+    })
   })
 
   await pruefe('the digest answers with both halves, and null where it cannot', async () => {
-    const d = await rt.imageDigest('freilauf/agent-claude:2.1.261')
-    gleich(d.ok, false, 'no runtime, no digest')
-    gleich(d.digest, null, 'and null rather than a guess')
-    falsch(String(d.error ?? '').startsWith('sandbox.'), 'the refusal is a sentence')
-    falsch(String(d.error ?? '').includes('could not be built'), 'reading a digest is not building')
+    // "Where it cannot" is a SEAM here and not the state of the machine any
+    // more: this development host now really has `freilauf/agent-claude:2.1.261`
+    // built, so the unconditional version of this check was asserting that a
+    // digest lookup fails where it in fact succeeds.
+    await mitRuntime({ forbid: true }, async () => {
+      const d = await rt.imageDigest('freilauf/agent-claude:2.1.261')
+      gleich(d.ok, false, 'no runtime, no digest')
+      gleich(d.digest, null, 'and null rather than a guess')
+      falsch(String(d.error ?? '').startsWith('sandbox.'), 'the refusal is a sentence')
+      falsch(String(d.error ?? '').includes('could not be built'), 'reading a digest is not building')
+    })
+    await mitRuntime({ daemon: true }, async () => {
+      const d = await rt.imageDigest('freilauf/agent-nosuch:1')
+      gleich(d.ok, false, 'an image the daemon does not hold is a refusal too …')
+      gleich(d.reason, 'no_such_image', '… but a different one, because the daemon ANSWERED')
+      gleich(d.verdict, 'ok', 'and the verdict says so, which is what a caller branches on')
+      gleich(d.digest, null, 'still no guess')
+    })
   })
 
 
@@ -9433,12 +9586,25 @@ process.stdout.write(JSON.stringify(out))
       // `resume_refused` — for an infrastructure hiccup, not for a CLI that
       // cannot start. AGENTS.md: "could not try" is not "tried and died".
       const { prepareSandbox } = await import('../server/sandbox/index.mjs')
-      let err = null
-      try { await prepareSandbox({ id: 'sb-no-daemon', sandbox: 1 }, { name: 'x', path: '/tmp/x' }) }
-      catch (e) { err = e }
+      const fehlschlag = async (id, repoPath) => {
+        try { await prepareSandbox({ id, sandbox: 1 }, { name: 'x', path: repoPath }); return null }
+        catch (e) { return e }
+      }
+      // Driven by the seam, not by the machine: this used to hold only because
+      // the development host had no Docker, and it went red the day it got one.
+      const err = await mitRuntime({ forbid: true }, () => fehlschlag('sb-no-daemon', '/tmp/x'))
       wahr(!!err, 'with no container runtime the preparation cannot go ahead')
       wahr(err.sandboxRetry === true, 'and it says so as a RETRY, not as a failure')
       wahr(String(err.message).length > 0, 'with a sentence a human can read')
+
+      // The other half, and it is what makes the first one mean something: with
+      // a runtime that DID answer, a failure is an attempt like any other. If
+      // everything were a retry, `RESUME_MAX` would never be reached and a CLI
+      // that cannot start would be launched for ever.
+      const echt = await mitRuntime({ daemon: true },
+        () => fehlschlag('sb-has-daemon', join(sandkasten, 'no-such-repo')))
+      wahr(!!echt, 'a run whose own preparation fails still fails')
+      falsch(echt.sandboxRetry === true, `and that is an ATTEMPT, not a retry (${echt?.message})`)
     })
 
     await pruefe('the container PATH names the directories fl-report is mounted from', () => {

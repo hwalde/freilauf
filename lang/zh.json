@@ -1586,6 +1586,7 @@
   "sandbox.reason.unreachable": "容器运行时完全没有响应。未做任何更改；Freilauf 会在下一轮再次询问。",
   "sandbox.reason.unknown_runtime": "Freilauf 不认识这里配置的容器运行时 — 请在“设置 → 沙箱”中选择 docker、podman 或 runsc。",
   "sandbox.reason.unsupported_runtime": "所配置的运行时尚未构建。请在“设置 → 沙箱”中选择 docker、podman 或 runsc。",
+  "sandbox.reason.runtime_not_registered": "守护进程已响应，但它不认识该 OCI 运行时 — 请先注册（gVisor：安装 runsc，写入守护进程配置并重启守护进程），然后重新扫描。",
   "sandbox.runtime.build_unknown_image": "Freilauf 没有名为“{image}”的镜像",
   "sandbox.runtime.build_no_dockerfile": "“{image}”的 Dockerfile 不在此检出中（{path}）",
   "sandbox.runtime.build_unavailable": "无法构建 {image}：{reason}",

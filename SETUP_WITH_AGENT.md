@@ -185,6 +185,47 @@ loginctl enable-linger "$USER"      # already done by setup/03, harmless twice
 docker info | grep -i rootless
 ```
 
+**`DOCKER_HOST` does not have to be set, and here is why it is worth setting
+anyway.** `dockerd-rootless-setuptool.sh` does not export anything — it creates a
+docker *context*, which the CLI reads out of `$HOME/.docker`. So the CLI finds
+the rootless daemon only while `HOME` is set, and a library that reads no
+contexts (any Docker client for Node, Python or Go) falls back to
+`/var/run/docker.sock` — which on such a host still EXISTS as a file, refuses
+with `EACCES` because nobody is in the `docker` group, and therefore looks like a
+broken daemon rather than like the wrong one. The hub does not depend on any of
+that: it resolves `$XDG_RUNTIME_DIR/docker.sock` itself, checks that something
+answers there before it believes a `docker` on the `PATH`, and hands the same
+endpoint to every command it runs. Setting it makes the same answer true for
+every other tool on the machine, including a shell you debug in — one line in
+`~/.config/freilauf/env` (**print it for the human; the file is theirs**):
+
+```
+DOCKER_HOST=unix:///run/user/1000/docker.sock
+```
+
+with `1000` replaced by `id -u` of the hub's user. Do not point it at
+`/var/run/docker.sock` on a rootless installation.
+
+**What such a host can and cannot fence.** Rootless Docker enforces only the
+cgroup controllers systemd delegated to the user; measured on Ubuntu 24.04 that
+is `cpu memory pids` — so `--memory`, `--pids-limit` and `--cpus` (the three the
+shipped profiles use) hold, while `cpuset` and io limits would be **refused**.
+The hub reads both the delegation file and `docker info`'s own `CPUSet` /
+`MemoryLimit` / `PidsLimit` / `CpuCfsQuota` flags and reports them under
+**Settings → Sandbox**; a limit that is not listed there is one this host cannot
+apply, whatever a profile says.
+
+**AppArmor:** Ubuntu 24.04 sets
+`kernel.apparmor_restrict_unprivileged_userns = 1`, and rootless Docker works
+under it anyway because the distribution ships
+`/etc/apparmor.d/rootlesskit` (`flags=(unconfined)` with a `userns,` rule).
+Nothing needs to be installed for the container boundary. Do not diagnose this
+with `aa-status`: as an ordinary user it prints "You do not have enough
+privilege to read the profile set" and still **exits 0**. And note that under a
+rootless daemon containers carry **no AppArmor confinement at all** — the
+boundary there is the user namespace, seccomp, `--cap-drop ALL` and
+`no-new-privileges`, not a container profile.
+
 **Recommend rootless, and say why.** With rootful Docker, membership of the
 `docker` group is equivalent to root on the host — anything that can talk to that
 socket can mount `/` into a privileged container, and the hub talks to that

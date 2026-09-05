@@ -21,9 +21,11 @@
 // out of the pure builders, and they mean "this spec cannot become a command
 // line", which is a readable refusal at launch (failRun) rather than a hang.
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { connect, isIP } from 'node:net'
+import { homedir } from 'node:os'
 import { env } from '../env.mjs'
 import { sh } from '../util.mjs'
 import { t } from '../i18n.mjs'
@@ -69,10 +71,17 @@ export const DETACH_KEYS = 'ctrl-^,ctrl-^'
  * own but a runtime REGISTERED with the docker daemon — hence the same CLI plus
  * one flag (§7.7's table, §4.1).
  */
+// `socket: true` says this runtime talks to a DAEMON over a unix socket, which
+// is what makes the reachability question below askable at all. podman is
+// deliberately false: it is daemonless, so "there is no socket" is not "there
+// is no runtime" there, and a precheck would refuse a working installation.
 const RUNTIMES = {
-  docker: { bin: 'docker', runFlags: [] },
-  runsc: { bin: 'docker', runFlags: ['--runtime=runsc'] },
-  podman: { bin: 'podman', runFlags: [] },
+  docker: { bin: 'docker', runFlags: [], socket: true, ociRuntime: null },
+  // `ociRuntime` is what the daemon has to have REGISTERED for this id to work,
+  // and it is the whole difference between `runsc` and `docker`: the binary and
+  // the socket are the same, the flag names a runtime the daemon may not know.
+  runsc: { bin: 'docker', runFlags: ['--runtime=runsc'], socket: true, ociRuntime: 'runsc' },
+  podman: { bin: 'podman', runFlags: [], socket: false, ociRuntime: null },
 }
 
 /**
@@ -338,6 +347,16 @@ export function buildRunArgv(spec, ctx = {}) {
   // The hardening set. --cap-drop ALL because an agent needs no capability the
   // kernel hands a container by default, and no-new-privileges because a setuid
   // binary inside the image must not be a way back up.
+  //
+  // DELIBERATELY NO `--security-opt apparmor=…`, and not as an omission: under a
+  // ROOTLESS daemon there is no AppArmor confinement on containers to name in
+  // the first place — the daemon runs unprivileged and cannot load or apply a
+  // container profile — so the flag is inert there, and a design that leans on
+  // it would be promising a wall that is not built [measured on this host: a
+  // rootless daemon, `apparmor: enabled` in runc's feature list and nothing
+  // confining the container]. The seccomp profile and the two flags above are
+  // what really bind here; the strong AppArmor posture belongs to a rootful
+  // installation and would have to be declared per profile, not assumed.
   args.push('--cap-drop', 'ALL')
   args.push('--security-opt', 'no-new-privileges')
 
@@ -482,7 +501,14 @@ function tmpfsArgs(spec, homeDir) {
     // NOT noexec on /tmp — `npm ci`, `pip install` and every build script in
     // the world execute out of it, and a noexec /tmp fails them in a way that
     // reads as a broken toolchain rather than as a policy.
-    const opts = ['rw', e.noexec ? 'noexec' : null, 'nosuid'].filter(Boolean)
+    //
+    // AND `exec` HAS TO BE NAMED. Docker's `--tmpfs` defaults to `noexec,nodev`,
+    // so omitting the word was not the same as allowing it: measured inside a
+    // container started from this very argv, `chmod +x /tmp/x && /tmp/x` exited
+    // **126** and `/proc/mounts` showed `noexec` — the comment above described
+    // an intention the command line did not carry. `--tmpfs '/tmp:rw,exec,…'`
+    // is what makes it true [measured 2026-09-05].
+    const opts = ['rw', e.noexec ? 'noexec' : 'exec', 'nosuid']
     const size = unset(e.size) ? fallback : e.size
     if (!unset(size)) opts.push(`size=${String(size).trim()}`)
     out.push('--tmpfs', `${e.path}:${opts.join(',')}`)
@@ -557,6 +583,15 @@ export function buildNetworkConnectArgv(network, name, { runtime = 'docker' } = 
 const NO_DAEMON_RE = new RegExp([
   'cannot connect to the docker daemon',            // [documented] docker CLI
   'is the docker daemon running',                   // [documented] docker CLI, same message
+  // [measured 2026-09-05, docker 29.8.0] THE VENDOR REWORDED IT. Against a
+  // socket that does not exist, docker 29 answers "failed to connect to the
+  // docker API at unix:///…; check if the path is correct and if the daemon is
+  // running" — which none of the lines above match, so every lifecycle call
+  // against a stopped daemon came back `unreachable` instead of `no_daemon`.
+  // Safe, because unreachable is the answer that does nothing, but it means the
+  // reconciliation pass could never reach the empty truth it is written for.
+  'failed to connect to the docker api',
+  'if the daemon is running',
   'docker daemon is not running',                   // [inferred] Docker Desktop wording
   'cannot connect to podman',                       // [inferred] podman CLI
   'unable to connect to podman',                    // [inferred] podman CLI
@@ -603,6 +638,151 @@ export function runtimeVerdict(result) {
   return NO_DAEMON_RE.test(text) ? 'no_daemon' : 'unreachable'
 }
 
+// ---------------------------------------------------------------------------
+// Where the daemon is — the socket, not the CLI
+// ---------------------------------------------------------------------------
+//
+// A `docker` on the PATH is not a daemon, and the difference cost this
+// installation two hours: rootful `docker.service` is stopped and disabled here,
+// `/var/run/docker.sock` still EXISTS as a file (and connecting to it answers
+// `EACCES`, because nobody is in the `docker` group), and the daemon that really
+// runs is the rootless one at `$XDG_RUNTIME_DIR/docker.sock` [measured
+// 2026-09-05]. So `runtimeInfo()` asks the SOCKET first, and a socket that
+// demonstrably refuses is `no_daemon` before a single subprocess is spawned.
+//
+// Two things follow from the same measurement, and both are about the CHILD's
+// environment rather than about ours:
+//
+//  - `dockerd-rootless-setuptool.sh` created an active docker CONTEXT, and the
+//    CLI reads contexts out of `$HOME/.docker`. A child without `HOME` therefore
+//    loses the context — and a Node library that never reads contexts at all
+//    would fall back to the dead `/var/run/docker.sock`. `runtimeEnv()` ensures
+//    `HOME` and, where this module resolved a rootless socket itself, hands the
+//    CLI the same `DOCKER_HOST` it resolved, so the hub and the command it runs
+//    can never disagree about which daemon they mean.
+//  - `/var/run/docker.sock` is deliberately NOT written into `DOCKER_HOST`: it is
+//    the CLI's own last resort anyway, and forcing it would override a working
+//    context with the dead socket — the exact failure this section exists to end.
+
+/** The one place the endpoint seams are named. See the two test fences below. */
+const ENDPOINT_SEAM = 'SANDBOX_DOCKER_HOST'
+const FORCE_SEAM = 'SANDBOX_RUNTIME_FORCE'
+
+/** How long a socket may take to answer before "I do not know" is the answer. */
+const SOCKET_TIMEOUT_MS = 1500
+
+/**
+ * Where this runtime's daemon is, resolved WITHOUT talking to anybody:
+ *
+ *   1. `FREILAUF_SANDBOX_DOCKER_HOST` — the operator's (and the suite's) seam.
+ *      Pointing it at a path that does not exist is how a test forbids a runtime
+ *      on a machine that has one, exactly as `FREILAUF_CURSOR_AUTH` and
+ *      `FREILAUF_CLAUDE_CREDENTIALS` point at files that are not there.
+ *   2. `DOCKER_HOST` (`CONTAINER_HOST` for podman) out of the environment.
+ *   3. `$XDG_RUNTIME_DIR/docker.sock` — the rootless daemon.
+ *   4. `/var/run/docker.sock` — the rootful one, and the CLI's own fallback.
+ *
+ * `source` says which of the four answered, because the answer's WEIGHT differs:
+ * a socket we found ourselves under 3 is one we may hand on as `DOCKER_HOST`;
+ * the legacy path under 4 is not (see above).
+ */
+export function runtimeEndpoint(runtimeId = 'docker') {
+  const id = String(runtimeId ?? 'docker')
+  const podman = id === 'podman'
+  const seam = env(ENDPOINT_SEAM)
+  if (seam !== undefined && String(seam).trim() !== '') {
+    return { endpoint: String(seam).trim(), source: 'seam' }
+  }
+  const fromEnv = podman ? process.env.CONTAINER_HOST : process.env.DOCKER_HOST
+  if (fromEnv && String(fromEnv).trim()) return { endpoint: String(fromEnv).trim(), source: 'env' }
+  const xdg = String(process.env.XDG_RUNTIME_DIR ?? '').trim()
+  if (xdg) {
+    const path = join(xdg, podman ? 'podman/podman.sock' : 'docker.sock')
+    if (existsSync(path)) return { endpoint: `unix://${path}`, source: 'xdg' }
+  }
+  return podman
+    ? { endpoint: null, source: 'none' }
+    : { endpoint: 'unix:///var/run/docker.sock', source: 'legacy' }
+}
+
+/** The filesystem path of a `unix://` endpoint, or null for anything else. */
+function socketPath(endpoint) {
+  const s = String(endpoint ?? '').trim()
+  if (!s) return null
+  if (s.startsWith('unix://')) return s.slice('unix://'.length) || null
+  return s.startsWith('/') ? s : null
+}
+
+/**
+ * Does something answer at this endpoint? Tri-state, and for the same reason
+ * `tmuxVerdict()` is:
+ *
+ *   `true`  the socket accepted a connection — there is a daemon behind it.
+ *   `false` the kernel refused, and said why: ENOENT (no socket at all),
+ *           ECONNREFUSED (a socket file whose server is gone — a stopped
+ *           daemon leaves exactly that) or EACCES (a socket this user may not
+ *           talk to, which is `/var/run/docker.sock` on a host where nobody is
+ *           in the `docker` group [measured]).
+ *   `null`  we cannot say from here: a tcp/ssh/npipe endpoint, a timeout, or an
+ *           error code nobody has seen yet. The CLI is then asked, as before.
+ *
+ * Nothing is written and nothing is sent — the connection is closed the moment
+ * it stands. A daemon that is merely busy still accepts connections, which is
+ * exactly why this is a cheaper question than `docker info` and a safe one.
+ */
+export async function endpointReachable(endpoint, { timeout = SOCKET_TIMEOUT_MS } = {}) {
+  const path = socketPath(endpoint)
+  if (!path) return { reachable: null, code: null, detail: endpoint ? 'not a unix socket' : 'no endpoint' }
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (value) => { if (!done) { done = true; try { sock.destroy() } catch {} resolve(value) } }
+    const sock = connect(path)
+    sock.setTimeout(timeout)
+    sock.on('connect', () => finish({ reachable: true, code: null, detail: null }))
+    sock.on('timeout', () => finish({ reachable: null, code: 'ETIMEDOUT', detail: `${path} did not answer` }))
+    sock.on('error', (err) => {
+      const code = err?.code ?? null
+      const known = code === 'ENOENT' || code === 'ECONNREFUSED' || code === 'EACCES'
+      finish({ reachable: known ? false : null, code, detail: `${path}: ${code ?? err?.message ?? 'error'}` })
+    })
+  })
+}
+
+/**
+ * Is the socket precheck asked at all?
+ *
+ * Not when the runtime is daemonless (podman), not when a binary seam names the
+ * thing to drive — a shim is a script and has no socket, and a test fence may
+ * replace what the hub CALLS — and not when `FREILAUF_SANDBOX_RUNTIME_FORCE=1`
+ * says the operator (or the suite) has already answered the question. Forcing
+ * does not invent a daemon: the CLI is still asked and still gets to say no.
+ */
+function socketPrechecked(def) {
+  if (!def.socket) return false
+  if (env(FORCE_SEAM) === '1') return false
+  if (env('SANDBOX_RUNTIME_BIN')) return false
+  return true
+}
+
+/**
+ * The environment every runtime command is run with. `HOME` because the CLI
+ * reads its contexts out of it, and the resolved `DOCKER_HOST` where we found
+ * one ourselves — see the section comment above for why the legacy socket is
+ * excluded from that.
+ */
+function runtimeEnv(runtimeId) {
+  const out = { ...process.env }
+  if (!out.HOME) {
+    try { out.HOME = homedir() } catch { /* a machine that cannot say has none */ }
+  }
+  const { endpoint, source } = runtimeEndpoint(runtimeId)
+  if (endpoint && (source === 'seam' || source === 'xdg')) {
+    if (String(runtimeId ?? 'docker') === 'podman') out.CONTAINER_HOST = endpoint
+    else out.DOCKER_HOST = endpoint
+  }
+  return out
+}
+
 /** One call, with the verdict attached. Never throws — sh() resolves on error. */
 async function call(runtimeId, args, opts = {}) {
   let bin
@@ -612,7 +792,7 @@ async function call(runtimeId, args, opts = {}) {
     // An unknown runtime id is a configuration answer, not a daemon answer.
     return { ok: false, code: 1, stdout: '', stderr: err.message, verdict: 'unreachable', bin: null }
   }
-  const r = await sh(bin, args, { timeout: opts.timeout ?? 30_000 })
+  const r = await sh(bin, args, { timeout: opts.timeout ?? 30_000, env: runtimeEnv(runtimeId) })
   return { ...r, bin, verdict: runtimeVerdict(r) }
 }
 
@@ -653,6 +833,7 @@ export function _runtimeInfoCacheReset() { infoCache = new Map(); infoFlight = n
  */
 const REASON = {
   ok: 'sandbox.reason.ok',
+  runtime_not_registered: 'sandbox.reason.runtime_not_registered',
   no_binary: 'sandbox.reason.no_binary',
   no_daemon: 'sandbox.reason.no_daemon',
   unreachable: 'sandbox.reason.unreachable',
@@ -686,7 +867,10 @@ export async function runtimeInfo(runtimeId = null, { force = false } = {}) {
   // Keyed on what the answer is ABOUT, not only on time: pointing the shim at
   // another binary does not make the cached answer old, it makes it about
   // something else (usage.mjs has the same second key, for the same reason).
-  const key = `${id}|${bin}`
+  // The ENDPOINT is part of that question too — the same `docker` binary against
+  // the rootless socket and against a dead one is two different answers, and a
+  // suite that moves the seam between them must not be handed the first one.
+  const key = `${id}|${bin}|${runtimeEndpoint(id).endpoint ?? ''}`
   const hit = infoCache.get(key)
   if (!force && hit && Date.now() - hit.at < INFO_CACHE_MS) return hit.value
   if (!force) {
@@ -727,9 +911,22 @@ export async function runtimeInfo(runtimeId = null, { force = false } = {}) {
 }
 
 async function probeRuntime(id, bin) {
+  const def = RUNTIMES[id] ?? RUNTIMES.docker
+  const { endpoint, source } = runtimeEndpoint(id)
   const base = {
-    available: false, id, bin, version: null, rootless: null,
+    available: false, id, bin, version: null, rootless: null, endpoint, endpointSource: source,
     runtimes: [], cgroup: cgroupFacts(), userns: usernsFacts(), reason: REASON.unreachable, message: null,
+  }
+  // THE SOCKET FIRST. A CLI on the PATH with no reachable daemon behind it is
+  // exactly the state this installation sat in, and it is cheaper to find out
+  // here than through a subprocess — a refusal from the kernel is an ANSWER
+  // (`no_daemon`), while a timeout or an endpoint we cannot reason about is
+  // not, and falls through to the CLI as before.
+  if (socketPrechecked(def)) {
+    const s = await endpointReachable(endpoint)
+    if (s.reachable === false) {
+      return { ...base, reason: REASON.no_daemon, message: s.detail }
+    }
   }
   // `info --format {{json .}}` is one call for everything the settings page
   // wants, and it is the call that fails when the daemon is down — which is
@@ -747,13 +944,33 @@ async function probeRuntime(id, bin) {
     // The daemon answered and we could not read it. That is not "no daemon".
     return { ...base, reason: REASON.unreachable, message: 'could not parse info output' }
   }
+  const runtimes = runtimesFrom(info)
+  // THE DAEMON ANSWERED IS NOT THIS RUNTIME WORKS. `runsc` is the same binary
+  // and the same socket as `docker` plus one flag, so `docker info` succeeding
+  // said nothing at all about whether gVisor is registered — and it is not, on
+  // an ordinary daemon: its `Runtimes` here are `io.containerd.runc.v2` and
+  // `runc` [measured 2026-09-05]. The settings page would have offered gVisor,
+  // the profile would have looked validated, and every run so configured would
+  // die in the pane with `unknown or invalid runtime name: runsc` (exit 125) —
+  // a start failure with no diagnosis anywhere above it. The list is in the very
+  // object we already parsed, so the check costs nothing.
+  if (def.ociRuntime && runtimes.length && !runtimes.includes(def.ociRuntime)) {
+    return {
+      ...base, reason: REASON.runtime_not_registered, runtimes,
+      version: versionFrom(info), rootless: rootlessFrom(info), cgroup: cgroupFacts(info),
+      message: `the daemon knows ${runtimes.join(', ')}`,
+    }
+  }
   return {
     ...base,
     available: true,
     reason: REASON.ok,
     version: versionFrom(info),
     rootless: rootlessFrom(info),
-    runtimes: runtimesFrom(info),
+    runtimes,
+    // The daemon's own answer about what it can enforce outranks the delegation
+    // file — see cgroupFacts().
+    cgroup: cgroupFacts(info),
     message: null,
   }
 }
@@ -789,24 +1006,77 @@ function runtimesFrom(info) {
 }
 
 /**
- * The cgroup controllers this USER has been delegated. Rootless Docker needs
- * `memory` and `pids` here or `--memory`/`--pids-limit` are silently ignored —
- * a resource fence that is not enforced is worse than none, because the
- * settings page says it is on. Read from the file rather than asked of the
- * daemon: it is the user's delegation, not the daemon's opinion.
+ * WHICH RESOURCE FENCES THIS HOST CAN REALLY ENFORCE.
+ *
+ * Two sources, and the daemon's own answer wins where it exists — because it is
+ * the answer `docker run` will act on, while the delegation file is only the
+ * ingredient it was computed from:
+ *
+ *  - `cgroup.controllers` under this user's systemd slice is the DELEGATION.
+ *    Rootless Docker needs `memory` and `pids` in it or `--memory` and
+ *    `--pids-limit` are silently ignored, and a fence that is not enforced is
+ *    worse than none, because the settings page says it is on. Measured on this
+ *    host: `cpu memory pids` — so `cpuset` and the io controller are NOT
+ *    delegated, and `--cpuset-cpus` or an io limit would be refused by the
+ *    daemon [measured 2026-09-05].
+ *  - `docker info` reports the same thing from the other side: `MemoryLimit`,
+ *    `SwapLimit`, `PidsLimit`, `CpuCfsQuota`/`CpuCfsPeriod` and `CPUSet` are
+ *    booleans [documented], and this host answers `CPUSet: false` next to
+ *    `true` for the rest.
+ *
+ * `limits` is therefore the field a form has to ask before it offers a fence:
+ * a limit whose entry is `false` is one `docker run` would refuse, and `null`
+ * means nobody could say — which is not permission to promise it either.
+ * Nothing in `buildRunArgv()` writes `--cpuset-cpus` or an io limit today, and
+ * this is the answer that keeps it that way: a new limit is offered only where
+ * this says it holds.
  */
-function cgroupFacts() {
-  const out = { controllers: [], delegated: null, path: null }
+function cgroupFacts(info = null) {
+  const out = { controllers: [], delegated: null, path: null, version: null, limits: {} }
+  const has = (name) => (out.controllers.length ? out.controllers.includes(name) : null)
   try {
     const uid = typeof process.getuid === 'function' ? process.getuid() : null
-    if (uid === null) return out
-    const path = `/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/cgroup.controllers`
-    out.path = path
-    if (!existsSync(path)) return out
-    out.controllers = readFileSync(path, 'utf8').trim().split(/\s+/).filter(Boolean)
-    out.delegated = out.controllers.includes('memory') && out.controllers.includes('pids')
+    if (uid !== null) {
+      const path = `/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/cgroup.controllers`
+      out.path = path
+      if (existsSync(path)) {
+        out.controllers = readFileSync(path, 'utf8').trim().split(/\s+/).filter(Boolean)
+        // The three the shipped profiles actually write. `cpu` joins the pair
+        // because `--cpus` is a cpu-controller quota, and a host that delegates
+        // memory and pids but not cpu would silently drop it.
+        out.delegated = ['memory', 'pids', 'cpu'].every(c => out.controllers.includes(c))
+      }
+    }
   } catch { /* a sysfs that does not answer is simply no information */ }
+  // `true`/`false` only where somebody really said so — `Boolean(undefined)` is
+  // `false`, and a fence reported as refused when nobody was asked would take
+  // away a limit that works.
+  const said = (v, fallback) => (typeof v === 'boolean' ? v : fallback)
+  out.version = info?.CgroupVersion ? String(info.CgroupVersion) : null
+  out.limits = {
+    memory: said(info?.MemoryLimit, has('memory')),
+    memorySwap: said(info?.SwapLimit, has('memory')),
+    pids: said(info?.PidsLimit, has('pids')),
+    cpus: said(info?.CpuCfsQuota, has('cpu')),
+    // cpuset and io are the two this host does NOT have, and the two nothing
+    // may quietly assume: `docker info` names cpuset itself, and the io
+    // controller has no `info` field at all, so the delegation file is the only
+    // witness for it.
+    cpuset: said(info?.CPUSet, has('cpuset')),
+    io: has('io'),
+  }
   return out
+}
+
+/**
+ * Which limits this host can enforce, as a plain question a form can ask:
+ * `cgroupSupports(info, 'cpuset')`. `null` is "nobody could say", and it is
+ * deliberately NOT `true` — offering a fence the daemon would refuse is the
+ * same lie as a fence that is silently ignored.
+ */
+export function cgroupSupports(info, limit) {
+  const v = info?.cgroup?.limits?.[String(limit)]
+  return typeof v === 'boolean' ? v : null
 }
 
 /**
@@ -827,6 +1097,72 @@ function usernsFacts() {
       const raw = readFileSync(path, 'utf8').trim()
       out[key] = raw === '' ? null : Number(raw)
     } catch { /* unreadable is the same as absent for this purpose */ }
+  }
+  const profile = usernsProfile()
+  out.apparmorUsernsProfile = profile.name
+  out.apparmorUsernsProfilePath = profile.path
+  // THE QUESTION IS "may a userns be created", NOT "did the docker package write
+  // a profile". The sysctl above says the restriction is ON; it says nothing
+  // about whether a profile lifts it for the binaries that matter, and Ubuntu
+  // 24.04 ships exactly such a profile itself — `/etc/apparmor.d/rootlesskit`,
+  // `flags=(unconfined)` with a `userns,` rule, and rootless Docker runs on this
+  // host with the sysctl at 1 [measured 2026-09-05]. Reporting a gap that is not
+  // there sends an operator to fix a working machine.
+  //
+  // `restricted` is therefore the ANSWER and not the ingredient: true only where
+  // the kernel restricts and nothing was found that permits it, false where it
+  // does not restrict or a profile does, null where we could not read enough to
+  // say. What is deliberately not used is `aa-status`: as a normal user it
+  // prints "You do not have enough privilege to read the profile set" and
+  // **exits 0** [measured] — a false green of exactly the kind this project has
+  // rules about.
+  const restrict = out.apparmorRestrictUserns
+  if (restrict === undefined || restrict === null) out.restricted = restrict === null ? null : false
+  else if (Number(restrict) === 0) out.restricted = false
+  else if (profile.name) out.restricted = false
+  else out.restricted = profile.readable ? true : null
+  return out
+}
+
+/**
+ * The AppArmor profiles that are allowed to create a user namespace, read from
+ * the profile FILES — the only source a hub that never runs `sudo` has. A
+ * profile qualifies when it carries a bare `userns,` rule (the grant Ubuntu's
+ * own `rootlesskit` profile uses) or is declared `flags=(unconfined)`.
+ *
+ * Bounded on purpose: the named candidates first, then at most a few dozen
+ * top-level files, each read only if it is small. This runs behind the discovery
+ * cache, and a directory scan that grew without a ceiling would be a page render
+ * waiting on somebody's `/etc`.
+ */
+const APPARMOR_DIR = '/etc/apparmor.d'
+const USERNS_CANDIDATES = ['rootlesskit', 'unprivileged_userns', 'docker', 'dockerd', 'podman', 'bwrap', 'unshare']
+const APPARMOR_MAX_FILES = 60
+const APPARMOR_MAX_BYTES = 64 * 1024
+
+function usernsProfile() {
+  const out = { name: null, path: null, readable: false }
+  let names
+  try {
+    if (!existsSync(APPARMOR_DIR)) return out
+    names = readdirSync(APPARMOR_DIR)
+    out.readable = true
+  } catch { return out }
+  const ordered = [
+    ...USERNS_CANDIDATES.filter(n => names.includes(n)),
+    ...names.filter(n => !USERNS_CANDIDATES.includes(n)).slice(0, APPARMOR_MAX_FILES),
+  ]
+  for (const name of ordered) {
+    const path = join(APPARMOR_DIR, name)
+    try {
+      const st = statSync(path)
+      if (!st.isFile() || st.size > APPARMOR_MAX_BYTES) continue
+      const text = readFileSync(path, 'utf8')
+      // `userns,` as a rule of its own, or a profile that is unconfined anyway.
+      if (/^\s*userns\s*,/m.test(text) || /flags\s*=\s*\(\s*[^)]*unconfined/.test(text)) {
+        return { name, path, readable: true }
+      }
+    } catch { /* one unreadable profile is not an answer about the set */ }
   }
   return out
 }
@@ -927,8 +1263,16 @@ export async function networkGateway(name, { runtime = 'docker' } = {}) {
   if (!r.ok) {
     return { verdict: r.verdict, ok: false, address: null, reason: (r.stderr || '').trim() || 'network inspect failed' }
   }
-  const address = String(r.stdout ?? '').trim().split(/\s+/)
-    .find(a => a && a !== '<no value>') ?? null
+  // AN IP, OR NOTHING. `find(a => a !== '<no value>')` was not a check that the
+  // token IS an address, and Docker 29.8.0 supplies one that is not:
+  // a network created with `gateway_mode_ipv4=isolated` carries no Gateway key,
+  // and the Go template stringifies the zero `netip.Addr` as **`invalid IP`**
+  // [measured 2026-09-05]. The whitespace split then handed `"invalid"` back as
+  // the address, `builtinBind()`'s explicit refusal never fired, and the proxy
+  // called `listen(port, 'invalid')` — so the operator got
+  // `ENOTFOUND getaddrinfo invalid` instead of the sentence this function was
+  // written to give them. `net.isIP()` is the check, and it costs nothing.
+  const address = String(r.stdout ?? '').trim().split(/\s+/).find(a => isIP(a) !== 0) ?? null
   return { verdict: 'ok', ok: !!address, address, reason: address ? null : 'the network has no gateway address' }
 }
 
@@ -1208,7 +1552,9 @@ export async function buildImage(name, { runtime = 'docker', registry = null, pu
       error: t('sandbox.runtime.build_no_dockerfile', { image: String(name), path: dockerfile }) }
   }
   const { bin, args } = buildImageArgv(recipe, { runtime, pull })
-  const r = await sh(bin, args, { timeout, maxBuffer: 16 * 1024 * 1024 })
+  // Through `runtimeEnv()` like every other runtime call: a build that lost the
+  // CLI's context would go looking for the daemon at the dead legacy socket.
+  const r = await sh(bin, args, { timeout, maxBuffer: 16 * 1024 * 1024, env: runtimeEnv(runtime) })
   const verdict = runtimeVerdict(r)
   if (r.ok) {
     // The digest is asked for right away: it is what a spec is pinned with and
@@ -1217,10 +1563,19 @@ export async function buildImage(name, { runtime = 'docker', registry = null, pu
     const d = await imageDigest(recipe.tag, { runtime })
     return { ok: true, image: recipe.tag, verdict: 'ok', digest: d.digest, imageId: d.id, log: r.stdout }
   }
-  if (verdict !== 'ok') {
-    // No daemon, or none that answered. That is not a broken Dockerfile, and
-    // saying "the build failed" about it would send the operator to the wrong
-    // file entirely.
+  // NO DAEMON, OR NO BINARY. That is not a broken Dockerfile, and saying "the
+  // build failed" about it would send the operator to the wrong file entirely.
+  //
+  // The test used to be `verdict !== 'ok'`, and that made the `build_failed`
+  // branch below UNREACHABLE: `runtimeVerdict()`'s default is `unreachable`, and
+  // a build that really breaks fails with a message no daemon classifier
+  // knows (`ERROR: failed to solve: …`). So every broken Dockerfile on this hub
+  // was reported as "there is no container runtime" — the one diagnosis that
+  // sends somebody to look at their installation instead of at their image.
+  // Only a POSITIVE no-daemon answer, or a binary that is not there, is a
+  // runtime problem; everything else is the build's own.
+  const missingBin = r.code === 'ENOENT' || /ENOENT|not found/i.test(String(r.stderr ?? ''))
+  if (verdict === 'no_daemon' || missingBin) {
     return { ok: false, reason: verdict === 'no_daemon' ? 'no_daemon' : 'unreachable', image: recipe.tag, verdict,
       error: t('sandbox.runtime.build_unavailable', {
         image: recipe.tag,
@@ -1401,7 +1756,7 @@ export async function dryRunChecks(spec, { allow = [], repo = null, workdir = nu
       })
     } catch (err) { add('container', false, err?.message || String(err)) }
     if (argv) {
-      const r = await sh(argv.bin, argv.args, { timeout: 120_000 })
+      const r = await sh(argv.bin, argv.args, { timeout: 120_000, env: runtimeEnv(s.runtime) })
       const out = String(r.stdout ?? '')
       if (!r.ok && !out.includes('done')) {
         add('container', false, (String(r.stderr ?? '').trim().split('\n').pop() || 'the probe container did not run'))

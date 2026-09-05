@@ -129,7 +129,13 @@ export async function tick() {
   // sessions the pass above is about to close. Both are a complete no-op on an
   // installation without a container runtime.
   try { await enforceMaxRuntime() } catch (e) { console.error('[sandbox]', e.message) }
-  try { await reconcileContainers() } catch (e) { console.error('[sandbox]', e.message) }
+  let containerPass = null
+  try { containerPass = await reconcileContainers() } catch (e) { console.error('[sandbox]', e.message) }
+  // …and the third: the built-in egress proxy a hub restart took with it. It
+  // reads the pass above's VERDICT rather than asking the daemon again, which
+  // is what keeps "the daemon did not answer" from being spent as an answer
+  // here too (restoreSandboxProxies below says why it hangs on this call).
+  try { await restoreSandboxProxies(containerPass?.verdict ?? null) } catch (e) { console.error('[sandbox]', e.message) }
   await cleanupWorktrees()
   // No-code flows: run_finished backstop, delays, cron (server/flows/triggers.mjs).
   try { await flowsTick() } catch (e) { console.error('[flows]', e.message) }
@@ -1134,8 +1140,18 @@ export const IN_FLIGHT_STATUSES = ['running', 'waiting_help', 'scheduled', 'defe
  * exec` debugging after the run is over (§7.11). It buys exactly the retention
  * clock, no more: `overKeep` is what says the clock has run out, and a 'keep'
  * that never expired would be a container nothing on this machine ever removes.
+ *
+ * There is deliberately no `exists` here any more. It used to be a parameter
+ * with a default of `true` and exactly one caller, which passed `true` — a rule
+ * nobody was applying, and the shape a reader takes for a case that is handled.
+ * It cannot vary because of what this function is asked ABOUT: the loop below
+ * walks the containers the daemon LISTED, so every one of them exists by
+ * construction. The other direction — a run that says sandboxed and has no
+ * container in front of it — never reaches this table at all: an in-flight run
+ * gets `sandbox:container_gone` from the second loop, and a terminal one is
+ * `releasable()`'s business.
  */
-export function containerVerdict({ status, sessionOpen, running, exists = true, retention = 'run', overKeep = false }) {
+export function containerVerdict({ status, sessionOpen, running, retention = 'run', overKeep = false }) {
   if (!status) return 'reap'
   if (IN_FLIGHT_STATUSES.includes(status)) {
     if (!running) return 'container_gone'          // an exited leftover is removed with the event
@@ -1145,7 +1161,7 @@ export function containerVerdict({ status, sessionOpen, running, exists = true, 
   // commission types into (§8.5) — retention closes both together, in that order.
   if (sessionOpen) return 'leave'
   if (retention === 'keep' && !overKeep) return 'leave'
-  return exists || running ? 'reap' : 'leave'
+  return 'reap'
 }
 
 /** Is the run's own session still open, as the hub's own bookkeeping has it? */
@@ -1215,13 +1231,20 @@ export async function reconcileContainers(hubId = null, nowMs = Date.now()) {
       status: run?.status ?? null,
       sessionOpen: sessionOpenFor(run),
       running: c.running,
-      exists: true,
       retention: spec?.retention ?? 'run',
       overKeep: finished != null && nowMs - finished >= keepMs,
     })
     // A proxy container is a tool of the run, not the run: it is reaped with it
     // and never carries an event of its own. Bringing a dead one back while its
-    // run is still going is the sandbox facade's job (§8.19), not the reaper's.
+    // run is still going is the sandbox facade's job (§8.19), not the reaper's —
+    // and that is a division of labour rather than a gap, now that
+    // `restoreSandboxProxies()` above calls that facade on every pass. A reaper
+    // that STARTED a proxy container would be a second implementation of the
+    // launch's proxy step: it cannot see the run's resolved allow list, its CA
+    // or its network wiring, and it does not know a retryable failure from a
+    // fatal one. `restoreProxies()` answers for the built-in engine today; the
+    // iron-proxy container's revival is one more branch THERE, and this pass
+    // picks it up without a line changing here.
     if (c.kind === 'proxy' && verdict !== 'reap') continue
     acted.push({ name: c.name, runId: c.runId, kind: c.kind, verdict })
     try {
@@ -1363,6 +1386,79 @@ async function dockerAnswered() {
 
 /** Test hook: forget how often the runtime has been silent. */
 export function _resetDockerSilence() { dockerSilence.count = 0 }
+
+// ------------------------------------ the proxy a hub restart took with it
+//
+// §8.19's `sandbox:proxy_restarted`, and the reason it is wired HERE.
+//
+// With the default `network.engine: 'builtin'` the run's egress proxy is a
+// listener inside the hub PROCESS and the facade's handle map is in-process
+// only. Measured across a real stop/start: the run survives, its tmux session
+// survives, the container survives — and the listener is gone, while the
+// container's frozen `HTTPS_PROXY` still points at the dead port. From that
+// moment every request the agent makes fails with a connection error and the
+// hub reads `running` throughout. This hub restarted 164 times in 30 days, so
+// it is the ordinary case, and it is the invisible-failure shape this file has
+// the most rules about.
+//
+// `restoreProxies()` in the facade does the repair (same port out of the run's
+// own `sandbox.json`, same resolved allow list, fail-soft per run). This is the
+// caller it was missing, and it is the watcher's pass rather than a timer of
+// its own for two reasons: `hub.mjs` already runs a first pass two seconds
+// after listen, so a restarted hub repairs its runs without waiting for
+// anything else to happen; and a second timer over the same runs is the drift
+// `reconcileContainers()`'s own banner is about.
+//
+// Three properties, each of them a way it would otherwise be wrong:
+//
+//  - **it hangs on the reconciliation pass's verdict**, not on a question of
+//    its own. `ok` is a positive answer about the machine; `unreachable` means
+//    the hub learned NOTHING, and acting on that is exactly the mistake
+//    `tmuxVerdict()` exists to prevent. Not knowing is a reason to wait a pass.
+//    `not_in_use` / `no_daemon` / `no_runtime` are the same refusal from the
+//    other side: no runtime means no container, and no container means there is
+//    nothing for a proxy to serve.
+//  - **it is idempotent and cheap.** The facade skips a run this process
+//    already holds a handle for, so the steady state costs one indexed query;
+//    with no in-flight sandboxed run at all it costs that query and nothing
+//    else. The ordinary hub — no sandbox — never gets past the verdict gate.
+//  - **it does not thrash.** A port that cannot be rebound (something else took
+//    it, the address is gone) writes a `warn` event per attempt, and a run in
+//    that state stays in that state: an attempt per 30 seconds for ever would
+//    be a run's history filled with one sentence. So a walk that restored
+//    nothing doubles its own wait (30 s → 15 min), a walk that restored
+//    something resets it, and a CHANGED set of candidates always gets a walk —
+//    a new run must never wait out somebody else's backoff.
+const proxyRestore = { candidates: '', nextAt: 0, waitMs: 0 }
+const PROXY_RESTORE_BASE_MS = 30_000            // one watcher pass
+const PROXY_RESTORE_MAX_MS = 15 * 60_000
+
+/** Test hook: forget the backoff, so a suite's next pass really walks. */
+export function _resetProxyRestore() {
+  proxyRestore.candidates = ''; proxyRestore.nextAt = 0; proxyRestore.waitMs = 0
+}
+
+export async function restoreSandboxProxies(verdict, nowMs = Date.now()) {
+  if (verdict !== 'ok') return null
+  // The same set `restoreProxies()` walks, asked here only to decide WHETHER to
+  // walk it: a run whose session the hub has closed is not owed a listener.
+  const ids = db.prepare(`SELECT id FROM runs WHERE sandbox=1 AND status IN ('running','waiting_help')
+                          AND tmux_closed_at IS NULL ORDER BY id`).all().map(r => r.id)
+  if (!ids.length) { _resetProxyRestore(); return null }
+  const key = ids.join(',')
+  const changed = key !== proxyRestore.candidates
+  if (!changed && nowMs < proxyRestore.nextAt) return null
+  proxyRestore.candidates = key
+  // Lazily, like releaseReaped() below: the facade imports this module for
+  // `reconcileContainers`, so a static edge back would be the cycle.
+  const { restoreProxies } = await import('./sandbox/index.mjs')
+  const out = await restoreProxies()
+  proxyRestore.waitMs = (changed || out?.restored?.length)
+    ? PROXY_RESTORE_BASE_MS
+    : Math.min(PROXY_RESTORE_MAX_MS, (proxyRestore.waitMs || PROXY_RESTORE_BASE_MS) * 2)
+  proxyRestore.nextAt = nowMs + proxyRestore.waitMs
+  return out
+}
 
 /**
  * `resources.maxRuntimeMinutes` from the run's frozen spec is a HARD stop

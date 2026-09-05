@@ -53,5 +53,7 @@ LABEL freilauf.cursor.version="${CURSOR_VERSION}"
 # cursor's only activity source and its only end-of-turn signal). Same rule and
 # same reasoning as the block in base.Dockerfile.
 
-USER agent
+# NO `USER` LINE — see the block at the top of base.Dockerfile. Under a
+# rootless daemon `--user` is absent, so a `USER` here would be what decides,
+# and uid 1000 inside maps to a subordinate uid that owns none of the mounts.
 WORKDIR /home/agent

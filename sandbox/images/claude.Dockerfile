@@ -62,5 +62,8 @@ ENV DISABLE_AUTOUPDATER=1 \
 # make two authors of one fact, and the image would then also claim it of a
 # `docker run` somebody does by hand for a completely different purpose.
 
-USER agent
+# NO `USER` LINE, and it is the base image's rule rather than this layer's: a
+# `USER` here would win under a rootless daemon, where `buildRunArgv()` passes
+# no `--user` at all and the container's root IS the hub user on the host. The
+# block at the top of base.Dockerfile has the measurement.
 WORKDIR /home/agent

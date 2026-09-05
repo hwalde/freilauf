@@ -1586,6 +1586,7 @@
   "sandbox.reason.unreachable": "Die Container-Laufzeit hat überhaupt nicht geantwortet. Es wurde nichts verändert; Freilauf fragt im nächsten Durchlauf erneut.",
   "sandbox.reason.unknown_runtime": "Freilauf kennt die hier eingestellte Container-Laufzeit nicht — unter Einstellungen → Sandbox docker, podman oder runsc wählen.",
   "sandbox.reason.unsupported_runtime": "Die eingestellte Laufzeit ist noch nicht gebaut. Unter Einstellungen → Sandbox docker, podman oder runsc wählen.",
+  "sandbox.reason.runtime_not_registered": "Der Daemon hat geantwortet, kennt diese OCI-Laufzeit aber nicht — sie eintragen (für gVisor: runsc installieren, in die Daemon-Konfiguration eintragen und den Daemon neu starten) und erneut suchen.",
   "sandbox.runtime.build_unknown_image": "Freilauf liefert kein Image namens „{image}“ aus",
   "sandbox.runtime.build_no_dockerfile": "Das Dockerfile für „{image}“ liegt nicht in diesem Checkout ({path})",
   "sandbox.runtime.build_unavailable": "{image} konnte nicht gebaut werden: {reason}",

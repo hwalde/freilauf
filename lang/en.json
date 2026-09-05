@@ -1586,6 +1586,7 @@
   "sandbox.reason.unreachable": "The container runtime gave no answer at all. Nothing was changed; Freilauf asks again on the next pass.",
   "sandbox.reason.unknown_runtime": "Freilauf does not know the container runtime configured here — pick docker, podman or runsc under Settings → Sandbox.",
   "sandbox.reason.unsupported_runtime": "The configured runtime is not built yet. Pick docker, podman or runsc under Settings → Sandbox.",
+  "sandbox.reason.runtime_not_registered": "The daemon answered, but it does not know this OCI runtime — register it (for gVisor: install runsc, add it to the daemon configuration and restart the daemon), then scan again.",
   "sandbox.runtime.build_unknown_image": "Freilauf ships no image called “{image}”",
   "sandbox.runtime.build_no_dockerfile": "The Dockerfile for “{image}” is not in this checkout ({path})",
   "sandbox.runtime.build_unavailable": "{image} could not be built: {reason}",

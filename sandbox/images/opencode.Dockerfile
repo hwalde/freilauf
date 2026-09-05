@@ -38,5 +38,7 @@ ENV OPENCODE_DISABLE_AUTOUPDATE=1
 # hub's activity and token measurement reading an empty session store. The full
 # reasoning is in base.Dockerfile; overlay.Dockerfile fails the build over it.
 
-USER agent
+# NO `USER` LINE — see the block at the top of base.Dockerfile. Under a
+# rootless daemon `--user` is absent, so a `USER` here would be what decides,
+# and uid 1000 inside maps to a subordinate uid that owns none of the mounts.
 WORKDIR /home/agent

@@ -1296,9 +1296,57 @@ export const RUN_DEF_FLOW_FIELDS = [
   // and inherits whatever that agent carries. `inherit` means the repo and the
   // hub decide, which is what every flow written before this field did.
   { key: 'sandbox', kind: 'select', options: SANDBOX_TRISTATE, default: 'inherit' },
-  { key: 'sandboxOverrides', kind: 'textarea', placeholder: '{"network": {"mode": "none"}}' },
+  {
+    key: 'sandboxOverrides', kind: 'textarea', placeholder: '{"network": {"mode": "none"}}',
+    // The one field of this list that is judged at SAVE time as well as at run
+    // time, and the asymmetry is the point: every other field here is a
+    // convenience whose worst case is a run that starts wrong, while this one
+    // is a wall whose worst case is a run that starts unprotected. `run()`
+    // refuses it (`sandboxFromFlowProps`), but the designer that saved the flow
+    // is not the thing that runs it — the operator learns at 03:00, from a
+    // failed step, that a document they typed on Tuesday was never a document.
+    //
+    // The hook takes the WHOLE props bag rather than the value, because the
+    // baseline a locked path is narrowed FROM depends on `props.repoId`, which
+    // is a field of the step and not of this list. Nothing here is a template:
+    // `start_single_run` renders `model`, `prompt` and `branchPattern` and
+    // passes everything else through verbatim, so what is judged at save time
+    // is byte for byte what `run()` will judge again.
+    validate: (props) => sandboxFlowProblems(props),
+  },
   { key: 'expectedMinutes', kind: 'number', default: DEFAULT_EXPECTED_MINUTES },
 ]
+
+/**
+ * One reading of a flow step's overrides document: what it resolves to, and
+ * what is wrong with it. `sandboxFromFlowProps()` (the run) and the `validate`
+ * hook above (the save) both ask THIS, so the designer and the engine cannot
+ * come to different conclusions about one document.
+ *
+ * Nothing is wrong with an absent or empty document, and never was: a flow that
+ * says nothing about the sandbox goes on saying nothing.
+ */
+function sandboxFlowCheck(props = {}) {
+  const lock = sandboxLock()
+  return validateSandboxOverrides(props?.sandboxOverrides, {
+    lock,
+    allowedMountRoots: sandboxAllowedMountRoots(),
+    // The same baseline the launch resolves against, so the step cannot be
+    // saved with a loosening the launch would refuse and then run as though it
+    // had asked for nothing.
+    against: sandboxAgainst(props?.repoId, lock),
+  })
+}
+
+/**
+ * The same document as the sentences an operator reads — the save-time half.
+ *
+ * Synchronous on purpose: `validateDefinition()` in `flows/steps.mjs` is, and a
+ * field rule that had to be awaited could not be asked from there at all.
+ */
+export function sandboxFlowProblems(props = {}) {
+  return sandboxFlowCheck(props).problems.map(p => t(p.key, p.params))
+}
 
 /**
  * The sandbox half of `defFromFlowProps()`.
@@ -1324,15 +1372,9 @@ export const RUN_DEF_FLOW_FIELDS = [
  */
 function sandboxFromFlowProps(props = {}) {
   const sandbox = SANDBOX_TRISTATE.includes(props.sandbox) ? props.sandbox : 'inherit'
-  const lock = sandboxLock()
-  const { overrides, problems } = validateSandboxOverrides(props.sandboxOverrides, {
-    lock,
-    allowedMountRoots: sandboxAllowedMountRoots(),
-    // The same baseline the launch resolves against, so the step cannot be
-    // saved with a loosening the launch would refuse and then run as though it
-    // had asked for nothing.
-    against: sandboxAgainst(props.repoId, lock),
-  })
+  // One reading, shared with the save-time hook on the field itself, so a
+  // document the designer accepted is a document this function accepts.
+  const { overrides, problems } = sandboxFlowCheck(props)
   if (problems.length) {
     throw new Error(t('sandbox.problem.flow_overrides', {
       problems: problems.map(p => t(p.key, p.params)).join(' · '),

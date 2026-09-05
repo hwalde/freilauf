@@ -7301,6 +7301,9 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       mkdirSync(join(SB, 'runs', id), { recursive: true })
       return id
     }
+    /** A problem page as the sentence it makes — the `<ul class="err">` items. */
+    const problemText = (html) => (html.match(/<ul class="err">([\s\S]*?)<\/ul>/)?.[1] ?? html)
+      .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300)
     const specVon = (id) => db.prepare('SELECT sandbox_spec AS s FROM runs WHERE id=?').get(id).s
     const overridesVon = (id) => db.prepare('SELECT sandbox_overrides AS o FROM runs WHERE id=?').get(id).o
     const LOCK = ['network', 'resources', 'filesystem', 'secrets']
@@ -7346,6 +7349,15 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
         overrides: JSON.stringify({ network: { mode: 'none' }, resources: { cpus: 1 } }),
       })
       const j = await r.json()
+      // The lock is taken back HERE, before the first assertion, and that is the
+      // rule rather than the tidying: `uebersprungen()` ENDS a check by
+      // throwing, and a failing assertion does the same — so a reset on the
+      // last line of a check that can skip is a reset that does not run. It did
+      // not, and the whole-suite cost was two checks further down: the hub was
+      // still locked on `network`, so Adopt's own document — adding three hosts
+      // to an empty `network.allow` — was judged a LOOSENING and answered 400
+      // naming `network.allow`. The lock was right, the fixture was not.
+      sk.setzeEinstellung('sandbox_lock', '')
       if (!j.ok) {
         // The facade may be absent, or may want a container this suite has none
         // of; what is under test here is that the LOCK did not refuse it.
@@ -7354,7 +7366,6 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       } else {
         gleich(JSON.parse(specVon(FL_RUN)).network.mode, 'none', 'the tightening is in force')
       }
-      sk.setzeEinstellung('sandbox_lock', '')
     })
 
     await pruefe('taking a planned run out of its sandbox is a named event, not a quiet setting', async () => {
@@ -7371,6 +7382,10 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       gleich(r.status, 200, 'the edit goes through')
       gleich(db.prepare('SELECT sandbox FROM runs WHERE id=?').get(geplant).sandbox, 0, 'the run is out of its sandbox')
       wahr(ereignisse(geplant).includes('sandbox:bypassed'), 'and the run says so in its own history')
+      // Both, and in that order: `sandbox:bypassed` is the specific statement a
+      // reader has to meet first, `edited` is the record that a human changed
+      // this run at all. One without the other is half a history.
+      wahr(ereignisse(geplant).includes('edited'), 'next to the ordinary record of the edit')
       // The refusal keeps its own rule: with the break glass forbidden, nothing
       // happens and nothing is written down.
       const zweiter = legeLauf('scheduled')
@@ -7398,8 +7413,17 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       for (const h of hosts) enthaelt(seite, h, `${h} is on the page as a ticked candidate`)
 
       db.prepare('UPDATE repos SET sandbox_overrides=? WHERE id=?').run('{}', repoId)
+      // Said here rather than inherited from whatever the checks above left
+      // behind: adopting a host WIDENS `network.allow`, so a lock still
+      // standing on `network` refuses it — correctly — and the failure then
+      // reads as a broken route instead of a dirty fixture.
+      sk.setzeEinstellung('sandbox_lock', '')
       const r = await formular('/repos/sandbox/adopt', { id: String(repoId), host: hosts }, { alsBrowser: true })
-      gleich(r.status, 303, 'it saves')
+      // `problemPage()` answers 400 for the empty selection AND for every
+      // validation problem, so the status alone cannot say which it was. The
+      // sentence can, and a diagnosis that needs a second suite run is a
+      // diagnosis nobody makes.
+      gleich(r.status, 303, `it saves${r.status === 303 ? '' : ' — ' + problemText(await r.text())}`)
       const allow = JSON.parse(db.prepare('SELECT sandbox_overrides AS o FROM repos WHERE id=?').get(repoId).o)
         .network?.allow ?? []
       gleich([...allow].sort().join(','), [...hosts].sort().join(','),
@@ -7411,11 +7435,12 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       sk.setzeEinstellung('sandbox_lock', JSON.stringify(['network.allow']))
       const gesperrt = await formular('/repos/sandbox/adopt', { id: String(repoId), host: ['evil.example.com'] },
         { alsBrowser: true })
+      const gesperrtText = await gesperrt.text()
+      sk.setzeEinstellung('sandbox_lock', '')            // before the assertions, see above
       gleich(gesperrt.status, 400, 'a locked allow list refuses the adoption')
-      enthaelt(await gesperrt.text(), 'network.allow', 'and names the path that is locked')
+      enthaelt(gesperrtText, 'network.allow', 'and names the path that is locked')
       gleich(db.prepare('SELECT sandbox_overrides AS o FROM repos WHERE id=?').get(repoId).o, '{}',
         'nothing was written')
-      sk.setzeEinstellung('sandbox_lock', '')
       db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now') WHERE id=?`).run(lauf)
       db.prepare('UPDATE repos SET sandbox_overrides=? WHERE id=?').run('{}', repoId)
     })
@@ -7444,6 +7469,196 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
     })
 
     db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now') WHERE id=?`).run(FL_RUN)
+  }
+
+  // ------------------------------------------------------------------
+  gruppe('Sandbox: the proxy comes back')
+  //
+  // §8.19, and the defect an evaluator measured by hand on a live hub. With the
+  // default `network.engine: 'builtin'` the run's egress proxy is a listener
+  // inside the HUB PROCESS, so a deploy takes it with it — while the container's
+  // `HTTPS_PROXY`, frozen at creation, still points at the port that has just
+  // died. The run survives, its tmux session survives, the container survives,
+  // and from that moment every request the agent makes fails with a connection
+  // error while the hub reads `running` throughout. This hub restarted 164 times
+  // in 30 days, so it is the ordinary case and not the edge one.
+  //
+  // `restoreProxies()` was written for it and NOTHING CALLED IT — so what is
+  // under test here is the wiring: a watcher pass, the same one `hub.mjs` runs
+  // two seconds after listen, brings the listener back on the port the run's own
+  // `sandbox.json` records, with the policy the run was started with.
+  //
+  // The restart is a real one. The hub process starts the run and holds the
+  // listener; `sk.hubStoppen()` takes both away; the pass that repairs it runs
+  // afterwards, with no second process anywhere near the port — which is also
+  // what makes the two negatives below assertable rather than racy.
+  {
+    const netMod = await import('node:net')
+    const watcherMod = await import('../server/watcher.mjs')
+    const dbMod = (await import('../server/db.mjs')).default
+    const { setSetting: setzeSchalter } = await import('../server/db.mjs')
+    let facade = null
+    try { facade = await import('../server/sandbox/index.mjs') } catch { facade = null }
+    const shim = sk.docker
+    const fehlt = typeof facade?.restoreProxies === 'function'
+      ? null : 'server/sandbox/index.mjs does not export restoreProxies()'
+
+    // Every query goes through the hub's OWN connection, not through `sk.db`:
+    // `hubStoppen()` closes that one, and half of this group happens while the
+    // hub is deliberately not running.
+    const zeile = (id) => dbMod.prepare('SELECT * FROM runs WHERE id=?').get(id)
+    const arten = (id) => dbMod.prepare('SELECT kind FROM events WHERE run_id=? ORDER BY id').all(id).map(e => e.kind)
+    const anzahl = (id, kind) =>
+      dbMod.prepare('SELECT COUNT(*) AS n FROM events WHERE run_id=? AND kind=?').get(id, kind).n
+    const nutzlast = (id, kind) => {
+      const row = dbMod.prepare('SELECT payload FROM events WHERE run_id=? AND kind=? ORDER BY id DESC LIMIT 1')
+        .get(id, kind)
+      try { return row?.payload ? JSON.parse(row.payload) : null } catch { return null }
+    }
+    /** The port the run's container was told to talk to — out of its own sandbox.json. */
+    const portVon = (id) => {
+      try {
+        const url = JSON.parse(readFileSync(join(SB, 'runs', id, 'sandbox.json'), 'utf8'))?.ctx?.proxyUrl
+        return url ? Number(new URL(String(url)).port) : 0
+      } catch { return 0 }
+    }
+    /** Is anything listening there at all? The container's question, asked from outside. */
+    const lauscht = (port) => new Promise((res) => {
+      if (!port) return res(false)
+      const s = netMod.connect({ host: '127.0.0.1', port })
+      const fertig = (v) => { try { s.destroy() } catch {} ; res(v) }
+      s.once('connect', () => fertig(true))
+      s.once('error', () => fertig(false))
+      setTimeout(() => fertig(false), 3000).unref()
+    })
+    /**
+     * A CONNECT through the listener, so the POLICY can be read off the answer
+     * rather than inferred from a socket being open. A host outside the allow
+     * list is refused BEFORE any name is resolved (`decide()` in proxy.mjs), so
+     * this never leaves the machine.
+     */
+    const durchProxy = (port, host) => new Promise((res) => {
+      let buf = ''
+      const s = netMod.connect({ host: '127.0.0.1', port }, () => {
+        s.write(`CONNECT ${host}:443 HTTP/1.1\r\nHost: ${host}:443\r\n\r\n`)
+      })
+      const fertig = (v) => { try { s.destroy() } catch {} ; res(v) }
+      s.on('data', (d) => { buf += d.toString(); if (buf.includes('\r\n')) fertig(buf.split('\r\n')[0]) })
+      s.on('error', () => fertig('connection refused'))
+      setTimeout(() => fertig(buf.split('\r\n')[0] || 'no answer'), 5000).unref()
+    })
+
+    let LEBT = null, LEBT_PORT = 0, VORBEI = null, VORBEI_PORT = 0
+
+    if (fehlt) uebersprungen('a sandboxed run’s proxy is a listener in the hub process', fehlt)
+    else {
+      watcherTick = await sk.watcherVorbereiten({ sandbox: true })
+      sk.setzeEinstellung('sandbox_mode', 'available')
+      // The image the run is launched from — whatever the container-path group
+      // built into the shim's table, so the two halves of the suite describe one
+      // image rather than two.
+      const bilder = (() => {
+        try { return JSON.parse(readFileSync(join(shim.STATE, 'images.json'), 'utf8')) } catch { return {} }
+      })()
+      db.prepare('UPDATE repos SET sandbox_image=? WHERE id=?')
+        .run(Object.keys(bilder)[0] ?? 'freilauf/base:1', repoId)
+
+      await pruefe('a sandboxed run’s proxy is a listener in the hub process', async () => {
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-ProxyRestore', sandbox: 'on' })
+        wahr(!!j.runId, `run started (${JSON.stringify(j).slice(0, 200)})`)
+        LEBT = j.runId
+        await sessionMerken(LEBT)
+        gleich(zeile(LEBT).sandbox, 1, 'the run really is sandboxed')
+        wahr(arten(LEBT).includes('sandbox:proxy_started'),
+          `and its egress goes through a proxy (${arten(LEBT).join(', ')})`)
+        LEBT_PORT = portVon(LEBT)
+        wahr(LEBT_PORT > 0, `sandbox.json names the port the container talks to (${LEBT_PORT})`)
+        wahr(await lauscht(LEBT_PORT), `and something answers there while the hub is up (${LEBT_PORT})`)
+
+        // The second fixture, prepared while there is still a hub: a run that is
+        // OVER. Its proxy goes with its session, and nothing may bring it back.
+        const k = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-ProxyDone', sandbox: 'on' })
+        VORBEI = k.runId
+        await sessionMerken(VORBEI)
+        VORBEI_PORT = portVon(VORBEI)
+        wahr(VORBEI_PORT > 0, `the second run has a recorded port too (${VORBEI_PORT})`)
+        await hol(`/api/runs/${VORBEI}/kill`, { method: 'POST' })
+        // Only that it is OVER — when exactly its listener goes is the
+        // teardown's business and another group's subject; what matters here is
+        // that a run in this state is not one a pass may bring a proxy back for.
+        await warteAuf(() => ['done', 'failed', 'aborted'].includes(zeile(VORBEI).status),
+          { was: 'the second run reaching a terminal status' })
+      })
+
+      await pruefe('a hub restart takes the listener with it — the container keeps dialling a dead port', async () => {
+        // THE defect, stated as the observable it is. Nothing else changes: the
+        // run is still running, its session still stands, and its sandbox.json
+        // still names a port nothing is behind.
+        await sk.hubStoppen()
+        falsch(await lauscht(LEBT_PORT), `nothing answers on ${LEBT_PORT} any more`)
+        gleich(zeile(LEBT).status, 'running', 'while the run says it is working')
+        gleich(portVon(LEBT), LEBT_PORT, 'and the port the container was told about has not moved')
+      })
+
+      await pruefe('an unreachable runtime restores nothing and ends nothing', async () => {
+        // tmuxVerdict()'s lesson, one layer over: "the daemon did not answer" is
+        // not an answer, and a pass that acted on it would be guessing about
+        // somebody's live agent.
+        shim.mode('unreachable')
+        watcherMod._resetProxyRestore()
+        try { await watcherTick() } finally { shim.mode('ok') }
+        falsch(await lauscht(LEBT_PORT), 'no listener was bound on a question nobody answered')
+        gleich(anzahl(LEBT, 'sandbox:proxy_restarted'), 0, 'and nothing claims one was')
+        gleich(zeile(LEBT).status, 'running', 'the run was not ended over it either')
+      })
+
+      await pruefe('the next pass brings the listener back, on the recorded port', async () => {
+        watcherMod._resetProxyRestore()
+        await watcherTick()
+        wahr(await lauscht(LEBT_PORT),
+          `the port the container dials answers again (${LEBT_PORT})`)
+        gleich(anzahl(LEBT, 'sandbox:proxy_restarted'), 1, 'and the run says so, once')
+      })
+
+      await pruefe('…with the list it was started with, enforced', async () => {
+        const start = nutzlast(LEBT, 'sandbox:proxy_started')
+        const zurueck = nutzlast(LEBT, 'sandbox:proxy_restarted')
+        gleich(JSON.stringify([...(zurueck?.allow ?? [])].sort()),
+          JSON.stringify([...(start?.allow ?? [])].sort()),
+          'the resolved allow list is the same one, not a fresh reading of a changed policy')
+        gleich(zurueck?.engine, 'builtin', 'the built-in engine is what needed restoring')
+        // And it is really THIS run's proxy rather than a socket that happens to
+        // be open: the refusal is enforced, and it is recorded on this run.
+        const antwort = await durchProxy(LEBT_PORT, 'evil.example.com')
+        enthaelt(antwort, '403', `a host outside the list is refused (${antwort})`)
+        await warteAuf(() => arten(LEBT).includes('sandbox:blocked'),
+          { was: 'the denial being recorded on this very run' })
+      })
+
+      await pruefe('a run that is over gets nothing back', async () => {
+        // A terminal run needs no egress, and a listener bound for it would be
+        // the hub holding a finished run's policy open for ever — the leak
+        // `teardownSandbox()` exists to close.
+        falsch(await lauscht(VORBEI_PORT), `nothing listens for the finished run (${VORBEI_PORT})`)
+        gleich(anzahl(VORBEI, 'sandbox:proxy_restarted'), 0, 'and no pass claims to have restored it')
+      })
+
+      await pruefe('a second pass costs nothing — a proxy this process holds is left alone', async () => {
+        watcherMod._resetProxyRestore()
+        await watcherTick()
+        gleich(anzahl(LEBT, 'sandbox:proxy_restarted'), 1,
+          'the restart is written down once, not once per pass')
+        wahr(await lauscht(LEBT_PORT), 'and the listener is still the same one')
+      })
+
+      // What this group started, taken back: the listener it restored lives in
+      // THIS process, and a fixture that outlives its own test is how the next
+      // suite finds a port it cannot explain.
+      try { await facade.teardownSandbox(zeile(LEBT), { reason: 'e2e', removeNetwork: true, force: true }) } catch {}
+      dbMod.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now') WHERE id IN (?,?)`)
+        .run(LEBT, VORBEI)
+      setzeSchalter('sandbox_mode', 'off')
+    }
   }
 
 
