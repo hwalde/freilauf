@@ -79,10 +79,16 @@ const plugin = {
     // 13.6 KB: the long tail is the real population here, not an outlier.
     promptFile: { maxBytes: 4000 },
     // The resume form (fl-start --resume): `--session <id>` continues the
-    // run's ROOT session (resumeId below reads it out of the store), and the
-    // prompt goes in as the next turn exactly as at a fresh start. fl-start
+    // run's ROOT session (resumeId below reads it out of the store); fl-start
     // maps the id 'last' to `--continue` — the last session of the worktree.
-    resume: ['--auto', { when: 'model', args: ['--model', '{model}'] }, '--session', '{resume_id}', '--prompt', '{prompt}'],
+    // NO `{prompt}` here, and that is measured (1.18.29): `--session <id>
+    // --prompt "…"` opens the session and DROPS the text — nothing submitted,
+    // editor empty, Enter nudge or not. So fl-start pastes the continuation
+    // into the editor once the TUI has drawn (oc_resume_paste), the way the
+    // hub types a message into a running session. Measured end to end
+    // through fl-start: the code word from the first turn came back, same
+    // session, no second one created.
+    resume: ['--auto', { when: 'model', args: ['--model', '{model}'] }, '--session', '{resume_id}'],
   },
 
   /**

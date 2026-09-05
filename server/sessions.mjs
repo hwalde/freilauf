@@ -326,10 +326,13 @@ export async function sessionGone(name) {
  * A standing session is not the same thing as a reachable agent: `fl-start
  * --keep` sets remain-on-exit, so the session outlives its process on purpose
  * — the screen stays readable, but there is nobody left to answer. That is
- * exactly where the coding agents differ: claude, opencode and cursor stay in
- * their TUI when the work is done (the pane lives on, a follow-up can be typed
- * into it), hermes runs `chat -q`, a single non-interactive query, and exits —
- * what remains there is a screenshot, not an agent.
+ * exactly where the coding agents differed: claude, opencode and cursor stay
+ * in their TUI when the work is done (the pane lives on, a follow-up can be
+ * typed into it), and hermes used to run `chat -q` as a single non-interactive
+ * query and exit — what remained there was a screenshot, not an agent. Since
+ * hermes 0.21 `-q` seeds an interactive session on a TTY and stays too
+ * (measured 2026-09-05), so today all four leave a live pane; a dead one is
+ * a crash, an older hermes, or a plugin harness that exits by design.
  *
  * One `tmux list-panes` for one session; the detail page asks this once per
  * render. `null` means tmux gave no answer at all (session gone, no server) —

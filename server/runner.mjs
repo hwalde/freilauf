@@ -645,10 +645,11 @@ export const RESUME_PROMPT = `Your session was interrupted: the tmux session it 
 Continue the task from where you were. Check \`git status\` and \`git log\` first so you do not redo work that is already committed, then carry on and finish. Everything the platform rules said still applies: commit your work, write the two report files and run \`fl-report done\` exactly as instructed. If you were waiting for a human's answer when the cut came, ask the question again with \`fl-report help\`. If the interruption cost you something you cannot recover, say so in the report.`
 
 /**
- * The header for a coding agent that has NO resume form (hermes runs a single
- * non-interactive query; a plugin without `launch.resume`): it is started
- * afresh with the ORIGINAL prompt, and this stands in front of it so it does
- * not redo the committed half of its own work.
+ * The header for a coding agent that has NO resume form (a plugin without
+ * `launch.resume`; cursor before its transcript exists): it is started afresh
+ * with the ORIGINAL prompt, and this stands in front of it so it does not redo
+ * the committed half of its own work. All four built-ins resume — hermes too,
+ * since 0.21 (measured; see harnesses/hermes.mjs).
  */
 export const RESUME_FRESH_HEADER = `# This run was interrupted and is being restarted
 
@@ -685,8 +686,8 @@ export async function resumeContext(run) {
   return lines.join('\n\n')
 }
 
-/** The three fl-start knows a resume form for; a plugin says so with `launch.resume`. */
-const RESUMABLE_BUILTIN = new Set(['claude', 'cursor', 'opencode'])
+/** The four fl-start knows a resume form for; a plugin says so with `launch.resume`. */
+const RESUMABLE_BUILTIN = new Set(['claude', 'cursor', 'opencode', 'hermes'])
 
 /** Can this coding agent continue an interrupted conversation at all? */
 export function resumable(harness) {
