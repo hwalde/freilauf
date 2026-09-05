@@ -59,6 +59,18 @@ const plugin = {
       { when: 'model', args: ['--model', '{model}'] },
       { when: 'effort', args: ['--effort', '{effort}'] },
     ],
+    // The resume form (fl-start --resume, runner.mjs resumeRun): the same
+    // argv with `--resume <id>` in place of `--session-id <id>`, and the
+    // prompt as the next turn. Measured: `claude --resume <id> "<text>"`
+    // continues the conversation with the text; without a prompt it waits.
+    resume: [
+      '--permission-mode', '{mode}',
+      { when: 'model', args: ['--model', '{model}'] },
+      { when: 'effort', args: ['--effort', '{effort}'] },
+      '--resume', '{resume_id}',
+      { when: 'settings', args: ['--settings', '{settings}'] },
+      '{prompt}',
+    ],
   },
 
   // Subscription-based: model list belongs to the account, no provider dropdown.
@@ -264,6 +276,13 @@ const plugin = {
     if (!run?.id || !run?.workdir_effective) return null
     return `cd ${run.workdir_effective} && claude --resume ${run.id}`
   },
+
+  /**
+   * The id the hub resumes this run's conversation with (runner.mjs,
+   * resumeRun): the run id, because that is the session id the hub chose at
+   * launch — the same answer resumeCommand() gives a human.
+   */
+  resumeId(run) { return run?.id ?? null },
 
   /**
    * CLI arguments for fl-start. claude takes model and effort as separate flags.

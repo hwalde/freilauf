@@ -2,6 +2,13 @@
 [Unit]
 Description=Freilauf (agent management, 127.0.0.1 only)
 After=network.target
+# The tmux server the agent sessions live in has a unit of its own
+# (freilauf-tmux.service, bin/fl-tmux-server): started before the hub, so the
+# first run after a reboot finds a server that is NOT in this unit's cgroup.
+# Wants, not Requires: a machine without that unit still runs the hub, and a
+# stopped tmux unit must never take the hub down with it.
+Wants=freilauf-tmux.service
+After=freilauf-tmux.service
 
 [Service]
 Type=simple
@@ -23,7 +30,9 @@ ExecStart=/usr/bin/node %h/agents/deploy/freilauf/server/hub.mjs
 # Only kill the node main process on stop/restart. With the default
 # (control-group) a tmux server that happened to be spawned by a hub-started
 # run (first tmux session after a reboot) would live in this unit's cgroup —
-# a restart would then tear down ALL agent sessions with it.
+# a restart would then tear down ALL agent sessions with it. Kept as the fence
+# under freilauf-tmux.service: on a machine where that unit is still waiting to
+# adopt a server somebody else spawned, this line is what keeps a deploy safe.
 KillMode=process
 Restart=always
 RestartSec=5

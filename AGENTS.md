@@ -233,6 +233,130 @@ process running the flow (see `server/flows/AGENTS.md`, "Restarting the hub from
 a flow"). Everything that has to be checked *after* the restart therefore has to
 be checked by the script, and it is: health check, rollback, notification.
 
+### Surviving restarts: the tmux server has a unit, a lost session is resumed
+
+Two facts were measured on this installation before any of this existed. The
+hub restarted **164 times in 30 days** (every deploy is a restart), and it
+survived those only because of one line — `KillMode=process` — since the tmux
+server is spawned by the first run after a reboot and therefore lived in the
+hub unit's cgroup; before commit 334ba06 every deploy took every agent with it.
+And a **server reboot** was not survived at all: the watcher found every
+session gone, aborted every run one by one ("tmux session ended", one
+notification each) and opened a `tmux_gone` incident — while worktree,
+`prompt.md`, log and, for claude, the whole conversation were still on disk.
+`launchRun()` had six callers and none was reachable from the place that
+noticed a lost session. Four pieces fix that, and each is its own rule:
+
+**The tmux server has a unit of its own.** `deploy/freilauf-tmux.service` runs
+`bin/fl-tmux-server`, which is `tmux -D`: the server in the foreground, on the
+DEFAULT socket, with `exit-empty` off — measured on tmux 3.4: the process IS the
+server, a server with zero sessions stays up, and `tmux attach`, `fl-attach`,
+the terminal page and the e2e suite notice nothing. `freilauf.service` carries
+`Wants=`/`After=` on it, so the first run after a reboot finds a server that is
+NOT in the hub's cgroup. On a machine where a server already exists (spawned by
+an earlier hub, or by hand) `tmux -D` cannot take the socket, so the script
+**waits and adopts** it when that server exits — nothing is ever killed by
+this; `freilauf status` says who owns the server right now. `fl-start` asks the
+unit to start the server when it finds none (best effort: a laptop without the
+unit still gets its session), `setup/03` and `freilauf-deploy`'s `sync_units`
+enable it, and no deploy ever restarts it: stopping THAT unit is the reboot.
+`KillMode=process` stays as the fence for the adoption stretch. `setup/03` also
+runs `loginctl enable-linger`, which was in no document: without it a user's
+units start at the first login, and a hub machine is the machine nobody logs
+into after a reboot.
+
+**A lost session is resumed, not aborted** (`resumeRun()` in runner.mjs, the
+seventh caller of `launchRun()`). The watcher's `watchRun()` is the only
+caller that decides a session was LOST: `has-session` says gone and the run is
+still `running`/`waiting_help`. Every deliberate end — the kill route, the
+sessions page, retention, archiving, a flow's `kill_run` — goes through
+`reconcileClosedSession()` directly and aborts exactly as before; a resume
+happens only for what the hub did not end itself. A run in the **finish
+gate** is not resumed either: it has reported, and its agent vanishing there
+is the integrator's `agent_gone` escalation as before — the leftovers are
+named, and the operator's buttons decide. `resumeRun()` marks the run
+(`runs.resume_pending`), retracts what the silence produced (the
+`no_activity`/overrun anomalies, the same `clearAnomalies` a raised duration
+uses), shifts `started_at` forward by the gap since the run's last activity
+(the expected duration is about the agent's work, and a night the server spent
+off is not work — the original start is in the `session_lost` event), resets
+`goal_sent_at` so the watcher delivers the goal into the new session, asks the
+ordinary budget gate (blocked = `deferred` with the mark kept, so the retry
+resumes rather than restarts) and calls `launchRun()`. That function knows a
+resume by the mark: the worktree is reused as it stands, `prompt.md` is left
+alone (it is the record of the task), `base_sha` and the quota marks are kept
+(the interrupted half of the work is still what the run wants merged, and the
+cost's start does not move), and the CLI is launched in its **resume form** —
+`fl-start --resume <id>`: claude `--resume <run id>` (the session id IS the run
+id since the hub launches with `--session-id`), cursor `--resume <chat id>`
+(the transcript's basename), opencode `--session <root session id>` out of its
+store (a run is a session tree, and "the last session" is usually a finished
+subagent), a plugin whatever its `launch.resume` declares. The continuation
+prompt is short and says what the worktree says: the commits since
+`base_sha`, uncommitted files, the last progress reports — an agent told
+"continue" without being told where it stood redoes work. **The prompt is not
+optional**, and that was measured: `claude --resume <id> "<text>"` continues
+with the text as the next turn, `claude --resume <id>` alone waits for input
+whatever the permission mode. hermes has no resume form (`chat -q` is a single
+query), and a plugin may declare none: such a run is started afresh from its
+original prompt behind a header that names what it had already committed.
+`resumeId(run)` on the plugin answers the id; `null` means the same fresh
+start (cursor with no transcript yet).
+
+Three fences. **A cap**: `resume_attempts`, `RESUME_MAX` (3,
+`FREILAUF_RESUME_MAX`) — past it the run ends the old way (`resume_refused`
+on the run, then `aborted`), because a CLI that dies at every start must not
+be restarted every pass for ever; a deliberate caller (a reason other than
+`session_lost` — the sandbox reconfiguration SANDBOX_RESEARCH.md plans) does
+not count against it. **"Could not try" is not "tried and died"**: a launch
+that fails on a resume — right after a reboot the tmux server itself may be a
+beat behind — leaves the mark standing and returns `retry`; the next pass's
+`retryPendingResumes()` launches again, and `verwaisteLaeufeAbschliessen()`
+skips a pending run instead of failing it as an orphan. **One message per
+pass, not per run** (`announceResumes()`): a reboot takes every session at
+once, and six "aborted, work not merged" texts for one event was the shape the
+old path had; muted runs are left out, the `tmux_gone` incident stays and
+says the runs are being resumed. `runs.retry` resets both columns — a retry
+is a new attempt, not a resume.
+
+**Missed schedule slots are caught up** (`catchUpMissed()` in scheduler.mjs).
+`scheduleDue()` matches the exact minute, so a hub that was off at 03:00 never
+started the 03:00 agent — the next tick is a different minute. Every tick
+writes `last_tick_at` (a settings row, written whether or not the pipeline is
+on: it means "the hub was alive"); the first tick with the pipeline on walks
+the minutes between then and now through `lastMissedSlot()` (util.mjs, pure,
+asks `scheduleDue()` itself so it cannot disagree with the tick), bounded by
+`schedule_catchup_hours` (Settings, default 6, `0` = off — a hub that was off
+for a week must not start a week of agents), and starts each affected agent
+ONCE, at its newest missed slot, with `schedule_catchup` on the run. The same
+busy / inactive-repo / capacity rules as a tick (`startBlocked()`, now shared),
+the same `fired` debounce. One-off schedules always caught up and still do.
+
+**And no blind window after a start.** Watcher and scheduler were plain
+30-second intervals, so after a restart a deferred run, a planned start, a
+pending goal, a lost session and a missed slot were all in the database and
+looked at by nobody for half a minute. `hub.mjs` runs both ticks two seconds
+after listen (`FREILAUF_FIRST_PASS_OFF=1` for a test that wants none).
+
+What the operator does before a **planned** reboot: `freilauf drain [minutes]`
+— pipeline off, every running agent told in its own session to commit and
+report within the window, and the command waits until nothing is working any
+more (exit 1 with what is still open; `freilauf undrain` afterwards). It kills
+nothing: a run that does not make it is resumed after the reboot like any
+other. `SETUP_WITH_AGENT.md` carries the machine rules (unattended upgrades
+are fine, `Automatic-Reboot` stays off, never stop `freilauf-tmux.service` by
+hand). The flow side has its own small net for restarts: a `waiting` flow run
+whose trigger run was marked dispatched at load is still resumed
+(`endedRunsWithWaiters()`, see `server/flows/AGENTS.md`). What deliberately
+did NOT change: a flow run caught `running` by a restart is still closed as
+failed (the step in flight is not idempotent), and the cchub → freilauf unit
+migration stays an operator's `freilauf-deploy --migrate`.
+
+The e2e group "Surviving a lost tmux server" kills a stub run's session by
+hand — the way a reboot looks to the watcher, never through a hub route —
+and asserts the resume, the cap, and that a session the hub ends itself is
+still an abort.
+
 ### The rename: this used to be called cc-hub, and the old names still answer
 
 The project was `cc-hub` and its scripts were `cc-start`, `cc-report`, `cc-attach`,

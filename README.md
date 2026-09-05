@@ -164,7 +164,7 @@ at least one agent CLI (`claude`, `opencode`, `hermes`, `cursor-agent`) on the
 ```bash
 ./setup/01-npm-install.sh       # node-pty, ws, xterm.js — for THIS checkout (tests, editing)
 ./setup/02-install-scripts.sh   # fl-start/-attach/-kill/-help/-report/-notify + freilauf + freilauf-deploy → ~/.local/bin
-./setup/03-install-services.sh  # ~/.config/freilauf/env (from env.example) + systemd units
+./setup/03-install-services.sh  # ~/.config/freilauf/env (from env.example) + systemd units (hub, tmux server) + enable-linger
 sudo ./setup/04-firewall.sh     # ufw: VPN port only on wg0 (one-time)
 ```
 

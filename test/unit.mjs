@@ -33,6 +33,7 @@ const d = (s) => new Date(s)
 
 try {
   const { cronMatches, validCron, scheduleDue, scheduleText, weeklySlots, slotsUniform, splitTimes,
+    lastMissedSlot, catchupHours,
     stripAnsi, escapeHtml,
     fmtDuration, parseDbUtc, toDbUtc, fmtRelativeTime, fmtDateTime, kurzid,
     fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent,
@@ -105,6 +106,45 @@ try {
     falsch(scheduleDue(woe, d('2026-08-24T07:31:00')), 'one minute off')
     falsch(scheduleDue(woe, d('2026-08-23T07:30:00')), 'Sunday')
   })
+
+  gruppe('Schedules: catching up what a downtime swallowed (lastMissedSlot)')
+
+  await pruefe('a cron slot inside the gap is found, the newest one when there are several', () => {
+    const nightly = { schedule_kind: 'cron', schedule: '0 3 * * *' }
+    const from = d('2026-08-24T22:00:00').getTime()
+    const to = d('2026-08-25T06:15:30').getTime()
+    gleich(lastMissedSlot(nightly, from, to)?.toISOString(), d('2026-08-25T03:00:00').toISOString(), 'the 03:00 slot')
+    const hourly = { schedule_kind: 'cron', schedule: '30 * * * *' }
+    gleich(lastMissedSlot(hourly, from, to)?.toISOString(), d('2026-08-25T05:30:00').toISOString(), 'the NEWEST of eight missed slots, not the first')
+  })
+  await pruefe('the minute of the last tick and the current minute are both excluded', () => {
+    const hourly = { schedule_kind: 'cron', schedule: '30 * * * *' }
+    gleich(lastMissedSlot(hourly, d('2026-08-25T05:30:10').getTime(), d('2026-08-25T05:45:00').getTime()), null,
+      'the last tick ran in the 05:30 minute and handled it')
+    gleich(lastMissedSlot(hourly, d('2026-08-25T05:00:00').getTime(), d('2026-08-25T05:30:20').getTime()), null,
+      'the current minute is the running tick\'s own')
+    gleich(lastMissedSlot(hourly, d('2026-08-25T05:00:00').getTime(), d('2026-08-25T05:31:00').getTime())?.toISOString(),
+      d('2026-08-25T05:30:00').toISOString(), 'one minute later it counts as missed')
+  })
+  await pruefe('weekly schedules are caught up too; one-off and manual ones never', () => {
+    gleich(lastMissedSlot(woe, d('2026-08-24T07:00:00').getTime(), d('2026-08-24T08:00:00').getTime())?.toISOString(),
+      d('2026-08-24T07:30:00').toISOString(), 'Monday 07:30')
+    gleich(lastMissedSlot(woe, d('2026-08-25T07:00:00').getTime(), d('2026-08-25T08:00:00').getTime()), null, 'not on a Tuesday')
+    gleich(lastMissedSlot({ schedule_kind: 'einmalig', run_at: '2026-08-24T07:30:00' }, 0, Date.now()), null,
+      'a one-off is due from its moment on anyway')
+    gleich(lastMissedSlot({ schedule_kind: 'manuell' }, 0, Date.now()), null, 'manual has no moment')
+    gleich(lastMissedSlot(woe, NaN, Date.now()), null, 'no last tick known → nothing to catch up')
+    gleich(lastMissedSlot(woe, Date.now(), Date.now() - 1000), null, 'an inverted window is empty')
+  })
+  await pruefe('the catch-up window: default 6 h, empty string is "not set", 0 switches it off', () => {
+    gleich(catchupHours({}), 6, 'default')
+    gleich(catchupHours({ schedule_catchup_hours: '' }), 6, 'the settings page writes "" for an untouched field')
+    gleich(catchupHours({ schedule_catchup_hours: '0' }), 0, 'an explicit 0 is honoured')
+    gleich(catchupHours({ schedule_catchup_hours: '24' }), 24, 'a number')
+    gleich(catchupHours({ schedule_catchup_hours: 'abc' }), 6, 'junk falls back')
+  })
+
+  gruppe('Schedules: cadence')
 
   const zwei = { ...woe, schedule_weeks: 2, schedule_anchor: '2026-08-24' }
   await pruefe('biweekly: anchor week yes, following week no', () => {

@@ -88,6 +88,11 @@ Options:
       --session-id UUID claude only: pass a fixed Claude session ID through
                         (--session-id, makes the transcript addressable in advance).
       --settings JSON   claude only: pass --settings JSON through (e.g. run hooks).
+      --resume ID       continue an interrupted conversation instead of starting one:
+                        claude --resume ID, cursor-agent --resume ID, opencode --session ID
+                        ('last' = opencode --continue); a --spec harness needs a
+                        'resume' argv in its declaration. The prompt (-p/-f) is then
+                        the continuation text. hermes has no resume form (ignored).
   -h, --help            This help.
 
 Examples:
@@ -169,6 +174,7 @@ LOGFILE=""
 KEEP=""
 CLAUDE_SESSION_ID=""
 CLAUDE_SETTINGS=""
+RESUME_ID=""
 NAME_ARG=""
 ID_SUFFIX=""
 SPEC=""
@@ -203,6 +209,8 @@ while [[ $# -gt 0 ]]; do
                           CLAUDE_SESSION_ID="$2"; shift 2 ;;
         --settings)       [[ $# -ge 2 ]] || { err "Error: $1 requires JSON."; exit 2; }
                           CLAUDE_SETTINGS="$2"; shift 2 ;;
+        --resume)         [[ $# -ge 2 ]] || { err "Error: $1 requires a session id."; exit 2; }
+                          RESUME_ID="$2"; shift 2 ;;
         --spec)           [[ $# -ge 2 ]] || { err "Error: $1 requires a file path."; exit 2; }
                           SPEC="$2"; shift 2 ;;
         --name)           [[ $# -ge 2 ]] || { err "Error: $1 requires a name."; exit 2; }
@@ -331,6 +339,18 @@ if [[ -n "$SPEC_MODE" ]]; then
     if [[ -n "$CLAUDE_SETTINGS" ]] && ! spec_uses settings; then
         err "Note: --settings has no place in '$HARNESS''s launch spec (ignored)."
     fi
+    # A resume needs the declaration's resume form; without one the launch
+    # is an ordinary fresh start and says so — the hub has already put the
+    # original task behind a header for exactly that case.
+    if [[ -n "$RESUME_ID" ]] && ! jq -e '(.resume | type) == "array" and (.resume | length) > 0' >/dev/null 2>&1 <<<"$SPEC_JSON"; then
+        err "Note: '$HARNESS' declares no resume form (launch.resume) — starting afresh."
+        RESUME_ID=""
+    fi
+fi
+
+if [[ -n "$RESUME_ID" && -z "$SPEC_MODE" && "$HARNESS" == "hermes" ]]; then
+    err "Note: hermes has no resume form — starting afresh."
+    RESUME_ID=""
 fi
 
 if [[ -n "$EFFORT" && "$HARNESS" == "cursor" ]]; then
@@ -489,10 +509,11 @@ spec_argv() {
     jq -r --arg key "$key" --arg model "$MODEL" --arg provider "$PROVIDER" \
           --arg effort "$EFFORT" --arg prompt "$have_prompt" --arg mode "$MODE" \
           --arg session_id "$CLAUDE_SESSION_ID" --arg settings "$CLAUDE_SETTINGS" \
+          --arg resume_id "$RESUME_ID" \
           --arg workdir "$WORKDIR" --arg session "$SESSION" --arg prompt_file "$PF" \
           --arg stderr_log "$SPEC_ERRLOG" --arg home "$HOME" '
         { model: $model, provider: $provider, effort: $effort, prompt: $prompt,
-          session_id: $session_id, settings: $settings } as $set
+          session_id: $session_id, settings: $settings, resume_id: $resume_id } as $set
         | def keep:
             (.when // null) as $w | (.unless // null) as $u
             | ((($w == null) or (($set[$w] // "") != ""))
@@ -504,6 +525,7 @@ spec_argv() {
               | gsub("\\{model\\}"; $model) | gsub("\\{provider\\}"; $provider)
               | gsub("\\{effort\\}"; $effort) | gsub("\\{mode\\}"; $mode)
               | gsub("\\{session_id\\}"; $session_id) | gsub("\\{settings\\}"; $settings)
+              | gsub("\\{resume_id\\}"; $resume_id)
               | gsub("\\{workdir\\}"; $workdir) | gsub("\\{session\\}"; $session)
               | gsub("\\{prompt_file\\}"; $prompt_file) | gsub("\\{stderr_log\\}"; $stderr_log)
               | gsub("\\{home\\}"; $home))
@@ -568,17 +590,30 @@ cmd_interactive() {
 }
 
 cmd_autonomous() {
-    [[ -n "$SPEC_MODE" ]] && { spec_cmd args; return 0; }
+    # A --spec harness resumes from its declaration's `resume` argv (checked
+    # above: RESUME_ID is empty when there is none), otherwise from `args`.
+    [[ -n "$SPEC_MODE" ]] && { if [[ -n "$RESUME_ID" ]]; then spec_cmd resume; else spec_cmd args; fi; return 0; }
     local model_args=""
     [[ -n "$MODEL" ]] && model_args=" --model $(q "$MODEL")"
     [[ -n "$PROVIDER" ]] && model_args+=" --provider $(q "$PROVIDER")"
     # hermes calls the same thing '--reasoning'.
     [[ -n "$EFFORT" && "$HARNESS" == "hermes" ]] && model_args+=" --reasoning $(q "$EFFORT")"
+    # opencode's resume form: `--session <id>` continues that conversation,
+    # `--continue` the last one of the directory ('last' from the hub when the
+    # root session could not be read out of the store). Measured 1.18.23: both
+    # take `--prompt` as the next turn like a fresh start does.
+    if [[ -n "$RESUME_ID" && "$HARNESS" == "opencode" ]]; then
+        if [[ "$RESUME_ID" == "last" ]]; then model_args+=" --continue"; else model_args+=" --session $(q "$RESUME_ID")"; fi
+    fi
     local claude_args=""
     [[ "$HARNESS" == "claude" ]] && {
         [[ -n "$MODEL" ]]             && claude_args+=" --model $(q "$MODEL")"
         [[ -n "$EFFORT" ]]            && claude_args+=" --effort $(q "$EFFORT")"
-        [[ -n "$CLAUDE_SESSION_ID" ]] && claude_args+=" --session-id $(q "$CLAUDE_SESSION_ID")"
+        # `--resume <id>` continues the conversation the hub started under
+        # `--session-id <id>`; the positional prompt is the next turn (measured:
+        # without a prompt claude waits for input, whatever the permission mode).
+        if [[ -n "$RESUME_ID" ]]; then claude_args+=" --resume $(q "$RESUME_ID")"
+        elif [[ -n "$CLAUDE_SESSION_ID" ]]; then claude_args+=" --session-id $(q "$CLAUDE_SESSION_ID")"; fi
         [[ -n "$CLAUDE_SETTINGS" ]]   && claude_args+=" --settings $(q "$CLAUDE_SETTINGS")"
     }
     case "$HARNESS" in
@@ -593,6 +628,7 @@ cmd_autonomous() {
         # "Do you trust the contents of this directory?" (verified by measurement).
         cursor)  printf '%s --force --trust' "$(q "$BIN")"
                  [[ -n "$MODEL" ]] && printf ' --model %s' "$(q "$MODEL")"
+                 [[ -n "$RESUME_ID" ]] && printf ' --resume %s' "$(q "$RESUME_ID")"
                  printf ' -- "$FL_PROMPT"'
                  : ;;
     esac
@@ -743,6 +779,31 @@ if [[ -n "$AUTONOM" ]]; then
     [[ -z "$NO_TRUST" ]] && trust_workdir "$WORKDIR"
 fi
 preflight
+
+# Where the server the session goes into should live. The first `new-session`
+# on a machine SPAWNS the tmux server, and the server then belongs to the
+# caller's cgroup — when the caller is the hub, every agent session's lifetime
+# hangs on the hub process from that moment. So when there is no server yet,
+# ask the server's own unit (freilauf-tmux.service, bin/fl-tmux-server) to
+# start one first, and only fall back to spawning it here where there is no
+# systemd or no such unit. Best effort: a session that starts is worth more
+# than the tidiness of its cgroup, and a human typing `fl-start` on a laptop
+# must not be told about units.
+ensure_tmux_server() {
+    local out i
+    out="$(tmux list-sessions 2>&1 >/dev/null)" && return 0
+    grep -qiE 'no server running|error connecting to' <<<"$out" || return 0
+    command -v systemctl >/dev/null 2>&1 || return 0
+    systemctl --user start freilauf-tmux.service >/dev/null 2>&1 || return 0
+    for ((i = 0; i < 10; i++)); do
+        tmux list-sessions >/dev/null 2>&1 && return 0
+        out="$(tmux list-sessions 2>&1 >/dev/null)" || true
+        grep -qiE 'no server running|error connecting to' <<<"$out" || return 0
+        sleep 0.5
+    done
+    return 0
+}
+ensure_tmux_server
 
 # Size of the new session. tmux otherwise creates detached sessions in default-size
 # (80x24); on a later attach from a larger terminal the pane gets rewrapped and

@@ -46,9 +46,33 @@ mkdir -p "$HOME/agents/runs" "$HOME/agents/worktrees"
 
 echo "==> Installing user units"
 mkdir -p "$SYSTEMD_DIR"
-install -m 644 "$ROOT/deploy/freilauf.service"     "$SYSTEMD_DIR/freilauf.service"
-install -m 644 "$ROOT/deploy/freilauf-vpn.service" "$SYSTEMD_DIR/freilauf-vpn.service"
+install -m 644 "$ROOT/deploy/freilauf.service"      "$SYSTEMD_DIR/freilauf.service"
+install -m 644 "$ROOT/deploy/freilauf-vpn.service"  "$SYSTEMD_DIR/freilauf-vpn.service"
+install -m 644 "$ROOT/deploy/freilauf-tmux.service" "$SYSTEMD_DIR/freilauf-tmux.service"
 systemctl --user daemon-reload
+
+# The tmux server gets a unit of its own, whatever the hub's unit is called: a
+# server spawned by the hub lives in the hub's cgroup, and a restart of the hub
+# could then take every agent session with it. bin/fl-tmux-server waits for a
+# server somebody else already spawned and adopts the socket when it exits, so
+# enabling this on a running installation disturbs nothing.
+echo "==> tmux server unit (freilauf-tmux.service)"
+systemctl --user enable --now freilauf-tmux.service >/dev/null 2>&1 \
+    && echo "    enabled and started" \
+    || echo "    could not be enabled — agent sessions keep living wherever tmux was spawned"
+
+# Without lingering, a user's systemd units start at the first LOGIN, not at
+# boot — and a hub machine is exactly the machine nobody logs into after a
+# reboot. `enable-linger` needs no root for one's own user.
+echo "==> Lingering (units start at boot, not at first login)"
+if [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null || true)" == yes ]]; then
+    echo "    already on"
+elif loginctl enable-linger "$USER" >/dev/null 2>&1; then
+    echo "    enabled"
+else
+    echo "    could not be enabled — run: loginctl enable-linger $USER"
+    echo "    (without it the hub and the tmux server only start when you log in after a reboot)"
+fi
 
 # Which unit really runs this hub. On a machine that has not been migrated yet
 # that is still `cchub.service`, and enabling and starting the new one beside it

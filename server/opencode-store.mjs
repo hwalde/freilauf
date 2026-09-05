@@ -130,6 +130,34 @@ export function readRun(d, directory, sinceMs) {
 }
 
 /**
+ * The run's ROOT session id — the one `opencode --session <id>` continues
+ * (runner.mjs, resumeRun). Only a parentless session created with this run
+ * counts: a subagent's id would resume the subagent. `null` on every failure
+ * and when the store knows nothing; the caller then falls back to
+ * `--continue`.
+ */
+export async function rootSessionId(run) {
+  if (!run?.workdir_effective || !run.started_at) return null
+  const path = storePath()
+  if (!existsSync(path)) return null
+  const since = Date.parse(run.started_at.replace(' ', 'T') + 'Z') - 5000
+  if (!Number.isFinite(since)) return null
+  let d = null
+  try {
+    const { DatabaseSync } = await import('node:sqlite')
+    d = new DatabaseSync(path, { readOnly: true })
+    if (!hasColumn(d, 'session', 'parent_id')) return null
+    const root = d.prepare(`SELECT id FROM session WHERE directory = ? AND time_created >= ?
+                            AND parent_id IS NULL ORDER BY time_created DESC LIMIT 1`).get(run.workdir_effective, since)
+    return root?.id ?? null
+  } catch {
+    return null
+  } finally {
+    try { d?.close() } catch {}
+  }
+}
+
+/**
  * The file version: open the store read-only, read the run, close again.
  * Answers null on every failure — a store that is not there, a schema that
  * moved, a locked database. The caller then knows nothing about this run's

@@ -316,7 +316,7 @@ and does without.
 | `settings` | `SettingField[]` (optional) | operator-configurable fields rendered on the plugin's card |
 | `gate` | `{label?, switchKey?, fields[], check(ctx, values, run)}` (optional) | the budget gate for runs on this coding agent — claude and cursor declare one |
 | `llm` | `{schema, overhead?, models(ctx), complete(ctx, req)}` (optional) | this coding agent can answer the hub's own questions; see below |
-| `launch` | `{promptMode, args[], interactiveArgs?, bin?, sessionTag?, installHint?, stderrLog?, submitNudge?, promptFile?}` (optional) | how `bin/fl-start` calls this CLI. **Without it an external coding agent cannot start a run at all**; see "The launch declaration" |
+| `launch` | `{promptMode, args[], interactiveArgs?, resume?, bin?, sessionTag?, installHint?, stderrLog?, submitNudge?, promptFile?}` (optional) | how `bin/fl-start` calls this CLI. **Without it an external coding agent cannot start a run at all**; see "The launch declaration" |
 | `pulseId(run)` | fn → string\|null | which pulse target to check while this run is active; `null` = explicitly *not monitored*, which is not the same as healthy |
 | `pulseTargets` | object | extra pulse targets `{id: {url, okStatus[]}}` beyond the provider plugins (claude contributes `anthropic`) |
 | `logPatterns` | `[{typ, re}]` | narrow regexes for the pipe-pane log scan; `typ` ∈ `TYPEN` from `detect.mjs` |
@@ -330,6 +330,7 @@ and does without.
 | `effortOptions({provider, model, helpers})` | async fn | levels for a concrete combination; returns `{stufen, standard?, pflicht?, quelle?, hinweisKey}` — `stufen: null` hides the form field. `helpers` = `{ownLevels, registryEffort, openrouterEffort}` |
 | `modelArgs(run, ctx, opts)` | fn | CLI arguments for `fl-start`; returns `{args, fehlt}` (`fehlt` = provider ids whose credential is missing). **Three arguments now** — see below |
 | `resumeCommand(run)` | fn (optional) | the shell command a HUMAN continues this run's session with, `cd <workdir> && …` included; `null` when the CLI has no reliable way (hermes). Called by `server/integrate.mjs` for every escalation message, the run's detail page and the failed/aborted Telegram texts. Only the plugin knows how its CLI names a session — claude gets `--session-id <run id>` from the hub and can name it back, cursor's id is its transcript's directory, opencode continues the last session of the worktree |
+| `resumeId(run)` | fn or async fn (optional) | the id the HUB continues this run's conversation with when its tmux session was lost (`server/runner.mjs`, `resumeRun` → `fl-start --resume <id>`). Without it the run id is used — right for a CLI that accepted `{session_id}` at launch. `null` means "nothing to continue": the run is then started afresh with its original task behind a header saying what already happened. claude answers the run id, cursor its transcript's basename, opencode the run's ROOT session out of its store (`'last'` = `--continue`) |
 | `usage(ctx)` | async fn | subscription usage for the overview panel, or `null`. Shapes in `usage.mjs`: `{kind:'claude', five, seven, seven_general, seven_fable, weekly_scoped, live, resets_at, plan}` / `{kind:'cursor', plan, spent_usd, included_usd, included_estimated?, remaining_usd, pct, cycle_end}` |
 
 ### `modelArgs(run, ctx)` takes a context now
@@ -571,6 +572,20 @@ launch: {
   script has never heard of can ask for the same thing. Only the object form is
   passed through — fl-start asks `jq` for `.submitNudge.waitFor`, and a bare
   `true` would be an error there rather than a default.
+- **`resume`** is the argv that CONTINUES an interrupted conversation — the form
+  `fl-start --resume <id>` launches instead of `args` when a run's tmux
+  session was lost and the hub resumes it (`resumeRun()` in `runner.mjs`, see
+  "Surviving restarts" in `AGENTS.md`). Same rules as `args`, one placeholder
+  more: `{resume_id}` is what `resumeId(run)` answered (the run id when the
+  plugin declares none), and `{prompt}` is the continuation text — the next
+  turn, not the task. A plugin without `resume` is not resumed: such a run is
+  started afresh from `args` with its original task behind a header that names
+  what it had already committed. The built-ins declare it (claude `--resume
+  {resume_id}`, cursor `--resume {resume_id}`, opencode `--session
+  {resume_id}`), as documentation of what fl-start's own cases do. Measured for
+  claude: `claude --resume <id> "<text>"` continues the conversation with the
+  text as the next turn; without a prompt it waits for input, whatever the
+  permission mode — which is why the continuation text is not optional.
 - **`promptFile: { maxBytes }`** says this CLI cannot be trusted with a prompt
   past that size, and is the second half of the same problem. The nudge above
   fixes the usual case and not the tail: measured 2026-09-04, a 13.5 KB prompt

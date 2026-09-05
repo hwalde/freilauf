@@ -277,6 +277,20 @@ export function pruneFlowRuns(nowMs = Date.now(), settings = null) {
 export function waitingOnRun(runId) {
   return db.prepare(`SELECT * FROM flow_runs WHERE status='waiting' AND wait_run_id = ?`).all(runId).map(hydrateRun)
 }
+/**
+ * Runs that have ENDED and still have a flow run waiting on them — whatever
+ * their dispatch flag says. The dispatcher resumes waiters inside its loop over
+ * undispatched runs, and a run finished more than an hour before a hub restart
+ * is marked dispatched at load ("history is never replayed") — so a flow run
+ * waiting on exactly such a run was never resumed and, being `waiting`, never
+ * pruned either. This query is the net under that loop.
+ */
+export function endedRunsWithWaiters() {
+  return db.prepare(`SELECT DISTINCT fr.wait_run_id AS id FROM flow_runs fr
+                     JOIN runs r ON r.id = fr.wait_run_id
+                     WHERE fr.status='waiting' AND fr.wait_run_id IS NOT NULL
+                       AND r.status IN ('done','failed','aborted')`).all().map(r => r.id)
+}
 export function dueDelayed(nowIso) {
   return db.prepare(`SELECT * FROM flow_runs WHERE status='waiting' AND resume_at IS NOT NULL AND resume_at <= ?`)
     .all(nowIso).map(hydrateRun)

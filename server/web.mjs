@@ -696,7 +696,7 @@ async function api(req, res, url) {
     // pageRun() render "no tmux session" for a session that is standing.
     db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL, archived_at=NULL,
                 goal_sent_at=NULL, followups=0, followup_md=NULL, followup_open=0, followup_since=NULL,
-                tmux_closed_at=NULL, exit_code=NULL WHERE id=?`).run(m[1])
+                tmux_closed_at=NULL, exit_code=NULL, resume_pending=0, resume_attempts=0 WHERE id=?`).run(m[1])
     // …and so does the integration: everything the finish gate and the
     // integrator wrote about the previous attempt is gone.
     resetIntegration(m[1])

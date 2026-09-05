@@ -5,6 +5,14 @@
 > development machine or in this repository), **[documented]** (a primary source, URL
 > given) or **[inferred]** (reasoning from the two; verify before relying on it).
 > The private planning document is not needed to read this one.
+>
+> **Revised 2026-09-05** against the recovery design (`freilauf-tmux.service`
+> owning the tmux server, `resumeRun()` picking a lost session back up in a new
+> one, `launch.resume` as the machine-readable resume form). Where this document
+> used to describe resume mechanics of its own — `respawn-pane` in the same
+> session, a `sandbox.resume` flag, the human `resumeCommand()` as if it were
+> executable — it now refers to those; the sandbox adds nothing to how a run comes
+> back, only what has to be standing around it when it does (§7.11, §7.12.4).
 
 ## 0. The short version
 
@@ -30,7 +38,8 @@ prerequisite.
    bytes in both directions (§7.1, §8.2). This is the one placement that is generic
    across claude, opencode, hermes, cursor and any external plugin: it wraps a
    command line, and a command line is what every harness already hands to
-   `fl-start`.
+   `fl-start`. The tmux server itself is the one `freilauf-tmux.service` owns, so
+   a hub restart never takes a sandboxed run's session down either (§7.11).
 2. **A sandboxed run works in a clone of its own, not in a linked worktree.** A
    linked worktree's `.git` is a file pointing into the operator's checkout, so the
    container would need that checkout's `.git` mounted **read-write** — and with it
@@ -69,10 +78,11 @@ prerequisite.
    403 body says the same; the log scanner recognises `EACCES`/`EROFS`/proxy
    refusals; and a repo can run in **audit-only mode** first, which logs what would
    have been blocked and proposes an allowlist. Network and resource limits change
-   live (`docker update`); a filesystem change needs a restart of the container,
-   for which the run is **resumed** in the same tmux session via the plugin's
-   `resumeCommand` (claude `--resume <run id>`, opencode `--continue`, cursor
-   `--resume`) — the agent keeps its conversation.
+   live (`docker update`); a filesystem change needs a new container, for which
+   the run is **resumed** through the hub's own `resumeRun()` — a new tmux
+   session, the harness's resume form (`fl-start --resume`, `launch.resume` for
+   an external plugin), the same clone and the same per-run home — so the agent
+   keeps its conversation (§7.12.4).
 7. **The container is hardened the boring way**: non-root user with the hub's own
    uid, `--cap-drop ALL`, `--security-opt no-new-privileges`, default seccomp and
    AppArmor, `--read-only` root with tmpfs, `--pids-limit`, `--memory`, `--cpus`,
@@ -210,7 +220,7 @@ mount it has to make.
 | 9 | Host git against the worktree: `rev-parse HEAD`, `--no-optional-locks status --porcelain`, `rev-list --count`, `diff --name-only`, and the rescue path `add -A` / `commit` / `checkout -- .` / `clean -fd` | `integrate.mjs:301, 327, 1072, 1438, 1485-1493` | once the agent is untrusted, its `.git` is hostile to host git (config-driven command execution): §7.4.4 |
 | 10 | RSS accounting sums the **process tree under the pane pid** | `sessions.mjs:351-379` | the pane pid is the `docker` client; ask `docker stats` instead |
 | 11 | The browser terminal spawns `tmux attach-session` on the host | `terminal.mjs:41-79` | unchanged when tmux stays on the host |
-| 12 | Session end = `tmux kill-session`; `reconcileClosedSession()` turns it into a run event | `sessions.mjs:555-580`, `watcher.mjs` | must also stop the container by name; and a container can outlive its client: §7.11 |
+| 12 | Session end = `tmux kill-session`; `reconcileClosedSession()` turns it into a run event; a session the hub did NOT end is handed to `resumeRun()` by the watcher | `sessions.mjs:555-580`, `watcher.mjs` | must also stop the container by name; a container can outlive its client; and a resume has to bring the container, the network and the proxy back with the session: §7.11 |
 
 Two more surfaces are not on the agent's path but matter for the trust story:
 
@@ -763,7 +773,9 @@ would need a `docker exec` indirection, two tmux servers would have to be
 reconciled, the `pipe-pane` log and the `pane-died` hook would run inside and reach
 the hub only through mounts, and every image would need `tmux`. The one advantage
 — the agent's screen survives a host tmux death — is not worth doubling the
-control surface.
+control surface, and it has shrunk since `resumeRun()` exists: a host tmux death
+now ends in the agent being resumed in a new session (its conversation is in the
+per-run home, §7.7), not in an aborted run.
 
 **(d) A process sandbox (bwrap/`srt`) instead of a container.** Not rejected,
 deferred (§4.6): same seam, weaker boundary, blocked on this host today.
@@ -1136,8 +1148,10 @@ read-write at the same path, so:
 
 - the hub's activity sources become `agentHome(run) + '/.claude/projects/<slug>/<run id>.jsonl'`
   etc. — one indirection in `measureActivity()`, `cursor-transcript.mjs`,
-  `claudeTranskriptPfad()`, the opencode and hermes SQLite readers, and
-  `resumeCommand()`; unsandboxed runs return the host home;
+  `claudeTranskriptPfad()`, the opencode and hermes SQLite readers,
+  `resumeCommand()`, and the two id lookups `resumeRun()` makes before it can
+  launch a resume form (cursor's transcript basename, opencode's root session
+  through `opencode-store.mjs`); unsandboxed runs return the host home;
 - the claude transcript slug is derived from the **workdir path**, which is the same
   inside and outside — nothing else about the slug rule changes;
 - seeded before start by the plugin (`sandbox.seedHome`, §7.9): claude's
@@ -1236,18 +1250,24 @@ sandbox: {
   stateDirs: ['.claude/projects'],       // what the hub reads back — documented, so an implementer knows why they are mounted rw
   launchOverrides: ({ spec }) => ({ mode: 'bypassPermissions' }),   // what changes on the command line inside a sandbox
   innerSandbox: { off: { settings: { sandbox: { enabled: false } } }, weak: { settings: { sandbox: { enabled: true, enableWeakerNestedSandbox: true } } } },
-  resume: true,                          // resumeCommand() works from the seeded home → "reconfigure and resume" is offered (§7.12)
+  // no `resume` field: whether a run can be picked back up is `launch.resume`'s answer
+  // (fl-start's own for the four built-ins) — the one `resumeRun()` reads, see §7.12.4
 }
 ```
 
 For the four built-ins: claude as above; opencode (`domains: ['opencode.ai',
-'models.dev']`, seed `auth.json` + config + `plugins/freilauf.js`, `resume: true`
-via `--continue`); hermes (`domains` from its provider, seed `~/.hermes`, `resume:
-false` — no reliable session name, the existing `resumeCommand: null`; force
-`terminal.backend: local`); cursor (`domains` = the enterprise list, seed
-`auth.json`, `launchOverrides: { sandbox: 'disabled' }`, `resume: true`). Provider
-plugins get `sandbox: { domains: [...], credentials: [{ key: 'api_key', injection:
-{ header: 'Authorization', prefix: 'Bearer ', hosts: [...] } }] }`.
+'models.dev']`, seed `auth.json` + config + `plugins/freilauf.js`); hermes
+(`domains` from its provider, seed `~/.hermes`; force `terminal.backend: local`;
+it has no resume form, so `resumeRun()` relaunches it fresh — §7.12.4); cursor
+(`domains` = the enterprise list, seed `auth.json`, `launchOverrides: { sandbox:
+'disabled' }`). Whether a coding agent can be picked back up is **not** declared
+here: `fl-start` knows the resume form of the four built-ins and an external
+plugin declares `launch.resume` (an args template with `{resume_id}`) — the one
+answer `resumeRun()` reads, whether the session was lost to a reboot or replaced
+by a reconfiguration. A second flag next to it would be a second statement about
+one fact. Provider plugins get `sandbox: { domains: [...], credentials: [{ key:
+'api_key', injection: { header: 'Authorization', prefix: 'Bearer ', hosts: [...]
+} }] }`.
 
 An **external** plugin without `sandbox` is simply not offered the option, the
 same way one without `launch` cannot start a run. `launchable(harness)` gains a
@@ -1326,13 +1346,22 @@ docker run -it --rm --init \
 `sandbox.json` + `proxy.yaml` → `docker network create` → start proxy → `fl-start
 --sandbox` (tmux + `docker run`) → `deliverGoal()` as today. Any failure before the
 tmux session exists is `failRun()` with the reason and removes what was created;
-`tmux_or_die()`'s pattern extends to the containers.
+`tmux_or_die()`'s pattern extends to the containers. A **resume**
+(`runs.resume_pending`, §7.12.4) walks the same order with every step
+idempotent: the spec is read from `runs.sandbox_spec` as it stands in the row
+(a lost session keeps its frozen spec, a reconfiguration wrote the new one
+before calling), clone and home exist and are left alone, the network is created
+and the proxy started only where they are missing, a container still holding
+the name `fl-<id>` is stopped first, and `fl-start --sandbox --resume` wraps the
+harness's resume form instead of its fresh one.
 
 **Events**: `started` carries `sandbox: { runtime, image, digest, network.mode,
 resolvedAllow, mounts, resources, secrets.mode, user }`; `sandbox:proxy_started`,
 `sandbox:blocked`, `sandbox:policy_changed {by, diff}`, `sandbox:override_refused`,
-`sandbox:bypassed`, `sandbox:container_gone`, `sandbox:restarted` (§7.12) — all
-through `addEvent()`, so the live channel and the run's history get them for free.
+`sandbox:bypassed`, `sandbox:container_gone`, `sandbox:restarting {reason, diff}`
+(§7.12; the way back is `resumeRun()`'s own `resumed` event, not a second one)
+— all through `addEvent()`, so the live channel and the run's history get them
+for free.
 
 **Ending a run.** `killSessions()` and `/api/runs/<id>/kill` do `docker stop
 fl-<id>` (SIGTERM → 30 s → SIGKILL) **before** `tmux kill-session`, then
@@ -1341,6 +1370,11 @@ fl-<id>` (SIGTERM → 30 s → SIGKILL) **before** `tmux kill-session`, then
 container that is gone while the session stands means the agent died
 (`pane_dead` will say so); a session that is gone while the container stands is
 the client-died case (§7.1) — stop the container, write `sandbox:container_gone`.
+Which of the two ends the run is the recovery design's rule, not the sandbox's:
+a session the hub closed on purpose (kill route, sessions page, retention,
+archive, a flow's `kill_run`) is reconciled as an end, a session that went away
+by itself is handed to `resumeRun()` — and for a sandboxed run that resume stops
+the orphaned container before it starts the next one (start order above).
 
 **Reconciliation and orphans.** The watcher pass gains `reconcileContainers()`:
 `docker ps -a --filter label=freilauf.hub=<id> --format …` versus the runs table —
@@ -1351,11 +1385,26 @@ gone gets the event. `tmuxVerdict()`'s lesson applies: "docker did not answer" i
 `unreachable`, not "no containers" — a daemon restart must not end every
 sandboxed run.
 
-**Hub restart / deploy.** `freilauf.service` has `KillMode=process`; the tmux
-sessions and their `docker` clients are children of tmux, not of the hub, so a
-deploy leaves sandboxed runs running exactly as it leaves the others. The proxy
-containers are Docker's, not the hub's. After a restart the reconciliation pass
-re-adopts them by label.
+**Hub restart / deploy.** The tmux server belongs to `freilauf-tmux.service`,
+a unit of its own that the hub is ordered after and that `freilauf-deploy` never
+restarts (`KillMode=process` on the hub unit stays as belt and braces); the
+sessions and their `docker` clients are children of that server, not of the hub,
+so a deploy leaves sandboxed runs running exactly as it leaves the others. The
+proxy containers are Docker's, not the hub's. After a restart the first watcher
+pass runs at once and its reconciliation re-adopts them by label.
+
+**Server reboot, or a lost tmux server.** The sessions go, the `docker` clients
+with them, and through `--init` the agents inside — `--rm` removes the
+containers, the proxies with them; the per-run networks are persisted by the
+daemon and survive. What survives on disk is everything a resume needs: the
+clone, the run directory and the per-run home with the agent's own transcript
+or session store. `resumeRun()` then does for a sandboxed run what it does for
+any other, through the idempotent start order above — with one condition that
+is the sandbox's alone: the first watcher pass after a boot runs immediately,
+and a rootless `docker.service` user unit may not be listening yet. A resume
+that cannot *ask* the daemon must wait for the next pass, exactly as
+`tmuxVerdict()`'s `unreachable` waits — never `failRun()` a run for a daemon
+that is still booting (§11).
 
 **Retention.** `session_keep_hours` closes the tmux session and, with it, the
 container (the client exits; PID 1 gets SIGHUP through `--init`; `docker stop` as
@@ -1423,34 +1472,62 @@ notifier-side rendering question).
 
 #### 7.12.4 Reconfigure and resume: the agent keeps its conversation
 
-For the changes that need a new container, the run is **restarted in place**, not
-thrown away:
+For the changes that need a new container, the run is **resumed**, not thrown
+away — and the mechanism is not the sandbox's. The recovery design's
+`resumeRun()` already does everything a reconfiguration needs: it closes the
+books on the old session, launches the harness's **resume form** through the
+same `fl-start` (`--resume <id>`, the continuation text as the ordinary `-f`
+prompt file; claude `--resume <run id> "<text>"` — the session id *is* the run
+id, found in the seeded home; cursor `--resume <chatId>`; opencode
+`--session <root session id>`; an external plugin
+through its `launch.resume` template), re-arms the log pipe and the pane-died
+hook on the new session, re-delivers the goal, and writes `resumed {attempt,
+session}`. A `respawn-pane` in the old session with a hand-typed continuation
+line would be a second copy of exactly that path, and the one thing it would
+have bought — the same session name — is not worth it: `runs.tmux_session` is
+rewritten by the launch, the live channel swaps the page, and the browser
+terminal reattaches by run, not by name. So:
 
-1. `sandbox:restarting {reason}`; the hub types nothing into the session (an agent
-   mid-tool-call is interrupted either way).
-2. `docker stop fl-<id>` (30 s grace, SIGKILL after). The clone, the run dir and the
-   home — with the agent's transcript/session store — are bind mounts and survive.
-3. New spec → new `sandbox.json` → `tmux respawn-pane -k -t "=<session>:"` with the
-   new `docker run` command whose agent command is the plugin's **resume** command
-   (claude: `claude --resume <run id>` — the session id *is* the run id, in the
-   seeded home; opencode: `opencode --continue`; cursor: `cursor-agent --resume
-   <transcript id>`) followed by one typed line: "The sandbox was reconfigured:
-   `<diff>`. Continue." The same tmux session name, so every hub-side reference
-   (`runs.tmux_session`, the browser terminal, the log pipe) stays valid; whether
-   `pipe-pane` survives `respawn-pane` is one of the things to measure (§11) — if
-   not, `fl-start` re-arms it.
-4. For a plugin with `resume: false` (hermes), the restart is offered as "restart
-   from the report so far": the run's `progress` reports and the log tail are
-   prepended to the prompt as a "what you had done" section; the operator is told
-   that context is lost.
-5. `sandbox:restarted {sessionResumed: true|false}`; the watcher's clocks
-   (`expected_minutes`, follow-up commission) keep running — a reconfiguration is
-   not a new run.
+1. The new spec is written into `runs.sandbox_spec` and the row is marked
+   `resume_pending` **first**, then `sandbox:restarting {reason, diff}` — in that
+   order, so a watcher pass that finds the session gone in the next second sees a
+   run already on its way and does not start a second resume with the old spec.
+   The hub types nothing into the session (an agent mid-tool-call is
+   interrupted either way).
+2. `docker stop fl-<id>` (30 s grace, SIGKILL after), then the tmux session is
+   closed. The clone, the run dir and the home — with the agent's
+   transcript/session store — are bind mounts and survive.
+3. `resumeRun(runId, { reason: 'sandbox_reconfigure' })` — a **direct** call by
+   the sandbox module, not the watcher's discovery path: the rule "the hub does
+   not resume a session it ended itself" is about the watcher not undoing a
+   deliberate kill, and a caller that closed the session in order to resume it
+   is the opposite case. `launchRun()` then walks the sandbox start order (§7.11)
+   with the spec from the row, and the resume form runs inside the **new**
+   container. The continuation text names what changed — "The sandbox was
+   reconfigured: `<diff>`. Continue." — in place of the recovery design's
+   "interrupted by a server restart" sentence.
+4. For a coding agent with no resume form (hermes, an external plugin without
+   `launch.resume`), `resumeRun()` relaunches it fresh with the original prompt
+   in the same clone — its commits and its working state are there — and the
+   event says so; the operator is told that the conversation is lost. Prepending
+   the run's `progress` reports and the log tail as a "what you had done" section
+   is the obvious improvement to that fresh launch, and it belongs in
+   `resumeRun()` for every harness without a resume form, not in the sandbox.
+5. `resumed {attempt, session}` is `resumeRun()`'s own event; the watcher's
+   clocks (`expected_minutes`, follow-up commission) keep running — a
+   reconfiguration is not a new run, and the seconds the container was down are
+   what `started_at` shifts by.
 
-The same mechanism is the **break-glass**: "Continue without the sandbox" stops the
-container and respawns the pane with the plain agent command in the same clone on
-the host, with `sandbox:bypassed {by: user, reason}` — an explicit, named,
-notified act, available only when `sandbox_allow_bypass` permits it.
+The same mechanism is the **break-glass**: "Continue without the sandbox" writes
+`runs.sandbox = 0`, stops the container, closes the session and calls
+`resumeRun()` the same way, so `launchRun()` starts the plain resume form in the
+same clone on the host, with `sandbox:bypassed {by: user, reason}` — an explicit,
+named, notified act, available only when `sandbox_allow_bypass` permits it. The
+resume form has to find the conversation in the **run's** home, so that launch
+keeps `HOME=<run home>` in the session's environment and re-seeds the
+credentials in `env` mode (they were placeholders under `inject`); where that
+cannot be made to work for a harness, the break-glass is a fresh launch and says
+so.
 
 #### 7.12.5 Preventing: dry run and audit-only mode
 
@@ -1671,8 +1748,9 @@ Sized against modules that exist: `integrate.mjs` is ~1,600 lines, `runner.mjs`
 ~550, `fl-start` ~850. Each phase is shippable on its own and off by default.
 
 **Phase 0 — seams that are right regardless of the sandbox** (small, low risk):
-`agentHome(run)` indirection in the four activity readers and `resumeCommand()`;
-`runGit(run, args)` in `integrate.mjs`/`watcher.mjs`/`runner.mjs`; `collectRunTip(run)`
+`agentHome(run)` indirection in the four activity readers, `resumeCommand()` and
+the id lookups `resumeRun()` makes (cursor's transcript basename, opencode's root
+session); `runGit(run, args)` in `integrate.mjs`/`watcher.mjs`/`runner.mjs`; `collectRunTip(run)`
 before the finish gate (a no-op today); the unix-socket report listener with a
 per-run `report_token` and `fl-report`'s `FL_HUB_SOCKET`; `scanSystem()` records
 Docker. Tests for each.
@@ -1692,7 +1770,9 @@ the builtin engine.
 **Phase 2 — the blocked-need flow**: proxy denials → events/incidents → the three
 buttons and live reload; `docker update` for limits; the `access` report kind and
 the prompt's Sandbox section; the log-scanner family; the dry run; audit-only mode
-with Adopt; reconfigure-and-resume via `respawn-pane`; `merge_check_sandboxed`.
+with Adopt; reconfigure-and-resume through `resumeRun()` (the sandbox start order
+made idempotent, the direct caller with its own reason and continuation text);
+`merge_check_sandboxed`.
 
 **Phase 3 — enterprise hardening**: iron-proxy engine with TLS termination and
 credential injection (`secrets.mode: inject`, plugin `injection` declarations,
@@ -1716,12 +1796,20 @@ composition, per-run named volumes for `rw` extras.
    invalidate the host session's refresh token? Decides whether
    `CLAUDE_CODE_OAUTH_TOKEN` is required for sandboxed claude runs or merely
    recommended (§7.8).
-3. **`tmux respawn-pane` and `pipe-pane`**: does the log pipe survive a respawn, or
-   must `fl-start` re-arm it (§7.12.4)?
-4. **`claude --resume <id>` from a seeded home** with the transcript at the
-   run-dir path: does resume work when the project slug and the home differ from
-   the original host layout? Same for `opencode --continue` with the per-run
-   `opencode.db`, and `cursor-agent --resume`.
+3. **A resume before the Docker daemon answers**: after a reboot the first
+   watcher pass runs at once (recovery design, change 5), and a rootless
+   `docker.service` user unit may still be starting. Confirm that `resumeRun()`
+   leaves such a run `resume_pending` for the next pass instead of `failRun()`,
+   and whether `freilauf.service` should be ordered after the daemon's unit on a
+   rootless installation (§7.11). (The former question here — does `pipe-pane`
+   survive `respawn-pane` — is gone with the respawn: `fl-start` arms the pipe on
+   every session it creates, a resume included.)
+4. **The resume form from a seeded home** — `claude --resume <run id>` with the
+   transcript under `<run home>/.claude/projects/<slug>/`, `opencode -s <root
+   session id>` with the per-run `opencode.db`, `cursor-agent --resume <chatId>`:
+   does each CLI find its conversation when the home differs from the original
+   host layout? The recovery design measures the forms on the host; this is the
+   same question one bind mount further in.
 5. **`--settings` vs project `.claude/settings.json`** precedence for hooks (§8.21).
 6. **iron-proxy under load and with SSE**: Anthropic's streaming responses, cursor's
    HTTP/2 endpoints (`repo42.cursor.sh` is HTTP/2 only — does a CONNECT tunnel

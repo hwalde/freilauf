@@ -1,0 +1,27 @@
+# Freilauf tmux server — the process every agent session lives in.
+#
+# A tmux server belongs to whoever spawns it, and on a hub machine that used to
+# be the hub: the first run after a reboot started the server inside
+# freilauf.service's cgroup, and a restart of the hub could take every working
+# agent down with it (KillMode=process in freilauf.service is the fence against
+# exactly that). This unit gives the server a home of its own, started before
+# the hub and never restarted by a deploy. `bin/fl-tmux-server` runs `tmux -D`
+# in the foreground on the default socket — and, on a machine where a server is
+# already running, waits for it to go away before starting one of its own.
+#
+# Stopping THIS unit ends every agent session on the machine. Nothing in
+# Freilauf does that; only an operator would.
+[Unit]
+Description=Freilauf tmux server (agent sessions live here, not in the hub's unit)
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=%h/.local/bin/fl-tmux-server
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

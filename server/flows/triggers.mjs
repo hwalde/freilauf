@@ -30,6 +30,7 @@ import {
 } from './db.mjs'
 import { parseAttachments, attachmentFires } from './attach.mjs'
 import { startFlowRun, resumeWaitingOnRun, resumeDelayed } from './engine.mjs'
+import { endedRunsWithWaiters } from './db.mjs'
 import { actions, runInfo } from './actions.mjs'
 import { cronMatches } from '../util.mjs'
 
@@ -135,6 +136,12 @@ export async function flowsTick(api = actions) {
       await Promise.allSettled(flowsForRun(run, info.outcome, flows).map(flow =>
         startFlowRun(flow, { kind: 'run_finished', run: info, at }, api, { triggerRunId: run.id })
           .catch(e => console.error(`[flows] ${flow.name}:`, e.message))))
+    }
+    // Waiters on a run the loop above never sees: one marked dispatched at load
+    // because it ended long before a restart (db.mjs). A row the loop already
+    // resumed is no longer `waiting`, so nothing is resumed twice.
+    for (const runId of endedRunsWithWaiters()) {
+      try { await resumeWaitingOnRun(runId, api) } catch (e) { console.error('[flows] resume', e.message) }
     }
     await dispatchMerges(flows, api)
     await resumeDelayed(api)

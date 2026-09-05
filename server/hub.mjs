@@ -19,8 +19,8 @@ await loadExternalPlugins()
 
 const { route } = await import('./web.mjs')
 const { startTerminalServer } = await import('./terminal.mjs')
-const { startScheduler, stopScheduler } = await import('./scheduler.mjs')
-const { startWatcher, stopWatcher, verwaisteLaeufeAbschliessen } = await import('./watcher.mjs')
+const { startScheduler, stopScheduler, tick: schedulerTick } = await import('./scheduler.mjs')
+const { startWatcher, stopWatcher, verwaisteLaeufeAbschliessen, tick: watcherTick } = await import('./watcher.mjs')
 const { startIntegrator, stopIntegrator } = await import('./integrate.mjs')
 const { getSetting } = await import('./db.mjs')
 const { seedIfEmpty } = await import('./coding-agents.mjs')
@@ -72,6 +72,21 @@ server.listen(PORT, HOST, () => {
   // and `ps` over every process on the machine, and without a warm cache the
   // first page view after a restart is the one that pays for it.
   sessionMemory().catch(() => {})
+  // The first pass right away, not 30 s from now. Both timers are plain
+  // intervals, so after a restart there used to be a 30-second window in which
+  // a deferred run, a planned start, a pending goal, a lost session and a
+  // missed schedule slot were all known to the database and looked at by
+  // nobody. Two seconds after listen, behind the warm-ups above; the interval
+  // then carries on as before. The e2e suite drives both ticks by hand and is
+  // not disturbed: a pass over the state it has just built is the same pass it
+  // would trigger itself. `FREILAUF_FIRST_PASS_OFF=1` is the fence for a test
+  // that wants no pass it did not ask for.
+  if (env('FIRST_PASS_OFF') !== '1') {
+    setTimeout(() => {
+      watcherTick().catch(e => console.error('[watcher]', e.message))
+      schedulerTick().catch(e => console.error('[scheduler]', e.message))
+    }, 2000)
+  }
   // What is already on this machine — installed coding agent CLIs, API keys in
   // the environment. Deliberately AFTER listen and fire-and-forget: it shells
   // out once per coding agent plugin, and a start must never wait on that.

@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRepo, getRun } from './db.mjs'
 import { KNOWN_QUANTIZATIONS, REGIONS, parseRoutingConfig } from './providers/openrouter-routing.mjs'
-import { escapeHtml as e, validCron, WOCHENTAGE, weeklySlots, slotsUniform, splitTimes, scheduleText, parseDbUtc, fmtRelativeTime, fmtDateTime, fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent, tzAbbrev, uiTimezone, setTimezone, setPublicHost, TIMEZONE_OPTIONS, hubVersion, publicBase, WORKTREES_DIR, RUNS_DIR } from './util.mjs'
+import { escapeHtml as e, validCron, WOCHENTAGE, weeklySlots, slotsUniform, splitTimes, scheduleText, parseDbUtc, catchupHours, fmtRelativeTime, fmtDateTime, fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent, tzAbbrev, uiTimezone, setTimezone, setPublicHost, TIMEZONE_OPTIONS, hubVersion, publicBase, WORKTREES_DIR, RUNS_DIR } from './util.mjs'
 import { cookieRepo, requestRepo } from './web-helpers.mjs'
 import { providerBalances } from './balances.mjs'
 import { enabledCodingAgents, saveCodingAgent, deleteCodingAgent } from './coding-agents.mjs'
@@ -1017,6 +1017,12 @@ export function runRow(r, ctx) {
  * cases where everything is as it should be.
  */
 function integrationLine(r) {
+  // A run whose session was lost and is on its way back (runner.mjs,
+  // resumeRun): between the loss and the new session it has no tmux session,
+  // and a running run with no session would otherwise read as broken.
+  if (r.resume_pending && ['running', 'waiting_help', 'deferred'].includes(r.status)) {
+    return `<div class="dim">${e(t('run.resuming'))}</div>`
+  }
   if (r.finish_state) return `<div class="dim">${e(finishText(r.finish_state))}</div>`
   if (!r.merge_status || ['merged', 'nothing'].includes(r.merge_status)) return ''
   if (!['done', 'failed', 'aborted'].includes(r.status)) return ''
@@ -2279,6 +2285,8 @@ export async function pageSettings(req, res, url) {
         <span class="dim">${e(t('settings.public_host_hint', { url: `${publicBase()}/runs/<id>` }))}</span></label>
     </fieldset>
     <label>${e(t('settings.pipeline'))} <select name="pipeline_on"><option value="1" ${s.pipeline_on === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option><option value="0" ${s.pipeline_on !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option></select></label>
+    <label>${e(t('settings.schedule_catchup'))} <input name="schedule_catchup_hours" type="number" min="0" step="1" value="${e(String(catchupHours(s)))}">
+      <span class="dim">${e(t('settings.schedule_catchup_hint'))}</span></label>
     ${gatesFieldset(s)}
     <label>${e(t('settings.abo_price'))} <input name="abo_price" type="number" value="${e(s.abo_price ?? '200')}">
       <span class="dim">${e(t('settings.abo_price_hint'))}</span></label>
@@ -3387,7 +3395,7 @@ export async function repoSave(req, res, url, formBody) {
  * fallback for an installation that has not saved the new field yet
  * (sessionKeepMs), and an empty write would silently reset it.
  */
-const STATIC_KEYS = ['pipeline_on',
+const STATIC_KEYS = ['pipeline_on', 'schedule_catchup_hours',
   'abo_price', 'session_keep_hours', 'archive_session_on', 'archive_session_keep_hours', 'flow_runs_keep_days', 'prompt_suffix',
   'public_host',
   'llm_check_on', 'llm_check_model', 'llm_check_or_provider', 'llm_check_source', 'llm_check_fallback', 'llm_check_fallback_model',

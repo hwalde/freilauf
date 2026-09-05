@@ -276,6 +276,16 @@ addColumn('runs', 'followup_detail_md', 'TEXT')    // the latest follow-up's det
 // means rebuilding the table, and a stored name is not worth a migration (the
 // same rule that leaves `openrouter_min_eur` holding dollars).
 addColumn('runs', 'telegram_on', 'INTEGER NOT NULL DEFAULT 1')
+// ---- surviving a lost tmux server: a run is resumed, not aborted ----
+// A session that vanished without the hub ending it (a reboot, a dead tmux
+// server) used to abort the run; now the watcher RESUMES it in a new session
+// (server/runner.mjs, resumeRun). `resume_pending` = the next launch is a
+// resume of the old conversation, not a fresh start — set by resumeRun(), read
+// by launchRun(), cleared when the new session stands. `resume_attempts` counts
+// the automatic ones, capped (RESUME_MAX) so a CLI that dies at every start is
+// not restarted for ever.
+addColumn('runs', 'resume_pending', 'INTEGER NOT NULL DEFAULT 0')
+addColumn('runs', 'resume_attempts', 'INTEGER NOT NULL DEFAULT 0')
 // Incidents: the delayed notification (notify_at = when the grace period ends and the
 // alarm becomes due) and whether it was EVER announced (gemeldet_am) — the latter
 // decides whether an auto-resolve also announces the recovery (server/incidents.mjs).
