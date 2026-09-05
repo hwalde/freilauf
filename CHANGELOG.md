@@ -136,6 +136,20 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A retried run is no longer killed by the hub seconds after it starts.**
+  "Retry run" set the run back to `running` but left `started_at` on the first
+  attempt — and that column is what the watcher's sweep for interrupted starts
+  measures its five-minute grace period against. So a retry had no grace at
+  all: the watcher pass falling into the two or three seconds between the start
+  and the tmux session wrote `failed — start interrupted, no session` over a
+  run that was starting perfectly well. The agent then worked and reported as
+  usual, but because the row said `failed`, its report arrived as a follow-up
+  report, which deliberately keeps the run's status — so the run stayed red for
+  its whole life while it was doing its job. The same stale timestamp made
+  every retried run overdue from its first second and, on a coding agent that
+  reports no activity, silent from its first second. A retry now starts both
+  clocks afresh, like every other path that starts a waiting run.
+
 - **A killed test suite no longer leaves its tmux sessions on the machine.**
   `node test/e2e.mjs` and `node test/browser.mjs` kill exactly the sessions
   they created — but only when they get to run their cleanup, and a suite
