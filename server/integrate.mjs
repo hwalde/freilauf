@@ -1022,7 +1022,14 @@ export function mergeCheckArgv(spec, ctx = {}) {
   if (setValue(r.cpus)) args.push('--cpus', String(r.cpus))
   if (setValue(r.shmSize)) args.push('--shm-size', String(r.shmSize))
 
-  args.push('--tmpfs', '/tmp:rw,nosuid')
+  // `exec` has to be NAMED. Docker's --tmpfs defaults to `noexec,nodev`, and
+  // the options given here are ADDED to those defaults rather than replacing
+  // them — measured against Docker 29.8.0 (§11b): `chmod +x /tmp/x && /tmp/x`
+  // exits 126 without this word. A merge check is `node test/unit.mjs` and its
+  // kind, and a toolchain that unpacks a helper into /tmp and runs it would
+  // fail here while the run that produced the code succeeds — a red check that
+  // says nothing about the work.
+  args.push('--tmpfs', '/tmp:rw,exec,nosuid')
   args.push('-e', 'HOME=/tmp')
   args.push('-e', 'LANG=C.UTF-8')
   args.push('-v', `${dir}:${dir}:rw`)
