@@ -62,7 +62,9 @@ Claude Code、opencode、hermes、cursor，或任何以插件形式加入的智�
   关闭**；只有你想要它时才需要 Docker。有一条限制应当写在概要里，而不是只写在细则中：
   在 **rootless** 守护进程上——也就是我们推荐的部署形态——强制生效的白名单需要一个
   自身就是容器的代理，而那个引擎从未对着真正的二进制跑过，所以 rootless 安装今天
-  只有 `open` 或 `none`（[docs/sandbox.md](docs/sandbox.md)——那份文档
+  只有 `open` 或 `none`。还有一条关于验证到什么程度的事实：**已经有一个编码智能体
+  真的在容器里跑完了一次运行**（opencode，工作无人协助地合并进了 `main`），另外
+  三个则从未在容器里启动过（[docs/sandbox.md](docs/sandbox.md)——那份文档
   讲它**不做**什么，和讲它做什么一样详细）。
 - **一切厂商相关的东西都是插件。** 编码智能体、模型提供商和通知服务都是有文档化
   契约的插件（[docs/plugins.md](docs/plugins.md)）；第三方可以把一个包放到机器上，

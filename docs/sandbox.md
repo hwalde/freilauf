@@ -185,14 +185,31 @@ were all measured in ([SANDBOX_RESEARCH.md
 have never been built, because the machine they were written on has no
 container runtime"* — was true when it was written and is not any more.
 
-**The agent layers are a different question, and it is still open.** A build
-succeeding says the install command found its file; it does not say the CLI
-inside starts, finds its seeded home or talks to its vendor. Not one harness CLI
-has yet been run inside a container ([§11b.8](../SANDBOX_RESEARCH.md)). So the
-per-image state — which layers build, and what is still unverified about each —
-is tracked in [`sandbox/images/README.md`](../sandbox/images/README.md) and that
-file is the one to believe over this paragraph. Expect the first real sandboxed
-run of a harness to be the thing that finds the remaining mistakes.
+**The agent layers are a different question, and it is answered for exactly one
+of them.** A build succeeding says the install command found its file; it does
+not say the CLI inside starts, finds its seeded home or talks to its vendor.
+**The opencode layer has now carried a whole run** — work done, committed,
+reported and merged (see [its own
+section](#one-coding-agent-has-run-in-a-container-three-have-not)) — and the
+claude, cursor and hermes layers have still never had their CLI started in a
+container. So the per-image state — which layers build, and what is still
+unverified about each — is tracked in
+[`sandbox/images/README.md`](../sandbox/images/README.md) and that file is the
+one to believe over this paragraph. Expect the first real sandboxed run of each
+remaining harness to be the thing that finds the mistakes in its layer: the
+first opencode one found five, and every one of them had been green in the test
+suite.
+
+**A run that names no image is not an error.** Where neither the repository nor
+the profile fills in `image.ref`, the run uses the image the coding agent's own
+plugin declares — the same name the Settings page builds, so the two cannot
+drift. `image.pull` decides what happens when that image is not on the machine:
+anything but `never` fetches it. (`always` does **not** re-fetch an image that is
+already there — it means the same as `if-missing` today.) An image
+that is still absent afterwards is a **refusal naming the image**, before the
+clone, the home and the network are created — it used to be a `docker run` that
+failed inside the tmux pane with the daemon's own wording and nothing on the
+run's record.
 
 ### 4. Verify a policy before a run depends on it
 
@@ -670,6 +687,19 @@ And the honest consequence: **the dirt of a dead sandboxed run is reported as
 unknown, never as measured** — which is exactly why the finish gate now has a
 third answer besides clean and dirty (see the changelog entry for 2026-09-05).
 
+**Retention is the one reader that had to be given the escape hatch**, and not
+having it cost a clone per run. The pass that removes a finished run's working
+copy checks it for uncommitted work first, and by the time it looks the run's
+container is always gone — the container is released when the run ends. So the
+check was refused, a refusal read as "dirty", and no sandboxed run's clone was
+ever removed; the record said `worktree_dirty` with an empty list of files under
+it. It now takes the same neutralised host git the operator's own rescue buttons
+take — the config renamed aside, `core.hooksPath=/dev/null`, verified inert
+against all eight commands — for a read-only `status`, which is strictly weaker
+than the `add`/`commit`/`checkout`/`clean` that path already runs. Where nobody
+could look at all the record says so (`unreadable`) instead of claiming there is
+uncommitted work.
+
 ---
 
 ## The report socket
@@ -698,9 +728,25 @@ every run in flight the moment the release is deployed. Runs from before the
 column keep a NULL token for the same reason.
 
 `fl-report` chooses socket, then loopback, then `inbox.jsonl` — and the inbox
-path is now taken from the configured runs directory rather than from `$HOME`,
+path is taken from the configured runs directory rather than from `$HOME`,
 which inside a container is the run's seeded home where `agents/runs` does not
-exist. The last fallback a report has used to write into nowhere, silently.
+exist. The last fallback a report has used to write into nowhere, silently; the
+setting that says where the runs directory is is now passed into the container
+too, which is what makes that fix real inside the box rather than only outside
+it.
+
+**Both channels were broken at once until 2026-09-05, and neither said so.** The
+mount named the socket's path *inside* the container as its source on the host —
+so Docker created a **directory** at that name, `fl-report` found no socket, and
+every report fell through to an inbox nobody read. Measured on the first real
+sandboxed run: the agent worked, committed, reported, was told the report was
+safe in the inbox, and the run then sat in `running` for ever. The host path and
+the container path no longer share a name, a document that still carries the old
+one is refused rather than silently rebuilding the directory, and a hub with no
+socket listening mounts nothing and writes `hub_socket_missing` on the run —
+degraded, not dead, and written down. **So the per-run token has still never
+authenticated a real report**: the one run that came through reported through
+the inbox, before any of this was repaired.
 
 ---
 
@@ -737,10 +783,21 @@ installation**, which is the posture this document recommends and the one three
 of the four shipped profiles are written for. What happens in practice is a
 **launch that fails**, not a run that silently has no egress — `builtinBind()`
 refuses to fall back to loopback, because loopback inside a container is the
-container, and `server.listen()` on an address the host does not have throws. It
-fails without naming the cause: nothing in the hub today recognises this
-combination of daemon and engine, and there is **no warning on the Settings page
-and no refusal in the profile editor**. That is a gap, not a design.
+container, and `server.listen()` on an address the host does not have throws.
+
+**The failure names its cause now.** One predicate answers "can this engine
+carry a run's egress on this daemon", and both the launch and the Settings page
+ask it, so an operator cannot be told two different things: the launch refuses
+before it starts anything, with the reason and the three ways out (the
+iron-proxy engine, `network.mode: open`, or publishing the listener yourself at
+an address the container can reach with `FREILAUF_SANDBOX_PROXY_BIND` — an
+operator who has done that has answered the question, so the refusal does not
+apply to them); Settings → Sandbox says the same next to the engine picker. A
+daemon that did not say whether it is rootless is **not** a refusal: the launch
+then fails on the bind as it did before, which is worse than a diagnosis and
+better than refusing a run over a question nobody answered. What is still
+missing is the **profile editor**, which does not warn about the combination
+while you are writing it down.
 
 What works instead, today:
 
@@ -775,9 +832,17 @@ rest of the boundary.
 
 **And the one fallback there is does not rescue you here.** A `secrets.mode:
 env` profile whose named engine will not start falls back to the built-in engine
-with a `warn` — which on a rootless daemon is a fall back onto the engine that
-cannot bind, so the launch still fails. (An `inject` profile never falls back at
-all: it fails outright, by design.)
+with a `warn` — which on a rootless daemon is a fall back onto an engine no
+container can dial, so it is **refused by the same predicate**, carrying both
+reasons: why the named engine did not start, and why the fallback is not
+available either. Falling back would otherwise have produced a run with no
+egress at all, which looks perfectly healthy right up to the first request that
+times out. (An `inject` profile never falls back at all: it fails outright, by
+design.)
+
+**This is why the one real run so far used `network.mode: open`**, and why an
+enforced allowlist is still the part of the sandbox nothing has exercised
+end to end.
 
 **One more consequence of the built-in engine living in the hub process**: a hub
 restart kills the listener while the container carries on with a frozen
@@ -946,28 +1011,59 @@ On a host with `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu
   truth, and there is no key, so somebody who re-runs the chaining gets a valid
   file again. The exported file says so on its own header line.
 
-### No coding agent has yet been run inside a container
+### One coding agent has run in a container. Three have not.
 
-The base image builds and containers have been started from it, so the
-*box* — the mount set, the uid map, the three resource fences, the network
-modes — is measured rather than reasoned about. **The agent inside it is not.**
-Not one harness CLI has been started in a container to date
-([SANDBOX_RESEARCH.md §11b.8](../SANDBOX_RESEARCH.md)), which leaves all of this
-open:
+**opencode has**, once, end to end, on 2026-09-05: opencode 1.18.29 in
+`freilauf/agent-opencode:1.18.29`, rootless Docker 29.8.0, `network.mode: open`,
+against a sandbox hub of its own and never the operator's. The second attempt
+reported `done` and had its branch merged into `origin/main` about a minute
+after it started, with nobody helping it. What that one run establishes, and it
+is the layer nothing before it could reach:
 
-- `docker run -it` as a tmux pane command under a live TUI, and whether
-  `--detach-keys` behaves as the reading says;
-- the hub's report socket mounted into the container and `fl-report` writing
-  back through it;
-- each CLI finding its seeded home at its container path, and the resume forms
-  read out of that home;
-- cursor's transcript slug inside a container.
+- **The tmux pane really is the container's terminal.** `capture-pane` shows the
+  TUI, `send-keys -l` reaches it, a bracketed paste arrives unsubmitted the way
+  it does on the host — the transport §7.1 chose survives a real agent, not only
+  a relay under a shell.
+- **A container that exits hands its status to `pane-died`** (measured at 42 and
+  125), which is what every "the agent is gone" path in the hub is built on.
+- **The run's files land where the hub expects them**, and the finish gate and
+  the integrator read the working copy through the box and merge what they find.
+- **Ending the run leaves nothing behind** — the container is stopped before the
+  session, and no container, network or proxy survives it.
+- **The sessions page reports the container's own memory** (786 MB, where the
+  pane's process tree would have said about ten).
+
+**claude, cursor and hermes have never been started in a container**, and
+neither has any run under an enforced allowlist — which on a rootless daemon
+cannot be had at all (see [the proxy
+section](#the-built-in-proxy-engine-does-not-work-under-a-rootless-daemon)). So
+these remain open, and the first run of each is what will find them:
+
+- each of the other three CLIs finding its seeded home at its container path,
+  and the resume forms read out of that home;
+- cursor's transcript slug inside a container;
+- claude as container root under a rootless daemon, which rests entirely on
+  `IS_SANDBOX=1` (below);
+- `--detach-keys` under a live TUI, still as the reading says it behaves;
+- the hub's report socket carrying a real report: the run above reported through
+  the `inbox.jsonl` fallback, because the socket was mounted as a directory
+  until that run exposed it.
+
+That run exposed five faults, and every one of them had passed the whole test
+suite: the wrong user for the hub's own git calls inside the box, the socket
+mount, the report fallback writing to a path the hub does not read, containers
+started with an empty name and empty labels, and the pane's client talking to
+the wrong daemon. All are fixed and in the [changelog](../CHANGELOG.md). The
+lesson is worth more than the fixes: a **`docker` shim cannot answer whether an
+account exists inside an image or whether a mount point came out a socket**, so
+a green suite says nothing about either.
 
 The per-layer build state and what is unverified about each image is in
-[`sandbox/images/README.md`](../sandbox/images/README.md), and that file is
-authoritative over this one. Everything that could only be observed *inside* a
-container is still unobserved; the unit and e2e suites drive a **`docker`
-shim**, not Docker.
+[`sandbox/images/README.md`](../sandbox/images/README.md), which is
+authoritative over this file on everything to do with the images — with one line
+now out of date: it says no image has yet run a real agent turn, and the
+opencode one has. The unit and e2e suites still drive a **`docker` shim**, not
+Docker.
 
 ### What rests on a reading rather than a measurement
 
@@ -976,8 +1072,12 @@ for what was established without a container runtime, **§11b** for what was
 measured on 2026-09-05 against a live rootless daemon. The short version,
 because it is what the boundary's edges are made of:
 
-**Measured against a real daemon (§11b), in throwaway containers and networks:**
+**Measured against a real daemon (§11b), in throwaway containers and networks —
+and, once, with a real agent working in one:**
 
+- **A real coding agent ran and its work was merged** — opencode, once, on
+  `network.mode: open`. [Its own section](#one-coding-agent-has-run-in-a-container-three-have-not)
+  says exactly what that establishes and what it leaves untouched.
 - The **mount set works end to end** inside a real container: the clone
   read-write, the operator's `.git` read-only at the same path, the masked
   config over it — `git status`, `git log` through the alternates, `git fetch`,

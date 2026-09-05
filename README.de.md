@@ -90,7 +90,10 @@ das tut Freilauf, und es geht nur vorwärts.
   Daemon — der Aufstellung, die wir empfehlen — braucht die erzwungene
   Allowlist einen Proxy, der selbst ein Container ist, und diese Engine ist nie
   gegen das echte Binary gelaufen; eine rootless-Installation hat heute also
-  `open` oder `none` ([docs/sandbox.md](docs/sandbox.md) — dort steht ebenso
+  `open` oder `none`. Und eine Angabe dazu, wie weit das erprobt ist: **ein
+  Coding-Agent hat wirklich einen Lauf in einem Container gemacht** (opencode,
+  die Arbeit landete ohne Hilfe in `main`), die anderen drei sind noch nie in
+  einem gestartet worden ([docs/sandbox.md](docs/sandbox.md) — dort steht ebenso
   ausführlich, was die Sandbox *nicht* tut, wie das, was sie tut).
 - **Alles Herstellerspezifische ist ein Plugin.** Coding-Agenten,
   Modell-Provider und Benachrichtigungsdienste sind Plugins mit dokumentiertem

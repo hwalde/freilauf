@@ -204,7 +204,13 @@ DOCKER_HOST=unix:///run/user/1000/docker.sock
 ```
 
 with `1000` replaced by `id -u` of the hub's user. Do not point it at
-`/var/run/docker.sock` on a rootless installation.
+`/var/run/docker.sock` on a rootless installation. The hub resolves the endpoint
+itself and hands it to the container client it starts in the run's tmux pane, so
+a run does not depend on this line — it is for the human's own `docker` and for
+anything else on the machine. (It did depend on it until 2026-09-05: the pane
+inherits nothing of what the hub resolved and fell back to the rootful socket,
+which on a rootless installation is absent or unreadable, so the pane died half
+a second after the start and that one permission error was the whole run log.)
 
 **What such a host can and cannot fence.** Rootless Docker enforces only the
 cgroup controllers systemd delegated to the user; measured on Ubuntu 24.04 that
@@ -246,13 +252,15 @@ cannot work** — the hub's listener would have to bind the run network's gatewa
 and rootlesskit keeps every bridge in a network namespace of its own
 (`--detach-netns`), so that address does not exist on the host. Measured three
 ways on 2026-09-05; the account is in `docs/sandbox.md` under *"The built-in
-proxy engine does not work under a rootless daemon"*. Consequences you must pass
-on, because the hub does **not** detect this combination and prints no warning:
+proxy engine does not work under a rootless daemon"*. The hub now **does**
+detect the combination — the launch refuses with the cause and the ways out, and
+Settings → Sandbox says the same next to the engine picker — but the profile
+editor does not warn while you are writing one, so pass the consequences on
+anyway:
 
 - three of the four shipped profiles — **Balanced**, **Locked down** and
   **Audit** — ask for exactly that combination, so on a rootless daemon they
-  fail at launch. They fail rather than running unrouted, but the message is the
-  operating system's and does not name the cause;
+  fail at launch, now with a message that names the cause;
 - the profile that works there today is **Open network** (`mode: open`), and
   `mode: none` works too;
 - an enforced allowlist on a rootless daemon needs `engine: iron-proxy`, whose
@@ -293,12 +301,18 @@ refusal is enforced in the save, so do not try to work around it. Build the
 shipped images from that page, or by hand as `sandbox/images/README.md`
 describes. The base image **does** build and real containers have been run from
 it (that is what the mount set, the resource fences and the network modes were
-measured in). What is still unproven is the layer above: **no harness CLI has
-ever been started inside a container**, so building an agent image successfully
-does not yet mean a run in it will work. `sandbox/images/README.md` is the file
-that tracks the per-image state and what is unverified about each; believe it
-over any summary, and expect the first real sandboxed run to be the thing that
-finds the remaining mistakes.
+measured in). The layer above is proven for **exactly one** coding agent:
+**opencode has done a whole run in its image** — work committed, reported and
+merged into `origin/main`, on 2026-09-05, under a rootless daemon with
+`network.mode: open`. **claude, cursor and hermes have never had their CLI
+started in a container**, so building one of those images successfully does not
+yet mean a run in it will work. `sandbox/images/README.md` is the file that
+tracks the per-image state and what is unverified about each; believe it over
+any summary, and expect the first real sandboxed run of each remaining harness
+to be the thing that finds the mistakes in its layer — the first opencode one
+found five, all of which the test suite had reported green, because a `docker`
+shim cannot say whether an account exists inside an image or whether a mount
+point came out a socket.
 
 **Verify a policy before a real run depends on it.** The whole container command
 line is produced by one pure function and can be printed without a runtime:
@@ -619,7 +633,8 @@ If your task is to change Freilauf rather than just run it:
     every row of "What has to be true" checked, Settings → Sandbox switched
     on, images built, a policy dry-run verified, and docs/sandbox.md's limits
     passed on — including that on a rootless daemon three of the four shipped
-    profiles cannot start a run (built-in proxy engine)
+    profiles cannot start a run (built-in proxy engine), and that only the
+    opencode image has ever carried a real run
 [ ] at least one repo added
 [ ] one small single run started and watched end to end
 [ ] no ports, addresses, hostnames or keys ended up in a commit

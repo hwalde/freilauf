@@ -8484,7 +8484,7 @@ process.stdout.write(JSON.stringify(out))
       // Anything that already names a scheme is left exactly as it stands:
       // refusing one this module has not heard of would be this module deciding
       // what the CLI supports.
-      for (const v of ['unix:///x.sock', 'tcp://10.0.0.1:2375', 'ssh://host']) {
+      for (const v of ['unix:///x.sock', 'tcp://203.0.113.5:2375', 'ssh://host']) {
         process.env.FREILAUF_SANDBOX_DOCKER_HOST = v
         gleich(rt.runtimeEndpoint('docker').endpoint, v, `${v} is passed through`)
       }

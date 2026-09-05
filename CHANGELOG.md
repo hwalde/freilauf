@@ -20,6 +20,32 @@ a day on which nothing was released.
 
 ### Added
 
+- **A coding agent has now done a whole run inside a container, and its work
+  reached `main`.** One harness, one machine, and worth naming exactly:
+  **opencode 1.18.29** in `freilauf/agent-opencode:1.18.29`, under **rootless
+  Docker 29.8.0**, with `network.mode: open` — because the enforced allowlist
+  needs an egress proxy a rootless daemon cannot reach (see the entry below).
+  The second attempt reported `done` and had its branch merged into
+  `origin/main` about a minute after it started, with nobody helping it:
+  `started → tmux_started → agent_working → finish_started → finish_clean →
+  merged`. Confirmed along the way with the container running: the tmux pane
+  really is the container's terminal (capture, typed keys and a pasted line all
+  arrive), a container that exits hands its exit status to `pane-died`, the
+  finish gate and the integrator read the run's working copy through the box,
+  ending the run leaves no container, network or proxy behind, and the sessions
+  page reports the container's own memory (786 MB where the pane's process tree
+  would have said about ten). **claude, cursor and hermes have still never been
+  started in a container**, and neither has any run under an enforced
+  allowlist; what a first run of each finds is what it finds.
+- **A sandboxed run no longer has to be told which image to start from.** Where
+  neither the repository nor the profile names one, the run uses the image the
+  coding agent's own plugin declares — the same name the Settings page builds,
+  so the two cannot drift. `image.pull` finally does something: a missing image
+  is fetched where the profile allows it (`if-missing`, `always`), and one that
+  is still missing afterwards is a **refusal that names the image**, before the
+  clone, the home and the network are created. It used to be a `docker run`
+  that failed inside the tmux pane with the daemon's own wording and nothing on
+  the run's record at all.
 - **A run's agent can work inside a container.** Optional, **off by default**,
   and an installation that never switches it on behaves exactly as it did.
   Turn it on under **Settings → Sandbox**, where the hub says what container
@@ -243,8 +269,71 @@ a day on which nothing was released.
   under its status word until the new session stands.
 - The `tmux_gone` incident says that the runs are being resumed.
 
+### Removed
+
+- **The sandbox profile's `user` field is gone.** It was a policy word — "run
+  as the hub's identity" — and never a login name, and the container's identity
+  has always been decided from the daemon's posture instead (the hub's uid on a
+  rootful daemon, nothing at all on a rootless one). But a field on a document
+  is a field somebody reads, and one did: it was handed into `docker exec -u`,
+  where `hub` is an account no image has (see the entry below). There is now
+  nothing here to set, so the two halves cannot come to disagree again. A
+  profile stored with the field keeps working — nothing reads it any more — and
+  a new one is refused in the overrides form as an unknown key.
+
 ### Fixed
 
+- **The hub really could not read a sandboxed run's working copy, for ever, on
+  a run that looked perfectly healthy.** Every git call the hub makes inside the
+  box — the finish gate's dirt check first of all — ran as a user that exists on
+  no image, so it failed every time; the gate answered *"the working copy could
+  not be read"* every few seconds and the run stayed `running` with its agent
+  idle in its TUI and nothing else wrong with it. The identity is answered by one
+  function now, for the run's own container and for every command the hub runs
+  in it, as a numeric uid that needs no account to exist.
+- **The hub's report socket was never actually mounted.** The mount named the
+  path *inside* the container as its source on the host, so Docker created a
+  **directory** there and no socket existed for `fl-report` to talk to: every
+  report in a sandboxed run silently degraded to the `inbox.jsonl` fallback, and
+  the per-run token the socket exists for had never once been used. The two
+  paths no longer share a name; where the hub has no socket listening, nothing
+  is mounted and the run records `hub_socket_missing` rather than starting with
+  a directory that looks like a channel.
+- **The report fallback works inside the container too.** `inbox.jsonl` is
+  written to the configured runs directory (see Security below) — but that
+  setting was not passed into the container, so inside the box it fell back to
+  `$HOME/agents/runs`, which is the run's own seeded home and a path the hub
+  never reads. Measured on the first real sandboxed run: the agent did the work,
+  committed it, reported, was told the report was safe in the inbox, and nobody
+  ever picked it up. Both channels dead at once.
+- **A sandboxed container has a name and labels again.** The document the launch
+  is built from named the run under one key and the launcher read another, so
+  every container was started as `--name fl- --label freilauf.run=` — two runs
+  then collided on one name, stopping a run addressed nothing, the pass that
+  cleans up orphaned containers matched nothing, and the sessions page could not
+  ask the runtime for that container's memory. A document that names no run is
+  now refused rather than started nameless.
+- **`docker` in the run's own tmux pane talks to the same daemon as the hub.**
+  The pane is not the hub's process and inherits none of what the hub resolved,
+  so with no `DOCKER_HOST` it fell back to the rootful socket — which on a
+  rootless installation is absent or unreadable. The pane died half a second
+  after the start with a permission error, and that one line was the whole run
+  log. The launcher now exports the endpoint the hub resolved, and
+  `sandbox/wrap.sh --print` prints it in front of the command line so the copy
+  really is reproducible.
+- **A finished sandboxed run's clone is cleaned up again.** Retention checks a
+  worktree for uncommitted work before removing it — and by then the run's
+  container is always gone, so that check was refused and read as "dirty".
+  Every sandboxed run left a full clone behind for ever, under an
+  `anomaly:worktree_dirty` whose list of uncommitted files was empty. The check
+  now falls back to the same neutralised host git the operator's own rescue
+  buttons use, and where nobody could look at all the record says `unreadable`
+  instead of claiming there is uncommitted work.
+- **A merge check that runs in the sandbox can execute what it unpacks into
+  `/tmp`.** Docker mounts a `--tmpfs` `noexec` by default and adds the options
+  you name to that rather than replacing them (measured), so a toolchain that
+  writes a helper into `/tmp` and runs it failed the check while the run that
+  produced the code succeeded — a red check saying nothing about the work.
 - **A live policy change says which half of it is in force.** Changing a
   sandboxed run's policy without restarting it has two halves — the network
   rules go to the egress proxy, memory/CPU/process limits go to the container

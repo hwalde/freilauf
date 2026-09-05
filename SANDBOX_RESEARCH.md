@@ -13,6 +13,15 @@
 > session, a `sandbox.resume` flag, the human `resumeCommand()` as if it were
 > executable — it now refers to those; the sandbox adds nothing to how a run comes
 > back, only what has to be standing around it when it does (§7.11, §7.12.4).
+>
+> **The status line is the state this was WRITTEN in, and it is no longer the
+> state of the hub.** The design is built and shipped — the operator-facing
+> reference is [docs/sandbox.md](docs/sandbox.md) — and on 2026-09-05 a real
+> coding agent (opencode) did a whole run inside a container and had its work
+> merged (§11b.8). This document stays a design study on purpose: where the
+> implementation departed from it, the departure is written into the section it
+> belongs to, with what was measured, rather than the section being rewritten as
+> if it had always said so.
 
 ## 0. The short version
 
@@ -804,7 +813,7 @@ designer and the events.
     "digest": null,                    // resolved at first use, then pinned and recorded in the run's events
     "pull": "if-missing"               // if-missing | always | never
   },
-  "user": "hub",                       // hub = the hub's own uid:gid (rootful daemon) or root (rootless daemon) — see §7.7
+  // "user": "hub"  — REMOVED from the built profile, see the note under this block and §7.7
   "network": {
     "mode": "allowlist",               // open | none | allowlist
     "engine": "iron-proxy",            // iron-proxy | builtin (CONNECT proxy, no TLS, no injection)
@@ -848,6 +857,29 @@ designer and the events.
 
 What is **not** in the profile because it is not a sandbox concern: the prompt,
 the branch rule, the duration, the model — they stay in the run definition.
+
+**`user` is not in it either, and that is a correction rather than an omission**
+[measured 2026-09-05, in the first real sandboxed run]. The design's reasoning
+stands: the identity depends on the daemon's posture, which is §7.7's table, and
+`"hub"` was the *policy word* for "whichever identity that table gives". But a
+field on a profile document is a field somebody reads, and one did — it was
+handed straight into `docker exec -u`, where `hub` is an account that exists on
+none of the images this hub starts:
+
+```
+$ docker exec -u hub fl-<id> true
+Error response from daemon: unable to find user hub: no matching entries in passwd file
+```
+
+Every git call the hub makes inside the box therefore failed, the dirt check
+answered *unknown*, and the finish gate wrote `finish_error` every few seconds
+for ever on a run whose status was `running`, whose session was alive and whose
+agent was idle in its TUI. **The implementation** therefore has no such field:
+`containerIdentity()` (§7.7) is asked by the launch and by every exec, it answers
+in **numbers** rather than names, and there is nothing here for an operator to
+set that could make the two disagree again. A profile stored with the key keeps
+working — nothing reads it — and `validateSandboxOverrides()` refuses a new one
+as an unknown key.
 
 ### 7.3 Layering: hub → repo → agent/run, and who may loosen what
 
@@ -1184,6 +1216,24 @@ uid unless `safe.directory` says so. The rule is one line per daemon type:
 | rootful Docker (`docker` group) | `--user <hub uid>:<hub gid>` with a passwd entry (image built with `--build-arg UID`, or `fixuid`/entrypoint), `HOME` set explicitly | files stay owned by the hub user; `bypassPermissions` needs non-root |
 | rootless Docker | container **root** (uid 0), which *is* the hub user on the host | Docker's documented mapping; a non-root container user would write host files as `subuid + n − 1` |
 | Podman rootless | `--userns=keep-id` (the hub uid maps to itself) | Podman's documented answer to exactly this |
+
+**There are two moments this table has to be applied, not one, and they must be
+one function** [measured 2026-09-05]. `docker run` decides who the *agent* is;
+`docker exec` decides who the *hub* is whenever it runs git in the box — the
+finish gate, the dirt check, a health probe. They were decided separately and
+came out different: the run wrote no `--user` at all under a rootless daemon
+(right), while the exec passed the profile's `user` word into `-u` (see §7.2 for
+what that cost). **The implementation** answers both from one place —
+`containerIdentity(runtime, identity)` in `server/sandbox/runtime.mjs`, pure and
+unit-tested — which reads the table as: rootful → `--user <uid>:<gid>` on the run
+and the same pair on the exec; rootless → **nothing on either side**; podman →
+`--userns=keep-id` on the run and nothing on the exec, because keep-id has
+already mapped it and both would fight. The values are always **numeric**, so an
+exec can never depend on a `passwd` entry existing. `hubIdentity(info)` is the
+half that turns discovery's answer about the daemon into `{uid, gid}`; the run
+freezes it into its sandbox document, and the exec asks it live, because the
+daemon's posture is a property of the machine and not of a spec written before a
+migration.
 
 `userns-remap` on a rootful daemon is **not** used: bind-mounted files appear as
 `nobody` and Docker exposes no per-container id-mapped mount (moby #52061 closed
@@ -2592,15 +2642,43 @@ this machine cannot be asked.
 - **§11.2 (OAuth token copies).** Unchanged and deliberately so: the experiment
   needs a throwaway Anthropic account, and the design is arranged never to be
   exposed to the answer (§11a.7).
-- **And, above all, a real coding agent inside a container.** Not one harness CLI
-  has been run in one. So `docker run -it` as a tmux pane command under a live
-  TUI, the `--detach-keys` question §11a.5 could only mark [documented], the hub
-  socket mounted into the container and `fl-report` writing back through it, the
-  seeded home found by each CLI at its container path, the resume forms from that
-  home (§11.4), and cursor's transcript slug inside it (§11.8) are all exactly as
-  open as they were yesterday. Every measurement in this section is about the
-  *box*; none of them is about the agent in it, and the box being right is the
-  cheaper half.
+- **A real coding agent inside a container — answered for one harness, later the
+  same day.** This entry used to read "not one harness CLI has been run in one".
+  **opencode 1.18.29 has now done a whole run** in `freilauf/agent-opencode:1.18.29`
+  on this daemon, `network.mode: open`, against a sandbox hub of its own: the
+  second attempt reported `done` and had its branch merged into `origin/main`
+  about a minute after it started, unassisted (`started → tmux_started →
+  agent_working → finish_started → finish_clean → merged`). Measured with the
+  container up: the tmux pane really carries the container's TTY (`capture-pane`,
+  `send-keys -l`, a bracketed paste arriving unsubmitted), `pane-died` carries
+  the container's own exit status (42 and 125), the finish gate and the
+  integrator read the working copy through the box and collect its tip, ending
+  the run leaves no container, network or proxy, and `docker stats` gives the
+  sessions page a real number (786 MB against the ~10 MB the pane's process tree
+  would have reported — §11a.5's twentyfold gap, confirmed under a live agent).
+
+  **Still open, and not narrowed by that run:** claude, cursor and hermes, none
+  of which has ever had its CLI started in a container — so the seeded home
+  found at its container path, the resume forms out of that home (§11.4),
+  cursor's transcript slug (§11.8) and claude-as-container-root under a rootless
+  daemon (§11.2's `IS_SANDBOX` reading) are exactly as open as they were. So is
+  `--detach-keys` under a live TUI, which §11a.5 could only mark [documented],
+  and so is the hub socket of §7.6: the run above reported through the
+  `inbox.jsonl` fallback, because the socket was mounted as a **directory** until
+  that run exposed it. And no run of any harness has yet gone through an enforced
+  allowlist, which on this daemon cannot be had at all (§11b.5).
+
+  **What the run cost, and the rule it leaves behind.** Five faults, all fatal,
+  all of them green in the whole test suite beforehand: the exec identity
+  (§7.2/§7.7), the socket mounted as a directory, the report fallback writing to
+  `<run home>/agents/runs` because the runs-directory seam was not passed into
+  the container, containers started as `--name fl- --label freilauf.run=` because
+  the document and its reader named the run differently, and the pane's `docker`
+  falling back to the rootful socket with no `DOCKER_HOST`. Four of the five look
+  like a perfectly healthy run from every page the hub has. **A `docker` shim
+  cannot answer whether an account exists inside an image or whether a mount
+  point came out a socket** — so for this layer a green suite is evidence about
+  the hub's own logic and about nothing else.
 
 ---
 

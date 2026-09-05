@@ -2388,6 +2388,35 @@ the suite calls `integrateTick(nowMs)` itself. The last test in the group turns
 `merge_mode` back to `off` — everything before it is the proof that without the
 setting nothing runs differently.
 
+**And the suite owns the container passes for the identical reason**
+(`FREILAUF_SANDBOX_REAPER_OFF=1`, `sandboxPassesOff()` in watcher.mjs). Every
+sandbox group in `test/e2e.mjs` reaps by hand — it calls
+`reconcileContainers(hubId)` directly — while the hub's own 30-second tick was
+reaping the same shim state four or five times underneath it. The call log then
+carried each `stop`/`rm`/`network-rm` twice and the set of failing checks moved
+from run to run, which is a suite that has stopped saying anything about the
+code. The seam gates exactly the three passes that TALK TO THE DAEMON —
+`enforceMaxRuntime()`, `reconcileContainers()`, `restoreSandboxProxies()` — and
+leaves the rest of `tick()` alone, the same shape the integrator fence has.
+
+**But the shim is where the suite's evidence runs out, and that has now been
+paid for.** The first real sandboxed run (opencode in a container, 2026-09-05 —
+[docs/sandbox.md](docs/sandbox.md) has the account) found five faults, and every
+one of them was green in this suite beforehand. Two of them say why in one
+sentence: **a stub cannot answer whether an account exists inside an image, or
+whether a mount point came out a socket.** `docker exec -u hub` is a perfectly
+well-formed command line and the shim answered it happily; on a real daemon it
+is `unable to find user hub`, so every git call the hub made inside the box
+failed and the finish gate looped for ever on a run that looked healthy. A
+`-v <path>:<path>` for a host path that does not exist is likewise a
+well-formed command line; Docker answers it by creating a **directory**, so the
+report socket was never a socket and every report degraded to the inbox. The
+rule to carry: for the container layer a green suite is evidence about the
+**hub's own logic** and about nothing else — the argument shape, the order of
+the steps, the refusals. Anything that depends on what a daemon or an image
+makes of that command line has to be run once against a real one, and until it
+has been, the documents say so per harness.
+
 **Why there is a browser suite.** `public/hub.js` was 746 lines with not one
 test, because no browser ran in the suite: everything else stops at the HTML the
 server sends. And the ways that file breaks are all **silent** — a dead listener
@@ -2672,14 +2701,21 @@ rootless daemon that gateway does not exist in the host's namespace**
 network (`--disable-host-loopback`), and `host-gateway` resolves to a stopped
 rootful daemon's leftover bridge — three independent reasons the built-in engine
 cannot serve an allowlist there, which is the posture the project recommends and
-the one three of the four shipped profiles are written for. **Nothing in the hub
-detects this combination today**: the launch fails without naming the cause,
-there is no warning on the settings page and no refusal in the profile editor.
-The containerised topology (proxy on the internal network with a second leg on
-`bridge`) was measured and works, and is what `engine: 'iron-proxy'` already
-does — an engine with no binary and no image here. Whoever closes this gap
-should close the diagnosis with it: a failure whose cause is in a research
-document and not in the message is a failure the operator pays for twice.
+the one three of the four shipped profiles are written for. **One predicate says
+so, and both the launch and the form ask it** — `engineUsable(engine, info)`, so
+an operator who was told the combination is impossible cannot then be told
+something else by the launch: `ensureProxy()` refuses before starting anything,
+the fallback to the built-in engine is asked the same question (falling back
+there would be a run with no egress at all, which looks healthy until the first
+request times out), and Settings → Sandbox prints the refusal next to the engine
+picker. `rootless: null` — a daemon that did not say — is **not** a refusal; the
+launch then fails on the bind as before, which is worse than a diagnosis and
+better than refusing a run over a question nobody answered. What is still not
+covered is the **profile editor**, which does not warn while the combination is
+being written down. The containerised topology (proxy on the internal network
+with a second leg on `bridge`) was measured and works, and is what
+`engine: 'iron-proxy'` already does — an engine with no binary and no image
+here.
 
 **The built-in proxy dies with the hub, so a restart must give it back.**
 `restoreProxies()` in the watcher pass rebinds a running sandboxed run's
@@ -2743,6 +2779,23 @@ an empty limit must produce **no flag at all**, because `--memory 0` is a refusa
 and `--cpus 0` is a container that cannot run; and a sandboxed session's memory
 is asked of the **runtime**, never summed from the pane's process tree, which
 under-reported a workload twentyfold (measured, 10.4 MB for 210.3 MB).
+
+**And three the first real run wrote, each of which had passed every test.**
+*Who a container runs as is one function, never a profile field*
+(`containerIdentity()` in runtime.mjs): the run's `--user` and every `docker
+exec -u` the hub makes come out of it, in **numbers** — the spec's old `user:
+'hub'` was a policy word, it was handed into an exec, and `hub` is an account no
+image has, so every git call inside the box failed and the finish gate looped
+for ever on a run that looked healthy. *A path on the host and a path inside the
+container may not share a field name*: `hubSocketSource` is the socket to mount,
+`HUB_SOCKET_TARGET` is where it appears, and while they were one name holding
+the container path Docker made a **directory** of a mount source that does not
+exist — a channel that exists and carries nothing, which is the failure shape
+this whole file is written against. *One name for the run in the document and in
+its reader*: `runId`/`hubId` on both sides now, and `buildRunArgv()` throws
+rather than emitting `--name fl- --label freilauf.run=`, because a nameless
+container collides with the next one, cannot be stopped by name and is invisible
+to the reaper's label filter.
 
 ## tmux sessions: the machine, not the bookkeeping
 
