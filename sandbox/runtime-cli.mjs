@@ -15,6 +15,19 @@
 // Output: one argument per line-less record, NUL-separated, the binary first.
 // NUL because an argument may contain anything at all, a newline included (a
 // `--settings` JSON does).
+//
+// `--print-env` prints, in the same shape, the environment the runtime CLI needs
+// to reach the daemon it is meant to reach. It exists because the container
+// client does NOT run in the hub's process: it runs in a tmux pane, whose
+// environment tmux composed, and `docker` with no `DOCKER_HOST` falls back to
+// `/var/run/docker.sock` — the rootful socket, which on a rootless installation
+// is either absent or unreadable. Measured 2026-09-05 on the first real
+// sandboxed run: the pane died half a second after the start with `permission
+// denied while trying to connect to the docker API at
+// unix:///var/run/docker.sock`, exit status 1, and the run's whole log was that
+// one line. The hub itself never had the problem, because `runtimeEnv()` in
+// server/sandbox/runtime.mjs hands its own calls the endpoint it resolved — the
+// pane was simply the one caller that never went through it.
 
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -35,6 +48,8 @@ function usage () {
                      An unset name is skipped, never an error — that is what lets
                      the launcher pass FL_PROMPT before it exists.
   --term VALUE       the terminal type; default \$TERM of this process.
+  --print-env        print the runtime environment (KEY=VALUE, NUL-separated)
+                     instead of the command line. No command is needed for it.
 `)
 }
 
@@ -44,10 +59,12 @@ const env = {}
 const inherit = []
 let term = null
 let cmd = null
+let printEnv = false
 
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i]
   if (a === '--') { cmd = argv.slice(i + 1); break }
+  else if (a === '--print-env') { printEnv = true }
   else if (a === '--env') { const v = argv[++i]; if (v === undefined) die('--env needs KEY=VALUE'); const eq = v.indexOf('='); if (eq < 1) die(`--env needs KEY=VALUE, got: ${v}`); env[v.slice(0, eq)] = v.slice(eq + 1) }
   else if (a === '--env-inherit') { const v = argv[++i]; if (!v) die('--env-inherit needs a name'); inherit.push(v) }
   else if (a === '--term') { term = argv[++i] ?? null }
@@ -58,7 +75,7 @@ for (let i = 0; i < argv.length; i++) {
 }
 
 if (!specPath) { usage(); die('no sandbox.json given') }
-if (!cmd || cmd.length === 0) die('no command given (everything after -- is the command)')
+if (!printEnv && (!cmd || cmd.length === 0)) die('no command given (everything after -- is the command)')
 
 // An unset name is skipped rather than exported as the empty string: an empty
 // FL_PROMPT inside the container would be a prompt the agent answers with
