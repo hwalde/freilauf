@@ -1603,9 +1603,15 @@
   "sandbox.launch.network_failed": "The run's private network {network} could not be created: {reason}",
   "sandbox.launch.no_ca": "This profile terminates TLS, but no CA certificate is configured. Set the certificate directory under Settings → Sandbox and put ca.crt in it.",
   "sandbox.launch.proxy_gone": "This run's egress proxy is no longer running, so the new policy could not be put in force. Restart the run to apply it.",
+  "sandbox.launch.proxy_reload_refused": "The run's egress proxy refused the new network rules, so they are not in force: {reason}",
+  "sandbox.launch.limits_failed": "The new resource limits could not be applied to this run's container, so they are not in force: {reason}",
+  "sandbox.launch.limits_no_container": "This run has no container the new resource limits could be applied to, so they are recorded but not in force. Restart the run to apply them.",
+  "sandbox.launch.policy_partial": "Only part of this change is in force — the rest was recorded and will apply when the run is restarted:",
+  "sandbox.launch.spec_write_refused": "The run's sandbox.json could not be written — there is a symbolic link at {path}, and Freilauf does not write through one.",
   "sandbox.launch.bypass_resume_failed": "The sandbox is off for this run and its container is gone, but the agent could not be relaunched. Retry the run.",
   "sandbox.notify.bypassed": "{title}: the sandbox was switched off for this run by {by} — {reason}",
   "sandbox.notify.bypassed_no_reason": "no reason given",
+  "sandbox.proxy.config_symlink": "there is a symbolic link at {path} where the run's proxy configuration belongs, and Freilauf does not write through one",
   "sandbox.proxy.no_image": "no iron-proxy image is configured (FREILAUF_SANDBOX_PROXY_IMAGE)",
   "sandbox.runtime.err_mount_mode": "The mount {target} asks for the mode “{mode}”, which is not one this container runtime knows (ro or rw)"
 }

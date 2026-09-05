@@ -40,7 +40,7 @@
 // fails with a READABLE reason and the caller falls back to the built-in engine.
 // It never throws something the operator would have to read a stack trace to
 // understand, and it never half-starts.
-import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs'
+import { createWriteStream, mkdirSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { t } from '../i18n.mjs'
@@ -48,6 +48,7 @@ import { env } from '../env.mjs'
 import { sh } from '../util.mjs'
 import { normalizeSpec } from './spec.mjs'
 import { proxyPolicy, auditLine } from './proxy.mjs'
+import { writeFileNoSymlink } from './exec.mjs'
 
 /** The listener the agent container's HTTPS_PROXY points at, inside the proxy container. */
 export const TUNNEL_PORT = 8080
@@ -184,7 +185,15 @@ export async function startIronProxy(run, spec, ctx = {}) {
     try {
       mkdirSync(ctx.runDir, { recursive: true })
       configPath = join(ctx.runDir, 'proxy.yaml')
-      writeFileSync(configPath, ironProxyConfig(spec, ctx), { mode: 0o600 })
+      // NOT `writeFileSync`: `~/agents/runs/<id>/` is mounted read-write into
+      // the container at the agent's own uid, and `'w'` follows a symlink — a
+      // link left at this name makes the hub write the run's proxy policy
+      // through it, as the hub user, on the next launch or reload.
+      if (!writeFileNoSymlink(configPath, ironProxyConfig(spec, ctx), { mode: 0o600 })) {
+        return failed(runId, t('sandbox.proxy.engine_missing', {
+          reason: t('sandbox.proxy.config_symlink', { path: configPath }),
+        }))
+      }
     } catch (err) {
       return failed(runId, t('sandbox.proxy.engine_missing', { reason: err?.message || String(err) }))
     }
@@ -384,9 +393,13 @@ export async function reloadIronProxy(handle, spec) {
 function writeConfig(handle, spec) {
   if (!handle.configPath) return { ok: true }
   try {
-    writeFileSync(handle.configPath,
+    // Symlink-refusing, like the writer at launch and for the same reason: this
+    // path is rewritten on EVERY policy reload, which is the moment an agent
+    // that has replaced the file with a link is waiting for.
+    const ok = writeFileNoSymlink(handle.configPath,
       ironProxyConfig(spec, { ...(handle.launchCtx ?? {}), secretsMode: handle.secretsMode, secrets: handle.secrets ?? [] }),
       { mode: 0o600 })
+    if (!ok) return { ok: false, reason: t('sandbox.proxy.config_symlink', { path: handle.configPath }) }
     return { ok: true }
   } catch (err) {
     return { ok: false, reason: err?.message || String(err) }

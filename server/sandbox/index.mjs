@@ -32,7 +32,7 @@
 // graph down with it. The same rule the harness plugins follow (AGENTS.md,
 // "Pitfalls": a plugin file that needs something from the hub's own modules
 // imports it inside the function that uses it).
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
@@ -548,7 +548,7 @@ export async function prepareSandbox(run, repo, opts = {}) {
       launchOverrides: await harnessLaunchOverrides(run, spec),
       proxyUrl: null,
     }
-    writeSpecFile(runId, spec, ctx)
+    await writeSpecFile(runId, spec, ctx)
 
     // A TLS-terminating proxy without a CA in the container is a run whose every
     // HTTPS call fails with a certificate error — so it is a refusal at launch
@@ -615,7 +615,7 @@ export async function prepareSandbox(run, repo, opts = {}) {
     //    now.
     startDockerEvents(runId, container, spec)
 
-    writeSpecFile(runId, spec, ctx)
+    await writeSpecFile(runId, spec, ctx)
     db.prepare('UPDATE runs SET sandbox_container=?, sandbox_home=? WHERE id=?').run(container, home, runId)
     if (seeded?.refused?.length) addEvent(runId, 'warn', { seed_home_refused: seeded.refused })
     if (proxy) {
@@ -685,10 +685,24 @@ async function harnessLaunchOverrides(run, spec) {
  * `sandbox/wrap.sh` from it. `ctx.cmd` and `ctx.term` are filled in by the
  * launcher, which knows the pane; everything already in `ctx.env` wins over
  * what it adds, which is the right precedence: the hub decided those.
+ *
+ * IT REFUSES A SYMLINK AT THE TARGET, and that is not belt and braces: this file
+ * lands in `~/agents/runs/<id>/`, which `buildRunArgv()` mounts READ-WRITE into
+ * the container at the agent's own uid, and it is rewritten on every resume and
+ * every reconfiguration. `writeFileSync`'s `'w'` follows a link, so an agent that
+ * replaces `sandbox.json` with one gets the hub to write through it as the HUB
+ * user on the next launch. `writeFileNoSymlink()` (exec.mjs) is the two-line
+ * guard `seedHomeFiles()` already kept; it answers false rather than throwing, so
+ * the refusal is turned into the launch failure it is — a run whose `sandbox.json`
+ * is somebody else's file must not start, because that file is what
+ * `fl-start --sandbox` reads AND the audit record of what was launched.
  */
-function writeSpecFile(runId, spec, ctx) {
+async function writeSpecFile(runId, spec, ctx) {
   const appDir = new URL('../..', import.meta.url).pathname.replace(/\/$/, '')
-  writeFileSync(specPath(runId), JSON.stringify({ version: 1, appDir, spec, ctx }, null, 2), { mode: 0o600 })
+  const exec = await need('exec')
+  const path = specPath(runId)
+  const ok = exec.writeFileNoSymlink(path, JSON.stringify({ version: 1, appDir, spec, ctx }, null, 2), { mode: 0o600 })
+  if (!ok) throw new Error(t('sandbox.launch.spec_write_refused', { path }))
 }
 
 /**
@@ -882,8 +896,15 @@ const proxies = new Map()
  * case that DOES fall back to the built-in CONNECT proxy: nothing was promised
  * there beyond "these hosts and no others", and the built-in engine keeps that
  * promise. The fallback is written down as a warning all the same.
+ *
+ * `allowFallback: false` switches that one case off, for the one caller that
+ * must not have it: reviving a container-engine proxy under a run that is
+ * ALREADY GOING (`restoreProxies()`). The fallback remakes the run's network to
+ * give the host an address on it — which cannot work while the agent's own
+ * container is attached to it, and would not help if it could, since that
+ * container's `HTTPS_PROXY` names the proxy container and not the host.
  */
-async function ensureProxy(run, spec, { runDir, network, allow, port = 0 }) {
+async function ensureProxy(run, spec, { runDir, network, allow, port = 0, allowFallback = true }) {
   const mode = spec.network?.mode ?? 'allowlist'
   if (mode === 'open' || mode === 'none') return null
   const existing = proxies.get(run.id)
@@ -941,7 +962,7 @@ async function ensureProxy(run, spec, { runDir, network, allow, port = 0 }) {
   if (!handle || handle.ok === false) {
     const reason = handle?.reason ?? t('sandbox.launch.proxy_unavailable', { mode })
     if (wantsInject) throw new Error(t('sandbox.launch.proxy_failed', { reason }))
-    if (engine === 'builtin') throw new Error(t('sandbox.launch.proxy_failed', { reason }))
+    if (engine === 'builtin' || !allowFallback) throw new Error(t('sandbox.launch.proxy_failed', { reason }))
     // The fallback engine needs a network the HOST has an address on, and the
     // one that was created for iron-proxy deliberately does not have one. No
     // container is on it yet at this point, so it is remade rather than the
@@ -1287,9 +1308,33 @@ export async function teardownSandbox(run, opts = {}) {
  *    and is left alone, never failed — the agent may well be between requests,
  *    and ending somebody's work over a listener is worse than the listener.
  *
- * An iron-proxy run needs nothing restarted (its proxy is a container the daemon
- * kept running); it only needs a handle again so a policy change can still reach
- * it, and that is what `startProxy` is NOT asked for here.
+ * AN ENGINE WHOSE PROXY IS A CONTAINER is the §8.19 case next door, and it is
+ * answered here rather than in the reaper — the reaper's business is a container
+ * that should be gone, and starting one means `ensureProxy()`, which lives in
+ * this file. A hub restart does NOT cost such a run its proxy: the daemon kept
+ * the container running and the agent goes on dialling it by name. What the
+ * restart costs is the HANDLE, and one thing on it cannot be recovered — the
+ * management API key is minted per launch (`randomBytes`, ironproxy.mjs) and
+ * lives only in that container's environment. So the two states are answered
+ * differently, and the difference is positive evidence as usual:
+ *
+ *  - **the proxy container is running** → left alone. Nothing is restarted
+ *    around a working proxy to recover a handle, and no handle is fabricated
+ *    for it either: one that cannot reach `/v1/reload` would let
+ *    `changePolicy()` believe it had delivered a policy it did not. The honest
+ *    answer there is the refusal that function now gives.
+ *  - **the daemon says the container is gone** (or exists and is not running) →
+ *    started again, because that IS a run with no egress at all: every request
+ *    the agent makes fails with a connection error while the hub reads
+ *    `running` throughout, which is the worst shape a fault can take.
+ *  - **the daemon did not answer** → nothing. `tmuxVerdict()`'s rule one layer
+ *    over: not knowing is a reason to wait, never a reason to act.
+ *
+ * The revive deliberately does NOT take `ensureProxy()`'s fallback to the
+ * built-in engine. That fallback REMAKES the run's network, and on a live run
+ * the agent's container is sitting on it — while `HTTPS_PROXY` names the proxy
+ * CONTAINER, which a listener on the host does not answer to. A fallback that
+ * is right at launch is destructive here.
  */
 export async function restoreProxies() {
   if (hubSandboxMode() === 'off') return { restored: [], skipped: [] }
@@ -1305,26 +1350,56 @@ export async function restoreProxies() {
       const spec = await runSpec(row)
       const mode = spec.network?.mode ?? 'allowlist'
       if (mode === 'open' || mode === 'none') { out.skipped.push(row.id); continue }
-      if ((spec.network?.engine ?? 'builtin') !== 'builtin') { out.skipped.push(row.id); continue }
-      const port = portOfRecordedProxy(row.id)
-      if (!port) { out.skipped.push(row.id); continue }
+      const engine = spec.network?.engine ?? 'builtin'
       const repo = db.prepare('SELECT * FROM repos WHERE id=?').get(row.repo_id) ?? null
+      let port = 0
+      if (engine === 'builtin') {
+        // The port the container is already dialling. A fresh ephemeral one
+        // would be a listener nothing talks to.
+        port = portOfRecordedProxy(row.id)
+        if (!port) { out.skipped.push(row.id); continue }
+      } else if (!(await containerProxyGone(row, spec))) {
+        // Running, or the daemon said nothing. Both mean "do not touch it".
+        out.skipped.push(row.id); continue
+      }
       const allow = await resolveAllowList(spec, repo, row)
       const handle = await ensureProxy(row, spec, {
         runDir: join(RUNS_DIR, String(row.id)), network: networkName(row.id), allow, port,
+        // See the block comment: the built-in fallback remakes the run's network,
+        // and this run's agent is on it.
+        allowFallback: engine === 'builtin',
       })
       if (handle) {
         addEvent(row.id, 'sandbox:proxy_restarted', {
-          engine: handle.engine ?? 'builtin', url: handle.url ?? null, allow, mode,
+          engine: handle.engine ?? engine, url: handle.url ?? null, allow, mode,
+          container: handle.container ?? null,
         })
         out.restored.push(row.id)
-      }
+      } else out.skipped.push(row.id)
     } catch (err) {
       addEvent(row.id, 'warn', { proxy_restart_failed: err?.message || String(err) })
       out.skipped.push(row.id)
     }
   }
   return out
+}
+
+/**
+ * Is this run's PROXY CONTAINER demonstrably not running? Only `true` counts as
+ * a reason to start one: an unanswered daemon and a container that is up both
+ * answer `false`, and a container that exists but has exited is removed first so
+ * the name is free (`docker run` would otherwise collide with the corpse).
+ */
+async function containerProxyGone(row, spec) {
+  const rt = await sibling('runtime')
+  if (!rt?.containerState || !rt?.proxyName) return false
+  const container = rt.proxyName(row.id)
+  const state = await rt.containerState(container, { runtime: spec.runtime })
+  const verdict = state?.verdict ?? (rt.runtimeVerdict ? rt.runtimeVerdict(state) : 'ok')
+  if (verdict !== 'ok') return false
+  if (state?.running) return false
+  if (state?.exists) await rt.removeContainer?.(container, { runtime: spec.runtime, force: true })
+  return true
 }
 
 /** Which runtime a run was started with — its own frozen spec, never the setting. */
@@ -1523,6 +1598,39 @@ function leafPaths(doc, prefix = '') {
  *    thrown away: `resumeRun()` closes the books on the old session, launches
  *    the harness's resume form in the new container, and the agent keeps its
  *    conversation.
+ *
+ * A LIVE CHANGE HAS TWO HALVES AND THEY ARE DELIVERED SEPARATELY — §7.12.3
+ * splits it that way and the answer has to say so. The network rules go to the
+ * proxy, `memory`/`cpus`/`pidsLimit` go to `docker update`, and a patch may
+ * carry one, the other or both. So each half is attempted on its own merits
+ * (a limits-only patch never asks after a proxy) and the ANSWER is derived
+ * from what really landed rather than from having reached the end of the
+ * function:
+ *
+ *   | asked for | delivered | answer |
+ *   |---|---|---|
+ *   | one half | that half | `ok: true` |
+ *   | one half | nothing | `ok: false`, that half's own reason |
+ *   | both | both | `ok: true` |
+ *   | both | one | `ok: false, partial: true`, and the reason names the half that did not land |
+ *
+ * The invariant is the one this function was rewritten for: **the hub never
+ * reports a change it did not make.** It used to be broken in both directions
+ * at once. A missing proxy handle — the state this hub is in after every
+ * restart — was reported as a success, so an operator clicked "Allow for this
+ * run", was told it had worked, and the agent kept hitting the same wall; the
+ * fix for that then refused the WHOLE call, so a patch that raised a memory
+ * limit lost its limits half to a proxy it never needed. `applied` was already
+ * the right shape for the honest answer, and it was written before it was
+ * read: `applied.limits = true` was set for a `docker update` that had
+ * answered `ok: false` (that function returns a verdict, it does not throw),
+ * which is the same lie one field over.
+ *
+ * `applied` is the truth per half, `partial` says the two disagree, and the
+ * event carries `enforced` so a run's own record says whether the policy it
+ * now names is the policy in force. The spec row is written either way and
+ * that is deliberate (see below): a change nothing could deliver TODAY is
+ * still what the next resume must come back with.
  */
 export async function changePolicy(run, patch, by = 'user') {
   const row = typeof run === 'string' ? db.prepare('SELECT * FROM runs WHERE id=?').get(run) : run
@@ -1567,27 +1675,35 @@ export async function changePolicy(run, patch, by = 'user') {
   // reboot) has to come back with the policy the operator just asked for, not
   // with the one they just replaced.
   db.prepare('UPDATE runs SET sandbox_spec=? WHERE id=?').run(JSON.stringify(after), row.id)
+
   const applied = { proxy: false, limits: false }
+  // One sentence per half that was asked for and did not land. It is what the
+  // caller renders, so it is a translated sentence and not a code — and there
+  // is one per half rather than one per call, because "the limits are in force
+  // and the network rules are not" is two facts and the operator has to act on
+  // the second one.
+  const unapplied = []
+
   if (kind.proxy) {
     let handle = proxies.get(row.id)
     const proxy = await sibling('proxy')
-    // NO HANDLE is the state this hub is in after every restart, and it used to
-    // be reported as a success: `applied.proxy` stayed false, no warning was
-    // written, and the operator was told "Allow for this run" had worked while
-    // the agent kept hitting the same wall. So the missing handle is answered
-    // by trying to bring the proxy back first (a restart is exactly what
-    // `restoreProxies()` exists for) and, where that cannot be done, by a
-    // refusal the caller can render — never by a quiet `ok: true`.
+    // NO HANDLE is the state this hub is in after every restart. So the missing
+    // handle is answered by trying to bring the proxy back first (a restart is
+    // exactly what `restoreProxies()` exists for) and, where that cannot be
+    // done, by a refusal the caller can render — never by a quiet `ok: true`.
     if (!handle) {
       try { await restoreProxies() } catch { /* fail-soft */ }
       handle = proxies.get(row.id)
     }
     if (!handle) {
       addEvent(row.id, 'warn', { proxy_reload_failed: 'no_proxy' })
-      addEvent(row.id, 'sandbox:policy_changed', { by, diff, applied: { proxy: false, limits: false }, live: true, enforced: false })
-      return { ok: false, live: true, applied, spec: after, error: t('sandbox.launch.proxy_gone') }
-    }
-    if (handle && proxy?.reloadProxy) {
+      unapplied.push(t('sandbox.launch.proxy_gone'))
+    } else if (!proxy?.reloadProxy) {
+      // A handle with nothing left to reload it: proxy.mjs is gone from under a
+      // running hub. Rare, and still a network change that did not happen.
+      addEvent(row.id, 'warn', { proxy_reload_failed: 'no_module' })
+      unapplied.push(t('sandbox.launch.module_missing', { module: 'proxy.mjs' }))
+    } else {
       // The answer is READ. `applied.proxy = true` used to be written whatever
       // came back, so a reload the engine refused — an iron-proxy whose
       // management listener the hub cannot reach is the case that really
@@ -1602,20 +1718,49 @@ export async function changePolicy(run, patch, by = 'user') {
       const allow = await resolveAllowList(after, repo, row)
       const r = await proxy.reloadProxy(handle, specForProxy(after, allow))
       applied.proxy = r?.ok === true
-      if (!applied.proxy) addEvent(row.id, 'warn', { proxy_reload_failed: r?.reason ?? 'unknown' })
+      if (!applied.proxy) {
+        addEvent(row.id, 'warn', { proxy_reload_failed: r?.reason ?? 'unknown' })
+        unapplied.push(t('sandbox.launch.proxy_reload_refused', { reason: r?.reason ?? 'unknown' }))
+      }
     }
   }
+
   if (kind.limits) {
     const rt = await sibling('runtime')
-    if (rt?.updateLimits && row.sandbox_container) {
+    // No runtime module and no container are the same fact from here: there is
+    // nothing for `docker update` to act on, so the new limits are recorded and
+    // not in force. Saying so is the whole rule; it used to be a silent skip.
+    if (!rt?.updateLimits || !row.sandbox_container) {
+      addEvent(row.id, 'warn', { docker_update: row.sandbox_container ? 'no_runtime' : 'no_container' })
+      unapplied.push(t('sandbox.launch.limits_no_container'))
+    } else {
       try {
-        await rt.updateLimits(row.sandbox_container, after.resources, { runtime: after.runtime })
-        applied.limits = true
-      } catch (err) { addEvent(row.id, 'warn', { docker_update: err.message }) }
+        // `updateLimits()` RETURNS a verdict rather than throwing — a daemon
+        // that did not answer, a container that is gone and a refused flag all
+        // come back as `ok: false`. Reading only the exception was the same
+        // defect the proxy half above carries the comment for.
+        const r = await rt.updateLimits(row.sandbox_container, after.resources, { runtime: after.runtime })
+        applied.limits = r?.ok === true
+        if (!applied.limits) {
+          const reason = r?.gone ? 'container gone' : (r?.reason || r?.verdict || 'unknown')
+          addEvent(row.id, 'warn', { docker_update: reason })
+          unapplied.push(t('sandbox.launch.limits_failed', { reason }))
+        }
+      } catch (err) {
+        addEvent(row.id, 'warn', { docker_update: err.message })
+        unapplied.push(t('sandbox.launch.limits_failed', { reason: err.message }))
+      }
     }
   }
-  addEvent(row.id, 'sandbox:policy_changed', { by, diff, applied, live: true })
-  return { ok: true, live: true, applied, spec: after }
+
+  const enforced = unapplied.length === 0
+  const partial = !enforced && (applied.proxy || applied.limits)
+  addEvent(row.id, 'sandbox:policy_changed', { by, diff, applied, live: true, enforced })
+  if (enforced) return { ok: true, live: true, applied, spec: after }
+  return {
+    ok: false, live: true, partial, applied, spec: after,
+    error: [partial ? t('sandbox.launch.policy_partial') : null, ...unapplied].filter(Boolean).join(' · '),
+  }
 }
 
 /**

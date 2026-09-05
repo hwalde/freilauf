@@ -1603,9 +1603,15 @@
   "sandbox.launch.network_failed": "无法创建本次运行的专用网络 {network}：{reason}",
   "sandbox.launch.no_ca": "该配置会终止 TLS，但未配置 CA 证书。请在“设置 → 沙箱”中设置证书目录，并将 ca.crt 放入其中。",
   "sandbox.launch.proxy_gone": "本次运行的出站代理已不再运行，新策略无法生效。请重启该运行以应用它。",
+  "sandbox.launch.proxy_reload_refused": "本次运行的出站代理拒绝了新的网络规则，因此它们尚未生效：{reason}",
+  "sandbox.launch.limits_failed": "新的资源限额无法应用到本次运行的容器上，因此尚未生效：{reason}",
+  "sandbox.launch.limits_no_container": "本次运行没有可应用新资源限额的容器，限额已记录但尚未生效。请重启该运行以应用它们。",
+  "sandbox.launch.policy_partial": "本次变更仅部分生效——其余部分已记录，将在该运行重启后生效：",
+  "sandbox.launch.spec_write_refused": "本次运行的 sandbox.json 无法写入——{path} 处存在一个符号链接，Freilauf 不会通过符号链接写入。",
   "sandbox.launch.bypass_resume_failed": "本次运行的沙箱已关闭且容器已移除，但智能体未能重新启动。请重试该运行。",
   "sandbox.notify.bypassed": "{title}：{by} 关闭了本次运行的沙箱 — {reason}",
   "sandbox.notify.bypassed_no_reason": "未说明原因",
+  "sandbox.proxy.config_symlink": "本次运行的代理配置应位于 {path}，但那里是一个符号链接，Freilauf 不会通过符号链接写入",
   "sandbox.proxy.no_image": "未配置 iron-proxy 镜像（FREILAUF_SANDBOX_PROXY_IMAGE）",
   "sandbox.runtime.err_mount_mode": "挂载 {target} 请求的模式“{mode}”不是该容器运行时认识的模式（ro 或 rw）"
 }

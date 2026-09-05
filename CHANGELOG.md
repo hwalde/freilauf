@@ -208,6 +208,23 @@ a day on which nothing was released.
   comes up empty in that mode, the page says why and names both ways back,
   once per page instead of leaving you guessing.
 
+- **The merge check can run inside the box too, and refuses rather than
+  quietly running on the host.** With **`merge_check_sandboxed`** ticked, a
+  sandboxed run's `repos.merge_check` runs in an ephemeral container of that
+  run's own image — the integration worktree mounted, no capabilities, the
+  run's own network and proxy settings — and where that container cannot be
+  had (no runtime, a missing image, a daemon that is positively not there) the
+  merge is **blocked** with *"nothing was merged, and it was NOT run on the
+  host"* rather than falling back. A run that is not itself boxed still runs
+  its check on the host and now says so on the run's record. A failing or
+  timing-out check is what it always was: a red check, not a refusal.
+- **Taking a planned run out of its sandbox is written down.** Switching a
+  `scheduled` or `deferred` run's sandbox off from its edit card records
+  `sandbox:bypassed` on the run, and the overview's status cell says
+  *bypassed* from then on — the same treatment the "Continue without the
+  sandbox" button gets, so no route out of a sandbox is silent. It is refused
+  outright where the hub mode is `required` or bypassing is switched off.
+
 ### Changed
 
 - Toasts stay visible while the terminal is in full screen.
@@ -228,6 +245,56 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A sandboxed run's allowlist really reaches its proxy.** The built-in
+  engine's listener bound to `127.0.0.1`, which inside a container is the
+  container itself — so every request through it failed with a connection error
+  while the hub read `running` throughout, and `network.mode: allowlist` had
+  never worked end to end with that engine. It binds to the run network's own
+  gateway now, and a network whose gateway it cannot learn is a **refused
+  launch**, never a fall back to loopback: a run that looks sandboxed and routes
+  nothing is the worst outcome available here. What that costs is stated rather
+  than hidden — the container can then also reach host services on that bridge,
+  which is why the proxy's own refusal to connect into loopback, RFC 1918,
+  CGNAT and link-local addresses is not optional. **On a rootless daemon this
+  engine cannot work at all** (the bridges are in another network namespace);
+  the launch fails without naming the cause, and
+  [docs/sandbox.md](docs/sandbox.md) now has the measurement and what to use
+  instead.
+- **A hub restart no longer strips a running sandboxed run of its egress.** The
+  built-in proxy lives in the hub process, so a deploy took it with it and left
+  the container talking to a dead port for the rest of its life. A watcher pass
+  now rebinds the listener on the same port with the same resolved allowlist and
+  records `sandbox:proxy_restarted` on the run; a proxy that cannot come back
+  leaves a warning on the run and never fails it. A run whose proxy is a
+  **container** is judged the same way and comes out differently: one the daemon
+  says is gone is started again, one that is still running is left alone, and
+  one the daemon will not answer about is left alone too. For a surviving
+  container proxy the hub has no handle and does not invent one, so a live
+  policy change on that run is now **refused with "the proxy is gone"** instead
+  of reporting a policy it never delivered.
+- **The hub's floor holds on every path that writes an override.** A path the
+  hub locked could be loosened through the **Reconfigure…** button on a running
+  run, through the repo form, through "Adopt these hosts", through the profile
+  editor and through a flow step — each of them judged an override document
+  against nothing, so only the agent and run forms ever enforced the rule the
+  whole layering rests on. All of them now resolve the layers above first and
+  refuse a loosening by name, and the sandbox facade checks it once more before
+  a policy is applied to a live container.
+- **A flow that would start a run with a loosening override is refused when it
+  is saved**, not when it fires at three in the morning: the "start single run"
+  step's sandbox overrides are validated in the designer against the same rule
+  and the same repo, and the step still refuses at run time as well.
+- **Claude's transcript is found again for runs whose path contains anything
+  but letters and digits.** The hub derived claude's project directory by
+  replacing only `/`, while claude replaces **every** non-alphanumeric
+  character — so for a worktree path with a dot, an underscore or a hyphen the
+  hub silently read no transcript at all: the run looked idle while it worked
+  (a false "no activity" flag) and API errors in that transcript were never
+  seen. This affects **every** claude run, sandboxed or not.
+- **A skipped check no longer counts as a pass.** A check that skipped part way
+  through was counted green in the test summary, which is exactly backwards for
+  a suite whose skips exist to say "this could not be verified here". The count
+  of skipped checks is now printed on a failing run too.
 - **A retried run is no longer killed by the hub seconds after it starts.**
   "Retry run" set the run back to `running` but left `started_at` on the first
   attempt — and that column is what the watcher's sweep for interrupted starts

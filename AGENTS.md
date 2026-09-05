@@ -2570,9 +2570,11 @@ Architecture, step registry contract and the integration seams:
 
 > **The depth is one document: [docs/sandbox.md](docs/sandbox.md)**, and the
 > measurements the whole thing rests on are
-> [SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md) **§11a** — which also says, per
-> claim, whether it was measured, read out of a binary, or not answered at all.
-> What follows is what the rest of the hub must not violate.
+> [SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md) **§11a** (before this machine had
+> a container runtime) and **§11b** (2026-09-05, against a live rootless
+> daemon) — which also say, per claim, whether it was measured, read out of a
+> binary, or not answered at all. What follows is what the rest of the hub must
+> not violate.
 
 A sandboxed run's agent runs inside a container; **tmux stays on the host** and
 the pane's process is the runtime's client, which is why `pipe-pane`,
@@ -2625,6 +2627,45 @@ do nothing and ask next pass, and three in a row raise the global
 because the runtime *could not be asked* carries `sandboxRetry`: it leaves
 `resume_pending` standing and does **not** count against `RESUME_MAX`, so a
 rootless daemon still coming up after a reboot cannot burn the cap.
+
+**The built-in proxy binds the run network's GATEWAY, never loopback — and on a
+rootless daemon it cannot bind anything at all.** Loopback inside a container is
+the container, so a listener on `127.0.0.1` is a run that looks sandboxed and
+routes nothing; `allowlist` had never worked end to end with this engine until
+`builtinBind()` started asking `networkGateway()`, and a network whose gateway
+it cannot learn is a **refusal**, not a fall back. What that buys is stated
+rather than hidden: the run's network is then created WITHOUT gateway isolation
+and the container can also reach host services on that bridge, which is why
+`denyUpstreamCidrs` is not optional. And measured 2026-09-05 (§11b.5): **under a
+rootless daemon that gateway does not exist in the host's namespace**
+(rootlesskit runs `--detach-netns`), a container cannot reach the host on any
+network (`--disable-host-loopback`), and `host-gateway` resolves to a stopped
+rootful daemon's leftover bridge — three independent reasons the built-in engine
+cannot serve an allowlist there, which is the posture the project recommends and
+the one three of the four shipped profiles are written for. **Nothing in the hub
+detects this combination today**: the launch fails without naming the cause,
+there is no warning on the settings page and no refusal in the profile editor.
+The containerised topology (proxy on the internal network with a second leg on
+`bridge`) was measured and works, and is what `engine: 'iron-proxy'` already
+does — an engine with no binary and no image here. Whoever closes this gap
+should close the diagnosis with it: a failure whose cause is in a research
+document and not in the message is a failure the operator pays for twice.
+
+**The built-in proxy dies with the hub, so a restart must give it back.**
+`restoreProxies()` in the watcher pass rebinds a running sandboxed run's
+listener on the **same port** (from its own `sandbox.json`) with the **same
+resolved allow list**, writing `sandbox:proxy_restarted`; a run whose proxy
+cannot come back gets a `warn` and is never failed, and the walk backs off when
+it restores nothing. A **container** proxy is judged on positive evidence like
+everything else here: gone → started again (that is a run with no egress at
+all), running → left alone, daemon silent → left alone. The revive deliberately
+does **not** take `ensureProxy()`'s fallback to the built-in engine, because
+that fallback remakes the run's network and the agent's container is sitting on
+it. For a surviving container proxy the hub holds **no handle** and does not
+fabricate one — a handle that could not reach `/v1/reload` would let
+`changePolicy()` believe it had delivered a policy it did not — so a live policy
+change there answers `proxy_gone`. Anything that later gives the hub a real
+handle to a surviving container proxy has to fix that answer in the same edit.
 
 **An `inject` profile fails loudly rather than degrading to `env`.**
 `secrets.mode: 'inject'` promises the container holds a placeholder; falling back
@@ -4004,3 +4045,35 @@ errors (`post_api_request` only fires after success).
   `~/.local/share/freilauf/harness-tags` the first time it launches one. These
   scripts read tmux, not the hub's database; that file is the only place on the
   machine that knows `fl-fa-` means `fakeagent`.
+- **Docker's `--tmpfs` options are ADDED to its defaults, not substituted for
+  them.** The default is `noexec,nodev`, so `--tmpfs /tmp:rw,size=2g` still
+  produces a `noexec` `/tmp` — and a binary run out of it fails with
+  *"Permission denied"* and exit **126**, which reads as a file mode rather than
+  as a mount option. `exec` has to be written out. Measured 2026-09-05, after a
+  comment in `tmpfsArgs()` had described the intention for weeks while the
+  command line carried the opposite; the run container is `rw,exec,nosuid` now.
+  **`mergeCheckArgv()` in `integrate.mjs` still emits `/tmp:rw,nosuid`**, so a
+  sandboxed merge check that execs out of `/tmp` fails where the run would not.
+- **`docker network inspect --format '{{.Gateway}}'` prints the literal string
+  `invalid IP` for an isolated network**, not an empty value: with
+  `gateway_mode_ipv4=isolated` Docker omits the `Gateway` key from the IPAM
+  config entirely, and a Go template over a missing key renders that. Anything
+  comparing against `''` reads a correctly isolated network as a misconfigured
+  one. Read the JSON, not a template. (The option itself exists on 29.8.0 and is
+  `--internal`-only — asking for it on an ordinary network is refused.)
+- **`aa-status --enabled` exits 0 as an ordinary user, with no output.** Which
+  means "the AppArmor module is loaded" and says **nothing** about whether
+  anything is confined — under a rootless daemon containers are unconfined and
+  `--security-opt apparmor=…` is accepted silently and does nothing. (`aa-status`
+  without the flag prints "You do not have enough privilege…" and exits 4, so
+  the cheap form is also the misleading one.) The hub therefore reads the
+  daemon's own `SecurityOptions`, and never `aa-status` — same family as
+  `--no-optional-locks` making an empty `git status` read as a clean worktree.
+- **Docker 29 no longer says `Cannot connect to the Docker daemon`.** It says
+  *"failed to connect to the docker API at …; check if the path is correct and
+  if the daemon is running"*, or, for a socket it may not open, *"permission
+  denied while trying to connect to the docker API at …"* — no substring of the
+  old pattern survives in either. A classifier keyed on a vendor's wording was
+  stale on the very first machine that had a daemon to test it against, which is
+  why `runtimeVerdict()` decides on the exit status and on whether the socket
+  exists and answers, and treats the message as something to print.

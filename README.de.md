@@ -85,9 +85,13 @@ das tut Freilauf, und es geht nur vorwärts.
   höhere festgezurrt hat. Blockiert sie etwas, das der Agent brauchte, bekommst
   du den Host genannt und einen Klick, um ihn für diesen Lauf oder dieses Repo
   freizugeben — ohne Neustart. Optional und **standardmäßig aus**; Docker ist
-  nur dann Voraussetzung, wenn du es willst
-  ([docs/sandbox.md](docs/sandbox.md) — dort steht ebenso ausführlich, was die
-  Sandbox *nicht* tut, wie das, was sie tut).
+  nur dann Voraussetzung, wenn du es willst. Eine Grenze gehört in die
+  Zusammenfassung und nicht nur ins Kleingedruckte: auf einem **rootless**
+  Daemon — der Aufstellung, die wir empfehlen — braucht die erzwungene
+  Allowlist einen Proxy, der selbst ein Container ist, und diese Engine ist nie
+  gegen das echte Binary gelaufen; eine rootless-Installation hat heute also
+  `open` oder `none` ([docs/sandbox.md](docs/sandbox.md) — dort steht ebenso
+  ausführlich, was die Sandbox *nicht* tut, wie das, was sie tut).
 - **Alles Herstellerspezifische ist ein Plugin.** Coding-Agenten,
   Modell-Provider und Benachrichtigungsdienste sind Plugins mit dokumentiertem
   Vertrag ([docs/plugins.md](docs/plugins.md)); ein Dritter kann ein Paket auf

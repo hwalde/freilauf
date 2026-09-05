@@ -17,9 +17,13 @@ This document is the operator's reference. The plugin side of it — the
 home, `launchOverrides`, `innerSandbox` — is in
 [docs/plugins.md](plugins.md), "The sandbox declaration". The design study
 behind all of it, including everything that was measured on a real machine
-before a line was written, is [SANDBOX_RESEARCH.md](../SANDBOX_RESEARCH.md);
-its **§11a** is the section to read if you want to know which of the claims
-below rest on a measurement and which on a reading.
+before a line was written, is [SANDBOX_RESEARCH.md](../SANDBOX_RESEARCH.md).
+Two of its sections say which of the claims below rest on a measurement and
+which on a reading: **§11a**, written before this machine had a container
+runtime, and **§11b**, written on 2026-09-05 against a live rootless daemon.
+§11b refutes two things §11a assumed, and the larger of them is in [what this
+sandbox does not
+do](#the-built-in-proxy-engine-does-not-work-under-a-rootless-daemon).
 
 **And read [What this sandbox does not do](#what-this-sandbox-does-not-do)
 before you rely on any of it.** A boundary whose limits are not written down is
@@ -76,14 +80,60 @@ worst case the sandbox is designed against anyway. Rootful Docker works and the
 hub uses it happily; it just makes the `docker` group part of your threat
 model.
 
-**What rootless costs on this kind of host** [measured on Ubuntu 24.04,
-systemd 255]: the user slice delegates `cpu memory pids` and **not** `cpuset`
-or `io`. So `--memory`, `--pids-limit` and `--cpus` are honoured out of the
-box, and CPU pinning and disk-IO limits are not — they need a
-`/etc/systemd/system/user@.service.d/delegate.conf` drop-in, which is a root
-step. Discovery reads the delegated controllers and the hub offers the limits
-that are actually available rather than a field that would fail at `docker
-run`.
+**Set `DOCKER_HOST` even though the hub does not need it.**
+`dockerd-rootless-setuptool.sh` exports nothing — it writes a docker *context*,
+which only the `docker` CLI reads, and only while `HOME` is set. Every other
+client (a Node, Python or Go library, a shell you debug in) falls back to
+`/var/run/docker.sock`, which on such a host still exists as a file and refuses
+with `EACCES` — so the wrong daemon looks like a broken one. The hub resolves
+`$XDG_RUNTIME_DIR/docker.sock` itself and checks that something answers there,
+so it is right either way; the line makes every other tool agree with it. It
+belongs in **the operator's own `~/.config/freilauf/env`** — Freilauf never
+writes to that file:
+
+```
+DOCKER_HOST=unix:///run/user/1000/docker.sock
+```
+
+with `1000` replaced by `id -u`.
+
+**What rootless costs on this kind of host.** Four things, all measured against
+the live daemon on 2026-09-05 (rootless Docker 29.8.0, Ubuntu 24.04,
+[SANDBOX_RESEARCH.md §11b](../SANDBOX_RESEARCH.md)):
+
+- **The limits that exist are `cpu`, `memory` and `pids`.** That is what the
+  user slice delegates; `cpuset` and every io limit are **not** delegated, so
+  `--cpuset-cpus` and disk-IO limits would be refused by the daemon — they need
+  a `/etc/systemd/system/user@.service.d/delegate.conf` drop-in, which is a root
+  step. Discovery reads the delegated controllers and the hub offers the limits
+  that are actually available rather than a field that would fail at `docker
+  run`. All three that are delegated were set and then pushed past: a 512 MB
+  allocation under `--memory 256m` was OOM-killed, a fork bomb under
+  `--pids-limit 64` stopped at the ceiling, and two busy loops under `--cpus
+  0.5` consumed exactly half a core.
+- **Container uid 0 *is* the operator.** Under a rootless daemon the container
+  runs as root and the files it writes come out owned by the hub user — which is
+  why no `--user` flag is passed there, and why git's `safe.directory` check
+  never fires in the mounted clone. The failure mode this avoids is worse than a
+  wrong owner: `--user 1000:1000` inside a rootless container maps to host
+  `100999`, which cannot write a single byte into a directory the hub created.
+  **An image whose default user is not root defeats this**, so the shipped
+  images run as root and `overlay.Dockerfile` is the place that has to keep
+  being checked when somebody supplies their own base.
+- **There is no AppArmor on containers at all.** Ubuntu 24.04 ships
+  `/etc/apparmor.d/rootlesskit` itself (`flags=(unconfined)` with a `userns,`
+  rule), which is what lets rootless Docker work under
+  `kernel.apparmor_restrict_unprivileged_userns = 1` — and it means the daemon
+  reports no `apparmor` security option and `--security-opt apparmor=…` is
+  **accepted silently and confines nothing**. The boundary here is the user
+  namespace, seccomp, `--cap-drop ALL` and `no-new-privileges`. Do not check
+  this with `aa-status`: as an ordinary user `aa-status --enabled` exits **0**
+  with no output, which means "the module is loaded" and says nothing about
+  containers. The hub reads the daemon's own `SecurityOptions` instead.
+- **The built-in proxy engine cannot work here.** This is the big one and it has
+  a section of its own: [The built-in proxy engine and a rootless
+  daemon](#the-built-in-proxy-engine-does-not-work-under-a-rootless-daemon).
+  Read it before you pick a profile.
 
 ### 2. Tell the hub
 
@@ -125,11 +175,24 @@ The same page carries the profile editor and one build button per shipped image.
 The images are in `sandbox/images/` — one base, one layer per built-in coding
 agent, and an overlay that puts an agent layer on top of a toolchain image you
 own. Build them from the Settings page, or by hand as
-[`sandbox/images/README.md`](../sandbox/images/README.md) describes. That file
-is also where the honest part lives: **they have never been built**, because
-the machine they were written on has no container runtime. Every install
-command in them was derived from a measured source and the confidence per layer
-is tabulated there — hermes is the one to build first.
+[`sandbox/images/README.md`](../sandbox/images/README.md) describes.
+
+**The base image builds and has been run.** `base.Dockerfile` produced
+`freilauf/agent-base:24.04` on 2026-09-05 and real containers were started from
+it — that is the image the mount set, the resource fences and the network modes
+were all measured in ([SANDBOX_RESEARCH.md
+§11b](../SANDBOX_RESEARCH.md)). The sentence that used to stand here — *"they
+have never been built, because the machine they were written on has no
+container runtime"* — was true when it was written and is not any more.
+
+**The agent layers are a different question, and it is still open.** A build
+succeeding says the install command found its file; it does not say the CLI
+inside starts, finds its seeded home or talks to its vendor. Not one harness CLI
+has yet been run inside a container ([§11b.8](../SANDBOX_RESEARCH.md)). So the
+per-image state — which layers build, and what is still unverified about each —
+is tracked in [`sandbox/images/README.md`](../sandbox/images/README.md) and that
+file is the one to believe over this paragraph. Expect the first real sandboxed
+run of a harness to be the thing that finds the remaining mistakes.
 
 ### 4. Verify a policy before a run depends on it
 
@@ -219,11 +282,27 @@ and they are kept apart rather than one of them winning.
 | **Open network** | `open`, built-in engine | `env` | 8 GB / 4 CPU | the repository whose build reaches half the internet and where an allowlist would be a week of whack-a-mole. The container is still a container |
 | **Audit** | Balanced, but `auditOnly` — nothing is blocked, everything that *would* have been is written down | `env` | 8 GB / 4 CPU | the mode you roll out in |
 
+**On a rootless daemon, three of these four cannot start a run today.**
+Balanced, Locked down and Audit all say `network.mode: allowlist` with
+`network.engine: builtin`, and that combination cannot work where the hub and
+the container bridges are in different network namespaces — which is what
+rootless Docker is. The launch fails rather than running unrouted, but it fails
+without naming the cause. **Open network** is the profile that works there
+today. The whole measurement, and what to do instead, is in [The built-in proxy
+engine does not work under a rootless
+daemon](#the-built-in-proxy-engine-does-not-work-under-a-rootless-daemon).
+
 The defaults underneath them, for a profile that says nothing: `network.mode
 allowlist`, `network.engine builtin`, `secrets.mode env`, worktree `rw`, the
 operator's `.git` `ro`, extras `ro`, read-only root filesystem with tmpfs at
 `/tmp` (2 GB) and `$HOME/.cache` (2 GB), memory 8 GB, 4 CPUs, `pidsLimit` 4096,
 `shmSize` 1 GB, `innerSandbox off`, `retention run`, audit on.
+
+**`memory` and `memorySwap` are written as a pair, and that is not tidiness.**
+`--memory 256m` alone leaves `memory.swap.max` at the same figure, so the
+container may swap that much again and a thrashing run is not a stopped one
+[measured]. All four profiles set `memorySwap` equal to `memory`, which is what
+sets the swap ceiling to zero. Do not "simplify" one of the two away in a copy.
 
 **All four ship with `secrets.mode: env`** — the credentials are passed into the
 container as environment variables, exactly as they are for an unsandboxed run.
@@ -306,10 +385,17 @@ container the cloud metadata service.
 
 | | `builtin` | `iron-proxy` |
 |---|---|---|
+| where it runs | inside the hub process, on the host | as a container of its own |
+| works under a **rootless** daemon | **no** (see below) | by construction, but unexercised |
 | CONNECT allowlist, 403 with a readable body, audit log | yes | yes |
 | terminate TLS | **no** | yes |
 | inject a credential so the key never enters the container | **no** | yes |
 | restrict HTTP methods | **no** | yes |
+
+The first two rows are the awkward part and are stated together on purpose: the
+engine that is implemented and exercised is the one that cannot run on the
+recommended posture, and the engine that suits that posture is the one that has
+never been run against its real binary.
 
 `tlsTerminate` is the root of the other two: without it the proxy sees a CONNECT
 line and encrypted bytes, so there is no method to judge and no header to swap a
@@ -336,11 +422,14 @@ profile says `retention: keep`, `--stop-timeout 30`, and
 `--detach-keys ctrl-^,ctrl-^` — Docker's default `Ctrl-P Ctrl-Q` would be eaten
 before it reached the agent's TUI, and every TUI uses `Ctrl-P`.
 
-The container user is **not root**: rootful Docker gets `--user <hub
-uid>:<hub gid>`, podman gets `--userns=keep-id`, and under rootless Docker no
-flag is needed because container root already *is* the hub user. The reason is
-the bind mounts: root in the container is root on every one of them, and a
-different uid could not write a single commit into the worktree.
+**Who the container runs as depends on the daemon, and the goal is the same in
+all three cases: the hub's own uid on the host.** Rootful Docker gets `--user
+<hub uid>:<hub gid>`, podman gets `--userns=keep-id`, and under rootless Docker
+**no flag is passed at all** — the process is uid 0 *inside* and the hub user
+*outside*, because that is what the subuid map does [measured]. The reason is
+the bind mounts: a different uid could not write a single commit into the
+worktree, and under a rootless daemon `--user <hub uid>` would map to
+`subuid + hub uid − 1` and be locked out of every one of them.
 
 The mounts, in order — host path to container path, which is the same path in
 every case except the socket:
@@ -362,6 +451,16 @@ mount *inside* one is the ordinary case. `--read-only` root is the default, with
 tmpfs at `/tmp` and `$HOME/.cache` — deliberately **not** `noexec`, because
 `npm ci`, `pip install` and every build script in the world execute out of
 `/tmp`.
+
+**And `exec` has to be written out, which is the trap.** Docker's `--tmpfs`
+defaults to `noexec,nodev`, and naming other options does not replace those
+defaults — `rw` and `size` are *added* to them and `noexec` stays [measured: a
+binary copied into such a `/tmp` fails with `Permission denied` and exit
+**126**, which reads as a file-mode problem rather than as a mount option]. The
+hub therefore emits `--tmpfs /tmp:rw,exec,nosuid,size=…` and keeps `noexec` on
+`/run`, where it is meant. If you write a `filesystem.tmpfsSizes` entry of your
+own, this is handled for you; if you hand-write a `--tmpfs` anywhere else, it is
+not.
 
 An empty limit produces **no flag at all**: `--memory 0` is a refusal from the
 daemon and `--cpus 0` is a container that cannot run.
@@ -611,6 +710,91 @@ Everything above is what it *does*. This section is what it does not, and it is
 the section to read twice. Where a limit rests on something that was measured,
 it says so; where it rests on a reading or an inference, it says that instead.
 
+### The built-in proxy engine does not work under a rootless daemon
+
+**Measured on 2026-09-05 against rootless Docker 29.8.0**
+([SANDBOX_RESEARCH.md §11b.5](../SANDBOX_RESEARCH.md)), three independent ways,
+each of them fatal on its own:
+
+- **The hub cannot bind the run network's gateway.** The built-in engine is a
+  CONNECT listener inside the hub *process*, and it binds to the run network's
+  gateway address so the container can reach it. On this daemon that address
+  does not exist in the host's network namespace at all: rootlesskit runs with
+  `--detach-netns`, so every bridge the daemon creates lives in *its* namespace.
+  `listen()` on that address answers `EADDRNOTAVAIL`.
+- **A container cannot reach the host, on any network.** From the default bridge
+  and from an internal network alike, the hub's own listening port was
+  unreachable at the host's loopback, at the bridge gateway and at the host's
+  VPN address — five attempts, five failures. rootlesskit's
+  `--disable-host-loopback` is exactly this, by design.
+- **`host-gateway` is a false friend.** `--add-host x:host-gateway` resolves,
+  and `ping` answers — to a `docker0` interface left behind in the host
+  namespace by a **stopped, disabled rootful daemon**. The name resolves, the
+  packets never leave rootlesskit's namespace, and the hub is not there.
+
+**So `network.mode: allowlist` with `engine: builtin` cannot work on a rootless
+installation**, which is the posture this document recommends and the one three
+of the four shipped profiles are written for. What happens in practice is a
+**launch that fails**, not a run that silently has no egress — `builtinBind()`
+refuses to fall back to loopback, because loopback inside a container is the
+container, and `server.listen()` on an address the host does not have throws. It
+fails without naming the cause: nothing in the hub today recognises this
+combination of daemon and engine, and there is **no warning on the Settings page
+and no refusal in the profile editor**. That is a gap, not a design.
+
+What works instead, today:
+
+| | on a rootless daemon |
+|---|---|
+| `network.mode: open` | works — the **Open network** profile |
+| `network.mode: none` | works — no routes at all, measured |
+| `network.mode: allowlist`, `engine: builtin` | **cannot work** |
+| `network.mode: allowlist`, `engine: iron-proxy` | the right shape, and unexercised (see below) |
+| any mode, **rootful** daemon | the hub and the bridges share one network namespace, so `builtin` should work — *inferred, not measured*: there is no rootful daemon here to ask. It costs you the `docker` group in your threat model |
+
+**The topology the containerised proxy needs was measured and it holds**: a
+container on the internal network given a second leg with `docker network
+connect bridge` has `eth0` on the internal subnet and `eth1` on the bridge, a
+default route only through the second, and reaches the internet; a second
+container on the internal network alone resolves the first **by name** through
+Docker's embedded resolver and reaches it. That is the proxy and the agent with
+no host involvement anywhere, and it is what `engine: iron-proxy` already does —
+it starts a container and connects it to `bridge`. The half that is missing is
+the binary: see [Credential
+injection](#credential-injection-is-implemented-and-unverified), whose "never
+run against the real iron-proxy binary" applies to the *whole* engine and not
+only to injection.
+
+There is **no containerised build of the built-in engine**, and `iron-proxy`
+ships **no image**: the engine names one only through
+`FREILAUF_SANDBOX_PROXY_IMAGE`, and without that setting it refuses to start
+with *"no proxy image"*. So if you need an enforced allowlist on a rootless
+daemon today, the honest options are a rootful daemon, an iron-proxy image and
+binary you are willing to be the first to exercise, or `open`/`none` plus the
+rest of the boundary.
+
+**And the one fallback there is does not rescue you here.** A `secrets.mode:
+env` profile whose named engine will not start falls back to the built-in engine
+with a `warn` — which on a rootless daemon is a fall back onto the engine that
+cannot bind, so the launch still fails. (An `inject` profile never falls back at
+all: it fails outright, by design.)
+
+**One more consequence of the built-in engine living in the hub process**: a hub
+restart kills the listener while the container carries on with a frozen
+`HTTPS_PROXY`. That is [repaired since 2026-09-05](../CHANGELOG.md) — a watcher
+pass rebinds the listener on the same port with the same resolved allow list and
+writes `sandbox:proxy_restarted` — but it is repair, not immunity: there is a
+window between the restart and the next pass, and a proxy that cannot come back
+leaves a `warn` event on the run rather than failing it.
+
+A **container** proxy is treated on the same principle and comes out
+differently. One the daemon says is **gone** is started again, because that is a
+run with no egress at all; one that is **still running** is left alone, and one
+the daemon would not answer about is left alone too. For that surviving
+container the hub holds **no handle**, and it does not fabricate one — so a live
+policy change on such a run is **refused** with *"the proxy is gone"* rather
+than reporting a policy it never delivered. Reconfiguring it resumes the run.
+
 ### It does not inspect what the agent sends
 
 The allowlist decides on the **hostname the client asked for**, and on nothing
@@ -659,6 +843,25 @@ that moves it into a container; **without that box ticked, a sandboxed run's
 code runs unsandboxed the moment it is merged.** The same is true of anything
 you wire behind a `run_merged` flow's `shell_command` step, which is a command
 on the hub machine by definition.
+
+**With the box ticked, the check is an ephemeral container of the run's own
+image** — the integration worktree bind-mounted, `--cap-drop ALL`,
+`no-new-privileges`, the run's own network and proxy variables under `allowlist`
+— **and where it cannot be one it refuses rather than falling back.** No
+runtime, a missing image, exit 125, a daemon that positively is not there: all
+of them end the merge with *"nothing was merged, and it was NOT run on the
+host"*, a `merge_error` escalation and the ordinary `merge_blocked` incident
+with its "Merge now" button. A failing check is still just a red check, and a
+timeout is a red check too, not a refusal.
+
+Two edges of that worth knowing. A run that is **not itself boxed** — the
+sandbox off, bypassed, or a spec with no image — makes the check run on the host
+even with the box ticked, and says so with a `merge_check_host` event naming the
+reason; the box cannot conjure a container for a run that never had one. And the
+check container's `/tmp` is currently mounted `rw,nosuid` **without `exec`**,
+unlike the run container's, so a merge check that unpacks and executes a helper
+out of `/tmp` will fail there with exit 126 where the same command succeeds
+inside the run.
 
 ### Credential injection is implemented, and unverified
 
@@ -716,7 +919,7 @@ operator can act on; a fallback would have been a bug they found in a log.
 | value | state |
 |---|---|
 | `docker` | implemented, and what everything was designed and tested against |
-| `runsc` (gVisor) | implemented as the same `docker` CLI plus `--runtime=runsc`; it presumes the daemon has gVisor registered. Discovery lists the runtimes the daemon knows |
+| `runsc` (gVisor) | implemented as the same `docker` CLI plus `--runtime=runsc`; it presumes the daemon has gVisor registered, and no daemon here does. Discovery lists the runtimes the daemon knows. Asking for one it does not know fails at `docker run` with *"unknown or invalid runtime name: runsc"* [measured] rather than falling back to `runc` |
 | `podman` | implemented, with `--userns=keep-id` in place of `--user` |
 | `srt` | **not implemented.** It is an accepted spec value and refused at launch with *"Freilauf cannot drive the runtime … yet"* |
 
@@ -743,29 +946,64 @@ On a host with `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu
   truth, and there is no key, so somebody who re-runs the chaining gets a valid
   file again. The exported file says so on its own header line.
 
-### The images have never been built
+### No coding agent has yet been run inside a container
 
-The machine all of this was written on has **no container runtime at all**
-[measured: `docker` and `podman` absent at both scopes, no unit files]. So every
-Dockerfile in `sandbox/images/` is **unbuilt and untested**. The install
-commands were derived from a measured source — the vendor's own installer read
-on 2026-09-05, or the CLI installed on that machine — and
-[`sandbox/images/README.md`](../sandbox/images/README.md) tabulates the
-confidence per layer honestly: claude and opencode **high**, cursor **medium**
-(its download URL is undocumented and Cursor's to change), hermes **low** and
-the one to build first, with three specific things about it that could not be
-checked without a build. The first operator to run `docker build` is doing the
-verification.
+The base image builds and containers have been started from it, so the
+*box* — the mount set, the uid map, the three resource fences, the network
+modes — is measured rather than reasoned about. **The agent inside it is not.**
+Not one harness CLI has been started in a container to date
+([SANDBOX_RESEARCH.md §11b.8](../SANDBOX_RESEARCH.md)), which leaves all of this
+open:
 
-The same is true of everything that could only be observed *inside* a container.
-The unit and e2e suites drive a **`docker` shim**, not Docker.
+- `docker run -it` as a tmux pane command under a live TUI, and whether
+  `--detach-keys` behaves as the reading says;
+- the hub's report socket mounted into the container and `fl-report` writing
+  back through it;
+- each CLI finding its seeded home at its container path, and the resume forms
+  read out of that home;
+- cursor's transcript slug inside a container.
+
+The per-layer build state and what is unverified about each image is in
+[`sandbox/images/README.md`](../sandbox/images/README.md), and that file is
+authoritative over this one. Everything that could only be observed *inside* a
+container is still unobserved; the unit and e2e suites drive a **`docker`
+shim**, not Docker.
 
 ### What rests on a reading rather than a measurement
 
-[SANDBOX_RESEARCH.md §11a](../SANDBOX_RESEARCH.md) is the full account. The
-short version, because it is what the boundary's edges are made of:
+[SANDBOX_RESEARCH.md](../SANDBOX_RESEARCH.md) is the full account — **§11a**
+for what was established without a container runtime, **§11b** for what was
+measured on 2026-09-05 against a live rootless daemon. The short version,
+because it is what the boundary's edges are made of:
 
-**Measured, on this machine, with real git / tmux / the real CLIs:**
+**Measured against a real daemon (§11b), in throwaway containers and networks:**
+
+- The **mount set works end to end** inside a real container: the clone
+  read-write, the operator's `.git` read-only at the same path, the masked
+  config over it — `git status`, `git log` through the alternates, `git fetch`,
+  `git add`/`commit` all succeed, the operator's `.git` really refuses a write,
+  and the collect step afterwards brings the tip back into the hub's repository.
+- **Every delegated resource fence binds**, and was pushed past to prove it:
+  memory (OOM-killed), pids (`can't fork`), cpu (0.50 of a core, 50 throttles).
+  `cpuset` and io are not delegated and remain unavailable.
+- **`--network none` and `--internal` hold** — no routes at all in the first, a
+  route to its own subnet plus the embedded resolver and nothing else in the
+  second.
+- **The uid map is what §7.7 said**: container root writes host files as the hub
+  user, and a `--user 1000:1000` container cannot write into the hub's own
+  directories at all.
+- **`--tmpfs` is `noexec` by default and naming other options does not undo it**
+  — the `exec` above.
+- **The built-in proxy engine cannot exist on a rootless daemon**, three ways;
+  and the containerised topology it would have to be replaced by does work. That
+  is [its own section](#the-built-in-proxy-engine-does-not-work-under-a-rootless-daemon).
+- **Docker 29 no longer says `Cannot connect to the Docker daemon`.** A
+  classifier keyed on that string was already stale on the first machine that
+  had a daemon to test it against, which is why the hub decides on the exit
+  status and on whether the socket exists and answers, and treats the message as
+  something to print.
+
+**Measured on this machine, with real git / tmux / the real CLIs (§11a):**
 
 - `git fetch` from a hostile clone executes nothing; host git *inside* one
   executes plenty, and the minimal-config mask plus `core.hooksPath=/dev/null`
@@ -799,10 +1037,13 @@ short version, because it is what the boundary's edges are made of:
 - **Claude refuses to run as root outside a "recognized sandbox", and being in a
   container is explicitly not enough** — the predicate tests `IS_SANDBOX=1` or
   `CLAUDE_CODE_BUBBLEWRAP` and consults its own Docker detection nowhere. The
-  hub sets `IS_SANDBOX=1` for a sandboxed claude run and does **not** depend on
-  it: the default is a non-root container user with the hub's uid, where the
-  question does not arise. `IS_SANDBOX` is documented nowhere and is
-  Anthropic's to change.
+  hub sets `IS_SANDBOX=1` for a sandboxed claude run. **Under a rootful daemon
+  or podman** it does not depend on that: the container user is the hub's uid,
+  where the question does not arise. **Under a rootless daemon it does** — there
+  the container user *is* root, deliberately (see above), so `IS_SANDBOX=1` is
+  the only thing standing between a claude run and its own refusal.
+  `IS_SANDBOX` is documented nowhere and is Anthropic's to change, and this has
+  not been tried with a claude CLI in a container.
 
 **Not answered at all, and what the design does instead:**
 
@@ -812,15 +1053,36 @@ short version, because it is what the boundary's edges are made of:
   `secrets.mode: env` with an OAuth token variable, the seeded home carries no
   credentials file, and **nothing may copy `~/.claude/.credentials.json` into a
   run home "for now"**.
-- **iron-proxy under load, and with server-sent events.** TLS termination and
-  header injection are opt-in per profile and not the phase-1 default; a profile
-  that cannot reach its proxy fails the start with a readable problem rather
-  than starting unproxied.
-- **Whether the daemon can isolate the container network's gateway.** Where it
-  cannot, the internal network is used anyway and the profile page says plainly
-  that the host bridge address is reachable. The hub's own socket is a unix
-  socket in the run directory rather than a TCP port, so the hub is not on the
-  other side of that gateway either way.
+- **iron-proxy, in every respect** — under load, with server-sent events, and
+  simply at all. No binary exists on any machine here, so its configuration
+  file, its reload endpoint and its log format have never been read by the thing
+  that is supposed to read them. TLS termination and header injection are opt-in
+  per profile and not the default; a profile that cannot reach its proxy fails
+  the start with a readable problem rather than starting unproxied. On a
+  rootless daemon this is nonetheless the only engine that could carry an
+  allowlist, which is an uncomfortable place for the documentation to be and is
+  said here rather than smoothed over.
+- **gVisor.** `runsc` is on no `PATH` here and the daemon lists only
+  `io.containerd.runc.v2` and `runc`. The one thing that was measured is the
+  refusal — `unknown or invalid runtime name: runsc` — which confirms that a
+  missing runtime fails at `docker run` with a namable error rather than
+  silently falling back to `runc`.
+- **podman**, still not installed, so `--userns=keep-id` and `:idmap` remain a
+  reading.
+- **AppArmor applied to a container.** Confirmed only *negatively*: on a
+  rootless daemon nothing is confined and `--security-opt apparmor=…` is
+  accepted and ignored. Whether a rootful daemon with `docker-default` loaded
+  applies it as documented was not measured, because there is no rootful daemon
+  here to ask.
+
+One item that used to stand here is **answered**: whether the daemon can isolate
+the container network's gateway. `gateway_mode_ipv4=isolated` exists on Docker
+29.8.0 and is `--internal`-only, exactly as the design pairs them. It comes with
+a reading trap worth knowing if you inspect a network by hand — with the option
+set, Docker omits the `Gateway` key entirely, so `docker network inspect
+--format '{{.Gateway}}'` prints the literal string **`invalid IP`** rather than
+an empty value, and a correctly isolated network read that way looks
+misconfigured.
 
 ### And the things it was never for
 
@@ -851,3 +1113,4 @@ it stops that from being something stupid on your machine.
 | The images, and what is not verified about them | `sandbox/images/README.md` |
 | What a coding agent or provider declares | [`docs/plugins.md`](plugins.md) |
 | The design, and what was measured before it | [`SANDBOX_RESEARCH.md`](../SANDBOX_RESEARCH.md), §11a |
+| What was measured against a real rootless daemon | [`SANDBOX_RESEARCH.md`](../SANDBOX_RESEARCH.md), §11b |

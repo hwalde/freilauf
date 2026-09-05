@@ -226,6 +226,13 @@ rootless daemon containers carry **no AppArmor confinement at all** — the
 boundary there is the user namespace, seccomp, `--cap-drop ALL` and
 `no-new-privileges`, not a container profile.
 
+**Under a rootless daemon the container runs as uid 0, and that is correct.**
+Container root *is* the hub user on the host through the subuid map, so files
+the agent writes come out owned by the operator and git's `safe.directory` check
+never fires. Pass no `--user` there (the hub does not) and do not "fix" this
+with a non-root image: a container user of 1000 maps to host `100999` and cannot
+write into the run's own directories at all [measured].
+
 **Recommend rootless, and say why.** With rootful Docker, membership of the
 `docker` group is equivalent to root on the host — anything that can talk to that
 socket can mount `/` into a privileged container, and the hub talks to that
@@ -233,14 +240,65 @@ socket. Rootless keeps the daemon in the hub user's own namespace, so a containe
 escape lands in the uid the agent was already running as without a sandbox.
 Rootful works; it just puts the `docker` group in the threat model.
 
+**Then tell the human the one thing that will otherwise bite them.** Under a
+rootless daemon, **`network.mode: allowlist` with the built-in proxy engine
+cannot work** — the hub's listener would have to bind the run network's gateway,
+and rootlesskit keeps every bridge in a network namespace of its own
+(`--detach-netns`), so that address does not exist on the host. Measured three
+ways on 2026-09-05; the account is in `docs/sandbox.md` under *"The built-in
+proxy engine does not work under a rootless daemon"*. Consequences you must pass
+on, because the hub does **not** detect this combination and prints no warning:
+
+- three of the four shipped profiles — **Balanced**, **Locked down** and
+  **Audit** — ask for exactly that combination, so on a rootless daemon they
+  fail at launch. They fail rather than running unrouted, but the message is the
+  operating system's and does not name the cause;
+- the profile that works there today is **Open network** (`mode: open`), and
+  `mode: none` works too;
+- an enforced allowlist on a rootless daemon needs `engine: iron-proxy`, whose
+  proxy is a container — the right shape, and a binary that exists on no machine
+  here and has never been run. Do not switch a profile to it on somebody's
+  behalf;
+- a **rootful** daemon does not have this problem, at the cost above.
+
+### What has to be true, and how to check each
+
+The two setup scripts this installation was built with live in the operator's
+`$HOME`, not in this repository, so there is nothing here to run. This is what
+they establish; check each one, print what you found, and hand the root steps to
+the human:
+
+| What has to be true | How to check it | If it is not |
+|---|---|---|
+| rootless Docker installed for the hub's user | `docker version --format '{{.Server.Version}}'` | `sudo apt-get install -y docker.io uidmap dbus-user-session` (human), then `dockerd-rootless-setuptool.sh install` as the hub user |
+| the daemon is really the **rootless** one | `docker info --format '{{json .SecurityOptions}}'` contains `name=rootless` | you are talking to a rootful daemon or to nothing; check `DOCKER_HOST` |
+| the socket answers | `test -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"` and `docker info >/dev/null` | the user unit is not running: `systemctl --user status docker.service` |
+| it survives a reboot with nobody logged in | `systemctl --user is-enabled docker.service` → `enabled`, and `loginctl show-user "$USER" -p Linger` → `Linger=yes` | `systemctl --user enable --now docker.service`; `loginctl enable-linger "$USER"` (`setup/03` already does the second) |
+| subuid/subgid ranges exist for the hub user | `grep "^$USER:" /etc/subuid /etc/subgid` | a root step: `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"` |
+| unprivileged user namespaces are permitted | `docker run --rm alpine true` succeeds | on Ubuntu 24.04 the distribution's `/etc/apparmor.d/rootlesskit` is what permits it; if it is missing, that is the root step |
+| the cgroup controllers the profiles need are delegated | `cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/cgroup.controllers` contains `cpu memory pids` | a `/etc/systemd/system/user@.service.d/delegate.conf` drop-in, which is a root step. Without them `--memory`/`--cpus`/`--pids-limit` are refused |
+| `DOCKER_HOST` agrees with all of the above | `echo "$DOCKER_HOST"` | print the line above for the human to put in `~/.config/freilauf/env`. The hub does not need it; every other tool does |
+
+Two checks that look right and are not, so do not use them: **`aa-status
+--enabled`** exits **0** as an ordinary user with no output at all, which says
+only that the module is loaded and nothing about containers (under a rootless
+daemon containers are unconfined, and `--security-opt apparmor=…` is accepted
+and ignored); and **`docker network inspect --format '{{.Gateway}}'`** on an
+isolated internal network prints the literal string `invalid IP` rather than an
+empty value, so a correctly isolated network read that way looks broken.
+
 Then, in the UI: **Settings → Sandbox**. The page prints what it found and
 **refuses to be switched on above `off` while it has found nothing** — that
 refusal is enforced in the save, so do not try to work around it. Build the
 shipped images from that page, or by hand as `sandbox/images/README.md`
-describes. **Those images have never been built** — the machine they were written
-on has no container runtime — so expect the first build to be the one that finds
-the mistakes; that file names, per image, how confident each install command is
-and which one to build first.
+describes. The base image **does** build and real containers have been run from
+it (that is what the mount set, the resource fences and the network modes were
+measured in). What is still unproven is the layer above: **no harness CLI has
+ever been started inside a container**, so building an agent image successfully
+does not yet mean a run in it will work. `sandbox/images/README.md` is the file
+that tracks the per-image state and what is unverified about each; believe it
+over any summary, and expect the first real sandboxed run to be the thing that
+finds the remaining mistakes.
 
 **Verify a policy before a real run depends on it.** The whole container command
 line is produced by one pure function and can be printed without a runtime:
@@ -465,7 +523,7 @@ tooling. The seams that were designed to be pulled on:
 | point the notification links at your own hostname | Settings → **Notification links**: a `Public hostname` (the name that matches your certificate), and the port follows the live VPN port automatically. Without one, `FREILAUF_PUBLIC_URL` (a full URL, in `~/.config/freilauf/env`) or the local address answers — `publicBase()` in `server/util.mjs` |
 | give agents an opt-in capability | drop a folder with a `SKILL.md` into `~/agents/zusaetze/` — it appears as a checkbox in the run forms. Deliberately *not* `.claude/skills`, so nothing loads automatically |
 | teach your coding agents how to drive Freilauf itself | Settings → **Freilauf skills** installs the agent skills under `skills/` into the directories your configured coding agents read. Where those are is a **plugin declaration** (`skills: { user, project }`), so a new coding agent brings its own — `server/skills.mjs`, [`docs/plugins.md`](docs/plugins.md) |
-| run an agent inside a boundary rather than as yourself | **Settings → Sandbox** — off by default, needs a container runtime, configured hub → repo → agent → run with a lower level only ever able to narrow what a higher one locked. Start with the **Audit** shape (watch what a run reaches), then enforce. → [`docs/sandbox.md`](docs/sandbox.md) |
+| run an agent inside a boundary rather than as yourself | **Settings → Sandbox** — off by default, needs a container runtime, configured hub → repo → agent → run with a lower level only ever able to narrow what a higher one locked. Start with the **Audit** shape (watch what a run reaches), then enforce — but read the rootless caveat first: Audit is one of the three profiles whose allowlist the built-in engine cannot deliver under a rootless daemon. → [`docs/sandbox.md`](docs/sandbox.md) |
 | put a project away without losing its history | **Repos → Deactivate**: gone from every dropdown, starts nothing new, everything it owns kept and reachable, reversible in one click. `POST /repos/toggle` (`id`, `active=1\|0`) is the same thing from a script — `server/pages.mjs`, and the "Putting a repository away" section in [`AGENTS.md`](AGENTS.md) |
 | script the hub from a shell or from inside a run | `fl-api` — `fl-api /api/runs repo=3 status=running`, `fl-api /api/runs/<id>`, `fl-api -X POST /api/runs/<id>/title title=…`. The read-only half is `server/read-api.mjs`; every write still goes through the ordinary POST routes, which validate |
 | show your project's own numbers in the sidebar | **panels** — the project pushes (`fl-panel set findings --total 33 --item "bug=17:red"`, or a tool of yours piping JSON in), Freilauf renders them with the time they were measured and never learns what they mean. Push it from a run before it reports, or from a `run_merged` flow → [`docs/panels.md`](docs/panels.md) |
@@ -558,8 +616,10 @@ If your task is to change Freilauf rather than just run it:
 [ ] a model source chosen for the hub's own questions (run titles at minimum)
 [ ] Settings → Freilauf skills answered (install them, or deliberately not)
 [ ] sandbox: left off (the default), OR a runtime installed by the human,
-    Settings → Sandbox switched on, images built, a policy dry-run
-    verified, and docs/sandbox.md's limits passed on
+    every row of "What has to be true" checked, Settings → Sandbox switched
+    on, images built, a policy dry-run verified, and docs/sandbox.md's limits
+    passed on — including that on a rootless daemon three of the four shipped
+    profiles cannot start a run (built-in proxy engine)
 [ ] at least one repo added
 [ ] one small single run started and watched end to end
 [ ] no ports, addresses, hostnames or keys ended up in a commit

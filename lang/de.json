@@ -1603,9 +1603,15 @@
   "sandbox.launch.network_failed": "Das private Netz {network} des Laufs konnte nicht angelegt werden: {reason}",
   "sandbox.launch.no_ca": "Dieses Profil terminiert TLS, aber es ist kein CA-Zertifikat konfiguriert. Setze das Zertifikatsverzeichnis unter Einstellungen → Sandbox und lege ca.crt hinein.",
   "sandbox.launch.proxy_gone": "Der Egress-Proxy dieses Laufs läuft nicht mehr, die neue Regel konnte deshalb nicht in Kraft gesetzt werden. Starte den Lauf neu, damit sie greift.",
+  "sandbox.launch.proxy_reload_refused": "Der Egress-Proxy dieses Laufs hat die neuen Netzregeln abgelehnt, sie sind deshalb nicht in Kraft: {reason}",
+  "sandbox.launch.limits_failed": "Die neuen Ressourcengrenzen konnten dem Container dieses Laufs nicht übergeben werden, sie sind deshalb nicht in Kraft: {reason}",
+  "sandbox.launch.limits_no_container": "Dieser Lauf hat keinen Container, auf den die neuen Ressourcengrenzen angewendet werden könnten; sie sind festgehalten, aber nicht in Kraft. Starte den Lauf neu, damit sie greifen.",
+  "sandbox.launch.policy_partial": "Nur ein Teil dieser Änderung ist in Kraft — der Rest ist festgehalten und greift, sobald der Lauf neu gestartet wird:",
+  "sandbox.launch.spec_write_refused": "Die sandbox.json dieses Laufs konnte nicht geschrieben werden — unter {path} liegt ein symbolischer Link, und Freilauf schreibt nicht durch einen hindurch.",
   "sandbox.launch.bypass_resume_failed": "Die Sandbox ist für diesen Lauf aus und sein Container ist weg, aber der Agent konnte nicht neu gestartet werden. Versuche den Lauf erneut.",
   "sandbox.notify.bypassed": "{title}: Die Sandbox wurde für diesen Lauf von {by} abgeschaltet — {reason}",
   "sandbox.notify.bypassed_no_reason": "ohne Begründung",
+  "sandbox.proxy.config_symlink": "unter {path} liegt ein symbolischer Link, wo die Proxy-Konfiguration dieses Laufs hingehört, und Freilauf schreibt nicht durch einen hindurch",
   "sandbox.proxy.no_image": "es ist kein iron-proxy-Image konfiguriert (FREILAUF_SANDBOX_PROXY_IMAGE)",
   "sandbox.runtime.err_mount_mode": "Der Mount {target} verlangt den Modus „{mode}“, den diese Container-Laufzeit nicht kennt (ro oder rw)"
 }

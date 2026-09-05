@@ -277,7 +277,7 @@ image, so the base's 942 MB is included in every one of them.
 | claude | ✅ | ~50 s | 1.26 GB | `claude --version` → `2.1.261 (Claude Code)` | no |
 | opencode | ✅ | ~30 s | 1.44 GB | `opencode --version` → `1.18.29` | **yes — the npm prefix** |
 | cursor | ✅ | ~36 s | 1.68 GB | `cursor-agent --version` → `2026.09.02-c22c1a3` | no |
-| hermes | ✅ | ~10 min | HERMES_SIZE | `hermes --version` → `Hermes Agent v0.21.0 (2026.8.31)` | **yes — the version is not a git ref** |
+| hermes | ✅ | ~5 min | 5.33 GB | `hermes --version` → `Hermes Agent v0.21.0 (2026.8.31)` | **yes — the version is not a git ref** |
 | overlay | ✅ | seconds | base + agent | the copied CLI answers on the overlay's PATH | see the opencode entry — the overlay is what exposed it |
 
 Not measured, and therefore not claimed: **arm64** (only amd64 was built),
@@ -343,6 +343,13 @@ sandbox.
 The build-time caches are deleted in the same `RUN` (a later layer cannot shrink
 an earlier one): 1.1 GB under the build-time `$HOME/.cache`, 157 MB of npm cache
 and 49 MB of a tool download, none of which a run reads.
+
+**hermes is by far the largest image at 5.33 GB**, and the reasons are worth
+knowing before anyone treats that as a defect: 658 MB of Chromium and ffmpeg,
+the X11/font/GTK apt dependencies `playwright install --with-deps` pulls in, a
+403 MB `node_modules` and a 651 MB `.git` inside the checkout, plus a 250 MB
+virtualenv and a uv-managed Python. `--skip-browser` is the one lever that
+changes the order of magnitude.
 
 ### The working set a run really uses
 

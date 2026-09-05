@@ -33,13 +33,29 @@ agent never has the key at all. The code for it is there and refuses loudly
 where it cannot deliver.
 
 What is missing is experience. It needs `iron-proxy`, which is installed on no
-machine here, so its configuration file, its reload endpoint and its log format
-were written from documentation and have never been parsed by the binary that is
-supposed to read them. Until somebody has run it in anger, the shipped profiles
-pass credentials in as environment variables — exactly as an unsandboxed run
-does — and injection is an explicit upgrade you make with your eyes open.
+machine here — the binary is on no `PATH` and no shipped image carries it — so
+its configuration file, its reload endpoint and its log format were written from
+documentation and have never been parsed by the binary that is supposed to read
+them. Until somebody has run it in anger, the shipped profiles pass credentials
+in as environment variables — exactly as an unsandboxed run does — and injection
+is an explicit upgrade you make with your eyes open.
 If you have iron-proxy running somewhere, telling us what actually happened
 would be the single most useful thing.
+
+**And it turns out to matter for more than credentials.** Measured on
+2026-09-05 against a real rootless Docker daemon: the *other* engine, the
+built-in one that lives inside the hub process, cannot work there at all —
+rootlesskit keeps the container bridges in a network namespace of its own, so
+the hub cannot bind the address the container would have to reach it at, and a
+container cannot reach the host on any network. An enforced allowlist on a
+rootless daemon therefore needs a proxy that is itself a **container**, which is
+what this engine already is; the topology was measured and works. So the engine
+nobody has exercised is the one the recommended posture needs, which is an
+uncomfortable thing to write down and is written down anyway — in
+[docs/sandbox.md](docs/sandbox.md) and in
+[SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md) §11b. Until that changes, an
+allowlist means a rootful daemon, and `open` or `none` are what a rootless
+installation has.
 
 Two things worth knowing before you plan around it. Injection can only ever
 cover a credential carried verbatim in a header: a request the client *signs*
@@ -51,8 +67,13 @@ environment-variable mode, and says so instead of guessing.
 ### A sandbox for machines that cannot have Docker
 
 **Status: named, not built.** Today the sandbox is a container, and Docker (or
-Podman) is a prerequisite for it. gVisor works if your daemon has it registered;
-Podman works with its own user-namespace mapping. What does not exist is the
+Podman) is a prerequisite for it. Podman is implemented with its own
+user-namespace mapping, and untried — no podman is installed here. **gVisor is
+implemented and has never had a daemon to run on**: no machine here has `runsc`
+registered, so all that could be established is that asking for a runtime the
+daemon does not know fails at `docker run` with *"unknown or invalid runtime
+name"* rather than silently falling back. If your daemon does have gVisor
+registered, you are the first. What does not exist is the
 "light" mode the design study names — a process-level sandbox with no container
 runtime at all, for a laptop or a locked-down host where installing a daemon is
 not an option. The spec already accepts the value and the hub refuses it with a

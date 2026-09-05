@@ -79,8 +79,12 @@ Freilauf does, and it only goes forward.
   may only ever narrow what a higher one locked. When it blocks something the
   agent needed, you get the host, one click to allow it for this run or this
   repo, and no restart. Optional and **off by default**; Docker is a
-  prerequisite only if you want it ([docs/sandbox.md](docs/sandbox.md), which
-  is as long about what it does *not* do as about what it does).
+  prerequisite only if you want it. One limit belongs in the summary rather
+  than only in the fine print: on a **rootless** daemon — the posture we
+  recommend — the enforced allowlist needs a proxy that is itself a container,
+  and that engine has never been run against its real binary, so a rootless
+  installation has `open` or `none` today ([docs/sandbox.md](docs/sandbox.md),
+  which is as long about what it does *not* do as about what it does).
 - **Everything vendor-specific is a plugin.** Coding agents, model providers
   and notification services are plugins with a documented contract
   ([docs/plugins.md](docs/plugins.md)); a third party can drop a package on
