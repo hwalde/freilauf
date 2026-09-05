@@ -587,8 +587,10 @@ launch: {
   `claude --resume <id> "<text>"` continues the conversation with the text as
   the next turn; without a prompt it waits for input, whatever the permission
   mode — which is why the continuation text is not optional. Measured for
-  hermes 0.21 the same way (the code word from the first turn came back
-  through the resume form, and `-q` stays interactive on a TTY). opencode
+  hermes 0.21 and cursor 2026.09.02 the same way (the code word from the
+  first turn came back through the resume form; hermes' `-q` stays
+  interactive on a TTY, cursor's resumed chat grows the same transcript
+  file). opencode
   1.18.29 is the odd one: `--session <id> --prompt "…"` opens the session and
   DROPS the prompt (nothing submitted, editor empty), so its declared resume
   form carries no `{prompt}` and fl-start pastes the continuation into the
