@@ -936,6 +936,20 @@ try {
     await watcherTick()
     isTrue(ereignisse(R1).includes('anomaly:unpushed'), `anomaly:unpushed (has: ${ereignisse(R1).join(', ')})`)
   })
+  await check('a run the hub merged itself is never reported as unpushed', async () => {
+    // The integrator merges the run's branch into the base branch and pushes
+    // THAT, which leaves the branch behind its upstream with nothing of its own
+    // missing. Measured on run d4ee07d2: `merged` at 16:47:56, then
+    // `anomaly:unpushed {"track":"[behind 1]"}` and a notification about work
+    // that was already on origin. Nothing of a merged run lives only here.
+    for (const status of ['merged', 'kept_on_branch']) {
+      db.prepare(`DELETE FROM events WHERE run_id=? AND kind IN ('anomaly:unpushed','branch_synced')`).run(R1)
+      db.prepare('UPDATE runs SET merge_status=? WHERE id=?').run(status, R1)
+      await watcherTick()
+      isFalse(ereignisse(R1).includes('anomaly:unpushed'), `${status}: not reported as unpushed`)
+    }
+    db.prepare('UPDATE runs SET merge_status=NULL WHERE id=?').run(R1)
+  })
 
   // ------------------------------------------------------------------
   group('Extra skills: opt-in per run and agent')
@@ -2761,6 +2775,36 @@ try {
     equal(lauf(j.runId).archived_at, null, 'nothing archived')
     // Clean up: the run must not linger for the watcher's sake.
     db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+  })
+  await check('a finished run with an open follow-up keeps its session', async () => {
+    // Archiving closes the run's tmux session, and a finished run whose
+    // follow-up commission is open is one the operator is typing into right
+    // now — the overview shows it as running for exactly that reason. So the
+    // row must not offer the button and the route must not take it. Measured
+    // on run 49a26807: "running — follow-up in progress" and the archive
+    // button in the same row.
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-archive-followup' })
+    await sessionMerken(j.runId)
+    db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now'),
+                followup_since=datetime('now') WHERE id=?`).run(j.runId)
+
+    const row = (await (await fetchPath(`/?repo=${repoId}`)).text())
+      .split('<tr ').find(chunk => chunk.includes(j.runId))
+    isTrue(!!row, 'the run is in the overview')
+    isFalse(row.includes(`/api/runs/${j.runId}/archive`), 'no archive button in the row')
+    isFalse(row.includes('class="run-pick"'), 'and no checkbox for the bulk archive')
+    const detail = await (await fetchPath(`/runs/${j.runId}`)).text()
+    isFalse(detail.includes(`/api/runs/${j.runId}/archive`), 'nor on the detail page')
+
+    const r = await postForm(`/api/runs/${j.runId}/archive`, {})
+    equal(r.status, 400, 'the route refuses it too')
+    equal(lauf(j.runId).archived_at, null, 'nothing archived')
+    contains((await r.json()).error, 'follow-up', 'and says WHY, not "only finished runs"')
+
+    // Once the follow-up has reported, the run may go like any other.
+    db.prepare(`UPDATE runs SET followup_since=NULL WHERE id=?`).run(j.runId)
+    equal((await postForm(`/api/runs/${j.runId}/archive`, {})).status, 200, 'afterwards it archives')
+    db.prepare('DELETE FROM runs WHERE id=?').run(j.runId)   // keep the pagination count stable
   })
   await check('several runs go into the archive in one request', async () => {
     // The overview's multi-select: forty finished runs of which four are kept

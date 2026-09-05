@@ -10,6 +10,7 @@ import { detectInstalled } from './harnesses/index.mjs'
 import { subscriptionUsage } from './usage.mjs'
 import { providerBalances } from './balances.mjs'
 import { sseHandler } from './events.mjs'
+import { archivable, followUpActive } from './run-state.mjs'
 import { launchRun } from './runner.mjs'
 import { startRun, startDeferredRun, startScheduledNow } from './scheduler.mjs'
 import { runDefFromForm, runStartFromForm, saveAgent, rememberRunChoice, lastRunChoiceFor } from './run-def.mjs'
@@ -108,6 +109,9 @@ function answer(req, res, code, obj, backTo) {
  * intact and reachable, it only leaves the overview. ONLY finished runs: a
  * running one is still being watched, and a deferred/scheduled one would simply
  * start later anyway — the archive must not hide a run that still has work to do.
+ * `archivable()` (run-state.mjs) is that rule, and it also covers the finished
+ * run that is working AGAIN because a follow-up commission is open: archiving
+ * closes the session, and there somebody is in it.
  *
  * One function because two routes archive: the single button in a row and the
  * overview's multi-select. Two copies of this rule is how one of them would
@@ -118,8 +122,13 @@ function answer(req, res, code, obj, backTo) {
  * sessions in one call instead of one at a time.
  */
 function archiveRecord(run) {
-  if (['running', 'waiting_help', 'scheduled', 'deferred'].includes(run.status)) {
-    return { error: t('api.archive_only_finished'), session: null }
+  if (!archivable(run)) {
+    // Two refusals, because they are two different facts about the run: one is
+    // not finished at all, the other is finished and back at work. A message
+    // saying "only finished runs" about a run whose record says `done` would
+    // send the reader looking for the wrong thing.
+    const key = followUpActive(run) ? 'api.archive_followup_open' : 'api.archive_only_finished'
+    return { error: t(key), session: null }
   }
   db.prepare(`UPDATE runs SET archived_at=COALESCE(archived_at, datetime('now')) WHERE id=?`).run(run.id)
   announceRun(run.id, 'archived')

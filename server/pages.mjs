@@ -23,7 +23,7 @@ import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } fro
 import { extrasModelsMru, rememberExtrasModel, DEFAULT_EXTRAS_MODEL } from './extras-suggest.mjs'
 import { runEditAllowed } from './run-edit.mjs'
 import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
-  IN_FLIGHT_ANOMALIES, anomaliesSettled } from './run-state.mjs'
+  IN_FLIGHT_ANOMALIES, anomaliesSettled, archivable } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
@@ -972,8 +972,11 @@ export function runRow(r, ctx) {
   const wartend = r.status === 'scheduled'
   // One click moves a finished run into the archive — the record stays, it just
   // leaves the overview. Only finished runs may go: a running or waiting one
-  // still has work to do and must not hide (the server enforces this too).
-  const archivierbar = ['done', 'failed', 'aborted'].includes(r.status)
+  // still has work to do and must not hide, and neither may a finished one
+  // whose follow-up commission is open — that row says "running" two cells to
+  // the left, and archiving would close the session somebody is typing into.
+  // `archivable()` is the one rule; the server enforces the same one.
+  const archivierbar = archivable(r)
   const archivBtn = archivierbar
     ? `<form method="post" action="/api/runs/${r.id}/archive" class="inline" onclick="event.stopPropagation()">
           <input type="hidden" name="back" value="/?repo=${repoId}">
@@ -1536,9 +1539,13 @@ export function runDetailHead(run, ctx) {
          <form method="post" action="/api/runs/${id}/kill" class="inline"><button class="danger">${e(t('start.cancel'))}</button></form>
        </div></div>`
     : ''}
-  ${['done', 'failed', 'aborted'].includes(run.status)
+  ${archivable(run) || run.archived_at
     // One click into the archive / back out of it. An archived run is hidden
     // from the overview but stays fully reachable here, report and log intact.
+    // `archivable()` for the way in (a finished run with an open follow-up
+    // commission is working again and its session must not be closed),
+    // `archived_at` for the way back out — an archived run always keeps its
+    // restore button, whatever else is true about it.
     // .btn-row, not <p>: an HTML parser closes an open paragraph at a <form>,
     // so the button and the note beside it would land on two lines whatever
     // the CSS says. One button hides the bug today; a second one shows it.

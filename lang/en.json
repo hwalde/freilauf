@@ -23,6 +23,7 @@
   "web.internal_error": "internal error: {msg}",
   "api.unknown_run": "unknown run",
   "api.unknown_incident": "unknown incident",
+  "api.archive_followup_open": "a follow-up is in progress in this run — archiving would close its session; wait for the follow-up report",
   "api.archive_only_finished": "only finished runs can be archived",
   "api.no_session": "no session",
   "api.no_session_given": "no session given",

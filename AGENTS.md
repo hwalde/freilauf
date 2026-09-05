@@ -641,7 +641,14 @@ overview next to the deferred ones and can be cancelled on their detail page.
 the record, report, log and incidents stay intact and the detail page keeps
 working. Only terminal statuses may go (`done`/`failed`/`aborted`): a running
 one is still being watched and a deferred/scheduled one would start later
-anyway, so archiving it would hide work that is not over. One click per row in
+anyway, so archiving it would hide work that is not over. **And not a finished
+run whose follow-up commission is open**, because archiving CLOSES the session
+(see below) and that is a session somebody is typing into — `displayStatus()`
+puts such a run back under "running" for exactly that reason, so the row said
+"running" and offered the archive button in the same breath. `archivable(run)`
+in `run-state.mjs` is the one rule, asked by the row's button, the row's bulk
+checkbox, the detail page and `archiveRecord()` alike; the refusal names the
+follow-up rather than claiming the run is not finished, which it is. One click per row in
 the overview (`POST /api/runs/<id>/archive`) or on the detail page; the
 **Archive** page (`/archive`, per repo like the overview) lists them
 newest-archived first with pagination (50 per page,
@@ -2154,6 +2161,21 @@ The remote is the backup, and that is a rule beyond the integrator:
    as the existing `anomaly:unpushed`, only carried out instead of reported.
    Remote branches are **not** deleted after a merge in v1: visible history is
    cheaper than an accidental deletion.
+
+**Which is why `anomaly:unpushed` may only ever mean "this lives only on this
+machine".** The watcher's `checkFinishedBranches()` asked `%(upstream:track)`
+and read ANY divergence as unpushed — but the integrator merges the run's
+branch into `{base}` and pushes THAT, which leaves the branch exactly one
+commit **behind** its upstream with nothing of its own missing. Measured on run
+d4ee07d2: `merged` at 16:47:56, `anomaly:unpushed {"track":"[behind 1]"}` at
+16:47:58, a message on the operator's phone at 16:47:59 — about work that was
+on `origin/main`. Two fences now, and the second is the one that generalizes:
+`branchOnRemote(upstream, track)` (reports.mjs, pure) counts only **ahead** as
+outstanding — `[behind n]` is pushed, no upstream and `[gone]` are not, and
+`cleanupWorktrees()` beside it had said "no [ahead]" in its own comment all
+along; and a run whose work the hub itself put on origin (`merge_status` of
+`merged` or `kept_on_branch`) is not asked the question at all, which is the
+rule `cleanupWorktrees()` already carried and this pass did not.
 
 ### Follow-up reports: a finished run can report again
 

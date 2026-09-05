@@ -23,6 +23,7 @@
   "web.internal_error": "内部错误：{msg}",
   "api.unknown_run": "未知运行",
   "api.unknown_incident": "未知事件",
+  "api.archive_followup_open": "该运行正在进行后续任务——归档会关闭它的会话；请等待后续报告",
   "api.archive_only_finished": "只有已结束的运行才能归档",
   "api.no_session": "没有会话",
   "api.no_session_given": "未指定会话",

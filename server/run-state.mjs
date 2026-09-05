@@ -54,6 +54,30 @@ export function displayStatus(run) {
 }
 
 /**
+ * May this run be put into the archive?
+ *
+ * Archiving is the operator's "put this finished work away", and it CLOSES the
+ * run's tmux session (web.mjs, closeArchivedSessions). So the question is not
+ * only whether the RECORD is terminal but whether anybody is still working in
+ * that session — and a finished run with an open follow-up commission is
+ * exactly such a run: `displayStatus()` puts it back under `running`, the
+ * overview row and the detail page say so, and the operator is typing into its
+ * terminal right now. Measured on run 49a26807: the row read "running —
+ * follow-up in progress" and offered the archive button in the very same row,
+ * where one click would have killed a live session mid-conversation.
+ *
+ * The rule lives here, next to `displayStatus()`, because it is the same kind
+ * of question — what does this run's state MEAN now — and because three places
+ * carried their own copy of it (the row's button, the row's bulk checkbox, the
+ * detail page) next to the one the server enforces in `archiveRecord()`. Two
+ * copies of the "only finished runs" rule is how one of them eventually
+ * archives a run that is still being worked on.
+ */
+export function archivable(run) {
+  return !!run && FINISHED.includes(run.status) && !followUpActive(run)
+}
+
+/**
  * The anomalies that are statements about a run IN FLIGHT — "nothing is
  * happening", "this is taking longer than planned", "its session vanished".
  *
