@@ -39,6 +39,11 @@ a day on which nothing was released.
   own "working" hook now opens the follow-up commission — the run displays as
   running again, exactly as if the send form had been used. An answer typed
   into the terminal likewise ends a help call (`Waiting for help` → `Running`).
+  The two or three tool calls an agent makes after `fl-report done` do NOT
+  count: only a submitted line opens a follow-up at once, a tool call only
+  after a two-minute grace window since the report
+  (`FREILAUF_ATTENTION_GRACE_MS`), so a finished run reads "Done", not
+  "Waiting for input", once its agent goes quiet.
 - **The watcher believes the agent.** No "no activity" flag and no follow-up
   overrun while the agent says it waits for input; a running run whose agent
   stopped without reporting turns yellow instead.

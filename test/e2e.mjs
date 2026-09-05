@@ -1885,11 +1885,20 @@ try {
       await sessionMerken(RF)
       await flReport(RF, ['_working'])
       db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(RF)
-      // The terminal writes into tmux directly; the send route is never called.
-      // The agent's own hook is the first the hub hears of it.
+      // The agent makes two or three more tool calls after `fl-report done` —
+      // a summary, a `git status` — before it stops. Those arrive as `_working
+      // tool` on a run that is already done, and inside the grace window after
+      // the report they are the reporting turn finishing, not a commission.
+      wahr((await flReport(RF, ['_working', 'tool'])).ok, 'a tool call right after the report')
+      gleich(lauf(RF).followup_since, null, 'is not a commission')
+      gleich(lauf(RF).agent_state, 'working', 'but the state is noted')
       wahr((await flReport(RF, ['_turn_end'])).ok, 'the agent stops after its report')
       gleich(lauf(RF).followup_since, null, 'a turn end on a finished run commissions nothing')
-      wahr((await flReport(RF, ['_working'])).ok, 'the operator typed, the agent works')
+      enthaelt(await (await hol(`/runs/${RF}`)).text(), '"status-chip">Done<', 'and the run reads done, not waiting for input')
+      // The terminal writes into tmux directly; the send route is never called.
+      // The agent's own prompt hook is the first the hub hears of it — and a
+      // human's line is a commission whenever it comes.
+      wahr((await flReport(RF, ['_working', 'prompt'])).ok, 'the operator typed, the agent works')
       const l = lauf(RF)
       gleich(l.status, 'done', 'the record stays done')
       wahr(!!l.followup_since, 'but a commission is open')
@@ -1919,6 +1928,19 @@ try {
       await flReport(RF, ['_working'])
       await watcherTick()
       wahr(ereignisse(RF).includes('anomaly:followup_overrun'), 'a follow-up that works past the duration is one')
+    })
+
+    await pruefe('past the grace window a tool call is work somebody asked for', async () => {
+      // opencode's plugin cannot tell a typed line from a tool call (its
+      // status says busy either way): a busy that comes long after the last
+      // report is somebody's follow-up, and the window is what tells the two
+      // apart.
+      const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-attention-grace', expected_minutes: '45' })
+      await sessionMerken(j.runId)
+      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now','-3 minutes') WHERE id=?`).run(j.runId)
+      wahr((await flReport(j.runId, ['_working', 'busy'])).ok, 'busy, three minutes after the report')
+      wahr(!!lauf(j.runId).followup_since, 'is a commission')
+      wahr(ereignisse(j.runId).includes('followup_started'), 'recorded as such')
     })
 
     await pruefe('a follow-up report closes the commission, the agent may keep waiting', async () => {
@@ -3309,9 +3331,14 @@ try {
     const leiste = html.slice(html.indexOf('id="status-sidebar"'), html.indexOf('</aside>'))
     wahr(leiste.length > 50, 'the sidebar has content')
     enthaelt(leiste, 'Work in flight', 'the block by its name from lang/en.json')
-    const zaehl = (s) => db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND status=?`).get(repoId, s).c
+    // The same rule the sidebar renders by (server/run-state.mjs): "running"
+    // is the record's running minus the agents that say they wait, plus the
+    // finished runs with an open follow-up — the unit suite holds SQL and
+    // JavaScript together, this test holds the page to the SQL.
+    const { displayStatusSql, WORK_STATUSES } = await import('../server/run-state.mjs')
+    const zaehl = (s) => db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NULL AND ${displayStatusSql(s)}`).get(repoId).c
     let gesehen = 0
-    for (const s of ['running', 'waiting_help', 'scheduled', 'deferred']) {
+    for (const s of WORK_STATUSES) {
       const n = zaehl(s)
       if (!n) {
         // Zero is not information, it is furniture: the line is absent, not "0".
@@ -5839,6 +5866,11 @@ export default {
         await warteAuf(() => lauf(j.runId).agent_state === 'waiting',
           { was: `${h.name} reporting its turn end`, timeoutMs: 90_000, taktMs: 1000 })
         wahr(ereignisse(j.runId).includes('agent_waiting'), `${h.name} reported its turn end`)
+        // …and the calls it made AFTER `fl-report done` — measured: two or
+        // three, a summary or a `git status` — did not turn the finished run
+        // into a follow-up. It reads "done", not "waiting for input".
+        gleich(lauf(j.runId).followup_since, null, `${h.name}'s tail calls after the report opened no commission`)
+        enthaelt(await (await hol(`/runs/${j.runId}`)).text(), '"status-chip">Done<', `${h.name}'s run reads done`)
       })
     }
   }

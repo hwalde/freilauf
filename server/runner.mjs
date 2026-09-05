@@ -511,12 +511,15 @@ export function claudeSettingsJson() {
       // call. SubagentStop fires too (with the MAIN session's id, and even for a
       // background helper nobody asked for) and is deliberately NOT hooked: a
       // subagent's end says nothing about whether the run waits for a human.
-      UserPromptSubmit: hook('fl-report _working'),
+      UserPromptSubmit: hook('fl-report _working prompt'),
       // Detached, because claude blocks the tool call until the hook returns:
       // one fork per tool call, and the hub writes nothing unless the state
       // changed. It is the net under the one continuation UserPromptSubmit
       // cannot see — a `/goal` that makes claude take another turn by itself.
-      PreToolUse: hook('setsid -f fl-report _working >/dev/null 2>&1'),
+      // 'tool', not 'prompt': the two or three calls an agent makes AFTER
+      // `fl-report done` arrive here too, and on the then-finished run only a
+      // human's line may open a follow-up (reports.mjs, commissionOnWorking).
+      PreToolUse: hook('setsid -f fl-report _working tool >/dev/null 2>&1'),
       Stop: hook('fl-report _turn_end'),
       SessionEnd: hook('fl-report _exit'),
       // A prompt the agent cannot pass on its own. `permission_prompt` cannot
