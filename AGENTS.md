@@ -3252,6 +3252,44 @@ duration uses to retract its overrun). It announces explicitly, because nothing
 was ADDED: the live channel hangs on `addEvent()`, and a retraction no page
 hears about sits in the overview until the next unrelated event.
 
+**And the run's own END is the last retraction, which nobody had wired up.**
+Four things already take an anomaly back the moment it is overtaken — a
+progress report, a raised expected duration, a resume, activity coming back —
+and all four go through `clearAnomalies()`, which renames the event to
+`cleared:*` so no query for `anomaly:%` finds it again. The one event that
+overtakes every one of them was missing: the run coming through. Measured on
+this installation — run 9b6bfee6 ran 52 minutes against an expectation of 45,
+reported done and had its work merged into `main`, and stood in the overview
+with a **red** dot titled "needs attention"; `12c30c75`, `f2d4af1d` and
+`01c8a3b9` wore the same yellow, all three done and merged. Beside them
+`ff5af7ad`, which had genuinely called for help, was green. That is worse than
+noise: it spends the colour, and the reader cannot use the dot any more.
+
+`anomaliesSettled(run)` (run-state.mjs, next to `displayStatus()` because it is
+the same kind of question — what does this run's state MEAN now) is the anomaly
+half of what `vorfallWeggrund()` does for incidents, and for the same stated
+reason: a run that reached `done` has answered them. Three fences, each a way
+it would otherwise go wrong:
+
+- **`done` only.** A `failed` or `aborted` run KEEPS its anomalies and their
+  colour — there the anomaly is the explanation of why it did not come through,
+  which is exactly what one wants to read.
+- **Not while a follow-up commission is open**, because such a run says `done`
+  while a human is waiting on it; its `followup_*` anomalies describe work
+  happening right now.
+- **`IN_FLIGHT_ANOMALIES` is a list and not "everything".** `unpushed` is
+  written AFTER a run ended and stays true afterwards — work that lives only on
+  this machine still does — so it is not in it, and neither are the follow-up
+  overruns. The four that are (`no_activity`, `soft_overrun`, `overrun`,
+  `session_gone`) are exactly the ones the existing `clearAnomalies()` callers
+  already treat as retractable; the list is evidence, not taste.
+
+Only the **colour** ends. The event is not rewritten (`clearAnomalies()` is
+deliberately NOT called here — a run's end is not a claim that the overrun did
+not happen), the status cell still prints the anomaly as its dim history line,
+and the duration column next to it says 52/45 anyway. `ampel()` is exported for
+the test that holds this.
+
 ### opencode's activity: a run is a session TREE
 
 `server/opencode-store.mjs` — split off from watcher.mjs the way
@@ -3332,6 +3370,28 @@ is gone" above) — since the evidence rule generalized, that includes the
 already answered what a model or auth hiccup during it meant. The notification
 states the group in its second line, so the reader can tell a "get up" from a
 "noted" without opening the hub.
+
+**Which means `typVonText()` decides who gets woken up, and a type it cannot
+name is filed as "nothing to do".** `unbekannt` is not in `MENSCH_TYPEN`, so a
+red incident the classifier missed lands under "Noticed — the hub carried on by
+itself (deferred, retried, or the agent simply kept working)". Measured
+2026-09-04: four opencode runs hit the OpenRouter key's daily credit cap within
+22 minutes and were refused with
+
+    This request requires more credits, or fewer max_tokens. You requested up
+    to 32000 tokens, but can only afford 20932 … adjust the key's daily limit
+    Prompt tokens limit exceeded: 365512 > 344659 … adjust the key's daily limit
+
+Neither says `402`, `billing`, `insufficient credits` or `credit balance` — the
+only money words the branch knew — so all four went out as "🔴 API error … for
+information, nothing to do". The hub had carried on with none of it: run
+98d81463 had burned $72.66, stopped at the first refusal and stood in `running`
+for eight hours until a human closed its session. `incidents.needs_you_hint`
+names credits in its first three words for exactly this case. So: **when a
+vendor invents a new way to say "no money", it belongs in the billing branch
+the same day** — narrow, each alternative naming money or the key's own spend
+cap, never a bare "limit" (a daily RATE limit is still `rate_limit`, and
+`rate_limit` is checked after billing precisely so the two do not swap).
 
 cursor, like hermes, has **no** hook for API errors (its hook enum knows
 `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `afterFileEdit`,

@@ -112,6 +112,25 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A run that came through no longer keeps calling for attention.** A run that
+  took longer than expected, or was quiet for a while, collected an anomaly and
+  wore its traffic light for ever — so a run that had reported done and had its
+  work merged into `main` sat in the overview with a red dot titled "needs
+  attention", beside a run that had genuinely called for help and was green.
+  An anomaly is a statement about a run *in flight*, and reaching the end
+  answers it, the same way a `done` run's incidents already close themselves.
+  The colour ends; the record does not — the row still names the anomaly as
+  history, next to a duration column saying the same thing. A `failed` or
+  `aborted` run keeps its colour: there the anomaly is the explanation of why
+  it did not come through.
+- **"Out of credit" is no longer reported as "API error, nothing to do".** The
+  two wordings OpenRouter refuses a spent key with — *"requires more credits …
+  can only afford"* and *"adjust the key's daily limit"* — name neither 402 nor
+  "insufficient credits", so they fell through to the unknown type. That type
+  is not one that asks for hands, so four runs that had stopped dead at an
+  exhausted daily credit cap were each announced as "Noticed, nothing to do:
+  the hub carried on by itself". It had not. They are `Credits/billing` now and
+  land in "Needs you", where the hint has named credits all along.
 - A flow run waiting on a run that had ended more than an hour before a hub
   restart was never resumed and never pruned; it is resumed now.
 

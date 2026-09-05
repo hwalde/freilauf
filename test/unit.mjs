@@ -1696,6 +1696,20 @@ try {
     gleich(typVonText('402 insufficient credits'), 'billing_error', '402 before the rate-limit check')
     gleich(typVonText('model_not_found: no such model'), 'model_error', 'model')
     gleich(typVonText('alles gut'), 'unbekannt', 'no match')
+
+    // The two wordings OpenRouter refuses a spent key with. Measured 2026-09-04
+    // on this installation: four runs, four red incidents, all of them filed as
+    // 'unbekannt' → "API error … the hub carried on by itself". It had not.
+    gleich(typVonText('This request requires more credits, or fewer max_tokens. You requested up to '
+      + "32000 tokens, but can only afford 20932. To increase, visit https://openrouter.ai/… and adjust the key's daily limit"),
+      'billing_error', 'OpenRouter: "requires more credits … can only afford"')
+    gleich(typVonText('Prompt tokens limit exceeded: 365512 > 344659. To increase, visit '
+      + "https://openrouter.ai/… and adjust the key's daily limit"),
+      'billing_error', "OpenRouter: a spent key's daily limit")
+    // …and the neighbours it must not swallow: a plain rate limit stays one,
+    // and a bare "limit" with no money next to it is still no verdict.
+    gleich(typVonText('Rate limit exceeded: free-models-per-day'), 'rate_limit', 'a daily RATE limit is not billing')
+    gleich(typVonText('context limit exceeded: 200000 > 180000'), 'unbekannt', 'a bare limit is not billing')
   })
 
   // An error hook fires while the process dies, and the hub is very often the
@@ -6604,6 +6618,33 @@ try {
     gleich(r({ status: 'scheduled', agent_state: 'waiting' }), 'scheduled', 'a run without a session is what it is')
     wahr(followUpActive({ status: 'aborted', followup_since: 'x' }), 'followUpActive on followup_since')
     falsch(followUpActive({ status: 'running', followup_since: 'x' }), 'never on a running run')
+  })
+
+  await pruefe('anomaliesSettled: a run that came through has answered them', async () => {
+    // The traffic light in pages.mjs asks this before it lets an in-flight
+    // anomaly colour a row. The rule is here, next to displayStatus, because it
+    // is the same kind of question: what does this run's state MEAN now.
+    const { anomaliesSettled, IN_FLIGHT_ANOMALIES } = await import('../server/run-state.mjs')
+    wahr(anomaliesSettled({ status: 'done' }), 'done: settled')
+    falsch(anomaliesSettled({ status: 'running' }), 'a run in flight is not')
+    falsch(anomaliesSettled({ status: 'waiting_help' }), 'nor one asking a question')
+    // failed/aborted keep theirs — there the anomaly is the explanation of why
+    // the run did not come through, which is exactly what one wants to read.
+    falsch(anomaliesSettled({ status: 'failed' }), 'failed keeps its explanation')
+    falsch(anomaliesSettled({ status: 'aborted' }), 'aborted too')
+    // A finished run with an open follow-up commission is working right now.
+    falsch(anomaliesSettled({ status: 'done', followup_since: 'x' }), 'not while a follow-up is open')
+    falsch(anomaliesSettled({ status: 'done', followup_open: 1 }), 'nor while one is in the gate')
+    falsch(anomaliesSettled(null), 'no run, no verdict')
+    // The list is the statements a run's own end answers. `unpushed` is NOT one
+    // of them: it is written AFTER the run ended and stays true afterwards —
+    // work that lives only on this machine is still work that lives only on
+    // this machine. Neither are the follow-up overruns, which describe a
+    // commission that is open right now.
+    for (const k of ['anomaly:unpushed', 'anomaly:followup_overrun', 'anomaly:followup_soft_overrun']) {
+      falsch(IN_FLIGHT_ANOMALIES.includes(k), `${k} is not settled by the run ending`)
+    }
+    wahr(IN_FLIGHT_ANOMALIES.every(k => k.startsWith('anomaly:')), 'and every entry is an anomaly kind')
   })
 
   await pruefe('displayStatusSql selects exactly the rows displayStatus would', async () => {
