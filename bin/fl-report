@@ -17,9 +17,12 @@
 #   fl-report _api_error [error] ["text"]         Rate-limit/provider error (from hooks);
 #                                                  without arguments: Claude hook JSON on stdin
 #   fl-report _turn_end|_exit|_rate_limit|_idle|_pane_died [exit]   internal hooks
-#   fl-report _working|_waiting                    the agent's attention (from hooks):
+#   fl-report _working [prompt|tool] | _waiting    the agent's attention (from hooks):
 #                                                  it started processing input / its
-#                                                  turn is over and it waits for a human
+#                                                  turn is over and it waits for a human.
+#                                                  'prompt' = a human submitted a line;
+#                                                  anything else is a tool call or a
+#                                                  status the CLI reports by itself
 #
 # Source: FL_RUN_ID + FL_HUB_URL from the environment (CC_RUN_ID/CC_HUB_URL are
 # still accepted, for sessions started before the rename). Fallback when the hub is not
@@ -130,6 +133,13 @@ elif kind == "branch":
     body["branch"] = text
 elif kind == "pr":
     body["pr"] = text
+elif kind in ("_working", "_waiting"):
+    # The optional source word ('prompt' / 'tool' / whatever the hook says):
+    # the hub reads 'prompt' as a human typing — a commission on a finished
+    # run — and everything else as the CLI going about its turn (reports.mjs,
+    # commissionOnWorking).
+    if text:
+        body["source"] = text.split()[0][:40]
 else:
     if file_arg and os.path.isfile(file_arg):
         with open(file_arg, encoding="utf-8", errors="replace") as fh:

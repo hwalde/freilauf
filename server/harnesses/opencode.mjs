@@ -99,7 +99,7 @@ const plugin = {
    * only, and that was measured: a subagent is a child session in the same
    * worktree, and its idle arrives while the parent is still working.
    */
-  attention: { source: 'plugin', note: 'session.status of the root session: busy → _working, idle → _waiting' },
+  attention: { source: 'plugin', note: 'session.status of the root session: busy → _working busy, idle → _waiting' },
 
   subscription: false,
   providers: ['opencode-zen', 'deepseek', 'openrouter'],

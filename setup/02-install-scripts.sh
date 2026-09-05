@@ -102,7 +102,11 @@ export const Freilauf = async ({ $, client }) => {
   const attention = async (state) => {
     if (state === last) return
     last = state
-    await melden(state === 'busy' ? '_working' : '_waiting')
+    // 'busy', not 'prompt': opencode's status says nothing about WHY the
+    // session is busy — a typed line and a tool call after `fl-report done`
+    // look the same — so on a finished run the hub applies its grace window
+    // after the report before it reads this as a follow-up (reports.mjs).
+    await melden(state === 'busy' ? '_working' : '_waiting', state)
   }
 
   return {

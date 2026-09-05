@@ -2598,10 +2598,10 @@ built-in wires, all four measured on 2026-09-05 in a tmux session:
 
 | Coding agent | working | waiting | where the hook lives |
 |---|---|---|---|
-| claude 2.1.261 | `UserPromptSubmit` (the launch prompt, every line typed or pasted into the TUI), `PreToolUse` detached with `setsid -f` | `Stop` (1–2 s after the answer), `Notification` with matcher `idle_prompt\|permission_prompt` (`idle_prompt` comes 60 s after Stop) | `claudeSettingsJson()` in runner.mjs, `--settings` on the command line |
-| cursor 2026.08.25 | `beforeSubmitPrompt` (launch prompt and every follow-up at "→ Add a follow-up") | `stop` | `.cursor/hooks.json`, `hookFiles` in the plugin |
-| opencode 1.18.29 | `session.status busy` | `session.status idle` | `~/.config/opencode/plugins/freilauf.js`, written by `setup/02` |
-| hermes 0.21.0 | `pre_llm_call` | `on_session_end` (fires per turn) | `hooks:` in `~/.hermes/config.yaml`, appended by `setup/02`; `bin/fl-hermes-hook` maps the event, `--accept-hooks` on the launch line gives the consent hermes would otherwise ask for at the TTY |
+| claude 2.1.261 | `UserPromptSubmit` → `_working prompt` (the launch prompt, every line typed or pasted into the TUI), `PreToolUse` → `_working tool`, detached with `setsid -f` | `Stop` (1–2 s after the answer), `Notification` with matcher `idle_prompt\|permission_prompt` (`idle_prompt` comes 60 s after Stop) | `claudeSettingsJson()` in runner.mjs, `--settings` on the command line |
+| cursor 2026.08.25 | `beforeSubmitPrompt` → `_working prompt` (launch prompt and every follow-up at "→ Add a follow-up") | `stop` | `.cursor/hooks.json`, `hookFiles` in the plugin |
+| opencode 1.18.29 | `session.status busy` → `_working busy` | `session.status idle` | `~/.config/opencode/plugins/freilauf.js`, written by `setup/02` |
+| hermes 0.21.0 | `pre_llm_call` → `_working prompt` | `on_session_end` (fires per turn) | `hooks:` in `~/.hermes/config.yaml`, appended by `setup/02`; `bin/fl-hermes-hook` maps the event, `--accept-hooks` on the launch line gives the consent hermes would otherwise ask for at the TTY |
 
 **A subagent's end is never "waiting", and that was the trap.** opencode opens
 a child session per subagent in the same worktree and every one of them emits
@@ -2632,6 +2632,22 @@ session's status only. claude's `SubagentStop` fires with the MAIN session's id
   had been used; the commission stays open across the agent's waits (it ends
   with the follow-up report or the session, as before), so "waiting for input"
   on a finished run means "you were talking to it and it has answered".
+  **With one fence, and it was the first thing production showed:**
+  `fl-report done` is a tool call inside the turn, and an agent makes two or
+  three more calls after it — a summary, a `git status`, deleting its task
+  file — before it stops. Each arrived as `_working` on a run that was already
+  done, opened a commission, and the run then read "waiting for input" instead
+  of "done". So the hook says what it saw: `_working prompt` for a submitted
+  line (claude UserPromptSubmit, cursor beforeSubmitPrompt, hermes
+  pre_llm_call) opens the commission at once — nothing but a person produces
+  it — and `_working tool` / `busy` / anything else only once the **grace
+  window** since the last report has passed (`commissionOnWorking()`,
+  `lastReportMs()`: the later of `ended_at` and the last report event; two
+  minutes, `FREILAUF_ATTENTION_GRACE_MS`). Inside the window such a call is the
+  reporting turn finishing, the state is noted and nothing else. The price is
+  on opencode, whose plugin cannot tell a typed line from a tool call: a
+  follow-up typed within two minutes of the report is recognised at the first
+  busy after the window.
 - **An answer typed into the terminal ends a help call.** `_working` on a
   `waiting_help` run calls `answerHelpCall()` — shared with the send route and
   the flow's message step — with no text: the status goes back to `running`,

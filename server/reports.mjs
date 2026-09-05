@@ -5,7 +5,7 @@ import db, { addEvent } from './db.mjs'
 // literally called `notify`, and a parameter that silently shadows a module
 // import is the kind of trap that only shows up the day somebody moves a line.
 import { notify as notifyChannels, notifyOnFor, detailUrl } from './notify.mjs'
-import { sh } from './util.mjs'
+import { sh, parseDbUtc } from './util.mjs'
 import { vorfallMelden, detektorLog } from './incidents.mjs'
 import { typVonClaudeFehler, typVonText, TYP_TEXT, fremdeClaudeSession, isSessionStopped } from './detect.mjs'
 import { getHarness } from './harnesses/index.mjs'
@@ -77,6 +77,53 @@ export function answerHelpCall(runId, text, via = 'web') {
               finish_started_at=CASE WHEN finish_state IS NULL THEN finish_started_at
                                      ELSE datetime('now') END WHERE id=? AND status='waiting_help'`).run(text, runId)
   addEvent(runId, 'help_answered', { text: text ? String(text).slice(0, 500) : null, via })
+}
+
+/**
+ * How long after a report a `_working` that is NOT a human prompt is still the
+ * tail of the reporting turn. `fl-report done` is a tool call INSIDE the turn,
+ * and an agent usually makes two or three more calls after it — prints a
+ * summary, runs `git status`, deletes its task file — before it stops.
+ * Every one of those arrives as `_working` on a run that is already `done`,
+ * and read as a commission it turned every finished run into "waiting for
+ * input" the moment the agent went quiet. Two minutes, `FREILAUF_ATTENTION_GRACE_MS`.
+ */
+export function attentionGraceMs() {
+  const raw = process.env.FREILAUF_ATTENTION_GRACE_MS
+  if (raw === undefined || raw === '') return 2 * 60_000
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : 2 * 60_000
+}
+
+/**
+ * Does a `_working` on a FINISHED run with no open commission open one? Pure,
+ * so the rule can be stated in a test.
+ *
+ *   source 'prompt'   a human submitted a line (claude UserPromptSubmit, cursor
+ *                     beforeSubmitPrompt, hermes pre_llm_call): a commission,
+ *                     whenever it comes — nothing but a person produces it.
+ *   anything else     a tool call, opencode's busy, an unnamed hook: only once
+ *                     the grace window since the last report has passed. Inside
+ *                     it, it is the reporting turn finishing.
+ */
+export function commissionOnWorking(source, sinceReportMs, graceMs = attentionGraceMs()) {
+  if (source === 'prompt') return true
+  return !(Number.isFinite(sinceReportMs) && sinceReportMs < graceMs)
+}
+
+/**
+ * The moment of the run's latest report — the end of the first attempt, or
+ * the latest follow-up's acceptance, whichever is later. Infinity ago when
+ * nothing is known, so an unknown never reads as "just now".
+ */
+export function lastReportMs(run) {
+  const stamps = []
+  if (run?.ended_at) stamps.push(parseDbUtc(run.ended_at))
+  const ev = db.prepare(`SELECT ts FROM events WHERE run_id=? AND kind IN ('done','followup_reported','followup_done','followup_failed')
+    ORDER BY id DESC LIMIT 1`).get(run?.id)?.ts
+  if (ev) stamps.push(parseDbUtc(ev))
+  const known = stamps.filter(Number.isFinite)
+  return known.length ? Math.max(...known) : -Infinity
 }
 
 /**
@@ -405,8 +452,10 @@ async function handleFollowUp(run, body, via) {
   // only one who noticed. With one open, or a follow-up in the gate (the agent
   // committing what the gate asked for), the state is all that changes.
   if (kind === '_working') {
-    noteAgentState(run, 'working', body.source ?? 'hook')
-    if (!run.followup_since && !run.followup_open && !run.finish_state) {
+    const source = body.source ?? 'hook'
+    noteAgentState(run, 'working', source)
+    if (!run.followup_since && !run.followup_open && !run.finish_state
+        && commissionOnWorking(source, Date.now() - lastReportMs(run))) {
       startFollowUpCommission(runId, null, 'session')
     }
     return { ok: true, message: null }

@@ -6673,6 +6673,27 @@ try {
     d.close()
   })
 
+  await pruefe('after a report, only a human prompt opens a follow-up — a tool call waits out the grace', async () => {
+    // `fl-report done` is a tool call INSIDE the turn; the two or three calls
+    // an agent makes after it arrive as `_working` on a finished run. Read as
+    // a commission they turned every finished run into "waiting for input".
+    const { commissionOnWorking, attentionGraceMs } = await import('../server/reports.mjs')
+    const grace = 120_000
+    wahr(commissionOnWorking('prompt', 5_000, grace), 'a prompt right after the report is a commission')
+    wahr(commissionOnWorking('prompt', -Infinity, grace), 'a prompt with no known report is one too')
+    falsch(commissionOnWorking('tool', 5_000, grace), 'a tool call 5 s after the report is the turn finishing')
+    falsch(commissionOnWorking('busy', 119_000, grace), "opencode's busy inside the window too")
+    wahr(commissionOnWorking('tool', 121_000, grace), 'past the window a tool call is work somebody asked for')
+    wahr(commissionOnWorking('hook', -Infinity, grace), 'and with no report known at all, nothing is held back')
+    wahr(commissionOnWorking('tool', NaN, grace), 'NaN is not "just now" either')
+    gleich(attentionGraceMs(), 120_000, 'two minutes by default')
+    process.env.FREILAUF_ATTENTION_GRACE_MS = '5000'
+    gleich(attentionGraceMs(), 5_000, 'configurable')
+    process.env.FREILAUF_ATTENTION_GRACE_MS = 'junk'
+    gleich(attentionGraceMs(), 120_000, 'junk means the default, never zero')
+    delete process.env.FREILAUF_ATTENTION_GRACE_MS
+  })
+
   await pruefe('every built-in coding agent declares how its attention reaches the hub', async () => {
     const { HARNESS_PLUGINS: HP } = await import('../server/harnesses/index.mjs')
     for (const id of ['claude', 'opencode', 'hermes', 'cursor']) {
@@ -6684,8 +6705,8 @@ try {
     const { claudeSettingsJson } = await import('../server/runner.mjs')
     const j = JSON.parse(claudeSettingsJson())
     const cmd = (ev) => j.hooks[ev][0].hooks[0].command
-    gleich(cmd('UserPromptSubmit'), 'fl-report _working', 'a prompt starts a turn')
-    enthaelt(cmd('PreToolUse'), 'fl-report _working', 'a tool call is work')
+    gleich(cmd('UserPromptSubmit'), 'fl-report _working prompt', 'a prompt starts a turn — and says it was a prompt')
+    enthaelt(cmd('PreToolUse'), 'fl-report _working tool', 'a tool call is work, and says it was a tool call')
     enthaelt(cmd('PreToolUse'), 'setsid -f', 'and it must not hold the tool call up')
     gleich(cmd('Stop'), 'fl-report _turn_end', 'the turn end is the waiting')
     gleich(cmd('Notification'), 'fl-report _waiting', 'the idle prompt is the net under it')
@@ -6699,7 +6720,7 @@ try {
   await pruefe('cursor: beforeSubmitPrompt reports work, stop reports the wait', async () => {
     const { HARNESS_PLUGINS: HP } = await import('../server/harnesses/index.mjs')
     const j = JSON.parse(HP.cursor.hookFiles({ flReport: '/bin/fl-report' })[0].content)
-    gleich(j.hooks.beforeSubmitPrompt[0].command, '/bin/fl-report _working', 'a typed follow-up starts a turn')
+    gleich(j.hooks.beforeSubmitPrompt[0].command, '/bin/fl-report _working prompt', 'a typed follow-up starts a turn, as a prompt')
     gleich(j.hooks.stop[0].command, '/bin/fl-report _turn_end', 'and the stop hook stays the turn end')
   })
 

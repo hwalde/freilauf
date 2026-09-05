@@ -93,7 +93,7 @@ const plugin = {
    * with arguments: hermes splits it itself and runs no shell, so an
    * environment assignment in front of it is "command not found".
    */
-  attention: { source: 'config', note: 'pre_llm_call → _working, on_session_end → _turn_end (bin/fl-hermes-hook)' },
+  attention: { source: 'config', note: 'pre_llm_call → _working prompt, on_session_end → _turn_end (bin/fl-hermes-hook)' },
 
   subscription: false,
   providers: ['openrouter', 'opencode-zen', 'deepseek'],
