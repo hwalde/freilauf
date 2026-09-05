@@ -526,6 +526,11 @@ body.term-cinema-on details.run-term { order: -1; }
    measured viewport height would fight it. */
 #term-wrap.term-cinema:not(.term-full) #term { height: var(--cinema-h, 70vh); }
 .term-cinema-btn { float: right; margin-right: var(--sp-6); }
+/* Who gets the mouse. It is a toggle, so the pressed state has to be visible
+   without hovering for the tooltip — one of the three icons up there is a MODE
+   the terminal is in, and the other two are not. */
+.term-mouse-btn { float: right; margin-right: var(--sp-6); }
+.term-mouse-btn[aria-pressed="true"] { background: var(--surface-hover); border-color: var(--accent); }
 /* The notification switch of the run, right under the terminal (notifySwitch in pages.mjs). */
 .notify-switch { margin: var(--sp-8) 0; flex-wrap: wrap; }
 .err { color: var(--err); } .warn { color: var(--warn-text); } .ok { color: var(--ok-text); }

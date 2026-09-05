@@ -22,7 +22,8 @@ import {
 import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } from './title.mjs'
 import { extrasModelsMru, rememberExtrasModel, DEFAULT_EXTRAS_MODEL } from './extras-suggest.mjs'
 import { runEditAllowed } from './run-edit.mjs'
-import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES } from './run-state.mjs'
+import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
+  IN_FLIGHT_ANOMALIES, anomaliesSettled } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
@@ -89,10 +90,40 @@ const SEVERITY_CLASS = { rot: 'red', gelb: 'yellow' }
 /** …and the same value as a word on the incident line — it used to print raw. */
 const SEVERITY_TEXT = { rot: 'incidents.severity_red', gelb: 'incidents.severity_yellow' }
 
+/** The yellow anomaly kinds — every other `anomaly:*` is a red one. */
+const YELLOW_ANOMALIES = ['anomaly:no_activity', 'anomaly:soft_overrun', 'anomaly:followup_soft_overrun', 'anomaly:unpushed']
+
+const sqlList = kinds => kinds.map(k => `'${k}'`).join(',')
+
+/**
+ * The anomaly kinds this run may still be coloured by — as a WHERE fragment.
+ *
+ * `cleared:*` kinds fall out by themselves: `clearAnomalies()` renames the
+ * event, so neither `LIKE 'anomaly:%'` nor an IN-list matches a retracted one.
+ * What did NOT fall out until now is an anomaly on a run that has come
+ * through — `anomaliesSettled()` is that rule and `IN_FLIGHT_ANOMALIES` the
+ * list of statements a run's own end answers (server/run-state.mjs).
+ */
+function stillSpeaking(run) {
+  return anomaliesSettled(run) ? ` AND kind NOT IN (${sqlList(IN_FLIGHT_ANOMALIES)})` : ''
+}
+
+/** Does the run carry one of these anomalies, still asking for attention? */
+function hasAnomaly(run, kinds) {
+  return !!db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind IN (${sqlList(kinds)})${stillSpeaking(run)} LIMIT 1`)
+    .get(run.id)
+}
+
+/** …and the counterpart: any anomaly that is NOT one of the yellow ones. */
+function hasOtherAnomaly(run, kinds) {
+  return !!db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind LIKE 'anomaly:%'
+    AND kind NOT IN (${sqlList(kinds)})${stillSpeaking(run)} LIMIT 1`).get(run.id)
+}
+
 function ampel(run) {
   const vf = ampelAusVorfaellen(run.id)
   const red = vf === 'rot' || ['waiting_help', 'failed'].includes(run.status)
-    || db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind LIKE 'anomaly:%' AND kind NOT IN ('anomaly:no_activity','anomaly:soft_overrun','anomaly:followup_soft_overrun','anomaly:unpushed') LIMIT 1`).get(run.id)
+    || hasOtherAnomaly(run, YELLOW_ANOMALIES)
   // A run in the finish gate is at least yellow: it has reported, and something
   // is still keeping its work off the base branch. A blocked_* one is red
   // through its incident anyway.
@@ -103,9 +134,10 @@ function ampel(run) {
   const yellow = !red && (
     vf === 'gelb' || run.status === 'deferred' || !!run.finish_state
     || (run.status === 'running' && run.agent_state === 'waiting')
-    || db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind IN ('anomaly:no_activity','anomaly:soft_overrun','anomaly:followup_soft_overrun','anomaly:unpushed') LIMIT 1`).get(run.id))
+    || hasAnomaly(run, YELLOW_ANOMALIES))
   return red ? 'red' : yellow ? 'yellow' : 'green'
 }
+export { ampel }
 
 /**
  * The traffic light as a dot. All three carry the same kind of label, and it is
@@ -1344,11 +1376,27 @@ export async function pageRun(req, res, url, id) {
     // toggles and its label has to say which way it now goes; hub.js swaps
     // them. The buttons float right, so the one written FIRST sits rightmost —
     // the full-screen icon keeps the corner it has always had.
-    sessionOpen ? `<button type="button" id="term-cinema" class="icon-btn term-cinema-btn" aria-pressed="false" title="${e(t('run.terminal_cinema'))}" aria-label="${e(t('run.terminal_cinema'))}" data-title-exit="${e(t('run.terminal_cinema_exit'))}">▭</button>` : ''}</summary>
+    sessionOpen ? `<button type="button" id="term-cinema" class="icon-btn term-cinema-btn" aria-pressed="false" title="${e(t('run.terminal_cinema'))}" aria-label="${e(t('run.terminal_cinema'))}" data-title-exit="${e(t('run.terminal_cinema_exit'))}">▭</button>` : ''}${
+    // Who gets the mouse. A coding agent's TUI may take mouse reporting for
+    // itself — measured: claude leaves it to tmux (which then marks, copies
+    // and sends the selection on), opencode takes it and does nothing with a
+    // drag, so marking produced nothing at all there. This switches the mouse
+    // over to selecting in the browser, which no application in the pane can
+    // take away. A toggle and not a default, because it costs the TUI its
+    // clicks; hub.js says so in a toast the first time a drag comes up empty.
+    sessionOpen ? `<button type="button" id="term-mouse" class="icon-btn term-mouse-btn" aria-pressed="false" title="${e(t('run.terminal_mouse_select'))}" aria-label="${e(t('run.terminal_mouse_select'))}" data-title-agent="${e(t('run.terminal_mouse_agent'))}">🖱</button>` : ''}</summary>
     <div id="term-wrap">
       ${sessionOpen ? `<button type="button" id="term-full-exit" class="icon-btn term-exit" title="${e(t('run.terminal_fullscreen_exit'))}" aria-label="${e(t('run.terminal_fullscreen_exit'))}">✕</button>` : ''}
       <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
     </div>
+    ${
+    // Selecting copies to the clipboard by itself (hub.js), but only a live
+    // client can do it with a plain drag: tmux runs with `mouse on`, so the
+    // drag is a mouse report — and a read-only client's input is dropped, by
+    // tmux and by terminal.mjs alike. There Shift is what makes the selection
+    // xterm's own, and a terminal in which marking silently does nothing is
+    // exactly the shape this whole feature was missing.
+    sessionOpen && !live ? `<p class="dim">${e(t('run.terminal_copy_hint'))}</p>` : ''}
     ${notifySwitch(run)}
     ${live && !arbeitet ? `<p class="dim">${e(t('run.session_after_hint'))}</p>` : ''}
     ${live ? `<form onsubmit="return freilaufSend(this,'/api/runs/${id}/send')"><textarea name="text" rows="3" placeholder="${e(t('run.send_text_ph'))}"></textarea><button>${e(t('run.send'))}</button></form>` : ''}

@@ -41,7 +41,10 @@ const plugin = {
     interactiveArgs: ['--force', '--trust', { when: 'model', args: ['--model', '{model}'] }],
     // The resume form (fl-start --resume): `--resume <chat id>` with the
     // prompt as the next turn; the chat id is read out of the transcript
-    // (resumeId below). Not measured end to end yet — the flag is documented.
+    // (resumeId below). Measured end to end through fl-start (2026.09.02):
+    // the code word from the first turn came back, and the SAME transcript
+    // file grew — so the watcher's activity and end-of-turn sources keep
+    // reading the file they already read.
     resume: ['--force', '--trust', { when: 'model', args: ['--model', '{model}'] }, '--resume', '{resume_id}', '--', '{prompt}'],
   },
 

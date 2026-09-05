@@ -879,6 +879,43 @@ try {
     wahr(k.includes('cleared:anomaly:overrun'), 'marked as resolved')
     wahr(k.includes('cleared:anomaly:soft_overrun'), 'the yellow level too')
   })
+  await pruefe('a run that came through stops calling for attention', async () => {
+    // The traffic light is fed by incidents AND by the run's anomalies. An
+    // anomaly is a statement about a run IN FLIGHT — "this is taking longer
+    // than planned" — and every other way of overtaking one already retracts
+    // it: the progress report just above, a raised expected duration, a
+    // resume, activity coming back. The run REACHING ITS END was the one
+    // nobody had wired up. Measured on the production hub: run 9b6bfee6 ran 52
+    // minutes against an expectation of 45, reported done and had its work
+    // merged into main — and sat in the overview with a RED dot titled "needs
+    // attention", beside a run that had genuinely called for help and was
+    // green. Three more wore the same yellow, all of them done and merged.
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-Ampel', expected_minutes: '1' })
+    await sessionMerken(j.runId)
+    db.prepare(`UPDATE runs SET started_at=datetime('now','-5 minutes') WHERE id=?`).run(j.runId)
+    await watcherTick()
+    wahr(ereignisse(j.runId).includes('anomaly:overrun'), 'it overran')
+    const zeile = async () => (await (await hol(`/api/fragments/run-row?id=${j.runId}&repo=${repoId}`)).text())
+    enthaelt(await zeile(), 'class="dot red"', 'while it runs, an overrun is red — that is the point of it')
+
+    wahr((await flReport(j.runId, ['done', 'fertig'])).ok, 'reports done')
+    gleich(lauf(j.runId).status, 'done', 'and the record says so')
+    const fertig = await zeile()
+    falsch(fertig.includes('class="dot red"'), 'a finished run is not red for having been slow')
+    falsch(fertig.includes('class="dot yellow"'), 'and not yellow either')
+    enthaelt(fertig, 'class="dot green"', 'it came through')
+    // Nothing is rewritten: the event stays as history and the status cell goes
+    // on printing it, next to a duration column that says the same thing. What
+    // ends is the call for attention, not the record.
+    wahr(ereignisse(j.runId).includes('anomaly:overrun'), 'the anomaly event is untouched')
+    enthaelt(fertig, 'far over the expected duration', 'and the row still names it as history')
+
+    // A run that did NOT come through keeps its colour: there the anomaly is
+    // the explanation of why it did not.
+    db.prepare(`UPDATE runs SET status='aborted' WHERE id=?`).run(j.runId)
+    enthaelt(await zeile(), 'class="dot red"', 'an aborted run keeps what its anomaly says')
+    db.prepare(`UPDATE runs SET status='done' WHERE id=?`).run(j.runId)
+  })
   await pruefe('cost finalization really runs for finished runs', async () => {
     await watcherTick()
     const l = lauf(R1)

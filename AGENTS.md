@@ -3268,6 +3268,44 @@ duration uses to retract its overrun). It announces explicitly, because nothing
 was ADDED: the live channel hangs on `addEvent()`, and a retraction no page
 hears about sits in the overview until the next unrelated event.
 
+**And the run's own END is the last retraction, which nobody had wired up.**
+Four things already take an anomaly back the moment it is overtaken — a
+progress report, a raised expected duration, a resume, activity coming back —
+and all four go through `clearAnomalies()`, which renames the event to
+`cleared:*` so no query for `anomaly:%` finds it again. The one event that
+overtakes every one of them was missing: the run coming through. Measured on
+this installation — run 9b6bfee6 ran 52 minutes against an expectation of 45,
+reported done and had its work merged into `main`, and stood in the overview
+with a **red** dot titled "needs attention"; `12c30c75`, `f2d4af1d` and
+`01c8a3b9` wore the same yellow, all three done and merged. Beside them
+`ff5af7ad`, which had genuinely called for help, was green. That is worse than
+noise: it spends the colour, and the reader cannot use the dot any more.
+
+`anomaliesSettled(run)` (run-state.mjs, next to `displayStatus()` because it is
+the same kind of question — what does this run's state MEAN now) is the anomaly
+half of what `vorfallWeggrund()` does for incidents, and for the same stated
+reason: a run that reached `done` has answered them. Three fences, each a way
+it would otherwise go wrong:
+
+- **`done` only.** A `failed` or `aborted` run KEEPS its anomalies and their
+  colour — there the anomaly is the explanation of why it did not come through,
+  which is exactly what one wants to read.
+- **Not while a follow-up commission is open**, because such a run says `done`
+  while a human is waiting on it; its `followup_*` anomalies describe work
+  happening right now.
+- **`IN_FLIGHT_ANOMALIES` is a list and not "everything".** `unpushed` is
+  written AFTER a run ended and stays true afterwards — work that lives only on
+  this machine still does — so it is not in it, and neither are the follow-up
+  overruns. The four that are (`no_activity`, `soft_overrun`, `overrun`,
+  `session_gone`) are exactly the ones the existing `clearAnomalies()` callers
+  already treat as retractable; the list is evidence, not taste.
+
+Only the **colour** ends. The event is not rewritten (`clearAnomalies()` is
+deliberately NOT called here — a run's end is not a claim that the overrun did
+not happen), the status cell still prints the anomaly as its dim history line,
+and the duration column next to it says 52/45 anyway. `ampel()` is exported for
+the test that holds this.
+
 ### opencode's activity: a run is a session TREE
 
 `server/opencode-store.mjs` — split off from watcher.mjs the way
@@ -3349,6 +3387,28 @@ already answered what a model or auth hiccup during it meant. The notification
 states the group in its second line, so the reader can tell a "get up" from a
 "noted" without opening the hub.
 
+**Which means `typVonText()` decides who gets woken up, and a type it cannot
+name is filed as "nothing to do".** `unbekannt` is not in `MENSCH_TYPEN`, so a
+red incident the classifier missed lands under "Noticed — the hub carried on by
+itself (deferred, retried, or the agent simply kept working)". Measured
+2026-09-04: four opencode runs hit the OpenRouter key's daily credit cap within
+22 minutes and were refused with
+
+    This request requires more credits, or fewer max_tokens. You requested up
+    to 32000 tokens, but can only afford 20932 … adjust the key's daily limit
+    Prompt tokens limit exceeded: 365512 > 344659 … adjust the key's daily limit
+
+Neither says `402`, `billing`, `insufficient credits` or `credit balance` — the
+only money words the branch knew — so all four went out as "🔴 API error … for
+information, nothing to do". The hub had carried on with none of it: run
+98d81463 had burned $72.66, stopped at the first refusal and stood in `running`
+for eight hours until a human closed its session. `incidents.needs_you_hint`
+names credits in its first three words for exactly this case. So: **when a
+vendor invents a new way to say "no money", it belongs in the billing branch
+the same day** — narrow, each alternative naming money or the key's own spend
+cap, never a bare "limit" (a daily RATE limit is still `rate_limit`, and
+`rate_limit` is checked after billing precisely so the two do not swap).
+
 cursor, like hermes, has **no** hook for API errors (its hook enum knows
 `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `afterFileEdit`,
 `beforeSubmitPrompt`, `afterAgentResponse`, `stop`, `sessionStart`, `sessionEnd`,
@@ -3395,6 +3455,72 @@ errors (`post_api_request` only fires after success).
   browser rewraps the agent's window to its size while watching — with and
   without write access alike. The remedy would be `window-size manual` on the
   session.
+- **Marking in the browser terminal copied nothing, and xterm was not the one
+  failing to copy.** `bin/fl-start` sets `mouse on`, so a plain drag never
+  reaches xterm at all: it is a mouse report, tmux selects in copy-mode, and
+  its default `MouseDragEnd1Pane` binding copies the selection and cancels it.
+  Mark, copy, deselect — the gesture was complete; what was missing was the
+  last hop out of tmux. tmux does send it: with `set-clipboard` (default
+  `external`) and the `clipboard` terminal feature, which tmux 3.4 hands every
+  `xterm*` client by itself, the copied text goes to the client as OSC 52.
+  Measured against a real tmux client: `ESC ] 52 ; ; <base64> BEL` — note the
+  **empty** target field, so a handler matching on `c` sees nothing. xterm.js
+  registers no handler for the sequence and dropped it on the floor;
+  `hub.js` registers one (`term.parser.registerOscHandler(52, …)`) and writes
+  the browser's clipboard. Four things around it, each of them a way it goes
+  wrong: a payload of **`?` is a READ request** and is never answered — the
+  answer would hand the operator's clipboard to whatever runs in that session;
+  **`atob` gives bytes, not characters**, so without a `TextDecoder` every
+  umlaut in a copied line arrives broken; both clipboard ways need the document
+  focused, which is why an unfocused tab drops the sequence silently instead of
+  leaving a failure toast nobody asked for; and an operator whose tmux has
+  `set-clipboard off` (a server option — the hub does not touch it) loses this
+  path entirely and is left with the second one.
+  That second path is xterm's **own** selection, copied on mouse release and
+  then cleared, so both feel like one behaviour: it is what covers a read-only
+  client (tmux drops its input, so only Shift+drag selects — the page says so
+  under such a terminal), an application inside the pane that grabbed mouse
+  reporting, and a browser reached over plain http, where `navigator.clipboard`
+  does not exist at all and the old `execCommand` textarea is the fallback.
+  The drag is tracked from its **mousedown in the terminal**, because it may
+  end anywhere on the page and a bare document-wide mouseup would re-copy a
+  standing selection on every click.
+- **Whether marking works at all depends on the coding agent, and that is not
+  a metaphor.** Both paths above hang on who CONSUMES the mouse reports xterm
+  sends, and the pane's `#{mouse_any_flag}` answers it. Measured on this
+  machine, one fresh session each: **claude** leaves the mouse to tmux
+  (`any=0`), so tmux marks in copy-mode, copies, cancels and sends the text on
+  as OSC 52 — the whole gesture, for free. **opencode** takes mouse reporting
+  for itself (`any=1`, SGR, alternate screen) and does **nothing** with a drag:
+  zero bytes back, no selection anywhere, no copy. So "select and it is in the
+  clipboard" worked in one harness and silently did nothing in the other, and
+  no amount of clipboard code could have fixed the second — the events never
+  got near a selection. Shift is every terminal's way out of that
+  (`shouldForceSelection` → `event.shiftKey` off a Mac), and the 🖱 button in
+  the terminal's toggle line makes it the default for this browser: every mouse
+  event over the terminal is **re-dispatched carrying `shiftKey`**, so xterm
+  selects locally and emits no report at all. A toggle and not a default,
+  because those reports are also what lets one click inside a TUI; remembered
+  globally (`freilauf.term.mouse`) because it is a habit, not a property of one
+  run. And because a drag that does nothing is invisible as a fault, hub.js
+  says so once per page when a real drag ends with neither a selection nor a
+  copy.
+- **xterm stops propagation on its own element, so a listener that is not in
+  the CAPTURE phase never sees a real drag.** The copy-on-release above hung on
+  a `mouseup` listener on `document` and worked in the browser suite for weeks
+  of nothing — because the test dispatched a synthetic mouseup at `#term`,
+  which bubbles happily, while a hand's drag is swallowed inside `.xterm`.
+  Both listeners are `capture: true` now, and the tests drive Playwright's real
+  mouse instead of synthesising events. The lesson is the test's, not the
+  listener's: a synthetic event dispatched at the element you own proves that
+  your handler works and nothing whatsoever about the path a user takes.
+- **Under the native Fullscreen API only the fullscreen element's subtree is
+  rendered.** The toast box sits at the end of `<body>`, so every toast — the
+  copy confirmation above first of all — was invisible for as long as somebody
+  was in full screen, and nothing said so. It moves into `#term-wrap` with the
+  terminal and back out afterwards (`paint()` in hub.js); `position: fixed`
+  keeps working there, since a fixed element's containing block is only taken
+  away by `transform`/`filter`/`contain`, none of which that wrapper has.
 - **Esc belongs to the agent's TUI, so the full-screen terminal asks the
   browser for it.** The icon on the terminal's toggle line puts `#term-wrap`
   into `.term-full` (fixed, inset 0) **and** calls `requestFullscreen()` on it.

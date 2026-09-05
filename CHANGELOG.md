@@ -51,8 +51,8 @@ a day on which nothing was released.
   vanishes without the hub ending it — a server reboot, an update that took
   the tmux server, a dead server — the run is resumed in a new session:
   all four coding agents continue their conversation (with a short
-  continuation prompt naming what was already committed; measured for claude,
-  opencode and hermes), a plugin without a resume form is started afresh with
+  continuation prompt naming what was already committed; measured for all
+  four), a plugin without a resume form is started afresh with
   its original task behind a header saying the same. hermes 0.21 keeps its
   session in `~/.hermes/state.db` and, on a TTY, stays interactive after
   `-q` like the other three — the old "hermes exits when done" no longer
@@ -86,9 +86,30 @@ a day on which nothing was released.
 - `setup/03-install-services.sh` runs `loginctl enable-linger`, so the hub and
   the tmux server start at boot and not at the first login; `SETUP_WITH_AGENT.md`
   says what to do about OS updates and reboots.
+- **Marking text in the browser terminal copies it to the clipboard.** Drag
+  across a live session and the selection is in your system clipboard the
+  moment you let go, and the marking is cleared — the same gesture a terminal
+  on your own machine has. It works for a selection made with the keyboard in
+  tmux's copy-mode too, and in a read-only terminal (where tmux ignores the
+  mouse) by holding Shift while dragging; the page says so under such a
+  terminal. A short toast names every copy, because a clipboard written from a
+  remote session must not be written silently, and it says so as well when the
+  browser refused the clipboard. A request from inside the session to *read*
+  the clipboard is never answered.
+- **…and where the coding agent takes the mouse for itself, a button hands it
+  back to selecting.** Whether a plain drag can mark anything depends on the
+  agent in the session: claude leaves the mouse to tmux, which marks and copies
+  for you; opencode takes it and does nothing with a drag, so marking used to
+  produce nothing at all there. Hold Shift while dragging — that works
+  everywhere and always did — or press the new 🖱 button above the terminal,
+  and the mouse marks text instead of going to the agent (the setting is
+  remembered for every terminal, and the agent then no longer receives clicks).
+  When a drag comes up empty, the page now says why and names both ways out,
+  once per page instead of leaving you guessing.
 
 ### Changed
 
+- Toasts stay visible while the terminal is in full screen.
 - The opencode plugin in `~/.config/opencode/plugins/freilauf.js` (rewritten
   by `setup/02-install-scripts.sh`, which every deploy runs) no longer reports
   `session.idle` of every session; it reports the root session's busy/idle. A
@@ -106,6 +127,25 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A run that came through no longer keeps calling for attention.** A run that
+  took longer than expected, or was quiet for a while, collected an anomaly and
+  wore its traffic light for ever — so a run that had reported done and had its
+  work merged into `main` sat in the overview with a red dot titled "needs
+  attention", beside a run that had genuinely called for help and was green.
+  An anomaly is a statement about a run *in flight*, and reaching the end
+  answers it, the same way a `done` run's incidents already close themselves.
+  The colour ends; the record does not — the row still names the anomaly as
+  history, next to a duration column saying the same thing. A `failed` or
+  `aborted` run keeps its colour: there the anomaly is the explanation of why
+  it did not come through.
+- **"Out of credit" is no longer reported as "API error, nothing to do".** The
+  two wordings OpenRouter refuses a spent key with — *"requires more credits …
+  can only afford"* and *"adjust the key's daily limit"* — name neither 402 nor
+  "insufficient credits", so they fell through to the unknown type. That type
+  is not one that asks for hands, so four runs that had stopped dead at an
+  exhausted daily credit cap were each announced as "Noticed, nothing to do:
+  the hub carried on by itself". It had not. They are `Credits/billing` now and
+  land in "Needs you", where the hint has named credits all along.
 - A flow run waiting on a run that had ended more than an hour before a hub
   restart was never resumed and never pruned; it is resumed now.
 

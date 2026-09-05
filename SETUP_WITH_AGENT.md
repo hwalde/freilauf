@@ -188,6 +188,13 @@ the window, and waits until nothing is working any more; then reboot, and
 `freilauf undrain` afterwards. Never stop `freilauf-tmux.service` by hand — that
 IS the reboot for the agents.
 
+One more tmux setting is worth leaving alone: `set-clipboard` (default
+`external`). It is what makes tmux hand a copied selection to its client, and
+that is how marking text in the browser terminal ends up in the operator's
+clipboard. With `set-clipboard off` in somebody's `~/.tmux.conf` that path is
+gone and only Shift+drag still copies. The hub does not touch the option — it
+is a tmux **server** option and therefore the operator's, not ours.
+
 ### Upgrading an installation that still says cc-hub
 
 This project was called **cc-hub** until recently, and everything about it was

@@ -61,8 +61,9 @@ Freilauf does, and it only goes forward.
   LLM, branch, loop, notify you, call a URL, run a shell command
   ([server/flows/AGENTS.md](server/flows/AGENTS.md)).
 - **One window.** What runs, what it costs, what came out, what needs you — the
-  overview, a live terminal in the browser (xterm.js, read-only by default),
-  and notifications with a link straight to the run. The sidebar shows your
+  overview, a live terminal in the browser (xterm.js, read-only by default;
+  marking text in it puts the text in your clipboard), and notifications with
+  a link straight to the run. The sidebar shows your
   subscription windows, provider balances and what every tmux session on the
   machine costs in memory; a configurable cleanup agent ends the oldest idle
   sessions when it grows too large. **And your project's own numbers stand
