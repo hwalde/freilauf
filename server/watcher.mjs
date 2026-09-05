@@ -21,7 +21,7 @@ import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
 import { flowsTick } from './flows/triggers.mjs'
 import { reconcileClosedSession, tmuxSnapshot, sessionGone, shouldAutoClose, currentKeepMs, shouldCloseArchived, archiveSessionKeepMs,
-  sandboxRuntime, sandboxHubId, containerName, stopRunContainer, finishedAtMs } from './sessions.mjs'
+  sandboxRuntime, sandboxHubId, containerName, stopRunContainer, finishedAtMs, paneTarget } from './sessions.mjs'
 import { integrateTick, pushOperatorBase, integratorTimerOff, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 import { maybeAutoCleanup } from './cleanup.mjs'
 // The two seams of SANDBOX_RESEARCH.md §7.4.4 / §7.7. Both answer for an
@@ -39,8 +39,30 @@ import { env } from './env.mjs'
 
 let timer = null
 
+/**
+ * Is the hub's own watcher clock switched off, so that somebody else owns it?
+ *
+ * The third seam of exactly this shape, and the last one that was missing:
+ * `FREILAUF_INTEGRATOR_OFF` keeps two processes off one integration worktree,
+ * `FREILAUF_SANDBOX_REAPER_OFF` keeps two reapers off one container daemon —
+ * and the pass itself, which is the thing that CONTAINS both of them, had no
+ * fence at all. `test/sandbox-env.mjs`'s `prepareWatcher()` imports
+ * `watcher.mjs` into the TEST process and drives the passes by hand, while
+ * `hub.mjs` was meanwhile running its own 30-second interval against the same
+ * database. Two passes over one run's log read the same bytes, report the same
+ * line twice, and "the same error twice within ten minutes" is the rule that
+ * promotes a yellow observation to a red incident — so the e2e failures were
+ * always on an "exactly once" or an escalation level, and they moved from run
+ * to run and from assertion to assertion. Measured across three consecutive
+ * runs of one commit: 2, 3 and 1 failures, never the same set.
+ *
+ * The seam gates the TIMER, not `tick()`: a hand-driven pass in another
+ * process must go on working, and it is the only pass left when this is on.
+ */
+export function watcherTimerOff() { return env('WATCHER_OFF') === '1' }
+
 export function startWatcher() {
-  if (timer) return
+  if (timer || watcherTimerOff()) return
   timer = setInterval(() => tick().catch(e => console.error('[watcher]', e.message)), 30_000)
 }
 export function stopWatcher() { clearInterval(timer); timer = null }
@@ -94,7 +116,50 @@ export function closeOrphanedRuns(gnadenfristSek = 300) {
   return rows.length
 }
 
+/**
+ * One pass at a time, and the reason is a read-modify-write.
+ *
+ * `startWatcher()` is a plain 30-second interval, so a pass that takes longer
+ * than 30 s overlaps the next one — and the sandbox passes made a pass talk to
+ * a container daemon, which is exactly the kind of call that takes seconds.
+ * Two overlapping passes both load the same `runs` row, both read the same
+ * `log_offset`, and both scan the SAME bytes: `scanNewBytes()` then finds one
+ * log line twice, `reportIncident()` counts it twice, and `rateLogHit()`'s
+ * repetition path turns a single match into a RED incident plus a notification
+ * — the promotion the design deliberately reserves for a limit that stands.
+ * `flowsTick()` has carried this guard from the beginning
+ * (server/flows/AGENTS.md states it as a rule) and the comment above
+ * `sandboxPassesOff()` describes the identical problem one layer out; the tick
+ * itself simply never got it.
+ *
+ * Guarded HERE and not in the interval callback, so every in-process caller is
+ * covered — hub.mjs's first pass two seconds after listen is the second one,
+ * and it is the pass most likely to still be running when the interval fires.
+ * The e2e suite drives `tick()` from its OWN process against the hub's
+ * database, so a flag in this module can never turn one of its hand-driven
+ * passes into a silent no-op.
+ *
+ * A skipped pass is SAID, because a pass that quietly did nothing is the shape
+ * this whole file keeps being written against — and it is a log line rather
+ * than an incident: one overlap on a busy machine is normal, and alarming
+ * about it is the wolf `alerts.mjs` exists to prevent. `skippedTicks()` is the
+ * count, for anyone who wants to know whether "normal" has become "always".
+ */
+let tickBusy = false
+let tickSkips = 0
+export function skippedTicks() { return tickSkips }
+
 export async function tick() {
+  if (tickBusy) {
+    tickSkips++
+    console.error(`[watcher] a pass was still running — this one did nothing (skipped ${tickSkips} so far)`)
+    return
+  }
+  tickBusy = true
+  try { return await runTick() } finally { tickBusy = false }
+}
+
+async function runTick() {
   closeOrphanedRuns()
   await collectInboxes()
   // Runs whose resume did not get a session last time (the tmux server was a
@@ -222,7 +287,7 @@ async function sessionLebt(session) {
 
 // ---------- single run ----------
 async function watchRun(run) {
-  let st = { pane_dead: '?', dead_status: '', dead_time: '', pid: '', cmd: '' }
+  let st = { pane_dead: '?', dead_status: '', dead_signal: '', dead_time: '', pid: '', cmd: '' }
   if (run.tmux_session) {
     const lebt = await sessionLebt(run.tmux_session)
     // null = tmux did not answer. Skip this run for this pass and try again in
@@ -255,17 +320,45 @@ async function watchRun(run) {
       addEventOnce(run.id, 'anomaly:session_gone')
       reconcileClosedSession(run.id, 'watcher')
     } else {
-      const r = await sh('tmux', ['display', '-p', '-t', `=${run.tmux_session}`,
-        '#{pane_dead} #{pane_dead_status} #{pane_dead_time} #{pane_pid} #{pane_current_command}'])
+      // paneTarget(), not `=${name}`: this is a PANE target and the trailing
+      // colon is what makes it one. Without it tmux answers exit 0 with every
+      // format field empty (measured, see sessions.mjs) — `r.stdout.trim()` is
+      // then '', `st.pane_dead` stays '?' and the branch below never fires.
+      // That is exactly what happened: the hub's only harness-independent net
+      // under a dead agent — the one every plugin, every sandboxed run and
+      // every crashed CLI falls into — had never once caught anything, while
+      // watchFollowUps() further down had the colon all along.
+      //
+      // And the fields are separated by '|' and split on it, never by
+      // whitespace: a pane killed by a SIGNAL has no exit status, so
+      // `#{pane_dead_status}` is EMPTY and a whitespace split shifts every
+      // field one to the left. Measured (tmux 3.4, SIGKILL):
+      // '1  1788639504 2285306 sleep'.trim().split(/\s+/) put the pane's death
+      // TIME where the exit status belongs, and `exit_code` would have been
+      // recorded as 1788639504. `#{pane_dead_signal}` is what says 9 there,
+      // and it travels along rather than being lost.
+      const r = await sh('tmux', ['display', '-p', '-t', paneTarget(run.tmux_session),
+        '#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}|#{pane_dead_time}|#{pane_pid}|#{pane_current_command}'])
       if (r.ok && r.stdout.trim()) {
-        const [a, b, c, d, e] = r.stdout.trim().split(/\s+/)
-        st = { pane_dead: a, dead_status: b, dead_time: c, pid: d, cmd: e }
+        const [a, b, sig, c, d, e] = r.stdout.trim().split('|')
+        st = { pane_dead: a, dead_status: b, dead_signal: sig, dead_time: c, pid: d, cmd: e }
+      } else {
+        // The session answered has-session a moment ago, so an empty answer
+        // here is a question that went unanswered — say so. Silence is how the
+        // missing colon survived: nothing above it and nothing below it ever
+        // noticed that this query had stopped saying anything at all.
+        console.error(`[watcher] ${run.id}: tmux said nothing about the pane of ${run.tmux_session}` +
+          `${r.stderr ? ` (${r.stderr.trim()})` : ''}`)
       }
     }
   }
 
   if (st.pane_dead === '1') {
-    handleReport(run.id, { kind: '_pane_died', exit: st.dead_status }, 'internal').catch(() => {})
+    // Never swallowed: this is the path that ends a run whose agent is dead,
+    // and a `.catch(() => {})` on it means a run stays 'running' for ever with
+    // nothing anywhere saying why.
+    handleReport(run.id, { kind: '_pane_died', exit: st.dead_status, signal: st.dead_signal }, 'internal')
+      .catch(err => console.error(`[watcher] ${run.id}: _pane_died report failed:`, err?.message ?? err))
   }
 
   // Activity + tokens per harness
@@ -378,8 +471,10 @@ async function watchFollowUps() {
       continue
     }
     if (run.tmux_session) {
-      // The colon target: without it a live session can be missed (AGENTS.md).
-      const r = await sh('tmux', ['display', '-p', '-t', `=${run.tmux_session}:`, '#{pane_dead}'])
+      // The colon target: without it tmux answers exit 0 and says nothing
+      // (paneTarget(), sessions.mjs). This site had it by hand; watchRun()'s
+      // did not, and one of the two being right is how nobody noticed.
+      const r = await sh('tmux', ['display', '-p', '-t', paneTarget(run.tmux_session), '#{pane_dead}'])
       // No answer: tmux said nothing. The closeOldSessions pass owns the "is
       // the session still there" question and its consequences — wait.
       if (!r.ok || !r.stdout.trim()) continue
@@ -460,6 +555,35 @@ function neueBytes(pfad, offset, maxBytes = 2_000_000) {
 }
 
 /**
+ * Advance a run's scan offset, and say whether THIS pass is the one that got to
+ * read those bytes.
+ *
+ * `log_offset` and `transcript_offset` are a read-modify-write: the row is
+ * loaded at the top of a pass, the bytes past the offset are scanned, and the
+ * new offset is written back. A plain UPDATE spends that as a fact, so two
+ * readers of the same starting offset both scan the same bytes and both report
+ * what is in them — and "only new bytes, every line counts once", which is the
+ * whole reason these columns exist, quietly stops being true. One log line then
+ * arrives as `anzahl` 2, and `rateLogHit()`'s repetition path promotes a single
+ * match to a RED incident with a notification behind it.
+ *
+ * `tickBusy` above keeps two passes of ONE hub apart. This is the fence under
+ * it, because the readers need not be in one process: the e2e suite drives
+ * `tick()` from its own process against the running hub's database, and so does
+ * anything an operator starts by hand. The UPDATE therefore names the offset it
+ * expects to replace, and `changes === 0` means somebody else has already read
+ * past here — in which case the honest thing is to report nothing at all rather
+ * than a second time.
+ */
+export function claimOffset(column, run, expected, next) {
+  const r = db.prepare(`UPDATE runs SET ${column} = ? WHERE id = ? AND COALESCE(${column}, 0) = ?`)
+    .run(next, run.id, expected)
+  if (r.changes) return true
+  detectorLog(run.id, { art: 'offset', hinweis: 'another pass had already read these bytes', column, expected, next })
+  return false
+}
+
+/**
  * Claude transcript: API errors appear there as dedicated lines with isApiErrorMessage
  * and Claude's own error enum — as unambiguous as the hook, just without the hook.
  * Catches the case where the StopFailure hook did not run, and yields every occurrence
@@ -477,7 +601,10 @@ async function scanTranscript(run) {
   if (schnitt < 0) return
   const komplett = chunk.text.slice(0, schnitt + 1)
   const neuerOffset = (chunk.von ?? run.transcript_offset ?? 0) + Buffer.byteLength(komplett, 'utf8')
-  db.prepare('UPDATE runs SET transcript_offset = ? WHERE id = ?').run(neuerOffset, run.id)
+  // Claimed, not just written: see claimOffset(). These bytes are reported as
+  // RED incidents, so scanning them twice inflates the occurrence count of a
+  // single API error.
+  if (!claimOffset('transcript_offset', run, run.transcript_offset ?? 0, neuerOffset)) return
   const fehler = transcriptErrors(komplett)
   if (!fehler.length) return
   detectorLog(run.id, { art: 'transkript', treffer: fehler.length, bytes: komplett.length })
@@ -506,7 +633,9 @@ async function scanLog(run) {
   // the data (SANDBOX_RESEARCH.md §7.12.1).
   const { treffer, sandboxTreffer, neuerOffset } =
     scanNewBytes(run.harness, chunk.text, chunk.von ?? run.log_offset ?? 0, { sandbox: run.sandbox === 1 })
-  db.prepare('UPDATE runs SET log_offset = ? WHERE id = ?').run(neuerOffset, run.id)
+  // The claim is what makes "every line counts once" true rather than intended
+  // — nothing below this line may run for bytes somebody else already read.
+  if (!claimOffset('log_offset', run, run.log_offset ?? 0, neuerOffset)) return
   if (sandboxTreffer.length) {
     detectorLog(run.id, { art: 'sandbox', treffer: sandboxTreffer.map(t => t.zeile) })
     // Yellow and nothing more: a wall the agent ran into is worth SEEING, and a

@@ -307,6 +307,31 @@ export async function tmuxSessions() {
 // pass then looked session-less at once. Whoever needs the map builds it from
 // tmuxSnapshot().sessions AFTER reading snapshot.ok.
 
+/**
+ * The exact-match target for a command that wants a PANE — `display`,
+ * `capture-pane`, `pipe-pane`, `set-hook`. The trailing colon is not optional
+ * and its absence is silent, which is the whole reason this is a function
+ * rather than a template literal at each call site.
+ *
+ * Measured, tmux 3.4, one live session `r1` and one whose pane had died under
+ * `remain-on-exit`:
+ *
+ *   tmux display -p -t '=r1'  '#{pane_dead} …'  → exit 0, stdout '    '
+ *   tmux display -p -t '=r1:' '#{pane_dead} …'  → exit 0, stdout '1  1788… sleep'
+ *
+ * So `=name` is not a parse error and not an empty session list: it is exit 0
+ * with every format field expanded to nothing. Every caller written as
+ * `if (r.ok && r.stdout.trim())` therefore reads it as "tmux said nothing" and
+ * silently keeps its default — which is how the watcher's `#{pane_dead}` query
+ * went years without ever seeing a dead pane. Same family as
+ * `--no-optional-locks` after the subcommand making a dirty worktree read
+ * clean. `has-session` is the one command that takes a bare `=name`, because
+ * there it really is a session target.
+ */
+export function paneTarget(name) {
+  return `=${name}:`
+}
+
 export async function sessionAlive(name) {
   return (await sh('tmux', ['has-session', '-t', `=${name}`])).ok
 }

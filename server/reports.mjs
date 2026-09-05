@@ -172,6 +172,22 @@ export function clearAgentState(runId) {
 // So the CONTAINER is asked, and the codes decide only where asking cannot help.
 
 /**
+ * The exit status a dead pane carried, or null when it carried none.
+ *
+ * `Number('')` is 0 and finite, and so is `Number(null)` — the trap this
+ * project has an entry about under "Pitfalls". A pane killed by a SIGNAL has an
+ * EMPTY `#{pane_dead_status}` (measured, tmux 3.4: SIGKILL gives
+ * `pane_dead_signal=9` and no status at all), so a coercion that does not
+ * compare first writes `exit_code = 0` for an agent the kernel shot — a run
+ * whose record says it exited cleanly and whose agent never got to say
+ * anything. Compare, then convert.
+ */
+export function exitStatus(exit) {
+  const raw = exit === null || exit === undefined ? '' : String(exit).trim()
+  return raw !== '' && Number.isFinite(Number(raw)) ? Number(raw) : null
+}
+
+/**
  * Pure: what a dead pane means, given the run's sandbox flag, the pane's exit
  * status and what the daemon said about the container.
  *
@@ -190,8 +206,7 @@ export function clearAgentState(runId) {
  */
 export function panePostMortem({ sandboxed = false, exit = null, container = null } = {}) {
   if (!sandboxed) return { verdict: 'agent', reason: 'not sandboxed' }
-  const raw = exit === null || exit === undefined ? '' : String(exit).trim()
-  const code = raw !== '' && Number.isFinite(Number(raw)) ? Number(raw) : null
+  const code = exitStatus(exit)
   // Asked BEFORE the daemon, because the daemon cannot answer it: a container
   // that was never created looks exactly like one `--rm` has taken away.
   if (code === 125) {
@@ -269,8 +284,7 @@ async function paneCause(run, exit) {
  *    infrastructure rather than the agent.
  */
 async function paneClientGone(runId, run, cause, exit) {
-  const raw = exit === null || exit === undefined ? '' : String(exit).trim()
-  const code = raw !== '' && Number.isFinite(Number(raw)) ? Number(raw) : null
+  const code = exitStatus(exit)
   addEvent(runId, 'sandbox:client_gone',
     { exit: code, reason: cause.reason, container: run?.sandbox_container ?? null })
   if (run?.finish_state) return
@@ -566,12 +580,21 @@ export async function handleReport(runId, body, via = 'http') {
         break
       }
       if (cause.verdict === 'infra') { await paneClientGone(runId, fresh, cause, body.exit); break }
-      addEvent(runId, 'pane_died', { exit: body.exit ?? null })
+      // A pane killed by a SIGNAL carries no exit status — and `Number('')` is
+      // 0 AND finite, so the old coercion wrote a confident `exit_code = 0`
+      // ("exited cleanly") for an agent the kernel had shot. So did `null`,
+      // since `Number(null)` is 0 too. `exitStatus()` compares before it
+      // converts, the way every numeric setting in this project has to; the
+      // signal is kept next to it rather than thrown away, because "killed by
+      // 9" is the answer to why the run ended.
+      const signal = body.signal === undefined || body.signal === null || String(body.signal).trim() === ''
+        ? null : String(body.signal).trim()
+      addEvent(runId, 'pane_died', { exit: body.exit ?? null, signal })
       clearAgentState(runId)
       if (fresh?.finish_state) { await escalateGone(runId); break }
       if (fresh?.status === 'running') {
         db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), exit_code=? WHERE id=?`)
-          .run(Number.isFinite(+body.exit) ? +body.exit : null, runId)
+          .run(exitStatus(body.exit), runId)
         const assessment = await assessAfterEnd(runId)
         await notifyRun(runId, 'pane_died', `🔴 Process dead without a report (tmux pane_dead).${assessment}`)
       }

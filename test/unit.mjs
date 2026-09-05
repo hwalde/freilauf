@@ -6031,6 +6031,95 @@ try {
     equal(se.sessionGoneFrom({ ok: false, stdout: '', stderr: 'fork failed: Cannot allocate memory' }), null, 'a failed fork says nothing')
   })
 
+  // The one-character bug that made the hub's only harness-independent net
+  // under a dead agent catch nothing at all. `tmux display -p -t '=name'` is
+  // not an error and not an empty session list — measured against tmux 3.4 it
+  // is exit 0 with every format field expanded to nothing:
+  //
+  //   -t '=r1'   → exit 0, stdout '    '
+  //   -t '=r1:'  → exit 0, stdout '1  1788638454 2176073 sleep'
+  //                (that run was SIGKILLed, so the second field — the exit
+  //                status — is empty; watcher.mjs says what that costs)
+  //
+  // watchRun() reads that with `if (r.ok && r.stdout.trim())`, so it kept its
+  // '?' default, `st.pane_dead === '1'` was never true, and no run ever got a
+  // `_pane_died` report from the watcher: a crashed CLI, a plugin harness that
+  // exits, a sandboxed run whose container died at launch — all of them sat on
+  // 'running' until a human noticed. Every e2e test of that path called
+  // handleReport() directly, so the consumer was covered and the producer was
+  // not. Same family as `--no-optional-locks` after the subcommand making a
+  // dirty worktree read clean.
+  await check('a pane target carries the colon that makes it one', () => {
+    equal(se.paneTarget('fl-cc-abcd1234'), '=fl-cc-abcd1234:', 'exact match, and a pane target')
+    isTrue(se.paneTarget('x').endsWith(':'), 'the colon is the whole point')
+  })
+
+  await check('no tmux pane command in server/ asks for a bare "=name" target', async () => {
+    const { readdirSync } = await import('node:fs')
+    // A fence for the family, not for the one site: `display` fails SILENTLY on
+    // a bare '=name' (measured above), while send-keys and capture-pane answer
+    // "can't find pane" out loud. The silent one is why this is a test.
+    const root = new URL('../server/', import.meta.url).pathname
+    const files = []
+    const walk = (dir) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.isDirectory()) { if (e.name !== 'node_modules') walk(join(dir, e.name)) }
+        else if (e.name.endsWith('.mjs')) files.push(join(dir, e.name))
+      }
+    }
+    walk(root)
+    // 'display', 'capture-pane', 'pipe-pane', 'set-hook' and 'send-keys' all
+    // want a PANE. 'has-session', 'kill-session', 'attach-session' want a
+    // session and 'list-panes' a window — those take '=name' correctly.
+    const PANE_CMD = /'(display|display-message|capture-pane|pipe-pane|set-hook|send-keys)'/
+    const offenders = []
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8')
+      src.split('\n').forEach((line, i) => {
+        if (!PANE_CMD.test(line)) return
+        // the target may sit on this line or, for a wrapped argv, on the next
+        const window = line + '\n' + (src.split('\n')[i + 1] ?? '')
+        const m = /'-t',\s*`=\$\{[^`]*?\}`/.exec(window)
+        if (m) offenders.push(`${f.slice(root.length)}:${i + 1}: ${m[0]}`)
+      })
+    }
+    equal(offenders.length, 0, `bare "=name" pane targets: ${offenders.join(' | ') || 'none'}`)
+  })
+
+  // The scan offsets are a read-modify-write, and two readers of one hub's
+  // database are not hypothetical: `startWatcher()` is a plain 30-second
+  // interval with no guard against a pass that takes longer than 30 s (the
+  // sandbox passes talk to a container daemon), and the e2e suite drives
+  // `tick()` from its own process against the running hub. Both readers load
+  // the same row, both scan the bytes past the same offset, and both report
+  // what is in them — so ONE log line arrives as `anzahl` 2 and
+  // `rateLogHit()`'s repetition path promotes a single match to a RED incident
+  // with a notification behind it. The UPDATE names the offset it expects to
+  // replace, and losing that race means reporting nothing at all.
+  await check('scan bytes are claimed, so no line is ever counted twice', async () => {
+    const wdb = (await import('../server/db.mjs')).default
+    const { claimOffset } = await import('../server/watcher.mjs')
+    const repo = wdb.prepare('INSERT INTO repos(name,path) VALUES(?,?)')
+      .run('unit-offset', '/tmp/unit-offset').lastInsertRowid
+    const id = 'off5e70f-0000-4000-8000-000000000001'
+    wdb.prepare(`INSERT INTO runs(id,repo_id,status,harness,prompt,branch_mode,expected_minutes,log_offset)
+                 VALUES(?,?,'running','claude','p','keiner',45,0)`).run(id, repo)
+    const run = wdb.prepare('SELECT * FROM runs WHERE id=?').get(id)
+
+    isTrue(claimOffset('log_offset', run, 0, 120), 'the first reader gets the bytes')
+    equal(wdb.prepare('SELECT log_offset AS o FROM runs WHERE id=?').get(id).o, 120, 'and the offset moved')
+    // The second reader holds the SAME row it loaded a moment ago — which is
+    // exactly the shape of an overlapping pass.
+    isFalse(claimOffset('log_offset', run, 0, 120), 'the second finds them taken')
+    equal(wdb.prepare('SELECT log_offset AS o FROM runs WHERE id=?').get(id).o, 120,
+      'and nothing is written twice either')
+    // Going on from where the first one stopped is an ordinary claim, not a race.
+    isTrue(claimOffset('log_offset', run, 120, 300), 'the next stretch is claimed normally')
+    equal(wdb.prepare('SELECT log_offset AS o FROM runs WHERE id=?').get(id).o, 300, 'and written')
+    wdb.prepare('DELETE FROM runs WHERE id=?').run(id)
+    wdb.prepare('DELETE FROM repos WHERE id=?').run(repo)
+  })
+
   await check('the state is what the page shows, and it decides what is hidden', () => {
     const lebt = { dead: false }, tot = { dead: true }
     equal(se.sessionState(lebt, { status: 'running' }), 'agent_running', 'running')
@@ -11323,8 +11412,25 @@ process.stdout.write(JSON.stringify(out))
     // or a `docker run` that never got past `runc create` set the run `failed`.
     // What matters here is the DISTINCTION — an ordinary agent exit must still
     // behave exactly as it did, and infrastructure trouble must never end a run.
-    const { panePostMortem } = await import('../server/reports.mjs')
+    const { panePostMortem, exitStatus } = await import('../server/reports.mjs')
     const ok = (over) => ({ verdict: 'ok', exists: true, running: false, exitCode: 42, oom: false, status: 'exited', ...over })
+
+    // A pane killed by a SIGNAL carries no exit status at all — measured on
+    // tmux 3.4, a SIGKILLed process leaves `#{pane_dead_status}` empty and
+    // `#{pane_dead_signal}` at 9. `Number('')` is 0 and finite, and so is
+    // `Number(null)`, so a coercion that converts before it compares records
+    // the run as having exited CLEANLY. That is the `Number('')` trap on the
+    // one field that says why a run ended.
+    await check('a pane that carried no exit status does not get a confident 0', () => {
+      equal(exitStatus(''), null, 'a signal death carries no status')
+      equal(exitStatus(null), null, 'and neither does "nothing was said"')
+      equal(exitStatus(undefined), null, 'nor an absent field')
+      equal(exitStatus('   '), null, 'nor whitespace')
+      equal(exitStatus('0'), 0, 'but a real 0 is a real 0')
+      equal(exitStatus(0), 0, 'as a number too')
+      equal(exitStatus('42'), 42, 'and an ordinary status comes through')
+      equal(exitStatus('killed'), null, 'anything that is not a number is not one')
+    })
 
     await check('an unsandboxed run answers "agent" without asking anything', () => {
       equal(panePostMortem({ sandboxed: false, exit: 1 }).verdict, 'agent', 'exit 1')

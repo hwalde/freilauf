@@ -465,6 +465,18 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // worktree is a race nobody wants to debug. The hub still integrates on
       // the report path, which is where it matters.
       FREILAUF_INTEGRATOR_OFF: '1',
+      // …and the suite owns the WATCHER's clock for the same reason, one layer
+      // out. `prepareWatcher()` below imports watcher.mjs into THIS process and
+      // drives every pass by hand; the hub was meanwhile running its own
+      // 30-second interval against the same database, so two passes read one
+      // run's log from the same position and reported the same line twice —
+      // and "twice within ten minutes" is what promotes a yellow observation to
+      // a red incident. Every failure that produced was on an "exactly once" or
+      // an escalation level, and none of them was reproducible: three
+      // consecutive runs of one commit failed 2, 3 and 1 checks, never the same
+      // ones. The hub goes on watching on the paths that are driven by an
+      // event (a report, a hook) — only the clock moves to the suite.
+      FREILAUF_WATCHER_OFF: '1',
       FREILAUF_QUOTA_JSON: join(SB, 'quota.json'),
       // The report socket of §7.6 resolves to $XDG_RUNTIME_DIR/freilauf/hub.sock
       // when nothing names it — a path OUTSIDE the sandbox that a live hub and

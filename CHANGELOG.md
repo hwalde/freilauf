@@ -345,6 +345,40 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A run whose agent died stayed on "running" — the watcher had never once
+  noticed a dead pane.** This is the failure shape the whole project is written
+  against: a run that looks alive and is doing nothing. The watcher asks tmux
+  every 30 seconds whether the run's pane is dead, and it asked with the wrong
+  kind of target — a session name where a *pane* is wanted, one missing
+  character. tmux does not refuse that: it answers successfully and says
+  nothing at all, so the check read "tmux gave no answer", kept its default and
+  never fired. The consequence was the same for every coding agent and every
+  kind of run: a CLI that crashed, a process that exited, a sandboxed run whose
+  container died at launch — all of them sat in the overview as working agents
+  until a human looked. Seen on a sandboxed run whose container died at 19:18
+  and which was still "running" twelve minutes later with nothing written down
+  anywhere. Such a run is now failed within one pass, with the reason and the
+  exit status, and the notification that goes with it. Nothing else about the
+  path changed — it was simply never reached.
+- **A run whose agent was killed said it had exited cleanly.** The exit status
+  of a dead pane and the signal that killed it are two different things, and a
+  process the kernel shot (an out-of-memory kill, a `docker` client taken down
+  with its daemon) carries no exit status at all. It was recorded as `0` — the
+  code for "finished without error" — or, when two empty fields ran together, as
+  the pane's death time: an exit code in the billions. The run's record now says
+  the real status where there is one, nothing where there is none, and the
+  signal number next to it.
+- **One log line could raise a red incident and page you.** A watcher pass that
+  takes longer than 30 seconds overlapped the next one, and a pass now talks to
+  a container daemon, which is exactly the kind of call that takes seconds. Both
+  passes then read a run's log from the same position and reported the same line
+  twice, and "the same error twice within ten minutes" is what promotes a yellow
+  observation to a red incident with a message behind it. Two fences: a pass
+  that finds one still running does nothing and says so in the log, and the
+  reading position is now *claimed* rather than overwritten, so a second reader
+  — including one in another process, which is what the test suite is — reports
+  nothing instead of reporting it again. Every log line counts exactly once,
+  which is what it was always meant to do.
 - **The shipped sandbox profiles were shown in English to every reader.** Each
   of them declares a translated name and a one-line explanation, in all three
   languages, from the day they were written — and nothing ever printed them:

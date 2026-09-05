@@ -921,6 +921,72 @@ try {
     contains(await zeile(), 'class="dot red"', 'an aborted run keeps what its anomaly says')
     db.prepare(`UPDATE runs SET status='done' WHERE id=?`).run(j.runId)
   })
+  await check('the watcher notices a dead pane by itself', async () => {
+    // The producer side of `_pane_died`, which had NO test at all: every other
+    // check of that path calls handleReport() directly, so the consumer was
+    // covered and the thing that is supposed to CALL it was not. It never
+    // called it. watchRun() asked `tmux display -p -t '=name'` — a session
+    // target where a PANE target is wanted — and measured against tmux 3.4
+    // that is not an error and not an empty list: it is exit 0 with every
+    // format field expanded to nothing. `if (r.ok && r.stdout.trim())` reads
+    // that as "tmux said nothing", `st.pane_dead` keeps its '?' default, and
+    // the run stays 'running' with no event, no anomaly and nothing in the
+    // log. Seen in production on sandboxed run f365ea8e: the container died at
+    // launch, the pane was dead, and twelve minutes later the hub still had it
+    // as a working agent — but the fault was never sandbox-specific. It was
+    // every crashed CLI, every plugin harness that exits, every one of the
+    // hub's own harnesses when its process dies. watchFollowUps(), a hundred
+    // lines further down, had the colon all along.
+    const sname = 'fl-cc-panedead-watcher'
+    sessions.add(sname)
+    await sh('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', sname])
+    await sh('tmux', ['set-option', '-t', `=${sname}:`, 'remain-on-exit', 'on'])
+    // `exit 7` rather than a bare `exit`, so the exit STATUS is asserted too:
+    // the fields come out of ONE format string, and the one that used to be
+    // split on whitespace shifted left whenever a field before it was empty.
+    await sh('tmux', ['send-keys', '-t', `=${sname}:`, 'exit 7', 'Enter'])
+    await waitFor(async () => {
+      const r = await sh('tmux', ['display', '-p', '-t', `=${sname}:`, '#{pane_dead}'])
+      return r.ok && r.stdout.trim() === '1'
+    }, { what: 'the pane is dead', timeoutMs: 5000 })
+
+    // The bare target, measured here rather than argued about: tmux is happy
+    // with it and says nothing whatsoever.
+    const bare = await sh('tmux', ['display', '-p', '-t', `=${sname}`, '#{pane_dead}'])
+    isTrue(bare.ok, 'the bare target is not an error — that is the trap')
+    equal(bare.stdout.trim(), '', 'it answers exit 0 and NOTHING, so nobody noticed')
+
+    const id = randomUUID()
+    db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                 workdir_effective,tmux_session,started_at)
+                VALUES(?,?,'claude','the agent crashed','keiner',45,'running',?,?,datetime('now'))`)
+      .run(id, repoId, REPO, sname)
+    mkdirSync(join(SB, 'runs', id), { recursive: true })
+    await watcherTick()
+    const k = ereignisse(id)
+    isTrue(k.includes('pane_died'), `the watcher reported it (has: ${k.join(', ')})`)
+    equal(lauf(id).status, 'failed', 'and the run does not sit on "running" for ever')
+    equal(lauf(id).exit_code, 7, 'with the status the pane really carried')
+    db.prepare('DELETE FROM runs WHERE id=?').run(id)
+  })
+
+  await check('two watcher passes never overlap', async () => {
+    // `startWatcher()` is a plain 30-second interval, so a pass longer than 30 s
+    // ran into the next one — and a pass that reconciles containers talks to a
+    // daemon, which is exactly the call that takes seconds. Both passes then
+    // read one run's `log_offset`, scan the SAME bytes and report the same log
+    // line twice, which is how a single match becomes a red incident.
+    // `flowsTick()` has had this guard from the beginning; the tick itself
+    // never got it. A skipped pass is counted rather than silent.
+    const wa = await import('../server/watcher.mjs')
+    const vorher = wa.skippedTicks()
+    await Promise.all([wa.tick(), wa.tick()])
+    equal(wa.skippedTicks(), vorher + 1, 'the second pass found the first one running and did nothing')
+    // …and the flag is given back: the next pass runs normally.
+    await wa.tick()
+    equal(wa.skippedTicks(), vorher + 1, 'nothing was skipped once the first pass was over')
+  })
+
   await check('cost finalization really runs for finished runs', async () => {
     await watcherTick()
     const l = lauf(R1)
