@@ -31,9 +31,9 @@ import { getProvider, providerLabel } from './providers/index.mjs'
 import { harnessOwnCredentials } from './models.mjs'
 import { subscriptionUsage } from './usage.mjs'
 import { panelValues, panelState } from './panels.mjs'
-import { ampelAusVorfaellen, offeneVorfaelle, alleVorfaelle, brauchtMensch } from './incidents.mjs'
-import { TYP_TEXT } from './detect.mjs'
-import { llmModelleMru, llmModellMerken } from './pruefer.mjs'
+import { trafficLightFromIncidents, openIncidentsOf, allIncidentsOf, needsHuman } from './incidents.mjs'
+import { TYPE_TEXT } from './detect.mjs'
+import { llmModelsMru, rememberLlmModel } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
 import { resumeCommand } from './integrate.mjs'
 import { listSessions, sessionMemory, sessionKeepHours, currentKeepMs, paneAlive, archiveSessionKeepHours } from './sessions.mjs'
@@ -120,8 +120,8 @@ function hasOtherAnomaly(run, kinds) {
     AND kind NOT IN (${sqlList(kinds)})${stillSpeaking(run)} LIMIT 1`).get(run.id)
 }
 
-function ampel(run) {
-  const vf = ampelAusVorfaellen(run.id)
+function trafficLight(run) {
+  const vf = trafficLightFromIncidents(run.id)
   const red = vf === 'rot' || ['waiting_help', 'failed'].includes(run.status)
     || hasOtherAnomaly(run, YELLOW_ANOMALIES)
   // A run in the finish gate is at least yellow: it has reported, and something
@@ -137,19 +137,19 @@ function ampel(run) {
     || hasAnomaly(run, YELLOW_ANOMALIES))
   return red ? 'red' : yellow ? 'yellow' : 'green'
 }
-export { ampel }
+export { trafficLight }
 
 /**
  * The traffic light as a dot. All three carry the same kind of label, and it is
  * a translated one: the red dot used to say `title="rot"` — a raw German word,
  * on every row of the overview — while yellow and green said nothing at all.
  * Colour alone is not a channel everyone has, and the dot answers more than the
- * status word beside it does (incidents and anomalies feed `ampel()` too).
+ * status word beside it does (incidents and anomalies feed `trafficLight()` too).
  */
-const AMPEL_DOT = {
-  red: () => `<span class="dot red" title="${e(t('ampel.red'))}"></span>`,
-  yellow: () => `<span class="dot yellow" title="${e(t('ampel.yellow'))}"></span>`,
-  green: () => `<span class="dot green" title="${e(t('ampel.green'))}"></span>`,
+const TRAFFIC_LIGHT_DOT = {
+  red: () => `<span class="dot red" title="${e(t('traffic_light.red'))}"></span>`,
+  yellow: () => `<span class="dot yellow" title="${e(t('traffic_light.yellow'))}"></span>`,
+  green: () => `<span class="dot green" title="${e(t('traffic_light.green'))}"></span>`,
 }
 
 /**
@@ -185,7 +185,7 @@ function lastAnomaly(runId) {
 /** Name of an incident type, also for 'provider_down:openrouter'. */
 export function typName(typ) {
   const [kopf, rest] = String(typ).split(':')
-  const name = t(`incident.${kopf}`) !== `incident.${kopf}` ? t(`incident.${kopf}`) : (TYP_TEXT[kopf] ?? kopf)
+  const name = t(`incident.${kopf}`) !== `incident.${kopf}` ? t(`incident.${kopf}`) : (TYPE_TEXT[kopf] ?? kopf)
   return name + (rest ? ` (${rest})` : '')
 }
 
@@ -199,13 +199,13 @@ export function typName(typ) {
  * badge is what one reads, the action appears where one is about to click, and
  * the keyboard reaches it because focus inside the form reveals it too.
  */
-function vorfallZelle(runId, repoId, runStatus = null) {
-  const offen = offeneVorfaelle(runId)
+function incidentCell(runId, repoId, runStatus = null) {
+  const offen = openIncidentsOf(runId)
   if (!offen.length) return '<span class="leer">–</span>'
   return `<div class="incident-cell">${offen.map(v => {
     // '!' marks the ones that are waiting for hands — in a table of many runs
     // that mark is the whole difference between a to-do and a note.
-    const handeln = brauchtMensch(v, runStatus)
+    const handeln = needsHuman(v, runStatus)
     const titel = `${typName(v.typ)} · ${t('incidents.last')} ${fmtDbUtc(v.zuletzt_gesehen)}${v.beleg ? `\n${v.beleg}` : ''}`
     return `<span class="incident ${SEVERITY_CLASS[v.schwere]}" title="${e(titel)}">${handeln ? '❗ ' : ''}${e(typName(v.typ))} ${v.anzahl}×</span>
     <form method="post" action="/api/incidents/${v.id}/resolve" class="inline" onclick="event.stopPropagation()">
@@ -215,10 +215,10 @@ function vorfallZelle(runId, repoId, runStatus = null) {
 
 /** Global incidents (provider pulse) above all pages. */
 function globalesBanner() {
-  const offen = offeneVorfaelle(null)
+  const offen = openIncidentsOf(null)
   if (!offen.length) return ''
   return `<div class="banner red">${offen.map(v => `🔴 <b>${e(typName(v.typ))}</b> ${e(t('incidents.global_since', { ts: fmtDbUtc(v.erst_gesehen) }))} (${e(t('incidents.checked', { n: v.anzahl }))}) — ${e(v.beleg ?? '')}
-    <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/"><button>${e(t(brauchtMensch(v) ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`).join('<br>')}</div>`
+    <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/"><button>${e(t(needsHuman(v) ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`).join('<br>')}</div>`
 }
 
 /**
@@ -500,7 +500,7 @@ function openIncidents(repoId) {
   const offen = db.prepare(`SELECT i.*, r.status AS run_status FROM incidents i
     LEFT JOIN runs r ON r.id = i.run_id
     WHERE i.geloest_am IS NULL AND (i.run_id IS NULL OR (r.repo_id = ? AND r.archived_at IS NULL))`).all(repoId ?? -1)
-  const handeln = offen.filter(v => brauchtMensch(v, v.run_status)).length
+  const handeln = offen.filter(v => needsHuman(v, v.run_status)).length
   return {
     offen: offen.length, handeln, noticed: offen.length - handeln,
     linkable: offen.filter(v => v.run_id !== null).length,
@@ -933,14 +933,14 @@ export async function pageOverview(req, res, url) {
   const filter = WORK_STATUSES.includes(wanted) ? wanted : null
   const nurVorfaelle = url.searchParams.get('incidents') === '1'
   const runs = overviewRuns(sel.id, filter, nurVorfaelle)
-  const filterHinweis = [
+  const filterHint = [
     filter ? e(t('overview.filtered', { status: statusText(filter) })) : null,
     nurVorfaelle ? e(t('overview.filtered_incidents')) : null,
   ].filter(Boolean).join(' · ')
   const body = `
   <div class="btn-row"><a class="btn" href="/runs/new?repo=${sel.id}">${e(t('overview.start_single'))}</a>
      <a class="btn ghost" href="/archive?repo=${sel.id}">${e(t('nav.archive'))}</a>
-     ${filterHinweis ? `<span class="dim">${filterHinweis}</span>
+     ${filterHint ? `<span class="dim">${filterHint}</span>
        <a class="btn" href="/?repo=${sel.id}">${e(t('overview.filter_clear'))}</a>` : ''}</div>
   ${overviewTable(runs, { repoId: sel.id, status: filter, incidents: nurVorfaelle })}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.overview'), '/', body, sel.id))
@@ -1008,7 +1008,7 @@ export function runRow(r, ctx) {
   return `<tr id="run-${e(r.id)}" onclick="location='/runs/${r.id}'">
       ${pickCell}
       <td class="status-cell">
-        <span class="status-line">${AMPEL_DOT[ampel(r)]()} ${e(statusText(displayStatus(r)))}</span>
+        <span class="status-line">${TRAFFIC_LIGHT_DOT[trafficLight(r)]()} ${e(statusText(displayStatus(r)))}</span>
         ${wartend ? `<div class="dim">${wartetAuf(r)}</div>` : ''}
         ${r.followup_since ? `<div class="dim">${e(t('run.followup_active', { ts: fmtDbUtc(r.followup_since) }))}</div>` : ''}
         ${integrationLine(r)}
@@ -1021,7 +1021,7 @@ export function runRow(r, ctx) {
       <td>${wartend ? '' : (durMin > 0 ? e(t('unit.minutes', { n: durMin })) : '')}<span class="dim"> / ${e(t('unit.minutes', { n: r.expected_minutes }))}</span></td>
       <td class="two-line">${branch ? e(branch) : '<span class="leer">–</span>'}${
         r.pr_url ? `<span class="dim"><a href="${e(r.pr_url)}" onclick="event.stopPropagation()">PR</a></span>` : ''}</td>
-      <td>${vorfallZelle(r.id, repoId, r.status)}${startBtn}${archivBtn}</td>
+      <td>${incidentCell(r.id, repoId, r.status)}${startBtn}${archivBtn}</td>
     </tr>`
 }
 
@@ -1414,7 +1414,7 @@ export async function pageRun(req, res, url, id) {
   ${run.report_md ? `<h3>${e(t('run.report'))}</h3><pre>${e(run.report_md)}</pre>` : ''}
   ${run.report_detail_md ? `<h3>${e(t('run.detail_report'))}</h3><pre>${e(run.report_detail_md)}</pre>` : ''}
   ${flowSection(run)}
-  ${vorfallAbschnitt(id, run.status)}
+  ${incidentSection(id, run.status)}
   <h3>${e(t('run.metrics'))}</h3>
   ${runMetrics(run)}
   <h3>${e(t('run.events'))}</h3>${runEvents(id)}
@@ -1500,7 +1500,7 @@ export function goalCard(run) {
 export function runDetailHead(run, ctx) {
   const id = run.id
   const titel = ctx.title
-  return `<h2 id="run-head">${AMPEL_DOT[ampel(run)]()} ${titleInline(id, titel)} <span class="status-chip">${e(statusText(displayStatus(run)))}</span></h2>
+  return `<h2 id="run-head">${TRAFFIC_LIGHT_DOT[trafficLight(run)]()} ${titleInline(id, titel)} <span class="status-chip">${e(statusText(displayStatus(run)))}</span></h2>
   ${
     // Always rendered, hidden when it does not apply: the live channel swaps
     // by id (hub.js tauscheNachId), and an element that is absent from the DOM
@@ -1722,7 +1722,7 @@ function toDateTimeLocal(ms) {
 export function runMetrics(run) {
   const zeile = (key, value) => `<dt>${e(t(key))}</dt><dd>${value}</dd>`
   return `<dl class="metrics" id="run-metrics">
-    ${zeile('run.runtime', `${fmtLaufzeit(run)} <span class="dim">/ ${e(t('run.expectation'))} ${e(t('unit.minutes', { n: run.expected_minutes }))}</span>`)}
+    ${zeile('run.runtime', `${fmtRuntime(run)} <span class="dim">/ ${e(t('run.expectation'))} ${e(t('unit.minutes', { n: run.expected_minutes }))}</span>`)}
     ${zeile('run.tokens', e(t('run.tokens_value', { in: run.tokens_in ?? 0, out: run.tokens_out ?? 0 })))}
     ${zeile('run.costs', run.cost_eur != null ? e(fmtNum(run.cost_eur, { maximumFractionDigits: 2 })) + ' € (' + e(t('run.abo_delta')) + ')' : run.cost_usd != null ? e(fmtNum(run.cost_usd, { maximumFractionDigits: 4 })) + ' $' : '–')}
     ${zeile('run.activity', e(run.last_activity_at ? fmtDbUtc(run.last_activity_at) : '–'))}
@@ -1751,7 +1751,7 @@ export function runEvents(runId) {
  * duration for such a run; the detail page has to say the same thing. Only once
  * the run is actually going (or has gone) does the figure mean "runtime".
  */
-function fmtLaufzeit(run) {
+function fmtRuntime(run) {
   if (run.status === 'scheduled' || run.status === 'deferred') return '–'
   const endeMs = run.ended_at ? Date.parse(run.ended_at.replace(' ', 'T') + 'Z') : Date.now()
   const min = Math.round((endeMs - Date.parse(run.started_at.replace(' ', 'T') + 'Z')) / 60000)
@@ -1770,22 +1770,22 @@ function runStartZeit(run) {
  * as history. The evidence (the line that fired) is shown — otherwise a false
  * alarm cannot be told apart from a real one.
  */
-export function vorfallAbschnitt(runId, runStatus = null) {
-  const alle = alleVorfaelle(runId)
+export function incidentSection(runId, runStatus = null) {
+  const alle = allIncidentsOf(runId)
   if (!alle.length) return ''
   const zeile = (v) => `<li class="incident-row ${v.geloest_am ? 'resolved' : SEVERITY_CLASS[v.schwere]}">
     <b>${e(typName(v.typ))}</b> <span class="dim">(${e(v.quelle)}, ${e(t(SEVERITY_TEXT[v.schwere] ?? 'incidents.severity_red'))})</span>
     · ${v.anzahl}× · ${e(t('incidents.first'))} ${e(fmtDbUtc(v.erst_gesehen))} · ${e(t('incidents.last'))} ${e(fmtDbUtc(v.zuletzt_gesehen))}
     ${v.wieder_geoeffnet ? `· ${e(t('incidents.reopened', { n: v.wieder_geoeffnet }))}` : ''}
     ${v.geloest_am ? `· ${e(t('incidents.resolved_at'))} ${e(fmtDbUtc(v.geloest_am))} (${e(v.geloest_von ?? '')})` : `
-      <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/runs/${runId}"><button>${e(t(brauchtMensch(v, runStatus) ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`}
+      <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/runs/${runId}"><button>${e(t(needsHuman(v, runStatus) ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`}
     ${v.beleg ? `<br><code class="evidence">${e(v.beleg)}</code>` : ''}</li>`
   const offen = alle.filter(v => !v.geloest_am), zu = alle.filter(v => v.geloest_am)
   // The split the single "resolve" button was missing: what is waiting for
   // hands, and what the hub merely wrote down. Both stay visible — but only the
   // first group is a to-do.
-  const handeln = offen.filter(v => brauchtMensch(v, runStatus))
-  const notiz = offen.filter(v => !brauchtMensch(v, runStatus))
+  const handeln = offen.filter(v => needsHuman(v, runStatus))
+  const notiz = offen.filter(v => !needsHuman(v, runStatus))
   return `<h3>${e(t('incidents.title'))}</h3>
   ${handeln.length ? `<h4 class="incident-group red">${e(t('incidents.needs_you', { n: handeln.length }))}</h4>
     <p class="dim">${e(t('incidents.needs_you_hint'))}</p>
@@ -1967,7 +1967,7 @@ export async function repoDelete(req, res, url, formBody) {
   // `db.exec('BEGIN')` and not `db.transaction(...)`: this hub runs on
   // `node:sqlite`, whose DatabaseSync has no `transaction()` — that is
   // better-sqlite3's API, and reaching for it here cost a 500 and one e2e run
-  // to notice. Same shape as `tabelleUmziehen()` in db.mjs.
+  // to notice. Same shape as `rebuildTable()` in db.mjs.
   db.exec('BEGIN')
   try {
     db.prepare('DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
@@ -2339,7 +2339,7 @@ export async function pageSettings(req, res, url) {
       <label>${e(t('settings.llm_on'))} <select name="llm_check_on"><option value="0" ${s.llm_check_on !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option><option value="1" ${s.llm_check_on === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option></select></label>
       ${llmSourceFields('llm_check', s, sources)}
       <label>${e(t('settings.llm_model'))} <input name="llm_check_model" list="llm-mru" value="${e(s.llm_check_model ?? '')}" placeholder="vendor/model">
-        <datalist id="llm-mru">${llmModelleMru().map(m => `<option value="${e(m)}">`).join('')}</datalist>
+        <datalist id="llm-mru">${llmModelsMru().map(m => `<option value="${e(m)}">`).join('')}</datalist>
         <span class="dim">${e(t('settings.llm_mru_hint'))}</span></label>
       ${llmFallbackFields('llm_check', s, sources)}
     </fieldset>
@@ -3510,7 +3510,7 @@ export async function settingsSave(req, res, url, formBody) {
   // …and for the public host, which the notification links read live.
   if (Object.hasOwn(b, 'public_host')) setPublicHost(b.public_host ?? '')
   // "Used" means saved: only now does the model enter the MRU list.
-  if (Object.hasOwn(b, 'llm_check_model')) llmModellMerken(b.llm_check_model)
+  if (Object.hasOwn(b, 'llm_check_model')) rememberLlmModel(b.llm_check_model)
   if (Object.hasOwn(b, 'llm_title_model')) rememberTitleModel(b.llm_title_model)
   if (Object.hasOwn(b, 'llm_extras_model')) rememberExtrasModel(b.llm_extras_model)
   redirect(res, '/settings')

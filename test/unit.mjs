@@ -35,7 +35,7 @@ try {
   const { cronMatches, validCron, scheduleDue, scheduleText, weeklySlots, slotsUniform, splitTimes,
     lastMissedSlot, catchupHours,
     stripAnsi, escapeHtml, stripGitProgress,
-    fmtDuration, parseDbUtc, toDbUtc, fmtRelativeTime, fmtDateTime, kurzid,
+    fmtDuration, parseDbUtc, toDbUtc, fmtRelativeTime, fmtDateTime, shortId,
     fmtDbUtc, fmtClock, fmtDatePart, fmtNum, fmtPercent,
     timezoneForLanguage, setTimezone, validTz, tzAbbrev, TIMEZONE_OPTIONS, setPublicHost, publicBase } = await import('../server/util.mjs')
   const { parseForm, cookieRepo, rememberRepo, requestRepo } = await import('../server/web-helpers.mjs')
@@ -495,8 +495,8 @@ try {
     isTrue(String(tzAbbrev(ms)).length > 0, 'a Berlin summer stamp has an abbreviation')
     setTimezone('')
   })
-  await check('kurzid returns the first UUID block', () => {
-    equal(kurzid('1d005159-78bd-4cc1-a889-07617871af2e'), '1d005159', 'UUID')
+  await check('shortId returns the first UUID block', () => {
+    equal(shortId('1d005159-78bd-4cc1-a889-07617871af2e'), '1d005159', 'UUID')
   })
 
   // ------------------------------------------------------------------
@@ -1684,48 +1684,48 @@ try {
 
   // ------------------------------------------------------------------
   group('Detection: rate limit / provider errors (detect.mjs)')
-  const { typVonClaudeFehler, typVonText, terminalText, scanneZeilen, scanneNeueBytes,
-    transkriptFehler, bewerteLogTreffer, fremdeClaudeSession, vorfallWeggrund,
+  const { typeFromClaudeError, typeFromText, terminalText, scanLines, scanNewBytes,
+    transcriptErrors, rateLogHit, foreignClaudeSession, incidentGoneReason,
     isSessionStopped } = await import('../server/detect.mjs')
 
   await check('Claude\'s StopFailure enum is mapped completely', () => {
-    equal(typVonClaudeFehler('rate_limit'), 'rate_limit', 'rate_limit')
-    equal(typVonClaudeFehler('overloaded'), 'provider_error', 'overloaded')
-    equal(typVonClaudeFehler('server_error'), 'provider_error', 'server_error')
-    equal(typVonClaudeFehler('authentication_failed'), 'auth_error', 'auth')
-    equal(typVonClaudeFehler('oauth_org_not_allowed'), 'auth_error', 'oauth')
-    equal(typVonClaudeFehler('billing_error'), 'billing_error', 'billing')
-    equal(typVonClaudeFehler('account_on_hold'), 'billing_error', 'on hold')
-    equal(typVonClaudeFehler('model_not_found'), 'model_error', 'model')
-    equal(typVonClaudeFehler('max_output_tokens'), null, 'max_output_tokens is NOT a provider problem')
-    equal(typVonClaudeFehler('unknown'), 'unbekannt', 'unknown')
-    equal(typVonClaudeFehler('irgendwas_neues'), 'unbekannt', 'unknown enum value maps to unbekannt, no crash')
+    equal(typeFromClaudeError('rate_limit'), 'rate_limit', 'rate_limit')
+    equal(typeFromClaudeError('overloaded'), 'provider_error', 'overloaded')
+    equal(typeFromClaudeError('server_error'), 'provider_error', 'server_error')
+    equal(typeFromClaudeError('authentication_failed'), 'auth_error', 'auth')
+    equal(typeFromClaudeError('oauth_org_not_allowed'), 'auth_error', 'oauth')
+    equal(typeFromClaudeError('billing_error'), 'billing_error', 'billing')
+    equal(typeFromClaudeError('account_on_hold'), 'billing_error', 'on hold')
+    equal(typeFromClaudeError('model_not_found'), 'model_error', 'model')
+    equal(typeFromClaudeError('max_output_tokens'), null, 'max_output_tokens is NOT a provider problem')
+    equal(typeFromClaudeError('unknown'), 'unbekannt', 'unknown')
+    equal(typeFromClaudeError('irgendwas_neues'), 'unbekannt', 'unknown enum value maps to unbekannt, no crash')
   })
 
   await check('free text is classified in the right order', () => {
-    equal(typVonText('AI_APICallError: [Stealth] stealth/ox-alpha is temporarily rate-limited upstream.'), 'rate_limit', 'opencode rate limit (real log text)')
-    equal(typVonText("You've hit your session limit · resets 8:36pm"), 'rate_limit', 'Claude subscription limit')
-    equal(typVonText('API Error: 429 Too Many Requests'), 'rate_limit', '429')
-    equal(typVonText('Overloaded'), 'provider_error', 'overloaded')
-    equal(typVonText('API Error: 529 overloaded_error'), 'provider_error', '529')
-    equal(typVonText('Please run /login · API Error: 403'), 'auth_error', '403 + login')
-    equal(typVonText('402 insufficient credits'), 'billing_error', '402 before the rate-limit check')
-    equal(typVonText('model_not_found: no such model'), 'model_error', 'model')
-    equal(typVonText('alles gut'), 'unbekannt', 'no match')
+    equal(typeFromText('AI_APICallError: [Stealth] stealth/ox-alpha is temporarily rate-limited upstream.'), 'rate_limit', 'opencode rate limit (real log text)')
+    equal(typeFromText("You've hit your session limit · resets 8:36pm"), 'rate_limit', 'Claude subscription limit')
+    equal(typeFromText('API Error: 429 Too Many Requests'), 'rate_limit', '429')
+    equal(typeFromText('Overloaded'), 'provider_error', 'overloaded')
+    equal(typeFromText('API Error: 529 overloaded_error'), 'provider_error', '529')
+    equal(typeFromText('Please run /login · API Error: 403'), 'auth_error', '403 + login')
+    equal(typeFromText('402 insufficient credits'), 'billing_error', '402 before the rate-limit check')
+    equal(typeFromText('model_not_found: no such model'), 'model_error', 'model')
+    equal(typeFromText('alles gut'), 'unbekannt', 'no match')
 
     // The two wordings OpenRouter refuses a spent key with. Measured 2026-09-04
     // on this installation: four runs, four red incidents, all of them filed as
     // 'unbekannt' → "API error … the hub carried on by itself". It had not.
-    equal(typVonText('This request requires more credits, or fewer max_tokens. You requested up to '
+    equal(typeFromText('This request requires more credits, or fewer max_tokens. You requested up to '
       + "32000 tokens, but can only afford 20932. To increase, visit https://openrouter.ai/… and adjust the key's daily limit"),
       'billing_error', 'OpenRouter: "requires more credits … can only afford"')
-    equal(typVonText('Prompt tokens limit exceeded: 365512 > 344659. To increase, visit '
+    equal(typeFromText('Prompt tokens limit exceeded: 365512 > 344659. To increase, visit '
       + "https://openrouter.ai/… and adjust the key's daily limit"),
       'billing_error', "OpenRouter: a spent key's daily limit")
     // …and the neighbours it must not swallow: a plain rate limit stays one,
     // and a bare "limit" with no money next to it is still no verdict.
-    equal(typVonText('Rate limit exceeded: free-models-per-day'), 'rate_limit', 'a daily RATE limit is not billing')
-    equal(typVonText('context limit exceeded: 200000 > 180000'), 'unbekannt', 'a bare limit is not billing')
+    equal(typeFromText('Rate limit exceeded: free-models-per-day'), 'rate_limit', 'a daily RATE limit is not billing')
+    equal(typeFromText('context limit exceeded: 200000 > 180000'), 'unbekannt', 'a bare limit is not billing')
   })
 
   // An error hook fires while the process dies, and the hub is very often the
@@ -1746,7 +1746,7 @@ try {
       'AI_APICallError: stream aborted', 'aborted: 503 upstream unavailable', '', 'alles gut']) {
       isFalse(isSessionStopped(t), `"${t}" is not merely a stopped session`)
     }
-    equal(typVonText('AI_APICallError: stream aborted'), 'provider_error',
+    equal(typeFromText('AI_APICallError: stream aborted'), 'provider_error',
       'and such a line is still classified as what it is')
   })
 
@@ -1757,7 +1757,7 @@ try {
 
   await check('production false positive: "Upgrade to Max for higher rate limits" does NOT fire', () => {
     const zeilen = ['/upgrade   Upgrade to Max for higher rate limits and more Opus', 'Rate limits', '  rate limit  ']
-    equal(scanneZeilen('claude', zeilen).length, 0, 'menu text and bare heading')
+    equal(scanLines('claude', zeilen).length, 0, 'menu text and bare heading')
   })
 
   await check('agent working on the topic: grep/source code/tests do not fire', () => {
@@ -1767,9 +1767,9 @@ try {
       "it('meldet 429 als rate_limit', () => {",
       'const retryAfter = res.headers.get("retry-after") // 429',
     ]
-    equal(scanneZeilen('hermes', zeilen).length, 0, 'hermes patterns on source code')
-    equal(scanneZeilen('cursor', zeilen).length, 0, 'cursor patterns on source code')
-    equal(scanneZeilen('opencode', zeilen).length, 0, 'opencode patterns on source code')
+    equal(scanLines('hermes', zeilen).length, 0, 'hermes patterns on source code')
+    equal(scanLines('cursor', zeilen).length, 0, 'cursor patterns on source code')
+    equal(scanLines('opencode', zeilen).length, 0, 'opencode patterns on source code')
   })
 
   // All three lines below opened an incident on ONE real cursor run (2026-08-25):
@@ -1783,27 +1783,27 @@ try {
       '✓ cursor: run passes through the pipeline and "Cannot use this model" is detected',
       '✓ hook report (fl-report _api_error via stdin) → RED; rate limit counter increments',
       // These two — this file's own lines — turned a running claude agent red.
-      "    equal(scanneZeilen('cursor', ['API Error: 503', 'upstream connection error (502)']).length, 2, 'real status codes')",
-      "    const c = scanneZeilen('claude', [\"You've hit your session limit · resets 8:36pm (Europe/Berlin)\"])",
+      "    equal(scanLines('cursor', ['API Error: 503', 'upstream connection error (502)']).length, 2, 'real status codes')",
+      "    const c = scanLines('claude', [\"You've hit your session limit · resets 8:36pm (Europe/Berlin)\"])",
     ]
     for (const h of ['cursor', 'hermes', 'opencode', 'claude']) {
-      equal(scanneZeilen(h, zeilen).length, 0, `${h}: no match`)
+      equal(scanLines(h, zeilen).length, 0, `${h}: no match`)
     }
   })
 
   await check('a bare 5xx number is not a status code — an error word has to stand next to it', () => {
-    equal(scanneZeilen('cursor', ['reading 512 lines', 'chunk 500 of 900', 'saved 503 bytes']).length, 0, 'plain numbers')
-    equal(scanneZeilen('cursor', ['API Error: 503', 'upstream connection error (502)']).length, 2, 'real status codes')
-    equal(typVonText('500 Internal Server Error'), 'provider_error', 'status + text')
-    equal(typVonText('processed 555 tokens'), 'unbekannt', 'token count is not a 5xx')
+    equal(scanLines('cursor', ['reading 512 lines', 'chunk 500 of 900', 'saved 503 bytes']).length, 0, 'plain numbers')
+    equal(scanLines('cursor', ['API Error: 503', 'upstream connection error (502)']).length, 2, 'real status codes')
+    equal(typeFromText('500 Internal Server Error'), 'provider_error', 'status + text')
+    equal(typeFromText('processed 555 tokens'), 'unbekannt', 'token count is not a 5xx')
   })
 
   await check('real error texts per harness are recognized', () => {
-    const c = scanneZeilen('claude', ["You've hit your session limit · resets 8:36pm (Europe/Berlin)", 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}'])
+    const c = scanLines('claude', ["You've hit your session limit · resets 8:36pm (Europe/Berlin)", 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}'])
     equal(c.map(t => t.typ).join(','), 'rate_limit,provider_error', 'claude')
-    const o = scanneZeilen('opencode', ['AI_APICallError: [Stealth] stealth/ox-alpha is temporarily rate-limited upstream. Please retry shortly.', 'AI_RetryError: Failed after 3 attempts'])
+    const o = scanLines('opencode', ['AI_APICallError: [Stealth] stealth/ox-alpha is temporarily rate-limited upstream. Please retry shortly.', 'AI_RetryError: Failed after 3 attempts'])
     equal(o.map(t => t.typ).join(','), 'rate_limit,provider_error', 'opencode')
-    const h = scanneZeilen('hermes', [
+    const h = scanLines('hermes', [
       '⏳ Retrying in 12.0s (rate limited by upstream provider (429))...',
       '⚠️  API call failed (attempt 2/5): APIConnectionError',
       '   ⏱️  upstream provider overloaded (529)',
@@ -1812,7 +1812,7 @@ try {
     isTrue(h[0].zeile.includes('Retrying'), 'evidence is the line')
     // cursor: 'Cannot use this model' is the VERBATIM rejection of the CLI for an
     // unknown model ID (measured) — the most reliable match cursor provides.
-    const u = scanneZeilen('cursor', [
+    const u = scanLines('cursor', [
       'Cannot use this model: gibtsnicht-9000. Available models: auto, gpt-5.2',
       'Error: 429 Too Many Requests',
       'You are not logged in. Please run cursor-agent login',
@@ -1823,18 +1823,18 @@ try {
 
   await check('offset scan: incomplete trailing line is deferred, not consumed', () => {
     const teil1 = 'foo\n⚠️  API call failed (attempt 1/5): RateLimit'
-    const r1 = scanneNeueBytes('hermes', teil1, 100)
+    const r1 = scanNewBytes('hermes', teil1, 100)
     equal(r1.treffer.length, 0, 'half a line does not count')
     equal(r1.neuerOffset, 100 + Buffer.byteLength('foo\n'), 'offset points at the start of the half line')
     const teil2 = '⚠️  API call failed (attempt 1/5): RateLimitError (HTTP 429)\n'
-    const r2 = scanneNeueBytes('hermes', teil2, r1.neuerOffset)
+    const r2 = scanNewBytes('hermes', teil2, r1.neuerOffset)
     equal(r2.treffer.length, 1, 'complete → match')
     equal(r2.treffer[0].typ, 'rate_limit', 'type')
     equal(r2.neuerOffset, r1.neuerOffset + Buffer.byteLength(teil2), 'offset at the end')
   })
 
   await check('offset scan: without a newline nothing moves', () => {
-    const r = scanneNeueBytes('claude', 'nur ein Stück', 7)
+    const r = scanNewBytes('claude', 'nur ein Stück', 7)
     equal(r.neuerOffset, 7, 'offset stays')
     equal(r.treffer.length, 0, 'no match')
   })
@@ -1847,7 +1847,7 @@ try {
       JSON.stringify({ type: 'assistant', error: 'max_output_tokens', isApiErrorMessage: true, message: { content: 'x' } }),
       '{"kaputt": tru',
     ].join('\n')
-    const f = transkriptFehler(jsonl)
+    const f = transcriptErrors(jsonl)
     equal(f.length, 1, 'exactly one relevant error (max_output_tokens and garbage ignored)')
     equal(f[0].typ, 'rate_limit', 'type')
     equal(f[0].ts, '2026-08-23T17:36:32.446Z', 'timestamp')
@@ -1856,36 +1856,36 @@ try {
 
   await check('rating: a single match with continued work stays yellow', () => {
     const t0 = Date.parse('2026-08-23T10:00:00Z')
-    equal(bewerteLogTreffer({ anzahl: 1, erstGesehenMs: t0, zuletztGesehenMs: t0, letzteAktivitaetMs: t0 + 60_000, jetztMs: t0 + 6 * 60_000 }), 'gelb', 'activity after the match')
+    equal(rateLogHit({ anzahl: 1, firstSeenMs: t0, lastSeenMs: t0, lastActivityMs: t0 + 60_000, jetztMs: t0 + 6 * 60_000 }), 'gelb', 'activity after the match')
   })
   await check('rating: silence after the match turns red (the limit stands at the end)', () => {
     const t0 = Date.parse('2026-08-23T10:00:00Z')
-    equal(bewerteLogTreffer({ anzahl: 1, erstGesehenMs: t0, zuletztGesehenMs: t0, letzteAktivitaetMs: t0 - 1000, jetztMs: t0 + 5 * 60_000 }), 'rot', '5 min silent')
-    equal(bewerteLogTreffer({ anzahl: 1, erstGesehenMs: t0, zuletztGesehenMs: t0, letzteAktivitaetMs: t0 - 1000, jetztMs: t0 + 2 * 60_000 }), 'gelb', 'only 2 min silent')
+    equal(rateLogHit({ anzahl: 1, firstSeenMs: t0, lastSeenMs: t0, lastActivityMs: t0 - 1000, jetztMs: t0 + 5 * 60_000 }), 'rot', '5 min silent')
+    equal(rateLogHit({ anzahl: 1, firstSeenMs: t0, lastSeenMs: t0, lastActivityMs: t0 - 1000, jetztMs: t0 + 2 * 60_000 }), 'gelb', 'only 2 min silent')
   })
   // Regression: cursor and hermes have NO activity source (measureActivity
   // returns nothing for them), so null was permanently true here — every yellow
   // log hit on those two turned red 5 min later while the agent was working.
   await check('rating: unmeasured activity is unknown, not silence — it never escalates', () => {
     const t0 = Date.parse('2026-08-23T10:00:00Z')
-    equal(bewerteLogTreffer({ anzahl: 1, erstGesehenMs: t0, zuletztGesehenMs: t0, letzteAktivitaetMs: null, jetztMs: t0 + 5 * 60_000 }), 'gelb', 'no activity source: stays yellow')
-    equal(bewerteLogTreffer({ anzahl: 1, erstGesehenMs: t0, zuletztGesehenMs: t0, letzteAktivitaetMs: null, jetztMs: t0 + 3 * 3600_000 }), 'gelb', 'even after hours')
-    equal(bewerteLogTreffer({ anzahl: 2, erstGesehenMs: t0, zuletztGesehenMs: t0 + 60_000, letzteAktivitaetMs: null, jetztMs: t0 + 2 * 60_000 }), 'rot', 'repetition still escalates')
+    equal(rateLogHit({ anzahl: 1, firstSeenMs: t0, lastSeenMs: t0, lastActivityMs: null, jetztMs: t0 + 5 * 60_000 }), 'gelb', 'no activity source: stays yellow')
+    equal(rateLogHit({ anzahl: 1, firstSeenMs: t0, lastSeenMs: t0, lastActivityMs: null, jetztMs: t0 + 3 * 3600_000 }), 'gelb', 'even after hours')
+    equal(rateLogHit({ anzahl: 2, firstSeenMs: t0, lastSeenMs: t0 + 60_000, lastActivityMs: null, jetztMs: t0 + 2 * 60_000 }), 'rot', 'repetition still escalates')
   })
   await check('rating: repetition within 10 min turns red (retry loop)', () => {
     const t0 = Date.parse('2026-08-23T10:00:00Z')
-    equal(bewerteLogTreffer({ anzahl: 2, erstGesehenMs: t0, zuletztGesehenMs: t0 + 3 * 60_000, letzteAktivitaetMs: t0 - 1000, jetztMs: t0 + 4 * 60_000 }), 'rot', '2× in 3 min')
-    equal(bewerteLogTreffer({ anzahl: 2, erstGesehenMs: t0, zuletztGesehenMs: t0 + 3 * 60_000, letzteAktivitaetMs: null, jetztMs: t0 + 4 * 60_000 }), 'rot', '… also without an activity source (cursor/hermes)')
-    equal(bewerteLogTreffer({ anzahl: 2, erstGesehenMs: t0, zuletztGesehenMs: t0 + 40 * 60_000, letzteAktivitaetMs: t0 - 1000, jetztMs: t0 + 41 * 60_000 }), 'gelb', '2× 40 min apart is not a loop')
+    equal(rateLogHit({ anzahl: 2, firstSeenMs: t0, lastSeenMs: t0 + 3 * 60_000, lastActivityMs: t0 - 1000, jetztMs: t0 + 4 * 60_000 }), 'rot', '2× in 3 min')
+    equal(rateLogHit({ anzahl: 2, firstSeenMs: t0, lastSeenMs: t0 + 3 * 60_000, lastActivityMs: null, jetztMs: t0 + 4 * 60_000 }), 'rot', '… also without an activity source (cursor/hermes)')
+    equal(rateLogHit({ anzahl: 2, firstSeenMs: t0, lastSeenMs: t0 + 40 * 60_000, lastActivityMs: t0 - 1000, jetztMs: t0 + 41 * 60_000 }), 'gelb', '2× 40 min apart is not a loop')
   })
   // Regression: an agent that scrolls through source code about API errors
   // produced five hits in two minutes — the repetition path made its run red
   // while it was working normally.
   await check('rating: work AFTER the last match vetoes every escalation', () => {
     const t0 = Date.parse('2026-08-23T10:00:00Z')
-    equal(bewerteLogTreffer({ anzahl: 5, erstGesehenMs: t0, zuletztGesehenMs: t0 + 2 * 60_000, letzteAktivitaetMs: t0 + 3 * 60_000, jetztMs: t0 + 4 * 60_000 }), 'gelb', '5× but the agent kept working')
-    equal(bewerteLogTreffer({ anzahl: 5, erstGesehenMs: t0, zuletztGesehenMs: t0 + 2 * 60_000, letzteAktivitaetMs: t0 + 3 * 60_000, jetztMs: t0 + 60 * 60_000 }), 'gelb', 'and an hour later still not')
-    equal(bewerteLogTreffer({ anzahl: 5, erstGesehenMs: t0, zuletztGesehenMs: t0 + 2 * 60_000, letzteAktivitaetMs: t0 + 60_000, jetztMs: t0 + 4 * 60_000 }), 'rot', 'no work after the last match: the loop stands')
+    equal(rateLogHit({ anzahl: 5, firstSeenMs: t0, lastSeenMs: t0 + 2 * 60_000, lastActivityMs: t0 + 3 * 60_000, jetztMs: t0 + 4 * 60_000 }), 'gelb', '5× but the agent kept working')
+    equal(rateLogHit({ anzahl: 5, firstSeenMs: t0, lastSeenMs: t0 + 2 * 60_000, lastActivityMs: t0 + 3 * 60_000, jetztMs: t0 + 60 * 60_000 }), 'gelb', 'and an hour later still not')
+    equal(rateLogHit({ anzahl: 5, firstSeenMs: t0, lastSeenMs: t0 + 2 * 60_000, lastActivityMs: t0 + 60_000, jetztMs: t0 + 4 * 60_000 }), 'rot', 'no work after the last match: the loop stands')
   })
 
   // The false alarm of 2026-08-30: an agent testing a fake model id
@@ -1894,11 +1894,11 @@ try {
   // red "Model unavailable". The session id is the discriminator.
   await check('a claude hook report from a foreign session is recognized', () => {
     const runId = 'a4a392ae-9a66-46db-bd03-4d4636465841'
-    isFalse(fremdeClaudeSession(runId, 'claude', runId), 'the run\'s own session (--session-id <run id>)')
-    isFalse(fremdeClaudeSession(runId, 'claude', ''), 'no session id (older fl-report): the run\'s own')
-    isFalse(fremdeClaudeSession(runId, 'claude', null), 'null: the run\'s own')
-    isFalse(fremdeClaudeSession(runId, 'cursor', 'andere-session'), 'the guard is claude-only')
-    isTrue(fremdeClaudeSession(runId, 'claude', '0f7c3b1e-0000-4000-8000-000000000000'),
+    isFalse(foreignClaudeSession(runId, 'claude', runId), 'the run\'s own session (--session-id <run id>)')
+    isFalse(foreignClaudeSession(runId, 'claude', ''), 'no session id (older fl-report): the run\'s own')
+    isFalse(foreignClaudeSession(runId, 'claude', null), 'null: the run\'s own')
+    isFalse(foreignClaudeSession(runId, 'cursor', 'andere-session'), 'the guard is claude-only')
+    isTrue(foreignClaudeSession(runId, 'claude', '0f7c3b1e-0000-4000-8000-000000000000'),
       'a claude with its own session id is a process the agent spawned')
   })
 
@@ -1906,68 +1906,68 @@ try {
   // itself — the run came through, or the agent demonstrably kept working
   // after the occurrence. Silence proves nothing for red (a blocked agent is
   // silent too), so red resolves only on positive evidence.
-  await check('vorfallWeggrund: gone is gone — done runs, work after the hit, expired yellow', () => {
+  await check('incidentGoneReason: gone is gone — done runs, work after the hit, expired yellow', () => {
     const t0 = Date.parse('2026-08-30T08:14:19Z')
-    const config = (ueber) => ({ zuletztGesehenMs: t0, jetztMs: t0 + 20 * 60_000, ...ueber })
+    const config = (ueber) => ({ lastSeenMs: t0, jetztMs: t0 + 20 * 60_000, ...ueber })
     // The run came through: the incident during it answered itself.
-    equal(vorfallWeggrund(config({ typ: 'model_error', schwere: 'rot', runStatus: 'done', letzteAktivitaetMs: null })),
+    equal(incidentGoneReason(config({ typ: 'model_error', schwere: 'rot', runStatus: 'done', lastActivityMs: null })),
       'run finished successfully', 'done run: even auth/billing/model close')
     // A red incident on a run that is still going: only measurable work after
     // the occurrence and no recurrence since resolves it.
-    equal(vorfallWeggrund(config({ typ: 'model_error', schwere: 'rot', runStatus: 'running',
-      letzteAktivitaetMs: t0 + 60_000 })), 'agent kept working after it', 'work after the hit')
-    equal(vorfallWeggrund(config({ typ: 'model_error', schwere: 'rot', runStatus: 'running',
-      letzteAktivitaetMs: t0 + 60_000, jetztMs: t0 + 5 * 60_000 })), null, 'too soon after the hit')
-    equal(vorfallWeggrund(config({ typ: 'rate_limit', schwere: 'rot', runStatus: 'running',
-      letzteAktivitaetMs: t0 - 60_000 })), null, 'silence proves nothing for red')
-    equal(vorfallWeggrund(config({ typ: 'rate_limit', schwere: 'rot', runStatus: 'running',
-      letzteAktivitaetMs: null })), null, 'no activity source (hermes): red stays')
+    equal(incidentGoneReason(config({ typ: 'model_error', schwere: 'rot', runStatus: 'running',
+      lastActivityMs: t0 + 60_000 })), 'agent kept working after it', 'work after the hit')
+    equal(incidentGoneReason(config({ typ: 'model_error', schwere: 'rot', runStatus: 'running',
+      lastActivityMs: t0 + 60_000, jetztMs: t0 + 5 * 60_000 })), null, 'too soon after the hit')
+    equal(incidentGoneReason(config({ typ: 'rate_limit', schwere: 'rot', runStatus: 'running',
+      lastActivityMs: t0 - 60_000 })), null, 'silence proves nothing for red')
+    equal(incidentGoneReason(config({ typ: 'rate_limit', schwere: 'rot', runStatus: 'running',
+      lastActivityMs: null })), null, 'no activity source (hermes): red stays')
     // A red incident on a failed run is WHY it failed — a human decides.
-    equal(vorfallWeggrund(config({ typ: 'auth_error', schwere: 'rot', runStatus: 'failed',
-      letzteAktivitaetMs: t0 + 60_000 })), null, 'red on a failed run stays')
+    equal(incidentGoneReason(config({ typ: 'auth_error', schwere: 'rot', runStatus: 'failed',
+      lastActivityMs: t0 + 60_000 })), null, 'red on a failed run stays')
     // Yellow: the old 30-minute rule, generalized.
-    equal(vorfallWeggrund(config({ typ: 'rate_limit', schwere: 'gelb', runStatus: 'running',
-      letzteAktivitaetMs: t0 + 60_000, jetztMs: t0 + 31 * 60_000 })), 'expired: agent kept working', 'yellow: agent worked on')
-    equal(vorfallWeggrund(config({ typ: 'rate_limit', schwere: 'gelb', runStatus: 'running',
-      letzteAktivitaetMs: t0 + 60_000, jetztMs: t0 + 20 * 60_000 })), null, 'yellow: less than half an hour')
-    equal(vorfallWeggrund(config({ typ: 'rate_limit', schwere: 'gelb', runStatus: 'running',
-      letzteAktivitaetMs: null, jetztMs: t0 + 31 * 60_000 })), 'expired: no recurrence', 'yellow without an activity source')
-    equal(vorfallWeggrund(config({ typ: 'rate_limit', schwere: 'gelb', runStatus: 'aborted',
-      letzteAktivitaetMs: null, jetztMs: t0 + 31 * 60_000 })), 'expired: run ended', 'yellow on an ended run')
+    equal(incidentGoneReason(config({ typ: 'rate_limit', schwere: 'gelb', runStatus: 'running',
+      lastActivityMs: t0 + 60_000, jetztMs: t0 + 31 * 60_000 })), 'expired: agent kept working', 'yellow: agent worked on')
+    equal(incidentGoneReason(config({ typ: 'rate_limit', schwere: 'gelb', runStatus: 'running',
+      lastActivityMs: t0 + 60_000, jetztMs: t0 + 20 * 60_000 })), null, 'yellow: less than half an hour')
+    equal(incidentGoneReason(config({ typ: 'rate_limit', schwere: 'gelb', runStatus: 'running',
+      lastActivityMs: null, jetztMs: t0 + 31 * 60_000 })), 'expired: no recurrence', 'yellow without an activity source')
+    equal(incidentGoneReason(config({ typ: 'rate_limit', schwere: 'gelb', runStatus: 'aborted',
+      lastActivityMs: null, jetztMs: t0 + 31 * 60_000 })), 'expired: run ended', 'yellow on an ended run')
     // Never by time alone:
-    equal(vorfallWeggrund(config({ typ: 'merge_blocked', schwere: 'rot', runStatus: 'running',
-      letzteAktivitaetMs: t0 + 60_000 })), null, 'merge_blocked is the integrator\'s decision')
-    equal(vorfallWeggrund(config({ typ: 'provider_down:deepseek', schwere: 'rot', runStatus: 'running',
-      letzteAktivitaetMs: t0 + 60_000 })), null, 'provider_down has its own recovery loop')
+    equal(incidentGoneReason(config({ typ: 'merge_blocked', schwere: 'rot', runStatus: 'running',
+      lastActivityMs: t0 + 60_000 })), null, 'merge_blocked is the integrator\'s decision')
+    equal(incidentGoneReason(config({ typ: 'provider_down:deepseek', schwere: 'rot', runStatus: 'running',
+      lastActivityMs: t0 + 60_000 })), null, 'provider_down has its own recovery loop')
   })
 
   // ------------------------------------------------------------------
-  group('Incidents: needs a human vs. merely noticed (brauchtMensch)')
-  const { brauchtMensch } = await import('../server/incidents.mjs')
+  group('Incidents: needs a human vs. merely noticed (needsHuman)')
+  const { needsHuman } = await import('../server/incidents.mjs')
 
   await check('login, credits and model always need a human — they never clear themselves', () => {
     for (const typ of ['auth_error', 'billing_error', 'model_error']) {
-      isTrue(brauchtMensch({ typ, schwere: 'gelb' }, 'running'), `${typ} while running`)
-      isTrue(brauchtMensch({ typ, schwere: 'gelb' }, 'done'), `${typ} on a finished run`)
+      isTrue(needsHuman({ typ, schwere: 'gelb' }, 'running'), `${typ} while running`)
+      isTrue(needsHuman({ typ, schwere: 'gelb' }, 'done'), `${typ} on a finished run`)
     }
   })
 
   await check('rate limit and provider errors are observations while the run lives or came through', () => {
     for (const typ of ['rate_limit', 'provider_error', 'unbekannt']) {
-      isFalse(brauchtMensch({ typ, schwere: 'rot' }, 'running'), `${typ} while running`)
-      isFalse(brauchtMensch({ typ, schwere: 'rot' }, 'done'), `${typ} on a finished run`)
+      isFalse(needsHuman({ typ, schwere: 'rot' }, 'running'), `${typ} while running`)
+      isFalse(needsHuman({ typ, schwere: 'rot' }, 'done'), `${typ} on a finished run`)
     }
   })
 
   await check('a confirmed incident on a run that did NOT come through is a to-do', () => {
-    isTrue(brauchtMensch({ typ: 'rate_limit', schwere: 'rot' }, 'failed'), 'red + failed')
-    isTrue(brauchtMensch({ typ: 'provider_error', schwere: 'rot' }, 'aborted'), 'red + aborted')
-    isFalse(brauchtMensch({ typ: 'rate_limit', schwere: 'gelb' }, 'failed'), 'a mere suspicion is not')
+    isTrue(needsHuman({ typ: 'rate_limit', schwere: 'rot' }, 'failed'), 'red + failed')
+    isTrue(needsHuman({ typ: 'provider_error', schwere: 'rot' }, 'aborted'), 'red + aborted')
+    isFalse(needsHuman({ typ: 'rate_limit', schwere: 'gelb' }, 'failed'), 'a mere suspicion is not')
   })
 
   await check('a global incident (provider pulse, no run) is not a to-do either', () => {
-    isFalse(brauchtMensch({ typ: 'provider_down:openrouter', schwere: 'rot' }), 'nobody can fix a provider outage')
-    isTrue(brauchtMensch({ typ: 'billing_error', schwere: 'rot' }), 'global billing still needs a human')
+    isFalse(needsHuman({ typ: 'provider_down:openrouter', schwere: 'rot' }), 'nobody can fix a provider outage')
+    isTrue(needsHuman({ typ: 'billing_error', schwere: 'rot' }), 'global billing still needs a human')
   })
 
   // ------------------------------------------------------------------

@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS agents (
   -- existing databases, which still carry the old global UNIQUE on name.
   name TEXT NOT NULL,
   -- No CHECK on the harness: coding agents are PLUGINS, and one may be loaded
-  -- from disk after this file ran (see harnessCheckAufloesen() below).
+  -- from disk after this file ran (see dropHarnessCheck() below).
   harness TEXT NOT NULL,
   model TEXT,
   prompt TEXT NOT NULL,
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS agents (
 -- Favoriten: die SETUP-Hälfte einer Laufdefinition unter einem Namen (Coding Agent,
 -- Provider, Modell, Effort, Extra-Skills, angehängte Flows). Bewusst OHNE Prompt,
 -- Branch-Regel und Dauer — die gehören zur Aufgabe, nicht zur Einstellung.
--- Deliberately without a CHECK on harness: see harnessCheckAufloesen() below —
+-- Deliberately without a CHECK on harness: see dropHarnessCheck() below —
 -- a CHECK rule would be a table rebuild for every new plugin, and since coding
 -- agents can be loaded from disk it could not be written at schema time at all.
 CREATE TABLE IF NOT EXISTS favorites (
@@ -236,7 +236,7 @@ addColumn('repos', 'active', 'INTEGER NOT NULL DEFAULT 1')
 // Per run: where it started from, where it stands in the finish gate, and what
 // became of its commits. finish_state is a SUB-state of 'running' on purpose —
 // runs.status carries a CHECK, and a new value there would be a table rebuild
-// (see tabelleUmziehen); besides, the run really is still running: its
+// (see rebuildTable); besides, the run really is still running: its
 // terminal is writable, messages reach it, a human can step in.
 addColumn('runs', 'base_sha', 'TEXT')            // HEAD of the worktree right after creation
 addColumn('runs', 'finish_state', 'TEXT')        // NULL|checking|awaiting_commit|awaiting_merge|merging|check_failed
@@ -322,7 +322,7 @@ addColumn('incidents', 'gemeldet_am', 'TEXT')
  * defaults and the UNIQUE survive. Copying is done column-wise by name, so the
  * order does not matter.
  */
-function harnessCheckAufloesen() {
+function dropHarnessCheck() {
   const sql = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'`).get()?.sql
   if (!sql) return
   if (!/CHECK\s*\(\s*harness\b/i.test(sql)) return   // fresh database, or already resolved
@@ -339,7 +339,7 @@ function harnessCheckAufloesen() {
     .replace(m[0], m[0].trimStart().startsWith(',') ? ',' : '')
     .replace(/CREATE TABLE (IF NOT EXISTS )?["'`]?agents["'`]?/i, 'CREATE TABLE agents_neu')
 
-  tabelleUmziehen(neuSql)
+  rebuildTable(neuSql)
   console.log('[db] agents.harness: CHECK removed — coding agents are plugins now')
 }
 
@@ -349,7 +349,7 @@ function harnessCheckAufloesen() {
  * agents(id); without turning it off, the DROP trips over that. Copying goes
  * column-wise by NAME from the live table, so the column order does not matter.
  */
-function tabelleUmziehen(neuSql) {
+function rebuildTable(neuSql) {
   db.exec('PRAGMA foreign_keys = OFF')
   try {
     db.exec('BEGIN')
@@ -371,7 +371,7 @@ function tabelleUmziehen(neuSql) {
  * Agent names are unique per REPO, not per hub (the CREATE TABLE above carries
  * UNIQUE(repo_id, name)); databases created before that change still hold a
  * column-level UNIQUE on name. SQLite cannot drop such a UNIQUE — so rebuild
- * once, with the same care as harnessCheckAufloesen(). Idempotent: a fresh
+ * once, with the same care as dropHarnessCheck(). Idempotent: a fresh
  * database already has the new rule and nothing happens.
  */
 function agentNameUniquePerRepo() {
@@ -395,10 +395,10 @@ function agentNameUniquePerRepo() {
   }
   neu = neu.replace(/CREATE TABLE (IF NOT EXISTS )?["'`]?agents["'`]?/i, 'CREATE TABLE agents_neu')
 
-  tabelleUmziehen(neu)
+  rebuildTable(neu)
   console.log('[db] agents.name: UNIQUE rebuilt per repo (repo_id, name)')
 }
-harnessCheckAufloesen()
+dropHarnessCheck()
 agentNameUniquePerRepo()
 
 // Existing agents with a cron expression keep their behavior.

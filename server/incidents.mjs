@@ -14,7 +14,7 @@ import { join } from 'node:path'
 import db, { addEvent } from './db.mjs'
 import { RUNS_DIR, fmtDbUtc } from './util.mjs'
 import { notify, notifyMuted, detailUrl } from './notify.mjs'
-import { TYP_TEXT } from './detect.mjs'
+import { TYPE_TEXT } from './detect.mjs'
 import { env } from './env.mjs'
 
 /**
@@ -28,15 +28,15 @@ import { env } from './env.mjs'
 const NOTIFY_DELAY_MS = Number(env('INCIDENT_NOTIFY_DELAY_MS') ?? 10 * 60_000)
 
 /** Timestamp in DB format (UTC, 'YYYY-MM-DD HH:MM:SS'). */
-export function dbZeit(ms = Date.now()) {
+export function dbTime(ms = Date.now()) {
   return new Date(ms).toISOString().replace('T', ' ').slice(0, 19)
 }
-export function msVon(dbTs) {
+export function msFrom(dbTs) {
   return dbTs ? Date.parse(String(dbTs).replace(' ', 'T') + 'Z') : NaN
 }
 
 /** Log line for the detector — append-only, never read during operation. */
-export function detektorLog(runId, eintrag) {
+export function detectorLog(runId, eintrag) {
   if (!runId) return
   try {
     const dir = join(RUNS_DIR, runId)
@@ -51,7 +51,7 @@ export function detektorLog(runId, eintrag) {
  * same wall. A rate limit and a provider hiccup, on the other hand, pass by
  * themselves; the hub defers and retries.
  */
-export const MENSCH_TYPEN = new Set(['auth_error', 'billing_error', 'model_error',
+export const HUMAN_TYPES = new Set(['auth_error', 'billing_error', 'model_error',
   // A branch that did not make it onto the base branch stays where it is until
   // somebody decides: merge it, commit the leftovers, or skip it. Waiting does
   // not help, so this belongs in the group that asks for hands.
@@ -77,23 +77,23 @@ export const MENSCH_TYPEN = new Set(['auth_error', 'billing_error', 'model_error
  *   noticed      everything else. The record stays as history, the hub closes
  *                it by itself when the run finishes.
  */
-export function brauchtMensch(v, runStatus = null) {
-  if (MENSCH_TYPEN.has(String(v.typ).split(':')[0])) return true
+export function needsHuman(v, runStatus = null) {
+  if (HUMAN_TYPES.has(String(v.typ).split(':')[0])) return true
   return v.schwere === 'rot' && ['failed', 'aborted'].includes(String(runStatus))
 }
 
-export function offeneVorfaelle(runId) {
+export function openIncidentsOf(runId) {
   return runId === null
     ? db.prepare(`SELECT * FROM incidents WHERE run_id IS NULL AND geloest_am IS NULL ORDER BY id`).all()
     : db.prepare(`SELECT * FROM incidents WHERE run_id = ? AND geloest_am IS NULL ORDER BY id`).all(runId)
 }
-export function alleVorfaelle(runId) {
+export function allIncidentsOf(runId) {
   return db.prepare(`SELECT * FROM incidents WHERE run_id = ? ORDER BY id`).all(runId)
 }
-export function vorfall(id) { return db.prepare('SELECT * FROM incidents WHERE id = ?').get(id) }
+export function incidentById(id) { return db.prepare('SELECT * FROM incidents WHERE id = ?').get(id) }
 
 /**
- * Report an occurrence. Returns { vorfall, ereignis } with ereignis ∈
+ * Report an occurrence. Returns { incident, ereignis } with ereignis ∈
  *   'neu' | 'wieder' | 'zusatz' | 'dedupe' | 'eskaliert'
  *
  * - Open incident of the same type: anzahl++, zuletzt_gesehen; an upgrade
@@ -103,27 +103,27 @@ export function vorfall(id) { return db.prepare('SELECT * FROM incidents WHERE i
  * - Two sources see the same event (hook + transcript within 90 s): do not
  *   count it twice.
  */
-export async function vorfallMelden(runId, { typ, quelle, schwere = 'rot', beleg = null, tsMs = Date.now(), stillMelden = false }) {
-  const ts = dbZeit(tsMs)
+export async function reportIncident(runId, { typ, quelle, schwere = 'rot', beleg = null, tsMs = Date.now(), noNotify = false }) {
+  const ts = dbTime(tsMs)
   const letzter = runId === null
     ? db.prepare(`SELECT * FROM incidents WHERE run_id IS NULL AND typ = ? ORDER BY id DESC LIMIT 1`).get(typ)
     : db.prepare(`SELECT * FROM incidents WHERE run_id = ? AND typ = ? ORDER BY id DESC LIMIT 1`).get(runId, typ)
 
   let ereignis, row
   if (letzter && letzter.geloest_am === null) {
-    const dedupe = quelle !== letzter.quelle && Math.abs(tsMs - msVon(letzter.zuletzt_gesehen)) < 90_000
+    const dedupe = quelle !== letzter.quelle && Math.abs(tsMs - msFrom(letzter.zuletzt_gesehen)) < 90_000
     const hoch = schwere === 'rot' && letzter.schwere === 'gelb'
     db.prepare(`UPDATE incidents SET anzahl = anzahl + ?, zuletzt_gesehen = max(zuletzt_gesehen, ?),
                 schwere = CASE WHEN ? THEN 'rot' ELSE schwere END,
                 beleg = COALESCE(?, beleg), quelle = CASE WHEN ? THEN ? ELSE quelle END WHERE id = ?`)
       .run(dedupe ? 0 : 1, ts, hoch ? 1 : 0, beleg, hoch ? 1 : 0, quelle, letzter.id)
     ereignis = hoch ? 'eskaliert' : dedupe ? 'dedupe' : 'zusatz'
-    row = vorfall(letzter.id)
-  } else if (letzter && tsMs <= msVon(letzter.geloest_am)) {
+    row = incidentById(letzter.id)
+  } else if (letzter && tsMs <= msFrom(letzter.geloest_am)) {
     // Straggler: the occurrence is older than the resolution — still belongs to the old incident.
     db.prepare(`UPDATE incidents SET anzahl = anzahl + 1 WHERE id = ?`).run(letzter.id)
     ereignis = 'zusatz'
-    row = vorfall(letzter.id)
+    row = incidentById(letzter.id)
   } else if (letzter) {
     // Reopening: the same record, so the history (erst_gesehen, anzahl) is preserved.
     // gemeldet_am resets: the reopened episode is a new one and pages again —
@@ -133,37 +133,37 @@ export async function vorfallMelden(runId, { typ, quelle, schwere = 'rot', beleg
                 wieder_geoeffnet = wieder_geoeffnet + 1, gemeldet_am = NULL, notify_at = NULL WHERE id = ?`)
       .run(ts, schwere, quelle, beleg, letzter.id)
     ereignis = 'wieder'
-    row = vorfall(letzter.id)
+    row = incidentById(letzter.id)
   } else {
     const r = db.prepare(`INSERT INTO incidents(run_id, typ, quelle, schwere, erst_gesehen, zuletzt_gesehen, beleg)
                           VALUES(?,?,?,?,?,?,?)`).run(runId, typ, quelle, schwere, ts, ts, beleg)
     ereignis = 'neu'
-    row = vorfall(Number(r.lastInsertRowid))
+    row = incidentById(Number(r.lastInsertRowid))
   }
 
-  detektorLog(runId, { art: 'vorfall', ereignis, typ, quelle, schwere: row.schwere, anzahl: row.anzahl, beleg })
+  detectorLog(runId, { art: 'vorfall', ereignis, typ, quelle, schwere: row.schwere, anzahl: row.anzahl, beleg })
   if (runId) addEvent(runId, `incident:${ereignis}`, { typ, quelle, schwere: row.schwere, id: row.id })
 
-  const melden = !stillMelden && row.schwere === 'rot' && ['neu', 'wieder', 'eskaliert'].includes(ereignis)
+  const melden = !noNotify && row.schwere === 'rot' && ['neu', 'wieder', 'eskaliert'].includes(ereignis)
   if (melden) await scheduleNotification(row.id, tsMs)
-  return { vorfall: row, ereignis }
+  return { incident: row, ereignis }
 }
 
 /**
  * Schedule (or, with a zero delay, send now) the notification for a red incident.
- * `notify_at` is when it becomes due; vorfaelleMeldenFaellig() — the watcher
+ * `notify_at` is when it becomes due; notifyDueIncidents() — the watcher
  * pass — sends everything that has come due and is STILL open. An incident that
  * resolves itself before then never pages (that is the point of the delay).
  */
 async function scheduleNotification(id, tsMs = Date.now()) {
   if (NOTIFY_DELAY_MS <= 0) {
-    const row = vorfall(id)
+    const row = incidentById(id)
     await notifyIncident(row, row.wieder_geoeffnet ? 'wieder' : 'neu')
-    db.prepare(`UPDATE incidents SET gemeldet_am = ?, notify_at = NULL WHERE id = ?`).run(dbZeit(), id)
+    db.prepare(`UPDATE incidents SET gemeldet_am = ?, notify_at = NULL WHERE id = ?`).run(dbTime(), id)
     return
   }
   db.prepare(`UPDATE incidents SET notify_at = ? WHERE id = ? AND gemeldet_am IS NULL AND geloest_am IS NULL`)
-    .run(dbZeit(tsMs + NOTIFY_DELAY_MS), id)
+    .run(dbTime(tsMs + NOTIFY_DELAY_MS), id)
 }
 
 /**
@@ -174,25 +174,25 @@ async function scheduleNotification(id, tsMs = Date.now()) {
  * Rows with a notify_at only exist when a delay is configured (with delay 0 the
  * alarm goes out immediately at scheduleNotification()) — or when a test set one by hand.
  */
-export async function vorfaelleMeldenFaellig(jetztMs = Date.now()) {
+export async function notifyDueIncidents(jetztMs = Date.now()) {
   const rows = db.prepare(`SELECT id FROM incidents
     WHERE geloest_am IS NULL AND gemeldet_am IS NULL AND schwere = 'rot'
-      AND notify_at IS NOT NULL AND notify_at <= ?`).all(dbZeit(jetztMs))
+      AND notify_at IS NOT NULL AND notify_at <= ?`).all(dbTime(jetztMs))
   for (const { id } of rows) {
-    const row = vorfall(id)
+    const row = incidentById(id)
     if (!row || row.geloest_am !== null || row.gemeldet_am !== null) continue
     await notifyIncident(row, row.wieder_geoeffnet ? 'wieder' : 'neu')
-    db.prepare(`UPDATE incidents SET gemeldet_am = ?, notify_at = NULL WHERE id = ?`).run(dbZeit(), id)
+    db.prepare(`UPDATE incidents SET gemeldet_am = ?, notify_at = NULL WHERE id = ?`).run(dbTime(), id)
   }
 }
 
 /** Upgrade yellow → red by the watcher (assessment by time/count). */
-export async function vorfallEskalieren(id, grund) {
-  const row = vorfall(id)
+export async function escalateIncident(id, grund) {
+  const row = incidentById(id)
   if (!row || row.geloest_am !== null || row.schwere === 'rot') return row
   db.prepare(`UPDATE incidents SET schwere = 'rot' WHERE id = ?`).run(id)
-  const neu = vorfall(id)
-  detektorLog(row.run_id, { art: 'eskalation', id, typ: row.typ, grund })
+  const neu = incidentById(id)
+  detectorLog(row.run_id, { art: 'eskalation', id, typ: row.typ, grund })
   if (row.run_id) addEvent(row.run_id, 'incident:eskaliert', { typ: row.typ, id, grund })
   // The escalation is a judgment by time/count, not a fresh occurrence — but it
   // is the moment the incident becomes an alarm, so it pages (with the same
@@ -203,19 +203,19 @@ export async function vorfallEskalieren(id, grund) {
 }
 
 /** Incident resolved by a human. Another occurrence afterwards reopens it. */
-export function vorfallLoesen(id, von = 'web') {
-  const row = vorfall(id)
+export function resolveIncident(id, von = 'web') {
+  const row = incidentById(id)
   if (!row || row.geloest_am !== null) return row
   db.prepare(`UPDATE incidents SET geloest_am = ?, geloest_von = ?, notify_at = NULL WHERE id = ?`)
-    .run(dbZeit(), von, id)
-  detektorLog(row.run_id, { art: 'geloest', id, typ: row.typ, von })
+    .run(dbTime(), von, id)
+  detectorLog(row.run_id, { art: 'geloest', id, typ: row.typ, von })
   if (row.run_id) addEvent(row.run_id, 'incident:geloest', { typ: row.typ, id, von })
-  return vorfall(id)
+  return incidentById(id)
 }
 
 /** Resolve all open incidents of a run ("resolve all" button). */
-export function vorfaelleLoesen(runId, von = 'web') {
-  for (const v of offeneVorfaelle(runId)) vorfallLoesen(v.id, von)
+export function resolveIncidentsOf(runId, von = 'web') {
+  for (const v of openIncidentsOf(runId)) resolveIncident(v.id, von)
 }
 
 /**
@@ -225,19 +225,19 @@ export function vorfaelleLoesen(runId, von = 'web') {
  * the recovery is announced too: an alarm that rings must un-ring, or
  * the operator keeps a problem in mind that no longer exists.
  */
-export async function vorfallVerwerfen(id, grund) {
-  const row = vorfall(id)
+export async function dismissIncident(id, grund) {
+  const row = incidentById(id)
   if (!row || row.geloest_am !== null) return row
   db.prepare(`UPDATE incidents SET geloest_am = ?, geloest_von = ?, notify_at = NULL WHERE id = ?`)
-    .run(dbZeit(), `auto:${grund}`, id)
-  detektorLog(row.run_id, { art: 'verworfen', id, typ: row.typ, grund })
+    .run(dbTime(), `auto:${grund}`, id)
+  detectorLog(row.run_id, { art: 'verworfen', id, typ: row.typ, grund })
   if (row.run_id) addEvent(row.run_id, 'incident:auto_resolved', { typ: row.typ, id, grund })
-  if (row.gemeldet_am !== null) await notifyResolved(vorfall(id), grund)
-  return vorfall(id)
+  if (row.gemeldet_am !== null) await notifyResolved(incidentById(id), grund)
+  return incidentById(id)
 }
 
 /** Traffic-light color from the incidents alone: 'rot' | 'gelb' | null. */
-export function ampelAusVorfaellen(runId) {
+export function trafficLightFromIncidents(runId) {
   const r = db.prepare(`SELECT schwere FROM incidents WHERE run_id = ? AND geloest_am IS NULL`).all(runId)
   if (r.some(x => x.schwere === 'rot')) return 'rot'
   if (r.length) return 'gelb'
@@ -250,7 +250,7 @@ export function ampelAusVorfaellen(runId) {
  * it. The agent's name, the repo and the harness/model travel with it, so the
  * message is attributable without opening the hub.
  */
-function runKennung(runId) {
+function runLabel(runId) {
   const run = db.prepare(`SELECT r.id, r.title, r.harness, r.model, r.provider, r.status, r.expected_minutes,
                             a.name AS agent, p.name AS repo
                           FROM runs r LEFT JOIN agents a ON a.id = r.agent_id LEFT JOIN repos p ON p.id = r.repo_id
@@ -264,14 +264,14 @@ function runKennung(runId) {
 
 async function notifyIncident(row, ereignis, grund = null) {
   const kopf = row.wieder_geoeffnet ? '🔴 AGAIN: ' : '🔴 '
-  const name = TYP_TEXT[row.typ] ?? row.typ
+  const name = TYPE_TEXT[row.typ] ?? row.typ
   const zeilen = [`${kopf}${name}`]
   if (row.run_id) {
-    const { zeile, run } = runKennung(row.run_id)
+    const { zeile, run } = runLabel(row.run_id)
     zeilen.push(zeile)
     // Say straight away whether this needs hands: the whole point of the alarm
     // is that the reader can tell a "get up" from a "noted" without opening it.
-    zeilen.push(brauchtMensch(row, run?.status)
+    zeilen.push(needsHuman(row, run?.status)
       ? '→ Needs you: this does not clear itself.'
       : '→ For information: the hub keeps going, nothing to do.')
   } else {
@@ -296,10 +296,10 @@ async function notifyIncident(row, ereignis, grund = null) {
 
 /** The counterpart of the alarm: an announced incident that cleared itself. */
 async function notifyResolved(row, grund) {
-  const name = TYP_TEXT[row.typ] ?? row.typ
+  const name = TYPE_TEXT[row.typ] ?? row.typ
   const zeilen = [`✅ Resolved: ${name}`]
   if (row.run_id) {
-    const { zeile } = runKennung(row.run_id)
+    const { zeile } = runLabel(row.run_id)
     zeilen.push(zeile)
   } else {
     zeilen.push('Global (provider pulse).')

@@ -32,10 +32,10 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import db, { getRepo, getRun, addEvent, getSetting } from './db.mjs'
-import { RUNS_DIR, kurzid, sh, sendToSession, parseDbUtc } from './util.mjs'
+import { RUNS_DIR, shortId, sh, sendToSession, parseDbUtc } from './util.mjs'
 import { harnessOwnedPaths, applyExtras } from './runner.mjs'
 import { notifyRun, doneText, completeFollowUp } from './reports.mjs'
-import { vorfallMelden, offeneVorfaelle, vorfallVerwerfen } from './incidents.mjs'
+import { reportIncident, openIncidentsOf, dismissIncident } from './incidents.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { fallbackTitle, TITLE_MAX } from './title.mjs'
 import { t } from './i18n.mjs'
@@ -391,12 +391,12 @@ async function pushOneRepo(repo) {
   const typ = `merge_blocked:${repo.name}`
   const decision = decidePush({ ahead, behind })
   if (decision === 'skip') {
-    for (const v of offeneVorfaelle(null)) if (v.typ === typ) vorfallVerwerfen(v.id, 'base branch back in sync')
+    for (const v of openIncidentsOf(null)) if (v.typ === typ) dismissIncident(v.id, 'base branch back in sync')
     return
   }
   if (decision === 'diverged') {
-    const { ereignis } = await vorfallMelden(null, {
-      typ, quelle: 'integrate', schwere: 'rot', stillMelden: true,
+    const { ereignis } = await reportIncident(null, {
+      typ, quelle: 'integrate', schwere: 'rot', noNotify: true,
       beleg: `${base} has diverged from origin/${base}: ${ahead} local, ${behind} remote commits`,
     })
     if (['neu', 'wieder'].includes(ereignis)) {
@@ -428,7 +428,7 @@ export async function backupBranch(runId) {
   const tip = await tipOf(run)
   if (!tip || !run.base_sha || tip === run.base_sha) return null
   const branch = run.branch_reported || run.branch_expected
-  const ref = branch || `run/${kurzid(runId)}`
+  const ref = branch || `run/${shortId(runId)}`
   const r = branch
     ? await sh('git', ['-C', run.workdir_effective, 'push', '-u', 'origin', branch], { timeout: 180_000 })
     : await sh('git', ['-C', repo.path, 'push', 'origin', `${tip}:refs/heads/${ref}`], { timeout: 180_000 })
@@ -494,7 +494,7 @@ export async function landedRuns(repo, run, max = 5) {
   for (const row of rows) {
     if (!shas.has(row.merged_sha)) continue
     const summary = fallbackTitle(row.report_md ?? '', 160) || '(no report)'
-    lines.push(`- "${row.title ?? kurzid(row.id)}" (${row.merged_sha.slice(0, 7)}): ${summary}`)
+    lines.push(`- "${row.title ?? shortId(row.id)}" (${row.merged_sha.slice(0, 7)}): ${summary}`)
     if (lines.length >= max) break
   }
   return lines.length ? lines.join('\n') : '- (no Freilauf runs; changes came from outside)'
@@ -885,10 +885,10 @@ async function integrateOne(runId, opts = {}) {
   }
 
   const beforeSha = (await sh('git', ['-C', dir, 'rev-parse', 'HEAD'])).stdout.trim()
-  const title = run.title ?? kurzid(runId)
+  const title = run.title ?? shortId(runId)
   const merged = await sh('git', ['-C', dir,
     '-c', 'user.name=Freilauf', '-c', 'user.email=Freilauf@localhost',
-    'merge', '--no-ff', '-m', `Merge run ${kurzid(runId)}: ${title}\n\nFreilauf run ${runId}`, tip])
+    'merge', '--no-ff', '-m', `Merge run ${shortId(runId)}: ${title}\n\nFreilauf run ${runId}`, tip])
   if (!merged.ok) {
     await sh('git', ['-C', dir, 'merge', '--abort'])
     return backToConflict(runId, repo, 'merge conflict')
@@ -1037,7 +1037,7 @@ async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = nu
       addEvent(orig.id, 'merged', { sha: tip, files, by_resolver: runId, followup: !!orig.followup_open })
       closeMergeIncidents(orig.id)
       const fresh = getRun(orig.id)
-      const origLine = `Merged into ${repo.base_branch}: ${String(tip).slice(0, 7)} (by conflict run ${kurzid(runId)})`
+      const origLine = `Merged into ${repo.base_branch}: ${String(tip).slice(0, 7)} (by conflict run ${shortId(runId)})`
       if (orig.followup_open) {
         await completeFollowUp(orig.id, { mergeLine: origLine, merged: true })
       } else {
@@ -1056,8 +1056,8 @@ async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = nu
 }
 
 function closeMergeIncidents(runId) {
-  for (const v of offeneVorfaelle(runId)) {
-    if (v.typ === 'merge_blocked') vorfallVerwerfen(v.id, 'merged after all')
+  for (const v of openIncidentsOf(runId)) {
+    if (v.typ === 'merge_blocked') dismissIncident(v.id, 'merged after all')
   }
 }
 
@@ -1090,11 +1090,11 @@ async function notifyBaseMoved(repo, mergedRun, { files, mergedSha }) {
     const overlap = [...changed].filter(f => mine.has(f))
     const text = overlap.length
       ? fill(M5A, {
-        base: repo.base_branch, title: mergedRun.title ?? kurzid(mergedRun.id),
+        base: repo.base_branch, title: mergedRun.title ?? shortId(mergedRun.id),
         sha7: String(mergedSha).slice(0, 7), overlap_files: formatFiles(overlap),
       })
       : fill(M5B, {
-        base: repo.base_branch, title: mergedRun.title ?? kurzid(mergedRun.id),
+        base: repo.base_branch, title: mergedRun.title ?? shortId(mergedRun.id),
         sha7: String(mergedSha).slice(0, 7), n: changed.size,
       })
     // sendToSession() directly and NOT actions.sendToRun(): the latter switches
@@ -1209,7 +1209,7 @@ export async function escalate(runId, reason) {
 }
 
 function branchOf(run) {
-  return run.branch_reported || run.branch_expected || `run ${kurzid(run.id)}`
+  return run.branch_reported || run.branch_expected || `run ${shortId(run.id)}`
 }
 function worktreeHint(run) {
   return `no resume for this coding agent; the worktree is at ${run.workdir_effective ?? '?'}`
@@ -1284,7 +1284,7 @@ async function blockRun(runId, repo, status, text) {
   db.prepare(`UPDATE runs SET merge_status=? WHERE id=?`).run(status, runId)
   addEvent(runId, 'merge_blocked', { status })
   const ref = await backupBranch(runId)
-  await vorfallMelden(runId, {
+  await reportIncident(runId, {
     typ: 'merge_blocked', quelle: 'integrate', schwere: 'rot',
     beleg: `${status}: ${branchOf(getRun(runId))} → ${repo.base_branch}`,
   })
@@ -1358,7 +1358,7 @@ async function startResolver(orig, repo) {
   if (!tip) return
 
   const attempt = (orig.merge_attempts ?? 0) + 1
-  const branch = `resolve/${kurzid(orig.id)}${attempt > 1 ? `-${attempt}` : ''}`
+  const branch = `resolve/${shortId(orig.id)}${attempt > 1 ? `-${attempt}` : ''}`
   const made = await sh('git', ['-C', repo.path, 'branch', branch, tip])
   if (!made.ok && !/already exists/i.test(made.stderr)) {
     addEvent(orig.id, 'merge_error', { reason: `branch ${branch}: ${made.stderr.trim()}` })
@@ -1372,7 +1372,7 @@ async function startResolver(orig, repo) {
   const failed = orig.finish_state === 'check_failed' || tipRun.finish_state === 'check_failed'
   const prompt = fill(P_CONFLICT, {
     branch, base: repo.base_branch,
-    orig_title: orig.title ?? kurzid(orig.id), orig_id: orig.id,
+    orig_title: orig.title ?? shortId(orig.id), orig_id: orig.id,
     reason: failed && check
       ? `the merge check "${check}" failed on the merged result (output below)`
       : 'merge conflict',
@@ -1404,7 +1404,7 @@ async function startResolver(orig, repo) {
   }
   def.flows = null
 
-  const title = `Resolve conflicts: ${orig.title ?? kurzid(orig.id)}`.slice(0, TITLE_MAX)
+  const title = `Resolve conflicts: ${orig.title ?? shortId(orig.id)}`.slice(0, TITLE_MAX)
   const r = await startRun(def, { repoId: repo.id, title })
   if (!r.ok || !r.runId) {
     addEvent(orig.id, 'merge_error', { reason: r.error ?? 'resolver start failed' })
@@ -1417,8 +1417,8 @@ async function startResolver(orig, repo) {
               merge_status='resolving' WHERE id=?`).run(r.runId, orig.id)
   addEvent(orig.id, 'resolver_started', { run_id: r.runId, branch, attempt })
   await notifyRun(orig.id, 'resolving', fill(T_RESOLVING, {
-    title: orig.title ?? kurzid(orig.id), base: repo.base_branch,
-    resolver_short: kurzid(r.runId), branch, attempt,
+    title: orig.title ?? shortId(orig.id), base: repo.base_branch,
+    resolver_short: shortId(r.runId), branch, attempt,
     max: Math.max(0, repo.merge_max_attempts ?? 2),
   }))
 }
@@ -1531,7 +1531,7 @@ export async function mergeByHand(runId, leftovers = null) {
     // here is the hub tidying up after its own run, which is why it is allowed.
     await sh('git', ['-C', run.workdir_effective,
       '-c', 'user.name=Freilauf', '-c', 'user.email=Freilauf@localhost',
-      'commit', '-m', `Leftover changes from run ${kurzid(runId)}, committed by Freilauf on the operator's request`])
+      'commit', '-m', `Leftover changes from run ${shortId(runId)}, committed by Freilauf on the operator's request`])
   } else if (leftovers === 'discard') {
     await sh('git', ['-C', run.workdir_effective, 'checkout', '--', '.'])
     await sh('git', ['-C', run.workdir_effective, 'clean', '-fd'])
@@ -1572,8 +1572,8 @@ export async function mergeByHand(runId, leftovers = null) {
 export function skipMerge(runId) {
   db.prepare(`UPDATE runs SET merge_status='skipped_by_operator' WHERE id=?`).run(runId)
   addEvent(runId, 'merge_manual', { action: 'skip' })
-  for (const v of offeneVorfaelle(runId)) {
-    if (v.typ === 'merge_blocked') vorfallVerwerfen(v.id, 'skipped by the operator')
+  for (const v of openIncidentsOf(runId)) {
+    if (v.typ === 'merge_blocked') dismissIncident(v.id, 'skipped by the operator')
   }
 }
 

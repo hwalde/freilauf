@@ -6,8 +6,8 @@ import db, { addEvent } from './db.mjs'
 // import is the kind of trap that only shows up the day somebody moves a line.
 import { notify as notifyChannels, notifyOnFor, detailUrl } from './notify.mjs'
 import { sh, parseDbUtc } from './util.mjs'
-import { vorfallMelden, detektorLog } from './incidents.mjs'
-import { typVonClaudeFehler, typVonText, TYP_TEXT, fremdeClaudeSession, isSessionStopped } from './detect.mjs'
+import { reportIncident, detectorLog } from './incidents.mjs'
+import { typeFromClaudeError, typeFromText, TYPE_TEXT, foreignClaudeSession, isSessionStopped } from './detect.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { transcriptState } from './cursor-transcript.mjs'
 
@@ -199,8 +199,8 @@ export async function handleReport(runId, body, via = 'http') {
   // matter, not the run's provider problems — logged for the detector's
   // protocol, ignored otherwise. fl-report only sends session_id when the hook
   // JSON carried one, so an older fl-report changes nothing here.
-  if (HOOK_KINDS.includes(kind) && fremdeClaudeSession(runId, run.harness, body.session_id)) {
-    detektorLog(runId, { art: 'verworfen', grund: 'hook report from a foreign claude session (a process the agent spawned)',
+  if (HOOK_KINDS.includes(kind) && foreignClaudeSession(runId, run.harness, body.session_id)) {
+    detectorLog(runId, { art: 'verworfen', grund: 'hook report from a foreign claude session (a process the agent spawned)',
       kind, session: body.session_id })
     return { ok: true, message: null }
   }
@@ -335,12 +335,12 @@ export async function handleReport(runId, body, via = 'http') {
       // archive). The end is recorded by whoever ended it; an incident on top
       // of that is an alarm about our own cleanup — see isSessionStopped().
       if (isSessionStopped(text) || isSessionStopped(roh)) break
-      let typ = typVonClaudeFehler(roh)
+      let typ = typeFromClaudeError(roh)
       if (typ === null) break                       // e.g. max_output_tokens: not a provider problem
-      if (typ === 'unbekannt') typ = typVonText(`${roh} ${text}`)
+      if (typ === 'unbekannt') typ = typeFromText(`${roh} ${text}`)
       if (typ === 'rate_limit') db.prepare('UPDATE runs SET rate_limit_hits = rate_limit_hits + 1 WHERE id=?').run(runId)
       const beleg = [roh !== 'unknown' ? roh : null, text].filter(Boolean).join(' — ').slice(0, 300) || null
-      await vorfallMelden(runId, { typ, quelle: `hook:${run.harness}`, schwere: 'rot', beleg })
+      await reportIncident(runId, { typ, quelle: `hook:${run.harness}`, schwere: 'rot', beleg })
       break
     }
     case '_idle':
@@ -467,8 +467,8 @@ export function wantsTurnEndFollowUp(run, tip, harness) {
 async function handleFollowUp(run, body, via) {
   const runId = run.id
   const kind = String(body.kind || '')
-  if (HOOK_KINDS.includes(kind) && fremdeClaudeSession(runId, run.harness, body.session_id)) {
-    detektorLog(runId, { art: 'verworfen', grund: 'hook report from a foreign claude session (a process the agent spawned)', kind, session: body.session_id })
+  if (HOOK_KINDS.includes(kind) && foreignClaudeSession(runId, run.harness, body.session_id)) {
+    detectorLog(runId, { art: 'verworfen', grund: 'hook report from a foreign claude session (a process the agent spawned)', kind, session: body.session_id })
     return { ok: true, message: null }
   }
   // The agent of a follow-up in the gate is gone — the escalation, as for a
@@ -810,7 +810,7 @@ export function doneText(run, report, mergeLine = null) {
     ? `Duration: ${Math.round((Date.now() - Date.parse(run.started_at.replace(' ', 'T') + 'Z')) / 60000)} min`
     : ''
   const vorfaelle = db.prepare(`SELECT typ, anzahl FROM incidents WHERE run_id = ? ORDER BY id`).all(run.id)
-  const vf = vorfaelle.length ? ' · Incidents: ' + vorfaelle.map(v => `${TYP_TEXT[v.typ] ?? v.typ} ${v.anzahl}×`).join(', ') : ''
+  const vf = vorfaelle.length ? ' · Incidents: ' + vorfaelle.map(v => `${TYPE_TEXT[v.typ] ?? v.typ} ${v.anzahl}×`).join(', ') : ''
   const branch = run.branch_reported || run.branch_expected
   const zeile2 = [dur, branch ? `Branch: ${branch}` : null, run.pr_url ? `PR: ${run.pr_url}` : null,
     mergeLine].filter(Boolean).join(' · ')

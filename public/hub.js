@@ -87,14 +87,14 @@
   // the server rendered it — the favorite that travels in the URL.
   const QRFULL_KEY = 'freilauf:qrfull'
   if (location.pathname === '/runs/new') {
-    const laufForm = document.querySelector('form.settings')
-    if (laufForm) {
+    const runForm = document.querySelector('form.settings')
+    if (runForm) {
       let geparkt = null
       try { geparkt = JSON.parse(sessionStorage.getItem(QRFULL_KEY) || 'null') } catch (err) { geparkt = null }
       if (Array.isArray(geparkt)) {
         const byName = new Map()
         geparkt.forEach(function (kv) { byName.set(kv[0], (byName.get(kv[0]) || []).concat(kv[1])) })
-        laufForm.querySelectorAll('input[name], textarea[name], select[name]').forEach(function (el) {
+        runForm.querySelectorAll('input[name], textarea[name], select[name]').forEach(function (el) {
           const vals = byName.get(el.name)
           if (el.type === 'checkbox' || el.type === 'radio') {
             el.checked = !!vals && vals.indexOf(el.value) >= 0
@@ -1753,7 +1753,7 @@
       }
     }
 
-    async function zeileAktualisieren(runId) {
+    async function refreshRow(runId) {
       const zeile = document.getElementById('run-' + runId)
       if (!zeile) return
       // Never swap a row whose title is being edited — the half-typed text is
@@ -1775,7 +1775,7 @@
     // because the empty state and the sort order both live in the tbody. So the
     // whole body is re-rendered — the one case where a parent has to be swapped
     // (the same reason a banner that was absent cannot appear by itself).
-    async function tabelleAktualisieren() {
+    async function refreshTable() {
       // Re-query: the element is replaced by every swap, so the reference
       // captured at load time is stale — and with it the status filter it
       // carries, which has to travel with the request or the filtered list
@@ -1793,7 +1793,7 @@
       syncRunPicks()    // every box in the new tbody starts unticked (see there)
     }
 
-    async function detailAktualisieren(runId) {
+    async function refreshDetail(runId) {
       if (!detail || detail[1] !== runId) return
       // Head, metrics and events only. The terminal is NOT part of this
       // fragment: replacing #term would tear the xterm instance off the DOM,
@@ -1823,7 +1823,7 @@
     // in by its own id. So the whole aside is replaced, which also covers
     // #header-status and #usage-panel inside it; the two fragment routes for
     // those stay, they are simply not what the page asks for any more.
-    async function statusAktualisieren() {
+    async function refreshStatus() {
       try {
         // The sidebar's repo, not the body's: it is set on pages that have no
         // repo context too (see statusSidebar in pages.mjs).
@@ -1846,7 +1846,7 @@
     const POLL_MS = Math.max(1000, Number(window.FREILAUF_SIDEBAR_POLL_MS) || 30_000)
     setInterval(() => {
       if (document.hidden) return
-      statusAktualisieren().catch(() => {})
+      refreshStatus().catch(() => {})
     }, POLL_MS)
 
     // While the header stands on ANOTHER repo than the page — a run detail
@@ -1864,14 +1864,14 @@
       try { d = JSON.parse(ev.data) } catch (err) { return }
       if (!d.runId) return
       bald('run:' + d.runId, () => {
-        zeileAktualisieren(d.runId).catch(() => {})
-        detailAktualisieren(d.runId).catch(() => {})
-        if (runsBody && !document.getElementById('run-' + d.runId)) tabelleAktualisieren().catch(() => {})
+        refreshRow(d.runId).catch(() => {})
+        refreshDetail(d.runId).catch(() => {})
+        if (runsBody && !document.getElementById('run-' + d.runId)) refreshTable().catch(() => {})
       })
       // Quota and balances move with the work, but far more slowly — a longer
       // timer keeps a burst of run events from turning into a burst of usage
       // requests, each of which may talk to a provider API.
-      bald('status', () => { statusAktualisieren().catch(() => {}) }, 2000)
+      bald('status', () => { refreshStatus().catch(() => {}) }, 2000)
     })
     // A project pushed a number into the sidebar (server/panels.mjs). It is its
     // own event type and not a `run` one, because it belongs to no run: a value
@@ -1881,7 +1881,7 @@
     // point of pushing rather than polling is that the number appears WHEN it
     // changes; waiting for the 30-second timer would give that away again.
     quelle.addEventListener('panel', () => {
-      bald('status', () => { statusAktualisieren().catch(() => {}) }, 500)
+      bald('status', () => { refreshStatus().catch(() => {}) }, 500)
     })
     // Whether the channel is actually up is a fact about the page, so the page
     // says so. It matters for real: a fresh load has no Last-Event-ID, so an

@@ -1123,7 +1123,7 @@ and it carries a second improvement the hub should have had anyway:
   path. The 127.0.0.1 route accepts the token when present and keeps working
   without it for one transition release, then requires it too — a claude
   subprocess spawned by the agent (§"A hook report from a foreign claude session")
-  inherits the token like it inherits `FL_RUN_ID`, so `fremdeClaudeSession()` stays
+  inherits the token like it inherits `FL_RUN_ID`, so `foreignClaudeSession()` stays
   the guard it is.
 - `fl-report` learns `FL_HUB_SOCKET`: `curl --unix-socket "$FL_HUB_SOCKET" http://hub/api/runs/$RUN_ID/report`.
   The inbox fallback (`~/agents/runs/<id>/inbox.jsonl`) works unchanged because the
@@ -1148,7 +1148,7 @@ read-write at the same path, so:
 
 - the hub's activity sources become `agentHome(run) + '/.claude/projects/<slug>/<run id>.jsonl'`
   etc. — one indirection in `measureActivity()`, `cursor-transcript.mjs`,
-  `claudeTranskriptPfad()`, the opencode and hermes SQLite readers,
+  `claudeTranscriptPath()`, the opencode and hermes SQLite readers,
   `resumeCommand()`, and the two id lookups `resumeRun()` makes before it can
   launch a resume form (cursor's transcript basename, opencode's root session
   through `opencode-store.mjs`); unsandboxed runs return the host home;
@@ -1434,7 +1434,7 @@ five parts.
 
 | Channel | What it sees | Becomes |
 |---|---|---|
-| **Proxy denials** (network) | every 403 the proxy issued: host, method, count, first/last time — from iron-proxy's JSON log or the builtin proxy's memory | `sandbox:blocked {host, count}` events, deduplicated per host per 10 minutes (the incident module's own throttle idea), and an incident `sandbox_blocked` in the **Noticed** group — yellow, because a single denial may be exactly what the policy intended; red after N distinct hosts or when the agent has been silent since (the `bewerteLogTreffer()` veto in reverse: work *after* the denial says the agent coped) |
+| **Proxy denials** (network) | every 403 the proxy issued: host, method, count, first/last time — from iron-proxy's JSON log or the builtin proxy's memory | `sandbox:blocked {host, count}` events, deduplicated per host per 10 minutes (the incident module's own throttle idea), and an incident `sandbox_blocked` in the **Noticed** group — yellow, because a single denial may be exactly what the policy intended; red after N distinct hosts or when the agent has been silent since (the `rateLogHit()` veto in reverse: work *after* the denial says the agent coped) |
 | **The log scanner** (filesystem, resources, docker-in-docker) | `EACCES`, `EROFS` / `Read-only file system`, `ENOSPC` on a tmpfs, `Cannot connect to the Docker daemon`, `Could not resolve host`, `ENETUNREACH`, `403 Forbidden` together with the proxy's marker string — a new `sandbox` pattern family in `harnesses/patterns.mjs`, applied only to sandboxed runs | `anomaly:sandbox_denied` with the line, yellow, same exception list and same "work after the hit vetoes escalation" rule as the incident scanner — an agent reading its own error handling must not turn its run red |
 | **The agent asks** | a new report kind `fl-report access "<what and why>"` — the prompt tells the agent to use it (below) | `help`-like: incident in **Needs you**, notification with the text, run stays `running` (the agent is told to continue with what it can do meanwhile, or to wait — its choice, stated in the report) |
 | **The proxy tells the agent** | the 403 body: `Freilauf sandbox: <host> is not on this run's allowlist. If you need it, run: fl-report access "<host>: <why>"` — `srt`'s `X-Proxy-Error` idea with the instruction in the text | the model reads its tool output; the instruction is in the place it looks |

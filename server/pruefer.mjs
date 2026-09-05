@@ -12,16 +12,16 @@
 // hit remains unchecked (yellow, turns red by time/count). Better one alarm too
 // many than a swallowed outage.
 import { getSetting, mruList, mruRemember } from './db.mjs'
-import { TYPEN } from './detect.mjs'
+import { INCIDENT_TYPES } from './detect.mjs'
 import { llmJson } from './llm/index.mjs'
 import { chainUsable, jobFallbacks, jobRouting, jobSource } from './llm/job.mjs'
 
-const MIN_ABSTAND_MS = 10 * 60_000    // per run at most one request every 10 min
-const MAX_ZEICHEN = 12_000            // context cap: cost and latency
+const MIN_GAP_MS = 10 * 60_000    // per run at most one request every 10 min
+const MAX_CHARS = 12_000            // context cap: cost and latency
 const zuletzt = new Map()             // runId → ms of the last request
 
 /** Which source answers this question. Unset = OpenRouter, as it always was. */
-export function pruefSource() {
+export function checkSource() {
   return jobSource('check')
 }
 
@@ -32,14 +32,14 @@ export function pruefSource() {
  * it declares as required" (`chainUsable` in llm/job.mjs), which is the same
  * sentence with the vendor taken out of it.
  */
-export function pruefLlmAktiv() {
+export function checkLlmActive() {
   if (getSetting('llm_check_on') !== '1' || !getSetting('llm_check_model')) return false
   return chainUsable('check', getSetting('llm_check_model'))
 }
 
 /** Most recently used models — "used" means: saved in the settings. */
-export function llmModelleMru() { return mruList('llm_check_models_mru') }
-export function llmModellMerken(model) { mruRemember('llm_check_models_mru', model) }
+export function llmModelsMru() { return mruList('llm_check_models_mru') }
+export function rememberLlmModel(model) { mruRemember('llm_check_models_mru', model) }
 
 const SCHEMA_NAME = 'vorfall_urteil'
 const SCHEMA = {
@@ -48,7 +48,7 @@ const SCHEMA = {
   required: ['problem', 'typ', 'blockiert', 'begruendung', 'zitat'],
   properties: {
     problem: { type: 'boolean', description: 'true if the agent is genuinely hindered by a rate limit, a provider outage, an auth or credit problem' },
-    typ: { type: 'string', enum: [...TYPEN, 'kein'] },
+    typ: { type: 'string', enum: [...INCIDENT_TYPES, 'kein'] },
     blockiert: { type: 'boolean', description: 'true if the agent is currently NOT continuing to work (stalled, waiting, aborted)' },
     begruendung: { type: 'string' },
     zitat: { type: 'string', description: 'the one line from the terminal that proves it (verbatim), or empty' },
@@ -70,19 +70,19 @@ Answer exclusively in the given JSON schema.`
  * 'zeilen' are already cleaned terminal lines, NOT newest-first —
  * chronological, as they appear in the log.
  */
-export async function pruefeTreffer({ runId, harness, treffer, zeilen, jetztMs = Date.now(), erzwingen = false }) {
-  if (!pruefLlmAktiv()) return null
+export async function checkHit({ runId, harness, treffer, zeilen, jetztMs = Date.now(), erzwingen = false }) {
+  if (!checkLlmActive()) return null
   const vorher = zuletzt.get(runId) ?? 0
-  if (!erzwingen && jetztMs - vorher < MIN_ABSTAND_MS) return { gedrosselt: true }
+  if (!erzwingen && jetztMs - vorher < MIN_GAP_MS) return { gedrosselt: true }
   zuletzt.set(runId, jetztMs)
 
   let kontext = zeilen.join('\n')
-  if (kontext.length > MAX_ZEICHEN) kontext = '…\n' + kontext.slice(-MAX_ZEICHEN)
+  if (kontext.length > MAX_CHARS) kontext = '…\n' + kontext.slice(-MAX_CHARS)
   const user = `Harness: ${harness}\nSuspicious line(s) from the scanner:\n${treffer.map(t => `- [${t.typ}] ${t.zeile}`).join('\n')}\n\nLast terminal lines (chronological, cleaned):\n\`\`\`\n${kontext}\n\`\`\``
 
   const model = getSetting('llm_check_model')
   const r = await llmJson({
-    source: pruefSource(),
+    source: checkSource(),
     model,
     fallbacks: jobFallbacks('check', model),
     ...jobRouting('check'),

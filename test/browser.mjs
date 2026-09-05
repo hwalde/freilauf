@@ -123,7 +123,7 @@ async function laufStarten(data) {
 }
 const melden = (runId, kind, text) => jsonPost(`/api/runs/${runId}/report`, { kind, text })
 const laufRow = (id) => db.prepare('SELECT * FROM runs WHERE id=?').get(id)
-const dbZeit = (ms) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ')
+const dbTime = (ms) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ')
 
 let repoId = 0, repoId2 = 0, FLOWID = 0, FAV1 = 0, FAV2 = 0
 let R_ALT = '', R_TICK = '', R_GEPLANT = '', R_LIVE = '', R_ENDE = '', R_OHNE_SESSION = ''
@@ -186,8 +186,8 @@ async function datenAnlegen() {
   // what is under test, and it must not depend on how long the setup took.
   const jetzt = Date.now()
   db.prepare('UPDATE runs SET started_at=?, ended_at=? WHERE id=?')
-    .run(dbZeit(jetzt - 5 * 60_000), dbZeit(jetzt - 3 * 60_000), R_ALT)
-  db.prepare('UPDATE runs SET started_at=? WHERE id=?').run(dbZeit(jetzt - 12_000), R_TICK)
+    .run(dbTime(jetzt - 5 * 60_000), dbTime(jetzt - 3 * 60_000), R_ALT)
+  db.prepare('UPDATE runs SET started_at=? WHERE id=?').run(dbTime(jetzt - 12_000), R_TICK)
   // A finished run whose session is gone — the terminal must say so instead of
   // opening a black box against a 404.
   db.prepare('UPDATE runs SET tmux_session=NULL WHERE id=?').run(R_OHNE_SESSION)

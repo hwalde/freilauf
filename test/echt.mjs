@@ -641,7 +641,7 @@ try {
   // The incident check has none — it is called by the watcher — so it is
   // exercised as the watcher calls it, in this process, against the same
   // settings table.
-  const { pruefeTreffer } = await import(R + 'pruefer.mjs')
+  const { checkHit } = await import(R + 'pruefer.mjs')
   const paare = [
     ['provider:deepseek', HAS.deepseek ? null : 'DEEPSEEK_API_KEY is not set'],
     ['agent:claude', HAS.claude ? null : 'claude is not in PATH'],
@@ -653,7 +653,7 @@ try {
       dbmod.setSetting('llm_check_source', quelle)
       dbmod.setSetting('llm_check_model', MODELS[quelle])
       const a = jetzt()
-      const urteil = await pruefeTreffer({
+      const urteil = await checkHit({
         runId: `echt-${quelle}-${Date.now()}`, harness: 'claude', erzwingen: true,
         treffer: [{ typ: 'rate_limit', zeile: 'API Error: 429 rate_limit_error — upstream rejected the request' }],
         zeilen: ['$ npm test', 'API Error: 429 rate_limit_error — upstream rejected the request', 'retrying in 60s'],

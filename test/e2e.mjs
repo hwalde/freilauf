@@ -1522,12 +1522,12 @@ try {
     db.prepare(`INSERT INTO incidents(run_id, typ, quelle, schwere, erst_gesehen, zuletzt_gesehen, beleg, notify_at)
                 VALUES(?,?,?,?,datetime('now'),datetime('now'),'Everything is broken.', datetime('now','+10 minutes'))`)
       .run(j.runId, 'provider_error', 'hook:claude', 'rot')
-    const { vorfaelleMeldenFaellig } = await import('../server/incidents.mjs')
-    await vorfaelleMeldenFaellig()
+    const { notifyDueIncidents } = await import('../server/incidents.mjs')
+    await notifyDueIncidents()
     isFalse(ereignisse(j.runId).some(k => k === 'notified'), 'not due yet: nothing announced')
     // Due and still open → the alarm.
     db.prepare(`UPDATE incidents SET notify_at=datetime('now','-1 second') WHERE run_id=?`).run(j.runId)
-    await vorfaelleMeldenFaellig()
+    await notifyDueIncidents()
     const tg = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='notified' ORDER BY id DESC LIMIT 1`).get(j.runId)
     isTrue(!!tg && JSON.parse(tg.payload).type === 'incident:provider_error', 'due: the alarm fires')
     isTrue(!!vorfaelle(j.runId)[0].gemeldet_am, 'recorded as announced')
@@ -2161,7 +2161,7 @@ try {
     isTrue(existsSync(vorher), 'worktree from the failed attempt is still there')
     rmSync(FAILED_START)
     // The failed attempt's started_at must not survive into the new one, and
-    // that is not cosmetics: `verwaisteLaeufeAbschliessen()` measures its grace
+    // that is not cosmetics: `closeOrphanedRuns()` measures its grace
     // period against this column, so a retry that kept the old timestamp had
     // none — the watcher pass falling into the seconds between launchRun()'s
     // `started` event and its `tmux_session` wrote `failed / start interrupted,
@@ -2710,7 +2710,7 @@ try {
     await sessionMerken(j.runId)
     db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now') WHERE id=?`).run(j.runId)
     const inc = await import('../server/incidents.mjs')
-    await inc.vorfallMelden(j.runId, { typ: 'auth_error', quelle: 'e2e', schwere: 'rot', beleg: 'E2E' })
+    await inc.reportIncident(j.runId, { typ: 'auth_error', quelle: 'e2e', schwere: 'rot', beleg: 'E2E' })
 
     const zaehlt = async () => {
       const seite = await (await fetchPath(`/?repo=${repoId}`)).text()
@@ -2728,7 +2728,7 @@ try {
     isFalse(nachher.block.includes('need you'), 'archived: the sidebar no longer promises a row')
     isFalse(nachher.gefiltert.includes(j.runId), 'and the filtered overview has none to give')
     // The record itself is untouched — the archive and the run's own page keep it.
-    isTrue(inc.offeneVorfaelle(j.runId).length === 1, 'the incident is still open, it is only not counted here')
+    isTrue(inc.openIncidentsOf(j.runId).length === 1, 'the incident is still open, it is only not counted here')
     contains(await (await fetchPath(`/runs/${j.runId}`)).text(), 'Incidents', 'and still shown on the run\'s page')
     db.prepare('DELETE FROM runs WHERE id=?').run(j.runId)   // keep the pagination count below stable
   })
