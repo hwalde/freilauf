@@ -886,16 +886,46 @@ export async function notifyRun(runId, type, text, lang = null) {
 }
 
 /**
+ * Is every commit of this branch already on the remote? Pure, so the rule can
+ * be stated in a test — the two callers in the watcher spend it as "there is
+ * nothing here that lives only on this machine".
+ *
+ * `%(upstream:track)` answers `[ahead n]`, `[behind n]`, `[ahead n, behind m]`,
+ * `[gone]`, or NOTHING when branch and upstream are identical. Two traps in
+ * that list, and this hub has now been caught by both:
+ *
+ *   - empty is also what a branch with NO upstream reports, so empty alone
+ *     never means "pushed" — hence the upstream is asked for as well;
+ *   - **behind-only means nothing is outstanding.** Reading any divergence as
+ *     "unpushed" is what turned the hub's own merge into a false alarm: the
+ *     integrator merges the run's branch into the base branch and pushes THAT,
+ *     which leaves the branch exactly one commit BEHIND its upstream with not a
+ *     single commit of its own missing from the remote. Measured on run
+ *     d4ee07d2 — `merged` at 16:47:56, `anomaly:unpushed {"track":"[behind 1]"}`
+ *     at 16:47:58, and a notification to the operator's phone at 16:47:59,
+ *     about work that was on `origin/main` by then. `cleanupWorktrees()` had
+ *     the right rule in its own comment ("no [ahead]") and asked this function,
+ *     which answered something stricter.
+ *
+ * `[gone]` is deliberately NOT synced: the upstream ref has been deleted, so
+ * the remote demonstrably no longer holds what it once did.
+ */
+export function branchOnRemote(upstream, track) {
+  if (!upstream) return false
+  const t = String(track ?? '')
+  if (t.includes('gone')) return false
+  return !/\bahead\b/.test(t)
+}
+
+/**
  * git helper check for the watcher: upstream AND tracking state.
- * The trap: '%(upstream:track)' is also empty when the branch has NO upstream
- * at all — empty alone does not mean "pushed". Hence the upstream comes back
- * too and 'synced' is only true when an upstream exists and nothing is pending.
- * Returns { upstream, track, synced }.
+ * Returns { upstream, track, synced } — see branchOnRemote() for what `synced`
+ * means and for the two ways of getting it wrong.
  */
 export async function branchSyncState(repoPath, branch) {
   const r = await sh('git', ['-C', repoPath, 'for-each-ref',
     '--format=%(upstream)%09%(upstream:track)', `refs/heads/${branch}`])
   if (!r.ok) return { upstream: '', track: '', synced: false }
   const [upstream = '', track = ''] = r.stdout.trim().split('\t')
-  return { upstream, track, synced: upstream !== '' && track === '' }
+  return { upstream, track, synced: branchOnRemote(upstream, track) }
 }

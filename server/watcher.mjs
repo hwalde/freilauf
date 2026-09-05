@@ -818,9 +818,17 @@ async function finishCostsPass() {
 }
 
 async function checkFinishedBranches() {
+  // The hub put this run's work on origin ITSELF — merged into the base branch
+  // and pushed, or kept on its branch and pushed there (integrate.mjs never
+  // knows a purely local merge). Nothing of it lives only on this machine,
+  // whatever the LOCAL branch's tracking config happens to say about itself,
+  // so the question is not asked at all. `cleanupWorktrees()` below already
+  // carried this rule (`run.merge_status === 'merged'`); this pass did not, and
+  // that is how a merged run came to be paged about as unpushed.
   const rows = db.prepare(`
     SELECT * FROM runs
     WHERE status IN ('done','failed') AND worktree IS NOT NULL
+      AND COALESCE(merge_status,'') NOT IN ('merged','kept_on_branch')
       AND id NOT IN (SELECT run_id FROM events WHERE kind IN ('anomaly:unpushed','branch_synced'))
   `).all()
   for (const run of rows) {

@@ -6722,6 +6722,53 @@ try {
     isTrue(IN_FLIGHT_ANOMALIES.every(k => k.startsWith('anomaly:')), 'and every entry is an anomaly kind')
   })
 
+  await check('archivable: a run being worked on again must not lose its session', async () => {
+    // Archiving CLOSES the run's tmux session. So the rule is not "is the
+    // record terminal" but "is anybody still in there" — and a finished run
+    // with an open follow-up commission displays as running for exactly that
+    // reason. Measured on run 49a26807: the row said "running — follow-up in
+    // progress" and offered the archive button beside it.
+    const { archivable, displayStatus } = await import('../server/run-state.mjs')
+    isTrue(archivable({ status: 'done' }), 'a finished run may go')
+    isTrue(archivable({ status: 'failed' }), 'a failed one too')
+    isTrue(archivable({ status: 'aborted' }), 'and an aborted one')
+    isFalse(archivable({ status: 'running' }), 'a running run may not')
+    isFalse(archivable({ status: 'waiting_help' }), 'nor one asking a question')
+    isFalse(archivable({ status: 'scheduled' }), 'nor one waiting for its time')
+    isFalse(archivable({ status: 'deferred' }), 'nor one waiting for quota')
+    isFalse(archivable({ status: 'done', followup_since: 'x' }), 'not with an open commission')
+    isFalse(archivable({ status: 'done', followup_open: 1 }), 'nor with a follow-up in the gate')
+    isFalse(archivable(null), 'no run, no verdict')
+    // The two rules are one statement: what the overview shows as running is
+    // what may not be archived out from under its own session.
+    for (const row of [{ status: 'done', followup_since: 'x', agent_state: 'waiting' },
+                       { status: 'failed', followup_open: 1 }]) {
+      isTrue(['running', 'waiting_input'].includes(displayStatus(row)) && !archivable(row),
+        `a row displaying as ${displayStatus(row)} is not archivable`)
+    }
+  })
+
+  await check('branchOnRemote: behind-only is pushed, no upstream is not', async () => {
+    // The watcher spends this as "does work live only on this machine". The
+    // integrator merges the branch into the base branch and pushes THAT, which
+    // leaves the branch [behind 1] with nothing of its own missing — measured
+    // on run d4ee07d2, which was merged at 16:47:56 and paged about as
+    // "unpushed" at 16:47:59.
+    const { branchOnRemote } = await import('../server/reports.mjs')
+    const up = 'refs/remotes/origin/main'
+    isTrue(branchOnRemote(up, ''), 'identical with its upstream')
+    isTrue(branchOnRemote(up, '[behind 1]'), 'behind only: everything is on the remote')
+    isTrue(branchOnRemote(up, '[behind 12]'), 'however far behind')
+    isFalse(branchOnRemote(up, '[ahead 1]'), 'ahead: commits live only here')
+    isFalse(branchOnRemote(up, '[ahead 2, behind 1]'), 'diverged counts as ahead')
+    isFalse(branchOnRemote(up, '[gone]'), 'the upstream was deleted — not evidence of a push')
+    // An empty track is ALSO what a branch with no upstream reports, so empty
+    // alone never means "pushed".
+    isFalse(branchOnRemote('', ''), 'no upstream at all')
+    isFalse(branchOnRemote(null, '[behind 1]'), 'nor a missing one')
+    isTrue(branchOnRemote(up, null), 'a missing track next to a real upstream is "identical"')
+  })
+
   await check('displayStatusSql selects exactly the rows displayStatus would', async () => {
     // The sidebar counts and the overview filter are SQL, the row is JavaScript:
     // one rule in two languages, held together here over every combination.

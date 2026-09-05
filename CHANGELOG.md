@@ -136,6 +136,31 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A run whose work the hub merged is no longer reported as "branch not
+  pushed".** The integrator merges a run's branch into the base branch and
+  pushes *that*, which leaves the branch itself one commit **behind** its
+  upstream — with not a single commit of its own missing from the remote. The
+  watcher's branch reconciliation read any divergence from the upstream as
+  unpushed work, so it raised the yellow anomaly and **sent a notification**
+  seconds after the merge, about work that was on `origin/main` by then
+  (measured on run d4ee07d2: `merged` at 16:47:56, "branch has unpushed
+  commits" on the operator's phone at 16:47:59; two such messages went out over
+  the last days). Two things changed: a branch that is only behind its upstream
+  now counts as pushed, which is what the worktree cleanup beside it already
+  said in its own comment; and a run the hub itself put on origin — merged into
+  the base branch or kept on its branch — is not asked the question at all.
+  A branch with no upstream, one that is genuinely ahead, and one whose
+  upstream has been deleted are reported exactly as before.
+- **A finished run that is working again cannot be archived out from under its
+  own session.** Archiving closes the run's tmux session, and a run whose
+  follow-up commission is open is one the operator is typing into right now —
+  the overview shows it as **Running** for exactly that reason. It nevertheless
+  offered the archive button and the bulk-archive checkbox in that same row,
+  and the route took them: one click would have ended a live conversation with
+  the agent. The button, the checkbox and the detail page's archive link are
+  gone while a follow-up is in progress, the route refuses with a message that
+  says why rather than "only finished runs can be archived", and the run
+  archives normally once its follow-up has reported.
 - **A retried run is no longer killed by the hub seconds after it starts.**
   "Retry run" set the run back to `running` but left `started_at` on the first
   attempt — and that column is what the watcher's sweep for interrupted starts

@@ -23,6 +23,7 @@
   "web.internal_error": "interner Fehler: {msg}",
   "api.unknown_run": "unbekannter Lauf",
   "api.unknown_incident": "unbekannter Vorfall",
+  "api.archive_followup_open": "in diesem Lauf ist ein Nachfolgeauftrag in Arbeit — Archivieren würde seine Session schließen; warte den Folge-Report ab",
   "api.archive_only_finished": "nur abgeschlossene Läufe können archiviert werden",
   "api.no_session": "keine Session",
   "api.no_session_given": "keine Session angegeben",
