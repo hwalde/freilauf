@@ -1590,6 +1590,11 @@ try {
           (err, stdout, stderr) => resolve({ err, stdout: String(stdout), stderr: String(stderr) })))
         enthaelt(r.stdout + r.stderr, 'limit', `Claude reports the limit (${(r.stdout + r.stderr).slice(-200)})`)
         await warteAuf(() => vorfaelle(j.runId).some(v => v.typ === 'rate_limit'), { was: 'incident via the hook', timeoutMs: 15_000 })
+        // The same settings file carries the attention hooks: UserPromptSubmit
+        // fires before the (failing) API call, so the real claude has told the
+        // hub it started working — the one measurement of that wiring the
+        // suite makes without spending quota.
+        wahr(ereignisse(j.runId).includes('agent_working'), 'the real UserPromptSubmit hook reported _working')
         const v = vorfaelle(j.runId).find(v => v.typ === 'rate_limit')
         gleich(v.quelle, 'hook:claude', 'source is the hook')
         gleich(v.schwere, 'rot', 'red')
@@ -1768,7 +1773,7 @@ try {
       wahr(ereignisse(RA).includes('agent_waiting'), 'and an event for the live channel')
       const html = await (await hol(`/runs/${RA}`)).text()
       enthaelt(html, 'Waiting for input', 'the detail page says so')
-      enthaelt(html, 'id="run-attention"', 'with the since-line')
+      enthaelt(html, 'id="run-attention">', 'with the since-line shown')
       const rows = await (await hol(`/?repo=${repoId}&status=waiting_input`)).text()
       enthaelt(rows, `id="run-${RA}"`, 'the overview filter finds it under waiting for input')
       falsch((await (await hol(`/?repo=${repoId}&status=running`)).text()).includes(`id="run-${RA}"`), 'and not under running')
@@ -1782,8 +1787,11 @@ try {
     await pruefe('input makes it running again — and a repeat writes no second event', async () => {
       wahr((await flReport(RA, ['_working'])).ok, '_working accepted')
       gleich(lauf(RA).agent_state, 'working', 'working')
+      // The chip, not the whole page: the sidebar next to it counts OTHER runs
+      // of the repo that wait for input (an earlier group's claude run).
       const html = await (await hol(`/runs/${RA}`)).text()
-      falsch(html.includes('Waiting for input'), 'the page reads running again')
+      enthaelt(html, '"status-chip">Running<', 'the page reads running again')
+      enthaelt(html, 'id="run-attention" hidden', 'and the since-line is hidden')
       await flReport(RA, ['_working'])
       await flReport(RA, ['_working'])
       gleich(ereignisse(RA).filter(k => k === 'agent_working').length, 1, 'three hooks, one event')
@@ -5783,6 +5791,17 @@ export default {
         wahr(existsSync(join(r.workdir_effective, marke)),
           `${marke} was really created in the worktree`)
         wahr((r.report_md ?? '').length > 0, 'report present')
+        // The agent's attention through the REAL hooks (docs/plugins.md,
+        // "Attention"): the CLI said it started working, and — since
+        // `fl-report done` is a tool call INSIDE the turn — said its turn was
+        // over afterwards, which is what leaves a finished run's agent sitting
+        // at its prompt. hermes and opencode need what setup/02 installs on
+        // this machine (the plugin, the hooks block); a machine without that
+        // fails here, and rightly so — it is what the suite is for.
+        wahr(ereignisse(j.runId).includes('agent_working'), `${h.name} reported _working through its hook`)
+        await warteAuf(() => lauf(j.runId).agent_state === 'waiting',
+          { was: `${h.name} reporting its turn end`, timeoutMs: 90_000, taktMs: 1000 })
+        wahr(ereignisse(j.runId).includes('agent_waiting'), `${h.name} reported its turn end`)
       })
     }
   }

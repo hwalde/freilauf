@@ -324,6 +324,7 @@ and does without.
 | `hookFiles({ccReport})` | fn (optional) | files the hub writes into the workspace before the start: `[{path, content}]`, `path` relative to the worktree. `ccReport` is the absolute path of `fl-report` — hook commands must not depend on `PATH`. An existing file is never overwritten, and `harnessOwnedPaths()` keeps these paths out of the worktree cleanup's dirty check |
 | `goal` | `{max, command(condition)}` (optional) | this CLI takes a SECOND prompt, one that says when the run is done — claude's `/goal <condition>`. `max` is the longest condition it accepts, `command()` builds the line. Presence is the whole capability check: the form shows the goal field only for these harnesses (`harnessesWithGoal()`), and `server/goal.mjs` types the line into the session after the start, because a slash command has no CLI flag |
 | `skills` | `{user: string[], project: string[]}` (optional) | where this coding agent looks for **agent skills**, user level and project level separately. `~` is allowed in the user paths; the project paths are relative to a workspace root. `server/skills.mjs` installs the hub's own skills into the smallest set of user directories that covers every configured coding agent — see "Where a coding agent looks for skills" below. Absent = this coding agent has no skill mechanism the hub knows about, and it is skipped without comment |
+| `attention` | `{source, note?}` (optional) | HOW this coding agent tells the hub whether it is working or waiting for input — `source` names the channel (`'settings'`, `'hookFiles'`, `'plugin'`, `'config'`, or your own word), `note` the events wired. A declaration, not a mechanism: the mechanism is the two report kinds `fl-report _working` / `fl-report _waiting` (plus `_turn_end`), see "Attention: working or waiting for input" below. The Plugins page prints the declaration, and prints its absence, because a coding agent without it never reads "waiting for input" and nothing else says why |
 | `promptRules` | string (optional) | extra prompt lines for this harness, appended to the platform rules by `platformSuffix()` — also to a custom template from the settings, because they describe the machine, not the operator's house rules |
 | `fetchModels()` | async fn | model list for subscription harnesses (cached by `models.mjs`) |
 | `effortLevels()` | async fn (optional) | levels the CLI itself accepts (probed; cached 24 h) |
@@ -452,6 +453,62 @@ plugin uses anyway. The price is a path that belongs to opencode's internals, an
 that price is paid by the `null` contract: no file, no permission, or a top-level
 shape that is not "provider id → entry" all answer *unknown* instead of the
 confident lie "holds nothing".
+
+### Attention: working or waiting for input
+
+`runs.status` records the attempt; it cannot say whether the agent is busy
+right now or sitting at its prompt waiting for a human — and the only party
+that knows is the CLI itself. So the coding agent's hooks say it, through two
+report kinds, and the hub turns them into the status word the pages show
+("Running" / "Waiting for input", `server/run-state.mjs`), into the follow-up
+commission when a finished run is typed into, and into the end of a help call
+when the answer was typed into the terminal.
+
+| What the CLI does | What the hook calls | Hub side |
+|---|---|---|
+| starts processing input — a prompt was submitted, a tool call begins | `fl-report _working` | `runs.agent_state='working'`; on a finished run with no open follow-up commission it OPENS one (`startFollowUpCommission`); on a `waiting_help` run it ends the help call (`answerHelpCall`) |
+| its turn is over and it waits for a human | `fl-report _turn_end` (the same kind cursor's run end uses; it implies waiting) or `fl-report _waiting` (for a second channel such as an idle notification) | `runs.agent_state='waiting'`; the run displays as "waiting for input"; the watcher writes no `no_activity` and pauses the follow-up overrun clock |
+
+Three rules, and each of them was measured to go wrong otherwise:
+
+1. **Root session only, never a subagent's end.** opencode emits
+   `session.status`/`session.idle` for every child session (its task tool
+   opens one per subagent, in the same worktree), and the child's idle arrives
+   while the parent still works on the result; claude fires `SubagentStop`
+   with the main session's id, even for a background helper. A "waiting"
+   reported off any of those says the run waits for a human while it is busy.
+   Ask the CLI which session is the root (`client.session.get(...).parentID`
+   in opencode's plugin API) or hook only the events of the main
+   conversation.
+2. **Report changes, not ticks.** A hook that fires on every tool call is
+   fine — `noteAgentState()` writes nothing when the state is unchanged — but
+   every call is a process. Keep a last-state variable where you can, and
+   detach a hook the CLI would otherwise block on (`setsid -f fl-report
+   _working >/dev/null 2>&1`, the pattern claude's `StopFailure` hook set).
+3. **Hook commands see the run's environment and nothing else.** `FL_RUN_ID`
+   and `FL_HUB_URL` reach the hook because the CLI inherits the tmux session's
+   environment; a hook that runs in the operator's own sessions too (a global
+   config, like hermes' `hooks:` block) has to exit 0 silently without them —
+   `bin/fl-hermes-hook` is the shape.
+
+How the four built-ins wire it, measured 2026-09-05 (versions in AGENTS.md,
+"The agent's attention"): claude `UserPromptSubmit` + `PreToolUse` →
+`_working`, `Stop` → `_turn_end`, `Notification` with matcher
+`idle_prompt|permission_prompt` → `_waiting` (`claudeSettingsJson()` in
+runner.mjs); cursor `beforeSubmitPrompt` → `_working`, `stop` → `_turn_end`
+(`hookFiles`); opencode `session.status` of the root session, busy →
+`_working`, idle → `_waiting` (the plugin `setup/02-install-scripts.sh`
+installs); hermes `pre_llm_call` → `_working`, `on_session_end` → `_turn_end`
+(`hooks:` in `~/.hermes/config.yaml`, `fl-hermes-hook`, and `--accept-hooks`
+on the launch line because hermes asks for consent per hook at the TTY).
+
+Then **declare** it: `attention: { source: '<where the hook lives>', note:
+'<events wired>' }`. The declaration changes nothing in the hub's behaviour —
+the state is read from the reports — but the Plugins page prints it, and
+prints its absence, because a coding agent that reports nothing simply never
+reads "waiting for input" and an operator would otherwise not know why. Every
+end of a session (`_exit`, `_pane_died`, the kill routes, a retry, a resume)
+clears the state; a plugin has nothing to do for that.
 
 ### Where a coding agent looks for skills
 
@@ -1443,25 +1500,33 @@ Three page-level rules worth knowing:
    (cursor), the harness needs `turnEndsRun` plus a channel that reports the turn
    end — a `hookFiles` entry, and ideally a second, hook-free source; see
    "cursor: when a run is over" in [AGENTS.md](../AGENTS.md).
-7. Optional but worth it: `resumeCommand(run)`. Every escalation the integration
+7. **Wire the agent's attention** (see "Attention: working or waiting for
+   input"): whatever the CLI offers — a hook file in the workspace, a settings
+   flag, a plugin of its own, a global config — calls `fl-report _working` when
+   it starts processing input and `fl-report _turn_end` (or `_waiting`) when
+   its turn is over and it waits for a human. Root session only, never a
+   subagent's end. Then declare `attention: { source, note }`. Without it a run
+   of this coding agent never reads "waiting for input" — not wrong, but the
+   Plugins page will say so.
+8. Optional but worth it: `resumeCommand(run)`. Every escalation the integration
    produces ends with "here is how you pick this session up"; a harness without
    it names the worktree instead. Find out from the CLI's own `--help` rather
    than guessing — a command that opens somebody ELSE's conversation is worse
    than no command.
-8. Optional: `gate` if this coding agent runs on an account the hub can meter,
+9. Optional: `gate` if this coding agent runs on an account the hub can meter,
    and `llm` if its CLI can answer a one-shot question. For `llm`, read the
    three rules in `cli-llm.mjs` first and declare `overhead: true`.
    `ownCredentials(ctx)` too — but **only if the CLI's credential store has been
    measured**: it decides a sentence the Plugins page states as fact, and a
    guess there is worse than leaving the capability out (see above). Declare
    `keyFreeProviders` either way; that is what the launch path reads.
-9. Optional: `skills`, the two lists of directories this CLI reads agent skills
+10. Optional: `skills`, the two lists of directories this CLI reads agent skills
    from (see "Where a coding agent looks for skills"). Only declare a directory
    you have **measured** — the CLI's own documentation, or its search list read
    out of the binary. Without it the coding agent is simply listed as unserved
    on Settings → Freilauf skills, which is the honest answer; with a wrong one
    the hub writes files where nothing reads them.
-10. Done: install detection, the discovery scan, the forms, the Plugins page, the
+11. Done: install detection, the discovery scan, the forms, the Plugins page, the
     detection patterns, the pulse, the budget-gate routing and the skill
     installer all follow the registry. Configure the new coding agent under
     Settings → Plugins.

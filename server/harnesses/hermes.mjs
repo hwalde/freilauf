@@ -74,7 +74,7 @@ const plugin = {
     // along: a resumed session announces "model restored" and still called the
     // configured default without them (measured).
     resume: [
-      'chat', '--in', '{workdir}', '--resume', '{resume_id}', '-q', '{prompt}', '--yolo',
+      'chat', '--in', '{workdir}', '--resume', '{resume_id}', '-q', '{prompt}', '--yolo', '--accept-hooks',
       { when: 'model', args: ['--model', '{model}'] },
       { when: 'provider', args: ['--provider', '{provider}'] },
       { when: 'effort', args: ['--reasoning', '{effort}'] },

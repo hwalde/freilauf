@@ -659,7 +659,8 @@ async function api(req, res, url) {
     if (['done', 'aborted'].includes(run?.status ?? '')) {
       // With the session goes the way a follow-up could report: an open
       // follow-up commission (web.mjs /send) is given up with it.
-      db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')), followup_since=NULL WHERE id=?`).run(m[1])
+      db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')), followup_since=NULL,
+                  agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(m[1])
       if (run && !run.tmux_closed_at) addEvent(m[1], 'tmux_closed', { source: 'user' })
       return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
     }
@@ -667,9 +668,10 @@ async function api(req, res, url) {
     // a terminal to the dead session until the next watcher tick (410 in the browser).
     // followup_since=NULL: a FAILED run can carry an open follow-up commission —
     // with the cancel it is given up, like with any other end of the session.
+    // …and what the agent last said about its attention goes with the session.
     db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
                 tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')), finish_state=NULL,
-                followup_since=NULL WHERE id=?`).run(m[1])
+                followup_since=NULL, agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(m[1])
     // Same event kind reconcileClosedSession() writes, so "why did this run
     // stop?" has one answer to look for rather than two.
     addEvent(m[1], 'aborted', { by: 'user' })

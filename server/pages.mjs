@@ -1460,9 +1460,13 @@ export function runDetailHead(run, ctx) {
   const id = run.id
   const titel = ctx.title
   return `<h2 id="run-head">${AMPEL_DOT[ampel(run)]()} ${titleInline(id, titel)} <span class="status-chip">${e(statusText(displayStatus(run)))}</span></h2>
-  ${displayStatus(run) === 'waiting_input' && run.agent_state_at
-    ? `<p class="dim" id="run-attention">${e(t('run.agent_waiting', { ts: fmtDbUtc(run.agent_state_at) }))}</p>`
-    : ''}
+  ${
+    // Always rendered, hidden when it does not apply: the live channel swaps
+    // by id (hub.js tauscheNachId), and an element that is absent from the DOM
+    // cannot be swapped in — nor out — by its own id. Same reason the card
+    // below needs its own removal step.
+    `<p class="dim" id="run-attention"${displayStatus(run) === 'waiting_input' && run.agent_state_at ? '' : ' hidden'}>${
+      run.agent_state_at ? e(t('run.agent_waiting', { ts: fmtDbUtc(run.agent_state_at) })) : ''}</p>`}
   ${followUpActive(run)
     ? `<div class="banner waiting" id="run-banner">${e(t('run.followup_banner'))}
        ${run.followup_since ? `<span class="dim">${e(t('run.followup_active', { ts: fmtDbUtc(run.followup_since) }))}</span>` : ''}</div>`
