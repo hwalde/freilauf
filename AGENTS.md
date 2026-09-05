@@ -3379,6 +3379,43 @@ errors (`post_api_request` only fires after success).
   browser rewraps the agent's window to its size while watching — with and
   without write access alike. The remedy would be `window-size manual` on the
   session.
+- **Marking in the browser terminal copied nothing, and xterm was not the one
+  failing to copy.** `bin/fl-start` sets `mouse on`, so a plain drag never
+  reaches xterm at all: it is a mouse report, tmux selects in copy-mode, and
+  its default `MouseDragEnd1Pane` binding copies the selection and cancels it.
+  Mark, copy, deselect — the gesture was complete; what was missing was the
+  last hop out of tmux. tmux does send it: with `set-clipboard` (default
+  `external`) and the `clipboard` terminal feature, which tmux 3.4 hands every
+  `xterm*` client by itself, the copied text goes to the client as OSC 52.
+  Measured against a real tmux client: `ESC ] 52 ; ; <base64> BEL` — note the
+  **empty** target field, so a handler matching on `c` sees nothing. xterm.js
+  registers no handler for the sequence and dropped it on the floor;
+  `hub.js` registers one (`term.parser.registerOscHandler(52, …)`) and writes
+  the browser's clipboard. Four things around it, each of them a way it goes
+  wrong: a payload of **`?` is a READ request** and is never answered — the
+  answer would hand the operator's clipboard to whatever runs in that session;
+  **`atob` gives bytes, not characters**, so without a `TextDecoder` every
+  umlaut in a copied line arrives broken; both clipboard ways need the document
+  focused, which is why an unfocused tab drops the sequence silently instead of
+  leaving a failure toast nobody asked for; and an operator whose tmux has
+  `set-clipboard off` (a server option — the hub does not touch it) loses this
+  path entirely and is left with the second one.
+  That second path is xterm's **own** selection, copied on mouse release and
+  then cleared, so both feel like one behaviour: it is what covers a read-only
+  client (tmux drops its input, so only Shift+drag selects — the page says so
+  under such a terminal), an application inside the pane that grabbed mouse
+  reporting, and a browser reached over plain http, where `navigator.clipboard`
+  does not exist at all and the old `execCommand` textarea is the fallback.
+  The drag is tracked from its **mousedown in the terminal**, because it may
+  end anywhere on the page and a bare document-wide mouseup would re-copy a
+  standing selection on every click.
+- **Under the native Fullscreen API only the fullscreen element's subtree is
+  rendered.** The toast box sits at the end of `<body>`, so every toast — the
+  copy confirmation above first of all — was invisible for as long as somebody
+  was in full screen, and nothing said so. It moves into `#term-wrap` with the
+  terminal and back out afterwards (`paint()` in hub.js); `position: fixed`
+  keeps working there, since a fixed element's containing block is only taken
+  away by `transform`/`filter`/`contain`, none of which that wrapper has.
 - **Esc belongs to the agent's TUI, so the full-screen terminal asks the
   browser for it.** The icon on the terminal's toggle line puts `#term-wrap`
   into `.term-full` (fixed, inset 0) **and** calls `requestFullscreen()` on it.

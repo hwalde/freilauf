@@ -66,7 +66,8 @@ das tut Freilauf, und es geht nur vorwärts.
   ([server/flows/AGENTS.md](server/flows/AGENTS.md)).
 - **Ein Fenster.** Was läuft, was es kostet, was herausgekommen ist, was dich
   braucht — die Übersicht, ein Live-Terminal im Browser (xterm.js,
-  standardmäßig nur lesend) und Benachrichtigungen mit Link direkt zum Lauf.
+  standardmäßig nur lesend; was man darin markiert, liegt in der
+  Zwischenablage) und Benachrichtigungen mit Link direkt zum Lauf.
   Die Seitenleiste zeigt deine Abo-Fenster, Provider-Guthaben und was jede
   tmux-Session auf der Maschine an Speicher kostet; ein konfigurierbarer
   Aufräum-Agent beendet die ältesten untätigen Sessions, wenn es zu viel wird.
