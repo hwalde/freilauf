@@ -2094,6 +2094,10 @@
   // say so too, or one pastes yesterday's text into somebody's shell.
   ;(function () {
     let lastToast = null
+    // When something last reached the clipboard — the one signal that says
+    // whether a drag did anything at all, whichever of the two paths carried
+    // it. The hint below hangs on it.
+    let lastCopyAt = 0
     const tell = (text, kind) => {
       if (!window.freilaufToast) return
       const standing = lastToast && lastToast.parentNode ? lastToast : null
@@ -2129,6 +2133,7 @@
       let ok = false
       try { await navigator.clipboard.writeText(text); ok = true } catch {}
       if (!ok) ok = legacyCopy(text)
+      lastCopyAt = Date.now()
       tell(ok ? T('js.term_copied', 'Copied to the clipboard')
         : T('js.term_copy_failed', 'The browser did not allow the clipboard — copy the selection by hand.'),
       ok ? 'ok' : 'err')
@@ -2155,25 +2160,122 @@
       return true
     })
 
+    // ---- who gets the mouse: the agent in the session, or selecting? ----
+    // tmux runs with `mouse on`, so xterm reports the mouse instead of
+    // selecting — and who CONSUMES those reports is the difference between
+    // the two harnesses, measured on this machine (`#{mouse_any_flag}` of the
+    // pane): claude leaves the mouse to tmux, which marks in copy-mode, copies
+    // and sends the text on as OSC 52; opencode takes mouse reporting for
+    // itself (any-motion, SGR, alternate screen) and does NOTHING with a drag —
+    // zero bytes back. So marking worked in one and produced nothing at all in
+    // the other, for a reason no amount of clipboard code could have fixed.
+    //
+    // Shift is the universal way out of that in every terminal, and xterm
+    // honours it (`shouldForceSelection` → `event.shiftKey` off a Mac). This
+    // button makes it the default for this browser: every mouse event in the
+    // terminal is re-dispatched with `shiftKey`, so xterm selects locally and
+    // sends no report at all. It is a TOGGLE and not the default, because the
+    // reports are also what lets one click inside a TUI — and it is remembered
+    // GLOBALLY rather than per run, because it is a habit ("I use this
+    // terminal to read and copy"), not a property of one agent's work.
+    const MOUSE_KEY = 'freilauf.term.mouse'
+    let mouseSelects = false
+    try { mouseSelects = localStorage.getItem(MOUSE_KEY) === 'select' } catch {}
+    const mouseBtn = document.getElementById('term-mouse')
+    const titleSelect = mouseBtn ? (mouseBtn.getAttribute('title') || '') : ''
+    const titleAgent = mouseBtn ? (mouseBtn.dataset.titleAgent || titleSelect) : ''
+    const paintMouse = () => {
+      if (!mouseBtn) return
+      const label = mouseSelects ? titleAgent : titleSelect
+      mouseBtn.setAttribute('title', label)
+      mouseBtn.setAttribute('aria-label', label)
+      mouseBtn.setAttribute('aria-pressed', mouseSelects ? 'true' : 'false')
+    }
+    paintMouse()
+    if (mouseBtn) {
+      mouseBtn.addEventListener('click', (ev) => {
+        // It sits in the <summary>, like the two icons next to it: a click
+        // there would otherwise fold the terminal away.
+        ev.preventDefault()
+        ev.stopPropagation()
+        mouseSelects = !mouseSelects
+        paintMouse()
+        try { localStorage.setItem(MOUSE_KEY, mouseSelects ? 'select' : 'agent') } catch {}
+      })
+    }
+    // The original event is stopped in the CAPTURE phase, before xterm's own
+    // listeners on the screen element see it, and a copy of it carrying
+    // `shiftKey` is dispatched on the same target — which then bubbles to
+    // exactly those listeners, and on to the document handlers xterm adds
+    // while a drag is running. `detail` travels with it, or a double click
+    // would stop selecting its word. The copy passes this listener again, so
+    // it carries a mark; without it this is an endless loop.
+    const forceSelect = (ev) => {
+      if (!mouseSelects || ev.shiftKey || ev.freilaufForced) return
+      ev.preventDefault()
+      ev.stopPropagation()
+      const copy = new MouseEvent(ev.type, {
+        bubbles: true, cancelable: true, composed: true, view: window,
+        clientX: ev.clientX, clientY: ev.clientY, screenX: ev.screenX, screenY: ev.screenY,
+        button: ev.button, buttons: ev.buttons, detail: ev.detail,
+        shiftKey: true, ctrlKey: ev.ctrlKey, altKey: ev.altKey, metaKey: ev.metaKey,
+      })
+      copy.freilaufForced = true
+      ev.target.dispatchEvent(copy)
+    }
+    for (const type of ['mousedown', 'mousemove', 'mouseup']) {
+      termBox.addEventListener(type, forceSelect, true)
+    }
+
     // xterm's own selection: copy when the mouse is let go, then clear it — the
     // same shape tmux's drag-end has, so both paths feel like one behaviour.
     // A failed copy KEEPS the selection: it is the only thing left to take by
     // hand. The drag is tracked from its mousedown because it may well end
     // outside the terminal, and a bare document-wide mouseup would re-copy a
     // standing selection every time the operator clicks anything on the page.
-    let dragging = false
-    termBox.addEventListener('mousedown', () => { dragging = true })
-    document.addEventListener('mouseup', () => {
-      if (!dragging) return
-      dragging = false
+    let dragFrom = null
+    let hinted = false
+    // BOTH listeners are in the CAPTURE phase, and that is the whole reason
+    // this works: xterm stops propagation on its own element while it handles
+    // a drag, so a mouseup listener on the document never sees a real
+    // selection being made — measured, after a first version that only ever
+    // ran in a test dispatching synthetic events straight at #term. Capture at
+    // the document runs before anything downstream can stop anything.
+    termBox.addEventListener('mousedown', (ev) => {
+      dragFrom = { x: ev.clientX, y: ev.clientY }
+    }, true)
+    document.addEventListener('mouseup', (ev) => {
+      const from = dragFrom
+      dragFrom = null
+      if (!from) return
+      // A drag may end anywhere on the page, so how far it went is measured
+      // against the event that ends it, not against the terminal's own.
+      const lastUp = { x: ev.clientX, y: ev.clientY }
       // A double click settles its word selection a tick after the event.
       setTimeout(() => {
-        if (!term.hasSelection()) return
-        const text = term.getSelection()
-        if (!text) return
-        copyOut(text).then((ok) => { if (ok) { try { term.clearSelection() } catch {} } })
+        if (term.hasSelection()) {
+          const text = term.getSelection()
+          if (!text) return
+          copyOut(text).then((ok) => { if (ok) { try { term.clearSelection() } catch {} } })
+          return
+        }
+        // Nothing selected. If this was a real drag and nothing landed in the
+        // clipboard either, the mouse went to an application that did nothing
+        // with it — the failure this whole section is about, and the one shape
+        // of it the operator cannot see. Say it once, and say what to do.
+        if (hinted || mouseSelects) return
+        const moved = Math.abs(lastUp.x - from.x) + Math.abs(lastUp.y - from.y)
+        if (moved < 8) return
+        setTimeout(() => {
+          if (hinted || Date.now() - lastCopyAt < 1500) return
+          hinted = true
+          tell(T('js.term_mouse_hint',
+            'That drag went to the agent in the session, which did nothing with it. '
+            + 'Hold Shift while dragging to select — or hand the mouse to selecting '
+            + 'with the 🖱 button above the terminal.'), 'warn')
+        }, 700)
       }, 0)
-    })
+    }, true)
   }())
 
   const sendSize = () => {

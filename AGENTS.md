@@ -3469,6 +3469,35 @@ errors (`post_api_request` only fires after success).
   The drag is tracked from its **mousedown in the terminal**, because it may
   end anywhere on the page and a bare document-wide mouseup would re-copy a
   standing selection on every click.
+- **Whether marking works at all depends on the coding agent, and that is not
+  a metaphor.** Both paths above hang on who CONSUMES the mouse reports xterm
+  sends, and the pane's `#{mouse_any_flag}` answers it. Measured on this
+  machine, one fresh session each: **claude** leaves the mouse to tmux
+  (`any=0`), so tmux marks in copy-mode, copies, cancels and sends the text on
+  as OSC 52 — the whole gesture, for free. **opencode** takes mouse reporting
+  for itself (`any=1`, SGR, alternate screen) and does **nothing** with a drag:
+  zero bytes back, no selection anywhere, no copy. So "select and it is in the
+  clipboard" worked in one harness and silently did nothing in the other, and
+  no amount of clipboard code could have fixed the second — the events never
+  got near a selection. Shift is every terminal's way out of that
+  (`shouldForceSelection` → `event.shiftKey` off a Mac), and the 🖱 button in
+  the terminal's toggle line makes it the default for this browser: every mouse
+  event over the terminal is **re-dispatched carrying `shiftKey`**, so xterm
+  selects locally and emits no report at all. A toggle and not a default,
+  because those reports are also what lets one click inside a TUI; remembered
+  globally (`freilauf.term.mouse`) because it is a habit, not a property of one
+  run. And because a drag that does nothing is invisible as a fault, hub.js
+  says so once per page when a real drag ends with neither a selection nor a
+  copy.
+- **xterm stops propagation on its own element, so a listener that is not in
+  the CAPTURE phase never sees a real drag.** The copy-on-release above hung on
+  a `mouseup` listener on `document` and worked in the browser suite for weeks
+  of nothing — because the test dispatched a synthetic mouseup at `#term`,
+  which bubbles happily, while a hand's drag is swallowed inside `.xterm`.
+  Both listeners are `capture: true` now, and the tests drive Playwright's real
+  mouse instead of synthesising events. The lesson is the test's, not the
+  listener's: a synthetic event dispatched at the element you own proves that
+  your handler works and nothing whatsoever about the path a user takes.
 - **Under the native Fullscreen API only the fullscreen element's subtree is
   rendered.** The toast box sits at the end of `<body>`, so every toast — the
   copy confirmation above first of all — was invisible for as long as somebody
