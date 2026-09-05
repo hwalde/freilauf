@@ -18,8 +18,7 @@ sind.
 |---|---|---|
 | Worker (gewöhnlich) | manuell — der Dispatcher startet ihn | trivial und normal, die Regel |
 | Worker (billiger Spezialist) | manuell — der Dispatcher startet ihn | nur trivial |
-| Worker (stark, Abo-Route) | manuell — der Dispatcher startet ihn | blockiert oder zweimal gescheitert |
-| Worker (stark, Ausweich-Route) | manuell — der Dispatcher startet ihn | dasselbe, wenn die Abo-Route nicht darf |
+| Worker (stark) | manuell — der Dispatcher startet ihn | blockiert oder zweimal gescheitert; dasselbe Modell, eine Aufgabe je Lauf |
 | Dispatcher | manuell — der Wächter-Takt und der Nachlauf wecken ihn | rechnet und startet |
 | Aufräumer | manuell — der Wächter-Takt weckt ihn, wenn eine Zuweisung hängt | klärt, was aus einem verschwundenen Lauf wurde; repariert nichts |
 | PO-Agent (optional) | manuell — der PO-Takt weckt ihn | trägt die offenen Fragen einem Menschen vor |
@@ -54,9 +53,8 @@ seinen Grund mit sich.
 Kein Agent hat einen Cron. Der einzige Takt ist der Wächter-Flow, und er ist ein Shell-Aufruf
 plus eine Bedingung — kein LLM. Ist nichts zu tun, schreibt er eine Notiz und ist fertig: null
 Agenten-Läufe, null Token. Der Wächter startet auch dann keinen Worker, wenn Arbeit da ist: Er
-weckt nur den Dispatcher. Welcher Worker, wie viele und auf welcher Route — das ist Triage- und
-Quoten-Arbeit, und sie gehört an eine Stelle, nicht in zwei Bedingungs-Leitern, die
-auseinanderlaufen.
+weckt nur den Dispatcher. Welcher Worker und wie viele — das ist Triage-Arbeit, und sie gehört an
+eine Stelle, nicht in zwei Bedingungs-Leitern, die auseinanderlaufen.
 
 Der Wächter darf nicht blind werden. Kann `dispatch.py lage --json` nicht laufen, fehlt
 `arbeit_da=1` in der Ausgabe — und eine Bedingung auf einen fehlenden Wert liest sich genau wie
