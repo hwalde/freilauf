@@ -46,8 +46,8 @@ a day on which nothing was released.
   vanishes without the hub ending it — a server reboot, an update that took
   the tmux server, a dead server — the run is resumed in a new session:
   all four coding agents continue their conversation (with a short
-  continuation prompt naming what was already committed; measured for claude,
-  opencode and hermes), a plugin without a resume form is started afresh with
+  continuation prompt naming what was already committed; measured for all
+  four), a plugin without a resume form is started afresh with
   its original task behind a header saying the same. hermes 0.21 keeps its
   session in `~/.hermes/state.db` and, on a TTY, stays interactive after
   `-q` like the other three — the old "hermes exits when done" no longer
