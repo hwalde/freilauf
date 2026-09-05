@@ -291,17 +291,23 @@ cost's start does not move), and the CLI is launched in its **resume form** —
 id since the hub launches with `--session-id`), cursor `--resume <chat id>`
 (the transcript's basename), opencode `--session <root session id>` out of its
 store (a run is a session tree, and "the last session" is usually a finished
-subagent), a plugin whatever its `launch.resume` declares. The continuation
+subagent) — with the continuation PASTED into the editor by fl-start's
+launcher, because `--session <id> --prompt "…"` drops the text (measured
+1.18.29, see Pitfalls) — a plugin whatever its `launch.resume` declares. The continuation
 prompt is short and says what the worktree says: the commits since
 `base_sha`, uncommitted files, the last progress reports — an agent told
 "continue" without being told where it stood redoes work. **The prompt is not
 optional**, and that was measured: `claude --resume <id> "<text>"` continues
 with the text as the next turn, `claude --resume <id>` alone waits for input
-whatever the permission mode. hermes has no resume form (`chat -q` is a single
-query), and a plugin may declare none: such a run is started afresh from its
-original prompt behind a header that names what it had already committed.
-`resumeId(run)` on the plugin answers the id; `null` means the same fresh
-start (cursor with no transcript yet).
+whatever the permission mode. hermes resumes too, since 0.21: `hermes chat --in
+<worktree> --resume <id> -q "<text>"`, the id out of `~/.hermes/state.db`
+(`sessions.cwd` = the worktree, the same table the watcher reads for tokens),
+`latest` when the store does not say — measured: the code word from the first
+turn came back, and `-q` now seeds an interactive session on a TTY instead of
+exiting. Only a plugin that declares no `launch.resume` is started afresh from
+its original prompt, behind a header that names what it had already
+committed. `resumeId(run)` on the plugin answers the id; `null` means the
+same fresh start (cursor with no transcript yet).
 
 Three fences. **A cap**: `resume_attempts`, `RESUME_MAX` (3,
 `FREILAUF_RESUME_MAX`) — past it the run ends the old way (`resume_refused`
@@ -2580,12 +2586,12 @@ that is not a detail of the terminal but the reason it exists (measured
 | claude | `claude --permission-mode dontAsk "$FL_PROMPT"` | stays in its TUI, pane alive — production sessions on `done` runs still had a live `claude` pane 19 h later |
 | opencode | `opencode --auto --prompt "$FL_PROMPT"` | stays in its TUI, pane alive |
 | cursor | `cursor-agent --force --trust -- "$FL_PROMPT"` | stays at "→ Add a follow-up", pane alive — this is what `finishByTurnEnd()` exists for |
-| hermes | `hermes chat -q "$FL_PROMPT" --yolo` | **exits.** `-q` is "single query (non-interactive mode)": it prints its answer plus a `hermes --resume …` line and the process ends (measured: dead pane, status 0, 9 s after the start) |
+| hermes | `hermes chat -q "$FL_PROMPT" --yolo` | **used to exit**, and since 0.21 stays in its TUI too. Measured 2026-08-27 on the older release: `-q` was "single query (non-interactive mode)", it printed its answer plus a `hermes --resume …` line and the process ended (dead pane, status 0, 9 s after the start). Measured 2026-09-05 on 0.21: on a real TTY `-q` **seeds an interactive session** — the query is submitted as the first turn and the process stays, pane alive, input line drawn; only `--oneshot`, `-Q` or a non-TTY give the old behaviour. The hub's own questions still use `-Q` and get the one-shot |
 
 So a standing session and a reachable agent are two different facts, and only
-`pane_dead` tells them apart — `remain-on-exit` keeps hermes's screen exactly
-the way it keeps a crashed run's. `paneAlive()` (sessions.mjs) is that one
-question, one `tmux list-panes` per detail page.
+`pane_dead` tells them apart — `remain-on-exit` keeps a crashed run's screen,
+and it kept hermes's screen back when hermes exited. `paneAlive()`
+(sessions.mjs) is that one question, one `tmux list-panes` per detail page.
 
 **Which is why the run's terminal is writable as long as its SESSION is**, not
 as long as its status says `running`. It used to hang on the status, and that
@@ -3370,6 +3376,15 @@ errors (`post_api_request` only fires after success).
   once it has read it, so the ordinary case leaves nothing behind — measured
   end to end: `Read .freilauf/task.md` → work done → `rm`, and `git status`
   showed only the agent's own file.
+- **`opencode --session <id> --prompt "…"` drops the prompt.** Measured with
+  1.18.29 through fl-start, Enter nudge included: the TUI opens the session
+  and the text is nowhere — not submitted, not in the editor; `--continue
+  --prompt` is the same. `opencode run -s <id> "…"` (print mode) takes it, so
+  the flag is not broken, the TUI just ignores it on a resume. fl-start's
+  resume form for opencode therefore launches `--auto --session <id>` bare and
+  PASTES the continuation into the editor once `ctrl+p` is on the status bar
+  (`oc_resume_paste`, the bracketed paste `sendToSession()` uses) — measured:
+  the code word from the first turn came back, same session, no second one.
 - **`opencode --auto` REFUSES the `external_directory` permission, it does not
   approve it.** Since opencode 1.18.27 every path outside the working directory
   goes through a permission called `external_directory`, and `--auto` is the one

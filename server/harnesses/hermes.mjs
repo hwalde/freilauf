@@ -31,6 +31,11 @@ async function providerLate(ctx, id) {
 }
 
 const execFileAsync = promisify(execFile)
+
+/** hermes' own session store; `FREILAUF_HERMES_STATE_DB` is the test fence. */
+function hermesStateDb() {
+  return process.env.FREILAUF_HERMES_STATE_DB || `${process.env.HOME}/.hermes/state.db`
+}
 const flat = (t) => String(t ?? '').replace(/\s+/g, ' ')
 const levelsFrom = (t) => t.split(/,|\bor\b/).map(x => x.trim().toLowerCase())
   .filter(x => /^[a-z]+$/.test(x))
@@ -57,6 +62,18 @@ const plugin = {
       { when: 'effort', args: ['--reasoning', '{effort}'] },
     ],
     interactiveArgs: ['--yolo'],
+    // The resume form (fl-start --resume, measured with hermes 0.21): `--resume
+    // <id>` continues that session, `--in <workdir>` scopes 'latest' to the
+    // worktree, `-q` is the next turn — and on a TTY it stays interactive
+    // afterwards, like a fresh `-q` does since 0.21. Model and provider travel
+    // along: a resumed session announces "model restored" and still called the
+    // configured default without them (measured).
+    resume: [
+      'chat', '--in', '{workdir}', '--resume', '{resume_id}', '-q', '{prompt}', '--yolo',
+      { when: 'model', args: ['--model', '{model}'] },
+      { when: 'provider', args: ['--provider', '{provider}'] },
+      { when: 'effort', args: ['--reasoning', '{effort}'] },
+    ],
   },
 
   subscription: false,
@@ -188,13 +205,38 @@ const plugin = {
    * into hermes' --reasoning.
    */
   /**
-   * No resume command. `hermes --resume SESSION` wants a session name the hub
-   * never learns (nothing hands one out at start), and `--continue` without a
-   * name is not documented as "the session of this directory" — offering a
-   * command that opens somebody else's conversation is worse than offering none.
-   * The escalation messages then name the worktree instead.
+   * The session hermes continues with. It used to be "none": nothing handed
+   * an id out at start. But hermes writes every session into
+   * `~/.hermes/state.db` (`sessions`: `id`, `cwd`, `started_at` as unix
+   * seconds, `parent_session_id`) — the same table the watcher already reads
+   * for tokens — and a run works in a worktree of its own, so the newest
+   * parentless session in that directory, started with this run, IS the run's.
+   * Measured with 0.21: `hermes chat --resume <that id> -q "…"` answered the
+   * code word from the first turn. Without a row: `'latest'`, which hermes
+   * scopes to the workspace `--in` names — the same answer, looked up by
+   * hermes instead of by us. `null` never: hermes always has a workspace.
    */
-  resumeCommand() { return null },
+  resumeId(run) {
+    if (!run?.workdir_effective) return null
+    try {
+      const { DatabaseSync } = process.getBuiltinModule('node:sqlite')
+      const d = new DatabaseSync(hermesStateDb(), { readOnly: true })
+      try {
+        const since = run.started_at ? Date.parse(String(run.started_at).replace(' ', 'T') + 'Z') / 1000 - 5 : 0
+        const row = d.prepare(`SELECT id FROM sessions WHERE cwd = ? AND started_at >= ? AND parent_session_id IS NULL
+                               ORDER BY started_at DESC LIMIT 1`).get(run.workdir_effective, Number.isFinite(since) ? since : 0)
+        if (row?.id) return String(row.id)
+      } finally { d.close() }
+    } catch { /* no store, no answer — 'latest' is still right */ }
+    return 'latest'
+  },
+
+  /** What a human types to continue this run's session — the same lookup, as a command. */
+  resumeCommand(run) {
+    if (!run?.workdir_effective) return null
+    const id = this.resumeId(run) ?? 'latest'
+    return `cd ${run.workdir_effective} && hermes chat --in ${run.workdir_effective} --resume ${id}`
+  },
 
   modelArgs(run, ctx = null) {
     const args = []

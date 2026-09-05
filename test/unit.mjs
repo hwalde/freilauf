@@ -6163,10 +6163,15 @@ try {
     enthaelt(both, '2 commit(s)', 'commits')
     enthaelt(both, '3 uncommitted file(s)', 'dirty files')
     enthaelt(both, 'Resume the session: cd /wt/a && claude --resume aaaa-bbbb-cccc-dddd', 'the resume command')
-    const hermes = ig.assessText({ harness: 'hermes', workdir_effective: '/wt/b' },
+    // hermes CAN be resumed since 0.21 (state.db knows the session; 'latest'
+    // when it does not) — the command names the worktree as the workspace.
+    const hermes = ig.assessText({ harness: 'hermes', workdir_effective: '/wt/b', started_at: '2026-09-05 07:00:00' },
       { status: 'nothing', commits: 0, dirty: 0 })
-    enthaelt(hermes, 'cannot be resumed', 'a harness without a resume says so')
-    enthaelt(hermes, '/wt/b', 'and names the worktree instead')
+    enthaelt(hermes, 'Resume the session: cd /wt/b && hermes chat --in /wt/b --resume ', 'hermes has a resume command now')
+    const fremd = ig.assessText({ harness: 'nosuchagent', workdir_effective: '/wt/c' },
+      { status: 'nothing', commits: 0, dirty: 0 })
+    enthaelt(fremd, 'cannot be resumed', 'a harness without a resume says so')
+    enthaelt(fremd, '/wt/c', 'and names the worktree instead')
   })
 
   await pruefe('the setup round trip: setup → form body → the same setup', async () => {
