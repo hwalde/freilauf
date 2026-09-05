@@ -334,11 +334,19 @@ async function harnessSection() {
       : `<span class="warn">${e(t('plugins.not_installed'))}</span>`
     const hint = isInstalled || !plugin.installHint ? ''
       : `<p class="dim">${e(t('plugins.install_hint'))}: <code>${e(plugin.installHint)}</code></p>`
+    // Whether this coding agent tells the hub when it works and when it waits
+    // for a human (docs/plugins.md, "Attention"). Stated on the card because
+    // its absence is otherwise invisible: a run of such an agent simply never
+    // reads "waiting for input", and nothing else says why.
+    const attention = plugin.attention && typeof plugin.attention === 'object'
+      ? `<p class="dim">${e(t('plugins.attention'))}: <code>${e(plugin.attention.source ?? '?')}</code>${plugin.attention.note ? ` — ${e(plugin.attention.note)}` : ''}</p>`
+      : `<p class="dim">${e(t('plugins.attention_none'))}</p>`
     return `<div class="card plugin-card ${configured && configured.enabled ? 'ok' : ''}">
       <h3>${e(plugin.label)} <span class="dim">${e(plugin.bin ?? id)}</span> ${state}</h3>
       ${plugin.descriptionKey ? `<p class="dim">${e(t(plugin.descriptionKey))}</p>` : ''}
       ${configured ? '' : `<p class="dim">${e(t('plugins.not_configured'))}</p>`}
       ${hint}
+      ${attention}
       <form method="post" action="/settings/plugins/save" class="form-grid">
         <input type="hidden" name="id" value="${e(id)}">
         ${checkbox('enabled', !!configured && configured.enabled === 1, t('plugins.enabled'))}

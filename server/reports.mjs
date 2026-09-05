@@ -19,7 +19,80 @@ const MAX_REPORT = 200 * 1024   // planning 11: report ≤ 200 kB
  * a test) inherits the worktree's hooks and FL_RUN_ID while carrying its own
  * session id. Without the guard its failures land on this run as red incidents.
  */
-const HOOK_KINDS = ['_turn_end', '_exit', '_api_error', '_rate_limit', '_idle']
+const HOOK_KINDS = ['_turn_end', '_exit', '_api_error', '_rate_limit', '_idle', '_working', '_waiting']
+
+// ------------------------------------------------------------ the agent's attention
+//
+// "Is the agent working, or is it sitting at its prompt waiting for me?" is a
+// question the run's status could not answer. `running` stayed `running` while
+// claude had long finished its turn, and a finished run stayed `done` while the
+// operator was typing into its terminal — the terminal on the run page writes
+// straight into tmux, so the hub never saw the conversation. And the only thing
+// that could have said so was the coding agent itself.
+//
+// So the harnesses' hooks say it (docs/plugins.md, "Attention"): `_working`
+// when the CLI starts processing input (claude UserPromptSubmit / PreToolUse,
+// cursor beforeSubmitPrompt, opencode session.status busy, hermes
+// pre_llm_call), `_waiting` or `_turn_end` when its turn is over and it waits
+// for a human (claude Stop / Notification idle_prompt, cursor stop, opencode
+// session.status idle, hermes on_session_end). `runs.agent_state` holds the
+// last word, and server/run-state.mjs turns it into the status word the pages
+// show. Two rules every hook has to keep, because each was measured to go wrong
+// otherwise: a SUBAGENT's end is never "waiting" (opencode fires session.idle
+// for every child session, claude fires SubagentStop — the parent is still
+// working), and a state is only written when it CHANGES, so a hook firing on
+// every tool call costs one UPDATE and no event.
+
+/**
+ * Record what the agent's hook said. Returns true when the state changed —
+ * and only then writes an event, so the live channel re-renders the row.
+ */
+export function noteAgentState(run, state, source) {
+  if (!run || !['working', 'waiting'].includes(state)) return false
+  if (run.agent_state === state) return false
+  db.prepare(`UPDATE runs SET agent_state=?, agent_state_at=datetime('now') WHERE id=?`).run(state, run.id)
+  addEvent(run.id, state === 'waiting' ? 'agent_waiting' : 'agent_working', { source })
+  run.agent_state = state
+  return true
+}
+
+/**
+ * The session is over (or a new one starts): whatever the old agent said about
+ * its attention describes a process that is gone. No event — the end itself is
+ * recorded by whoever ended it.
+ */
+export function clearAgentState(runId) {
+  db.prepare(`UPDATE runs SET agent_state=NULL, agent_state_at=NULL WHERE id=? AND agent_state IS NOT NULL`).run(runId)
+}
+
+/**
+ * A help call is answered — by the send route with the operator's text, or by
+ * the agent's own `_working` hook when the operator typed the answer straight
+ * into the terminal (then the hub never saw the text, and `help_answer` stays
+ * empty). Either way the run is `running` again and the finish gate's clock,
+ * which does not run while a run waits for a HUMAN, starts again from now.
+ */
+export function answerHelpCall(runId, text, via = 'web') {
+  db.prepare(`UPDATE runs SET status='running', help_answer=COALESCE(?, help_answer),
+              finish_started_at=CASE WHEN finish_state IS NULL THEN finish_started_at
+                                     ELSE datetime('now') END WHERE id=? AND status='waiting_help'`).run(text, runId)
+  addEvent(runId, 'help_answered', { text: text ? String(text).slice(0, 500) : null, via })
+}
+
+/**
+ * A finished run is given more work: the operator typed into its session. The
+ * send route knows the moment exactly; the terminal on the run page does not
+ * pass through the hub, so there the agent's own `_working` hook is what says
+ * it. From this moment the run displays as running again and the watcher holds
+ * it to its expected duration (watchFollowUps) — every new instruction restarts
+ * that clock and retracts the previous commission's "longer than expected".
+ */
+export function startFollowUpCommission(runId, text, via = 'web') {
+  db.prepare(`UPDATE runs SET followup_since=datetime('now') WHERE id=?`).run(runId)
+  addEvent(runId, 'followup_started', { text: text ? String(text).slice(0, 500) : null, via })
+  clearAnomalies(runId, ['anomaly:followup_soft_overrun', 'anomaly:followup_overrun',
+    ...notifiedFlags('followup_overrun')])
+}
 
 /**
  * Process one report event. Returns `{ ok, message? }`.
@@ -138,13 +211,28 @@ export async function handleReport(runId, body, via = 'http') {
     }
     case '_turn_end':
       addEvent(runId, 'turn_end')
+      // A turn that ended is an agent waiting for input — for every harness
+      // whose CLI stays up. For one whose process exits with the turn, `_exit`
+      // clears it a moment later.
+      noteAgentState(run, 'waiting', 'turn_end')
       // For most harnesses the end of a turn is just a note. For cursor it is
       // the end of the RUN (harnesses/cursor.mjs: turnEndsRun) — its TUI stays
       // standing afterwards, so nothing else will ever say the work is over.
       await finishByTurnEnd(runId, 'stop hook')
       break
+    case '_waiting':
+      noteAgentState(run, 'waiting', body.source ?? 'hook')
+      break
+    case '_working':
+      noteAgentState(run, 'working', body.source ?? 'hook')
+      // The agent was waiting on a help call and now processes input: somebody
+      // answered — by hand, into the terminal, past the send route. The run is
+      // running again; the answer's text is unknown and stays empty.
+      if (run.status === 'waiting_help') answerHelpCall(runId, null, 'session')
+      break
     case '_exit': {
       addEvent(runId, 'exit')
+      clearAgentState(runId)
       const fresh = db.prepare('SELECT status, finish_state FROM runs WHERE id = ?').get(runId)
       // A run in the finish gate HAS reported. Its agent vanishing is not
       // "ended without a report", it is the escalation trigger (3.3).
@@ -181,6 +269,7 @@ export async function handleReport(runId, body, via = 'http') {
       break
     case '_pane_died': {
       addEvent(runId, 'pane_died', { exit: body.exit ?? null })
+      clearAgentState(runId)
       const fresh = db.prepare('SELECT status, finish_state FROM runs WHERE id = ?').get(runId)
       if (fresh?.finish_state) { await escalateGone(runId); break }
       if (fresh?.status === 'running') {
@@ -305,10 +394,29 @@ async function handleFollowUp(run, body, via) {
   // The agent of a follow-up in the gate is gone — the escalation, as for a
   // first report. Every other hook on a finished run is what it always was: nothing.
   if (['_exit', '_pane_died'].includes(kind)) {
+    clearAgentState(runId)
     if (run.finish_state) { addEvent(runId, kind === '_exit' ? 'exit' : 'pane_died', { exit: body.exit ?? null }); await escalateGone(runId) }
     return { ok: true, message: null }
   }
+  // The agent's attention on a FINISHED run: this is where "I typed into the
+  // terminal and the run still says done" is answered. `_working` without an
+  // open commission IS the commission — the operator gave the agent more work
+  // straight through the terminal, past the send route, and the agent is the
+  // only one who noticed. With one open, or a follow-up in the gate (the agent
+  // committing what the gate asked for), the state is all that changes.
+  if (kind === '_working') {
+    noteAgentState(run, 'working', body.source ?? 'hook')
+    if (!run.followup_since && !run.followup_open && !run.finish_state) {
+      startFollowUpCommission(runId, null, 'session')
+    }
+    return { ok: true, message: null }
+  }
+  if (kind === '_waiting') {
+    noteAgentState(run, 'waiting', body.source ?? 'hook')
+    return { ok: true, message: null }
+  }
   if (kind === '_turn_end') {
+    noteAgentState(run, 'waiting', 'turn_end')
     await followUpByTurnEnd(run, 'stop hook')
     return { ok: true, message: null }
   }

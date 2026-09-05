@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# fl-hermes-hook — the shell hook hermes runs for Freilauf, one argument: the
+# hermes event name. Installed into ~/.hermes/config.yaml by
+# setup/02-install-scripts.sh:
+#
+#   hooks:
+#     pre_llm_call:   [{ command: "fl-hermes-hook pre_llm_call" }]
+#     on_session_end: [{ command: "fl-hermes-hook on_session_end" }]
+#
+# It translates the event into what the hub understands (docs/plugins.md,
+# "Attention"): pre_llm_call = the agent starts processing input → `_working`,
+# on_session_end = its turn is over and it sits at its prompt → `_turn_end`.
+# hermes passes the event's JSON on stdin; fl-report reads it (bounded) and
+# forwards the session id.
+#
+# Outside a Freilauf run — the operator's own `hermes chat`, a cron job — this
+# exits 0 without a word. The hooks live in the operator's global config, so
+# they fire in every hermes session on the machine; a script that reported
+# "FL_RUN_ID is not set" there would put a warning into hermes' error log on
+# every turn of every conversation. The stdin JSON is drained first: a hook that
+# exits with an unread pipe is fine for hermes, but reading it costs nothing
+# and keeps the two paths alike.
+set -u
+[[ -n "${FL_RUN_ID:-${CC_RUN_ID:-}}" ]] || { timeout 2 cat >/dev/null 2>&1 || true; exit 0; }
+case "${1:-}" in
+    pre_llm_call)   exec fl-report _working ;;
+    on_session_end) exec fl-report _turn_end ;;
+    *) timeout 2 cat >/dev/null 2>&1 || true; exit 0 ;;
+esac

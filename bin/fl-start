@@ -619,7 +619,10 @@ cmd_autonomous() {
     case "$HARNESS" in
         claude)  printf '%s --permission-mode %s%s "$FL_PROMPT"' "$(q "$BIN")" "$(q "$MODE")" "$claude_args" ;;
         opencode) printf '%s --auto%s --prompt "$FL_PROMPT" 2>>%s' "$(q "$BIN")" "$model_args" "$(q "$OC_ERRLOG")" ;;
-        hermes)  printf '%s chat -q "$FL_PROMPT" --yolo%s' "$(q "$BIN")" "$model_args" ;;
+        # --accept-hooks: the shell hooks in ~/.hermes/config.yaml (Freilauf's
+        # attention hooks among them, setup/02-install-scripts.sh) need a one-time
+        # consent hermes asks for at the TTY — and nobody sits at this one.
+        hermes)  printf '%s chat -q "$FL_PROMPT" --yolo --accept-hooks%s' "$(q "$BIN")" "$model_args" ;;
         # cursor: the prompt is a POSITIONAL argument, not -p. '-p/--print' would be
         # wrong here -- it prints and exits, the session would be gone immediately.
         # This way the TUI works through the task and then stays open (like opencode),

@@ -50,14 +50,33 @@ const plugin = {
    */
   launch: {
     promptMode: 'argv',
+    // `--accept-hooks`: hermes runs the shell hooks in ~/.hermes/config.yaml
+    // only after a one-time consent per (event, command), which it asks for at
+    // the TTY — and a run in a tmux session has nobody at that TTY. The flag
+    // records the consent for the hooks the operator configured (Freilauf's
+    // own are installed by setup/02-install-scripts.sh, see `attention`).
     args: [
-      'chat', '-q', '{prompt}', '--yolo',
+      'chat', '-q', '{prompt}', '--yolo', '--accept-hooks',
       { when: 'model', args: ['--model', '{model}'] },
       { when: 'provider', args: ['--provider', '{provider}'] },
       { when: 'effort', args: ['--reasoning', '{effort}'] },
     ],
     interactiveArgs: ['--yolo'],
   },
+
+  /**
+   * How the hub learns whether this agent works or waits (docs/plugins.md,
+   * "Attention"). hermes has shell hooks in `~/.hermes/config.yaml` (`hooks:`,
+   * a command per event, the event's JSON on stdin); setup/02 installs
+   * `bin/fl-hermes-hook` under `pre_llm_call` and `on_session_end`. Measured
+   * with hermes 0.21.0: `chat -q` on a TTY seeds an INTERACTIVE session and
+   * stays at its prompt after the answer — which is where the operator types
+   * the next instruction — and the two hooks fire once per turn, the first
+   * turn and every typed one alike. The command must be a plain executable
+   * with arguments: hermes splits it itself and runs no shell, so an
+   * environment assignment in front of it is "command not found".
+   */
+  attention: { source: 'config', note: 'pre_llm_call → _working, on_session_end → _turn_end (bin/fl-hermes-hook)' },
 
   subscription: false,
   providers: ['openrouter', 'opencode-zen', 'deepseek'],

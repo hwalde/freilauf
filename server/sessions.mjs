@@ -489,7 +489,8 @@ export function refreshSessionMemoryAfterRun(runId) {
 export function reconcileClosedSession(runId, source = 'session') {
   const run = getRun(runId)
   if (!run) return null
-  db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(runId)
+  db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')),
+              agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(runId)
   // A session is gone — whatever ended it. If its run was a cleanup run, the
   // memory it freed must reach the sidebar now, not on the next cache expiry.
   refreshSessionMemoryAfterRun(runId)

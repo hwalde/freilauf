@@ -3,7 +3,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import db, { getRepo, getRun, setSetting, addEvent, announceRun, allSettings } from './db.mjs'
-import { handleReport, clearAnomalies, notifiedFlags } from './reports.mjs'
+import { handleReport, answerHelpCall, startFollowUpCommission } from './reports.mjs'
 import { modelList, orEndpoints, standVon, effortOptionen } from './models.mjs'
 import { providersForHarness, listCodingAgents } from './coding-agents.mjs'
 import { detectInstalled } from './harnesses/index.mjs'
@@ -597,11 +597,10 @@ async function api(req, res, url) {
     if (run.status === 'waiting_help') {
       // The finish gate's deadline does not run while a run waits for a HUMAN —
       // so the clock starts again from the moment the answer arrives, not from
-      // the report that came before the question.
-      db.prepare(`UPDATE runs SET status='running', help_answer=?,
-                  finish_started_at=CASE WHEN finish_state IS NULL THEN finish_started_at
-                                         ELSE datetime('now') END WHERE id=?`).run(text, run.id)
-      addEvent(run.id, 'help_answered', { text: text.slice(0, 500) })
+      // the report that came before the question (reports.mjs, answerHelpCall —
+      // shared with the agent's own `_working` hook, which is how an answer
+      // typed straight into the terminal is noticed).
+      answerHelpCall(run.id, text, 'web')
     } else if (['done', 'failed', 'aborted'].includes(run.status)) {
       // A message into a FINISHED run's session is a follow-up COMMISSION: the
       // operator read the report and asked for more. The run's status keeps
@@ -611,11 +610,10 @@ async function api(req, res, url) {
       // without reporting is captured, exactly like a first attempt (watcher.mjs
       // watchFollowUps). Every new instruction restarts the clock, so the old
       // "longer than expected" statement of a previous commission is retracted
-      // the same way a raised duration retracts it (run-edit.mjs).
-      db.prepare(`UPDATE runs SET followup_since=datetime('now') WHERE id=?`).run(run.id)
-      addEvent(run.id, 'followup_started', { text: text.slice(0, 500) })
-      clearAnomalies(run.id, ['anomaly:followup_soft_overrun', 'anomaly:followup_overrun',
-        ...notifiedFlags('followup_overrun')])
+      // the same way a raised duration retracts it (run-edit.mjs). The same
+      // function answers the agent's `_working` hook for what was typed into
+      // the terminal directly (reports.mjs).
+      startFollowUpCommission(run.id, text, 'web')
     } else {
       addEvent(run.id, 'message_sent', { text: text.slice(0, 500) })
     }
@@ -696,6 +694,7 @@ async function api(req, res, url) {
     // pageRun() render "no tmux session" for a session that is standing.
     db.prepare(`UPDATE runs SET status='running', ended_at=NULL, report_md=NULL, archived_at=NULL,
                 goal_sent_at=NULL, followups=0, followup_md=NULL, followup_open=0, followup_since=NULL,
+                agent_state=NULL, agent_state_at=NULL,
                 tmux_closed_at=NULL, exit_code=NULL, resume_pending=0, resume_attempts=0 WHERE id=?`).run(m[1])
     // …and so does the integration: everything the finish gate and the
     // integrator wrote about the previous attempt is gone.
