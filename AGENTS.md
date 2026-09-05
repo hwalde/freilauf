@@ -2356,7 +2356,14 @@ its rows were dead test sessions. So both suites answer SIGHUP as well, and,
 because a SIGKILL answers nothing, **a starting sandbox sweeps what a dead one
 left**: `verwaisteAufraeumen()` reads the OTHER sandbox's own `sessions.txt` and
 kills exactly those names. The list is the proof of ownership on the way in
-exactly as it is on the way out — still no pattern across all `fl-*`.
+exactly as it is on the way out — still no pattern across all `fl-*`. Those
+kills go out **in parallel**, and that is not tidiness: serially it is one
+process per session against a tmux server already busy with everybody's agents,
+and on a machine holding 300 leftovers that put seconds between the suite's
+start and its first tmux call — enough to make the timing-sensitive incident
+tests in `e2e.mjs` fail (measured: 4 of 347, reproducible by seeding 25
+leftovers, green again once the sweep was parallel). A sweep must cost the
+suite that performs it as close to nothing as possible.
 `sandkastenVerwaist()` is the decision, pure and unit-tested, and it says no
 three times: never our own directory, never one whose `owner.pid` is still
 alive (sweeping a RUNNING suite would kill the sessions it is asserting on,

@@ -124,12 +124,18 @@ async function verwaisteAufraeumen(eigenerPfad) {
     let namen = []
     try { namen = readFileSync(join(eintrag.pfad, 'sessions.txt'), 'utf8').split('\n').map(z => z.trim()).filter(Boolean) }
     catch { /* a sandbox that never started a run */ }
-    for (const s of new Set(namen)) {
-      // Two suites may sweep the same leftover at once, and a session may be long
-      // gone: a failed kill is the normal case here, never a reason to stop.
-      const r = await sh('tmux', ['kill-session', '-t', `=${s}`]).catch(() => ({ ok: false }))
-      if (r.ok) getoetet += 1
-    }
+    // In PARALLEL, and that is not a micro-optimisation. Serially this is one
+    // process per session against a tmux server that is busy with everybody
+    // else's agents; on a machine holding 300 leftovers it put seconds between
+    // the suite's start and its first tmux call, which is exactly the kind of
+    // latency the timing-sensitive parts of e2e.mjs trip over. A sweep must
+    // cost the suite that performs it as close to nothing as possible.
+    //
+    // Two suites may sweep the same leftover at once, and a session may be long
+    // gone: a failed kill is the normal case here, never a reason to stop.
+    const ergebnisse = await Promise.all([...new Set(namen)].map(s =>
+      sh('tmux', ['kill-session', '-t', `=${s}`]).catch(() => ({ ok: false }))))
+    getoetet += ergebnisse.filter(r => r.ok).length
     try { rmSync(eintrag.pfad, { recursive: true, force: true }) } catch { /* next run gets it */ }
   }
   if (getoetet) console.log(`  (${getoetet} tmux sessions of an earlier, killed suite cleaned up)`)
