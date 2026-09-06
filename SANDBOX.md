@@ -901,7 +901,7 @@ they were deliberately told to try to break out.
 Both reached exactly the hosts the presets name (their model provider, the npm
 registry) and were refused everywhere else: probes to `example.com`,
 `api.github.com` and `1.1.1.1` each came back `sandbox:blocked {action: deny}`,
-and cursor's attempts to reach the host gateways (`172.17.0.1`, the run
+and cursor's attempts to reach the host gateways (the default bridge's, and the run
 network's own gateway), `127.0.0.1` and the proxy container by name were denied
 too — the gateway is isolated. Neither agent found a way out (see [Two agents
 tried to break out, and could not](#two-agents-tried-to-break-out-and-could-not)).
