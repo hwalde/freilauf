@@ -1569,6 +1569,8 @@ it stops that from being something stupid on your machine.
 | The four built-in profiles and the copy-on-write rule | `server/sandbox/profiles.mjs` |
 | Presets, and how a host is matched | `server/sandbox/presets.mjs` |
 | The container runtime, discovery, the command line | `server/sandbox/runtime.mjs` |
+| Which images this installation needs, and building one with progress | `imageInventory()`, `buildImageStreaming()` in `server/sandbox/runtime.mjs` |
+| Building the image a run is missing, on the launch path | `buildMissingImage()` in `server/sandbox/index.mjs` |
 | The built-in egress proxy, engines, the CIDR fence, both placements | `server/sandbox/proxy.mjs` |
 | The same engine, as it runs inside its own container | `sandbox/proxy-entry.mjs` |
 | iron-proxy: config, credential injection | `server/sandbox/ironproxy.mjs` |
