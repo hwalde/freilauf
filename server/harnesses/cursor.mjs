@@ -145,6 +145,112 @@ const plugin = {
     project: ['.cursor/skills', '.claude/skills', '.agents/skills'],
   },
 
+  /**
+   * Running cursor inside the Freilauf sandbox (docs/plugins.md, "The sandbox
+   * declaration"; SANDBOX_RESEARCH.md §3.4 and §7.9).
+   */
+  sandbox: {
+    supported: true,
+
+    // Version pin: MEASURED on this machine on 2026-09-05 (SANDBOX_RESEARCH.md
+    // §11a.4, which read the rules out of this very build).
+    image: { dockerfile: 'sandbox/images/cursor.Dockerfile', args: { CURSOR_VERSION: '2026.09.02-c22c1a3' } },
+
+    // Cursor's own enterprise network list
+    // (https://cursor.com/docs/enterprise/network-configuration).
+    //
+    // READ AGAINST `hostGlobMatch()`, not transcribed. That page carries three
+    // lists — a recommended wildcard set (`*.cursor.sh`, `*.cursor-cdn.com`,
+    // `*.cursorapi.com`), an SSL-inspection exclusion set, and an enumerated
+    // fallback "if your firewall mandates granular subdomain allowlists without
+    // wildcards" — and this declaration is the granular one. In presets.mjs a
+    // bare domain means THAT host and nothing else, so wherever the vendor's own
+    // granular list names subdomains of an entry, the entry has to be dotted or
+    // the subdomains would be denied by a line that reads as if it allowed them
+    // (the failure measured on opencode's `models.opencode.ai`, 2026-09-05).
+    // Three entries earn the dot, and only those three:
+    //
+    //   `.api5.cursor.sh`         the vendor's NAL section names six more —
+    //                             agent, agentn, agent.us, agentn.us,
+    //                             agent.global, agentn.global — of which this
+    //                             list carried exactly one.
+    //   `.authentication.cursor.sh`  `prod.authentication.cursor.sh` is listed
+    //                             next to the apex.
+    //   `.cursor-cdn.com`         the wildcard list says `*.cursor-cdn.com`; a
+    //                             CDN that serves only its apex is not one.
+    //
+    // The rest stay bare because the vendor enumerates them as leaves and
+    // nothing under them is documented or resolves [measured 2026-09-05:
+    // no subdomain of `downloads.cursor.com` or `marketplace.cursorapi.com`].
+    // `*.gcpp.cursor.sh` stays a subdomain-only wildcard: `gcpp.cursor.sh`
+    // itself does not resolve.
+    domains: [
+      'api2.cursor.sh',
+      'api3.cursor.sh',
+      'api4.cursor.sh',
+      '.api5.cursor.sh',
+      'repo42.cursor.sh',
+      '*.gcpp.cursor.sh',
+      '.authentication.cursor.sh',
+      'marketplace.cursorapi.com',
+      'downloads.cursor.com',
+      '.cursor-cdn.com',
+    ],
+
+    // No cursor-specific auto-update or telemetry switch is documented; the
+    // vendor-neutral one is, and the image is what pins the CLI either way.
+    env: { DO_NOT_TRACK: '1' },
+
+    /**
+     * `CURSOR_API_KEY` is cursor's documented credential and is passed as a
+     * variable. Deliberately **no `injection`**: which header cursor sends it
+     * in is nowhere established, and an injection aimed at the wrong header
+     * would strip the key from every request while the run looked like a
+     * provider outage. §7.8 says the same in one line — for cursor, `env` with
+     * the API key is the reliable mode.
+     */
+    credentials: [{ key: 'api_key', envKeys: ['CURSOR_API_KEY'] }],
+
+    // What the hub reads back: the transcript is cursor's only activity source
+    // AND the channel `finishByTurnEnd()` works from, and its directory name is
+    // the id `resumeId()` answers with. cursor keeps state under TWO roots —
+    // the transcripts under `~/.cursor` (or `$CURSOR_DATA_DIR`), the token
+    // under `~/.config/cursor` [measured, §11a.4] — so the seed and the read
+    // are two different paths, and only the read is state.
+    stateDirs: ['.cursor/projects'],
+
+    /**
+     * `--sandbox disabled`, and the reason is the reason the whole feature
+     * exists once rather than twice: cursor's own sandbox falls back to
+     * bubblewrap, and nested bubblewrap fails inside an unprivileged container
+     * (§2.4 measured the failure on the host already). Nested Landlock would be
+     * harmless but adds nothing the container does not already do, and cursor's
+     * "shall I run this outside the sandbox?" prompt is one `--force` answers
+     * anyway. Two boundaries are not stronger than one.
+     */
+    launchOverrides: () => ({ sandbox: 'disabled' }),
+
+    /**
+     * The per-run home: cursor's own token file, and nothing else.
+     *
+     * `~/.cursor/cli-config.json` is named in §7.7 as well and is deliberately
+     * left out: §3.4 establishes the KEYS it holds (`sandbox.mode`,
+     * `sandbox.networkAccess`) but not the values, and the switch this run
+     * needs is already made on the command line, where the vocabulary
+     * (`enabled|disabled`) IS documented. A guessed value in a config file
+     * would be a run that refuses to start for a reason nothing names.
+     */
+    seedHome({ spec = {} } = {}) {
+      if (spec.secrets?.mode === 'inject') return []
+      try {
+        return [{ path: '.config/cursor/auth.json', content: readFileSync(AUTH_FILE(), 'utf8'), mode: 0o600 }]
+      } catch {
+        // No token file on the host: the run authenticates with CURSOR_API_KEY.
+        return []
+      }
+    },
+  },
+
   // cursor has NO hook for API errors (its hook enum knows beforeShellExecution,
   // afterFileEdit, stop, sessionEnd, beforeSubmitPrompt — nothing for a failed
   // call), so the log scan is the only source. 'Cannot use this model' is

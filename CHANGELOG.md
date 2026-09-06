@@ -20,6 +20,186 @@ a day on which nothing was released.
 
 ### Added
 
+- **The container no longer has to hold your API key.** `secrets.mode: inject`
+  had been implemented for a while and had never once run, because the engine it
+  needs — iron-proxy — was on no machine here. It is now: `ironsh/iron-proxy` is
+  a public image, pinned by digest in `sandbox/images/ironproxy.ref`, and the
+  whole path is measured. The agent's container holds `fl-token-<random>`; the
+  proxy swaps in the real credential on that credential's own declared hosts and
+  on nothing else. Verified four ways: the container's environment shows the
+  placeholder, the declared host received the real key, another allowed host
+  received the placeholder untouched, and the key appears in neither the proxy's
+  config file, nor the audit log, nor `docker inspect` of the agent's container.
+- **A fifth shipped sandbox profile, `No secrets in the box`** — Balanced's
+  allowlist through iron-proxy with TLS termination, and the only one of the five
+  whose container does not hold your real credential. It is deliberately not the
+  default: it needs the iron-proxy image pulled, a CA on the machine
+  (four `openssl` commands, in `docs/sandbox.md`) and an `injection` declaration
+  on every credential the run uses. Each of those missing is a refusal at launch
+  that names what is missing — never a quiet fall back to putting the key in the
+  box.
+- **A coding agent has now worked behind an enforced allowlist.** opencode in a
+  container on a rootless daemon: a host outside the list was refused with a 403,
+  the refusal became a `sandbox_blocked` incident with the three buttons, allowing
+  the host for that run took effect **on the agent's very next attempt — no
+  restart, same session, same container** — and the work was merged. Denied
+  17:55:54, allowed 17:56:00, through at 17:56:39.
+- **An allowed tunnel is recorded when it opens, not only when it closes.** A
+  keep-alive connection to a run's model provider lives as long as the run, so
+  the old close-only line meant a run's own provider appeared nowhere in its
+  egress log. Both lines carry a `phase` field and pair into a span.
+- **A sandboxed run can have an enforced allowlist on a rootless daemon.** This
+  was the sandbox's largest documented limit: the built-in egress proxy was a
+  listener inside the hub process, a rootless daemon keeps the run's network in
+  a namespace of its own, and so three of the four shipped profiles —
+  **Balanced**, **Locked down** and **Audit** — could not start a run at all,
+  while the fourth gave the container the whole internet. All four start now.
+  Where the listener cannot live on the host, the hub runs it as a **container
+  on the run's own network**, and the agent reaches it by name. It is the same
+  proxy either way — same allowlist matcher, same readable 403, same audit
+  format — and where the in-process listener works (a rootful daemon, or an
+  address you published yourself with `FREILAUF_SANDBOX_PROXY_BIND`) that is
+  still what runs, because it costs nothing. Nothing to configure: where the
+  proxy runs is a fact about your daemon, not a field in a profile.
+  `FREILAUF_SANDBOX_PROXY_PLACEMENT` forces one if you must.
+  The container placement is also the **stronger** posture, not a workaround —
+  the run's network keeps its gateway isolated, so the container cannot reach
+  services on the host at all, which the in-process listener has to leave open.
+  Measured against rootless Docker 29.8.0: an allowed host answers, a denied one
+  gets the 403, `git` and `npm` to denied hosts are refused, a policy change made
+  while the run is going takes effect on the next connection, audit-only lets the
+  request through and records it, and the denial arrives on the run as
+  `sandbox:blocked`. **What has still never happened is a coding agent working
+  behind one** — roll out with the **Audit** profile and adopt the hosts it
+  records, exactly as [docs/sandbox.md](docs/sandbox.md) says.
+- **A hub restart no longer costs a sandboxed run its blocked-host events.** A
+  proxy container survives a restart, and the hub now takes a running one back
+  over instead of leaving it alone: the run goes on reporting what it was refused,
+  and a live policy change reaches it again. Before, such a run kept enforcing
+  correctly and quietly stopped saying anything about it. (A proxy the daemon
+  says is *gone* is still replaced; one it will not answer about is still left
+  alone. An iron-proxy container is the exception and is still left as it is — its
+  management key died with the process that minted it, so a policy change there is
+  still refused rather than reported as delivered.)
+- **A coding agent has now done a whole run inside a container, and its work
+  reached `main`.** One harness, one machine, and worth naming exactly:
+  **opencode 1.18.29** in `freilauf/agent-opencode:1.18.29`, under **rootless
+  Docker 29.8.0**, with `network.mode: open` — because at the time the enforced
+  allowlist needed an egress proxy a rootless daemon could not reach, which the
+  first entry above answers later the same day.
+  The second attempt reported `done` and had its branch merged into
+  `origin/main` about a minute after it started, with nobody helping it:
+  `started → tmux_started → agent_working → finish_started → finish_clean →
+  merged`. Confirmed along the way with the container running: the tmux pane
+  really is the container's terminal (capture, typed keys and a pasted line all
+  arrive), a container that exits hands its exit status to `pane-died`, the
+  finish gate and the integrator read the run's working copy through the box,
+  ending the run leaves no container, network or proxy behind, and the sessions
+  page reports the container's own memory (786 MB where the pane's process tree
+  would have said about ten). **claude, cursor and hermes have still never been
+  started in a container**, and no run of any harness has yet worked behind an
+  enforced allowlist; what a first run of each finds is what it finds.
+- **A sandboxed run no longer has to be told which image to start from.** Where
+  neither the repository nor the profile names one, the run uses the image the
+  coding agent's own plugin declares — the same name the Settings page builds,
+  so the two cannot drift. `image.pull` finally does something: a missing image
+  is fetched where the profile allows it (`if-missing`, `always`), and one that
+  is still missing afterwards is a **refusal that names the image**, before the
+  clone, the home and the network are created. It used to be a `docker run`
+  that failed inside the tmux pane with the daemon's own wording and nothing on
+  the run's record at all.
+- **A run's agent can work inside a container.** Optional, **off by default**,
+  and an installation that never switches it on behaves exactly as it did.
+  Turn it on under **Settings → Sandbox**, where the hub says what container
+  runtime it found and refuses to be switched on without one. The boundary —
+  network, filesystem, resources, secrets — is one profile document that four
+  layers may contribute to (hub → repo → agent → run), and **a lower layer may
+  only ever narrow what a higher one locked**; an attempt to loosen a locked
+  field is refused and written down, never silently applied. Four profiles are
+  shipped: **Balanced**, **Locked down**, **Open network** and **Audit**, all
+  four of which run on the built-in proxy and pass credentials in as
+  environment variables, so they start a run on any machine that has a
+  container runtime and nothing else. Keeping the keys out of the container
+  entirely (`secrets: inject` through iron-proxy) is an explicit upgrade of
+  three fields in a copy of a profile — built, and never yet run against the
+  real iron-proxy binary. A
+  sandboxed run gets a clone of its own instead of a linked worktree, its own
+  `HOME`, and a network whose only way out is an egress proxy that answers a
+  readable **403** for a host that is not on its allowlist. Everything the hub
+  does with tmux is unchanged — the terminal, `fl-attach`, `fl-kill`, the log,
+  typed messages — because the pane's process is the container's client.
+  **The full reference, including a long section on what the sandbox does
+  *not* do, is [docs/sandbox.md](docs/sandbox.md).**
+- **When the sandbox blocks something, you get three buttons and the agent
+  gets a sentence.** Every refusal is a `sandbox:blocked` event and a row on
+  the run's page: *Allow for this run* (live, no restart), *Allow for this
+  repo*, *Deny and tell the agent* (which types the decision into the
+  session). The proxy's 403 names the host and tells the agent to run
+  `fl-report access "<what and why>"` and carry on with what it can do, and
+  the run's prompt says the same. Network and resource changes apply to a
+  running container; a filesystem change resumes the run in a new container
+  with the same clone and the same conversation. **Continue without the
+  sandbox** is there for the moment none of that is enough — it asks first and
+  is recorded on the run for ever.
+- **An agent that the sandbox is standing in the way of can say so, and you
+  hear about it.** `fl-report access "<what you need and why>"` — which the
+  run's own prompt and the proxy's 403 both tell it to use — opens a red
+  **Agent needs access** incident in the **Needs you** group and notifies at
+  once, with the agent's own words and the three answers spelled out: allow it
+  for this run, allow it for the repo, or tell it to do without. The run
+  **keeps running** while you decide, because the agent was told to carry on
+  with what it can do; asking the same thing twice stays quiet.
+- **And you are told even when the agent says nothing.** Hosts the proxy turned
+  away become a **Sandbox turned a host away** incident — yellow, because a
+  wall doing its job is not a fault, and red once it demonstrably is in the way
+  (two or more distinct hosts, or no work since the denial). An agent that kept
+  working is never escalated. A refusal in the agent's own log shows as a
+  **sandbox denied** flag on the run's traffic light, taken back the moment the
+  agent is measurably working again. A container daemon that stops answering
+  (**`docker_unreachable`**) lands in "Needs you" too: it does not come back by
+  itself, and every sandboxed run on the machine is behind it.
+- **Audit-only mode, and one button to grow an allowlist out of it.** Nothing
+  is blocked; everything that would have been is written down. The repo form
+  then lists the hosts this repository's own runs reached, with counts, and
+  adopts the ticked ones into its allowlist. That is the rollout an
+  organisation actually does: observe first, enforce second.
+- **An audit you can hand to somebody.** *Download the audit* on a run page
+  (`GET /api/runs/<id>/audit.jsonl`) folds the run's policy, its proxy
+  configuration, every request the proxy saw and the run's own events into one
+  hash-chained JSONL file, headed by the run and the hub's running sha and
+  footed by the line count — so a truncated copy is detectable. It says on its
+  own first line what it proves and what it does not.
+- **Per-repo, per-agent and per-run sandbox fields**, a **Sandbox** block in
+  the repo form (default, profile, image, audit-only, run the merge check in
+  the sandbox too) with a **Dry run** button that resolves the policy without
+  starting anything, the tri-state on agents, single runs, favorites and the
+  flow designer's "start single run" step, and a **profile editor** under
+  Settings → Sandbox. The Plugins page says per coding agent whether it can be
+  sandboxed at all, with its image, the hosts it needs and whether its
+  credential was found; the Welcome wizard prints the same one-line runtime
+  answer without asking a question about it.
+- **The sessions page and the sidebar say "unknown" instead of guessing.** A
+  sandboxed session's memory is asked of the runtime, because the pane's
+  process tree lives in another namespace and under-reports a container by
+  about twentyfold (measured). Where it cannot be measured it says so, and the
+  machine total says it is incomplete.
+- **`fl-start --sandbox <file>`**, with `--dry-run` to print the whole
+  container command line without a runtime present; `sandbox/wrap.sh --print`
+  does the same from the shell. **`fl-report access "…"`** is a new report kind
+  for an agent that needs something the sandbox blocks. **`fl-kill` stops the
+  container before it kills the session**, so ending a sandboxed run no longer
+  leaves the agent running.
+- **"The daemon did not answer" is never read as "there are no containers".**
+  A runtime that times out, cannot be forked or is still coming up after a
+  reboot means the hub learned nothing, so it does nothing and asks again next
+  pass; only a positive answer ever ends a run, and three silences in a row
+  raise the incident above rather than a verdict about anybody's work. A launch
+  that failed because the runtime could not be *asked* does not count against a
+  run's resume attempts either.
+- **A hard runtime ceiling per profile.** `resources.maxRuntimeMinutes` stops
+  the container, ends the session and aborts the run, once, with one
+  notification.
+
 - **A run says whether its agent is working or waiting for input.** The
   coding agents' own hooks tell the hub when they start processing input and
   when their turn is over (claude: UserPromptSubmit / PreToolUse and Stop /
@@ -116,6 +296,23 @@ a day on which nothing was released.
   comes up empty in that mode, the page says why and names both ways back,
   once per page instead of leaving you guessing.
 
+- **The merge check can run inside the box too, and refuses rather than
+  quietly running on the host.** With **`merge_check_sandboxed`** ticked, a
+  sandboxed run's `repos.merge_check` runs in an ephemeral container of that
+  run's own image — the integration worktree mounted, no capabilities, the
+  run's own network and proxy settings — and where that container cannot be
+  had (no runtime, a missing image, a daemon that is positively not there) the
+  merge is **blocked** with *"nothing was merged, and it was NOT run on the
+  host"* rather than falling back. A run that is not itself boxed still runs
+  its check on the host and now says so on the run's record. A failing or
+  timing-out check is what it always was: a red check, not a refusal.
+- **Taking a planned run out of its sandbox is written down.** Switching a
+  `scheduled` or `deferred` run's sandbox off from its edit card records
+  `sandbox:bypassed` on the run, and the overview's status cell says
+  *bypassed* from then on — the same treatment the "Continue without the
+  sandbox" button gets, so no route out of a sandbox is silent. It is refused
+  outright where the hub mode is `required` or bypassing is switched off.
+
 ### Changed
 
 - Toasts stay visible while the terminal is in full screen.
@@ -134,8 +331,291 @@ a day on which nothing was released.
   under its status word until the new session stands.
 - The `tmux_gone` incident says that the runs are being resumed.
 
+### Removed
+
+- **The sandbox profile's `user` field is gone.** It was a policy word — "run
+  as the hub's identity" — and never a login name, and the container's identity
+  has always been decided from the daemon's posture instead (the hub's uid on a
+  rootful daemon, nothing at all on a rootless one). But a field on a document
+  is a field somebody reads, and one did: it was handed into `docker exec -u`,
+  where `hub` is an account no image has (see the entry below). There is now
+  nothing here to set, so the two halves cannot come to disagree again. A
+  profile stored with the field keeps working — nothing reads it any more — and
+  a new one is refused in the overrides form as an unknown key.
+
 ### Fixed
 
+- **A run whose agent died stayed on "running" — the watcher had never once
+  noticed a dead pane.** This is the failure shape the whole project is written
+  against: a run that looks alive and is doing nothing. The watcher asks tmux
+  every 30 seconds whether the run's pane is dead, and it asked with the wrong
+  kind of target — a session name where a *pane* is wanted, one missing
+  character. tmux does not refuse that: it answers successfully and says
+  nothing at all, so the check read "tmux gave no answer", kept its default and
+  never fired. The consequence was the same for every coding agent and every
+  kind of run: a CLI that crashed, a process that exited, a sandboxed run whose
+  container died at launch — all of them sat in the overview as working agents
+  until a human looked. Seen on a sandboxed run whose container died at 19:18
+  and which was still "running" twelve minutes later with nothing written down
+  anywhere. Such a run is now failed within one pass, with the reason and the
+  exit status, and the notification that goes with it. Nothing else about the
+  path changed — it was simply never reached.
+- **A run whose agent was killed said it had exited cleanly.** The exit status
+  of a dead pane and the signal that killed it are two different things, and a
+  process the kernel shot (an out-of-memory kill, a `docker` client taken down
+  with its daemon) carries no exit status at all. It was recorded as `0` — the
+  code for "finished without error" — or, when two empty fields ran together, as
+  the pane's death time: an exit code in the billions. The run's record now says
+  the real status where there is one, nothing where there is none, and the
+  signal number next to it.
+- **One log line could raise a red incident and page you.** A watcher pass that
+  takes longer than 30 seconds overlapped the next one, and a pass now talks to
+  a container daemon, which is exactly the kind of call that takes seconds. Both
+  passes then read a run's log from the same position and reported the same line
+  twice, and "the same error twice within ten minutes" is what promotes a yellow
+  observation to a red incident with a message behind it. Two fences: a pass
+  that finds one still running does nothing and says so in the log, and the
+  reading position is now *claimed* rather than overwritten, so a second reader
+  — including one in another process, which is what the test suite is — reports
+  nothing instead of reporting it again. Every log line counts exactly once,
+  which is what it was always meant to do.
+- **The shipped sandbox profiles were shown in English to every reader.** Each
+  of them declares a translated name and a one-line explanation, in all three
+  languages, from the day they were written — and nothing ever printed them:
+  every page rendered the row's stored name, which is its identity and is
+  English by design. A German or Chinese operator picking a profile therefore
+  read "Balanced" and no explanation at all. The name a profile is stored under
+  is unchanged, so nothing that names one in a script or an API call moves; a
+  profile you renamed yourself is yours and is never translated.
+- **A deny rule the egress engine cannot enforce is now said out loud.** Under
+  `iron-proxy` there is no deny list — an allowlist entry can be subtracted, but
+  a deny that narrows a wildcard (`deny: evil.example.com` under
+  `allow: *.example.com`) has no expression at all. The hub worked that out
+  correctly, wrote a warning about it, and then nobody read the warning: it was
+  computed into a field no code ever looked at. It is now an event on the run,
+  so it stands in the run's own history and travels into the audit export next
+  to the spec that promises the rule — an auditor reading that spec would
+  otherwise believe the deny bound. That is the same failure this engine already
+  taught once: a policy that does nothing starts as cleanly as one that binds.
+- **Every hermes run in a sandbox raised an incident before it did any work.**
+  The plugin declared one host of its own, and the CLI reaches for four at
+  startup — its agent endpoint and the model catalogs it reads to know what it
+  can offer. All four were refused, which opened a yellow "blocked host"
+  incident on every single hermes run. The runs succeeded regardless, so this
+  was noise; noise on every run is how a signal stops being read. Deliberately
+  still refused: GitHub. hermes touches it at startup and works without it, and
+  a harness declaration widens *every* run of that harness — where a repository
+  really lives on GitHub, the `git-host` preset says so from that repo's own
+  origin.
+- **A sandboxed claude run could not start, and a sandboxed cursor or hermes run
+  started without the switches its plugin asked for.** Every coding-agent plugin
+  declares a `sandbox.env` — its telemetry and auto-update switches, and for
+  claude the `IS_SANDBOX=1` that lets `bypassPermissions` be accepted as
+  container root — and nothing read that declaration: the container got `HOME`,
+  `USER` and `PATH` and nothing else. Under a rootless daemon, which is every
+  claude run there is, the CLI refused 2.4 seconds after the container started
+  with *"--dangerously-skip-permissions cannot be used with root/sudo
+  privileges"*. Measured, and now covered by a unit test.
+- **…and it could not authenticate.** A subscription CLI logs in from a file in
+  the operator's `$HOME`; inside the box `$HOME` is the run's own seeded home and
+  that file is deliberately not copied there, so the declared credential is the
+  only way in — and `sandbox.credentials` was read only by the code that turns a
+  credential into a placeholder, never by anything that supplies one. A claude
+  run with the token configured on the hub started, drew its TUI and answered
+  *"Not logged in · Please run /login"*. The declared credentials now travel with
+  the run's other environment variables, which means `secrets.mode` governs them
+  exactly as it governs a model provider's key: real value under `env`,
+  placeholder under `inject`, absent under `none`.
+- **…and if it got past both, it stood at a dialog.** `IS_SANDBOX=1` is what
+  lets the bypass-permissions mode be accepted; it is not what makes that mode's
+  disclaimer go away. A sandboxed claude run drew *"WARNING: Claude Code running
+  in Bypass Permissions mode … ❯ No, exit / Yes, I accept"* and waited for a
+  keystroke nobody was there to press — a run that looks alive and is doing
+  nothing. The per-run home now carries the acceptance flag claude's own
+  `.claude.json` uses for it.
+
+  Together: claude, cursor and hermes have each now completed a real task inside
+  a container — file written, committed, reported over the hub socket, merged
+  into the base branch.
+- **The egress audit log was empty under iron-proxy, and would have stayed
+  empty.** The mapper that folds that engine's log into `egress.jsonl` read the
+  request fields at the top level of each line; the real binary puts them inside
+  an `audit` object. Every line a real proxy writes would have been dropped — a
+  silence that reads exactly like a quiet run.
+- **Several iron-proxy policy settings were being written into keys the binary
+  ignores.** A deny host (`deny_domains`) and an HTTP-method restriction were
+  written in shapes iron-proxy accepts without a word and does not enforce, so a
+  policy could look applied and do nothing. Deny hosts are now removed from the
+  allowlist itself, a method restriction is written as the per-host rule iron-proxy
+  actually reads, and a deny that can only narrow a wildcard — which that engine
+  cannot express at all — is reported to the operator instead of silently
+  dropped.
+- **Credential injection rejected every request it was supposed to permit.** The
+  config asked iron-proxy to refuse requests to a declared host that do not carry
+  the placeholder, which on Freilauf's proxy path refuses the connection before
+  any header exists — so the one host a credential was meant for was the only one
+  that failed. It is no longer set.
+
+- **opencode's own model catalog was blocked on every sandboxed opencode run.**
+  The harness declared `opencode.ai`, and a bare domain deliberately does not
+  imply its subdomains — so `models.opencode.ai` was refused within three seconds
+  of every launch. The declarations now say `.opencode.ai` where a vendor really
+  serves from subdomains; cursor's and the package-registry preset were corrected
+  the same way.
+- **The blocked-hosts alarm no longer goes red about the operator's own preset
+  gaps.** A host counts toward the "several distinct hosts" escalation only where
+  the agent was demonstrably at work when it was turned away — never before its
+  first turn, never for a host it went on working past. Silence since a denial is
+  still judged against every denial, so a provider missing from the allowlist is
+  still caught.
+
+- **The first host a sandboxed run was refused could have taken the whole hub
+  down.** The egress proxy answered a denied CONNECT with its 403 and closed the
+  connection — and a client that has been refused a tunnel resets it, which
+  arrived on a socket with no error handler and became an uncaught exception.
+  Measured against a real daemon: the proxy died one second after its first
+  denial. Where that listener runs inside the hub process — a rootful daemon, or
+  a published address — the process that died would have been **the hub**:
+  scheduler, watcher and every open page, at the moment an agent first hit its
+  own allowlist. Nobody had reached it, because until now no run had ever got as
+  far as being refused a host.
+- **The hub really could not read a sandboxed run's working copy, for ever, on
+  a run that looked perfectly healthy.** Every git call the hub makes inside the
+  box — the finish gate's dirt check first of all — ran as a user that exists on
+  no image, so it failed every time; the gate answered *"the working copy could
+  not be read"* every few seconds and the run stayed `running` with its agent
+  idle in its TUI and nothing else wrong with it. The identity is answered by one
+  function now, for the run's own container and for every command the hub runs
+  in it, as a numeric uid that needs no account to exist.
+- **The hub's report socket was never actually mounted.** The mount named the
+  path *inside* the container as its source on the host, so Docker created a
+  **directory** there and no socket existed for `fl-report` to talk to: every
+  report in a sandboxed run silently degraded to the `inbox.jsonl` fallback, and
+  the per-run token the socket exists for had never once been used. The two
+  paths no longer share a name; where the hub has no socket listening, nothing
+  is mounted and the run records `hub_socket_missing` rather than starting with
+  a directory that looks like a channel.
+- **The report fallback works inside the container too.** `inbox.jsonl` is
+  written to the configured runs directory (see Security below) — but that
+  setting was not passed into the container, so inside the box it fell back to
+  `$HOME/agents/runs`, which is the run's own seeded home and a path the hub
+  never reads. Measured on the first real sandboxed run: the agent did the work,
+  committed it, reported, was told the report was safe in the inbox, and nobody
+  ever picked it up. Both channels dead at once.
+- **A sandboxed container has a name and labels again.** The document the launch
+  is built from named the run under one key and the launcher read another, so
+  every container was started as `--name fl- --label freilauf.run=` — two runs
+  then collided on one name, stopping a run addressed nothing, the pass that
+  cleans up orphaned containers matched nothing, and the sessions page could not
+  ask the runtime for that container's memory. A document that names no run is
+  now refused rather than started nameless.
+- **`docker` in the run's own tmux pane talks to the same daemon as the hub.**
+  The pane is not the hub's process and inherits none of what the hub resolved,
+  so with no `DOCKER_HOST` it fell back to the rootful socket — which on a
+  rootless installation is absent or unreadable. The pane died half a second
+  after the start with a permission error, and that one line was the whole run
+  log. The launcher now exports the endpoint the hub resolved, and
+  `sandbox/wrap.sh --print` prints it in front of the command line so the copy
+  really is reproducible.
+- **A finished sandboxed run's clone is cleaned up again.** Retention checks a
+  worktree for uncommitted work before removing it — and by then the run's
+  container is always gone, so that check was refused and read as "dirty".
+  Every sandboxed run left a full clone behind for ever, under an
+  `anomaly:worktree_dirty` whose list of uncommitted files was empty. The check
+  now falls back to the same neutralised host git the operator's own rescue
+  buttons use, and where nobody could look at all the record says `unreadable`
+  instead of claiming there is uncommitted work.
+- **A merge check that runs in the sandbox can execute what it unpacks into
+  `/tmp`.** Docker mounts a `--tmpfs` `noexec` by default and adds the options
+  you name to that rather than replacing them (measured), so a toolchain that
+  writes a helper into `/tmp` and runs it failed the check while the run that
+  produced the code succeeded — a red check saying nothing about the work.
+- **A live policy change says which half of it is in force.** Changing a
+  sandboxed run's policy without restarting it has two halves — the network
+  rules go to the egress proxy, memory/CPU/process limits go to the container
+  runtime — and the answer now reports them separately. A change that only
+  raises a limit is applied even when the hub holds no proxy for that run; a
+  change to the network rules with no proxy to carry them is **refused**, with
+  the reason, instead of being reported as done; and a change that carries both
+  is reported as **partly applied**, naming the half that did not land. The new
+  policy is recorded on the run either way, so a restart comes back with what
+  was asked for. Before this, such a change was first reported as a success it
+  had not delivered, and then — after that was fixed — refused as a whole,
+  which threw away the limits half of a patch that never needed a proxy.
+- **A sandbox profile that cannot work on this daemon says so, by name.** The
+  built-in egress proxy cannot be reached from inside a container under a
+  **rootless** container daemon: it listens on the host, and a rootless daemon
+  keeps the run's network in a namespace of its own. The launch already
+  refused — with a bind error nobody could read as "this engine cannot work
+  here", and three of the four shipped profiles are exactly that combination.
+  The refusal now names the cause and what to do instead (the iron-proxy
+  engine, network mode `open`, or publishing the listener yourself with
+  `FREILAUF_SANDBOX_PROXY_BIND`). Falling back to the built-in engine when a
+  named one will not start is refused for the same reason on such a daemon,
+  rather than producing a run with no egress at all. **Superseded later the same
+  day** by the first entry under *Added* above: the combination is not
+  impossible any more, and what survives of this refusal is the one case an
+  operator brings on themselves by forcing the listener into the hub process.
+- **A sandboxed run's `sandbox.json` and `proxy.yaml` are never written through
+  a symbolic link.** Both live in the run's own directory, which is mounted
+  read-write into the container at the agent's uid, and both are rewritten on
+  every resume and every policy change — so a link left at one of those names
+  made the hub write through it as the hub user. The write is refused now, and
+  the refusal is the launch failure it is.
+- **A sandboxed run's allowlist really reaches its proxy.** The built-in
+  engine's listener bound to `127.0.0.1`, which inside a container is the
+  container itself — so every request through it failed with a connection error
+  while the hub read `running` throughout, and `network.mode: allowlist` had
+  never worked end to end with that engine. It binds to the run network's own
+  gateway now, and a network whose gateway it cannot learn is a **refused
+  launch**, never a fall back to loopback: a run that looks sandboxed and routes
+  nothing is the worst outcome available here. What that costs is stated rather
+  than hidden — the container can then also reach host services on that bridge,
+  which is why the proxy's own refusal to connect into loopback, RFC 1918,
+  CGNAT and link-local addresses is not optional. **On a rootless daemon this
+  listener cannot exist on the host at all** (the bridges are in another network
+  namespace), which the first entry under *Added* above answers later the same
+  day by moving it into a container — where no gateway is needed and the run's
+  network keeps its own isolated. Everything in this entry is therefore about
+  the in-process placement, which is what a rootful daemon still gets.
+- **A hub restart no longer strips a running sandboxed run of its egress.** The
+  built-in proxy lives in the hub process, so a deploy took it with it and left
+  the container talking to a dead port for the rest of its life. A watcher pass
+  now rebinds the listener on the same port with the same resolved allowlist and
+  records `sandbox:proxy_restarted` on the run; a proxy that cannot come back
+  leaves a warning on the run and never fails it. A run whose proxy is a
+  **container** is judged the same way and comes out differently: one the daemon
+  says is gone is started again, one that is still running is left alone, and
+  one the daemon will not answer about is left alone too. For a surviving
+  container proxy the hub has no handle and does not invent one, so a live
+  policy change on that run is now **refused with "the proxy is gone"** instead
+  of reporting a policy it never delivered. **Narrowed later the same day** by
+  the second entry under *Added* above: a surviving BUILT-IN proxy container is
+  taken back over, handle and all. iron-proxy is what the sentence still
+  describes.
+- **The hub's floor holds on every path that writes an override.** A path the
+  hub locked could be loosened through the **Reconfigure…** button on a running
+  run, through the repo form, through "Adopt these hosts", through the profile
+  editor and through a flow step — each of them judged an override document
+  against nothing, so only the agent and run forms ever enforced the rule the
+  whole layering rests on. All of them now resolve the layers above first and
+  refuse a loosening by name, and the sandbox facade checks it once more before
+  a policy is applied to a live container.
+- **A flow that would start a run with a loosening override is refused when it
+  is saved**, not when it fires at three in the morning: the "start single run"
+  step's sandbox overrides are validated in the designer against the same rule
+  and the same repo, and the step still refuses at run time as well.
+- **Claude's transcript is found again for runs whose path contains anything
+  but letters and digits.** The hub derived claude's project directory by
+  replacing only `/`, while claude replaces **every** non-alphanumeric
+  character — so for a worktree path with a dot, an underscore or a hyphen the
+  hub silently read no transcript at all: the run looked idle while it worked
+  (a false "no activity" flag) and API errors in that transcript were never
+  seen. This affects **every** claude run, sandboxed or not.
+- **A skipped check no longer counts as a pass.** A check that skipped part way
+  through was counted green in the test summary, which is exactly backwards for
+  a suite whose skips exist to say "this could not be verified here". The count
+  of skipped checks is now printed on a failing run too.
 - **A run whose work the hub merged is no longer reported as "branch not
   pushed".** The integrator merges a run's branch into the base branch and
   pushes *that*, which leaves the branch itself one commit **behind** its
@@ -230,6 +710,76 @@ a day on which nothing was released.
   land in "Needs you", where the hint has named credits all along.
 - A flow run waiting on a run that had ended more than an hour before a hub
   restart was never resumed and never pruned; it is resumed now.
+- **A worktree path with a dot, an underscore or a space made a claude run go
+  blind.** Claude stores a session's transcript under a directory named after
+  the working directory, and its real rule replaces **every** character that is
+  not a letter or a digit — the hub only replaced `/`. So for a worktree whose
+  path carried anything else, the hub looked for a transcript that was not
+  there: no activity measurement (the run collected "no activity" while it
+  worked), no token or cost figures, and the second channel that detects a rate
+  limit or a provider outage from claude's own transcript never saw a line. No
+  path on the machine this was found on triggered it, which is why it had never
+  shown up; a repository or branch name with a dot in it is all it takes.
+- **"I could not read the working copy" is no longer read as "there is nothing
+  uncommitted".** The finish gate's dirt check answered "clean" whenever the
+  `git status` behind it failed for any reason, and "clean" at the finish gate
+  means "merge it". It now answers *unknown*, and every caller holds on that:
+  the gate keeps the run in the gate and checks again, a run kept on its branch
+  is not pushed and called finished, the leftovers of a failed run are shown to
+  the operator instead of being reported as none. A run's uncommitted state is
+  either something somebody looked at or something nobody knows — never
+  silently the first because the second was cheaper to write.
+- **A sandboxed run is no longer failed because the container runtime had a
+  moment.** For a sandboxed run the tmux pane is the `docker` client, not the
+  agent — so a restarted daemon, a `permission denied` on the socket or a
+  `docker run` that never got past `runc create` killed the pane, and the run
+  was marked `failed` with a red message about an agent that was either still
+  working inside its container or had never started at all. The hub now asks
+  the **container** what happened, and gives the three answers the rest of the
+  sandbox already gives: the agent's own exit ends the run exactly as before, a
+  client that died hands the run to the ordinary resume path (capped, so a
+  runtime that fails at every start is not retried for ever), and a daemon that
+  does not answer decides nothing — it is recorded once and asked again on the
+  next pass.
+- **A sandboxed hermes run's activity and resume id came out of the operator's
+  own hermes store.** The one source that still read the host's `$HOME`, so the
+  hub looked for the run's session in the wrong file: wrong "last activity",
+  and a `--resume` pointing at somebody else's conversation. It reads the home
+  the agent actually worked in.
+
+### Security
+
+- **The hub and an agent now have a channel that is only the report API.**
+  Until today an agent was handed `FL_HUB_URL`, which is the hub's **whole**
+  API — kill any run, type into any session, read the settings that hold the
+  notification token and the provider credentials — and `FL_RUN_ID` was the
+  only thing standing in front of it. There is now a **unix socket** serving an
+  allowlist of exactly two routes (post a report, read this run's own sandbox
+  policy), authenticated with a **per-run token** that every run gets. A
+  sandboxed run is given the socket and the token and no hub URL at all.
+- **The `127.0.0.1` report route still accepts a report with no token**, on
+  purpose, for **one transition release**: an agent that is running right now
+  was started by a hub that knew no token and its `fl-report` sends none, so
+  requiring one would silence every run in flight the moment this is deployed.
+  Runs from before the token column keep reporting that way too. A later commit
+  removes the exemption.
+- The report fallback file (`inbox.jsonl`) is written to the configured runs
+  directory rather than to `$HOME/agents/runs`. Inside a container that path
+  does not exist, so the last channel a report had would have written into
+  nowhere without saying so.
+- **A flow's shell command no longer takes text the agent wrote without being
+  told to.** A `shell_command` step runs on the hub machine as the hub's user —
+  that is what it is for — but its command is a template, and
+  `{{trigger.run.report}}`, `{{trigger.run.help_text}}`,
+  `{{trigger.run.branch}}`, `{{trigger.run.pr_url}}` and
+  `{{trigger.merge.files}}` all carry text a coding agent wrote, substituted
+  raw. A flow built the obvious way was therefore a route from inside the
+  sandbox to a host shell. The step now names such a variable and refuses,
+  unless **"allow text the agent wrote"** is ticked on that step; ticked, it
+  works exactly as it always did. What the check cannot see — the same text one
+  hop further out, through an `extract` step, another command's output or an
+  HTTP response — is written down in `docs/sandbox.md` rather than pretended
+  away.
 
 ## 2026-09-04
 

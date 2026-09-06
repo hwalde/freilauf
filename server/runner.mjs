@@ -94,16 +94,86 @@ const FOLLOWUP_MERGE_CLAUSE = ', and origin/{base} merged into your branch once 
 const FOLLOWUP_PROCESSES_CLAUSE = ' (integration into {base}, the flows that hang on this run)'
 
 /**
+ * What a sandboxed run is told about the box it is in (SANDBOX_RESEARCH.md
+ * §7.12.1). Two halves, and the second is what the whole escalation path hangs
+ * on.
+ *
+ * The first half is FACTS, and they are read from what the run really launched
+ * with — the resolved allow list comes out of the same `resolvedAllow()` the
+ * proxy is configured from, so the list the agent is told about and the list
+ * that is enforced cannot say different things. An agent that knows its network
+ * is an allowlist stops treating a 403 as a flaky server.
+ *
+ * The second half is one sentence the agent can ACT on: report what it needs and
+ * carry on with what it can. Without it the only move a blocked agent has is to
+ * hit the same wall five times or to work around the boundary — and working
+ * around the boundary is precisely what the sandbox exists to prevent. A
+ * sentence it can act on beats a wall it hits five times.
+ */
+const SANDBOX_RULES = [
+  'SANDBOX — this run is not on the operator\'s machine directly:',
+  '- You are running inside a container. Working copy: {sandbox_workdir} (read-write).',
+  '- Network: {sandbox_network}',
+  '- Memory {sandbox_memory}, CPU {sandbox_cpus}. The root filesystem is {sandbox_root};',
+  '  write inside your working copy, and in /tmp and your home.',
+  '- If you need a host, a path or more resources, do NOT try to work around the sandbox:',
+  '  run `fl-report access "<what you need and why>"` and carry on with what you CAN do',
+  '  meanwhile. A human decides, and where the change can be applied without a restart it',
+  '  reaches you while you keep working — where it cannot, your session is resumed with',
+  '  your conversation intact. Guessing at a way around the boundary costs the run;',
+  '  one sentence of explanation does not.',
+  '- If nobody answers and you genuinely cannot finish without it, do NOT wait indefinitely:',
+  '  commit what you have and report — `done` with what you achieved and what is missing, or',
+  '  `failed` naming the host. Retrying for ever tells nobody anything, and a run that never',
+  '  reports is the one shape of failure this platform cannot see.',
+].join('\n')
+
+/** How the network half of that block reads, per mode. */
+const SANDBOX_NETWORK_TEXT = {
+  none: 'no network at all. Anything that needs the internet will fail — say so instead of retrying.',
+  open: 'unrestricted.',
+  allowlist: 'an allowlist through a proxy — reachable: {sandbox_allow}. Every other host answers 403.',
+}
+
+/**
+ * The Sandbox section, rendered from what `prepareSandbox()` really produced, or
+ * `''` for an unsandboxed run — which is what keeps the prompt of every run on
+ * an installation without a sandbox byte for byte what it was.
+ */
+export function sandboxPromptSection(facts) {
+  if (!facts) return ''
+  const mode = SANDBOX_NETWORK_TEXT[facts.mode] ? facts.mode : 'allowlist'
+  const allow = (facts.allow ?? []).filter(Boolean)
+  let network = SANDBOX_NETWORK_TEXT[mode]
+    .replace('{sandbox_allow}', allow.length ? allow.join(', ') : '(nothing — every host answers 403)')
+  // Audit-only means the policy is being LEARNED rather than enforced: telling
+  // the agent hosts are blocked when they are not would make it report access it
+  // already has, which is noise on somebody's phone.
+  if (facts.auditOnly && mode === 'allowlist') {
+    network = `an allowlist that is currently only being recorded, not enforced — expected: ${allow.join(', ') || '(none yet)'}. Requests still go through; report anything you needed that is not on that list.`
+  }
+  return SANDBOX_RULES
+    .replace('{sandbox_workdir}', facts.workdir ?? '(your working directory)')
+    .replace('{sandbox_network}', network)
+    .replace('{sandbox_memory}', facts.memory ?? 'as configured')
+    .replace('{sandbox_cpus}', facts.cpus == null ? 'as configured' : String(facts.cpus))
+    .replace('{sandbox_root}', facts.readOnlyRoot ? 'read-only' : 'writable')
+}
+
+/**
  * The prompt block that turns a task into a RUN: where to work, how long it may
  * take, and above all how to report back.
  *
- * Four sections in this order, and the order is the point:
+ * Five sections in this order, and the order is the point:
  *
  *   1. the platform rules
- *   2. the operator's own addition (Settings → Platform prompt suffix)
- *   3. the harness's own lines (`promptRules`) — cursor has to be told that its
+ *   2. the sandbox, where there is one — a FACT about the machine the agent is
+ *      on, so it stands above advice; §7.12.1 puts it in this slot for that
+ *      reason, between the platform rules and the harness's own lines
+ *   3. the operator's own addition (Settings → Platform prompt suffix)
+ *   4. the harness's own lines (`promptRules`) — cursor has to be told that its
  *      turn ending closes the run
- *   4. how the run ends — LAST, because that is what runs actually fail on
+ *   5. how the run ends — LAST, because that is what runs actually fail on
  *
  * The finishing instruction is **not removable**, and that is a lesson, not a
  * design preference: the settings field used to REPLACE this whole block. It is
@@ -114,7 +184,7 @@ const FOLLOWUP_PROCESSES_CLAUSE = ' (integration into {base}, the flows that han
  * Whatever the operator writes is now an ADDITION, placed where it reads like
  * one.
  */
-export function platformSuffix(run, branchRule, settings, repo = null) {
+export function platformSuffix(run, branchRule, settings, repo = null, sandboxFacts = null) {
   const own = String(settings.prompt_suffix ?? '').trim()
   const harnessRules = getHarness(run.harness)?.promptRules
   // Only where the hub really integrates. With merge_mode 'off' the prompt is
@@ -136,6 +206,7 @@ export function platformSuffix(run, branchRule, settings, repo = null) {
     .replace('{followup_merge}', hubMerges && !run.keep_on_branch ? FOLLOWUP_MERGE_CLAUSE : '')
     .replace('{followup_processes}', hubMerges ? FOLLOWUP_PROCESSES_CLAUSE : '')
   return [rules,
+    sandboxPromptSection(sandboxFacts),
     own && `Operator rules (apply to every run of this hub):\n${own}`,
     harnessRules, finish, followUp]
     .filter(Boolean).join('\n\n')
@@ -558,21 +629,119 @@ export function claudeSettingsJson() {
   })
 }
 
-/** Creates the run record (definition copy) and returns the run ID. */
+/**
+ * The four variables a SANDBOXED session gets on top of the ordinary ones, and
+ * each of them is a boundary crossing rather than a convenience:
+ *
+ *  - `HOME` is the run's OWN home (§7.7), not the operator's. Everything the CLI
+ *    keeps — its conversation, its session store, its auth file — lives there,
+ *    which is what makes the run's state part of the run's record rather than a
+ *    file in somebody's home directory, and what makes a resume find the
+ *    conversation again. It is also why the break-glass keeps this value: a run
+ *    continued on the host still has to find what it wrote inside the box.
+ *  - `FL_RUN_TOKEN` and `FL_HUB_SOCKET` are the way back to the hub (§7.6). The
+ *    token is minted by the INSERT itself, so a run created before that existed
+ *    simply has none and reports over loopback as it always did — which is why
+ *    the variable is only set when there is one to set.
+ *  - `FREILAUF_RUNS_DIR` is what makes the LAST channel work, and it was missing.
+ *    `fl-report` files an unreachable report in `<runs dir>/<run id>/inbox.jsonl`
+ *    for the watcher to replay, and it resolves that directory the way every
+ *    `fl-*` script does: the seam, then `$HOME/agents/runs`. Inside the box
+ *    `$HOME` is the run's seeded home, so with the variable unset the fallback
+ *    wrote to `<run home>/agents/runs/<id>/inbox.jsonl` — a path the hub does
+ *    not look at. Measured 2026-09-05 on the first real sandboxed run: the agent
+ *    did the work, committed it, ran `fl-report done`, was told "hub not
+ *    reachable — the report is in inbox.jsonl, the watcher will pick it up", and
+ *    the run then sat in `running` with nobody ever picking it up. Both channels
+ *    dead at once, and the run looked healthy throughout.
+ *
+ *    The value is the HOST path, and that is right rather than lucky: the run
+ *    directory is bind-mounted at its own path (`-v <runDir>:<runDir>` in
+ *    `buildRunArgv()`), so `<runs dir>/<run id>` names the same directory on both
+ *    sides. Only that one child of the runs directory is mounted, which is all
+ *    `fl-report` ever writes into.
+ */
+function sandboxEnvArgs(run, sandbox) {
+  const out = ['--env', `HOME=${sandbox.home}`,
+    '--env', `FL_HUB_SOCKET=${sandbox.hubSocket}`,
+    '--env', `FREILAUF_RUNS_DIR=${RUNS_DIR}`]
+  if (run.report_token) out.push('--env', `FL_RUN_TOKEN=${run.report_token}`)
+  return out
+}
+
+/**
+ * The other half of the sentence above, and it was missing: a run that WAS
+ * sandboxed and now runs on the HOST keeps its own home too.
+ *
+ * That is the break-glass (`continueWithoutSandbox()`, §7.12.4), which
+ * deliberately keeps `runs.sandbox_home` for exactly this reason — the harness's
+ * conversation lives in there (`~/agents/runs/<id>/home/.claude/projects/…`),
+ * and a resumed CLI pointed at the operator's `$HOME` finds nothing to continue.
+ * `HOME` was emitted only on the sandboxed branch, so the escape hatch resumed a
+ * run into a home it had never written a byte to, which turns a resume back into
+ * a fresh start — the one thing the break-glass exists to avoid.
+ *
+ * A home that is not on disk is not passed on: pointing a CLI at a directory
+ * that does not exist is worse than leaving it the host's, and this is a
+ * fail-soft convenience, not a boundary.
+ */
+function hostHomeArgs(run) {
+  const home = run?.sandbox_home
+  return home && existsSync(home) ? ['--env', `HOME=${home}`] : []
+}
+
+/**
+ * Split a plugin's launch arguments into its `--env NAME=VALUE` pairs and
+ * everything else, so the pairs can be handed to §7.8's secret handling and put
+ * back afterwards. Only ever used on the sandboxed path: an unsandboxed run's
+ * argument list is passed through exactly as the plugin produced it.
+ */
+export function splitEnvArgs(args) {
+  const rest = [], pairs = []
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--env' && i + 1 < args.length) {
+      const raw = String(args[++i])
+      const eq = raw.indexOf('=')
+      if (eq > 0) { pairs.push({ name: raw.slice(0, eq), value: raw.slice(eq + 1) }); continue }
+      rest.push('--env', raw)
+      continue
+    }
+    rest.push(args[i])
+  }
+  return { rest, pairs }
+}
+
+/**
+ * Creates the run record (definition copy) and returns the run ID.
+ *
+ * The `sandbox*` arguments are what `startRun()` decided BEFORE it got here
+ * (server/sandbox/index.mjs, `planSandbox()`), and they are written in the same
+ * INSERT as everything else for the same reason `or_routing` is: the row has to
+ * say from its very first moment what this run will run as. `worktree_kind`
+ * follows from it — a sandboxed run gets a clone (§7.4), and `makeSandboxClone()`
+ * writes the column again itself, which is right: the one place that knows a
+ * clone was really made should be the one that says so.
+ */
 export function createRun({ repoId, agentId = null, harness, model = null, provider = null,
   orProvider = null, orRouting = null, effort = null, prompt, promptExtra = null, goal = null, branchMode, branchPattern = null,
-  keepOnBranch = 0, expectedMinutes, skills = null, flows = null, title = null }) {
+  keepOnBranch = 0, expectedMinutes, skills = null, flows = null, title = null,
+  sandbox = 0, sandboxProfileId = null, sandboxOverrides = '{}', sandboxSpec = null }) {
   if (!getHarness(harness)) throw new Error(t('run.unknown_harness', { harness }))
   if (!isHarnessEnabled(harness)) throw new Error(t('run.harness_not_configured', { harness }))
   if (!prompt?.trim()) throw new Error(t('run.empty_prompt'))
   const id = randomUUID()
   db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, model, provider, or_provider, or_routing,
               effort, prompt, prompt_extra, goal, branch_mode, branch_pattern, keep_on_branch,
-              expected_minutes, skills, flows, title, last_activity_at)
-              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? , datetime('now'))`)
+              expected_minutes, skills, flows, title,
+              sandbox, sandbox_profile_id, sandbox_overrides, sandbox_spec, worktree_kind, last_activity_at)
+              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,? , datetime('now'))`)
     .run(id, repoId, agentId, harness, model, provider, orProvider,
       orRouting ? JSON.stringify(orRouting) : null, effort, prompt, promptExtra,
-      goal, branchMode, branchPattern, keepOnBranch ? 1 : 0, expectedMinutes, skills, flows, title)
+      goal, branchMode, branchPattern, keepOnBranch ? 1 : 0, expectedMinutes, skills, flows, title,
+      sandbox ? 1 : 0, sandboxProfileId,
+      typeof sandboxOverrides === 'string' ? sandboxOverrides : JSON.stringify(sandboxOverrides ?? {}),
+      sandboxSpec ? (typeof sandboxSpec === 'string' ? sandboxSpec : JSON.stringify(sandboxSpec)) : null,
+      sandbox ? 'clone' : 'worktree')
   return id
 }
 
@@ -751,12 +920,21 @@ export async function resumeIdFor(run) {
  * a night the server spent switched off is not work — without the shift every
  * resumed run would be flagged as overrun the moment it came back. The
  * original start is kept in the `session_lost` event.
+ *
+ * `adoptPending` is for the ONE caller that has already set the mark itself:
+ * the sandbox's reconfigure-and-resume (§7.12.4) marks the row BEFORE it stops
+ * the container, so that a watcher pass finding the session gone a second later
+ * sees a run already on its way instead of starting a second resume with the
+ * stale spec. Without this flag the guard below would answer that caller
+ * `{pending: true}` and nobody would ever launch. The guard itself stays exactly
+ * as strict for everyone else — it is what keeps two watcher passes from
+ * launching one run twice.
  */
-export async function resumeRun(runId, { reason = 'session_lost', text = null } = {}) {
+export async function resumeRun(runId, { reason = 'session_lost', text = null, adoptPending = false } = {}) {
   const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
   if (!run) return { ok: false, error: 'run not found' }
   if (!['running', 'waiting_help'].includes(run.status)) return { ok: false, error: `status is ${run.status}` }
-  if (run.resume_pending) return { ok: true, pending: true }
+  if (run.resume_pending && !adoptPending) return { ok: true, pending: true }
   // Reported already: the finish gate's `agent_gone` escalation owns this case.
   if (run.finish_state) return { ok: false, error: 'in the finish gate — the integrator escalates' }
   if (!run.workdir_effective || !existsSync(run.workdir_effective)) return { ok: false, error: 'the worktree is gone' }
@@ -813,6 +991,44 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null } 
  * it, until the cap is reached: right after a reboot the tmux server itself
  * may be a beat behind, and "could not try" is not "tried and died".
  */
+/**
+ * §8.1's availability rule, applied where the run is actually LAUNCHED — which
+ * is not where it was planned, and that gap is the whole defect.
+ *
+ * `planSandbox()` folds "is a runtime there?" into the decision through
+ * `sandboxOutcome()` at CREATE time. Between then and here lie a cached
+ * discovery answer and, for a `scheduled` or `deferred` run, hours: a 03:00
+ * agent start whose daemon hiccups is the case, and it ended `failed` with "The
+ * container runtime did not answer, so fl-… could not be prepared" — an entire
+ * night lost to a rule that says the opposite. §8.1: an `available` hub starts
+ * unsandboxed and writes it down, a `required` hub refuses readably.
+ *
+ * The same PURE function decides both times, so plan and launch cannot come to
+ * mean different things about one fact — and the answer, whichever way it goes,
+ * is never silent: a bypass is `sandbox:bypassed {by: 'unavailable', reason}` on
+ * the run's own record, and an operator who believes their runs are contained
+ * and learns later that Docker was down is the worst outcome this feature has.
+ *
+ * `runs.sandbox` goes to 0 with it, because it is the column everything else
+ * reads: the reconciliation pass, the sessions page's badge, the finish gate's
+ * seams. A row that says 1 while the agent works on the host would make every
+ * one of them describe a container that is not there.
+ *
+ * Returns `{ problem }` (start nothing) or `{ bypass: true }`.
+ */
+async function sandboxUnavailable(runId, reason) {
+  const { sandboxOutcome } = await import('./sandbox/index.mjs')
+  const { sandboxHubMode } = await import('./run-def.mjs')
+  const outcome = sandboxOutcome({
+    decision: { sandbox: true }, hubMode: sandboxHubMode(),
+    available: false, unavailableReason: String(reason ?? 'unknown'),
+  })
+  if (outcome.problems.length) return { problem: outcome.problems.join('\n\n') }
+  for (const [kind, payload] of outcome.events) addEvent(runId, kind, payload)
+  db.prepare('UPDATE runs SET sandbox=0 WHERE id=?').run(runId)
+  return { bypass: true }
+}
+
 export async function launchRun(runId) {
   const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
   if (!run) throw new Error(`run ${runId} not found`)
@@ -843,16 +1059,106 @@ export async function launchRun(runId) {
 
   let workdir = repo.path
   let branchExpected = null
+  // What `prepareSandbox()` produced, or null. An unsandboxed run never touches
+  // the sandbox module at all — not even an import — which is what makes "the
+  // sandbox is optional" a property of the code rather than a promise about it.
+  let sandbox = null
+  // Did §8.1's availability rule weaken this start into an unsandboxed one? The
+  // catch below then must not undo the worktree it just made, nor fail a run
+  // that is about to start perfectly well.
+  let bypassed = false
   try {
     if (run.branch_mode === 'neu' || run.branch_mode === 'fest') {
       branchExpected = expandPattern(run.branch_pattern, { ...run, agent_name: agent?.name, id: runId })
     }
-    // Every run works in its own worktree — even with expectation "none"
-    // (then detached HEAD; throwaway changes; planning 4.0).
-    workdir = await makeWorktree(repo, run, branchExpected)
+    if (run.sandbox) {
+      // §7.11's start order, all of it idempotent, because a resume walks it
+      // again: spec → clone → home → sandbox.json → network → proxy → stop an
+      // orphan holding the name. The clone REPLACES the linked worktree (§7.4):
+      // a worktree hangs on the operator's `.git`, and a container that could
+      // write there could write the operator's hooks.
+      //
+      // …unless the runtime cannot be reached at all, and THAT is asked here
+      // rather than left to prepareSandbox()'s throw, because the two callers
+      // want opposite things out of the same fact (see sandboxUnavailable()).
+      const { prepareSandbox, refreshSandboxAvailability } = await import('./sandbox/index.mjs')
+      const av = resuming ? { available: true } : await refreshSandboxAvailability()
+      const weakened = av.available ? null : await sandboxUnavailable(runId, av.reason)
+      if (weakened?.problem) {
+        failRun(runId, weakened.problem)
+        return { ok: false, error: weakened.problem }
+      }
+      if (weakened?.bypass) {
+        run.sandbox = 0
+        workdir = await makeWorktree(repo, run, branchExpected)
+      } else {
+        sandbox = await prepareSandbox(run, repo, { branch: branchExpected })
+        workdir = sandbox.workdir
+      }
+    } else {
+      // Every run works in its own worktree — even with expectation "none"
+      // (then detached HEAD; throwaway changes; planning 4.0).
+      workdir = await makeWorktree(repo, run, branchExpected)
+    }
   } catch (err) {
-    failRun(runId, `Start failed:\n\n${err.message}`)
-    return { ok: false, error: err.message }
+    // "Could not try" is not "tried and died", and here it has a fuse behind it
+    // (§11.3): after a reboot the first watcher pass runs at once, and a rootless
+    // container daemon's user unit may still be starting. Three passes against a
+    // daemon that is merely slow would burn the whole RESUME_MAX cap and end the
+    // run — for an infrastructure hiccup, not for a CLI that cannot start. A
+    // sandbox failure that means "the runtime could not be ASKED" therefore
+    // leaves `resume_pending` standing, counts no attempt (the increment happens
+    // further down and is never reached) and asks again next pass.
+    if (resuming && err?.sandboxRetry) {
+      // The in-flight marker is taken back with it: nothing IS in flight, and
+      // leaving it would make the next four passes skip this run for the launch
+      // grace period while the daemon it is waiting for comes up in seconds.
+      try {
+        delete resumeInfo.launching_at
+        writeFileSync(join(runDir, RESUME_FILE), JSON.stringify(resumeInfo), { mode: 0o600 })
+      } catch { /* the marker is a courtesy */ }
+      addEvent(runId, 'resume_failed', { attempt: run.resume_attempts, error: String(err.message).slice(0, 500), waiting: 'sandbox_runtime' })
+      return { ok: false, retry: true, error: err.message }
+    }
+    // The same fact on a FRESH start means the opposite thing (§8.1), so it gets
+    // the opposite answer: there is no conversation to preserve and nothing to
+    // wait for — the run has never run. `prepareSandbox()` asks the daemon in
+    // more places than the availability probe above (an orphan still holding the
+    // container name, §7.11 step 7), so this is the belt under that check.
+    if (!resuming && err?.sandboxRetry && run.sandbox) {
+      const weakened = await sandboxUnavailable(runId, err.message)
+      if (weakened?.problem) {
+        failRun(runId, weakened.problem)
+        return { ok: false, error: weakened.problem }
+      }
+      try {
+        const { teardownSandbox } = await import('./sandbox/index.mjs')
+        await teardownSandbox({ ...run, sandbox: 1 }, { reason: 'bypassed', removeNetwork: true, force: true })
+      } catch { /* fail-soft: the reaper is the net under this */ }
+      run.sandbox = 0
+      sandbox = null
+      try {
+        workdir = await makeWorktree(repo, run, branchExpected)
+        bypassed = true
+      } catch (e2) {
+        failRun(runId, `Start failed:\n\n${e2.message}`)
+        return { ok: false, error: e2.message }
+      }
+    }
+    // Whatever the sandbox built before it failed goes again — `prepareSandbox()`
+    // tears down its own half-built work, and this is the belt for a failure
+    // that happened after it returned. §7.10: a run that hangs because an image
+    // is missing is the worst outcome there is, so this ends visibly instead.
+    if (!bypassed) {
+      if (run.sandbox) {
+        try {
+          const { teardownSandbox } = await import('./sandbox/index.mjs')
+          await teardownSandbox(run, { reason: 'launch_failed', removeNetwork: true })
+        } catch { /* a teardown that fails must not hide the reason the start did */ }
+      }
+      failRun(runId, `Start failed:\n\n${err.message}`)
+      return { ok: false, error: err.message }
+    }
   }
 
   const mainSha = await sh('git', ['-C', repo.path, 'rev-parse', 'HEAD'])
@@ -869,8 +1175,15 @@ export async function launchRun(runId) {
   // long argument gets the framing plus a pointer, and the task goes to a file.
   const taskPrompt = [run.prompt, repoPromptZusatz(repo.prompt), run.prompt_extra?.trim(),
     skillPromptZusatz(run.skills)].filter(Boolean).join('\n\n')
+  // The Sandbox section of the prompt is rendered from what the launch really
+  // produced — the resolved allow list out of the same function the proxy is
+  // configured from — never from a profile: an agent told about hosts it does
+  // not actually have is worse informed than one told nothing.
+  const sandboxFacts = sandbox
+    ? (await import('./sandbox/index.mjs')).sandboxPromptFacts(sandbox)
+    : null
   const platformPrompt = platformSuffix({ ...run, id: runId, workdir_effective: workdir },
-    branchRule, settings, repo).trim()
+    branchRule, settings, repo, sandboxFacts).trim()
   const fullPrompt = [taskPrompt, platformPrompt].filter(Boolean).join('\n\n')
   let promptFile = join(runDir, 'prompt.md')
   // The resume form's argv, when this launch continues a conversation.
@@ -910,6 +1223,13 @@ export async function launchRun(runId) {
   // Hook files into the workspace (cursor: the 'stop' hook that reports the end
   // of a turn). Fail-soft: a run without hooks still works, it just falls back
   // to the transcript for its end detection.
+  //
+  // WHICH SIDE OF THE BOUNDARY: the HOST side, and unchanged. `.cursor/hooks.json`
+  // is written into the working copy, and the working copy is bind-mounted into
+  // the container at the SAME absolute path — so one file, written outside, read
+  // inside. The command it names (`flReportPath()`, `~/.local/bin/fl-report`) is
+  // mounted read-only at that same path too (§7.11), which is what makes an
+  // absolute path written on the host resolve inside the box.
   try {
     const hooks = writeHarnessHooks(run.harness, workdir)
     if (hooks.length) addEvent(runId, 'hooks_installed', { files: hooks })
@@ -944,24 +1264,73 @@ export async function launchRun(runId) {
         mainSha.ok ? mainSha.stdout.trim() : null, baseSha.ok ? baseSha.stdout.trim() : null,
         q.five, sevenForRun(run, q), runId)
     addEvent(runId, 'started', { workdir, harness: run.harness, model: run.model,
-      provider: run.provider ?? null, effort: run.effort ?? null })
+      provider: run.provider ?? null, effort: run.effort ?? null,
+      // §7.11: the `started` event is the record of what this run was really
+      // launched as. A page that wants to answer "was this contained, and how?"
+      // reads one event instead of re-resolving a profile that has since moved.
+      ...(sandbox ? { sandbox: {
+        runtime: sandbox.spec?.runtime ?? null,
+        image: sandbox.spec?.image?.ref ?? null,
+        digest: sandbox.spec?.image?.digest ?? null,
+        network: { mode: sandbox.spec?.network?.mode ?? null, engine: sandbox.spec?.network?.engine ?? null,
+          auditOnly: !!sandbox.spec?.network?.auditOnly },
+        resolvedAllow: sandbox.resolvedAllow ?? [],
+        mounts: sandbox.spec?.filesystem?.extraMounts ?? [],
+        resources: sandbox.spec?.resources ?? null,
+        secrets: sandbox.spec?.secrets?.mode ?? null,
+        user: sandbox.spec?.user ?? null,
+        container: sandbox.container, home: sandbox.home,
+      } } : {}),
+    })
   }
 
+  const hubUrl = `http://127.0.0.1:${env('LOCAL_PORT') ?? '8791'}`
+  // A sandboxed run reaches the hub over the unix socket with its own bearer
+  // (§7.6), and DELIBERATELY not over the loopback URL: `127.0.0.1` inside the
+  // container is the container, so `FL_HUB_URL` would be a variable pointing at
+  // nothing — and where it did resolve it would be a second, unauthenticated way
+  // in from inside the box. The two old `CC_*` names follow the same rule for
+  // the same reason.
   const args = ['--harness', run.harness,
     '--name', (agent?.name ?? 'einzel').toLowerCase().replaceAll(/[^a-z0-9_-]/g, '-'),
     '--id', kurz,
     '--env', `FL_RUN_ID=${runId}`,
-    '--env', `FL_HUB_URL=http://127.0.0.1:${env('LOCAL_PORT') ?? '8791'}`,
+    ...(sandbox ? [] : ['--env', `FL_HUB_URL=${hubUrl}`]),
     // The old names travel with them for one transition release. A run started
     // by this hub is fine either way, but the WORKTREE it starts in may still
     // hold a `.cursor/hooks.json` or a claude settings block written before the
     // rename, and those call `cc-report`, which reads `CC_RUN_ID`. Cheap
     // insurance; the next release drops these two lines.
     '--env', `CC_RUN_ID=${runId}`,
-    '--env', `CC_HUB_URL=http://127.0.0.1:${env('LOCAL_PORT') ?? '8791'}`,
+    ...(sandbox ? [] : ['--env', `CC_HUB_URL=${hubUrl}`]),
+    ...(sandbox ? sandboxEnvArgs(run, sandbox) : hostHomeArgs(run)),
     '--log', join(runDir, 'log.txt'), '--keep',
     '-f', promptFile, workdir]
   const modelArgs = harnessModelArgs(run, { externalDirs: runExternalDirs(run, repo, runDir) })
+  if (sandbox) {
+    // §7.8: under `secrets.mode: 'inject'` the container must hold a placeholder
+    // and nothing else — the real value goes to the proxy, which swaps it in on
+    // requests to that credential's own hosts. Everything the plugin produced
+    // that is NOT an environment variable (`--model`, `--effort`, a config blob)
+    // passes through untouched.
+    const { rest, pairs } = splitEnvArgs(modelArgs.args)
+    const { applySecrets, sandboxCredentialPairs } = await import('./sandbox/index.mjs')
+    let applied
+    try {
+      // …and what no plugin emitted but the run cannot authenticate without:
+      // a subscription CLI's own credential, which outside the box comes from a
+      // file in the operator's $HOME that a per-run home does not have. Added
+      // BEFORE applySecrets, so `inject` and `none` govern it exactly as they
+      // govern a provider key — see sandboxCredentialPairs().
+      pairs.push(...await sandboxCredentialPairs(run, pairs))
+      applied = await applySecrets(run, sandbox.spec, pairs)
+    } catch (err) {
+      failRun(runId, `Start failed:\n\n${err.message}`)
+      return { ok: false, error: err.message }
+    }
+    modelArgs.args = [...rest, ...applied.pairs.flatMap(p => ['--env', `${p.name}=${p.value}`])]
+    if (applied.injected.length) addEvent(runId, 'sandbox:secrets_injected', { vars: applied.injected })
+  }
   args.unshift(...modelArgs.args)
   if (modelArgs.fehlt.length) {
     // Better to start and record it visibly than to walk into the knife
@@ -973,6 +1342,12 @@ export async function launchRun(runId) {
   // that a later resume can find it. The hooks travel either way.
   if (resumeArgs.length) args.unshift(...resumeArgs)
   else if (run.harness === 'claude') args.unshift('--session-id', runId)
+  // WHICH SIDE OF THE BOUNDARY: neither. `--settings` takes the JSON INLINE, so
+  // this crosses no filesystem at all — it is argv, and argv is built on the
+  // host and executed inside the container. What it names (`fl-report`,
+  // `setsid`) is resolved inside, from the read-only mount of `~/.local/bin`
+  // (§7.11). That is deliberately not the same as claude's own settings FILE,
+  // which the plugin's `seedHome` writes into the run's home.
   if (run.harness === 'claude') args.unshift('--settings', claudeSettingsJson())
   // A coding agent fl-start has no case for is launched from its own
   // declaration. The file lives next to prompt.md in the run directory — NOT in
@@ -982,6 +1357,20 @@ export async function launchRun(runId) {
     const specPath = join(runDir, 'launch.json')
     writeFileSync(specPath, JSON.stringify(spec, null, 2), { mode: 0o600 })
     args.unshift('--spec', specPath)
+  }
+  // …and a sandboxed run hands fl-start the document that says what container to
+  // build (§7.11). One file, written by `prepareSandbox()`, read by the wrapper:
+  // the hub never assembles a `docker run` command line itself, so a human can
+  // reproduce the run from the same file.
+  if (sandbox) {
+    args.unshift('--sandbox', sandbox.specPath)
+    // What the plugin wants changed about its own command line inside the box
+    // (§7.9). claude asks for `bypassPermissions`: there is nothing left to ask
+    // a human about in there, and its own `sandbox.env` carries the `IS_SANDBOX`
+    // hint that lets that mode be accepted. `--setting-sources user` is fl-start's
+    // own doing for every sandboxed claude run and is deliberately not repeated
+    // here — see harnessLaunchOverrides() in server/sandbox/index.mjs.
+    if (sandbox.launchOverrides?.mode) args.unshift('--mode', sandbox.launchOverrides.mode)
   }
 
   const r = await sh(env('START_SCRIPT') ?? `${homedir()}/.local/bin/fl-start`, args, { timeout: 120_000 })

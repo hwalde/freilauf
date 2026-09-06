@@ -104,6 +104,29 @@ const plugin = {
   pulse: { url: 'https://openrouter.ai/api/v1/models', okStatus: [200] },
 
   /**
+   * What a sandboxed run on this provider needs (docs/plugins.md, "The sandbox
+   * declaration"). One host, and one bearer header to it — the textbook case
+   * for credential injection (SANDBOX_RESEARCH.md §7.8): the container holds a
+   * placeholder, and the proxy substitutes the real key on requests to
+   * `openrouter.ai` and nowhere else. Every call this plugin makes above goes
+   * to that host with exactly this header, which is what makes the declaration
+   * a reading of the code rather than a guess.
+   */
+  sandbox: {
+    // Bare, deliberately: `hostGlobMatch()` reads that as the apex and nothing
+    // under it, and the apex is exactly where every call above goes
+    // (`openrouter.ai/api/v1/…`). The subdomains that exist belong to the
+    // website's sign-in, not to the API [measured 2026-09-05], so a dotted form
+    // would widen the allowlist for traffic a run never makes.
+    domains: ['openrouter.ai'],
+    credentials: [{
+      key: 'api_key',
+      envKeys: ['OPENROUTER_API_KEY'],
+      injection: { header: 'Authorization', prefix: 'Bearer ', hosts: ['openrouter.ai'] },
+    }],
+  },
+
+  /**
    * The budget gate for a run that draws on OpenRouter credits.
    *
    * The threshold key is still `openrouter_min_eur` although the figure is

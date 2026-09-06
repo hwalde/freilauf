@@ -13,6 +13,7 @@ import {
   runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
   runTitleField, runStartTimeFields, runStartFromForm,
   runSetupFields, runSetupFromForm, branchFields, branchContext,
+  sandboxRunFields,
   agentNameTaken, moveAgent, deleteAgent, EMPTY_SCHEDULE,
 } from './run-def.mjs'
 import {
@@ -61,6 +62,15 @@ import { llmSources, DEFAULT_SOURCE } from './llm/sources.mjs'
 // that module; it is re-exported here so a fragment has ONE place to ask for a
 // piece of a page, whichever module happens to build it.
 export { flowSection }
+// Running an agent in a sandbox (SANDBOX_RESEARCH.md): the blocks live in
+// server/sandbox/pages.mjs — a subject of its own, and this file is long
+// enough. Everything imported here answers honestly on a machine with no
+// container runtime, which is what lets these call sites be unconditional.
+import {
+  sandboxRepoFields, sandboxRepoFromForm, sandboxDryRunButton, sandboxAdoptBlock,
+  sandboxCard, sandboxReconfigureCard, sandboxStatusSuffix, sandboxSessionBadge,
+  sandboxSettingsSummary,
+} from './sandbox/pages.mjs'
 import { t, LANGUAGES, currentLanguage, setLanguage, clientCatalog } from './i18n.mjs'
 import { env } from './env.mjs'
 
@@ -561,6 +571,11 @@ async function memoryBlock() {
   return `<div class="side-block" id="side-mem"><span class="side-label">${e(t('side.mem'))}</span>
     <div><a href="/sessions"><b>${e(mem.rssKb ? byteText(mem.rssKb) : '0 MB')}</b></a>
       <span class="dim">${e(t('side.mem_sessions', { n: mem.sessions }))}</span></div>
+    ${
+      // A sandboxed session whose runtime did not answer is not measured, and a
+      // sum that quietly leaves out a container is the same lie as a quota bar
+      // that is two days old. It says so instead of rounding the gap away.
+      mem.unmeasured ? `<div class="dim">${e(t('sandbox.lifecycle.total_incomplete', { n: mem.unmeasured }))}</div>` : ''}
     <div class="dim"${mem.measuredAtMs ? ` title="${e(fmtDateTime(mem.measuredAtMs))}"` : ''}>${
       e(t('side.mem_every', { min: Math.max(1, Math.round(mem.intervalMs / 60_000)) }))}</div>
     ${free}</div>`
@@ -1015,6 +1030,13 @@ export function runRow(r, ctx) {
         ${wartend ? `<div class="dim">${wartetAuf(r)}</div>` : ''}
         ${r.followup_since ? `<div class="dim">${e(t('run.followup_active', { ts: fmtDbUtc(r.followup_since) }))}</div>` : ''}
         ${integrationLine(r)}
+        ${
+          // One statement, in the same voice as the integration line and the
+          // anomaly beside it — a run that ran behind walls, or one whose
+          // operator took them down. Never a second badge next to the status
+          // word: this cell already carries four voices and a fifth is how a
+          // cell stops being readable.
+          sandboxStatusSuffix(r)}
         ${anomaly ? `<div class="dim">${e(anomaly)}</div>` : ''}</td>
       <td class="title-cell" onclick="event.stopPropagation()">
         ${titleInline(r.id, titel)}
@@ -1357,6 +1379,8 @@ export async function pageRun(req, res, url, id) {
   ${runPromptCard(run)}
   ${runChips(run, repo, herkunft)}
   ${runEditCard(run)}
+  ${await sandboxCard(run, repo)}
+  ${sandboxReconfigureCard(run)}
   ${integrationSection(run, repo)}
   ${goalCard(run)}
   ${run.help_text
@@ -1693,6 +1717,13 @@ export function runEditCard(run) {
     // the explanations through its data-merge-modes/bases, exactly as in the
     // Quick-Run dialog.
     zeilen.push(branchFields(run, branchContext(run.repo_id)))
+  }
+  if (erlaubt.sandbox) {
+    // The run's tri-state is already RESOLVED (runs.sandbox is 0/1), so this is
+    // a yes/no about a run that has not started — the same table the endpoint
+    // applies, which is the rule this card exists for: it may never offer an
+    // edit `/api/runs/<id>/edit` would refuse.
+    zeilen.push(sandboxRunFields(run))
   }
   if (erlaubt.startTime) {
     // Prefilled with what the run currently waits for: the DB holds UTC, the
@@ -2043,11 +2074,24 @@ export function sessionRow(s, ctx = {}) {
     <td>${run
       ? `<a href="/runs/${e(run.id)}">${e(title)}</a><div class="dim">${e(statusText(run.status))}${run.repo_name ? ` · ${e(run.repo_name)}` : ''}</div>`
       : `<span class="dim">${e(t('sessions.unknown_hint'))}</span>`}</td>
-    <td><code>${e(s.name)}</code>${run ? `<div class="dim">${e(harnessLabel(run.harness))}${run.model ? `/${e(run.model)}` : ''}</div>` : ''}</td>
+    <td><code>${e(s.name)}</code>${run ? `<div class="dim">${e(harnessLabel(run.harness))}${run.model ? `/${e(run.model)}` : ''}</div>` : ''}${
+      // "sandboxed", and the image it runs: on this page the question is what
+      // the MACHINE is holding, and a container is a different amount of
+      // machine than a bare process. The data comes from sessions.mjs; a
+      // session that carries none renders nothing, which is the right answer
+      // for a session that is not sandboxed.
+      sandboxSessionBadge(s)}</td>
     <td>${age}</td>
     <td>${activity}</td>
     <td>${e(s.command || '–')}<div class="dim">${e(t('sessions.processes'))}: ${s.resources.count}</div></td>
-    <td>${e(byteText(s.resources.rssKb))}<div class="dim">${e(fmtNum(s.resources.cpu, { maximumFractionDigits: 1 }))} % CPU</div></td>
+    <td>${
+      // `unknown` is not zero. A sandboxed session's pane tree under-reports the
+      // container by about twenty times (measured), so where the runtime could
+      // not be asked the cell REFUSES to guess: "0 B" next to a 200 MB
+      // container is the shape of lie this whole page exists to prevent.
+      s.resources.unknown
+        ? `<span class="dim" title="${e(t('sandbox.lifecycle.mem_unknown_why'))}">${e(t('sandbox.lifecycle.mem_unknown'))}</span>`
+        : `${e(byteText(s.resources.rssKb))}<div class="dim">${e(fmtNum(s.resources.cpu, { maximumFractionDigits: 1 }))} % CPU</div>`}</td>
     <td>${s.windows}/${s.paneCount}${s.attached ? ` <b>${e(t('sessions.attached'))}</b>` : ''}</td>
     <td class="dim"><code>${e(s.path)}</code></td>
     <td><button type="button" class="danger sess-kill">${e(t('sessions.end'))}</button></td>
@@ -2312,6 +2356,8 @@ export async function pageSettings(req, res, url) {
      <span class="dim">${e(t('settings.cleanup_hint', { setup: cleanupSettingsSummary() }))}</span></p>
   <p><a class="btn" href="/settings/skills">${e(t('flskills.title'))}</a>
      <span class="dim">${e(t('settings.skills_hint', { state: t(skillsInstallOn() ? 'layout.on' : 'layout.off') }))}</span></p>
+  <p><a class="btn" href="/settings/sandbox">${e(t('sandbox.settings.title'))}</a>
+     <span class="dim">${e(t('sandbox.settings.link_hint', { state: await sandboxSettingsSummary() }))}</span></p>
   <form method="post" action="/settings/save" class="settings form-grid">
     <label>${e(t('settings.language'))} <select name="ui_language">${Object.entries(LANGUAGES).map(([code, label]) =>
       `<option value="${code}" ${(s.ui_language ?? 'en') === code ? 'selected' : ''}>${e(label)}</option>`).join('')}</select></label>
@@ -2435,7 +2481,15 @@ export async function favoriteEdit(req, res, url) {
   const body = `<h2>${e(id ? t('fav.edit_title') : t('fav.create_title'))}</h2>
   <form method="post" action="/settings/favorites/edit${id ? `?id=${id}` : ''}" class="settings form-grid">
     <label>${e(t('fav.name'))} <input name="name" value="${e(f?.name ?? '')}" placeholder="${e(t('fav.name_ph'))}" required></label>
-    ${runSetupFields(werte)}
+    ${
+      // The sandbox tri-state is OPT-IN on this block, and the favorite form is
+      // the one place that opts in. The merge-resolver setup and the tmux
+      // cleanup embed the same `runSetupFields()` and store their answer as
+      // individual `settings` rows — a sandbox field rendered there would look
+      // saved and would not be, which is the failure AGENTS.md has the rule
+      // about. Here it is a real column (`favorites.sandbox`), because the
+      // boundary a run works in is setup and not task.
+      ''}${runSetupFields(werte, { sandbox: 'tristate' })}
     ${skillFelder(werte.skills)}
     ${flowAttachFields(werte.flows)}
     <div class="btn-row"><button>${e(t('settings.save'))}</button>
@@ -3381,8 +3435,17 @@ export async function repoEdit(req, res, url) {
       <span class="btn-row"><button type="button" class="ghost" id="extras-find">${e(t('repos.extras_find'))}</button>
       <span class="dim">${e(t('repos.extras_find_hint'))}</span></span></label>
     ${integrationFields(r)}
+    ${await sandboxRepoFields(r)}
     <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
   </form>
+  ${
+    // Both of these stand OUTSIDE the form above, and not for tidiness: a
+    // <form> inside a <form> is a parse error, and the inner button then
+    // submits the OUTER one — a "Dry run" placed in the fieldset would silently
+    // have been a second Save. They also read better here: one tests and adopts
+    // what is SAVED, not what is currently typed.
+    await sandboxDryRunButton(r)}
+  ${await sandboxAdoptBlock(r)}
   ${extrasDialog()}`
   // This form belongs to ONE repo, like a run's detail page: switching the
   // header repo cannot make it show another one, so it hands its own repo over
@@ -3411,6 +3474,12 @@ export async function repoSave(req, res, url, formBody) {
     problems.push(t('repos.extras_json', { err: err.message }))
   }
   const integ = integrationFromForm(b, problems)
+  // `null` means the body carried no sandbox fields at all — the form was
+  // rendered on a hub where the block has none to offer. The stored columns are
+  // then left exactly as they are: reading "absent" as "empty" is how a
+  // configuration disappears the first time somebody saves a page that could
+  // not show it (the same rule the skills page's `skills_pick` marker has).
+  const sandbox = await sandboxRepoFromForm(b, problems)
   if (problems.length) return problemPage(req, res, t('repos.edit_title'), problems, back)
   const prompt = (b.prompt ?? '').trim() || null
   const i = [integ.merge_mode, integ.merge_check, integ.finish_timeout_min, integ.merge_max_attempts,
@@ -3420,11 +3489,23 @@ export async function repoSave(req, res, url, formBody) {
                 merge_mode=?, merge_check=?, finish_timeout_min=?, merge_max_attempts=?,
                 conflict_parallel=?, notify_running=?, max_parallel=? WHERE id=?`)
       .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt, ...i, +id)
+    if (sandbox) {
+      db.prepare(`UPDATE repos SET sandbox_default=?, sandbox_profile_id=?, sandbox_overrides=?,
+                  sandbox_image=?, merge_check_sandboxed=? WHERE id=?`)
+        .run(sandbox.sandbox_default, sandbox.sandbox_profile_id, sandbox.sandbox_overrides,
+          sandbox.sandbox_image, sandbox.merge_check_sandboxed, +id)
+    }
   } else {
-    db.prepare(`INSERT INTO repos(name,path,base_branch,worktree_extras,prompt,
+    const newId = db.prepare(`INSERT INTO repos(name,path,base_branch,worktree_extras,prompt,
                 merge_mode,merge_check,finish_timeout_min,merge_max_attempts,
-                conflict_parallel,notify_running,max_parallel) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt, ...i)
+                conflict_parallel,notify_running,max_parallel) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`)
+      .get(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt, ...i).id
+    if (sandbox) {
+      db.prepare(`UPDATE repos SET sandbox_default=?, sandbox_profile_id=?, sandbox_overrides=?,
+                  sandbox_image=?, merge_check_sandboxed=? WHERE id=?`)
+        .run(sandbox.sandbox_default, sandbox.sandbox_profile_id, sandbox.sandbox_overrides,
+          sandbox.sandbox_image, sandbox.merge_check_sandboxed, newId)
+    }
   }
   redirect(res, '/repos')
 }

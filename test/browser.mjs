@@ -79,8 +79,21 @@ process.on('SIGHUP', async () => { await cleanUp(); process.exit(129) })
  * `init` runs in the page before ANY script, so a test can e.g. shorten the
  * sidebar poll interval the page would otherwise use.
  */
+// `newPage()` takes no timeout of its own, so a Chromium that does not answer
+// hangs the whole suite FOREVER rather than failing one check — measured under
+// load (~60, 30 GB of swap, live agents on the machine): the run stalled here
+// and only an external `timeout` ended it, 600 s later, with ten bogus "browser
+// has been closed" failures in its wake. A hang is the worse failure of the two,
+// because it says nothing at all and a red check says where to look.
+const NEW_PAGE_MS = Number(process.env.FREILAUF_BROWSER_NEWPAGE_MS || 60_000)
+
 async function neueSeite(pfad, init) {
-  const p = await kontext.newPage()
+  const p = await Promise.race([
+    kontext.newPage(),
+    new Promise((_, ab) => setTimeout(
+      () => ab(new Error(`newPage() did not answer within ${NEW_PAGE_MS} ms — Chromium is stuck, not the hub`)),
+      NEW_PAGE_MS).unref()),
+  ])
   if (init) await p.addInitScript(init)
   p.fehler = []
   p.dialoge = []
@@ -1423,23 +1436,64 @@ try {
     await p.close()
   })
 
+  const tmux = (...a) => { try { return String(execFileSync('tmux', a, { encoding: 'utf8' })).trim() } catch { return '' } }
+
   // The case the first release did not cover, and the reason there is a button
   // for it: an application in the pane may take mouse reporting for itself.
   // Measured on this machine with `#{mouse_any_flag}` — claude leaves the mouse
   // to tmux, which marks and copies; opencode takes it (any-motion, SGR,
-  // alternate screen) and does nothing with a drag. Here the terminal is put
-  // into exactly that mode by writing the sequence an application would send,
-  // and then a REAL mouse drag is made over it.
+  // alternate screen) and does nothing with a drag.
+  //
+  // The mode is therefore turned on WHERE IT REALLY LIVES: in the pane. Writing
+  // `\x1b[?1003h` into the browser's xterm instead was this suite's one flake,
+  // failing about half of all runs, and it took measuring to see why — the
+  // session is a live tmux one, and tmux re-asserts the pane's mouse mode at
+  // every redraw. Whenever a redraw (the terminal's own fit/resize) landed in
+  // the 10-25 ms after the write, `\x1b[?1006l\x1b[?1000l\x1b[?1002l\x1b[?1003l`
+  // came back over the WebSocket, xterm's mouse tracking went off again, and
+  // the drag below then selected locally and copied — one entry in the
+  // clipboard where the check demands none. Nothing was wrong with hub.js: the
+  // simulation was client-side only, so the state it asserted on was never the
+  // terminal's real one. Now the escape goes through the sandbox agent's own
+  // `[agent saw] $line` echo into the pane's OUTPUT, tmux parses it, and
+  // `#{mouse_any_flag}` says so before anything else is believed.
   await check('an application that takes the mouse changes nothing — and the button hands it over', async () => {
+    const session = laufRow(R_LIVE).tmux_session
+    // With tmux's own `mouse` off there is exactly ONE consumer of a mouse
+    // report — the application in the pane — which is what this check is
+    // about. Pinned rather than inherited, so the operator's global tmux
+    // setting cannot decide what the check measures. (In production, where
+    // fl-start sets `mouse on`, tmux hands the mouse to a pane that asked for
+    // it just the same; the OTHER case, where tmux keeps it and copies, is the
+    // check below.)
+    tmux('set-option', '-t', `=${session}:`, 'mouse', 'off')
     const p = await neueSeite(`/runs/${R_LIVE}`, clipboardStub)
     await p.bringToFront()
     await p.waitForSelector('#term .xterm-screen', { timeout: 15_000 })
     await wartePage(p, (id) => (document.querySelector('#term .xterm-rows')?.textContent || '').includes(id),
       R_LIVE, 'the session\'s content to be there to drag over')
-    // 1003 = report any motion, 1006 = SGR encoding: opencode's own two. What
-    // the terminal writes here is what opencode's TUI writes for real.
-    await p.evaluate(() => window.FREILAUF_TERM.write('\x1b[?1003h\x1b[?1006h'))
-    await p.waitForTimeout(300)
+    // What ARRIVED, rather than what was asked for. Registered before the mode
+    // is switched on, and it answers `false`, so xterm still applies the mode
+    // and hub.js's own handler still sees it — a handler that swallowed the
+    // sequence would switch off the very thing under test.
+    await p.evaluate(() => {
+      window.__paneMouse = false
+      const parser = window.FREILAUF_TERM.parser
+      parser.registerCsiHandler({ prefix: '?', final: 'h' }, (ps) => { if (ps.flat().includes(1003)) window.__paneMouse = true; return false })
+      parser.registerCsiHandler({ prefix: '?', final: 'l' }, (ps) => { if (ps.flat().includes(1003)) window.__paneMouse = false; return false })
+    })
+    // 1003 = report any motion, 1006 = SGR encoding: opencode's own two. Typed
+    // into the session, so the stub agent echoes them back out of the pane and
+    // tmux reads them as the application asking for the mouse.
+    const tippe = (s) => {
+      tmux('send-keys', '-t', `=${session}:`, '-H', ...[...s].map((c) => c.charCodeAt(0).toString(16).padStart(2, '0')))
+      tmux('send-keys', '-t', `=${session}:`, 'Enter')
+    }
+    tippe('\x1b[?1003h\x1b[?1006h')
+    await waitFor(() => tmux('display', '-p', '-t', `=${session}:`, '#{mouse_any_flag}') === '1',
+      { what: 'the pane to really own the mouse (#{mouse_any_flag})', timeoutMs: 10_000 })
+    await wartePage(p, () => window.__paneMouse === true, null,
+      'the mouse mode to reach the browser over the WebSocket')
     const zeile = await textZeile(p, R_LIVE)
     equal(await p.getAttribute('#term-mouse', 'aria-pressed'), 'true',
       'the mouse selects to begin with — nobody has to know what the TUI does with it')
@@ -1463,6 +1517,12 @@ try {
     equal(await p.getAttribute('#term-mouse', 'aria-pressed'), 'false', 'the agent has the mouse now')
     isTrue(await p.$eval('details.run-term', el => el.open), 'and the details stayed open, not toggled shut')
     await ziehe(p, zeile)
+    // The premise, read again AFTER the drag and not only before it: this is
+    // exactly what used to give way underneath — the mode went off mid-check
+    // and the assertion below then failed saying "got 1, expected 0", which
+    // names nothing. A premise that stopped holding must say so itself.
+    isTrue(await p.evaluate(() => window.__paneMouse === true),
+      'and the application still owned the mouse all the way through the drag')
     isFalse(await p.evaluate(() => window.FREILAUF_TERM.hasSelection()),
       'the drag went to the application, which does nothing with it')
     equal(await p.evaluate(() => window.__copied.length), 0, 'so nothing reaches the clipboard')
@@ -1479,16 +1539,22 @@ try {
     equal(await p.getAttribute('#term-mouse', 'aria-pressed'), 'true', 'and selecting is the default again')
     sauber(p)
     await p.close()
+    // …and so is the pane's mouse mode: the session outlives this check, and a
+    // later one attaching to it must find the terminal as every other check
+    // found it.
+    tippe('\x1b[?1003l\x1b[?1006l')
+    await waitFor(() => tmux('display', '-p', '-t', `=${session}:`, '#{mouse_any_flag}') === '0',
+      { what: 'the pane to give the mouse back', timeoutMs: 10_000 })
+    tmux('set-option', '-t', `=${session}:`, '-u', 'mouse')
   })
 
-  // …and the same thing once through the whole chain, because the test above
-  // writes the sequence into xterm itself and therefore proves nothing about
-  // the hop it actually comes over: tmux → the pty in terminal.mjs → the
+  // …and the same thing once through the whole chain, because the check above
+  // stops at what the pane's own application does with the mouse and says
+  // nothing about the other consumer: tmux → the pty in terminal.mjs → the
   // WebSocket → xterm's parser. The copy is aimed at THIS page's client by
   // name (`-t`), so no other tmux client on the machine is written to, and the
   // whole check reports itself skipped where the operator's tmux has
   // `set-clipboard off` — that is their setting, not a broken hub.
-  const tmux = (...a) => { try { return String(execFileSync('tmux', a, { encoding: 'utf8' })).trim() } catch { return '' } }
   const tmuxTest = tmux('show', '-sv', 'set-clipboard') === 'off'
     ? (name) => skipped(name, 'this machine\'s tmux has set-clipboard off — it sends no OSC 52 at all')
     : check
@@ -2121,6 +2187,100 @@ try {
     sauber(p)
     await p.close()
   })
+  // ------------------------------------------------------------------
+  group('A21 — the sandbox block: only where the coding agent has one')
+  //
+  // The same mechanism as the goal block, and the same non-negotiable half of
+  // it: hidden means DISABLED. A hidden field that still submits is a network
+  // policy the operator can neither see nor correct — and here the belief it
+  // would leave behind ("this run is fenced off") is the one a sandbox feature
+  // must never create. The difference is that this block does not vanish: it
+  // stays and says why, because "the field is gone" reads as "there is no
+  // question here" when the truth is "this run goes to the host".
+  {
+    const setzeModus = (v) => db.prepare(
+      `INSERT INTO settings(key,value) VALUES('sandbox_mode',?)
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(v)
+
+    await check('switching to a coding agent that cannot be sandboxed hides AND disables the fields', async () => {
+      setzeModus('available')
+      try {
+        const p = await neueSeite(`/runs/new?repo=${repoId}`)
+        // Every built-in coding agent declares a sandbox block today, so the
+        // list is narrowed here the way the OpenRouter test puts an option in:
+        // what is under test is the rule in hub.js, not who is on the list.
+        await p.evaluate(() => {
+          document.querySelector('[data-sandbox-block]').dataset.sandboxHarnesses = 'claude'
+        })
+        await p.selectOption('select[name=harness]', 'claude')
+        await wartePage(p, () => document.querySelector('[data-sandbox-controls]').hidden === false,
+          null, 'the sandbox fields to be there for a coding agent that has one')
+        equal(await p.$eval('select[name=sandbox]', el => el.disabled), false, 'and to be live')
+        equal(await p.$eval('[data-sandbox-unsupported]', el => el.hidden), true, 'no note while it is supported')
+
+        // What the operator typed, so the next assertion can show it survives.
+        // The editor is folded away by default, so it is opened the way a hand
+        // opens it.
+        await p.click('details.sandbox-overrides summary')
+        await p.fill('textarea[name=sandbox_overrides]', '{"network": {"mode": "none"}}')
+        await p.selectOption('select[name=sandbox]', 'on')
+
+        await p.selectOption('select[name=harness]', 'opencode')
+        await wartePage(p, () => document.querySelector('[data-sandbox-controls]').hidden === true,
+          null, 'the fields to go away for a coding agent that has none')
+        equal(await p.$eval('select[name=sandbox]', el => el.disabled), true,
+          'the tri-state is DISABLED, not merely hidden — a hidden field must not still submit')
+        equal(await p.$eval('textarea[name=sandbox_overrides]', el => el.disabled), true,
+          'and neither may the overrides travel')
+        equal(await p.$eval('select[name=sandbox_profile_id]', el => el.disabled), true, 'nor the profile')
+        equal(await p.$eval('[data-sandbox-unsupported]', el => el.hidden), false,
+          'and the block SAYS why instead of vanishing')
+
+        // Back again: nothing was thrown away. Switching a coding agent back
+        // and forth must not cost what was typed, exactly as with the goal.
+        await p.selectOption('select[name=harness]', 'claude')
+        await wartePage(p, () => document.querySelector('[data-sandbox-controls]').hidden === false,
+          null, 'the fields to come back')
+        equal(await p.$eval('textarea[name=sandbox_overrides]', el => el.value), '{"network": {"mode": "none"}}',
+          'the overrides survived the round trip')
+        equal(await p.$eval('select[name=sandbox]', el => el.value), 'on', 'and so did the tri-state')
+        equal(await p.$eval('select[name=sandbox]', el => el.disabled), false, 'enabled again')
+        sauber(p)
+        await p.close()
+      } finally { setzeModus('') }
+    })
+
+    await check('the overrides editor is folded away, and opens on the summary', async () => {
+      // Folded because it is the exception, not the rule: an always-open wall
+      // of JSON is how people learn to stop reading a form.
+      setzeModus('available')
+      try {
+        const p = await neueSeite(`/runs/new?repo=${repoId}`)
+        equal(await p.$eval('details.sandbox-overrides', el => el.open), false, 'closed with nothing in it')
+        await p.click('details.sandbox-overrides summary')
+        await wartePage(p, () => document.querySelector('details.sandbox-overrides').open === true,
+          null, 'the editor to open')
+        isTrue(await p.isVisible('textarea[name=sandbox_overrides]'), 'and the field to be reachable')
+        sauber(p)
+        await p.close()
+      } finally { setzeModus('') }
+    })
+
+    await check('with the hub mode off there is no block at all', async () => {
+      // The state every installation without a container runtime is in: the
+      // form must be byte for byte the one it has always been.
+      const p = await neueSeite(`/runs/new?repo=${repoId}`)
+      equal(await p.$$eval('[data-sandbox-block]', els => els.length), 0, 'nothing rendered')
+      // And the driver does not fall over the absence — it is the same change
+      // listener that drives the provider cascade next to it.
+      await p.selectOption('select[name=harness]', 'opencode')
+      await wartePage(p, () => document.getElementById('prov-label').hidden === false, null,
+        'the rest of the form to keep working')
+      sauber(p)
+      await p.close()
+    })
+  }
+
 } catch (err) {
   console.log(`\nAborted: ${err.stack}`)
   counter.failures.push({ name: 'Test run', reason: err.message })

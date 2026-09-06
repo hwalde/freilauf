@@ -2319,6 +2319,7 @@ node test/e2e.mjs --echt    # additionally ONE real run per harness (consumes qu
 node test/e2e.mjs --keep    # keep the sandbox (debugging)
 node test/browser.mjs       # public/hub.js in a real Chromium — ~10 s
 node test/proxy.mjs         # vpn-proxy.mjs against a stub upstream — <1 s
+node test/proxy-egress.mjs  # the sandbox's own egress proxy against a stub upstream — <1 s
 node test/deploy.mjs        # bin/freilauf-deploy against a bare origin — ~3 s
 ```
 
@@ -2408,6 +2409,57 @@ race nobody wants to debug, so the hub still integrates on the report path and
 the suite calls `integrateTick(nowMs)` itself. The last test in the group turns
 `merge_mode` back to `off` — everything before it is the proof that without the
 setting nothing runs differently.
+
+**And the suite owns the container passes for the identical reason**
+(`FREILAUF_SANDBOX_REAPER_OFF=1`, `sandboxPassesOff()` in watcher.mjs). Every
+sandbox group in `test/e2e.mjs` reaps by hand — it calls
+`reconcileContainers(hubId)` directly — while the hub's own 30-second tick was
+reaping the same shim state four or five times underneath it. The call log then
+carried each `stop`/`rm`/`network-rm` twice and the set of failing checks moved
+from run to run, which is a suite that has stopped saying anything about the
+code. The seam gates exactly the three passes that TALK TO THE DAEMON —
+`enforceMaxRuntime()`, `reconcileContainers()`, `restoreSandboxProxies()` — and
+leaves the rest of `tick()` alone, the same shape the integrator fence has.
+
+**And then the rest of `tick()` needed the same fence after all**
+(`FREILAUF_WATCHER_OFF=1`, set in the hub's environment by
+`test/sandbox-env.mjs` next to `FREILAUF_INTEGRATOR_OFF`). `prepareWatcher()`
+imports `tick` into the TEST process and calls it there, while `hub.mjs` ran
+`setInterval(tick, 30_000)` in the hub process against the same database — two
+processes, one SQLite file, no fence, which is the third time this project has
+written down that exact sentence. It was not theoretical: three consecutive e2e
+runs on one commit failed 2, 3 and 1 checks, in different tests and in different
+assertions *within* one test, and every one of them asserted "exactly once" or
+an escalation level. The mechanism is `runs.log_offset` — a plain read, scan,
+`UPDATE ... WHERE id=?`, so two passes read the same starting offset, scanned
+the same bytes and both reported the same log line: one line reached `anzahl`
+2, and `rateLogHit()`'s repetition path turns that red, with a notification, for
+a hit the design says must stay yellow. Three answers, and each is worth having
+on its own: the seam (the suite owns the clock), a re-entrancy guard inside
+`tick()` so a production pass slower than 30 s cannot overlap itself
+(`skippedTicks()` counts what it skipped — a guard that drops work silently is
+the next entry in this file), and `claimOffset()`, which names the offset it
+expects to replace so a second reader gets `changes === 0` and honestly reports
+nothing. Guarded INSIDE `tick()`, so the hub's own first pass is covered too,
+and a hand-driven pass from another process can never be turned into a no-op.
+
+**But the shim is where the suite's evidence runs out, and that has now been
+paid for.** The first real sandboxed run (opencode in a container, 2026-09-05 —
+[docs/sandbox.md](docs/sandbox.md) has the account) found five faults, and every
+one of them was green in this suite beforehand. Two of them say why in one
+sentence: **a stub cannot answer whether an account exists inside an image, or
+whether a mount point came out a socket.** `docker exec -u hub` is a perfectly
+well-formed command line and the shim answered it happily; on a real daemon it
+is `unable to find user hub`, so every git call the hub made inside the box
+failed and the finish gate looped for ever on a run that looked healthy. A
+`-v <path>:<path>` for a host path that does not exist is likewise a
+well-formed command line; Docker answers it by creating a **directory**, so the
+report socket was never a socket and every report degraded to the inbox. The
+rule to carry: for the container layer a green suite is evidence about the
+**hub's own logic** and about nothing else — the argument shape, the order of
+the steps, the refusals. Anything that depends on what a daemon or an image
+makes of that command line has to be run once against a real one, and until it
+has been, the documents say so per harness.
 
 **Why there is a browser suite.** `public/hub.js` was 746 lines with not one
 test, because no browser ran in the suite: everything else stops at the HTML the
@@ -2616,6 +2668,203 @@ with the reason instead of silently not sticking.
 
 Architecture, step registry contract and the integration seams:
 **[server/flows/AGENTS.md](server/flows/AGENTS.md)**.
+
+## The sandbox: a container around the agent, and one rule about who may loosen it
+
+> **The depth is one document: [docs/sandbox.md](docs/sandbox.md)**, and the
+> measurements the whole thing rests on are
+> [SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md) **§11a** (before this machine had
+> a container runtime) and **§11b** (2026-09-05, against a live rootless
+> daemon) — which also say, per claim, whether it was measured, read out of a
+> binary, or not answered at all. What follows is what the rest of the hub must
+> not violate.
+
+A sandboxed run's agent runs inside a container; **tmux stays on the host** and
+the pane's process is the runtime's client, which is why `pipe-pane`,
+`capture-pane`, bracketed paste, `pane-died` with the inner exit status and
+`remain-on-exit` all keep working untouched (measured through a PTY relay,
+tmux 3.4). It is **off by default** (`sandbox_mode`), and an unsandboxed run
+never touches `server/sandbox/` at all — not even an import. That is a property
+of the code, not a promise about it, and it is what "optional" means here.
+
+**The narrowing rule is the whole point.** Four layers contribute to one spec
+document — hub → repo → agent/run — and for a path the hub **locked**, a lower
+layer may only append to a deny-shaped list, remove from an allow-shaped one,
+lower a number, turn `auditOnly` off, or tighten a mode. Anything else is
+**refused**, all-or-nothing per path, with the higher layer's value standing:
+a half-honoured list would be a fourth value that no layer wrote and neither the
+form nor the event could name. The default shape for a locked path with no rule
+of its own is `fixed` — locked means locked — because a new field that silently
+inherited "may be loosened" is how a lock stops meaning anything. A path that is
+**not** locked is simply overwritten; narrowing is enforced only under a lock.
+`spec.mjs` imports nothing of the hub's, is pure, and answers the same on a
+machine that has never heard of Docker.
+
+**A weakening is always a named event, never a setting.**
+`sandbox:bypassed {by, reason}` for every way a run that was going to be
+sandboxed is not — an opt-out at a layer, an unavailable runtime, or the
+operator's "Continue without the sandbox" — and `sandbox:override_refused` for
+every attempt to loosen a locked path. `decideSandbox()` also asks whether the
+opt-out actually took something away: opting out of something that was never
+going to be sandboxed is not a bypass and writes nothing. A quiet weakening is
+the one failure this whole design cannot survive, because every page above it
+still reads as "sandboxed".
+
+**Two seams, and a special case belongs behind them, never in a caller.**
+`agentHome(run)` answers where this run's CLI keeps its state, and `runGit(run,
+args)` answers `git -C <workdir>` — both of them byte for byte today's answer
+for an unsandboxed run. Every place that reads a transcript, a session store or
+a worktree goes through them; four call sites used to hardcode `homedir()` and
+each failed **soft**, which is the expensive direction (no activity became
+`anomaly:no_activity` on a working run, no tokens became a cost of zero, and two
+of the four `resumeId()` fallbacks were silent lies that would have continued
+the wrong conversation). If a harness needs something special, it goes behind
+the seam.
+
+**"The daemon did not answer" is not "there are no containers"** —
+`runtimeVerdict()` is `tmuxVerdict()`'s twin and for the same reason.
+`ok` / `no_daemon` (demonstrably nothing, the empty truth) / `unreachable` (the
+hub learned nothing). Only a positive answer may end a run; `unreachable` means
+do nothing and ask next pass, and three in a row raise the global
+`docker_unreachable` incident. The same instinct is why a launch that failed
+because the runtime *could not be asked* carries `sandboxRetry`: it leaves
+`resume_pending` standing and does **not** count against `RESUME_MAX`, so a
+rootless daemon still coming up after a reboot cannot burn the cap.
+
+**The built-in proxy is ONE engine with TWO placements, and the placement is a
+fact about the daemon rather than a field in a profile.** Measured 2026-09-05
+(§11b.5): under a rootless daemon the run network's gateway does not exist in the
+host's namespace (rootlesskit runs `--detach-netns`), a container cannot reach
+the host on any network (`--disable-host-loopback`), and `host-gateway` resolves
+to a stopped rootful daemon's leftover bridge — three independent reasons a
+listener in the HUB PROCESS cannot serve an allowlist there, which is the posture
+the project recommends and the one three of the four shipped profiles are written
+for. The answer was to move the listener, not to drop the engine
+(§11b.5a): `proxyPlacement(engine, info)` answers `'process'` (the hub, on the
+run network's GATEWAY — never loopback, because loopback inside a container is
+the container) or `'container'` (`fl-proxy-<id>` on the run's own internal
+network, dialled by name). Rootless → container; a forced
+`FREILAUF_SANDBOX_PROXY_PLACEMENT`, or a `FREILAUF_SANDBOX_PROXY_BIND` the
+operator published themselves, outranks it. **The container placement is the
+stronger one**: a proxy on that network needs no host address on it, so the
+network keeps `gateway_mode_ipv4=isolated`; only the in-process placement pays
+the documented cost of a reachable gateway, which is why `denyUpstreamCidrs` is
+not optional there. `engineUsable()` keeps exactly one refusal — a placement
+FORCED to `process` under a rootless daemon — and the launch, Settings → Sandbox
+and the profile editor all ask that one predicate, so an operator cannot be told
+two different things about one profile. `rootless: null` — a daemon that did not
+say — is **not** a refusal; the launch then fails on the bind, which is worse
+than a diagnosis and better than refusing a run over a question nobody answered.
+
+**It is not a second proxy, and nothing may make it one.** `sandbox/proxy-entry.mjs`
+runs the SAME `server/sandbox/proxy.mjs` engine out of three read-only bind
+mounts of the hub's own source (`server/`, `lang/`, `sandbox/`) — one matcher,
+one 403 body, one audit format. Two matchers would be two allowlists that agree
+until the day one of them lets something out. Consequences that are rules:
+**everything `proxy.mjs` needs from the hub is imported lazily**, because that
+module is loaded inside a container where no database and no config exist; the
+**control channel is a policy FILE**, written tmp+rename into a directory the
+proxy holds read-only, under the hub's DATA directory and never the run's (the
+run directory is mounted read-write into the AGENT's container, and a policy the
+agent can rewrite is not a policy); the proxy watches the **directory**, since a
+bind-mounted file keeps pointing at the old inode after a rename; and a document
+that cannot be read leaves the policy in force rather than falling back to an
+empty one, which under `allowlist` would mean "deny everything".
+
+**A denied CONNECT must attach its `error` listener before anything can fail.**
+A socket with no `'error'` listener turns curl's reset of a refused tunnel into
+an uncaught exception — measured: the proxy died one second after its first
+denial. In the in-process placement that is **the hub** dying (scheduler,
+watcher, every SSE client) at the moment an agent first hits its own allowlist.
+The listener goes on the first line of `onConnect`, before the DNS lookup, not
+next to the socket that is created later.
+
+**The built-in proxy dies with the hub where it lives IN the hub, so a restart
+must give it back.** `restoreProxies()` in the watcher pass rebinds an
+in-process listener on the **same port** (from its own `sandbox.json`) with the
+**same resolved allow list**, writing `sandbox:proxy_restarted`; a run whose
+proxy cannot come back gets a `warn` and is never failed, and the walk backs off
+when it restores nothing. A built-in proxy **container** survives the restart and
+is taken back over (`attachProxy`) — the file channel has no per-launch secret to
+lose, so the policy channel and the audit tail can be rebuilt honestly for a
+container this process never started, and the policy is rewritten from the
+RESOLVED allow list rather than the row's raw spec (whose `network.allow` is the
+unexpanded, usually empty, list — re-asserting it would mean "deny everything" on
+a live run). One that is demonstrably gone is started again (that is a run with
+no egress at all); a daemon that will not answer means leave it alone. The revive
+deliberately does **not** take `ensureProxy()`'s fallback to the built-in engine,
+because that fallback remakes the run's network and the agent's container is
+sitting on it. **iron-proxy keeps the old rule**: its management key was minted
+per launch and died with the process, so the hub holds no handle for a surviving
+iron-proxy container and does not fabricate one — a handle that could not reach
+`/v1/reload` would let `changePolicy()` believe it had delivered a policy it did
+not — and a live policy change there answers `proxy_gone`. Anything that later
+gives the hub a real handle to a surviving iron-proxy container has to fix that
+answer in the same edit.
+
+**An `inject` profile fails loudly rather than degrading to `env`.**
+`secrets.mode: 'inject'` promises the container holds a placeholder; falling back
+to environment variables would put the operator's real key inside the very
+container the profile said held nothing — and it would do so to somebody who
+picked the strict profile *in order to be safe*. So the launch fails with a
+readable reason. The question is asked of `engineCapabilities()`, never of an
+engine's name, so a third engine that can inject works without touching that
+file. The one fallback that *is* allowed is a `secrets.mode: 'env'` profile whose
+named engine will not start: nothing was promised there beyond "these hosts and
+no others", the built-in CONNECT proxy keeps that promise, and the fallback is
+still written down as a `warn`. Likewise a `network.methods` list on an engine
+that cannot see a method is **dropped and reported**, never stored and ignored.
+
+**A clone, not a linked worktree, and the reason is two sentences.** A linked
+worktree's `.git` is a pointer into the operator's checkout, so even `git add`
+needs that checkout's `.git` writable — and with it the operator's hooks and
+config, which are *commands the host runs later*, plus the refs
+`pushOperatorBase()` pushes. A private clone with the objects borrowed read-only
+through `objects/info/alternates` costs 16 KB and hands the agent nothing of the
+operator's. Two consequences that are rules, not details: the operator's
+`.git/config` is masked with a **minimal replacement** and never an empty file
+(measured — an emptied config on a sha256 repository makes `git ls-remote`
+answer exit 0 with an all-zero sha, a silent wrong answer), and **host git is
+never run inside an agent-owned clone**: `rev-parse` and `rev-list --count` were
+measured inert and are the only exceptions, everything else runs in the container
+or is refused. A denylist of git config keys is **not** a boundary — measured:
+with `core.hooksPath`, `core.fsmonitor` and `diff.external` all disarmed, a
+`filter.<n>.clean` driver selected by a tracked `.gitattributes` still ran.
+
+**No image may set `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
+`CLAUDE_CONFIG_DIR`, `CURSOR_DATA_DIR` or `HERMES_HOME`** — not in the base, not
+in a harness layer, not in a toolchain image an overlay is built on. Measured
+(§11a.4): **XDG outranks `HOME` for opencode**. An image carrying one sends the
+CLI's state somewhere the hub does not read, and every consequence is silent —
+the seeded credentials are never read, the reporting plugin never loads, and the
+activity measurement looks into an empty directory and concludes the agent is
+idle. `overlay.Dockerfile` fails the build and names the variable, because Docker
+cannot unset an inherited `ENV`.
+
+Three more rules that are easy to undo by accident: the container command line
+has exactly **one author** (`buildRunArgv()`, pure, no daemon asked), which is
+what makes `sandbox/wrap.sh --print` a real dry run on a machine with no Docker;
+an empty limit must produce **no flag at all**, because `--memory 0` is a refusal
+and `--cpus 0` is a container that cannot run; and a sandboxed session's memory
+is asked of the **runtime**, never summed from the pane's process tree, which
+under-reported a workload twentyfold (measured, 10.4 MB for 210.3 MB).
+
+**And three the first real run wrote, each of which had passed every test.**
+*Who a container runs as is one function, never a profile field*
+(`containerIdentity()` in runtime.mjs): the run's `--user` and every `docker
+exec -u` the hub makes come out of it, in **numbers** — the spec's old `user:
+'hub'` was a policy word, it was handed into an exec, and `hub` is an account no
+image has, so every git call inside the box failed and the finish gate looped
+for ever on a run that looked healthy. *A path on the host and a path inside the
+container may not share a field name*: `hubSocketSource` is the socket to mount,
+`HUB_SOCKET_TARGET` is where it appears, and while they were one name holding
+the container path Docker made a **directory** of a mount source that does not
+exist — a channel that exists and carries nothing, which is the failure shape
+this whole file is written against. *One name for the run in the document and in
+its reader*: `runId`/`hubId` on both sides now, and `buildRunArgv()` throws
+rather than emitting `--name fl- --label freilauf.run=`, because a nameless
+container collides with the next one, cannot be stopped by name and is invisible
+to the reaper's label filter.
 
 ## tmux sessions: the machine, not the bookkeeping
 
@@ -3542,6 +3791,37 @@ errors (`post_api_request` only fires after success).
   `-t "=name:"`. And `tmux display -p -t "=name"` returns exit code 0 for a
   **non-existing** session — whoever checks "session gone?" with it checks
   nothing. That is what `tmux has-session` is for.
+
+  **The colon has now cost this project three times, and the third one is the
+  one to remember: a bare `=name` where a PANE is meant does not fail, it
+  SUCCEEDS EMPTY.** Measured on tmux 3.4 against a session with a genuinely dead
+  pane: `display -p -t '=name' '#{pane_dead} …'` exits 0 and expands every field
+  to nothing (four spaces for a five-field format), while `-t '=name:'` answers
+  `1  1788638393 2170172 sleep`. `server/watcher.mjs` had the bare form, its
+  guard read `r.ok && r.stdout.trim()` as "tmux said nothing", `pane_dead` kept
+  its `'?'` default — and so **the watcher had never once reported
+  `_pane_died`, for any run, since the line was written.** With it went
+  everything hanging off that report: the `exit_without_report` assessment, and
+  the whole sandbox recovery ladder (`panePostMortem()` maps a container's exit
+  125 to `'infra'` → `sandbox:client_gone` → `resumeRun()`), which was
+  unreachable from the watcher. Nobody noticed because
+  `watchFollowUps()` twenty lines further down had the colon all along, and
+  because every test of that path called `handleReport()` directly: the consumer
+  was covered and the producer had no test at all. `paneTarget(name)` in
+  sessions.mjs is the one place that writes it now, and a unit test greps
+  `server/` for a bare `=name` pane target. Same family as
+  `--no-optional-locks` after the subcommand making a dirty worktree read clean:
+  the dangerous tmux and git mistakes do not error, they answer emptily, and an
+  empty answer reads as good news.
+
+  Two more faults were sitting on those same three lines, both of them this
+  file's own recurring traps. A pane killed by a **signal** has an empty
+  `#{pane_dead_status}` (it carries `pane_dead_signal` instead), so splitting the
+  format on whitespace shifted every field left and wrote the pane's *death
+  time* into the exit status — `exit_code = 1788639504`. The fields are
+  `'|'`-separated now. And where the status was simply empty, `Number('')` being
+  `0` **and finite** recorded an agent the kernel shot as having exited cleanly.
+  Compare before converting; `exitStatus()` does.
 - **The terminal is fail-closed, twice.** `/term` only enables write access on an
   explicit `?ro=0` (`terminal.mjs`); without the parameter tmux attaches with
   `-r` AND every input is discarded. The client sets `ro=0` from `data-live` in
@@ -3622,6 +3902,29 @@ errors (`post_api_request` only fires after success).
   And because a drag that does nothing is invisible as a fault, hub.js still
   says so once per page when a real drag ends with neither a selection nor a
   copy — which now only happens when the operator has handed the mouse back.
+- **A terminal mode written into xterm FROM THE CLIENT is undone by tmux's next
+  redraw**, and that made a browser test fail about half the time for reasons
+  that looked like a race and were not. The check that asserts "an application
+  that takes the mouse changes nothing" simulated the application by doing
+  `FREILAUF_TERM.write('\x1b[?1003h\x1b[?1006h')` — which sets the mode in the
+  browser's xterm and tells the tmux server nothing. The terminal is attached to
+  a LIVE session, and tmux re-asserts the pane's real mouse state on every
+  redraw: measured with a `CSI ?h/?l` recorder in the page, a fit or resize
+  landing in that window sent `l:1006 l:1000 l:1002 l:1003` ten to twenty-five
+  milliseconds after the write, three times over. tmux was right — nothing in
+  that pane wanted the mouse — so xterm's tracking died, the next drag selected
+  locally and copied, and only the clipboard assertion failed (`copyOut()`
+  clears the selection on success, so the `hasSelection()` check above it still
+  passed and named nothing). Two rules out of it: a mode belongs in the PANE,
+  set where tmux can see it (`tmux send-keys -H`, echoed by the pane's own
+  program) and then asserted from both ends — `#{mouse_any_flag}` is 1 AND the
+  sequence really arrived over the WebSocket — and a test whose premise can
+  quietly give way must assert that premise again AFTER the gesture it is about.
+  Neither of the two obvious explanations was right, incidentally: no OSC 52 was
+  ever involved (`tmux show -g mouse` is off on this machine and the suite's
+  `fl-start` stub does not set it, so tmux never copies and never sends one),
+  and no late copy from an earlier drag existed either — both were refuted by
+  recording what actually landed in the clipboard and where it came from.
 - **xterm stops propagation on its own element, so a listener that is not in
   the CAPTURE phase never sees a real drag.** The copy-on-release above hung on
   a `mouseup` listener on `document` and worked in the browser suite for weeks
@@ -3948,3 +4251,35 @@ errors (`post_api_request` only fires after success).
   `~/.local/share/freilauf/harness-tags` the first time it launches one. These
   scripts read tmux, not the hub's database; that file is the only place on the
   machine that knows `fl-fa-` means `fakeagent`.
+- **Docker's `--tmpfs` options are ADDED to its defaults, not substituted for
+  them.** The default is `noexec,nodev`, so `--tmpfs /tmp:rw,size=2g` still
+  produces a `noexec` `/tmp` — and a binary run out of it fails with
+  *"Permission denied"* and exit **126**, which reads as a file mode rather than
+  as a mount option. `exec` has to be written out. Measured 2026-09-05, after a
+  comment in `tmpfsArgs()` had described the intention for weeks while the
+  command line carried the opposite; the run container is `rw,exec,nosuid` now.
+  **`mergeCheckArgv()` in `integrate.mjs` still emits `/tmp:rw,nosuid`**, so a
+  sandboxed merge check that execs out of `/tmp` fails where the run would not.
+- **`docker network inspect --format '{{.Gateway}}'` prints the literal string
+  `invalid IP` for an isolated network**, not an empty value: with
+  `gateway_mode_ipv4=isolated` Docker omits the `Gateway` key from the IPAM
+  config entirely, and a Go template over a missing key renders that. Anything
+  comparing against `''` reads a correctly isolated network as a misconfigured
+  one. Read the JSON, not a template. (The option itself exists on 29.8.0 and is
+  `--internal`-only — asking for it on an ordinary network is refused.)
+- **`aa-status --enabled` exits 0 as an ordinary user, with no output.** Which
+  means "the AppArmor module is loaded" and says **nothing** about whether
+  anything is confined — under a rootless daemon containers are unconfined and
+  `--security-opt apparmor=…` is accepted silently and does nothing. (`aa-status`
+  without the flag prints "You do not have enough privilege…" and exits 4, so
+  the cheap form is also the misleading one.) The hub therefore reads the
+  daemon's own `SecurityOptions`, and never `aa-status` — same family as
+  `--no-optional-locks` making an empty `git status` read as a clean worktree.
+- **Docker 29 no longer says `Cannot connect to the Docker daemon`.** It says
+  *"failed to connect to the docker API at …; check if the path is correct and
+  if the daemon is running"*, or, for a socket it may not open, *"permission
+  denied while trying to connect to the docker API at …"* — no substring of the
+  old pattern survives in either. A classifier keyed on a vendor's wording was
+  stale on the very first machine that had a daemon to test it against, which is
+  why `runtimeVerdict()` decides on the exit status and on whether the socket
+  exists and answers, and treats the message as something to print.

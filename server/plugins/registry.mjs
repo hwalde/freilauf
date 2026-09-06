@@ -174,6 +174,32 @@ export function harnessesWithGoal() { return harnessIds().filter(id => HARNESS_P
  */
 export function skillSpec(id) { return HARNESS_PLUGINS[id]?.skills ?? null }
 
+/**
+ * The sandbox declaration of a coding agent or a model provider, or null.
+ * `{ supported, image, domains, env, credentials, seedHome, stateDirs,
+ *    launchOverrides, innerSandbox }` — see docs/plugins.md, "The sandbox
+ * declaration", and SANDBOX_RESEARCH.md §7.9.
+ */
+export function sandboxDecl(id) { return getPlugin(id)?.sandbox ?? null }
+
+/**
+ * May a run on this coding agent be put in a sandbox?
+ *
+ * The sibling of `launchable()` in runner.mjs and the same kind of answer: a
+ * plugin that declares nothing cannot do the thing, and the FORM asks before a
+ * run exists — so a repo whose default is "sandbox on" meeting an agent whose
+ * plugin cannot be sandboxed ends in a readable problem rather than in a run
+ * that dies at launch. `supported` must be an explicit `true`: an external
+ * package that carries half a declaration is not offered the boundary on the
+ * strength of the half.
+ */
+export function sandboxable(harness) {
+  return HARNESS_PLUGINS[harness]?.sandbox?.supported === true
+}
+
+/** The coding agents that can be sandboxed — what the form offers the option for. */
+export function harnessesWithSandbox() { return harnessIds().filter(sandboxable) }
+
 /** The coding agents the hub can install its own skills for. */
 export function harnessesWithSkills() {
   return harnessIds().filter(id => (HARNESS_PLUGINS[id].skills?.user ?? []).length)

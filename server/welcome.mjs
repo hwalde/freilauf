@@ -130,6 +130,9 @@ import {
   pluginConfig, isPluginEnabled, pluginHasCredential, credentialSpec,
 } from './plugins/store.mjs'
 import { scanSystem, openDiscoveries, answerDiscovery, lastScanAt } from './plugins/discovery.mjs'
+// The one renderer of "Sandbox: available / not available", shared with the
+// Plugins page — two copies of that sentence is how the two eventually differ.
+import { sandboxRuntimeLine } from './plugins/web.mjs'
 import { llmSources, defaultSource } from './llm/sources.mjs'
 import { availableSkills, skillTargets, syncSkills, installedOverview } from './skills.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
@@ -544,6 +547,11 @@ async function step2(ctx) {
         <form method="post" action="/welcome/scan" class="inline"><button class="ghost">${e(t('welcome.s2_scan'))}</button></form>
         <span class="dim">${e(scanned ? t('welcome.s2_last_scan', { at: fmtDateTime(Date.parse(scanned)) }) : t('welcome.s2_never_scanned'))}</span>
       </div>
+      ${
+        // What the same scan found about a container runtime. A line and never
+        // a step of its own: the sandbox is optional, and a wizard that asked
+        // about it would read as a requirement.
+        sandboxRuntimeLine()}
       ${already ? `${already}<p class="dim">${e(t('welcome.s2_on_hint'))}</p>` : ''}
       <form method="post" action="/welcome/agents" class="form-grid">
         ${boxes || `<p class="dim">${e(t(already ? 'welcome.s2_all_on' : 'welcome.s2_none'))}</p>`}

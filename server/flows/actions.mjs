@@ -342,6 +342,15 @@ export const actions = {
    * open — otherwise execFile would sit and wait for it after all, whatever the
    * command looks like.
    */
+  /*
+   * And what this function must never be handed: a command line an AGENT wrote.
+   * `bash -lc` here is the host, as the operator, outside every sandbox — so a
+   * template that interpolates a run's report, help text, branch, PR or merged
+   * file names is agent-authored host code. The refusal lives in the STEP
+   * (`agentWrittenVars()` in steps.mjs, an opt-in per step), not here, because
+   * this function also serves callers with no template at all; what belongs
+   * here is the reason it is refused up there.
+   */
   async shell({ command, cwd, timeoutMs, detach }) {
     const dir = String(cwd ?? '').trim() || homedir()
     if (!existsSync(dir)) throw new Error(`working directory does not exist: ${dir}`)

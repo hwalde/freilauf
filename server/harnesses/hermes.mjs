@@ -8,6 +8,9 @@ import { HTTP_5XX } from './patterns.mjs'
 import { runCli, cliFailure } from './cli-llm.mjs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 // A model provider's descriptor — never through a static import.
 // `../providers/index.mjs` re-exports the plugin registry, and the registry's
@@ -32,10 +35,114 @@ async function providerLate(ctx, id) {
 
 const execFileAsync = promisify(execFile)
 
-/** hermes' own session store; `FREILAUF_HERMES_STATE_DB` is the test fence. */
-function hermesStateDb() {
-  return process.env.FREILAUF_HERMES_STATE_DB || `${process.env.HOME}/.hermes/state.db`
+// The sandbox facade's one answer this plugin needs: WHICH home the agent had.
+// Imported dynamically rather than statically, because a plugin file must not
+// put a static edge into the hub's module graph (docs/plugins.md, and the
+// registry cycle AGENTS.md names it for) — but started at load and remembered,
+// because `resumeCommand()` is SYNCHRONOUS: it is rendered into the run's detail
+// page and into every escalation message, and it cannot await anything. The
+// module itself costs nothing extra — `watcher.mjs` imports it statically, so
+// every running hub has it long before a report is processed.
+let execMod = null
+const execModReady = import('../sandbox/exec.mjs').then(m => (execMod = m)).catch(() => null)
+
+/**
+ * The home the AGENT worked in. For every ordinary run that is the host home,
+ * byte for byte as before; for a sandboxed run it is the per-run home (§7.7),
+ * and reading the host's instead was the whole defect: the watcher took its
+ * tokens and `resumeId()` took its session id out of the OPERATOR's own hermes
+ * store. The rule lives in `agentHome()` and is never restated here.
+ */
+async function runHome(run) {
+  const m = execMod ?? await execModReady
+  return m ? m.agentHome(run) : (process.env.HOME || homedir())
 }
+function runHomeSync(run) {
+  return execMod ? execMod.agentHome(run) : (process.env.HOME || homedir())
+}
+
+/** hermes' own session store under a given home; `FREILAUF_HERMES_STATE_DB` is the test fence. */
+function hermesStateDb(home) {
+  return process.env.FREILAUF_HERMES_STATE_DB || join(home || process.env.HOME || homedir(), '.hermes', 'state.db')
+}
+/**
+ * The OPERATOR's hermes home, the way `setup/02-install-scripts.sh` resolves it
+ * — deliberately the host's and not `agentHome()`'s: this is only ever read by
+ * `seedHome()` below, whose whole job is to copy the operator's config and
+ * `.env` INTO the per-run home. A sandboxed run's own home is empty at that
+ * moment, so asking it would seed nothing.
+ */
+function hermesHome() {
+  return process.env.HERMES_HOME || join(homedir(), '.hermes')
+}
+
+/**
+ * The run's own hermes session out of a store, or null. Pure apart from the
+ * read, so both `resumeId()` (which resolves the home properly) and the
+ * synchronous `resumeCommand()` ask exactly one question in exactly one place.
+ *
+ * `run.workdir_effective` is the HOST path of the worktree, and inside a
+ * container hermes writes its own `cwd` — the path the worktree is MOUNTED at.
+ * So for a sandboxed run this lookup finds nothing and the caller falls back to
+ * `'latest'`, which hermes scopes to the workspace `--in` names and therefore
+ * resolves correctly from inside the box. Deliberately not "fixed" by guessing
+ * the container path here: no hermes CLI has ever been started in a container
+ * on this machine (SANDBOX_RESEARCH.md §11b.8), and a lookup written against an
+ * unmeasured path would be a confident wrong answer where `'latest'` is a
+ * correct one.
+ */
+function sessionInStore(run, dbPath) {
+  try {
+    const { DatabaseSync } = process.getBuiltinModule('node:sqlite')
+    const d = new DatabaseSync(dbPath, { readOnly: true })
+    try {
+      const since = run.started_at ? Date.parse(String(run.started_at).replace(' ', 'T') + 'Z') / 1000 - 5 : 0
+      const row = d.prepare(`SELECT id FROM sessions WHERE cwd = ? AND started_at >= ? AND parent_session_id IS NULL
+                             ORDER BY started_at DESC LIMIT 1`).get(run.workdir_effective, Number.isFinite(since) ? since : 0)
+      if (row?.id) return String(row.id)
+    } finally { d.close() }
+  } catch { /* no store, no answer — 'latest' is still right */ }
+  return null
+}
+
+/**
+ * Force `terminal.backend: local` in a COPY of the operator's hermes config
+ * (SANDBOX_RESEARCH.md §3.3): inside the Freilauf sandbox the container IS the
+ * boundary, and hermes' own docker backend would put a second container around
+ * every terminal tool call — a nested runtime the agent must not be able to
+ * reach in the first place.
+ *
+ * Line-based on purpose, exactly as `setup/02-install-scripts.sh` appends the
+ * hooks block: `config.yaml` is the operator's file, full of comments, and a
+ * YAML round-trip would flatten them. Any existing top-level `terminal:` key is
+ * dropped and ours appended — this is a copy in the per-run home, so the
+ * operator's own file is never touched and the worst case is a lost comment in
+ * a file nobody reads.
+ */
+function forceLocalTerminal(yaml) {
+  const kept = []
+  let inTerminalBlock = false
+  for (const line of String(yaml ?? '').split('\n')) {
+    if (inTerminalBlock) {
+      // A line starting at column 0 ends the block; an indented one is part of it.
+      if (/^\S/.test(line)) inTerminalBlock = false
+      else continue
+    }
+    const m = /^terminal\s*:(.*)$/.exec(line)
+    if (m) {
+      // `terminal:` with nothing but a comment after it opens a block.
+      inTerminalBlock = /^\s*(#.*)?$/.test(m[1])
+      continue
+    }
+    kept.push(line)
+  }
+  const body = kept.join('\n').replace(/\n*$/, '\n')
+  return body
+    + '\n# Freilauf sandbox: the container is the security boundary, so hermes runs its\n'
+    + '# terminal tool calls in it rather than opening one of its own.\n'
+    + 'terminal:\n  backend: local\n'
+}
+
 const flat = (t) => String(t ?? '').replace(/\s+/g, ' ')
 const levelsFrom = (t) => t.split(/,|\bor\b/).map(x => x.trim().toLowerCase())
   .filter(x => /^[a-z]+$/.test(x))
@@ -126,6 +233,93 @@ const plugin = {
   skills: {
     user: ['~/.hermes/skills'],
     project: ['.hermes/skills', '.agents/skills'],
+  },
+
+  /**
+   * Running hermes inside the Freilauf sandbox (docs/plugins.md, "The sandbox
+   * declaration"; SANDBOX_RESEARCH.md §3.3 and §7.9).
+   *
+   * hermes brings the most prior art of the four — a docker backend with a
+   * measured hardening flag set and an iron-proxy egress firewall — but all of
+   * it is for its TOOL CALLS, not for itself: the hermes process stays on the
+   * host and holds the credentials. So for the generic layer hermes is a
+   * process like any other, and the one thing that has to change is that it
+   * stops opening containers of its own (see `seedHome` below).
+   */
+  sandbox: {
+    supported: true,
+
+    // Version pin: measured on this machine (AGENTS.md, hermes 0.21.0).
+    image: { dockerfile: 'sandbox/images/hermes.Dockerfile', args: { HERMES_VERSION: '0.21.0' } },
+
+    // hermes has no API of its own the way claude and cursor do — its model
+    // traffic goes to whichever provider the run picked, which is the
+    // `provider` preset's job. What is left is what the CLI reaches for on its
+    // OWN account, and that list was measured rather than reasoned about
+    // (2026-09-05, a sandboxed hermes run with `harness` + `provider`): before
+    // it had done any work at all it was turned away from five hosts, opening a
+    // yellow `sandbox_blocked` incident on every single hermes run. The run
+    // still succeeded, so this is noise — and noise on every run is how a
+    // signal stops being read, which is the lesson the blocked-hosts escalation
+    // already carries.
+    //
+    // Written for the matcher that judges them: a bare domain deliberately does
+    // not imply its subdomains, so a host that has any is declared with its dot.
+    domains: [
+      'inference.nousresearch.com',
+      // Its own agent endpoint — the one the CLI itself talks to.
+      'hermes-agent.nousresearch.com',
+      // The model catalogs it reads at startup to know what it may offer.
+      'models.dev', 'opencode.ai', '.opencode.ai',
+    ],
+    // Two more were measured in that same startup burst and are deliberately
+    // NOT here: `github.com` and `raw.githubusercontent.com`. A harness
+    // declaration is added to the allowlist of every run of that harness, and
+    // putting GitHub in one would quietly hand all of GitHub to every hermes
+    // run — for a fetch the CLI does not need (the run worked without it). Where
+    // a run's repository really lives on GitHub the `git-host` preset says so,
+    // derived from that repo's own origin, which is the narrow way to the same
+    // place. If you find hermes genuinely broken without them, widen the RUN or
+    // the repo, not this list.
+
+    env: { DO_NOT_TRACK: '1' },
+
+    // What the hub reads back: `state.db` is where the watcher reads this run's
+    // tokens and where `resumeId()` finds the session `--resume` continues.
+    stateDirs: ['.hermes'],
+
+    /**
+     * The per-run home: hermes' config and its `.env`, both copied from the
+     * operator's `~/.hermes`.
+     *
+     * The config is copied rather than written, because it is what carries the
+     * `hooks:` block `setup/02-install-scripts.sh` appended — without it a
+     * sandboxed hermes run never says whether it is working or waiting for a
+     * human. `terminal.backend` is the one statement in it the sandbox
+     * overrules.
+     *
+     * `SOUL.md` / `AGENTS.md` are named in §7.7 as things an operator may want
+     * along; there is no setting that says so today, and copying a personality
+     * file into every run because it happens to lie in the home is exactly the
+     * opt-in the `~/agents/zusaetze/` idea exists to avoid.
+     */
+    seedHome({ spec = {} } = {}) {
+      const files = []
+      const home = hermesHome()
+      try {
+        files.push({ path: '.hermes/config.yaml', content: forceLocalTerminal(readFileSync(join(home, 'config.yaml'), 'utf8')) })
+      } catch {
+        // No config on the host: still say which backend this run uses, because
+        // that is a statement about the sandbox and not about the operator.
+        files.push({ path: '.hermes/config.yaml', content: forceLocalTerminal('') })
+      }
+      if (spec.secrets?.mode !== 'inject') {
+        try {
+          files.push({ path: '.hermes/.env', content: readFileSync(join(home, '.env'), 'utf8'), mode: 0o600 })
+        } catch { /* no .env — the provider key reaches the run as a variable */ }
+      }
+      return files
+    },
   },
 
   pulseId: (run) => run.provider ?? null,
@@ -234,26 +428,26 @@ const plugin = {
    * code word from the first turn. Without a row: `'latest'`, which hermes
    * scopes to the workspace `--in` names — the same answer, looked up by
    * hermes instead of by us. `null` never: hermes always has a workspace.
+   *
+   * And the store it is looked up in is the one the AGENT wrote: `agentHome(run)`
+   * (§7.7), never the host `$HOME`. `runner.mjs` awaits this method, which is
+   * what lets it resolve the home the same way every other activity source does.
    */
-  resumeId(run) {
+  async resumeId(run) {
     if (!run?.workdir_effective) return null
-    try {
-      const { DatabaseSync } = process.getBuiltinModule('node:sqlite')
-      const d = new DatabaseSync(hermesStateDb(), { readOnly: true })
-      try {
-        const since = run.started_at ? Date.parse(String(run.started_at).replace(' ', 'T') + 'Z') / 1000 - 5 : 0
-        const row = d.prepare(`SELECT id FROM sessions WHERE cwd = ? AND started_at >= ? AND parent_session_id IS NULL
-                               ORDER BY started_at DESC LIMIT 1`).get(run.workdir_effective, Number.isFinite(since) ? since : 0)
-        if (row?.id) return String(row.id)
-      } finally { d.close() }
-    } catch { /* no store, no answer — 'latest' is still right */ }
-    return 'latest'
+    return sessionInStore(run, hermesStateDb(await runHome(run))) ?? 'latest'
   },
 
-  /** What a human types to continue this run's session — the same lookup, as a command. */
+  /**
+   * What a human types to continue this run's session — the same lookup, as a
+   * command. Synchronous by contract (it is rendered into a page and into every
+   * escalation message), so it asks the home through `runHomeSync()`; where the
+   * facade has not been loaded at all the answer degrades to `latest`, which
+   * hermes resolves itself against the workspace `--in` names.
+   */
   resumeCommand(run) {
     if (!run?.workdir_effective) return null
-    const id = this.resumeId(run) ?? 'latest'
+    const id = sessionInStore(run, hermesStateDb(runHomeSync(run))) ?? 'latest'
     return `cd ${run.workdir_effective} && hermes chat --in ${run.workdir_effective} --resume ${id}`
   },
 

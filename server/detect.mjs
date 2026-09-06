@@ -16,14 +16,22 @@
 //               per-harness patterns (defined in the harness plugins) and an
 //               assessment whether the hit is really a problem.
 import { HARNESS_PLUGINS } from './harnesses/index.mjs'
-import { HTTP_5XX } from './harnesses/patterns.mjs'
+import { HTTP_5XX, SANDBOX_PATTERNS } from './harnesses/patterns.mjs'
 
 /** Incident types. Anything else would be guesswork — better 'unbekannt' than wrong. */
 export const INCIDENT_TYPES = ['rate_limit', 'provider_error', 'auth_error', 'billing_error', 'model_error',
   // Not a provider problem at all: the hub could not get a finished run's work
   // onto the base branch (server/integrate.mjs). It sits in the same table
   // because it answers the same question — is anything waiting for me?
-  'merge_blocked', 'unbekannt']
+  'merge_blocked',
+  // The sandbox (SANDBOX_RESEARCH.md §7.12). Two of them, and they are two
+  // because they ask two different things of the reader: the proxy turned a
+  // host away (maybe exactly as the policy intended — `sandbox_blocked`), and
+  // the AGENT said it needs something it cannot reach (`sandbox_access`, which
+  // nobody but a human can answer). The container runtime going silent is the
+  // `tmux_unreachable` twin and belongs in the same table for the same reason.
+  'sandbox_blocked', 'sandbox_access', 'docker_unreachable',
+  'unbekannt']
 
 /**
  * Claude's StopFailure enum (as of 2.1.241, read from the binary) → our
@@ -132,6 +140,18 @@ const MUSTER = Object.fromEntries(
  * Lines that contain hits but are NOT errors. This collects what has already
  * misfired in practice — plus the obvious relatives.
  */
+
+/**
+ * "This line is about the hub's own code, not about the hub's own trouble."
+ *
+ * Pulled out under its own name because the SANDBOX family below cannot use it
+ * as it stands: the built-in proxy's 403 body begins with the word Freilauf, so
+ * an exception matching that word would silently swallow the one message the
+ * whole escalation path hangs on. The sandbox variant therefore names files and
+ * documents instead of the product.
+ */
+const OUR_OWN_CODE = /freilauf|cc-hub|detect\.mjs|incidents?\b|test\/(unit|e2e)/i
+
 const EXCEPTIONS = [
   /upgrade to max/i,                       // Claude command menu: "/upgrade … higher rate limits"
   /\/(upgrade|usage|usage-credits|status|help)\b/,  // menu lines with slash command
@@ -140,7 +160,7 @@ const EXCEPTIONS = [
   // Work on exactly this code. Case-insensitive since a capital "Incidents:"
   // (the hub's own section heading, scrolling through the agent's terminal)
   // slipped past the lowercase version and landed in the DB as a rate limit.
-  /freilauf|cc-hub|detect\.mjs|incidents?\b|test\/(unit|e2e)/i,
+  OUR_OWN_CODE,
   /\b(describe|it|test|expect)\(/,          // test code
   /retry_after|retryAfter|rateLimit[A-Z]|rate_limit_hits|RATE_LIMIT/, // identifiers in source
   // A call with a quoted/bracketed argument list is source code, not output —
@@ -161,16 +181,43 @@ const EXCEPTIONS = [
 ]
 
 /**
- * Scans cleaned lines with the patterns of one harness.
- * Returns [{ typ, zeile, index }] — each line at most once (first pattern wins).
+ * The exception list for the SANDBOX family (§7.12.1). Everything the ordinary
+ * one carries except the product name — see OUR_OWN_CODE — plus the three
+ * shapes in which this repository writes its own errno vocabulary down. All
+ * three were adversarial cases before they were exceptions:
+ *
+ *   `EROFS` in backticks   SANDBOX_RESEARCH.md §7.12.1 lists the whole family in
+ *                          one prose line, and AGENTS.md quotes it again.
+ *   a JSON key line        lang/*.json carries `sandbox.proxy.denied`, which IS
+ *                          the 403 body — an agent editing the translations
+ *                          prints the very sentence the pattern hunts for.
+ *   `re: /…/` and `\bX\b`  patterns.mjs and this file, read out loud by an agent
+ *                          working on exactly this feature.
  */
-export function scanLines(harness, zeilen) {
-  const muster = MUSTER[harness] ?? []
+const SANDBOX_EXCEPTIONS = [
+  ...EXCEPTIONS.filter(a => a !== OUR_OWN_CODE),
+  /cc-hub|detect\.mjs|patterns\.mjs|watcher\.mjs|SANDBOX_RESEARCH|AGENTS\.md|lang\/\w+\.json|test\/(unit|e2e)/i,
+  // The vocabulary quoted as code — documentation, a changelog entry, a comment.
+  /`[^`\n]{0,80}(EACCES|EROFS|ENOSPC|ENETUNREACH|read-only file system|no space left on device|could not resolve host|cannot connect to the docker daemon|fl-report access)[^`\n]{0,80}`/i,
+  // A JSON object member: `"key": "value"` — a translation file, a fixture.
+  /^"[\w.$-]+"\s*:\s*["[{]/,
+  // A regular expression written down, in any of the shapes this repo uses.
+  /\bre:\s*\/|\/\^|\\b[A-Z]{4,}\\b|\[\^\\n\]/,
+  // A call whose LATER argument is the quoted error text — `helper(id, 'EROFS…')`.
+  // The shared list only knows `helper('EROFS…')`, and this suite's own
+  // `logAnhaengen(id, 'Error: ENOSPC…')` walked straight through it.
+  /\w+\([^\n)]{0,160},\s*['"`]/,
+  // An escaped newline inside a string literal: no terminal ever prints one.
+  /\\n['"`]/,
+]
+
+/** Shared body of the two scanners — one loop, two pattern sets, two exception lists. */
+function scanLinesWith(muster, ausnahmen, zeilen) {
   const treffer = []
   zeilen.forEach((roh, index) => {
     const zeile = roh.trim()
     if (!zeile || zeile.length > 2000) return
-    if (EXCEPTIONS.some(a => a.test(zeile))) return
+    if (ausnahmen.some(a => a.test(zeile))) return
     for (const m of muster) {
       if (m.re.test(zeile)) { treffer.push({ typ: m.typ, zeile: zeile.slice(0, 300), index }); break }
     }
@@ -179,21 +226,45 @@ export function scanLines(harness, zeilen) {
 }
 
 /**
+ * Scans cleaned lines with the patterns of one harness.
+ * Returns [{ typ, zeile, index }] — each line at most once (first pattern wins).
+ */
+export function scanLines(harness, zeilen) {
+  return scanLinesWith(MUSTER[harness] ?? [], EXCEPTIONS, zeilen)
+}
+
+/**
+ * The same, with the sandbox family — the wall an agent runs into, in its own
+ * words (§7.12.1). Harness-independent on purpose: a read-only mount answers
+ * every CLI the same way. The caller applies it only to a SANDBOXED run.
+ */
+export function scanSandboxLines(zeilen) {
+  return scanLinesWith(SANDBOX_PATTERNS, SANDBOX_EXCEPTIONS, zeilen)
+}
+
+/**
  * Scan new bytes of a log. 'text' is the chunk starting at the old offset.
  * The last, possibly incomplete line is NOT evaluated and also not "consumed":
  * the new offset points at its start, so it arrives complete on the next pass.
  * Otherwise a line break in the middle of a word would tear the hit apart.
  */
-export function scanNewBytes(harness, text, oldOffset) {
+export function scanNewBytes(harness, text, oldOffset, { sandbox = false } = {}) {
   const sauber = terminalText(text)
   const letzterUmbruch = sauber.lastIndexOf('\n')
-  if (letzterUmbruch < 0) return { treffer: [], neuerOffset: oldOffset }
+  if (letzterUmbruch < 0) return { treffer: [], sandboxTreffer: [], neuerOffset: oldOffset }
   const komplett = sauber.slice(0, letzterUmbruch)
   // The offset counts RAW bytes; the cleanup changes lengths. So the remainder
   // is computed from the raw length of the incomplete trailing line.
   const rohRest = Buffer.byteLength(text.slice(text.lastIndexOf('\n') + 1), 'utf8')
   const neuerOffset = oldOffset + Buffer.byteLength(text, 'utf8') - rohRest
-  return { treffer: scanLines(harness, komplett.split('\n')), neuerOffset }
+  const zeilen = komplett.split('\n')
+  // One cleaning, one offset, two questions: the log is read once and the
+  // sandbox family only asked where there is a sandbox to be blocked by.
+  return {
+    treffer: scanLines(harness, zeilen),
+    sandboxTreffer: sandbox ? scanSandboxLines(zeilen) : [],
+    neuerOffset,
+  }
 }
 
 /**
@@ -248,10 +319,93 @@ export function transcriptErrors(jsonlText) {
  */
 export function rateLogHit({ anzahl, firstSeenMs, lastSeenMs, lastActivityMs, jetztMs,
   fensterMs = 10 * 60_000, stilleMs = 5 * 60_000, schwelle = 2 }) {
-  if (lastActivityMs != null && lastActivityMs > lastSeenMs) return 'gelb'
+  if (agentCopedAfter(lastActivityMs, lastSeenMs)) return 'gelb'
   if (anzahl >= schwelle && (lastSeenMs - firstSeenMs) <= fensterMs) return 'rot'
   if (lastActivityMs != null && (jetztMs - lastSeenMs) >= stilleMs) return 'rot'
   return 'gelb'
+}
+
+/**
+ * THE veto, on its own: did the agent demonstrably keep working after the thing
+ * we are about to alarm about?
+ *
+ * It stood as the first line of rateLogHit() and is a named function now
+ * because a second caller arrived — the sandbox's proxy denials (§7.12.1 asks
+ * for "the rateLogHit() veto" by name). A second COPY of it is the one
+ * thing that must not happen: this rule is what keeps an agent that merely read
+ * an error message off its own screen from turning its run red, and two copies
+ * is two chances for one of them to be forgotten.
+ *
+ * `null` is UNKNOWN, never "silent": measureActivity() has no source for hermes,
+ * and Number(null) being 0 and finite is the trap this repo has an entry for.
+ */
+export function agentCopedAfter(lastActivityMs, seitMs) {
+  return lastActivityMs != null && Number.isFinite(Number(lastActivityMs))
+    && Number(lastActivityMs) > Number(seitMs)
+}
+
+/**
+ * The proxy's denials, collapsed the way the incident module throttles: ONE
+ * denial per host per window (§7.12.1, ten minutes). An `npm install` behind a
+ * wall produces a hundred 403s about one host, and a hundred occurrences would
+ * say "this run is very blocked" where the truth is "one registry is missing".
+ *
+ * Pure. `denials` is [{ host, atMs }] in any order; the answer carries the
+ * DISTINCT hosts (which is what the escalation counts), the collapsed number of
+ * occurrences and the timeline.
+ */
+export function sandboxDenialSummary(denials, { fensterMs = 10 * 60_000 } = {}) {
+  const proHost = new Map()
+  for (const d of denials ?? []) {
+    const host = String(d?.host ?? '').trim()
+    const at = Number(d?.atMs)
+    if (!host || !Number.isFinite(at)) continue
+    if (!proHost.has(host)) proHost.set(host, [])
+    proHost.get(host).push(at)
+  }
+  let count = 0
+  let erstMs = Infinity
+  let zuletztMs = -Infinity
+  for (const stamps of proHost.values()) {
+    stamps.sort((a, b) => a - b)
+    let letzteGezaehlt = -Infinity
+    for (const at of stamps) {
+      if (at - letzteGezaehlt >= fensterMs) { count += 1; letzteGezaehlt = at }
+      if (at < erstMs) erstMs = at
+      if (at > zuletztMs) zuletztMs = at
+    }
+  }
+  return {
+    hosts: [...proHost.keys()],
+    count,
+    erstMs: Number.isFinite(erstMs) ? erstMs : null,
+    zuletztMs: Number.isFinite(zuletztMs) ? zuletztMs : null,
+  }
+}
+
+/**
+ * Yellow or red for a `sandbox_blocked` incident (§7.12.1).
+ *
+ * Yellow to begin with, because a single denial may be exactly what the policy
+ * intended — that is the whole reason the sandbox exists. Red when the wall is
+ * demonstrably in the agent's way: several DISTINCT hosts turned away (one
+ * missing entry is a policy that is nearly right; two is a policy written for a
+ * different job), or silence since the denial.
+ *
+ * And before either of those, the veto: work after the denial says the agent
+ * coped, and then neither repetition nor silence may promote it. That is
+ * rateLogHit()'s own judgment, so this is rateLogHit() with the
+ * distinct host count in place of the occurrence count — a wrapper and not a
+ * copy, so the veto can never drift between the two callers.
+ */
+export function sandboxBlockedSeverity(summary, { lastActivityMs = null, jetztMs = Date.now(),
+  hostSchwelle = 2, fensterMs = 10 * 60_000, stilleMs = 5 * 60_000 } = {}) {
+  if (!summary || !summary.hosts?.length || summary.zuletztMs == null) return 'gelb'
+  return rateLogHit({
+    anzahl: summary.hosts.length,
+    firstSeenMs: summary.erstMs, lastSeenMs: summary.zuletztMs,
+    lastActivityMs, jetztMs, fensterMs, stilleMs, schwelle: hostSchwelle,
+  })
 }
 
 /**
@@ -298,8 +452,20 @@ export function incidentGoneReason({ typ, schwere, runStatus, lastActivityMs, la
   // tmux_gone/tmux_unreachable say something about the MACHINE, not about this
   // run: tmux answering again does not undo the sessions that died, and the
   // watcher closes the transient one itself the moment it gets an answer.
+  // docker_unreachable is the same kind of statement about the MACHINE, and the
+  // watcher owns its recovery: dockerAnswered() closes it the moment the daemon
+  // replies. Time must not, or the incident would clear itself while every
+  // sandboxed run on the box is still standing behind a runtime that is gone.
   if (typ === 'merge_blocked' || typ === 'tmux_gone' || typ === 'tmux_unreachable'
+      || typ === 'docker_unreachable'
       || String(typ).startsWith('provider_down:')) return null
+  // The agent ASKED for something (§7.12.1). It was told to continue with what
+  // it can do meanwhile, so it goes on working — and under the ordinary rule
+  // that very evidence ("the agent kept working after it") would close the
+  // request ten minutes later, with nobody having decided anything. A question
+  // to a human is answered by a decision, like merge_blocked; the one thing
+  // that makes it moot is the run coming through anyway.
+  if (typ === 'sandbox_access') return runStatus === 'done' ? 'run finished successfully' : null
   const zuletzt = Number(lastSeenMs)
   // Number(null) is 0 AND finite — the trap this repo has been bitten by before.
   // null means "no activity source", never "activity at the epoch".
@@ -339,5 +505,8 @@ export const TYPE_TEXT = {
   merge_blocked: 'Not merged',
   tmux_gone: 'All tmux sessions gone',
   tmux_unreachable: 'tmux not answering',
+  sandbox_blocked: 'Sandbox turned a host away',
+  sandbox_access: 'Agent needs access',
+  docker_unreachable: 'Container runtime not answering',
   unbekannt: 'API error',
 }

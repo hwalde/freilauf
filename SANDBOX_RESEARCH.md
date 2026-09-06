@@ -13,6 +13,15 @@
 > session, a `sandbox.resume` flag, the human `resumeCommand()` as if it were
 > executable — it now refers to those; the sandbox adds nothing to how a run comes
 > back, only what has to be standing around it when it does (§7.11, §7.12.4).
+>
+> **The status line is the state this was WRITTEN in, and it is no longer the
+> state of the hub.** The design is built and shipped — the operator-facing
+> reference is [docs/sandbox.md](docs/sandbox.md) — and on 2026-09-05 a real
+> coding agent (opencode) did a whole run inside a container and had its work
+> merged (§11b.8). This document stays a design study on purpose: where the
+> implementation departed from it, the departure is written into the section it
+> belongs to, with what was measured, rather than the section being rewritten as
+> if it had always said so.
 
 ## 0. The short version
 
@@ -244,19 +253,27 @@ in `run-edit.mjs` decides what a status allows to be edited. The repo form is
 `integrationFromForm()` as the block a sandbox section would sit next to. §7.13 lists
 the columns.
 
-### 2.4 What this machine has [measured, 2026-09-02]
+### 2.4 What this machine has [measured 2026-09-02, corrected 2026-09-05]
+
+The rows below were first written on 2026-09-02 and re-measured on 2026-09-05
+(§11a.6, §11b.1); where the two dates disagree the second one is in the table and
+the first is named next to it, because a stale inventory is the one document that
+makes a design argue against a machine that no longer exists.
 
 | Thing | State | Why it matters |
 |---|---|---|
-| Docker / Podman | **not installed** | the feature must be discoverable and absent-safe; the e2e suite needs a shim |
+| Docker | **rootless Docker 29.8.0**, socket `unix:///run/user/<uid>/docker.sock`, user unit active; the rootful `docker.service` is stopped and disabled and the `docker` group is empty (on 2026-09-02: nothing installed at all) | the feature is no longer hypothetical on this host — §11b measures it. It stays discoverable and absent-safe all the same, and the e2e suite still needs its shim: a suite whose result depends on the hardware is a suite nobody can trust |
+| Podman | **not installed** | §7.7's `--userns=keep-id` row remains [documented] |
+| gVisor (`runsc`) | **not installed**; the daemon lists `io.containerd.runc.v2` and `runc` only | §4.1's option, unmeasurable here beyond the refusal (§11b.8) |
 | `bwrap` 0.9.0 | installed, **fails**: `bwrap: setting up uid map: Permission denied`; `unshare -rn` fails the same way | Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor (`kernel.apparmor_restrict_unprivileged_userns = 1`); only `unprivileged_userns` and `lxc-usernsexec` profiles are present, none for `bwrap` — so Claude Code's own sandbox, Anthropic's `srt`, Codex's sandbox and cursor's bubblewrap fallback are all dead on this host until an operator installs a profile (§4.6, §8.11) |
 | Landlock | in `/sys/kernel/security/lsm` (`lockdown,capability,landlock,yama,apparmor`) | cursor's Landlock sandbox and `landrun` would work; Landlock cannot name hosts, only ports |
-| cgroup v2 | `cgroup2fs` on `/sys/fs/cgroup` | rootless Docker resource limits are possible with systemd delegation |
-| tmux 3.4, git 2.43.0, node 22 | | git 2.43 has no `worktree.useRelativePaths` (2.48+) |
-| claude 2.1.258 | `--permission-mode` = `acceptEdits, auto, bypassPermissions, manual, dontAsk, plan`; the binary carries the whole `sandbox` settings vocabulary (`allowedDomains`, `denyWrite`, `enableWeakerNestedSandbox`, `autoAllowBashIfSandboxed`, …) | §3.1 |
-| cursor-agent 2026.08.25 | `--sandbox <enabled|disabled>`; ships a 4.6 MB `cursorsandbox` binary ("Sandboxing helper for Everysphere shell-exec", `--policy <json>`, `--preflight-only`; strings: landlock, seccomp, bubblewrap, proxy) | §3.4 |
-| hermes 0.20.5 | seven terminal backends (`tools/environments/`: local, docker, ssh, singularity, modal, daytona, vercel_sandbox); `hermes egress` manages an **iron-proxy** credential-injection firewall; `--yolo`, `--safe-mode` | §3.3, §4.5 |
-| opencode 1.18.26 | no sandbox; `permission` config only | §3.2 |
+| cgroup v2 | `cgroup2fs` on `/sys/fs/cgroup`; the user slice delegates `cpu memory pids` and **not** `cpuset` or `io` | rootless Docker's `--memory`, `--pids-limit` and `--cpus` all bind here, measured (§11b.4); `--cpuset-cpus` and every io limit have no controller to write |
+| AppArmor, for containers | **not applied** — the daemon reports `seccomp`, `rootless`, `cgroupns` and no `apparmor`; `/etc/apparmor.d/rootlesskit` is `flags=(unconfined)` | `--security-opt apparmor=…` is accepted and confines nothing (§11b.1); a profile page must not print it back as effective |
+| tmux 3.4, git 2.43.0, node 22, systemd 255 | | git 2.43 has no `worktree.useRelativePaths` (2.48+) |
+| claude **2.1.261** (2026-09-02: 2.1.258) | `--permission-mode` = `acceptEdits, auto, bypassPermissions, manual, dontAsk, plan`; the binary carries the whole `sandbox` settings vocabulary (`allowedDomains`, `denyWrite`, `enableWeakerNestedSandbox`, `autoAllowBashIfSandboxed`, …) | §3.1 |
+| cursor-agent **2026.09.02-c22c1a3** (2026-09-02: 2026.08.25) | `--sandbox <enabled\|disabled>`; ships a 4.6 MB `cursorsandbox` binary ("Sandboxing helper for Everysphere shell-exec", `--policy <json>`, `--preflight-only`; strings: landlock, seccomp, bubblewrap, proxy) | §3.4 |
+| hermes **0.21.0** (2026-09-02: 0.20.5) | seven terminal backends (`tools/environments/`: local, docker, ssh, singularity, modal, daytona, vercel_sandbox); `hermes egress` manages an **iron-proxy** credential-injection firewall — the proxy binary itself is **not installed** here; `--yolo`, `--safe-mode` | §3.3, §4.5 |
+| opencode **1.18.29** (2026-09-02: 1.18.26) | no sandbox; `permission` config only | §3.2 |
 
 ---
 
@@ -607,7 +624,13 @@ Upstream deny CIDRs default to loopback, link-local, RFC 1918, IPv6 ULA and the
 cloud metadata addresses — the SSRF fence a company would otherwise have to write.
 Every request logs `host, method, path, action, status_code, duration_ms,
 request_transforms[…]` including which secret was swapped in which header; rejected
-requests carry `rejected_by`. Known limits (from hermes' integration notes):
+requests carry `rejected_by`. **The implementation adds `phase`** (`open` /
+`close` / `null`), because a tunnel writes twice: once when it is established and
+once when it ends with its byte counts. Only the second line existed at first,
+and a keep-alive tunnel that lives for a whole run closes at teardown — so a run's
+own model provider appeared nowhere in its egress log [measured]. The security
+record was intact (a denial is written at once); the traffic record was not.
+Known limits (from hermes' integration notes):
 signature-based auth (AWS SigV4, GCP OAuth) bypasses header substitution; a Node
 process can bypass the CA bundle with raw sockets (mitigated by `NODE_OPTIONS=--use-openssl-ca`);
 one bind per daemon. That last one is why §7.5 runs **one proxy container per
@@ -796,7 +819,7 @@ designer and the events.
     "digest": null,                    // resolved at first use, then pinned and recorded in the run's events
     "pull": "if-missing"               // if-missing | always | never
   },
-  "user": "hub",                       // hub = the hub's own uid:gid (rootful daemon) or root (rootless daemon) — see §7.7
+  // "user": "hub"  — REMOVED from the built profile, see the note under this block and §7.7
   "network": {
     "mode": "allowlist",               // open | none | allowlist
     "engine": "iron-proxy",            // iron-proxy | builtin (CONNECT proxy, no TLS, no injection)
@@ -840,6 +863,29 @@ designer and the events.
 
 What is **not** in the profile because it is not a sandbox concern: the prompt,
 the branch rule, the duration, the model — they stay in the run definition.
+
+**`user` is not in it either, and that is a correction rather than an omission**
+[measured 2026-09-05, in the first real sandboxed run]. The design's reasoning
+stands: the identity depends on the daemon's posture, which is §7.7's table, and
+`"hub"` was the *policy word* for "whichever identity that table gives". But a
+field on a profile document is a field somebody reads, and one did — it was
+handed straight into `docker exec -u`, where `hub` is an account that exists on
+none of the images this hub starts:
+
+```
+$ docker exec -u hub fl-<id> true
+Error response from daemon: unable to find user hub: no matching entries in passwd file
+```
+
+Every git call the hub makes inside the box therefore failed, the dirt check
+answered *unknown*, and the finish gate wrote `finish_error` every few seconds
+for ever on a run whose status was `running`, whose session was alive and whose
+agent was idle in its TUI. **The implementation** therefore has no such field:
+`containerIdentity()` (§7.7) is asked by the launch and by every exec, it answers
+in **numbers** rather than names, and there is nothing here for an operator to
+set that could make the two disagree again. A profile stored with the key keeps
+working — nothing reads it — and `validateSandboxOverrides()` refuses a new one
+as an unknown key.
 
 ### 7.3 Layering: hub → repo → agent/run, and who may loosen what
 
@@ -1073,6 +1119,13 @@ binary. It cannot terminate TLS, so it offers `allow`/`deny`/`auditOnly` but not
 iron-proxy in phase 3 (§10) — the spec's `engine` field is what makes the order a
 choice rather than a rewrite.
 
+*(Departure, measured: "inside the hub process" is the one part of that a
+rootless daemon refuses — §11b.5. The implementation therefore keeps the engine
+and moves the listener: under such a daemon it runs as a container on the run's
+own network, same policy code, same 403, same audit format, controlled through a
+policy file rather than a management port — §11b.5a. The `engine` field is
+unchanged by it; where the listener runs is not a field at all.)*
+
 Why not the alternatives: `squid`/`tinyproxy` give an allowlist and a log but no
 injection and no per-request JSON; Coder Boundary brings its own jail and wants
 sudo for it; Anthropic's `srt` proxy is a Node library tied to unix-socket
@@ -1176,6 +1229,24 @@ uid unless `safe.directory` says so. The rule is one line per daemon type:
 | rootful Docker (`docker` group) | `--user <hub uid>:<hub gid>` with a passwd entry (image built with `--build-arg UID`, or `fixuid`/entrypoint), `HOME` set explicitly | files stay owned by the hub user; `bypassPermissions` needs non-root |
 | rootless Docker | container **root** (uid 0), which *is* the hub user on the host | Docker's documented mapping; a non-root container user would write host files as `subuid + n − 1` |
 | Podman rootless | `--userns=keep-id` (the hub uid maps to itself) | Podman's documented answer to exactly this |
+
+**There are two moments this table has to be applied, not one, and they must be
+one function** [measured 2026-09-05]. `docker run` decides who the *agent* is;
+`docker exec` decides who the *hub* is whenever it runs git in the box — the
+finish gate, the dirt check, a health probe. They were decided separately and
+came out different: the run wrote no `--user` at all under a rootless daemon
+(right), while the exec passed the profile's `user` word into `-u` (see §7.2 for
+what that cost). **The implementation** answers both from one place —
+`containerIdentity(runtime, identity)` in `server/sandbox/runtime.mjs`, pure and
+unit-tested — which reads the table as: rootful → `--user <uid>:<gid>` on the run
+and the same pair on the exec; rootless → **nothing on either side**; podman →
+`--userns=keep-id` on the run and nothing on the exec, because keep-id has
+already mapped it and both would fight. The values are always **numeric**, so an
+exec can never depend on a `passwd` entry existing. `hubIdentity(info)` is the
+half that turns discovery's answer about the daemon into `{uid, gid}`; the run
+freezes it into its sandbox document, and the exec asks it live, because the
+daemon's posture is a property of the machine and not of a spec written before a
+migration.
 
 `userns-remap` on a rootful daemon is **not** used: bind-mounted files appear as
 `nobody` and Docker exposes no per-container id-mapped mount (moby #52061 closed
@@ -1790,6 +1861,22 @@ composition, per-run named volumes for `rw` extras.
 
 ## 11. Open questions to measure before building (in the order they block)
 
+**Two sections below carry the answers, both with the commands and the raw
+verdicts.** §11a (2026-09-05, morning) measured everything that could be measured
+**without** a container runtime: 4, 5, 7, 8 outright, 1, 3 and 10 in part, and it
+records honestly that 2, 6 and 9 could not be asked at all on a machine with no
+daemon. §11b (2026-09-05, afternoon) is the same day against **rootless Docker
+29.8.0**, which the host now runs: it settles **9** and **10**, confirms §7.4's
+mount set and §7.7's uid rule against a live container, and refutes two things
+the design assumed — the built-in proxy engine (§7.5.2) cannot listen on the HOST
+of a rootless daemon, and §7.11's `/tmp` is not executable. The first of those
+was answered later the same day by moving the listener into a container rather
+than dropping the engine (§11b.5a), so it costs the design a placement and not a
+phase. Still open after both: **2** (needs a throwaway account), **6**
+(iron-proxy is not installed anywhere), and the container halves of **1**, **3**,
+**4** and **8** — of the four harness CLIs only opencode has been run inside a
+container, later the same day and on `network.mode: open` (§11b.8).
+
 1. **Claude as container root under rootless Docker**: does `bypassPermissions`
    accept root "inside a recognized sandbox", and what makes a sandbox recognised?
    Decides whether rootless Docker can be the recommended daemon for claude runs
@@ -1828,6 +1915,957 @@ composition, per-run named volumes for `rw` extras.
    container (the hub does not listen there, but other host services might).
 10. **Resource-limit delegation** on the operator's systemd user session for
     rootless Docker (`cgroup.controllers` shows `memory pids` only by default).
+
+---
+
+## 11a. Measured before building (2026-09-05)
+
+Everything below was run on the development machine on 2026-09-05, in a throwaway
+directory, against real git, real tmux and the real installed CLIs. Nothing in the
+hub's own checkout was touched. Where a question could not be answered here, it
+says so and states what the design does so that it is safe under **both** answers —
+because a design that is only correct under the answer one hopes for is not a
+design, it is a bet.
+
+**What cannot be measured on this machine, and why.** There is no container
+runtime: `command -v docker` and `command -v podman` both fail, no binary exists
+under `/usr/bin` or `/usr/local/bin`, and `systemctl list-unit-files` shows no
+docker or podman unit at either scope [measured]. Unprivileged user namespaces are
+closed: `unshare -rn true` → `write failed /proc/self/uid_map: Operation not
+permitted`, `bwrap --ro-bind / / --dev /dev true` → `bwrap: setting up uid map:
+Permission denied`, with `kernel.apparmor_restrict_unprivileged_userns = 1` and
+only `unprivileged_userns`, `lxc-unshare` and `lxc-usernsexec` profiles present
+[measured]. So questions **§11.1** (only partly — see below), **§11.2**, **§11.3**,
+**§11.6**, **§11.9** and **§11.10** (only partly) cannot be answered here. To answer
+them one needs a machine with rootless Docker ≥ 28 installed and a systemd user
+session with delegation, plus — for §11.2 — a throwaway Anthropic account, because
+the experiment is "does a second `.credentials.json` refreshing its token
+invalidate the first" and running it on the operator's own account is how one
+loses a live session.
+
+> **Later the same day, rootless Docker 29.8.0 was installed on this host and
+> §11.9 and §11.10 were measured against it — see §11b.** Everything below is
+> left as it was written: it is the record of what was known before there was a
+> daemon, and the design decisions it names were taken on that knowledge.
+
+---
+
+### 11a.1 (§11.7) `git fetch` from a hostile clone executes nothing — but the *fallback* path does
+
+**The question.** §7.4.3 keeps exactly one host-side git operation on
+agent-controlled data: `git -C <repo.path> fetch <clone> HEAD:refs/freilauf/runs/<id>`.
+Does `git-upload-pack`, running inside a repository whose `.git` the agent owns,
+execute anything the agent put there?
+
+**What was run.** A clone was built exactly as §7.4.2 prescribes (`git init`,
+`remote add origin <source>`, the two fetch refspecs, `objects/info/alternates`
+pointing at the source's `objects`, `fetch origin`, `checkout`), a commit was made
+in it, and then it was made hostile: `.git/config` given `core.fsmonitor`,
+`core.sshCommand`, `core.alternateRefsCommand`, `core.pager`, `core.editor`,
+`uploadpack.packObjectsHook`, `diff.external` — every one of them `touch
+/tmp/PWNED_<name>` — plus twelve executable hooks in `.git/hooks` (`pre-commit`,
+`post-checkout`, `pre-receive`, `post-receive`, `update`, `post-update`,
+`pre-push`, `proc-receive`, `reference-transaction`, `push-to-checkout`,
+`post-index-change`, `fsmonitor-watchman`), each `touch`ing its own marker. Then,
+from the source repository:
+
+```bash
+git -C <source> fetch <clone> HEAD:refs/freilauf/runs/test
+GIT_CONFIG_NOSYSTEM=1 git -C <source> -c uploadpack.allowAnySHA1InWant=false \
+    fetch --force <clone> HEAD:refs/freilauf/runs/test2
+git ls-remote <clone>
+git -C <source> fetch --force <clone> refs/heads/hostile:refs/freilauf/runs/test3
+git -C <source> fetch --force file://<clone> refs/heads/hostile:refs/freilauf/runs/test4
+git -C <source> fetch --dry-run <clone> HEAD
+```
+
+**Verdict [measured, git 2.43.0]: not one marker appeared, on any of the six.**
+All six exited 0, the ref resolved (`git -C <source> rev-parse
+refs/freilauf/runs/test`), and a blob only the clone had came back
+(`git cat-file -p refs/freilauf/runs/test:loot.txt` → `payload`). The
+`GIT_CONFIG_NOSYSTEM=1` and `-c uploadpack.allowAnySHA1InWant=false` belt-and-braces
+changed nothing, which is the expected result rather than a disappointment:
+`uploadpack.packObjectsHook` is only respected in **protected configuration**
+(system, global, command scope), and git's own manual says why — "an attacker who
+controls these scopes can do substantial harm without using Git" [documented,
+`man git-config`, section "Protected configuration"]. The integrator's own
+follow-on operations are clean too: `git -C <source> merge-tree --write-tree
+--name-only origin/main refs/freilauf/runs/<id>` returned a tree sha on a
+mergeable pair and exit 1 with the conflicting path on a conflicting one, and
+`git status` in the source stayed empty afterwards [measured].
+
+**The positive control is the finding.** The same payload, with the same clone,
+fires immediately when git is run **inside** the clone — which is exactly what
+§7.4.4 forbids and exactly what the fallback path still does:
+
+| host-side command in the clone | what fired [measured] |
+|---|---|
+| `git -C <clone> --no-optional-locks status --porcelain` | `core.fsmonitor` |
+| `git -C <clone> diff` | `core.fsmonitor`, `diff.external` |
+| `git -C <clone> add -A && git commit` | `core.fsmonitor`, hooks `pre-commit`, `post-index-change`, `reference-transaction` |
+| `git -C <clone> checkout -- .` | `core.fsmonitor`, hooks `post-checkout`, `post-index-change` |
+| `git -C <clone> rev-parse HEAD` | nothing |
+| `git -C <clone> rev-list --count HEAD` | nothing |
+
+**And the hardening §7.4.4 proposes is not enough** [measured]. With
+`-c core.hooksPath=/dev/null -c core.fsmonitor=false -c diff.external=` and
+`GIT_CONFIG_NOSYSTEM=1`, a **filter driver** still runs: `filter.evil.clean` in the
+clone's `.git/config`, selected by a `.gitattributes` of `* filter=evil` — a
+**tracked file the agent commits**, which is the point — executed on `status`, on
+`add -A` and on `diff HEAD`, all three. `diff.<name>.textconv` and
+`merge.<name>.driver` are the same family. The denylist named three keys; git 2.43
+has at least seven repo-local ways to name a command, and there is no
+`GIT_CONFIG_NOLOCAL` — a repository's own config cannot be switched off from the
+command line.
+
+**Therefore the implementation does three things.** (1) The collecting fetch stays
+exactly as §7.4.3 writes it, in the source repository, with `GIT_CONFIG_NOSYSTEM=1`
+kept as documentation of intent; the bundle variant is not needed. (2) The
+host-side fallback for a run whose container is gone is restricted to the two
+commands measured inert — `rev-parse` and `rev-list --count` — plus the fetch;
+anything that reads the worktree (`status`, `diff`, and the whole rescue path)
+either runs in the sandbox or does not run at all, and the dirt of a dead
+sandboxed run is reported as **unknown**, never as measured. (3) Where the rescue
+path must run on the host anyway, the clone's `.git/config` is **replaced by a
+minimal file** for the duration of the call (`[core] repositoryformatversion = 0 /
+bare = false`) **and** `-c core.hooksPath=/dev/null` is passed — the substitution
+alone leaves `.git/hooks` as the default hooks directory, and `post-index-change`
+fires. That combination was verified against all eight commands above: nothing
+fired [measured]. A denylist of config keys is not a boundary and must not be
+described as one.
+
+Also measured, because it looks like a config problem and is not: git's
+merge driver for the integrator's `merge-tree` is resolved out of the **source**
+repository's config, which is the hub's. A `.gitattributes` naming `merge=evil`
+that the agent gets merged into the base branch therefore selects a driver the
+source does not define, and merge-tree falls back to the built-in [measured].
+
+---
+
+### 11a.2 (§7.4.2) The per-run clone: every step works, including under a read-only source
+
+**The question.** Does the layout §7.4.2 prescribes actually behave — with the
+source `.git` mounted read-only and its `config` masked, which is the mount mode
+the design uses?
+
+**What was run.** A source repository was built with a bare `origin`, 302 files, a
+`main` and a `feature` branch, both pushed; then the §7.4.2 sequence verbatim.
+
+| # | Question | Verdict |
+|---|---|---|
+| (a) | `git fetch origin` in the clone | works; brings `refs/remotes/origin/*` and, through the second refspec, the source's local branches as `refs/remotes/local/*` [measured] |
+| (b) | `git checkout --detach origin/main` | works [measured] |
+| (c) | does the alternate avoid copying objects | source `.git/objects` **3.1 MB**, clone `.git/objects` **16 KB** before any work, **40 KB** after a commit [measured] |
+| (d) | source `.git` **read-only** (`chmod -R a-w`) | `fetch origin`, `checkout`, `log`, `status`, a commit in the clone, a second incremental `fetch` and `cat-file` on a blob that exists only in the alternate — all work, all exit 0 [measured] |
+| (e) | source `.git/config` **replaced by an empty file** | `fetch origin`, `checkout` and alternate resolution all still work; `ls-remote` against the masked source answers normally [measured] |
+| (f) | the branch modes of `makeWorktree()` | see below [measured] |
+| (g) | collect + integrate | `git -C <source> fetch <clone> HEAD:refs/freilauf/runs/<id>` then `merge-tree --write-tree --name-only` — covered in §11a.1 [measured] |
+
+**(f) The three branch modes as clone commands**, each verified to land on the same
+commit `makeWorktree()` would have landed on:
+
+| `branch_mode` | clone command | lands on |
+|---|---|---|
+| `keiner` | `git -C <clone> checkout --detach origin/<base>` | the base tip [measured] |
+| `neu`, branch nowhere | `git -C <clone> checkout -b <name> origin/<base>` | the base tip [measured] |
+| `neu`/`fest`, the operator has it **locally** | `git -C <clone> checkout -b <name> refs/remotes/local/<name>` | byte-identical to the source's `refs/heads/<name>` [measured] |
+| `neu`/`fest`, it exists only on origin | `git -C <clone> checkout -b <name> origin/<name>` | the remote tip [measured] |
+
+The third row is what the second fetch refspec exists for, and it is the row a
+naive clone gets wrong: `makeWorktree()` prefers the operator's **local** branch
+over `origin/<name>`, and without `+refs/heads/*:refs/remotes/local/*` the clone
+cannot see it at all.
+
+**One correction to §7.4.2, and it is not cosmetic.** "The operator's `.git/config`
+itself is masked with an empty file" is wrong for a repository that carries
+`extensions.*`. Measured on a `--object-format=sha256` repository whose config was
+emptied: `git log` → `fatal: your current branch appears to be broken`, and
+`git ls-remote` answered **exit 0 with an all-zero sha** — a silent wrong answer,
+which is worse than the error. `core.repositoryformatversion = 1` plus the
+`[extensions]` block is what tells git how to read the repository at all, and the
+same applies to a partial clone (`extensions.partialClone`,
+`remote.origin.promisor`). **Therefore the implementation masks the config by
+writing a minimal replacement, not an empty file**: `core.repositoryformatversion`
+and the whole `[extensions]` section copied over from the source, everything else —
+`remote.*` (which may carry a token in a URL), `user.*`, `core.fsmonitor` and the
+rest — dropped. An empty file is a mask that can silently change what a repository
+*is*.
+
+---
+
+### 11a.3 (§11.5, §8.21) `--settings` outranks project settings — and a repo file can switch every hook off anyway
+
+**The question.** Do the hooks the hub installs through `claude --settings <json>`
+survive a project `.claude/settings.json` in the agent's own worktree that also
+declares hooks?
+
+**Why it could not be answered by running it.** Every path that would resolve
+settings and then *act* on them starts a session, and a session that reports
+anything costs API quota. `claude doctor` prints installation health and no
+settings; there is no `claude config list`-style settings dump among the
+subcommands (`agents attach auth auto-mode doctor gateway import install logs mcp
+plugin project respawn rm setup-token stop ultrareview update`) [measured]. So the
+answer was read out of the shipped binary — `~/.local/share/claude/versions/2.1.261`,
+a 215 MB bun single-file executable whose JavaScript chunks are readable with
+`strings`.
+
+**Verdict, in three parts.**
+
+1. **Precedence is documented inside the binary itself** [measured, read from the
+   shipped binary 2.1.261]. Its own settings-report schema carries the source enum
+   `["userSettings","projectSettings","localSettings","flagSettings","policySettings"]`
+   with the description *"Ordered low-to-high priority — later entries ov[erride]"*,
+   and the same order appears as a literal array. `flagSettings` is `--settings`.
+   So **`--settings` outranks both `.claude/settings.json` and
+   `.claude/settings.local.json`**, and only managed policy outranks it.
+
+2. **But a repo settings file can disable every hook, the hub's included.** The
+   hook resolver reads the *merged* settings and returns `{}` when
+   `disableAllHooks` is true anywhere in the merge, and project settings are in the
+   merge. The binary states the consequence in its own words, twice: a log line
+   reading *"launcher_hooks materialized, but a repo `.claude/settings.json` or
+   `settings.local.json` carries `disableAllHooks:true` — the child will drop every
+   flagSettings hook"*, and a user-facing message reading *"A settings file in this
+   checkout switches all hooks off (`disableAllHooks`); that holds for this
+   terminal"* [measured, read from the shipped binary]. **This contradicts §8.21's
+   assumption.** An agent — or a repository somebody cloned — that writes six lines
+   into `.claude/settings.json` silences `fl-report _api_error`, `_working`,
+   `_waiting` and `Stop` for that run, and the hub's only symptom is a run that
+   reports nothing, which reads as an idle agent.
+
+3. **There is a clean lever, and claude uses it on itself.** `--setting-sources
+   <sources>` takes a comma-separated list of `user, project, local`; claude's own
+   plugin-eval runner builds its child command with `--setting-sources user`
+   [measured, read from the shipped binary]. A source that is not loaded cannot
+   contribute a `disableAllHooks` either. `--bare` is **not** the lever: it is
+   documented as "skip hooks" and the resolver returns `kind:"none", reason:"bare"`.
+
+**Therefore the implementation launches claude with `--setting-sources user`**
+(alongside `--settings`), in the sandbox and outside it, and the harness plugin
+declares that as part of its launch spec rather than leaving it to `fl-start`. Two
+further facts from the same read, both load-bearing for a seeded home: hooks are
+skipped entirely in an untrusted workspace (`"Skipping … hook execution -
+workspace trust not accepted"`), so the trust flag `fl-start`'s `trust_workdir()`
+writes must exist in the **run's** home; and `.claude/settings.local.json` hooks
+are additionally dropped when that file is git-tracked (`reason:
+"repo_provenance"`) — a fence the hub gets for free and must not rely on.
+
+---
+
+### 11a.4 (§11.4, §11.8) All four CLIs relocate with `HOME` — and three offer a narrower lever
+
+**The question.** Does each CLI find its conversation when the home differs from
+the host layout, and — §11.8 — is cursor's transcript slug derived only from the
+workdir?
+
+| CLI | where the conversation lives | derived from | verdict |
+|---|---|---|---|
+| claude 2.1.261 | `<config>/projects/<slug(workdir)>/<session id>.jsonl`, `<config>` = `$CLAUDE_CONFIG_DIR` else `$HOME/.claude` | `$HOME`, overridable | relocates cleanly [measured] |
+| opencode 1.18.29 | `<data>/opencode/opencode.db`, table `session`, keyed by the **absolute** `directory` + `parent_id`; `<data>` = `$XDG_DATA_HOME` else `$HOME/.local/share` | XDG first, `$HOME` as its fallback | relocates cleanly; **`XDG_DATA_HOME` outranks `HOME`** [measured] |
+| cursor-agent 2026.09.02 | `<data>/projects/<slug(workdir)>/agent-transcripts/<chat>/<chat>.jsonl` **and** `<data>/chats/<md5(absolute workdir)>/`; `<data>` = `$CURSOR_DATA_DIR` else `homedir()/.cursor` | `$HOME`, overridable | relocates cleanly; auth lives under a **second root** [measured] |
+| hermes 0.21.0 | `$HERMES_HOME/state.db`, table `sessions`, keyed by the absolute `cwd`; `$HERMES_HOME` = `$HOME/.hermes` | `$HOME`, overridable | relocates cleanly [measured] |
+
+Each was run once with `HOME=<throwaway>` for a non-API command (`--version`,
+`config list`): every one created its full state tree under the throwaway home and
+**nothing** appeared under the real one (`find <real> -newer <ref>` empty)
+[measured]. `CLAUDE_CONFIG_DIR` was verified to move the whole tree while leaving
+the throwaway `HOME` completely empty [measured]; so was `XDG_DATA_HOME` /
+`XDG_CONFIG_HOME` for opencode [measured].
+
+**§11.8, answered: yes — cursor's slug is the workdir and nothing else.** The rule
+in the shipped bundle is `e.replace(/[^a-zA-Z0-9]/g,"-").replace(/-+/g,"-")
+.replace(/^-+|-+$/g,"")`, taking one argument, the workspace path — byte for byte
+what `cursor-transcript.mjs` already implements [measured, read from
+`~/.local/share/cursor-agent/versions/2026.09.02-c22c1a3/index.js`]. The home
+enters only as the containing directory, and once more in the **truncated**
+variant for paths over 92 characters, whose sha256 is taken over the full path
+*including* the home. Two such truncated directories exist under the real
+`~/.cursor/projects`; both are **empty**, and reproducing the rule matches them
+exactly only when the home is part of the hash input [measured]. The hub already
+returns both forms, in the right order.
+
+**Three consequences for the implementation**, each of them a way a per-run home
+goes wrong quietly rather than loudly:
+
+- **The hub reads these stores from the *hub's* home, not the run's.** Four call
+  sites hardcode it: `watcher.mjs` (`${homedir()}/.claude/projects`,
+  `${homedir()}/.hermes/state.db`), `opencode-store.mjs`
+  (`${homedir()}/.local/share/opencode/opencode.db`) and `harnesses/hermes.mjs`
+  (`${process.env.HOME}/.hermes/state.db`) [measured]. Every one fails **soft**: no
+  activity becomes `anomaly:no_activity` on a working run, no tokens becomes a cost
+  of zero, no resume id becomes a fallback. They all take the `agentHome(run)`
+  indirection §7.7 names, and `cursor-transcript.mjs` is the shape the other four
+  follow.
+- **Two of the four resume fallbacks are silent lies.** With the wrong store,
+  opencode's `resumeId()` degrades to `'last'` (→ `--continue`) and hermes' to
+  `'latest'` — both look like answers and both continue the wrong conversation or
+  none. cursor's returns `null`, which the hub already reads honestly as "start
+  afresh". Therefore the sandboxed resume path treats a `resumeId()` that came from
+  a store the run did not write as **no id at all**, rather than passing the
+  fallback through.
+- **Prefer the narrow lever over `HOME` where one exists.** `CLAUDE_CONFIG_DIR`,
+  `XDG_DATA_HOME`, `CURSOR_DATA_DIR` and `HERMES_HOME` each move the state without
+  moving the home, and each has a matching seam on the hub side
+  (`FREILAUF_CLAUDE_PROJECTS`, `FREILAUF_OPENCODE_DB`, `FREILAUF_CURSOR_DIR`,
+  `FREILAUF_HERMES_STATE_DB`) — so the CLI and the hub can be pointed at one
+  directory from one decision. Credentials still have to be seeded per home, and
+  cursor's auth (`$XDG_CONFIG_HOME`/`$HOME/.config/cursor/auth.json`) sits under a
+  different root from its data.
+
+**One latent bug found on the way** [measured]: claude's real slug rule replaces
+**every** non-alphanumeric character, not just `/`. A worktree path containing a
+dot, an underscore or a space produces a directory the hub's
+`replaceAll('/', '-')` will not find — no worktree on this machine triggers it
+today, and `measureActivity()` and the claude incident channel would go blind if
+one did.
+
+---
+
+### 11a.5 (§7.1) The transport survives a PTY relay — and RSS accounting does not
+
+**The question.** §7.1 chooses "tmux on the host, the pane command is `docker run
+-it`". Without Docker, the claim can still be tested against the shape: a pane
+whose command is a program that allocates a PTY for a child and relays raw bytes
+in both directions, propagating `SIGWINCH` and exiting with the child's status.
+A 40-line Python relay was written for exactly that, with a fake TUI as its child
+(bracketed paste enabled on its output, `exit 7` on a keyword), driven on a
+private tmux socket (`tmux -L fl-measure`) so no production session was involved.
+
+| claim | verdict [measured, tmux 3.4] |
+|---|---|
+| `pipe-pane -o 'cat >> log'` sees the inner program's output | yes — the log holds the relayed lines |
+| `capture-pane -p` reads the inner screen | yes |
+| `send-keys -l` with the hub's bracketed paste (`ESC[200~ … ESC[201~`, `util.mjs:95`) | yes — the escape bytes traverse the relay unchanged and reach the child byte for byte |
+| `pane-died` fires, with the inner exit status | yes — `pane_dead=1`, `pane_dead_status=7`, the hook ran |
+| `remain-on-exit` keeps the last screen | yes — `capture-pane` still reads it, `has-session` still true |
+| `--detach-keys` intercepts `Ctrl-P Ctrl-Q` on the input side | [documented] — no Docker here; the Docker CLI's detach sequence is a client-side feature and the relay has none |
+
+**But `pane_current_command` reports the transport, not the agent** [measured]: the
+pane's command was `python3` (the relay) with the inner program invisible to tmux.
+Under Docker it is `docker`. And the RSS accounting follows from the same fact.
+`sessions.mjs` sums the process tree under `pane_pid`; with the workload
+re-parented away from the relay — which is the container's shape, its processes
+being children of the shim in the daemon's cgroup rather than of the client — the
+pane tree summed **10.4 MB** while the workload held **210.3 MB** [measured]. A
+twenty-fold under-report, in the number the status sidebar prints on every page
+and the memory-cleanup agent acts on.
+
+**Therefore the implementation** keeps the transport as §7.1 chose it — nothing in
+the tmux half needs to change — and makes `sessionMemory()` and the sessions page
+ask the runtime for a sandboxed run's memory instead of the process tree, marking
+what it cannot measure as unknown rather than as 10 MB. The harness a session
+belongs to must likewise not be inferred from `pane_current_command`; the tmux
+name prefix (`bin/fl-harness-tags.sh`) already answers that and stays the answer.
+
+---
+
+### 11a.6 (§2.4, §11.10) This host today, and what §2.4 got wrong
+
+Re-measured 2026-09-05 with the commands §11.10 names:
+
+| Thing | 2026-09-05 [measured] |
+|---|---|
+| Docker / Podman | still absent, at both scopes — Docker arrived hours later, §11b.1 |
+| kernel | 6.8.0-138-generic, Ubuntu 24.04 |
+| root `cgroup.controllers` | `cpuset cpu io memory hugetlb pids rdma misc` |
+| **user slice `cgroup.controllers`** | **`cpu memory pids`** — at `user.slice/user-1000.slice` and at `user@1000.service` alike |
+| `/etc/systemd/system/user@.service.d/delegate.conf` | **does not exist** — the delegation is systemd 255's own default, `Delegate=pids memory cpu` in the stock `user@.service` |
+| `kernel.apparmor_restrict_unprivileged_userns` | `1`; `kernel.unprivileged_userns_clone = 1` (the AppArmor switch is the one that binds) |
+| `/sys/kernel/security/lsm` | `lockdown,capability,landlock,yama,apparmor` |
+| `unshare -rn true` | fails: `write failed /proc/self/uid_map: Operation not permitted` |
+| `bwrap` | 0.9.0 installed; smoke test fails: `setting up uid map: Permission denied` |
+| git / tmux / node / systemd | 2.43.0 / 3.4 / v22.23.2 / 255 |
+
+**§11.10 is corrected**: the user session shows `cpu memory pids`, not "`memory
+pids` only". So on this host a rootless daemon could honour `--memory`,
+`--pids-limit` and `--cpus` out of the box, and could **not** honour `--cpuset-cpus`
+or any io limit (`--blkio-weight`, `--device-read-bps`) — `cpuset` and `io` are not
+delegated, and enabling them is the `delegate.conf` drop-in that does not exist
+here. The design's discovery step therefore reads the user slice's
+`cgroup.controllers` and offers exactly the limits it lists, rather than offering a
+`cpuset` field that would fail at `docker run`.
+
+**§2.4's version rows are stale** [measured]: claude is **2.1.261** (not 2.1.258),
+opencode **1.18.29** (not 1.18.26), hermes **0.21.0** (not 0.20.5 — the release in
+which `-q` began seeding an interactive session), cursor-agent
+**2026.09.02-c22c1a3** (not 2026.08.25). Everything else in §2.4 still holds.
+
+---
+
+### 11a.7 What the unmeasurable questions do to the design
+
+**§11.1 — claude as container root — is answered in part, from the binary rather
+than from a container** [measured, read from the shipped binary 2.1.261]. The
+refusal is one predicate:
+
+```js
+isRootOutsideDeliberateSandbox() {
+  return platform !== "win32" && getuid() === 0
+      && !isSandboxEnvSet()        // process.env.IS_SANDBOX === "1"
+      && !isBubblewrapEnvSet()     // env CLAUDE_CODE_BUBBLEWRAP
+}
+```
+
+and `bypassPermissions` exits 1 with *"--dangerously-skip-permissions cannot be
+used with root/sudo privileges for security reasons"* when it holds. So **"a
+recognized sandbox" means `IS_SANDBOX=1` or `CLAUDE_CODE_BUBBLEWRAP`, and nothing
+else** — being in a container is explicitly *not* enough: the binary has a separate
+`isDocker()` (it tests for `/.dockerenv`) and this predicate does not consult it.
+`IS_SANDBOX` is a documented-nowhere environment variable that also steers other
+behaviour (the 529-overload retry path, the "contained, no internet" probe), which
+is why this stays a **partial** answer: what is measured is that the flag lifts the
+refusal, not that Anthropic will keep it meaning that. **Therefore the
+implementation** sets `IS_SANDBOX=1` through the existing `fl-start --env` channel
+for a sandboxed claude run and does **not** depend on it: the profile's default
+daemon is rootful Docker with `--user <hub uid>:<hub gid>`, where the question does
+not arise, and rootless Docker is offered with the flag and a note that it rests on
+an undocumented variable.
+
+**§11.3 — a resume before the daemon answers — has its hub half already true**
+[measured, read from `runner.mjs` and `watcher.mjs` on this checkout]. A launch
+that fails during a resume writes `resume_failed`, **keeps `resume_pending`** and
+returns `{ retry: true }`; `retryPendingResumes()` launches again on the next
+watcher pass; `verwaisteLaeufeAbschliessen()` skips a pending run. A `docker run`
+that cannot reach a daemon still coming up is exactly that branch, so nothing fails
+the run. **But `resume_attempts` is incremented on every counted attempt, before
+`fl-start` is called**, and `RESUME_MAX` is 3 — so a daemon that takes longer than
+about ninety seconds after a reboot burns the cap and the run ends `resume_refused`.
+**Therefore the implementation** does two things rather than one: `freilauf.service`
+gains `After=` the daemon's user unit on a rootless installation, and a launch that
+failed because the *runtime* was unreachable is classified like `resumeInfo.counted
+=== false` — a reason the hub could not try, not an attempt that died. Safe under
+either answer to §11.3, because neither depends on how fast the daemon starts.
+
+**§11.2, §11.6, §11.9 and the rest of §11.10 are untouched.** What the design does
+in the meantime, and why it is safe whichever way each falls:
+
+- **§11.2 (OAuth token copies).** The profile's default for a subscription CLI is
+  `secrets.mode: env` with `CLAUDE_CODE_OAUTH_TOKEN`, never a copy of
+  `.credentials.json`, and the seeded home carries no credentials file at all.
+  If the answer turns out to be "a second copy refreshing is harmless", nothing
+  changes; if it turns out to be "it invalidates the host session", the design was
+  never exposed to it. The one thing the implementation must not do is copy
+  `~/.claude/.credentials.json` into a run home "for now".
+- **§11.6 (iron-proxy under load and with SSE).** `network.mode: allowlist` with
+  TLS termination is not the phase-1 default; the default is a CONNECT tunnel,
+  which carries HTTP/2 and streaming responses without understanding them. TLS
+  termination and header injection are opt-in per profile, and a profile that
+  cannot reach its proxy fails the start with a readable problem rather than
+  starting unproxied.
+- **§11.9 (`gateway_mode_ipv4=isolated`).** Discovery reads the daemon version; a
+  daemon that cannot isolate the gateway gets the internal network **plus** an
+  explicit note on the profile page that the host bridge address is reachable, and
+  the hub's own socket is a unix socket in the run directory (§7.6) rather than a
+  TCP port, so the hub is not on the other side of that gateway either way.
+  *(Measured since: the option exists on 29.8.0 and is `--internal`-only — §11b.5.)*
+- **§11.10 (delegation).** As above: the limits offered are the controllers the
+  user slice actually delegates, read at discovery time.
+  *(Measured since: all three delegated fences really bind — §11b.4.)*
+
+---
+
+## 11b. Measured against a real daemon (2026-09-05)
+
+The development machine now runs **rootless Docker 29.8.0**. Six of the ten
+questions in §11 were left open in §11a for want of a container runtime, and §11a
+said so in the same breath as it said what the design does so as to be safe under
+either answer. That excuse is gone: everything below was run against the live
+daemon on this host, in throwaway directories and throwaway networks, with the
+hub's own checkout, database, worktrees and tmux sessions untouched. It is
+observation rather than reading — where §11a inferred from a binary's strings or
+from a shape, this section has an exit code. Two of the answers refute something
+the design assumed, and those are the half worth reading first (§11b.5, §11b.6).
+
+---
+
+### 11b.1 The host, as measured
+
+| Thing | 2026-09-05 [measured] |
+|---|---|
+| client / server | Docker Engine Community **29.8.0**, API 1.56, containerd v2.3.4, runc 1.5.1, rootlesskit 3.1.0 |
+| context | `rootless`, endpoint `unix:///run/user/1000/docker.sock`; the user unit `docker.service` is **active** |
+| rootful daemon | `systemctl is-active docker.service` → `inactive`, `is-enabled` → `disabled`; the socket file at `/var/run/docker.sock` still exists (`root:docker`, mode 660) and answers nothing |
+| `docker` group | exists, gid 985, **empty** — nobody on this machine can reach a rootful daemon even if one were started |
+| storage / cgroup driver | `overlayfs` / `systemd`, cgroup v2 |
+| security options reported by the daemon | `seccomp` (profile `builtin`), `rootless`, `cgroupns` — **no `apparmor`** |
+| runtimes | `io.containerd.runc.v2`, `runc`; default `runc` |
+| delegated controllers, user slice | `cpu memory pids` at `user.slice/user-<uid>.slice` and at `user@<uid>.service` alike — **not `cpuset`, not `io`** |
+| `/etc/subuid`, `/etc/subgid` | `<hub user>:100000:65536` |
+| rootlesskit's own command line | `--net=gvisor-tap-vsock --disable-host-loopback --port-driver=builtin --detach-netns` |
+
+**AppArmor does not apply to containers here** [measured]. Ubuntu 24.04 ships
+`/etc/apparmor.d/rootlesskit` — 354 bytes, dated 2024-07-15, whose own comment says
+it "allows everything and only exists to give the application a name instead of
+having the label `unconfined`": `profile rootlesskit /usr/bin/rootlesskit
+flags=(unconfined) { userns, }`. So rootlesskit gets the `userns` capability the
+kernel's unprivileged-namespace restriction otherwise withholds (§11a's
+`unshare -rn` failure), and it gets it *unconfined*. The daemon reports no
+`apparmor` security option, and `--security-opt apparmor=docker-default` is
+**accepted without complaint and confines nothing**: inside such a container
+`/proc/self/attr/current` reads `rootlesskit (unconfined)` [measured]. A profile
+name that is silently ignored is worse than one that is refused, because a profile
+page could print it back as if it had taken effect.
+
+**And `aa-status` is not the way to find that out.** As a non-root user it prints
+*"You do not have enough privilege to read the profile set."* and exits **4**; but
+`aa-status --enabled` — the form a discovery step reaches for, because it is the
+cheap one — exits **0** with no output at all [measured]. That 0 means "the
+AppArmor module is loaded", which on this host is true and irrelevant: the
+containers are unconfined regardless. Same family as the `--no-optional-locks`
+entry in AGENTS.md, where an empty answer read as a clean worktree. **Therefore
+the implementation** takes the daemon's own `SecurityOptions` list as the answer
+to "is AppArmor applied to containers", and never `aa-status`.
+
+---
+
+### 11b.2 (§7.7) The uid map, confirmed — and one consequence git cares about
+
+§7.7's table says: under a rootless daemon, run the agent as container **root**,
+because a non-root container user would write host files as `subuid + n − 1`. Four
+`docker run`s against a bind-mounted directory, `ls -n` inside and outside
+[measured]:
+
+| container `--user` | uid inside | owner of a file it creates, seen from the host |
+|---|---|---|
+| *(none, root image)* | `0:0` | `1000:1000` — the hub user itself |
+| `0:0` (explicit) | `0:0` | `1000:1000` |
+| `1000:1000` | `1000:1000` | `100999:100999` |
+| `1001:1001` | `1001:1001` | `101000:101000` |
+
+The subuid base is 100000 and container uid 1 is the first mapped id, so container
+uid *n* is host `99999 + n`. §7.7's rule is right, and the failure mode it warns
+about is worse than "wrong owner": with `--user 1000:1000` into a directory the hub
+created, the container could not write **at all** (`touch: Permission denied`),
+because that directory is owned by host 1000, which the container sees as `root`.
+A run configured that way would fail at its first file, in a way that reads like a
+mount problem.
+
+**One thing this buys that §7.7 does not mention**: git's `safe.directory` check
+never fires. The clone is owned by host 1000, the container process is uid 0, and
+those are the same identity through the map — `git status` in the mounted clone
+works with no `safe.directory` configuration at all [measured]. §7.7 raises the
+question ("git refuses to work in a repository owned by another uid"); under a
+rootless daemon it does not arise, and under a rootful one with `--user <hub
+uid>:<hub gid>` it does not arise either. It arises only in the combination the
+table already rules out.
+
+---
+
+### 11b.3 (§7.4) The mount set works end to end, inside a real container
+
+§7.4.2's clone was measured on the host in §11a.2. What could not be measured was
+the *mount set* — whether the same repository still behaves when the operator's
+`.git` arrives read-only and its `config` is masked. Built as §7.4.2 writes it (a
+source repository with two commits and a remote URL carrying a token-shaped
+secret; a clone with `objects/info/alternates` pointing at the source), then run
+with exactly §7.11's three git-related mounts: the clone read-write, the source's
+`.git` read-only at the same path, and an empty file over that `.git/config`
+[measured, `freilauf/agent-base:24.04`, git 2.43 inside and out]:
+
+| claim | verdict |
+|---|---|
+| `git status --porcelain` in the clone | rc 0, clean |
+| `git log --oneline` reaches the source's history | rc 0, both commits |
+| alternates really resolve | yes — the clone holds 3 loose objects to the source's 6, and `rev-parse HEAD~1` still answers |
+| the operator's `.git` is genuinely read-only | `touch: cannot touch '…/.git/PROBE': Read-only file system` |
+| the masked config is readable and empty | `wc -c` → 0; `grep -c TOKEN` → 0 |
+| `git fetch origin` through the read-only mount | rc 0 |
+| `git add` / `git commit` in the clone | rc 0, new tip |
+| §7.4.3's collect step on the host afterwards | `git -C <source> fetch <clone> HEAD:refs/freilauf/runs/<id>` → rc 0, the tip's commit reachable in the source |
+
+So the design's central compromise — the agent owns a whole repository, the
+operator's owns nothing the agent can write, and the objects are borrowed rather
+than copied — is not a plan any more. It is a thing that ran.
+
+---
+
+### 11b.4 (§11.10, §7.11) Every resource fence binds — and one does not bind as far as it looks
+
+The three controllers this host delegates were each set and then pushed past
+[measured]:
+
+| fence | flag | inside the container | pushed |
+|---|---|---|---|
+| memory | `--memory 256m` | `memory.max` = `268435456` | a 512 MB anonymous allocation → `OOMKilled=true`, `ExitCode=137` |
+| pids | `--pids-limit 64` | `pids.max` = `64` | a loop asking for 200 background processes stopped at the ceiling with `sh: can't fork: Resource temporarily unavailable` |
+| cpu | `--cpus 0.5` | `cpu.max` = `50000 100000` | two busy loops over 5 s consumed **0.50** cores; `nr_throttled` 50 |
+
+`--cpuset-cpus` and every io limit remain unavailable, exactly as §11a.6 predicted
+from the delegated controller list — the daemon has no controller to write.
+
+**The memory fence is not a fence against swap unless it is told to be**
+[measured]. `--memory 256m` alone leaves `memory.swap.max` at `268435456`: the
+container may swap a further 256 MB, and a run that is thrashing is not a run that
+gets stopped. Only `--memory-swap` equal to `--memory` sets `memory.swap.max` to
+`0`. §7.11's command line already writes `--memory 8g --memory-swap 8g`, so the
+design is correct as it stands — this measurement is why that pairing must not be
+"simplified" later. Docker refuses the two ways of getting it wrong, verbatim:
+*"You should always set the Memory limit when using Memoryswap limit, see usage"*
+and *"Minimum memoryswap limit should be larger than memory limit, see usage"*.
+
+---
+
+### 11b.5 (§11.9, §7.5) The network holds — and the built-in proxy engine cannot exist on this host
+
+**What holds.** `--network none` leaves the container with no routes at all and no
+reachable address; a `--internal` network gives it a route to its own subnet, an
+embedded resolver that answers container names, and nothing else — `wget` against
+an external name fails with `bad address`, against an external literal with
+`Network unreachable` [measured].
+
+**`gateway_mode_ipv4=isolated` exists on 29.8.0**, and it is `--internal`-only:
+`docker network create --opt com.docker.network.bridge.gateway_mode_ipv4=isolated`
+on a normal network is refused with *"gateway mode 'isolated' can only be used for
+an internal network"* [measured] — which is how §7.5.1 already pairs them, so
+nothing changes. What does change is a reading trap: with the option set, Docker
+**omits the `Gateway` key from the IPAM config entirely**, so
+`docker network inspect --format '{{.Gateway}}'` prints the string **`invalid
+IP`**, not an empty value [measured — the same network without the option prints
+its gateway normally, and the JSON carries `{"Subnet":"…"}` with no `Gateway`
+member]. Anything that parses that template and compares against `''` will read a
+correctly isolated network as a misconfigured one. §11.9 is answered: the option
+is available here, and discovery should read the JSON, not a Go template.
+
+**What is refuted: §7.5.2's `builtin` engine.** The design offers a ~200-line
+CONNECT proxy inside the hub process, one listener per run on the run's own
+bridge, and calls it *"the natural first implementation for phase 1"*. On a
+rootless daemon it cannot be implemented at all. Three measurements, and each one
+alone is fatal:
+
+- **The hub cannot bind the run network's gateway.** `listen(47999,
+  '<the internal network's gateway>')` from a plain node process on this host →
+  `EADDRNOTAVAIL: address not available`, and `ip addr` in the host namespace
+  shows no bridge for that subnet at all. rootlesskit runs with `--detach-netns`,
+  so every bridge the daemon creates lives in *its* network namespace, not the
+  host's [measured; the flag from rootlesskit's own command line].
+- **A container cannot reach the host, on any network.** From a container on the
+  default bridge and from one on an internal network alike, the hub's real
+  listening port was unreachable at the host's loopback, at the bridge gateway
+  address and at the host's VPN address — five attempts, five failures [measured].
+  rootlesskit's `--disable-host-loopback` is exactly this, by design.
+- **`host-gateway` is a false friend.** `--add-host x:host-gateway` resolves to
+  the `docker0` address of Docker's default bridge — and on this machine that
+  same address is *also* carried by a `docker0` interface left behind in the host
+  namespace by the **stopped, disabled rootful daemon**. So the name resolves,
+  `ping` answers, and the packets never leave rootlesskit's namespace; the hub is
+  not there [measured resolution and unreachability; the two-bridges-one-address
+  reading is inferred from `--detach-netns` plus the host's own interface list].
+  A container that "can see the host gateway" here can see nothing of the host.
+
+**Therefore the implementation**: under a rootless daemon the egress proxy must be
+a **container**, or `network.mode: allowlist` cannot work at all. §7.5.2's phase-1
+default has to be the containerised proxy, with `builtin` available only where the
+hub and the bridges share a network namespace — a rootful daemon — and refused,
+with a readable problem, where they do not. A profile that offers `builtin` on
+this posture would produce runs that start, look sandboxed, and route nothing.
+
+**The containerised topology, on the other hand, works exactly as §7.5.1 draws
+it** [measured]: a container started on the internal network and then given a
+second leg with `docker network connect bridge` holds `eth0` on the internal
+subnet and `eth1` on the bridge, has a default route only through the second, and
+resolves and reaches the public internet; a second container on the internal
+network alone resolves the first **by name** through the embedded resolver and
+reaches it. That is the proxy and the agent, with no host involvement anywhere.
+
+---
+
+#### 11b.5a What was done about it, later the same day
+
+The three measurements above stand, and nothing below withdraws one of them.
+What moved is the **conclusion**, and it moved because the refutation was
+narrower than it first read: §7.5.2 offers the built-in engine as *"a CONNECT
+proxy inside the hub process"*, and only the words after "inside" are what
+rootless Docker refuses. The policy engine — the matcher, the 403 body, the CIDR
+fence, the audit line — never depended on where the socket was.
+
+So the listener was **moved rather than abandoned**. `sandbox/proxy-entry.mjs`
+runs the same `server/sandbox/proxy.mjs` module as a container on the run's own
+internal network, out of three read-only bind mounts of the hub's source
+(`server/`, `lang/`, `sandbox/`), with a second leg to `bridge` — the topology
+this section had already measured — and the agent dials it by container name.
+Where the in-process listener works (a rootful daemon, or an operator who
+published one with `FREILAUF_SANDBOX_PROXY_BIND`) it is still used, because a
+machine that can run the listener for free should not pay for a container.
+Two things a placement is not: it is **not a second engine** (two matchers would
+be two allowlists that agree until the day one of them lets something out), and
+it is **not a field in a profile** (it is a fact about the daemon).
+
+The control channel could not be a management port — the hub cannot reach that
+container, which is this section's whole finding — and deliberately is not
+`docker exec` either: that container is `--read-only --cap-drop ALL
+--security-opt no-new-privileges` precisely so that it does not accept new
+processes. It is a **policy file**, written tmp+rename into a directory the proxy
+holds read-only, under the hub's data directory and not the run's (the run
+directory is mounted read-write into the *agent's* container, and a policy the
+agent can rewrite is not a policy). The proxy watches the directory rather than
+the file, because a bind-mounted file keeps pointing at the old inode after a
+rename. Denials come back the other way, by the proxy appending to its own
+`egress.jsonl` in its one writable mount and the hub tailing it.
+
+**Measured 2026-09-05, rootless Docker 29.8.0, `--internal` with
+`gateway_mode_ipv4=isolated`** — the strong posture this section said the
+built-in engine could not have:
+
+| probe | result |
+|---|---|
+| allowed host through the proxy | HTTP 200 |
+| denied host | `curl: (56) CONNECT tunnel failed, response 403` |
+| `git ls-remote` github.com (allowed) | the remote's `HEAD` |
+| `git ls-remote` gitlab.com (denied) | CONNECT tunnel failed, 403 |
+| `npm view left-pad` (denied registry) | `npm error 403` |
+| a live policy change | in force on the next connection, 0 retries |
+| audit-only | request passes, `would_deny` written to the audit, and the hub raises `sandbox:would_block` rather than `sandbox:blocked` |
+| the denial reaching the hub | `sandbox:blocked` |
+| teardown | container, network and proxy all reaped |
+
+So §7.5.2's phase-1 default did not have to become iron-proxy after all, which
+is worth stating plainly because this section is what would otherwise be read as
+the reason to reach for a binary nobody here has ever run.
+
+**And one defect the move made visible**, which the in-process placement had
+been carrying all along [measured]: a denied CONNECT ended its client socket with
+no `'error'` listener attached, and curl answers a refused tunnel by resetting
+it — so `read ECONNRESET` became an uncaught exception and the proxy process
+died one second after its first denial. In a container that is a run whose egress
+stops at its first blocked host. **In the in-process placement it is the hub** —
+scheduler, watcher and every SSE client — at the moment an agent first hits its
+own allowlist. The listener is registered before the DNS lookup now, on both
+entry points.
+
+**What is still not established** is in §11b.8: this is real clients through a
+real boundary, and it is not a coding agent doing a run behind one.
+
+---
+
+### 11b.6 (§7.11) `--tmpfs` is `noexec`, and omitting the flag does not undo it
+
+§7.11's pane command mounts `--tmpfs /tmp:rw,nosuid,size=2g`. Measured, that
+`/tmp` is **not executable** [measured]:
+
+| flag | resulting mount options | a binary copied into `/tmp` |
+|---|---|---|
+| `--tmpfs /tmp` | `rw,nosuid,nodev,noexec,relatime,…` | `Permission denied`, exit **126** |
+| `--tmpfs /tmp:rw,size=64m` | `rw,nosuid,nodev,noexec,relatime,size=65536k,…` | `Permission denied`, exit **126** |
+| `--tmpfs /tmp:exec` | `rw,nosuid,nodev,relatime,…` | runs, exit 0 |
+
+Docker's default for `--tmpfs` is `noexec,nodev`, and — this is the part that
+costs the time — **naming other options does not replace the defaults**: `rw` and
+`size` are added to them, `noexec` stays, and `exec` has to be written out to be
+removed. So the command line as §7.11 has it produces a `/tmp` that breaks
+`npm ci` with native modules (node-gyp execs out of a temporary directory), any
+installer that unpacks and runs a helper, and every tool that writes a script to
+`/tmp` and runs it — with `exit 126` and *"Permission denied"*, which reads as a
+file-mode problem rather than as a mount option. **Therefore the implementation**
+writes `--tmpfs /tmp:rw,exec,nosuid,size=2g`, keeps `noexec` on `/run` where it is
+deliberate, and states the choice in the profile rather than inheriting it.
+
+---
+
+### 11b.7 (§7.11) Docker 29's wordings, verbatim, because the classifier keys on them
+
+§7.11 asks for a verdict classifier in `tmuxVerdict()`'s shape — `ok` /
+`no_daemon` / `unreachable` — and §7.12's log-scanner family (line: *"the log
+scanner (filesystem, resources, docker-in-docker)"*) names the string
+**`Cannot connect to the Docker daemon`** as one of its patterns. Docker 29 does
+not say that any more [measured]:
+
+| situation | what Docker 29.8.0 says, verbatim |
+|---|---|
+| daemon socket absent | `failed to connect to the docker API at unix:///nonexistent/docker.sock; check if the path is correct and if the daemon is running: dial unix /nonexistent/docker.sock: connect: no such file or directory` |
+| socket present, no permission (the stopped rootful one) | `permission denied while trying to connect to the docker API at unix:///var/run/docker.sock` |
+| missing container | `docker inspect` writes `[]` to stdout, `error: no such object: <name>` to stderr, and exits **1** |
+| missing image | `Unable to find image '<ref>' locally` then `docker: Error response from daemon: pull access denied for <repo>, repository does not exist or may require 'docker login'` |
+| name conflict | `docker: Error response from daemon: Conflict. The container name "/<name>" is already in use by container "<id>". You have to remove (or rename) that container to be able to reuse that name.` |
+| unknown runtime | `docker: Error response from daemon: unknown or invalid runtime name: runsc` |
+
+Neither of the first two contains the string `Cannot connect to the Docker
+daemon`, and neither carries the `Is the docker daemon running?` question that
+used to follow it; the first says *"check if the path is correct and if the daemon
+is running"* instead — the same fact, phrased so that no substring of the old
+pattern survives — and the second does not mention the daemon's state at all.
+**A classifier that guesses at vendor strings ages**, and this is the evidence for
+it: the pattern was written against an earlier release's wording and was already
+stale on the first machine that had a daemon to test it against. **Therefore the implementation** classifies on what
+does not move — the exit status, and whether the socket path exists and is
+connectable — and treats the message as something to *print*, not to decide on;
+the string patterns stay only as a hint of last resort, in the same spirit as
+`tmuxVerdict()`, whose whole lesson is that "I could not answer you" must never be
+spent as "it is gone".
+
+The last row is also the only measurement gVisor allowed here (§11b.8).
+
+---
+
+### 11b.8 What is still open, and why
+
+Honest list. Nothing below is a judgement about the technology; each is a thing
+this machine cannot be asked.
+
+- **iron-proxy** (§4.5, §7.5.2). **This entry is answered — see §11b.9.** It read
+  "not installed, not on the `PATH`, not shipped by hermes' package here", and
+  that was true of the *binary* and never of the *image*: `ironsh/iron-proxy` is
+  public on Docker Hub under Apache-2.0, and pulling it took one command. The
+  reload endpoint, the per-request JSON log and the credential transform have all
+  now been driven. What stays open is §11.6 — SSE and HTTP/2 through it, under
+  load — which is about mileage rather than about mechanism.
+- **`secrets.mode: inject`** (§7.8). **Also answered — §11b.9.** It used to
+  inherit the line above wholesale; it now inherits its answer, with one
+  correction of its own that no amount of reading would have produced
+  (`require: true`). `env` and `none` still need nothing that is missing.
+- **gVisor** (§4.1). `runsc` is not on the `PATH` and the daemon lists only
+  `io.containerd.runc.v2` and `runc`. The only measurement possible was the
+  refusal — `unknown or invalid runtime name: runsc` — which at least confirms
+  that `runtime` is a per-container flag the design can set, and that a missing
+  runtime fails at `docker run` with a namable error rather than silently falling
+  back to `runc`.
+- **podman** (§7.7's third row). Still not installed, so `--userns=keep-id` and
+  `:idmap` remain [documented].
+- **AppArmor on containers** (§7.11's `--security-opt`). Confirmed only
+  *negatively*: on this host nothing is confined and the flag is ignored
+  (§11b.1). Whether a rootful daemon on a machine with `docker-default` loaded
+  applies it as documented was not measured, because there is no rootful daemon
+  here to ask.
+- **§11.2 (OAuth token copies).** Unchanged and deliberately so: the experiment
+  needs a throwaway Anthropic account, and the design is arranged never to be
+  exposed to the answer (§11a.7).
+- **A real coding agent inside a container — answered for one harness, later the
+  same day.** This entry used to read "not one harness CLI has been run in one".
+  **opencode 1.18.29 has now done a whole run** in `freilauf/agent-opencode:1.18.29`
+  on this daemon, `network.mode: open`, against a sandbox hub of its own: the
+  second attempt reported `done` and had its branch merged into `origin/main`
+  about a minute after it started, unassisted (`started → tmux_started →
+  agent_working → finish_started → finish_clean → merged`). Measured with the
+  container up: the tmux pane really carries the container's TTY (`capture-pane`,
+  `send-keys -l`, a bracketed paste arriving unsubmitted), `pane-died` carries
+  the container's own exit status (42 and 125), the finish gate and the
+  integrator read the working copy through the box and collect its tip, ending
+  the run leaves no container, network or proxy, and `docker stats` gives the
+  sessions page a real number (786 MB against the ~10 MB the pane's process tree
+  would have reported — §11a.5's twentyfold gap, confirmed under a live agent).
+
+  **Still open, and not narrowed by that run:** claude, cursor and hermes, none
+  of which has ever had its CLI started in a container — so the seeded home
+  found at its container path, the resume forms out of that home (§11.4),
+  cursor's transcript slug (§11.8) and claude-as-container-root under a rootless
+  daemon (§11.2's `IS_SANDBOX` reading) are exactly as open as they were. So is
+  `--detach-keys` under a live TUI, which §11a.5 could only mark [documented],
+  and so is the hub socket of §7.6: the run above reported through the
+  `inbox.jsonl` fallback, because the socket was mounted as a **directory** until
+  that run exposed it. And no run of any harness has yet gone through an enforced
+  allowlist. That last one narrowed the same day without being answered: the
+  boundary itself now enforces on this daemon, from a proxy container of its own,
+  measured against real clients (§11b.5a) — but the run above used
+  `network.mode: open`, so which hosts a real claude, opencode, cursor or hermes
+  session reaches that the presets do not name is exactly as unknown as it was.
+  `auditOnly` is the way to find that out without paying for it.
+
+  **What the run cost, and the rule it leaves behind.** Five faults, all fatal,
+  all of them green in the whole test suite beforehand: the exec identity
+  (§7.2/§7.7), the socket mounted as a directory, the report fallback writing to
+  `<run home>/agents/runs` because the runs-directory seam was not passed into
+  the container, containers started as `--name fl- --label freilauf.run=` because
+  the document and its reader named the run differently, and the pane's `docker`
+  falling back to the rootful socket with no `DOCKER_HOST`. Four of the five look
+  like a perfectly healthy run from every page the hub has. **A `docker` shim
+  cannot answer whether an account exists inside an image or whether a mount
+  point came out a socket** — so for this layer a green suite is evidence about
+  the hub's own logic and about nothing else.
+
+
+### 11b.9 iron-proxy, and `secrets.mode: inject`, actually run (2026-09-05, evening)
+
+The engine that three sections of this document depended on and no section had
+ever executed. §11b.8 said it was "not installed — not on the `PATH`, not
+shipped by hermes' package here", and every word of that was true about the
+**binary** and irrelevant: iron-proxy publishes a **Docker image**, and this hub
+starts its proxy as a container anyway (§11b.5a).
+
+| | |
+|---|---|
+| registry | `docker.io/ironsh/iron-proxy` — public, Apache-2.0, no login, 28 661 pulls |
+| source | https://github.com/paradigmxyz/iron-proxy (`ironsh/iron-proxy` redirects there) |
+| version | `0.49.0`, the newest tag that is not a release candidate on this day; `latest` pointed at the same digest |
+| digest | `sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da` |
+| size | 84 MB, entrypoint `iron-proxy`, flags `-config` and `-token` and nothing else |
+| pinned in | `sandbox/images/ironproxy.ref`, checked by a unit test against the code's own constants |
+
+#### The setup
+
+`fl-ip-agent` (an agent container holding **only a placeholder**), `fl-ip-proxy`
+(iron-proxy, holding the real credential in its environment), and a stub
+upstream that echoes back the headers it received, on network aliases
+`api.stub.test` and `other.stub.test`. Two CAs: one the proxy mints leaves from
+and the agent trusts, one the stub's own certificate is signed by and the proxy
+trusts (`SSL_CERT_FILE`, which Go honours). No provider was called and no quota
+was spent — the point was never the vendor, it was the swap.
+
+The config was not hand-written for the occasion: it is the string
+`ironProxyConfig()` produces, so what was measured is what the hub writes.
+
+#### What was proven
+
+| asked | answer |
+|---|---|
+| `docker exec fl-ip-agent printenv STUB_API_KEY` | `fl-token-PLACEHOLDER-9f3c11` |
+| agent → **the credential's declared host** | upstream saw `X-Api-Key: sk-REALKEY-…` |
+| agent → **another allowed host**, same value | upstream saw `fl-token-PLACEHOLDER-9f3c11` |
+| agent → a host **not on the allowlist** | `curl: (56) CONNECT tunnel failed, response 403` |
+| the real key in `proxy.yaml` \| audit log \| `docker inspect` of the agent | 0 \| 0 \| 0 |
+| `POST /v1/reload` with the bearer token \| without it | 200 \| 401 |
+
+#### What the binary corrected, and why only one of them was loud
+
+This is the part worth carrying forward, because **four of the five guesses
+failed silently** — an unknown key inside a transform's `config` is accepted and
+ignored. A config full of policy that does nothing starts as cleanly as a
+correct one.
+
+| guess | reality |
+|---|---|
+| `log: { level, format }` | `format` does not exist — **the one loud failure** (`field format not found in type config.Log`), and therefore the only reason to distrust the others' silence |
+| DNS not mentioned | `dns.enabled: false` is **required**; the DNS server is on by default and the binary refuses to start with `dns.proxy_ip is required` |
+| `tls` not mentioned | `tls.ca_cert` **and** `ca_key` are required in the default `mitm` mode. `sni-only` needs neither and sees only a hostname — which is why `inject` and `tlsTerminate` are one capability |
+| any CA will do | it must carry `keyUsage=critical,keyCertSign,cRLSign`. Without it the process starts and then dies: `initializing cert cache: CA certificate missing KeyUsageCertSign` |
+| `management.api_key_env` just names a variable | that variable **must be set**, or the binary refuses to start. The hub always mints one; a hand-run config does not |
+| `deny_domains` beside `domains` | **does not exist**, and is swallowed. Deny hosts are subtracted from the allowlist in the hub; a deny that only narrows a wildcard cannot be expressed here at all and is reported |
+| `methods` beside `domains` | **swallowed**. A method restriction is `rules: [{ host, methods, paths }]` |
+| the audit line's fields at the top level | the *names* were right (`host`, `method`, `path`, `action`, `status_code`, `duration_ms`, `rejected_by`); they sit inside an `audit` object. The mapper read the top level, so it would have returned null for every real line and left `egress.jsonl` empty — a silence indistinguishable from a quiet run |
+
+#### And the one that was not a config field: `require: true`
+
+The `secrets` transform's `require` rejects a request to a declared host that
+does not carry the placeholder. It is exactly the fence one wants — a workload
+must not be able to reach that host with a credential of its own — and on the
+path Freilauf uses it **rejects everything**.
+
+Freilauf reaches the proxy through `HTTPS_PROXY`, so the first thing that
+arrives is a CONNECT, and iron-proxy evaluates a **synthetic CONNECT — carrying
+no headers at all** — against the transform pipeline. Measured: every call to
+the one host the credential existed for died as a 403, `rejected_by: "secrets"`,
+`annotations: { rejected: "STUB_API_KEY" }` — while calls to hosts the
+credential was *not* declared for went through untouched. The one request that
+had to work was the only one that could not.
+
+Freilauf does not write it. What that costs is the bypass fence and nothing
+about the swap itself; it comes back the day the sandbox routes through
+iron-proxy's DNS interception (§7.5.2's other option) instead of a proxy
+variable, because a real request with real headers is what the transform would
+then see. It is the clearest argument in this whole document for measuring a
+security control rather than reading about one: `require: true` is *documented*
+to do the right thing, it *does* the right thing, and in this topology the right
+thing is a wall across the only door.
+
+#### What this does NOT establish
+
+Mileage, not mechanism. A handful of curls against one stub says nothing about a
+long-lived server-sent-event stream through the MITM path (a coding agent's
+whole conversation is one), about `max_request_body_bytes` under a large
+request, about several runs' proxies at once, or about a leaf-certificate cache
+over hours. §11.6 stays open, and no coding agent has yet run behind this
+engine. The e2e suite still does not exercise it: the image is not something a
+test may assume, and the suite's `docker` shim cannot answer what a real proxy
+does — so the measured facts are pinned as unit tests over the string the hub
+writes and over log lines copied verbatim out of `docker logs`.
 
 ---
 

@@ -35,6 +35,12 @@ import {
   pluginsInstall, pluginsUninstall, pluginsScan, pluginsDiscovery,
 } from './plugins/web.mjs'
 import {
+  pageSandboxSettings, sandboxSettingsSave, sandboxProfilePage, sandboxProfileSave,
+  sandboxProfileDelete, sandboxBuild, sandboxDryRun, sandboxAdopt,
+  sandboxAllow, sandboxDeny, sandboxReconfigure, sandboxBypass, sandboxCard,
+} from './sandbox/pages.mjs'
+import { streamAuditChain } from './sandbox/audit.mjs'
+import {
   pageNotifications, notificationsSave, notificationsTest,
   notifierSetupPage, notifierSetupAction, notifierSetupJson,
 } from './notifications.mjs'
@@ -301,6 +307,22 @@ async function dispatch(req, res, url, path, formBody) {
   // Freilauf's own agent skills (server/skills.mjs) — the two switches, and the
   // sync they trigger. Its own page because saving here DELETES FILES, and a
   // handler that owns the whole request is what can act on that transition.
+  // Settings → Sandbox: the hub layer of §7.3, the profile editor, the
+  // discovery result and the image builds. Its own page and its own save, like
+  // Merge and Cleanup — a settings key that renders on one page and is dropped
+  // by another page's allowlist is exactly the failure `settingsKeys()` in
+  // pages.mjs was made a function for.
+  if (req.method === 'GET' && path === '/settings/sandbox') return pageSandboxSettings(req, res, url)
+  if (req.method === 'POST' && path === '/settings/sandbox') return sandboxSettingsSave(req, res, url, formBody)
+  if (req.method === 'GET' && path === '/settings/sandbox/profile') return sandboxProfilePage(req, res, url)
+  if (req.method === 'POST' && path === '/settings/sandbox/profile') return sandboxProfileSave(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/settings/sandbox/profile/delete') return sandboxProfileDelete(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/settings/sandbox/build') return sandboxBuild(req, res, url, formBody)
+  // The two buttons that live under the repo form (§7.12.5): test the policy
+  // before a run meets it, and adopt what audit-only already saw.
+  if (req.method === 'POST' && path === '/repos/sandbox/dry-run') return sandboxDryRun(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/repos/sandbox/adopt') return sandboxAdopt(req, res, url, formBody)
+
   if (req.method === 'GET' && path === '/settings/skills') return pageSkillSettings(req, res, url)
   if (req.method === 'POST' && path === '/settings/skills') return skillSettingsSave(req, res, url, formBody)
   if (req.method === 'POST' && path === '/settings/skills/sync') return skillSettingsSync(req, res, url, formBody)
@@ -659,6 +681,15 @@ async function api(req, res, url) {
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/kill$/))) {
     const run = getRun(m[1])
     const { sh } = await import('./util.mjs')
+    // The container goes FIRST, and the order is not tidiness (§7.11): the
+    // pane's process IS the container's client, so killing the session first
+    // leaves a container whose client has gone — the orphan case §8.18 is
+    // about, rather than a clean stop. An unsandboxed run answers `stopped:
+    // false` and nothing happens.
+    if (run) {
+      const { stopRunContainer } = await import('./sessions.mjs')
+      try { await stopRunContainer(run) } catch { /* fail-soft: the session still has to go */ }
+    }
     if (run?.tmux_session) await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
     // 'done' and 'aborted' are final answers, so a click can only close the
     // session they left standing: 'done' came through cleanly and must not be
@@ -793,6 +824,13 @@ async function api(req, res, url) {
       branchMode: branchFelt ? b.branch_mode : null,
       branchPattern: branchFelt ? b.branch_pattern : null,
       keepOnBranch: branchFelt ? (b.keep_on_branch === '1' || b.keep_on_branch === 'on' ? 1 : 0) : null,
+      // The two sandbox fields the card offers while a run has not started.
+      // Handed over RAW: `editRun()` compares them against the values that mean
+      // yes and runs the overrides through `validateSandboxOverrides()` — a
+      // coercion here would make the string '0' switch a run INTO a container,
+      // which is the entry AGENTS.md carries twice over.
+      sandbox: b.sandbox !== undefined ? b.sandbox : null,
+      sandboxOverrides: b.sandbox_overrides !== undefined ? b.sandbox_overrides : null,
     }, problems)
     if (problems.length) {
       if (wantsHtml(req)) return problemPage(req, res, t('run.edit'), problems, `/runs/${run.id}`)
@@ -808,6 +846,34 @@ async function api(req, res, url) {
   //
   // "Mark as done" is exactly what `fl-report done` is, only typed by a human:
   // same path, same finish gate, same everything.
+  // ---- the sandbox: the audit export, and the three decisions of §7.12.2 ----
+  //
+  // The whole feature is judged on what happens when the walls block something
+  // the agent needs, so these four routes are the point rather than a detail:
+  // allow it here, allow it for the repository, tell the agent it stays blocked,
+  // or — where the hub's own policy permits it, and never quietly — take the
+  // walls down for this run.
+  if (req.method === 'GET' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/audit\.jsonl$/))) {
+    const run = getRun(m[1])
+    if (!run) return json(res, 404, { ok: false, error: t('api.unknown_run') })
+    streamAuditChain(run.id, res, { run })
+    return
+  }
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/sandbox\/(allow|deny|reconfigure|bypass)$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const b = await form(req)
+    const what = m[2]
+    const r = what === 'allow' ? await sandboxAllow(run, b.host, b.scope)
+      : what === 'deny' ? await sandboxDeny(run, b.host)
+      : what === 'reconfigure' ? await sandboxReconfigure(run, b.overrides)
+      : await sandboxBypass(run, b.reason)
+    // A refusal has a reason, and a redirect back to the run would swallow it —
+    // the page would look as if the click had done nothing at all. Same rule
+    // the "Merge now" button follows one screen down.
+    if (!r.ok && wantsHtml(req)) return problemPage(req, res, t('sandbox.page.card_title'), [r.error], `/runs/${run.id}`)
+    return answer(req, res, r.ok ? 200 : 400, r, `/runs/${run.id}`)
+  }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/mark-done$/))) {
     const run = getRun(m[1])
     if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
@@ -986,8 +1052,10 @@ async function fragmentApi(req, res, url) {
     const agentName = run.agent_id
       ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null
     const title = runTitle(run, agentName, t('overview.single_run'))
+    const repo = getRepo(run.repo_id)
     return fragment(res, runDetailHead(run, { title })
-      + runEditCard(run) + integrationSection(run, getRepo(run.repo_id)) + runMetrics(run) + runEvents(run.id))
+      + runEditCard(run) + await sandboxCard(run, repo) + integrationSection(run, repo)
+      + runMetrics(run) + runEvents(run.id))
   }
 
   // There is deliberately no per-session fragment. The sessions page ends a

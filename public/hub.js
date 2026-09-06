@@ -902,6 +902,52 @@
     goalSync()
   }
 
+  // ---- the sandbox: only where the coding agent has one ----
+  //
+  // Which coding agents can be run in a container is the plugins' answer, not
+  // this file's: the server writes it into `data-sandbox-harnesses`, the same
+  // mechanism as the goal block above and with the same non-negotiable detail —
+  // hidden means DISABLED, because a field one cannot see must not still
+  // submit. Switching the coding agent would otherwise send along a network
+  // policy the operator can no longer read.
+  //
+  // Where the goal block simply vanishes, this one stays and SAYS why. "The
+  // sandbox field disappeared" reads as "there is no sandbox question here";
+  // the truth is "this run goes to the host", and that belief is the one thing
+  // a sandbox feature must never leave someone holding.
+  //
+  // Delegated, and re-synced over every block on the page, because the same
+  // fieldset also lives inside the swap-in-able "Edit this run" card: a direct
+  // listener dies when the live channel replaces #run-edit (same reason as the
+  // start-time switch and the branch rule above). What the operator typed is
+  // left standing either way, so switching back and forth costs nothing.
+  function syncSandboxBox(box, harnessSel) {
+    // No list at all: the "Edit this run" card's block, which belongs to ONE
+    // run whose coding agent cannot change any more. Nothing to switch.
+    if (box.dataset.sandboxHarnesses === undefined) return
+    var koennen = box.dataset.sandboxHarnesses.split(/\s+/).filter(Boolean)
+    var on = koennen.indexOf((harnessSel && harnessSel.value) || '') >= 0
+    var note = box.querySelector('[data-sandbox-unsupported]')
+    var controls = box.querySelector('[data-sandbox-controls]')
+    if (note) note.hidden = on
+    if (!controls) return
+    controls.hidden = !on
+    controls.querySelectorAll('select, textarea, input').forEach(function (el) { el.disabled = !on })
+  }
+  function syncSandboxBoxes(root) {
+    (root || document).querySelectorAll('[data-sandbox-block]').forEach(function (box) {
+      var form = box.closest('form') || document
+      syncSandboxBox(box, form.querySelector && form.querySelector('select[name=harness]'))
+    })
+  }
+  syncSandboxBoxes()
+  document.addEventListener('change', function (ev) {
+    var el = ev.target
+    if (!el || !el.matches || !el.matches('select[name=harness]')) return
+    var form = el.form || (el.closest && el.closest('form'))
+    if (form) syncSandboxBoxes(form)
+  })
+
   // ---- provider and model selection ----
   // The list arrives AFTER rendering via fetch: if a provider API hangs, a
   // text field is still there immediately to type the slug into. The search is

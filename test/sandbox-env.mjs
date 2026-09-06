@@ -175,12 +175,68 @@ export function newSandbox({ prefix = 'freilauf-test-', keep = false } = {}) {
   // because after the suite exits nothing else distinguishes the two.
   if (keep) { try { writeFileSync(join(SB, 'keep'), 'kept for debugging\n') } catch { /* best effort */ } }
 
-  const state = { hub: null, db: null, port: 0, base: '', cleanedUp: false }
+  // ---- the container runtime, shimmed (SANDBOX_RESEARCH.md §7.13, "Tests") ----
+  // The development machine has no Docker, and the sandbox has to be covered
+  // there too. `test/shims/docker` answers for it: it logs every argv and reads
+  // its answers out of DOCKER_STATE, and its `run` executes the wrapped command
+  // on the host — so a sandboxed run really starts a tmux session and every
+  // assertion downstream of the launch keeps holding.
+  //
+  // SHIM_DIR holds the launcher and NOTHING else. It goes first on the hub's
+  // PATH, so a bare `docker` (discovery, scanSystem) finds the shim; a directory
+  // that also held the fl-start stub would shadow the real fl-* scripts a
+  // --echt run needs.
+  const SHIM_DIR = join(SB, 'shim')
+  const DOCKER_STATE = join(SB, 'docker')
+  const DOCKER_BIN = join(SHIM_DIR, 'docker')
+  const SANDBOX_DIR = join(SB, 'sandbox')
+
+  const state = { hub: null, db: null, port: 0, base: '', cleanedUp: false, sandbox: false }
 
   async function build() {
     // Before anything of our own: take back what a killed suite left standing.
     await sweepOrphans(SB)
     for (const d of ['data', 'runs', 'worktrees', 'integrate', 'bin', 'plugins', 'skillhome']) mkdirSync(join(SB, d), { recursive: true })
+    for (const d of [SHIM_DIR, DOCKER_STATE, join(DOCKER_STATE, 'answers'),
+      SANDBOX_DIR, join(SANDBOX_DIR, 'ca'), join(SANDBOX_DIR, 'sock')]) mkdirSync(d, { recursive: true })
+    // The launcher binds the shim to THIS sandbox's state directory. The repo's
+    // own test/shims/docker stays generic on purpose — it is also the pane
+    // command of a sandboxed run, started by tmux with an environment the hub
+    // composed, and a shim that had to inherit its state path would find none.
+    //
+    // It also answers the ONE handshake a shimmed container cannot: the egress
+    // proxy in `placement: 'container'` is waited for by
+    // `startBuiltinContainer()` until `ready.json` appears in its out
+    // directory, and the shim starts no process that could write one — so
+    // without this, every container-placement launch would fail after twenty
+    // seconds with "the proxy container is not ready" and the placement the
+    // production path uses would stay untestable. The launcher recognises that
+    // container by the label the argv already carries (`freilauf.role=proxy`),
+    // finds the out directory in the `-v <host>:/var/freilauf/out` mount the
+    // hub itself wrote, and writes the marker the real proxy entry writes
+    // there. It is the shim standing in for the proxy process, exactly as
+    // `run` standing in for a container is what makes every other sandbox
+    // assertion hold — and it touches nothing when the label is absent.
+    writeFileSync(DOCKER_BIN,
+      `#!/usr/bin/env bash\nexport FL_DOCKER_STATE=${JSON.stringify(DOCKER_STATE)}\n`
+      + `${JSON.stringify(join(PROJECT, 'test', 'shims', 'docker'))} "$@"\n`
+      + 'status=$?\n'
+      + 'if [ "$1" = "run" ]; then\n'
+      + '  proxy=0; out=""\n'
+      + '  for a in "$@"; do\n'
+      + '    case "$a" in\n'
+      + '      freilauf.role=proxy) proxy=1 ;;\n'
+      + '      *:/var/freilauf/out|*:/var/freilauf/out:*) out="${a%%:/var/freilauf/out*}" ;;\n'
+      + '    esac\n'
+      + '  done\n'
+      + '  if [ "$proxy" = 1 ] && [ -n "$out" ] && [ -d "$out" ]; then\n'
+      + '    printf \'{"ok":true,"shim":true}\\n\' > "$out/ready.json"\n'
+      + '  fi\n'
+      + 'fi\n'
+      + 'exit $status\n')
+    chmodSync(DOCKER_BIN, 0o755)
+    writeFileSync(join(DOCKER_STATE, 'calls.jsonl'), '')
+    writeFileSync(join(DOCKER_STATE, 'created.txt'), '')
 
     // Extra-skill dummy (planning: opt-in skills outside the skill autoload folders)
     mkdirSync(join(SB, 'zusaetze', 'e2e-fleiss'), { recursive: true })
@@ -279,7 +335,123 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
    * `realAgents` hands the runs to the real ~/.local/bin/fl-start (and needs the
    * provider keys back in the environment); everything else keeps the stub.
    */
-  async function startHub({ realAgents = false, keys = {}, env = {}, welcome = false } = {}) {
+  /**
+   * Every FREILAUF_* seam the sandbox feature has, pointed into $SB.
+   *
+   * `sandbox: false` is the DEFAULT and it is a hard off: no runtime binary is
+   * named, and FREILAUF_SANDBOX_OFF says so outright, so every test that
+   * existed before this takes byte for byte the path it took before — which is
+   * the one rule the whole feature is built on.
+   *
+   * `sandbox: true` names the shim and fences everything the feature writes:
+   * the run homes and clones already live under RUNS_DIR/WORKTREES_DIR, but
+   * the sandbox directory, the CA and the hub↔agent socket are new places, and
+   * FREILAUF_SKILLS_HOME is the precedent for what an unfenced one costs — a
+   * suite that installed into, and then deleted from, the operator's own home.
+   */
+  const SANDBOX_ENV_KEYS = [
+    'FREILAUF_SANDBOX_OFF', 'FREILAUF_SANDBOX_RUNTIME_BIN', 'FL_DOCKER_STATE',
+    'FREILAUF_SANDBOX_DIR', 'FREILAUF_SANDBOX_CA_DIR', 'FREILAUF_SANDBOX_SOCKET_DIR',
+    'FREILAUF_SANDBOX_INFO_CACHE_MS', 'FREILAUF_SANDBOX_PROXY_BIND',
+    // WHERE the built-in listener runs, and out of which image. The placement
+    // seam OUTRANKS the bind below, so an operator who has `…_PLACEMENT=container`
+    // in their shell would make this suite start a container per sandboxed run —
+    // the same class of leak FREILAUF_SKILLS_HOME is the precedent for.
+    'FREILAUF_SANDBOX_PROXY_PLACEMENT', 'FREILAUF_SANDBOX_PROXY_IMAGE',
+    // The two endpoint seams. See `sandboxSeams()` below for what each says.
+    'FREILAUF_SANDBOX_DOCKER_HOST', 'FREILAUF_SANDBOX_RUNTIME_FORCE',
+    // Who drives the container passes. See `sandboxSeams()`.
+    'FREILAUF_SANDBOX_REAPER_OFF',
+  ]
+
+  /** The PATH without the shim directory — what "no runtime at all" has to mean. */
+  function pathWithoutShim() {
+    return String(process.env.PATH ?? '').split(':').filter(p => p !== SHIM_DIR).join(':')
+  }
+
+  /**
+   * WHICH PLACEMENT A SANDBOXED SUITE DRIVES — and why this is a parameter now.
+   *
+   * `sandbox: true` used to set `FREILAUF_SANDBOX_PROXY_BIND` and nothing else,
+   * and `proxyPlacement()` answers `'process'` for anything with a bind set. So
+   * whatever daemon the suite ran against, it exercised the IN-PROCESS
+   * placement — and under a rootless daemon that is exactly the one production
+   * does not use. The first end-to-end fenced run only came up after the bind
+   * was unset by hand, which is the signature of a fence a green suite could
+   * never have caught: a test that structurally cannot reach the production
+   * path is not covering it.
+   *
+   * So `sandbox` says which: `true` (or `'process'`) keeps the in-process
+   * listener every existing sandbox group was written against, `'container'`
+   * drives the placement a rootless daemon really takes. Either way the
+   * placement is NAMED rather than implied — the bind stays as the fence
+   * against a future default that binds somewhere a live hub can see, and it
+   * no longer decides anything, because the seam that outranks it is set.
+   */
+  function placementOf(sandbox) {
+    return sandbox === 'container' ? 'container' : 'process'
+  }
+
+  function sandboxSeams(sandbox) {
+    // Off is a HARD off: the switch says so, no runtime binary is named, the
+    // shim is taken off the PATH again — a leftover `docker` there would let a
+    // suite that asked for no sandbox find one anyway, which is precisely the
+    // premise the "with the sandbox off, nothing calls the runtime" check rests
+    // on — and the endpoint seam points at a socket that does not exist, which
+    // is the same fence `FREILAUF_CURSOR_AUTH` and `FREILAUF_CLAUDE_CREDENTIALS`
+    // are: it makes "there is no runtime here" true on a machine that HAS one.
+    // Since rootless Docker was installed on the development host, the two are
+    // no longer the same thing, and a suite whose result depends on the hardware
+    // is a suite nobody can trust.
+    if (!sandbox) {
+      return {
+        FREILAUF_SANDBOX_OFF: '1',
+        FREILAUF_SANDBOX_DOCKER_HOST: join(SB, 'no-such-docker.sock'),
+        FREILAUF_SANDBOX_RUNTIME_FORCE: '',
+        PATH: pathWithoutShim(),
+      }
+    }
+    return {
+      FREILAUF_SANDBOX_RUNTIME_BIN: DOCKER_BIN,
+      // The shim is a SCRIPT, not a daemon, so there is no socket to probe: the
+      // force seam says the reachability question has been answered elsewhere.
+      // (A named binary implies it too — this is the seam saying so out loud,
+      // so the suite does not depend on that implication.)
+      FREILAUF_SANDBOX_RUNTIME_FORCE: '1',
+      FREILAUF_SANDBOX_DOCKER_HOST: '',
+      FL_DOCKER_STATE: DOCKER_STATE,        // for a bare `docker` off the PATH
+      FREILAUF_SANDBOX_DIR: SANDBOX_DIR,
+      FREILAUF_SANDBOX_CA_DIR: join(SANDBOX_DIR, 'ca'),
+      FREILAUF_SANDBOX_SOCKET_DIR: join(SANDBOX_DIR, 'sock'),
+      // The discovery cache is keyed on time as well as on the binary, and a
+      // test that switches the shim's mode file expects the next call to ask
+      // again rather than to be handed a minute-old answer.
+      FREILAUF_SANDBOX_INFO_CACHE_MS: '0',
+      // The built-in proxy already defaults to 127.0.0.1:0; naming it is the
+      // fence against a later default that binds somewhere a live hub can see.
+      // It is NOT what decides the placement any more (see `placementOf`): the
+      // seam below outranks it, so the suite can drive either side.
+      FREILAUF_SANDBOX_PROXY_BIND: '127.0.0.1',
+      FREILAUF_SANDBOX_PROXY_PLACEMENT: placementOf(sandbox),
+      // THE SUITE OWNS THE CONTAINER PASSES, exactly as FREILAUF_INTEGRATOR_OFF
+      // above hands it the integrator's clock, and for the same reason one layer
+      // out: the sandbox groups reap by hand (`reconcileContainers(hubId)`) while
+      // the hub's own 30-second timer was reaping the SAME shim state four or
+      // five times through a two-minute group. Every `stop`/`rm`/`network-rm`
+      // then appeared twice in the call log, "the reaper takes the run's network
+      // with its containers" saw two `ps` entries for one call, and the set of
+      // failing checks moved from run to run — the signature of a second driver,
+      // not of a broken assertion.
+      FREILAUF_SANDBOX_REAPER_OFF: '1',
+      PATH: `${SHIM_DIR}:${pathWithoutShim()}`,
+    }
+  }
+
+  async function startHub({ realAgents = false, keys = {}, env = {}, welcome = false, sandbox = false } = {}) {
+    // The VALUE, not a boolean: `'container'` has to survive as far as
+    // `prepareWatcher()`, or a suite driving the container placement would
+    // run its watcher passes against the in-process one.
+    state.sandbox = sandbox ? (sandbox === 'container' ? 'container' : true) : false
     state.port = await freePort()
     state.base = `http://127.0.0.1:${state.port}`
     const environment = {
@@ -293,7 +465,26 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // worktree is a race nobody wants to debug. The hub still integrates on
       // the report path, which is where it matters.
       FREILAUF_INTEGRATOR_OFF: '1',
+      // …and the suite owns the WATCHER's clock for the same reason, one layer
+      // out. `prepareWatcher()` below imports watcher.mjs into THIS process and
+      // drives every pass by hand; the hub was meanwhile running its own
+      // 30-second interval against the same database, so two passes read one
+      // run's log from the same position and reported the same line twice —
+      // and "twice within ten minutes" is what promotes a yellow observation to
+      // a red incident. Every failure that produced was on an "exactly once" or
+      // an escalation level, and none of them was reproducible: three
+      // consecutive runs of one commit failed 2, 3 and 1 checks, never the same
+      // ones. The hub goes on watching on the paths that are driven by an
+      // event (a report, a hook) — only the clock moves to the suite.
+      FREILAUF_WATCHER_OFF: '1',
       FREILAUF_QUOTA_JSON: join(SB, 'quota.json'),
+      // The report socket of §7.6 resolves to $XDG_RUNTIME_DIR/freilauf/hub.sock
+      // when nothing names it — a path OUTSIDE the sandbox that a live hub and
+      // every parallel suite would bind in turn, each unlinking the last one's
+      // socket. Named here rather than in the one group that is about it, so a
+      // suite cannot forget: it is the same fence as FREILAUF_SKILLS_HOME, and
+      // it is on for every hub because the socket is not a sandbox feature.
+      FREILAUF_HUB_SOCKET: join(SB, 'hub.sock'),
       // The report CLI the prompt names and the claude hooks call. Without it
       // the hub points at ~/.local/bin/fl-report — whatever the last deploy
       // installed there, or nothing at all on a machine that has not deployed
@@ -344,6 +535,12 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       FREILAUF_INCIDENT_NOTIFY_DELAY_MS: '0',
       NODE_OPTIONS: '--disable-warning=ExperimentalWarning',
     }
+    // …after `...process.env`, and with the whole set cleared first: this
+    // process may itself have been prepared for a sandboxed watcher pass, and a
+    // leftover runtime binary in the hub's environment would sandbox a suite
+    // that asked for none.
+    for (const k of SANDBOX_ENV_KEYS) delete environment[k]
+    for (const [k, v] of Object.entries(sandboxSeams(sandbox))) environment[k] = v
     // A suite may override or add to the hub's environment — e.g. shorten the
     // usage/balance caches so a browser test does not wait a full minute.
     for (const [k, v] of Object.entries(env)) environment[k] = v
@@ -383,6 +580,13 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     // the honest way round: opting IN to the redirect in the one place that is
     // about it, rather than every other suite opting out of it.
     if (welcome === false) setSetting('welcome_hide', '1')
+    // The two settings that are paths rather than switches. Set here and not by
+    // the test, so a suite cannot forget one: a CA directory outside $SB would
+    // be a file written into the operator's own data directory by every run.
+    if (sandbox) {
+      setSetting('sandbox_ca_dir', join(SANDBOX_DIR, 'ca'))
+      setSetting('sandbox_runtime', 'docker')
+    }
     return state.db
   }
 
@@ -398,13 +602,21 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
    * This writes the FREILAUF_* variables into THIS process, so it belongs to the one
    * sandbox a suite works with.
    */
-  async function prepareWatcher() {
+  async function prepareWatcher({ sandbox = state.sandbox } = {}) {
+    // The same seams, in THIS process: a watcher pass triggered from the suite
+    // reads server/sandbox/* out of the test process, so an unfenced path here
+    // would reach out of the sandbox exactly as it would from the hub. Cleared
+    // first — a suite that switches the sandbox on for one group and off again
+    // must not leave a runtime binary named behind it.
+    for (const k of SANDBOX_ENV_KEYS) delete process.env[k]
+    for (const [k, v] of Object.entries(sandboxSeams(sandbox))) process.env[k] = v
     process.env.FREILAUF_DATA_DIR = join(SB, 'data')
     process.env.FREILAUF_RUNS_DIR = join(SB, 'runs')
     process.env.FREILAUF_WORKTREES_DIR = join(SB, 'worktrees')
     process.env.FREILAUF_INTEGRATE_DIR = join(SB, 'integrate')
     process.env.FREILAUF_INTEGRATOR_OFF = '1'
     process.env.FREILAUF_QUOTA_JSON = join(SB, 'quota.json')
+    process.env.FREILAUF_HUB_SOCKET = join(SB, 'hub.sock')
     process.env.FREILAUF_REPORT_SCRIPT = join(PROJECT, 'bin', 'fl-report')
     process.env.FREILAUF_CLAUDE_CREDENTIALS = join(SB, 'missing-claude-credentials.json')
     process.env.FREILAUF_START_SCRIPT = STUB
@@ -444,6 +656,114 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     })
   }
 
+  // ------------------------------------------------- the container runtime shim
+  /**
+   * How a test talks to the shim: it reads the argv log and dictates the
+   * answers. Nothing here starts a container — there are none — so every
+   * question is "what did the hub SAY", which is the only question a machine
+   * without Docker can answer and, for a command line, the only one worth
+   * asking anyway.
+   */
+  function schreibeShim(datei, text) { writeFileSync(join(DOCKER_STATE, datei), text) }
+
+  const docker = {
+    STATE: DOCKER_STATE,
+    BIN: DOCKER_BIN,
+
+    /** Every invocation, in order: { at, verb, argv, cwd }. */
+    calls() {
+      let raw
+      try { raw = readFileSync(join(DOCKER_STATE, 'calls.jsonl'), 'utf8') } catch { return [] }
+      return raw.split('\n').filter(Boolean).map(l => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
+    },
+    /** The verbs in the order they were called — the shape an ordering assertion needs. */
+    order() { return docker.calls().map(c => c.verb) },
+    /** Every argv of one verb. */
+    argvFor(verb) { return docker.calls().filter(c => c.verb === verb).map(c => c.argv) },
+    /** The most recent argv of one verb, or null. */
+    lastArgv(verb) { const a = docker.argvFor(verb); return a.length ? a[a.length - 1] : null },
+    /** The `run` whose --name is this container, or null. */
+    runFor(name) {
+      return docker.argvFor('run').find(a => a[a.indexOf('--name') + 1] === name) ?? null
+    },
+
+    /**
+     * Dictate what the shim answers for one verb: one line per call, each
+     * consumed once, the LAST one repeating — test/deploy.mjs's curl rule, and
+     * what makes "unreachable now, fine on the next pass" expressible.
+     * Words: ok | out <text> | default | no_daemon | unreachable | notfound |
+     * absent | fail <code> <text>.
+     */
+    say(verb, ...lines) {
+      mkdirSync(join(DOCKER_STATE, 'answers'), { recursive: true })
+      writeFileSync(join(DOCKER_STATE, 'answers', verb), lines.join('\n') + '\n')
+    },
+    /** Take the dictation back; the built-in behaviour answers again. */
+    clearSay(verb) { try { rmSync(join(DOCKER_STATE, 'answers', verb)) } catch {} },
+
+    /**
+     * A witness: a script the shim runs BEFORE it answers that verb, with the
+     * whole argv. It is the only way to ask an ordering question that spans two
+     * processes — "was the tmux session still standing when the container was
+     * stopped?", "did the row already say resume_pending?" — because both facts
+     * are gone by the time the test looks. Its exit code is ignored: a witness
+     * that could change the answer would stop being one.
+     */
+    hook(verb, script) {
+      mkdirSync(join(DOCKER_STATE, 'hooks'), { recursive: true })
+      const p = join(DOCKER_STATE, 'hooks', verb)
+      writeFileSync(p, script.startsWith('#!') ? script : `#!/usr/bin/env bash\n${script}\n`)
+      chmodSync(p, 0o755)
+    },
+    clearHook(verb) { try { rmSync(join(DOCKER_STATE, 'hooks', verb)) } catch {} },
+    /** What a witness wrote into <state>/witness — text, or null. */
+    witness() {
+      try { return readFileSync(join(DOCKER_STATE, 'witness'), 'utf8').trim() } catch { return null }
+    },
+    clearWitness() { try { rmSync(join(DOCKER_STATE, 'witness')) } catch {} },
+
+    /**
+     * The whole binary's answer, outranking every verb. 'absent' is the binary
+     * that is not on the PATH, 'unreachable' the daemon that does not answer —
+     * two of the three verdicts, and both have to be reachable from a test
+     * because "the daemon did not answer must not end a run" is the single most
+     * important behaviour in the feature.
+     */
+    mode(m) { schreibeShim('mode', String(m ?? 'ok') + '\n') },
+
+    /** What `docker info --format {{json .}}` answers (rootless, version, runtimes). */
+    info(obj) { schreibeShim('info.json', JSON.stringify(obj)) },
+
+    /** Seed or patch one row of the fake daemon's container table. */
+    container(name, patch = {}) {
+      const t = docker.containers()
+      t[name] = { state: 'running', status: 'Up 1 second', labels: {}, ...(t[name] ?? {}), ...patch }
+      schreibeShim('containers.json', JSON.stringify(t, null, 2))
+      return t[name]
+    },
+    containers() {
+      try { return JSON.parse(readFileSync(join(DOCKER_STATE, 'containers.json'), 'utf8')) } catch { return {} }
+    },
+    networks() {
+      try { return JSON.parse(readFileSync(join(DOCKER_STATE, 'networks.json'), 'utf8')) } catch { return {} }
+    },
+    /** Every container and network the shim created — the cleanup list. */
+    created() {
+      try { return readFileSync(join(DOCKER_STATE, 'created.txt'), 'utf8').split('\n').filter(Boolean) } catch { return [] }
+    },
+
+    /** Forget the log, every dictation and every witness; the table is left alone. */
+    reset() {
+      schreibeShim('calls.jsonl', '')
+      schreibeShim('mode', 'ok\n')
+      for (const d of ['answers', 'hooks']) {
+        try { rmSync(join(DOCKER_STATE, d), { recursive: true, force: true }) } catch {}
+        mkdirSync(join(DOCKER_STATE, d), { recursive: true })
+      }
+      try { rmSync(join(DOCKER_STATE, 'witness')) } catch {}
+    },
+  }
+
   // ---------------------------------------------------------------- Cleanup
   /** Stop the hub process (also mid-suite, when the real-run mode restarts it). */
   async function stopHub() {
@@ -455,6 +775,28 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       await new Promise(r => { const t = setTimeout(() => { try { hub.kill('SIGKILL') } catch {} ; r() }, 4000); hub.once('exit', () => { clearTimeout(t); r() }) })
     }
     state.hub = null
+  }
+
+  /**
+   * The session rule, one layer out: a container is the same problem a tmux
+   * session is, and it is answered the same way. The shim writes down every
+   * name it created, and only those names are removed — never a filter across
+   * `fl-*`, which on a machine that really has Docker would take a live hub's
+   * containers with it.
+   *
+   * On this machine the runtime is the shim, so this removes rows from a JSON
+   * file. The rule belongs in the code BEFORE there are real containers, not
+   * after — that is the whole lesson of the 157 leaked tmux sessions.
+   */
+  async function cleanUpContainers() {
+    const bin = process.env.FREILAUF_SANDBOX_RUNTIME_BIN || DOCKER_BIN
+    let names
+    try { names = readFileSync(join(DOCKER_STATE, 'created.txt'), 'utf8').split('\n').filter(Boolean) } catch { return }
+    if (!names.length) return
+    for (const name of names) {
+      if (name.startsWith('network:')) await sh(bin, ['network', 'rm', name.slice(8)]).catch(() => {})
+      else await sh(bin, ['rm', '-f', name]).catch(() => {})
+    }
   }
 
   async function cleanUp() {
@@ -472,6 +814,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       }
     } catch { /* no run ever started: nothing to clean up */ }
     for (const s of all) await sh('tmux', ['kill-session', '-t', `=${s}`]).catch(() => {})
+    await cleanUpContainers()
     if (keep) console.log(`\nSandbox kept: ${SB}`)
     else {
       // A detached flow command (a `sleep 1; touch` in the run_merged tests) can
@@ -487,6 +830,8 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
   return {
     SB, REPO, ORIGIN, FAILED_START, sessions, SESSION_LIST,
     PLUGINS: join(SB, 'plugins'),
+    SANDBOX_DIR, DOCKER_STATE, DOCKER_BIN, SHIM_DIR,
+    docker,
     build, startHub, stopHub, prepareWatcher, cleanUp,
     fetchPath, postForm, setSetting,
     get db() { return state.db },

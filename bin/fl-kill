@@ -64,6 +64,33 @@ fi
 # Derive a session's harness from its name (fl-harness-tags.sh).
 harness_of() { fl_harness_of "$1"; }
 
+# A sandboxed run works in a container while its tmux session only holds the
+# container client (SANDBOX_RESEARCH.md §7.1). Killing the session therefore
+# kills the client and leaves the agent inside working with nobody watching, so
+# the container is stopped FIRST — SIGTERM, then the runtime's own grace period,
+# then SIGKILL.
+#
+# The session name ends in the run's short id (fl-start builds it as
+# <prefix><tag><name>-<short id>, plus a -2 style suffix on a name collision) and
+# the container is fl-<full run id>, so an anchored name filter is what connects
+# the two. Everything here is fail-soft: no runtime on the PATH, no daemon, no
+# container — fl-kill goes on and kills the session exactly as it always did.
+CONTAINER_BIN="${FREILAUF_SANDBOX_RUNTIME_BIN:-docker}"
+
+stop_container() {
+    local s="$1" id names name
+    command -v "$CONTAINER_BIN" >/dev/null 2>&1 || return 0
+    id="$(printf '%s' "$s" | sed -nE 's/.*-([0-9a-fA-F]{8})(-[0-9]+)?$/\1/p')" || return 0
+    [[ -n "$id" ]] || return 0
+    names="$("$CONTAINER_BIN" ps --filter "name=^fl-${id}" --format '{{.Names}}' 2>/dev/null || true)"
+    [[ -n "$names" ]] || return 0
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        echo "  Stopping container '$name' …"
+        "$CONTAINER_BIN" stop -t 30 "$name" >/dev/null 2>&1 || true
+    done <<<"$names"
+}
+
 mapfile -t ROWS < <(tmux list-sessions \
     -F '#{session_name}|#{t:session_created}|#{?session_attached,attached,free}|#{session_path}' \
     2>/dev/null | grep -E "$(fl_session_re)" || true)
@@ -101,6 +128,7 @@ kill_session() {
     echo "  Currently open: $attached"
     echo
     if [[ -n "$YES" ]]; then
+        stop_container "$s"
         tmux kill-session -t "=$s"
         echo "Session '$s' terminated (--yes)."
         return
@@ -113,6 +141,7 @@ kill_session() {
         echo "Cancelled - name does not match."
         exit 0
     fi
+    stop_container "$s"
     tmux kill-session -t "=$s"
     echo "Session '$s' terminated."
 }

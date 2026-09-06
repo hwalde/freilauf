@@ -1,12 +1,14 @@
 // Freilauf — processing of agent reports (fl-report → POST /api/runs/<id>/report
 // or fallback inbox.jsonl collected by the watcher). Planning 6 + 11.
+import { timingSafeEqual } from 'node:crypto'
 import db, { addEvent } from './db.mjs'
 // `notifyChannels` and not `notify`: `completeFollowUp()` below takes an option
 // literally called `notify`, and a parameter that silently shadows a module
 // import is the kind of trap that only shows up the day somebody moves a line.
 import { notify as notifyChannels, notifyOnFor, detailUrl } from './notify.mjs'
 import { sh, parseDbUtc } from './util.mjs'
-import { reportIncident, detectorLog } from './incidents.mjs'
+import { env } from './env.mjs'
+import { reportIncident, detectorLog, openIncidentsOf } from './incidents.mjs'
 import { typeFromClaudeError, typeFromText, TYPE_TEXT, foreignClaudeSession, isSessionStopped } from './detect.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { transcriptState } from './cursor-transcript.mjs'
@@ -20,6 +22,47 @@ const MAX_REPORT = 200 * 1024   // planning 11: report ≤ 200 kB
  * session id. Without the guard its failures land on this run as red incidents.
  */
 const HOOK_KINDS = ['_turn_end', '_exit', '_api_error', '_rate_limit', '_idle', '_working', '_waiting']
+
+// ------------------------------------------------------------ the run's own token
+//
+// `runs.report_token` (SANDBOX_RESEARCH.md §7.6) is the per-run bearer of the
+// report socket. It is issued for EVERY run at creation, sandboxed or not,
+// because the socket is worth having either way: it is the only channel that
+// carries the report route WITHOUT carrying the rest of the hub's API with it.
+//
+// What the token is NOT: a replacement for `foreignClaudeSession()`. A claude
+// process the agent spawns inherits the environment of the session it was
+// spawned from — `FL_RUN_TOKEN` exactly as it inherits `FL_RUN_ID` — so it
+// authenticates perfectly and is still not this run's own session. The token
+// answers "which run is this"; that guard answers "which SESSION of it", and
+// the two questions stay two questions.
+
+/**
+ * Constant-time equality of two tokens. Pure, and exported because this is the
+ * comparison worth a test: `timingSafeEqual` THROWS on differing lengths, so a
+ * naive call is an exception on exactly the input an attacker controls — hence
+ * the length guard before it, and hence the empty string never matching.
+ */
+export function tokensMatch(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  if (!a || !b || a.length !== b.length) return false
+  const bufA = Buffer.from(a, 'utf8')
+  const bufB = Buffer.from(b, 'utf8')
+  if (bufA.length !== bufB.length) return false
+  return timingSafeEqual(bufA, bufB)
+}
+
+/**
+ * Does this bearer belong to this run? A run without a stored token (a row from
+ * before the column existed) can never be authenticated — which is right for the
+ * socket, whose whole point is that it is not reachable without one; those runs
+ * still report over 127.0.0.1 exactly as they did.
+ */
+export function reportTokenOk(runId, token) {
+  if (!token) return false
+  const row = db.prepare('SELECT report_token FROM runs WHERE id = ?').get(runId)
+  return tokensMatch(row?.report_token ?? '', token)
+}
 
 // ------------------------------------------------------------ the agent's attention
 //
@@ -97,6 +140,179 @@ export function noteOperatorInput(runId, via = 'terminal') {
 export function clearAgentState(runId) {
   db.prepare(`UPDATE runs SET agent_state=NULL, agent_state_at=NULL WHERE id=? AND agent_state IS NOT NULL`).run(runId)
 }
+
+// ------------------------------------------------ a dead pane, and who killed it
+//
+// For an ordinary run the pane IS the agent: `remain-on-exit` keeps the screen,
+// `pane_dead` means the CLI's own process ended, and a run still `running` at
+// that moment ended without reporting. Red, and rightly so.
+//
+// For a SANDBOXED run the pane is the `docker` CLIENT that started the container
+// and is watching it; the agent is a process inside. So a dead pane has two
+// entirely different causes, and until this branch existed both were spent as
+// the first one: a restarted daemon, a `permission denied` on the socket or a
+// `docker run` that never got past `runc create` set the run `failed` and paged
+// the operator about an agent that was either still working or had never started
+// at all. That is the acceptance criterion "infrastructure trouble never makes
+// runs count as ended", and it is answered the way `tmuxVerdict()` and
+// `runtimeVerdict()` answer theirs — three answers, of which only two may act.
+//
+// **The exit status is a hint and never the verdict on its own.** Measured on
+// this machine [2026-09-05, rootless docker 29.8.0]:
+//
+//   1     a client that could not reach the daemon — and equally an agent that
+//         exited 1. The code cannot tell those apart; the daemon can.
+//   125   docker's own reserved code, and the one case the daemon cannot settle
+//         afterwards: the client never started the container (a failed `runc
+//         create`, an image that is not on the machine, a name conflict — all
+//         three are classified by name in sandbox/runtime.mjs). The agent never
+//         ran, so the container's absence says nothing about the work.
+//   42    an inner command's own status, handed through by `docker run`.
+//
+// So the CONTAINER is asked, and the codes decide only where asking cannot help.
+
+/**
+ * The exit status a dead pane carried, or null when it carried none.
+ *
+ * `Number('')` is 0 and finite, and so is `Number(null)` — the trap this
+ * project has an entry about under "Pitfalls". A pane killed by a SIGNAL has an
+ * EMPTY `#{pane_dead_status}` (measured, tmux 3.4: SIGKILL gives
+ * `pane_dead_signal=9` and no status at all), so a coercion that does not
+ * compare first writes `exit_code = 0` for an agent the kernel shot — a run
+ * whose record says it exited cleanly and whose agent never got to say
+ * anything. Compare, then convert.
+ */
+export function exitStatus(exit) {
+  const raw = exit === null || exit === undefined ? '' : String(exit).trim()
+  return raw !== '' && Number.isFinite(Number(raw)) ? Number(raw) : null
+}
+
+/**
+ * Pure: what a dead pane means, given the run's sandbox flag, the pane's exit
+ * status and what the daemon said about the container.
+ *
+ *   `container === null`   there is nothing to ask (an unsandboxed run, or a
+ *                          launch that never got a container)
+ *   `container.verdict`    'ok' | 'no_daemon' | 'unreachable', straight from
+ *                          `containerState()`; anything but 'ok' means the hub
+ *                          learned NOTHING
+ *
+ * Returns `{ verdict, reason }`:
+ *
+ *   'agent'    the agent's process ended — the ordinary case, byte for byte the
+ *              behaviour every unsandboxed run has always had
+ *   'infra'    the pane died on the CLIENT side; the run must not be ended by it
+ *   'unknown'  nobody answered. Do nothing, ask again next pass.
+ */
+export function panePostMortem({ sandboxed = false, exit = null, container = null } = {}) {
+  if (!sandboxed) return { verdict: 'agent', reason: 'not sandboxed' }
+  const code = exitStatus(exit)
+  // Asked BEFORE the daemon, because the daemon cannot answer it: a container
+  // that was never created looks exactly like one `--rm` has taken away.
+  if (code === 125) {
+    return { verdict: 'infra', reason: 'the runtime client could not start the container (exit 125)' }
+  }
+  if (!container) return { verdict: 'agent', reason: 'no container to ask about' }
+  if (container.verdict !== 'ok') {
+    return { verdict: 'unknown', reason: `the container runtime did not answer (${container.verdict})` }
+  }
+  if (container.running === true) {
+    return { verdict: 'infra', reason: 'the container is still running — the client died, not the agent' }
+  }
+  // The daemon answered and the container is not running: either `--rm` took it
+  // away with the agent's own exit, or it exited and is still there with its
+  // status. Both are the ordinary end.
+  return {
+    verdict: 'agent',
+    reason: container.exists === false ? 'the container is gone' : 'the container has exited',
+  }
+}
+
+/** How often a client that died may be resumed before the run is ended anyway. */
+const CLIENT_RESUME_MAX = (() => {
+  // `Number('')` is 0 AND finite — the trap AGENTS.md has its own entry for.
+  const raw = env('SANDBOX_CLIENT_RESUME_MAX')
+  if (raw === undefined || String(raw).trim() === '') return 3
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : 3
+})()
+
+/**
+ * Ask the daemon about this run's container. Everything sandbox is imported
+ * LAZILY (AGENTS.md: an installation without a container runtime never loads a
+ * line of it), and the two failure shapes are kept apart on purpose:
+ *
+ *   no container NAME    → `null`, which `panePostMortem()` reads as "nothing to
+ *                          ask", i.e. the ordinary agent case
+ *   a name and no answer → `{ verdict: 'unreachable' }`, i.e. "I learned
+ *                          nothing" — never "it is gone"
+ */
+async function paneCause(run, exit) {
+  if (!run?.sandbox) return panePostMortem({ sandboxed: false })
+  const name = run.sandbox_container ? String(run.sandbox_container) : null
+  if (!name) return panePostMortem({ sandboxed: true, exit, container: null })
+  let state = { verdict: 'unreachable' }
+  try {
+    const [{ sandboxRuntime }, { specOf }] = await Promise.all([
+      import('./sessions.mjs'), import('./sandbox/exec.mjs'),
+    ])
+    const rt = await sandboxRuntime()
+    if (typeof rt?.containerState === 'function') {
+      const runtime = env('SANDBOX_RUNTIME') ?? specOf(run)?.runtime ?? undefined
+      state = await rt.containerState(name, { runtime }) ?? { verdict: 'unreachable' }
+    }
+  } catch (err) {
+    detectorLog(run.id, { art: 'sandbox', grund: `containerState failed: ${err.message}` })
+  }
+  return panePostMortem({ sandboxed: true, exit, container: state })
+}
+
+/**
+ * The pane died and the AGENT did not. Never ends the run over it — that is the
+ * whole point — but it does not leave it hanging either:
+ *
+ *  - a run in the finish gate is the integrator's: it has reported, and its own
+ *    deadline (`finish_started_at` + `repos.finish_timeout_min`) escalates by
+ *    itself. Escalating here would blame the agent for a client that died.
+ *  - a live run is handed to `resumeRun()` — the recovery path that already
+ *    exists, and the one §7.11's start order walks through again (a leftover
+ *    container of the same name is what `stopOrphan()` is for).
+ *  - and that is CAPPED. A client that dies at every start must not be restarted
+ *    every pass for ever — the same rule `RESUME_MAX` carries, counted here
+ *    because a deliberate caller's reason is deliberately not counted there.
+ *    Past the cap the run ends after all, and the message names the
+ *    infrastructure rather than the agent.
+ */
+async function paneClientGone(runId, run, cause, exit) {
+  const code = exitStatus(exit)
+  addEvent(runId, 'sandbox:client_gone',
+    { exit: code, reason: cause.reason, container: run?.sandbox_container ?? null })
+  if (run?.finish_state) return
+  if (!['running', 'waiting_help'].includes(run?.status)) return
+  const tries = db.prepare(`SELECT COUNT(*) AS n FROM events WHERE run_id=? AND kind='sandbox:client_gone'`)
+    .get(runId)?.n ?? 1
+  let why = `resumed ${tries - 1} time(s) already (cap ${CLIENT_RESUME_MAX})`
+  if (tries <= CLIENT_RESUME_MAX) {
+    const r = await import('./runner.mjs')
+      .then(m => m.resumeRun(runId, { reason: 'sandbox_client_gone' }))
+      .catch(err => ({ ok: false, error: err.message }))
+    // `retry` is `launchRun()`'s "could not TRY" — right after a reboot the
+    // tmux server itself may be a beat behind — and the run stays
+    // `resume_pending` for `retryPendingResumes()`. "Could not try" is not
+    // "tried and died", exactly as runner.mjs says: it is a run on its way, so
+    // failing it here would undo the very rule this branch exists for.
+    if (r?.ok || r?.retry) return
+    why = r?.error ?? 'the resume was refused'
+    addEvent(runId, 'sandbox:client_gone_unrecovered', { error: why })
+  }
+  db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), exit_code=? WHERE id=?`)
+    .run(code, runId)
+  clearAgentState(runId)
+  const assessment = await assessAfterEnd(runId)
+  await notifyRun(runId, 'pane_died',
+    `🔴 The sandbox runtime client died and the run could not be resumed — ${cause.reason} (${why}).${assessment}`)
+}
+
 
 /**
  * A help call is answered — by the send route with the operator's text, or by
@@ -273,6 +489,8 @@ export async function handleReport(runId, body, via = 'http') {
       }
       break
     }
+    case 'access':
+      return handleAccessRequest(run, text)
     case 'progress': {
       addEvent(runId, 'progress', { text })
       db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(runId)
@@ -348,13 +566,35 @@ export async function handleReport(runId, body, via = 'http') {
       db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(runId)
       break
     case '_pane_died': {
-      addEvent(runId, 'pane_died', { exit: body.exit ?? null })
+      // Who killed the pane — the agent, or the runtime client watching it?
+      // For every unsandboxed run this is 'agent' without a subprocess, and
+      // everything below it is byte for byte what it always was.
+      const fresh = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
+      const cause = await paneCause(fresh, body.exit)
+      if (cause.verdict === 'unknown') {
+        // The daemon did not answer, so the hub knows nothing about the agent.
+        // Not knowing is a reason to ask again next pass, never to end somebody's
+        // work — and `addEventOnce` is what keeps the watcher's 30-second retry
+        // from writing one event per pass for as long as the daemon is out.
+        addEventOnce(runId, 'sandbox:pane_unclear', { exit: body.exit ?? null, reason: cause.reason })
+        break
+      }
+      if (cause.verdict === 'infra') { await paneClientGone(runId, fresh, cause, body.exit); break }
+      // A pane killed by a SIGNAL carries no exit status — and `Number('')` is
+      // 0 AND finite, so the old coercion wrote a confident `exit_code = 0`
+      // ("exited cleanly") for an agent the kernel had shot. So did `null`,
+      // since `Number(null)` is 0 too. `exitStatus()` compares before it
+      // converts, the way every numeric setting in this project has to; the
+      // signal is kept next to it rather than thrown away, because "killed by
+      // 9" is the answer to why the run ended.
+      const signal = body.signal === undefined || body.signal === null || String(body.signal).trim() === ''
+        ? null : String(body.signal).trim()
+      addEvent(runId, 'pane_died', { exit: body.exit ?? null, signal })
       clearAgentState(runId)
-      const fresh = db.prepare('SELECT status, finish_state FROM runs WHERE id = ?').get(runId)
       if (fresh?.finish_state) { await escalateGone(runId); break }
       if (fresh?.status === 'running') {
         db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), exit_code=? WHERE id=?`)
-          .run(Number.isFinite(+body.exit) ? +body.exit : null, runId)
+          .run(exitStatus(body.exit), runId)
         const assessment = await assessAfterEnd(runId)
         await notifyRun(runId, 'pane_died', `🔴 Process dead without a report (tmux pane_dead).${assessment}`)
       }
@@ -369,6 +609,56 @@ export async function handleReport(runId, body, via = 'http') {
     import('./flows/triggers.mjs').then(m => m.flowsTick()).catch(e => console.error('[flows]', e.message))
   }
   return { ok: true }
+}
+
+/**
+ * `fl-report access "<what you need and why>"` — the agent asking for something
+ * the sandbox is keeping from it (SANDBOX_RESEARCH.md §7.12.1).
+ *
+ * It is `help`-like in everything that reaches a person: an incident in the
+ * **Needs you** group (`sandbox_access` is in HUMAN_TYPES, because a host, a
+ * path or a memory limit is a decision and waiting does not make it), a
+ * notification carrying the agent's own words, and never deduplicated — a
+ * second, different need is a second question.
+ *
+ * And it differs from `help` in the one thing that matters: **the run stays
+ * `running`.** A help call means the agent has stopped and waits; an access
+ * request means the agent has run into a wall and was told, in its own prompt,
+ * to carry on with what it can do meanwhile. Putting it into `waiting_help`
+ * would say the opposite — the finish gate's deadline would stop, the watcher
+ * would treat the silence as deliberate, and the operator's answer would be
+ * expected to arrive in the session. None of that is true here: the answer is a
+ * policy change, and it reaches the agent through the proxy without anybody
+ * typing anything.
+ *
+ * The incident is opened `noNotify`, i.e. without the ten-minute grace
+ * period: that delay exists so an alarm that answers itself never pages, and
+ * this one cannot answer itself — the agent asked. The message goes out here
+ * instead, at once, which is also what `help` does.
+ *
+ * A repeat of the SAME request (an agent that hits the same wall twice) counts
+ * on the open incident and stays quiet, the way a replayed help call does.
+ */
+async function handleAccessRequest(run, text, { followup = false } = {}) {
+  const runId = run.id
+  const beleg = String(text ?? '').trim().slice(0, 300)
+  addEvent(runId, 'access_request', { text: String(text ?? '').slice(0, 500), followup })
+  const offen = openIncidentsOf(runId).find(v => v.typ === 'sandbox_access')
+  const wiederholung = !!offen && offen.beleg === beleg
+  await reportIncident(runId, { typ: 'sandbox_access', quelle: 'agent', schwere: 'rot',
+    beleg: beleg || null, noNotify: true })
+  if (!wiederholung) {
+    const kopf = followup ? followUpHeader(run, 'FOLLOW-UP ACCESS REQUEST') : reportHeader(run, 'ACCESS REQUEST')
+    await notifyRun(runId, 'access',
+      `${kopf}\n\n${text || '(no text)'}\n\n🔒 The sandbox is in the agent's way · ${harnessLabel(run)}`
+      + `\n→ Needs you: allow it for this run, allow it for the repo, or tell the agent to do without.`,
+      { fileName: `access-${runId.slice(0, 8)}.md`, fileContent: text, dedupe: false })
+  }
+  // The answer travels back as the agent's own tool output (fl-report prints
+  // it), which is the cheapest moment there is to tell it what happens next.
+  return { ok: true, message: 'Freilauf: your access request reached the operator. Nothing has been unblocked yet — '
+    + 'keep working on what you can do without it. If the policy is widened you will simply get through on your next '
+    + 'attempt; if it is not, you will be told in this session. Do not work around the sandbox.' }
 }
 
 /**
@@ -442,8 +732,16 @@ export async function finishByTurnEnd(runId, source) {
 // one stays `failed` (its record is the truth about the first attempt; what
 // the follow-up delivered is in the merge line and the report).
 
-/** The kinds a finished run still answers to. Hooks are handled apart. */
-const FOLLOWUP_KINDS = ['done', 'failed', 'help', 'progress', 'branch', 'pr']
+/**
+ * The kinds a finished run still answers to. Hooks are handled apart.
+ *
+ * `access` is among them because a FOLLOW-UP hits the wall exactly as readily as
+ * a first attempt: the operator types "and now push it to the fork" into a
+ * finished run's session, and the host for that fork is not on the allowlist.
+ * Refusing the request there would leave the agent with a wall and no way to
+ * say so.
+ */
+const FOLLOWUP_KINDS = ['done', 'failed', 'help', 'progress', 'branch', 'pr', 'access']
 
 /**
  * Should a turn end on a FINISHED run count as its follow-up report?
@@ -539,6 +837,11 @@ async function handleFollowUp(run, body, via) {
         { fileName: `help-${runId.slice(0, 8)}.md`, fileContent: text, dedupe: false })
       return { ok: true }
     }
+    case 'access':
+      // Same rule as for a running run, and for the same reason: the status
+      // (`done`/`failed`) is the truth about the first attempt and an access
+      // request says nothing about it.
+      return handleAccessRequest(run, text, { followup: true })
     case 'progress':
       addEvent(runId, 'progress', { text, followup: true })
       db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(runId)
