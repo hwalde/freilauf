@@ -182,6 +182,27 @@ agent, and an overlay that puts an agent layer on top of a toolchain image you
 own. Build them from the Settings page, or by hand as
 [`sandbox/images/README.md`](sandbox/images/README.md) describes.
 
+**You do not have to build them first, but you will want to.** Settings →
+Sandbox lists the images this installation needs — the base, one per **enabled**
+coding agent, whatever a repository names in its own `sandbox_image`, and the
+proxy engine's — each with its state: built, not built yet, building (with the
+step it is on), or *the runtime did not answer*, which is deliberately a fourth
+answer and not "not built": a daemon that hiccuped must never send somebody off
+to rebuild a 5 GB image they already have. A build started here runs **in the
+hub**, not in your request: the page shows its progress on the live channel and
+you can navigate away. Two people pressing the same button start one build, not
+two.
+
+A missing image is otherwise built by the **first run that needs it** — the base
+first, if that is missing too — and that run waits for the build. That is
+usually a minute or two and, for hermes, about five; building ahead of time is
+the difference between a run that starts in seconds and one that starts in
+minutes. It is worth knowing why this is a build and not a download:
+`freilauf/agent-*` is a **local tag with no registry behind it**, so a pull can
+never answer for it. Until 2026-09-06 the launch path only pulled, and a run
+whose image was missing simply failed — while this page's own hint promised that
+images were "built lazily on first use". They are now.
+
 **The base image builds and has been run.** `base.Dockerfile` produced
 `freilauf/agent-base:24.04` on 2026-09-05 and real containers were started from
 it — that is the image the mount set, the resource fences and the network modes
@@ -190,20 +211,21 @@ way](#why-it-is-built-this-way)). The sentence that used to stand here — *"the
 have never been built, because the machine they were written on has no
 container runtime"* — was true when it was written and is not any more.
 
-**The agent layers are a different question, and it is answered for exactly one
-of them.** A build succeeding says the install command found its file; it does
-not say the CLI inside starts, finds its seeded home or talks to its vendor.
-**The opencode layer has now carried a whole run** — work done, committed,
-reported and merged (see [its own
-section](#one-coding-agent-has-run-in-a-container-three-have-not)) — and the
-claude, cursor and hermes layers have still never had their CLI started in a
-container. So the per-image state — which layers build, and what is still
-unverified about each — is tracked in
-[`sandbox/images/README.md`](sandbox/images/README.md) and that file is the
-one to believe over this paragraph. Expect the first real sandboxed run of each
-remaining harness to be the thing that finds the mistakes in its layer: the
-first opencode one found five, and every one of them had been green in the test
-suite.
+**The agent layers are a different question.** A build succeeding says the
+install command found its file; it does not say the CLI inside starts, finds its
+seeded home or talks to its vendor. All four layers have now had their CLI
+started in a container: **opencode and cursor have carried whole runs** — work
+done, committed, reported, merged — while claude and hermes each exposed a fault
+that a build could never have shown (see [Four coding agents have been started
+in a
+container](#four-coding-agents-have-been-started-in-a-container-two-complete-runs-two-hit-bugs)).
+Both are fixed; both were in the layer around the image rather than in the image
+itself. The per-image state — which layers build, and what is still unverified
+about each — is tracked in
+[`sandbox/images/README.md`](sandbox/images/README.md) and that file is the one
+to believe over this paragraph. Expect the first real sandboxed run of a harness
+to be the thing that finds the mistakes around its layer: the first opencode one
+found five, and every one of them had been green in the test suite.
 
 **A run that names no image is not an error.** Where neither the repository nor
 the profile fills in `image.ref`, the run uses the image the coding agent's own
@@ -318,9 +340,9 @@ an allowed host answers, a denied one gets the 403, `git` and `npm` to denied
 hosts are refused, and a live policy change takes effect on the next connection.
 How that placement is decided, and what it costs, is [Where the built-in proxy
 runs](#where-the-built-in-proxy-runs-in-the-hub-or-in-a-container); what an
-enforced allowlist still has not been through is [No agent run has yet worked
-behind an enforced
-allowlist](#no-agent-run-has-yet-worked-behind-an-enforced-allowlist).
+enforced allowlist has and has not been through is [An enforced allowlist has
+now carried real
+runs](#an-enforced-allowlist-has-now-carried-real-runs--with-caveats).
 
 The defaults underneath them, for a profile that says nothing: `network.mode
 allowlist`, `network.engine builtin`, `secrets.mode env`, worktree `rw`, the
@@ -1011,6 +1033,28 @@ So:
 
 The boundary is about *where* the agent can reach, not about *what* it says
 there.
+
+### The container can read the hub's own script directory, and its own paths
+
+Two things both probe agents found on 2026-09-06, neither of them a way out and
+both worth knowing rather than leaving to be discovered:
+
+- **The host's `~/.local/bin` is mounted read-only into the box.** That is the
+  hub↔agent channel — it is how `fl-report` is there at all, and `fl-api` and
+  the rest of the `fl-*` tools with it. It also means the agent can read those
+  scripts, and through them learn the shape of the host's Freilauf
+  installation. A scan of that directory for cleartext secrets found none (the
+  scripts reference environment variables), and narrowing the mount to
+  `fl-report` alone was considered and rejected: it would break the other tools
+  an agent legitimately uses. What was fixed instead is the thing that made it
+  dangerous — those host scripts used to come FIRST on the container's `PATH`,
+  so a host wrapper could shadow the image's own CLI (which is exactly how
+  hermes failed). The image's directories now win, and the mount is left where
+  it is as a deliberate trade.
+- **`/proc/self/mountinfo` and the run's `sandbox.json` name host paths.** The
+  overlay's directories on the host are visible as strings inside the
+  container. They cannot be reached from there; it is disclosure of layout, not
+  access.
 
 ### It protects the host from the agent, not the hub from anything
 

@@ -2853,6 +2853,42 @@ and `--cpus 0` is a container that cannot run; and a sandboxed session's memory
 is asked of the **runtime**, never summed from the pane's process tree, which
 under-reported a workload twentyfold (measured, 10.4 MB for 210.3 MB).
 
+**And four the first ENFORCED runs wrote** (2026-09-06, opencode and cursor
+behind the Balanced allowlist, claude and hermes each stopped by one of these):
+
+- **The image's own directories come first on the container's `PATH`**
+  (`containerEnv()`). The host's `~/.local/bin` is mounted read-only into the
+  box so `fl-report` is reachable, and it used to be FIRST — but `fl-start`
+  launches a sandboxed agent by its BARE name, so bare `hermes` found the
+  host's wrapper, which `exec`s a python venv that exists only on the host, and
+  the pane died with exit 127. `fl-report` exists in no image and so is still
+  found; it simply cannot shadow anything any more.
+- **A credential a plugin declares `required` and that resolves to nothing is a
+  refusal, not a start** (`missingRequiredCredentials()`). A sandboxed claude
+  with no token drew its TUI, printed "Not logged in" and sat there while the
+  run said `running`. The claude plugin's `oauth_token` also carries a `read`
+  hook — the last resort behind a stored value and a named variable — that
+  takes the token out of `~/.claude/.credentials.json` and passes it as the
+  declared variable; the FILE never enters the container, so nothing in there
+  holds a refresh token. Scoped to `required` on purpose: cursor is a
+  subscription CLI too, declares its credential without it, and runs with none.
+- **`pane_died` is evidence a sandbox may be released** (`releasable()` in
+  watcher.mjs). It used to ask only whether the tmux session was closed — but
+  `remain-on-exit` keeps a crashed run's screen readable, so `tmux_closed_at`
+  stays NULL for hours and the run went on holding its network and its
+  `fl-proxy-<id>`. A finished run whose pane is still ALIVE keeps everything: a
+  follow-up commission needs the container and its egress.
+- **A missing image is BUILT, not only pulled** (`buildMissingImage()` in
+  index.mjs). `freilauf/agent-*` is a local tag with no registry behind it, so
+  the pull-only launch path failed every run whose image was absent — while the
+  settings page's own hint promised images were "built lazily on first use".
+  The first run that needs one now builds it (the base first if that is missing
+  too), a second run joins that build rather than starting another, and the
+  page builds ahead of time **in the hub** rather than inside the operator's
+  request. `imageInventory()` derives what this installation needs from the
+  ENABLED coding agents, so a plugin coding agent appears there too, and
+  `unreachable` is a fourth state that is never rendered as "not built".
+
 **And three the first real run wrote, each of which had passed every test.**
 *Who a container runs as is one function, never a profile field*
 (`containerIdentity()` in runtime.mjs): the run's `--user` and every `docker
@@ -4262,8 +4298,11 @@ errors (`post_api_request` only fires after success).
   as a mount option. `exec` has to be written out. Measured 2026-09-05, after a
   comment in `tmpfsArgs()` had described the intention for weeks while the
   command line carried the opposite; the run container is `rw,exec,nosuid` now.
-  **`mergeCheckArgv()` in `integrate.mjs` still emits `/tmp:rw,nosuid`**, so a
-  sandboxed merge check that execs out of `/tmp` fails where the run would not.
+  `mergeCheckArgv()` in `integrate.mjs` carries the same word for the same
+  reason — a sandboxed merge check is `node test/unit.mjs` and its kind, and a
+  toolchain that unpacks a helper into `/tmp` and runs it would otherwise fail
+  there while the run that produced the code succeeded: a red check that says
+  nothing about the work.
 - **`docker network inspect --format '{{.Gateway}}'` prints the literal string
   `invalid IP` for an isolated network**, not an empty value: with
   `gateway_mode_ipv4=isolated` Docker omits the `Gateway` key from the IPAM

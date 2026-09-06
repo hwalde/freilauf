@@ -18,6 +18,60 @@ a day on which nothing was released.
 
 ## 2026-09-06
 
+### Added
+
+- **Settings → Sandbox now says which images this installation needs and whether
+  it has them**, and builds one in the background instead of holding the request
+  open. A build used to be an awaited call inside the click: a hung browser tab
+  for two to seven minutes, no step, no percentage, and two operators clicking
+  at once ran two identical builds. Now the page shows a row per image with its
+  state — built, not built yet, building (with the step it is on), or *the
+  runtime did not answer*, which is deliberately not the same as "not built" —
+  and the progress arrives on the live channel. The list is derived from the
+  **enabled** coding agents plus the base image, any image a repository names
+  and the proxy engine's own, so a coding agent that arrived as a plugin appears
+  there too; it used to be five names written out in the page.
+- **A missing sandbox image is now built the first time a run needs it.** That
+  is what the settings page had claimed for months while nothing did it: the
+  launch path only ever *pulled*, and `freilauf/agent-*` is a local tag no
+  registry can answer for, so the run died with "not on this machine and could
+  not be fetched — build it under Settings → Sandbox". The first run that needs
+  an image now builds it (the base first, if that is missing too) and says so on
+  its own event list; a second run needing the same image joins that build
+  rather than starting another. Building ahead of time on the settings page is
+  still the difference between a run that starts in seconds and one that starts
+  in minutes.
+
+### Fixed
+
+- **hermes could not start in a container at all** — the pane died immediately
+  with exit 127. The host's `~/.local/bin` is mounted read-only into the box so
+  `fl-report` is reachable, and it was placed *first* on the container's `PATH`;
+  since a sandboxed run launches its agent by bare name, `hermes` resolved to
+  the host's wrapper, which runs a python virtualenv that exists only on the
+  host. The image's own directories now come first.
+- **claude on a subscription could not authenticate in a container.** Its
+  terminal showed "Not logged in · Please run /login" while the run said
+  `running` and looked healthy from every page. Outside a container claude signs
+  in from a file in your home directory that a sandboxed run deliberately does
+  not get; that token is now read and passed in as the variable claude documents
+  for it. The file itself never enters the container, so nothing in there holds
+  a refresh token. For unattended installations `claude setup-token` is still
+  the better answer, because an interactive login's token is short-lived and
+  cannot be refreshed inside the box.
+- **A credential a coding agent cannot start without now refuses the launch**
+  instead of starting a session nobody is logged into, and the refusal says what
+  to do about it. Only a plugin that declares the credential *required* can
+  refuse — cursor is a subscription CLI too and runs without one.
+- **A sandboxed run whose agent died went on holding its network and its egress
+  proxy.** The reaper asked only whether the tmux session was closed, but a
+  crashed run's session is kept open on purpose so its screen stays readable —
+  so `fl-proxy-<id>` kept running for hours with nothing behind it, and the
+  per-run networks accumulate until no sandboxed run can start. A dead pane now
+  counts as evidence that the agent is gone. A finished run whose agent is still
+  sitting in its terminal keeps everything, because follow-up work there still
+  needs it.
+
 ### Changed
 
 - **The sandbox documentation is now one file, [SANDBOX.md](SANDBOX.md), at the

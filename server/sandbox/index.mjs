@@ -41,6 +41,9 @@ import { RUNS_DIR, shortId, sh } from '../util.mjs'
 import { env } from '../env.mjs'
 import { t, currentLanguage } from '../i18n.mjs'
 import { dataDir } from '../paths.mjs'
+// The live channel. `events.mjs` imports nothing at all, which is exactly what
+// lets db.mjs and this file both import it without closing a ring.
+import { publish } from '../events.mjs'
 // The one reader of the four hub sandbox settings — see "the hub layer" below.
 import { sandboxHubMode, sandboxAllowBypass, sandboxLock, sandboxHubSpec, sandboxAgainst } from '../run-def.mjs'
 import { appendAuditFile } from './audit.mjs'
@@ -184,6 +187,77 @@ export const CONTAINER_HUB_SOCKET = '/run/freilauf/hub.sock'
  * and stays null for a locally built image; `id` is the local image id, which is
  * always there and is the provenance a machine building its own agent images has.
  */
+/**
+ * Build the image a run is missing, when it is one THIS repository ships a
+ * recipe for. `false` for anything else — an operator's own overlay image, a
+ * coding agent whose plugin ships no Dockerfile, a runtime module that predates
+ * the streaming build — and the caller then refuses exactly as it did.
+ *
+ * Two rules that are not details:
+ *
+ *  - **Only the ref we ourselves derived.** The recipe's tag must equal the ref
+ *    that is missing. A repository pointing `sandbox_image` at a toolchain image
+ *    of the operator's must never be answered by building something else under
+ *    that name.
+ *  - **The base comes first.** Every harness layer is `FROM freilauf/agent-base`,
+ *    and that base is a local tag with no registry behind it — so building a
+ *    harness image on a machine without the base fails inside `docker build`
+ *    with the daemon's own wording. Building it here turns that into one
+ *    ordinary extra step.
+ *
+ * Progress goes onto the run's own event list AND the live channel, because
+ * this happens on the launch path: a run that is quietly building a 5 GB image
+ * for five minutes must not look like a run that is hanging.
+ */
+async function buildMissingImage(rt, ref, run, spec, registry) {
+  if (typeof rt.buildImageStreaming !== 'function' || typeof rt.harnessImage !== 'function') return false
+  const kind = String(run.harness ?? '')
+  if (!kind) return false
+  let tag = null
+  try { tag = await rt.harnessImage(kind, { registry }) } catch { tag = null }
+  if (!tag || tag !== ref) return false
+
+  const opts = { runtime: spec.runtime, registry: registry ?? undefined }
+  const announce = (payload) => {
+    try { publish('sandbox_image', payload) } catch { /* nobody watching is not a failure */ }
+  }
+  const build = async (name) => {
+    announce({ image: name, state: 'building' })
+    const r = await rt.buildImageStreaming(name, {
+      ...opts,
+      onProgress: (pr) => announce({ ...pr, image: name, state: 'building' }),
+    })
+    announce({ image: name, state: r?.ok ? 'done' : 'failed', error: r?.ok ? null : String(r?.error ?? '') })
+    return r
+  }
+
+  addEvent(run.id, 'sandbox:image_build', { image: ref, harness: kind })
+  try {
+    // The base, only where it is really absent — asking is one `image inspect`.
+    const baseRef = await rt.harnessImage('base', { registry }).catch(() => null)
+    if (baseRef) {
+      const haveBase = await rt.imageDigest(baseRef, { runtime: spec.runtime })
+      if (!haveBase.ok && haveBase.reason === 'no_such_image') {
+        const rb = await build('base')
+        if (!rb?.ok) {
+          addEvent(run.id, 'warn', { image_build_failed: String(rb?.error ?? '').slice(0, 300) })
+          return false
+        }
+      }
+    }
+    const r = await build(kind)
+    if (!r?.ok) {
+      addEvent(run.id, 'warn', { image_build_failed: String(r?.error ?? '').slice(0, 300) })
+      return false
+    }
+    addEvent(run.id, 'sandbox:image_built', { image: ref })
+    return true
+  } catch (err) {
+    addEvent(run.id, 'warn', { image_build_failed: String(err?.message ?? err).slice(0, 300) })
+    return false
+  }
+}
+
 async function ensureImage(spec, run) {
   const rt = await need('runtime')
   const registry = String(getSetting('sandbox_image_registry') ?? '').trim() || null
@@ -206,6 +280,20 @@ async function ensureImage(spec, run) {
     addEvent(run.id, 'sandbox:image_pull', { image: ref })
     const pulled = await rt.pullImage(ref, { runtime: spec.runtime })
     if (pulled.ok) seen = await rt.imageDigest(ref, { runtime: spec.runtime })
+  }
+  // A pull cannot answer for an image this repository BUILDS. `freilauf/agent-*`
+  // is a local tag with no registry behind it, so `docker pull` fails with
+  // "pull access denied" and the run died with "not on this machine … build it
+  // under Settings → Sandbox" — while the settings page's own hint had promised
+  // for months that images are "built lazily on first use". Nothing built
+  // anything. Now the first run that needs one builds it, which is what makes
+  // that sentence true; the operator can still build ahead of time, and a
+  // second run needing the same image joins the first build rather than
+  // starting its own.
+  if (!seen.ok && seen.reason === 'no_such_image') {
+    if (await buildMissingImage(rt, ref, run, spec, registry)) {
+      seen = await rt.imageDigest(ref, { runtime: spec.runtime })
+    }
   }
   if (!seen.ok && seen.reason === 'no_such_image') {
     throw new Error(t('sandbox.launch.image_missing', { image: ref }))

@@ -10242,6 +10242,32 @@ process.stdout.write(JSON.stringify(out))
         })
       })
 
+      await check('a build streams a step counter, and an unparsable line is still kept', async () => {
+        // BuildKit's `--progress=plain` is the only format that streams a step
+        // at all, and the page shows the last line either way: a build that has
+        // produced nothing recognisable for minutes is exactly what an operator
+        // wants to see rather than a spinner.
+        const rt = await import('../server/sandbox/runtime.mjs')
+        const p = rt.parseBuildProgress('#12 [ 7/14] RUN apt-get install -y python3')
+        equal(`${p.step}/${p.of}`, '7/14', 'the step counter is read')
+        contains(p.line, 'apt-get', 'and so is what it is doing')
+        const err = rt.parseBuildProgress('ERROR: failed to solve: no such file')
+        equal(err.step, null, 'a line with no step is still an answer')
+        contains(err.line, 'failed to solve', '…and keeps its text, which is the useful half')
+        equal(rt.parseBuildProgress('   '), null, 'a blank line is not an event')
+      })
+
+      await check('what may be BUILT is asked of the recipes, not of a written-out list', async () => {
+        // The settings page's table is derived from the enabled coding agents,
+        // so a hardcoded allowlist in the build route would refuse the very
+        // button the page had just rendered for a plugin coding agent.
+        const rt = await import('../server/sandbox/runtime.mjs')
+        isTrue(await rt.isBuildableImage('base'), 'the base image has a recipe')
+        isTrue(await rt.isBuildableImage('claude'), 'and so does a built-in coding agent')
+        isFalse(await rt.isBuildableImage('no-such-agent'), 'something with no recipe is not buildable')
+        isFalse(await rt.isBuildableImage(''), 'and neither is nothing at all')
+      })
+
       await check('only a plugin that says `required` can refuse a launch', async () => {
         // The scope is the point. cursor is a subscription CLI too and declares a
         // sandbox credential without `required` — and a cursor run with NO

@@ -1918,6 +1918,233 @@ function writeBuildLog(name, text) {
 }
 
 /**
+ * Is this a name THIS repository ships a build recipe for? No daemon is asked,
+ * so it is the cheap validation a request can be checked against.
+ *
+ * It exists because the settings page's build route carried a written-out
+ * allowlist of five names while the page's own table is derived from the
+ * enabled coding agents — so a coding agent that arrived as a plugin and ships
+ * a Dockerfile got a Build button the route would then refuse. One question,
+ * asked of the recipes themselves, cannot drift from the table.
+ */
+export async function isBuildableImage(name, { registry = null } = {}) {
+  try { return !!(await imageRecipe(name, { registry }))?.ok } catch { return false }
+}
+
+// ------------------------------------------- the images, and what is in flight
+
+/**
+ * The builds THIS process started and has not finished, keyed by image ref.
+ *
+ * Deliberately in memory and nowhere else. A build that was running when the
+ * hub restarted is not resumable — its `docker build` child died with the
+ * process — and a row persisted as "building" would then be stuck on that word
+ * for ever, which is the stale-display failure this project has a rule about.
+ * Presence is re-asked of the daemon on every render instead, so after a
+ * restart an image is simply present or missing, which is the truth.
+ */
+const buildsInFlight = new Map()
+
+/** What a ref's build is doing right now, or null. A copy, never the entry. */
+export function buildStateOf(ref) {
+  const b = buildsInFlight.get(String(ref ?? ''))
+  return b ? { ...b } : null
+}
+
+/** Every build in flight, for a page that renders all of them. */
+export function buildStates() {
+  return [...buildsInFlight.values()].map(b => ({ ...b }))
+}
+
+/**
+ * `#12 [ 7/14] RUN apt-get …` → `{ step: 7, of: 14, line: 'RUN apt-get …' }`.
+ *
+ * BuildKit's `--progress=plain` is the only format that streams a step counter
+ * at all; anything it does not match is still kept as the last line, because a
+ * build that has produced no recognisable step for minutes is exactly what an
+ * operator wants to see rather than a spinner.
+ */
+export function parseBuildProgress(line) {
+  const s = String(line ?? '').trim()
+  if (!s) return null
+  const m = /^#\d+\s+\[\s*(\d+)\/(\d+)\s*\]\s*(.*)$/.exec(s)
+  if (m) return { step: Number(m[1]), of: Number(m[2]), line: m[3].slice(0, 200) }
+  return { step: null, of: null, line: s.slice(0, 200) }
+}
+
+/**
+ * Build a shipped image, streaming its progress instead of blocking on it.
+ *
+ * The awaited `buildImage()` above stays exactly as it was — the tests and any
+ * caller that genuinely wants the finished answer use it. This one exists
+ * because a build is **two to seven minutes** (measured on this machine:
+ * ~90 s for the base, ~5 min for hermes at 5.33 GB) and the settings page used
+ * to `await` it inside the request: a hung browser tab, no percentage, no step,
+ * and two operators clicking at once ran two identical builds.
+ *
+ * Three rules, each of them a way it would otherwise go wrong:
+ *
+ *  - **One build per ref.** A second caller JOINS the first's promise rather
+ *    than starting a second `docker build` — the same shape `usage.mjs` and
+ *    `balances.mjs` needed, including releasing the entry from the promise and
+ *    not at the end of the body.
+ *  - **`onProgress` is throttled by the CALLER's clock, not per line.** A
+ *    build emits hundreds of lines a second and every one of them would be a
+ *    message on the live channel; the entry is updated on every line and the
+ *    callback fires at most every `progressMs`.
+ *  - **The full log is still written to a file**, exactly as the awaited build
+ *    writes it, because the sentence a page shows is one line and the answer to
+ *    "which installer broke" is four hundred.
+ */
+export async function buildImageStreaming(name, {
+  runtime = 'docker', registry = null, pull = 'if-missing',
+  timeout = 30 * 60_000, onProgress = null, progressMs = 2000,
+} = {}) {
+  const recipe = await imageRecipe(name, { registry })
+  if (!recipe.ok) {
+    return { ok: false, reason: 'unknown_image', image: String(name ?? ''), verdict: 'ok',
+      error: t('sandbox.runtime.build_unknown_image', { image: String(name ?? '') }) }
+  }
+  const existing = buildsInFlight.get(recipe.tag)
+  if (existing?.promise) return existing.promise      // join, never start a second
+
+  const dockerfile = join(appDir(), recipe.dockerfile)
+  if (!existsSync(dockerfile)) {
+    return { ok: false, reason: 'no_dockerfile', image: recipe.tag, verdict: 'ok',
+      error: t('sandbox.runtime.build_no_dockerfile', { image: String(name), path: dockerfile }) }
+  }
+
+  const { bin, args } = buildImageArgv(recipe, { runtime, pull })
+  const entry = {
+    kind: String(name), ref: recipe.tag, startedAt: Date.now(),
+    step: null, of: null, line: '', at: Date.now(), promise: null,
+  }
+  buildsInFlight.set(recipe.tag, entry)
+
+  const run = (async () => {
+    const { spawn } = await import('node:child_process')
+    let out = ''
+    let lastEmit = 0
+    const emit = (force) => {
+      const now = Date.now()
+      if (!force && now - lastEmit < progressMs) return
+      lastEmit = now
+      try { onProgress?.({ kind: entry.kind, ref: entry.ref, step: entry.step, of: entry.of, line: entry.line }) } catch {}
+    }
+    const code = await new Promise((resolve) => {
+      let child
+      try {
+        child = spawn(bin, args, {
+          // BuildKit is what streams a step counter at all; `plain` is what
+          // makes the stream line-oriented rather than a redrawn TTY display.
+          env: { ...runtimeEnv(runtime), DOCKER_BUILDKIT: '1', BUILDKIT_PROGRESS: 'plain' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+      } catch (err) { return resolve({ code: null, err }) }
+      const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, timeout)
+      timer.unref?.()
+      let buf = ''
+      const take = (chunk) => {
+        out += chunk
+        buf += chunk
+        const lines = buf.split('\n')
+        buf = lines.pop() ?? ''
+        for (const l of lines) {
+          const p = parseBuildProgress(l)
+          if (!p) continue
+          if (p.step != null) { entry.step = p.step; entry.of = p.of }
+          entry.line = p.line
+          entry.at = Date.now()
+        }
+        emit(false)
+      }
+      child.stdout?.on('data', d => take(String(d)))
+      child.stderr?.on('data', d => take(String(d)))   // BuildKit writes progress to stderr
+      child.on('error', err => { clearTimeout(timer); resolve({ code: null, err }) })
+      child.on('close', c => { clearTimeout(timer); resolve({ code: c, err: null }) })
+    })
+    emit(true)
+
+    if (code.err || code.code !== 0) {
+      const missingBin = code.err?.code === 'ENOENT'
+      if (missingBin) {
+        return { ok: false, reason: 'unreachable', image: recipe.tag, verdict: 'unreachable',
+          error: t('sandbox.runtime.build_unavailable', {
+            image: recipe.tag,
+            reason: t('sandbox.runtime.reason_unreachable', { bin }),
+          }) }
+      }
+      const path = writeBuildLog(name, [`$ ${bin} ${args.join(' ')}`, '', out].join('\n'))
+      return { ok: false, reason: 'build_failed', image: recipe.tag, verdict: 'ok', log: out,
+        error: t('sandbox.runtime.build_failed', {
+          image: recipe.tag, detail: lastMeaningfulLine(out), log: path ?? '—',
+        }) }
+    }
+    const d = await imageDigest(recipe.tag, { runtime })
+    return { ok: true, image: recipe.tag, verdict: 'ok', digest: d.digest, imageId: d.id, log: out }
+  })()
+
+  // Released BY the promise, never at the end of the body: with a synchronous
+  // path through the function the entry would otherwise be cleared before the
+  // assignment that set it, and every later caller would join a dead build.
+  entry.promise = run.finally(() => { buildsInFlight.delete(recipe.tag) })
+  return entry.promise
+}
+
+/**
+ * What images this installation would need, and whether it has them.
+ *
+ * The list is DERIVED, never a literal: the settings page used to carry
+ * `['base','claude','opencode','cursor','hermes']` written out, so a coding
+ * agent that arrived as a plugin had no button and an operator running only
+ * cursor was offered four builds they will never start. The caller passes the
+ * harness ids (the ENABLED coding agents) and any extra refs — a repo's own
+ * `sandbox_image`, the proxy engine's image — because reading those means
+ * reading the database, and this module deliberately imports nothing of the
+ * hub's.
+ *
+ * `state` is four-valued and the fourth is the point: `unreachable` is not
+ * `missing`. A daemon that would not answer must never render as "you have to
+ * build this", or an operator goes off to rebuild a 5 GB image they already
+ * have — the same rule `tmuxVerdict()` and `runtimeVerdict()` carry.
+ */
+export async function imageInventory({
+  runtime = 'docker', registry = null, harnesses = [], extraRefs = [],
+} = {}) {
+  const rows = []
+  const seen = new Set()
+
+  const add = async ({ kind, ref, source, buildable }) => {
+    const r = String(ref ?? '').trim()
+    if (!r || seen.has(r)) return
+    seen.add(r)
+    const building = buildStateOf(r)
+    const d = await imageDigest(r, { runtime })
+    const state = building ? 'building'
+      : d.ok ? 'present'
+      : d.reason === 'no_such_image' ? 'missing'
+      : 'unreachable'
+    rows.push({ kind, ref: r, source, buildable, state, id: d.id ?? null, digest: d.digest ?? null, progress: building })
+  }
+
+  const baseRecipe = await imageRecipe(BASE_IMAGE.name, { registry })
+  if (baseRecipe.ok) await add({ kind: BASE_IMAGE.name, ref: baseRecipe.tag, source: 'built', buildable: true })
+
+  for (const id of harnesses) {
+    const recipe = await imageRecipe(id, { registry })
+    if (recipe.ok) await add({ kind: id, ref: recipe.tag, source: 'built', buildable: true })
+  }
+  for (const extra of extraRefs) {
+    const ref = typeof extra === 'string' ? extra : extra?.ref
+    await add({
+      kind: typeof extra === 'string' ? null : (extra?.kind ?? null),
+      ref, source: typeof extra === 'string' ? 'operator' : (extra?.source ?? 'operator'), buildable: false,
+    })
+  }
+  return rows
+}
+
+/**
  * The digest of an image, so a spec can be pinned after a build.
  *
  * Two answers, and the difference matters more than it looks. `RepoDigests`
