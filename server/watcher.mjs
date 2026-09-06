@@ -1655,8 +1655,27 @@ async function releaseReaped(row) {
  *    often as this one restarts oftener than a leak accumulates.
  */
 function releasable(nowMs, keepMs) {
+  // "Over" is TWO facts, not one, and taking only the first was a leak measured
+  // on 2026-09-06. A closed session is the ordinary end. But a run whose AGENT
+  // PROCESS died keeps its session standing on purpose — `fl-start --keep` sets
+  // `remain-on-exit` so the screen stays readable — so `tmux_closed_at` stays
+  // NULL until retention closes it hours later, and until then the run's
+  // network and its egress proxy container were held for an agent that no
+  // longer exists. A hermes launch that died at exit 127 left `fl-proxy-<id>`
+  // running with nothing behind it.
+  //
+  // `pane_died` is the durable positive evidence that the process is gone, and
+  // it costs no tmux call. Releasing on it does NOT close the session: the
+  // screen is tmux's own buffer, not the container's, so it stays readable
+  // exactly as before. What must NOT be released is a terminal run whose pane
+  // is still ALIVE — claude, opencode and cursor all sit in their TUI after
+  // reporting `done`, and a follow-up commission there still needs the
+  // container and its egress. That run has no `pane_died` and is untouched.
   const rows = db.prepare(`SELECT r.* FROM runs r
-                           WHERE r.sandbox=1 AND r.tmux_closed_at IS NOT NULL
+                           WHERE r.sandbox=1
+                             AND (r.tmux_closed_at IS NOT NULL
+                                  OR EXISTS (SELECT 1 FROM events ep
+                                             WHERE ep.run_id=r.id AND ep.kind='pane_died'))
                              AND r.status NOT IN ('running','waiting_help','scheduled','deferred')
                              AND r.resume_pending IS NOT 1
                              AND NOT EXISTS (SELECT 1 FROM events e

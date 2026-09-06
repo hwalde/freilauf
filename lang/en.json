@@ -1630,6 +1630,7 @@
   "sandbox.runtime.err_hub_socket_name": "The sandbox document names the hub socket as “hubSocket”, which used to hold the path inside the container. The mount source is the socket on the host and is called “hubSocketSource”; start the run again so the document is rewritten.",
   "sandbox.launch.no_image": "The coding agent “{harness}” declares no sandbox image, and neither the repository nor the profile names one. Set an image under the repository’s sandbox settings.",
   "sandbox.launch.image_missing": "The sandbox image {image} is not on this machine and could not be fetched. Build it under Settings → Sandbox, or name one that exists.",
+  "sandbox.launch.credential_required": "The coding agent “{harness}” cannot authenticate inside a container without {vars}, and no value could be found for it. Outside a container it signs in from a file in your own home directory, which a sandboxed run deliberately does not get. For claude: run “claude setup-token” once and store the token under Settings → Plugins, or set the variable in the hub's environment. The run was not started — it would have sat at a login prompt nobody can answer.",
   "sandbox.warn.deny_unenforced": "This engine has no deny list. These deny entries narrow a wildcard and are NOT enforced: {hosts}",
   "sandbox.warn.policy_broken": "The egress policy could not be built: {reason}"
 }

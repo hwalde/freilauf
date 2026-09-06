@@ -249,6 +249,15 @@ export function rememberedScoped(now = Date.now()) {
 /**
  * The OAuth access token, or null. Only the token and its expiry are read —
  * never the refresh token, and nothing is ever written back.
+ *
+ * Exported as `oauthAccessToken()` below, because a SANDBOXED claude run needs
+ * the same answer: inside the container `$HOME` is the run's own seeded home and
+ * `.credentials.json` is deliberately not copied there, so the token can only
+ * travel as the declared `CLAUDE_CODE_OAUTH_TOKEN` variable. Reading the token
+ * here and passing it as a variable is not the thing rule 2 forbids: the
+ * container never receives the FILE and therefore never holds the refresh
+ * token, so nothing in the box can refresh — and nothing can invalidate the
+ * operator's live session.
  */
 function accessToken() {
   try {
@@ -260,6 +269,22 @@ function accessToken() {
     if (Number.isFinite(Number(o.expiresAt)) && Number(o.expiresAt) <= Date.now()) return null
     return o.accessToken
   } catch { return null }
+}
+
+/**
+ * The same token, for the sandbox's credential resolution. A separate name
+ * rather than exporting `accessToken` itself, so the two call sites read
+ * differently at their own end: quota asks "may I call the usage endpoint",
+ * the sandbox asks "is there a token to hand the container".
+ *
+ * It is the LAST resort, behind a stored value and a named variable, and it is
+ * deliberately the weaker answer: an interactive login's access token is
+ * short-lived, and the container cannot refresh it, so a long run can outlive
+ * it. `claude setup-token` mints a long-lived one for exactly this, and that is
+ * what an unattended installation should store.
+ */
+export function oauthAccessToken() {
+  return accessToken()
 }
 
 /**

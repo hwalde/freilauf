@@ -9933,7 +9933,8 @@ process.stdout.write(JSON.stringify(out))
     // matrix plus §8.1's availability rule, and a matrix that could only be
     // tested on a machine with a container daemon would not be tested at all.
     const { decideSandbox } = await import('../server/sandbox/spec.mjs')
-    const { sandboxOutcome, classifyPolicyPatch, LIVE_POLICY_PATHS, containerEnv, engineUsable, proxyPlacement } =
+    const { sandboxOutcome, classifyPolicyPatch, LIVE_POLICY_PATHS, containerEnv, engineUsable, proxyPlacement,
+      sandboxCredentialPairs, missingRequiredCredentials } =
       await import('../server/sandbox/index.mjs')
     const { platformSuffix, sandboxPromptSection, splitEnvArgs, createRun } = await import('../server/runner.mjs')
 
@@ -10137,8 +10138,15 @@ process.stdout.write(JSON.stringify(out))
       // and cursor hook that calls it by bare name fails — silently, on a run
       // whose session stands, whose pane is alive and which says `running`.
       const e = containerEnv({ home: '/runs/x/home', binPaths: ['/home/hub/.local/bin'] })
-      contains(e.PATH, '/home/hub/.local/bin', 'the mounted directory comes first')
+      contains(e.PATH, '/home/hub/.local/bin', 'the mounted directory is on PATH so fl-report is found')
       contains(e.PATH, '/usr/bin', 'and the image’s own directories are still there')
+      // The image's own dirs come BEFORE the host mount: the host ~/.local/bin
+      // holds the host install of every coding agent (hermes' is a venv wrapper
+      // that cannot run in the image), and fl-start launches the agent by bare
+      // name — so bare `hermes` must resolve to /usr/local/bin/hermes in the
+      // image, not the host wrapper. Measured 2026-09-06, exit 127.
+      isTrue(e.PATH.indexOf('/usr/local/bin') < e.PATH.indexOf('/home/hub/.local/bin'),
+        'image dirs precede the host bin mount, so the image’s own CLI wins over the host wrapper')
       equal(e.HOME, '/runs/x/home', 'HOME is the run’s own (§7.7)')
       // USER is a LOGIN NAME and `spec.user` is a POLICY word — the two must not
       // be confused, or a CLI resolving $USER against /etc/passwd disagrees with
@@ -10174,6 +10182,76 @@ process.stdout.write(JSON.stringify(out))
       const bare = containerEnv({ home: '/runs/x/home', binPaths: [] })
       equal(Object.keys(bare).sort().join(','), 'HOME,PATH,USER', 'no declaration, no extra variables')
     })
+
+    // ---- the credential a subscription CLI cannot start without (2026-09-06) ----
+    //
+    // Measured that day: a sandboxed claude with nothing stored and no variable
+    // set started, drew its TUI, printed "Not logged in · Please run /login" and
+    // sat there — status `running`, pane alive, every page healthy, and nothing
+    // would ever report. Two answers, and both are tested here: the token can be
+    // read from the file that authenticates every unsandboxed run, and if it
+    // cannot be found anywhere the launch REFUSES instead of starting.
+    {
+      const withCreds = async (file, fn) => {
+        const beforeFile = process.env.FREILAUF_CLAUDE_CREDENTIALS
+        const beforeVar = process.env.CLAUDE_CODE_OAUTH_TOKEN
+        process.env.FREILAUF_CLAUDE_CREDENTIALS = file
+        delete process.env.CLAUDE_CODE_OAUTH_TOKEN   // the declared variable must not answer for the file
+        try { return await fn() } finally {
+          if (beforeFile === undefined) delete process.env.FREILAUF_CLAUDE_CREDENTIALS
+          else process.env.FREILAUF_CLAUDE_CREDENTIALS = beforeFile
+          if (beforeVar !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = beforeVar
+        }
+      }
+      const goodCreds = join(sandbox, 'sandbox-claude-credentials.json')
+      writeFileSync(goodCreds, JSON.stringify({
+        claudeAiOauth: { accessToken: 'tok-from-file', refreshToken: 'never-leaves', expiresAt: Date.now() + 3_600_000 },
+      }))
+
+      await check('a subscription credential is read from the file when nothing else has it', async () => {
+        await withCreds(goodCreds, async () => {
+          const pairs = await sandboxCredentialPairs({ harness: 'claude', provider: null }, [])
+          const tok = pairs.find(p => p.name === 'CLAUDE_CODE_OAUTH_TOKEN')
+          equal(tok?.value, 'tok-from-file', 'the token travels as the declared variable')
+          // The FILE never does: only the token is read, so the container can
+          // hold no refresh token and can never invalidate the host session.
+          isFalse(pairs.some(p => String(p.value).includes('never-leaves')),
+            'the refresh token is not among the pairs')
+          equal((await missingRequiredCredentials({ harness: 'claude', provider: null }, [])).length, 0,
+            'and nothing is missing once it resolved')
+        })
+      })
+
+      await check('no token anywhere is a REFUSAL, not a session nobody is logged into', async () => {
+        await withCreds(join(sandbox, 'no-such-claude-credentials.json'), async () => {
+          const pairs = await sandboxCredentialPairs({ harness: 'claude', provider: null }, [])
+          isFalse(pairs.some(p => p.name === 'CLAUDE_CODE_OAUTH_TOKEN'), 'nothing to pass in')
+          const missing = await missingRequiredCredentials({ harness: 'claude', provider: null }, [])
+          equal(missing.map(m => m.name).join(','), 'CLAUDE_CODE_OAUTH_TOKEN',
+            'the launch is told exactly which variable it lacks')
+        })
+      })
+
+      await check('a credential something else already emitted is neither re-read nor missing', async () => {
+        await withCreds(join(sandbox, 'no-such-claude-credentials.json'), async () => {
+          const have = [{ name: 'CLAUDE_CODE_OAUTH_TOKEN', value: 'from-the-plugin' }]
+          const pairs = await sandboxCredentialPairs({ harness: 'claude', provider: null }, have)
+          equal(pairs.length, 0, 'the plugin’s own value is not duplicated or overridden')
+          equal((await missingRequiredCredentials({ harness: 'claude', provider: null }, have)).length, 0,
+            'and a variable that is already there is not missing')
+        })
+      })
+
+      await check('only a plugin that says `required` can refuse a launch', async () => {
+        // The scope is the point. cursor is a subscription CLI too and declares a
+        // sandbox credential without `required` — and a cursor run with NO
+        // resolved credential worked (measured 2026-09-06). The tempting general
+        // rule, "a subscription coding agent needs a credential", would refuse a
+        // run that demonstrably runs.
+        const missing = await missingRequiredCredentials({ harness: 'cursor', provider: null }, [])
+        equal(missing.length, 0, 'cursor declares no required credential, so nothing is refused')
+      })
+    }
 
     // ---------------- live vs. restart (§7.12.3) ----------------
 

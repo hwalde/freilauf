@@ -1089,6 +1089,20 @@ const IMAGE_ACCOUNT = 'agent'
  * claude the one variable a sandboxed run cannot start without. The hub's own
  * three win over it: a plugin that set `HOME` would move the run's home out
  * from under `seedHome()`, and `PATH` is what puts `fl-report` in the box.
+ *
+ * **The order of `PATH` is a fix, not a detail.** `binPaths` is the host's own
+ * `~/.local/bin`, mounted read-only at its identical path so `fl-report` is in
+ * the box — but that directory ALSO holds the host's install of every coding
+ * agent, and for hermes that install is a wrapper that `exec`s a host python
+ * venv (`~/.hermes/hermes-agent/venv/bin/python`) which does not exist in the
+ * image. `fl-start` launches the agent by its BARE name (`hermes`), resolved by
+ * this PATH — so with the host bin directory first, bare `hermes` found the
+ * host wrapper and the pane died with exit 127 (measured 2026-09-06, first
+ * enforced-allowlist runs). The image's own directories therefore come FIRST,
+ * so an agent installed at `/usr/local/bin` (or the run home's own `.local/bin`)
+ * wins over the host mount; `fl-report`, which exists in no image, is still
+ * found because the host bin directory is on the PATH — just last, where it can
+ * shadow nothing.
  */
 export function containerEnv({ home, binPaths = [], harnessEnv = {} } = {}) {
   const base = ['/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin']
@@ -1100,7 +1114,7 @@ export function containerEnv({ home, binPaths = [], harnessEnv = {} } = {}) {
     ...declared,
     HOME: home,
     USER: env('SANDBOX_IMAGE_ACCOUNT') || IMAGE_ACCOUNT,
-    PATH: [...binPaths, `${home}/.local/bin`, ...base].filter(Boolean).join(':'),
+    PATH: [...base, `${home}/.local/bin`, ...binPaths].filter(Boolean).join(':'),
   }
 }
 
@@ -1765,7 +1779,21 @@ async function secretDeclarations(run) {
         const inj = c?.injection && Array.isArray(c.injection.hosts) && c.injection.hosts.length
           ? { header: c.injection.header || 'Authorization', prefix: c.injection.prefix ?? '', hosts: c.injection.hosts.map(String) }
           : null
-        for (const k of c?.envKeys ?? []) out.set(String(k), { plugin: id, key: c?.key ?? String(k), injection: inj })
+        // `read` and `required` travel with the declaration because they are
+        // the plugin's own answers and only it can give them: `read` is the
+        // last-resort source for a credential the operator stored nowhere (see
+        // claude's `oauth_token`), `required` says that a run of this coding
+        // agent cannot authenticate without it. Both are optional; a plugin
+        // that declares neither behaves exactly as it did.
+        for (const k of c?.envKeys ?? []) {
+          out.set(String(k), {
+            plugin: id,
+            key: c?.key ?? String(k),
+            injection: inj,
+            read: typeof c?.read === 'function' ? c.read : null,
+            required: c?.required === true,
+          })
+        }
       }
     }
   } catch { /* an unanswerable question masks nothing, which is `env` mode */ }
@@ -1804,13 +1832,65 @@ export async function sandboxCredentialPairs(run, have = []) {
     const decls = await secretDeclarations(run)
     for (const [name, decl] of decls) {
       if (known.has(name)) continue
-      const value = credentialValue(decl.plugin, decl.key)
+      // The ordinary three sources first — stored value, named variable, the
+      // plugin's own declared variables. `read` is the LAST resort and only the
+      // plugin can provide it: claude's is `~/.claude/.credentials.json`, which
+      // authenticates every unsandboxed run on the machine and reaches no
+      // container, because `$HOME` in the box is the run's seeded home. Reading
+      // the token here and passing it as the declared variable keeps the FILE —
+      // and with it the refresh token — outside the box. A `read` that throws
+      // or answers nothing is simply no credential.
+      let value = credentialValue(decl.plugin, decl.key)
+      if (!value && decl.read) {
+        try { value = (await decl.read()) || null } catch { value = null }
+      }
       if (!value) continue
       out.push({ name, value })
       known.add(name)          // two plugins declaring one variable is one variable
     }
   } catch { /* unanswerable: the run starts as it did before this existed */ }
   return out
+}
+
+/**
+ * The credentials this run's plugins declare as REQUIRED and that resolved to
+ * nothing — the launch's reason to refuse rather than start a session nobody is
+ * logged into.
+ *
+ * It exists because of the most expensive failure shape this hub has a name
+ * for: a sandboxed claude with no token started, drew its TUI, printed *"Not
+ * logged in · Please run /login"* and sat there, while the run said `running`,
+ * the pane was alive and every page above it read as healthy (measured
+ * 2026-09-06). Nothing was wrong that a human could see; nothing would ever
+ * report.
+ *
+ * **Scoped deliberately, and the scope is the point.** Only a declaration that
+ * says `required: true` counts. cursor is a subscription CLI too and declares
+ * `CURSOR_API_KEY` with no `required`, and a cursor run WITHOUT any resolved
+ * credential worked (measured the same day) — so the tempting general rule,
+ * "a subscription coding agent needs a credential", would refuse a run that
+ * demonstrably works. The plugin says whether its credential is the run's
+ * authentication; the hub does not guess.
+ *
+ * Returns `[{ name, plugin, key }]`, empty when everything required resolved —
+ * which is every run on an installation whose plugins declare no `required`.
+ */
+export async function missingRequiredCredentials(run, have = []) {
+  const known = new Set(have.map(p => p?.name).filter(Boolean))
+  const missing = []
+  try {
+    const { credentialValue } = await import('../plugins/store.mjs')
+    const decls = await secretDeclarations(run)
+    for (const [name, decl] of decls) {
+      if (!decl.required || known.has(name)) continue
+      let value = credentialValue(decl.plugin, decl.key)
+      if (!value && decl.read) {
+        try { value = (await decl.read()) || null } catch { value = null }
+      }
+      if (!value) missing.push({ name, plugin: decl.plugin, key: decl.key })
+    }
+  } catch { /* unanswerable: never a refusal on a question that could not be asked */ }
+  return missing
 }
 
 /**

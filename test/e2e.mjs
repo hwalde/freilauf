@@ -7451,6 +7451,50 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
                     tmux_closed_at=datetime('now') WHERE id=?`).run(id)
       })
 
+      await check('a dead pane releases the sandbox, even though the session still stands', async () => {
+        // `fl-start --keep` sets `remain-on-exit`, so a crashed run's screen
+        // stays readable and `tmux_closed_at` stays NULL for hours. Until
+        // 2026-09-06 the reaper asked only about a CLOSED session, so a run
+        // whose agent process had already exited went on holding its network
+        // and its egress proxy — measured: a hermes launch died at exit 127 and
+        // `fl-proxy-<id>` was still running a minute later with nothing behind
+        // it. `pane_died` is the durable evidence that the process is gone.
+        const id = randomUUID()
+        db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                     sandbox,sandbox_container,tmux_session,started_at,ended_at)
+                    VALUES(?,?,'hermes','leak','keiner',45,'failed',1,?,?,datetime('now'),datetime('now'))`)
+          .run(id, repoId, `fl-${id}`, `fl-leak-${id.slice(0, 8)}`)
+        mkdirSync(join(SB, 'runs', id), { recursive: true })
+        await runtime.createNetwork(`fl-net-${id}`, { runtime: 'docker' })
+        db.prepare(`INSERT INTO events(run_id,ts,kind,payload) VALUES(?,datetime('now'),'pane_died',?)`)
+          .run(id, JSON.stringify({ exit: 127 }))
+        shim.reset()
+        await watcherMod.reconcileContainers(hubId)
+        isFalse(netzDa(id), 'the network of a run whose agent is gone is released')
+        isTrue(ereignisse(id).includes('sandbox:released'),
+          `and the run says it was let go (${JSON.stringify(ereignisse(id))})`)
+      })
+
+      await check('…but a finished run whose agent is still in its TUI keeps everything', async () => {
+        // The other half, and the reason the rule is `pane_died` and not merely
+        // "the run is over": claude, opencode and cursor all sit in their TUI
+        // after reporting `done`, and a follow-up commission typed into that
+        // session still needs the container and its way out.
+        const id = randomUUID()
+        db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                     sandbox,sandbox_container,tmux_session,started_at,ended_at)
+                    VALUES(?,?,'claude','leak','keiner',45,'done',1,?,?,datetime('now'),datetime('now'))`)
+          .run(id, repoId, `fl-${id}`, `fl-leak-${id.slice(0, 8)}`)
+        mkdirSync(join(SB, 'runs', id), { recursive: true })
+        await runtime.createNetwork(`fl-net-${id}`, { runtime: 'docker' })
+        shim.container(`fl-${id}`, { state: 'running', labels: { 'freilauf.hub': hubId } })
+        shim.reset()
+        await watcherMod.reconcileContainers(hubId)
+        isTrue(netzDa(id), 'a live TUI keeps its network')
+        isFalse(ereignisse(id).includes('sandbox:released'), 'and nothing was released')
+        db.prepare('UPDATE runs SET tmux_closed_at=datetime(\'now\') WHERE id=?').run(id)
+      })
+
       await check('an unreachable daemon releases nothing — "no answer" is not "gone"', async () => {
         const id = await sandboxLauf()
         shim.reset()

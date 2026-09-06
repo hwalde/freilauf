@@ -1630,6 +1630,7 @@
   "sandbox.runtime.err_hub_socket_name": "Das Sandbox-Dokument nennt den Hub-Socket als „hubSocket“, und darin stand früher der Pfad im Container. Die Mount-Quelle ist der Socket auf dem Host und heißt „hubSocketSource“; starte den Lauf neu, damit das Dokument neu geschrieben wird.",
   "sandbox.launch.no_image": "Der Coding-Agent „{harness}“ deklariert kein Sandbox-Image, und weder das Repository noch das Profil nennt eines. Trage in den Sandbox-Einstellungen des Repositories ein Image ein.",
   "sandbox.launch.image_missing": "Das Sandbox-Image {image} liegt nicht auf dieser Maschine und konnte nicht geholt werden. Baue es unter Einstellungen → Sandbox, oder nenne eines, das existiert.",
+  "sandbox.launch.credential_required": "Der Coding-Agent „{harness}“ kann sich im Container ohne {vars} nicht anmelden, und es war kein Wert dafür zu finden. Außerhalb eines Containers meldet er sich aus einer Datei in deinem eigenen Home an, die ein gesandboxter Lauf bewusst nicht bekommt. Für claude: einmal „claude setup-token“ ausführen und den Token unter Einstellungen → Plugins hinterlegen, oder die Variable in der Umgebung des Hubs setzen. Der Lauf wurde nicht gestartet — er hätte an einer Anmeldeaufforderung gestanden, die niemand beantworten kann.",
   "sandbox.warn.deny_unenforced": "Diese Engine kennt keine Sperrliste. Diese Sperreinträge schränken einen Platzhalter ein und werden NICHT durchgesetzt: {hosts}",
   "sandbox.warn.policy_broken": "Die Ausgangsregel konnte nicht gebaut werden: {reason}"
 }

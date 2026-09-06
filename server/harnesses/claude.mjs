@@ -260,10 +260,37 @@ const plugin = {
      * under `none` it does not enter the container at all. The value itself is
      * resolved where every credential is resolved —
      * `credentialValue('claude', 'oauth_token')`.
+     *
+     * `read` is the LAST resort behind those, and it is what makes a sandboxed
+     * claude run work on an ordinary subscription installation. Outside a
+     * container claude authenticates from `~/.claude/.credentials.json`; inside
+     * one `$HOME` is the run's seeded home and that file is deliberately not
+     * copied there, so with nothing stored and no variable set the container got
+     * no token at all and the TUI sat at *"Not logged in · Please run /login"*
+     * on a run whose status said `running` — the invisible failure shape
+     * (measured 2026-09-06). Reading the token host-side and passing it as the
+     * declared variable keeps the file — and with it the refresh token — out of
+     * the box entirely.
+     *
+     * It is deliberately the WEAKER answer: an interactive login's access token
+     * is short-lived and nothing in the container can refresh it, so a long run
+     * can outlive it. `claude setup-token` mints a long-lived token for exactly
+     * this case, and `required` below is what turns "no token from anywhere"
+     * into a refusal that says so instead of a session nobody is logged into.
+     *
+     * Lazily imported, like everything this file needs from the hub's own
+     * modules (AGENTS.md, "Pitfalls": a static import here closes a ring).
      */
     credentials: [{
       key: 'oauth_token',
       envKeys: OAUTH_ENV,
+      required: true,
+      read: async () => {
+        try {
+          const { oauthAccessToken } = await import('../claude-usage.mjs')
+          return oauthAccessToken() ?? null
+        } catch { return null }
+      },
       injection: { header: 'Authorization', prefix: 'Bearer ', hosts: ['api.anthropic.com'] },
     }],
 
