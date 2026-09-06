@@ -80,7 +80,7 @@
                           "name": "Dispatcher wecken",
                           "properties": {
                             "agentId": "@DISPATCHER_AGENT_ID@",
-                            "promptExtra": "Ausgelöst vom Wächter-Takt. Es liegt Arbeit an. Rechne die Lage und starte die Worker entsprechend — die gewöhnliche Bahn nach der Staffel, die starke nach `stark_route`. Halte dein 15-Minuten-Budget ein.",
+                            "promptExtra": "Ausgelöst vom Wächter-Takt. Es liegt Arbeit an. Rechne die Lage und starte die Worker entsprechend — die gewöhnliche Bahn nach der Staffel, die starke nach `stark_starts_soll`. Halte dein 15-Minuten-Budget ein.",
                             "wait": false,
                             "outputVar": "dispatcher"
                           }

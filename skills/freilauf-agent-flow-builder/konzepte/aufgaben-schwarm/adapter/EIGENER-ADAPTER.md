@@ -147,6 +147,12 @@ vergeben, und genau die Doppelarbeit ist zurück, gegen die die Zuweisung gebaut
 Vertrag lautet deshalb: lebt, beendet, unbekannt. Bei unbekannt bleibt die Zuweisung stehen,
 und es entscheidet die Stunden-Decke, nicht eine Vermutung.
 
+Und weil nur die Antwort „beendet“ etwas löst, hole genau diese ein zweites Mal, mit ein
+paar Sekunden Abstand. Erst wenn beide Male dasselbe kommt, gilt sie; widersprechen sich
+die Antworten, heißt das Ergebnis unbekannt und es wird nichts freigegeben. „Lebt“ und
+„unbekannt“ brauchen die Nachfrage nicht: Sie halten die Zuweisung ohnehin fest, und ein
+Irrtum dort kostet Wartezeit statt Doppelarbeit.
+
 Dieser Fehler ist im Ursprungsprojekt am 2026-09-04 gebaut und noch vor dem ersten Schaden
 gefunden worden: Das Prüf-Skript meldete korrekt einen dritten Code für „nicht beantwortet“,
 und die aufrufende Seite warf ihn mit „beendet“ in einen Topf.
