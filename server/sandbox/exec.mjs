@@ -1,5 +1,5 @@
 // Freilauf — the two seams the rest of the hub calls for a run's working copy
-// and a run's agent state (SANDBOX_RESEARCH.md §7.4.4 and §7.7).
+// and a run's agent state (SANDBOX.md).
 //
 // The whole point of this file is that its callers stop asking whether a run is
 // sandboxed. `agentHome(run)` and `runGit(run, args)` answer the same question
@@ -17,8 +17,8 @@ import { envIs } from '../env.mjs'
  * deliberately hostile clone — `core.fsmonitor`, `core.sshCommand`,
  * `core.alternateRefsCommand`, `core.pager`, `core.editor`, `diff.external`,
  * `uploadpack.packObjectsHook` and twelve executable hooks, none of them fired
- * [measured, git 2.43.0, SANDBOX_RESEARCH.md §11a.1]. Everything that reads the
- * WORKING TREE fired something: `status` and `diff` ran `core.fsmonitor` and
+ * [measured, git 2.43.0, before this machine had a container runtime; see
+ * SANDBOX.md]. Everything that reads the WORKING TREE fired something: `status` and `diff` ran `core.fsmonitor` and
  * `diff.external`, `add`/`commit` ran `pre-commit`, `post-index-change` and
  * `reference-transaction`, `checkout -- .` ran `post-checkout`.
  *

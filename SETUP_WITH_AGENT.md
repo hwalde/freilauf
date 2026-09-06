@@ -255,7 +255,7 @@ keeps every bridge in a network namespace of its own (`--detach-netns`), so that
 address does not exist on the host — measured three ways on 2026-09-05. There the
 hub starts the listener as a **container** on the run's own network instead, with
 the same policy code, the same 403 and the same audit format, and the agent dials
-it by name. The account is in `docs/sandbox.md` under *"Where the built-in proxy
+it by name. The account is in `SANDBOX.md` under *"Where the built-in proxy
 runs"*. What to pass on:
 
 - **all four shipped profiles start on a rootless daemon**, including the three
@@ -339,7 +339,7 @@ mode that keeps the keys out of it (`secrets: inject`, through `iron-proxy`) is
 **built but has never been run against the real binary** — do not switch a
 profile to it on their behalf. And the sandbox decides on hostnames and inspects
 no content, so an allowed host is a way out. Both, and
-everything else it does not do, are in **[docs/sandbox.md](docs/sandbox.md)**;
+everything else it does not do, are in **[SANDBOX.md](SANDBOX.md)**;
 what a coding-agent plugin has to declare to be sandboxable is in
 **[docs/plugins.md](docs/plugins.md)**.
 
@@ -546,7 +546,7 @@ tooling. The seams that were designed to be pulled on:
 | point the notification links at your own hostname | Settings → **Notification links**: a `Public hostname` (the name that matches your certificate), and the port follows the live VPN port automatically. Without one, `FREILAUF_PUBLIC_URL` (a full URL, in `~/.config/freilauf/env`) or the local address answers — `publicBase()` in `server/util.mjs` |
 | give agents an opt-in capability | drop a folder with a `SKILL.md` into `~/agents/zusaetze/` — it appears as a checkbox in the run forms. Deliberately *not* `.claude/skills`, so nothing loads automatically |
 | teach your coding agents how to drive Freilauf itself | Settings → **Freilauf skills** installs the agent skills under `skills/` into the directories your configured coding agents read. Where those are is a **plugin declaration** (`skills: { user, project }`), so a new coding agent brings its own — `server/skills.mjs`, [`docs/plugins.md`](docs/plugins.md) |
-| run an agent inside a boundary rather than as yourself | **Settings → Sandbox** — off by default, needs a container runtime, configured hub → repo → agent → run with a lower level only ever able to narrow what a higher one locked. Start with the **Audit** shape (watch what a run reaches), then enforce — and that order is not politeness: the allowlist is enforced by a proxy that has been exercised by hand and never yet by a run. → [`docs/sandbox.md`](docs/sandbox.md) |
+| run an agent inside a boundary rather than as yourself | **Settings → Sandbox** — off by default, needs a container runtime, configured hub → repo → agent → run with a lower level only ever able to narrow what a higher one locked. Start with the **Audit** shape (watch what a run reaches), then enforce — that order lets you learn your own allowlist before it can block a build. Two agents (opencode, cursor) have completed real runs behind the enforced allowlist; claude and hermes each still hit a launch bug in the box. → [`SANDBOX.md`](SANDBOX.md) |
 | put a project away without losing its history | **Repos → Deactivate**: gone from every dropdown, starts nothing new, everything it owns kept and reachable, reversible in one click. `POST /repos/toggle` (`id`, `active=1\|0`) is the same thing from a script — `server/pages.mjs`, and the "Putting a repository away" section in [`AGENTS.md`](AGENTS.md) |
 | script the hub from a shell or from inside a run | `fl-api` — `fl-api /api/runs repo=3 status=running`, `fl-api /api/runs/<id>`, `fl-api -X POST /api/runs/<id>/title title=…`. The read-only half is `server/read-api.mjs`; every write still goes through the ordinary POST routes, which validate |
 | show your project's own numbers in the sidebar | **panels** — the project pushes (`fl-panel set findings --total 33 --item "bug=17:red"`, or a tool of yours piping JSON in), Freilauf renders them with the time they were measured and never learns what they mean. Push it from a run before it reports, or from a `run_merged` flow → [`docs/panels.md`](docs/panels.md) |
@@ -613,7 +613,7 @@ If your task is to change Freilauf rather than just run it:
 | The read-only JSON API those skills talk to | `server/read-api.mjs`, `bin/fl-api` |
 | A project's own numbers in the sidebar | `server/panels.mjs`, `bin/fl-panel`, **`docs/panels.md`** |
 | No-code flows | `server/flows/` + its own `AGENTS.md` |
-| Running an agent in a container: profiles, layering, network, audit, and what it does **not** do | **`docs/sandbox.md`**, `server/sandbox/`, `sandbox/images/README.md` |
+| Running an agent in a container: profiles, layering, network, audit, and what it does **not** do | **`SANDBOX.md`**, `server/sandbox/`, `sandbox/images/README.md` |
 | The report socket and the per-run token | `server/hub-socket.mjs`, `bin/fl-report` |
 | Pages, sidebar, live channel | `server/pages.mjs`, `server/events.mjs`, `public/hub.js` |
 | TLS proxy, HTTP/2, the network edge | `vpn-proxy.mjs`, `test/proxy.mjs` |
@@ -640,7 +640,7 @@ If your task is to change Freilauf rather than just run it:
 [ ] Settings → Freilauf skills answered (install them, or deliberately not)
 [ ] sandbox: left off (the default), OR a runtime installed by the human,
     every row of "What has to be true" checked, Settings → Sandbox switched
-    on, images built, a policy dry-run verified, and docs/sandbox.md's limits
+    on, images built, a policy dry-run verified, and SANDBOX.md's limits
     passed on — including that no coding agent has yet worked behind an
     enforced allowlist (so roll out with the Audit profile), and that only the
     opencode image has ever carried a real run

@@ -15,7 +15,7 @@
 export const HTTP_5XX = /\b(?:api|http|error|status|code|response)\b[^\n]{0,16}\b5\d\d\b|\b5\d\d\b\s*[-–—:]?\s*(?:internal server error|bad gateway|service unavailable|gateway time-?out)/i
 
 /**
- * The sandbox family (SANDBOX_RESEARCH.md §7.12.1) — what a WALL looks like from
+ * The sandbox family (SANDBOX.md) — what a WALL looks like from
  * inside the agent's terminal, as opposed to what the proxy sees.
  *
  * It is deliberately not a per-harness set: a read-only filesystem, a tmpfs that
@@ -26,7 +26,7 @@ export const HTTP_5XX = /\b(?:api|http|error|status|code|response)\b[^\n]{0,16}\
  *
  * Every entry needs the errno (or the kernel phrase) PLUS the shape real output
  * has around it — a colon and its message, `code EACCES`, `connect ENETUNREACH`.
- * A bare token would fire on this file, on SANDBOX_RESEARCH.md and on the test
+ * A bare token would fire on this file, on SANDBOX.md and on the test
  * that pins these patterns, which is the failure this repo has already paid for
  * twice ("Upgrade to Max for higher rate limits", `555 tokens`). The rest of that
  * defence is the exception list in detect.mjs.

@@ -1929,6 +1929,29 @@
     quelle.addEventListener('panel', () => {
       bald('status', () => { refreshStatus().catch(() => {}) }, 500)
     })
+    // A sandbox image is being built (server/sandbox/pages.mjs, and the launch
+    // path when a run needs an image nobody built yet). Its own event type for
+    // the same reason `panel` is: it belongs to no run — the settings page can
+    // start one, and so can a run in a repo this page is not looking at. The
+    // answer is the usual one: re-fetch the block, which the server renders
+    // through the very function the page used, so a step counter and the page
+    // can never disagree.
+    //
+    // Only where the block is on the page at all. A build takes minutes and
+    // emits progress throughout; a page without `#sandbox-images` would
+    // otherwise fetch a fragment it has nowhere to put.
+    quelle.addEventListener('sandbox_image', () => {
+      if (!document.getElementById('sandbox-images')) return
+      bald('sandbox-images', () => {
+        fetch('/api/fragments/sandbox-images', { headers: { accept: 'text/html' } })
+          .then(r => (r.ok ? r.text() : null))
+          .then((html) => {
+            const box = document.getElementById('sandbox-images')
+            if (box && html != null) box.innerHTML = html
+          })
+          .catch(() => {})
+      }, 700)
+    })
     // Whether the channel is actually up is a fact about the page, so the page
     // says so. It matters for real: a fresh load has no Last-Event-ID, so an
     // event fired in the gap between rendering and connecting is simply missed

@@ -365,7 +365,7 @@ export async function startRun(def, {
   const resolved = await resolveRouting(def)
 
   // …and so does the sandbox, for exactly the same reason and in the same slot
-  // (SANDBOX_RESEARCH.md §7.13). `planSandbox()` reads the repo's default,
+  // (SANDBOX.md). `planSandbox()` reads the repo's default,
   // profile and overrides LIVE — repo config is not snapshotted into a run, the
   // rule `repos.prompt` already follows — and freezes the RESOLVED SPEC into the
   // row, which `launchRun()` then reads and never resolves again. A profile

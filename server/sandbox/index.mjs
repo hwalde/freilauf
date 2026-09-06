@@ -1,6 +1,6 @@
 // Freilauf — the sandbox facade: the one module the rest of the hub imports
-// (SANDBOX_RESEARCH.md §7.11 for the lifecycle, §7.3 for the decision, §7.12 for
-// changing a policy on a run that is already going).
+// (SANDBOX.md — the lifecycle, the decision, and changing a policy on a run
+// that is already going).
 //
 // Everything else under `server/sandbox/` is a piece of machinery — the spec and
 // its layering, the clone, the proxy, the container runtime. This file is the
@@ -41,6 +41,9 @@ import { RUNS_DIR, shortId, sh } from '../util.mjs'
 import { env } from '../env.mjs'
 import { t, currentLanguage } from '../i18n.mjs'
 import { dataDir } from '../paths.mjs'
+// The live channel. `events.mjs` imports nothing at all, which is exactly what
+// lets db.mjs and this file both import it without closing a ring.
+import { publish } from '../events.mjs'
 // The one reader of the four hub sandbox settings — see "the hub layer" below.
 import { sandboxHubMode, sandboxAllowBypass, sandboxLock, sandboxHubSpec, sandboxAgainst } from '../run-def.mjs'
 import { appendAuditFile } from './audit.mjs'
@@ -184,6 +187,77 @@ export const CONTAINER_HUB_SOCKET = '/run/freilauf/hub.sock'
  * and stays null for a locally built image; `id` is the local image id, which is
  * always there and is the provenance a machine building its own agent images has.
  */
+/**
+ * Build the image a run is missing, when it is one THIS repository ships a
+ * recipe for. `false` for anything else — an operator's own overlay image, a
+ * coding agent whose plugin ships no Dockerfile, a runtime module that predates
+ * the streaming build — and the caller then refuses exactly as it did.
+ *
+ * Two rules that are not details:
+ *
+ *  - **Only the ref we ourselves derived.** The recipe's tag must equal the ref
+ *    that is missing. A repository pointing `sandbox_image` at a toolchain image
+ *    of the operator's must never be answered by building something else under
+ *    that name.
+ *  - **The base comes first.** Every harness layer is `FROM freilauf/agent-base`,
+ *    and that base is a local tag with no registry behind it — so building a
+ *    harness image on a machine without the base fails inside `docker build`
+ *    with the daemon's own wording. Building it here turns that into one
+ *    ordinary extra step.
+ *
+ * Progress goes onto the run's own event list AND the live channel, because
+ * this happens on the launch path: a run that is quietly building a 5 GB image
+ * for five minutes must not look like a run that is hanging.
+ */
+async function buildMissingImage(rt, ref, run, spec, registry) {
+  if (typeof rt.buildImageStreaming !== 'function' || typeof rt.harnessImage !== 'function') return false
+  const kind = String(run.harness ?? '')
+  if (!kind) return false
+  let tag = null
+  try { tag = await rt.harnessImage(kind, { registry }) } catch { tag = null }
+  if (!tag || tag !== ref) return false
+
+  const opts = { runtime: spec.runtime, registry: registry ?? undefined }
+  const announce = (payload) => {
+    try { publish('sandbox_image', payload) } catch { /* nobody watching is not a failure */ }
+  }
+  const build = async (name) => {
+    announce({ image: name, state: 'building' })
+    const r = await rt.buildImageStreaming(name, {
+      ...opts,
+      onProgress: (pr) => announce({ ...pr, image: name, state: 'building' }),
+    })
+    announce({ image: name, state: r?.ok ? 'done' : 'failed', error: r?.ok ? null : String(r?.error ?? '') })
+    return r
+  }
+
+  addEvent(run.id, 'sandbox:image_build', { image: ref, harness: kind })
+  try {
+    // The base, only where it is really absent — asking is one `image inspect`.
+    const baseRef = await rt.harnessImage('base', { registry }).catch(() => null)
+    if (baseRef) {
+      const haveBase = await rt.imageDigest(baseRef, { runtime: spec.runtime })
+      if (!haveBase.ok && haveBase.reason === 'no_such_image') {
+        const rb = await build('base')
+        if (!rb?.ok) {
+          addEvent(run.id, 'warn', { image_build_failed: String(rb?.error ?? '').slice(0, 300) })
+          return false
+        }
+      }
+    }
+    const r = await build(kind)
+    if (!r?.ok) {
+      addEvent(run.id, 'warn', { image_build_failed: String(r?.error ?? '').slice(0, 300) })
+      return false
+    }
+    addEvent(run.id, 'sandbox:image_built', { image: ref })
+    return true
+  } catch (err) {
+    addEvent(run.id, 'warn', { image_build_failed: String(err?.message ?? err).slice(0, 300) })
+    return false
+  }
+}
+
 async function ensureImage(spec, run) {
   const rt = await need('runtime')
   const registry = String(getSetting('sandbox_image_registry') ?? '').trim() || null
@@ -206,6 +280,20 @@ async function ensureImage(spec, run) {
     addEvent(run.id, 'sandbox:image_pull', { image: ref })
     const pulled = await rt.pullImage(ref, { runtime: spec.runtime })
     if (pulled.ok) seen = await rt.imageDigest(ref, { runtime: spec.runtime })
+  }
+  // A pull cannot answer for an image this repository BUILDS. `freilauf/agent-*`
+  // is a local tag with no registry behind it, so `docker pull` fails with
+  // "pull access denied" and the run died with "not on this machine … build it
+  // under Settings → Sandbox" — while the settings page's own hint had promised
+  // for months that images are "built lazily on first use". Nothing built
+  // anything. Now the first run that needs one builds it, which is what makes
+  // that sentence true; the operator can still build ahead of time, and a
+  // second run needing the same image joins the first build rather than
+  // starting its own.
+  if (!seen.ok && seen.reason === 'no_such_image') {
+    if (await buildMissingImage(rt, ref, run, spec, registry)) {
+      seen = await rt.imageDigest(ref, { runtime: spec.runtime })
+    }
   }
   if (!seen.ok && seen.reason === 'no_such_image') {
     throw new Error(t('sandbox.launch.image_missing', { image: ref }))
@@ -839,7 +927,7 @@ export async function prepareSandbox(run, repo, opts = {}) {
     //    the HUB PROCESS on the host, so the gateway address is the only way the
     //    container can reach it at all; isolating the gateway away would leave
     //    that run with no egress whatsoever, which is what it had. The cost is
-    //    written down in `ensureProxy()` and in SANDBOX_RESEARCH.md.
+    //    written down in `ensureProxy()` and in SANDBOX.md.
     if (spec.network?.mode !== 'none' && spec.network?.mode !== 'open') {
       const rt = await sibling('runtime')
       //
@@ -1089,6 +1177,20 @@ const IMAGE_ACCOUNT = 'agent'
  * claude the one variable a sandboxed run cannot start without. The hub's own
  * three win over it: a plugin that set `HOME` would move the run's home out
  * from under `seedHome()`, and `PATH` is what puts `fl-report` in the box.
+ *
+ * **The order of `PATH` is a fix, not a detail.** `binPaths` is the host's own
+ * `~/.local/bin`, mounted read-only at its identical path so `fl-report` is in
+ * the box — but that directory ALSO holds the host's install of every coding
+ * agent, and for hermes that install is a wrapper that `exec`s a host python
+ * venv (`~/.hermes/hermes-agent/venv/bin/python`) which does not exist in the
+ * image. `fl-start` launches the agent by its BARE name (`hermes`), resolved by
+ * this PATH — so with the host bin directory first, bare `hermes` found the
+ * host wrapper and the pane died with exit 127 (measured 2026-09-06, first
+ * enforced-allowlist runs). The image's own directories therefore come FIRST,
+ * so an agent installed at `/usr/local/bin` (or the run home's own `.local/bin`)
+ * wins over the host mount; `fl-report`, which exists in no image, is still
+ * found because the host bin directory is on the PATH — just last, where it can
+ * shadow nothing.
  */
 export function containerEnv({ home, binPaths = [], harnessEnv = {} } = {}) {
   const base = ['/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin']
@@ -1100,7 +1202,7 @@ export function containerEnv({ home, binPaths = [], harnessEnv = {} } = {}) {
     ...declared,
     HOME: home,
     USER: env('SANDBOX_IMAGE_ACCOUNT') || IMAGE_ACCOUNT,
-    PATH: [...binPaths, `${home}/.local/bin`, ...base].filter(Boolean).join(':'),
+    PATH: [...base, `${home}/.local/bin`, ...binPaths].filter(Boolean).join(':'),
   }
 }
 
@@ -1419,7 +1521,7 @@ async function ensureProxy(run, spec, { runDir, network, allow, port = 0, allowF
     // is what mints them, and a copy of it inside the agent's box would let the
     // agent forge any host it likes. Both come from `sandbox_ca_dir`, generated
     // once by the operator (iron-proxy's own README step 1, quoted in
-    // docs/sandbox.md), and the key is absent for every installation that never
+    // SANDBOX.md), and the key is absent for every installation that never
     // set one up — which `startIronProxy()` turns into a named refusal rather
     // than a proxy that silently swaps nothing.
     caPath: hubCaPath(),
@@ -1765,7 +1867,21 @@ async function secretDeclarations(run) {
         const inj = c?.injection && Array.isArray(c.injection.hosts) && c.injection.hosts.length
           ? { header: c.injection.header || 'Authorization', prefix: c.injection.prefix ?? '', hosts: c.injection.hosts.map(String) }
           : null
-        for (const k of c?.envKeys ?? []) out.set(String(k), { plugin: id, key: c?.key ?? String(k), injection: inj })
+        // `read` and `required` travel with the declaration because they are
+        // the plugin's own answers and only it can give them: `read` is the
+        // last-resort source for a credential the operator stored nowhere (see
+        // claude's `oauth_token`), `required` says that a run of this coding
+        // agent cannot authenticate without it. Both are optional; a plugin
+        // that declares neither behaves exactly as it did.
+        for (const k of c?.envKeys ?? []) {
+          out.set(String(k), {
+            plugin: id,
+            key: c?.key ?? String(k),
+            injection: inj,
+            read: typeof c?.read === 'function' ? c.read : null,
+            required: c?.required === true,
+          })
+        }
       }
     }
   } catch { /* an unanswerable question masks nothing, which is `env` mode */ }
@@ -1804,13 +1920,65 @@ export async function sandboxCredentialPairs(run, have = []) {
     const decls = await secretDeclarations(run)
     for (const [name, decl] of decls) {
       if (known.has(name)) continue
-      const value = credentialValue(decl.plugin, decl.key)
+      // The ordinary three sources first — stored value, named variable, the
+      // plugin's own declared variables. `read` is the LAST resort and only the
+      // plugin can provide it: claude's is `~/.claude/.credentials.json`, which
+      // authenticates every unsandboxed run on the machine and reaches no
+      // container, because `$HOME` in the box is the run's seeded home. Reading
+      // the token here and passing it as the declared variable keeps the FILE —
+      // and with it the refresh token — outside the box. A `read` that throws
+      // or answers nothing is simply no credential.
+      let value = credentialValue(decl.plugin, decl.key)
+      if (!value && decl.read) {
+        try { value = (await decl.read()) || null } catch { value = null }
+      }
       if (!value) continue
       out.push({ name, value })
       known.add(name)          // two plugins declaring one variable is one variable
     }
   } catch { /* unanswerable: the run starts as it did before this existed */ }
   return out
+}
+
+/**
+ * The credentials this run's plugins declare as REQUIRED and that resolved to
+ * nothing — the launch's reason to refuse rather than start a session nobody is
+ * logged into.
+ *
+ * It exists because of the most expensive failure shape this hub has a name
+ * for: a sandboxed claude with no token started, drew its TUI, printed *"Not
+ * logged in · Please run /login"* and sat there, while the run said `running`,
+ * the pane was alive and every page above it read as healthy (measured
+ * 2026-09-06). Nothing was wrong that a human could see; nothing would ever
+ * report.
+ *
+ * **Scoped deliberately, and the scope is the point.** Only a declaration that
+ * says `required: true` counts. cursor is a subscription CLI too and declares
+ * `CURSOR_API_KEY` with no `required`, and a cursor run WITHOUT any resolved
+ * credential worked (measured the same day) — so the tempting general rule,
+ * "a subscription coding agent needs a credential", would refuse a run that
+ * demonstrably works. The plugin says whether its credential is the run's
+ * authentication; the hub does not guess.
+ *
+ * Returns `[{ name, plugin, key }]`, empty when everything required resolved —
+ * which is every run on an installation whose plugins declare no `required`.
+ */
+export async function missingRequiredCredentials(run, have = []) {
+  const known = new Set(have.map(p => p?.name).filter(Boolean))
+  const missing = []
+  try {
+    const { credentialValue } = await import('../plugins/store.mjs')
+    const decls = await secretDeclarations(run)
+    for (const [name, decl] of decls) {
+      if (!decl.required || known.has(name)) continue
+      let value = credentialValue(decl.plugin, decl.key)
+      if (!value && decl.read) {
+        try { value = (await decl.read()) || null } catch { value = null }
+      }
+      if (!value) missing.push({ name, plugin: decl.plugin, key: decl.key })
+    }
+  } catch { /* unanswerable: never a refusal on a question that could not be asked */ }
+  return missing
 }
 
 /**

@@ -61,7 +61,7 @@ export const HUMAN_TYPES = new Set(['auth_error', 'billing_error', 'model_error'
   // those sessions stopped mid-work, whatever the reason was.
   'tmux_gone', 'tmux_unreachable',
   // The agent said, in so many words, that the sandbox is in its way
-  // (`fl-report access`, SANDBOX_RESEARCH.md §7.12.1). It is a question, and a
+  // (`fl-report access`, SANDBOX.md). It is a question, and a
   // question only a human answers: allow the host for this run, allow it for
   // the repo, or tell the agent to do without. Waiting changes nothing.
   'sandbox_access',

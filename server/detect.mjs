@@ -24,7 +24,7 @@ export const INCIDENT_TYPES = ['rate_limit', 'provider_error', 'auth_error', 'bi
   // onto the base branch (server/integrate.mjs). It sits in the same table
   // because it answers the same question — is anything waiting for me?
   'merge_blocked',
-  // The sandbox (SANDBOX_RESEARCH.md §7.12). Two of them, and they are two
+  // The sandbox (SANDBOX.md). Two of them, and they are two
   // because they ask two different things of the reader: the proxy turned a
   // host away (maybe exactly as the policy intended — `sandbox_blocked`), and
   // the AGENT said it needs something it cannot reach (`sandbox_access`, which
@@ -186,8 +186,8 @@ const EXCEPTIONS = [
  * shapes in which this repository writes its own errno vocabulary down. All
  * three were adversarial cases before they were exceptions:
  *
- *   `EROFS` in backticks   SANDBOX_RESEARCH.md §7.12.1 lists the whole family in
- *                          one prose line, and AGENTS.md quotes it again.
+ *   `EROFS` in backticks   SANDBOX.md lists the whole family in one prose line,
+ *                          and AGENTS.md quotes it again.
  *   a JSON key line        lang/*.json carries `sandbox.proxy.denied`, which IS
  *                          the 403 body — an agent editing the translations
  *                          prints the very sentence the pattern hunts for.
@@ -196,7 +196,7 @@ const EXCEPTIONS = [
  */
 const SANDBOX_EXCEPTIONS = [
   ...EXCEPTIONS.filter(a => a !== OUR_OWN_CODE),
-  /cc-hub|detect\.mjs|patterns\.mjs|watcher\.mjs|SANDBOX_RESEARCH|AGENTS\.md|lang\/\w+\.json|test\/(unit|e2e)/i,
+  /cc-hub|detect\.mjs|patterns\.mjs|watcher\.mjs|SANDBOX(_RESEARCH)?\.md|AGENTS\.md|lang\/\w+\.json|test\/(unit|e2e)/i,
   // The vocabulary quoted as code — documentation, a changelog entry, a comment.
   /`[^`\n]{0,80}(EACCES|EROFS|ENOSPC|ENETUNREACH|read-only file system|no space left on device|could not resolve host|cannot connect to the docker daemon|fl-report access)[^`\n]{0,80}`/i,
   // A JSON object member: `"key": "value"` — a translation file, a fixture.

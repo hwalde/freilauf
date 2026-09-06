@@ -1,4 +1,4 @@
-// Freilauf — the working copy of a SANDBOXED run (SANDBOX_RESEARCH.md §7.4).
+// Freilauf — the working copy of a SANDBOXED run (SANDBOX.md).
 //
 // WHY a clone and not the linked worktree every other run gets: a linked
 // worktree's `.git` is a pointer INTO the operator's checkout — `HEAD`, `index`

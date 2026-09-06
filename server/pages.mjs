@@ -62,7 +62,7 @@ import { llmSources, DEFAULT_SOURCE } from './llm/sources.mjs'
 // that module; it is re-exported here so a fragment has ONE place to ask for a
 // piece of a page, whichever module happens to build it.
 export { flowSection }
-// Running an agent in a sandbox (SANDBOX_RESEARCH.md): the blocks live in
+// Running an agent in a sandbox (SANDBOX.md): the blocks live in
 // server/sandbox/pages.mjs — a subject of its own, and this file is long
 // enough. Everything imported here answers honestly on a machine with no
 // container runtime, which is what lets these call sites be unconditional.

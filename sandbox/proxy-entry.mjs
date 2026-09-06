@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Freilauf — the egress proxy, as it runs INSIDE its own container
-// (SANDBOX_RESEARCH.md §7.5.1, §11b).
+// (SANDBOX.md, including what was measured on 2026-09-05 against a live
+// rootless daemon).
 //
 // WHY THIS FILE IS FOUR LINES OF WORK AND FORTY OF REASON.
 //

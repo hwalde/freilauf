@@ -1018,6 +1018,14 @@ async function fragmentApi(req, res, url) {
     return fragment(res, await statusSidebar(repo ? +repo : null))
   }
 
+  // The sandbox images block. Rendered by the SAME function the settings page
+  // renders it with, so a build's progress and the page it lands on cannot
+  // disagree — the rule every fragment here follows.
+  if (path === '/api/fragments/sandbox-images') {
+    const { sandboxImagesBlock, hubPolicy, runtimeState } = await import('./sandbox/pages.mjs')
+    return fragment(res, await sandboxImagesBlock(await hubPolicy(), await runtimeState()))
+  }
+
   // The whole tbody. Needed for the one case a row-level swap cannot serve: a
   // run this page does not show YET. The empty state and the sort order both
   // live in the body, so a new row cannot simply be appended — the parent has

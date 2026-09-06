@@ -299,7 +299,7 @@ addColumn('runs', 'resume_attempts', 'INTEGER NOT NULL DEFAULT 0')
 // decides whether an auto-resolve also announces the recovery (server/incidents.mjs).
 addColumn('incidents', 'notify_at', 'TEXT')
 addColumn('incidents', 'gemeldet_am', 'TEXT')
-// ---- running an agent in a sandbox (SANDBOX_RESEARCH.md §7.13) ----
+// ---- running an agent in a sandbox (SANDBOX.md) ----
 // A sandbox profile is one JSON document (the spec of §7.2) under a name. The
 // hub seeds four of them (`builtin = 1`); editing one writes a copy of its own,
 // so an update of the hub can keep its own defaults current without silently

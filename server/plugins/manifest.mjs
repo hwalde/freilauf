@@ -28,7 +28,7 @@ const isStr = (v) => typeof v === 'string' && !!v.trim()
  * A path a plugin hands the hub to write inside the per-run home, or to mount
  * out of it: relative, and never leaving the home. An absolute path or a `..`
  * segment would let a `seedHome` write into the operator's own `~/.claude` —
- * which is the one thing SANDBOX_RESEARCH.md §7.7 says must never happen.
+ * which is the one thing SANDBOX.md says must never happen.
  */
 function badHomePath(p) {
   if (!isStr(p)) return 'must be a non-empty string'
@@ -53,14 +53,14 @@ function badDomain(d) {
 /**
  * The inner (agent-native) sandbox levels a plugin may declare a mapping for.
  * `off` is what a sandboxed run gets by default — two boundaries are not
- * stronger than one, they are two things that break (SANDBOX_RESEARCH.md §4.3).
+ * stronger than one, they are two things that break (SANDBOX.md).
  * A level the plugin does not declare is a level that coding agent cannot do.
  */
 export const INNER_SANDBOX_LEVELS = ['off', 'weak', 'full']
 
 /**
  * The optional `sandbox` block, on a coding agent and on a model provider
- * (SANDBOX_RESEARCH.md §7.9, docs/plugins.md "The sandbox declaration").
+ * (SANDBOX.md, docs/plugins.md "The sandbox declaration").
  *
  * It is validated rather than merely read, and a malformed one is REFUSED
  * rather than dropped: a declaration that is silently ignored produces a run

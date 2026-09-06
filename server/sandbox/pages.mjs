@@ -1,5 +1,4 @@
-// Freilauf — every page and block the sandbox needs (SANDBOX_RESEARCH.md §7.3
-// "UI placement", §7.12, §7.13 "Pages").
+// Freilauf — every page and block the sandbox needs (SANDBOX.md).
 //
 // Its own file rather than more of server/pages.mjs, which is 3500 lines: the
 // sandbox is one subject with a settings page, a profile editor, a repo block, a
@@ -24,6 +23,11 @@ import { escapeHtml as e } from '../util.mjs'
 import { t } from '../i18n.mjs'
 import { layout, problemPage } from '../pages.mjs'
 import { redirect } from '../web-helpers.mjs'
+import { env } from '../env.mjs'
+// The live channel, for a build that now takes minutes in the hub instead of
+// minutes in the operator's request. `events.mjs` imports nothing at all, which
+// is what lets anything import it without closing a ring.
+import { publish } from '../events.mjs'
 import {
   DEFAULT_SPEC, HUB_MODES, SANDBOX_TRISTATE, normalizeSpec, narrow, pathLocked,
   validateSandboxOverrides,
@@ -868,6 +872,103 @@ export async function sandboxProfileDelete(req, res, url, formBody) {
 const IMAGE_KINDS = ['base', 'claude', 'opencode', 'cursor', 'hermes']
 
 /**
+ * Which images this installation would need, and whether it has them.
+ *
+ * The list used to be `IMAGE_KINDS` written out above — so a coding agent that
+ * arrived as a plugin had no button at all, an operator running only cursor was
+ * offered four builds they will never start, and the page could not say which
+ * of them existed. It is derived now: the base (every harness layer is `FROM`
+ * it), the ENABLED coding agents, each active repo's own `sandbox_image`, and
+ * the proxy engine's image where one is configured.
+ *
+ * `null` means the question could not be asked at all (no runtime module, no
+ * daemon) — which the caller renders as "no runtime", never as "nothing is
+ * built". `IMAGE_KINDS` survives as the build route's allowlist and nothing
+ * else: what a request may ask to be BUILT is still only what this repository
+ * ships a Dockerfile for.
+ */
+async function imageRows(p, state) {
+  if (!state?.available) return null
+  const rt = await mod('runtime')
+  const inventory = pick(rt, ['imageInventory'])
+  if (!inventory) return null
+
+  let harnesses = []
+  try {
+    const { enabledCodingAgents } = await import('../coding-agents.mjs')
+    harnesses = enabledCodingAgents().map(a => a.harness).filter(Boolean)
+  } catch { harnesses = [] }
+
+  const extraRefs = []
+  try {
+    const rows = db.prepare(`SELECT DISTINCT sandbox_image AS ref FROM repos
+                             WHERE active=1 AND sandbox_image IS NOT NULL AND TRIM(sandbox_image)!=''`).all()
+    for (const r of rows) extraRefs.push({ ref: r.ref, source: 'operator' })
+  } catch { /* a question the database could not answer adds no rows */ }
+  try {
+    if (p?.proxyEngine === 'iron-proxy') {
+      const ip = await mod('ironproxy')
+      const ref = env('SANDBOX_PROXY_IMAGE') || ip?.DEFAULT_PROXY_IMAGE
+      if (ref) extraRefs.push({ ref, source: 'proxy' })
+    }
+  } catch { /* the proxy image is a row, not a requirement */ }
+
+  try {
+    return await inventory({
+      runtime: p?.runtime || undefined,
+      registry: p?.imageRegistry || undefined,
+      harnesses, extraRefs,
+    })
+  } catch { return null }
+}
+
+/**
+ * The images block, rendered by the same function for the page and for the
+ * fragment the live channel re-fetches — so a build's progress and the page it
+ * lands on can never disagree about what a row says.
+ */
+export async function sandboxImagesBlock(p, state) {
+  const rows = await imageRows(p, state)
+  if (!rows) {
+    return `<h3 id="images">${e(t('sandbox.settings.images_title'))}</h3>
+  <p class="dim">${e(t('sandbox.settings.images_hint'))}</p>
+  <p class="dim">${e(t('sandbox.settings.images_need_runtime'))}</p>`
+  }
+  const cell = (r) => {
+    if (r.state === 'building') {
+      const pr = r.progress ?? {}
+      const step = pr.step != null && pr.of ? t('sandbox.settings.image_step', { step: pr.step, of: pr.of }) : ''
+      return `<span class="warn">${e(t('sandbox.settings.image_building'))}</span>`
+        + (step ? ` <span class="dim">${e(step)}</span>` : '')
+        + (pr.line ? `<br><code class="dim">${e(String(pr.line).slice(0, 120))}</code>` : '')
+    }
+    if (r.state === 'present') return `<span class="ok">${e(t('sandbox.settings.image_present'))}</span>`
+    if (r.state === 'missing') return `<span class="warn">${e(t('sandbox.settings.image_missing'))}</span>`
+    // "The daemon did not answer" is not "you have to build this".
+    return `<span class="dim">${e(t('sandbox.settings.image_unknown'))}</span>`
+  }
+  const action = (r) => {
+    if (r.state === 'building') return ''
+    if (!r.buildable) return `<span class="dim">${e(t('sandbox.settings.image_not_buildable'))}</span>`
+    const label = r.state === 'present' ? t('sandbox.action.rebuild') : t('sandbox.action.build_one')
+    return `<form method="post" action="/settings/sandbox/build" class="inline">
+      <input type="hidden" name="image" value="${e(r.kind)}">
+      <button>${e(label)}</button></form>`
+  }
+  return `<h3 id="images">${e(t('sandbox.settings.images_title'))}</h3>
+  <p class="dim">${e(t('sandbox.settings.images_hint'))}</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>${e(t('sandbox.settings.image_col_image'))}</th>
+      <th>${e(t('sandbox.settings.image_col_state'))}</th>
+      <th></th></tr></thead>
+    <tbody>${rows.map(r => `<tr>
+      <td class="two-line"><code>${e(r.ref)}</code><br><span class="dim">${e(t(`sandbox.settings.image_source_${r.source}`))}</span></td>
+      <td>${cell(r)}</td>
+      <td>${action(r)}</td></tr>`).join('')}</tbody>
+  </table></div>`
+}
+
+/**
  * The hub layer of §7.3, the profile editor, the discovery result and the image
  * builds — one page, because they are one question: what may run in a sandbox
  * on this machine, and inside which walls.
@@ -960,14 +1061,7 @@ export async function pageSandboxSettings(req, res, url) {
   ${profileList(profiles)}
   <p><a class="btn" href="/settings/sandbox/profile">${e(t('sandbox.action.profile_new'))}</a></p>
 
-  <h3>${e(t('sandbox.settings.images_title'))}</h3>
-  <p class="dim">${e(t('sandbox.settings.images_hint'))}</p>
-  <div class="btn-row">
-    ${IMAGE_KINDS.map(k => `<form method="post" action="/settings/sandbox/build" class="inline">
-      <input type="hidden" name="image" value="${e(k)}">
-      <button${state.available ? '' : ' disabled'}>${e(t('sandbox.action.build', { image: k }))}</button></form>`).join('')}
-  </div>
-  ${state.available ? '' : `<p class="dim">${e(t('sandbox.settings.images_need_runtime'))}</p>`}`
+  <div id="sandbox-images">${await sandboxImagesBlock(p, state)}</div>`
 
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
     .end(await layout(req, t('sandbox.settings.title'), '/settings', body))
@@ -1030,32 +1124,71 @@ export async function sandboxSettingsSave(req, res, url, formBody) {
 export async function sandboxBuild(req, res, url, formBody) {
   const b = await formBody()
   const name = String(b.image ?? '').trim()
-  if (!IMAGE_KINDS.includes(name)) {
+  const rt = await mod('runtime')
+  // What may be built is what a RECIPE exists for, asked of the recipes
+  // themselves — the table above is derived from the enabled coding agents, so
+  // a written-out list here would refuse the Build button it just rendered for
+  // a coding agent that arrived as a plugin. `IMAGE_KINDS` is the fallback for
+  // a runtime module that predates the question, and nothing else.
+  const canBuild = typeof rt?.isBuildableImage === 'function'
+    ? await rt.isBuildableImage(name)
+    : IMAGE_KINDS.includes(name)
+  if (!canBuild) {
     return problemPage(req, res, t('sandbox.settings.images_title'), [t('sandbox.settings.err_unknown_image', { image: name })], '/settings/sandbox')
   }
-  const rt = await mod('runtime')
-  const build = pick(rt, ['buildImage', 'buildSandboxImage'])
+  // The streaming build is preferred and the awaited one is the fallback, so an
+  // installation whose runtime module predates this still builds — just without
+  // progress, exactly as it did.
+  const stream = pick(rt, ['buildImageStreaming'])
+  const build = stream ?? pick(rt, ['buildImage', 'buildSandboxImage'])
   if (!build) {
     return problemPage(req, res, t('sandbox.settings.images_title'), [t('sandbox.settings.err_build_unavailable')], '/settings/sandbox')
   }
   const p = await hubPolicy()
-  try {
-    // The runtime travels with the request: an operator who configured podman
-    // must not have their images built by docker. (`buildImage()` defaults to
-    // docker, so leaving it out was a silent wrong answer rather than an error.)
-    const r = await build(name, { runtime: p.runtime || undefined, registry: p.imageRegistry || undefined })
-    if (r && r.ok === false) {
-      // The sentence, never the log. It is already translated and it NAMES the
-      // file the whole build output was written to — which is the only way to
-      // find out which of the CLI installers broke, so it has to reach the
-      // operator intact rather than being summarised away.
-      return problemPage(req, res, t('sandbox.settings.images_title'),
-        [String(r.error || r.reason || '')], '/settings/sandbox')
+  // The runtime travels with the request: an operator who configured podman
+  // must not have their images built by docker. (`buildImage()` defaults to
+  // docker, so leaving it out was a silent wrong answer rather than an error.)
+  const opts = { runtime: p.runtime || undefined, registry: p.imageRegistry || undefined }
+
+  if (!stream) {
+    try {
+      const r = await build(name, opts)
+      if (r && r.ok === false) {
+        return problemPage(req, res, t('sandbox.settings.images_title'),
+          [String(r.error || r.reason || '')], '/settings/sandbox')
+      }
+    } catch (err) {
+      return problemPage(req, res, t('sandbox.settings.images_title'), [String(err?.message ?? err)], '/settings/sandbox')
     }
-  } catch (err) {
-    return problemPage(req, res, t('sandbox.settings.images_title'), [String(err?.message ?? err)], '/settings/sandbox')
+    return redirect(res, '/settings/sandbox')
   }
-  redirect(res, '/settings/sandbox')
+
+  // DETACHED, and that is the whole point of this change. A build is two to
+  // seven minutes; awaiting it inside the request meant a hung browser tab with
+  // no percentage and no step, and two operators clicking at once ran two
+  // identical builds. The decision — is this a known image, is there a runtime —
+  // stays in the request, because it is milliseconds and it says whether
+  // anything happens at all. What takes minutes is handed to the hub.
+  //
+  // The answer travels the way every other long operation's does: an event on
+  // the live channel, and the page re-fetches the block. The sentence a failure
+  // produces is already translated and NAMES the log file, which is the only
+  // way to find out which installer broke — so it reaches the operator intact
+  // as an event rather than being summarised away.
+  const announce = (payload) => {
+    try { publish('sandbox_image', payload) } catch { /* a page nobody is watching is not a failure */ }
+  }
+  announce({ image: name, state: 'building' })
+  build(name, { ...opts, onProgress: (pr) => announce({ ...pr, image: name, state: 'building' }) })
+    .then((r) => {
+      announce({ image: name, state: r?.ok ? 'done' : 'failed', error: r?.ok ? null : String(r?.error ?? r?.reason ?? '') })
+      if (!r?.ok) console.error('[sandbox] build failed:', r?.error ?? r?.reason)
+    })
+    .catch((err) => {
+      announce({ image: name, state: 'failed', error: String(err?.message ?? err) })
+      console.error('[sandbox] build failed:', err?.message ?? err)
+    })
+  redirect(res, '/settings/sandbox#images')
 }
 
 /** The dry run of §7.12.5 — the policy somebody TESTED, not the one they hope is right. */

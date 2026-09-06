@@ -2,7 +2,7 @@
 
 One base image, one layer per built-in coding agent, and one overlay that puts
 an agent layer on top of a toolchain image somebody else owns. They are what a
-sandboxed run runs inside (SANDBOX_RESEARCH.md §7.10).
+sandboxed run runs inside ([SANDBOX.md](../../SANDBOX.md)).
 
 > **All five were built for the first time on 2026-09-05**, against rootless
 > Docker 29.8.0 on ubuntu 24.04/amd64, and the results — including the two
@@ -133,8 +133,9 @@ attention and API errors, claude's transcript, cursor's transcript, opencode's
 session store. The hub seeds that directory before the start and reads it back
 while the run goes — activity, tokens, the end of a turn.
 
-It was **measured** (SANDBOX_RESEARCH.md §11a.4) that **XDG outranks `HOME` for
-opencode**. So an image carrying one of these variables sends the CLI's state
+It was **measured** (before this machine had a container runtime; see
+[SANDBOX.md](../../SANDBOX.md)) that **XDG outranks `HOME` for opencode**. So
+an image carrying one of these variables sends the CLI's state
 somewhere else, and every consequence is silent: the seeded credentials are
 never read, the reporting plugin never loads, and the hub's activity
 measurement looks into an empty directory and concludes the agent is idle.
@@ -382,8 +383,9 @@ fails with exit 126. That flag is the runtime's, not this directory's.
 |---|---|
 | cursor | the download URL `https://downloads.cursor.com/lab/<version>/linux/<arch>/agent-cli-package.tar.gz` is undocumented and is Cursor's to change; it worked on 2026-09-05. If it 404s, run `https://cursor.com/install` once by hand and read the `DOWNLOAD_URL` it prints. |
 | all four | the *pinned versions* age. The plugin is the authority (`sandbox.image.args`), the Dockerfile default is kept equal to it, and a unit test holds the README's build commands to both. |
-| claude, cursor, hermes | only the `--version` handshake was exercised inside the container. No agent turn against a provider has ever run on these three. |
-| opencode | **this one has run for real** — 2026-09-05, `freilauf/agent-opencode:1.18.29`, rootless Docker 29.8.0, `network.mode: open`: the agent did the work, committed it in its clone, reported, and the hub merged it onto `origin/main`. That says the image is sound for a run; it says nothing about the other three, whose CLIs install differently. |
+| opencode, cursor | **run for real against a provider** — opencode on 2026-09-05 (`network.mode: open`, merged onto `origin/main`) and both opencode and cursor on 2026-09-06 behind the enforced Balanced allowlist: the agent did the work, committed in its clone, reported over the socket, finished. The images are sound for a run. |
+| claude | starts and draws its TUI in the container, but on a subscription blocks at *"Not logged in"* — the OAuth token is not seeded into the box (see [`SANDBOX.md`](../../SANDBOX.md)). Not an image fault; the image is otherwise exercised only to the `--version` handshake against a provider. |
+| hermes | **does not launch**: `fl-start` resolves the host wrapper `~/.local/bin/hermes`, whose python venv is not in the image (which ships hermes at `/usr/local/bin/hermes`), so the pane dies with exit 127. A sandboxed run must resolve the binary inside the container. Until then this image's agent turn is unproven. |
 
 The auto-updater switches are in the same shape:
 

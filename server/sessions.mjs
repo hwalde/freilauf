@@ -375,7 +375,7 @@ export async function paneAlive(name) {
 // ------------------------------------------------------- the run's container
 //
 // A sandboxed run works inside a container while its tmux session holds the
-// container CLIENT (SANDBOX_RESEARCH.md §7.1). Everything below is what the
+// container CLIENT (SANDBOX.md). Everything below is what the
 // session side of the hub has to know about that, and all of it is fail-soft in
 // the same direction: an installation without a container runtime, or a daemon
 // that does not answer, must behave exactly as this file behaved before any of
@@ -488,9 +488,9 @@ export async function stopRunContainer(run, { timeoutSec = 30 } = {}) {
  * children of the daemon's shim, not of anything under the pane, so summing the
  * tree measures the transport and calls it the workload: measured against a PTY
  * relay of the container's shape, the pane tree came to **10.4 MB while the
- * workload held 210.3 MB** (SANDBOX_RESEARCH.md §11a.5) — a twenty-fold
- * under-report in the one number the status sidebar exists to print and the
- * memory-cleanup agent acts on.
+ * workload held 210.3 MB** (measured before this machine had a container
+ * runtime; see SANDBOX.md) — a twenty-fold under-report in the one number the
+ * status sidebar exists to print and the memory-cleanup agent acts on.
  *
  * Which is why a null here must NOT fall back to the tree walk: 10 MB that looks
  * like a measurement is worse than no measurement, and this repo has a rule

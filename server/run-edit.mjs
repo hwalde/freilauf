@@ -33,7 +33,7 @@
 //     the clone and starts the container there), hence the same rule: editable
 //     until the run starts, and never after. A RUNNING run's network policy is
 //     loosened through the buttons next to a blocked host instead
-//     (SANDBOX_RESEARCH.md §7.12) — that reloads a proxy, it does not edit a
+//     (SANDBOX.md) — that reloads a proxy, it does not edit a
 //     plan, and it is a different question with a different answer.
 //
 // "Not started" means `scheduled` or `deferred`: both have no session and no

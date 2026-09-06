@@ -1,5 +1,5 @@
 // Freilauf — sandbox profiles: the spec of §7.2 under a name
-// (SANDBOX_RESEARCH.md §7.13).
+// (SANDBOX.md).
 //
 // A repo names one profile as its default, an agent may name another, and both
 // may narrow it. The table is small and the CRUD is dull; the one rule worth
@@ -52,7 +52,7 @@ import { engineCapabilities } from './proxy.mjs'
 // image (`sandbox/images/ironproxy.ref`), the config Freilauf writes for it has
 // been parsed and driven end to end, and a placeholder in the container really
 // does become the real credential on the way to that credential's own host and
-// to nothing else — measured 2026-09-05, four ways, in docs/sandbox.md.
+// to nothing else — measured 2026-09-05, four ways, in SANDBOX.md.
 //
 // `No secrets in the box` is therefore a fifth built-in profile rather than a
 // paragraph telling somebody to type JSON. It is deliberately NOT the default
@@ -60,7 +60,7 @@ import { engineCapabilities } from './proxy.mjs'
 //
 //   - it needs a CA on the machine (`sandbox_ca_dir` holding `ca.crt` AND
 //     `ca.key`), because iron-proxy mints leaf certificates and will not start
-//     without one. Four commands, in docs/sandbox.md — but four commands is
+//     without one. Four commands, in SANDBOX.md — but four commands is
 //     four more than "install Docker", and a default that cannot start a run is
 //     the one thing worse than a default that is not the strictest possible.
 //   - it needs the iron-proxy image pulled.
@@ -171,7 +171,7 @@ export const BUILTIN_PROFILES = [
       // The three lines are one decision: `inject` needs a proxy that
       // terminates TLS, because a header cannot be rewritten inside a tunnel it
       // cannot read. Requires a CA and the iron-proxy image — see the long
-      // comment above and docs/sandbox.md.
+      // comment above and SANDBOX.md.
       network: {
         mode: 'allowlist',
         engine: 'iron-proxy',

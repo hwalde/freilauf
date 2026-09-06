@@ -94,9 +94,8 @@ const FOLLOWUP_MERGE_CLAUSE = ', and origin/{base} merged into your branch once 
 const FOLLOWUP_PROCESSES_CLAUSE = ' (integration into {base}, the flows that hang on this run)'
 
 /**
- * What a sandboxed run is told about the box it is in (SANDBOX_RESEARCH.md
- * §7.12.1). Two halves, and the second is what the whole escalation path hangs
- * on.
+ * What a sandboxed run is told about the box it is in (SANDBOX.md). Two
+ * halves, and the second is what the whole escalation path hangs on.
  *
  * The first half is FACTS, and they are read from what the run really launched
  * with — the resolved allow list comes out of the same `resolvedAllow()` the
@@ -779,7 +778,7 @@ export function harnessModelArgs(run, opts = null) {
 // flow's kill_run — goes through reconcileClosedSession() and aborts exactly
 // as before. The watcher's discovery path is the caller that decides a
 // session was LOST; anything else that wants a resume (a future sandbox
-// reconfiguration, SANDBOX_RESEARCH.md) calls resumeRun() with a reason of its
+// reconfiguration, SANDBOX.md) calls resumeRun() with a reason of its
 // own, which does not count against the cap.
 
 /**
@@ -1314,7 +1313,8 @@ export async function launchRun(runId) {
     // that is NOT an environment variable (`--model`, `--effort`, a config blob)
     // passes through untouched.
     const { rest, pairs } = splitEnvArgs(modelArgs.args)
-    const { applySecrets, sandboxCredentialPairs } = await import('./sandbox/index.mjs')
+    const { applySecrets, sandboxCredentialPairs, missingRequiredCredentials } =
+      await import('./sandbox/index.mjs')
     let applied
     try {
       // …and what no plugin emitted but the run cannot authenticate without:
@@ -1323,6 +1323,23 @@ export async function launchRun(runId) {
       // BEFORE applySecrets, so `inject` and `none` govern it exactly as they
       // govern a provider key — see sandboxCredentialPairs().
       pairs.push(...await sandboxCredentialPairs(run, pairs))
+      // A credential the PLUGIN declares as required and that resolved to
+      // nothing is a refusal, not a start. Without this the run launches, the
+      // CLI draws its TUI, prints "Not logged in" and waits for a keystroke
+      // nobody will type — while the status says `running` and every page above
+      // it reads as healthy. Only `required: true` counts, so a coding agent
+      // that authenticates some other way (cursor, measured working with no
+      // resolved credential) is untouched.
+      const missing = await missingRequiredCredentials(run, pairs)
+      if (missing.length) {
+        const reason = t('sandbox.launch.credential_required', {
+          harness: run.harness,
+          vars: missing.map(m => m.name).join(', '),
+        })
+        addEvent(runId, 'sandbox:credential_missing', { vars: missing.map(m => m.name) })
+        failRun(runId, reason)
+        return { ok: false, error: reason }
+      }
       applied = await applySecrets(run, sandbox.spec, pairs)
     } catch (err) {
       failRun(runId, `Start failed:\n\n${err.message}`)

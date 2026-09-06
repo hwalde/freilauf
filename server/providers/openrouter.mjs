@@ -106,7 +106,7 @@ const plugin = {
   /**
    * What a sandboxed run on this provider needs (docs/plugins.md, "The sandbox
    * declaration"). One host, and one bearer header to it — the textbook case
-   * for credential injection (SANDBOX_RESEARCH.md §7.8): the container holds a
+   * for credential injection (SANDBOX.md): the container holds a
    * placeholder, and the proxy substitutes the real key on requests to
    * `openrouter.ai` and nowhere else. Every call this plugin makes above goes
    * to that host with exactly this header, which is what makes the declaration

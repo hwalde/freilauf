@@ -191,7 +191,7 @@ const plugin = {
 
   /**
    * Running claude inside the Freilauf sandbox (docs/plugins.md, "The sandbox
-   * declaration"; SANDBOX_RESEARCH.md §3.1 and §7.9).
+   * declaration"; SANDBOX.md).
    *
    * The inner sandbox is OFF by default and that is the whole argument of §4.3:
    * claude's own boundary is bubblewrap, bubblewrap inside an unprivileged
@@ -205,8 +205,9 @@ const plugin = {
     supported: true,
 
     // The image pins the CLI, so a sandboxed run never updates itself (§7.10).
-    // The version is the one MEASURED on this machine on 2026-09-05
-    // (SANDBOX_RESEARCH.md §11a) — a pin, meant to be raised deliberately.
+    // The version is the one MEASURED on this machine on 2026-09-05, before
+    // this machine had a container runtime (see SANDBOX.md) — a pin, meant to
+    // be raised deliberately.
     image: { dockerfile: 'sandbox/images/claude.Dockerfile', args: { CLAUDE_VERSION: '2.1.261' } },
 
     // Claude Code's own required hosts, as its network documentation lists them
@@ -259,10 +260,37 @@ const plugin = {
      * under `none` it does not enter the container at all. The value itself is
      * resolved where every credential is resolved —
      * `credentialValue('claude', 'oauth_token')`.
+     *
+     * `read` is the LAST resort behind those, and it is what makes a sandboxed
+     * claude run work on an ordinary subscription installation. Outside a
+     * container claude authenticates from `~/.claude/.credentials.json`; inside
+     * one `$HOME` is the run's seeded home and that file is deliberately not
+     * copied there, so with nothing stored and no variable set the container got
+     * no token at all and the TUI sat at *"Not logged in · Please run /login"*
+     * on a run whose status said `running` — the invisible failure shape
+     * (measured 2026-09-06). Reading the token host-side and passing it as the
+     * declared variable keeps the file — and with it the refresh token — out of
+     * the box entirely.
+     *
+     * It is deliberately the WEAKER answer: an interactive login's access token
+     * is short-lived and nothing in the container can refresh it, so a long run
+     * can outlive it. `claude setup-token` mints a long-lived token for exactly
+     * this case, and `required` below is what turns "no token from anywhere"
+     * into a refusal that says so instead of a session nobody is logged into.
+     *
+     * Lazily imported, like everything this file needs from the hub's own
+     * modules (AGENTS.md, "Pitfalls": a static import here closes a ring).
      */
     credentials: [{
       key: 'oauth_token',
       envKeys: OAUTH_ENV,
+      required: true,
+      read: async () => {
+        try {
+          const { oauthAccessToken } = await import('../claude-usage.mjs')
+          return oauthAccessToken() ?? null
+        } catch { return null }
+      },
       injection: { header: 'Authorization', prefix: 'Bearer ', hosts: ['api.anthropic.com'] },
     }],
 

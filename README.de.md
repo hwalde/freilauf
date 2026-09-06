@@ -84,18 +84,11 @@ das tut Freilauf, und es geht nur vorwärts.
   pro Agent, pro Lauf — und eine tiefere Ebene darf nur verengen, was eine
   höhere festgezurrt hat. Blockiert sie etwas, das der Agent brauchte, bekommst
   du den Host genannt und einen Klick, um ihn für diesen Lauf oder dieses Repo
-  freizugeben — ohne Neustart. Optional und **standardmäßig aus**; Docker ist
-  nur dann Voraussetzung, wenn du es willst. Wie weit das erprobt ist, gehört in
-  die Zusammenfassung und nicht nur ins Kleingedruckte: **alle vier
-  Coding-Agenten haben inzwischen echte Arbeit in einem Container erledigt** —
-  eine Datei geschrieben, committet, zurückgemeldet und in den Base-Branch
-  gemerged —, und **einer davon (opencode) hat hinter einer erzwungenen
-  Allowlist gearbeitet**: ein Host außerhalb der Liste wurde abgewiesen, aus der
-  Abweisung wurde ein Vorfall, und die Freigabe wirkte beim nächsten Versuch des
-  Agenten — ohne Neustart. Fang trotzdem im Audit-Modus an und rechne damit,
-  etwas über deine eigene Allowlist zu lernen; genau dafür ist er da
-  ([docs/sandbox.md](docs/sandbox.md) — dort steht ebenso ausführlich, was die
-  Sandbox *nicht* tut, wie das, was sie tut).
+  freizugeben — ohne Neustart. Ein Audit-Modus zeichnet auf, was ein Lauf
+  erreicht, ohne ihn zu blockieren — der sinnvolle Weg, die eigene Allowlist
+  kennenzulernen, bevor man sie erzwingt. Optional und **standardmäßig aus**;
+  Docker ist nur dann Voraussetzung, wenn du es willst
+  ([SANDBOX.md](SANDBOX.md)).
 - **Alles Herstellerspezifische ist ein Plugin.** Coding-Agenten,
   Modell-Provider und Benachrichtigungsdienste sind Plugins mit dokumentiertem
   Vertrag ([docs/plugins.md](docs/plugins.md)); ein Dritter kann ein Paket auf
@@ -267,8 +260,8 @@ Der Hub kann tmux steuern. **Das ist Shell-Zugriff.** Deshalb:
   zwischen dem *Agenten* und dem Host, gebaut vom Hub, der auf der Host-Seite
   davon steht: sie verkleinert nicht, was ein kompromittierter Hub kann, und
   sie schaut in keinen Inhalt hinein — ein erlaubter Host ist damit ein Weg
-  nach draußen. Lies [docs/sandbox.md](docs/sandbox.md); der Abschnitt „What
-  this sandbox does not do" ist der wichtige.
+  nach draußen. Lies [SANDBOX.md](SANDBOX.md); der Abschnitt „What this sandbox
+  does not do" ist der wichtige.
 
 **Betreibe den Hub nie in einem erreichbaren Netz ohne diese Schichten.**
 

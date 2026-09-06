@@ -106,7 +106,7 @@ async function scanSandboxRuntime() {
       runsc: Array.isArray(info?.runtimes) ? info.runtimes.includes('runsc') : null,
       // Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor,
       // which is what kills every bubblewrap-based inner sandbox on this host
-      // (SANDBOX_RESEARCH.md §2.4). The hub does not need them — its boundary
+      // (SANDBOX.md). The hub does not need them — its boundary
       // is the container — but the value explains why an `innerSandbox` above
       // `off` is refused, so it is worth writing down once. Taken from
       // `runtimeInfo()` rather than read here a second time: two readers of one

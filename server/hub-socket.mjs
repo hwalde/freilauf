@@ -1,5 +1,5 @@
 // Freilauf — the hub's SECOND listener: a unix socket carrying exactly two routes
-// (SANDBOX_RESEARCH.md §7.6).
+// (SANDBOX.md).
 //
 // WHY this exists at all, and why it is worth having for a run that is not
 // sandboxed either. `FL_HUB_URL = http://127.0.0.1:<port>` is handed to every

@@ -87,9 +87,9 @@ function hermesHome() {
  * `'latest'`, which hermes scopes to the workspace `--in` names and therefore
  * resolves correctly from inside the box. Deliberately not "fixed" by guessing
  * the container path here: no hermes CLI has ever been started in a container
- * on this machine (SANDBOX_RESEARCH.md §11b.8), and a lookup written against an
- * unmeasured path would be a confident wrong answer where `'latest'` is a
- * correct one.
+ * on this machine (measured 2026-09-05 against a live rootless daemon; see
+ * SANDBOX.md), and a lookup written against an unmeasured path would be a
+ * confident wrong answer where `'latest'` is a correct one.
  */
 function sessionInStore(run, dbPath) {
   try {
@@ -107,7 +107,7 @@ function sessionInStore(run, dbPath) {
 
 /**
  * Force `terminal.backend: local` in a COPY of the operator's hermes config
- * (SANDBOX_RESEARCH.md §3.3): inside the Freilauf sandbox the container IS the
+ * (SANDBOX.md): inside the Freilauf sandbox the container IS the
  * boundary, and hermes' own docker backend would put a second container around
  * every terminal tool call — a nested runtime the agent must not be able to
  * reach in the first place.
@@ -237,7 +237,7 @@ const plugin = {
 
   /**
    * Running hermes inside the Freilauf sandbox (docs/plugins.md, "The sandbox
-   * declaration"; SANDBOX_RESEARCH.md §3.3 and §7.9).
+   * declaration"; SANDBOX.md).
    *
    * hermes brings the most prior art of the four — a docker backend with a
    * measured hardening flag set and an iron-proxy egress firewall — but all of

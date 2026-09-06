@@ -51,9 +51,12 @@ a change, not a follow-up to it:
 **The roadmap is the changelog's mirror image, and it is deliberately
 incomplete.** `CHANGELOG.md` records everything a user would notice, in the
 commit that changed it; `ROADMAP.md` announces only the few changes big enough
-that somebody might plan around them — today that is exactly one, running
-agents in a sandbox ([SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md)). It says so
-about itself in its own first paragraph, because a roadmap read as a promise of
+that somebody might plan around them — **today that is none at all**, since the
+last such item, running agents in a sandbox, landed and left the page for
+[SANDBOX.md](SANDBOX.md) and the changelog. A roadmap is allowed to be empty,
+and saying so is better than keeping a finished item on it to avoid the blank
+space. It says all of this about itself in its first paragraph, because a
+roadmap read as a promise of
 completeness turns every unlisted feature into a surprise and every unshipped
 item into a broken promise. So: no dates, no version milestones (there are no
 releases to hang them on), and an item that lands moves OUT of the roadmap and
@@ -313,7 +316,7 @@ Three fences. **A cap**: `resume_attempts`, `RESUME_MAX` (3,
 `FREILAUF_RESUME_MAX`) — past it the run ends the old way (`resume_refused`
 on the run, then `aborted`), because a CLI that dies at every start must not
 be restarted every pass for ever; a deliberate caller (a reason other than
-`session_lost` — the sandbox reconfiguration SANDBOX_RESEARCH.md plans) does
+`session_lost` — the sandbox reconfiguration SANDBOX.md describes) does
 not count against it. **"Could not try" is not "tried and died"**: a launch
 that fails on a resume — right after a reboot the tmux server itself may be a
 beat behind — leaves the mark standing and returns `retry`; the next pass's
@@ -2445,7 +2448,7 @@ and a hand-driven pass from another process can never be turned into a no-op.
 
 **But the shim is where the suite's evidence runs out, and that has now been
 paid for.** The first real sandboxed run (opencode in a container, 2026-09-05 —
-[docs/sandbox.md](docs/sandbox.md) has the account) found five faults, and every
+[SANDBOX.md](SANDBOX.md) has the account) found five faults, and every
 one of them was green in this suite beforehand. Two of them say why in one
 sentence: **a stub cannot answer whether an account exists inside an image, or
 whether a mount point came out a socket.** `docker exec -u hub` is a perfectly
@@ -2671,13 +2674,14 @@ Architecture, step registry contract and the integration seams:
 
 ## The sandbox: a container around the agent, and one rule about who may loosen it
 
-> **The depth is one document: [docs/sandbox.md](docs/sandbox.md)**, and the
-> measurements the whole thing rests on are
-> [SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md) **§11a** (before this machine had
-> a container runtime) and **§11b** (2026-09-05, against a live rootless
-> daemon) — which also say, per claim, whether it was measured, read out of a
-> binary, or not answered at all. What follows is what the rest of the hub must
-> not violate.
+> **The depth is one document: [SANDBOX.md](SANDBOX.md)** — the operator
+> reference and, in its second half ("Why it is built this way"), the design
+> study with every measurement the whole thing rests on. It keeps two epochs
+> apart — what was established before this machine had a container runtime, and
+> what was measured 2026-09-05 against a live rootless daemon — and says, per
+> claim, whether it was measured, read out of a binary, or not answered at all.
+> (It replaced the former `docs/sandbox.md` and `SANDBOX_RESEARCH.md`, now
+> deleted.) What follows is what the rest of the hub must not violate.
 
 A sandboxed run's agent runs inside a container; **tmux stays on the host** and
 the pane's process is the runtime's client, which is why `pipe-pane`,
@@ -2848,6 +2852,42 @@ an empty limit must produce **no flag at all**, because `--memory 0` is a refusa
 and `--cpus 0` is a container that cannot run; and a sandboxed session's memory
 is asked of the **runtime**, never summed from the pane's process tree, which
 under-reported a workload twentyfold (measured, 10.4 MB for 210.3 MB).
+
+**And four the first ENFORCED runs wrote** (2026-09-06, opencode and cursor
+behind the Balanced allowlist, claude and hermes each stopped by one of these):
+
+- **The image's own directories come first on the container's `PATH`**
+  (`containerEnv()`). The host's `~/.local/bin` is mounted read-only into the
+  box so `fl-report` is reachable, and it used to be FIRST — but `fl-start`
+  launches a sandboxed agent by its BARE name, so bare `hermes` found the
+  host's wrapper, which `exec`s a python venv that exists only on the host, and
+  the pane died with exit 127. `fl-report` exists in no image and so is still
+  found; it simply cannot shadow anything any more.
+- **A credential a plugin declares `required` and that resolves to nothing is a
+  refusal, not a start** (`missingRequiredCredentials()`). A sandboxed claude
+  with no token drew its TUI, printed "Not logged in" and sat there while the
+  run said `running`. The claude plugin's `oauth_token` also carries a `read`
+  hook — the last resort behind a stored value and a named variable — that
+  takes the token out of `~/.claude/.credentials.json` and passes it as the
+  declared variable; the FILE never enters the container, so nothing in there
+  holds a refresh token. Scoped to `required` on purpose: cursor is a
+  subscription CLI too, declares its credential without it, and runs with none.
+- **`pane_died` is evidence a sandbox may be released** (`releasable()` in
+  watcher.mjs). It used to ask only whether the tmux session was closed — but
+  `remain-on-exit` keeps a crashed run's screen readable, so `tmux_closed_at`
+  stays NULL for hours and the run went on holding its network and its
+  `fl-proxy-<id>`. A finished run whose pane is still ALIVE keeps everything: a
+  follow-up commission needs the container and its egress.
+- **A missing image is BUILT, not only pulled** (`buildMissingImage()` in
+  index.mjs). `freilauf/agent-*` is a local tag with no registry behind it, so
+  the pull-only launch path failed every run whose image was absent — while the
+  settings page's own hint promised images were "built lazily on first use".
+  The first run that needs one now builds it (the base first if that is missing
+  too), a second run joins that build rather than starting another, and the
+  page builds ahead of time **in the hub** rather than inside the operator's
+  request. `imageInventory()` derives what this installation needs from the
+  ENABLED coding agents, so a plugin coding agent appears there too, and
+  `unreachable` is a fourth state that is never rendered as "not built".
 
 **And three the first real run wrote, each of which had passed every test.**
 *Who a container runs as is one function, never a profile field*
@@ -4258,8 +4298,11 @@ errors (`post_api_request` only fires after success).
   as a mount option. `exec` has to be written out. Measured 2026-09-05, after a
   comment in `tmpfsArgs()` had described the intention for weeks while the
   command line carried the opposite; the run container is `rw,exec,nosuid` now.
-  **`mergeCheckArgv()` in `integrate.mjs` still emits `/tmp:rw,nosuid`**, so a
-  sandboxed merge check that execs out of `/tmp` fails where the run would not.
+  `mergeCheckArgv()` in `integrate.mjs` carries the same word for the same
+  reason — a sandboxed merge check is `node test/unit.mjs` and its kind, and a
+  toolchain that unpacks a helper into `/tmp` and runs it would otherwise fail
+  there while the run that produced the code succeeded: a red check that says
+  nothing about the work.
 - **`docker network inspect --format '{{.Gateway}}'` prints the literal string
   `invalid IP` for an isolated network**, not an empty value: with
   `gateway_mode_ipv4=isolated` Docker omits the `Gateway` key from the IPAM

@@ -1,5 +1,5 @@
 // Freilauf — the egress proxy: the engine interface, and the built-in CONNECT
-// proxy that implements it (SANDBOX_RESEARCH.md §7.5, §7.12).
+// proxy that implements it (SANDBOX.md).
 //
 // A sandboxed run's container sits on an internal Docker network with no default
 // route; its only way out is an HTTP proxy this module owns. Two engines answer

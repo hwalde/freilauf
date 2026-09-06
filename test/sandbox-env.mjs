@@ -175,7 +175,7 @@ export function newSandbox({ prefix = 'freilauf-test-', keep = false } = {}) {
   // because after the suite exits nothing else distinguishes the two.
   if (keep) { try { writeFileSync(join(SB, 'keep'), 'kept for debugging\n') } catch { /* best effort */ } }
 
-  // ---- the container runtime, shimmed (SANDBOX_RESEARCH.md §7.13, "Tests") ----
+  // ---- the container runtime, shimmed (SANDBOX.md) ----
   // The development machine has no Docker, and the sandbox has to be covered
   // there too. `test/shims/docker` answers for it: it logs every argv and reads
   // its answers out of DOCKER_STATE, and its `run` executes the wrapped command
@@ -496,6 +496,18 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // It also keeps the operator's real plan string out of the suite, which
       // the plan lookup in harnesses/claude.mjs used to read straight from $HOME.
       FREILAUF_CLAUDE_CREDENTIALS: join(SB, 'missing-claude-credentials.json'),
+      // …and BECAUSE that file is deliberately absent, the suite has to supply
+      // the credential the other way, or every sandboxed claude run is refused
+      // before it starts. `claude` declares its OAuth token `required` (see
+      // missingRequiredCredentials()): a sandboxed run whose token cannot be
+      // found anywhere now FAILS with a readable sentence instead of drawing a
+      // TUI that says "Not logged in" and waiting for a keystroke nobody will
+      // type. That refusal is right for a real installation and wrong for a
+      // suite whose `fl-start` is a stub that never talks to Anthropic — so the
+      // sandbox looks like an installation that HAS configured its token. What
+      // happens when it has not is a unit test, where it can be asserted without
+      // failing every sandbox group.
+      CLAUDE_CODE_OAUTH_TOKEN: 'e2e-dummy-oauth-token',
       FREILAUF_CLAUDE_PROJECTS: join(SB, 'claude-projects'),
       FREILAUF_ZUSAETZE_DIR: join(SB, 'zusaetze'),
       FREILAUF_PULS_AUS: '1',          // no provider pulse against real endpoints from the suite
@@ -619,6 +631,10 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     process.env.FREILAUF_HUB_SOCKET = join(SB, 'hub.sock')
     process.env.FREILAUF_REPORT_SCRIPT = join(PROJECT, 'bin', 'fl-report')
     process.env.FREILAUF_CLAUDE_CREDENTIALS = join(SB, 'missing-claude-credentials.json')
+    // The same reason as in the hub's own environment above: with no credentials
+    // file, claude's `required` OAuth token has nowhere else to come from, and a
+    // watcher-driven relaunch in THIS process would refuse the run.
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'e2e-dummy-oauth-token'
     process.env.FREILAUF_START_SCRIPT = STUB
     process.env.FREILAUF_CLAUDE_PROJECTS = join(SB, 'claude-projects')
     process.env.FREILAUF_ZUSAETZE_DIR = join(SB, 'zusaetze')

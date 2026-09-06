@@ -178,7 +178,7 @@ export function skillSpec(id) { return HARNESS_PLUGINS[id]?.skills ?? null }
  * The sandbox declaration of a coding agent or a model provider, or null.
  * `{ supported, image, domains, env, credentials, seedHome, stateDirs,
  *    launchOverrides, innerSandbox }` — see docs/plugins.md, "The sandbox
- * declaration", and SANDBOX_RESEARCH.md §7.9.
+ * declaration", and SANDBOX.md.
  */
 export function sandboxDecl(id) { return getPlugin(id)?.sandbox ?? null }
 

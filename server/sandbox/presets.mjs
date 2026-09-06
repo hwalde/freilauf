@@ -1,5 +1,5 @@
 // Freilauf — network presets: an allowlist nobody has to type by hand
-// (SANDBOX_RESEARCH.md §7.5.3).
+// (SANDBOX.md).
 //
 // An allowlist that has to be written out is an allowlist that gets switched
 // off. Four presets cover what a run of this hub actually needs, and each of
