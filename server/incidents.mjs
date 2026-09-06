@@ -14,7 +14,7 @@ import { join } from 'node:path'
 import db, { addEvent } from './db.mjs'
 import { RUNS_DIR, fmtDbUtc } from './util.mjs'
 import { notify, notifyMuted, detailUrl } from './notify.mjs'
-import { TYPE_TEXT } from './detect.mjs'
+import { TYPE_TEXT, agentCopedAfter } from './detect.mjs'
 import { env } from './env.mjs'
 
 /**
@@ -107,7 +107,8 @@ export function incidentById(id) { return db.prepare('SELECT * FROM incidents WH
  *
  * - Open incident of the same type: anzahl++, zuletzt_gesehen; an upgrade
  *   yellow→red (e.g. the hook confirms what the log scanner only suspected) notifies.
- * - Resolved incident and the occurrence lies AFTER the resolution: reopen + notify.
+ * - Resolved incident and the occurrence lies AFTER the resolution: reopen + notify,
+ *   UNLESS the agent has demonstrably worked since (see reopenVetoed below).
  * - Occurrence BEFORE the resolution (straggler from the transcript): only count it.
  * - Two sources see the same event (hook + transcript within 90 s): do not
  *   count it twice.
@@ -133,6 +134,15 @@ export async function reportIncident(runId, { typ, quelle, schwere = 'rot', bele
     db.prepare(`UPDATE incidents SET anzahl = anzahl + 1 WHERE id = ?`).run(letzter.id)
     ereignis = 'zusatz'
     row = incidentById(letzter.id)
+  } else if (letzter && reopenVetoed(runId, letzter.geloest_am)) {
+    // The agent has demonstrably worked SINCE this incident was closed, so it is
+    // not blocked by an API error and this hit is text on its screen — the
+    // rateLogHit() veto, applied to the one path that never had it. Counted like
+    // a straggler, and deliberately NOT reopened: reopening would page again.
+    db.prepare(`UPDATE incidents SET anzahl = anzahl + 1, beleg = COALESCE(?, beleg) WHERE id = ?`)
+      .run(beleg, letzter.id)
+    ereignis = 'echo'
+    row = incidentById(letzter.id)
   } else if (letzter) {
     // Reopening: the same record, so the history (erst_gesehen, anzahl) is preserved.
     // gemeldet_am resets: the reopened episode is a new one and pages again —
@@ -156,6 +166,45 @@ export async function reportIncident(runId, { typ, quelle, schwere = 'rot', bele
   const melden = !noNotify && row.schwere === 'rot' && ['neu', 'wieder', 'eskaliert'].includes(ereignis)
   if (melden) await scheduleNotification(row.id, tsMs)
   return { incident: row, ereignis }
+}
+
+/**
+ * May this occurrence REOPEN an incident somebody (or the hub) has closed?
+ *
+ * Not if the agent has demonstrably worked since the closure. That is
+ * `agentCopedAfter()` — detect.mjs's one named copy of "a working agent is
+ * never escalated" — and until this existed it guarded only the SEVERITY of a
+ * log hit, never the reopening. So a coding agent's TUI redrawing an old line
+ * into the pipe-pane log was a full recurrence: the incident came back, the
+ * grace period restarted and the phone rang again.
+ *
+ * Measured on run 4eeaa0bc (2026-09-06). Its claude hit a real 5-hour session
+ * limit at 07:14 and the incident was rightly red. The limit ended with the
+ * window's own reset at 16:29 — the account reported 19 % and the agent's own
+ * status line read `11% 5h` while it drove five subagents. The log scanner went
+ * on matching the SAME screen line, `You've hit your session limit · resets
+ * 11:30am`, on every single watcher pass: `incident:dedupe` at 14:54:21,
+ * 14:54:51, 14:55:21 … to 77 occurrences. Two things follow from that, and the
+ * second is why this fence is not optional. The incident could never resolve
+ * itself, because "no recurrence for 10 minutes" cannot become true while a
+ * redraw manufactures one every 30 seconds. And it could not be resolved BY
+ * HAND either: closing it at 15:01:23 was undone by the next pass at 15:01:51 —
+ * `wieder_geoeffnet` 2, and a fresh notification with it. An alarm the operator
+ * cannot switch off is worse than no alarm.
+ *
+ * Both directions stay right, which is the whole reason the veto is the right
+ * rule here rather than a text comparison. A genuinely blocked agent stops
+ * producing output, so its activity does not advance past the closure, the veto
+ * is false and the incident reopens and pages exactly as before. A harness that
+ * measures no activity at all (hermes) reports `null`, which is UNKNOWN and
+ * never a veto — those reopen as they always did. And a global incident has no
+ * agent to ask about.
+ */
+function reopenVetoed(runId, resolvedAt) {
+  if (!runId || !resolvedAt) return false
+  const r = db.prepare('SELECT last_activity_at FROM runs WHERE id = ?').get(runId)
+  const workedAt = r?.last_activity_at ? msFrom(r.last_activity_at) : null
+  return agentCopedAfter(workedAt, msFrom(resolvedAt))
 }
 
 /**

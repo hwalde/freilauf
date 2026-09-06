@@ -471,6 +471,35 @@ async function watchFollowUps() {
   const rows = db.prepare(`SELECT * FROM runs WHERE followup_since IS NOT NULL
     AND status IN ('done','failed','aborted')`).all()
   for (const run of rows) {
+    // A follow-up run is MEASURED, exactly like a running one — and until this
+    // existed nobody measured it at all. measureActivity() is called from
+    // watchRun(), whose query is `status IN ('running','waiting_help')`, and
+    // from finishCostsPass(), which runs ONCE per run and then never again. A
+    // follow-up commission sits on a `done`/`failed`/`aborted` row, so from the
+    // first report onwards `last_activity_at`, the tokens and the cost stood
+    // still while the agent went on working in the same session for hours.
+    // Measured on run 49a26807: its detail page said "activity 2026-09-05
+    // 16:46:32" while its claude transcript had been written 45 minutes before
+    // the reading — 21 hours of the run's own work, none of it counted.
+    //
+    // The false "activity" line is the cheap half. The expensive half is that
+    // `agentWaiting()` (run-state.mjs) rests on `last_activity_at` being "the
+    // only independent witness there is" against a `waiting` mark that latched
+    // because half a hook pair never arrived. A witness that cannot move is no
+    // witness: on a follow-up run the mark was believed unconditionally, and
+    // `agentWaiting(run)` below then switches this pass's whole clock off for
+    // the life of the commission — the one alarm that says "your follow-up
+    // never came back". Same family as finishCostsPass()'s own comment, one
+    // pass further on.
+    const act = await measureActivity(run)
+    if (act.lastActivity) {
+      db.prepare('UPDATE runs SET last_activity_at=?, tokens_in=?, tokens_out=?, cost_usd=COALESCE(?, cost_usd) WHERE id=?')
+        .run(act.lastActivity, act.tokensIn, act.tokensOut, act.costUsd ?? null, run.id)
+    }
+    // THIS pass's reading, not the row's — for the reason watchRun()'s
+    // `lastActAt` gives: the UPDATE above already knows better than the row
+    // that was loaded before it.
+    const lastActAt = act.lastActivity ?? run.last_activity_at
     // The session was closed on purpose (kill route, retention, archive):
     // nothing can report any more. reconcileClosedSession usually cleared the
     // flag already — this is the net under it.
@@ -500,7 +529,8 @@ async function watchFollowUps() {
     // on, and "follow-up exceeds the expected duration" would alarm about a
     // conversation the operator is in the middle of. The clock resumes the
     // moment the agent works again — every `_working` is a new instruction.
-    if (agentWaiting(run)) continue
+    // …its own word, unless the activity measured above contradicts it.
+    if (agentWaiting({ ...run, last_activity_at: lastActAt })) continue
     const expectedMs = run.expected_minutes * 60_000
     const elapsed = Date.now() - parseDbUtc(run.followup_since)
     if (elapsed > 0.8 * expectedMs) addEventOnce(run.id, 'anomaly:followup_soft_overrun')

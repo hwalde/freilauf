@@ -3791,6 +3791,42 @@ sidebar and the notifications stop counting it as open:
 | red on `failed`/`aborted` | stays open — that is WHY the run did not come through |
 | `merge_blocked`, `provider_down:*` | never by time: the integrator and the pulse own their recovery paths |
 
+**And a REDRAW is not a recurrence** (`reopenVetoed()` in incidents.mjs). Every
+row above turns on "no recurrence for n minutes", and the auto-alarm principle
+reopens a closed incident the moment one arrives — both of which assume the
+occurrence stream says something. For a log-sourced incident it does not: a
+coding agent's TUI repaints, `pipe-pane` writes every repaint into `log.txt`,
+and the same screen line therefore comes past the scanner again as genuinely new
+bytes. Measured on run 4eeaa0bc (2026-09-06): its claude hit a real 5-hour
+session limit at 07:14, and long after the window had reset — the account
+reporting 19 %, the agent's own status line reading `11% 5h` while it drove five
+subagents — the scanner went on matching `You've hit your session limit ·
+resets 11:30am` on **every watcher pass**, `incident:dedupe` at 14:54:21,
+14:54:51, 14:55:21 …, to 77 occurrences. Two consequences, and the second is
+the one that makes this a fence rather than a nicety: "no recurrence for 10
+minutes" can never become true while a repaint manufactures one every 30
+seconds, so the incident could not resolve itself — and it could not be
+resolved BY HAND either, because the next pass reopened it. Closing it at
+15:01:23 was undone at 15:01:51, `wieder_geoeffnet` 2, with a fresh
+notification behind it. **An alarm the operator cannot switch off is worse than
+no alarm.**
+
+The fence is the veto that already existed, applied to the one path that never
+had it: `agentCopedAfter()` — detect.mjs's single copy of "a working agent is
+never escalated" — now also decides whether an occurrence may REOPEN a closed
+incident. Has the agent demonstrably worked since the closure? Then it is not
+blocked by an API error and this hit is text on its screen: counted
+(`incident:echo`), not reopened, not announced. Both directions stay right, and
+that is why the veto is the correct rule here rather than a comparison of the
+line's text: a genuinely blocked agent stops producing output, so its activity
+does not run past the closure and the incident reopens and pages exactly as
+before; a harness that measures no activity at all reports `null`, which is
+UNKNOWN and never a veto. `last_activity_at` is seeded at a run's start, which
+is harmless here for the same reason it is harmless in `rateLogHit()` — an
+incident is always closed *after* its run started, so the seed always lies
+before the closure. Only a test that back-dates a resolution can construct the
+opposite, and one did.
+
 ### The notification grace period — and the un-ringing
 
 A red incident does **not** page immediately: `notify_at` stores
@@ -3911,6 +3947,26 @@ errors (`post_api_request` only fires after success).
   `'|'`-separated now. And where the status was simply empty, `Number('')` being
   `0` **and finite** recorded an agent the kernel shot as having exited cleanly.
   Compare before converting; `exitStatus()` does.
+- **A dead pane does not always say HOW it died, and that is permanent.**
+  Measured on tmux 3.4 in four probes (4/25, 7/40, 8/30, 5/30 — about one in
+  six): a pane whose own screen shows the shell running `exit 7` and logging
+  out comes back as `#{pane_dead}` = `1` with `#{pane_dead_status}`,
+  `#{pane_dead_signal}` **and** `#{pane_dead_time}` all empty. It is not a read
+  that came too early — 300 re-queries over 700 ms and a further 18 seconds
+  leave it empty, `list-panes` answers exactly what `display` answers, and
+  waiting for the shell's prompt before sending the keys changes nothing. So
+  **`exit_code IS NULL` on a `failed` run is not evidence about the process**:
+  it may mean the agent was killed by a signal, or simply that tmux never
+  recorded the status. Two consequences to keep in mind rather than to code
+  around: nothing may read a missing exit code as `0` (that is what
+  `exitStatus()` is for), and `panePostMortem()`'s exit-code ladder — the one
+  that maps a container client's **125** to `'infra'` and resumes the run —
+  cannot fire when tmux lost the number, so it falls through to the
+  conservative "the agent died" branch. The e2e check that asserts the status
+  therefore BUILDS its fixture instead of assuming it: it makes a dead pane up
+  to six times until tmux really recorded one. The assertion stays as strong as
+  it was; only the premise is retried, which is the rule the browser suite's
+  mouse-mode entry already states.
 - **The terminal is fail-closed, twice.** `/term` only enables write access on an
   explicit `?ro=0` (`terminal.mjs`); without the parameter tmux attaches with
   `-r` AND every input is discarded. The client sets `ro=0` from `data-live` in
