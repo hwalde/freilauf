@@ -3049,6 +3049,30 @@ session's status only. claude's `SubagentStop` fires with the MAIN session's id
   duration of a first attempt still counts, a running run whose agent stopped
   without reporting still overruns — that IS the failure, and the yellow row
   now says why.
+- **…but not past the point where the agent contradicts it.** `waiting` is set
+  by one hook and cleared by another, so HALF a hook pair latches it for ever —
+  and that is not hypothetical. The `_working` hooks are younger than the
+  `_turn_end`/`_waiting` ones, `--settings` is passed INLINE at launch, and a
+  claude already running can never be given the new pair; `PreToolUse` is fired
+  detached (`setsid -f … >/dev/null 2>&1`), so a hook that cannot run says so to
+  nobody. Measured on run 4eeaa0bc: `agent_state='waiting'` since 03:49,
+  `turn_end` events every few minutes after it, its own transcript still growing
+  four and a half hours later — and every page reading "waiting for input" while
+  the `no_activity` watchdog stayed switched off for it, which is the expensive
+  direction. **`agentWaiting(run)`** (run-state.mjs) is the one predicate all
+  five readers ask now — `displayStatus`, its SQL twin, `trafficLight()`, the
+  `no_activity` pass and `watchFollowUps()` — and it is the agent's own word
+  unless `last_activity_at` runs more than `ATTENTION_STALE_MS` (2 min) past
+  the mark. Three things make that safe rather than clever: `last_activity_at`
+  is the harness's own file MTIME and never the time of the measurement, so it
+  moves only when the agent writes; only a CONTRADICTION counts, so hermes
+  (which measures no activity) and a run with no mark are untouched — silence
+  never overrules a hook; and the margin is four orders of magnitude above the
+  measured 20 ms by which claude's transcript trails its own Stop hook. The
+  watcher asks with THIS pass's reading, for the reason `lastActAt` beside it
+  already did. The SQL twin needs **two** COALESCEs and the parity test found
+  both: `agent_state = 'waiting'` on a NULL column is NULL, not false, so a
+  bare `NOT (…)` around it selects nothing at all.
 - **Cleared with the session.** `_exit`, `_pane_died`, the kill route, the
   sessions page, a flow's `kill_run`, `reconcileClosedSession()`, a retry and a
   resume all NULL the two columns: what the old agent said describes a process
@@ -3693,6 +3717,31 @@ deliberately NOT called here — a run's end is not a claim that the overrun did
 not happen), the status cell still prints the anomaly as its dim history line,
 and the duration column next to it says 52/45 anyway. `trafficLight()` is exported for
 the test that holds this.
+
+**And the run's end is not the only thing that answers an anomaly — its WORK
+REACHING ORIGIN answers one too.** `unpushed` is rightly not in the list above,
+and that is exactly why it needed the second rule rather than an entry: for an
+unmerged run it stays true after the end, so the run's end must not settle it —
+but for a run whose work the hub itself pushed it was never true at all.
+`checkFinishedBranches()` has carried that fence since the false alarm two
+sections up (`merge_status` of `merged` or `kept_on_branch` is never asked the
+question), and a fence only stops NEW events: measured on run d4ee07d2, `merged`
+into main at 16:47:56, `anomaly:unpushed` two seconds later, and a day
+afterwards the overview still wore a yellow dot titled "worth a look" over the
+words "branch not pushed" — about work that was on `origin/main`. The writer had
+learned the rule and the reader had not, which is the drift this whole file is
+written against.
+
+So the settled set is a question about the run, not a constant:
+**`settledAnomalies(run)`** returns `IN_FLIGHT_ANOMALIES` when the run came
+through *plus* `anomaly:unpushed` when `workOnOrigin(run)`, and `stillSpeaking()`
+in pages.mjs subtracts whatever comes back. The two halves are deliberately
+**independent**: `checkFinishedBranches()` asks about `failed` runs too, and a
+failed run's leftovers can be merged by hand from its detail page — once they are
+on origin, "not pushed" is just as false there, while the run's own explanation
+of why it failed still stands. And `WORK_ON_ORIGIN` is **one list with two
+readers**: watcher.mjs builds its `NOT IN` from it instead of repeating the two
+words, because two literals is how the two came to disagree in the first place.
 
 ### opencode's activity: a run is a session TREE
 

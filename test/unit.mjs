@@ -6887,6 +6887,59 @@ try {
     isTrue(IN_FLIGHT_ANOMALIES.every(k => k.startsWith('anomaly:')), 'and every entry is an anomaly kind')
   })
 
+  await check('settledAnomalies: work on origin answers "branch not pushed"', async () => {
+    // The other half of the same question, and the one that was missing.
+    // `checkFinishedBranches()` never ASKS a run whose work the hub put on
+    // origin itself — but that fence only stops NEW events. Measured on run
+    // d4ee07d2: merged into main at 16:47:56, `anomaly:unpushed` two seconds
+    // later (written before the fence existed), and a day afterwards the
+    // overview still carried a YELLOW dot titled "worth a look" over the line
+    // "branch not pushed" — about work that was on `origin/main`.
+    const { settledAnomalies, workOnOrigin, WORK_ON_ORIGIN, IN_FLIGHT_ANOMALIES } =
+      await import('../server/run-state.mjs')
+
+    // The run in the measurement: done AND merged.
+    const merged = { status: 'done', merge_status: 'merged' }
+    isTrue(settledAnomalies(merged).includes('anomaly:unpushed'),
+      'a merged run is not "not pushed"')
+    for (const k of IN_FLIGHT_ANOMALIES) {
+      isTrue(settledAnomalies(merged).includes(k), `${k} is still settled by the end`)
+    }
+
+    // Not tied to `done`: checkFinishedBranches() asks about `failed` runs too,
+    // and a failed run's leftovers can be merged by hand from the detail page.
+    isTrue(settledAnomalies({ status: 'failed', merge_status: 'merged' }).includes('anomaly:unpushed'),
+      'a failed run whose leftovers were merged is not "not pushed" either')
+    // …and the two rules stay independent: the end has not answered the rest.
+    isFalse(settledAnomalies({ status: 'failed', merge_status: 'merged' }).includes('anomaly:overrun'),
+      'while its own explanation still stands')
+
+    // Kept on its branch counts: integrate.mjs pushed that branch.
+    isTrue(settledAnomalies({ status: 'done', merge_status: 'kept_on_branch' }).includes('anomaly:unpushed'),
+      'kept_on_branch was pushed too')
+
+    // And the case the anomaly exists FOR must survive: a run nobody merged.
+    isFalse(settledAnomalies({ status: 'done' }).includes('anomaly:unpushed'),
+      'an unmerged run may still live only on this machine')
+    isFalse(settledAnomalies({ status: 'done', merge_status: 'blocked_conflict' }).includes('anomaly:unpushed'),
+      'and a blocked one certainly does')
+    equal(settledAnomalies(null).length, 0, 'no run, nothing settled')
+
+    isTrue(workOnOrigin({ merge_status: 'merged' }), 'workOnOrigin: merged')
+    isFalse(workOnOrigin({ merge_status: null }), 'workOnOrigin: nothing merged')
+    isFalse(workOnOrigin(null), 'workOnOrigin: no run')
+
+    // The writer's SQL is built from this very list (watcher.mjs), so a word
+    // added here reaches both readers or neither.
+    const wsrc = readFileSync(new URL('../server/watcher.mjs', import.meta.url), 'utf8')
+    isTrue(wsrc.includes('WORK_ON_ORIGIN.map'),
+      'checkFinishedBranches() builds its NOT IN from WORK_ON_ORIGIN, not a second literal')
+    isFalse(/NOT IN \('merged','kept_on_branch'\)/.test(wsrc),
+      'and no literal copy of the list is left behind')
+    isTrue(WORK_ON_ORIGIN.includes('merged') && WORK_ON_ORIGIN.includes('kept_on_branch'),
+      'the list names both ways the hub pushes')
+  })
+
   await check('archivable: a run being worked on again must not lose its session', async () => {
     // Archiving CLOSES the run's tmux session. So the rule is not "is the
     // record terminal" but "is anybody still in there" — and a finished run
@@ -6940,14 +6993,27 @@ try {
     const { displayStatus, displayStatusSql, WORK_STATUSES } = await import('../server/run-state.mjs')
     const { DatabaseSync } = await import('node:sqlite')
     const d = new DatabaseSync(':memory:')
-    d.exec(`CREATE TABLE runs(id INTEGER PRIMARY KEY, status TEXT, agent_state TEXT, followup_since TEXT, followup_open INTEGER DEFAULT 0)`)
-    const ins = d.prepare('INSERT INTO runs(status, agent_state, followup_since) VALUES(?,?,?)')
+    d.exec(`CREATE TABLE runs(id INTEGER PRIMARY KEY, status TEXT, agent_state TEXT, followup_since TEXT,
+      followup_open INTEGER DEFAULT 0, agent_state_at TEXT, last_activity_at TEXT)`)
+    const ins = d.prepare(`INSERT INTO runs(status, agent_state, followup_since, agent_state_at, last_activity_at)
+      VALUES(?,?,?,?,?)`)
     const rows = []
+    // The fourth dimension is the one the `waiting` mark is now judged against:
+    // no witness at all, a witness that agrees, one a second later (a real turn
+    // end — claude writes its transcript ~20 ms after the Stop hook) and one
+    // hours later (the latched mark on run 4eeaa0bc).
+    const SAID = '2026-09-06 03:49:50'
+    const WITNESS = [
+      [null, null], [SAID, null], [null, '2026-09-06 06:15:21'],
+      [SAID, SAID], [SAID, '2026-09-06 03:49:51'], [SAID, '2026-09-06 06:15:21'],
+    ]
     for (const status of ['scheduled', 'deferred', 'running', 'waiting_help', 'done', 'failed', 'aborted']) {
       for (const agent_state of [null, 'working', 'waiting']) {
         for (const followup_since of [null, '2026-09-05 10:00:00']) {
-          ins.run(status, agent_state, followup_since)
-          rows.push({ status, agent_state, followup_since, followup_open: 0 })
+          for (const [agent_state_at, last_activity_at] of WITNESS) {
+            ins.run(status, agent_state, followup_since, agent_state_at, last_activity_at)
+            rows.push({ status, agent_state, followup_since, followup_open: 0, agent_state_at, last_activity_at })
+          }
         }
       }
     }
@@ -6958,6 +7024,44 @@ try {
       isTrue(viaJs.length > 0, `${s} selects something at all`)
     }
     d.close()
+  })
+
+  await check('a latched "waiting" mark is overruled by the agent still writing', async () => {
+    // `waiting` is set by the agent's own hook and cleared by its own
+    // `_working` hook, so half a hook pair latches it for ever. Measured on run
+    // 4eeaa0bc: `agent_state='waiting'` at 03:49 (a claude launched before the
+    // `_working` hooks existed — `--settings` is passed INLINE at launch, so a
+    // running session never gets them), `turn_end` events every few minutes
+    // afterwards, and its own transcript still growing four and a half hours
+    // later. Every page said "waiting for input" about an agent that was
+    // demonstrably working, and the `no_activity` watchdog stayed off with it.
+    const { agentWaiting, displayStatus, ATTENTION_STALE_MS } = await import('../server/run-state.mjs')
+    const said = '2026-09-06 03:49:50'
+    isTrue(agentWaiting({ agent_state: 'waiting' }), 'its own word, where nothing contradicts it')
+    isTrue(agentWaiting({ agent_state: 'waiting', agent_state_at: said, last_activity_at: said }),
+      'a witness that agrees changes nothing')
+    isTrue(agentWaiting({ agent_state: 'waiting', agent_state_at: said, last_activity_at: '2026-09-06 03:49:51' }),
+      'nor one a second later — that IS a turn end, the transcript follows the hook')
+    isFalse(agentWaiting({ agent_state: 'waiting', agent_state_at: said, last_activity_at: '2026-09-06 06:15:21' }),
+      'but hours of writing afterwards is not a waiting agent')
+    // Only a CONTRADICTION counts. hermes measures no activity at all, so its
+    // `last_activity_at` never moves — silence must never overrule the hook.
+    isTrue(agentWaiting({ agent_state: 'waiting', agent_state_at: said, last_activity_at: null }),
+      'no activity source is silence, not evidence')
+    isTrue(agentWaiting({ agent_state: 'waiting', agent_state_at: null, last_activity_at: '2026-09-06 06:15:21' }),
+      'and activity with no mark to compare against says nothing either')
+    isFalse(agentWaiting({ agent_state: 'working', agent_state_at: said }), 'a working agent is not waiting')
+    isFalse(agentWaiting({ agent_state: null }), 'and a harness that reports nothing never is')
+    isFalse(agentWaiting(null), 'no run, no verdict')
+
+    // The margin is a margin, not a threshold to tune: comfortably above the
+    // measured 20 ms and far below the failure it catches.
+    isTrue(ATTENTION_STALE_MS > 1000 && ATTENTION_STALE_MS < 3_600_000, 'the margin is minutes, not milliseconds or hours')
+
+    // …and the word on the page follows it.
+    const stuck = { status: 'running', agent_state: 'waiting', agent_state_at: said, last_activity_at: '2026-09-06 06:15:21' }
+    equal(displayStatus(stuck), 'running', 'the run reads as running again')
+    equal(displayStatus({ ...stuck, last_activity_at: said }), 'waiting_input', 'a real wait still reads as one')
   })
 
   await check('after a report, only a human prompt opens a follow-up — a tool call waits out the grace', async () => {

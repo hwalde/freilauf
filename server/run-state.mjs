@@ -33,6 +33,69 @@ export function followUpActive(run) {
 }
 
 /**
+ * How far `last_activity_at` may run past the moment the agent said it waits
+ * before the hub stops believing the word.
+ *
+ * A `waiting` mark is set by the agent's OWN hook and cleared by its own
+ * `_working` hook — so where only half of that pair arrives, the mark latches
+ * and never comes off. That is not hypothetical: the `_working` hooks
+ * (UserPromptSubmit, PreToolUse) are younger than the `_turn_end`/`_waiting`
+ * ones, `--settings` is passed INLINE at launch, and a claude started before
+ * they existed goes on emitting `turn_end` and `idle` for days with nothing in
+ * between. `PreToolUse` is also fired detached (`setsid -f … >/dev/null 2>&1`),
+ * so a hook that cannot run says so to nobody. Measured on run 4eeaa0bc:
+ * `agent_state='waiting'` since 03:49, `turn_end` events every few minutes
+ * after it, and the run's own transcript still growing four and a half hours
+ * later — while every page read "waiting for input" and the `no_activity`
+ * watchdog stayed switched off for it.
+ *
+ * `last_activity_at` is the only independent witness there is, and it is the
+ * harness's own file MTIME (watcher.mjs `measureActivity()`), never the time of
+ * the measurement — so it moves when, and only when, the agent writes. The
+ * margin exists because the two are legitimately near-simultaneous at a real
+ * turn end: claude writes its transcript ~20 ms AFTER the Stop hook has run.
+ * Two minutes is four orders of magnitude above that measurement and four
+ * orders below the failure it catches, so it can be a constant rather than a
+ * setting nobody would ever tune.
+ */
+export const ATTENTION_STALE_MS = 120_000
+
+/** A database timestamp (`YYYY-MM-DD HH:MM:SS`, UTC) as epoch ms, or NaN. */
+function dbMs(s) {
+  return typeof s === 'string' && s ? Date.parse(s.replace(' ', 'T') + 'Z') : NaN
+}
+
+/**
+ * Does the agent really wait for a human?
+ *
+ * Its own word, unless measured activity contradicts it — see
+ * `ATTENTION_STALE_MS`. Only a CONTRADICTION counts: no activity source (hermes
+ * measures none, so `last_activity_at` never moves) and no mark are both silence,
+ * and silence never overrules the hook. The SQL twin below has to say the same,
+ * because the overview's filter and the sidebar's counts select rows.
+ */
+export function agentWaiting(run) {
+  if (!run || run.agent_state !== 'waiting') return false
+  const said = dbMs(run.agent_state_at)
+  const acted = dbMs(run.last_activity_at)
+  if (!Number.isFinite(said) || !Number.isFinite(acted)) return true
+  return acted - said <= ATTENTION_STALE_MS
+}
+
+/**
+ * …the same sentence in SQL. `julianday` gives days, so the margin is scaled.
+ *
+ * Both COALESCEs are load-bearing, and the parity test found them: SQL's third
+ * truth value is not `false`. `agent_state = 'waiting'` on a NULL column is
+ * NULL, so a bare `NOT (…)` around it selects NOTHING — which is why the rule
+ * this replaced was already written as `COALESCE(agent_state,'') <> 'waiting'`.
+ * The inner comparison can go NULL too (`julianday` of anything it cannot
+ * parse), and a witness the database cannot read is no contradiction.
+ */
+const WAITING_SQL = `(COALESCE(agent_state, '') = 'waiting' AND NOT COALESCE(
+  julianday(last_activity_at) - julianday(agent_state_at) > ${ATTENTION_STALE_MS / 86_400_000}, 0))`
+
+/**
  * The status word a run displays under.
  *
  *   waiting_input   the agent's turn is over and it waits for a human — on a
@@ -48,8 +111,8 @@ export function followUpActive(run) {
  */
 export function displayStatus(run) {
   if (!run) return null
-  if (followUpActive(run)) return run.agent_state === 'waiting' ? 'waiting_input' : 'running'
-  if (run.status === 'running' && run.agent_state === 'waiting') return 'waiting_input'
+  if (followUpActive(run)) return agentWaiting(run) ? 'waiting_input' : 'running'
+  if (run.status === 'running' && agentWaiting(run)) return 'waiting_input'
   return run.status
 }
 
@@ -129,6 +192,51 @@ export function anomaliesSettled(run) {
 }
 
 /**
+ * The merge statuses that mean: the hub ITSELF put this run's work on `origin`.
+ * `merged` pushed it into the base branch, `kept_on_branch` pushed the branch —
+ * integrate.mjs knows no purely local merge, so either word is proof that
+ * nothing of this run lives only on this machine.
+ */
+export const WORK_ON_ORIGIN = ['merged', 'kept_on_branch']
+
+/** …as a question about one run. */
+export function workOnOrigin(run) {
+  return !!run && WORK_ON_ORIGIN.includes(String(run.merge_status ?? ''))
+}
+
+/**
+ * The anomaly kinds this run's own state has ANSWERED — the WHERE fragment in
+ * pages.mjs subtracts exactly these, so they stop colouring the traffic light.
+ *
+ * Two rules, and they are independent because they answer different statements:
+ *
+ *   the run came through   → `IN_FLIGHT_ANOMALIES` (see above)
+ *   its work is on origin  → `anomaly:unpushed`
+ *
+ * The second one is the writer's own rule, read back. `checkFinishedBranches()`
+ * never ASKS whether a merged run's branch is pushed — the hub put the work on
+ * origin itself — but that fence only stops NEW events; one already on the run
+ * went on speaking for ever, because `unpushed` is deliberately not an
+ * in-flight anomaly (for an unmerged run it stays true after the end, which is
+ * the whole point of it). Measured on run d4ee07d2: `merged` into main at
+ * 16:47:56, `anomaly:unpushed` two seconds later, and a day afterwards the
+ * overview still showed a YELLOW dot titled "worth a look" over the dim line
+ * "branch not pushed" — about work that was on `origin/main`. Same family as
+ * the false alarm reports.mjs fixed, one layer further out: the writer learned
+ * the rule and the reader did not.
+ *
+ * It is NOT tied to `done`. `checkFinishedBranches()` asks about `failed` runs
+ * too, and a failed run's leftovers can be merged by hand from the detail page
+ * — once they are on origin, "not pushed" is just as false there.
+ */
+export function settledAnomalies(run) {
+  if (!run) return []
+  const settled = anomaliesSettled(run) ? [...IN_FLIGHT_ANOMALIES] : []
+  if (workOnOrigin(run) && !settled.includes('anomaly:unpushed')) settled.push('anomaly:unpushed')
+  return settled
+}
+
+/**
  * Is what the browser terminal just sent into the session a HUMAN doing
  * something — a key, a pasted line, Ctrl-C — as opposed to the terminal
  * talking to the application by itself?
@@ -167,9 +275,9 @@ const FOLLOWUP_SQL = `(status IN ('done','failed','aborted') AND followup_since 
 export function displayStatusSql(status) {
   switch (status) {
     case 'running':
-      return `((status = 'running' OR ${FOLLOWUP_SQL}) AND COALESCE(agent_state, '') <> 'waiting')`
+      return `((status = 'running' OR ${FOLLOWUP_SQL}) AND NOT ${WAITING_SQL})`
     case 'waiting_input':
-      return `((status = 'running' OR ${FOLLOWUP_SQL}) AND agent_state = 'waiting')`
+      return `((status = 'running' OR ${FOLLOWUP_SQL}) AND ${WAITING_SQL})`
     default:
       return `(status = '${String(status).replace(/'/g, '')}' AND NOT ${FOLLOWUP_SQL})`
   }
