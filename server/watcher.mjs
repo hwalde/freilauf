@@ -24,6 +24,10 @@ import { reconcileClosedSession, tmuxSnapshot, sessionGone, shouldAutoClose, cur
   sandboxRuntime, sandboxHubId, containerName, stopRunContainer, finishedAtMs, paneTarget } from './sessions.mjs'
 import { integrateTick, pushOperatorBase, integratorTimerOff, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 import { maybeAutoCleanup } from './cleanup.mjs'
+// One list, two readers: this pass never ASKS a run whose work the hub itself
+// put on origin, and pages.mjs stops COLOURING one that was asked before the
+// fence existed. Two literals here is how the two came to disagree.
+import { WORK_ON_ORIGIN, agentWaiting } from './run-state.mjs'
 // The two seams of SANDBOX.md. Both answer for an
 // unsandboxed run exactly what this file did before they existed, which is why
 // every call site below could be rewired mechanically.
@@ -396,7 +400,11 @@ async function watchRun(run) {
     // "the agent's attention") is silent on purpose: the status word already
     // reads "waiting for input", and "no activity" under it would be the same
     // fact twice — the second time as an alarm about the operator's own pause.
-    const waiting = run.agent_state === 'waiting'
+    // …its own word, unless measured activity contradicts it: a `waiting` mark
+    // that latched (a half-wired hook pair) would switch this watchdog off for
+    // the life of the run — see agentWaiting() in run-state.mjs. Asked with
+    // THIS pass's reading, for the reason `lastActAt` above is.
+    const waiting = agentWaiting({ ...run, last_activity_at: lastActAt })
     if (!inFinishGate && act.measured && idle && !waiting && st.pane_dead !== '1') {
       addEventOnce(run.id, 'anomaly:no_activity')
     }
@@ -492,7 +500,7 @@ async function watchFollowUps() {
     // on, and "follow-up exceeds the expected duration" would alarm about a
     // conversation the operator is in the middle of. The clock resumes the
     // moment the agent works again — every `_working` is a new instruction.
-    if (run.agent_state === 'waiting') continue
+    if (agentWaiting(run)) continue
     const expectedMs = run.expected_minutes * 60_000
     const elapsed = Date.now() - parseDbUtc(run.followup_since)
     if (elapsed > 0.8 * expectedMs) addEventOnce(run.id, 'anomaly:followup_soft_overrun')
@@ -1301,7 +1309,7 @@ async function checkFinishedBranches() {
   const rows = db.prepare(`
     SELECT * FROM runs
     WHERE status IN ('done','failed') AND worktree IS NOT NULL
-      AND COALESCE(merge_status,'') NOT IN ('merged','kept_on_branch')
+      AND COALESCE(merge_status,'') NOT IN (${WORK_ON_ORIGIN.map(s => `'${s}'`).join(',')})
       AND id NOT IN (SELECT run_id FROM events WHERE kind IN ('anomaly:unpushed','branch_synced'))
   `).all()
   for (const run of rows) {

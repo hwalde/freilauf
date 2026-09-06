@@ -24,7 +24,7 @@ import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } fro
 import { extrasModelsMru, rememberExtrasModel, DEFAULT_EXTRAS_MODEL } from './extras-suggest.mjs'
 import { runEditAllowed } from './run-edit.mjs'
 import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
-  IN_FLIGHT_ANOMALIES, anomaliesSettled, archivable } from './run-state.mjs'
+  settledAnomalies, archivable, agentWaiting } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
@@ -110,12 +110,14 @@ const sqlList = kinds => kinds.map(k => `'${k}'`).join(',')
  *
  * `cleared:*` kinds fall out by themselves: `clearAnomalies()` renames the
  * event, so neither `LIKE 'anomaly:%'` nor an IN-list matches a retracted one.
- * What did NOT fall out until now is an anomaly on a run that has come
- * through — `anomaliesSettled()` is that rule and `IN_FLIGHT_ANOMALIES` the
- * list of statements a run's own end answers (server/run-state.mjs).
+ * What did NOT fall out until now is an anomaly the run's own state has already
+ * answered — `settledAnomalies()` is that rule (server/run-state.mjs): the
+ * statements a run's end answers, plus "branch not pushed" on a run whose work
+ * the hub itself put on origin.
  */
 function stillSpeaking(run) {
-  return anomaliesSettled(run) ? ` AND kind NOT IN (${sqlList(IN_FLIGHT_ANOMALIES)})` : ''
+  const settled = settledAnomalies(run)
+  return settled.length ? ` AND kind NOT IN (${sqlList(settled)})` : ''
 }
 
 /** Does the run carry one of these anomalies, still asking for attention? */
@@ -143,7 +145,7 @@ function trafficLight(run) {
   // not that — the operator is the one typing.
   const yellow = !red && (
     vf === 'gelb' || run.status === 'deferred' || !!run.finish_state
-    || (run.status === 'running' && run.agent_state === 'waiting')
+    || (run.status === 'running' && agentWaiting(run))
     || hasAnomaly(run, YELLOW_ANOMALIES))
   return red ? 'red' : yellow ? 'yellow' : 'green'
 }
@@ -1043,7 +1045,19 @@ export function runRow(r, ctx) {
         <div class="dim">${e(herkunft)}</div></td>
       <td class="two-line">${e(harnessLabel(r.harness))}${r.model ? `<span class="dim">${r.provider ? e(r.provider) + ':' : ''}${e(r.model)}</span>` : ''}</td>
       <td>${wartend ? plannedCell(r) : startedCell(r.started_at)}</td>
-      <td>${wartend ? '' : (durMin > 0 ? e(t('unit.minutes', { n: durMin })) : '')}<span class="dim"> / ${e(t('unit.minutes', { n: r.expected_minutes }))}</span></td>
+      <td>${
+        // `durMin > 0` used to guard this, and 0 is a duration: a run that died
+        // five seconds after its start (74916f05, a hermes launch that hit exit
+        // 127) printed nothing at all before the slash, so the cell read
+        // "/ 25 Min." — which says "no runtime recorded", not "under a minute",
+        // and says it on exactly the failed run somebody is trying to read. Its
+        // own detail page said `0 Min.` in the same breath, because fmtRuntime()
+        // has no such guard. One fact, two renderers, two answers. The only run
+        // that has no runtime yet is one that has not started, and `wartend`
+        // already answers that. Same family as `Number('')` in "Pitfalls":
+        // a falsy zero read as "nothing".
+        wartend ? '' : e(t('unit.minutes', { n: Number.isFinite(durMin) ? durMin : 0 }))
+      }<span class="dim"> / ${e(t('unit.minutes', { n: r.expected_minutes }))}</span></td>
       <td class="two-line">${branch ? e(branch) : '<span class="leer">–</span>'}${
         r.pr_url ? `<span class="dim"><a href="${e(r.pr_url)}" onclick="event.stopPropagation()">PR</a></span>` : ''}</td>
       <td>${incidentCell(r.id, repoId, r.status)}${startBtn}${archivBtn}</td>

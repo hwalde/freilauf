@@ -44,6 +44,34 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A run whose agent is plainly still working no longer reads "waiting for
+  input".** The word comes from the coding agent's own hooks — one says it has
+  started, another that its turn is over — so where only the second half of that
+  pair arrives, the "waiting" mark goes on and never comes off. It happens: the
+  hooks that report *working* are younger than the ones that report *waiting*,
+  and a session already running cannot be given new ones. Seen on a claude run
+  that had been marked "waiting for input" for four and a half hours while it
+  finished a turn every few minutes. The hub now stops believing the mark when
+  the agent's own transcript has been growing well past it — and with it the
+  "no activity" watchdog, which had been switched off for that run the whole
+  time. An agent that is genuinely waiting still reads as waiting; a harness
+  that measures no activity at all is unaffected, because silence is not
+  evidence.
+- **A merged run no longer claims its branch was never pushed.** The overview
+  showed a yellow "worth a look" dot over the line *branch not pushed* on runs
+  whose work the hub had merged into `main` itself — the anomaly was written two
+  seconds after the merge, back before the check learned to skip merged runs, and
+  once written it went on colouring the row for ever. The check that stops it
+  being written now also stops it being *shown*: a run whose work the hub put on
+  `origin` (merged, or kept on its branch and pushed there) is not asked the
+  question and is not coloured by an older answer to it either. A run that really
+  does have work living only on this machine is unaffected — that is what the
+  warning is for.
+- **A run that lasted less than a minute showed no duration at all.** The
+  overview printed `/ 25 min` with nothing before the slash, which reads as "no
+  runtime recorded" rather than "under a minute" — and it did so on exactly the
+  runs one wants to read, the ones that died seconds after starting. The run's
+  own detail page said `0 min` in the same breath. Both now say the same thing.
 - **hermes could not start in a container at all** — the pane died immediately
   with exit 127. The host's `~/.local/bin` is mounted read-only into the box so
   `fl-report` is reachable, and it was placed *first* on the container's `PATH`;

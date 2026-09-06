@@ -920,6 +920,22 @@ try {
     db.prepare(`UPDATE runs SET status='aborted' WHERE id=?`).run(j.runId)
     contains(await zeile(), 'class="dot red"', 'an aborted run keeps what its anomaly says')
     db.prepare(`UPDATE runs SET status='done' WHERE id=?`).run(j.runId)
+
+    // A run that lasted less than a minute has a duration of zero, and zero is
+    // a duration. The cell was guarded with `durMin > 0`, so it printed NOTHING
+    // before the slash — "/ 25 min", which reads as "no runtime recorded"
+    // rather than "under a minute", on exactly the kind of run somebody is
+    // trying to read: measured on production run 74916f05, a sandboxed hermes
+    // launch that died after five seconds with exit 127. Its own detail page
+    // said `0 min` in the same breath, because fmtRuntime() never had the
+    // guard — one fact, two renderers, two answers.
+    db.prepare(`UPDATE runs SET started_at=datetime('now'), ended_at=datetime('now') WHERE id=?`).run(j.runId)
+    const brief = await zeile()
+    contains(brief, '0 min', 'a five-second run says so instead of saying nothing')
+    isFalse(/<td>\s*<span class="dim"> \//.test(brief), 'the duration cell is not empty before the slash')
+    // …and the detail page, the other renderer, still agrees with it.
+    const detail = await (await fetchPath(`/api/fragments/run-detail?id=${j.runId}`)).text()
+    contains(detail, '0 min', 'the detail page says the same thing')
   })
   await check('the watcher notices a dead pane by itself', async () => {
     // The producer side of `_pane_died`, which had NO test at all: every other
