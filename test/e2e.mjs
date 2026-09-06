@@ -1297,6 +1297,28 @@ try {
     contains(zeile, 'quota exhausted', 'the row says the word')
     contains(zeile, '(5h', 'and names the window')
 
+    // …and the window resets, which is what a quota window DOES. Of all the
+    // in-flight anomalies this is the only one that is transient by definition,
+    // and it was the only one nobody took back: measured on run 4eeaa0bc, whose
+    // row still read "quota exhausted (5h · 06.09.2026, 08:49:19)" while the
+    // account reported that window at 2 % — thirteen hours after the reset time
+    // the event itself names, under a run that had been working all along.
+    quotaSchreiben(0, 0)
+    await watcherTick()
+    isTrue(ereignisse(c.runId).includes('cleared:anomaly:quota_full'), 'a window with room again takes the statement back')
+    equal(db.prepare(`SELECT count(*) n FROM events WHERE run_id=? AND kind='anomaly:quota_full'`)
+      .get(c.runId).n, 0, 'and no query for anomaly:% finds it any more')
+    const rowAfter = (await (await fetchPath(`/?repo=${repoId}`)).text()).split('<tr').find(z => z.includes(c.runId))
+    isFalse(rowAfter.includes('quota exhausted'), 'so the row stops saying it')
+    // A reading that says NOTHING must leave the statement standing — absence
+    // of evidence is not evidence of room (`quotaKnown()`, quota.mjs).
+    writeFileSync(quotaDatei, JSON.stringify({ five_hour: { used_percentage: 100, resets_at: 1800000000 } }))
+    await watcherTick()
+    isTrue(ereignisse(c.runId).includes('anomaly:quota_full'), 'a full window flags it again')
+    writeFileSync(quotaDatei, JSON.stringify({}))
+    await watcherTick()
+    isTrue(ereignisse(c.runId).includes('anomaly:quota_full'), 'and an empty reading retracts nothing')
+
     db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(c.runId)
     db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(fremd.runId)
     quotaSchreiben(0, 0)
@@ -1689,7 +1711,17 @@ try {
     const v1 = vorfaelle(j.runId)[0]
     isTrue(!!v1.geloest_am, 'the same line seen again leaves it closed')
     equal(v1.wieder_geoeffnet, 0, 'and does not page again')
-    isTrue(ereignisse(j.runId).includes('incident:echo'), 'it is recorded as the echo it is')
+    // …and it is recorded where "seen and ignored" belongs — the detector log,
+    // not the run's event list. A redraw arrives on EVERY watcher pass, so an
+    // event per echo is a row in `events` and an SSE publish every 30 seconds
+    // for the life of the run (measured: 1296 of them on run 4eeaa0bc in twelve
+    // hours). The incident's own steps stay in the event list; the repetition
+    // does not.
+    isTrue(!ereignisse(j.runId).some(k => k.startsWith('incident:') && k !== 'incident:neu' && k !== 'incident:geloest'),
+      'an echo writes no event of its own')
+    const dl = readFileSync(join(SB, 'runs', j.runId, 'detektor.jsonl'), 'utf8')
+    isTrue(dl.split('\n').filter(Boolean).map(z => JSON.parse(z)).some(z => z.ereignis === 'echo'),
+      'it is recorded as the echo it is, in the detector log')
     // …and a genuine recurrence still reopens: an agent that is really blocked
     // stops producing output, so its activity does not run past the closure.
     db.prepare(`UPDATE runs SET last_activity_at=datetime('now','-30 minutes') WHERE id=?`).run(j.runId)
@@ -1698,6 +1730,48 @@ try {
     const v2 = vorfaelle(j.runId)[0]
     equal(v2.geloest_am, null, 'a silent agent reopens it')
     equal(v2.wieder_geoeffnet, 1, 'exactly once')
+  })
+
+  await check('a redraw may not keep an OPEN incident alive for ever', async () => {
+    // The other half of the same fault, and the half the reopen guard could not
+    // see: while an incident is OPEN the redraw never reaches that guard at all
+    // — it lands in the ordinary "count it and move zuletzt_gesehen" branch and
+    // pushes the resolution deadline forward by 30 seconds, on every pass, for
+    // ever. Measured on run 4eeaa0bc a day after the reopen fix had shipped:
+    // still open thirteen hours after the limit had lifted, 255 occurrences,
+    // `zuletzt_gesehen` never older than the last watcher pass, and the agent
+    // visibly committing code the whole time.
+    const j = await laufStarten({ repo_id: repoId, harness: 'claude', prompt: 'E2E-Vorfall-nachhall-offen' })
+    await sessionMerken(j.runId)
+    await watcherTick()
+    const line = 'API Error: 429 rate limit exceeded\n'
+    logAnhaengen(j.runId, line)
+    await watcherTick()
+    const v0 = vorfaelle(j.runId)[0]
+    equal(v0.geloest_am, null, 'the incident is open')
+    // The hit is 40 minutes old and the agent has been working ever since — the
+    // very evidence incidentGoneReason() asks for.
+    db.prepare(`UPDATE incidents SET erst_gesehen=datetime('now','-40 minutes'),
+                zuletzt_gesehen=datetime('now','-40 minutes') WHERE id=?`).run(v0.id)
+    db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(j.runId)
+    logAnhaengen(j.runId, line)
+    await watcherTick()
+    const v1 = vorfaelle(j.runId)[0]
+    isTrue(!!v1.geloest_am, 'the echo leaves the last occurrence where it was, so the incident closes itself')
+    contains(v1.geloest_von, 'auto:', 'by itself, not by hand')
+    // …and a genuinely blocked agent is still escalated: its activity stands
+    // still, so the veto is false and the repetition path does its work.
+    const k = await laufStarten({ repo_id: repoId, harness: 'claude', prompt: 'E2E-Vorfall-echt' })
+    await sessionMerken(k.runId)
+    await watcherTick()
+    logAnhaengen(k.runId, line)
+    await watcherTick()
+    db.prepare(`UPDATE runs SET last_activity_at=datetime('now','-30 minutes') WHERE id=?`).run(k.runId)
+    logAnhaengen(k.runId, line)
+    await watcherTick()
+    const w = vorfaelle(k.runId)[0]
+    equal(w.geloest_am, null, 'a silent agent keeps its alarm')
+    equal(w.schwere, 'rot', 'and it goes red on the repetition')
   })
 
   await check('raising the expected duration retracts the overrun statement', async () => {

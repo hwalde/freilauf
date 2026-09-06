@@ -11,7 +11,7 @@ import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd
 import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
 import { storeActivity } from './opencode-store.mjs'
 import { deliverPendingGoals } from './goal.mjs'
-import { claudeQuota, sevenForRun, quotaFullWindow } from './quota.mjs'
+import { claudeQuota, sevenForRun, quotaFullWindow, quotaKnown } from './quota.mjs'
 import { refreshClaudeLimits } from './claude-usage.mjs'
 import { scanNewBytes, transcriptErrors, rateLogHit, terminalText, incidentGoneReason,
   sandboxDenialSummary, sandboxBlockedSeverity, agentCopedAfter } from './detect.mjs'
@@ -446,7 +446,7 @@ async function watchRun(run) {
       const voll = quotaFullWindow(q, run.model ?? null)
       if (voll) {
         addEventOnce(run.id, 'anomaly:quota_full', { window: voll.label, pct: voll.pct, resets_at: voll.resets_at })
-      }
+      } else if (quotaKnown(q, run.model ?? null)) retractQuotaFull(run.id)
     }
   }
 
@@ -844,6 +844,32 @@ function retractNoActivity(runId) {
   announceRun(runId, 'activity')
 }
 
+/**
+ * Take back 'anomaly:quota_full' — the window has room again.
+ *
+ * Of all the in-flight anomalies this is the one that is transient BY
+ * DEFINITION: a quota window's whole nature is that it resets, and the event
+ * even writes down WHEN (`resets_at`). Nothing ever read that back. Measured on
+ * run 4eeaa0bc: its overview row read "quota exhausted (5h · 06.09.2026,
+ * 08:49:19)" while the account reported the 5-hour window at 2 % — thirteen
+ * hours after the reset time the anomaly itself names, under a run that had
+ * been working the whole time. A status cell that says "quota exhausted" about
+ * a run drawing happily on its quota is the same spent colour AGENTS.md's
+ * `anomaliesSettled()` entry is about, one anomaly further on.
+ *
+ * The caller asks `quotaKnown()` first, and that is the load-bearing half: a
+ * reading that says nothing must leave the statement standing. Announced
+ * explicitly, like retractNoActivity(), because nothing was ADDED — the live
+ * channel hangs on addEvent(), and a retraction no page hears about sits in the
+ * overview until the next unrelated event.
+ */
+function retractQuotaFull(runId) {
+  const had = db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind='anomaly:quota_full' LIMIT 1`).get(runId)
+  if (!had) return
+  clearAnomalies(runId, ['anomaly:quota_full'])
+  announceRun(runId, 'quota')
+}
+
 /** How long a sandbox denial keeps colouring a run that has since carried on. */
 const SANDBOX_DENIED_SETTLE_MS = Number(env('SANDBOX_DENIED_SETTLE_MS') ?? 10 * 60_000) || 10 * 60_000
 
@@ -1087,6 +1113,55 @@ export async function watchSandboxBlocks(jetztMs = Date.now()) {
 }
 
 /**
+ * What a claude transcript says about the run: when the agent last WROTE
+ * something, and what it has spent. Pure — the caller does the I/O.
+ *
+ * **The activity is the newest record's own timestamp, not the file's mtime**,
+ * and that distinction is the whole reason this is a function. The mtime looked
+ * like the perfect witness ("it moves only when the agent writes", AGENTS.md),
+ * and it is not: claude touches transcripts it is not writing to. Measured
+ * 2026-09-06 across this installation's `~/.claude/projects`, files rewritten
+ * in batches of five and seven within one second —
+ *
+ *   run 627607ea   mtime 2026-09-06 05:01:53   newest record 2026-09-05 07:48:21
+ *   run d6ef07ad   mtime 2026-09-06 05:01:53   newest record 2026-09-05 08:33:24
+ *   run 49a26807   mtime 2026-09-06 18:50:41   newest record 2026-09-06 15:12:23
+ *
+ * — twenty-one hours of "activity" from an agent that had written nothing. It
+ * is not a cosmetic line on a detail page: `last_activity_at` is what
+ * `agentWaiting()` calls "the only independent witness there is" against a
+ * latched `waiting` mark, and what `agentCopedAfter()` — the veto behind every
+ * incident escalation — asks whether the agent is still coping. A witness that
+ * moves on its own says "this agent is working" about an agent that is idle,
+ * which pages a human about a follow-up that is waiting for THEM (measured:
+ * `anomaly:followup_overrun` on 49a26807 at 18:40, its agent at its prompt
+ * since 15:12) and, in the expensive direction, vetoes a real alarm on an agent
+ * that is genuinely stuck.
+ *
+ * The record timestamp cannot drift that way: it is what the agent wrote next
+ * to what it wrote. The mtime stays as the fallback for a transcript that
+ * carries no timestamp at all — better a witness that can be touched than none.
+ */
+export function claudeTranscriptReading(text, mtime, { lines: maxLines = 500 } = {}) {
+  const out = { lastActivityMs: Number(new Date(mtime)), tokensIn: 0, tokensOut: 0 }
+  let newestMs = null
+  for (const line of String(text ?? '').split('\n').filter(Boolean).slice(-maxLines)) {
+    try {
+      const j = JSON.parse(line)
+      const u = j?.message?.usage
+      if (u) {
+        out.tokensIn += (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
+        out.tokensOut += (u.output_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
+      }
+      const ts = Date.parse(j?.timestamp)
+      if (Number.isFinite(ts) && (newestMs === null || ts > newestMs)) newestMs = ts
+    } catch {}
+  }
+  if (newestMs !== null) out.lastActivityMs = newestMs
+  return out
+}
+
+/**
  * Evaluate the Claude transcript (path known in advance thanks to --session-id, planning 7.1).
  *
  * `measured` is the answer to "does this harness have an activity source at
@@ -1102,19 +1177,10 @@ async function measureActivity(run) {
     if (existsSync(f)) {
       try {
         const stat = statSync(f)
-        out.lastActivity = new Date(stat.mtime).toISOString().replace('T', ' ').slice(0, 19)
-        const text = readFileSync(f, 'utf8')
-        const lines = text.split('\n').filter(Boolean)
-        for (const line of lines.slice(-500)) {
-          try {
-            const j = JSON.parse(line)
-            const u = j?.message?.usage
-            if (u) {
-              out.tokensIn += (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
-              out.tokensOut += (u.output_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
-            }
-          } catch {}
-        }
+        const reading = claudeTranscriptReading(readFileSync(f, 'utf8'), stat.mtime)
+        out.lastActivity = new Date(reading.lastActivityMs).toISOString().replace('T', ' ').slice(0, 19)
+        out.tokensIn = reading.tokensIn
+        out.tokensOut = reading.tokensOut
       } catch {}
     }
     return out

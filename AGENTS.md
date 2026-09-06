@@ -1367,6 +1367,20 @@ Where it is asked, and why each of them:
   only a window that binds THIS run's model can flag it. The event **names the
   window** (`quotaFullWindow()`: '5h', '7d', '7d Fable') and the overview prints
   it, so "quota exhausted" comes with the answer to whose quota ran out.
+  **And it is taken back when the window refills** (`retractQuotaFull()`,
+  watcher.mjs). Of every in-flight anomaly this is the one that is transient by
+  definition — a quota window's whole nature is that it resets, and the event
+  writes down `resets_at` — and it was the only one nothing ever retracted.
+  Measured on run 4eeaa0bc: its row read "quota exhausted (5h · 06.09.2026,
+  08:49:19)" while the account reported that window at 2 %, thirteen hours past
+  the reset time the anomaly itself named, under a run that had worked
+  throughout. The retraction is the `clearAnomalies()` + `announceRun()` pair
+  `retractNoActivity()` already uses — and it asks **`quotaKnown()`** first,
+  which is the load-bearing half: `quotaFullWindow()` answers `null` both for
+  "the windows are fine" and for "the account did not tell us" (`quota?.five ??
+  0`, which is the right reading for flagging and the wrong one for
+  un-flagging), so retracting on its `null` alone would clear a real alarm the
+  moment the usage endpoint rate-limits the hub. No reading, no retraction.
 - **`quota7_start` / `quota7_end`** (runner.mjs, `finishCosts`) — both ends of
   the cost subtraction now describe one window. Taking the maximum made a run on
   Sonnet expensive because a Fable week filled up while it ran.
@@ -3064,8 +3078,10 @@ session's status only. claude's `SubagentStop` fires with the MAIN session's id
   `no_activity` pass and `watchFollowUps()` — and it is the agent's own word
   unless `last_activity_at` runs more than `ATTENTION_STALE_MS` (2 min) past
   the mark. Three things make that safe rather than clever: `last_activity_at`
-  is the harness's own file MTIME and never the time of the measurement, so it
-  moves only when the agent writes; only a CONTRADICTION counts, so hermes
+  is what the AGENT wrote and never the time of the measurement, so it moves
+  only when the agent writes (that used to say "the harness's own file MTIME",
+  and the mtime turned out not to keep that promise — see below); only a
+  CONTRADICTION counts, so hermes
   (which measures no activity) and a run with no mark are untouched — silence
   never overrules a hook; and the margin is four orders of magnitude above the
   measured 20 ms by which claude's transcript trails its own Stop hook. The
@@ -3077,6 +3093,34 @@ session's status only. claude's `SubagentStop` fires with the MAIN session's id
   sessions page, a flow's `kill_run`, `reconcileClosedSession()`, a retry and a
   resume all NULL the two columns: what the old agent said describes a process
   that is gone.
+
+**A FILE'S MTIME IS NOT WHAT THE AGENT WROTE**, and the whole paragraph above
+rested on the belief that it was. `measureActivity()` read `statSync(f).mtime`
+for claude — but claude rewrites transcripts it is not working in, in batches.
+Measured 2026-09-06 across this installation's `~/.claude/projects`, five and
+seven files touched inside one second, none of them growing:
+
+| run | file mtime | newest record IN the file |
+|---|---|---|
+| 627607ea | 2026-09-06 05:01:53 | 2026-09-05 07:48:21 |
+| d6ef07ad | 2026-09-06 05:01:53 | 2026-09-05 08:33:24 |
+| 49a26807 | 2026-09-06 18:50:41 | 2026-09-06 15:12:23 |
+
+Twenty-one hours of "activity" from an agent that had written nothing. And
+`last_activity_at` is not a line on a page: it is the witness `agentWaiting()`
+holds a latched `waiting` mark to, and the one `agentCopedAfter()` asks before
+it vetoes an escalation. A witness that moves on its own is wrong in **both**
+expensive directions at once — it says "this agent is working" about an idle
+one, which is how run 49a26807 was paged as a `followup_overrun` at 18:40 while
+its agent had been sitting at its prompt since 15:12 waiting for the very human
+who got the message; and it vouches for an agent that is genuinely stuck, which
+silences a real alarm. `claudeTranscriptReading()` (watcher.mjs, pure, unit
+tested) therefore answers the **newest record's own timestamp** — the file was
+being read in full for the token counts anyway, so it costs nothing — and falls
+back to the mtime only for a transcript that carries no timestamp at all.
+`cursorTranscriptState()` still reports an mtime; nobody has measured whether
+cursor does the same thing, and this project does not change an activity source
+on a guess.
 
 **The plugin side is a declaration and a contract** (docs/plugins.md,
 "Attention"). `attention: { source, note }` on the descriptor says HOW the
@@ -3791,7 +3835,7 @@ sidebar and the notifications stop counting it as open:
 | red on `failed`/`aborted` | stays open — that is WHY the run did not come through |
 | `merge_blocked`, `provider_down:*` | never by time: the integrator and the pulse own their recovery paths |
 
-**And a REDRAW is not a recurrence** (`reopenVetoed()` in incidents.mjs). Every
+**And a REDRAW is not a recurrence** (`echoVetoed()` in incidents.mjs). Every
 row above turns on "no recurrence for n minutes", and the auto-alarm principle
 reopens a closed incident the moment one arrives — both of which assume the
 occurrence stream says something. For a log-sourced incident it does not: a
@@ -3811,21 +3855,55 @@ resolved BY HAND either, because the next pass reopened it. Closing it at
 notification behind it. **An alarm the operator cannot switch off is worse than
 no alarm.**
 
-The fence is the veto that already existed, applied to the one path that never
-had it: `agentCopedAfter()` — detect.mjs's single copy of "a working agent is
-never escalated" — now also decides whether an occurrence may REOPEN a closed
-incident. Has the agent demonstrably worked since the closure? Then it is not
-blocked by an API error and this hit is text on its screen: counted
-(`incident:echo`), not reopened, not announced. Both directions stay right, and
-that is why the veto is the correct rule here rather than a comparison of the
-line's text: a genuinely blocked agent stops producing output, so its activity
-does not run past the closure and the incident reopens and pages exactly as
-before; a harness that measures no activity at all reports `null`, which is
-UNKNOWN and never a veto. `last_activity_at` is seeded at a run's start, which
-is harmless here for the same reason it is harmless in `rateLogHit()` — an
-incident is always closed *after* its run started, so the seed always lies
-before the closure. Only a test that back-dates a resolution can construct the
-opposite, and one did.
+The fence is the veto that already existed, applied to the paths that never had
+it: `agentCopedAfter()` — detect.mjs's single copy of "a working agent is never
+escalated" — now also decides whether an occurrence counts as a recurrence at
+all. Has the agent demonstrably worked since the moment we measure against? Then
+it is not blocked by an API error and this hit is text on its screen: counted,
+not acted on. Both directions stay right, and that is why the veto is the
+correct rule here rather than a comparison of the line's text: a genuinely
+blocked agent stops producing output, so its activity does not run past that
+moment and the incident reopens, escalates and pages exactly as before; a
+harness that measures no activity at all reports `null`, which is UNKNOWN and
+never a veto. `last_activity_at` is seeded at a run's start, which is harmless
+here for the same reason it is harmless in `rateLogHit()` — an incident is
+always closed *after* its run started, so the seed always lies before the
+closure. Only a test that back-dates a resolution can construct the opposite,
+and one did.
+
+**The two "consequences" above are two branches, and the first fix reached only
+one of them.** `reopenVetoed()` was asked on the path taken by a CLOSED
+incident, so it answered the second consequence — the alarm nobody could switch
+off — and left the first exactly as it was: while an incident is open, the same
+redraw walks into the ordinary `anzahl++, zuletzt_gesehen = now` branch, which is
+the column `incidentGoneReason()` reads. Measured on the same run a day after
+that fix had shipped: incident 38 still red thirteen hours after the limit had
+lifted, 255 occurrences, `zuletzt_gesehen` never older than the last watcher
+pass, the agent committing code throughout, the 5-hour window at 2 %. So the
+veto is asked on BOTH branches now — against the resolution for a closed
+incident, against the **last occurrence** for an open one — and an echo on an
+open incident leaves `zuletzt_gesehen` where it stands. That is what lets
+`incidentGoneReason()` see "the agent kept working after it" ten minutes later
+and close the alarm on its own. It cannot latch the other way either: an agent
+that worked and is NOW blocked has its activity standing still while
+`zuletzt_gesehen` stands still too, so the open incident resolves itself once,
+and the very next occurrence finds a closed incident whose resolution is younger
+than that activity — no veto, reopened, announced. Two things outrank the echo
+inside that branch, and the first was found by a test rather than by thinking: a
+**dedupe** (two sources describing one event within 90 s) must still count
+*once*, so reading it as an echo would count it twice — the very thing that rule
+exists for; and an occurrence that **escalates** yellow→red is not an echo
+whatever the activity says, because a hook or a confirmed transcript error is
+stronger evidence than the veto and its moment is a new statement.
+
+**And an echo writes no event.** `addEvent()` is the live channel, and a redraw
+arrives on every pass: 1296 `incident:dedupe` rows for run 4eeaa0bc in twelve
+hours — 15 % of the whole `events` table — each of them a publish that made
+every open browser re-fetch that run's fragment, and together a history in which
+the run's own six steps were buried. An echo is the statement that NOTHING
+happened; saying it on the channel is a contradiction in terms. `detektor.jsonl`
+still records every one, which is the file whose whole job is "what was scanned,
+what matched and why something was not reported".
 
 ### The notification grace period — and the un-ringing
 
