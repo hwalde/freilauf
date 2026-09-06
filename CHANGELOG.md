@@ -44,6 +44,34 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **An alarm you have dismissed now stays dismissed.** A coding agent's terminal
+  repaints itself, and everything it repaints is written to the run's log a
+  second time — so an error message still sitting on the agent's screen came
+  past the hub's log scanner again and again as if it had just happened. Seen on
+  a run that hit a genuine rate limit in the morning: hours after the limit had
+  lifted, with the agent visibly working again, the hub was still recording that
+  same line every thirty seconds. The incident could never settle by itself,
+  because "nothing has happened for ten minutes" can never come true that way —
+  and dismissing it by hand did not help either: the next check brought it
+  straight back, with a fresh notification. The hub now applies the rule it
+  already had elsewhere: an agent that is demonstrably still working is not
+  blocked by an API error, so a repeat of the same message while it works is
+  noted and nothing more. An agent that really is stuck goes quiet, and there
+  the alarm comes back and announces itself exactly as before.
+- **A run you gave follow-up work to is measured again while it works.** From
+  the moment a run reported for the first time, nothing looked at it any more:
+  its "last activity", its tokens and its cost froze at that report and stayed
+  frozen while the agent went on working in the very same session for hours.
+  Seen on a run whose page claimed its last activity was the previous
+  afternoon while its transcript had been written forty-five minutes earlier —
+  twenty-one hours of work, none of it counted, and the figure presented itself
+  as current. Two things follow from the fix besides an honest activity line
+  and honest token and cost figures. The follow-up work now shows up in the
+  numbers as it happens. And the safeguard that stops the hub believing a stale
+  "waiting for input" mark works here too: it compares the mark against
+  measured activity, so on a follow-up run — where that activity could never
+  move — it could never fire, and a run whose agent had stopped reporting
+  properly could keep its follow-up overrun alarm switched off indefinitely.
 - **A run whose agent is plainly still working no longer reads "waiting for
   input".** The word comes from the coding agent's own hooks — one says it has
   started, another that its turn is over — so where only the second half of that

@@ -953,18 +953,37 @@ try {
     // every crashed CLI, every plugin harness that exits, every one of the
     // hub's own harnesses when its process dies. watchFollowUps(), a hundred
     // lines further down, had the colon all along.
-    const sname = 'fl-cc-panedead-watcher'
-    sessions.add(sname)
-    await sh('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', sname])
-    await sh('tmux', ['set-option', '-t', `=${sname}:`, 'remain-on-exit', 'on'])
     // `exit 7` rather than a bare `exit`, so the exit STATUS is asserted too:
     // the fields come out of ONE format string, and the one that used to be
     // split on whitespace shifted left whenever a field before it was empty.
-    await sh('tmux', ['send-keys', '-t', `=${sname}:`, 'exit 7', 'Enter'])
-    await waitFor(async () => {
-      const r = await sh('tmux', ['display', '-p', '-t', `=${sname}:`, '#{pane_dead}'])
-      return r.ok && r.stdout.trim() === '1'
-    }, { what: 'the pane is dead', timeoutMs: 5000 })
+    //
+    // …and the fixture has to be BUILT rather than assumed, because tmux does
+    // not always record the status. Measured on tmux 3.4 (four probes, 4/25,
+    // 7/40, 8/30 and 5/30): a pane whose screen shows the shell running
+    // `exit 7` and logging out sometimes comes back as `pane_dead=1` with
+    // `pane_dead_status`, `pane_dead_signal` AND `pane_dead_time` all empty —
+    // permanently (still empty after 18 s and 300 re-queries, and `list-panes`
+    // says the same as `display`, so it is not a read that came too early).
+    // Waiting for the shell's prompt before sending the keys does not change
+    // it. So the check used to be red about one run in six, for a reason that
+    // is not in this repository at all. The ASSERTION stays exactly as strong;
+    // what is retried is the premise it needs.
+    let sname = null
+    for (let versuch = 1; versuch <= 6 && !sname; versuch++) {
+      const kandidat = `fl-cc-panedead-watcher-${versuch}`
+      sessions.add(kandidat)
+      await sh('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', kandidat])
+      await sh('tmux', ['set-option', '-t', `=${kandidat}:`, 'remain-on-exit', 'on'])
+      await sh('tmux', ['send-keys', '-t', `=${kandidat}:`, 'exit 7', 'Enter'])
+      await waitFor(async () => {
+        const r = await sh('tmux', ['display', '-p', '-t', `=${kandidat}:`, '#{pane_dead}'])
+        return r.ok && r.stdout.trim() === '1'
+      }, { what: 'the pane is dead', timeoutMs: 5000 })
+      const st = await sh('tmux', ['display', '-p', '-t', `=${kandidat}:`, '#{pane_dead_status}'])
+      if (st.ok && st.stdout.trim() === '7') sname = kandidat
+      else await sh('tmux', ['kill-session', '-t', `=${kandidat}`])
+    }
+    isTrue(!!sname, 'tmux recorded the exit status of a dead pane (retried; it does not always)')
 
     // The bare target, measured here rather than argued about: tmux is happy
     // with it and says nothing whatsoever.
@@ -1459,6 +1478,12 @@ try {
   await check('if it recurs AFTER resolving, the alarm goes on again (auto-alarm)', async () => {
     // The resolution happened within the same second — the new match must come after it.
     db.prepare(`UPDATE incidents SET geloest_am=datetime('now','-2 minutes') WHERE run_id=?`).run(RH)
+    // …and the agent has NOT worked since it was closed, which is what makes
+    // the next hit a recurrence rather than a repaint of an old screen line
+    // (reopenVetoed, incidents.mjs). Back-dating only the resolution left the
+    // run's start-seeded `last_activity_at` lying after it — a state no live
+    // run can be in, since an incident is always closed after its run started.
+    db.prepare(`UPDATE runs SET last_activity_at=datetime('now','-30 minutes') WHERE id=?`).run(RH)
     logAnhaengen(RH, '⏳ Retrying in 30.0s (rate limited by upstream provider (429))...\n')
     await watcherTick()
     const v = vorfaelle(RH)
@@ -1637,6 +1662,44 @@ try {
     const tg2 = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='notified' ORDER BY id DESC LIMIT 1`).get(j.runId)
     isTrue(!!tg2 && JSON.parse(tg2.payload).type === 'incident_resolved:provider_error', 'and the recovery is announced')
   })
+  await check('a redraw of an old screen line may not reopen an incident somebody closed', async () => {
+    // A coding agent's TUI repaints, and pipe-pane writes every repaint into
+    // log.txt — so the SAME line comes past the scanner again as new bytes.
+    // That was a full recurrence: the closed incident came back and paged
+    // again. Measured on run 4eeaa0bc, whose claude hit a real 5-hour limit at
+    // 07:14 and went on redrawing `You've hit your session limit · resets
+    // 11:30am` onto every watcher pass for hours after the window had reset —
+    // 77 occurrences, and closing it by hand at 15:01:23 was undone 28 seconds
+    // later. The veto that already forbids ESCALATING such a hit now forbids
+    // reopening on it too.
+    const j = await laufStarten({ repo_id: repoId, harness: 'claude', prompt: 'E2E-Vorfall-nachhall' })
+    await sessionMerken(j.runId)
+    await watcherTick()
+    const line = 'API Error: 429 rate limit exceeded\n'
+    logAnhaengen(j.runId, line)
+    await watcherTick()
+    const v0 = vorfaelle(j.runId)[0]
+    equal(v0.typ, 'rate_limit', 'the line is a rate limit')
+    // The operator closes it, and the agent then demonstrably goes on working.
+    isTrue((await postForm(`/api/incidents/${v0.id}/resolve`, {})).ok, 'closed by hand')
+    db.prepare(`UPDATE incidents SET geloest_am=datetime('now','-2 minutes') WHERE id=?`).run(v0.id)
+    db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(j.runId)
+    logAnhaengen(j.runId, line)
+    await watcherTick()
+    const v1 = vorfaelle(j.runId)[0]
+    isTrue(!!v1.geloest_am, 'the same line seen again leaves it closed')
+    equal(v1.wieder_geoeffnet, 0, 'and does not page again')
+    isTrue(ereignisse(j.runId).includes('incident:echo'), 'it is recorded as the echo it is')
+    // …and a genuine recurrence still reopens: an agent that is really blocked
+    // stops producing output, so its activity does not run past the closure.
+    db.prepare(`UPDATE runs SET last_activity_at=datetime('now','-30 minutes') WHERE id=?`).run(j.runId)
+    logAnhaengen(j.runId, line)
+    await watcherTick()
+    const v2 = vorfaelle(j.runId)[0]
+    equal(v2.geloest_am, null, 'a silent agent reopens it')
+    equal(v2.wieder_geoeffnet, 1, 'exactly once')
+  })
+
   await check('raising the expected duration retracts the overrun statement', async () => {
     const j = await laufStarten({ repo_id: repoId, harness: 'hermes', prompt: 'E2E-Dauer-Edit', expected_minutes: '90' })
     await sessionMerken(j.runId)
@@ -2082,6 +2145,42 @@ try {
       await flReport(RF, ['_working'])
       await watcherTick()
       isTrue(ereignisse(RF).includes('anomaly:followup_overrun'), 'a follow-up that works past the duration is one')
+    })
+
+    await check('a follow-up run is measured, so a latched "waiting" can still be contradicted', async () => {
+      // Nothing measured a run once it had reported: measureActivity() is
+      // reached from watchRun() (running runs only) and from finishCostsPass()
+      // (once per run). So on a follow-up run `last_activity_at` could not
+      // move — and agentWaiting()'s whole staleness fence rests on it moving.
+      // A `waiting` mark that latched (half a hook pair) therefore switched
+      // this pass's clock off for the life of the commission.
+      const j = await laufStarten({ repo_id: repoId, harness: 'claude',
+        prompt: 'E2E-followup-aktivitaet', expected_minutes: '45' })
+      await sessionMerken(j.runId)
+      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(j.runId)
+      await flReport(j.runId, ['_working', 'prompt'])   // the operator typed: commission open
+      await flReport(j.runId, ['_turn_end'])            // …and the agent says it waits
+      equal(lauf(j.runId).agent_state, 'waiting', 'the mark is set')
+      // The agent is demonstrably still writing, ten minutes past the mark —
+      // the contradiction ATTENTION_STALE_MS exists for. Nothing but a fresh
+      // measurement can see it, so the row is put a day behind by hand: that is
+      // where a follow-up run's reading really stood, frozen at its first report.
+      const { claudeProjectSlug } = await import('../server/watcher.mjs')
+      const r = lauf(j.runId)
+      const dir = join(SB, 'claude-projects', claudeProjectSlug(r.workdir_effective))
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, `${j.runId}.jsonl`),
+        JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 7, output_tokens: 3 } } }) + '\n')
+      db.prepare(`UPDATE runs SET followup_since=datetime('now','-2 hours'),
+                  last_activity_at=datetime('now','-1 day'),
+                  agent_state_at=datetime('now','-10 minutes') WHERE id=?`).run(j.runId)
+      await watcherTick()
+      const l = lauf(j.runId)
+      isTrue(l.last_activity_at > lauf(j.runId).agent_state_at,
+        `the follow-up pass measured the run (activity ${l.last_activity_at})`)
+      equal(l.tokens_in, 7, 'and counted the follow-up work')
+      isTrue(ereignisse(j.runId).includes('anomaly:followup_overrun'),
+        'so the latched "waiting" no longer hides the overrun')
     })
 
     await check('past the grace window a tool call is work somebody asked for', async () => {
