@@ -1089,6 +1089,20 @@ const IMAGE_ACCOUNT = 'agent'
  * claude the one variable a sandboxed run cannot start without. The hub's own
  * three win over it: a plugin that set `HOME` would move the run's home out
  * from under `seedHome()`, and `PATH` is what puts `fl-report` in the box.
+ *
+ * The IMAGE'S OWN directories come FIRST, and that was not always so. The
+ * mounted `binPaths` directory (`~/.local/bin`) holds the host's fl-* scripts
+ * AND the host's coding-agent launchers — on a machine where hermes was
+ * installed the non-root way, `/home/<u>/.local/bin/hermes` sits next to
+ * `fl-report` and execs a host-only venv. With the mount ahead of
+ * `/usr/local/bin` it shadowed the CLI the image was built with, and the run
+ * died at `docker start` with exit 127 (`.../venv/bin/python: No such file or
+ * directory`, measured 2026-09-06, run 74916f05 — hermes, the first sandboxed
+ * hermes launch). The image's pinned CLI is the one thing a sandbox run is
+ * guaranteed to have; a host launcher can never work in the box (its paths are
+ * not mounted), so it must never win a name resolution. `fl-report` and
+ * friends exist only in the mounted directory, so they still resolve — the
+ * hub↔agent channel keeps working.
  */
 export function containerEnv({ home, binPaths = [], harnessEnv = {} } = {}) {
   const base = ['/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin']
@@ -1100,7 +1114,7 @@ export function containerEnv({ home, binPaths = [], harnessEnv = {} } = {}) {
     ...declared,
     HOME: home,
     USER: env('SANDBOX_IMAGE_ACCOUNT') || IMAGE_ACCOUNT,
-    PATH: [...binPaths, `${home}/.local/bin`, ...base].filter(Boolean).join(':'),
+    PATH: [...base, ...binPaths, `${home}/.local/bin`].filter(Boolean).join(':'),
   }
 }
 

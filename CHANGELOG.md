@@ -16,6 +16,21 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-06
+
+### Fixed
+
+- **Sandboxed hermes runs start again.** The first sandboxed hermes launch died
+  one second after `docker start` with exit 127: the container's `PATH` put the
+  mounted host `~/.local/bin` ahead of `/usr/local/bin`, so the host's `hermes`
+  launcher shadowed the CLI the image was built with — and that launcher execs a
+  host-only venv, which does not exist in the box. The image's own directories
+  now come first, so the pinned CLI always wins a name resolution; the host
+  launchers (`hermes`, `claude`, `cursor`) stay mounted but can no longer
+  shadow it. `fl-report` and the other fl-* scripts exist only in the mounted
+  directory and still resolve, so the hub↔agent channel is unchanged. The same
+  shadowing was latent on every sandboxed claude and cursor run.
+
 ## 2026-09-05
 
 ### Added

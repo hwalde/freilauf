@@ -10135,8 +10135,17 @@ process.stdout.write(JSON.stringify(out))
       // and cursor hook that calls it by bare name fails — silently, on a run
       // whose session stands, whose pane is alive and which says `running`.
       const e = containerEnv({ home: '/runs/x/home', binPaths: ['/home/hub/.local/bin'] })
-      contains(e.PATH, '/home/hub/.local/bin', 'the mounted directory comes first')
+      contains(e.PATH, '/home/hub/.local/bin', 'the mounted directory is on PATH')
       contains(e.PATH, '/usr/bin', 'and the image’s own directories are still there')
+      // The IMAGE's own directories come first. The mounted binPaths directory
+      // also carries the host's coding-agent launchers (hermes, claude, cursor),
+      // and each of those execs a host-only path — a host launcher in the box
+      // can only die with 127. Measured 2026-09-06: a sandboxed hermes run died
+      // at docker start because the host launcher shadowed the image's pinned
+      // hermes. `fl-report` exists only in the mounted directory, so it still
+      // resolves wherever the image directories stand.
+      isTrue(e.PATH.indexOf('/usr/local/bin') < e.PATH.indexOf('/home/hub/.local/bin'),
+        'the image’s pinned CLI wins over a host launcher')
       equal(e.HOME, '/runs/x/home', 'HOME is the run’s own (§7.7)')
       // USER is a LOGIN NAME and `spec.user` is a POLICY word — the two must not
       // be confused, or a CLI resolving $USER against /etc/passwd disagrees with
