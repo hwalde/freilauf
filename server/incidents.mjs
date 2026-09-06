@@ -107,8 +107,10 @@ export function incidentById(id) { return db.prepare('SELECT * FROM incidents WH
  *
  * - Open incident of the same type: anzahl++, zuletzt_gesehen; an upgrade
  *   yellow→red (e.g. the hook confirms what the log scanner only suspected) notifies.
+ *   UNLESS the agent has demonstrably worked since the last occurrence — then it
+ *   is an echo (see echoVetoed below) and `zuletzt_gesehen` stands still.
  * - Resolved incident and the occurrence lies AFTER the resolution: reopen + notify,
- *   UNLESS the agent has demonstrably worked since (see reopenVetoed below).
+ *   UNLESS the agent has demonstrably worked since (the same veto).
  * - Occurrence BEFORE the resolution (straggler from the transcript): only count it.
  * - Two sources see the same event (hook + transcript within 90 s): do not
  *   count it twice.
@@ -123,18 +125,33 @@ export async function reportIncident(runId, { typ, quelle, schwere = 'rot', bele
   if (letzter && letzter.geloest_am === null) {
     const dedupe = quelle !== letzter.quelle && Math.abs(tsMs - msFrom(letzter.zuletzt_gesehen)) < 90_000
     const hoch = schwere === 'rot' && letzter.schwere === 'gelb'
-    db.prepare(`UPDATE incidents SET anzahl = anzahl + ?, zuletzt_gesehen = max(zuletzt_gesehen, ?),
+    // An echo on an OPEN incident: the agent has demonstrably worked since the
+    // last occurrence, so this hit is its TUI redrawing an old line. It is
+    // counted, and `zuletzt_gesehen` is deliberately left standing — that column
+    // is what "no recurrence for n minutes" reads (incidentGoneReason), and
+    // moving it every 30 seconds is what kept the alarm alive. See echoVetoed().
+    //
+    // The two conditions above OUTRANK it, and each for its own reason. A
+    // `dedupe` is two sources describing ONE event within 90 seconds; treating
+    // it as an echo would count it twice, which is the very thing that rule
+    // exists to prevent (an e2e check caught exactly that). And an occurrence
+    // that ESCALATES the severity is not an echo whatever the activity says: a
+    // hook or a confirmed transcript error is stronger evidence than the veto,
+    // and its moment is a new statement worth recording.
+    const echo = !dedupe && !hoch && echoVetoed(runId, letzter.zuletzt_gesehen)
+    db.prepare(`UPDATE incidents SET anzahl = anzahl + ?,
+                zuletzt_gesehen = CASE WHEN ? THEN zuletzt_gesehen ELSE max(zuletzt_gesehen, ?) END,
                 schwere = CASE WHEN ? THEN 'rot' ELSE schwere END,
                 beleg = COALESCE(?, beleg), quelle = CASE WHEN ? THEN ? ELSE quelle END WHERE id = ?`)
-      .run(dedupe ? 0 : 1, ts, hoch ? 1 : 0, beleg, hoch ? 1 : 0, quelle, letzter.id)
-    ereignis = hoch ? 'eskaliert' : dedupe ? 'dedupe' : 'zusatz'
+      .run(dedupe ? 0 : 1, echo ? 1 : 0, ts, hoch ? 1 : 0, beleg, hoch ? 1 : 0, quelle, letzter.id)
+    ereignis = hoch ? 'eskaliert' : dedupe ? 'dedupe' : echo ? 'echo' : 'zusatz'
     row = incidentById(letzter.id)
   } else if (letzter && tsMs <= msFrom(letzter.geloest_am)) {
     // Straggler: the occurrence is older than the resolution — still belongs to the old incident.
     db.prepare(`UPDATE incidents SET anzahl = anzahl + 1 WHERE id = ?`).run(letzter.id)
     ereignis = 'zusatz'
     row = incidentById(letzter.id)
-  } else if (letzter && reopenVetoed(runId, letzter.geloest_am)) {
+  } else if (letzter && echoVetoed(runId, letzter.geloest_am)) {
     // The agent has demonstrably worked SINCE this incident was closed, so it is
     // not blocked by an API error and this hit is text on its screen — the
     // rateLogHit() veto, applied to the one path that never had it. Counted like
@@ -161,7 +178,15 @@ export async function reportIncident(runId, { typ, quelle, schwere = 'rot', bele
   }
 
   detectorLog(runId, { art: 'vorfall', ereignis, typ, quelle, schwere: row.schwere, anzahl: row.anzahl, beleg })
-  if (runId) addEvent(runId, `incident:${ereignis}`, { typ, quelle, schwere: row.schwere, id: row.id })
+  // An echo is the statement that NOTHING happened, so it writes no run event.
+  // A redraw arrives on every watcher pass, and an event every 30 seconds is
+  // three things at once: a row in `events` for ever, a publish on the live
+  // channel that re-fetches the run's fragment, and a history in which the run's
+  // own six steps are buried under thirteen hundred repetitions of one line —
+  // measured on run 4eeaa0bc, 1296 `incident:dedupe` rows in twelve hours, 15 %
+  // of the whole events table. The detector log above still records every
+  // decision; that file is where "seen and ignored" belongs.
+  if (runId && ereignis !== 'echo') addEvent(runId, `incident:${ereignis}`, { typ, quelle, schwere: row.schwere, id: row.id })
 
   const melden = !noNotify && row.schwere === 'rot' && ['neu', 'wieder', 'eskaliert'].includes(ereignis)
   if (melden) await scheduleNotification(row.id, tsMs)
@@ -169,9 +194,12 @@ export async function reportIncident(runId, { typ, quelle, schwere = 'rot', bele
 }
 
 /**
- * May this occurrence REOPEN an incident somebody (or the hub) has closed?
+ * Is this occurrence an ECHO — a line the agent's TUI redrew — rather than the
+ * problem happening again?
  *
- * Not if the agent has demonstrably worked since the closure. That is
+ * Not if the agent has demonstrably worked since the moment we are measuring
+ * against: the incident's resolution (may it REOPEN?) or its last occurrence
+ * (may it keep an OPEN incident alive?). That is
  * `agentCopedAfter()` — detect.mjs's one named copy of "a working agent is
  * never escalated" — and until this existed it guarded only the SEVERITY of a
  * log hit, never the reopening. So a coding agent's TUI redrawing an old line
@@ -192,19 +220,37 @@ export async function reportIncident(runId, { typ, quelle, schwere = 'rot', bele
  * `wieder_geoeffnet` 2, and a fresh notification with it. An alarm the operator
  * cannot switch off is worse than no alarm.
  *
+ * **The first of those two was fixed by the second's fix and nothing else**, and
+ * that is why this veto had to move one branch up. The reopen guard only ever
+ * sees an incident somebody had already CLOSED; while one is open, the same
+ * redraw walked into the ordinary `anzahl++, zuletzt_gesehen = now` branch and
+ * pushed the resolution deadline forward by 30 seconds, for ever. Measured on
+ * the same run a day later: incident 38 still open thirteen hours after the
+ * limit had lifted, 255 occurrences, `zuletzt_gesehen` never older than the
+ * last watcher pass, and the agent visibly committing code the whole time. So
+ * an open incident asks the veto against its LAST OCCURRENCE, and an echo does
+ * not move that column — which is exactly what lets incidentGoneReason() see
+ * "the agent kept working after it" ten minutes later and close the alarm.
+ *
  * Both directions stay right, which is the whole reason the veto is the right
  * rule here rather than a text comparison. A genuinely blocked agent stops
- * producing output, so its activity does not advance past the closure, the veto
- * is false and the incident reopens and pages exactly as before. A harness that
- * measures no activity at all (hermes) reports `null`, which is UNKNOWN and
- * never a veto — those reopen as they always did. And a global incident has no
- * agent to ask about.
+ * producing output, so its activity does not advance past the closure (or past
+ * the last occurrence), the veto is false and the incident reopens, escalates
+ * and pages exactly as before. A harness that measures no activity at all
+ * (hermes) reports `null`, which is UNKNOWN and never a veto — those behave as
+ * they always did. And a global incident has no agent to ask about.
+ *
+ * The freeze cannot latch, either: an agent that worked and is NOW blocked has
+ * its activity standing still while `zuletzt_gesehen` stands still too, so the
+ * open incident resolves itself once ("the agent kept working after it"), and
+ * the very next occurrence finds a closed incident whose resolution is younger
+ * than that activity — no veto, reopened, announced.
  */
-function reopenVetoed(runId, resolvedAt) {
-  if (!runId || !resolvedAt) return false
+function echoVetoed(runId, sinceAt) {
+  if (!runId || !sinceAt) return false
   const r = db.prepare('SELECT last_activity_at FROM runs WHERE id = ?').get(runId)
   const workedAt = r?.last_activity_at ? msFrom(r.last_activity_at) : null
-  return agentCopedAfter(workedAt, msFrom(resolvedAt))
+  return agentCopedAfter(workedAt, msFrom(sinceAt))
 }
 
 /**

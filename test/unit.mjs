@@ -667,6 +667,27 @@ try {
     equal(quotaFullWindow({ ...quotaWindows, five: 0, seven_general: 40 }, 'claude-sonnet-5'), null, 'nothing full')
   })
 
+  // …and that last `null` is the reason quotaKnown() exists. quotaFullWindow()
+  // answers null both for "the windows are fine" and for "the account said
+  // nothing", which is right where the question is "flag this run" and wrong
+  // where it is "take the flag back": retracting on silence would clear a real
+  // "quota exhausted" the moment the endpoint rate-limits us.
+  await check('quotaKnown separates "the window has room" from "nobody answered"', async () => {
+    const { quotaKnown } = await quotaMit('{}', 20)
+    isTrue(quotaKnown({ ...quotaWindows, five: 0, seven_general: 40 }, 'claude-sonnet-5'), 'a real reading is a reading')
+    isTrue(quotaKnown({ five: 0, weekly_scoped: [] }, 'claude-sonnet-5'), 'the 5-hour window alone is enough')
+    // Number(null) is 0 AND finite — the trap this repo keeps an entry for. A
+    // window the account does not have must not read as "measured at 0 %".
+    isFalse(quotaKnown({ five: null, seven_general: null, weekly_scoped: [] }, 'claude-sonnet-5'),
+      'an answer with no window in it is not an answer')
+    isFalse(quotaKnown({}, 'claude-sonnet-5'), 'and neither is an empty object')
+    // A scoped week the run does not draw from says nothing about the run.
+    isFalse(quotaKnown({ five: null, seven_general: null, weekly_scoped: [{ label: 'Fable', pct: 40, resets_at: 'X' }] },
+      'claude-sonnet-5'), 'somebody else’s window is not a reading for this run')
+    isTrue(quotaKnown({ five: null, seven_general: null, weekly_scoped: [{ label: 'Fable', pct: 40, resets_at: 'X' }] },
+      'fable'), 'but it is one for the run it binds')
+  })
+
   await check('an object carrying no window list is taken at its word', async () => {
     const { sevenFor, claudeGateBlocked } = await quotaMit('{}', 17)
     equal(sevenFor({ five: 0, seven: 88 }, 'fable'), 88, 'the number it has is the answer')
@@ -6119,6 +6140,42 @@ try {
     equal(wdb.prepare('SELECT log_offset AS o FROM runs WHERE id=?').get(id).o, 300, 'and written')
     wdb.prepare('DELETE FROM runs WHERE id=?').run(id)
     wdb.prepare('DELETE FROM repos WHERE id=?').run(repo)
+  })
+
+  // A claude run's activity is what the AGENT wrote, not when the FILE was
+  // touched. Measured 2026-09-06 on this installation: claude rewrites
+  // transcripts it is not writing to, in batches — run 627607ea's file carried
+  // an mtime twenty-one hours past its newest record, run 49a26807's three and
+  // a half. `last_activity_at` is the witness `agentWaiting()` holds a latched
+  // `waiting` mark to and the veto every incident escalation asks, so an mtime
+  // that moves on its own says "this agent is working" about an idle one — it
+  // paged a human about a follow-up that was waiting for that very human, and
+  // in the other direction it silences a real alarm.
+  await check('a claude transcript’s activity is its newest record, not its mtime', async () => {
+    const { claudeTranscriptReading } = await import('../server/watcher.mjs')
+    const record = (ts, usage) => JSON.stringify({ timestamp: ts, message: usage ? { usage } : undefined })
+    const mtime = Date.parse('2026-09-06T18:50:41Z')
+    const text = [
+      record('2026-09-06T15:12:20.936Z', { input_tokens: 10, cache_read_input_tokens: 5 }),
+      record('2026-09-06T15:12:23.443Z', { output_tokens: 7, cache_creation_input_tokens: 3 }),
+    ].join('\n') + '\n'
+    const r = claudeTranscriptReading(text, mtime)
+    equal(r.lastActivityMs, Date.parse('2026-09-06T15:12:23.443Z'),
+      'the newest record wins over an mtime three hours later')
+    equal(r.tokensIn, 15, 'input and cache reads are one number')
+    equal(r.tokensOut, 10, 'output and cache creation are the other')
+    // Out-of-order records still yield the newest — the file is appended to by
+    // one writer, but a sidechain arriving late must not move the answer back.
+    equal(claudeTranscriptReading([record('2026-09-06T15:12:23.443Z'), record('2026-09-06T15:00:00.000Z')].join('\n'), mtime)
+      .lastActivityMs, Date.parse('2026-09-06T15:12:23.443Z'), 'the newest, not the last')
+    // No record carries a time (a transcript of a shape we do not know): the
+    // mtime is better than nothing, and it is what this always used.
+    equal(claudeTranscriptReading('{"type":"summary"}\n', mtime).lastActivityMs, mtime,
+      'the mtime is the fallback, not the rule')
+    equal(claudeTranscriptReading('', mtime).lastActivityMs, mtime, 'an empty file says only the mtime')
+    // A half-written last line is not an answer and must not become one.
+    equal(claudeTranscriptReading(record('2026-09-06T15:12:23.443Z') + '\n{"timestamp":"2026-09', mtime)
+      .lastActivityMs, Date.parse('2026-09-06T15:12:23.443Z'), 'a truncated line is skipped')
   })
 
   await check('the state is what the page shows, and it decides what is hidden', () => {

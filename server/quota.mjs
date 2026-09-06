@@ -327,6 +327,23 @@ export function quotaFullWindow(quota = claudeQuota(), model = null) {
   return null
 }
 
+/**
+ * Does this reading actually SAY anything about the windows that bind `model`?
+ *
+ * `quotaFullWindow()` answers null both for "the windows are fine" and for "the
+ * account did not tell us" — `quota?.five ?? 0` is the `Number(null)` family of
+ * traps one level up, and it is the right reading THERE, because a window
+ * nobody could measure must not flag a run. It is the wrong reading for the
+ * opposite question: taking BACK a "quota exhausted" needs positive evidence
+ * that the window has room again, not merely the absence of evidence that it
+ * has not.
+ */
+export function quotaKnown(quota = claudeQuota(), model = null) {
+  if (quota?.five != null && Number.isFinite(Number(quota.five))) return true
+  const w = weeklyBinding(quota, model)
+  return !!w && w.pct != null && Number.isFinite(Number(w.pct))
+}
+
 // ================= the metered sources a budget gate reads =================
 //
 // Two shapes, and NOTHING in here names a provider or a coding agent any more.

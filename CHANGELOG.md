@@ -44,6 +44,46 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **An alarm nobody has dismissed yet now switches itself off too.** The fix
+  below stopped a repainted screen line from *reopening* an alarm somebody had
+  closed. It could not help an alarm that was still open — and that is where
+  the same repaint did the real damage: every repetition pushed the "nothing
+  has happened for ten minutes" deadline forward by thirty seconds, so the
+  alarm could never reach it. Seen the next day on the same run: still red
+  thirteen hours after the rate limit had lifted, 255 recorded occurrences,
+  and the agent committing code the whole time. The hub now applies the rule it
+  already had — an agent that is demonstrably still working is not blocked by an
+  API error — to open alarms as well, so the alarm settles by itself about ten
+  minutes after the agent gets going again. An agent that really is stuck goes
+  quiet, and there nothing is vetoed and the alarm behaves exactly as before.
+- **A repeat of an alarm no longer fills the run's own history.** Every one of
+  those repetitions was written into the run's event list and pushed to every
+  open browser — 1296 of them for one run in twelve hours, burying the six
+  steps that actually described what the run did. A repetition the hub has
+  decided to ignore now goes only into the detector log, where "seen and
+  ignored" belongs.
+- **"Quota exhausted" is taken back when the window refills.** A quota window
+  resets — that is what a quota window does, and the hub even wrote down when.
+  It never looked at it again: a run flagged at eight in the morning still
+  carried "quota exhausted (5h · 08:49)" in the overview thirteen hours later,
+  while the account reported that same window at 2 % and the run was working
+  normally. The flag now comes off as soon as the window has room again. It
+  deliberately stays on while the account says nothing at all — a reading that
+  failed is not a reading that says the quota is free.
+- **A claude run's "last activity" is what the agent wrote, not when its file
+  was touched.** The hub read the age of the transcript file, on the assumption
+  that only the agent ever writes it. It is not so — claude rewrites
+  transcripts it is not working in, several at a time: on this installation one
+  run's file carried a timestamp twenty-one hours newer than the newest thing
+  in it. Three things hang on that figure, and all three were wrong in the
+  expensive direction. The activity line on the detail page claimed work that
+  never happened. A run whose agent was sitting idle at its prompt looked busy,
+  which paged a human about follow-up work that was in fact waiting for that
+  very human. And the safeguard that stops the hub raising an alarm about an
+  agent that is plainly coping was reading the same figure, so it could vouch
+  for an agent that had been stuck for hours. The hub now reads the newest entry
+  the agent actually wrote, and falls back to the file's age only for a
+  transcript that carries no times at all.
 - **An alarm you have dismissed now stays dismissed.** A coding agent's terminal
   repaints itself, and everything it repaints is written to the run's log a
   second time — so an error message still sitting on the agent's screen came
