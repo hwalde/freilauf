@@ -5,7 +5,7 @@
 # `buildRunArgv()` in server/sandbox/runtime.mjs, and this script's whole job is
 # to obtain that argv and `exec` it, so that the process the caller started IS
 # the container client. That matters for tmux: `pane-died` carries the client's
-# exit status and `pipe-pane` reads its output (SANDBOX_RESEARCH.md §7.1), so
+# exit status and `pipe-pane` reads its output (SANDBOX.md), so
 # nothing may sit between the pane and the runtime — not even this script.
 #
 # Two callers, one path:

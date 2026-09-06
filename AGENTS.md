@@ -51,9 +51,12 @@ a change, not a follow-up to it:
 **The roadmap is the changelog's mirror image, and it is deliberately
 incomplete.** `CHANGELOG.md` records everything a user would notice, in the
 commit that changed it; `ROADMAP.md` announces only the few changes big enough
-that somebody might plan around them — today that is exactly one, running
-agents in a sandbox ([SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md)). It says so
-about itself in its own first paragraph, because a roadmap read as a promise of
+that somebody might plan around them — **today that is none at all**, since the
+last such item, running agents in a sandbox, landed and left the page for
+[SANDBOX.md](SANDBOX.md) and the changelog. A roadmap is allowed to be empty,
+and saying so is better than keeping a finished item on it to avoid the blank
+space. It says all of this about itself in its first paragraph, because a
+roadmap read as a promise of
 completeness turns every unlisted feature into a surprise and every unshipped
 item into a broken promise. So: no dates, no version milestones (there are no
 releases to hang them on), and an item that lands moves OUT of the roadmap and
@@ -313,7 +316,7 @@ Three fences. **A cap**: `resume_attempts`, `RESUME_MAX` (3,
 `FREILAUF_RESUME_MAX`) — past it the run ends the old way (`resume_refused`
 on the run, then `aborted`), because a CLI that dies at every start must not
 be restarted every pass for ever; a deliberate caller (a reason other than
-`session_lost` — the sandbox reconfiguration SANDBOX_RESEARCH.md plans) does
+`session_lost` — the sandbox reconfiguration SANDBOX.md describes) does
 not count against it. **"Could not try" is not "tried and died"**: a launch
 that fails on a resume — right after a reboot the tmux server itself may be a
 beat behind — leaves the mark standing and returns `retry`; the next pass's
@@ -2445,7 +2448,7 @@ and a hand-driven pass from another process can never be turned into a no-op.
 
 **But the shim is where the suite's evidence runs out, and that has now been
 paid for.** The first real sandboxed run (opencode in a container, 2026-09-05 —
-[docs/sandbox.md](docs/sandbox.md) has the account) found five faults, and every
+[SANDBOX.md](SANDBOX.md) has the account) found five faults, and every
 one of them was green in this suite beforehand. Two of them say why in one
 sentence: **a stub cannot answer whether an account exists inside an image, or
 whether a mount point came out a socket.** `docker exec -u hub` is a perfectly
@@ -2671,13 +2674,14 @@ Architecture, step registry contract and the integration seams:
 
 ## The sandbox: a container around the agent, and one rule about who may loosen it
 
-> **The depth is one document: [docs/sandbox.md](docs/sandbox.md)**, and the
-> measurements the whole thing rests on are
-> [SANDBOX_RESEARCH.md](SANDBOX_RESEARCH.md) **§11a** (before this machine had
-> a container runtime) and **§11b** (2026-09-05, against a live rootless
-> daemon) — which also say, per claim, whether it was measured, read out of a
-> binary, or not answered at all. What follows is what the rest of the hub must
-> not violate.
+> **The depth is one document: [SANDBOX.md](SANDBOX.md)** — the operator
+> reference and, in its second half ("Why it is built this way"), the design
+> study with every measurement the whole thing rests on. It keeps two epochs
+> apart — what was established before this machine had a container runtime, and
+> what was measured 2026-09-05 against a live rootless daemon — and says, per
+> claim, whether it was measured, read out of a binary, or not answered at all.
+> (It replaced the former `docs/sandbox.md` and `SANDBOX_RESEARCH.md`, now
+> deleted.) What follows is what the rest of the hub must not violate.
 
 A sandboxed run's agent runs inside a container; **tmux stays on the host** and
 the pane's process is the runtime's client, which is why `pipe-pane`,

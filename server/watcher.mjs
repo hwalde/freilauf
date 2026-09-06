@@ -24,7 +24,7 @@ import { reconcileClosedSession, tmuxSnapshot, sessionGone, shouldAutoClose, cur
   sandboxRuntime, sandboxHubId, containerName, stopRunContainer, finishedAtMs, paneTarget } from './sessions.mjs'
 import { integrateTick, pushOperatorBase, integratorTimerOff, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 import { maybeAutoCleanup } from './cleanup.mjs'
-// The two seams of SANDBOX_RESEARCH.md §7.4.4 / §7.7. Both answer for an
+// The two seams of SANDBOX.md. Both answer for an
 // unsandboxed run exactly what this file did before they existed, which is why
 // every call site below could be rewired mechanically.
 // The hub's own sandbox policy, from its one reader (run-def.mjs, "THE FOUR HUB
@@ -507,7 +507,8 @@ async function watchFollowUps() {
 /**
  * claude's own slug rule for a project directory: EVERY character that is not a
  * letter or a digit becomes '-', with no collapsing — `/home/x` is `-home-x`
- * (measured, claude 2.1.261, SANDBOX_RESEARCH.md §11a.4).
+ * (measured, claude 2.1.261, before this machine had a container runtime; see
+ * SANDBOX.md).
  *
  * This used to be `replaceAll('/', '-')`, and that was a latent bug rather than a
  * simplification: a worktree path holding a dot, an underscore or a space
@@ -630,7 +631,7 @@ async function scanLog(run) {
   // The sandbox family is asked of the same bytes, in the same pass, and only
   // where there IS a sandbox: an unsandboxed run hitting EACCES has an ordinary
   // permission problem, and filing that as a sandbox denial would be a lie in
-  // the data (SANDBOX_RESEARCH.md §7.12.1).
+  // the data (SANDBOX.md).
   const { treffer, sandboxTreffer, neuerOffset } =
     scanNewBytes(run.harness, chunk.text, chunk.von ?? run.log_offset ?? 0, { sandbox: run.sandbox === 1 })
   // The claim is what makes "every line counts once" true rather than intended
@@ -1418,7 +1419,7 @@ async function tmuxAnswered() {
 // --------------------------------------------- containers: the same lesson again
 //
 // A sandboxed run works in a container while its tmux session holds the client
-// (SANDBOX_RESEARCH.md §7.1). So the machine now holds two things per run that
+// (SANDBOX.md). So the machine now holds two things per run that
 // can disappear independently, and the reconciliation between them is this pass.
 //
 // tmuxVerdict()'s lesson applies here with full force, and it is the most

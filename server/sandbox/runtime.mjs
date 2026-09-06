@@ -6,7 +6,7 @@
 //   A. buildRunArgv()/buildProxyArgv() are PURE. They turn a resolved sandbox
 //      spec plus a run's context into an argv, and nothing else. That is where
 //      the whole feature is actually verifiable — every flag of
-//      SANDBOX_RESEARCH.md §7.11 is a line here and a unit test there, on a
+//      SANDBOX.md is a line here and a unit test there, on a
 //      machine that has no container runtime at all.
 //   B. Everything below them talks to a daemon, and therefore never throws and
 //      never spends "I did not learn anything" as "there is nothing". That is
@@ -342,7 +342,7 @@ function imageRef(ref, digest) {
 }
 
 /**
- * The pane command of SANDBOX_RESEARCH.md §7.11 — `docker run -it …` — as an
+ * The pane command of SANDBOX.md — `docker run -it …` — as an
  * argv. Pure: no daemon is asked, nothing is written, the only thing it reads
  * outside its arguments is the one binary seam above.
  *

@@ -1590,7 +1590,7 @@
   "sandbox.plugin.runtime_rootless": "rootless",
   "sandbox.page.err_policy_failed": "Die Änderung ließ sich nicht anwenden.",
   "sandbox.reason.ok": "Eine Container-Laufzeit ist installiert und antwortet.",
-  "sandbox.reason.no_binary": "Auf dieser Maschine wurde keine Container-Laufzeit gefunden — Docker installieren (siehe docs/sandbox.md) und erneut suchen.",
+  "sandbox.reason.no_binary": "Auf dieser Maschine wurde keine Container-Laufzeit gefunden — Docker installieren (siehe SANDBOX.md) und erneut suchen.",
   "sandbox.reason.no_daemon": "Die Container-Laufzeit ist installiert, aber ihr Daemon läuft nicht — starten (rootless: systemctl --user start docker) und erneut suchen.",
   "sandbox.reason.unreachable": "Die Container-Laufzeit hat überhaupt nicht geantwortet. Es wurde nichts verändert; Freilauf fragt im nächsten Durchlauf erneut.",
   "sandbox.reason.unknown_runtime": "Freilauf kennt die hier eingestellte Container-Laufzeit nicht — unter Einstellungen → Sandbox docker, podman oder runsc wählen.",

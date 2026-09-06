@@ -4700,10 +4700,10 @@ try {
       'LICENSE is the CC BY 4.0 legal code')
   })
 
-  // A roadmap that names a design document which is no longer there sends the
-  // one interested reader after a 404, and a roadmap without the issues URL is
-  // an invitation with no address on it.
-  await check('ROADMAP.md links its design study and the issue tracker', async () => {
+  // A roadmap that names a document which is no longer there sends the one
+  // interested reader after a 404, and a roadmap without the issues URL is an
+  // invitation with no address on it.
+  await check('ROADMAP.md links the sandbox document and the issue tracker', async () => {
     const { readFileSync, existsSync } = await import('node:fs')
     const { join: j } = await import('node:path')
     const root = new URL('..', import.meta.url).pathname
@@ -4711,7 +4711,8 @@ try {
     for (const link of [...text.matchAll(/\]\((?!https?:|#)([^)]+)\)/g)].map((m) => m[1])) {
       isTrue(existsSync(j(root, link)), `ROADMAP.md links ${link}, which exists`)
     }
-    isTrue(text.includes('SANDBOX_RESEARCH.md'), 'ROADMAP.md links the sandbox design study')
+    isTrue(text.includes('[SANDBOX.md](SANDBOX.md)'),
+      'ROADMAP.md links the sandbox document — the one item that left this page')
     isTrue(text.includes('https://github.com/hwalde/freilauf/issues'),
       'ROADMAP.md names the issue tracker')
   })
@@ -6241,7 +6242,7 @@ try {
 
   // ---- the merge check's own box (§8.7) -----------------------------------
   // `repos.merge_check_sandboxed` existed as a column, a checkbox and a
-  // sentence in docs/sandbox.md, and NOTHING read it: the check ran
+  // sentence in SANDBOX.md, and NOTHING read it: the check ran
   // `bash -lc` on the host either way. These pin the shape of the container it
   // runs in now, because that argv is the whole control.
 
@@ -7462,7 +7463,7 @@ try {
   // ------------------------------------------------------------------
   group('Run report token')
   {
-    // The per-run bearer of the report socket (SANDBOX_RESEARCH.md §7.6). Three
+    // The per-run bearer of the report socket (SANDBOX.md). Three
     // things are worth pinning: it exists for EVERY run without anybody asking
     // for it, the comparison cannot be tricked, and the socket's route list is a
     // list of two.
@@ -8287,7 +8288,7 @@ process.stdout.write(JSON.stringify(out))
   })
 
   // ------------------------------------------------------------------
-  // The command line of SANDBOX_RESEARCH.md §7.11 is the one place the whole
+  // The command line of SANDBOX.md is the one place the whole
   // sandbox feature is verifiable on a machine with no container runtime:
   // buildRunArgv() is pure, so every flag that is there for a reason can be
   // held to that reason here. The verdict classifier is the second half — it
@@ -9699,7 +9700,8 @@ process.stdout.write(JSON.stringify(out))
     //
     // claude replaces EVERY non-alphanumeric character, not just '/'. The old
     // rule found nothing for a path holding a dot, an underscore or a space, and
-    // the run then read as idle while it worked (SANDBOX_RESEARCH.md §11a.4).
+    // the run then read as idle while it worked (measured before this machine
+    // had a container runtime; see SANDBOX.md).
     await check('the claude slug replaces every non-alphanumeric character, not only the slashes', () => {
       equal(claudeProjectSlug('/home/x/agents/worktrees/my.repo/ab12-feat_x'),
         '-home-x-agents-worktrees-my-repo-ab12-feat-x',
@@ -10379,7 +10381,7 @@ process.stdout.write(JSON.stringify(out))
       // exists because this class of false alarm has already cost this project
       // two production incidents ("Upgrade to Max", `555 tokens`).
       const harmlos = [
-        // SANDBOX_RESEARCH.md §7.12.1, the whole family in one prose line.
+        // SANDBOX.md, the whole family in one prose line.
         '| **The log scanner** | `EACCES`, `EROFS` / `Read-only file system`, `ENOSPC` on a tmpfs, '
           + '`Cannot connect to the Docker daemon`, `Could not resolve host`, `ENETUNREACH` |',
         // The pattern file itself, read out loud.
@@ -11562,7 +11564,7 @@ process.stdout.write(JSON.stringify(out))
     })
 
     await check('what the check cannot see is written down rather than pretended away', () => {
-      const doku = readFileSync(new URL('../docs/sandbox.md', import.meta.url), 'utf8')
+      const doku = readFileSync(new URL('../SANDBOX.md', import.meta.url), 'utf8')
       contains(doku, 'refuses such a template by name', 'the docs name the refusal')
       contains(doku, 'one hop further out', 'and the residual risk the static check misses')
     })

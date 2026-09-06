@@ -94,9 +94,8 @@ const FOLLOWUP_MERGE_CLAUSE = ', and origin/{base} merged into your branch once 
 const FOLLOWUP_PROCESSES_CLAUSE = ' (integration into {base}, the flows that hang on this run)'
 
 /**
- * What a sandboxed run is told about the box it is in (SANDBOX_RESEARCH.md
- * §7.12.1). Two halves, and the second is what the whole escalation path hangs
- * on.
+ * What a sandboxed run is told about the box it is in (SANDBOX.md). Two
+ * halves, and the second is what the whole escalation path hangs on.
  *
  * The first half is FACTS, and they are read from what the run really launched
  * with — the resolved allow list comes out of the same `resolvedAllow()` the
@@ -779,7 +778,7 @@ export function harnessModelArgs(run, opts = null) {
 // flow's kill_run — goes through reconcileClosedSession() and aborts exactly
 // as before. The watcher's discovery path is the caller that decides a
 // session was LOST; anything else that wants a resume (a future sandbox
-// reconfiguration, SANDBOX_RESEARCH.md) calls resumeRun() with a reason of its
+// reconfiguration, SANDBOX.md) calls resumeRun() with a reason of its
 // own, which does not count against the cap.
 
 /**

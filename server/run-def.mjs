@@ -372,7 +372,7 @@ export function goalFields(a = {}) {
 // ------------------------------------------------------------------ sandbox
 //
 // Whether a run happens inside a container is a field of the run definition
-// like every other (SANDBOX_RESEARCH.md §7.3, §7.13) — which is why it lives
+// like every other (SANDBOX.md) — which is why it lives
 // here and not in a page: the agent form, the single-run form, the flow step,
 // the favorite and the edit card all read the SAME block and the SAME parser.
 //
@@ -1357,7 +1357,7 @@ export const RUN_DEF_FLOW_FIELDS = [
   { key: 'branchMode', kind: 'select', options: BRANCH_MODES, default: 'keiner' },
   { key: 'branchPattern', kind: 'text', placeholder: 'flow/{date}-{kurz}' },
   { key: 'keepOnBranch', kind: 'checkbox', default: false },
-  // Whether the run happens in a container (SANDBOX_RESEARCH.md §7.13). Flat,
+  // Whether the run happens in a container (SANDBOX.md). Flat,
   // like the routing fields above — the designer has no folding. Only the
   // "start single run" step needs them: "start agent" runs a stored definition
   // and inherits whatever that agent carries. `inherit` means the repo and the

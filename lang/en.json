@@ -1590,7 +1590,7 @@
   "sandbox.plugin.runtime_rootless": "rootless",
   "sandbox.page.err_policy_failed": "The change could not be applied.",
   "sandbox.reason.ok": "A container runtime is installed and answering.",
-  "sandbox.reason.no_binary": "No container runtime was found on this machine — install Docker (see docs/sandbox.md) and scan again.",
+  "sandbox.reason.no_binary": "No container runtime was found on this machine — install Docker (see SANDBOX.md) and scan again.",
   "sandbox.reason.no_daemon": "The container runtime is installed, but its daemon is not running — start it (rootless: systemctl --user start docker) and scan again.",
   "sandbox.reason.unreachable": "The container runtime gave no answer at all. Nothing was changed; Freilauf asks again on the next pass.",
   "sandbox.reason.unknown_runtime": "Freilauf does not know the container runtime configured here — pick docker, podman or runsc under Settings → Sandbox.",

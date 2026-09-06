@@ -1,4 +1,4 @@
-// Freilauf — the iron-proxy engine (SANDBOX_RESEARCH.md §4.5, §7.5.2, §7.8).
+// Freilauf — the iron-proxy engine (SANDBOX.md).
 //
 // The built-in proxy in proxy.mjs tunnels HTTPS and can therefore judge a HOST
 // and nothing finer. iron-proxy terminates TLS with leaf certificates minted
@@ -15,7 +15,7 @@
 // pinned by digest in `sandbox/images/ironproxy.ref`, and the config this module
 // writes has been parsed, started and driven end to end against it on
 // 2026-09-05 — including the `secrets` transform swapping a per-run placeholder
-// for a real credential on the way upstream. `docs/sandbox.md` carries the four
+// for a real credential on the way upstream. `SANDBOX.md` carries the four
 // measurements; the e2e group "iron-proxy: the config the hub writes" re-runs
 // the config half wherever the image is present.
 //
@@ -36,7 +36,7 @@
 //     to carry the right extension: a CA generated without
 //     `keyUsage=critical,keyCertSign,cRLSign` starts the process and then dies
 //     with `initializing cert cache: CA certificate missing KeyUsageCertSign`,
-//     which is why docs/sandbox.md prints the four commands rather than saying
+//     which is why SANDBOX.md prints the four commands rather than saying
 //     "generate a CA".
 //   - `management.api_key_env` names a variable that MUST BE SET, or the binary
 //     refuses to start (`… is not set in the environment`). `startIronProxy()`

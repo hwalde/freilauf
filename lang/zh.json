@@ -1590,7 +1590,7 @@
   "sandbox.plugin.runtime_rootless": "无 root 模式",
   "sandbox.page.err_policy_failed": "该更改无法应用。",
   "sandbox.reason.ok": "已安装容器运行时，并且能够响应。",
-  "sandbox.reason.no_binary": "本机未找到容器运行时 — 请安装 Docker（参见 docs/sandbox.md）后重新扫描。",
+  "sandbox.reason.no_binary": "本机未找到容器运行时 — 请安装 Docker（参见 SANDBOX.md）后重新扫描。",
   "sandbox.reason.no_daemon": "容器运行时已安装，但其守护进程未运行 — 请启动它（rootless：systemctl --user start docker）后重新扫描。",
   "sandbox.reason.unreachable": "容器运行时完全没有响应。未做任何更改；Freilauf 会在下一轮再次询问。",
   "sandbox.reason.unknown_runtime": "Freilauf 不认识这里配置的容器运行时 — 请在“设置 → 沙箱”中选择 docker、podman 或 runsc。",

@@ -34,10 +34,10 @@ import { env } from './env.mjs'
 export const FAVORITES_MAX = Number(env('FAVORITES_MAX') ?? 3) || 3
 
 /**
- * Whether a run happens in a sandbox is setup, not task (SANDBOX_RESEARCH.md
- * §7.3), so a favorite carries the tri-state — but only the tri-state: the
- * profile and the overrides describe one repository's rules, and a favorite is
- * used across repositories.
+ * Whether a run happens in a sandbox is setup, not task (SANDBOX.md), so a
+ * favorite carries the tri-state — but only the tri-state: the profile and the
+ * overrides describe one repository's rules, and a favorite is used across
+ * repositories.
  *
  * Asked of the database rather than assumed, once per process. A hub started
  * against a database from before this column (a rollback, a copy taken off an

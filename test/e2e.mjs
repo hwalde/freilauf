@@ -6061,7 +6061,7 @@ export default {
   // ------------------------------------------------------------------
   group('The report socket')
   {
-    // The narrow channel of SANDBOX_RESEARCH.md §7.6: a second listener carrying
+    // The narrow channel of SANDBOX.md: a second listener carrying
     // exactly two routes and a per-run bearer, so an agent can report without
     // being handed the whole API on 127.0.0.1 — and so a container, which cannot
     // reach the host's loopback at all, has a way home.
@@ -6230,7 +6230,7 @@ export default {
   // ------------------------------------------------------------------
   group('Sandbox: the container path')
   {
-    // This machine has no Docker, and SANDBOX_RESEARCH.md §7.13 says the sandbox
+    // This machine has no Docker, and SANDBOX.md says the sandbox
     // has to be covered anyway. It is, because everything worth asserting here
     // is a question about what the hub SAYS to a container runtime: the exact
     // flags a profile produces, the order a kill puts a container and a tmux
@@ -7218,7 +7218,7 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
 
   {
     // The two channels that turn "the sandbox is in the agent's way" into
-    // something a person sees (SANDBOX_RESEARCH.md §7.12.1): the agent asking,
+    // something a person sees (SANDBOX.md): the agent asking,
     // and the proxy turning a host away. Both are exercised on rows written
     // straight into the database — what is under test is the hub's REACTION,
     // and a real container would only add a runtime to the list of things that

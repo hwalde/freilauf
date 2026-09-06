@@ -1,6 +1,6 @@
 // Freilauf — the sandbox facade: the one module the rest of the hub imports
-// (SANDBOX_RESEARCH.md §7.11 for the lifecycle, §7.3 for the decision, §7.12 for
-// changing a policy on a run that is already going).
+// (SANDBOX.md — the lifecycle, the decision, and changing a policy on a run
+// that is already going).
 //
 // Everything else under `server/sandbox/` is a piece of machinery — the spec and
 // its layering, the clone, the proxy, the container runtime. This file is the
@@ -839,7 +839,7 @@ export async function prepareSandbox(run, repo, opts = {}) {
     //    the HUB PROCESS on the host, so the gateway address is the only way the
     //    container can reach it at all; isolating the gateway away would leave
     //    that run with no egress whatsoever, which is what it had. The cost is
-    //    written down in `ensureProxy()` and in SANDBOX_RESEARCH.md.
+    //    written down in `ensureProxy()` and in SANDBOX.md.
     if (spec.network?.mode !== 'none' && spec.network?.mode !== 'open') {
       const rt = await sibling('runtime')
       //
@@ -1419,7 +1419,7 @@ async function ensureProxy(run, spec, { runDir, network, allow, port = 0, allowF
     // is what mints them, and a copy of it inside the agent's box would let the
     // agent forge any host it likes. Both come from `sandbox_ca_dir`, generated
     // once by the operator (iron-proxy's own README step 1, quoted in
-    // docs/sandbox.md), and the key is absent for every installation that never
+    // SANDBOX.md), and the key is absent for every installation that never
     // set one up — which `startIronProxy()` turns into a named refusal rather
     // than a proxy that silently swaps nothing.
     caPath: hubCaPath(),

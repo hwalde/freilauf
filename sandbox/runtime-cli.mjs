@@ -8,7 +8,7 @@
 //
 // Why a printer and not a runner: the process that must end up in the tmux pane
 // is the container client itself, because `pane-died` carries ITS exit status
-// and `pipe-pane` reads ITS output (SANDBOX_RESEARCH.md §7.1). A node process
+// and `pipe-pane` reads ITS output (SANDBOX.md). A node process
 // sitting in between would break both. So `sandbox/wrap.sh` reads what this
 // prints and `exec`s it — node is gone before the container starts.
 //

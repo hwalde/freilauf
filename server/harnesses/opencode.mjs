@@ -179,7 +179,7 @@ const plugin = {
 
   /**
    * Running opencode inside the Freilauf sandbox (docs/plugins.md, "The sandbox
-   * declaration"; SANDBOX_RESEARCH.md §3.2 and §7.9).
+   * declaration"; SANDBOX.md).
    *
    * opencode has no sandbox of its own — permissions and nothing else — so
    * there is nothing to switch off and no `innerSandbox` mapping. What it does
@@ -190,8 +190,8 @@ const plugin = {
   sandbox: {
     supported: true,
 
-    // Version pin: MEASURED on this machine on 2026-09-05 (SANDBOX_RESEARCH.md
-    // §11a.4).
+    // Version pin: MEASURED on this machine on 2026-09-05, before this machine
+    // had a container runtime (see SANDBOX.md).
     image: { dockerfile: 'sandbox/images/opencode.Dockerfile', args: { OPENCODE_VERSION: '1.18.29' } },
 
     // opencode's own two hosts (§3.2): the model catalog and Zen. The model

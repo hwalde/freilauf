@@ -1,5 +1,5 @@
 // Freilauf — the sandbox spec: one document, four layers, and one rule about
-// who may loosen what (SANDBOX_RESEARCH.md §7.2 and §7.3).
+// who may loosen what (SANDBOX.md).
 //
 // A sandbox profile is a single JSON document. It is stored under a name
 // (`sandbox_profiles`), a repo names one as its default, and the agent or the

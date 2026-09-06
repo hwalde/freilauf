@@ -1,5 +1,4 @@
-// Freilauf — every page and block the sandbox needs (SANDBOX_RESEARCH.md §7.3
-// "UI placement", §7.12, §7.13 "Pages").
+// Freilauf — every page and block the sandbox needs (SANDBOX.md).
 //
 // Its own file rather than more of server/pages.mjs, which is 3500 lines: the
 // sandbox is one subject with a settings page, a profile editor, a repo block, a

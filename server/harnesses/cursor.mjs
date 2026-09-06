@@ -147,13 +147,14 @@ const plugin = {
 
   /**
    * Running cursor inside the Freilauf sandbox (docs/plugins.md, "The sandbox
-   * declaration"; SANDBOX_RESEARCH.md §3.4 and §7.9).
+   * declaration"; SANDBOX.md).
    */
   sandbox: {
     supported: true,
 
-    // Version pin: MEASURED on this machine on 2026-09-05 (SANDBOX_RESEARCH.md
-    // §11a.4, which read the rules out of this very build).
+    // Version pin: MEASURED on this machine on 2026-09-05, before this machine
+    // had a container runtime — the rules were read out of this very build
+    // (see SANDBOX.md).
     image: { dockerfile: 'sandbox/images/cursor.Dockerfile', args: { CURSOR_VERSION: '2026.09.02-c22c1a3' } },
 
     // Cursor's own enterprise network list

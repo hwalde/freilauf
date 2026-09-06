@@ -175,7 +175,7 @@ export function newSandbox({ prefix = 'freilauf-test-', keep = false } = {}) {
   // because after the suite exits nothing else distinguishes the two.
   if (keep) { try { writeFileSync(join(SB, 'keep'), 'kept for debugging\n') } catch { /* best effort */ } }
 
-  // ---- the container runtime, shimmed (SANDBOX_RESEARCH.md §7.13, "Tests") ----
+  // ---- the container runtime, shimmed (SANDBOX.md) ----
   // The development machine has no Docker, and the sandbox has to be covered
   // there too. `test/shims/docker` answers for it: it logs every argv and reads
   // its answers out of DOCKER_STATE, and its `run` executes the wrapped command

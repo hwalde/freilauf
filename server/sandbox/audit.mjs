@@ -1,5 +1,5 @@
 // Freilauf — the per-run sandbox audit, and the one export an auditor is handed
-// (SANDBOX_RESEARCH.md §7.14).
+// (SANDBOX.md).
 //
 // A sandboxed run leaves four files in `~/agents/runs/<id>/` — `sandbox.json`
 // (the spec as launched, digest included), `proxy.yaml` (the policy the egress

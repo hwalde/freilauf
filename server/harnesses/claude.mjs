@@ -191,7 +191,7 @@ const plugin = {
 
   /**
    * Running claude inside the Freilauf sandbox (docs/plugins.md, "The sandbox
-   * declaration"; SANDBOX_RESEARCH.md §3.1 and §7.9).
+   * declaration"; SANDBOX.md).
    *
    * The inner sandbox is OFF by default and that is the whole argument of §4.3:
    * claude's own boundary is bubblewrap, bubblewrap inside an unprivileged
@@ -205,8 +205,9 @@ const plugin = {
     supported: true,
 
     // The image pins the CLI, so a sandboxed run never updates itself (§7.10).
-    // The version is the one MEASURED on this machine on 2026-09-05
-    // (SANDBOX_RESEARCH.md §11a) — a pin, meant to be raised deliberately.
+    // The version is the one MEASURED on this machine on 2026-09-05, before
+    // this machine had a container runtime (see SANDBOX.md) — a pin, meant to
+    // be raised deliberately.
     image: { dockerfile: 'sandbox/images/claude.Dockerfile', args: { CLAUDE_VERSION: '2.1.261' } },
 
     // Claude Code's own required hosts, as its network documentation lists them

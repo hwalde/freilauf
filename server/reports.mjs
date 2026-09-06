@@ -25,7 +25,7 @@ const HOOK_KINDS = ['_turn_end', '_exit', '_api_error', '_rate_limit', '_idle', 
 
 // ------------------------------------------------------------ the run's own token
 //
-// `runs.report_token` (SANDBOX_RESEARCH.md §7.6) is the per-run bearer of the
+// `runs.report_token` (SANDBOX.md) is the per-run bearer of the
 // report socket. It is issued for EVERY run at creation, sandboxed or not,
 // because the socket is worth having either way: it is the only channel that
 // carries the report route WITHOUT carrying the rest of the hub's API with it.
@@ -613,7 +613,7 @@ export async function handleReport(runId, body, via = 'http') {
 
 /**
  * `fl-report access "<what you need and why>"` — the agent asking for something
- * the sandbox is keeping from it (SANDBOX_RESEARCH.md §7.12.1).
+ * the sandbox is keeping from it (SANDBOX.md).
  *
  * It is `help`-like in everything that reaches a person: an incident in the
  * **Needs you** group (`sandbox_access` is in HUMAN_TYPES, because a host, a

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Freilauf — the built-in egress proxy, driven for real (SANDBOX_RESEARCH.md §7.5).
+// Freilauf — the built-in egress proxy, driven for real (SANDBOX.md).
 //
 // Why this file exists at its own name, and next to test/proxy.mjs rather than
 // inside it: the two proxies are different animals. `vpn-proxy.mjs` sits in

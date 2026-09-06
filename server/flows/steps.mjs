@@ -56,7 +56,7 @@ const RUN_STATUSES = ['scheduled', 'deferred', 'running', 'waiting_help', 'done'
 //   opt-in     says the thing out loud at the one moment somebody can judge it,
 //              and leaves the step exactly as capable as it was.
 //
-// What this does NOT catch, and `docs/sandbox.md` says so in the same words: a
+// What this does NOT catch, and `SANDBOX.md` says so in the same words: a
 // value that reached `vars.*` through an `extract` step (an LLM reading the
 // agent's report), through another `shell_command`'s `stdout`, or through an
 // HTTP response. Those are agent text one hop further out, and no static check

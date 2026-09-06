@@ -38,7 +38,7 @@ import { notifyRun, doneText, completeFollowUp } from './reports.mjs'
 import { reportIncident, openIncidentsOf, dismissIncident } from './incidents.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { fallbackTitle, TITLE_MAX } from './title.mjs'
-// The seam of SANDBOX_RESEARCH.md §7.4.4. Every git command this module runs
+// The seam of SANDBOX.md. Every git command this module runs
 // against a RUN's working copy goes through it, because on a sandboxed run that
 // directory is a clone whose `.git/config` and `.git/hooks` belong to the agent
 // — and `core.fsmonitor`, `core.sshCommand` and `diff.external` are commands
