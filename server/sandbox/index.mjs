@@ -2936,9 +2936,6 @@ export function sandboxPromptFacts(prep) {
   }
 }
 
-/** Is there a sandbox spec on disk for this run? Used by the resume path's checks. */
-export function specFileExists(runId) { return existsSync(specPath(runId)) }
-
 /** The spec document as it was last launched — the audit record, read back. */
 export function readSpecFile(runId) {
   try { return JSON.parse(readFileSync(specPath(runId), 'utf8')) } catch { return null }

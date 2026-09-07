@@ -290,14 +290,20 @@ Today the only locks in force are the ones the **hub** setting names: the
 resolver supports a lock per layer, and nothing below the hub layer sets one.
 
 The default for a locked path that has no rule of its own is **`fixed`**: no
-change at all. `runtime`, `image.*`, `user`, `network.engine`, `audit.export`
-and anything a plugin adds fall into it. The paths with a rule are the mode
+change at all. `runtime`, `image.*`, `network.engine` and anything a plugin adds
+fall into it. The paths with a rule are the mode
 orders above, the allow-shaped lists (`network.allow`, `network.presets`,
 `filesystem.extraMounts` — may shrink), the deny-shaped ones (`network.deny`,
 `network.denyUpstreamCidrs`, `filesystem.protected` — may grow), the numbers
 and sizes (may only go down), and the booleans that have a safe direction
 (`network.auditOnly` may only become `false`; `network.tlsTerminate`,
-`filesystem.readOnlyRoot` and the two `audit` flags may only become `true`).
+`filesystem.readOnlyRoot` and `audit.dockerEvents` may only become `true`).
+
+Four paths in that list are **leftovers rather than fields**: `user`,
+`filesystem.protected`, `secrets.gitFetch` and `audit.proxyLog` were each read
+by nobody and have left `DEFAULT_SPEC`, so the form refuses them by name today.
+Their ordering stays only so that a profile stored before the removal still
+layers the way it used to instead of freezing as `fixed`.
 
 ### The tri-state
 

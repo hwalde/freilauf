@@ -1,143 +1,115 @@
-# PLAN — Freilauf skills: authored, installed, kept current, offered (tree 4)
+# PLAN — Dead code, third pass: what 218 commits of new surface left behind (tree 3)
 
 ## Goal
 
-Freilauf ships a family of **agent skills** that teach any coding agent how to
-drive this hub — its agents, repos, runs, flows, statistics and its model
-choices. They are part of this repository, they are installed at **user level**
-into the directories the installed coding agents really read, they are kept
-current, and they are offered once during the Welcome wizard.
+Find and remove code nothing reaches, and — the harder half — prove for
+everything that merely *looks* unreached that it is alive, so the tree is not
+made smaller at the price of being made wrong.
 
-Four things make this more than "write six Markdown files", and each is a rule
-in this plan:
+Two dead-code passes have already run over this repository, and they left a
+policy that this pass inherits rather than re-litigates:
 
-- **Where a coding agent looks for skills is the coding agent's own knowledge.**
-  It therefore belongs in its plugin descriptor, like `launch`, `goal` and
-  `hookFiles` — separately for user level and project level. The hub must not
-  carry a table of vendor paths.
-- **A skill installed twice is a skill answered twice.** Three of the four
-  shipped coding agents read `~/.claude/skills`; only hermes does not. So the
-  installer computes the **smallest set of directories that covers every enabled
-  coding agent**, and installs once per directory — not once per agent.
-- **Removal must never touch somebody else's file.** The installer records what
-  it wrote (path + content hash) and removes only that. A directory that holds a
-  skill of the operator's own under the same name is left alone and reported.
-- **A recommendation goes stale the moment it is copied.** The static model
-  advice lives in one skill (`freilauf-models`); everything installation-specific
-  — which coding agents are configured, which favorites exist, which models a
-  provider serves — is *asked at runtime* through the hub's own API, never baked
-  into the file.
+- **`e871322` — "remove what nothing reaches, keep what documentation names".**
+  15 symbols, 12 import bindings and 18 translation keys went. What
+  deliberately stayed: a name written into the reference documentation
+  (`openrouterGateBlocked`, `unconfiguredHarnessIds`, `seedFilePath`,
+  `server/notifiers/index.mjs`), and two unreferenced files that are still the
+  only coverage of what they check (`scripts/gates-msg-header.mjs`,
+  `test/verify-agent-lifecycle.mjs`).
+- **`4be531f` — "two unreachable routes and two attributes nothing reads".**
+  It also wrote down the rule that saves the most time here: **a green
+  assertion is use**, so an export whose only consumer is the test suite is
+  alive; and `setup/fw-inspect.sh` is an operator tool a human runs by hand,
+  not an unreferenced file.
 
-## Measured facts this plan rests on
+Since `4be531f` the tree has grown by **218 commits and ~67 000 lines**, almost
+all of it `server/sandbox/`. That is the surface this pass is about.
 
-Read out of the installed CLIs on this machine, not assumed:
-
-| Coding agent | user-level skill roots | project-level skill roots |
-|---|---|---|
-| claude | `~/.claude/skills` | `.claude/skills` |
-| cursor | `~/.cursor/skills`, `~/.claude/skills`, `~/.codex/skills`, `~/.grok/skills`, `~/.agents/skills` | the same names inside the workspace |
-| opencode | `~/.config/opencode/skill`, plus **auto-loaded** `~/.claude/skills` and `~/.agents/skills` | `.opencode/skill` |
-| hermes | `~/.hermes/skills` | `.hermes/skills`, `.agents/skills` (trusted repos only) |
-
-Sources: cursor's `skill-path-utils.ts` search list inside
-`~/.local/share/cursor-agent/versions/*/index.js`; opencode's own configuration
-table inside its binary (`Global skills`, `External skills (auto-loaded)`);
-`hermes skills trust --help` and `hermes_cli/config_defaults.py`;
-`~/.claude/skills` for claude.
-
-Consequence: the covering set for all four is **two** directories,
-`~/.claude/skills` (claude + cursor + opencode) and `~/.hermes/skills` (hermes).
-Nothing about that is hardcoded — it falls out of the declarations.
-
-## Depth tree
+## The tree (depth 3)
 
 ```
-root — Freilauf skills
-├── 1  The platform seam
-│   ├── 1.1  Declaration and resolution
-│   │   ├── 1.1.1  `skills` declaration on the harness contract (4 plugins + docs)
-│   │   └── 1.1.2  server/skills.mjs — covering set, install, remove, sync, state
-│   ├── 1.2  Operator surface
-│   │   ├── 1.2.1  Settings → Skills (two switches, save, i18n ×3)
-│   │   ├── 1.2.2  The removal confirmation (hub.js modal + CSS)
-│   │   ├── 1.2.3  The Welcome wizard step
-│   │   └── 1.2.4  Sync triggers (startup, settings save, plugin install/enable)
-│   └── 1.3  What the skills talk to
-│       ├── 1.3.1  Read-only JSON API the skills need
-│       └── 1.3.2  bin/fl-api — the CLI a skill actually calls
-├── 2  The skills
-│   ├── 2.1  The shared one
-│   │   └── 2.1.1  freilauf-models
-│   ├── 2.2  Work
-│   │   ├── 2.2.1  freilauf-runs
-│   │   └── 2.2.2  freilauf-agents
-│   └── 2.3  Structure
-│       ├── 2.3.1  freilauf-repos
-│       ├── 2.3.2  freilauf-flows
-│       └── 2.3.3  freilauf-stats
-└── 3  Proof
-    ├── 3.1  Tests (unit, e2e, browser)
-    └── 3.2  Documentation (AGENTS.md, docs/plugins.md, SETUP_WITH_AGENT.md, READMEs ×3)
+dead-code-3
+├── 1  symbol level — is anything declared that nothing names?
+│   ├── 1.1  exported symbols with no consumer anywhere
+│   ├── 1.2  import bindings and destructured bindings never used
+│   └── 1.3  declarations at any indentation, per file
+├── 2  artefact level — is anything shipped that nothing reaches?
+│   ├── 2.1  HTTP routes, fragments and data-* attributes
+│   ├── 2.2  translation keys, CSS classes, shell functions and variables
+│   └── 2.3  files no other file names
+└── 3  document level — is anything *written down* that nothing reads?
+    ├── 3.1  the sandbox spec's own leaves (the `secrets.gitFetch` shape)
+    ├── 3.2  the shipped profiles, against the document they are written for
+    └── 3.3  plugin descriptor keys, settings keys, env seams, event kinds
 ```
 
-## Contracts fixed before any leaf starts
+Branch 3 is the one the previous two passes could not have: it looks at
+**data** rather than at symbols, and it is where a field can be declared
+correctly, explain itself in prose, and be read by nobody — the shape
+`f86fb1e` ("three things that were written down and never read") already found
+once in this same subsystem.
 
-### The plugin declaration
+## Method: every scanner is proved against a positive control
 
-```js
-// server/harnesses/<id>.mjs
-skills: {
-  // Ordered by the plugin's own preference; the resolver treats the order as a
-  // tie-break only, because coverage decides. Paths starting with '~' are
-  // resolved against the home directory.
-  user:    ['~/.claude/skills'],
-  // Relative to a workspace/worktree root. Declared for completeness and shown
-  // on the Plugins page; the installer does not write into a repository.
-  project: ['.claude/skills'],
-}
-```
+A scanner that finds nothing is worthless unless it can be shown to find
+something. Each of the nine scanners was therefore run first against
+**`4669f3d`** — the tree as it stood *before* the first dead-code pass — and
+only believed once it rediscovered what that pass removed:
 
-Absent = this coding agent has no skill mechanism the hub knows about; it is
-skipped without comment.
-
-### The state file
-
-`<dataDir>/skills-installed.json` (`FREILAUF_SKILLS_STATE` overrides it):
-
-```json
-{ "version": 1,
-  "entries": [ { "dir": "~/.claude/skills/freilauf-runs",   // absolute in the real file
-                 "skill": "freilauf-runs", "hash": "<sha256 of the payload>",
-                 "at": "2026-09-03T10:00:00Z" } ] }
-```
-
-### The settings keys
-
-- `skills_install` — `'1'` / `'0'`, default `'0'`. User-level installation on.
-- `skills_auto_update` — `'1'` / `'0'`, default `'1'`. Re-sync on start and on
-  every plugin change.
-
-### The source of the skills
-
-`skills/<name>/SKILL.md` in this repository, plus optional
-`skills/<name>/scripts/`, `skills/<name>/references/`. Copied verbatim.
-
-## Ownership
-
-| Leaf | owns |
+| scanner | rediscovers at `4669f3d` |
 |---|---|
-| 1.1.1 | `server/harnesses/*.mjs`, `docs/plugins.md` (contract table + new section) |
-| 1.1.2 | `server/skills.mjs` |
-| 1.2.1 | `server/pages.mjs` (settings section), `server/web.mjs` (route), `lang/*.json` |
-| 1.2.2 | `public/hub.js`, `public/hub.css` |
-| 1.2.3 | `server/welcome.mjs` |
-| 1.2.4 | `server/hub.mjs`, `server/plugins/web.mjs` |
-| 1.3.1 | `server/web.mjs` (JSON routes) |
-| 1.3.2 | `bin/fl-api`, `setup/02-install-scripts.sh` |
-| 2.x | `skills/**` |
-| 3.1 | `test/unit.mjs`, `test/e2e.mjs`, `test/browser.mjs` |
-| 3.2 | `AGENTS.md`, `SETUP_WITH_AGENT.md`, `README*.md` |
+| symbols | `_cleanupGetSetting`, `_cleanupSetSetting`, `integrate._resetState`, `llm/json.firstJsonValue`, `_sourcesReset` |
+| imports | all 10 dead import bindings, incl. `pages.cleanupPrompt`, `db.homedir` |
+| routes | `/api/flows/step-defaults`, `/api/fragments/session-row` |
+| data attributes | `data-active`, `data-llm-prefix` |
+| i18n / css / shell / files | the same verdicts the two passes recorded |
 
-The leaves under 1.2 touch shared files (`pages.mjs`, `web.mjs`), so they run
-**sequentially in this session**, not as concurrent subagents. Only the leaves
-under 2 are dispatched in parallel — they own disjoint directories.
+## What goes
+
+| # | what | why it is dead |
+|---|---|---|
+| 1 | `specFileExists()` — `server/sandbox/index.mjs` | exported, called by nothing: not code, not a suite, not a document. Its own comment says "Used by the resume path's checks"; that path asks `readSpecFile()` and never this |
+| 2 | `buildStates()` — `server/sandbox/runtime.mjs` | exported, called by nothing. Its comment says "for a page that renders all of them"; the page renders `buildStateOf(ref)` per image |
+| 3 | `homedir`, `getSetting` — `server/watcher.mjs` | import bindings that are the only occurrence of their name in the file |
+| 4 | `splitEnvArgs` — `test/unit.mjs`; `_r`, `_h` — `test/deploy.mjs` | the same, in the suites |
+| 5 | `gitFetch: 'mirror'` ×5 — `server/sandbox/profiles.mjs` | the field was removed from `DEFAULT_SPEC`, and `checkNode()` now refuses it by name as an unknown field — but all five shipped profiles still write it |
+| 6 | `audit.proxyLog`, `audit.export` — `DEFAULT_SPEC` in `server/sandbox/spec.mjs` | nothing reads either. `proxy.mjs` opens `auditStream()` unconditionally in all three placements, and the export route always streams jsonl, so `false` and `'none'` are promises the hub does not keep. `audit.dockerEvents` beside them IS read twice and stays |
+| 7 | `uebersicht-repo3.png` | a 232 KB screenshot of the operator's own live installation, committed by accident in a WIP commit; named by no document, and it carries real run titles and real quota figures into a public repository |
+
+For 5 and 6 the remedy follows the precedent this repository already set and
+tested: the leaf leaves `DEFAULT_SPEC`, and its **ordering and narrowing shape
+stay** (`MODE_ORDERS`, `SHAPES`) so a profile stored before the removal still
+layers exactly as it did instead of freezing as `fixed`.
+
+## What deliberately stays, and the measurement behind each
+
+- **`openrouterGateBlocked`, `unconfiguredHarnessIds`** — the only two symbols
+  in the tree whose sole mention outside their own file is prose. Both are
+  named in `docs/plugins.md` as part of a contract (a trio of gate wrappers,
+  and a byte-compatible adapter API). Settled by `e871322`; re-measured, same
+  answer.
+- **`scripts/gates-msg-header.mjs`, `test/verify-agent-lifecycle.mjs`,
+  `setup/fw-inspect.sh`, `.github/*`** — the four files nothing names. Settled
+  by the two earlier passes for reasons that have not changed.
+- **`/api/fragments/usage`, `/settings/coding-agents/delete`,
+  `/telegram-setup/`** — the three route literals with one mention. All three
+  are documented compatibility surfaces; the first two were settled by
+  `4be531f`.
+- **`data-panel`** — write-only in the server, and asserted twice by the e2e
+  suite. A green assertion is use.
+- **`.sqd-toolbox`, `.sqd-smart-editor`** — emitted by
+  `sequential-workflow-designer`, not by us. Present at `4669f3d` too.
+- **`MODE_ORDERS['secrets.gitFetch']`, `SHAPES['filesystem.protected']`** —
+  kept on purpose, and their own comments say why.
+- **The `cc-*` / `CCHUB_*` transition layer** — `AGENTS.md` says in so many
+  words that it is for one transition release and that a later commit deletes
+  it. Every fallback in it is reached today; ending the transition is a
+  decision, not a dead-code finding.
+
+## Verification
+
+`GATES.md`. Every suite has to land on **exactly** its pre-change count — a
+dead-code pass that changes a number has removed something that was alive — and
+the absence of each removed name is proved against a positive control on the
+pre-change commit, so an empty grep means "measured" and not "the expression
+was wrong".

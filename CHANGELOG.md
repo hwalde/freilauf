@@ -16,6 +16,38 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-07
+
+### Fixed
+
+- **Opening a built-in sandbox profile in the editor and saving it was refused.**
+  All five shipped profiles still wrote `secrets.gitFetch`, a field that had
+  already been removed from the sandbox document because nothing read it — and
+  the profile editor validates the whole document through the same function that
+  refuses an unknown field by name. So the operator was told a profile Freilauf
+  itself ships was invalid. The shipped profiles no longer name it, and the unit
+  suite now holds every built-in to the document it is written for.
+
+### Removed
+
+- **Two sandbox settings that promised something the hub does not do.**
+  `audit.proxyLog` (false = "do not write the proxy log") and `audit.export`
+  (`none` = "no audit export") were read by no code: the proxy opens its audit
+  stream in all three placements without asking, and the export route always
+  streams jsonl. Both are gone from the sandbox document and are refused at the
+  form, like the three inert fields removed before them; `audit.dockerEvents`
+  beside them is real and untouched, and a profile stored earlier still carries
+  and layers its old value. Nothing about a run changes — the proxy log and the
+  audit export were always written and still are.
+- **Code nothing reached**, found by a third full-tree scan with every scanner
+  proved against the tree as it stood before the first such pass: two exported
+  functions whose own comments described a caller that does not exist
+  (`specFileExists`, `buildStates`), three unused import bindings, and a 232 KB
+  screenshot of a live installation committed by accident. Everything that
+  merely *looks* unreached — a name the reference documentation carries, an
+  export whose only consumer is a green assertion, an operator tool run by hand
+  — was measured and kept, with the reason recorded next to it.
+
 ## 2026-09-06
 
 ### Added

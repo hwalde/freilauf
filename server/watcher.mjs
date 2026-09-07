@@ -3,8 +3,7 @@
 // cost estimation, auto-close of finished sessions (server/sessions.mjs), worktree cleanup.
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
-import db, { getRepo, getRun, addEvent, announceRun, allSettings, getSetting } from './db.mjs'
+import db, { getRepo, getRun, addEvent, announceRun, allSettings } from './db.mjs'
 import { RUNS_DIR, sh, parseDbUtc, shortId } from './util.mjs'
 import { notify, notifyOnFor } from './notify.mjs'
 import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd, followUpHeader, clearAnomalies } from './reports.mjs'

@@ -10097,7 +10097,7 @@ process.stdout.write(JSON.stringify(out))
     const { sandboxOutcome, classifyPolicyPatch, LIVE_POLICY_PATHS, containerEnv, engineUsable, proxyPlacement,
       sandboxCredentialPairs, missingRequiredCredentials } =
       await import('../server/sandbox/index.mjs')
-    const { platformSuffix, sandboxPromptSection, splitEnvArgs, createRun } = await import('../server/runner.mjs')
+    const { platformSuffix, sandboxPromptSection, createRun } = await import('../server/runner.mjs')
 
     /** The whole way from four tri-states to what the run row says and the hub writes. */
     const plan = ({ hub, repo = 'inherit', agent = 'inherit', run = 'inherit',
@@ -10717,7 +10717,7 @@ process.stdout.write(JSON.stringify(out))
     const proxy = await import('../server/sandbox/proxy.mjs')
     const iron = await import('../server/sandbox/ironproxy.mjs')
     const { BUILTIN_PROFILES } = await import('../server/sandbox/profiles.mjs')
-    const { normalizeSpec } = await import('../server/sandbox/spec.mjs')
+    const { normalizeSpec, validateSandboxOverrides: validateShippedSpec } = await import('../server/sandbox/spec.mjs')
     const rd = await import('../server/run-def.mjs')
     const { setSetting: setS } = await import('../server/db.mjs')
     const enSb = JSON.parse(readFileSync(new URL('../lang/en.json', import.meta.url), 'utf8'))
@@ -10796,6 +10796,14 @@ process.stdout.write(JSON.stringify(out))
         }
         if (s.network?.tlsTerminate === true) isTrue(caps.tlsTerminate, `${p.name}: asks for TLS termination on an engine that can`)
         isTrue(!!enSb[p.descKey], `${p.name}: its description is in the catalog`)
+        // …and it may not name a field the document no longer has. All five
+        // shipped `secrets: { mode, gitFetch: 'mirror' }` long after `gitFetch`
+        // had left DEFAULT_SPEC, so opening a built-in in the profile editor
+        // and saving it was refused with "unknown field" — the editor validates
+        // the whole document through the same function.
+        const { problems: shipped } = validateShippedSpec(JSON.stringify(p.spec))
+        equal(shipped.filter(x => x.key === 'sandbox.problem.unknown_field').length, 0,
+          `${p.name}: names no field the form would refuse`)
       }
     })
 
@@ -11195,7 +11203,16 @@ process.stdout.write(JSON.stringify(out))
       isFalse('protected' in DEFAULT_SPEC.filesystem, 'filesystem.protected: nothing read it, and the clone makes it moot')
       isFalse('gitFetch' in DEFAULT_SPEC.secrets, 'secrets.gitFetch: nothing read it, and "none" needs the mount gone')
       equal(DEFAULT_SPEC.secrets.mode, 'env', 'the field next to it is untouched')
-      for (const doc of [{ filesystem: { protected: ['.git/hooks'] } }, { secrets: { gitFetch: 'none' } }]) {
+      // Two more of the same shape, found by the third dead-code pass:
+      // `proxy.mjs` opens its audit stream in all three placements without
+      // asking, and the export route always streams jsonl. `dockerEvents`
+      // beside them IS read (twice, in index.mjs) and therefore stays — the
+      // rule is "nothing reads it", not "it sits in the audit block".
+      isFalse('proxyLog' in DEFAULT_SPEC.audit, 'audit.proxyLog: the proxy log is written unconditionally')
+      isFalse('export' in DEFAULT_SPEC.audit, "audit.export: the export route always streams jsonl")
+      equal(DEFAULT_SPEC.audit.dockerEvents, true, 'the one of the three that IS read is untouched')
+      for (const doc of [{ filesystem: { protected: ['.git/hooks'] } }, { secrets: { gitFetch: 'none' } },
+        { audit: { proxyLog: false } }, { audit: { export: 'none' } }]) {
         const { problems } = validateSandboxOverrides(JSON.stringify(doc))
         isTrue(problems.some(p => p.key === 'sandbox.problem.unknown_field'),
           `${JSON.stringify(doc)} is refused rather than stored and ignored`)
@@ -11204,8 +11221,10 @@ process.stdout.write(JSON.stringify(out))
       // value survives normalisation and its narrowing shape is unchanged, so
       // an old row does not suddenly freeze or resolve differently.
       equal(normalizeSpec({ secrets: { gitFetch: 'mirror' } }).secrets.gitFetch, 'mirror', 'an old profile keeps its value')
+      equal(normalizeSpec({ audit: { proxyLog: false } }).audit.proxyLog, false, 'and so does an old audit field')
       isFalse(narrow('filesystem.protected', ['.git/config'], ['.git/config', '.git/hooks']).refused,
         'and an old deny-shaped list still appends')
+      isFalse(narrow('audit.proxyLog', false, true).refused, 'and audit.proxyLog still ranks as a tightening')
     })
 
     // ---- the audit: what the chain CANNOT say ------------------------------

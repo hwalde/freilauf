@@ -118,7 +118,17 @@ export const DEFAULT_SPEC = {
   innerSandbox: 'off',                            // off | weak | full
   harness: {},                                    // { claude: {...}, cursor: {...} } — plugin knobs
   retention: 'run',                               // run | keep
-  audit: { proxyLog: true, dockerEvents: true, export: 'jsonl' },
+  // `audit.proxyLog` and `audit.export` used to sit beside `dockerEvents`, and
+  // they were the same shape as the two above: written down, read by nobody.
+  // `proxy.mjs` opens `auditStream(ctx.runDir)` in all three placements without
+  // asking anything, and `GET /api/runs/<id>/audit.jsonl` always streams jsonl —
+  // so `proxyLog: false` and `export: 'none'` were promises this hub does not
+  // keep. `dockerEvents` is the one of the three that IS read (twice, in
+  // index.mjs), which is why it stays. `SHAPES` keeps `audit.proxyLog`'s
+  // ordering for the reason `MODE_ORDERS` keeps `secrets.gitFetch`'s: a profile
+  // stored before the removal still names it, and a leftover must layer the way
+  // it used to rather than freeze as `fixed`.
+  audit: { dockerEvents: true },
 }
 
 /**
@@ -255,7 +265,11 @@ export const SPEC_VALUES = {
   'secrets.mode': ['env', 'inject', 'none'],
   innerSandbox: ['off', 'weak', 'full'],
   retention: ['run', 'keep'],
-  'audit.export': ['jsonl', 'none'],
+  // `audit.export` had its enum here. It went with the field (see DEFAULT_SPEC),
+  // and unlike a narrowing shape this entry could not have been kept usefully:
+  // `checkLeaf()` — the only reader — is reached for a path that is IN the
+  // document, so an enum for a field the form now refuses by name is a rule
+  // nothing can ever apply.
 }
 
 // Objects the layering treats as ONE value rather than recursing into: a map of
@@ -407,6 +421,10 @@ const SHAPES = {
   // inspection is stricter, and a lower layer may switch it on but not off.
   'network.tlsTerminate': 'strictTrue',
   'filesystem.readOnlyRoot': 'strictTrue',
+  // Removed from DEFAULT_SPEC (see there). Kept for the same reason
+  // `filesystem.protected` and `secrets.gitFetch` keep theirs: a profile stored
+  // before the removal still carries the path, and it must layer as it always
+  // did rather than freeze.
   'audit.proxyLog': 'strictTrue',
   'audit.dockerEvents': 'strictTrue',
   'resources.memory': 'size',
