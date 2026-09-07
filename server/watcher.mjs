@@ -455,7 +455,9 @@ async function watchRun(run) {
 // ---------- follow-up commissions ----------
 /**
  * A finished run the operator typed new work into (`followup_since`, set by the
- * send route) is working again — and from the moment of the commission it is
+ * send route and by the agent's own prompt hook — reports.mjs,
+ * `startFollowUpCommission`) is working again — and from the moment of the
+ * LATEST instruction, because every one of them starts the clock afresh, it is
  * held to the same expectation as a first attempt: `expected_minutes`, soft
  * overrun at 80 %, overrun with a notification at 100 %. Before this, a
  * follow-up that worked on and on without reporting was invisible: watchRun()
@@ -528,7 +530,9 @@ async function watchFollowUps() {
     // commission is open because nobody reported, but nothing is being worked
     // on, and "follow-up exceeds the expected duration" would alarm about a
     // conversation the operator is in the middle of. The clock resumes the
-    // moment the agent works again — every `_working` is a new instruction.
+    // moment the agent works again — and where that work began with a line the
+    // operator submitted, `restartCommissionOnWorking()` has already started it
+    // over, so what is measured here is always the LATEST instruction.
     // …its own word, unless the activity measured above contradicts it.
     if (agentWaiting({ ...run, last_activity_at: lastActAt })) continue
     const expectedMs = run.expected_minutes * 60_000

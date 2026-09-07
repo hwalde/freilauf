@@ -1810,7 +1810,15 @@ export function runMetrics(run) {
   const zeile = (key, value) => `<dt>${e(t(key))}</dt><dd>${value}</dd>`
   return `<dl class="metrics" id="run-metrics">
     ${zeile('run.runtime', `${fmtRuntime(run)} <span class="dim">/ ${e(t('run.expectation'))} ${e(t('unit.minutes', { n: run.expected_minutes }))}</span>`)}
-    ${zeile('run.tokens', e(t('run.tokens_value', { in: run.tokens_in ?? 0, out: run.tokens_out ?? 0 })))}
+    ${/* The largest figures the UI ever prints, and the only ones that used to
+          skip fmtNum() — `rein 912769371, raus 1749372` stood one line above a
+          `11,5 €` that went through it. A claude run's input is the whole
+          prompt side including every cache read, so nine digits is the normal
+          case rather than the outlier, and ungrouped nine digits cannot be read
+          at a glance at all (measured on run 49a26807). util.mjs says of that
+          helper that everything display-facing goes through it; this is what
+          did not. */''}
+    ${zeile('run.tokens', e(t('run.tokens_value', { in: fmtNum(run.tokens_in ?? 0), out: fmtNum(run.tokens_out ?? 0) })))}
     ${zeile('run.costs', run.cost_eur != null ? e(fmtNum(run.cost_eur, { maximumFractionDigits: 2 })) + ' € (' + e(t('run.abo_delta')) + ')' : run.cost_usd != null ? e(fmtNum(run.cost_usd, { maximumFractionDigits: 4 })) + ' $' : '–')}
     ${zeile('run.activity', e(run.last_activity_at ? fmtDbUtc(run.last_activity_at) : '–'))}
     ${zeile('run.branch_reported', `${e(run.branch_reported ?? '–')} <span class="dim">/ ${e(t('run.branch_expected'))} ${e(run.branch_expected ?? '–')}</span>`)}

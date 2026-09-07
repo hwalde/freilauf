@@ -2292,7 +2292,28 @@ lesson). `runs.followup_since` carries it, and three things hang on it:
   `anomaly:soft_overrun`), overrun at 100 % with a notification
   (`followup_overrun` — its own type, so a first attempt's page does not mute
   the follow-up's). Each new instruction restarts the clock and retracts the
-  old statement the way a raised duration retracts one; a follow-up `progress`
+  old statement the way a raised duration retracts one — **through the terminal
+  as much as through the send route**, and that is where the sentence used to
+  stop being true. Only `POST /send` called `startFollowUpCommission()`; the
+  run page's terminal writes straight into tmux, so a second instruction typed
+  there reached the hub only as the agent's own `_working {source:'prompt'}`
+  hook, and the branch that reads it opened a commission where none was open
+  and did **nothing at all** where one was. Measured on run 49a26807:
+  `anomaly:followup_overrun` raised 2026-09-06 18:40, the next instruction
+  typed into the session on 2026-09-07 15:11:35 and answered 57 seconds later,
+  and a day afterwards the run still wore a red dot over "follow-up far over
+  the expected duration". Two ways that is expensive rather than untidy — the
+  operator cannot switch the alarm off, because typing the next instruction is
+  exactly the gesture that ought to clear it; and `notified:followup_overrun`
+  stays set, so the alarm is SPENT and a later instruction that genuinely runs
+  long can never page, being measured against a clock that started a day before
+  it did. `restartCommissionOnWorking()` (reports.mjs, pure, next to
+  `commissionOnWorking()`) is the rule: only a human's submitted line restarts
+  an open commission, never a tool call or opencode's `busy` — a clock any tool
+  call resets is a clock the overrun could never reach, which is the same
+  reason its sibling gives for the same word. opencode, whose plugin cannot
+  tell a typed line from a tool call, therefore keeps the price already named
+  there and pays no new one. A follow-up `progress`
   report clears the anomalies (but not the flag, like a first run); the clock
   stops when the follow-up reports (`endFollowUpCommission()`), when the
   session is closed (kill route, `reconcileClosedSession()`) — or when the
@@ -2982,6 +3003,25 @@ bill ran for days (thirty sessions, 15 GB, measured).
   command, and **RSS/CPU of the whole process tree** (one `ps`, summed from the
   pane PID down) — the pane itself is only a shell and would understate it by an
   order of magnitude.
+- **"Last activity" is `window_activity`, never `session_activity`**, and that
+  is a measurement rather than a preference. tmux moves the SESSION field when
+  a client attaches or selects the session; output does not touch it. Measured
+  on tmux 3.4, seven live sessions: five carried `session_activity` exactly
+  equal to `session_created`, three of them while writing to their pane every
+  second, and the hub's own agent left the value untouched across seventeen
+  minutes of continuous output while `window_activity` tracked it to the
+  second — the only two sessions whose value differed from their creation were
+  the two a human had attached to. So on the page whose whole job is deciding
+  which screens are dead weight, the column was the age column again under
+  another heading, and wrong in the expensive direction: a session worked in
+  all day and one untouched since it was made read identically. The field
+  rides along on the `list-panes` call that is made anyway (no second
+  shell-out), the newest window of a session wins, and it only ever OVERRIDES
+  the session field where it is newer — a tmux that keeps that field current,
+  or one that does not know `window_activity`, is never made to say less than
+  it did. Same family as `session_activity` here and `--no-optional-locks`
+  after the subcommand: the field answered, it just did not answer this
+  question.
 - **The sum of all of it is in the status sidebar**, on every page
   (`sessionMemory()`, see there): the bill this page exists for runs quietly, so
   the one number that says how big it has grown must not need a navigation to be

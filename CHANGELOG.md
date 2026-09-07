@@ -20,6 +20,44 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A run's token counts are grouped like every other number on the page.**
+  They were the only figures in the UI printed raw — `rein 912769371, raus
+  1749372` one line above a `11,5 €` that was formatted properly. A claude
+  run's input side counts every cache read, so nine digits is the ordinary
+  case, and nine ungrouped digits cannot be read at a glance at all.
+
+- **The Sessions page's "last activity" was the session's creation time.** That
+  page exists to decide which screens are dead weight holding memory, and the
+  one column that would tell you "nothing has happened in here for two days"
+  was reading a tmux field that output does not move — it moves when somebody
+  attaches. Measured on this machine: of seven live sessions, five carried
+  exactly their creation time, three of those while writing to their pane every
+  second, and the hub's own agent did not move the value across seventeen
+  minutes of continuous output. So the column was a copy of the Alter column
+  beside it, and wrong in the dangerous direction: a session worked in all day
+  and one untouched since it was made looked the same. It is now read from the
+  session's windows, where output really registers — an idle session says so,
+  and a working one reads "just now". Nothing else used the value, so no
+  session is kept or closed differently because of this.
+
+- **Giving a finished run more work through its terminal did not clear the
+  alarm about the previous instruction.** When you type new work into a
+  finished run's session, the hub starts holding it to the expected duration
+  again and, if it runs long, says "follow-up far over the expected duration"
+  and sends you a message. The next instruction was supposed to start that
+  clock over and take the old statement back — and it did, but only when it was
+  typed into the run page's *message* box. The terminal writes straight into
+  tmux, so an instruction typed there left the old alarm standing. Measured on
+  run 49a26807: the alarm went up on Sunday evening, the operator typed the
+  next instruction on Monday afternoon and had an answer within a minute, and
+  the run still showed a red dot over the Sunday statement a day later. Two
+  things that cost: the alarm could not be switched off (typing the next
+  instruction is exactly the gesture that should clear it), and, because the
+  hub remembers that it already messaged you about this overrun, a later
+  instruction that really did run long could never reach you. Both ways in now
+  start the clock afresh. Only a line you submit does — a tool call the agent
+  makes on its own does not, or the alarm could never fire at all.
+
 - **A run whose agent kept saying "I am waiting" was called idle every half
   hour anyway.** The hub believes a coding agent's own word about whether it is
   working or sitting at its prompt, unless measured activity runs past the
