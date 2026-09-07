@@ -5109,9 +5109,33 @@ try {
     await watcherTick()
     equal(ereignisse(followed.id).filter(k => k === 'notified:followup_overrun').length, 1, 'the next pass does not page again')
 
+    // A tool call is the agent working, not a new order: it must leave the
+    // standing statement alone, or the follow-up overrun would be reset by
+    // every step the agent takes and could never be reached at all.
+    await sendReport(followed.id, { kind: '_working', source: 'tool' })
+    contains(ereignisse(followed.id).join(','), 'anomaly:followup_overrun',
+      'a tool call leaves the overrun standing')
+
+    // An instruction typed straight into the SESSION restarts the clock — the
+    // run page's terminal writes into tmux, past the send route, and the
+    // agent's own prompt hook is the only one who sees it. This was the gap:
+    // the restart existed on the send route alone, so a run whose operator had
+    // typed the next instruction stayed red about the previous one for as long
+    // as the commission lived, with its notification flag spent (run 49a26807).
+    const vorher = lauf(followed.id).followup_since
+    await sendReport(followed.id, { kind: '_working', source: 'prompt' })
+    isFalse(ereignisse(followed.id).includes('anomaly:followup_overrun'),
+      'a line typed into the session clears the old statement')
+    isFalse(ereignisse(followed.id).includes('notified:followup_overrun'),
+      'and its notification flag, so a genuine overrun can page again')
+    isTrue(lauf(followed.id).followup_since !== vorher, 'and the clock starts again')
+
     // New instructions restart the clock — and retract the old overrun statement
     // the same way a raised duration retracts one, so a genuine overrun of the
     // new commission can page again.
+    db.prepare(`UPDATE runs SET followup_since=datetime('now', '-46 minutes') WHERE id=?`).run(followed.id)
+    await watcherTick()
+    contains(ereignisse(followed.id).join(','), 'anomaly:followup_overrun', 'the new commission can go over too')
     await postForm(`/api/runs/${followed.id}/send`, { text: 'And add tests, too.' })
     isFalse(ereignisse(followed.id).includes('anomaly:followup_overrun'), 'the new commission clears the old statement')
     isFalse(ereignisse(followed.id).includes('notified:followup_overrun'), 'and its notification flag with it')

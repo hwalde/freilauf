@@ -7248,6 +7248,19 @@ try {
     delete process.env.FREILAUF_ATTENTION_GRACE_MS
   })
 
+  await check('a second instruction restarts an open commission — and a tool call does not', async () => {
+    // The send route restarted the clock; the terminal never did, so a
+    // follow-up overrun raised on Sunday was still red on Monday after the
+    // operator had typed the next instruction into the session and had it
+    // answered in under a minute (run 49a26807). Only a human's line counts:
+    // a clock any tool call resets is a clock the overrun can never reach.
+    const { restartCommissionOnWorking } = await import('../server/reports.mjs')
+    isTrue(restartCommissionOnWorking('prompt'), 'a submitted line is the next instruction')
+    isFalse(restartCommissionOnWorking('tool'), 'a tool call is the agent working, not a new order')
+    isFalse(restartCommissionOnWorking('busy'), "opencode's busy says nothing about who typed")
+    isFalse(restartCommissionOnWorking('hook'), 'and an unnamed hook is no evidence of a person')
+  })
+
   await check('every built-in coding agent declares how its attention reaches the hub', async () => {
     const { HARNESS_PLUGINS: HP } = await import('../server/harnesses/index.mjs')
     for (const id of ['claude', 'opencode', 'hermes', 'cursor']) {

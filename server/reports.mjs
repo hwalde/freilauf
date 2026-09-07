@@ -386,6 +386,35 @@ export function commissionOnWorking(source, sinceReportMs, graceMs = attentionGr
 }
 
 /**
+ * And does a `_working` on a run whose commission is ALREADY open start a NEW
+ * one? Its sibling above answers the first instruction; this answers the
+ * second, and it had no answer at all: the send route restarted the clock, the
+ * terminal did not, and the run page's terminal is the ordinary way in — it
+ * writes straight into tmux, which is why "a human typing into the session IS
+ * the commissioning" is the rule in the first place.
+ *
+ * What that cost, measured on run 49a26807: `anomaly:followup_overrun` raised
+ * 2026-09-06 18:40, a new instruction typed into the session on 2026-09-07
+ * 15:11:35 (`agent_working {"source":"prompt"}`) and answered 57 seconds later
+ * — and a day afterwards the run still wore a red dot over "follow-up far over
+ * the expected duration". Two ways that is expensive rather than untidy. The
+ * operator cannot switch the alarm off: typing the next instruction is exactly
+ * the gesture that ought to clear it, and it was the gesture that did nothing.
+ * And `notified:followup_overrun` stays set, so the alarm is SPENT — a second
+ * instruction that genuinely runs long can never page, because the clock it is
+ * measured against started a day before it did.
+ *
+ * Only a human's line restarts it, for the reason `commissionOnWorking` gives
+ * for the same word: a tool call or opencode's `busy` is the agent working,
+ * and a clock that any tool call resets is a clock the follow-up overrun could
+ * never reach. So opencode — whose plugin cannot tell a typed line from a tool
+ * call — keeps the price already named there, and pays no new one.
+ */
+export function restartCommissionOnWorking(source) {
+  return source === 'prompt'
+}
+
+/**
  * The moment of the run's latest report — the end of the first attempt, or
  * the latest follow-up's acceptance, whichever is later. Infinity ago when
  * nothing is known, so an unknown never reads as "just now".
@@ -810,8 +839,17 @@ async function handleFollowUp(run, body, via) {
   if (kind === '_working') {
     const source = body.source ?? 'hook'
     noteAgentState(run, 'working', source)
-    if (!run.followup_since && !run.followup_open && !run.finish_state
-        && commissionOnWorking(source, Date.now() - lastReportMs(run))) {
+    // With a commission already open the same call is the SECOND instruction,
+    // and it restarts the clock exactly as the send route's does — one
+    // function for both, because `startFollowUpCommission()` is the whole
+    // statement: clock from now, previous "longer than expected" retracted,
+    // notification flag with it. Both exclusions stay: a follow-up in the gate
+    // or being merged has reported, and its deadline is the gate's, not this
+    // clock's (watchFollowUps() skips exactly that pair).
+    if (!run.followup_open && !run.finish_state
+        && (run.followup_since
+          ? restartCommissionOnWorking(source)
+          : commissionOnWorking(source, Date.now() - lastReportMs(run)))) {
       startFollowUpCommission(runId, null, 'session')
     }
     return { ok: true, message: null }
