@@ -16,6 +16,48 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-07
+
+### Fixed
+
+- **A run with an open follow-up showed a duration that had nothing to do with
+  the alarm next to it.** The "duration / expectation" pair and the follow-up
+  overrun both measure against the same `expected_minutes`, but from different
+  starts: the cell counted the first attempt, the alarm counted the commission.
+  So run 49a26807's row read "477 Min. / 800 Min." — comfortably inside — with a
+  red dot and "follow-up far over the expected duration" beside it, because the
+  commission had been open for 24 hours and that number appeared nowhere.
+  Neither cell was wrong on its own and together they were unreadable. While a
+  commission is open the pair is now about the commission, like the status word,
+  the sort and the sidebar's counts already were, and the detail page's runtime
+  line marks which clock it is on. A follow-up sitting in the finish gate keeps
+  the attempt's clock, because there the deadline is the gate's own.
+
+- **A claude run's token counts were wrong in both directions at once, and the
+  "out" figure was one no model could have produced.** The transcript reader
+  added `cache_creation_input_tokens` — a prompt-side field, named and billed as
+  input — to the OUTPUT total: run 8ee6a523 ran 79 seconds and its detail page
+  credited it with 416 105 output tokens, 5 267 a second, where the transcript's
+  own `output_tokens` come to 10 775. The inflation was not a constant one could
+  read past either (38× there, 2.6× on two others), because what was being added
+  is the cache traffic and not the answer. At the same time the sums covered only
+  the last 500 records of the transcript, so a run's token count silently *shrank*
+  as it grew past that and changed retroactively on every pass — 149a666b was
+  credited with 104 885 of the 143 975 output tokens it had written, and
+  4e9d5819 with 65 % of its own. Both counts are now what the whole file says,
+  with cache writes and cache reads counted as the input they are. Existing runs
+  keep the figure they were recorded with; a run still going is corrected on the
+  next watcher pass.
+- **The sessions page and the status sidebar beside it printed different totals
+  for the same tmux memory.** The page measures the machine itself (it needs a
+  row per session) and summed that list for its headline, while the sidebar
+  rendered into the very same response served its own cached measurement — both
+  honest, up to eight minutes apart, and nearly a gigabyte apart on screen
+  ("31,3 GB" against "32,2 GB in 42 Sessions"), with nothing to tell the reader
+  which one the machine was actually holding. The page now publishes the reading
+  it has just paid for, and the sidebar quotes that — one number, and the next
+  sidebar refresh does not shell out again for a measurement that already exists.
+
 ## 2026-09-06
 
 ### Added

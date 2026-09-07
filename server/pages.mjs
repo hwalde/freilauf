@@ -24,7 +24,7 @@ import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } fro
 import { extrasModelsMru, rememberExtrasModel, DEFAULT_EXTRAS_MODEL } from './extras-suggest.mjs'
 import { runEditAllowed } from './run-edit.mjs'
 import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
-  settledAnomalies, archivable, agentWaiting } from './run-state.mjs'
+  settledAnomalies, archivable, agentWaiting, runtimeClock } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
@@ -37,7 +37,7 @@ import { TYPE_TEXT } from './detect.mjs'
 import { llmModelsMru, rememberLlmModel } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
 import { resumeCommand } from './integrate.mjs'
-import { listSessions, sessionMemory, sessionKeepHours, currentKeepMs, paneAlive, archiveSessionKeepHours } from './sessions.mjs'
+import { listSessions, sessionMemory, publishSessionMemory, sessionKeepHours, currentKeepMs, paneAlive, archiveSessionKeepHours } from './sessions.mjs'
 import { cleanupSettings, cleanupConfigured, cleanupRunInFlight } from './cleanup.mjs'
 import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
 import { flowRunKeepDays } from './flows/db.mjs'
@@ -982,9 +982,12 @@ export function runRow(r, ctx) {
     ? t('merge.resolver_for', { title: resolvedTitle(r.resolves_run_id) })
     : agentName ? t('overview.from_agent', { agent: agentName }) : t('overview.single_run')
   // Finished runs: duration until the end, not until now — otherwise a run
-  // from three days ago "grows" to 4000 minutes in the overview.
-  const startedMs = parseDbUtc(r.started_at)
-  const endeMs = r.ended_at ? parseDbUtc(r.ended_at) : Date.now()
+  // from three days ago "grows" to 4000 minutes in the overview. And a run with
+  // an open follow-up commission is measured from THAT, because that is the
+  // clock the anomaly beside this cell was raised off (runtimeClock()).
+  const uhr = runtimeClock(r)
+  const startedMs = uhr === 'followup' ? parseDbUtc(r.followup_since) : parseDbUtc(r.started_at)
+  const endeMs = uhr !== 'followup' && r.ended_at ? parseDbUtc(r.ended_at) : Date.now()
   const durMin = Math.round((endeMs - startedMs) / 60000)
   const wartend = r.status === 'scheduled'
   // One click moves a finished run into the archive — the record stays, it just
@@ -1804,10 +1807,19 @@ export function runEvents(runId) {
  * the run is actually going (or has gone) does the figure mean "runtime".
  */
 function fmtRuntime(run) {
-  if (run.status === 'scheduled' || run.status === 'deferred') return '–'
-  const endeMs = run.ended_at ? Date.parse(run.ended_at.replace(' ', 'T') + 'Z') : Date.now()
-  const min = Math.round((endeMs - Date.parse(run.started_at.replace(' ', 'T') + 'Z')) / 60000)
-  return `${t('unit.minutes', { n: min })}${run.ended_at ? '' : ' (' + t('run.running') + ')'}`
+  // The same clock the overview's cell reads, and for the same reason: this
+  // line pairs a duration with `run.expected_minutes`, and while a follow-up
+  // commission is open that expectation is being measured against the
+  // COMMISSION (watchFollowUps). The marker says which of the two it is, so a
+  // number that suddenly counts from yesterday morning is not a riddle.
+  const uhr = runtimeClock(run)
+  if (uhr === 'none') return '–'
+  const followUp = uhr === 'followup'
+  const vonMs = Date.parse((followUp ? run.followup_since : run.started_at).replace(' ', 'T') + 'Z')
+  const laeuft = followUp || !run.ended_at
+  const endeMs = laeuft ? Date.now() : Date.parse(run.ended_at.replace(' ', 'T') + 'Z')
+  const min = Math.round((endeMs - vonMs) / 60000)
+  return `${t('unit.minutes', { n: min })}${laeuft ? ' (' + t(followUp ? 'run.followup_running' : 'run.running') + ')' : ''}`
 }
 
 /** The moment a run's clock really starts — or started. Null while it still waits to launch. */
@@ -2114,8 +2126,13 @@ export function sessionRow(s, ctx = {}) {
 
 export async function pageSessions(req, res, url) {
   const sessions = await listSessions()
+  // This page has just measured, so it PUBLISHES its reading instead of
+  // summing it privately: the status sidebar rendered into the same response
+  // then quotes the same number rather than an up-to-eight-minute-old one of
+  // its own. Both were honest before and they contradicted each other on
+  // screen — 31,3 GB in the headline, 32,2 GB in the sidebar beside it.
   const runningCount = sessions.filter(s => s.state === 'agent_running').length
-  const rssTotal = sessions.reduce((n, s) => n + s.resources.rssKb, 0)
+  const rssTotal = publishSessionMemory(sessions).rssKb
   const hours = Math.round(currentKeepMs() / 3_600_000 * 10) / 10
   const cleanup = cleanupSettings()
   const cleanupBox = cleanupConfigured(cleanup)

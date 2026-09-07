@@ -209,6 +209,7 @@
   "run.log": "日志（pipe-pane）",
   "run.no_log": "没有日志。",
   "run.running": "运行中",
+  "run.followup_running": "后续任务",
   "run.unknown_harness": "未知的 Coding Agent：{harness}",
   "run.harness_not_configured": "Coding Agent“{harness}”未配置或已停用 —— 请在设置 → Coding Agents 中添加。",
   "run.no_launch_spec": "无法启动编码代理“{harness}”：bin/fl-start 没有对应分支，插件也未声明 launch（参见 docs/plugins.md）。",

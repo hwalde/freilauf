@@ -1141,17 +1141,45 @@ export async function watchSandboxBlocks(jetztMs = Date.now()) {
  * The record timestamp cannot drift that way: it is what the agent wrote next
  * to what it wrote. The mtime stays as the fallback for a transcript that
  * carries no timestamp at all — better a witness that can be touched than none.
+ *
+ * **Only `output_tokens` is output.** The other three fields of the vendor's
+ * usage object — `input_tokens`, `cache_read_input_tokens` and
+ * `cache_creation_input_tokens` — are all prompt-side, which is what their
+ * names say and how they are billed; writing the prompt cache is an INPUT the
+ * model was handed, not a token it produced. Counting the cache creation as
+ * output made the figure on every claude run's page physically impossible, and
+ * a number nobody can arrive at is worse than no number: measured on run
+ * 8ee6a523, which ran 79 seconds and was credited with 416 105 output tokens —
+ * 5 267 tokens a second, where its transcript's own `output_tokens` come to
+ * 10 775 (136/s, the rate an opus actually writes at). The inflation is not a
+ * constant one can read past either: 38× there, 2.6× on 149a666b and
+ * 4e9d5819, because it is the cache traffic and not the answer that is being
+ * added. `test/echt.mjs` has summed the same three fields as input all along —
+ * this function was the one place in the repository that disagreed.
+ *
+ * **And a total is over the whole file.** This used to sum the last 500
+ * records, which is right for finding the newest timestamp and wrong for a
+ * sum: a run's token count then silently SHRANK as its transcript grew past
+ * the cap, and changed retroactively on every pass. Measured on 149a666b (684
+ * records): 104 885 output counted against 143 975 written, 27 % missing, and
+ * on 4e9d5819 35 %. Walking all of it is what a total means, and it is not
+ * what costs anything here — the caller has already read the whole file into
+ * memory, and on the largest transcript on this installation (12 MB, 6 968
+ * records) parsing every line takes 18 ms against the 28 ms the read itself
+ * needs.
  */
-export function claudeTranscriptReading(text, mtime, { lines: maxLines = 500 } = {}) {
+export function claudeTranscriptReading(text, mtime) {
   const out = { lastActivityMs: Number(new Date(mtime)), tokensIn: 0, tokensOut: 0 }
   let newestMs = null
-  for (const line of String(text ?? '').split('\n').filter(Boolean).slice(-maxLines)) {
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line) continue
     try {
       const j = JSON.parse(line)
       const u = j?.message?.usage
       if (u) {
         out.tokensIn += (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
-        out.tokensOut += (u.output_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
+          + (u.cache_creation_input_tokens ?? 0)
+        out.tokensOut += u.output_tokens ?? 0
       }
       const ts = Date.parse(j?.timestamp)
       if (Number.isFinite(ts) && (newestMs === null || ts > newestMs)) newestMs = ts

@@ -209,6 +209,7 @@
   "run.log": "Log (pipe-pane)",
   "run.no_log": "Kein Log.",
   "run.running": "läuft",
+  "run.followup_running": "Nachfolgeauftrag",
   "run.unknown_harness": "Unbekannter Coding Agent: {harness}",
   "run.harness_not_configured": "Coding Agent „{harness}“ ist nicht konfiguriert oder deaktiviert — unter Einstellungen → Coding Agents hinzufügen.",
   "run.no_launch_spec": "Coding-Agent \"{harness}\" kann nicht gestartet werden: bin/fl-start kennt ihn nicht und das Plugin deklariert keine launch-Spezifikation (siehe docs/plugins.md).",

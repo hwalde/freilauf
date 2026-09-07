@@ -586,33 +586,66 @@ let memCache = { at: 0, value: null }
 // before the assignment below; see usage.mjs for what that cost there.
 let memInflight = null
 
+/**
+ * One reading of `listSessions()` → the value the panel shows. The single
+ * builder, because the two callers below would otherwise be two sums over one
+ * list, and two sums are how the sidebar and the sessions page came to print
+ * different totals in one response (see publishSessionMemory).
+ */
+function memoryOf(sessions) {
+  return {
+    sessions: sessions.length,
+    running: sessions.filter(s => s.state === 'agent_running').length,
+    // listSessions() already substitutes the container's memory for a
+    // sandboxed session's pane tree, so this sum includes the containers by
+    // construction — the same "one reading, rendered in two places" rule the
+    // sidebar and the sessions page have always shared.
+    sandboxed: sessions.filter(s => s.sandbox).length,
+    // How many sessions could not be measured at all — a sandboxed one whose
+    // runtime did not answer. The total below is then INCOMPLETE, and the
+    // panel has to say so: a machine total that quietly leaves out a 200 MB
+    // container is the same lie as a quota bar that is two days old.
+    unmeasured: sessions.filter(s => s.resources?.unknown).length,
+    rssKb: sessions.reduce((sum, s) => sum + (s.resources?.rssKb ?? 0), 0),
+    measuredAtMs: Date.now(),
+    // The panel says how often this is taken, so a reading up to eight
+    // minutes old cannot pass itself off as live. It travels WITH the value
+    // because the TTL is configurable — a hardcoded "8" in a translation
+    // would be a lie the moment someone sets the variable.
+    intervalMs: MEM_CACHE_MS,
+  }
+}
+
+/**
+ * A caller that has just measured hands its reading over, and the sidebar
+ * quotes THAT instead of an older one of its own.
+ *
+ * The sessions page calls `listSessions()` itself — it needs a row per session
+ * — and then summed that list a second time for its headline while the status
+ * sidebar rendered into the very same response served the cached measurement.
+ * Both were honest and they contradicted each other on screen: measured
+ * 2026-09-07, the page said "31,3 GB" and the sidebar beside it "32,2 GB in 42
+ * Sessions", nearly a gigabyte apart, with nothing to tell the reader which of
+ * the two the machine was actually holding. The comment above `sessionMemory()`
+ * had claimed since it was written that the two are "the same number by
+ * construction"; this is what makes that true.
+ *
+ * It is a publish, not an invalidation: the page has already paid for the
+ * three shell-outs, so throwing that reading away and letting the next sidebar
+ * fragment pay for them again was waste on top of the contradiction.
+ */
+export function publishSessionMemory(sessions) {
+  const value = memoryOf(sessions)
+  memCache = { at: Date.now(), value }
+  return value
+}
+
 export async function sessionMemory({ force = false } = {}) {
   const cached = memCache.value
   if (!force && cached && Date.now() - memCache.at < MEM_CACHE_MS) return cached
   if (memInflight) return !force && cached ? cached : memInflight
   const task = (async () => {
-    const sessions = await listSessions()
-    const value = {
-      sessions: sessions.length,
-      running: sessions.filter(s => s.state === 'agent_running').length,
-      // listSessions() already substitutes the container's memory for a
-      // sandboxed session's pane tree, so this sum includes the containers by
-      // construction — the same "one reading, rendered in two places" rule the
-      // sidebar and the sessions page have always shared.
-      sandboxed: sessions.filter(s => s.sandbox).length,
-      // How many sessions could not be measured at all — a sandboxed one whose
-      // runtime did not answer. The total below is then INCOMPLETE, and the
-      // panel has to say so: a machine total that quietly leaves out a 200 MB
-      // container is the same lie as a quota bar that is two days old.
-      unmeasured: sessions.filter(s => s.resources?.unknown).length,
-      rssKb: sessions.reduce((sum, s) => sum + (s.resources?.rssKb ?? 0), 0),
-      measuredAtMs: Date.now(),
-      // The panel says how often this is taken, so a reading up to eight
-      // minutes old cannot pass itself off as live. It travels WITH the value
-      // because the TTL is configurable — a hardcoded "8" in a translation
-      // would be a lie the moment someone sets the variable.
-      intervalMs: MEM_CACHE_MS,
-    }
+    const value = memoryOf(await listSessions())
     memCache = { at: Date.now(), value }
     return value
   })()

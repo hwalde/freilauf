@@ -6162,8 +6162,29 @@ try {
     const r = claudeTranscriptReading(text, mtime)
     equal(r.lastActivityMs, Date.parse('2026-09-06T15:12:23.443Z'),
       'the newest record wins over an mtime three hours later')
-    equal(r.tokensIn, 15, 'input and cache reads are one number')
-    equal(r.tokensOut, 10, 'output and cache creation are the other')
+    equal(r.tokensIn, 18, 'input, cache reads and cache writes are one number')
+    equal(r.tokensOut, 7, 'and only what the model wrote is output')
+    // Only `output_tokens` is output. The cache creation is a prompt-side
+    // field — the vendor's own name says so and bills it that way — and adding
+    // it to the output made the number on every claude run's page impossible
+    // to arrive at: run 8ee6a523 ran 79 seconds and was credited with 416 105
+    // output tokens, 5 267 a second, where its transcript's own output_tokens
+    // come to 10 775. `test/echt.mjs` has counted the same three fields as
+    // input all along; the watcher was the one place that disagreed.
+    const cached = claudeTranscriptReading(
+      record('2026-09-06T15:12:24.000Z', { input_tokens: 4, cache_creation_input_tokens: 400, output_tokens: 11 }),
+      mtime)
+    equal(cached.tokensOut, 11, 'writing the prompt cache is not something the model wrote')
+    equal(cached.tokensIn, 404, 'it is a prompt the model was handed, so it counts as input')
+    // A total is over the whole file. Summing only the tail made a run's token
+    // count SHRINK as its transcript grew past the cap, and change
+    // retroactively on every pass: 149a666b was credited with 104 885 of the
+    // 143 975 output tokens it had written, 27 % of them missing.
+    const many = Array.from({ length: 600 }, (_, i) =>
+      record(`2026-09-06T15:${String(i % 60).padStart(2, '0')}:00.000Z`, { output_tokens: 1, input_tokens: 2 })).join('\n')
+    const all = claudeTranscriptReading(many, mtime)
+    equal(all.tokensOut, 600, 'every record counts, not the last five hundred')
+    equal(all.tokensIn, 1200, 'on both sides of the sum')
     // Out-of-order records still yield the newest — the file is appended to by
     // one writer, but a sidechain arriving late must not move the answer back.
     equal(claudeTranscriptReading([record('2026-09-06T15:12:23.443Z'), record('2026-09-06T15:00:00.000Z')].join('\n'), mtime)
@@ -6221,6 +6242,34 @@ try {
     await new Promise(r => setTimeout(r, 300))
     const b = await se.sessionMemory()
     isTrue(b.measuredAtMs >= a.measuredAtMs, 'and behind it a fresh measurement landed')
+    se._sessionMemoryReset()
+  })
+
+  await check('a caller that has just measured publishes its reading, so there is one total', async () => {
+    // The sessions page calls listSessions() itself — it needs a row per
+    // session — and used to sum that list a second time for its headline while
+    // the sidebar rendered into the SAME response served the cached
+    // measurement. Both honest, and contradicting each other on screen:
+    // measured 2026-09-07, "31,3 GB" in the headline against "32,2 GB in 42
+    // Sessions" in the sidebar beside it, nearly a gigabyte apart.
+    se._sessionMemoryReset()
+    const sessions = [
+      { name: 'a', state: 'agent_running', sandbox: null, resources: { rssKb: 1000 } },
+      { name: 'b', state: 'run_ended', sandbox: null, resources: { rssKb: 2000 } },
+      // A sandboxed session whose runtime did not answer: it counts as a
+      // session, adds nothing to the sum, and is named as unmeasured — the sum
+      // is then incomplete and the panel has to be able to say so.
+      { name: 'c', state: 'run_ended', sandbox: 1, resources: { unknown: true } },
+    ]
+    const published = se.publishSessionMemory(sessions)
+    equal(published.rssKb, 3000, 'the published total is the sum of the reading it was handed')
+    equal(published.sessions, 3, 'and it counts every session in it')
+    equal(published.running, 1, 'the working ones')
+    equal(published.unmeasured, 1, 'and the ones nothing could be measured for')
+    // The point of the whole thing: the sidebar now quotes THAT reading rather
+    // than measuring a second one behind the page's back.
+    equal((await se.sessionMemory()).rssKb, 3000,
+      'the sidebar in the same response quotes the page’s number, not one of its own')
     se._sessionMemoryReset()
   })
 
@@ -7021,6 +7070,30 @@ try {
       isTrue(['running', 'waiting_input'].includes(displayStatus(row)) && !archivable(row),
         `a row displaying as ${displayStatus(row)} is not archivable`)
     }
+  })
+
+  await check('runtimeClock: the duration is measured on the clock the alarm was raised off', async () => {
+    // The cell pairs a duration with `expected_minutes`, and the follow-up
+    // overrun is raised by measuring `followup_since` against that same
+    // expectation. While the two used different starts the row contradicted
+    // itself: run 49a26807 read "477 Min. / 800 Min." — comfortably inside —
+    // beside a red "follow-up far over the expected duration", because the
+    // commission had been open for 24 hours and nothing showed that number.
+    const { runtimeClock } = await import('../server/run-state.mjs')
+    equal(runtimeClock({ status: 'running', started_at: 'x' }), 'attempt', 'an ordinary run')
+    equal(runtimeClock({ status: 'done', started_at: 'x', ended_at: 'y' }), 'attempt', 'and a finished one')
+    equal(runtimeClock({ status: 'done', started_at: 'x', ended_at: 'y', followup_since: 'z' }), 'followup',
+      'an open commission is what the pair is about')
+    equal(runtimeClock({ status: 'failed', started_at: 'x', followup_since: 'z' }), 'followup',
+      'whatever the first attempt ended as')
+    // A follow-up in the finish gate has no commission clock at all — its
+    // deadline is the gate's — so the pair stays on the attempt rather than
+    // inventing a start.
+    equal(runtimeClock({ status: 'done', started_at: 'x', followup_open: 1 }), 'attempt',
+      'a follow-up in the gate keeps the attempt’s clock')
+    equal(runtimeClock({ status: 'scheduled' }), 'none', 'a run that has not started has no duration')
+    equal(runtimeClock({ status: 'deferred' }), 'none', 'nor one waiting for quota')
+    equal(runtimeClock(null), 'none', 'no run, no clock')
   })
 
   await check('branchOnRemote: behind-only is pushed, no upstream is not', async () => {
