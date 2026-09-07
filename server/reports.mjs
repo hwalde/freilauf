@@ -83,16 +83,41 @@ export function reportTokenOk(runId, token) {
 // show. Two rules every hook has to keep, because each was measured to go wrong
 // otherwise: a SUBAGENT's end is never "waiting" (opencode fires session.idle
 // for every child session, claude fires SubagentStop — the parent is still
-// working), and a state is only written when it CHANGES, so a hook firing on
-// every tool call costs one UPDATE and no event.
+// working), and an EVENT is only written when the state CHANGES, so a hook
+// firing on every tool call costs one UPDATE and no event.
 
 /**
  * Record what the agent's hook said. Returns true when the state changed —
  * and only then writes an event, so the live channel re-renders the row.
+ *
+ * **The moment is refreshed even when the word repeats**, and that half is
+ * load-bearing rather than tidy. `agent_state_at` is one side of
+ * `agentWaiting()`'s staleness fence (run-state.mjs): the agent's word counts
+ * unless measured activity runs more than `ATTENTION_STALE_MS` past it. A mark
+ * that only ever moves on a CHANGE is not "when the agent last said this", it
+ * is "when it first said this" — so an agent that keeps re-asserting the same
+ * word never renews its own witness, and any activity that ever happened after
+ * the first assertion is read as a contradiction for the rest of the run.
+ *
+ * Measured 2026-09-07 on run 4eeaa0bc (the same run whose latched mark
+ * `ATTENTION_STALE_MS` was written for, one turn of the screw further on): its
+ * claude ends a turn about every 32 minutes and says `idle` one minute after
+ * each one, so the freshest word is always "waiting" — while `agent_state_at`
+ * stood at 2026-09-06 16:06:05 and `last_activity_at` at 2026-09-07 11:48:17.
+ * `agentWaiting()` therefore answered false all day, the `no_activity`
+ * watchdog ran under an agent sitting at its prompt, and the run wrote and
+ * retracted `anomaly:no_activity` eight times in four hours — a yellow dot on
+ * the overview twice an hour, each write and each retraction a publish on the
+ * live channel. The fence still catches what it was built for: during a
+ * working stretch no `waiting` hook fires, so the transcript grows past the
+ * mark and the contradiction stands.
  */
 export function noteAgentState(run, state, source) {
   if (!run || !['working', 'waiting'].includes(state)) return false
-  if (run.agent_state === state) return false
+  if (run.agent_state === state) {
+    db.prepare(`UPDATE runs SET agent_state_at=datetime('now') WHERE id=?`).run(run.id)
+    return false
+  }
   db.prepare(`UPDATE runs SET agent_state=?, agent_state_at=datetime('now') WHERE id=?`).run(state, run.id)
   addEvent(run.id, state === 'waiting' ? 'agent_waiting' : 'agent_working', { source })
   run.agent_state = state

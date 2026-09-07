@@ -20,6 +20,42 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A run whose agent kept saying "I am waiting" was called idle every half
+  hour anyway.** The hub believes a coding agent's own word about whether it is
+  working or sitting at its prompt, unless measured activity runs past the
+  moment it said so — but the moment was only recorded when the word CHANGED,
+  so an agent that kept repeating itself never renewed its own witness and any
+  activity that ever happened afterwards counted as a contradiction for the rest
+  of the run. Measured on run 4eeaa0bc: its claude ended a turn about every 32
+  minutes and reported itself idle a minute after each one, while the recorded
+  moment stood a day behind — so the "no activity" watchdog ran under an agent
+  that was demonstrably at its prompt, and the run wrote and retracted
+  `anomaly:no_activity` 41 times in 29 hours. Each of those was a yellow dot on
+  the overview and a refresh in every open browser. The moment is now renewed
+  whenever the agent says the same thing again; the event, and with it the live
+  update, is still written only on a real change.
+
+- **A blocked merge said "integration error" and nowhere said which one.**
+  `blocked_error` covers every git, network, auth and pre-push-hook failure
+  there is, and the sentence that tells them apart was recorded and then shown
+  to no one: the run's event list renders event kinds only, so a run whose push
+  was refused offered five identical `merge_error` lines and no cause, and the
+  only route to it was reading the database by hand. The detail page's
+  Integration block now carries the reason behind a fold, from the same record
+  the notification is built from, so the page and the message cannot disagree.
+
+- **…and that reason had been cut off before the part that explains anything.**
+  It kept the first 1200 characters, while a hook's verdict is its last line and
+  its evidence is everything before it. Measured on run 149a666b: the operator's
+  private-value guard printed 33 lines about hits it waved through and only then
+  the file it actually refused over — the cause sat at offset 3325 of 4089 and
+  the record held none of it. Both ends are kept now, tail-weighted, with the
+  number of dropped lines named in between; the excerpt reaches 4000 characters,
+  which is what a failed merge check next to it already kept. The message sent
+  to the operator is excerpted the same way instead of keeping its first 300
+  characters, which were git's "failed to push" — something the word "blocked"
+  beside it had already said.
+
 - **A run with an open follow-up showed a duration that had nothing to do with
   the alarm next to it.** The "duration / expectation" pair and the follow-up
   overrun both measure against the same `expected_minutes`, but from different

@@ -1609,6 +1609,31 @@ export function mergeText(status) {
 }
 
 /**
+ * Why a merge did not go through, in the operator's own words rather than in
+ * the hub's.
+ *
+ * `blocked_error` is one word for every git, network, auth and hook failure
+ * there is, and the sentence that tells them apart was written down and then
+ * shown to nobody: the `merge_error` event carries it, the events list on this
+ * page renders event KINDS only, and the incident's own evidence line says
+ * `blocked_error: run <id> → main`. So the page read "blocked: integration
+ * error" and the only route to the cause was reading the events table by hand
+ * — measured on run 149a666b, five identical `merge_error` lines under a
+ * banner that named none of them, and again on 0c1fc610 three days earlier.
+ * The message on the operator's phone had the reason all along; the page they
+ * open BECAUSE of that message did not.
+ *
+ * Deliberately the same source `escalate()` reads for that message (the newest
+ * `merge_error` of the run), so the two cannot say different things, and folded
+ * away because it is a hook's whole output and not a headline.
+ */
+export function mergeBlockReason(runId) {
+  const row = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='merge_error'
+    ORDER BY id DESC LIMIT 1`).get(runId)
+  try { return String(JSON.parse(row?.payload ?? '{}').reason ?? '').trim() } catch { return '' }
+}
+
+/**
  * Where this run's work stands — and the buttons that move it.
  *
  * Only rendered where the repo asked the hub to integrate; with merge_mode 'off'
@@ -1654,8 +1679,15 @@ export function integrationSection(run, repo) {
   }
   if (/^(blocked_|unmerged_)/.test(unmerged)) buttons.push(btn('merge-skip', 'merge.skip'))
 
+  // What `blocked_error` and `blocked_no_remote` actually mean for THIS run.
+  // Only those two: a conflict is named by its file list and a dirty worktree
+  // by the M1 message, while these two are a bare word standing in for
+  // anything a git command or a pre-push hook can say.
+  const why = ['blocked_error', 'blocked_no_remote'].includes(unmerged) ? mergeBlockReason(run.id) : ''
+
   return `<div class="banner waiting" id="run-integration">
     <b>${e(t('merge.section'))}:</b> ${zeilen.join(' · ') || `<span class="dim">–</span>`}
+    ${why ? `<details class="merge-why"><summary>${e(t('merge.why'))}</summary><pre>${e(why)}</pre></details>` : ''}
     ${resume ? `<div class="dim">${e(t('merge.resume'))}: <code>${e(resume)}</code></div>` : ''}
     ${buttons.length ? `<div class="btn-row">${buttons.join('')}</div>` : ''}
   </div>`

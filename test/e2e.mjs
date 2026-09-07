@@ -2094,6 +2094,32 @@ try {
       equal(lauf(RA).agent_state, 'waiting', 'waiting again')
     })
 
+    await check('a repeated word renews the mark, so the fence measures against the LAST one', async () => {
+      // agentWaiting()'s staleness fence (run-state.mjs) reads `agent_state_at`
+      // as "when the agent last said this". A mark that only moved on a CHANGE
+      // said "when it FIRST said this", so an agent re-asserting the same word
+      // never renewed its own witness and every later activity stayed a
+      // contradiction for the rest of the run. Measured on run 4eeaa0bc: a
+      // claude ending a turn every ~32 minutes and saying `idle` a minute after
+      // each one, with the mark stuck a day behind — so the `no_activity`
+      // watchdog ran under an agent sitting at its prompt and the run wrote and
+      // retracted `anomaly:no_activity` eight times in four hours.
+      const { agentWaiting } = await import('../server/run-state.mjs')
+      equal(lauf(RA).agent_state, 'waiting', 'the agent says it waits')
+      db.prepare(`UPDATE runs SET agent_state_at=datetime('now','-1 day'),
+                  last_activity_at=datetime('now','-20 minutes') WHERE id=?`).run(RA)
+      isFalse(agentWaiting(lauf(RA)), 'activity a day past the mark contradicts it')
+      const before = ereignisse(RA).filter(k => k === 'agent_waiting').length
+      isTrue((await flReport(RA, ['_waiting'])).ok, 'the agent says it again')
+      const l = lauf(RA)
+      equal(ereignisse(RA).filter(k => k === 'agent_waiting').length, before,
+        'still no event — nothing changed for the live channel')
+      isTrue(l.agent_state_at > l.last_activity_at, 'but the moment moved to the fresh word')
+      isTrue(agentWaiting(l), 'so the agent is believed again')
+      const html = await (await fetchPath(`/runs/${RA}`)).text()
+      contains(html, 'Waiting for input', 'and the page says what the agent last said')
+    })
+
     await check('a key typed into the browser terminal answers the wait — before any hook does', async () => {
       // The agent's hooks say "working" on Enter (claude, cursor, hermes) or on
       // the first token (opencode) and never for a half-typed line, a menu or a
@@ -4790,6 +4816,20 @@ try {
       equal(kinds.filter(k => k === 'finish_escalated').length, 1, 'escalated once')
       equal(lauf(l.id).merge_status, 'blocked_error', 'and it says why')
       equal(lauf(l.id).finish_state, null, 'the run has left the loop')
+
+      // …and "blocked_error" is one word for every git, network, auth and hook
+      // failure there is. The sentence that tells them apart was recorded and
+      // then shown to nobody: the events list renders KINDS only, so the page a
+      // human opens because of that alarm named five identical `merge_error`
+      // lines and no cause (measured on runs 149a666b and 0c1fc610).
+      const { escapeHtml } = await import('../server/util.mjs')
+      const why = JSON.parse(db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='merge_error'
+        ORDER BY id DESC LIMIT 1`).get(l.id).payload).reason
+      isTrue(!!why, `git said why (${String(why).split('\n')[0]})`)
+      const page = await (await fetchPath(`/runs/${l.id}`)).text()
+      contains(page, 'Why it did not go through', 'the detail page offers the reason')
+      contains(page, escapeHtml(String(why).split('\n').at(-1)),
+        'and it is the same text the message on the phone carries')
 
       // Nothing may pick it back up: a human has been called, and no leftover
       // retry may merge, push or alarm behind their back.

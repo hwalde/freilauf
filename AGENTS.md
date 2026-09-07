@@ -2053,6 +2053,21 @@ five attempts collapsed into twenty seconds.
 | no `origin` remote | `blocked_no_remote` | incident + notification; the hub never merges in the operator's checkout |
 | ended `failed`/`aborted` | `unmerged_*` | never merged automatically — named, backed up, and the operator decides |
 
+**`blocked_error` is one word for everything git, a network, an auth check or a
+pre-push hook can refuse over, so the sentence that tells them apart has to
+reach the operator — and it has now failed to twice, at two different points.**
+It is stored in the `merge_error` event and read from there by exactly two
+places: `escalate()` for the message, and `integrationSection()` (pages.mjs,
+`mergeBlockReason()`) for the fold on the detail page. That fold is the newer
+half: the run's event list renders event KINDS, so a refused push showed five
+identical `merge_error` lines and no cause, and the page a human opens *because*
+of the alarm said less than the alarm did (runs 149a666b and 0c1fc610). And both
+excerpts go through **`failureExcerpt()`**, which keeps both ENDS: a verdict
+comes last and its evidence comes before it, so `slice(0, n)` keeps the half
+nobody needs — measured on 149a666b, where the hook printed 33 `excused:` lines
+and the cause sat at offset 3325 of 4089 while the stored 1200 held none of it.
+Raising the cap only moves the cliff; what was dropped is named in between.
+
 A **conflict run** is an ordinary single run through `startRun()`: budget gate,
 title, overview, watcher, incidents, and the same finish gate at its end. Its
 setup lives under Settings → Merge and goes back into a run the one way there
@@ -2990,7 +3005,15 @@ none — with `agent_state_at`. Two report kinds carry it (`fl-report _working`,
 `fl-report _waiting`), and `_turn_end` implies `waiting` for every CLI that
 stays up after its turn. `noteAgentState()` in reports.mjs writes an event
 (`agent_working` / `agent_waiting`) **only on a change**, which is what lets a
-hook fire on every tool call without filling the events table. What each
+hook fire on every tool call without filling the events table — but it refreshes
+`agent_state_at` **every time**, because that column is one side of the
+staleness fence below and means "when the agent last said this". While it moved
+only on a change it meant "when it first said this", so an agent repeating
+itself never renewed its own witness: measured 2026-09-07 on run 4eeaa0bc, whose
+claude ended a turn every ~32 min and reported `idle` a minute later while the
+mark stood a day behind, so `agentWaiting()` answered false all day and the run
+wrote and retracted `anomaly:no_activity` 41 times in 29 hours — a yellow dot
+twice an hour, and a live-channel publish each way. What each
 built-in wires, all four measured on 2026-09-05 in a tmux session:
 
 | Coding agent | working | waiting | where the hook lives |
@@ -3109,7 +3132,10 @@ session's status only. claude's `SubagentStop` fires with the MAIN session's id
   never overrules a hook; and the margin is four orders of magnitude above the
   measured 20 ms by which claude's transcript trails its own Stop hook. The
   watcher asks with THIS pass's reading, for the reason `lastActAt` beside it
-  already did. The SQL twin needs **two** COALESCEs and the parity test found
+  already did. **And both sides of that comparison have to be honest**, which
+  is why `noteAgentState()` renews the mark on a repeated word: a witness that
+  cannot move turned the fence into a permanent verdict of "latched", the exact
+  opposite failure, on the very same run. The SQL twin needs **two** COALESCEs and the parity test found
   both: `agent_state = 'waiting'` on a NULL column is NULL, not false, so a
   bare `NOT (…)` around it selects nothing at all.
 - **Cleared with the session.** `_exit`, `_pane_died`, the kill route, the
