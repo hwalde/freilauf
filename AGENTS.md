@@ -2284,6 +2284,21 @@ lesson). `runs.followup_since` carries it, and three things hang on it:
   watcher finds the pane dead (`followup_agent_gone`): a process that exited
   can never report, so waiting out the deadline would only produce a
   misleading alarm.
+- **…and the pair on the page is measured on that same clock**
+  (`runtimeClock()` in run-state.mjs, asked by the overview's cell and by
+  `fmtRuntime()`). "Duration / expectation" is two numbers about ONE
+  expectation, and the two came from different starts: the cell counted the
+  first attempt while the alarm counted the commission. Measured 2026-09-07 on
+  run 49a26807 — the row read "477 Min. / 800 Min.", comfortably inside, beside
+  a red "follow-up far over the expected duration" raised because the
+  commission had been open 24 hours; neither cell was wrong alone, and the one
+  number that would have explained the dot was the one the row did not carry.
+  Everything else about such a row had already switched frames (the status
+  word, the sort, the sidebar's counts), so this is the pair catching up rather
+  than a new opinion, and the runtime line names the clock
+  (`run.followup_running`). A follow-up in the finish GATE keeps the attempt's
+  clock deliberately: there the deadline is the gate's own and
+  `watchFollowUps()` raises nothing.
 - **The duration stays editable while the commission is open**
   (`runEditAllowed()`): a finished run with `followup_since`/`followup_open`
   allows exactly what a running one does — the live-read expected duration.

@@ -96,6 +96,42 @@ const WAITING_SQL = `(COALESCE(agent_state, '') = 'waiting' AND NOT COALESCE(
   julianday(last_activity_at) - julianday(agent_state_at) > ${ATTENTION_STALE_MS / 86_400_000}, 0))`
 
 /**
+ * WHICH clock the "duration / expectation" pair is about.
+ *
+ *   'none'      the run has not started — there is no duration yet
+ *   'followup'  a follow-up commission is open: measure from `followup_since`
+ *   'attempt'   the ordinary one, `started_at` → `ended_at` (or now)
+ *
+ * The pair is two numbers about one expectation, and they came from two
+ * different clocks. `watchFollowUps()` measures a commission from
+ * `followup_since` against `runs.expected_minutes` and raises
+ * `anomaly:followup_overrun` off THAT — while the cell that shows a duration
+ * against that very expectation went on showing the first attempt's. Measured
+ * 2026-09-07 on run 49a26807: its overview row read "477 Min. / 800 Min." —
+ * comfortably inside — with a red dot and "follow-up far over the expected
+ * duration" in the cell beside it, because the commission had been open for 24
+ * hours. Neither cell was wrong on its own and together they were unreadable:
+ * the number that would have explained the alarm was the one number the row
+ * did not show.
+ *
+ * Everything else about such a row has already switched to the follow-up's
+ * frame — the status word (`displayStatus()`), the sort, the sidebar's counts,
+ * the anomaly and the message it sends — so this is the pair catching up with
+ * them, not a new opinion.
+ *
+ * `followup_open` with no `followup_since` stays on the attempt's clock
+ * deliberately: that is a follow-up in the finish gate, where the deadline is
+ * the gate's own and `watchFollowUps()` raises nothing at all.
+ *
+ * Pure, like everything here — the caller parses the timestamps, this only
+ * says which of them to read.
+ */
+export function runtimeClock(run) {
+  if (!run || run.status === 'scheduled' || run.status === 'deferred') return 'none'
+  return followUpActive(run) && run.followup_since ? 'followup' : 'attempt'
+}
+
+/**
  * The status word a run displays under.
  *
  *   waiting_input   the agent's turn is over and it waits for a human — on a

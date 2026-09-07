@@ -20,6 +20,19 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A run with an open follow-up showed a duration that had nothing to do with
+  the alarm next to it.** The "duration / expectation" pair and the follow-up
+  overrun both measure against the same `expected_minutes`, but from different
+  starts: the cell counted the first attempt, the alarm counted the commission.
+  So run 49a26807's row read "477 Min. / 800 Min." — comfortably inside — with a
+  red dot and "follow-up far over the expected duration" beside it, because the
+  commission had been open for 24 hours and that number appeared nowhere.
+  Neither cell was wrong on its own and together they were unreadable. While a
+  commission is open the pair is now about the commission, like the status word,
+  the sort and the sidebar's counts already were, and the detail page's runtime
+  line marks which clock it is on. A follow-up sitting in the finish gate keeps
+  the attempt's clock, because there the deadline is the gate's own.
+
 - **A claude run's token counts were wrong in both directions at once, and the
   "out" figure was one no model could have produced.** The transcript reader
   added `cache_creation_input_tokens` — a prompt-side field, named and billed as

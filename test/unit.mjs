@@ -7072,6 +7072,30 @@ try {
     }
   })
 
+  await check('runtimeClock: the duration is measured on the clock the alarm was raised off', async () => {
+    // The cell pairs a duration with `expected_minutes`, and the follow-up
+    // overrun is raised by measuring `followup_since` against that same
+    // expectation. While the two used different starts the row contradicted
+    // itself: run 49a26807 read "477 Min. / 800 Min." — comfortably inside —
+    // beside a red "follow-up far over the expected duration", because the
+    // commission had been open for 24 hours and nothing showed that number.
+    const { runtimeClock } = await import('../server/run-state.mjs')
+    equal(runtimeClock({ status: 'running', started_at: 'x' }), 'attempt', 'an ordinary run')
+    equal(runtimeClock({ status: 'done', started_at: 'x', ended_at: 'y' }), 'attempt', 'and a finished one')
+    equal(runtimeClock({ status: 'done', started_at: 'x', ended_at: 'y', followup_since: 'z' }), 'followup',
+      'an open commission is what the pair is about')
+    equal(runtimeClock({ status: 'failed', started_at: 'x', followup_since: 'z' }), 'followup',
+      'whatever the first attempt ended as')
+    // A follow-up in the finish gate has no commission clock at all — its
+    // deadline is the gate's — so the pair stays on the attempt rather than
+    // inventing a start.
+    equal(runtimeClock({ status: 'done', started_at: 'x', followup_open: 1 }), 'attempt',
+      'a follow-up in the gate keeps the attempt’s clock')
+    equal(runtimeClock({ status: 'scheduled' }), 'none', 'a run that has not started has no duration')
+    equal(runtimeClock({ status: 'deferred' }), 'none', 'nor one waiting for quota')
+    equal(runtimeClock(null), 'none', 'no run, no clock')
+  })
+
   await check('branchOnRemote: behind-only is pushed, no upstream is not', async () => {
     // The watcher spends this as "does work live only on this machine". The
     // integrator merges the branch into the base branch and pushes THAT, which
