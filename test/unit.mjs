@@ -6287,6 +6287,39 @@ try {
     equal(ig.nextCheckDelayMs(NaN), 5000, 'no timestamp: as at the start')
   })
 
+  await check('a failure is excerpted from BOTH ends, because the verdict comes last', () => {
+    // Measured on run 149a666b: the operator's pre-push hook printed 33
+    // `excused:` lines and only then the file it refused over. The cause sat at
+    // offset 3325 of 4089 characters, and `reason: err.slice(0, 1200)` stored
+    // none of it — so `merge_status` said `blocked_error` with a reason that
+    // named no error, twice in three days.
+    const noise = Array.from({ length: 40 }, (_, i) => `excused: file-${i}.mjs:${i}: a line that was looked at and waved past`)
+    const raw = ['ABORT: private values found', "error: failed to push some refs to 'origin'", ...noise,
+      'FORBIDDEN PATTERN: the thing it really refused over', 'HEAD:GATES.md:19: the offending line'].join('\n')
+    const cut = ig.failureExcerpt(raw, 1200)
+    isTrue(cut.length <= 1200, `within the budget (${cut.length})`)
+    contains(cut, 'FORBIDDEN PATTERN', 'the verdict survives')
+    contains(cut, 'HEAD:GATES.md:19', 'and the line it names')
+    contains(cut, 'ABORT: private values found', 'so does the head, which says what kind of failure it was')
+    contains(cut, 'omitted by Freilauf', 'and what was dropped is named, not silently missing')
+    isFalse(raw.slice(0, 1200).includes('FORBIDDEN PATTERN'), 'which the old head-first cap could not do')
+  })
+
+  await check('an excerpt cuts whole lines, and a short text is left alone', () => {
+    equal(ig.failureExcerpt('short and sweet', 1200), 'short and sweet', 'nothing to cut')
+    equal(ig.failureExcerpt('', 1200), '', 'nothing at all')
+    equal(ig.failureExcerpt(null, 1200), '', 'not even a string')
+    const lines = Array.from({ length: 60 }, (_, i) => `line ${i} ${'x'.repeat(40)}`)
+    const cut = ig.failureExcerpt(lines.join('\n'), 600)
+    isTrue(cut.split('\n').every(l => l.startsWith('line ') || l.startsWith('[…')),
+      'every kept line is a whole line')
+    contains(cut, 'line 59', 'the end is kept')
+    // One line longer than the whole budget: its END is the verdict.
+    const single = 'y'.repeat(500) + 'THE-REASON'
+    equal(ig.failureExcerpt(single, 100).slice(-10), 'THE-REASON', 'a single long line keeps its end')
+    equal(ig.failureExcerpt(single, 100).length, 100, 'and only the budget')
+  })
+
   await check('what the hub put into the worktree is not the agent’s dirt', () => {
     const porcelain = [
       '?? referenz',

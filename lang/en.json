@@ -1186,6 +1186,7 @@
   "settings.merge_hint": "Conflict resolver: {setup}",
   "merge.section": "Integration",
   "merge.resume": "Resume",
+  "merge.why": "Why it did not go through",
   "merge.resolver_run": "conflict run",
   "merge.original_run": "original run",
   "merge.mark_done": "Mark as done",

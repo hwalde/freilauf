@@ -1186,6 +1186,7 @@
   "settings.merge_hint": "Konfliktlöser: {setup}",
   "merge.section": "Integration",
   "merge.resume": "Fortsetzen",
+  "merge.why": "Woran es lag",
   "merge.resolver_run": "Konflikt-Lauf",
   "merge.original_run": "Ursprungslauf",
   "merge.mark_done": "Als fertig markieren",

@@ -610,6 +610,11 @@ button.act:hover { color: var(--accent-act-hover); background: var(--accent-soft
 .pager .btn { padding: var(--sp-5) var(--sp-12); }
 /* A waiting run is not an incident — the banner must not look like one. */
 .banner.waiting { border-left-color: var(--warn-deep); background: var(--warn-deep-soft); }
+/* Why a merge did not go through: a hook's whole output, folded away inside the
+   integration banner. `pre` above already bounds and scrolls it; the summary
+   only needs to look like the clickable thing every other <details> here is. */
+details.merge-why > summary { cursor: pointer; }
+details.merge-why > pre { margin-top: var(--sp-8); }
 
 /* ---- overview: one statement, one cell ----
    Traffic light, status word and "last anomaly" used to sit in three cells

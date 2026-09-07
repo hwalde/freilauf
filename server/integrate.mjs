@@ -161,6 +161,64 @@ export function formatFiles(files, max = 30) {
 // ---------------------------------------------------------------- pure logic
 
 /**
+ * The excerpt of a git/hook failure that a human is shown.
+ *
+ * A verdict comes LAST. git prints its detail and then `error: failed to push
+ * some refs`; a pre-push hook prints every line it examined and then the
+ * sentence that says why it refused. So a cap that keeps the FIRST n characters
+ * keeps the part nobody needs, and this file has now paid for that twice:
+ *
+ *  - 2026-09-04 the recorded reason was `stderr || stdout`, and the hook had
+ *    said why on stdout — fixed by joining both streams and raising the cap
+ *    from 300 to 1200, with the comment "a cap that ends inside the noise is
+ *    the same failure as dropping stdout entirely";
+ *  - 2026-09-07, run 149a666b: the same hook refused a push over a committed
+ *    file holding scratchpad paths, and printed 33 lines of `excused:` before
+ *    it. The cause sat at offset 3325 of 4089 characters, the stored 1200 held
+ *    none of it, and `merge_status` again said `blocked_error` with a reason
+ *    that named no error.
+ *
+ * Raising the cap again would only move the cliff. Both ENDS are kept instead,
+ * tail-weighted because that is where the verdict is, and what was dropped is
+ * named rather than silently missing — 4000 characters for the event, which is
+ * what `finish_check_failed` next door already keeps of a red merge check, so
+ * the two records of "this did not go through" agree.
+ *
+ * Whole lines only, so nothing is cut mid-path. A single line longer than the
+ * budget keeps its end, for the same reason the split is tail-weighted.
+ *
+ * The marker in the middle stays **English and does not go through `t()`**, and
+ * that is a decision rather than an oversight. What it sits inside is git's and
+ * a hook's own output, which is English whatever the operator's UI language —
+ * one translated sentence in the middle of an untranslated wall reads worse
+ * than none. It is also frozen into the `merge_error` event at merge time and
+ * reused for the notification, so translating it here would pin it to whatever
+ * language happened to be set that minute and push it into a message that is
+ * English by rule.
+ */
+export function failureExcerpt(text, max = 4000, headShare = 0.25) {
+  const s = String(text ?? '').trim()
+  if (s.length <= max) return s
+  const lines = s.split('\n')
+  const head = []
+  let used = 0
+  for (const line of lines) {
+    if (used + line.length + 1 > Math.floor(max * headShare)) break
+    head.push(line); used += line.length + 1
+  }
+  const tail = []
+  for (let i = lines.length - 1; i >= head.length; i--) {
+    if (used + lines[i].length + 1 > max) break
+    tail.unshift(lines[i]); used += lines[i].length + 1
+  }
+  const dropped = lines.length - head.length - tail.length
+  if (dropped <= 0) return s
+  // Neither end fitted: one very long line. Its end is the verdict.
+  if (!head.length && !tail.length) return s.slice(-max)
+  return [...head, `[… ${dropped} line(s) omitted by Freilauf …]`, ...tail].join('\n')
+}
+
+/**
  * How long until the next check of a waiting run.
  *
  * Dense at the start, because an agent that is told "commit first" usually does
@@ -1309,10 +1367,10 @@ async function integrateOne(runId, opts = {}) {
     }
     const n = (pushFails.get(runId) ?? 0) + 1
     pushFails.set(runId, n)
-    // 1200 and not 300: with both streams joined, the noise comes first (it is
-    // stderr) and the sentence that names the cause comes after it. A cap that
-    // ends inside the noise is the same failure as dropping stdout entirely.
-    addEvent(runId, 'merge_error', { reason: err.slice(0, 1200), attempt: n })
+    // Both ENDS, not the first n characters: a hook's verdict is its last line
+    // and its evidence is everything before it (failureExcerpt() carries the
+    // two measurements). This is the one place a blocked merge is explained.
+    addEvent(runId, 'merge_error', { reason: failureExcerpt(err), attempt: n })
     // A merge that cannot be pushed is not a merge. Throw it away rather than
     // leave a "merged, but only locally" state behind — origin is the truth.
     await sh('git', ['-C', dir, 'reset', '--hard', `origin/${repo.base_branch}`])
@@ -1560,8 +1618,13 @@ export async function escalate(runId, reason) {
     const last = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='merge_error' ORDER BY id DESC LIMIT 1`).get(runId)
     let why = 'git error'
     try { why = JSON.parse(last?.payload ?? '{}').reason ?? why } catch {}
+    // …and the message the operator gets is excerpted the same way. It used to
+    // keep the first 300 characters of a reason whose own first 300 characters
+    // are git's "failed to push" — which the word `blocked_error` beside it had
+    // already said. Six hundred, both ends, so the sentence that names the
+    // cause travels to the phone rather than only to the detail page.
     return blockRun(runId, repo, 'blocked_error', fill(T_BLOCKED_ERROR, {
-      branch: branchOf(run), base: repo.base_branch, reason: String(why).slice(0, 300),
+      branch: branchOf(run), base: repo.base_branch, reason: failureExcerpt(why, 600),
     }))
   }
   // A run that was told to keep its work on its branch is not merged because

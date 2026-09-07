@@ -1186,6 +1186,7 @@
   "settings.merge_hint": "冲突解决者：{setup}",
   "merge.section": "集成",
   "merge.resume": "恢复会话",
+  "merge.why": "未能通过的原因",
   "merge.resolver_run": "冲突运行",
   "merge.original_run": "原始运行",
   "merge.mark_done": "标记为完成",

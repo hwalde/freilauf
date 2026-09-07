@@ -49,14 +49,22 @@ export function followUpActive(run) {
  * later — while every page read "waiting for input" and the `no_activity`
  * watchdog stayed switched off for it.
  *
- * `last_activity_at` is the only independent witness there is, and it is the
- * harness's own file MTIME (watcher.mjs `measureActivity()`), never the time of
+ * `last_activity_at` is the only independent witness there is, and it is what
+ * the AGENT wrote (watcher.mjs `measureActivity()`, and for claude the newest
+ * record's own timestamp rather than the transcript's mtime), never the time of
  * the measurement — so it moves when, and only when, the agent writes. The
  * margin exists because the two are legitimately near-simultaneous at a real
  * turn end: claude writes its transcript ~20 ms AFTER the Stop hook has run.
  * Two minutes is four orders of magnitude above that measurement and four
  * orders below the failure it catches, so it can be a constant rather than a
  * setting nobody would ever tune.
+ *
+ * The other side of the comparison has to be as honest: `agent_state_at` is
+ * "when the agent last said this", so `noteAgentState()` renews it on every
+ * assertion and not only on a change (see the reason written down there). A
+ * mark that stood still while the agent kept repeating itself turned this
+ * fence into a permanent verdict of "latched" — the exact opposite failure,
+ * measured on the very same run.
  */
 export const ATTENTION_STALE_MS = 120_000
 
