@@ -20,6 +20,20 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **The Sessions page's "last activity" was the session's creation time.** That
+  page exists to decide which screens are dead weight holding memory, and the
+  one column that would tell you "nothing has happened in here for two days"
+  was reading a tmux field that output does not move — it moves when somebody
+  attaches. Measured on this machine: of seven live sessions, five carried
+  exactly their creation time, three of those while writing to their pane every
+  second, and the hub's own agent did not move the value across seventeen
+  minutes of continuous output. So the column was a copy of the Alter column
+  beside it, and wrong in the dangerous direction: a session worked in all day
+  and one untouched since it was made looked the same. It is now read from the
+  session's windows, where output really registers — an idle session says so,
+  and a working one reads "just now". Nothing else used the value, so no
+  session is kept or closed differently because of this.
+
 - **Giving a finished run more work through its terminal did not clear the
   alarm about the previous instruction.** When you type new work into a
   finished run's session, the hub starts holding it to the expected duration

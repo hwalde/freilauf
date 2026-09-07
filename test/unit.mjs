@@ -5938,15 +5938,43 @@ try {
 
   await check('panes decide whether a session still works', () => {
     const s = se.mergePanes(se.parseSessions(SESSION_LINES), [
-      'fl-einzel-aaaa\t0\t111\t\t\tclaude',
-      'fl-einzel-bbbb\t1\t222\t0\t1787501000\tbash',
-      'fl-einzel-bbbb\t1\t223\t0\t1787502000\tbash',
+      'fl-einzel-aaaa\t0\t111\t\t\t1787600500\tclaude',
+      'fl-einzel-bbbb\t1\t222\t0\t1787501000\t1787500900\tbash',
+      'fl-einzel-bbbb\t1\t223\t0\t1787502000\t1787500900\tbash',
     ].join('\n'))
     isFalse(s[0].dead, 'a live pane keeps the session alive')
     equal(s[0].command, 'claude', 'command of the live pane')
     isTrue(s[1].dead, 'all panes dead = session dead')
     equal(s[1].paneCount, 2, 'both panes counted')
     equal(s[1].deadMs, 1787501000000, 'the EARLIEST death is when it stopped working')
+  })
+
+  await check("a session's last activity comes from its windows, not from session_activity", () => {
+    // Measured on tmux 3.4: `session_activity` is moved by a client attaching,
+    // NOT by output — five of seven live sessions carried exactly their
+    // creation time, three of them while writing to their pane every second.
+    // On the page that exists to decide which screens are dead weight, that
+    // made "last activity" a copy of the age column.
+    const sitzungen = se.mergePanes(se.parseSessions(SESSION_LINES), [
+      // aaaa: session_activity says 1787600500 (its creation-ish value), but a
+      // window in it was written to a full hour later.
+      'fl-einzel-aaaa\t0\t111\t\t\t1787604100\tclaude',
+      // bbbb: two windows, and the NEWEST of them is the session's answer.
+      'fl-einzel-bbbb\t0\t222\t\t\t1787500950\tbash',
+      'fl-einzel-bbbb\t0\t223\t\t\t1787503000\topencode',
+    ].join('\n'))
+    equal(sitzungen[0].activityMs, 1787604100000, 'the window that was written to decides')
+    equal(sitzungen[1].activityMs, 1787503000000, 'the newest window of the session, not the first')
+
+    // A tmux that keeps session_activity current, or one that does not know
+    // window_activity at all, must never be made to say LESS than it did.
+    const aelter = se.mergePanes(se.parseSessions(SESSION_LINES),
+      'fl-einzel-aaaa\t0\t111\t\t\t1787500000\tclaude')
+    equal(aelter[0].activityMs, 1787600500000, 'an older window reading never overrides the session')
+    const ohne = se.mergePanes(se.parseSessions(SESSION_LINES),
+      'fl-einzel-aaaa\t0\t111\t\t\t\tclaude')
+    equal(ohne[0].activityMs, 1787600500000, 'and a tmux that reports none leaves it exactly as it was')
+    equal(ohne[0].command, 'claude', 'the command is still read from the last field')
   })
 
   await check('resources are counted over the whole process tree, not just the pane', () => {

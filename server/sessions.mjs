@@ -30,9 +30,23 @@ const SESSION_FIELDS = [
   '#{session_windows}', '#{session_activity}', '#{session_path}',
 ].join('\t')
 // Same rule: pane_current_command last.
+//
+// `window_activity` rides along here because `session_activity` does not answer
+// the question the Sessions page asks of it. Measured, tmux 3.4, seven live
+// sessions: five had `session_activity` EXACTLY equal to `session_created`,
+// three of them while demonstrably writing to their pane — and one of those was
+// the hub's own agent, whose value did not move across seventeen minutes of
+// continuous output while `window_activity` tracked it to the second. tmux
+// moves `session_activity` when a client attaches or selects the session, and
+// the only two sessions on that machine whose value differed from their
+// creation were exactly the two a human had attached to. So on the page whose
+// whole job is deciding which screens are dead weight, "last activity" was the
+// creation time — the same value as the Alter column beside it, wearing another
+// heading, and wrong in the dangerous direction: a session worked in all day
+// and one untouched since it was made read identically.
 const PANE_FIELDS = [
   '#{session_name}', '#{pane_dead}', '#{pane_pid}',
-  '#{pane_dead_status}', '#{pane_dead_time}', '#{pane_current_command}',
+  '#{pane_dead_status}', '#{pane_dead_time}', '#{window_activity}', '#{pane_current_command}',
 ].join('\t')
 
 const num = (s) => { const n = Number(s); return Number.isFinite(n) ? n : null }
@@ -66,16 +80,26 @@ export function mergePanes(sessions, text) {
   for (const line of String(text ?? '').split('\n')) {
     if (!line.trim()) continue
     const f = line.split('\t')
-    if (f.length < 6) continue
+    if (f.length < 7) continue
     const session = bySession.get(f[0])
     if (!session) continue
     const deadSec = num(f[4])
+    const actSec = num(f[5])
+    // The newest window activity anywhere in the session is when something in
+    // it last wrote to a screen. It only ever OVERRIDES `session_activity`
+    // where it is newer, so a tmux that does keep the session field current
+    // (or one that does not know `window_activity` at all, which arrives here
+    // as null) is never made to say less than it did.
+    if (actSec != null) {
+      const ms = actSec * 1000
+      if (session.activityMs == null || ms > session.activityMs) session.activityMs = ms
+    }
     session.panes.push({
       dead: f[1] === '1',
       pid: num(f[2]),
       deadStatus: f[3] || null,
       deadMs: deadSec != null ? deadSec * 1000 : null,
-      command: f.slice(5).join('\t'),
+      command: f.slice(6).join('\t'),
     })
   }
   // A session with no live pane left is finished, whatever it once ran.

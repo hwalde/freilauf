@@ -3003,6 +3003,25 @@ bill ran for days (thirty sessions, 15 GB, measured).
   command, and **RSS/CPU of the whole process tree** (one `ps`, summed from the
   pane PID down) — the pane itself is only a shell and would understate it by an
   order of magnitude.
+- **"Last activity" is `window_activity`, never `session_activity`**, and that
+  is a measurement rather than a preference. tmux moves the SESSION field when
+  a client attaches or selects the session; output does not touch it. Measured
+  on tmux 3.4, seven live sessions: five carried `session_activity` exactly
+  equal to `session_created`, three of them while writing to their pane every
+  second, and the hub's own agent left the value untouched across seventeen
+  minutes of continuous output while `window_activity` tracked it to the
+  second — the only two sessions whose value differed from their creation were
+  the two a human had attached to. So on the page whose whole job is deciding
+  which screens are dead weight, the column was the age column again under
+  another heading, and wrong in the expensive direction: a session worked in
+  all day and one untouched since it was made read identically. The field
+  rides along on the `list-panes` call that is made anyway (no second
+  shell-out), the newest window of a session wins, and it only ever OVERRIDES
+  the session field where it is newer — a tmux that keeps that field current,
+  or one that does not know `window_activity`, is never made to say less than
+  it did. Same family as `session_activity` here and `--no-optional-locks`
+  after the subcommand: the field answered, it just did not answer this
+  question.
 - **The sum of all of it is in the status sidebar**, on every page
   (`sessionMemory()`, see there): the bill this page exists for runs quietly, so
   the one number that says how big it has grown must not need a navigation to be
