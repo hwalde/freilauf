@@ -4820,6 +4820,29 @@ try {
     isFalse(/>\s*null\s*</.test(html), 'no stray null')
   })
 
+  await check('a token count is grouped like every other figure on the page', async () => {
+    // The largest numbers the UI prints were the only ones not going through
+    // fmtNum(): `rein 912769371, raus 1749372` stood one line above a `11,5 €`
+    // that did. A claude run's input is the whole prompt side including every
+    // cache read, so nine digits is the ordinary case — measured on run
+    // 49a26807 — and ungrouped nine digits cannot be read at a glance at all.
+    const { runMetrics } = await import('../server/pages.mjs')
+    const { setLanguage, currentLanguage } = await import('../server/i18n.mjs')
+    const vorher = currentLanguage()
+    const lauf = { status: 'done', started_at: '2026-09-05 08:50:38', ended_at: '2026-09-05 16:47:30',
+      expected_minutes: 800, tokens_in: 912769371, tokens_out: 1749372, cost_eur: 11.5 }
+    try {
+      setLanguage('de')
+      const de = runMetrics(lauf)
+      contains(de, '912.769.371', 'German groups with dots, like the € beside it')
+      contains(de, '1.749.372', 'the output side too')
+      setLanguage('en')
+      contains(runMetrics(lauf), '912,769,371', 'and English with commas — one formatter, one locale')
+      contains(runMetrics({ ...lauf, tokens_in: null, tokens_out: null }), 'in 0, out 0',
+        'a run that has spent nothing still says zero, not blank')
+    } finally { setLanguage(vorher) }
+  })
+
   // ------------------------------------------------------------------
   group('Configured coding agents (coding-agents.mjs)')
   const ca = await import('../server/coding-agents.mjs')

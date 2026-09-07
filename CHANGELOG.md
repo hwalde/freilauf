@@ -20,6 +20,12 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A run's token counts are grouped like every other number on the page.**
+  They were the only figures in the UI printed raw — `rein 912769371, raus
+  1749372` one line above a `11,5 €` that was formatted properly. A claude
+  run's input side counts every cache read, so nine digits is the ordinary
+  case, and nine ungrouped digits cannot be read at a glance at all.
+
 - **The Sessions page's "last activity" was the session's creation time.** That
   page exists to decide which screens are dead weight holding memory, and the
   one column that would tell you "nothing has happened in here for two days"
