@@ -37,7 +37,7 @@ import { TYPE_TEXT } from './detect.mjs'
 import { llmModelsMru, rememberLlmModel } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
 import { resumeCommand } from './integrate.mjs'
-import { listSessions, sessionMemory, sessionKeepHours, currentKeepMs, paneAlive, archiveSessionKeepHours } from './sessions.mjs'
+import { listSessions, sessionMemory, publishSessionMemory, sessionKeepHours, currentKeepMs, paneAlive, archiveSessionKeepHours } from './sessions.mjs'
 import { cleanupSettings, cleanupConfigured, cleanupRunInFlight } from './cleanup.mjs'
 import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
 import { flowRunKeepDays } from './flows/db.mjs'
@@ -2114,8 +2114,13 @@ export function sessionRow(s, ctx = {}) {
 
 export async function pageSessions(req, res, url) {
   const sessions = await listSessions()
+  // This page has just measured, so it PUBLISHES its reading instead of
+  // summing it privately: the status sidebar rendered into the same response
+  // then quotes the same number rather than an up-to-eight-minute-old one of
+  // its own. Both were honest before and they contradicted each other on
+  // screen — 31,3 GB in the headline, 32,2 GB in the sidebar beside it.
   const runningCount = sessions.filter(s => s.state === 'agent_running').length
-  const rssTotal = sessions.reduce((n, s) => n + s.resources.rssKb, 0)
+  const rssTotal = publishSessionMemory(sessions).rssKb
   const hours = Math.round(currentKeepMs() / 3_600_000 * 10) / 10
   const cleanup = cleanupSettings()
   const cleanupBox = cleanupConfigured(cleanup)

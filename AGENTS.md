@@ -1812,6 +1812,14 @@ application comes out of it.
   total RSS of every tmux session on the machine — foreign ones included, the
   question is what the MACHINE holds — through `listSessions()`, so the sidebar's
   total and the sessions page's own summary are the same number by construction.
+  That sentence stood here while it was not true: the page calls `listSessions()`
+  itself (it needs a row per session) and summed that list a SECOND time, so the
+  headline and the sidebar rendered into one response were two honest readings up
+  to eight minutes apart — measured 2026-09-07, "31,3 GB" against "32,2 GB in 42
+  Sessions". A caller that has just measured therefore **publishes** its reading
+  (`publishSessionMemory()`, one builder with `sessionMemory()`) and the sidebar
+  quotes it; the page had already paid for the three shell-outs, so summing it
+  privately was waste on top of the contradiction.
   Its cache **is** the update interval: the 30-second timer above asks the same
   fragment, and this TTL decides how often `tmux list-sessions`/`list-panes` and
   a `ps` over every process really run. Stale-while-revalidate like the two
@@ -3121,6 +3129,26 @@ back to the mtime only for a transcript that carries no timestamp at all.
 `cursorTranscriptState()` still reports an mtime; nobody has measured whether
 cursor does the same thing, and this project does not change an activity source
 on a guess.
+
+**The same function counts the tokens, and only `output_tokens` is output.**
+The vendor's usage object carries four fields and three of them are prompt-side
+— `input_tokens`, `cache_read_input_tokens` and `cache_creation_input_tokens`,
+which is what their names say and how they are billed. Adding the cache
+creation to the OUTPUT made the figure on every claude run's page one no model
+could have produced: run 8ee6a523 ran 79 seconds and was credited with 416 105
+output tokens, 5 267 a second, against the 10 775 its own transcript records
+(136/s, the rate an opus writes at); the inflation is not a constant to read
+past either — 38× there, 2.6× on 149a666b and 4e9d5819 — because it is the
+cache traffic and not the answer that is being added. `test/echt.mjs` had
+summed the same three fields as input all along, so this was the one place in
+the repository that disagreed with itself. **And a total is over the whole
+file**: the sums used to cover the last 500 records, which is right for finding
+the newest timestamp and wrong for a sum — a run's token count then SHRANK as
+its transcript grew past the cap and changed retroactively on every pass
+(149a666b: 104 885 counted of 143 975 written). Walking all of it is what a
+total means and costs nothing measurable — the caller has the file in memory
+already, and on the largest transcript on this installation (12 MB, 6 968
+records) parsing every line takes 18 ms against the 28 ms of the read itself.
 
 **The plugin side is a declaration and a contract** (docs/plugins.md,
 "Attention"). `attention: { source, note }` on the descriptor says HOW the
