@@ -4828,19 +4828,19 @@ try {
     // 49a26807 — and ungrouped nine digits cannot be read at a glance at all.
     const { runMetrics } = await import('../server/pages.mjs')
     const { setLanguage, currentLanguage } = await import('../server/i18n.mjs')
-    const vorher = currentLanguage()
-    const lauf = { status: 'done', started_at: '2026-09-05 08:50:38', ended_at: '2026-09-05 16:47:30',
+    const before = currentLanguage()
+    const run = { status: 'done', started_at: '2026-09-05 08:50:38', ended_at: '2026-09-05 16:47:30',
       expected_minutes: 800, tokens_in: 912769371, tokens_out: 1749372, cost_eur: 11.5 }
     try {
       setLanguage('de')
-      const de = runMetrics(lauf)
-      contains(de, '912.769.371', 'German groups with dots, like the € beside it')
-      contains(de, '1.749.372', 'the output side too')
+      const german = runMetrics(run)
+      contains(german, '912.769.371', 'German groups with dots, like the € beside it')
+      contains(german, '1.749.372', 'the output side too')
       setLanguage('en')
-      contains(runMetrics(lauf), '912,769,371', 'and English with commas — one formatter, one locale')
-      contains(runMetrics({ ...lauf, tokens_in: null, tokens_out: null }), 'in 0, out 0',
+      contains(runMetrics(run), '912,769,371', 'and English with commas — one formatter, one locale')
+      contains(runMetrics({ ...run, tokens_in: null, tokens_out: null }), 'in 0, out 0',
         'a run that has spent nothing still says zero, not blank')
-    } finally { setLanguage(vorher) }
+    } finally { setLanguage(before) }
   })
 
   // ------------------------------------------------------------------
@@ -5978,7 +5978,7 @@ try {
     // creation time, three of them while writing to their pane every second.
     // On the page that exists to decide which screens are dead weight, that
     // made "last activity" a copy of the age column.
-    const sitzungen = se.mergePanes(se.parseSessions(SESSION_LINES), [
+    const sessions = se.mergePanes(se.parseSessions(SESSION_LINES), [
       // aaaa: session_activity says 1787600500 (its creation-ish value), but a
       // window in it was written to a full hour later.
       'fl-einzel-aaaa\t0\t111\t\t\t1787604100\tclaude',
@@ -5986,18 +5986,18 @@ try {
       'fl-einzel-bbbb\t0\t222\t\t\t1787500950\tbash',
       'fl-einzel-bbbb\t0\t223\t\t\t1787503000\topencode',
     ].join('\n'))
-    equal(sitzungen[0].activityMs, 1787604100000, 'the window that was written to decides')
-    equal(sitzungen[1].activityMs, 1787503000000, 'the newest window of the session, not the first')
+    equal(sessions[0].activityMs, 1787604100000, 'the window that was written to decides')
+    equal(sessions[1].activityMs, 1787503000000, 'the newest window of the session, not the first')
 
     // A tmux that keeps session_activity current, or one that does not know
     // window_activity at all, must never be made to say LESS than it did.
-    const aelter = se.mergePanes(se.parseSessions(SESSION_LINES),
+    const older = se.mergePanes(se.parseSessions(SESSION_LINES),
       'fl-einzel-aaaa\t0\t111\t\t\t1787500000\tclaude')
-    equal(aelter[0].activityMs, 1787600500000, 'an older window reading never overrides the session')
-    const ohne = se.mergePanes(se.parseSessions(SESSION_LINES),
+    equal(older[0].activityMs, 1787600500000, 'an older window reading never overrides the session')
+    const none = se.mergePanes(se.parseSessions(SESSION_LINES),
       'fl-einzel-aaaa\t0\t111\t\t\t\tclaude')
-    equal(ohne[0].activityMs, 1787600500000, 'and a tmux that reports none leaves it exactly as it was')
-    equal(ohne[0].command, 'claude', 'the command is still read from the last field')
+    equal(none[0].activityMs, 1787600500000, 'and a tmux that reports none leaves it exactly as it was')
+    equal(none[0].command, 'claude', 'the command is still read from the last field')
   })
 
   await check('resources are counted over the whole process tree, not just the pane', () => {

@@ -5122,13 +5122,13 @@ try {
     // the restart existed on the send route alone, so a run whose operator had
     // typed the next instruction stayed red about the previous one for as long
     // as the commission lived, with its notification flag spent (run 49a26807).
-    const vorher = lauf(followed.id).followup_since
+    const clockBefore = lauf(followed.id).followup_since
     await sendReport(followed.id, { kind: '_working', source: 'prompt' })
     isFalse(ereignisse(followed.id).includes('anomaly:followup_overrun'),
       'a line typed into the session clears the old statement')
     isFalse(ereignisse(followed.id).includes('notified:followup_overrun'),
       'and its notification flag, so a genuine overrun can page again')
-    isTrue(lauf(followed.id).followup_since !== vorher, 'and the clock starts again')
+    isTrue(lauf(followed.id).followup_since !== clockBefore, 'and the clock starts again')
 
     // New instructions restart the clock — and retract the old overrun statement
     // the same way a raised duration retracts one, so a genuine overrun of the
