@@ -2320,6 +2320,34 @@ lesson). `runs.followup_since` carries it, and three things hang on it:
   watcher finds the pane dead (`followup_agent_gone`): a process that exited
   can never report, so waiting out the deadline would only produce a
   misleading alarm.
+- **A commission that is given up is a run ending badly, and its leftovers are
+  named.** Stopping the clock used to be the WHOLE of what those last two
+  paths did, and that is how a follow-up's work was lost: the operator types
+  into a finished run's session, the agent commits, goes idle without calling
+  `fl-report done`, and retention closes the session hours later. Measured on
+  run 9ed29a82 — a commit made 39 seconds after the instruction, sitting in a
+  detached worktree on no branch and not on origin, under a run whose every
+  page went on saying "nothing to merge". A run whose SESSION goes while it is
+  still `running` has had `assessLater()` behind it all along; a follow-up had
+  nothing. **`abandonFollowUp()`** (reports.mjs) is the one function all four
+  give-up paths call — `reconcileClosedSession()`, the watcher's two branches,
+  and the kill route on a finished run — and it is `endFollowUpCommission()`
+  plus the same `assessUnmerged()` the abort path uses: `merge_status` becomes
+  `unmerged_*`, the commits are pushed to origin (`backupBranch`), the detail
+  page offers "Merge now", and the operator is told (not on the kill route,
+  where a human is looking at the page — the rule `assessLater(…, false)`
+  already had). The event that says WHY stays with the caller, because only the
+  caller knows: `followup_agent_gone` for a dead pane, `followup_abandoned`
+  with its source for a closed session — the latter is new, and the branch that
+  writes it wrote nothing at all before, so a commission simply vanished from
+  the row.
+  Two things make that assessment honest a SECOND time round. It measures from
+  **`merged_sha ?? base_sha`** — what the hub itself last put on origin, the
+  same reference `wantsTurnEndFollowUp()` compares a tip against; `base_sha`
+  would count every commit the merge already pushed. And `keepWhenEmpty`
+  refuses to write the one answer that means "nothing happened": a follow-up
+  that added nothing must not turn a `merged` run into a `nothing` one and take
+  the run's own record of where its work went away from it.
 - **…and the pair on the page is measured on that same clock**
   (`runtimeClock()` in run-state.mjs, asked by the overview's cell and by
   `fmtRuntime()`). "Duration / expectation" is two numbers about ONE
@@ -3777,6 +3805,31 @@ coding agents stay in their TUI afterwards. It carries `pane_alive` as a
 **tri-state** (`null` = tmux could not be asked, which is not "gone") and a
 `verdict` of `working` / `idle_in_tui` / `process_gone` / `no_session` /
 `unknown`.
+
+**`?status=` selects by `displayStatus()`, and every row carries
+`display_status`.** The route returns the row AS STORED — that rule is
+unchanged, `status` still records the attempt — but *which rows* it returns is
+the question the pages answer, and this was the last reader with a copy of its
+own (`r.status = ?`). Two ways that was wrong at once: `waiting_input` is a
+display status and no column value, so it matched nothing at all for ever; and
+a finished run whose operator typed into its session — work in flight to the
+overview, the sidebar's counts, the overview's own filter and this route's own
+liveness verdict — was missing from `?status=running` and sitting in
+`?status=done`, where the overview refuses to show it. `LIST_STATUSES` is
+`WORK_STATUSES` plus the terminal ones (this route lists finished runs, the
+overview's filter does not), and anything else is a **400 naming them** rather
+than an empty 200: "there are none" is the one answer a caller must not be
+given for "I do not know that word".
+
+The caller that made this expensive is **`freilauf drain`**. It asks this route
+before a planned reboot, tells every run it finds to commit and report, and
+waits until none is left — so a run it could not see was an agent nobody warned
+and a session counted as idle under the words "Safe to reboot or update". And
+that is the one kind of run a reboot does not give back: `resumeRun()` resumes
+`running`/`waiting_help`, never a follow-up commission. `drain` asks once per
+status in `DRAIN_STATUSES` (`running`, `waiting_help`, `waiting_input`) and
+lets the hub decide which rows those are, instead of re-filtering the answer on
+a column.
 
 ## Incidents (rate limit, provider outage)
 

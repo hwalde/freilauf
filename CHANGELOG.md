@@ -20,6 +20,39 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **`freilauf drain` said "safe to reboot" while a conversation was live, and
+  the JSON API's status filter is why.** `GET /api/runs?status=…` filtered on
+  the stored status column instead of the word the pages actually show, so a
+  finished run you had typed into — which the overview, the sidebar and the
+  run's own page all count as working again — was missing from
+  `status=running` and listed under `status=done`, where the overview refuses
+  to show it; and `status=waiting_input` matched nothing at all, ever. `drain`
+  asks that route before a planned reboot: those runs were never told the
+  server was going down, and the wait then reported that nothing was working.
+  A follow-up is also the one kind of session a reboot does not bring back.
+  The filter now selects exactly the runs the pages list, every row carries a
+  `display_status` next to its stored `status`, and a status nobody has is
+  refused with the valid ones named instead of answered with an empty list.
+
+- **Work a follow-up committed was silently left behind when its session
+  ended.** Type into a finished run's terminal and Freilauf treats it as a
+  follow-up: the run counts as working again and is held to its expected
+  duration. But if the agent then committed something and stopped without
+  calling `fl-report done` — it answered a question, or simply went idle — and
+  the session was later closed (by the automatic retention, by hand, or because
+  the agent's process had died), Freilauf only stopped the clock. Nothing
+  looked at the worktree. The commits stayed exactly where they were, on no
+  branch and not on the remote, under a run whose pages went on reporting
+  whatever its first attempt had earned — including "nothing to merge".
+  Measured on one run of this installation: one commit, made 39 seconds after
+  the operator typed into the session, invisible everywhere. A follow-up nobody
+  can answer any more is now treated like any other run that ends without
+  reporting: what it left is named on the run's page ("not merged — n
+  commits"), the commits are pushed to the remote as a `run/<id>` branch so
+  they no longer live on one machine alone, **Merge now** is offered, and you
+  get a message about it. A follow-up that added nothing changes nothing — a
+  run whose work was merged still says merged.
+
 - **The Sessions page offered a live conversation for one-click ending, and
   retention was about to end one by itself.** When you type into a finished
   run's terminal, Freilauf treats that as a follow-up commission: the overview,

@@ -115,7 +115,12 @@ Do this:
 
 /** One paragraph per assessment of a run that did NOT end with done. */
 export const T_ASSESS = {
-  unmerged_commits: 'Not merged — the run did not end with done. The branch has {n} commit(s) and no uncommitted changes, so git could merge them safely. But look first: a failed run\'s work is not automatically wanted. To merge anyway, use "Merge now" on the run\'s detail page.',
+  // "never reported as finished" rather than "did not end with done": since
+  // `abandonFollowUp()` asks the same question of a follow-up whose session
+  // went away, this paragraph is printed under runs that DID end with done —
+  // and a first sentence that is false about half its readers is worse than a
+  // vaguer one that is true about all of them.
+  unmerged_commits: 'Not merged — this work was never reported as finished. The branch has {n} commit(s) and no uncommitted changes, so git could merge them safely. But look first: work nobody reported as done is not automatically wanted. To merge anyway, use "Merge now" on the run\'s detail page.',
   unmerged_both: 'Not merged. The branch has {n} commit(s), BUT the worktree also has {m} uncommitted file(s). Nothing was merged. On the detail page you can commit or discard the leftovers and merge, or leave everything as it is.',
   unmerged_dirty: 'Nothing to merge: no commits, but {m} uncommitted file(s) in the worktree. They stay there until you decide — detail page: commit & merge, or discard.',
   nothing: 'Nothing to merge: no commits and no uncommitted changes.',
@@ -1913,8 +1918,14 @@ export async function resolverEnded(resolverRun) {
  * merge under any circumstance: whether a failed run's work is wanted is a
  * human's decision, and the detail page has the buttons for it.
  * Returns the status, or null when there is nothing to judge.
+ *
+ * `keepWhenEmpty` is for the one caller that asks a SECOND time — a follow-up
+ * commission that was given up (reports.mjs, `abandonFollowUp`). There an empty
+ * answer means "the follow-up added nothing", which is not a verdict about the
+ * run at all: writing 'nothing' over a `merged` would take the run's own record
+ * of where its work went away from it.
  */
-export async function assessUnmerged(runId) {
+export async function assessUnmerged(runId, { keepWhenEmpty = false } = {}) {
   const run = getRun(runId)
   if (!run) return null
   const repo = getRepo(run.repo_id)
@@ -1922,9 +1933,18 @@ export async function assessUnmerged(runId) {
   // A conflict run leaves nothing behind that is anybody's decision: it either
   // delivered or the original needs another answer.
   if (isResolverRun(run)) { await resolverEnded(run); return null }
-  if (!run.base_sha) return null
+  // What this run still wants merged is measured from the last point at which
+  // the hub ITSELF put its work on origin — `merged_sha` where there is one,
+  // the worktree's own start otherwise. For a first attempt the two are the
+  // same (nothing has been merged yet), which is why this read the start alone
+  // for as long as only first attempts asked. After a merge they are not, and
+  // `base_sha` would count every commit the hub has already pushed a second
+  // time. It is the same reference `wantsTurnEndFollowUp()` compares a tip
+  // against, for the same question.
+  const since = run.merged_sha ?? run.base_sha
+  if (!since) return null
   const dirt = await dirtyFiles(run, repo)
-  const r = await runGit(run, ['rev-list', '--count', `${run.base_sha}..HEAD`])
+  const r = await runGit(run, ['rev-list', '--count', `${since}..HEAD`])
   const commits = r.ok ? Number(r.stdout.trim()) || 0 : 0
   // "Could not tell" counts as leftovers here. This assessment decides whether
   // the operator is shown a run's remains at all, and 'nothing' is the one
@@ -1932,6 +1952,7 @@ export async function assessUnmerged(runId) {
   // nobody managed to look at. The event says which of the two it was.
   const dirtyCount = dirt.unknown ? 1 : dirt.files.length
   const status = classifyUnmerged({ commits, dirty: dirtyCount })
+  if (keepWhenEmpty && status === 'nothing') return null
   db.prepare('UPDATE runs SET merge_status=? WHERE id=?').run(status, runId)
   addEvent(runId, 'merge_assessed', { status, commits, dirty: dirtyCount, dirty_unknown: dirt.unknown || undefined })
   // Commits nobody merged are commits that must not live on one disk alone.

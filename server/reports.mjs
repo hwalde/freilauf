@@ -970,6 +970,49 @@ function endFollowUpCommission(runId) {
 }
 
 /**
+ * The commission is given up rather than answered: the session is gone, or the
+ * agent's pane is dead. Nothing can report for this run any more — which is
+ * exactly the sentence `reconcileClosedSession()` writes down when a RUNNING
+ * run's session goes, and there it is followed by `assessLater()`: what the run
+ * left behind is named, its commits are pushed to origin, and the detail page
+ * offers "Merge now".
+ *
+ * A follow-up got none of that. Clearing `followup_since` was the whole of it,
+ * so work the agent committed after its first report stayed exactly where it
+ * was — in a worktree, usually on no branch at all, not on origin — under a run
+ * that went on saying whatever its first attempt had earned. Measured on run
+ * 9ed29a82: "nothing to merge" over a commit made 39 seconds after the operator
+ * typed into the session, invisible on every page, reachable only from a
+ * detached HEAD.
+ *
+ * The assessment is deliberately the SAME one (`assessUnmerged`), asked with
+ * `keepWhenEmpty` so a follow-up that added nothing leaves the first attempt's
+ * verdict — and its merge — standing. The event that says WHY the commission
+ * ended stays with the caller: only the caller knows whether the pane died or
+ * the session was closed, and both words already exist.
+ */
+export function abandonFollowUp(runId, announce = true) {
+  const run = db.prepare('SELECT * FROM runs WHERE id=?').get(runId)
+  if (!run?.followup_since) return false
+  endFollowUpCommission(runId)
+  // Floating, like every other integrator call on a path that must not wait for
+  // git: `reconcileClosedSession()` is synchronous and has callers that read its
+  // answer. A failure here is logged and costs the run nothing it had.
+  nameFollowUpLeftovers(runId, announce).catch(err => console.error('[integrate]', err.message))
+  return true
+}
+
+/** `announce` false where a human clicked the button, like assessLater()'s. */
+async function nameFollowUpLeftovers(runId, announce) {
+  const m = await import('./integrate.mjs')
+  const assessment = await m.assessUnmerged(runId, { keepWhenEmpty: true })
+  if (!assessment || !announce) return
+  const run = db.prepare('SELECT * FROM runs WHERE id=?').get(runId)
+  await notifyRun(runId, 'followup_unmerged',
+    `${followUpHeader(run, 'FOLLOW-UP NOT MERGED')}\n\n🟡 The session ended before the follow-up reported.\n${m.assessText(run, assessment)}`)
+}
+
+/**
  * A `done` from a finished run. The report is stored first, then the gate runs
  * like it would for a first report — a follow-up whose worktree is dirty is
  * told so in the same words, through the same channel.

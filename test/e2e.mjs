@@ -5176,6 +5176,71 @@ try {
     db.prepare('DELETE FROM runs WHERE id=?').run(id)
   })
 
+  await check('a follow-up that never reported leaves its commits named, not silently behind', async () => {
+    // Measured on run 9ed29a82: the first attempt closed with "nothing to
+    // merge" (true at the time), the operator then typed into the session, the
+    // agent committed one file 39 seconds later, went idle without calling
+    // `fl-report done`, and retention closed the session three hours on. The
+    // commission was cleared and NOTHING else happened: the run stayed green
+    // and still said "nothing to merge" while a commit sat in its worktree on
+    // no branch, not on origin, reachable only from a detached HEAD that
+    // `cleanupWorktrees()` would one day remove.
+    //
+    // A follow-up nobody can answer any more is a run ending badly, and the hub
+    // already knows what to do with one: assess what is left, name it, back the
+    // commits up to origin, offer "Merge now".
+    const l = await mergeRun()
+    await sendReport(l.id, { kind: 'done', text: 'nothing to do here' })
+    await waitFor(() => lauf(l.id).status === 'done' && lauf(l.id).merge_status === 'nothing',
+      { what: 'the first attempt closes with nothing to merge', timeoutMs: 30_000 })
+
+    // The operator types into the run's terminal — past the send route, so the
+    // agent's own prompt hook is what opens the commission.
+    await sendReport(l.id, { kind: '_working', source: 'prompt' })
+    isTrue(!!lauf(l.id).followup_since, 'the commission is open')
+
+    // …the follow-up commits, and then the session goes away without a report.
+    await writeAndCommit(l.wt, 'followup.txt', 'work the follow-up did\n', 'follow-up work')
+    const j = await (await postForm('/api/sessions/kill', { session: l.session })).json()
+    isTrue(j.ok, 'the session is closed')
+    await waitFor(() => lauf(l.id).merge_status !== 'nothing',
+      { what: 'the leftovers are assessed', timeoutMs: 30_000 })
+    const r = lauf(l.id)
+    equal(r.followup_since, null, 'the commission is given up')
+    equal(r.merge_status, 'unmerged_commits', 'and what the follow-up left is named, not read as nothing')
+    contains(ereignisse(l.id).join(','), 'followup_abandoned',
+      'the run’s own history says the commission was given up')
+    contains(ereignisse(l.id).join(','), 'branch_backed_up',
+      'and the commits are on origin — nothing lives on this machine alone')
+    equal(r.status, 'done', 'the record of the first attempt is untouched')
+  })
+
+  await check('a follow-up that left nothing behind does not take a merge back', async () => {
+    // The other half of the rule above, and the way it would go wrong: a run
+    // whose work the hub MERGED, whose follow-up commission is then given up
+    // with nothing new in the worktree, must keep saying `merged`. Assessing
+    // from `base_sha` would count the commits the hub has already pushed a
+    // second time; writing 'nothing' over 'merged' would take the run's own
+    // record of where its work went away from it.
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'merged-first.txt', 'first attempt\n', 'first attempt')
+    await sendReport(l.id, { kind: 'done', text: 'done and mergeable' })
+    await waitFor(() => lauf(l.id).merge_status === 'merged',
+      { what: 'the first attempt is merged', timeoutMs: 30_000 })
+    const sha = lauf(l.id).merged_sha
+
+    await sendReport(l.id, { kind: '_working', source: 'prompt' })
+    isTrue(!!lauf(l.id).followup_since, 'the commission is open')
+    const j = await (await postForm('/api/sessions/kill', { session: l.session })).json()
+    isTrue(j.ok, 'the session is closed')
+    await waitFor(() => lauf(l.id).followup_since === null,
+      { what: 'the commission is given up', timeoutMs: 30_000 })
+    await watcherTick()
+    const r = lauf(l.id)
+    equal(r.merge_status, 'merged', 'the merge stands')
+    equal(r.merged_sha, sha, 'and it still names what was merged')
+  })
+
   // ---- 9. with merge_mode off nothing of this happens ----
   await check('with the integration switched off a done report closes the run as it always did', async () => {
     await repoMerge({ merge_mode: 'off' })
@@ -6006,6 +6071,53 @@ export default {
       `liveness verdict is one of the five (${j.liveness.verdict})`)
     isTrue([true, false, null].includes(j.liveness.pane_alive),
       'pane_alive is a tri-state — null means tmux could not be asked, never "gone"')
+  })
+
+  await check('GET /api/runs filters by the status the pages SHOW, not by the stored column', async () => {
+    // `runs.status` records the attempt; `displayStatus()` answers what the
+    // overview, the detail page, the sidebar's counts and the single-run
+    // route's own liveness verdict all say — a finished run whose operator
+    // typed into its session is work in flight. Four readers had learned that
+    // rule and the list route had not, so `?status=running` answered a
+    // different set than the page's own "running" filter, and `waiting_input`
+    // — a value `runs.status` never holds — matched nothing at all, for ever.
+    //
+    // It is not only a report that disagreed with a page. `freilauf drain`
+    // asks this route before a planned reboot, tells every run it finds to
+    // commit and report, and waits until none is left. A run it cannot see is
+    // one whose agent is never warned and whose session is then counted as
+    // idle — under the words "Safe to reboot or update", while somebody's
+    // conversation stands in it.
+    const l = await mergeRun()
+    await sendReport(l.id, { kind: 'done', text: 'first attempt' })
+    await waitFor(() => lauf(l.id).status === 'done',
+      { what: 'the run is finished', timeoutMs: 30_000 })
+    await postForm(`/api/runs/${l.id}/send`, { text: 'One more thing, please.' })
+    isTrue(!!lauf(l.id).followup_since, 'the commission is open')
+
+    const list = async (q) => (await (await fetchPath(`/api/runs?repo=${repoId}&limit=200${q}`)).json()).runs
+    const runningRows = await list('&status=running')
+    isTrue(runningRows.some(r => r.id === l.id),
+      'a finished run with an open follow-up is IN the running list, as the page counts it')
+    const row = runningRows.find(r => r.id === l.id)
+    equal(row.status, 'done', 'the stored column still records the attempt — nothing is rewritten')
+    equal(row.display_status, 'running', 'and the row says which word the pages print')
+    const finishedRows = await list('&status=done')
+    isFalse(finishedRows.some(r => r.id === l.id),
+      'and it is NOT in the finished list, exactly as the overview refuses to show it there')
+
+    // `waiting_input` is a display status and no column value: the agent's own
+    // hook says its turn is over, and the list has to answer for it.
+    await sendReport(l.id, { kind: '_waiting', source: 'hook' })
+    const waitingRows = await list('&status=waiting_input')
+    isTrue(waitingRows.some(r => r.id === l.id), 'the agent stopped: the run answers under waiting_input')
+    isFalse((await list('&status=running')).some(r => r.id === l.id), 'and no longer under running')
+
+    // A status nobody has is a refusal that names the valid ones — never an
+    // empty 200, which reads as "there are none".
+    const bad = await fetchPath(`/api/runs?repo=${repoId}&status=alive`)
+    equal(bad.status, 400, 'an unknown status is refused')
+    contains((await bad.json()).error, 'waiting_input', 'and the answer names what it could have been')
   })
 
   await check("the skill's own run-alive script answers against a live hub", async () => {
