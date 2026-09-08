@@ -2138,7 +2138,11 @@ export function sessionRow(s, ctx = {}) {
     <td><span class="dot ${STATE_CLASS[s.state]}"></span> <span class="sess-state">${e(stateText)}</span>
       ${s.deadStatus ? `<span class="dim">${e(t('sessions.exit', { code: s.deadStatus }))}</span>` : ''}</td>
     <td>${run
-      ? `<a href="/runs/${e(run.id)}">${e(title)}</a><div class="dim">${e(statusText(run.status))}${run.repo_name ? ` · ${e(run.repo_name)}` : ''}</div>`
+      // `displayStatus()`, like every other place a run's status is written
+      // out: this page saying "Done" about a run the overview calls "waiting
+      // for input" is two pages disagreeing about one run, and here it sits
+      // next to a button that ends its session.
+      ? `<a href="/runs/${e(run.id)}">${e(title)}</a><div class="dim">${e(statusText(displayStatus(run)))}${run.repo_name ? ` · ${e(run.repo_name)}` : ''}</div>`
       : `<span class="dim">${e(t('sessions.unknown_hint'))}</span>`}</td>
     <td><code>${e(s.name)}</code>${run ? `<div class="dim">${e(harnessLabel(run.harness))}${run.model ? `/${e(run.model)}` : ''}</div>` : ''}${
       // "sandboxed", and the image it runs: on this page the question is what

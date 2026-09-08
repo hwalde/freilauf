@@ -2994,6 +2994,32 @@ bill ran for days (thirty sessions, 15 GB, measured).
   is not within reach of the mouse; one checkbox shows them, and the choice
   lives in `localStorage`. Ending one of them asks first — that confirmation is
   the only friction on the page.
+- **"Running" here is `displayStatus()`, and every copy of that question on
+  this page had to be told so.** `runs.status` records the ATTEMPT, and a
+  finished run whose FOLLOW-UP COMMISSION is open is one somebody is typing
+  into right now — which is exactly why `archivable()` refuses to archive it
+  (archiving closes the session). This page closes the session *directly*,
+  without going through `archivable()`, and it read `run.status`: so such a
+  session was called "run over, session open · Done", stood in the DEFAULT
+  list, and its End button neither hid nor asked, because both of those hang on
+  `data-running` alone. Measured on run 49a26807: the overview said "waiting
+  for input — follow-up in progress since 06.09.", the sidebar counted it under
+  "waiting for input", and this page offered it as leftover. Three functions
+  carried the copy and all three now ask the one rule: `sessionState()` (the
+  state word, the dot, `data-running`), `sessionRow()`'s status line, and
+  `confirmGone()` in the watcher, whose second `has-session` check exists
+  precisely because acting on a bad listing ends somebody's work.
+- **And retention measures from a clock that may predate the conversation**,
+  which is the half no stray click is needed for. `finishedAtMs()` takes the
+  earlier of the run's end and the pane's death — but a follow-up's `ended_at`
+  is the FIRST attempt's end, so a commission opened yesterday inherits a clock
+  that started three days ago. Measured on 49a26807: reported done 05.09.
+  16:47, commission opened 06.09., the operator typing into it on 07.09., and
+  the 72-hour retention due to kill that session on 08.09. at 16:47 —
+  `reconcileClosedSession()` clearing the commission on the way out. So an open
+  commission means **not finished**, and `shouldAutoClose()` inherits it. A
+  dead pane still wins over an open commission: nobody is talking to a process
+  that has exited.
 - **Oldest first**, because that is the order one cleans up in.
 - **Nothing blocks.** A click marks its row "ending …" in the same tick and the
   request goes off in the background; several rows can be clicked away in a row,

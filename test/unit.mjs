@@ -6029,6 +6029,20 @@ try {
     equal(se.finishedAtMs(tot, { status: 'done', ended_at: '1970-01-01 00:00:03' }), 3000, 'the earlier one wins')
     equal(se.finishedAtMs({ dead: true, deadMs: null, createdMs: 7000 }, null), 7000,
       'a dead pane without a timestamp still counts as finished')
+    // An open follow-up commission is a conversation in progress, and
+    // `ended_at` there is the FIRST attempt's end — a clock that started
+    // before the conversation did. Measured on run 49a26807: reported done
+    // 05.09. 16:47, commission opened 06.09., the operator typing into it on
+    // 07.09. — and the 72 h retention would have killed that session on
+    // 08.09. 16:47 with no warning and no way to see it coming.
+    equal(se.finishedAtMs(lebt, { status: 'done', ended_at: '2026-09-05 16:47:30',
+      followup_since: '2026-09-06 05:20:36' }), null, 'an open follow-up commission is not a finished session')
+    equal(se.finishedAtMs(lebt, { status: 'failed', ended_at: '2026-09-05 16:47:30', followup_open: 1 }), null,
+      'a follow-up being integrated is not one either')
+    // The pane really being gone still ends it: nobody is talking to a process
+    // that exited, whatever the record says.
+    equal(se.finishedAtMs(tot, { status: 'done', ended_at: '1970-01-01 00:00:03',
+      followup_since: '2026-09-06 05:20:36' }), 3000, 'a dead pane beats an open commission')
   })
 
   await check('the keep time comes from the hours, the old days are the fallback', () => {
@@ -6074,6 +6088,9 @@ try {
     isFalse(se.shouldAutoClose(fertig, null, 4 * 3600_000, jetzt), 'keep four hours: stays')
     isTrue(se.shouldAutoClose(lebt, { status: 'done', ended_at: '1970-01-01 00:00:00' }, 0, jetzt),
       'keep 0 closes a finished run right away, even with a live pane')
+    isFalse(se.shouldAutoClose(lebt, { status: 'done', ended_at: '1970-01-01 00:00:00',
+      followup_since: '1970-01-01 00:00:10' }, 0, jetzt),
+      'not even keep 0 closes a session somebody is having a conversation in')
   })
 
   // The bug this exists for: 'no answer' used to be indistinguishable from
@@ -6259,6 +6276,27 @@ try {
     equal(se.sessionState(tot, { status: 'running' }), 'dead', 'dead pane beats the status')
     equal(se.sessionState(lebt, null), 'unknown', 'foreign session')
     equal(se.sessionState(tot, null), 'dead', 'foreign dead session')
+  })
+
+  await check('a finished run whose follow-up commission is open still has an agent in it', () => {
+    const lebt = { dead: false }, tot = { dead: true }
+    // The record says the first attempt is over; a human is typing into that
+    // session right now. displayStatus() puts such a run back under "running"
+    // and archivable() refuses it for exactly this reason — and THIS page ends
+    // the session directly, without going through either. Measured on run
+    // 49a26807: the overview said "waiting for input, follow-up in progress"
+    // while this page said "run over, session open" and offered a one-click
+    // end, unhidden and unconfirmed.
+    const auftrag = { status: 'done', followup_since: '2026-09-06 05:20:36' }
+    equal(se.sessionState(lebt, auftrag), 'agent_running', 'an open follow-up commission is an agent at work')
+    equal(se.sessionState(lebt, { ...auftrag, agent_state: 'waiting', agent_state_at: '2026-09-06 05:21:20' }),
+      'agent_running', 'and it stays one while the agent waits for the next line')
+    equal(se.sessionState(lebt, { status: 'done', followup_open: 1 }), 'agent_running',
+      'a follow-up report being integrated counts too')
+    // Nothing else moves: the commission is over, so the session is leftover again.
+    equal(se.sessionState(lebt, { status: 'done', followup_since: null, followups: 3 }), 'run_ended',
+      'a delivered follow-up leaves the session behind like any other')
+    equal(se.sessionState(tot, auftrag), 'dead', 'a dead pane still beats the record')
   })
 
   await check('automatic closing only ever touches sessions with a run of this hub', () => {

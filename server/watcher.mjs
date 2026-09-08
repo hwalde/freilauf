@@ -27,7 +27,7 @@ import { maybeAutoCleanup } from './cleanup.mjs'
 // One list, two readers: this pass never ASKS a run whose work the hub itself
 // put on origin, and pages.mjs stops COLOURING one that was asked before the
 // fence existed. Two literals here is how the two came to disagree.
-import { WORK_ON_ORIGIN, agentWaiting } from './run-state.mjs'
+import { WORK_ON_ORIGIN, agentWaiting, displayStatus } from './run-state.mjs'
 // The two seams of SANDBOX.md. Both answer for an
 // unsandboxed run exactly what this file did before they existed, which is why
 // every call site below could be rewired mechanically.
@@ -1505,9 +1505,16 @@ async function closeOldSessions() {
  * acting on it ABORTS somebody's work — so it is asked a second time, directly
  * and by name, and only a confirmed 'gone' counts. Two independent answers
  * instead of one, exactly where the mistake is expensive.
+ *
+ * "Still going" is `displayStatus()`, not `runs.status` — the same rule the
+ * Sessions page and `archivable()` ask. A finished run whose follow-up
+ * commission is open has a human typing into that session, and acting on a
+ * listing that was merely unlucky would end the conversation and clear the
+ * commission (reconcileClosedSession). It is the third copy of one question,
+ * and it was the third to be reading the wrong column.
  */
 async function confirmGone(run) {
-  if (!['running', 'waiting_help'].includes(run.status)) return true
+  if (!['running', 'waiting_input', 'waiting_help'].includes(displayStatus(run))) return true
   const gone = await sessionGone(run.tmux_session)
   if (gone === true) return true
   console.error(`[watcher] ${run.id}: listing said ${run.tmux_session} is gone, has-session said ${gone === false ? 'it is there' : 'nothing'} — leaving the run alone`)

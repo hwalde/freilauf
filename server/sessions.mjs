@@ -19,6 +19,7 @@
 // tmuxVerdict, sessionGoneFrom) so they can be tested without a tmux server.
 import db, { getRun, addEvent, allSettings } from './db.mjs'
 import { sh, parseDbUtc } from './util.mjs'
+import { displayStatus, followUpActive } from './run-state.mjs'
 import { specOf } from './sandbox/exec.mjs'
 import { t } from './i18n.mjs'
 import { env } from './env.mjs'
@@ -163,10 +164,22 @@ export function processTree({ procs, children }, pid) {
  *   - the pane's process exited (remain-on-exit keeps the session standing).
  * Returns null while it is still working — such a session is never closed
  * automatically.
+ *
+ * "Still working" includes a finished run whose FOLLOW-UP COMMISSION is open,
+ * and that is the expensive half: `ended_at` there is the first attempt's end,
+ * so the retention clock starts before the conversation does. Measured on run
+ * 49a26807 — reported done 05.09. 16:47, the operator opened a follow-up on
+ * 06.09. and was still typing into it on 07.09., and the 72-hour retention was
+ * due to kill that session on 08.09. at 16:47. The Sessions page at least
+ * needs a stray click; this pass does it by itself, on a timer, and
+ * `reconcileClosedSession()` then clears the commission on the way out.
+ *
+ * A dead pane still wins: nobody is talking to a process that has exited.
  */
 export function finishedAtMs(session, run) {
   const candidates = []
   if (session?.deadMs != null) candidates.push(session.deadMs)
+  if (!session?.dead && followUpActive(run)) return null
   if (run?.ended_at) {
     const ms = parseDbUtc(run.ended_at)
     if (Number.isFinite(ms)) candidates.push(ms)
@@ -242,15 +255,40 @@ export function shouldAutoClose(session, run, keepMs, nowMs = Date.now()) {
 }
 
 /**
+ * The display statuses that mean somebody's work is going on in this session.
+ *
+ * `waiting_input` belongs here as much as `running` does: the agent has ended
+ * its turn and is sitting at its prompt waiting for a human — that is a
+ * conversation in progress, not a leftover screen.
+ */
+const ATTENDED = ['running', 'waiting_input', 'waiting_help']
+
+/**
  * State of a session, as the page shows it:
  *   'agent_running' — a run of this hub is going in it (hidden by default)
  *   'run_ended'     — the run is over, the session is still standing
  *   'dead'          — the process exited, only the screen is left
  *   'unknown'       — no run of this hub belongs to it (foreign or leftover)
+ *
+ * It asks `displayStatus()` and not `runs.status`, and that is the whole point
+ * of this function: `status` records the ATTEMPT, and a finished run whose
+ * follow-up commission is open is one a human is typing into RIGHT NOW. Every
+ * other surface already knows that — the overview row, the detail page, the
+ * sidebar's counts, and `archivable()`, which refuses to archive such a run
+ * precisely because archiving closes its session. This page closes the session
+ * directly, without going through any of them, and it was the copy of the rule
+ * that never got the news.
+ *
+ * What that cost, measured on run 49a26807: the overview said "waiting for
+ * input — follow-up in progress since 06.09.", the sidebar counted it under
+ * "waiting for input", and this page said "run over, session open · Done" and
+ * put it in the DEFAULT list with a one-click "End" — no hiding, no
+ * confirmation, because both of those hang on `data-running` alone. One stray
+ * click would have killed a live conversation mid-sentence.
  */
 export function sessionState(session, run) {
   if (!run) return session?.dead ? 'dead' : 'unknown'
-  if (['running', 'waiting_help'].includes(run.status) && !session?.dead) return 'agent_running'
+  if (ATTENDED.includes(displayStatus(run)) && !session?.dead) return 'agent_running'
   return session?.dead ? 'dead' : 'run_ended'
 }
 
