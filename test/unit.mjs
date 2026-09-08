@@ -7209,8 +7209,8 @@ try {
     const d = new DatabaseSync(':memory:')
     d.exec(`CREATE TABLE runs(id INTEGER PRIMARY KEY, status TEXT, agent_state TEXT, followup_since TEXT,
       followup_open INTEGER DEFAULT 0, agent_state_at TEXT, last_activity_at TEXT)`)
-    const ins = d.prepare(`INSERT INTO runs(status, agent_state, followup_since, agent_state_at, last_activity_at)
-      VALUES(?,?,?,?,?)`)
+    const ins = d.prepare(`INSERT INTO runs(status, agent_state, followup_since, followup_open, agent_state_at, last_activity_at)
+      VALUES(?,?,?,?,?,?)`)
     const rows = []
     // The fourth dimension is the one the `waiting` mark is now judged against:
     // no witness at all, a witness that agrees, one a second later (a real turn
@@ -7221,12 +7221,21 @@ try {
       [null, null], [SAID, null], [null, '2026-09-06 06:15:21'],
       [SAID, SAID], [SAID, '2026-09-06 03:49:51'], [SAID, '2026-09-06 06:15:21'],
     ]
+    // …and `followup_open` is the fifth, which this loop used to pin to 0 while
+    // the comment above it said "every combination". `followUpActive()` reads
+    // `followup_since OR followup_open`, so the state a follow-up is in from
+    // `followUpDone()` until the integrator's end — commission answered
+    // (`followup_since` NULL again), report in the gate or being merged
+    // (`followup_open` 1) — was the one combination nothing compared. The SQL
+    // twin did not know the column at all.
     for (const status of ['scheduled', 'deferred', 'running', 'waiting_help', 'done', 'failed', 'aborted']) {
       for (const agent_state of [null, 'working', 'waiting']) {
         for (const followup_since of [null, '2026-09-05 10:00:00']) {
-          for (const [agent_state_at, last_activity_at] of WITNESS) {
-            ins.run(status, agent_state, followup_since, agent_state_at, last_activity_at)
-            rows.push({ status, agent_state, followup_since, followup_open: 0, agent_state_at, last_activity_at })
+          for (const followup_open of [0, 1]) {
+            for (const [agent_state_at, last_activity_at] of WITNESS) {
+              ins.run(status, agent_state, followup_since, followup_open, agent_state_at, last_activity_at)
+              rows.push({ status, agent_state, followup_since, followup_open, agent_state_at, last_activity_at })
+            }
           }
         }
       }
