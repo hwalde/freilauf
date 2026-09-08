@@ -309,7 +309,33 @@ export function isOperatorInput(s) {
 /** The statuses the overview can be filtered by and the sidebar counts, in reading order. */
 export const WORK_STATUSES = ['running', 'waiting_input', 'waiting_help', 'scheduled', 'deferred']
 
-const FOLLOWUP_SQL = `(status IN ('done','failed','aborted') AND followup_since IS NOT NULL)`
+/**
+ * `followUpActive()` in SQL — and it has to name BOTH columns, because a
+ * follow-up spends part of its life carrying only the second one.
+ *
+ * `followUpDone()` answers the commission (`endFollowUpCommission()` sets
+ * `followup_since` back to NULL, which stops the follow-up's overrun clock)
+ * and sets `followup_open=1` in the same breath; the flag comes off only at
+ * the integrator's end (`completeFollowUp()`). So from the report until the
+ * merge is through — minutes for an ordinary merge, the whole
+ * `finish_timeout_min` for a worktree the gate holds as dirty, indefinitely
+ * for a merge that is blocked — the row has `followup_since IS NULL` and
+ * `followup_open = 1`.
+ *
+ * While the column was missing here the two languages said different things
+ * about exactly that stretch: the row's status chip and the JSON API's
+ * liveness verdict (both `displayStatus()`) read "running", while the
+ * sidebar's counts did not count the run at all, `?status=running` did not
+ * list it, and `overviewRuns()`' ORDER BY sorted it below the finished runs —
+ * so the overview showed a running row that its own "running" filter denied.
+ * Same family as the archived runs' incident count: a number and the list
+ * behind it are one set.
+ *
+ * `COALESCE` because the column is only `NOT NULL` in the hub's own schema —
+ * the rule must not go NULL (and select nothing) against any other table.
+ */
+const FOLLOWUP_SQL = `(status IN ('done','failed','aborted')
+  AND (followup_since IS NOT NULL OR COALESCE(followup_open, 0) = 1))`
 
 /**
  * The WHERE fragment that selects the rows `displayStatus()` would put under

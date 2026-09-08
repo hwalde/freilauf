@@ -16,6 +16,21 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-08
+
+### Fixed
+
+- **A run whose follow-up was being merged showed as running but was missing
+  from the "running" list.** The status word on the overview row, the run's
+  detail page and the JSON API's liveness verdict all count a finished run as
+  work in flight while its follow-up sits in the finish gate or is being
+  merged. The sidebar's counts, the overview's status filter and its sort order
+  ask the same question in SQL — and that copy knew only half the rule, so for
+  the whole stretch between a follow-up report and its merge the row said
+  "running" while the sidebar counted it nowhere, `?status=running` refused to
+  list it, and it sorted below the finished runs. A blocked or held-up merge
+  keeps a run in that state for as long as it lasts.
+
 ## 2026-09-07
 
 ### Fixed
