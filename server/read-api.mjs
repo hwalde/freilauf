@@ -34,7 +34,7 @@ import { listFavorites, FAVORITES_MAX, favoriteSummary } from './favorites.mjs'
 import { listSessions, sessionMemory, paneAlive } from './sessions.mjs'
 import { panelValues, panelState } from './panels.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
-import { displayStatus, followUpActive } from './run-state.mjs'
+import { displayStatus, displayStatusSql, followUpActive, WORK_STATUSES, FINISHED } from './run-state.mjs'
 import {
   availableSkills, harnessSkillRoots, skillTargets, installedOverview,
   skillsInstallOn, skillsAutoUpdate,
@@ -54,12 +54,29 @@ function json(res, code, obj) {
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }).end(body)
 }
 
-/** The columns a run list carries — the whole row would be a page of JSON per run. */
+/**
+ * The columns a run list carries — the whole row would be a page of JSON per run.
+ *
+ * The last three are what `displayStatus()` needs on top of `status`,
+ * `followup_since` and `last_activity_at`, and they are here so a caller can
+ * arrive at the same word the pages print instead of guessing at it from the
+ * stored column. `display_status` below is that word, computed once.
+ */
 const RUN_LIST_COLUMNS = `r.id, r.title, r.status, r.repo_id, r.agent_id, r.harness, r.model, r.provider,
   r.effort, r.branch_expected, r.branch_reported, r.pr_url, r.started_at, r.ended_at, r.expected_minutes,
   r.finish_state, r.merge_status, r.merged_sha, r.archived_at, r.followup_since, r.followups,
   r.start_mode, r.start_at, r.tmux_session, r.workdir_effective, r.exit_code, r.cost_eur, r.cost_usd,
-  r.tokens_in, r.tokens_out, r.last_activity_at, r.resolves_run_id`
+  r.tokens_in, r.tokens_out, r.last_activity_at, r.resolves_run_id,
+  r.followup_open, r.agent_state, r.agent_state_at`
+
+/**
+ * The values `?status=` takes: the ones the overview's own filter offers, plus
+ * the terminal ones it deliberately does not (this route lists finished runs
+ * too). Every one of them is a `displayStatus()` answer — `waiting_input` is a
+ * display status and no column value at all, which is why the raw `status = ?`
+ * this replaced could never match it.
+ */
+const LIST_STATUSES = [...WORK_STATUSES, ...FINISHED]
 
 /**
  * Where a run's files are. Answered even when they do not exist yet, with a
@@ -189,7 +206,18 @@ export async function readApi(req, res, url) {
     const where = []
     const args = []
     if (repo) { where.push('r.repo_id = ?'); args.push(Number(repo)) }
-    if (status) { where.push('r.status = ?'); args.push(status) }
+    if (status) {
+      // The rule the pages select by, not the stored column — one statement, in
+      // the one place it is written (run-state.mjs). An unknown value is
+      // REFUSED and not quietly answered with an empty list: "there are none"
+      // is the one reading a caller must not be given for "I do not know that
+      // word", and `freilauf drain` acts on this answer before a reboot.
+      if (!LIST_STATUSES.includes(status)) {
+        json(res, 400, { ok: false, error: `unknown status '${status}' — one of: ${LIST_STATUSES.join(', ')}` })
+        return true
+      }
+      where.push(displayStatusSql(status))
+    }
     if (agent) { where.push('r.agent_id = ?'); args.push(Number(agent)) }
     if (archived === '1') where.push('r.archived_at IS NOT NULL')
     else if (archived !== 'all') where.push('r.archived_at IS NULL')
@@ -202,7 +230,7 @@ export async function readApi(req, res, url) {
       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY COALESCE(r.started_at, r.start_at) DESC LIMIT ?`
     const runs = db.prepare(sql).all(...args, limitOf(url))
-      .map(r => ({ ...r, short_id: shortId(r.id) }))
+      .map(r => ({ ...r, short_id: shortId(r.id), display_status: displayStatus(r) }))
     json(res, 200, { ok: true, count: runs.length, limit: limitOf(url), runs })
     return true
   }
@@ -222,7 +250,10 @@ export async function readApi(req, res, url) {
       // being: this route is what the agent skills and `fl-api` print. Stripped
       // by name rather than by an allowlist, so a new column keeps appearing
       // here as before — the token is the exception, not the rule.
-      run: { ...run, report_token: undefined, short_id: shortId(run.id), harness_label: harnessLabel(run.harness) },
+      run: { ...run, report_token: undefined, short_id: shortId(run.id), harness_label: harnessLabel(run.harness),
+        // The same word the list route and every page print, so the two routes
+        // cannot come to answer differently about one run.
+        display_status: displayStatus(run) },
       agent: agent ?? null,
       repo: repo ? { id: repo.id, name: repo.name, path: repo.path, base_branch: repo.base_branch, merge_mode: repo.merge_mode } : null,
       liveness: await livenessOf(run),

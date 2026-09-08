@@ -97,6 +97,16 @@ Sorted by `COALESCE(started_at, start_at)` descending. Each row carries
 `short_id` (the first uuid segment — what session names and branches use) plus
 `agent_name` and `repo_name`.
 
+**`status=` selects by what the pages SHOW, and every row also carries
+`display_status`.** The two differ for one kind of run and it is the kind you
+will meet: a finished run whose operator typed into its session is working
+again — its `status` still records the attempt (`done`), its `display_status`
+is `running`, and it answers under `status=running`, not under `status=done`.
+So `waiting_input` is a value you can filter by even though no run ever *stores*
+it. **Filter on `display_status`, never on `status`, when the question is
+"who is working right now"** — and a status the hub does not know is a 400
+naming the valid ones, not an empty list.
+
 **One run in full** — and this is the endpoint that answers the interesting
 questions:
 

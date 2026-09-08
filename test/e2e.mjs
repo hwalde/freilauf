@@ -6073,6 +6073,53 @@ export default {
       'pane_alive is a tri-state — null means tmux could not be asked, never "gone"')
   })
 
+  await check('GET /api/runs filters by the status the pages SHOW, not by the stored column', async () => {
+    // `runs.status` records the attempt; `displayStatus()` answers what the
+    // overview, the detail page, the sidebar's counts and the single-run
+    // route's own liveness verdict all say — a finished run whose operator
+    // typed into its session is work in flight. Four readers had learned that
+    // rule and the list route had not, so `?status=running` answered a
+    // different set than the page's own "running" filter, and `waiting_input`
+    // — a value `runs.status` never holds — matched nothing at all, for ever.
+    //
+    // It is not only a report that disagreed with a page. `freilauf drain`
+    // asks this route before a planned reboot, tells every run it finds to
+    // commit and report, and waits until none is left. A run it cannot see is
+    // one whose agent is never warned and whose session is then counted as
+    // idle — under the words "Safe to reboot or update", while somebody's
+    // conversation stands in it.
+    const l = await mergeRun()
+    await sendReport(l.id, { kind: 'done', text: 'first attempt' })
+    await waitFor(() => lauf(l.id).status === 'done',
+      { what: 'the run is finished', timeoutMs: 30_000 })
+    await postForm(`/api/runs/${l.id}/send`, { text: 'One more thing, please.' })
+    isTrue(!!lauf(l.id).followup_since, 'the commission is open')
+
+    const list = async (q) => (await (await fetchPath(`/api/runs?repo=${repoId}&limit=200${q}`)).json()).runs
+    const runningRows = await list('&status=running')
+    isTrue(runningRows.some(r => r.id === l.id),
+      'a finished run with an open follow-up is IN the running list, as the page counts it')
+    const row = runningRows.find(r => r.id === l.id)
+    equal(row.status, 'done', 'the stored column still records the attempt — nothing is rewritten')
+    equal(row.display_status, 'running', 'and the row says which word the pages print')
+    const finishedRows = await list('&status=done')
+    isFalse(finishedRows.some(r => r.id === l.id),
+      'and it is NOT in the finished list, exactly as the overview refuses to show it there')
+
+    // `waiting_input` is a display status and no column value: the agent's own
+    // hook says its turn is over, and the list has to answer for it.
+    await sendReport(l.id, { kind: '_waiting', source: 'hook' })
+    const waitingRows = await list('&status=waiting_input')
+    isTrue(waitingRows.some(r => r.id === l.id), 'the agent stopped: the run answers under waiting_input')
+    isFalse((await list('&status=running')).some(r => r.id === l.id), 'and no longer under running')
+
+    // A status nobody has is a refusal that names the valid ones — never an
+    // empty 200, which reads as "there are none".
+    const bad = await fetchPath(`/api/runs?repo=${repoId}&status=alive`)
+    equal(bad.status, 400, 'an unknown status is refused')
+    contains((await bad.json()).error, 'waiting_input', 'and the answer names what it could have been')
+  })
+
   await check("the skill's own run-alive script answers against a live hub", async () => {
     // A script shipped inside a skill is a promise like any other line in it.
     // Run it the way an agent would: fl-api on PATH, FL_HUB_URL from the

@@ -3806,6 +3806,31 @@ coding agents stay in their TUI afterwards. It carries `pane_alive` as a
 `verdict` of `working` / `idle_in_tui` / `process_gone` / `no_session` /
 `unknown`.
 
+**`?status=` selects by `displayStatus()`, and every row carries
+`display_status`.** The route returns the row AS STORED — that rule is
+unchanged, `status` still records the attempt — but *which rows* it returns is
+the question the pages answer, and this was the last reader with a copy of its
+own (`r.status = ?`). Two ways that was wrong at once: `waiting_input` is a
+display status and no column value, so it matched nothing at all for ever; and
+a finished run whose operator typed into its session — work in flight to the
+overview, the sidebar's counts, the overview's own filter and this route's own
+liveness verdict — was missing from `?status=running` and sitting in
+`?status=done`, where the overview refuses to show it. `LIST_STATUSES` is
+`WORK_STATUSES` plus the terminal ones (this route lists finished runs, the
+overview's filter does not), and anything else is a **400 naming them** rather
+than an empty 200: "there are none" is the one answer a caller must not be
+given for "I do not know that word".
+
+The caller that made this expensive is **`freilauf drain`**. It asks this route
+before a planned reboot, tells every run it finds to commit and report, and
+waits until none is left — so a run it could not see was an agent nobody warned
+and a session counted as idle under the words "Safe to reboot or update". And
+that is the one kind of run a reboot does not give back: `resumeRun()` resumes
+`running`/`waiting_help`, never a follow-up commission. `drain` asks once per
+status in `DRAIN_STATUSES` (`running`, `waiting_help`, `waiting_input`) and
+lets the hub decide which rows those are, instead of re-filtering the answer on
+a column.
+
 ## Incidents (rate limit, provider outage)
 
 On a rate limit or provider outage the agent cannot report anything — without an
