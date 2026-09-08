@@ -20,6 +20,25 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **Work a follow-up committed was silently left behind when its session
+  ended.** Type into a finished run's terminal and Freilauf treats it as a
+  follow-up: the run counts as working again and is held to its expected
+  duration. But if the agent then committed something and stopped without
+  calling `fl-report done` — it answered a question, or simply went idle — and
+  the session was later closed (by the automatic retention, by hand, or because
+  the agent's process had died), Freilauf only stopped the clock. Nothing
+  looked at the worktree. The commits stayed exactly where they were, on no
+  branch and not on the remote, under a run whose pages went on reporting
+  whatever its first attempt had earned — including "nothing to merge".
+  Measured on one run of this installation: one commit, made 39 seconds after
+  the operator typed into the session, invisible everywhere. A follow-up nobody
+  can answer any more is now treated like any other run that ends without
+  reporting: what it left is named on the run's page ("not merged — n
+  commits"), the commits are pushed to the remote as a `run/<id>` branch so
+  they no longer live on one machine alone, **Merge now** is offered, and you
+  get a message about it. A follow-up that added nothing changes nothing — a
+  run whose work was merged still says merged.
+
 - **The Sessions page offered a live conversation for one-click ending, and
   retention was about to end one by itself.** When you type into a finished
   run's terminal, Freilauf treats that as a follow-up commission: the overview,

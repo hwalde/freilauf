@@ -3,7 +3,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import db, { getRepo, getRun, setSetting, addEvent, announceRun, allSettings } from './db.mjs'
-import { handleReport, answerHelpCall, startFollowUpCommission, noteOperatorInput } from './reports.mjs'
+import { handleReport, answerHelpCall, startFollowUpCommission, noteOperatorInput, abandonFollowUp } from './reports.mjs'
 import { modelList, orEndpoints, standVon, effortOptionen } from './models.mjs'
 import { providersForHarness, listCodingAgents } from './coding-agents.mjs'
 import { detectInstalled } from './harnesses/index.mjs'
@@ -704,9 +704,16 @@ async function api(req, res, url) {
     // the race decided. Cancelling a failed run IS setting it to 'aborted'.
     if (['done', 'aborted'].includes(run?.status ?? '')) {
       // With the session goes the way a follow-up could report: an open
-      // follow-up commission (web.mjs /send) is given up with it.
-      db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')), followup_since=NULL,
+      // follow-up commission (web.mjs /send) is given up with it — and what it
+      // left in the worktree is assessed, exactly as the abort path below
+      // assesses its own leftovers. No notification, for the same reason it
+      // gives: whoever clicked the button is looking at the page.
+      db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')),
                   agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(m[1])
+      if (run?.followup_since) {
+        addEvent(m[1], 'followup_abandoned', { source: 'user' })
+        abandonFollowUp(m[1], false)
+      }
       if (run && !run.tmux_closed_at) addEvent(m[1], 'tmux_closed', { source: 'user' })
       return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
     }

@@ -7,7 +7,7 @@ import { homedir } from 'node:os'
 import db, { getRepo, getRun, addEvent, announceRun, allSettings, getSetting } from './db.mjs'
 import { RUNS_DIR, sh, parseDbUtc, shortId } from './util.mjs'
 import { notify, notifyOnFor } from './notify.mjs'
-import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd, followUpHeader, clearAnomalies } from './reports.mjs'
+import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd, followUpHeader, clearAnomalies, abandonFollowUp } from './reports.mjs'
 import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
 import { storeActivity } from './opencode-store.mjs'
 import { deliverPendingGoals } from './goal.mjs'
@@ -506,7 +506,8 @@ async function watchFollowUps() {
     // nothing can report any more. reconcileClosedSession usually cleared the
     // flag already — this is the net under it.
     if (run.tmux_closed_at) {
-      db.prepare('UPDATE runs SET followup_since=NULL WHERE id=?').run(run.id)
+      addEvent(run.id, 'followup_abandoned', { source: 'session_closed' })
+      abandonFollowUp(run.id)
       continue
     }
     if (run.tmux_session) {
@@ -518,8 +519,8 @@ async function watchFollowUps() {
       // the session still there" question and its consequences — wait.
       if (!r.ok || !r.stdout.trim()) continue
       if (r.stdout.trim() === '1') {
-        db.prepare('UPDATE runs SET followup_since=NULL WHERE id=?').run(run.id)
         addEvent(run.id, 'followup_agent_gone')
+        abandonFollowUp(run.id)
         continue
       }
     }

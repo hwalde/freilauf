@@ -5176,6 +5176,71 @@ try {
     db.prepare('DELETE FROM runs WHERE id=?').run(id)
   })
 
+  await check('a follow-up that never reported leaves its commits named, not silently behind', async () => {
+    // Measured on run 9ed29a82: the first attempt closed with "nothing to
+    // merge" (true at the time), the operator then typed into the session, the
+    // agent committed one file 39 seconds later, went idle without calling
+    // `fl-report done`, and retention closed the session three hours on. The
+    // commission was cleared and NOTHING else happened: the run stayed green
+    // and still said "nothing to merge" while a commit sat in its worktree on
+    // no branch, not on origin, reachable only from a detached HEAD that
+    // `cleanupWorktrees()` would one day remove.
+    //
+    // A follow-up nobody can answer any more is a run ending badly, and the hub
+    // already knows what to do with one: assess what is left, name it, back the
+    // commits up to origin, offer "Merge now".
+    const l = await mergeRun()
+    await sendReport(l.id, { kind: 'done', text: 'nothing to do here' })
+    await waitFor(() => lauf(l.id).status === 'done' && lauf(l.id).merge_status === 'nothing',
+      { what: 'the first attempt closes with nothing to merge', timeoutMs: 30_000 })
+
+    // The operator types into the run's terminal — past the send route, so the
+    // agent's own prompt hook is what opens the commission.
+    await sendReport(l.id, { kind: '_working', source: 'prompt' })
+    isTrue(!!lauf(l.id).followup_since, 'the commission is open')
+
+    // …the follow-up commits, and then the session goes away without a report.
+    await writeAndCommit(l.wt, 'followup.txt', 'work the follow-up did\n', 'follow-up work')
+    const j = await (await postForm('/api/sessions/kill', { session: l.session })).json()
+    isTrue(j.ok, 'the session is closed')
+    await waitFor(() => lauf(l.id).merge_status !== 'nothing',
+      { what: 'the leftovers are assessed', timeoutMs: 30_000 })
+    const r = lauf(l.id)
+    equal(r.followup_since, null, 'the commission is given up')
+    equal(r.merge_status, 'unmerged_commits', 'and what the follow-up left is named, not read as nothing')
+    contains(ereignisse(l.id).join(','), 'followup_abandoned',
+      'the run’s own history says the commission was given up')
+    contains(ereignisse(l.id).join(','), 'branch_backed_up',
+      'and the commits are on origin — nothing lives on this machine alone')
+    equal(r.status, 'done', 'the record of the first attempt is untouched')
+  })
+
+  await check('a follow-up that left nothing behind does not take a merge back', async () => {
+    // The other half of the rule above, and the way it would go wrong: a run
+    // whose work the hub MERGED, whose follow-up commission is then given up
+    // with nothing new in the worktree, must keep saying `merged`. Assessing
+    // from `base_sha` would count the commits the hub has already pushed a
+    // second time; writing 'nothing' over 'merged' would take the run's own
+    // record of where its work went away from it.
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'merged-first.txt', 'first attempt\n', 'first attempt')
+    await sendReport(l.id, { kind: 'done', text: 'done and mergeable' })
+    await waitFor(() => lauf(l.id).merge_status === 'merged',
+      { what: 'the first attempt is merged', timeoutMs: 30_000 })
+    const sha = lauf(l.id).merged_sha
+
+    await sendReport(l.id, { kind: '_working', source: 'prompt' })
+    isTrue(!!lauf(l.id).followup_since, 'the commission is open')
+    const j = await (await postForm('/api/sessions/kill', { session: l.session })).json()
+    isTrue(j.ok, 'the session is closed')
+    await waitFor(() => lauf(l.id).followup_since === null,
+      { what: 'the commission is given up', timeoutMs: 30_000 })
+    await watcherTick()
+    const r = lauf(l.id)
+    equal(r.merge_status, 'merged', 'the merge stands')
+    equal(r.merged_sha, sha, 'and it still names what was merged')
+  })
+
   // ---- 9. with merge_mode off nothing of this happens ----
   await check('with the integration switched off a done report closes the run as it always did', async () => {
     await repoMerge({ merge_mode: 'off' })

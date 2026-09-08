@@ -20,6 +20,9 @@
 import db, { getRun, addEvent, allSettings } from './db.mjs'
 import { sh, parseDbUtc } from './util.mjs'
 import { displayStatus, followUpActive } from './run-state.mjs'
+// Static, and it cannot become a cycle: reports.mjs reaches sessions.mjs only
+// through `import()` at call time, never from its module body.
+import { abandonFollowUp } from './reports.mjs'
 import { specOf } from './sandbox/exec.mjs'
 import { t } from './i18n.mjs'
 import { env } from './env.mjs'
@@ -819,9 +822,16 @@ export function reconcileClosedSession(runId, source = 'session') {
     if (!run.tmux_closed_at) addEvent(runId, 'tmux_closed', { source })
     // A session is the only way a follow-up can report — with it gone, an open
     // follow-up commission (web.mjs /send) can never be answered. The run
-    // falls back to displaying as finished; an escalation below takes care of
-    // a follow-up that was already in the gate.
-    if (run.followup_since) db.prepare('UPDATE runs SET followup_since=NULL WHERE id=?').run(runId)
+    // falls back to displaying as finished, and what the follow-up left in the
+    // worktree is assessed exactly as an aborted run's leftovers are
+    // (abandonFollowUp → assessUnmerged): it used to be cleared and nothing
+    // else, so commits made after the first report stayed on this machine
+    // alone under a run that said its work was done with. An escalation below
+    // takes care of a follow-up that was already in the gate.
+    if (run.followup_since) {
+      addEvent(runId, 'followup_abandoned', { source })
+      abandonFollowUp(runId)
+    }
     // A finished run whose FOLLOW-UP is in the finish gate (reports.mjs): its
     // agent is gone mid-report, and that is the same escalation as for a first
     // report — not a silent wait for the gate's deadline.
