@@ -20,6 +20,23 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **The Sessions page offered a live conversation for one-click ending, and
+  retention was about to end one by itself.** When you type into a finished
+  run's terminal, Freilauf treats that as a follow-up commission: the overview,
+  the detail page and the sidebar all put the run back under "running", and the
+  archive button refuses it — because archiving closes the tmux session and
+  somebody is typing into it. The Sessions page, which ends sessions directly,
+  never learned that rule: it read the stored status instead, so such a session
+  was labelled "run over, session open · Done", stood in the default list
+  (rather than behind the "show running agents" checkbox), and its **End**
+  button neither warned nor asked. The automatic retention was the worse half —
+  it measures from the run's own end, which for a follow-up is the *first*
+  attempt's end, so a conversation opened yesterday could be killed today on a
+  clock that started before it. Measured on one run of this installation: the
+  session of a follow-up the operator was working in was due to be closed
+  without notice four hours later. All three now ask the same question the rest
+  of the hub asks, and the page prints the same status word as the overview.
+
 - **A run whose follow-up was being merged showed as running but was missing
   from the "running" list.** The status word on the overview row, the run's
   detail page and the JSON API's liveness verdict all count a finished run as
