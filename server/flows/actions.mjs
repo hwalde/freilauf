@@ -5,7 +5,7 @@ import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import db, { addEvent } from '../db.mjs'
-import { RUNS_DIR, sh, sendToSession, shortId } from '../util.mjs'
+import { RUNS_DIR, sh, sendToSession, shortId, tailText } from '../util.mjs'
 import { terminalText } from '../detect.mjs'
 // Imported under a different name: the api object below has a method called
 // `notify` too, and one of the two reading as the other is a trap worth a line.
@@ -23,10 +23,7 @@ const SHELL_MAX_BUFFER = 8 * 1024 * 1024   // what the command may print at all 
 const iso = (s) => (s ? s.replace(' ', 'T') + 'Z' : null)
 
 /** The end of a command's output — that is where the interesting part of a build or a test run is. */
-const lastBytes = (text) => {
-  const s = String(text ?? '')
-  return s.length <= SHELL_OUTPUT_BYTES ? s : s.slice(-SHELL_OUTPUT_BYTES)
-}
+const lastBytes = (text) => tailText(text, SHELL_OUTPUT_BYTES)
 
 /**
  * Everything a flow may know about a run — the shape behind `trigger.run` and

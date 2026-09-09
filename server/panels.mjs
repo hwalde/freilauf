@@ -44,6 +44,39 @@
 //
 // The freedom that costs nothing is given back instead: a `href` on the
 // headline, and a `note` in a tiny Markdown subset the hub renders itself.
+//
+// ## And a panel may TAKE a value, not only show one
+//
+// The block above is about numbers travelling one way. The other direction was
+// asked for by the same operator on the same day: "how many swarm workers may
+// run at once" is a number that BELONGS next to the number of open findings,
+// and having to open a terminal to change it is what makes an operator not
+// change it. So a panel value may carry `controls` — a declared list of
+// widgets — and an `action` — an argv command with an explicit working
+// directory.
+//
+// The rule of the block above survives intact, and that is deliberate: a
+// control is DATA too. The project says "a number between 0 and 6 called
+// gleichzeitig"; the hub decides what that looks like in a 240px column. No
+// project ever writes an `<input>`, which is what keeps the rail, the read API
+// and this hub's CSS class names out of somebody else's repository.
+//
+// Two ways a changed value can mean something, and both are needed:
+//
+//   `store: true`   the hub keeps it. `GET /api/panels` reports it, the project
+//                   READS it when it needs it, and nothing is executed. The
+//                   declared `value` is then only the seed for the first time —
+//                   afterwards the stored one is the truth, because in this way
+//                   the hub IS the store and a second truth would be the whole
+//                   failure this file is written against.
+//   an `action`     the values travel to a command as argv elements. The
+//                   project stays the owner: it writes the value where it
+//                   belongs and pushes the panel again. The declared `value` is
+//                   what was last measured.
+//
+// Combined they are "store only when the command succeeded" — a value the hub
+// keeps while the command that was supposed to apply it failed would be a lie
+// about what the project holds.
 import db from './db.mjs'
 import { publish } from './events.mjs'
 import { parseDbUtc, toDbUtc } from './util.mjs'
@@ -63,18 +96,64 @@ CREATE TABLE IF NOT EXISTS panel_values (
   at       TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (repo_id, key)
 );
+
+-- What a control the hub KEEPS is currently set to. Its own table rather than a
+-- field inside the value column, because the two have different owners and
+-- different lifetimes: the value is overwritten wholesale by every push of the
+-- producer, and a setting the operator made must survive exactly that.
+-- Namespaced per repo, panel and field, which is what makes two panels
+-- declaring a control called "n" harmless.
+CREATE TABLE IF NOT EXISTS panel_control_values (
+  repo_id    INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  panel_key  TEXT NOT NULL,
+  key        TEXT NOT NULL,
+  value      TEXT NOT NULL DEFAULT '',
+  at         TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (repo_id, panel_key, key)
+);
 `)
+
+// The outcome of the last action of a panel, as JSON. On the panel row rather
+// than in a table of its own: exactly one command may run per panel at a time
+// (see `submitPanel`), so there is exactly one outcome worth showing, and it
+// belongs to the block the operator is looking at.
+if (!db.prepare('PRAGMA table_info(panel_values)').all().some(c => c.name === 'action_result')) {
+  db.exec('ALTER TABLE panel_values ADD COLUMN action_result TEXT')
+}
 
 /** Panel keys: the same shape a plugin id has — lowercase, digits, dashes. */
 export const PANEL_KEY_RE = /^[a-z0-9][a-z0-9-]{0,39}$/
 
+/** A control's key — the name a placeholder in `argv` refers to. */
+export const CONTROL_KEY_RE = /^[a-z0-9][a-z0-9_-]{0,29}$/
+
 /** Hard caps. A sidebar column is 240px wide; anything past this is not a panel. */
 export const PANEL_MAX_ITEMS = 8
+/**
+ * And at most this many controls. Six is not a shy number in a 240px column:
+ * a number, a number, a select and a button — the first customer's whole
+ * throttle — is four. A panel that wants more is a settings page, and a page
+ * is what `href` is for.
+ */
+export const PANEL_MAX_CONTROLS = 6
+export const PANEL_MAX_OPTIONS = 12
+export const PANEL_MAX_ARGV = 24
 const MAX_TITLE = 40
 const MAX_LABEL = 40
 const MAX_NOTE = 200
 const MAX_ERROR = 200
+const MAX_HINT = 120
+const MAX_CONFIRM = 200
+const MAX_ARG = 500
+export const PANEL_MAX_VALUE = 200
 const MAX_PANELS_PER_REPO = 6
+
+/** The five widgets. Everything a small control panel needs, and nothing that needs a second column. */
+export const CONTROL_TYPES = ['number', 'text', 'select', 'toggle', 'button']
+
+/** Seconds a panel command may run before it is killed. */
+export const ACTION_TIMEOUT_DEFAULT = 60
+export const ACTION_TIMEOUT_MAX = 600
 
 /** The tones a value may carry. Anything else is dropped, never rendered raw. */
 const TONES = ['red', 'yellow', 'green']
@@ -119,6 +198,178 @@ function tone(v) {
 }
 
 /**
+ * A push that must be refused rather than repaired.
+ *
+ * `normalizePanel` is deliberately forgiving about the numbers — a fourteenth
+ * item is cut, an unknown tone is dropped, and a producer is a 40-line script
+ * in somebody else's repository. A CONTROL is the other kind of thing: it is
+ * half of a contract with a command, and half a contract repaired into
+ * something plausible is how a button comes to send an argument nobody wrote.
+ * So the caps are still repaired and the structure is refused, by name.
+ */
+class PanelRefusal extends Error {}
+const refuse = (msg) => { throw new PanelRefusal(msg) }
+
+/** True/false out of whatever a producer wrote — JSON booleans, 1/0, "yes", "on". */
+function flag(v, fallback = false) {
+  if (v === null || v === undefined || v === '') return fallback
+  if (typeof v === 'boolean') return v
+  const s = String(v).trim().toLowerCase()
+  if (['1', 'true', 'yes', 'on'].includes(s)) return true
+  if (['0', 'false', 'no', 'off'].includes(s)) return false
+  return fallback
+}
+
+/**
+ * The value a control carries, as the string the form and the command see.
+ *
+ * Everything crossing this seam is a string, because that is what an argv
+ * element is, what a form field is and what the settings table holds. A number
+ * keeps its formatting through `num()` (so `1.0` arrives as `1`), and — the
+ * trap this whole file has an entry about — an EMPTY value stays empty and
+ * never becomes `0`.
+ */
+function controlValue(raw, type) {
+  if (type === 'toggle') return flag(raw) ? '1' : '0'
+  if (type === 'number') { const n = num(raw); return n === null ? '' : String(n) }
+  if (raw === null || raw === undefined) return ''
+  return String(raw).replace(/[\r\n\t]+/g, ' ').slice(0, PANEL_MAX_VALUE)
+}
+
+/**
+ * The options of a `select`, as `{value,label}` — a bare string is both.
+ *
+ * A select with no options at all is refused rather than rendered empty: a
+ * dropdown that can only produce the empty string is a control that cannot be
+ * used, and the producer is the only one who can say what belongs in it.
+ */
+function options(raw, problems, key) {
+  const list = Array.isArray(raw) ? raw : []
+  const out = []
+  for (const o of list) {
+    if (out.length >= PANEL_MAX_OPTIONS) { problems.push(`${key}: more than ${PANEL_MAX_OPTIONS} options — the rest was dropped`); break }
+    const value = typeof o === 'object' && o !== null ? o.value : o
+    if (value === null || value === undefined || value === '') continue
+    const v = String(value).slice(0, PANEL_MAX_VALUE)
+    const label = text(typeof o === 'object' && o !== null ? (o.label ?? v) : v, MAX_LABEL) ?? v
+    if (!out.some(x => x.value === v)) out.push({ value: v, label })
+  }
+  if (!out.length) refuse(`control ${JSON.stringify(key)} is a select with no options`)
+  return out
+}
+
+/**
+ * A command a panel may call: an explicit working directory and an argv list.
+ *
+ * Two things it deliberately is NOT. It is not a shell string — a placeholder
+ * is substituted INSIDE one argv element and can therefore never become two
+ * arguments, which is what makes the first value containing a space or a quote
+ * a non-event instead of a bug nobody finds again. And `cwd` has no default:
+ * `docs/panels.md` already carries the measurement (a working checkout 627
+ * commits behind `origin/main`), and a command that silently ran in the wrong
+ * checkout would be that measurement happening again with a button on it.
+ */
+export function normalizeAction(raw, where) {
+  if (raw === null || raw === undefined) return null
+  if (typeof raw !== 'object' || Array.isArray(raw)) refuse(`${where}: the action must be a JSON object`)
+  const cwd = text(raw.cwd, 500)
+  if (!cwd) refuse(`${where}: the action needs a "cwd" — the directory the command runs in, spelled out`)
+  if (!cwd.startsWith('/')) refuse(`${where}: the action's cwd must be an absolute path, not ${JSON.stringify(cwd)}`)
+  const rawArgv = Array.isArray(raw.argv) ? raw.argv : null
+  if (!rawArgv || !rawArgv.length) refuse(`${where}: the action needs an "argv" — the program and its arguments as a list`)
+  if (rawArgv.length > PANEL_MAX_ARGV) refuse(`${where}: an action takes at most ${PANEL_MAX_ARGV} argv elements`)
+  const argv = rawArgv.map((a) => {
+    if (a === null || a === undefined) refuse(`${where}: an argv element is empty — argv is positional, so nothing may silently fall out of it`)
+    const s = String(a)
+    if (s.length > MAX_ARG) refuse(`${where}: an argv element is longer than ${MAX_ARG} characters`)
+    return s
+  })
+  if (!argv[0].trim()) refuse(`${where}: the first argv element is the program, and it is empty`)
+  const t = num(raw.timeout_s ?? raw.timeoutS)
+  return {
+    cwd,
+    argv,
+    timeoutS: t === null ? ACTION_TIMEOUT_DEFAULT : Math.min(ACTION_TIMEOUT_MAX, Math.max(1, Math.round(t))),
+  }
+}
+
+/**
+ * The widgets of one panel.
+ *
+ * `submit` is what a control does when it CHANGES, and its default is the one
+ * decision here worth stating: a button submits (it has no other purpose), a
+ * toggle submits (a switch that needs a second click on a different widget is
+ * not a switch), and a number, a text or a select does not — those are typed
+ * and read back before they are meant, and they travel when a button is
+ * pressed. Any of it is overridable, so "one select and no button" is one
+ * field away.
+ */
+export function normalizeControls(raw, problems) {
+  const list = Array.isArray(raw) ? raw : []
+  if (!list.length) return []
+  const out = []
+  for (const c of list) {
+    if (out.length >= PANEL_MAX_CONTROLS) { problems.push(`more than ${PANEL_MAX_CONTROLS} controls — the rest was dropped`); break }
+    if (!c || typeof c !== 'object') refuse('a control must be a JSON object')
+    const key = String(c.key ?? '').trim()
+    if (!CONTROL_KEY_RE.test(key)) {
+      refuse(`control key ${JSON.stringify(key)} is not usable — lowercase letters, digits, "-" and "_", starting with a letter or digit`)
+    }
+    if (out.some(x => x.key === key)) refuse(`control ${JSON.stringify(key)} is declared twice`)
+    const type = String(c.type ?? 'text').trim().toLowerCase()
+    if (!CONTROL_TYPES.includes(type)) refuse(`control ${JSON.stringify(key)}: unknown type ${JSON.stringify(type)} — one of ${CONTROL_TYPES.join(', ')}`)
+
+    const control = {
+      key,
+      type,
+      label: text(c.label, MAX_LABEL) ?? key,
+      hint: text(c.hint, MAX_HINT),
+      confirm: text(c.confirm, MAX_CONFIRM),
+      value: type === 'button' ? '' : controlValue(c.value, type),
+      store: type === 'button' ? false : flag(c.store),
+      // A button ALWAYS submits, whatever it says: it has no second purpose,
+      // and `"submit": false` on one would render something that looks like the
+      // way to act and is refused when pressed — the exact shape this file
+      // refuses a button with nothing behind it for.
+      submit: type === 'button' ? true : flag(c.submit, type === 'toggle'),
+      tone: tone(c.tone),
+      min: null, max: null, step: null, placeholder: null, options: null, action: null,
+    }
+    if (type === 'number') {
+      control.min = num(c.min)
+      control.max = num(c.max)
+      control.step = num(c.step)
+      if (control.min !== null && control.max !== null && control.min > control.max) {
+        refuse(`control ${JSON.stringify(key)}: min ${control.min} is above max ${control.max}`)
+      }
+    }
+    if (type === 'text') control.placeholder = text(c.placeholder, MAX_LABEL)
+    if (type === 'select') {
+      control.options = options(c.options, problems, key)
+      // A seed that is not in its own list would be sent to the command as a
+      // value the producer never offered — the first option is the honest
+      // reading of "nothing valid was said".
+      if (!control.options.some(o => o.value === control.value)) {
+        if (control.value) problems.push(`${key}: the value ${JSON.stringify(control.value)} is not one of its options`)
+        control.value = control.options[0].value
+      }
+    }
+    if (type === 'number' && control.value !== '') {
+      const n = Number(control.value)
+      if (control.min !== null && n < control.min) problems.push(`${key}: the value ${n} is below its own minimum`)
+      if (control.max !== null && n > control.max) problems.push(`${key}: the value ${n} is above its own maximum`)
+    }
+    if (c.action !== null && c.action !== undefined) {
+      if (type !== 'button') refuse(`control ${JSON.stringify(key)}: only a button carries an action of its own`)
+      control.action = normalizeAction(c.action, `control ${JSON.stringify(key)}`)
+    }
+    out.push(control)
+  }
+  if (!out.length) refuse('a "controls" list that produced no usable control')
+  return out
+}
+
+/**
  * Bring whatever a producer pushed into the one shape the renderer knows.
  *
  * Returns `{ ok, value, problems }`. It is deliberately forgiving about what it
@@ -154,9 +405,31 @@ export function normalizePanel(raw) {
     })
   }
 
+  let controls = []
+  let action = null
+  try {
+    controls = normalizeControls(obj.controls, problems)
+    action = normalizeAction(obj.action, 'panel')
+  } catch (err) {
+    if (!(err instanceof PanelRefusal)) throw err
+    return { ok: false, value: null, problems: [err.message] }
+  }
+
   const total = num(obj.total)
-  if (total === null && !items.length) {
-    return { ok: false, value: null, problems: ['a panel needs a total or at least one item'] }
+  // A panel that TAKES a value is a panel even with no number in it: "how many
+  // workers may run" is worth its block whether or not the project also counts
+  // something. Before controls existed, "no total and no item" was simply not a
+  // panel, and it still is not.
+  if (total === null && !items.length && !controls.length) {
+    return { ok: false, value: null, problems: ['a panel needs a total, an item or a control'] }
+  }
+
+  // A button with nothing to press it FOR is the one shape that reads as
+  // working and does nothing at all — the failure this repository keeps writing
+  // down. It is only a button when something would happen: an action here, an
+  // action of its own, or a value the hub is asked to keep.
+  if (controls.length && !action && !controls.some(c => c.action || c.store)) {
+    return { ok: false, value: null, problems: ['these controls neither store a value (`"store": true`) nor call anything (`action`) — nothing would happen'] }
   }
 
   return {
@@ -169,14 +442,36 @@ export function normalizePanel(raw) {
       href: href(obj.href),
       note: text(obj.note, MAX_NOTE),
       items,
+      controls,
+      action,
     },
   }
 }
 
-function shape(row) {
+function shape(row, stored = null) {
   if (!row) return null
   let value = null
   try { value = JSON.parse(row.value || '{}') } catch { value = null }
+  let actionResult = null
+  try { actionResult = row.action_result ? JSON.parse(row.action_result) : null } catch { actionResult = null }
+  const controls = (Array.isArray(value?.controls) ? value.controls : []).map((c) => {
+    // The stored value outranks the declared one, and only for a control the
+    // panel asked the hub to keep. That is not the hub preferring itself: for a
+    // `store` control the hub IS the store, so the producer's `value` was the
+    // seed and the stored one is what everybody — this render, `GET
+    // /api/panels`, the command's argv — has to agree on. For every other
+    // control the declared value is the last measurement and nothing may
+    // shadow it.
+    const held = c.store && stored ? stored.get(`${row.key}/${c.key}`) : undefined
+    if (held === undefined) return { ...c, stored: false }
+    // …unless the producer has since changed what the field may hold. A kept
+    // "woche" under a select that now offers only "stunde" would be reported by
+    // the read API as a value nothing can act on and drawn as a dropdown showing
+    // something else — so the declaration wins back, which is the same "the
+    // first option is the honest reading" rule a seed nobody could satisfy gets.
+    if (c.type === 'select' && !c.options?.some(o => o.value === held.value)) return { ...c, stored: false }
+    return { ...c, value: held.value, storedAt: held.at, stored: true }
+  })
   return {
     repoId: row.repo_id,
     key: row.key,
@@ -186,12 +481,23 @@ function shape(row) {
     href: value?.href ?? null,
     note: value?.note ?? null,
     items: Array.isArray(value?.items) ? value.items : [],
+    controls,
+    action: value?.action ?? null,
+    actionResult,
     error: row.error || null,
     ttlMin: row.ttl_min ?? null,
     source: row.source || null,
     at: row.at,
     atMs: parseDbUtc(row.at),
   }
+}
+
+/** Every kept control value of one repo, keyed `panel\0control`. One query, not one per panel. */
+function storedValues(repoId, panelKey = null) {
+  const rows = panelKey
+    ? db.prepare('SELECT * FROM panel_control_values WHERE repo_id=? AND panel_key=?').all(repoId, panelKey)
+    : db.prepare('SELECT * FROM panel_control_values WHERE repo_id=?').all(repoId)
+  return new Map(rows.map(r => [`${r.panel_key}/${r.key}`, { value: r.value, at: r.at }]))
 }
 
 /**
@@ -212,13 +518,37 @@ export function panelState(panel, nowMs = Date.now()) {
 /** Every panel of one repo, in the order they were first pushed. */
 export function panelValues(repoId) {
   if (repoId == null) return []
-  return db.prepare('SELECT * FROM panel_values WHERE repo_id=? ORDER BY key').all(Number(repoId)).map(shape)
+  const id = Number(repoId)
+  const stored = storedValues(id)
+  return db.prepare('SELECT * FROM panel_values WHERE repo_id=? ORDER BY key').all(id).map(row => shape(row, stored))
 }
 
 /** One panel, or null. */
 export function panelValue(repoId, key) {
   if (repoId == null) return null
-  return shape(db.prepare('SELECT * FROM panel_values WHERE repo_id=? AND key=?').get(Number(repoId), String(key)))
+  const id = Number(repoId)
+  const k = String(key)
+  return shape(db.prepare('SELECT * FROM panel_values WHERE repo_id=? AND key=?').get(id, k), storedValues(id, k))
+}
+
+
+/**
+ * Keep what the operator set.
+ *
+ * Written per control rather than as one blob, because a producer may add a
+ * control tomorrow and the ones set today must not be rewritten by that.
+ */
+export function setControlValue(repoId, key, controlKey, value) {
+  db.prepare(`INSERT INTO panel_control_values(repo_id, panel_key, key, value, at) VALUES(?,?,?,?,?)
+              ON CONFLICT(repo_id, panel_key, key) DO UPDATE SET value=excluded.value, at=excluded.at`)
+    .run(Number(repoId), String(key), String(controlKey), String(value ?? ''), toDbUtc(Date.now()))
+}
+
+/** What the last press of a button did. `null` forgets it — a fresh push says nothing about an old command. */
+export function setActionResult(repoId, key, result) {
+  db.prepare('UPDATE panel_values SET action_result=? WHERE repo_id=? AND key=?')
+    .run(result === null ? null : JSON.stringify(result), Number(repoId), String(key))
+  publish('panel', { repoId: Number(repoId), key: String(key) })
 }
 
 /**
@@ -243,23 +573,26 @@ export function setPanelValue({ repoId, key, value = null, error = null, ttlMin 
   }
   if (!PANEL_KEY_RE.test(k)) return { ok: false, error: `invalid panel key ${JSON.stringify(k)}` }
 
-  const known = panelValue(id, k)
-  if (!known) {
+  // The RAW row, not `panelValue()`: the shaped one carries the stored control
+  // values merged over the declared ones, and writing that back would bake a
+  // setting into the producer's own document — the second truth this module
+  // exists to avoid.
+  const row = db.prepare('SELECT * FROM panel_values WHERE repo_id=? AND key=?').get(id, k)
+  if (!row) {
     const n = db.prepare('SELECT count(*) c FROM panel_values WHERE repo_id=?').get(id).c
     if (n >= MAX_PANELS_PER_REPO) return { ok: false, error: `a repo carries at most ${MAX_PANELS_PER_REPO} panels` }
   }
 
-  let stored = known ? JSON.stringify({
-    title: known.title, total: known.total, tone: known.tone,
-    href: known.href, note: known.note, items: known.items,
-  }) : '{}'
+  let stored = row?.value || '{}'
   const problems = []
+  let controls = null
   if (value !== null && value !== undefined) {
     const norm = normalizePanel(value)
     if (!norm.ok) return { ok: false, error: norm.problems.join('; ') }
     problems.push(...norm.problems)
     stored = JSON.stringify(norm.value)
-  } else if (!known && !error) {
+    controls = norm.value.controls
+  } else if (!row && !error) {
     return { ok: false, error: 'a panel needs a value' }
   }
 
@@ -271,6 +604,17 @@ export function setPanelValue({ repoId, key, value = null, error = null, ttlMin 
     .run(id, k, stored, text(error, MAX_ERROR), num(ttlMin) === null ? null : Math.max(0, Math.round(num(ttlMin))),
       text(source, 80), toDbUtc(Date.now()))
 
+  // A control the producer dropped takes its kept value with it. Left behind,
+  // it would come back to life the day somebody declares that key again — with
+  // a value nobody remembers setting, which is worse than starting from the
+  // seed.
+  if (controls) {
+    const alive = new Set(controls.filter(c => c.store).map(c => c.key))
+    for (const r of db.prepare('SELECT key FROM panel_control_values WHERE repo_id=? AND panel_key=?').all(id, k)) {
+      if (!alive.has(r.key)) db.prepare('DELETE FROM panel_control_values WHERE repo_id=? AND panel_key=? AND key=?').run(id, k, r.key)
+    }
+  }
+
   publish('panel', { repoId: id, key: k })
   return { ok: true, problems, panel: panelValue(id, k) }
 }
@@ -280,6 +624,11 @@ export function deletePanelValue(repoId, key) {
   const id = Number(repoId)
   if (!Number.isFinite(id)) return { ok: false, error: 'unknown repo' }
   db.prepare('DELETE FROM panel_values WHERE repo_id=? AND key=?').run(id, String(key))
+  // The kept values go with it. There is no foreign key between the two tables
+  // (a control value is addressed by the panel's KEY, not by a row id), so this
+  // is the deletion — leaving them would make a re-pushed panel of the same
+  // name inherit settings from a panel that was removed on purpose.
+  db.prepare('DELETE FROM panel_control_values WHERE repo_id=? AND panel_key=?').run(id, String(key))
   publish('panel', { repoId: id, key: String(key) })
   return { ok: true }
 }

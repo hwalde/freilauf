@@ -428,6 +428,135 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // A panel control is the one thing in the sidebar somebody TYPES INTO, and the
+  // sidebar is swapped whole — by the 30-second poll, by every run event, by
+  // somebody else's push. Everything below is about that collision, plus the two
+  // gestures the server cannot see: which button was pressed, and a toggle that
+  // acts on its own.
+  group('Panel controls: the sidebar takes a value')
+
+  const panelPushen = (value) => postForm('/api/panels', {
+    repo: String(repoId), key: 'schwarm', value: JSON.stringify(value),
+  })
+
+  // The fold is remembered in localStorage and the group before this one leaves
+  // it shut. A control in a folded sidebar is not reachable, which is correct
+  // and not what these checks are about.
+  const sidebarAuf = async (p) => {
+    if (!(await p.isVisible('#side-body'))) await p.click('#side-toggle')
+    isTrue(await p.isVisible('#side-body'), 'the sidebar is open')
+  }
+
+  await check('typing into a control is not thrown away by the sidebar refreshing under it', async () => {
+    await panelPushen({
+      title: 'Schwarm',
+      total: 1,
+      controls: [
+        { key: 'n', type: 'number', label: 'at once', value: 1, min: 0, max: 6, store: true },
+        { key: 'go', type: 'button', label: 'Apply' },
+      ],
+    })
+    const p = await neueSeite(`/?repo=${repoId}`, () => { window.FREILAUF_SIDEBAR_POLL_MS = 1000 })
+    await sidebarAuf(p)
+    await p.fill('input[name="v_n"]', '4')
+    await p.evaluate(() => { document.getElementById('status-sidebar').dataset.vorher = '1' })
+    // A real run event: without the focus guard this swap replaces the aside and
+    // the half-typed 4 goes with it.
+    await laufStarten({ repo_id: repoId, prompt: 'a run while a control is being typed into' })
+    await p.waitForTimeout(2500)
+    equal(await p.$eval('#status-sidebar', el => el.dataset.vorher ?? ''), '1',
+      'the swap was held back while the field had focus — the same rule the "Edit this run" card follows')
+    equal(await p.inputValue('input[name="v_n"]'), '4', 'and what was typed is still there')
+    // Let go, and the sidebar catches up by itself on the next tick.
+    await p.evaluate(() => document.activeElement?.blur())
+    await wartePage(p, () => !document.getElementById('status-sidebar')?.dataset.vorher,
+      null, 'the sidebar to refresh once the field is no longer focused')
+    sauber(p)
+    await p.close()
+  })
+
+  await check('a press sends the values and the button that was pressed, and says what happened', async () => {
+    const p = await neueSeite(`/?repo=${repoId}`)
+    await sidebarAuf(p)
+    const gesendet = []
+    await p.route('**/api/panels/control', async (route) => {
+      gesendet.push(route.request().postData())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, saved: true }) })
+    })
+    await p.fill('input[name="v_n"]', '5')
+    await p.click('button[name="control"][value="go"]')
+    await wartePage(p, () => document.querySelectorAll('#freilauf-toasts .toast').length > 0, null, 'a toast')
+    contains(gesendet[0] ?? '', 'v_n=5', 'the value went with it')
+    contains(gesendet[0] ?? '', 'control=go', 'and the name of the button, so one form can serve two commands')
+    contains(gesendet[0] ?? '', 'key=schwarm', 'named by its panel')
+    // The page did not go anywhere — a form post would have left the overview.
+    contains(p.url(), `/?repo=${repoId}`, 'and the page stayed where it was')
+    sauber(p)
+    await p.close()
+  })
+
+  await check('a toggle acts on its own, and a confirmation that is declined sends nothing', async () => {
+    await panelPushen({
+      title: 'Schwarm',
+      total: 1,
+      controls: [
+        { key: 'an', type: 'toggle', label: 'swarm on', value: true, store: true },
+        { key: 'weg', type: 'toggle', label: 'dangerous', value: false, store: true, confirm: 'Really?' },
+      ],
+    })
+    const p = await neueSeite(`/?repo=${repoId}`)
+    await sidebarAuf(p)
+    const gesendet = []
+    await p.route('**/api/panels/control', async (route) => {
+      gesendet.push(route.request().postData())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, saved: true }) })
+    })
+    // No button anywhere near it: a switch that needs a second click on another
+    // widget is not a switch.
+    // Two elements carry that name: the hidden `0` companion and the checkbox
+    // itself. Naming the type is what makes the selector mean the widget.
+    await p.uncheck('input[type=checkbox][name="v_an"]')
+    await wartePage(p, () => document.querySelectorAll('#freilauf-toasts .toast').length > 0, null, 'a toast')
+    equal(gesendet.length, 1, 'the toggle submitted by itself')
+    contains(gesendet[0], 'v_an=0',
+      'switched OFF really reaches the hub — the hidden 0 companion is what makes an absent checkbox distinguishable from an unchanged field')
+
+    // And declined confirmations: answer the dialog with "no" this time.
+    p.removeAllListeners('dialog')
+    p.on('dialog', (d) => { p.dialoge.push(d.message()); d.dismiss().catch(() => {}) })
+    await p.click('input[type=checkbox][name="v_weg"]')
+    await p.waitForTimeout(500)
+    equal(gesendet.length, 1, 'a declined confirmation sends nothing')
+    isTrue(p.dialoge.some(m => m.includes('Really?')), 'and the question the project wrote is what was asked')
+    isFalse(await p.isChecked('input[type=checkbox][name="v_weg"]'), 'the box goes back to where it was')
+    sauber(p)
+    await p.close()
+  })
+
+  await check('the outcome comes from the server, so it is still there after a reload', async () => {
+    await panelPushen({
+      title: 'Schwarm',
+      total: 1,
+      controls: [{ key: 'n', type: 'number', label: 'at once', value: 1, store: true }, { key: 'go', type: 'button', label: 'Apply' }],
+    })
+    const p = await neueSeite(`/?repo=${repoId}`)
+    await sidebarAuf(p)
+    await p.fill('input[name="v_n"]', '3')
+    await p.click('button[name="control"][value="go"]')
+    await wartePage(p, () => !!document.querySelector('#status-sidebar .panel-action'),
+      null, 'the outcome line to appear through the live channel')
+    contains(await p.$eval('#status-sidebar .panel-action', el => el.className), 'ok', 'it says it was taken')
+    // The proof that it is not a toast: reload, and it is still there — with
+    // the value the operator set, because the hub is the store for it.
+    await p.goto(sk.base + `/agents?repo=${repoId}`, { waitUntil: 'load' })
+    isTrue(await p.isVisible('#status-sidebar .panel-action'), 'on another page too')
+    equal(await p.inputValue('input[name="v_n"]'), '3', 'and the field shows what was set')
+    sauber(p)
+    await p.close()
+    await postForm('/api/panels', { repo: String(repoId), key: 'schwarm', remove: '1' })
+  })
+
+  // ------------------------------------------------------------------
   // `label { display: block }` plus a field inline after the caption means every
   // row of a form starts at a different x, depending on how long the caption is.
   group('Forms: captions in one column, tall fields with the caption above')

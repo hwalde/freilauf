@@ -16,6 +16,38 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-09
+
+### Added
+
+- **A sidebar panel can now take a value, not only show one.** A project's
+  panel may declare **controls** — a number field, a text field, a dropdown, a
+  switch, a button (up to six per panel) — and a changed value either goes into
+  a setting the hub keeps, or to a command the panel declared. The occasion was
+  a throttle: "how many workers may run at once, and how many starts per hour"
+  is a number that belongs next to the number of open findings, and having to
+  open a terminal to change it is what makes an operator not change it.
+  - **The hub keeps it** (`"store": true`): nothing runs anywhere, and the
+    project reads the value back with `fl-panel get <panel> <control>` or
+    `GET /api/panels`. This is the ordinary way.
+  - **A command is called** (`action`): the values reach it as separate
+    arguments — an `argv` list, never a shell line, so a value with a space or
+    a semicolon in it is a value and nothing else. Its working directory is
+    **required and has no default**: it must be a checkout that is kept
+    current, for the same reason panels are pushed and not polled.
+  - Every press leaves a line under the panel: *running…*, *applied 14:05* with
+    the command's own last line, *saved*, *failed (exit 3)*, *no answer within
+    60 s*, *the command could not be started*, or *no answer — the hub was
+    restarted while the command ran*. It is stored on the panel, so it is still
+    there after a reload, in another tab, and for whoever looks next — and
+    "applied 14:05" next to "as of 11:20" says exactly that the numbers above
+    have not been confirmed since.
+  - `bin/fl-panel` grew `--control`, `--store`, `--action-cwd`,
+    `--action-timeout`, everything after `--` as the command, and a new
+    `fl-panel get` that prints a value bare, for a shell script.
+  - Panels without controls behave exactly as before, and the folded rail still
+    draws only values. The contract is [docs/panels.md](docs/panels.md).
+
 ## 2026-09-08
 
 ### Fixed

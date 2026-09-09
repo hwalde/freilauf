@@ -1888,6 +1888,62 @@ to know is this:
   in somebody else's repository. `''` becomes `null` and never `0`: in a panel
   that trap does not merely read wrong, it reads as "nothing left to do".
 
+#### …and a panel may TAKE a value, not only show one
+
+The same seam runs the other way since the throttle of a project's own agent
+swarm — "how many workers at once, how many starts per hour" — turned out to be
+a number that belongs next to the number of open findings. A panel value may
+carry **`controls`** (a declared list of widgets) and an **`action`** (an argv
+command with an explicit working directory); `server/panel-action.mjs` is the
+gesture, `POST /api/panels/control` the route, and
+[docs/panels.md](docs/panels.md) the contract. Six rules the rest of the hub has
+to keep:
+
+- **A control is data too, which is what makes it fit the rule above.** The
+  project says "a number between 0 and 6 called `gleichzeitig`"; `panelControls()`
+  in pages.mjs decides what that is in a 240px column. No project writes an
+  `<input>`, so the rail, the read API and this hub's class names stay out of
+  somebody else's repository — the same three reasons, one field further out.
+- **Two ways, and they differ in who owns the value.** `store: true` means the
+  HUB is the store: the declared `value` was only the seed, the stored one wins
+  in the render and in `GET /api/panels`, and the project READS it (`fl-panel
+  get`). An `action` means the project stays the owner: the values travel to its
+  command and it pushes the panel again. Combined, the store happens only on
+  exit 0 — "the hub holds 4" and "the project was told 4" have to be one
+  statement.
+- **`argv`, never a command string, and `api.shell` is deliberately not
+  reused.** That function is `bash -lc` and right for a flow step somebody types
+  into a textarea; here the command line is assembled out of values typed into a
+  sidebar, so the two share only the primitive underneath (`sh()`, `execFile`,
+  no shell ever). A `{{placeholder}}` is substituted INSIDE one element, so the
+  element count is the producer's and the first value with a space or a `;` in
+  it is a non-event. There is no `detach` either: a command whose outcome
+  cannot be shown has no business behind a button.
+- **`cwd` is required and has no default**, which is the push-not-pull
+  measurement applied to the other direction: a defaulted working directory
+  would run in the operator's checkout — the one that was 627 commits behind —
+  and look like it worked.
+- **A submission is checked where a push is repaired.** `checkValues()` refuses a
+  number outside its own range, an empty number (never the `0` of the
+  `Number('')` entry), and a select value nobody offered — with the rule in the
+  sentence. Repairing a rendered panel is cosmetic; repairing a submitted value
+  sends somebody's command an argument nobody typed.
+- **The outcome is server state on the panel row, not a toast.** Running,
+  applied, saved, exit code, timeout, no such program, no such directory — and
+  `lost` for a "running" mark past its own timeout, because the command runs in
+  this process and a deploy in the middle of one would otherwise leave a row
+  saying "running" for ever. It therefore survives the sidebar swap, a reload
+  and a closed tab; and `applied 14:05` standing next to `as of 11:20` is the
+  honest answer to "did anything happen?" when the command did not push again.
+  One command per panel at a time.
+
+Two client rules go with it, both of them shapes this file already has entries
+about: `refreshStatus()` holds the sidebar swap back while a panel FIELD has
+focus (a focused button does not block it — that swap is the one carrying the
+outcome), the same rule `#run-edit :focus` follows; and a toggle renders the
+hidden `0` companion before the checkbox, or "switched off" and "this field was
+not on the page" would be the same request.
+
 ### The overview: seven columns, and forms on a grid
 
 Eleven columns became seven without losing a fact: traffic light + status word

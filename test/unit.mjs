@@ -4670,6 +4670,179 @@ try {
   })
 
   // ------------------------------------------------------------------
+  // A panel that TAKES a value. The pure half: what a producer may declare, what
+  // the widgets may send back, and how a command line is assembled out of the
+  // two. The whole reason this is worth its own group is the asymmetry —
+  // `normalizePanel()` is forgiving because a bad panel renders oddly, and this
+  // is strict because a bad value reaches somebody's command.
+  group('Panels: controls, and the command a press calls')
+
+  const { normalizeControls, normalizeAction, CONTROL_TYPES, PANEL_MAX_CONTROLS } =
+    await import('../server/panels.mjs')
+  const { checkValues, buildArgv, actionState, outputLine } = await import('../server/panel-action.mjs')
+
+  /** The shape `normalizeControls` produces, for the checks that submit values. */
+  const declare = (list) => normalizeControls(list, [])
+
+  await check('a control is data: five widgets, and an unknown one is refused rather than guessed at', () => {
+    equal(CONTROL_TYPES.join(','), 'number,text,select,toggle,button', 'the five')
+    const c = declare([{ key: 'n', type: 'number', value: 3, min: 0, max: 6 }])[0]
+    equal(c.value, '3', 'a value crosses this seam as the string an argv element is')
+    equal(c.label, 'n', 'without a label it is called by its key')
+    let refused = null
+    try { declare([{ key: 'n', type: 'slider' }]) } catch (err) { refused = err.message }
+    contains(refused ?? '', 'unknown type', 'a widget nobody implements is named, not silently turned into a text field')
+    refused = null
+    try { declare([{ key: 'Not A Key', type: 'text' }]) } catch (err) { refused = err.message }
+    isTrue(!!refused, 'and a key that could not be a placeholder name is refused')
+    refused = null
+    try { declare([{ key: 'n', type: 'select', options: [] }]) } catch (err) { refused = err.message }
+    contains(refused ?? '', 'no options', 'a dropdown that can only produce the empty string is not a control')
+  })
+
+  await check('what submits by itself, and what waits for a button', () => {
+    const cs = declare([
+      { key: 'n', type: 'number', value: 1 }, { key: 's', type: 'select', options: ['a'] },
+      { key: 't', type: 'toggle' }, { key: 'go', type: 'button' },
+    ])
+    equal(cs.map(c => (c.submit ? 1 : 0)).join(''), '0011',
+      'a toggle and a button act on their own; a number and a select are typed and read back first')
+    equal(declare([{ key: 's', type: 'select', options: ['a'], submit: true }])[0].submit, true,
+      'and any of it is one field away from the other behaviour')
+  })
+
+  await check('a seed that is not in its own list is repaired; a range that is upside down is refused', () => {
+    const problems = []
+    const c = normalizeControls([{ key: 's', type: 'select', value: 'jahr', options: ['stunde', 'woche'] }], problems)[0]
+    equal(c.value, 'stunde', 'the first option is the honest reading of "nothing valid was said"')
+    isTrue(problems.some(p => p.includes('not one of its options')), 'and the producer is told')
+    let refused = null
+    try { declare([{ key: 'n', type: 'number', min: 9, max: 2 }]) } catch (err) { refused = err.message }
+    contains(refused ?? '', 'above max', 'a range no value can satisfy is a declaration nobody can use')
+  })
+
+  await check('the caps hold, and the sixth control is the last one', () => {
+    const problems = []
+    const many = Array.from({ length: 9 }, (_, i) => ({ key: `k${i}`, type: 'text', store: true }))
+    equal(normalizeControls(many, problems).length, PANEL_MAX_CONTROLS, 'cut to the cap')
+    isTrue(problems.some(p => p.includes('the rest was dropped')), 'and said so rather than dropping them quietly')
+  })
+
+  await check('an action needs a cwd and a command, and neither has a default', () => {
+    for (const [raw, why] of [
+      [{ argv: ['/bin/true'] }, 'a command with no working directory'],
+      [{ cwd: 'relative/path', argv: ['/bin/true'] }, 'a relative one'],
+      [{ cwd: '/tmp' }, 'a working directory with no command'],
+      [{ cwd: '/tmp', argv: [] }, 'an empty command'],
+      [{ cwd: '/tmp', argv: ['', 'x'] }, 'a program that is the empty string'],
+    ]) {
+      let refused = null
+      try { normalizeAction(raw, 'panel') } catch (err) { refused = err.message }
+      isTrue(!!refused, `refused: ${why}`)
+    }
+    const a = normalizeAction({ cwd: '/tmp', argv: ['./x'] }, 'panel')
+    equal(a.timeoutS, 60, 'a command that says nothing about time gets a minute')
+    equal(normalizeAction({ cwd: '/tmp', argv: ['./x'], timeout_s: 9000 }, 'panel').timeoutS, 600, 'and it is capped')
+  })
+
+  await check('a submitted value is checked, not repaired — the opposite of a pushed one', () => {
+    const cs = declare([
+      { key: 'n', type: 'number', value: 1, min: 0, max: 6 },
+      { key: 'f', type: 'select', value: 'stunde', options: ['stunde', 'woche'] },
+      { key: 'an', type: 'toggle', value: true },
+      { key: 'go', type: 'button' },
+    ])
+    const ok = checkValues(cs, { n: '4', f: 'woche', an: '0' })
+    isTrue(ok.ok, 'a valid submission')
+    equal(JSON.stringify(ok.values), '{"n":"4","f":"woche","an":"0"}', 'as strings, the way an argv element is one')
+    isFalse(checkValues(cs, { n: '' }).ok, 'an empty number is refused, never read as the 0 this file has an entry about')
+    isFalse(checkValues(cs, { n: '7' }).ok, 'above its own maximum')
+    isFalse(checkValues(cs, { n: 'x' }).ok, 'not a number at all')
+    isFalse(checkValues(cs, { f: 'jahr' }).ok, 'a choice nobody offered')
+    contains(checkValues(cs, { n: '7' }).error, 'at most 6', 'and the refusal names the rule rather than the field alone')
+    // A key that was not sent falls back to what the control currently says: a
+    // page may be a minute older than the panel it draws.
+    equal(checkValues(cs, {}).values.n, '1', 'a missing field keeps its current value')
+    equal(checkValues(cs, { an: 'yes' }).values.an, '1', 'a toggle reads the words a form may use')
+  })
+
+  await check('a placeholder becomes ONE argv element, whatever is in it', () => {
+    const action = normalizeAction({ cwd: '/tmp', argv: ['./t', 'set', '--n', '{{n}}', '--note={{note}}', '--who', '{{control}}'] }, 'p')
+    const argv = buildArgv(action, { n: '4', note: 'a b; rm -rf /' }, { control: 'go', panel: 'x', repo: 3 })
+    equal(argv.length, 7, 'the element count is the producer\'s and nobody else\'s')
+    equal(argv[3], '4', 'a whole-element placeholder')
+    equal(argv[4], '--note=a b; rm -rf /', 'and one inside a word — spaces, semicolons and all, still one argument')
+    equal(argv[6], 'go', 'the button that was pressed is a name too')
+    equal(buildArgv(action, {}, {})[3], '', 'an unknown name is empty rather than a literal pair of braces')
+    // The panel's own names lose to a control of the same name, which is the
+    // rule docs/panels.md states so a project can rely on either.
+    equal(buildArgv(normalizeAction({ cwd: '/tmp', argv: ['{{panel}}'] }, 'p'), { panel: 'mine' }, { panel: 'theirs' })[0], 'mine',
+      'a control wins over the built-in name')
+  })
+
+  await check('a kept value survives the producer, and gives way when the field no longer fits it', async () => {
+    const { setPanelValue: setP, panelValue: getP, setControlValue, deletePanelValue: delP } =
+      await import('../server/panels.mjs')
+    const { db: udb } = await import('../server/db.mjs')
+    udb.prepare(`INSERT INTO repos(name, path) VALUES('panel-controls','/tmp/panel-controls')`).run()
+    const repoId = udb.prepare(`SELECT id FROM repos WHERE name='panel-controls'`).get().id
+    const push = (options) => setP({
+      repoId,
+      key: 'drossel',
+      value: {
+        total: 1,
+        controls: [
+          { key: 'n', type: 'number', value: 1, min: 0, max: 9, store: true },
+          { key: 'f', type: 'select', value: options[0], options, store: true },
+        ],
+      },
+    })
+    isTrue(push(['stunde', 'woche']).ok, 'pushed')
+    setControlValue(repoId, 'drossel', 'n', '5')
+    setControlValue(repoId, 'drossel', 'f', 'woche')
+    let p = getP(repoId, 'drossel')
+    equal(p.controls[0].value, '5', 'the kept value wins over the seed')
+    isTrue(p.controls[0].stored, 'and says it is the kept one, so a project can tell "set" from "never touched"')
+    // The producer pushes the same panel again: the seed does NOT come back,
+    // because for a `store` control the hub is the store.
+    isTrue(push(['stunde', 'woche']).ok, 'pushed again')
+    equal(getP(repoId, 'drossel').controls[0].value, '5', 'a fresh push is not a reset')
+    // …but a producer that narrows the choices takes the value back with them:
+    // a kept value nothing can act on would be reported as if it could.
+    isTrue(push(['stunde']).ok, 'the choices are narrowed')
+    p = getP(repoId, 'drossel')
+    equal(p.controls[1].value, 'stunde', 'the declaration wins back')
+    isFalse(p.controls[1].stored, 'and it says so')
+    // A control the producer drops takes its kept value with it, so declaring
+    // that key again tomorrow starts from the seed rather than from a setting
+    // nobody remembers making.
+    isTrue(setP({ repoId, key: 'drossel', value: { total: 1, controls: [{ key: 'f', type: 'select', options: ['stunde'], store: true }] } }).ok, 'n is dropped')
+    equal(udb.prepare(`SELECT count(*) c FROM panel_control_values WHERE repo_id=? AND panel_key='drossel' AND key='n'`).get(repoId).c,
+      0, 'its kept value went with it')
+    delP(repoId, 'drossel')
+    equal(udb.prepare(`SELECT count(*) c FROM panel_control_values WHERE repo_id=?`).get(repoId).c, 0,
+      'and removing the panel forgets every value it held')
+  })
+
+  await check('a "running" mark that nobody will ever finish is read as what it is', () => {
+    const now = 1_000_000
+    equal(actionState(null, now), null, 'nothing pressed yet, nothing to say')
+    equal(actionState({ running: true, at: now - 1000, timeoutS: 60 }, now), 'running', 'inside its own time')
+    equal(actionState({ running: true, at: now - 200_000, timeoutS: 60 }, now), 'lost',
+      'past it, "running" means the hub was restarted while the command ran — not that it is still going')
+    equal(actionState({ ok: true, at: now }, now), 'ok', 'a command that came back')
+    equal(actionState({ ok: false, at: now }, now), 'failed', 'and one that did not')
+    equal(actionState({ ok: true, saved: true, at: now }, now), 'saved', 'a value the hub kept is its own answer')
+  })
+
+  await check('the line shown of a command is the LAST one, and stderr only when stdout said nothing', () => {
+    equal(outputLine('first\nSCHWARM_DROSSEL result=OK\n\n', ''), 'SCHWARM_DROSSEL result=OK',
+      'a script puts its verdict last, so slicing from the front keeps the half nobody needs')
+    equal(outputLine('', 'boom'), 'boom', 'a command that failed usually only wrote to stderr')
+    equal(outputLine('', ''), '', 'and one that said nothing says nothing')
+  })
+
+  // ------------------------------------------------------------------
   group('Docs: AGENTS.md / CLAUDE.md pairing')
 
   await check('every AGENTS.md has a CLAUDE.md next to it that only includes it', async () => {

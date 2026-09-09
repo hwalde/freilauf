@@ -1594,6 +1594,95 @@
     })
   })
 
+  // ---- Panel controls: a sidebar block that takes a value ----
+  //
+  // The form is a real `<form method="post">` rendered by the server, so this
+  // code is not what makes it work — without JavaScript the browser posts it
+  // and the route redirects back. What it adds is the two things a page reload
+  // would cost: staying where you are, and saying at once that something is
+  // happening.
+  //
+  // It deliberately does NOT paint the outcome. That is server state on the
+  // panel row, it arrives through the `panel` live event like every other panel
+  // change, and it is therefore still there after a reload and for anybody
+  // else's browser. A toast that said "applied" while the row said nothing
+  // would be exactly the pair this project keeps writing entries about.
+  function panelSubmit(form, control) {
+    if (form.dataset.busy === '1') return
+    // A checkbox that is off is absent from FormData, and the server's fallback
+    // for an absent field is the CURRENT value — so the hidden `0` companion
+    // rendered BEFORE it is what makes switching one off possible at all. Both
+    // travel when it is on, and `parseForm()` keeps the last of a repeated
+    // name, which is the checkbox. The order in the DOM is the contract; the
+    // browser suite asserts both directions.
+    var body = new URLSearchParams(new FormData(form))
+    if (control) body.set('control', control)
+    form.dataset.busy = '1'
+    var buttons = form.querySelectorAll('button')
+    for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true
+    // Let go of the field. `refreshStatus()` holds the sidebar swap back while a
+    // control has focus, and the swap right after a press is the one carrying
+    // the outcome — so submitting with Enter, which leaves the caret in the
+    // number field, would have kept its own answer off the screen until the
+    // operator happened to click somewhere else.
+    if (form.contains(document.activeElement)) document.activeElement.blur()
+    var toast = window.freilaufToast
+      ? window.freilaufToast(T('js.panel_working', 'Sending…'), { kind: 'pending' })
+      : null
+    fetch('/api/panels/control', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      body: body,
+    })
+      .then(function (r) { return r.json().catch(function () { return { ok: false, error: 'HTTP ' + r.status } }) })
+      .then(function (j) {
+        if (window.freilaufToast) {
+          if (j && j.ok && j.running) {
+            window.freilaufToast(T('js.panel_started', 'Command started'), { kind: 'ok', replace: toast, ms: 4000 })
+          } else if (j && j.ok) {
+            window.freilaufToast(T('js.panel_saved', 'Saved'), { kind: 'ok', replace: toast, ms: 4000 })
+          } else {
+            window.freilaufToast((j && j.error) || 'error', { kind: 'err', replace: toast })
+          }
+        }
+      })
+      .catch(function (err) {
+        if (window.freilaufToast) window.freilaufToast(err.message, { kind: 'err', replace: toast })
+      })
+      .then(function () {
+        form.dataset.busy = ''
+        for (var k = 0; k < buttons.length; k++) buttons[k].disabled = false
+      })
+  }
+
+  document.addEventListener('submit', function (ev) {
+    var form = ev.target && ev.target.closest && ev.target.closest('form[data-panel-form]')
+    if (!form) return
+    ev.preventDefault()
+    // `ev.submitter` names the button that was pressed — which button matters,
+    // because a button may carry a command of its own. A form submitted with
+    // Enter has no submitter, and the server then falls back to the one button
+    // there is.
+    var press = ev.submitter
+    if (press && press.dataset.confirm && !window.confirm(press.dataset.confirm)) return
+    panelSubmit(form, press && press.name === 'control' ? press.value : '')
+  })
+
+  // A control that submits on its own — a toggle, or a select the producer
+  // marked. Everything else is typed and read back before it is meant, and
+  // travels when a button is pressed.
+  document.addEventListener('change', function (ev) {
+    var el = ev.target
+    if (!el || !el.dataset || el.dataset.panelSubmit !== '1') return
+    var form = el.closest('form[data-panel-form]')
+    if (!form) return
+    if (el.dataset.confirm && !window.confirm(el.dataset.confirm)) {
+      if (el.type === 'checkbox') el.checked = !el.checked
+      return
+    }
+    panelSubmit(form, el.dataset.panelControl || '')
+  })
+
   // ---- Repos: confirm before a repository goes ----
   //
   // One dialog per row, rendered by the server with the real counts and the
@@ -1870,11 +1959,23 @@
     // #header-status and #usage-panel inside it; the two fragment routes for
     // those stay, they are simply not what the page asks for any more.
     async function refreshStatus() {
+      // A panel control being TYPED IN lives only in the DOM, and the sidebar
+      // is swapped whole — by the 30-second timer, by every run event, by
+      // somebody else's push. Swapping it mid-word throws the value away, so
+      // the swap waits, exactly as the run-detail fragment waits for
+      // `#run-edit :focus`. Only fields wait: a focused BUTTON must not block
+      // it, because the swap right after a press is the one carrying the
+      // outcome of that press.
+      const halten = document.querySelector('#status-sidebar .panel-controls input:focus, '
+        + '#status-sidebar .panel-controls select:focus')
+      if (halten) return
       try {
         // The sidebar's repo, not the body's: it is set on pages that have no
         // repo context too (see statusSidebar in pages.mjs).
         const sRepo = document.getElementById('status-sidebar')?.dataset.repo || repo
-        const html = await holeFragment('/api/fragments/sidebar' + (sRepo ? '?repo=' + encodeURIComponent(sRepo) : ''))
+        const html = await holeFragment('/api/fragments/sidebar'
+          + (sRepo ? '?repo=' + encodeURIComponent(sRepo) : '?repo=')
+          + '&back=' + encodeURIComponent(location.pathname + location.search))
         if (html !== null) { tauscheNachId(html); sidebarSync() }
       } catch (err) { /* a quiet panel beats a broken page */ }
     }

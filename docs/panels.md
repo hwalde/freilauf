@@ -7,7 +7,9 @@ unassigned, how many tests fail. That question belongs to the project, and its
 answer is different in every repository.
 
 A **panel** is that answer: a small block in the sidebar of one repo, pushed by
-the project, rendered by the hub.
+the project, rendered by the hub. It can also take a value back — a field, a
+choice, a switch, a button that calls the project's own command; that half is
+["Controls"](#controls-a-panel-may-also-take-a-value) below.
 
 ```
 ┌─ STATUS ─────────────┐
@@ -98,8 +100,12 @@ hub:
 }
 ```
 
-Every field is optional except that there must be a `total` or at least one
-item. `tone` is `red | yellow | green` and colours a number, nothing else. A
+Every field is optional except that there must be a `total`, at least one item
+or at least one control. Two more fields live in this object and have a section
+of their own below: **`controls`** (the fields the block offers) and
+**`action`** (the command a press calls).
+
+`tone` is `red | yellow | green` and colours a number, nothing else. A
 `href` is followed only when it is an `http(s)://` URL or a path on this hub — a
 filesystem path inside the repository is dead in a browser and is dropped.
 
@@ -147,6 +153,265 @@ is shown as the text it is.
 The caps: at most 8 rows, 40 characters per label, 200 per note, 6 panels per
 repo. A sidebar column is 240 px wide; anything past that is not a panel but a
 page, and a page is what the `href` is for.
+
+## Controls: a panel may also TAKE a value
+
+Everything above is a number travelling one way. The other direction was asked
+for by the same operator on the same day, and about the same block: *how many
+swarm workers may run at once, and how many may start per hour* are numbers that
+belong right next to the number of open findings — and having to open a terminal
+to change one is what makes an operator not change it.
+
+So a panel value may carry **`controls`**: a list of fields the hub renders and
+the operator uses.
+
+```
+┌─ SCHWARM ────────────┐
+│ Findings         33  │
+│ at once              │
+│ [ 2            ]     │
+│ starts               │
+│ [ 1            ]     │
+│ per                  │
+│ [ hour        ▾]     │
+│ [ Apply ]            │
+│ as of 14:03          │
+│ applied 14:05  OK    │
+└──────────────────────┘
+```
+
+**A control is data too, and that is the whole reason this fits.** The project
+says *"a number between 0 and 6 called `gleichzeitig`"*; the hub decides what
+that is in a 240 px column. No project ever writes an `<input>`, which is what
+keeps the rail, `GET /api/panels` and this hub's CSS class names out of somebody
+else's repository — the same three reasons the rows above are data, one field
+further out.
+
+### Two ways a changed value can mean something
+
+Both exist, and they answer different questions about who OWNS the value.
+
+| | **the hub keeps it** (`"store": true`) | **a command is called** (`action`) |
+|---|---|---|
+| Who holds the truth | the hub. `GET /api/panels` is where the project reads it | the project. The hub only carries the values over |
+| What runs on the hub machine | nothing | the command the panel declared, as `argv`, no shell |
+| What the declared `value` means | the **seed**, used until somebody sets it | the **last measurement**, always shown |
+| When it is written | at once — nothing could still refuse it | only when the command exited 0 |
+
+Prefer the first. It runs nothing, it needs no path on the hub machine, and the
+project reads its own setting when it happens to need it — `fl-panel get
+<panel> <control>` prints the bare value, so a shell script needs no JSON parser
+anywhere near it. Reach for the second when the setting has to take effect
+somewhere the hub cannot reach: a file in a repository, a systemd unit, a
+database of the project's own.
+
+They combine. A panel may store a value *and* call a command with it; the store
+then happens only if the command succeeded, because "the hub holds 4" and "the
+project was told 4" have to be the same statement or the panel is lying about
+one of them.
+
+### The shape
+
+```json
+{
+  "title": "Schwarm",
+  "total": 1,
+  "controls": [
+    { "key": "gleichzeitig", "type": "number", "label": "at once",
+      "value": 1, "min": 0, "max": 6, "step": 1 },
+    { "key": "anzahl", "type": "number", "label": "starts", "value": 1, "min": 0, "max": 99 },
+    { "key": "fenster", "type": "select", "label": "per", "value": "stunde",
+      "options": [ {"value": "stunde", "label": "hour"},
+                   {"value": "woche",  "label": "week"},
+                   {"value": "monat",  "label": "month"} ] },
+    { "key": "anwenden", "type": "button", "label": "Apply" }
+  ],
+  "action": {
+    "cwd": "/srv/checkouts/beispiel-repo",
+    "argv": ["python", "schwarm/dispatch.py", "drossel",
+             "--gleichzeitig", "{{gleichzeitig}}",
+             "--anzahl", "{{anzahl}}",
+             "--fenster", "{{fenster}}"],
+    "timeout_s": 60
+  }
+}
+```
+
+**A control**, field by field:
+
+| Field | For | Meaning |
+|---|---|---|
+| `key` | all | required; lowercase letters, digits, `-` and `_`. It is the name a `{{placeholder}}` refers to |
+| `type` | all | `number`, `text`, `select`, `toggle`, `button`. Anything else is refused, never rendered as something near enough |
+| `label` | all | what it is called. Defaults to the key |
+| `value` | not `button` | the seed (stored controls) or the last measurement (everything else) |
+| `hint` | all | one small line under the field |
+| `store` | not `button` | the hub keeps this value; see the table above |
+| `submit` | not `button` | does changing it act at once? Default **yes** for a `toggle` (a switch that needs a second click on another widget is not a switch), **no** for a number, a text or a select — those are typed and read back before they are meant, and travel when a button is pressed. A button always submits; it has no second purpose |
+| `confirm` | all | a question the operator has to answer before anything happens |
+| `min`, `max`, `step` | `number` | the range. Enforced in the browser AND again on the server |
+| `placeholder` | `text` | the grey example inside the empty field |
+| `options` | `select` | required; a list of strings, or of `{value, label}`. At most 12 |
+| `tone` | `button` | `red` draws it as a dangerous action |
+| `action` | `button` | a command of its own, instead of the panel's |
+
+**An action:**
+
+| Field | Meaning |
+|---|---|
+| `cwd` | **required, absolute, no default.** The directory the command runs in |
+| `argv` | **required.** The program and its arguments, as a list. At most 24 elements |
+| `timeout_s` | how long it may run. Default 60, at most 600 |
+
+**`argv`, never a command string.** A placeholder is substituted *inside* one
+element, so `{{n}}` and `--n={{n}}` both work and neither can ever become two
+arguments. The number of arguments is decided by the producer and by nobody
+else: the first value somebody types with a space, a quote or a `;` in it is
+then a non-event instead of a bug nobody finds again. There is no shell
+anywhere on this path, which is also why there is no `command` string form — it
+could not be made safe, only made to look safe.
+
+Besides the control keys, four names a panel knows about itself: `{{control}}`
+(the key of the control that was used — the button that was pressed, or the
+switch that was flipped; that is how one command can serve two buttons),
+`{{panel}}`, `{{repo}}` and `{{repo_path}}`. A control of the same
+name wins, so a project that really wants a control called `panel` gets its own
+value.
+
+The same things reach the command as environment variables, for a script that
+prefers them there: `FL_PANEL`, `FL_PANEL_REPO`, `FL_PANEL_CONTROL`,
+`FL_PANEL_V_<KEY>` per control (uppercased, `-` → `_`), and `FL_HUB_URL` — the
+last one so the command can push the panel back without being told where the
+hub is.
+
+### `cwd` is required, and here is the measurement behind that
+
+The section "Push, not pull" above is about a working checkout that was **627
+commits behind `origin/main`** and did not contain the counting tool at all. A
+command with a defaulted working directory would be that measurement happening
+again, with a button on it: it would run wherever the hub happened to be, or in
+the operator's own checkout, and it would look like it worked.
+
+So there is no default. Point `cwd` at a checkout that is **kept current on
+purpose** — the deploy checkout of the project, a clone a timer pulls, or the
+directory of a tool that does not live in a repository at all. If the command
+has to run against the newest code, make it fetch first; the hub will not do it
+for you and will not pretend to.
+
+### What the operator sees when they press
+
+A button that does not say what happened is worse than no button, so every press
+ends in a recorded outcome under the panel's own "as of" line:
+
+| Line | When |
+|---|---|
+| *running …* | the command was started |
+| *applied 14:05* + the command's last line | it exited 0 |
+| *saved 14:05* | no command; the hub kept the value |
+| *failed (exit 3)* + the last line it wrote | it exited non-zero |
+| *no answer within 60 s* | it ran too long and was killed |
+| *the command could not be started: …* | there is no such program |
+| *the working directory does not exist: …* | `cwd` is not there |
+| *no answer — the hub was restarted while the command ran* | it was in flight when the hub went down |
+
+That outcome is **stored on the panel**, not shown as a passing message: it is
+still there after a reload, in another tab, and for whoever looks next. The
+press itself does not hold the click open — the command runs in the hub and the
+line updates through the live channel when it is over.
+
+**And this is how you tell whether a value was really taken** when the command
+does not push the panel again. The `as of` line belongs to the *numbers* and
+only a push moves it; the line under it belongs to the *press*. So
+`applied 14:05` standing next to `as of 11:20` says, exactly: the command ran
+and succeeded, and the numbers above it have not been confirmed since. The
+better producer pushes the panel at the end of its command — then both lines say
+14:05 and there is nothing to work out.
+
+One command per panel runs at a time. A second press while one is running is
+refused with that sentence, rather than two commands racing for one setting.
+
+### Caps
+
+At most **6 controls** per panel and **12 options** per select; a label is 40
+characters, a value 200, an `argv` 24 elements of 500 characters. A sidebar
+column is 240 px wide: a number, a number, a select and a button — the whole
+throttle above — is four controls. A panel that wants more is a settings page,
+and a page is what `href` is for.
+
+### Security, plainly
+
+The hub listens on `127.0.0.1` only and has no authentication. Whoever can push
+a panel can already reach every other POST route on this hub and start a coding
+agent with full shell access — so a panel command is **not a new risk**, and
+pretending otherwise would be theatre. What is true is worth writing down
+anyway:
+
+- the command runs **as the hub's user, on the hub machine**, outside every
+  sandbox;
+- **no shell**: `execFile` with an argv, so nothing typed into a field can
+  become a second command;
+- **the command is never in the request.** A press sends values and the name of
+  the button; the program comes out of the stored panel. A caller can choose
+  what the values are and never what runs;
+- **the values are checked before they travel**: a number against its own
+  min/max, a select against its own options, a text against its length. An
+  invalid value is refused with the reason, never repaired;
+- `cwd` is explicit, the timeout is bounded (600 s), the output is capped, and
+  there is no `detach` — a command whose outcome cannot be shown has no business
+  behind a button.
+
+### Setting one up with `fl-panel`
+
+The compact form, for the by-hand case:
+
+```bash
+fl-panel set schwarm --repo 1 --title Schwarm --total 1 \
+  --control "gleichzeitig=1:number:0..6" \
+  --control "anzahl=1:number:0..99" \
+  --control "fenster=stunde:select:stunde|woche|monat" \
+  --control "anwenden:button" \
+  --action-cwd /srv/checkouts/beispiel-repo \
+  -- python schwarm/dispatch.py drossel \
+     --gleichzeitig "{{gleichzeitig}}" --anzahl "{{anzahl}}" --fenster "{{fenster}}"
+```
+
+`--control` is `key=value:type:extra` — the extra is a range (`0..6`) for a
+number, the choices (`a|b|c`) for a select, a placeholder for a text, and
+nothing for a toggle or a button. Everything past that (a label that is not the
+key, a hint, a confirmation, a step) is a JSON object instead:
+`--control '{"key":"n","type":"number","label":"at once","min":0,"max":6}'` —
+which is what a script writes anyway, and the reason there is no third grammar.
+Everything after `--` is the command, word for word.
+
+The hub-keeps-it way needs no command at all:
+
+```bash
+fl-panel set drossel --repo 1 --title Throttle \
+  --control "n=1:number:0..6" --control "go:button" --store n
+n=$(fl-panel get drossel n --repo 1)      # what the operator set
+```
+
+And a producer that already builds JSON simply includes `controls` and `action`
+in what it pipes to `fl-panel set` — the shape above is what goes over the wire
+either way.
+
+`GET /api/panels?repo=<id>[&panel=<key>]` reports the controls with their
+**effective** value (what the hub holds where it holds one, the pushed seed
+otherwise), `stored: true|false` per control, and `action_state` for the last
+press. That is what a flow condition or a skill reads.
+
+### What did not change
+
+A panel without `controls` behaves exactly as it did — no form, no action line,
+the same block it always was. The folded **rail** draws values and never
+controls; it could not do anything with a field, and it does not have to. And a
+panel that carries controls but no `total` and no `items` is still a panel: "how
+many workers may run" is worth its block whether or not the project also counts
+something.
+
+Two shapes are refused rather than rendered, because both read as working and do
+nothing: a control list where nothing is stored and no command is declared, and
+a `button` that is neither the panel's submit nor carries an action of its own.
 
 ## The counting rule stays in the project
 
