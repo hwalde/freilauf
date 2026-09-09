@@ -227,7 +227,7 @@ one of them.
     { "key": "anwenden", "type": "button", "label": "Apply" }
   ],
   "action": {
-    "cwd": "/home/me/projects/video-production",
+    "cwd": "/srv/checkouts/beispiel-repo",
     "argv": ["python", "schwarm/dispatch.py", "drossel",
              "--gleichzeitig", "{{gleichzeitig}}",
              "--anzahl", "{{anzahl}}",
@@ -370,7 +370,7 @@ fl-panel set schwarm --repo 1 --title Schwarm --total 1 \
   --control "anzahl=1:number:0..99" \
   --control "fenster=stunde:select:stunde|woche|monat" \
   --control "anwenden:button" \
-  --action-cwd /home/me/projects/video-production \
+  --action-cwd /srv/checkouts/beispiel-repo \
   -- python schwarm/dispatch.py drossel \
      --gleichzeitig "{{gleichzeitig}}" --anzahl "{{anzahl}}" --fenster "{{fenster}}"
 ```
