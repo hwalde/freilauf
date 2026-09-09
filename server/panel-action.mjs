@@ -220,6 +220,16 @@ async function runAction(action, argv, values, ctx) {
   }
   result.endedAt = Date.now()
   result.by = ctx.by ?? null
+  // WHAT the command was given, not only that it ran. Without this the panel
+  // contradicted itself inside one block: measured 2026-09-09 on a panel whose
+  // controls are not stored — typed 7, pressed, and one second later the field
+  // read 2 (the producer's last push) while the outcome line three lines under
+  // it read "applied 17:06 · OK anzahl=7". Both halves were true in their own
+  // terms and the number the operator had typed was the one that vanished.
+  // `panelValue()` prefers these over the pushed value while they are the newer
+  // statement; a push that arrives after the command still wins, so the project
+  // keeps ownership and only the hole between the two closes.
+  if (result.ok) result.values = { ...values }
   // The kept value is written only now, and only on success: with a command in
   // the way, "the hub holds 4" and "the project was told 4" have to be the same
   // statement or the panel is lying about one of them.

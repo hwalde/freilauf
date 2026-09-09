@@ -75,6 +75,21 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A panel no longer contradicts itself one second after you press its
+  button.** For a control the hub does not keep — one whose values only travel
+  to the project's own command — the field showed whatever the project last
+  pushed, and a successful command did not move that. So pressing the button
+  made the field snap back to the old number while the outcome line three lines
+  underneath it said the command had been applied with the new one. Measured:
+  typed 7, pressed, and one second later the field read 2 over the words
+  *applied 17:06 · OK anzahl=7*. Both halves were true in their own terms, and
+  the number the operator had typed was the one that disappeared — on one
+  installation the next push was up to five minutes away. The values a
+  successful command was given now stand in the fields until the project pushes
+  again, which takes them back at once: ownership does not move, only the hole
+  closes. A command that failed changes nothing, and `GET /api/panels` says
+  `applied: true` while that is where a value comes from.
+
 - **A value you chose in a sidebar panel no longer jumps back on its own.** The
   sidebar is replaced whole whenever anything happens — every half minute, and
   on every run event — and everything a person had entered and not yet sent went

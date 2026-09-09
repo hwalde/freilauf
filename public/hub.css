@@ -301,10 +301,19 @@ ul.side-counts .overall { flex: 0 0 auto; }
 .side-panel .panel-field input[type="number"] { flex: 0 0 4.5rem; width: 4.5rem; }
 .side-panel .panel-field input[type="text"], .side-panel .panel-field select { flex: 0 1 62%; min-width: 0; }
 /* A value somebody else moved while an unsent entry stood in the field
-   (hub.js, `panelEditsZurueck`). The entry still wins; this is only so that the
+   (hub.js, `panelEditsRestore`). The entry still wins; this is only so that the
    operator does not send over a change they never saw. Warm, not red: nothing
    is wrong, something merely moved. */
 .side-panel .panel-field [data-panel-foreign] { border-color: var(--warn-deep); background: var(--warn-deep-soft); }
+/* …and the same fact for somebody who cannot see a border. The notice goes in
+   the `title` for the mouse, but a field with a hint already points its
+   `aria-describedby` at that hint, and a description wins over a title — so a
+   screen reader would be left with the colour, which is not a signal. This
+   span is the description; it is off-screen rather than `display:none`,
+   because the second is not in the accessibility tree at all. */
+.side-panel .panel-foreign-note { position: absolute; width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0; overflow: hidden; white-space: nowrap;
+  clip: rect(0 0 0 0); clip-path: inset(50%); }
 /* A toggle needs no width of its own; it lines up on the right edge with the
    fields above it, so a column of controls reads as one column. */
 .side-panel .panel-field-toggle input[type="checkbox"] { flex: 0 0 auto; width: auto; margin: 0; }

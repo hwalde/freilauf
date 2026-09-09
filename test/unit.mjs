@@ -4724,6 +4724,53 @@ try {
     equal(panelValues(null).length, 0, 'no repo, no panels — never a throw')
   })
 
+  await check('what a command was GIVEN stands until the producer says otherwise', async () => {
+    const { setActionResult } = await import('../server/panels.mjs')
+    const { db: udb } = await import('../server/db.mjs')
+    udb.prepare(`INSERT INTO repos(name, path) VALUES('panel-applied','/tmp/panel-applied')`).run()
+    const repoId = udb.prepare(`SELECT id FROM repos WHERE name='panel-applied'`).get().id
+    const push = (n) => setPanelValue({ repoId, key: 'schwarm', value: { title: 'Schwarm', total: n, controls: [
+      { key: 'anzahl', type: 'number', label: 'Starts', value: n, min: 0, max: 99 },
+      { key: 'fenster', type: 'select', label: 'je', value: 'monat', options: ['monat', 'woche'] },
+      { key: 'go', type: 'button', label: 'Apply' },
+    ], action: { cwd: '/tmp', argv: ['/bin/true'] } } })
+    const control = (k) => panelValue(repoId, 'schwarm').controls.find(c => c.key === k)
+
+    push(2)
+    equal(control('anzahl').value, '2', 'the producer owns the value while nobody has pressed anything')
+
+    // The press. Measured before this existed: the field went back to the
+    // producer's number within a second, while the outcome line under it said
+    // the command had been applied with the new one — one block, two answers.
+    setActionResult(repoId, 'schwarm', { ok: true, control: 'go', exitCode: 0, at: Date.now(), endedAt: Date.now(),
+      values: { anzahl: '7', fenster: 'woche' } })
+    equal(control('anzahl').value, '7', 'after a successful command the field shows what the command was given')
+    equal(control('anzahl').applied, true, 'and says that is where it comes from')
+    equal(control('fenster').value, 'woche', 'every control it carried, not only the number')
+
+    // And the producer takes it back by saying something newer. Decided by the
+    // ORDER OF WRITES, never by comparing a whole-second `at` against a
+    // millisecond `endedAt` — a press and a push inside one second would be
+    // ordered by whichever way that rounded.
+    push(3)
+    equal(control('anzahl').value, '3', 'a push supersedes what the command was given')
+    isFalse(control('anzahl').applied === true, 'and the field stops claiming otherwise')
+    equal(panelValue(repoId, 'schwarm').actionResult?.ok, true,
+      'but the outcome of the press is still there — "applied 14:05" next to "as of 14:06" is the honest pair')
+
+    // A command that FAILED was given nothing anybody should be shown.
+    setActionResult(repoId, 'schwarm', { ok: false, control: 'go', exitCode: 3, at: Date.now(), endedAt: Date.now() })
+    equal(control('anzahl').value, '3', 'a failed command changes no field')
+
+    // An option the producer has since withdrawn cannot be shown, exactly as a
+    // kept value that fell out of its own list cannot.
+    setActionResult(repoId, 'schwarm', { ok: true, control: 'go', exitCode: 0, at: Date.now(), endedAt: Date.now(),
+      values: { fenster: 'jahr' } })
+    equal(control('fenster').value, 'monat', 'a value no option carries falls back to what the producer declared')
+
+    deletePanelValue(repoId, 'schwarm')
+  })
+
   await check('bin/fl-panel parses', async () => {
     const { execFileSync: run } = await import('node:child_process')
     const root = new URL('..', import.meta.url).pathname

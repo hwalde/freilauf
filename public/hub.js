@@ -1662,6 +1662,10 @@
         // Carried forward, or the mark below would light up on the one swap
         // that moved the seed and be gone again on the next one.
         foreign: el.dataset.panelForeign === '1',
+        // Whether that seed is the SERVER's answer or the one a successful send
+        // put there. The mark below rests on "the seed moved", and a send moves
+        // it by itself — see the comment there.
+        sentSeed: el.dataset.panelSentSeed === '1',
       })
     }
     return pending
@@ -1676,22 +1680,86 @@
       var el = null, fields = panelFields(form)
       for (var j = 0; j < fields.length; j++) if (fields[j].dataset.panelControl === o.key) el = fields[j]
       if (!el) continue                                     // the control is gone
-      if (el.type === 'checkbox') el.checked = o.value === '1'
-      else if (el.tagName === 'SELECT' && !panelHasOption(el, o.value)) continue
+      // The one entry this cannot give back: a select whose option list no
+      // longer offers what was chosen. Assigning a value no option carries
+      // blanks the field, so the server's answer stands — and because that is
+      // the single case where an entry really is lost, it is SAID, with its own
+      // sentence, instead of the field quietly standing on somebody else's
+      // choice.
+      var gone = el.tagName === 'SELECT' && !panelHasOption(el, o.value)
+      if (gone) { /* the option is not there any more — leave what the server rendered */ }
+      else if (el.type === 'checkbox') el.checked = o.value === '1'
       else el.value = o.value
       // Somebody else really moved the value underneath the entry (a push from
       // the project, another browser). The entry still wins — it is the newer
       // human decision and nobody has sent it yet — but the operator must be
       // able to SEE that, or they would submit over a change they never knew
-      // about. Deliberately small: a warm border and the server's value in the
-      // title, no banner and no dialog, because the ordinary case is that
-      // nothing moved at all.
-      if (o.foreign || el.dataset.seed !== o.seed) {
-        el.dataset.panelForeign = '1'
-        el.title = T('js.panel_foreign', 'Changed elsewhere in the meantime: {value}. Your entry counts once you send it.',
-          { value: el.dataset.seed })
-      }
+      // about. Deliberately small: a warm border, the value in the title and an
+      // off-screen description, no banner and no dialog, because the ordinary
+      // case is that nothing moved at all.
+      //
+      // TWO FENCES, and both were false alarms first. A seed that AGREES with
+      // the entry is nothing to warn about — there is no change left to send
+      // over — which is what a swap landing between the press and its answer
+      // produces: the fresh seed is already the value that was just sent.
+      // And a seed the SEND put there is not the server's word: for a control
+      // the hub does not store, the next render carries the project's own
+      // unmoved measurement, which differs from that send-baseline through
+      // nobody's doing. Marking on it said "changed elsewhere: 1" about a value
+      // that had not changed anywhere, and `o.foreign` would have carried that
+      // lie for the life of the entry.
+      var agrees = panelValueOf(el) === el.dataset.seed
+      var moved = el.dataset.seed !== o.seed && !o.sentSeed
+      if (gone) {
+        panelMark(el, T('js.panel_option_gone',
+          'The option you had chosen is no longer offered — the field shows {value} again.',
+          { value: panelValueOf(el) }))
+      } else if (!agrees && (o.foreign || moved)) {
+        panelMark(el, T('js.panel_foreign',
+          'Changed elsewhere in the meantime: {value}. Your entry counts once you send it.',
+          { value: el.dataset.seed }))
+      } else panelUnmark(el)
     }
+  }
+
+  /**
+   * Say that the value moved, in the two places that reach two different
+   * readers: a warm border with the sentence in `title` for the mouse, and an
+   * off-screen span the field POINTS AT for a screen reader. The second is not
+   * belt and braces — a field with a hint already carries `aria-describedby`,
+   * and a description wins over a title, so without the span the notice would
+   * be shadowed by the hint and colour would be the only signal left.
+   */
+  function panelMark(el, text) {
+    el.dataset.panelForeign = '1'
+    el.title = text
+    var field = el.closest('.panel-field')
+    if (!field) return
+    var note = field.querySelector('.panel-foreign-note')
+    if (!note) {
+      note = document.createElement('span')
+      note.className = 'panel-foreign-note'
+      note.id = (el.id || 'pc') + '-moved'
+      field.appendChild(note)
+    }
+    note.textContent = text
+    var says = (el.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean)
+    if (says.indexOf(note.id) < 0) says.push(note.id)
+    el.setAttribute('aria-describedby', says.join(' '))
+  }
+
+  function panelUnmark(el) {
+    if (el.dataset.panelForeign !== '1') return
+    delete el.dataset.panelForeign
+    el.removeAttribute('title')
+    var field = el.closest('.panel-field')
+    var note = field && field.querySelector('.panel-foreign-note')
+    if (!note) return
+    var says = (el.getAttribute('aria-describedby') || '').split(/\s+/)
+      .filter(function (x) { return x && x !== note.id })
+    if (says.length) el.setAttribute('aria-describedby', says.join(' '))
+    else el.removeAttribute('aria-describedby')
+    note.remove()
   }
   function panelHasOption(sel, value) {
     for (var i = 0; i < sel.options.length; i++) if (sel.options[i].value === value) return true
@@ -1726,10 +1794,12 @@
       if (!sentAll.length) continue
       var sent = sentAll[sentAll.length - 1]
       el.dataset.seed = sent
-      if (panelValueOf(el) === sent) {
-        delete el.dataset.panelForeign
-        el.removeAttribute('title')
-      }
+      // …and it is marked as OURS. The next render may well carry a different
+      // seed through nobody's doing — for a control the hub does not store it
+      // carries the project's own unmoved measurement — and without this the
+      // "changed elsewhere" mark would fire on the operator's own send.
+      el.dataset.panelSentSeed = '1'
+      if (panelValueOf(el) === sent) panelUnmark(el)
     }
   }
 

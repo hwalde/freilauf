@@ -454,6 +454,30 @@ function shape(row, stored = null) {
   try { value = JSON.parse(row.value || '{}') } catch { value = null }
   let actionResult = null
   try { actionResult = row.action_result ? JSON.parse(row.action_result) : null } catch { actionResult = null }
+  // What the last command was GIVEN, where that is the newer statement.
+  //
+  // For a control the hub does not store, the rendered value is the producer's
+  // last push — and a successful command does not move it. So a press was
+  // followed, within a second, by the field going back to the old number while
+  // the outcome line directly under it said the command had been applied with
+  // the new one (measured 2026-09-09: field 2, line "applied · OK anzahl=7").
+  // One block, two answers, and the operator's own number the one that
+  // disappeared.
+  //
+  // The rule is the same one the two lines already imply: `applied 14:05` next
+  // to `as of 11:20` says the command ran and the numbers have not been
+  // confirmed since. So the applied values stand until the producer confirms
+  // otherwise — and a push that arrives after the command wins outright, which
+  // is what keeps the project the owner of its own measurement.
+  //
+  // "After" is decided by the ORDER OF WRITES and never by comparing the two
+  // timestamps: `panel_values.at` is whole seconds and `endedAt` is
+  // milliseconds, so a press and a push inside one second would be ordered by
+  // whichever way that comparison happened to round — the `statSync().mtimeMs`
+  // trap in AGENTS.md, one table further out. `setPanelValue()` therefore
+  // STRIKES these values when it stores a push; the rest of the result stays,
+  // because "applied 14:05" is still true and still worth reading.
+  const applied = actionResult?.ok ? actionResult.values || null : null
   const controls = (Array.isArray(value?.controls) ? value.controls : []).map((c) => {
     // The stored value outranks the declared one, and only for a control the
     // panel asked the hub to keep. That is not the hub preferring itself: for a
@@ -463,7 +487,16 @@ function shape(row, stored = null) {
     // control the declared value is the last measurement and nothing may
     // shadow it.
     const held = c.store && stored ? stored.get(`${row.key}/${c.key}`) : undefined
-    if (held === undefined) return { ...c, stored: false }
+    if (held === undefined) {
+      // Nothing kept — so the applied value is the newest thing anybody said
+      // about this control, if there is one. A select is asked the same
+      // question the stored branch is asked below: an option the producer has
+      // since withdrawn is not a value this field can show.
+      const was = applied?.[c.key]
+      if (was === undefined) return { ...c, stored: false }
+      if (c.type === 'select' && !c.options?.some(o => o.value === was)) return { ...c, stored: false }
+      return { ...c, value: was, appliedAt: actionResult.endedAt ?? actionResult.at, stored: false, applied: true }
+    }
     // …unless the producer has since changed what the field may hold. A kept
     // "woche" under a select that now offers only "stunde" would be reported by
     // the read API as a value nothing can act on and drawn as a dropdown showing
@@ -603,6 +636,22 @@ export function setPanelValue({ repoId, key, value = null, error = null, ttlMin 
                 ttl_min = excluded.ttl_min, source = excluded.source, at = excluded.at`)
     .run(id, k, stored, text(error, MAX_ERROR), num(ttlMin) === null ? null : Math.max(0, Math.round(num(ttlMin))),
       text(source, 80), toDbUtc(Date.now()))
+
+  // A push is the producer saying what is true NOW, so it supersedes the values
+  // the last command was given (see `shape()`): those stood only because
+  // nothing newer had been said about them. The rest of the action result is
+  // deliberately kept — "applied 14:05" next to a fresh "as of 14:06" is still
+  // the honest pair, and losing it would take the outcome of a press off the
+  // screen the moment the producer answered.
+  if (row?.action_result) {
+    let last = null
+    try { last = JSON.parse(row.action_result) } catch { last = null }
+    if (last && last.values) {
+      delete last.values
+      db.prepare('UPDATE panel_values SET action_result=? WHERE repo_id=? AND key=?')
+        .run(JSON.stringify(last), id, k)
+    }
+  }
 
   // A control the producer dropped takes its kept value with it. Left behind,
   // it would come back to life the day somebody declares that key again — with

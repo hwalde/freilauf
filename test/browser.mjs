@@ -612,6 +612,53 @@ try {
     await p.close()
   })
 
+  // A control the hub does NOT store is owned by the producer, and a successful
+  // command does not move what the producer last pushed — so the field snapped
+  // back to the old number while the line under it said the command had been
+  // applied with the new one. One block, two answers.
+  await check('after a press the field shows what the command was given, and a push takes it back', async () => {
+    await postForm('/api/panels', {
+      repo: String(repoId), key: 'schwarm',
+      value: JSON.stringify({
+        title: 'Schwarm', total: 2,
+        controls: [
+          { key: 'n', type: 'number', label: 'at once', value: 2, min: 0, max: 99, store: false },
+          { key: 'go', type: 'button', label: 'Apply' },
+        ],
+        action: { cwd: sk.SB, argv: ['/bin/true'], timeout_s: 30 },
+      }),
+    })
+    const p = await neueSeite(`/?repo=${repoId}`)
+    await sidebarAuf(p)
+    equal(await p.inputValue('input[name="v_n"]'), '2', 'the producer owns it while nobody has pressed anything')
+    await p.fill('input[name="v_n"]', '7')
+    await p.click('button[name="control"][value="go"]')
+    await wartePage(p, () => !!document.querySelector('#status-sidebar .panel-action.ok'),
+      null, 'the outcome line to say the command went')
+    // The swap the outcome line arrived on is the one that used to undo it, so
+    // asserting after it is asserting the thing that was broken.
+    equal(await p.inputValue('input[name="v_n"]'), '7',
+      'the field shows what the command was given, instead of contradicting the line under it')
+    // …and the producer takes it back by saying something newer.
+    await postForm('/api/panels', {
+      repo: String(repoId), key: 'schwarm',
+      value: JSON.stringify({
+        title: 'Schwarm', total: 3,
+        controls: [
+          { key: 'n', type: 'number', label: 'at once', value: 3, min: 0, max: 99, store: false },
+          { key: 'go', type: 'button', label: 'Apply' },
+        ],
+        action: { cwd: sk.SB, argv: ['/bin/true'], timeout_s: 30 },
+      }),
+    })
+    await wartePage(p, () => document.querySelector('input[name="v_n"]')?.value === '3',
+      null, 'the producer push to take the value back')
+    isTrue(await p.isVisible('#status-sidebar .panel-action'),
+      'and the outcome of the press is still on the screen — "applied" next to a fresh "as of" is the honest pair')
+    sauber(p)
+    await p.close()
+  })
+
   await check('a press sends the values and the button that was pressed, and says what happened', async () => {
     const p = await neueSeite(`/?repo=${repoId}`)
     await sidebarAuf(p)
