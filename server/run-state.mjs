@@ -223,6 +223,40 @@ export function archivable(run) {
 }
 
 /**
+ * May the operator pick this ended run back up where it stopped?
+ *
+ * The hub resumes by itself everything it can prove was not the agent's doing —
+ * a lost session, a killed process (reports.mjs, paneNotTheAgent). This is the
+ * other half: the cases it cannot prove, and the ones it refused. An agent that
+ * exited 1 in the middle of its work, a run past the resume cap, a run the
+ * operator stopped and now wants back — the evidence there is a human's, and a
+ * button is how a human states it.
+ *
+ * It is deliberately NOT "retry". Retry throws the work away and starts the
+ * same task afresh; resume keeps the worktree, the commits and — where the
+ * coding agent has a resume form — the conversation. For a run with 37 commits
+ * in its worktree those are not the same offer, and the overview used to make
+ * only the destructive one.
+ *
+ * `worktreeThere` is handed in rather than looked up, so the rule stays pure:
+ * the caller has the filesystem, this has the reasoning. Four refusals:
+ *
+ *  - only a run that really ENDED (`failed`/`aborted`). A `done` run is picked
+ *    back up by typing into its session — that is a follow-up commission and it
+ *    has its own machinery; `scheduled`/`deferred` have not started yet.
+ *  - not without the worktree: there is nothing to continue in.
+ *  - never a conflict run — the way back in there is "Merge now" on the run it
+ *    worked for, which starts a fresh resolver with a fresh branch (the rule
+ *    the retry button already keeps).
+ *  - not an archived one: it was deliberately put away, and archiving closed
+ *    its session.
+ */
+export function resumable(run, worktreeThere) {
+  return !!run && ['failed', 'aborted'].includes(run.status)
+    && !!worktreeThere && !run.resolves_run_id && !run.archived_at
+}
+
+/**
  * The anomalies that are statements about a run IN FLIGHT — "nothing is
  * happening", "this is taking longer than planned", "its session vanished".
  *

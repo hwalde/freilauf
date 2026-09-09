@@ -170,7 +170,10 @@ export function clearAgentState(runId) {
 //
 // For an ordinary run the pane IS the agent: `remain-on-exit` keeps the screen,
 // `pane_dead` means the CLI's own process ended, and a run still `running` at
-// that moment ended without reporting. Red, and rightly so.
+// that moment ended without reporting. Red, and rightly so — **unless the agent
+// did not decide to end.** A process that was killed from outside says nothing
+// about the work, and reading it as "ended without a report" is what made a
+// restart cost three runs on this installation (see signalDeath below).
 //
 // For a SANDBOXED run the pane is the `docker` CLIENT that started the container
 // and is watching it; the agent is a process inside. So a dead pane has two
@@ -213,8 +216,57 @@ export function exitStatus(exit) {
 }
 
 /**
+ * The signals that mean "somebody took this process away", by number and name.
+ * The three inclusions and the exclusions are the whole rule, so both are
+ * spelled out:
+ *
+ *   SIGHUP (1)    the session the process hung on went away — a tmux server
+ *                 dying, a login shell closing, a hung-up process group
+ *   SIGKILL (9)   the OOM killer, `kill -9`, a cgroup being torn down
+ *   SIGTERM (15)  systemd stopping a unit, a deploy, `pkill` — the shape a
+ *                 restart has, and the one measured below
+ *
+ * NOT SIGINT (2): that is a human at the keyboard, and putting back what
+ * somebody has just interrupted is the opposite of what they asked for. And
+ * not SIGQUIT/SIGSEGV/SIGABRT/SIGBUS: a process that faults IS the agent
+ * ending, and filing a crash under "infrastructure" would restart a crash loop
+ * behind a word that says it is not one.
+ */
+const KILLED_FROM_OUTSIDE = new Map([[1, 'SIGHUP'], [9, 'SIGKILL'], [15, 'SIGTERM']])
+
+/**
+ * Pure: which signal killed this pane's process — or null, because none did.
+ *
+ * Two fields carry the same fact, and which one a pane produces depends on the
+ * shape of the pane rather than on the death. tmux fills `#{pane_dead_signal}`
+ * when the pane's OWN process was signalled; where the pane runs a shell — and
+ * `fl-start` launches every agent through one — the shell reports its child's
+ * signal death the way every shell does, as the exit status 128 + n, and tmux
+ * then sees an ordinary exit and fills no signal field at all.
+ *
+ * Measured on this installation 2026-09-09: three claude runs whose processes a
+ * restart killed came back as `{"exit":143,"signal":null}` — 128 + SIGTERM, no
+ * signal field. So reading only `#{pane_dead_signal}` would have caught none of
+ * the case this function exists for.
+ *
+ * `exitStatus()` before every comparison, for the reason it exists: `Number('')`
+ * and `Number(null)` are both 0 AND finite, and 0 - 128 is not a signal but
+ * would be arithmetic all the same.
+ */
+export function signalDeath(exit, signal = null) {
+  const direct = exitStatus(signal)
+  if (direct !== null && KILLED_FROM_OUTSIDE.has(direct)) {
+    return { signal: direct, name: KILLED_FROM_OUTSIDE.get(direct) }
+  }
+  const code = exitStatus(exit)
+  const n = code !== null && code > 128 ? code - 128 : null
+  if (n !== null && KILLED_FROM_OUTSIDE.has(n)) return { signal: n, name: KILLED_FROM_OUTSIDE.get(n) }
+  return null
+}
+
+/**
  * Pure: what a dead pane means, given the run's sandbox flag, the pane's exit
- * status and what the daemon said about the container.
+ * status and signal, and what the daemon said about the container.
  *
  *   `container === null`   there is nothing to ask (an unsandboxed run, or a
  *                          launch that never got a container)
@@ -222,27 +274,46 @@ export function exitStatus(exit) {
  *                          `containerState()`; anything but 'ok' means the hub
  *                          learned NOTHING
  *
- * Returns `{ verdict, reason }`:
+ * Returns `{ verdict, kind?, reason }`:
  *
  *   'agent'    the agent's process ended — the ordinary case, byte for byte the
  *              behaviour every unsandboxed run has always had
- *   'infra'    the pane died on the CLIENT side; the run must not be ended by it
+ *   'infra'    the agent did not decide to end; the run must not be ended by it.
+ *              `kind` says which of the two shapes it is, because they are
+ *              written down under different names and read by different people:
+ *              'killed' — the process was signalled from outside (every run,
+ *              sandboxed or not), 'client' — the runtime client watching a
+ *              container died (a sandboxed run only)
  *   'unknown'  nobody answered. Do nothing, ask again next pass.
+ *
+ * The signal is asked FIRST and for every run, because it is the one piece of
+ * evidence that needs nobody: it does not depend on a daemon answering, and it
+ * is just as true of an unsandboxed run — which is precisely the case that had
+ * no answer at all until now.
  */
-export function panePostMortem({ sandboxed = false, exit = null, container = null } = {}) {
+export function panePostMortem({ sandboxed = false, exit = null, signal = null, container = null } = {}) {
+  const killed = signalDeath(exit, signal)
+  if (killed) {
+    return {
+      verdict: 'infra',
+      kind: 'killed',
+      signal: killed.signal,
+      reason: `the agent's process was killed from outside (${killed.name})`,
+    }
+  }
   if (!sandboxed) return { verdict: 'agent', reason: 'not sandboxed' }
   const code = exitStatus(exit)
   // Asked BEFORE the daemon, because the daemon cannot answer it: a container
   // that was never created looks exactly like one `--rm` has taken away.
   if (code === 125) {
-    return { verdict: 'infra', reason: 'the runtime client could not start the container (exit 125)' }
+    return { verdict: 'infra', kind: 'client', reason: 'the runtime client could not start the container (exit 125)' }
   }
   if (!container) return { verdict: 'agent', reason: 'no container to ask about' }
   if (container.verdict !== 'ok') {
     return { verdict: 'unknown', reason: `the container runtime did not answer (${container.verdict})` }
   }
   if (container.running === true) {
-    return { verdict: 'infra', reason: 'the container is still running — the client died, not the agent' }
+    return { verdict: 'infra', kind: 'client', reason: 'the container is still running — the client died, not the agent' }
   }
   // The daemon answered and the container is not running: either `--rm` took it
   // away with the agent's own exit, or it exited and is still there with its
@@ -253,14 +324,37 @@ export function panePostMortem({ sandboxed = false, exit = null, container = nul
   }
 }
 
-/** How often a client that died may be resumed before the run is ended anyway. */
-const CLIENT_RESUME_MAX = (() => {
+/**
+ * How often a pane that died through no fault of the agent may be resumed
+ * before the run is ended anyway. ONE budget for both shapes: a run whose
+ * client dies and a run whose process is killed are the same question asked
+ * twice — "how many times do we put this back before we admit it will not
+ * stay?" — and two counters would let a run alternate between them for ever.
+ *
+ * `FREILAUF_SANDBOX_CLIENT_RESUME_MAX` is the name this cap was born under and
+ * keeps answering to; it now governs a case that has nothing to do with the
+ * sandbox, so `FREILAUF_PANE_RESUME_MAX` is what it is called from here on.
+ */
+const PANE_RESUME_MAX = (() => {
   // `Number('')` is 0 AND finite — the trap AGENTS.md has its own entry for.
-  const raw = env('SANDBOX_CLIENT_RESUME_MAX')
+  const raw = env('PANE_RESUME_MAX') ?? env('SANDBOX_CLIENT_RESUME_MAX')
   if (raw === undefined || String(raw).trim() === '') return 3
   const n = Number(raw)
   return Number.isFinite(n) && n >= 0 ? n : 3
 })()
+
+/**
+ * The two shapes of "the pane died and the agent did not decide to", by the
+ * `kind` panePostMortem() answers: the event each is written down as, and the
+ * reason `resumeRun()` is given. Both reasons are deliberately NOT
+ * 'session_lost', so neither spends the run's RESUME_MAX crash budget — each
+ * is capped by PANE_RESUME_MAX above, which counts these very events.
+ */
+const PANE_INFRA = {
+  killed: { event: 'agent_killed', reason: 'agent_killed' },
+  client: { event: 'sandbox:client_gone', reason: 'sandbox_client_gone' },
+}
+const PANE_INFRA_EVENTS = Object.values(PANE_INFRA).map(v => v.event)
 
 /**
  * Ask the daemon about this run's container. Everything sandbox is imported
@@ -272,10 +366,13 @@ const CLIENT_RESUME_MAX = (() => {
  *   a name and no answer → `{ verdict: 'unreachable' }`, i.e. "I learned
  *                          nothing" — never "it is gone"
  */
-async function paneCause(run, exit) {
-  if (!run?.sandbox) return panePostMortem({ sandboxed: false })
+async function paneCause(run, exit, signal = null) {
+  // The signal travels into EVERY branch, the unsandboxed one included: it is
+  // the one verdict that needs no daemon, and dropping it here is what made an
+  // ordinary run's killed process indistinguishable from a crashed agent.
+  if (!run?.sandbox) return panePostMortem({ sandboxed: false, exit, signal })
   const name = run.sandbox_container ? String(run.sandbox_container) : null
-  if (!name) return panePostMortem({ sandboxed: true, exit, container: null })
+  if (!name) return panePostMortem({ sandboxed: true, exit, signal, container: null })
   let state = { verdict: 'unreachable' }
   try {
     const [{ sandboxRuntime }, { specOf }] = await Promise.all([
@@ -289,12 +386,12 @@ async function paneCause(run, exit) {
   } catch (err) {
     detectorLog(run.id, { art: 'sandbox', grund: `containerState failed: ${err.message}` })
   }
-  return panePostMortem({ sandboxed: true, exit, container: state })
+  return panePostMortem({ sandboxed: true, exit, signal, container: state })
 }
 
 /**
- * The pane died and the AGENT did not. Never ends the run over it — that is the
- * whole point — but it does not leave it hanging either:
+ * The pane died and the AGENT did not decide to. Never ends the run over it —
+ * that is the whole point — but it does not leave it hanging either:
  *
  *  - a run in the finish gate is the integrator's: it has reported, and its own
  *    deadline (`finish_started_at` + `repos.finish_timeout_min`) escalates by
@@ -302,40 +399,63 @@ async function paneCause(run, exit) {
  *  - a live run is handed to `resumeRun()` — the recovery path that already
  *    exists, and the one §7.11's start order walks through again (a leftover
  *    container of the same name is what `stopOrphan()` is for).
- *  - and that is CAPPED. A client that dies at every start must not be restarted
- *    every pass for ever — the same rule `RESUME_MAX` carries, counted here
- *    because a deliberate caller's reason is deliberately not counted there.
- *    Past the cap the run ends after all, and the message names the
- *    infrastructure rather than the agent.
+ *  - and that is CAPPED. A client that dies at every start, or a CLI the
+ *    machine shoots the moment it draws, must not be restarted every pass for
+ *    ever — the same rule `RESUME_MAX` carries, counted here because a
+ *    deliberate caller's reason is deliberately not counted there. Past the cap
+ *    the run ends after all, and the message names the infrastructure rather
+ *    than the agent.
+ *
+ * It began as the sandbox's own recovery and is now BOTH shapes, because the
+ * second one turned out to be the common case: a restart, a reboot or an OOM
+ * kill takes the processes inside sessions that survive it, and `remain-on-exit`
+ * — the flag that keeps a crashed run's screen readable — is exactly what makes
+ * those sessions survive. So `watchRun()` found a live session with a dead pane,
+ * and the run was failed for good. Measured 2026-09-09 on this installation:
+ * of the runs a restart caught, `a29e5fc2` (whose SESSION went) was resumed and
+ * `fd0c57c8`, `902478df` and `174a5f8c` (whose PANES died first, exit 143) were
+ * not — a race whose outcome had nothing to do with the runs.
  */
-async function paneClientGone(runId, run, cause, exit) {
+async function paneNotTheAgent(runId, run, cause, exit) {
   const code = exitStatus(exit)
-  addEvent(runId, 'sandbox:client_gone',
-    { exit: code, reason: cause.reason, container: run?.sandbox_container ?? null })
+  const shape = PANE_INFRA[cause.kind] ?? PANE_INFRA.client
+  addEvent(runId, shape.event, {
+    exit: code,
+    signal: cause.signal ?? null,
+    reason: cause.reason,
+    container: run?.sandbox_container ?? null,
+  })
   if (run?.finish_state) return
   if (!['running', 'waiting_help'].includes(run?.status)) return
-  const tries = db.prepare(`SELECT COUNT(*) AS n FROM events WHERE run_id=? AND kind='sandbox:client_gone'`)
-    .get(runId)?.n ?? 1
-  let why = `resumed ${tries - 1} time(s) already (cap ${CLIENT_RESUME_MAX})`
-  if (tries <= CLIENT_RESUME_MAX) {
+  const tries = db.prepare(`SELECT COUNT(*) AS n FROM events WHERE run_id=? AND kind IN (${
+    PANE_INFRA_EVENTS.map(() => '?').join(',')})`).get(runId, ...PANE_INFRA_EVENTS)?.n ?? 1
+  let why = `resumed ${tries - 1} time(s) already (cap ${PANE_RESUME_MAX})`
+  if (tries <= PANE_RESUME_MAX) {
     const r = await import('./runner.mjs')
-      .then(m => m.resumeRun(runId, { reason: 'sandbox_client_gone' }))
+      .then(m => m.resumeRun(runId, { reason: shape.reason }))
       .catch(err => ({ ok: false, error: err.message }))
     // `retry` is `launchRun()`'s "could not TRY" — right after a reboot the
     // tmux server itself may be a beat behind — and the run stays
     // `resume_pending` for `retryPendingResumes()`. "Could not try" is not
     // "tried and died", exactly as runner.mjs says: it is a run on its way, so
     // failing it here would undo the very rule this branch exists for.
-    if (r?.ok || r?.retry) return
+    if (r?.ok || r?.retry) {
+      // Into the watcher's own log, so the operator hears ONE message about a
+      // restart that took six agents rather than six about six runs — the same
+      // rule announceResumes() was written for, and this path had been outside
+      // it. Lazy, because the watcher imports this module.
+      import('./watcher.mjs').then(m => m.noteResume(runId, { ...r, reason: shape.reason })).catch(() => {})
+      return
+    }
     why = r?.error ?? 'the resume was refused'
-    addEvent(runId, 'sandbox:client_gone_unrecovered', { error: why })
+    addEvent(runId, 'sandbox:client_gone_unrecovered', { error: why, kind: cause.kind ?? null })
   }
   db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), exit_code=? WHERE id=?`)
     .run(code, runId)
   clearAgentState(runId)
   const assessment = await assessAfterEnd(runId)
   await notifyRun(runId, 'pane_died',
-    `🔴 The sandbox runtime client died and the run could not be resumed — ${cause.reason} (${why}).${assessment}`)
+    `🔴 ${cause.reason} and the run could not be resumed (${why}).${assessment}`)
 }
 
 
@@ -624,7 +744,7 @@ export async function handleReport(runId, body, via = 'http') {
       // For every unsandboxed run this is 'agent' without a subprocess, and
       // everything below it is byte for byte what it always was.
       const fresh = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
-      const cause = await paneCause(fresh, body.exit)
+      const cause = await paneCause(fresh, body.exit, body.signal)
       if (cause.verdict === 'unknown') {
         // The daemon did not answer, so the hub knows nothing about the agent.
         // Not knowing is a reason to ask again next pass, never to end somebody's
@@ -633,7 +753,7 @@ export async function handleReport(runId, body, via = 'http') {
         addEventOnce(runId, 'sandbox:pane_unclear', { exit: body.exit ?? null, reason: cause.reason })
         break
       }
-      if (cause.verdict === 'infra') { await paneClientGone(runId, fresh, cause, body.exit); break }
+      if (cause.verdict === 'infra') { await paneNotTheAgent(runId, fresh, cause, body.exit); break }
       // A pane killed by a SIGNAL carries no exit status — and `Number('')` is
       // 0 AND finite, so the old coercion wrote a confident `exit_code = 0`
       // ("exited cleanly") for an agent the kernel had shot. So did `null`,

@@ -1,5 +1,5 @@
 // Freilauf — HTTP: server-rendered HTML + JSON API (planning 5).
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, statSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import db, { getRepo, getRun, setSetting, addEvent, announceRun, allSettings } from './db.mjs'
@@ -10,8 +10,8 @@ import { detectInstalled } from './harnesses/index.mjs'
 import { subscriptionUsage } from './usage.mjs'
 import { providerBalances } from './balances.mjs'
 import { sseHandler } from './events.mjs'
-import { archivable, followUpActive } from './run-state.mjs'
-import { launchRun } from './runner.mjs'
+import { archivable, followUpActive, resumable } from './run-state.mjs'
+import { launchRun, resumeRun } from './runner.mjs'
 import { startRun, startDeferredRun, startScheduledNow } from './scheduler.mjs'
 import { runDefFromForm, runStartFromForm, saveAgent, rememberRunChoice, lastRunChoiceFor } from './run-def.mjs'
 import { runTitle, TITLE_MAX } from './title.mjs'
@@ -735,6 +735,55 @@ async function api(req, res, url) {
     assessLater(m[1], false)
     flowsTick().catch(e => console.error('[flows]', e.message))   // "run finished" triggers, without waiting for the watcher
     return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
+  }
+  // "Resume": pick an ended run back up where it stopped — the same worktree,
+  // the same commits, and for a coding agent that has a resume form the same
+  // conversation. The hub does this by itself wherever it can PROVE the agent
+  // did not end on its own (a lost session, a killed process — watcher.mjs and
+  // reports.mjs); this is the operator saying so where it cannot, and the way
+  // back for a run past the resume cap.
+  //
+  // It is not `retry` and must never quietly become it: retry throws the work
+  // away and starts the task afresh. So the row is put back to `running` and
+  // handed to the ordinary `resumeRun()` — the SAME function the automatic
+  // paths use, which is what keeps "how a run is resumed" one piece of code.
+  // The reason is not 'session_lost', so a deliberate click does not spend the
+  // run's crash budget (RESUME_MAX), exactly as the sandbox's own reconfigure
+  // does not.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/resume$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const there = !!run.workdir_effective && existsSync(run.workdir_effective)
+    // A refusal has a reason, and a redirect back to the run would swallow it:
+    // the event list renders event KINDS, so `resume_refused` would stand there
+    // as a bare word and the page a human opens BECAUSE they clicked would say
+    // less than the click did. Same rule the sandbox card and "Merge now" follow.
+    const refuse = (reason) => wantsHtml(req)
+      ? problemPage(req, res, t('run.resume'), [reason], `/runs/${run.id}`)
+      : answer(req, res, 400, { ok: false, error: reason }, `/runs/${run.id}`)
+    if (!resumable(run, there)) return refuse(t('run.resume_err'))
+    // Everything the ending wrote about the run is taken back before the resume,
+    // not after it: `resumeRun()` refuses anything but a live run, and the
+    // integrator's verdict on the leftovers ("unmerged_both") describes an
+    // attempt that is about to continue. `assessUnmerged()` runs again at the
+    // real end. `exit_code` goes for the same reason — it belongs to a process
+    // that is being replaced.
+    db.prepare(`UPDATE runs SET status='running', ended_at=NULL, exit_code=NULL,
+                agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(run.id)
+    resetIntegration(run.id)
+    addEvent(run.id, 'resume_requested', { previous_status: run.status, by: 'operator' })
+    let r
+    try { r = await resumeRun(run.id, { reason: 'operator' }) } catch (e) { r = { ok: false, error: e.message } }
+    if (!r?.ok && !r?.retry) {
+      // The resume was refused after all (no launch spec, the worktree went
+      // between the check and here): put the record back exactly as it was
+      // rather than leaving a `running` run with nothing behind it.
+      db.prepare(`UPDATE runs SET status=?, ended_at=COALESCE(?, datetime('now')), exit_code=? WHERE id=?`)
+        .run(run.status, run.ended_at, run.exit_code, run.id)
+      addEvent(run.id, 'resume_refused', { error: r?.error ?? 'unknown' })
+      return refuse(r?.error ?? 'resume failed')
+    }
+    return answer(req, res, 200, { ok: true, ...r }, `/runs/${run.id}`)
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/retry$/))) {
     const run = getRun(m[1])

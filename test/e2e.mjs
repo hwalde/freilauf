@@ -2375,6 +2375,147 @@ try {
       const ev = ereignisse(j.runId)
       contains(ev.join(','), 'resume_refused', 'and the refusal is written on the run')
     })
+    // ---- the OTHER way a restart takes an agent, and the one that cost three runs.
+    //
+    // A restart, a reboot or the OOM killer kills PROCESSES. Where the tmux
+    // session survives that — and `remain-on-exit` is exactly what makes it
+    // survive, so this is the ordinary shape rather than the exotic one — the
+    // watcher does not see a lost session at all: it sees a live session with a
+    // dead pane, and until this existed that failed the run for good.
+    //
+    // Measured 2026-09-09 on the production installation: of the runs one
+    // restart caught, `a29e5fc2` (whose session went) was resumed and
+    // `fd0c57c8`, `902478df` and `174a5f8c` (whose panes died first, exit 143)
+    // were not. Which of the two a run got was a race, and it decided whether
+    // 37 commits were picked back up or abandoned.
+    //
+    // `exit 143` in a real shell, not a killed process: it is byte for byte the
+    // status those three carried (128 + SIGTERM, reported by the shell
+    // fl-start launches through, so tmux fills no signal field at all) and it
+    // is deterministic. The FIXTURE is retried for the reason the other dead-pane
+    // check states — tmux does not always record the status — while the
+    // assertion below stays exactly as strong.
+    await check('a pane whose process was KILLED resumes the run instead of failing it', async () => {
+      let sname = null
+      for (let versuch = 1; versuch <= 6 && !sname; versuch++) {
+        const kandidat = `fl-cc-killed-${versuch}`
+        sessions.add(kandidat)
+        await sh('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', kandidat])
+        await sh('tmux', ['set-option', '-t', `=${kandidat}:`, 'remain-on-exit', 'on'])
+        await sh('tmux', ['send-keys', '-t', `=${kandidat}:`, 'exit 143', 'Enter'])
+        await waitFor(async () => {
+          const r = await sh('tmux', ['display', '-p', '-t', `=${kandidat}:`, '#{pane_dead}'])
+          return r.ok && r.stdout.trim() === '1'
+        }, { what: 'the pane is dead', timeoutMs: 5000 })
+        const st = await sh('tmux', ['display', '-p', '-t', `=${kandidat}:`, '#{pane_dead_status}'])
+        if (st.ok && st.stdout.trim() === '143') sname = kandidat
+        else await sh('tmux', ['kill-session', '-t', `=${kandidat}`])
+      }
+      isTrue(!!sname, 'tmux recorded the exit status of the killed pane (retried; it does not always)')
+
+      const id = randomUUID()
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                   workdir_effective,tmux_session,started_at)
+                  VALUES(?,?,'claude','E2E-Killed: the machine took the process','keiner',45,'running',?,?,datetime('now'))`)
+        .run(id, repoId, REPO, sname)
+      mkdirSync(join(SB, 'runs', id), { recursive: true })
+      await watcherTick()
+      // `watchRun()` fires the `_pane_died` report WITHOUT awaiting it — on
+      // purpose: a pass must not stand still while a CLI is launched. So the
+      // tick is the trigger and not the finish line, and waiting for the
+      // session is the honest way to read a resume that is still in flight.
+      await waitFor(() => !!lauf(id)?.tmux_session, { what: 'the resumed session', timeoutMs: 20_000 })
+
+      const r = lauf(id)
+      const ev = ereignisse(id)
+      equal(r.status, 'running', 'the run is still going — nobody asked for that ending')
+      contains(ev.join(','), 'agent_killed', 'the death is written down as what it was')
+      contains(ev.join(','), 'session_lost', 'and the resume went the one path every resume goes')
+      isTrue(!!r.tmux_session, 'a session stands again')
+      if (r.tmux_session) sessions.add(r.tmux_session)
+      isFalse(ev.includes('pane_died'), 'not filed as an agent that ended by itself')
+      // The cap is its own, so a machine that keeps shooting the CLI does not
+      // spend the run's crash budget — and vice versa.
+      equal(r.resume_attempts, 0, 'a killed process does not count against RESUME_MAX')
+      contains(readFileSync(join(SB, 'runs', id, 'resume-prompt.md'), 'utf8'), 'interrupted',
+        'and the agent is told where it stood')
+      db.prepare('DELETE FROM runs WHERE id=?').run(id)
+    })
+
+    await check('past the cap a killed process ends the run after all', async () => {
+      const id = randomUUID()
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                   workdir_effective,started_at)
+                  VALUES(?,?,'claude','E2E-Killed: over the cap','keiner',45,'running',?,datetime('now'))`)
+        .run(id, repoId, REPO)
+      mkdirSync(join(SB, 'runs', id), { recursive: true })
+      // Four earlier deaths of the same kind: the cap is 3, and it counts the
+      // events themselves rather than a column, so this IS how it is reached.
+      for (let i = 0; i < 4; i++) db.prepare(`INSERT INTO events(run_id,kind) VALUES(?,'agent_killed')`).run(id)
+      const { handleReport } = await import('../server/reports.mjs')
+      await handleReport(id, { kind: '_pane_died', exit: '143', signal: '' }, 'internal')
+      equal(lauf(id).status, 'failed', 'a CLI the machine shoots at every start is not restarted for ever')
+      equal(lauf(id).exit_code, 143, 'with the status the pane really carried')
+      db.prepare('DELETE FROM runs WHERE id=?').run(id)
+    })
+
+    // Where the hub cannot PROVE the agent did not end on its own — a CLI that
+    // crashed, a run past the cap — the evidence is a human's, and the button
+    // is how they state it. It goes through the same resumeRun() as everything
+    // above, which is the point: there is one way a run is resumed.
+    await check('the operator can pick an ended run back up, and it is not a retry', async () => {
+      const id = randomUUID()
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                   workdir_effective,started_at,ended_at,exit_code,merge_status)
+                  VALUES(?,?,'claude','E2E-Resume: the operator says so','keiner',45,'failed',?,
+                         datetime('now'),datetime('now'),1,'unmerged_both')`)
+        .run(id, repoId, REPO)
+      mkdirSync(join(SB, 'runs', id), { recursive: true })
+
+      const r = await postForm(`/api/runs/${id}/resume`, {})
+      equal(r.status, 200, 'the route takes it')
+      await waitFor(() => !!lauf(id)?.tmux_session, { what: 'the resumed session', timeoutMs: 20_000 })
+      const l = lauf(id)
+      sessions.add(l.tmux_session)
+      equal(l.status, 'running', 'the run is going again')
+      equal(l.ended_at, null, 'and is not over any more')
+      contains(ereignisse(id).join(','), 'resume_requested', 'the click is on the record')
+      equal(l.resume_attempts, 0, 'a deliberate resume spends no crash budget')
+      // The difference from retry, in the one place it shows: prompt.md is the
+      // record of the task and the agent is told where it stood, rather than
+      // being started over.
+      contains(readFileSync(join(SB, 'runs', id, 'resume-prompt.md'), 'utf8'), 'interrupted',
+        'the agent is continued, not restarted')
+      db.prepare('DELETE FROM runs WHERE id=?').run(id)
+    })
+
+    await check('what may not be resumed is refused with a reason, not a 500', async () => {
+      const mk = (over) => {
+        const id = randomUUID()
+        db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                     workdir_effective,started_at)
+                    VALUES(?,?,'claude','E2E-Resume: refused','keiner',45,?,?,datetime('now'))`)
+          .run(id, repoId, over.status ?? 'failed', over.workdir === null ? null : REPO)
+        if (over.resolves_run_id) db.prepare('UPDATE runs SET resolves_run_id=? WHERE id=?').run(over.resolves_run_id, id)
+        if (over.archived_at) db.prepare(`UPDATE runs SET archived_at=datetime('now') WHERE id=?`).run(id)
+        return id
+      }
+      for (const [was, over] of [
+        ['a run that is still going', { status: 'running' }],
+        ['a finished one — that is a follow-up, not a resume', { status: 'done' }],
+        ['one whose worktree is gone', { workdir: null }],
+        ['a conflict run', { resolves_run_id: R1 }],
+        ['an archived one', { archived_at: 1 }],
+      ]) {
+        const id = mk(over)
+        const r = await postForm(`/api/runs/${id}/resume`, {})
+        equal(r.status, 400, `${was}: refused`)
+        equal(lauf(id).status, over.status ?? 'failed', `${was}: and left exactly as it was`)
+        db.prepare('DELETE FROM runs WHERE id=?').run(id)
+      }
+      equal((await postForm(`/api/runs/${randomUUID()}/resume`, {})).status, 404, 'an unknown run is a 404')
+    })
+
     await check('a session the hub ends itself is an abort, never a resume', async () => {
       const k = await laufStarten({ repo_id: repoId, prompt: 'E2E-Resume: killed on purpose' })
       await waitFor(() => !!lauf(k.runId)?.tmux_session, { what: 'tmux session' })
