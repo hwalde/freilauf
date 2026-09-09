@@ -7414,9 +7414,16 @@ try {
     // the run did not come through, which is exactly what one wants to read.
     isFalse(anomaliesSettled({ status: 'failed' }), 'failed keeps its explanation')
     isFalse(anomaliesSettled({ status: 'aborted' }), 'aborted too')
-    // A finished run with an open follow-up commission is working right now.
-    isFalse(anomaliesSettled({ status: 'done', followup_since: 'x' }), 'not while a follow-up is open')
-    isFalse(anomaliesSettled({ status: 'done', followup_open: 1 }), 'nor while one is in the gate')
+    // A follow-up commission does NOT hold the first attempt's statements open.
+    // Measured on run ecc518c4: done at 17:35:22, merged into main one second
+    // later, the operator typing into its session six seconds after that — and
+    // the `anomaly:overrun` from 17:04, about an attempt that had since
+    // succeeded, went on colouring the row red for hours while 7c31c0c1 (done,
+    // merged, same anomaly, nobody talking to it) was green.
+    isTrue(anomaliesSettled({ status: 'done', followup_since: 'x' }),
+      'the first attempt is over, whoever is typing into the session now')
+    isTrue(anomaliesSettled({ status: 'done', followup_open: 1 }),
+      'and a follow-up in the gate does not reopen it either')
     isFalse(anomaliesSettled(null), 'no run, no verdict')
     // The list is the statements a run's own end answers. `unpushed` is NOT one
     // of them: it is written AFTER the run ended and stays true afterwards —
@@ -7459,6 +7466,17 @@ try {
     // Kept on its branch counts: integrate.mjs pushed that branch.
     isTrue(settledAnomalies({ status: 'done', merge_status: 'kept_on_branch' }).includes('anomaly:unpushed'),
       'kept_on_branch was pushed too')
+
+    // Run ecc518c4 as pages.mjs sees it: done, merged, and somebody typing into
+    // its session. The attempt's own statements are settled — and the alarms
+    // that belong to the commission are NOT among them, so the follow-up keeps
+    // every voice it has. That second half is what makes the first one safe.
+    const followUp = { status: 'done', merge_status: 'merged', followup_since: '2026-09-09 15:35:28' }
+    isTrue(settledAnomalies(followUp).includes('anomaly:overrun'),
+      'an overrun of the attempt that already merged stops colouring the row')
+    for (const k of ['anomaly:followup_overrun', 'anomaly:followup_soft_overrun']) {
+      isFalse(settledAnomalies(followUp).includes(k), `${k} still speaks — it is about the open commission`)
+    }
 
     // And the case the anomaly exists FOR must survive: a run nobody merged.
     isFalse(settledAnomalies({ status: 'done' }).includes('anomaly:unpushed'),

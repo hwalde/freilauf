@@ -803,6 +803,23 @@ therefore names the block. Whichever way a future change moves this, it has to
 move both sides: what the hub will wake somebody up about, it has to be able to
 show them.
 
+**"Where its rows really are" means the ROWS, and for a while it meant the
+page they were somewhere on.** The link was the bare `/archive?repo=`, and the
+archive is paginated 50 to a page with no column that mentions an incident —
+so measured on this installation, repo Freilauf, 212 archived runs: of the two
+the number was counting, `149a666b` sat at row 35 and `0c1fc610` at row 121,
+three pages deep, reachable by nothing but paging through by hand and reading
+status cells. A count that promises rows the reader cannot find is the failure
+the two links above already have a rule about, one page further out — and this
+one's own tooltip says "this is where they are". `pageArchive()` therefore
+takes the overview's filter, spelled the same way and using the same subquery:
+**`/archive?repo=<id>&incidents=1`**, which is where `incidentBlock()` now
+points. It carries through the pager and through each row's restore button (a
+filter that drops back to all 212 on the second page is not one), the headline
+names both numbers under it (`{n} of {total}`, or "2 runs in the archive" would
+stand over an archive holding 212), and there is a way back out to the whole
+archive.
+
 **And a list is put away in one gesture, not row by row.** Forty finished runs
 of which four are worth keeping were forty clicks; the overview therefore
 carries a checkbox per archivable row, a bulk bar UNDER the table (where the
@@ -4172,21 +4189,36 @@ noise: it spends the colour, and the reader cannot use the dot any more.
 `anomaliesSettled(run)` (run-state.mjs, next to `displayStatus()` because it is
 the same kind of question — what does this run's state MEAN now) is the anomaly
 half of what `incidentGoneReason()` does for incidents, and for the same stated
-reason: a run that reached `done` has answered them. Three fences, each a way
+reason: a run that reached `done` has answered them. Two fences, each a way
 it would otherwise go wrong:
 
 - **`done` only.** A `failed` or `aborted` run KEEPS its anomalies and their
   colour — there the anomaly is the explanation of why it did not come through,
   which is exactly what one wants to read.
-- **Not while a follow-up commission is open**, because such a run says `done`
-  while a human is waiting on it; its `followup_*` anomalies describe work
-  happening right now.
 - **`IN_FLIGHT_ANOMALIES` is a list and not "everything".** `unpushed` is
   written AFTER a run ended and stays true afterwards — work that lives only on
   this machine still does — so it is not in it, and neither are the follow-up
   overruns. The four that are (`no_activity`, `soft_overrun`, `overrun`,
   `session_gone`) are exactly the ones the existing `clearAnomalies()` callers
   already treat as retractable; the list is evidence, not taste.
+
+**A follow-up commission is deliberately NOT a third fence, and it was one.**
+The reasoning read "such a run says `done` while a human waits on it" — true of
+the run, and false of the statements: every kind in the list is raised by
+`watchRun()`, whose query is `status IN ('running','waiting_help')`, about the
+FIRST attempt and measured against its own `started_at`. That attempt is over. A
+commission has its own clock (`runtimeClock()`), its own alarms
+(`anomaly:followup_*`, raised by `watchFollowUps()`) and its own retraction —
+and none of those kinds is in the list, so settling here can never silence a
+live one. Measured 2026-09-09 on run ecc518c4: done at 17:35:22, merged into
+`main` one second later, the operator typing into its session six seconds after
+that — and the `anomaly:overrun` from 17:04, about an attempt that had since
+succeeded, coloured the row RED for hours, while 7c31c0c1 beside it (done,
+merged, the same kind of anomaly, nobody talking to it) was green. Two runs in
+the same state told apart by something that says nothing about either anomaly —
+and not transient either: a commission stays open until the follow-up reports or
+the session closes, so the one gesture that would clear the alarm is the gesture
+that keeps it.
 
 Only the **colour** ends. The event is not rewritten (`clearAnomalies()` is
 deliberately NOT called here — a run's end is not a claim that the overrun did

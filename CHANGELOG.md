@@ -75,6 +75,33 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A finished run stopped wearing a red "needs attention" dot because
+  somebody was talking to it.** When a run reported done and its work was
+  merged, the statements the watcher had made about it while it ran — "far over
+  the expected duration", "no activity" — stopped colouring its row, as
+  intended. Unless the operator typed into its session afterwards: then the
+  first attempt's alarm came back and stayed, for as long as that conversation
+  was open. Measured on one installation: a run reported done at 17:35:22, was
+  merged into `main` one second later, the operator typed into its session six
+  seconds after that — and it sat in the overview marked red for hours over an
+  overrun of an attempt that had already succeeded, beside an identical run
+  nobody had talked to that was green. Worse, the one gesture that would have
+  cleared it was the gesture keeping it there. A follow-up conversation has its
+  own clock and its own alarms; those are untouched and still speak.
+
+- **"n open in the archive" now takes you to those runs, not to the archive's
+  first page.** The count in the status sidebar is the number the notification
+  channel has been talking about — incidents on archived runs, which no
+  overview can show — and its tooltip says "this is where they are". The link
+  went to the plain archive, which is paginated 50 rows to a page and has no
+  column mentioning incidents: measured on one installation with 212 archived
+  runs, one of the two runs behind the number sat on page 1 and the other on
+  page 3, findable only by paging through by hand. The link now carries the
+  same `incidents=1` filter the overview's incident counts use, the archive
+  honours it (with the count in words, a way back to the whole archive, and the
+  filter kept across paging and restoring), and the page can be asked for
+  directly: `/archive?repo=<id>&incidents=1`.
+
 - **A panel no longer contradicts itself one second after you press its
   button.** For a control the hub does not keep — one whose values only travel
   to the project's own command — the field showed whatever the project last
