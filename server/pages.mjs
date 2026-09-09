@@ -554,11 +554,14 @@ function incidentBlock(repoId) {
   const zahl = (klasse, n, text) => linkable
     ? `<div><a href="${ziel}"><b class="${klasse}">${n}</b> ${text}</a></div>`
     : `<div><b class="${klasse}">${n}</b> ${text}</div>`
-  // The archived ones are a line of their own, dim, pointing at the archive.
-  // Their job is "there is still something open over here" — the number the
-  // notification channel has been talking about all along.
+  // The archived ones are a line of their own, dim, pointing at the archive —
+  // FILTERED to exactly the rows it counts, the same `incidents=1` gesture the
+  // two links above make into the overview. Without the filter this landed on
+  // page 1 of a paginated list whose columns never mention an incident: of the
+  // two runs measured here, one was at row 121 and unreachable by anything but
+  // paging through the archive by hand (pageArchive).
   const archivedLine = archived
-    ? `<div class="dim"><a href="/archive?repo=${repoId}" title="${e(t('incidents.archived_hint'))}"><b>${archived}</b> ${e(t('incidents.archived_short'))}</a></div>`
+    ? `<div class="dim"><a href="/archive?repo=${repoId}&amp;incidents=1" title="${e(t('incidents.archived_hint'))}"><b>${archived}</b> ${e(t('incidents.archived_short'))}</a></div>`
     : ''
   return `<div class="side-block side-incidents"><span class="side-label">${e(t('incidents.title'))}</span>
     ${handeln ? zahl('err', handeln, e(t('incidents.needs_you_short'))) : ''}
@@ -1391,14 +1394,42 @@ function wartetAuf(run) {
 // the at-a-glance list. Paginated, newest-archived first.
 const ARCHIV_SEITE = Number(env('ARCHIVE_PAGE_SIZE') ?? 50) || 50
 
+/**
+ * The archive, and the ONE filter it has: `?incidents=1`.
+ *
+ * The sidebar counts "n open in the archive" (incidentBlock) and links here,
+ * because an incident on an archived run still notifies and the overview
+ * cannot show a row for it — so this page is the only place its row exists.
+ * That link used to be the bare archive, and the bare archive is paginated:
+ * measured on this installation, repo Freilauf, 212 archived runs at 50 a page
+ * — of the two runs the number was counting, one sat at row 35 and the other
+ * at row 121, three pages deep, in a list whose columns do not mention
+ * incidents at all. So the count promised rows the reader could not find, and
+ * its own tooltip said "this is where they are". The same failure the overview
+ * already has a rule about, one page further out.
+ *
+ * The filter is the overview's, deliberately spelled the same way (`incidents=1`,
+ * the same subquery): a click on a number shows the rows behind it. It travels
+ * through the pager and through every row's restore button, so paging or
+ * restoring one does not silently drop back to all 212.
+ */
 export async function pageArchive(req, res, url) {
   const sel = selectRepo(req, url)
   if (!sel) return noRepoPage(req, res, '/archive', t('nav.archive'))
+  const nurVorfaelle = url.searchParams.get('incidents') === '1'
+  const whereClause = `repo_id=? AND archived_at IS NOT NULL${nurVorfaelle
+    ? ` AND id IN (SELECT run_id FROM incidents WHERE geloest_am IS NULL AND run_id IS NOT NULL)` : ''}`
+  const query = nurVorfaelle ? `&incidents=1` : ''
   const gewuenscht = Math.max(1, Number(url.searchParams.get('page')) || 1)
-  const total = db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NOT NULL`).get(sel.id).c
+  const total = db.prepare(`SELECT count(*) c FROM runs WHERE ${whereClause}`).get(sel.id).c
+  // Under the filter the headline has to name BOTH numbers, or "2 runs in the
+  // archive" would stand over an archive that holds 212 of them.
+  const archivedTotal = nurVorfaelle
+    ? db.prepare(`SELECT count(*) c FROM runs WHERE repo_id=? AND archived_at IS NOT NULL`).get(sel.id).c
+    : total
   const seiten = Math.max(1, Math.ceil(total / ARCHIV_SEITE))
   const seite = Math.min(gewuenscht, seiten)
-  const runs = db.prepare(`SELECT * FROM runs WHERE repo_id=? AND archived_at IS NOT NULL
+  const runs = db.prepare(`SELECT * FROM runs WHERE ${whereClause}
     ORDER BY archived_at DESC, started_at DESC LIMIT ? OFFSET ?`)
     .all(sel.id, ARCHIV_SEITE, (seite - 1) * ARCHIV_SEITE)
   const rows = runs.map(r => {
@@ -1420,21 +1451,24 @@ export async function pageArchive(req, res, url) {
       <td>${e(r.branch_reported || r.branch_expected || '–')}</td>
       <td>${r.pr_url ? `<a href="${e(r.pr_url)}">PR</a>` : '–'}</td>
       <td><form method="post" action="/api/runs/${r.id}/unarchive" class="inline" onclick="event.stopPropagation()">
-        <input type="hidden" name="back" value="/archive?repo=${sel.id}&page=${seite}">
+        <input type="hidden" name="back" value="/archive?repo=${sel.id}&page=${seite}${query}">
         <button type="submit" title="${e(t('archive.restore_title'))}" aria-label="${e(t('archive.restore_title'))}">${e(t('archive.restore'))}</button></form></td>
     </tr>`
   }).join('')
   const pager = seiten <= 1 ? ''
     : `<div class="pager">
-        ${seite > 1 ? `<a class="btn" href="/archive?repo=${sel.id}&page=${seite - 1}">${e(t('archive.prev'))}</a>` : `<span class="dim">${e(t('archive.prev'))}</span>`}
+        ${seite > 1 ? `<a class="btn" href="/archive?repo=${sel.id}&page=${seite - 1}${query}">${e(t('archive.prev'))}</a>` : `<span class="dim">${e(t('archive.prev'))}</span>`}
         <span>${e(t('archive.page', { page: seite, pages: seiten }))}</span>
-        ${seite < seiten ? `<a class="btn" href="/archive?repo=${sel.id}&page=${seite + 1}">${e(t('archive.next'))}</a>` : `<span class="dim">${e(t('archive.next'))}</span>`}
+        ${seite < seiten ? `<a class="btn" href="/archive?repo=${sel.id}&page=${seite + 1}${query}">${e(t('archive.next'))}</a>` : `<span class="dim">${e(t('archive.next'))}</span>`}
       </div>`
   const body = `
   <h2>${e(t('archive.title', { repo: sel.name }))}</h2>
-  <p class="dim">${e(t('archive.total', { n: total }))}</p>
+  <p class="dim">${nurVorfaelle
+    ? `${e(t('archive.total_incidents', { n: total, total: archivedTotal }))}
+       <a href="/archive?repo=${sel.id}">${e(t('archive.filter_clear'))}</a>`
+    : e(t('archive.total', { n: total }))}</p>
   <div class="table-wrap"><table class="list"><thead><tr><th>${e(t('overview.title_col'))}</th><th>${e(t('overview.harness_model'))}</th><th>${e(t('overview.status'))}</th><th>${e(t('archive.archived_at'))}</th><th>${e(t('overview.branch'))}</th><th>PR</th><th></th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="7" class="dim">${e(t('archive.empty'))}</td></tr>`}</tbody></table></div>
+  <tbody>${rows || `<tr><td colspan="7" class="dim">${e(t(nurVorfaelle ? 'archive.empty_incidents' : 'archive.empty'))}</td></tr>`}</tbody></table></div>
   ${pager}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.archive'), '/archive', body, sel.id))
 }

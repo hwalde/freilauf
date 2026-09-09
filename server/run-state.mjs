@@ -330,13 +330,33 @@ export const IN_FLIGHT_ANOMALIES = [
  * `done` only. A `failed` or `aborted` run KEEPS its anomalies and their
  * colour, because there the anomaly is the explanation of why it did not come
  * through. A `done` run whose work is stuck off the base branch is red through
- * its `merge_blocked` incident, which is the integrator's ladder and not
- * this. And a run with an open follow-up commission is working right now — its
- * `followup_*` anomalies are not in the list above anyway, but its status says
- * `done` while a human waits on it, so it is not settled either.
+ * its `merge_blocked` incident, which is the integrator's ladder and not this.
+ *
+ * A follow-up commission is deliberately NOT asked about, and it used to be.
+ * The reasoning was "such a run is working right now" — true of the run, and
+ * not of the statements above: every one of them was raised by `watchRun()`
+ * about the FIRST ATTEMPT, measured from `started_at` against
+ * `expected_minutes`, and that attempt is over. What a commission is working on
+ * has its own clock (`runtimeClock()`), its own alarms
+ * (`anomaly:followup_soft_overrun` / `followup_overrun`, raised by
+ * `watchFollowUps()`) and its own retraction — and none of those kinds is in
+ * the list above, so settling here can never silence a live one. Every writer
+ * of an `IN_FLIGHT_ANOMALIES` kind sits inside `watchRun()`, whose query is
+ * `status IN ('running','waiting_help')`: a `done` run cannot acquire one.
+ *
+ * What the guard cost, measured 2026-09-09 on run ecc518c4: it reported done at
+ * 17:35:22 and the integrator merged it into `main` one second later — and
+ * because the operator typed into its session six seconds after that, the
+ * `anomaly:overrun` from 17:04, during an attempt that had since succeeded,
+ * went on colouring the row RED with "needs attention" for hours. Beside it
+ * 7c31c0c1 — done, merged, carrying the same kind of overrun anomaly and
+ * nobody talking to it — was green. Two runs in the same state, told apart by
+ * something that says nothing about either anomaly. And it was not transient:
+ * a commission stays open until the follow-up reports or the session closes,
+ * so the one gesture that would clear the alarm is the gesture that keeps it.
  */
 export function anomaliesSettled(run) {
-  return !!run && run.status === 'done' && !followUpActive(run)
+  return !!run && run.status === 'done'
 }
 
 /**

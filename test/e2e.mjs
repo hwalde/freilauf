@@ -3191,6 +3191,11 @@ try {
     // The record itself is untouched — the archive and the run's own page keep it.
     const stillOpen = inc.openIncidentsOf(j.runId).length
     const runPage = await (await fetchPath(`/runs/${j.runId}`)).text()
+    // The page the number links to, asked the way the number asks it. The
+    // unfiltered archive is asked too: it holds every archived run of this
+    // repo, so it is what the reader used to be handed instead.
+    const archiveFiltered = await (await fetchPath(`/archive?repo=${repoId}&incidents=1`)).text()
+    const archiveWhole = await (await fetchPath(`/archive?repo=${repoId}`)).text()
     // Everything is read BEFORE the run goes, so the cleanup cannot be skipped
     // by a failing assertion — the pagination check further down counts rows.
     db.prepare('DELETE FROM runs WHERE id=?').run(j.runId)
@@ -3204,7 +3209,18 @@ try {
     // therefore counted as its OWN number, pointing at the one page that can
     // show it — the archive, whose status column names the block.
     contains(nachher.block, 'open in the archive', 'the archived one is counted separately')
-    contains(nachher.block, `/archive?repo=${repoId}`, 'and links where its rows really are')
+    // "Where its rows really are" has to mean the ROWS, not the page they are
+    // somewhere on: the archive is paginated (50 a page), and measured on this
+    // installation the two runs the number was counting sat at rows 35 and 121
+    // of 212, in a table whose columns never mention an incident. So the link
+    // carries the overview's own `incidents=1` gesture, and the page honours it.
+    contains(nachher.block, `/archive?repo=${repoId}&amp;incidents=1`,
+      'and links where its rows really are — filtered to exactly them')
+    isTrue(archiveFiltered.includes(j.runId), 'the filtered archive shows the run behind the number')
+    isFalse(archiveFiltered.includes(ARV),
+      'and only that one: an archived run with no open incident is not in it')
+    isTrue(archiveWhole.includes(ARV), 'while the whole archive still has both')
+    contains(archiveFiltered, 'Show the whole archive', 'with the way back out of the filter')
     isFalse(leer.includes('open in the archive'), 'and the line goes when nothing is open in the archive')
     // The folded rail is the same question in 46 pixels, and a folded sidebar
     // that says "nothing stuck" while the open one says otherwise is the two
