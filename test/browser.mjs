@@ -2354,7 +2354,7 @@ try {
       { what: 'the kept cleanup run to get its session', timeoutMs: 10_000 })
     sk.sessions.add(db.prepare('SELECT tmux_session FROM runs WHERE id=?').get(id).tmux_session)
     const prompt = db.prepare('SELECT prompt FROM runs WHERE id=?').get(id).prompt
-    contains(prompt, 'Diese Sessions bleiben auf jeden Fall erhalten', 'the keep line is present')
+    contains(prompt, 'These sessions are kept', 'the keep line is present')
     contains(prompt, db.prepare('SELECT tmux_session FROM runs WHERE id=?').get(CL_ERSTER).tmux_session,
       'naming the kept run\'s session')
     sauber(p)

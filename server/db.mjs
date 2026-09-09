@@ -54,9 +54,10 @@ CREATE TABLE IF NOT EXISTS agents (
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(repo_id, name)
 );
--- Favoriten: die SETUP-Hälfte einer Laufdefinition unter einem Namen (Coding Agent,
--- Provider, Modell, Effort, Extra-Skills, angehängte Flows). Bewusst OHNE Prompt,
--- Branch-Regel und Dauer — die gehören zur Aufgabe, nicht zur Einstellung.
+-- Favorites: the SETUP half of a run definition under one name (coding agent,
+-- provider, model, effort, extra skills, attached flows). Deliberately WITHOUT
+-- the prompt, the branch rule and the duration — those belong to the task,
+-- not to the setup.
 -- Deliberately without a CHECK on harness: see dropHarnessCheck() below —
 -- a CHECK rule would be a table rebuild for every new plugin, and since coding
 -- agents can be loaded from disk it could not be written at schema time at all.
@@ -82,7 +83,7 @@ CREATE TABLE IF NOT EXISTS runs (
   ended_at TEXT,
   status TEXT NOT NULL DEFAULT 'running'
     CHECK(status IN ('scheduled','deferred','running','waiting_help','done','failed','aborted')),
-  -- Definitions-Kopie (der Lauf zeigt später, womit er WIRKLICH gestartet ist)
+  -- Definition copy (the run later shows what it was REALLY started with)
   harness TEXT NOT NULL,
   model TEXT,
   prompt TEXT NOT NULL,
@@ -116,10 +117,10 @@ CREATE TABLE IF NOT EXISTS events (
   kind TEXT NOT NULL,
   payload TEXT
 );
--- Vorfälle (Rate-Limit, Provider-Ausfall, Auth …): EIN Datensatz je (Lauf, Typ), der
--- offen ist, gelöst wird und bei erneutem Auftreten WIEDER aufgeht — wie ein Autoalarm.
--- events ist dafür ungeeignet: ein Append-Only-Log kennt keinen Zustand.
--- run_id NULL = globaler Vorfall (Provider-Puls), gehört zu keinem Lauf.
+-- Incidents (rate limit, provider outage, auth …): ONE record per (run, type)
+-- that is open, gets resolved, and REOPENS when it recurs — like an auto-alarm.
+-- events is not suited for that: an append-only log knows no state.
+-- run_id NULL = a global incident (provider pulse), belongs to no run.
 CREATE TABLE IF NOT EXISTS incidents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,

@@ -7115,7 +7115,7 @@ try {
     delete process.env.CCHUB_VPN_PORT
     try {
       const out = cleanupPrompt({ targetGb: 3, keepSessions: ['sess-1'], settings: { prompt: 'ziel={target_gb} keep={keep_line} url={sessions_url} th={threshold_gb}', thresholdGb: 5 } })
-      equal(out, 'ziel=3 keep=Diese Sessions bleiben auf jeden Fall erhalten (auch wenn inaktiv) und dürfen NICHT beendet werden:\nsess-1 url=https://127.0.0.1:8790/sessions th=5', 'all placeholders filled')
+      equal(out, 'ziel=3 keep=These sessions are kept no matter what (even when inactive) and must NOT be ended:\nsess-1 url=https://127.0.0.1:8790/sessions th=5', 'all placeholders filled')
     } finally {
       if (vorher[0] !== undefined) process.env.FREILAUF_PUBLIC_URL = vorher[0]; else delete process.env.FREILAUF_PUBLIC_URL
       if (vorher[1] !== undefined) process.env.CCHUB_PUBLIC_URL = vorher[1]; else delete process.env.CCHUB_PUBLIC_URL
@@ -7123,7 +7123,7 @@ try {
       if (vorher[3] !== undefined) process.env.CCHUB_VPN_PORT = vorher[3]; else delete process.env.CCHUB_VPN_PORT
     }
     const noKeep = cleanupPrompt({ targetGb: 1, settings: { prompt: 'keep={keep_line}' } })
-    equal(noKeep, 'keep=Ohne Ausnahmen — was inaktiv ist, darf gehen, älteste zuerst.', 'no keep list = the default sentence')
+    equal(noKeep, 'keep=No exceptions — what is inactive may go, oldest first.', 'no keep list = the default sentence')
   })
 
   await check('keepSessionsForRuns resolves run ids to session names', () => {
