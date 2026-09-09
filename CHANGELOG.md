@@ -48,6 +48,24 @@ a day on which nothing was released.
   - Panels without controls behave exactly as before, and the folded rail still
     draws only values. The contract is [docs/panels.md](docs/panels.md).
 
+### Fixed
+
+- **The sidebar could claim the machine held nothing.** `tmux list-sessions`
+  reports "there is no server" and "I could not answer you" through the same
+  exit code, and the memory block spent the second one as the first: a tmux
+  that did not answer arrived as an empty list, was summed to **0 MB in 0
+  Sessions**, and was then cached for eight minutes — so one bad moment made
+  every page say for eight minutes that there was nothing to clean up, which
+  is the opposite of what that block exists to show. Measured on this
+  installation: six live sessions holding 4.6 GB, three sidebars in the same
+  minute saying `0 MB in 0 Sessions` and the next three `4,6 GB in 6 Sessions`.
+  A reading nobody could take is no longer taken: the previous one stays on
+  screen with its own measuring time in the tooltip, and where there is none
+  the block says nothing at all. A machine with no tmux server is a real answer
+  and still shows a zero. The Sessions page had the same gap in its headline
+  and its empty table — both now say that tmux did not answer instead of
+  counting to nought.
+
 ## 2026-09-08
 
 ### Fixed

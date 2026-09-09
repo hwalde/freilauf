@@ -6535,6 +6535,39 @@ try {
     se._sessionMemoryReset()
   })
 
+  await check('a tmux that gave no answer is never a machine holding nothing', async () => {
+    // `tmuxSessions()` answers `[]` for BOTH "there is no tmux server" and "I
+    // could not answer you", and summing the second one produces `0 MB in 0
+    // Sessions` — the one number this block must never invent, because it is
+    // exactly the number that says "no bill, nothing to clean up". Measured
+    // 2026-09-09: six live sessions holding 4.6 GB, and three sidebars rendered
+    // in the same minute said 0 MB in 0 Sessions while the next three said
+    // 4,6 GB in 6 Sessions.
+    const gut = { ok: true, sessions: [{ state: 'run_ended', sandbox: null, resources: { rssKb: 5000 } }] }
+    const messung = se.memoryReading(gut, null)
+    equal(messung.rssKb, 5000, 'an answer is the reading')
+
+    const keineAntwort = { ok: false, sessions: [] }
+    equal(se.memoryReading(keineAntwort, messung), messung,
+      'no answer leaves the previous reading standing, with its own measuring time')
+    equal(se.memoryReading(keineAntwort, null), null,
+      'and with no previous reading the panel says nothing at all — never a zero')
+
+    // A machine with no tmux SERVER is a real answer, and really is a zero.
+    const leer = se.memoryReading({ ok: true, sessions: [] }, messung)
+    equal(leer.rssKb, 0, 'no server is an answer')
+    equal(leer.sessions, 0, 'and it is the empty one')
+
+    // The second door into the same cache: the sessions page publishes what it
+    // measured, and must not publish a reading nobody could take.
+    se._sessionMemoryReset()
+    se.publishSessionMemory([{ state: 'run_ended', sandbox: null, resources: { rssKb: 7000 } }])
+    equal(se.publishSessionMemory([], { ok: false })?.rssKb, 7000,
+      'an unanswered page render leaves the sidebar’s last reading alone')
+    equal((await se.sessionMemory()).rssKb, 7000, 'so the sidebar keeps quoting it')
+    se._sessionMemoryReset()
+  })
+
   // ------------------------------------------------------------------
   group('Integration: finish gate, integrator, escalation (integrate.mjs)')
 

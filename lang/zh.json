@@ -372,6 +372,7 @@
   "sessions.end_selected": "结束所选（{n}）",
   "sessions.refresh": "重新加载",
   "sessions.summary": "会话数：{n} · 内存：{ram}",
+  "sessions.unreachable": "tmux 未响应 — 此列表并非机器的实际情况",
   "sessions.auto_hint": "已完成的会话会在 {hours} 小时后自动关闭。",
   "sessions.hidden_note": "当前有代理正在运行的会话数：{n}。它们默认保持隐藏，以免误点结束。",
   "sessions.none": "没有 tmux 会话",

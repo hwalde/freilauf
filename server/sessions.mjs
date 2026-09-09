@@ -575,13 +575,31 @@ async function containerResources(run) {
 }
 
 /**
+ * Every session with everything known about it, TOGETHER WITH the verdict on
+ * whether tmux answered at all — `{ ok, sessions }`, the same shape
+ * `tmuxSnapshot()` has one layer further down and for the same reason.
+ *
+ * `listSessions()` below drops the flag, which is right for a caller that
+ * renders a table: an empty table is the honest rendering of an unanswered
+ * question. It is NOT right for anything that SUMS the list — see
+ * `sessionMemory()`.
+ */
+export async function listSessionsSnapshot() {
+  const snap = await tmuxSnapshot()
+  if (!snap.ok || !snap.sessions.length) return { ok: snap.ok, sessions: [] }
+  return { ok: true, sessions: await describeSessions(snap.sessions) }
+}
+
+/**
  * Every session with everything known about it: the run behind it, the agent,
  * the repo and what the process tree costs. Oldest first — that is the order
  * one wants when cleaning up.
  */
 export async function listSessions() {
-  const sessions = await tmuxSessions()
-  if (!sessions.length) return []
+  return (await listSessionsSnapshot()).sessions
+}
+
+async function describeSessions(sessions) {
   const ps = await sh('ps', ['-eo', 'pid=,ppid=,rss=,pcpu='])
   const tree = parsePs(ps.ok ? ps.stdout : '')
   // One query instead of one per session: there are few runs with a session.
@@ -699,9 +717,43 @@ function memoryOf(sessions) {
  * three shell-outs, so throwing that reading away and letting the next sidebar
  * fragment pay for them again was waste on top of the contradiction.
  */
-export function publishSessionMemory(sessions) {
-  const value = memoryOf(sessions)
-  memCache = { at: Date.now(), value }
+export function publishSessionMemory(sessions, { ok = true } = {}) {
+  return memoryReading({ ok, sessions }, memCache.value, true)
+}
+
+/**
+ * What the panel may say after ONE attempt to measure — the whole rule, pure,
+ * so it can be tested without a tmux server.
+ *
+ * `tmuxSessions()` answers `[]` both for a machine that demonstrably holds no
+ * sessions and for a tmux that gave no answer at all (a fork that failed under
+ * memory pressure, a server too busy to reply, the 30 s timeout in `sh()`), and
+ * `memoryOf([])` turns the second one into `0 MB in 0 Sessions`. For a table
+ * that is harmless — an empty table shows nothing. For this block it is a
+ * confident false claim about the machine, and the eight-minute cache then
+ * repeats it on EVERY page for eight minutes.
+ *
+ * Measured 2026-09-09 on this installation: six live tmux sessions holding
+ * 4.6 GB, and three sidebars rendered in the same minute said `0 MB in 0
+ * Sessions` while the next three said `4,6 GB in 6 Sessions` — a reading of
+ * nothing had got into the cache and was being served until it expired. Nought
+ * is the one number this block must never invent: it is exactly the number that
+ * says "no bill, nothing to clean up", which is the opposite of what the block
+ * exists to show. Same family as `--no-optional-locks` after the subcommand
+ * making a dirty worktree read clean, and `Number('')` reading as a configured
+ * zero: the dangerous answers here do not error, they come back empty, and an
+ * empty answer reads as good news.
+ *
+ * So: an answer replaces the reading, no answer leaves the previous one
+ * standing (its own `measuredAtMs` is in the block's tooltip, so its age is
+ * never hidden), and where there is no previous one the panel says nothing at
+ * all — `memoryBlock()` renders `''` for a null. A machine with no tmux SERVER
+ * is a real answer and really is a zero.
+ */
+export function memoryReading(snapshot, previous, write = false) {
+  if (!snapshot?.ok) return previous ?? null
+  const value = memoryOf(snapshot.sessions)
+  if (write) memCache = { at: Date.now(), value }
   return value
 }
 
@@ -710,8 +762,11 @@ export async function sessionMemory({ force = false } = {}) {
   if (!force && cached && Date.now() - memCache.at < MEM_CACHE_MS) return cached
   if (memInflight) return !force && cached ? cached : memInflight
   const task = (async () => {
-    const value = memoryOf(await listSessions())
-    memCache = { at: Date.now(), value }
+    const value = memoryReading(await listSessionsSnapshot(), memCache.value)
+    // Only a real reading may become the cached one — an unanswered tmux must
+    // not start an eight-minute window of "the machine holds nothing", and it
+    // must not push the previous reading's age forward either.
+    if (value && value !== memCache.value) memCache = { at: Date.now(), value }
     return value
   })()
   memInflight = task
