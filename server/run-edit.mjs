@@ -332,7 +332,11 @@ export async function editRun(runId, {
     const warFallback = altTitle && altTitle === fallbackTitle(run.prompt)
     if (warFallback) {
       const neu = fallbackTitle(String(prompt))
-      db.prepare('UPDATE runs SET title=? WHERE id=? AND title=?').run(neu, runId, altTitle)
+      // The attempt budget goes back to zero with it: `title_attempts` counts
+      // the asking about ONE question, and a new prompt is a new question — a
+      // run whose first prompt exhausted the budget must not be barred from a
+      // title for its second.
+      db.prepare('UPDATE runs SET title=?, title_attempts=0 WHERE id=? AND title=?').run(neu, runId, altTitle)
       // Regenerate in the background; on failure the new fallback stays, exactly
       // as at the original start.
       applyGeneratedTitle(runId, String(prompt)).catch(() => {})

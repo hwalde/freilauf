@@ -696,10 +696,46 @@ fraction of a cent). It is **not OpenRouter-only any more**: any plugin
 declaring `llm` can answer, including a coding agent on a subscription that is
 already being paid for.
 
+**Fail-soft is not the same as fail-silent, and for a while it was.** That one
+call on the launch path was the only one there ever was: `.catch(() => {})`
+swallowed everything, no event was written, and nothing asked again — so a
+timeout under load, a 429 or a hub restarted in those two seconds cost the run
+its name for the rest of its life, with no trace anywhere of why. Measured
+2026-09-09 on this installation: runs `ecc518c4` and `7c31c0c1` kept their
+prompt's first line while `a61ad15a`, started between them, got a title — same
+process, same key, same model, and all three prompts titled correctly when the
+same call was made by hand afterwards. Everything above read as healthy, which
+is the shape this file keeps paying for.
+
+Three things fix it and none of them changes the fail-soft rule:
+
+- **`askTitle()` keeps the reason** where `generateTitle()` answers a string or
+  `null`. "Switched off" and "the vendor timed out" arrive as the same `null`,
+  and retrying the first for ever would be as wrong as never retrying the
+  second.
+- **A failure is written down** — `title_failed {reason, attempt, of, error}`,
+  the stage and the vendor's own sentence, at most three per run. It costs an
+  event and it is the difference between "the title never came" and an answer.
+- **`retryMissingTitles()` asks again**, in the watcher pass, not awaited (a
+  title holds a pass up no more than it holds a start up). `runs.title_attempts`
+  is the budget, incremented BEFORE the question so a hub that dies mid-call
+  spends one attempt rather than none — the instinct `resume_attempts` is
+  written with. `titleRetryDue()` (pure) is the rule: still exactly
+  `fallbackTitle(prompt)` (the same guard the UPDATE uses, so a rename by hand
+  and a title that did arrive are both out by construction), `title_attempts`
+  between 1 and `TITLE_ATTEMPTS_MAX` (3, `FREILAUF_TITLE_ATTEMPTS`), no agent,
+  not archived. **`> 0` is load-bearing**: a run nothing ever asked about — an
+  agent run, a typed title, a run made while the LLM was off — is not a failure
+  to repair, and a pass that retitled those would be rewriting history it was
+  never part of. The SQL adds the window (an hour) and a cap of three per pass;
+  it only ever NARROWS, and the pure rule decides.
+
 Every run can be **renamed inline** in the overview and on its detail page
 (`POST /api/runs/<id>/title`, pencil next to the title). That touches only the
 run: the agent keeps its name, and its next run is called by it again. An
-emptied title falls back to the agent's name.
+emptied title falls back to the agent's name. A prompt edit resets
+`title_attempts` with the fallback it rewrites: the counter counts the asking
+about ONE question, and a new prompt is a new question.
 
 ### A single run may also start later
 
@@ -943,6 +979,30 @@ Three consequences, each of them the point rather than a side effect:
   seconds. One of the few announcements not carried by an event (like the
   generated title and archiving): "the row is there" is not a transition worth
   recording.
+
+- **…and the RUN PAGE has to know the start is still in flight**, which is the
+  half that was missing for as long as `detached` existed. The toast links
+  straight to `/runs/<id>`, so following it lands on a page rendered before
+  `runs.tmux_session` exists — and the terminal box said *"No tmux session
+  anymore"*, over a run that was starting perfectly well. It said so **for
+  good**: `#term` is deliberately never part of the run-detail fragment
+  (swapping it would tear the xterm instance off the DOM and leak a tmux
+  client), so no live event could ever correct it, and the operator's only way
+  out was a reload nobody had a reason to try. `sessionPending()`
+  (run-state.mjs, pure) is the third answer — a `running`/`waiting_help` run
+  with no session and none closed, which is a launch or a resume in flight and
+  never a `scheduled`/`deferred` run nobody is fetching one for. The page then
+  renders `data-session="pending"`, says so in words, and hub.js waits for the
+  session and **reloads** once the hub names one: a reload rather than a swap
+  because the terminal, its buttons, the send form and the kill form all come
+  out of that one fact and there is no xterm instance to tear off yet — the
+  same reason `freilaufKill()` reloads. It cannot loop, because the reload only
+  happens once the run really HAS a session, and a start that fails ends the
+  run, which is not pending. Deliberately a poll (1.5 s, three minutes,
+  `FREILAUF_TERM_POLL_MS`) and not the live channel, for the reason the toast
+  gives for the same choice: a fresh page has no `Last-Event-ID`, so the
+  `tmux_started` event fired in the gap between rendering and connecting is
+  simply missed — and that gap IS this race.
 
 What deliberately did **not** become detached: every other caller of
 `startRun()`. The flow step that waits for a run's result, the single-run form
