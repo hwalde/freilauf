@@ -90,6 +90,30 @@ a day on which nothing was released.
   in the meantime (a push from the project, another browser) marks the field
   and names the new value, so nobody sends over a change they never saw.
 
+- **A run that was still starting said its terminal was gone.** Freilauf
+  launches a run in the hub, not in the browser: Quick Run answers its dialog
+  the moment the quota gate has spoken and hands the rest — `git fetch`, the
+  worktree checkout, starting the coding agent, the tmux session — back to the
+  hub. Following the toast's link inside those seconds landed on a run page
+  whose terminal box read *"No tmux session anymore"* over a run that was
+  starting perfectly well — and it said so for good, because the terminal is
+  deliberately never replaced by a live update. The only way out was a reload
+  nobody had a reason to try. The page now says **"the session is being set
+  up"**, waits for it, and shows the terminal by itself the moment the agent is
+  there. A session that really is gone reads exactly as it did.
+
+- **A run's generated title was asked for once, and a failure was final and
+  invisible.** The short name a small model derives from the prompt was a single
+  call on the launch path: any hiccup — a timeout, a rate limit, the hub
+  restarted in those two seconds — and the run kept its prompt's first line for
+  the rest of its life, with nothing anywhere saying why. Measured on one
+  installation: two runs started six minutes apart, one titled and one not, same
+  model and same key, and the model named both prompts correctly when asked by
+  hand afterwards. Now a failed attempt is **written into the run's own history**
+  (`title_failed`, with the vendor's own sentence), and the hub **asks again** on
+  its next pass — up to three times per run, within the first hour, and never
+  for a run somebody has renamed or one that already has a title.
+
 - **An alarm you were being paged about could be found nowhere in the hub.**
   Archiving a run deliberately takes its incidents out of the status sidebar's
   count — that count is a link into the overview, and no archived run is in an

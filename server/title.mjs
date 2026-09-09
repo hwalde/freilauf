@@ -16,7 +16,8 @@
 // The transport moved into `server/llm` (`llmJson`): which source answers is
 // `llm_title_source`, and an installation that never sets it reads
 // `provider:openrouter` — exactly the call this file used to make itself.
-import db, { getSetting, mruList, mruRemember, announceRun } from './db.mjs'
+import db, { getSetting, mruList, mruRemember, announceRun, addEvent } from './db.mjs'
+import { env } from './env.mjs'
 import { llmJson } from './llm/index.mjs'
 import { chainUsable, jobFallbacks, jobRouting, jobSource } from './llm/job.mjs'
 
@@ -126,9 +127,26 @@ Answer exclusively in the given JSON schema.`
  * stays a fraction of a cent either way.
  */
 export async function generateTitle(prompt, { timeoutMs = 30_000 } = {}) {
-  if (!titleLlmActive()) return null
+  const r = await askTitle(prompt, { timeoutMs })
+  return r.ok ? r.title : null
+}
+
+/**
+ * The same question, with the REASON kept.
+ *
+ * `generateTitle()` answers a string or `null`, which is exactly right for its
+ * callers and exactly wrong for the one that has to decide whether to ask
+ * again: "switched off" and "the vendor timed out" arrive as the same `null`,
+ * and retrying the first for ever would be as wrong as never retrying the
+ * second. So the reason stays here — `off` (nothing to retry), `empty` (no
+ * prompt, likewise), or the failing `stage` llmJson names.
+ *
+ * @returns {Promise<{ok:true, title:string} | {ok:false, reason:string, error?:string}>}
+ */
+export async function askTitle(prompt, { timeoutMs = 30_000 } = {}) {
+  if (!titleLlmActive()) return { ok: false, reason: 'off' }
   const text = String(prompt ?? '').trim()
-  if (!text) return null
+  if (!text) return { ok: false, reason: 'empty' }
   const model = titleModel()
 
   const r = await llmJson({
@@ -148,28 +166,144 @@ export async function generateTitle(prompt, { timeoutMs = 30_000 } = {}) {
   // Fail-soft, unchanged: every reason to have no title — off, no credential,
   // a broken vendor, an answer that is not a title — is the same reason to keep
   // the fallback, and none of them is worth a thrown error on the launch path.
-  if (!r.ok) return null
+  if (!r.ok) return { ok: false, reason: r.stage ?? 'transport', error: String(r.error ?? '') }
   const title = shorten(String(r.data?.title ?? '').replace(/^["'\s]+|["'.\s]+$/g, ''))
-  return title.length >= 3 ? title : null
+  // An answer that arrived and is not a title is a failure like any other: the
+  // provider was up, so it is worth asking again, and it must not be filed as
+  // "the feature is switched off".
+  if (title.length < 3) return { ok: false, reason: 'no_title', error: String(r.data?.title ?? '') }
+  return { ok: true, title }
 }
+
+/**
+ * How often the hub asks for one run's title before it gives up. Three, which
+ * is roughly a minute and a half of watcher passes — long enough to sit out a
+ * rate limit or a vendor hiccup, short enough that a provider which is really
+ * down costs a handful of calls per run and not one every thirty seconds for
+ * the life of the run.
+ */
+export const TITLE_ATTEMPTS_MAX = Math.max(1, Number(env('TITLE_ATTEMPTS') ?? 3) || 3)
 
 /**
  * Generate the title in the background and write it — but only over the
  * fallback the run started with. If the operator renamed the run in the
  * meantime (inline editing in the overview), their name wins: a model must
  * never overwrite a decision a human already made.
+ *
+ * Two things beyond that, and both exist because this used to be a single
+ * fire-and-forget call whose failure was invisible:
+ *
+ *  - **the attempt is counted, before the question is asked.** `title_attempts`
+ *    is what `retryMissingTitles()` reads, and counting it first is what makes
+ *    a hub restarted mid-question spend one attempt rather than none (a crash
+ *    on this path would otherwise be retried for ever) — the same instinct
+ *    `resume_attempts` is written with.
+ *  - **a failure is written down.** `title_failed` names the stage and the
+ *    vendor's own sentence. It costs at most three events on a run and it is
+ *    the difference between "the title never came" and an answer to why: a
+ *    silent failure that every layer above reads as healthy is the shape this
+ *    project keeps paying for.
+ *
+ * A run whose title generation is switched off or has no prompt is neither
+ * counted nor recorded — nothing was asked, and there is nothing to retry.
  */
 export async function applyGeneratedTitle(runId, prompt) {
-  const title = await generateTitle(prompt)
-  if (!title) return null
+  if (!titleLlmActive() || !String(prompt ?? '').trim()) return null
+  db.prepare('UPDATE runs SET title_attempts = title_attempts + 1 WHERE id=?').run(runId)
+  const attempt = db.prepare('SELECT title_attempts FROM runs WHERE id=?').get(runId)?.title_attempts ?? 0
+  const answer = await askTitle(prompt)
+  if (!answer.ok) {
+    // 'off' and 'empty' cannot happen here (both are refused above), so
+    // whatever arrives is a real failure and belongs in the run's history.
+    addEvent(runId, 'title_failed', {
+      reason: answer.reason, attempt, of: TITLE_ATTEMPTS_MAX,
+      error: String(answer.error ?? '').slice(0, 300),
+    })
+    return null
+  }
   const before = fallbackTitle(prompt)
   const r = db.prepare(`UPDATE runs SET title=? WHERE id=? AND (title IS NULL OR title='' OR title=?)`)
-    .run(title, runId, before)
+    .run(answer.title, runId, before)
   // A title change writes no event, so the live channel has to be told here.
   // This is the case the whole live channel started from: the title arrives
   // seconds after the run does, and the page is already open by then.
   if (r.changes) announceRun(runId, 'title')
-  return r.changes ? title : null
+  return r.changes ? answer.title : null
+}
+
+/** How far back this repair reaches, and how many titles one pass may ask for. */
+export const RETRY_WINDOW_MIN = 60
+const RETRY_PER_PASS = 3
+
+/**
+ * Does this run still want a title? The rule, pure, so the SQL below only ever
+ * NARROWS the candidates and never decides.
+ *
+ * Four refusals, and each of them is a way asking again would be wrong:
+ *
+ *  - **the title is not the fallback any more.** Either the model already
+ *    answered or a human renamed the run — the same guard
+ *    `applyGeneratedTitle()`'s UPDATE uses, so the two cannot come to disagree
+ *    about what "still nameless" means.
+ *  - **nothing was ever asked** (`title_attempts` 0). An agent run is called by
+ *    its agent, a run started with a typed title keeps it, and a run made while
+ *    the title LLM was off was a deliberate state — none of those is a failure
+ *    to repair, and retitling them would be this pass rewriting history it was
+ *    never part of.
+ *  - **the budget is spent.** A provider that is really down must cost a
+ *    handful of calls per run, not one every thirty seconds for its whole life.
+ *  - **an archived run.** It was put away; its name is what the operator last
+ *    saw it under.
+ */
+export function titleRetryDue(run, max = TITLE_ATTEMPTS_MAX) {
+  if (!run || run.agent_id || run.archived_at) return false
+  const attempts = Number(run.title_attempts ?? 0)
+  if (!(attempts > 0 && attempts < max)) return false
+  const title = String(run.title ?? '')
+  return !!title && title === fallbackTitle(run.prompt)
+}
+
+/**
+ * Ask again for the titles that never arrived — one watcher pass, no state of
+ * its own.
+ *
+ * The generated title was a single call on the launch path, and everything
+ * about it was fail-soft except the one part that mattered: a failure was
+ * final. A timeout under load, a rate limit, a hub restarted in those two
+ * seconds — and the run kept its prompt's first line for good, with nothing
+ * anywhere saying why. Measured on this installation 2026-09-09: two single
+ * runs started six minutes apart, one titled and one not, same process, same
+ * key, same model, and the model answered both of those prompts correctly when
+ * asked by hand afterwards.
+ *
+ * `titleRetryDue()` above is the rule; the SQL only NARROWS — the window is
+ * what keeps this a repair of the recent past rather than a mass-retitling of
+ * the archive, and the per-pass cap keeps a broken provider from costing three
+ * calls a second.
+ *
+ * Fire-and-forget per run: a title holds a watcher pass up no more than it
+ * holds a start up. The attempt counter is written before the question, so the
+ * next pass cannot pick up a run this one is still asking about.
+ */
+export function retryMissingTitles() {
+  if (!titleLlmActive()) return 0
+  // The window is what keeps this a repair of the recent past: without it the
+  // first pass after a deploy would walk every untitled run in the archive.
+  const rows = db.prepare(`
+    SELECT id, prompt, title, title_attempts, agent_id, archived_at FROM runs
+     WHERE agent_id IS NULL AND archived_at IS NULL
+       AND title_attempts > 0 AND title_attempts < ?
+       AND started_at > datetime('now', ?)
+     ORDER BY started_at DESC LIMIT 20
+  `).all(TITLE_ATTEMPTS_MAX, `-${RETRY_WINDOW_MIN} minutes`)
+  let started = 0
+  for (const row of rows) {
+    if (started >= RETRY_PER_PASS) break
+    if (!titleRetryDue(row)) continue
+    started++
+    applyGeneratedTitle(row.id, row.prompt).catch(() => {})
+  }
+  return started
 }
 
 /**

@@ -348,6 +348,16 @@ addColumn('runs', 'worktree_kind', `TEXT NOT NULL DEFAULT 'worktree'`)
 // The per-run bearer for the report socket (§7.6). Written at creation for EVERY
 // run, sandboxed or not — the socket and the token are worth having either way.
 addColumn('runs', 'report_token', 'TEXT')
+// How often the hub has ASKED a model for this run's title. The generated title
+// used to be one fire-and-forget call at the start whose failure was written
+// down nowhere and never tried again — so a timeout, a 429 or a hub restarted
+// in those seconds cost the run its name for good, and left no trace of why
+// (measured 2026-09-09: runs ecc518c4 and 7c31c0c1 kept their prompt's first
+// line while a run started between them got a title, same process, same key).
+// The counter is what lets the watcher try again and what stops it trying for
+// ever; it is incremented BEFORE the call, so a hub that dies mid-question
+// cannot spend the budget twice on one attempt.
+addColumn('runs', 'title_attempts', 'INTEGER NOT NULL DEFAULT 0')
 // …and it is issued by the INSERT itself, not by a caller.
 //
 // WHY a trigger rather than a line in `createRun()`: the INSERT is the one place

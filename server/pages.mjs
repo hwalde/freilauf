@@ -24,7 +24,7 @@ import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } fro
 import { extrasModelsMru, rememberExtrasModel, DEFAULT_EXTRAS_MODEL } from './extras-suggest.mjs'
 import { runEditAllowed } from './run-edit.mjs'
 import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
-  settledAnomalies, archivable, resumable, agentWaiting, runtimeClock } from './run-state.mjs'
+  settledAnomalies, archivable, resumable, agentWaiting, runtimeClock, sessionPending } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
@@ -1574,6 +1574,14 @@ export async function pageRun(req, res, url, id) {
   // Unknown (null) counts as alive: a tmux that did not answer must not silently
   // take away write access — the handshake is fail-closed on its own.
   const live = sessionOpen && (await paneAlive(run.tmux_session)) !== false
+  // …and the third state, which the page could not say before: there is no
+  // session YET. A detached start (Quick Run) answers its dialog seconds before
+  // `launchRun()` has a session, so a page opened in that window rendered "no
+  // tmux session anymore" over a run that was starting. `#term` is never part
+  // of a fragment, so nothing could ever correct it — the client waits for the
+  // session itself and reloads once it stands (public/hub.js). See
+  // `sessionPending()` for why `scheduled`/`deferred` are deliberately not it.
+  const pending = !sessionOpen && sessionPending(run)
   // Is this run itself still going? That decides the BUTTON, not the typing:
   // ending a run that is over would rewrite its 'done' to 'aborted'.
   const inFlight = ['running', 'waiting_help'].includes(run.status)
@@ -1598,7 +1606,7 @@ export async function pageRun(req, res, url, id) {
       // done: show as history, not as an open question
       : `<p class="dim"><b>${e(t('run.help_answered'))}:</b> ${e(run.help_text)}${run.help_answer ? ` → <i>${e(run.help_answer)}</i>` : ''}</p>`
     : ''}
-  <details class="run-term" ${live ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(terminalState(live, sessionOpen, arbeitet))}${
+  <details class="run-term" ${live || pending ? 'open' : ''}><summary>${e(t('run.terminal'))} ${e(terminalState(live, sessionOpen, arbeitet, pending))}${
     // The way in is on the toggle line, because that is the line one is on when
     // one decides the screen is too small. Only where there IS a screen: a run
     // whose session is gone shows a sentence, and a sentence in full screen is
@@ -1622,7 +1630,7 @@ export async function pageRun(req, res, url, id) {
     sessionOpen ? `<button type="button" id="term-mouse" class="icon-btn term-mouse-btn" aria-pressed="true" title="${e(t('run.terminal_mouse_agent'))}" aria-label="${e(t('run.terminal_mouse_agent'))}" data-title-select="${e(t('run.terminal_mouse_select'))}">🖱</button>` : ''}</summary>
     <div id="term-wrap">
       ${sessionOpen ? `<button type="button" id="term-full-exit" class="icon-btn term-exit" title="${e(t('run.terminal_fullscreen_exit'))}" aria-label="${e(t('run.terminal_fullscreen_exit'))}">✕</button>` : ''}
-      <div id="term" data-session="${sessionOpen ? '1' : '0'}" data-live="${live ? '1' : '0'}"></div>
+      <div id="term" data-session="${sessionOpen ? '1' : pending ? 'pending' : '0'}" data-live="${live ? '1' : '0'}"></div>
     </div>
     ${notifySwitch(run)}
     ${live && !arbeitet ? `<p class="dim">${e(t('run.session_after_hint'))}</p>` : ''}
@@ -1696,8 +1704,13 @@ export function notifySwitch(run) {
  * process has exited would be a lie — the scrollback is there and can be
  * attached to, only nobody answers any more.
  */
-export function terminalState(live, sessionOpen, inFlight) {
+export function terminalState(live, sessionOpen, inFlight, pending = false) {
   if (live) return t(inFlight ? 'run.terminal_live' : 'run.terminal_after')
+  // Before the fourth answer existed, a run whose session was still being set
+  // up got `run.terminal_closed` — "(ended, scrollback)" over a start that was
+  // seconds old. Same word for two opposite facts is how the page came to
+  // contradict the row beside it.
+  if (pending) return t('run.terminal_starting')
   return t(sessionOpen ? 'run.terminal_dead' : 'run.terminal_closed')
 }
 

@@ -2351,6 +2351,77 @@
     termBox.classList.add('dim')
     return
   }
+  // …but "no session" and "no session YET" are two different facts, and the
+  // second one used to be rendered as the first. A run is launched in the HUB,
+  // not in the browser: Quick Run answers its dialog as soon as the budget gate
+  // has spoken and hands the launch — `git fetch`, the worktree checkout,
+  // fl-start, tmux — back to the hub. Following the toast's link inside those
+  // seconds landed on a page that said the session was gone, and said it for
+  // good: #term is deliberately never part of a fragment, so no live event can
+  // put a terminal there afterwards. The operator's only way out was a reload
+  // they had to think of themselves.
+  //
+  // So the page waits for its own session and reloads once the hub has one.
+  // A RELOAD and not a swap, for the same reason `freilaufKill()` reloads: the
+  // terminal, its buttons, the send form and the kill form are all rendered
+  // server-side from that one fact, and there is no xterm instance to tear off
+  // yet — nothing is being thrown away here.
+  //
+  // It cannot loop: `sessionPending()` (server/run-state.mjs) is only ever true
+  // for a `running`/`waiting_help` run that has no session, and the reload only
+  // happens once the hub NAMES one. A start that fails ends the run, the answer
+  // stops being pending, and the wait gives up with the ordinary sentence.
+  if (termBox.dataset.session === 'pending') {
+    const spinner = document.createElement('span')
+    spinner.className = 'spinner'
+    spinner.setAttribute('aria-hidden', 'true')
+    termBox.classList.add('dim')
+    termBox.append(spinner, ' ' + T('js.session_starting',
+      'The session is being set up — the terminal appears as soon as the agent is running.'))
+    // Every 1.5 s for at most three minutes. Deliberately a poll and not the
+    // live channel, and for the reason the Quick-Run toast gives for the same
+    // choice: a fresh page has no Last-Event-ID, so the `tmux_started` event
+    // fired in the gap between rendering and connecting is simply missed — and
+    // that gap IS this race. It costs a handful of requests, and only while a
+    // start is in flight.
+    const TICK_MS = Math.max(100, Number(window.FREILAUF_TERM_POLL_MS) || 1500)
+    const deadline = Date.now() + Math.max(TICK_MS, Number(window.FREILAUF_TERM_WAIT_MS) || 180000)
+    const gaveUp = () => {
+      termBox.textContent = T('js.no_session', 'No tmux session anymore — the history is in the log below.')
+    }
+    // Not while somebody is typing: a reload throws a half-written rename or
+    // message away. The wait simply continues, so it lands the moment the field
+    // is left — the same rule the run-detail fragment follows for #run-edit.
+    const typing = () => {
+      const a = document.activeElement
+      return !!a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable)
+    }
+    // A start is seconds, so the first half-minute is asked densely and
+    // everything after it is a long shot that must not cost a request every
+    // second and a half for three minutes.
+    let ticks = 0
+    const nextMs = () => (ticks++ < 20 ? TICK_MS : TICK_MS * 4)
+    let ready = false
+    const ask = async () => {
+      if (ready) {
+        if (!typing()) return void location.reload()
+        return void setTimeout(ask, TICK_MS)
+      }
+      let run = null
+      try {
+        const r = await fetch('/api/runs/' + runMatch[1], { headers: { accept: 'application/json' } })
+        if (r.ok) run = (await r.json()).run
+      } catch (err) { /* a blip is not an answer — ask again below */ }
+      if (run && run.tmux_session && !run.tmux_closed_at) { ready = true; return void ask() }
+      // The run ended before it ever had a session (a launch that failed):
+      // nothing is coming, so stop asking and say what is true now.
+      if (run && ['done', 'failed', 'aborted'].includes(run.status)) return void gaveUp()
+      if (Date.now() >= deadline) return void gaveUp()
+      setTimeout(ask, nextMs())
+    }
+    setTimeout(ask, nextMs())
+    return
+  }
   // data-live comes from pages.mjs and means the same as there: a standing tmux
   // session with a live process in it — NOT "the run is still going". A claude,
   // opencode or cursor that has reported 'done' is still sitting in its TUI,

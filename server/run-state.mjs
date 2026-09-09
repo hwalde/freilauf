@@ -257,6 +257,38 @@ export function resumable(run, worktreeThere) {
 }
 
 /**
+ * "There is no session" and "there is no session YET" are two different facts,
+ * and until this existed the detail page could only say the first one.
+ *
+ * A run is launched in the hub, not in the browser: a Quick Run answers its
+ * dialog the moment the budget gate has spoken and hands `launchRun()` back to
+ * the hub (`detached` in scheduler.mjs), and that stretch is `git fetch`, a
+ * worktree checkout — measured at 4.1 s for a repository of 16 000 files —
+ * `fl-start` and the tmux session. An operator who follows the toast's link
+ * inside those seconds lands on a page rendered before `runs.tmux_session`
+ * exists, and the terminal box said "no tmux session anymore" over a run that
+ * was starting perfectly well.
+ *
+ * Worse, it said so for good: `#term` is deliberately never part of the
+ * run-detail fragment (swapping it would tear the xterm instance off the DOM
+ * and leak a tmux client), so no live event can ever put the terminal there.
+ * The page was right at the moment it was rendered and wrong a second later,
+ * with no way back but a reload the operator had to think of themselves.
+ *
+ * Pending means: the hub is on its way to a session for this run — the launch
+ * is in flight, or a resume is (`resume_pending`, whose row looks exactly the
+ * same). Deliberately only `running`/`waiting_help`: a `scheduled` or
+ * `deferred` run has no session either, but nobody is fetching one for it right
+ * now, and a page that says "starting…" about a run planned for tomorrow would
+ * be the same kind of lie one layer out. A finished run can never be pending,
+ * which is what keeps the client's wait from becoming a loop.
+ */
+export function sessionPending(run) {
+  return !!run && !run.tmux_session && !run.tmux_closed_at
+    && ['running', 'waiting_help'].includes(run.status)
+}
+
+/**
  * The anomalies that are statements about a run IN FLIGHT — "nothing is
  * happening", "this is taking longer than planned", "its session vanished".
  *
