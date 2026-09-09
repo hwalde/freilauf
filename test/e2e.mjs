@@ -4618,6 +4618,27 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
     contains(overview, 'id="cleanup-dialog"', 'the modal is on every page')
     isFalse(overview.includes('name="keep"'), 'but the keep field only on the Sessions page')
   })
+  await check('GET /api/sessions answers with ONE reading, not a list and a separate total', async () => {
+    // The route listed the sessions and then asked sessionMemory() for a second,
+    // unrelated measurement, so one response carried two answers to one
+    // question. Measured 2026-09-09 on the production hub while another agent's
+    // test suite was starting and killing sessions: `sessions.length` 14 next to
+    // `memory.sessions` 7, with nothing to tell a consumer which the machine was
+    // holding. Same rule the sessions page already follows — a caller that has
+    // just measured publishes its reading instead of summing privately.
+    const sitzung = (await sh('tmux', ['list-sessions', '-F', '#{session_name}'])).stdout.trim()
+    if (!sitzung) return skipped('/api/sessions one reading', 'no tmux server in this environment')
+    const j = await (await fetchPath('/api/sessions')).json()
+    isTrue(Array.isArray(j.sessions) && !!j.memory, 'a list and a memory block')
+    equal(j.memory.sessions, j.sessions.length,
+      `the block counts exactly the list beside it (${j.memory.sessions} vs ${j.sessions.length})`)
+    equal(j.memory.running, j.sessions.filter(s => s.state === 'agent_running').length,
+      'and the working ones are the working ones of that same list')
+    // …and the sidebar rendered next quotes it rather than paying for three
+    // more subprocesses — which is the other half of publishing.
+    const leiste = await (await fetchPath('/api/fragments/sidebar')).text()
+    contains(leiste, `in ${j.memory.sessions} sessions`, 'the sidebar quotes the reading the API just published')
+  })
   await check('the cleanup agent starts through the ordinary run path', async () => {
     const r = await postForm('/api/cleanup/start', { target_gb: '2', keep: '', source: 'sessions' })
     const j = await r.json()
