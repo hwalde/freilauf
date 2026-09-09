@@ -60,6 +60,13 @@ a day on which nothing was released.
 
 ### Changed
 
+- **The default tmux-cleanup prompt is in English, like the rest of the hub.**
+  The template behind the cleanup agent (Settings → tmux cleanup) and its two
+  keep-list sentences were still German, so a fresh cleanup run instructed its
+  agent — and reported back to the operator — in German while every other run
+  speaks English. The default is English now; a cleanup prompt you had already
+  edited is stored and stays exactly as you wrote it.
+
 - **Panel controls are a great deal smaller.** A control used to be three lines
   in the 240px sidebar — caption, field across the whole column, a hint
   underneath it in permanent type — so the four controls of the throttle above

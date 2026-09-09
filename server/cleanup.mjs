@@ -31,13 +31,13 @@ import { env } from './env.mjs'
  * numbers the AGENT measures and must write into its report.
  */
 export const CLEANUP_PROMPT_DEFAULT = [
-'Beende tmux-Sessions, um Speicher freizugeben. Ziel: Der von ALLEN tmux-Sessions belegte Speicher soll auf höchstens {target_gb} GB gesenkt werden.',
+'End tmux sessions to free memory. Goal: the memory held by ALL tmux sessions is to be reduced to at most {target_gb} GB.',
 '',
 '{keep_line}',
 '',
-'## Aktivitätsalter, nicht Erstellungsalter — und das richtige tmux-Feld',
+'## Activity age, not creation age — and the right tmux field',
 '',
-'Maßgeblich ist, wann in der Session zuletzt etwas passiert ist, NICHT wann sie angelegt wurde. `#{session_activity}` ist dafür NICHT das richtige Feld — es wird von Pane-Ausgabe praktisch nicht bewegt, sondern nur von einem Client-Attach. Richtig ist `#{window_activity}`, der Zeitpunkt der letzten Pane-Ausgabe (bei mehreren Fenstern das jüngste):',
+'What counts is when something last happened in the session, NOT when it was created. `#{session_activity}` is NOT the right field for that — pane output barely moves it, only a client attach does. The right field is `#{window_activity}`, the time of the last pane output (the newest window when there are several):',
 '',
 '```bash',
 'now=$(date +%s)',
@@ -47,45 +47,45 @@ export const CLEANUP_PROMPT_DEFAULT = [
 "  | awk -F'|' -v now=\"$now\" '{printf \"act_h=%7.2f  %s\\n\", (now-$1)/3600, $2}'",
 '```',
 '',
-'## Speicher messen',
+'## Measuring memory',
 '',
-'Der Speicher einer Session ist die Summe des RSS ihres ganzen Prozessbaums (Pane-Shell + Agent + alles, was er gestartet hat) — die Pane-Shell allein unterschätzt ihn um eine Größenordnung. Aktuellen Gesamtstand ermitteln, bevor irgendetwas beendet wird (Summe über alle Sessions).',
+'A session\'s memory is the sum of the RSS of its whole process tree (pane shell + agent + everything it started) — the pane shell alone underestimates it by an order of magnitude. Determine the current total BEFORE ending anything (the sum over all sessions).',
 '',
-'## Löschreihenfolge: nur das Inaktivste und Älteste',
+'## Deletion order: only the most inactive and oldest',
 '',
-'Sortiere nach Aktivitätsalter und beginne mit der am längsten inaktiven Session. Beende in dieser Reihenfolge Sessions, bis der Gesamtspeicher unter {target_gb} GB liegt. Sind die inaktiven Sessions allein nicht genug, fahre mit dem nächstälteren fort — auch jüngere, falls nötig. Liegt der Gesamtspeicher bereits unter {target_gb} GB, beende nichts.',
+'Sort by activity age and start with the longest-inactive session. End sessions in that order until total memory is below {target_gb} GB. If the inactive sessions alone are not enough, continue with the next oldest — younger ones too if necessary. If total memory is already below {target_gb} GB, end nothing.',
 '',
-'## Was NICHT angefasst wird',
+'## What must NOT be touched',
 '',
-'- **Laufende Runs.** Vorher abfragen und ausnehmen:',
+'- **Running runs.** Query them first and except them:',
 '```bash',
 'sqlite3 "{db}" "SELECT tmux_session FROM runs WHERE status IN (\'running\',\'waiting_help\') AND tmux_session IS NOT NULL;"',
 '```',
-'Die eigene Session dieses Runs steht da mit drin und ist damit geschützt.',
-'- **Laufende e2e-Suiten.** Sessions mit `fl-e2e-`/`cc-e2e-`, frisch entstandene `fl-einzel-…`/`cc-einzel-…` im Minutenbereich und `fl-skill-traeger-…`/`cc-skill-traeger-…`.',
-'- **Die Runs selbst.** Gelöscht wird ausschließlich die tmux-Session. Keine Zeile in `runs`, kein Verzeichnis unter `~/agents/runs`, kein Worktree.',
-'- **Commits.** Du machst in diesem Arbeitsverzeichnis KEINE Commits und änderst keine Dateien — es ist nur eine leere Hülle.',
+'This run\'s own session is in that list and is therefore protected.',
+'- **Running e2e suites.** Sessions with `fl-e2e-`/`cc-e2e-`, freshly created `fl-einzel-…`/`cc-einzel-…` within minutes, and `fl-skill-traeger-…`/`cc-skill-traeger-…`.',
+'- **The runs themselves.** Only the tmux session is deleted. No row in `runs`, no directory under `~/agents/runs`, no worktree.',
+'- **Commits.** Make NO commits in this working directory and change no files — it is only an empty shell.',
 '',
-'Gelöscht wird mit exaktem Namensmatch: `tmux kill-session -t "=<name>"`.',
+'Delete by exact name match: `tmux kill-session -t "=<name>"`.',
 '',
-'## Das Hilfsskript `fl-session-cleanup`',
+'## The helper script `fl-session-cleanup`',
 '',
-'Freilauf installiert ein Skript auf `~/.local/bin`, das Messen und Entscheiden zuverlässig macht — nutze es zuerst:',
+'Freilauf installs a script on `~/.local/bin` that makes measuring and deciding reliable — use it first:',
 '',
-'- `fl-session-cleanup` — listet alle Sessions mit Aktivitätsalter und Speicher',
-'- `fl-session-cleanup --target-gb N` — zeigt, welche beendet werden müssen, um auf ≤ N GB zu kommen (älteste inaktive zuerst)',
-'- `fl-session-cleanup --target-gb N --kill` — beendet sie wirklich',
-'- `fl-session-cleanup --keep "name1 name2"` — diese Sessions nie anfassen',
+'- `fl-session-cleanup` — lists all sessions with activity age and memory',
+'- `fl-session-cleanup --target-gb N` — shows which ones must be ended to get to ≤ N GB (oldest inactive first)',
+'- `fl-session-cleanup --target-gb N --kill` — really ends them',
+'- `fl-session-cleanup --keep "name1 name2"` — never touches these sessions',
 '',
-'Kontrolliere mit dem Skript (oder den Kommandos oben), ob das Ziel erreicht ist.',
+'Check with the script (or the commands above) whether the target is reached.',
 '',
-'## Bericht (wird als Benachrichtigung verschickt, falls ein Kanal eingerichtet ist)',
+'## Report (sent as a notification when a channel is configured)',
 '',
-'Schreibe in deinen Abschlussreport einen Satz GENAU dieser Form — die URLs sind schon eingesetzt, ersetze nur die beiden Zahlen durch die von dir gemessenen GB-Werte (eine Nachkommastelle):',
+'Write one sentence of EXACTLY this form into your final report — the URLs are already in place, only replace the two numbers with the GB values you measured (one decimal place):',
 '',
-'"{freed_gb} GB Speicher wurde freigeräumt. Jetzt sind nur noch {current_gb} GB Speicher belegt. Du möchtest weiteren Speicher freigeben? {sessions_url}"',
+'"{freed_gb} GB of memory was freed. {current_gb} GB of memory is now in use. Do you want to free more memory? {sessions_url}"',
 '',
-'Außerdem angeben: Anzahl der Sessions vorher / gelöscht / verbleibend, und womit das Aktivitätsalter geprüft wurde (Skript oder Kommando).',
+'Also state: the number of sessions before / deleted / remaining, and what you used to check the activity age (script or command).',
 ].join('\n')
 
 /** Fallbacks for the numeric settings — an empty or broken value keeps the hub usable. */
@@ -145,8 +145,8 @@ export function keepSessionsForRuns(ids) {
 export function cleanupPrompt({ targetGb = null, keepSessions = [], thresholdGb = null, settings = null } = {}) {
   const s = settings ?? cleanupSettings()
   const keepLine = keepSessions.length
-    ? `Diese Sessions bleiben auf jeden Fall erhalten (auch wenn inaktiv) und dürfen NICHT beendet werden:\n${keepSessions.join(', ')}`
-    : 'Ohne Ausnahmen — was inaktiv ist, darf gehen, älteste zuerst.'
+    ? `These sessions are kept no matter what (even when inactive) and must NOT be ended:\n${keepSessions.join(', ')}`
+    : 'No exceptions — what is inactive may go, oldest first.'
   const target = targetGb == null ? s.targetGb : Number(targetGb)
   const tpl = String(s.prompt?.trim() || CLEANUP_PROMPT_DEFAULT)
   return tpl
