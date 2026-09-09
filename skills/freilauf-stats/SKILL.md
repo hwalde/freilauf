@@ -134,6 +134,58 @@ Pushing one is `bin/fl-panel` (`fl-panel set <key> --total n --item "label=count
 or JSON on stdin). Inside a run it needs no repo — `FL_RUN_ID` says which.
 The contract is `docs/panels.md` in the Freilauf checkout.
 
+### A panel can also TAKE a value
+
+A panel may carry **`controls`** — a number field, a text field, a select, a
+toggle, a button (max 6 per panel) — and the operator uses them in the sidebar.
+Two things a change can do, and a panel may do both:
+
+| | what happens | how it is declared |
+|---|---|---|
+| the **hub keeps** the value | nothing runs; the project reads it back | `"store": true` on the control |
+| a **command is called** | the values go to it as argv, no shell | `action: {cwd, argv, timeout_s}` |
+
+Reading is the same call as everything else, and it is the ordinary way a
+project asks "what did the operator set?":
+
+```bash
+fl-api /api/panels repo=3 panel=schwarm    # controls[] with the EFFECTIVE value + action_state
+fl-panel get schwarm gleichzeitig --repo 3 # just the value, bare, for a shell script
+```
+
+`controls[].value` is what the hub holds where it holds one, and the value the
+project last pushed everywhere else; `stored` says which of the two it was.
+`action_state` is the last press: `running`, `ok`, `saved`, `failed`, or `lost`
+(the hub was restarted while the command ran). **When reporting a panel's
+numbers, say the `state` as always — and if `action_state` is `ok` with a time
+later than `at`, say so: a command ran and the numbers have not been confirmed
+since.**
+
+Declaring one (the compact CLI form — JSON on stdin does the same):
+
+```bash
+fl-panel set schwarm --repo 3 --title Schwarm --total 1 \
+  --control "gleichzeitig=1:number:0..6" \
+  --control "fenster=stunde:select:stunde|woche|monat" \
+  --control "anwenden:button" \
+  --action-cwd /path/to/a/checkout/that/is/kept/current \
+  -- python schwarm/dispatch.py drossel --gleichzeitig "{{gleichzeitig}}" --fenster "{{fenster}}"
+```
+
+Three rules worth remembering before you write one:
+
+- **`--action-cwd` is required and has no default.** It must be a checkout that
+  is kept current — the operator's working checkout may be hundreds of commits
+  behind `origin/main`, which is the measurement the whole push-not-pull design
+  rests on.
+- **`{{key}}` is substituted inside ONE argv element.** There is no shell, so a
+  value with a space or a `;` in it is a value and never a second command.
+- **Prefer `--store` to a command** where the project can simply read the value
+  when it needs it. Nothing runs on the hub machine that way.
+
+The full contract — every control field, the failure lines, the caps, the
+security paragraph — is the "Controls" section of `docs/panels.md`.
+
 ## Getting the numbers without a browser
 
 ```bash

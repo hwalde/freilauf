@@ -33,6 +33,7 @@ import { allIncidentsOf } from './incidents.mjs'
 import { listFavorites, FAVORITES_MAX, favoriteSummary } from './favorites.mjs'
 import { listSessions, sessionMemory, paneAlive } from './sessions.mjs'
 import { panelValues, panelState } from './panels.mjs'
+import { actionState } from './panel-action.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import { displayStatus, displayStatusSql, followUpActive, WORK_STATUSES, FINISHED } from './run-state.mjs'
 import {
@@ -282,14 +283,30 @@ export async function readApi(req, res, url) {
   // one thing the stored row cannot say by itself — whether the reading is
   // still inside its own TTL. A consumer that only prints the number would
   // otherwise repeat a value nobody is confirming any more.
+  // A panel that carries CONTROLS answers a second question here, and it is the
+  // whole of the "the hub keeps the value" way: the project pushed a field, an
+  // operator set it in the sidebar, and this is where the project reads back
+  // what it now says. `controls[].value` is therefore the EFFECTIVE value —
+  // what the hub holds where it holds one, the pushed seed everywhere else —
+  // and `stored` says which of the two it was, because a project that wants to
+  // know whether anybody has ever touched a setting cannot tell from the value
+  // alone.
   if (path === '/api/panels') {
     const repo = url.searchParams.get('repo')
     if (!repo) { json(res, 400, { ok: false, error: t('api.unknown_repo') }); return true }
+    const only = url.searchParams.get('panel')
     const now = Date.now()
     json(res, 200, {
       ok: true,
       repo: Number(repo),
-      panels: panelValues(Number(repo)).map(p => ({ ...p, state: panelState(p, now), age_s: p.atMs ? Math.round((now - p.atMs) / 1000) : null })),
+      panels: panelValues(Number(repo))
+        .filter(p => !only || p.key === only)
+        .map(p => ({
+          ...p,
+          state: panelState(p, now),
+          age_s: p.atMs ? Math.round((now - p.atMs) / 1000) : null,
+          action_state: actionState(p.actionResult, now),
+        })),
     })
     return true
   }

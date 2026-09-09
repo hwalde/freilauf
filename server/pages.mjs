@@ -31,7 +31,8 @@ import { getProvider, providerLabel } from './providers/index.mjs'
 // cached there, `null` when it cannot be established. See providerChoiceBlock().
 import { harnessOwnCredentials } from './models.mjs'
 import { subscriptionUsage } from './usage.mjs'
-import { panelValues, panelState } from './panels.mjs'
+import { panelValues, panelState, PANEL_MAX_VALUE } from './panels.mjs'
+import { actionState } from './panel-action.mjs'
 import { trafficLightFromIncidents, openIncidentsOf, allIncidentsOf, needsHuman } from './incidents.mjs'
 import { TYPE_TEXT } from './detect.mjs'
 import { llmModelsMru, rememberLlmModel } from './pruefer.mjs'
@@ -626,7 +627,109 @@ function noteHtml(note) {
  * panel that quietly keeps showing an old number is the staleness this hub has
  * been caught by before — so the reading always carries the time it was made.
  */
-function panelsBlock(repoId) {
+/**
+ * The widgets a panel declared, as a form.
+ *
+ * A real `<form method="post">` and not a handful of inputs with a click
+ * handler, and that buys three things for nothing: Enter in a field submits,
+ * the browser enforces `min`/`max`/`required` before anything is sent, and a
+ * page with no JavaScript still works — `answer()` on the route redirects a
+ * plain browser back where it came from. hub.js only intercepts it to keep the
+ * page where it is and to show the pending state.
+ *
+ * The producer never writes a single tag of this. It says "a number between 0
+ * and 6 called gleichzeitig" and the hub decides what that is in a 240px
+ * column — which is the same rule the numbers above already follow, one field
+ * further out. See docs/panels.md, "Data, never markup".
+ */
+function panelControls(p, back) {
+  if (!p.controls?.length) return ''
+  const feld = (c) => {
+    const id = `pc-${p.key}-${c.key}`
+    const name = `v_${c.key}`
+    const gemein = `id="${e(id)}" name="${e(name)}" data-panel-control="${e(c.key)}"`
+      + (c.submit ? ' data-panel-submit="1"' : '')
+    if (c.type === 'button') {
+      return `<button type="submit" name="control" value="${e(c.key)}"
+        class="btn panel-btn${c.tone === 'red' ? ' danger' : ''}"
+        ${c.confirm ? `data-confirm="${e(c.confirm)}"` : ''}
+        ${c.hint ? `title="${e(c.hint)}"` : ''}>${e(c.label)}</button>`
+    }
+    const beschriftung = `<label for="${e(id)}">${e(c.label)}</label>`
+    if (c.type === 'toggle') {
+      // The hidden `0` companion: an unticked box is simply absent from a POST
+      // body, so without it "switch it off" would be indistinguishable from
+      // "this field was not on the page" — and the fallback for a missing key
+      // is the CURRENT value, which would make switching off impossible.
+      return `<div class="panel-field panel-field-toggle">
+        <input type="hidden" name="${e(name)}" value="0">
+        <input type="checkbox" value="1" ${gemein}${c.value === '1' ? ' checked' : ''}
+          ${c.confirm ? `data-confirm="${e(c.confirm)}"` : ''}>
+        ${beschriftung}</div>`
+    }
+    let eingabe
+    if (c.type === 'select') {
+      eingabe = `<select ${gemein}>${c.options.map(o =>
+        `<option value="${e(o.value)}"${o.value === c.value ? ' selected' : ''}>${e(o.label)}</option>`).join('')}</select>`
+    } else if (c.type === 'number') {
+      eingabe = `<input type="number" ${gemein} value="${e(c.value)}" required
+        ${c.min === null ? '' : `min="${e(String(c.min))}"`}
+        ${c.max === null ? '' : `max="${e(String(c.max))}"`}
+        ${c.step === null ? '' : `step="${e(String(c.step))}"`}>`
+    } else {
+      eingabe = `<input type="text" ${gemein} value="${e(c.value)}" maxlength="${PANEL_MAX_VALUE}"
+        ${c.placeholder ? `placeholder="${e(c.placeholder)}"` : ''}>`
+    }
+    return `<div class="panel-field">${beschriftung}${eingabe}
+      ${c.hint ? `<span class="panel-hint dim">${e(c.hint)}</span>` : ''}</div>`
+  }
+  return `<form class="panel-controls" method="post" action="/api/panels/control" data-panel-form="${e(p.key)}">
+    <input type="hidden" name="repo" value="${e(String(p.repoId))}">
+    <input type="hidden" name="key" value="${e(p.key)}">
+    <input type="hidden" name="back" value="${e(back || '/')}">
+    ${p.controls.map(feld).join('')}
+  </form>`
+}
+
+/**
+ * What the last press did — the half of a button that makes it a button.
+ *
+ * It is read out of the panel row rather than remembered in the page, so it
+ * survives the sidebar being swapped by the live channel, a reload and a closed
+ * tab. And it sits UNDER the "as of" line on purpose: a command that changed
+ * something and did not push the panel again leaves "applied 14:03" standing
+ * next to "as of 11:20", and those two lines together are the honest answer to
+ * "did anything happen?" — the numbers above have not been confirmed since.
+ */
+function panelActionLine(p, now) {
+  const r = p.actionResult
+  const state = actionState(r, now)
+  if (!state) return ''
+  const wann = r.endedAt || r.at ? fmtClock(r.endedAt || r.at) : '?'
+  // The verdict never wraps and the command's own line goes UNDER it: in a
+  // 244px column a flex row would break "applied 04:55" across two lines and
+  // put the output between the two halves. Whether it fits is decided by the
+  // stylesheet; what belongs on which line is decided here.
+  const verdikt = (klasse, satz, zusatz = '') =>
+    `<div class="panel-action ${klasse}"${r.line ? ` title="${e(r.line)}"` : ''}>${satz}${zusatz}</div>`
+  const zeile = r.line ? `<span class="dim pa-line">${e(r.line)}</span>` : ''
+  if (state === 'running') {
+    return verdikt('pending', `<span class="spin" aria-hidden="true"></span> ${e(t('panel.action_running'))}`)
+  }
+  if (state === 'lost') return verdikt('warn', e(t('panel.action_lost')))
+  if (state === 'saved') return verdikt('ok', e(t('panel.action_saved', { when: wann })))
+  if (state === 'ok') return verdikt('ok', e(t('panel.action_ok', { when: wann })), zeile)
+  // Every way it can go wrong says WHICH way. "failed" alone sends the reader
+  // to the command; the exit code, the timeout and "there is no such program"
+  // are three different mornings.
+  const grund = r.error === 'timeout' ? t('panel.action_timeout', { s: r.timeoutS ?? '?' })
+    : r.error === 'not_started' ? t('panel.action_not_started', { detail: r.detail || '' })
+      : r.error === 'no_cwd' ? t('panel.action_no_cwd', { dir: r.detail || '' })
+        : t('panel.action_exit', { code: r.exitCode ?? '?' })
+  return verdikt('err', e(grund), zeile)
+}
+
+function panelsBlock(repoId, back = '/') {
   if (repoId == null) return ''
   const now = Date.now()
   const bloecke = panelValues(repoId).map((p) => {
@@ -653,7 +756,9 @@ function panelsBlock(repoId) {
       <span class="side-label">${e(p.title)}</span>
       ${kopf}${zeilen}
       ${p.note ? `<div class="panel-note dim">${noteHtml(p.note)}</div>` : ''}
+      ${panelControls(p, back)}
       <div class="panel-stand"${p.atMs ? ` title="${e(fmtDateTime(p.atMs))}"` : ''}>${stand}</div>
+      ${panelActionLine(p, now)}
     </div>`
   })
   return bloecke.join('')
@@ -731,7 +836,18 @@ async function sideRail(repoId) {
   return `<div class="side-rail" aria-hidden="true">${teile.join('')}</div>`
 }
 
-export async function statusSidebar(repoId = null) {
+/**
+ * Where a plain form submit comes back to — a path on this hub and nothing
+ * else. It travels in a hidden field and therefore through the browser, so
+ * `//evil.example` and an absolute URL are the two shapes that must never
+ * become a redirect target.
+ */
+function localPath(url) {
+  const s = String(url ?? '')
+  return s.startsWith('/') && !s.startsWith('//') ? s : '/'
+}
+
+export async function statusSidebar(repoId = null, back = '/') {
   // The sidebar carries its own repo. <body data-repo> is the live channel's
   // filter and is only set where a page really HAS a repo context; the sidebar
   // reads a repo on every page (the header's switcher shows one there too), so
@@ -748,7 +864,7 @@ export async function statusSidebar(repoId = null) {
     <div class="side-block">${headerStatus()}</div>
     ${workBlock(repoId)}
     ${incidentBlock(repoId)}
-    ${panelsBlock(repoId)}
+    ${panelsBlock(repoId, localPath(back))}
     ${await usagePanel()}
     ${await memoryBlock()}
   </div>
@@ -819,7 +935,7 @@ ${setupBanner()}
 </header>
 <div class="shell" id="shell">
 <main>${globalesBanner()}${discoveryBanner(active || '/')}${otherRepo}${content}</main>
-${await statusSidebar(effRepo)}
+${await statusSidebar(effRepo, localPath(req?.url))}
 </div>
 ${quickRunDialog(repos, effRepo)}
 ${await cleanupDialogHtml(active)}

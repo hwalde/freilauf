@@ -275,6 +275,44 @@ ul.side-counts .overall { flex: 0 0 auto; }
 .side-panel .panel-note, .side-panel .panel-stand { font-size: 12px; margin-top: var(--sp-4); }
 .side-panel .panel-note code { font-size: 11px; }
 .side-panel.panel-cold ul.side-counts, .side-panel.panel-cold .panel-total { opacity: .6; }
+/* And a panel may TAKE a value, not only show one (docs/panels.md, "Controls").
+   The column is 240px, so a caption above its field rather than beside it: two
+   columns here would leave a number field four characters wide. The controls
+   deliberately do NOT dim with `panel-cold` — the numbers being unconfirmed
+   says nothing about whether the throttle may be set, and a control that looks
+   disabled while it works is the worse of the two readings. */
+.side-panel .panel-controls { display: flex; flex-direction: column; gap: var(--sp-6); margin: var(--sp-8) 0 0; }
+.side-panel .panel-field { display: flex; flex-direction: column; gap: 2px; }
+.side-panel .panel-field label { font-size: 11px; color: var(--text-dim); }
+.side-panel .panel-field input, .side-panel .panel-field select {
+  width: 100%; box-sizing: border-box; font: inherit; font-size: 12px;
+  padding: var(--sp-4) var(--sp-6); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-4); background: var(--surface-card); color: var(--text); }
+/* A toggle is the one control whose caption belongs BESIDE it: a checkbox with
+   its label underneath reads as two separate things. */
+.side-panel .panel-field-toggle { flex-direction: row; align-items: center; gap: var(--sp-6); }
+.side-panel .panel-field-toggle input { width: auto; }
+.side-panel .panel-hint { font-size: 11px; }
+.side-panel .panel-btn { font-size: 12px; padding: var(--sp-4) var(--sp-10); align-self: flex-start; }
+/* What the last press did. Under the "as of" line on purpose: "applied 14:03"
+   standing next to "as of 11:20" is what tells the reader that the command ran
+   and the numbers above it have not been confirmed since. */
+/* Block, not flex: a flex row lets the verdict shrink below its own width, and
+   at 240px that broke "applied 04:55" across two lines with the command's
+   output wedged between the halves (measured in a browser, 2026-09-09). The
+   command's line goes UNDERNEATH, one line, ellipsized — the whole of it is in
+   the title attribute. */
+.side-panel .panel-action { font-size: 12px; margin-top: var(--sp-4); }
+.side-panel .panel-action.ok { color: var(--ok); }
+.side-panel .panel-action.warn { color: var(--warn); }
+.side-panel .panel-action.err { color: var(--err); }
+.side-panel .panel-action .pa-line { display: block; font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-panel .panel-action .spin { width: 0.8em; height: 0.8em; border-radius: 50%;
+  display: inline-block; vertical-align: -1px;
+  border: 2px solid var(--border-strong); border-top-color: var(--accent);
+  animation: toast-spin 0.9s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .side-panel .panel-action .spin { animation: none; } }
 /* The incident block's counts are links into the filtered overview, and take
    the text colour like every other count in this column: inside the sidebar
    the blue would read as the loudest thing in it. */

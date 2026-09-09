@@ -973,6 +973,42 @@ async function api(req, res, url) {
     })
     return json(res, r.ok ? 200 : 400, r)
   }
+  // Somebody used a panel's controls (server/panel-action.mjs).
+  //
+  // Its own route rather than a mode of `POST /api/panels`, because it is the
+  // other direction: that one is a PRODUCER stating a value, this one is the
+  // operator changing one. They differ in who may be wrong about what — a push
+  // is repaired where it can be, a submission is refused where it cannot be
+  // proven correct — and sharing a route would have meant one handler holding
+  // both attitudes.
+  //
+  // The values arrive as `v_<control key>`, so nothing a producer names can
+  // collide with `repo`, `key`, `control` or `back`. The command itself is
+  // never in the request: it is read from the stored panel, so a caller can
+  // choose the values and never the program.
+  if (req.method === 'POST' && path === '/api/panels/control') {
+    const b = await form(req)
+    const run = b.run ? getRun(String(b.run)) : null
+    const repoId = b.repo ? Number(b.repo) : run?.repo_id ?? null
+    if (repoId == null || !getRepo(repoId)) return json(res, 400, { ok: false, error: t('api.unknown_repo') })
+    // `parseForm()` adds a `<name>_list` twin for every field, which is what
+    // keeps both halves of a checkbox pair readable — here only the last value
+    // is wanted. The twins are told apart by being ARRAYS and not by their
+    // name: a control may legitimately be called `my_list`, and matching on the
+    // suffix would then drop the field itself and keep its twin.
+    const submitted = {}
+    for (const [k, v] of Object.entries(b)) if (k.startsWith('v_') && !Array.isArray(v)) submitted[k.slice(2)] = v
+    const { submitPanel } = await import('./panel-action.mjs')
+    // `done` is the promise of the command, for a caller that wants to wait.
+    // The route deliberately does not — and a Promise in a JSON body would
+    // serialize as an empty object, which reads as a field that means nothing.
+    const { done, ...r } = await submitPanel({ repoId, key: b.key ?? '', control: b.control || null, submitted, by: 'ui' })
+    // A `back` out of a POST body is a string the browser carried: it may only
+    // ever be a path on this hub. Same rule the sidebar renders it under.
+    const back = String(b.back ?? '/')
+    const zurueck = back.startsWith('/') && !back.startsWith('//') ? back : '/'
+    return answer(req, res, r.ok ? 200 : 400, r, zurueck)
+  }
   // The repo form's "find worktree extras": algorithmic checks first (path
   // exists, is a git project), then a single OpenRouter call. Errors are already
   // translated and arrive as `{ ok:false, error }` — the modal shows them as-is.
@@ -1022,7 +1058,11 @@ async function fragmentApi(req, res, url) {
   // counted for the repo one is looking at.
   if (path === '/api/fragments/sidebar') {
     const repo = url.searchParams.get('repo')
-    return fragment(res, await statusSidebar(repo ? +repo : null))
+    // `back` is the page the sidebar is standing on — only a panel's control
+    // form uses it, and only when the browser posts that form without
+    // JavaScript. The client sends its own location so a swapped-in form keeps
+    // the same way home the rendered one had.
+    return fragment(res, await statusSidebar(repo ? +repo : null, url.searchParams.get('back') || '/'))
   }
 
   // The sandbox images block. Rendered by the SAME function the settings page

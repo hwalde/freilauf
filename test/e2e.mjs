@@ -17,7 +17,7 @@
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, lstatSync } from 'node:fs'
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, lstatSync, chmodSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { WebSocket } from 'ws'
@@ -3961,6 +3961,275 @@ try {
     contains(leiste, 'failing', 'with the row from --item')
     await postForm('/api/panels', { repo: String(repoId), key: 'tests', remove: '1' })
     await postForm('/api/panels', { repo: String(repoId), key: 'findings', remove: '1' })
+  })
+
+  // ------------------------------------------------------------------
+  // The other direction: a panel that TAKES a value. Everything above is the
+  // project stating a number; this is the operator changing one from the same
+  // 240px column — either into a value the hub keeps, or into a command the
+  // project declared. What is tested here is the whole path a click takes, and
+  // every way it can go wrong: no such program, a non-zero exit, a timeout, a
+  // value outside its own range, and a working directory that is not there.
+  group('Panels: a block that takes a value, not only shows one')
+
+  const spuren = join(SB, 'panel-spuren')
+  mkdirSync(spuren, { recursive: true })
+  // The stand-in for the first customer's `schwarm/dispatch.py drossel`: it
+  // writes its argv where the test can read it and prints a byte-stable
+  // closing line, exactly as that command does.
+  const werkzeug = join(spuren, 'drossel.sh')
+  writeFileSync(werkzeug, `#!/bin/bash
+printf '%s\\n' "$@" > "${spuren}/argv.txt"
+env | grep '^FL_' | sort > "${spuren}/env.txt"
+case "$1" in
+  fail) echo "something went wrong" >&2; exit 3 ;;
+  slow) sleep 30 ;;
+esac
+echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
+`)
+  chmodSync(werkzeug, 0o755)
+
+  const schwarmPushen = (action, controls) => postForm('/api/panels', {
+    repo: String(repoId), key: 'schwarm',
+    value: JSON.stringify({
+      title: 'Schwarm',
+      total: 1,
+      controls: controls ?? [
+        { key: 'gleichzeitig', type: 'number', label: 'at once', value: 1, min: 0, max: 6, step: 1 },
+        { key: 'fenster', type: 'select', label: 'per', value: 'stunde', options: ['stunde', 'woche', 'monat'] },
+        { key: 'anwenden', type: 'button', label: 'Apply' },
+      ],
+      action: action ?? { cwd: spuren, argv: [werkzeug, 'drossel', '--gleichzeitig', '{{gleichzeitig}}', '--fenster', '{{fenster}}'] },
+    }),
+  })
+
+  // The panel's own state, straight out of the read API — the one place that
+  // says what the hub now holds, and what the last press did.
+  const schwarm = async () => {
+    const d = await (await fetchPath(`/api/panels?repo=${repoId}&panel=schwarm`, { headers: { accept: 'application/json' } })).json()
+    return d.panels[0]
+  }
+  const bisFertig = async (was = 'the command') => waitFor(async () => {
+    const p = await schwarm()
+    return p?.action_state && p.action_state !== 'running' ? p : null
+  }, { what: `${was} to finish`, timeoutMs: 20_000 })
+
+  await check('the controls a project declared are rendered as fields, and the producer wrote no markup', async () => {
+    equal((await schwarmPushen()).status, 200, 'the push is accepted')
+    const leiste = leisteVon(await (await fetchPath(`/?repo=${repoId}`)).text())
+    contains(leiste, 'data-panel-form="schwarm"', 'the block carries a form')
+    contains(leiste, 'name="v_gleichzeitig"', 'the number field, namespaced so it cannot collide with repo/key/control')
+    contains(leiste, 'min="0"', 'with the range the project declared')
+    contains(leiste, 'max="6"', 'both ends')
+    contains(leiste, '<select', 'the choice is a select')
+    contains(leiste, 'value="woche"', 'with the options it was given')
+    contains(leiste, 'name="control" value="anwenden"', 'and a button that names itself')
+    contains(leiste, 'action="/api/panels/control"', 'a real form — it works without JavaScript too')
+  })
+
+  await check('a press really calls the command, with the values as separate arguments', async () => {
+    const r = await postForm('/api/panels/control', {
+      repo: String(repoId), key: 'schwarm', control: 'anwenden', v_gleichzeitig: '4', v_fenster: 'woche',
+    })
+    equal(r.status, 200, 'accepted')
+    const antwort = await r.json()
+    isTrue(antwort.running, 'and it answers at once rather than holding the click open for the command')
+    const p = await bisFertig()
+    equal(p.action_state, 'ok', 'the command came back green')
+    const argv = readFileSync(join(spuren, 'argv.txt'), 'utf8').split('\n').filter(Boolean)
+    equal(argv.join(' | '), 'drossel | --gleichzeitig | 4 | --fenster | woche',
+      'the placeholders became argv elements of their own — never a shell string')
+    const env = readFileSync(join(spuren, 'env.txt'), 'utf8')
+    contains(env, 'FL_PANEL=schwarm', 'the command is told which panel it was called from')
+    contains(env, 'FL_PANEL_CONTROL=anwenden', 'and which button')
+    contains(env, 'FL_PANEL_V_GLEICHZEITIG=4', 'the values are in the environment too, for a script that prefers them there')
+    contains(env, 'FL_HUB_URL=', 'and where the hub is, so it can push the panel back')
+  })
+
+  await check('and the outcome is visible in the sidebar, on any page and after a reload', async () => {
+    const leiste = leisteVon(await (await fetchPath(`/agents?repo=${repoId}`)).text())
+    contains(leiste, 'panel-action ok', 'the press is recorded as applied')
+    contains(leiste, 'SCHWARM_DROSSEL result=OK', 'with the command\'s own closing line')
+    // It is server state, not a toast: the read API says the same thing, which
+    // is what makes it survive the sidebar being swapped and the tab closed.
+    equal((await schwarm()).action_state, 'ok', 'the read API agrees')
+  })
+
+  await check('a value the hub KEEPS is the one everybody reads afterwards', async () => {
+    await postForm('/api/panels', {
+      repo: String(repoId), key: 'drossel',
+      value: JSON.stringify({
+        title: 'Throttle',
+        controls: [
+          { key: 'n', type: 'number', label: 'workers', value: 1, min: 0, max: 9, store: true },
+          { key: 'an', type: 'toggle', label: 'on', value: true, store: true },
+          { key: 'go', type: 'button', label: 'Save' },
+        ],
+      }),
+    })
+    const r = await postForm('/api/panels/control', { repo: String(repoId), key: 'drossel', control: 'go', v_n: '5', v_an: '0' })
+    equal(r.status, 200, 'accepted')
+    isTrue((await r.json()).saved, 'saved at once — there is no command that could still refuse it')
+    const lies = async () => {
+      const d = await (await fetchPath(`/api/panels?repo=${repoId}&panel=drossel`, { headers: { accept: 'application/json' } })).json()
+      return Object.fromEntries(d.panels[0].controls.map(c => [c.key, c.value]))
+    }
+    equal(JSON.stringify(await lies()), '{"n":"5","an":"0","go":""}',
+      'the read API reports what was set, which is how the project reads it back')
+    // And the producer pushing again does NOT overwrite it: for a `store`
+    // control the declared value was only the seed, and the hub is the store.
+    await postForm('/api/panels', {
+      repo: String(repoId), key: 'drossel',
+      value: JSON.stringify({
+        title: 'Throttle',
+        controls: [
+          { key: 'n', type: 'number', label: 'workers', value: 1, min: 0, max: 9, store: true },
+          { key: 'an', type: 'toggle', label: 'on', value: true, store: true },
+          { key: 'go', type: 'button', label: 'Save' },
+        ],
+      }),
+    })
+    equal((await lies()).n, '5', 'a fresh push of the same panel does not take the setting back to its seed')
+    contains(leisteVon(await (await fetchPath(`/?repo=${repoId}`)).text()), 'value="5"', 'and the field shows it')
+    await postForm('/api/panels', { repo: String(repoId), key: 'drossel', remove: '1' })
+  })
+
+  await check('an invalid value is refused with the reason, and nothing is called', async () => {
+    const zuGross = await postForm('/api/panels/control', {
+      repo: String(repoId), key: 'schwarm', control: 'anwenden', v_gleichzeitig: '99', v_fenster: 'woche',
+    })
+    equal(zuGross.status, 400, 'outside its own range')
+    contains((await zuGross.json()).error, 'at most 6', 'and the answer names the rule')
+    const leer = await postForm('/api/panels/control', {
+      repo: String(repoId), key: 'schwarm', control: 'anwenden', v_gleichzeitig: '', v_fenster: 'woche',
+    })
+    equal(leer.status, 400, 'an empty number is refused rather than read as 0')
+    const falsch = await postForm('/api/panels/control', {
+      repo: String(repoId), key: 'schwarm', control: 'anwenden', v_gleichzeitig: '2', v_fenster: 'jahr',
+    })
+    equal(falsch.status, 400, 'a choice the project never offered')
+    const fremd = await postForm('/api/panels/control', { repo: String(repoId), key: 'schwarm', control: 'nope' })
+    equal(fremd.status, 400, 'a control this panel does not have')
+    // Nothing ran: the argv file still holds the last successful call.
+    contains(readFileSync(join(spuren, 'argv.txt'), 'utf8'), 'woche', 'no refused press reached the command')
+  })
+
+  await check('a command that fails says so — exit code, missing program, timeout', async () => {
+    await schwarmPushen({ cwd: spuren, argv: [werkzeug, 'fail'] })
+    await postForm('/api/panels/control', { repo: String(repoId), key: 'schwarm', control: 'anwenden' })
+    let p = await bisFertig('the failing command')
+    equal(p.action_state, 'failed', 'a non-zero exit is a failure')
+    equal(p.actionResult.exitCode, 3, 'with the code it really exited with')
+    contains(p.actionResult.line, 'something went wrong', 'and the last line it wrote, stderr included')
+    contains(leisteVon(await (await fetchPath(`/?repo=${repoId}`)).text()), 'exit 3', 'the sidebar says which way it failed')
+
+    await schwarmPushen({ cwd: spuren, argv: [join(spuren, 'gibtsnicht'), 'x'] })
+    await postForm('/api/panels/control', { repo: String(repoId), key: 'schwarm', control: 'anwenden' })
+    p = await bisFertig('the missing program')
+    equal(p.action_state, 'failed', 'a program that is not there is a failure')
+    equal(p.actionResult.error, 'not_started', 'and it is told apart from a program that ran and refused')
+
+    await schwarmPushen({ cwd: spuren, argv: [werkzeug, 'slow'], timeout_s: 1 })
+    await postForm('/api/panels/control', { repo: String(repoId), key: 'schwarm', control: 'anwenden' })
+    p = await bisFertig('the slow command')
+    equal(p.action_state, 'failed', 'a command that runs too long is killed')
+    equal(p.actionResult.error, 'timeout', 'and says it was the clock, not the program')
+
+    // A working directory that does not exist is refused BEFORE anything runs,
+    // and it is refused to the caller rather than only recorded.
+    await schwarmPushen({ cwd: join(spuren, 'weg'), argv: [werkzeug] })
+    const r = await postForm('/api/panels/control', { repo: String(repoId), key: 'schwarm', control: 'anwenden' })
+    equal(r.status, 400, 'the press is refused')
+    contains((await r.json()).error, 'does not exist', 'naming the directory')
+  })
+
+  await check('what a producer must not be able to declare', async () => {
+    const ohneCwd = await postForm('/api/panels', {
+      repo: String(repoId), key: 'x1',
+      value: JSON.stringify({ total: 1, controls: [{ key: 'go', type: 'button' }], action: { argv: ['/bin/true'] } }),
+    })
+    equal(ohneCwd.status, 400, 'an action without a cwd is refused — there is no silent default')
+    const ohneArgv = await postForm('/api/panels', {
+      repo: String(repoId), key: 'x1',
+      value: JSON.stringify({ total: 1, controls: [{ key: 'go', type: 'button' }], action: { cwd: spuren } }),
+    })
+    equal(ohneArgv.status, 400, 'and an action without a command')
+    const nichts = await postForm('/api/panels', {
+      repo: String(repoId), key: 'x1',
+      value: JSON.stringify({ total: 1, controls: [{ key: 'go', type: 'button' }] }),
+    })
+    equal(nichts.status, 400, 'a button that neither stores nor calls anything would do nothing at all')
+    const unbekannt = await postForm('/api/panels', {
+      repo: String(repoId), key: 'x1',
+      value: JSON.stringify({ total: 1, controls: [{ key: 'go', type: 'slider', store: true }] }),
+    })
+    equal(unbekannt.status, 400, 'an unknown widget is refused, never rendered as something else')
+    // A label is data here exactly as it is in a row: escaped, not pasted.
+    await postForm('/api/panels', {
+      repo: String(repoId), key: 'x1',
+      value: JSON.stringify({ total: 1, controls: [{ key: 'go', type: 'button', label: '<b>go</b>', action: { cwd: spuren, argv: ['/bin/true'] } }] }),
+    })
+    const leiste = leisteVon(await (await fetchPath(`/?repo=${repoId}`)).text())
+    isFalse(leiste.includes('<b>go</b>'), 'a control cannot bring its own markup')
+    await postForm('/api/panels', { repo: String(repoId), key: 'x1', remove: '1' })
+  })
+
+  await check('the folded rail draws no control, and a panel without any is unchanged', async () => {
+    const html = await (await fetchPath(`/?repo=${repoId}`)).text()
+    const rail = html.slice(html.indexOf('class="side-rail"'), html.indexOf('side-body'))
+    isFalse(rail.includes('panel-controls'), 'the rail draws values and nothing else')
+    isFalse(rail.includes('<input'), 'there is no field in it')
+    // The old shape still behaves exactly as it did: no form, no action line.
+    await postForm('/api/panels', { repo: String(repoId), key: 'alt', value: JSON.stringify({ title: 'Alt', total: 7 }) })
+    const block = leisteVon(await (await fetchPath(`/?repo=${repoId}`)).text())
+    // Exactly this one block: the next panel in the column has a form, and a
+    // fixed number of characters would read into it.
+    const von = block.indexOf('data-panel="alt"')
+    const nach = block.indexOf('data-panel="', von + 20)
+    const alt = block.slice(von, nach < 0 ? undefined : nach)
+    isFalse(alt.includes('panel-controls'), 'a panel without controls carries no form')
+    contains(alt, '>7<', 'and still shows its number')
+    await postForm('/api/panels', { repo: String(repoId), key: 'alt', remove: '1' })
+  })
+
+  await check('bin/fl-panel declares controls and a command, and reads a kept value back', async () => {
+    const flPanel = (...argv) => new Promise((res) => execFile(process.execPath,
+      [join(PROJECT, 'bin', 'fl-panel'), ...argv],
+      { env: { ...process.env, FL_HUB_URL: BASE }, timeout: 30_000 },
+      (err, stdout, stderr) => res({ code: err?.code ?? 0, stdout, stderr })))
+
+    let r = await flPanel('set', 'cli', '--repo', String(repoId), '--title', 'CLI', '--total', '2',
+      '--control', 'n=3:number:0..9', '--control', 'fenster=woche:select:stunde|woche|monat',
+      '--control', 'go:button', '--action-cwd', spuren, '--', werkzeug, 'cli', '--n', '{{n}}', '--f', '{{fenster}}')
+    equal(r.code, 0, `fl-panel exited 0 (${r.stderr})`)
+    contains(r.stdout, '3 controls', 'and says how many it declared')
+    const leiste = leisteVon(await (await fetchPath(`/?repo=${repoId}`)).text())
+    contains(leiste, 'name="v_n"', 'the compact spec really became a field')
+    contains(leiste, 'max="9"', 'with its range')
+
+    await postForm('/api/panels/control', { repo: String(repoId), key: 'cli', control: 'go', v_n: '7', v_fenster: 'monat' })
+    await waitFor(async () => {
+      const d = await (await fetchPath(`/api/panels?repo=${repoId}&panel=cli`, { headers: { accept: 'application/json' } })).json()
+      return d.panels[0].action_state === 'ok' ? true : null
+    }, { what: 'the CLI-declared command to finish', timeoutMs: 20_000 })
+    equal(readFileSync(join(spuren, 'argv.txt'), 'utf8').split('\n').filter(Boolean).join(' | '),
+      'cli | --n | 7 | --f | monat', 'and it was called with what the fields said')
+
+    // A command needs a cwd, from the CLI as much as over HTTP.
+    r = await flPanel('set', 'cli2', '--repo', String(repoId), '--total', '1', '--control', 'go:button', '--', '/bin/true')
+    equal(r.code, 2, 'a command without --action-cwd is a usage error')
+    contains(r.stderr, 'action-cwd', 'and says which flag is missing')
+
+    // The reading half: `fl-panel get` prints the bare value, so a shell script
+    // needs no JSON parser to find out what the operator set.
+    await flPanel('set', 'keep', '--repo', String(repoId), '--total', '1',
+      '--control', 'n=1:number:0..9', '--control', 'go:button', '--store', 'n')
+    await postForm('/api/panels/control', { repo: String(repoId), key: 'keep', control: 'go', v_n: '6' })
+    r = await flPanel('get', 'keep', 'n', '--repo', String(repoId))
+    equal(r.code, 0, `fl-panel get exited 0 (${r.stderr})`)
+    equal(r.stdout.trim(), '6', 'the value the operator set, and nothing else on the line')
+
+    for (const k of ['cli', 'keep', 'schwarm']) await postForm('/api/panels', { repo: String(repoId), key: k, remove: '1' })
   })
 
   // ------------------------------------------------------------------

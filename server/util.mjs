@@ -95,6 +95,20 @@ export function stripGitProgress(stderr) {
     .trim()
 }
 
+/**
+ * The END of a command's output, capped.
+ *
+ * Always the end and never the beginning: a build, a test run and a script that
+ * prints a verdict all put the interesting part last, and `slice(0, n)` keeps
+ * the half nobody needs. (`failureExcerpt()` in integrate.mjs keeps BOTH ends,
+ * because a merge error's evidence comes before its verdict — this is the
+ * simpler case where only the tail is wanted.)
+ */
+export function tailText(text, max) {
+  const s = String(text ?? '')
+  return s.length <= max ? s : s.slice(-max)
+}
+
 export function sh(cmd, args, opts = {}) {
   return new Promise((resolve) => {
     execFile(cmd, args, { timeout: opts.timeout ?? 30_000, encoding: 'utf8', ...opts },
