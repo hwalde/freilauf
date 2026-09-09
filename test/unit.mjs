@@ -7367,6 +7367,21 @@ try {
     }
   })
 
+  await check('resumable: picking an ended run back up is not the same offer as retrying it', async () => {
+    const { resumable } = await import('../server/run-state.mjs')
+    isTrue(resumable({ status: 'failed' }, true), 'a failed run whose worktree stands may be continued')
+    isTrue(resumable({ status: 'aborted' }, true), 'an aborted one too — the machine ends runs that way')
+    isFalse(resumable({ status: 'failed' }, false), 'but not without the worktree: there is nothing to continue in')
+    isFalse(resumable({ status: 'done' }, true), 'a finished run is continued by typing into its session, not by this')
+    isFalse(resumable({ status: 'running' }, true), 'and one that is still going needs nothing')
+    isFalse(resumable({ status: 'deferred' }, true), 'nor one that has not started')
+    isFalse(resumable({ status: 'failed', resolves_run_id: 'x' }, true),
+      'never a conflict run — "Merge now" on the original is the way back in')
+    isFalse(resumable({ status: 'failed', archived_at: 'x' }, true),
+      'nor an archived one: it was put away, and archiving closed its session')
+    isFalse(resumable(null, true), 'no run, no verdict')
+  })
+
   await check('runtimeClock: the duration is measured on the clock the alarm was raised off', async () => {
     // The cell pairs a duration with `expected_minutes`, and the follow-up
     // overrun is raised by measuring `followup_since` against that same
@@ -12069,7 +12084,7 @@ process.stdout.write(JSON.stringify(out))
     // or a `docker run` that never got past `runc create` set the run `failed`.
     // What matters here is the DISTINCTION — an ordinary agent exit must still
     // behave exactly as it did, and infrastructure trouble must never end a run.
-    const { panePostMortem, exitStatus } = await import('../server/reports.mjs')
+    const { panePostMortem, exitStatus, signalDeath } = await import('../server/reports.mjs')
     const ok = (over) => ({ verdict: 'ok', exists: true, running: false, exitCode: 42, oom: false, status: 'exited', ...over })
 
     // A pane killed by a SIGNAL carries no exit status at all — measured on
@@ -12093,6 +12108,54 @@ process.stdout.write(JSON.stringify(out))
       equal(panePostMortem({ sandboxed: false, exit: 1 }).verdict, 'agent', 'exit 1')
       equal(panePostMortem({ sandboxed: false, exit: 125 }).verdict, 'agent', 'even 125 — no docker is involved')
       equal(panePostMortem().verdict, 'agent', 'and with nothing said at all')
+    })
+
+    // ---- and the case that cost three runs: the agent did not decide to end.
+    //
+    // Measured 2026-09-09 on this installation. A restart killed the processes
+    // inside tmux sessions that SURVIVED it — `remain-on-exit`, the flag that
+    // keeps a crashed run's screen readable, is exactly what makes them survive
+    // — so `watchRun()` found a live session with a dead pane and failed the run
+    // for good, while a run whose whole SESSION had gone was resumed. Which of
+    // the two a run got was a race and had nothing to do with the run.
+    await check('a signal death is read out of whichever field carries it', () => {
+      // The shape the three runs really had: fl-start launches through a shell,
+      // the shell reports its child's signal death as 128 + n, and tmux then
+      // sees an ordinary exit and fills no signal field at all.
+      const term = signalDeath(143, null)
+      equal(term?.signal, 15, '143 is 128 + SIGTERM')
+      equal(term?.name, 'SIGTERM', 'and it is named')
+      equal(signalDeath(129, null)?.name, 'SIGHUP', 'a hung-up process group')
+      equal(signalDeath(137, null)?.name, 'SIGKILL', 'the OOM killer')
+      // …and the shape tmux fills when the pane's OWN process was signalled.
+      equal(signalDeath('', 9)?.name, 'SIGKILL', 'the signal field alone is enough')
+      equal(signalDeath('', '15')?.name, 'SIGTERM', 'tmux hands it over as text')
+      // The exclusions are the rule as much as the inclusions are.
+      equal(signalDeath(130, null), null, 'SIGINT is a human at the keyboard, not the machine')
+      equal(signalDeath(139, null), null, 'and a segfault IS the agent ending')
+      equal(signalDeath(1, null), null, 'an ordinary exit 1 is not signal 1')
+      equal(signalDeath(0, null), null, 'nor is a clean exit')
+      equal(signalDeath('', ''), null, 'and `Number("")` does not become signal 0')
+      equal(signalDeath(null, null), null, 'nor does "nothing was said"')
+    })
+
+    await check('a killed process is infrastructure, sandbox or no sandbox', () => {
+      const r = panePostMortem({ sandboxed: false, exit: 143 })
+      equal(r.verdict, 'infra', 'the ordinary run finally has an answer here')
+      equal(r.kind, 'killed', 'and it is written down under its own name')
+      contains(r.reason, 'SIGTERM', 'which names the signal')
+      equal(panePostMortem({ sandboxed: false, exit: '', signal: 9 }).verdict, 'infra',
+        'the signal field says the same thing')
+      // Asked before the daemon on purpose: it is the one verdict that needs
+      // nobody, so a daemon that will not answer cannot bury it as 'unknown'.
+      equal(panePostMortem({ sandboxed: true, exit: 143, container: { verdict: 'unreachable' } }).verdict, 'infra',
+        'a silent daemon does not hide a killed process')
+      equal(panePostMortem({ sandboxed: true, exit: 143, container: ok() }).verdict, 'infra',
+        'and neither does a container that has exited — it exited because its client was shot')
+      // The two shapes stay distinguishable, because they are written down
+      // under different names and read by different people.
+      equal(panePostMortem({ sandboxed: true, exit: 1, container: ok({ running: true }) }).kind, 'client',
+        'a dead client is still a dead client')
     })
 
     await check('the ordinary sandboxed end: the agent exited and the container is over', () => {
@@ -12141,7 +12204,10 @@ process.stdout.write(JSON.stringify(out))
     await check('the handler asks that question and nothing else decides it', () => {
       const quelle = readFileSync(new URL('../server/reports.mjs', import.meta.url), 'utf8')
       const fall = quelle.slice(quelle.indexOf("case '_pane_died': {"))
-      contains(fall, 'await paneCause(fresh, body.exit)', 'the cause is asked first')
+      // The SIGNAL travels with the exit status, and that is not a detail: the
+      // signal is the only evidence an unsandboxed run's dead pane carries, so
+      // a call that dropped it would leave that whole case unanswered again.
+      contains(fall, 'await paneCause(fresh, body.exit, body.signal)', 'the cause is asked first, signal and all')
       isTrue(fall.indexOf("cause.verdict === 'unknown'") < fall.indexOf("status='failed'"),
         'and both non-agent branches stand BEFORE the line that ends the run')
       isTrue(fall.indexOf("cause.verdict === 'infra'") < fall.indexOf("status='failed'"), 'the infra branch too')

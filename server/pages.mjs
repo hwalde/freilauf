@@ -24,7 +24,7 @@ import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } fro
 import { extrasModelsMru, rememberExtrasModel, DEFAULT_EXTRAS_MODEL } from './extras-suggest.mjs'
 import { runEditAllowed } from './run-edit.mjs'
 import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
-  settledAnomalies, archivable, agentWaiting, runtimeClock } from './run-state.mjs'
+  settledAnomalies, archivable, resumable, agentWaiting, runtimeClock } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
@@ -1568,8 +1568,20 @@ export async function pageRun(req, res, url, id) {
   ${['failed', 'aborted'].includes(run.status) && !run.resolves_run_id
     // A conflict run is never retried: the way back in is "Merge now" on the
     // run it works for, which starts a fresh one with a fresh branch.
-    ? `<form method="post" action="/api/runs/${id}/retry"><button>${e(t('run.retry'))}</button>
-       <span class="dim">${e(t('run.retry_hint'))}</span></form>`
+    //
+    // Resume stands FIRST and retry keeps its place beside it, because they are
+    // not two spellings of one offer: resume keeps this run's worktree, its
+    // commits and — where the coding agent has a resume form — its conversation,
+    // while retry throws all of that away and starts the task afresh. For a run
+    // the machine ended with 37 commits in its worktree, only one of those two
+    // is what the operator means, and until now only the other one was on the
+    // page. `resumable()` is the rule; the route enforces the same one.
+    ? `<div class="btn-row">
+       ${resumable(run, !!run.workdir_effective && existsSync(run.workdir_effective))
+        ? `<form method="post" action="/api/runs/${id}/resume" class="inline"><button>${e(t('run.resume'))}</button></form>
+           <span class="dim">${e(t('run.resume_hint'))}</span>` : ''}
+       <form method="post" action="/api/runs/${id}/retry" class="inline"><button>${e(t('run.retry'))}</button></form>
+       <span class="dim">${e(t('run.retry_hint'))}</span></div>`
     : ''}
   ${run.report_md ? `<h3>${e(t('run.report'))}</h3><pre>${e(run.report_md)}</pre>` : ''}
   ${run.report_detail_md ? `<h3>${e(t('run.detail_report'))}</h3><pre>${e(run.report_detail_md)}</pre>` : ''}

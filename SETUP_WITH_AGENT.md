@@ -354,7 +354,16 @@ still working, in a new session (claude, cursor and opencode continue their
 conversation, hermes is started afresh with its task and told what it had
 already committed), and catches up the cron and weekly slots the downtime
 swallowed (Settings → "Catch up missed schedule slots", default 6 hours).
-Details: `AGENTS.md`, "Surviving restarts".
+
+The same holds for the other shape a restart has, and it is the more common
+one: where a session **survives** but the agent's process inside it is killed
+(SIGTERM from a stopping unit, SIGHUP from a dying tmux server, SIGKILL from
+the OOM killer), the run is resumed just the same. Capped at three times per
+run, so a CLI the machine shoots at every start is not restarted for ever.
+Where the hub cannot tell — an agent that crashed on its own, a run past that
+cap — the run's page has a **"Resume run"** button next to "Retry run": resume
+continues in the same worktree with the same commits and conversation, retry
+starts the task from scratch. Details: `AGENTS.md`, "Surviving restarts".
 
 So the rules for the machine are short. Unattended package upgrades are fine
 and need nothing from you — they do not kill user processes. Leave

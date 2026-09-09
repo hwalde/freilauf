@@ -328,6 +328,69 @@ old path had; muted runs are left out, the `tmux_gone` incident stays and
 says the runs are being resumed. `runs.retry` resets both columns — a retry
 is a new attempt, not a resume.
 
+**And a KILLED PROCESS is resumed too, which is the half that was missing.**
+Everything above is about the session going away. But a restart, a reboot or
+the OOM killer takes **processes**, and where the tmux session survives that —
+which is the ordinary case, because `remain-on-exit` is exactly the flag that
+makes it survive — `watchRun()` never reaches its session-lost branch at all.
+It sees a live session with a dead pane, reports `_pane_died`, and until this
+existed that failed the run for good. So whether a restart cost a run its work
+was decided by which of the two the watcher noticed first — a race that had
+nothing to do with the run. Measured on this installation 2026-09-09: of the
+runs one restart caught, `a29e5fc2` (whose session went) was resumed, while
+`fd0c57c8`, `902478df` and `174a5f8c` (whose panes died first, `exit 143`) were
+failed with 32, 14 and 37 commits sitting in their worktrees — and `resumeRun()`
+refuses a run that is not running, so ninety seconds later, when their sessions
+went too, there was no way back.
+
+`signalDeath()` (reports.mjs, pure) is the rule, and it reads **both** fields
+that carry the same fact: tmux fills `#{pane_dead_signal}` when the pane's own
+process was signalled, but `fl-start` launches every agent through a shell, and
+a shell reports its child's signal death as the exit status `128 + n` — which
+is why all three of those runs came back as `{"exit":143,"signal":null}` and why
+reading only the signal field would have caught none of them. Three signals
+count — **SIGHUP** (the session the process hung on went away), **SIGKILL** (the
+OOM killer, a cgroup torn down) and **SIGTERM** (systemd, a deploy, `pkill` —
+the shape a restart has) — and the two exclusions are as much the rule as the
+inclusions: **not SIGINT**, which is a human at the keyboard and putting back
+what somebody just interrupted is the opposite of what they asked for, and not
+SIGSEGV/SIGABRT/SIGQUIT, because a process that faults IS the agent ending and
+filing a crash under "infrastructure" would restart a crash loop behind a word
+saying it is not one.
+
+`panePostMortem()` asks it **first and for every run**, sandboxed or not: it is
+the one verdict that needs nobody, so a daemon that will not answer cannot bury
+it as `unknown`. Its answer carries a `kind` — `killed` or the sandbox's own
+`client` — and `paneNotTheAgent()` (the old `paneClientGone`, which turned out
+to be the special case of the general one) writes the death down under that
+name, resumes through the same `resumeRun()` every other path uses, and reports
+into the same `announceResumes()` log, so a reboot that takes six agents is one
+message and not six. Its cap is **one budget for both shapes**
+(`PANE_RESUME_MAX`, 3, `FREILAUF_PANE_RESUME_MAX`, still answering to
+`FREILAUF_SANDBOX_CLIENT_RESUME_MAX`) counted off the events themselves — two
+counters would let a run alternate between the shapes for ever — and it is
+deliberately not `RESUME_MAX`: a machine that keeps shooting the CLI must not
+spend the run's own crash budget. `anomaly:exit_without_report` joins the list
+`resumeRun()` retracts, **with its `notified:` flag**, because the CLI's own
+end-of-session hook says "ended without a report" seconds before the hub has
+worked out that nobody asked for that ending (measured on `fd0c57c8`: the
+anomaly at 04:07:49, the dead pane at 04:10:43) — and leaving the flag set
+would SPEND the alarm, so a later ending that really is the agent's could never
+page.
+
+**Where the hub cannot prove it, the operator says it** (`resumable()` in
+run-state.mjs, `POST /api/runs/<id>/resume`, the button next to Retry on a
+`failed`/`aborted` run whose worktree still stands). The two offers are not two
+spellings of one thing and the page had only ever made the destructive one:
+**retry** throws the work away and starts the task afresh, **resume** keeps the
+worktree, the commits and — where the coding agent has a resume form — the
+conversation. It goes through the same `resumeRun()`, with a reason that is not
+`session_lost` so a deliberate click spends no crash budget, and it is the way
+back for a run past the cap or one an agent's own exit 1 ended. Refused for a
+conflict run (there the way in is "Merge now" on the original) and for an
+archived one; a refusal puts the record back exactly as it was rather than
+leaving a `running` run with nothing behind it.
+
 **Missed schedule slots are caught up** (`catchUpMissed()` in scheduler.mjs).
 `scheduleDue()` matches the exact minute, so a hub that was off at 03:00 never
 started the 03:00 agent — the next tick is a different minute. Every tick
