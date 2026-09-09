@@ -3173,7 +3173,10 @@ try {
     const zaehlt = async () => {
       const seite = await (await fetchPath(`/?repo=${repoId}`)).text()
       const block = seite.split('side-incidents')[1]?.split('</div>')[0] ?? ''
-      return { block, gefiltert: await (await fetchPath(`/?repo=${repoId}&incidents=1`)).text() }
+      // The folded rail says the same thing in 46 pixels; it is read from the
+      // same response so the two views can never be compared across a gap.
+      const rail = seite.split('class="side-rail"')[1]?.split('</div>\n')[0] ?? ''
+      return { block, rail: /dot gray/.test(rail), gefiltert: await (await fetchPath(`/?repo=${repoId}&incidents=1`)).text() }
     }
     const vorher = await zaehlt()
     contains(vorher.block, 'need you', 'while the run is visible the sidebar asks for hands')
@@ -3186,9 +3189,28 @@ try {
     isFalse(nachher.block.includes('need you'), 'archived: the sidebar no longer promises a row')
     isFalse(nachher.gefiltert.includes(j.runId), 'and the filtered overview has none to give')
     // The record itself is untouched — the archive and the run's own page keep it.
-    isTrue(inc.openIncidentsOf(j.runId).length === 1, 'the incident is still open, it is only not counted here')
-    contains(await (await fetchPath(`/runs/${j.runId}`)).text(), 'Incidents', 'and still shown on the run\'s page')
-    db.prepare('DELETE FROM runs WHERE id=?').run(j.runId)   // keep the pagination count below stable
+    const stillOpen = inc.openIncidentsOf(j.runId).length
+    const runPage = await (await fetchPath(`/runs/${j.runId}`)).text()
+    // Everything is read BEFORE the run goes, so the cleanup cannot be skipped
+    // by a failing assertion — the pagination check further down counts rows.
+    db.prepare('DELETE FROM runs WHERE id=?').run(j.runId)
+    const leer = (await (await fetchPath(`/?repo=${repoId}`)).text()).split('side-incidents')[1] ?? ''
+
+    isTrue(stillOpen === 1, 'the incident is still open, it is only not counted here')
+    contains(runPage, 'Incidents', 'and still shown on the run\'s page')
+    // …but it is not silent either. notifyDueIncidents() knows no `archived`,
+    // so this incident goes on paging; a count that says nothing while the
+    // phone rings is the asymmetry, not the missing overview row. It is
+    // therefore counted as its OWN number, pointing at the one page that can
+    // show it — the archive, whose status column names the block.
+    contains(nachher.block, 'open in the archive', 'the archived one is counted separately')
+    contains(nachher.block, `/archive?repo=${repoId}`, 'and links where its rows really are')
+    isFalse(leer.includes('open in the archive'), 'and the line goes when nothing is open in the archive')
+    // The folded rail is the same question in 46 pixels, and a folded sidebar
+    // that says "nothing stuck" while the open one says otherwise is the two
+    // views disagreeing about one fact.
+    isTrue(nachher.rail, 'the folded rail marks it too')
+    isFalse(vorher.rail, 'and did not before, when the run was still in the overview')
   })
   await check('restore puts the run back into the overview', async () => {
     const r = await postForm(`/api/runs/${ARV}/unarchive`, { back: `/archive?repo=${repoId}` }, { asBrowser: true })

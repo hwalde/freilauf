@@ -1142,6 +1142,8 @@
   "panel.action_lost": "no answer — the hub was restarted while the command ran",
   "incidents.needs_you_short": "need you",
   "incidents.noticed_short": "noticed",
+  "incidents.archived_short": "open in the archive",
+  "incidents.archived_hint": "Open incidents on runs that were archived. They no longer appear in the overview, and they still notify — this is where they are.",
   "status.scheduled": "Scheduled",
   "status.deferred": "Deferred",
   "status.running": "Running",
