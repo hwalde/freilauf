@@ -1318,9 +1318,20 @@ async function tryResume(run) {
   const { resumeRun } = await import('./runner.mjs')
   let r
   try { r = await resumeRun(run.id, { reason: 'session_lost' }) } catch (e) { r = { ok: false, error: e.message } }
-  if (r.ok || r.retry) { resumeLog.push({ runId: run.id, ...r }); return true }
+  if (r.ok || r.retry) { noteResume(run.id, { ...r, reason: 'session_lost' }); return true }
   addEvent(run.id, 'resume_refused', { error: r.error })
   return false
+}
+
+/**
+ * A resume that happened somewhere else belongs in this pass's one message too.
+ * `reports.mjs` resumes a run whose PANE died without its session going
+ * (paneNotTheAgent) — the shape a restart usually has — and before this it was
+ * outside the summary entirely: a reboot that killed six agents would have sent
+ * nothing, or one line per run had that path notified for itself.
+ */
+export function noteResume(runId, outcome) {
+  resumeLog.push({ runId, ...outcome })
 }
 
 /**
@@ -1339,7 +1350,7 @@ async function retryPendingResumes() {
     if (resumeLaunchInFlight(row.id)) continue
     try {
       const r = await launchRun(row.id)
-      resumeLog.push({ runId: row.id, ...r })
+      noteResume(row.id, { ...r, reason: 'session_lost' })
     } catch (e) { console.error(`[watcher] resume ${row.id}:`, e.message) }
   }
 }
@@ -1368,7 +1379,17 @@ async function announceResumes() {
   }
   if (!ok.length && !deferred.length && !retry.length) return
   const name = (id) => db.prepare('SELECT title FROM runs WHERE id=?').get(id)?.title || shortId(id)
-  const lines = ['🔁 tmux sessions were lost (a restart or a dead tmux server) — Freilauf resumed the runs:']
+  // Two ways a run loses its agent, and the headline has to say which happened
+  // or it describes the wrong event: the SESSION went (a dead tmux server), or
+  // the PROCESS inside a session that survived was killed (a restart, a reboot,
+  // the OOM killer). A pass that saw both — which is what a reboot looks like —
+  // gets the wider sentence, because it covers both and neither covers the other.
+  // Over the runs the message really names, not over the raw log: a muted run
+  // that is left out of every line must not decide the sentence above them.
+  const onlySessions = [...ok, ...deferred, ...retry].every(r => (r.reason ?? 'session_lost') === 'session_lost')
+  const lines = [onlySessions
+    ? '🔁 tmux sessions were lost (a restart or a dead tmux server) — Freilauf resumed the runs:'
+    : '🔁 Agents were lost to something outside the runs (a restart, a reboot, a killed process) — Freilauf resumed them:']
   if (ok.length) lines.push(`Resumed in a new session: ${ok.map(r => name(r.runId)).join(', ')}`)
   if (deferred.length) lines.push(`Waiting on the budget gate, resume pending: ${deferred.map(r => name(r.runId)).join(', ')}`)
   if (retry.length) lines.push(`Could not launch yet, trying again next pass: ${retry.map(r => name(r.runId)).join(', ')}`)

@@ -956,8 +956,25 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
               agent_state=NULL, agent_state_at=NULL,
               started_at=datetime(started_at, '+' || ? || ' seconds'), last_activity_at=datetime('now') WHERE id=?`)
     .run(gapSec, runId)
-  const { clearAnomalies } = await import('./reports.mjs')
-  clearAnomalies(runId, ['anomaly:no_activity', 'anomaly:soft_overrun', 'anomaly:overrun', 'anomaly:session_gone'])
+  const { clearAnomalies, notifiedFlags } = await import('./reports.mjs')
+  // `exit_without_report` belongs on this list for the same reason the four
+  // beside it do: the resume overtakes the statement. The agent's process
+  // ending is exactly what a killed pane looks like, and the CLI's own
+  // end-of-session hook says so seconds before the hub has worked out that
+  // nobody asked for that ending — measured on run fd0c57c8, whose
+  // `anomaly:exit_without_report` was written at 04:07:49 and whose pane was
+  // found dead at 04:10:43. Leaving it would mean a resumed run wears a red dot
+  // over an ending that did not happen.
+  //
+  // The notification flag goes with it, and that half is the load-bearing one:
+  // `notified:*` is what keeps a type from paging twice, so leaving it set
+  // SPENDS the alarm — the run would then be free to end without a report for
+  // real, and nobody would ever be told (the same trap `notified:followup_overrun`
+  // has its own entry about).
+  clearAnomalies(runId, [
+    'anomaly:no_activity', 'anomaly:soft_overrun', 'anomaly:overrun', 'anomaly:session_gone',
+    'anomaly:exit_without_report', ...notifiedFlags('exit_without_report'),
+  ])
   addEvent(runId, 'session_lost', {
     reason, attempt: run.resume_attempts + 1, gap_s: gapSec,
     started_at_before: run.started_at, session: run.tmux_session,

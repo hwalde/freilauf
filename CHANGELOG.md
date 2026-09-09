@@ -48,6 +48,46 @@ a day on which nothing was released.
   - Panels without controls behave exactly as before, and the folded rail still
     draws only values. The contract is [docs/panels.md](docs/panels.md).
 
+- **A "Resume run" button, next to "Retry run".** For a run that ended as
+  `failed` or `aborted` and whose worktree is still there, it picks the work
+  back up where it stopped: the same worktree, the same commits, and — where
+  the coding agent has a resume form — the same conversation. The two offers
+  are not two spellings of one thing, and until now the page made only the
+  destructive one: **retry** throws the work away and starts the task afresh.
+  It is the way back for a run past the automatic resume cap, and for one an
+  agent's own crash ended. Not offered for a conflict run (there the way in is
+  "Merge now" on the run it worked for) or an archived one.
+
+### Fixed
+
+- **A restart no longer abandons the agents it interrupts.** Freilauf already
+  resumed a run whose tmux *session* disappeared — but a restart, a reboot or
+  the OOM killer kills **processes**, and where the session survives that (which
+  is the usual case: sessions are kept open on purpose so a finished run's
+  screen stays readable) the hub saw a live session with a dead pane and marked
+  the run failed for good. So whether a restart cost you a run's work came down
+  to which of the two the watcher happened to notice first. Measured on one
+  installation: of the runs a single restart caught, one was resumed and three
+  were failed with 32, 14 and 37 commits sitting unmerged in their worktrees.
+  - A pane whose process was killed from outside — **SIGHUP**, **SIGKILL** or
+    **SIGTERM**, read from either the signal or the shell's `128 + n` exit
+    status — is now infrastructure, not the agent, for every run: the run keeps
+    running and is resumed in a new session, told where it stood.
+    Deliberately **not** SIGINT (that is a person interrupting, and putting back
+    what they just stopped is the opposite of what they asked for) and not a
+    crash such as a segfault (that really is the agent ending).
+  - Capped like the sandbox's own recovery it grew out of, and with the same
+    budget: three times per run (`FREILAUF_PANE_RESUME_MAX`, still answering to
+    `FREILAUF_SANDBOX_CLIENT_RESUME_MAX`), after which the run ends as it did
+    before and the message names the infrastructure rather than the agent. It
+    does not spend the run's own crash budget.
+  - One message per event, not per run: a reboot that takes six agents says so
+    once, in the same summary a lost tmux server already used.
+  - A resumed run no longer wears the red "ended without a report" its coding
+    agent's own shutdown hook raised seconds before the hub had worked out that
+    nobody asked for that ending — and because the alarm is taken back rather
+    than left spent, a later ending that really is the agent's can still page.
+
 ## 2026-09-08
 
 ### Fixed
