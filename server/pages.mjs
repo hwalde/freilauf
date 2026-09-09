@@ -508,21 +508,41 @@ function workBlock(repoId) {
  * stay counted: they need hands and belong to no run. They are also the one
  * group the filtered overview cannot show, which is why `linkable` exists —
  * see incidentBlock().
+ *
+ * What archiving may NOT do is make an open incident vanish from the hub
+ * altogether, and that is what it did: `notifyDueIncidents()` (incidents.mjs)
+ * does not know the word `archived`, so a still-open incident on an archived
+ * run goes on paging — a new one, and a reopened one all over again — while
+ * every counter in the UI says nothing needs hands. Measured on this
+ * installation 2026-09-09: two `merge_blocked` incidents, open since 03.09.
+ * and 07.09., both on runs the operator had archived, both about work that is
+ * demonstrably still not on `main` (their tips conflict with `origin/main` to
+ * this day) — and the alarm about them exists only on somebody's phone. That
+ * is the asymmetry, not the exclusion: an alarm that rings and is then
+ * unfindable is worse than either half alone.
+ *
+ * So the archived ones are counted again — as their OWN number, next to the
+ * other two and never mixed into them. Nothing an existing line says changes
+ * meaning, the "needs you" count still promises only rows the overview can
+ * really show, and the new one links where its rows are: the archive, whose
+ * status column carries integrationLine() and therefore names the block.
  */
 function openIncidents(repoId) {
-  const offen = db.prepare(`SELECT i.*, r.status AS run_status FROM incidents i
+  const allOpen = db.prepare(`SELECT i.*, r.status AS run_status, r.archived_at AS run_archived FROM incidents i
     LEFT JOIN runs r ON r.id = i.run_id
-    WHERE i.geloest_am IS NULL AND (i.run_id IS NULL OR (r.repo_id = ? AND r.archived_at IS NULL))`).all(repoId ?? -1)
-  const handeln = offen.filter(v => needsHuman(v, v.run_status)).length
+    WHERE i.geloest_am IS NULL AND (i.run_id IS NULL OR r.repo_id = ?)`).all(repoId ?? -1)
+  const visible = allOpen.filter(v => v.run_id === null || v.run_archived === null)
+  const handeln = visible.filter(v => needsHuman(v, v.run_status)).length
   return {
-    offen: offen.length, handeln, noticed: offen.length - handeln,
-    linkable: offen.filter(v => v.run_id !== null).length,
+    offen: visible.length, handeln, noticed: visible.length - handeln,
+    linkable: visible.filter(v => v.run_id !== null).length,
+    archived: allOpen.length - visible.length,
   }
 }
 
 function incidentBlock(repoId) {
-  const { offen, handeln, noticed, linkable } = openIncidents(repoId)
-  if (!offen) return ''
+  const { offen, handeln, noticed, linkable, archived } = openIncidents(repoId)
+  if (!offen && !archived) return ''
   // The counts link into the overview filtered to the runs that carry an open
   // incident — the same gesture as the work-in-flight block above: a click on
   // a number shows the rows behind it, not a hunt through every run. With
@@ -534,9 +554,16 @@ function incidentBlock(repoId) {
   const zahl = (klasse, n, text) => linkable
     ? `<div><a href="${ziel}"><b class="${klasse}">${n}</b> ${text}</a></div>`
     : `<div><b class="${klasse}">${n}</b> ${text}</div>`
+  // The archived ones are a line of their own, dim, pointing at the archive.
+  // Their job is "there is still something open over here" — the number the
+  // notification channel has been talking about all along.
+  const archivedLine = archived
+    ? `<div class="dim"><a href="/archive?repo=${repoId}" title="${e(t('incidents.archived_hint'))}"><b>${archived}</b> ${e(t('incidents.archived_short'))}</a></div>`
+    : ''
   return `<div class="side-block side-incidents"><span class="side-label">${e(t('incidents.title'))}</span>
     ${handeln ? zahl('err', handeln, e(t('incidents.needs_you_short'))) : ''}
-    ${noticed ? zahl('warn', noticed, e(t('incidents.noticed_short'))) : ''}</div>`
+    ${noticed ? zahl('warn', noticed, e(t('incidents.noticed_short'))) : ''}
+    ${archivedLine}</div>`
 }
 
 /**
@@ -796,11 +823,17 @@ async function sideRail(repoId) {
   teile.push(`<span class="rail-dot" title="${e(t('layout.pipeline'))}: ${e(pipeline ? t('layout.on') : t('layout.off'))}">
     <span class="dot ${pipeline ? 'green' : 'yellow'}"></span></span>`)
 
-  const { handeln, noticed } = openIncidents(repoId)
+  const { handeln, noticed, archived } = openIncidents(repoId)
   if (handeln) teile.push(`<span class="rail-dot" title="${e(t('incidents.needs_you_short'))}">
     <span class="dot red"></span>${handeln}</span>`)
   if (noticed) teile.push(`<span class="rail-dot" title="${e(t('incidents.noticed_short'))}">
     <span class="dot yellow"></span>${noticed}</span>`)
+  // The archived ones get a mark too — grey, because they are not urgent, and
+  // present, because "is anything stuck" is the question this rail exists to
+  // answer and a folded sidebar that says "nothing" while the open one says
+  // "2 open in the archive" is the two views disagreeing about one fact.
+  if (archived) teile.push(`<span class="rail-dot" title="${e(t('incidents.archived_short'))}">
+    <span class="dot gray"></span>${archived}</span>`)
 
   // The same numbers the panel shows, as bars that fill from the bottom. Read
   // through subscriptionUsage() rather than re-derived, so the rail cannot come

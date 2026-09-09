@@ -1142,6 +1142,8 @@
   "panel.action_lost": "没有响应 — 命令运行期间 Hub 被重启",
   "incidents.needs_you_short": "需要处理",
   "incidents.noticed_short": "仅记录",
+  "incidents.archived_short": "归档中仍未处理",
+  "incidents.archived_hint": "已归档运行上仍未解决的事件。它们不再出现在总览中，却仍会发出通知——它们在这里。",
   "status.scheduled": "已计划",
   "status.deferred": "已推迟",
   "status.running": "运行中",

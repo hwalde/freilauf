@@ -1142,6 +1142,8 @@
   "panel.action_lost": "keine Antwort — der Hub wurde neu gestartet, während das Kommando lief",
   "incidents.needs_you_short": "braucht dich",
   "incidents.noticed_short": "nur notiert",
+  "incidents.archived_short": "offen im Archiv",
+  "incidents.archived_hint": "Offene Vorfälle zu archivierten Läufen. Sie stehen in keiner Übersicht mehr, melden sich aber weiterhin — hier stehen sie.",
   "status.scheduled": "Geplant",
   "status.deferred": "Zurückgestellt",
   "status.running": "Läuft",

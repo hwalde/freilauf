@@ -60,6 +60,20 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **An alarm you were being paged about could be found nowhere in the hub.**
+  Archiving a run deliberately takes its incidents out of the status sidebar's
+  count — that count is a link into the overview, and no archived run is in an
+  overview. What nobody noticed is that the *notifications* never learned the
+  same rule: an incident on an archived run goes on notifying, a new one and a
+  reopened one alike. So a message could arrive saying a merge is blocked while
+  every number in the hub said nothing needs hands. Measured on one
+  installation: two `merge_blocked` incidents open for days, both on archived
+  runs, both about work that really is still not on the base branch — and the
+  only trace of them was on somebody's phone. The sidebar now counts those
+  separately, as **"open in the archive"**, linking to the archive, whose status
+  column already names the block. The two existing counts are unchanged and
+  still promise only rows the overview can really show.
+
 - **A restart no longer abandons the agents it interrupts.** Freilauf already
   resumed a run whose tmux *session* disappeared — but a restart, a reboot or
   the OOM killer kills **processes**, and where the session survives that (which

@@ -749,6 +749,24 @@ incidents, both on runs the operator had archived, so two repos said "1 needs
 you" and both clicks landed on "no runs yet". A number that promises rows nobody
 can see is the same lie the run multi-select has a rule about.
 
+**But taking them out of that count must not take them out of the hub**, and
+for a while it did. `notifyDueIncidents()` (incidents.mjs) knows no
+`archived_at` either — which is right, it belongs to the group above — so an
+open incident on an archived run goes on paging, a new one and a reopened one
+alike, while every counter in the UI said nothing needed hands. Measured
+2026-09-09: two `merge_blocked` incidents, open since 03.09. and 07.09., both
+on archived runs, both about work that is demonstrably still not on `main`
+(their tips conflict with `origin/main` to this day), and the only trace of
+them anywhere was a message on somebody's phone. The asymmetry is the fault,
+not the exclusion: an alarm that rings and is then unfindable is worse than
+either half alone. So they are counted again as their **own** number
+("open in the archive"), never mixed into the other two — the "needs you" line
+still promises only rows the overview can show — and it links where its rows
+really are, the archive, whose status column carries `integrationLine()` and
+therefore names the block. Whichever way a future change moves this, it has to
+move both sides: what the hub will wake somebody up about, it has to be able to
+show them.
+
 **And a list is put away in one gesture, not row by row.** Forty finished runs
 of which four are worth keeping were forty clicks; the overview therefore
 carries a checkbox per archivable row, a bulk bar UNDER the table (where the
