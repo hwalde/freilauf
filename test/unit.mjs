@@ -7437,6 +7437,42 @@ try {
     equal(runtimeClock(null), 'none', 'no run, no clock')
   })
 
+  await check('a progress report buys another expected duration, not immunity', async () => {
+    const { overrunClockFrom } = await import('../server/run-state.mjs')
+    const start = Date.parse('2026-09-03T08:46:10Z')
+    const progress = Date.parse('2026-09-03T10:21:23Z')
+    equal(overrunClockFrom(start, NaN), start, 'no progress report: the run’s own start')
+    equal(overrunClockFrom(start, progress), progress,
+      'a progress report is the moment the expectation is measured from')
+    // A report cannot move the clock BACKWARDS — the watcher reads MAX(ts), but
+    // a clock that could go back would hand a run a second alarm it had already
+    // earned.
+    equal(overrunClockFrom(progress, start), progress, 'never earlier than the start')
+
+    // The rule this replaces, in the run that showed what it cost. 48ceead7:
+    // expectation 45 min, started 08:46:10, red raised and NOTIFIED at 09:31,
+    // two progress reports at 10:21 retracting red and yellow — after which the
+    // yellow came back three seconds later (it never had the veto) and the red
+    // could not, because the old guard skipped it for any run that had EVER
+    // written a progress event. The run finished at 124 min, 276 % of its
+    // expectation, wearing the weaker of the two statements.
+    const expectedMs = 45 * 60_000
+    const overrunAt = (now, clock) => now - clock > expectedMs
+    const yellowAt = (now, clock) => now - clock > 0.8 * expectedMs
+    const dreiSekundenSpaeter = progress + 3_000
+    isFalse(yellowAt(dreiSekundenSpaeter, overrunClockFrom(start, progress)),
+      'the yellow does not flap back three seconds after the report that retracted it')
+    isTrue(yellowAt(Date.parse('2026-09-03T11:00:00Z'), overrunClockFrom(start, progress)),
+      'but it is earned again once the new 80 % is crossed')
+    const ende = Date.parse('2026-09-03T10:50:00Z')   // 124 min in, the run’s real end
+    isFalse(overrunAt(ende, overrunClockFrom(start, progress)),
+      'still inside the time the report bought: no alarm, which is the point of reporting')
+    isTrue(overrunAt(Date.parse('2026-09-03T11:10:00Z'), overrunClockFrom(start, progress)),
+      'and past THAT the red is raised again — the old veto could never raise it')
+    isTrue(overrunAt(Date.parse('2026-09-03T09:31:11Z'), overrunClockFrom(start, NaN)),
+      'a run that never reported is unchanged')
+  })
+
   await check('branchOnRemote: behind-only is pushed, no upstream is not', async () => {
     // The watcher spends this as "does work live only on this machine". The
     // integrator merges the branch into the base branch and pushes THAT, which

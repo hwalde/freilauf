@@ -884,6 +884,28 @@ try {
     isTrue(k.includes('cleared:anomaly:overrun'), 'marked as resolved')
     isTrue(k.includes('cleared:anomaly:soft_overrun'), 'the yellow level too')
   })
+  await check('…and the retraction holds, then re-arms — it is not immunity', async () => {
+    // The run is still five minutes into a one-minute expectation, so under the
+    // old rule the very next pass raised the YELLOW again (it never had the
+    // progress guard) while the RED stayed skipped for ever, because that guard
+    // asked whether the run had EVER written a progress event. The run then wore
+    // the weaker of the two statements while going far past its duration —
+    // measured on production run 48ceead7, red raised and notified at 09:31, two
+    // progress reports at 10:21, yellow back three seconds later, and the run
+    // finished at 276 % of its expectation.
+    await watcherTick()
+    let k = ereignisse(R3)
+    isFalse(k.includes('anomaly:soft_overrun'), 'the yellow does not flap straight back')
+    isFalse(k.includes('anomaly:overrun'), 'nor the red — the report bought time')
+
+    // Backdate the report itself: the clock the expectation is measured from is
+    // now that report, so this is the run going past its duration a SECOND time.
+    db.prepare(`UPDATE events SET ts=datetime('now','-5 minutes') WHERE run_id=? AND kind='progress'`).run(R3)
+    await watcherTick()
+    k = ereignisse(R3)
+    isTrue(k.includes('anomaly:overrun'), `the red is earned again (has: ${k.join(', ')})`)
+    isTrue(k.includes('anomaly:soft_overrun'), 'and the yellow with it')
+  })
   await check('a run that came through stops calling for attention', async () => {
     // The traffic light is fed by incidents AND by the run's anomalies. An
     // anomaly is a statement about a run IN FLIGHT — "this is taking longer

@@ -3968,6 +3968,33 @@ duration uses to retract its overrun). It announces explicitly, because nothing
 was ADDED: the live channel hangs on `addEvent()`, and a retraction no page
 hears about sits in the overview until the next unrelated event.
 
+**A retraction is not immunity, and the overrun alarm was spending it as one.**
+A progress report retracts both overrun statements on the report path
+(`clearAnomalies()`, whose own comment promises `addEventOnce` "fires again on
+recurrence"). The watcher carried a SECOND copy of that rule in the wrong shape:
+the red was skipped for any run that had **ever** written a `progress` event —
+a veto with no time bound, which defeated exactly the re-arming the retraction
+promises. So one progress line in the first ten minutes bought a run immunity
+from the overrun alarm for the rest of its life, and the platform prompt asks
+every agent for that line ("if you need considerably longer, report it") — the
+runs most likely to overrun were the ones that had disarmed the alarm. Measured
+on this installation: 12 runs past their expectation with a progress report and
+no `anomaly:overrun` among them, the worst at 413 % (`71d69a4d`, 186 min against
+45). Run `48ceead7` shows why it is worse than merely missing — red raised and
+notified at 09:31, two progress reports at 10:21 retracting red **and** yellow,
+the **yellow back three seconds later** (it never had the veto) and the red
+unable to return: the run finished at 276 % of its expectation wearing the
+weaker of the two statements while the stronger one was permanently spent.
+**Both thresholds are measured from the last progress report now**
+(`overrunClockFrom()` in run-state.mjs, pure, next to `runtimeClock()` because
+it is the same kind of question), which is what "the agent told you where it
+stands" actually buys: another expected duration, earned by saying so, and a
+fresh alarm past that. Same shape as `agentCopedAfter()` — a comparison against
+the moment we measure against, never a flag that latches — and it ends the
+yellow's flapping, since the retracted statement now has a new 80 % to cross
+before it can come back. `notified:overrun` deliberately still stays set, so the
+re-armed red colours the row without paging a second time about one run.
+
 **And the run's own END is the last retraction, which nobody had wired up.**
 Four things already take an anomaly back the moment it is overtaken — a
 progress report, a raised expected duration, a resume, activity coming back —

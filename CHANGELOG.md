@@ -50,6 +50,22 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A single progress report switched a run's overrun alarm off for good.** The
+  red "this run is far past its expected duration" was skipped for any run that
+  had *ever* reported progress — so one `fl-report progress` in the first ten
+  minutes bought a run immunity for the rest of its life, on the very alarm that
+  says an agent is not coming back. The platform prompt asks every agent for
+  that line when it needs longer, so the runs most likely to overrun were
+  exactly the ones that had disarmed the alarm: 12 runs on this installation
+  went past their expectation with a progress report and no alarm, the worst at
+  413 % of its duration. Worse, the *yellow* "approaching the expected duration"
+  had no such veto and came back within seconds of the report that retracted it
+  — so such a run ended up showing the weaker of the two warnings while the
+  stronger one was permanently spent. Both thresholds are now measured **from
+  the last progress report**: reporting where you stand buys another expected
+  duration, and going past that raises the alarm again. A run that never reports
+  is unchanged, and the operator is still paged only once per run.
+
 - **The sidebar could claim the machine held nothing.** `tmux list-sessions`
   reports "there is no server" and "I could not answer you" through the same
   exit code, and the memory block spent the second one as the first: a tmux

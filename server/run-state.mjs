@@ -140,6 +140,44 @@ export function runtimeClock(run) {
 }
 
 /**
+ * The moment the expected duration is measured FROM — the run's start, or the
+ * last progress report if there has been one.
+ *
+ * A progress report says "here is where I stand, and I need longer", which the
+ * platform prompt explicitly asks for. `handleReport()` answers it by RETRACTING
+ * what the silence produced (`clearAnomalies()` renames the two overrun events
+ * to `cleared:*`, so `addEventOnce()` can raise them again — its own comment
+ * says exactly that). That is the right mechanism and it was already there.
+ *
+ * The watcher carried a SECOND copy of the same rule in the wrong shape: the red
+ * `anomaly:overrun` was skipped whenever the run had EVER written a progress
+ * event. A veto with no time bound, and it defeated the re-arming the retraction
+ * promises — so one progress line in the first ten minutes bought a run immunity
+ * from the overrun alarm for the rest of its life. Measured on this
+ * installation: 12 runs past their expectation with a progress report and no
+ * overrun among them, the worst at 413 % (71d69a4d, 186 min against 45).
+ *
+ * Run 48ceead7 shows why that is worse than merely missing: it earned a red at
+ * 09:31 and was notified, two progress reports at 10:21 retracted red AND
+ * yellow, the YELLOW came back three seconds later (it never had the veto) and
+ * the red could not — so the run finished at 276 % of its expectation wearing
+ * "approaching the expected duration", the weaker of the two statements, with
+ * the stronger one permanently spent.
+ *
+ * Measuring from the last progress report is what "the agent told you where it
+ * stands" actually buys: another expected duration's worth of time, earned by
+ * saying so, and a fresh alarm if it goes past that too. It is the same shape as
+ * `agentCopedAfter()` in detect.mjs — a comparison against the moment we measure
+ * against, never a flag that latches — and it stops the yellow flapping, because
+ * the retracted statement now has a fresh 80 % to cross before it can return.
+ *
+ * Pure: the caller has already parsed the timestamps.
+ */
+export function overrunClockFrom(startedMs, lastProgressMs) {
+  return Number.isFinite(lastProgressMs) && lastProgressMs > startedMs ? lastProgressMs : startedMs
+}
+
+/**
  * The status word a run displays under.
  *
  *   waiting_input   the agent's turn is over and it waits for a human — on a
