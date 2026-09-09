@@ -668,53 +668,94 @@ function noteHtml(note) {
  * and 6 called gleichzeitig" and the hub decides what that is in a 240px
  * column — which is the same rule the numbers above already follow, one field
  * further out. See docs/panels.md, "Data, never markup".
+ *
+ * Every field carries `data-seed`: the value the SERVER just rendered. It is
+ * what lets hub.js tell an entry a person made and has not sent yet from the
+ * value the panel came with, and therefore what lets an unsent entry survive
+ * the sidebar being swapped (`panelEdits()` there). It is written by the one
+ * place that knows the server's answer — putting it anywhere else would be a
+ * second copy of the same statement.
+ *
+ * The shape is one ROW per field — caption left, field right — and not a
+ * caption above its field: measured in the running hub, four controls (two
+ * numbers, a select and a button) took more height in the 240px column than
+ * the whole rest of the sidebar, because each of them was three lines
+ * (caption, field, hint). The hint is still in the DOM and still reachable —
+ * `aria-describedby` announces it, and the stylesheet shows it on hover and on
+ * focus — it simply no longer stands there permanently. It is positioned OVER
+ * the page rather than in the flow, so revealing it moves nothing: a hint that
+ * pushes the button it belongs to down as the mouse travels towards it is a
+ * moving target.
  */
 function panelControls(p, back) {
   if (!p.controls?.length) return ''
-  const feld = (c) => {
+  const buttonHtml = (c) => `<button type="submit" name="control" value="${e(c.key)}"
+      class="btn panel-btn${c.tone === 'red' ? ' danger' : ''}"
+      ${c.confirm ? `data-confirm="${e(c.confirm)}"` : ''}
+      ${c.hint ? `title="${e(c.hint)}"` : ''}>${e(c.label)}</button>`
+  const fieldHtml = (c) => {
     const id = `pc-${p.key}-${c.key}`
     const name = `v_${c.key}`
-    const gemein = `id="${e(id)}" name="${e(name)}" data-panel-control="${e(c.key)}"`
+    const hintId = `${id}-hint`
+    const common = `id="${e(id)}" name="${e(name)}" data-panel-control="${e(c.key)}"`
       + (c.submit ? ' data-panel-submit="1"' : '')
-    if (c.type === 'button') {
-      return `<button type="submit" name="control" value="${e(c.key)}"
-        class="btn panel-btn${c.tone === 'red' ? ' danger' : ''}"
-        ${c.confirm ? `data-confirm="${e(c.confirm)}"` : ''}
-        ${c.hint ? `title="${e(c.hint)}"` : ''}>${e(c.label)}</button>`
-    }
-    const beschriftung = `<label for="${e(id)}">${e(c.label)}</label>`
+      + (c.hint ? ` aria-describedby="${e(hintId)}"` : '')
+    const caption = `<label for="${e(id)}">${e(c.label)}</label>`
+    const hint = c.hint ? `<span class="panel-hint dim" id="${e(hintId)}">${e(c.hint)}</span>` : ''
     if (c.type === 'toggle') {
       // The hidden `0` companion: an unticked box is simply absent from a POST
       // body, so without it "switch it off" would be indistinguishable from
       // "this field was not on the page" — and the fallback for a missing key
       // is the CURRENT value, which would make switching off impossible.
+      // The caption stands FIRST here as it does in every other row — the box
+      // itself is what moves to the right edge, under the other fields. The
+      // hidden companion still stands immediately before the checkbox; that
+      // order is the contract, not the caption's position.
+      const on = c.value === '1'
       return `<div class="panel-field panel-field-toggle">
+        ${caption}
         <input type="hidden" name="${e(name)}" value="0">
-        <input type="checkbox" value="1" ${gemein}${c.value === '1' ? ' checked' : ''}
-          ${c.confirm ? `data-confirm="${e(c.confirm)}"` : ''}>
-        ${beschriftung}</div>`
+        <input type="checkbox" value="1" ${common} data-seed="${on ? '1' : '0'}"${on ? ' checked' : ''}
+          ${c.confirm ? `data-confirm="${e(c.confirm)}"` : ''}>${hint}</div>`
     }
-    let eingabe
+    const seed = ` data-seed="${e(c.value)}"`
+    let input
     if (c.type === 'select') {
-      eingabe = `<select ${gemein}>${c.options.map(o =>
+      input = `<select ${common}${seed}>${c.options.map(o =>
         `<option value="${e(o.value)}"${o.value === c.value ? ' selected' : ''}>${e(o.label)}</option>`).join('')}</select>`
     } else if (c.type === 'number') {
-      eingabe = `<input type="number" ${gemein} value="${e(c.value)}" required
+      input = `<input type="number" ${common}${seed} value="${e(c.value)}" required
         ${c.min === null ? '' : `min="${e(String(c.min))}"`}
         ${c.max === null ? '' : `max="${e(String(c.max))}"`}
         ${c.step === null ? '' : `step="${e(String(c.step))}"`}>`
     } else {
-      eingabe = `<input type="text" ${gemein} value="${e(c.value)}" maxlength="${PANEL_MAX_VALUE}"
+      input = `<input type="text" ${common}${seed} value="${e(c.value)}" maxlength="${PANEL_MAX_VALUE}"
         ${c.placeholder ? `placeholder="${e(c.placeholder)}"` : ''}>`
     }
-    return `<div class="panel-field">${beschriftung}${eingabe}
-      ${c.hint ? `<span class="panel-hint dim">${e(c.hint)}</span>` : ''}</div>`
+    return `<div class="panel-field">${caption}${input}${hint}</div>`
   }
+  // Buttons that stand next to each other in the declaration stand next to each
+  // other on the page, in one row aligned with the fields' right edge: a button
+  // has to look like it belongs to the fields it sends, and a stack of
+  // full-width buttons under a stack of rows says nothing about which is which.
+  // The declared ORDER is kept — a producer may well put a button between two
+  // fields, and moving it would be the hub deciding something the producer did.
+  const pieces = []
+  for (const c of p.controls) {
+    if (c.type === 'button') {
+      const last = pieces[pieces.length - 1]
+      if (last?.buttons) last.buttons.push(c)
+      else pieces.push({ buttons: [c] })
+    } else pieces.push({ field: c })
+  }
+  const html = pieces.map(piece => piece.field
+    ? fieldHtml(piece.field)
+    : `<div class="panel-btns">${piece.buttons.map(buttonHtml).join('')}</div>`).join('')
   return `<form class="panel-controls" method="post" action="/api/panels/control" data-panel-form="${e(p.key)}">
     <input type="hidden" name="repo" value="${e(String(p.repoId))}">
     <input type="hidden" name="key" value="${e(p.key)}">
     <input type="hidden" name="back" value="${e(back || '/')}">
-    ${p.controls.map(feld).join('')}
+    ${html}
   </form>`
 }
 

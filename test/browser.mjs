@@ -475,6 +475,138 @@ try {
     await p.close()
   })
 
+  // …and the guard above is only about the CARET, which is why it was never
+  // enough. Measured in the running hub: a select was set to another value, the
+  // mouse moved towards the button — the focus leaves with that — and 22
+  // seconds later the field stood on the old value again, without the server
+  // value having moved at all. From where the operator sits that is a broken
+  // control, not a stale page.
+  const unsentPanel = () => panelPushen({
+    title: 'Schwarm',
+    total: 1,
+    controls: [
+      { key: 'n', type: 'number', label: 'at once', value: 1, min: 0, max: 6, store: true },
+      { key: 'w', type: 'select', label: 'per', value: 'hour', store: true, options: ['hour', 'week', 'month'] },
+      { key: 'go', type: 'button', label: 'Apply' },
+    ],
+  })
+
+  await check('an entry nobody has sent yet survives the swap, focus or no focus', async () => {
+    await unsentPanel()
+    const p = await neueSeite(`/?repo=${repoId}`, () => { window.FREILAUF_SIDEBAR_POLL_MS = 1000 })
+    await sidebarAuf(p)
+    await p.fill('input[name="v_n"]', '4')
+    await p.selectOption('select[name="v_w"]', 'week')
+    // The gesture: choose, then reach for the button. The focus is gone before
+    // the press, and this is exactly the stretch the focus guard cannot cover.
+    await p.evaluate(() => document.activeElement?.blur())
+    await p.evaluate(() => { document.getElementById('status-sidebar').dataset.vorher = '1' })
+    await laufStarten({ repo_id: repoId, prompt: 'a run while an entry stands unsent' })
+    await wartePage(p, () => !document.getElementById('status-sidebar')?.dataset.vorher,
+      null, 'the sidebar to swap under the unsent entry')
+    // The swap really happened — the sidebar is NOT frozen while a field is
+    // held open, which is the whole reason this restores instead of blocking.
+    equal(await p.inputValue('select[name="v_w"]'), 'week', 'the choice is still there')
+    equal(await p.inputValue('input[name="v_n"]'), '4', 'and so is the number')
+    sauber(p)
+    await p.close()
+  })
+
+  await check('a value somebody else moved underneath it is marked, and the entry still wins', async () => {
+    await unsentPanel()
+    const p = await neueSeite(`/?repo=${repoId}`)
+    await sidebarAuf(p)
+    await p.selectOption('select[name="v_w"]', 'month')
+    await p.evaluate(() => document.activeElement?.blur())
+    // A foreign push: the project moved the value while the entry stood.
+    await panelPushen({
+      title: 'Schwarm',
+      total: 1,
+      controls: [
+        { key: 'n', type: 'number', label: 'at once', value: 1, min: 0, max: 6, store: true },
+        { key: 'w', type: 'select', label: 'per', value: 'week', store: true, options: ['hour', 'week', 'month'] },
+        { key: 'go', type: 'button', label: 'Apply' },
+      ],
+    })
+    await wartePage(p, () => document.querySelector('select[name="v_w"]')?.dataset.panelForeign === '1',
+      null, 'the field to say that the value moved underneath it')
+    equal(await p.inputValue('select[name="v_w"]'), 'month',
+      'the newer human decision still wins — it is simply no longer a silent one')
+    contains(await p.$eval('select[name="v_w"]', el => el.title || ''), 'week',
+      'and the title names the value the operator would otherwise send over unknowingly')
+    sauber(p)
+    await p.close()
+  })
+
+  await check('but a successful send makes what was sent the new baseline', async () => {
+    await unsentPanel()
+    const p = await neueSeite(`/?repo=${repoId}`)
+    await sidebarAuf(p)
+    // The answer is faked so that NOTHING on the server changes: what the
+    // sidebar renders afterwards is still the pushed value, which is exactly
+    // the case a browser holding on to the entry would get wrong — a control
+    // the hub does not store is owned by the project and never moves.
+    await p.route('**/api/panels/control', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, saved: true }) })
+    })
+    await p.fill('input[name="v_n"]', '5')
+    await p.click('button[name="control"][value="go"]')
+    // The GREEN toast, not any toast: an exception on the answer path lands in
+    // the same box as an error from the hub, and waiting for "a toast" would
+    // read a thrown baseline update as a successful one (it did, once).
+    await wartePage(p, () => !!document.querySelector('#freilauf-toasts .toast.ok'), null, 'the toast that says it went')
+    await p.evaluate(() => { document.getElementById('status-sidebar').dataset.vorher = '1' })
+    await laufStarten({ repo_id: repoId, prompt: 'a run after a control was sent' })
+    await wartePage(p, () => !document.getElementById('status-sidebar')?.dataset.vorher,
+      null, 'the sidebar to swap after the press')
+    equal(await p.inputValue('input[name="v_n"]'), '1',
+      'the entry was let go of when it was sent — otherwise the browser would hold a difference that no longer exists')
+    sauber(p)
+    await p.close()
+  })
+
+  // The other half of the same block: four controls used to be twelve lines in
+  // a 240px column — caption, field, hint, per control — which was more height
+  // than the whole rest of the sidebar.
+  await check('a control is one row, and its hint costs no height until it is asked for', async () => {
+    await panelPushen({
+      title: 'Schwarm',
+      total: 1,
+      controls: [
+        { key: 'n', type: 'number', label: 'at once', value: 1, min: 0, max: 6, store: true,
+          hint: 'how many workers may run at the same time' },
+        { key: 'go', type: 'button', label: 'Apply' },
+      ],
+    })
+    const p = await neueSeite(`/?repo=${repoId}`)
+    await sidebarAuf(p)
+    const sizes = await p.$eval('#status-sidebar .panel-field', (field) => {
+      const l = field.querySelector('label').getBoundingClientRect()
+      const i = field.querySelector('input').getBoundingClientRect()
+      const h = field.querySelector('.panel-hint')
+      return {
+        row: Math.round(field.getBoundingClientRect().height),
+        captionRight: Math.round(l.right), fieldLeft: Math.round(i.left), fieldWidth: Math.round(i.width),
+        column: Math.round(field.getBoundingClientRect().width),
+        hintVisible: Number(getComputedStyle(h).opacity) > 0,
+        described: field.querySelector('input').getAttribute('aria-describedby') === h.id,
+      }
+    })
+    isTrue(sizes.fieldLeft >= sizes.captionRight, 'the field stands BESIDE its caption, not under it')
+    isTrue(sizes.row < 34, `and the whole control is one row (${sizes.row}px)`)
+    isTrue(sizes.fieldWidth < sizes.column * 0.6,
+      `a number takes four characters, not the column (${sizes.fieldWidth} of ${sizes.column}px)`)
+    isFalse(sizes.hintVisible, 'the hint does not stand there permanently')
+    isTrue(sizes.described, 'but it is tied to its field, so it is announced and never unreachable')
+    await p.hover('#status-sidebar .panel-field input')
+    await wartePage(p, () => Number(getComputedStyle(document.querySelector('#status-sidebar .panel-hint')).opacity) > 0,
+      null, 'the hint to appear on the field')
+    const afterwards = await p.$eval('#status-sidebar .panel-field', f => Math.round(f.getBoundingClientRect().height))
+    equal(afterwards, sizes.row, 'and showing it moves nothing — a hint that pushes the button down is a moving target')
+    sauber(p)
+    await p.close()
+  })
+
   await check('a press sends the values and the button that was pressed, and says what happened', async () => {
     const p = await neueSeite(`/?repo=${repoId}`)
     await sidebarAuf(p)

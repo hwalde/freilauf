@@ -731,6 +731,7 @@
   "js.panel_working": "Sending…",
   "js.panel_started": "Command started",
   "js.panel_saved": "Saved",
+  "js.panel_foreign": "Changed elsewhere in the meantime: {value}. Your entry counts once you send it.",
   "js.qr_scheduled": "Run planned: {name}",
   "js.qr_deferred": "Run deferred (quota/credit): {name}",
   "js.qr_starting": "Starting: {name}",

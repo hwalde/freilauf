@@ -168,13 +168,10 @@ the operator uses.
 ```
 ┌─ SCHWARM ────────────┐
 │ Findings         33  │
-│ at once              │
-│ [ 2            ]     │
-│ starts               │
-│ [ 1            ]     │
-│ per                  │
-│ [ hour        ▾]     │
-│ [ Apply ]            │
+│ at once        [ 2 ] │
+│ starts         [ 1 ] │
+│ per       [ hour  ▾] │
+│            [ Apply ] │
 │ as of 14:03          │
 │ applied 14:05  OK    │
 └──────────────────────┘
@@ -245,7 +242,7 @@ one of them.
 | `type` | all | `number`, `text`, `select`, `toggle`, `button`. Anything else is refused, never rendered as something near enough |
 | `label` | all | what it is called. Defaults to the key |
 | `value` | not `button` | the seed (stored controls) or the last measurement (everything else) |
-| `hint` | all | one small line under the field |
+| `hint` | all | one sentence about the field. Shown when the mouse is on the field or the field has focus, and tied to it for a screen reader — it does not stand there permanently, because a 240px column has no room for a third line per control |
 | `store` | not `button` | the hub keeps this value; see the table above |
 | `submit` | not `button` | does changing it act at once? Default **yes** for a `toggle` (a switch that needs a second click on another widget is not a switch), **no** for a number, a text or a select — those are typed and read back before they are meant, and travel when a button is pressed. A button always submits; it has no second purpose |
 | `confirm` | all | a question the operator has to answer before anything happens |
@@ -329,6 +326,24 @@ better producer pushes the panel at the end of its command — then both lines s
 
 One command per panel runs at a time. A second press while one is running is
 refused with that sentence, rather than two commands racing for one setting.
+
+### What an unsent entry is worth
+
+The sidebar is replaced whole every half minute and on every run event, and a
+value typed or chosen into a control lives nowhere but in that page until it is
+sent. So an entry nobody has sent yet is **carried across the refresh** — the
+rest of the sidebar goes on saying how the machine is doing, and the field
+keeps what the operator put in it, whether or not it still has the focus. Once
+it has been sent successfully the panel's own value counts again, so the
+browser never holds on to a difference that is over.
+
+The one case worth knowing about as a producer: if a push moves a control's
+value while somebody has an unsent entry standing in that field, the entry
+still wins — it is the newer human decision — and the field says that the value
+moved underneath it and names the value that was pushed. A press then sends the
+operator's value, not the pushed one. If a control's value is something your
+producer owns and re-pushes on a clock, that is worth remembering when it is
+also something an operator sets by hand.
 
 ### Caps
 
