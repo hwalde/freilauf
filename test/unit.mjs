@@ -43,6 +43,19 @@ process.env.FREILAUF_RUNS_DIR = join(sandbox, 'runs')
 // the code under test. The two checks that want a seam set it themselves and
 // restore it; a fence at the top is what protects the groups before them.
 delete process.env.FREILAUF_SANDBOX_RUNTIME_BIN
+// A provider is only OFFERED where a credential for it can be resolved, so
+// `runDefFromForm({ provider: 'openrouter' })` — which several checks below go
+// through, because it is the ordinary start path — refuses on a machine whose
+// environment does not carry the key. That made this suite green on the
+// operator's shell and RED on a fresh clone, in a CONTRIBUTING.md step whose
+// whole job is to be a clean baseline: two failures that say nothing about the
+// code, standing where a real regression would have to be noticed. The value is
+// deliberately not a key: nothing here reaches a vendor (every balance and
+// model check is driven through an injected context), it only has to EXIST. The
+// checks that care about a key set their own and restore it, so a fence at the
+// top is what protects the groups before them — the same shape as the line
+// above it.
+process.env.OPENROUTER_API_KEY = 'unit-suite-not-a-key'
 
 const d = (s) => new Date(s)
 
