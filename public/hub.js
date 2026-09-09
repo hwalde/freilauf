@@ -1607,6 +1607,132 @@
   // change, and it is therefore still there after a reload and for anybody
   // else's browser. A toast that said "applied" while the row said nothing
   // would be exactly the pair this project keeps writing entries about.
+  // An entry a person made and has not sent yet lives ONLY in the DOM, and the
+  // sidebar is swapped whole — by the 30-second poll, by every run event, by
+  // somebody else's push. Measured in the running hub before this existed: a
+  // select was set to another value, the mouse moved towards the button, and
+  // 22 seconds later the field stood on the old value again. The server value
+  // had not moved; it was the swap. From where the operator sits that is not a
+  // stale page, it is a broken control ("I choose X and it jumps back to Y"),
+  // which is the most expensive shape this can take — the widget looks defective
+  // while everything behind it works.
+  //
+  // TWO DESIGNS WERE ON THE TABLE, and this is (a), restore-after-swap:
+  //
+  //   (a) carry the unsent entries across the swap — the sidebar keeps saying
+  //       how the machine is doing while somebody holds a field open;
+  //   (b) hold the swap back for as long as any field differs from its server
+  //       value — three lines less code, and it freezes quota, work in flight
+  //       and memory for as long as nobody presses the button, which may be
+  //       hours. The sidebar is the ONE place a person sees how the machine is
+  //       doing; it must not stop saying so because a field was touched.
+  //
+  // So (a). The state is not remembered anywhere: an entry is "pending" exactly
+  // while the field's value differs from the `data-seed` the server rendered,
+  // which is read out of the DOM at the moment of the swap and written back
+  // immediately after it. That is also why there is no expiry — the entry lives
+  // exactly as long as the page it was typed into, the way any unsent form
+  // entry in a browser does, and a timer would delete something the person is
+  // still looking at.
+  //
+  // The focus guard below stays and is a different rule: it keeps the CARET,
+  // which a restored value cannot give back.
+  function panelFields(root) {
+    return (root || document).querySelectorAll('#status-sidebar .panel-controls [data-panel-control][data-seed]')
+  }
+  function panelValueOf(el) { return el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value }
+  function panelFormByKey(key) {
+    var forms = document.querySelectorAll('#status-sidebar form[data-panel-form]')
+    for (var i = 0; i < forms.length; i++) if (forms[i].dataset.panelForm === key) return forms[i]
+    return null
+  }
+
+  /** The unsent entries, read straight before the sidebar is replaced. */
+  function panelEdits() {
+    var pending = [], fields = panelFields()
+    for (var i = 0; i < fields.length; i++) {
+      var el = fields[i]
+      var current = panelValueOf(el)
+      if (current === el.dataset.seed) continue
+      var form = el.closest('form[data-panel-form]')
+      if (!form) continue
+      pending.push({
+        panel: form.dataset.panelForm, key: el.dataset.panelControl, value: current,
+        seed: el.dataset.seed,
+        // Carried forward, or the mark below would light up on the one swap
+        // that moved the seed and be gone again on the next one.
+        foreign: el.dataset.panelForeign === '1',
+      })
+    }
+    return pending
+  }
+
+  /** …and written back into the fields the swap put there instead. */
+  function panelEditsRestore(pending) {
+    for (var i = 0; i < pending.length; i++) {
+      var o = pending[i]
+      var form = panelFormByKey(o.panel)
+      if (!form) continue                                   // the panel is gone
+      var el = null, fields = panelFields(form)
+      for (var j = 0; j < fields.length; j++) if (fields[j].dataset.panelControl === o.key) el = fields[j]
+      if (!el) continue                                     // the control is gone
+      if (el.type === 'checkbox') el.checked = o.value === '1'
+      else if (el.tagName === 'SELECT' && !panelHasOption(el, o.value)) continue
+      else el.value = o.value
+      // Somebody else really moved the value underneath the entry (a push from
+      // the project, another browser). The entry still wins — it is the newer
+      // human decision and nobody has sent it yet — but the operator must be
+      // able to SEE that, or they would submit over a change they never knew
+      // about. Deliberately small: a warm border and the server's value in the
+      // title, no banner and no dialog, because the ordinary case is that
+      // nothing moved at all.
+      if (o.foreign || el.dataset.seed !== o.seed) {
+        el.dataset.panelForeign = '1'
+        el.title = T('js.panel_foreign', 'Changed elsewhere in the meantime: {value}. Your entry counts once you send it.',
+          { value: el.dataset.seed })
+      }
+    }
+  }
+  function panelHasOption(sel, value) {
+    for (var i = 0; i < sel.options.length; i++) if (sel.options[i].value === value) return true
+    return false
+  }
+
+  /**
+   * A successful send makes what was sent the new baseline, and that is the
+   * other half of the rule above: without it the browser would hold on to a
+   * difference that no longer exists. For a control the hub stores, the next
+   * render carries the sent value anyway; for one it does not store (the panel
+   * only passes the values to a command) the rendered value is the project's
+   * last measurement and never moves — so THAT is the case where an entry would
+   * otherwise be restored for ever, over a value the project is entitled to own.
+   *
+   * The baseline comes out of the body that was really sent, not out of the
+   * fields as they stand now: a field somebody changed again while the request
+   * was in flight is a new unsent entry and has to stay one. And the form is
+   * looked up again by its panel key, because the sidebar may well have been
+   * swapped between the press and the answer.
+   */
+  function panelSeedsFromSent(panelKey, body) {
+    var form = panelFormByKey(panelKey)
+    if (!form) return
+    var fields = panelFields(form)
+    for (var i = 0; i < fields.length; i++) {
+      var el = fields[i]
+      // The LAST of a repeated name, which is the rule the server's own
+      // `parseForm()` follows: a ticked checkbox travels twice, behind its
+      // hidden `0` companion, and the first of the two says the opposite.
+      var sentAll = body.getAll('v_' + el.dataset.panelControl)
+      if (!sentAll.length) continue
+      var sent = sentAll[sentAll.length - 1]
+      el.dataset.seed = sent
+      if (panelValueOf(el) === sent) {
+        delete el.dataset.panelForeign
+        el.removeAttribute('title')
+      }
+    }
+  }
+
   function panelSubmit(form, control) {
     if (form.dataset.busy === '1') return
     // A checkbox that is off is absent from FormData, and the server's fallback
@@ -1636,6 +1762,7 @@
     })
       .then(function (r) { return r.json().catch(function () { return { ok: false, error: 'HTTP ' + r.status } }) })
       .then(function (j) {
+        if (j && j.ok) panelSeedsFromSent(form.dataset.panelForm, body)
         if (window.freilaufToast) {
           if (j && j.ok && j.running) {
             window.freilaufToast(T('js.panel_started', 'Command started'), { kind: 'ok', replace: toast, ms: 4000 })
@@ -1961,11 +2088,16 @@
     async function refreshStatus() {
       // A panel control being TYPED IN lives only in the DOM, and the sidebar
       // is swapped whole — by the 30-second timer, by every run event, by
-      // somebody else's push. Swapping it mid-word throws the value away, so
+      // somebody else's push. Swapping it mid-word throws the caret away, so
       // the swap waits, exactly as the run-detail fragment waits for
       // `#run-edit :focus`. Only fields wait: a focused BUTTON must not block
       // it, because the swap right after a press is the one carrying the
       // outcome of that press.
+      //
+      // This guard covers the caret and NOTHING ELSE. The value itself is
+      // carried across the swap by `panelEdits()` — the focus leaves a field
+      // the moment somebody reaches for the button, and an entry that is only
+      // safe while it is focused is not safe (see the comment there).
       const halten = document.querySelector('#status-sidebar .panel-controls input:focus, '
         + '#status-sidebar .panel-controls select:focus')
       if (halten) return
@@ -1976,7 +2108,14 @@
         const html = await holeFragment('/api/fragments/sidebar'
           + (sRepo ? '?repo=' + encodeURIComponent(sRepo) : '?repo=')
           + '&back=' + encodeURIComponent(location.pathname + location.search))
-        if (html !== null) { tauscheNachId(html); sidebarSync() }
+        if (html === null) return
+        // Read straight before the swap and written back straight after it —
+        // not before the fetch, or an entry made while the fragment was in
+        // flight would be the one thrown away.
+        const pending = panelEdits()
+        tauscheNachId(html)
+        panelEditsRestore(pending)
+        sidebarSync()
       } catch (err) { /* a quiet panel beats a broken page */ }
     }
 

@@ -732,6 +732,7 @@
   "js.panel_working": "Wird gesendet …",
   "js.panel_started": "Kommando gestartet",
   "js.panel_saved": "Gespeichert",
+  "js.panel_foreign": "Inzwischen anderswo geändert: {value}. Deine Eingabe zählt, sobald du sie abschickst.",
   "js.qr_scheduled": "Lauf geplant: {name}",
   "js.qr_deferred": "Lauf zurückgestellt (Kontingent/Guthaben): {name}",
   "js.qr_starting": "Startet: {name}",

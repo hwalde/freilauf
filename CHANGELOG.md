@@ -58,7 +58,37 @@ a day on which nothing was released.
   agent's own crash ended. Not offered for a conflict run (there the way in is
   "Merge now" on the run it worked for) or an archived one.
 
+### Changed
+
+- **Panel controls are a great deal smaller.** A control used to be three lines
+  in the 240px sidebar — caption, field across the whole column, a hint
+  underneath it in permanent type — so the four controls of the throttle above
+  took more height than the whole rest of the sidebar. A control is **one row**
+  now: caption on the left, field on the right, and a number takes four
+  characters instead of the column. The hint is still there and still reachable
+  — it appears over the page when the mouse is on the field or the field has
+  focus, and it is tied to the field for a screen reader — it simply no longer
+  stands there all the time. The buttons stand in a row of their own, aligned
+  with the fields they send, and a switch lines up on the same right edge.
+  Nothing changes for a project: the same `controls` are declared, the hub
+  decides what they look like.
+
 ### Fixed
+
+- **A value you chose in a sidebar panel no longer jumps back on its own.** The
+  sidebar is replaced whole whenever anything happens — every half minute, and
+  on every run event — and everything a person had entered and not yet sent went
+  with it. Measured: a dropdown was set to another value, the hand moved
+  towards the button, and 22 seconds later the old value stood there again,
+  with nothing at all having changed on the server. From where the operator
+  sits that is not a stale page, it is a control that does not work. Unsent
+  entries are now carried across the refresh, whether or not the field still
+  has the focus, and the rest of the sidebar keeps updating while somebody
+  holds a field open. Two things go with it: once a value has been sent
+  successfully, the hub's own value counts again — the browser does not hold on
+  to a difference that no longer exists — and a value that somebody else moved
+  in the meantime (a push from the project, another browser) marks the field
+  and names the new value, so nobody sends over a change they never saw.
 
 - **A run that was still starting said its terminal was gone.** Freilauf
   launches a run in the hub, not in the browser: Quick Run answers its dialog
