@@ -4736,6 +4736,108 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
   })
 
   // ------------------------------------------------------------------
+  group('The title: a name that did not arrive is asked for again')
+
+  // The generated title was ONE fire-and-forget call on the launch path, and a
+  // failure was final and invisible: no event, no retry, no trace. Measured on
+  // this installation 2026-09-09 — two single runs started six minutes apart,
+  // one titled and one not, same process, same key, same model, and the model
+  // answered both prompts correctly when asked by hand afterwards. So a
+  // transient (a timeout under load, a 429, a hub restarted in those seconds)
+  // cost a run its name for good and left nothing to read.
+  //
+  // The source here is a stub provider registered into THIS process's registry:
+  // the suite deletes OPENROUTER_API_KEY from both processes on purpose, and a
+  // title test must not be the one thing that talks to a vendor.
+  await check('a failed attempt is written down, and the next pass repairs it', async () => {
+    const { registerPlugin, unregisterPlugin } = await import('../server/plugins/registry.mjs')
+    const { applyGeneratedTitle, retryMissingTitles, fallbackTitle, titleLlmActive } = await import('../server/title.mjs')
+    const { setSetting, getSetting } = await import('../server/db.mjs')
+
+    // What the stub answers, switched by the test. Prose is a `parse` failure —
+    // deliberately that and not an HTTP error: `llmJson()` already walks its
+    // chain and backs off for a transport failure, so a 429 is not the shape
+    // that loses a title. An answer that ARRIVES and is not JSON is: the source
+    // is demonstrably up, so there is no fallback and no backoff, the repair
+    // round is spent, and until this existed that was the end of it.
+    let reply = 'Sure! Here is a nice title for you: Login form.'
+    const registered = registerPlugin({
+      id: 'e2e-title', kind: 'provider', label: 'E2E Title Source',
+      // Declared and empty: a provider needs one of the two, and a source with
+      // no REQUIRED credential is ready with nothing configured — which is the
+      // whole reason this stub can stand in for OpenRouter here.
+      envKeys: [],
+      async fetchModels() { return [{ id: 'stub-titler', name: 'Stub Titler' }] },
+      llm: {
+        schema: 'prompt',
+        async models() { return [{ id: 'stub-titler', name: 'Stub Titler' }] },
+        async complete() { return { text: reply, usage: null } },
+      },
+    })
+    const before = {
+      source: getSetting('llm_title_source'), model: getSetting('llm_title_model'),
+      on: getSetting('llm_title_on'),
+    }
+    setSetting('llm_title_source', 'provider:e2e-title')
+    setSetting('llm_title_model', 'stub-titler')
+    setSetting('llm_title_on', '1')
+    // A refused registration would make every assertion below read as "the
+    // title feature is switched off", which is exactly the silence this whole
+    // test exists about.
+    isTrue(registered.ok, `the stub source is registered (${registered.error ?? ''})`)
+    isTrue(titleLlmActive(), 'and the hub considers the title job usable')
+
+    try {
+      const prompt = 'Rewrite the login form\n\nand make it accessible while you are at it'
+      const r = await postForm('/api/runs', {
+        repo_id: String(repoId), harness: 'claude', prompt,
+        branch_mode: 'keiner', expected_minutes: '45',
+      })
+      const id = (await r.json()).runId
+      await sessionMerken(id)
+      equal(lauf(id).title, fallbackTitle(prompt), 'the run starts under its prompt\'s first line')
+
+      // The first attempt — the one the launch path makes — fails.
+      equal(await applyGeneratedTitle(id, prompt), null, 'the model did not answer, so nothing is written')
+      equal(lauf(id).title, fallbackTitle(prompt), 'and the fallback stands, exactly as before')
+      equal(lauf(id).title_attempts, 1, 'the attempt is counted — that is what bounds the retry')
+      const noted = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='title_failed'`).all(id)
+      equal(noted.length, 1, 'and it is written down, which it never used to be')
+      contains(noted[0].payload, 'parse', 'naming the stage, so the operator can read WHY')
+
+      // …and the watcher's pass asks again — this time the model behaves.
+      reply = JSON.stringify({ title: 'Login form rewritten' })
+      equal(retryMissingTitles(), 1, 'the run is a candidate: still nameless, attempts left')
+      for (let i = 0; i < 100 && lauf(id).title === fallbackTitle(prompt); i++) {
+        await new Promise(res => setTimeout(res, 50))
+      }
+      equal(lauf(id).title, 'Login form rewritten', 'the second answer lands on the run')
+      equal(lauf(id).title_attempts, 2, 'two questions were asked in all')
+      equal(retryMissingTitles(), 0, 'and a run that HAS a title is not asked about again')
+
+      // A run somebody renamed is never overwritten, however many attempts are
+      // left — the rule the UPDATE has always had, now also the retry's.
+      const second = await postForm('/api/runs', {
+        repo_id: String(repoId), harness: 'claude', prompt: 'Second task for the titler',
+        branch_mode: 'keiner', expected_minutes: '45',
+      })
+      const id2 = (await second.json()).runId
+      await sessionMerken(id2)
+      db.prepare('UPDATE runs SET title=?, title_attempts=1 WHERE id=?').run('Von Hand benannt', id2)
+      equal(retryMissingTitles(), 0, 'a renamed run is nobody\'s to rename again')
+      equal(lauf(id2).title, 'Von Hand benannt', 'and it keeps the name it was given')
+
+      await postForm(`/api/runs/${id}/kill`, {})
+      await postForm(`/api/runs/${id2}/kill`, {})
+    } finally {
+      setSetting('llm_title_source', before.source ?? '')
+      setSetting('llm_title_model', before.model ?? '')
+      setSetting('llm_title_on', before.on ?? '1')
+      unregisterPlugin('e2e-title')
+    }
+  })
+
+  // ------------------------------------------------------------------
   group('tmux cleanup: the memory-freeing agent')
 
   await check('the cleanup settings page renders the reusable setup block', async () => {

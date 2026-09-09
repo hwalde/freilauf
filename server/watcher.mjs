@@ -24,6 +24,7 @@ import { reconcileClosedSession, tmuxSnapshot, sessionGone, shouldAutoClose, cur
   sandboxRuntime, sandboxHubId, containerName, stopRunContainer, finishedAtMs, paneTarget } from './sessions.mjs'
 import { integrateTick, pushOperatorBase, integratorTimerOff, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 import { maybeAutoCleanup } from './cleanup.mjs'
+import { retryMissingTitles } from './title.mjs'
 // One list, two readers: this pass never ASKS a run whose work the hub itself
 // put on origin, and pages.mjs stops COLOURING one that was asked before the
 // fence existed. Two literals here is how the two came to disagree.
@@ -176,6 +177,11 @@ async function runTick() {
   }
   // One message about every session this pass found lost — not one per run.
   try { await announceResumes() } catch (e) { console.error('[watcher] resume summary:', e.message) }
+  // The titles that never arrived. The generated title is asked for once on the
+  // launch path and used to be given up on there; this is the second chance,
+  // and it is deliberately not awaited — a title must never hold a pass up any
+  // more than it holds a start up (server/title.mjs).
+  try { retryMissingTitles() } catch (e) { console.error('[title]', e.message) }
   // The second prompt, for every run that still owes its session one: a hub
   // restarted between the start and the delivery, a session that had not drawn
   // yet, a run that was answering a help call (server/goal.mjs).

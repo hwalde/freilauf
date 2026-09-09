@@ -7476,6 +7476,48 @@ try {
     isFalse(resumable(null, true), 'no run, no verdict')
   })
 
+  await check('sessionPending: "no session" and "no session yet" are two different answers', async () => {
+    const { sessionPending } = await import('../server/run-state.mjs')
+    // The state a detached start (Quick Run) is in while `git fetch`, the
+    // worktree checkout and fl-start are still running. The page used to render
+    // it as "no tmux session anymore" — and for good, because #term is never
+    // part of a fragment.
+    isTrue(sessionPending({ status: 'running' }), 'a running run with no session is on its way to one')
+    isTrue(sessionPending({ status: 'waiting_help' }), 'so is one that is waiting for an answer')
+    isTrue(sessionPending({ status: 'running', resume_pending: 1 }),
+      'a resume looks exactly the same from here, and is the same fact')
+    isFalse(sessionPending({ status: 'running', tmux_session: 'fl-x' }), 'a run that HAS one is not waiting for one')
+    isFalse(sessionPending({ status: 'running', tmux_session: 'fl-x', tmux_closed_at: 'now' }),
+      'nor one whose session was closed — that one really is gone')
+    // The refusals below are what keeps the client's wait from becoming a loop
+    // and the page from promising a start that is not happening.
+    for (const status of ['done', 'failed', 'aborted']) {
+      isFalse(sessionPending({ status }), `a ${status} run is never starting a session`)
+    }
+    for (const status of ['scheduled', 'deferred']) {
+      isFalse(sessionPending({ status }), `a ${status} run has no session either, but nobody is fetching one`)
+    }
+    isFalse(sessionPending(null), 'no run, no verdict')
+  })
+
+  await check('titleRetryDue: a title that never arrived is asked for again — but only that one', async () => {
+    const { titleRetryDue, fallbackTitle } = await import('../server/title.mjs')
+    const prompt = 'Rewrite the login form\n\nand make it accessible'
+    const nameless = { prompt, title: fallbackTitle(prompt), title_attempts: 1 }
+    isTrue(titleRetryDue(nameless, 3), 'a run still wearing its prompt\'s first line, with attempts left')
+    isFalse(titleRetryDue({ ...nameless, title: 'Rewrite login form' }, 3),
+      'not one the model already named — that title is the answer')
+    isFalse(titleRetryDue({ ...nameless, title: 'Von Hand benannt' }, 3),
+      'nor one a human renamed: a model never overwrites a decision somebody made')
+    isFalse(titleRetryDue({ ...nameless, title_attempts: 0 }, 3),
+      'nothing was ever asked here — an agent run, a typed title, or the LLM switched off')
+    isFalse(titleRetryDue({ ...nameless, title_attempts: 3 }, 3),
+      'and the budget is what stops a dead provider costing a call every pass')
+    isFalse(titleRetryDue({ ...nameless, agent_id: 7 }, 3), 'an agent run is called by its agent')
+    isFalse(titleRetryDue({ ...nameless, archived_at: 'x' }, 3), 'an archived run keeps the name it was put away under')
+    isFalse(titleRetryDue(null, 3), 'no run, no verdict')
+  })
+
   await check('runtimeClock: the duration is measured on the clock the alarm was raised off', async () => {
     // The cell pairs a duration with `expected_minutes`, and the follow-up
     // overrun is raised by measuring `followup_since` against that same

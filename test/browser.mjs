@@ -139,7 +139,7 @@ const laufRow = (id) => db.prepare('SELECT * FROM runs WHERE id=?').get(id)
 const dbTime = (ms) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ')
 
 let repoId = 0, repoId2 = 0, FLOWID = 0, FAV1 = 0, FAV2 = 0
-let R_ALT = '', R_TICK = '', R_GEPLANT = '', R_LIVE = '', R_ENDE = '', R_OHNE_SESSION = ''
+let R_ALT = '', R_TICK = '', R_GEPLANT = '', R_LIVE = '', R_ENDE = '', R_OHNE_SESSION = '', R_STARTET = ''
 
 async function datenAnlegen() {
   for (const [harness, providers] of [['claude', []], ['opencode', ['opencode-zen', 'openrouter', 'deepseek']]]) {
@@ -186,6 +186,11 @@ async function datenAnlegen() {
   R_ENDE = await laufStarten({ repo_id: String(repoId), prompt: 'Browser-Lauf beendet' })
   R_OHNE_SESSION = await laufStarten({ repo_id: String(repoId), prompt: 'Browser-Lauf ohne Session' })
   R_LIVE = await laufStarten({ repo_id: String(repoId), prompt: 'Browser-Lauf laeuft' })
+  // A run whose session is still being fetched: a real, live stub session that
+  // the row does not name YET. That is exactly the state a detached start
+  // (Quick Run) is in for its first seconds, and the state the page used to
+  // render as "no tmux session anymore". The column is put back inside the test.
+  R_STARTET = await laufStarten({ repo_id: String(repoId), prompt: 'Browser-Lauf startet noch' })
   for (const id of [R_ALT, R_TICK, R_ENDE, R_OHNE_SESSION]) await melden(id, 'done', 'fertig')
 
   // A planned run: the overview cell then looks FORWARD ("in 20 minutes").
@@ -1372,6 +1377,28 @@ try {
     contains(await p.textContent('#term'), 'No tmux session', 'and the box says it in words')
     isTrue(await p.$eval('#term', el => el.classList.contains('dim')), 'toned down')
     equal(await p.$$eval('#term .xterm', els => els.length), 0, 'no terminal was built at all')
+    sauber(p)
+    await p.close()
+  })
+
+  await check('a session that is still being set up is waited for, not declared gone', async () => {
+    // The row does not name its session yet — the state a detached start is in
+    // while `git fetch`, the worktree checkout and fl-start are still running.
+    const session = laufRow(R_STARTET).tmux_session
+    db.prepare('UPDATE runs SET tmux_session=NULL WHERE id=?').run(R_STARTET)
+    const p = await neueSeite(`/runs/${R_STARTET}`, () => {
+      window.FREILAUF_TERM_POLL_MS = 150
+    })
+    equal(await p.$eval('#term', el => el.dataset.session), 'pending', 'the page says "not yet", not "none"')
+    contains(await p.textContent('#term'), 'being set up', 'and the box says so in words')
+    isTrue(await p.$eval('details.run-term', el => el.open), 'the block is open — something is about to appear there')
+    equal(await p.$$eval('#term .xterm', els => els.length), 0, 'nothing is attached while there is nothing to attach to')
+    // The hub gets its session. Nothing on the page is touched — the page has
+    // to notice by itself, which is the whole point.
+    db.prepare('UPDATE runs SET tmux_session=? WHERE id=?').run(session, R_STARTET)
+    await p.waitForSelector('#term .xterm-screen', { timeout: 15_000 })
+    equal(await p.$eval('#term', el => el.dataset.session), '1', 'the reloaded page has the session')
+    equal(await p.$eval('#term', el => el.dataset.live), '1', 'and write access, because the agent is there')
     sauber(p)
     await p.close()
   })
