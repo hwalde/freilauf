@@ -356,10 +356,13 @@ const plugin = {
    * OPENCODE_CONFIG_CONTENT (global plugins and MCP servers survive that).
    */
   /**
-   * `opencode --continue` continues the LAST session of the directory it is
-   * started in (`-c, --continue  continue the last session`, opencode 1.18.23).
-   * Every run works in a worktree of its own, so that last session is this run's
-   * — no id to look up.
+   * What a HUMAN is offered for picking a run's conversation back up.
+   *
+   * `--continue` is scoped to the PROJECT, not to the directory — see
+   * resumeId() below, where that cost a run its record. It stays the suggestion
+   * because a person types it with the terminal in front of them and sees at
+   * once which conversation came up; the hub's own unattended resume may not
+   * rely on that, and no longer does.
    */
   resumeCommand(run) {
     return run?.workdir_effective ? `cd ${run.workdir_effective} && opencode --continue` : null
@@ -369,14 +372,37 @@ const plugin = {
    * The session id the hub resumes with (runner.mjs, resumeRun): the run's
    * ROOT session out of opencode's store — a run is a session tree, and "the
    * last session of the directory" is usually a finished subagent (see
-   * server/opencode-store.mjs). 'last' when the store cannot say: fl-start
-   * turns that into `--continue`, which is what resumeCommand() offers a human.
+   * server/opencode-store.mjs).
+   *
+   * **`null` when the store cannot name it, and never `'last'`.** That fallback
+   * turned into `opencode --continue` in fl-start on the belief, written down
+   * here, that "every run works in a worktree of its own, so that last session
+   * is this run's". It is not: `--continue` is scoped to the PROJECT, and every
+   * worktree of one repository is one project.
+   *
+   * Measured on this installation. Run a29e5fc2 ("find runs with technical
+   * errors") hung on 2026-09-07 without opencode ever creating a session — its
+   * worktree has no row in the store at all — and was resumed 39 hours later.
+   * `rootSessionId()` correctly answered null, `'last'` became `--continue`, and
+   * the newest session of the FREILAUF project was run 85019e9c's finished
+   * "Update Coding Agents" conversation. The resumed agent answered out of it,
+   * and the hub filed 85019e9c's report — byte for byte — as a29e5fc2's own,
+   * closed the run `done`, merged nothing and told the operator the job was
+   * finished. Every layer above it read as healthy, which is the most expensive
+   * shape a fault can take: the work never happened, and another run's report
+   * is now in this run's record.
+   *
+   * `null` is the documented, safe answer (docs/plugins.md): runner.mjs starts
+   * the CLI afresh from the original prompt behind a header naming what the run
+   * had already committed. Doing the task twice is a cost; reporting somebody
+   * else's work as done is not a cost, it is a wrong answer.
+   *
    * Lazy import — the plugin rule (docs/plugins.md): hub modules are reached
    * inside the function that needs them.
    */
   async resumeId(run) {
     const { rootSessionId } = await import('../opencode-store.mjs')
-    return (await rootSessionId(run)) ?? 'last'
+    return (await rootSessionId(run)) ?? null
   },
 
   modelArgs(run, ctx = null, opts = null) {

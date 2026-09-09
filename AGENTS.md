@@ -312,6 +312,26 @@ its original prompt, behind a header that names what it had already
 committed. `resumeId(run)` on the plugin answers the id; `null` means the
 same fresh start (cursor with no transcript yet).
 
+**And `null` is what a plugin must answer when it cannot name THIS run's own
+conversation — a resume may never guess.** opencode's `resumeId()` used to fall
+back to `'last'`, which `fl-start` turns into `opencode --continue`, on a
+premise written into the plugin: "every run works in a worktree of its own, so
+that last session is this run's". It is false — `--continue` is scoped to the
+**project**, and every worktree of one repository is one project. Measured on
+this installation: run `a29e5fc2` hung on 2026-09-07 without opencode ever
+creating a session (its worktree has no row in the store at all) and was resumed
+39 hours later; `rootSessionId()` correctly answered null, `--continue` picked up
+the newest session of the Freilauf project — run `85019e9c`'s finished "Update
+Coding Agents" conversation — the resumed agent answered out of it, and the hub
+filed `85019e9c`'s report **byte for byte** as `a29e5fc2`'s own, closed the run
+`done`, merged nothing and told the operator the job was finished. Every layer
+above read as healthy, the work never happened, and another run's report now
+sits in this run's record. Redoing a task costs time; reporting somebody else's
+work as done is not a cost but a wrong answer, so the fresh start wins whenever
+the id is not certain. The same question is worth asking of any future plugin's
+resume: does the CLI's "continue the last one" mean the last one of THIS RUN, or
+the last one it happened to see?
+
 Three fences. **A cap**: `resume_attempts`, `RESUME_MAX` (3,
 `FREILAUF_RESUME_MAX`) — past it the run ends the old way (`resume_refused`
 on the run, then `aborted`), because a CLI that dies at every start must not

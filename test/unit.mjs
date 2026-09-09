@@ -1731,6 +1731,54 @@ try {
     } finally { delete process.env.FREILAUF_OPENCODE_DB }
   })
 
+  await check('a resume the store cannot name starts afresh — never on another run’s session', async () => {
+    // What `'last'` did. It became `opencode --continue` in fl-start, on the
+    // belief that "every run works in a worktree of its own, so the last
+    // session is this run's". `--continue` is scoped to the PROJECT, and every
+    // worktree of one repository is one project.
+    //
+    // Measured: run a29e5fc2 hung on 2026-09-07 without opencode ever creating
+    // a session — its worktree has no row in the store at all — and was resumed
+    // 39 hours later. rootSessionId() correctly answered null, `--continue`
+    // picked up the newest session of the FREILAUF project, which was run
+    // 85019e9c's finished "Update Coding Agents" conversation, and the hub filed
+    // 85019e9c's report BYTE FOR BYTE as a29e5fc2's own: run closed `done`,
+    // nothing merged, the operator told the job was finished. The work never
+    // happened and another run's report sits in this run's record.
+    const opencode = (await import('../server/harnesses/opencode.mjs')).default
+    const run = { harness: 'opencode', workdir_effective: OC_WT, started_at: '2026-09-04 15:11:00' }
+
+    // The store knows this run's root session: that id is what a resume gets.
+    const ownSession = ocStore({ sessions: [
+      { id: 'ses_root', parent_id: null, time_created: ocMin(0), time_updated: ocMin(9) },
+      { id: 'ses_sub', parent_id: 'ses_root', time_created: ocMin(1), time_updated: ocMin(2) },
+    ] })
+    ownSession.db.close()
+    process.env.FREILAUF_OPENCODE_DB = ownSession.file
+    try {
+      equal(await opencode.resumeId(run), 'ses_root', 'the run’s own root session, not a subagent')
+    } finally { delete process.env.FREILAUF_OPENCODE_DB }
+
+    // A store holding ONLY somebody else's session — the shape that cost a run
+    // its record. The answer must be null, which runner.mjs starts afresh from
+    // the original prompt with.
+    const foreignOnly = ocStore({ sessions: [
+      { id: 'ses_other_run', parent_id: null, directory: '/wt/run-b', time_created: ocMin(-60), time_updated: ocMin(-59) },
+    ] })
+    foreignOnly.db.close()
+    process.env.FREILAUF_OPENCODE_DB = foreignOnly.file
+    try {
+      equal(await opencode.resumeId(run), null,
+        'no session of this run’s own: a fresh start, never a guess at the newest conversation')
+    } finally { delete process.env.FREILAUF_OPENCODE_DB }
+
+    // And with no store at all.
+    process.env.FREILAUF_OPENCODE_DB = join(sandbox, 'no-such-store.db')
+    try {
+      equal(await opencode.resumeId(run), null, 'no store, no id')
+    } finally { delete process.env.FREILAUF_OPENCODE_DB }
+  })
+
   // ------------------------------------------------------------------
   group('Detection: rate limit / provider errors (detect.mjs)')
   const { typeFromClaudeError, typeFromText, terminalText, scanLines, scanNewBytes,
@@ -6556,20 +6604,20 @@ try {
     // 2026-09-09: six live sessions holding 4.6 GB, and three sidebars rendered
     // in the same minute said 0 MB in 0 Sessions while the next three said
     // 4,6 GB in 6 Sessions.
-    const gut = { ok: true, sessions: [{ state: 'run_ended', sandbox: null, resources: { rssKb: 5000 } }] }
-    const messung = se.memoryReading(gut, null)
-    equal(messung.rssKb, 5000, 'an answer is the reading')
+    const answered = { ok: true, sessions: [{ state: 'run_ended', sandbox: null, resources: { rssKb: 5000 } }] }
+    const reading = se.memoryReading(answered, null)
+    equal(reading.rssKb, 5000, 'an answer is the reading')
 
-    const keineAntwort = { ok: false, sessions: [] }
-    equal(se.memoryReading(keineAntwort, messung), messung,
+    const noAnswer = { ok: false, sessions: [] }
+    equal(se.memoryReading(noAnswer, reading), reading,
       'no answer leaves the previous reading standing, with its own measuring time')
-    equal(se.memoryReading(keineAntwort, null), null,
+    equal(se.memoryReading(noAnswer, null), null,
       'and with no previous reading the panel says nothing at all — never a zero')
 
     // A machine with no tmux SERVER is a real answer, and really is a zero.
-    const leer = se.memoryReading({ ok: true, sessions: [] }, messung)
-    equal(leer.rssKb, 0, 'no server is an answer')
-    equal(leer.sessions, 0, 'and it is the empty one')
+    const emptyMachine = se.memoryReading({ ok: true, sessions: [] }, reading)
+    equal(emptyMachine.rssKb, 0, 'no server is an answer')
+    equal(emptyMachine.sessions, 0, 'and it is the empty one')
 
     // The second door into the same cache: the sessions page publishes what it
     // measured, and must not publish a reading nobody could take.
@@ -7459,13 +7507,13 @@ try {
     const expectedMs = 45 * 60_000
     const overrunAt = (now, clock) => now - clock > expectedMs
     const yellowAt = (now, clock) => now - clock > 0.8 * expectedMs
-    const dreiSekundenSpaeter = progress + 3_000
-    isFalse(yellowAt(dreiSekundenSpaeter, overrunClockFrom(start, progress)),
+    const threeSecondsLater = progress + 3_000
+    isFalse(yellowAt(threeSecondsLater, overrunClockFrom(start, progress)),
       'the yellow does not flap back three seconds after the report that retracted it')
     isTrue(yellowAt(Date.parse('2026-09-03T11:00:00Z'), overrunClockFrom(start, progress)),
       'but it is earned again once the new 80 % is crossed')
-    const ende = Date.parse('2026-09-03T10:50:00Z')   // 124 min in, the run’s real end
-    isFalse(overrunAt(ende, overrunClockFrom(start, progress)),
+    const runEnd = Date.parse('2026-09-03T10:50:00Z')   // 124 min in, the run’s real end
+    isFalse(overrunAt(runEnd, overrunClockFrom(start, progress)),
       'still inside the time the report bought: no alarm, which is the point of reporting')
     isTrue(overrunAt(Date.parse('2026-09-03T11:10:00Z'), overrunClockFrom(start, progress)),
       'and past THAT the red is raised again — the old veto could never raise it')

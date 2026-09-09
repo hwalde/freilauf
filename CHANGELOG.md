@@ -50,6 +50,21 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A resumed opencode run could pick up a different run's conversation and
+  file its report.** When the hub resumes an interrupted opencode run it looks
+  up that run's own session; where the store could not name one it fell back to
+  `opencode --continue`, on the assumption that a run's own worktree makes the
+  "last session" unambiguous. It does not — `--continue` continues the last
+  session of the **project**, and every worktree of one repository is one
+  project. Measured here: a run that had hung without ever starting a session
+  was resumed 39 hours later, landed in another agent's finished conversation,
+  and the hub recorded that agent's report — word for word — as its own, closed
+  the run as done and reported success to the operator. The work had never
+  happened. A resume that cannot identify the run's own conversation now starts
+  the agent afresh from its original task instead, behind the usual header
+  naming what the run had already committed. Doing a task twice is a cost;
+  reporting someone else's work as finished is a wrong answer.
+
 - **A single progress report switched a run's overrun alarm off for good.** The
   red "this run is far past its expected duration" was skipped for any run that
   had *ever* reported progress — so one `fl-report progress` in the first ten
