@@ -192,7 +192,7 @@ Both exist, and they answer different questions about who OWNS the value.
 |---|---|---|
 | Who holds the truth | the hub. `GET /api/panels` is where the project reads it | the project. The hub only carries the values over |
 | What runs on the hub machine | nothing | the command the panel declared, as `argv`, no shell |
-| What the declared `value` means | the **seed**, used until somebody sets it | the **last measurement**, always shown |
+| What the declared `value` means | the **seed**, used until somebody sets it | the **last measurement** — shown until a press, then what the press applied, until the next push (see below) |
 | When it is written | at once — nothing could still refuse it | only when the command exited 0 |
 
 Prefer the first. It runs nothing, it needs no path on the hub machine, and the
@@ -268,6 +268,26 @@ then a non-event instead of a bug nobody finds again. There is no shell
 anywhere on this path, which is also why there is no `command` string form — it
 could not be made safe, only made to look safe.
 
+**The argv belongs to the checkout `cwd` points at.** A panel value and the
+program its `argv` calls are a **version pair**, and normally nobody notices,
+because both travel in the same checkout and are pushed from it. The moment one
+of them is pushed from somewhere else — a human from their working copy, a run
+from its worktree — the panel can declare a command line the receiver does not
+understand yet, and the result is not an ugly button but an **inert** one.
+Measured 2026-09-09: a panel pushed with one argument more than the script in
+the target checkout knew, and `argparse` refused the whole call rather than
+ignoring what it did not recognise:
+
+    failed (exit 2) — dispatch.py: error: unrecognized arguments: --panel-cwd /…
+
+The hub reports that faithfully and can do nothing else about it: it did not
+write the argv and does not know what the program accepts. So whoever pushes a
+panel from outside the directory `cwd` names is declaring for a receiver they
+cannot see. Either push the panel from the checkout the command runs in, or have
+the pushing script look at the program it is about to declare for and fall back
+to the older form — the option a receiver does not know is the one that turns a
+button off.
+
 Besides the control keys, four names a panel knows about itself: `{{control}}`
 (the key of the control that was used — the button that was pressed, or the
 switch that was flipped; that is how one command can serve two buttons),
@@ -326,6 +346,33 @@ better producer pushes the panel at the end of its command — then both lines s
 
 One command per panel runs at a time. A second press while one is running is
 refused with that sentence, rather than two commands racing for one setting.
+
+**And the field shows what the command was given, until you say otherwise.** A
+control the hub does not store is owned by the producer: its value is whatever
+was last pushed, and a successful command does not move it. That produced a
+panel contradicting itself inside one block — measured 2026-09-09: the operator
+typed 7, pressed, and one second later the field read 2 (the last push) while
+the outcome line three lines under it read *applied 17:06 · OK anzahl=7*. Both
+halves were true in their own terms, and the number the operator had typed was
+the one that vanished.
+
+So after a command exits 0, the values it was given stand in the fields — and
+the **next push takes them straight back**, because a push is the producer
+saying what is true now. Ownership does not move; only the hole between the
+command and the next confirmation closes. Three details worth knowing as a
+producer:
+
+- it is decided by the **order of writes**, not by comparing timestamps, so a
+  press and a push inside the same second cannot be ordered by rounding;
+- a command that **failed** contributes nothing — a field never shows a value
+  that was refused;
+- `GET /api/panels` reports such a control with `applied: true` for as long as
+  that is where its value comes from, so a reader can tell the two apart.
+
+**The better producer still pushes at the end of its own command.** This closes
+the display hole; it does not update the *rows* above the fields, which are your
+numbers and only a push can move. If your push is a timer, that hole is as long
+as your interval.
 
 ### What an unsent entry is worth
 

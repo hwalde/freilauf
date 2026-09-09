@@ -733,6 +733,7 @@
   "js.panel_started": "命令已启动",
   "js.panel_saved": "已保存",
   "js.panel_foreign": "其间已在别处改为：{value}。发送后以你的输入为准。",
+  "js.panel_option_gone": "你选择的选项已不再提供——该字段重新显示 {value}。",
   "js.qr_scheduled": "运行已计划：{name}",
   "js.qr_deferred": "运行已推迟（配额/余额）：{name}",
   "js.qr_starting": "正在启动：{name}",

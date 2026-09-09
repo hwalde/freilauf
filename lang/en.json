@@ -733,6 +733,7 @@
   "js.panel_started": "Command started",
   "js.panel_saved": "Saved",
   "js.panel_foreign": "Changed elsewhere in the meantime: {value}. Your entry counts once you send it.",
+  "js.panel_option_gone": "The option you had chosen is no longer offered — the field shows {value} again.",
   "js.qr_scheduled": "Run planned: {name}",
   "js.qr_deferred": "Run deferred (quota/credit): {name}",
   "js.qr_starting": "Starting: {name}",
