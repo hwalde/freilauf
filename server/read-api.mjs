@@ -31,7 +31,7 @@ import db, { getRun, getRepo } from './db.mjs'
 import { RUNS_DIR, WORKTREES_DIR, shortId } from './util.mjs'
 import { allIncidentsOf } from './incidents.mjs'
 import { listFavorites, FAVORITES_MAX, favoriteSummary } from './favorites.mjs'
-import { listSessions, sessionMemory, paneAlive } from './sessions.mjs'
+import { listSessionsSnapshot, publishSessionMemory, paneAlive } from './sessions.mjs'
 import { panelValues, panelState } from './panels.mjs'
 import { actionState } from './panel-action.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
@@ -271,9 +271,21 @@ export async function readApi(req, res, url) {
   // poll — but it is the only way to see what the MACHINE holds, foreign
   // sessions included.
   if (path === '/api/sessions') {
-    const sessions = await listSessions()
+    // This route has just measured, so it PUBLISHES its reading — the same rule
+    // the sessions page follows, and for the same reason one layer out. It used
+    // to list the sessions and then ask sessionMemory() for a SECOND, unrelated
+    // reading, so one response carried two answers to one question: measured
+    // 2026-09-09 on this installation, `sessions.length` 14 next to
+    // `memory.sessions` 7, with nothing to tell a consumer which the machine
+    // was actually holding. Publishing also means the sidebar rendered next
+    // quotes this reading instead of paying for three more subprocesses.
     let memory = null
-    try { memory = await sessionMemory() } catch { memory = null }
+    let sessions = []
+    try {
+      const snap = await listSessionsSnapshot()
+      sessions = snap.sessions
+      memory = publishSessionMemory(sessions, { ok: snap.ok })
+    } catch { memory = null }
     json(res, 200, { ok: true, memory, sessions })
     return true
   }

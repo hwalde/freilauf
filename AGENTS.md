@@ -312,6 +312,26 @@ its original prompt, behind a header that names what it had already
 committed. `resumeId(run)` on the plugin answers the id; `null` means the
 same fresh start (cursor with no transcript yet).
 
+**And `null` is what a plugin must answer when it cannot name THIS run's own
+conversation — a resume may never guess.** opencode's `resumeId()` used to fall
+back to `'last'`, which `fl-start` turns into `opencode --continue`, on a
+premise written into the plugin: "every run works in a worktree of its own, so
+that last session is this run's". It is false — `--continue` is scoped to the
+**project**, and every worktree of one repository is one project. Measured on
+this installation: run `a29e5fc2` hung on 2026-09-07 without opencode ever
+creating a session (its worktree has no row in the store at all) and was resumed
+39 hours later; `rootSessionId()` correctly answered null, `--continue` picked up
+the newest session of the Freilauf project — run `85019e9c`'s finished "Update
+Coding Agents" conversation — the resumed agent answered out of it, and the hub
+filed `85019e9c`'s report **byte for byte** as `a29e5fc2`'s own, closed the run
+`done`, merged nothing and told the operator the job was finished. Every layer
+above read as healthy, the work never happened, and another run's report now
+sits in this run's record. Redoing a task costs time; reporting somebody else's
+work as done is not a cost but a wrong answer, so the fresh start wins whenever
+the id is not certain. The same question is worth asking of any future plugin's
+resume: does the CLI's "continue the last one" mean the last one of THIS RUN, or
+the last one it happened to see?
+
 Three fences. **A cap**: `resume_attempts`, `RESUME_MAX` (3,
 `FREILAUF_RESUME_MAX`) — past it the run ends the old way (`resume_refused`
 on the run, then `aborted`), because a CLI that dies at every start must not
@@ -4030,6 +4050,33 @@ watcher now takes it back the moment the run is measurably working again
 duration uses to retract its overrun). It announces explicitly, because nothing
 was ADDED: the live channel hangs on `addEvent()`, and a retraction no page
 hears about sits in the overview until the next unrelated event.
+
+**A retraction is not immunity, and the overrun alarm was spending it as one.**
+A progress report retracts both overrun statements on the report path
+(`clearAnomalies()`, whose own comment promises `addEventOnce` "fires again on
+recurrence"). The watcher carried a SECOND copy of that rule in the wrong shape:
+the red was skipped for any run that had **ever** written a `progress` event —
+a veto with no time bound, which defeated exactly the re-arming the retraction
+promises. So one progress line in the first ten minutes bought a run immunity
+from the overrun alarm for the rest of its life, and the platform prompt asks
+every agent for that line ("if you need considerably longer, report it") — the
+runs most likely to overrun were the ones that had disarmed the alarm. Measured
+on this installation: 12 runs past their expectation with a progress report and
+no `anomaly:overrun` among them, the worst at 413 % (`71d69a4d`, 186 min against
+45). Run `48ceead7` shows why it is worse than merely missing — red raised and
+notified at 09:31, two progress reports at 10:21 retracting red **and** yellow,
+the **yellow back three seconds later** (it never had the veto) and the red
+unable to return: the run finished at 276 % of its expectation wearing the
+weaker of the two statements while the stronger one was permanently spent.
+**Both thresholds are measured from the last progress report now**
+(`overrunClockFrom()` in run-state.mjs, pure, next to `runtimeClock()` because
+it is the same kind of question), which is what "the agent told you where it
+stands" actually buys: another expected duration, earned by saying so, and a
+fresh alarm past that. Same shape as `agentCopedAfter()` — a comparison against
+the moment we measure against, never a flag that latches — and it ends the
+yellow's flapping, since the retracted statement now has a new 80 % to cross
+before it can come back. `notified:overrun` deliberately still stays set, so the
+re-armed red colours the row without paging a second time about one run.
 
 **And the run's own END is the last retraction, which nobody had wired up.**
 Four things already take an anomaly back the moment it is overtaken — a

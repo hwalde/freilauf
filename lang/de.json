@@ -375,6 +375,7 @@
   "sessions.end_selected": "Ausgewählte beenden ({n})",
   "sessions.refresh": "Neu laden",
   "sessions.summary": "Sessions: {n} · RAM: {ram}",
+  "sessions.unreachable": "tmux hat nicht geantwortet — diese Liste ist nicht, was die Maschine hält",
   "sessions.auto_hint": "Abgeschlossene Sessions schließen sich nach {hours} h von selbst.",
   "sessions.hidden_note": "Sessions mit gerade laufendem Agenten: {n}. Sie bleiben standardmäßig ausgeblendet, damit keine per Fehlklick beendet wird.",
   "sessions.none": "keine tmux-Sessions",

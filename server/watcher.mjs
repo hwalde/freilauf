@@ -27,7 +27,7 @@ import { maybeAutoCleanup } from './cleanup.mjs'
 // One list, two readers: this pass never ASKS a run whose work the hub itself
 // put on origin, and pages.mjs stops COLOURING one that was asked before the
 // fence existed. Two literals here is how the two came to disagree.
-import { WORK_ON_ORIGIN, agentWaiting, displayStatus } from './run-state.mjs'
+import { WORK_ON_ORIGIN, agentWaiting, displayStatus, overrunClockFrom } from './run-state.mjs'
 // The two seams of SANDBOX.md. Both answer for an
 // unsandboxed run exactly what this file did before they existed, which is why
 // every call site below could be rewired mechanically.
@@ -417,18 +417,26 @@ async function watchRun(run) {
     // The same retraction for the sandbox's own yellow: a wall the agent got
     // past is history, not a call for attention (the veto, see below).
     if (act.measured) retractSandboxDenied(run.id, lastAct, now)
+    // Both thresholds are measured from the last progress report where there is
+    // one — see overrunClockFrom(). A progress report already RETRACTS what the
+    // silence produced (clearAnomalies on the report path); this is what makes
+    // that retraction mean something instead of being undone on the next pass
+    // for the yellow and made permanent for the red.
+    const lastProgress = db.prepare(
+      `SELECT MAX(ts) AS ts FROM events WHERE run_id=? AND kind='progress'`).get(run.id)?.ts
+    const clockFrom = overrunClockFrom(startedMs, parseDbUtc(lastProgress))
     // yellow: 80 % of the expected duration reached, no report
-    if (!inFinishGate && now - startedMs > 0.8 * expectedMs && !run.report_md) {
+    if (!inFinishGate && now - clockFrom > 0.8 * expectedMs && !run.report_md) {
       addEventOnce(run.id, 'anomaly:soft_overrun')
     }
-    // red: expected duration exceeded without report/progress
-    if (!inFinishGate && now - startedMs > expectedMs && !run.report_md) {
-      const hadProgress = db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind='progress'`).get(run.id)
-      if (!hadProgress) {
-        addEventOnce(run.id, 'anomaly:overrun')
-        await notifyRun(run.id, 'overrun',
-          `🔴 Run exceeds the expected duration (${run.expected_minutes} min) without a report.`)
-      }
+    // red: the expected duration exceeded, and the agent has not said where it
+    // stands since. Reporting progress buys another expected duration, not
+    // immunity — a run that goes past THAT too is the silent hang this alarm is
+    // for, and it may be raised again because the retraction re-armed it.
+    if (!inFinishGate && now - clockFrom > expectedMs && !run.report_md) {
+      addEventOnce(run.id, 'anomaly:overrun')
+      await notifyRun(run.id, 'overrun',
+        `🔴 Run exceeds the expected duration (${run.expected_minutes} min) without a report.`)
     }
     // Rate limit / provider errors: hooks report themselves (reports.mjs); here are
     // the two sources the hub reads from the outside — transcript and pipe-pane log.

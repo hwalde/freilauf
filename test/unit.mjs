@@ -43,6 +43,19 @@ process.env.FREILAUF_RUNS_DIR = join(sandbox, 'runs')
 // the code under test. The two checks that want a seam set it themselves and
 // restore it; a fence at the top is what protects the groups before them.
 delete process.env.FREILAUF_SANDBOX_RUNTIME_BIN
+// A provider is only OFFERED where a credential for it can be resolved, so
+// `runDefFromForm({ provider: 'openrouter' })` — which several checks below go
+// through, because it is the ordinary start path — refuses on a machine whose
+// environment does not carry the key. That made this suite green on the
+// operator's shell and RED on a fresh clone, in a CONTRIBUTING.md step whose
+// whole job is to be a clean baseline: two failures that say nothing about the
+// code, standing where a real regression would have to be noticed. The value is
+// deliberately not a key: nothing here reaches a vendor (every balance and
+// model check is driven through an injected context), it only has to EXIST. The
+// checks that care about a key set their own and restore it, so a fence at the
+// top is what protects the groups before them — the same shape as the line
+// above it.
+process.env.OPENROUTER_API_KEY = 'unit-suite-not-a-key'
 
 const d = (s) => new Date(s)
 
@@ -1715,6 +1728,54 @@ try {
       const r = await storeActivity(run)
       equal(r.tokensIn, 42, 'read out of the store the variable names')
       equal(r.lastActivityMs, ocMin(1), 'with its activity')
+    } finally { delete process.env.FREILAUF_OPENCODE_DB }
+  })
+
+  await check('a resume the store cannot name starts afresh — never on another run’s session', async () => {
+    // What `'last'` did. It became `opencode --continue` in fl-start, on the
+    // belief that "every run works in a worktree of its own, so the last
+    // session is this run's". `--continue` is scoped to the PROJECT, and every
+    // worktree of one repository is one project.
+    //
+    // Measured: run a29e5fc2 hung on 2026-09-07 without opencode ever creating
+    // a session — its worktree has no row in the store at all — and was resumed
+    // 39 hours later. rootSessionId() correctly answered null, `--continue`
+    // picked up the newest session of the FREILAUF project, which was run
+    // 85019e9c's finished "Update Coding Agents" conversation, and the hub filed
+    // 85019e9c's report BYTE FOR BYTE as a29e5fc2's own: run closed `done`,
+    // nothing merged, the operator told the job was finished. The work never
+    // happened and another run's report sits in this run's record.
+    const opencode = (await import('../server/harnesses/opencode.mjs')).default
+    const run = { harness: 'opencode', workdir_effective: OC_WT, started_at: '2026-09-04 15:11:00' }
+
+    // The store knows this run's root session: that id is what a resume gets.
+    const ownSession = ocStore({ sessions: [
+      { id: 'ses_root', parent_id: null, time_created: ocMin(0), time_updated: ocMin(9) },
+      { id: 'ses_sub', parent_id: 'ses_root', time_created: ocMin(1), time_updated: ocMin(2) },
+    ] })
+    ownSession.db.close()
+    process.env.FREILAUF_OPENCODE_DB = ownSession.file
+    try {
+      equal(await opencode.resumeId(run), 'ses_root', 'the run’s own root session, not a subagent')
+    } finally { delete process.env.FREILAUF_OPENCODE_DB }
+
+    // A store holding ONLY somebody else's session — the shape that cost a run
+    // its record. The answer must be null, which runner.mjs starts afresh from
+    // the original prompt with.
+    const foreignOnly = ocStore({ sessions: [
+      { id: 'ses_other_run', parent_id: null, directory: '/wt/run-b', time_created: ocMin(-60), time_updated: ocMin(-59) },
+    ] })
+    foreignOnly.db.close()
+    process.env.FREILAUF_OPENCODE_DB = foreignOnly.file
+    try {
+      equal(await opencode.resumeId(run), null,
+        'no session of this run’s own: a fresh start, never a guess at the newest conversation')
+    } finally { delete process.env.FREILAUF_OPENCODE_DB }
+
+    // And with no store at all.
+    process.env.FREILAUF_OPENCODE_DB = join(sandbox, 'no-such-store.db')
+    try {
+      equal(await opencode.resumeId(run), null, 'no store, no id')
     } finally { delete process.env.FREILAUF_OPENCODE_DB }
   })
 
@@ -6535,6 +6596,39 @@ try {
     se._sessionMemoryReset()
   })
 
+  await check('a tmux that gave no answer is never a machine holding nothing', async () => {
+    // `tmuxSessions()` answers `[]` for BOTH "there is no tmux server" and "I
+    // could not answer you", and summing the second one produces `0 MB in 0
+    // Sessions` — the one number this block must never invent, because it is
+    // exactly the number that says "no bill, nothing to clean up". Measured
+    // 2026-09-09: six live sessions holding 4.6 GB, and three sidebars rendered
+    // in the same minute said 0 MB in 0 Sessions while the next three said
+    // 4,6 GB in 6 Sessions.
+    const answered = { ok: true, sessions: [{ state: 'run_ended', sandbox: null, resources: { rssKb: 5000 } }] }
+    const reading = se.memoryReading(answered, null)
+    equal(reading.rssKb, 5000, 'an answer is the reading')
+
+    const noAnswer = { ok: false, sessions: [] }
+    equal(se.memoryReading(noAnswer, reading), reading,
+      'no answer leaves the previous reading standing, with its own measuring time')
+    equal(se.memoryReading(noAnswer, null), null,
+      'and with no previous reading the panel says nothing at all — never a zero')
+
+    // A machine with no tmux SERVER is a real answer, and really is a zero.
+    const emptyMachine = se.memoryReading({ ok: true, sessions: [] }, reading)
+    equal(emptyMachine.rssKb, 0, 'no server is an answer')
+    equal(emptyMachine.sessions, 0, 'and it is the empty one')
+
+    // The second door into the same cache: the sessions page publishes what it
+    // measured, and must not publish a reading nobody could take.
+    se._sessionMemoryReset()
+    se.publishSessionMemory([{ state: 'run_ended', sandbox: null, resources: { rssKb: 7000 } }])
+    equal(se.publishSessionMemory([], { ok: false })?.rssKb, 7000,
+      'an unanswered page render leaves the sidebar’s last reading alone')
+    equal((await se.sessionMemory()).rssKb, 7000, 'so the sidebar keeps quoting it')
+    se._sessionMemoryReset()
+  })
+
   // ------------------------------------------------------------------
   group('Integration: finish gate, integrator, escalation (integrate.mjs)')
 
@@ -7404,6 +7498,42 @@ try {
     equal(runtimeClock({ status: 'scheduled' }), 'none', 'a run that has not started has no duration')
     equal(runtimeClock({ status: 'deferred' }), 'none', 'nor one waiting for quota')
     equal(runtimeClock(null), 'none', 'no run, no clock')
+  })
+
+  await check('a progress report buys another expected duration, not immunity', async () => {
+    const { overrunClockFrom } = await import('../server/run-state.mjs')
+    const start = Date.parse('2026-09-03T08:46:10Z')
+    const progress = Date.parse('2026-09-03T10:21:23Z')
+    equal(overrunClockFrom(start, NaN), start, 'no progress report: the run’s own start')
+    equal(overrunClockFrom(start, progress), progress,
+      'a progress report is the moment the expectation is measured from')
+    // A report cannot move the clock BACKWARDS — the watcher reads MAX(ts), but
+    // a clock that could go back would hand a run a second alarm it had already
+    // earned.
+    equal(overrunClockFrom(progress, start), progress, 'never earlier than the start')
+
+    // The rule this replaces, in the run that showed what it cost. 48ceead7:
+    // expectation 45 min, started 08:46:10, red raised and NOTIFIED at 09:31,
+    // two progress reports at 10:21 retracting red and yellow — after which the
+    // yellow came back three seconds later (it never had the veto) and the red
+    // could not, because the old guard skipped it for any run that had EVER
+    // written a progress event. The run finished at 124 min, 276 % of its
+    // expectation, wearing the weaker of the two statements.
+    const expectedMs = 45 * 60_000
+    const overrunAt = (now, clock) => now - clock > expectedMs
+    const yellowAt = (now, clock) => now - clock > 0.8 * expectedMs
+    const threeSecondsLater = progress + 3_000
+    isFalse(yellowAt(threeSecondsLater, overrunClockFrom(start, progress)),
+      'the yellow does not flap back three seconds after the report that retracted it')
+    isTrue(yellowAt(Date.parse('2026-09-03T11:00:00Z'), overrunClockFrom(start, progress)),
+      'but it is earned again once the new 80 % is crossed')
+    const runEnd = Date.parse('2026-09-03T10:50:00Z')   // 124 min in, the run’s real end
+    isFalse(overrunAt(runEnd, overrunClockFrom(start, progress)),
+      'still inside the time the report bought: no alarm, which is the point of reporting')
+    isTrue(overrunAt(Date.parse('2026-09-03T11:10:00Z'), overrunClockFrom(start, progress)),
+      'and past THAT the red is raised again — the old veto could never raise it')
+    isTrue(overrunAt(Date.parse('2026-09-03T09:31:11Z'), overrunClockFrom(start, NaN)),
+      'a run that never reported is unchanged')
   })
 
   await check('branchOnRemote: behind-only is pushed, no upstream is not', async () => {

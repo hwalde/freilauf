@@ -88,6 +88,53 @@ a day on which nothing was released.
     nobody asked for that ending — and because the alarm is taken back rather
     than left spent, a later ending that really is the agent's can still page.
 
+- **A resumed opencode run could pick up a different run's conversation and
+  file its report.** When the hub resumes an interrupted opencode run it looks
+  up that run's own session; where the store could not name one it fell back to
+  `opencode --continue`, on the assumption that a run's own worktree makes the
+  "last session" unambiguous. It does not — `--continue` continues the last
+  session of the **project**, and every worktree of one repository is one
+  project. Measured here: a run that had hung without ever starting a session
+  was resumed 39 hours later, landed in another agent's finished conversation,
+  and the hub recorded that agent's report — word for word — as its own, closed
+  the run as done and reported success to the operator. The work had never
+  happened. A resume that cannot identify the run's own conversation now starts
+  the agent afresh from its original task instead, behind the usual header
+  naming what the run had already committed. Doing a task twice is a cost;
+  reporting someone else's work as finished is a wrong answer.
+
+- **A single progress report switched a run's overrun alarm off for good.** The
+  red "this run is far past its expected duration" was skipped for any run that
+  had *ever* reported progress — so one `fl-report progress` in the first ten
+  minutes bought a run immunity for the rest of its life, on the very alarm that
+  says an agent is not coming back. The platform prompt asks every agent for
+  that line when it needs longer, so the runs most likely to overrun were
+  exactly the ones that had disarmed the alarm: 12 runs on this installation
+  went past their expectation with a progress report and no alarm, the worst at
+  413 % of its duration. Worse, the *yellow* "approaching the expected duration"
+  had no such veto and came back within seconds of the report that retracted it
+  — so such a run ended up showing the weaker of the two warnings while the
+  stronger one was permanently spent. Both thresholds are now measured **from
+  the last progress report**: reporting where you stand buys another expected
+  duration, and going past that raises the alarm again. A run that never reports
+  is unchanged, and the operator is still paged only once per run.
+
+- **The sidebar could claim the machine held nothing.** `tmux list-sessions`
+  reports "there is no server" and "I could not answer you" through the same
+  exit code, and the memory block spent the second one as the first: a tmux
+  that did not answer arrived as an empty list, was summed to **0 MB in 0
+  Sessions**, and was then cached for eight minutes — so one bad moment made
+  every page say for eight minutes that there was nothing to clean up, which
+  is the opposite of what that block exists to show. Measured on this
+  installation: six live sessions holding 4.6 GB, three sidebars in the same
+  minute saying `0 MB in 0 Sessions` and the next three `4,6 GB in 6 Sessions`.
+  A reading nobody could take is no longer taken: the previous one stays on
+  screen with its own measuring time in the tooltip, and where there is none
+  the block says nothing at all. A machine with no tmux server is a real answer
+  and still shows a zero. The Sessions page had the same gap in its headline
+  and its empty table — both now say that tmux did not answer instead of
+  counting to nought.
+
 ## 2026-09-08
 
 ### Fixed

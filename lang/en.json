@@ -375,6 +375,7 @@
   "sessions.end_selected": "End selected ({n})",
   "sessions.refresh": "Reload",
   "sessions.summary": "Sessions: {n} · RAM: {ram}",
+  "sessions.unreachable": "tmux did not answer — this list is not what the machine holds",
   "sessions.auto_hint": "Finished sessions close by themselves after {hours} h.",
   "sessions.hidden_note": "Sessions with a running agent right now: {n}. They stay hidden by default so none is ended by a misclick.",
   "sessions.none": "no tmux sessions",

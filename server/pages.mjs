@@ -38,7 +38,7 @@ import { TYPE_TEXT } from './detect.mjs'
 import { llmModelsMru, rememberLlmModel } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
 import { resumeCommand } from './integrate.mjs'
-import { listSessions, sessionMemory, publishSessionMemory, sessionKeepHours, currentKeepMs, paneAlive, archiveSessionKeepHours } from './sessions.mjs'
+import { listSessions, listSessionsSnapshot, sessionMemory, publishSessionMemory, sessionKeepHours, currentKeepMs, paneAlive, archiveSessionKeepHours } from './sessions.mjs'
 import { cleanupSettings, cleanupConfigured, cleanupRunInFlight } from './cleanup.mjs'
 import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
 import { flowRunKeepDays } from './flows/db.mjs'
@@ -2297,14 +2297,20 @@ export function sessionRow(s, ctx = {}) {
 }
 
 export async function pageSessions(req, res, url) {
-  const sessions = await listSessions()
+  // The snapshot and not the bare list: this page SUMS what it gets, and an
+  // unanswered tmux arrives as an empty array. Summed, that is "0 Sessions,
+  // 0 MB" — on the one page whose whole job is showing how big the memory bill
+  // has grown, and therefore the one number that reads as "nothing to clean up".
+  const { ok: tmuxAnswered, sessions } = await listSessionsSnapshot()
   // This page has just measured, so it PUBLISHES its reading instead of
   // summing it privately: the status sidebar rendered into the same response
   // then quotes the same number rather than an up-to-eight-minute-old one of
   // its own. Both were honest before and they contradicted each other on
   // screen — 31,3 GB in the headline, 32,2 GB in the sidebar beside it.
+  // A reading nobody could take is not published at all: the sidebar keeps the
+  // last one it had rather than being handed a zero.
   const runningCount = sessions.filter(s => s.state === 'agent_running').length
-  const rssTotal = publishSessionMemory(sessions).rssKb
+  const rssTotal = publishSessionMemory(sessions, { ok: tmuxAnswered })?.rssKb ?? 0
   const hours = Math.round(currentKeepMs() / 3_600_000 * 10) / 10
   const cleanup = cleanupSettings()
   const cleanupBox = cleanupConfigured(cleanup)
@@ -2329,21 +2335,25 @@ export async function pageSessions(req, res, url) {
     <label class="chk"><input type="checkbox" id="sess-all"> ${e(t('sessions.select_all'))}</label>
     <button type="button" id="sess-kill-selected" class="danger" disabled>${e(t('sessions.end_selected', { n: 0 }))}</button>
     <span class="spacer"></span>
-    <span class="dim" id="sess-summary">${e(t('sessions.summary', { n: sessions.length, ram: byteText(rssTotal) }))}</span>
+    <span class="dim" id="sess-summary">${e(tmuxAnswered
+      ? t('sessions.summary', { n: sessions.length, ram: byteText(rssTotal) })
+      : t('sessions.unreachable'))}</span>
     <a class="btn" href="/sessions">${e(t('sessions.refresh'))}</a>
   </div>
   <p class="dim" id="sess-hidden" hidden></p>
   <p class="dim">${e(t('sessions.auto_hint', { hours: hours }))}
      <a href="/settings">${e(t('nav.settings'))}</a></p>
-  ${sessionsTable(sessions, {})}
+  ${sessionsTable(sessions, { unreachable: !tmuxAnswered })}
   <p class="dim">${e(t('sessions.hidden_note', { n: runningCount }))}</p>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
     .end(await layout(req, t('sessions.title'), '/sessions', body))
 }
 
 export function sessionRows(sessions, ctx = {}) {
+  // An empty table has two very different meanings, and only one of them is
+  // "there is nothing here": `ctx.unreachable` is the tmux that gave no answer.
   return sessions.map(s => sessionRow(s, ctx)).join('')
-    || `<tr><td colspan="11" class="dim">${e(t('sessions.none'))}</td></tr>`
+    || `<tr><td colspan="11" class="dim">${e(t(ctx.unreachable ? 'sessions.unreachable' : 'sessions.none'))}</td></tr>`
 }
 
 export function sessionsTable(sessions, ctx = {}) {

@@ -98,7 +98,8 @@ Options:
       --settings JSON   claude only: pass --settings JSON through (e.g. run hooks).
       --resume ID       continue an interrupted conversation instead of starting one:
                         claude --resume ID, cursor-agent --resume ID, opencode --session ID
-                        ('last' = opencode --continue), hermes chat --in DIR --resume ID
+                        ('last' = opencode --continue, the PROJECT's last session —
+                        not necessarily this run's), hermes chat --in DIR --resume ID
                         ('latest' = the workspace's newest session); a --spec harness
                         needs a 'resume' argv in its declaration. The prompt (-p/-f)
                         is then the continuation text.
@@ -725,10 +726,15 @@ cmd_autonomous() {
     [[ -n "$PROVIDER" ]] && model_args+=" --provider $(q "$PROVIDER")"
     # hermes calls the same thing '--reasoning'.
     [[ -n "$EFFORT" && "$HARNESS" == "hermes" ]] && model_args+=" --reasoning $(q "$EFFORT")"
-    # opencode's resume form: `--session <id>` continues that conversation,
-    # `--continue` the last one of the directory ('last' from the hub when the
-    # root session could not be read out of the store). Measured 1.18.23: both
-    # take `--prompt` as the next turn like a fresh start does.
+    # opencode's resume form: `--session <id>` continues that conversation.
+    # 'last' maps to `--continue`, which continues the last session of the
+    # PROJECT — not of the directory, and every worktree of one repository is
+    # one project. The hub therefore no longer sends it (opencode.mjs,
+    # resumeId(): a null answer starts afresh instead), because unattended it
+    # picked up another run's finished conversation and filed its report. It
+    # stays available for a caller that asks for it deliberately and can see
+    # which conversation came up. Measured 1.18.23: both take `--prompt` as the
+    # next turn like a fresh start does.
     if [[ -n "$RESUME_ID" && "$HARNESS" == "opencode" ]]; then
         if [[ "$RESUME_ID" == "last" ]]; then model_args+=" --continue"; else model_args+=" --session $(q "$RESUME_ID")"; fi
     fi

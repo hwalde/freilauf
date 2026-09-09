@@ -884,6 +884,28 @@ try {
     isTrue(k.includes('cleared:anomaly:overrun'), 'marked as resolved')
     isTrue(k.includes('cleared:anomaly:soft_overrun'), 'the yellow level too')
   })
+  await check('…and the retraction holds, then re-arms — it is not immunity', async () => {
+    // The run is still five minutes into a one-minute expectation, so under the
+    // old rule the very next pass raised the YELLOW again (it never had the
+    // progress guard) while the RED stayed skipped for ever, because that guard
+    // asked whether the run had EVER written a progress event. The run then wore
+    // the weaker of the two statements while going far past its duration —
+    // measured on production run 48ceead7, red raised and notified at 09:31, two
+    // progress reports at 10:21, yellow back three seconds later, and the run
+    // finished at 276 % of its expectation.
+    await watcherTick()
+    let k = ereignisse(R3)
+    isFalse(k.includes('anomaly:soft_overrun'), 'the yellow does not flap straight back')
+    isFalse(k.includes('anomaly:overrun'), 'nor the red — the report bought time')
+
+    // Backdate the report itself: the clock the expectation is measured from is
+    // now that report, so this is the run going past its duration a SECOND time.
+    db.prepare(`UPDATE events SET ts=datetime('now','-5 minutes') WHERE run_id=? AND kind='progress'`).run(R3)
+    await watcherTick()
+    k = ereignisse(R3)
+    isTrue(k.includes('anomaly:overrun'), `the red is earned again (has: ${k.join(', ')})`)
+    isTrue(k.includes('anomaly:soft_overrun'), 'and the yellow with it')
+  })
   await check('a run that came through stops calling for attention', async () => {
     // The traffic light is fed by incidents AND by the run's anomalies. An
     // anomaly is a statement about a run IN FLIGHT — "this is taking longer
@@ -4736,6 +4758,27 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
     const overview = await (await fetchPath('/')).text()
     contains(overview, 'id="cleanup-dialog"', 'the modal is on every page')
     isFalse(overview.includes('name="keep"'), 'but the keep field only on the Sessions page')
+  })
+  await check('GET /api/sessions answers with ONE reading, not a list and a separate total', async () => {
+    // The route listed the sessions and then asked sessionMemory() for a second,
+    // unrelated measurement, so one response carried two answers to one
+    // question. Measured 2026-09-09 on the production hub while another agent's
+    // test suite was starting and killing sessions: `sessions.length` 14 next to
+    // `memory.sessions` 7, with nothing to tell a consumer which the machine was
+    // holding. Same rule the sessions page already follows — a caller that has
+    // just measured publishes its reading instead of summing privately.
+    const sitzung = (await sh('tmux', ['list-sessions', '-F', '#{session_name}'])).stdout.trim()
+    if (!sitzung) return skipped('/api/sessions one reading', 'no tmux server in this environment')
+    const j = await (await fetchPath('/api/sessions')).json()
+    isTrue(Array.isArray(j.sessions) && !!j.memory, 'a list and a memory block')
+    equal(j.memory.sessions, j.sessions.length,
+      `the block counts exactly the list beside it (${j.memory.sessions} vs ${j.sessions.length})`)
+    equal(j.memory.running, j.sessions.filter(s => s.state === 'agent_running').length,
+      'and the working ones are the working ones of that same list')
+    // …and the sidebar rendered next quotes it rather than paying for three
+    // more subprocesses — which is the other half of publishing.
+    const leiste = await (await fetchPath('/api/fragments/sidebar')).text()
+    contains(leiste, `in ${j.memory.sessions} sessions`, 'the sidebar quotes the reading the API just published')
   })
   await check('the cleanup agent starts through the ordinary run path', async () => {
     const r = await postForm('/api/cleanup/start', { target_gb: '2', keep: '', source: 'sessions' })
