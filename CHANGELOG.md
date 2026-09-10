@@ -18,6 +18,26 @@ a day on which nothing was released.
 
 ## 2026-09-10
 
+### Added
+
+- **A follow-up commission can be ended by hand, without closing the session.**
+  A finished run's banner now carries an "End follow-up" button
+  (`POST /api/runs/<id>/end-followup`). A commission is opened by the coding
+  agent's own hook reporting that a line went in, and the hub cannot always
+  tell whose line it was — Claude Code announces a finished background subagent
+  by writing a message into its own session, and the fix for that recognises
+  only the shapes that have been measured. Whatever it misses lands as a
+  commission nobody gave, and until now the only way to clear one was to kill
+  the tmux session: destructive, and the wrong price for correcting a record.
+  Two runs on this installation sat at the top of the overview for ten and
+  eleven hours that way — displayed as running, clocked against the phantom
+  commission, counted as work in flight, impossible to archive, and enough to
+  make `freilauf drain` wait for ever before a planned reboot. The button
+  closes the commission and nothing else: the session stays open, the agent
+  stays reachable, the run keeps the status its first attempt earned, and
+  anything the agent committed is named exactly as it is on every other
+  give-up path.
+
 ### Fixed
 
 - **A run that had stopped dead was filed under "nothing to do".** A red

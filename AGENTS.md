@@ -2564,9 +2564,9 @@ lesson). `runs.followup_since` carries it, and three things hang on it:
   detached worktree on no branch and not on origin, under a run whose every
   page went on saying "nothing to merge". A run whose SESSION goes while it is
   still `running` has had `assessLater()` behind it all along; a follow-up had
-  nothing. **`abandonFollowUp()`** (reports.mjs) is the one function all four
+  nothing. **`abandonFollowUp()`** (reports.mjs) is the one function all five
   give-up paths call — `reconcileClosedSession()`, the watcher's two branches,
-  and the kill route on a finished run — and it is `endFollowUpCommission()`
+  the kill route on a finished run, and the operator's own button (below) — and it is `endFollowUpCommission()`
   plus the same `assessUnmerged()` the abort path uses: `merge_status` becomes
   `unmerged_*`, the commits are pushed to origin (`backupBranch`), the detail
   page offers "Merge now", and the operator is told (not on the kill route,
@@ -2583,6 +2583,29 @@ lesson). `runs.followup_since` carries it, and three things hang on it:
   refuses to write the one answer that means "nothing happened": a follow-up
   that added nothing must not turn a `merged` run into a `nothing` one and take
   the run's own record of where its work went away from it.
+- **And a commission the hub opened in error can be taken back — by the
+  operator, without closing the session** (`POST /api/runs/<id>/end-followup`,
+  the button in the follow-up banner). A commission is opened by the agent's
+  own hook saying a line went in, and the hub cannot always tell whose line it
+  was: `injectedSubmission()` recognises the shapes that have been MEASURED,
+  and the next CLI that writes into its own session will not be on that list.
+  Whatever that list misses lands as a commission nobody gave — and until this
+  button existed the only way to clear one was to **kill the tmux session**,
+  which is destructive and the wrong price for correcting a record. Measured
+  on this installation: runs `05246ba4` and `1e4ec85e` each took a burst of
+  `<task-notification>` injections seconds after reporting done, and their
+  commissions stood at the top of the overview for ten and eleven hours with no
+  way out — the run displayed as running, its clock ran against the commission
+  (628 min against an expectation of 45), the sidebar counted it as work in
+  flight, `archivable()` refused it and `freilauf drain` would have waited on
+  it. Same shape as the resume button: where the hub cannot prove it, the
+  operator says it. It goes through the same `abandonFollowUp()` — so a
+  commission ended by hand leaves the same trace and assesses its leftovers the
+  same way, with `announce` false because whoever clicked is looking at the
+  page — and it touches nothing else: the SESSION stays open, the agent stays
+  reachable, and the run keeps the status its first attempt earned. A run with
+  no open commission is refused with the reason rather than writing a second
+  `followup_abandoned` over a conversation nobody had.
 - **…and the pair on the page is measured on that same clock**
   (`runtimeClock()` in run-state.mjs, asked by the overview's cell and by
   `fmtRuntime()`). "Duration / expectation" is two numbers about ONE

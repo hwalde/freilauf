@@ -785,6 +785,39 @@ async function api(req, res, url) {
     }
     return answer(req, res, 200, { ok: true, ...r }, `/runs/${run.id}`)
   }
+  // "End the follow-up": take back a commission that is open over a
+  // conversation nobody is having.
+  //
+  // A commission is opened by the agent's own hook saying a line went in, and
+  // the hub cannot always tell whose line it was — Claude Code announces a
+  // finished background subagent by INJECTING a `<task-notification>` as an
+  // ordinary user message, and every one of those fired the same hook.
+  // `injectedSubmission()` recognises the ones that have been measured, and it
+  // is a narrow list on purpose; the next CLI that writes into its own session
+  // will not be on it. There has to be a way back, and there was exactly one:
+  // closing the tmux session — which is destructive, and the wrong price for
+  // correcting a record.
+  //
+  // The same shape as the resume button one route up: where the hub cannot
+  // prove it, the operator says it. It goes through `abandonFollowUp()`, the
+  // one function all four give-up paths already use, so a commission ended by
+  // hand leaves the same trace and assesses its leftovers the same way — and
+  // with `announce` false, because whoever clicked is looking at the page. It
+  // touches nothing else: the SESSION stays open, the agent stays reachable,
+  // and the run keeps the status its first attempt earned.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/end-followup$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    if (!run.followup_since) {
+      const reason = t('run.followup_end_err')
+      return wantsHtml(req)
+        ? problemPage(req, res, t('run.followup_end'), [reason], `/runs/${run.id}`)
+        : answer(req, res, 400, { ok: false, error: reason }, `/runs/${run.id}`)
+    }
+    addEvent(run.id, 'followup_abandoned', { source: 'operator' })
+    abandonFollowUp(run.id, false)
+    return answer(req, res, 200, { ok: true }, `/runs/${run.id}`)
+  }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/retry$/))) {
     const run = getRun(m[1])
     if (!run) return json(res, 404, { ok: false })

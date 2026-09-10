@@ -1805,7 +1805,9 @@ export function runDetailHead(run, ctx) {
       run.agent_state_at ? e(t('run.agent_waiting', { ts: fmtDbUtc(run.agent_state_at) })) : ''}</p>`}
   ${followUpActive(run)
     ? `<div class="banner waiting" id="run-banner">${e(t('run.followup_banner'))}
-       ${run.followup_since ? `<span class="dim">${e(t('run.followup_active', { ts: fmtDbUtc(run.followup_since) }))}</span>` : ''}</div>`
+       ${run.followup_since ? `<span class="dim">${e(t('run.followup_active', { ts: fmtDbUtc(run.followup_since) }))}</span>
+       <form method="post" action="/api/runs/${run.id}/end-followup" class="inline"><button
+         title="${e(t('run.followup_end_hint'))}">${e(t('run.followup_end'))}</button></form>` : ''}</div>`
     : ''}
   ${run.status === 'scheduled'
     // A planned run must be revocable — otherwise a start you thought better of
