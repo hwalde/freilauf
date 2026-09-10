@@ -6616,8 +6616,8 @@ try {
   })
 
   await check('a caller that has just measured publishes its reading, so there is one total', async () => {
-    // The sessions page calls listSessions() itself — it needs a row per
-    // session — and used to sum that list a second time for its headline while
+    // The sessions page measures itself — it needs a row per session — and
+    // used to sum that list a second time for its headline while
     // the sidebar rendered into the SAME response served the cached
     // measurement. Both honest, and contradicting each other on screen:
     // measured 2026-09-07, "31,3 GB" in the headline against "32,2 GB in 42
@@ -6644,7 +6644,7 @@ try {
   })
 
   await check('a tmux that gave no answer is never a machine holding nothing', async () => {
-    // `tmuxSessions()` answers `[]` for BOTH "there is no tmux server" and "I
+    // A bare session list answers `[]` for BOTH "there is no tmux server" and "I
     // could not answer you", and summing the second one produces `0 MB in 0
     // Sessions` — the one number this block must never invent, because it is
     // exactly the number that says "no bill, nothing to clean up". Measured
@@ -10739,7 +10739,7 @@ process.stdout.write(JSON.stringify(out))
     const { sandboxOutcome, classifyPolicyPatch, LIVE_POLICY_PATHS, containerEnv, engineUsable, proxyPlacement,
       sandboxCredentialPairs, missingRequiredCredentials } =
       await import('../server/sandbox/index.mjs')
-    const { platformSuffix, sandboxPromptSection, splitEnvArgs, createRun } = await import('../server/runner.mjs')
+    const { platformSuffix, sandboxPromptSection, createRun } = await import('../server/runner.mjs')
 
     /** The whole way from four tri-states to what the run row says and the hub writes. */
     const plan = ({ hub, repo = 'inherit', agent = 'inherit', run = 'inherit',

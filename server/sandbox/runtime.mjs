@@ -1951,11 +1951,6 @@ export function buildStateOf(ref) {
   return b ? { ...b } : null
 }
 
-/** Every build in flight, for a page that renders all of them. */
-export function buildStates() {
-  return [...buildsInFlight.values()].map(b => ({ ...b }))
-}
-
 /**
  * `#12 [ 7/14] RUN apt-get …` → `{ step: 7, of: 14, line: 'RUN apt-get …' }`.
  *

@@ -15,8 +15,6 @@ fi
 # shellcheck source=fl-harness-tags.sh
 . "$FL_LIB"
 
-PREFIX="$FL_PREFIX"
-
 usage() {
     cat <<'EOF'
 Usage: fl-kill [options] [session-name]

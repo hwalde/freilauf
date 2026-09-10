@@ -709,10 +709,10 @@ is the shape this file keeps paying for.
 
 Three things fix it and none of them changes the fail-soft rule:
 
-- **`askTitle()` keeps the reason** where `generateTitle()` answers a string or
-  `null`. "Switched off" and "the vendor timed out" arrive as the same `null`,
-  and retrying the first for ever would be as wrong as never retrying the
-  second.
+- **`askTitle()` keeps the reason** where the wrapper in front of it answered a
+  string or `null` (it is gone; both callers ask `askTitle()` now). "Switched
+  off" and "the vendor timed out" arrive as the same `null`, and retrying the
+  first for ever would be as wrong as never retrying the second.
 - **A failure is written down** — `title_failed {reason, attempt, of, error}`,
   the stage and the vendor's own sentence, at most three per run. It costs an
   event and it is the difference between "the title never came" and an answer.
@@ -1988,9 +1988,10 @@ application comes out of it.
 - **The tmux memory block works exactly that way, on an eight-minute clock.**
   `sessionMemory()` (sessions.mjs, `FREILAUF_SESSION_MEM_CACHE_MS`) measures the
   total RSS of every tmux session on the machine — foreign ones included, the
-  question is what the MACHINE holds — through `listSessions()`, so the sidebar's
-  total and the sessions page's own summary are the same number by construction.
-  That sentence stood here while it was not true: the page calls `listSessions()`
+  question is what the MACHINE holds — through `listSessionsSnapshot()`, so the
+  sidebar's total and the sessions page's own summary are the same number by
+  construction.
+  That sentence stood here while it was not true: the page measures
   itself (it needs a row per session) and summed that list a SECOND time, so the
   headline and the sidebar rendered into one response were two honest readings up
   to eight minutes apart — measured 2026-09-07, "31,3 GB" against "32,2 GB in 42
@@ -3608,12 +3609,15 @@ Four rules follow from it, and each one is a place where "nothing" used to be
 spent as "gone":
 
 - **`tmuxSnapshot()` carries the verdict**; `ok: false` means "no answer", never
-  "empty". `tmuxSessions()` is its thin wrapper and keeps returning a bare list,
-  which is right for the DISPLAY callers (the sessions page, the memory block) —
-  showing nothing is the honest rendering of an unanswered question. Anything
-  that **ends a run** reads the verdict. `tmuxSessionMap()` is gone on purpose:
-  a Map cannot carry a verdict, and that is exactly how an unreachable tmux
-  arrived as "no sessions anywhere".
+  "empty". A DISPLAY caller (the sessions page, the memory block) may drop the
+  flag and render nothing — that is the honest rendering of an unanswered
+  question — but it drops it at the call site: the bare-list wrappers that used
+  to do it for them (`tmuxSessions()`, `listSessions()`) are gone, because the
+  shape that hides the verdict is the shape nothing should reach for by default.
+  Anything that **ends a run** reads the verdict. `tmuxSessionMap()` is gone for
+  the sharper version of the same reason: a Map cannot carry a verdict at all,
+  and that is exactly how an unreachable tmux arrived as "no sessions
+  anywhere".
 - **`sessionGone(name)` is tri-state** — `true` / `false` / `null`. `watchRun()`
   skips a run entirely on `null` and tries again in 30 s: not knowing is a
   reason to wait, never a reason to end somebody's work. A session that really

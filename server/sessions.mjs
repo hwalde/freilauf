@@ -8,7 +8,7 @@
 // days that adds up to dozens of them.
 //
 // This module is the one place that knows about sessions:
-//   - listSessions()           what tmux has, enriched with the run behind it
+//   - listSessionsSnapshot()   what tmux has, enriched with the run behind it
 //   - sessionMemory()          what all of them cost together, cached
 //   - killSessions()           end them, and keep the run records honest
 //   - reconcileClosedSession() what an ended session means for its run
@@ -356,21 +356,12 @@ export async function tmuxSnapshot() {
   return { ok: true, sessions: mergePanes(sessions, panes.ok ? panes.stdout : ''), reason: 'ok' }
 }
 
-/**
- * Raw session list including panes. Empty when tmux is not reachable — which is
- * right for the DISPLAY callers (the sessions page, the memory block): showing
- * nothing is the honest rendering of an unanswered question. Anything that ENDS
- * a run asks tmuxSnapshot() instead and reads its verdict.
- */
-export async function tmuxSessions() {
-  return (await tmuxSnapshot()).sessions
-}
-
-// Deliberately no tmuxSessionMap() any more. The watcher used to build its
-// name → session map from tmuxSessions(), and a Map cannot carry the verdict:
-// an unreachable tmux arrived as a map with nothing in it, and every run in the
-// pass then looked session-less at once. Whoever needs the map builds it from
-// tmuxSnapshot().sessions AFTER reading snapshot.ok.
+// Deliberately no tmuxSessions() and no tmuxSessionMap() any more. Both dropped
+// the verdict: a bare list and a Map alike answer "empty" for a machine that
+// demonstrably holds no session AND for a tmux that could not be asked, so an
+// unreachable server made every run in the pass look session-less at once.
+// Whoever needs the list or the map builds it from tmuxSnapshot().sessions
+// AFTER reading snapshot.ok.
 
 /**
  * The exact-match target for a command that wants a PANE — `display`,
@@ -575,28 +566,22 @@ async function containerResources(run) {
 }
 
 /**
- * Every session with everything known about it, TOGETHER WITH the verdict on
- * whether tmux answered at all — `{ ok, sessions }`, the same shape
- * `tmuxSnapshot()` has one layer further down and for the same reason.
+ * Every session with everything known about it — the run behind it, the agent,
+ * the repo and what the process tree costs, oldest first, which is the order one
+ * wants when cleaning up — TOGETHER WITH the verdict on whether tmux answered at
+ * all: `{ ok, sessions }`, the same shape `tmuxSnapshot()` has one layer further
+ * down and for the same reason.
  *
- * `listSessions()` below drops the flag, which is right for a caller that
- * renders a table: an empty table is the honest rendering of an unanswered
- * question. It is NOT right for anything that SUMS the list — see
- * `sessionMemory()`.
+ * A caller that renders a table may drop the flag — an empty table is the honest
+ * rendering of an unanswered question. Nothing that SUMS the list may (see
+ * `sessionMemory()`), and there is deliberately no wrapper that drops it for
+ * them: the bare-list form outlived its callers, and the one import of it was a
+ * binding nothing read.
  */
 export async function listSessionsSnapshot() {
   const snap = await tmuxSnapshot()
   if (!snap.ok || !snap.sessions.length) return { ok: snap.ok, sessions: [] }
   return { ok: true, sessions: await describeSessions(snap.sessions) }
-}
-
-/**
- * Every session with everything known about it: the run behind it, the agent,
- * the repo and what the process tree costs. Oldest first — that is the order
- * one wants when cleaning up.
- */
-export async function listSessions() {
-  return (await listSessionsSnapshot()).sessions
 }
 
 async function describeSessions(sessions) {
@@ -651,9 +636,10 @@ async function describeSessions(sessions) {
  * the question the panel answers is what the MACHINE is holding, not what this
  * hub booked.
  *
- * It goes through listSessions(), so the sidebar's total and the sessions
- * page's own summary are the same number by construction — the panel exists to
- * make the page's reading visible everywhere, not to compute a second one.
+ * It goes through listSessionsSnapshot(), so the sidebar's total and the
+ * sessions page's own summary are the same number by construction — the panel
+ * exists to make the page's reading visible everywhere, not to compute a
+ * second one.
  *
  * Cached for eight minutes, and that TTL is the update interval: the sidebar
  * re-fetches its fragment every 30 s (hub.js), and this cache decides how often
@@ -670,16 +656,16 @@ let memCache = { at: 0, value: null }
 let memInflight = null
 
 /**
- * One reading of `listSessions()` → the value the panel shows. The single
- * builder, because the two callers below would otherwise be two sums over one
- * list, and two sums are how the sidebar and the sessions page came to print
- * different totals in one response (see publishSessionMemory).
+ * One reading of `listSessionsSnapshot()` → the value the panel shows. The
+ * single builder, because the two callers below would otherwise be two sums
+ * over one list, and two sums are how the sidebar and the sessions page came to
+ * print different totals in one response (see publishSessionMemory).
  */
 function memoryOf(sessions) {
   return {
     sessions: sessions.length,
     running: sessions.filter(s => s.state === 'agent_running').length,
-    // listSessions() already substitutes the container's memory for a
+    // describeSessions() already substitutes the container's memory for a
     // sandboxed session's pane tree, so this sum includes the containers by
     // construction — the same "one reading, rendered in two places" rule the
     // sidebar and the sessions page have always shared.
@@ -703,9 +689,9 @@ function memoryOf(sessions) {
  * A caller that has just measured hands its reading over, and the sidebar
  * quotes THAT instead of an older one of its own.
  *
- * The sessions page calls `listSessions()` itself — it needs a row per session
- * — and then summed that list a second time for its headline while the status
- * sidebar rendered into the very same response served the cached measurement.
+ * The sessions page measures itself — it needs a row per session — and then
+ * summed that list a second time for its headline while the status sidebar
+ * rendered into the very same response served the cached measurement.
  * Both were honest and they contradicted each other on screen: measured
  * 2026-09-07, the page said "31,3 GB" and the sidebar beside it "32,2 GB in 42
  * Sessions", nearly a gigabyte apart, with nothing to tell the reader which of
@@ -725,7 +711,7 @@ export function publishSessionMemory(sessions, { ok = true } = {}) {
  * What the panel may say after ONE attempt to measure — the whole rule, pure,
  * so it can be tested without a tmux server.
  *
- * `tmuxSessions()` answers `[]` both for a machine that demonstrably holds no
+ * A bare session list answers `[]` both for a machine that demonstrably holds no
  * sessions and for a tmux that gave no answer at all (a fork that failed under
  * memory pressure, a server too busy to reply, the 30 s timeout in `sh()`), and
  * `memoryOf([])` turns the second one into `0 MB in 0 Sessions`. For a table
