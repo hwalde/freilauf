@@ -2208,6 +2208,27 @@ try {
       isTrue(ereignisse(RA).includes('help_answered'), 'help_answered recorded')
     })
 
+    await check('a line the harness injected into its own session is not the operator', async () => {
+      // Claude Code announces a finished BACKGROUND SUBAGENT by writing a
+      // `<task-notification>` into the conversation, and that fires the same
+      // UserPromptSubmit hook a typed line does. Read as a person it closed
+      // help calls nobody had answered and opened follow-up commissions on
+      // finished runs — measured on runs 05246ba4 and 1e4ec85e, 2026-09-10.
+      const note = '<task-notification> <task-id>bbs1qtlj4</task-id> <output-file>/tmp/x</output-file>'
+      isTrue((await flReport(RA, ['help', 'Which branch?'])).ok, 'the agent asks a human')
+      equal(lauf(RA).status, 'waiting_help', 'and waits')
+      await flReport(RA, ['_turn_end'])
+      equal(lauf(RA).agent_state, 'waiting', 'and sits at its prompt')
+      const r = await report(RA, { kind: '_working', source: 'prompt', prompt_head: note })
+      equal(r.status, 200, 'the notification is accepted…')
+      equal(lauf(RA).status, 'waiting_help', '…and does NOT answer the question')
+      equal(JSON.parse(db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='agent_working' ORDER BY id DESC LIMIT 1`)
+        .get(RA)?.payload ?? 'null')?.source, 'injected', 'the history says what really arrived')
+      // A real line still answers it, exactly as before.
+      isTrue((await flReport(RA, ['_working', 'prompt'])).ok, 'the operator does answer')
+      equal(lauf(RA).status, 'running', 'running again')
+    })
+
     await check('closing the session forgets what the agent said', async () => {
       await flReport(RA, ['_turn_end'])
       equal(lauf(RA).agent_state, 'waiting', 'waiting')
@@ -2234,6 +2255,16 @@ try {
       isTrue((await flReport(RF, ['_turn_end'])).ok, 'the agent stops after its report')
       equal(lauf(RF).followup_since, null, 'a turn end on a finished run commissions nothing')
       contains(await (await fetchPath(`/runs/${RF}`)).text(), '"status-chip">Done<', 'and the run reads done, not waiting for input')
+      // Nor does a line the HARNESS wrote to itself — and this one is not held
+      // back by the grace window at all, so it must be refused on its own
+      // merits: run 1e4ec85e's phantom commission arrived 56 minutes after the
+      // report and stood as "follow-up in progress" for ten hours.
+      db.prepare(`UPDATE runs SET ended_at=datetime('now','-1 hour') WHERE id=?`).run(RF)
+      equal((await report(RF, { kind: '_working', source: 'prompt', prompt_head: '<task-notification> <task-id>b7rvn3eo2</task-id>' })).status,
+        200, 'a subagent notification an hour after the report is accepted')
+      equal(lauf(RF).followup_since, null, 'and still commissions nothing')
+      contains(await (await fetchPath(`/runs/${RF}`)).text(), '"status-chip">Done<', 'the run still reads done')
+      db.prepare(`UPDATE runs SET ended_at=datetime('now') WHERE id=?`).run(RF)
       // The terminal writes into tmux directly; the send route is never called.
       // The agent's own prompt hook is the first the hub hears of it — and a
       // human's line is a commission whenever it comes.

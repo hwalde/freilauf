@@ -3388,20 +3388,54 @@ session's status only. claude's `SubagentStop` fires with the MAIN session's id
   done, opened a commission, and the run then read "waiting for input" instead
   of "done". So the hook says what it saw: `_working prompt` for a submitted
   line (claude UserPromptSubmit, cursor beforeSubmitPrompt, hermes
-  pre_llm_call) opens the commission at once — nothing but a person produces
-  it — and `_working tool` / `busy` / anything else only once the **grace
-  window** since the last report has passed (`commissionOnWorking()`,
-  `lastReportMs()`: the later of `ended_at` and the last report event; two
-  minutes, `FREILAUF_ATTENTION_GRACE_MS`). Inside the window such a call is the
-  reporting turn finishing, the state is noted and nothing else. The price is
-  on opencode, whose plugin cannot tell a typed line from a tool call: a
-  follow-up typed within two minutes of the report is recognised at the first
-  busy after the window.
+  pre_llm_call) opens the commission at once, and `_working tool` / `busy` /
+  anything else only once the **grace window** since the last report has passed
+  (`commissionOnWorking()`, `lastReportMs()`: the later of `ended_at` and the
+  last report event; two minutes, `FREILAUF_ATTENTION_GRACE_MS`). Inside the
+  window such a call is the reporting turn finishing, the state is noted and
+  nothing else. The price is on opencode, whose plugin cannot tell a typed line
+  from a tool call: a follow-up typed within two minutes of the report is
+  recognised at the first busy after the window.
+  **And `prompt` used to be read as proof of a person — "nothing but a person
+  produces it" — which is false: a CLI writes into its own session too.** Claude
+  Code announces a finished BACKGROUND SUBAGENT by injecting a
+  `<task-notification>` as an ordinary user message, and every one of them fires
+  `UserPromptSubmit`. Measured 2026-09-10 on this installation: run `05246ba4`
+  reported done at 01:35:04 and merged in the same second, and in the following
+  72 seconds its transcript took six such notifications while the hub wrote six
+  `agent_working {"source":"prompt"}` + `followup_started` pairs at exactly
+  those instants — six for six. `1e4ec85e` went the same way and then stood as
+  "waiting for input · follow-up in progress since 23:35" for ten hours. Both
+  bypassed the fence above by construction, because the fence lets `prompt`
+  through at any distance from the report. What a phantom commission costs is
+  four things that all read as healthy: `runtimeClock()` switches to it (a
+  35-minute run reading *266 min / 45 min*), `archivable()` refuses the run for
+  as long as it stands, the sidebar counts it as work in flight, and
+  **`freilauf drain` waits for it** — the command that exists precisely so a
+  planned reboot cannot lose a live conversation now cannot finish over one that
+  does not exist. `injectedSubmission(head)` (reports.mjs, pure) is the rule and
+  `attentionSource(body)` applies it **once**, renaming the source to
+  `injected`; `commissionOnWorking()` and `restartCommissionOnWorking()` needed
+  no change, because both already answer "no" to every word but `prompt`. Three
+  things make it safe rather than clever: the head travels from `fl-report` out
+  of claude's own hook payload (measured 2.1.261: `prompt` alongside `cwd`,
+  `hook_event_name`, `permission_mode`, `prompt_id`, `session_id`,
+  `transcript_path`), bounded to 120 single-line characters and stored nowhere;
+  the match is on a **narrow** list of blocks that were measured and only at the
+  very start of the line, since a person may legitimately paste markup as an
+  instruction; and an **absent** head is not injected but unknown — a session
+  started before this release sends none, and its operator's lines must go on
+  opening follow-ups exactly as they did.
 - **An answer typed into the terminal ends a help call.** `_working` on a
   `waiting_help` run calls `answerHelpCall()` — shared with the send route and
   the flow's message step — with no text: the status goes back to `running`,
   `help_answered` is written with `via: 'session'`, `help_answer` stays empty
-  because the hub never saw it.
+  because the hub never saw it. **Except an `injected` line**, and that is the
+  sharper half of the same fault: a `<task-notification>` landing on a run that
+  had asked a human a question would close the question with no answer, take
+  the run out of "needs you", and leave the person who was asked with nothing
+  to see. Only that one exclusion — a tool call still ends a help call, because
+  an agent that has started working again has been answered by somebody.
 - **The first key the operator types answers the wait — before any hook
   does.** The hooks above say `working` on Enter (claude, cursor, hermes) or
   on the first token (opencode), and never at all for a half-typed line, a

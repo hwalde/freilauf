@@ -467,7 +467,7 @@ when the answer was typed into the terminal.
 
 | What the CLI does | What the hook calls | Hub side |
 |---|---|---|
-| starts processing input — a prompt was submitted, a tool call begins | `fl-report _working prompt` when a human submitted a line, `fl-report _working tool` (or any other word) for a tool call or a status the CLI reports by itself | `runs.agent_state='working'`; on a `waiting_help` run it ends the help call (`answerHelpCall`); on a finished run with no open follow-up commission it OPENS one (`startFollowUpCommission`) — at once for `prompt`, and for everything else only once the **grace window** since the last report has passed (`commissionOnWorking`, two minutes, `FREILAUF_ATTENTION_GRACE_MS`) |
+| starts processing input — a prompt was submitted, a tool call begins | `fl-report _working prompt` when a human submitted a line, `fl-report _working tool` (or any other word) for a tool call or a status the CLI reports by itself; with the submitted text's start as `prompt_head` where the hook carries it (see below) | `runs.agent_state='working'`; on a `waiting_help` run it ends the help call (`answerHelpCall`); on a finished run with no open follow-up commission it OPENS one (`startFollowUpCommission`) — at once for `prompt`, never for a line the harness injected into its own session, and for everything else only once the **grace window** since the last report has passed (`commissionOnWorking`, two minutes, `FREILAUF_ATTENTION_GRACE_MS`) |
 | its turn is over and it waits for a human | `fl-report _turn_end` (the same kind cursor's run end uses; it implies waiting) or `fl-report _waiting` (for a second channel such as an idle notification) | `runs.agent_state='waiting'`; the run displays as "waiting for input"; the watcher writes no `no_activity` and pauses the follow-up overrun clock |
 
 One thing the hub does WITHOUT the plugin: the first key the operator types
@@ -490,7 +490,21 @@ that cannot tell (a tool call, opencode's `session.status busy`) says anything
 else: the hub then waits out the grace window after the report before it reads
 the work as somebody's follow-up.
 
-Three rules, and each of them was measured to go wrong otherwise:
+**And say WHAT was submitted, because `prompt` is not proof of a person.**
+A CLI writes into its own session too: Claude Code injects a
+`<task-notification>` as an ordinary user message when a background subagent
+finishes, and every one of them fires `UserPromptSubmit`. So a hook that
+carries the submitted text should pass its start along as `prompt_head` (a
+hook that has no text simply omits it — absent means "unknown", which the hub
+reads as a person, the way it always worked). `bin/fl-report` does this for
+claude out of the hook's own `prompt` field, bounded to 120 single-line
+characters; the hub matches the head against the blocks a harness is known to
+inject (`injectedSubmission()` in reports.mjs), renames the source to
+`injected` once (`attentionSource()`), and from there every rule downstream is
+unchanged — such a line opens no commission at ANY distance from the report,
+restarts none, and answers no help call.
+
+Four rules, and each of them was measured to go wrong otherwise:
 
 1. **Root session only, never a subagent's end.** opencode emits
    `session.status`/`session.idle` for every child session (its task tool
@@ -511,6 +525,12 @@ Three rules, and each of them was measured to go wrong otherwise:
    environment; a hook that runs in the operator's own sessions too (a global
    config, like hermes' `hooks:` block) has to exit 0 silently without them —
    `bin/fl-hermes-hook` is the shape.
+4. **A submitted line is not the same as a submitted line by a PERSON.** Ask
+   of your CLI what "the user sent a message" means to it: if the harness can
+   put a message into the conversation itself — a background task finishing, a
+   scheduled continuation, a queued reminder — that event fires the same hook,
+   and `prompt_head` is what tells the two apart. Measured on claude, twice, on
+   two different runs; nobody has yet asked the question of cursor or hermes.
 
 How the four built-ins wire it, measured 2026-09-05 (versions in AGENTS.md,
 "The agent's attention"): claude `UserPromptSubmit` → `_working prompt`,
