@@ -314,7 +314,7 @@
   "incidents.mark_handled": "标记为已处理",
   "incidents.dismiss": "知道了",
   "incidents.needs_you": "需要你处理（{n}）",
-  "incidents.needs_you_hint": "登录、额度或模型：这类问题不会自行消失——后续每次运行都会撞上同一堵墙。处理完后请标记为已处理。",
+  "incidents.needs_you_hint": "登录、额度或模型——或者一次已经停下、不会自行恢复的运行。这些都不会自行消失。处理完后请标记为已处理。",
   "incidents.noticed": "已记录，无需处理（{n}）",
   "incidents.noticed_hint": "Hub 已自行继续（延后、重试，或代理直接继续工作）。仅作为历史保留，运行结束后会自动关闭。",
   "incidents.resolve_hint": "清除条目只会让它在这里和通知中静默——运行本身不受影响。若问题再次出现，条目会重新打开并再次通知。",

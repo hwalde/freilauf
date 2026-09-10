@@ -20,6 +20,23 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **A run that had stopped dead was filed under "nothing to do".** A red
+  incident was only ever a to-do on a run whose status said `failed` or
+  `aborted` — and a run that stops mid-work is never written to `failed` by
+  anybody: no agent reports for it, its session stands, and the hub goes on
+  calling it `running`. So the one case where the incident IS the whole story
+  landed in the group whose hint reads "the hub carried on by itself". Measured
+  on this installation: a run took a 504 from its provider at 04:41:43, went
+  idle in the same second and never moved again — ten hours later its row, its
+  detail page, the sidebar and the message that had gone to the operator's
+  phone all said there was nothing to do, about a 30-minute run standing at 601
+  minutes. A red incident on a run that is still in flight now counts as
+  needing a human once the notification grace period has passed and the agent
+  has not demonstrably worked since — the same evidence the auto-resolution
+  already uses to refuse to close such an incident, so the two can no longer
+  read one measurement and reach opposite conclusions. An agent that carried on
+  after the hit still leaves it a note, which is the overwhelming majority.
+
 - **A finished run said "waiting for input" over a conversation nobody was
   having.** A run whose agent had spawned background subagents opened a
   follow-up commission by itself the moment those subagents finished: Claude

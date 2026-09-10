@@ -314,7 +314,7 @@
   "incidents.mark_handled": "Mark as handled",
   "incidents.dismiss": "Dismiss",
   "incidents.needs_you": "Needs you ({n})",
-  "incidents.needs_you_hint": "Login, credits or model: this does not clear itself — every following run walks into the same wall. Mark it handled once you have dealt with it.",
+  "incidents.needs_you_hint": "Login, credits or model — or a run that has stopped moving and will not come back by itself. None of this clears itself. Mark it handled once you have dealt with it.",
   "incidents.noticed": "Noticed, nothing to do ({n})",
   "incidents.noticed_hint": "The hub carried on by itself (deferred, retried, or the agent simply kept working). Kept as history and closed automatically once the run finishes.",
   "incidents.resolve_hint": "Clearing an entry only silences it here and in the notifications — it changes nothing about the run. If the problem occurs again, the entry reopens and notifies again.",

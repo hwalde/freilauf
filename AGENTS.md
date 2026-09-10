@@ -4428,8 +4428,44 @@ answer. `incidents.mjs` splits it:
 
 | Group | What | Button |
 |---|---|---|
-| **Needs you** | `auth_error`, `billing_error`, `model_error` — always. A token, a credit balance or a wrong model ID does not get better by waiting; every following run walks into the same wall. Plus a **red** incident on a run with status `failed`/`aborted`: that is the reason it did not come through. | "Mark as handled" |
-| **Noticed** | everything else — rate limit, provider hiccup, global pulse. The hub deferred, retried, or the run simply carried on. | "Dismiss" |
+| **Needs you** | `auth_error`, `billing_error`, `model_error` — always. A token, a credit balance or a wrong model ID does not get better by waiting; every following run walks into the same wall. Plus a **red** incident on a run that did not come through: status `failed`/`aborted`, or one still in flight that has **stopped moving** (below). | "Mark as handled" |
+| **Noticed** | everything else — rate limit, provider hiccup, global pulse. The hub deferred, retried, or the agent simply carried on. | "Dismiss" |
+
+**"Did not come through" was read off `runs.status` alone, and a run that stops
+mid-work is never written to `failed` by anybody.** No agent reports for it, its
+session stands, its pane lives, and the hub goes on calling it `running` — so
+the one case where a red incident IS the whole story landed in the group whose
+hint reads "the hub carried on by itself (deferred, retried, or the agent simply
+kept working)". Measured 2026-09-10 on run `ff3b350b`: its opencode took a
+`{"code":504,"message":"A Timeout Occurred"}` from the provider at 04:41:43,
+went idle in the same second and never moved again — and ten hours later the
+row, the detail page, the sidebar and the message that had already gone to the
+operator's phone at 04:52 all said there was nothing to do, about a 30-minute
+run standing at 601 minutes. The same trap `displayStatus()`, its SQL twin, the
+read API's `?status=` filter and the sessions page each learned separately:
+`runs.status` records the ATTEMPT, and asking it is not asking what the run is
+doing.
+
+The rule is the evidence that was already there, and it is deliberately the one
+**`incidentGoneReason()` asks about the very same fact** — those two must not
+read one measurement and reach opposite conclusions, which is exactly what they
+did: that function refuses to close a red incident on a running run *unless the
+agent demonstrably worked after it*, while this one called the same silence
+"nothing to do". So a red incident on a `running`/`waiting_help` run needs a
+human once **the notification grace period has passed** (an incident that clears
+itself is never a summons for the minutes it exists — and it is the same
+threshold the alarm uses, so by the time `notifyDueIncidents()` composes a text
+the condition holds by construction, and the message and the page cannot
+disagree) and **`agentCopedAfter()` says no**. That veto is asked, never copied.
+Its `null` is UNKNOWN, and unknown resolves to "needs you" here: the alternative
+is promising a reader that nothing is left to do, on evidence the hub does not
+have, about an alarm it has already rung. `deferred` and `scheduled` are
+deliberately out — there the hub really is carrying on by itself.
+
+`needsHuman(v, run)` therefore takes the run ROW, not a status string: the
+second half of the question is about the agent, and a parameter that took either
+shape would be one silent misreading away from answering "noticed" for a run it
+never looked at.
 
 Neither button changes anything about the run; both only silence the entry here
 and in the notifications, and a recurrence reopens it. What the watcher adds: incidents
