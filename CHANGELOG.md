@@ -16,6 +16,31 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-10
+
+### Fixed
+
+- **A finished run said "waiting for input" over a conversation nobody was
+  having.** A run whose agent had spawned background subagents opened a
+  follow-up commission by itself the moment those subagents finished: Claude
+  Code announces each one by writing a `<task-notification>` message into its
+  own session, that message goes through the same hook a typed line does, and
+  the hub read every one of them as "the operator gave this run more work".
+  Measured on two runs of this installation — one of them reported done and
+  merged at 01:35:04 and took six such notifications in the next 72 seconds,
+  the other stood as "follow-up in progress" for ten hours.
+  What a phantom commission costs is not cosmetic: the run's duration column
+  switches to the follow-up's clock (a 35-minute run read *266 min / 45 min*),
+  the run cannot be archived for as long as it stands, the sidebar counts it as
+  work in flight, and `freilauf drain` waits for it before a planned reboot —
+  the one command that exists so a reboot cannot lose a live conversation.
+  The hub now tells a person's line from one the harness wrote to itself, and
+  such a line opens no commission, restarts none, and — the sharper half of the
+  same fault — no longer closes a **help call** with no answer, which would
+  have taken a run that was genuinely waiting for a human out of "needs you".
+  A run started before this change keeps behaving exactly as it did until its
+  session is restarted; nothing an operator types is affected.
+
 ## 2026-09-09
 
 ### Added

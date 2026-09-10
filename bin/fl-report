@@ -67,7 +67,7 @@ if [[ -z "$RUN_ID" ]]; then
     exit 3
 fi
 
-TEXT="" ; FILE_ARG="" ; DETAIL_ARG="" ; ERR="" ; SESSION_ID=""
+TEXT="" ; FILE_ARG="" ; DETAIL_ARG="" ; ERR="" ; SESSION_ID="" ; PROMPT_HEAD=""
 # Claude calls the StopFailure hook without arguments and delivers the event as JSON
 # on stdin: { "error": "rate_limit", "last_assistant_message": "…", "session_id": "…" }.
 # The other hook kinds (Stop, SessionEnd, Notification) get the same JSON shape.
@@ -108,6 +108,20 @@ except Exception: pass' 2>/dev/null || true)"
         SESSION_ID="$(printf '%s' "$HOOK_JSON" | python3 -c 'import json,sys
 try: j=json.load(sys.stdin); print(j.get("session_id") or "")
 except Exception: pass' 2>/dev/null || true)"
+        # The START of the submitted line, for `_working prompt` only. Claude's
+        # UserPromptSubmit payload carries the text as `prompt` (measured on
+        # 2.1.261: cwd, hook_event_name, permission_mode, prompt, prompt_id,
+        # session_id, transcript_path) — and it fires for the harness's OWN
+        # injected messages too, which is what made every finished run that had
+        # spawned a background subagent read as "waiting for input"
+        # (reports.mjs, injectedSubmission). Bounded to 120 characters and
+        # single-line: the hub needs the opening tag and nothing else, it stores
+        # none of it, and an operator's instruction is not this script's to ship.
+        PROMPT_HEAD="$(printf '%s' "$HOOK_JSON" | python3 -c 'import json,sys
+try:
+    j = json.load(sys.stdin)
+    print(" ".join(((j.get("prompt") or "").strip()).split())[:120])
+except Exception: pass' 2>/dev/null || true)"
     fi
     if [[ "$KIND" == "_api_error" ]]; then set --; fi
 fi
@@ -127,7 +141,7 @@ if [[ -n "${1:-}" ]]; then
 fi
 
 # Build the payload as JSON with python3 (quoting-safe, no jq dependency).
-PAYLOAD="$(python3 - "$KIND" "$TEXT" "$FILE_ARG" "$DETAIL_ARG" "$ERR" "$SESSION_ID" <<'PY'
+PAYLOAD="$(python3 - "$KIND" "$TEXT" "$FILE_ARG" "$DETAIL_ARG" "$ERR" "$SESSION_ID" "$PROMPT_HEAD" <<'PY'
 # `os` is used below for os.path.isfile — it was lost once, and the failure is
 # invisible until the ONE call that matters: `fl-report done --file <report>`
 # dies with a NameError, so an agent finishes its work and cannot say so.
@@ -135,6 +149,7 @@ PAYLOAD="$(python3 - "$KIND" "$TEXT" "$FILE_ARG" "$DETAIL_ARG" "$ERR" "$SESSION_
 # short-circuits the isfile() call — which is exactly why it went unnoticed.
 import json, os, sys
 kind, text, file_arg, detail_arg, err, session_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
+prompt_head = sys.argv[7] if len(sys.argv) > 7 else ""
 body = {"kind": kind}
 if kind == "_api_error":
     body["error"] = err or "unknown"
@@ -153,6 +168,13 @@ elif kind in ("_working", "_waiting"):
     # commissionOnWorking).
     if text:
         body["source"] = text.split()[0][:40]
+    # And WHAT was submitted, so the hub can tell a person's line from one the
+    # harness wrote to itself. Only ever sent when the hook really carried a
+    # text: absent has to keep meaning "unknown", which the hub reads as a
+    # person — a session started before this release sends nothing, and its
+    # operator's lines must go on opening follow-ups exactly as they did.
+    if prompt_head:
+        body["prompt_head"] = prompt_head
 else:
     if file_arg and os.path.isfile(file_arg):
         with open(file_arg, encoding="utf-8", errors="replace") as fh:

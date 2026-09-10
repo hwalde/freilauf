@@ -490,17 +490,78 @@ export function attentionGraceMs() {
 }
 
 /**
+ * The submitted lines a HARNESS writes into its own session. `source: 'prompt'`
+ * rests on one sentence — "nothing but a person produces it" — and that sentence
+ * is false: Claude Code injects a `<task-notification>` as an ordinary user
+ * message when a background subagent finishes, and every one of them fires
+ * `UserPromptSubmit`.
+ *
+ * Measured 2026-09-10 on this installation. Run 05246ba4 reported done at
+ * 01:35:04 and merged in the same second; in the 72 seconds after that its
+ * transcript took six `<task-notification>` messages, and the hub wrote six
+ * `agent_working {"source":"prompt"}` + `followup_started` pairs at exactly
+ * those instants (01:35:13, :25, :30, :54, 01:36:12, :16 — six for six). Run
+ * 1e4ec85e went the same way. Both then stood in the overview as "waiting for
+ * input · follow-up in progress since …", one of them for ten hours, over a
+ * conversation nobody was having — and a phantom commission is not cosmetic:
+ * `runtimeClock()` switches to it (05246ba4 read 266 min against a 45-minute
+ * expectation for a run that took 35), `archivable()` refuses the run for as
+ * long as it stands, the sidebar counts it as work in flight, and
+ * `freilauf drain` waits for it before a planned reboot — which is the one
+ * gesture that exists so a reboot cannot lose a live conversation.
+ *
+ * The list is deliberately NARROW, like every other pattern this project
+ * matches against somebody else's output: only blocks that were measured, and
+ * matched only at the very start of the line, because a person may legitimately
+ * type or paste markup as an instruction. An unknown head — an `fl-report` from
+ * before this existed, a harness whose hook carries no text — is NOT injected:
+ * absent means "the way it always worked", the same reading
+ * `foreignClaudeSession()` gives a missing session id.
+ */
+const INJECTED_SUBMISSIONS = ['task-notification']
+
+export function injectedSubmission(head) {
+  if (typeof head !== 'string' || !head) return false
+  const s = head.trimStart()
+  return INJECTED_SUBMISSIONS.some(tag => s.startsWith(`<${tag}>`) || s.startsWith(`<${tag} `))
+}
+
+/**
+ * The attention source as the REST of the hub may read it: a `prompt` the
+ * harness wrote to itself becomes `injected`, and everything downstream then
+ * says the right thing without a rule of its own — `commissionOnWorking()` and
+ * `restartCommissionOnWorking()` both already answer "no" to every word but
+ * `prompt`, and the run's own event history records what really arrived.
+ *
+ * The state stays `working`, which is honest: claude does take a turn to read
+ * such a notification. Only the inference "therefore a person is here" was wrong.
+ */
+export function attentionSource(body) {
+  const source = body?.source ?? 'hook'
+  return source === 'prompt' && injectedSubmission(body?.prompt_head) ? 'injected' : source
+}
+
+/**
  * Does a `_working` on a FINISHED run with no open commission open one? Pure,
  * so the rule can be stated in a test.
  *
  *   source 'prompt'   a human submitted a line (claude UserPromptSubmit, cursor
  *                     beforeSubmitPrompt, hermes pre_llm_call): a commission,
- *                     whenever it comes — nothing but a person produces it.
+ *                     whenever it comes.
+ *   source 'injected' the harness wrote that line to itself (see
+ *                     `injectedSubmission`): NEVER, at any distance from the
+ *                     report. The grace window is the wrong instrument here —
+ *                     it asks "is this still the reporting turn finishing?",
+ *                     and the answer for a subagent notification is no while
+ *                     the conclusion stays just as wrong. Measured: run
+ *                     1e4ec85e's still-standing phantom commission arrived
+ *                     3389 seconds after the report, comfortably past any window.
  *   anything else     a tool call, opencode's busy, an unnamed hook: only once
  *                     the grace window since the last report has passed. Inside
  *                     it, it is the reporting turn finishing.
  */
 export function commissionOnWorking(source, sinceReportMs, graceMs = attentionGraceMs()) {
+  if (source === 'injected') return false
   if (source === 'prompt') return true
   return !(Number.isFinite(sinceReportMs) && sinceReportMs < graceMs)
 }
@@ -695,13 +756,19 @@ export async function handleReport(runId, body, via = 'http') {
     case '_waiting':
       noteAgentState(run, 'waiting', body.source ?? 'hook')
       break
-    case '_working':
-      noteAgentState(run, 'working', body.source ?? 'hook')
+    case '_working': {
+      const source = attentionSource(body)
+      noteAgentState(run, 'working', source)
       // The agent was waiting on a help call and now processes input: somebody
       // answered — by hand, into the terminal, past the send route. The run is
-      // running again; the answer's text is unknown and stays empty.
-      if (run.status === 'waiting_help') answerHelpCall(runId, null, 'session')
+      // running again; the answer's text is unknown and stays empty. A line the
+      // HARNESS wrote to itself is the one exclusion, and it is the sharper half
+      // of the same fault: a `<task-notification>` landing here would close the
+      // question with no answer, take the run out of "needs you", and leave the
+      // human who was asked with nothing to see.
+      if (run.status === 'waiting_help' && source !== 'injected') answerHelpCall(runId, null, 'session')
       break
+    }
     case '_exit': {
       addEvent(runId, 'exit')
       clearAgentState(runId)
@@ -957,7 +1024,7 @@ async function handleFollowUp(run, body, via) {
   // only one who noticed. With one open, or a follow-up in the gate (the agent
   // committing what the gate asked for), the state is all that changes.
   if (kind === '_working') {
-    const source = body.source ?? 'hook'
+    const source = attentionSource(body)
     noteAgentState(run, 'working', source)
     // With a commission already open the same call is the SECOND instruction,
     // and it restarts the clock exactly as the send route's does — one

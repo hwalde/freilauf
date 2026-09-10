@@ -7784,6 +7784,38 @@ try {
     isFalse(restartCommissionOnWorking('hook'), 'and an unnamed hook is no evidence of a person')
   })
 
+  await check('a line the harness wrote to itself is not a person — the commission it opened was a phantom', async () => {
+    // Measured 2026-09-10: run 05246ba4 reported done at 01:35:04 and took six
+    // `<task-notification>` messages in the next 72 seconds — Claude Code's own
+    // notice that a background subagent had finished. Every one of them fires
+    // UserPromptSubmit, so the hub wrote six `agent_working {"source":"prompt"}`
+    // + `followup_started` pairs at exactly those instants, and the finished,
+    // merged run then stood in the overview as "waiting for input · follow-up in
+    // progress" over a conversation nobody was having. `prompt` bypasses the
+    // grace window by design, so nothing downstream could catch it.
+    const { injectedSubmission, attentionSource, commissionOnWorking, restartCommissionOnWorking } =
+      await import('../server/reports.mjs')
+    const note = '<task-notification> <task-id>bbs1qtlj4</task-id> <tool-use-id>toolu_01SG</tool-use-id>'
+    isTrue(injectedSubmission(note), "claude's subagent notification is the harness talking to itself")
+    isTrue(injectedSubmission('  <task-notification>\nfoo'), 'leading whitespace does not hide it')
+    isFalse(injectedSubmission('please also fix <task-notification> handling'),
+      'only at the very start — a person may write about one')
+    isFalse(injectedSubmission('<div>hello</div>'), 'and markup a person typed is still a person')
+    isFalse(injectedSubmission(undefined), 'an fl-report from before this sent no head: unknown, never injected')
+    isFalse(injectedSubmission(''), 'and a hook that carries no text says nothing either')
+
+    equal(attentionSource({ source: 'prompt', prompt_head: note }), 'injected', 'the source is renamed once…')
+    equal(attentionSource({ source: 'prompt', prompt_head: 'run the tests again' }), 'prompt', '…and only then')
+    equal(attentionSource({ source: 'prompt' }), 'prompt', 'no head at all stays the way it always worked')
+    equal(attentionSource({ source: 'tool', prompt_head: note }), 'tool', 'a tool call is untouched by this')
+    equal(attentionSource({}), 'hook', 'and a hook with no source is still a hook')
+
+    // The whole point of renaming it: the two rules below need no change at all.
+    isFalse(commissionOnWorking('injected', 5_000, 120_000), 'so it opens no commission after a report')
+    isFalse(commissionOnWorking('injected', 999_000, 120_000), 'nor long after one — it is never a person')
+    isFalse(restartCommissionOnWorking('injected'), 'and it restarts no open commission either')
+  })
+
   await check('every built-in coding agent declares how its attention reaches the hub', async () => {
     const { HARNESS_PLUGINS: HP } = await import('../server/harnesses/index.mjs')
     for (const id of ['claude', 'opencode', 'hermes', 'cursor']) {
