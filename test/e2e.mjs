@@ -5775,6 +5775,43 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
     equal(lauf(followed.id).status, 'done', 'and the status is still the first attempt’s truth')
   })
 
+  // The operator's own way back out of a commission the hub opened in error.
+  // A CLI that writes into its own session fires the same prompt hook a typed
+  // line does — `injectedSubmission()` knows the shapes that have been
+  // measured, and the next one will not be on that list. Until this route
+  // existed the only way to clear such a record was to KILL THE SESSION, which
+  // is destructive and the wrong price for correcting a record.
+  await check('a commission nobody gave can be taken back — without closing the session', async () => {
+    const vor = await postForm(`/api/runs/${followed.id}/send`, { text: 'One more thing.' })
+    isTrue(vor.ok, 'a commission is open')
+    isTrue(!!lauf(followed.id).followup_since, 'and clocked')
+    const sitzung = lauf(followed.id).tmux_session
+    const detail = await (await fetchPath(`/runs/${followed.id}`)).text()
+    contains(detail, `/api/runs/${followed.id}/end-followup`, 'the banner offers the way out')
+
+    const r = await postForm(`/api/runs/${followed.id}/end-followup`, {})
+    isTrue(r.ok, 'the click is accepted')
+    const l = lauf(followed.id)
+    equal(l.followup_since, null, 'the commission is closed')
+    equal(l.status, 'done', 'and the run keeps what its first attempt earned')
+    equal(l.tmux_session, sitzung, 'the session is untouched — the agent stays reachable')
+    equal(l.tmux_closed_at, null, 'and is not marked closed')
+    contains(ereignisse(followed.id).join(','), 'followup_abandoned', 'the record says the commission was given up')
+    // The run is a normal finished run again: it leaves the running filter and
+    // may be archived, which an open commission refuses (archiving closes the
+    // session, and a session somebody is typing into must not be closed).
+    const laufend = await (await fetchPath(`/?repo=${repoId}&status=running`)).text()
+    isFalse(laufend.includes(`/runs/${followed.id}`), 'and is gone from the running filter')
+
+    // A second click has nothing to take back and says so, rather than writing
+    // a second `followup_abandoned` over a run nobody commissioned.
+    const n = ereignisse(followed.id).filter(k => k === 'followup_abandoned').length
+    const nochmal = await postForm(`/api/runs/${followed.id}/end-followup`, {})
+    isFalse(nochmal.ok, 'a run without an open commission refuses')
+    equal(ereignisse(followed.id).filter(k => k === 'followup_abandoned').length, n,
+      'and writes nothing')
+  })
+
   await check('a follow-up whose agent is gone is not held to a deadline that can never be met', async () => {
     // A dead pane can never report — holding the commission to its deadline
     // would produce a misleading alarm after the run's expected duration. The

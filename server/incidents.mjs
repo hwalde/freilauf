@@ -82,13 +82,61 @@ export const HUMAN_TYPES = new Set(['auth_error', 'billing_error', 'model_error'
  *   needs you    auth / billing / model, always. Plus: a confirmed (red)
  *                incident on a run that did NOT come through — that is the
  *                reason it did not, and the decision (retry? change model?
- *                wait?) is a human one.
+ *                wait?) is a human one. A run that is STILL IN FLIGHT and has
+ *                stopped moving counts as "did not come through" too (below).
  *   noticed      everything else. The record stays as history, the hub closes
  *                it by itself when the run finishes.
+ *
+ * "Did not come through" used to be read off `runs.status` alone, and a run
+ * that stops mid-work is never written to `failed` by anybody: no agent reports
+ * for it, its session stands, its pane lives, and the hub goes on calling it
+ * `running`. So the one case where a red incident IS the whole story landed in
+ * the group whose hint reads "the hub carried on by itself (deferred, retried,
+ * or the agent simply kept working)". Measured 2026-09-10 on run ff3b350b: its
+ * opencode took a 504 from the provider at 04:41:43, went idle in the same
+ * second and never moved again — and ten hours later the row, the detail page,
+ * the sidebar and the message on the operator's phone all said there was
+ * nothing to do, about a 30-minute run standing at 601 minutes.
+ *
+ * It is the same trap `displayStatus()`, `displayStatusSql()`, the read API's
+ * `?status=` filter and the sessions page each learned separately: `runs.status`
+ * records the ATTEMPT, and asking it is not asking what the run is doing.
+ *
+ * The rule uses the evidence that is already here, and it is deliberately the
+ * one `incidentGoneReason()` uses on the very same fact — the two must not read
+ * one measurement and reach opposite conclusions, which is exactly what they
+ * did: that function refuses to close a red incident on a running run unless
+ * the agent demonstrably worked after it, while this one called the same
+ * silence "nothing to do".
+ *
+ *   - only `running`/`waiting_help`: a `deferred` run really IS the hub
+ *     carrying on by itself, and a `scheduled` one has not begun.
+ *   - only after the notification grace period has passed, so an incident that
+ *     clears itself never becomes a summons for the minutes it exists. It is
+ *     the same threshold the alarm uses, so the message and the page cannot
+ *     disagree — by the time `notifyDueIncidents()` composes a text, this
+ *     condition holds by construction.
+ *   - `agentCopedAfter()` is THE veto and is asked, not copied: an agent that
+ *     kept working after the hit is not blocked by it, and the incident stays
+ *     a note. Its `null` means UNKNOWN, and unknown resolves to "needs you"
+ *     here — the alternative is promising a reader that nothing is left to do
+ *     on evidence the hub does not have, over an alarm it has already rung.
+ *
+ * `run` is the run ROW ({ status, last_activity_at }), not a status string: the
+ * second half of the question is about the agent, and a parameter that took
+ * either shape would be one silent misreading away from answering "noticed"
+ * for a run it never looked at. A global incident carries no run and passes
+ * none.
  */
-export function needsHuman(v, runStatus = null) {
+export function needsHuman(v, run = null, jetztMs = Date.now()) {
   if (HUMAN_TYPES.has(String(v.typ).split(':')[0])) return true
-  return v.schwere === 'rot' && ['failed', 'aborted'].includes(String(runStatus))
+  if (v.schwere !== 'rot') return false
+  const status = String(run?.status)
+  if (['failed', 'aborted'].includes(status)) return true
+  if (!['running', 'waiting_help'].includes(status)) return false
+  const zuletzt = msFrom(v.zuletzt_gesehen)
+  if (!Number.isFinite(zuletzt) || jetztMs - zuletzt < NOTIFY_DELAY_MS) return false
+  return !agentCopedAfter(msFrom(run?.last_activity_at), zuletzt)
 }
 
 export function openIncidentsOf(runId) {
@@ -356,6 +404,7 @@ export function trafficLightFromIncidents(runId) {
  */
 function runLabel(runId) {
   const run = db.prepare(`SELECT r.id, r.title, r.harness, r.model, r.provider, r.status, r.expected_minutes,
+                            r.last_activity_at,
                             a.name AS agent, p.name AS repo
                           FROM runs r LEFT JOIN agents a ON a.id = r.agent_id LEFT JOIN repos p ON p.id = r.repo_id
                           WHERE r.id = ?`).get(runId)
@@ -375,7 +424,7 @@ async function notifyIncident(row, ereignis, grund = null) {
     zeilen.push(zeile)
     // Say straight away whether this needs hands: the whole point of the alarm
     // is that the reader can tell a "get up" from a "noted" without opening it.
-    zeilen.push(needsHuman(row, run?.status)
+    zeilen.push(needsHuman(row, run)
       ? '→ Needs you: this does not clear itself.'
       : '→ For information: the hub keeps going, nothing to do.')
   } else {

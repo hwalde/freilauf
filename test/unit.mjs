@@ -2042,24 +2042,81 @@ try {
   group('Incidents: needs a human vs. merely noticed (needsHuman)')
   const { needsHuman } = await import('../server/incidents.mjs')
 
+  // The clock the in-flight rule below is measured on. `jetzt` is a fixed
+  // "now"; a hit is `vorMin` minutes old, and the agent's last measured work
+  // sits wherever the case needs it.
+  const JETZT = Date.parse('2026-09-10T12:00:00Z')
+  const dbTs = (ms) => new Date(ms).toISOString().replace('T', ' ').slice(0, 19)
+  const vorMin = (m) => dbTs(JETZT - m * 60_000)
+
   await check('login, credits and model always need a human — they never clear themselves', () => {
     for (const typ of ['auth_error', 'billing_error', 'model_error']) {
-      isTrue(needsHuman({ typ, schwere: 'gelb' }, 'running'), `${typ} while running`)
-      isTrue(needsHuman({ typ, schwere: 'gelb' }, 'done'), `${typ} on a finished run`)
+      isTrue(needsHuman({ typ, schwere: 'gelb' }, { status: 'running' }), `${typ} while running`)
+      isTrue(needsHuman({ typ, schwere: 'gelb' }, { status: 'done' }), `${typ} on a finished run`)
     }
   })
 
-  await check('rate limit and provider errors are observations while the run lives or came through', () => {
+  await check('rate limit and provider errors are observations while the agent works on', () => {
     for (const typ of ['rate_limit', 'provider_error', 'unbekannt']) {
-      isFalse(needsHuman({ typ, schwere: 'rot' }, 'running'), `${typ} while running`)
-      isFalse(needsHuman({ typ, schwere: 'rot' }, 'done'), `${typ} on a finished run`)
+      // The veto: the hit is half an hour old and the agent has worked since,
+      // so it was not blocked by it.
+      isFalse(needsHuman({ typ, schwere: 'rot', zuletzt_gesehen: vorMin(30) },
+        { status: 'running', last_activity_at: vorMin(1) }, JETZT), `${typ} while the agent works on`)
+      isFalse(needsHuman({ typ, schwere: 'rot', zuletzt_gesehen: vorMin(30) },
+        { status: 'done', last_activity_at: vorMin(29) }, JETZT), `${typ} on a finished run`)
     }
   })
 
   await check('a confirmed incident on a run that did NOT come through is a to-do', () => {
-    isTrue(needsHuman({ typ: 'rate_limit', schwere: 'rot' }, 'failed'), 'red + failed')
-    isTrue(needsHuman({ typ: 'provider_error', schwere: 'rot' }, 'aborted'), 'red + aborted')
-    isFalse(needsHuman({ typ: 'rate_limit', schwere: 'gelb' }, 'failed'), 'a mere suspicion is not')
+    isTrue(needsHuman({ typ: 'rate_limit', schwere: 'rot' }, { status: 'failed' }), 'red + failed')
+    isTrue(needsHuman({ typ: 'provider_error', schwere: 'rot' }, { status: 'aborted' }), 'red + aborted')
+    isFalse(needsHuman({ typ: 'rate_limit', schwere: 'gelb' }, { status: 'failed' }), 'a mere suspicion is not')
+  })
+
+  // A run that stops mid-work is never written to `failed` by anybody: no agent
+  // reports for it, its session stands and the hub goes on calling it
+  // `running`. Measured on run ff3b350b — a 504 at 04:41:43, the agent idle in
+  // the same second, and ten hours later every counter still said "nothing to
+  // do" about a 30-minute run at 601 minutes.
+  await check('a red incident on a run that has STOPPED MOVING is a to-do, whatever its status says', () => {
+    const vorfall = { typ: 'provider_error', schwere: 'rot', zuletzt_gesehen: vorMin(600) }
+    isTrue(needsHuman(vorfall, { status: 'running', last_activity_at: vorMin(600) }, JETZT),
+      'the agent has not worked since the hit — that IS why the run did not come through')
+    isTrue(needsHuman(vorfall, { status: 'waiting_help', last_activity_at: vorMin(600) }, JETZT),
+      'a run already asking for a human is one too')
+    isFalse(needsHuman(vorfall, { status: 'running', last_activity_at: vorMin(2) }, JETZT),
+      'but not while the agent demonstrably works — that is the rateLogHit veto, asked and not copied')
+  })
+
+  await check('it waits out the notification grace period, so a self-clearing hit is never a summons', () => {
+    const frisch = { typ: 'provider_error', schwere: 'rot', zuletzt_gesehen: vorMin(1) }
+    isFalse(needsHuman(frisch, { status: 'running', last_activity_at: vorMin(1) }, JETZT),
+      'a minute old is the window in which the agent may still retry')
+    isTrue(needsHuman({ ...frisch, zuletzt_gesehen: vorMin(11) },
+      { status: 'running', last_activity_at: vorMin(11) }, JETZT),
+      'past the grace period the alarm has already gone out, and it is a to-do')
+  })
+
+  await check('a run the hub is carrying itself stays a note', () => {
+    const vorfall = { typ: 'rate_limit', schwere: 'rot', zuletzt_gesehen: vorMin(600) }
+    for (const status of ['deferred', 'scheduled', 'done']) {
+      isFalse(needsHuman(vorfall, { status, last_activity_at: vorMin(600) }, JETZT),
+        `${status}: the hub really is carrying on by itself`)
+    }
+  })
+
+  // The two answers used to be read off one fact and disagree about it:
+  // incidentGoneReason() refuses to close a red incident on a running run
+  // unless the agent worked after it, while needsHuman() called that same
+  // silence "nothing to do".
+  await check('what the hub will not close by itself, it does not call "nothing to do"', async () => {
+    const { incidentGoneReason } = await import('../server/detect.mjs')
+    const vorfall = { typ: 'provider_error', schwere: 'rot', zuletzt_gesehen: vorMin(600) }
+    const lauf = { status: 'running', last_activity_at: vorMin(600) }
+    equal(incidentGoneReason({ typ: vorfall.typ, schwere: 'rot', runStatus: 'running',
+      lastActivityMs: JETZT - 600 * 60_000, lastSeenMs: JETZT - 600 * 60_000, jetztMs: JETZT }), null,
+      'the auto-resolution keeps it open — silence proves nothing')
+    isTrue(needsHuman(vorfall, lauf, JETZT), 'so the classification must not close the book on it either')
   })
 
   await check('a global incident (provider pulse, no run) is not a to-do either', () => {
@@ -11356,7 +11413,7 @@ process.stdout.write(JSON.stringify(out))
 
     await check('docker_unreachable needs a human, and never clears itself by time', () => {
       isTrue(HUMAN_TYPES.has('docker_unreachable'), 'in the "Needs you" set')
-      isTrue(needsHuman({ typ: 'docker_unreachable', schwere: 'rot' }, 'running'),
+      isTrue(needsHuman({ typ: 'docker_unreachable', schwere: 'rot' }, { status: 'running' }),
         'a daemon that stopped answering does not get better by waiting')
       isTrue(TYPEN_SB.includes('docker_unreachable'), 'a known type, not "unbekannt"')
       equal(TEXT_SB.docker_unreachable, 'Container runtime not answering', 'and it has a name')
@@ -11369,7 +11426,7 @@ process.stdout.write(JSON.stringify(out))
 
     await check('an access request is a question, and only a decision or the run answers it', () => {
       isTrue(HUMAN_TYPES.has('sandbox_access'), 'in the "Needs you" set')
-      isTrue(needsHuman({ typ: 'sandbox_access', schwere: 'rot' }, 'running'), 'while the run goes on')
+      isTrue(needsHuman({ typ: 'sandbox_access', schwere: 'rot' }, { status: 'running' }), 'while the run goes on')
       // The agent was told to carry on with what it can — so the ordinary rule's
       // evidence ("the agent kept working after it") is present by construction
       // and must NOT close the request.

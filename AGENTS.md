@@ -2564,9 +2564,9 @@ lesson). `runs.followup_since` carries it, and three things hang on it:
   detached worktree on no branch and not on origin, under a run whose every
   page went on saying "nothing to merge". A run whose SESSION goes while it is
   still `running` has had `assessLater()` behind it all along; a follow-up had
-  nothing. **`abandonFollowUp()`** (reports.mjs) is the one function all four
+  nothing. **`abandonFollowUp()`** (reports.mjs) is the one function all five
   give-up paths call — `reconcileClosedSession()`, the watcher's two branches,
-  and the kill route on a finished run — and it is `endFollowUpCommission()`
+  the kill route on a finished run, and the operator's own button (below) — and it is `endFollowUpCommission()`
   plus the same `assessUnmerged()` the abort path uses: `merge_status` becomes
   `unmerged_*`, the commits are pushed to origin (`backupBranch`), the detail
   page offers "Merge now", and the operator is told (not on the kill route,
@@ -2583,6 +2583,29 @@ lesson). `runs.followup_since` carries it, and three things hang on it:
   refuses to write the one answer that means "nothing happened": a follow-up
   that added nothing must not turn a `merged` run into a `nothing` one and take
   the run's own record of where its work went away from it.
+- **And a commission the hub opened in error can be taken back — by the
+  operator, without closing the session** (`POST /api/runs/<id>/end-followup`,
+  the button in the follow-up banner). A commission is opened by the agent's
+  own hook saying a line went in, and the hub cannot always tell whose line it
+  was: `injectedSubmission()` recognises the shapes that have been MEASURED,
+  and the next CLI that writes into its own session will not be on that list.
+  Whatever that list misses lands as a commission nobody gave — and until this
+  button existed the only way to clear one was to **kill the tmux session**,
+  which is destructive and the wrong price for correcting a record. Measured
+  on this installation: runs `05246ba4` and `1e4ec85e` each took a burst of
+  `<task-notification>` injections seconds after reporting done, and their
+  commissions stood at the top of the overview for ten and eleven hours with no
+  way out — the run displayed as running, its clock ran against the commission
+  (628 min against an expectation of 45), the sidebar counted it as work in
+  flight, `archivable()` refused it and `freilauf drain` would have waited on
+  it. Same shape as the resume button: where the hub cannot prove it, the
+  operator says it. It goes through the same `abandonFollowUp()` — so a
+  commission ended by hand leaves the same trace and assesses its leftovers the
+  same way, with `announce` false because whoever clicked is looking at the
+  page — and it touches nothing else: the SESSION stays open, the agent stays
+  reachable, and the run keeps the status its first attempt earned. A run with
+  no open commission is refused with the reason rather than writing a second
+  `followup_abandoned` over a conversation nobody had.
 - **…and the pair on the page is measured on that same clock**
   (`runtimeClock()` in run-state.mjs, asked by the overview's cell and by
   `fmtRuntime()`). "Duration / expectation" is two numbers about ONE
@@ -4428,8 +4451,44 @@ answer. `incidents.mjs` splits it:
 
 | Group | What | Button |
 |---|---|---|
-| **Needs you** | `auth_error`, `billing_error`, `model_error` — always. A token, a credit balance or a wrong model ID does not get better by waiting; every following run walks into the same wall. Plus a **red** incident on a run with status `failed`/`aborted`: that is the reason it did not come through. | "Mark as handled" |
-| **Noticed** | everything else — rate limit, provider hiccup, global pulse. The hub deferred, retried, or the run simply carried on. | "Dismiss" |
+| **Needs you** | `auth_error`, `billing_error`, `model_error` — always. A token, a credit balance or a wrong model ID does not get better by waiting; every following run walks into the same wall. Plus a **red** incident on a run that did not come through: status `failed`/`aborted`, or one still in flight that has **stopped moving** (below). | "Mark as handled" |
+| **Noticed** | everything else — rate limit, provider hiccup, global pulse. The hub deferred, retried, or the agent simply carried on. | "Dismiss" |
+
+**"Did not come through" was read off `runs.status` alone, and a run that stops
+mid-work is never written to `failed` by anybody.** No agent reports for it, its
+session stands, its pane lives, and the hub goes on calling it `running` — so
+the one case where a red incident IS the whole story landed in the group whose
+hint reads "the hub carried on by itself (deferred, retried, or the agent simply
+kept working)". Measured 2026-09-10 on run `ff3b350b`: its opencode took a
+`{"code":504,"message":"A Timeout Occurred"}` from the provider at 04:41:43,
+went idle in the same second and never moved again — and ten hours later the
+row, the detail page, the sidebar and the message that had already gone to the
+operator's phone at 04:52 all said there was nothing to do, about a 30-minute
+run standing at 601 minutes. The same trap `displayStatus()`, its SQL twin, the
+read API's `?status=` filter and the sessions page each learned separately:
+`runs.status` records the ATTEMPT, and asking it is not asking what the run is
+doing.
+
+The rule is the evidence that was already there, and it is deliberately the one
+**`incidentGoneReason()` asks about the very same fact** — those two must not
+read one measurement and reach opposite conclusions, which is exactly what they
+did: that function refuses to close a red incident on a running run *unless the
+agent demonstrably worked after it*, while this one called the same silence
+"nothing to do". So a red incident on a `running`/`waiting_help` run needs a
+human once **the notification grace period has passed** (an incident that clears
+itself is never a summons for the minutes it exists — and it is the same
+threshold the alarm uses, so by the time `notifyDueIncidents()` composes a text
+the condition holds by construction, and the message and the page cannot
+disagree) and **`agentCopedAfter()` says no**. That veto is asked, never copied.
+Its `null` is UNKNOWN, and unknown resolves to "needs you" here: the alternative
+is promising a reader that nothing is left to do, on evidence the hub does not
+have, about an alarm it has already rung. `deferred` and `scheduled` are
+deliberately out — there the hub really is carrying on by itself.
+
+`needsHuman(v, run)` therefore takes the run ROW, not a status string: the
+second half of the question is about the agent, and a parameter that took either
+shape would be one silent misreading away from answering "noticed" for a run it
+never looked at.
 
 Neither button changes anything about the run; both only silence the entry here
 and in the notifications, and a recurrence reopens it. What the watcher adds: incidents

@@ -212,13 +212,13 @@ export function typName(typ) {
  * badge is what one reads, the action appears where one is about to click, and
  * the keyboard reaches it because focus inside the form reveals it too.
  */
-function incidentCell(runId, repoId, runStatus = null) {
+function incidentCell(runId, repoId, run = null) {
   const offen = openIncidentsOf(runId)
   if (!offen.length) return '<span class="leer">–</span>'
   return `<div class="incident-cell">${offen.map(v => {
     // '!' marks the ones that are waiting for hands — in a table of many runs
     // that mark is the whole difference between a to-do and a note.
-    const handeln = needsHuman(v, runStatus)
+    const handeln = needsHuman(v, run)
     const titel = `${typName(v.typ)} · ${t('incidents.last')} ${fmtDbUtc(v.zuletzt_gesehen)}${v.beleg ? `\n${v.beleg}` : ''}`
     return `<span class="incident ${SEVERITY_CLASS[v.schwere]}" title="${e(titel)}">${handeln ? '❗ ' : ''}${e(typName(v.typ))} ${v.anzahl}×</span>
     <form method="post" action="/api/incidents/${v.id}/resolve" class="inline" onclick="event.stopPropagation()">
@@ -528,11 +528,13 @@ function workBlock(repoId) {
  * status column carries integrationLine() and therefore names the block.
  */
 function openIncidents(repoId) {
-  const allOpen = db.prepare(`SELECT i.*, r.status AS run_status, r.archived_at AS run_archived FROM incidents i
+  const allOpen = db.prepare(`SELECT i.*, r.status AS run_status, r.archived_at AS run_archived,
+      r.last_activity_at AS run_activity FROM incidents i
     LEFT JOIN runs r ON r.id = i.run_id
     WHERE i.geloest_am IS NULL AND (i.run_id IS NULL OR r.repo_id = ?)`).all(repoId ?? -1)
   const visible = allOpen.filter(v => v.run_id === null || v.run_archived === null)
-  const handeln = visible.filter(v => needsHuman(v, v.run_status)).length
+  const handeln = visible.filter(v => needsHuman(v,
+    v.run_id === null ? null : { status: v.run_status, last_activity_at: v.run_activity })).length
   return {
     offen: visible.length, handeln, noticed: visible.length - handeln,
     linkable: visible.filter(v => v.run_id !== null).length,
@@ -1256,7 +1258,7 @@ export function runRow(r, ctx) {
       }<span class="dim"> / ${e(t('unit.minutes', { n: r.expected_minutes }))}</span></td>
       <td class="two-line">${branch ? e(branch) : '<span class="leer">–</span>'}${
         r.pr_url ? `<span class="dim"><a href="${e(r.pr_url)}" onclick="event.stopPropagation()">PR</a></span>` : ''}</td>
-      <td>${incidentCell(r.id, repoId, r.status)}${startBtn}${archivBtn}</td>
+      <td>${incidentCell(r.id, repoId, r)}${startBtn}${archivBtn}</td>
     </tr>`
 }
 
@@ -1702,7 +1704,7 @@ export async function pageRun(req, res, url, id) {
   ${run.report_md ? `<h3>${e(t('run.report'))}</h3><pre>${e(run.report_md)}</pre>` : ''}
   ${run.report_detail_md ? `<h3>${e(t('run.detail_report'))}</h3><pre>${e(run.report_detail_md)}</pre>` : ''}
   ${flowSection(run)}
-  ${incidentSection(id, run.status)}
+  ${incidentSection(id, run)}
   <h3>${e(t('run.metrics'))}</h3>
   ${runMetrics(run)}
   <h3>${e(t('run.events'))}</h3>${runEvents(id)}
@@ -1803,7 +1805,9 @@ export function runDetailHead(run, ctx) {
       run.agent_state_at ? e(t('run.agent_waiting', { ts: fmtDbUtc(run.agent_state_at) })) : ''}</p>`}
   ${followUpActive(run)
     ? `<div class="banner waiting" id="run-banner">${e(t('run.followup_banner'))}
-       ${run.followup_since ? `<span class="dim">${e(t('run.followup_active', { ts: fmtDbUtc(run.followup_since) }))}</span>` : ''}</div>`
+       ${run.followup_since ? `<span class="dim">${e(t('run.followup_active', { ts: fmtDbUtc(run.followup_since) }))}</span>
+       <form method="post" action="/api/runs/${run.id}/end-followup" class="inline"><button
+         title="${e(t('run.followup_end_hint'))}">${e(t('run.followup_end'))}</button></form>` : ''}</div>`
     : ''}
   ${run.status === 'scheduled'
     // A planned run must be revocable — otherwise a start you thought better of
@@ -2123,7 +2127,7 @@ function runStartZeit(run) {
  * as history. The evidence (the line that fired) is shown — otherwise a false
  * alarm cannot be told apart from a real one.
  */
-export function incidentSection(runId, runStatus = null) {
+export function incidentSection(runId, run = null) {
   const alle = allIncidentsOf(runId)
   if (!alle.length) return ''
   const zeile = (v) => `<li class="incident-row ${v.geloest_am ? 'resolved' : SEVERITY_CLASS[v.schwere]}">
@@ -2131,14 +2135,14 @@ export function incidentSection(runId, runStatus = null) {
     · ${v.anzahl}× · ${e(t('incidents.first'))} ${e(fmtDbUtc(v.erst_gesehen))} · ${e(t('incidents.last'))} ${e(fmtDbUtc(v.zuletzt_gesehen))}
     ${v.wieder_geoeffnet ? `· ${e(t('incidents.reopened', { n: v.wieder_geoeffnet }))}` : ''}
     ${v.geloest_am ? `· ${e(t('incidents.resolved_at'))} ${e(fmtDbUtc(v.geloest_am))} (${e(v.geloest_von ?? '')})` : `
-      <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/runs/${runId}"><button>${e(t(needsHuman(v, runStatus) ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`}
+      <form method="post" action="/api/incidents/${v.id}/resolve" class="inline"><input type="hidden" name="back" value="/runs/${runId}"><button>${e(t(needsHuman(v, run) ? 'incidents.mark_handled' : 'incidents.dismiss'))}</button></form>`}
     ${v.beleg ? `<br><code class="evidence">${e(v.beleg)}</code>` : ''}</li>`
   const offen = alle.filter(v => !v.geloest_am), zu = alle.filter(v => v.geloest_am)
   // The split the single "resolve" button was missing: what is waiting for
   // hands, and what the hub merely wrote down. Both stay visible — but only the
   // first group is a to-do.
-  const handeln = offen.filter(v => needsHuman(v, runStatus))
-  const notiz = offen.filter(v => !needsHuman(v, runStatus))
+  const handeln = offen.filter(v => needsHuman(v, run))
+  const notiz = offen.filter(v => !needsHuman(v, run))
   return `<h3>${e(t('incidents.title'))}</h3>
   ${handeln.length ? `<h4 class="incident-group red">${e(t('incidents.needs_you', { n: handeln.length }))}</h4>
     <p class="dim">${e(t('incidents.needs_you_hint'))}</p>

@@ -18,7 +18,44 @@ a day on which nothing was released.
 
 ## 2026-09-10
 
+### Added
+
+- **A follow-up commission can be ended by hand, without closing the session.**
+  A finished run's banner now carries an "End follow-up" button
+  (`POST /api/runs/<id>/end-followup`). A commission is opened by the coding
+  agent's own hook reporting that a line went in, and the hub cannot always
+  tell whose line it was — Claude Code announces a finished background subagent
+  by writing a message into its own session, and the fix for that recognises
+  only the shapes that have been measured. Whatever it misses lands as a
+  commission nobody gave, and until now the only way to clear one was to kill
+  the tmux session: destructive, and the wrong price for correcting a record.
+  Two runs on this installation sat at the top of the overview for ten and
+  eleven hours that way — displayed as running, clocked against the phantom
+  commission, counted as work in flight, impossible to archive, and enough to
+  make `freilauf drain` wait for ever before a planned reboot. The button
+  closes the commission and nothing else: the session stays open, the agent
+  stays reachable, the run keeps the status its first attempt earned, and
+  anything the agent committed is named exactly as it is on every other
+  give-up path.
+
 ### Fixed
+
+- **A run that had stopped dead was filed under "nothing to do".** A red
+  incident was only ever a to-do on a run whose status said `failed` or
+  `aborted` — and a run that stops mid-work is never written to `failed` by
+  anybody: no agent reports for it, its session stands, and the hub goes on
+  calling it `running`. So the one case where the incident IS the whole story
+  landed in the group whose hint reads "the hub carried on by itself". Measured
+  on this installation: a run took a 504 from its provider at 04:41:43, went
+  idle in the same second and never moved again — ten hours later its row, its
+  detail page, the sidebar and the message that had gone to the operator's
+  phone all said there was nothing to do, about a 30-minute run standing at 601
+  minutes. A red incident on a run that is still in flight now counts as
+  needing a human once the notification grace period has passed and the agent
+  has not demonstrably worked since — the same evidence the auto-resolution
+  already uses to refuse to close such an incident, so the two can no longer
+  read one measurement and reach opposite conclusions. An agent that carried on
+  after the hit still leaves it a note, which is the overwhelming majority.
 
 - **A finished run said "waiting for input" over a conversation nobody was
   having.** A run whose agent had spawned background subagents opened a
