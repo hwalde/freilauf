@@ -245,16 +245,6 @@ export async function notify(message) {
 }
 
 /**
- * Text plus an optional file — the shape `notifyLong()` had, kept because four
- * callers think in it: a report goes out as a message AND, when it does not
- * fit, as the complete file. Whether that second half happens at all is the
- * channel's decision now, not the hub's.
- */
-export async function notifyLong(text, { fileName = 'report.md', fileContent = null, url = null, kind = 'system', runId = null } = {}) {
-  return notify({ kind, text, url, runId, attachment: fileContent ? { fileName, content: fileContent } : null })
-}
-
-/**
  * The "send test message" button of one notifier card. Answers `{ ok, error? }`;
  * a switched-off or unconfigured channel says which of the two it is rather
  * than quietly reporting success.

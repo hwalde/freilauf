@@ -27,9 +27,6 @@
 import { getHarness, getProvider } from '../plugins/registry.mjs'
 import { sh } from '../util.mjs'
 
-/** The presets `network.presets` may name. */
-export const PRESETS = ['harness', 'provider', 'git-host', 'package-registries']
-
 /**
  * The package registries a build reaches for, whatever the language. Static on
  * purpose: it is a fact about the world, not about this installation, and an
@@ -150,8 +147,9 @@ function pluginDomains(plugin) {
  *
  * Pure and synchronous: everything it needs is in `ctx`, including the origin
  * URL, because reading a git remote is I/O and this function is also what the
- * form previews with. `expandPresetsForRepo()` next to it is the one that goes
- * and asks git.
+ * form previews with. `repoOriginUrl()` above is the one that goes and asks
+ * git; a caller that needs both does the two steps itself, which is what
+ * `resolvedAllow()`'s callers do.
  *
  * ctx: `{ harness, provider, originUrl, harnessDomains, providerDomains }` —
  * the two `*Domains` fields let a caller (and a test) hand the declarations
@@ -177,16 +175,10 @@ export function expandPresets(names, ctx = {}) {
         add(PACKAGE_REGISTRIES)
         break
       default:
-        break   // an unknown preset contributes nothing; the form refuses it earlier
+        break   // an unknown preset contributes nothing, and says nothing
     }
   }
   return out
-}
-
-/** `expandPresets()` with the one piece of I/O it needs: the repo's origin. */
-export async function expandPresetsForRepo(names, ctx = {}) {
-  const originUrl = ctx.originUrl ?? await repoOriginUrl(ctx.repo?.path ?? ctx.repoPath)
-  return expandPresets(names, { ...ctx, originUrl })
 }
 
 /**

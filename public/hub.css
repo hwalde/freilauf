@@ -69,13 +69,10 @@
               → --warn-deep / --err-deep (+ their -soft washes)
 
      Green has no -deep because nothing green ever gets a border: green is
-     "fine", and "fine" is never framed. --ok-bright is the one exception to
-     all of this — it is AREA on the permanently dark bar, where the light
-     tone would disappear. */
+     "fine", and "fine" is never framed. */
   --ok: #46a758;
   --ok-text: #2c7a3f;          /* readable green on a light surface; also the quick-run button */
   --ok-hover: #35924b;
-  --ok-bright: #7ddc8f;        /* green on the dark bar */
   --warn: #f2c14e;
   --warn-text: #b98900;
   --warn-deep: #b8860b;

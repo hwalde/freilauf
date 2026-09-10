@@ -685,7 +685,7 @@ export function sandboxStatusSuffix(run) {
 
 /** The sessions page badge: "sandboxed", and the image it really runs. */
 export function sandboxSessionBadge(s) {
-  // `listSessions()` answers `{ container, image, measured }` for a sandboxed
+  // The session list answers `{ container, image, measured }` for a sandboxed
   // session and nothing at all for an ordinary one — so the absence renders
   // nothing, which is the right answer for a session that is not in a
   // container.

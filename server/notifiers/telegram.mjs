@@ -240,9 +240,9 @@ const plugin = {
    * contract"). Returns `{ ok, error? }` and never throws.
    *
    * The attachment goes out as a SECOND call and only when the text really
-   * does not fit or the file is substantial — the old `notifyLong()` rule,
-   * unchanged: a truncated report is not a report, and a file for three lines
-   * is noise.
+   * does not fit or the file is substantial — the rule the hub used to carry
+   * itself, unchanged: a truncated report is not a report, and a file for
+   * three lines is noise.
    */
   async send(message, ctx) {
     const text = String(message?.text ?? '')

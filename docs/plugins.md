@@ -1098,7 +1098,6 @@ and that indirection is what makes the channel swappable *and* optional.
 | Function | Answers |
 |---|---|
 | `notify(message)` | send to every enabled, configured notifier — in parallel, every failure caught. `{ sent, delivered, results }`; never throws |
-| `notifyLong(text, {fileName, fileContent, url, kind, runId})` | the same, in the shape the report callers think in |
 | `notifiersConfigured()` | would a message go anywhere at all? |
 | `configuredNotifiers()` / `notifierPlugins()` / `notifierConfigured(id)` | the list, and the readiness of one |
 | `sendTest(id)` | the "send test message" button; names `disabled` / `not configured` rather than reporting a success nobody had |

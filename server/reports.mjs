@@ -1344,7 +1344,8 @@ export function doneText(run, report, mergeLine = null) {
   const zeile2 = [dur, branch ? `Branch: ${branch}` : null, run.pr_url ? `PR: ${run.pr_url}` : null,
     mergeLine].filter(Boolean).join(' · ')
   const status = `✅ Done · ${harnessLabel(run)}${zeile2 ? ' · ' + zeile2 : ''}${vf}`
-  // Full report; over 4096 chars notify() truncates and notifyLong() attaches the file.
+  // Full report; over 4096 chars the channel truncates the text and sends the
+  // whole thing as a file beside it (see the telegram notifier's send()).
   return `${reportHeader(run)}\n\n${report || '(no report text)'}\n\n${status}`
 }
 

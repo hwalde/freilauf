@@ -424,18 +424,18 @@ function hubLock() { return sandboxLock() }
 /**
  * The cached discovery answer, for the forms and for the decision at start.
  *
- * Synchronous on purpose — it sits on the launch path and in every form render,
- * exactly like `claudeQuota()` — so the *refresh* is async and fills this, while
- * the *read* is not. A caller that needs the answer to be current (the start
- * decision does: starting a run unsandboxed because a minute-old scan said the
- * daemon was down is the wrong direction to be wrong in) awaits
- * `refreshSandboxAvailability()` first.
+ * Cached rather than re-scanned, because it sits on the launch path and in every
+ * form render. There used to be a synchronous getter beside it, on the argument
+ * that a caller must be able to read the cache without awaiting anything; not
+ * one caller ever did, and the reason is the second half of that argument —
+ * starting a run unsandboxed because a minute-old scan said the daemon was down
+ * is the wrong direction to be wrong in. So everybody awaits
+ * `refreshSandboxAvailability()`, which answers from the cache inside the TTL
+ * and is therefore the cheap read as well as the current one.
  */
 let availability = { available: false, reason: 'sandbox.reason.not_scanned', at: 0 }
 let scanning = null
 const AVAILABILITY_TTL_MS = 60_000
-
-export function sandboxAvailable() { return availability }
 
 export async function refreshSandboxAvailability({ force = false } = {}) {
   // A hard off for the test suites: no scan, no daemon, no ambiguity.
@@ -779,9 +779,9 @@ export async function prepareSandbox(run, repo, opts = {}) {
   //    Asked BEFORE anything is created, so a launch that cannot go ahead leaves
   //    the disk exactly as it found it.
   //
-  //    `force` on purpose, and the comment on `sandboxAvailable()` already said
-  //    why without this call honouring it: the cached answer stands for 60 s,
-  //    and a resume right after a reboot is exactly the case where the daemon
+  //    `force` on purpose, and the comment on the availability cache already
+  //    said why without this call honouring it: the cached answer stands for
+  //    60 s, and a resume right after a reboot is exactly the case where the daemon
   //    came up in that minute. Measured: a resume waited 31 s after the daemon
   //    was back, for nothing. Starting a run against a minute-old "the daemon is
   //    down" is the wrong direction to be wrong in.
@@ -2221,7 +2221,7 @@ export async function restoreProxies() {
         //
         // THE RESOLVED LIST, and not the row's raw spec — the same rule the
         // reload below it follows and for the same reason: the stored spec
-        // carries the profile's PRESETS, and its `network.allow` is the
+        // carries the profile's presets, and its `network.allow` is the
         // unexpanded (usually empty) list. Re-asserting that into the policy
         // file would replace a working allow list with "deny everything", on
         // a run that is going, at the moment the hub comes back.
@@ -2935,9 +2935,6 @@ export function sandboxPromptFacts(prep) {
     readOnlyRoot: spec.filesystem?.readOnlyRoot !== false,
   }
 }
-
-/** Is there a sandbox spec on disk for this run? Used by the resume path's checks. */
-export function specFileExists(runId) { return existsSync(specPath(runId)) }
 
 /** The spec document as it was last launched — the audit record, read back. */
 export function readSpecFile(runId) {

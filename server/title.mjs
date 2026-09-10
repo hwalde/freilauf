@@ -112,9 +112,18 @@ Rules:
 Answer exclusively in the given JSON schema.`
 
 /**
- * Ask for a title. Returns the title or null (off, no key, error, empty answer).
+ * Ask for a title, with the REASON kept.
+ *
  * The context is capped: a title comes from the first paragraphs, and nothing
  * about that is worth paying for a 50k-token prompt.
+ *
+ * There used to be a `generateTitle()` in front of this that answered a string
+ * or `null`, and that shape is exactly wrong for the caller which has to decide
+ * whether to ask again: "switched off" and "the vendor timed out" arrive as the
+ * same `null`, and retrying the first for ever would be as wrong as never
+ * retrying the second. Both callers moved here, so the reason is all there is —
+ * `off` (nothing to retry), `empty` (no prompt, likewise), or the failing
+ * `stage` llmJson names.
  *
  * One thing this call used to carry and no longer can: OpenRouter's
  * `reasoning: { enabled: false }`. A title is not a thinking task and the levy
@@ -125,21 +134,6 @@ Answer exclusively in the given JSON schema.`
  * private fetch here to save it would put the copy back that this whole layer
  * exists to remove. Preset model, small prompt, `max_tokens: 200`: the cost
  * stays a fraction of a cent either way.
- */
-export async function generateTitle(prompt, { timeoutMs = 30_000 } = {}) {
-  const r = await askTitle(prompt, { timeoutMs })
-  return r.ok ? r.title : null
-}
-
-/**
- * The same question, with the REASON kept.
- *
- * `generateTitle()` answers a string or `null`, which is exactly right for its
- * callers and exactly wrong for the one that has to decide whether to ask
- * again: "switched off" and "the vendor timed out" arrive as the same `null`,
- * and retrying the first for ever would be as wrong as never retrying the
- * second. So the reason stays here — `off` (nothing to retry), `empty` (no
- * prompt, likewise), or the failing `stage` llmJson names.
  *
  * @returns {Promise<{ok:true, title:string} | {ok:false, reason:string, error?:string}>}
  */
