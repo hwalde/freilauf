@@ -38,8 +38,10 @@ a day on which nothing was released.
   such a line opens no commission, restarts none, and — the sharper half of the
   same fault — no longer closes a **help call** with no answer, which would
   have taken a run that was genuinely waiting for a human out of "needs you".
-  A run started before this change keeps behaving exactly as it did until its
-  session is restarted; nothing an operator types is affected.
+  Runs that are already in flight are covered from the deploy onwards — their
+  hooks call `fl-report` by name, and the deploy replaces it — and where the
+  hook carries no text at all the hub reads it as a person, exactly as it
+  always did. Nothing an operator types is affected.
 
 ## 2026-09-09
 
