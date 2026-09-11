@@ -70,6 +70,7 @@
   "usage.as_of": "as of {time}",
   "usage.resets_in": "resets in {days} d",
   "usage.spent": "{usd} $ of {included} $ included",
+  "usage.spent_bonus": "{usd} $ of {included} $ included (+ {bonus} $ bonus)",
   "usage.spent_est": "{usd} $ of ~{included} $ included (configured fallback)",
   "usage.remaining": "{amount} {currency} remaining",
   "usage.balance_detail": "{granted} granted + {topped_up} topped up",

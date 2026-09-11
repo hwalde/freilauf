@@ -16,6 +16,19 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-11
+
+### Fixed
+
+- **Cursor usage no longer counts free bonus spend against the included plan.**
+  The sidebar showed well over 100 % of a Pro period (177 % on this
+  installation) that Cursor itself already called exhausted. The period
+  endpoint's `totalSpend` is included spend **plus** `bonusSpend` — extra
+  usage model providers give away, not a second helping of the $20 included
+  amount. The bar, the tooltip and the budget gate now measure
+  `includedSpend / limit`. Bonus dollars still appear in the tooltip, so the
+  extra is visible without pretending the plan is more than full.
+
 ## 2026-09-10
 
 ### Added
