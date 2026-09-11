@@ -2725,6 +2725,37 @@ try {
       else process.env.FREILAUF_CURSOR_AUTH = altAuth
     }
   })
+  // totalSpend / limit is how the sidebar read 177 % of a Pro period Cursor
+  // itself already called exhausted: totalSpend also holds bonusSpend (free
+  // extra from model providers). The bar measures includedSpend against limit.
+  await check('cursor period usage measures included spend, not totalSpend with bonus', async () => {
+    const { cursorPeriodUsage } = await import('../server/harnesses/cursor.mjs')
+    const over = cursorPeriodUsage({
+      profile: { membershipType: 'pro' },
+      period: {
+        billingCycleEnd: '1789404355000',
+        planUsage: {
+          totalSpend: 3552, includedSpend: 2000, bonusSpend: 1552, limit: 2000,
+        },
+      },
+    })
+    equal(over.pct, 100, 'included pool is full, not 177.6 %')
+    equal(over.spent_usd, 20, 'included spend, not 35.52 total')
+    equal(over.bonus_usd, 15.52, 'bonus is named, not folded into the bar')
+    equal(over.remaining_usd, 0, 'proto3-omitted remaining is 0 when included is spent')
+    const half = cursorPeriodUsage({
+      profile: { membershipType: 'pro' },
+      period: {
+        planUsage: {
+          totalSpend: 4000, includedSpend: 1000, bonusSpend: 3000,
+          remaining: 1000, limit: 2000,
+        },
+      },
+    })
+    equal(half.pct, 50, 'bonus on top of a half-full pool does not fill the bar')
+    equal(half.spent_usd, 10, 'included spend only')
+    equal(half.remaining_usd, 10, 'remaining of the included pool')
+  })
   await check('cursor model list puts "auto" first and marks it', async () => {
     const bin = join(sandbox, 'bin-cursor')
     mkdirSync(bin, { recursive: true })

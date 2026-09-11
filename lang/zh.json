@@ -70,6 +70,7 @@
   "usage.as_of": "数据截至 {time}",
   "usage.resets_in": "{days} 天后重置",
   "usage.spent": "已用 {usd} $，共含 {included} $ 额度",
+  "usage.spent_bonus": "已用 {usd} $，共含 {included} $ 额度（另有 {bonus} $ 赠送）",
   "usage.spent_est": "已用 {usd} $，共含约 {included} $ 额度（配置的备用值）",
   "usage.remaining": "剩余 {amount} {currency}",
   "usage.balance_detail": "赠送 {granted} + 充值 {topped_up}",

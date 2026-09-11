@@ -19,6 +19,81 @@ const execFileAsync = promisify(execFile)
 const AUTH_FILE = () => env('CURSOR_AUTH') ?? `${homedir()}/.config/cursor/auth.json`
 const API = () => env('CURSOR_API') ?? 'https://api2.cursor.sh'
 
+function cents(v) {
+  if (v == null || v === '') return null
+  const n = Number(v)
+  return Number.isFinite(n) ? Math.round(n) : null
+}
+
+function usd(c) {
+  return c == null ? null : c / 100
+}
+
+/**
+ * Turn GetCurrentPeriodUsage (+ optional aggregation fallback) into the
+ * panel/gate shape. Pure so the included-vs-bonus split can be tested
+ * without talking to api2.cursor.sh.
+ *
+ * `planUsage.totalSpend` is not the included-pool spend: it is
+ * includedSpend + bonusSpend (and on-demand when that is on). Bonus is
+ * free extra from model providers. Dividing totalSpend by limit is how a
+ * Pro bar that Cursor already called "hit your usage limit"
+ * (includedSpend === limit) read 177 %. The bar, the tooltip and the
+ * budget gate therefore measure includedSpend against limit; bonus dollars
+ * travel along as `bonus_usd` so the extra is visible without pretending
+ * the plan is more than full.
+ *
+ * proto3 omits zeros: `remaining` missing while includedSpend equals
+ * limit means 0 remaining, not "unknown".
+ */
+export function cursorPeriodUsage({ period, agg, profile, includedFallback = 20 } = {}) {
+  if (!profile && !agg && !period) return null
+  const plan = period?.planUsage ?? null
+  const limitC = cents(plan?.limit)
+  const includedC = cents(plan?.includedSpend)
+  const bonusC = cents(plan?.bonusSpend)
+  const totalC = cents(plan?.totalSpend) ?? cents(agg?.totalCostCents)
+  const remainingC = cents(plan?.remaining)
+
+  let included = usd(limitC)
+  let estimated = false
+  if (included == null) {
+    included = Number(includedFallback) || 20
+    estimated = true
+  }
+  const includedCents = included == null ? null : Math.round(included * 100)
+
+  let spentC = includedC
+  if (spentC == null && remainingC != null && includedCents != null) {
+    spentC = Math.max(0, includedCents - remainingC)
+  }
+  if (spentC == null && totalC != null && bonusC != null) {
+    spentC = Math.max(0, totalC - bonusC)
+  }
+  if (spentC == null) spentC = totalC
+
+  let remainC = remainingC
+  if (remainC == null && spentC != null && includedCents != null) {
+    remainC = Math.max(0, includedCents - spentC)
+  }
+
+  const pct = spentC != null && includedCents
+    ? Math.min(100, Math.round((spentC / includedCents) * 1000) / 10)
+    : null
+  const endMs = Number(period?.billingCycleEnd)
+  return {
+    kind: 'cursor',
+    plan: profile?.membershipType ?? profile?.individualMembershipType ?? null,
+    spent_usd: usd(spentC),
+    included_usd: included,
+    ...(estimated ? { included_estimated: true } : {}),
+    ...(bonusC ? { bonus_usd: usd(bonusC) } : {}),
+    remaining_usd: usd(remainC),
+    pct,
+    cycle_end: Number.isFinite(endMs) && endMs > 0 ? new Date(endMs).toISOString() : null,
+  }
+}
+
 const plugin = {
   id: 'cursor',
   label: 'Cursor CLI',
@@ -407,9 +482,9 @@ const plugin = {
   /**
    * Subscription usage via the CLI's own token (~/.config/cursor/auth.json):
    *   - auth/full_stripe_profile                  → plan ("pro", …)
-   *   - DashboardService/GetCurrentPeriodUsage    → included amount, spend and
-   *     billing cycle of the running period, all in CENTS ('limit': 2000 on
-   *     Pro) — this is what makes the bar honest, nothing has to be assumed
+   *   - DashboardService/GetCurrentPeriodUsage    → included amount, included
+   *     spend (not totalSpend — that one also holds bonusSpend) and billing
+   *     cycle of the running period, all in CENTS ('limit': 2000 on Pro)
    *   - DashboardService/GetAggregatedUsageEvents → total of the period, used
    *     only as the fallback when the period endpoint answers nothing
    *
@@ -433,35 +508,10 @@ const plugin = {
       post('/aiserver.v1.DashboardService/GetAggregatedUsageEvents'),
       post('/aiserver.v1.DashboardService/GetCurrentPeriodUsage'),
     ])
-    if (!profile && !agg && !period) return null
-    const usd = (cents) => (cents == null || !Number.isFinite(Number(cents)) ? null : Math.round(Number(cents)) / 100)
-    const plan = period?.planUsage ?? null
-    const endMs = Number(period?.billingCycleEnd)
-    const spent = usd(plan?.totalSpend) ?? usd(agg?.totalCostCents)
-    // The included amount comes from Cursor itself. Only when that endpoint
-    // stays silent does the configured fallback step in — and then the answer
-    // SAYS so, so the UI can mark the bar as an estimate instead of presenting
-    // a guess as a fact. This used to live in usage.mjs, where the aggregator
-    // knew a vendor's field names and the budget gate had to compute the same
-    // percentage a second time.
-    let included = usd(plan?.limit)
-    let estimated = false
-    if (included == null) {
-      included = Number(ctx?.setting?.('included_usd', 20)) || 20
-      estimated = true
-    }
-    return {
-      kind: 'cursor',
-      plan: profile?.membershipType ?? profile?.individualMembershipType ?? null,
-      // The period endpoint's own total belongs to its own limit — mixing it
-      // with the aggregation would make bar and tooltip disagree by a cent.
-      spent_usd: spent,
-      included_usd: included,
-      ...(estimated ? { included_estimated: true } : {}),
-      remaining_usd: usd(plan?.remaining),
-      pct: spent != null && included ? Math.round((spent / included) * 1000) / 10 : null,
-      cycle_end: Number.isFinite(endMs) && endMs > 0 ? new Date(endMs).toISOString() : null,
-    }
+    return cursorPeriodUsage({
+      period, agg, profile,
+      includedFallback: Number(ctx?.setting?.('included_usd', 20)) || 20,
+    })
   },
 }
 

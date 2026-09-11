@@ -1388,13 +1388,16 @@ for — which is why the Welcome wizard offers it.
 Harness plugins may implement `usage()`; `server/usage.mjs` aggregates and
 caches the results for the overview panel and `GET /api/usage`. Claude asks the
 account (see below), cursor asks the Cursor API with the CLI's own token
-(`~/.config/cursor/auth.json`): `GetCurrentPeriodUsage` reports spend, the
-included amount and the cycle end of the running period in cents — the bar
-therefore measures against the amount the account really has, on every plan.
-Cursor documents that amount nowhere and its public APIs are admin-only, so this
-internal dashboard endpoint is the only source; it has no contract. When it
-stays silent the configurable `cursor_included_usd` setting (default 20) steps
-in as a fallback and the UI marks the value as estimated.
+(`~/.config/cursor/auth.json`): `GetCurrentPeriodUsage` reports the included
+amount, the included spend and the cycle end of the running period in cents —
+the bar measures `includedSpend / limit`, not `totalSpend / limit`.
+`totalSpend` also holds `bonusSpend` (free extra from model providers), and
+dividing that sum by the included cap is how a Pro bar that Cursor itself
+already called exhausted read 177 %. Bonus dollars still appear in the tooltip.
+Cursor documents the included amount nowhere and its public APIs are admin-only,
+so this internal dashboard endpoint is the only source; it has no contract. When
+it stays silent the configurable `cursor_included_usd` setting (default 20)
+steps in as a fallback and the UI marks the value as estimated.
 
 #### Claude's windows come from the account, not off the floor
 
