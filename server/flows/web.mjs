@@ -21,7 +21,7 @@ const html = (res, code, page) => res.writeHead(code, { 'content-type': 'text/ht
 const json = (res, code, obj) => res.writeHead(code, { 'content-type': 'application/json' }).end(JSON.stringify(obj))
 
 // ---------------- meta for the editor ----------------
-function agentsList() { return db.prepare('SELECT a.id, a.name, r.name AS repo FROM agents a JOIN repos r ON r.id=a.repo_id ORDER BY a.name').all() }
+function agentsList() { return db.prepare('SELECT a.id, a.name, r.name AS repo, a.active FROM agents a JOIN repos r ON r.id=a.repo_id ORDER BY a.name').all() }
 // Only ACTIVE repos: the designer's `repo` field is a dropdown like any other,
 // and a flow aimed at a deactivated repo would never fire.
 function reposList() { return db.prepare('SELECT id, name FROM repos WHERE active=1 ORDER BY name').all() }

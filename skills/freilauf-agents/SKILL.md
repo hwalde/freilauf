@@ -239,7 +239,7 @@ What the scheduler does with it (`server/scheduler.mjs`):
 | do | call | notes |
 |---|---|---|
 | start now | `fl-api -X POST /agents/start id=<id> repo=<repoId>` | ignores the pipeline switch and `max_parallel`; the budget gate still applies. 303 to the new run — `fl-api` cannot show the `Location`, so read the id back with `fl-api /api/runs agent=<id> limit=1` |
-| on/off | `fl-api -X POST /agents/toggle id=<id> repo=<repoId>` | flips `active` |
+| on/off | `fl-api -X POST /agents/toggle id=<id> repo=<repoId>` | flips `active`. **Off stops every automatic start** — its own schedule and every flow's `start_agent` step (which then reports `skipped`); only `start` above still runs it |
 | delete | `fl-api -X POST /agents/delete id=<id>` | **the past runs survive.** Only `runs.agent_id` is nulled; each run keeps its own definition copy and title snapshot, so the history stays in the overview. Irreversible — confirm with the operator first |
 | move | `fl-api -X POST /agents/move id=<id> repo=<targetRepoId>` | a name collision in the target repo appends a `YYYY-MM-DD-HHMMSS` suffix (UTC). Refused for a target that does not exist or is the repo it already lives in. `GET /agents/move?id=<id>` is the page |
 

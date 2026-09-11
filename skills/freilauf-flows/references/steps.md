@@ -114,10 +114,17 @@ uses, budget gate included.
 | `wait` | `true` | suspend until that run ends |
 | `outputVar` | `run` | |
 
-Output without `wait`: `{ id: string, deferred: boolean }`. With `wait` the
-finished run's `RUN_SHAPE` **replaces** the output.
+Output without `wait`: `{ id: string, deferred: boolean, skipped: boolean }`.
+With `wait` the finished run's `RUN_SHAPE` **replaces** the output.
 
 - A start that fails (`ok:false`) **throws** and fails the flow run.
+- **A switched-off agent (`active = 0`) is not started** (since 2026-09-11 —
+  before that a flow walked past the switch). Without `wait` the step logs
+  `skipped (agent "<name>" is switched off)` and the output is
+  `{ id: null, deferred: false, skipped: true }` — branch on `vars.<out>.skipped`.
+  With `wait` the step **fails** the flow run: there is no run whose outcome it
+  could hand on. To run a switched-off agent from a flow, switch it on first
+  (`toggle_agent` with `startNow`).
 - A `deferred` run (budget gate) still ends eventually, so `wait` stays correct
   — but the flow run sits in `waiting` until it does.
 - The started run carries `runs.flow_run_id`, which is the loop guard: it never
@@ -191,8 +198,10 @@ on afterwards.
 Output `{ id: number, name: string, active_before: boolean, active_after: boolean,
 started_run_id: string|null }`.
 
-- **`off` stops the SCHEDULE and nothing else.** A manual start, a flow start and
-  an API start all still work — the switch is a reversible pause, not a lock.
+- **`off` stops every automatic start**: the agent's own schedule and every
+  flow's `start_agent` step (which then reports `skipped`). Only the "start now"
+  button — by hand or `POST /agents/start` — still starts it; the switch is a
+  reversible pause, not a lock. (Before 2026-09-11 a flow start walked past it.)
 - `startNow` starts a run **only after switching on**: with `active=off` the
   ticked box is ignored, because a ticked box is not a second command.
 - It also starts nothing while a run of this agent is `running`, `waiting_help`
