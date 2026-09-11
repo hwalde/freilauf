@@ -70,6 +70,7 @@
   "usage.as_of": "Stand {time}",
   "usage.resets_in": "Reset in {days} T",
   "usage.spent": "{usd} $ von {included} $ inklusive",
+  "usage.spent_bonus": "{usd} $ von {included} $ inklusive (+ {bonus} $ Bonus)",
   "usage.spent_est": "{usd} $ von ~{included} $ inklusive (konfigurierter Ersatzwert)",
   "usage.remaining": "{amount} {currency} übrig",
   "usage.balance_detail": "{granted} Guthaben + {topped_up} aufgeladen",

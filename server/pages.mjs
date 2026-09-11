@@ -1093,8 +1093,13 @@ export async function usagePanel() {
       // dollars are the detail and move into the tooltip; only when the included
       // amount is the configured fallback does the text say so (tilde).
       const money = d.spent_usd != null
-        ? t(d.included_estimated ? 'usage.spent_est' : 'usage.spent',
-          { usd: fmtNum(d.spent_usd, { maximumFractionDigits: 2 }), included: fmtNum(d.included_usd, { maximumFractionDigits: 2 }) })
+        ? t(d.included_estimated ? 'usage.spent_est'
+          : (d.bonus_usd > 0 ? 'usage.spent_bonus' : 'usage.spent'),
+          {
+            usd: fmtNum(d.spent_usd, { maximumFractionDigits: 2 }),
+            included: fmtNum(d.included_usd, { maximumFractionDigits: 2 }),
+            bonus: fmtNum(d.bonus_usd ?? 0, { maximumFractionDigits: 2 }),
+          })
         : ''
       const days = d.cycle_end != null
         ? Math.max(0, Math.ceil((Date.parse(d.cycle_end) - Date.now()) / 86_400_000)) : null
