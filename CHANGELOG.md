@@ -16,6 +16,23 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-11
+
+### Fixed
+
+- **A switched-off agent is no longer started by a flow.** The on/off switch on
+  the agents page used to stop only the agent's own schedule: a flow's "Start
+  agent" step walked straight past it. So an agent switched off — and even set
+  to manual — was still started every night by a cron flow that pointed at it,
+  and nothing on the agents page said why it ran. "Off" now stops every
+  automatic start. The flow step reports `skipped (agent "<name>" is switched
+  off)` and carries on, with `skipped: true` in its output to branch on; a step
+  that was set to wait for the run's result fails instead, because there is no
+  result to hand on. The "start now" button still starts a switched-off agent by
+  hand, and a flow that wants one to run switches it on first ("Toggle agent"
+  with "start right away"). The flow designer's agent picker now marks agents
+  that are switched off.
+
 ## 2026-09-10
 
 ### Added

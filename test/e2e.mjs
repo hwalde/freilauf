@@ -3701,6 +3701,30 @@ try {
     await postForm(`/api/flows/${FLOWID}/toggle`, {})
     equal(db.prepare('SELECT active FROM flows WHERE id=?').get(FLOWID).active, 1, 'on again')
   })
+  await check('a flow does not start a switched-off agent — the step says it skipped it', async () => {
+    // Measured 2026-09-10/11: an agent switched off on the agents page was still
+    // started every night by a cron flow's start_agent step. Through the real
+    // route and the real actions.startAgent(), against a real agent row.
+    const agentId = db.prepare(`INSERT INTO agents(repo_id,name,harness,prompt,branch_mode,expected_minutes,active,schedule_kind)
+      VALUES(?,'e2e-switched-off','claude','x','keiner',10,0,'manuell') RETURNING id`).get(repoId).id
+    const r = await jsonPost('/api/flows/save', {
+      name: 'E2E-Start-Off-Agent', active: true, trigger: { kind: 'manual' },
+      definition: { properties: {}, sequence: [{
+        id: 'e2e-start-off', componentType: 'task', type: 'start_agent', name: 'start it',
+        properties: { agentId: String(agentId), promptExtra: '', wait: false, outputVar: 'po' },
+      }] },
+    })
+    const j = await r.json()
+    isTrue(j.ok && !!j.id, `flow saved (${JSON.stringify(j).slice(0, 200)})`)
+    equal((await postForm(`/api/flows/${j.id}/run`, {}, { asBrowser: true })).status, 303, 'run now')
+    const fr = () => db.prepare('SELECT * FROM flow_runs WHERE flow_id=? ORDER BY started_at DESC LIMIT 1').get(j.id)
+    await waitFor(() => fr()?.status === 'done', { what: 'the flow run is over', timeoutMs: 15_000 })
+    equal(db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(agentId).c, 0, 'no run of the agent was created')
+    equal(JSON.parse(fr().context).vars.po.skipped, true, 'the output says it was skipped')
+    contains(fr().log, 'is switched off', 'and the flow run\'s log says why')
+    await postForm(`/api/flows/${j.id}/delete`, {})
+    db.prepare('DELETE FROM agents WHERE id=?').run(agentId)
+  })
   await check('deleting the flow also removes it from the agent it hung on', async () => {
     const r = await postForm(`/api/flows/${FLOWID}/delete`, {})
     equal(r.status, 200, 'deleted')

@@ -473,8 +473,9 @@ def main(argv=None) -> int:
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--dispatcher-aktiv", dest="disp", action="store_true", default=None)
     g.add_argument("--dispatcher-inaktiv", dest="disp", action="store_false",
-                   help="den Dispatcher-Agenten ausgeschaltet lassen (dann trägt der "
-                        "Cron-Flow 'Schwarm-Takt' — aber nie beide zugleich)")
+                   help="den Dispatcher-Agenten ausgeschaltet lassen. Ein ausgeschalteter "
+                        "Agent wird auch von keinem Flow gestartet (Freilauf seit "
+                        "2026-09-11) — der Schwarm verteilt dann nichts, bis er wieder an ist")
     ap.add_argument("--worker-zuruecksetzen", action="store_true",
                     help="den Schaltzustand der Worker auf die Konfig-Vorgabe zurückholen "
                          "(sonst bleibt er, wie ihn `dispatch.py stopp` gestellt hat)")

@@ -1017,7 +1017,7 @@
   "flows.field.outputVar": "Output variable (vars.…)",
   "flows.field.promptExtra": "Additional prompt",
   "flows.field.active": "Switch to",
-  "flows.field.active.hint": "\"Off\" stops the SCHEDULE only — a manual start, a flow start and an API start all still work.",
+  "flows.field.active.hint": "\"Off\" stops every automatic start — the schedule and a flow's \"Start agent\" step. The \"start now\" button still starts it by hand.",
   "flows.field.startNow": "start a run right away",
   "flows.field.startNow.hint": "Only after switching on, and only when no run of this agent is running, waiting for help or deferred. Otherwise the step reports it as skipped and the output variable keeps started_run_id empty.",
   "flows.field.wait": "wait until the run ends (result → output variable)",

@@ -458,7 +458,10 @@ function stepEditor(step, context) {
           input = $('select', {}, f.options.map(o => $('option', { value: o, selected: props[f.key] === o }, optionLabel(f.key, o))))
           input.addEventListener('change', () => { props[f.key] = input.value; changed() }); break
         case 'agent':
-          input = $('select', {}, $('option', { value: '' }, '–'), meta.agents.map(a => $('option', { value: a.id, selected: String(props[f.key]) === String(a.id) }, `${a.name} (${a.repo})`)))
+          // A switched-off agent is not started by a flow (actions.startAgent), so
+          // the picker says which ones are off before the flow finds out at 2 am.
+          input = $('select', {}, $('option', { value: '' }, '–'), meta.agents.map(a => $('option', { value: a.id, selected: String(props[f.key]) === String(a.id) },
+            `${a.name} (${a.repo})${a.active === 0 ? ` ${T('flows.attach.inactive')}` : ''}`)))
           input.addEventListener('change', () => { props[f.key] = input.value; light() }); break
         case 'repo':
           input = $('select', {}, $('option', { value: '' }, '–'), meta.repos.map(r => $('option', { value: r.id, selected: String(props[f.key]) === String(r.id) }, r.name)))

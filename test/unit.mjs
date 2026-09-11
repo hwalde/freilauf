@@ -4183,6 +4183,44 @@ try {
     equal(fr.context.vars.fixer.outcome, 'done', 'RunInfo replaced the placeholder output')
     isTrue(fr.log.some(l => l.msg === 'fixed'), 'condition read the resumed variable')
   })
+  // Measured 2026-09-10/11: a switched-off agent was started every night by a
+  // cron flow's start_agent step. actions.startAgent() now answers `inactive`
+  // for it (the e2e suite drives that against a real row); these two pin what
+  // the STEP makes of that answer.
+  const offApi = { ...stubApi, startAgent: async (agentId) => {
+    calls.push(['startAgent', agentId]); return { ok: true, runId: null, inactive: true, name: 'PO' } } }
+  await check('start_agent on a switched-off agent: skipped, a result the flow can branch on', async () => {
+    calls.length = 0
+    const def = { sequence: [
+      step('start_agent', { agentId: '9', promptExtra: '', wait: false, outputVar: 'po' }),
+      step('condition', { left: '{{vars.po.skipped}}', op: 'truthy', right: '' }, { branches: {
+        true: [step('note', { text: 'agent is off' })], false: [step('note', { text: 'agent started' })] } }),
+    ] }
+    const id = await engine.startFlowRun({ id: null, name: 'po-takt', definition: def }, { kind: 'cron' }, offApi)
+    const fr = fdb.getFlowRun(id)
+    equal(fr.status, 'done', 'the flow run carries on — the switch is the operator\'s decision, not a failure')
+    equal(fr.context.vars.po.id, null, 'no run id')
+    equal(fr.context.vars.po.skipped, true, 'and the output says it was skipped')
+    contains(fr.log.map(l => l.msg).join(' '), 'skipped (agent "PO" is switched off)', 'the log names the agent and why')
+    isTrue(fr.log.some(l => l.msg === 'agent is off'), 'a condition on vars.po.skipped sees it')
+    const paths = vs.shapePaths('vars.po', vs.outputShapeOf(
+      { id: 's', type: 'start_agent', properties: { wait: false } }, STEP_MAP.start_agent)).map(p => `${p.path}:${p.type}`).join(',')
+    contains(paths, 'vars.po.skipped:boolean', 'the variable catalog offers `skipped` to pick')
+  })
+  await check('start_agent WITH wait on a switched-off agent fails the step — there is no outcome to hand on', async () => {
+    const def = { sequence: [
+      step('start_agent', { agentId: '9', promptExtra: '', wait: true, outputVar: 'po' }),
+      step('switch_outcome', { value: '{{vars.po.outcome}}' }, { branches: {
+        done: [], failed: [step('note', { text: 'went down the failed branch' })], aborted: [] } }),
+    ] }
+    const id = await engine.startFlowRun({ id: null, name: 'chain-off', definition: def }, { kind: 'cron' }, offApi)
+    const fr = fdb.getFlowRun(id)
+    equal(fr.status, 'failed', 'failed, not waiting for a run that does not exist')
+    contains(fr.error, 'switched off', 'the error says why')
+    equal(fr.wait_run_id ?? null, null, 'nothing to resume on')
+    isFalse(fr.log.some(l => l.msg === 'went down the failed branch'),
+      'and switch_outcome never saw a made-up "failed" for a run that never existed')
+  })
   await check('delay suspends until resume_at; resumeDelayed continues', async () => {
     const def = { sequence: [step('delay', { minutes: 10 }), step('note', { text: 'later' })] }
     const id = await engine.startFlowRun({ id: null, name: 'sleepy', definition: def }, trig, stubApi)

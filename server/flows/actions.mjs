@@ -207,9 +207,24 @@ export const actions = {
     return true
   },
 
+  /**
+   * Start a stored agent for a flow. A switched-off agent (`active = 0`) is NOT
+   * started: answers `{ ok: true, runId: null, inactive: true, name }`, and the
+   * step decides what that means for the flow.
+   *
+   * This used to walk past the switch, on the reading that "off" only stops the
+   * agent's own schedule. That is not what an operator means by it, and it was
+   * measured: a swarm's product-owner agent was switched off and its schedule
+   * set to manual, and a cron flow's `start_agent` step still started it every
+   * night at 02:00 (runs ff3b350b and ce5a53b4, 2026-09-10/11) — so the
+   * one switch the agents page offers could not stop it, and nothing on that
+   * page said why it ran. A flow is an AUTOMATIC start exactly like the
+   * schedule; the "start now" button stays the deliberate way past the switch.
+   */
   async startAgent(agentId, promptExtra, flowRunId) {
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId)
     if (!agent) return { ok: false, error: `agent ${agentId} does not exist` }
+    if (agent.active === 0) return { ok: true, runId: null, inactive: true, name: agent.name }
     const r = await startForAgent(agent, promptExtra)
     if (r.runId) markStartedByFlow(r.runId, flowRunId)
     return r
@@ -231,10 +246,11 @@ export const actions = {
    * agents page. Answers `{ ok, id, name, active_before, active_after }`, and
    * `{ ok: false, error }` for an id that does not exist.
    *
-   * `active = 0` gates the SCHEDULED starts only (the `WHERE active = 1` in
-   * `scheduler.mjs`'s tick). A manual start, a flow start and an API start all
-   * walk past it, deliberately — the switch means "stop firing by yourself",
-   * not "this agent is forbidden".
+   * `active = 0` gates every AUTOMATIC start: the scheduler's tick (`WHERE
+   * active = 1`) and a flow's `start_agent` step (`startAgent()` above). The
+   * "start now" button — by hand or through the API — still walks past it,
+   * deliberately: the switch means "nothing starts this by itself", not "this
+   * agent is forbidden".
    */
   async setAgentActive(agentId, on) {
     const agent = db.prepare('SELECT id, name, active FROM agents WHERE id = ?').get(agentId)

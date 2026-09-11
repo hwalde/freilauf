@@ -138,7 +138,8 @@ export const STEPS = [
   {
     type: 'start_agent', component: 'task', group: 'agents', output: true,
     // Without "wait" only the id exists; with it the finished run replaces the output.
-    outputShape: { from: 'run_if_wait', otherwise: { type: 'object', props: { id: { type: 'string' }, deferred: { type: 'boolean' } } } },
+    outputShape: { from: 'run_if_wait', otherwise: { type: 'object', props: {
+      id: { type: 'string' }, deferred: { type: 'boolean' }, skipped: { type: 'boolean' } } } },
     fields: [
       { key: 'agentId', kind: 'agent', required: true },
       { key: 'promptExtra', kind: 'textarea', placeholder: 'Additional instructions — {{vars.…}} placeholders allowed.' },
@@ -148,7 +149,18 @@ export const STEPS = [
       const extra = render(props.promptExtra, ctx).trim() || null
       const r = await api.startAgent(Number(props.agentId), extra, info.flowRunId)
       if (!r.ok) throw new Error(r.error || 'agent start failed')
-      const out = { id: r.runId, deferred: !!r.deferred }
+      // A switched-off agent is not started by a flow (actions.startAgent). The
+      // switch is the operator's decision, so without `wait` that is a result the
+      // flow may branch on (`skipped`), like toggle_agent's busy agent. WITH
+      // `wait` the step promised the rest of the flow a finished run's outcome,
+      // and there is none — carrying on would send a `switch_outcome` down its
+      // "failed" branch for a run that never existed, so the step fails instead.
+      if (r.inactive) {
+        const why = `agent "${r.name}" is switched off`
+        if (props.wait) throw new Error(`${why} — not started, so there is no run to wait for`)
+        return { msg: `skipped (${why})`, output: { id: null, deferred: false, skipped: true } }
+      }
+      const out = { id: r.runId, deferred: !!r.deferred, skipped: false }
       // A deferred run (quota gate) still ends eventually — waiting stays correct.
       if (props.wait) return { msg: `started run ${r.runId} — waiting`, output: out, wait: { runId: r.runId } }
       return { msg: `started run ${r.runId}`, output: out }
