@@ -2951,6 +2951,27 @@ try {
     await postForm(`/api/runs/${j.runId}/start-now`, {})
     await sessionMerken(j.runId)
   })
+  await check('a manual run waits for the operator and never starts by itself', async () => {
+    const j = await laufStarten({ repo_id: repoId, prompt: 'E2E-manuell', title: 'Manual run', start_mode: 'manual' })
+    const id = j.runId
+    isTrue(j.scheduled, `reported as planned (${JSON.stringify(j)})`)
+    const r = lauf(id)
+    equal(r.status, 'scheduled', 'status')
+    equal(r.start_mode, 'manual', 'the mode is stored')
+    equal(r.tmux_session, null, 'no session — nothing was started')
+    await watcherTick()
+    equal(lauf(id).status, 'scheduled', 'a watcher pass does not start it — it waits for nobody but the operator')
+    // The banner says what it is waiting for, and the same two buttons are there
+    // that any planned run carries: "Start now" is the only way it goes.
+    const seite = await fetchPath(`/runs/${id}`).then(r => r.text())
+    contains(seite, 'waiting to be started by hand', 'the banner names the manual wait')
+    contains(seite, `action="/api/runs/${id}/start-now"`, 'the banner offers the start-now button')
+    const zeile = (await (await fetchPath(`/?repo=${repoId}`)).text()).split('<tr').find(z => z.includes(id))
+    contains(zeile, 'Scheduled', 'the waiting run is visible in the overview')
+    await postForm(`/api/runs/${id}/start-now`, {})
+    equal(lauf(id).status, 'running', 'and starts when the operator says so')
+    await sessionMerken(id)
+  })
   await check('"when the repo is free" waits for exactly that', async () => {
     // The groups before left runs behind; the question here is only about the
     // blocker this test starts itself.

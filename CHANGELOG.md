@@ -16,6 +16,22 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-12
+
+### Added
+
+- **A run can be planned as "manually — only started by hand".** Next to
+  "immediately", "at a date and time", "in n minutes" and "when the repo is
+  free", the single-run form and the Quick-Run dialog offer a fifth start
+  option: the run is created and waits at the top of the overview, but the hub
+  never starts it on its own — not at a time, not when the repo frees up, not
+  after a restart. It goes only when the operator presses "Start now" on its
+  page (with the same budget gate as any other start), and the usual "Cancel"
+  retracts it. Useful for a task that should be prepared but fired only after a
+  look at the situation, or one that belongs into a maintenance window a human
+  decides on. The run's banner says "waiting to be started by hand", and the
+  "Edit this run" card can move such a run to a fixed time later.
+
 ## 2026-09-11
 
 ### Fixed

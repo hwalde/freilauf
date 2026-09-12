@@ -6079,6 +6079,11 @@ try {
     equal(s.startMode, 'idle', 'mode')
     equal(s.startAt, null, 'nothing to wait for by the clock')
   })
+  await check('"manually" waits for the operator, never for a clock', () => {
+    const s = rd.runStartFromForm({ start_mode: 'manual' })
+    equal(s.startMode, 'manual', 'mode')
+    equal(s.startAt, null, 'no point in time — nothing would ever fire')
+  })
   await check('a broken entry is a problem, not a run that starts at the wrong time', () => {
     const p1 = []
     equal(rd.runStartFromForm({ start_mode: 'at', start_at: 'nonsense' }, p1).startMode, 'now', 'falls back to now')
@@ -6172,6 +6177,20 @@ try {
     equal(r.ok, true, 'applied')
     const lauf = edb.prepare('SELECT * FROM runs WHERE id=?').get(id)
     equal(lauf.start_mode, 'idle', 'now waiting for the repo')
+    equal(lauf.start_at, null, 'the point in time is gone')
+  })
+
+  await check('a planned run can be told to wait for a human ("manual")', async () => {
+    const a = edb.prepare(`SELECT id FROM repos WHERE name='edit-repo-a'`).get().id
+    const id = 'edit-run-manual'
+    edb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title, start_mode, start_at)
+                 VALUES(?,?,'scheduled','claude','p','keiner',45,NULL,'at','2030-01-01 00:00:00')`).run(id, a)
+    const problems = []
+    const r = await editRun(id, { startMode: 'manual' }, problems)
+    equal(problems.length, 0, `no problems (${problems.join(', ')})`)
+    equal(r.ok, true, 'applied')
+    const lauf = edb.prepare('SELECT * FROM runs WHERE id=?').get(id)
+    equal(lauf.start_mode, 'manual', 'now waiting for the operator')
     equal(lauf.start_at, null, 'the point in time is gone')
   })
 

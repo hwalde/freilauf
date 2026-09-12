@@ -184,7 +184,7 @@ export async function editRun(runId, {
   }
 
   // The start time, through the single-run form's own parser. 'at' / 'in' write
-  // a point in time, 'idle' clears it, 'now' means "start it now".
+  // a point in time, 'idle' and 'manual' clear it, 'now' means "start it now".
   if (startMode !== null && startMode !== undefined) {
     if (!erlaubt.startTime) problems.push(t('run.edit.start_only_scheduled'))
     else {
@@ -205,6 +205,12 @@ export async function editRun(runId, {
       } else if (s.startMode === 'idle') {
         if (run.start_mode !== 'idle') {
           sets.push('start_mode=?'); vals.push('idle')
+          sets.push('start_at=?'); vals.push(null)
+          geaendert.push('start')
+        }
+      } else if (s.startMode === 'manual') {
+        if (run.start_mode !== 'manual') {
+          sets.push('start_mode=?'); vals.push('manual')
           sets.push('start_at=?'); vals.push(null)
           geaendert.push('start')
         }
