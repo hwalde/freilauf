@@ -23,12 +23,15 @@ a day on which nothing was released.
 - **Cursor usage is the spending %, not "100 % of the $20 sticker".** After
   the bar stopped counting bonus dollars it sat at 100 % while the CLI kept
   answering — the included dollar figure is a retail-value estimate, and
-  Cursor throttles on Auto / API spending percentages instead (on this
-  account: ~8 % Auto, ~64 % API, against a $20 included line that was already
-  spent). The sidebar now shows those two buckets, the tooltip still names
-  the dollars and the bonus, and the budget gate follows the bucket the
-  run's model actually draws from rather than deferring every cursor start
-  because the sticker looked empty.
+  Cursor throttles on spending percentages instead. The sidebar shows Auto
+  and API; the tooltip still names the dollars and the bonus; the budget
+  gate follows the bucket the run's model actually draws from rather than
+  deferring every cursor start because the sticker looked empty.
+- **The Auto bar was still the wrong field.** `autoPercentUsed` on this
+  account was ~3 % while Cursor's own Auto line said "You've used 9% of your
+  included total usage" — that 9 % is `totalPercentUsed`. The named-API line
+  already matched `apiPercentUsed` (64 %). Auto now uses the total figure,
+  the one the CLI actually prints.
 
 ## 2026-09-11
 

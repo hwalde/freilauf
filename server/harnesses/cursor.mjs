@@ -52,9 +52,9 @@ export function cursorModelIsAuto(model, autoModels = []) {
 }
 
 /**
- * Which spending % binds this run: Auto for Composer/Grok-in-the-auto-list,
- * API for everything named (claude, …), the fuller of the two when the
- * model cannot be placed, else the plugin's headline `pct`.
+ * Which spending % binds this run: Auto/Composer uses Cursor's "included
+ * total usage" (`auto_pct` = totalPercentUsed), named models use the API
+ * bucket, the fuller of the two when the model cannot be placed.
  */
 export function cursorBindingPct(data, model) {
   if (!data) return null
@@ -79,11 +79,14 @@ export function cursorBindingPct(data, model) {
  *     because bonus usage is extra on top. Measured on this installation:
  *     includedSpend === limit, displayMessage "You've hit your usage limit",
  *     and the CLI kept answering.
- *   - **Spending %** (`autoPercentUsed`, `apiPercentUsed`, `totalPercentUsed`).
- *     What Cursor throttles on. The Auto/Composer bucket is large; the named
- *     API bucket is small. The bar and the budget gate use these, never the
- *     dollar quotient — a 100 % dollar bar that defers every cursor start
- *     while the API bucket is at 64 % is the same class of lie as 177 %.
+ *   - **Spending %** is what Cursor throttles on, and the fields are not
+ *     named after the UI. Measured on this installation: `autoPercentUsed`
+ *     was 3.2 while Cursor's own Auto line read "You've used 9% of your
+ *     included **total** usage" — that 9 % is `totalPercentUsed` (8.7,
+ *     rounded). `namedModelSelectedDisplayMessage` tracks `apiPercentUsed`.
+ *     The Auto bar therefore uses `totalPercentUsed`, never
+ *     `autoPercentUsed`. Putting the latter on a bar labelled Auto is how
+ *     the sidebar still disagreed with the CLI after the dollar fix.
  *
  * `totalSpend` still includes `bonusSpend`. Dollars stay in the tooltip so
  * the extra is visible; they do not fill the bar when spending % is present.
@@ -127,9 +130,11 @@ export function cursorPeriodUsage({ period, agg, profile, includedFallback = 20 
   const dollarPct = spentC != null && includedCents
     ? Math.min(100, Math.round((spentC / includedCents) * 1000) / 10)
     : null
-  const autoPct = round1(plan?.autoPercentUsed)
   const apiPct = round1(plan?.apiPercentUsed)
   const totalPct = round1(plan?.totalPercentUsed)
+  // Cursor's Auto-selected UI shows totalPercentUsed ("included total usage"),
+  // not autoPercentUsed. Fall back to the Auto field only when total is absent.
+  const autoPct = totalPct ?? round1(plan?.autoPercentUsed)
   const spending = totalPct ?? (
     autoPct != null || apiPct != null
       ? Math.max(autoPct ?? 0, apiPct ?? 0)
