@@ -1020,7 +1020,7 @@
   "flows.field.outputVar": "输出变量（vars.…）",
   "flows.field.promptExtra": "附加提示",
   "flows.field.active": "切换为",
-  "flows.field.active.hint": "“关闭”只会停止计划——手动启动、流程启动和 API 启动依然有效。",
+  "flows.field.active.hint": "“关闭”会停止所有自动启动——计划以及流程中的“启动代理”步骤。仍可通过“立即启动”手动启动它。",
   "flows.field.startNow": "立即启动一次运行",
   "flows.field.startNow.hint": "仅在开启之后，且该代理当前没有运行中、等待帮助或被延后的运行时才启动。否则该步骤报告为跳过，输出变量中的 started_run_id 保持为空。",
   "flows.field.wait": "等待运行结束（结果 → 输出变量）",

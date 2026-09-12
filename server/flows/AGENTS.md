@@ -104,7 +104,7 @@ Steps never touch the database or tmux themselves — everything goes through
 | type | does |
 |---|---|
 | `send_message` | types a text into the tmux session of target runs (bracketed paste + Enter, same as the detail page) |
-| `start_agent` | `startForAgent(agent, promptExtra)` — quota gate applies; `wait` suspends until the run ends |
+| `start_agent` | `startForAgent(agent, promptExtra)` — quota gate applies; `wait` suspends until the run ends. A **switched-off agent is not started** (see below): without `wait` the step reports `skipped` and its output carries `skipped: true`; with `wait` it fails, because there is no outcome to hand on |
 | `start_single_run` | the same `startRun(def, …)` the run form uses — quota gate applies. Its property fields ARE the run definition (`RUN_DEF_FLOW_FIELDS` from `server/run-def.mjs`), so a field cannot exist in the form and be missing here |
 | `kill_run` | kills the tmux session of target runs, marks them aborted |
 | `toggle_agent` | switches an agent's schedule `on`, `off` or `toggle` → `{id, name, active_before, active_after, started_run_id}`. The agents page's own toggle, reachable from a flow, so "this nightly job has failed three times, stop it firing until somebody looks" is a block instead of a human. `startNow` starts a run at once, but **only after switching ON** — a ticked box is not a second command — and **only when no run of this agent is `running`/`waiting_help`/`deferred`**; otherwise the step reports it skipped and leaves `started_run_id` null, which is a result to branch on rather than a failure |
@@ -126,10 +126,30 @@ harnesses have none, so it falls back to the log), `report_and_log`, `custom`.
 and `api.startAgentIfIdle()` — three thin functions in `actions.mjs` on top of
 the agents table and `startForAgent()`. `agentInfo` exists because "toggle"
 cannot name the state it wants without reading the one it has, and a step reads
-state through the `api`, never off the database. `active = 0` gates the
-**scheduled** starts only (the `WHERE active = 1` in the scheduler's tick): a
-manual, flow or API start still works, which is why "switched off" is a
-reversible pause and not a lock.
+state through the `api`, never off the database.
+
+**`active = 0` gates every automatic start** — the scheduler's tick (`WHERE
+active = 1`) and a flow's `start_agent` step (`actions.startAgent()` answers
+`{ ok: true, runId: null, inactive: true, name }`). Only the "start now" button,
+by hand or through `POST /agents/start`, still walks past it: a deliberate
+click, like the one `repos.max_parallel` never blocks. It used to be the other
+way round — "off" stopped the schedule and nothing else — and that is not what
+an operator means by the one switch the agents page offers. Measured 2026-09-11:
+the agent that presents a swarm's open product-owner questions was switched off
+and set to manual, and the swarm's daily cron flow started it at 02:00 anyway,
+two nights running (runs ff3b350b, ce5a53b4); nothing on the agents page said
+why it ran. A flow that
+wants a switched-off agent to run switches it on first — `toggle_agent` with
+`startNow`, which starts only AFTER switching on. The designer's agent picker
+marks switched-off agents, so the flow's author sees it before the night does.
+
+What the step makes of `inactive` depends on `wait`, and both halves are
+deliberate: without it nothing downstream depends on the run, so "skipped" is a
+result (`vars.<out>.skipped`) the flow may branch on, the same way
+`toggle_agent` treats a busy agent; with it the step promised the rest of the
+flow a finished run's `RunInfo`, and a `switch_outcome` handed nothing falls
+through to "failed" — a failure branch for a run that never existed. So that
+case fails the flow run, with the agent's name in the error.
 
 `count_runs` reads through `api.listRuns()`, which is deliberately a second query
 next to `api.findRuns()` rather than a parameter on it. They answer different
