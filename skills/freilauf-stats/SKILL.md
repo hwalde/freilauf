@@ -239,8 +239,9 @@ dropped.
                              "resets_at": "…", "stale": true, "at": 1756900000000 } ],
         "live": true } },
     { "harness": "cursor", "label": "Cursor CLI", "ok": true,
-      "data": { "kind": "cursor", "plan": "pro", "spent_usd": 7.4,
-        "included_usd": 20, "remaining_usd": 12.6, "pct": 37.0,
+      "data": { "kind": "cursor", "plan": "pro", "spent_usd": 20,
+        "included_usd": 20, "bonus_usd": 16.1, "remaining_usd": 0,
+        "auto_pct": 8.0, "api_pct": 64.2, "pct": 7.9,
         "cycle_end": "…" } } ] }
 ```
 
@@ -312,7 +313,7 @@ gate the operator switched off cannot block; a gate that throws does not block.
 | gate | settings keys (defaults) | blocks when |
 |---|---|---|
 | claude | `claude_gate_on` (1), `claude_gate_5h` (90), `claude_gate_7d` (95), `claude_gate_fable` (null → follows `_7d`) | 5 h window ≥ `_5h`, or **a weekly window that binds this run's model** ≥ its own threshold |
-| cursor | `cursor_gate_on` (1), `cursor_gate_pct` (95) | spend ÷ included amount of the running period ≥ pct |
+| cursor | `cursor_gate_on` (1), `cursor_gate_pct` (95) | Auto/API spending % of the running period ≥ pct (dollar quotient only when those percentages are missing) |
 | openrouter | `openrouter_gate_on` (1), `openrouter_min_eur` (5) | USD balance < minimum (**the key says eur and holds dollars** — renaming it would be a migration for nothing) |
 | deepseek | `deepseek_gate_on` (1), `deepseek_min_usd` (2) | USD balance < minimum, **or** the account reports `is_available: false` |
 

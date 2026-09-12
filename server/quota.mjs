@@ -363,7 +363,7 @@ export function quotaKnown(quota = claudeQuota(), model = null) {
 const METER_TTL_MS = 120_000
 
 const balanceCache = new Map()   // pluginId -> { at, remaining, available }
-const usageCache = new Map()     // pluginId -> { at, pct, cycle_end }
+const usageCache = new Map()     // pluginId -> { at, data }
 
 /**
  * What a provider still holds, in one currency — `{ remaining, available }` or
@@ -426,45 +426,50 @@ export async function balanceGateBlocked(pluginId, {
 }
 
 /**
- * A gate on a SUBSCRIPTION's included usage — spend divided by the included
- * amount of the running period, as the account itself reports it.
+ * A gate on a SUBSCRIPTION's included usage, as the plugin reports it.
+ *
+ * The percentage comes from the plugin (`data.pct`, or `pctFrom` when the
+ * plugin's answer depends on the run — cursor's Auto vs API buckets). The
+ * dollar fallback (`spent_usd / included_usd`) is only for a payload that
+ * carries no spending % at all. Recomputing from dollars here is how a
+ * cursor bar that Cursor itself throttles at ~64 % API / ~8 % Auto still
+ * deferred every start at "100 % of $20".
  *
  * Three ways the number can be missing, and all three mean "no signal, do not
- * block": no token, no answer from the account, and no included amount with an
+ * block": no token, no answer from the account, and no percentage with an
  * empty `includedFallback`. The fallback is only ever a fallback: where the
  * account states the amount, that is what the bar and this gate measure against.
  */
 export async function usageGateBlocked(pluginId, {
-  threshold = 95, includedFallback = 20, label = null,
+  threshold = 95, includedFallback = 20, label = null, pctFrom = null,
 } = {}) {
   const plugin = getPlugin(pluginId)
   if (!plugin?.usage) return { blocked: false }
   const name = gateName(plugin, pluginId, label)
   let entry = usageCache.get(pluginId)
-  if (!entry || entry.pct === null || Date.now() - entry.at >= METER_TTL_MS) {
+  if (!entry || Date.now() - entry.at >= METER_TTL_MS) {
     try {
       const data = await plugin.usage(pluginCtx(pluginId))
-      if (!data) {
-        entry = { at: Date.now(), pct: null, cycle_end: null }
-      } else {
-        const included = data.included_usd != null ? data.included_usd : (Number(includedFallback) || 0)
-        entry = {
-          at: Date.now(),
-          pct: data.spent_usd != null && included ? Math.round((data.spent_usd / included) * 1000) / 10 : null,
-          cycle_end: data.cycle_end ?? null,
-        }
-      }
+      entry = { at: Date.now(), data: data ?? null }
       usageCache.set(pluginId, entry)
     } catch {
       // keep the old entry — the previous answer is still the best one there is
     }
   }
-  if (!entry || entry.pct === null) return { blocked: false }
-  if (entry.pct >= threshold) {
+  const data = entry?.data
+  if (!data) return { blocked: false }
+  let pct = typeof pctFrom === 'function' ? pctFrom(data) : null
+  if (pct == null) pct = data.pct
+  if (pct == null) {
+    const included = data.included_usd != null ? data.included_usd : (Number(includedFallback) || 0)
+    pct = data.spent_usd != null && included ? Math.round((data.spent_usd / included) * 1000) / 10 : null
+  }
+  if (pct === null) return { blocked: false }
+  if (pct >= threshold) {
     return {
       blocked: true,
-      reason: `${name} usage: ${entry.pct} % of the included period`,
-      resets_at: entry.cycle_end ?? null,
+      reason: `${name} usage: ${pct} % of the included period`,
+      resets_at: data.cycle_end ?? null,
     }
   }
   return { blocked: false }

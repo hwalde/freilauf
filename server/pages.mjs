@@ -903,7 +903,9 @@ async function sideRail(repoId) {
     // breaks the windows out one by one and names each of them.
     const werte = d.kind === 'claude'
       ? [['5h', d.five], ['7d', d.seven]]
-      : [[u.harness.slice(0, 3), d.pct]]
+      : d.kind === 'cursor' && (d.auto_pct != null || d.api_pct != null)
+        ? [[t('usage.cursor_auto'), d.auto_pct], [t('usage.cursor_api'), d.api_pct]]
+        : [[u.harness.slice(0, 3), d.pct]]
     for (const [kurz, pct] of werte) {
       if (pct == null) continue
       const klasse = pct >= 90 ? 'r' : pct >= 80 ? 'y' : ''
@@ -1089,9 +1091,9 @@ export async function usagePanel() {
         ${scoped}</div>`
     }
     if (d.kind === 'cursor') {
-      // What one reads at a glance is the bar — like the claude rows above. The
-      // dollars are the detail and move into the tooltip; only when the included
-      // amount is the configured fallback does the text say so (tilde).
+      // Spending % is the meter Cursor throttles on (Auto vs named API). The
+      // dollar line is the detail in the tooltip — includedSpend/limit can
+      // already read 100 % while those buckets still have room.
       const money = d.spent_usd != null
         ? t(d.included_estimated ? 'usage.spent_est'
           : (d.bonus_usd > 0 ? 'usage.spent_bonus' : 'usage.spent'),
@@ -1103,9 +1105,13 @@ export async function usagePanel() {
         : ''
       const days = d.cycle_end != null
         ? Math.max(0, Math.ceil((Date.parse(d.cycle_end) - Date.now()) / 86_400_000)) : null
+      const bars = (d.auto_pct != null || d.api_pct != null)
+        ? `${d.auto_pct != null ? quotaBar(d.auto_pct, { label: t('usage.cursor_auto'), title: money }) : ''}${
+            d.api_pct != null ? quotaBar(d.api_pct, { label: t('usage.cursor_api'), title: money }) : ''}`
+        : (d.pct != null ? quotaBar(d.pct, { title: money })
+          : `<span class="dim">${e(t('usage.unavailable'))}</span>`)
       return `<div class="usage-row"><b>${e(u.label)}</b>${d.plan ? ` <span class="dim">${e(d.plan)}</span>` : ''}
-        ${d.pct != null ? quotaBar(d.pct, { title: money })
-          : `<span class="dim">${e(t('usage.unavailable'))}</span>`}
+        ${bars}
         ${days != null ? `<span class="dim">${e(t('usage.resets_in', { days }))}</span>` : ''}</div>`
     }
     return ''

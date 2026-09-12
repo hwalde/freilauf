@@ -29,19 +29,66 @@ function usd(c) {
   return c == null ? null : c / 100
 }
 
+function round1(n) {
+  if (n == null || n === '' || !Number.isFinite(Number(n))) return null
+  return Math.round(Number(n) * 10) / 10
+}
+
+/**
+ * Cursor's Auto/Composer bucket vs the named-API bucket. `null` means the
+ * list did not say — the gate then takes the fuller of the two percentages
+ * rather than guessing a model into the cheaper pool.
+ */
+export function cursorModelIsAuto(model, autoModels = []) {
+  if (!model) return null
+  const m = String(model).toLowerCase()
+  if (m === 'auto' || m === 'default') return true
+  const list = Array.isArray(autoModels) ? autoModels : []
+  if (!list.length) return null
+  return list.some((id) => {
+    const x = String(id).toLowerCase()
+    return m === x || m.startsWith(`${x}-`)
+  })
+}
+
+/**
+ * Which spending % binds this run: Auto for Composer/Grok-in-the-auto-list,
+ * API for everything named (claude, …), the fuller of the two when the
+ * model cannot be placed, else the plugin's headline `pct`.
+ */
+export function cursorBindingPct(data, model) {
+  if (!data) return null
+  const auto = cursorModelIsAuto(model, data.auto_models)
+  if (auto === true && data.auto_pct != null) return data.auto_pct
+  if (auto === false && data.api_pct != null) return data.api_pct
+  if (data.auto_pct != null && data.api_pct != null) return Math.max(data.auto_pct, data.api_pct)
+  return data.pct ?? null
+}
+
 /**
  * Turn GetCurrentPeriodUsage (+ optional aggregation fallback) into the
- * panel/gate shape. Pure so the included-vs-bonus split can be tested
- * without talking to api2.cursor.sh.
+ * panel/gate shape. Pure so the included-vs-bonus split and the spending-%
+ * vs dollar split can be tested without talking to api2.cursor.sh.
  *
- * `planUsage.totalSpend` is not the included-pool spend: it is
- * includedSpend + bonusSpend (and on-demand when that is on). Bonus is
- * free extra from model providers. Dividing totalSpend by limit is how a
- * Pro bar that Cursor already called "hit your usage limit"
- * (includedSpend === limit) read 177 %. The bar, the tooltip and the
- * budget gate therefore measure includedSpend against limit; bonus dollars
- * travel along as `bonus_usd` so the extra is visible without pretending
- * the plan is more than full.
+ * Two numbers in the payload, and they are not the same meter:
+ *
+ *   - **Dollars** (`includedSpend` / `limit`, `bonusSpend` on the side).
+ *     Retail-value estimate. Cursor's own `displayMessage` is this quotient.
+ *     It can sit at 100 % of the $20 sticker while calls still go through,
+ *     because the included allocation is worth more than the plan price and
+ *     because bonus usage is extra on top. Measured on this installation:
+ *     includedSpend === limit, displayMessage "You've hit your usage limit",
+ *     and the CLI kept answering.
+ *   - **Spending %** (`autoPercentUsed`, `apiPercentUsed`, `totalPercentUsed`).
+ *     What Cursor throttles on. The Auto/Composer bucket is large; the named
+ *     API bucket is small. The bar and the budget gate use these, never the
+ *     dollar quotient — a 100 % dollar bar that defers every cursor start
+ *     while the API bucket is at 64 % is the same class of lie as 177 %.
+ *
+ * `totalSpend` still includes `bonusSpend`. Dollars stay in the tooltip so
+ * the extra is visible; they do not fill the bar when spending % is present.
+ * Without spending % (older payload, tests) the dollar quotient remains the
+ * fallback, capped at 100 %.
  *
  * proto3 omits zeros: `remaining` missing while includedSpend equals
  * limit means 0 remaining, not "unknown".
@@ -77,9 +124,20 @@ export function cursorPeriodUsage({ period, agg, profile, includedFallback = 20 
     remainC = Math.max(0, includedCents - spentC)
   }
 
-  const pct = spentC != null && includedCents
+  const dollarPct = spentC != null && includedCents
     ? Math.min(100, Math.round((spentC / includedCents) * 1000) / 10)
     : null
+  const autoPct = round1(plan?.autoPercentUsed)
+  const apiPct = round1(plan?.apiPercentUsed)
+  const totalPct = round1(plan?.totalPercentUsed)
+  const spending = totalPct ?? (
+    autoPct != null || apiPct != null
+      ? Math.max(autoPct ?? 0, apiPct ?? 0)
+      : null
+  )
+  const autoModels = Array.isArray(period?.autoBucketModels)
+    ? period.autoBucketModels.map(String)
+    : []
   const endMs = Number(period?.billingCycleEnd)
   return {
     kind: 'cursor',
@@ -89,7 +147,10 @@ export function cursorPeriodUsage({ period, agg, profile, includedFallback = 20 
     ...(estimated ? { included_estimated: true } : {}),
     ...(bonusC ? { bonus_usd: usd(bonusC) } : {}),
     remaining_usd: usd(remainC),
-    pct,
+    auto_pct: autoPct,
+    api_pct: apiPct,
+    ...(autoModels.length ? { auto_models: autoModels } : {}),
+    pct: spending ?? dollarPct,
     cycle_end: Number.isFinite(endMs) && endMs > 0 ? new Date(endMs).toISOString() : null,
   }
 }
@@ -366,11 +427,12 @@ const plugin = {
       { key: 'gate_on', settingKey: 'cursor_gate_on', type: 'switch', default: 1, labelKey: 'settings.gate_cursor_on' },
       { key: 'pct', settingKey: 'cursor_gate_pct', type: 'number', default: 95, min: 0, max: 100, step: 0.5, labelKey: 'settings.gate_cursor_pct', hintKey: 'settings.gate_cursor_pct_hint' },
     ],
-    async check(ctx, values = {}) {
+    async check(ctx, values = {}, run = null) {
       const { usageGateBlocked } = await import('../quota.mjs')
       const g = await usageGateBlocked(plugin.id, {
         threshold: values.pct ?? 95,
         includedFallback: Number(ctx?.setting?.('included_usd', 20)) || 20,
+        pctFrom: (data) => cursorBindingPct(data, run?.model),
       })
       return g.blocked ? g : null
     },

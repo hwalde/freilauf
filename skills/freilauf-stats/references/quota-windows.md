@@ -176,6 +176,8 @@ behind the rest. Both cache for `METER_TTL_MS` = 2 min, both return
 `{blocked: false}` on **no signal** (no plugin, no `balance()`/`usage()`, no
 credential, no answer, no earlier answer), and a failed refresh keeps the
 previous reading. `unavailableBlocks` is DeepSeek's `is_available === false`.
+Cursor's `usage()` answers spending % (Auto vs API); the dollar quotient is
+only the fallback when those percentages are missing.
 
 **The gate does not go through the aggregators** (`usage.mjs` / `balances.mjs`):
 it needs one number from one plugin and it sits on the launch path.

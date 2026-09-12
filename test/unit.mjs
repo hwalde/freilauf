@@ -933,6 +933,21 @@ try {
       process.env.FREILAUF_CURSOR_AUTH = join(sandbox, 'missing-cursor-gate-auth.json')
       const { cursorGateBlocked: g3 } = await cu(3)
       isFalse((await g3(95, 20)).blocked, 'no token → no signal → the gate stays open')
+
+      process.env.FREILAUF_CURSOR_AUTH = auth
+      global.fetch = async (url) => {
+        const u = String(url)
+        if (u.includes('GetCurrentPeriodUsage')) return { ok: true, json: async () => ({
+          planUsage: {
+            limit: 2000, includedSpend: 2000, totalSpend: 3610, bonusSpend: 1610,
+            autoPercentUsed: 8, apiPercentUsed: 64, totalPercentUsed: 8,
+          },
+        }) }
+        if (u.includes('GetAggregatedUsageEvents')) return { ok: true, json: async () => ({ totalCostCents: 3610 }) }
+        return { ok: true, json: async () => ({ membershipType: 'pro' }) }
+      }
+      const { cursorGateBlocked: g4 } = await cu(4)
+      isFalse((await g4(95, 20)).blocked, '100 % of the $20 sticker does not block when spending % is 8')
     } finally {
       global.fetch = echt
       if (alt === undefined) delete process.env.FREILAUF_CURSOR_AUTH; else process.env.FREILAUF_CURSOR_AUTH = alt
@@ -2739,7 +2754,7 @@ try {
         },
       },
     })
-    equal(over.pct, 100, 'included pool is full, not 177.6 %')
+    equal(over.pct, 100, 'without spending %, the dollar quotient still fills the bar')
     equal(over.spent_usd, 20, 'included spend, not 35.52 total')
     equal(over.bonus_usd, 15.52, 'bonus is named, not folded into the bar')
     equal(over.remaining_usd, 0, 'proto3-omitted remaining is 0 when included is spent')
@@ -2755,6 +2770,29 @@ try {
     equal(half.pct, 50, 'bonus on top of a half-full pool does not fill the bar')
     equal(half.spent_usd, 10, 'included spend only')
     equal(half.remaining_usd, 10, 'remaining of the included pool')
+  })
+  await check('cursor spending % is the bar, not 100 % of the dollar sticker', async () => {
+    const { cursorPeriodUsage, cursorBindingPct, cursorModelIsAuto } = await import('../server/harnesses/cursor.mjs')
+    const live = cursorPeriodUsage({
+      profile: { membershipType: 'pro' },
+      period: {
+        autoBucketModels: ['composer-2.5', 'grok-4.5', 'auto'],
+        planUsage: {
+          totalSpend: 3610, includedSpend: 2000, bonusSpend: 1610, limit: 2000,
+          autoPercentUsed: 1.602, apiPercentUsed: 64.2, totalPercentUsed: 7.293,
+        },
+      },
+    })
+    equal(live.spent_usd, 20, 'dollars still say the $20 sticker is gone')
+    equal(live.pct, 7.3, 'the headline is totalPercentUsed, not 100')
+    equal(live.auto_pct, 1.6, 'Auto bucket')
+    equal(live.api_pct, 64.2, 'API bucket — named models still have room')
+    isTrue(cursorModelIsAuto('auto', live.auto_models) === true, 'auto is Auto')
+    isTrue(cursorModelIsAuto('composer-2.5', live.auto_models) === true, 'composer is Auto')
+    isTrue(cursorModelIsAuto('claude-opus-5-thinking-high', live.auto_models) === false, 'claude is API')
+    equal(cursorBindingPct(live, 'auto'), 1.6, 'an Auto run is gated on Auto')
+    equal(cursorBindingPct(live, 'claude-opus-5'), 64.2, 'a claude run is gated on API')
+    equal(cursorBindingPct(live, null), 64.2, 'unknown model takes the fuller bucket, not the dollars')
   })
   await check('cursor model list puts "auto" first and marks it', async () => {
     const bin = join(sandbox, 'bin-cursor')
