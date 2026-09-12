@@ -1091,9 +1091,9 @@ export async function usagePanel() {
         ${scoped}</div>`
     }
     if (d.kind === 'cursor') {
-      // Spending % is the meter Cursor throttles on. Auto is totalPercentUsed
-      // (what Cursor prints for Auto: "included total usage"), not
-      // autoPercentUsed. API is apiPercentUsed. Dollars stay in the tooltip.
+      // Cursor already writes the percentages into autoModelSelectedDisplayMessage
+      // / namedModelSelectedDisplayMessage. Those sentences are the bar and sit
+      // next to it as the hint; dollars stay in the tooltip.
       const money = d.spent_usd != null
         ? t(d.included_estimated ? 'usage.spent_est'
           : (d.bonus_usd > 0 ? 'usage.spent_bonus' : 'usage.spent'),
@@ -1106,8 +1106,8 @@ export async function usagePanel() {
       const days = d.cycle_end != null
         ? Math.max(0, Math.ceil((Date.parse(d.cycle_end) - Date.now()) / 86_400_000)) : null
       const bars = (d.auto_pct != null || d.api_pct != null)
-        ? `${d.auto_pct != null ? quotaBar(d.auto_pct, { label: t('usage.cursor_auto'), title: money }) : ''}${
-            d.api_pct != null ? quotaBar(d.api_pct, { label: t('usage.cursor_api'), title: money }) : ''}`
+        ? `${d.auto_pct != null ? quotaBar(d.auto_pct, { label: t('usage.cursor_auto'), note: d.auto_note || '', title: money }) : ''}${
+            d.api_pct != null ? quotaBar(d.api_pct, { label: t('usage.cursor_api'), note: d.api_note || '', title: money }) : ''}`
         : (d.pct != null ? quotaBar(d.pct, { title: money })
           : `<span class="dim">${e(t('usage.unavailable'))}</span>`)
       return `<div class="usage-row"><b>${e(u.label)}</b>${d.plan ? ` <span class="dim">${e(d.plan)}</span>` : ''}

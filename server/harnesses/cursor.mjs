@@ -35,6 +35,18 @@ function round1(n) {
 }
 
 /**
+ * Cursor already writes the percentage it shows the operator into
+ * `autoModelSelectedDisplayMessage` / `namedModelSelectedDisplayMessage`.
+ * Those sentences are the source of truth; the numeric fields next to them
+ * have disagreed with them (and with each other) on this installation.
+ */
+export function pctFromCursorMessage(text) {
+  if (text == null || text === '') return null
+  const m = String(text).match(/(\d+(?:\.\d+)?)\s*%/)
+  return m ? round1(m[1]) : null
+}
+
+/**
  * Cursor's Auto/Composer bucket vs the named-API bucket. `null` means the
  * list did not say — the gate then takes the fuller of the two percentages
  * rather than guessing a model into the cheaper pool.
@@ -53,8 +65,8 @@ export function cursorModelIsAuto(model, autoModels = []) {
 
 /**
  * Which spending % binds this run: Auto/Composer uses Cursor's "included
- * total usage" (`auto_pct` = totalPercentUsed), named models use the API
- * bucket, the fuller of the two when the model cannot be placed.
+ * total usage" (`auto_pct`, from the Auto display sentence), named models
+ * use the API bucket, the fuller of the two when the model cannot be placed.
  */
 export function cursorBindingPct(data, model) {
   if (!data) return null
@@ -79,14 +91,14 @@ export function cursorBindingPct(data, model) {
  *     because bonus usage is extra on top. Measured on this installation:
  *     includedSpend === limit, displayMessage "You've hit your usage limit",
  *     and the CLI kept answering.
- *   - **Spending %** is what Cursor throttles on, and the fields are not
- *     named after the UI. Measured on this installation: `autoPercentUsed`
- *     was 3.2 while Cursor's own Auto line read "You've used 9% of your
- *     included **total** usage" — that 9 % is `totalPercentUsed` (8.7,
- *     rounded). `namedModelSelectedDisplayMessage` tracks `apiPercentUsed`.
- *     The Auto bar therefore uses `totalPercentUsed`, never
- *     `autoPercentUsed`. Putting the latter on a bar labelled Auto is how
- *     the sidebar still disagreed with the CLI after the dollar fix.
+ *   - **Spending %** is what Cursor throttles on. The payload already names
+ *     it in English: `autoModelSelectedDisplayMessage` / `namedModelSelectedDisplayMessage`
+ *     ("You've used 9% of your included total usage"). Those sentences are
+ *     the bar. The numeric fields have been the wrong guess three times
+ *     (`totalSpend/limit`, `includedSpend/limit`, `autoPercentUsed`).
+ *     `displayMessage` is the dollar sticker ("You've hit your usage limit")
+ *     and is not a spending %. Without a sentence, `totalPercentUsed` /
+ *     `apiPercentUsed` remain the fallback.
  *
  * `totalSpend` still includes `bonusSpend`. Dollars stay in the tooltip so
  * the extra is visible; they do not fill the bar when spending % is present.
@@ -130,16 +142,14 @@ export function cursorPeriodUsage({ period, agg, profile, includedFallback = 20 
   const dollarPct = spentC != null && includedCents
     ? Math.min(100, Math.round((spentC / includedCents) * 1000) / 10)
     : null
-  const apiPct = round1(plan?.apiPercentUsed)
+  const autoNote = String(period?.autoModelSelectedDisplayMessage ?? '').trim()
+  const apiNote = String(period?.namedModelSelectedDisplayMessage ?? '').trim()
+  const apiPct = pctFromCursorMessage(apiNote) ?? round1(plan?.apiPercentUsed)
   const totalPct = round1(plan?.totalPercentUsed)
-  // Cursor's Auto-selected UI shows totalPercentUsed ("included total usage"),
-  // not autoPercentUsed. Fall back to the Auto field only when total is absent.
-  const autoPct = totalPct ?? round1(plan?.autoPercentUsed)
-  const spending = totalPct ?? (
-    autoPct != null || apiPct != null
-      ? Math.max(autoPct ?? 0, apiPct ?? 0)
-      : null
-  )
+  const autoPct = pctFromCursorMessage(autoNote) ?? totalPct ?? round1(plan?.autoPercentUsed)
+  const spending = autoPct != null || apiPct != null
+    ? Math.max(autoPct ?? 0, apiPct ?? 0)
+    : totalPct
   const autoModels = Array.isArray(period?.autoBucketModels)
     ? period.autoBucketModels.map(String)
     : []
@@ -154,6 +164,8 @@ export function cursorPeriodUsage({ period, agg, profile, includedFallback = 20 
     remaining_usd: usd(remainC),
     auto_pct: autoPct,
     api_pct: apiPct,
+    ...(autoNote ? { auto_note: autoNote } : {}),
+    ...(apiNote ? { api_note: apiNote } : {}),
     ...(autoModels.length ? { auto_models: autoModels } : {}),
     pct: spending ?? dollarPct,
     cycle_end: Number.isFinite(endMs) && endMs > 0 ? new Date(endMs).toISOString() : null,

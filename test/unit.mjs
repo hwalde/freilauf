@@ -2784,7 +2784,7 @@ try {
       },
     })
     equal(live.spent_usd, 20, 'dollars still say the $20 sticker is gone')
-    equal(live.pct, 7.3, 'the headline is totalPercentUsed, not 100')
+    equal(live.pct, 64.2, 'headline is the fuller of the two bars')
     equal(live.auto_pct, 7.3, 'Auto UI shows total usage, not autoPercentUsed 1.6')
     equal(live.api_pct, 64.2, 'API bucket — named models still have room')
     isTrue(cursorModelIsAuto('auto', live.auto_models) === true, 'auto is Auto')
@@ -2793,6 +2793,27 @@ try {
     equal(cursorBindingPct(live, 'auto'), 7.3, 'an Auto run is gated on total usage')
     equal(cursorBindingPct(live, 'claude-opus-5'), 64.2, 'a claude run is gated on API')
     equal(cursorBindingPct(live, null), 64.2, 'unknown model takes the fuller bucket, not the dollars')
+  })
+  await check('cursor usage bars read the display messages, not a guessed field', async () => {
+    const { cursorPeriodUsage, pctFromCursorMessage } = await import('../server/harnesses/cursor.mjs')
+    equal(pctFromCursorMessage("You've used 9% of your included total usage"), 9, 'Auto sentence')
+    equal(pctFromCursorMessage("You've used 64% of your included API usage"), 64, 'API sentence')
+    isTrue(pctFromCursorMessage("You've hit your usage limit") == null, 'the dollar sticker has no %')
+    const live = cursorPeriodUsage({
+      profile: { membershipType: 'pro' },
+      period: {
+        autoModelSelectedDisplayMessage: "You've used 9% of your included total usage",
+        namedModelSelectedDisplayMessage: "You've used 64% of your included API usage",
+        displayMessage: "You've hit your usage limit",
+        planUsage: {
+          totalSpend: 4316, includedSpend: 2000, bonusSpend: 2316, limit: 2000,
+          autoPercentUsed: 3.17, apiPercentUsed: 50, totalPercentUsed: 8.72,
+        },
+      },
+    })
+    equal(live.auto_pct, 9, 'Auto bar is the sentence, not autoPercentUsed 3.2 or total 8.7')
+    equal(live.api_pct, 64, 'API bar is the sentence, not the stale 50 on the field')
+    equal(live.auto_note, "You've used 9% of your included total usage", 'the hint travels with the bar')
   })
   await check('cursor model list puts "auto" first and marks it', async () => {
     const bin = join(sandbox, 'bin-cursor')
