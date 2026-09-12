@@ -16,6 +16,20 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-12
+
+### Fixed
+
+- **Cursor usage is the spending %, not "100 % of the $20 sticker".** After
+  the bar stopped counting bonus dollars it sat at 100 % while the CLI kept
+  answering — the included dollar figure is a retail-value estimate, and
+  Cursor throttles on Auto / API spending percentages instead (on this
+  account: ~8 % Auto, ~64 % API, against a $20 included line that was already
+  spent). The sidebar now shows those two buckets, the tooltip still names
+  the dollars and the bonus, and the budget gate follows the bucket the
+  run's model actually draws from rather than deferring every cursor start
+  because the sticker looked empty.
+
 ## 2026-09-11
 
 ### Fixed

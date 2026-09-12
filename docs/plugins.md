@@ -333,7 +333,7 @@ and does without.
 | `modelArgs(run, ctx, opts)` | fn | CLI arguments for `fl-start`; returns `{args, fehlt}` (`fehlt` = provider ids whose credential is missing). **Three arguments now** — see below |
 | `resumeCommand(run)` | fn (optional) | the shell command a HUMAN continues this run's session with, `cd <workdir> && …` included; `null` when the CLI has no reliable way (hermes). Called by `server/integrate.mjs` for every escalation message, the run's detail page and the failed/aborted Telegram texts. Only the plugin knows how its CLI names a session — claude gets `--session-id <run id>` from the hub and can name it back, cursor's id is its transcript's directory, opencode continues the last session of the worktree |
 | `resumeId(run)` | fn or async fn (optional) | the id the HUB continues this run's conversation with when its tmux session was lost (`server/runner.mjs`, `resumeRun` → `fl-start --resume <id>`). Without it the run id is used — right for a CLI that accepted `{session_id}` at launch. `null` means "nothing to continue": the run is then started afresh with its original task behind a header saying what already happened. claude answers the run id, cursor its transcript's basename, opencode the run's ROOT session out of its store (`'last'` = `--continue`), hermes the newest parentless session of the worktree out of `~/.hermes/state.db` (`'latest'` when the store does not say — hermes scopes that to the workspace `--in` names) |
-| `usage(ctx)` | async fn | subscription usage for the overview panel, or `null`. Shapes in `usage.mjs`: `{kind:'claude', five, seven, seven_general, seven_fable, weekly_scoped, live, resets_at, plan}` / `{kind:'cursor', plan, spent_usd, included_usd, included_estimated?, bonus_usd?, remaining_usd, pct, cycle_end}`. For cursor, `spent_usd`/`pct` are the included pool (`includedSpend / limit`), never `totalSpend` — that field also holds free `bonusSpend`. |
+| `usage(ctx)` | async fn | subscription usage for the overview panel, or `null`. Shapes in `usage.mjs`: `{kind:'claude', five, seven, seven_general, seven_fable, weekly_scoped, live, resets_at, plan}` / `{kind:'cursor', plan, spent_usd, included_usd, included_estimated?, bonus_usd?, remaining_usd, auto_pct?, api_pct?, auto_models?, pct, cycle_end}`. For cursor, `pct` / `auto_pct` / `api_pct` are Cursor's spending percentages (what it throttles on). `spent_usd` is the included-dollar estimate and is **not** the bar: that figure can already be 100 % of the sticker while Auto/API still have room. |
 
 ### `modelArgs(run, ctx)` takes a context now
 
@@ -1235,7 +1235,7 @@ claude-window mathematics and **two meters that name no vendor**:
 | Function | Measures | Used by |
 |---|---|---|
 | `balanceGateBlocked(pluginId, {minimum, currency, unavailableBlocks, label})` | the plugin's `balance()` | openrouter, deepseek |
-| `usageGateBlocked(pluginId, {threshold, includedFallback, label})` | the plugin's `usage()` — spend ÷ included amount of the running period | cursor |
+| `usageGateBlocked(pluginId, {threshold, includedFallback, label, pctFrom})` | the plugin's `usage()` — spending % of the running period (cursor: Auto vs API; dollar quotient only when no spending % is present) | cursor |
 | `claudeGateBlocked(quota, model, {five, seven, fable})` | the claude windows, each against its own threshold | claude |
 | `providerRemaining(pluginId, currency)` | one cached balance reading (2 min TTL) | the two above |
 
