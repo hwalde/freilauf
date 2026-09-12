@@ -32,6 +32,11 @@ a day on which nothing was released.
   included total usage" — that 9 % is `totalPercentUsed`. The named-API line
   already matched `apiPercentUsed` (64 %). Auto now uses the total figure,
   the one the CLI actually prints.
+- **Those two Cursor sentences are the source of truth.** The payload
+  already carries `autoModelSelectedDisplayMessage` and
+  `namedModelSelectedDisplayMessage`. The bars now read the percentage out
+  of that text (and print the sentence next to the bar). Guessing which
+  numeric field matches the UI is how the number drifted three times.
 
 ## 2026-09-11
 
