@@ -1389,15 +1389,17 @@ Harness plugins may implement `usage()`; `server/usage.mjs` aggregates and
 caches the results for the overview panel and `GET /api/usage`. Claude asks the
 account (see below), cursor asks the Cursor API with the CLI's own token
 (`~/.config/cursor/auth.json`): `GetCurrentPeriodUsage` reports two meters,
-and they are not the same. **Spending %** (`autoPercentUsed` /
-`apiPercentUsed` / `totalPercentUsed`) is what Cursor throttles on — Auto vs
-named API, two buckets of different size. **Dollars** (`includedSpend` /
-`limit`, plus `bonusSpend`) are a retail-value estimate: they can already
-read 100 % of the $20 Pro sticker while calls still go through. The bar, the
-rail and the budget gate use the spending percentages (the gate asks which
-bucket the run's model belongs to, the same way a claude gate asks which
-week). Dollars stay in the tooltip. `totalSpend` still includes `bonusSpend`
-and is never the numerator of the bar.
+and they are not the same. **Spending %** is what Cursor throttles on.
+The Auto-selected UI shows `totalPercentUsed` ("You've used n% of your
+included total usage"), not `autoPercentUsed` — those two disagreed by a
+factor of three on this installation (3 % vs 9 %). Named models show
+`apiPercentUsed`. **Dollars** (`includedSpend` / `limit`, plus `bonusSpend`)
+are a retail-value estimate: they can already read 100 % of the $20 Pro
+sticker while calls still go through. The bar, the rail and the budget gate
+use the spending percentages (the gate asks which bucket the run's model
+belongs to, the same way a claude gate asks which week). Dollars stay in
+the tooltip. `totalSpend` still includes `bonusSpend` and is never the
+numerator of the bar.
 Cursor documents the included amount nowhere and its public APIs are admin-only,
 so this internal dashboard endpoint is the only source; it has no contract. When
 it stays silent the configurable `cursor_included_usd` setting (default 20)
@@ -1624,11 +1626,12 @@ whichever gate a claude budget was blamed for. Both are fixed by one rule:
 - **The cursor gate** measures Cursor's spending % of the running period —
   Auto vs named API, from `GetCurrentPeriodUsage`, the same numbers the usage
   panel shows — against `cursor_gate_pct`. A run on Composer/auto is gated on
-  the Auto bucket; a run on claude (or any model not in `autoBucketModels`)
-  on the API bucket. The included **dollar** figure is only the fallback when
-  those percentages are missing, and the configured `cursor_included_usd`
-  amount only when the endpoint stays silent. No token, no answer, no
-  percentage: all three mean no signal, and the gate stays open.
+  **total** usage (what Cursor prints when Auto is selected, `totalPercentUsed`,
+  not the `autoPercentUsed` field); a run on claude (or any model not in
+  `autoBucketModels`) on the API bucket. The included **dollar** figure is
+  only the fallback when those percentages are missing, and the configured
+  `cursor_included_usd` amount only when the endpoint stays silent. No token,
+  no answer, no percentage: all three mean no signal, and the gate stays open.
 - **A deferred run can be started anyway.** The gate is a rule that must not
   overrule a deliberate decision (same principle as `repos.max_parallel`), so
   the detail page and the overview row carry a "Start anyway" button

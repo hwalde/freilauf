@@ -1091,9 +1091,9 @@ export async function usagePanel() {
         ${scoped}</div>`
     }
     if (d.kind === 'cursor') {
-      // Spending % is the meter Cursor throttles on (Auto vs named API). The
-      // dollar line is the detail in the tooltip — includedSpend/limit can
-      // already read 100 % while those buckets still have room.
+      // Spending % is the meter Cursor throttles on. Auto is totalPercentUsed
+      // (what Cursor prints for Auto: "included total usage"), not
+      // autoPercentUsed. API is apiPercentUsed. Dollars stay in the tooltip.
       const money = d.spent_usd != null
         ? t(d.included_estimated ? 'usage.spent_est'
           : (d.bonus_usd > 0 ? 'usage.spent_bonus' : 'usage.spent'),
