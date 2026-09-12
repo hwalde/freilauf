@@ -1157,10 +1157,10 @@ export function deleteAgent(id) {
 
 /**
  * How a single run enters the world. 'in' is only the convenient form of 'at'
- * ("in 20 minutes") and is resolved right here — the DB knows two waiting
- * kinds, not three.
+ * ("in 20 minutes") and is resolved right here — the DB knows three waiting
+ * kinds, not four.
  */
-export const START_MODES = ['now', 'at', 'in', 'idle']
+export const START_MODES = ['now', 'at', 'in', 'idle', 'manual']
 
 /**
  * Title and start time — the two things a single run has and an AGENT does not:
@@ -1184,6 +1184,7 @@ export function runStartTimeFields(v = {}) {
     ['at', t('start.mode_at')],
     ['in', t('start.mode_in')],
     ['idle', t('start.mode_idle')],
+    ['manual', t('start.mode_manual')],
   ]
   // `data-start-switch` instead of an id: the Quick-Run dialog sits in the layout
   // of EVERY page, so this block exists twice on the single-run form — and two
@@ -1202,6 +1203,9 @@ export function runStartTimeFields(v = {}) {
     </div>
     <div class="st" data-mode="idle">
       <p class="dim">${e(t('start.idle_hint'))}</p>
+    </div>
+    <div class="st" data-mode="manual">
+      <p class="dim">${e(t('start.manual_hint'))}</p>
     </div>
   </fieldset>`
 }
@@ -1239,6 +1243,9 @@ export function runStartFromForm(b, problems = [], nowMs = Date.now()) {
     return { title, startMode: 'at', startAt: toDbUtc(nowMs + min * 60_000) }
   }
   if (mode === 'idle') return { title, startMode: 'idle', startAt: null }
+  // Manual: the run waits for the operator, never for a clock — "Start now" on
+  // its page is the only way it goes.
+  if (mode === 'manual') return { title, startMode: 'manual', startAt: null }
   return { title, startMode: 'now', startAt: null }
 }
 

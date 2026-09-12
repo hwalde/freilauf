@@ -414,8 +414,10 @@ export async function startRun(def, {
   if (!chosen) applyGeneratedTitle(runId, def.prompt).catch(() => {})
 
   // A planned start: the run exists and is visible in the overview, it just
-  // does not run yet. pickUpScheduled() below takes it from here.
-  if (startMode === 'at' || startMode === 'idle') {
+  // does not run yet. 'manual' is a planned start that waits for nobody but
+  // the operator — pickUpScheduled() knows only 'at' and 'idle' and skips it,
+  // so "Start now" on the run's page is the only way it goes.
+  if (startMode === 'at' || startMode === 'idle' || startMode === 'manual') {
     db.prepare(`UPDATE runs SET status='scheduled', start_mode=?, start_at=? WHERE id=?`)
       .run(startMode, startMode === 'at' ? startAt : null, runId)
     addEvent(runId, 'scheduled', { start_mode: startMode, start_at: startAt ?? null })
@@ -464,6 +466,10 @@ export async function startForAgent(agent, promptExtra = null) {
  *            starts per repo and pass, because after the first one the repo is
  *            not free any more — including the 'at' runs that start in the same
  *            pass, which is why they mark the repo as busy too.
+ *
+ * 'manual' is deliberately NOT picked up here: a run started by hand stays
+ * waiting until the operator starts it (startScheduledNow, the "Start now"
+ * button), whatever else happens.
  *
  * Returns the ids that were started.
  */

@@ -1396,6 +1396,7 @@ function plannedCell(run) {
 /** What a waiting run is waiting for, in one line. */
 function wartetAuf(run) {
   if (run.status === 'deferred') return e(t('start.waits_budget'))
+  if (run.start_mode === 'manual') return e(t('start.waits_manual'))
   if (run.start_mode === 'idle') return e(t('start.until_free'))
   const ms = parseDbUtc(run.start_at)
   return Number.isFinite(ms) ? e(t('start.waits_until', { time: fmtDateTime(ms) })) : e(t('start.waits'))
