@@ -390,10 +390,12 @@ weitere Coding-Agenten, Provider oder Benachrichtiger, Übersetzungen,
 Doku-Korrekturen gleichermaßen. Die Spielregeln und die Checkliste vor dem
 Einreichen stehen in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Entwicklerwissen — Architekturentscheidungen, Eigenheiten der Harnesses und
-eine lange Liste von Fallstricken, die schon jemanden einen Nachmittag
-gekostet haben — steht in [AGENTS.md](AGENTS.md), geschrieben für Menschen
-**und** Coding-Agenten.
+Entwicklerwissen ist für Coding-Agenten und Menschen gleichermaßen
+geschrieben: [AGENTS.md](AGENTS.md) ist der kurze Einstieg (Regeln, Workflow,
+wo ist was), [docs/requirements.md](docs/requirements.md) hält je Bereich die
+Invarianten, die der Code einhalten muss, und [docs/pitfalls.md](docs/pitfalls.md)
+die gemessenen Werkzeug-Fallstricke, die schon jemanden einen Nachmittag
+gekostet haben.
 
 Was sich wann geändert hat, steht in [CHANGELOG.md](CHANGELOG.md). Es gibt
 keine Releases — der Hub wird aus `main` deployt —, deshalb ist er nach Tagen

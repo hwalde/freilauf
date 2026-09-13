@@ -532,8 +532,8 @@ Four rules, and each of them was measured to go wrong otherwise:
    and `prompt_head` is what tells the two apart. Measured on claude, twice, on
    two different runs; nobody has yet asked the question of cursor or hermes.
 
-How the four built-ins wire it, measured 2026-09-05 (versions in AGENTS.md,
-"The agent's attention"): claude `UserPromptSubmit` → `_working prompt`,
+How the four built-ins wire it, measured 2026-09-05 (claude 2.1.261, cursor
+2026.08.25, opencode 1.18.29, hermes 0.21.0): claude `UserPromptSubmit` → `_working prompt`,
 `PreToolUse` → `_working tool`, `Stop` → `_turn_end`, `Notification` with
 matcher `idle_prompt|permission_prompt` → `_waiting` (`claudeSettingsJson()`
 in runner.mjs); cursor `beforeSubmitPrompt` → `_working prompt`, `stop` →
@@ -674,7 +674,7 @@ launch: {
 - **`resume`** is the argv that CONTINUES an interrupted conversation — the form
   `fl-start --resume <id>` launches instead of `args` when a run's tmux
   session was lost and the hub resumes it (`resumeRun()` in `runner.mjs`, see
-  "Surviving restarts" in `AGENTS.md`). Same rules as `args`, one placeholder
+  "Deploying and restarts" in `docs/requirements.md`). Same rules as `args`, one placeholder
   more: `{resume_id}` is what `resumeId(run)` answered (the run id when the
   plugin declares none), and `{prompt}` is the continuation text — the next
   turn, not the task. A plugin without `resume` is not resumed: such a run is
@@ -1204,7 +1204,7 @@ gate: {
   window does not govern starts.
 - **`run` is `{harness, model, provider}`.** It travels because claude's answer
   depends on the MODEL: a Fable week at 96 % says nothing about a run on Sonnet
-  (see "Which 7-day window binds" in [AGENTS.md](../AGENTS.md)).
+  (see "Quota and gates" in [docs/requirements.md](requirements.md)).
 - **A gate that throws does not block.** `askGate()` catches, warns with the
   plugin id, and answers `null`. A broken plugin is a reason to say so in the
   log, never to stop the hub starting runs.
@@ -1702,7 +1702,7 @@ Three page-level rules worth knowing:
    done, `_pane_died` / `_exit` already cover it. If the CLI stays up instead
    (cursor), the harness needs `turnEndsRun` plus a channel that reports the turn
    end — a `hookFiles` entry, and ideally a second, hook-free source; see
-   "cursor: when a run is over" in [AGENTS.md](../AGENTS.md).
+   "Watcher and incidents" in [docs/requirements.md](requirements.md).
 7. **Wire the agent's attention** (see "Attention: working or waiting for
    input"): whatever the CLI offers — a hook file in the workspace, a settings
    flag, a plugin of its own, a global config — calls `fl-report _working` when

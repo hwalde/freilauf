@@ -186,8 +186,7 @@ const EXCEPTIONS = [
  * shapes in which this repository writes its own errno vocabulary down. All
  * three were adversarial cases before they were exceptions:
  *
- *   `EROFS` in backticks   SANDBOX.md lists the whole family in one prose line,
- *                          and AGENTS.md quotes it again.
+ *   `EROFS` in backticks   SANDBOX.md lists the whole family in one prose line.
  *   a JSON key line        lang/*.json carries `sandbox.proxy.denied`, which IS
  *                          the 403 body — an agent editing the translations
  *                          prints the very sentence the pattern hunts for.

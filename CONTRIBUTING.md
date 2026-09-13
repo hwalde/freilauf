@@ -81,11 +81,15 @@ whatever the operator happens to have installed and stops being reproducible.
 
 - One concern per PR. A plugin file plus its three i18n keys is one concern; a
   plugin file plus a refactor of the scheduler is two.
-- Say **why**, not just what. `AGENTS.md` is written that way on purpose — most
-  of the surprising code in this project is surprising because something else
-  was worse, and the reason is what keeps it from being "cleaned up" later.
-- If you found a trap, add it to the **Pitfalls** section of `AGENTS.md`. That
-  list is the most valuable file in the repository.
+- Say **why**, not just what — in the code comment next to the surprising
+  line. Most of the surprising code in this project is surprising because
+  something else was worse, and the reason is what keeps it from being
+  "cleaned up" later. The code is the source of truth; the documents hold only
+  what it cannot say.
+- If your change adds, changes or drops an invariant of an area, update its
+  section in `docs/requirements.md`. If you measured a trap in tmux, git,
+  docker or an agent CLI, add one line to `docs/pitfalls.md` — that list is
+  the most valuable file in the repository.
 - Screenshots for UI changes; the exact command and its output for anything
   operational.
 

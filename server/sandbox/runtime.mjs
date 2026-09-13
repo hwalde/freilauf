@@ -1161,8 +1161,8 @@ export async function runtimeInfo(runtimeId = null, { force = false } = {}) {
   // The release hangs on the PROMISE and not on the end of the body. With no
   // runtime at all this function has barely an await, so a reset written after
   // the assignment would run BEFORE it — and every later caller would be handed
-  // one stale promise for the life of the process. AGENTS.md has the entry;
-  // this is the same handful of lines.
+  // one stale promise for the life of the process (docs/requirements.md,
+  // "Quota and gates" has the entry; this is the same handful of lines).
   // Identity, not existence: with a forced probe running alongside an ordinary
   // one, whoever finishes first must clear only ITS OWN entry.
   const release = () => { if (infoFlight.get(key) === task) infoFlight.delete(key) }
@@ -1725,7 +1725,7 @@ export async function listOwned(hubId, { runtime = 'docker' } = {}) {
 /** The base everything else is `FROM`. Its tag is the distribution it pins. */
 const BASE_IMAGE = { name: 'base', dockerfile: 'sandbox/images/base.Dockerfile', version: '24.04' }
 
-/** The checkout this module lives in — never the process's cwd (AGENTS.md). */
+/** The checkout this module lives in — never the process's cwd (docs/requirements.md, "Deploying and restarts"). */
 function appDir() {
   return join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 }

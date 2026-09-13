@@ -573,7 +573,7 @@ export function sandboxAgainst(repoId, lock = sandboxLock()) {
  * `server/sandbox/index.mjs` carries a private copy of this under the name
  * `hubSpec()`. That copy should become an import of this function: two readers
  * of one setting is how the two come to disagree, and this file is the one
- * AGENTS.md nominates as the reader of the hub's sandbox settings.
+ * reader of the hub's sandbox settings.
  */
 export function sandboxHubSpec() {
   const spec = {}

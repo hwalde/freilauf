@@ -20,9 +20,10 @@
 //   * master switch `llm_alert_on` (1).
 //
 // State lives in a module-level Map, no table. HTTP, scheduler and watcher are
-// one process (see AGENTS.md on events.mjs), so there is nobody to share it
-// with — and a throttle that survives a restart would be wrong anyway: after a
-// deploy the operator wants to hear whether it is still broken.
+// one process (see docs/requirements.md, "Pages and live channel", on
+// events.mjs), so there is nobody to share it with — and a throttle that
+// survives a restart would be wrong anyway: after a deploy the operator wants
+// to hear whether it is still broken.
 import { getSetting } from '../db.mjs'
 import { notify, detailUrl } from '../notify.mjs'
 import { t } from '../i18n.mjs'

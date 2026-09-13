@@ -20,4 +20,5 @@ Delete anything below that does not apply — this is a checklist, not a form to
 - [ ] New `AGENTS.md`? Then a `CLAUDE.md` next to it containing only `@AGENTS.md`
 - [ ] Nothing machine-specific committed (ports, IPs, hostnames, home paths,
       keys) — `./pruefe-vor-push.sh` is green
-- [ ] A trap you hit is written down in the **Pitfalls** section of `AGENTS.md`
+- [ ] A changed invariant is in `docs/requirements.md`, a measured tool trap in
+      `docs/pitfalls.md`

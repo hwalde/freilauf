@@ -301,8 +301,10 @@ Freilauf 是一位运维者的工作流写成的代码，公开出来是因为�
 翻译、文档修正，一视同仁。基本规则和提交前清单在
 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-开发者知识——架构决策、各 harness 的怪癖，以及一长串已经让某人耗掉一个下午的坑——
-都在 [AGENTS.md](AGENTS.md) 里，同时写给人**和**编码智能体看。
+开发者知识同时写给编码智能体**和**人看：[AGENTS.md](AGENTS.md) 是简短的入口
+（规则、工作流、什么在哪里），[docs/requirements.md](docs/requirements.md) 按领域记录
+代码必须保持的不变量，[docs/pitfalls.md](docs/pitfalls.md) 记录已经让某人耗掉一个
+下午的、实测过的工具陷阱。
 
 什么时候改了什么，都记在 [CHANGELOG.md](CHANGELOG.md) 里。本项目没有发布版本——
 hub 直接从 `main` 部署——所以它按天分组，而不是按版本号。

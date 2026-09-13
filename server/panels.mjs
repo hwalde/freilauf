@@ -474,7 +474,7 @@ function shape(row, stored = null) {
   // timestamps: `panel_values.at` is whole seconds and `endedAt` is
   // milliseconds, so a press and a push inside one second would be ordered by
   // whichever way that comparison happened to round — the `statSync().mtimeMs`
-  // trap in AGENTS.md, one table further out. `setPanelValue()` therefore
+  // trap in docs/pitfalls.md, one table further out. `setPanelValue()` therefore
   // STRIKES these values when it stores a push; the rest of the result stays,
   // because "applied 14:05" is still true and still worth reading.
   const applied = actionResult?.ok ? actionResult.values || null : null

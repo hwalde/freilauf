@@ -398,7 +398,8 @@ async function watchRun(run) {
     // for hermes, and without one `lastAct` falls back to the run's start: every
     // hermes run longer than a quarter of an hour was therefore flagged as idle
     // while it worked. That is the same rule rateLogHit() already
-    // follows — an unmeasured harness is UNKNOWN, never silent (AGENTS.md,
+    // follows — an unmeasured harness is UNKNOWN, never silent
+    // (docs/requirements.md, "Watcher and incidents",
     // "Silence is only an argument where activity is measured").
     const idle = now - lastAct > 15 * 60_000
     // An agent that has SAID it waits for a human (its own hook, reports.mjs
@@ -872,8 +873,9 @@ function retractNoActivity(runId) {
  * 08:49:19)" while the account reported the 5-hour window at 2 % — thirteen
  * hours after the reset time the anomaly itself names, under a run that had
  * been working the whole time. A status cell that says "quota exhausted" about
- * a run drawing happily on its quota is the same spent colour AGENTS.md's
- * `anomaliesSettled()` entry is about, one anomaly further on.
+ * a run drawing happily on its quota is the same spent colour the
+ * `anomaliesSettled()` entry in docs/requirements.md ("Watcher and incidents")
+ * is about, one anomaly further on.
  *
  * The caller asks `quotaKnown()` first, and that is the load-bearing half: a
  * reading that says nothing must leave the statement standing. Announced
@@ -922,8 +924,8 @@ const SANDBOX_BLOCK_HOSTS = Number(env('SANDBOX_BLOCKED_HOSTS') ?? 2) || 2
 
 /**
  * The COARSE stand-in for "the agent has begun its own work", used only where
- * the harness reports no attention state at all (`agent_working`, AGENTS.md
- * "The agent's attention"): how long after a run's start a denial still belongs
+ * the harness reports no attention state at all (`agent_working`,
+ * docs/requirements.md "Attention"): how long after a run's start a denial still belongs
  * to the CLI's boot. All four built-in coding agents wire the hook, so this is
  * the fallback and not the rule.
  *
@@ -985,8 +987,8 @@ const SANDBOX_STARTUP_MS = (() => {
  *
  *                              WHEN that was is not guessed: `agent_working` is
  *                              the run's own record of the moment its CLI
- *                              submitted the prompt (AGENTS.md, "The agent's
- *                              attention" — claude's UserPromptSubmit, cursor's
+ *                              submitted the prompt (docs/requirements.md,
+ *                              "Attention" — claude's UserPromptSubmit, cursor's
  *                              beforeSubmitPrompt, opencode's busy, hermes'
  *                              pre_llm_call). `arbeitAbMs` is that event; the
  *                              30-second window off the run's start is only the
@@ -1136,8 +1138,9 @@ export async function watchSandboxBlocks(jetztMs = Date.now()) {
  *
  * **The activity is the newest record's own timestamp, not the file's mtime**,
  * and that distinction is the whole reason this is a function. The mtime looked
- * like the perfect witness ("it moves only when the agent writes", AGENTS.md),
- * and it is not: claude touches transcripts it is not writing to. Measured
+ * like the perfect witness ("it moves only when the agent writes",
+ * docs/requirements.md, "Attention"), and it is not: claude touches
+ * transcripts it is not writing to. Measured
  * 2026-09-06 across this installation's `~/.claude/projects`, files rewritten
  * in batches of five and seven within one second —
  *

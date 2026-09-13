@@ -160,7 +160,8 @@ freilauf on                            # start the TLS proxy → reachable over 
 
 **Verify from a VPN client, not from the server.** `curl` against the VPN IP
 from the machine itself travels over `lo` and proves nothing about the
-firewall. This is a real trap and it is in `AGENTS.md` under "Pitfalls".
+firewall. This is a real trap and it is in `AGENTS.md` under "Pitfalls that
+hurt on any change".
 
 Troubleshooting, in the order that pays off: `freilauf status` → `freilauf logs` →
 `systemctl --user status freilauf.service`. A hub that will not start is almost
@@ -363,7 +364,8 @@ run, so a CLI the machine shoots at every start is not restarted for ever.
 Where the hub cannot tell — an agent that crashed on its own, a run past that
 cap — the run's page has a **"Resume run"** button next to "Retry run": resume
 continues in the same worktree with the same commits and conversation, retry
-starts the task from scratch. Details: `AGENTS.md`, "Surviving restarts".
+starts the task from scratch. Details: `docs/requirements.md`, "Deploying
+and restarts".
 
 So the rules for the machine are short. Unattended package upgrades are fine
 and need nothing from you — they do not kill user processes. Leave
@@ -465,7 +467,7 @@ The hub starts empty on purpose, and the first thing a browser sees says so:
    deactivating instead.
 3. **Start a single run.** Small, boring task, a repo you do not mind. Watch it
    in the browser terminal. This is the fastest way to learn what the system
-   does — much faster than reading `AGENTS.md`.
+   does — much faster than reading the documentation.
 4. **Then make it an agent**: same form plus a name and a schedule.
  5. **Settings → Notifications** (`/settings/notifications`) — *optional, and
     genuinely so.* One card per notification channel the hub can drive: enabled
@@ -593,11 +595,14 @@ If your task is to change Freilauf rather than just run it:
   you touched `public/hub.js`, `vpn-proxy.mjs` or `bin/freilauf-deploy`. The e2e
   suite is sandboxed — its own port, database, repo and tmux sessions — so it is
   safe to run next to a live hub.
-- **Read `AGENTS.md` before you get creative.** In particular the "Pitfalls"
-  section: every entry there is an hour somebody already lost. tmux targets need
-  a trailing colon, a branch belongs to exactly one worktree, `--no-optional-locks`
-  is a git-level flag, a `<form>` closes an open `<p>`, and a green test only
-  proves the path the test took.
+- **Read `AGENTS.md` before you get creative.** It is short and says what is
+  documented where: the invariants per area in `docs/requirements.md`, the
+  measured tool traps in `docs/pitfalls.md` — every entry there is an hour
+  somebody already lost (tmux targets need a trailing colon, a branch belongs
+  to exactly one worktree, `--no-optional-locks` is a git-level flag, a
+  `<form>` closes an open `<p>`, and a green test only proves the path the
+  test took). The code is the source of truth; the documents hold what it
+  cannot say.
 
 ---
 
@@ -605,7 +610,9 @@ If your task is to change Freilauf rather than just run it:
 
 | Question | File |
 |---|---|
-| Everything, in depth (architecture, decisions, pitfalls) | `AGENTS.md` |
+| The rules, the workflow, what is documented where | `AGENTS.md` |
+| The invariants each area must keep | `docs/requirements.md` |
+| Measured traps in tmux, git, docker and the agent CLIs | `docs/pitfalls.md` |
 | What a run *is*; forms, validation, agent lifecycle | `server/run-def.mjs` |
 | Starting a run, schedules, budget gate | `server/scheduler.mjs`, `server/quota.mjs` |
 | Worktrees, prompt assembly, session launch | `server/runner.mjs`, `bin/fl-start` |

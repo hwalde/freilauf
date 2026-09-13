@@ -367,9 +367,11 @@ coding agents, providers or notifiers, translations, documentation fixes alike.
 The ground rules and the pre-submit checklist are in
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Developer knowledge — architecture decisions, harness quirks, and a long list of
-pitfalls that already cost somebody an afternoon — lives in
-[AGENTS.md](AGENTS.md), written for humans **and** coding agents.
+Developer knowledge is written for coding agents and humans alike:
+[AGENTS.md](AGENTS.md) is the short entry (rules, workflow, where is what),
+[docs/requirements.md](docs/requirements.md) holds the invariants the code
+must keep per area, and [docs/pitfalls.md](docs/pitfalls.md) the measured
+tool traps that already cost somebody an afternoon.
 
 What changed, and when, is in [CHANGELOG.md](CHANGELOG.md). There are no
 releases — the hub is deployed from `main` — so it is grouped by day rather than
