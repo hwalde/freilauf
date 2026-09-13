@@ -91,8 +91,8 @@ incomplete, may be empty). License CC BY 4.0.
 ## Quality assurance: the evaluator
 
 Before anything is reported as done or working, the `evaluator` subagent
-(`.claude/agents/evaluator.md`) checks it: fresh context, no write access,
-judged against observed evidence — test output, the diff, the running page.
+(`.claude/agents/evaluator.md`) checks it: fresh context, it never edits the
+work (Bash only to run the suites), judged against observed evidence — test output, the diff, the running page.
 Reason: the builder never grades its own work, and a second pair of eyes finds
 different mistakes. Hand it the task or acceptance criteria, the changed files
 and the paths to the evidence. `NEEDS_WORK` means work through every finding
@@ -106,11 +106,12 @@ only `PASS` ends the task.
 | What a run is: forms, validation, agents, favorites | `server/run-def.mjs`, `server/favorites.mjs`, `server/run-edit.mjs` | Run definition |
 | Starting runs, schedules, budget gate | `server/scheduler.mjs`, `server/quota.mjs` | Scheduling; Quota and gates |
 | Worktree, prompt, launch, resume | `server/runner.mjs`, `bin/fl-start` | Launch and resume |
-| Reports, follow-ups, attention state | `server/reports.mjs`, `bin/fl-report`, `server/goal.mjs` | Reports and follow-ups; Attention |
+| Reports, follow-ups, attention state | `server/reports.mjs`, `bin/fl-report`, `server/hub-socket.mjs`, `server/goal.mjs` | Reports and follow-ups; Attention |
+| Extra skills, the cleanup agent, model catalogs, extras suggestion | `server/zusaetze.mjs`, `server/cleanup.mjs`, `server/models.mjs`, `server/extras-suggest.mjs` | Run definition |
 | Watching, anomalies, incidents | `server/watcher.mjs`, `server/detect.mjs`, `server/incidents.mjs` | Watcher and incidents |
 | Merging into the base branch | `server/integrate.mjs` | Integration |
 | tmux sessions, retention, memory | `server/sessions.mjs`, `server/terminal.mjs` | Sessions |
-| Pages, sidebar, live channel, transport | `server/pages.mjs`, `server/events.mjs`, `public/hub.js`, `vpn-proxy.mjs` | Pages and live channel |
+| Pages, sidebar, live channel, transport | `server/pages.mjs`, `server/web.mjs`, `server/web-helpers.mjs`, `server/notifications.mjs`, `server/events.mjs`, `public/hub.js`, `vpn-proxy.mjs` | Pages and live channel |
 | Plugins, credentials, discovery, welcome | `server/plugins/`, `server/harnesses/`, `server/providers/`, `server/notifiers/`, `server/welcome.mjs` | Plugins (+ `docs/plugins.md`) |
 | The hub's own LLM calls, titles, alerts | `server/llm/`, `server/title.mjs` | LLM layer |
 | Usage, balances, OpenRouter routing | `server/usage.mjs`, `server/claude-usage.mjs`, `server/balances.mjs`, `server/providers/openrouter-routing.mjs` | Quota and gates |
@@ -140,9 +141,9 @@ only `PASS` ends the task.
 - A branch belongs to exactly one worktree; never `--force` a worktree onto
   the base branch, and never run `merge`/`checkout`/`reset` in the operator's
   checkout (push is the one git command allowed there).
-- Settings keys are computed per save (`SETTINGS_KEYS()` is a function): a
-  module-level constant is evaluated before plugins are registered and drops
-  their fields silently.
+- Settings keys are computed per save (`settingsKeys()` in pages.mjs is a
+  function): a module-level constant is evaluated before plugins are
+  registered and drops their fields silently.
 - `node:sqlite` has no `.transaction()`; use `BEGIN`/`COMMIT` via `db.exec`.
 - A `<form>` closes an open `<p>` and cannot nest in another `<form>`; buttons
   that belong together go in `div.btn-row`, footer forms stand outside the

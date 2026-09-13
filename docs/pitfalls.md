@@ -47,9 +47,6 @@ change are in `AGENTS.md`.
   exit 0 with an all-zero sha; mask a config with a minimal replacement, never
   an empty file. A denylist of config keys is not a boundary: a
   `filter.<n>.clean` driver selected by a tracked `.gitattributes` still runs.
-- `statSync().mtimeMs` is a float and `Date.now()` an integer; a file written
-  in the current millisecond sorts as "newer than now".
-
 ## Docker (29)
 
 - `--tmpfs` options are added to the defaults (`noexec,nodev`), not
@@ -70,9 +67,6 @@ change are in `AGENTS.md`.
 - No image may set `XDG_*_HOME`, `CLAUDE_CONFIG_DIR`, `CURSOR_DATA_DIR` or
   `HERMES_HOME`: XDG outranks `HOME` for opencode and the CLI's state lands
   where the hub does not read.
-- A denied CONNECT socket needs its `error` listener before the DNS lookup or
-  the proxy dies on curl's reset.
-
 ## claude (Claude Code 2.1.x)
 
 - Hook settings are `{ matcher?, hooks: [{ type, command }] }` lists per
@@ -145,6 +139,10 @@ change are in `AGENTS.md`.
 
 ## Browser and Node
 
+- `statSync().mtimeMs` is a float and `Date.now()` an integer; a file written
+  in the current millisecond sorts as "newer than now".
+- A denied CONNECT socket needs its `error` listener before the DNS lookup or
+  the process dies on curl's reset of the refused tunnel.
 - xterm stops propagation on its own element; listeners for real drags must be
   in the capture phase, and tests must drive a real mouse.
 - Under the native Fullscreen API only the fullscreen element's subtree
@@ -163,6 +161,6 @@ change are in `AGENTS.md`.
 ## The log scanner
 
 - Menu text (`Upgrade to Max for higher rate limits`), the hub's own section
-  headings and a test's success lines all look like incidents to a pattern; a
-  line with a quoted argument list is source code, not output. Patterns stay
-  narrow, and work after the hit vetoes escalation.
+  headings, a test's success lines and a source line with a quoted argument
+  list all match an incident pattern when an agent working on this repository
+  scrolls them through its screen.

@@ -917,7 +917,7 @@ async function api(req, res, url) {
       // Handed over RAW: `editRun()` compares them against the values that mean
       // yes and runs the overrides through `validateSandboxOverrides()` — a
       // coercion here would make the string '0' switch a run INTO a container,
-      // which is the entry AGENTS.md carries twice over.
+      // which is the `Number('')` entry AGENTS.md carries.
       sandbox: b.sandbox !== undefined ? b.sandbox : null,
       sandboxOverrides: b.sandbox_overrides !== undefined ? b.sandbox_overrides : null,
     }, problems)

@@ -42,7 +42,7 @@ export function pluginSettingValue(pluginId, field) {
 /**
  * Every settings key declared by any REGISTERED plugin.
  *
- * This is what extends the `SETTINGS_KEYS` allowlist on the settings page: a
+ * This is what extends the `settingsKeys()` allowlist on the settings page: a
  * key that is not in it is silently dropped when the form is saved, so an
  * installed plugin's own thresholds would look configurable and never stick.
  * Both groups, deduplicated, in registration order.

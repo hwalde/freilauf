@@ -162,7 +162,7 @@ const TONES = ['red', 'yellow', 'green']
  * A number, or null — and `''` is null, never 0.
  *
  * `Number('')` is 0 AND finite, which is how an unset field becomes a confident
- * zero. This trap has its own entry in AGENTS.md twice over; a panel is exactly
+ * zero. This trap has its own entry in AGENTS.md; a panel is exactly
  * the place it would be invisible, because "0 open findings" reads like good
  * news rather than like a missing value.
  */

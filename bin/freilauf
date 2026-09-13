@@ -145,7 +145,8 @@ drain() {
         [[ -z "$left" ]] && { echo "Drained: no run is working any more. Safe to reboot or update."; return 0; }
         sleep 10
     done
-    echo "Time is up. Still working (their work is on disk; a reboot resumes them, see docs/requirements.md 'Deploying and restarts'):"
+    echo "Time is up. Still working (their work is on disk; a reboot resumes them," \
+         "see docs/requirements.md 'Launch and resume'):"
     while IFS= read -r title; do [[ -n "$title" ]] && echo "  $title"; done <<<"$left"
     return 1
 }

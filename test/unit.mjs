@@ -11150,7 +11150,8 @@ process.stdout.write(JSON.stringify(out))
       // and RESUME_MAX is 3, so three watcher passes against a daemon that is
       // merely still starting after a reboot would end the run with
       // `resume_refused` — for an infrastructure hiccup, not for a CLI that
-      // cannot start. docs/requirements.md, "Launch and resume": "could not try" is not "tried and died".
+      // cannot start. docs/requirements.md, "Launch and resume": "could not
+      // try" is not "tried and died".
       const { prepareSandbox } = await import('../server/sandbox/index.mjs')
       const fehlschlag = async (id, repoPath) => {
         try { await prepareSandbox({ id, sandbox: 1 }, { name: 'x', path: repoPath }); return null }

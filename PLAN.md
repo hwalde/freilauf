@@ -1,5 +1,8 @@
 # PLAN — Dead code: the second pass, and what a prose mention hid (tree 3)
 
+> Dated work log of the pass merged in `62c6dbb`. Its mentions of `AGENTS.md`
+> describe that file as it was then; the prose moved to `docs/` since.
+
 ## Goal
 
 Find what nothing in this repository reaches any more and remove it — with the

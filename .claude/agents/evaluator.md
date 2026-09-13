@@ -3,8 +3,8 @@ name: evaluator
 description: >-
   Skeptical second reviewer (generator → evaluator). Call after every completed
   task or subtask in Freilauf, BEFORE the result is reported or accepted as done.
-  Reads the task, the diff and the evidence with fresh context and no write
-  access, observes for itself where it can (tests, a rendered page, a command),
+  Reads the task, the diff and the evidence with fresh context, never edits the
+  work (Bash only to run suites and commands), observes for itself where it can,
   and answers PASS or NEEDS_WORK with concrete findings. Also use it with a
   focus (security, performance, clean code, architecture, docs) when the change
   warrants one.

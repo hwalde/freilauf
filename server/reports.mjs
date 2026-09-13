@@ -358,8 +358,8 @@ const PANE_INFRA_EVENTS = Object.values(PANE_INFRA).map(v => v.event)
 
 /**
  * Ask the daemon about this run's container. Everything sandbox is imported
- * LAZILY (AGENTS.md: an installation without a container runtime never loads a
- * line of it), and the two failure shapes are kept apart on purpose:
+ * LAZILY (SANDBOX.md: an installation without a container runtime never loads
+ * a line of it), and the two failure shapes are kept apart on purpose:
  *
  *   no container NAME    → `null`, which `panePostMortem()` reads as "nothing to
  *                          ask", i.e. the ordinary agent case

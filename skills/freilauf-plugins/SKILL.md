@@ -123,7 +123,7 @@ before you argue with the rule.
   `lang/de.json`, `lang/zh.json`. A unit test enforces identical key sets, and
   a plugin may not name a string that is not there. → the `Adding a new …`
   checklists
-- **`SETTINGS_KEYS` is a function, not a constant** (see AGENTS.md, "Pitfalls that hurt on any change"):
+- **`settingsKeys()` in `server/pages.mjs` is a function, not a constant** (see AGENTS.md, "Pitfalls that hurt on any change"):
   a plugin's settings are only in the allowlist because it is evaluated per
   save. If you add a settings surface anywhere, do not freeze that list at
   module level — a field that looks like it saved and did not is the worst

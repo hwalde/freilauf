@@ -9,7 +9,7 @@
 // runtime must not be offered a setting that does nothing. Every block below
 // asks first, and where the answer is "no runtime" it says so and names what to
 // install — a switch that looks configurable and is not is the failure
-// AGENTS.md has an entry about (`SETTINGS_KEYS`), one layer up.
+// AGENTS.md has an entry about (`settingsKeys()`), one layer up.
 //
 // The modules this file drives — `runtime.mjs`, `profiles.mjs`, `index.mjs` —
 // are imported LAZILY, inside the function that uses them. Two reasons, and the

@@ -5,27 +5,18 @@ must not break; where the reason is not obvious it follows in the same
 sentence. The code is the source of truth for *how* any of it is done — a line
 here that the code no longer satisfies is removed or corrected, never kept.
 Contracts for third parties live elsewhere: `docs/plugins.md`,
-`docs/panels.md`, `server/flows/AGENTS.md`, `SANDBOX.md`.
+`docs/panels.md`, `server/flows/AGENTS.md`, `SANDBOX.md`. Which modules
+belong to which section is the "Where is what" table in `AGENTS.md`.
 
-| Section | Modules |
-|---|---|
-| [Deploying and restarts](#deploying-and-restarts) | `bin/freilauf-deploy`, `bin/freilauf`, `deploy/`, `setup/`, `bin/fl-tmux-server`, `server/env.mjs`, `server/paths.mjs`, `bin/fl-paths.sh` |
-| [Launch and resume](#launch-and-resume) | `server/runner.mjs`, `bin/fl-start`, `server/goal.mjs` |
-| [Run definition](#run-definition) | `server/run-def.mjs`, `server/favorites.mjs`, `server/run-edit.mjs`, `server/title.mjs`, `server/db.mjs` |
-| [Scheduling](#scheduling) | `server/scheduler.mjs`, `server/util.mjs` |
-| [Quota and gates](#quota-and-gates) | `server/quota.mjs`, `server/claude-usage.mjs`, `server/usage.mjs`, `server/balances.mjs`, `server/providers/openrouter-routing.mjs` |
-| [Plugins](#plugins) | `server/plugins/`, `server/harnesses/`, `server/providers/`, `server/notifiers/`, `server/notify.mjs`, `server/welcome.mjs`, `server/coding-agents.mjs` |
-| [LLM layer](#llm-layer) | `server/llm/`, `server/title.mjs` |
-| [Pages and live channel](#pages-and-live-channel) | `server/pages.mjs`, `server/events.mjs`, `public/hub.js`, `vpn-proxy.mjs`, `server/web.mjs` |
-| [Panels](#panels) | `server/panels.mjs`, `server/panel-action.mjs`, `bin/fl-panel` |
-| [Integration](#integration) | `server/integrate.mjs`, `server/reports.mjs` |
-| [Reports and follow-ups](#reports-and-follow-ups) | `server/reports.mjs`, `bin/fl-report`, `server/run-state.mjs` |
-| [Attention](#attention) | `server/reports.mjs`, `server/run-state.mjs`, `server/watcher.mjs`, `server/terminal.mjs` |
-| [Watcher and incidents](#watcher-and-incidents) | `server/watcher.mjs`, `server/detect.mjs`, `server/incidents.mjs`, `server/opencode-store.mjs`, `server/cursor-transcript.mjs`, `server/harnesses/patterns.mjs` |
-| [Sessions](#sessions) | `server/sessions.mjs`, `server/terminal.mjs`, `bin/fl-attach`, `bin/fl-kill`, `bin/fl-harness-tags.sh` |
-| [Repos and archive](#repos-and-archive) | `server/web.mjs`, `server/pages.mjs`, `server/read-api.mjs`, `bin/fl-api` |
-| [Skills](#skills) | `skills/`, `server/skills.mjs` |
-| [Tests](#tests) | `test/` |
+Sections: [Deploying and restarts](#deploying-and-restarts) ·
+[Launch and resume](#launch-and-resume) · [Run definition](#run-definition) ·
+[Scheduling](#scheduling) · [Quota and gates](#quota-and-gates) ·
+[Plugins](#plugins) · [LLM layer](#llm-layer) ·
+[Pages and live channel](#pages-and-live-channel) · [Panels](#panels) ·
+[Integration](#integration) · [Reports and follow-ups](#reports-and-follow-ups) ·
+[Attention](#attention) · [Watcher and incidents](#watcher-and-incidents) ·
+[Sessions](#sessions) · [Repos and archive](#repos-and-archive) ·
+[Skills](#skills) · [Tests](#tests)
 
 ## Deploying and restarts
 
@@ -50,24 +41,8 @@ Contracts for third parties live elsewhere: `docs/plugins.md`,
   `exit-empty off`); no deploy restarts it; `KillMode=process` stays as the
   fence while a server spawned elsewhere is being adopted; `enable-linger` is
   part of setup.
-- A session found LOST (has-session says gone, run still running) is
-  resumed, not aborted; every deliberate end goes through
-  `reconcileClosedSession()` and still aborts. A run in the finish gate is not
-  resumed (its agent vanishing is `agent_gone`).
-- A pane killed by SIGHUP, SIGKILL or SIGTERM is resumed too (`signalDeath()`
-  reads both the signal field and exit `128+n`); SIGINT is a human and is not,
-  SIGSEGV/SIGABRT/SIGQUIT are the agent crashing and are not.
-- Resume caps: `RESUME_MAX` for lost sessions, `PANE_RESUME_MAX` as one budget
-  for both dead-pane shapes; a deliberate resume (button, sandbox
-  reconfiguration) spends no budget; a launch that could not be tried leaves
-  `resume_pending` standing for the next pass instead of counting as died.
-- One announcement per pass for all resumes, not one per run.
-- A resume reuses the worktree, keeps `prompt.md`, `base_sha` and the quota
-  marks, shifts `started_at` by the gap, and launches the CLI in its resume
-  form with a continuation prompt that names commits since `base_sha`,
-  uncommitted files and the last progress reports. `resumeId()` answers `null`
-  whenever the plugin cannot name THIS run's own conversation — a resume never
-  continues a guessed session; fresh start wins.
+- What a restart or reboot does to a run's session and process is answered
+  by resuming, never by aborting — see "Launch and resume".
 - Missed schedule slots are caught up once per agent at the newest missed slot,
   bounded by `schedule_catchup_hours`; watcher and scheduler run a first pass
   two seconds after listen.
@@ -109,8 +84,25 @@ Contracts for third parties live elsewhere: `docs/plugins.md`,
 - `runner.mjs` is the only launcher and always passes a plugin context to
   `modelArgs()`; both env-variable pairs (`FL_*` and `CC_*`) are exported into
   the session.
-- The runs' token counts sum only `output_tokens` as output; the three
-  prompt-side fields are input; totals cover the whole transcript.
+- A session found LOST (has-session says gone, run still running) is
+  resumed, not aborted; every deliberate end goes through
+  `reconcileClosedSession()` and still aborts. A run in the finish gate is not
+  resumed (its agent vanishing is `agent_gone`).
+- A pane killed by SIGHUP, SIGKILL or SIGTERM is resumed too (`signalDeath()`
+  reads both the signal field and exit `128+n`); SIGINT is a human and is not,
+  SIGSEGV/SIGABRT/SIGQUIT are the agent crashing and are not.
+- Resume caps: `RESUME_MAX` for lost sessions, `PANE_RESUME_MAX` as one budget
+  for both dead-pane shapes; a deliberate resume (button, sandbox
+  reconfiguration) spends no budget; a launch that could not be tried leaves
+  `resume_pending` standing for the next pass instead of counting as died
+  ("could not try" is not "tried and died").
+- One announcement per pass for all resumes, not one per run.
+- A resume reuses the worktree, keeps `prompt.md`, `base_sha` and the quota
+  marks, shifts `started_at` by the gap, and launches the CLI in its resume
+  form with a continuation prompt that names commits since `base_sha`,
+  uncommitted files and the last progress reports. `resumeId()` answers `null`
+  whenever the plugin cannot name THIS run's own conversation — a resume never
+  continues a guessed session; fresh start wins.
 
 ## Run definition
 
@@ -244,8 +236,12 @@ Contracts for third parties live elsewhere: `docs/plugins.md`,
   read, in discovery rows.
 - Every gate, `llm` source, `launch` spec, `goal`, `attention`, `skills`,
   `hookFiles`, `usage()`, `balance()`, `resumeId()`/`resumeCommand()` and
-  `logPatterns` are plugin declarations; nothing about a vendor is typed into
-  `pages.mjs`, `scheduler.mjs` or `watcher.mjs`.
+  `logPatterns` are plugin declarations: the Budget gates fieldset, the model
+  pickers, the usage panel and the launch line are generated from them, and no
+  vendor URL, credential name, threshold or model list is typed into
+  `pages.mjs`, `scheduler.mjs` or `watcher.mjs`. (`LEGACY_DEFAULT_GATE` and the
+  `harness === 'claude'` branches for the claude subscription windows are the
+  named exceptions.)
 - `notify()` dispatches to every enabled notifier, catches everything, never
   throws; nothing configured is a complete installation with no banner and no
   error. The message shape is normalized; the flow step is `notify` with
@@ -279,6 +275,10 @@ Contracts for third parties live elsewhere: `docs/plugins.md`,
 
 ## Pages and live channel
 
+- The hub has no authentication and binds `127.0.0.1` only; `vpn-proxy.mjs`
+  binds exclusively to the VPN address (fail-closed: its unit is not enabled
+  at boot), and its host allowlist plus origin check are the rebinding/CSRF
+  fence. Nothing may open a second listener or relax either check.
 - `events.mjs` imports nothing; the channel hangs on `addEvent()` in
   `db.mjs`, and every status write adds an event; title generation, archive
   and unarchive call `announceRun()` explicitly. An event carries a signal,
@@ -310,7 +310,8 @@ Contracts for third parties live elsewhere: `docs/plugins.md`,
 - Forms are `form.form-grid`; every grid selector carries `:not([hidden])`.
   The overview has seven titled columns plus the pick column
   (`OVERVIEW_COLS`).
-- `SETTINGS_KEYS()` is a function evaluated per save.
+- `settingsKeys()` (pages.mjs) is a function evaluated per save, so plugin
+  settings registered after module load are in the allowlist.
 - Terminal: write access only with `?ro=0`, set from `data-live` = session
   standing and pane alive, never from the status; OSC 52 from tmux is written
   to the clipboard (never answered for `?`, decoded via `TextDecoder`); while
@@ -474,6 +475,8 @@ Contracts for third parties live elsewhere: `docs/plugins.md`,
 - The `_pane_died` format is `|`-separated, `exitStatus()` compares before
   converting, and a missing exit code is never read as 0.
 - `pushOperatorBase()` runs for inactive repos too.
+- A run's token counts sum only `output_tokens` as output; the three
+  prompt-side fields are input; totals cover the whole transcript.
 
 ## Sessions
 
@@ -507,8 +510,10 @@ Contracts for third parties live elsewhere: `docs/plugins.md`,
   commission (`archivable()`, one rule for row, bulk box, page and route);
   both routes archive through `archiveRecord()`, a refusal per run never holds
   up the rest; archiving closes the session by the `archive_session_*`
-  settings on two paths; nothing else filters on `archived_at`, except the
-  sidebar's overview-linked count.
+  settings on two paths; the watcher, the flows and the incidents keep their
+  view of a run whether it is archived or not — only displays that promise
+  rows (the sidebar's overview-linked count, the read API's `archived` filter)
+  and the retention and title-retry passes read `archived_at`.
 - `repos.active=0` removes the repo from every dropdown and starts nothing
   (manual path included) while history stays reachable through an explicit
   `?repo=`.

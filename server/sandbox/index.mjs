@@ -74,8 +74,9 @@ async function need(name) {
 }
 
 /**
- * "Could not try" is not "tried and died" (docs/requirements.md, "Deploying and restarts"), and in a sandbox that
- * distinction has a fuse behind it (§11.3): after a server reboot the first
+ * "Could not try" is not "tried and died" (docs/requirements.md, "Launch and
+ * resume"), and in a sandbox that distinction has a fuse behind it (§11.3):
+ * after a server reboot the first
  * watcher pass runs at once, and on a rootless installation the container
  * daemon's user unit may still be coming up. Three passes against a daemon that
  * is merely slow would burn the whole `RESUME_MAX` cap and end the run with
