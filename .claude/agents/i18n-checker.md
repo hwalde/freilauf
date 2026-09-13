@@ -6,7 +6,7 @@ tools: Read, Grep, Glob, Bash
 
 You audit the Freilauf UI for internationalization completeness.
 
-The rules (see AGENTS.md, "Multilingual UI"):
+The rules (see AGENTS.md, "Language, and the multilingual UI"):
 
 - Every user-visible string in the web UI must go through `t('key')`
   (`server/i18n.mjs`) — pages in `server/pages.mjs`, hints in `server/web.mjs`

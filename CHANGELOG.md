@@ -16,6 +16,32 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-13
+
+### Added
+
+- **An `evaluator` subagent** (`.claude/agents/evaluator.md`): a skeptical
+  second reviewer with fresh context and no write access that judges a change
+  against test output and the diff before it counts as done. `AGENTS.md` makes
+  running it part of the standard workflow.
+- **`docs/requirements.md` and `docs/pitfalls.md`.** The first lists, per area
+  of the hub, the invariants the code must keep satisfying, with a table of
+  contents that maps modules to sections; the second lists the measured traps
+  in tmux, git, docker and the four agent CLIs, one line each.
+
+### Changed
+
+- **`AGENTS.md` is a short entry now** (about 150 lines instead of 5000): the
+  language rules, what is documented and what is not — the code is the single
+  source of truth, documents hold only requirements, third-party contracts and
+  measured tool traps — the standard workflow (read the matching requirements
+  section, work, test, evaluator, update the documents), a "where is what"
+  table and the handful of pitfalls that bite on any change. Everything that
+  described how a function works, or the history of a bug, is gone; the code
+  comments and `git log` carry it. Code comments, `SETUP_WITH_AGENT.md`,
+  `CONTRIBUTING.md`, the PR template, the plugin document and the three
+  READMEs point at the new files.
+
 ## 2026-09-12
 
 ### Added

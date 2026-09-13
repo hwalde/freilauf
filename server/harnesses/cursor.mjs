@@ -289,7 +289,7 @@ const plugin = {
    *
    * `.claude/skills` is marked `thirdParty` in that list and is gated on
    * `thirdPartyExtensibilityEnabled`, which defaults to on and has no local
-   * switch — the same mechanism AGENTS.md already records for `CLAUDE.md` and
+   * switch — the same mechanism that also loads `CLAUDE.md` and
    * `.claude/agents`. Its own directory comes first so a machine with only
    * cursor on it gets the native one.
    */

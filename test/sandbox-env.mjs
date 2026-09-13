@@ -4,7 +4,8 @@
 // (test/browser.mjs) needed exactly the same thing: a hub of its own, with its
 // own database, its own runs/worktrees directories, its own test repo and a
 // fl-start stub instead of a real coding agent. Copying those ~150 lines would
-// have been the same drift AGENTS.md describes for run-def.mjs — two sandboxes
+// have been the same drift docs/requirements.md ("Run definition") describes
+// for run-def.mjs — two sandboxes
 // that slowly stop being the same sandbox.
 //
 // Everything is per instance: every call to newSandbox() makes its own

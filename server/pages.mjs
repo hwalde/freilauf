@@ -961,7 +961,7 @@ export async function layout(req, title, active, content, selectedRepo = null, w
   // Only ACTIVE repos are offered. This one query feeds both the header
   // switcher and the Quick-Run dialog (which takes the list as a parameter), so
   // deactivating a repo removes it from both at once — see "Deactivating and
-  // deleting a repo" in AGENTS.md.
+  // deleting a repo" in docs/requirements.md, "Repos and archive".
   const repos = db.prepare('SELECT id,name FROM repos WHERE active=1 ORDER BY name').all()
   // Which repo the HEADER stands on — three answers in this order, and the
   // order is the whole point (see the switcher on a page that belongs to ONE
@@ -2836,8 +2836,9 @@ export async function favoriteEdit(req, res, url) {
       // the one place that opts in. The merge-resolver setup and the tmux
       // cleanup embed the same `runSetupFields()` and store their answer as
       // individual `settings` rows — a sandbox field rendered there would look
-      // saved and would not be, which is the failure AGENTS.md has the rule
-      // about. Here it is a real column (`favorites.sandbox`), because the
+      // saved and would not be, which is the failure docs/requirements.md
+      // ("Run definition") has the rule about. Here it is a real column
+      // (`favorites.sandbox`), because the
       // boundary a run works in is setup and not task.
       ''}${runSetupFields(werte, { sandbox: 'tristate' })}
     ${skillFelder(werte.skills)}

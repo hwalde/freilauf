@@ -91,7 +91,7 @@ function readText(name) {
  *
  * Two `docker run`s of one suite can overlap (a scheduler start and a manual
  * one), and a lost update would be a container the cleanup never hears about —
- * the leak this project already has an entry in AGENTS.md for, one layer out.
+ * the leak docs/requirements.md ("Tests") already has an entry for, one layer out.
  * An exclusive create is the whole lock; a stale one older than ten seconds is
  * broken, because a shim that died mid-write must not wedge the suite.
  */

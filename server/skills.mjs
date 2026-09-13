@@ -378,8 +378,9 @@ function copySkill(source, target) {
  * skill that hardcoded `~/agents/runs` would be wrong on half the machines.
  *
  * `app_dir` is the hub's own code, and it is resolved from THIS MODULE — the
- * same idiom as `skillsSourceDir()` above, and for the reason AGENTS.md states
- * about the deploy: everything inside the repo is found from `import.meta.url`
+ * same idiom as `skillsSourceDir()` above, and for the reason
+ * docs/requirements.md, "Deploying and restarts" states about the deploy:
+ * everything inside the repo is found from `import.meta.url`
  * and never from the process's working directory. It is not `deployDir()`
  * either: a hub started by hand out of a checkout is still the hub whose
  * `docs/` a skill wants to read. It is what lets the plugin skill find

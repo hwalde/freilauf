@@ -74,8 +74,9 @@ async function need(name) {
 }
 
 /**
- * "Could not try" is not "tried and died" (AGENTS.md), and in a sandbox that
- * distinction has a fuse behind it (§11.3): after a server reboot the first
+ * "Could not try" is not "tried and died" (docs/requirements.md, "Launch and
+ * resume"), and in a sandbox that distinction has a fuse behind it (§11.3):
+ * after a server reboot the first
  * watcher pass runs at once, and on a rootless installation the container
  * daemon's user unit may still be coming up. Three passes against a daemon that
  * is merely slow would burn the whole `RESUME_MAX` cap and end the run with
@@ -415,8 +416,8 @@ function hubLock() { return sandboxLock() }
  * baseline every form judges a locked override against — resolved it without
  * them, so on a podman hub with `runtime` locked the form accepted a switch back
  * to docker (against an empty baseline it narrows nothing) and the launch then
- * refused it. There is one reader now, and it is the one AGENTS.md nominates:
- * every place below calls `sandboxHubSpec()` from run-def.mjs.
+ * refused it. There is one reader now: every place below calls
+ * `sandboxHubSpec()` from run-def.mjs.
  */
 
 // --------------------------------------------------------------- discovery
@@ -447,8 +448,8 @@ export async function refreshSandboxAvailability({ force = false } = {}) {
   // The in-flight promise is released BY the promise, never at the end of the
   // body: with no runtime module the body has no `await` at all, so a reset at
   // the end would run before the assignment that set it and every later call
-  // would get one stale promise for the life of the process (AGENTS.md has this
-  // entry for the usage and balance caches).
+  // would get one stale promise for the life of the process (docs/requirements.md,
+  // "Quota and gates" has this entry for the usage and balance caches).
   if (scanning) return scanning
   scanning = (async () => {
     const rt = await sibling('runtime')
@@ -1671,7 +1672,8 @@ function onBlocked(runId, info) {
     // like a real 403. The incident rule reads that kind, so the rollout mode
     // that exists to be silent raised a RED incident saying two hosts had been
     // turned away, on a run where nothing was. Same family as every other
-    // "an alarm that fires for a working agent" entry in AGENTS.md.
+    // "an alarm that fires for a working agent" entry in docs/requirements.md,
+    // "Watcher and incidents".
     //
     // `sandbox:would_block` is the learning record §7.12.5 wants — it is what
     // the repo page grows an allow list out of — and nothing escalates on it.

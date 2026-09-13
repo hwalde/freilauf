@@ -162,7 +162,7 @@ const TONES = ['red', 'yellow', 'green']
  * A number, or null — and `''` is null, never 0.
  *
  * `Number('')` is 0 AND finite, which is how an unset field becomes a confident
- * zero. This trap has its own entry in AGENTS.md twice over; a panel is exactly
+ * zero. This trap has its own entry in AGENTS.md; a panel is exactly
  * the place it would be invisible, because "0 open findings" reads like good
  * news rather than like a missing value.
  */
@@ -474,7 +474,7 @@ function shape(row, stored = null) {
   // timestamps: `panel_values.at` is whole seconds and `endedAt` is
   // milliseconds, so a press and a push inside one second would be ordered by
   // whichever way that comparison happened to round — the `statSync().mtimeMs`
-  // trap in AGENTS.md, one table further out. `setPanelValue()` therefore
+  // trap in docs/pitfalls.md, one table further out. `setPanelValue()` therefore
   // STRIKES these values when it stores a push; the rest of the result stays,
   // because "applied 14:05" is still true and still worth reading.
   const applied = actionResult?.ok ? actionResult.values || null : null

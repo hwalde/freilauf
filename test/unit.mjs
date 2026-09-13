@@ -10342,8 +10342,9 @@ process.stdout.write(JSON.stringify(out))
   group('Sandbox: run definition')
   //
   // Whether a run happens in a container is a field of the run definition like
-  // every other, so it has to be in every one of the places AGENTS.md's
-  // `keep_on_branch` checklist names — and the two it must NOT be in. What this
+  // every other, so it has to be in every one of the places
+  // docs/requirements.md's ("Run definition") `keep_on_branch` checklist
+  // names — and the two it must NOT be in. What this
   // group pins is that list, structurally rather than by example: the drift
   // run-def.mjs exists to prevent is a field that reaches three of the four
   // copies, and a test that only round-tripped one form would never see it.
@@ -11149,7 +11150,8 @@ process.stdout.write(JSON.stringify(out))
       // and RESUME_MAX is 3, so three watcher passes against a daemon that is
       // merely still starting after a reboot would end the run with
       // `resume_refused` — for an infrastructure hiccup, not for a CLI that
-      // cannot start. AGENTS.md: "could not try" is not "tried and died".
+      // cannot start. docs/requirements.md, "Launch and resume": "could not
+      // try" is not "tried and died".
       const { prepareSandbox } = await import('../server/sandbox/index.mjs')
       const fehlschlag = async (id, repoPath) => {
         try { await prepareSandbox({ id, sandbox: 1 }, { name: 'x', path: repoPath }); return null }

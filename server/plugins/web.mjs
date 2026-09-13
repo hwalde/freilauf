@@ -591,7 +591,7 @@ export async function pluginsSave(req, res, url, formBody) {
  * what is stored" and never "delete it". Without that rule, opening a card and
  * pressing Save would silently wipe the very token the card exists to hold —
  * and a form that looks like it saved and did not is the worst shape a bug can
- * take (see AGENTS.md on SETTINGS_KEYS).
+ * take (see AGENTS.md on `settingsKeys()` being a function).
  */
 export function saveDeclaredSettings(id, plugin, b) {
   for (const field of pluginFields(plugin, 'settings')) {

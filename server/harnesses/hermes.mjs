@@ -249,7 +249,7 @@ const plugin = {
   sandbox: {
     supported: true,
 
-    // Version pin: measured on this machine (AGENTS.md, hermes 0.21.0).
+    // Version pin: measured on this machine (docs/pitfalls.md, "hermes", 0.21.0).
     image: { dockerfile: 'sandbox/images/hermes.Dockerfile', args: { HERMES_VERSION: '0.21.0' } },
 
     // hermes has no API of its own the way claude and cursor do — its model

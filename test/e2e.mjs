@@ -8042,7 +8042,7 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
     await check('every container the shim created is written down for the cleanup', () => {
       // The tmux-session rule, one layer out. There are no real containers on
       // this machine, but the list has to exist BEFORE there are — that is the
-      // whole lesson of the 157 leaked sessions in AGENTS.md.
+      // whole lesson of the 157 leaked sessions in docs/requirements.md, "Tests".
       const erzeugt = shim.created()
       isTrue(erzeugt.includes(`fl-${RUN_ID}`), `the argv-log container is on the list (${erzeugt.length} entries)`)
       isTrue(erzeugt.every(n => n.startsWith('fl-') || n.startsWith('network:') || n.startsWith('shim-')),

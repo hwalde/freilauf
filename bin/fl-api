@@ -19,7 +19,7 @@
 #
 # The hub listens on 127.0.0.1 only and has no authentication — being able to
 # run this command on the machine IS the authorization. Never expose the local
-# port; the outside path is the VPN proxy (see AGENTS.md).
+# port; the outside path is the VPN proxy (see docs/requirements.md, "Pages and live channel").
 #
 # Exit codes: 0 = HTTP 2xx, 1 = HTTP error (the body is still printed),
 #             2 = usage error, 3 = the hub could not be reached.

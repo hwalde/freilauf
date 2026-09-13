@@ -110,7 +110,7 @@ async function livenessOf(run) {
   return {
     tmux_session: session,
     // true / false / null — null means tmux could not be asked, which is NOT
-    // the same as "gone" (see AGENTS.md, "tmux did not answer").
+    // the same as "gone" (see docs/pitfalls.md, "tmux").
     pane_alive: alive,
     status: run.status,
     finish_state: run.finish_state ?? null,
