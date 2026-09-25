@@ -1702,21 +1702,16 @@ export async function pageRun(req, res, url, id) {
           <button class="danger">${e(t('run.end_session'))}</button></form>
         <span class="dim">${e(t('run.end_session_hint'))}</span></div>` : ''}
   </details>
+  ${reviveBlock(run, live)}
   ${['failed', 'aborted'].includes(run.status) && !run.resolves_run_id
     // A conflict run is never retried: the way back in is "Merge now" on the
     // run it works for, which starts a fresh one with a fresh branch.
     //
-    // Resume stands FIRST and retry keeps its place beside it, because they are
-    // not two spellings of one offer: resume keeps this run's worktree, its
-    // commits and — where the coding agent has a resume form — its conversation,
-    // while retry throws all of that away and starts the task afresh. For a run
-    // the machine ended with 37 commits in its worktree, only one of those two
-    // is what the operator means, and until now only the other one was on the
-    // page. `resumable()` is the rule; the route enforces the same one.
+    // Retry keeps its place beside Revive, because they are not two spellings
+    // of one offer: revive keeps this run's worktree, its commits and — where
+    // the coding agent has a resume form — its conversation, while retry throws
+    // all of that away and starts the task afresh.
     ? `<div class="btn-row">
-       ${resumable(run, !!run.workdir_effective && existsSync(run.workdir_effective))
-        ? `<form method="post" action="/api/runs/${id}/resume" class="inline"><button>${e(t('run.resume'))}</button></form>
-           <span class="dim">${e(t('run.resume_hint'))}</span>` : ''}
        <form method="post" action="/api/runs/${id}/retry" class="inline"><button>${e(t('run.retry'))}</button></form>
        <span class="dim">${e(t('run.retry_hint'))}</span></div>`
     : ''}
@@ -1729,6 +1724,28 @@ export async function pageRun(req, res, url, id) {
   <h3>${e(t('run.events'))}</h3>${runEvents(id)}
   <h3>${e(t('run.log'))}</h3>${logHtml}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, titel, '/', body, run.repo_id, true))
+}
+
+/**
+ * "Revive": bring an ended run's agent back into a new tmux session — its own
+ * conversation where the coding agent can continue one, otherwise (or when the
+ * operator ticks it) a fresh agent handed the whole record (runner.mjs,
+ * handoverPrompt). As often as wanted; a deliberate revive spends no crash
+ * budget. `resumable()` is the rule and the route enforces the same one.
+ *
+ * A finished run needs an instruction (the route refuses without one): its
+ * revive is a follow-up commission. For a failed or aborted one the text is
+ * optional and the agent is told to finish its task.
+ */
+export function reviveBlock(run, live) {
+  if (!resumable(run, { live })) return ''
+  const done = run.status === 'done'
+  return `<details class="revive" id="revive"${done ? '' : ' open'}><summary>${e(t('run.resume'))} <span class="dim">${e(t('run.resume_hint'))}</span></summary>
+    <form method="post" action="/api/runs/${e(run.id)}/resume">
+      <textarea name="text" rows="3"${done ? ' required' : ''} placeholder="${e(t(done ? 'run.revive_text_ph_done' : 'run.revive_text_ph'))}"></textarea>
+      <label class="chk"><input type="checkbox" name="mode" value="fresh"> ${e(t('run.revive_fresh'))} <span class="dim">${e(t('run.revive_fresh_hint'))}</span></label>
+      <div class="btn-row"><button>${e(t('run.resume'))}</button></div>
+    </form></details>`
 }
 
 /**

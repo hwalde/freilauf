@@ -1,5 +1,5 @@
 // Freilauf — HTTP: server-rendered HTML + JSON API (planning 5).
-import { readFileSync, statSync, existsSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import db, { getRepo, getRun, setSetting, addEvent, announceRun, allSettings } from './db.mjs'
@@ -757,7 +757,11 @@ async function api(req, res, url) {
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/resume$/))) {
     const run = getRun(m[1])
     if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
-    const there = !!run.workdir_effective && existsSync(run.workdir_effective)
+    const b = await form(req)
+    // What the operator wants now (may be empty), and whether a FRESH agent is
+    // to take over instead of the old conversation (the handover, runner.mjs).
+    const instruction = String(b.text ?? '').trim()
+    const fresh = String(b.mode ?? '') === 'fresh'
     // A refusal has a reason, and a redirect back to the run would swallow it:
     // the event list renders event KINDS, so `resume_refused` would stand there
     // as a bare word and the page a human opens BECAUSE they clicked would say
@@ -765,28 +769,61 @@ async function api(req, res, url) {
     const refuse = (reason) => wantsHtml(req)
       ? problemPage(req, res, t('run.resume'), [reason], `/runs/${run.id}`)
       : answer(req, res, 400, { ok: false, error: reason }, `/runs/${run.id}`)
-    if (!resumable(run, there)) return refuse(t('run.resume_err'))
-    // Everything the ending wrote about the run is taken back before the resume,
-    // not after it: `resumeRun()` refuses anything but a live run, and the
-    // integrator's verdict on the leftovers ("unmerged_both") describes an
-    // attempt that is about to continue. `assessUnmerged()` runs again at the
-    // real end. `exit_code` goes for the same reason — it belongs to a process
-    // that is being replaced.
-    db.prepare(`UPDATE runs SET status='running', ended_at=NULL, exit_code=NULL,
-                agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(run.id)
-    resetIntegration(run.id)
-    addEvent(run.id, 'resume_requested', { previous_status: run.status, by: 'operator' })
+    // Is somebody still sitting in the old session? Then typing into it is the
+    // way, and a second agent beside it would share one worktree. A session
+    // whose pane is dead is closed first, so the new one can take its place.
+    const sessionOpen = !!run.tmux_session && !run.tmux_closed_at
+    const { paneAlive } = await import('./sessions.mjs')
+    const live = sessionOpen && (await paneAlive(run.tmux_session)) !== false
+    if (!resumable(run, { live })) return refuse(t('run.resume_err'))
+    // Reviving a FINISHED run is a follow-up commission, and a commission has a
+    // content: without one the agent would come back, have nothing to do, and
+    // the run would read "follow-up in progress" over a conversation nobody has.
+    const finished = run.status === 'done'
+    if (finished && !instruction) return refuse(t('run.revive_needs_text'))
+    if (sessionOpen) {
+      // Unhooked from the row BEFORE it is killed, so a watcher pass in between
+      // does not read the vanished session as lost and start a second resume;
+      // the container first, for the reason the kill route gives.
+      db.prepare('UPDATE runs SET tmux_session=NULL, tmux_closed_at=NULL WHERE id=?').run(run.id)
+      const { sh } = await import('./util.mjs')
+      const { stopRunContainer } = await import('./sessions.mjs')
+      try { await stopRunContainer(run) } catch { /* fail-soft: the session still has to go */ }
+      await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
+    }
+    // Everything the ending wrote about a failed/aborted run is taken back
+    // before the resume, not after it: `resumeRun()` refuses anything but a
+    // live run, and the integrator's verdict on the leftovers ("unmerged_both")
+    // describes an attempt that is about to continue. `assessUnmerged()` runs
+    // again at the real end. `exit_code` goes for the same reason — it belongs
+    // to a process that is being replaced. A `done` run keeps all of it: its
+    // status and its merge are the truth about its attempt, and the revive is a
+    // follow-up on top (resumeRun's `keepStatus`).
+    if (!finished) {
+      db.prepare(`UPDATE runs SET status='running', ended_at=NULL, exit_code=NULL,
+                  agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(run.id)
+      resetIntegration(run.id)
+    }
+    addEvent(run.id, 'resume_requested', { previous_status: run.status, by: 'operator',
+      ...(instruction ? { text: instruction.slice(0, 500) } : {}), ...(fresh ? { mode: 'fresh' } : {}) })
     let r
-    try { r = await resumeRun(run.id, { reason: 'operator' }) } catch (e) { r = { ok: false, error: e.message } }
+    try { r = await resumeRun(run.id, { reason: 'operator', instruction, fresh }) } catch (e) { r = { ok: false, error: e.message } }
     if (!r?.ok && !r?.retry) {
-      // The resume was refused after all (no launch spec, the worktree went
-      // between the check and here): put the record back exactly as it was
-      // rather than leaving a `running` run with nothing behind it.
-      db.prepare(`UPDATE runs SET status=?, ended_at=COALESCE(?, datetime('now')), exit_code=? WHERE id=?`)
-        .run(run.status, run.ended_at, run.exit_code, run.id)
+      // The resume was refused after all (no launch spec, a budget gate, a
+      // container runtime that did not answer): put the record back exactly as
+      // it was rather than leaving a `running` run with nothing behind it.
+      if (!finished) {
+        db.prepare(`UPDATE runs SET status=?, ended_at=COALESCE(?, datetime('now')), exit_code=? WHERE id=?`)
+          .run(run.status, run.ended_at, run.exit_code, run.id)
+      }
+      if (sessionOpen) db.prepare(`UPDATE runs SET tmux_session=COALESCE(tmux_session, ?),
+                                   tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(run.tmux_session, run.id)
       addEvent(run.id, 'resume_refused', { error: r?.error ?? 'unknown' })
       return refuse(r?.error ?? 'resume failed')
     }
+    // The revived agent is working on the operator's instruction from this
+    // moment — the same commission a line typed into a live session opens.
+    if (finished && r?.ok) startFollowUpCommission(run.id, instruction, 'revive')
     return answer(req, res, 200, { ok: true, ...r }, `/runs/${run.id}`)
   }
   // "End the follow-up": take back a commission that is open over a

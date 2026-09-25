@@ -20,6 +20,25 @@ a day on which nothing was released.
 
 ### Added
 
+- **Revive an agent whose session has ended.** The run page offers "Revive
+  agent" for every finished, failed or aborted run whose agent is no longer
+  running — also when the tmux session is long gone ("No tmux session
+  anymore") and even when retention already removed the worktree (it is
+  recreated at the same path). The agent comes back in a new tmux session
+  with all the run's settings, sandbox included, and continues its own
+  conversation where the coding agent can (claude, cursor, opencode,
+  hermes). As often as you like; a revive spends no crash budget. A finished
+  run needs an instruction and the revive becomes a follow-up (the status,
+  report and merge of the first attempt stay as they were); for a failed or
+  aborted run the instruction is optional.
+- **A fresh agent can take over instead.** Tick "Fresh agent instead of the
+  old conversation", or it happens by itself where no conversation can be
+  continued: a new agent starts in the same worktree and is handed the whole
+  record — the original task, every report and follow-up report, progress
+  reports, questions and answers, the operator's messages and the state of
+  the worktree. The automatic resume after a lost session uses the same
+  handover where it cannot continue a conversation.
+
 - **Code review, optional.** Finished work can wait for a reviewer instead of
   landing on the base branch directly. It is set in three places — Settings →
   Merge (the default for every repo), the repo form (overrides the default,

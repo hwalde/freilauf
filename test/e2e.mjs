@@ -17,9 +17,9 @@
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, lstatSync, chmodSync } from 'node:fs'
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, lstatSync, chmodSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { WebSocket } from 'ws'
 import { group, check, skipped, equal, isTrue, isFalse, contains, waitFor, summary, counter } from './mini.mjs'
 import { newSandbox, sh, hasBinary, freePort, PROJECT } from './sandbox-env.mjs'
@@ -2502,8 +2502,14 @@ try {
                          datetime('now'),datetime('now'),1,'unmerged_both')`)
         .run(id, repoId, REPO)
       mkdirSync(join(SB, 'runs', id), { recursive: true })
+      // The conversation the hub started under the run id, where claude files it:
+      // only a transcript that is really there is continued (claude.resumeId).
+      const { claudeTranscriptPath } = await import('../server/watcher.mjs')
+      const transcript = claudeTranscriptPath({ id, workdir_effective: REPO, sandbox: 0 })
+      mkdirSync(dirname(transcript), { recursive: true })
+      writeFileSync(transcript, '{}\n')
 
-      const r = await postForm(`/api/runs/${id}/resume`, {})
+      const r = await postForm(`/api/runs/${id}/resume`, { text: 'E2E-ORDER-1' })
       equal(r.status, 200, 'the route takes it')
       await waitFor(() => !!lauf(id)?.tmux_session, { what: 'the resumed session', timeoutMs: 20_000 })
       const l = lauf(id)
@@ -2515,8 +2521,71 @@ try {
       // The difference from retry, in the one place it shows: prompt.md is the
       // record of the task and the agent is told where it stood, rather than
       // being started over.
-      contains(readFileSync(join(SB, 'runs', id, 'resume-prompt.md'), 'utf8'), 'interrupted',
-        'the agent is continued, not restarted')
+      const text = readFileSync(join(SB, 'runs', id, 'resume-prompt.md'), 'utf8')
+      contains(text, 'brought you back', 'the agent is continued, not restarted')
+      contains(text, 'E2E-ORDER-1', 'and handed the operator\'s instruction')
+      const resumed = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='resumed' ORDER BY id DESC`).get(id)
+      equal(JSON.parse(resumed.payload).resume_form, id, 'in its own conversation (claude --resume <run id>)')
+
+      // As often as wanted — and the second way back: a FRESH agent handed the
+      // whole record, while the old conversation is filed away rather than lost.
+      await sh('tmux', ['kill-session', '-t', `=${l.tmux_session}`])
+      sessions.delete(l.tmux_session)
+      db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), tmux_closed_at=datetime('now'),
+                  report_md='E2E-REPORT-OLD' WHERE id=?`).run(id)
+      // The first revive moved the run from the repo into a worktree of its
+      // own (this row was inserted with the repo as its directory), and claude
+      // files a conversation under the directory — so that is where it now is.
+      const transcript2 = claudeTranscriptPath({ id, workdir_effective: lauf(id).workdir_effective, sandbox: 0 })
+      mkdirSync(dirname(transcript2), { recursive: true })
+      writeFileSync(transcript2, '{}\n')
+      const r2 = await postForm(`/api/runs/${id}/resume`, { mode: 'fresh' })
+      equal(r2.status, 200, 'a second revive is taken too')
+      await waitFor(() => !!lauf(id)?.tmux_session && !lauf(id)?.resume_pending, { what: 'the second session', timeoutMs: 20_000 })
+      sessions.add(lauf(id).tmux_session)
+      const hand = readFileSync(join(SB, 'runs', id, 'resume-prompt.md'), 'utf8')
+      contains(hand, 'taking over', 'a fresh agent is told it takes over')
+      contains(hand, 'E2E-REPORT-OLD', 'with the reports of the one before it')
+      contains(hand, 'E2E-Resume: the operator says so', 'and the original task')
+      isFalse(existsSync(transcript2), 'the old conversation no longer sits under the run id')
+      isTrue(readdirSync(dirname(transcript2)).some(f => f.startsWith(`${id}.before-`)), 'it was filed away beside it')
+      db.prepare('DELETE FROM runs WHERE id=?').run(id)
+    })
+
+    await check('a FINISHED run whose session and worktree are gone is revived as a follow-up', async () => {
+      const id = randomUUID()
+      const gone = join(SB, 'worktrees-gone', id)
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,report_md,
+                                   workdir_effective,worktree,started_at,ended_at,tmux_session,tmux_closed_at,merge_status)
+                  VALUES(?,?,'claude','E2E-Revive: a finished task','keiner',45,'done','E2E-REPORT-DONE',?,?,
+                         datetime('now','-2 hours'),datetime('now','-1 hours'),'fl-gone-${id.slice(0, 8)}',datetime('now'),'merged')`)
+        .run(id, repoId, gone, gone)
+      mkdirSync(join(SB, 'runs', id), { recursive: true })
+      const before = lauf(id)
+
+      const leer = await postForm(`/api/runs/${id}/resume`, {})
+      equal(leer.status, 400, 'without an instruction it is refused: a revived finished run is a follow-up')
+      equal(lauf(id).status, 'done', 'and left as it was')
+
+      const r = await postForm(`/api/runs/${id}/resume`, { text: 'E2E-FOLLOWUP-ORDER' })
+      equal(r.status, 200, 'with one it is taken')
+      await waitFor(() => !!lauf(id)?.tmux_session && !lauf(id)?.resume_pending, { what: 'the revived session', timeoutMs: 30_000 })
+      const l = lauf(id)
+      sessions.add(l.tmux_session)
+      equal(l.status, 'done', 'the status still tells the truth about the first attempt')
+      equal(l.started_at, before.started_at, 'and its start is not moved')
+      equal(l.report_md, 'E2E-REPORT-DONE', 'its report is untouched')
+      isTrue(!!l.followup_since, 'the revive opened a follow-up commission')
+      isTrue(existsSync(l.workdir_effective), `the worktree was made again (${l.workdir_effective})`)
+      const ev = ereignisse(id)
+      contains(ev.join(','), 'worktree_recreated', 'and that is on the record')
+      contains(ev.join(','), 'followup_started', 'the commission is on the record')
+      // No transcript under the run id here: nothing to continue, so a fresh
+      // agent takes over, handed the record.
+      const hand = readFileSync(join(SB, 'runs', id, 'resume-prompt.md'), 'utf8')
+      contains(hand, 'E2E-REPORT-DONE', 'the fresh agent gets the report')
+      contains(hand, 'E2E-FOLLOWUP-ORDER', 'and the instruction')
+      contains(hand, 'follow-up report', 'and is told its report is a follow-up')
       db.prepare('DELETE FROM runs WHERE id=?').run(id)
     })
 
@@ -2533,7 +2602,7 @@ try {
       }
       for (const [was, over] of [
         ['a run that is still going', { status: 'running' }],
-        ['a finished one — that is a follow-up, not a resume', { status: 'done' }],
+        ['a finished one without an instruction — its revive is a follow-up', { status: 'done' }],
         ['one whose worktree is gone', { workdir: null }],
         ['a conflict run', { resolves_run_id: R1 }],
         ['an archived one', { archived_at: 1 }],
@@ -8304,6 +8373,7 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
       // by default and that is what every group above ran under.
       sk.setSetting('sandbox_mode', 'available')
       let sandboxDoc = null            // the sandbox.json the hub really wrote
+      let sandboxRunId = null          // the sandboxed run, revived further down
       // The image the run is launched from. Without one `buildRunArgv()`
       // refuses — "there is nothing to start" — and rightly so; the repo column
       // is the operator's own way of naming it, and the tag is the one the
@@ -8327,6 +8397,33 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
         isTrue(!!shim.networks()[`fl-net-${j.runId}`], 'and it is called fl-net-<run id>')
         sandboxDoc = join(SB, 'runs', j.runId, 'sandbox.json')
         await fetchPath(`/api/runs/${j.runId}/kill`, { method: 'POST' })
+        sandboxRunId = j.runId
+      })
+
+      await check('an ended SANDBOXED run is revived as one: container, network and clone come back', async () => {
+        isTrue(!!sandboxRunId, 'the sandboxed run from above exists')
+        await waitFor(() => lauf(sandboxRunId).status === 'aborted', { what: 'the kill landed', timeoutMs: 10_000 })
+        const vorher = lauf(sandboxRunId)
+        // Retention removes a clone once its work is merged; the revive makes it
+        // again at the same path, which is where the agent's conversation hangs.
+        rmSync(vorher.workdir_effective, { recursive: true, force: true })
+        await sh('tmux', ['kill-session', '-t', `=${vorher.tmux_session}`])
+        db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(sandboxRunId)
+        shim.reset()
+        const r = await postForm(`/api/runs/${sandboxRunId}/resume`, { text: 'E2E-SANDBOX-REVIVE' })
+        equal(r.status, 200, `the route takes it (${r.status})`)
+        await waitFor(() => !!lauf(sandboxRunId)?.tmux_session && !lauf(sandboxRunId)?.resume_pending,
+          { what: 'the revived sandboxed session', timeoutMs: 30_000 })
+        const l = lauf(sandboxRunId)
+        sessions.add(l.tmux_session)
+        equal(l.sandbox, 1, 'still sandboxed — the revive keeps every setting of the run')
+        equal(l.workdir_effective, vorher.workdir_effective, 'in the same working directory')
+        isTrue(existsSync(join(l.workdir_effective, '.git')), 'which is a clone again')
+        isTrue(!!shim.networks()[`fl-net-${sandboxRunId}`], `its network was made again (${JSON.stringify(shim.order())})`)
+        equal(l.sandbox_spec, vorher.sandbox_spec, 'from the spec frozen into the row')
+        contains(readFileSync(join(SB, 'runs', sandboxRunId, 'resume-prompt.md'), 'utf8'), 'E2E-SANDBOX-REVIVE',
+          'and the agent is handed the instruction')
+        await fetchPath(`/api/runs/${sandboxRunId}/kill`, { method: 'POST' })
       })
 
       await check('the pane command the launcher prints resolves to the shim too', async () => {

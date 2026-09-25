@@ -43,7 +43,9 @@ das tut Freilauf, und es geht nur vorwärts.
 - **Ein Arbeitsplatz pro Lauf.** Jeder Lauf bekommt seinen eigenen
   Git-Worktree und seine eigene tmux-Session. Kein Agent tritt dem anderen auf
   die Füße — und keiner dir; du kannst dich später an jede Session hängen und
-  den ganzen Bildschirm lesen.
+  den ganzen Bildschirm lesen. Eine beendete Session lässt sich wiederbeleben —
+  derselbe Agent mit demselben Gespräch oder ein frischer Agent mit dem ganzen
+  Verlauf —, so oft du willst.
 - **Rollen statt Tickets.** Ein *Agent* ist eine Rolle mit einem Zeitplan: der
   Reviewer, der jede Nacht läuft, der Tote-Code-Sucher am Sonntag, der
   Doku-Pfleger nach jedem Merge. Ein *Einzellauf* ist dasselbe Formular ohne

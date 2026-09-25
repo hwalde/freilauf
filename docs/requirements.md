@@ -102,8 +102,23 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   marks, shifts `started_at` by the gap, and launches the CLI in its resume
   form with a continuation prompt that names commits since `base_sha`,
   uncommitted files and the last progress reports. `resumeId()` answers `null`
-  whenever the plugin cannot name THIS run's own conversation — a resume never
-  continues a guessed session; fresh start wins.
+  whenever the plugin cannot name THIS run's own conversation (claude: no
+  transcript under the run id) — a resume never continues a guessed session;
+  fresh start wins.
+- A fresh start of an existing run is a handover (`handoverPrompt()`): the
+  record first (worktree state, every report, progress, questions and
+  answers, operator messages), then the original task, then the instructions
+  with the platform rules inline; `retireConversation()` files a conversation
+  away before the CLI would refuse or reuse its id.
+- The operator revives any `done`/`failed`/`aborted` run that ever had a
+  working directory, as often as wanted, never beside a live agent and never
+  a conflict or archived run (`resumable()` in run-state.mjs, shared by page
+  and route). A revived `done` run keeps its status, `started_at`, report and
+  merge, needs an instruction and opens a follow-up commission; a failed
+  revive of it goes through `reviveFailed()`, never `failRun()`.
+- A revive whose worktree retention removed recreates it at the same path
+  (the resume keeps `branch_expected`), because the CLI finds its
+  conversation by that path; after a merge `base_sha` moves to the new HEAD.
 
 ## Run definition
 
