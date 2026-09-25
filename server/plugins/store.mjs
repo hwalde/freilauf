@@ -140,6 +140,10 @@ export function setPluginConfig(id, patch = {}) {
  * would silence a channel that was working the minute before the upgrade. The
  * fresh installation stays quiet all the same — being enabled is not being
  * configured, and `notifiersConfigured()` asks the second question.
+ *
+ * A REVIEW PLATFORM is on by default too: it is configured by its settings and
+ * only ever asked when a repo selects it, so an off switch in front of that
+ * would be a second step with nothing to protect.
  */
 export function isPluginEnabled(id, defaultOn = pluginKind(id) !== 'harness') {
   const row = pluginConfig(id)

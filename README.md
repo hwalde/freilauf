@@ -56,6 +56,17 @@ Freilauf does, and it only goes forward.
   for it: Freilauf checks the worktree, tells a still-running agent what is
   missing, merges in an integration worktree of its own, starts a conflict run
   when a merge fails, and calls you last.
+- **Code review, if you want one.** Optional, like the sandbox: set globally,
+  per repo and per agent or run. Finished work is then pushed and waits for a
+  reviewer instead of landing on the base branch: either on Freilauf's own
+  review page (diff, approve & merge, request changes — the comment goes
+  straight into the agent's session — or reject), or as a pull request on
+  GitHub, GitLab, Bitbucket Cloud or Bitbucket Data Center, where the platform's
+  own approvals and branch protection decide and Freilauf follows the result.
+  An approval binds to one commit: whatever the agent commits afterwards is
+  reviewed again. It holds back what Freilauf merges; an agent outside the
+  sandbox runs as your user and is fenced off only by the platform's branch
+  protection.
 - **Flows without code.** When a run ends, a flow can message another agent,
   start the next run and wait for it, extract structured data from a report via
   LLM, branch, loop, notify you, call a URL, run a shell command

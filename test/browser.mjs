@@ -923,13 +923,18 @@ try {
       null, 'the fieldset to follow the repo')
     isTrue(await p.isVisible(`${feld} [data-explain="hub"]`), 'the hub explanation appears')
     isTrue(await p.isVisible(`${feld} [data-hub-only]`), 'and so does the keep box')
+    isTrue(await p.isVisible(`${feld} [data-review-choice]`), 'the code-review choice is offered too')
     await p.check(`${feld} input[name=keep_on_branch]`)
+    await p.selectOption(`${feld} select[name=review]`, 'off')
     await p.selectOption('#qr-form select[name=repo_id]', String(repoId))
     await wartePage(p, () => document.querySelector('#qr-form fieldset.branch-choice').dataset.mergeMode === 'off',
       null, 'and back again')
     // Hidden AND unticked: a box one cannot see must not still submit.
     equal(await p.$eval(`${feld} input[name=keep_on_branch]`, c => c.checked), false,
       'going back to a repo that does not integrate unticks it')
+    isFalse(await p.isVisible(`${feld} [data-review-choice]`), 'the code-review choice is hidden again')
+    equal(await p.$eval(`${feld} select[name=review]`, s => s.value), 'inherit',
+      'and back on "repo default" — a hidden choice must not still submit "off"')
     sauber(p)
     await p.close()
   })

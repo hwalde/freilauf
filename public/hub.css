@@ -692,6 +692,20 @@ button.act:hover { color: var(--accent-act-hover); background: var(--accent-soft
    only needs to look like the clickable thing every other <details> here is. */
 details.merge-why > summary { cursor: pointer; }
 details.merge-why > pre { margin-top: var(--sp-8); }
+/* Code review (server/review.mjs): the diff a reviewer reads. The pre keeps
+   the theme's own colours; only a line's wash says added, removed or hunk. */
+.card.review { border-left-color: var(--warn-deep); }
+.card.review h3 .pill { font-size: 12px; font-weight: normal; margin-left: var(--sp-8); }
+.review-file { margin: var(--sp-8) 0; }
+.review-file > summary { cursor: pointer; }
+pre.diff { max-height: 640px; line-height: 1.35; }
+pre.diff span { display: block; white-space: pre; }
+pre.diff .add { background: rgba(70, 167, 88, .18); }
+pre.diff .del { background: var(--err-soft); }
+pre.diff .hunk { opacity: .7; }
+.diff-add { color: var(--ok-text); } .diff-del { color: var(--err); }
+.review-form textarea { width: 100%; }
+.review-history blockquote { margin: var(--sp-4) 0 var(--sp-4) var(--sp-16); white-space: pre-wrap; }
 
 /* ---- overview: one statement, one cell ----
    Traffic light, status word and "last anomaly" used to sit in three cells

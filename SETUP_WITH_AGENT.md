@@ -49,9 +49,15 @@ Six facts and you can reason about the whole system:
     a run without a detail behaves exactly as before, and the document then
     carries the full report again.
 4. **The hub does the merging, not the agent** (when a repo is set to
-   `merge_mode = hub`). A run is `done` when its work is on the base branch.
+   `merge_mode = hub`). A run is `done` when its work is on the base branch
+   (under code review: when it is submitted for review).
    If the worktree is dirty or the merge conflicts, the still-living agent is
    told to fix it, and only then a human. `server/integrate.mjs`.
+   Optional **code review** on top (global, per repo, per agent/run): the
+   branch is pushed and waits for a reviewer — Freilauf's own review page or a
+   pull request through a `review` plugin (GitHub, GitLab, Bitbucket Cloud,
+   Bitbucket Data Center) — and only the approved commit is merged.
+   `server/review.mjs`, `server/review-platforms/`.
 5. **Coding agents and model providers are plugins** — built-ins under
    `server/harnesses/` and `server/providers/`, external packages in
    `FREILAUF_PLUGIN_DIR` (default `~/.local/share/freilauf/plugins`), loaded at
@@ -619,6 +625,8 @@ If your task is to change Freilauf rather than just run it:
 | Reports coming back in | `server/reports.mjs`, `bin/fl-report` |
 | Watching from the outside; anomalies | `server/watcher.mjs`, `server/detect.mjs` |
 | Merging a finished run into the base branch | `server/integrate.mjs` |
+| Code review: the three levels, submit, approve, platform polling, the diff page | `server/review.mjs` |
+| Code review platforms (GitHub, GitLab, Bitbucket Cloud / Data Center) | `server/review-platforms/`, contract in `docs/plugins.md` |
 | Rate limits / provider outages | `server/incidents.mjs`, `server/harnesses/patterns.mjs` |
 | Plugins — coding agents, model providers, notification channels: the contract, in depth | **`docs/plugins.md`** (the one document to hand an agent for this), `server/harnesses/`, `server/providers/`, `server/notifiers/` |
 | Saying something to a human — the facade, the page, the CLI | `server/notify.mjs`, `server/notifications.mjs`, `bin/fl-notify` |

@@ -6,13 +6,14 @@
 // credential or a setting of its own, and an external package had no place at
 // all.
 //
-// Four sections, in the order an operator meets them:
+// Five sections, in the order an operator meets them:
 //
 //   1. what the hub FOUND on this machine — asked once, answered here;
 //   2. the coding agents (every registered one, configured or not — which is
 //      what subsumes the old "add a coding agent" list into the same card);
 //   3. the model providers;
-//   4. the plugin packages, with their load errors as they stand.
+//   4. the code review platforms;
+//   5. the plugin packages, with their load errors as they stand.
 //
 // Two rules run through all of it:
 //
@@ -57,7 +58,8 @@ const explain = (key) => `<p class="dim">${e(t(key))}</p>`
 export function kindLabel(kind) {
   return t(kind === 'harness' ? 'plugins.kind_harness'
     : kind === 'notifier' ? 'plugins.kind_notifier'
-      : 'plugins.kind_provider')
+      : kind === 'review' ? 'plugins.kind_review'
+        : 'plugins.kind_provider')
 }
 
 // ---------------- the banner ----------------
@@ -255,7 +257,8 @@ export function settingsBlock(pluginId, plugin) {
 export function cardFooter(id, label, kind) {
   const forgetLabel = kind === 'provider'
     ? 'plugins.forget_provider'
-    : kind === 'notifier' ? 'plugins.forget_notifier' : 'plugins.forget_harness'
+    : kind === 'notifier' ? 'plugins.forget_notifier'
+      : kind === 'review' ? 'plugins.forget_review' : 'plugins.forget_harness'
   const forget = pluginConfig(id)
     ? `<form method="post" action="/settings/plugins/remove" class="inline"
         onsubmit="return confirm(${e(JSON.stringify(t('plugins.forget_confirm', { label })))})">
@@ -471,7 +474,36 @@ function providerSection() {
     ${cards || `<p class="dim">${e(t('plugins.none_registered'))}</p>`}`
 }
 
-// ---------------- section 4: plugin packages ----------------
+// ---------------- section 4: code review platforms ----------------
+
+/**
+ * One card per review platform: enabled switch and the plugin's own settings
+ * (token, API base). Enabled is not the same as in use — the hub only asks a
+ * platform a repo has selected; the switch is the operator's way to withdraw one.
+ */
+function reviewSection() {
+  const cards = allPlugins().filter(p => p.kind === 'review').map(({ id, plugin }) => {
+    const on = isPluginEnabled(id)
+    return `<div class="card plugin-card ${on ? 'ok' : ''}">
+      <h3>${e(plugin.label)}</h3>
+      ${plugin.descriptionKey ? `<p class="dim">${e(t(plugin.descriptionKey))}</p>` : ''}
+      <form method="post" action="/settings/plugins/save" class="form-grid">
+        <input type="hidden" name="id" value="${e(id)}">
+        ${checkbox('enabled', on, t('plugins.enabled'))}
+        ${credentialsBlock(id, plugin)}
+        ${settingsBlock(id, plugin)}
+        <div class="btn-row"><button>${e(t('settings.save'))}</button></div>
+      </form>
+      ${cardFooter(id, plugin.label, 'review')}
+    </div>`
+  }).join('')
+
+  return `<h2>${e(t('plugins.review_title'))}</h2>
+    ${explain('plugins.review_explain')}
+    ${cards || `<p class="dim">${e(t('plugins.none_registered'))}</p>`}`
+}
+
+// ---------------- section 5: plugin packages ----------------
 
 function packagesSection() {
   let packages = []
@@ -536,6 +568,7 @@ export async function pagePlugins(req, res, url) {
   ${found.scanLine}
   ${await harnessSection()}
   ${providerSection()}
+  ${reviewSection()}
   ${packagesSection()}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
     .end(await layout(req, t('plugins.title'), '/settings', body))

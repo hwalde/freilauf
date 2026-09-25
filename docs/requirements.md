@@ -13,7 +13,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 [Scheduling](#scheduling) · [Quota and gates](#quota-and-gates) ·
 [Plugins](#plugins) · [LLM layer](#llm-layer) ·
 [Pages and live channel](#pages-and-live-channel) · [Panels](#panels) ·
-[Integration](#integration) · [Reports and follow-ups](#reports-and-follow-ups) ·
+[Integration](#integration) · [Code review](#code-review) ·
+[Reports and follow-ups](#reports-and-follow-ups) ·
 [Attention](#attention) · [Watcher and incidents](#watcher-and-incidents) ·
 [Sessions](#sessions) · [Repos and archive](#repos-and-archive) ·
 [Skills](#skills) · [Tests](#tests)
@@ -143,8 +144,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 - Favorites store the setup half only (harness, provider, model, serving
   provider, effort, skills, flows) and round-trip through
   `runSetupFromForm()`/`favoriteToFormBody()` — no second definition builder.
-  Quick Run takes exactly repo, prompt, branch mode and pattern from the
-  request (allowlist), answers JSON, closes at once (`detached`), announces the
+  Quick Run takes exactly repo, prompt and the branch fieldset (mode,
+  pattern, keep, review) from the request (allowlist), answers JSON, closes at once (`detached`), announces the
   row on creation, and the toast polls the run record until the session
   stands; `failRun()` publishes `start_failed`.
 - A run page rendered before the session exists says the start is pending
@@ -359,7 +360,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   HEAD:{base}`; a rejected push retries once, a second rejection is a
   conflict; any other push failure waits on a due time honoured by the loop
   (never a timer of its own), five failures escalate. Only after the push is
-  the run `done`, are others told and flows fired.
+  the run `done`, are others told and flows fired — except under code review,
+  where the run is `done` on submission and the merge follows the approval.
 - Escalation ladder: `blocked_dirty` (three one-click answers),
   `resolving` → `blocked_conflict` after `merge_max_attempts` conflict runs,
   `blocked_error` (the git sentence is stored in `merge_error` and shown via
@@ -370,8 +372,9 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   branch, its setup from Settings → Merge via `setupToFormBody()`; it never
   starts a conflict run, never notifies, fires no flows
   (`flow_dispatched=1`, `merge_dispatched=1` at creation), gets no generated
-  title, carries only `merged` or nothing, and every failure maps onto the
-  original run.
+  title, carries only `merged`, a review state (it is reviewed when the
+  original is) or nothing, and every failure — a rejected review included —
+  maps onto the original run.
 - After every merge the other running agents of the repo are told (urgently
   when files overlap), never a run in `waiting_help`.
 - Nothing lives only on this machine: the integrator knows no local merge; the
@@ -385,6 +388,45 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   `run/<short id>` where a name is needed; `keep_on_branch` (hub mode only,
   refused with no branch) keeps the dirt check, skips the merge, pushes the
   branch, fires no `run_merged`, and "Merge now" still works.
+
+## Code review
+
+- Optional and off by default; it only exists under `merge_mode='hub'`, and
+  a repo or run without it behaves byte for byte as before.
+- Three levels, nearest wins: run/agent `review` → repo `review_mode` →
+  Settings → Merge `review_default`; the platform comes from the repo, else
+  the global setting. `decideReview()` is the one decision, and `launchRun()`
+  freezes it into `runs.review_platform` (`NULL` = legacy, not reviewed), so
+  the prompt sentence and the end of the run agree.
+- `keep_on_branch` and review exclude each other (the form refuses both), and
+  a conflict run of a reviewed run is reviewed too.
+- The finish gate is unchanged (clean, mergeable); where it would enqueue the
+  merge, `submitForReview()` pushes the branch (`run/<short id>` when
+  detached), opens or updates the review and closes the run as `done` with
+  `merge_status='in_review'`; `run_merged` fires only on the real merge.
+- An approval binds to `review_sha`: `integrateOne()` merges exactly
+  `review_approved_sha`, and every path that reaches it unapproved submits
+  instead; a later commit goes back to review.
+- Change requests (internal comment or forwarded platform comments) are typed
+  into the live session as a follow-up commission; the follow-up report
+  re-submits the same review; with no session the request is refused, never
+  dropped.
+- External platforms are `review` plugins (`docs/plugins.md`): the platform
+  approves and merges under its own rules, the hub polls `status()` once a
+  minute from the integrator tick and records a platform merge through the
+  same `finishMerged()`; the token stays in the hub process.
+- The reviewer's diff is computed in `repo.path` with `--no-ext-diff
+  --no-textconv`, never in the agent's working copy; an open review keeps its
+  worktree and its session — retention, the cleanup agent and the archive
+  skip it (`inOpenReview()`) — and the review states are in `WORK_ON_ORIGIN`.
+- An approval is atomic (one conditional `UPDATE`), a platform change request
+  the agent already answered is not re-flagged (`staleChangeRequest()`), and a
+  platform link is rendered only for `http(s)` (`safeHref()`: `fl-report pr`
+  lets an agent write `pr_url`).
+- The trust boundary: review holds back what the HUB merges. An unsandboxed
+  agent runs as the operator's user and could push to the base branch or call
+  the hub's local API itself; only a sandboxed run is actually fenced off, and
+  a platform's branch protection is the stronger guarantee.
 
 ## Reports and follow-ups
 

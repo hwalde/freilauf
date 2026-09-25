@@ -16,6 +16,44 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-25
+
+### Added
+
+- **Code review, optional.** Finished work can wait for a reviewer instead of
+  landing on the base branch directly. It is set in three places — Settings →
+  Merge (the default for every repo), the repo form (overrides the default,
+  and names the platform) and the agent / single-run form ("repo default",
+  "with", "without") — and it only applies to repos where Freilauf
+  integrates. The finish gate stays as it was (committed, mergeable); then the
+  branch is pushed (`run/<short id>` for a detached run, otherwise the branch
+  the branch rule names) and a review is opened. The run reads "done — in code
+  review"; `run_merged` flows fire when the work really lands.
+- **Freilauf's own review page**: a new "Reviews" entry in the navigation
+  (only once review is in use) lists open reviews; a run's detail page shows
+  the commits and the diff with three buttons — *Approve & merge*, *Request
+  changes* (the comment is typed into the agent's session, its next report
+  updates the same review) and *Reject*. An approval binds to exactly the
+  reviewed commit: anything committed afterwards is reviewed again.
+- **Review platforms as plugins** (a fourth plugin kind, `review`): GitHub
+  (also Enterprise), GitLab (also self-hosted), Bitbucket Cloud and Bitbucket
+  Data Center are built in and configured on the Plugins page with a token.
+  Freilauf opens the pull / merge request, checks it every minute, reports a
+  change request, forwards the review comments to the agent on a click, and
+  records a merge done on the platform — with the platform's own approvals
+  and branch protection in charge. The token never reaches a run's session or
+  container. The contract for further platforms is in `docs/plugins.md`.
+
+### Changed
+
+- **A run in an open code review keeps its tmux session and its worktree**:
+  session retention and the tmux-cleanup agent leave it alone and it cannot be
+  archived until the review is decided — change requests are typed into that
+  session. An approval whose commit no longer merges (conflict, red merge
+  check) is withdrawn, and the fix goes back to review. Code review holds back
+  what Freilauf merges; an agent outside the sandbox runs as your user, so a
+  platform's branch protection is the stronger guarantee.
+
 ## 2026-09-13
 
 ### Added

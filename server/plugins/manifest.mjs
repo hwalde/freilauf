@@ -16,7 +16,7 @@ export const PLUGIN_API = 1
 export const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]{1,39}$/
 
 /** The kinds of plugin the hub knows. */
-export const PLUGIN_KINDS = ['harness', 'provider', 'notifier']
+export const PLUGIN_KINDS = ['harness', 'provider', 'notifier', 'review']
 
 function isPlainObject(v) {
   return !!v && typeof v === 'object' && !Array.isArray(v)
@@ -250,6 +250,17 @@ export function validateDescriptor(desc, kind) {
     // because the smallest useful notifier is a webhook with a URL in a setting
     // and a `send` that posts to it.
     if (typeof desc.send !== 'function') problems.push('notifier: "send" must be a function')
+  } else if (kind === 'review') {
+    // A code review platform is asked two questions by the hub — open a
+    // pull/merge request, and what is its state — so those two are the
+    // contract; reading comments, posting a note and deriving the project from
+    // a remote are optional, but a field that is there must be a function.
+    for (const fn of ['open', 'status']) {
+      if (typeof desc[fn] !== 'function') problems.push(`review platform: "${fn}" must be a function`)
+    }
+    for (const fn of ['comments', 'note', 'parseRemote']) {
+      if (desc[fn] !== undefined && typeof desc[fn] !== 'function') problems.push(`review platform: "${fn}" must be a function`)
+    }
   } else {
     const hasEnvKeys = Array.isArray(desc.envKeys)
     const hasCredentials = Array.isArray(desc.credentials)
@@ -259,9 +270,10 @@ export function validateDescriptor(desc, kind) {
     if (typeof desc.fetchModels !== 'function') problems.push('model provider: "fetchModels" must be a function')
   }
 
-  // Optional on both kinds, and the one optional block that is checked rather
-  // than left to the reader: see validateSandbox() above for why.
-  if (desc.sandbox !== undefined && kind !== 'notifier') validateSandbox(desc.sandbox, kind, problems)
+  // Optional on coding agents and model providers (the two kinds that run
+  // inside a sandbox), and the one optional block that is checked rather than
+  // left to the reader: see validateSandbox() above for why.
+  if (desc.sandbox !== undefined && (kind === 'harness' || kind === 'provider')) validateSandbox(desc.sandbox, kind, problems)
 
   return { ok: problems.length === 0, problems }
 }

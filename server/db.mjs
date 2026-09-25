@@ -248,6 +248,17 @@ addColumn('runs', 'merged_at', 'TEXT')
 addColumn('runs', 'merge_attempts', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('runs', 'resolver_run_id', 'TEXT')     // the conflict run working for this run
 addColumn('runs', 'resolves_run_id', 'TEXT')     // set on a conflict run: the run it works for
+// ---- code review (server/review.mjs): 'inherit' | 'on' | 'off', no CHECK ----
+addColumn('repos', 'review_mode', `TEXT NOT NULL DEFAULT 'inherit'`)
+addColumn('repos', 'review_platform', 'TEXT')     // NULL = the global platform; 'internal' | plugin id
+addColumn('repos', 'review_project', 'TEXT')      // the platform's project path; NULL = derived from origin
+addColumn('agents', 'review', `TEXT NOT NULL DEFAULT 'inherit'`)
+addColumn('runs', 'review', `TEXT NOT NULL DEFAULT 'inherit'`)
+addColumn('runs', 'review_platform', 'TEXT')      // FROZEN at launch: 'none' | 'internal' | plugin id; NULL = legacy, not reviewed
+addColumn('runs', 'review_id', 'TEXT')            // the platform's review id (internal: the run id)
+addColumn('runs', 'review_sha', 'TEXT')           // the commit that was submitted
+addColumn('runs', 'review_approved_sha', 'TEXT')  // the commit an approval binds to — only it is merged
+addColumn('runs', 'review_state', 'TEXT')         // open | approved | changes_requested | rejected | closed
 // ---- follow-up reports: a finished run can report again ----
 // After `done` the coding agent is still sitting in its session, and the
 // operator often types more work into it. `fl-report done` from a finished run

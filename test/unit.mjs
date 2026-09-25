@@ -3695,6 +3695,402 @@ try {
   })
 
   // ------------------------------------------------------------------
+  group('Code review platforms: the fourth plugin kind (review-platforms/)')
+  {
+    const { REVIEW_PLUGINS, reviewPlatformIds, getReviewPlatform, reviewPlatformLabel } = await import('../server/review-platforms/index.mjs')
+    const reg = await import('../server/plugins/registry.mjs')
+    const { validateDescriptor: validiere, PLUGIN_KINDS: arten } = await import('../server/plugins/manifest.mjs')
+    const { isPluginEnabled: eingeschaltet } = await import('../server/plugins/store.mjs')
+    const { kindLabel } = await import('../server/plugins/web.mjs')
+    const { t: tr } = await import('../server/i18n.mjs')
+    const { createServer } = await import('node:http')
+    const BUILTINS = ['github', 'gitlab', 'bitbucket', 'bitbucket-server']
+
+    await check('the four built-ins validate, are registered as kind review and are on by default', () => {
+      isTrue(arten.includes('review'), 'review is a known kind')
+      equal(REVIEW_PLUGINS, reg.REVIEW_PLUGINS, 'the front door re-exports the very registry object')
+      for (const id of BUILTINS) {
+        isTrue(reviewPlatformIds().includes(id), `${id} registered`)
+        equal(reg.pluginKind(id), 'review', `${id} kind`)
+        equal(reg.pluginSource(id), 'builtin', `${id} source`)
+        const p = getReviewPlatform(id)
+        const v = validiere(p, 'review')
+        isTrue(v.ok, `${id} validates (${v.problems.join('; ')})`)
+        for (const fn of ['parseRemote', 'open', 'status', 'comments', 'note']) isTrue(typeof p[fn] === 'function', `${id}.${fn}`)
+        isTrue(p.settings.some(f => f.key === 'token' && f.type === 'password' && f.required), `${id}: a required password token`)
+        equal(reviewPlatformLabel(id), p.label, `${id} label`)
+        isTrue(eingeschaltet(id), `${id} enabled without configuration`)
+      }
+      equal(getReviewPlatform('bitbucket-server').settings.find(f => f.key === 'base_url').required, true,
+        'Bitbucket Data Center has no public instance, so its base URL is required')
+      equal(kindLabel('review'), tr('plugins.kind_review'), 'the Plugins page has a label for the kind')
+      isFalse(kindLabel('review') === 'plugins.kind_review', 'and the label is translated, not the bare key')
+    })
+
+    await check('a review descriptor needs open and status; the optional functions must be functions', () => {
+      const min = { id: 'x-review', label: 'X', open: async () => ({}), status: async () => ({}) }
+      isTrue(validiere(min, 'review').ok, 'open + status is enough')
+      const ohne = validiere({ ...min, status: undefined }, 'review')
+      isFalse(ohne.ok, 'status missing')
+      contains(ohne.problems.join(';'), '"status"', 'names the missing function')
+      isFalse(validiere({ ...min, comments: 'nope' }, 'review').ok, 'comments of the wrong type')
+      isFalse(validiere({ ...min, parseRemote: {} }, 'review').ok, 'parseRemote of the wrong type')
+      const r = reg.registerPlugin({ ...min, id: 'github', kind: 'review' })
+      isFalse(r.ok, 'a built-in id is not overridden')
+    })
+
+    await check('parseRemote derives the platform project from https, ssh and scp-like remotes', () => {
+      const p = (id, url) => getReviewPlatform(id).parseRemote(url)
+      equal(p('github', 'git@github.com:acme/app.git'), 'acme/app', 'github scp')
+      equal(p('github', 'https://github.com/acme/app.git'), 'acme/app', 'github https')
+      equal(p('github', 'https://github.com/acme/app'), 'acme/app', 'github https without .git')
+      equal(p('gitlab', 'ssh://git@gitlab.example.com:2222/group/sub/app.git'), 'group/sub/app', 'gitlab keeps subgroups')
+      equal(p('gitlab', 'git@gitlab.com:group/app.git'), 'group/app', 'gitlab scp')
+      equal(p('gitlab', 'https://gitlab.com/group/sub/app.git'), 'group/sub/app', 'gitlab https')
+      equal(p('bitbucket', 'https://user@bitbucket.org/ws/app.git'), 'ws/app', 'bitbucket https with user')
+      equal(p('bitbucket', 'git@bitbucket.org:ws/app.git'), 'ws/app', 'bitbucket scp')
+      equal(p('bitbucket-server', 'ssh://git@bbs.example.com:7999/PROJ/app.git'), 'PROJ/app', 'bbs ssh')
+      equal(p('bitbucket-server', 'https://bbs.example.com/scm/proj/app.git'), 'PROJ/app', 'bbs https, key upper-cased')
+      equal(p('bitbucket-server', 'https://bbs.example.com/bitbucket/scm/proj/app.git'), 'PROJ/app', 'bbs behind a context path')
+      for (const id of BUILTINS) {
+        equal(p(id, ''), null, `${id}: empty`)
+        equal(p(id, 'not a remote'), null, `${id}: nonsense`)
+      }
+    })
+
+    // A stub platform: records every request and answers from a route table.
+    async function stub(routes) {
+      const seen = []
+      const server = createServer((req, res) => {
+        let raw = ''
+        req.on('data', c => { raw += c })
+        req.on('end', () => {
+          const u = new URL(req.url, 'http://x')
+          const entry = { method: req.method, path: u.pathname, query: u.searchParams, auth: req.headers.authorization ?? null,
+            headers: req.headers, body: raw ? JSON.parse(raw) : null }
+          seen.push(entry)
+          const hit = routes[`${req.method} ${u.pathname}`]
+          const [status, json] = hit ? (typeof hit === 'function' ? hit(entry) : hit) : [404, { message: 'no route' }]
+          res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(json))
+        })
+      })
+      await new Promise(r => server.listen(0, '127.0.0.1', r))
+      const base = `http://127.0.0.1:${server.address().port}`
+      return { base, seen, close: () => new Promise(r => server.close(r)) }
+    }
+    const ctxOf = (values) => ({ setting: (k, fb = null) => values[k] ?? fb })
+
+    await check('github: idempotent open, create, merged + sha, approvals, comments, note', async () => {
+      const gh = getReviewPlatform('github')
+      let open = [{ number: 7, html_url: 'https://gh/pr/7', head: { ref: 'fl/run' }, base: { ref: 'main' } }]
+      let reviews = [
+        { user: { login: 'ann' }, state: 'CHANGES_REQUESTED', body: 'fix it', submitted_at: '2026-01-01T00:00:03Z' },
+        { user: { login: 'ann' }, state: 'APPROVED', body: '', submitted_at: '2026-01-01T00:00:05Z' },
+        { user: { login: 'bob' }, state: 'COMMENTED', body: '', submitted_at: '2026-01-01T00:00:06Z' },
+      ]
+      let pr = { number: 7, state: 'closed', merged: true, merge_commit_sha: 'abc123', html_url: 'https://gh/pr/7' }
+      const s = await stub({
+        'GET /repos/acme/app/pulls': () => [200, open],
+        'POST /repos/acme/app/pulls': (r) => [201, { number: 8, html_url: 'https://gh/pr/8', ...r.body }],
+        'GET /repos/acme/app/pulls/7': () => [200, pr],
+        'GET /repos/acme/app/pulls/7/reviews': () => [200, reviews],
+        'GET /repos/acme/app/issues/7/comments': [200, [{ user: { login: 'bob' }, body: 'general', created_at: '2026-01-01T00:00:01Z' }]],
+        'GET /repos/acme/app/pulls/7/comments': [200, [{ user: { login: 'ann' }, body: 'inline', path: 'a.js', line: 3, created_at: '2026-01-01T00:00:02Z' }]],
+        'POST /repos/acme/app/issues/7/comments': [201, { id: 1 }],
+      })
+      try {
+        const ctx = ctxOf({ token: 'tok-gh', base_url: s.base + '/' })
+        const args = { project: 'acme/app', head: 'fl/run', base: 'main', title: 'T', body: 'B' }
+        const a = await gh.open(ctx, args)
+        equal(JSON.stringify(a), JSON.stringify({ id: '7', url: 'https://gh/pr/7' }), 'the open PR is returned')
+        equal(s.seen[0].query.get('head'), 'acme:fl/run', 'head filter is owner:branch')
+        equal(s.seen[0].auth, 'Bearer tok-gh', 'Bearer token')
+        isFalse(s.seen.some(r => r.method === 'POST'), 'nothing was created')
+        open = []
+        const b = await gh.open(ctx, args)
+        equal(b.id, '8', 'a new PR is created when none is open')
+        const post = s.seen.find(r => r.method === 'POST')
+        equal(`${post.body.head}>${post.body.base}|${post.body.title}|${post.body.body}`, 'fl/run>main|T|B', 'create body')
+
+        let st = await gh.status(ctx, { project: 'acme/app', id: '7' })
+        equal(`${st.state}|${st.mergeSha}|${st.approved}|${st.changesRequested}`, 'merged|abc123|true|false',
+          'merged, its sha, and the latest review per user decides')
+        pr = { ...pr, merged: false, merged_at: null, state: 'closed' }
+        reviews = [...reviews, { user: { login: 'cid' }, state: 'CHANGES_REQUESTED', body: '' }]
+        st = await gh.status(ctx, { project: 'acme/app', id: '7' })
+        equal(`${st.state}|${st.mergeSha}|${st.approved}|${st.changesRequested}`, 'closed|null|false|true', 'closed, changes requested')
+        pr = { ...pr, state: 'open' }
+        equal((await gh.status(ctx, { project: 'acme/app', id: '7' })).state, 'open', 'open')
+
+        const cs = await gh.comments(ctx, { project: 'acme/app', id: '7' })
+        equal(cs.map(c => c.body).join(','), 'general,inline,fix it', 'general, inline and review bodies, oldest first')
+        equal(`${cs[1].path}:${cs[1].line}`, 'a.js:3', 'inline position')
+        equal(cs[0].path, null, 'a general comment has no path')
+
+        equal((await gh.note(ctx, { project: 'acme/app', id: '7', body: 'pushed' })).ok, true, 'note ok')
+        equal(s.seen.at(-1).body.body, 'pushed', 'note body')
+
+        let err = null
+        try { await gh.status(ctxOf({ token: 'tok-gh', base_url: s.base }), { project: 'acme/app', id: '99' }) } catch (x) { err = x }
+        contains(err?.message, 'github: HTTP 404', 'an HTTP failure is one short sentence')
+        isFalse(err.message.includes('tok-gh'), 'the token never appears in an error')
+        err = null
+        try { await gh.status(ctxOf({ base_url: s.base }), { project: 'acme/app', id: '7' }) } catch (x) { err = x }
+        contains(err?.message, 'no token', 'no token is said, not sent')
+      } finally { await s.close() }
+    })
+
+    await check('gitlab: idempotent open, create, merged + sha, approvals, requested changes, notes', async () => {
+      const gl = getReviewPlatform('gitlab')
+      const P = '/projects/group%2Fsub%2Fapp/merge_requests'
+      let open = [{ iid: 4, web_url: 'https://gl/mr/4', source_branch: 'fl/run', target_branch: 'main' }]
+      let mr = { iid: 4, state: 'merged', merge_commit_sha: null, squash_commit_sha: 'sq1', sha: 'head1', web_url: 'https://gl/mr/4' }
+      let approvals = { approved: true, approvals_required: 1, approved_by: [] }
+      const s = await stub({
+        [`GET ${P}`]: () => [200, open],
+        [`POST ${P}`]: (r) => [201, { iid: 5, web_url: 'https://gl/mr/5', ...r.body }],
+        [`GET ${P}/4`]: () => [200, mr],
+        [`GET ${P}/4/approvals`]: () => [200, approvals],
+        [`GET ${P}/4/notes`]: [200, [
+          { system: true, body: 'added 1 commit', author: { username: 'sys' }, created_at: '2026-01-01T00:00:00Z' },
+          { body: 'inline', author: { username: 'ann' }, position: { new_path: 'b.js', new_line: 9 }, created_at: '2026-01-01T00:00:02Z' },
+          { body: 'general', author: { username: 'bob' }, created_at: '2026-01-01T00:00:01Z' },
+        ]],
+        [`POST ${P}/4/notes`]: [201, { id: 1 }],
+      })
+      try {
+        const ctx = ctxOf({ token: 'tok-gl', base_url: s.base })
+        const args = { project: 'group/sub/app', head: 'fl/run', base: 'main', title: 'T', body: 'B' }
+        equal((await gl.open(ctx, args)).id, '4', 'the open MR is returned')
+        equal(s.seen[0].headers['private-token'], 'tok-gl', 'PRIVATE-TOKEN header')
+        equal(s.seen[0].query.get('source_branch'), 'fl/run', 'filtered by source branch')
+        open = []
+        const b = await gl.open(ctx, args)
+        equal(`${b.id}|${b.url}`, '5|https://gl/mr/5', 'created')
+        const post = s.seen.find(r => r.method === 'POST')
+        equal(`${post.body.source_branch}>${post.body.target_branch}|${post.body.description}`, 'fl/run>main|B', 'create body')
+
+        let st = await gl.status(ctx, { project: 'group/sub/app', id: '4' })
+        equal(`${st.state}|${st.mergeSha}|${st.approved}|${st.changesRequested}`, 'merged|sq1|true|false', 'merged, squash sha, approved')
+        mr = { ...mr, state: 'closed' }
+        approvals = { approved: true, approvals_required: 0, approved_by: [] }
+        st = await gl.status(ctx, { project: 'group/sub/app', id: '4' })
+        equal(`${st.state}|${st.mergeSha}|${st.approved}`, 'closed|null|false', 'closed; no rule and no approver is not approved')
+        mr = { ...mr, state: 'opened', detailed_merge_status: 'requested_changes' }
+        approvals = { approved: false, approved_by: [{ user: { username: 'ann' } }] }
+        st = await gl.status(ctx, { project: 'group/sub/app', id: '4' })
+        equal(`${st.state}|${st.approved}|${st.changesRequested}`, 'open|true|true', 'open, an approver, changes requested')
+
+        const cs = await gl.comments(ctx, { project: 'group/sub/app', id: '4' })
+        equal(cs.map(c => c.body).join(','), 'general,inline', 'system notes dropped, oldest first')
+        equal(`${cs[1].author}|${cs[1].path}:${cs[1].line}`, 'ann|b.js:9', 'inline position')
+        equal((await gl.note(ctx, { project: 'group/sub/app', id: '4', body: 'pushed' })).ok, true, 'note ok')
+        equal(s.seen.at(-1).body.body, 'pushed', 'note body')
+      } finally { await s.close() }
+    })
+
+    await check('bitbucket cloud: bearer and basic auth, idempotent open, states, participants, comments', async () => {
+      const bb = getReviewPlatform('bitbucket')
+      const P = '/repositories/ws/app/pullrequests'
+      let open = { values: [
+        { id: 2, source: { branch: { name: 'other' } }, destination: { branch: { name: 'main' } }, links: { html: { href: 'https://bb/2' } } },
+        { id: 3, source: { branch: { name: 'fl/run' } }, destination: { branch: { name: 'main' } }, links: { html: { href: 'https://bb/3' } } },
+      ] }
+      let pr = { id: 3, state: 'MERGED', merge_commit: { hash: 'm3' }, links: { html: { href: 'https://bb/3' } },
+        participants: [{ approved: true, state: 'approved' }, { approved: false, state: null }] }
+      const s = await stub({
+        [`GET ${P}`]: () => [200, open],
+        [`POST ${P}`]: () => [201, { id: 4, links: { html: { href: 'https://bb/4' } } }],
+        [`GET ${P}/3`]: () => [200, pr],
+        [`GET ${P}/3/comments`]: [200, { values: [
+          { content: { raw: 'late' }, user: { nickname: 'bob' }, created_on: '2026-01-01T00:00:09Z' },
+          { content: { raw: 'gone' }, deleted: true, user: { nickname: 'x' }, created_on: '2026-01-01T00:00:01Z' },
+          { content: { raw: 'inline' }, user: { nickname: 'ann' }, inline: { path: 'c.js', to: 5 }, created_on: '2026-01-01T00:00:02Z' },
+        ] }],
+        [`POST ${P}/3/comments`]: [201, { id: 1 }],
+      })
+      try {
+        const args = { project: 'ws/app', head: 'fl/run', base: 'main', title: 'T', body: 'B' }
+        const bearer = ctxOf({ token: 'tok-bb', base_url: s.base })
+        equal((await bb.open(bearer, args)).id, '3', 'the matching open PR, not the other branch')
+        equal(s.seen[0].auth, 'Bearer tok-bb', 'Bearer without a username')
+        const basic = ctxOf({ token: 'app-pass', username: 'herb', base_url: s.base })
+        open = { values: [] }
+        const b = await bb.open(basic, args)
+        equal(`${b.id}|${b.url}`, '4|https://bb/4', 'created')
+        const post = s.seen.find(r => r.method === 'POST')
+        equal(post.auth, `Basic ${Buffer.from('herb:app-pass').toString('base64')}`, 'Basic with the app password')
+        equal(`${post.body.source.branch.name}>${post.body.destination.branch.name}|${post.body.description}`, 'fl/run>main|B', 'create body')
+
+        let st = await bb.status(bearer, { project: 'ws/app', id: '3' })
+        equal(`${st.state}|${st.mergeSha}|${st.approved}|${st.changesRequested}`, 'merged|m3|true|false', 'merged, hash, approved')
+        pr = { ...pr, state: 'DECLINED', participants: [...pr.participants, { approved: false, state: 'changes_requested' }] }
+        st = await bb.status(bearer, { project: 'ws/app', id: '3' })
+        equal(`${st.state}|${st.mergeSha}|${st.approved}|${st.changesRequested}`, 'closed|null|false|true', 'declined, changes requested')
+        pr = { ...pr, state: 'SUPERSEDED' }
+        equal((await bb.status(bearer, { project: 'ws/app', id: '3' })).state, 'closed', 'superseded is closed')
+        pr = { ...pr, state: 'OPEN' }
+        equal((await bb.status(bearer, { project: 'ws/app', id: '3' })).state, 'open', 'open')
+
+        const cs = await bb.comments(bearer, { project: 'ws/app', id: '3' })
+        equal(cs.map(c => c.body).join(','), 'inline,late', 'deleted dropped, oldest first')
+        equal(`${cs[0].path}:${cs[0].line}`, 'c.js:5', 'inline position')
+        equal((await bb.note(bearer, { project: 'ws/app', id: '3', body: 'pushed' })).ok, true, 'note ok')
+        equal(s.seen.at(-1).body.content.raw, 'pushed', 'note body')
+      } finally { await s.close() }
+    })
+
+    await check('bitbucket data center: base URL required, idempotent open, reviewers, activities', async () => {
+      const bs = getReviewPlatform('bitbucket-server')
+      const P = '/rest/api/1.0/projects/PROJ/repos/app/pull-requests'
+      let open = { values: [{ id: 11, fromRef: { id: 'refs/heads/fl/run' }, toRef: { id: 'refs/heads/main' }, links: { self: [{ href: 'https://bbs/11' }] } }] }
+      let pr = { id: 11, state: 'MERGED', properties: { mergeCommit: { id: 'dc11' } }, links: { self: [{ href: 'https://bbs/11' }] },
+        reviewers: [{ status: 'APPROVED' }, { status: 'UNAPPROVED' }] }
+      const s = await stub({
+        [`GET ${P}`]: () => [200, open],
+        [`POST ${P}`]: () => [201, { id: 12, links: { self: [{ href: 'https://bbs/12' }] } }],
+        [`GET ${P}/11`]: () => [200, pr],
+        [`GET ${P}/11/activities`]: [200, { values: [
+          { action: 'APPROVED' },
+          { action: 'COMMENTED', commentAnchor: { path: 'd.js', line: 7 },
+            comment: { text: 'inline', author: { name: 'ann' }, createdDate: Date.parse('2026-01-01T00:00:03Z'),
+              comments: [{ text: 'reply', author: { name: 'bob' }, createdDate: Date.parse('2026-01-01T00:00:04Z') }] } },
+          { action: 'COMMENTED', comment: { text: 'general', author: { name: 'bob' }, createdDate: Date.parse('2026-01-01T00:00:01Z') } },
+        ] }],
+        [`POST ${P}/11/comments`]: [201, { id: 1 }],
+      })
+      try {
+        let err = null
+        try { await bs.status(ctxOf({ token: 't' }), { project: 'PROJ/app', id: '11' }) } catch (x) { err = x }
+        contains(err?.message, 'no base URL', 'without a base URL nothing is guessed')
+        const ctx = ctxOf({ token: 'tok-bs', base_url: s.base })
+        const args = { project: 'PROJ/app', head: 'fl/run', base: 'main', title: 'T', body: 'B' }
+        equal((await bs.open(ctx, args)).id, '11', 'the open PR is returned')
+        equal(s.seen[0].auth, 'Bearer tok-bs', 'Bearer token')
+        equal(s.seen[0].query.get('at'), 'refs/heads/fl/run', 'filtered by the source ref')
+        open = { values: [] }
+        const b = await bs.open(ctx, args)
+        equal(`${b.id}|${b.url}`, '12|https://bbs/12', 'created')
+        const post = s.seen.find(r => r.method === 'POST')
+        equal(`${post.body.fromRef.id}>${post.body.toRef.id}|${post.body.toRef.repository.project.key}`, 'refs/heads/fl/run>refs/heads/main|PROJ', 'create body')
+
+        let st = await bs.status(ctx, { project: 'PROJ/app', id: '11' })
+        equal(`${st.state}|${st.mergeSha}|${st.approved}|${st.changesRequested}`, 'merged|dc11|true|false', 'merged, merge commit, approved')
+        pr = { ...pr, state: 'DECLINED', reviewers: [{ status: 'APPROVED' }, { status: 'NEEDS_WORK' }] }
+        st = await bs.status(ctx, { project: 'PROJ/app', id: '11' })
+        equal(`${st.state}|${st.mergeSha}|${st.approved}|${st.changesRequested}`, 'closed|null|false|true', 'declined, needs work')
+
+        const cs = await bs.comments(ctx, { project: 'PROJ/app', id: '11' })
+        equal(cs.map(c => c.body).join(','), 'general,inline,reply', 'comments and replies, oldest first')
+        equal(`${cs[1].path}:${cs[1].line}`, 'd.js:7', 'anchor')
+        equal(cs[0].at, '2026-01-01T00:00:01.000Z', 'epoch millis become ISO')
+        equal((await bs.note(ctx, { project: 'PROJ/app', id: '11', body: 'pushed' })).ok, true, 'note ok')
+        equal(s.seen.at(-1).body.text, 'pushed', 'note body')
+      } finally { await s.close() }
+    })
+  }
+
+  // ------------------------------------------------------------------
+  group('Code review: who is reviewed, and what an approval binds to (review.mjs)')
+  {
+    const rv = await import('../server/review.mjs')
+    const { setSetting } = await import('../server/db.mjs')
+    const { platformSuffix } = await import('../server/runner.mjs')
+    const { WORK_ON_ORIGIN } = await import('../server/run-state.mjs')
+    const hub = (extra = {}) => ({ merge_mode: 'hub', review_mode: 'inherit', review_platform: null, ...extra })
+
+    await check('three levels: global, repo, run — the nearest one that says something wins', () => {
+      setSetting('review_default', 'off'); setSetting('review_platform', '')
+      equal(rv.decideReview({ review: 'inherit' }, hub()), 'none', 'nothing says yes: no review')
+      setSetting('review_default', 'on')
+      equal(rv.decideReview({ review: 'inherit' }, hub()), 'internal', 'the global default, on the internal platform')
+      equal(rv.decideReview({ review: 'inherit' }, hub({ review_mode: 'off' })), 'none', 'the repo overrides the global on')
+      equal(rv.decideReview({ review: 'on' }, hub({ review_mode: 'off' })), 'internal', 'the run overrides the repo off')
+      equal(rv.decideReview({ review: 'off' }, hub({ review_mode: 'on' })), 'none', 'and the repo on')
+      equal(rv.decideReview({ review: 'on' }, hub({ review_platform: 'github' })), 'github', 'the repo names the platform')
+      setSetting('review_platform', 'gitlab')
+      equal(rv.decideReview({ review: 'on' }, hub()), 'gitlab', 'or the global setting does')
+      equal(rv.decideReview({ review: 'weird' }, hub()), 'gitlab', 'an unknown run value means inherit')
+      setSetting('review_default', 'off'); setSetting('review_platform', '')
+    })
+
+    await check('review only exists where the hub integrates, and never beside keep-on-branch', () => {
+      equal(rv.decideReview({ review: 'on' }, hub({ merge_mode: 'off' })), 'none', 'merge mode off: the hub merges nothing, so it holds nothing back')
+      equal(rv.decideReview({ review: 'on', keep_on_branch: 1 }, hub()), 'none', 'keep on branch merges nothing either')
+      equal(rv.reviewPlatformOf({ review_platform: null }), null, 'a run from before this feature is not reviewed')
+      equal(rv.reviewPlatformOf({ review_platform: 'none' }), null, '"none" is not a platform')
+    })
+
+    await check('an approval binds to one commit; anything else is reviewed again', () => {
+      const run = { review_platform: 'internal', review_approved_sha: null }
+      isTrue(rv.wantsReview(run, 'aaa'), 'nothing approved: submit')
+      isFalse(rv.wantsReview({ ...run, review_approved_sha: 'aaa' }, 'aaa'), 'the approved commit is merged')
+      isTrue(rv.wantsReview({ ...run, review_approved_sha: 'aaa' }, 'bbb'), 'a later commit goes back to review')
+      isFalse(rv.wantsReview({ review_platform: 'none' }, 'aaa'), 'an unreviewed run is merged as before')
+    })
+
+    await check('a platform change request the agent already answered is not raised again', async () => {
+      const dbm = await import('../server/db.mjs')
+      const id = 'review-stale-1'
+      const repo = dbm.default.prepare(`INSERT INTO repos(name,path) VALUES('review-stale','/tmp/review-stale')`).run().lastInsertRowid
+      dbm.default.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes)
+        VALUES(?,?,'done','claude','x','keiner',5)`).run(id, repo)
+      const at = (kind, ts) => dbm.default.prepare(`INSERT INTO events(run_id, kind, ts) VALUES(?,?,?)`).run(id, kind, ts)
+      isFalse(rv.staleChangeRequest({ id }, { changesRequested: true }), 'nothing re-submitted: a request is a request')
+      at('review_changes_requested', '2026-09-25 10:00:00')
+      at('review_updated', '2026-09-25 11:00:00')
+      isTrue(rv.staleChangeRequest({ id }, { changesRequested: true }), 'without a time: the re-submission answered it')
+      isTrue(rv.staleChangeRequest({ id }, { changesRequested: true, changesRequestedAt: '2026-09-25T10:30:00Z' }), 'an older request is stale')
+      isFalse(rv.staleChangeRequest({ id }, { changesRequested: true, changesRequestedAt: '2026-09-25T11:30:00Z' }), 'a newer one is new')
+    })
+
+    await check('the diff is split per file, and comments become one block for the agent', () => {
+      const patch = 'diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/d/y.md b/d/y.md\n+++ b/d/y.md\n+c\n'
+      const parts = rv.splitPatch(patch)
+      equal(parts.map(p => p.path).join(','), 'x.txt,d/y.md', 'one chunk per file, by path')
+      contains(parts[0].text, '+b', 'with its own lines')
+      isFalse(parts[0].text.includes('y.md'), 'and nothing of the next file')
+      const text = rv.formatComments([{ author: 'alice', body: 'rename it', path: 'x.txt', line: 3 }, { body: 'thanks' }])
+      contains(text, '- alice (x.txt:3): rename it', 'author, place and body')
+      contains(text, '- reviewer: thanks', 'a comment without author or place still reads')
+    })
+
+    await check('the agent is told about the review, and only when there is one', () => {
+      const base = { id: 'r-1', workdir_effective: '/w', expected_minutes: 30 }
+      contains(platformSuffix({ ...base, review_platform: 'internal' }, 'B', {}, { merge_mode: 'hub', base_branch: 'main' }),
+        rv.REVIEW_PLATFORM_RULE, 'a reviewed run reads the review sentence')
+      isFalse(platformSuffix({ ...base, review_platform: 'none' }, 'B', {}, { merge_mode: 'hub', base_branch: 'main' })
+        .includes(rv.REVIEW_PLATFORM_RULE), 'an unreviewed one does not')
+      isFalse(platformSuffix({ ...base, review_platform: 'internal' }, 'B', {}, { merge_mode: 'off' })
+        .includes(rv.REVIEW_PLATFORM_RULE), 'and with the integration off not a word changes')
+    })
+
+    await check('an open review counts as work on origin, and keeps its worktree', async () => {
+      for (const s of ['in_review', 'changes_requested', 'approved', 'review_rejected']) {
+        isTrue(WORK_ON_ORIGIN.includes(s), `${s}: the branch was pushed before the review opened`)
+      }
+      isTrue(rv.inOpenReview({ review_platform: 'internal', merge_status: 'in_review' }), 'in review: keep')
+      const { archivable } = await import('../server/run-state.mjs')
+      isFalse(archivable({ status: 'done', review_platform: 'internal', merge_status: 'in_review' }), 'and it cannot be archived')
+      isTrue(archivable({ status: 'done', review_platform: 'internal', merge_status: 'merged' }), 'a decided one can')
+      equal(rv.safeHref('javascript:alert(1)'), null, 'an agent-written pr_url is no link target')
+      equal(rv.safeHref('https://github.com/a/b/pull/1'), 'https://github.com/a/b/pull/1', 'a web address is')
+      isFalse(rv.inOpenReview({ review_platform: 'internal', merge_status: 'review_rejected' }), 'decided: the ordinary cleanup rules')
+    })
+
+    await check('every UI key the review module names exists in all three languages', () => {
+      const src = readFileSync(new URL('../server/review.mjs', import.meta.url), 'utf8')
+      const keys = [...src.matchAll(/t\('(review\.[a-z_]+)'/g)].map(m => m[1])
+      for (const s of ['open', 'approved', 'changes_requested', 'rejected', 'closed', 'pending']) keys.push(`review.state_${s}`)
+      for (const lang of ['en', 'de', 'zh']) {
+        const cat = JSON.parse(readFileSync(new URL(`../lang/${lang}.json`, import.meta.url), 'utf8'))
+        const missing = [...new Set(keys)].filter(k => !(k in cat))
+        equal(missing.join(','), '', `${lang}: no key missing`)
+      }
+    })
+  }
+
+  // ------------------------------------------------------------------
   group('Model sources and plugin settings (llm/sources.mjs, plugins/settings.mjs)')
 
   const { parseSource, sourceId, DEFAULT_SOURCE } = await import('../server/llm/sources.mjs')
@@ -6571,6 +6967,8 @@ try {
     isFalse(se.shouldAutoClose(lebt, { status: 'running' }, 3600_000, jetzt), 'a working agent is never closed')
     isTrue(se.shouldAutoClose(fertig, null, 3600_000, jetzt), 'two hours old, keep one hour')
     isFalse(se.shouldAutoClose(fertig, null, 4 * 3600_000, jetzt), 'keep four hours: stays')
+    isFalse(se.shouldAutoClose(fertig, { status: 'done', review_platform: 'internal', merge_status: 'in_review' }, 0, jetzt),
+      'a run in an open code review keeps its session — change requests go there')
     isTrue(se.shouldAutoClose(lebt, { status: 'done', ended_at: '1970-01-01 00:00:00' }, 0, jetzt),
       'keep 0 closes a finished run right away, even with a live pane')
     isFalse(se.shouldAutoClose(lebt, { status: 'done', ended_at: '1970-01-01 00:00:00',
