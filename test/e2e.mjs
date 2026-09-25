@@ -7859,6 +7859,42 @@ export default {
       }, { asBrowser: true })
     })
 
+    // ---- code review of a sandboxed run: the clone's tip is what is reviewed ----
+    await check('a sandboxed run goes through code review like any other: pushed, diffed on the host, merged on approval', async () => {
+      const repoForm = db.prepare('SELECT * FROM repos WHERE id=?').get(repoId)
+      const repoFields = (extra) => ({
+        name: repoForm.name, path: REPO, base_branch: 'main',
+        worktree_extras: repoForm.worktree_extras ?? '[]', prompt: repoForm.prompt ?? '',
+        merge_mode: 'hub', merge_check: '', finish_timeout_min: '15',
+        merge_max_attempts: '2', conflict_parallel: '1', notify_running: '1', max_parallel: '0', ...extra,
+      })
+      await postForm(`/repos/edit?id=${repoId}`, repoFields({ review_mode: 'on', review_platform: 'internal' }), { asBrowser: true })
+      const j = await laufStarten({ repo_id: String(repoId), prompt: 'E2E-Sandbox-Review', branch_mode: 'keiner' })
+      await sessionMerken(j.runId)
+      const c = await cloneMod.makeSandboxClone(db.prepare('SELECT * FROM repos WHERE id=?').get(repoId), lauf(j.runId))
+      db.prepare('UPDATE runs SET workdir_effective=?, worktree_kind=?, base_sha=? WHERE id=?').run(c.dir, 'clone', c.baseSha, j.runId)
+      writeFileSync(join(c.dir, 'sandbox-review.md'), 'reviewed work from a clone\n')
+      await g(c.dir, 'add', '-A')
+      await g(c.dir, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'Sandbox review commit')
+      const tip = (await g(c.dir, 'rev-parse', 'HEAD')).stdout.trim()
+      const a = await (await fetchPath(`/api/runs/${j.runId}/report`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'done', text: 'clone run for review' }),
+      })).json()
+      contains(a.message ?? '', 'CODE REVIEW', 'submitted, not merged')
+      equal(lauf(j.runId).merge_status, 'in_review', 'in review')
+      equal(lauf(j.runId).review_sha, tip, 'the clone\'s tip is what is reviewed')
+      equal((await g(ORIGIN, 'rev-parse', `refs/heads/run/${j.runId.split('-')[0]}`)).stdout.trim(), tip,
+        'the branch was pushed from the operator\'s repository, not from the agent\'s clone')
+      const html = await (await fetchPath(`/runs/${j.runId}`)).text()
+      contains(html, 'sandbox-review.md', 'the diff is read on the host, from the collected tip')
+      const ok = await postForm(`/api/runs/${j.runId}/review/approve`, {})
+      equal(ok.status, 200, 'approved')
+      await waitFor(() => lauf(j.runId).merge_status === 'merged', { was: 'the reviewed clone run merged', timeoutMs: 30_000 })
+      isTrue((await g(ORIGIN, 'merge-base', '--is-ancestor', tip, 'main')).ok, 'and its commit is on main')
+      await postForm(`/repos/edit?id=${repoId}`, repoFields({ merge_mode: 'off', review_mode: 'inherit', review_platform: '' }), { asBrowser: true })
+    })
+
     // ---- the verdict: "the daemon did not answer" is not "there is nothing" --
     await check('an unreachable daemon is a third answer, not an empty one', async () => {
       await imModus('unreachable', async () => {
